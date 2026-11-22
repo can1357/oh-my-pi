@@ -141,6 +141,38 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		}
 	});
 
+	it("uses Zellij's local mode when its forwarded host OSC 11 disagrees", () => {
+		Bun.env.ZELLIJ = "1";
+		const { terminal, writes, received } = setupTerminal();
+		const changes: string[] = [];
+		terminal.onAppearanceChange(appearance => changes.push(appearance));
+		try {
+			process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+			process.stdin.emit("data", "\x1b[?997;2n");
+			expect(writes).toContain("\x1b[?996n");
+			expect(terminal.appearance).toBe("light");
+			expect(changes).toEqual(["dark", "light"]);
+			expect(received).toEqual([]);
+		} finally {
+			terminal.stop();
+		}
+	});
+
+	it("keeps Zellij's mode through a late conflicting OSC 11 reply and updates on a mode change", () => {
+		Bun.env.ZELLIJ = "1";
+		const { terminal } = setupTerminal();
+		try {
+			process.stdin.emit("data", "\x1b[?997;2n");
+			process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+			expect(terminal.appearance).toBe("light");
+			expect(terminal.appearanceSource).toBe("mode");
+			process.stdin.emit("data", "\x1b[?997;1n");
+			expect(terminal.appearance).toBe("dark");
+		} finally {
+			terminal.stop();
+		}
+	});
+
 	it("expires an unanswered forwarded OSC 11 query before sending a queued refresh", () => {
 		vi.useFakeTimers();
 		Bun.env.ZELLIJ = "1";

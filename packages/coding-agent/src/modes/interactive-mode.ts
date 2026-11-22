@@ -3207,8 +3207,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 
 		// Subscribe to terminal dark/light appearance changes.
-		// The terminal queries background color via OSC 11 at startup and on
-		// Mode 2031 notifications, computing luminance to detect dark/light.
+		// Zellij reports its local palette mode; otherwise OSC 11 supplies the
+		// background luminance used for terminal appearance.
 		const unsubscribeAppearanceReport = this.ui.terminal.onAppearanceReport?.((_mode, requestToken) => {
 			const request = this.#appearanceRefreshRequest;
 			if (request === undefined || requestToken !== request.token) return;
@@ -3240,7 +3240,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			// OSC 11 response or an automatic query ahead of it reveals a theme
 			// change, commit that change so theme loading performs a second full
 			// replay with the newly detected palette.
-			onTerminalAppearanceChange(mode, appearanceRefreshWasRequested ? {} : undefined);
+			onTerminalAppearanceChange(
+				mode,
+				appearanceRefreshWasRequested ? {} : undefined,
+				this.ui.terminal.appearanceSource,
+			);
 		});
 
 		// Tern kept the typing of a startup and draws it in the composer; plain

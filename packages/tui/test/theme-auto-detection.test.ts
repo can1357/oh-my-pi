@@ -174,6 +174,24 @@ describe("theme auto-detection", () => {
 		expect(detectSpy).not.toHaveBeenCalled();
 	});
 
+	it("uses Zellij's local light mode instead of the macOS host or COLORFGBG", async () => {
+		using _globals = withThemeTestGlobals({ zellij: "1", colorfgbg: "15;0" });
+		vi.spyOn(nativesModule, "detectMacOSAppearance").mockReturnValue(MacOSAppearance.Dark);
+		setTerminalBackgroundColor(0x102030);
+		themeModule.onTerminalAppearanceChange("dark");
+		await themeModule.initTheme(false, undefined, undefined, "dark", "light");
+
+		try {
+			themeModule.onTerminalAppearanceChange("light", undefined, "mode");
+			await flushThemeLoad();
+			expect(themeModule.getCurrentThemeName()).toBe("light");
+			expect(themeModule.detectTerminalBackground()).toBe("light");
+			expect(getTerminalBackgroundColor()).toBe(0xffffff);
+		} finally {
+			themeModule.onTerminalAppearanceChange("dark");
+		}
+	});
+
 	it("prefers COLORFGBG before macOS fallback inside Zellij", async () => {
 		using _globals = withThemeTestGlobals({ zellij: "1", colorfgbg: "15;0" });
 		const detectSpy = vi.spyOn(nativesModule, "detectMacOSAppearance").mockReturnValue(MacOSAppearance.Light);

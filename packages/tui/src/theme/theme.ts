@@ -37,8 +37,10 @@ export {
 	warmHighlighter,
 } from "./tui-adapters";
 
-/** Appearance detected via OSC 11 background color query, or undefined if not yet available. */
+/** Last terminal-reported appearance, whether from OSC 11 or a pane-local mode report. */
 var terminalReportedAppearance: "dark" | "light" | undefined;
+/** Pane-local mode reports remain authoritative when a multiplexer forwards OSC 11. */
+var terminalAppearanceSource: "osc11" | "mode" = "osc11";
 
 /** Appearance reported by the macOS fallback observer, or undefined if not yet available. */
 var macOSReportedAppearance: "dark" | "light" | undefined;
@@ -57,14 +59,13 @@ export function onTerminalBackgroundFallbackChange(callback: () => void): () => 
 }
 
 /**
- * Detect appearance from trusted OSC 11 reports, then COLORFGBG, then native
- * macOS appearance only on known-broken multiplexer background-query paths.
+ * Detect appearance from pane-local mode reports, trusted OSC 11 reports,
+ * COLORFGBG, then native macOS appearance on broken multiplexer query paths.
  * Defaults to dark when none of those signals is available.
  */
 export function detectTerminalBackground(): "dark" | "light" {
 	const backgroundQueryTrusted = isTerminalBackgroundQueryTrusted();
-	// Tier 1: terminal-reported appearance from OSC 11 luminance.
-	if (backgroundQueryTrusted && terminalReportedAppearance) {
+	if ((terminalAppearanceSource === "mode" || backgroundQueryTrusted) && terminalReportedAppearance) {
 		return terminalReportedAppearance;
 	}
 
@@ -311,16 +312,17 @@ export function setAutoThemeMapping(mode: "dark" | "light", themeName: string): 
 }
 
 /**
- * Called when the terminal detects a dark/light appearance change.
- * The terminal layer queries OSC 11 (background color) and computes luminance;
- * Mode 2031 notifications trigger re-queries rather than providing the value directly.
+ * Apply a terminal appearance report, including Zellij's pane-local mode when
+ * OSC 11 may instead describe the outer terminal.
  */
 export function onTerminalAppearanceChange(
 	mode: "dark" | "light",
 	event: ThemeChangeEvent = { ephemeral: true },
+	source: "osc11" | "mode" = "osc11",
 ): void {
-	if (terminalReportedAppearance === mode) return;
+	if (terminalReportedAppearance === mode && terminalAppearanceSource === source) return;
 	terminalReportedAppearance = mode;
+	terminalAppearanceSource = source;
 	reevaluateAutoTheme("terminal appearance", event);
 }
 

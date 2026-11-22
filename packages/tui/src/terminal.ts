@@ -36,7 +36,11 @@ import {
 } from "./terminal-capabilities";
 import { tmuxMultiplexer } from "./multiplexers/tmux";
 import type { TerminalMultiplexerBackgroundColorCache } from "./multiplexers/types";
-import { classifyTerminalMultiplexerModule, terminalMultiplexerSessions } from "./terminal-multiplexer";
+import {
+	classifyTerminalMultiplexerModule,
+	hasTerminalMultiplexerSession,
+	terminalMultiplexerSessions,
+} from "./terminal-multiplexer";
 import { setTmuxPaneApcTitles, tmuxSessionSpeaksTsp } from "./tmux";
 import { setHangulCompatibilityJamoWidth } from "./utils";
 import { Win32InputModeDecoder, Win32PasteMarkerNormalizer } from "./windows-input-mode";
@@ -603,7 +607,7 @@ export interface Terminal {
 
 	/**
 	 * Register a callback for terminal appearance (dark/light) changes.
-	 * Detection uses OSC 11 background color query with Mode 2031 as a change trigger.
+	 * Detection uses OSC 11 background color, or Zellij's local mode when available.
 	 * Fires when the detected appearance changes, including the initial detection.
 	 * Subscribers registered after detection are invoked immediately with the
 	 * already-detected appearance so late subscribers never miss it.
@@ -612,8 +616,8 @@ export interface Terminal {
 		callback: (appearance: TerminalAppearance, requestToken?: TerminalAppearanceRequestToken) => void,
 	): void;
 	/**
-	 * Register a callback fired for every valid OSC 11 appearance report,
-	 * including reports whose classification matches the current appearance.
+	 * Register a callback fired for every valid terminal appearance report,
+	 * including unchanged OSC 11 reports and Zellij mode updates.
 	 * Unlike onAppearanceChange, this does not replay an earlier report.
 	 * Optional so custom Terminals built against older pi-tui versions keep working.
 	 */
@@ -637,6 +641,8 @@ export interface Terminal {
 	refreshAppearance?(requestToken?: TerminalAppearanceRequestToken): TerminalAppearanceRequestToken | void;
 	/** The last detected terminal appearance, or undefined if not yet known. */
 	get appearance(): TerminalAppearance | undefined;
+	/** Source of the current appearance, when the terminal distinguishes mode reports from OSC 11. */
+	readonly appearanceSource?: "osc11" | "mode";
 	/**
 	 * Register a callback fired once per DEC private mode when its DECRQM support
 	 * status resolves. `confirmed` is false when the terminal answered the DA1
@@ -881,6 +887,7 @@ export class ProcessTerminal implements Terminal {
 		(appearance: TerminalAppearance, requestToken?: TerminalAppearanceRequestToken) => void
 	> = [];
 	#appearance: TerminalAppearance | undefined;
+	#appearanceSource: "osc11" | "mode" | undefined;
 	#osc11Pending = false;
 	#osc11ActiveToken?: TerminalAppearanceRequestToken;
 	#osc11QueuedQuery?: { cache?: TerminalMultiplexerBackgroundColorCache; token?: TerminalAppearanceRequestToken };
@@ -990,6 +997,10 @@ export class ProcessTerminal implements Terminal {
 
 	get appearance(): TerminalAppearance | undefined {
 		return this.#appearance;
+	}
+
+	get appearanceSource(): "osc11" | "mode" | undefined {
+		return this.#appearanceSource;
 	}
 
 	onAppearanceChange(
@@ -1255,6 +1266,9 @@ export class ProcessTerminal implements Terminal {
 		// DA1 bounds unanswered queries; Zellij may forward OSC 11 after answering
 		// DA1 locally, so its forwarded reply gets a short additional window.
 		this.#queryBackgroundColor();
+		// Zellij answers this locally even when it forwards OSC 11 to a host
+		// with a different background. Unanswered queries leave OSC 11 in charge.
+		if (hasTerminalMultiplexerSession("zellij")) this.#safeWrite("\x1b[?996n");
 
 		// Query OSC 99 notification capabilities for Kitty. The query uses the
 		// same DA1 sentinel FIFO as OSC 11/DECRQM so unsupported terminals resolve
@@ -1273,9 +1287,8 @@ export class ProcessTerminal implements Terminal {
 		// the TUI to describing its UI instead of painting rows.
 		this.#queryTspSupport();
 
-		// Subscribe to Mode 2031 appearance change notifications.
-		// When the terminal reports a change, we re-query OSC 11 to get the
-		// actual background color (following Neovim convention) with 100ms debounce.
+		// Subscribe to Mode 2031 appearance change notifications. Zellij's
+		// local DSR is authoritative; other terminals still re-query OSC 11.
 		this.#safeWrite("\x1b[?2031h");
 
 		// Theme detection relies on (1) the startup OSC 11 probe above and
@@ -1846,11 +1859,17 @@ export class ProcessTerminal implements Terminal {
 				}
 			}
 
-			// Mode 2031 change notification: re-query OSC 11 with 100ms debounce
-			// (Neovim convention — coalesces rapid notifications during transitions)
+			// Zellij reports its own palette mode, which may differ from the
+			// host background returned by OSC 11. Other terminals retain their
+			// existing OSC 11 refresh path on Mode 2031 notifications.
 			const appearanceMatch = sequence.match(appearanceDsrPattern);
 			if (appearanceMatch) {
-				if (this.#mode2031DebounceTimer) clearTimeout(this.#mode2031DebounceTimer);
+				if (hasTerminalMultiplexerSession("zellij")) {
+					this.#appearanceSource = "mode";
+					this.#publishAppearance(appearanceMatch[1] === "1" ? "dark" : "light");
+					return;
+				}
+				clearTimeout(this.#mode2031DebounceTimer);
 				this.#mode2031DebounceTimer = setTimeout(() => {
 					this.#mode2031DebounceTimer = undefined;
 					this.#queryBackgroundColor();
@@ -2224,7 +2243,15 @@ export class ProcessTerminal implements Terminal {
 		const b = normalize(bHex);
 		setTerminalBackgroundColor((Math.round(r * 255) << 16) | (Math.round(g * 255) << 8) | Math.round(b * 255));
 		const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
-		const mode: TerminalAppearance = luminance < 0.5 ? "dark" : "light";
+		// A forwarded host reply still supplies RGB for image compositing, but
+		// must not replace a mode reported by Zellij's pane.
+		const mode: TerminalAppearance =
+			this.#appearanceSource === "mode" ? this.#appearance! : luminance < 0.5 ? "dark" : "light";
+		this.#appearanceSource ??= "osc11";
+		this.#publishAppearance(mode, requestToken);
+	}
+
+	#publishAppearance(mode: TerminalAppearance, requestToken?: TerminalAppearanceRequestToken): void {
 		const changed = mode !== this.#appearance;
 		this.#appearance = mode;
 		// oxlint-disable-next-line unicorn/no-useless-spread -- callbacks may unsubscribe while reporting
@@ -2629,6 +2656,7 @@ export class ProcessTerminal implements Terminal {
 		this.#appearanceCallbacks = [];
 		this.#appearanceReportCallbacks = [];
 		this.#osc11Pending = false;
+		this.#appearanceSource = undefined;
 		this.#osc11ActiveToken = undefined;
 		this.#clearWindowsTerminalAppearancePoll();
 		this.#osc11QueuedQuery = undefined;
