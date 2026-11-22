@@ -133,9 +133,7 @@ function withMargin(localTokens: number): number {
 function countPromptTokens(context: Context, tokenizer: Tokenizer): number {
 	const { messages } = context;
 	const anchor = findRequestUsageAnchor(messages);
-	if (!anchor) {
-		return withMargin(countContextTokens(context, tokenizer)) + messages.length * MESSAGE_FRAMING_TOKENS;
-	}
+	if (!anchor) return estimateContextPromptTokens(context, tokenizer);
 	let tail = 0;
 	for (let index = anchor.index + 1; index < messages.length; index++) {
 		tail += tokenizer.countMessage(messages[index]);
@@ -152,4 +150,9 @@ function countContextTokens(context: Context, tokenizer: Tokenizer): number {
 		countFraming(inactiveTools, tokenizer, () => toolFragments(inactiveTools ?? [])) +
 		tokenizer.countMessages(context.messages)
 	);
+}
+
+/** Conservative full-context prompt estimate for side requests without a trustworthy live-turn usage anchor. */
+export function estimateContextPromptTokens(context: Context, tokenizer: Tokenizer): number {
+	return withMargin(countContextTokens(context, tokenizer)) + context.messages.length * MESSAGE_FRAMING_TOKENS;
 }

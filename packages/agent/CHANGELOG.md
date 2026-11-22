@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Handoff generation now avoids sending requests whose full prepared context exceeds the target model's declared window ([#20099](https://github.com/can1357/oh-my-pi/issues/20099)).
+
 ## [19.1.0] - 2026-11-21
 
 ### Added

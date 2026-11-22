@@ -1480,6 +1480,38 @@ describe("AgentSession handoff", () => {
 		expect(compaction.summary).toContain(handoffText);
 	});
 
+	it("falls through to soft after an oversized cross-provider handoff without sending it", async () => {
+		cfgCompactionMethodOrder.set(session.settings, ["handoff", "soft"]);
+		cfgContextPromotionEnabled.set(session.settings, false);
+		const activeModel = session.agent.state.model;
+		session.agent.setModel({ ...activeModel, contextWindow: 1024, maxTokens: 128 });
+		sessionManager.appendMessage({
+			role: "user",
+			content: "unreadable native history ".repeat(6000),
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "## Goal\nContinue with the original request",
+			shortSummary: undefined,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+		const providerCall = vi.spyOn(session.agent, "streamFn");
+
+		await session.runIdleCompaction();
+
+		expect(providerCall).not.toHaveBeenCalled();
+		expect(compactSpy).toHaveBeenCalled();
+		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "idle", action: "handoff" });
+		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "idle", action: "context-full" });
+		expect(sessionManager.getBranch().findLast(entry => entry.type === "compaction")).toMatchObject({
+			type: "compaction",
+			method: "soft",
+		});
+	});
+
 	it("falls back from malformed auto-handoff to soft compaction", async () => {
 		cfgCompactionMethodOrder.set(session.settings, ["handoff", "soft"]);
 		cfgCompactionHandoffSaveToDisk.set(session.settings, true);

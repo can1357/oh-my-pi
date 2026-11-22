@@ -159,6 +159,27 @@ describe("handoff helpers", () => {
 		expect(promptBlock.text).toContain("preserve failing test name");
 	});
 
+	test("refuses an oversized prepared handoff before sending it to the provider", async () => {
+		const model = { ...getTestModel(), contextWindow: 1024, maxTokens: 128 };
+		const context = {
+			systemPrompt: ["Live system prompt"],
+			tools: [],
+			messages: [
+				{ role: "user" as const, content: "unreadable native history ".repeat(6000), timestamp: 1 },
+				{ role: "user" as const, content: "prepare handoff", timestamp: 2 },
+			],
+		};
+		const completeImpl = vi.fn(async () => createAssistantMessage([{ type: "text", text: "## Goal\nContinue" }]));
+
+		await expect(
+			generateHandoffFromContext(context, model, {
+				streamOptions: { apiKey: "test-key" },
+				completeImpl,
+			}),
+		).rejects.toThrow(/Handoff input exceeds the context window/);
+		expect(completeImpl).not.toHaveBeenCalled();
+	});
+
 	test("generateHandoffFromContext forwards cache routing and forces no-tools", async () => {
 		const completeSimpleSpy = vi
 			.spyOn(ai, "completeSimple")
