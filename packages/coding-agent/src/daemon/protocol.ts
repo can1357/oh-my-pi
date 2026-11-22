@@ -30,6 +30,12 @@ export const DAEMON_PTY_ROWS = 40;
 export const DAEMON_OUTPUT_PATTERN_FLAGS = "mu";
 /** How long restored units wait for their clients to reconnect before idle timers resume. */
 export const DAEMON_RESUME_LEASE_GRACE_MS = 15_000;
+/** Env var overriding {@link DAEMON_RESUME_LEASE_GRACE_MS} (milliseconds) in the daemon; for tests. */
+export const DAEMON_RESUME_LEASE_GRACE_ENV = "OMP_DAEMON_RESUME_LEASE_GRACE_MS";
+/** How long an idle daemon (no connection, no unit holding it) lingers before it exits. */
+export const DAEMON_IDLE_EXIT_GRACE_MS = 3_000;
+/** Env var overriding {@link DAEMON_IDLE_EXIT_GRACE_MS} (milliseconds) in the daemon; for tests. */
+export const DAEMON_IDLE_EXIT_GRACE_ENV = "OMP_DAEMON_IDLE_EXIT_GRACE_MS";
 
 export type DaemonSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT" | "SIGKILL";
 

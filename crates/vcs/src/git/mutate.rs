@@ -667,6 +667,15 @@ impl GitRepo {
 			.map_err(|e| Error::backend("git read-tree", e))
 	}
 
+	/// Write bytes as a blob and return its full object id.
+	pub fn write_blob(&self, bytes: &[u8]) -> Result<String> {
+		self
+			.gix()?
+			.write_blob(bytes)
+			.map(|id| id.detach().to_hex().to_string())
+			.map_err(|err| Error::backend("git write blob", err))
+	}
+
 	/// Seed a private index from `treeish`, retaining the shared index's
 	/// sparse-checkout exclusions.
 	///

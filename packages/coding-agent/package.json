@@ -38,6 +38,7 @@
 		"dist/CHANGELOG-*.md",
 		"dist/*.node",
 		"dist/*.json-*.zst",
+		"dist/perturbation-pool.json-*.txt",
 		"scripts",
 		"examples",
 		"README.md",
