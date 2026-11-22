@@ -3,8 +3,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	type AwsAuthRefreshRequest,
 	clearAwsCredentialCache,
 	resolveAwsCredentials,
+	setAwsAuthRefreshHandler,
 	tokenizeCredentialProcessCommand,
 } from "@oh-my-pi/pi-ai/providers/aws-credentials";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
@@ -740,7 +742,7 @@ describe("resolveAwsCredentials SSO token refresh", () => {
 		const captured = { oidc: [] as Array<Record<string, unknown>>, bearer: [] as string[] };
 
 		await expect(resolveAwsCredentials({ profile: "sso-test", fetch: ssoMock(captured) })).rejects.toThrow(
-			/has expired. Run 'aws sso login'/,
+			/has expired\. Run 'aws sso login --sso-session my-session' to refresh\.$/,
 		);
 		expect(captured.oidc).toHaveLength(0);
 	});
@@ -752,7 +754,7 @@ describe("resolveAwsCredentials SSO token refresh", () => {
 
 		await expect(
 			resolveAwsCredentials({ profile: "sso-test", fetch: ssoMock(captured, { oidcStatus: 400 }) }),
-		).rejects.toThrow(/has expired. Run 'aws sso login'/);
+		).rejects.toThrow(/has expired\. Run 'aws sso login --sso-session my-session' to refresh\.$/);
 		expect(captured.oidc).toHaveLength(1);
 	});
 
@@ -762,8 +764,106 @@ describe("resolveAwsCredentials SSO token refresh", () => {
 		const captured = { oidc: [] as Array<Record<string, unknown>>, bearer: [] as string[] };
 
 		await expect(resolveAwsCredentials({ profile: "sso-test", fetch: ssoMock(captured) })).rejects.toThrow(
-			/has expired. Run 'aws sso login'/,
+			/has expired\. Run 'aws sso login --sso-session my-session' to refresh\.$/,
 		);
 		expect(captured.oidc).toHaveLength(0);
+	});
+
+	describe("host auth refresh handler", () => {
+		afterEach(() => setAwsAuthRefreshHandler(undefined));
+
+		const liveToken = () =>
+			expiredToken({ accessToken: "renewed-token", expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+
+		test("renews a session the refresh grant cannot, then retries", async () => {
+			await writeSsoConfig();
+			await writeCachedToken(expiredToken());
+			const captured = { oidc: [] as Array<Record<string, unknown>>, bearer: [] as string[] };
+			const requests: AwsAuthRefreshRequest[] = [];
+			setAwsAuthRefreshHandler(async request => {
+				requests.push(request);
+				await writeCachedToken(liveToken());
+				return { refreshed: true };
+			});
+
+			const creds = await resolveAwsCredentials({
+				profile: "sso-test",
+				fetch: ssoMock(captured, { oidcStatus: 400 }),
+			});
+
+			expect(creds.accessKeyId).toBe("ASIASSO");
+			expect(requests).toEqual([
+				{
+					kind: "sso-token-expired",
+					sso: { profile: "sso-test", startUrl: START_URL, region: "us-east-1", sessionName: SESSION },
+					loginCommand: `aws sso login --sso-session ${SESSION}`,
+				},
+			]);
+			expect(captured.bearer).toEqual(["renewed-token"]);
+		});
+
+		test("profiles sharing a session run the refresh command once", async () => {
+			const cfg = path.join(tmp, "config");
+			const profile = (name: string) =>
+				`[profile ${name}]\nsso_session = ${SESSION}\nsso_account_id = 111122223333\nsso_role_name = TestRole\n\n`;
+			await Bun.write(
+				cfg,
+				`${profile("a")}${profile("b")}[sso-session ${SESSION}]\nsso_start_url = ${START_URL}\nsso_region = us-east-1\n`,
+			);
+			Bun.env.AWS_CONFIG_FILE = cfg;
+			await writeCachedToken(expiredToken());
+			const captured = { oidc: [] as Array<Record<string, unknown>>, bearer: [] as string[] };
+			// Hold the renewal until both profiles' refresh exchanges were rejected, so
+			// the second failure overlaps the first renewal (joining it, or retrying
+			// once it completed) instead of starting a second one.
+			const bothRejected = Promise.withResolvers<void>();
+			const mock = ssoMock(captured, { oidcStatus: 400 });
+			const fetchImpl = Object.assign(
+				async (input: string | URL | Request, init?: RequestInit) => {
+					const response = await mock(input, init);
+					if (captured.oidc.length === 2) bothRejected.resolve();
+					return response;
+				},
+				{ preconnect: fetch.preconnect },
+			);
+			let calls = 0;
+			setAwsAuthRefreshHandler(async () => {
+				calls++;
+				await bothRejected.promise;
+				await writeCachedToken(liveToken());
+				return { refreshed: true };
+			});
+
+			const results = await Promise.all(
+				["a", "b"].map(p => resolveAwsCredentials({ profile: p, fetch: fetchImpl })),
+			);
+
+			expect(results.map(c => c.accessKeyId)).toEqual(["ASIASSO", "ASIASSO"]);
+			expect(calls).toBe(1);
+		});
+
+		test("a failed renewal surfaces the SSO error with the failure, without retrying", async () => {
+			await writeSsoConfig();
+			await writeCachedToken(expiredToken({ refreshToken: undefined }));
+			const captured = { oidc: [] as Array<Record<string, unknown>>, bearer: [] as string[] };
+			setAwsAuthRefreshHandler(async () => {
+				throw new Error("command exited with code 255");
+			});
+
+			await expect(resolveAwsCredentials({ profile: "sso-test", fetch: ssoMock(captured) })).rejects.toThrow(
+				/has expired\. Run 'aws sso login --sso-session my-session' to refresh\. Automatic refresh failed: command exited with code 255$/,
+			);
+			expect(captured.bearer).toEqual([]);
+		});
+
+		test("an unconfigured host appends its hint", async () => {
+			await writeSsoConfig();
+			const captured = { oidc: [] as Array<Record<string, unknown>>, bearer: [] as string[] };
+			setAwsAuthRefreshHandler(async () => ({ refreshed: false, hint: "Set the refresh command." }));
+
+			await expect(resolveAwsCredentials({ profile: "sso-test", fetch: ssoMock(captured) })).rejects.toThrow(
+				/not found in ~\/\.aws\/sso\/cache\. Run 'aws sso login --sso-session my-session' first\. Set the refresh command\.$/,
+			);
+		});
 	});
 });

@@ -128,6 +128,8 @@ import type { FileSlashCommand } from "../extensibility/slash-commands";
 import { loadSlashCommands } from "../extensibility/slash-commands";
 import type { GoalModeState } from "../goals/state";
 import { rescopeSessionToCwd } from "../session/cwd-rescope";
+import { setAwsAuthRefreshPresenter } from "../session/aws-auth-refresh";
+import { createAwsAuthRefreshPresenter } from "./aws-auth-refresh-view";
 import { copyLocalArtifacts, resolveLocalRoot } from "../internal-urls";
 import { hasNativeJudge } from "../judgment";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
@@ -2692,6 +2694,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// behind the approval mutex must prompt on a live signal, not a dead one.
 		this.#dialogLifetime.abort();
 		this.#dialogLifetime = new AbortController();
+		setAwsAuthRefreshPresenter(createAwsAuthRefreshPresenter(this));
 
 		this.keybindings = logger.time("InteractiveMode.init:keybindings", () => KeybindingsManager.create());
 		// Before first paint, so hints the user already learned never flash on.
@@ -8683,6 +8686,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// pending input callback against a session that is already disposing.
 		this.#abortLoopCondition();
 		this.#cancelLoopAutoSubmit();
+		setAwsAuthRefreshPresenter(undefined);
 
 		// `#beginClose()` already acknowledged the close; escalate only once the
 		// teardown itself lingers, so time spent in exit prompts never counts.

@@ -88,7 +88,110 @@ function credentialCacheKey(profile: string, region: string, loadSharedConfig: b
 	return `${profile}\x00${region}\x00${loadSharedConfig ? "config" : "credentials"}`;
 }
 
+/** A lapsed SSO sign-in the host is asked to renew. */
+export interface AwsAuthRefreshRequest {
+	kind: "sso-token-missing" | "sso-token-expired";
+	sso: AIError.AwsSsoSession;
+	/** The `aws sso login …` invocation that renews {@link sso}. */
+	loginCommand: string;
+}
+
+export type AwsAuthRefreshOutcome =
+	/** The host signed in again; resolution is retried once. */
+	| { refreshed: true }
+	/** Nothing was attempted; a `hint` is appended to the original error. */
+	| { refreshed: false; hint?: string };
+
+/**
+ * Host hook that renews a lapsed SSO sign-in (e.g. by running `aws sso login`).
+ * Throwing reports a failed attempt; its message is appended to the SSO error.
+ */
+export type AwsAuthRefreshHandler = (request: AwsAuthRefreshRequest) => Promise<AwsAuthRefreshOutcome>;
+
+let authRefreshHandler: AwsAuthRefreshHandler | undefined;
+/** One renewal per SSO session at a time; concurrent failures share it. */
+const authRefreshInflight: Map<string, Promise<AwsAuthRefreshOutcome>> = new Map();
+/**
+ * Bumped when a renewal completes. A request that started before the bump read
+ * the pre-renewal cache; it retries instead of renewing (and opening the browser) again.
+ */
+let authRefreshGeneration = 0;
+
+/** Install the process-wide SSO renewal hook; `undefined` restores plain errors. */
+export function setAwsAuthRefreshHandler(handler: AwsAuthRefreshHandler | undefined): void {
+	authRefreshHandler = handler;
+}
+
+/** The AWS CLI command that signs `sso` in again. */
+export function awsSsoLoginCommand(sso: AIError.AwsSsoSession): string {
+	const quote = (value: string) => (/^[\w.@:/-]+$/.test(value) ? value : JSON.stringify(value));
+	return sso.sessionName
+		? `aws sso login --sso-session ${quote(sso.sessionName)}`
+		: `aws sso login --profile ${quote(sso.profile)}`;
+}
+
 export async function resolveAwsCredentials(opts: CredentialResolveOptions = {}): Promise<ResolvedCredentials> {
+	const generation = authRefreshGeneration;
+	try {
+		return await resolveCachedCredentials(opts);
+	} catch (error) {
+		const handler = authRefreshHandler;
+		if (
+			!handler ||
+			!(error instanceof AIError.AwsCredentialsError) ||
+			!error.sso ||
+			(error.kind !== "sso-token-missing" && error.kind !== "sso-token-expired")
+		) {
+			throw error;
+		}
+		// A renewal finished while this request was reading the stale cache.
+		if (generation !== authRefreshGeneration) return resolveCachedCredentials(opts);
+		const sso = error.sso;
+		const request: AwsAuthRefreshRequest = { kind: error.kind, sso, loginCommand: awsSsoLoginCommand(sso) };
+		let outcome: AwsAuthRefreshOutcome;
+		try {
+			outcome = await raceWithSignal(runAuthRefresh(handler, request), opts.signal);
+		} catch (refreshError) {
+			if (opts.signal?.aborted) throw refreshError;
+			const detail = refreshError instanceof Error ? refreshError.message : String(refreshError);
+			throw new AIError.AwsCredentialsError(`${error.message} Automatic refresh failed: ${detail}`, error.kind, {
+				cause: refreshError,
+				sso,
+			});
+		}
+		if (!outcome.refreshed) {
+			if (!outcome.hint) throw error;
+			throw new AIError.AwsCredentialsError(`${error.message} ${outcome.hint}`, error.kind, { sso });
+		}
+		// One retry: a refresh that "succeeded" without renewing this session
+		// surfaces the fresh SSO error instead of looping.
+		return resolveCachedCredentials(opts);
+	}
+}
+
+function runAuthRefresh(
+	handler: AwsAuthRefreshHandler,
+	request: AwsAuthRefreshRequest,
+): Promise<AwsAuthRefreshOutcome> {
+	const key = request.sso.sessionName ? `session\x00${request.sso.sessionName}` : `url\x00${request.sso.startUrl}`;
+	const existing = authRefreshInflight.get(key);
+	if (existing) return existing;
+	// Detached from every caller's signal like the shared resolution below; the
+	// host bounds the attempt itself.
+	const promise = (async () => {
+		try {
+			const outcome = await handler(request);
+			if (outcome.refreshed) authRefreshGeneration++;
+			return outcome;
+		} finally {
+			authRefreshInflight.delete(key);
+		}
+	})();
+	authRefreshInflight.set(key, promise);
+	return promise;
+}
+
+async function resolveCachedCredentials(opts: CredentialResolveOptions): Promise<ResolvedCredentials> {
 	const profile = resolveAwsProfile(opts.profile);
 	const region = resolveAwsRegion(opts.region, opts.profile);
 	const loadSharedConfig = shouldLoadAwsSharedConfig(opts.profile);
@@ -250,7 +353,7 @@ async function resolveProfileChain(
 	}
 
 	if (merged.sso_account_id && merged.sso_role_name) {
-		return readSsoCredentials(merged, ctx.configIni, ctx.region, ctx.signal, ctx.fetchImpl);
+		return readSsoCredentials(profile, merged, ctx.configIni, ctx.region, ctx.signal, ctx.fetchImpl);
 	}
 
 	if (merged.credential_process) {
@@ -425,6 +528,7 @@ interface SsoCacheEntry {
 const SSO_TOKEN_REFRESH_SKEW_MS = 60_000;
 
 async function readSsoCredentials(
+	profile: string,
 	profileCfg: Record<string, string>,
 	configIni: AwsIniFile | undefined,
 	defaultRegion: string,
@@ -445,12 +549,15 @@ async function readSsoCredentials(
 		}
 	}
 	if (!startUrl || !ssoRegion) return undefined;
+	const sso: AIError.AwsSsoSession = { profile, startUrl, region: ssoRegion };
+	if (sessionName) sso.sessionName = sessionName;
 
 	const cached = await loadSsoCachedToken(startUrl, sessionName);
 	if (!cached?.token.accessToken) {
 		throw new AIError.AwsCredentialsError(
-			`AWS SSO token for ${startUrl} not found in ~/.aws/sso/cache. Run 'aws sso login' first.`,
+			`AWS SSO token for ${startUrl} not found in ~/.aws/sso/cache. Run '${awsSsoLoginCommand(sso)}' first.`,
 			"sso-token-missing",
+			{ sso },
 		);
 	}
 	let accessToken = cached.token.accessToken;
@@ -465,8 +572,9 @@ async function readSsoCredentials(
 		if (refreshed?.accessToken) accessToken = refreshed.accessToken;
 		else if (expired) {
 			throw new AIError.AwsCredentialsError(
-				`AWS SSO token for ${startUrl} has expired. Run 'aws sso login' to refresh.`,
+				`AWS SSO token for ${startUrl} has expired. Run '${awsSsoLoginCommand(sso)}' to refresh.`,
 				"sso-token-expired",
+				{ sso },
 			);
 		}
 	}

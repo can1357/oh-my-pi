@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `setAwsAuthRefreshHandler` lets a host renew an expired or missing AWS SSO sign-in (for example by running `aws sso login`); Bedrock requests then retry instead of failing, and concurrent requests share one renewal
+
+### Changed
+
+- AWS SSO errors now name the exact login command, e.g. `aws sso login --sso-session <name>`
+
 ### Fixed
 
 - With several Devin logins, omp now prefers a login with daily or weekly quota left; a login past its quota that its on-demand balance still funds comes next, and one with no balance is skipped until its quota resets ([#19929](https://github.com/can1357/oh-my-pi/pull/19929) by [@will-bogusz](https://github.com/will-bogusz))
