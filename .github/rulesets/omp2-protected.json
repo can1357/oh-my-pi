@@ -42,7 +42,7 @@
           { "context": "Lint workspace (macOS)" },
           { "context": "Rust workspace and acceptance proofs" },
           { "context": "Terminal proof P7 (Linux PTY)" },
-          { "context": "Acceptance proofs P9, P10 and tool sources (Linux)" },
+          { "context": "Acceptance proofs P9-P14 and tool sources (Linux)" },
           { "context": "Error-formatting ratchet (lintx)" },
           { "context": "Remote Linux verification (BuildBuddy)" },
           { "context": "Protobuf format and lint" }
