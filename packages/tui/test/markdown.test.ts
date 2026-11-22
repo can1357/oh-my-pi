@@ -1247,6 +1247,30 @@ more text`,
 			expect(plainLines.some(line => line.includes("```mermaid"))).toBeFalsy();
 		});
 
+		it("holds a still-streaming diagram to one row and draws it once the fence closes", () => {
+			// A diagram laid out again with every line has no rows that could
+			// retire while it streams; one row cannot outgrow the screen.
+			const tall = Array.from({ length: 40 }, (_, i) => `row ${i}`).join("\n");
+			const markdown = new Markdown("Intro.\n\n```mermaid\nflowchart TD\n  A-->B\n", 0, 0, {
+				...defaultMarkdownTheme,
+				resolveMermaidAscii: () => tall,
+			});
+			markdown.transientRenderCache = true;
+			const open = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+			expect(open).toEqual(["Intro.", "", "```mermaid · drawing diagram…"]);
+
+			markdown.setText("Intro.\n\n```mermaid\nflowchart TD\n  A-->B\n```\n\nAfter.");
+			const closed = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+			expect(closed.filter(line => line.startsWith("row "))).toHaveLength(40);
+			expect(closed.at(-1)).toBe("After.");
+
+			// A quoted fence without a closer ended with its quote: it is drawn.
+			markdown.setText("> ```mermaid\n> flowchart TD\n> A-->B\n\nOutside.\n\nMore");
+			const quoted = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+			expect(quoted.some(line => line.includes("row 39"))).toBe(true);
+			expect(quoted.some(line => line.includes("drawing diagram"))).toBe(false);
+		});
+
 		it("keeps resolved Mermaid art inside the coding-agent margin", () => {
 			const markdown = new Markdown(
 				"```mermaid\nflowchart TD\n```",
@@ -2391,6 +2415,25 @@ describe("Module-level LRU render cache", () => {
 		markdown.setText("```sql\nSELECT 1;\nSELECT 2;\nSELECT 3;\nSELECT 4;");
 		markdown.render(80);
 		expect(markdown.getLastRenderStableText()).toBe("```sql\nSELECT 1;\nSELECT 2;\n");
+	});
+
+	it("settles nothing inside an open mermaid fence drawn as a diagram", () => {
+		// The diagram is laid out again from the whole body with every line, so
+		// its rows are not append-only: published rows would stop prefixing the
+		// block and freeze it, leaving every row above the screen unretired.
+		clearRenderCache();
+		const source = "Intro.\n\n```mermaid\nflowchart TD\n  A --> B\n  B --> C\n  C --> D";
+		const diagramTheme = { ...defaultMarkdownTheme, resolveMermaidAscii: () => "diagram" };
+		const diagram = new Markdown(source, 0, 0, diagramTheme);
+		diagram.transientRenderCache = true;
+		diagram.render(80);
+		expect(diagram.getLastRenderStableText()).toBe("Intro.\n\n");
+
+		// Without a resolver the fence renders as code, which only appends.
+		const code = new Markdown(source, 0, 0, { ...defaultMarkdownTheme, resolveMermaidAscii: undefined });
+		code.transientRenderCache = true;
+		code.render(80);
+		expect(code.getLastRenderStableText()).toBe("Intro.\n\n```mermaid\nflowchart TD\n  A --> B\n");
 	});
 
 	it("clears the settled fence text when a non-append edit rewinds it", () => {

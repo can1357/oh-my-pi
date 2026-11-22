@@ -112,7 +112,11 @@ interface FastPathItem {
 }
 type DisplayThinkingContentBlock = ThinkingContentBlock & { rawThinking?: string };
 type StablePartKind = "thinking" | "text";
-type StablePart = { kind: StablePartKind; text: string; contentIndex: number } | { kind: "spacer" };
+/** A figure part renders through the live figure component itself, so its rows match the block's own render. */
+type StablePart =
+	| { kind: StablePartKind; text: string; contentIndex: number }
+	| { kind: "spacer" }
+	| { kind: "figure"; figure: Component };
 
 /**
  * One published prefix of the block's finished content. Later snapshots extend
@@ -174,6 +178,10 @@ function isSnapshotExtension(previous: readonly StablePart[], current: readonly 
 		const after = current[index]!;
 		if (before.kind !== after.kind) return false;
 		if (before.kind === "spacer" || after.kind === "spacer") continue;
+		if (before.kind === "figure" || after.kind === "figure") {
+			if (before.kind !== "figure" || after.kind !== "figure" || before.figure !== after.figure) return false;
+			continue;
+		}
 		const isLast = index === previous.length - 1;
 		if (isLast ? !after.text.startsWith(before.text) : after.text !== before.text) return false;
 	}
@@ -1384,7 +1392,11 @@ export class AssistantMessageComponent extends Container {
 		const { parts, openTable } = current;
 		const last = parts.at(-1);
 		if (!last || last.kind === "spacer") return;
-		const snapshot: StableSnapshot = { partCount: parts.length, lastTextLength: last.text.length, openTable };
+		const snapshot: StableSnapshot = {
+			partCount: parts.length,
+			lastTextLength: last.kind === "figure" ? 0 : last.text.length,
+			openTable,
+		};
 		const previous = this.#stableSnapshots.at(-1);
 		// An unmoved boundary publishes nothing whether or not it still extends
 		// the last snapshot, so most frames skip the whole-document comparison.
@@ -1397,7 +1409,14 @@ export class AssistantMessageComponent extends Container {
 		}
 		if (previous && !isSnapshotExtension(this.#stableParts, parts)) return;
 		this.#syncStableRenderInputs();
-		const currentRows = this.#renderStableParts(parts, parts.length, last.text.length, width, "head", openTable);
+		const currentRows = this.#renderStableParts(
+			parts,
+			parts.length,
+			snapshot.lastTextLength,
+			width,
+			"head",
+			openTable,
+		);
 		// The container verifies stable rows against the blank-trimmed render.
 		if (!this.#candidatePrefix.holds(currentRows, trimBlankEdges(rendered))) return;
 		const previousRows = previous
@@ -1432,12 +1451,23 @@ export class AssistantMessageComponent extends Container {
 			if (item?.md === child) {
 				const md = item.md;
 				if (md instanceof FigureMarkdown) {
-					// Plain Markdown reproduces only the prose ahead of the first figure.
-					if (md.leadingProse) {
-						parts.push({ kind: item.blockType, text: md.leadingProse, contentIndex: item.contentIndex });
-						openTable = md.leadingProseEndsInOpenTable;
+					// Prose renders through plain Markdown, settled figures through
+					// themselves; publication stops at a figure still being drawn.
+					const prefix = md.stablePrefix();
+					for (const part of prefix.parts) {
+						parts.push(
+							part.kind === "markdown"
+								? { kind: item.blockType, text: part.text, contentIndex: item.contentIndex }
+								: part,
+						);
 					}
-					break;
+					if (!prefix.complete) {
+						openTable = md.leadingProseEndsInOpenTable;
+						break;
+					}
+					if (itemIndex === items.length - 1) break;
+					itemIndex++;
+					continue;
 				}
 				if (itemIndex === items.length - 1) {
 					// Streaming child: publish Markdown's frozen prefix, and only
@@ -1502,6 +1532,10 @@ export class AssistantMessageComponent extends Container {
 			const part = parts[index]!;
 			if (part.kind === "spacer") {
 				rows.push("");
+				continue;
+			}
+			if (part.kind === "figure") {
+				for (const row of part.figure.render(width)) rows.push(row);
 				continue;
 			}
 			const closed = index < lastIndex;
