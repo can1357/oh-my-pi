@@ -1,7 +1,6 @@
 /**
- * Google Gemini CLI / Antigravity provider.
- * Shared implementation for both google-gemini-cli and google-antigravity providers.
- * Uses the Cloud Code Assist API endpoint to access Gemini and Claude models.
+ * Cloud Code Assist transport for Antigravity and custom providers.
+ * The `google-gemini-cli` API identifier is retained for configured models.
  */
 import { randomBytes, randomUUID } from "node:crypto";
 import { scheduler } from "node:timers/promises";
@@ -10,10 +9,8 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { isReviewedTierVariantWireId } from "@oh-my-pi/pi-catalog/compat/collapse";
 import {
 	ensureAntigravityVersion,
-	ensureGeminiCliVersion,
 	getAntigravityHeaders,
 	getAntigravityModelWireProfile,
-	getGeminiCliHeaders,
 } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { extractHttpStatusFromError, fetchWithRetry, readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
@@ -610,18 +607,13 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			}
 			// The backend gates newer models on the client version; a process that
 			// skipped discovery (fresh model cache) must still send the current one.
-			// The npm registry is not Cloud Code Assist, so the Gemini CLI lookup goes
-			// through the global fetch: a caller's transport only carries provider requests.
 			if (isAntigravity) await ensureAntigravityVersion(options?.fetch ?? fetch, options?.signal);
-			else await ensureGeminiCliVersion(fetch, options?.signal);
 			// Antigravity mirrors the native Go client: no `Accept`, gzip only, and
 			// no Claude-thinking beta on Claude 5.x (the compat flag scopes it).
 			const requestHeaders = {
 				Authorization: `Bearer ${accessToken}`,
 				"Content-Type": "application/json",
-				...(isAntigravity
-					? getAntigravityHeaders()
-					: { Accept: "text/event-stream", ...getGeminiCliHeaders(model.id) }),
+				...(isAntigravity ? getAntigravityHeaders() : { Accept: "text/event-stream" }),
 				...(model.compat.claudeThinkingBetaHeader && model.identity.class === "anthropic" && model.reasoning
 					? { "anthropic-beta": CLAUDE_THINKING_BETA_HEADER }
 					: {}),

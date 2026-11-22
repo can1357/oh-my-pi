@@ -1,58 +1,10 @@
 import type { FetchImpl } from "@oh-my-pi/pi-utils";
 import type { AntigravityModelWireProfile } from "../types";
-import { createVersionLookup, npmLatestVersion } from "./client-version-lookup";
-
-/**
- * Offline fallback for the Gemini CLI version, used until
- * {@link ensureGeminiCliVersion} resolves the current npm release.
- */
-export const DEFAULT_GEMINI_CLI_VERSION = "0.68.0";
-
-const geminiCliVersionLookup = createVersionLookup({ resolve: npmLatestVersion("@google/gemini-cli") });
-
-/** Version reported as Gemini CLI: env override → npm `latest` → pinned fallback. */
-export function getGeminiCliVersion(): string {
-	return process.env.PI_AI_GEMINI_CLI_VERSION || geminiCliVersionLookup.current() || DEFAULT_GEMINI_CLI_VERSION;
-}
-
-/**
- * Resolves the latest `@google/gemini-cli` release from npm, re-checked hourly.
- * The Cloud Code Assist backend reads the client version from the User-Agent,
- * so a frozen pin drifts behind every release. Skipped entirely when
- * PI_AI_GEMINI_CLI_VERSION is set; see {@link createVersionLookup} for caching,
- * back-off, and `signal` semantics. Callers pass the global fetch: a provider
- * transport only carries provider requests.
- */
-export function ensureGeminiCliVersion(fetcher: FetchImpl = fetch, signal?: AbortSignal): Promise<void> {
-	if (process.env.PI_AI_GEMINI_CLI_VERSION) return Promise.resolve();
-	return geminiCliVersionLookup.ensure(fetcher, signal);
-}
-
-/** Drops the resolved Gemini CLI version and back-off; tests only. */
-export function resetGeminiCliVersionForTest(): void {
-	geminiCliVersionLookup.resetForTest();
-}
-
-/**
- * Build a User-Agent string that identifies as Gemini CLI to unlock higher rate limits.
- * Uses the same format as the official Gemini CLI (v0.35+):
- * GeminiCLI/VERSION/MODEL (PLATFORM; ARCH; SURFACE)
- */
-export function getGeminiCliUserAgent(modelId = "gemini-3.1-pro-preview"): string {
-	const version = getGeminiCliVersion();
-	const platform = process.platform === "win32" ? "win32" : process.platform;
-	const arch = process.arch === "x64" ? "x64" : process.arch;
-	return `GeminiCLI/${version}/${modelId} (${platform}; ${arch}; terminal)`;
-}
-
-export const getGeminiCliHeaders = (modelId?: string) => ({
-	"User-Agent": getGeminiCliUserAgent(modelId),
-	"Client-Metadata": "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI",
-});
+import { createVersionLookup } from "./client-version-lookup";
 
 /**
  * Antigravity / Cloud Code Assist user agent. Lives in its own file so discovery
- * and usage code can read it without pulling the heavy google-gemini-cli provider
+ * and usage code can read it without pulling the heavy Cloud Code Assist provider
  * (and its @google/genai → google-auth-library dependency chain) into the startup
  * parse graph.
  *

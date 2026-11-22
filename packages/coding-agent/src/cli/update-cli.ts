@@ -17,6 +17,7 @@ import {
 	getUpdateStateDir,
 	isCompiledBinary,
 	isEnoent,
+	logger,
 	VERSION,
 	WhichCachePolicy,
 } from "@oh-my-pi/pi-utils";
@@ -1104,21 +1105,32 @@ function formatVerificationFailure(result: InstalledVersionVerification, expecte
 	return `could not verify updated version${result.path ? ` at ${result.path}` : ""}`;
 }
 
-/**
- * Print post-update verification result.
- */
-function printVerificationResult(result: InstalledVersionVerification, expectedVersion: string): void {
+/** Publish extension assets from a verified launcher, not from the process that updated it. */
+export async function syncRelayAfterVerifiedUpdate(launcher: string | undefined): Promise<void> {
+	if (!launcher) return;
+	try {
+		const result = await $`${launcher} browser-relay sync`.quiet().nothrow();
+		if (result.exitCode !== 0) {
+			logger.warn("browser relay sync after update failed", {
+				launcher,
+				exitCode: result.exitCode,
+				error: result.stderr.toString().trim(),
+			});
+		}
+	} catch (error) {
+		logger.warn("browser relay sync after update failed", { launcher, error: String(error) });
+	}
+}
+
+/** Report verification and publish assets only when the requested installed version was confirmed. */
+async function finishVerifiedUpdate(result: InstalledVersionVerification, expectedVersion: string): Promise<void> {
 	if (result.ok) {
 		printVerifiedVersion(expectedVersion, result.path);
+		await syncRelayAfterVerifiedUpdate(result.path);
 		return;
 	}
 	console.log(chalk.yellow(`\nWarning: ${formatVerificationFailure(result, expectedVersion)}`));
 	console.log(chalk.yellow(`You may need to reinstall: ${installerHint()}`));
-}
-
-/** Verify the PATH-resolved launcher and print the outcome. */
-async function printVerification(expectedVersion: string): Promise<void> {
-	printVerificationResult(await verifyInstalledVersion(expectedVersion), expectedVersion);
 }
 
 async function unlinkIfExists(filePath: string): Promise<void> {
@@ -1544,7 +1556,7 @@ export async function migrateRenamedInstall(release: ReleaseInfo, steps: RenameM
 			`${formatVerificationFailure(verification, release.version)}; reinstall with: ${installerHint()}`,
 		);
 	}
-	printVerifiedVersion(release.version);
+	await finishVerifiedUpdate(verification, release.version);
 }
 
 /** Older bun releases predate `--minimum-release-age` and reject unknown flags, so probe the installed help output before passing it. */
@@ -1699,7 +1711,7 @@ export async function updateViaManager(
 	const launcherNeedsRepair = !result.ok && (launcherIsBroken || launcherIsOlder);
 	if (!launcherNeedsRepair) {
 		if (installError) throw installError;
-		printVerificationResult(result, release.version);
+		await finishVerifiedUpdate(result, release.version);
 		return;
 	}
 	if (!launcherPath) {
@@ -1738,7 +1750,7 @@ async function updateViaHomebrew(expectedVersion: string, force: boolean): Promi
 		throw new Error(`brew ${args[0]} failed with exit code ${exitCode}`);
 	}
 
-	await printVerification(expectedVersion);
+	await finishVerifiedUpdate(await verifyInstalledVersion(expectedVersion), expectedVersion);
 }
 
 async function updateViaMise(expectedVersion: string, force: boolean): Promise<void> {
@@ -1760,7 +1772,7 @@ async function updateViaMise(expectedVersion: string, force: boolean): Promise<v
 		}
 	}
 
-	await printVerification(expectedVersion);
+	await finishVerifiedUpdate(await verifyInstalledVersion(expectedVersion), expectedVersion);
 }
 
 // Monotonic within this process so two updates started in the same millisecond
@@ -1930,7 +1942,7 @@ export async function updateViaBinaryAt(
 		await sweepStaleUpdateArtifacts(targetPath);
 		return result;
 	});
-	printVerifiedVersion(build.version, verification.path ?? targetPath);
+	await finishVerifiedUpdate({ ...verification, path: verification.path ?? targetPath }, build.version);
 	console.log(chalk.dim(`Restart ${APP_NAME} to use the new version`));
 }
 
@@ -1979,7 +1991,7 @@ export async function updateViaShimTakeover(
 	// Serialize the launcher swap and artifact sweep so two overlapping updates
 	// never retire the same shims or reclaim a live run's backup before its
 	// verification can roll it back.
-	await withFileLock(exePath, async () => {
+	const verification = await withFileLock(exePath, async () => {
 		console.log(chalk.dim(`Installing ${APP_NAME}.exe beside the script launcher...`));
 		await fs.promises.rename(tempPath, exePath);
 		// Retire the shims so PATH resolution lands on the new exe. Renamed, not
@@ -2036,6 +2048,7 @@ export async function updateViaShimTakeover(
 		for (const ext of [".exe", "", ".cmd", ".ps1", ".bat"]) {
 			await sweepStaleUpdateArtifacts(path.join(launcherDir, `${APP_NAME}${ext}`));
 		}
+		return verification;
 	});
 	for (const { launcher } of forwarded) {
 		console.log(chalk.dim(`Converted ${launcher} to a forwarder (it could not be removed).`));
@@ -2047,7 +2060,7 @@ export async function updateViaShimTakeover(
 			),
 		);
 	}
-	printVerifiedVersion(build.version);
+	await finishVerifiedUpdate({ ...verification, path: exePath }, build.version);
 	console.log(chalk.dim(`Restart ${APP_NAME} to use the new version`));
 }
 

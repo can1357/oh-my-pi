@@ -2870,6 +2870,8 @@ fn copy_data(
 			ReflinkMode::Never => false,
 		};
 	if clone_by_path {
+		// The clone creates `dest` without the filesystem facade.
+		filesystem.note_change(&dest_fs);
 		match omp_iso::cow::clone_file(&source_fs, &dest_fs) {
 			Ok(()) => {
 				if !matches!(options.attributes.timestamps, Preserve::Yes { .. }) {
