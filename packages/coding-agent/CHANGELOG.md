@@ -4,6 +4,7 @@
 
 ### Added
 
+- `/wt` (TUI, ACP, RPC and `worktree.onStart`) runs the new worktree's `post-checkout` hook as `git worktree add` does, with a spinner in the TUI, then loads the skills and commands it added; a failing hook keeps the worktree and shows a warning, and quitting while it runs keeps that worktree with a warning. In an ovnfs checkout only a `core.hooksPath` hook runs ([#20045](https://github.com/can1357/oh-my-pi/pull/20045) by [@Dangerboi](https://github.com/Dangerboi))
 - Added `async.processWatch.enabled` (off by default): while background jobs run, the `judge` model role checks them on a schedule (30 s, 1, 2, 4, 8 and 16 minutes, then every 30 minutes) and tells the agent at its next turn about jobs that look stalled, failing, or like a server it is waiting on as if it would exit. Tune with `async.processWatch.threshold`, `async.processWatch.schedule` and `async.processWatch.everySeconds`. ([#19901](https://github.com/can1357/oh-my-pi/pull/19901) by [@Xytronix](https://github.com/Xytronix))
 - On Linux, process-watch checks also see host resource pressure (CPU, memory and I/O stall averages, free memory and swap, free disk space), so a job starved by the host is reported as stalled with the cause named and a suggestion to move heavy work off the host or free resources. ([#19901](https://github.com/can1357/oh-my-pi/pull/19901) by [@Xytronix](https://github.com/Xytronix))
 
@@ -19,6 +20,7 @@
 - Fixed `/usage` showing "Usage history unavailable (database is locked)" while another process was writing the stats database; the stored history stays visible, marked not synced when the refresh cannot finish ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
 - `openai-models-list` discovery no longer offers a gateway's speech and transcription models as chat models: rows whose only output is `speech` or `transcription` (including OpenRouter's `text->speech` style `architecture.modality` summary) become `tts` and `stt` models ([#19900](https://github.com/can1357/oh-my-pi/pull/19900) by [@Xytronix](https://github.com/Xytronix))
 - Subagents stopped by their parent through `proc://<id>/kill` now record "Stopped by parent agent" in their transcripts instead of "Interrupted by user" ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
+- Fixed the omp daemon staying alive for up to 3 seconds after shutdown, or 11 seconds after stopping a module unit such as the image URL broker, once its work was done
 
 ## [19.1.0] - 2026-11-21
 
