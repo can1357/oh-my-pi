@@ -1602,7 +1602,10 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const outputWriter = new RpcOutputWriter(stdout, failure => {
 		logger.error("RPC output delivery failed", { error: String(failure) });
 		dictationBridge?.dispose();
-		void session.dispose().finally(() => process.exit(1));
+		void session
+			.dispose()
+			.finally(() => disposeLocalMcpHost())
+			.finally(() => process.exit(1));
 	});
 	outputWriter.write(
 		frameEncoder.encodeFrames({
