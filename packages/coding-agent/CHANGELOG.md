@@ -4,7 +4,7 @@
 
 ### Added
 
-- Bedrock can sign in to AWS SSO again on its own: set `providers.amazon-bedrock.authRefreshCommand` (e.g. `aws sso login --sso-session <name>`) and omp runs it when the SSO session expires, shows its output, and retries the request; without it, the error shows the `omp config set` command to set it up
+- Bedrock can sign in to AWS SSO again on its own: set `providers.amazon-bedrock.authRefreshCommand` (e.g. `aws sso login --sso-session <name>`) and omp runs it when the SSO session expires, shows its output, and retries the request; without it, the error shows the `omp config set` command to set it up ([#20160](https://github.com/can1357/oh-my-pi/pull/20160) by [@lericson](https://github.com/lericson))
 - `/wt` (TUI, ACP, RPC and `worktree.onStart`) runs the new worktree's `post-checkout` hook as `git worktree add` does, with a spinner in the TUI, then loads the skills and commands it added; a failing hook keeps the worktree and shows a warning, and quitting while it runs keeps that worktree with a warning. In an ovnfs checkout only a `core.hooksPath` hook runs ([#20045](https://github.com/can1357/oh-my-pi/pull/20045) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Fixed
