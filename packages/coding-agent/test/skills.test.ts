@@ -143,6 +143,22 @@ describe("skills", () => {
 
 			expect(skills).toHaveLength(0);
 		});
+
+		it("discovers a SKILL.md created in a previously scanned empty directory", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skill-late-"));
+			const later = path.join(root, "later");
+			await fs.mkdir(later, { recursive: true });
+
+			try {
+				expect((await loadSkillsFromDir({ dir: root, source: "test" })).skills).toHaveLength(0);
+				await writeSkill(later, "later-skill");
+				expect((await loadSkillsFromDir({ dir: root, source: "test" })).skills.map(skill => skill.name)).toEqual([
+					"later-skill",
+				]);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
 	});
 
 	describe("loadSkills with options", () => {

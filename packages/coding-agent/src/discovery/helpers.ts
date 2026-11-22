@@ -544,8 +544,11 @@ export async function scanSkillsFromDir(
 		}
 		// The root carries a skill only when a caller opts in (recursive scans or
 		// Claude plugin manifest paths); nested directories may each be a skill.
-		if (depth > 0 || options.includeSelf || recursive) {
-			work.push(loadSkill(path.join(currentDir, "SKILL.md")));
+		// Check existence before reading so a missing manifest is not negative-cached
+		// and a later scan can see a SKILL.md created in an already-visited directory.
+		const selfSkillPath = path.join(currentDir, "SKILL.md");
+		if ((depth > 0 || options.includeSelf || recursive) && fs.existsSync(selfSkillPath)) {
+			work.push(loadSkill(selfSkillPath));
 		}
 		entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 		for (const entry of entries) {
@@ -555,7 +558,8 @@ export async function scanSkillsFromDir(
 			// Flat scans keep the one-level contract; recursive scans treat
 			// symlinked directories as leaves so a link cycle cannot loop.
 			if (!recursive || entry.isSymbolicLink()) {
-				work.push(loadSkill(path.join(currentDir, entry.name, "SKILL.md")));
+				const childSkillPath = path.join(currentDir, entry.name, "SKILL.md");
+				if (fs.existsSync(childSkillPath)) work.push(loadSkill(childSkillPath));
 				continue;
 			}
 			if (depth >= RECURSIVE_SKILL_SCAN_MAX_DEPTH) {
