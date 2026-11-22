@@ -1731,10 +1731,8 @@ export class AcpAgent implements Agent {
 	 * `AgentSession.joinActiveTurn()`, which atomically classifies the target
 	 * run and enqueues onto its native steering/follow-up queue:
 	 *
-	 * - a live run (streaming, or a `session/prompt` turn reserved but still
-	 *   dispatching) owns delivery — its agent loop polls the queue at
-	 *   tool-batch and model-call boundaries — and the outcome is
-	 *   `injected`;
+	 * - a client-owned run (streaming, paused for outside work, or reserved
+	 *   but still dispatching) owns delivery and the outcome is `injected`;
 	 * - a run that settles while the steer is being admitted (image
 	 *   preprocessing awaits real time) classifies as not-admitted, the
 	 *   message never reaches the queue, and no autonomous continuation can

@@ -39,7 +39,7 @@ import { type OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import type { AgentSideConnection, SessionNotification } from "@oh-my-pi/pi-utils/acp";
 /**
  * Wait out the session's owned jobs, their deliveries, and the run their results start.
@@ -256,6 +256,112 @@ describe("AgentSession owner-routed async delivery", () => {
 			).toHaveLength(2);
 		} finally {
 			releaseOutput.resolve();
+			await acp.dispose();
+		}
+	});
+
+	it("steers a paused ACP prompt and still delivers its background job before end_turn", async () => {
+		await using temp = await TempDir.create("@acp-paused-steer-");
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			responses: [
+				{ content: ["Initial answer"] },
+				{ content: ["Steered answer"] },
+				{ content: ["Background answer"] },
+			],
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [] },
+				convertToLlm,
+				streamFn: mock.stream,
+			}),
+			sessionManager: SessionManager.inMemory(temp.path()),
+			settings: Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
+			modelRegistry: new ModelRegistry(authStorage, temp.join("models.yml")),
+			agentId: "Lead",
+			asyncJobManager: manager,
+		});
+		const updates: SessionNotification[] = [];
+		const connection = {
+			sessionUpdate: async (notification: SessionNotification) => {
+				updates.push(notification);
+			},
+			extNotification: async () => {},
+			signal: new AbortController().signal,
+			closed: Promise.withResolvers<void>().promise,
+		} as unknown as AgentSideConnection;
+		const acp = new AcpAgent(connection, async () => session);
+		const job = Promise.withResolvers<string>();
+		const paused = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "agent_pause") paused.resolve();
+		});
+		try {
+			await acp.initialize({ protocolVersion: 1, clientCapabilities: {} });
+			const created = await acp.newSession({ cwd: temp.path(), mcpServers: [] });
+			manager.register("bash", "long-running collector", () => job.promise, { id: "collector", ownerId: "Lead" });
+			let promptSettled = false;
+			const prompt = acp
+				.prompt({
+					sessionId: created.sessionId,
+					prompt: [{ type: "text", text: "Start collector" }],
+				})
+				.then(response => {
+					promptSettled = true;
+					return response;
+				});
+			await withTimeout(paused.promise, 2_000, "ACP run did not pause");
+			expect(session.isStreaming).toBe(false);
+			expect(session.isRunActive).toBe(true);
+			expect(promptSettled).toBe(false);
+
+			const result = await withTimeout(
+				acp.extMethod("_session/steering", {
+					sessionId: created.sessionId,
+					prompt: [{ type: "text", text: "Change direction" }],
+				}),
+				2_000,
+				"Steer did not join the paused ACP prompt",
+			);
+			expect(result).toEqual({ outcome: "injected", queue: "steering" });
+			await withTimeout(session.waitForIdle(), 2_000, "Steered turn did not finish");
+			expect(mock.calls).toHaveLength(2);
+			expect(
+				mock.calls[1]?.context.messages.some(message =>
+					JSON.stringify(message.content).includes("Change direction"),
+				),
+			).toBe(true);
+			expect(session.isRunActive).toBe(true);
+			expect(promptSettled).toBe(false);
+
+			job.resolve("collector complete");
+			await withTimeout(settleOwnedJobs(session, manager), 2_000, "Collector did not wake the run");
+			expect(mock.calls).toHaveLength(3);
+			expect(
+				mock.calls[2]?.context.messages.some(message =>
+					JSON.stringify(message.content).includes("collector complete"),
+				),
+			).toBe(true);
+			expect((await withTimeout(prompt, 2_000, "ACP prompt did not settle")).stopReason).toBe("end_turn");
+			for (const text of ["Steered answer", "Background answer"]) {
+				expect(
+					updates.some(
+						notification =>
+							notification.update.sessionUpdate === "agent_message_chunk" &&
+							notification.update.content.type === "text" &&
+							notification.update.content.text.includes(text),
+					),
+				).toBe(true);
+			}
+		} finally {
+			job.resolve("collector complete");
 			await acp.dispose();
 		}
 	});

@@ -1174,6 +1174,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#settledAgentEnd: AgentEndEvent | undefined;
 	/** A run is open: from its first `agent_start` until its `agent_end` (see {@link isRunActive}). */
 	#runActive = false;
+	/** Retained after a client's prompt call returns while its run waits for outside work. */
+	#clientOwnedRun = false;
 	/** The open run's latest loop end; undefined while that loop is live or still routing. */
 	#loopEnd: LoopEnd | undefined;
 	/** Settles when the open run ends or is abandoned; see {@link waitForRunEnd}. */
@@ -1450,7 +1452,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * (`joinActiveTurn`), the dispatch-live park, and the defer-client drain
 	 * gate can key on real client ownership: a steer must never inject into a
 	 * run whose output the client has no prompt turn for (its events would be
-	 * dropped by the ACP host).
+	 * dropped by the ACP host). Once the prompt call returns, `#clientOwnedRun`
+	 * and the ACP bridge's live gate retain ownership until the run ends.
 	 */
 	#clientPromptInFlightCount = 0;
 	/** Dialogs open and waiting for the user's answer; while any is, the computer turn is ended. */
@@ -6336,6 +6339,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Close the open run; without a following `agent_end`, a transition or dispose abandons it. */
 	#closeRun(): void {
 		this.#runActive = false;
+		this.#clientOwnedRun = false;
 		this.#loopEnd = undefined;
 		this.#emitRunState("idle");
 		const ended = this.#runEnded;
@@ -10256,6 +10260,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					// client-owned run goes live (never on a busy-retry that
 					// waits behind an autonomous run) — wake steers parked on
 					// the dispatch so they admit into the run they targeted.
+					if (this.#clientPromptInFlightCount > 0) this.#clientOwnedRun = true;
 					this.#wakeDispatchLiveWaiters();
 					options?.followUpBatch?.release();
 				});
@@ -10574,6 +10579,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#scheduleIdleQueueDrain();
 	}
 
+	/** This run has a client prompt forwarding its events even after the prompt call returns. */
+	#hasOpenClientRun(): boolean {
+		return this.#runActive && this.#clientOwnedRun && this.#clientBridge?.deferAgentInitiatedTurns === false;
+	}
 	/**
 	 * Atomically enqueue a user-authored message onto the steering or follow-up
 	 * queue of the currently running turn. The primitive behind the ACP
@@ -10587,15 +10596,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * - a run that settled mid-admission classifies as `false` (not admitted)
 	 *   and the caller keeps its content — no invisible autonomous continuation
 	 *   can claim it;
-	 * - a run that stays live owns delivery: its agent loop polls the steering
-	 *   queue at tool-batch and model-call boundaries.
+	 * - a client-owned run that stays live owns delivery: its agent loop polls
+	 *   the steering queue at tool-batch and model-call boundaries; a paused
+	 *   run schedules a continuation under the same open prompt.
 	 *
 	 * Everything else that enqueues user input (`prompt()`, `steer()`,
 	 * `followUp()`, the idle paths) schedules the idle drain as before; only
-	 * this admission does not, because it only ever targets a live run.
+	 * this admission does not, because it targets a live client-owned run.
 	 *
-	 * @returns `true` when the message was admitted onto the live run's queue;
-	 *   `false` when no run was live at (or survived) admission.
+	 * @returns `true` when the message was admitted onto the client's run queue;
+	 *   `false` when no client-owned run was live at (or survived) admission.
 	 */
 	async joinActiveTurn(
 		text: string,
@@ -10624,8 +10634,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// has no client forwarder (`#handlePromptEvent` drops events with no
 		// promptTurn), so a steer admitted into one would answer invisibly
 		// and be reported `injected`. Refuse instead — the host keeps its
-		// content and resubmits through session/prompt.
-		if (this.#clientPromptInFlightCount === 0) return false;
+		// content and resubmits through session/prompt — unless this is the
+		// same client-owned run whose prompt call returned while the ACP
+		// promptTurn remains open.
+		if (this.#clientPromptInFlightCount === 0 && !this.#hasOpenClientRun()) return false;
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
@@ -10636,16 +10648,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// busy by interrupting the very turn the steer targeted. Hold it
 		// until the owning prompt goes live, then admit: the steer injects
 		// at the first batch boundary of the run it was meant for, and the
-		// ACP bridge answers `injected`.
-		if (!this.agent.state.isStreaming) {
+		// ACP bridge answers `injected`. An already client-owned run need
+		// not park: its paused loop can be continued immediately.
+		if (!this.agent.state.isStreaming && !this.#hasOpenClientRun()) {
 			for (;;) {
 				await this.#waitForPromptDispatchLive();
 				// The owning prompt settled without going live (setup
 				// failure, abort, disposal) or an abort took the window:
 				// keep the caller's content instead of injecting into a
 				// dead run.
-				if (this.#abortInProgress || this.#clientPromptInFlightCount === 0) return false;
-				if (this.agent.state.isStreaming) break;
+				if (this.#abortInProgress || (this.#clientPromptInFlightCount === 0 && !this.#hasOpenClientRun())) {
+					return false;
+				}
+				if (this.agent.state.isStreaming || this.#hasOpenClientRun()) break;
 				// The client prompt is still dispatching behind an
 				// autonomous run (e.g. an IRC wake its busy-retry is
 				// waiting out) that has since ended: keep parking — only
@@ -10732,7 +10747,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			 * `joinActiveTurn` admission: never schedule the idle queue drain —
 			 * the live run owns delivery (its loop polls the steering queue at
 			 * batch/model-call boundaries), and a message admitted while no run
-			 * streams must not auto-continue as an autonomous turn.
+			 * streams must not auto-continue as an autonomous turn. A paused
+			 * client-owned run schedules its own continuation instead.
 			 */
 			skipIdleDrain?: boolean;
 			/**
@@ -10792,7 +10808,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// between this check and the message landing on the queue.
 		if (
 			options?.requireActiveRun &&
-			(this.#abortInProgress || !this.isStreaming || this.#clientPromptInFlightCount === 0)
+			(this.#abortInProgress ||
+				(!this.#hasOpenClientRun() && (!this.isStreaming || this.#clientPromptInFlightCount === 0)))
 		) {
 			return false;
 		}
@@ -10826,8 +10843,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		options?.onPromptAdmitted?.();
 		// joinActiveTurn admission must never start an autonomous turn: the
 		// live run owns delivery, and an idle queue stays put until the host
-		// decides what to do with its content.
-		if (!options?.skipIdleDrain) {
+		// decides what to do with its content. A paused client-owned run resumes
+		// only while its ACP promptTurn still forwards events.
+		if (options?.requireActiveRun && this.#hasOpenClientRun() && !this.agent.state.isStreaming) {
+			this.#scheduleAgentContinue({
+				source: "client-paused-steer",
+				generation: this.#promptGeneration,
+				shouldContinue: () => this.#hasOpenClientRun() && this.agent.hasQueuedMessages(),
+			});
+		} else if (!options?.skipIdleDrain) {
 			this.#scheduleIdleQueueDrain();
 		}
 		return true;
