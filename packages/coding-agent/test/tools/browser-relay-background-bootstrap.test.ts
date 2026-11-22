@@ -146,10 +146,22 @@ it("reconnects a lost native port with backoff, reset by a link, and at once on 
 	expect(portsBeforeAlarm).toBe(7);
 	expect(linkRequests).toHaveLength(8);
 	for (const request of linkRequests) expect(request.first).toEqual({ t: "link", extensionId: EXTENSION_ID });
-	// Only exits that ended a link reach the panel; failed reconnects are already disconnected.
+	// Only exits that ended a link reach the panel; reasonless failed reconnects change nothing it shows.
 	const linked = { connected: true, extensionVersion: undefined };
 	const unlinked = { connected: false, extensionVersion: undefined };
 	expect(relayStatuses(panelReceived!)).toEqual([linked, unlinked, linked, unlinked]);
+});
+
+it("tells the panel why the browser refused the native host though no link ever opened, until a host links", () => {
+	const { panelReceived } = runProbe({ scenario: "refused" });
+	const refused = "Access to the native messaging host was disabled by the system administrator.";
+	expect(relayStatuses(panelReceived!)).toEqual([
+		{ connected: true },
+		{ connected: false },
+		// The repeated refusal is not news.
+		{ connected: false, hostError: refused },
+		{ connected: true },
+	]);
 });
 
 it("gives the panel the relay's own page target id and the tab's CSS viewport", () => {
