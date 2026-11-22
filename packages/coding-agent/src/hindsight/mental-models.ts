@@ -307,10 +307,19 @@ export function renderMentalModelsBlock(models: MentalModelSummary[], budgetChar
 	const innerBudget = Math.max(0, budgetChars - truncatedOverhead);
 	const headerCost = models.reduce((sum, m) => sum + sectionHeader(m).length, 0);
 	const separatorCost = SECTION_SEPARATOR.length * Math.max(0, models.length - 1);
-	const perModelBudget = Math.max(
-		120,
-		Math.floor((innerBudget - headerCost - separatorCost) / Math.max(1, models.length)),
-	);
+	// If every model's full body fits within the inner budget, don't divide
+	// space into equal shares at all: equal shares clip long entries even when
+	// shorter ones leave room unused (#19857). Only fall back to per-model
+	// splitting when the complete render would overflow.
+	const totalNeeded =
+		headerCost + separatorCost + models.reduce((sum, m) => sum + (m.content ?? "").trim().length, 0);
+	const perModelBudget =
+		totalNeeded <= innerBudget
+			? Number.MAX_SAFE_INTEGER
+			: Math.max(
+					120,
+					Math.floor((innerBudget - headerCost - separatorCost) / Math.max(1, models.length)),
+				);
 
 	const sections: string[] = [];
 	let consumed = 0;

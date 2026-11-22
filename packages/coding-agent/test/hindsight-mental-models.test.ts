@@ -258,6 +258,19 @@ describe("renderMentalModelsBlock", () => {
 		expect(block).toContain("[mental-model snapshot truncated at render budget]");
 	});
 
+	it("renders every entry in full when the complete block fits the budget (#19857)", () => {
+		const long = "- " + "word ".repeat(1800) + "END.";
+		const short = "- " + "word ".repeat(100) + "END.";
+		const models = [
+			{ id: "l", bank_id: "b", name: "Long", content: long },
+			{ id: "s", bank_id: "b", name: "Short", content: short },
+		];
+		const block = renderMentalModelsBlock(models, 16_000);
+		expect(block).toContain(long);
+		expect(block).toContain(short);
+		expect(block).not.toContain("[mental-model snapshot truncated at render budget]");
+	});
+
 	it("returns an empty string for an empty model list (callers gate on this)", () => {
 		expect(renderMentalModelsBlock([], 16_000)).toBe("");
 	});
