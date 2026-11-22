@@ -579,4 +579,48 @@ describe("EventController mixed assistant text/tool rendering", () => {
 			}
 		});
 	}
+
+	it("clears the cache baseline when auto compaction starts", async () => {
+		const { controller, ctx } = createFixture();
+		ctx.lastAssistantUsage = {
+			...zeroUsage(),
+			input: 1_000,
+			cacheRead: 830_000,
+			totalTokens: 831_000,
+		};
+
+		await controller.handleEvent({
+			type: "auto_compaction_start",
+			reason: "threshold",
+			action: "context-full",
+		} as Extract<AgentSessionEvent, { type: "auto_compaction_start" }>);
+
+		expect(ctx.lastAssistantUsage).toBeUndefined();
+	});
+
+	it("clears the cache baseline after the compaction rebuild reseeds it", async () => {
+		const { controller, ctx } = createFixture();
+		const preCompactionUsage: Usage = {
+			...zeroUsage(),
+			input: 1_000,
+			cacheRead: 830_000,
+			totalTokens: 831_000,
+		};
+		ctx.lastAssistantUsage = preCompactionUsage;
+		vi.spyOn(ctx, "rebuildChatFromMessages").mockImplementation(() => {
+			// Simulate the replay reseeding the live baseline from a kept
+			// pre-compaction assistant.
+			ctx.lastAssistantUsage = preCompactionUsage;
+		});
+
+		await controller.handleEvent({
+			type: "auto_compaction_end",
+			action: "context-full",
+			result: {} as never,
+			aborted: false,
+			willRetry: false,
+		} as Extract<AgentSessionEvent, { type: "auto_compaction_end" }>);
+
+		expect(ctx.lastAssistantUsage).toBeUndefined();
+	});
 });

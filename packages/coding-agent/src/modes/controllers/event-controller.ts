@@ -2662,6 +2662,11 @@ export class EventController {
 	async #handleAutoCompactionStart(
 		event: Extract<AgentSessionEvent, { type: "auto_compaction_start" }>,
 	): Promise<void> {
+		// Compaction rewrites the context into a new conversation prefix. Never
+		// compare the post-compaction request with the pre-compaction cache
+		// counters: that reports the whole old prefix as a cache miss.
+		this.ctx.lastAssistantUsage = undefined;
+
 		this.composerPrediction.cancel();
 		if (!this.#terminalProgressActive) {
 			this.#setTerminalProgress(true);
@@ -2709,6 +2714,10 @@ export class EventController {
 	}
 
 	async #handleAutoCompactionEnd(event: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>): Promise<void> {
+		// Also clear on end for an event that arrives after a resume or an aborted
+		// start. The next assistant turn begins a new prefix.
+		this.ctx.lastAssistantUsage = undefined;
+
 		if (this.#compactionOwnsProgress) {
 			this.#compactionOwnsProgress = false;
 			this.#setTerminalProgress(false);
@@ -2748,13 +2757,21 @@ export class EventController {
 				this.ctx.showWarning(event.errorMessage);
 			} else if (!event.skipped) {
 				this.ctx.lastAssistantUsage = undefined;
+
 				this.ctx.rebuildChatFromMessages();
+				this.ctx.lastAssistantUsage = undefined;
+
 				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender(true, { clearScrollback: true });
 				this.ctx.showStatus("Auto-shake completed");
 			}
 		} else if (event.result) {
 			this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
+			// The rebuild reseeds the live baseline from the last replayed assistant
+			// message, which can be the kept pre-compaction turn. Drop it again so
+			// the first post-compaction request starts a new prefix.
+			this.ctx.lastAssistantUsage = undefined;
+
 			this.ctx.statusLine.invalidate();
 			// rebuildChatFromMessages clears the container's emission ledger,
 			// so every block re-emits on this frame while the previous copy is
@@ -2771,7 +2788,12 @@ export class EventController {
 		} else if (isHandoffAction) {
 			this.ctx.clearTransientSessionUi();
 			this.ctx.lastAssistantUsage = undefined;
+
 			await this.ctx.renderInitialMessages();
+			// renderInitialMessages reseeds from replayed history; compaction and
+			// handoff both start a new prefix.
+			this.ctx.lastAssistantUsage = undefined;
+
 			this.ctx.statusLine.invalidate();
 			await this.ctx.reloadTodos();
 			this.ctx.ui.requestRender(true, { clearScrollback: true });
