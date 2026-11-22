@@ -180,8 +180,13 @@ pub fn wait_readable(
 }
 
 /// Waits until a read of the Windows pipe `file` would not block, checking
-/// `is_cancelled` every [`POLL_SLICE`]; fails with [`crate::cancelled`] once it
-/// is.
+/// `is_cancelled` at least every [`POLL_SLICE`]; fails with
+/// [`crate::cancelled`] once it is.
+///
+/// An empty pipe is re-peeked after a sleep that starts at 1 ms and doubles up
+/// to [`POLL_SLICE`]: a fixed 100 ms sleep let a writer fill the pipe buffer
+/// and block for most of each slice, capping a pipeline that drains faster
+/// than its producer writes at one buffer per slice.
 ///
 /// Anonymous and named Windows pipes have no pollable descriptor, so peeking is
 /// the only readiness probe. The caller classifies the handle once
@@ -197,11 +202,12 @@ pub fn wait_pipe_readable(file: &std::fs::File, is_cancelled: impl Fn() -> bool)
 
 	use windows_sys::Win32::System::Pipes::PeekNamedPipe;
 
+	let mut pause = Duration::from_millis(1);
 	loop {
 		if is_cancelled() {
 			return Err(crate::cancelled());
 		}
-		let mut available = 0;
+		let mut available = 0u32;
 		// SAFETY: `file` owns the handle for the whole call, and only
 		// `available` is written.
 		let ready = unsafe {
@@ -210,14 +216,15 @@ pub fn wait_pipe_readable(file: &std::fs::File, is_cancelled: impl Fn() -> bool)
 				std::ptr::null_mut(),
 				0,
 				std::ptr::null_mut(),
-				&mut available,
+				&raw mut available,
 				std::ptr::null_mut(),
 			)
 		};
 		if ready == 0 || available > 0 {
 			return Ok(());
 		}
-		std::thread::sleep(POLL_SLICE);
+		std::thread::sleep(pause);
+		pause = (pause * 2).min(POLL_SLICE);
 	}
 }
 
