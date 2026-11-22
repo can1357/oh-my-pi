@@ -325,9 +325,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	constructor(private readonly session: ToolSession) {
 		this.#endTurn = session.tuiTranscript === true;
 		this.description = prompt.render(waitDescription, {
-			endTurn: this.#endTurn,
 			subagent: (session.taskDepth ?? 0) > 0,
-			longest: formatDuration(WAIT_LADDER_MS[WAIT_TOP_RUNG]),
 		});
 	}
 

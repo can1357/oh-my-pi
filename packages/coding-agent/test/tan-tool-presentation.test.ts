@@ -49,6 +49,10 @@ describe("/tan prompt-cache tool presentation", () => {
 				...base,
 				settings,
 				hasUI: true,
+				// The interactive TUI: its `wait` description must equal the clone's. While
+				// the description carried the `endTurn` wording, this flag changed it and
+				// the clone's first request missed the parent's cache.
+				tuiTranscript: true,
 				sessionManager: SessionManager.inMemory(cwd),
 			});
 			try {

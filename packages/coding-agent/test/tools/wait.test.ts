@@ -199,7 +199,10 @@ describe("wait", () => {
 		const build = Promise.withResolvers<string>();
 		manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
 		const interactive = new WaitTool(session(manager, "Main", false, { tuiTranscript: true }));
-		expect(interactive.description).toContain("End your turn instead");
+		// The description stays independent of the session kind: a `/tan` clone re-renders
+		// its tools with `tuiTranscript` false, and any wording that follows it would break
+		// the parent's cached tool prefix. The result names the next step instead.
+		expect(interactive.description).not.toContain("End your turn");
 		// An early return could only end its turn: one more request than blocking until the result.
 		const first = await elapse(interactive, 240_000);
 		expect(report(first)).toContain("within 4m");
@@ -207,6 +210,7 @@ describe("wait", () => {
 		expect(notice(first)).toBeUndefined();
 		// Print mode exits and cancels the jobs when the turn ends; ACP holds results until the client's next prompt.
 		const headless = new WaitTool(session(manager));
+		expect(headless.description).toBe(interactive.description);
 		expect(headless.description).not.toContain("End your turn");
 		const headlessReport = report(await elapse(headless, 5_000));
 		expect(headlessReport).not.toContain("End your turn");
