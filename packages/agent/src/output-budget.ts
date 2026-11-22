@@ -133,7 +133,9 @@ function withMargin(localTokens: number): number {
 function countPromptTokens(context: Context, tokenizer: Tokenizer): number {
 	const { messages } = context;
 	const anchor = findRequestUsageAnchor(messages);
-	if (!anchor) return estimateContextPromptTokens(context, tokenizer);
+	if (!anchor) {
+		return withMargin(countContextTokens(context, tokenizer)) + messages.length * MESSAGE_FRAMING_TOKENS;
+	}
 	let tail = 0;
 	for (let index = anchor.index + 1; index < messages.length; index++) {
 		tail += tokenizer.countMessage(messages[index]);
@@ -152,11 +154,6 @@ function countContextTokens(context: Context, tokenizer: Tokenizer): number {
 	);
 }
 
-/** Conservative full-context prompt estimate for side requests without a trustworthy live-turn usage anchor. */
-export function estimateContextPromptTokens(context: Context, tokenizer: Tokenizer): number {
-	return withMargin(countContextTokens(context, tokenizer)) + context.messages.length * MESSAGE_FRAMING_TOKENS;
-}
-
 /**
  * Minimum output headroom (fitted floor plus per-request headway) the transport
  * requires to dispatch a generation request.
@@ -166,6 +163,12 @@ export const MIN_OUTPUT_HEADROOM_TOKENS = OUTPUT_FIT_HEADWAY_TOKENS + MIN_FITTED
 /**
  * Checks whether the prepared handoff context fits within the model's context window
  * leaving enough room for the transport's minimum output headroom.
+ *
+ * Counts the full context locally (provider usage anchors may describe another
+ * reader's compaction view) without the output fitter's tokenizer margin or
+ * per-message framing: those pad an output cap, but as a refusal gate they
+ * reject threshold-sized requests the provider would accept. Only requests
+ * known to be oversized are refused.
  */
 export function handoffContextFitsWindow(
 	context: Context,
@@ -174,7 +177,7 @@ export function handoffContextFitsWindow(
 ): { fits: boolean; estimatedTokens: number } {
 	const contextWindow = model.contextWindow;
 	if (contextWindow == null || contextWindow <= 0) return { fits: true, estimatedTokens: 0 };
-	const estimatedTokens = estimateContextPromptTokens(context, tokenizer);
+	const estimatedTokens = countContextTokens(context, tokenizer);
 	return {
 		fits: estimatedTokens + MIN_OUTPUT_HEADROOM_TOKENS <= contextWindow,
 		estimatedTokens,

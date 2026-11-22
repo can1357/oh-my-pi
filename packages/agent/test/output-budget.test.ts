@@ -283,6 +283,16 @@ describe("handoffContextFitsWindow", () => {
 		expect(result.fits).toBe(false);
 	});
 
+	test("allows a threshold-sized handoff spread across many messages", () => {
+		// 85% of a 200k window (the default auto-compaction threshold) over 1,200
+		// messages: the provider accepts it, so the gate must not pad it past the window.
+		const window200k: Model = { ...deepseek, contextWindow: 200_000, maxTokens: 32_000 };
+		const context: Context = { messages: Array.from({ length: 1_200 }, (_, i) => userOf(141, i)) };
+		const result = handoffContextFitsWindow(context, window200k, tokenizer);
+		expect(result.estimatedTokens).toBe(169_200);
+		expect(result.fits).toBe(true);
+	});
+
 	test("allows handoff when model declares no context window", () => {
 		const unwindowedModel: Model = { ...deepseek, contextWindow: 0 };
 		const context: Context = { messages: [userOf(500_000, 1)] };
