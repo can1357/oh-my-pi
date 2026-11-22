@@ -795,11 +795,11 @@ describe("Agent", () => {
 			transport: "pi-native",
 			baseUrl: "http://gateway.internal",
 		};
-		const fetchImpl: FetchImpl = (async () =>
+		const fetchImpl: FetchImpl = async () =>
 			new Response(JSON.stringify({ error: { type: "api_error", message: "Bad gateway response" } }), {
 				status: 502,
 				headers: { "Content-Type": "application/json" },
-			})) as FetchImpl;
+			});
 		const agent = new Agent({
 			initialState: { model: gatewayModel, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: (model, context, options) => streamSimple(model, context, { ...options, fetch: fetchImpl }),
