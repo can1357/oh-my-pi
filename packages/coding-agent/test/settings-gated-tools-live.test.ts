@@ -71,7 +71,7 @@ describe("settings-gated tools in a live session", () => {
 	/** Tool names on the system prompt's `# Tool Inventory` line. */
 	function promptToolNames(session: AgentSession): string[] {
 		const prompt = session.systemPrompt.join("\n");
-		return prompt.split("\n# Tool Inventory\n")[1]?.split("\n", 1)[0]?.split(", ") ?? [];
+		return prompt.split("\n# Tool Inventory\n")[1]?.split("\n").find(line => line.trim() !== "")?.split(", ") ?? [];
 	}
 
 	it("removes and restores find in the request tools and system prompt", async () => {
