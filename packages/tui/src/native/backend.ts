@@ -177,7 +177,12 @@ class NativeContext implements DescribeContext {
 		this.reduceMotion = hello.reduceMotion === true;
 		this.dark = hello.dark !== false;
 		this.hour12 = hello.hour12;
-		this.#kinds = new Set(hello.kinds);
+		const kinds = new Set(hello.kinds);
+		// `media` names files by path, which the terminal opens on its own machine. Tern exports
+		// `TERN_BLOB_DIR` (its blob cache) into its local panes only: an ssh session or container
+		// running omp elsewhere doesn't inherit it, and gets the kinds' fallbacks (image blobs).
+		if (!Bun.env.TERN_BLOB_DIR) kinds.delete("media");
+		this.#kinds = kinds;
 		this.#features = new Set(hello.features);
 	}
 
