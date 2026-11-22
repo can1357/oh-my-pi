@@ -9,6 +9,7 @@ import evalHelpersTopic from "../prompts/tools/eval-helpers.md" with { type: "te
 import evalJudgeTopic from "../prompts/tools/eval-judge.md" with { type: "text" };
 import type { PerCallModelAdvertisement } from "../task/model-approval";
 import { resolveSpawnPolicy } from "../task/spawn-policy";
+import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
 
 export interface EvalToolDescriptionOptions {
 	py?: boolean;
@@ -46,6 +47,8 @@ export interface EvalToolDescriptionOptions {
 	perCallModelAdvertisement?: PerCallModelAdvertisement;
 	/** Canonical and wire names currently accepted by the session tool bridge. */
 	toolNames?: readonly string[];
+	/** Session `tools.maxTimeout`; the advertised default deadline is the one it actually caps to. */
+	maxTimeout?: number;
 }
 
 export function evalTemplateContext(options: EvalToolDescriptionOptions) {
@@ -63,6 +66,10 @@ export function evalTemplateContext(options: EvalToolDescriptionOptions) {
 		autoProvision: options.autoProvision ?? true,
 		perCallModel: options.perCallModel ?? false,
 		perCallModelAdvertisement: options.perCallModelAdvertisement,
+		timeoutDefault: clampTimeout("eval", undefined, options.maxTimeout),
+		timeoutRaisable:
+			clampTimeout("eval", TOOL_TIMEOUTS.eval.max, options.maxTimeout) >
+			clampTimeout("eval", undefined, options.maxTimeout),
 	};
 }
 

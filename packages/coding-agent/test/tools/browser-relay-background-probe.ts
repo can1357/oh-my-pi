@@ -20,6 +20,32 @@ async function settle(): Promise<void> {
 	for (let tick = 0; tick < 50; tick++) await Promise.resolve();
 }
 
+/**
+ * Turn the event loop until `done` holds. Some answers wait on work off this thread: a panel `tabContext` builds the
+ * relay's page target id from a `crypto.subtle.digest` of this browser's identity, which completes on WebCrypto's
+ * work queue, so no fixed number of turns ({@link settle}) is enough on a loaded machine. Fails after 10s.
+ */
+async function settleUntil(done: () => boolean, what: string): Promise<void> {
+	const deadline = Date.now() + 10_000;
+	while (!done()) {
+		if (Date.now() > deadline) throw new Error(`the probe waited 10s for ${what}`);
+		await Bun.sleep(1);
+	}
+}
+
+/** Whether the panel port got the worker's response to request `id`. */
+function answered(port: FakePort, id: number): boolean {
+	return port.received.some(
+		frame =>
+			typeof frame === "object" &&
+			frame !== null &&
+			"kind" in frame &&
+			frame.kind === "response" &&
+			"id" in frame &&
+			frame.id === id,
+	);
+}
+
 function fire(name: string, ...args: unknown[]): void {
 	for (const listener of probe.listeners[name] ?? []) (listener as (...values: unknown[]) => unknown)(...args);
 }
@@ -72,7 +98,7 @@ switch (Bun.env.PROBE_SCENARIO) {
 		});
 		probe.zoom = 1.25;
 		port.deliver({ kind: "request", id: 3, request: { op: "tabContext", tabId: 5 } });
-		await settle();
+		await settleUntil(() => answered(port, 3), "the panel's tabContext answer");
 		// The relay goes away with the collabLink call unanswered.
 		host().hostSays({ t: "unlinked", reason: "omp relay went away" });
 		await settle();
@@ -113,15 +139,16 @@ switch (Bun.env.PROBE_SCENARIO) {
 		break;
 	}
 	case "reconnect": {
-		// Hold reconnect timers for the probe to fire; anything else runs as usual.
+		// Hold reconnect timers for the probe to fire. Anything else runs as usual but unref'd: the alarm's connect
+		// arms a 15s link deadline that never comes due here and would hold the probe open long after it reported.
 		const timers: Array<{ delay: number; run: () => void }> = [];
 		const realSetTimeout = globalThis.setTimeout;
-		const holdReconnects = (run: () => void, delay?: number): ReturnType<typeof setTimeout> => {
+		const holdReconnects = (run: () => void, delay?: number): NodeJS.Timeout => {
 			if (delay !== undefined && delay >= 1_000 && delay <= 10_000) {
 				timers.push({ delay, run });
-				return 0 as unknown as ReturnType<typeof setTimeout>;
+				return 0 as unknown as NodeJS.Timeout;
 			}
-			return realSetTimeout(run, delay);
+			return realSetTimeout(run, delay).unref();
 		};
 		globalThis.setTimeout = holdReconnects as unknown as typeof setTimeout;
 		const panel = new FakePort("omp-panel");

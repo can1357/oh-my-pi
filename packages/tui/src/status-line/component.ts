@@ -502,7 +502,9 @@ interface CachedStatusLine {
 	externalInputs: StatusLineExternalInputs;
 	/** `#statusLineClock` tick the content was drawn on. */
 	clockTick: number;
-	/** Wall-clock second of the last full build: every segment but the brand spinner changes only across seconds. */
+	/** Display bucket for the cumulative activity timer, which can advance within a spinner tick. */
+	timeSpentTick: number;
+	/** Wall-clock second of the last full build for the other time readouts. */
 	builtSecond: number;
 	/** The animating `pi` segment as drawn into `content` at `start`, when it appears there once and whole. */
 	brand: { ctx: SegmentContext; part: string; start: number } | undefined;
@@ -1141,10 +1143,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * session, including any in-flight window. Exposed for the segment
 	 * context builder; tests assert against this too.
 	 */
-	getActiveMs(): number {
+	getActiveMs(nowMs = Date.now()): number {
 		const meter = this.#meter();
 		if (meter.activeStartedAt === null) return meter.activeMs;
-		return meter.activeMs + Math.max(0, Date.now() - meter.activeStartedAt);
+		return meter.activeMs + Math.max(0, nowMs - meter.activeStartedAt);
 	}
 	/**
 	 * Elapsed ms of the currently-open active-processing window, or null when
@@ -2762,7 +2764,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			// The tree total describes the main session; a focused subagent's
 			// view falls back to its own completed task results.
 			subagentTreeCost: this.#focusedAgentId ? 0 : this.#subagentTreeCost,
-			activeMs: this.getActiveMs(),
+			activeMs: this.getActiveMs(nowMs),
 			turnElapsedMs,
 			awaitingAnswer: this.#awaitingAnswer,
 			now: new Date(nowMs),
@@ -3052,6 +3054,17 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const nowMs = Date.now();
 		this.#expireStaleVcsRender(nowMs);
 		const clockTick = this.#statusLineClock(nowMs, effectiveSettings);
+		const activeMs =
+			effectiveSettings.leftSegments.includes("time_spent") || effectiveSettings.rightSegments.includes("time_spent")
+				? this.getActiveMs(nowMs)
+				: 0;
+		// Match the visible timer: hidden below one second, then rounded tenths, then whole units.
+		const timeSpentTick =
+			activeMs < 1_000
+				? 0
+				: activeMs < 60_000
+					? Math.round(activeMs / 100) * 100
+					: Math.floor(activeMs / 1_000) * 1_000;
 
 		const cached = this.#statusLineRenderCache[layout];
 		if (
@@ -3059,6 +3072,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			cached.availableWidth === width &&
 			cached.renderRevision === this.#renderRevision &&
 			cached.inputRevision === this.#statusLineInputRevision &&
+			cached.timeSpentTick === timeSpentTick &&
 			cached.previewTitle === previewTitle &&
 			this.#sameStatusLineExternalInputs(cached.externalInputs, externalInputs)
 		) {
@@ -3085,6 +3099,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			previewTitle,
 			externalInputs,
 			clockTick,
+			timeSpentTick,
 			builtSecond: Math.floor(nowMs / 1_000),
 			brand:
 				brand.ctx && brand.part && start >= 0 && content.indexOf(brand.part, start + 1) < 0
@@ -3097,10 +3112,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 
 	/**
 	 * Follow a spinner-rate clock tick by redrawing only the brand segment.
-	 * Within one wall-clock second the spinner glyph is the only thing on the
-	 * line that moves (time readouts change across seconds, a brand fade
-	 * recolors every frame), so a brand part of unchanged width drops into
-	 * the cached line at the same place: the layout around it cannot move.
+	 * Once the activity timer's display bucket has been checked, other time
+	 * readouts change across seconds and a brand fade recolors on every frame.
+	 * A brand part of unchanged width drops into the cached layout in place.
 	 * Returns undefined when that does not hold; the caller rebuilds then.
 	 */
 	#followBrandSpinner(cached: CachedStatusLine, clockTick: number, nowMs: number): CachedStatusLine | undefined {
