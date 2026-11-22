@@ -1219,6 +1219,18 @@ export class TurnRecovery {
 			attribution: "agent",
 			timestamp: Date.now(),
 		});
+		logger.info("Empty-stop retry scheduled", {
+			attempt: this.#emptyStopRetryCount,
+			maxAttempts: EMPTY_STOP_MAX_RETRIES,
+			model: assistantMessage.model,
+			provider: assistantMessage.provider,
+			stopReason: assistantMessage.stopReason,
+			durationMs: assistantMessage.duration,
+			ttftMs: assistantMessage.ttft,
+			errorMessage: assistantMessage.errorMessage,
+			errorStatus: assistantMessage.errorStatus,
+			outputTokens: assistantMessage.usage.output,
+		});
 		this.#host.scheduleAgentContinue({
 			source: "empty-stop-retry",
 			generation: this.#host.promptGeneration(),
