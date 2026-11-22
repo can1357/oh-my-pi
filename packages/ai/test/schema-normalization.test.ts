@@ -661,6 +661,36 @@ describe("sanitizeSchemaForOpenAIResponses", () => {
 		});
 	});
 
+	it("strips regex patterns with an unescaped `[` inside a character class", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				nested: { type: "string", pattern: "^[^[\\]]*$" },
+				escaped: { type: "string", pattern: "^[^\\[\\]]*$" },
+				outside: { type: "string", pattern: "^\\[[a-z]+\\]$" },
+				lookaheadLiteral: { type: "string", pattern: "^[(?=]+$" },
+			},
+			patternProperties: {
+				"^[[]": { type: "string" },
+				"^\\[x\\]": { type: "number" },
+			},
+		};
+
+		expect(sanitizeSchemaForOpenAIResponses(schema)).toEqual({
+			type: "object",
+			properties: {
+				nested: { type: "string" },
+				escaped: { type: "string", pattern: "^[^\\[\\]]*$" },
+				outside: { type: "string", pattern: "^\\[[a-z]+\\]$" },
+				lookaheadLiteral: { type: "string", pattern: "^[(?=]+$" },
+			},
+			patternProperties: {
+				".*": { type: "string" },
+				"^\\[x\\]": { type: "number" },
+			},
+		});
+	});
+
 	it("preserves non-array oneOf payloads verbatim instead of dropping them", () => {
 		const malformed = { type: "object", oneOf: { type: "object" } } as unknown as Record<string, unknown>;
 
