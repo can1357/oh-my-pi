@@ -1215,6 +1215,38 @@ export const cfgDevAutoqaConsent = register({
 	default: "unset" as const,
 });
 
+export const cfgPowerShellEnabled = register({
+	id: "powershell.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "PowerShell",
+		description: "Enable the persistent PowerShell tool",
+	},
+});
+
+export const cfgPowerShellDefaultEdition = register({
+	id: "powershell.defaultEdition",
+	type: "enum",
+	values: ["pwsh", "powershell"] as const,
+	default: "pwsh" as const,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "Default PowerShell Edition",
+		description:
+			"Which PowerShell backend a powershell tool call uses when it doesn't request one explicitly: pwsh (PowerShell 7+) or powershell (Windows PowerShell 5.1, powershell.exe). Each edition gets its own pooled host per session, so both can run side by side",
+	},
+});
+
+/** Override for the `pwsh` edition's executable; defaults to `pwsh` on PATH. The `powershell` edition always resolves `powershell.exe` and has no separate override. */
+export const cfgPowerShellShellPath = register({ id: "powershell.shellPath", type: "string", default: undefined });
+export const cfgPowerShellOutputWidth = register({ id: "powershell.outputWidth", type: "number", default: 120 });
+export const cfgPowerShellHistoryDepth = register({ id: "powershell.historyDepth", type: "number", default: 20 });
+export const cfgPowerShellIdleTtlMs = register({ id: "powershell.idleTtlMs", type: "number", default: 600_000 });
+
 /** Settings read by `resolveBuiltinToolPlan` (`tools/index.ts`); a live session reconciles its built-ins when any changes. */
 export const cfgBuiltinToolGates = combine({
 	ask: cfgAskEnabled,
@@ -1235,6 +1267,7 @@ export const cfgBuiltinToolGates = combine({
 	grep: cfgGrepEnabled,
 	launch: cfgLaunchEnabled,
 	lsp: cfgLspEnabled,
+	powershell: cfgPowerShellEnabled,
 	security: cfgSecurityEnabled,
 	taskMaxRecursionDepth: cfgTaskMaxRecursionDepth,
 	todo: cfgTodoEnabled,

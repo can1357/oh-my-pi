@@ -33,7 +33,7 @@
 		},
 		"colors": {
 			"type": "object",
-			"description": "Theme color definitions (all required except thinkingMax, assistantMessageText, mdExtensionLink and subagent1-subagent6)",
+			"description": "Theme color definitions (all required except thinkingMax, assistantMessageText, mdExtensionLink, subagent1-subagent6, toolPowerShell and toolWindowsPowerShell)",
 			"required": [
 				"accent",
 				"border",
@@ -195,6 +195,14 @@
 				"toolOutput": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Tool output text"
+				},
+				"toolPowerShell": {
+					"$ref": "#/$defs/colorValue",
+					"description": "PowerShell (pwsh) tool icon and title (optional; omitted derives the PowerShell 7 logo color for the theme's surface brightness)"
+				},
+				"toolWindowsPowerShell": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Windows PowerShell tool icon and title (optional; omitted derives the Windows PowerShell logo color for the theme's surface brightness)"
 				},
 				"mdHeading": {
 					"$ref": "#/$defs/colorValue",

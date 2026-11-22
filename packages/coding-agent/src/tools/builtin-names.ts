@@ -3,6 +3,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 export const BUILTIN_TOOL_NAMES = [
 	"read",
 	"bash",
+	"powershell",
 	"edit",
 	"ast_grep",
 	"ast_edit",
@@ -51,6 +52,7 @@ export const BUILTIN_TOOL_HELP: Record<BuiltinToolName, BuiltinToolHelp> = {
 	edit: { summary: "Edit files in place", defaultState: "on" },
 	write: { summary: "Create or overwrite files", defaultState: "on" },
 	bash: { summary: "Execute shell commands", defaultState: "on" },
+	powershell: { summary: "Execute PowerShell commands in a persistent pooled host", defaultState: "off" },
 	grep: { summary: "Search file contents by regex", defaultState: "on" },
 	glob: { summary: "Find files by glob pattern", defaultState: "on" },
 	find: {

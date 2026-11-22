@@ -5,6 +5,7 @@
 ### Added
 
 - Added `AGENT_KILL_LABEL`, `InterruptReason` and `isInterruptReason` so hosts can tell a parent agent's kill apart from a user interrupt ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
+- `powershell` tool cards name their edition, "PowerShell" (`pwsh`) or "Windows PowerShell" (`powershell.exe`), with a distinct icon, and paint the icon and title in that edition's logo color; themes can override them with the new optional `toolPowerShell` / `toolWindowsPowerShell` colors, which otherwise follow the logos in a shade readable on the theme's background ([#13236](https://github.com/can1357/oh-my-pi/pull/13236) by [@HeyItsGilbert](https://github.com/HeyItsGilbert))
 
 ### Fixed
 
