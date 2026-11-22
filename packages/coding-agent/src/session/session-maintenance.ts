@@ -642,13 +642,14 @@ export class SessionMaintenance {
 	/** In-flight or armed background speculative compaction, if any. */
 	#speculation: SpeculationRun | undefined;
 	/**
-	 * {@link #nativeSpeculationKey} of the session and model whose native
-	 * speculative compaction failed for a reason a retry would hit again (an
-	 * exhausted output budget, a tool call, a refusal). Until a compaction
-	 * commits, speculation does not re-send the request and the threshold pass
-	 * falls back to the next method instead.
+	 * {@link #remoteSpeculationKey} of the session and model whose speculative
+	 * remote compaction failed for a reason a retry would hit again (a native
+	 * request's exhausted output budget, tool call or refusal, or a
+	 * `compaction.remoteEndpoint` rejection such as a 404 for a model it does
+	 * not serve). Until a compaction commits, speculation does not re-send the
+	 * request and the threshold pass falls back to the next method instead.
 	 */
-	#failedNativeSpeculation: string | undefined;
+	#failedRemoteSpeculation: string | undefined;
 	#skipPostTurnMaintenanceAssistantTimestamp: number | undefined;
 	/**
 	 * Consecutive no-progress `response.incomplete` (length-stop) recoveries in
@@ -2459,7 +2460,7 @@ export class SessionMaintenance {
 		const model = this.#model;
 		if (!model) return;
 		const method = resolveSpeculationMethod(model, settings, {
-			skipRemote: this.#nativeSpeculationFailed(model),
+			skipRemote: this.#remoteSpeculationFailed(model),
 		});
 		if (!method) return;
 		this.#startSpeculationRun(contextTokens, method);
@@ -2478,7 +2479,7 @@ export class SessionMaintenance {
 		};
 		const model = this.#model;
 		// Keyed now: the session can switch before the run settles.
-		const nativeKey = model && this.#nativeSpeculationKey(model);
+		const remoteKey = model && this.#remoteSpeculationKey(model);
 		this.#speculation = run;
 		run.promise = this.#runSpeculation(run, method, contextTokens).catch(error => {
 			logger.debug("Speculative compaction failed", {
@@ -2491,14 +2492,17 @@ export class SessionMaintenance {
 			// only moves this cycle to the next configured method. Errors with no
 			// HTTP status classify by message text, so an unrecognised transient
 			// failure costs the same single early fallback.
+			// Native failures arrive wrapped in NativeCompactionError. Endpoint failures
+			// arrive unwrapped.
 			if (
 				method === "remote" &&
 				model &&
 				!controller.signal.aborted &&
-				error instanceof NativeCompactionError &&
-				!AIError.retriable(AIError.classify(error.cause, model.api))
+				!AIError.retriable(
+					AIError.classify(error instanceof NativeCompactionError ? error.cause : error, model.api),
+				)
 			) {
-				this.#failedNativeSpeculation = nativeKey;
+				this.#failedRemoteSpeculation = remoteKey;
 			}
 		});
 		return run;
@@ -2523,7 +2527,7 @@ export class SessionMaintenance {
 		const method = resolveSpeculationMethod(
 			model,
 			{ ...settings, methodOrder },
-			{ skipRemote: this.#nativeSpeculationFailed(model) },
+			{ skipRemote: this.#remoteSpeculationFailed(model) },
 		);
 		return method === "soft" ? undefined : method;
 	}
@@ -2567,14 +2571,14 @@ export class SessionMaintenance {
 		);
 	}
 
-	/** Identity of `model`'s native speculation in the current session. */
-	#nativeSpeculationKey(model: Model): string {
+	/** Identity of `model`'s remote speculation in the current session. */
+	#remoteSpeculationKey(model: Model): string {
 		return `${this.#host.sessionManager.getSessionId()}/${model.provider}/${model.id}`;
 	}
 
-	/** Whether `model`'s native speculation already failed for good this cycle. */
-	#nativeSpeculationFailed(model: Model): boolean {
-		return this.#failedNativeSpeculation === this.#nativeSpeculationKey(model);
+	/** Whether `model`'s remote speculation already failed for good this cycle. */
+	#remoteSpeculationFailed(model: Model): boolean {
+		return this.#failedRemoteSpeculation === this.#remoteSpeculationKey(model);
 	}
 
 	/**
@@ -2605,7 +2609,7 @@ export class SessionMaintenance {
 		const model = this.#model;
 		if (!model) return false;
 		const method = resolveSpeculationMethod(model, settings, {
-			skipRemote: this.#nativeSpeculationFailed(model),
+			skipRemote: this.#remoteSpeculationFailed(model),
 		});
 		if (!method) return false;
 		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
@@ -2898,8 +2902,8 @@ export class SessionMaintenance {
 			},
 		);
 		this.#host.persistEvalStateContext();
-		// A committed compaction starts a new cycle; native compaction gets a fresh try.
-		this.#failedNativeSpeculation = undefined;
+		// A committed compaction starts a new cycle; remote compaction gets a fresh try.
+		this.#failedRemoteSpeculation = undefined;
 		const newEntries = this.#host.sessionManager.getEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.replaceMessagesFromSessionContext(sessionContext.messages);
@@ -5068,7 +5072,7 @@ export class SessionMaintenance {
 			},
 		);
 		this.#host.persistEvalStateContext();
-		this.#failedNativeSpeculation = undefined;
+		this.#failedRemoteSpeculation = undefined;
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.replaceMessagesFromSessionContext(sessionContext.messages);
 		this.#host.rebaseAfterCompaction();
@@ -5566,13 +5570,13 @@ export class SessionMaintenance {
 				)
 			)
 				continue;
-			// Re-sending a native request that just failed for good only delays the
+			// Re-sending a remote request that just failed for good only delays the
 			// fallback. Skip it while a later method can still run.
 			const liveModel = this.#model;
 			if (
 				candidate === "remote" &&
 				liveModel &&
-				this.#nativeSpeculationFailed(liveModel) &&
+				this.#remoteSpeculationFailed(liveModel) &&
 				methods
 					.slice(index + 1)
 					.some(next =>
@@ -5585,7 +5589,7 @@ export class SessionMaintenance {
 						),
 					)
 			) {
-				logger.debug("Skipping native compaction after a failed speculative attempt", {
+				logger.debug("Skipping remote compaction after a failed speculative attempt", {
 					model: `${liveModel.provider}/${liveModel.id}`,
 				});
 				continue;
