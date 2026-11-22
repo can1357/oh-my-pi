@@ -1297,36 +1297,44 @@ const streamOpenAIResponsesOnce = (
 					// tokens. An encrypted reasoning item with neither reasoning text
 					// nor reasoning tokens is not replayable progress and must not
 					// suppress the probe.
-					const hasVisibleOutput = output.content.some(block =>
-						block.type === "thinking" ? false : block.type === "text" ? block.text.trim().length > 0 : true,
-					);
-					const hasNonReasoningOutputItem = nativeOutputItems.some(
-						item => item.type !== "reasoning" && item.type !== "thinking",
-					);
-					const hasReasoningOutputItem = nativeOutputItems.some(
-						item => item.type === "reasoning" || item.type === "thinking",
-					);
+					// Gate on the cheap flags first so ordinary non-OpenRouter
+					// completions never run the output scans below.
 					if (
 						model.compat.isOpenRouterHost &&
 						output.stopReason === "stop" &&
-						!hasVisibleOutput &&
-						!hasNonReasoningOutputItem &&
-						(!hasReasoningOutputItem || (output.usage.reasoningTokens ?? 0) === 0) &&
 						!output.stopDetails &&
 						output.responseId
 					) {
-						const nativeError = await readOpenRouterGenerationError({
-							baseUrl: resolvedBaseUrl,
-							headers,
-							responseId: output.responseId,
-							outputTokens: output.usage.output,
-							reasoningTokens: output.usage.reasoningTokens,
-							fetch: options?.fetch,
-							signal: requestSignal,
-						});
-						if (abortTracker.wasCallerAbort()) throw new AIError.AbortError();
-						if (nativeError) {
-							throw new AIError.ProviderResponseError(nativeError, { provider: model.provider, kind: "output" });
+						const hasVisibleOutput = output.content.some(block =>
+							block.type === "thinking" ? false : block.type === "text" ? block.text.trim().length > 0 : true,
+						);
+						const hasNonReasoningOutputItem = nativeOutputItems.some(
+							item => item.type !== "reasoning" && item.type !== "thinking",
+						);
+						const hasReasoningOutputItem = nativeOutputItems.some(
+							item => item.type === "reasoning" || item.type === "thinking",
+						);
+						if (
+							!hasVisibleOutput &&
+							!hasNonReasoningOutputItem &&
+							(!hasReasoningOutputItem || (output.usage.reasoningTokens ?? 0) === 0)
+						) {
+							const nativeError = await readOpenRouterGenerationError({
+								baseUrl: resolvedBaseUrl,
+								headers,
+								responseId: output.responseId,
+								outputTokens: output.usage.output,
+								reasoningTokens: output.usage.reasoningTokens,
+								fetch: options?.fetch,
+								signal: requestSignal,
+							});
+							if (abortTracker.wasCallerAbort()) throw new AIError.AbortError();
+							if (nativeError) {
+								throw new AIError.ProviderResponseError(nativeError, {
+									provider: model.provider,
+									kind: "output",
+								});
+							}
 						}
 					}
 
