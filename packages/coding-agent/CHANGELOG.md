@@ -451,6 +451,9 @@
 - Fixed conflict-region resolution when a selected side is empty or shares edge lines with surrounding code.
 - MCP stdio server failures before a response now report the process exit code or terminating signal instead of only reporting closed stdout.
 - Fixed prewalk handoffs so model and reasoning-effort changes are preserved, and automatic handoffs return to the planning model when automatic prewalk is changed or disabled.
+### Fixed
+
+- Fixed the "agent turn ended with provider error" log omitting the provider request id; Anthropic refusals now log the `request-id` that support asks for ([#19383](https://github.com/can1357/oh-my-pi/pull/19383) by [@nnnnoel](https://github.com/nnnnoel))
 
 ## [18.20.3] - 2026-11-16
 
