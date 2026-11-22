@@ -655,6 +655,7 @@ export class VibeSessionRegistry {
 		id: string,
 		ownerId: string,
 		childSessionFile: string,
+		childStorage: SessionStorage,
 		expected?: AgentRef | null,
 		teardownDeadline?: number,
 	): Promise<void> {
@@ -687,6 +688,8 @@ export class VibeSessionRegistry {
 			session: null,
 			sessionFile: childSessionFile,
 			status: "aborted",
+			// A reopened worker carries it on, so a later kill writes its tombstone beside the transcript.
+			storage: childStorage,
 		});
 	}
 
@@ -748,7 +751,7 @@ export class VibeSessionRegistry {
 				requireAgentMatch: false,
 			});
 			if (!childSessionFile) continue;
-			await this.#markTerminalRef(id, scope.ownerId, childSessionFile);
+			await this.#markTerminalRef(id, scope.ownerId, childSessionFile, childStorage);
 			this.#records.delete(scopeKey(scope, id));
 		}
 
@@ -777,6 +780,8 @@ export class VibeSessionRegistry {
 					session: null,
 					sessionFile: childSessionFile,
 					status: "parked",
+					// A kill of the parked worker writes its tombstone beside the transcript this storage holds.
+					storage: childStorage,
 				});
 			}
 			this.#records.set(key, {
@@ -1254,7 +1259,14 @@ export class VibeSessionRegistry {
 		try {
 			const persisted = await SessionManager.peekSessionInit(record.childSessionFile, record.childStorage);
 			if (persisted?.init) {
-				await this.#markTerminalRef(record.id, record.ownerId, record.childSessionFile, expected, teardownDeadline);
+				await this.#markTerminalRef(
+					record.id,
+					record.ownerId,
+					record.childSessionFile,
+					record.childStorage,
+					expected,
+					teardownDeadline,
+				);
 			}
 		} catch (error) {
 			logger.warn("vibe: failed to retain terminal worker transcript", {

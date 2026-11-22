@@ -41,6 +41,8 @@ export interface AgentsProbe {
 	threadId(): Promise<string>;
 	/** Build a real session (mock model) and register it as `id` in the (remote) registry. */
 	open(id: string, options: { sessionFile?: string; gated?: boolean; monitored?: boolean }): Promise<string>;
+	/** As {@link open}, but through `registerIfAvailable(…, null)`, the call a spawn on a worker makes. */
+	openAvailable(id: string, options: { sessionFile?: string }): Promise<string>;
 	/** Run a prompt on the local session to completion. */
 	prompt(id: string, text: string): Promise<void>;
 	/** Emit a tool call on a specific session, even after another session takes its id. */
@@ -142,6 +144,16 @@ const probe: AgentsProbe = {
 				agent: { name: id, description: "test", systemPrompt: "test", source: "bundled" },
 			});
 		}
+		return session.instanceKey;
+	},
+	openAvailable: async (id, options) => {
+		const session = await makeSession(id, false);
+		const registry = AgentRegistry.global();
+		const ref = registry.registerIfAvailable(
+			{ id, displayName: id, kind: "sub", session, sessionFile: options.sessionFile ?? null, status: "idle" },
+			null,
+		);
+		if (!ref) throw new Error(`${id} is taken`);
 		return session.instanceKey;
 	},
 	prompt: async (id, text) => {
