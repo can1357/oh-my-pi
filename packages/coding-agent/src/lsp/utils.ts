@@ -2,6 +2,7 @@ export { truncate } from "@oh-my-pi/pi-utils";
 
 import * as fs from "node:fs/promises";
 import path from "node:path";
+import { PREVIEW_LIMITS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import { formatPathRelativeToCwd, resolveToCwd, specialFileKind } from "../tools/path-utils";
@@ -299,17 +300,31 @@ export function formatPosition(line: number, col: number): string {
 // WorkspaceEdit Formatting
 // =============================================================================
 
+const TEXT_EDIT_PREVIEW_LENGTH = 60;
+
 /**
- * Format a workspace edit as a summary of changes.
+ * Format a workspace edit with bounded text-edit details.
  */
 export function formatWorkspaceEdit(edit: WorkspaceEdit, cwd: string): string[] {
 	const results: string[] = [];
+	let textEditCount = 0;
+	let shownTextEdits = 0;
+
+	const addTextEdits = (uri: string, textEdits: TextEdit[]): void => {
+		const file = formatPathRelativeToCwd(uriToFile(uri), cwd);
+		results.push(`${file}: ${textEdits.length} edit${textEdits.length > 1 ? "s" : ""}`);
+		textEditCount += textEdits.length;
+		for (const textEdit of textEdits) {
+			if (shownTextEdits >= PREVIEW_LIMITS.COLLAPSED_ITEMS) continue;
+			results.push(`  ${formatTextEdit(textEdit)}`);
+			shownTextEdits++;
+		}
+	};
 
 	// Handle changes map (legacy format)
 	if (edit.changes) {
 		for (const [uri, textEdits] of Object.entries(edit.changes)) {
-			const file = formatPathRelativeToCwd(uriToFile(uri), cwd);
-			results.push(`${file}: ${textEdits.length} edit${textEdits.length > 1 ? "s" : ""}`);
+			addTextEdits(uri, textEdits);
 		}
 	}
 
@@ -317,8 +332,7 @@ export function formatWorkspaceEdit(edit: WorkspaceEdit, cwd: string): string[] 
 	if (edit.documentChanges) {
 		for (const change of edit.documentChanges) {
 			if ("edits" in change && change.textDocument) {
-				const file = formatPathRelativeToCwd(uriToFile(change.textDocument.uri), cwd);
-				results.push(`${file}: ${change.edits.length} edit${change.edits.length > 1 ? "s" : ""}`);
+				addTextEdits(change.textDocument.uri, change.edits);
 			} else if ("kind" in change) {
 				switch (change.kind) {
 					case "create":
@@ -337,18 +351,21 @@ export function formatWorkspaceEdit(edit: WorkspaceEdit, cwd: string): string[] 
 		}
 	}
 
+	if (shownTextEdits < textEditCount) {
+		results.push(
+			`INCOMPLETE preview: showing ${shownTextEdits}/${textEditCount} text edits; ${textEditCount - shownTextEdits} omitted`,
+		);
+	}
 	return results;
 }
 
 /**
  * Format a text edit as a preview.
  */
-export function formatTextEdit(edit: TextEdit, maxLength = 50): string {
+export function formatTextEdit(edit: TextEdit, maxLength = TEXT_EDIT_PREVIEW_LENGTH): string {
 	const range = `${edit.range.start.line + 1}:${edit.range.start.character + 1}`;
-	const preview =
-		edit.newText.length > maxLength
-			? `${edit.newText.slice(0, maxLength).replace(/\n/g, "\\n")}…`
-			: edit.newText.replace(/\n/g, "\\n");
+	const escapedText = edit.newText.replace(/\r/g, "\\r").replace(/\n/g, "\\n").replace(/\t/g, "\\t");
+	const preview = escapedText.length > maxLength ? `${escapedText.slice(0, maxLength)}…` : escapedText;
 	return `line ${range} ${navArrow()} "${preview}"`;
 }
 
