@@ -717,7 +717,7 @@ function invokedToolCommand(command: string, names: ReadonlySet<string>): string
 }
 
 /** Whether the first simple command of `command` is a session tool command. */
-function startsWithToolCommand(command: string, names: ReadonlySet<string>): boolean {
+export function startsWithToolCommand(command: string, names: ReadonlySet<string>): boolean {
 	const first = tokenizeShellSegments(command)[0]?.[0];
 	return first !== undefined && names.has(first);
 }

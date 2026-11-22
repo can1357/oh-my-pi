@@ -16,11 +16,13 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import { shellChangeSnapshots } from "../commit/selective/journal";
 import { executeBash } from "../exec/bash-executor";
 import { createToolCommandHandler, toolCommandNames } from "../exec/tool-command-host";
-import { cfgBashGitGuard } from "../exec/settings";
+import { cfgBashGitGuard, cfgBashInterceptorEnabled, cfgBashInterceptorPatterns } from "../exec/settings";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import { ovnfsCommand } from "../task/settings";
 import type { ToolSession } from "../tools";
+import { checkBashInterception } from "../tools/bash-interceptor";
+import { startsWithToolCommand } from "../tools/bash";
 import { resolveToCwd } from "../tools/path-utils";
 import { sessionShellSpeech } from "../tts/shell-speech";
 import type { JsStatusEvent } from "./js/shared/types";
@@ -67,6 +69,13 @@ export async function runEvalShell(args: unknown, options: EvalShellBridgeOption
 	let length = 0;
 	let truncated = false;
 	const names = toolCommandNames(session);
+	// Apply the same interception the `bash` tool runs before every command, so `sh()` cannot
+	// reach commands the interceptor denies: built-in rules plus `bashInterceptor.patterns`.
+	// A leading session tool command is that tool's own call and is never intercepted.
+	if (cfgBashInterceptorEnabled.get(session.settings) && !startsWithToolCommand(command, new Set(names))) {
+		const interception = checkBashInterception(command, names, cfgBashInterceptorPatterns.get(session.settings), command);
+		if (interception.block) throw new ToolError(interception.message ?? "Command blocked");
+	}
 	const toolContext = session.getToolContext?.();
 	const commands =
 		names.length === 0

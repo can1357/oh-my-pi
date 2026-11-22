@@ -231,3 +231,39 @@ describe.skipIf(process.platform === "win32")("tool commands in eval sh()", () =
 		expect(statuses).toContainEqual(expect.objectContaining({ op: "fake", mode: "execute", code: 0 }));
 	});
 });
+
+describe.skipIf(process.platform === "win32")("eval sh() interception", () => {
+	const denyCat = [{ pattern: "(^|[;&|]\\s*)cat\\b", tool: "fake", message: "cat is not allowed" }];
+
+	it("refuses an intercepted command with the interceptor's message", async () => {
+		const executed: unknown[] = [];
+		const session = bashSession([flagTool("fake", executed)], {
+			settings: Settings.isolated({ "bashInterceptor.enabled": true, "bashInterceptor.patterns": denyCat }),
+		});
+
+		await expect(runEvalShell({ command: "cat /dev/null; echo ran-cat" }, { session })).rejects.toThrow(
+			"cat is not allowed",
+		);
+	});
+
+	it("runs a session tool command the interceptor would otherwise match", async () => {
+		const executed: unknown[] = [];
+		const session = bashSession([flagTool("fake", executed)], {
+			settings: Settings.isolated({ "bashInterceptor.enabled": true, "bashInterceptor.patterns": denyCat }),
+		});
+
+		const result = await runEvalShell({ command: "fake --flag v" }, { session });
+		expect(result.exitCode).toBe(0);
+		expect(executed).toEqual([{ flag: "v" }]);
+	});
+
+	it("leaves commands unintercepted while the interceptor is disabled", async () => {
+		const session = bashSession([flagTool("fake")], {
+			settings: Settings.isolated({ "bashInterceptor.enabled": false, "bashInterceptor.patterns": denyCat }),
+		});
+
+		const result = await runEvalShell({ command: "cat /dev/null; echo ran-cat" }, { session });
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("ran-cat");
+	});
+});
