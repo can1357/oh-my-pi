@@ -7,9 +7,9 @@ A preselected radio of one group is submitted together with the user's pick in a
 
 ```html
 <fieldset>
-  <legend>Sharing</legend>
-  <label><input type="radio" name="sources" value="common" checked> Common location only</label>
-  <label><input type="radio" name="sources" value="personal"> Include personal installations</label>
+  <legend>Session store</legend>
+  <label><input type="radio" name="store" value="sqlite" checked> SQLite</label>
+  <label><input type="radio" name="store" value="redis"> Redis</label>
 </fieldset>
 ```
 
