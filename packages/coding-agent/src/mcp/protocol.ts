@@ -40,9 +40,8 @@ export const MCPErrorCode = {
 } as const;
 
 /**
- * Whether `code` is an error only a 2026-07-28 server emits. The era probe
- * treats these as proof of a modern server; any other failure of
- * `server/discover` means a handshake-era one.
+ * Whether `code` is specific to MCP 2026-07-28. The era probe also checks
+ * the advertised revisions on an unsupported-version error.
  */
 export function isModernErrorCode(code: unknown): boolean {
 	return (
