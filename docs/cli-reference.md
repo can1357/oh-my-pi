@@ -113,7 +113,7 @@ or `--fork`.
 | `--service-tier <tier>`      | OpenAI service tier: `none`, `auto`, `default`, `flex`, `scale`, `priority`, or `ultrafast` (`none` omits `service_tier`). |
 | `--no-judge`                 | Run judge-role calls only on the active model's provider; with no active model, nothing is judged.                         |
 | `--no-spotlight`             | Send no Spotlight requests, unless the active model's provider is `stencil` and `spotlight.url` is the default.           |
-| `--offline`                  | Both of the above, and keep omp's other auxiliary model calls (such as memories, titles, commit messages, subagents, fallbacks, web search, speech and image generation) on the active model's provider; a feature with no model there is skipped or fails. Not a network firewall: MCP servers, web fetches and other non-model traffic still go out. |
+| `--offline`                  | Both of the above, and keep memories, titles, commit messages, subagents, fallback models, web search, speech and image generation on the active model's provider; a feature with no model there is skipped or fails. Not a network firewall: MCP servers and web fetches still go out. |
 
 See [providers](./providers.md) and [models](./models.md) for model resolution.
 
