@@ -142,6 +142,12 @@ provider "openai" {
 	models "gpt-5.6-cyber" {
 		reasoning-disable-mode "none-effort"
 	}
+	// Exact deployment contract: the official Terra API supports reasoning
+	// `none`; disabling reasoning must not fall back to its lowest `low` tier.
+	// https://developers.openai.com/api/docs/models/gpt-6.1-terra
+	models "gpt-6.1-terra" {
+		reasoning-disable-mode "none-effort"
+	}
 	// The 5.6 generation reasons through the wire `none` tier when disabled,
 	// and every first-party GPT-5 Responses SKU takes the freeform apply_patch
 	// custom tool.

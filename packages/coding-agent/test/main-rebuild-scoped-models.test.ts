@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Api, AuthStorage, Model } from "@oh-my-pi/pi-ai";
+import { type Api, type AuthStorage, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { formatModelStringWithRouting, resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { cfgEnabledModels, cfgModelProviderOrder } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildSessionOptions,
@@ -13,6 +15,7 @@ import {
 	resolveScopedModels,
 	type ScopedModelSink,
 	toSessionScopedModels,
+	watchScopedModelSettings,
 } from "@oh-my-pi/pi-coding-agent/main";
 import { createSetupHost } from "@oh-my-pi/pi-coding-agent/modes/setup";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -58,18 +61,25 @@ class FakeRegistry {
 	async awaitBackgroundRefresh(): Promise<void> {
 		this.onRefresh?.();
 	}
+	reapplyModelPolicies(): Promise<void> {
+		return this.refresh();
+	}
 }
 
 class FakeSession implements ScopedModelSink {
 	isDisposed = false;
 	scopedModels: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	setCalls = 0;
+	disposers: Array<() => void> = [];
 	constructor(initial: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>) {
 		this.scopedModels = initial;
 	}
 	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>): void {
 		this.setCalls += 1;
 		this.scopedModels = scopedModels;
+	}
+	addDisposer(dispose: () => void): void {
+		this.disposers.push(dispose);
 	}
 }
 
@@ -80,6 +90,55 @@ async function startupScope(
 ): Promise<Array<{ model: Model; thinkingLevel?: ThinkingLevel }>> {
 	return toSessionScopedModels(await resolveModelScope(patterns, registry, undefined, settings), settings);
 }
+
+describe("watchScopedModelSettings", () => {
+	it("replaces the scope when an enabled model changes only its upstream pin", async () => {
+		const source = "openrouter/z-ai/glm-4.7@sambanova";
+		const target = "openrouter/z-ai/glm-4.7@cerebras";
+		const settings = Settings.isolated();
+		cfgEnabledModels.set(settings, [source]);
+		const bundled = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!bundled) throw new Error("Expected bundled OpenRouter model");
+		const registry = new FakeRegistry([bundled]);
+		const session = new FakeSession(await startupScope([source], registry, settings));
+		expect(session.scopedModels.map(entry => formatModelStringWithRouting(entry.model))).toEqual([source]);
+
+		watchScopedModelSettings(session, parseArgs([]), registry, settings);
+		try {
+			cfgEnabledModels.set(settings, [target]);
+			const { promise, resolve } = Promise.withResolvers<void>();
+			setImmediate(resolve);
+			await promise;
+
+			expect(session.setCalls).toBe(1);
+			expect(session.scopedModels.map(entry => formatModelStringWithRouting(entry.model))).toEqual([target]);
+		} finally {
+			for (const dispose of session.disposers) dispose();
+		}
+	});
+
+	it("updates the cycling scope when provider preference changes an enabled model", async () => {
+		const id = "anthropic/claude-preset-fixture";
+		const patterns = [id];
+		const settings = Settings.isolated({ enabledModels: patterns, modelProviderOrder: ["openrouter"] });
+		const registry = new FakeRegistry(
+			["openrouter", "vercel-ai-gateway"].map(provider => ({ ...model(id), provider })),
+		);
+		const session = new FakeSession(await startupScope(patterns, registry, settings));
+		expect(session.scopedModels.map(entry => entry.model.provider)).toEqual(["openrouter"]);
+
+		watchScopedModelSettings(session, parseArgs([]), registry, settings);
+		try {
+			cfgModelProviderOrder.override(settings, ["vercel-ai-gateway"]);
+			const { promise, resolve } = Promise.withResolvers<void>();
+			setImmediate(resolve);
+			await promise;
+			expect(session.scopedModels.map(entry => entry.model.provider)).toEqual(["vercel-ai-gateway"]);
+		} finally {
+			for (const dispose of session.disposers) dispose();
+		}
+	});
+});
 
 describe("rebuildScopedModelsAfterDiscovery", () => {
 	it("adds an enabledModels model that only materializes after background discovery", async () => {
@@ -260,6 +319,92 @@ describe("buildSessionOptions --models scope selection", () => {
 		expect(options.model).toBeUndefined();
 		expect(options.modelPattern).toEqual(["extprov/model-x", "extprov/model-y"]);
 		expect(options.scopedModels).toBeUndefined();
+	});
+
+	it("seeds the startup thinking level from the scope entry the session starts on", async () => {
+		const parsed = parseArgs(["--models", "prov/a:low,prov/b:high"]);
+		const settings = Settings.isolated({ modelRoles: { default: "prov/b" } });
+		const scoped = await resolveModelScope(
+			["prov/a:low", "prov/b:high"],
+			{ getAvailable: () => [model("a"), model("b")] },
+			undefined,
+		);
+
+		const options = await buildSessionOptions(parsed, scoped, SessionManager.inMemory(), registry(), settings);
+
+		expect(options.model?.id).toBe("b");
+		expect(options.thinkingLevel).toBe(Effort.High);
+	});
+
+	it("keeps the --model thinking level when that model starts outside the scope", async () => {
+		const parsed = parseArgs([
+			"--model",
+			"anthropic/claude-opus-4-5:medium",
+			"--models",
+			"anthropic/claude-sonnet-4-5:low",
+		]);
+		const scoped = await resolveModelScope(
+			["anthropic/claude-sonnet-4-5:low"],
+			{ getAvailable: () => [getBundledModel("anthropic", "claude-sonnet-4-5")] },
+			undefined,
+		);
+
+		const options = await buildSessionOptions(
+			parsed,
+			scoped,
+			SessionManager.inMemory(),
+			registry(),
+			Settings.isolated(),
+		);
+
+		expect(options.model?.id).toBe("claude-opus-4-5");
+		expect(options.thinkingLevel).toBe(Effort.Medium);
+	});
+
+	it("keeps the --model thinking level over the scope entry for the same model", async () => {
+		const parsed = parseArgs([
+			"--model",
+			"anthropic/claude-opus-4-5:medium",
+			"--models",
+			"anthropic/claude-sonnet-4-5:low,anthropic/claude-opus-4-5:high",
+		]);
+		const scoped = await resolveModelScope(
+			["anthropic/claude-sonnet-4-5:low", "anthropic/claude-opus-4-5:high"],
+			{
+				getAvailable: () => [
+					getBundledModel("anthropic", "claude-sonnet-4-5"),
+					getBundledModel("anthropic", "claude-opus-4-5"),
+				],
+			},
+			undefined,
+		);
+
+		const options = await buildSessionOptions(
+			parsed,
+			scoped,
+			SessionManager.inMemory(),
+			registry(),
+			Settings.isolated(),
+		);
+
+		expect(options.model?.id).toBe("claude-opus-4-5");
+		expect(options.thinkingLevel).toBe(Effort.Medium);
+	});
+
+	it("starts on the remembered free variant and its pin when --models also allows the paid model", async () => {
+		const paid = "openrouter/qwen/qwen3-coder";
+		const saved = `${paid}:free@cerebras`;
+		const parsed = parseArgs(["--models", `${paid},${paid}:free`]);
+		const settings = Settings.isolated({ modelRoles: { default: saved } });
+		const modelRegistry = registry();
+		authStorage.keys.setRuntime("openrouter", "test-key");
+		try {
+			const scoped = await resolveScopedModels(parsed, modelRegistry, settings);
+			const options = await buildSessionOptions(parsed, scoped, SessionManager.inMemory(), modelRegistry, settings);
+			expect(options.model && formatModelStringWithRouting(options.model)).toBe(saved);
+		} finally {
+			authStorage.keys.removeRuntime("openrouter");
+		}
 	});
 
 	it("pins the first scoped model and sets no deferred pattern when the scope resolved", async () => {

@@ -30,8 +30,8 @@ Control the host desktop from JavaScript or Python Eval with the global `compute
   Use it when you need both visual and semantic context.
 - An `ax()` line is `- role "label" [ref=eN]: "value"` plus states:
   - `(disabled)`, `(focused)` (the app's keyboard focus)
+  - on macOS and Linux, `(selected)`
   - on macOS:
-    - `(selected)`
     - `(settable)` (a date `setValue` writes)
     - `(readonly)` (a web text field the page declares read-only; typing into it is expected to change nothing)
     - `actions=…` listing what the element offers beyond its role's own press (`perform("open")`);
