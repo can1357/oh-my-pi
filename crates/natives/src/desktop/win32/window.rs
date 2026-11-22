@@ -806,6 +806,9 @@ pub(super) fn click_button(hwnd: HWND, top: HWND) -> CoreResult<()> {
 			top.expose_provenance()
 		)));
 	}
+	// The point past which a fenced AX request reports `AxUnconfirmed` rather
+	// than `Timeout` if its reply wait ends: from here the click may land.
+	control::dispatching()?;
 	// A click that may have landed is reported as `InputFailed` with wording
 	// that says so, not `AxUnconfirmed`: naming its target would query the same
 	// possibly blocked app again.
