@@ -1198,6 +1198,12 @@ function withoutReasoning(spec: ModelSpec<Api>, isAnthropic: boolean): ModelSpec
 	} as ModelSpec<Api>;
 }
 
+/** Native catalogs mark unlisted rows `hide` or `hidden`, in any case. */
+function isHiddenVisibility(value: unknown): boolean {
+	const visibility = typeof value === "string" ? value.trim().toLowerCase() : "";
+	return visibility === "hide" || visibility === "hidden";
+}
+
 export async function discoverOpenAIModelsList(
 	providerConfig: DiscoveryProviderConfig,
 	ctx: DiscoveryContext,
@@ -1212,7 +1218,7 @@ export async function discoverOpenAIModelsList(
 	const baseUrl = injectV1
 		? normalizeOpenAIModelsListBaseUrl(providerConfig.baseUrl)
 		: normalizeBareDiscoveryBaseUrl(providerConfig.baseUrl);
-	const modelsUrl = appendModelsPath(baseUrl);
+	const modelsUrl = providerConfig.discovery.modelsUrl ?? appendModelsPath(baseUrl);
 
 	const baseHeaders: Record<string, string> = { ...providerConfig.headers };
 	// LM Studio is a desktop server reached over loopback, so an unanswered
@@ -1243,6 +1249,16 @@ export async function discoverOpenAIModelsList(
 					throw new DiscoveryHttpError(res.status, modelsUrl);
 				}
 				return (await res.json()) as {
+					models?: Array<{
+						slug?: string;
+						display_name?: string;
+						context_window?: number;
+						visibility?: string;
+						supported_in_api?: boolean;
+						supported_reasoning_levels?: unknown;
+						default_reasoning_level?: unknown;
+						input_modalities?: unknown;
+					}>;
 					data?: Array<{
 						id?: string;
 						max_model_len?: unknown;
@@ -1276,7 +1292,15 @@ export async function discoverOpenAIModelsList(
 	const [payload, nativeMetadata] = apiKey
 		? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
 		: await attempt(baseHeaders);
-	const models = payload.data ?? [];
+	const models: NonNullable<typeof payload.data> =
+		payload.data ??
+		(payload.models ?? [])
+			.filter(
+				item =>
+					item.supported_in_api !== false &&
+					(!isHiddenVisibility(item.visibility) || providerConfig.discovery.includeHidden === true),
+			)
+			.map(item => ({ ...item, id: item.slug, metadata: item }));
 	const references = getBundledModelReferenceIndex();
 	const specs: ModelSpec<Api>[] = [];
 	for (const item of models) {

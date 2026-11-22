@@ -378,6 +378,10 @@ export const getModelsConfigSchemaBundle = once(() => {
 		 * returns a different, smaller model list.
 		 */
 		"injectV1?": "boolean",
+		/** Alternate model catalog URL; inference continues to use baseUrl. */
+		"modelsUrl?": "string",
+		/** Include API-supported native catalog entries hidden from its default picker. */
+		"includeHidden?": "boolean",
 		/**
 		 * Defaults to `true`. Set `false` to ignore the reasoning ladder a
 		 * `/v1/models` row advertises and build each model's thinking surface from
@@ -392,6 +396,9 @@ export const getModelsConfigSchemaBundle = once(() => {
 		 */
 		"advertisedReasoning?": "boolean",
 	}).narrow((value, ctx) => {
+		if ((value.modelsUrl !== undefined || value.includeHidden !== undefined) && value.type !== "openai-models-list") {
+			return ctx.mustBe("modelsUrl and includeHidden only on openai-models-list discovery");
+		}
 		if (value.injectV1 !== undefined && value.type !== "openai-models-list") {
 			return ctx.mustBe("injectV1 only on openai-models-list discovery");
 		}

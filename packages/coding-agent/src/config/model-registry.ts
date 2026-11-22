@@ -2787,9 +2787,13 @@ export class ModelRegistry {
 			// `injectV1: false` additionally splits off its own namespace: rows
 			// cached from the `/v1`-injected URL can hold a different (smaller)
 			// model set and must never satisfy a bare provider's cache read.
+			const catalogSuffix =
+				providerConfig.discovery.modelsUrl || providerConfig.discovery.includeHidden
+					? `:catalog:${JSON.stringify([providerConfig.discovery.modelsUrl ?? null, providerConfig.discovery.includeHidden === true])}`
+					: "";
 			return providerConfig.discovery.injectV1 === false
-				? `${providerConfig.provider}:openai-models-list-bare-${this.advertisedReasoningCacheSuffix(providerConfig)}`
-				: `${providerConfig.provider}:openai-models-list-${this.advertisedReasoningCacheSuffix(providerConfig)}`;
+				? `${providerConfig.provider}:openai-models-list-bare-${this.advertisedReasoningCacheSuffix(providerConfig)}${catalogSuffix}`
+				: `${providerConfig.provider}:openai-models-list-${this.advertisedReasoningCacheSuffix(providerConfig)}${catalogSuffix}`;
 		}
 		if (providerConfig.discovery.type === "proxy") {
 			// proxy-v2 invalidates rows cached before a proxy row's advertised
