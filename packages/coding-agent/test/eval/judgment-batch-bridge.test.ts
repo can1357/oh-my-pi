@@ -768,7 +768,7 @@ await Bun.write(${JSON.stringify(resultPath)}, JSON.stringify({ exitCode: one.ex
 process.exit(0);
 `,
 	);
-	const child = await $`bun ${scriptPath}`.cwd(repoRoot).quiet().nothrow();
+	const child = await $`${process.execPath} ${scriptPath}`.cwd(repoRoot).quiet().nothrow();
 	const stdout = child.stdout.toString();
 	const stderr = child.stderr.toString();
 	if (child.exitCode !== 0)
