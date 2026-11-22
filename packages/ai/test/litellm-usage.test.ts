@@ -1,7 +1,10 @@
+import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import type { UsageFetchParams, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { litellmUsageProvider } from "@oh-my-pi/pi-ai/usage/litellm";
+import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
 import { withEnv } from "./helpers";
 
 type Routes = Record<string, Response | undefined>;
@@ -136,5 +139,122 @@ describe("litellmUsageProvider", () => {
 			const builtIn = await probe("jwt-token", routes, { provider: "litellm", baseUrl: undefined });
 			expect(builtIn.report?.limits.map(limit => limit.id)).toEqual(["litellm:user:budget"]);
 		});
+	});
+});
+
+describe("LiteLLM budget cooldown", () => {
+	async function rotate(keyInfo: object, userInfo?: object, keyInfoBeforeFailure?: object) {
+		const provider = "litellm";
+		const baseUrl = "https://gw.example/team/v1";
+		const apiKey = "sk-test";
+		let currentKeyInfo = keyInfoBeforeFailure ?? keyInfo;
+		const usageFetch = Object.assign(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				if (new Headers(init?.headers).get("authorization") !== `Bearer ${apiKey}`) {
+					return new Response(null, { status: 401 });
+				}
+				if (String(input) === KEY_INFO) {
+					return Response.json({ info: currentKeyInfo });
+				}
+				if (String(input) === USER_INFO && userInfo) {
+					return Response.json(userInfo);
+				}
+				return new Response(null, { status: 403 });
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const storage = new AuthStorage(store, { usageFetch });
+		try {
+			storage.usage.replaceConfiguredProviders(new Map([[provider, litellmUsageProvider]]));
+			const credential = { type: "api_key", source: "login", key: apiKey } as const;
+			if (keyInfoBeforeFailure) {
+				await storage.credentials.set(provider, [credential, { ...credential, key: "sk-sibling" }]);
+				expect(await storage.keys.get(provider, undefined, { baseUrl })).toBe(apiKey);
+				currentKeyInfo = keyInfo;
+			} else {
+				await storage.credentials.set(provider, credential);
+			}
+			const error = await captureOpenAIHttpError(
+				Response.json({ error: { message: "Budget Exceeded", type: "budget_exceeded" } }, { status: 422 }),
+			);
+			const before = Date.now();
+			await storage.limits.rotate(provider, undefined, { apiKey, baseUrl, error });
+			const rows = store.listAuthCredentials(provider);
+			const [block] = store.listCredentialBlocks(rows.map(row => row.id));
+			return { blockedUntil: block?.blockedUntilMs, before, after: Date.now() };
+		} finally {
+			storage.close();
+		}
+	}
+
+	it("blocks until the later reset when both the key and user budgets are exhausted", async () => {
+		const latestReset = Date.now() + 3 * 60 * 60_000;
+		const { blockedUntil } = await rotate(
+			{
+				spend: 2,
+				max_budget: 1,
+				budget_duration: "3h",
+				budget_reset_at: new Date(latestReset).toISOString(),
+			},
+			{
+				spend: 2,
+				max_budget: 1,
+				budget_duration: "2h",
+				budget_reset_at: new Date(latestReset - 60 * 60_000).toISOString(),
+			},
+		);
+		expect(blockedUntil).toBe(latestReset);
+	});
+
+	it("uses the user budget reset when the key budget has headroom", async () => {
+		const resetAt = Date.now() + 120_000;
+		const { blockedUntil } = await rotate(
+			{ spend: 0, max_budget: 1 },
+			{ spend: 2, max_budget: 1, budget_duration: "1h", budget_reset_at: new Date(resetAt).toISOString() },
+		);
+		expect(blockedUntil).toBe(resetAt);
+	});
+
+	it("refreshes the failed key's usage after selection cached a budget with headroom", async () => {
+		const resetAt = Date.now() + 3 * 60 * 60_000;
+		const budget = { max_budget: 1, budget_duration: "3h", budget_reset_at: new Date(resetAt).toISOString() };
+		const { blockedUntil } = await rotate({ ...budget, spend: 2 }, undefined, { ...budget, spend: 0 });
+		expect(blockedUntil).toBe(resetAt);
+	});
+
+	it("excludes the personal user budget when selecting or cooling down a team key", async () => {
+		const keyReset = Date.now() + 120_000;
+		const keyBudget = {
+			team_id: "team-1",
+			max_budget: 1,
+			budget_duration: "3h",
+			budget_reset_at: new Date(keyReset).toISOString(),
+		};
+		const userBudget = {
+			spend: 2,
+			max_budget: 1,
+			budget_duration: "1d",
+			budget_reset_at: new Date(keyReset + 3_600_000).toISOString(),
+		};
+		const { blockedUntil } = await rotate({ ...keyBudget, spend: 2 }, userBudget, { ...keyBudget, spend: 0 });
+		expect(blockedUntil).toBe(keyReset);
+	});
+
+	it("uses a known reset earlier than the fallback cooldown", async () => {
+		const resetAt = Date.now() + 12_000;
+		const { blockedUntil } = await rotate({
+			spend: 2,
+			max_budget: 1,
+			budget_duration: "30s",
+			budget_reset_at: new Date(resetAt).toISOString(),
+		});
+		expect(blockedUntil).toBe(resetAt);
+	});
+
+	it("falls back to a 60-second cooldown without a future reset", async () => {
+		const { blockedUntil, before, after } = await rotate({ spend: 2, max_budget: 1 });
+		expect(blockedUntil).toBeGreaterThanOrEqual(before + 60_000);
+		expect(blockedUntil).toBeLessThanOrEqual(after + 60_000);
 	});
 });

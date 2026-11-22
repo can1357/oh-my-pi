@@ -3,7 +3,14 @@ import { normalizeLiteLLMManagementBaseUrl } from "@oh-my-pi/pi-catalog/provider
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import { ProviderHttpError } from "../error";
 import type { Provider } from "../types";
-import type { UsageFetchContext, UsageFetchParams, UsageLimit, UsageProvider, UsageReport } from "../usage";
+import type {
+	CredentialRankingStrategy,
+	UsageFetchContext,
+	UsageFetchParams,
+	UsageLimit,
+	UsageProvider,
+	UsageReport,
+} from "../usage";
 import { buildUsageAmount, parseIsoTimestamp, usageStatus } from "./shared";
 
 /** LiteLLM budget durations (`30s`, `7d`, `1mo`); other values are not trusted as display labels. */
@@ -112,11 +119,17 @@ async function fetchLiteLLMUsage(params: UsageFetchParams, ctx: UsageFetchContex
 
 	const accountId = [userInfo?.user_id, keyInfo?.user_id].find(id => typeof id === "string" && id.length > 0);
 	const email = typeof userInfo?.user_email === "string" ? userInfo.user_email : undefined;
+	const teamId = typeof keyInfo?.team_id === "string" ? keyInfo.team_id : undefined;
 	return {
 		provider: params.provider,
 		fetchedAt: Date.now(),
 		limits,
-		metadata: { endpoint: baseUrl, ...(accountId ? { accountId } : {}), ...(email ? { email } : {}) },
+		metadata: {
+			endpoint: baseUrl,
+			...(accountId ? { accountId } : {}),
+			...(email ? { email } : {}),
+			...(teamId ? { teamId } : {}),
+		},
 	};
 }
 
@@ -129,4 +142,20 @@ export const litellmUsageProvider: UsageProvider = {
 	id: "litellm",
 	usesRequestKey: true,
 	fetchUsage: fetchLiteLLMUsage,
+};
+
+export const litellmRankingStrategy: CredentialRankingStrategy = {
+	// Check all applicable budgets without ranking keys by their remaining spend.
+	findWindowLimits: () => ({}),
+	windowDefaults: { primaryMs: 0, secondaryMs: 0 },
+	scopeLimits(report) {
+		const now = Date.now();
+		return report.limits.filter(limit => {
+			// LiteLLM excludes team keys from the personal user budget by default.
+			if (report.metadata?.teamId && limit.id === `${report.provider}:user:budget`) return false;
+			// A snapshot from before a reset describes the previous budget window.
+			const resetAt = limit.window?.resetsAt;
+			return resetAt === undefined || resetAt > now || report.fetchedAt >= resetAt;
+		});
+	},
 };

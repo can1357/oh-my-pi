@@ -796,15 +796,31 @@ export class UsageService implements UsageApi {
 				return report;
 			}
 		}
+		const request = await this.#reportRequest(provider, credential, options?.baseUrl);
+		return request
+			? this.#fetchUsageCached(request, { timeoutMs: options?.timeoutMs ?? this.requestTimeoutMs })
+			: null;
+	}
+
+	/** Recheck a pre-failure report without bypassing a store's authoritative probe. */
+	async probeReport(provider: Provider, credential: AuthCredential, baseUrl?: string): Promise<UsageReport | null> {
+		if (credential.type === "oauth" && this.#deps.store.getUsageReport) return null;
+		const request = await this.#reportRequest(provider, credential, baseUrl);
+		return request ? this.#fetchUsageUncached(request, this.requestTimeoutMs) : null;
+	}
+
+	async #reportRequest(
+		provider: Provider,
+		credential: AuthCredential,
+		baseUrl?: string,
+	): Promise<UsageRequestDescriptor | null> {
 		const usageCredential = buildUsageCredential(credential);
 		if (credential.type === "api_key") {
-			const resolvedApiKey = await this.#deps.overrides.resolve(credential.key);
-			if (!resolvedApiKey) return null;
-			usageCredential.apiKey = resolvedApiKey;
+			const apiKey = await this.#deps.overrides.resolve(credential.key);
+			if (!apiKey) return null;
+			usageCredential.apiKey = apiKey;
 		}
-		return this.#fetchUsageCached(usageRequest(provider, usageCredential, options?.baseUrl), {
-			timeoutMs: options?.timeoutMs ?? this.requestTimeoutMs,
-		});
+		return usageRequest(provider, usageCredential, baseUrl);
 	}
 
 	/**

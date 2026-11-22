@@ -310,6 +310,7 @@ export class RateLimits implements LimitsApi {
 		// Heuristic/default fallbacks are guesses; provider-stated hints and
 		// report-derived extensions are timed.
 		let providerTimed = options?.providerTimed === true;
+		const hasExplicitCooldown = options?.providerTimed ?? options?.retryAfterMs !== undefined;
 
 		// Epoch ms of the usage-report-derived reset. Authoritative only when
 		// EVERY exhausted window carries a future reset: a permanent cap
@@ -325,20 +326,32 @@ export class RateLimits implements LimitsApi {
 				"usage fetch aborted",
 			);
 			if (report) {
-				const scopedLimits = scopedUsageLimits(routing.strategy, report, routing.rankingContext);
+				let scopedLimits = scopedUsageLimits(routing.strategy, report, routing.rankingContext);
+				// A cached report with headroom cannot explain this usage-limit failure.
+				if (report.fetchedAt <= now && !isUsageLimitReached(scopedLimits)) {
+					const freshReport = await raceSignal(
+						this.#deps.usage.probeReport(provider, target.credential, options?.baseUrl),
+						options?.signal,
+						"usage fetch aborted",
+					);
+					if (freshReport) scopedLimits = scopedUsageLimits(routing.strategy, freshReport, routing.rankingContext);
+				}
 				if (isUsageLimitReached(scopedLimits)) {
-					const resetAtMs = usageResetAtMs(scopedLimits, Date.now());
-					if (resetAtMs && resetAtMs > blockedUntil) {
-						blockedUntil = resetAtMs;
-						providerTimed = true;
-					}
 					const nowMs = Date.now();
+					const resetAtMs = usageResetAtMs(scopedLimits, nowMs);
 					const exhaustedLimits = scopedLimits.filter(limit => isUsageLimitExhausted(limit));
 					const futureResets = exhaustedLimits
 						.map(limit => windowResetAt(limit.window))
 						.filter((reset): reset is number => reset !== undefined && reset > nowMs);
 					if (exhaustedLimits.length > 0 && futureResets.length === exhaustedLimits.length) {
 						reportResetAtMs = Math.max(...futureResets);
+					}
+					if (
+						resetAtMs !== undefined &&
+						(resetAtMs > blockedUntil || (!hasExplicitCooldown && reportResetAtMs !== undefined))
+					) {
+						blockedUntil = resetAtMs;
+						providerTimed = true;
 					}
 				}
 			}
