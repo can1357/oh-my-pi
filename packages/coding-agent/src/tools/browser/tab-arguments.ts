@@ -73,8 +73,8 @@ const SCROLL_DIRECTIONS: Record<string, (amount: number) => [number, number]> = 
  * object that names no delta; empty when the object is some other shape.
  */
 function scrollCallHint(label: string, options: Record<string, unknown>): string {
-	const direction =
-		typeof options.direction === "string" ? SCROLL_DIRECTIONS[options.direction.toLowerCase()] : undefined;
+	const key = typeof options.direction === "string" ? options.direction.toLowerCase() : undefined;
+	const direction = key !== undefined && Object.hasOwn(SCROLL_DIRECTIONS, key) ? SCROLL_DIRECTIONS[key] : undefined;
 	const amount = options.amount;
 	if (!direction || typeof amount !== "number" || !Number.isFinite(amount)) return "";
 	const [dx, dy] = direction(amount);
