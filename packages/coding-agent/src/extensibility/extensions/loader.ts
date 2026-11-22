@@ -40,6 +40,7 @@ import { getEnabledPlugins, resolvePluginExtensionPaths } from "../plugins/loade
 
 import { resolvePath, withHostGuard } from "../utils";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
 import { notifyTranscriptPresentersChanged } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import type {
 	AssistantTextRenderer,
@@ -377,6 +378,15 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		}
 		if (id === NATIVE_TODO_BACKEND) {
 			throw new Error(`Todo backend id "${id}" is reserved for omp's own todo list`);
+		}
+		for (const field of ["label", "description"] as const) {
+			const text = definition[field];
+			// Blank once sanitized: a label of escape codes alone would draw as an empty row.
+			if (text !== undefined && (typeof text !== "string" || sanitizeDisplayLine(text).length === 0)) {
+				throw new TypeError(
+					`Todo backend "${id}" ${field} must be text that is not blank once control sequences are removed`,
+				);
+			}
 		}
 		if (typeof definition.replace !== "function") {
 			throw new TypeError(`Todo backend "${id}" must have a replace function`);
