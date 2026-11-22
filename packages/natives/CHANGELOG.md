@@ -13,6 +13,7 @@
 - Fixed `grep()`, `glob()`, `fuzzyFind()`, `astGrep()`, `astEdit()` and the shell's `grep -r`, `rg` and `fd` sometimes never returning on machines with many CPUs ([#20022](https://github.com/can1357/oh-my-pi/pull/20022) by [@sjawhar](https://github.com/sjawhar))
 - Fixed macOS `computer` background keys, typing and held keys into a window that is already its application's key window bringing that window in front of yours for a moment: they no longer send the press that made it key ([#19702](https://github.com/can1357/oh-my-pi/pull/19702) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Wayland screenshots each failing after 30 s while the screen-share picker waited for the user: the call now waits for the picker until its deadline, as input waits for the RemoteDesktop dialog, and ends with a `Timeout` naming the picker if nobody answers ([#19616](https://github.com/can1357/oh-my-pi/pull/19616) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Windows AX `press()` (no chord) and `perform()` calls without a menu path reporting `Timeout` instead of `AxUnconfirmed` when dispatch may have begun but the provider did not reply before the native reply wait ended, and prevented those calls from dispatching after that wait ended without dispatch ([#19871](https://github.com/can1357/oh-my-pi/pull/19871) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [19.1.0] - 2026-11-21
 
