@@ -144,7 +144,9 @@ describe("MCP catalog-change after connect", () => {
 		fs.unlinkSync(gate);
 		const paintsBeforeReconnect = paints;
 		const connectedBefore = lifecycle.filter(type => type === "connected").length;
-		manager.getConnection(SERVER)?.transport.onClose?.();
+		// A manual reconnect restarts the server, so its catalogs are listed anew
+		// rather than served from what the host remembers.
+		void manager.reconnectServer(SERVER, { manual: true });
 		await waitUntil(
 			() => lifecycle.filter(type => type === "connected").length > connectedBefore,
 			"reconnect connected",

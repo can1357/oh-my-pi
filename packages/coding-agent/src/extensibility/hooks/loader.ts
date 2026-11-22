@@ -11,6 +11,7 @@ import { loadCapability } from "../../discovery";
 import { getCodingAgentApi } from "../host-api";
 import type { CustomMessagePayload } from "../../session/messages";
 import * as typebox from "../legacy-typebox";
+import { assertBunCanImport } from "../module-path";
 import { resolvePath, withHostGuard } from "../utils";
 import { execCommand } from "./runner";
 import type { ExecOptions, HookAPI, HookFactory, HookMessageRenderer, RegisteredCommand } from "./types";
@@ -149,6 +150,7 @@ async function loadHook(hookPath: string, cwd: string): Promise<{ hook: LoadedHo
 
 	try {
 		// Import the module using native Bun import
+		await assertBunCanImport(resolvedPath);
 		const module = await withHostGuard(() => import(resolvedPath));
 		const factory = module.default as HookFactory;
 

@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
+### Breaking Changes
+
+- The omp extension now uses a pinned Chrome extension ID and connects to the browser relay through its native host. Reinstall the extension using Chrome’s “Load unpacked” flow; the relay port and token options have been removed.
+
+### Added
+
+- Added an omp Chrome side panel with session model selection, role shortcuts, thinking controls, input shortcuts, message queuing, and run interruption controls.
+- Added browser interaction features including page overlays, image and element picking, Teach, scheduled shortcuts, and GIF export.
+
+### Changed
+
+- The Chrome side panel shows brief labels for tool steps with structured intents.
+- The extension now keeps registered installations up to date across omp upgrades and reloads when idle.
+- Browser relay ports are assigned automatically and discovered locally by terminal clients, while sidebar chats continue using their existing connection.
+- Side panel sessions now control the connected Chrome browser directly instead of opening a separate headless browser.
+
+### Fixed
+
+- Improved relay recovery so Chrome reconnects automatically when the native host is unavailable or a stale connection drops.
+
+## [19.0.1] - 2026-11-19
+
 ### Fixed
 
 - The browser relay extension survives a browser whose loaded permission set predates the `downloads` permission: the service worker keeps working without download pairing instead of crashing before it ever connects ([#19659](https://github.com/can1357/oh-my-pi/pull/19659) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))

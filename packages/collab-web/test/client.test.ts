@@ -631,3 +631,26 @@ describe("GuestClient frame apply", () => {
 		expect(after.entries).toHaveLength(before.entries.length + 1);
 	});
 });
+
+describe("GuestClient prompts", () => {
+	it("sends prompt images in the prompt frame and omits an empty list", () => {
+		const sent: GuestFrame[] = [];
+		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: GuestFrame) => {
+			sent.push(frame);
+		});
+		try {
+			const client = liveClient();
+			const image = { type: "image" as const, data: "iVBORw0K", mimeType: "image/png" };
+			client.sendPrompt("what is this?", [image]);
+			client.sendPrompt("plain", []);
+			client.sendPrompt("legacy");
+			expect(sent).toEqual([
+				{ t: "prompt", text: "what is this?", images: [image] },
+				{ t: "prompt", text: "plain" },
+				{ t: "prompt", text: "legacy" },
+			]);
+		} finally {
+			sendSpy.mockRestore();
+		}
+	});
+});

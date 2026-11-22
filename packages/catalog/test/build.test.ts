@@ -7,6 +7,7 @@ import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { defaultSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels, resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -257,7 +258,7 @@ describe("buildModel", () => {
 	});
 
 	it("loads bundled OpenRouter models with resolved compat", () => {
-		const model = getBundledModel<"openrouter">("openrouter", "anthropic/claude-sonnet-4");
+		const model = getBundledModel<"openrouter">("openrouter", "anthropic/claude-sonnet-4.6");
 
 		expect(model.compat).toBeDefined();
 		expect(model.compat?.isOpenRouterHost).toBe(true);
@@ -848,6 +849,25 @@ describe("openai-completions wire-quirk compat detection", () => {
 		).toBe(false);
 	});
 
+	it("folds user text into the preceding tool result for Gemini 4 models only", () => {
+		// Gemini 4 ends requests closing on user text after a function response with
+		// an empty MALFORMED_RESPONSE; Gemini 3.x does not.
+		expect(resolveModelPolicy(openrouterSpec({ id: "google/gemini-4-neon" })).compat.foldUserAfterToolResult).toBe(
+			true,
+		);
+		expect(
+			resolveModelPolicy(
+				responsesSpec({ provider: "custom", id: "gemini-4-neon", baseUrl: "https://proxy.example/v1" }),
+			).compat.foldUserAfterToolResult,
+		).toBe(true);
+		expect(resolveModelPolicy(openrouterSpec({ id: "google/gemini-4-argon" })).compat.foldUserAfterToolResult).toBe(
+			true,
+		);
+		expect(resolveModelPolicy(openrouterSpec({ id: "google/gemini-3.1-pro" })).compat.foldUserAfterToolResult).toBe(
+			false,
+		);
+	});
+
 	it("flags cumulative reasoning deltas for MiniMax provider or id", () => {
 		expect(resolveModelPolicy(completionsSpec({ provider: "minimax" })).compat.reasoningDeltasMayBeCumulative).toBe(
 			true,
@@ -1330,6 +1350,32 @@ describe("OpenRouter model discovery", () => {
 			defaultLevel: Effort.High,
 			requiresEffort: true,
 		});
+	});
+
+	it("clamps thinking-off on mandatory OpenRouter rows that publish no effort ladder", async () => {
+		// Live shape of liquid/lfm-3-1.7b: `reasoning: { mandatory: true }` only.
+		// Without `requiresEffort`, disabled reasoning goes out as
+		// `enabled: false` and OpenRouter answers 400 "Reasoning is mandatory".
+		const row = (id: string) => ({
+			id,
+			name: id,
+			supported_parameters: ["tools", "reasoning", "include_reasoning"],
+			reasoning: { mandatory: true },
+		});
+		const options = openrouterModelManagerOptions({
+			fetch: async url =>
+				String(url) !== "https://openrouter.ai/api/v1/models"
+					? Response.json({ data: [] })
+					: Response.json({ data: [row("liquid/lfm-3-1.7b"), row("acme/unbundled-reasoner")] }),
+		});
+		const specs = (await options.fetchDynamicModels?.()) ?? [];
+		for (const id of ["liquid/lfm-3-1.7b", "acme/unbundled-reasoner"]) {
+			const spec = specs.find(model => model.id === id);
+			if (!spec) throw new Error(`Expected discovered ${id}`);
+			const model = buildModel(spec);
+			expect(model.thinking?.requiresEffort).toBe(true);
+			expect(defaultSupportedEffort(model)).toBe(Effort.Minimal);
+		}
 	});
 
 	it("bills discovered Haiku 5.5 rows at 5x their own rates above 100K input", async () => {
