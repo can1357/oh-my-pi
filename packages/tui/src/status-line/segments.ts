@@ -1157,7 +1157,14 @@ const vimSegment: StatusLineSegment = {
 	id: "vim",
 	render(ctx) {
 		const vim = ctx.vim;
-		if (!vim || vim.display === "none") return { content: "", visible: false };
+		if (!vim) return { content: "", visible: false };
+		// The command being typed shows even with the mode hidden: like Vim's showcmd, it is the one
+		// sign that a half-typed `15d` is waiting for its last key.
+		if (vim.display === "none") {
+			return vim.pending
+				? { content: theme.fg("muted", vim.pending), visible: true }
+				: { content: "", visible: false };
+		}
 		let label = vim.display === "icon" ? theme.symbol(VIM_MODE_ICON_KEYS[vim.mode]) : VIM_MODE_LABELS[vim.mode];
 		// The selection height rides along in both presentations — it is the one part of the
 		// indicator with no other on-screen source.
@@ -1169,7 +1176,8 @@ const vimSegment: StatusLineSegment = {
 	},
 	describe(ctx) {
 		const vim = ctx.vim;
-		if (!vim || vim.display === "none") return null;
+		if (!vim) return null;
+		if (vim.display === "none") return vim.pending ? segView([span(vim.pending, "muted")]) : null;
 		const color = VIM_MODE_COLORS[vim.mode];
 		const spans: TspSpan[] = [];
 		const lines = vim.selectedLines > 1 ? `${vim.selectedLines}L` : "";

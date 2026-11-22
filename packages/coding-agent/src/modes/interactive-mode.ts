@@ -479,6 +479,7 @@ import {
 	cfgTuiTitleState,
 	cfgTuiVimMode,
 	cfgTuiVimModeDisplay,
+	cfgTuiVimShowCommand,
 	cfgTuiVimStartMode,
 	cfgTuiVimYankToClipboard,
 } from "./settings";
@@ -521,6 +522,7 @@ const cfgLiveUiSettings = combine({
 	"composer.shape": cfgComposerShape,
 	"tui.vimMode": cfgTuiVimMode,
 	"tui.vimModeDisplay": cfgTuiVimModeDisplay,
+	"tui.vimShowCommand": cfgTuiVimShowCommand,
 	"tui.vimStartMode": cfgTuiVimStartMode,
 	"display.pinnedAgents": cfgDisplayPinnedAgents,
 	"display.subagentLivePreview": cfgDisplaySubagentLivePreview,
@@ -4475,7 +4477,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.updateEditorBorderColor();
 		}
 		if (any("composer.shape")) this.syncComposerShape();
-		if (any("tui.vimMode", "tui.vimModeDisplay", "tui.vimStartMode")) this.#applyVimModeSetting();
+		if (any("tui.vimMode", "tui.vimModeDisplay", "tui.vimShowCommand", "tui.vimStartMode")) {
+			this.#applyVimModeSetting();
+		}
 		if (any("display.pinnedAgents")) this.applyPinnedAgentsSetting();
 		if (any("display.subagentLivePreview")) {
 			this.#renderSubagentList();
@@ -6860,7 +6864,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			editor.vimEnabled
 				? {
 						mode: editor.vimMode,
-						pending: editor.vimPending,
+						pending: cfgTuiVimShowCommand.get(settings) ? editor.vimPending : "",
 						selectedLines: editor.vimSelectedLines,
 						display: cfgTuiVimModeDisplay.get(settings),
 					}
