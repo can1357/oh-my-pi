@@ -14,7 +14,7 @@
 - Fixed the status line's `time_spent` readout freezing within a wall-clock second while a turn is active; the displayed tenths now advance at their own visible granularity ([#20064](https://github.com/can1357/oh-my-pi/pull/20064) by [@jchanghong023](https://github.com/jchanghong023))
 - Fixed Enter pressed again on a model row just assigned to a role removing that role and falling back to the default role's model ([#12310](https://github.com/can1357/oh-my-pi/issues/12310), [#19986](https://github.com/can1357/oh-my-pi/pull/19986) by [@JamieJ5926](https://github.com/JamieJ5926))
 - The quick model picker (alt+p) in a session limited by `--models` or `enabledModels` now lists models the catalog gained since the session started, as the unlimited picker does ([#19878](https://github.com/can1357/oh-my-pi/pull/19878) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed Tern showing "Not found" for `read` images and other files shown by path when omp runs on another machine than Tern (e.g. over ssh); omp names files by path only to a Tern on the same machine and otherwise uploads images as before ([#20103](https://github.com/can1357/oh-my-pi/issues/20103))
+- Fixed Tern showing "Not found" for `read` images and other files shown by path when omp runs on another machine than Tern (e.g. over ssh); omp names files by path only when `TERN_BLOB_DIR` is set (Tern exports it into its local panes) and otherwise uploads images, so a local session without it, such as a tmux server started outside Tern, also uploads ([#20103](https://github.com/can1357/oh-my-pi/issues/20103))
 
 ### Removed
 

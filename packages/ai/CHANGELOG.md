@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- `apple/on-device` requests no longer print `omp-applefm: ignored text action 'updateFinishReason'` to stderr, and report the model's own stop reason, so a turn cut off by the response token limit ends as `length` even when no `maxTokens` was sent ([#20100](https://github.com/can1357/oh-my-pi/issues/20100))
+- `apple/on-device` requests no longer print `omp-applefm: ignored text action 'updateFinishReason'` to stderr; the bridge forwards the model's finish reason, which the provider maps to `stop` or `length` when it recognizes it and otherwise ignores in favor of the previous token-count guess ([#20100](https://github.com/can1357/oh-my-pi/issues/20100))
 - With several Devin logins, omp now prefers a login with daily or weekly quota left; a login past its quota that its on-demand balance still funds comes next, and one with no balance is skipped until its quota resets ([#19929](https://github.com/can1357/oh-my-pi/pull/19929) by [@will-bogusz](https://github.com/will-bogusz))
 - Devin logins now store the account's email, user id and organization, so two organizations under one email show as two accounts in `omp usage` and `auth.accountPolicies` can name each; sign in again to identify an existing login ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))
 - Anthropic requests with no messages now fail locally with the model, provider, and how many messages arrived, instead of a bare `400 "messages is required"` ([#19881](https://github.com/can1357/oh-my-pi/pull/19881) by [@FnSGit](https://github.com/FnSGit))
@@ -25,7 +25,7 @@
 - Fixed `antigravity-cli` models not seeing images returned by tools such as `read` on image files ([#19358](https://github.com/can1357/oh-my-pi/pull/19358) by [@0xprincess](https://github.com/0xprincess))
 - A transient `404` from a proxy in front of the auth broker no longer switches the snapshot stream to long-polling and turns off usage reporting for the rest of the process ([#19236](https://github.com/can1357/oh-my-pi/issues/19236)) ([#19348](https://github.com/can1357/oh-my-pi/pull/19348) by [@Alex-Wengg](https://github.com/Alex-Wengg))
 - Antigravity CLI requests no longer fail with a credential staging error when two sessions for the same account stage sign-in at the same time ([#19347](https://github.com/can1357/oh-my-pi/pull/19347) by [@eggpeat](https://github.com/eggpeat))
-- OpenAI Codex WebSocket tool-call continuations now keep the turn's sticky routing token, so they reuse the prompt cache instead of re-running the whole prefix uncached ([#20088](https://github.com/can1357/oh-my-pi/issues/20088))
+- OpenAI Codex WebSocket continuations now send back the turn's sticky routing token (`x-codex-turn-state`), which the server delivers on `codex.response.metadata` rather than `response.metadata`; before, it was never captured on WebSocket ([#20088](https://github.com/can1357/oh-my-pi/issues/20088))
 
 ## [19.1.0] - 2026-11-21
 
