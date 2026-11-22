@@ -137,6 +137,24 @@ export interface ToolCommandState {
 	decorateExecution?(tool: Tool): Tool;
 }
 
+/** Tool that hosts tool commands: mounted tools run as commands inside its shell. */
+const TOOL_COMMAND_HOST_NAME = "bash";
+
+/**
+ * Whether the session still has a tool that can run tool commands: the native
+ * built-in host, or a same-name extension override with that native tool behind
+ * it (`ctx.invokeTool`), which reaches the command handler exactly as a direct
+ * call does. An override with no native tool behind it replaces the host
+ * outright, so the transport stays off and mountable tools present top-level
+ * (#18339).
+ */
+export function toolCommandHostAvailable(
+	builtInNames: ReadonlySet<string>,
+	hasNativeTool: ((name: string) => boolean) | undefined,
+): boolean {
+	return builtInNames.has(TOOL_COMMAND_HOST_NAME) || hasNativeTool?.(TOOL_COMMAND_HOST_NAME) === true;
+}
+
 /** Full-help character budget for system-prompt tool-command sections. */
 export const TOOL_COMMAND_DOCS_TOTAL_BUDGET = 48_000;
 /** Per-tool cap preventing one pathological description from starving later tools. */

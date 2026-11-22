@@ -23,6 +23,7 @@ import {
 	type CustomTool,
 	createAgentSession,
 	discoverAuthStorage,
+	type ExtensionContext,
 	type ExtensionFactory,
 } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -52,6 +53,22 @@ const toolActivationExtension: ExtensionFactory = pi => {
 		parameters: type({}),
 		async execute() {
 			return { content: [{ type: "text", text: "active" }] };
+		},
+	});
+};
+
+// A proxy extension re-registers `bash` under its own name and runs the native
+// tool through `ctx.invokeTool`, the shape that turned the command transport off
+// for the whole session (#18339).
+const proxiedBashExtension: ExtensionFactory = pi => {
+	pi.registerTool({
+		name: "bash",
+		label: "Proxied Bash",
+		description: "Runs bash elsewhere and delegates to the native tool.",
+		parameters: type({ "command?": "string" }),
+		async execute(_toolCallId: string, params: unknown, _signal: unknown, _onUpdate: unknown, ctx: ExtensionContext) {
+			const native = await ctx.invokeTool?.((params ?? {}) as Record<string, unknown>);
+			return native ?? { content: [{ type: "text" as const, text: "no native bash" }] };
 		},
 	});
 };
@@ -183,6 +200,52 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getActiveToolNames()).not.toContain("write");
 			expect(session.getActiveToolNames()).not.toContain("default_inactive_tool");
 			expect(session.getToolCommandEntries()).toEqual([]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps tool commands mounted when an extension proxies bash through the native tool (#18339)", async () => {
+		const tempDir = makeTempDir();
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [proxiedBashExtension, toolActivationExtension],
+		});
+
+		try {
+			// The proxy owns the registry slot but the native bash still runs the
+			// commands, so discoverable tools stay behind the transport instead of
+			// flooding every request as top-level definitions.
+			expect(session.getToolByName("bash")?.label).toBe("Proxied Bash");
+			expect(session.hasBuiltInTool("bash")).toBe(false);
+			expect(session.getToolCommandEntries().map(entry => entry.name)).toContain("default_active_tool");
+			expect(session.getActiveToolNames()).toContain("bash");
+			expect(session.getActiveToolNames()).not.toContain("default_active_tool");
+			// A later presentation apply re-partitions through SessionTools, which
+			// gates on the same host: the mounts survive it.
+			await session.setActiveToolPresentation(session.getEnabledToolNames(), session.getMountedToolCommandNames());
+			expect(session.getMountedToolCommandNames()).toContain("default_active_tool");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("leaves tool commands off when a registered bash has no native tool behind it (#18339)", async () => {
+		const tempDir = makeTempDir();
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["read", "grep", "glob"],
+			extensions: [proxiedBashExtension, toolActivationExtension],
+		});
+
+		try {
+			// `bash` is registered, but no native tool backs it: nothing can run the
+			// commands, so every discoverable tool presents top-level.
+			expect(session.getToolByName("bash")?.label).toBe("Proxied Bash");
+			expect(session.getToolCommandEntries()).toEqual([]);
+			expect(session.getActiveToolNames()).toContain("default_active_tool");
 		} finally {
 			await session.dispose();
 		}
