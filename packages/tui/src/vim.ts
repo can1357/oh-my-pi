@@ -505,6 +505,12 @@ type VimChange =
 			insert: VimInsertRecord | null;
 	  };
 
+/**
+ * Largest count a command takes. Beyond it a held digit key would reach
+ * Infinity (`parseInt` of 400 nines), and motions and pastes loop count times.
+ */
+const MAX_COUNT = 99_999;
+
 export class VimState {
 	mode: VimMode = "normal";
 	/** Fixed end of a Visual selection; the cursor is the moving end. */
@@ -791,7 +797,7 @@ export class VimState {
 		}
 
 		if (this.#isCountKey(key)) {
-			this.#count += key;
+			this.#count = String(Math.min(Number(this.#count + key), MAX_COUNT));
 			return [];
 		}
 

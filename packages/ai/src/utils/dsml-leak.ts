@@ -18,6 +18,7 @@ import {
 	findDeepSeekTemplateToken,
 } from "../dialect/deepseek";
 import type { AssistantMessage, Model } from "../types";
+import { dropReasoningDetailsEnvelopes, isReasoningField, parseReasoningDetailsSignature } from "./reasoning-source";
 
 // Structural DSML tags in either pipe spelling (fullwidth `｜` U+FF5C or ASCII),
 // including doubled delimiters and the observed malformed ` calls` wrapper.
@@ -131,10 +132,14 @@ export function stripDsmlToolMarkup(text: string): string | undefined {
  * Remove leaked DSML tool-call markup from an assistant message before commit,
  * including reasoning blocks and turns with valid structured calls. Rewritten
  * thinking with an opaque signature is discarded; OpenAI-compatible reasoning
- * field names are replay markers, not signatures, and survive cleanup.
+ * field names and `reasoning_details` envelopes are replay state, not
+ * signatures, and survive cleanup. Envelope entries carry the turn's original
+ * reasoning text, so rewriting any thinking block reduces every envelope of the
+ * turn to its field marker.
  */
 export function removeDsmlToolMarkupLeak(message: AssistantMessage): boolean {
 	let content: AssistantMessage["content"] | undefined;
+	let thinkingChanged = false;
 	for (let index = 0; index < message.content.length; index++) {
 		const block = message.content[index]!;
 		if (block.type !== "text" && block.type !== "thinking") {
@@ -150,15 +155,17 @@ export function removeDsmlToolMarkupLeak(message: AssistantMessage): boolean {
 		if (block.type === "text") {
 			if (stripped.trim().length > 0) content.push({ ...block, text: stripped });
 		} else {
+			thinkingChanged = true;
 			const signature = block.thinkingSignature;
-			const reasoningField =
-				(message.api === "openai-completions" || message.api === "openrouter") &&
-				(signature === "reasoning_content" || signature === "reasoning" || signature === "reasoning_text");
-			if ((!signature || reasoningField) && stripped.trim().length > 0) {
+			const completionsTurn = message.api === "openai-completions" || message.api === "openrouter";
+			const replayState =
+				completionsTurn && (isReasoningField(signature) || parseReasoningDetailsSignature(signature) !== undefined);
+			if ((!signature || replayState) && stripped.trim().length > 0) {
 				content.push({ ...block, thinking: stripped });
 			}
 		}
 	}
-	if (content) message.content = content;
-	return content !== undefined;
+	if (!content) return false;
+	message.content = thinkingChanged ? dropReasoningDetailsEnvelopes(content) : content;
+	return true;
 }

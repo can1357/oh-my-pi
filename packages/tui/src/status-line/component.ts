@@ -74,16 +74,18 @@ export type StatusLineNativeAction =
 	| "status.context"
 	| "status.git"
 	| "status.cost"
+	| "status.usage"
 	| "status.path"
 	| "status.cache";
 
-/** Click action per native segment: quick model picker, `/context`, `/git`, `/usage`, the project directory, `/session`. */
+/** Click action per native segment: quick model picker, `/context`, `/git`, `/usage` (cost and the subscription limits), the project directory, `/session`. */
 const NATIVE_SEGMENT_ACTIONS: Partial<Record<string, StatusLineNativeAction>> = {
 	model: "status.model",
 	context_pct: "status.context",
 	context_total: "status.context",
 	git: "status.git",
 	cost: "status.cost",
+	usage: "status.usage",
 	path: "status.path",
 	cache: "status.cache",
 };

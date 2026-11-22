@@ -67,6 +67,10 @@ pub struct DesktopCapture {
 	/// a display capture shows the lock screen and a window capture its last
 	/// frame. Windows also detects disconnected sessions and secure desktops.
 	pub screen_locked:     bool,
+	/// The target window appeared fully covered around this frame, and its app
+	/// can stop drawing while covered (Chromium on Windows), so the frame may
+	/// be stale.
+	pub covered:           bool,
 }
 
 #[napi(object)]
@@ -347,6 +351,10 @@ pub struct AxSnapshot {
 	pub text:       String,
 	pub node_count: u32,
 	pub truncated:  bool,
+	/// The window appeared fully covered around the read, and its app can stop
+	/// updating its tree while covered (Chromium on Windows), so the tree may
+	/// be stale.
+	pub covered:    bool,
 }
 
 #[napi(object)]

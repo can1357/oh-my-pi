@@ -14,12 +14,13 @@
  * bundled rows are frozen by the generator; results are memoized per
  * deployment.
  */
-import { resolveCascade } from "./cascade";
+import { onCascadeRulesChange, resolveCascade } from "./cascade";
 import { classifyModel } from "./taxonomy";
 import type { ModelIdentity } from "./types";
 
 /** `null` records a deployment that does not carry reasoning. */
 const portableIdentityMemo = new Map<string, ModelIdentity | null>();
+onCascadeRulesChange(() => portableIdentityMemo.clear());
 
 /**
  * The identity a deployment's reasoning is carried under, or `undefined` when

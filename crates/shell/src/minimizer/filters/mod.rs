@@ -299,11 +299,9 @@ fn bundle_wrapped_command(command: &str) -> Option<String> {
 		.split(|ch: char| ch.is_whitespace() || matches!(ch, ';' | '|' | '&'))
 		.filter(|tok| !tok.is_empty())
 		.collect();
-	let bundle_pos = tokens.iter().position(|t| {
-		t.rsplit('/')
-			.next()
-			.is_some_and(|name| name.eq_ignore_ascii_case("bundle"))
-	})?;
+	let bundle_pos = tokens
+		.iter()
+		.position(|t| crate::minimizer::detect::program_name(t).eq_ignore_ascii_case("bundle"))?;
 	let mut iter = tokens.iter().skip(bundle_pos + 1).copied();
 	let word = next_command_word(&mut iter)?;
 	if word != "exec" {

@@ -3,7 +3,9 @@
 //! Port of `packages/coding-agent/src/edit/sloppy.ts` lines 1–1650.
 
 use std::{
+	borrow::Cow,
 	collections::{HashMap, HashSet},
+	fmt::Write as _,
 	sync::LazyLock,
 };
 
@@ -24,6 +26,17 @@ const REWRITE_HEADER: &str = markers::PUT;
 // parsing.
 const AFTER_HEADER: &str = "\0AFTER ";
 const BEFORE_HEADER: &str = "\0BEFORE ";
+// A legacy marked Find is already a complete edit. Keep its pattern opaque
+// on the second normalization pass so none of its rows can open another op.
+const EMBEDDED_HEADER: &str = "\0EMBEDDED ";
+// A Block selector is one literal row on its opener. Replace, like Insert,
+// carries a JSON body so literal block edits never enter legacy recovery.
+const BLOCK_HEADER: &str = "\0BLOCK ";
+const BLOCK_REPLACE_HEADER: &str = "\0LITERAL REPLACE ";
+// Body-less actions closing a `*** Find`.
+const CUT_LINE: &str = "\0CUT";
+const PASTE_AFTER_LINE: &str = "\0PASTE AFTER";
+const PASTE_BEFORE_LINE: &str = "\0PASTE BEFORE";
 const SELECT_OPEN: &str = markers::SELECT_OPEN;
 const SELECT_CLOSE: &str = markers::SELECT_CLOSE;
 const SELECT_DIVIDER: &str = markers::SELECT_DIVIDER;
@@ -45,7 +58,7 @@ macro_rules! regex {
 
 regex!(
 	HEADER_RE,
-	r"(?iu)^\*{3}[ \t]+(Edit[ \t]+File|Find|Replace|Insert[ \t]+After|Insert[ \t]+Before)(?::|[ \t]|$)[ \t]*(.*)$"
+	r"(?iu)^\*{3}[ \t]+(Edit[ \t]+File|Find|(?:(?:Replace|Delete|Cut|Insert(?:[ \t]+(?:Before|After))?|Paste[ \t]+(?:Before|After))[ \t]+)?Block|Replace|Insert[ \t]+After|Insert[ \t]+Before|Cut|Paste[ \t]+After|Paste[ \t]+Before)(:|[ \t]|$)(.*)$"
 );
 regex!(ENVELOPE_WORDS_RE, r"(?iu)^\s*(?:Begin|End)(?:\s+of)?\s+(?:patch|edits?|file)\b");
 regex!(
@@ -81,33 +94,71 @@ regex!(
 regex!(EMPTY_SELECTION_TAIL_RE, r"(?:^|\n)[ \t]*\x{27EA}\x{27EB}[ \t]*$");
 
 #[derive(Debug)]
-enum Header {
-	Edit { path: Option<String>, all: bool },
-	Find,
+enum Header<'a> {
+	Edit {
+		path: Option<String>,
+		all:  bool,
+	},
+	/// `*** Find`, or `*** Find all` to change every match of this operation.
+	Find {
+		all: bool,
+	},
+	Action(Action),
+	Block(BlockAction, &'a str),
+	InvalidBlock(&'static str),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BlockAction {
+	Cut,
+	Paste(Placement),
+	Delete,
+	Replace,
+}
+
+impl BlockAction {
+	const fn header(self) -> &'static str {
+		match self {
+			Self::Cut => "*** Cut Block",
+			Self::Paste(Placement::Before) => "*** Paste Before Block",
+			Self::Paste(Placement::After) => "*** Paste After Block",
+			Self::Delete => "*** Delete Block",
+			Self::Replace => "*** Replace Block",
+		}
+	}
+}
+
+/// What a `*** Find` is followed by.
+#[derive(Debug, Clone, Copy)]
+enum Action {
 	Replace,
 	Insert(Placement),
+	Cut,
+	Paste(Placement),
+}
+
+impl Action {
+	/// The `*** ` header naming this action.
+	const fn header(self) -> &'static str {
+		match self {
+			Self::Replace => "*** Replace",
+			Self::Insert(at) => at.header(),
+			Self::Cut => "*** Cut",
+			Self::Paste(at) => at.paste_header(),
+		}
+	}
 }
 
 struct RewriteBody {
 	lines:  Vec<String>,
-	insert: Option<Placement>,
-}
-
-impl RewriteBody {
-	/// The `*** ` operator header this body was staged under.
-	const fn operator(&self) -> &'static str {
-		match self.insert {
-			None => "*** Replace",
-			Some(at) => at.header(),
-		}
-	}
+	action: Action,
 }
 
 /// The grammar allows one operator per `*** Find`; a second one can only
 /// discard the staged body, so refuse the payload instead of silently
 /// dropping it.
 ///
-/// The lead phrase is shared with [`is_conflicting_operators_error`] so region
+/// The lead phrase is shared with [`is_header_pair_error`] so region
 /// extraction can recognize a payload the edit pipeline must report. The full
 /// message stays byte-identical: models are trained on these strings.
 const CONFLICTING_OPERATORS_LEAD: &str = "*** Find is followed by both";
@@ -118,11 +169,25 @@ fn conflicting_operators(staged: &str, incoming: &str) -> EditError {
 	))
 }
 
-/// Whether this rejection is the conflicting-operators signal. Region
-/// extraction preserves such payloads so the pipeline reports the parser
-/// error instead of completing the turn with no tool call.
-fn is_conflicting_operators_error(error: &EditError) -> bool {
-	matches!(error, EditError::Parse { message, .. } if message.starts_with(CONFLICTING_OPERATORS_LEAD))
+const MISSING_ACTION: &str = "Incomplete edit has *** Find but no *** Replace or other action. \
+                              Send one complete pair: *** Find with current text, then *** \
+                              Replace with new text.";
+
+const OLD_BLOCK_ERROR: &str = "Invalid block edit: standalone *** Block is not supported. Put the \
+                               action and opening-line prefix together, e.g. *** Delete Block: \
+                               <opening-line prefix>.";
+const BLOCK_SELECTOR_ERROR: &str =
+	"Invalid block edit: follow the action with a colon and a nonblank opening-line prefix.";
+const BLOCK_REPLACE_EMPTY: &str = "Invalid block edit: *** Replace Block needs a nonempty \
+                                   replacement body. To delete the block, use *** Delete Block: \
+                                   <opening-line prefix>.";
+const BLOCK_ALL_ERROR: &str = "Invalid block edit: a block selects one unique opener; drop all.";
+
+/// Region extraction preserves recognizable header errors for the pipeline
+/// to report instead of completing the turn with no tool call.
+fn is_header_pair_error(error: &EditError) -> bool {
+	matches!(error, EditError::Parse { message, .. } if message == MISSING_ACTION
+		|| message.starts_with("Invalid block edit:") || message.starts_with(CONFLICTING_OPERATORS_LEAD))
 }
 
 /// Internal op-stream prefix carrying a JSON-encoded insertion body.
@@ -130,6 +195,24 @@ const fn insert_header(at: Placement) -> &'static str {
 	match at {
 		Placement::Before => BEFORE_HEADER,
 		Placement::After => AFTER_HEADER,
+	}
+}
+
+/// Internal op-stream line for a paste at `at`.
+const fn paste_line(at: Placement) -> &'static str {
+	match at {
+		Placement::Before => PASTE_BEFORE_LINE,
+		Placement::After => PASTE_AFTER_LINE,
+	}
+}
+
+/// The body-less action an internal op-stream line stands for.
+fn bodyless_action(line: &str) -> Option<Action> {
+	match line {
+		CUT_LINE => Some(Action::Cut),
+		PASTE_BEFORE_LINE => Some(Action::Paste(Placement::Before)),
+		PASTE_AFTER_LINE => Some(Action::Paste(Placement::After)),
+		_ => None,
 	}
 }
 
@@ -159,14 +242,38 @@ fn js_len(text: &str) -> usize {
 	text.encode_utf16().count()
 }
 
-fn parse_header(line: &str) -> Option<Header> {
-	let trimmed = line.trim();
+fn parse_header(line: &str) -> Option<Header<'_>> {
+	let trimmed = line.trim_start();
 	if !trimmed.starts_with("***") {
 		return None;
 	}
-	let captures = HEADER_RE.captures(trimmed)?;
+	let captures = HEADER_RE.captures(trimmed.trim_end())?;
 	let name = captures.get(1)?.as_str().to_ascii_lowercase();
-	let rest = captures.get(2).map_or("", |value| value.as_str()).trim();
+	let tail = &trimmed[captures.get(3)?.start()..];
+	if name.ends_with("block") {
+		let action = match name.split_ascii_whitespace().next()? {
+			"cut" => BlockAction::Cut,
+			"delete" => BlockAction::Delete,
+			"replace" => BlockAction::Replace,
+			"paste" if name.contains("before") => BlockAction::Paste(Placement::Before),
+			"paste" => BlockAction::Paste(Placement::After),
+			"insert" => {
+				return Some(Header::InvalidBlock(
+					"Invalid block edit: for insertion use *** Find followed by *** Insert Before or \
+					 *** Insert After.",
+				));
+			},
+			_ => return Some(Header::InvalidBlock(OLD_BLOCK_ERROR)),
+		};
+		if &captures[2] != ":" || tail.trim().is_empty() {
+			return Some(Header::InvalidBlock(BLOCK_SELECTOR_ERROR));
+		}
+		// One optional separator space belongs to the header. Everything else,
+		// including source indentation, annotations and trailing spaces, is
+		// literal.
+		return Some(Header::Block(action, tail.strip_prefix(' ').unwrap_or(tail)));
+	}
+	let rest = tail.trim();
 	if name.starts_with("edit") {
 		let (path, all) = if rest.eq_ignore_ascii_case("all") {
 			("", true)
@@ -186,17 +293,23 @@ fn parse_header(line: &str) -> Option<Header> {
 		};
 		return Some(Header::Edit { path, all });
 	}
+	if name == "find" && rest.eq_ignore_ascii_case("all") {
+		return Some(Header::Find { all: true });
+	}
 	if !rest.is_empty() {
 		return None;
 	}
-	Some(if name == "find" {
-		Header::Find
-	} else if name == "replace" {
-		Header::Replace
-	} else if name.ends_with("before") {
-		Header::Insert(Placement::Before)
+	let at = if name.ends_with("before") {
+		Placement::Before
 	} else {
-		Header::Insert(Placement::After)
+		Placement::After
+	};
+	Some(match name.as_str() {
+		"find" => Header::Find { all: false },
+		"replace" => Header::Action(Action::Replace),
+		"cut" => Header::Action(Action::Cut),
+		name if name.starts_with("paste") => Header::Action(Action::Paste(at)),
+		_ => Header::Action(Action::Insert(at)),
 	})
 }
 
@@ -226,8 +339,12 @@ pub fn strip_envelope_noise(lines: Vec<&str>) -> Vec<String> {
 		let mut line = lines[index].to_owned();
 		let header = parse_header(&line);
 		if let Some(header) = &header {
-			inserting = !skipping && matches!(header, Header::Insert(_));
-			writing = !skipping && matches!(header, Header::Replace | Header::Insert(_));
+			inserting = !skipping
+				&& matches!(
+					header,
+					Header::Action(Action::Insert(_)) | Header::Block(BlockAction::Replace, _)
+				);
+			writing = inserting || !skipping && matches!(header, Header::Action(Action::Replace));
 		} else if writing && ENVELOPE_END_RE.is_match(line.trim()) {
 			match lines[index + 1..]
 				.iter()
@@ -281,6 +398,71 @@ fn trim_blank(buffer: &[String]) -> Vec<String> {
 	buffer[start..end].to_vec()
 }
 
+/// Check a header-authored Find before it loses its provenance in the IR.
+fn finish_find(lines: &mut Vec<String>, streaming: bool) -> Result<(), EditError> {
+	if lines.iter().any(|line| line.contains(['⟪', '＋', '－'])) {
+		let start = lines
+			.iter()
+			.position(|line| !line.trim().is_empty())
+			.unwrap_or(0);
+		let source = normalize_block(&lines[start..], Side::Find);
+		if has_inline_selection(&source) || has_marker_lines(&source) {
+			let encoded = serde_json::to_string(&source).expect("string serialization");
+			lines.clear();
+			lines.push(format!("{EMBEDDED_HEADER}{encoded}"));
+			return Ok(());
+		}
+	}
+	if !streaming {
+		return Err(parse_error(MISSING_ACTION));
+	}
+	lines.clear();
+	Ok(())
+}
+
+fn section_ir(sections: &mut Vec<CompiledSection>) -> &mut Vec<String> {
+	if sections.is_empty() {
+		sections.push(CompiledSection { path: String::new(), ir: Vec::new() });
+	}
+	&mut sections.last_mut().expect("section exists").ir
+}
+
+fn compile_block(
+	sections: &mut Vec<CompiledSection>,
+	action: BlockAction,
+	selector: &str,
+	body: &[String],
+	streaming_tail: bool,
+) -> Result<(), EditError> {
+	if !matches!(action, BlockAction::Replace) && body.iter().any(|line| !line.trim().is_empty()) {
+		return Err(parse_error(format!(
+			"Invalid block edit: {} takes no body. Start the next operation with a new header.",
+			action.header()
+		)));
+	}
+	let instruction = match action {
+		BlockAction::Delete => format!("{BLOCK_REPLACE_HEADER}\"\""),
+		BlockAction::Cut => CUT_LINE.to_owned(),
+		BlockAction::Paste(at) => paste_line(at).to_owned(),
+		BlockAction::Replace => {
+			let text = body.join("\n");
+			if text.is_empty() {
+				return if streaming_tail {
+					Ok(())
+				} else {
+					Err(parse_error(BLOCK_REPLACE_EMPTY))
+				};
+			}
+			let encoded = serde_json::to_string(&text).expect("string serialization");
+			format!("{BLOCK_REPLACE_HEADER}{encoded}")
+		},
+	};
+	let ir = section_ir(sections);
+	ir.push(format!("{BLOCK_HEADER}{selector}"));
+	ir.push(instruction);
+	Ok(())
+}
+
 fn flush_compiled(
 	sections: &mut Vec<CompiledSection>,
 	all: bool,
@@ -292,31 +474,38 @@ fn flush_compiled(
 	find_lines.clear();
 	if find.is_empty()
 		&& put.as_ref().is_none_or(|rewrite| {
-			rewrite.insert.is_none() && rewrite.lines.iter().all(|line| line.trim().is_empty())
+			matches!(rewrite.action, Action::Replace)
+				&& rewrite.lines.iter().all(|line| line.trim().is_empty())
 		}) {
 		return;
 	}
-	let ir = match sections.last_mut() {
-		Some(section) => &mut section.ir,
-		None => {
-			&mut sections
-				.push_mut(CompiledSection { path: String::new(), ir: Vec::new() })
-				.ir
-		},
-	};
+	let ir = section_ir(sections);
 	ir.push(format!("{OPENER}{}", if all { "*" } else { "" }));
-	if let Some(RewriteBody { lines, insert: Some(at) }) = &put {
-		ir.extend(find);
-		let mut text = lines.join("\n");
-		if !lines.is_empty() {
-			text.push('\n');
-		}
-		ir.push(format!(
-			"{}{}",
-			insert_header(*at),
-			serde_json::to_string(&text).expect("string serialization")
-		));
-		return;
+	match &put {
+		Some(RewriteBody { lines, action: Action::Insert(at) }) => {
+			ir.extend(find);
+			let mut text = lines.join("\n");
+			if !lines.is_empty() {
+				text.push('\n');
+			}
+			ir.push(format!(
+				"{}{}",
+				insert_header(*at),
+				serde_json::to_string(&text).expect("string serialization")
+			));
+			return;
+		},
+		Some(RewriteBody { action: Action::Cut, .. }) => {
+			ir.extend(find);
+			ir.push(CUT_LINE.to_owned());
+			return;
+		},
+		Some(RewriteBody { action: Action::Paste(at), .. }) => {
+			ir.extend(find);
+			ir.push(paste_line(*at).to_owned());
+			return;
+		},
+		Some(RewriteBody { action: Action::Replace, .. }) | None => {},
 	}
 	let put = put.map(|rewrite| trim_blank(&rewrite.lines));
 	if find.is_empty() {
@@ -333,21 +522,26 @@ fn flush_compiled(
 }
 
 /// Compile payload lines into per-file internal op streams.
-fn compile_sections(lines: &[String]) -> Result<Vec<CompiledSection>, EditError> {
+fn compile_sections(lines: &[String], streaming: bool) -> Result<Vec<CompiledSection>, EditError> {
 	#[derive(Clone, Copy)]
-	enum State {
+	enum State<'a> {
 		Idle,
+		Legacy,
 		Find,
 		Put,
+		Block { action: BlockAction, selector: &'a str, body_start: usize },
 	}
 
 	let mut sections = Vec::new();
+	// `all` holds for the file section (`*** Edit File: path all`), `find_all`
+	// for the operation being collected (`*** Find all`).
 	let mut all = false;
+	let mut find_all = false;
 	let mut state = State::Idle;
 	let mut find_lines = Vec::new();
 	let mut put_lines: Option<RewriteBody> = None;
 
-	for line in lines {
+	for (index, line) in lines.iter().enumerate() {
 		let Some(header) = parse_header(line) else {
 			match state {
 				State::Put => put_lines
@@ -355,45 +549,77 @@ fn compile_sections(lines: &[String]) -> Result<Vec<CompiledSection>, EditError>
 					.expect("put buffer exists")
 					.lines
 					.push(line.clone()),
-				State::Find => find_lines.push(line.clone()),
+				State::Find | State::Legacy => find_lines.push(line.clone()),
 				State::Idle if !line.trim().is_empty() => {
-					state = State::Find;
+					state = State::Legacy;
 					find_lines.push(line.clone());
 				},
-				State::Idle => {},
+				State::Idle | State::Block { .. } => {},
 			}
 			continue;
 		};
-		match header {
+		if let State::Block { action, selector, body_start } = state {
+			compile_block(&mut sections, action, selector, &lines[body_start..index], false)?;
+			if let Header::Action(next) = header {
+				return Err(parse_error(format!(
+					"Invalid block edit: {} already names its action. Start a new selector before {}.",
+					action.header(),
+					next.header()
+				)));
+			}
+		} else if !matches!(header, Header::Action(_)) {
+			if matches!(state, State::Find) {
+				finish_find(&mut find_lines, false)?;
+			}
+			flush_compiled(&mut sections, all || find_all, &mut find_lines, &mut put_lines);
+		}
+		let action = match header {
 			Header::Edit { path, all: next_all } => {
-				flush_compiled(&mut sections, all, &mut find_lines, &mut put_lines);
 				state = State::Idle;
 				if let Some(path) = path {
 					sections.push(CompiledSection { path, ir: Vec::new() });
 				}
 				all = next_all;
+				find_all = false;
+				continue;
 			},
-			Header::Find => {
-				flush_compiled(&mut sections, all, &mut find_lines, &mut put_lines);
+			Header::Find { all: next_all } => {
 				state = State::Find;
+				find_all = next_all;
+				continue;
 			},
-			Header::Replace => {
-				if let Some(staged) = put_lines.as_ref() {
-					return Err(conflicting_operators(staged.operator(), "*** Replace"));
+			Header::Block(action, selector) => {
+				if all {
+					return Err(parse_error(BLOCK_ALL_ERROR));
 				}
-				put_lines = Some(RewriteBody { lines: Vec::new(), insert: None });
-				state = State::Put;
+				state = State::Block { action, selector, body_start: index + 1 };
+				find_all = false;
+				continue;
 			},
-			Header::Insert(at) => {
-				if let Some(staged) = put_lines.as_ref() {
-					return Err(conflicting_operators(staged.operator(), at.header()));
-				}
-				put_lines = Some(RewriteBody { lines: Vec::new(), insert: Some(at) });
-				state = State::Put;
-			},
+			Header::InvalidBlock(message) => return Err(parse_error(message)),
+			Header::Action(action) => action,
+		};
+		if let Some(staged) = &put_lines {
+			return Err(conflicting_operators(staged.action.header(), action.header()));
+		}
+		put_lines = Some(RewriteBody { lines: Vec::new(), action });
+		if matches!(action, Action::Cut | Action::Paste(_)) {
+			// Body-less: the operation is complete at its header.
+			flush_compiled(&mut sections, all || find_all, &mut find_lines, &mut put_lines);
+			state = State::Idle;
+			find_all = false;
+		} else {
+			state = State::Put;
 		}
 	}
-	flush_compiled(&mut sections, all, &mut find_lines, &mut put_lines);
+	if let State::Block { action, selector, body_start } = state {
+		compile_block(&mut sections, action, selector, &lines[body_start..], streaming)?;
+	} else {
+		if matches!(state, State::Find) {
+			finish_find(&mut find_lines, streaming)?;
+		}
+		flush_compiled(&mut sections, all || find_all, &mut find_lines, &mut put_lines);
+	}
 	Ok(sections)
 }
 
@@ -402,6 +628,15 @@ fn compile_sections(lines: &[String]) -> Result<Vec<CompiledSection>, EditError>
 /// Fails when one `*** Find` carries more than one operator: the second
 /// operator can only discard the body the first one staged.
 pub fn split_sloppy_sections(input: &str) -> Result<Vec<SloppySection>, EditError> {
+	split_sloppy_sections_for_preview(input, false)
+}
+
+/// A preview may omit a trailing Find without its action or Replace Block
+/// without its body.
+pub(super) fn split_sloppy_sections_for_preview(
+	input: &str,
+	streaming: bool,
+) -> Result<Vec<SloppySection>, EditError> {
 	let mut lines = strip_envelope_noise(input.lines().collect());
 	while lines.first().is_some_and(|line| line.trim().is_empty()) {
 		lines.remove(0);
@@ -412,7 +647,7 @@ pub fn split_sloppy_sections(input: &str) -> Result<Vec<SloppySection>, EditErro
 	) {
 		return Ok(Vec::new());
 	}
-	let sections = compile_sections(&lines)?;
+	let sections = compile_sections(&lines, streaming)?;
 	let mut bodies: HashMap<String, Vec<String>> = HashMap::new();
 	let mut paths = Vec::new();
 	for section in sections {
@@ -428,6 +663,20 @@ pub fn split_sloppy_sections(input: &str) -> Result<Vec<SloppySection>, EditErro
 		.into_iter()
 		.map(|path| SloppySection { body: bodies.remove(&path).unwrap_or_default().join("\n"), path })
 		.collect())
+}
+
+/// File targets visible to the approval gate and renderer before their
+/// selectors have actions. A path is not evidence of an executable edit.
+pub(super) fn declared_paths(input: &str) -> Vec<String> {
+	let mut paths = Vec::new();
+	for line in input.lines() {
+		if let Some(Header::Edit { path: Some(path), .. }) = parse_header(line)
+			&& !paths.contains(&path)
+		{
+			paths.push(path);
+		}
+	}
+	paths
 }
 
 /// Extract pathful sloppy payloads embedded in prose, using UTF-16 offsets.
@@ -460,21 +709,15 @@ pub fn extract_inline_sloppy_regions(text: &str) -> Vec<InlineSloppyRegion> {
 			index += 1;
 			continue;
 		}
-		#[derive(Clone, Copy)]
-		enum Block {
-			Outside,
-			Find,
-			Put,
-		}
 		let mut last = index;
-		let mut block = Block::Outside;
+		let mut collecting_body = false;
 		let mut scan = index + 1;
 		while scan < lines.len() {
 			if ENVELOPE_END_RE.is_match(lines[scan].trim()) {
 				break;
 			}
 			let Some(header) = parse_header(lines[scan]) else {
-				if matches!(block, Block::Outside) {
+				if !collecting_body {
 					if lines[scan].trim().is_empty() {
 						scan += 1;
 						continue;
@@ -485,21 +728,24 @@ pub fn extract_inline_sloppy_regions(text: &str) -> Vec<InlineSloppyRegion> {
 				scan += 1;
 				continue;
 			};
-			block = match header {
-				Header::Find => Block::Find,
-				Header::Replace | Header::Insert(_) => Block::Put,
-				Header::Edit { .. } => Block::Outside,
-			};
+			// Keep stray body rows on a structural action: the pipeline must
+			// report them rather than applying a truncated deletion or move.
+			collecting_body =
+				!matches!(header, Header::Edit { .. } | Header::Action(Action::Cut | Action::Paste(_)));
 			last = scan;
 			scan += 1;
 		}
-		let payload = lines[index..=last].join("\n");
+		let mut payload = lines[index..=last].join("\n");
+		// A literal blank body row immediately before an envelope still has
+		// a terminator; without it `str::lines` would drop that row at EOF.
+		if collecting_body && last + 1 < lines.len() && matches!(lines[last], "" | "\r") {
+			payload.push('\n');
+		}
 		// A payload the sloppy parser rejects is not an inline sloppy region —
-		// except a conflicting-operators payload, which the edit pipeline must
-		// report rather than silently skip.
+		// except recognizable header errors, which the pipeline must report.
 		let recognized = match split_sloppy_sections(&payload) {
 			Ok(sections) => !sections.is_empty(),
-			Err(error) => is_conflicting_operators_error(&error),
+			Err(error) => is_header_pair_error(&error),
 		};
 		if recognized {
 			regions.push(InlineSloppyRegion { start: starts[index], end: line_end(last), payload });
@@ -513,9 +759,13 @@ pub fn extract_inline_sloppy_regions(text: &str) -> Vec<InlineSloppyRegion> {
 enum OpenerKind {
 	Single,
 	All,
+	Block,
 }
 
 fn parse_opener(line: &str) -> Option<OpenerKind> {
+	if line.starts_with(BLOCK_HEADER) {
+		return Some(OpenerKind::Block);
+	}
 	match line.trim() {
 		"«" => Some(OpenerKind::Single),
 		"«*" => Some(OpenerKind::All),
@@ -529,6 +779,10 @@ fn is_ordinal_opener(line: &str) -> bool {
 
 /// Normalize section headers or internal IR into a canonical op stream.
 pub fn normalize_input(input: &str) -> Result<String, EditError> {
+	normalize_section(input, false)
+}
+
+fn normalize_section(input: &str, streaming: bool) -> Result<String, EditError> {
 	let mut lines = strip_envelope_noise(input.lines().collect());
 	while lines.first().is_some_and(|line| line.trim().is_empty()) {
 		lines.remove(0);
@@ -544,7 +798,7 @@ pub fn normalize_input(input: &str) -> Result<String, EditError> {
 		lines.pop_if(|line| line.trim() == "```");
 	}
 	if lines.iter().any(|line| parse_header(line).is_some()) {
-		lines = compile_sections(&lines)?
+		lines = compile_sections(&lines, streaming)?
 			.into_iter()
 			.flat_map(|section| section.ir)
 			.collect();
@@ -568,15 +822,59 @@ pub fn normalize_input(input: &str) -> Result<String, EditError> {
 	Ok(lines.join("\n"))
 }
 
-fn normalize_block(lines: &[String], rewrite: bool) -> String {
+/// Which side of an operation a body is, for [`normalize_block`].
+#[derive(Clone, Copy)]
+enum Side {
+	Find,
+	/// `numbered_find`: the operation's Find was a [`numbered_copy`], so a
+	/// numbered Replace is one too. Without that, a Replace that starts with
+	/// digits and `|` or `:` is code (`0 || fallback`), not line numbers.
+	Replace {
+		numbered_find: bool,
+	},
+}
+
+/// Line number of a row copied from numbered tool output (`12:text`,
+/// `12|text`); `None` when the row is code that merely starts with a number
+/// (`0 || x`, `1 |= mask`, `a ? 1 :: b`).
+fn copied_line_number(line: &str) -> Option<usize> {
+	let prefix = NUMBERED_LINE_RE.find(line)?.as_str();
+	if line[prefix.len()..].starts_with([':', '|', '=']) {
+		return None;
+	}
+	prefix
+		.trim_start()
+		.trim_end_matches([':', '|'])
+		.trim_end()
+		.parse()
+		.ok()
+		.filter(|number| *number > 0)
+}
+
+/// Whether `line` is a notice or fold row of tool output, never file text.
+fn is_read_notice(line: &str) -> bool {
+	let trimmed = line.trim();
+	SHOWING_LINES_RE.is_match(trimmed)
+		|| READ_MORE_NOTICE_RE.is_match(trimmed)
+		|| ELIDED_LINE_RE.is_match(trimmed)
+}
+
+/// Whether every row of file text carries an ascending line-number prefix,
+/// as rows copied from a file read or an edit result do.
+fn numbered_copy(lines: &[String]) -> bool {
+	let numbers = lines
+		.iter()
+		.filter(|line| !line.trim().is_empty() && !is_read_notice(line))
+		.map(|line| copied_line_number(line))
+		.collect::<Option<Vec<_>>>();
+	numbers.is_some_and(|numbers| !numbers.is_empty() && numbers.is_sorted_by(|a, b| a < b))
+}
+
+fn normalize_block(lines: &[String], side: Side) -> String {
+	let rewrite = matches!(side, Side::Replace { .. });
 	let mut cleaned: Vec<String> = lines
 		.iter()
-		.filter(|line| {
-			let trimmed = line.trim();
-			!SHOWING_LINES_RE.is_match(trimmed)
-				&& !READ_MORE_NOTICE_RE.is_match(trimmed)
-				&& !ELIDED_LINE_RE.is_match(trimmed)
-		})
+		.filter(|line| !is_read_notice(line))
 		.cloned()
 		.collect();
 	if !rewrite {
@@ -590,11 +888,8 @@ fn normalize_block(lines: &[String], rewrite: bool) -> String {
 		cleaned.pop();
 	}
 	let has_non_blank = cleaned.iter().any(|line| !line.trim().is_empty());
-	let numbered_lines = has_non_blank
-		&& cleaned
-			.iter()
-			.filter(|line| !line.trim().is_empty())
-			.all(|line| NUMBERED_LINE_RE.is_match(line));
+	let numbered_lines =
+		!matches!(side, Side::Replace { numbered_find: false }) && numbered_copy(&cleaned);
 	let numbered_literals = has_non_blank
 		&& cleaned
 			.iter()
@@ -669,8 +964,10 @@ fn recover_missing_separator(lines: &[String], content: &str) -> Option<(String,
 		if remainder_start >= lines.len() {
 			continue;
 		}
-		let pattern = normalize_block(&lines[..split], false);
-		let rewrite = normalize_block(&lines[remainder_start..], true);
+		let pattern = normalize_block(&lines[..split], Side::Find);
+		let rewrite = normalize_block(&lines[remainder_start..], Side::Replace {
+			numbered_find: numbered_copy(&lines[..split]),
+		});
 		if js_len(&pattern) < 4 || rewrite.replace(GAP, "").trim().is_empty() {
 			continue;
 		}
@@ -684,7 +981,7 @@ fn recover_missing_separator(lines: &[String], content: &str) -> Option<(String,
 		if occurrences.len() != 1 {
 			continue;
 		}
-		let through_first_rewrite = normalize_block(&lines[..=remainder_start], false);
+		let through_first_rewrite = normalize_block(&lines[..=remainder_start], Side::Find);
 		if content[occurrences[0]..].starts_with(&through_first_rewrite) {
 			continue;
 		}
@@ -718,8 +1015,11 @@ fn recover_alternating_separators(lines: &[String], content: &str) -> Option<Vec
 		let next = headers.get(pair + 2).copied().unwrap_or(lines.len());
 		let match_lines = &lines[match_start + 1..rewrite_start];
 		let rewrite_lines = &lines[rewrite_start + 1..next];
-		let normalized_match = normalize_text(&normalize_block(match_lines, false)).text;
-		let normalized_rewrite = normalize_text(&normalize_block(rewrite_lines, true)).text;
+		let normalized_match = normalize_text(&normalize_block(match_lines, Side::Find)).text;
+		let normalized_rewrite = normalize_text(&normalize_block(rewrite_lines, Side::Replace {
+			numbered_find: numbered_copy(match_lines),
+		}))
+		.text;
 		if normalized_match.is_empty()
 			|| normalized_rewrite.is_empty()
 			|| rewrite_lines.iter().any(|line| line.contains(SELECT_OPEN))
@@ -763,8 +1063,11 @@ fn recover_bracket_pairs(lines: &[String], content: &str) -> Option<Vec<String>>
 		let second = items[pair + 1];
 		let match_lines = &lines[first.0 + 1..first.1];
 		let rewrite_lines = &lines[second.0 + 1..second.1];
-		let normalized_match = normalize_text(&normalize_block(match_lines, false)).text;
-		let normalized_rewrite = normalize_text(&normalize_block(rewrite_lines, true)).text;
+		let normalized_match = normalize_text(&normalize_block(match_lines, Side::Find)).text;
+		let normalized_rewrite = normalize_text(&normalize_block(rewrite_lines, Side::Replace {
+			numbered_find: numbered_copy(match_lines),
+		}))
+		.text;
 		if normalized_match.is_empty()
 			|| normalized_rewrite.is_empty()
 			|| rewrite_lines.iter().any(|line| line.contains(SELECT_OPEN))
@@ -782,16 +1085,12 @@ fn recover_bracket_pairs(lines: &[String], content: &str) -> Option<Vec<String>>
 }
 
 fn has_inline_selection(pattern: &str) -> bool {
-	let mut selected = false;
-	for character in pattern.chars() {
-		match character.to_string().as_str() {
-			SELECT_OPEN => selected = true,
-			SELECT_CLOSE => selected = false,
-			SELECT_DIVIDER if selected => return true,
-			_ => {},
-		}
-	}
-	false
+	pattern.split(SELECT_OPEN).skip(1).any(|tail| {
+		tail
+			.split_once(SELECT_CLOSE)
+			.map_or(tail, |(selection, _)| selection)
+			.contains(SELECT_DIVIDER)
+	})
 }
 
 fn validate_selection_markers(pattern: &str, operation_number: usize) -> Result<(), EditError> {
@@ -1426,6 +1725,7 @@ fn create_operation_text(
 					source_pattern_text: source_pattern_text.to_owned(),
 					rewrite: OperationRewrite::Explicit { text: String::new() },
 					all,
+					block: false,
 					assumed_deletion: false,
 					desired_state: false,
 					recovery_note: (!notes.is_empty()).then(|| notes.join("\n")),
@@ -1444,6 +1744,7 @@ fn create_operation_text(
 			source_pattern_text: source_pattern_text.to_owned(),
 			rewrite: OperationRewrite::Inline { replacements },
 			all,
+			block: false,
 			assumed_deletion: false,
 			desired_state: false,
 			recovery_note: (!notes.is_empty()).then(|| notes.join("\n")),
@@ -1463,6 +1764,7 @@ fn create_operation_text(
 			source_pattern_text: source_pattern_text.to_owned(),
 			rewrite: OperationRewrite::Explicit { text: rewrite_text.to_owned() },
 			all,
+			block: false,
 			assumed_deletion: false,
 			desired_state: false,
 			recovery_note: Some(format!(
@@ -1478,6 +1780,7 @@ fn create_operation_text(
 		source_pattern_text: source_pattern_text.to_owned(),
 		rewrite: OperationRewrite::Explicit { text: rewrite_text.to_owned() },
 		all,
+		block: false,
 		assumed_deletion: false,
 		desired_state: false,
 		recovery_note: None,
@@ -1497,21 +1800,38 @@ pub fn create_operation(
 		OperationRewrite::Explicit { text } => {
 			create_operation_text(source_pattern_text, &text, all, operation_number, true)
 		},
-		OperationRewrite::Insert { ref text, at } if text.is_empty() => Err(parse_error(format!(
-			"Operation {operation_number} has an empty {}; include the new lines to insert.",
-			at.header()
-		))),
-		OperationRewrite::Insert { .. } | OperationRewrite::Inline { .. } => Ok(Operation {
-			pattern_text: source_pattern_text.to_owned(),
-			source_pattern_text: source_pattern_text.to_owned(),
-			rewrite,
-			all,
-			assumed_deletion: false,
-			desired_state: false,
-			recovery_note: None,
-			whitespace_matched: false,
-		}),
+		rewrite => {
+			literal_operation(source_pattern_text.to_owned(), rewrite, all, false, operation_number)
+		},
 	}
+}
+
+fn literal_operation(
+	source: String,
+	rewrite: OperationRewrite,
+	all: bool,
+	block: bool,
+	number: usize,
+) -> Result<Operation, EditError> {
+	if let OperationRewrite::Insert { text, at } = &rewrite
+		&& text.is_empty()
+	{
+		return Err(parse_error(format!(
+			"Operation {number} has an empty {}; include the new lines to insert.",
+			at.header()
+		)));
+	}
+	Ok(Operation {
+		pattern_text: source.clone(),
+		source_pattern_text: source,
+		rewrite,
+		all,
+		block,
+		assumed_deletion: false,
+		desired_state: false,
+		recovery_note: None,
+		whitespace_matched: false,
+	})
 }
 
 fn finish_operation(
@@ -1524,8 +1844,9 @@ fn finish_operation(
 	all: bool,
 	operations: &mut Vec<Operation>,
 ) -> Result<(), EditError> {
-	let source = normalize_block(pattern_lines, false);
-	let rewrite = normalize_block(rewrite_lines, true);
+	let source = normalize_block(pattern_lines, Side::Find);
+	let rewrite =
+		normalize_block(rewrite_lines, Side::Replace { numbered_find: numbered_copy(pattern_lines) });
 	if let Some(reference) = reference_separator.filter(|_| rewrite.trim().is_empty()) {
 		if !has_inline_selection(&source) {
 			let mut corrected = lines.to_vec();
@@ -1609,7 +1930,7 @@ fn finish_pattern(
 	operations: &mut Vec<Operation>,
 	pending: &mut Vec<(usize, String)>,
 ) -> Result<(), EditError> {
-	let source = normalize_block(pattern_lines, false);
+	let source = normalize_block(pattern_lines, Side::Find);
 	let number = operations.len() + 1;
 	if has_inline_selection(&source) || has_marker_lines(&source) || has_bare_desired(&source) {
 		operations.push(create_operation_text(&source, "", all, number, false)?);
@@ -1645,6 +1966,9 @@ fn finish_pattern(
 		operations.push(operation);
 		return Ok(());
 	}
+	let normalized_pattern = normalize_text(&source).text;
+	let in_file =
+		!normalized_pattern.is_empty() && normalize_text(content).text.contains(&normalized_pattern);
 	if !source.contains(GAP) {
 		let mut desired = create_operation_text(&source, &source, all, number, true)?;
 		desired.desired_state = true;
@@ -1720,12 +2044,16 @@ fn finish_pattern(
 				Err(_) => {},
 			}
 		}
-		if let Some(closest) = closest_desired_block(content, &source) {
+		// Text the file already holds is a Find that lost its action, not a
+		// statement of desired text: rewriting the nearest other block with it
+		// would corrupt the file.
+		if !in_file && let Some(closest) = closest_desired_block(content, &source) {
 			operations.push(Operation {
 				pattern_text:        closest,
 				source_pattern_text: source.clone(),
 				rewrite:             OperationRewrite::Explicit { text: source.clone() },
 				all:                 false,
+				block:               false,
 				assumed_deletion:    false,
 				desired_state:       false,
 				recovery_note:       Some(format!(
@@ -1738,10 +2066,7 @@ fn finish_pattern(
 			return Ok(());
 		}
 	}
-	let normalized_pattern = normalize_text(&source).text;
-	let context_echo = if !normalized_pattern.is_empty()
-		&& normalize_text(content).text.contains(&normalized_pattern)
-	{
+	let context_echo = if in_file {
 		"\nIts lines already exist in the file unchanged — if this operation only restated context, \
 		 delete it; anchors belong inside the operation that edits them."
 	} else {
@@ -1815,7 +2140,7 @@ pub(super) fn parse_section(
 	path: &str,
 	streaming: bool,
 ) -> Result<Vec<Operation>, EditError> {
-	let payload = normalize_input(input)?;
+	let payload = normalize_section(input, streaming)?;
 	let mut lines: Vec<String> = payload.split('\n').map(str::to_owned).collect();
 	if parse_opener(lines.first().map_or("", String::as_str)).is_none()
 		&& (lines.iter().any(|line| line.trim() == REWRITE_HEADER)
@@ -1825,7 +2150,11 @@ pub(super) fn parse_section(
 	{
 		lines.insert(0, OPENER.to_owned());
 	}
-	if !lines.iter().any(|line| strip_insert_header(line).is_some()) {
+	if !lines.iter().any(|line| {
+		line.starts_with(BLOCK_HEADER)
+			|| line.starts_with(EMBEDDED_HEADER)
+			|| strip_insert_header(line).is_some()
+	}) {
 		lines = recover_alternating_separators(&lines, content).unwrap_or(lines);
 		lines = recover_bracket_pairs(&lines, content).unwrap_or(lines);
 	}
@@ -1842,29 +2171,95 @@ pub(super) fn parse_section(
 	let mut rewrite = Rows::default();
 	let mut reference_separator: Option<String> = None;
 	let mut pending = Vec::new();
+	// The planner uses the cut's index to resolve its original selector.
+	let mut cut: Option<(usize, bool)> = None;
+	let mut block: Option<&str> = None;
 
 	for index in 0..lines.len() {
 		let line = &lines[index];
+		let selector = block.take();
+		block = line.strip_prefix(BLOCK_HEADER);
 		let parsed_opener = parse_opener(line);
 		let trimmed = line.trim();
 		let register_reference = REFERENCE_RE.captures(trimmed);
-		if let Some((at, encoded)) = strip_insert_header(line) {
+		let literal_action = strip_insert_header(line)
+			.map(|(at, body)| (Action::Insert(at), body))
+			.or_else(|| {
+				line
+					.strip_prefix(BLOCK_REPLACE_HEADER)
+					.map(|body| (Action::Replace, body))
+			})
+			.or_else(|| bodyless_action(line).map(|action| (action, "")));
+		if let Some((action, encoded)) = literal_action {
 			let number = operations.len() + 1;
-			let header = at.header();
-			if state != State::Pattern || !pattern.has_content {
+			let header = action.header();
+			if state != State::Pattern || selector.is_none() && !pattern.has_content {
 				return Err(parse_error(format!(
 					"Operation {number} needs a non-empty *** Find before {header}."
 				)));
 			}
-			let text = serde_json::from_str(encoded)
-				.map_err(|error| parse_error(format!("Invalid {header} body: {error}")))?;
-			operations.push(create_operation(
-				&normalize_block(&pattern.lines, false),
-				OperationRewrite::Insert { text, at },
-				all,
-				content,
-				number,
-			)?);
+			let rewrite = match action {
+				Action::Replace | Action::Insert(_) => {
+					let text = serde_json::from_str(encoded)
+						.map_err(|error| parse_error(format!("Invalid {header} body: {error}")))?;
+					if let Action::Insert(at) = action {
+						if selector.is_some() {
+							return Err(parse_error("Invalid internal block instruction."));
+						}
+						OperationRewrite::Insert { text, at }
+					} else if selector.is_some() {
+						OperationRewrite::Explicit { text }
+					} else {
+						return Err(parse_error("Unexpected literal block replacement."));
+					}
+				},
+				Action::Cut | Action::Paste(_) if all => {
+					return Err(parse_error(format!(
+						"Operation {number}: {header} moves one block; drop all."
+					)));
+				},
+				Action::Cut => {
+					if let Some((unpasted, structural)) = cut.replace((number, selector.is_some())) {
+						return Err(unpasted_cut(unpasted, structural));
+					}
+					OperationRewrite::Cut
+				},
+				Action::Paste(at) => {
+					let Some((cut, _)) = cut.take() else {
+						if selector.is_some() {
+							return Err(parse_error(format!(
+								"Operation {number} has {} but nothing is cut. Use *** Cut Block: \
+								 <opening-line prefix> first; each cut pastes once.",
+								BlockAction::Paste(at).header()
+							)));
+						}
+						return Err(parse_error(format!(
+							"Operation {number} has {header} but nothing is cut. Quote the block to move \
+							 in a *** Find followed by *** Cut first; each *** Cut pastes once."
+						)));
+					};
+					OperationRewrite::Paste { cut, at }
+				},
+			};
+			let source =
+				selector.map_or_else(|| normalize_block(&pattern.lines, Side::Find), str::to_owned);
+			if selector.is_some_and(|opener| opener.trim().is_empty()) {
+				return Err(parse_error(BLOCK_SELECTOR_ERROR));
+			}
+			operations.push(literal_operation(source, rewrite, all, selector.is_some(), number)?);
+			state = State::Outside;
+			continue;
+		}
+		if selector.is_some() {
+			return Err(parse_error("Invalid internal block instruction."));
+		}
+		if let Some(encoded) = line.strip_prefix(EMBEDDED_HEADER) {
+			if state != State::Pattern || pattern.has_content {
+				return Err(parse_error("Unexpected embedded edit."));
+			}
+			let source: String = serde_json::from_str(encoded)
+				.map_err(|error| parse_error(format!("Invalid embedded edit: {error}")))?;
+			operations.push(create_operation_text(&source, "", all, operations.len() + 1, false)?);
 			state = State::Outside;
 			continue;
 		}
@@ -2001,6 +2396,15 @@ pub(super) fn parse_section(
 		)?,
 		State::Outside => {},
 	}
+	if block.is_some() {
+		return Err(parse_error("Invalid internal block instruction."));
+	}
+	// While streaming, the paste may simply not have arrived yet.
+	if let Some((unpasted, structural)) = cut
+		&& !streaming
+	{
+		return Err(unpasted_cut(unpasted, structural));
+	}
 	if operations.is_empty() {
 		return Err(parse_error(
 			"Empty patch. Provide *** Find followed by *** Replace, *** Insert Before, or *** Insert \
@@ -2008,9 +2412,14 @@ pub(super) fn parse_section(
 		));
 	}
 	for (index, operation) in operations.iter().enumerate() {
+		if operation.block {
+			continue;
+		}
 		let rewrites: Vec<&str> = match &operation.rewrite {
 			OperationRewrite::Explicit { text } => vec![text],
-			OperationRewrite::Insert { .. } => continue,
+			OperationRewrite::Insert { .. }
+			| OperationRewrite::Cut
+			| OperationRewrite::Paste { .. } => continue,
 			OperationRewrite::Inline { replacements } => {
 				replacements.iter().map(String::as_str).collect()
 			},
@@ -2043,6 +2452,7 @@ pub(super) fn parse_section(
 				OperationRewrite::Inline { replacements } => {
 					replacements.iter().map(String::as_str).collect()
 				},
+				OperationRewrite::Cut | OperationRewrite::Paste { .. } => Vec::new(),
 			};
 			rewrites.iter().any(|rewrite| {
 				normalize_text(rewrite).text.contains(&normalized_pattern)
@@ -2086,39 +2496,111 @@ fn render_inline_pattern(pattern_text: &str, replacements: &[String]) -> String 
 	rendered
 }
 
-fn operation_pattern(operation: &Operation, pattern_text: Option<&str>) -> String {
+fn operation_pattern<'a>(operation: &'a Operation, pattern_text: Option<&'a str>) -> Cow<'a, str> {
+	if operation.block {
+		return Cow::Borrowed(&operation.source_pattern_text);
+	}
 	let pattern = pattern_text.unwrap_or(&operation.pattern_text);
 	match &operation.rewrite {
 		OperationRewrite::Inline { replacements } if pattern != operation.pattern_text => {
-			render_inline_pattern(pattern, replacements)
+			Cow::Owned(render_inline_pattern(pattern, replacements))
 		},
-		OperationRewrite::Inline { .. } => operation.source_pattern_text.clone(),
-		OperationRewrite::Explicit { .. } | OperationRewrite::Insert { .. } => pattern.to_owned(),
+		OperationRewrite::Inline { .. } => Cow::Borrowed(&operation.source_pattern_text),
+		OperationRewrite::Explicit { .. }
+		| OperationRewrite::Insert { .. }
+		| OperationRewrite::Cut
+		| OperationRewrite::Paste { .. } => Cow::Borrowed(pattern),
 	}
 }
 
-/// File header for a copy-ready payload, quoting paths ambiguous with `all`.
-pub(crate) fn edit_header(path: &str, all: bool) -> String {
-	let quoted = (path.trim() != path
+/// A `*** Cut` whose block no later operation pastes.
+fn unpasted_cut(number: usize, structural: bool) -> EditError {
+	if structural {
+		return parse_error(format!(
+			"Operation {number} has *** Cut Block but no paste follows it. Add *** Paste Before \
+			 Block: <opening-line prefix> or *** Paste After Block: <opening-line prefix>. To delete \
+			 the block instead, use *** Delete Block: <opening-line prefix>."
+		));
+	}
+	parse_error(format!(
+		"Operation {number} has *** Cut but no *** Paste Before or *** Paste After follows it. To \
+		 delete the block instead, use an empty *** Replace."
+	))
+}
+
+/// File and `*** Find` headers opening a copy-ready operation; `all` selects
+/// every match. Paths ambiguous with the file header's own `all` are quoted.
+pub(crate) fn find_opener(path: &str, all: bool) -> String {
+	format!("*** Edit File: {}\n*** Find{}", header_path(path), if all { " all" } else { "" })
+}
+
+fn header_path(path: &str) -> Cow<'_, str> {
+	if path.trim() != path
 		|| path.starts_with('"')
 		|| path.contains(['\n', '\r'])
 		|| path.eq_ignore_ascii_case("all")
 		|| path
 			.rsplit_once(char::is_whitespace)
-			.is_some_and(|(_, flag)| flag.eq_ignore_ascii_case("all")))
-	.then(|| serde_json::to_string(path).expect("path serialization"));
-	format!("*** Edit File: {}{}", quoted.as_deref().unwrap_or(path), if all { " all" } else { "" })
+			.is_some_and(|(_, flag)| flag.eq_ignore_ascii_case("all"))
+	{
+		Cow::Owned(serde_json::to_string(path).expect("path serialization"))
+	} else {
+		Cow::Borrowed(path)
+	}
+}
+
+fn render_block(out: &mut String, path: &str, selector: &str, action: BlockAction, text: &str) {
+	writeln!(out, "*** Edit File: {}\n{}: {selector}", header_path(path), action.header())
+		.expect("writing to string");
+	if !text.is_empty() {
+		out.push_str(text);
+		out.push('\n');
+	}
 }
 
 /// Render internal operations as copy-ready section-delimited edits.
 pub fn ir_to_payload(lines: &[&str], path: &str) -> String {
 	let mut out = String::new();
 	let mut in_find = false;
-	for line in lines {
-		if let Some(opener) = parse_opener(line) {
-			out.push_str(&edit_header(path, opener == OpenerKind::All));
-			out.push_str("\n*** Find\n");
+	let mut rows = lines.iter().copied();
+	while let Some(line) = rows.next() {
+		if let Some(selector) = line.strip_prefix(BLOCK_HEADER) {
+			let instruction = rows.next().unwrap_or_default();
+			if let Some(text) = instruction
+				.strip_prefix(BLOCK_REPLACE_HEADER)
+				.and_then(|encoded| serde_json::from_str::<String>(encoded).ok())
+			{
+				let action = if text.is_empty() {
+					BlockAction::Delete
+				} else {
+					BlockAction::Replace
+				};
+				render_block(&mut out, path, selector, action, &text);
+			} else {
+				let action = match bodyless_action(instruction) {
+					Some(Action::Cut) => BlockAction::Cut,
+					Some(Action::Paste(at)) => BlockAction::Paste(at),
+					_ => continue,
+				};
+				render_block(&mut out, path, selector, action, "");
+			}
+			in_find = false;
+		} else if let Some(opener) = parse_opener(line) {
+			out.push_str(&find_opener(path, opener == OpenerKind::All));
+			out.push('\n');
 			in_find = true;
+		} else if let Some(pattern) = line
+			.strip_prefix(EMBEDDED_HEADER)
+			.and_then(|encoded| serde_json::from_str::<String>(encoded).ok())
+			.filter(|_| in_find)
+		{
+			out.push_str(&pattern);
+			out.push('\n');
+			in_find = false;
+		} else if let Some(action) = bodyless_action(line).filter(|_| in_find) {
+			out.push_str(action.header());
+			out.push('\n');
+			in_find = false;
 		} else if let Some((at, text)) = strip_insert_header(line)
 			.and_then(|(at, encoded)| Some((at, serde_json::from_str::<String>(encoded).ok()?)))
 			.filter(|_| in_find)
@@ -2145,16 +2627,30 @@ pub fn operation_payload(
 	all: bool,
 	pattern_text: Option<&str>,
 ) -> String {
-	let open = edit_header(path, all);
 	let pattern = operation_pattern(operation, pattern_text);
+	if operation.block {
+		let (action, text) = match &operation.rewrite {
+			OperationRewrite::Cut => (BlockAction::Cut, ""),
+			OperationRewrite::Paste { at, .. } => (BlockAction::Paste(*at), ""),
+			OperationRewrite::Explicit { text } if text.is_empty() => (BlockAction::Delete, ""),
+			OperationRewrite::Explicit { text } => (BlockAction::Replace, text.as_str()),
+			_ => unreachable!("unsupported structural action"),
+		};
+		let mut out = String::new();
+		render_block(&mut out, path, &pattern, action, text);
+		return out;
+	}
+	let open = find_opener(path, all);
 	match &operation.rewrite {
-		OperationRewrite::Inline { .. } => format!("{open}\n*** Find\n{pattern}\n"),
+		OperationRewrite::Inline { .. } => format!("{open}\n{pattern}\n"),
 		OperationRewrite::Insert { text, at } => {
-			format!("{open}\n*** Find\n{pattern}\n{}\n{text}", at.header())
+			format!("{open}\n{pattern}\n{}\n{text}", at.header())
 		},
 		OperationRewrite::Explicit { text } => {
-			format!("{open}\n*** Find\n{pattern}\n*** Replace\n{text}")
+			format!("{open}\n{pattern}\n*** Replace\n{text}")
 		},
+		OperationRewrite::Cut => format!("{open}\n{pattern}\n*** Cut\n"),
+		OperationRewrite::Paste { at, .. } => format!("{open}\n{pattern}\n{}\n", at.paste_header()),
 	}
 }
 
