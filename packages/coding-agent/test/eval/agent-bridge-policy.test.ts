@@ -334,9 +334,6 @@ describe("runEvalAgent", () => {
 		expect(firstOptions.parentActiveModelPattern).toBe("p/current");
 		expect(firstOptions.outputSchema).toBe(schema);
 		expect(firstOptions.outputSchemaOverridesAgent).toBe(true);
-		// task.structured is off (default); eval agents keep yield + schemas regardless.
-		expect(firstOptions.structured).toBe(true);
-		expect(secondOptions.structured).toBe(true);
 		expect(firstOptions.assignment).toBe("hello");
 		expect(firstOptions.description).toBe("My Agent");
 		// No per-call override: the agent's own frontmatter model applies.
@@ -656,6 +653,50 @@ describe("agent() through eval runtimes", () => {
 		expect(output.node.handle).toBe(`agent://${output.node.id}`);
 	});
 
+	it("waits for an existing JavaScript agent by displayed id and rejects unknown ids", async () => {
+		using tempDir = TempDir.createSync("@omp-wait-agent-name-js-");
+		const { session, sessionFile } = makeEvalSession(tempDir, "js-wait-name");
+		mockAgents();
+		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+			singleResult(options, { output: "done" }),
+		);
+		const result = await executeJs(
+			'const h = await agent("hello"); const value = await wait([h.id]); let error; try { await wait(["not-owned"]); } catch (e) { error = e.message; } return JSON.stringify({ value, error });',
+			{ cwd: tempDir.path(), sessionId: sharedJsSessionId, session, sessionFile },
+		);
+		expect(result.exitCode).toBe(0);
+		const resultValue = JSON.parse(result.output.trim());
+		expect(resultValue.value).toEqual(["done"]);
+		expect(resultValue.error).toContain("unknown agent handle");
+	});
+
+	it("waits for a separately spawned task by name without exposing another owner's task", async () => {
+		using tempDir = TempDir.createSync("@omp-wait-task-name-");
+		const { session, sessionFile } = makeEvalSession(tempDir, "js-wait-task-name");
+		session.getAgentId = () => "Main";
+		const manager = session.asyncJobManager!;
+		manager.publishCompleted(
+			"task",
+			"OwnWorker",
+			{ text: "delivered" },
+			{ id: "OwnWorker", agentId: "OwnWorker", ownerId: "Main" },
+		);
+		manager.publishCompleted(
+			"task",
+			"ForeignWorker",
+			{ text: "private" },
+			{ id: "ForeignWorker", agentId: "ForeignWorker", ownerId: "Other" },
+		);
+		const result = await executeJs(
+			'const value = await wait(["OwnWorker"]); let error; try { await wait(["ForeignWorker"]); } catch (e) { error = e.message; } return JSON.stringify({value, error});',
+			{ cwd: tempDir.path(), sessionId: sharedJsSessionId, session, sessionFile },
+		);
+		expect(result.exitCode).toBe(0);
+		const data = JSON.parse(result.output.trim());
+		expect(data.value).toEqual(["delivered"]);
+		expect(data.error).toContain("unknown agent handle");
+	});
+
 	it("runs JavaScript agent handles concurrently and returns results in input order", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-js-handles-");
 		const { session, sessionFile } = makeEvalSession(tempDir, "js-agent-handles");
@@ -743,6 +784,23 @@ describe("agent() through eval runtimes", () => {
 		const node = JSON.parse(lines[2] ?? "");
 		expect(node.data).toEqual({ ok: true });
 		expect(node.handle).toBe(`agent://${node.id}`);
+	});
+
+	it("waits for an existing Python agent by displayed id and rejects unknown ids", async () => {
+		using tempDir = TempDir.createSync("@omp-wait-agent-name-py-");
+		const { session, sessionFile, sessionId } = makeEvalSession(tempDir, "py-wait-name");
+		mockAgents();
+		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+			singleResult(options, { output: "done" }),
+		);
+		const result = await executePython(
+			'import json\nh = agent("hello")\nvalue = wait([h.id])\ntry:\n    wait(["not-owned"])\nexcept Exception as e:\n    error = str(e)\nprint(json.dumps({"value": value, "error": error}))',
+			{ cwd: tempDir.path(), sessionId, sessionFile, kernelMode: "per-call", toolSession: session },
+		);
+		expect(result.exitCode).toBe(0);
+		const resultValue = JSON.parse(result.output.trim());
+		expect(resultValue.value).toEqual(["done"]);
+		expect(resultValue.error).toContain("unknown agent handle");
 	});
 
 	it("runs Python agent handles concurrently and returns results in input order", async () => {

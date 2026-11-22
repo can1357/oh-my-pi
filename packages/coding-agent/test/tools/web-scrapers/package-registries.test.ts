@@ -117,6 +117,10 @@ describe.skipIf(SKIP)("handlePubDev", () => {
 		expect(result).toBeNull();
 	});
 
+	it("leaves package subpages to the generic reader", async () => {
+		expect(await handlePubDev("https://pub.dev/packages/http/changelog", 10)).toBeNull();
+	});
+
 	it("returns null for invalid pub.dev URLs", async () => {
 		const result = await handlePubDev("https://pub.dev/invalid", 10);
 		expect(result).toBeNull();

@@ -16,7 +16,7 @@ import { nativeImageNode } from "../native/blobs";
 import { node, row, span } from "../native/describe";
 import { plainText } from "../native/spans";
 import type { DescribeContext, NativeNode } from "../native/node";
-import { convertImageToPng } from "../chat/image-loading";
+import { convertImageToPng } from "../png-conversion";
 import { attachmentSgr } from "./composer-attachments";
 import { cachedImageDimensions, setCachedImageDimensions } from "./image-references";
 import { theme } from "../theme/theme";

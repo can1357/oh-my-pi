@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, it } from "bun:test";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { isEvalTimeoutControlEvent } from "@oh-my-pi/pi-coding-agent/eval/bridge-timeout";
 import { PYTHON_PRELUDE } from "@oh-my-pi/pi-coding-agent/eval/py/prelude";
 import {
 	disposePyToolBridge,
@@ -210,6 +211,31 @@ asyncio.run(check_intent())
 		}
 	});
 
+	it("rejects yield with a direct-tool error without executing it", async () => {
+		const calls: FakeCall[] = [];
+		const tool = makeFakeTool("yield", calls, {
+			content: [{ type: "text", text: "Result submitted." }],
+		});
+		const session = makeSession(new Map([["yield", tool]]));
+		const info = await ensurePyToolBridge();
+		const unregister = registerPyToolBridge("yield-session", "run-yield", { toolSession: session });
+		try {
+			const res = await call(info, {
+				session: "yield-session",
+				run: "run-yield",
+				name: "yield",
+				args: { data: { result: "done" } },
+			});
+			expect(await res.json()).toMatchObject({
+				ok: false,
+				error: expect.stringContaining("call the direct `yield` tool"),
+			});
+			expect(calls).toEqual([]);
+		} finally {
+			unregister();
+		}
+	});
+
 	it("rejects requests with a bad bearer token", async () => {
 		const info = await ensurePyToolBridge();
 		const res = await call(
@@ -246,8 +272,10 @@ asyncio.run(check_intent())
 				args: { path: "foo.ts" },
 			});
 			expect(res.status).toBe(200);
-			expect(statusEvents).toHaveLength(1);
-			expect(statusEvents[0]!.op).toBe("read");
+			// Timeout pause/resume control events surround the tool's own status.
+			expect(statusEvents.filter(event => !isEvalTimeoutControlEvent(event)).map(event => event.op)).toEqual([
+				"read",
+			]);
 		} finally {
 			unregister();
 		}

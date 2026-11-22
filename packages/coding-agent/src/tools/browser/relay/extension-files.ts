@@ -4,26 +4,88 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getBrowserRelayDir } from "@oh-my-pi/pi-utils";
-import backgroundJs from "./extension-assets/background.js.txt" with { type: "text" };
-import licenseText from "./extension-assets/LICENSE.txt" with { type: "text" };
-import manifestJson from "./extension-assets/manifest.json.txt" with { type: "text" };
-import optionsHtml from "./extension-assets/options.html.txt" with { type: "text" };
-import optionsJs from "./extension-assets/options.js.txt" with { type: "text" };
+import { getBrowserRelayDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { replaceFileAtomically } from "../../../utils/atomic-file";
-import { stampRelayExtensionManifest, stampRelayExtensionScript } from "./protocol";
+import { embeddedRelayExtensionZstPath } from "./embedded-extension";
+import {
+	type RelayExtensionStamp,
+	readRelayExtensionStamp,
+	stampRelayExtensionManifest,
+	stampRelayExtensionScript,
+} from "./protocol";
 
-/** The extension files `omp browser-relay install` writes, stamped with the installing omp's version. */
-export function relayExtensionFiles(ompVersion: string): Record<string, string> {
-	return {
-		// The extension reports this stamp in its hello, so omp can tell when an older install keeps running.
-		"background.js": stampRelayExtensionScript(backgroundJs, ompVersion),
-		LICENSE: licenseText,
-		// Shown in chrome://extensions.
-		"manifest.json": stampRelayExtensionManifest(manifestJson, ompVersion),
-		"options.html": optionsHtml,
-		"options.js": optionsJs,
+/** The unstamped extension files, binary ones base64-encoded, as packages/browser-relay/scripts/build-extension.ts writes them. */
+export interface RelayExtensionBundle {
+	/** Digest of the unstamped files; stamped into every install so a relay can spot a stale build. */
+	build: string;
+	files: Record<string, string | { base64: string }>;
+}
+
+/** Where a source checkout keeps the generated extension; builds embed it instead. */
+const GENERATED_EXTENSION = path.join(import.meta.dir, "extension.generated.json");
+
+let loading: Promise<RelayExtensionBundle> | undefined;
+
+/**
+ * The extension this omp installs: loaded lazily from the embedded zstd asset in
+ * binaries and bundles, or read from `extension.generated.json` in a source
+ * checkout. Coalesces concurrent loads without pinning the ~2 MiB bundle after
+ * callers finish.
+ *
+ * @throws Error naming `bun run gen:relay-extension` when a source checkout has not generated the extension.
+ */
+export function loadRelayExtension(): Promise<RelayExtensionBundle> {
+	if (loading) return loading;
+	const pending: Promise<RelayExtensionBundle> = embeddedRelayExtensionZstPath
+		? Bun.file(embeddedRelayExtensionZstPath)
+				.bytes()
+				.then(bytes => Bun.zstdDecompress(bytes))
+				.then((raw): RelayExtensionBundle => JSON.parse(raw.toString("utf8")))
+		: Bun.file(GENERATED_EXTENSION)
+				.json()
+				.catch((error: unknown) => {
+					if (!isEnoent(error)) throw error;
+					throw new Error(
+						`This omp checkout has not built the omp extension (${GENERATED_EXTENSION} is missing). Run \`bun run gen:relay-extension\` at the repository root.`,
+					);
+				});
+	loading = pending;
+	const settle = (): void => {
+		if (loading === pending) loading = undefined;
 	};
+	pending.then(settle, settle);
+	return pending;
+}
+
+type ExtensionFiles = Record<string, string | Buffer> & {
+	"background.js": string;
+	"manifest.json": string;
+};
+
+/**
+ * The extension files `omp browser-relay install` writes, stamped with the installing omp's version.
+ *
+ * @throws Error when the extension is missing (see {@link loadRelayExtension}) or lacks its manifest or service worker.
+ */
+export async function relayExtensionFiles(
+	ompVersion: string,
+	bundle: Promise<RelayExtensionBundle> = loadRelayExtension(),
+): Promise<ExtensionFiles> {
+	const { build, files: assets } = await bundle;
+	const manifest = assets["manifest.json"];
+	const script = assets["background.js"];
+	if (typeof manifest !== "string" || typeof script !== "string")
+		throw new Error("The omp extension lacks manifest.json or background.js");
+	const files: ExtensionFiles = {
+		"manifest.json": stampRelayExtensionManifest(manifest, ompVersion),
+		"background.js": stampRelayExtensionScript(script, ompVersion, build),
+	};
+	for (const name in assets) {
+		if (name === "background.js" || name === "manifest.json") continue;
+		const content = assets[name]!;
+		files[name] = typeof content === "string" ? content : Buffer.from(content.base64, "base64");
+	}
+	return files;
 }
 
 /** Where `omp browser-relay install` puts the extension without `--dir` (~/.omp/browser-relay/extension). */
@@ -35,32 +97,55 @@ export function defaultRelayExtensionDir(): string {
  * Write the extension files of `ompVersion` into `dir`. Each changed file is
  * written beside its target and renamed over it, so Chrome never reads a
  * partly written file: a reload that meets a broken manifest unloads the
- * extension until the user reloads it by hand. `background.js` goes last: its
- * stamp is the version the extension reports, so a write that fails midway
- * leaves it reporting the old one and the update is tried again.
+ * extension until the user reloads it by hand. Publish the manifest after its
+ * assets and `background.js` last, so a write that fails midway leaves the
+ * worker reporting the old version. Returns whether any file was published. Callers writing several folders pass
+ * one `bundle` so the extension loads once.
  */
-export async function writeRelayExtension(dir: string, ompVersion: string): Promise<void> {
-	await fs.mkdir(dir, { recursive: true });
-	const files = relayExtensionFiles(ompVersion);
-	const names = Object.keys(files).filter(name => name !== "background.js");
-	names.push("background.js");
-	for (const name of names) {
-		const target = path.join(dir, name);
-		const content = files[name]!;
-		const current = await Bun.file(target)
-			.text()
-			.catch(() => null);
-		if (current === content) continue;
-		const staged = `${target}.${crypto.randomUUID()}.tmp`;
-		await Bun.write(staged, content);
-		await replaceFileAtomically(staged, target);
+export async function writeRelayExtension(
+	dir: string,
+	ompVersion: string,
+	bundle?: Promise<RelayExtensionBundle>,
+): Promise<boolean> {
+	const files = await relayExtensionFiles(ompVersion, bundle);
+	let changed = false;
+	for (const name in files) {
+		if (name === "background.js" || name === "manifest.json") continue;
+		if (await publishExtensionFile(path.join(dir, name), files[name]!)) changed = true;
 	}
+	if (await publishExtensionFile(path.join(dir, "manifest.json"), files["manifest.json"])) changed = true;
+	return (await publishExtensionFile(path.join(dir, "background.js"), files["background.js"])) || changed;
+}
+
+async function publishExtensionFile(target: string, content: string | Buffer): Promise<boolean> {
+	const bytes = typeof content === "string" ? Buffer.from(content) : content;
+	const current = await Bun.file(target)
+		.arrayBuffer()
+		.catch((error: unknown) => {
+			if (isEnoent(error)) return null;
+			throw error;
+		});
+	if (current !== null && bytes.equals(Buffer.from(current))) return false;
+
+	const staged = `${target}.${crypto.randomUUID()}.tmp`;
+	try {
+		await Bun.write(staged, bytes);
+		await replaceFileAtomically(staged, target);
+	} catch (error) {
+		await fs.rm(staged, { force: true }).catch(() => {});
+		throw error;
+	}
+	return true;
 }
 
 /**
- * The id Chrome gives an extension loaded unpacked from `dir` (a manifest without a `key`, like the relay's), or
- * null when `dir` does not exist. Chrome makes the path absolute (`base::MakeAbsoluteFilePath`: `realpath` on
- * macOS and Linux, `_wfullpath` on Windows, which keeps links) and hashes it with {@link extensionIdForPath}.
+ * The id Chrome gives the extension loaded unpacked from `dir`, or null when `dir` does not exist. Chrome makes the
+ * path absolute (`base::MakeAbsoluteFilePath`: `realpath` on macOS and Linux, `_wfullpath` on Windows, which keeps
+ * links) and hashes it with {@link extensionIdForPath}.
+ *
+ * The manifest deliberately has no `key`: a key would change the id of a folder Chrome already loaded, and Chrome
+ * keeps the old record, whose id no longer matches the folder, which then fails every later startup load of that
+ * folder (`InstalledLoader::LoadAllExtensions` marks the path invalid). Path ids keep every install updatable in place.
  */
 export async function unpackedExtensionId(dir: string): Promise<string | null> {
 	try {
@@ -83,8 +168,21 @@ export function extensionIdForPath(absolutePath: string, platform: NodeJS.Platfo
 					"utf16le",
 				)
 			: Buffer.from(absolutePath, "utf8");
-	const hex = new Bun.CryptoHasher("sha256").update(bytes).digest("hex").slice(0, 32);
-	return Array.from(hex, digit => String.fromCharCode(97 + Number.parseInt(digit, 16))).join("");
+	const hex = Bun.SHA256.hash(bytes, "hex").slice(0, 32);
+	return hex.replace(/./g, digit => String.fromCharCode(97 + Number.parseInt(digit, 16)));
+}
+
+/**
+ * The stamp of the `background.js` in `dir`: the build Chrome runs once it (re)loads that folder. Null when the
+ * script is absent, unreadable or unstamped.
+ */
+export async function installedRelayExtensionStamp(dir: string): Promise<RelayExtensionStamp | null> {
+	try {
+		const head = await Bun.file(path.join(dir, "background.js")).slice(0, 256).text();
+		return readRelayExtensionStamp(head);
+	} catch {
+		return null;
+	}
 }
 
 /** The omp version stamped in `dir`'s manifest; "" when it has none or cannot be read. */

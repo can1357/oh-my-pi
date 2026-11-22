@@ -13,21 +13,27 @@ import { createInteractiveModeContext } from "../../helpers/interactive-mode-con
  * main session's run state and the viewed session's streaming state are
  * mutable flags the tests drive directly.
  */
-function createContext() {
+function createContext(options: { viewSessionIsMain?: boolean } = {}) {
 	const streamState = { mainRunActive: false, viewIsStreaming: false };
+	const viewed = {
+		isCompacting: false,
+		getLastAssistantMessage: () => undefined,
+		get isStreaming() {
+			return streamState.viewIsStreaming;
+		},
+	};
 	const ctx = createInteractiveModeContext({
 		session: {
 			get isRunActive() {
 				return streamState.mainRunActive;
 			},
-		},
-		viewSession: {
-			isCompacting: false,
-			getLastAssistantMessage: () => undefined,
 			get isStreaming() {
 				return streamState.viewIsStreaming;
 			},
 		},
+		// No override: the helper's `viewSession` getter returns `this.session`,
+		// the normal case where the main session is the one on screen.
+		viewSession: options.viewSessionIsMain ? undefined : viewed,
 	});
 	const loader = new Loader(
 		ctx.ui,
@@ -43,6 +49,18 @@ function createContext() {
 
 const AGENT_START = { type: "agent_start" } as unknown as AgentSessionEvent;
 const AGENT_END = { type: "agent_end", messages: [] } as unknown as AgentSessionEvent;
+const DONE_END = {
+	type: "agent_end",
+	messages: [
+		{
+			role: "assistant",
+			content: [{ type: "text", text: "result" }],
+			stopReason: "stop",
+			usage: { inputTokens: 0, outputTokens: 0 },
+			timestamp: Date.now(),
+		},
+	],
+} as unknown as AgentSessionEvent;
 
 describe("EventController agent_end teardown", () => {
 	beforeAll(async () => {
@@ -74,13 +92,12 @@ describe("EventController agent_end teardown", () => {
 		expect(ctx.loadingAnimation).toBeUndefined();
 	});
 
-	it("releases the worker's run flag and loader when a focused worker ends while the main session's run goes on", async () => {
+	it("releases the worker's loader when a focused worker ends while the main session's run goes on", async () => {
 		const { ctx, streamState, loader } = createContext();
 		const controller = new EventController(ctx);
 
 		streamState.viewIsStreaming = true;
 		await controller.handleEvent(AGENT_START);
-		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
 
 		// The viewed worker finishes; the main session's run keeps going underneath
 		// (streaming, or paused awaiting its own jobs).
@@ -89,7 +106,6 @@ describe("EventController agent_end teardown", () => {
 		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
 		await controller.handleEvent(AGENT_END);
 
-		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(false);
 		// A stale "Working…" row would otherwise stay under the finished worker.
 		expect(loader.stop).toHaveBeenCalledTimes(1);
 		expect(ctx.loadingAnimation).toBeUndefined();
@@ -98,24 +114,47 @@ describe("EventController agent_end teardown", () => {
 		expect(TERMINAL.sendNotification).not.toHaveBeenCalled();
 	});
 
-	it("keeps the composer busy for idle auto-compaction and releases it at the end", async () => {
-		const { ctx } = createContext();
+	it("does not report done for a stale agent_end but still tears the ended run down when the next run opened on the viewed main session", async () => {
+		const { ctx, streamState, loader } = createContext({ viewSessionIsMain: true });
+		// The main session is on screen here, so the focused-worker teardown
+		// branch cannot be what protects the status: the helper's getter makes
+		// `viewSession === session` when no viewSession override is supplied.
 		const controller = new EventController(ctx);
 
-		await controller.handleEvent({
-			type: "auto_compaction_start",
-			reason: "idle",
-			action: "context-full",
-		} as unknown as AgentSessionEvent);
-		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
+		// Run 1 starts and owns the loader / composer activity.
+		streamState.mainRunActive = true;
+		streamState.viewIsStreaming = true;
+		await controller.handleEvent(AGENT_START);
+		expect(ctx.loadingAnimation).toBeDefined();
 
-		// An aborted compaction leaves no rebuilt transcript to refill the loader's row.
-		await controller.handleEvent({
-			type: "auto_compaction_end",
-			action: "context-full",
-			aborted: true,
-		} as unknown as AgentSessionEvent);
-		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(false);
+		// Real chain order: #checkRun closes run 1 and emits its (stale)
+		// agent_end, then #drainStrandedQueuedMessages opens run 2 before the
+		// serialized dispatch chain delivers that end. So `isRunActive` is true
+		// again when the controller handles the stale end. Run 2's own
+		// agent_start follows in the chain — it is NOT dispatched before it.
+		streamState.mainRunActive = false; // #checkRun closes run 1
+		streamState.mainRunActive = true; // #drainStrandedQueuedMessages opens run 2
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		await controller.handleEvent(DONE_END);
+
+		// No mid-run `done` for Rex / OSC 7501 ...
+		expect(report).not.toHaveBeenCalled();
+		// ... but the ended run still got its full teardown, not a blanket skip.
+		expect(ctx.flushPendingModelSwitch).toHaveBeenCalled();
+		expect(loader.stop).toHaveBeenCalled();
+		expect(ctx.loadingAnimation).toBeUndefined();
+		expect(TERMINAL.sendNotification).toHaveBeenCalled();
+
+		// Run 2's agent_start follows the stale end and re-arms the live run.
+		await controller.handleEvent(AGENT_START);
+		expect(ctx.loadingAnimation).toBeDefined();
+
+		// The live run's own terminal end still reports done normally.
+		streamState.mainRunActive = false;
+		streamState.viewIsStreaming = false;
+		report.mockClear();
+		await controller.handleEvent(DONE_END);
+		expect(report).toHaveBeenCalledWith({ state: "done" });
 	});
 
 	it("flushes queued command panels at a pause", async () => {

@@ -976,6 +976,50 @@ describe("devin catalog pricing", () => {
 		}
 	});
 
+	it("switches Gemini promo prices that discovery reports to list when each promo ends", () => {
+		const now = Date.parse("2026-11-17T00:00:00Z");
+		const flashPromo = { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 };
+		const gemini4Promo = { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 };
+		const gemini4List = { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 0 };
+		const clock = spyOn(Date, "now").mockReturnValue(now);
+		try {
+			for (const [id, reported, ends, list] of [
+				[
+					"gemini-3-8-flash",
+					flashPromo,
+					"2027-01-01T08:00:00Z",
+					{ ...flashPromo, input: 1.5, output: 7.5, cacheRead: 0.15 },
+				],
+				["gemini-4-argon", gemini4Promo, "2026-12-01T08:00:00Z", gemini4List],
+				// An account billed below the public promo keeps its own rate until the promo ends.
+				[
+					"gemini-4-argon-low",
+					{ input: 1, output: 5, cacheRead: 0.05, cacheWrite: 0 },
+					"2026-12-01T08:00:00Z",
+					gemini4List,
+				],
+				// A raw effort uid that arrives without family metadata.
+				["gemini-4-carbon-high", gemini4Promo, "2026-11-24T16:00:00Z", gemini4List],
+			] as const) {
+				const model = buildModel(spec(id, reported));
+				expect(model.cost, id).toMatchObject(reported);
+				expect(getEffectiveTokenCost(model.cost, Date.parse(ends) - 1), id).toMatchObject(reported);
+				expect(getEffectiveTokenCost(model.cost, Date.parse(ends)), id).toMatchObject(list);
+			}
+			// Hydrogen shares Argon's and Carbon's class rank; Gemini 3.6 Flash sits below the promo revisions.
+			for (const [id, upstream] of [
+				["gemini-4-hydrogen", { input: 1.5, output: 7.5, cacheRead: 0.075, cacheWrite: 0 }],
+				["gemini-3-6-flash", { input: 1.5, output: 7.5, cacheRead: 0.15, cacheWrite: 0 }],
+			] as const) {
+				const model = buildModel(spec(id, upstream));
+				expect(model.cost, id).toMatchObject(upstream);
+				expect(model.cost.timeBased, id).toBeUndefined();
+			}
+		} finally {
+			clock.mockRestore();
+		}
+	});
+
 	it("switches the SWE-2 fallback to list after the promo ends, including on rows rebuilt from promo-era rows", () => {
 		const promoEra = buildModel(spec("swe-2"));
 		const clock = spyOn(Date, "now").mockReturnValue(PROMO_ENDS);
@@ -1025,19 +1069,36 @@ describe("devin catalog pricing", () => {
 		});
 	});
 
-	it("tiers the standard GPT-5.6 lanes but not their undocumented Fast lanes", () => {
-		const standard = buildModel(spec("gpt-5-6-sol-high", { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 0 }));
-		expect(standard.cost.longContext).toEqual({
+	it("tiers GPT-5.6 lanes, Fast included, at Devin's published long-context rates", () => {
+		const fast = buildModel(
+			spec("gpt-5-6-terra-high-priority", { input: 4, output: 24, cacheRead: 0.4, cacheWrite: 0 }),
+		);
+		expect(fast.cost.longContext).toEqual({
+			inputThreshold: 272_000,
+			input: 8,
+			output: 36,
+			cacheRead: 0.8,
+			cacheWrite: 10,
+		});
+		// Sol's published tier did not follow its standard-context price rise.
+		const sol = buildModel(spec("gpt-5-6-sol-high", { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 }));
+		expect(sol.cost.longContext).toEqual({
 			inputThreshold: 272_000,
 			input: 8,
 			output: 30,
 			cacheRead: 0.8,
 			cacheWrite: 10,
 		});
-		const fast = buildModel(
-			spec("gpt-5-6-sol-high-priority", { input: 8, output: 40, cacheRead: 0.8, cacheWrite: 0 }),
+		const solFast = buildModel(
+			spec("gpt-5-6-sol-max-priority", { input: 10, output: 60, cacheRead: 1, cacheWrite: 0 }),
 		);
-		expect(fast.cost.longContext).toBeUndefined();
+		expect(solFast.cost.longContext).toEqual({
+			inputThreshold: 272_000,
+			input: 16,
+			output: 60,
+			cacheRead: 1.6,
+			cacheWrite: 20,
+		});
 	});
 
 	it("doubles every Grok leg but raises Gemini Pro output only 1.5x above 200K", () => {
@@ -1073,7 +1134,15 @@ describe("devin catalog pricing", () => {
 	});
 
 	it("leaves models Devin publishes no tier for untiered", () => {
-		for (const id of ["gpt-7-sol", "gpt-6-mini", "gpt-6-nano", "gemini-3-pro", "gemini-4-pro", "grok-5"]) {
+		for (const id of [
+			"gpt-7-sol",
+			"gpt-6-mini",
+			"gpt-6-nano",
+			"gpt-5-5-high-priority",
+			"gemini-3-pro",
+			"gemini-4-pro",
+			"grok-5",
+		]) {
 			const model = buildModel(spec(id, { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 }));
 			expect(model.cost.longContext).toBeUndefined();
 		}

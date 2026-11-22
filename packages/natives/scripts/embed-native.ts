@@ -39,7 +39,7 @@ export interface EmbedOptions extends NativeEmbedTarget {
  * small.
  *
  * Nothing is written to disk. Bun.build shares the runtime's directory cache
- * and never re-reads it on a miss, so a process that imported pi-natives before
+ * and never re-reads it on a miss, so a process that imported omp-natives before
  * writing the frames cannot resolve them; in-memory files bypass that lookup.
  *
  * @throws when no addon exists for the target, or when an addon lacks the
@@ -95,7 +95,7 @@ export async function embeddedAddonFiles({
 	);
 	const files = available.map(
 		({ variant, filename, bytes }, index) =>
-			`{ variant: ${JSON.stringify(variant)}, filename: ${JSON.stringify(filename)}, size: ${bytes.length}, zstdPath: zstdPath${index} }`,
+			`{ variant: ${JSON.stringify(variant)}, filename: ${JSON.stringify(filename)}, size: ${bytes.length}, hash: ${JSON.stringify(Bun.hash.xxHash64(bytes).toString(16).padStart(16, "0"))}, zstdPath: zstdPath${index} }`,
 	);
 	const manifest = `${imports.join("\n")}
 

@@ -5,7 +5,7 @@ import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
 import { closeDb, initDb } from "@oh-my-pi/omp-stats/db";
 import type { SpotlightAgentScope, SpotlightDashboardStats } from "@oh-my-pi/omp-stats/shared-types";
 import { buildSpotlightDashboard } from "@oh-my-pi/omp-stats/spotlight-aggregator";
-import { getSessionsDir } from "@oh-my-pi/pi-utils";
+import { getSessionsDir, spillFileName, spillUrl } from "@oh-my-pi/pi-utils";
 import { type ShapeSpec, SpotlightSessionBuilder } from "./helpers/spotlight-session";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
@@ -43,7 +43,7 @@ function shaped(b: SpotlightSessionBuilder, name: string, args: Record<string, u
 	return id;
 }
 
-/** A shaped whole-file read of `file` (`lines` lines, original `artifact://N`) that kept `kept`. */
+/** A shaped whole-file read of `file` (`lines` lines, original spill `N`, or `url` as given) that kept `kept`. */
 function shapedRead(
 	b: SpotlightSessionBuilder,
 	file: string,
@@ -52,7 +52,8 @@ function shapedRead(
 		kept?: [number, number][];
 		heat?: string;
 		artifact?: number;
-	} & Partial<Pick<ShapeSpec, "holdout" | "scoreFree" | "inTokens" | "outTokens" | "gated">> = {},
+		url?: string;
+	} & Partial<Pick<ShapeSpec, "holdout" | "scoreFree" | "inTokens" | "outTokens" | "plainTokens" | "gated">> = {},
 ): string {
 	return shaped(
 		b,
@@ -65,8 +66,9 @@ function shapedRead(
 			...(opts.holdout ? { holdout: opts.holdout } : {}),
 			...(opts.scoreFree ? { scoreFree: true } : {}),
 			...(opts.gated ? { gated: true } : {}),
+			...(opts.plainTokens === undefined ? {} : { plainTokens: opts.plainTokens }),
 			original: {
-				url: `artifact://${opts.artifact ?? 0}`,
+				url: opts.url ?? spillUrl(opts.artifact ?? 0),
 				lines: opts.lines ?? 60,
 				path: file,
 				kept: opts.kept ?? [[1, 10]],
@@ -85,7 +87,7 @@ describe("Spotlight savings against plain", () => {
 	it("prefers the logged plain size, estimates older traces from the inline cap, and counts a cut wider than plain as a loss", async () => {
 		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
 		b.user("go");
-		const original = { url: "artifact://0", lines: 4000, kept: [[1, 10]] as [number, number][] };
+		const original = { url: spillUrl(0), lines: 4000, kept: [[1, 10]] as [number, number][] };
 		// 120,000 chars over bash's 52 KiB cap: plain shows 30,000 × 53,248 / 120,000 = 13,312 tokens.
 		shaped(b, "bash", { command: "make all" }, { inTokens: 30_000, outTokens: 1000, original });
 		const logged = shaped(
@@ -140,33 +142,39 @@ describe("Spotlight savings against plain", () => {
 });
 
 describe("Spotlight needed lines", () => {
-	it("records re-read selections and edit Find spans from a subagent's artifact in its parent's directory, until the first edit", async () => {
-		const parent = new SpotlightSessionBuilder(T0).header("/repo");
-		parent.user("delegate");
-		await write("main.jsonl", parent);
-		await Bun.write(sessionPath("main/3.spotlight-read.log"), TEN_LINES.join("\n"));
+	// Spills sit at the session's `local://` root; transcripts from before that named `artifact://N` (file `N.*`).
+	for (const [layout, url, file] of [
+		["spill", spillUrl(3), `main/local/${spillFileName(3)}`],
+		["legacy artifact", "artifact://3", "main/3.spotlight-read.log"],
+	] as const) {
+		it(`records re-read selections and edit Find spans from a subagent's ${layout} in its parent's directory, until the first edit`, async () => {
+			const parent = new SpotlightSessionBuilder(T0).header("/repo");
+			parent.user("delegate");
+			await write("main.jsonl", parent);
+			await Bun.write(sessionPath(file), TEN_LINES.join("\n"));
 
-		const b = new SpotlightSessionBuilder(T0 + 60_000).header("/repo").marker();
-		b.user("task");
-		shapedRead(b, "src/x.ts", { lines: 10, kept: [[1, 3]], artifact: 3 });
-		call(b, "read", { path: "src/x.ts:5-6" });
-		call(b, "read", { path: "src/other.ts:1-2" });
-		edit(b, "/repo/src/x.ts", ["line 7", "line 8"]);
-		// After the file's first edit: new content, not the original's lines.
-		call(b, "read", { path: "src/x.ts:9-10" });
-		await write("main/Sub.jsonl", b);
+			const b = new SpotlightSessionBuilder(T0 + 60_000).header("/repo").marker();
+			b.user("task");
+			shapedRead(b, "src/x.ts", { lines: 10, kept: [[1, 3]], url });
+			call(b, "read", { path: "src/x.ts:5-6" });
+			call(b, "read", { path: "src/other.ts:1-2" });
+			edit(b, "/repo/src/x.ts", ["line 7", "line 8"]);
+			// After the file's first edit: new content, not the original's lines.
+			call(b, "read", { path: "src/x.ts:9-10" });
+			await write("main/Sub.jsonl", b);
 
-		const stats = await dashboard();
-		expect(stats.ranking.sources).toEqual({ reread: 1, edit: 1 });
-		const cell = stats.ranking.cells.find(c => c.group === "applied");
-		expect(cell).toMatchObject({ results: 1, neededLines: 4 });
-		// None of lines 5–8 was kept: a random cut of the same size would have kept 3/10 of them.
-		expect(cell?.keptLift.value).toBe(0);
-	});
+			const stats = await dashboard();
+			expect(stats.ranking.sources).toEqual({ reread: 1, edit: 1 });
+			const cell = stats.ranking.cells.find(c => c.group === "applied");
+			expect(cell).toMatchObject({ results: 1, neededLines: 4 });
+			// None of lines 5–8 was kept: a random cut of the same size would have kept 3/10 of them.
+			expect(cell?.keptLift.value).toBe(0);
+		});
+	}
 
 	it("keeps collecting a shaped read's needs across tail parses", async () => {
 		const file = sessionPath("tail.jsonl");
-		await Bun.write(sessionPath("tail/0.spotlight-read.log"), TEN_LINES.join("\n"));
+		await Bun.write(sessionPath(`tail/local/${spillFileName(0)}`), TEN_LINES.join("\n"));
 		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
 		b.user("go");
 		shapedRead(b, "src/x.ts", { lines: 10, kept: [[1, 2]] });
@@ -225,9 +233,9 @@ describe("Spotlight holdout-adjusted net", () => {
 		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
 		b.user("go");
 		// Held out (the model saw them whole): one re-read of a would-be hidden line (100 tokens), one nothing.
-		shapedRead(b, "src/a.ts", { holdout: { shapedUrl: "artifact://9" } });
+		shapedRead(b, "src/a.ts", { holdout: { shapedUrl: spillUrl(9) } });
 		call(b, "read", { path: "src/a.ts:20-30" }, "x".repeat(400));
-		shapedRead(b, "src/b.ts", { holdout: { shapedUrl: "artifact://9" } });
+		shapedRead(b, "src/b.ts", { holdout: { shapedUrl: spillUrl(9) } });
 		// Applied: one recovered (200 tokens), one not.
 		shapedRead(b, "src/c.ts");
 		call(b, "read", { path: "src/c.ts:20-30" }, "y".repeat(800));
@@ -254,6 +262,153 @@ describe("Spotlight holdout-adjusted net", () => {
 		expect(time).toMatchObject({ fetchBackTurns: 1, fetchBackMs: 4000, agentMs: 24_000 });
 		expect(time.share).toBeCloseTo((4000 + time.shapeMs) / 24_000, 12);
 	});
+
+	it("prices each capped side's cuts at its own holdouts' rate, in the estimate, its interval and the step rows", async () => {
+		// Three identical sessions: every resample sums to the same cells, so the interval is the estimate.
+		for (let s = 0; s < 3; s++) {
+			const b = new SpotlightSessionBuilder(T0 + s * DAY).header("/repo").marker();
+			b.user("go");
+			// Held out: ten reads plain capped (showed 2,000 of 3,000 tokens) whose hidden lines come back (100 tokens
+			// each), and ten plain showed whole that nothing fetches.
+			for (let i = 0; i < 10; i++) {
+				shapedRead(b, `src/capped${i}.ts`, { holdout: { shapedUrl: spillUrl(9) }, plainTokens: 2000 });
+				call(b, "read", { path: `src/capped${i}.ts:20-30` }, "x".repeat(400));
+				shapedRead(b, `src/whole${i}.ts`, { holdout: { shapedUrl: spillUrl(9) } });
+			}
+			// Applied: one capped cut recovered (200 tokens), two uncapped, one of them recovered (100 tokens).
+			shapedRead(b, "src/c.ts", { plainTokens: 2000 });
+			call(b, "read", { path: "src/c.ts:20-30" }, "y".repeat(800));
+			shapedRead(b, "src/d.ts");
+			call(b, "read", { path: "src/d.ts:20-30" }, "z".repeat(400));
+			shapedRead(b, "src/e.ts");
+			await write(`binned${s}.jsonl`, b);
+		}
+
+		const stats = await dashboard();
+		// 30 holdouts a side: the 3 capped cuts get 100 back anyway each, the 6 uncapped ones 0, so 900 − 300 is
+		// excess. A pooled baseline (50 a cut over nine cuts) would call 450 excess.
+		const excess = { value: 600, lo: 600, hi: 600 };
+		expect(stats.adjusted.byTool.find(t => t.tool === "read")?.excessTokens).toEqual(excess);
+		expect(stats.adjusted.excessTokens).toEqual(excess);
+		// The step rows charge each cut its side's rate as well.
+		expect(stats.steps.map(c => [c.tool, c.cuts, c.excessTokens])).toEqual([["read", 9, 600]]);
+	});
+
+	it("prices all of a tool's cuts at its pooled rate while a capped side with cuts has fewer holdouts than the trust threshold", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		// Held out: 30 reads plain showed whole that nothing fetches, and one plain capped whose hidden lines come back
+		// (310 tokens), the capped side's only holdout.
+		for (let i = 0; i < 30; i++) shapedRead(b, `src/whole${i}.ts`, { holdout: { shapedUrl: spillUrl(9) } });
+		shapedRead(b, "src/a.ts", { holdout: { shapedUrl: spillUrl(9) }, plainTokens: 2000 });
+		call(b, "read", { path: "src/a.ts:20-30" }, "x".repeat(1240));
+		// Applied: one capped cut recovered (400 tokens), one uncapped (100 tokens).
+		shapedRead(b, "src/c.ts", { plainTokens: 2000 });
+		call(b, "read", { path: "src/c.ts:20-30" }, "y".repeat(1600));
+		shapedRead(b, "src/d.ts");
+		call(b, "read", { path: "src/d.ts:20-30" }, "z".repeat(400));
+		await write("thin.jsonl", b);
+
+		const stats = await dashboard();
+		// Both cuts get the pooled 310 / 31 = 10 back anyway, not the uncapped side's own 0 beside a pooled capped rate
+		// (which would call 490 excess). 500 − 20 is excess, in the step rows too.
+		expect(stats.adjusted.byTool.find(t => t.tool === "read")?.excessTokens.value).toBe(480);
+		expect(stats.steps.map(c => [c.tool, c.cuts, c.excessTokens])).toEqual([["read", 2, 480]]);
+	});
+
+	it("calls no excess when cuts come back like holdouts of the same capped share and one side is thin", async () => {
+		// Three identical sessions: every resample sums to the same cells, so the interval is the estimate.
+		for (let s = 0; s < 3; s++) {
+			const b = new SpotlightSessionBuilder(T0 + s * DAY).header("/repo").marker();
+			b.user("go");
+			// Held out: twelve reads plain showed whole that nothing fetches (36 in all, past the threshold), and four
+			// plain capped whose hidden lines come back (100 tokens each; 12 in all, under it).
+			for (let i = 0; i < 12; i++) shapedRead(b, `src/whole${i}.ts`, { holdout: { shapedUrl: spillUrl(9) } });
+			for (let i = 0; i < 4; i++) {
+				shapedRead(b, `src/capped${i}.ts`, { holdout: { shapedUrl: spillUrl(9) }, plainTokens: 2000 });
+				call(b, "read", { path: `src/capped${i}.ts:20-30` }, "x".repeat(400));
+			}
+			// Applied, a quarter capped like the holdouts: three uncapped cuts nothing fetches, one capped recovered
+			// (100 tokens).
+			for (let i = 0; i < 3; i++) shapedRead(b, `src/cut${i}.ts`);
+			shapedRead(b, "src/c.ts", { plainTokens: 2000 });
+			call(b, "read", { path: "src/c.ts:20-30" }, "y".repeat(400));
+			await write(`share${s}.jsonl`, b);
+		}
+
+		const stats = await dashboard();
+		// The pooled 1,200 / 48 = 25 a cut over twelve cuts is the 300 recovered. The uncapped side's own 0 beside the
+		// pooled 25 for the three capped cuts would call 225 excess.
+		const excess = { value: 0, lo: 0, hi: 0 };
+		expect(stats.adjusted.byTool.find(t => t.tool === "read")?.excessTokens).toEqual(excess);
+		expect(stats.adjusted.excessTokens).toEqual(excess);
+	});
+
+	it("charges the cuts no fetch-back of a result shaping left whole", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		// Applied, no holdouts: the whole recovery is excess.
+		shapedRead(b, "src/c.ts");
+		call(b, "read", { path: "src/c.ts:20-30" }, "y".repeat(800));
+		// A result pi truncated natively, which shaping did not cut, and its own dive in a request of its own, whose
+		// tokens a later request carries.
+		call(b, "bash", { command: "make" }, "built\n[cut: artifact://5]");
+		call(b, "read", { path: "artifact://5" }, "z".repeat(4000));
+		call(b, "grep", { pattern: "x" });
+		await write("native.jsonl", b);
+
+		const stats = await dashboard();
+		expect(stats.clawback.events).toBe(2);
+		// The dive is both carried and an extra turn, so each must be kept out of the cuts' cost.
+		expect(stats.clawback.byKind.artifact).toMatchObject({ events: 1, turns: 1 });
+		expect(stats.clawback.byKind.artifact.usd).toBeGreaterThan(0);
+		const read = stats.economics.find(e => e.tool === "read");
+		const { savedUsd, spotlightUsd } = stats.compounding;
+		expect(stats.adjusted.netUsd.value).toBeCloseTo(
+			savedUsd - (read?.recoveryUsd ?? 0) - (read?.turnUsd ?? 0) - spotlightUsd,
+			12,
+		);
+	});
+
+	it("charges the cuts the same fetch-back turns in the net, the economics and the time cost", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		shapedRead(b, "src/c.ts");
+		shapedRead(b, "src/d.ts");
+		// A request whose two calls both recover a cut: one extra turn, split between the two cuts.
+		const pure = b.request({
+			cacheRead: 12_000,
+			cost: 0.05,
+			duration: 7000,
+			calls: [
+				{ name: "read", args: { path: "src/c.ts:20-30" } },
+				{ name: "read", args: { path: "src/d.ts:20-30" } },
+			],
+		});
+		for (const id of pure) b.result(id, { text: "y".repeat(400) });
+		// A request that recovers a cut but also does other work: not the cuts' turn anywhere.
+		const mixed = b.request({
+			cacheRead: 12_000,
+			cost: 0.08,
+			duration: 9000,
+			calls: [
+				{ name: "read", args: { path: "src/c.ts:40-50" } },
+				{ name: "grep", args: { pattern: "x" } },
+			],
+		});
+		for (const id of mixed) b.result(id, { text: "z".repeat(400) });
+		call(b, "grep", { pattern: "y" });
+		await write("cut-turns.jsonl", b);
+
+		const stats = await dashboard();
+		const read = stats.economics.find(e => e.tool === "read");
+		expect(read).toMatchObject({ cuts: 2, extraTurns: 1 });
+		expect(read?.turnUsd).toBeCloseTo(0.05, 12);
+		expect(stats.timeCost).toMatchObject({ fetchBackTurns: 1, fetchBackMs: 7000 });
+		// No holdouts: the whole recovery, and only the pure turn, comes off the adjusted net.
+		const { savedUsd, spotlightUsd } = stats.compounding;
+		expect(stats.adjusted.netUsd.value).toBeCloseTo(savedUsd - (read?.recoveryUsd ?? 0) - 0.05 - spotlightUsd, 12);
+	});
 });
 
 describe("Spotlight historical gated reads", () => {
@@ -268,7 +423,7 @@ describe("Spotlight historical gated reads", () => {
 		call(b, "read", { path: "src/c.ts:20-30" }, "y".repeat(800));
 		shapedRead(b, "src/d.ts");
 		// Held out: shown whole, nothing fetched.
-		shapedRead(b, "src/h.ts", { holdout: { shapedUrl: "artifact://9" } });
+		shapedRead(b, "src/h.ts", { holdout: { shapedUrl: spillUrl(9) } });
 		await write("gate.jsonl", b);
 
 		const stats = await dashboard();
@@ -304,7 +459,7 @@ describe("Spotlight step economics", () => {
 	it("splits cuts by step combination and saved size, folding rare combinations into other", async () => {
 		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
 		b.user("go");
-		const original = { url: "artifact://0", lines: 100, kept: [[1, 5]] as [number, number][] };
+		const original = { url: spillUrl(0), lines: 100, kept: [[1, 5]] as [number, number][] };
 		for (let i = 0; i < 10; i++) {
 			shaped(
 				b,
@@ -378,7 +533,7 @@ describe("Spotlight list reads' windows", () => {
 				outTokens: 1000,
 				costUsd: 0.001,
 				original: {
-					url: "artifact://0",
+					url: spillUrl(0),
 					lines: 10 + bLines,
 					kept: opts.kept,
 					...(opts.heat ? { heat: opts.heat } : {}),
@@ -443,7 +598,7 @@ describe("Spotlight list reads' windows", () => {
 
 	it("locates an edit's Find in its own window and records it past the windows before", async () => {
 		// Both windows hold the same ten lines: only `b.py`'s own window places the Find once.
-		await Bun.write(sessionPath("list-edit/0.spotlight-read.log"), [...TEN_LINES, ...TEN_LINES].join("\n"));
+		await Bun.write(sessionPath(`list-edit/local/${spillFileName(0)}`), [...TEN_LINES, ...TEN_LINES].join("\n"));
 		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
 		b.user("go");
 		const list = listRead(b, {

@@ -159,4 +159,32 @@ describe("SessionManager.continueRecent /new boundary", () => {
 			await relaunched.close();
 		}
 	});
+
+	it("-c ignores a never-written fresh boundary from another project (#19495)", async () => {
+		const old = SessionManager.create(cwd);
+		old.appendMessage({ role: "user", content: "real work", timestamp: 1 });
+		old.appendMessage(makeAssistantMessage());
+		await old.flush();
+		const oldFile = old.getSessionFile();
+		if (!oldFile) throw new Error("Expected persisted old session file");
+		await old.close();
+
+		// Same terminal: a session started in another project and left before
+		// any output leaves a fresh breadcrumb whose JSONL never exists.
+		const cwdOther = path.join(testAgentDir, "other-project");
+		fs.mkdirSync(cwdOther, { recursive: true });
+		const abandoned = SessionManager.create(cwdOther);
+		const abandonedFile = abandoned.getSessionFile();
+		if (!abandonedFile) throw new Error("Expected a fresh session file path");
+		await abandoned.close();
+		expect(fs.existsSync(abandonedFile)).toBe(false);
+
+		const relaunched = await SessionManager.continueRecent(cwd);
+		try {
+			expect(path.resolve(relaunched.getSessionFile() ?? "")).toBe(path.resolve(oldFile));
+			expect(JSON.stringify(relaunched.getEntries())).toContain("real work");
+		} finally {
+			await relaunched.close();
+		}
+	});
 });

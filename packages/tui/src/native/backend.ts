@@ -177,7 +177,12 @@ class NativeContext implements DescribeContext {
 		this.reduceMotion = hello.reduceMotion === true;
 		this.dark = hello.dark !== false;
 		this.hour12 = hello.hour12;
-		this.#kinds = new Set(hello.kinds);
+		const kinds = new Set(hello.kinds);
+		// `media` names files by path, which the terminal opens on its own machine. Tern exports
+		// `TERN_BLOB_DIR` (its blob cache) into its local panes only: an ssh session or container
+		// running omp elsewhere doesn't inherit it, and gets the kinds' fallbacks (image blobs).
+		if (!Bun.env.TERN_BLOB_DIR) kinds.delete("media");
+		this.#kinds = kinds;
 		this.#features = new Set(hello.features);
 	}
 
@@ -187,6 +192,14 @@ class NativeContext implements DescribeContext {
 
 	feature(name: string): boolean {
 		return this.#features.has(name);
+	}
+
+	/** Adopts the features a `features` event lists; whether they differ from the ones held. */
+	setFeatures(features: readonly string[]): boolean {
+		const next = new Set(features);
+		if (sameSet(next, this.#features)) return false;
+		this.#features = next;
+		return true;
 	}
 
 	/** Whether `other` advertises exactly the same kinds and features. */
@@ -836,6 +849,16 @@ export class NativeBackend {
 			case "motion":
 				this.#cx.reduceMotion = event.reduce;
 				this.#host.motionChanged(event.reduce);
+				return;
+			case "features":
+				// A setting changed what the terminal does (Tern's Agents tray): kept for a
+				// resumed surface too, and every component describes itself again, as after a
+				// `hello` with another vocabulary.
+				this.#hello = { ...this.#hello, features: event.features };
+				if (!this.#cx.setFeatures(event.features)) return;
+				setNativePacing(this.#cx.feature("pace"));
+				this.#host.invalidate();
+				this.#host.requestRender();
 				return;
 			case "visible":
 				return;

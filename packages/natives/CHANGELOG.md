@@ -2,6 +2,115 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `grep()` with a match limit resolving with a short result when its directory walk panicked; it now rejects with the panic ([#20013](https://github.com/can1357/oh-my-pi/pull/20013) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a use-after-free in `grep()`, `glob()`, `fuzzyFind()`, `astGrep()` and `astEdit()` when a timeout or an abort cancelled them just after they started ([#20014](https://github.com/can1357/oh-my-pi/pull/20014) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the `computer` tool on Linux Wayland leaving GTK 3 message dialogs (OK/Cancel and Yes/No boxes) out of `windows()`, so their buttons could not be found or pressed ([#19884](https://github.com/can1357/oh-my-pi/pull/19884) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `PtySession` output on Linux sometimes ending with an extra blank line after the command exited
+- Fixed the `computer` tool on Linux showing no value for sliders, scroll bars and progress bars and never marking a selected row, list item or tab `(selected)`, so a script could not read where a control stood or which row was chosen ([#20110](https://github.com/can1357/oh-my-pi/pull/20110) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed NumLock-off keypad navigation keys (arrows, Home, End, Page Up, Page Down, Insert, Delete, and Clear) being dropped under the kitty keyboard protocol ([#20087](https://github.com/can1357/oh-my-pi/pull/20087) by [@fsoikin](https://github.com/fsoikin))
+- Fixed `grep()`, `glob()`, `fuzzyFind()`, `astGrep()`, `astEdit()` and the shell's `grep -r`, `rg` and `fd` sometimes never returning on machines with many CPUs ([#20022](https://github.com/can1357/oh-my-pi/pull/20022) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `@oh-my-pi/pi-natives` failing with "Failed to load pi_natives native addon" when it runs from bun's install cache: the platform package beside it is now used ([#8901](https://github.com/can1357/oh-my-pi/issues/8901), [#19983](https://github.com/can1357/oh-my-pi/pull/19983) by [@JamieJ5926](https://github.com/JamieJ5926))
+- Fixed macOS `computer` background keys, typing and held keys into a window that is already its application's key window bringing that window in front of yours for a moment: they no longer send the press that made it key ([#19702](https://github.com/can1357/oh-my-pi/pull/19702) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Wayland screenshots each failing after 30 s while the screen-share picker waited for the user: the call now waits for the picker until its deadline, as input waits for the RemoteDesktop dialog, and ends with a `Timeout` naming the picker if nobody answers ([#19616](https://github.com/can1357/oh-my-pi/pull/19616) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Windows AX `press()` (no chord) and `perform()` calls without a menu path reporting `Timeout` instead of `AxUnconfirmed` when dispatch may have begun but the provider did not reply before the native reply wait ended, and prevented those calls from dispatching after that wait ended without dispatch ([#19871](https://github.com/can1357/oh-my-pi/pull/19871) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Windows `computer` `press()` on a classic button or check box (Win32 and WinForms) bringing its app in front of yours, and `click()` on one reporting success without clicking it ([#19889](https://github.com/can1357/oh-my-pi/pull/19889) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a macOS `computer` takeover that ended while another program was typing for you (a remote-control, text-expansion or automation tool posting keystrokes) putting your app back in front with no key window: its window looked inactive and web pages saw a blur until you clicked or switched apps. The window you were typing in is now made key again unless you clicked, used a shortcut the takeover read, focused another of your app's windows, or have ⌘ or ⌃ down at that moment, or another app is in front; if the window then does not report itself key within 400 ms, the call fails saying restoration failed instead of reporting success ([#19504](https://github.com/can1357/oh-my-pi/pull/19504) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed X11 typing of characters outside the keyboard layout, including non-Latin text, failing with "X11 keymap has no keycode for keysym ...". They are typed through spare keycodes, restored when the session closes; a text with more distinct such characters than the layout has spare keycodes is refused before any key, and chords and holds of them still refuse ([#19519](https://github.com/can1357/oh-my-pi/pull/19519) by [@will-bogusz](https://github.com/will-bogusz))
+- Applying a binary patch now refuses when the file's current contents are not the version the patch was built from, instead of replacing them ([#19392](https://github.com/can1357/oh-my-pi/pull/19392) by [@eggpeat](https://github.com/eggpeat))
+- On Windows, an abort or `timeout` now ends an in-process utility such as `cat` that is blocked reading an open, empty stdin pipe, instead of waiting until a writer closes it ([#19338](https://github.com/can1357/oh-my-pi/pull/19338) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed a standalone binary loading the native addon a previous build of the same version extracted, instead of its own, when both addons happened to be the same size: each build now extracts its addon to its own directory named by the addon's content hash ([#19346](https://github.com/can1357/oh-my-pi/pull/19346) by [@HeyItsGilbert](https://github.com/HeyItsGilbert))
+- Fixed the macOS `computer` tool's background taps and scrolls on iPhone Mirroring being dropped after a takeover tap had activated its window ([#17756](https://github.com/can1357/oh-my-pi/pull/17756) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [19.1.0] - 2026-11-21
+
+### Added
+
+- Added host-provided session commands to `Shell.run` (`commands`) and `shellReservedCommandNames()`
+
+### Fixed
+
+- Fixed grouped `sed` scripts such as `1{h;d};2{G}` being rejected when no semicolon precedes a closing brace.
+- Fixed the native addon failing to load when `HOME`, `PI_NATIVES_DIR`, or the installation path contains `?`.
+- `commitCreate()` now reports a `HeadMoved` error when `HEAD` changes after the expected-HEAD check, including changes made by a `commit-msg` hook.
+- Fixed macOS window reads for minimized windows so the requested window remains inspectable without being restored or replaced by a sibling window; unavailable menus and commands now report `WindowUnavailable`.
+- Fixed Windows captures and accessibility trees incorrectly reporting fully covered Chromium and Electron windows as current; they now report `covered` when those applications stop drawing while covered.
+- Fixed Windows `computer` `setValue` bringing classic Win32 and WinForms text-box windows to the foreground and directing subsequent keyboard input into them.
+
+## [19.0.1] - 2026-11-19
+
+### Fixed
+
+- Fixed omp freezing for seconds to minutes on WSL2 while saving sessions: Linux `FileLock` now locks a sidecar file instead of binding a socket, which takes about 10 ms per call there. Older omp versions still running do not see these locks, so restart them after updating ([#19704](https://github.com/can1357/oh-my-pi/pull/19704) by [@turgaybulut](https://github.com/turgaybulut))
+
+## [19.0.0] - 2026-11-18
+
+### Added
+
+- Added `VcsGitRepo.worktreeToGit()` to convert worktree content into the blob representation produced by `git add`.
+- Added support for using a `Shell` as a process's shell, routing commands through the process's standard streams while preserving the process session and terminal for external commands.
+- Added `ShellRunOptions.speech` to connect the host speech handler to the shell's `say` command.
+- Added an in-process `file` shell builtin with broad file-type detection, MIME and encoding output, archive/image/document support, and compatibility with the commonly used `file` command options.
+
+### Changed
+
+- Improved typing and key-press responsiveness in iPhone Mirroring, reducing per-character latency by approximately half.
+
+### Fixed
+
+- Fixed screenshots of partially off-screen Linux windows on Wayland and X11 so the visible region is captured and coordinate-based zoom targets correctly.
+- Fixed Wayland input operations on desktops without an available input route to fail immediately with a clear `PermissionDenied` error instead of attempting unnecessary screen capture first.
+- Fixed macOS `computer` interactions so background clicks, key presses, pop-up menu actions, and takeover calls restore the previously active window within the call.
+- Fixed macOS pop-up menu reads immediately after typing so they reflect the option selected by the entered letters.
+
+## [18.22.2] - 2026-11-18
+
+### Added
+
+- `TtyWriter` now works on Windows consoles: it writes off the JS thread in 16 KiB `WriteFile` chunks, restores the UTF-8 console code pages that child processes change, and `stop()` cancels a blocked write
+- Added `isolateThreadStartsFromConsole()`, which keeps a Windows console whose terminal stopped reading from blocking new threads in the process
+
+## [18.22.1] - 2026-11-17
+
+### Added
+
+- Added `DesktopFocusReturn.keyboard`, which reports what happened to the user's keyboard after a macOS takeover: handed back, left as chosen, kept, brought to the front only, or not sent.
+- Added `desktopWindowRoster()` to enumerate all on-screen macOS windows, including popups, pickers, and system prompts, with their owners, layers, and visibility to `listWindows`.
+- Added sparse-checkout-aware Git tree operations so selective commits preserve files outside the sparse cone and collapsed sparse-directory entries.
+
+### Changed
+
+- macOS scrolling now matches Windows and Linux: positive `dy` scrolls down and positive `dx` scrolls right.
+- `InputBusy` now identifies the agent and omp process holding input or focus control when that information is available.
+- Wayland text input now supports characters unavailable through the active keyboard layout, including accented characters, CJK text, and emoji, on compositors providing libei text support.
+- Improved Linux accessibility performance and scalability for large GTK, Qt, and other applications, including faster element lookups and bounded tree reads for very large tables and lists.
+- Tree listings now expose gitlink modes so selective commits can distinguish submodule pointers from ordinary files.
+
+### Fixed
+
+- Fixed macOS and Windows focus restoration after computer takeovers and background input, including cases where the target application brought itself forward; the originating app now becomes active again and focus results are reported accurately.
+- Fixed keyboard input on Windows and X11 when the target uses a different keyboard layout or when Caps Lock, StickyKeys, or another layout is active.
+- Fixed X11 input being delivered to another application's menu, screen lock, or other keyboard grab; input now waits for transient grabs to end or fails without sending keys.
+- Fixed Linux text entry from affecting the user's active field during agent input. Supported GTK and Qt text fields now use safe accessibility-based entry where possible, while unsupported fields continue to use the existing keyboard path.
+- Fixed Linux interactions with combo boxes so unsupported popup-opening actions are refused safely, while supported GTK 3 and Chromium selections can be made without taking over the keyboard.
+- Fixed macOS accessibility labels for SwiftUI toggles, including matching their adjacent labels with `find({ title })`.
+- Fixed macOS element references in refreshed tables, including Activity Monitor, so row actions follow an unchanged row, reject a changed row safely, and provide useful before-and-after details when the row cannot be matched.
+- Fixed macOS clicks and presses being reported as successful when the target was hidden, unavailable, covered by a sheet, or otherwise not clickable.
+- Fixed macOS Chromium `<select>` interactions, including option matching, menu cleanup, and safe handling when the available options are incomplete.
+- Fixed macOS `setValue` for numeric controls such as sliders and steppers, including reporting values that the control clamps or rounds; unsupported but step-able controls now explain how to use their increment and decrement actions.
+- Fixed macOS takeover and background input from sending keys while the user is actively typing or holding input controls; such operations now wait for a safe idle point or fail without sending input.
+- Fixed macOS menu and popup-button interactions from leaving menus open or sending keys into the user's application after background input completes.
+- Fixed macOS background actions from incorrectly stopping when the user's app briefly took the keyboard, and improved target selection after drag-and-drop or remote-control interaction.
+- Fixed Wayland screenshots and screenshot-dependent clicks, drags, and scrolls in released Linux builds. `capabilities()` now reports when capture is unavailable, with an explanatory error when PipeWire is missing.
+- Fixed a Windows native IPC crash that could leave daemon-served tools hanging after another session closed its connection.
+- Fixed `commitCreate()` errors from omitting rejecting `pre-commit` or `commit-msg` hook output; hook output is now included consistently with `git commit`.
+- Fixed Rust block edits anchored on the first attribute or documentation comment so they cover the complete item instead of being treated as single-line edits.
+
+### Removed
+
+- Removed the obsolete `wayland-pipewire` Cargo feature and `OMP_NATIVE_FEATURES` configuration variable.
+
 ## [18.22.0] - 2026-11-16
 
 ### Breaking Changes
