@@ -726,43 +726,38 @@ describe("AgentSession empty stop guard", () => {
 		expect(assistantText(withTool.session.agent.state.messages)).toContain("tool path complete");
 	});
 
-	it("logs every empty stop with model + retry metadata, and an info line per retry", async () => {
-		// This path only logged at cap-hit, so every detection and every retry
-		// that succeeded was silent. It now emits a debug line on every empty
-		// stop (frequency) and an info line on each retry (which attempt it
-		// is), so a model that keeps returning nothing is visible instead of
-		// looking like an unexpected user message.
+	it("logs every empty stop with model + retry metadata, and an info line per scheduled retry", async () => {
 		const debugSpy = vi.spyOn(logger, "debug").mockImplementation(() => {});
 		const infoSpy = vi.spyOn(logger, "info").mockImplementation(() => {});
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 
-		const { session } = await createHarness([
+		const { session, mock } = await createHarness([
 			recordCall("delta", "call-record-delta"),
 			emptyStop(),
 			emptyStop(),
 			emptyStop(),
-			emptyStop(), // 4 empty stops: 1 logged + 3 retries, then cap hit
+			emptyStop(), // the fourth empty stop hits the cap instead of scheduling a retry
 		]);
 
 		await session.prompt("record delta");
 		await session.waitForIdle();
 
-		// debug: fired once per empty stop occurrence (4 total here)
-		const emptyStopLogs = debugSpy.mock.calls.filter(([msg]) => msg === "Assistant returned empty stop");
-		expect(emptyStopLogs).toHaveLength(4);
-		for (const [, ctx] of emptyStopLogs) {
-			expect(ctx).toMatchObject({
-				stopReason: "stop",
-				maxRetries: 3,
-			});
-			expect((ctx as { model?: string }).model).toBeDefined();
-			expect((ctx as { provider?: string }).provider).toBeDefined();
+		const identity = { model: mock.id, provider: mock.provider };
+
+		const detections = debugSpy.mock.calls.filter(([message]) => message === "Assistant returned empty stop");
+		expect(detections).toHaveLength(4);
+		expect(detections.map(([, context]) => context?.attempt)).toEqual([1, 2, 3, 4]);
+		for (const [, context] of detections) {
+			expect(context).toMatchObject({ ...identity, maxAttempts: 3, stopReason: "stop" });
 		}
 
-		// info: one per retry that was actually scheduled (cap is 3, so 3)
-		const retryScheduledLogs = infoSpy.mock.calls.filter(([msg]) => msg === "Empty-stop retry scheduled");
-		expect(retryScheduledLogs).toHaveLength(3);
-		expect(retryScheduledLogs.map(([, ctx]) => (ctx as { attempt: number }).attempt)).toEqual([1, 2, 3]);
+		const scheduled = infoSpy.mock.calls.filter(([message]) => message === "Empty-stop retry scheduled");
+		expect(scheduled).toHaveLength(3);
+		expect(scheduled.map(([, context]) => context?.attempt)).toEqual([1, 2, 3]);
+		for (const [index, [, context]] of scheduled.entries()) {
+			// The retry scheduled after detection N reports that same detection.
+			expect(context).toMatchObject({ ...identity, attempt: detections[index]?.[1]?.attempt });
+		}
 
 		// warn: one cap-hit log (existing behavior)
 		const capLogs = warnSpy.mock.calls.filter(([msg]) =>

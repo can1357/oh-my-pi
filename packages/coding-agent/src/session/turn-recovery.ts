@@ -1168,11 +1168,12 @@ export class TurnRecovery {
 		// active task" reminder otherwise looks like an unexplained user
 		// message. Cap-hit is logged at warn below.
 		logger.debug("Assistant returned empty stop", {
+			attempt: this.#emptyStopRetryCount,
+			maxAttempts: EMPTY_STOP_MAX_RETRIES,
+			retryCount: this.#emptyStopRetryCount,
 			model: assistantMessage.model,
 			provider: assistantMessage.provider,
 			stopReason: assistantMessage.stopReason,
-			retryCount: this.#emptyStopRetryCount,
-			maxRetries: EMPTY_STOP_MAX_RETRIES,
 			durationMs: assistantMessage.duration,
 			ttftMs: assistantMessage.ttft,
 			errorMessage: assistantMessage.errorMessage,
@@ -1239,6 +1240,7 @@ export class TurnRecovery {
 		logger.info("Empty-stop retry scheduled", {
 			attempt: this.#emptyStopRetryCount,
 			maxAttempts: EMPTY_STOP_MAX_RETRIES,
+			retryCount: this.#emptyStopRetryCount,
 			model: assistantMessage.model,
 			provider: assistantMessage.provider,
 		});
