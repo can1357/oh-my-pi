@@ -5,7 +5,7 @@
  * only in a subsequent prompt. Failed drains kill the process and reseed.
  */
 import * as path from "node:path";
-import { $which, isRecord, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
+import { $which, isRecord, logger, prompt, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import {
 	type ContentBlock,
 	ClientSideConnection,
@@ -37,8 +37,17 @@ import {
 } from "./conversation-store";
 import { agyCredentialEnv } from "./credentials";
 import { type McpCallHandler, McpBridge, type McpToolDefinition, type McpToolOutput } from "./mcp-bridge";
-import { inputBlocks, type Ledger, lateToolResultPrompt, planTurn, replayPrompt, transcriptDigest } from "./reconcile";
+import {
+	inputBlocks,
+	type Ledger,
+	lateToolResultPrompt,
+	planTurn,
+	replayPrompt,
+	toolResultImagesPrompt,
+	transcriptDigest,
+} from "./reconcile";
 import type { StepWriter } from "./step-writer";
+import toolResultImageReferenceTemplate from "./tool-result-image-reference.md" with { type: "text" };
 
 const AGENT_NAME = "bridge";
 const STARTUP_TIMEOUT_MS = 60_000;
@@ -315,9 +324,13 @@ export class AgyHost implements ProviderSessionState {
 					this.#prompt([...lateToolResultPrompt(plan.toolResult), ...plan.input.flatMap(inputBlocks)]);
 				} else {
 					pending?.expiry.cancel();
-					if (plan.input.length > 0) {
+					const steer = [
+						...(plan.toolResult ? toolResultImagesPrompt(plan.toolResult) : []),
+						...plan.input.flatMap(inputBlocks),
+					];
+					if (steer.length > 0) {
 						const previous = this.#turn;
-						this.#prompt(plan.input.flatMap(inputBlocks));
+						this.#prompt(steer);
 						// The old prompt settling proves agy accepted the steer before the held tool resumes.
 						if (previous)
 							await this.#setup(
@@ -949,12 +962,21 @@ function toMcpTool(tool: Tool): McpToolDefinition {
 }
 
 function toMcpOutput(result: ToolResultMessage): McpToolOutput {
+	const content = result.content.flatMap(part =>
+		part.type === "text" ? [{ type: "text" as const, text: part.text }] : [],
+	);
+	if (result.content.some(part => part.type === "image")) {
+		content.push({
+			type: "text",
+			text: prompt.render(toolResultImageReferenceTemplate, {
+				toolCallId: result.toolCallId,
+				toolName: result.toolName,
+				isError: result.isError,
+			}),
+		});
+	}
 	return {
-		content: result.content.map(part =>
-			part.type === "text"
-				? { type: "text", text: part.text }
-				: { type: "image", data: part.data, mimeType: part.mimeType },
-		),
+		content,
 		isError: result.isError,
 	};
 }

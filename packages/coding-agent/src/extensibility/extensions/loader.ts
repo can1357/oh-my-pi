@@ -30,6 +30,7 @@ import type { SendUserMessageOptions } from "../../session/agent-session";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { isFilesystemSourcePath } from "../../tools/path-utils";
+import { NATIVE_TODO_BACKEND } from "../../tools/settings";
 import { InternalUrlRouter } from "../../internal-urls/router";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
@@ -55,6 +56,7 @@ import type {
 	RegisteredCommand,
 	ShortcutConflict,
 	SourceInfo,
+	TodoBackendDefinition,
 	ToolDefinition,
 	ToolInfo,
 	TranscriptPresenter,
@@ -67,6 +69,8 @@ type LoadedExtensionModule = ExtensionFactory | { default?: ExtensionFactory };
 
 /** RFC 3986 scheme syntax, lowercased, two characters at least so `c` cannot capture `C:/` paths. */
 const LINK_SCHEME_PATTERN = /^[a-z][a-z0-9+.-]+$/;
+/** `todo.backend` ids: safe to print and to type in a config file. */
+const TODO_BACKEND_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /** Standard schemes an extension may not claim: web, file and mail links. omp's internal URLs are refused too. */
 const STANDARD_LINK_SCHEMES: Readonly<Record<string, true>> = {
@@ -362,6 +366,22 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			throw new Error(`Cannot replace built-in composer shape "${id}"`);
 		}
 		this.extension.composerShapes.set(id, definition);
+	}
+
+	registerTodoBackend(definition: TodoBackendDefinition): void {
+		const id = definition.id;
+		if (typeof id !== "string" || !TODO_BACKEND_ID_PATTERN.test(id)) {
+			throw new TypeError(
+				'Todo backend id must be letters, digits, ".", "_" or "-", starting with a letter or digit',
+			);
+		}
+		if (id === NATIVE_TODO_BACKEND) {
+			throw new Error(`Todo backend id "${id}" is reserved for omp's own todo list`);
+		}
+		if (typeof definition.replace !== "function") {
+			throw new TypeError(`Todo backend "${id}" must have a replace function`);
+		}
+		(this.extension.todoBackends ??= new Map()).set(id, definition);
 	}
 
 	getFlag(name: string): boolean | string | undefined {

@@ -8,15 +8,7 @@ import type { NativeNode } from "../native/node";
 import { col, md, node, span, text } from "../native/describe";
 import { hintsRow, type NativeHint, statusHintsRow } from "../native/overlay";
 
-export type OmfgPanelState =
-	| "generating"
-	| "validating"
-	| "confirming"
-	| "saving"
-	| "saved"
-	| "rejected"
-	| "aborted"
-	| "error";
+export type OmfgPanelState = "generating" | "validating" | "confirming" | "saving" | "rejected" | "aborted" | "error";
 
 /** States with work still in flight (the sheet head shows the live spinner). */
 const LIVE_STATES: Record<OmfgPanelState, boolean> = {
@@ -24,7 +16,6 @@ const LIVE_STATES: Record<OmfgPanelState, boolean> = {
 	validating: true,
 	confirming: true,
 	saving: true,
-	saved: false,
 	rejected: false,
 	aborted: false,
 	error: false,
@@ -40,7 +31,6 @@ export class OmfgPanelComponent extends OverlayPanel {
 	#state: OmfgPanelState = "generating";
 	#status = "Generating TTSR rule…";
 	#preview = "";
-	#savedPath: string | undefined;
 	#errorMessage: string | undefined;
 	#closed = false;
 	readonly #complaint: string;
@@ -75,15 +65,6 @@ export class OmfgPanelComponent extends OverlayPanel {
 		if (this.#closed) return;
 		this.#state = state;
 		this.#status = status;
-		this.#errorMessage = undefined;
-		this.#rebuild();
-	}
-
-	markSaved(path: string): void {
-		if (this.#closed) return;
-		this.#state = "saved";
-		this.#savedPath = path;
-		this.#status = `Saved ${path}`;
 		this.#errorMessage = undefined;
 		this.#rebuild();
 	}
@@ -163,15 +144,6 @@ export class OmfgPanelComponent extends OverlayPanel {
 			case "confirming":
 			case "saving":
 				return hintsRow([{ ...esc, label: "cancel /omfg" }]);
-			case "saved":
-				return statusHintsRow(
-					[
-						span(`${theme.status.success} Registered live`, "success"),
-						span(" · ", "muted"),
-						span(replaceTabs(this.#savedPath ?? "saved"), "path"),
-					],
-					[esc],
-				);
 			case "rejected":
 				return statusHintsRow([span(`${theme.status.warning} Not saved`, "warning")], [esc]);
 			case "aborted":
@@ -196,11 +168,6 @@ export class OmfgPanelComponent extends OverlayPanel {
 			case "confirming":
 			case "saving":
 				return theme.fg("muted", `${esc} cancel /omfg`);
-			case "saved":
-				return theme.fg(
-					"success",
-					`${theme.status.success} Registered live · ${replaceTabs(this.#savedPath ?? "saved")} · ${esc} dismiss`,
-				);
 			case "rejected":
 				return theme.fg("warning", `${theme.status.warning} Not saved · ${esc} dismiss`);
 			case "aborted":
