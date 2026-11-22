@@ -11,6 +11,7 @@
 ### Changed
 
 - Empty-stop recovery now logs each scheduled retry with the model, provider and stop metadata, so a model that keeps returning nothing is visible in the session log instead of reading as an unexpected user message ([#20122](https://github.com/can1357/oh-my-pi/pull/20122) by [@FnSGit](https://github.com/FnSGit))
+- `/delete` now asks before unlinking the current session file, naming the session it will delete (Enter deletes, Esc leaves everything untouched), the same confirm `/session delete` and the resume picker already show; previously a stray Enter on `/delete` destroyed the session with no prompt ([#19838](https://github.com/can1357/oh-my-pi/pull/19838) by [@breadpowder](https://github.com/breadpowder))
 
 ### Fixed
 

@@ -9598,6 +9598,34 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async handleDeleteCommand(): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
+		// /delete was the only in-session delete that unlinked on the submitting
+		// Enter. Ask the way the TUI /session delete and the resume pickers
+		// already do, before prepareSessionSwitch: its teardown (canceling a
+		// live /btw, hiding a pending plan review) must not run for a delete
+		// the user then declines. With nothing on disk — in-memory or a lazy
+		// session never saved — there is no file to lose, and the ungated
+		// "Nothing to delete"/silent-discard paths stay exactly as today.
+		const sessionFile = this.sessionManager.getSessionFile();
+		if (sessionFile && (await Bun.file(sessionFile).exists())) {
+			const deleteSessionId = this.sessionManager.getSessionId();
+			const sessionName = this.sessionManager.getSessionName() ?? sessionFile;
+			const confirmed = await this.showHookConfirm(
+				"Delete session?",
+				`This permanently deletes "${sessionName}" and its artifacts; it cannot be undone.`,
+			);
+			if (!confirmed) {
+				this.showStatus("Session delete cancelled");
+				return;
+			}
+			// A running turn can swap the session while the dialog is open
+			// (write-conflict recovery, an extension newSession); never delete
+			// a file the user did not see named in the prompt.
+			if (this.sessionManager.getSessionId() !== deleteSessionId) {
+				this.showStatus("Session changed; delete cancelled");
+				return;
+			}
+			if (this.#vibeSessionTransitionBlocked()) return;
+		}
 		await this.prepareSessionSwitch();
 		await this.#commandController.handleDeleteCommand();
 	}
