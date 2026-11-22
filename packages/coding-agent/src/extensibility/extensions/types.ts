@@ -2201,7 +2201,7 @@ export interface ExtensionAPI {
 	/** Set the current model. Returns false if no API key available. */
 	setModel(model: Model): Promise<boolean>;
 
-	/** Get current thinking level. */
+	/** Get the effective thinking level, not the configured `auto` selector. `undefined` means no concrete effort is selected (including `auto` on models without controllable efforts); it does not mean the session is uninitialized. */
 	getThinkingLevel(): ThinkingLevel | undefined;
 
 	/** Set thinking level for the current session. */
