@@ -262,6 +262,10 @@ describe("headless runtime session switch", () => {
 					USERPROFILE: path.join(cwd, "home"),
 					TMPDIR: process.env.TMPDIR,
 					NO_COLOR: "1",
+					// Marks the child as a test runtime, as the CI runner does for inherited envs: its model registry
+					// rejects network fetches, so the background discovery that `open_session` awaits for a model
+					// missing from the catalog settles at once instead of waiting on public provider catalogs.
+					PI_TEST_RUNTIME: "1",
 				},
 				stdin: "pipe",
 				stdout: "pipe",
