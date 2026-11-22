@@ -20,10 +20,19 @@ import { blockEnd, type FileView, fileLines } from "./magic-view";
 import type { ReplaceBatchParams } from "./schemas";
 
 interface Splice {
-	/** Half-open, zero-based indices into the original lines. */
+	/** Half-open, zero-based indices into the original lines (including carried blank separators). */
 	from: number;
 	to: number;
+	/** Half-open, zero-based indices explicitly requested before blank-separator expansion. */
+	coreFrom: number;
+	coreTo: number;
 	lines: readonly string[];
+	/** Originating operation label for error messages. */
+	label: string;
+	/** True for `sub` splices, which edit text within original lines and inherit `indent`/`dedent`. */
+	inheritShift?: boolean;
+	/** True for `delete` splices, which may merge across blank separators. */
+	isDelete?: boolean;
 }
 
 interface Shift {
@@ -31,6 +40,13 @@ interface Shift {
 	to: number;
 	prefix: string;
 	dedent: boolean;
+}
+
+interface CompiledOperations {
+	edit: ReplaceBatchParams["edits"][number];
+	ranges: Range[];
+	splices: readonly Splice[];
+	shifts: readonly Shift[];
 }
 
 /** Forms the operations take, quoted back to the model when one is malformed. */
@@ -44,6 +60,11 @@ const FORMS: Record<string, string> = {
 	indent: '["indent", first, last, spaces or "tab"]',
 	dedent: '["dedent", first, last, spaces or "tab"]',
 };
+
+const MAX_REPORTED_PROBLEMS = 8;
+const MAX_DIAGNOSED_OPS = 3;
+const MAX_LINEAR_DIAGNOSE_OPS = 48;
+const MAX_SINGLE_FIX_CHECK = 12;
 
 const isText = (value: unknown): value is string => typeof value === "string" && !/[\r\0]/.test(value);
 const isSide = (value: unknown): value is "before" | "after" => value === "before" || value === "after";
@@ -67,6 +88,11 @@ const NUMBERS: Record<string, readonly number[]> = {
 
 /** `{` opening an operation written with braces, `{"sub", 4, …}`. */
 const BRACED_OPERATION = /^\{\s*"[a-z]+"\s*,/;
+
+function compactOp(operation: unknown): string {
+	const text = JSON.stringify(operation);
+	return text.length > 140 ? `${text.slice(0, 137)}…` : text;
+}
 
 /** Index of the bracket closing the one at `text[start]` (`[` or `{`), or -1 when it never closes. */
 function bracketEnd(text: string, start: number): number {
@@ -92,8 +118,8 @@ function bracketEnd(text: string, start: number): number {
  * (`undefined`), as is an array that is not JSON or never closes.
  * `commented` tells that commentary follows the last operation.
  */
-function readOperations(reply: string): { operations: unknown[]; commented: boolean } | undefined {
-	const operations: unknown[] = [];
+function readOperations(reply: string): { operations: unknown[][]; commented: boolean } | undefined {
+	const operations: unknown[][] = [];
 	let commented = false;
 	let index = 0;
 	while (index < reply.length) {
@@ -181,7 +207,7 @@ type Range = [first: number, last: number];
  * past it into lines that are not whole blocks of their own (a comment or a
  * statement that follows the block).
  */
-export function blockHints(content: string, ranges: readonly Range[], view: FileView): string {
+export function blockHints(content: string, ranges: readonly Range[], view: FileView): string[] {
 	const lines = fileLines(content);
 	const isBlank = (index: number) => lines[index].trim() === "";
 	// Only a block that lies within one shown stretch can be named; an excerpt may hide where others end.
@@ -212,40 +238,16 @@ export function blockHints(content: string, ranges: readonly Range[], view: File
 			`line ${start + 1} opens a block that ends on line ${end + 1}, but the range ends on line ${stop + 1} (\`${text.length > 60 ? `${text.slice(0, 60)}…` : text}\`)`,
 		);
 	}
-	return hints.join("; ");
+	return hints;
 }
 
-/**
- * Compile a line-operation reply into one `replace` edit of `content`, the LF
- * snapshot `view` was cut from. `cut` marks a reply that ran into the output
- * limit: it counts only when commentary shows its operations were finished.
- * `ranges` are the line ranges the reply deletes, moves or swaps, for
- * {@link blockHints}. `problem` is worded for the model: an unreadable reply,
- * a malformed or unknown operation, a line outside the file or the shown
- * excerpt, operations on the same lines, indentation that is not there to
- * remove, or no change.
- */
-export function compileLineEdits(
-	reply: string,
+/** Compile parsed operations into one atomic edit without mutating the input arrays. */
+function compileOperations(
+	operations: readonly unknown[][],
 	content: string,
 	view: FileView,
-	cut = false,
-): { edit: ReplaceBatchParams["edits"][number]; ranges: Range[] } | { problem: string } {
-	const read = readOperations(reply);
-	// A reply cut at the output limit counts only if commentary shows the model had finished its list.
-	if (!read || read.operations.length === 0 || (cut && !read.commented)) {
-		return { problem: "Output only JSON operation arrays, one per line, and nothing else." };
-	}
-	const parsed = read.operations;
+): CompiledOperations | { problem: string } {
 	if (content === "") return { problem: "Cannot anchor an edit in an empty file; use write instead." };
-	// A repeated operation is the same request twice.
-	const seen = new Set<string>();
-	const operations = parsed.filter(operation => {
-		const key = JSON.stringify(operation);
-		if (seen.has(key)) return false;
-		seen.add(key);
-		return true;
-	});
 	const lines = fileLines(content);
 	const visible = (from: number, to: number) =>
 		!view.partial || view.shown.some(([start, end]) => from >= start && to <= end);
@@ -259,8 +261,10 @@ export function compileLineEdits(
 	const ranges: Range[] = [];
 	/** Per-line substitutions, applied in order to the original line. */
 	const subs = new Map<number, string>();
+	const subLabels = new Map<number, string>();
 	/** New lines per insertion point, in the order given: several inserts at one place are one. */
 	const inserts = new Map<number, string[]>();
+	const insertLabels = new Map<number, string>();
 	// Blank lines separate blocks rather than belong to them. Only shown lines count:
 	// a separator never reaches into lines the model did not see.
 	const isBlank = (index: number) => lines[index].trim() === "" && visible(index, index);
@@ -294,16 +298,23 @@ export function compileLineEdits(
 		return { from, to, carried: 0 };
 	};
 
-	for (const [index, operation] of operations.entries()) {
+	const problems: string[] = [];
+	for (const [index, rawOperation] of operations.entries()) {
 		// Problems quote the operation as the model wrote it.
-		const written = JSON.stringify(operation);
-		const problem = (reason: string) => ({ problem: `Operation ${index + 1} (${written}): ${reason}` });
-		if (!Array.isArray(operation)) return problem("expected an operation array.");
+		const written = JSON.stringify(rawOperation);
+		const label = `Operation ${index + 1} (${compactOp(rawOperation)})`;
+		const recordProblem = (reason: string) => {
+			problems.push(`Operation ${index + 1} (${written}): ${reason}`);
+		};
+		const operation = [...rawOperation];
 		normalize(operation, content);
 		const [name] = operation;
 		const form = typeof name === "string" ? FORMS[name] : undefined;
-		if (!form) return problem(`unknown operation; use one of ${Object.keys(FORMS).join(", ")}.`);
-		const malformed = () => problem(`expected ${form}.`);
+		if (!form) {
+			recordProblem(`unknown operation; use one of ${Object.keys(FORMS).join(", ")}.`);
+			continue;
+		}
+		const malformed = () => recordProblem(`expected ${form}.`);
 		const range = (first: unknown, last: unknown): [number, number] | undefined => {
 			if (!isLine(first) || !isLine(last) || first > last) return undefined;
 			if (name === "delete" || name === "move" || name === "swap") ranges.push([first, last]);
@@ -314,17 +325,36 @@ export function compileLineEdits(
 		switch (name) {
 			case "delete": {
 				const span = operation.length === 3 ? range(operation[1], operation[2]) : undefined;
-				if (!span) return malformed();
-				if (hidden(...span)) return problem("range includes lines not shown.");
+				if (!span) {
+					malformed();
+					continue;
+				}
+				if (hidden(...span)) {
+					recordProblem("range includes lines not shown.");
+					continue;
+				}
 				const { from, to } = withSeparator(...span);
-				splices.push({ from, to, lines: [] });
+				splices.push({ from, to, coreFrom: span[0], coreTo: span[1], lines: [], label, isDelete: true });
 				break;
 			}
 			case "replace": {
 				const span = operation.length === 4 ? range(operation[1], operation[2]) : undefined;
-				if (!span || !isText(operation[3])) return malformed();
-				if (hidden(...span)) return problem("range includes lines not shown.");
-				splices.push({ from: span[0], to: span[1], lines: operation[3].split("\n") });
+				if (!span || !isText(operation[3])) {
+					malformed();
+					continue;
+				}
+				if (hidden(...span)) {
+					recordProblem("range includes lines not shown.");
+					continue;
+				}
+				splices.push({
+					from: span[0],
+					to: span[1],
+					coreFrom: span[0],
+					coreTo: span[1],
+					lines: operation[3].split("\n"),
+					label,
+				});
 				break;
 			}
 			case "sub": {
@@ -336,63 +366,103 @@ export function compileLineEdits(
 					old === "" ||
 					!isText(replacement)
 				) {
-					return malformed();
+					malformed();
+					continue;
 				}
-				if (old.includes("\n") || replacement.includes("\n")) return problem("sub changes text within one line.");
+				if (old.includes("\n")) {
+					recordProblem("sub matches text within one line; use replace to span multiple lines.");
+					continue;
+				}
+				if (line !== "all" && hidden(line - 1, line)) {
+					recordProblem("line is not shown.");
+					continue;
+				}
+				if (old === replacement) continue;
 				const current = (at: number) => subs.get(at) ?? lines[at];
+				const setSub = (at: number, text: string) => {
+					subs.set(at, text);
+					if (!subLabels.has(at)) subLabels.set(at, label);
+				};
 				if (line === "all") {
 					let found = false;
 					for (let at = 0; at < lines.length; at++) {
 						if (!current(at).includes(old)) continue;
-						subs.set(at, current(at).replaceAll(old, replacement));
+						setSub(at, current(at).replaceAll(old, replacement));
 						found = true;
 					}
-					if (!found) return problem(`the file does not contain ${JSON.stringify(old)}.`);
+					if (!found) {
+						recordProblem(`the file does not contain ${JSON.stringify(old)}.`);
+						continue;
+					}
 					break;
 				}
-				if (hidden(line - 1, line)) return problem("line is not shown.");
 				if (!current(line - 1).includes(old)) {
 					const holders: number[] = [];
 					for (let at = 0; at < lines.length; at++) {
-						if (lines[at].includes(old) && visible(at, at)) holders.push(at);
+						if (current(at).includes(old) && visible(at, at)) holders.push(at);
 					}
 					// The line number is a hint: text that only one shown line holds is meant there.
 					if (holders.length === 1) {
-						subs.set(holders[0], current(holders[0]).replaceAll(old, replacement));
+						setSub(holders[0], current(holders[0]).replaceAll(old, replacement));
 						break;
 					}
 					const gap = Math.min(...holders.map(at => Math.abs(at + 1 - line)));
 					const nearest = holders.filter(at => Math.abs(at + 1 - line) === gap).map(at => at + 1);
 					const where = nearest.length > 0 ? `; the nearest line that does is ${nearest.join(" or ")}` : "";
-					return problem(`line ${line} does not contain ${JSON.stringify(old)}${where}.`);
+					recordProblem(`line ${line} does not contain ${JSON.stringify(old)}${where}.`);
+					continue;
 				}
-				subs.set(line - 1, current(line - 1).replaceAll(old, replacement));
+				setSub(line - 1, current(line - 1).replaceAll(old, replacement));
 				break;
 			}
 			case "insert": {
 				const [, side, line, text] = operation;
-				if (operation.length !== 4 || !isSide(side) || !isLine(line) || !isText(text)) return malformed();
-				if (hidden(line - 1, line)) return problem("anchor line is not shown.");
+				if (operation.length !== 4 || !isSide(side) || !isLine(line) || !isText(text)) {
+					malformed();
+					continue;
+				}
+				if (hidden(line - 1, line)) {
+					recordProblem("anchor line is not shown.");
+					continue;
+				}
 				const at = side === "before" ? line - 1 : line;
 				const added = inserts.get(at) ?? [];
 				inserts.set(at, added);
+				if (!insertLabels.has(at)) insertLabels.set(at, label);
 				added.push(...text.split("\n"));
 				break;
 			}
 			case "move": {
 				const [, first, last, side, line] = operation;
-				const span = operation.length === 5 && isSide(side) && isLine(line) ? range(first, last) : undefined;
-				if (!span) return malformed();
-				if (hidden(...span) || hidden(line - 1, line)) return problem("range or destination is not shown.");
+				if (operation.length !== 5 || !isSide(side) || !isLine(line)) {
+					malformed();
+					continue;
+				}
+				const span = range(first, last);
+				if (!span) {
+					malformed();
+					continue;
+				}
+				if (hidden(...span) || hidden(line - 1, line)) {
+					recordProblem("range or destination is not shown.");
+					continue;
+				}
 				const block = core(...span);
-				if (block[0] === block[1]) return problem("the range holds only blank lines.");
+				if (block[0] === block[1]) {
+					recordProblem("the range holds only blank lines.");
+					continue;
+				}
 				const source = withSeparator(...block);
 				const at = side === "before" ? line - 1 : line;
-				if (at > source.from && at < source.to) return problem("the destination is inside the moved lines.");
+				if (at > source.from && at < source.to) {
+					recordProblem("the destination is inside the moved lines.");
+					continue;
+				}
 				if (at === source.from || at === source.to) {
-					return problem(
+					recordProblem(
 						`lines ${first}-${last} are already ${side} line ${line} (blank lines between blocks stay as separators), so nothing moves; to exchange two blocks, use swap.`,
 					);
+					continue;
 				}
 				// A block that was set off by blank lines is set off again where it lands, except right inside a block.
 				const pad = (neighbour: number, edge: RegExp) =>
@@ -406,22 +476,37 @@ export function compileLineEdits(
 				const moving: string[] = Array.from({ length: pad(at - 1, OPENS_BLOCK) }, () => "");
 				moving.push(...lines.slice(...block));
 				for (let after = pad(at, CLOSES_BLOCK); after > 0; after--) moving.push("");
-				splices.push({ from: source.from, to: source.to, lines: [] }, { from: at, to: at, lines: moving });
+				splices.push(
+					{ from: source.from, to: source.to, coreFrom: block[0], coreTo: block[1], lines: [], label },
+					{ from: at, to: at, coreFrom: at, coreTo: at, lines: moving, label },
+				);
 				moved.push([source.from, source.to]);
 				break;
 			}
 			case "swap": {
 				const first = operation.length === 5 ? range(operation[1], operation[2]) : undefined;
 				const second = operation.length === 5 ? range(operation[3], operation[4]) : undefined;
-				if (!first || !second) return malformed();
-				if (hidden(...first) || hidden(...second)) return problem("a range includes lines not shown.");
+				if (!first || !second) {
+					malformed();
+					continue;
+				}
+				if (hidden(...first) || hidden(...second)) {
+					recordProblem("a range includes lines not shown.");
+					continue;
+				}
 				// Blank lines at the edges are separators, not content: they stay in place.
 				const [a, b] = [core(...first), core(...second)].sort((x, y) => x[0] - y[0]);
-				if (a[0] === a[1] || b[0] === b[1]) return problem("a range holds only blank lines.");
-				if (b[0] < a[1]) return problem("the two ranges overlap.");
+				if (a[0] === a[1] || b[0] === b[1]) {
+					recordProblem("a range holds only blank lines.");
+					continue;
+				}
+				if (b[0] < a[1]) {
+					recordProblem("the two ranges overlap.");
+					continue;
+				}
 				splices.push(
-					{ from: a[0], to: a[1], lines: lines.slice(...b) },
-					{ from: b[0], to: b[1], lines: lines.slice(...a) },
+					{ from: a[0], to: a[1], coreFrom: a[0], coreTo: a[1], lines: lines.slice(...b), label },
+					{ from: b[0], to: b[1], coreFrom: b[0], coreTo: b[1], lines: lines.slice(...a), label },
 				);
 				moved.push(a, b);
 				break;
@@ -430,10 +515,18 @@ export function compileLineEdits(
 			case "dedent": {
 				const [, first, last, amount] = operation;
 				const span = operation.length === 4 ? range(first, last) : undefined;
-				if (!span || (amount !== "tab" && (!Number.isInteger(amount) || amount < 1 || amount > 64))) {
-					return malformed();
+				if (
+					!span ||
+					(amount !== "tab" &&
+						(typeof amount !== "number" || !Number.isInteger(amount) || amount < 1 || amount > 64))
+				) {
+					malformed();
+					continue;
 				}
-				if (hidden(...span)) return problem("range includes lines not shown.");
+				if (hidden(...span)) {
+					recordProblem("range includes lines not shown.");
+					continue;
+				}
 				shifts.push({
 					from: span[0],
 					to: span[1],
@@ -444,21 +537,83 @@ export function compileLineEdits(
 			}
 		}
 	}
-	for (const [line, text] of subs) splices.push({ from: line, to: line + 1, lines: [text] });
-	for (const [at, added] of inserts) splices.push({ from: at, to: at, lines: added });
 
-	splices.sort((a, b) => a.from - b.from || a.to - b.to);
+	if (problems.length > 0) {
+		const shown = problems.slice(0, MAX_REPORTED_PROBLEMS);
+		if (problems.length > MAX_REPORTED_PROBLEMS) {
+			shown.push(`… and ${problems.length - MAX_REPORTED_PROBLEMS} more operation errors.`);
+		}
+		return { problem: shown.join("\n") };
+	}
+
+	for (const [line, text] of subs) {
+		splices.push({
+			from: line,
+			to: line + 1,
+			coreFrom: line,
+			coreTo: line + 1,
+			lines: text.split("\n"),
+			label: subLabels.get(line) ?? `line ${line + 1}`,
+			inheritShift: true,
+		});
+	}
+	for (const [at, added] of inserts) {
+		splices.push({
+			from: at,
+			to: at,
+			coreFrom: at,
+			coreTo: at,
+			lines: added,
+			label: insertLabels.get(at) ?? `line ${at + 1}`,
+		});
+	}
+
+	splices.sort((a, b) => a.coreFrom - b.coreFrom || a.coreTo - b.coreTo);
 	for (let i = 1; i < splices.length; i++) {
 		const previous = splices[i - 1];
 		const next = splices[i];
-		if (next.from < previous.to || (next.from === next.to && previous.from === next.from)) {
+		if (
+			next.coreFrom < previous.coreTo ||
+			(next.coreFrom === next.coreTo && previous.coreFrom === previous.coreTo && next.coreFrom === previous.coreFrom)
+		) {
 			return {
-				problem:
-					"Two operations touch the same lines or insert at the same place. Give each line at most one operation, numbered against the original file.",
+				problem: `${previous.label} and ${next.label} touch the same lines or insert at the same place. Give each line at most one operation, numbered against the original file.`,
 			};
 		}
 	}
-
+	// Merge delete splices separated only by blank lines so their outer separator is placed once.
+	const merged: Splice[] = [];
+	for (const splice of splices) {
+		const previous = merged.at(-1);
+		let onlyBlanks = Boolean(previous?.isDelete && splice.isDelete);
+		for (let at = previous?.coreTo ?? 0; onlyBlanks && at < splice.coreFrom; at++) {
+			onlyBlanks = isBlank(at);
+		}
+		if (previous && onlyBlanks) {
+			const span = withSeparator(previous.coreFrom, splice.coreTo);
+			merged[merged.length - 1] = {
+				from: span.from,
+				to: span.to,
+				coreFrom: previous.coreFrom,
+				coreTo: splice.coreTo,
+				lines: [],
+				label: `${previous.label} + ${splice.label}`,
+				isDelete: true,
+			};
+			continue;
+		}
+		merged.push(splice);
+	}
+	splices.length = 0;
+	splices.push(...merged);
+	// Trim automatically carried blank separators so neighbouring deletes, moves and inserts never collide.
+	for (let i = 1; i < splices.length; i++) {
+		const previous = splices[i - 1];
+		const next = splices[i];
+		if (previous.to > next.coreFrom) previous.to = next.coreFrom;
+		if (next.from < previous.coreTo) next.from = previous.coreTo;
+		if (previous.to > next.from) next.from = previous.to;
+	}
 	shifts.sort((a, b) => a.from - b.from);
 	for (const [i, shift] of shifts.entries()) {
 		if (i > 0 && shift.from < shifts[i - 1].to) return { problem: "Indentation ranges overlap." };
@@ -481,22 +636,204 @@ export function compileLineEdits(
 	const replacement: string[] = [];
 	let cursor = from;
 	let shiftIndex = 0;
-	splices.push({ from: to, to, lines: [] });
+	const applyShift = (line: string, at: number): string | undefined => {
+		while (shiftIndex < shifts.length && shifts[shiftIndex].to <= at) shiftIndex++;
+		const shift = shifts[shiftIndex];
+		if (shift === undefined || shift.from > at || line.trim() === "") return line;
+		if (!shift.dedent) return shift.prefix + line;
+		if (line.startsWith(shift.prefix)) return line.slice(shift.prefix.length);
+		return undefined;
+	};
 	for (const splice of splices) {
 		while (cursor < splice.from) {
-			const line = lines[cursor];
-			while (shiftIndex < shifts.length && shifts[shiftIndex].to <= cursor) shiftIndex++;
-			const shift = shifts[shiftIndex];
-			if (shift === undefined || shift.from > cursor || line.trim() === "") replacement.push(line);
-			else if (!shift.dedent) replacement.push(shift.prefix + line);
-			else if (line.startsWith(shift.prefix)) replacement.push(line.slice(shift.prefix.length));
-			else return { problem: `Line ${cursor + 1} does not have the specified indentation to remove.` };
+			const shifted = applyShift(lines[cursor], cursor);
+			if (shifted === undefined) {
+				return { problem: `Line ${cursor + 1} does not have the specified indentation to remove.` };
+			}
+			replacement.push(shifted);
 			cursor++;
 		}
-		for (const line of splice.lines) replacement.push(line);
+		if (splice.inheritShift) {
+			for (const line of splice.lines) {
+				const shifted = applyShift(line, splice.from);
+				if (shifted === undefined) {
+					return { problem: `Line ${splice.from + 1} does not have the specified indentation to remove.` };
+				}
+				replacement.push(shifted);
+			}
+		} else {
+			for (const line of splice.lines) replacement.push(line);
+		}
 		cursor = splice.to;
+	}
+	while (cursor < to) {
+		const shifted = applyShift(lines[cursor], cursor);
+		if (shifted === undefined) {
+			return { problem: `Line ${cursor + 1} does not have the specified indentation to remove.` };
+		}
+		replacement.push(shifted);
+		cursor++;
 	}
 	const next = replacement.join("\n") + (replacement.length && (to < lines.length || finalNewline) ? "\n" : "");
 	if (old === next) return { problem: "The operations produce no changes." };
-	return { edit: { old_string: old, new_string: next }, ranges };
+	return { edit: { old_string: old, new_string: next }, ranges, splices, shifts };
+}
+
+/**
+ * Compile a line-operation reply into one `replace` edit of `content`, the LF
+ * snapshot `view` was cut from. `cut` marks a reply that ran into the output
+ * limit: it counts only when commentary shows its operations were finished.
+ * `ranges` are the line ranges the reply deletes, moves or swaps, for
+ * {@link blockHints}. `operations` are the parsed, deduplicated operations for
+ * {@link diagnoseSyntaxFailure}. `problem` is worded for the model: an
+ * unreadable reply, a malformed or unknown operation, a line outside the file
+ * or the shown excerpt, operations on the same lines, indentation that is not
+ * there to remove, or no change.
+ */
+export function compileLineEdits(
+	reply: string,
+	content: string,
+	view: FileView,
+	cut = false,
+): { edit: ReplaceBatchParams["edits"][number]; ranges: Range[]; operations: unknown[][] } | { problem: string } {
+	const read = readOperations(reply);
+	// A reply cut at the output limit counts only if commentary shows the model had finished its list.
+	if (!read || read.operations.length === 0 || (cut && !read.commented)) {
+		return { problem: "Output only JSON operation arrays, one per line, and nothing else." };
+	}
+	// A repeated operation is the same request twice.
+	const seen = new Set<string>();
+	const operations = read.operations.filter(operation => {
+		const key = JSON.stringify(operation);
+		if (seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	});
+	const compiled = compileOperations(operations, content, view);
+	if ("problem" in compiled) return compiled;
+	return { edit: compiled.edit, ranges: compiled.ranges, operations };
+}
+
+/** Compact boundary preview of one operation's splices so the apply model sees where syntax broke. */
+function previewOperation(index: number, operation: unknown[], content: string, view: FileView): string {
+	const header = `Operation ${index + 1} (${compactOp(operation)})`;
+	const compiled = compileOperations([operation], content, view);
+	if ("problem" in compiled) return `${header} breaks syntax.`;
+	const lines = fileLines(content);
+	if (compiled.splices.length === 0) {
+		const shift = compiled.shifts[0];
+		return shift ? `${header} breaks syntax around lines ${shift.from + 1}-${shift.to}.` : `${header} breaks syntax.`;
+	}
+	const blocks: string[] = [];
+	for (const splice of compiled.splices.slice(0, 2)) {
+		const spanLabel =
+			splice.from === splice.to
+				? `line ${Math.min(splice.from + 1, lines.length)}`
+				: splice.to - splice.from === 1
+					? `line ${splice.from + 1}`
+					: `lines ${splice.from + 1}-${splice.to}`;
+		const out: string[] = [`${header} breaks syntax around ${spanLabel}:`];
+		const ctxStart = Math.max(0, splice.from - 2);
+		const ctxEnd = Math.min(lines.length, splice.to + 2);
+		for (let i = ctxStart; i < splice.from; i++) out.push(`  ${i + 1}\t${lines[i]}`);
+		const removedCount = splice.to - splice.from;
+		if (removedCount <= 7) {
+			for (let i = splice.from; i < splice.to; i++) out.push(`- ${i + 1}\t${lines[i]}`);
+		} else {
+			for (let i = splice.from; i < splice.from + 3; i++) out.push(`- ${i + 1}\t${lines[i]}`);
+			out.push(`  … (${removedCount - 6} removed lines)`);
+			for (let i = splice.to - 3; i < splice.to; i++) out.push(`- ${i + 1}\t${lines[i]}`);
+		}
+		if (splice.lines.length <= 9) {
+			for (const line of splice.lines) out.push(`+ ${line}`);
+		} else {
+			for (let i = 0; i < 4; i++) out.push(`+ ${splice.lines[i]}`);
+			out.push(`  … (${splice.lines.length - 8} added lines)`);
+			for (let i = splice.lines.length - 4; i < splice.lines.length; i++) out.push(`+ ${splice.lines[i]}`);
+		}
+		for (let i = splice.to; i < ctxEnd; i++) out.push(`  ${i + 1}\t${lines[i]}`);
+		blocks.push(out.join("\n"));
+	}
+	if (compiled.splices.length > 2) blocks.push(`… (${compiled.splices.length - 2} more locations affected)`);
+	return blocks.join("\n");
+}
+
+/**
+ * Pinpoint which operation(s) in a compiled batch left the file unparseable,
+ * with compact boundary context around where syntax broke.
+ */
+export function diagnoseSyntaxFailure(
+	operations: readonly unknown[][],
+	content: string,
+	view: FileView,
+	parses: (code: string) => boolean,
+): string {
+	if (operations.length === 0) return "";
+	if (operations.length === 1) return previewOperation(0, operations[0], content, view);
+
+	const subsetParses = (indices: readonly number[]): boolean => {
+		if (indices.length === 0) return true;
+		const res = compileOperations(
+			indices.map(i => operations[i]),
+			content,
+			view,
+		);
+		if ("problem" in res) return true;
+		const at = content.indexOf(res.edit.old_string);
+		return parses(content.slice(0, at) + res.edit.new_string + content.slice(at + res.edit.old_string.length));
+	};
+
+	const all = operations.map((_, i) => i);
+	let brokenAlone: number[] = [];
+	if (operations.length <= MAX_LINEAR_DIAGNOSE_OPS) {
+		brokenAlone = all.filter(i => !subsetParses([i]));
+	} else {
+		const findBroken = (indices: number[]) => {
+			if (brokenAlone.length >= MAX_DIAGNOSED_OPS + 1 || indices.length === 0) return;
+			if (subsetParses(indices)) return;
+			if (indices.length === 1) {
+				brokenAlone.push(indices[0]);
+				return;
+			}
+			const mid = indices.length >> 1;
+			findBroken(indices.slice(0, mid));
+			findBroken(indices.slice(mid));
+		};
+		findBroken(all);
+	}
+
+	if (brokenAlone.length > 0) {
+		// If removing one failing operation makes the full batch parse (e.g. a valid unwrap pair plus one broken op),
+		// report only the operation that actually breaks the batch.
+		let culprits = brokenAlone;
+		if (brokenAlone.length > 1 && brokenAlone.length <= MAX_SINGLE_FIX_CHECK) {
+			const singleFixes = brokenAlone.filter(i => subsetParses(all.filter(j => j !== i)));
+			if (singleFixes.length > 0) culprits = singleFixes;
+		}
+		const lines = culprits.slice(0, MAX_DIAGNOSED_OPS).map(i => previewOperation(i, operations[i], content, view));
+		if (culprits.length > MAX_DIAGNOSED_OPS) {
+			lines.push(`… and ${culprits.length - MAX_DIAGNOSED_OPS} more operations break syntax.`);
+		}
+		return lines.join("\n\n");
+	}
+
+	// Every operation parses on its own; binary-search the first prefix that fails to find an interacting pair.
+	let lo = 1;
+	let hi = all.length - 1;
+	while (lo < hi) {
+		const mid = (lo + hi) >> 1;
+		if (subsetParses(all.slice(0, mid + 1))) lo = mid + 1;
+		else hi = mid;
+	}
+	const partnerLimit = Math.min(hi, MAX_LINEAR_DIAGNOSE_OPS);
+	for (let partner = 0; partner < partnerLimit; partner++) {
+		if (!subsetParses([partner, hi])) {
+			return [
+				`Operations ${partner + 1} (${compactOp(operations[partner])}) and ${hi + 1} (${compactOp(operations[hi])}) together break syntax.`,
+				previewOperation(partner, operations[partner], content, view),
+				previewOperation(hi, operations[hi], content, view),
+			].join("\n\n");
+		}
+	}
+	return previewOperation(hi, operations[hi], content, view);
 }
