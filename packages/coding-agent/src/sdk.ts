@@ -643,7 +643,7 @@ export interface CreateAgentSessionOptions {
 
 	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
 	authStorage?: AuthStorage;
-	/** Model registry. Default: discoverModels(authStorage, agentDir) */
+	/** Model registry. Default: constructed from <agentDir>/models.yml */
 	modelRegistry?: ModelRegistry;
 	/**
 	 * Request credential resolver. Defaults to the model registry's normal
@@ -2012,10 +2012,11 @@ export function createAutoLearnCaptureRunner(
  * const { session } = await createAgentSession();
  *
  * // With explicit model
- * import { getModel } from '@oh-my-pi/pi-ai';
+ * import { ThinkingLevel } from '@oh-my-pi/pi-agent-core';
+ * import { getBundledModel } from '@oh-my-pi/pi-catalog/models';
  * const { session } = await createAgentSession({
- *   model: getModel('anthropic', 'claude-opus-4-5'),
- *   thinkingLevel: 'high',
+ *   model: getBundledModel('anthropic', 'claude-opus-4-5'),
+ *   thinkingLevel: ThinkingLevel.High,
  * });
  *
  * // Continue previous session
