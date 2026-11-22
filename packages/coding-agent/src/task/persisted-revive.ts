@@ -41,7 +41,9 @@ import {
 	compactionThresholdSettings,
 	createSubagentSettings,
 	followMCPTools,
+	readAgentMaxEffort,
 	replayRevivedAgentStart,
+	resolveAgentEffortCeiling,
 	softRequestBudgetFor,
 	subagentLspWritethroughSettings,
 	subagentRetryFallbackRole,
@@ -422,11 +424,21 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			asyncJobManager: spec.asyncJobManager,
 			parentAgentId: ref.parentId,
 			oauthAccountPools,
+			// The spawn-time `task.agentMaxEffort` ceiling is not persisted; recompute it from the agent name.
+			thinkingLevelCeiling: resolveAgentEffortCeiling(
+				init.agent ?? "",
+				undefined,
+				readAgentMaxEffort(spec.settings),
+			),
 			// A per-call model is held to the operator's current grants, not the transcript's,
 			// never switches models, and keeps the live task.maxEffort ceiling the spawn ran under.
 			...(assertApprovedModel
 				? {
-						thinkingLevelCeiling: cfgTaskMaxEffort.get(spec.settings),
+						thinkingLevelCeiling: resolveAgentEffortCeiling(
+							init.agent ?? "",
+							cfgTaskMaxEffort.get(spec.settings),
+							readAgentMaxEffort(spec.settings),
+						),
 						disableModelFallback: true,
 						disableServerSideFallback: true,
 						assertDispatchModel: (model: Model) => {

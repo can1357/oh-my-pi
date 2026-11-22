@@ -662,6 +662,28 @@ export const cfgTaskMaxEffort = register({
 	},
 });
 
+function validateAgentMaxEffort(value: unknown): void {
+	if (value === undefined || value === null) return;
+	if (!isRecord(value)) {
+		const received = Array.isArray(value) ? "an array" : `a ${typeof value}`;
+		throw new Error(`Invalid task.agentMaxEffort: expected a map of agent name to effort level, got ${received}.`);
+	}
+	for (const [agentName, level] of Object.entries(value)) {
+		if (typeof level === "string" && (THINKING_EFFORTS as readonly string[]).includes(level)) continue;
+		throw new Error(
+			`Invalid task.agentMaxEffort.${agentName}: expected one of ${THINKING_EFFORTS.join(", ")}, got ${Bun.inspect(level)}.`,
+		);
+	}
+}
+
+export const cfgTaskAgentMaxEffort = register({
+	id: "task.agentMaxEffort",
+	protocolDefault: ["rpc", "acp"],
+	type: "record",
+	default: {} as Record<string, string>,
+	validate: validateAgentMaxEffort,
+});
+
 export const cfgTaskDisabledAgents = register({
 	id: "task.disabledAgents",
 	protocolDefault: ["rpc", "acp"],

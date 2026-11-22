@@ -272,6 +272,42 @@ afterEach(async () => {
 });
 
 describe("persisted subagent revival", () => {
+	it("re-applies task.agentMaxEffort as the session effort ceiling on cold revival", async () => {
+		const cwd = makeTempDir("@pi-agent-max-effort-revive-");
+		const sessionFile = await createPersistedSession(cwd, false, "default", undefined, { agent: "scout" });
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const settings = Settings.isolated({ "task.agentMaxEffort": { scout: "low" } });
+		const reviver = await createFactory(cwd, undefined, { settings })(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.thinkingLevelCeiling).toBe(Effort.Low);
+	});
+
+	it("revives an agent without a task.agentMaxEffort entry with no effort ceiling", async () => {
+		const cwd = makeTempDir("@pi-agent-max-effort-revive-none-");
+		const sessionFile = await createPersistedSession(cwd, false, "default", undefined, { agent: "coder" });
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const settings = Settings.isolated({ "task.agentMaxEffort": { scout: "low" } });
+		const reviver = await createFactory(cwd, undefined, { settings })(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.thinkingLevelCeiling).toBeUndefined();
+	});
+
 	it("initializes the extension runtime on cold revival so tool_call handlers are not fail-closed blocked", async () => {
 		const cwd = makeTempDir("@pi-revive-ext-init-");
 		const sessionFile = await createPersistedSession(cwd);
