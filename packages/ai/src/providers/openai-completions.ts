@@ -1295,8 +1295,10 @@ const streamOpenAICompletionsOnce = (
 					if (currentBlock?.type !== "toolCall") finishCurrentBlock(currentBlock);
 					if (lastTextBlock) {
 						// This channel is resuming after the other one streamed; continue
-						// the block it left instead of starting a second one.
+						// the block it left instead of starting a second one. Reopen it so
+						// the deltas land on an open block, as the pause closed it.
 						currentBlock = lastTextBlock;
+						stream.push({ type: "text_start", contentIndex: blockIndex(currentBlock), partial: output });
 					} else {
 						currentBlock = { type: "text", text: "" };
 						pushContentBlock(currentBlock);
@@ -1336,16 +1338,21 @@ const streamOpenAICompletionsOnce = (
 					(signature === undefined || currentBlock.thinkingSignature === signature)
 						? currentBlock
 						: undefined;
-				if (block === undefined && lastThinkingBlock !== undefined) {
+				if (block === undefined && lastThinkingBlock !== undefined && receivedReasoningDetails.length === 0) {
+					// `reasoning_details` entries are per-segment signed items: a later
+					// segment after visible text is its own block, never a resume.
 					const resumable =
 						lastThinkingBlock.thinkingSignature === signature ||
 						(signature === undefined && lastThinkingBlock.thinkingSignature === undefined);
 					if (resumable) {
 						// Same resume rule as appendText: the reasoning channel continues
 						// the block it left rather than opening one after the answer.
+						// The block was closed when the other channel started, so reopen
+						// it: a delta for a closed block is dropped by event consumers.
 						if (currentBlock?.type !== "toolCall") finishCurrentBlock(currentBlock);
 						block = lastThinkingBlock;
 						currentBlock = block;
+						stream.push({ type: "thinking_start", contentIndex: blockIndex(block), partial: output });
 					}
 				}
 				block ??= openThinkingBlock(signature);
@@ -1471,6 +1478,10 @@ const streamOpenAICompletionsOnce = (
 			const receivedReasoningDetails: ReasoningDetail[] = [];
 			let healedToolCallEmitted = false;
 			const emitHealedToolCall = (call: HealedToolCall): void => {
+				// A healed tool call is its own transcript boundary; text or
+				// reasoning after it starts a new block instead of resuming one.
+				lastTextBlock = undefined;
+				lastThinkingBlock = undefined;
 				finishCurrentBlock(currentBlock);
 				const block: ToolCall & { partialArgs: string } = {
 					type: "toolCall",
@@ -1497,7 +1508,13 @@ const streamOpenAICompletionsOnce = (
 				if (event.type === "text") {
 					appendProcessedText(event.text);
 				} else if (event.type === "thinking") {
-					if (!suppressThinking) appendThinkingDelta(event.thinking);
+					if (!suppressThinking) {
+						// A healed fence splits the visible text around its own thinking
+						// block; the piece after it must open a new text block.
+						lastTextBlock = undefined;
+						lastThinkingBlock = undefined;
+						appendThinkingDelta(event.thinking);
+					}
 				} else {
 					emitHealedToolCall(event.call);
 				}

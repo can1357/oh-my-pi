@@ -63,6 +63,29 @@ const ANSWER_HEAD = "Lithium batteries degrade because plating is irreversible. 
 const REASONING_TAIL = "r".repeat(512);
 const ANSWER_TAIL = "a".repeat(512);
 
+/** Every text/thinking delta must arrive on an open block, and every start must close. */
+function expectBalancedLifecycle(events: readonly AssistantMessageEvent[]): void {
+	const open = new Set<number>();
+	for (const event of events) {
+		if (event.type === "text_start" || event.type === "thinking_start") {
+			open.add(event.contentIndex);
+			continue;
+		}
+		if (event.type === "text_delta" || event.type === "thinking_delta") {
+			expect({ index: event.contentIndex, open: open.has(event.contentIndex) }).toEqual({
+				index: event.contentIndex,
+				open: true,
+			});
+			continue;
+		}
+		if (event.type === "text_end" || event.type === "thinking_end") {
+			expect(open.has(event.contentIndex)).toBe(true);
+			open.delete(event.contentIndex);
+		}
+	}
+	expect([...open]).toEqual([]);
+}
+
 describe("openai-completions channel resume", () => {
 	it("appends a deferred channel tail to the block the channel left", async () => {
 		const model = gatewayModel();
@@ -106,6 +129,25 @@ describe("openai-completions channel resume", () => {
 		const text = message.content.find(block => block.type === "text");
 		expect(thinking?.thinking).toBe(REASONING_HEAD + REASONING_TAIL);
 		expect(text?.text).toBe(ANSWER_HEAD + ANSWER_TAIL);
+	});
+
+	it("reopens each resumed channel so its deltas land on an open block", async () => {
+		const model = gatewayModel();
+		const stream = streamOpenAICompletions(model, context, {
+			apiKey: "test-key",
+			fetch: streamingFetch([
+				chunk(model, { role: "assistant", reasoning_content: REASONING_HEAD.slice(0, 20) }),
+				chunk(model, { reasoning_content: REASONING_HEAD.slice(20) }),
+				chunk(model, { content: ANSWER_HEAD.slice(0, 15) }),
+				chunk(model, { content: ANSWER_HEAD.slice(15) }),
+				chunk(model, { reasoning_content: REASONING_TAIL }),
+				chunk(model, { content: ANSWER_TAIL }),
+			]),
+		});
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) events.push(event);
+		await stream.result();
+		expectBalancedLifecycle(events);
 	});
 });
 
@@ -158,5 +200,69 @@ describe("leaked-thinking projector channel resume", () => {
 		const reasoning = result.content.find(block => block.type === "thinking");
 		expect(answer?.text).toBe(ANSWER_HEAD + ANSWER_TAIL);
 		expect(reasoning?.thinking).toBe(REASONING_TAIL);
+	});
+
+	it("reopens the answer across a tool call before the flushed tail", async () => {
+		const inner = new AssistantMessageEventStream();
+		const out = wrapLeakedThinkingStream(inner);
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "openai-completions",
+			provider: "omni",
+			model: "ds/deepseek-flash",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 0,
+		};
+		inner.push({ type: "start", partial: message });
+		const text = { type: "text" as const, text: "" };
+		const tool = { type: "toolCall" as const, id: "call_1", name: "read", arguments: {} };
+		const thinking = { type: "thinking" as const, thinking: "", thinkingSignature: "reasoning_content" };
+		const send = (event: AssistantMessageEvent): void => {
+			inner.push(event);
+		};
+		// Answer head, then the tool call, then the flushed reasoning tail, then the
+		// rest of the answer on the same source block.
+		text.text += ANSWER_HEAD;
+		send({ type: "text_delta", contentIndex: 0, delta: ANSWER_HEAD, partial: { ...message, content: [text] } });
+		send({ type: "toolcall_start", contentIndex: 1, partial: { ...message, content: [text, tool] } });
+		send({
+			type: "toolcall_end",
+			contentIndex: 1,
+			toolCall: tool,
+			partial: { ...message, content: [text, tool] },
+		});
+		thinking.thinking += REASONING_TAIL;
+		send({ type: "thinking_start", contentIndex: 2, partial: { ...message, content: [text, tool, thinking] } });
+		send({
+			type: "thinking_delta",
+			contentIndex: 2,
+			delta: REASONING_TAIL,
+			partial: { ...message, content: [text, tool, thinking] },
+		});
+		text.text += ANSWER_TAIL;
+		send({
+			type: "text_delta",
+			contentIndex: 0,
+			delta: ANSWER_TAIL,
+			partial: { ...message, content: [text, tool, thinking] },
+		});
+		send({ type: "done", reason: "toolUse", message: { ...message, content: [text, tool, thinking] } });
+
+		for await (const _event of out) {
+			// drain
+		}
+		const result = await out.result();
+		expect(result.content.map(block => block.type)).toEqual(["text", "toolCall", "thinking"]);
+		const answer = result.content[0];
+		expect(answer?.type === "text" ? answer.text : "").toBe(ANSWER_HEAD + ANSWER_TAIL);
 	});
 });

@@ -545,19 +545,17 @@ class LeakedThinkingProjector {
 			// The text channel resumed after the reasoning channel streamed, so
 			// `#openThinking` closed this block mid-answer. Reopen it — a gateway
 			// that flushes its channel tails late would otherwise split one answer
-			// in two around a stray reasoning fragment. Only a block that still
-			// belongs to this source text block and has no tool call, image or
-			// redacted block after it may be resumed.
+			// in two around a stray reasoning fragment, and it flushes its tail
+			// after a tool call too. A tool call or image projected since does not
+			// close the answer: the resumed chunk names the same source block, so
+			// its text belongs before them.
 			const resumed = this.#resumableText;
 			const resumableBlock = resumed === undefined ? undefined : this.#partial.content[resumed];
 			if (
 				!this.#healedThinkingSinceTextClose &&
 				resumed !== undefined &&
 				resumableBlock?.type === "text" &&
-				this.#sourceAnchors.get(resumableBlock) === srcIndex &&
-				this.#partial.content.every(
-					(content, index) => index <= resumed || content.type === "text" || content.type === "thinking",
-				)
+				this.#sourceAnchors.get(resumableBlock) === srcIndex
 			) {
 				this.#text = { index: resumed };
 				this.#out.push({ type: "text_start", contentIndex: resumed, partial: this.#partial });
