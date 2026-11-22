@@ -327,6 +327,30 @@ describe("session exit diagnostics", () => {
 		expect(describePendingToolCalls(sessionManager.getBranch())).toContain("bun run check:ts");
 	});
 
+	it("reports only calls left open after the last assistant message", () => {
+		const sessionManager = SessionManager.inMemory();
+		const marker = (toolCallId: string): ToolExecutionStartData => ({
+			toolCallId,
+			toolName: "bash",
+			args: { command: `run ${toolCallId}` },
+			startedAt: new Date().toISOString(),
+		});
+		const callingAssistant = (id: string): AssistantMessage => ({
+			...pendingAssistant,
+			content: [{ type: "toolCall", id, name: "bash", arguments: { command: `run ${id}` } }],
+		});
+		// An earlier turn left a call and a started marker without results; a later assistant message supersedes both.
+		sessionManager.appendMessage(callingAssistant("toolu_old"));
+		sessionManager.appendCustomEntry(TOOL_EXECUTION_START_CUSTOM_TYPE, marker("toolu_stray"));
+		sessionManager.appendMessage(callingAssistant("toolu_last"));
+		sessionManager.appendCustomEntry(TOOL_EXECUTION_START_CUSTOM_TYPE, marker("toolu_last"));
+		sessionManager.appendCustomEntry(TOOL_EXECUTION_START_CUSTOM_TYPE, marker("toolu_after"));
+		expect(collectPendingToolCalls(sessionManager.getBranch()).map(call => call.toolCallId)).toEqual([
+			"toolu_last",
+			"toolu_after",
+		]);
+	});
+
 	it("clears the pending warning once the matching tool result is recorded", () => {
 		const sessionManager = SessionManager.inMemory();
 		sessionManager.appendMessage(pendingAssistant);
