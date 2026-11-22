@@ -2828,6 +2828,8 @@ const streamAnthropicOnce = (
 					let response: Response;
 					let requestId: string | null;
 					let recordsRawSseEvents: boolean;
+					// Cleared here, not per retry rung: an attempt that throws before its response must not keep the last one's id.
+					output.requestId = undefined;
 					try {
 						({
 							events: anthropicStream,
@@ -2843,6 +2845,7 @@ const streamAnthropicOnce = (
 					} finally {
 						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
 					}
+					output.requestId = requestId ?? undefined;
 					await notifyProviderResponse(options, response, sourceModel, requestId);
 					if (slowMode) {
 						const slowSignal = parseAnthropicSlowModeHeaders(response.headers);

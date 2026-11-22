@@ -15,7 +15,7 @@ import * as path from "node:path";
 import { isRecord, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import type { McpEra } from "./contract";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const DB_FILE = "cache.db";
 /** Entries unread for this long are dropped: no session configures the server any more. */
 const UNUSED_ENTRY_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -76,9 +76,12 @@ export function cacheParamsKey(params: Record<string, unknown> | undefined): str
 }
 
 function migrate(db: Database): void {
-	const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
-	if (version >= SCHEMA_VERSION) return;
+	const version = db.query<{ user_version: number }, []>("PRAGMA user_version");
+	if ((version.get()?.user_version ?? 0) >= SCHEMA_VERSION) return;
 	db.transaction(() => {
+		// Another host may have migrated and repopulated the cache while we waited for the lock.
+		const current = version.get()?.user_version ?? 0;
+		if (current >= SCHEMA_VERSION) return;
 		db.run(`CREATE TABLE IF NOT EXISTS eras (
 			key TEXT PRIMARY KEY,
 			era TEXT NOT NULL,
@@ -94,15 +97,16 @@ function migrate(db: Database): void {
 			used_at INTEGER NOT NULL,
 			PRIMARY KEY (key, method, params)
 		)`);
+		if (current === 1) db.run("DELETE FROM eras");
 		db.run(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-	})();
+	}).immediate();
 }
 
 function openDatabase(file: string): Database {
 	const db = new Database(file, { create: true });
 	try {
-		db.run("PRAGMA journal_mode = WAL");
 		db.run(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+		db.run("PRAGMA journal_mode = WAL");
 		migrate(db);
 		return db;
 	} catch (error) {
@@ -187,9 +191,9 @@ export class McpStore {
 		this.#db.run("INSERT OR REPLACE INTO eras (key, era, probed_at) VALUES (?, ?, ?)", [key, era, Date.now()]);
 	}
 
-	/** Forget a verdict that turned out wrong; the next resolve probes again. */
-	clearEra(key: string): void {
-		this.#db.run("DELETE FROM eras WHERE key = ?", [key]);
+	/** Forget a verdict only if it still matches the rejected era. */
+	clearEra(key: string, era: McpEra): void {
+		this.#db.run("DELETE FROM eras WHERE key = ? AND era = ?", [key, era]);
 	}
 
 	/** The stored result of `method` with `params` (a {@link cacheParamsKey}), fresh or not. */
