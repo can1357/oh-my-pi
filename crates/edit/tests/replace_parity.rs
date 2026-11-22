@@ -91,7 +91,8 @@ fn resolves_parent_targets_outside_cwd() {
 			.resolve("../outside.txt", &HashMap::new())
 			.unwrap()
 			.location
-			.key(),
+			.disk_path()
+			.unwrap(),
 		root.path().join("outside.txt")
 	);
 }
@@ -110,7 +111,8 @@ fn preserves_absolute_targets_outside_cwd() {
 			.resolve(absolute.to_str().unwrap(), &HashMap::new())
 			.unwrap()
 			.location
-			.key(),
+			.disk_path()
+			.unwrap(),
 		absolute
 	);
 }
@@ -129,7 +131,8 @@ fn expands_home_targets_outside_cwd() {
 			.resolve("~/.claude/settings.json", &HashMap::new())
 			.unwrap()
 			.location
-			.key(),
+			.disk_path()
+			.unwrap(),
 		home.join(".claude/settings.json")
 	);
 }

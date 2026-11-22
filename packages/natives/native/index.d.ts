@@ -232,12 +232,7 @@ export declare class EditSession {
   close(): void
 }
 
-/**
- * Session-scoped snapshots, clipboard registers, and the no-op loop guard.
- *
- * Keys are absolute disk paths or canonical resource URLs (for example,
- * `ssh://host/home/u/x`); hosted URLs are never filesystem-canonicalized.
- */
+/** Session-scoped snapshots, clipboard registers, and the no-op loop guard. */
 export declare class EditStore {
   constructor()
   /**
@@ -1017,6 +1012,8 @@ export declare class VcsGitRepo {
   submodulePaths(signal?: unknown | undefined | null): Promise<Array<string>>
   /** Read blob bytes. */
   showBlob(spec: string, maxBytes?: number | undefined | null, signal?: unknown | undefined | null): Promise<VcsShowResult>
+  /** Write bytes as a blob and return its full object id. */
+  writeBlob(data: Uint8Array, signal?: unknown | undefined | null): Promise<string>
   /**
    * Convert worktree content to the blob `git add` would store per path
    * (EOL/`text` attributes, `core.autocrlf`, `ident`, clean filters such as
@@ -1031,6 +1028,11 @@ export declare class VcsGitRepo {
   diffText(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<string>
   /** Render a no-index patch between two filesystem paths. */
   diffNoIndex(left: string, right: string, binary: boolean, signal?: unknown | undefined | null): Promise<string>
+  /**
+   * Render a same-path patch between blobs already stored in the object
+   * database.
+   */
+  diffBlobs(change: VcsBlobChange, binary: boolean, signal?: unknown | undefined | null): Promise<string>
   /** Changed paths. */
   changedFiles(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<Array<string>>
   /** Per-file line counts. */
@@ -2217,7 +2219,7 @@ export declare function editErrorKinds(): Array<string>
 
 /** A destructive file operation a payload declares. */
 export interface EditFileOpIntent {
-  /** `create` | `delete` | `move`. */
+  /** `delete` | `move`. */
   kind: string
   path: string
   to?: string
@@ -2225,7 +2227,7 @@ export interface EditFileOpIntent {
 
 /** One file's apply outcome. */
 export interface EditFileOutcome {
-  /** Absolute disk path or opaque hosted resource key. */
+  /** Absolute path. */
   path: string
   displayPath: string
   /** `create` | `update` | `delete`. */
@@ -2325,15 +2327,8 @@ export interface EditPreviewBatch {
 
 /** Host answer for one internal URL (`resolveUrl`). */
 export interface EditUrlResolution {
-  /**
-   * Absolute backing file or canonical hosted resource URL. Hosted keys
-   * use `scheme://authority/absolute-path`, never disk paths.
-   */
+  /** Absolute backing file; null when no local file backs the URL. */
   path?: string
-  /** Full hosted file text; omit it when the hosted target does not exist. */
-  content?: string
-  /** Resolve only after execution approval; omit previews for this target. */
-  deferred?: boolean
   /** Model-facing refusal (read-only, disabled…); wins over `path`. */
   error?: string
   /** Writable while plan mode is active (sandbox-scoped scheme). */
@@ -2342,15 +2337,12 @@ export interface EditUrlResolution {
 
 /** Host write request; the host owns the bytes. */
 export interface EditWriteRequest {
-  /** Absolute disk path or opaque hosted resource key. */
+  /** Absolute path. */
   path: string
   displayPath: string
   /** `create` | `update` | `delete` | `move`. */
   op: string
-  /**
-   * Destination disk path or hosted key for `move` (write `content` there,
-   * delete `path`).
-   */
+  /** Absolute destination for `move` (write `content` there, delete `path`). */
   moveTo?: string
   /** Final bytes as text; null for `delete`. */
   content?: string
@@ -4750,6 +4742,15 @@ export interface VcsApplyOptions {
   indexPath?: string
   reverse?: boolean
   threeWay?: boolean
+}
+
+/** One same-path change between blobs already stored in the object database. */
+export interface VcsBlobChange {
+  path: string
+  oldId?: string
+  newId?: string
+  oldMode?: string
+  newMode?: string
 }
 
 /** Clean options. */

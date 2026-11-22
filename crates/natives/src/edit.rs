@@ -126,13 +126,8 @@ impl EditPolicy {
 /// Host answer for one internal URL (`resolveUrl`).
 #[napi(object)]
 pub struct EditUrlResolution {
-	/// Absolute backing file or canonical hosted resource URL. Hosted keys
-	/// use `scheme://authority/absolute-path`, never disk paths.
+	/// Absolute backing file; null when no local file backs the URL.
 	pub path:          Option<String>,
-	/// Full hosted file text; omit it when the hosted target does not exist.
-	pub content:       Option<String>,
-	/// Resolve only after execution approval; omit previews for this target.
-	pub deferred:      Option<bool>,
 	/// Model-facing refusal (read-only, disabled…); wins over `path`.
 	pub error:         Option<String>,
 	/// Writable while plan mode is active (sandbox-scoped scheme).
@@ -188,13 +183,12 @@ impl From<PreviewBatch> for EditPreviewBatch {
 /// Host write request; the host owns the bytes.
 #[napi(object)]
 pub struct EditWriteRequest {
-	/// Absolute disk path or opaque hosted resource key.
+	/// Absolute path.
 	pub path:         String,
 	pub display_path: String,
 	/// `create` | `update` | `delete` | `move`.
 	pub op:           String,
-	/// Destination disk path or hosted key for `move` (write `content` there,
-	/// delete `path`).
+	/// Absolute destination for `move` (write `content` there, delete `path`).
 	pub move_to:      Option<String>,
 	/// Final bytes as text; null for `delete`.
 	pub content:      Option<String>,
@@ -222,7 +216,7 @@ pub struct EditApplyRequest {
 /// One file's apply outcome.
 #[napi(object)]
 pub struct EditFileOutcome {
-	/// Absolute disk path or opaque hosted resource key.
+	/// Absolute path.
 	pub path:               String,
 	pub display_path:       String,
 	/// `create` | `update` | `delete`.
@@ -256,43 +250,11 @@ pub struct EditApplyOutcome {
 // Store
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// A canonical host resource URL, preserved byte-for-byte as an opaque key.
-/// Reject disk paths and incomplete URLs consistently on every platform.
-fn hosted_key(key: &str) -> Option<String> {
-	let (scheme, rest) = key.split_once("://")?;
-	if scheme.len() == 1
-		|| scheme.eq_ignore_ascii_case("file")
-		|| !scheme.as_bytes().first()?.is_ascii_alphabetic()
-		|| !scheme
-			.bytes()
-			.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
-		|| key
-			.bytes()
-			.any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
-		|| key.contains('\\')
-	{
-		return None;
-	}
-	let (authority, _) = rest.split_once('/')?;
-	if authority.is_empty() {
-		return None;
-	}
-	Some(key.to_owned())
-}
-
-/// The same hosted-URL contract is used by snapshot methods and resolver
-/// answers.
-fn store_key(key: &str) -> Location {
-	match hosted_key(key) {
-		Some(key) => Location::Hosted(key),
-		None => Location::Disk(key.into()).canonical_key(),
-	}
+fn store_key(path: &str) -> Location {
+	Location::Disk(PathBuf::from(path)).canonical_key()
 }
 
 /// Session-scoped snapshots, clipboard registers, and the no-op loop guard.
-///
-/// Keys are absolute disk paths or canonical resource URLs (for example,
-/// `ssh://host/home/u/x`); hosted URLs are never filesystem-canonicalized.
 #[napi]
 #[derive(Default)]
 pub struct EditStore {
@@ -561,48 +523,20 @@ async fn resolve_one(resolver: &ResolverCallback, url: &str) -> UrlAnswer {
 		Err(err) => Err(err),
 	};
 	match answer {
-		Ok(answer) => url_answer(url, answer),
+		Ok(answer) => {
+			if let Some(error) = answer.error {
+				UrlAnswer::Refused(error)
+			} else if let Some(path) = answer.path {
+				UrlAnswer::Backed {
+					path:          PathBuf::from(path),
+					plan_writable: answer.plan_writable,
+				}
+			} else {
+				UrlAnswer::Refused(format!("No local file backs {url}"))
+			}
+		},
 		Err(err) => UrlAnswer::Refused(err.reason),
 	}
-}
-
-fn url_answer(url: &str, answer: EditUrlResolution) -> UrlAnswer {
-	if let Some(error) = answer.error {
-		return UrlAnswer::Refused(error);
-	}
-	if answer.deferred.unwrap_or(false) {
-		return UrlAnswer::Pending;
-	}
-	let Some(path) = answer.path else {
-		let kind = if answer.content.is_some() {
-			"resource key"
-		} else {
-			"local file"
-		};
-		return UrlAnswer::Refused(format!("No {kind} backs {url}"));
-	};
-	if let Some(key) = hosted_key(&path) {
-		return UrlAnswer::Hosted {
-			key,
-			content: answer.content,
-			plan_writable: answer.plan_writable,
-		};
-	}
-	if answer.content.is_some() {
-		return UrlAnswer::Refused(
-			"Hosted edit keys must be canonical resource URLs such as ssh://host/absolute-path, not \
-			 disk paths"
-				.into(),
-		);
-	}
-	let path = PathBuf::from(path);
-	if !path.is_absolute() {
-		return UrlAnswer::Refused(format!(
-			"Invalid backing path for {url}: expected an absolute disk path or a canonical resource \
-			 URL"
-		));
-	}
-	UrlAnswer::Backed { path, plan_writable: answer.plan_writable }
 }
 
 /// The single file or directory below `cwd` whose path ends with the missing
@@ -961,7 +895,7 @@ pub struct EditMatcherEntry {
 /// A destructive file operation a payload declares.
 #[napi(object)]
 pub struct EditFileOpIntent {
-	/// `create` | `delete` | `move`.
+	/// `delete` | `move`.
 	pub kind: String,
 	pub path: String,
 	pub to:   Option<String>,
@@ -995,9 +929,6 @@ pub fn edit_inspect(mode: String, args_json: String) -> Result<EditInspection> {
 			.file_ops
 			.into_iter()
 			.map(|op| match op {
-				omp_edit::FileOpIntent::Create { path } => {
-					EditFileOpIntent { kind: "create".into(), path, to: None }
-				},
 				omp_edit::FileOpIntent::Delete { path } => {
 					EditFileOpIntent { kind: "delete".into(), path, to: None }
 				},
@@ -1170,107 +1101,6 @@ pub fn notebook_to_editable_text(json: String, display_path: String) -> Result<S
 mod tests {
 	use super::*;
 
-	fn hosted_answer(key: &str) -> UrlAnswer {
-		url_answer("ssh://host/authored.txt", EditUrlResolution {
-			path:          Some(key.into()),
-			content:       Some("alpha\n".into()),
-			deferred:      None,
-			error:         None,
-			plan_writable: false,
-		})
-	}
-
-	#[test]
-	fn resolver_error_takes_precedence_over_deferred() {
-		let answer = url_answer("ssh://host/notes.txt", EditUrlResolution {
-			path:          None,
-			content:       None,
-			deferred:      Some(true),
-			error:         Some("Host denied the edit".into()),
-			plan_writable: false,
-		});
-		assert!(matches!(answer, UrlAnswer::Refused(message) if message == "Host denied the edit"));
-	}
-
-	#[test]
-	fn hosted_answers_refuse_disk_paths_and_incomplete_resource_urls() {
-		for key in [
-			"/home/u/x",
-			"C:\\home\\u\\x",
-			"C:/home/u/x",
-			"C://home/u/x",
-			"\\\\server\\share\\x",
-			"relative.txt",
-			"ssh:///home/u/x",
-			"ssh://host",
-			"file:///tmp/x",
-		] {
-			let UrlAnswer::Refused(error) = hosted_answer(key) else {
-				panic!("accepted invalid hosted key {key}");
-			};
-			assert!(error.contains("canonical resource URLs"), "{error}");
-		}
-	}
-
-	#[test]
-	fn hosted_answers_without_content_keep_the_missing_resource_identity() {
-		let key = "ssh://host/home/u/missing.ipynb";
-		let answer = url_answer("ssh://host/~/missing.ipynb", EditUrlResolution {
-			path:          Some(key.into()),
-			content:       None,
-			deferred:      None,
-			error:         None,
-			plan_writable: false,
-		});
-		let UrlAnswer::Hosted { key: resolved, content: None, .. } = answer else {
-			panic!("missing hosted resource lost its identity: {answer:?}");
-		};
-		assert_eq!(resolved, key);
-	}
-
-	#[test]
-	fn malformed_hosted_answers_without_content_do_not_become_disk_paths() {
-		for path in ["ssh://host", "ssh:///tmp/x", "relative.txt"] {
-			let answer = url_answer("ssh://host/tmp/missing.txt", EditUrlResolution {
-				path:          Some(path.into()),
-				content:       None,
-				deferred:      None,
-				error:         None,
-				plan_writable: false,
-			});
-			assert!(matches!(answer, UrlAnswer::Refused(_)), "{path}: {answer:?}");
-		}
-	}
-
-	#[test]
-	fn hosted_snapshots_keep_distinct_url_paths_separate() {
-		let store = EditStore::new();
-		let repeated = "ssh://host/a//note.txt";
-		let single = "ssh://host/a/note.txt";
-		let tag = store.record_snapshot(repeated.into(), "first".into(), None);
-		store.record_snapshot(single.into(), "second".into(), None);
-		assert_eq!(store.head_text(repeated.into()).as_deref(), Some("first"));
-		assert_eq!(store.head_text(single.into()).as_deref(), Some("second"));
-		assert!(store.by_hash_text(single.into(), tag).is_none());
-		store.invalidate(single.into());
-		assert_eq!(store.head_text(repeated.into()).as_deref(), Some("first"));
-	}
-
-	#[test]
-	fn hosted_answer_and_snapshot_methods_share_one_opaque_key() {
-		let key = "ssh://host/home/u/a%20b.ipynb";
-		let UrlAnswer::Hosted { key: resolved, .. } = hosted_answer(key) else {
-			panic!("valid hosted URL refused");
-		};
-		assert_eq!(resolved, key);
-		assert_eq!(store_key(key), Location::Hosted(resolved.clone()));
-		let store = EditStore::new();
-		let tag = store.record_snapshot(key.into(), "alpha\n".into(), None);
-		assert_eq!(store.head_text(key.into()).as_deref(), Some("alpha\n"));
-		assert_eq!(store.by_hash_text(key.into(), tag).as_deref(), Some("alpha\n"));
-		assert!(store.inner.head(&Location::Hosted(resolved)).is_some());
-	}
-
 	/// A fresh directory removed on drop.
 	struct Scratch(PathBuf);
 
@@ -1309,7 +1139,7 @@ mod tests {
 		tree.write("deep/src/other.ts", "");
 		let recovered = recover_one(&tree.0, "src/a.ts").await.unwrap();
 		assert_eq!(recovered.display, "deep/src/a.ts");
-		assert_eq!(recovered.location.key(), tree.0.join("deep/src/a.ts"));
+		assert_eq!(recovered.location.disk_path().unwrap(), tree.0.join("deep/src/a.ts"));
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

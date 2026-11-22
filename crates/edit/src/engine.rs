@@ -68,45 +68,56 @@ impl FileOp {
 	}
 }
 
-/// Physical disk target or an opaque host-owned identity. Hosted keys never
-/// pass through filesystem canonicalization or notebook projection.
+/// A resolved local filesystem location.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Location {
-	/// A filesystem path, canonicalized and read through local disk APIs.
+	/// A filesystem path.
 	Disk(PathBuf),
-	/// An opaque host identity; never canonicalized or interpreted as a local
-	/// file.
-	Hosted(String),
 }
 
 impl Location {
-	/// Represent a target as a path for host requests and display. Compare the
-	/// locations themselves when checking identity.
-	pub fn key(&self) -> &Path {
+	/// The filesystem path, when this location is backed by disk.
+	pub fn disk_path(&self) -> Option<&Path> {
 		match self {
-			Self::Disk(path) => path,
-			Self::Hosted(key) => Path::new(key),
+			Self::Disk(path) => Some(path),
 		}
 	}
 
-	/// Canonicalize a disk path using the filesystem; preserve a hosted key
-	/// verbatim.
+	/// The location as UTF-8, if it can be represented without loss.
+	pub fn as_text(&self) -> Option<&str> {
+		match self {
+			Self::Disk(path) => path.to_str(),
+		}
+	}
+
+	/// The location text for diagnostics.
+	pub fn display(&self) -> std::borrow::Cow<'_, str> {
+		match self {
+			Self::Disk(path) => path.to_string_lossy(),
+		}
+	}
+
+	/// The location at the host writer boundary.
+	pub(crate) fn writer_path(&self) -> PathBuf {
+		match self {
+			Self::Disk(path) => path.clone(),
+		}
+	}
+
+	/// Canonicalize the underlying filesystem path.
 	pub fn canonical_key(&self) -> Self {
 		match self {
 			Self::Disk(path) => Self::Disk(crate::path_policy::canonical_key(path)),
-			Self::Hosted(_) => self.clone(),
 		}
 	}
 
 	pub(crate) fn capacity(&self) -> usize {
 		match self {
 			Self::Disk(path) => path.capacity(),
-			Self::Hosted(key) => key.capacity(),
 		}
 	}
 
-	/// True only for local notebooks; hosted notebooks retain their raw text
-	/// view.
+	/// Whether this is a disk notebook.
 	pub fn is_notebook(&self) -> bool {
 		matches!(self, Self::Disk(path) if crate::notebook::is_notebook_path(path))
 	}
@@ -141,7 +152,7 @@ pub enum HeaderKind {
 pub struct StagedFile {
 	/// Display path as authored (after suffix / tag recovery).
 	pub display:            String,
-	/// Local disk target or opaque hosted identity.
+	/// Resolved target location.
 	pub location:           Location,
 	pub op:                 FileOp,
 	/// Destination for a rename (`*** Move to:` / hashline `MV`). The write
@@ -220,8 +231,6 @@ pub struct PreviewFile {
 	pub first_changed_line: Option<u32>,
 	/// Model-facing error text; mutually exclusive with `diff`.
 	pub error:              Option<String>,
-	/// Host resolution awaits execution approval; never publish as an error.
-	pub deferred:           bool,
 	pub op:                 Option<FileOp>,
 	pub rename:             Option<String>,
 }
@@ -235,14 +244,13 @@ pub struct Inspection {
 	/// `(path, digest)` — the digest is the text the edit introduces into that
 	/// file (added lines only, no patch grammar). Same-path sections merge.
 	pub entries:  Vec<(String, String)>,
-	/// Whole-file intents; the ACP permission gate consumes deletes and moves.
+	/// Delete / move intents for the ACP permission gate.
 	pub file_ops: Vec<FileOpIntent>,
 }
 
-/// An explicit whole-file operation declared by the payload.
+/// A destructive file operation a payload declares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileOpIntent {
-	Create { path: String },
 	Delete { path: String },
 	Move { from: String, to: String },
 }

@@ -267,57 +267,19 @@ fn wrap_file_error(path: &str, error: EditError, multiple_files: bool) -> EditEr
 }
 
 enum VirtualFile {
-	Raw { raw: String, is_notebook: bool },
+	Raw(String),
 	Read(Arc<FileRead>),
-}
-
-impl VirtualFile {
-	fn is_notebook(&self) -> bool {
-		match self {
-			Self::Raw { is_notebook, .. } => *is_notebook,
-			Self::Read(read) => read.is_notebook,
-		}
-	}
 }
 
 /// The ordered envelope's read-through namespace. Disk remains untouched until
 /// every section has staged; tombstones prevent suffix recovery from reviving
 /// a path that an earlier section deleted or moved.
 struct VirtualFiles<'a> {
-	source:   &'a mut dyn FileSource,
-	state:    HashMap<Location, Option<VirtualFile>>,
-	/// Targets whose contents or existence depend on an earlier preview section.
-	deferred: HashMap<Location, String>,
+	source: &'a mut dyn FileSource,
+	state:  HashMap<Location, Option<VirtualFile>>,
 }
 
 impl VirtualFiles<'_> {
-	fn resolve_target(&mut self, authored: &str, must_exist: bool) -> Result<Resolved, EditError> {
-		let resolved = self.source.resolve(authored, false)?;
-		let key = resolved.location.canonical_key();
-		if !must_exist || self.state.contains_key(&key) || self.deferred.contains_key(&key) {
-			return Ok(resolved);
-		}
-		self.source.resolve(authored, true)
-	}
-
-	fn defer(&mut self, authored: &str, must_exist: bool, url: &str) {
-		if let Ok(resolved) = self.resolve_target(authored, must_exist) {
-			self
-				.deferred
-				.entry(resolved.location.canonical_key())
-				.or_insert_with(|| url.to_owned());
-		}
-	}
-
-	fn check_deferred(&self, location: &Location) -> Result<(), EditError> {
-		if !self.deferred.is_empty()
-			&& let Some(url) = self.deferred.get(&location.canonical_key())
-		{
-			return Err(EditError::DeferredUrl(url.clone()));
-		}
-		Ok(())
-	}
-
 	fn record(&mut self, file: &StagedFile) {
 		if file.op == FileOp::Delete || file.move_to.is_some() {
 			self.state.insert(file.location.canonical_key(), None);
@@ -327,17 +289,9 @@ impl VirtualFiles<'_> {
 				.move_to
 				.as_ref()
 				.map_or(&file.location, |to| &to.location);
-			let key = target.canonical_key();
-			// Retain the read's editable view: remote notebooks use raw JSON.
-			// New targets have no prior view and use the destination's format.
-			let is_notebook = self
-				.state
-				.get(&key)
-				.and_then(Option::as_ref)
-				.map_or_else(|| target.is_notebook(), VirtualFile::is_notebook);
 			self
 				.state
-				.insert(key, Some(VirtualFile::Raw { raw: raw.clone(), is_notebook }));
+				.insert(target.canonical_key(), Some(VirtualFile::Raw(raw.clone())));
 		}
 	}
 }
@@ -348,9 +302,11 @@ impl FileSource for VirtualFiles<'_> {
 	}
 
 	fn resolve(&mut self, authored: &str, must_exist: bool) -> Result<Resolved, EditError> {
-		let resolved = self.resolve_target(authored, must_exist)?;
-		self.check_deferred(&resolved.location)?;
-		Ok(resolved)
+		let resolved = self.source.resolve(authored, false)?;
+		if self.state.contains_key(&resolved.location.canonical_key()) || !must_exist {
+			return Ok(resolved);
+		}
+		self.source.resolve(authored, true)
 	}
 
 	fn exists(&mut self, location: &Location) -> bool {
@@ -371,16 +327,9 @@ impl FileSource for VirtualFiles<'_> {
 	}
 
 	fn try_read(&mut self, resolved: &Resolved) -> Result<Option<Arc<FileRead>>, EditError> {
-		self.check_deferred(&resolved.location)?;
 		let key = resolved.location.canonical_key();
-		let state = match self.state.remove(&key) {
-			Some(state) => state,
-			None => match self.source.try_read(resolved)? {
-				Some(read) => Some(VirtualFile::Read(read)),
-				// Only staged deletions are tombstones. A missing disk probe
-				// must still allow a later must-exist lookup to recover a suffix.
-				None => return Ok(None),
-			},
+		let Some(state) = self.state.remove(&key) else {
+			return self.source.try_read(resolved);
 		};
 		let read = match state {
 			None => {
@@ -388,13 +337,14 @@ impl FileSource for VirtualFiles<'_> {
 				return Ok(None);
 			},
 			Some(VirtualFile::Read(read)) => read,
-			Some(VirtualFile::Raw { raw, is_notebook }) => {
+			Some(VirtualFile::Raw(raw)) => {
 				if let Some(message) = self
 					.policy()
 					.auto_generated_message(&resolved.display, &raw.as_bytes()[..raw.len().min(1024)])
 				{
 					return Err(EditError::apply(message));
 				}
+				let is_notebook = resolved.location.is_notebook();
 				let (bom, body) = strip_bom(&raw);
 				let ending = if is_notebook {
 					LineEnding::Lf
@@ -427,7 +377,6 @@ impl FileSource for VirtualFiles<'_> {
 
 	fn clear(&mut self) {
 		self.state.clear();
-		self.deferred.clear();
 		self.source.clear();
 	}
 }
@@ -437,14 +386,12 @@ fn stage_entries(
 	files: &mut dyn FileSource,
 	allow_fuzzy: bool,
 	threshold: f64,
-	preview: bool,
 ) -> Result<Vec<StagedFile>, EditError> {
 	if entries.is_empty() {
 		return Err(EditError::apply("No files were modified."));
 	}
 	let multiple_files = distinct_paths(entries) > 1;
-	let mut files =
-		VirtualFiles { source: files, state: HashMap::new(), deferred: HashMap::new() };
+	let mut files = VirtualFiles { source: files, state: HashMap::new() };
 	let engine = PatchEngine { allow_fuzzy, fuzzy_threshold: threshold, first_match: true };
 	let mut staged = Vec::with_capacity(entries.len());
 	let mut index = 0;
@@ -469,32 +416,35 @@ fn stage_entries(
 		} else {
 			// Validate the strict Add File contract against the running state. A
 			// preceding delete permits a later add of the same path.
-			files
+			let resolved = files
 				.resolve(path, group[0].op != Operation::Create)
-				.and_then(|resolved| {
-					let mut exists = files.exists(&resolved.location);
-					for entry in group {
-						match entry.op {
-							Operation::Create if exists => {
-								return Err(EditError::apply(format!(
-									"Cannot create {path}: file already exists. Use *** Update File to \
-									 modify it in place."
-								)));
-							},
-							Operation::Create => exists = true,
-							Operation::Delete => exists = false,
-							Operation::Update => {},
-						}
-					}
-					let args = ArgSnapshot {
-						path: Some(path.clone()),
-						edits: group.iter().map(as_edit_entry).collect(),
-						has_edits: true,
-						complete: true,
-						..ArgSnapshot::default()
-					};
-					engine.stage(&args, &mut files, &EditStore::new())
-				})
+				.map_err(|error| wrap_file_error(path, error, multiple_files))?;
+			let mut exists = files.exists(&resolved.location);
+			for entry in group {
+				match entry.op {
+					Operation::Create if exists => {
+						return Err(wrap_file_error(
+							path,
+							EditError::apply(format!(
+								"Cannot create {path}: file already exists. Use *** Update File to modify \
+								 it in place."
+							)),
+							multiple_files,
+						));
+					},
+					Operation::Create => exists = true,
+					Operation::Delete => exists = false,
+					Operation::Update => {},
+				}
+			}
+			let args = ArgSnapshot {
+				path: Some(path.clone()),
+				edits: group.iter().map(as_edit_entry).collect(),
+				has_edits: true,
+				complete: true,
+				..ArgSnapshot::default()
+			};
+			engine.stage(&args, &mut files, &EditStore::new())
 		};
 		match result {
 			Ok(mut next) => {
@@ -505,32 +455,16 @@ fn stage_entries(
 				}
 				staged.append(&mut next);
 			},
-			Err(error) => {
-				if preview && let Some(url) = error.deferred_url() {
-					// Later sections must wait for the source and destination of a
-					// pending move. Other targets can still be previewed.
-					files.defer(path, group[0].op != Operation::Create, url);
-					if let Some(rename) = &group[0].rename {
-						files.defer(rename, false, url);
-					}
-				} else {
-					return Err(wrap_file_error(path, error, multiple_files));
-				}
-			},
+			Err(error) => return Err(wrap_file_error(path, error, multiple_files)),
 		}
 	}
 	Ok(staged)
 }
 
-fn streaming_target_ready(files: &mut dyn FileSource, path: &str) -> bool {
-	!files.policy().is_internal_url(path) || files.resolve(path, false).is_ok()
-}
-
-fn natural_order_previews(input: &str, files: &mut dyn FileSource) -> Vec<PreviewFile> {
+fn natural_order_previews(input: &str) -> Vec<PreviewFile> {
 	let mut order = Vec::<String>::new();
 	let mut groups = HashMap::<String, Vec<String>>::new();
 	let mut current = None::<String>;
-	let mut waiting = HashSet::new();
 	for raw in input.split('\n') {
 		let trimmed = raw.trim_end();
 		if matches!(trimmed, BEGIN_PATCH_MARKER | END_PATCH_MARKER | "*** Abort Patch") {
@@ -541,10 +475,7 @@ fn natural_order_previews(input: &str, files: &mut dyn FileSource) -> Vec<Previe
 			.or_else(|| trimmed.strip_prefix(DELETE_FILE_MARKER))
 			.or_else(|| trimmed.strip_prefix(UPDATE_FILE_MARKER));
 		if let Some(path) = header {
-			let path = path.trim().to_owned();
-			if !streaming_target_ready(files, &path) {
-				waiting.insert(path.clone());
-			}
+			let path = path.to_owned();
 			if !groups.contains_key(&path) {
 				order.push(path.clone());
 			}
@@ -552,15 +483,7 @@ fn natural_order_previews(input: &str, files: &mut dyn FileSource) -> Vec<Previe
 			current = Some(path);
 			continue;
 		}
-		if let Some(destination) = trimmed.strip_prefix(MOVE_TO_MARKER) {
-			if let Some(path) = &current
-				&& !streaming_target_ready(files, destination.trim())
-			{
-				waiting.insert(path.clone());
-			}
-			continue;
-		}
-		if trimmed.starts_with("*** End of File") {
+		if trimmed.starts_with("*** Move to:") || trimmed.starts_with("*** End of File") {
 			continue;
 		}
 		if let Some(path) = &current
@@ -571,7 +494,6 @@ fn natural_order_previews(input: &str, files: &mut dyn FileSource) -> Vec<Previe
 	}
 	order
 		.into_iter()
-		.filter(|path| !waiting.contains(path))
 		.filter_map(|path| {
 			let body = groups.remove(&path).unwrap_or_default();
 			(!body.is_empty()).then(|| PreviewFile {
@@ -610,9 +532,6 @@ fn inspect_entries(input: &str) -> (Vec<String>, Vec<(String, String)>, Vec<File
 					})
 					.or_insert(added);
 			}
-		}
-		if entry.op == Operation::Create {
-			file_ops.push(FileOpIntent::Create { path: entry.path.clone() });
 		}
 		if entry.op == Operation::Delete {
 			file_ops.push(FileOpIntent::Delete { path: entry.path.clone() });
@@ -655,7 +574,7 @@ impl ModeEngine for ApplyPatchEngine {
 			let Some(last_newline) = input.rfind('\n') else {
 				return Vec::new();
 			};
-			return natural_order_previews(&input[..=last_newline], files);
+			return natural_order_previews(&input[..=last_newline]);
 		}
 		let entries = match parse_apply_patch(input) {
 			Ok(entries) if !entries.is_empty() => entries,
@@ -672,7 +591,7 @@ impl ModeEngine for ApplyPatchEngine {
 		if entries.is_empty() {
 			return Vec::new();
 		}
-		match stage_entries(&entries, files, self.allow_fuzzy, self.fuzzy_threshold, true) {
+		match stage_entries(&entries, files, self.allow_fuzzy, self.fuzzy_threshold) {
 			Ok(staged) => staged
 				.into_iter()
 				.map(|file| PreviewFile {
@@ -680,17 +599,12 @@ impl ModeEngine for ApplyPatchEngine {
 					diff:               file.preview_diff.or(Some(file.diff)),
 					first_changed_line: file.first_changed_line,
 					error:              None,
-					deferred:           false,
 					op:                 Some(file.op),
 					rename:             file.move_to.map(|destination| destination.display),
 				})
 				.collect(),
 			Err(error) => {
-				vec![PreviewFile {
-					error: Some(error.to_string()),
-					deferred: error.is_deferred(),
-					..PreviewFile::default()
-				}]
+				vec![PreviewFile { error: Some(error.to_string()), ..PreviewFile::default() }]
 			},
 		}
 	}
@@ -705,7 +619,7 @@ impl ModeEngine for ApplyPatchEngine {
 			EditError::parse("The first line of the patch must be '*** Begin Patch'")
 		})?;
 		let entries = parse_apply_patch(input)?;
-		stage_entries(&entries, files, self.allow_fuzzy, self.fuzzy_threshold, false)
+		stage_entries(&entries, files, self.allow_fuzzy, self.fuzzy_threshold)
 	}
 
 	fn inspect(&self, args: &ArgSnapshot) -> Inspection {
@@ -720,37 +634,6 @@ impl ModeEngine for ApplyPatchEngine {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::files::FileCache;
-
-	#[test]
-	fn missing_probe_does_not_block_suffix_recovery() {
-		let dir = tempfile::tempdir().unwrap();
-		let cwd = dir.path().canonicalize().unwrap();
-		std::fs::create_dir(cwd.join("nested")).unwrap();
-		let target = cwd.join("nested/a.txt");
-		std::fs::write(&target, "recoverable\n").unwrap();
-		let mut source = FileCache::new(PathPolicy {
-			cwd:                  cwd.clone(),
-			home_dir:             cwd,
-			url_schemes:          Vec::new(),
-			url_alias_schemes:    Vec::new(),
-			plan_writable_roots:  Vec::new(),
-			plan_active:          false,
-			block_auto_generated: false,
-		});
-		source.provide_recovery(
-			"a.txt".into(),
-			Some(Resolved { location: target.into(), display: "nested/a.txt".into() }),
-		);
-		let mut files =
-			VirtualFiles { source: &mut source, state: HashMap::new(), deferred: HashMap::new() };
-		let missing = files.resolve("a.txt", false).unwrap();
-		assert!(files.try_read(&missing).unwrap().is_none());
-		let recovered = files
-			.read("a.txt")
-			.expect("a missing probe must still allow suffix recovery");
-		assert_eq!(recovered.text, "recoverable\n");
-	}
 
 	#[test]
 	fn parses_heredoc_wrapper() {

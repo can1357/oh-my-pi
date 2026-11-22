@@ -30,27 +30,13 @@ pub enum UrlAnswer {
 	/// A local backing file; normal filesystem canonicalization and stamps
 	/// apply.
 	Backed { path: PathBuf, plan_writable: bool },
-	/// Host-owned text, keyed as an opaque identity without filesystem access.
-	Hosted {
-		/// Identity shared by aliases and the snapshot store; never a local
-		/// backing file.
-		key:           String,
-		/// Full UTF-8 text, or `None` for a host target that does not exist.
-		content:       Option<String>,
-		plan_writable: bool,
-	},
-	/// Resolution requires execution approval; preview only this target later.
-	Pending,
 	/// A model-facing host refusal, propagated verbatim.
 	Refused(String),
 }
 
 impl UrlAnswer {
 	const fn plan_writable(&self) -> bool {
-		matches!(
-			self,
-			Self::Backed { plan_writable: true, .. } | Self::Hosted { plan_writable: true, .. }
-		)
+		matches!(self, Self::Backed { plan_writable: true, .. })
 	}
 }
 
@@ -109,8 +95,6 @@ impl PathPolicy {
 					.ok_or_else(|| EditError::UnresolvedUrl(url.as_ref().to_owned()))?;
 				match resolution {
 					UrlAnswer::Backed { path, .. } => Location::Disk(path.clone()),
-					UrlAnswer::Hosted { key, .. } => Location::Hosted(key.clone()),
-					UrlAnswer::Pending => return Err(EditError::DeferredUrl(url.into_owned())),
 					UrlAnswer::Refused(error) => return Err(EditError::apply(error.clone())),
 				}
 			},
@@ -726,9 +710,23 @@ mod tests {
 		let tmp = tempfile::tempdir().unwrap();
 		let p = policy(tmp.path());
 		let urls = HashMap::new();
-		assert_eq!(p.resolve("/", &urls).unwrap().location.key(), tmp.path());
-		assert_eq!(p.resolve("@~/x", &urls).unwrap().location.key(), tmp.path().join("home/x"));
-		assert_eq!(p.resolve(":./x", &urls).unwrap().location.key(), tmp.path().join("./x"));
+		assert_eq!(p.resolve("/", &urls).unwrap().location.disk_path().unwrap(), tmp.path());
+		assert_eq!(
+			p.resolve("@~/x", &urls)
+				.unwrap()
+				.location
+				.disk_path()
+				.unwrap(),
+			tmp.path().join("home/x")
+		);
+		assert_eq!(
+			p.resolve(":./x", &urls)
+				.unwrap()
+				.location
+				.disk_path()
+				.unwrap(),
+			tmp.path().join("./x")
+		);
 		// The file URL's `/tmp/...` path maps to a POSIX root; on Windows it
 		// resolves onto the current drive instead (`C:\tmp\...`).
 		#[cfg(unix)]
@@ -736,14 +734,26 @@ mod tests {
 			p.resolve("file:///tmp/a%20b", &urls)
 				.unwrap()
 				.location
-				.key(),
+				.disk_path()
+				.unwrap(),
 			PathBuf::from("/tmp/a b")
 		);
 		// Scheme-colon names without a slash, Windows drives, and `./`-prefixed
 		// URI-shaped names are plain paths.
-		assert_eq!(p.resolve("sbx:x", &urls).unwrap().location.key(), tmp.path().join("sbx:x"));
 		assert_eq!(
-			p.resolve("./other://x", &urls).unwrap().location.key(),
+			p.resolve("sbx:x", &urls)
+				.unwrap()
+				.location
+				.disk_path()
+				.unwrap(),
+			tmp.path().join("sbx:x")
+		);
+		assert_eq!(
+			p.resolve("./other://x", &urls)
+				.unwrap()
+				.location
+				.disk_path()
+				.unwrap(),
 			tmp.path().join("other:/x")
 		);
 		assert!(p.resolve("C:/x", &urls).is_ok());
@@ -844,7 +854,8 @@ mod tests {
 			p.resolve(dotted.to_str().unwrap(), &urls)
 				.unwrap()
 				.location
-				.key(),
+				.disk_path()
+				.unwrap(),
 			sandbox.join("plan.md")
 		);
 	}
@@ -863,7 +874,7 @@ mod tests {
 		let backing = tmp.path().join("elsewhere/plan.md");
 		files.provide("sbx://plan.md".into(), answer(Some(backing.clone()), None, true));
 		let resolved = files.resolve("[sbx://plan.md#AB12]", true).unwrap();
-		assert_eq!(resolved.location.key(), backing);
+		assert_eq!(resolved.location.disk_path().unwrap(), backing);
 		assert_eq!(resolved.display, "sbx://plan.md");
 
 		files.provide(

@@ -130,11 +130,7 @@ impl ModeEngine for ReplaceEngine {
 		}
 		let read = match files.read(path) {
 			Ok(read) => read,
-			Err(error) => {
-				let mut preview = Self::preview_error(path, error.to_string());
-				preview.deferred = error.is_deferred();
-				return vec![preview];
-			},
+			Err(error) => return vec![Self::preview_error(path, error.to_string())],
 		};
 		let display = read.resolved.display.clone();
 		let before = read.text.as_str();
@@ -173,7 +169,6 @@ impl ModeEngine for ReplaceEngine {
 			diff: Some(output.diff),
 			first_changed_line: output.first_changed_line,
 			error: None,
-			deferred: false,
 			op: Some(FileOp::Update),
 			rename: None,
 		}]

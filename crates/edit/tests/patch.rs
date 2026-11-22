@@ -35,7 +35,7 @@ fn matcher_digest_uses_added_lines_and_whole_create_content() {
 	let inspection = engine.inspect(&args);
 	assert_eq!(inspection.paths, ["a.txt"]);
 	assert_eq!(inspection.entries, [("a.txt".into(), "new\nwhole content".into())]);
-	assert_eq!(inspection.file_ops, [omp_edit::FileOpIntent::Create { path: "a.txt".into() }]);
+	assert!(inspection.file_ops.is_empty());
 }
 
 #[tokio::test]

@@ -3,7 +3,6 @@
 use std::{
 	collections::{HashMap, HashSet},
 	ops::RangeInclusive,
-	path::Path,
 	sync::Arc,
 };
 
@@ -334,11 +333,11 @@ fn enclosing_context(lines: &[&str], path: &str, line: u32) -> Vec<(String, Stri
 fn context_preserved(
 	previous: &str,
 	current: &str,
-	path: &Path,
+	path: Option<&str>,
 	authored: &[Edit],
 	remapped: &[Edit],
 ) -> bool {
-	let Some(path) = path.to_str() else {
+	let Some(path) = path else {
 		return true;
 	};
 	let previous_lines = previous.split('\n').collect::<Vec<_>>();
@@ -518,7 +517,8 @@ pub fn try_recover(
 	let Some((edits, offset)) = remap_edits(&snapshot.text, args.current_text, args.edits) else {
 		return Ok(None);
 	};
-	if !context_preserved(&snapshot.text, args.current_text, args.path.key(), args.edits, &edits) {
+	if !context_preserved(&snapshot.text, args.current_text, args.path.as_text(), args.edits, &edits)
+	{
 		return Ok(None);
 	}
 	if offset != 0 && aimed_at_authored_lines(args.current_text, args.edits, offset) {
@@ -531,7 +531,7 @@ pub fn try_recover(
 		.as_deref()
 		.filter(|_| has_clipboard_edit(&edits))
 		.map(Clipboard::fork);
-	let path = args.path.key().to_str();
+	let path = args.path.as_text();
 	let Ok(applied) = apply_edits(args.current_text, &edits, ApplyOptions {
 		clipboard: clipboard.as_mut(),
 		path,

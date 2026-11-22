@@ -9,12 +9,12 @@ use super::{
 	clipboard::resolve_clipboard_edits,
 	input::{Patch, PatchSection, contains_recognizable_hashline_operations},
 	parser::parse_patch_streaming,
-	patcher::{apply_with_recovery, preview_mismatch, recover_target},
+	patcher::{apply_with_recovery, mismatch, recover_target},
 	types::{Cursor, Edit, FileOp},
 };
 use crate::{
 	diff_string::{BlockContextSource, generate_diff_string},
-	engine::{FileOp as EngineFileOp, Location, PreviewFile},
+	engine::{FileOp as EngineFileOp, PreviewFile},
 	files::FileSource,
 	store::{Clipboard, EditStore},
 };
@@ -124,16 +124,10 @@ fn preview_section(
 	files: &mut dyn FileSource,
 	store: &EditStore,
 	clipboard: &mut Clipboard,
-) -> (PreviewFile, bool) {
+) -> PreviewFile {
 	let mut result = PreviewFile { display: section.path.clone(), ..PreviewFile::default() };
-	let initial = files.resolve(&section.path, false);
-	let local = match &initial {
-		Ok(resolved) => matches!(resolved.location, Location::Disk(_)),
-		// A host lookup can fail before it supplies a location.
-		Err(_) => !files.policy().is_internal_url(&section.path),
-	};
 	let outcome = (|| {
-		let initial = initial?;
+		let initial = files.resolve(&section.path, false)?;
 		let recovered = recover_target(section, &initial, files, store)?;
 		let (target, resolved) = recovered
 			.as_ref()
@@ -165,32 +159,9 @@ fn preview_section(
 			},
 			Err(err) => return Err(err),
 		};
-		// Hosted previews use the exact version the model read, never a newer
-		// checkout or head when the header names a historical snapshot.
-		let snapshot = if matches!(resolved.location, Location::Hosted(_)) {
-			let snapshot = match target.file_hash.as_deref() {
-				Some(tag) => store.by_hash(&read.canonical, tag),
-				None => store.head(&read.canonical),
-			};
-			Some(snapshot.ok_or_else(|| {
-				preview_mismatch(
-					target,
-					&read.canonical,
-					&read.text,
-					target.file_hash.as_deref().unwrap_or(""),
-					store,
-				)
-			})?)
-		} else {
-			None
-		};
-		let text = snapshot
-			.as_ref()
-			.map_or(read.text.as_str(), |snapshot| snapshot.text.as_ref());
-
 		if streaming {
-			let (diff, first, file_op) =
-				streaming_diff(target, text, clipboard).map_err(crate::error::EditError::apply)?;
+			let (diff, first, file_op) = streaming_diff(target, &read.text, clipboard)
+				.map_err(crate::error::EditError::apply)?;
 			result.diff = Some(diff);
 			result.first_changed_line = first;
 			result.op = Some(if matches!(file_op, Some(FileOp::Rem)) {
@@ -202,11 +173,18 @@ fn preview_section(
 		}
 		let parsed = target.parse()?;
 		if target.file_hash.is_none() {
-			return Err(preview_mismatch(target, &read.canonical, text, "", store));
+			return Err(mismatch(target, &read.canonical, &read.text, "", store));
 		}
 		// A `REM` section holds only bodyless `CUT`s, which still fill registers.
-		let applied =
-			apply_with_recovery(target, &read.canonical, text, &parsed.edits, clipboard, store, None)?;
+		let applied = apply_with_recovery(
+			target,
+			&read.canonical,
+			&read.text,
+			&parsed.edits,
+			clipboard,
+			store,
+			None,
+		)?;
 		result.op = Some(if matches!(parsed.file_op, Some(FileOp::Rem)) {
 			EngineFileOp::Delete
 		} else {
@@ -216,7 +194,7 @@ fn preview_section(
 			Some(FileOp::Move { dest }) => Some(dest.clone()),
 			_ => None,
 		};
-		if applied.text == text || matches!(parsed.file_op, Some(FileOp::Rem)) {
+		if applied.text == read.text || matches!(parsed.file_op, Some(FileOp::Rem)) {
 			if parsed.file_op.is_some() {
 				result.diff = Some(String::new());
 				return Ok(());
@@ -226,7 +204,7 @@ fn preview_section(
 				target.path
 			)));
 		}
-		let diff = generate_diff_string(text, &applied.text, None, &BlockContextSource {
+		let diff = generate_diff_string(&read.text, &applied.text, None, &BlockContextSource {
 			path:      Some(&target.path),
 			lang:      None,
 			streaming: false,
@@ -237,10 +215,9 @@ fn preview_section(
 	})();
 	if let Err(error) = outcome {
 		result.diff = None;
-		result.deferred = error.is_deferred();
 		result.error = Some(error.to_string());
 	}
-	(result, local)
+	result
 }
 
 /// Compute per-section previews, threading a transactional clipboard in patch
@@ -261,8 +238,8 @@ pub fn preview_patch(
 	let mut clipboard = store.start_clipboard_batch();
 	let mut previews = Vec::new();
 	for (index, section) in patch.sections.iter().take(count).enumerate() {
-		let (preview, local) = preview_section(section, streaming, files, store, &mut clipboard);
-		if preview.error.is_some() && (streaming || (local && count > 1)) && index + 1 == count {
+		let preview = preview_section(section, streaming, files, store, &mut clipboard);
+		if preview.error.is_some() && (streaming || count > 1) && index + 1 == count {
 			continue;
 		}
 		previews.push(preview);

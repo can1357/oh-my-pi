@@ -395,7 +395,7 @@ fn snapshot_store_matches_snapshot_contract_cases() {
 	let shared_tag = shared.record(&path, shared_text, None);
 	shared.record(&other, shared_text, None);
 	let mut matches = shared.paths_with_hash(&shared_tag);
-	matches.sort_by(|a, b| a.key().cmp(b.key()));
+	matches.sort_by(|a, b| a.disk_path().unwrap().cmp(b.disk_path().unwrap()));
 	assert_eq!(
 		matches,
 		vec![other, path.clone()],

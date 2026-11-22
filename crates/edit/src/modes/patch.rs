@@ -1690,12 +1690,8 @@ pub fn preview_patch(
 		.and_then(|entry| preview_entry(&input, entry, streaming))
 	{
 		Ok(preview) => preview,
-		Err(error) => PreviewFile {
-			display,
-			error: Some(error.to_string()),
-			deferred: error.is_deferred(),
-			rename,
-			..PreviewFile::default()
+		Err(error) => {
+			PreviewFile { display, error: Some(error.to_string()), rename, ..PreviewFile::default() }
 		},
 	}
 }
@@ -1737,9 +1733,9 @@ fn preview_entry(
 		diff:               Some(diff.diff),
 		first_changed_line: diff.first_changed_line,
 		error:              None,
-		deferred:           false,
-		op:                 Some(engine_op(input.op)),
-		rename:             entry.move_to.map(|value| value.display),
+
+		op:     Some(engine_op(input.op)),
+		rename: entry.move_to.map(|value| value.display),
 	})
 }
 
@@ -1970,9 +1966,6 @@ impl ModeEngine for PatchEngine {
 					},
 					None => digest = Some(added),
 				}
-			}
-			if entry.op.as_deref() == Some("create") {
-				file_ops.push(FileOpIntent::Create { path: path.clone() });
 			}
 			if entry.op.as_deref() == Some("delete") {
 				file_ops.push(FileOpIntent::Delete { path: path.clone() });

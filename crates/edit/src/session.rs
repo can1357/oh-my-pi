@@ -56,8 +56,6 @@ pub struct PreviewBatch {
 /// Host write request. Rust never touches disk for writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteRequest {
-	/// Absolute disk path or opaque hosted key; route hosted keys to their
-	/// handler.
 	pub absolute:     PathBuf,
 	pub display:      String,
 	pub op:           FileOp,
@@ -96,7 +94,6 @@ pub struct ApplyRequest {
 /// Per-file apply outcome.
 #[derive(Debug, Clone)]
 pub struct FileOutcome {
-	/// Absolute disk path or opaque hosted key, matching the writer identity.
 	pub absolute:           PathBuf,
 	pub display:            String,
 	pub op:                 FileOp,
@@ -284,7 +281,7 @@ impl Session {
 		let inspection = self.engine.inspect(&snapshot);
 		let moves = inspection.file_ops.iter().filter_map(|op| match op {
 			FileOpIntent::Move { to, .. } => Some(to),
-			FileOpIntent::Create { .. } | FileOpIntent::Delete { .. } => None,
+			FileOpIntent::Delete { .. } => None,
 		});
 		let policy = &self.config.policy;
 		let mut targets: Vec<String> = Vec::new();
@@ -315,10 +312,6 @@ impl Session {
 		let mut files = self
 			.engine
 			.preview(&snapshot, streaming, &mut self.files, &self.store);
-		// Deferral is host state, independent of any path-qualified engine error.
-		// Never publish it as a preview failure or trigger the host's abort
-		// guard.
-		files.retain(|file| !file.deferred);
 		if streaming {
 			for file in &mut files {
 				if let Some(diff) = file.diff.take() {
@@ -374,13 +367,10 @@ impl Session {
 			} else {
 				writer
 					.write(WriteRequest {
-						absolute:     file.location.key().to_path_buf(),
+						absolute:     file.location.writer_path(),
 						display:      file.display.clone(),
 						op:           file.op,
-						move_to:      file
-							.move_to
-							.as_ref()
-							.map(|m| m.location.key().to_path_buf()),
+						move_to:      file.move_to.as_ref().map(|m| m.location.writer_path()),
 						content:      file.persisted.clone(),
 						flush_lsp:    request.lsp_flush && last_write == Some(index),
 						lsp_batch_id: request.lsp_batch_id.clone(),
@@ -481,13 +471,10 @@ impl Session {
 			let (old_text, new_text, snapshots_pruned) = prune_snapshots(old_text, new_text);
 
 			files.push(FileOutcome {
-				absolute: file.location.key().to_path_buf(),
+				absolute: file.location.writer_path(),
 				display: file.display.clone(),
 				op: file.op,
-				move_to: file
-					.move_to
-					.as_ref()
-					.map(|m| m.location.key().to_path_buf()),
+				move_to: file.move_to.as_ref().map(|m| m.location.writer_path()),
 				diff: file.diff.clone(),
 				first_changed_line: file.first_changed_line,
 				old_text,
@@ -544,14 +531,12 @@ fn format_file_text(file: &StagedFile, header: &str) -> String {
 		let moved = file.move_to.as_ref().map(|m| {
 			// DEST resolves from cwd, not from the source's directory: name a
 			// move out of that directory absolutely so it cannot be misread.
-			if matches!(
-				(&file.location, &m.location),
-				(Location::Disk(source), Location::Disk(destination))
-					if source.parent() == destination.parent()
-			) {
+			let Location::Disk(source) = &file.location;
+			let Location::Disk(destination) = &m.location;
+			if source.parent() == destination.parent() {
 				format!("Moved to {}", m.display)
 			} else {
-				format!("Moved to {}", m.location.key().display())
+				format!("Moved to {}", m.location.display())
 			}
 		});
 		if let Some(moved) = &moved {

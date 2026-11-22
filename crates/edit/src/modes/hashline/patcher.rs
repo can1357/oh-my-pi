@@ -104,29 +104,16 @@ pub(crate) fn mismatch(
 	expected: &str,
 	store: &EditStore,
 ) -> EditError {
-	let line_count = normalized.split('\n').count();
+	let actual = file_hash(normalized);
+	let file_lines: Vec<String> = normalized.split('\n').map(str::to_owned).collect();
 	let anchor_lines = section.collect_anchor_lines().unwrap_or_default();
 	// The reply hands back the current tag and prints the rows around each
 	// anchor in full, so those rows count as seen for a resend under it.
 	record_reply_provenance(store, canonical, normalized, || {
-		super::messages::anchored_context_lines(&anchor_lines, line_count)
+		super::messages::anchored_context_lines(&anchor_lines, file_lines.len())
 			.into_iter()
 			.collect()
 	});
-	preview_mismatch(section, canonical, normalized, expected, store)
-}
-
-/// Build the mismatch without treating preview rows as a model-visible read.
-pub(crate) fn preview_mismatch(
-	section: &PatchSection,
-	canonical: &Location,
-	normalized: &str,
-	expected: &str,
-	store: &EditStore,
-) -> EditError {
-	let actual = file_hash(normalized);
-	let file_lines = normalized.split('\n').map(str::to_owned).collect();
-	let anchor_lines = section.collect_anchor_lines().unwrap_or_default();
 	// When the tag isn't from this exact path, list the other paths in this
 	// session that *did* issue the same tag — so the rejection can name the
 	// file the tag was actually for and the model doesn't follow a wrong-tree
@@ -149,7 +136,7 @@ fn tag_origin_paths(store: &EditStore, canonical: &Location, tag: &str) -> Vec<S
 		.paths_with_hash(tag)
 		.into_iter()
 		.filter(|path| path != canonical)
-		.map(|path| path.key().to_string_lossy().into_owned())
+		.map(|path| path.display().into_owned())
 		.collect();
 	paths.sort();
 	paths.dedup();
@@ -641,7 +628,7 @@ pub(crate) fn apply_with_recovery(
 		if !origins.is_empty() {
 			return Err(tag_from_other_file_error(
 				&section.path,
-				&canonical.key().to_string_lossy(),
+				&canonical.display(),
 				expected,
 				&origins,
 			));
@@ -685,7 +672,7 @@ pub(crate) fn apply_with_recovery(
 		}
 		let mut result = apply_edits(normalized, &resolved, ApplyOptions {
 			clipboard:      Some(clipboard),
-			path:           Some(canonical.key().to_string_lossy().as_ref()),
+			path:           Some(canonical.display().as_ref()),
 			on_empty_paste: EmptyPaste::Throw,
 		})?;
 		result.block_resolutions = block_resolutions;
@@ -701,7 +688,7 @@ pub(crate) fn apply_with_recovery(
 	if !has_anchor_scoped_edit(&resolved) {
 		let mut result = apply_edits(normalized, &resolved, ApplyOptions {
 			clipboard:      Some(clipboard),
-			path:           Some(canonical.key().to_string_lossy().as_ref()),
+			path:           Some(canonical.display().as_ref()),
 			on_empty_paste: EmptyPaste::Throw,
 		})?;
 		resolve_warnings.push(HEADTAIL_DRIFT_WARNING.to_owned());
@@ -767,16 +754,14 @@ fn format_block_resolution(resolution: &BlockResolution) -> String {
 
 /// Rebind a missing disk path to the unique local snapshot with its tag and
 /// name when the replacement is inside the session's sandbox. Otherwise,
-/// report the other path without rebinding. Hosted identities never rebind.
+/// report the other path without rebinding.
 pub(crate) fn recover_target(
 	section: &PatchSection,
 	initial: &Resolved,
 	files: &mut dyn FileSource,
 	store: &EditStore,
 ) -> Result<Option<(PatchSection, Resolved)>, EditError> {
-	let Location::Disk(initial_path) = &initial.location else {
-		return Ok(None);
-	};
+	let Location::Disk(initial_path) = &initial.location;
 	if files.exists(&initial.location) {
 		return Ok(None);
 	}
@@ -787,12 +772,8 @@ pub(crate) fn recover_target(
 	let mut candidates = store
 		.paths_with_hash(tag)
 		.into_iter()
-		.filter_map(|location| match location {
-			Location::Disk(path) if path.file_name() == authored_name && &path != initial_path => {
-				Some(path)
-			},
-			_ => None,
-		})
+		.map(|Location::Disk(path)| path)
+		.filter(|path| path.file_name() == authored_name && path != initial_path)
 		.collect::<Vec<_>>();
 	candidates.sort();
 	candidates.dedup();
@@ -1095,9 +1076,7 @@ mod lifecycle {
 	use tempfile::TempDir;
 
 	use crate::{
-		EditMode, EditResult, EditWriter, Location, Resolved, WriteRequest, WriteResponse,
-		files::FileCache,
-		modes::hashline::input::{Patch, SplitOptions},
+		EditMode, EditResult, EditWriter, Location, WriteRequest, WriteResponse,
 		path_policy::{PathPolicy, canonical_key},
 		session::{ApplyRequest, Session, SessionConfig},
 		store::EditStore,
@@ -1208,46 +1187,6 @@ mod lifecycle {
 
 	fn all_seen(lines: usize) -> Vec<u32> {
 		(1..=lines as u32).collect()
-	}
-
-	#[test]
-	fn hosted_alias_cannot_retarget_a_local_snapshot() {
-		let mut ctx = Lifecycle::new("notes.txt", 1);
-		ctx.policy.cwd = ctx.dir.path().canonicalize().unwrap();
-		ctx.policy.home_dir.clone_from(&ctx.policy.cwd);
-		ctx.policy.plan_writable_roots.push(ctx.policy.cwd.clone());
-		let tag = ctx.read("notes.txt", &[1]);
-		ctx.store.record(
-			&Location::Hosted("ssh://host/another/notes.txt".into()),
-			&ctx.text("notes.txt"),
-			Some(&[1]),
-		);
-		let authored = "alias/notes.txt";
-		let section = Patch::parse_single(
-			&format!("[{authored}#{tag}]\nPUT 1.=1:\n+updated\n"),
-			&SplitOptions::default(),
-		)
-		.unwrap();
-		let mut files = FileCache::new(ctx.policy.clone());
-		// A FileSource may resolve an authored alias to a hosted identity.
-		// The resolved kind, rather than the alias's spelling, forbids recovery.
-		let hosted = Resolved {
-			display:  authored.into(),
-			location: Location::Hosted("ssh://host/home/u/notes.txt".into()),
-		};
-		assert!(
-			super::recover_target(&section, &hosted, &mut files, &ctx.store)
-				.unwrap()
-				.is_none()
-		);
-		let disk = Resolved {
-			display:  authored.into(),
-			location: Location::Disk(ctx.dir.path().join(authored)),
-		};
-		let (_, recovered) = super::recover_target(&section, &disk, &mut files, &ctx.store)
-			.unwrap()
-			.expect("disk aliases still recover inside the sandbox");
-		assert_eq!(recovered.location, Location::Disk(ctx.canonical("notes.txt")));
 	}
 
 	/// Full read, two inserted lines above, then a replace at the shifted

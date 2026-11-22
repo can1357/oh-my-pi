@@ -7,7 +7,7 @@
  * `agent_start` via `ctx.clearPinnedError`. Aborts and normal stops must NOT
  * pin a banner.
  */
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -54,6 +54,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+	setSystemTime();
 	resetSettingsForTest();
 });
 
@@ -326,6 +327,9 @@ describe("EventController error banner", () => {
 		clearPinnedError.mockClear();
 		setErrorPinned.mockClear();
 
+		// The retry row counts its delay down from the wall clock, which runs on between the retry's
+		// start and this render; hold the clock still so the row shows the whole delay on any machine.
+		setSystemTime(Date.now());
 		await controller.handleEvent({
 			type: "auto_retry_start",
 			attempt: 1,

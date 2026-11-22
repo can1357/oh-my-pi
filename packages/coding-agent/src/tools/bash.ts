@@ -24,6 +24,7 @@ import { $env } from "@oh-my-pi/pi-utils/env";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
 import {
 	compileNotifyPattern,
+	formatAsyncJobLabel,
 	type NotifyPattern,
 	OutputNotifier,
 	raceJobSettlement,
@@ -1513,7 +1514,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			throw new ToolError("Background job manager unavailable for this session.");
 		}
 
-		const label = options.command.length > 120 ? `${options.command.slice(0, 117)}...` : options.command;
+		const label = formatAsyncJobLabel(options.command);
 		// Holds the run's Shell only while it runs: a retained reference would
 		// keep a finished `:async:` Shell (and its background children) alive.
 		let pids: () => readonly number[] = NO_PIDS;
