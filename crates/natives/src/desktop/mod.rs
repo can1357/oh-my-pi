@@ -1232,7 +1232,11 @@ impl Worker {
 
 	fn execute(&mut self, request: &Request, token: &OperationToken) -> CoreResult<Response> {
 		if request.is_close() {
-			return Ok(Response::Unit);
+			// A backend that never started changed nothing.
+			return match &mut self.backend {
+				Ok(backend) => backend.close().map(|()| Response::Unit),
+				Err(_) => Ok(Response::Unit),
+			};
 		}
 		token.check()?;
 		// Pointer and keyboard input on a desktop with no input route is refused
@@ -2269,7 +2273,7 @@ impl SessionCore {
 			token:   self.cancellation.token(),
 		})
 		.map_err(|_| DesktopError::closed())?;
-		let _ = rrx.recv_timeout(CLOSE_TIMEOUT).map_err(|e| {
+		let closed = rrx.recv_timeout(CLOSE_TIMEOUT).map_err(|e| {
 			DesktopError::timeout(format!("timed out closing native desktop worker: {e}"))
 		})?;
 		if let Some(done) = lifecycle.done.take() {
@@ -2282,7 +2286,7 @@ impl SessionCore {
 				.join()
 				.map_err(|_| DesktopError::internal("native desktop worker panicked during close"))?;
 		}
-		Ok(())
+		closed.map(|_| ())
 	}
 }
 impl Drop for SessionCore {
@@ -3268,6 +3272,8 @@ mod capture_tests {
 		grow_on_capture:        u32,
 		/// Nothing of the window shows on screen.
 		covered:                bool,
+		/// What the backend fails to undo when the session closes.
+		close_error:            Option<DesktopError>,
 	}
 
 	impl FakeWaylandBackend {
@@ -3382,6 +3388,7 @@ mod capture_tests {
 				drag_selection: None,
 				grow_on_capture: 0,
 				covered: false,
+				close_error: None,
 			}
 		}
 	}
@@ -3665,6 +3672,10 @@ mod capture_tests {
 		fn hold_display_awake(&mut self) -> Option<DisplayAwakeHold> {
 			self.awake.lock().push(true);
 			Some(Box::new(FakeAwakeHold(Arc::clone(&self.awake))))
+		}
+
+		fn close(&mut self) -> CoreResult<()> {
+			self.close_error.take().map_or(Ok(()), Err)
 		}
 
 		fn capture(
@@ -4148,6 +4159,20 @@ mod capture_tests {
 		lifecycle.join = Some(join);
 		drop(lifecycle);
 		core
+	}
+
+	#[test]
+	fn closing_a_session_reports_what_its_backend_could_not_undo() {
+		let mut backend = FakeWaylandBackend::new();
+		backend.close_error =
+			Some(DesktopError::input_failed("failed to restore temporary X11 text keymap"));
+		let error = session_serving(backend).close().unwrap_err();
+		assert!(
+			error
+				.message
+				.contains("failed to restore temporary X11 text keymap"),
+			"{error:?}"
+		);
 	}
 
 	/// Queues a window listing without waiting for its reply; returns the
