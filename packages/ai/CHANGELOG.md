@@ -3,7 +3,6 @@
 ## [Unreleased]
 
 ### Fixed
-- Strict tool schemas no longer close a bare `type: "object"` property into a `{}`-only shape while still reporting `strict: true`; such tools now send a non-strict schema, so calls that set fields of that property are accepted ([#10125](https://github.com/can1357/oh-my-pi/issues/10125), [#19980](https://github.com/can1357/oh-my-pi/pull/19980) by [@JamieJ5926](https://github.com/JamieJ5926))
 
 - With several Devin logins, omp now prefers a login with daily or weekly quota left; a login past its quota that its on-demand balance still funds comes next, and one with no balance is skipped until its quota resets ([#19929](https://github.com/can1357/oh-my-pi/pull/19929) by [@will-bogusz](https://github.com/will-bogusz))
 - Devin logins now store the account's email, user id and organization, so two organizations under one email show as two accounts in `omp usage` and `auth.accountPolicies` can name each; sign in again to identify an existing login ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))
@@ -17,6 +16,7 @@
 - A corrupt `agent.db` no longer loses every stored provider credential: omp restores the ones still readable from the quarantined copy, keeps disabled ones disabled, and logs the quarantined path if recovery fails ([#20142](https://github.com/can1357/oh-my-pi/pull/20142) by [@Komzpa](https://github.com/Komzpa))
 - Gemini models behind Portkey with strict OpenAI compliance turned off now keep their thought signatures between tool calls, also through the auth gateway ([#20082](https://github.com/can1357/oh-my-pi/pull/20082) by [@smartinio](https://github.com/smartinio))
 - Fixed the thinking-loop guard discarding and retrying a final answer with a long markdown table or same-shape JSON records (one array or one per line) ([#11129](https://github.com/can1357/oh-my-pi/issues/11129), [#19990](https://github.com/can1357/oh-my-pi/pull/19990) by [@JamieJ5926](https://github.com/JamieJ5926))
+- Strict tool schemas no longer close a bare `type: "object"` property into a `{}`-only shape while still reporting `strict: true`; such tools now send a non-strict schema, so calls that set fields of that property are accepted ([#10125](https://github.com/can1357/oh-my-pi/issues/10125), [#19980](https://github.com/can1357/oh-my-pi/pull/19980) by [@JamieJ5926](https://github.com/JamieJ5926))
 
 ## [19.1.0] - 2026-11-21
 
