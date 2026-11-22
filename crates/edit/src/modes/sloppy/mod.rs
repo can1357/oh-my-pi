@@ -1,6 +1,8 @@
-//! `sloppy` mode: `*** Find` anchors with `*** Replace` replacements or
-//! `*** Insert Before`/`*** Insert After` insertions inside `*** Edit File:`
-//! file sections, with tolerant matching.
+//! `sloppy` mode: tolerant-match edits inside `*** Edit File:` sections.
+//!
+//! Supports `*** Find` anchors with `*** Replace` replacements,
+//! `*** Insert Before`/`*** Insert After` insertions, and `*** Cut` with
+//! `*** Paste Before`/`*** Paste After` moves.
 
 pub mod apply;
 pub mod parse;
@@ -41,7 +43,7 @@ impl SloppyEngine {
 		} else {
 			input
 		};
-		split_sloppy_sections(input)
+		parse::split_sloppy_sections_for_preview(input, streaming)
 	}
 
 	fn missing_target(args: &ArgSnapshot) -> bool {
@@ -227,10 +229,11 @@ impl ModeEngine for SloppyEngine {
 	}
 
 	fn inspect(&self, args: &ArgSnapshot) -> Inspection {
-		// An unparseable payload targets nothing; `preview` and `stage` surface
-		// the error.
-		let parsed =
-			split_sloppy_sections(args.input.as_deref().unwrap_or_default()).unwrap_or_default();
+		let input = args.input.as_deref().unwrap_or_default();
+		let parsed = split_sloppy_sections(input).unwrap_or_default();
+		if parsed.is_empty() {
+			return Inspection { paths: parse::declared_paths(input), ..Inspection::default() };
+		}
 		let paths = parsed.iter().map(|section| section.path.clone()).collect();
 		let mut sections = Vec::new();
 		for section in &parsed {

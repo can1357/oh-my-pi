@@ -549,9 +549,6 @@ async function readScript(file: string): Promise<string> {
 /** Whether a call can do harm the approval layer does not judge, so the judge should see it. */
 export function needsJudgement(call: GuardedCall, cwd: string): boolean {
 	if (call.tier === "read" || inTable(UNJUDGED_TOOLS, call.toolName)) return false;
-	const writePath = call.toolName === "write" ? stringArg(call.args, "path") : undefined;
-	// A write to a mounted device dispatches the device's own call, which the guard sees on its own.
-	if (writePath?.startsWith("xd://")) return false;
 	if (call.toolName === "bash") {
 		const command = stringArg(call.args, "command");
 		if (command === undefined) return true;
@@ -559,7 +556,7 @@ export function needsJudgement(call: GuardedCall, cwd: string): boolean {
 	}
 	if (call.tier === "write") {
 		const targets = call.targets ?? [];
-		// Internal URLs (`local://`, `xd://`) are the session's own artifacts or dispatch on their own.
+		// Internal URLs (`local://`) are the session's own artifacts.
 		if (targets.length > 0) return targets.some(target => !target.includes("://") && !pathIsWithin(cwd, target));
 		// Built-in write-tier tools without targets keep session state; an MCP tool can act anywhere.
 		return isMCPToolName(call.toolName);
@@ -686,9 +683,10 @@ export class ToolGuard {
 	#consecutive = 0;
 	#total = 0;
 	/**
-	 * The last call that ended a run of refusals, and how long that run was. A device call (`write
-	 * xd://<tool>`, a shell redirect to one) passes the guard twice under one id: its carrier, then
-	 * the device's tool. When the device's tool is refused, its carrier ran nothing and ended no run.
+	 * The last call that ended a run of refusals, and how long that run was. A tool command run inside
+	 * `bash` passes the guard after its `bash` call, under that call's id with a `:cmd:<n>` suffix
+	 * (`exec/tool-command-host.ts`). When the command's tool is refused, its `bash` call did not get
+	 * what it asked for and ended no run.
 	 */
 	#endedBy: string | undefined;
 	#endedRun = 0;
@@ -783,8 +781,8 @@ export class ToolGuard {
 
 	/** Counts one refusal, stopping the run after too many, and returns it. */
 	#refused(toolCallId: string, refusal: string): string {
-		// The device's tool of a call whose carrier ended the run: the carrier ran nothing, so the run goes on.
-		if (this.#endedBy === toolCallId) {
+		// The tool command of a `bash` call that ended the run: that call's work was refused, so the run goes on.
+		if (this.#endedBy !== undefined && toolCallId.startsWith(`${this.#endedBy}:cmd:`)) {
 			this.#endedBy = undefined;
 			this.#consecutive += this.#endedRun;
 		}

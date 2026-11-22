@@ -1,11 +1,15 @@
 import { type } from "@oh-my-pi/omptype";
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { Judge, JudgmentRequest, NoulAnswer } from "@oh-my-pi/pi-ai";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import { releaseShellSessions } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import { cfgTtsrGateTimeoutMs } from "@oh-my-pi/pi-coding-agent/export/ttsr-settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -19,9 +23,9 @@ import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { TtsrCoordinator } from "@oh-my-pi/pi-coding-agent/session/ttsr-coordinator";
 import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { type GuardJudge, ToolGuard } from "@oh-my-pi/pi-coding-agent/tools/tool-guard";
-import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
-import { resolveXdevTool, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
+import { resolveToolCommand, type ToolCommandState } from "@oh-my-pi/pi-coding-agent/tools/tool-commands";
 import { assistant, fakeJudge, judgedRule, setup } from "./helpers/ttsr-judged-rules";
 
 const DELETES = "Does the command delete files outside the project?";
@@ -389,51 +393,77 @@ describe("TTSR gate rules", () => {
 		expect(execute).not.toHaveBeenCalled();
 	});
 
-	it("[gate-21] stops the run after three refused device calls, though each one's write carrier passes", async () => {
-		const REWRITES = "Does the call rewrite code?";
-		const { judge } = fakeJudge({ [REWRITES]: 0.9 });
-		const settings = Settings.isolated({ "tools.approvalMode": "yolo" });
-		const rule = judgedRule("no-rewrite", { gate: "before", question: REWRITES, scope: ["tool:ast_edit"] });
-		const { coordinator, events } = setup([rule], judge, settings);
-		const runner = new ExtensionRunner(
-			[],
-			new ExtensionRuntime(),
-			"/work",
-			SessionManager.inMemory(),
-			{} as ModelRegistry,
-		);
-		const stops: string[] = [];
-		runner.setToolGuard(guardOver(coordinator, settings, stops));
-		const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "rewrote" }] }));
-		const device = {
-			name: "ast_edit",
-			label: "ast_edit",
-			description: "structural rewrite",
-			parameters: type({ pattern: "string" }),
-			approval: "write",
-			execute,
-		} as AgentTool;
-		const xdev: XdevState = {
-			tools: new Map([["ast_edit", new ExtensionToolWrapper(device, runner) as unknown as Tool]]),
-			mountedNames: new Set(["ast_edit"]),
-			builtInNames: new Set(),
-			isActive: () => false,
-			resolve: name => resolveXdevTool(xdev, name),
-		};
-		const session = { cwd: "/work", hasUI: false, getSessionFile: () => null, settings, xdev } as ToolSession;
-		const write = new ExtensionToolWrapper(new WriteTool(session) as unknown as AgentTool, runner);
-		const call = { path: "xd://ast_edit", content: JSON.stringify({ pattern: "foo($A)" }) };
+	it.skipIf(process.platform === "win32")(
+		"[gate-21] stops the run after three refused tool commands, though each one's bash call passes",
+		async () => {
+			const REWRITES = "Does the call rewrite code?";
+			const { judge } = fakeJudge({ [REWRITES]: 0.9 });
+			const settings = Settings.isolated({ "tools.approvalMode": "yolo", "bash.autoBackground.enabled": false });
+			const rule = judgedRule("no-rewrite", { gate: "before", question: REWRITES, scope: ["tool:ast_edit"] });
+			const { coordinator, events } = setup([rule], judge, settings);
+			const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ttsr-gate-"));
+			try {
+				const runner = new ExtensionRunner(
+					[],
+					new ExtensionRuntime(),
+					cwd,
+					SessionManager.inMemory(),
+					{} as ModelRegistry,
+				);
+				const stops: string[] = [];
+				runner.setToolGuard(guardOver(coordinator, settings, stops));
+				const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "rewrote" }] }));
+				const command = {
+					name: "ast_edit",
+					label: "ast_edit",
+					description: "structural rewrite",
+					parameters: type({ pattern: "string" }),
+					approval: "write",
+					execute,
+				} as AgentTool;
+				const toolCommands: ToolCommandState = {
+					tools: new Map([["ast_edit", new ExtensionToolWrapper(command, runner) as unknown as Tool]]),
+					mountedNames: new Set(["ast_edit"]),
+					builtInNames: new Set(),
+					isActive: () => false,
+					resolve: name => resolveToolCommand(toolCommands, name),
+				};
+				const session: ToolSession = {
+					cwd,
+					hasUI: false,
+					getSessionFile: () => null,
+					getSessionId: () => cwd,
+					getSessionSpawns: () => "*",
+					settings,
+					toolCommands,
+					isToolActive: name => name === "bash",
+				};
+				const shell = new ExtensionToolWrapper(new BashTool(session) as unknown as AgentTool, runner);
+				// The `$` keeps the line from resolving to `read`: the `bash` call itself passes the guard and
+				// would end the run, were its tool command not refused right after it.
+				const line = { command: "ast_edit --pattern 'foo($A)'" };
 
-		for (let i = 0; i < 3; i++) {
-			const result = await write.execute(`call-${i}`, call, undefined, undefined, { settings } as AgentToolContext);
-			expect(result.isError).toBe(true);
-			expect(JSON.stringify(result.content)).toContain("no-rewrite guidance");
-		}
+				for (let i = 0; i < 3; i++) {
+					const outcome = await shell
+						.execute(`call-${i}`, line, undefined, undefined, {
+							settings,
+						} as AgentToolContext)
+						.then(
+							result => JSON.stringify(result.content),
+							(err: unknown) => (err instanceof Error ? err.message : String(err)),
+						);
+					expect(outcome).toContain("no-rewrite guidance");
+				}
 
-		expect(execute).not.toHaveBeenCalled();
-		expect(events.filter(event => event.type === "ttsr_triggered")).toHaveLength(3);
-		expect(stops).toEqual(["The tool guard refused 3 tool calls in a row; the run stopped."]);
-	});
+				expect(execute).not.toHaveBeenCalled();
+				expect(events.filter(event => event.type === "ttsr_triggered")).toHaveLength(3);
+				expect(stops).toEqual(["The tool guard refused 3 tool calls in a row; the run stopped."]);
+			} finally {
+				releaseShellSessions(cwd);
+				await fs.rm(cwd, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("[gate-22] judges a call under the wire name it arrived by, as rule scopes name it", async () => {
 		const { judge } = fakeJudge({ [DELETES]: 0.9 });
