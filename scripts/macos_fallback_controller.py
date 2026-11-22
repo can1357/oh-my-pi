@@ -254,8 +254,10 @@ class Controller:
                         self.fallback = False
                         try:
                             self.drain_admission()
-                            self.parent()
-                            verify_mac_configuration(self.api, self.request)
+                            # When falling back after a hosted failure, the parent CI run
+                            # may have already completed. Only verify Mac configuration
+                            # without requiring the parent to still be running.
+                            verify_mac_configuration(self.api, self.request, relaxed=True)
                         except VerificationError:
                             raise VerificationError("native objective did not succeed")
                         fallback = self.dispatch(1, "self-hosted", run_id)

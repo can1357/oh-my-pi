@@ -337,8 +337,13 @@ def verify_parent(api, request, require_running=True):
         verify_mac_configuration(api, request)
 
 
-def verify_mac_configuration(api, request):
-    """Prove Mac policy before cancellation, without requiring cancellation yet."""
+def verify_mac_configuration(api, request, relaxed=False):
+    """Prove Mac policy before cancellation, without requiring cancellation yet.
+
+    When *relaxed* is True, the parent liveness check is skipped — used when
+    falling back after a hosted runner failure where the parent CI run may have
+    already completed.
+    """
     validate_request(request)
     if (request["repository"] != "blyzer/oh-my-pi"
             or request["actor"] != "blyzer" or request["triggering_actor"] != "blyzer"
@@ -350,7 +355,13 @@ def verify_mac_configuration(api, request):
         # Repository writers already authorize executing candidate code on the
         # Mac. Bind that authority to live GitHub observations, not a frozen
         # ci.yml hash that prevents verification of CI changes themselves.
-        run = verify_parent_liveness(api, request)
+        if not relaxed:
+            run = verify_parent_liveness(api, request)
+        else:
+            # In relaxed mode, just check the parent exists and was authorized,
+            # without requiring it to still be running.
+            prefix = f"repos/{request['repository']}"
+            run = api.get(f"{prefix}/actions/runs/{request['parent_run_id']}")
         if (run.get("actor", {}).get("login") != "blyzer"
                 or run.get("triggering_actor", {}).get("login") != "blyzer"
                 or run.get("head_repository", {}).get("full_name") != request["repository"]):
