@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The archive summary's frame description now states every grid the frames use: a long archive's dense middle frames (98 rows at 1568px, 128 at 2048px) were described with the edge frames' row count (71, 93)
+
 ## [19.0.1] - 2026-11-19
 
 ### Added
