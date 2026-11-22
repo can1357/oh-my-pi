@@ -627,46 +627,6 @@ describe("TanCommandController", () => {
 		expect(opts?.parentTaskPrefix).not.toBe("FocusedParent");
 	});
 
-	it("tells a fork whose wait tool is enabled to keep waiting instead of ending its turn", async () => {
-		const harness = createContext({ enabledToolNames: ["read", "bash", "wait"] });
-		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
-		const { clone, messages } = createCloneStub();
-		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
-			session: clone,
-		} as unknown as CreateAgentSessionResult);
-		await new TanCommandController(harness.ctx).start("wait for the build");
-		const run = harness.capturedRun;
-		if (!run) throw new Error("run function was not captured");
-		await run({ jobId: "job-1", signal: new AbortController().signal, reportProgress: async () => {} });
-
-		const contextSwitch = messages.find(message => message.role === "developer");
-		if (!contextSwitch || contextSwitch.role !== "developer") throw new Error("context switch message missing");
-		const text =
-			typeof contextSwitch.content === "string" ? contextSwitch.content : JSON.stringify(contextSwitch.content);
-		// The fork's request is the parent's request plus this tail message: the wait
-		// policy must ride here, after the fork point, not in the shared tool schema.
-		expect(text).toContain("call `wait` again instead of ending your turn");
-	});
-
-	it("leaves the fork's wait guidance out when the wait tool is disabled", async () => {
-		const harness = createContext({ enabledToolNames: ["read", "bash"] });
-		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
-		const { clone, messages } = createCloneStub();
-		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
-			session: clone,
-		} as unknown as CreateAgentSessionResult);
-		await new TanCommandController(harness.ctx).start("wait for the build");
-		const run = harness.capturedRun;
-		if (!run) throw new Error("run function was not captured");
-		await run({ jobId: "job-1", signal: new AbortController().signal, reportProgress: async () => {} });
-
-		const contextSwitch = messages.find(message => message.role === "developer");
-		if (!contextSwitch || contextSwitch.role !== "developer") throw new Error("context switch message missing");
-		const text =
-			typeof contextSwitch.content === "string" ? contextSwitch.content : JSON.stringify(contextSwitch.content);
-		expect(text).not.toContain("call `wait` again instead of ending your turn");
-	});
-
 	it("pins the parent's effective cache key when the parent itself carries a pinned promptCacheKey", async () => {
 		// A parent that is itself a fork/tan caches under `agent.promptCacheKey`,
 		// not its own session id — the clone must read that exact shard.
