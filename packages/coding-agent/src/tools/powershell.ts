@@ -9,7 +9,12 @@ import powershellDescription from "../prompts/tools/powershell.md" with { type: 
 import powershellSummary from "../prompts/tools/powershell-summary.md" with { type: "text" };
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
-import { outputMeta, resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "./output-meta";
+import {
+	outputMeta,
+	resolveOutputMaxColumns,
+	resolveOutputSinkArtifactMaxBytes,
+	resolveOutputSinkHeadBytes,
+} from "./output-meta";
 import { resolveToCwd } from "./path-utils";
 import {
 	acquirePsHost,
@@ -96,10 +101,10 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 		if (params.edition) lines.push(`Edition: ${params.edition}`);
 		return lines;
 	};
-	// With `xd://` mounting in its default "catalog" docs mode this line is the
-	// only thing a model sees before its first call, so it must carry the
-	// edition routing on its own: a model that only reads this line should
-	// still pick `edition` over shelling out to pwsh/powershell.exe from bash.
+	// When the tool is mounted as a bash command, this line is the only thing
+	// a model sees in the command catalog before its first call, so it must
+	// carry the edition routing on its own: a model that only reads this line
+	// should still pick `edition` over running pwsh/powershell.exe from bash.
 	get summary(): string {
 		return prompt.render(powershellSummary, {
 			defaultEdition: cfgPowerShellDefaultEdition.get(this.session.settings),
@@ -149,18 +154,17 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 		};
 
 		// Everything fallible on the input path runs BEFORE a host is acquired:
-		// a rejected cwd or artifact failure must not leak an ephemeral pwsh or
-		// strand a session lease (leases pin the host against idle eviction).
+		// a rejected cwd must not leak an ephemeral pwsh or strand a session
+		// lease (leases pin the host against idle eviction).
 		const resolvedCwd = cwd ? resolveToCwd(cwd, this.session.cwd) : undefined;
 		const width = cfgPowerShellOutputWidth.get(settings);
 
 		const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
-		const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("powershell")) ?? {};
 		const sink = new OutputSink({
 			onChunk: streamTailUpdates(tailBuffer, onUpdate),
-			artifactPath,
-			artifactId,
+			allocateArtifact: this.session.allocateOutputArtifact,
 			headBytes: resolveOutputSinkHeadBytes(settings),
+			artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(settings),
 			maxColumns: resolveOutputMaxColumns(settings),
 		});
 

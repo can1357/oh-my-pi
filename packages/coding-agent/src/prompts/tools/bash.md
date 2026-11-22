@@ -8,7 +8,7 @@ In-process builtins, ahead of PATH: {{join builtins ", "}}.
 {{/if}}
 Don't trunc output by habit, result will be summarized and saved as an artifact.
 {{#if hasPowerShell}}
-PowerShell (pwsh or powershell.exe): NEVER run it from bash; use the `powershell` tool{{#if powerShellMounted}} (`write xd://powershell`){{/if}} with `edition` (`"pwsh"` or `"powershell"`).
+PowerShell: NEVER run pwsh or powershell.exe from bash; use the `powershell` tool{{#if powerShellMounted}} (here a bash command, see `powershell --help`){{/if}} with `edition` (`"pwsh"` or `"powershell"`).
 {{/if}}
 {{#if hasLaunch}}
 Long-lived services:
