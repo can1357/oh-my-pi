@@ -3,6 +3,7 @@
  * always did, then hands the selected backend the whole list.
  */
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -20,7 +21,7 @@ import { cfgTodoBackend } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 interface Tracker {
 	calls: Array<{ phases: TodoPhase[]; sessionId: string }>;
@@ -238,7 +239,7 @@ describe("todo backend", () => {
 		expect(tasksOf(backend)).toEqual([["a"], ["b"]]);
 	});
 
-	it("an id no extension registers, an empty one included, is reported once and todos keep working", async () => {
+	it("an id no extension registers, an empty one included, is reported once until a registered id is selected, and todos keep working", async () => {
 		for (const id of ["missing", ""]) {
 			const { session, errors } = await open([tracker().extension], id);
 
@@ -248,6 +249,15 @@ describe("todo backend", () => {
 
 			expect(session.getTodoPhases()).toEqual(list("b"));
 			expect(errors).toEqual([expect.stringContaining(`"${id}"`)]);
+
+			cfgTodoBackend.override(session.settings, "tracker");
+			session.commitTodoPhases(list("c"));
+			await settled(session);
+			cfgTodoBackend.override(session.settings, id);
+			session.commitTodoPhases(list("d"));
+			await settled(session);
+
+			expect(errors).toEqual([expect.stringContaining(`"${id}"`), expect.stringContaining(`"${id}"`)]);
 		}
 	});
 
@@ -310,17 +320,22 @@ describe("todo backend", () => {
 
 	it("a session moved to another file sends the list again under its new id", async () => {
 		const backend = tracker();
-		const manager = SessionManager.inMemory();
-		const subscribed = spyOn(manager, "onPersistenceNotice");
+		const manager = SessionManager.create(dir.path(), dir.path());
 		const { session } = await open([backend.extension], "tracker", { sessionManager: manager });
 		session.commitTodoPhases(list("a"));
+		manager.appendMessage(createAssistantMessage("ok"));
+		await manager.flush();
+		await settled(session);
+		const original = manager.getSessionId();
+
+		// The file no longer reads as this session: the next rewrite leaves it and moves to a sibling under a new id.
+		const file = manager.getSessionFile();
+		if (!file) throw new Error("the session has no file");
+		fs.writeFileSync(file, "not a session\n");
+		await manager.rewriteEntries();
 		await settled(session);
 
-		// What a manager does when its file is open elsewhere: a new id for the same session, then the notice.
-		await manager.newSession();
-		for (const [notify] of subscribed.mock.calls) notify({ reason: "open-elsewhere", from: "old", to: "new" });
-		await settled(session);
-
+		expect(manager.getSessionId()).not.toBe(original);
 		expect(backend.calls.at(-1)).toEqual({ phases: list("a"), sessionId: manager.getSessionId() });
 		expect(backend.calls).toHaveLength(2);
 	});
@@ -453,7 +468,10 @@ describe("todo backend", () => {
 
 		expect(tasksOf(first)).toEqual([["a"]]);
 		expect(tasksOf(second)).toEqual([["a"]]);
-		expect(errors).toEqual([expect.stringContaining('"tracker"')]);
+		expect(errors).toEqual([
+			expect.stringContaining('todo backend "tracker" is ignored'),
+			expect.stringContaining('No enabled extension registers the todo backend "tracker"'),
+		]);
 	});
 
 	it("two extensions that register one shared backend object are still two holders: on takeover the next one gets the list", async () => {

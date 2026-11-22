@@ -2181,7 +2181,7 @@ export interface ExtensionAPI {
 	 * Register a todo backend the user can select with the `todo.backend` setting. Throws for a
 	 * malformed id, for `native` and for a missing `replace`; an id this extension registered
 	 * before gets the new definition. When several extensions register an id, the first one loaded
-	 * keeps it.
+	 * keeps it; once that id is selected, the others are reported as extension errors.
 	 */
 	registerTodoBackend(definition: TodoBackendDefinition): void;
 

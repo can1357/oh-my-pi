@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- `prewalkWouldBeNoop` no longer skips a handoff when only the model's upstream pin changes ([#19664](https://github.com/can1357/oh-my-pi/pull/19664) by [@taibenvenuti](https://github.com/taibenvenuti)).
 - Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.1.0] - 2026-11-21

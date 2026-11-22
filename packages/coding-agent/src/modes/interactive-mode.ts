@@ -7,7 +7,7 @@ import * as path from "node:path";
 import { type Agent, AgentBusyError, type AgentMessage, agentPauseGate, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
-import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { execReplace } from "@oh-my-pi/pi-natives";
 import type {
 	AutocompleteProvider,
@@ -6320,7 +6320,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async #restorePlanPreviousModel(prev: { model: Model; thinkingLevel?: ConfiguredThinkingLevel }): Promise<void> {
-		if (modelsAreEqual(this.session.model, prev.model)) {
+		if (routedModelsAreEqual(this.session.model, prev.model)) {
 			// Same model — only thinking level may differ. Avoid setModelTemporary()
 			// which would reset provider-side sessions and break continuity.
 			this.session.setThinkingLevel(prev.thinkingLevel);
@@ -6418,7 +6418,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.session.setPlanModeState(planModeState);
 			if (
 				planModeModelState &&
-				(!modelsAreEqual(this.session.model, planModeModelState.model) ||
+				(!routedModelsAreEqual(this.session.model, planModeModelState.model) ||
 					this.session.configuredThinkingLevel() !== planModeModelState.thinkingLevel)
 			) {
 				try {
@@ -8228,7 +8228,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				const restoredIndex =
 					cycle && restoredState
 						? cycle.models.findIndex(entry => {
-								if (!modelsAreEqual(entry.model, restoredState.model)) return false;
+								if (!routedModelsAreEqual(entry.model, restoredState.model)) return false;
 								if (!entry.explicitThinkingLevel) return true;
 								return entry.thinkingLevel === restoredState.thinkingLevel;
 							})

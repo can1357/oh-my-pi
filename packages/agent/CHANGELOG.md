@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed handoff generation sending a prepared context that cannot fit the target model's window; it now fails before any provider call ([#20126](https://github.com/can1357/oh-my-pi/pull/20126) by [@harshaygadekar](https://github.com/harshaygadekar))
+
 ## [19.1.0] - 2026-11-21
 
 ### Added
