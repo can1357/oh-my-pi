@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/wt` (TUI, ACP, RPC and `worktree.onStart`) runs the new worktree's `post-checkout` hook as `git worktree add` does, with a spinner in the TUI, then loads the skills and commands it added; a failing hook keeps the worktree and shows a warning, and quitting while it runs keeps that worktree with a warning. In an ovnfs checkout only a `core.hooksPath` hook runs ([#20045](https://github.com/can1357/oh-my-pi/pull/20045) by [@Dangerboi](https://github.com/Dangerboi))
+
 ### Changed
 
 - `omp usage reset` and `/usage reset` list each saved reset's id and title, and for Claude the limits it clears; the `/usage reset` picker shows the selected account's resets too ([#19894](https://github.com/can1357/oh-my-pi/pull/19894) by [@Xytronix](https://github.com/Xytronix))
@@ -18,6 +22,7 @@
 - Fixed `/usage` showing "Usage history unavailable (database is locked)" while another process was writing the stats database; the stored history stays visible, marked not synced when the refresh cannot finish ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
 - `openai-models-list` discovery no longer offers a gateway's speech and transcription models as chat models: rows whose only output is `speech` or `transcription` (including OpenRouter's `text->speech` style `architecture.modality` summary) become `tts` and `stt` models ([#19900](https://github.com/can1357/oh-my-pi/pull/19900) by [@Xytronix](https://github.com/Xytronix))
 - Subagents stopped by their parent through `proc://<id>/kill` now record "Stopped by parent agent" in their transcripts instead of "Interrupted by user" ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
+- Fixed the omp daemon staying alive for up to 3 seconds after shutdown, or 11 seconds after stopping a module unit such as the image URL broker, once its work was done
 - `omp usage reset` and `/usage reset` take `<provider>/<credential id>:<credit id>` to spend exactly that saved reset, and refuse a target without one when the account holds resets that clear different limits (a full Claude reset next to a Fable-only one), or a named Claude grant that isn't the one Claude offers next ([#19894](https://github.com/can1357/oh-my-pi/pull/19894) by [@Xytronix](https://github.com/Xytronix))
 - Automatic Claude restores no longer spend a reset that clears more than the block needs while the account banks one, offered later, that clears only that (a full reset ahead of a Fable-only one on a Fable-only block); the session shows the command to spend it instead, and a blocked account whose reset clears only what blocks it is restored first ([#19894](https://github.com/can1357/oh-my-pi/pull/19894) by [@Xytronix](https://github.com/Xytronix))
 - The expiry banner's spend command for a Claude account names the expiring reset ([#19894](https://github.com/can1357/oh-my-pi/pull/19894) by [@Xytronix](https://github.com/Xytronix))
