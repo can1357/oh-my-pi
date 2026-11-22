@@ -1423,6 +1423,10 @@ pub(super) mod tests {
 	/// user switching windows while the provider answers would. It prints
 	/// `armed`.
 	const SWITCH_ON_LOOKUP: u32 = WM_APP + 11;
+	/// Posted to the WPF window: it prints `menu open` while its context menu
+	/// is open, or `menu closed` once its `Closed` has fired, after the menu's
+	/// window is gone (a closing fade can outlast `IsOpen`).
+	const MENU_STATE: u32 = WM_APP + 12;
 
 	/// A WPF window whose context menu holds a `Mark` item, with an activatable
 	/// popup it owns and an unrelated window of the same app, in its own
@@ -1460,12 +1464,18 @@ public static class Fixture {
 	public static Window other;
 	static Window window;
 	static ContextMenu menu;
+	static bool menuClosed, closedWanted;
 	static void Say(string line) { Console.Out.WriteLine(line); Console.Out.Flush(); }
 	static IntPtr Hook(IntPtr hwnd, int message, IntPtr w, IntPtr l, ref bool handled) {
 		if (message == 0x8007) window.Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() => Say("mark")));
 		else if (message == 0x8009) { menu.IsOpen = false; menu.IsOpen = true; }
 		else if (message == 0x800A) Say((w == IntPtr.Zero ? other : window).Activate() ? "switch succeeded" : "switch failed");
 		else if (message == 0x800B) { switchOnLookup = true; Say("armed"); }
+		else if (message == 0x800C) {
+			if (menu.IsOpen) Say("menu open");
+			else if (menuClosed) Say("menu closed");
+			else closedWanted = true;
+		}
 		return IntPtr.Zero;
 	}
 	static IntPtr Handle(Window window) { return new WindowInteropHelper(window).Handle; }
@@ -1478,6 +1488,11 @@ public static class Fixture {
 		item.Click += (sender, e) => Say("marked");
 		menu = new ContextMenu { StaysOpen = true };
 		menu.Items.Add(item);
+		menu.Closed += (sender, e) => {
+			menuClosed = true;
+			if (closedWanted) { closedWanted = false; Say("menu closed"); }
+		};
+		menu.Opened += (sender, e) => menuClosed = false;
 		menu.Opened += (sender, e) => menu.Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => {
 			var centre = item.PointToScreen(new Point(item.ActualWidth / 2, item.ActualHeight / 2));
 			Say("opened " + (int)centre.X + " " + (int)centre.Y);
@@ -1693,8 +1708,27 @@ public static class Fixture {
 		app.until("switch succeeded");
 		app.printed(main);
 		assert_eq!(foreground(), other);
+		// SAFETY: a plain message to a window this test's fixture owns.
+		assert_ne!(unsafe { PostMessageW(main, MENU_STATE, 0, 0) }, 0, "posting menu query failed");
+		let mut seen = Vec::new();
+		let menu_open = loop {
+			match app.line().join(" ").as_str() {
+				"menu open" => break true,
+				"menu closed" => break false,
+				line => seen.push(line.to_string()),
+			}
+		};
+		assert_eq!(seen, Vec::<String>::new());
 		let error = press(&mut worker, item).unwrap_err();
-		assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
+		if menu_open {
+			assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
+		} else {
+			// Where Windows closes the menu once another window of the app
+			// activates, its closing has finished and the item has no host
+			// window left: refused before any pattern lookup.
+			assert_eq!(error.code, ErrorCode::AxFailed, "{error}");
+			assert!(error.message.contains("cannot establish the native window"), "{error}");
+		}
 		assert_eq!(app.printed(main), Vec::<String>::new());
 		assert_eq!(foreground(), other);
 	}
