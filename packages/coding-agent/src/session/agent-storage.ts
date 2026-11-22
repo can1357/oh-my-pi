@@ -203,7 +203,7 @@ export interface AgentStorageApi {
  */
 export class AgentStorage implements AgentStorageApi {
 	#db: Database;
-	#authStore: AuthCredentialStore;
+	#authStore: SqliteAuthCredentialStore;
 
 	#listSettingsStmt: Statement;
 	#upsertModelUsageStmt: Statement;
@@ -462,7 +462,8 @@ FROM model_usage_legacy
 		if (existing) return existing;
 
 		fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
-		return openSqliteDatabase(
+		let preservedPath: string | undefined;
+		const opened = await openSqliteDatabase(
 			dbPath,
 			db => {
 				const storage = new AgentStorage(db, dbPath);
@@ -472,8 +473,16 @@ FROM model_usage_legacy
 				instances.set(dbPath, storage);
 				return storage;
 			},
-			{ recoverCorruption: true },
+			{
+				recoverCorruption: true,
+				onCorruptionPreserved: backupPath => {
+					preservedPath = backupPath;
+				},
+			},
 		);
+		// The quarantined store held the user's provider credentials; carry over what is readable.
+		if (preservedPath) opened.#authStore.salvageQuarantinedCredentials(preservedPath);
+		return opened;
 	}
 
 	/** Flushes deferred writes, closes every process-wide database, and permits reopening them. */
