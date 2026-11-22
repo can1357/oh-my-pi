@@ -2136,7 +2136,8 @@ export async function resolveModelScope(
 	settings?: Settings,
 ): Promise<ScopedModel[]> {
 	const availableModels = modelRegistry.getAvailable();
-	const context = buildPreferenceContext(availableModels, preferences);
+	const matchPreferences = mergeModelMatchPreferences(settings, preferences);
+	const context = buildPreferenceContext(availableModels, matchPreferences);
 	const scopedModels: ScopedModel[] = [];
 	const addScopedModel = (model: Model<Api>, thinkingLevel: ThinkingLevel | undefined, explicit: boolean) => {
 		if (scopedModels.some(sm => routedModelsAreEqual(sm.model, model))) return;
@@ -2156,7 +2157,7 @@ export async function resolveModelScope(
 		runnerModels ??= modelRegistry.getAvailable("all").filter(model => modelKind(model) !== "chat");
 		const namesRunner = glob
 			? resolveGlobScopePattern(pattern, runnerModels).models.length > 0
-			: parseModelPatternWithContext(pattern, runnerModels, buildPreferenceContext(runnerModels, preferences))
+			: parseModelPatternWithContext(pattern, runnerModels, buildPreferenceContext(runnerModels, matchPreferences))
 					.model !== undefined;
 		if (namesRunner) {
 			logger.debug(`Scope pattern "${pattern}" names a non-chat model; it stays out of the chat scope`);
@@ -2290,7 +2291,7 @@ export function filterAvailableModelsByEnabledPatterns(
 ): Model<Api>[] {
 	if (patterns.length === 0) return available;
 
-	const context = buildPreferenceContext(available, undefined);
+	const context = buildPreferenceContext(available, getModelMatchPreferences(settings));
 	const allowedModels: Model<Api>[] = [];
 	const addAllowed = (model: Model<Api>) => {
 		allowedModels.push(model);

@@ -228,6 +228,12 @@ mkdir -p "$TARBALL_APP_DIR"
       echo "Unexpected @oh-my-pi/omptype probe result: $omptype_probe"
       exit 1
    }
+   # SDK consumers import the package root from the published `src`; any import escaping the tarball fails here.
+   sdk_probe="$(bun -e 'import { z } from "@oh-my-pi/pi-coding-agent"; process.stdout.write(typeof z);')"
+   [ "$sdk_probe" = "object" ] || {
+      echo "Unexpected @oh-my-pi/pi-coding-agent root import probe result: $sdk_probe"
+      exit 1
+   }
    [ -f "node_modules/@oh-my-pi/collab-web/dist/index.html" ] || {
       echo "Collab web tarball did not install built dist/index.html"
       exit 1

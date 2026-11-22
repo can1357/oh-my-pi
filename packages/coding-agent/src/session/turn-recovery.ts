@@ -1164,6 +1164,7 @@ export class TurnRecovery {
 		this.#emptyStopRetryCount++;
 		if (this.#emptyStopRetryCount > EMPTY_STOP_MAX_RETRIES) {
 			const attempts = this.#emptyStopRetryCount - 1;
+			this.#emptyStopRetryCount = 0;
 			const outputTokens = assistantMessage.usage.output;
 			const outputTokensExcludingKnownReasoning = Math.max(
 				0,
@@ -1218,6 +1219,18 @@ export class TurnRecovery {
 			content: [{ type: "text", text: this.#emptyStopRetryReminder() }],
 			attribution: "agent",
 			timestamp: Date.now(),
+		});
+		logger.info("Empty-stop retry scheduled", {
+			attempt: this.#emptyStopRetryCount,
+			maxAttempts: EMPTY_STOP_MAX_RETRIES,
+			model: assistantMessage.model,
+			provider: assistantMessage.provider,
+			stopReason: assistantMessage.stopReason,
+			durationMs: assistantMessage.duration,
+			ttftMs: assistantMessage.ttft,
+			errorMessage: assistantMessage.errorMessage,
+			errorStatus: assistantMessage.errorStatus,
+			outputTokens: assistantMessage.usage.output,
 		});
 		this.#host.scheduleAgentContinue({
 			source: "empty-stop-retry",

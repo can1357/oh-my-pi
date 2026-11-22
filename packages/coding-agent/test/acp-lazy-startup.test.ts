@@ -500,6 +500,55 @@ describe("ACP lazy startup", () => {
 		}
 	});
 
+	it.each([
+		[":high", "high"],
+		["", "low"],
+	])("seeds a workspace session's thinking level only when --model%s sets none", async (suffix, expected) => {
+		using launch = TempDir.createSync("@omp-acp-thinking-launch-");
+		using workspace = TempDir.createSync("@omp-acp-thinking-workspace-");
+		const selector = "openrouter/z-ai/glm-4.7";
+		await Bun.write(workspace.join(".omp/config.yml"), `enabledModels:\n  - ${selector}:low\n`);
+		const settings = await Settings.loadIsolated({ cwd: launch.path(), agentDir: launch.join("agent") });
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("openrouter", "test-key");
+		const { runRootCommand } = await import("@oh-my-pi/pi-coding-agent/main");
+		const rawArgs = ["--model", `${selector}${suffix}`];
+		let thinkingLevel: string | undefined;
+		try {
+			await expect(
+				runRootCommand(
+					{
+						...parseArgs(rawArgs),
+						mode: "acp",
+						offline: true,
+						noExtensions: true,
+						sessionDir: launch.join("sessions"),
+					},
+					rawArgs,
+					{
+						discoverAuthStorage: async () => authStorage,
+						settings,
+						createAgentSession: async options => {
+							thinkingLevel = options?.thinkingLevel;
+							return {
+								session: new LazyFakeSession(workspace.path()),
+								setToolUIContext: () => {},
+							} as unknown as CreateAgentSessionResult;
+						},
+						runAcpMode: async createSession => {
+							await createSession(workspace.path());
+							throw new Error("stop test ACP mode");
+						},
+					},
+				),
+			).rejects.toThrow("stop test ACP mode");
+			expect(thinkingLevel).toBe(expected);
+		} finally {
+			authStorage.close();
+			settings.cancelPendingSaves();
+		}
+	});
+
 	it("binds --api-key to the launch scope provider without a stored credential", async () => {
 		using launch = TempDir.createSync("@omp-acp-key-launch-");
 		using other = TempDir.createSync("@omp-acp-key-other-");

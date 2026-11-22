@@ -96,6 +96,7 @@ import { appKey, editorKey, rawKeyHint } from "@oh-my-pi/pi-tui/chrome/keybindin
 import {
 	formatModelStringWithRouting,
 	type ResolvedModelRoleValue,
+	resolveExactModelIdentity,
 	resolveModelRoleValue,
 } from "../config/model-resolver";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
@@ -1423,6 +1424,11 @@ const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
 
 /** Repaint cadence of the open jobs sheet: output tails, pids and list ages are polled, not pushed. */
 const JOBS_SHEET_REFRESH_MS = 250;
+type PlanPreModelState = {
+	model?: Model;
+	identity?: string;
+	thinkingLevel?: ConfiguredThinkingLevel;
+};
 
 export class InteractiveMode implements InteractiveModeContext {
 	#ownsStartedUi: boolean;
@@ -2000,7 +2006,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#pendingGoalContinuationTurns = 0;
 	#previousGoalContinuationActivity: string | undefined;
 	#goalSuppressNextContinuation = false;
-	#planModePreviousModelState: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
+	#planModePreviousModelState: PlanPreModelState | undefined;
 	#pendingModelSwitch: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
 	/** Whether #pendingModelSwitch was queued by the live plan-role reconciler. */
 	#pendingPlanModelSwitch = false;
@@ -5966,20 +5972,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async #applyPlanModeModel(): Promise<void> {
+		const currentModel = this.session.model;
 		const resolved = this.session.resolveRoleModelWithThinking("plan");
 		if (!resolved.model) return;
-
-		const currentModel = this.session.model;
-		// Capture the pre-plan model so #exitPlanMode can restore it. Only the
-		// entry path records this — a mid-planning role change (below) leaves the
-		// active model on the plan role, so overwriting here would restore the old
-		// plan model instead of the user's real pre-plan model.
-		this.#planModePreviousModelState = currentModel
-			? {
-					model: currentModel,
-					thinkingLevel: this.session.configuredThinkingLevel(),
-				}
-			: undefined;
+		// Only an entry captures this; role changes while planning must not overwrite it.
+		this.#planModePreviousModelState = {
+			...(currentModel ? { model: currentModel, identity: formatModelStringWithRouting(currentModel) } : {}),
+			thinkingLevel: this.session.configuredThinkingLevel(),
+		};
 
 		await this.#applyPlanModelTransition(currentModel, resolved);
 	}
@@ -6089,8 +6089,8 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#planModeHasEntered = false;
 				this.#updatePlanModeStatus();
 			}
-			if (options?.restorePlanModel && previousModel) {
-				await this.#restorePlanPreviousModel(previousModel);
+			if (options?.restorePlanModel) {
+				await this.#restorePlanPreviousModel(previousModel ?? {});
 			}
 		}
 
@@ -6214,7 +6214,28 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (sessionContext.mode === "plan") {
 			const planFilePath = sessionContext.modeData?.planFilePath as string | undefined;
-			await this.#enterPlanMode({ planFilePath, preserveRestoredModel: true });
+			const prePlanModelIdentity = sessionContext.modeData?.prePlanModelIdentity;
+			const previousModel =
+				typeof prePlanModelIdentity === "string"
+					? resolveExactModelIdentity(prePlanModelIdentity, this.session.modelRegistry)
+					: undefined;
+			const prePlanThinkingLevel = parseConfiguredThinkingLevel(
+				typeof sessionContext.modeData?.prePlanThinkingLevel === "string"
+					? sessionContext.modeData.prePlanThinkingLevel
+					: undefined,
+			);
+			await this.#enterPlanMode({
+				planFilePath,
+				preserveRestoredModel: true,
+				previousModelState:
+					typeof prePlanModelIdentity === "string"
+						? {
+								...(previousModel ? { model: previousModel } : {}),
+								identity: prePlanModelIdentity,
+								thinkingLevel: prePlanThinkingLevel,
+							}
+						: undefined,
+			});
 		} else if (sessionContext.mode === "plan_paused") {
 			this.planModePaused = true;
 			this.#planModeHasEntered = true;
@@ -6238,6 +6259,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		planFilePath?: string;
 		workflow?: "parallel" | "iterative";
 		preserveRestoredModel?: boolean;
+		previousModelState?: PlanPreModelState;
 	}): Promise<void> {
 		if (this.planModeEnabled) {
 			return;
@@ -6308,19 +6330,40 @@ export class InteractiveMode implements InteractiveModeContext {
 			await this.session.sendPlanModeContext({ deliverAs: "steer" });
 		}
 		this.#planModeHasEntered = true;
-		// Session loading already restored the model recorded in the journal.
-		// Reapplying today's plan role here would replace a CLI/session-specific
-		// selection with current config during --resume or an in-process switch.
+		if (options?.previousModelState) {
+			this.#planModePreviousModelState = options.previousModelState;
+		}
+		// Resume already restored the active plan model; applying the role again
+		// would overwrite any execution target restored from the journal.
 		if (!options?.preserveRestoredModel) {
 			await this.#applyPlanModeModel();
 		}
 		this.#updatePlanModeStatus();
-		this.sessionManager.appendModeChange("plan", { planFilePath });
+		this.sessionManager.appendModeChange("plan", this.#planModeJournalData(planFilePath));
 		this.showStatus(`Plan mode enabled. Plan file: ${planFilePath}`);
 	}
 
-	async #restorePlanPreviousModel(prev: { model: Model; thinkingLevel?: ConfiguredThinkingLevel }): Promise<void> {
-		if (routedModelsAreEqual(this.session.model, prev.model)) {
+	#planModeJournalData(planFilePath: string): Record<string, unknown> {
+		const previous = this.#planModePreviousModelState;
+		const identity =
+			previous?.identity ?? (previous?.model ? formatModelStringWithRouting(previous.model) : undefined);
+		return {
+			planFilePath,
+			...(identity
+				? {
+						prePlanModelIdentity: identity,
+						...(previous?.thinkingLevel !== undefined ? { prePlanThinkingLevel: previous.thinkingLevel } : {}),
+					}
+				: {}),
+		};
+	}
+
+	async #restorePlanPreviousModel(prev: PlanPreModelState): Promise<void> {
+		if (!prev.model) return;
+		if (
+			this.session.model &&
+			formatModelStringWithRouting(this.session.model) === formatModelStringWithRouting(prev.model)
+		) {
 			// Same model — only thinking level may differ. Avoid setModelTemporary()
 			// which would reset provider-side sessions and break continuity.
 			this.session.setThinkingLevel(prev.thinkingLevel);
@@ -6455,7 +6498,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.planModePaused = options?.paused ?? false;
 		this.planModePlanFilePath = undefined;
 		this.#planModePreviousToolPresentation = undefined;
-		if (!options?.deferModelRestore) this.#planModePreviousModelState = undefined;
+		if (!options?.deferModelRestore || !this.#planModePreviousModelState?.model) {
+			this.#planModePreviousModelState = undefined;
+		}
 		this.#updatePlanModeStatus();
 		const paused = options?.paused ?? false;
 		this.sessionManager.appendModeChange(paused ? "plan_paused" : "none");
@@ -8017,7 +8062,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const planState = this.session.getPlanModeState();
 		if (planState?.enabled && planState.planFilePath !== planFilePath) {
 			this.session.setPlanModeState({ ...planState, planFilePath });
-			this.sessionManager.appendModeChange("plan", { planFilePath });
+			this.sessionManager.appendModeChange("plan", this.#planModeJournalData(planFilePath));
 			// Reported only once committed: the next planning turn reads this state.
 			this.#notifyModeChanged();
 		}
@@ -8226,7 +8271,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				// different configured thinking level silently keeps the pre-plan level.
 				const restoredState = this.#planModePreviousModelState;
 				const restoredIndex =
-					cycle && restoredState
+					cycle && restoredState?.model
 						? cycle.models.findIndex(entry => {
 								if (!routedModelsAreEqual(entry.model, restoredState.model)) return false;
 								if (!entry.explicitThinkingLevel) return true;

@@ -15,7 +15,7 @@
  */
 import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import { hexToOklch, hueDistance, logger, oklchCusp, oklchToHex } from "@oh-my-pi/pi-utils";
-import { Image, type ImageBudget } from "../components/image";
+import { Image, type ImageBudget, measuringRender } from "../components/image";
 import { fencedCode, type Markdown } from "../components/markdown";
 import { type CellDimensions, getCellDimensions, getImageDimensions } from "../terminal-capabilities";
 import { ensureThemeSync, getThemeEpoch, type ThemeColor, theme } from "../theme";
@@ -227,8 +227,11 @@ export class SvgFigure implements Component {
 	}
 
 	render(width: number): readonly string[] {
-		// Width, cell size and theme are render-time inputs; a change re-rasterizes.
-		this.#width = width;
+		// Width, cell size and theme are render-time inputs; a change re-rasterizes. A measuring
+		// pass may try a width no frame draws at (a form lays its column out once without its
+		// scrollbar), so once a draw has set the width only draws move it; the first render sizes it
+		// either way, since a form draws only a picture it has measured.
+		if (this.#width === undefined || !measuringRender()) this.#width = width;
 		this.#schedule();
 		const maxRows = this.#maxRows();
 		if (maxRows === 0) return [];
@@ -276,6 +279,7 @@ export class SvgFigure implements Component {
 			failed: this.#failed === this.#source,
 			raster: this.#raster ? `${this.#raster.widthPx}x${this.#raster.heightPx}` : null,
 			current: this.#raster?.source === this.#source,
+			rasterizing: this.#rasterizing,
 		};
 	}
 

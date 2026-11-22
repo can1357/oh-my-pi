@@ -1,12 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Api, AuthStorage, Model } from "@oh-my-pi/pi-ai";
+import { type Api, type AuthStorage, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { formatModelStringWithRouting, resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
-import { cfgEnabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import { cfgEnabledModels, cfgModelProviderOrder } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildSessionOptions,
@@ -112,6 +112,28 @@ describe("watchScopedModelSettings", () => {
 
 			expect(session.setCalls).toBe(1);
 			expect(session.scopedModels.map(entry => formatModelStringWithRouting(entry.model))).toEqual([target]);
+		} finally {
+			for (const dispose of session.disposers) dispose();
+		}
+	});
+
+	it("updates the cycling scope when provider preference changes an enabled model", async () => {
+		const id = "anthropic/claude-preset-fixture";
+		const patterns = [id];
+		const settings = Settings.isolated({ enabledModels: patterns, modelProviderOrder: ["openrouter"] });
+		const registry = new FakeRegistry(
+			["openrouter", "vercel-ai-gateway"].map(provider => ({ ...model(id), provider })),
+		);
+		const session = new FakeSession(await startupScope(patterns, registry, settings));
+		expect(session.scopedModels.map(entry => entry.model.provider)).toEqual(["openrouter"]);
+
+		watchScopedModelSettings(session, parseArgs([]), registry, settings);
+		try {
+			cfgModelProviderOrder.override(settings, ["vercel-ai-gateway"]);
+			const { promise, resolve } = Promise.withResolvers<void>();
+			setImmediate(resolve);
+			await promise;
+			expect(session.scopedModels.map(entry => entry.model.provider)).toEqual(["vercel-ai-gateway"]);
 		} finally {
 			for (const dispose of session.disposers) dispose();
 		}
@@ -297,6 +319,76 @@ describe("buildSessionOptions --models scope selection", () => {
 		expect(options.model).toBeUndefined();
 		expect(options.modelPattern).toEqual(["extprov/model-x", "extprov/model-y"]);
 		expect(options.scopedModels).toBeUndefined();
+	});
+
+	it("seeds the startup thinking level from the scope entry the session starts on", async () => {
+		const parsed = parseArgs(["--models", "prov/a:low,prov/b:high"]);
+		const settings = Settings.isolated({ modelRoles: { default: "prov/b" } });
+		const scoped = await resolveModelScope(
+			["prov/a:low", "prov/b:high"],
+			{ getAvailable: () => [model("a"), model("b")] },
+			undefined,
+		);
+
+		const options = await buildSessionOptions(parsed, scoped, SessionManager.inMemory(), registry(), settings);
+
+		expect(options.model?.id).toBe("b");
+		expect(options.thinkingLevel).toBe(Effort.High);
+	});
+
+	it("keeps the --model thinking level when that model starts outside the scope", async () => {
+		const parsed = parseArgs([
+			"--model",
+			"anthropic/claude-opus-4-5:medium",
+			"--models",
+			"anthropic/claude-sonnet-4-5:low",
+		]);
+		const scoped = await resolveModelScope(
+			["anthropic/claude-sonnet-4-5:low"],
+			{ getAvailable: () => [getBundledModel("anthropic", "claude-sonnet-4-5")] },
+			undefined,
+		);
+
+		const options = await buildSessionOptions(
+			parsed,
+			scoped,
+			SessionManager.inMemory(),
+			registry(),
+			Settings.isolated(),
+		);
+
+		expect(options.model?.id).toBe("claude-opus-4-5");
+		expect(options.thinkingLevel).toBe(Effort.Medium);
+	});
+
+	it("keeps the --model thinking level over the scope entry for the same model", async () => {
+		const parsed = parseArgs([
+			"--model",
+			"anthropic/claude-opus-4-5:medium",
+			"--models",
+			"anthropic/claude-sonnet-4-5:low,anthropic/claude-opus-4-5:high",
+		]);
+		const scoped = await resolveModelScope(
+			["anthropic/claude-sonnet-4-5:low", "anthropic/claude-opus-4-5:high"],
+			{
+				getAvailable: () => [
+					getBundledModel("anthropic", "claude-sonnet-4-5"),
+					getBundledModel("anthropic", "claude-opus-4-5"),
+				],
+			},
+			undefined,
+		);
+
+		const options = await buildSessionOptions(
+			parsed,
+			scoped,
+			SessionManager.inMemory(),
+			registry(),
+			Settings.isolated(),
+		);
+
+		expect(options.model?.id).toBe("claude-opus-4-5");
+		expect(options.thinkingLevel).toBe(Effort.Medium);
 	});
 
 	it("starts on the remembered free variant and its pin when --models also allows the paid model", async () => {

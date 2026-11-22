@@ -8,7 +8,7 @@ import * as fsSync from "node:fs";
 import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
-import { getModelPricingStatus, routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { getModelPricingStatus, modelsAreEqual, routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { ensureSqliteLockShim, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import { bindAgentMesh } from "./irc/mesh";
@@ -203,7 +203,7 @@ import {
 	cfgSessionWarnCost,
 	cfgSessionWorktreeScope,
 } from "./session/settings";
-import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
+import { cfgDisabledProviders, cfgEnabledModels, cfgModelProviderOrder } from "./config/model-settings";
 import { cfgTaskAgentIdleTtlMs } from "./task/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
@@ -413,6 +413,16 @@ export interface InteractiveModeNotify {
 	message: string;
 }
 
+/** The startup fallback warning, unless setup selected a model the session did not have before it. */
+function postSetupModelFallback(
+	message: string | undefined,
+	modelBeforeSetup: Model | undefined,
+	modelAfterSetup: Model | undefined,
+): string | undefined {
+	if (modelAfterSetup && !modelsAreEqual(modelBeforeSetup, modelAfterSetup)) return undefined;
+	return message;
+}
+
 export function buildModelScopeNotification(
 	scopedModelsForDisplay: readonly Pick<ScopedModel, "model" | "thinkingLevel" | "explicitThinkingLevel">[],
 	startupQuiet: boolean,
@@ -591,6 +601,7 @@ async function resolveAcpApiKeyProvider(
 		await resolveScopedModels(parsed, modelRegistry, settings),
 		settings,
 		false,
+		false,
 	);
 	if (keyTarget.model) return keyTarget.model.provider;
 	const declaredScope = parsed.models ?? cfgEnabledModels.get(settings);
@@ -638,7 +649,9 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		const nextOptions = { ...args.baseOptions };
 		if (args.parsedArgs.models === undefined) {
 			const scope = await resolveScopedModels(args.parsedArgs, args.modelRegistry, nextSettings);
-			applyStartupScopedModels(nextOptions, args.parsedArgs, scope, nextSettings, false);
+			// Without `--models` the ACP launch resolved no scope, so a level already set came from `--model`.
+			const cliModelThinking = nextOptions.thinkingLevel !== undefined;
+			applyStartupScopedModels(nextOptions, args.parsedArgs, scope, nextSettings, false, cliModelThinking);
 		}
 		if (apiKey) {
 			if (!apiKeyProvider && !nextOptions.modelPattern) throw new CliUsageError(API_KEY_REQUIRES_MODEL);
@@ -755,7 +768,10 @@ async function runInteractiveMode(
 	startupLease?: ComposerLease,
 	startupGoal?: string,
 	startupRestore?: () => Promise<RestoreOutcome>,
+	modelFallbackMessage?: string,
 ): Promise<void> {
+	// Captured before setup: the setup wizard may replace the model the fallback warning describes.
+	const modelBeforeSetup = session.model;
 	const InteractiveModeConstructor = await loadInteractiveModeConstructor();
 	let mode: InteractiveMode;
 	try {
@@ -871,6 +887,14 @@ async function runInteractiveMode(
 		for (const notify of notifs) {
 			if (!notify) {
 				continue;
+			}
+			if (notify.message === modelFallbackMessage) {
+				// Setup may have replaced the model this fallback warning describes.
+				const postSetupFallback = postSetupModelFallback(modelFallbackMessage, modelBeforeSetup, session.model);
+				if (!postSetupFallback) {
+					continue;
+				}
+				notify.message = postSetupFallback;
 			}
 			if (notify.kind === "warn") {
 				mode.showWarning(notify.message);
@@ -1290,12 +1314,16 @@ export async function rebuildScopedModels(
 }
 
 /** Settings the scoped model list follows (see {@link watchScopedModelSettings}). */
-const cfgScopedModelInputs = combine({ enabledModels: cfgEnabledModels, disabledProviders: cfgDisabledProviders });
+const cfgScopedModelInputs = combine({
+	enabledModels: cfgEnabledModels,
+	disabledProviders: cfgDisabledProviders,
+	modelProviderOrder: cfgModelProviderOrder,
+});
 
 /**
  * Keep the Ctrl+P / scoped `/models` list in step with live settings: an
- * `enabledModels` edit re-resolves a settings-derived scope (an explicit
- * `--models` scope stays pinned), and a `disabledProviders` edit re-resolves
+ * `enabledModels` or provider-order edit re-resolves a settings-derived scope
+ * (an explicit `--models` scope stays pinned), and a `disabledProviders` edit re-resolves
  * after the catalog rebuild so re-enabled providers rejoin (disabled ones are
  * already filtered from `session.scopedModels` at read time).
  */
@@ -1536,6 +1564,8 @@ function applyStartupScopedModels(
 	scopedModels: readonly ScopedModel[],
 	activeSettings: Settings,
 	restoringSession: boolean,
+	/** An explicit `--model` level outranks the scope entry for the same model. */
+	cliModelThinking: boolean,
 ): void {
 	const first = scopedModels[0];
 	// True when a configured `default` role was deliberately left unresolved for
@@ -1595,18 +1625,23 @@ function applyStartupScopedModels(
 		}
 	}
 
-	// Thinking level
+	// Thinking level comes from the scope entry the session starts on, which is not always the
+	// first one (e.g. a remembered default). A model outside the scope (an explicit `--model`) keeps its own.
+	const startScoped = options.model
+		? scopedModels.find(entry => routedModelsAreEqual(entry.model, options.model))
+		: first;
 	if (parsed.thinking) {
 		options.thinkingLevel = parsed.thinking;
 	} else if (
-		first?.explicitThinkingLevel === true &&
+		startScoped?.explicitThinkingLevel === true &&
+		!cliModelThinking &&
 		// A deferred default role resolves its own model (and any explicit
 		// thinking suffix) after extensions register; seeding the fallback
 		// scoped model's level here would override it in createAgentSession.
 		!deferredDefaultRole &&
 		!restoringSession
 	) {
-		options.thinkingLevel = first.thinkingLevel;
+		options.thinkingLevel = startScoped.thinkingLevel;
 	}
 
 	// Scoped models for Ctrl+P cycling — fill in default thinking levels when not explicit.
@@ -1711,6 +1746,8 @@ export async function buildSessionOptions(
 	// configured assignment so explicit prewalk role targets still resolve
 	// against the value that existed when the CLI was invoked.
 	const preModelOverrideDefaultRole = activeSettings.getModelRole("default");
+	// An explicit `--model` level outranks the scope entry for the same model.
+	let cliModelThinking = false;
 	if (parsed.model) {
 		const resolved = resolveCliModel({
 			cliProvider: parsed.provider,
@@ -1770,6 +1807,7 @@ export async function buildSessionOptions(
 			});
 			if (!parsed.thinking && resolved.thinkingLevel) {
 				options.thinkingLevel = resolved.thinkingLevel;
+				cliModelThinking = true;
 			}
 		}
 	}
@@ -1843,7 +1881,7 @@ export async function buildSessionOptions(
 		options.planYolo = { target: resolved.model, thinkingLevel: resolved.thinkingLevel };
 	}
 
-	applyStartupScopedModels(options, parsed, scopedModels, activeSettings, restoringSession);
+	applyStartupScopedModels(options, parsed, scopedModels, activeSettings, restoringSession, cliModelThinking);
 
 	// API key from CLI - set in authStorage
 	// (handled by caller before createAgentSession)
@@ -3018,6 +3056,7 @@ export async function runRootCommand(
 						startupLease,
 						initialArgs.goal,
 						parsedArgs.restore ? () => restoreSession(session, { eventBus, subagentEventBus }) : undefined,
+						modelFallbackMessage,
 					);
 				} finally {
 					startupLease?.dispose();
