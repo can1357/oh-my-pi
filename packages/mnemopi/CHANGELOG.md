@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
+### Fixed
+
+- Improved diagnostics when a configured embedding provider fails, making provider errors visible in logs while preserving the existing fallback behavior.
+
+## [18.22.1] - 2026-11-17
+
+### Fixed
+
+- Fixed embedding requests failing when oversized inputs were clipped in the middle of an emoji or other Unicode character.
+
+## [18.21.0] - 2026-11-16
+
+### Changed
+
+- Improved file memory bank performance by reducing unnecessary disk synchronization during checkpointing, lowering per-turn I/O overhead for banks shared across multiple processes.
+
+## [18.20.3] - 2026-11-16
+
+### Added
+
+- Added configurable embedding query prefixes and input types for instruction-tuned and asymmetric embedding models, including Qwen3-Embedding, E5, and NVIDIA NIM.
+- Added the `embeddings.onRequestFailed` callback, allowing hosts to handle and surface failed embedding API requests.
+
 ## [18.20.0] - 2026-11-12
 
 ### Fixed

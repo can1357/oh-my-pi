@@ -1,12 +1,20 @@
 import { describe, expect, it } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import {
 	assertModelSupportsEffortCeiling,
+	automaticThinkingLevel,
+	AUTO_THINKING,
 	clampThinkingLevelToCeiling,
 	modelSupportsEffortCeiling,
+	newSessionThinkingLevel,
+	prewalkWouldBeNoop,
+	resolveConfiguredThinkingLevel,
+	resolveProvisionalAutoLevel,
 } from "../src/thinking";
 
 function customReasoner(): Model {
@@ -24,6 +32,32 @@ function customReasoner(): Model {
 		maxTokens: 32_000,
 	});
 }
+
+describe("thinking before capability discovery", () => {
+	const model = buildModel({
+		...toModelSpec(customReasoner()),
+		reasoning: undefined,
+		thinking: undefined,
+	});
+
+	it.each([Effort.Low, Effort.Max, AUTO_THINKING, ThinkingLevel.Off, undefined])(
+		"honors the session default %s while capability is unverified",
+		level => {
+			expect(model.thinking?.unverified).toBe(true);
+			expect(model.thinking?.efforts).toEqual(THINKING_EFFORTS);
+			expect(automaticThinkingLevel(model, level)).toBe(level);
+			expect(newSessionThinkingLevel(model, undefined, level)).toBe(level);
+		},
+	);
+
+	it("resolves auto to a concrete provisional effort without enabling known non-reasoners", () => {
+		expect(resolveProvisionalAutoLevel(model)).toBe(Effort.High);
+		expect(resolveConfiguredThinkingLevel(model, AUTO_THINKING)).toBe(Effort.High);
+		const nonreasoner = buildModel({ ...toModelSpec(model), reasoning: false, thinking: undefined });
+		expect(nonreasoner.thinking).toBeUndefined();
+		expect(resolveConfiguredThinkingLevel(nonreasoner, AUTO_THINKING)).toBeUndefined();
+	});
+});
 
 const DEFERRED_LEVELS: Array<ThinkingLevel | undefined> = [undefined, ThinkingLevel.Inherit, ThinkingLevel.Off];
 
@@ -69,5 +103,29 @@ describe("clampThinkingLevelToCeiling", () => {
 	it("accepts models with no controllable effort surface", () => {
 		const model = { ...customReasoner(), reasoning: false, thinking: undefined };
 		expect(modelSupportsEffortCeiling(model, Effort.Minimal)).toBe(true);
+	});
+});
+
+describe("prewalkWouldBeNoop", () => {
+	it("distinguishes Vercel Gateway upstreams but treats a cloned same-upstream model as a no-op", () => {
+		const bundled = getBundledModel("anthropic", "claude-sonnet-4-6");
+		if (!bundled) throw new Error("Expected bundled Claude Sonnet 4.6");
+		const source = buildModel({
+			...toModelSpec(bundled),
+			id: "anthropic/claude-sonnet-4.6",
+			api: "openai-completions",
+			provider: "vercel-ai-gateway",
+			baseUrl: "https://ai-gateway.vercel.sh/v1",
+			compat: { vercelGatewayRouting: { only: ["anthropic"] } },
+		});
+		const clone = buildModel(toModelSpec(source));
+		const target = buildModel({
+			...toModelSpec(source),
+			compat: { vercelGatewayRouting: { only: ["bedrock"] } },
+		});
+
+		expect(clone).not.toBe(source);
+		expect(prewalkWouldBeNoop(source, Effort.High, clone, Effort.High)).toBe(true);
+		expect(prewalkWouldBeNoop(source, Effort.High, target, Effort.High)).toBe(false);
 	});
 });

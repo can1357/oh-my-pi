@@ -13,6 +13,7 @@ import { isMarkdownPath } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "../sdk";
 import {
 	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
 	noTruncResult,
 	type TruncationResult,
 	truncateHead,
@@ -32,7 +33,7 @@ import type { ReadToolDetails, ReadTruncationStats } from "@oh-my-pi/pi-tui/tool
 import { isRawSelector, type ParsedSelector, resolveTailSelector, selToOffsetLimit } from "./read-selector";
 import { formatBytes, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import type { TruncationMetaInput } from "./output-meta";
+import { resolveArtifactSpillThreshold, resolveInlineByteCapBudget, type TruncationMetaInput } from "./output-meta";
 import { toolResult } from "./tool-result";
 
 import { cfgReadRenderMarkdown } from "./settings";
@@ -190,10 +191,10 @@ function sliceLineRange(text: string, lines: readonly string[], start: number, e
 }
 
 /**
- * Slice a raw range without splitting the whole text. Open-ended reads retain
- * the terminal newline when it closes the last addressable line.
+ * Slice a raw range without splitting the whole text, keeping its last line's terminator
+ * so consecutive ranges concatenate to the source.
  */
-function sliceRawLineRange(text: string, start: number, end: number, includeFinalNewline: boolean): string {
+function sliceRawLineRange(text: string, start: number, end: number): string {
 	let from = 0;
 	for (let i = 0; i < start; i++) from = text.indexOf("\n", from) + 1;
 	let to = from;
@@ -201,7 +202,7 @@ function sliceRawLineRange(text: string, start: number, end: number, includeFina
 		const newlineAt = text.indexOf("\n", to);
 		to = newlineAt === -1 ? text.length + 1 : newlineAt + 1;
 	}
-	return text.slice(from, Math.max(from, to - (includeFinalNewline ? 0 : 1)));
+	return text.slice(from, to);
 }
 
 export function contiguousLineNumbers(startLine: number, count: number): number[] {
@@ -310,6 +311,8 @@ function expandRangeWithContext(
 export interface InMemoryTextOptions {
 	details?: ReadToolDetails;
 	sourcePath?: string;
+	/** Path the `[PATH#TAG]` header names when it is not `sourcePath` (a remote URL read through a local mirror). */
+	hashlinePath?: string;
 	/** Excerpt provenance: input line 1 maps to this backing-file line. */
 	sourceStartLine?: number;
 	sourceUrl?: string;
@@ -377,6 +380,14 @@ export async function buildInMemoryTextResult(
 	);
 	let startLine = expanded.startLine;
 	const endLine = expanded.endLine;
+	// Reserve row prefixes as the filesystem reader does, capped at half the spill threshold.
+	const spillThreshold = resolveArtifactSpillThreshold(session.settings);
+	const pageLines = Math.min(endLine - startLine, DEFAULT_MAX_LINES);
+	const prefixWidth = displayMode.lineNumbers ? String(startLine + pageLines).length + 1 : 0;
+	const maxBytes = Math.min(
+		DEFAULT_MAX_BYTES,
+		spillThreshold - Math.min(pageLines * prefixWidth, Math.floor(spillThreshold / 2)),
+	);
 
 	const resultBuilder = toolResult(details);
 	if (options.sourcePath) {
@@ -393,7 +404,7 @@ export async function buildInMemoryTextResult(
 		const suggestion =
 			totalLines === 0
 				? `The ${options.entityLabel} is empty.`
-				: `Use :1 to read from the start, or :${totalLines} to read the last line.`;
+				: `Use :1- to read from the start, or :${totalLines} to read the last line.`;
 		const notice = `Line ${requestedStart + 1} is beyond end of ${options.entityLabel} (${totalLines} lines total). ${suggestion}`;
 		return resultBuilder.text(appendReadNotice("", notice, details)).done();
 	}
@@ -403,13 +414,8 @@ export async function buildInMemoryTextResult(
 	// re-join it so the result never pins `text` through a substring.
 	let selectedRange = allLines
 		? sliceLineRange(text, allLines, startLine, endLine)
-		: sliceRawLineRange(
-				text,
-				startLine,
-				endLine,
-				limit === undefined && endLine === totalLines && text.endsWith("\n"),
-			);
-	let truncation = ignoreResultLimits ? noTruncResult(selectedRange) : truncateHead(selectedRange);
+		: sliceRawLineRange(text, startLine, endLine);
+	let truncation = ignoreResultLimits ? noTruncResult(selectedRange) : truncateHead(selectedRange, { maxBytes });
 	// The leading context line must not cost the requested start line: when the byte budget
 	// stops at or inside it, `:<start>` would widen to the same context and repeat this page.
 	// The whole text is in memory, so drop the context and page from the requested line.
@@ -421,7 +427,7 @@ export async function buildInMemoryTextResult(
 	) {
 		startLine = requestedStart;
 		selectedRange = sliceLineRange(text, allLines, startLine, endLine);
-		truncation = truncateHead(selectedRange);
+		truncation = truncateHead(selectedRange, { maxBytes });
 	}
 	const startLineDisplay = startLine + 1;
 	const joinSelectedLines = (): string =>
@@ -446,7 +452,7 @@ export async function buildInMemoryTextResult(
 			? recordFullHashlineContext(
 					session,
 					options.sourcePath,
-					formatPathRelativeToCwd(options.sourcePath, session.cwd),
+					options.hashlinePath ?? formatPathRelativeToCwd(options.sourcePath, session.cwd),
 					text,
 					options.sourceStartLine,
 				)
@@ -500,12 +506,12 @@ export async function buildInMemoryTextResult(
 	if (truncation.firstLineExceedsLimit) {
 		const firstLine = allLines ? (allLines[startLine] ?? "") : selectedRange.split("\n", 1)[0];
 		const firstLineBytes = Buffer.byteLength(firstLine, "utf-8");
-		const snippet = truncateHeadBytes(firstLine, DEFAULT_MAX_BYTES);
+		const snippet = truncateHeadBytes(firstLine, maxBytes);
 
 		if (shouldAddHashLines) {
 			outputText = `[Line ${startLineDisplay} is ${formatBytes(
 				firstLineBytes,
-			)}, exceeds ${formatBytes(DEFAULT_MAX_BYTES)} limit. Hashline output requires full lines; cannot emit an editable numbered preview for a truncated line.]`;
+			)}, exceeds ${formatBytes(maxBytes)} limit. Hashline output requires full lines; cannot emit an editable numbered preview for a truncated line.]`;
 		} else {
 			outputText = formatText(snippet.text, startLineDisplay);
 		}
@@ -513,7 +519,7 @@ export async function buildInMemoryTextResult(
 		if (snippet.text.length === 0) {
 			outputText = `[Line ${startLineDisplay} is ${formatBytes(
 				firstLineBytes,
-			)}, exceeds ${formatBytes(DEFAULT_MAX_BYTES)} limit. Unable to display a valid UTF-8 snippet.]`;
+			)}, exceeds ${formatBytes(maxBytes)} limit. Unable to display a valid UTF-8 snippet.]`;
 		}
 
 		details.truncation = toReadTruncationStats(truncation);
@@ -538,7 +544,7 @@ export async function buildInMemoryTextResult(
 				direction: "head",
 				startLine: startLineDisplay,
 				totalFileLines: totalLines,
-				maxBytes: DEFAULT_MAX_BYTES,
+				maxBytes,
 			},
 		};
 	} else if (!rawDisplay && userLimitedLines !== undefined && startLine + userLimitedLines < totalLines) {
@@ -551,7 +557,7 @@ export async function buildInMemoryTextResult(
 		} else {
 			outputText = formatLineEntries(buildLineEntries(allLines, endLine), startLineDisplay);
 		}
-		outputText += `\n\n[${remaining} more lines in ${options.entityLabel}. Use :${nextOffset} to continue]`;
+		outputText += `\n\n[${remaining} more lines in ${options.entityLabel}. Use :${nextOffset}- to continue]`;
 	} else {
 		if (!allLines) {
 			rawSeenLines = contiguousLineNumbers(startLineDisplay, endLine - startLine);
@@ -568,6 +574,15 @@ export async function buildInMemoryTextResult(
 		recordInMemorySeenLines(session, options.sourcePath, text, rawSeenLines, options.sourceStartLine);
 	}
 	resultBuilder.text(outputText);
+	// Like filesystem pages, converted documents and URL text can be re-read by source
+	// line. Preserve that continuation rather than spilling an already bounded page.
+	if (
+		!ignoreResultLimits &&
+		!truncation.firstLineExceedsLimit &&
+		Buffer.byteLength(outputText, "utf-8") <= resolveInlineByteCapBudget(session.settings)
+	) {
+		resultBuilder.pagedSource();
+	}
 	if (truncationInfo) {
 		resultBuilder.truncation(truncationInfo.result, truncationInfo.options);
 	}
@@ -602,7 +617,7 @@ export async function buildInMemoryMultiRangeResult(
 			? recordFullHashlineContext(
 					session,
 					options.sourcePath,
-					formatPathRelativeToCwd(options.sourcePath, session.cwd),
+					options.hashlinePath ?? formatPathRelativeToCwd(options.sourcePath, session.cwd),
 					text,
 					options.sourceStartLine,
 				)
@@ -628,12 +643,7 @@ export async function buildInMemoryMultiRangeResult(
 		if (!allLines) {
 			// Re-join (as the split path did) so the part never pins `text` through a substring.
 			rawParts.push(
-				sliceRawLineRange(
-					text,
-					range.startLine - 1,
-					effectiveEnd,
-					range.endLine === undefined && effectiveEnd === totalLines && text.endsWith("\n"),
-				)
+				sliceRawLineRange(text, range.startLine - 1, effectiveEnd)
 					.split("\n")
 					.join("\n"),
 			);
@@ -642,7 +652,8 @@ export async function buildInMemoryMultiRangeResult(
 
 	let outputText = "";
 	if (!allLines) {
-		outputText = rawParts.join("\n");
+		// Each part carries its own terminator, so the parts concatenate to the selected bytes.
+		outputText = rawParts.join("");
 	} else if (visibleSpans.length > 0) {
 		if (
 			options.sourcePath &&
@@ -676,7 +687,7 @@ export async function buildInMemoryMultiRangeResult(
 	}
 	const notices: string[] = [];
 	for (const range of outOfBounds) {
-		const bound = range.endLine !== undefined ? `${range.startLine}-${range.endLine}` : `${range.startLine}`;
+		const bound = range.endLine !== undefined ? `${range.startLine}-${range.endLine}` : `${range.startLine}-`;
 		notices.push(`[Range ${bound} is beyond end of ${options.entityLabel} (${totalLines} lines total); skipped]`);
 	}
 	const finalText = notices.length > 0 ? appendReadNotice(outputText, notices.join("\n"), details) : outputText;

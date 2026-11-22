@@ -1,11 +1,25 @@
+import * as os from "node:os";
+import * as path from "node:path";
 import { inflateSync } from "node:zlib";
 
-import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { deliveredImageSize, fitLongEdge, type ImageSize } from "@oh-my-pi/pi-catalog/compat/image-tokenization";
+import { logger, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { CDPSession, ElementHandle, ElementScreenshotOptions, Page } from "puppeteer-core";
-import type { ScreenshotArea } from "../../utils/image-resize";
+import {
+	DEFAULT_MIN_DIMENSION,
+	paddedMapping,
+	type ResizedImage,
+	readImageHeaderDimensions,
+	resizeImage,
+} from "../../utils/image-resize";
 import { encodeRawPng } from "../../utils/png-encode";
+import { throwIfAborted } from "../tool-errors";
 import { untilAbortedOrReleased } from "./op-timeouts";
+import type { PointerFrame, PointerSpace } from "./pointer-space";
+import type { RunOutput } from "./run-output";
+import type { ScreenshotLimits, ScreenshotResult, SessionSnapshot } from "./tab-protocol";
 
 /** Options accepted by tab.screenshot(). */
 export interface ScreenshotOptions {
@@ -13,10 +27,50 @@ export interface ScreenshotOptions {
 	fullPage?: boolean;
 	silent?: boolean;
 	annotate?: boolean;
-	format?: "png" | "jpeg";
+	format?: ScreenshotFormat;
 	quality?: number;
 	ifChanged?: boolean;
 	threshold?: number;
+	/** Save the full-size capture to this path (relative to the session cwd) instead of a temp file. */
+	path?: string;
+}
+
+/** Encodings tab.screenshot() can capture in. */
+export type ScreenshotFormat = "png" | "jpeg" | "webp";
+
+const SCREENSHOT_FORMATS: readonly ScreenshotFormat[] = ["png", "jpeg", "webp"];
+const SCREENSHOT_OPTION_KEYS = [
+	"selector",
+	"fullPage",
+	"silent",
+	"annotate",
+	"format",
+	"quality",
+	"ifChanged",
+	"threshold",
+	"path",
+] as const satisfies readonly (keyof ScreenshotOptions)[];
+
+/** The MIME type of a capture in `format`. */
+export function screenshotMime(format: ScreenshotFormat): ScreenshotCapture["mimeType"] {
+	return format === "jpeg" ? "image/jpeg" : format === "webp" ? "image/webp" : "image/png";
+}
+
+/** Refuse a screenshot option the capture would silently ignore (an unknown key or format). */
+export function validateScreenshotOptions(opts: ScreenshotOptions): void {
+	for (const key in opts) {
+		if (!(SCREENSHOT_OPTION_KEYS as readonly string[]).includes(key)) {
+			throw new ToolError(
+				`tab.screenshot() has no ${JSON.stringify(key)} option; it takes ${SCREENSHOT_OPTION_KEYS.join(", ")}`,
+			);
+		}
+	}
+	if (opts.format !== undefined && !SCREENSHOT_FORMATS.includes(opts.format)) {
+		throw new ToolError(`tab.screenshot() format must be one of ${SCREENSHOT_FORMATS.join(", ")}`);
+	}
+	if (opts.path !== undefined && (typeof opts.path !== "string" || !opts.path)) {
+		throw new ToolError("tab.screenshot() path must be a non-empty file path");
+	}
 }
 
 /** Stateful screenshot result returned when change detection is enabled. */
@@ -97,6 +151,40 @@ interface AnnotationDocument {
 	querySelector(selector: string): AnnotationElement | null;
 }
 
+/** What a browser screenshot covers, which sets the CSS pixel space its image coordinates map to. */
+export type ScreenshotArea = "viewport" | "page" | "element";
+
+/** One capture for {@link emitScreenshot} to size, store and show. */
+export interface ScreenshotCapture {
+	/** The capture as the browser encoded it, at device resolution. */
+	bytes: Uint8Array;
+	mimeType: "image/png" | "image/jpeg" | "image/webp";
+	area: ScreenshotArea;
+	/** Capture pixels per CSS pixel; `undefined` when the surface could not report it. */
+	scale: number | undefined;
+	/** Store `bytes` rather than the model-visible image even without `browser.screenshotDir` (an explicit `format`). */
+	keepCapture?: boolean;
+	/** Absolute file to store the full-size capture in (`screenshot({path})`); implies keeping the capture. */
+	path?: string;
+	/** Captured through a frame handle: filed as a frame screenshot. */
+	inFrame?: boolean;
+	/** Store the capture without showing it. */
+	silent?: boolean;
+	/** Lines shown under the screenshot's own (annotation legend, surface caveats). */
+	notes?: readonly string[];
+}
+
+/** Where {@link emitScreenshot} files and shows a capture: one run of one tab. */
+export interface ScreenshotRun {
+	session: SessionSnapshot;
+	/** The run's displays; a shown capture adds its line and image. */
+	output: RunOutput;
+	/** The run's screenshot list; every stored capture joins it. */
+	screenshots: ScreenshotResult[];
+	/** The tab's pointer space; a shown viewport capture sets what its positions mean. */
+	pointer: PointerSpace;
+}
+
 /** Resolve the history bucket for a page, full-page, or selector capture. */
 export function screenshotScope(opts: ScreenshotOptions): string {
 	if (opts.selector) return `selector:${opts.selector}`;
@@ -118,26 +206,177 @@ export function screenshotThreshold(value: number | undefined): number {
 	return value;
 }
 
-/** Validate JPEG quality and reject quality on PNG captures. */
+/** Validate JPEG/WebP quality and reject quality on PNG captures. */
 export function screenshotQuality(opts: ScreenshotOptions): number | undefined {
 	if (opts.quality === undefined) return undefined;
-	if (opts.format !== "jpeg") throw new ToolError('Screenshot quality is only valid with format: "jpeg"');
+	if (opts.format !== "jpeg" && opts.format !== "webp") {
+		throw new ToolError('Screenshot quality is only valid with format: "jpeg" or "webp"');
+	}
 	if (!Number.isInteger(opts.quality) || opts.quality < 0 || opts.quality > 100) {
-		throw new ToolError("Screenshot JPEG quality must be an integer from 0 to 100");
+		throw new ToolError("Screenshot quality must be an integer from 0 to 100");
 	}
 	return opts.quality;
 }
 
 /**
+ * Longest edge of a model-visible screenshot: the most an Anthropic request carrying more than 20 images
+ * allows per image. The provider boundary shrinks a larger one to it without the tool hearing of it, which
+ * would move every position read off the image.
+ */
+const SCREENSHOT_MAX_EDGE = 2000;
+
+/** The CSS space positions on a full-page or element capture map to. */
+const SCREENSHOT_AREA_TARGET = {
+	page: "CSS pixels from the page's top-left corner (tab.clickAt takes viewport positions)",
+	element: "CSS pixels from the element's top-left corner",
+} as const;
+
+/**
+ * The longest edge a capture of `size` CSS pixels is resized to. The model sees it in CSS pixels where the
+ * tool cap, the host's edge cap and the model's own resize all allow, and at the largest size they pass
+ * otherwise: each would rescale a larger image after its size was reported.
+ */
+function modelVisibleEdge(size: ImageSize | undefined, limits: ScreenshotLimits | undefined): number {
+	const cap = Math.min(SCREENSHOT_MAX_EDGE, limits?.maxEdge ?? SCREENSHOT_MAX_EDGE);
+	// resizeImage enlarges or pads a capture under the vision floor, so it cannot stay in CSS pixels.
+	if (!size || Math.min(size.width, size.height) < DEFAULT_MIN_DIMENSION) return cap;
+	const capped = fitLongEdge(size, cap);
+	const edge = Math.max(capped.width, capped.height);
+	const delivered = limits?.tokenization && deliveredImageSize(limits.tokenization, capped, limits.detail);
+	// A vendor that enlarges small images names a larger size; only a smaller one binds.
+	return delivered ? Math.min(edge, Math.max(delivered.width, delivered.height)) : edge;
+}
+
+/**
+ * Where the viewport lies on a capture of it taken at `scale` device pixels per CSS pixel, or `undefined`
+ * when the image is the viewport in CSS pixels.
+ */
+function pointerFrame(resized: ResizedImage, scale: number): PointerFrame | undefined {
+	if (!resized.originalWidth || !resized.originalHeight || !resized.width || !resized.height) return undefined;
+	const viewport = {
+		width: Math.round(resized.originalWidth / scale),
+		height: Math.round(resized.originalHeight / scale),
+	};
+	// Padding edges are fractions of the image; the rectangle they bound is whole pixels.
+	const content = resized.paddedContent ?? { left: 0, top: 0, right: 1, bottom: 1 };
+	const width = Math.round((content.right - content.left) * resized.width);
+	const height = Math.round((content.bottom - content.top) * resized.height);
+	// A pixel of difference is the capture's device size rounding, not a scale.
+	if (!resized.paddedContent && Math.abs(width - viewport.width) <= 1 && Math.abs(height - viewport.height) <= 1) {
+		return undefined;
+	}
+	return {
+		viewport,
+		left: Math.round(content.left * resized.width),
+		top: Math.round(content.top * resized.height),
+		width,
+		height,
+	};
+}
+
+/** How positions on a capture map to CSS pixels, or `undefined` when its pixels already are CSS pixels. */
+function coordinateNote(
+	area: ScreenshotArea,
+	scale: number | undefined,
+	resized: ResizedImage,
+	frame: PointerFrame | undefined,
+): string | undefined {
+	if (!resized.originalWidth || !resized.width) return undefined;
+	if (scale === undefined) {
+		return "The screenshot's scale to CSS pixels could not be read; target elements by selector or id rather than tab.clickAt.";
+	}
+	if (area === "viewport") {
+		if (!frame) return undefined;
+		// No scale factor: a rounded one invites multiplying page positions by it, which lands pixels off.
+		return `This image is the ${frame.viewport.width}x${frame.viewport.height} viewport rescaled: clickAt, mouseMove and drag points are positions on this image. Pass {css: true} with a position measured on the page (box, evaluate) instead of rescaling it.`;
+	}
+	const target = SCREENSHOT_AREA_TARGET[area];
+	if (resized.paddedContent) return paddedMapping(resized, resized.paddedContent, scale, target);
+	const factor = (resized.originalWidth / resized.width / scale).toFixed(2);
+	return factor === "1.00" ? undefined : `Multiply image coordinates by ${factor} to get ${target}.`;
+}
+
+/**
+ * Size a capture for the model, store it, and show it in the run's output.
+ *
+ * The model-visible image is in CSS pixels wherever the session's model takes the capture at that size, so a
+ * position read off it is a position on the page. Its line says the size the model sees, the kept capture's
+ * path, and, only when the image's pixels are not CSS pixels, how its positions map. A shown viewport
+ * capture also sets the tab's pointer space, which does that mapping for the pointer helpers.
+ *
+ * @returns the stored file: the capture when it is kept (`browser.screenshotDir`, `keepCapture`), else the
+ * model-visible image.
+ * @throws ToolAbortError when `signal` aborts before the capture is stored or shown.
+ */
+export async function emitScreenshot(
+	capture: ScreenshotCapture,
+	run: ScreenshotRun,
+	signal?: AbortSignal,
+): Promise<string> {
+	const { session } = run;
+	const scale = capture.scale !== undefined && capture.scale > 0 ? capture.scale : undefined;
+	const header = readImageHeaderDimensions(capture.bytes);
+	// An unread scale leaves the capture's own pixels as the nearest thing to its CSS size.
+	const density = scale ?? 1;
+	const edge = modelVisibleEdge(
+		header && { width: Math.round(header.width / density), height: Math.round(header.height / density) },
+		session.screenshotLimits,
+	);
+	// Within the byte budget every tool image gets: encoding quality gives way before the image's size does.
+	const resized = await resizeImage(
+		{ bytes: capture.bytes, mimeType: capture.mimeType },
+		{ maxWidth: edge, maxHeight: edge, jpegQuality: 70, excludeWebP: session.excludeWebP },
+	);
+	throwIfAborted(signal);
+	const kept = capture.keepCapture === true || capture.path !== undefined || !!session.browserScreenshotDir;
+	const saved = kept ? capture.bytes : resized.buffer;
+	const mimeType = kept ? capture.mimeType : resized.mimeType;
+	const ext = mimeType === "image/webp" ? "webp" : mimeType === "image/jpeg" ? "jpg" : "png";
+	const dest =
+		capture.path ??
+		(session.browserScreenshotDir
+			? path.join(
+					session.browserScreenshotDir,
+					`${capture.inFrame ? "frame-screenshot" : "screenshot"}-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1)}.${ext}`,
+				)
+			: path.join(os.tmpdir(), `${capture.inFrame ? "omp-frame-sshots" : "omp-sshots"}-${Snowflake.next()}.${ext}`));
+	await Bun.write(dest, saved);
+	throwIfAborted(signal);
+	run.screenshots.push({ dest, mimeType, bytes: saved.length, width: resized.width, height: resized.height });
+	if (capture.silent) return dest;
+
+	const frame = capture.area === "viewport" && scale !== undefined ? pointerFrame(resized, scale) : undefined;
+	let line = `Screenshot ${resized.width}x${resized.height}`;
+	if (kept) line += `, full size saved to ${shortenPath(dest)}`;
+	line += ".";
+	if (resized.decodeFailed) line += " The image decoder failed, so this is the original image.";
+	const note = coordinateNote(capture.area, scale, resized, frame);
+	if (note) line += ` ${note}`;
+	run.output.push({ type: "text", text: [line, ...(capture.notes ?? [])].join("\n") });
+	// `original`: the image is already sized for the model, and resizing it again would move its positions.
+	run.output.push({ type: "image", data: resized.data, mimeType: resized.mimeType, detail: "original" });
+	// The pointer helpers now read positions on this image, or CSS pixels when it is in them.
+	if (capture.area === "viewport") run.pointer.use(frame);
+	return dest;
+}
+
+/** How long a capture waits for the page to draw an animation frame before treating its renderer as stalled. */
+const RENDER_FRAME_WAIT_MS = 1_500;
+/** How long a capture of a stalled renderer may take before it fails with a named error. */
+const STALLED_CAPTURE_MS = 5_000;
+
+/**
  * Let pending style and layout changes paint before a capture. A hidden page (a
  * background tab, a minimized or fully covered window) runs no animation frames,
  * so the wait ends at once there, or as soon as the page turns hidden mid-wait.
+ * Resolves `false` when a visible page drew no frame within {@link RENDER_FRAME_WAIT_MS}:
+ * its compositor has stalled, and a capture that waits for a fresh frame would hang.
  */
-async function waitForRenderFrame(page: Page, signal: AbortSignal | undefined): Promise<void> {
-	await untilAborted(signal, () =>
+async function waitForRenderFrame(page: Page, signal: AbortSignal | undefined): Promise<boolean> {
+	return await untilAborted(signal, () =>
 		page.evaluate(
-			() =>
-				new Promise<void>(resolve => {
+			(waitMs: number) =>
+				new Promise<boolean>(resolve => {
 					const pageGlobal = globalThis as unknown as {
 						document: {
 							visibilityState: string;
@@ -145,18 +384,51 @@ async function waitForRenderFrame(page: Page, signal: AbortSignal | undefined): 
 							removeEventListener(type: string, listener: () => void): void;
 						};
 						requestAnimationFrame(callback: () => void): number;
+						setTimeout(callback: () => void, ms: number): number;
 					};
 					const { document } = pageGlobal;
-					if (document.visibilityState === "hidden") return resolve();
-					const done = (): void => {
+					if (document.visibilityState === "hidden") return resolve(true);
+					const finish = (drew: boolean): void => {
 						document.removeEventListener("visibilitychange", done);
-						resolve();
+						resolve(drew);
 					};
+					const done = (): void => finish(true);
 					document.addEventListener("visibilitychange", done);
 					pageGlobal.requestAnimationFrame(done);
+					pageGlobal.setTimeout(() => finish(false), waitMs);
 				}),
+			RENDER_FRAME_WAIT_MS,
 		),
 	);
+}
+
+/**
+ * Capture once the page has drawn a frame. A renderer that drew none gets a capture
+ * from the view (`fromSurface: false`), which needs no new frame, bounded so a dead
+ * compositor fails fast with a named error instead of the op timeout.
+ */
+async function captureAfterFrame(
+	page: Page,
+	signal: AbortSignal | undefined,
+	capture: (fromSurface: boolean | undefined) => Promise<Uint8Array>,
+): Promise<Uint8Array> {
+	if (await waitForRenderFrame(page, signal)) return await untilAborted(signal, () => capture(undefined));
+	logger.debug("Browser screenshot: page drew no animation frame; capturing from the view");
+	const { promise: stalled, reject } = Promise.withResolvers<never>();
+	const timer = setTimeout(
+		() =>
+			reject(
+				new ToolError(
+					`Screenshot failed: the page's renderer stopped drawing (no animation frame in ${RENDER_FRAME_WAIT_MS}ms and no capture in ${STALLED_CAPTURE_MS}ms). DOM helpers still work; reopen the tab with kill:true to get a fresh renderer.`,
+				),
+			),
+		STALLED_CAPTURE_MS,
+	);
+	try {
+		return await untilAborted(signal, () => Promise.race([capture(false), stalled]));
+	} finally {
+		clearTimeout(timer);
+	}
 }
 
 /**
@@ -203,9 +475,9 @@ export async function captureScreenshotBuffer(
 	opts: ScreenshotOptions,
 	signal: AbortSignal | undefined,
 	resolveSelector: (selector: string) => Promise<ElementHandle | null>,
-	format: "png" | "jpeg" = opts.format ?? "png",
+	format: ScreenshotFormat = opts.format ?? "png",
 ): Promise<Uint8Array> {
-	const quality = format === "jpeg" ? screenshotQuality({ ...opts, format }) : undefined;
+	const quality = format === "png" ? undefined : screenshotQuality({ ...opts, format });
 	if (opts.selector) {
 		const handle = await resolveSelector(opts.selector);
 		if (!handle) throw new ToolError("Screenshot selector did not resolve to an element");
@@ -218,20 +490,16 @@ export async function captureScreenshotBuffer(
 					target.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
 				}),
 			).catch(() => undefined);
-			await waitForRenderFrame(page, signal);
-			const shotOptions: ElementScreenshotOptions = {
-				type: format,
-				quality,
-				scrollIntoView: false,
-			};
-			return await untilAborted(signal, () => handle.screenshot(shotOptions));
+			return await captureAfterFrame(page, signal, fromSurface => {
+				const shotOptions: ElementScreenshotOptions = { type: format, quality, scrollIntoView: false, fromSurface };
+				return handle.screenshot(shotOptions);
+			});
 		} finally {
 			await handle.dispose().catch(() => undefined);
 		}
 	}
-	await waitForRenderFrame(page, signal);
-	return await untilAborted(signal, () =>
-		page.screenshot({ type: format, quality, fullPage: opts.fullPage ?? false }),
+	return await captureAfterFrame(page, signal, fromSurface =>
+		page.screenshot({ type: format, quality, fullPage: opts.fullPage ?? false, fromSurface }),
 	);
 }
 

@@ -202,6 +202,11 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 				threadId,
 				manager.onJobSettled(() => ignoreSettle(listener())),
 			),
+		onJobsChanged: (manager, listener) =>
+			cleanups.track(
+				threadId,
+				manager.onJobsChanged(() => ignoreSettle(listener())),
+			),
 		register: (manager, type, label, run, options) => {
 			const feed = options?.feed ? new JobFeedMirror(options.feed) : undefined;
 			return manager.register(
@@ -222,6 +227,8 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 		},
 		publishCompleted: (manager, type, label, result, options) =>
 			manager.publishCompleted(type, label, result, options),
+		publishFailed: (manager, type, label, errorText, options) =>
+			manager.publishFailed(type, label, errorText, options),
 		cancel: (manager, id, filter) => manager.cancel(id, filter),
 		getJob: (manager, id) => {
 			const job = manager.getJob(id);
@@ -241,6 +248,8 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 		isJobResultConsumed: (manager, jobId) => manager.isJobResultConsumed(jobId),
 		cancelAll: (manager, filter, reason) => manager.cancelAll(filter, fromWireReason(reason)),
 		evictCompletedJobs: (manager, filter) => manager.evictCompletedJobs(filter),
+		getEvictedJob: (manager, id, filter) => manager.getEvictedJob(id, filter),
+		getEvictedJobs: (manager, filter) => manager.getEvictedJobs(filter),
 		waitForAll: manager => manager.waitForAll(),
 		registerDeliverySink: (manager, ownerId, sink) =>
 			cleanups.track(

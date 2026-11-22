@@ -85,11 +85,10 @@ describe("models.dev normalized kind mapping", () => {
 		expect(models.some(model => model.provider === "google" && model.id === "gemini-2.5-flash-preview-tts")).toBe(
 			false,
 		);
-		expect(models.find(model => model.provider === "openrouter" && model.id === "openrouter/auto")).toMatchObject({
-			api: "openrouter",
-			reasoning: false,
-			input: ["text", "image"],
-		});
+		const auto = models.find(model => model.provider === "openrouter" && model.id === "openrouter/auto");
+		expect(auto).toMatchObject({ api: "openrouter", input: ["text", "image"] });
+		// The row reports no reasoning field: chat mapping keeps that silence.
+		expect(auto?.reasoning).toBeUndefined();
 		expect(
 			models.find(model => model.provider === "openrouter" && model.id === "openrouter/auto")?.kind,
 		).toBeUndefined();

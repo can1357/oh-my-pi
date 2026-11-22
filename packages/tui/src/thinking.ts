@@ -3,7 +3,7 @@ import type { ConfiguredThinkingLevel } from "./render/render-utils";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import { Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 /** Thinking selectors accepted by CLI inputs, in display order. */
 export const CLI_THINKING_LEVELS: readonly ConfiguredThinkingLevel[] = ["off", ...THINKING_EFFORTS, "auto"];
@@ -134,10 +134,10 @@ export function resolveThinkingLevelForModel(
 
 /**
  * Level applied to `model` when the user has not picked one for it (carried,
- * global default, auto). Unverified thinking stays unset until the user picks.
+ * global default, auto), including models awaiting capability discovery.
  */
-export function automaticThinkingLevel<T>(model: Model | undefined, fallback: T): T | undefined {
-	return model?.thinking?.unverified ? undefined : fallback;
+export function automaticThinkingLevel<T>(_model: Model | undefined, fallback: T): T {
+	return fallback;
 }
 
 /**
@@ -189,11 +189,11 @@ export function resolveConfiguredThinkingLevel(
 
 /**
  * True when a prewalk hand-off from `current`/`currentLevel` to
- * `target`/`targetLevel` would change nothing observable: same model id, same
- * auto/fixed mode, and the same model-clamped effective effort. Prewalk arms and
- * switches only when this is false.
+ * `target`/`targetLevel` would change nothing observable: same model and
+ * upstream route, same auto/fixed mode, and the same model-clamped effort.
+ * Prewalk arms and switches only when this is false.
  *
- * An effort-only delta on the same model id is a legitimate cheapening hand-off
+ * An effort-only delta on the same routed model is a legitimate cheapening hand-off
  * — on a reasoning model the effort is the bulk of the cost — so it is NOT a
  * no-op and must still switch. A `targetLevel` of `undefined` means the prewalk
  * pattern carried no explicit `:level` suffix (no effort change requested),
@@ -216,7 +216,7 @@ export function prewalkWouldBeNoop(
 	target: Model,
 	targetLevel: ConfiguredThinkingLevel | undefined,
 ): boolean {
-	if (!modelsAreEqual(current, target)) return false;
+	if (!routedModelsAreEqual(current, target)) return false;
 	if (targetLevel === undefined) return true;
 	if ((targetLevel === AUTO_THINKING) !== (currentLevel === AUTO_THINKING)) return false;
 	return (
@@ -419,7 +419,7 @@ export function assertModelSupportsEffortCeiling(model: Model, maxEffort: Effort
  * models.
  */
 export function resolveProvisionalAutoLevel(model: Model | undefined): Effort | undefined {
-	if (!model?.reasoning || model.thinking?.unverified) return undefined;
+	if (!model?.reasoning) return undefined;
 	const preferred = model.thinking?.defaultLevel ?? Effort.High;
 	return clampAutoThinkingEffort(model, preferred === Effort.Max ? Effort.XHigh : preferred, Effort.XHigh);
 }

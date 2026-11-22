@@ -21,6 +21,7 @@ import { kCursorExecResolved, kStreamingPartialJson } from "@oh-my-pi/pi-ai/util
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { opencodeGoUsageProvider } from "@oh-my-pi/pi-ai/usage/opencode-go";
+import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -102,6 +103,7 @@ describe("AgentSession retry delay cap", () => {
 			"openrouter",
 			"github-copilot",
 			"zai",
+			"cc-switch-zhipu-glm",
 			"cursor",
 		]) {
 			authStorage.keys.removeRuntime(provider);
@@ -197,6 +199,111 @@ describe("AgentSession retry delay cap", () => {
 		expect(session.isRetrying).toBe(false);
 	});
 
+	it.each([
+		{ name: "waits for an in-cap reset", maxDelayMs: 3_000_000, outcome: "wait" },
+		{ name: "reports the actual over-cap reset and configured cap", maxDelayMs: 1_500_000, outcome: "fail" },
+		{ name: "waits for an over-cap reset when opted in", maxDelayMs: 1_500_000, outcome: "opt-in" },
+		{
+			name: "tries the usage-limit model fallback before failing an over-cap reset",
+			maxDelayMs: 1_500_000,
+			outcome: "fallback",
+		},
+	])("Antigravity $name", async ({ maxDelayMs, outcome }) => {
+		// Antigravity is paused in its auth rules; its retry handling stays for when it is turned back on.
+		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
+		const model = getBundledModel("google-antigravity", "gemini-3.7-flash");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!model || !fallbackModel) {
+			throw new Error("Expected bundled Antigravity and OpenAI fallback test models to exist");
+		}
+		const primarySelector = `${model.provider}/${model.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		authStorage.keys.setRuntime(model.provider, "google-antigravity-test-key");
+		authStorage.keys.setRuntime(fallbackModel.provider, "openai-test-key");
+
+		const quotaError = `Cloud Code Assist API error (429): ${JSON.stringify({
+			error: {
+				code: 429,
+				status: "RESOURCE_EXHAUSTED",
+				message: "Resets in 2s.",
+				details: [
+					{
+						"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+						reason: "RATE_LIMIT_EXCEEDED",
+						domain: "cloudcode-pa.googleapis.com",
+						metadata: { quotaResetDelay: "30m" },
+					},
+				],
+			},
+		})}`;
+
+		const mock = createMockModel({
+			responses: [{ throw: quotaError }, { content: ["Recovered"] }],
+		});
+		const requests: Array<{ selector: string; atMs: number }> = [];
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, options) => {
+				requests.push({ selector: `${requestedModel.provider}/${requestedModel.id}`, atMs: Date.now() });
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.maxDelayMs": maxDelayMs,
+			"retry.maxRetries": 1,
+			"retry.waitForUsageReset": outcome === "opt-in",
+			"retry.modelFallback": outcome === "fallback",
+			"retry.fallbackOn": "usage-limit",
+			"retry.fallbackChains": { [primarySelector]: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		mockSchedulerWaitWithClock();
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Trigger Antigravity quota error");
+		await session.waitForIdle();
+
+		if (outcome === "fail") {
+			expect(requests.map(request => request.selector)).toEqual([primarySelector]);
+			expect(retryStartEvents).toHaveLength(0);
+			expect(retryEndEvents).toEqual([
+				expect.objectContaining({
+					success: false,
+					finalError: `Provider requested 1800000ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${quotaError}`,
+				}),
+			]);
+			return;
+		}
+
+		expect(requests.map(request => request.selector)).toEqual(
+			outcome === "fallback" ? [primarySelector, fallbackSelector] : [primarySelector, primarySelector],
+		);
+		expect(retryStartEvents).toHaveLength(1);
+		expect(retryStartEvents[0]).toMatchObject({ delayMs: outcome === "fallback" ? 0 : 1_800_000 });
+		if (outcome !== "fallback") {
+			expect(requests[1].atMs - requests[0].atMs).toBeGreaterThanOrEqual(1_800_000);
+		}
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true });
+		expect(lastAssistant(session).content).toContainEqual({ type: "text", text: "Recovered" });
+	});
+
 	it("waits past retry.maxDelayMs for a usage-limit reset when retry.waitForUsageReset is set", async () => {
 		// Contract: with the opt-in set, a provider-stated usage-limit reset
 		// sleeps until the reset instead of failing fast. Uses Z.AI's English
@@ -269,6 +376,105 @@ describe("AgentSession retry delay cap", () => {
 		expect(lastAssistant(session).stopReason).toBe("stop");
 		expect(session.isRetrying).toBe(false);
 	});
+
+	it("uses the Coding Plan endpoint reset time for a custom provider's automatic retry", async () => {
+		const bundled = getBundledModel("zhipu-coding-plan", "glm-5.3-flashx");
+		if (!bundled) throw new Error("Expected bundled Zhipu Coding Plan model");
+		const model = { ...bundled, provider: "cc-switch-zhipu-glm" };
+		authStorage.keys.setRuntime(model.provider, "zhipu-test-key");
+		const resetStamp = new Date(Date.now() + 4_900_000 + 8 * 3_600_000).toISOString().slice(0, 19).replace("T", " ");
+		const usageLimitError = `429 已达到 5 小时的使用上限，您的限额将在 ${resetStamp} 重置. (type=1308)`;
+		const mock = createMockModel({
+			responses: [{ throw: usageLimitError }, { content: ["recovered after quota reset"], stopReason: "stop" }],
+		});
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: () => "zhipu-test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, options) => {
+				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.maxDelayMs": 100,
+			"retry.maxRetries": 2,
+			"retry.modelFallback": false,
+			"retry.waitForUsageReset": true,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		mockSchedulerWaitWithClock();
+		const retries: AutoRetryStartEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retries.push(event);
+		});
+
+		await session.prompt("Wait for the custom provider's quota reset");
+		await session.waitForIdle();
+
+		expect(retries).toHaveLength(1);
+		expect(retries[0].delayMs).toBeGreaterThan(4_890_000);
+		expect(retries[0].delayMs).toBeLessThanOrEqual(4_900_000);
+		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
+		expect(lastAssistant(session).stopReason).toBe("stop");
+	});
+
+	it("uses the Coding Plan endpoint reset time for a custom provider with a trailing-slash base URL", async () => {
+		const bundled = getBundledModel("zhipu-coding-plan", "glm-5.3-flashx");
+		if (!bundled?.baseUrl) throw new Error("Expected bundled Zhipu Coding Plan model with a base URL");
+		const model = { ...bundled, provider: "cc-switch-zhipu-glm", baseUrl: `${bundled.baseUrl}/` };
+		authStorage.keys.setRuntime(model.provider, "zhipu-test-key");
+		const resetStamp = new Date(Date.now() + 4_900_000 + 8 * 3_600_000).toISOString().slice(0, 19).replace("T", " ");
+		const usageLimitError = `429 已达到 5 小时的使用上限，您的限额将在 ${resetStamp} 重置. (type=1308)`;
+		const mock = createMockModel({
+			responses: [{ throw: usageLimitError }, { content: ["recovered after quota reset"], stopReason: "stop" }],
+		});
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: () => "zhipu-test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, options) => {
+				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.maxDelayMs": 100,
+			"retry.maxRetries": 2,
+			"retry.modelFallback": false,
+			"retry.waitForUsageReset": true,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		mockSchedulerWaitWithClock();
+		const retries: AutoRetryStartEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retries.push(event);
+		});
+
+		await session.prompt("Wait for the custom provider's trailing-slash quota reset");
+		await session.waitForIdle();
+
+		expect(retries).toHaveLength(1);
+		expect(retries[0].delayMs).toBeGreaterThan(4_890_000);
+		expect(retries[0].delayMs).toBeLessThanOrEqual(4_900_000);
+		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
+		expect(lastAssistant(session).stopReason).toBe("stop");
+	});
+
 	it("probes after the relative hint when a naive stamp conflicts, then recovers", async () => {
 		// Contract: a naive `reset at` wall stamp conflicting with the relative
 		// hint sleeps the relative signal only; the retry after that wait is
@@ -501,7 +707,7 @@ describe("AgentSession retry delay cap", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
-			"retry.maxDelayMs": 100,
+			"retry.maxDelayMs": 3_000_000,
 			"retry.modelFallback": false,
 			"retry.waitForUsageReset": true,
 		});

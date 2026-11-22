@@ -109,6 +109,28 @@
 				"clientOmit": []
 			},
 			{
+				"name": "abort_and_deliver_queue",
+				"doc": "Abort the current run and continue it with the queued user input (the TUI's empty Enter); `aborted` is false when no run was streaming with queued input.",
+				"params": null,
+				"result": "AbortAndDeliverQueueResult",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "resume",
+				"doc": "Continue the agent (the TUI's `.`/`c` shortcut), interrupting a running turn first; queued input continues the run in place of the continue directive. Acknowledged once the continuation is under way.",
+				"params": null,
+				"result": null,
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
 				"name": "new_session",
 				"doc": "Start a new session.",
 				"params": "NewSessionParams",
@@ -414,6 +436,17 @@
 				"result": "GetAvailableModelsResult",
 				"nullable": false,
 				"unwrap": "models",
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "get_model_picker",
+				"doc": "Model picker rows ordered and ranked as omp's session model picker shows them; a query starting with `@` lists quick roles.",
+				"params": "GetModelPickerParams",
+				"result": "ModelPickerResult",
+				"nullable": false,
+				"unwrap": null,
 				"timeoutMs": null,
 				"completion": null,
 				"clientOmit": []
@@ -1499,6 +1532,9 @@
 				"details": {},
 				"attribution": {
 					"$ref": "#/$defs/Attribution"
+				},
+				"excludeFromContext": {
+					"type": "boolean"
 				}
 			},
 			"required": [
@@ -2635,6 +2671,17 @@
 				"thinkingLevel": {
 					"$ref": "#/$defs/ThinkingLevel"
 				},
+				"configuredThinkingLevel": {
+					"$ref": "#/$defs/ConfiguredThinkingLevel",
+					"description": "The user's thinking selector: `auto` while auto mode picks the effort, else `thinkingLevel`."
+				},
+				"thinkingLevels": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ConfiguredThinkingLevel"
+					},
+					"description": "Selectors the active model accepts, as omp's thinking selector lists them: `off`, `auto`, then its efforts."
+				},
 				"isStreaming": {
 					"type": "boolean",
 					"default": false
@@ -2712,7 +2759,7 @@
 				},
 				"hasPendingAsyncWork": {
 					"type": "boolean",
-					"description": "Background jobs or deliveries can still inject a follow-up and wake the session.",
+					"description": "Background jobs, their deliveries, child agents or queued peer messages can still wake the session.",
 					"default": false
 				},
 				"isSettled": {
@@ -2855,6 +2902,10 @@
 					"properties": {},
 					"additionalProperties": {},
 					"description": "The embedded shell's final `ShellTrace` of the run; only when the caller asked for one."
+				},
+				"fork": {
+					"$ref": "#/$defs/ShellForkOutcome",
+					"description": "Set when the command overlapped another one on the session's persistent shell and ran in a fork of it."
 				}
 			},
 			"required": [
@@ -2865,6 +2916,23 @@
 				"totalBytes",
 				"outputLines",
 				"outputBytes"
+			]
+		},
+		"ShellForkOutcome": {
+			"type": "object",
+			"properties": {
+				"carried": {
+					"type": "boolean",
+					"description": "What the command set carried back into the session's shell; `false`: it stayed in the fork."
+				},
+				"jobs": {
+					"type": "boolean",
+					"description": "It left background jobs running in the fork, where later commands' `jobs`, `wait` and `%N` miss them."
+				}
+			},
+			"required": [
+				"carried",
+				"jobs"
 			]
 		},
 		"LineRange": {
@@ -2926,6 +2994,101 @@
 				"summary",
 				"firstKeptEntryId",
 				"tokensBefore"
+			]
+		},
+		"ModelPickerRole": {
+			"type": "object",
+			"properties": {
+				"role": {
+					"type": "string"
+				},
+				"label": {
+					"type": "string",
+					"description": "The role's display tag."
+				},
+				"auto": {
+					"type": "boolean",
+					"description": "Auto-selected: the role has no configured model."
+				}
+			},
+			"required": [
+				"role",
+				"label"
+			],
+			"description": "A role a model holds, as picker rows chip it."
+		},
+		"ModelPickerRow": {
+			"type": "object",
+			"properties": {
+				"provider": {
+					"type": "string"
+				},
+				"id": {
+					"type": "string"
+				},
+				"name": {
+					"type": "string"
+				},
+				"role": {
+					"type": "string",
+					"description": "The quick role this row applies (`@` search); pass it to `set_model`."
+				},
+				"roles": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ModelPickerRole"
+					},
+					"description": "Visible roles the model holds, built-in order first."
+				},
+				"thinking": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ConfiguredThinkingLevel"
+					},
+					"description": "Steps of the model's thinking slider, low to high: `auto`, `off`, then its efforts. Absent when it has no effort to pick."
+				},
+				"thinkingLevel": {
+					"$ref": "#/$defs/ConfiguredThinkingLevel",
+					"description": "Model rows: the session's level as this model would run it (the untouched slider). Quick-role rows: the role's explicit level, which `set_model` should carry."
+				},
+				"overContext": {
+					"type": "boolean",
+					"description": "The session's context exceeds the model's window."
+				},
+				"current": {
+					"type": "boolean",
+					"description": "The session runs this row: its model, or under `@` its active quick role."
+				}
+			},
+			"required": [
+				"provider",
+				"id",
+				"name"
+			],
+			"description": "One row of omp's session model picker."
+		},
+		"ModelPickerResult": {
+			"type": "object",
+			"properties": {
+				"rows": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ModelPickerRow"
+					}
+				},
+				"recent": {
+					"type": "integer",
+					"description": "Leading rows that are recently used or role-held (the picker's Recent block); 0 when there is no such split."
+				},
+				"total": {
+					"type": "integer",
+					"description": "Matching rows before `limit`."
+				}
+			},
+			"required": [
+				"rows",
+				"recent",
+				"total"
 			]
 		},
 		"ModelCycleResult": {
@@ -3678,6 +3841,13 @@
 			],
 			"type": "string"
 		},
+		"CacheWarmingMethod": {
+			"enum": [
+				"prewarm",
+				"replay"
+			],
+			"type": "string"
+		},
 		"CacheWarmingOutcome": {
 			"enum": [
 				"hit",
@@ -4005,7 +4175,7 @@
 			"required": [
 				"type"
 			],
-			"description": "A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted."
+			"description": "A manual compaction began. Handoff mode leaves live turns running and applies between turns or when idle."
 		},
 		"ManualCompactionEndEvent": {
 			"type": "object",
@@ -4106,6 +4276,9 @@
 				"phase": {
 					"$ref": "#/$defs/CacheWarmingPhase"
 				},
+				"method": {
+					"$ref": "#/$defs/CacheWarmingMethod"
+				},
 				"provider": {
 					"type": "string"
 				},
@@ -4116,6 +4289,7 @@
 			"required": [
 				"type",
 				"phase",
+				"method",
 				"provider",
 				"model"
 			],
@@ -4129,6 +4303,9 @@
 				},
 				"phase": {
 					"$ref": "#/$defs/CacheWarmingPhase"
+				},
+				"method": {
+					"$ref": "#/$defs/CacheWarmingMethod"
 				},
 				"provider": {
 					"type": "string"
@@ -4151,6 +4328,7 @@
 			"required": [
 				"type",
 				"phase",
+				"method",
 				"provider",
 				"model",
 				"outcome"
@@ -5357,6 +5535,33 @@
 			],
 			"description": "Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it."
 		},
+		"FormUiRequest": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "extension_ui_request"
+				},
+				"id": {
+					"type": "string"
+				},
+				"method": {
+					"const": "form"
+				},
+				"html": {
+					"type": "string"
+				},
+				"timeout": {
+					"type": "integer"
+				}
+			},
+			"required": [
+				"type",
+				"id",
+				"method",
+				"html"
+			],
+			"description": "The HTML `<form>` of one `ui.formDialog` call (the `ask` tool or an extension); no opt-in is required."
+		},
 		"CancelUiRequest": {
 			"type": "object",
 			"properties": {
@@ -5559,6 +5764,9 @@
 					"$ref": "#/$defs/AskUiRequest"
 				},
 				{
+					"$ref": "#/$defs/FormUiRequest"
+				},
+				{
 					"$ref": "#/$defs/CancelUiRequest"
 				},
 				{
@@ -5665,7 +5873,7 @@
 				"id",
 				"cancelled"
 			],
-			"description": "Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers)."
+			"description": "Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers, a `form` its defaults)."
 		},
 		"AnswersUiResponse": {
 			"type": "object",
@@ -5690,6 +5898,29 @@
 			],
 			"description": "Answers an `ask` request: one `AskAnswer` per question, in question order."
 		},
+		"DataUiResponse": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "extension_ui_response"
+				},
+				"id": {
+					"type": "string"
+				},
+				"data": {
+					"type": "object",
+					"properties": {},
+					"additionalProperties": {},
+					"description": "Submitted values by control `name`: a string, a number, or a string array."
+				}
+			},
+			"required": [
+				"type",
+				"id",
+				"data"
+			],
+			"description": "Answers a `form` request with the submitted form data."
+		},
 		"ExtensionUiResponse": {
 			"anyOf": [
 				{
@@ -5703,6 +5934,9 @@
 				},
 				{
 					"$ref": "#/$defs/AnswersUiResponse"
+				},
+				{
+					"$ref": "#/$defs/DataUiResponse"
 				}
 			],
 			"description": "Host reply to an extension UI request; variants share `type` and differ by their payload key."
@@ -6261,6 +6495,17 @@
 				"message"
 			]
 		},
+		"AbortAndDeliverQueueResult": {
+			"type": "object",
+			"properties": {
+				"aborted": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"aborted"
+			]
+		},
 		"NewSessionParams": {
 			"type": "object",
 			"properties": {
@@ -6702,6 +6947,14 @@
 				},
 				"modelId": {
 					"type": "string"
+				},
+				"thinkingLevel": {
+					"$ref": "#/$defs/ConfiguredThinkingLevel",
+					"description": "Thinking level to run the model at, clamped to it; omitted re-applies the session's level."
+				},
+				"role": {
+					"type": "string",
+					"description": "Model role the switch records (a quick-role pick passes its role); default `default`. Nothing is persisted."
 				}
 			},
 			"required": [
@@ -6723,11 +6976,25 @@
 				"models"
 			]
 		},
+		"GetModelPickerParams": {
+			"type": "object",
+			"properties": {
+				"query": {
+					"type": "string",
+					"description": "Search text; blank browses every model, `provider/` limits matches to a provider."
+				},
+				"limit": {
+					"type": "integer",
+					"description": "Most rows to return; default 100."
+				}
+			}
+		},
 		"SetThinkingLevelParams": {
 			"type": "object",
 			"properties": {
 				"level": {
-					"$ref": "#/$defs/ThinkingLevel"
+					"$ref": "#/$defs/ConfiguredThinkingLevel",
+					"description": "`auto` lets omp pick the effort per turn."
 				}
 			},
 			"required": [

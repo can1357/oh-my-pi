@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { type Component, type RenderTimer, TUI } from "@oh-my-pi/pi-tui";
 import { DEFAULT_MAX_FPS, setMaxFps } from "@oh-my-pi/pi-tui/frame-rate";
+import { BackloggedTerminal } from "./backlogged-terminal";
 import { VirtualTerminal } from "./virtual-terminal";
 
 class InputProbe implements Component {
@@ -215,9 +216,7 @@ describe("TUI input/render scheduling", () => {
 
 		it("keeps a keystroke frame's priority across an output-backlog deferral", () => {
 			setMaxFps(4);
-			const term = new (class extends VirtualTerminal {
-				pendingOutputBytes = 0;
-			})(20, 4);
+			const term = new BackloggedTerminal(20, 4);
 			const scheduler = new DeferredRenderScheduler();
 			const events: string[] = [];
 			const probe = new InputProbe(events);
@@ -232,7 +231,7 @@ describe("TUI input/render scheduling", () => {
 				events.length = 0;
 
 				// The terminal owes a large backlog: the keystroke's frame is deferred, not painted.
-				term.pendingOutputBytes = 64 * 1024 * 1024;
+				term.pendingBytes = 64 * 1024 * 1024;
 				scheduler.nowMs = 40;
 				term.sendInput("x");
 				scheduler.immediates.shift()?.();
@@ -240,14 +239,15 @@ describe("TUI input/render scheduling", () => {
 				expect(due?.delayMs).toBe(0);
 				due?.callback();
 				expect(events).toEqual(["input"]);
-				const retry = scheduler.timers.shift();
-				expect(retry?.delayMs).toBe(10);
+				expect(scheduler.timers).toEqual([]);
 
-				// Backlog drained: the retry paints the keystroke's frame at once, and the latch it
-				// carried is consumed by that paint — the next animation frame is paced by the ceiling.
-				term.pendingOutputBytes = 0;
+				// Drain resumes the keystroke at its input cadence, then consumes the
+				// latch so the next animation frame is paced by the ceiling.
 				scheduler.nowMs = 50;
-				retry?.callback();
+				term.pendingBytes = 0;
+				const resumed = scheduler.timers.shift();
+				expect(resumed?.delayMs).toBe(0);
+				resumed?.callback();
 				expect(events).toEqual(["input", "render"]);
 				scheduler.nowMs = 60;
 				tui.requestComponentRender(probe);

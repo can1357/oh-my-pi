@@ -11,7 +11,7 @@ import { Snowflake, TempDir } from "@oh-my-pi/pi-utils";
 
 const OLD_USER = "OLD_SESSION_USER_SENTINEL";
 const OLD_ASSISTANT = "OLD_SESSION_ASSISTANT_SENTINEL";
-const HIDDEN_XDEV = "HIDDEN_XDEV_STEER_SENTINEL";
+const HIDDEN_TOOL_COMMAND = "HIDDEN_TOOL_COMMAND_STEER_SENTINEL";
 const LATE_OUTPUT = "LATE_OUTPUT_FROM_OLD_CONTINUE";
 
 /** Collect the text of every message, tolerant of the AgentMessage union
@@ -94,11 +94,11 @@ describe("newSession() atomic boundary vs queued hidden steer", () => {
 		await agent.waitForIdle();
 		expect(agent.state.messages.some(m => m.role === "assistant")).toBe(true);
 
-		// Queue a hidden custom steer (xdev-mount-notice equivalent) while idle.
+		// Queue a hidden custom steer (tool-command-mount-notice equivalent) while idle.
 		agent.steer({
 			role: "custom",
-			customType: "xdev-mount-notice",
-			content: HIDDEN_XDEV,
+			customType: "tool-command-mount-notice",
+			content: HIDDEN_TOOL_COMMAND,
 			display: false,
 			timestamp: Date.now(),
 		});
@@ -132,7 +132,7 @@ describe("newSession() atomic boundary vs queued hidden steer", () => {
 		expect(providerCalls).toBe(1);
 		// Contract 2: fresh branch contains no old markers or hidden steer.
 		expect(secondRequestMessages).not.toContain(OLD_USER);
-		expect(secondRequestMessages).not.toContain(HIDDEN_XDEV);
+		expect(secondRequestMessages).not.toContain(HIDDEN_TOOL_COMMAND);
 		expect(branchText).not.toContain(OLD_USER);
 		expect(branchText).not.toContain(OLD_ASSISTANT);
 		// Contract 3: no late output appended to the fresh session.

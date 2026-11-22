@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
 import * as os from "node:os";
+import { RunTrace, Shell } from "@oh-my-pi/pi-natives";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import {
 	type JobsPanelDetail,
@@ -9,6 +10,8 @@ import {
 	type JobsSheetSource,
 } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import type { ShellStream } from "@oh-my-pi/pi-tui/tools/shell-steps";
+import { isShellTrace, type ShellTrace, type ShellTraceNode } from "@oh-my-pi/pi-wire";
 import { modelEval } from "./fixtures/job-widget-views";
 
 const DOWN = "\x1b[B";
@@ -116,6 +119,19 @@ describe("JobsSheet", () => {
 		});
 		sheet.handleInput("x");
 		expect(source.cancel).toHaveBeenCalledTimes(1);
+	});
+
+	it("opens on the job asked for when it is listed, else on the first, as when opened any other way", () => {
+		const source = { load: () => JOBS, inspect: (id: string) => DETAILS[id], close: vi.fn() };
+		const onJob = new JobsSheet(source, { selected: "bash-2" });
+		expect(prop(list(onJob.describe(CX)), "selected")).toBe("bash-2");
+		expect(onJob.render(100).find(line => line.startsWith(">"))).toContain("bun lint");
+		// The keys move from there.
+		onJob.handleInput(UP);
+		expect(prop(list(onJob.describe(CX)), "selected")).toBe("bash-1");
+
+		const gone = new JobsSheet(source, { selected: "bg_9" });
+		expect(prop(list(gone.describe(CX)), "selected")).toBe("task-1");
 	});
 
 	it("keeps the selected settled job and its output after the session evicts it, until another is selected", () => {
@@ -285,7 +301,8 @@ describe("JobsSheet", () => {
 
 	it("leads a job with its intent and caption over the command, and drops a widget with nothing beyond its title", async () => {
 		await initTheme();
-		const intent = "Waiting for stock watch to finish";
+		const label = "Waiting for stock watch";
+		const intent = `${label}: Report when the service stops`;
 		const command = "ssh pc-worker 'while systemctl --user is-active -q watch; do sleep 60; done'";
 		const caption = "Checks pc-worker every 60s until the watch service stops";
 		const job: JobsPanelJob = {
@@ -309,16 +326,19 @@ describe("JobsSheet", () => {
 			close: vi.fn(),
 		});
 		const root = sheet.describe(CX);
-		expect(texts(list(root)!)).toContain(intent);
+		expect(texts(list(root)!)).toContain(label);
+		expect(texts(list(root)!)).not.toContain("Report when");
 		expect(texts(list(root)!)).not.toContain("systemctl");
-		expect(prop(byRole(root, "omp.jobs.title")[0], "text")).toBe(intent);
+		expect(prop(byRole(root, "omp.jobs.title")[0], "text")).toBe(label);
+		expect(prop(byRole(root, "omp.jobs.title")[0], "title")).toBe(intent);
 		expect(texts(byRole(root, "omp.jobs.caption")[0]!)).toContain(caption);
 		expect(prop(byRole(root, "omp.jobs.command")[0], "text")).toBe(command);
 		expect(byRole(root, "omp.jobs.widget")).toHaveLength(0);
 
 		const lines = sheet.render(160).map(line => Bun.stripANSI(line));
-		expect(lines.find(line => line.includes("bg_27") || line.includes("running  bash"))).toContain(intent);
-		expect(lines.filter(line => line.includes(intent))).toHaveLength(1);
+		expect(lines.find(line => line.includes("bg_27") || line.includes("running  bash"))).toContain(label);
+		expect(lines.filter(line => line.includes(label))).toHaveLength(1);
+		expect(lines.join("\n")).not.toContain("Report when");
 		expect(lines.some(line => line.includes(caption))).toBe(true);
 	});
 
@@ -341,6 +361,321 @@ describe("JobsSheet", () => {
 		expect(byRole(sheet.describe(CX), "omp.jobs.caption")).toHaveLength(0);
 		job = { ...settled, caption: "Waits about 2 min, printing nothing" };
 		expect(texts(byRole(sheet.describe(CX), "omp.jobs.caption")[0]!)).toContain("Waits about 2 min");
+	});
+
+	describe("with a command whose steps write pipes and files", () => {
+		const job: JobsPanelJob = {
+			id: "bg_13",
+			type: "bash",
+			status: "running",
+			label: "for d in a b; do bench > $d/run.log; done; grep -c round a/run.log | head; echo done",
+			startTime: NOW,
+		};
+		const node = (k: ShellTraceNode["k"], p?: number): ShellTraceNode => ({
+			k,
+			lo: 0,
+			hi: 1,
+			state: "running",
+			...(p === undefined ? {} : { p }),
+		});
+		// 0 brace ─ 1 for ─ 2 bench (7 its redirect word) · 3 pipeline ─ 4 grep, 5 head · 6 echo
+		const trace: ShellTrace = {
+			v: 1,
+			seq: 4,
+			t_ns: 0,
+			script: job.label,
+			units: [
+				{
+					line: 1,
+					nodes: [
+						node("brace"),
+						node("for", 0),
+						node("simple", 1),
+						node("pipeline", 0),
+						node("simple", 3),
+						node("simple", 3),
+						node("simple", 0),
+						node("word", 2),
+					],
+				},
+			],
+			history: [
+				{ seq: 1, t_ns: 1, kind: "Output", text: "1\n", fd: 1, u: 0, n: 5 },
+				{ seq: 2, t_ns: 2, kind: "Output", text: "done\n", fd: 1, u: 0, n: 6 },
+				{ seq: 3, t_ns: 3, kind: "Output", text: "unattributed\n", fd: 1 },
+			],
+		};
+		const command = (value: string): NativeUiEvent => ({
+			type: "action",
+			key: "split/bg_13/command",
+			act: "shell-viz",
+			value,
+			mods: [],
+		});
+		const action = (act: string): NativeUiEvent => ({
+			type: "action",
+			key: "split/bg_13/out/source/x",
+			act,
+			mods: [],
+		});
+
+		/** A stream whose write time `modified()` overrides while it returns one, read anew every frame. */
+		function stream(base: Omit<ShellStream, "tail">, text: string, modified: () => number | undefined): ShellStream {
+			return {
+				...base,
+				get modified() {
+					return modified() ?? base.modified;
+				},
+				tail: vi.fn(() => text),
+			};
+		}
+
+		function streams(now: number, modified: { a?: number; b?: number; pipe?: number } = {}) {
+			const a = stream(
+				{
+					id: "file:1",
+					kind: "file",
+					producer: "bench > $d/run.log",
+					consumer: `${os.homedir()}/runs/a/run.log`,
+					node: "0:0:2",
+					bytes: 10,
+					open: true,
+					modified: now - 10_000,
+				},
+				"round a/1\n",
+				() => modified.a,
+			);
+			const b = stream(
+				{
+					id: "file:2",
+					kind: "file",
+					producer: "bench > $d/run.log",
+					consumer: `${os.homedir()}/runs/b/run.log`,
+					node: "0:0:2",
+					bytes: 20,
+					open: true,
+					modified: now - 5_000,
+				},
+				"round b/1\nround b/2\n",
+				() => modified.b,
+			);
+			const pipe = stream(
+				{
+					id: "pipe:3",
+					kind: "pipe",
+					producer: "grep -c round a/run.log",
+					consumer: "LC_ALL=C /usr/bin/head",
+					node: "0:0:4",
+					bytes: 2,
+					open: true,
+					modified: now - 8_000,
+				},
+				"1\n",
+				() => modified.pipe,
+			);
+			return { a, b, pipe };
+		}
+
+		/** A sheet over `job` whose detail reads `state` anew every frame. */
+		function setupSteps(state: { output: string; streams: ShellStream[]; outputModified?: number }) {
+			return new JobsSheet({
+				load: () => ({ running: [job], recent: [] }),
+				inspect: () => ({
+					command: job.label,
+					pids: [7],
+					output: state.output,
+					outputModified: state.outputModified,
+					trace,
+					streams: state.streams,
+				}),
+				close: vi.fn(),
+			});
+		}
+
+		const shown = (root: NativeNode) => prop(byRole(root, "omp.jobs.output")[0], "text");
+		const menu = (root: NativeNode) => byRole(root, "omp.jobs.sources")[0];
+
+		it("shows the newest stream of a clicked step, and lists every stream with labels that tell them apart", async () => {
+			await initTheme();
+			const { a, b, pipe } = streams(Date.now());
+			const sheet = setupSteps({ output: "", streams: [a, b, pipe] });
+			sheet.describe(CX);
+			// A click lands on the redirect word: its command writes both files, one per pass of the loop.
+			sheet.handleNativeEvent(command("select:0:0:7"));
+			const root = sheet.describe(CX);
+
+			expect(shown(root)).toBe("round b/1\nround b/2\n");
+			expect(prop(menu(root), "text")).toBe("b/run.log");
+			expect(prop(menu(root), "items")).toEqual([
+				{ id: "source:out", label: "Output", radio: "source", checked: false },
+				{
+					id: "source:file:1",
+					label: "a/run.log",
+					detail: "~/runs/a/run.log · 10B",
+					radio: "source",
+					checked: false,
+				},
+				{
+					id: "source:file:2",
+					label: "b/run.log",
+					detail: "~/runs/b/run.log · 20B",
+					radio: "source",
+					checked: true,
+				},
+				{
+					id: "source:pipe:3",
+					label: "grep → head",
+					detail: "grep -c round a/run.log → LC_ALL=C /usr/bin/head · 2B",
+					radio: "source",
+					checked: false,
+				},
+			]);
+			expect(texts(byRole(root, "omp.jobs.stream")[0]!)).toBe("~/runs/b/run.log · 20B");
+			expect(byRole(root, "omp.jobs.follow")).toHaveLength(0);
+			expect(texts(byRole(root, "omp.jobs.source")[0]!)).toContain("Follow live");
+			expect(nodes(root).some(node => node.k === "tabs")).toBe(false);
+
+			// A megabyte per stream per frame otherwise: only the shown one is read, and again only once it grew.
+			sheet.invalidate();
+			sheet.describe(CX);
+			expect(b.tail).toHaveBeenCalledTimes(1);
+			expect(a.tail).not.toHaveBeenCalled();
+			expect(pipe.tail).not.toHaveBeenCalled();
+
+			const lines = sheet.render(100).map(line => Bun.stripANSI(line));
+			expect(lines).toContain("   → b/run.log · ~/runs/b/run.log · 20B");
+			expect(lines).toContain("   round b/2");
+			// The click on a step is not a click on a job row.
+			expect(prop(list(root), "selected")).toBe("bg_13");
+		});
+
+		it("shows only a clicked step's own slice of the output when it writes no stream", () => {
+			const { a, b, pipe } = streams(Date.now());
+			const sheet = setupSteps({ output: "1\ndone\nunattributed\n", streams: [a, b, pipe] });
+			sheet.describe(CX);
+			sheet.handleNativeEvent(command("select:0:0:6"));
+			const root = sheet.describe(CX);
+			expect(shown(root)).toBe("done\n");
+			expect(prop(menu(root), "text")).toBe("Step output");
+			expect(texts(byRole(root, "omp.jobs.stream")[0]!)).toBe("Its own output");
+
+			// `head` reads the pipe but writes the output: its slice, not the pipe `grep` feeds.
+			sheet.handleNativeEvent(command("select:0:0:5"));
+			expect(shown(sheet.describe(CX))).toBe("1\n");
+		});
+
+		it("follows the source written most recently, staying on the followed one while it keeps flowing", () => {
+			const now = Date.now();
+			const modified: { a?: number; b?: number; pipe?: number } = { a: now - 100 };
+			const { a, b, pipe } = streams(now, modified);
+			const sheet = setupSteps({ output: "", streams: [a, b, pipe] });
+			let root = sheet.describe(CX);
+			expect(shown(root)).toBe("round a/1\n");
+			expect(prop(byRole(root, "omp.jobs.follow")[0], "text")).toBe("Following");
+			expect(prop(byRole(root, "omp.jobs.follow")[0], "tone")).toBe("pending");
+
+			// The pipe was written later, but the file still flows: the pane stays put.
+			modified.pipe = Date.now() - 10;
+			expect(shown(sheet.describe(CX))).toBe("round a/1\n");
+
+			// The file stalls: the pane moves to the one written most recently.
+			modified.a = Date.now() - 5_000;
+			root = sheet.describe(CX);
+			expect(shown(root)).toBe("1\n");
+			expect(prop(menu(root), "text")).toBe("grep → head");
+
+			// Everything stalls: the pane stays on the newest write, its dot still.
+			modified.pipe = Date.now() - 4_000;
+			root = sheet.describe(CX);
+			expect(shown(root)).toBe("1\n");
+			expect(prop(byRole(root, "omp.jobs.follow")[0], "tone")).toBeUndefined();
+		});
+
+		it("keeps a pinned step while another stream flows, and resumes following when it is clicked again", () => {
+			const now = Date.now();
+			const modified: { a?: number; b?: number; pipe?: number } = {};
+			const { a, b, pipe } = streams(now, modified);
+			const sheet = setupSteps({ output: "", streams: [a, b, pipe] });
+			sheet.describe(CX);
+			sheet.handleNativeEvent(command("select:0:0:2"));
+			modified.pipe = Date.now();
+			expect(shown(sheet.describe(CX))).toBe("round b/1\nround b/2\n");
+
+			sheet.handleNativeEvent(command("select:0:0:2"));
+			let root = sheet.describe(CX);
+			expect(shown(root)).toBe("1\n");
+			expect(byRole(root, "omp.jobs.follow")).toHaveLength(1);
+
+			// A menu entry pins that source; Follow live lets go of it.
+			sheet.handleNativeEvent(action("source:file:1"));
+			expect(shown(sheet.describe(CX))).toBe("round a/1\n");
+			sheet.handleNativeEvent(action("follow"));
+			root = sheet.describe(CX);
+			expect(shown(root)).toBe("1\n");
+			expect(prop(menu(root), "text")).toBe("grep → head");
+		});
+
+		it("never draws a binary stream as text", () => {
+			const archive: ShellStream = {
+				id: "pipe:1",
+				kind: "pipe",
+				producer: "git archive HEAD",
+				consumer: "tar -x -C /tmp/out",
+				bytes: 4096,
+				open: false,
+				modified: Date.now() - 100,
+				tail: () => undefined,
+			};
+			const root = setupSteps({ output: "", streams: [archive] }).describe(CX);
+			expect(prop(menu(root), "text")).toBe("git → tar");
+			expect(byRole(root, "omp.jobs.output")).toHaveLength(0);
+			expect(prop(byRole(root, "omp.jobs.nooutput")[0], "text")).toBe("Binary data");
+		});
+	});
+
+	it("draws a traced command as its shell visualization where the terminal has one, changed only by its view controls", async () => {
+		const command = "printf 'first\\n' >/dev/null; printf done";
+		const run = new RunTrace(command);
+		await new Shell().run({ command, trace: run });
+		const trace: unknown = JSON.parse(run.snapshot());
+		if (!isShellTrace(trace)) throw new Error("the engine returned no shell trace");
+		const job: JobsPanelJob = {
+			id: "bg_5",
+			type: "bash",
+			status: "completed",
+			label: command,
+			startTime: NOW - 1_000,
+			endTime: NOW,
+		};
+		const sheet = new JobsSheet({
+			load: () => ({ running: [], recent: [job] }),
+			inspect: () => ({ command, pids: [], exitCode: 0, output: "done", trace }),
+			close: vi.fn(),
+		});
+		const commandNode = (cx: DescribeContext = CX) => byRole(sheet.describe(cx), "omp.jobs.command")[0];
+		const act = (value: string): NativeUiEvent => ({
+			type: "action",
+			key: "split/bg_5/command",
+			act: "shell-viz",
+			value,
+			mods: [],
+		});
+
+		expect(commandNode()?.k).toBe("shell");
+		// Its steps pick the output; a settled job shows its own, so no step is focused.
+		expect(prop(commandNode(), "steps")).toBe(true);
+		expect(prop(commandNode(), "focus")).toEqual([]);
+		expect(prop(commandNode(), "presentation")).toMatchObject({ preferences: { view: "pseudo" } });
+		sheet.handleNativeEvent(act("view:raw"));
+		expect(prop(commandNode(), "presentation")).toMatchObject({ preferences: { view: "raw" } });
+
+		// Replay is the transcript card's: a cursor set here would freeze the command at its first step.
+		sheet.handleNativeEvent(act("reset"));
+		expect(prop(commandNode(), "presentation")).not.toHaveProperty("preferences.cursor");
+
+		const plain = commandNode({ ...CX, supports: kind => kind !== "shell" });
+		expect(plain?.k).toBe("code");
+		expect(prop(plain, "text")).toBe(command);
 	});
 
 	describe("as a tree of subagents", () => {

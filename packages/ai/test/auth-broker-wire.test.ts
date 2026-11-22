@@ -669,6 +669,16 @@ describe("auth-broker wire surface", () => {
 			body: JSON.stringify({ installId: "x", entries: [{ at: "not-a-number" }] }),
 		});
 		expect(bad.status).toBe(400);
+
+		// Fields a newer client adds are ignored, not a reason to drop its usage.
+		const newer = await fetch(`${handle!.url}/v1/usage/observed`, {
+			method: "POST",
+			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+			body: JSON.stringify({ installId: "install-3", sessionId: "newer-client", entries: [entry] }),
+		});
+		expect(newer.status).toBe(200);
+		const afterNewer = await client.fetchClientUsageSummary();
+		expect(afterNewer.clients.find(c => c.installId === "install-3")?.providers[0]).toMatchObject({ requests: 2 });
 	});
 
 	test("Unknown route returns 404", async () => {

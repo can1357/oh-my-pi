@@ -1,8 +1,8 @@
 /**
  * The Spotlight experiment's trace on a tool result (`details.spotlight`, written by the coding agent's shaping
  * hooks and persisted with the message): what shaping did to the model-facing text, and, when it changed
- * it, where the original is and how Spotlight scored and kept its lines. A native transcript draws it as a notice
- * row under the tool card ({@link SpotlightNotice}); a click on a "saved" or "held out" notice opens the sheet.
+ * it, where the original is and how Spotlight scored and kept its lines. A native transcript draws a notice under
+ * the tool card for a cut, applied or held back, but not for a passthrough ({@link SpotlightNotice}).
  */
 import { formatNumber, isRecord } from "@oh-my-pi/pi-utils";
 import type { TspPropNode, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
@@ -35,7 +35,7 @@ export interface SpotlightWindow {
 
 /** The original of a result whose text shaping changed. */
 export interface SpotlightOriginal {
-	/** Session artifact holding the original text (`artifact://N`). */
+	/** Session spill holding the original text (`local://N.log`). */
 	url: string;
 	/** Its line count. */
 	lines: number;
@@ -70,7 +70,7 @@ export interface SpotlightOriginal {
 	 * of its own (a shaping note).
 	 */
 	map?: (number | [number, number] | null)[];
-	/** A held-out result's would-be text, the cut the model was not shown (`artifact://N`). */
+	/** A held-out result's would-be text, the cut the model was not shown (`local://N.log`). */
 	shapedUrl?: string;
 }
 
@@ -361,8 +361,6 @@ export function spotlightNoticeCard(original: SpotlightOriginal, heldOut = false
 	);
 }
 
-/** The notice's star when the model saw the original (passthrough, held out): Nerd Font `md-star_off_outline`. */
-const STAR_OFF = "\u{f155b}";
 /** The notice's star when shaping changed what the model saw: Nerd Font `fa-star`. */
 const STAR = "\uf005";
 /** {@link STAR} past {@link SHOOTING_STAR_TOKENS} saved: Nerd Font `md-star_shooting_outline`. */
@@ -371,16 +369,14 @@ const SHOOTING_STAR = "\u{f1742}";
 const SHOOTING_STAR_TOKENS = 10_000;
 
 /**
- * The notice's spans: Spotlight's star, then what shaping did to the result. A passthrough is the star alone. A
- * changed result's star is lit and pulses (Tern twinkles it), a shooting star past {@link SHOOTING_STAR_TOKENS} saved.
+ * A held-back cut explains why in text; an applied cut also pulses a star, shooting past {@link SHOOTING_STAR_TOKENS} saved.
  */
 function noticeSpans(spotlight: SpotlightDetails): TspSpan[] {
 	const saving = spotlightSaving(spotlight);
 	if (spotlight.holdout || spotlight.gated) {
 		const why = spotlight.gated ? "kept whole for editing" : "held out";
-		return [span(STAR_OFF, "icon"), span(`spotlight: ${why} · would save ${formatNumber(Math.max(0, saving))} toks`)];
+		return [span(`spotlight: ${why} · would save ${formatNumber(Math.max(0, saving))} toks`)];
 	}
-	if (!spotlight.original) return [span(STAR_OFF, "icon")];
 	const star = saving > SHOOTING_STAR_TOKENS ? SHOOTING_STAR : STAR;
 	return [
 		span(star, "icon", { fx: "pulse" }),
@@ -394,7 +390,7 @@ function noticeSpans(spotlight: SpotlightDetails): TspSpan[] {
 
 /**
  * The notice row under one tool card (role `omp.tool.spotlight`, key `spotlight:<toolCallId>`): muted for a
- * passthrough (its star alone, named by its tooltip) and for a held-out result, accent for a changed result
+ * held-back cut, accent for an applied cut
  * ({@link noticeSpans}). One with an original (changed or held out) has a hover card charting its heat
  * ({@link spotlightNoticeCard}) and a click that opens its sheet through the host's transcript actions. A native
  * transcript block of its own, placed right after its card ({@link Component.nativeTrailers}), so it shows while the
@@ -442,7 +438,7 @@ export class SpotlightNotice implements Component {
 							this.#spotlight.holdout === true || this.#spotlight.gated === true,
 						),
 					}
-				: { title: "Spotlight: passthrough", aria: "Spotlight: passthrough" }),
+				: {}),
 			...(original && hasTranscriptActions() ? { actions: { click: "spotlight" } } : {}),
 			...(this.#hidden ? { hidden: true } : {}),
 		});
@@ -479,7 +475,7 @@ export class SpotlightNotices {
 	set(toolCallId: string, details: unknown, reduced: string): boolean {
 		const spotlight = spotlightDetails(details);
 		const existing = this.#byCall.get(toolCallId);
-		if (!spotlight) {
+		if (!spotlight || !(spotlight.original || spotlight.holdout || spotlight.gated)) {
 			if (!existing) return false;
 			this.#byCall.delete(toolCallId);
 			this.#list = [...this.#byCall.values()];
