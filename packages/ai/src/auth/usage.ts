@@ -39,7 +39,7 @@ import { mergeRefreshedOrganizationScope, OAUTH_REFRESH_SKEW_MS } from "./refres
 import type { OAuthRefresher } from "./refresh";
 import { USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { AuthCredentialStore } from "./store";
-import type { AuthCredential, OAuthCredential, ObservedUsageInput, UsageApi } from "./types";
+import type { AuthCredential, MarkUsageLimitOptions, OAuthCredential, ObservedUsageInput, UsageApi } from "./types";
 import {
 	dedupeUsageReports,
 	isUsageLimitExhausted,
@@ -802,11 +802,23 @@ export class UsageService implements UsageApi {
 			: null;
 	}
 
-	/** Recheck a pre-failure report without bypassing a store's authoritative probe. */
-	async probeReport(provider: Provider, credential: AuthCredential, baseUrl?: string): Promise<UsageReport | null> {
+	/** Expire the failed credential's snapshot while keeping the shared probe and failure backoff. */
+	async recheckReport(
+		provider: Provider,
+		credential: AuthCredential,
+		previous: UsageReport,
+		options?: Pick<MarkUsageLimitOptions, "baseUrl" | "signal">,
+	): Promise<UsageReport | null> {
 		if (credential.type === "oauth" && this.#deps.store.getUsageReport) return null;
-		const request = await this.#reportRequest(provider, credential, baseUrl);
-		return request ? this.#fetchUsageUncached(request, this.requestTimeoutMs) : null;
+		const request = await this.#reportRequest(provider, credential, options?.baseUrl);
+		if (!request) return null;
+		options?.signal?.throwIfAborted();
+		const key = this.#deps.cache.reportKey(request);
+		const cached = this.#deps.cache.get<UsageReport | null>(key);
+		if (cached?.value?.fetchedAt === previous.fetchedAt && cached.expiresAt > Date.now()) {
+			this.#deps.cache.set(key, { value: cached.value, expiresAt: 0 });
+		}
+		return this.#fetchUsageCached(request, { timeoutMs: this.requestTimeoutMs });
 	}
 
 	async #reportRequest(

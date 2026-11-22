@@ -310,7 +310,6 @@ export class RateLimits implements LimitsApi {
 		// Heuristic/default fallbacks are guesses; provider-stated hints and
 		// report-derived extensions are timed.
 		let providerTimed = options?.providerTimed === true;
-		const hasExplicitCooldown = options?.providerTimed ?? options?.retryAfterMs !== undefined;
 
 		// Epoch ms of the usage-report-derived reset. Authoritative only when
 		// EVERY exhausted window carries a future reset: a permanent cap
@@ -328,9 +327,9 @@ export class RateLimits implements LimitsApi {
 			if (report) {
 				let scopedLimits = scopedUsageLimits(routing.strategy, report, routing.rankingContext);
 				// A cached report with headroom cannot explain this usage-limit failure.
-				if (report.fetchedAt <= now && !isUsageLimitReached(scopedLimits)) {
+				if (report.fetchedAt <= now && routing.strategy.shouldRecheckUsageLimit?.(scopedLimits)) {
 					const freshReport = await raceSignal(
-						this.#deps.usage.probeReport(provider, target.credential, options?.baseUrl),
+						this.#deps.usage.recheckReport(provider, target.credential, report, options),
 						options?.signal,
 						"usage fetch aborted",
 					);
@@ -348,7 +347,8 @@ export class RateLimits implements LimitsApi {
 					}
 					if (
 						resetAtMs !== undefined &&
-						(resetAtMs > blockedUntil || (!hasExplicitCooldown && reportResetAtMs !== undefined))
+						(resetAtMs > blockedUntil ||
+							(routing.strategy.shouldRecheckUsageLimit && !providerTimed && reportResetAtMs !== undefined))
 					) {
 						blockedUntil = resetAtMs;
 						providerTimed = true;

@@ -1,6 +1,7 @@
 import { getDefaultModelDiscoveryBaseUrl } from "@oh-my-pi/pi-catalog/provider-models/cache-provider-id";
 import { normalizeLiteLLMManagementBaseUrl } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
+import { isUsageLimitReached } from "../auth/usage-report";
 import { ProviderHttpError } from "../error";
 import type { Provider } from "../types";
 import type {
@@ -148,6 +149,7 @@ export const litellmRankingStrategy: CredentialRankingStrategy = {
 	// Check all applicable budgets without ranking keys by their remaining spend.
 	findWindowLimits: () => ({}),
 	windowDefaults: { primaryMs: 0, secondaryMs: 0 },
+	shouldRecheckUsageLimit: limits => !isUsageLimitReached(limits),
 	scopeLimits(report) {
 		const now = Date.now();
 		return report.limits.filter(limit => {

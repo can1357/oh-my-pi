@@ -148,12 +148,14 @@ describe("LiteLLM budget cooldown", () => {
 		const baseUrl = "https://gw.example/team/v1";
 		const apiKey = "sk-test";
 		let currentKeyInfo = keyInfoBeforeFailure ?? keyInfo;
+		let keyInfoRequests = 0;
 		const usageFetch = Object.assign(
 			async (input: string | URL | Request, init?: RequestInit) => {
 				if (new Headers(init?.headers).get("authorization") !== `Bearer ${apiKey}`) {
 					return new Response(null, { status: 401 });
 				}
 				if (String(input) === KEY_INFO) {
+					keyInfoRequests += 1;
 					return Response.json({ info: currentKeyInfo });
 				}
 				if (String(input) === USER_INFO && userInfo) {
@@ -180,9 +182,16 @@ describe("LiteLLM budget cooldown", () => {
 			);
 			const before = Date.now();
 			await storage.limits.rotate(provider, undefined, { apiKey, baseUrl, error });
+			const after = Date.now();
 			const rows = store.listAuthCredentials(provider);
 			const [block] = store.listCredentialBlocks(rows.map(row => row.id));
-			return { blockedUntil: block?.blockedUntilMs, before, after: Date.now() };
+			if (keyInfoBeforeFailure) {
+				storage.keys.setRuntime(provider, apiKey);
+				const reports = await storage.usage.reports({ provider, baseUrlResolver: () => baseUrl });
+				expect(reports?.[0]?.limits[0]?.status).toBe("exhausted");
+				expect(keyInfoRequests).toBe(2);
+			}
+			return { blockedUntil: block?.blockedUntilMs, before, after };
 		} finally {
 			storage.close();
 		}
