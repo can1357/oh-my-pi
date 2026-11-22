@@ -3,9 +3,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { registerNativeBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { node } from "@oh-my-pi/pi-tui/native/describe";
 import type { NativeNode } from "@oh-my-pi/pi-tui/native/node";
+import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { Component } from "@oh-my-pi/pi-tui/tui";
 import { TspHarness } from "./tsp-harness";
 
@@ -264,5 +266,46 @@ describe("native blob delivery", () => {
 		h.stall(1);
 		expect(sent(h, "b")).toHaveLength(1);
 		expect(h.terminal.blobs.get(pic.id)).toEqual(pic.bytes);
+	});
+});
+
+describe("read image results on a native surface", () => {
+	// 1×1 transparent PNG.
+	const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+	const ui = { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} };
+	const readImage = (): ToolExecutionComponent => {
+		const tool = new ToolExecutionComponent("read", { path: "frame.png" }, { showImages: true }, undefined, ui);
+		tool.updateResult(
+			{
+				content: [
+					{ type: "text", text: "Read image" },
+					{ type: "image", data: PNG, mimeType: "image/png" } as { type: string; text?: string },
+				],
+				details: { resolvedPath: "/project/shots/frame.png", mediaPath: "/project/shots/frame.png" },
+			},
+			false,
+		);
+		return tool;
+	};
+
+	it("shows the file by path when Tern runs on this machine", async () => {
+		setThemeInstance((await getThemeByName("dark"))!);
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "tern-blobs-"));
+		harness = await TspHarness.start(tui => tui.addChild(readImage()), { blobDir: tempDir });
+		expect(harness.findAll(n => n.k === "media").map(n => n.p)).toEqual([
+			expect.objectContaining({ path: "/project/shots/frame.png" }),
+		]);
+		expect(harness.findAll(n => n.k === "image")).toEqual([]);
+	});
+
+	it("uploads the image when Tern runs on another machine, though it advertises media", async () => {
+		setThemeInstance((await getThemeByName("dark"))!);
+		harness = await TspHarness.start(tui => tui.addChild(readImage()));
+		expect(harness.findAll(n => n.k === "media")).toEqual([]);
+		const uploaded = [...harness.terminal.blobs.keys()];
+		expect(uploaded).toHaveLength(1);
+		expect(harness.findAll(n => n.k === "image").map(n => n.p)).toEqual([
+			expect.objectContaining({ blob: uploaded[0] }),
+		]);
 	});
 });
