@@ -53,7 +53,7 @@ function shapedRead(
 		heat?: string;
 		artifact?: number;
 		url?: string;
-	} & Partial<Pick<ShapeSpec, "holdout" | "scoreFree" | "inTokens" | "outTokens" | "gated">> = {},
+	} & Partial<Pick<ShapeSpec, "holdout" | "scoreFree" | "inTokens" | "outTokens" | "plainTokens" | "gated">> = {},
 ): string {
 	return shaped(
 		b,
@@ -66,6 +66,7 @@ function shapedRead(
 			...(opts.holdout ? { holdout: opts.holdout } : {}),
 			...(opts.scoreFree ? { scoreFree: true } : {}),
 			...(opts.gated ? { gated: true } : {}),
+			...(opts.plainTokens === undefined ? {} : { plainTokens: opts.plainTokens }),
 			original: {
 				url: opts.url ?? spillUrl(opts.artifact ?? 0),
 				lines: opts.lines ?? 60,
@@ -260,6 +261,153 @@ describe("Spotlight holdout-adjusted net", () => {
 		const time = stats.timeCost;
 		expect(time).toMatchObject({ fetchBackTurns: 1, fetchBackMs: 4000, agentMs: 24_000 });
 		expect(time.share).toBeCloseTo((4000 + time.shapeMs) / 24_000, 12);
+	});
+
+	it("prices each capped side's cuts at its own holdouts' rate, in the estimate, its interval and the step rows", async () => {
+		// Three identical sessions: every resample sums to the same cells, so the interval is the estimate.
+		for (let s = 0; s < 3; s++) {
+			const b = new SpotlightSessionBuilder(T0 + s * DAY).header("/repo").marker();
+			b.user("go");
+			// Held out: ten reads plain capped (showed 2,000 of 3,000 tokens) whose hidden lines come back (100 tokens
+			// each), and ten plain showed whole that nothing fetches.
+			for (let i = 0; i < 10; i++) {
+				shapedRead(b, `src/capped${i}.ts`, { holdout: { shapedUrl: spillUrl(9) }, plainTokens: 2000 });
+				call(b, "read", { path: `src/capped${i}.ts:20-30` }, "x".repeat(400));
+				shapedRead(b, `src/whole${i}.ts`, { holdout: { shapedUrl: spillUrl(9) } });
+			}
+			// Applied: one capped cut recovered (200 tokens), two uncapped, one of them recovered (100 tokens).
+			shapedRead(b, "src/c.ts", { plainTokens: 2000 });
+			call(b, "read", { path: "src/c.ts:20-30" }, "y".repeat(800));
+			shapedRead(b, "src/d.ts");
+			call(b, "read", { path: "src/d.ts:20-30" }, "z".repeat(400));
+			shapedRead(b, "src/e.ts");
+			await write(`binned${s}.jsonl`, b);
+		}
+
+		const stats = await dashboard();
+		// 30 holdouts a side: the 3 capped cuts get 100 back anyway each, the 6 uncapped ones 0, so 900 − 300 is
+		// excess. A pooled baseline (50 a cut over nine cuts) would call 450 excess.
+		const excess = { value: 600, lo: 600, hi: 600 };
+		expect(stats.adjusted.byTool.find(t => t.tool === "read")?.excessTokens).toEqual(excess);
+		expect(stats.adjusted.excessTokens).toEqual(excess);
+		// The step rows charge each cut its side's rate as well.
+		expect(stats.steps.map(c => [c.tool, c.cuts, c.excessTokens])).toEqual([["read", 9, 600]]);
+	});
+
+	it("prices all of a tool's cuts at its pooled rate while a capped side with cuts has fewer holdouts than the trust threshold", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		// Held out: 30 reads plain showed whole that nothing fetches, and one plain capped whose hidden lines come back
+		// (310 tokens), the capped side's only holdout.
+		for (let i = 0; i < 30; i++) shapedRead(b, `src/whole${i}.ts`, { holdout: { shapedUrl: spillUrl(9) } });
+		shapedRead(b, "src/a.ts", { holdout: { shapedUrl: spillUrl(9) }, plainTokens: 2000 });
+		call(b, "read", { path: "src/a.ts:20-30" }, "x".repeat(1240));
+		// Applied: one capped cut recovered (400 tokens), one uncapped (100 tokens).
+		shapedRead(b, "src/c.ts", { plainTokens: 2000 });
+		call(b, "read", { path: "src/c.ts:20-30" }, "y".repeat(1600));
+		shapedRead(b, "src/d.ts");
+		call(b, "read", { path: "src/d.ts:20-30" }, "z".repeat(400));
+		await write("thin.jsonl", b);
+
+		const stats = await dashboard();
+		// Both cuts get the pooled 310 / 31 = 10 back anyway, not the uncapped side's own 0 beside a pooled capped rate
+		// (which would call 490 excess). 500 − 20 is excess, in the step rows too.
+		expect(stats.adjusted.byTool.find(t => t.tool === "read")?.excessTokens.value).toBe(480);
+		expect(stats.steps.map(c => [c.tool, c.cuts, c.excessTokens])).toEqual([["read", 2, 480]]);
+	});
+
+	it("calls no excess when cuts come back like holdouts of the same capped share and one side is thin", async () => {
+		// Three identical sessions: every resample sums to the same cells, so the interval is the estimate.
+		for (let s = 0; s < 3; s++) {
+			const b = new SpotlightSessionBuilder(T0 + s * DAY).header("/repo").marker();
+			b.user("go");
+			// Held out: twelve reads plain showed whole that nothing fetches (36 in all, past the threshold), and four
+			// plain capped whose hidden lines come back (100 tokens each; 12 in all, under it).
+			for (let i = 0; i < 12; i++) shapedRead(b, `src/whole${i}.ts`, { holdout: { shapedUrl: spillUrl(9) } });
+			for (let i = 0; i < 4; i++) {
+				shapedRead(b, `src/capped${i}.ts`, { holdout: { shapedUrl: spillUrl(9) }, plainTokens: 2000 });
+				call(b, "read", { path: `src/capped${i}.ts:20-30` }, "x".repeat(400));
+			}
+			// Applied, a quarter capped like the holdouts: three uncapped cuts nothing fetches, one capped recovered
+			// (100 tokens).
+			for (let i = 0; i < 3; i++) shapedRead(b, `src/cut${i}.ts`);
+			shapedRead(b, "src/c.ts", { plainTokens: 2000 });
+			call(b, "read", { path: "src/c.ts:20-30" }, "y".repeat(400));
+			await write(`share${s}.jsonl`, b);
+		}
+
+		const stats = await dashboard();
+		// The pooled 1,200 / 48 = 25 a cut over twelve cuts is the 300 recovered. The uncapped side's own 0 beside the
+		// pooled 25 for the three capped cuts would call 225 excess.
+		const excess = { value: 0, lo: 0, hi: 0 };
+		expect(stats.adjusted.byTool.find(t => t.tool === "read")?.excessTokens).toEqual(excess);
+		expect(stats.adjusted.excessTokens).toEqual(excess);
+	});
+
+	it("charges the cuts no fetch-back of a result shaping left whole", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		// Applied, no holdouts: the whole recovery is excess.
+		shapedRead(b, "src/c.ts");
+		call(b, "read", { path: "src/c.ts:20-30" }, "y".repeat(800));
+		// A result pi truncated natively, which shaping did not cut, and its own dive in a request of its own, whose
+		// tokens a later request carries.
+		call(b, "bash", { command: "make" }, "built\n[cut: artifact://5]");
+		call(b, "read", { path: "artifact://5" }, "z".repeat(4000));
+		call(b, "grep", { pattern: "x" });
+		await write("native.jsonl", b);
+
+		const stats = await dashboard();
+		expect(stats.clawback.events).toBe(2);
+		// The dive is both carried and an extra turn, so each must be kept out of the cuts' cost.
+		expect(stats.clawback.byKind.artifact).toMatchObject({ events: 1, turns: 1 });
+		expect(stats.clawback.byKind.artifact.usd).toBeGreaterThan(0);
+		const read = stats.economics.find(e => e.tool === "read");
+		const { savedUsd, spotlightUsd } = stats.compounding;
+		expect(stats.adjusted.netUsd.value).toBeCloseTo(
+			savedUsd - (read?.recoveryUsd ?? 0) - (read?.turnUsd ?? 0) - spotlightUsd,
+			12,
+		);
+	});
+
+	it("charges the cuts the same fetch-back turns in the net, the economics and the time cost", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		shapedRead(b, "src/c.ts");
+		shapedRead(b, "src/d.ts");
+		// A request whose two calls both recover a cut: one extra turn, split between the two cuts.
+		const pure = b.request({
+			cacheRead: 12_000,
+			cost: 0.05,
+			duration: 7000,
+			calls: [
+				{ name: "read", args: { path: "src/c.ts:20-30" } },
+				{ name: "read", args: { path: "src/d.ts:20-30" } },
+			],
+		});
+		for (const id of pure) b.result(id, { text: "y".repeat(400) });
+		// A request that recovers a cut but also does other work: not the cuts' turn anywhere.
+		const mixed = b.request({
+			cacheRead: 12_000,
+			cost: 0.08,
+			duration: 9000,
+			calls: [
+				{ name: "read", args: { path: "src/c.ts:40-50" } },
+				{ name: "grep", args: { pattern: "x" } },
+			],
+		});
+		for (const id of mixed) b.result(id, { text: "z".repeat(400) });
+		call(b, "grep", { pattern: "y" });
+		await write("cut-turns.jsonl", b);
+
+		const stats = await dashboard();
+		const read = stats.economics.find(e => e.tool === "read");
+		expect(read).toMatchObject({ cuts: 2, extraTurns: 1 });
+		expect(read?.turnUsd).toBeCloseTo(0.05, 12);
+		expect(stats.timeCost).toMatchObject({ fetchBackTurns: 1, fetchBackMs: 7000 });
+		// No holdouts: the whole recovery, and only the pure turn, comes off the adjusted net.
+		const { savedUsd, spotlightUsd } = stats.compounding;
+		expect(stats.adjusted.netUsd.value).toBeCloseTo(savedUsd - (read?.recoveryUsd ?? 0) - 0.05 - spotlightUsd, 12);
 	});
 });
 

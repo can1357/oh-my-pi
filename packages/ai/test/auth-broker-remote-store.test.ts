@@ -42,6 +42,47 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<v
 	if (!predicate()) throw new Error("waitUntil timeout");
 }
 
+/**
+ * A reverse proxy in front of `target` that answers `answer404(path)`'s 404
+ * body (and content type) instead of forwarding while it returns one; counts
+ * every request path it sees.
+ */
+function startBrokerProxy(
+	target: string,
+	answer404: (pathname: string) => { body: string; contentType: string } | undefined,
+): { url: string; requests: string[]; stop(): void } {
+	const requests: string[] = [];
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		async fetch(req) {
+			const url = new URL(req.url);
+			requests.push(url.pathname);
+			const notFound = answer404(url.pathname);
+			if (notFound) {
+				return new Response(notFound.body, { status: 404, headers: { "Content-Type": notFound.contentType } });
+			}
+			return fetch(`${target}${url.pathname}${url.search}`, {
+				method: req.method,
+				headers: req.headers,
+				body: req.method === "GET" ? undefined : await req.arrayBuffer(),
+			});
+		},
+	});
+	return { url: `http://127.0.0.1:${server.port}`, requests, stop: () => server.stop(true) };
+}
+
+const OBSERVED_ENTRY = {
+	provider: "anthropic",
+	model: "claude-x",
+	requests: 1,
+	inputTokens: 1,
+	outputTokens: 1,
+	cacheReadTokens: 0,
+	cacheWriteTokens: 0,
+	costUsd: 0,
+};
+
 describe("RemoteAuthCredentialStore SSE integration", () => {
 	let tempDir = "";
 	let store: SqliteAuthCredentialStore | undefined;
@@ -228,6 +269,73 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 			).toEqual(["deepseek", "google"]);
 		} finally {
 			gatewayStorage.close();
+		}
+	});
+
+	// #19236: while the broker restarts, a reverse proxy without a route yet
+	// answers 404 with its own body. That must not latch long-poll mode or
+	// disable usage reporting for the rest of the process.
+	test("recovers the snapshot stream and usage reporting after a proxy 404 during a broker restart", async () => {
+		const seen = new Map<string, number>();
+		const proxy = startBrokerProxy(handle!.url, pathname => {
+			const count = (seen.get(pathname) ?? 0) + 1;
+			seen.set(pathname, count);
+			const restarting = pathname === "/v1/snapshot/stream" || pathname === "/v1/usage/observed";
+			return restarting && count === 1 ? { body: "404 page not found\n", contentType: "text/plain" } : undefined;
+		});
+		try {
+			const client = new AuthBrokerClient({ url: proxy.url, token });
+			remote = new RemoteAuthCredentialStore({ client, observedUsageFlushMs: 25 });
+			remote.recordObservedUsage([{ at: Date.now(), ...OBSERVED_ENTRY }]);
+
+			await waitUntil(() => remote!.snapshot.credentials.length === 1, 5_000);
+			await waitUntil(() => storage!.usage.clientSummary(0).clients.length === 1, 5_000);
+			// One long-poll covers the 404, then the stream reconnects instead of latching long-poll.
+			await waitUntil(() => proxy.requests.filter(p => p === "/v1/snapshot/stream").length === 2, 5_000);
+			expect(proxy.requests.filter(p => p === "/v1/snapshot").length).toBe(1);
+		} finally {
+			proxy.stop();
+		}
+	});
+
+	// A proxy that never routes the stream path must not stop credential sync:
+	// each stream 404 is followed by a long-poll, which delivers the snapshot.
+	test("keeps syncing credentials through long-poll when a proxy never routes the snapshot stream", async () => {
+		const proxy = startBrokerProxy(handle!.url, pathname =>
+			pathname === "/v1/snapshot/stream" ? { body: "404 page not found\n", contentType: "text/plain" } : undefined,
+		);
+		try {
+			const client = new AuthBrokerClient({ url: proxy.url, token });
+			remote = new RemoteAuthCredentialStore({ client });
+
+			await waitUntil(() => remote!.snapshot.credentials.length === 1, 5_000);
+			expect(proxy.requests).toContain("/v1/snapshot/stream");
+			expect(proxy.requests).toContain("/v1/snapshot");
+		} finally {
+			proxy.stop();
+		}
+	});
+
+	test("still falls back to long-poll and stops usage reports when the broker itself lacks the endpoints", async () => {
+		const proxy = startBrokerProxy(handle!.url, pathname =>
+			pathname === "/v1/snapshot/stream" || pathname === "/v1/usage/observed"
+				? { body: JSON.stringify({ error: `No route: GET ${pathname}` }), contentType: "application/json" }
+				: undefined,
+		);
+		try {
+			const client = new AuthBrokerClient({ url: proxy.url, token });
+			remote = new RemoteAuthCredentialStore({ client, observedUsageFlushMs: 25 });
+			remote.recordObservedUsage([{ at: Date.now(), ...OBSERVED_ENTRY }]);
+
+			await waitUntil(() => remote!.snapshot.credentials.length === 1, 5_000);
+			await waitUntil(() => proxy.requests.includes("/v1/usage/observed"));
+			remote.recordObservedUsage([{ at: Date.now(), ...OBSERVED_ENTRY }]);
+			await Bun.sleep(150);
+			expect(proxy.requests.filter(p => p === "/v1/snapshot/stream").length).toBe(1);
+			expect(proxy.requests).toContain("/v1/snapshot");
+			expect(proxy.requests.filter(p => p === "/v1/usage/observed").length).toBe(1);
+		} finally {
+			proxy.stop();
 		}
 	});
 

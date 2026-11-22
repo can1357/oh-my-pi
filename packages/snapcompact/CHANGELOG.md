@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed snapcompact archive summaries to report the actual grid of dense middle frames ([#20163](https://github.com/can1357/oh-my-pi/pull/20163) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.0.1] - 2026-11-19
 
 ### Added

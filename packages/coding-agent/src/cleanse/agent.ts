@@ -1,7 +1,7 @@
 import { type } from "@oh-my-pi/omptype";
 import { getProjectDir, isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
-import { formatModelString, resolveCliModel } from "../config/model-resolver";
+import { formatModelString, formatModelStringWithRouting, resolveCliModel } from "../config/model-resolver";
 import { Settings } from "../config/settings";
 import { IrcBus } from "../irc/bus";
 import { holdSharedLsp } from "../lsp/client";
@@ -78,7 +78,7 @@ export async function createCleanseAgentRuntime(options: {
 	if (resolved.error || !resolved.model) {
 		throw new Error(resolved.error ?? `Model "${options.model}" not found`);
 	}
-	const modelSelector = resolved.selector ?? formatModelString(resolved.model);
+	const modelSelector = resolved.selector ?? formatModelStringWithRouting(resolved.model);
 	const modelDisplay = formatModelString(resolved.model);
 	const sessionManager = SessionManager.create(cwd);
 	await sessionManager.setSessionName("Cleanse", "auto");
