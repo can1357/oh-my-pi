@@ -179,6 +179,24 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(registry.getAll("image").some(isGatewayImage)).toBe(true);
 	});
 
+	test("an extension model keeps its configured snapcompact shape across refresh", async () => {
+		const snapcompactShape = { variant: "11on16-bw", frameSize: 1932 };
+		registry.registerProvider(
+			"my-gateway",
+			{
+				baseUrl: "https://gateway.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				models: [{ ...baseModel, id: "gemini-3.5-flash", snapcompactShape }],
+			},
+			"ext://runtime",
+		);
+
+		expect(registry.find("my-gateway", "gemini-3.5-flash")?.snapcompactShape).toEqual(snapcompactShape);
+		await registry.refresh("offline");
+		expect(registry.find("my-gateway", "gemini-3.5-flash")?.snapcompactShape).toEqual(snapcompactShape);
+	});
+
 	test("fetchDynamicModels drops a row whose api cannot serve its kind", async () => {
 		registry.registerProvider(
 			"my-gateway",

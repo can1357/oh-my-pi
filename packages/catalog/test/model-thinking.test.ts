@@ -603,7 +603,13 @@ describe("model thinking derivation", () => {
 		// Google documents LOW/MEDIUM/HIGH for Gemini 4:
 		// `thinkingBudget` and THINKING_LEVEL_MINIMAL both return 400.
 		// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/get-started-with-gemini-4
-		for (const id of ["gemini-4-argon", "gemini-4-argon-cyber-permissive", "gemini-4-carbon", "gemini-4-hydrogen"]) {
+		for (const id of [
+			"gemini-4-argon",
+			"gemini-4-argon-cyber-permissive",
+			"gemini-4-carbon",
+			"gemini-4-hydrogen",
+			"gemini-4-neon",
+		]) {
 			for (const [provider, api] of [
 				["google-vertex", "google-vertex"],
 				["google", "google-generative-ai"],
@@ -615,7 +621,7 @@ describe("model thinking derivation", () => {
 					expect(gemini4.reasoning).toBe(true);
 					expect(gemini4.thinking?.mode).toBe("google-level");
 					const efforts = [Effort.Low, Effort.Medium, Effort.High];
-					if (id === "gemini-4-hydrogen") efforts.push(Effort.XHigh);
+					if (id === "gemini-4-hydrogen" || id === "gemini-4-neon") efforts.push(Effort.XHigh);
 					expect(getSupportedEfforts(gemini4)).toEqual(efforts);
 					expect(mapEffortToGoogleThinkingLevel(Effort.Medium, gemini4)).toBe("MEDIUM");
 				}

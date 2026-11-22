@@ -11,7 +11,7 @@ use uiautomation::{
 };
 use windows_sys::Win32::{
 	Foundation::{HWND, POINT},
-	UI::WindowsAndMessaging::{GetDesktopWindow, IsWindow, WindowFromPoint},
+	UI::WindowsAndMessaging::{GA_PARENT, GetAncestor, GetDesktopWindow, IsWindow, WindowFromPoint},
 };
 
 use super::{
@@ -488,7 +488,11 @@ impl AxBackend for Win32Ax {
 		let secure = password.unwrap_or(true);
 		let hwnd = native_window(element).map(super::value_write::combo_target);
 		let class = hwnd.map_or_default(window::class_name);
-		match super::value_write::route(&class) {
+		let parent_class = hwnd.map_or_default(|hwnd| {
+			// SAFETY: GetAncestor only queries the native control's true parent.
+			window::class_name(unsafe { GetAncestor(hwnd, GA_PARENT) })
+		});
+		match super::value_write::route(&class, &parent_class) {
 			super::value_write::ValueRoute::Combo => {
 				return super::value_write::set_combo(
 					hwnd.ok_or_else(|| {
@@ -506,6 +510,14 @@ impl AxBackend for Win32Ax {
 					"this combo box cannot notify the app through setValue; select the item via \
 					 press/click instead",
 				));
+			},
+			super::value_write::ValueRoute::Edit => {
+				return super::value_write::set_edit(
+					hwnd.ok_or_else(|| DesktopError::ax_failed("text field has no native window"))?,
+					text,
+					element.is_enabled().map_err(ax_error)?,
+					password,
+				);
 			},
 			super::value_write::ValueRoute::Pattern => self.contained(element, || {
 				element

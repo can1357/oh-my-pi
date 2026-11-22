@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import math
 import os
 import queue
 import signal
@@ -350,10 +351,10 @@ class HostToolCompletedEvent:
     """A registered host tool's `execute()` returned without raising.
 
     Emitted by `RpcClient.on_host_tool_completed` for every dispatch path —
-    top-level call, `xd://` device write, or the eval bridge — unlike
-    `tool_execution_end`, which only names the transport tool the agent
-    invoked. `tool_call_id` is the id omp dispatched with; for eval-bridged
-    calls it is synthetic and matches no `tool_execution_*` event.
+    top-level call, a tool command run inside a `bash` call, or the eval
+    bridge — unlike `tool_execution_end`, which only names the transport tool
+    the agent invoked. `tool_call_id` is the id omp dispatched with; for
+    eval-bridged calls it is synthetic and matches no `tool_execution_*` event.
     """
 
     tool_name: str
@@ -915,7 +916,7 @@ class RpcClient(WireClient):
                 else:
                     self.cancel_ui_request(request.id)
                 return
-            if request.method == "ask":
+            if request.method in ("ask", "form"):
                 self.cancel_ui_request(request.id)
 
         return self.on_ui_request(handle)
@@ -951,6 +952,36 @@ class RpcClient(WireClient):
             wire_answers.append(entry)
         self._send_notification(
             {"type": "extension_ui_response", "id": request_id, "answers": wire_answers}
+        )
+
+    def send_ui_data(self, request_id: str, data: Mapping[str, str | int | float | Sequence[str]]) -> None:
+        """Answer a `form` request with the submitted values by control `name`.
+
+        Raises `TypeError` for a `bool` (forms submit option values, never booleans),
+        a value that is neither a string, a number nor a sequence of strings (`None`,
+        a mapping, a set), or a list member that is not a string, and `ValueError` for
+        a non-finite float, which JSON cannot carry.
+        """
+        wire_data: JsonObject = {}
+        for name, value in data.items():
+            if isinstance(value, bool):
+                raise TypeError(f"form field {name!r} must be a string, a number or a list of strings, not a bool")
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError(f"form field {name!r} must be a finite number, not {value!r}")
+            if isinstance(value, (str, int, float)):
+                wire_data[name] = value
+                continue
+            if not isinstance(value, Sequence):
+                raise TypeError(
+                    f"form field {name!r} must be a string, a number or a list of strings, not {type(value).__name__}"
+                )
+            # Members are checked too: a NaN inside a list would write invalid JSON the server cannot parse.
+            members = list(value)
+            if not all(isinstance(member, str) for member in members):
+                raise TypeError(f"form field {name!r} must be a list of strings, not {members!r}")
+            wire_data[name] = members
+        self._send_notification(
+            {"type": "extension_ui_response", "id": request_id, "data": wire_data}
         )
 
     def cancel_ui_request(self, request_id: str, *, timed_out: bool = False) -> None:
@@ -1505,16 +1536,17 @@ class RpcClient(WireClient):
     def _normalize_host_tool_event(self, payload: JsonObject) -> None:
         """Rename transport tool events for in-flight host-tool dispatches.
 
-        With `tools.xdev` enabled, omp mounts custom tools as `xd://` devices
-        and the agent invokes them through the `write` tool, so
-        `tool_execution_update`/`tool_execution_end` events report the
-        transport tool (`write`) rather than the host tool that actually ran.
+        With `tools.commands` enabled, omp mounts custom tools as commands in
+        the embedded bash engine and the agent runs them inside a `bash` call,
+        so `tool_execution_update`/`tool_execution_end` events report the
+        transport tool (`bash`) rather than the host tool that actually ran.
         The `host_tool_call` frame carries the outer call's `toolCallId` (the
-        device dispatch forwards it verbatim), which lets events for that call
-        be renamed to the executed host tool — consumers observe the same tool
-        names regardless of transport. A top-level call (xdev off) maps the
-        name onto itself. `tool_execution_start` precedes the `host_tool_call`
-        frame on the wire, so start events keep the transport name.
+        bash run forwards it verbatim), which lets events for that call be
+        renamed to the executed host tool — consumers observe the same tool
+        names regardless of dispatch path. A top-level call (tool commands off)
+        maps the name onto itself. `tool_execution_start` precedes the
+        `host_tool_call` frame on the wire, so start events keep the transport
+        name.
         """
         tool_call_id = payload.get("toolCallId")
         if not isinstance(tool_call_id, str):

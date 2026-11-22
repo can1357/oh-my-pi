@@ -29,8 +29,9 @@ export const benchHelp = {
 		"Benchmark models: TTFT/prefill vs decode throughput with p50/p95, across chat, prefill, generation, and prompt-cache workloads, or single-user vs parallel load (--detailed)",
 } satisfies CommandMetadata;
 
+/** Root help description for managing omp's Chrome extension and relay. */
 export const browserRelayHelp = {
-	description: "Run the local CDP relay that lets the browser prelude drive your own Chrome tabs",
+	description: "Install or sync the omp Chrome extension; its native host serves the browser relay",
 } satisfies CommandMetadata;
 
 export const cleanseHelp = {

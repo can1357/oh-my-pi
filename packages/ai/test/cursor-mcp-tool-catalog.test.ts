@@ -11,10 +11,10 @@ const tool = (name: string, parameters: TSchema = { type: "object", properties: 
 });
 
 describe("cursor buildMcpToolDefinitions", () => {
-	it("forwards the write transport alongside preview-staging devices so xd:// resolution stays reachable", () => {
-		// A Cursor session with xdev on: ast_edit is a mounted device, write is the
-		// xd:// transport carried top-level. ast_edit always stages a preview whose
-		// resolution rides `write xd://resolve` / `write xd://reject`.
+	it("forwards the bash transport alongside preview-staging tools so a staged preview stays resolvable", () => {
+		// A Cursor session with tool commands on: ast_edit is a mounted command,
+		// and resolve/reject run as commands through `bash`. ast_edit always
+		// stages a preview whose resolution rides `bash` running `resolve`/`reject`.
 		const defs = buildMcpToolDefinitions([
 			tool("read"),
 			tool("write"),
@@ -27,22 +27,22 @@ describe("cursor buildMcpToolDefinitions", () => {
 
 		expect(names).toContain("ast_edit");
 		expect(names).toContain("task");
-		// `write` is the sole native-filtered tool re-included: without it the
-		// staged preview can never be resolved and the SoftToolRequirement('write')
+		// `bash` is the sole native-filtered tool re-included: without it the
+		// staged preview can never be resolved and the SoftToolRequirement("bash")
 		// escalation aborts the turn.
-		expect(names).toContain("write");
+		expect(names).toContain("bash");
 		expect(names).not.toContain("read");
-		expect(names).not.toContain("bash");
+		expect(names).not.toContain("write");
 		expect(names).not.toContain("todo");
 
-		// The forwarded write must be a routable pi-agent MCP tool, so Cursor
-		// dispatches it back through the coding-agent write tool's xd:// handler.
-		const writeDef = defs.find(def => def.name === "write");
-		expect(writeDef?.providerIdentifier).toBe("pi-agent");
-		expect(writeDef?.toolName).toBe("write");
+		// The forwarded bash must be a routable pi-agent MCP tool, so Cursor
+		// dispatches it back through the coding-agent bash tool's command host.
+		const bashDef = defs.find(def => def.name === "bash");
+		expect(bashDef?.providerIdentifier).toBe("pi-agent");
+		expect(bashDef?.toolName).toBe("bash");
 	});
 
-	it("keeps write out when only native tools are advertised (no pi-agent device needs resolution)", () => {
+	it("keeps bash out when only native tools are advertised (no pi-agent tool needs resolution)", () => {
 		const names = buildMcpToolDefinitions([tool("read"), tool("write"), tool("bash")]).map(def => def.name);
 		expect(names).toEqual([]);
 	});

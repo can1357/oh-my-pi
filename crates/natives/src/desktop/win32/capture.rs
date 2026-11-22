@@ -1,6 +1,7 @@
 use std::{collections::HashSet, ffi::c_void};
 
 use image::{Rgba, RgbaImage};
+use windows_sys::Win32::UI::WindowsAndMessaging::IsWindow;
 use xcap::{Monitor, Window};
 
 use super::{
@@ -113,6 +114,18 @@ pub(super) fn displays() -> CoreResult<Vec<DesktopDisplay>> {
 
 const fn hwnd_from_id(id: u32) -> *mut c_void {
 	std::ptr::with_exposed_provenance_mut(id as usize)
+}
+
+/// Whether window `id` is drawn by an app that can pause while covered and
+/// appears fully covered, so its frame and tree may be stale; false for an
+/// id that names no live window.
+pub(super) fn window_covered(id: &str) -> bool {
+	id.parse::<u32>().is_ok_and(|id| {
+		let hwnd = hwnd_from_id(id);
+		// SAFETY: IsWindow validates the opaque value; null names no window.
+		let live = unsafe { IsWindow(hwnd) } != 0;
+		live && window::paused_while_covered(hwnd) && window::fully_covered(hwnd)
+	})
 }
 
 pub(super) fn windows() -> CoreResult<Vec<DesktopWindow>> {

@@ -332,6 +332,61 @@ function computeModelRank(model: Model, roles: RoleAssignments): number {
 	return i;
 }
 
+/** A role's chip text: its tag, else its name, lowercased. Also RPC `get_model_picker`'s role labels. */
+export function roleChipLabel(role: string, settings: Pick<ModelBrowserSource, "getRoleInfo">): string {
+	const info = settings.getRoleInfo(role);
+	return (info.tag ?? info.name ?? role).toLowerCase();
+}
+
+/** A role a model holds, as picker rows chip it. */
+export interface HeldRole {
+	role: string;
+	assignment: RoleAssignment;
+}
+
+/** Visible roles `model` holds, built-in order first: picker row chips, here and in RPC `get_model_picker`. */
+export function heldRoles(
+	model: Model,
+	roles: RoleAssignments,
+	settings: Pick<ModelBrowserSource, "getRoleInfo">,
+): HeldRole[] {
+	const held: HeldRole[] = [];
+	const seen = new Set<string>();
+	const push = (role: string) => {
+		if (seen.has(role)) return;
+		seen.add(role);
+		const assignment = roles[role];
+		if (!assignment || !modelsAreEqual(assignment.model, model)) return;
+		if (settings.getRoleInfo(role).hidden) return;
+		held.push({ role, assignment });
+	};
+	for (const role of MODEL_ROLE_IDS) push(role);
+	for (const role in roles) push(role);
+	return held;
+}
+
+function isRecentOrRole(item: ModelBrowserItem, roles: RoleAssignments, mruOrder: ReadonlyArray<string>): boolean {
+	if (mruOrder.includes(item.selector)) return true;
+	for (const role in roles) {
+		const assignment = roles[role];
+		if (assignment && modelsAreEqual(assignment.model, item.model)) return true;
+	}
+	return false;
+}
+
+/**
+ * Rows of the Recent block heading `items`: the leading run of recently used or role-held models; 0 when that run is
+ * empty or spans every item, which leaves no separator. The picker's "Recent" group, here and in RPC `get_model_picker`.
+ */
+export function recentBlockLength(
+	items: readonly ModelBrowserItem[],
+	roles: RoleAssignments,
+	mruOrder: ReadonlyArray<string>,
+): number {
+	const end = items.findIndex(item => !isRecentOrRole(item, roles, mruOrder));
+	return end > 0 ? end : 0;
+}
+
 /** Options for {@link sortModelItems}. */
 export interface SortModelItemsOptions {
 	roles?: RoleAssignments;
@@ -797,7 +852,7 @@ export function rankModelItems(
  */
 export function formatRoleChip(role: string, assignment: RoleAssignment, settings: ModelBrowserSource): string {
 	const info = settings.getRoleInfo(role);
-	const label = (info.tag ?? info.name ?? role).toLowerCase();
+	const label = roleChipLabel(role, settings);
 	const glyph = thinkingLevelGlyph(assignment.thinkingLevel, theme);
 	const suffix = glyph ? ` ${theme.fg("dim", glyph)}` : "";
 	if (assignment.autoSelected) {
@@ -809,7 +864,7 @@ export function formatRoleChip(role: string, assignment: RoleAssignment, setting
 /** {@link formatRoleChip} as styled spans for a described node. */
 function roleChipSpans(role: string, assignment: RoleAssignment, settings: ModelBrowserSource): TspSpan[] {
 	const info = settings.getRoleInfo(role);
-	const label = (info.tag ?? info.name ?? role).toLowerCase();
+	const label = roleChipLabel(role, settings);
 	const glyph = thinkingLevelGlyph(assignment.thinkingLevel, theme);
 	const spans = assignment.autoSelected
 		? [span(`${theme.status.shadowed} ${label}`, "dim")]
@@ -1410,18 +1465,10 @@ export class ModelBrowser implements Component {
 		}
 	}
 
-	#isRecentOrRole(item: ModelBrowserItem): boolean {
-		if (this.#mruOrder.includes(item.selector)) return true;
-		for (const role in this.#roles) {
-			const r = this.#roles[role];
-			if (r && modelsAreEqual(r.model, item.model)) return true;
-		}
-		return false;
-	}
 	#insertSeparator(items: ModelBrowserItem[]): ModelBrowserItem[] {
 		const filtered = items.filter(item => item.id !== "separator");
-		const firstNonRecentIndex = filtered.findIndex(item => !this.#isRecentOrRole(item));
-		if (firstNonRecentIndex > 0 && firstNonRecentIndex < filtered.length) {
+		const recent = recentBlockLength(filtered, this.#roles, this.#mruOrder);
+		if (recent > 0) {
 			const separatorItem: ModelBrowserItem = {
 				id: "separator",
 				provider: "",
@@ -1439,7 +1486,7 @@ export class ModelBrowser implements Component {
 					maxTokens: 0,
 				}),
 			};
-			return [...filtered.slice(0, firstNonRecentIndex), separatorItem, ...filtered.slice(firstNonRecentIndex)];
+			return [...filtered.slice(0, recent), separatorItem, ...filtered.slice(recent)];
 		}
 		return filtered;
 	}
@@ -2174,8 +2221,8 @@ export class ModelBrowser implements Component {
 
 	#pickerItem(item: ModelBrowserItem): TspPickerItem {
 		const model = item.model;
-		const heldRoles = this.#heldRoles(model);
-		const held = heldRoles
+		const holders = heldRoles(model, this.#roles, this.#settings);
+		const held = holders
 			.map(({ role, assignment }) => `${role}:${assignment.autoSelected}:${assignment.thinkingLevel}`)
 			.join(",");
 		const cached = this.#pickerItemCache.get(item.selector);
@@ -2208,11 +2255,10 @@ export class ModelBrowser implements Component {
 		if (model.isNew) badges.push({ text: "new", tone: "accent" });
 		if (model.isBeta) badges.push({ text: "beta", tone: "warning" });
 		if (isFreeModel(model)) badges.push({ text: "free", tone: "success" });
-		const chips = heldRoles.map(({ role, assignment }) => {
-			const info = this.#settings.getRoleInfo(role);
+		const chips = holders.map(({ role, assignment }) => {
 			const dot = thinkingDotToken(assignment.thinkingLevel);
 			return {
-				text: (info.tag ?? info.name ?? role).toLowerCase(),
+				text: roleChipLabel(role, this.#settings),
 				on: !assignment.autoSelected,
 				...(assignment.autoSelected ? { auto: true } : {}),
 				...(dot ? { dot } : {}),
@@ -2235,23 +2281,6 @@ export class ModelBrowser implements Component {
 		const kept = cached && Bun.deepEquals(cached.value, value) ? cached.value : value;
 		this.#pickerItemCache.set(item.selector, { model, label: item.id, held, epoch: this.#pickerEpoch, value: kept });
 		return kept;
-	}
-
-	/** Visible roles `model` holds, built-in order first (the detail line's chips). */
-	#heldRoles(model: Model): { role: string; assignment: RoleAssignment }[] {
-		const held: { role: string; assignment: RoleAssignment }[] = [];
-		const seen = new Set<string>();
-		const push = (role: string) => {
-			if (seen.has(role)) return;
-			seen.add(role);
-			const assignment = this.#roles[role];
-			if (!assignment || !modelsAreEqual(assignment.model, model)) return;
-			if (this.#settings.getRoleInfo(role).hidden) return;
-			held.push({ role, assignment });
-		};
-		for (const role of MODEL_ROLE_IDS) push(role);
-		for (const role in this.#roles) push(role);
-		return held;
 	}
 
 	/**
@@ -2388,7 +2417,7 @@ export class ModelBrowser implements Component {
 					{ wrap: "word" },
 				)
 			: undefined;
-		const held = this.#heldRoles(model);
+		const held = heldRoles(model, this.#roles, this.#settings);
 		const roleBadge = (role: string, assignment: RoleAssignment | undefined): NativeNode => {
 			const info = this.#settings.getRoleInfo(role);
 			const level =
@@ -2396,7 +2425,7 @@ export class ModelBrowser implements Component {
 					? getConfiguredThinkingLevelMetadata(assignment.thinkingLevel).label
 					: undefined;
 			return node("badge", {
-				text: (info.tag ?? info.name ?? role).toLowerCase(),
+				text: roleChipLabel(role, this.#settings),
 				...(assignment ? { tone: assignment.autoSelected ? "muted" : "accent" } : {}),
 				title: assignment
 					? `${info.name}${assignment.autoSelected ? " (auto-selected)" : ""}${level ? ` · thinking ${level}` : ""}`

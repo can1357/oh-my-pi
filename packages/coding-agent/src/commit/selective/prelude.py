@@ -66,8 +66,9 @@ def _make_commit():
             return self
 
         async def diff(self, *, silent=False):
-            text, _ = await self._run("diff", {}, silent)
-            return text
+            text, details = await self._run("diff", {}, silent)
+            # What printed may show long edited lines as word rows; the patch is returned as it is.
+            return details["patch"] if details else text
 
         async def commit(
             self, subject, body=None, *, fixes=None, amend=False, no_verify=False, silent=False

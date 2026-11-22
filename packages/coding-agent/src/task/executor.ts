@@ -9,8 +9,8 @@
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
-import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import { AgentBusyError, extractIntent, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import type { Api, AssistantMessageEvent, Model, ServiceTierByFamily, ToolCall, Usage } from "@oh-my-pi/pi-ai";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import {
 	isRecord,
@@ -148,6 +148,7 @@ import {
 } from "./types";
 import {
 	type AgentProgress,
+	type AgentStreaming,
 	type SingleResult,
 	type StructuredSubagentOutput,
 	type StructuredSubagentSchemaMode,
@@ -263,6 +264,10 @@ function formatSalvageSnippet(text: string, maxLength = 500): string {
 	const flattened = text.replace(/\s+/g, " ").trim();
 	return flattened.length > maxLength ? `${flattened.slice(0, maxLength - 1)}…` : flattened;
 }
+
+/** The model reasons, or writes prose: the stream states without a payload, shared by every snapshot. */
+const STREAMING_THINKING: AgentStreaming = { kind: "thinking" };
+const STREAMING_TEXT: AgentStreaming = { kind: "text" };
 
 /** Events the run monitor tracks: the core loop events plus the session's `agent_pause`. */
 type MonitoredEvent = AgentEvent | Extract<AgentSessionEvent, { type: "agent_pause" }>;
@@ -1024,7 +1029,7 @@ function getUsageTokens(usage: unknown): number {
 /**
  * Create proxy tools that reuse the parent's MCP connections, as `scope` sees them.
  *
- * Each proxy delegates to the current source `MCPTool`/`DeferredMCPTool` rather
+ * Each proxy delegates to the current source `MCPTool` rather
  * than rebuilding a raw `tools/call` request, so the Task/subagent path shares
  * the source tool's authoritative outbound boundary: harness-intent (`i`)
  * stripping, optional-placeholder pruning, local-URL resolution, reconnect
@@ -1771,13 +1776,49 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		progress.recentOutput = filtered.slice(-8).reverse();
 	};
 
+	/**
+	 * The tool call the model is writing, by its newest stream snapshot. Its preview is taken at the
+	 * emit boundary, as recentOutput is: a large edit's patch parses at most once per emit, not per delta.
+	 */
+	let streamingCall: ToolCall | undefined;
+	let streamingCallDirty = false;
+	const refreshStreamingCall = () => {
+		if (!streamingCallDirty || !streamingCall) return;
+		streamingCallDirty = false;
+		const { intent, strippedArgs } = extractIntent(isRecord(streamingCall.arguments) ? streamingCall.arguments : {});
+		const preview = previewToolArgs(streamingCall.name, strippedArgs);
+		progress.streaming = {
+			kind: "call",
+			tool: streamingCall.name,
+			args: preview?.value,
+			argsKey: preview?.key,
+			intent,
+		};
+	};
+	/** What the model now produces, other than a call it is writing; undefined once nothing streams. */
+	const setStreaming = (state: AgentStreaming | undefined) => {
+		streamingCall = undefined;
+		streamingCallDirty = false;
+		progress.streaming = state;
+	};
+
+	/** A call's argument preview, read as its tool reads it (an edit tool's mode decides its paths). */
+	const previewToolArgs = (toolName: string, args: Record<string, unknown>) => {
+		const editMode =
+			toolName === "apply_patch"
+				? "apply_patch"
+				: ((activeSession?.getToolByName(toolName) as { mode?: EditMode } | undefined)?.mode ?? undefined);
+		return extractToolArgsPreview(args, toolName, editMode);
+	};
+
 	const emitProgressNow = () => {
 		refreshRecentOutput();
+		refreshStreamingCall();
 		progress.durationMs = Date.now() - startTime;
 		onProgress?.({ ...progress });
 		const activityGist =
 			progress.lastIntent ?? (progress.currentTool ? `running ${progress.currentTool}` : undefined);
-		if (activityGist) AgentRegistry.global().setActivity(id, activityGist);
+		if (activityGist && activeSession) AgentRegistry.global().setActivity(id, activityGist, activeSession);
 		const progressPayload = {
 			index,
 			agent: agent.name,
@@ -1997,6 +2038,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			case "message_start":
 				if (event.message?.role === "assistant") {
 					assistantStreaming = true;
+					setStreaming(undefined);
 					resetRecentOutput();
 				}
 				// An async-result follow-up injected after a recorded yield
@@ -2028,12 +2070,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				} else if (isRecord(event.args)) {
 					startArgs = event.args;
 				}
-				const editMode =
-					event.toolName === "apply_patch"
-						? "apply_patch"
-						: ((activeSession?.getToolByName(event.toolName) as { mode?: EditMode } | undefined)?.mode ??
-							undefined);
-				const preview = extractToolArgsPreview(startArgs, event.toolName, editMode);
+				const preview = previewToolArgs(event.toolName, startArgs);
+				// The running call takes over from the one being written; calls written after it wait their turn.
+				setStreaming(undefined);
 				progress.currentToolArgs = preview?.value;
 				progress.currentToolArgsKey = preview?.key;
 				progress.currentToolStartMs = now;
@@ -2236,22 +2275,41 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 
 			case "message_update": {
 				if (event.message?.role !== "assistant") break;
-				const assistantEvent = (
-					event as AgentEvent & {
-						assistantMessageEvent?: { type?: string; delta?: string };
+				// Optional at runtime: a replayed content update carries no stream event.
+				const update: AssistantMessageEvent | undefined = event.assistantMessageEvent;
+				if (!update) {
+					const updateContent =
+						getMessageContent(event.message) || (event as AgentEvent & { content?: unknown }).content;
+					if (updateContent && Array.isArray(updateContent)) {
+						replaceRecentOutputFromContent(updateContent);
 					}
-				).assistantMessageEvent;
-				if (assistantEvent?.type === "text_delta" && typeof assistantEvent.delta === "string") {
-					appendRecentOutputTail(assistantEvent.delta);
 					break;
 				}
-				if (assistantEvent && assistantEvent.type !== "text_delta") {
-					break;
-				}
-				const updateContent =
-					getMessageContent(event.message) || (event as AgentEvent & { content?: unknown }).content;
-				if (updateContent && Array.isArray(updateContent)) {
-					replaceRecentOutputFromContent(updateContent);
+				switch (update.type) {
+					case "text_delta":
+						appendRecentOutputTail(update.delta);
+						setStreaming(STREAMING_TEXT);
+						break;
+					case "text_start":
+						setStreaming(STREAMING_TEXT);
+						break;
+					case "thinking_start":
+					case "thinking_delta":
+						setStreaming(STREAMING_THINKING);
+						break;
+					case "toolcall_start":
+					case "toolcall_delta": {
+						const block = update.partial.content[update.contentIndex];
+						if (block?.type === "toolCall" && block.name) {
+							streamingCall = block;
+							streamingCallDirty = true;
+						}
+						break;
+					}
+					case "toolcall_end":
+						streamingCall = update.toolCall;
+						streamingCallDirty = true;
+						break;
 				}
 				break;
 			}
@@ -2261,6 +2319,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				const role = event.message?.role;
 				if (role === "assistant") {
 					assistantStreaming = false;
+					// Reasoning and prose end with the response; a call it wrote stays until it runs.
+					if (!streamingCall) setStreaming(undefined);
 					sawAssistantMessage = true;
 					progress.requests += 1;
 					const eventContent = isRecord(event) && "content" in event ? event.content : undefined;
@@ -2357,6 +2417,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				// vanished after a pause ends with that paused loop's messages again.
 				const resent = event.type === "agent_end" && pausedLoopCollected;
 				pausedLoopCollected = event.type === "agent_pause";
+				setStreaming(undefined);
 				// Extract final content from assistant messages only (not user prompts).
 				if (!resent && Array.isArray(event.messages)) {
 					for (const msg of event.messages) {
@@ -5435,7 +5496,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				systemPrompt: session.agent.state.systemPrompt,
 				task,
 				tools: persistedSubagentTools,
-				mountedTools: session.getMountedXdevToolNames(),
+				mountedTools: session.getMountedToolCommandNames(),
 				agent: agent.name,
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,
