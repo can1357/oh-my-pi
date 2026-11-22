@@ -46,6 +46,7 @@ use crate::{
 		CallId, CallOutcome, ControlHandle, Cx, IoPoll, Lineage, NativeRef, RunId, Script, Shell,
 		ShellApi, ToolCall, ToolRef,
 	},
+	commands::CommandSlot,
 	extras::{ExtrasGate, ReportedError, Speech},
 	git::{GitLayers, flag_on},
 	vfs::VfsFs,
@@ -57,6 +58,11 @@ const GIT: ToolRef = ToolRef(3);
 /// Every extra that runs command lines; `argv[0]` names it.
 const EXTRA: ToolRef = ToolRef(4);
 const URLMAP: ToolRef = ToolRef(5);
+
+/// pi's tools other than the extras, by name; [`ToolConfig::lookup`] offers
+/// `nohup` and `git` only when the session's switches turn them on.
+const TOOLS: [(&str, ToolRef); 4] =
+	[("timeout", TIMEOUT), ("urlmap", URLMAP), ("nohup", NOHUP), ("git", GIT)];
 
 /// The switch that hands `nohup` to the system binary.
 const NOHUP_OFF: &str = "PI_DISABLE_NOHUP_BUILTIN";
@@ -77,6 +83,16 @@ pub fn builtins(on: impl Fn(&str) -> bool) -> Vec<&'static str> {
 		.collect();
 	names.sort_unstable();
 	names
+}
+
+/// Every name [`ToolConfig::lookup`] or [`ToolConfig::native_extra`] can
+/// resolve, whatever the session's switches: the tools and all of pi's
+/// extras.
+pub fn names() -> impl Iterator<Item = &'static str> {
+	TOOLS
+		.iter()
+		.map(|&(name, _)| name)
+		.chain(omp_builtins::extras::extras().map(|(name, _)| name))
 }
 
 /// Which tools a session offers; fixed when the session starts, as pi
@@ -102,6 +118,8 @@ pub struct ToolConfig {
 	pub reported_error: ReportedError,
 	/// The application's speech synthesizer, for `say`.
 	pub speech:         Speech,
+	/// The session commands of the run in flight ([`crate::commands`]).
+	pub commands:       CommandSlot,
 }
 
 impl ToolConfig {
@@ -127,18 +145,21 @@ impl ToolConfig {
 			runtime: Some(runtime),
 			reported_error: ReportedError::default(),
 			speech: Speech::default(),
+			commands: CommandSlot::default(),
 		}
 	}
 
 	/// The tool `name` resolves to, if it is one of these.
 	pub fn lookup(&self, name: &BStr) -> Option<ToolRef> {
-		match name.as_bytes() {
-			b"timeout" => Some(TIMEOUT),
-			b"urlmap" => Some(URLMAP),
-			b"nohup" if self.nohup => Some(NOHUP),
-			b"git" if self.git.any() => Some(GIT),
-			_ if self.extras.runs_commands(name) => Some(EXTRA),
-			_ => None,
+		let tool = TOOLS
+			.iter()
+			.find(|&&(tool, _)| tool.as_bytes() == name.as_bytes())
+			.map(|&(_, tool)| tool);
+		match tool {
+			Some(NOHUP) => self.nohup.then_some(NOHUP),
+			Some(GIT) => self.git.any().then_some(GIT),
+			Some(tool) => Some(tool),
+			None => self.extras.runs_commands(name).then_some(EXTRA),
 		}
 	}
 

@@ -10,10 +10,11 @@
 //!   `std::fs` filesystem, readiness, parking).
 //! - pi's host: [`vfs::VfsFs`] (the engine's filesystem over `omp-vfs`),
 //!   [`host::PiHost`], [`session::Session`] (a persistent shell driven by a
-//!   task on the caller's runtime), [`tools`] (`timeout`, `nohup`, `git` and
-//!   the command-running extras as host callouts), [`extras`] (pi's utilities
-//!   from `omp-builtins` as engine commands) and [`git`] (the guard and
-//!   in-process worktree layers).
+//!   task on the caller's runtime), [`commands`] (the host's session commands
+//!   of a run), [`tools`] (`timeout`, `nohup`, `git` and the command-running
+//!   extras as host callouts), [`extras`] (pi's utilities from `omp-builtins`
+//!   as engine commands) and [`git`] (the guard and in-process worktree
+//!   layers).
 //! - The API omp-natives uses: [`Shell`], [`execute_shell`],
 //!   [`execute_shell_streams`], [`minimizer`], [`taps`], [`cancel`],
 //!   [`proctree`].
@@ -34,6 +35,7 @@
 extern crate alloc;
 
 pub mod bash;
+pub mod commands;
 pub mod extras;
 pub mod git;
 pub mod host;
@@ -62,6 +64,10 @@ pub mod taps;
 pub mod windows;
 
 pub use child_session::{ChildSessionAction, child_session_action};
+pub use commands::{
+	SessionCommandFuture, SessionCommandHandler, SessionCommandRequest, SessionCommandResult,
+	SessionCommands, reserved_command_names,
+};
 // Re-exported for `omp-natives`: the builtins live in `omp-builtins`,
 // but the native layer only ever depends on the shell.
 pub use omp_builtins::{

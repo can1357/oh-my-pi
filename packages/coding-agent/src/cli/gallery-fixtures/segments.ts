@@ -99,6 +99,12 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 		case "status":
 			return [
 				{ label: "multiple extension statuses", context: { hookStatuses: ["Indexer ready", "Tests passing"] } },
+				{
+					label: "coloured extension status",
+					context: {
+						hookStatuses: ["\x1b[33mbuilding\x1b[39m", "\x1b[1;38;2;255;95;135mfailed\x1b[0m", "queued"],
+					},
+				},
 			];
 		case "model":
 			return [

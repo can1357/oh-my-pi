@@ -12,15 +12,17 @@ use std::{
 	path::Path,
 };
 
+use omp_ast::block::standalone_block_at;
+
 use super::{
 	parse::{
-		decode_literal_markers, edit_header, has_marker_lines, missing_unmarked_lines,
+		decode_literal_markers, find_opener, has_marker_lines, missing_unmarked_lines,
 		operation_payload, parse_section,
 	},
 	types::{
-		Candidate, CandidateResult, EdgeGaps, LiteralFallback, MAX_CANDIDATES, MAX_COMBINATIONS,
-		NormalizedText, Occurrence, Operation, OperationRewrite, PARSE_FAILURE_NOTICE, ParsedPattern,
-		PatternToken, Placement, PlannedEdit, SelectionPair,
+		BlockGap, Candidate, CandidateResult, EdgeGaps, LiteralFallback, MAX_CANDIDATES,
+		MAX_COMBINATIONS, NormalizedText, Occurrence, Operation, OperationRewrite,
+		PARSE_FAILURE_NOTICE, ParsedPattern, PatternToken, Placement, PlannedEdit, SelectionPair,
 		markers::{GAP, SELECT_CLOSE, SELECT_DIVIDER, SELECT_OPEN},
 	},
 };
@@ -64,10 +66,47 @@ pub fn normalize_text(source: &str) -> NormalizedText {
 	NormalizedText { text, starts, ends }
 }
 
+/// Leading whitespace width of `line`.
+fn indent_width(line: &str) -> usize {
+	line.len() - line.trim_start_matches([' ', '\t']).len()
+}
+
+/// Authored indentation around the `…` line at `line_start..line_end` of
+/// `pattern`; `None` when no line precedes or follows it.
+fn block_gap(pattern: &str, line_start: usize, line_end: usize) -> Option<BlockGap> {
+	let opener = pattern[..line_start]
+		.lines()
+		.rev()
+		.find(|line| !line.trim().is_empty())?;
+	let closer = pattern[line_end..]
+		.lines()
+		.find(|line| !line.trim().is_empty())?;
+	Some(BlockGap { opener_indent: indent_width(opener), closer_indent: indent_width(closer) })
+}
+
 fn visible_identifier(text: &str) -> bool {
 	text
 		.chars()
 		.any(|character| character.is_alphanumeric() || matches!(character, '_' | '$'))
+}
+
+fn literal_pattern(text: &str, number: usize) -> Result<ParsedPattern, EditError> {
+	let normalized = normalize_text(text).text;
+	if normalized.is_empty() {
+		return Err(EditError::matched(format!("Operation {number} has no visible current text.")));
+	}
+	Ok(ParsedPattern {
+		tokens:                   vec![PatternToken::Literal { text: text.to_owned(), normalized }],
+		edge_gaps:                EdgeGaps::default(),
+		selection_start:          0,
+		selection_end:            1,
+		insertion:                false,
+		line_insertion:           false,
+		selected_capture_indices: Vec::new(),
+		selection_ranges:         Vec::new(),
+		selection_pairs:          Vec::new(),
+		literal_fallback:         None,
+	})
 }
 
 pub(crate) fn parse_pattern(
@@ -96,27 +135,7 @@ pub(crate) fn parse_pattern(
 	let has_gap = pattern.contains(GAP);
 	let has_selection = pattern.contains(SELECT_OPEN);
 	if !has_gap && !has_selection {
-		let normalized = normalize_text(pattern).text;
-		if normalized.is_empty() {
-			return Err(EditError::matched(format!(
-				"Operation {operation_number} has no visible current text."
-			)));
-		}
-		return Ok(ParsedPattern {
-			tokens:                   vec![PatternToken::Literal {
-				text: pattern.to_owned(),
-				normalized,
-			}],
-			edge_gaps:                EdgeGaps::default(),
-			selection_start:          0,
-			selection_end:            1,
-			insertion:                false,
-			line_insertion:           false,
-			selected_capture_indices: Vec::new(),
-			selection_ranges:         Vec::new(),
-			selection_pairs:          Vec::new(),
-			literal_fallback:         None,
-		});
+		return literal_pattern(pattern, operation_number);
 	}
 
 	let mut tokens = Vec::new();
@@ -159,6 +178,9 @@ pub(crate) fn parse_pattern(
 			tokens.push(PatternToken::Gap {
 				capture_index: capture_count,
 				line_bounded:  !before.trim().is_empty() && !after.trim().is_empty(),
+				block:         (before.trim().is_empty() && after.trim().is_empty())
+					.then(|| block_gap(pattern, line_start, line_end))
+					.flatten(),
 			});
 			capture_count += 1;
 			index += GAP.len();
@@ -611,12 +633,35 @@ fn resolve_boundary(
 	previous.map_or(0, |entry| end_at(entry.end))
 }
 
+/// A comment continuation must not consume stars from a line-leading opener.
+fn starts_in_comment_opener(content: &str, offset: usize) -> bool {
+	let tail = &content[offset..];
+	if !tail.starts_with(['*', '/']) {
+		return false;
+	}
+	let before = content[..offset]
+		.rsplit('\n')
+		.next()
+		.unwrap_or("")
+		.trim_ascii_start();
+	if before.is_empty() {
+		return tail.starts_with("/*");
+	}
+	tail.starts_with('*')
+		&& before
+			.strip_prefix('/')
+			.is_some_and(|prefix| prefix.bytes().all(|byte| byte == b'*'))
+}
+
+/// Every way `pattern` matches `content` in `mode`. With `strict_blocks`, the
+/// line closing a block range must satisfy `Search::closes_block`.
 fn collect_candidates(
 	content: &str,
 	normalized: &NormalizedText,
 	pattern: &ParsedPattern,
 	mode: MatchMode,
 	allow_punctuation: bool,
+	strict_blocks: bool,
 ) -> CandidateResult {
 	let literal_indices = pattern
 		.tokens
@@ -629,11 +674,24 @@ fn collect_candidates(
 		let PatternToken::Literal { text, normalized: needle } = &pattern.tokens[*index] else {
 			unreachable!()
 		};
-		let values = match mode {
+		let mut values = match mode {
 			MatchMode::Raw => exact_occurrences(content, text),
 			MatchMode::Normalized => exact_occurrences(&normalized.text, needle),
 			MatchMode::Fuzzy => fuzzy_occurrences(&normalized.text, needle, allow_punctuation),
 		};
+		if mode != MatchMode::Raw
+			&& text
+				.trim_ascii_start()
+				.strip_prefix('*')
+				.is_some_and(|rest| rest.starts_with([' ', '\t']))
+		{
+			values.retain(|occurrence| {
+				!starts_in_comment_opener(
+					content,
+					source_start(normalized, occurrence.start, content.len()),
+				)
+			});
+		}
 		if values.is_empty() {
 			return CandidateResult { candidates: Vec::new(), overflow: false };
 		}
@@ -647,12 +705,70 @@ fn collect_candidates(
 		literal_indices:   &'a [usize],
 		occurrences:       &'a HashMap<usize, Vec<Occurrence>>,
 		allow_punctuation: bool,
+		/// Hold the line after a block-range `…` to [`Search::closes_block`].
+		strict_blocks:     bool,
 		chosen:            HashMap<usize, Occurrence>,
 		candidates:        Vec<Candidate>,
 		combinations:      usize,
 		overflow:          bool,
 	}
 	impl Search<'_> {
+		/// Source range of an occurrence's text without surrounding whitespace.
+		fn visible_span(&self, occurrence: Occurrence) -> (usize, usize) {
+			if self.mode == MatchMode::Raw {
+				let text = &self.content[occurrence.start..occurrence.end];
+				let start = occurrence.end - text.trim_start().len();
+				return (start, occurrence.start + text.trim_end().len());
+			}
+			(self.source_start(occurrence.start), self.source_end(occurrence.end))
+		}
+
+		/// Whether `closer` is the closing line a block range (first line, `…`,
+		/// last line) asks for, given the occurrence chosen for its `opener`.
+		///
+		/// The closing line starts its file line, ends it when it is the whole
+		/// last line of the Find, and sits against the opening line as authored:
+		/// same indentation when both were typed alike, otherwise deeper or
+		/// shallower in the same direction, or at exactly the typed width. That
+		/// skips nested closers and continued ones such as `} else {`, which the
+		/// shortest match would stop at.
+		fn closes_block(
+			&self,
+			token_index: usize,
+			block: BlockGap,
+			opener: Occurrence,
+			closer: Occurrence,
+		) -> bool {
+			let content = self.content;
+			let line_start = |offset: usize| content[..offset].rfind('\n').map_or(0, |at| at + 1);
+			let (closer_start, closer_end) = self.visible_span(closer);
+			let closer_line = line_start(closer_start);
+			if content[closer_line..closer_start]
+				.contains(|character| !matches!(character, ' ' | '\t'))
+			{
+				return false;
+			}
+			let PatternToken::Literal { text, .. } = &self.pattern.tokens[token_index] else {
+				return true;
+			};
+			let ends_find =
+				token_index + 1 == self.pattern.tokens.len() && !self.pattern.edge_gaps.trailing;
+			if ends_find && !text.trim().contains('\n') {
+				let line_end = content[closer_end..]
+					.find('\n')
+					.map_or(content.len(), |at| closer_end + at);
+				if !content[closer_end..line_end].trim().is_empty() {
+					return false;
+				}
+			}
+			let (_, opener_end) = self.visible_span(opener);
+			let opener_indent = indent_width(&content[line_start(opener_end)..]);
+			let closer_indent = closer_start - closer_line;
+			let authored = block.closer_indent.cmp(&block.opener_indent);
+			authored == closer_indent.cmp(&opener_indent)
+				|| (block.closer_indent > 0 && block.closer_indent == closer_indent)
+		}
+
 		fn source_start(&self, offset: usize) -> usize {
 			if self.mode == MatchMode::Raw {
 				offset
@@ -832,6 +948,16 @@ fn collect_candidates(
 				{
 					continue;
 				}
+				if self.strict_blocks
+					&& let Some(previous) = previous
+					&& let Some(block) = gap_tokens.iter().find_map(|token| match token {
+						PatternToken::Gap { block, .. } => *block,
+						PatternToken::Literal { .. } => None,
+					})
+					&& !self.closes_block(token_index, block, previous, occurrence)
+				{
+					continue;
+				}
 				self.chosen.insert(token_index, occurrence);
 				self.visit(position + 1);
 				self.chosen.remove(&token_index);
@@ -846,6 +972,7 @@ fn collect_candidates(
 		literal_indices: &literal_indices,
 		occurrences: &occurrences,
 		allow_punctuation,
+		strict_blocks,
 		chosen: HashMap::new(),
 		candidates: Vec::new(),
 		combinations: 0,
@@ -1043,7 +1170,9 @@ fn same_rewrite_for_all(
 	candidates: &[Candidate],
 ) -> bool {
 	match &operation.rewrite {
-		OperationRewrite::Insert { .. } => true,
+		OperationRewrite::Insert { .. } | OperationRewrite::Cut | OperationRewrite::Paste { .. } => {
+			true
+		},
 		OperationRewrite::Explicit { text } => {
 			let gaps = text.matches(GAP).count();
 			pattern
@@ -1080,6 +1209,34 @@ fn same_rewrite_for_all(
 	}
 }
 
+/// For an `all` operation whose Find is one bare identifier, drop the matches
+/// inside a longer identifier (`id` in `width`), even if those were the only
+/// hits.
+fn retain_whole_words(content: &str, find: &str, candidates: &mut Vec<Candidate>) {
+	let word = |character: char| character.is_alphanumeric() || matches!(character, '_' | '$');
+	let mut chars = find.trim().chars();
+	if !chars
+		.next()
+		.is_some_and(|ch| ch.is_alphabetic() || matches!(ch, '_' | '$'))
+		|| !chars.all(word)
+	{
+		return;
+	}
+	candidates.retain(|candidate| {
+		let matched = &content[candidate.match_start..candidate.match_end];
+		let start = candidate.match_end - matched.trim_start().len();
+		let end = candidate.match_start + matched.trim_end().len();
+		!content[..start].chars().next_back().is_some_and(word)
+			&& !content[end..].chars().next().is_some_and(word)
+	});
+}
+
+/// Removing either range leaves identical bytes iff the ranges have the same
+/// length and the intervening text shifts onto itself.
+fn same_deletion(content: &str, (a, b): (usize, usize), (c, d): (usize, usize)) -> bool {
+	b - a == d - c && content[a.min(c)..a.max(c)] == content[b.min(d)..b.max(d)]
+}
+
 pub(crate) fn locate(
 	content: &str,
 	pattern: &ParsedPattern,
@@ -1089,79 +1246,106 @@ pub(crate) fn locate(
 	exclusions: &[(usize, usize)],
 ) -> Result<Vec<Candidate>, EditError> {
 	let normalized = normalize_text(content);
-	let raw = collect_candidates(content, &normalized, pattern, MatchMode::Raw, false);
-	if raw.overflow {
-		return Err(EditError::matched(format!(
+	let too_broad = || {
+		EditError::matched(format!(
 			"Operation {operation_number} pattern is too broad; add another distinctive {GAP} \
 			 fragment."
-		)));
-	}
-	let marker_op = has_marker_lines(&operation.source_pattern_text);
-	if raw.candidates.is_empty()
-		&& let Some(fallback) = &pattern.literal_fallback
-	{
-		let exact = exact_occurrences(&normalized.text, &fallback.normalized);
-		if !exact.is_empty() && (operation.all || exact.len() == 1) {
-			let candidates = exact
-				.into_iter()
-				.map(|occurrence| {
-					let match_start = source_start(&normalized, occurrence.start, 0);
-					let match_end = source_end(&normalized, occurrence.end, content.len());
-					let fallback_start = occurrence.start + fallback.selection_start;
-					let fallback_end = occurrence.start + fallback.selection_end;
-					let start = if fallback.selection_start == fallback.normalized.len() {
-						match_end
-					} else {
-						source_start(&normalized, fallback_start, match_end)
-					};
-					let end = if fallback.selection_end == fallback.normalized.len() {
-						match_end
-					} else if fallback.insertion {
-						source_start(&normalized, fallback_end, match_end)
-					} else {
-						source_end(&normalized, fallback_end, match_end)
-					};
-					Candidate {
-						start,
-						end,
-						match_start,
-						match_end,
-						captures: Vec::new(),
-						selection_spans: (pattern.selection_pairs.len() == 1)
-							.then_some(vec![(start, end)])
-							.unwrap_or_default(),
-						tuple: vec![occurrence.start],
-						literal_gaps: true,
-					}
-				})
-				.collect::<Vec<_>>();
-			return Ok(if operation.all {
-				candidates
-			} else {
-				vec![candidates[0].clone()]
-			});
-		}
-	}
-	let mut result = if raw.candidates.is_empty() {
-		collect_candidates(content, &normalized, pattern, MatchMode::Normalized, false)
-	} else {
-		raw
+		))
 	};
-	if result.candidates.is_empty() && !result.overflow && !marker_op {
-		result = collect_candidates(content, &normalized, pattern, MatchMode::Fuzzy, false);
-		if result.candidates.is_empty() && !result.overflow && !operation.all {
-			let punctuation =
-				collect_candidates(content, &normalized, pattern, MatchMode::Fuzzy, true);
-			if !punctuation.overflow && punctuation.candidates.len() == 1 {
-				result = punctuation;
+	let marker_op = has_marker_lines(&operation.source_pattern_text);
+	let has_block = pattern
+		.tokens
+		.iter()
+		.any(|token| matches!(token, PatternToken::Gap { block: Some(_), .. }));
+	let mut result = CandidateResult { candidates: Vec::new(), overflow: false };
+	// A three-line range names its closing line. Never turn it back into
+	// an unrestricted gap after the closing-line checks reject every match.
+	let short_block = has_block
+		&& !marker_op
+		&& pattern.selection_pairs.is_empty()
+		&& matches!(
+			pattern.tokens.as_slice(),
+			[PatternToken::Literal { text: first, .. }, PatternToken::Gap { .. }, PatternToken::Literal { text: last, .. }]
+				if !pattern.edge_gaps.leading && !pattern.edge_gaps.trailing
+					&& !first.trim().contains('\n') && !last.trim().contains('\n')
+		);
+	for strict_blocks in [true, false] {
+		if strict_blocks && !has_block {
+			continue;
+		}
+		let collect = |mode, allow_punctuation| {
+			collect_candidates(content, &normalized, pattern, mode, allow_punctuation, strict_blocks)
+		};
+		let raw = collect(MatchMode::Raw, false);
+		if raw.overflow {
+			return Err(too_broad());
+		}
+		if raw.candidates.is_empty()
+			&& !short_block
+			&& let Some(fallback) = &pattern.literal_fallback
+		{
+			let exact = exact_occurrences(&normalized.text, &fallback.normalized);
+			if !exact.is_empty() && (operation.all || exact.len() == 1) {
+				let candidates = exact
+					.into_iter()
+					.map(|occurrence| {
+						let match_start = source_start(&normalized, occurrence.start, 0);
+						let match_end = source_end(&normalized, occurrence.end, content.len());
+						let fallback_start = occurrence.start + fallback.selection_start;
+						let fallback_end = occurrence.start + fallback.selection_end;
+						let start = if fallback.selection_start == fallback.normalized.len() {
+							match_end
+						} else {
+							source_start(&normalized, fallback_start, match_end)
+						};
+						let end = if fallback.selection_end == fallback.normalized.len() {
+							match_end
+						} else if fallback.insertion {
+							source_start(&normalized, fallback_end, match_end)
+						} else {
+							source_end(&normalized, fallback_end, match_end)
+						};
+						Candidate {
+							start,
+							end,
+							match_start,
+							match_end,
+							captures: Vec::new(),
+							selection_spans: (pattern.selection_pairs.len() == 1)
+								.then_some(vec![(start, end)])
+								.unwrap_or_default(),
+							tuple: vec![occurrence.start],
+							literal_gaps: true,
+						}
+					})
+					.collect::<Vec<_>>();
+				return Ok(if operation.all {
+					candidates
+				} else {
+					vec![candidates[0].clone()]
+				});
 			}
 		}
-	}
-	if result.overflow {
-		return Err(EditError::matched(format!(
-			"Operation {operation_number} pattern is too broad; add another distinctive {GAP} \
-			 fragment."
-		)));
+		result = if raw.candidates.is_empty() {
+			collect(MatchMode::Normalized, false)
+		} else {
+			raw
+		};
+		if result.candidates.is_empty() && !result.overflow && !marker_op {
+			result = collect(MatchMode::Fuzzy, false);
+			if result.candidates.is_empty() && !result.overflow && !operation.all {
+				let punctuation = collect(MatchMode::Fuzzy, true);
+				if !punctuation.overflow && punctuation.candidates.len() == 1 {
+					result = punctuation;
+				}
+			}
+		}
+		if result.overflow {
+			return Err(too_broad());
+		}
+		if short_block || !result.candidates.is_empty() {
+			break;
+		}
 	}
 	let mut candidates = result.candidates;
 	if !exclusions.is_empty() && candidates.len() > 1 {
@@ -1178,8 +1362,15 @@ pub(crate) fn locate(
 			candidates = free;
 		}
 	}
-	if operation.all && !candidates.is_empty() {
-		return Ok(candidates);
+	if operation.all {
+		// The legacy desired-state detector enumerates overlapping spans
+		// internally. Only an authored rename requests identifier boundaries.
+		if !operation.desired_state {
+			retain_whole_words(content, &operation.pattern_text, &mut candidates);
+		}
+		if !candidates.is_empty() {
+			return Ok(candidates);
+		}
 	}
 	if candidates.len() == 1 {
 		return Ok(candidates);
@@ -1187,15 +1378,44 @@ pub(crate) fn locate(
 	if candidates.is_empty() {
 		return Err(no_match_error(content, pattern, operation, operation_number, path));
 	}
-	if candidates.len() <= 4
+	let deletion = match &operation.rewrite {
+		OperationRewrite::Explicit { text } => text.trim().is_empty() && !pattern.insertion,
+		OperationRewrite::Inline { replacements } => replacements.iter().all(String::is_empty),
+		_ => false,
+	};
+	if deletion && candidates.len() <= 4 && !operation.desired_state {
+		// Compare the actual removal, including blank-line cleanup, not a
+		// whitespace-normalized projection of the literal match.
+		if pattern.selection_pairs.len() <= 1
+			&& !pattern
+				.selection_pairs
+				.iter()
+				.any(|pair| pair.gap_only || pair.line_insertion)
+		{
+			let span =
+				|candidate: &Candidate| full_line_deletion(content, candidate.start, candidate.end);
+			let first = span(&candidates[0]);
+			if candidates[1..]
+				.iter()
+				.all(|other| same_deletion(content, first, span(other)))
+			{
+				candidates.truncate(1);
+				return Ok(candidates);
+			}
+		}
+	} else if candidates.len() <= 4
 		&& !operation.desired_state
-		&& !matches!(operation.rewrite, OperationRewrite::Insert { .. })
-	{
+		&& matches!(
+			operation.rewrite,
+			OperationRewrite::Explicit { .. } | OperationRewrite::Inline { .. }
+		) {
 		let outcomes = candidates
 			.iter()
 			.filter_map(|candidate| {
 				Some(match &operation.rewrite {
-					OperationRewrite::Insert { .. } => return None,
+					OperationRewrite::Insert { .. }
+					| OperationRewrite::Cut
+					| OperationRewrite::Paste { .. } => return None,
 					OperationRewrite::Explicit { text } => {
 						format!("{}{}{}", &content[..candidate.start], text, &content[candidate.end..])
 					},
@@ -1596,65 +1816,61 @@ fn align_boundary_echoes(content: &str, candidate: &Candidate, replacement: &str
 	aligned
 }
 
-fn expand_full_line_deletion(content: &str, candidate: &Candidate) -> Candidate {
-	if candidate.start == candidate.end {
-		return candidate.clone();
+fn full_line_deletion(content: &str, start: usize, end: usize) -> (usize, usize) {
+	if start == end {
+		return (start, end);
 	}
-	let line_start = content[..candidate.start]
-		.rfind('\n')
-		.map_or(0, |at| at + 1);
-	let newline = content[candidate.end..]
-		.find('\n')
-		.map(|at| candidate.end + at);
+	let line_start = content[..start].rfind('\n').map_or(0, |at| at + 1);
+	let newline = content[end..].find('\n').map(|at| end + at);
 	let line_end = newline.unwrap_or(content.len());
-	if !content[line_start..candidate.start]
+	if !content[line_start..start]
 		.bytes()
 		.all(|byte| matches!(byte, b' ' | b'\t'))
-		|| !content[candidate.end..line_end]
+		|| !content[end..line_end]
 			.bytes()
 			.all(|byte| matches!(byte, b' ' | b'\t'))
 	{
-		return candidate.clone();
+		return (start, end);
 	}
-	let mut result = candidate.clone();
-	result.start = line_start;
-	result.end = newline.map_or(line_end, |at| at + 1);
-	if line_start > 0 && result.end < content.len() {
+	let mut start = line_start;
+	let mut end = newline.map_or(line_end, |at| at + 1);
+	if line_start > 0 && end < content.len() {
 		let previous_end = line_start - 1;
 		let previous_start = content[..previous_end].rfind('\n').map_or(0, |at| at + 1);
-		let next_end = content[result.end..]
+		let next_end = content[end..]
 			.find('\n')
-			.map_or(content.len(), |at| result.end + at);
+			.map_or(content.len(), |at| end + at);
 		let previous_blank = content[previous_start..previous_end].trim().is_empty();
-		let next_blank = content[result.end..next_end].trim().is_empty();
+		let next_blank = content[end..next_end].trim().is_empty();
 		let previous_text = &content[previous_start..previous_end];
 		if previous_blank && next_blank {
-			result.end = if next_end == content.len() {
-				next_end
-			} else {
-				next_end + 1
-			};
+			end = (next_end + 1).min(content.len());
 		} else if previous_blank
-			&& content[result.end..next_end]
+			&& content[end..next_end]
 				.trim_start()
 				.starts_with([')', ']', '}'])
 		{
-			result.start = previous_start;
+			start = previous_start;
 		} else if next_blank && previous_text.trim_end().ends_with(['(', '{', '[']) {
-			result.end = if next_end == content.len() {
-				next_end
-			} else {
-				next_end + 1
-			};
+			end = (next_end + 1).min(content.len());
 		}
-	} else if line_start > 0 && result.end >= content.len() {
+	} else if line_start > 0 && end >= content.len() {
 		let previous_end = line_start - 1;
 		let previous_start = content[..previous_end].rfind('\n').map_or(0, |at| at + 1);
 		if content[previous_start..previous_end].trim().is_empty() {
-			result.start = previous_start;
+			start = previous_start;
+		}
+	} else if line_start == 0 && end < content.len() {
+		// At the head of the file the blank line that set the lines apart
+		// follows them.
+		let next_end = content[end..]
+			.find('\n')
+			.map_or(content.len(), |at| end + at);
+		if content[end..next_end].trim().is_empty() {
+			end = (next_end + 1).min(content.len());
 		}
 	}
-	result
+	(start, end)
 }
 
 fn snap_line_insertion_offset(content: &str, offset: usize, hop_blank_lines: bool) -> usize {
@@ -1838,7 +2054,8 @@ fn prepare_inline(
 	)?;
 	if replacement.is_empty() && start != end {
 		let deleted = content[start..end].to_owned();
-		candidate = expand_full_line_deletion(content, &candidate);
+		(candidate.start, candidate.end) =
+			full_line_deletion(content, candidate.start, candidate.end);
 		return Ok((candidate, replacement, Some(deleted)));
 	}
 	Ok((candidate, replacement, None))
@@ -2041,6 +2258,101 @@ fn punctuation_pair_variants(operation: &Operation) -> Vec<Operation> {
 	variants
 }
 
+/// `operation` with a final `*** Replace` line `all` read as the every-match
+/// flag, which models put under the replacement.
+///
+/// Only an ambiguous operation is reread this way, so the reading replaces an
+/// error and never another applied edit.
+fn trailing_all_flag(operation: &Operation, number: usize) -> Option<Operation> {
+	let OperationRewrite::Explicit { text } = &operation.rewrite else {
+		return None;
+	};
+	let (replacement, flag) = text.trim_end().rsplit_once('\n')?;
+	if operation.all || !flag.trim().eq_ignore_ascii_case("all") {
+		return None;
+	}
+	let mut every = operation.clone();
+	every.all = true;
+	every.rewrite = OperationRewrite::Explicit { text: replacement.to_owned() };
+	every.recovery_note = Some(format!(
+		"Note: operation {number}'s *** Replace ended with a line `all`; it was read as the \
+		 every-match flag, not text. Write *** Find all."
+	));
+	Some(every)
+}
+
+/// A Block opener is literal, case-sensitive and line-local. It never takes
+/// the whitespace/fuzzy Find ladder: a near miss could move an entire member.
+fn locate_block(
+	content: &str,
+	path: &str,
+	operation: &Operation,
+	number: usize,
+) -> Result<Candidate, EditError> {
+	let prefix = operation.pattern_text.trim();
+	let mut matches = content
+		.lines()
+		.enumerate()
+		.filter(|(_, line)| line.trim_start().starts_with(prefix));
+	let missing = || {
+		EditError::matched(format!(
+			"Operation {number}: no line starts with {prefix:?} in {path}. Use *** Find for a text \
+			 range."
+		))
+	};
+	let span_at = |row: usize| {
+		let line = u32::try_from(row + 1).map_err(|_| missing())?;
+		standalone_block_at(content, path, line)
+			.map_err(|err| EditError::matched(format!("{path}:{line}: {err}")))?
+			.ok_or_else(|| {
+				EditError::matched(format!(
+					"Operation {number}: {path}:{line} does not open a standalone multiline syntax \
+					 block. Use *** Find with its first line, …, and its last line."
+				))
+			})
+	};
+	let (first, _) = matches.next().ok_or_else(missing)?;
+	let span = span_at(first)?;
+	let delete =
+		matches!(&operation.rewrite, OperationRewrite::Explicit { text } if text.is_empty());
+	let (start, end) = if let Some((next, _)) = matches.next() {
+		let ambiguous = || {
+			EditError::matched(format!(
+				"Operation {number}: more than one line in {path} starts with {prefix:?}. Use a \
+				 longer opener or *** Find with distinctive context."
+			))
+		};
+		if !delete || matches.next().is_some() {
+			return Err(ambiguous());
+		}
+		let other = span_at(next)?;
+		if other.start < span.end
+			|| !content[span.end..other.start].trim().is_empty()
+			|| content[span.clone()] != content[other.clone()]
+		{
+			return Err(ambiguous());
+		}
+		// A + separator + A → A. Take the separator along with the
+		// second copy. Both choices leave byte-identical surroundings,
+		// even when the blank lines outside the pair differ.
+		(span.end, other.end)
+	} else if delete {
+		full_line_deletion(content, span.start, span.end)
+	} else {
+		(span.start, span.end)
+	};
+	Ok(Candidate {
+		start,
+		end,
+		match_start: span.start,
+		match_end: span.end,
+		captures: Vec::new(),
+		selection_spans: Vec::new(),
+		tuple: Vec::new(),
+		literal_gaps: false,
+	})
+}
+
 fn locate_with_recovery(
 	content: &str,
 	operation: &Operation,
@@ -2048,22 +2360,42 @@ fn locate_with_recovery(
 	path: &str,
 	exclusions: &[(usize, usize)],
 ) -> Result<(Operation, ParsedPattern, Vec<Candidate>), EditError> {
+	if operation.block {
+		let candidate = locate_block(content, path, operation, number)?;
+		return Ok((operation.clone(), literal_pattern(&operation.pattern_text, number)?, vec![
+			candidate,
+		]));
+	}
 	let pattern = parse_pattern(&operation.pattern_text, number)?;
 	match locate(content, &pattern, operation, number, path, exclusions) {
 		Ok(candidates) => {
 			let mut resolved = operation.clone();
 			if has_marker_lines(&operation.source_pattern_text) {
 				let normalized = normalize_text(content);
-				let raw = collect_candidates(content, &normalized, &pattern, MatchMode::Raw, false);
+				let raw =
+					collect_candidates(content, &normalized, &pattern, MatchMode::Raw, false, false);
 				let lenient = raw.candidates.is_empty()
-					&& !collect_candidates(content, &normalized, &pattern, MatchMode::Normalized, false)
-						.candidates
-						.is_empty();
+					&& !collect_candidates(
+						content,
+						&normalized,
+						&pattern,
+						MatchMode::Normalized,
+						false,
+						false,
+					)
+					.candidates
+					.is_empty();
 				resolved.whitespace_matched = lenient;
 			}
 			Ok((resolved, pattern, candidates))
 		},
 		Err(original) => {
+			if original.to_string().contains(" is ambiguous: ")
+				&& let Some(every) = trailing_all_flag(operation, number)
+				&& let Ok(candidates) = locate(content, &pattern, &every, number, path, exclusions)
+			{
+				return Ok((every, pattern, candidates));
+			}
 			for candidate in recover_pattern_candidates(
 				&operation.pattern_text,
 				matches!(operation.rewrite, OperationRewrite::Inline { .. }),
@@ -2268,10 +2600,14 @@ fn no_op_error(
 	EditError::rejected(Rejection::NoChange, format!("{base}{grounding}{hint}"))
 }
 
+/// One edit standing for two overlapping ones, when they are compatible:
+/// they project to the same text, or (with `absorb`) one is a deletion and
+/// the other an edit inside it, which then replaces the deleted span.
 fn reconcile_overlap(
 	content: &str,
 	left: &PlannedEdit,
 	right: &PlannedEdit,
+	absorb: bool,
 ) -> Option<PlannedEdit> {
 	let start = left.start.min(right.start);
 	let end = left.end.max(right.end);
@@ -2293,7 +2629,7 @@ fn reconcile_overlap(
 				operation_number: inner.operation_number,
 			})
 	};
-	if let Some(result) = container(left, right).or_else(|| container(right, left)) {
+	if absorb && let Some(result) = container(left, right).or_else(|| container(right, left)) {
 		return Some(result);
 	}
 	let project = |edit: &PlannedEdit| {
@@ -2305,6 +2641,61 @@ fn reconcile_overlap(
 		replacement: project(left),
 		operation_number: left.operation_number,
 	})
+}
+
+/// Where lines land beside `candidate`'s match: at the start of its first
+/// line, or at the end of its last line, ahead of that line's newline so the
+/// file keeps its EOF convention.
+fn insertion_offset(content: &str, candidate: &Candidate, at: Placement) -> usize {
+	match at {
+		Placement::Before => content[..candidate.match_start]
+			.rfind('\n')
+			.map_or(0, |at| at + 1),
+		Placement::After => {
+			let end = candidate.match_end;
+			if end > 0 && content.as_bytes()[end - 1] == b'\n' {
+				end - 1
+			} else {
+				content[end..]
+					.find('\n')
+					.map_or(content.len(), |at| end + at)
+			}
+		},
+	}
+}
+
+/// Text that puts the `moved` lines at `offset` (see [`insertion_offset`]).
+///
+/// A `paragraph` (a block that stood between blank lines) keeps a blank line
+/// towards each neighbour that is code, as [`full_line_deletion`]
+/// keeps them where the block left: none against a blank line, the file's
+/// edge, or the bracket that encloses it.
+fn frame_paste(
+	content: &str,
+	offset: usize,
+	moved: &str,
+	at: Placement,
+	paragraph: bool,
+) -> String {
+	let (above, below) = match at {
+		Placement::Before => {
+			(content[..offset].lines().next_back(), content[offset..].lines().next())
+		},
+		Placement::After => (content[..offset].lines().next_back(), content[offset..].lines().nth(1)),
+	};
+	let apart_above = paragraph
+		&& above.is_some_and(|line| {
+			!line.trim().is_empty() && !line.trim_end().ends_with(['(', '[', '{'])
+		});
+	let apart_below = paragraph
+		&& below.is_some_and(|line| {
+			!line.trim().is_empty() && !line.trim_start().starts_with([')', ']', '}'])
+		});
+	let gap = |apart: bool| if apart { "\n" } else { "" };
+	match at {
+		Placement::Before => format!("{}{moved}\n{}", gap(apart_above), gap(apart_below)),
+		Placement::After => format!("\n{}{moved}{}", gap(apart_above), gap(apart_below)),
+	}
 }
 
 /// Edits and advisories from locating operations against one base text.
@@ -2343,6 +2734,11 @@ fn plan_operations(
 		let index = queue[cursor];
 		cursor += 1;
 		let number = index + 1;
+		// Paste resolves its source and destination against the same file
+		// version. A cut alone never schedules a removal.
+		if matches!(operations[index].rewrite, OperationRewrite::Cut) {
+			continue;
+		}
 		let exclusions = if retried.contains(&index) {
 			plan
 				.edits
@@ -2368,11 +2764,12 @@ fn plan_operations(
 				},
 			};
 		let (edits, notes, last_match) = (plan.edits.len(), plan.notes.len(), plan.last_match);
-		if let Some(note) = &operations[index].recovery_note {
+		if let Some(note) = &operation.recovery_note {
 			plan.notes.push((number, note.clone()));
 		}
 		let planned = plan_operation(
-			content, index, &operation, &pattern, candidates, removed, path, noop, &mut plan,
+			content, operations, index, &operation, &pattern, candidates, removed, path, noop,
+			&mut plan,
 		);
 		if let Err(error) = planned {
 			plan.edits.truncate(edits);
@@ -2397,6 +2794,7 @@ fn plan_operations(
 )]
 fn plan_operation(
 	content: &str,
+	operations: &[Operation],
 	index: usize,
 	operation: &Operation,
 	pattern: &ParsedPattern,
@@ -2421,30 +2819,52 @@ fn plan_operation(
 		candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.start));
 	}
 	match &operation.rewrite {
+		// The paste that follows plans the whole move, so a paste that fails
+		// leaves the block where it is.
+		OperationRewrite::Cut => plan.last_match = candidates[0].match_start,
+		OperationRewrite::Paste { cut, at } => {
+			let anchor = &candidates[0];
+			let source = &operations[*cut - 1];
+			let (_, _, located) = locate_with_recovery(content, source, *cut, path, &[])?;
+			// A cut takes whole lines, however much of them its Find quoted.
+			let lines_start = insertion_offset(content, &located[0], Placement::Before);
+			let lines_end = insertion_offset(content, &located[0], Placement::After);
+			let moved = &content[lines_start..lines_end];
+			let (start, end) = full_line_deletion(content, lines_start, lines_end);
+			// The deletion also took a blank line: the block stood apart, and
+			// stays apart where it lands.
+			let paragraph = start < lines_start || end > (lines_end + 1).min(content.len());
+			let offset = insertion_offset(content, anchor, *at);
+			if (anchor.match_start < lines_end && lines_start < anchor.match_end)
+				|| (offset > start && offset < end)
+			{
+				return Err(EditError::matched(format!(
+					"Operation {number}: the {} anchor lies inside the block operation {cut} cuts. \
+					 Anchor on a line outside that block.",
+					at.paste_header()
+				)));
+			}
+			plan.edits.push(PlannedEdit {
+				start,
+				end,
+				replacement: String::new(),
+				operation_number: number,
+			});
+			plan.edits.push(PlannedEdit {
+				start:            offset,
+				end:              offset,
+				replacement:      frame_paste(content, offset, moved, *at, paragraph),
+				operation_number: number,
+			});
+			plan.last_match = anchor.match_start;
+		},
 		OperationRewrite::Insert { text, at } => {
 			let body = text.strip_suffix('\n').unwrap_or(text);
 			for candidate in &candidates {
-				let (offset, replacement) = match at {
-					// Insert at the first anchor line's start, ahead of its
-					// indentation.
-					Placement::Before => {
-						let start = candidate.match_start;
-						let offset = content[..start].rfind('\n').map_or(0, |at| at + 1);
-						(offset, format!("{body}\n"))
-					},
-					// Insert before the final anchor line's newline, retaining
-					// its EOF convention.
-					Placement::After => {
-						let end = candidate.match_end;
-						let offset = if end > 0 && content.as_bytes()[end - 1] == b'\n' {
-							end - 1
-						} else {
-							content[end..]
-								.find('\n')
-								.map_or(content.len(), |at| end + at)
-						};
-						(offset, format!("\n{body}"))
-					},
+				let offset = insertion_offset(content, candidate, *at);
+				let replacement = match at {
+					Placement::Before => format!("{body}\n"),
+					Placement::After => format!("\n{body}"),
 				};
 				plan.edits.push(PlannedEdit {
 					start: offset,
@@ -2519,6 +2939,20 @@ fn plan_operation(
 				));
 			}
 		},
+		OperationRewrite::Explicit { text } if operation.block => {
+			let candidate = &candidates[0];
+			let (start, end) = (candidate.start, candidate.end);
+			if &content[start..end] == text {
+				return Err(no_op_error(path, noop, Some(number), Some((content, start)), None, None));
+			}
+			plan.edits.push(PlannedEdit {
+				start,
+				end,
+				replacement: text.clone(),
+				operation_number: number,
+			});
+			plan.last_match = start;
+		},
 		OperationRewrite::Explicit { text } => {
 			let resolved = resolve_references(text, removed)?;
 			let base = if resolved.trim().is_empty() {
@@ -2580,7 +3014,7 @@ fn plan_operation(
 			{
 				let one_line = base.split_whitespace().collect::<Vec<_>>().join(" ");
 				let repeated = vec![one_line; pattern.selection_ranges.len()];
-				let header = edit_header(path, operation.all);
+				let header = find_opener(path, operation.all);
 				let candidate = &candidates[0];
 				return Err(EditError::matched(
 					[
@@ -2591,13 +3025,13 @@ fn plan_operation(
 						),
 						"Copy-ready per-selection interpretation:".to_owned(),
 						format!(
-							"{header}\n*** Find\n{}\n*** Replace\n{}",
+							"{header}\n{}\n*** Replace\n{}",
 							operation.pattern_text,
 							repeated.join("\n")
 						),
 						"Copy-ready whole-span interpretation:".to_owned(),
 						format!(
-							"{header}\n*** Find\n{}\n*** Replace\n{}",
+							"{header}\n{}\n*** Replace\n{}",
 							operation.pattern_text,
 							rewrite_selection_spans(content, candidate, &repeated)
 						),
@@ -2622,6 +3056,26 @@ fn plan_operation(
 				} else {
 					base.clone()
 				};
+				// A Find quoted from its line's first visible character carries
+				// no indentation, so an indented Replace states that line's whole
+				// indentation: without this the file's own would precede it.
+				if candidate.start == candidate.match_start
+					&& rewrite.starts_with([' ', '\t'])
+					&& !operation.pattern_text.starts_with([' ', '\t'])
+					&& !pattern.edge_gaps.leading
+					&& pattern.selection_pairs.is_empty()
+				{
+					let line_start = content[..candidate.start]
+						.rfind('\n')
+						.map_or(0, |at| at + 1);
+					if content[line_start..candidate.start]
+						.bytes()
+						.all(|byte| matches!(byte, b' ' | b'\t'))
+					{
+						candidate.start = line_start;
+						candidate.match_start = line_start;
+					}
+				}
 				let rendered = render_rewrite(
 					&rewrite,
 					if candidate.captures.is_empty() {
@@ -2642,7 +3096,8 @@ fn plan_operation(
 					.is_empty()
 					.then(|| content[candidate.start..candidate.end].to_owned());
 				if deleted.is_some() {
-					candidate = expand_full_line_deletion(content, &candidate);
+					(candidate.start, candidate.end) =
+						full_line_deletion(content, candidate.start, candidate.end);
 				}
 				if candidates.len() == 1
 					&& let Some(deleted) = &deleted
@@ -2747,6 +3202,13 @@ fn merge_edits<'a>(
 	edits: &'a [PlannedEdit],
 	deferred: &BTreeMap<usize, usize>,
 ) -> Result<Vec<Cow<'a, PlannedEdit>>, (usize, usize)> {
+	let mut planned = HashMap::<usize, usize>::new();
+	for edit in edits {
+		*planned.entry(edit.operation_number).or_default() += 1;
+	}
+	// An operation with several edits (every match, or a move) is not one
+	// replacement a deletion can absorb: it waits and applies to the result.
+	let lone = |edit: &PlannedEdit| planned[&edit.operation_number] == 1;
 	let mut merged: Vec<Cow<'a, PlannedEdit>> = Vec::new();
 	for current in edits
 		.iter()
@@ -2764,7 +3226,8 @@ fn merge_edits<'a>(
 			merged.push(Cow::Borrowed(current));
 			continue;
 		}
-		if let Some(reconciled) = reconcile_overlap(content, previous, current) {
+		let absorb = lone(previous) && lone(current);
+		if let Some(reconciled) = reconcile_overlap(content, previous, current, absorb) {
 			*previous = Cow::Owned(reconciled);
 		} else if previous.operation_number != current.operation_number {
 			let (left, right) = (previous.operation_number, current.operation_number);

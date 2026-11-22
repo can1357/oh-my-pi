@@ -2400,6 +2400,11 @@ const streamAnthropicOnce = (
 				if (dropFastMode) {
 					dropAnthropicFastMode(nextParams);
 				}
+				// Snapshot the encoder's output before the caller's hook runs, so
+				// the empty-request diagnosis below can name which side emptied the
+				// conversation. `Array.isArray` (not `?.length ?? 0`) states the
+				// contract: a missing or non-array `messages` counts as empty.
+				const encodedMessageCount = Array.isArray(nextParams.messages) ? nextParams.messages.length : 0;
 				const replacementPayload = transport ? undefined : await options?.onPayload?.(nextParams, model);
 				if (replacementPayload !== undefined) {
 					nextParams = replacementPayload as typeof nextParams;
@@ -2440,6 +2445,28 @@ const streamAnthropicOnce = (
 						url: `${baseUrl}/v1/messages${isOAuthToken ? "?beta=true" : ""}`,
 						body: nextParams,
 					};
+				}
+				// Diagnose an empty provider request on the body that will actually
+				// be sent: after the caller's `onPayload` hook on the normal path,
+				// and after the transport's own request shaping on the transport
+				// path — which is where Bedrock runs the hook, so checking earlier
+				// would judge a body the transport is free to rewrite. Anthropic
+				// answers `messages: []` with a bare HTTP 400 "messages is
+				// required" that does not say who emptied the conversation, so name
+				// the model, provider, and — from the pre-hook snapshot — which side
+				// emptied it.
+				const sentMessages = transport
+					? (transportPayload as { messages?: unknown } | undefined)?.messages
+					: nextParams.messages;
+				const sentMessageCount = Array.isArray(sentMessages) ? sentMessages.length : 0;
+				if (sentMessageCount === 0) {
+					const detail =
+						encodedMessageCount === 0
+							? `Context had ${context.messages.length} input messages; none survived encoding.`
+							: `Context had ${context.messages.length} input messages; encoding produced ${encodedMessageCount}, then the onPayload hook returned an empty list.`;
+					throw new Error(
+						`anthropic: refusing to send a request with no messages for model ${model.id} (provider ${model.provider}). ${detail}`,
+					);
 				}
 				return nextParams;
 			};
@@ -4908,6 +4935,10 @@ function diffAnthropicActiveTools(
  * Keep top-level `tools` byte-stable across a conversation. The declared list
  * is the latest record's, minus names with no definition in `tools` or
  * `inactiveTools`, plus newly active tools appended with `defer_loading`.
+ * Before any record, `inactiveTools` are declared deferred after the active
+ * tools: Anthropic re-writes the system and message caches when a request
+ * declares a tool its prefix did not, even a deferred one, so a tool known to
+ * activate later must be in the first declaration.
  * Every recorded active-set change is replayed as a control before the
  * response of the request that made it; the change this request makes goes
  * at the tail. Records at a different index than they were written at are
@@ -4971,6 +5002,15 @@ function planAnthropicToolControls(
 		}
 		const toolChanges = ownChange ? diffAnthropicActiveTools(previous, activeNames, declaredSet) : [];
 		if (toolChanges.length > 0) inserts.push({ index: context.messages.length, spec: { toolChanges } });
+	} else if (activeNames.length > 0) {
+		// The API rejects a declaration whose tools are all deferred, hence the active-tools guard.
+		declared = [...activeNames];
+		for (const tool of context.inactiveTools ?? []) {
+			// Skips active names (their definition wins in `definitions`) and repeats.
+			if (deferred.has(tool.name) || definitions.get(tool.name) !== tool) continue;
+			declared.push(tool.name);
+			deferred.add(tool.name);
+		}
 	}
 
 	const tools: Tool[] = [];

@@ -4,19 +4,19 @@ import { register } from "../config/registry";
 export const cfgDisassembler = register({
 	id: "disassembler.backend",
 	type: "enum",
-	values: ["auto", "ghidra", "ida", "none"] as const,
+	values: ["auto", "ghidra", "ida", "binja", "none"] as const,
 	default: "auto",
 	ui: {
 		tab: "tools",
 		group: "Available Tools",
 		label: "Disassembler",
 		description:
-			"Backend for analysis selectors in read and eval's dsm namespace; bare executable reads show metadata only. Auto uses IDA Pro when installed, else Ghidra (downloaded on first analysis)",
+			"Backend for analysis selectors in read and eval's dsm namespace; bare executable reads show metadata only. Auto uses IDA Pro when installed, else Ghidra (downloaded on first analysis); Binary Ninja is used only when selected",
 		options: [
 			{
 				value: "auto",
 				label: "Auto",
-				description: "IDA Pro when an install with idalib is found, otherwise Ghidra",
+				description: "IDA Pro when an install with idalib is found, otherwise Ghidra; never Binary Ninja",
 			},
 			{
 				value: "ghidra",
@@ -28,6 +28,12 @@ export const cfgDisassembler = register({
 				value: "ida",
 				label: "IDA Pro",
 				description: "IDA Pro via idalib; analysis disabled when no install is found",
+			},
+			{
+				value: "binja",
+				label: "Binary Ninja",
+				description:
+					"Binary Ninja via its headless Python API (needs a headless-capable licence); never chosen by Auto; analysis disabled when no install is found",
 			},
 			{ value: "none", label: "None", description: "Executable metadata only; analysis disabled" },
 		],
@@ -44,7 +50,7 @@ export const cfgDisasmMaxOpen = register({
 		group: "Disassembler",
 		label: "Max Open Databases",
 		description:
-			"Most databases (omp.ida.* / omp.ghidra.* daemons in omp ps) open at once per project; opening another evicts an unreferenced idle one. Close retained dsm handles when done",
+			"Most databases open at once per project (each is a disasm unit in omp ps, labelled with its backend and binary); opening another evicts an unreferenced idle one. Close retained dsm handles when done",
 		options: [
 			{ value: "2", label: "2" },
 			{ value: "4", label: "4" },

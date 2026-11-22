@@ -1,6 +1,7 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { callTool } from "@oh-my-pi/pi-coding-agent/mcp/client";
+import { disposeLocalMcpHost } from "@oh-my-pi/pi-coding-agent/mcp/host/local";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
@@ -14,6 +15,11 @@ beforeAll(() => {
 	initTheme();
 });
 
+// The server must be one the host has never seen: a known one answers from the
+// host's store inside the reload window, however slowly it starts.
+beforeEach(disposeLocalMcpHost);
+afterEach(disposeLocalMcpHost);
+
 describe("/mcp reload status", () => {
 	it("reports servers still connecting after the bounded reload window", async () => {
 		const config: MCPStdioServerConfig = {
@@ -21,7 +27,7 @@ describe("/mcp reload status", () => {
 			command: process.execPath,
 			args: [FIXTURE_PATH],
 		};
-		const manager = new MCPManager(process.cwd(), null, async () => ({
+		const manager = new MCPManager(process.cwd(), async () => ({
 			configs: { delayed: config },
 			sources: {},
 			exaApiKeys: [],

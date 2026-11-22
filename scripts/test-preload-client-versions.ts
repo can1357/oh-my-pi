@@ -5,7 +5,5 @@
  * of the lookups themselves unset the variable locally and restore it after.
  */
 import { DEFAULT_CLAUDE_CODE_VERSION } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
-import { DEFAULT_GEMINI_CLI_VERSION } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 
-process.env.PI_AI_GEMINI_CLI_VERSION ||= DEFAULT_GEMINI_CLI_VERSION;
 process.env.PI_AI_CLAUDE_CODE_VERSION ||= DEFAULT_CLAUDE_CODE_VERSION;
