@@ -403,7 +403,18 @@ function applyMessageEntry(pending: Map<string, PendingToolCallRecord>, message:
 /** Finds tool calls left pending at the end of a session branch. */
 export function collectPendingToolCalls(entries: readonly SessionEntry[]): PendingToolCallDiagnostic[] {
 	const pending = new Map<string, PendingToolCallRecord>();
-	for (const entry of entries) {
+	// Each assistant message replaces what is pending, so the scan starts at the last one: nothing before it can
+	// remain, and a long branch's older entries are never read.
+	let start = 0;
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i]!;
+		if (entry.type === "message" && entry.message.role === "assistant") {
+			start = i;
+			break;
+		}
+	}
+	for (let i = start; i < entries.length; i++) {
+		const entry = entries[i]!;
 		if (entry.type === "message") {
 			applyMessageEntry(pending, entry.message);
 			continue;
