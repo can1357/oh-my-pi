@@ -14,6 +14,7 @@
 - Anthropic requests with no messages now fail locally with the model, provider, and how many messages arrived, instead of a bare `400 "messages is required"` ([#19881](https://github.com/can1357/oh-my-pi/pull/19881) by [@FnSGit](https://github.com/FnSGit))
 - Usage reports of a provider an extension registers now survive across omp processes. Registering a provider's first usage adapter no longer discards the reports another process cached for it, so each new session stops re-probing the provider's usage endpoint; replacing an existing adapter still invalidates them ([#20030](https://github.com/can1357/oh-my-pi/pull/20030) by [@ahsanatha](https://github.com/ahsanatha))
 - OpenAI and Codex requests no longer fail with `invalid_function_parameters` when an MCP tool schema has a `pattern` with an unescaped `[` inside a character class (e.g. `^[^[\]]*$`); the unsupported pattern is dropped from the tool definition ([#20137](https://github.com/can1357/oh-my-pi/issues/20137))
+- Gemini models behind Portkey with strict OpenAI compliance turned off now keep their thought signatures between tool calls, also through the auth gateway ([#20082](https://github.com/can1357/oh-my-pi/pull/20082) by [@smartinio](https://github.com/smartinio))
 
 ## [19.1.0] - 2026-11-21
 
