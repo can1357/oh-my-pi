@@ -58,7 +58,7 @@ import { resolveEditMode } from "../utils/edit-mode";
 import { attemptEditAutoRepair, type EditAutoRepairOutcome } from "./auto-repair";
 import { type AppliedEditSnapshot, createEditBlackboxRecorder } from "./blackbox";
 import hashlineCompactPrompt from "./hashline-compact.md" with { type: "text" };
-import { MAGIC_EDIT_FORMATS, magicEditPaths, runMagicEdit } from "./magic";
+import { MAGIC_EDIT_GRAMMAR, magicEditPaths, runMagicEdit } from "./magic";
 import magicEditDescription from "../prompts/tools/magic-edit.md" with { type: "text" };
 import { getLspBatchRequest } from "../lsp/batch";
 import { type EditToolDetails, type EditToolPerFileResult, type Operation } from "@oh-my-pi/pi-tui/tools/edit";
@@ -84,7 +84,6 @@ import {
 	cfgEditEnforceSeenLines,
 	cfgEditFuzzyMatch,
 	cfgEditFuzzyThreshold,
-	cfgEditMagicFormat,
 } from "./settings";
 import {
 	cfgLspDiagnosticsDeduplicate,
@@ -404,23 +403,21 @@ export class EditTool implements AgentTool<TInput> {
 	get mode(): EditMode {
 		if (this.#editMode) return this.#editMode;
 		const mode = resolveEditMode(this.session);
-		// `magic_edit` applies its model-written batch through `replace` (see `#magic`). `edit.mode: none`
+		// `magic` applies its model-written batch through `replace` (see `#magic`). `edit.mode: none`
 		// unregisters this tool on the next built-in reconcile; until then keep a valid schema.
-		return mode === "none" || mode === "magic_edit" ? "replace" : mode;
+		return mode === "none" || mode === "magic" ? "replace" : mode;
 	}
 
 	/**
-	 * `edit.mode: magic_edit`: calls carry described changes, which {@link runMagicEdit} turns
+	 * `edit.mode: magic`: calls carry described changes, which {@link runMagicEdit} turns
 	 * into one `replace` batch per file before anything reaches the native engine.
 	 */
 	get #magic(): boolean {
-		return this.#editMode === undefined && resolveEditMode(this.session) === "magic_edit";
+		return this.#editMode === undefined && resolveEditMode(this.session) === "magic";
 	}
 
 	get description(): string {
-		if (this.#magic) {
-			return prompt.render(magicEditDescription, { xml: cfgEditMagicFormat.get(this.session.settings) === "xml" });
-		}
+		if (this.#magic) return prompt.render(magicEditDescription);
 		return resolveEditToolDescription(this.mode, this.session.getActiveModel?.());
 	}
 
@@ -447,7 +444,7 @@ export class EditTool implements AgentTool<TInput> {
 	}
 
 	get customFormat(): { syntax: "lark"; definition: string } | undefined {
-		if (this.#magic) return MAGIC_EDIT_FORMATS[cfgEditMagicFormat.get(this.session.settings)];
+		if (this.#magic) return MAGIC_EDIT_GRAMMAR;
 		const definition = editGrammar(this.mode);
 		return definition === null ? undefined : { syntax: "lark", definition };
 	}
@@ -564,9 +561,20 @@ export class EditTool implements AgentTool<TInput> {
 				session: this.session,
 				input: params.input,
 				signal,
-				apply: (path, edits) => this.execute(toolCallId, { path, edits }, signal, undefined, context),
+				apply: (path, edits, rawSnapshot) =>
+					this.#execute(toolCallId, { path, edits }, signal, context, rawSnapshot),
 			});
 		}
+		return this.#execute(toolCallId, params, signal, context);
+	}
+
+	async #execute(
+		toolCallId: string,
+		params: EditParams,
+		signal?: AbortSignal,
+		context?: AgentToolContext,
+		rawSnapshot?: string,
+	): Promise<AgentToolResult<EditToolDetails, TInput>> {
 		let open = this.#sessions.get(toolCallId);
 		const argsJson = JSON.stringify(params);
 		if (open && this.#streamedArgs.get(toolCallId) !== argsJson) {
@@ -593,7 +601,14 @@ export class EditTool implements AgentTool<TInput> {
 		try {
 			outcome = await editSession.apply(
 				{ lspBatchId: batch?.id, lspFlush: batch?.flush ?? false },
-				(_error, request) => this.#write(request, signal),
+				async (_error, request) => {
+					if (rawSnapshot !== undefined && (await Bun.file(request.path).text()) !== rawSnapshot) {
+						throw new ToolError("The file changed after the numbered snapshot was read; re-read and retry.", {
+							path: request.path,
+						});
+					}
+					return this.#write(request, signal);
+				},
 			);
 			if (outcome.isError && batch?.flush) {
 				await flushLspWritethroughBatch(batch.id, this.session.cwd, signal);
@@ -670,8 +685,7 @@ export class EditTool implements AgentTool<TInput> {
 		if (this.#magic) {
 			// The payload names its files itself; the native inspectors do not know its syntax.
 			const input = (args as { input?: unknown } | null | undefined)?.input;
-			const format = cfgEditMagicFormat.get(this.session.settings);
-			return { paths: typeof input === "string" ? magicEditPaths(input, format) : [], entries: [], fileOps: [] };
+			return { paths: typeof input === "string" ? magicEditPaths(input) : [], entries: [], fileOps: [] };
 		}
 		const tagged = typeof args === "object" && args !== null ? (args as InspectedArgs) : undefined;
 		const cached = tagged?.[kInspection];

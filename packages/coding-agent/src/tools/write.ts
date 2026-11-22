@@ -34,14 +34,7 @@ import {
 } from "@oh-my-pi/pi-utils/ar";
 import { detectLineEnding, normalizeToLF, restoreLineEndings } from "../edit/normalize";
 
-import {
-	extractUriScheme,
-	InternalUrlRouter,
-	LocalProtocolHandler,
-	resolveLocalRoot,
-	sessionResolveContext,
-	sessionWriteContext,
-} from "../internal-urls";
+import { InternalUrlRouter, sessionResolveContext, sessionWriteContext } from "../internal-urls";
 import { readSnapshot } from "../commit/selective/journal";
 import { createLspWritethrough, type WritethroughCallback, writethroughNoop } from "../lsp";
 
@@ -50,12 +43,10 @@ import { getLspBatchRequest } from "../lsp/batch";
 import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
 
 import writeDescription from "../prompts/tools/write.md" with { type: "text" };
-import writeDeviceOnlyDescription from "../prompts/tools/write-device-only.md" with { type: "text" };
-import writeDeviceOnlyRefusal from "../prompts/tools/write-device-only-refusal.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 
 import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-bridge";
-import { formatApprovalArguments, truncateForPrompt } from "./approval";
+import { truncateForPrompt } from "./approval";
 import { approvalTargetKey } from "./approval-targets";
 import { assertEditableFile } from "./auto-generated-guard";
 
@@ -66,7 +57,7 @@ import { unwrapHashlineHeaderPath } from "./hashline-header-path";
 import { outputMeta } from "./output-meta";
 import { formatPathRelativeToCwd, probeLiteralPathExists, resolveToCwd, specialFileKind } from "./path-utils";
 import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
-import { enforcePlanModeWrite, resolvePlanPath, targetsLocalSandbox } from "./plan-mode-guard";
+import { enforcePlanModeWrite, resolvePlanPath } from "./plan-mode-guard";
 import { decodeUtf8Text } from "./read-format";
 import { routeReadThroughBridge } from "./read-summary";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -84,7 +75,7 @@ import {
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { maybeWriteSnapshotHeader, stripWriteContent } from "./write-content";
-import { docTopicsReadable } from "./xdev";
+import { docTopicsReadable } from "./doc-topics";
 
 import {
 	cfgLspDiagnosticsDeduplicate,
@@ -96,47 +87,15 @@ import {
 
 const EXECUTABLE_NOTICE = "[Notice: Made executable via chmod +x]";
 const URI_LIKE_WRITE_PATH_RE = /^([a-z][a-z0-9+.-]*):\/{1,2}(.*)$/i;
-const MISSING_DELIMITER_RE = /^([a-z][a-z0-9+.-]*)\/+(.*)$/i;
-
-/** True when `typo` is exactly one insertion, deletion, substitution, or adjacent swap away from `word`. */
-function isOneEditAway(typo: string, word: string): boolean {
-	if (typo === word || Math.abs(typo.length - word.length) > 1) return false;
-	let common = 0;
-	while (common < typo.length && common < word.length && typo[common] === word[common]) common++;
-	const a = typo.slice(common);
-	const b = word.slice(common);
-	if (a.slice(1) === b.slice(1) || a.slice(1) === b || a === b.slice(1)) return true;
-	return a.length >= 2 && a[0] === b[1] && a[1] === b[0] && a.slice(2) === b.slice(2);
-}
 
 function assertWriteTargetAddressable(target: string, router: InternalUrlRouter): void {
 	const trimmed = target.trim();
 	if (path.win32.isAbsolute(trimmed) || router.canHandle(trimmed)) return;
-
-	// Tool-device transports get typo recovery: a bare `<device>/x` or a near-miss
-	// scheme is a mistyped dispatch, never an intended filesystem path.
-	const deviceSchemes: string[] = [];
-	for (const [scheme, spec] of router.specs()) {
-		if (spec.write?.scope === "device") deviceSchemes.push(scheme);
-	}
-
-	const missingDelimiter = trimmed.match(MISSING_DELIMITER_RE);
-	if (missingDelimiter && deviceSchemes.includes(missingDelimiter[1]!.toLowerCase())) {
-		throw new ToolError(
-			`Unknown URI-like write target '${trimmed}'. Did you mean '${missingDelimiter[1]!.toLowerCase()}://${missingDelimiter[2]}'? Prefix the path with './' to write it as a filesystem path.`,
-		);
-	}
-
 	const uriLike = trimmed.match(URI_LIKE_WRITE_PATH_RE);
 	if (!uriLike) return;
 
 	const scheme = uriLike[1]!.toLowerCase();
-	const canonicalScheme = router.spec(scheme) ? scheme : deviceSchemes.find(device => isOneEditAway(scheme, device));
-	const suggestion = canonicalScheme
-		? ` Did you mean '${canonicalScheme}://${uriLike[2]}'?`
-		: deviceSchemes.length > 0
-			? ` Tool devices use '${deviceSchemes[0]}://<tool>'.`
-			: "";
+	const suggestion = router.spec(scheme) ? ` Did you mean '${scheme}://${uriLike[2]}'?` : "";
 	throw new ToolError(
 		`Unknown URI-like write target '${trimmed}'.${suggestion} Prefix the path with './' to write it as a filesystem path.`,
 	);
@@ -149,7 +108,7 @@ function assertWriteTargetAddressable(target: string, router: InternalUrlRouter)
  * expression (`src/foo.tsx:1-260:raw`) as the target. Because a literal colon
  * filename is legal on POSIX (issue #4618), that request otherwise resolves to
  * filesystem creation and reports success, leaving a stray zero-byte file the
- * model cannot recover from — the local analogue of the device-scheme near-miss guard
+ * model cannot recover from — the local analogue of the URI-scheme near-miss guard
  * ({@link assertWriteTargetAddressable}, issue #6123).
  *
  * Fires only on the high-confidence combination the report identifies: the tail
@@ -523,17 +482,6 @@ function isArchivePathNotFound(error: unknown): boolean {
 	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOTDIR";
 }
 
-/**
- * On-disk form of `local://<name>`, resolved the way the write itself resolves
- * it (session context, then process override, then main session) and shortened
- * to `~` so the refusal does not carry the home directory into transcripts;
- * undefined when `local://` has no root for this session.
- */
-function localFileDiskPathHint(session: ToolSession): string | undefined {
-	const options = LocalProtocolHandler.resolveOptions(sessionResolveContext(session));
-	return options ? shortenPath(path.join(resolveLocalRoot(options), "<name>")) : undefined;
-}
-
 function normalizeArchiveWriteSubPath(rawPath: string): string {
 	const normalized = rawPath.replace(/\\/g, "/");
 	if (normalized.length === 0) {
@@ -605,15 +553,6 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const params = args as Partial<WriteParams>;
 		const targetPath = typeof params.path === "string" ? params.path : "(missing)";
 		const content = typeof params.content === "string" ? params.content : "";
-		const unwrapped = unwrapHashlineHeaderPath(targetPath);
-		if (extractUriScheme(unwrapped) === "xd") {
-			try {
-				const parsed: unknown = JSON.parse(content);
-				return [`Path: ${truncateForPrompt(targetPath)}`, ...formatApprovalArguments(parsed, { showEmpty: true })];
-			} catch {
-				// Non-JSON payload falls back to raw content
-			}
-		}
 		return [`Path: ${truncateForPrompt(targetPath)}`, `Content:\n${truncateForPrompt(content)}`];
 	};
 	/**
@@ -629,9 +568,8 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	};
 	readonly label = "Write";
 	get description(): string {
-		const deviceOnly = this.session.deviceOnlyWrite === true && this.session.pendingFullWriteDescription !== true;
-		// The archive/SQLite target grammar lives in `xd://read/sources`; inline it when that doc is unreachable.
-		return prompt.render(deviceOnly ? writeDeviceOnlyDescription : writeDescription, {
+		// The archive/SQLite target grammar lives in `help://read/sources`; inline it when that doc is unreachable.
+		return prompt.render(writeDescription, {
 			readActive: docTopicsReadable(this.session),
 		});
 	}
@@ -968,31 +906,6 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			policy?.scope === "coordination" ||
 			policy?.scope === "reply" ||
 			(target !== undefined && policy?.cancels?.(target.url) === true);
-		// A device-only session grants `write` purely as the device transport (see
-		// createTools): device dispatches, file-free writes, and the session's
-		// local:// sandbox proceed; every other target is rejected before any
-		// handler, guard, conflict resolver, or bridge sees it.
-		if (
-			this.session.deviceOnlyWrite === true &&
-			policy?.scope !== "device" &&
-			!touchesNoFiles &&
-			!(await targetsLocalSandbox(this.session, path, signal))
-		) {
-			// A device-only session that still has `yield` is the read-only subagent
-			// shape: `write` is present only as the xd:// transport, yet the parent's
-			// briefing names a file path. Without naming the channel that does work,
-			// the rejection reads as a dead end (#14308). Keyed on `yield` being
-			// active rather than on an `isReadOnlyAgent` flag, which never reaches
-			// this session. When both the disk path and `yield` apply, the template
-			// names them as one route (return the path or the content through
-			// `yield`) instead of two competing deliverables.
-			throw new ToolError(
-				prompt.render(writeDeviceOnlyRefusal, {
-					diskPath: localFileDiskPathHint(this.session),
-					canYield: this.session.isToolActive?.("yield") === true,
-				}),
-			);
-		}
 		return untilAborted(signal, async () => {
 			// Text payloads get hashline display prefixes ([PATH#HASH] + LINE:) stripped if the model
 			// copied them from read output. Verbatim payloads (messages, process stdin, setting
@@ -1008,9 +921,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			assertWriteTargetAddressable(path, router);
 			if (target) {
 				if (policy?.via === "handler") {
-					// Device payloads are dispatch arguments, not resource text, so only
-					// non-device text writes are checked against a truncated read projection.
-					if (!verbatim && target.spec.backing !== "device" && endsWithReadTruncationNotice(content)) {
+					if (!verbatim && endsWithReadTruncationNotice(content)) {
 						let currentContent: string | undefined;
 						try {
 							const current = (await router.resolve(path, sessionResolveContext(this.session, { signal })))
@@ -1023,15 +934,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 						}
 						assertNotShorterReadProjection(path, content, currentContent, cleanContent);
 					}
-					// Handler-owned writes mutate state outside the sandbox unless they touch no
-					// files (peer messages, replies, background-work cancellation) or dispatch a
-					// device (which keeps each dispatched tool's own tier and policy).
-					if (policy?.scope !== "device") {
-						if (!touchesNoFiles) {
-							await enforcePlanModeWrite(this.session, path, { op: "update", signal });
-						}
-						emitWriteProgress(onUpdate, cleanBytes, path);
+					// Handler-owned writes mutate state outside the sandbox unless they touch no files (peer messages, replies, background-work cancellation).
+					if (!touchesNoFiles) {
+						await enforcePlanModeWrite(this.session, path, { op: "update", signal });
 					}
+					emitWriteProgress(onUpdate, cleanBytes, path);
 					const handlerResult = await router.write(
 						path,
 						cleanContent,

@@ -718,9 +718,9 @@ export class ExtensionRunner {
 	 * The agent loop emits `tool_call` at arg-prep time (before scheduling and
 	 * `tool_execution_start`) via the session's `beforeToolCall` wiring; the
 	 * marker tells `ExtensionToolWrapper.execute` not to emit a second event for
-	 * the same dispatch. Keyed by call id + tool name because a nested xd://
-	 * device dispatch reuses the model's toolCallId under a different tool name
-	 * and must still emit its own event. Bounded: markers for calls whose
+	 * the same dispatch. Keyed by call id + tool name because a tool command run
+	 * inside a `bash` call reuses the model's toolCallId while dispatching under
+	 * its own name and must still emit its own event. Bounded: markers for calls whose
 	 * execute path never runs (policy deny, validation failure) would otherwise
 	 * accumulate for the session's lifetime.
 	 */

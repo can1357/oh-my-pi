@@ -50,7 +50,7 @@ export const sloppyEditSchema = type({
 
 export type SloppyParams = typeof sloppyEditSchema.infer;
 
-/** `edit.mode: magic_edit`: changes in words, per file; an auxiliary model writes the patches. */
+/** `edit.mode: magic`: changes in words, per file; an auxiliary model writes the patches. */
 export const magicEditSchema = type({
 	input: type("string").describe("One section per file: the file, then the changes to it in words."),
 });

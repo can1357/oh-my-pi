@@ -626,12 +626,13 @@ describe.skipIf(process.platform !== "linux")("ptree subreaper stop", () => {
 	for (const [name, start] of [
 		[
 			"its signal is already aborted",
-			(cmd: string[]) => spawn(cmd, { subreaper: true, signal: AbortSignal.abort() }),
+			(cmd: string[], env: Record<string, string | undefined>) =>
+				spawn(cmd, { subreaper: true, env, signal: AbortSignal.abort() }),
 		],
 		[
 			"it is killed before the subreaper launches it",
-			(cmd: string[]) => {
-				const child = spawn(cmd, { subreaper: true });
+			(cmd: string[], env: Record<string, string | undefined>) => {
+				const child = spawn(cmd, { subreaper: true, env });
 				child.kill(new AbortError(new Error("stop"), ""));
 				return child;
 			},
@@ -643,8 +644,22 @@ describe.skipIf(process.platform !== "linux")("ptree subreaper stop", () => {
 			// not wait out a grace period during which the command starts.
 			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-subreaper-stop-"));
 			const marker = path.join(dir, "ran");
+			// A loaded runner can stall this process between spawn() and the stop
+			// for longer than the subreaper takes to boot and launch the command.
+			// A preload holds the subreaper's Bun until the stop has been issued, so
+			// the command can only start if the stop failed to end the subreaper.
+			const go = path.join(dir, "go");
+			const gate = path.join(dir, "gate.ts");
+			await Bun.write(
+				gate,
+				`import { existsSync } from "node:fs";\nconst until = Date.now() + 10_000;\nwhile (!existsSync(${JSON.stringify(go)}) && Date.now() < until) Bun.sleepSync(5);\n`,
+			);
 			try {
-				const child = start(["/bin/sh", "-c", `echo ran > '${marker}'; sleep 5`]);
+				const child = start(["/bin/sh", "-c", `echo ran > '${marker}'; sleep 5`], {
+					...Bun.env,
+					BUN_OPTIONS: `--preload=${gate}`,
+				});
+				await Bun.write(go, "");
 				expect(await child.wait().catch((error: unknown) => error)).toBeInstanceOf(AbortError);
 				// A command the subreaper launched in its last instant would be a real
 				// process outside our control; no event marks "it never wrote", so give

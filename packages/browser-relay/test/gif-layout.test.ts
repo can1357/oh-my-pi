@@ -36,10 +36,14 @@ it("places a pill beside the action, flipping and clamping for markers at the vi
 it("keeps a drag arrow clear of its endpoint disks and does not invent a heading for tiny drags", () => {
 	const anchor = { x: 20, y: 10 };
 	expect(dragHead(anchor, { x: 120, y: 10 })).toEqual({
-		tip: { x: 114, y: 10 }, left: { x: 100, y: 17 }, right: { x: 100, y: 3 },
+		tip: { x: 114, y: 10 },
+		left: { x: 100, y: 17 },
+		right: { x: 100, y: 3 },
 	});
 	expect(dragHead(anchor, { x: 20, y: 30 })).toEqual({
-		tip: { x: 20, y: 24 }, left: { x: 16, y: 16 }, right: { x: 24, y: 16 },
+		tip: { x: 20, y: 24 },
+		left: { x: 16, y: 16 },
+		right: { x: 24, y: 16 },
 	});
 	expect(dragHead(anchor, { x: 20, y: 12 })).toBeUndefined();
 });
