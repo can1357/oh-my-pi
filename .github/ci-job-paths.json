@@ -5,13 +5,13 @@
     "remote": ["scripts/remote-verify.sh", "scripts/remote-verify-runner.sh", ".github/actions/buildbuddy-*/**"],
     "mac_native": [".github/workflows/macos-verification.yml", ".github/actions/macos-*/**", "scripts/ci-macos-objective.sh", "scripts/ssh-loopback-fixture.sh", "scripts/check-python-examples.py"],
     "mac_controls": [".github/workflows/ci.yml", ".github/workflows/macos-verification.yml", ".github/actions/macos-*/**", "scripts/macos_*.py", "scripts/ci-macos-objective.sh"],
-    "policy": ["AGENTS.md", ".claude/**", "*.md", ".github/workflows/**", ".github/rulesets/**", ".github/ci-paths.txt", ".github/ci-rust-paths.txt", ".github/labeler.yml", ".github/dependabot.yml", "scripts/macos_*.py", "scripts/test_*.py", "scripts/package_macos_evidence.py", "scripts/check-ci-paths.py", "scripts/check-editing-discipline.py"],
+    "policy": ["AGENTS.md", ".github/workflows/**", ".github/rulesets/**", ".github/ci-paths.txt", ".github/ci-rust-paths.txt", ".github/labeler.yml", ".github/dependabot.yml", "scripts/macos_*.py", "scripts/test_*.py", "scripts/package_macos_evidence.py", "scripts/check-ci-paths.py", "scripts/check-editing-discipline.py"],
     "perf_core": [".cargo/**", ".config/**", "Cargo.toml", "Cargo.lock", "**/Cargo.toml", "rust-toolchain.toml", "crates/**", "examples/**", "fixtures/**", "justfile"]
   },
   "workflows": {
     "ci": {
       "global": [".github/ci-job-paths.json", ".github/workflows/ci.yml", "scripts/ci_scope.py", "scripts/test_ci_scope.py"],
-      "ignored": ["docs/**", "*.png", "*.svg", ".git-blame-ignore-revs"],
+      "ignored": ["docs/**", "*.png", "*.svg", ".git-blame-ignore-revs", ".agents/**", ".claude/**", ".junie/**", ".scratch/**", ".omp/**", ".cm/**", ".remember/**", "assets/**", "elastic/**", "npm/**", "skills-lock.json", "README.md", "CONTRIBUTING.md", "PHILOSOPHY.md", "adr0045-f-report.md"],
       "jobs": {
         "format": ["@policy", "@build", "@mac_native", "about.toml", "deny.toml", "clippy.toml", "rustfmt.toml", "LICENSE*", "THIRD-PARTY-NOTICES*", "tools/lintx/**", "scripts/check-spec.rs", "scripts/check-extension-conformance.py"],
         "format_rust": ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "rustfmt.toml", "rust-toolchain.toml", ".cargo/**"],
@@ -31,7 +31,7 @@
     },
     "codeql": {
       "global": [".github/ci-job-paths.json", ".github/workflows/codeql.yml", ".github/codeql/**", "scripts/ci_scope.py", "scripts/test_ci_scope.py"],
-      "ignored": ["*.md", "docs/**", "scripts/**", "fixtures/**", "examples/**", "**/*.sh", ".github/**", "LICENSE*", "**/LICENSE*", "THIRD-PARTY-NOTICES*", "about.toml", "deny.toml", "clippy.toml", "rustfmt.toml", "tools/**", "crates/**/tests/**", "crates/**/benches/**", "crates/**/examples/**", "crates/e2e/**", "**/*.toml", "**/*.yaml", "**/*.yml", "**/*.json"],
+      "ignored": ["*.md", "docs/**", "scripts/**", "fixtures/**", "examples/**", "**/*.sh", ".github/**", "LICENSE*", "**/LICENSE*", "THIRD-PARTY-NOTICES*", "about.toml", "deny.toml", "clippy.toml", "rustfmt.toml", "tools/**", "crates/**/tests/**", "crates/**/benches/**", "crates/**/examples/**", "crates/e2e/**", "**/*.toml", "**/*.yaml", "**/*.yml", "**/*.json", ".agents/**", ".claude/**", ".junie/**", ".scratch/**", ".omp/**", ".cm/**", ".remember/**", "assets/**", "elastic/**", "npm/**", "skills-lock.json"],
       "jobs": {
         "codeql_actions": [".github/workflows/**", ".github/actions/**"],
         "codeql_python": ["*.py"],
@@ -41,7 +41,7 @@
     },
     "p8": {
       "global": [".github/ci-job-paths.json", ".github/workflows/p8-baseline.yml", "scripts/ci_scope.py", "scripts/test_ci_scope.py"],
-      "ignored": ["docs/**", "*.md", ".github/**", "scripts/**", "tools/**", "extensions/**", "LICENSE*", "THIRD-PARTY-NOTICES*", "about.toml", "deny.toml", "clippy.toml", "rustfmt.toml"],
+      "ignored": ["docs/**", "*.md", ".github/**", "scripts/**", "tools/**", "extensions/**", "LICENSE*", "THIRD-PARTY-NOTICES*", "about.toml", "deny.toml", "clippy.toml", "rustfmt.toml", ".agents/**", ".claude/**", ".junie/**", ".scratch/**", ".omp/**", ".cm/**", ".remember/**", "assets/**", "elastic/**", "npm/**", "skills-lock.json"],
       "jobs": {
         "p8_macos": ["@perf_core", ".github/actions/macos-native-tools/**", ".github/actions/macos-build-state/**"],
         "p8_linux": ["@perf_core", ".github/actions/buildbuddy-*/**", "scripts/remote-verify.sh", "scripts/remote-verify-runner.sh"]

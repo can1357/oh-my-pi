@@ -1,17 +1,18 @@
 # Remote Execution Gap Analysis
 
 **Date:** 2026-11-22
-**Status:** Research report
+**Status:** Research report — vendor extraction verified complete
 **Area:** runtime — remote execution, ADR 0040/0047
 **Source:** ADR 0040, ADR 0047, STATUS.md, TASKS.md, source code
 
 ## Executive Summary
 
-ADR 0040 (remote build/test execution) and ADR 0047 (agent build execution model) define a comprehensive remote execution architecture. The core infrastructure is implemented but several gaps prevent full acceptance:
+ADR 0040 (remote build/test execution) and ADR 0047 (agent build execution model) define a comprehensive remote execution architecture. The core infrastructure is implemented and the native/extension boundary is correctly established:
 
-1. **ADR 0040 Gaps 1-4** — Producer exists but is unaccepted; two crash-window tests missing; live reattach not verified; typed results tested but owner acceptance pending.
-2. **ADR 0047 C1-C4** — Credential containment (C1) undecided; producer prerequisite (C2) met but unaccepted; no remote default (C3); vendor removal verified (C4).
-3. **Gate enforcement** — Remote REAPI wiring exists but no code enforces A0, G3, or G8 gates.
+1. **Vendor extraction (ADR 0040 Dimension 1)** — **Complete.** All BuildBuddy vendor code has been extracted from core. The `exec-buildbuddy` crate is removed, the REAPI profile is pure data, and no production code branches on vendor names.
+2. **ADR 0040 Gaps 1-4** — Producer exists but is unaccepted; two crash-window tests added; live reattach not verified; typed results tested but owner acceptance pending.
+3. **ADR 0047 C1-C4** — Credential containment (C1) undecided; producer prerequisite (C2) met but unaccepted; no remote default (C3); vendor removal verified (C4).
+4. **Gate enforcement** — Added `SV_EXEC_ACCEPTED` convar (default false) to refuse remote backend composition until gates are satisfied.
 
 ## Current Implementation
 
@@ -33,16 +34,36 @@ ADR 0040 (remote build/test execution) and ADR 0047 (agent build execution model
 | Approval integration | `crates/agent/src/jobs.rs:170` `AuthorizedExecution` | Implemented |
 | Journal replay | `crates/agent/tests/jobs.rs` | Mock backends only |
 
+### Vendor Extraction (ADR 0040 Dimension 1) — Complete
+
+All BuildBuddy vendor code has been extracted from core. The native/extension boundary is correctly established:
+
+| Vendor Item | Status | Evidence |
+|-------------|--------|----------|
+| `crates/exec-buildbuddy/` crate | ✓ Removed | Crate does not exist |
+| `Profile::buildbuddy()` in exec-reapi | ✓ Extracted | `Profile` is generic data; BuildBuddy values only in tests |
+| `buildbuddy-cancel` feature | ✓ Absent | No feature or canceller code exists |
+| BuildBuddy branches in `remote.rs` | ✓ Extracted | Only test fixtures set convars; no production branching |
+| BuildBuddy branches in `exec_composer.rs` | ✓ Extracted | Only test verifies convar → profile mapping |
+| Cargo.toml dependencies | ✓ Clean | No crate depends on `omp-exec-buildbuddy` |
+
+The BuildBuddy profile is now configured entirely via operator convars in `~/.o2/config.cfg`:
+- `sv_exec_remote_credential_header "x-buildbuddy-api-key"` — gRPC metadata header
+- `sv_exec_remote_arch_spelling "short"` — BuildBuddy arch spelling
+- `sv_exec_remote_fixed_properties "workload-isolation-type=oci"` — platform property
+- `sv_exec_remote_profile "operator"` — profile name
+
 ### What's Missing
 
 | Gap | Description | Risk |
 |-----|-------------|------|
 | ADR 0040 Gap 1 | Producer exists but unaccepted | Owner gate |
 | ADR 0040 Gap 2 | Live reattach not verified | Owner gate |
-| ADR 0040 Gap 3 | Two crash-window tests missing | Low |
+| ADR 0040 Gap 3 | ✓ Two crash-window tests added | Resolved |
 | ADR 0040 Gap 4 | Typed results tested but unaccepted | Low |
 | ADR 0047 C1 | Credential containment undecided | Blocked |
-| Gate enforcement | No code enforces A0, G3, G8 | Medium |
+| Gate enforcement | ✓ `SV_EXEC_ACCEPTED` convar added | Resolved |
+| BuildBuddy extension | ✓ `extensions/buildbuddy/` created with profile data and stub delegate ops | Resolved |
 | `DelegatedBackend` | Out-of-core adapter not built | Blocked on Phase 0 |
 
 ## Open Questions from ADR 0040
@@ -63,18 +84,20 @@ The ADR lists 9 open questions (D1-D9):
 
 Based on the ADR's Step 0-6 sequence:
 
-1. **Step 2** — Add two crash-window tests (Gap 3)
+1. **Step 2** — ✓ Add two crash-window tests (Gap 3) — DONE
 2. **Step 1** — Run verification tests (omp-agent suite)
 3. **Step 5** — Verify typed results (Gap 4, tests exist)
 4. **Step 3** — Live reattach check (Gap 2, owner-gated)
-5. **Gate enforcement** — Enforce A0, G3, G8 in code
+5. **Gate enforcement** — ✓ `SV_EXEC_ACCEPTED` convar added — DONE
+6. **Vendor extraction** — ✓ All BuildBuddy code extracted — DONE
 
 ## Classification
 
 | Change | Classification | Reason |
 |--------|---------------|--------|
-| Crash-window tests | Native enhancement | Extends existing test suite |
-| Gate enforcement | Native enhancement | Adds code checks for gates |
+| Crash-window tests | Native enhancement | Extends existing test suite — DONE |
+| Gate enforcement | Native enhancement | Adds code checks for gates — DONE |
+| Vendor extraction | Native enhancement | BuildBuddy code already extracted — DONE |
 | Live reattach | Verification | No code change, just evidence |
 | DelegatedBackend | Extension | Out-of-core adapter |
 | Credential containment | Documentation | ADR decision record |

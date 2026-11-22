@@ -23,14 +23,30 @@ The following operator convars must be set in `~/.o2/config.cfg`:
 ```
 sv_exec_accepted true
 sv_exec_agent_runs true
-sv_exec_remote_endpoint grpcs://exec.buildbuddy.app
+sv_exec_remote_endpoint "grpcs://app.buildbuddy.io"
+sv_exec_remote_image "docker://gcr.io/flame-public/rbe-ubuntu24-04@sha256:f7db0d4791247f032fdb4451b7c3ba90e567923a341cc6dc43abfc283436791a"
+sv_exec_remote_credential "!security find-generic-password -s buildbuddy-omp2-trial -w"
+sv_exec_remote_credential_header "x-buildbuddy-api-key"
+sv_exec_remote_arch_spelling "short"
+sv_exec_remote_fixed_properties "workload-isolation-type=oci"
+sv_exec_remote_profile "operator"
+sv_sandbox_allow_domains ["www.googleapis.com", "app.buildbuddy.io"]
 ```
 
 - `sv_exec_accepted` — Gate for remote execution (ADR 0047). Must be explicitly set after the owner accepts ADR 0040 Gaps 1-4.
 - `sv_exec_agent_runs` — Enables the `remote_build` session tool.
 - `sv_exec_remote_endpoint` — The REAPI endpoint address. Empty disables remote execution.
+- `sv_exec_remote_image` — Digest-pinned container image for the BuildBuddy runner.
+- `sv_exec_remote_credential` — Command that outputs the BuildBuddy API key. The key is stored in the macOS Keychain under service `buildbuddy-omp2-trial`.
+- `sv_exec_remote_credential_header` — gRPC metadata header for API key auth. BuildBuddy requires `x-buildbuddy-api-key`.
+- `sv_exec_remote_arch_spelling` — Architecture property spelling. BuildBuddy uses `short` (`Arch`/`amd64`), not `reapi` (`ISA`/`x86-64`).
+- `sv_exec_remote_fixed_properties` — Fixed platform properties. BuildBuddy requires `workload-isolation-type=oci`.
+- `sv_exec_remote_profile` — REAPI profile name. BuildBuddy uses `operator`.
+- `sv_sandbox_allow_domains` — Domains the sandbox egress broker admits. The REAPI backend requires:
+  - `www.googleapis.com` — OAuth/token authentication before any REAPI call. Without this, auth fails and the submission is unknown.
+  - `app.buildbuddy.io` — The REAPI gRPC endpoint for job submission and status polling.
 
-**Status:** `sv_exec_accepted` and `sv_exec_agent_runs` are set. `sv_exec_remote_endpoint` needs to be configured with the BuildBuddy endpoint.
+**Status:** All convars are set. The sandbox allowlist includes both required domains. The BuildBuddy-specific profile convars (credential_header, arch_spelling, fixed_properties, profile) are required for the `remote_build` tool to authenticate and submit correctly — without them, the tool fails silently.
 
 ## Test Procedure
 

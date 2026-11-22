@@ -1,0 +1,34 @@
+id = "omp.buildbuddy"
+name = "BuildBuddy remote execution"
+version = "0.1.0"
+omp_api = 1
+description = "BuildBuddy REAPI profile data and Run API delegate (ADR 0040 Dimension 1)"
+entry = "omp_buildbuddy"
+capabilities = ["env.net.fetch"]
+
+# BuildBuddy vendor integration extension. Provides:
+# - REAPI profile data (credential header, arch spelling, fixed properties)
+# - Run API delegate operations (describe, start, poll, cancel)
+# The native REAPI gRPC client (crates/exec-reapi/) uses the profile data.
+# The future DelegatedBackend adapter will call the Run API operations.
+
+[[declarations]]
+id = "exec"
+kind = "soft"
+module = "omp_buildbuddy"
+key = "exec@.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"
+
+[[declarations]]
+id = "mount_exec_leaves"
+kind = "hook"
+module = "omp_buildbuddy"
+key = "extension_activate/observe"
+trigger = "lazy"
+api = 1
+failure = "fail-open"
+
+[requires]
+python = ">=3.14"

@@ -39,6 +39,7 @@ See [WAVE1.md](WAVE1.md) and rescue triage [RESCUE.md](RESCUE.md).
 | [`gitlab/`](gitlab/) | GitLab T2 backend (`omp_gitlab` forge + GitLab CI) |
 | [`pr-review/`](pr-review/) … [`spec-flow/`](spec-flow/) | Rescue wave 1 (eight ports; see RESCUE.md) |
 | [`vault/`](vault/) | Note graph reads through `vault://` (`info`, `section`, `backlinks`, `tag`, `map`) |
+| [`buildbuddy/`](buildbuddy/) | BuildBuddy REAPI profile data and Run API delegate (ADR 0040 Dimension 1) |
 
 ## Conformance (ADR 0049 D5)
 

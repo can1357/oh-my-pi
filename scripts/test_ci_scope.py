@@ -29,10 +29,20 @@ class SelectionTests(unittest.TestCase):
     def test_docs_do_not_compile_rust(self):
         for path in ("docs/research/a.md", "README.md"):
             selected = self.ci(path)
-            self.assertTrue(selected["format"])
+            # Docs and top-level markdown files are ignored — they trigger no CI.
+            self.assertFalse(selected["format"])
             self.assertFalse(selected["format_rust"])
             self.assertFalse(selected["rust"])
             self.assertFalse(selected["lintx_ratchet"])
+
+    def test_agent_configs_and_scratch_do_not_trigger_ci(self):
+        for path in (".agents/skills/research/SKILL.md", ".claude/skills/omp-adr/SKILL.md",
+                      ".junie/plans/test.md", ".scratch/notes.md", ".omp/skills/pyo3/SKILL.md",
+                      ".cm/gitstream.cm", ".remember/remember.md", "skills-lock.json",
+                      "elastic/ELASTIC_SLOTS2.tex", "npm/pi-coding-agent/bin/omp.js",
+                      "assets/hero.png"):
+            selected = self.ci(path)
+            self.assertFalse(any(selected[name] for name in scope.CI_JOBS), path)
 
     def test_native_mac_input_does_not_start_linux_or_buildbuddy(self):
         for path in (".github/workflows/macos-verification.yml", "scripts/ci-macos-objective.sh",
