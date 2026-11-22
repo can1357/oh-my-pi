@@ -281,6 +281,12 @@ behavior {
 			exact="meta/muse-wonder-1.0" exact="mistral/mistral-large-4" exact="moonshotai/Kimi-K3.1-Pro" \
 			exact="nvidia/nemotron-3.5-super-vl" exact="stealth/glyph-cluster:free" exact="tencent/hy4-flash"
 	}
+	// Baseten lists its decision models in the `/v1/models` chat roster, but they
+	// answer typed questions only at `/v1/systemone` (System One), outside the chat
+	// transports.
+	api-routes provider="baseten" default="openai-completions" {
+		route "baseten-systemone" prefix="decision-models/"
+	}
 	// ZenMux fronts Anthropic ids on a dedicated Messages endpoint; every
 	// other namespace stays on chat completions.
 	api-routes provider="zenmux" default="openai-completions" {

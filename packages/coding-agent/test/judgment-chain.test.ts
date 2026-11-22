@@ -379,6 +379,36 @@ describe("ChainJudge", () => {
 		expect(urls).toEqual(["https://judge.example.test/v1/systemone"]);
 	});
 
+	it("answers through a bundled Baseten decision model assigned to the judge role", async () => {
+		const joey = getBundledModel("baseten", "decision-models/baseten-joey-2b-latest");
+		if (!joey) throw new Error("Expected the bundled Baseten joey-1 decision model");
+		const settings = Settings.isolated({ modelRoles: { judge: `${joey.provider}/${joey.id}` } });
+		const registry = makeRegistry([joey], { baseten: "bt-key" });
+		const calls: { url: string; authorization: string | null; model: string }[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (url, init) => {
+				const { model } = JSON.parse(String(init?.body)) as { model: string };
+				calls.push({ url: String(url), authorization: new Headers(init?.headers).get("authorization"), model });
+				return Response.json({
+					model: "decision-models/baseten-joey-latest",
+					answers: {
+						level: { type: "choice", choice: "high", confidence: 0.9, probabilities: { low: 0.1, high: 0.9 } },
+					},
+					usage: { input_tokens: 40, output_tokens: 1 },
+				});
+			}),
+		);
+		const judge = new ChainJudge({ settings, registry, purpose: "test" });
+
+		const result = await judge.judge({ state: "redesign the scheduler", questions: { level: TIER_QUESTION } });
+
+		expect(result.answers.level.choice).toBe("high");
+		expect(calls).toEqual([
+			{ url: "https://inference.baseten.co/v1/systemone", authorization: "Bearer bt-key", model: joey.id },
+		]);
+		expect(hasNativeJudge(settings, registry)).toBe(true);
+	});
+
 	it("never degrades a native lead to a prompted model, and keeps the native gate on the judge role", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: `${LOCAL.provider}/${LOCAL.id}` },

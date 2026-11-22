@@ -4811,15 +4811,28 @@ const BASETEN_CACHE_MIGRATION_MODEL_IDS = [
 	"deepseek-ai/DeepSeek-V4-Flash-0731",
 	"deepseek-ai/DeepSeek-V4.1-Flash",
 	"deepseek-ai/DeepSeek-V4-Pro-0813",
+	// Discovery used to list these decision models as chat models.
+	"decision-models/baseten-elephant-9b-latest",
+	"decision-models/baseten-mammoth-27b-latest",
+	"decision-models/baseten-joey-2b-latest",
 ] as const;
+
+/**
+ * Baseten serves System One (`/v1/systemone`) beside, not under, its `/v1` chat
+ * root; derive it so a custom gateway base URL keeps both aligned.
+ */
+export function basetenSystemOneBaseUrl(chatBaseUrl: string): string {
+	return chatBaseUrl.replace(/\/+$/g, "").replace(/\/v1$/, "");
+}
 
 export function basetenModelManagerOptions(
 	config?: BasetenModelManagerConfig,
-): ModelManagerOptions<"openai-completions"> {
-	return createOpenAICompatibleModelManagerOptions({
+): ModelManagerOptions<"openai-completions" | "baseten-systemone"> {
+	const defaultBaseUrl = "https://inference.baseten.co/v1";
+	return createOpenAICompatibleModelManagerOptions<"openai-completions" | "baseten-systemone">({
 		api: "openai-completions",
 		providerId: "baseten",
-		defaultBaseUrl: "https://inference.baseten.co/v1",
+		defaultBaseUrl,
 		config,
 		dynamicModelsAuthoritative: true,
 		requireApiKey: true,
@@ -4858,6 +4871,20 @@ export function basetenModelManagerOptions(
 			};
 
 			const baseModel = mapWithBundledReference(entry, defaults, reference);
+
+			// Decision models answer typed questions at `/v1/systemone`, not chat completions.
+			if (apiRouteFor("baseten", defaults.id)?.api === "baseten-systemone") {
+				return {
+					...baseModel,
+					api: "baseten-systemone",
+					baseUrl: basetenSystemOneBaseUrl(config?.baseUrl ?? defaultBaseUrl),
+					kind: "judge",
+					reasoning: false,
+					input: vision ? ["text", "image"] : ["text"],
+					cost,
+					supportsTools: false,
+				};
+			}
 
 			return {
 				...baseModel,

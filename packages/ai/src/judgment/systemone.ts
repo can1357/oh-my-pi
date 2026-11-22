@@ -22,6 +22,10 @@
  *   go in a top-level array of base64 data URLs. Drex also rejects any text
  *   holding a base64 media data URL, so each one in `state`, `instructions` or
  *   `criteria` is replaced by a description (see {@link describeMediaDataUrls}).
+ * - `baseten-systemone`: Baseten Model APIs' `POST {baseUrl}/v1/systemone` for
+ *   `decision-models/*` (elephant, mammoth, joey). Same body, but images travel
+ *   as `image_url` parts of a user message under `state.messages`, and a
+ *   request may carry at most 512 answer options across its questions.
  */
 import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import { $env, isRecord } from "@oh-my-pi/pi-utils";
@@ -36,7 +40,13 @@ import {
 	type Questions,
 	tokenUsage,
 } from "./types";
-import { type DecodedJudgment, finiteNumber, type JudgmentImageAssets, type JudgmentWire } from "./wire";
+import {
+	type DecodedJudgment,
+	finiteNumber,
+	type JudgmentImageAssets,
+	type JudgmentOptionBudget,
+	type JudgmentWire,
+} from "./wire";
 
 function decodeSystemOne(payload: unknown): DecodedJudgment | undefined {
 	if (!isRecord(payload) || !isRecord(payload.answers)) return undefined;
@@ -277,4 +287,74 @@ export const naceWire: JudgmentWire = {
 			},
 			model,
 		),
+};
+
+/** Most options one choice question may list on Baseten. */
+const BASETEN_MAX_CHOICE_OPTIONS = 255;
+/** Most levels one score question may list on Baseten. */
+const BASETEN_MAX_SCORE_LEVELS = 10;
+
+/** Options a question counts against Baseten's per-request budget: a yes/no counts as two. */
+function basetenOptionCost(question: Question): number {
+	switch (question.type) {
+		case "choice":
+			return Object.keys(question.criteria).length;
+		case "score":
+			return question.criteria.length;
+		case "noul":
+			return 2;
+		case "box":
+			return 0;
+	}
+}
+
+/** Baseten rejects a request whose questions list more options than this, however they split. */
+export const BASETEN_OPTION_BUDGET: JudgmentOptionBudget = { limit: 512, cost: basetenOptionCost };
+
+/** Reject a question Baseten would refuse for its option count, before spending a request on it. */
+function checkBasetenQuestion(id: string, question: Question): void {
+	if (question.type === "choice" && Object.keys(question.criteria).length > BASETEN_MAX_CHOICE_OPTIONS) {
+		throw new AIError.ValidationError(
+			`Baseten judgment question "${id}" lists more than ${BASETEN_MAX_CHOICE_OPTIONS} choice options`,
+		);
+	}
+	if (question.type === "score" && question.criteria.length > BASETEN_MAX_SCORE_LEVELS) {
+		throw new AIError.ValidationError(
+			`Baseten judgment question "${id}" lists more than ${BASETEN_MAX_SCORE_LEVELS} score levels`,
+		);
+	}
+}
+
+/**
+ * `state` as Baseten reads it for a text-only request. It treats any object holding a `messages`
+ * key as a conversation and rejects roles other than user and assistant, so such an object goes
+ * in an array, which it renders as JSON text like any other structured state.
+ */
+function basetenTextState(state: JudgmentRequest["state"]): JudgmentRequest["state"] {
+	return isRecord(state) && !Array.isArray(state) && Object.hasOwn(state, "messages") ? [state] : state;
+}
+
+/**
+ * Baseten Model APIs decision models: elephant-1, mammoth-1 and joey-1 at
+ * `POST {baseUrl}/v1/systemone` (https://docs.baseten.co/reference/inference-api/system-one).
+ * Images are base64 PNG, JPEG or WebP data URLs in a user message under `state.messages`, at most
+ * 16 per request, with `detail` left unset; the state text rides in the same message.
+ */
+export const basetenWire: JudgmentWire = {
+	...systemOneWire("/v1/systemone"),
+	images: { mimeTypes: ["image/png", "image/jpeg", "image/webp"], maxCount: 16 },
+	ignoresImageDetail: true,
+	optionBudget: BASETEN_OPTION_BUDGET,
+	encode(request, model) {
+		for (const id in request.questions) checkBasetenQuestion(id, request.questions[id]);
+		const questions = wireQuestions(request.questions);
+		const images = request.images ?? [];
+		if (images.length === 0) return { state: basetenTextState(request.state), model, questions };
+		const text = typeof request.state === "string" ? request.state : JSON.stringify(request.state);
+		const content: JsonValue[] = [
+			...(text.length > 0 ? [{ type: "text", text }] : []),
+			...images.map(image => ({ type: "image_url", image_url: { url: embeddedImageDataUrl(image) } })),
+		];
+		return { state: { messages: [{ role: "user", content }] }, model, questions };
+	},
 };

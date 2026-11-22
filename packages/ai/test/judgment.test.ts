@@ -1,6 +1,6 @@
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { calculateUsageCost } from "@oh-my-pi/pi-catalog/models";
-import type { Api, Model, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
+import type { Api, FetchImpl, Model, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import { describe, expect, it, spyOn } from "bun:test";
 import {
@@ -2252,5 +2252,155 @@ describe("chat judgment backend images", () => {
 		} finally {
 			fetchSpy.mockRestore();
 		}
+	});
+});
+
+describe("NativeJudge Baseten decision models", () => {
+	const elephant = buildModel({
+		id: "decision-models/baseten-elephant-9b-latest",
+		name: "elephant-1",
+		api: "baseten-systemone",
+		provider: "baseten",
+		baseUrl: "https://inference.baseten.co",
+		reasoning: false,
+		input: ["text", "image"],
+		cost: { input: 0.035, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 16_384,
+		maxTokens: null,
+	});
+
+	/** A fetch that records each body and answers every question it carries as a yes/no or first choice. */
+	function recordingFetch(bodies: Record<string, unknown>[], urls: string[] = []): FetchImpl {
+		return async (url, init) => {
+			urls.push(String(url));
+			const body = JSON.parse(String(init?.body)) as {
+				questions: Record<string, { type: string; criteria?: Record<string, unknown> }>;
+			};
+			bodies.push(body);
+			const answers: Record<string, unknown> = {};
+			for (const id in body.questions) {
+				const question = body.questions[id];
+				if (question.type === "choice") {
+					const [choice] = Object.keys(question.criteria ?? {});
+					answers[id] = { type: "choice", choice, confidence: 1, probabilities: { [choice]: 1 } };
+				} else answers[id] = { type: "noul", noul: 0.9 };
+			}
+			return Response.json({
+				model: "decision-models/baseten-elephant-9b-latest",
+				answers,
+				usage: { input_tokens: 10, output_tokens: 1 },
+			});
+		};
+	}
+
+	it("posts the verbatim body to /v1/systemone with the key as bearer", async () => {
+		const bodies: Record<string, unknown>[] = [];
+		const urls: string[] = [];
+		const seen: (string | null)[] = [];
+		const fetchImpl = recordingFetch(bodies, urls);
+		const judge = createNativeJudge(elephant, {
+			apiKey: "baseten-test-key",
+			fetch: async (url, init) => {
+				seen.push(new Headers(init?.headers).get("authorization"));
+				return fetchImpl(url, init);
+			},
+		});
+		const questions = { urgent: { type: "noul", instructions: "Urgent?" } } as const;
+
+		const result = await judge.judge({ state: "Checkout is down.", questions });
+
+		expect(urls).toEqual(["https://inference.baseten.co/v1/systemone"]);
+		expect(seen).toEqual(["Bearer baseten-test-key"]);
+		expect(bodies[0]).toEqual({
+			state: "Checkout is down.",
+			model: "decision-models/baseten-elephant-9b-latest",
+			questions,
+		});
+		expect(result.answers.urgent.noul).toBe(0.9);
+	});
+
+	it("wraps an object state that holds a messages key so Baseten reads it as data, not a conversation", async () => {
+		const bodies: Record<string, unknown>[] = [];
+		const judge = createNativeJudge(elephant, { apiKey: "k", fetch: recordingFetch(bodies) });
+		const state = { messages: ["a", "b"], user: "ada" };
+
+		await judge.judge({ state, questions: { q: { type: "noul", instructions: "?" } } });
+
+		expect(bodies[0].state).toEqual([state]);
+	});
+
+	it("sends images as image_url parts of a user message under state.messages, without detail or assets", async () => {
+		const bodies: Record<string, unknown>[] = [];
+		const judge = createNativeJudge(elephant, { apiKey: "k", fetch: recordingFetch(bodies) });
+
+		await judge.judge({
+			state: { page: "checkout" },
+			questions: { err: { type: "noul", instructions: "Is an error visible?" } },
+			images: [
+				{ type: "image", data: "AQID", mimeType: "image/png", detail: "high" },
+				{ type: "image", data: "BAUG", mimeType: "image/webp" },
+			],
+		});
+
+		expect(bodies[0]).toEqual({
+			state: {
+				messages: [
+					{
+						role: "user",
+						content: [
+							{ type: "text", text: '{"page":"checkout"}' },
+							{ type: "image_url", image_url: { url: "data:image/png;base64,AQID" } },
+							{ type: "image_url", image_url: { url: "data:image/webp;base64,BAUG" } },
+						],
+					},
+				],
+			},
+			model: "decision-models/baseten-elephant-9b-latest",
+			questions: { err: { type: "noul", instructions: "Is an error visible?" } },
+		});
+	});
+
+	it("splits a judgment so no request carries more than 512 options, counting a yes/no as two", async () => {
+		const bodies: Record<string, unknown>[] = [];
+		const judge = createNativeJudge(elephant, { apiKey: "k", fetch: recordingFetch(bodies) });
+		const noul = (count: number) =>
+			Object.fromEntries(
+				Array.from({ length: count }, (_, i) => [`q${i}`, { type: "noul", instructions: "?" } as const]),
+			);
+
+		const result = await judge.judge({ state: "s", questions: noul(257) });
+
+		expect(bodies.map(body => Object.keys(body.questions as object).length).sort((a, b) => b - a)).toEqual([256, 1]);
+		expect(Object.keys(result.answers)).toHaveLength(257);
+
+		bodies.length = 0;
+		const choices = Object.fromEntries(
+			["a", "b", "c"].map(id => [
+				id,
+				{
+					type: "choice",
+					instructions: "Which?",
+					criteria: Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`${id}${i}`, null])),
+				} as const,
+			]),
+		);
+		await judge.judge({ state: "s", questions: choices });
+
+		expect(bodies.map(body => Object.keys(body.questions as object).length).sort()).toEqual([1, 2]);
+	});
+
+	it("rejects a question Baseten would refuse for its option count before sending anything", async () => {
+		const bodies: Record<string, unknown>[] = [];
+		const judge = createNativeJudge(elephant, { apiKey: "k", fetch: recordingFetch(bodies) });
+		const levels = Array.from({ length: 11 }, (_, i) => `level ${i}`) as [string, string, ...string[]];
+		const options = Object.fromEntries(Array.from({ length: 256 }, (_, i) => [`o${i}`, null]));
+
+		await expect(
+			judge.judge({ state: "s", questions: { s: { type: "score", instructions: "?", criteria: levels } } }),
+		).rejects.toThrow(ValidationError);
+		await expect(
+			judge.judge({ state: "s", questions: { c: { type: "choice", instructions: "?", criteria: options } } }),
+		).rejects.toThrow(ValidationError);
+		expect(bodies).toHaveLength(0);
 	});
 });
