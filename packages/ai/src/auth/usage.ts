@@ -39,7 +39,7 @@ import { mergeRefreshedOrganizationScope, OAUTH_REFRESH_SKEW_MS } from "./refres
 import type { OAuthRefresher } from "./refresh";
 import { USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { AuthCredentialStore } from "./store";
-import type { AuthCredential, OAuthCredential, ObservedUsageInput, UsageApi } from "./types";
+import type { AuthCredential, MarkUsageLimitOptions, OAuthCredential, ObservedUsageInput, UsageApi } from "./types";
 import {
 	dedupeUsageReports,
 	isUsageLimitExhausted,
@@ -796,15 +796,43 @@ export class UsageService implements UsageApi {
 				return report;
 			}
 		}
+		const request = await this.#reportRequest(provider, credential, options?.baseUrl);
+		return request
+			? this.#fetchUsageCached(request, { timeoutMs: options?.timeoutMs ?? this.requestTimeoutMs })
+			: null;
+	}
+
+	/** Expire the failed credential's snapshot while keeping the shared probe and failure backoff. */
+	async recheckReport(
+		provider: Provider,
+		credential: AuthCredential,
+		previous: UsageReport,
+		options?: Pick<MarkUsageLimitOptions, "baseUrl" | "signal">,
+	): Promise<UsageReport | null> {
+		if (credential.type === "oauth" && this.#deps.store.getUsageReport) return null;
+		const request = await this.#reportRequest(provider, credential, options?.baseUrl);
+		if (!request) return null;
+		options?.signal?.throwIfAborted();
+		const key = this.#deps.cache.reportKey(request);
+		const cached = this.#deps.cache.get<UsageReport | null>(key);
+		if (cached?.value?.fetchedAt === previous.fetchedAt && cached.expiresAt > Date.now()) {
+			this.#deps.cache.set(key, { value: cached.value, expiresAt: 0 });
+		}
+		return this.#fetchUsageCached(request, { timeoutMs: this.requestTimeoutMs });
+	}
+
+	async #reportRequest(
+		provider: Provider,
+		credential: AuthCredential,
+		baseUrl?: string,
+	): Promise<UsageRequestDescriptor | null> {
 		const usageCredential = buildUsageCredential(credential);
 		if (credential.type === "api_key") {
-			const resolvedApiKey = await this.#deps.overrides.resolve(credential.key);
-			if (!resolvedApiKey) return null;
-			usageCredential.apiKey = resolvedApiKey;
+			const apiKey = await this.#deps.overrides.resolve(credential.key);
+			if (!apiKey) return null;
+			usageCredential.apiKey = apiKey;
 		}
-		return this.#fetchUsageCached(usageRequest(provider, usageCredential, options?.baseUrl), {
-			timeoutMs: options?.timeoutMs ?? this.requestTimeoutMs,
-		});
+		return usageRequest(provider, usageCredential, baseUrl);
 	}
 
 	/**

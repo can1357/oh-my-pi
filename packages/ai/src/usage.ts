@@ -487,6 +487,8 @@ export interface CredentialRankingStrategy {
 	 * account-wide quotas can omit this and use all limits.
 	 */
 	scopeLimits?(report: UsageReport, context?: CredentialRankingContext): UsageLimit[];
+	/** Identify pre-failure reports that need rechecking. Complete resets for these strategies may replace heuristic cooldowns. */
+	shouldRecheckUsageLimit?(limits: UsageLimit[]): boolean;
 	/**
 	 * Restrict limits for the opt-in, non-destructive usage-reserve health
 	 * check ({@link AuthStorage.health.model}). Distinct from

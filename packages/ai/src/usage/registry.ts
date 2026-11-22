@@ -12,6 +12,7 @@ import { githubCopilotUsageProvider } from "./github-copilot";
 import { antigravityRankingStrategy, antigravityUsageProvider } from "./google-antigravity";
 import { kimiRankingStrategy, kimiUsageProvider } from "./kimi";
 import { kiroRankingStrategy, kiroUsageProvider } from "./kiro";
+import { litellmRankingStrategy } from "./litellm";
 import { museCodeUsageProvider } from "./muse-code";
 import { minimaxCodeUsageProvider } from "./minimax-code";
 import { ollamaCloudUsageProvider, ollamaUsageProvider } from "./ollama";
@@ -74,6 +75,7 @@ const DEFAULT_RANKING_STRATEGIES = new Map<Provider, CredentialRankingStrategy>(
 	["commandcode", commandCodeRankingStrategy],
 	["kiro", kiroRankingStrategy],
 	["devin", devinRankingStrategy],
+	["litellm", litellmRankingStrategy],
 ]);
 
 /** Built-in ranking strategy for `provider`. */

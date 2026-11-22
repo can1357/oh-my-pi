@@ -26,6 +26,7 @@
 - A transient `404` from a proxy in front of the auth broker no longer switches the snapshot stream to long-polling and turns off usage reporting for the rest of the process ([#19236](https://github.com/can1357/oh-my-pi/issues/19236)) ([#19348](https://github.com/can1357/oh-my-pi/pull/19348) by [@Alex-Wengg](https://github.com/Alex-Wengg))
 - Antigravity CLI requests no longer fail with a credential staging error when two sessions for the same account stage sign-in at the same time ([#19347](https://github.com/can1357/oh-my-pi/pull/19347) by [@eggpeat](https://github.com/eggpeat))
 - OpenAI Codex WebSocket continuations now send back the turn's sticky routing token (`x-codex-turn-state`), which the server delivers on `codex.response.metadata` rather than `response.metadata`; before, it was never captured on WebSocket ([#20088](https://github.com/can1357/oh-my-pi/issues/20088))
+- LiteLLM skips exhausted keys when another key is available and respects budget reset times after `422 Budget Exceeded` ([#20166](https://github.com/can1357/oh-my-pi/issues/20166)) ([#20183](https://github.com/can1357/oh-my-pi/pull/20183) by [@USTC-XeF2](https://github.com/USTC-XeF2))
 
 ## [19.1.0] - 2026-11-21
 

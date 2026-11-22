@@ -325,20 +325,33 @@ export class RateLimits implements LimitsApi {
 				"usage fetch aborted",
 			);
 			if (report) {
-				const scopedLimits = scopedUsageLimits(routing.strategy, report, routing.rankingContext);
+				let scopedLimits = scopedUsageLimits(routing.strategy, report, routing.rankingContext);
+				// A cached report with headroom cannot explain this usage-limit failure.
+				if (report.fetchedAt <= now && routing.strategy.shouldRecheckUsageLimit?.(scopedLimits)) {
+					const freshReport = await raceSignal(
+						this.#deps.usage.recheckReport(provider, target.credential, report, options),
+						options?.signal,
+						"usage fetch aborted",
+					);
+					if (freshReport) scopedLimits = scopedUsageLimits(routing.strategy, freshReport, routing.rankingContext);
+				}
 				if (isUsageLimitReached(scopedLimits)) {
-					const resetAtMs = usageResetAtMs(scopedLimits, Date.now());
-					if (resetAtMs && resetAtMs > blockedUntil) {
-						blockedUntil = resetAtMs;
-						providerTimed = true;
-					}
 					const nowMs = Date.now();
+					const resetAtMs = usageResetAtMs(scopedLimits, nowMs);
 					const exhaustedLimits = scopedLimits.filter(limit => isUsageLimitExhausted(limit));
 					const futureResets = exhaustedLimits
 						.map(limit => windowResetAt(limit.window))
 						.filter((reset): reset is number => reset !== undefined && reset > nowMs);
 					if (exhaustedLimits.length > 0 && futureResets.length === exhaustedLimits.length) {
 						reportResetAtMs = Math.max(...futureResets);
+					}
+					if (
+						resetAtMs !== undefined &&
+						(resetAtMs > blockedUntil ||
+							(routing.strategy.shouldRecheckUsageLimit && !providerTimed && reportResetAtMs !== undefined))
+					) {
+						blockedUntil = resetAtMs;
+						providerTimed = true;
 					}
 				}
 			}
