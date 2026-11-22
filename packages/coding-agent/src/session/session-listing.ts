@@ -509,22 +509,25 @@ async function scanSessionFile(
 		let needTurn = assistantTurns === 0;
 		if ((needPrompt || needTurn) && size > SESSION_LIST_PREFIX_BYTES && storage.scanLines) {
 			try {
-				await storage.scanLines(file, line => {
-					const message = parseTurnLine(line);
-					if (message?.role === "assistant" && needTurn) {
-						assistantTurns = 1;
-						needTurn = false;
-					} else if (message?.role === "user" && needPrompt) {
-						// Cap at what a prompt read from the prefix could hold.
-						const text = textContent(message.content, " ").slice(0, SESSION_LIST_PREFIX_BYTES);
-						if (text) {
-							firstMessage = text;
-							allMessages.unshift(text);
-							needPrompt = false;
+				if (!needPrompt && needTurn && storage.scanAssistantTurn) {
+					if (await storage.scanAssistantTurn(file)) assistantTurns = 1;
+				} else
+					await storage.scanLines(file, line => {
+						const message = parseTurnLine(line);
+						if (message?.role === "assistant" && needTurn) {
+							assistantTurns = 1;
+							needTurn = false;
+						} else if (message?.role === "user" && needPrompt) {
+							// Cap at what a prompt read from the prefix could hold.
+							const text = textContent(message.content, " ").slice(0, SESSION_LIST_PREFIX_BYTES);
+							if (text) {
+								firstMessage = text;
+								allMessages.unshift(text);
+								needPrompt = false;
+							}
 						}
-					}
-					return !needPrompt && !needTurn;
-				});
+						return !needPrompt && !needTurn;
+					});
 			} catch {
 				// Backend unreadable: keep the bounded-window evidence.
 			}
