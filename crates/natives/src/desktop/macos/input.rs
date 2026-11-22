@@ -885,7 +885,17 @@ fn with_background_keyboard<T>(
 ) -> CoreResult<T> {
 	let route = keyboard_route(pid, wid)?;
 	skylight::with_background_watch(pid, |visit| {
-		keyboard_in_watch(source, pid, wid, window, entry_front, route, visit, deliver)
+		keyboard_in_watch(
+			source,
+			pid,
+			wid,
+			window,
+			entry_front,
+			route,
+			KeyPurpose::Keyboard,
+			visit,
+			deliver,
+		)
 	})
 }
 
@@ -916,7 +926,8 @@ fn keyboard_route(pid: libc::pid_t, wid: u32) -> CoreResult<KeyboardRoute> {
 }
 
 /// The body of [`with_background_keyboard`], inside a background watch that
-/// reports the user's visits through `visit`.
+/// reports the user's visits through `visit`. `purpose` decides whether the
+/// activating press goes out ([`make_key_in_background`]).
 #[allow(clippy::too_many_arguments, reason = "the watch's parts, passed explicitly")]
 fn keyboard_in_watch<T>(
 	source: &CGEventSource,
@@ -925,20 +936,13 @@ fn keyboard_in_watch<T>(
 	window: &DesktopWindow,
 	entry_front: EntryFront,
 	route: KeyboardRoute,
+	purpose: KeyPurpose,
 	visit: skylight::TargetVisit<'_>,
 	deliver: impl FnOnce(libc::pid_t, &dyn Fn() -> CoreResult<()>) -> CoreResult<T>,
 ) -> CoreResult<T> {
 	let KeyboardRoute { conflict, in_overlay } = route;
-	let prepared = make_key_in_background(
-		source,
-		pid,
-		wid,
-		window,
-		entry_front,
-		in_overlay,
-		KeyPurpose::Keyboard,
-		visit,
-	)?;
+	let prepared =
+		make_key_in_background(source, pid, wid, window, entry_front, in_overlay, purpose, visit)?;
 	let (to, focus) = await_key_destination(pid, wid, conflict)?;
 	let owner =
 		key_process(to, wid, &focus, || ax::window_content(pid, window), ax::focused_window_id)?;
@@ -3664,7 +3668,10 @@ fn primed<T>(
 /// the pointer call's own watch (`visit`). After a takeover tap activated the
 /// window, iPhone Mirroring dropped every background tap until this route
 /// reached it; Shift posted to the process alone did not bring taps back.
-/// Shift alone types nothing.
+/// Shift alone types nothing. The route runs with the pointer purpose, so the
+/// activating press goes out even when the window is already key: every
+/// measured primer included that press, and no run separated which of the
+/// route's steps brings taps back.
 fn prime_reports(
 	source: &CGEventSource,
 	pid: libc::pid_t,
@@ -3674,7 +3681,8 @@ fn prime_reports(
 	visit: skylight::TargetVisit<'_>,
 ) -> CoreResult<()> {
 	let route = keyboard_route(pid, wid)?;
-	keyboard_in_watch(source, pid, wid, window, entry_front, route, visit, |to, guard| {
+	let purpose = KeyPurpose::Pointer;
+	keyboard_in_watch(source, pid, wid, window, entry_front, route, purpose, visit, |to, guard| {
 		press_chord(
 			source,
 			&[KeyPress { name: KeyName::Shift, code: key_code(KeyName::Shift)? }],
