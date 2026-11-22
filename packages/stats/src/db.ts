@@ -10,7 +10,7 @@ import {
 	hasRecurringTariff,
 } from "@oh-my-pi/pi-catalog/models";
 import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
-import { getConfigRootDir, getStatsDbPath, VERSION } from "@oh-my-pi/pi-utils";
+import { $envpos, getConfigRootDir, getStatsDbPath, VERSION } from "@oh-my-pi/pi-utils";
 import { ChunkedInsert } from "./chunked-insert";
 import { classifyAgentType, type ParseSessionResult, type SessionParserState } from "./parser";
 import { ensureRollupSchema, getDailyActivityFromRollup } from "./rollup";
@@ -168,6 +168,19 @@ const MODEL_USAGE_SINCE_MS = Date.parse("2026-08-31T00:00:00Z");
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
+/** How long a stats DB statement waits on another connection's lock before failing with "database is locked". */
+const BUSY_TIMEOUT_MS = 5000;
+/**
+ * Env var overriding {@link BUSY_TIMEOUT_MS} (positive milliseconds) for the
+ * connections this module opens; for tests that hold the write lock. Read at
+ * open time, so worker threads inherit it from the spawning process.
+ */
+export const STATS_BUSY_TIMEOUT_MS_ENV = "OMP_STATS_BUSY_TIMEOUT_MS";
+
+function busyTimeoutPragma(): string {
+	return `PRAGMA busy_timeout = ${$envpos(STATS_BUSY_TIMEOUT_MS_ENV, BUSY_TIMEOUT_MS)}`;
+}
+
 /**
  * Initialize the database and create tables.
  */
@@ -180,7 +193,7 @@ export async function initDb(): Promise<Database> {
 	db = new Database(getStatsDbPath());
 	// Install the busy handler BEFORE any lock-taking statement. See
 	// https://github.com/can1357/oh-my-pi/issues/2421.
-	db.run("PRAGMA busy_timeout = 5000");
+	db.run(busyTimeoutPragma());
 	db.run("PRAGMA journal_mode = WAL");
 	// The database is a derived cache of the transcripts, so WAL's NORMAL sync
 	// (fsync only at checkpoints) is safe: a crash can drop the newest batches,
@@ -1411,7 +1424,7 @@ export function readDailyActivity(days = 371): DailyActivityPoint[] | null {
 		return null;
 	}
 	try {
-		reader.run("PRAGMA busy_timeout = 5000");
+		reader.run(busyTimeoutPragma());
 		reader.run("PRAGMA query_only = 1");
 		return dailyActivity(reader, days);
 	} finally {
