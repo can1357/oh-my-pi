@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- Clicking any row of a wrapped MCP OAuth `Copy URL:` link now opens the whole authorization URL instead of just that row's fragment ([#20192](https://github.com/can1357/oh-my-pi/issues/20192))
 - `tab.scroll({ direction: "down", amount: 600 })` and other objects that name no pixel delta are rejected with the helper's signature and the equivalent call (`tab.scroll(0, 600)`) instead of silently scrolling nothing; the browser docs point at the `TabApi` interface in `tab-worker.ts` instead of a declaration file that no longer exists ([#20171](https://github.com/can1357/oh-my-pi/pull/20171) by [@kaluli123123](https://github.com/kaluli123123))
 - `ask` now reports a `<fieldset>` whose radios each carry a different `name` back to the model instead of showing it, so a preselected option can no longer be submitted next to the user's pick as a second answer ([#19625](https://github.com/can1357/oh-my-pi/issues/19625), [#20170](https://github.com/can1357/oh-my-pi/pull/20170) by [@kaluli123123](https://github.com/kaluli123123))
 - Title generation stops after a model declines with `<title/>` or `none`, instead of sending the same request to every remaining title candidate, including fallback chains and the session model; errors and unusable replies still move on to the next candidate ([#20168](https://github.com/can1357/oh-my-pi/issues/20168)).
