@@ -130,13 +130,22 @@ pub enum SettleStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhaseSettle {
 	/// The phase.
-	pub phase:    Str,
+	pub phase:       Str,
 	/// The attempt ordinal.
-	pub attempt:  u32,
+	pub attempt:     u32,
 	/// How the attempt ended.
-	pub status:   SettleStatus,
+	pub status:      SettleStatus,
 	/// Verbatim feedback of a rejection; empty otherwise.
-	pub feedback: Str,
+	pub feedback:    Str,
+	/// Verdict decision recorded by the judge (e.g. "accept", "reject",
+	/// "needs-human"). Absent when the settle was created before verdict
+	/// tracking was added.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub verdict:     Option<Str>,
+	/// Whether the judge route differs from the producer route (independent
+	/// review). Absent when not applicable.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub independent: Option<bool>,
 }
 
 /// Payload of `adw.phase.uncertain@1`.
