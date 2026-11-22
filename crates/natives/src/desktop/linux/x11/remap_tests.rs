@@ -19,13 +19,56 @@ use super::{
 };
 use crate::desktop::{backend::DeliveryMode, control, keys::KeyName, types::Target};
 
-#[link(name = "X11")]
-unsafe extern "C" {
-	fn XInitThreads() -> c_int;
-	fn XOpenDisplay(name: *const c_char) -> *mut c_void;
-	fn XCloseDisplay(display: *mut c_void) -> c_int;
-	fn XDefaultRootWindow(display: *mut c_void) -> c_ulong;
-	fn XCreateSimpleWindow(
+/// Declares the Xlib functions the receiver uses, resolved from `libX11.so.6`
+/// at first use rather than linked: the hermetic Linux toolchains have no
+/// libX11, and only these ignored tests need it.
+macro_rules! xlib {
+	($($name:ident($($arg:ident: $ty:ty),*) -> $ret:ty;)*) => {
+		#[allow(non_snake_case)]
+		struct Xlib {
+			$($name: unsafe extern "C" fn($($ty),*) -> $ret,)*
+		}
+		fn xlib() -> &'static Xlib {
+			static XLIB: std::sync::LazyLock<Xlib> = std::sync::LazyLock::new(|| {
+				// SAFETY: the name is NUL-terminated; the handle stays open for the
+				// process lifetime, as the resolved functions do.
+				let handle =
+					unsafe { libc::dlopen(c"libX11.so.6".as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+				assert!(!handle.is_null(), "libX11.so.6 loads");
+				Xlib {
+					$($name: {
+						// SAFETY: `handle` is a live dlopen handle and the name is
+						// NUL-terminated.
+						let symbol = unsafe {
+							libc::dlsym(handle, concat!(stringify!($name), "\0").as_ptr().cast())
+						};
+						assert!(!symbol.is_null(), concat!("libX11 exports ", stringify!($name)));
+						// SAFETY: Xlib declares the function with this signature.
+						unsafe {
+							std::mem::transmute::<*mut c_void, unsafe extern "C" fn($($ty),*) -> $ret>(
+								symbol,
+							)
+						}
+					},)*
+				}
+			});
+			&XLIB
+		}
+		$(
+			#[allow(non_snake_case)]
+			unsafe fn $name($($arg: $ty),*) -> $ret {
+				// SAFETY: the caller upholds the Xlib function's contract.
+				unsafe { (xlib().$name)($($arg),*) }
+			}
+		)*
+	};
+}
+xlib! {
+	XInitThreads() -> c_int;
+	XOpenDisplay(name: *const c_char) -> *mut c_void;
+	XCloseDisplay(display: *mut c_void) -> c_int;
+	XDefaultRootWindow(display: *mut c_void) -> c_ulong;
+	XCreateSimpleWindow(
 		display: *mut c_void,
 		parent: c_ulong,
 		x: c_int,
@@ -34,20 +77,20 @@ unsafe extern "C" {
 		height: u32,
 		border_width: u32,
 		border: c_ulong,
-		background: c_ulong,
+		background: c_ulong
 	) -> c_ulong;
-	fn XSelectInput(display: *mut c_void, window: c_ulong, mask: c_long) -> c_int;
-	fn XMapWindow(display: *mut c_void, window: c_ulong) -> c_int;
-	fn XSetInputFocus(display: *mut c_void, window: c_ulong, revert: c_int, time: c_ulong) -> c_int;
-	fn XSync(display: *mut c_void, discard: c_int) -> c_int;
-	fn XNextEvent(display: *mut c_void, event: *mut c_long) -> c_int;
-	fn XRefreshKeyboardMapping(event: *mut c_long) -> c_int;
-	fn XLookupString(
+	XSelectInput(display: *mut c_void, window: c_ulong, mask: c_long) -> c_int;
+	XMapWindow(display: *mut c_void, window: c_ulong) -> c_int;
+	XSetInputFocus(display: *mut c_void, window: c_ulong, revert: c_int, time: c_ulong) -> c_int;
+	XSync(display: *mut c_void, discard: c_int) -> c_int;
+	XNextEvent(display: *mut c_void, event: *mut c_long) -> c_int;
+	XRefreshKeyboardMapping(event: *mut c_long) -> c_int;
+	XLookupString(
 		event: *mut c_long,
 		buffer: *mut c_char,
 		size: c_int,
 		symbol: *mut c_ulong,
-		compose: *mut c_void,
+		compose: *mut c_void
 	) -> c_int;
 }
 struct Server(Child);
