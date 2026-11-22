@@ -91,6 +91,8 @@ export interface WorkPoolCreateOptions {
 	name: string;
 	/** Raw selector applied to each worker at creation, never to follow-up turns. */
 	model?: string;
+	/** Raw workload role applied to each worker at creation, never to follow-up turns. */
+	modelRole?: unknown;
 	policy: EffectiveSubagentPolicy;
 	context?: string;
 	customTools?: CustomTool[];
@@ -114,6 +116,7 @@ export class WorkPool {
 	readonly session: ToolSession;
 	readonly policy: EffectiveSubagentPolicy;
 	readonly #model?: string;
+	readonly #modelRole?: unknown;
 	readonly context?: string;
 	readonly customTools: CustomTool[];
 	readonly freshAgents: boolean;
@@ -137,6 +140,7 @@ export class WorkPool {
 		this.session = session;
 		this.policy = options.policy;
 		this.#model = options.model;
+		this.#modelRole = options.modelRole;
 		this.context = options.context;
 		this.customTools = options.customTools ?? [];
 		this.freshAgents = cfgEvalWorkpoolFreshAgents.get(session.settings);
@@ -390,6 +394,7 @@ export class WorkPool {
 							...(this.context ? { context: this.context } : {}),
 							agent: this.policy.agentName,
 							...(this.#model !== undefined ? { perCallModel: this.#model } : {}),
+							...(this.#modelRole !== undefined ? { modelRole: this.#modelRole } : {}),
 							identity: { id: agent.id },
 							customTools: this.customTools,
 							outputSchema,

@@ -39,11 +39,11 @@ const sink: SpeculativeOperationSink = {
 	close: () => {},
 };
 
-function createSession(manager: AsyncJobManager): ToolSession {
+function createSession(manager: AsyncJobManager, settings: Record<string, unknown> = {}): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
-		settings: Settings.isolated({ "async.enabled": true, "task.batch": true }),
+		settings: Settings.isolated({ "async.enabled": true, "task.batch": true, ...settings }),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		getAgentId: () => null,
@@ -132,6 +132,7 @@ describe("task speculative launch", () => {
 	const managers: AsyncJobManager[] = [];
 	const spawns = new Map<string, SpawnEvents>();
 	const startedIds = new Set<string>();
+	const dispatchedOptions: executorModule.ExecutorOptions[] = [];
 	const spawn = (id: string): SpawnEvents => {
 		let events = spawns.get(id);
 		if (!events) {
@@ -145,10 +146,12 @@ describe("task speculative launch", () => {
 		return events;
 	};
 
-	async function openSession(): Promise<{ tool: TaskTool; manager: AsyncJobManager; session: TaskLaunchSession }> {
+	async function openSession(
+		settings: Record<string, unknown> = {},
+	): Promise<{ tool: TaskTool; manager: AsyncJobManager; session: TaskLaunchSession }> {
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
 		managers.push(manager);
-		const tool = await TaskTool.create(createSession(manager));
+		const tool = await TaskTool.create(createSession(manager, settings));
 		const session = await tool.speculation.stream?.open({ coordinator: sink, parentToolCallId: toolCall.id });
 		if (!session) throw new Error("expected a task launch session");
 		return { tool, manager, session: session as TaskLaunchSession };
@@ -161,6 +164,7 @@ describe("task speculative launch", () => {
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
 			const id = options.id ?? "?";
 			const events = spawn(id);
+			dispatchedOptions.push(options);
 			startedIds.add(id);
 			options.signal?.addEventListener(
 				"abort",
@@ -180,6 +184,7 @@ describe("task speculative launch", () => {
 		for (const events of spawns.values()) events.release.resolve();
 		spawns.clear();
 		startedIds.clear();
+		dispatchedOptions.length = 0;
 		vi.restoreAllMocks();
 		for (const manager of managers.splice(0)) await manager.dispose({ timeoutMs: 1000 });
 		AgentLifecycleManager.resetGlobalForTests();
@@ -264,6 +269,62 @@ describe("task speculative launch", () => {
 
 		await spawn("Alpha").aborted.promise;
 		expect([...startedIds]).toEqual(["Alpha"]);
+	});
+
+	describe("with workload roles", () => {
+		const roleSettings = { modelRoles: { smol: "mock/fast", slow: "mock/deep" } };
+		const roleArgs = (alphaRole: unknown) => ({
+			context: "ctx",
+			tasks: [
+				{ name: "Alpha", agent: "task", task: "Do A.", modelRole: alphaRole },
+				{ name: "Beta", agent: "task", task: "Do B.", modelRole: "slow" },
+			],
+		});
+		const streamedThroughAlpha = (alphaRole: unknown) => {
+			const text = JSON.stringify(roleArgs(alphaRole));
+			return text.slice(0, text.indexOf('{"name":"Beta"') + 10);
+		};
+
+		it("starts each streamed item on its own role and dispatch adopts it", async () => {
+			const { tool, manager, session } = await openSession(roleSettings);
+			session.update(toolCall, streamedThroughAlpha("smol"));
+			await spawn("Alpha").started.promise;
+			const args = roleArgs("smol");
+			session.finalize({ toolCall, args });
+			await spawn("Beta").started.promise;
+			const result = await tool.execute(toolCall.id, args);
+			expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha", "Beta"]);
+			expect(dispatchedOptions.map(options => [options.id, options.modelRole, options.modelOverride])).toEqual([
+				["Alpha", "smol", ["mock/fast"]],
+				["Beta", "slow", ["mock/deep"]],
+			]);
+			spawn("Alpha").release.resolve();
+			spawn("Beta").release.resolve();
+			await manager.getJob("Alpha")!.promise;
+			await manager.getJob("Beta")!.promise;
+		});
+
+		it("aborts a launched item whose role changed in the finished call", async () => {
+			const { session } = await openSession(roleSettings);
+			session.update(toolCall, streamedThroughAlpha("smol"));
+			await spawn("Alpha").started.promise;
+			const changed = roleArgs("slow");
+			expect(session.matchesFinalArgs(changed)).toBe(false);
+			session.finalize({ toolCall, args: changed });
+			await spawn("Alpha").aborted.promise;
+			expect([...startedIds]).toEqual(["Alpha"]);
+		});
+
+		it("never starts an item whose role preflight refuses", async () => {
+			const { tool, session } = await openSession(roleSettings);
+			const args = roleArgs("@smol");
+			session.update(toolCall, JSON.stringify(args));
+			session.finalize({ toolCall, args });
+			const result = await tool.execute(toolCall.id, args);
+			expect(result.isError).toBe(true);
+			expect(JSON.stringify(result.content)).toContain("Invalid `modelRole`");
+			expect(executorModule.runSubprocess).not.toHaveBeenCalled();
+		});
 	});
 });
 

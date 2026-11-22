@@ -1632,3 +1632,141 @@ describe("session upstream routing inheritance", () => {
 		}
 	});
 });
+
+describe("requested workload model role", () => {
+	const ROLES = { smol: "mock/fast", slow: "mock/deep", task: "mock/task-route" };
+	const TASK_ROUTED: AgentDefinition = { ...AGENT, model: ["@task"] };
+
+	function roleSession(settings: Record<string, unknown> = {}, sessionAgents: readonly AgentDefinition[] = []) {
+		return Object.assign(
+			session({
+				settings: Settings.isolated({
+					"task.isolation.enabled": false,
+					"task.maxRecursionDepth": 2,
+					"task.perCallModel": "off",
+					modelRoles: ROLES,
+					...settings,
+				}),
+				sessionAgents,
+			}),
+			{ getActiveModelString: () => "mock/parent" },
+		);
+	}
+
+	function discover(...agents: AgentDefinition[]) {
+		return vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents, projectAgentsDir: null });
+	}
+
+	it.each(["smol", "slow"] as const)(
+		"routes a requested %s role like an agent declaring it, without the per-call model gate",
+		async role => {
+			const stockAgent: AgentDefinition = { ...AGENT, name: "stock", model: [`@${role}`] };
+			discover(TASK_ROUTED, stockAgent);
+			const requested = await resolveEffectiveSubagentPolicy(request({ session: roleSession(), modelRole: role }));
+			const stock = await resolveEffectiveSubagentPolicy(request({ session: roleSession(), agent: "stock" }));
+			expect(requested.modelOverride).toEqual([ROLES[role]]);
+			expect(requested.modelOverride).toEqual(stock.modelOverride);
+			expect(requested.modelRole).toBe(role);
+			expect(requested.modelRole).toBe(stock.modelRole);
+			// Roles are not exact-model grants, and an unresolvable role keeps stock parent fallback.
+			expect(requested.perCallModelGrants).toBeUndefined();
+			expect(requested.parentActiveModelPattern).toBe("mock/parent");
+			// Only the model route changes: the agent's instructions and tools stay its own.
+			expect(requested.effectiveAgent).toBe(TASK_ROUTED);
+		},
+	);
+
+	it.each([undefined, "", "   "])("keeps the agent's own route when the role is %p", async modelRole => {
+		discover(TASK_ROUTED);
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: roleSession(), modelRole }));
+		expect(policy.modelOverride).toEqual([ROLES.task]);
+		expect(policy.modelRole).toBe("task");
+	});
+
+	it("treats a blank operator override as no pin, so the role routes", async () => {
+		discover(TASK_ROUTED);
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ session: roleSession({ "task.agentModelOverrides": { worker: "" } }), modelRole: "slow" }),
+		);
+		expect(policy.modelOverride).toEqual([ROLES.slow]);
+		expect(policy.modelRole).toBe("slow");
+	});
+
+	// One row per input class: alias, legacy alias, other role, wrong case, thinking suffix, non-string.
+	it.each(["@smol", "pi/slow", "default", "SMOL", "smol:high", 7])(
+		"rejects the role %p before agent discovery",
+		async modelRole => {
+			const discovery = discover(TASK_ROUTED);
+			const error = await resolveEffectiveSubagentPolicy(
+				request({ session: roleSession(), modelRole: modelRole as string }),
+			).catch((cause: unknown) => cause);
+			expect(error).toBeInstanceOf(StructuredSubagentError);
+			expect((error as StructuredSubagentError).kind).toBe("preflight");
+			expect((error as Error).message).toContain("`modelRole`");
+			expect((error as Error).message).toContain('"smol"');
+			expect(discovery).not.toHaveBeenCalled();
+		},
+	);
+
+	const TAGGED: AgentDefinition = { ...AGENT, name: "m1", model: ["mock/target:high"], thinkingLevel: Effort.High };
+	const UNTAGGED: AgentDefinition = { ...AGENT, name: "m2", model: ["mock/target"], thinkingLevel: "auto" };
+	it.each([
+		[
+			"an exact per-call model",
+			{ perCallModel: "mock/fast" },
+			{ "task.perCallModel": "on" },
+			[],
+			/`modelRole` and `model`/,
+		],
+		["a host model", { model: "mock/fast" }, {}, [], /host model/],
+		[
+			"an operator agent pin",
+			{},
+			{ "task.agentModelOverrides": { worker: "mock/pinned" } },
+			[],
+			/task\.agentModelOverrides for agent "worker"/,
+		],
+		["a user-tagged model with effort", { agent: "m1" }, {}, [TAGGED], /user-tagged model agent "m1"/],
+		["a user-tagged model without effort", { agent: "m2" }, {}, [UNTAGGED], /user-tagged model agent "m2"/],
+	] as const)(
+		"rejects a role combined with %s before dispatch",
+		async (_name, overrides, settings, tagged, message) => {
+			discover(TASK_ROUTED);
+			const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+			const error = await runStructuredSubagent(
+				request({
+					session: roleSession(settings, tagged),
+					modelRole: "slow",
+					...(overrides as Partial<StructuredSubagentRequest>),
+				}),
+			).catch((cause: unknown) => cause);
+			expect(error).toBeInstanceOf(StructuredSubagentError);
+			expect((error as StructuredSubagentError).kind).toBe("preflight");
+			expect((error as Error).message).toMatch(message);
+			expect(run).not.toHaveBeenCalled();
+		},
+	);
+
+	it("dispatches the role's route and identity so the child's retries stay on that role", async () => {
+		discover(TASK_ROUTED);
+		const childSession = roleSession();
+		const events: BeforeSubagentSpawnEvent[] = [];
+		childSession.emitBeforeSubagentSpawn = async event => {
+			events.push(event);
+			return undefined;
+		};
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+		await runStructuredSubagent(request({ session: childSession, modelRole: "slow", effort: "hi" }));
+		expect(dispatched).toHaveLength(1);
+		expect(dispatched[0]).toMatchObject({ modelOverride: [ROLES.slow], modelRole: "slow", effort: "hi" });
+		expect(dispatched[0]?.perCallModelGrants).toBeUndefined();
+		expect(dispatched[0]?.agent).toBe(TASK_ROUTED);
+		expect(events).toEqual([
+			expect.objectContaining({ modelRole: "slow", patterns: [ROLES.slow] }) as BeforeSubagentSpawnEvent,
+		]);
+	});
+});

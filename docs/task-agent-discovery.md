@@ -243,6 +243,12 @@ For task dispatch, model precedence is:
 
 A call's per-call `model` (task item / flat call, eval `agent()` / `workpool()`; see below) replaces steps 2 and 3 when it is approved. It is a conflict error, rather than outranking anything, for an agent with a step-1 entry or a mention agent whose tag names a level. Role aliases in steps 1 and 2 are expanded through `modelRoles`. Host callers (SDK `runStructuredSubagent({ model })`, `omp cleanse --model`) supply an ungated model ahead of the settings override.
 
+### Per-call workload role
+
+The lead can choose `modelRole: "smol"` for routine, easy-to-verify work or `modelRole: "slow"` for consequential work that needs more reasoning. This selects the workload **for one delegation**, not the specialist: the same `reviewer` can use either role without changing its instructions or tools. Omit `modelRole` to use the usual agent routing.
+
+Use the bare role name, not `@smol` or a model ID. Unlike `model`, `modelRole` does not need `task.perCallModel` enabled and keeps the role's normal retry and fallback chain. It cannot be combined with an exact `model`, a host model override, an agent pinned by `task.agentModelOverrides`, or a user-tagged model agent. It does not switch the parent session's model.
+
 ### Per-call `model`
 
 `task.perCallModel` decides where a model-facing call may pick its model:

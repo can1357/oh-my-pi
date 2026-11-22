@@ -508,4 +508,69 @@ describe("WorkPool model selection", () => {
 		expect(follow.mock.calls[0]?.[0].id).toBe(workerId);
 		expect((follow.mock.calls[0]?.[0] as { perCallModel?: string } | undefined)?.perCallModel).toBeUndefined();
 	});
+
+	it("applies the pool modelRole to every new worker", async () => {
+		const session = makeSession([], 1, true);
+		const initial = vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			const id = request.identity?.id ?? "missing";
+			markIdle(id);
+			return execution(id);
+		});
+		const follow = vi.spyOn(executor, "runSubagentFollowUpTurn");
+		const workpool = new WorkPool(session, { name: "fresh-roles", policy: POLICY, modelRole: "smol" });
+		workpool.push(["one", "two", "three"]);
+		await finishPool(session, workpool);
+
+		expect(initial.mock.calls.map(([request]) => request.modelRole)).toEqual(["smol", "smol", "smol"]);
+		expect(initial.mock.calls.map(([request]) => request.identity?.id)).toEqual([
+			"fresh-roles-1",
+			"fresh-roles-2",
+			"fresh-roles-3",
+		]);
+		expect(follow).not.toHaveBeenCalled();
+	});
+
+	it("applies modelRole when a worker starts and reuses its session without the role", async () => {
+		const session = makeSession([], 1);
+		const first = Promise.withResolvers<void>();
+		const initial = vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			await first.promise;
+			const id = request.identity?.id ?? "missing";
+			markIdle(id);
+			return execution(id);
+		});
+		const follow = vi.spyOn(executor, "runSubagentFollowUpTurn").mockImplementation(async options => {
+			markIdle(options.id);
+			return singleResult(options.id);
+		});
+		const workpool = new WorkPool(session, { name: "roles", policy: POLICY, modelRole: "slow" });
+		workpool.push(["one", "two"]);
+		await until(() => workpool.agents[0]?.queue.length === 1);
+		first.resolve();
+		await finishPool(session, workpool);
+		expect(initial.mock.calls).toHaveLength(1);
+		expect(initial.mock.calls[0]?.[0].modelRole).toBe("slow");
+		expect(follow.mock.calls).toHaveLength(1);
+		const workerId = initial.mock.calls[0]?.[0].identity?.id;
+		if (!workerId) throw new Error("First turn did not receive a worker id");
+		expect(follow.mock.calls[0]?.[0].id).toBe(workerId);
+		// A follow-up turn continues the worker's existing session; it never re-routes to the role.
+		expect(follow.mock.calls[0]?.[0].modelRole).toBeUndefined();
+	});
+
+	it("starts workers of a pool created without a role on the pool agent with no role", async () => {
+		const session = makeSession([], 1, true);
+		const initial = vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			const id = request.identity?.id ?? "missing";
+			markIdle(id);
+			return execution(id);
+		});
+		const workpool = new WorkPool(session, { name: "no-role", policy: POLICY });
+		workpool.push(["one"]);
+		await finishPool(session, workpool);
+		expect(initial.mock.calls).toHaveLength(1);
+		expect(initial.mock.calls.map(([request]) => [request.agent, request.modelRole])).toEqual([
+			[POLICY.agentName, undefined],
+		]);
+	});
 });

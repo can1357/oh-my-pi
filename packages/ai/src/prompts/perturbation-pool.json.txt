@@ -16959,6 +16959,15 @@
 			]
 		},
 		{
+			"source": "- `modelRole`: choose `\"smol\"` for routine work with a clear check, `\"slow\"` for consequential decisions or hard-to-verify work. Both retain role fallback. Omit to use the agent default; omit for pinned or model-tagged agents. Do not combine with `model`.",
+			"origin": "tools/task.md",
+			"variants": [
+				"- `modelRole`: pick `\"smol\"` for routine work with a clear check, `\"slow\"` for consequential decisions or hard-to-verify work. Both keep role fallback. Omit to use the agent default; omit for pinned or model-tagged agents. Do not combine with `model`.",
+				"- `modelRole`: use `\"smol\"` for routine work that has a clear check, `\"slow\"` for consequential decisions or work that is hard to verify. Both retain role fallback. Omit it to use the agent default, and for pinned or model-tagged agents. Never combine with `model`.",
+				"- `modelRole`: choose `\"smol\"` for routine, easily checked work and `\"slow\"` for consequential decisions or hard-to-verify work. Both retain role fallback. Omit to use the agent default; omit for pinned or model-tagged agents. Do not pair with `model`."
+			]
+		},
+		{
 			"source": "- Matches are STAGED as a proposal, not applied: finalize with `resolve <one-sentence reason>` (apply) or `reject <reason>` (discard).",
 			"origin": "tools/ast-edit.md",
 			"variants": [

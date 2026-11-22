@@ -618,8 +618,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 				"agent",
 				opts,
 				rest,
-				["agent", "label", "schema", "isolated", "apply", "merge", "schemaMode", "tools", "model"],
-				"{ agent, label, schema, schemaMode, isolated, apply, merge, tools, model }",
+				["agent", "label", "schema", "isolated", "apply", "merge", "schemaMode", "tools", "model", "modelRole"],
+				"{ agent, label, schema, schemaMode, isolated, apply, merge, tools, model, modelRole }",
 			);
 			const result = await globalThis.__omp_call_tool__("__agent__", { prompt, ...options });
 			if (!result || typeof result.id !== "string") throw new Error("agent() did not return a handle");
@@ -682,8 +682,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			"workpool",
 			opts,
 			rest,
-			["name", "context", "tools", "model"],
-			"{ name, context, tools, model }",
+			["name", "context", "tools", "model", "modelRole"],
+			"{ name, context, tools, model, modelRole }",
 		);
 		// `op` goes last so a caller-supplied `op` cannot turn create into close/push on an existing pool.
 		const result = await globalThis.__omp_call_tool__("__workpool__", {

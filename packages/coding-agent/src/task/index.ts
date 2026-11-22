@@ -229,6 +229,16 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
 	if (batchEnabled && params.tasks !== undefined && params.model !== undefined) {
 		return "Top-level `model` is not part of the batch shape. Set `tasks[].model` instead.";
 	}
+	// A blank `modelRole` routes like an omitted one; only a real role is misplaced at the root.
+	const rootModelRole: unknown = params.modelRole;
+	if (
+		batchEnabled &&
+		params.tasks !== undefined &&
+		rootModelRole !== undefined &&
+		!(typeof rootModelRole === "string" && rootModelRole.trim() === "")
+	) {
+		return "Top-level `modelRole` is not part of the batch shape. Set `tasks[].modelRole` instead.";
+	}
 	if (!batchEnabled) {
 		const disallowed = (["tasks", "context"] as const).filter(field => params[field] !== undefined);
 		if (disallowed.length > 0) {
@@ -339,9 +349,13 @@ function validateModel(item: TaskItem | TaskParams, label: string, settings: Set
 	return invalidModelSelectorReason(item.model, label, { settings, invocationKind: "task" });
 }
 
-function spawnModelFields(params: TaskParams): Pick<StructuredSubagentRequest, "perCallModel"> {
-	// `validateModel` rejected anything but one string before dispatch.
-	return typeof params.model === "string" ? { perCallModel: params.model } : {};
+function spawnModelFields(params: TaskParams): Pick<StructuredSubagentRequest, "perCallModel" | "modelRole"> {
+	// `validateModel` rejected anything but one string before dispatch; the role is
+	// forwarded raw so the shared preflight validates it for task and eval alike.
+	return {
+		...(typeof params.model === "string" ? { perCallModel: params.model } : {}),
+		...(params.modelRole !== undefined ? { modelRole: params.modelRole } : {}),
+	};
 }
 
 /**
@@ -363,6 +377,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if ("effort" in params) item.effort = params.effort;
 	if ("isolated" in params) item.isolated = params.isolated;
 	if ("model" in params) item.model = params.model;
+	if ("modelRole" in params) item.modelRole = params.modelRole;
 	return [item];
 }
 
@@ -387,6 +402,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if ("tools" in item) spawn.tools = item.tools;
 	if ("effort" in item) spawn.effort = item.effort;
 	if ("model" in item) spawn.model = item.model;
+	if ("modelRole" in item) spawn.modelRole = item.modelRole;
 	if (item.isolated !== undefined) {
 		spawn.isolated = item.isolated;
 	} else if ("isolated" in params) {
@@ -685,6 +701,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (typeof params.model === "string") {
 			lines.push(`Model: ${truncateForPrompt(params.model)}`);
 		}
+		if (typeof params.modelRole === "string" && params.modelRole.trim()) {
+			lines.push(`Model role: ${truncateForPrompt(params.modelRole)}`);
+		}
 		if (typeof params.task === "string") {
 			lines.push(`Task:\n${truncateForPrompt(params.task)}`);
 		}
@@ -724,6 +743,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			for (const [index, item] of tasks.entries()) {
 				if (isRecord(item) && typeof item.model === "string") {
 					lines.push(`Task ${index + 1} model: ${truncateForPrompt(item.model)}`);
+				}
+				if (isRecord(item) && typeof item.modelRole === "string" && item.modelRole.trim()) {
+					lines.push(`Task ${index + 1} model role: ${truncateForPrompt(item.modelRole)}`);
 				}
 			}
 			if (tasks.length > 1) {

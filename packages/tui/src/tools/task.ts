@@ -2259,6 +2259,8 @@ export interface TaskItem {
 	agent?: string;
 	/** One exact per-call model, gated by `task.perCallModel`. */
 	model?: string;
+	/** Workload role, `"smol"` (routine) or `"slow"` (complex), routed through stock role resolution in place of the agent's own model. */
+	modelRole?: string;
 	/** Inline instructions; exactly one of task or steps is required. */
 	task?: string;
 	/** Ordered stages sent instead of `task` (`task.steps`), each once the child delivered the previous (several share a prompt past four). */
@@ -2290,6 +2292,8 @@ export interface TaskParams {
 	agent?: string;
 	/** See {@link TaskItem.model}. */
 	model?: string;
+	/** See {@link TaskItem.modelRole}. */
+	modelRole?: string;
 	/** The work (flat form). */
 	task?: string;
 	/** Ordered stages (flat form); see {@link TaskItem.steps}. */

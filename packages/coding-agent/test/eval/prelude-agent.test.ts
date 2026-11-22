@@ -258,6 +258,64 @@ describe("eval js workpool model selection", () => {
 			},
 		]);
 	});
+
+	it("sends modelRole raw on create, including a malformed value for the host to reject", async () => {
+		const calls: Array<{ name: string; args: unknown }> = [];
+		const sandbox = loadPrelude(async (name, args) => {
+			calls.push({ name, args });
+			return { name: "tiered", agent: "scout", limit: 2 };
+		});
+		const create = sandbox.workpool as (agent: string, options?: Record<string, unknown>) => Promise<unknown>;
+		await create("scout", { name: "tiered", modelRole: "slow" });
+		await create("scout", { modelRole: 42 });
+		await create("scout");
+		expect(calls.map(call => call.args)).toEqual([
+			{ op: "create", agent: "scout", name: "tiered", modelRole: "slow" },
+			{ op: "create", agent: "scout", modelRole: 42 },
+			{ op: "create", agent: "scout" },
+		]);
+	});
+
+	it("maps a fifth positional arg onto modelRole", async () => {
+		let seenArgs: unknown;
+		const sandbox = loadPrelude(async (_name, args) => {
+			seenArgs = args;
+			return { name: "positional", agent: "scout", limit: 2 };
+		});
+		const create = sandbox.workpool as (...args: unknown[]) => Promise<unknown>;
+		await create("scout", "positional", undefined, undefined, undefined, "smol");
+		expect(seenArgs).toEqual({ op: "create", agent: "scout", name: "positional", modelRole: "smol" });
+	});
+});
+
+describe("eval js agent() modelRole", () => {
+	it("sends modelRole raw, including a malformed value for the host to reject", async () => {
+		const seen: unknown[] = [];
+		const sandbox = loadPrelude(async (_name, args) => {
+			seen.push(args);
+			return { id: "role", agent: "task" };
+		});
+		const spawn = preludeHelper<AgentHelper>(sandbox, "agent");
+		await spawn("work", { modelRole: "smol" });
+		await spawn("work", { modelRole: null });
+		await spawn("work");
+		expect(seen).toEqual([
+			{ prompt: "work", modelRole: "smol" },
+			{ prompt: "work", modelRole: null },
+			{ prompt: "work" },
+		]);
+	});
+
+	it("maps the tenth positional arg onto modelRole", async () => {
+		let seenArgs: unknown;
+		const sandbox = loadPrelude(async (_name, args) => {
+			seenArgs = args;
+			return { id: "positional", agent: "task" };
+		});
+		const spawn = preludeHelper<(prompt: string, ...rest: unknown[]) => Promise<unknown>>(sandbox, "agent");
+		await spawn("work", "task", ...Array.from({ length: 8 }, () => undefined), "slow");
+		expect(seenArgs).toEqual({ prompt: "work", agent: "task", modelRole: "slow" });
+	});
 });
 
 describe("eval js output() options (issue #17455)", () => {

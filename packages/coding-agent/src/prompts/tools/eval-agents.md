@@ -1,11 +1,12 @@
 ```
 {{#if py}}
-agent(prompt, *, agent?="{{spawnDefaultAgent}}", label?=None, schema?=None, schema_mode?=None, isolated?=None, apply?=None, merge?=None{{#if evalTools}}, tools?=None{{/if}}{{#if perCallModel}}, model?=None{{/if}}) → AgentHandle
+agent(prompt, *, agent?="{{spawnDefaultAgent}}", label?=None, schema?=None, schema_mode?=None, isolated?=None, apply?=None, merge?=None, model_role?=None{{#if evalTools}}, tools?=None{{/if}}{{#if perCallModel}}, model?=None{{/if}}) → AgentHandle
 {{else}}
-await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?{{#if evalTools}}, tools?{{/if}}{{#if perCallModel}}, model?{{/if}} }) → AgentHandle
+await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?, modelRole?{{#if evalTools}}, tools?{{/if}}{{#if perCallModel}}, model?{{/if}} }) → AgentHandle
 {{/if}}
   Spawns a background subagent and returns immediately.
   - `agent` selects a discovered agent; omit it to use `{{spawnDefaultAgent}}`.{{#if spawnAllowedAgentsText}} Allowed agents: {{spawnAllowedAgentsText}}.{{/if}}
+  - `{{#if py}}model_role{{else}}modelRole{{/if}}`: `"smol"` for routine work with a clear check, `"slow"` for consequential or hard-to-verify work. Preserves role fallback. Omit for pinned or model-tagged agents; never combine with `model`.
   - Handle: `.id`, `.handle` ("agent://<id>"), {{#if py}}`.status`{{else}}`.status()`{{/if}}, `.done()`, `.wait(timeout?)` → final text (parsed with `schema`),
     `.send(message)`, `.cancel()`, `.output()`.
   - Unwaited results auto-deliver like async jobs.
@@ -32,7 +33,7 @@ await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, m
 {{/if}}
 {{#ifAll py js}}
   - Python: call without `await`; `await agent(…)` returns the final result, not a handle (`await h` = `h.wait()`).
-  - JS: ONE trailing object — `h = await agent(prompt, { agent, label, schema, schemaMode, isolated, apply, merge{{#if evalTools}}, tools{{/if}}{{#if perCallModel}}, model{{/if}} })`.
+  - JS: ONE trailing object — `h = await agent(prompt, { agent, label, schema, schemaMode, isolated, apply, merge, modelRole{{#if evalTools}}, tools{{/if}}{{#if perCallModel}}, model{{/if}} })`.
     - Without `await agent(…)`, `.id`/`.handle` are undefined.
     - Every handle method returns a Promise; `.status` is `await h.status()`.
 {{else}}
@@ -42,10 +43,11 @@ await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, m
 {{/if}}
 {{/ifAll}}
 {{#if py}}
-workpool(agent?=None, *, name?=None, context?=None{{#if evalTools}}, tools?=None{{/if}}{{#if perCallModel}}, model?=None{{/if}}) → WorkPool
+workpool(agent?=None, *, name?=None, context?=None, model_role?=None{{#if evalTools}}, tools?=None{{/if}}{{#if perCallModel}}, model?=None{{/if}}) → WorkPool
 {{else}}
-await workpool(agent?, { name?, context?{{#if evalTools}}, tools?{{/if}}{{#if perCallModel}}, model?{{/if}} }) → WorkPool
+await workpool(agent?, { name?, context?, modelRole?{{#if evalTools}}, tools?{{/if}}{{#if perCallModel}}, model?{{/if}} }) → WorkPool
 {{/if}}
+  - Workload role applies when each worker starts. Follow-up turns reuse the worker.
   {{#if eagerDelegation}}Default for 2+ independent items.{{else}}Keep-alive worker pool for a batch of independent items.{{/if}}
   - {{#if py}}`.push(*items)` (strings) → item ids; `.status()`; `.peek()`; `.close()`.{{else}}`await` each of `.push(...items)` (strings) → item ids, `.status()`, `.peek()`, `.close()`.{{/if}}
   - Pool name = async job id; results auto-deliver.

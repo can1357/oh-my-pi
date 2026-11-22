@@ -129,6 +129,37 @@ describe("task schema per-call model field", () => {
 	afterEach(() => vi.restoreAllMocks());
 });
 
+describe("task schema workload model role", () => {
+	afterEach(() => vi.restoreAllMocks());
+
+	it("declares modelRole as one string on every shape, whatever task.perCallModel says", async () => {
+		const shapes = [
+			taskSchema,
+			...[false, true].flatMap(batchEnabled =>
+				[false, true].flatMap(isolationEnabled => [
+					getTaskSchema({ batchEnabled, isolationEnabled }),
+					getTaskSchema({ batchEnabled, isolationEnabled, perCallModel: true, effortEnabled: true }),
+				]),
+			),
+		];
+		for (const schema of shapes) {
+			expect(JSON.stringify(schema.toJsonSchema())).toContain('"modelRole":{"type":"string"}');
+		}
+		for (const mode of ["off", "eval", "on"]) {
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+			const tool = await TaskTool.create(createSession({ settings: { "task.perCallModel": mode } }));
+			expect(JSON.stringify(tool.parameters.toJsonSchema())).toContain('"modelRole":{"type":"string"}');
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("keeps a flat call's modelRole through wire validation", () => {
+		const parsed = taskSchema({ agent: "scout", task: "Map auth.", solutionSpace: "c", modelRole: "smol" });
+		if (parsed instanceof type.errors) throw new Error(parsed.summary);
+		expect(parsed.modelRole).toBe("smol");
+	});
+});
+
 describe("task spawn validation", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();

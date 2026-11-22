@@ -14,6 +14,7 @@ import {
 	runStructuredSubagent,
 	StructuredSubagentError,
 	type StructuredSubagentIsolationControls,
+	type StructuredSubagentRequest,
 	type StructuredSubagentResult,
 } from "../task/structured-subagent";
 import type { AgentProgress, SingleResult, StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
@@ -30,6 +31,8 @@ const agentArgsSchema = type({
 	"agent?": "string>0",
 	"model?": "string",
 	"label?": "string",
+	// Raw: the shared preflight validates and reports a malformed role instead of the bridge dropping it.
+	"modelRole?": "unknown",
 	"schema?": "unknown",
 	"schemaMode?": "'permissive' | 'strict'",
 	"isolated?": "boolean",
@@ -43,6 +46,7 @@ interface EvalAgentArgs {
 	prompt: string;
 	agent?: string;
 	model?: string;
+	modelRole?: unknown;
 	label?: string;
 	schema?: unknown;
 	schemaMode?: StructuredSubagentSchemaMode;
@@ -197,6 +201,10 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 	const customTools = parsed.tools?.length
 		? createEvalCustomTools(options.session, await describeEvalTools(options.session, parsed.tools, options.signal))
 		: undefined;
+	// Forward even a non-string or blank role so the shared preflight judges it rather than the bridge.
+	const modelRole: Pick<StructuredSubagentRequest, "modelRole"> = Object.hasOwn(parsed, "modelRole")
+		? { modelRole: parsed.modelRole }
+		: {};
 
 	try {
 		const policy = await resolveEffectiveSubagentPolicy({
@@ -205,6 +213,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 			assignment: parsed.prompt,
 			...(parsed.agent !== undefined ? { agent: parsed.agent } : {}),
 			...(parsed.model !== undefined ? { perCallModel: parsed.model } : {}),
+			...modelRole,
 			...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
 			...(parsed.schemaMode !== undefined ? { schemaMode: parsed.schemaMode } : {}),
 			...(isolation ? { isolation } : {}),
@@ -229,6 +238,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 						assignment: parsed.prompt,
 						...(parsed.agent !== undefined ? { agent: parsed.agent } : {}),
 						...(parsed.model !== undefined ? { perCallModel: parsed.model } : {}),
+						...modelRole,
 						...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
 						...(parsed.schemaMode !== undefined ? { schemaMode: parsed.schemaMode } : {}),
 						identity: { id, label: parsed.label },

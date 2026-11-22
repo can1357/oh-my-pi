@@ -5,6 +5,7 @@ import {
 	invalidModelSelectorReason,
 	normalizeModelSelector,
 	resolveEffectiveSubagentPolicy,
+	type StructuredSubagentRequest,
 } from "../task/structured-subagent";
 import { type WorkPoolPeekResult, type WorkPoolStatus, WorkPoolRegistry } from "../task/workpool";
 import type { ToolSession } from "../tools";
@@ -82,6 +83,10 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 		if (modelProblem) throw new ToolError(modelProblem);
 		// `record.model` is untyped here; only a string survives the selector check above.
 		const perCallModel = typeof model === "string" ? model : undefined;
+		// Raw: the shared preflight validates and reports a malformed role instead of the bridge dropping it.
+		const modelRole: Pick<StructuredSubagentRequest, "modelRole"> = Object.hasOwn(record, "modelRole")
+			? { modelRole: record.modelRole }
+			: {};
 		if (tools?.length && options.session.getPlanModeState?.()?.enabled === true) {
 			throw new ToolError("Eval-defined tools are unavailable in plan mode.");
 		}
@@ -90,6 +95,7 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 			invocationKind: "eval",
 			assignment: `Create workpool ${requestedName ?? agent ?? "worker"}`,
 			...(agent ? { agent } : {}),
+			...modelRole,
 			...(perCallModel !== undefined ? { perCallModel } : {}),
 		});
 		const customTools = tools?.length
@@ -109,6 +115,7 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 			name,
 			policy,
 			...(perCallModel !== undefined ? { model: perCallModel } : {}),
+			...modelRole,
 			...(context ? { context } : {}),
 			customTools,
 		});
