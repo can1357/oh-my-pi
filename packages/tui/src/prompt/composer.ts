@@ -240,6 +240,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#nativeDock: readonly (Component | FeatureDockEntry)[] | undefined;
 	#nativeTail: readonly Container[] = [];
 	#coveringChrome: ReadonlySet<Component> = new Set();
+	/** Persisted startup inputs the live {@link #startupStatus} renders; refreshed by {@link updateStartupStatus}. */
+	#startupStatusData: StatusLineStartupData | undefined;
 	/** Cache-driven status line shown until {@link setStatusComponent} mounts the session's. */
 	#startupStatus: StatusLineComponent | undefined;
 	#runtimeMounted = false;
@@ -335,6 +337,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		if (options.status) {
 			const { borderColor, statusLine } = options.status;
 			if (borderColor) this.editor.borderColor = text => `${borderColor.prefix}${text}${borderColor.suffix}`;
+			this.#startupStatusData = statusLine;
 			this.#startupStatus = createStartupStatusLine(statusLine);
 			this.#statusHost.setComponent(this.#startupStatus);
 			this.#startupStatus.attachToEditor(this.editor, getComposerStyle(this.#preferences.composerShape));
@@ -1032,6 +1035,33 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	}
 
 	/**
+	 * Replace the speculative status line's inputs once the real settings and
+	 * model catalog are loaded, shrinking the window in which a stale cached
+	 * model paints. Compaction boundaries depend on the session, so they are
+	 * dropped when the displayed model changes rather than carried over wrong.
+	 */
+	updateStartupStatus(update: Partial<StatusLineStartupData>): void {
+		const previous = this.#startupStatusData;
+		if (!this.#startupStatus || !previous) return;
+		const modelChanged =
+			update.model !== undefined &&
+			(update.model.id !== previous.model?.id || update.model.provider !== previous.model.provider);
+		const merged: StatusLineStartupData = {
+			...previous,
+			...update,
+			compactionBoundaries: modelChanged ? null : (update.compactionBoundaries ?? previous.compactionBoundaries),
+		};
+		this.#disposeStartupStatus();
+		this.#startupStatusData = merged;
+		this.#startupStatus = createStartupStatusLine(merged);
+		this.#statusHost.setComponent(this.#startupStatus);
+		this.#startupStatus.attachToEditor(this.editor, getComposerStyle(this.#preferences.composerShape));
+		const state = startupComposerState(merged);
+		this.editor.composerState = () => state;
+		this.ui.requestRender();
+	}
+
+	/**
 	 * Mount the session-aware status component into the slot below the editor,
 	 * retiring the startup status line; the caller installs the real top-border
 	 * provider through its composer-shape sync.
@@ -1047,6 +1077,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#disposeStartupStatus(): void {
 		this.#startupStatus?.dispose();
 		this.#startupStatus = undefined;
+		this.#startupStatusData = undefined;
 	}
 
 	/** Mount or replace session-aware root children while preserving the header and status hosts. */

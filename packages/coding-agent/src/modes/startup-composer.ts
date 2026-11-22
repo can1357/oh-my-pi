@@ -7,6 +7,7 @@ import {
 	sharedComposerCache,
 } from "@oh-my-pi/pi-tui/prompt/composer-cache";
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
+import type { StatusLineStartupData } from "@oh-my-pi/pi-tui/status-line/startup";
 import { initThemeSync } from "@oh-my-pi/pi-tui/theme";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
 
@@ -128,4 +129,9 @@ export function applyStartupComposerPreferences(update: PrepaintComposerPreferen
 	// buffered) everything typed during the load; the editor replays it here.
 	pending.composer.enableInput();
 	pending.cache?.writeUi(pending.cwd, preferences, update.theme);
+}
+
+/** Refresh the pending startup composer's speculative status line once real settings/models resolve. */
+export function updateStartupComposerStatus(update: Partial<StatusLineStartupData>): void {
+	pendingComposer?.composer.updateStartupStatus(update);
 }

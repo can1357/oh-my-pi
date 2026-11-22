@@ -93,11 +93,13 @@ import { CURRENT_SETUP_VERSION } from "@oh-my-pi/pi-tui/setup/setup-version";
 import type * as SetupWizardModule from "./modes/setup";
 import type { SetupScene } from "@oh-my-pi/pi-tui/setup/scenes/types";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./modes/skill-command";
+import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import {
 	applyStartupComposerPreferences,
 	type ComposerLease,
 	stopPendingStartupComposer,
 	takeStartupComposerLease,
+	updateStartupComposerStatus,
 } from "./modes/startup-composer";
 import { ensureTheme, initTheme, stopThemeWatcher } from "@oh-my-pi/pi-tui/theme";
 import type { SubmittedUserInput } from "./modes/types";
@@ -146,7 +148,14 @@ import { type RestoreOutcome, restoreSession } from "./task/restore";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { cfgTelemetryOtlpExportEnabled } from "./telemetry-settings";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
-import { automaticThinkingLevel, concreteThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import {
+	AUTO_THINKING,
+	automaticThinkingLevel,
+	concreteThinkingLevel,
+	newSessionThinkingLevel,
+	parseConfiguredThinkingLevel,
+	resolveConfiguredThinkingLevel,
+} from "@oh-my-pi/pi-tui/thinking";
 import type { LspStartupServerInfo } from "./tools";
 import { sanitizeDisplayWarnings } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getChangelogPath, readLastChangelogVersion, resolveStartupChangelogForDisplay } from "./utils/changelog";
@@ -2167,6 +2176,35 @@ export async function runRootCommand(
 		});
 
 		await credentialScopedCacheHydration;
+		// Shrink the stale-model window: the speculative status line still shows
+		// the previous launch's cached model; re-resolve the configured default
+		// role against the now-loaded settings/registry and repaint. An
+		// unresolvable default keeps the speculation until the session mounts.
+		logger.time("updateStartupComposerStatus", () => {
+			const roles: ModelRoleLookup = {
+				getModelRole: role =>
+					settingsInstance.getProjectModelRole(role) ?? settingsInstance.getGlobalModelRole(role),
+			};
+			const defaultRole = resolveModelRoleValue(roles.getModelRole("default"), modelRegistry.getAvailable(), {
+				settings: settingsInstance,
+				roleLookup: roles,
+			});
+			const model = defaultRole.model;
+			if (!model) return;
+			const thinking = newSessionThinkingLevel(
+				model,
+				defaultRole.explicitThinkingLevel ? defaultRole.thinkingLevel : undefined,
+				parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(settingsInstance)),
+			);
+			updateStartupComposerStatus({
+				hostname: os.hostname(),
+				model,
+				thinkingLevel: resolveConfiguredThinkingLevel(model, thinking),
+				autoThinking: thinking === AUTO_THINKING,
+				usingSubscription: modelRegistry.isUsingSubscription(model),
+			});
+		});
+
 		let scopedModels = await logger.time(
 			"resolveModelScope",
 			resolveScopedModels,

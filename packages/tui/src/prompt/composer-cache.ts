@@ -18,6 +18,7 @@
  */
 import type { Database, Statement } from "bun:sqlite";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { getComposerCacheDbPath } from "@oh-my-pi/pi-utils/dirs";
 import { isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
@@ -76,7 +77,9 @@ function parseJson(value: string | undefined): unknown {
 function parseStatus(value: unknown): ComposerStatusCache | undefined {
 	if (!isRecord(value)) return undefined;
 	const statusLine = readStatusLineStartupData(value.statusLine);
-	if (!statusLine) return undefined;
+	// Rows written by another host (shared ~/.omp on NFS/synced homes, copied
+	// caches) would paint that machine's default model over this one's.
+	if (!statusLine || statusLine.hostname !== os.hostname()) return undefined;
 	const rawBorderColor = value.borderColor;
 	if (rawBorderColor === undefined) return { statusLine };
 	if (!isRecord(rawBorderColor)) return undefined;

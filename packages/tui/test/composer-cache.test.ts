@@ -11,6 +11,7 @@ function statusFor(thinkingLevel: ThinkingLevel): ComposerStatusCache {
 	return {
 		borderColor: { prefix: "\x1b[36m", suffix: "\x1b[39m" },
 		statusLine: {
+			hostname: os.hostname(),
 			settings: { leftSegments: ["model", "path", "git"], contextLine: "embedded" },
 			gitEnabled: true,
 			thinkingLevel,
@@ -34,6 +35,18 @@ describe("composer startup cache", () => {
 
 	afterEach(async () => {
 		await fs.rm(root, { recursive: true, force: true });
+	});
+
+	it("drops a status row stamped by another host", () => {
+		const project = path.join(root, "project");
+		const foreign = statusFor(ThinkingLevel.High);
+		const cache = ComposerCache.open(dbPath);
+		cache.writeStatus(project, {
+			...foreign,
+			statusLine: { ...foreign.statusLine, hostname: `${os.hostname()}-elsewhere` },
+		});
+		expect(cache.read(project).status).toBeUndefined();
+		cache.close();
 	});
 
 	it("round-trips per-project speculation and serves settings-derived rows to projects without their own", () => {

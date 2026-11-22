@@ -3,6 +3,7 @@
  * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
  */
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { type Agent, AgentBusyError, type AgentMessage, agentPauseGate, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
@@ -4973,6 +4974,7 @@ export class InteractiveMode implements InteractiveModeContext {
 							suffix: colored.slice(markerIndex + marker.length),
 						},
 			statusLine: {
+				hostname: os.hostname(),
 				settings: statusLineHost.getSettings(),
 				gitEnabled: statusLineHost.gitEnabled(),
 				model,
