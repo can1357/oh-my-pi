@@ -23,7 +23,10 @@
 
 use std::{
 	fs, io,
-	sync::atomic::{AtomicU16, Ordering},
+	sync::{
+		Arc,
+		atomic::{AtomicU16, Ordering},
+	},
 	time::{Duration, Instant},
 };
 
@@ -46,6 +49,7 @@ use x11rb::{
 use super::{
 	input::button_detail,
 	keymap::{self, KeyStep, Keymap},
+	text_mapping::TextMapping,
 	uinput::{UInputDevice, X_KEYCODE_OFFSET},
 	wm::{Atoms, Wm, refusal},
 };
@@ -102,7 +106,7 @@ static NONCE: AtomicU16 = AtomicU16::new(1);
 type ReleaseEvents = std::cell::RefCell<Box<dyn FnMut() -> Option<Event> + Send>>;
 
 pub(super) struct Mpx {
-	conn:            RustConnection,
+	conn:            Arc<RustConnection>,
 	root:            Window,
 	atoms:           Atoms,
 	/// Bottom-right screen corner: the virtual cursor rests there between
@@ -114,6 +118,7 @@ pub(super) struct Mpx {
 	pointer:         UInputDevice,
 	pointer_slave:   u16,
 	keyboard:        Option<VirtualKeyboard>,
+	text_mapping:    TextMapping,
 	/// A timeout can leave kernel events in flight. Never retarget that pair
 	/// to another window after an uncertain dispatch.
 	uncertain:       bool,
@@ -131,6 +136,8 @@ pub(super) struct Mpx {
 struct VirtualKeyboard {
 	device: UInputDevice,
 	slave:  u16,
+	/// Whether the warm-up key went through; see [`Mpx::warm`].
+	warm:   bool,
 }
 
 /// A slave a call sends through and the master of this pair it must sit on.
@@ -215,6 +222,7 @@ impl<'a> ReleaseOrder<'a> {
 impl Mpx {
 	pub(super) fn create() -> CoreResult<Self> {
 		let (conn, screen) = x11rb::connect(None).map_err(mpx_failed)?;
+		let conn = Arc::new(conn);
 		let (root, park) = {
 			let info = &conn.setup().roots[screen];
 			let corner = |size: u16| i16::try_from(size.saturating_sub(1)).unwrap_or(i16::MAX);
@@ -264,6 +272,7 @@ impl Mpx {
 			return Err(error);
 		}
 		set_flat_acceleration(&conn, pointer_slave);
+		let text_mapping = TextMapping::new(Arc::clone(&conn));
 		let mpx = Self {
 			conn,
 			root,
@@ -279,6 +288,7 @@ impl Mpx {
 			sent: false,
 			#[cfg(test)]
 			release_events: None,
+			text_mapping,
 		};
 		mpx.park();
 		Ok(mpx)
@@ -450,10 +460,25 @@ impl Mpx {
 		})
 	}
 
+	/// Restores the temporary text keycodes bound on this pair's keyboard.
+	pub(super) fn finish_text(&mut self) -> CoreResult<()> {
+		self.text_mapping.finish()
+	}
+
 	pub(super) fn type_text(&mut self, target: Window, text: &str) -> CoreResult<()> {
 		self.begin(false)?;
-		let steps = self.keyboard_keymap()?.plan_text(text)?;
-		self.deliver_keys(target, &steps)
+		let mut keymap = self.keyboard_keymap()?;
+		self.text_mapping.bind(&mut keymap, text)?;
+		let steps = keymap.plan_text(text)?;
+		let before = self.text_mapping.presses();
+		self.deliver_keys(target, &steps).map_err(|mut error| {
+			if self.text_mapping.presses() != before {
+				error
+					.message
+					.push_str("; part of the text was sent before this error");
+			}
+			error
+		})
 	}
 
 	pub(super) fn key_chord(&mut self, target: Window, keys: &[KeyName]) -> CoreResult<()> {
@@ -463,6 +488,7 @@ impl Mpx {
 	}
 
 	fn deliver_keys(&mut self, target: Window, steps: &[KeyStep]) -> CoreResult<()> {
+		self.warm()?;
 		self.focus(target)?;
 		let result = self.emit_keys(steps);
 		if result.is_err() {
@@ -541,6 +567,7 @@ impl Mpx {
 				keycodes.push(code);
 			}
 		}
+		self.warm()?;
 		self.focus(target)?;
 		let presses: Vec<KeyStep> = keycodes
 			.iter()
@@ -614,7 +641,11 @@ impl Mpx {
 				}
 			}
 			index += 1;
-			keyboard.device.key(step.keycode, step.press)
+			keyboard.device.key_written(step.keycode, step.press, || {
+				if step.press {
+					self.text_mapping.pressed(step.keycode);
+				}
+			})
 		})?;
 		let releases = steps.iter().filter(|step| !step.press).count();
 		if releases == 0 {
@@ -863,6 +894,7 @@ impl Mpx {
 			// call that follows focuses its own.
 			unfocus(&self.conn, self.master_keyboard);
 			let warmed = self.warm_up(&mut keyboard.device, keyboard.slave);
+			keyboard.warm = warmed.is_ok();
 			self.keyboard = Some(keyboard);
 			warmed?;
 		}
@@ -914,7 +946,9 @@ impl Mpx {
 	fn keyboard_keymap(&mut self) -> CoreResult<Keymap> {
 		let slave = self.ensure_keyboard()?.slave;
 		// The desktop can reconfigure a hot-plugged device between actions.
-		Keymap::device(&self.conn, slave)
+		let mut map = Keymap::mpx(&self.conn, slave, self.master_keyboard)?;
+		self.text_mapping.hide(&mut map)?;
+		Ok(map)
 	}
 
 	fn ensure_keyboard(&mut self) -> CoreResult<&mut VirtualKeyboard> {
@@ -927,7 +961,7 @@ impl Mpx {
 
 	fn create_keyboard(&self) -> CoreResult<VirtualKeyboard> {
 		let device_name = format!("{} uinput keyboard", self.name);
-		let mut device = UInputDevice::keyboard(&device_name)?;
+		let device = UInputDevice::keyboard(&device_name)?;
 		let slave = wait_for_slave(&self.conn, &device_name, DeviceType::SLAVE_KEYBOARD)?;
 		attach(&self.conn, slave, self.master_keyboard)?;
 		select_raw(
@@ -936,10 +970,22 @@ impl Mpx {
 			slave,
 			XIEventMask::RAW_KEY_PRESS | XIEventMask::RAW_KEY_RELEASE,
 		)?;
-		// The first events of a fresh keyboard were observed to vanish while
-		// the master switches to the slave's keymap.
-		self.warm_up(&mut device, slave)?;
-		Ok(VirtualKeyboard { device, slave })
+		Ok(VirtualKeyboard { device, slave, warm: false })
+	}
+
+	/// Warms a keyboard created for this call, focused nowhere, before its
+	/// first keys: the first events of a fresh keyboard were observed to
+	/// vanish while the master switches to the slave's keymap. Deferred from
+	/// creation, so a call refused while it plans sends no key at all.
+	fn warm(&mut self) -> CoreResult<()> {
+		let Some(mut keyboard) = self.keyboard.take_if(|keyboard| !keyboard.warm) else {
+			return Ok(());
+		};
+		unfocus(&self.conn, self.master_keyboard);
+		let warmed = self.warm_up(&mut keyboard.device, keyboard.slave);
+		keyboard.warm = warmed.is_ok();
+		self.keyboard = Some(keyboard);
+		warmed
 	}
 
 	/// Pushes a symbol-less key through the whole pipeline of a keyboard
@@ -1022,6 +1068,7 @@ impl Mpx {
 
 impl Drop for Mpx {
 	fn drop(&mut self) {
+		let _ = self.text_mapping.finish();
 		// A cancelled or timed-out call can leave events of the slaves in flight;
 		// park and free the pair only once the server has dropped them, so a late
 		// motion or release never lands at the park corner or under the next
@@ -2336,7 +2383,9 @@ mod tests {
 			.find(|info| info.type_ == DeviceType::MASTER_KEYBOARD)
 			.unwrap()
 			.deviceid;
+		let conn = Arc::new(conn);
 		Mpx {
+			text_mapping: TextMapping::new(Arc::clone(&conn)),
 			conn,
 			root,
 			atoms,
@@ -2346,7 +2395,11 @@ mod tests {
 			master_keyboard: keyboard,
 			pointer: UInputDevice::test_sink(),
 			pointer_slave: 0,
-			keyboard: Some(VirtualKeyboard { device: UInputDevice::test_sink(), slave: keyboard }),
+			keyboard: Some(VirtualKeyboard {
+				device: UInputDevice::test_sink(),
+				slave:  keyboard,
+				warm:   true,
+			}),
 			uncertain: false,
 			sent: false,
 			release_events: None,

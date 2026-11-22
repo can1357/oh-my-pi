@@ -9,6 +9,8 @@
  * - No system prompt / tool catalog sections.
  */
 import { describe, expect, it } from "bun:test";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { renderAdvisorDeltaChunks } from "@oh-my-pi/pi-coding-agent/advisor/delta-split";
 import { formatSessionHistoryMarkdown } from "@oh-my-pi/pi-coding-agent/session/session-history-format";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
@@ -546,4 +548,102 @@ describe("formatSessionHistoryMarkdown", () => {
 			expect(output).toContain("counter example");
 		});
 	}
+});
+
+describe("advisor-view shortening label (#12777)", () => {
+	const ELIDED_HERE =
+		"shortened here for advisor view only; the omitted lines were part of the result the main thread received";
+	const TOOL_TRUNCATED = "shortened here for advisor view only; the tool itself truncated its output";
+	const complete = Array.from({ length: 150 }, (_, i) => `line ${i + 1}`).join("\n");
+
+	// A read call and its result, in the shape the advisor transcript renders.
+	function readTranscript(text: string, details?: unknown): unknown[] {
+		return [
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "r1", name: "read", arguments: { path: "report:raw:1-150" } }],
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "r1",
+				toolName: "read",
+				content: [{ type: "text", text }],
+				details,
+				isError: false,
+				timestamp: 2,
+			},
+		];
+	}
+
+	it("labels the lines only the advisor view cut as part of the result the main thread received", () => {
+		const output = formatSessionHistoryMarkdown(readTranscript(complete), { expandToolIO: true });
+
+		expect(output).toContain(`Tool result (${ELIDED_HERE}):\n`);
+		expect(output).toMatch(/\[…\d+ln elided…\]/);
+	});
+
+	// One representative case for tool-side metadata (summary or meta.limits): the formatter
+	// never reads these shapes, so the label is the same for every one of them.
+	it("makes no completeness claim when the read result carries tool-side metadata", () => {
+		const details = { meta: { limits: { matchLimit: { reached: 150, suggestion: 300 } } } };
+		const output = formatSessionHistoryMarkdown(readTranscript(complete, details), { expandToolIO: true });
+
+		expect(output).toContain(`Tool result (${ELIDED_HERE}):\n`);
+	});
+
+	it("names the tool's own truncation on a small result the advisor view did not shorten", () => {
+		const details = {
+			meta: {
+				truncation: {
+					direction: "middle",
+					truncatedBy: "middle",
+					totalLines: 300,
+					totalBytes: 9000,
+					outputLines: 20,
+					outputBytes: 600,
+				},
+			},
+		};
+		const small = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n");
+		const output = formatSessionHistoryMarkdown(readTranscript(small, details), { expandToolIO: true });
+
+		expect(output).toContain("Tool result (the tool itself truncated its output):\n");
+	});
+
+	it("names the tool's own truncation when the tool already truncated the output", () => {
+		const details = {
+			meta: {
+				truncation: {
+					direction: "middle",
+					truncatedBy: "middle",
+					totalLines: 300,
+					totalBytes: 9000,
+					outputLines: 150,
+					outputBytes: 4500,
+				},
+			},
+		};
+		const output = formatSessionHistoryMarkdown(readTranscript(complete, details), { expandToolIO: true });
+
+		expect(output).toContain(`Tool result (${TOOL_TRUNCATED}):\n`);
+	});
+
+	it("keeps the bare label for a result the advisor view did not shorten", () => {
+		const output = formatSessionHistoryMarkdown(readTranscript("const a = 1;"), { expandToolIO: true });
+
+		expect(output).toContain("Tool result:\n");
+		expect(output).not.toContain("advisor view only");
+	});
+
+	it("labels the advisor-only cut on the chunked path the advisor receives", () => {
+		const chunks = renderAdvisorDeltaChunks(readTranscript(complete) as AgentMessage[], {
+			wip: false,
+			includeThinking: false,
+			advisorRegexSecretValues: new Set(),
+		});
+		const text = (chunks ?? []).map(chunk => (chunk as { content: { text: string }[] }).content[0].text).join("\n");
+
+		expect(text).toContain(`Tool result (${ELIDED_HERE}):\n`);
+	});
 });

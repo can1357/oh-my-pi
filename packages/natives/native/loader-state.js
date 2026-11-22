@@ -71,12 +71,36 @@ function getNativesDir() {
 	return path.join(os.homedir(), ".omp", "natives");
 }
 
-function resolveLeafPackageDir(platformTag) {
+/**
+ * Bun's install cache has no `node_modules` around a release copy, so
+ * `require.resolve` cannot reach the platform leaf beside it: a version-pinned
+ * sibling (`pi-natives-<tag>@<version>@@@N`) of the core package. Scan the core
+ * package's scope directory for the leaf that holds the addon, matching the
+ * running version (issue #8901).
+ */
+function findScopedLeafPackageDir(platformTag, addonFilenames) {
+	const scopeDir = path.join(import.meta.dir, "..", "..");
+	let names;
+	try {
+		names = fs.readdirSync(scopeDir);
+	} catch {
+		return null;
+	}
+	const leafName = `pi-natives-${platformTag}`;
+	const leaves = names.filter(name => name === leafName || name.startsWith(`${leafName}@${packageJson.version}@`));
+	for (const name of leaves) {
+		const dir = path.join(scopeDir, name);
+		if (addonFilenames.some(filename => fs.existsSync(path.join(dir, filename)))) return dir;
+	}
+	return null;
+}
+
+function resolveLeafPackageDir(platformTag, addonFilenames) {
 	try {
 		const require_ = createRequire(import.meta.url);
 		return path.dirname(require_.resolve(`@oh-my-pi/pi-natives-${platformTag}/package.json`));
 	} catch {
-		return null;
+		return findScopedLeafPackageDir(platformTag, addonFilenames);
 	}
 }
 
@@ -453,11 +477,26 @@ function isSafeEmbeddedAddonFilename(filename) {
 	return filename.length > 0 && path.basename(filename) === filename && !filename.includes("/") && !filename.includes("\\");
 }
 
+/**
+ * Embedded addons extract to `<targetDir>/embedded-<hash>/<filename>`, where
+ * `hash` is the manifest's build-time content hash. A path only ever receives
+ * the bytes of its own build, and a file appears there only through an atomic
+ * rename, so its presence at the expected size identifies it. Two builds of
+ * one version never share a path, so a rebuild with a same-size addon, an
+ * interrupted extraction, or two builds extracting at once cannot leave one
+ * build loading the other's addon. Hashing the 100+ MB file at startup is
+ * never needed.
+ */
+const EMBEDDED_ADDON_DIR_PREFIX = "embedded-";
+
+export function embeddedAddonPath(targetDir, file) {
+	return path.join(targetDir, `${EMBEDDED_ADDON_DIR_PREFIX}${file.hash}`, file.filename);
+}
+
 function isEmbeddedAddonFileCurrent(targetPath, file) {
 	try {
 		const stat = fs.statSync(targetPath);
-		if (!stat.isFile()) return false;
-		return stat.size === file.size;
+		return stat.isFile() && stat.size === file.size;
 	} catch (err) {
 		if (err && err.code === "ENOENT") return false;
 		throw err;
@@ -484,26 +523,78 @@ export function extractEmbeddedAddons({ files, targetDir }) {
 		if (!isSafeEmbeddedAddonFilename(file.filename)) {
 			throw new Error(`Unsafe embedded addon filename: ${file.filename}`);
 		}
+		if (!/^[0-9a-f]+$/.test(file.hash)) {
+			throw new Error(`Unsafe embedded addon hash for ${file.filename}: ${file.hash}`);
+		}
 	}
 	const writtenPaths = [];
 	for (const file of files) {
-		const targetPath = path.join(targetDir, file.filename);
+		const targetPath = embeddedAddonPath(targetDir, file);
 		if (isEmbeddedAddonFileCurrent(targetPath, file)) continue;
 		const content = Bun.zstdDecompressSync(fs.readFileSync(file.zstdPath));
 		if (content.length !== file.size) {
 			throw new Error(`Embedded addon size mismatch for ${file.filename}: expected ${file.size}, got ${content.length}`);
 		}
-		writeEmbeddedAddonFile(targetPath, content);
+		fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+		try {
+			writeEmbeddedAddonFile(targetPath, content);
+		} catch (err) {
+			// Another process published the same build first; on Windows the
+			// rename then fails because that process has the file loaded.
+			if (isEmbeddedAddonFileCurrent(targetPath, file)) continue;
+			throw err;
+		}
 		writtenPaths.push(targetPath);
 	}
 	return writtenPaths;
 }
 
+/**
+ * Best-effort removal of `embedded-<hash>` directories left by other builds of
+ * this version. A directory still loaded by a running process (Windows locks
+ * it) is skipped and retried on a later start.
+ */
+export function pruneStaleEmbeddedAddons({ targetDir, keepHashes }) {
+	const keep = new Set(keepHashes.map(hash => `${EMBEDDED_ADDON_DIR_PREFIX}${hash}`));
+	const removed = [];
+	let entries;
+	try {
+		entries = fs.readdirSync(targetDir, { withFileTypes: true });
+	} catch {
+		return removed;
+	}
+	for (const entry of entries) {
+		if (!entry.isDirectory() || !entry.name.startsWith(EMBEDDED_ADDON_DIR_PREFIX) || keep.has(entry.name)) continue;
+		const dir = path.join(targetDir, entry.name);
+		try {
+			fs.rmSync(dir, { recursive: true, force: true });
+			removed.push(dir);
+		} catch {
+			// In use by another process; retried on a later start.
+		}
+	}
+	return removed;
+}
+
+function hasMatchingEmbeddedAddon(ctx) {
+	return (
+		ctx.isCompiledBinary &&
+		!!embeddedAddon &&
+		embeddedAddon.platformTag === ctx.platformTag &&
+		embeddedAddon.version === ctx.packageVersion
+	);
+}
+
+/** This build's embedded addon for the selected variant, plus the lazily extracted baseline fallback on modern x64. */
+function embeddedProbeFiles(ctx) {
+	if (!hasMatchingEmbeddedAddon(ctx)) return { primary: null, fallback: null };
+	const fallback =
+		ctx.selectedVariant === "modern" ? embeddedAddon.files.find(file => file.variant === "baseline") || null : null;
+	return { primary: selectEmbeddedAddonFile(ctx.selectedVariant), fallback };
+}
+
 function maybeExtractEmbeddedAddon(ctx, errors, file = selectEmbeddedAddonFile(ctx.selectedVariant)) {
-	if (!ctx.isCompiledBinary || !embeddedAddon) return null;
-	if (embeddedAddon.platformTag !== ctx.platformTag || embeddedAddon.version !== ctx.packageVersion) return null;
-	if (!file) return null;
-	const targetPath = path.join(ctx.versionedDir, file.filename);
+	if (!hasMatchingEmbeddedAddon(ctx) || !file) return null;
 
 	startupMarker("native:extractEmbeddedAddon:start");
 	try {
@@ -516,12 +607,27 @@ function maybeExtractEmbeddedAddon(ctx, errors, file = selectEmbeddedAddonFile(c
 
 	try {
 		extractEmbeddedAddons({ files: [file], targetDir: ctx.versionedDir });
-		return targetPath;
+		return embeddedAddonPath(ctx.versionedDir, file);
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		errors.push(`embedded addon extraction (${file.filename}): ${message}`);
 		return null;
 	}
+}
+
+/**
+ * Final probe order for `loadNative`. When the binary carries an addon for
+ * this platform and version, the unhashed `versionedDir/<filename>` paths are
+ * dropped: older builds of this version extracted there, so a file at that
+ * path may belong to any of them and would pass the release-version check.
+ * The embedded addon is reachable only through its own hash path, which the
+ * caller probes after (re-)extracting it.
+ *
+ * @param {{ candidates: string[]; versionedDir: string; hasEmbedded: boolean; embedded: string[]; staged: string | null }} input
+ */
+export function resolveRuntimeCandidates({ candidates, versionedDir, hasEmbedded, embedded, staged }) {
+	const shared = hasEmbedded ? candidates.filter(candidate => path.dirname(candidate) !== versionedDir) : candidates;
+	return [...new Set([...embedded, ...(staged ? [staged] : []), ...shared])];
 }
 
 /**
@@ -889,13 +995,27 @@ function configureGrammarDir(bindings, nativesDir) {
 }
 
 
+/**
+ * Paths a compiled binary loads its addon from: this build's
+ * `embedded-<hash>/` paths when it embeds an addon (the shared
+ * `versionedDir/<filename>` paths are never probed then), else the shared ones.
+ */
+function compiledAddonTargets(ctx) {
+	const { primary, fallback } = embeddedProbeFiles(ctx);
+	const files = [...new Set([primary, fallback].filter(Boolean))];
+	if (files.length > 0) {
+		return files.map(file => ({ filename: file.filename, targetPath: embeddedAddonPath(ctx.versionedDir, file) }));
+	}
+	return ctx.addonFilenames.map(filename => ({ filename, targetPath: path.join(ctx.versionedDir, filename) }));
+}
+
 function buildHelpMessage(ctx) {
 	if (ctx.isCompiledBinary) {
-		const expectedPaths = ctx.addonFilenames.map(filename => `  ${path.join(ctx.versionedDir, filename)}`).join("\n");
-		const downloadHints = ctx.addonFilenames
-			.map(filename => {
+		const targets = compiledAddonTargets(ctx);
+		const expectedPaths = targets.map(({ targetPath }) => `  ${targetPath}`).join("\n");
+		const downloadHints = targets
+			.map(({ filename, targetPath }) => {
 				const downloadUrl = `https://github.com/can1357/oh-my-pi/releases/latest/download/${filename}`;
-				const targetPath = path.join(ctx.versionedDir, filename);
 				return `  curl -fsSL "${downloadUrl}" -o "${targetPath}"`;
 			})
 			.join("\n");
@@ -941,25 +1061,28 @@ export function initLoaderContext(overrides = {}) {
 			importMetaUrl: import.meta.url,
 		});
 	const normalizedNativeDir = platform === "win32" ? nativeDir.toLowerCase() : nativeDir;
+	// A published core manifest declares its platform leaf in `optionalDependencies`; a
+	// checkout does not. A release copied into bun's install cache has no `node_modules`
+	// segment, so the path alone cannot tell it from a checkout (issue #8901).
 	const isWorkspaceLoad =
 		!isCompiledBinary &&
+		!packageJson.optionalDependencies?.[`@oh-my-pi/pi-natives-${platformTag}`] &&
 		!normalizedNativeDir.includes("\\node_modules\\") &&
 		!normalizedNativeDir.includes("/node_modules/");
+	const selectedVariant = resolveCpuVariant(getVariantOverride());
+	const addonFilenames = getAddonFilenames({ tag: platformTag, arch: process.arch, variant: selectedVariant });
+	const addonLabel = selectedVariant ? `${platformTag} (${selectedVariant})` : platformTag;
 	const leafPackageDir =
 		isCompiledBinary || isWorkspaceLoad
 			? null
 			: overrides.leafPackageDir === undefined
-				? resolveLeafPackageDir(platformTag)
+				? resolveLeafPackageDir(platformTag, addonFilenames)
 				: overrides.leafPackageDir;
 	const stageFromNodeModules = shouldStageNodeModulesAddon({
 		platform,
 		isCompiledBinary,
 		nativeDir: normalizedNativeDir,
 	});
-
-	const selectedVariant = resolveCpuVariant(getVariantOverride());
-	const addonFilenames = getAddonFilenames({ tag: platformTag, arch: process.arch, variant: selectedVariant });
-	const addonLabel = selectedVariant ? `${platformTag} (${selectedVariant})` : platformTag;
 
 	const candidates = resolveLoaderCandidates({
 		addonFilenames,
@@ -1034,18 +1157,20 @@ export function loadNative() {
 	const errors = [];
 	const embeddedCandidate = maybeExtractEmbeddedAddon(ctx, errors);
 	const stagedCandidate = embeddedCandidate ? null : maybeStageNodeModulesAddon(ctx, errors);
-	const prepended = [embeddedCandidate, stagedCandidate].filter(c => typeof c === "string");
-	const runtimeCandidates = prepended.length > 0 ? [...prepended, ...ctx.candidates] : ctx.candidates;
-	const fallbackEmbeddedFile =
-		ctx.selectedVariant === "modern" && embeddedAddon
-			? embeddedAddon.files.find(file => file.variant === "baseline")
-			: null;
-	const fallbackEmbeddedPath = fallbackEmbeddedFile && path.join(ctx.versionedDir, fallbackEmbeddedFile.filename);
+	const hasEmbedded = hasMatchingEmbeddedAddon(ctx);
+	const { primary: primaryEmbeddedFile, fallback: fallbackEmbeddedFile } = embeddedProbeFiles(ctx);
+	const fallbackEmbeddedPath = fallbackEmbeddedFile && embeddedAddonPath(ctx.versionedDir, fallbackEmbeddedFile);
+	const runtimeCandidates = resolveRuntimeCandidates({
+		candidates: ctx.candidates,
+		versionedDir: ctx.versionedDir,
+		hasEmbedded,
+		embedded: [embeddedCandidate, fallbackEmbeddedPath].filter(c => typeof c === "string"),
+		staged: stagedCandidate,
+	});
 
 	for (const candidate of runtimeCandidates) {
-		if (fallbackEmbeddedFile && candidate === fallbackEmbeddedPath) {
-			maybeExtractEmbeddedAddon(ctx, errors, fallbackEmbeddedFile);
-		}
+		// Extracted lazily, and never probed unless this build's copy is in place.
+		if (candidate === fallbackEmbeddedPath && !maybeExtractEmbeddedAddon(ctx, errors, fallbackEmbeddedFile)) continue;
 		try {
 			startupMarker(`native:require:${path.basename(candidate)}`);
 			const bindings = openNativeAddon(candidate);
@@ -1054,7 +1179,13 @@ export function loadNative() {
 			configureGrammarDir(bindings, ctx.nativesDir);
 			loadedAddon = describeLoadedAddon(bindings, candidate, ctx);
 			reportStaleWorkspaceAddon(ctx, loadedAddon);
-	        cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
+			cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
+			if (hasEmbedded) {
+				pruneStaleEmbeddedAddons({
+					targetDir: ctx.versionedDir,
+					keepHashes: [primaryEmbeddedFile, fallbackEmbeddedFile].filter(Boolean).map(file => file.hash),
+				});
+			}
 			startupMarker("native:loadNative:done");
 			return bindings;
 		} catch (err) {
