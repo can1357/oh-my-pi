@@ -133,9 +133,7 @@ function withMargin(localTokens: number): number {
 function countPromptTokens(context: Context, tokenizer: Tokenizer): number {
 	const { messages } = context;
 	const anchor = findRequestUsageAnchor(messages);
-	if (!anchor) {
-		return withMargin(countContextTokens(context, tokenizer)) + messages.length * MESSAGE_FRAMING_TOKENS;
-	}
+	if (!anchor) return estimateContextPromptTokens(context, tokenizer);
 	let tail = 0;
 	for (let index = anchor.index + 1; index < messages.length; index++) {
 		tail += tokenizer.countMessage(messages[index]);
@@ -152,4 +150,33 @@ function countContextTokens(context: Context, tokenizer: Tokenizer): number {
 		countFraming(inactiveTools, tokenizer, () => toolFragments(inactiveTools ?? [])) +
 		tokenizer.countMessages(context.messages)
 	);
+}
+
+/** Conservative full-context prompt estimate for side requests without a trustworthy live-turn usage anchor. */
+export function estimateContextPromptTokens(context: Context, tokenizer: Tokenizer): number {
+	return withMargin(countContextTokens(context, tokenizer)) + context.messages.length * MESSAGE_FRAMING_TOKENS;
+}
+
+/**
+ * Minimum output headroom (fitted floor plus per-request headway) the transport
+ * requires to dispatch a generation request.
+ */
+export const MIN_OUTPUT_HEADROOM_TOKENS = OUTPUT_FIT_HEADWAY_TOKENS + MIN_FITTED_OUTPUT_TOKENS;
+
+/**
+ * Checks whether the prepared handoff context fits within the model's context window
+ * leaving enough room for the transport's minimum output headroom.
+ */
+export function handoffContextFitsWindow(
+	context: Context,
+	model: Model,
+	tokenizer: Tokenizer,
+): { fits: boolean; estimatedTokens: number } {
+	const contextWindow = model.contextWindow;
+	if (contextWindow == null || contextWindow <= 0) return { fits: true, estimatedTokens: 0 };
+	const estimatedTokens = estimateContextPromptTokens(context, tokenizer);
+	return {
+		fits: estimatedTokens + MIN_OUTPUT_HEADROOM_TOKENS <= contextWindow,
+		estimatedTokens,
+	};
 }

@@ -5,8 +5,10 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	fitOutputTokensToContextWindow,
+	handoffContextFitsWindow,
 	MESSAGE_FRAMING_TOKENS,
 	MIN_FITTED_OUTPUT_TOKENS,
+	MIN_OUTPUT_HEADROOM_TOKENS,
 	OUTPUT_FIT_HEADWAY_TOKENS,
 } from "../src/output-budget";
 import { Tokenizer } from "../src/tokenizer";
@@ -250,5 +252,41 @@ describe("fitOutputTokensToContextWindow", () => {
 		// worth of framing would 400. The headway applies on this branch too.
 		const context: Context = { messages: [reported(799_950, 1)] };
 		expect(fitOutputTokensToContextWindow(deepseek, context, 200_000, tokenizer)).toBe(199_986);
+	});
+});
+
+describe("handoffContextFitsWindow", () => {
+	const tokenizer = new Tokenizer();
+
+	test("allows handoff on models with large maxTokens when prompt leaves minimum headroom (Opus 5.5)", () => {
+		const opus = getBundledModel("anthropic", "claude-opus-5-5");
+		// 820k raw tokens estimated at ~902k with margin; full 128k maxTokens would exceed 1M,
+		// but prompt leaves plenty of room for minimum transport headroom.
+		const context: Context = { messages: [userOf(820_000, 1)] };
+		const result = handoffContextFitsWindow(context, opus, tokenizer);
+		expect(result.fits).toBe(true);
+		expect(result.estimatedTokens + MIN_OUTPUT_HEADROOM_TOKENS).toBeLessThanOrEqual(1_000_000);
+	});
+
+	test("allows handoff for models with large default output caps (DeepSeek V4 at 57% window)", () => {
+		// 570k raw tokens on DeepSeek (384k maxTokens) would fail if full maxTokens is charged.
+		const context: Context = { messages: [userOf(570_000, 1)] };
+		const result = handoffContextFitsWindow(context, deepseek, tokenizer);
+		expect(result.fits).toBe(true);
+		expect(result.estimatedTokens + MIN_OUTPUT_HEADROOM_TOKENS).toBeLessThanOrEqual(1_000_000);
+	});
+
+	test("refuses handoff when prompt alone leaves no room for minimum output headroom", () => {
+		const smallWindowModel: Model = { ...deepseek, contextWindow: 262_144, maxTokens: 8_192 };
+		const context: Context = { messages: [userOf(300_000, 1)] };
+		const result = handoffContextFitsWindow(context, smallWindowModel, tokenizer);
+		expect(result.fits).toBe(false);
+	});
+
+	test("allows handoff when model declares no context window", () => {
+		const unwindowedModel: Model = { ...deepseek, contextWindow: 0 };
+		const context: Context = { messages: [userOf(500_000, 1)] };
+		const result = handoffContextFitsWindow(context, unwindowedModel, tokenizer);
+		expect(result.fits).toBe(true);
 	});
 });
