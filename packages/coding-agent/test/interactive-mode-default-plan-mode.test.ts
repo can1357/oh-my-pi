@@ -10,6 +10,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../src/config/model-registry";
+import { resolveExactModelIdentity } from "../src/config/model-resolver";
 import type { CustomTool } from "../src/extensibility/custom-tools/types";
 import { resolveLocalUrlToPath } from "../src/internal-urls";
 import { InteractiveMode, shouldEnterPlanModeOnStartup } from "../src/modes/interactive-mode";
@@ -172,12 +173,13 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		const created = createHarness(Settings.isolated({ "compaction.enabled": false }));
 		const currentSession = session;
 		const routedBase = currentSession?.modelRegistry.find("openrouter", "anthropic/claude-sonnet-4.5");
-		const planModel = currentSession?.modelRegistry.find("anthropic", "claude-opus-4-5");
-		if (!currentSession || !routedBase || !planModel) throw new Error("Expected routed sonnet and plan opus models");
-		const routedModel = {
-			...routedBase,
-			compat: { ...routedBase.compat, openRouterRouting: { only: ["anthropic"] } },
-		} as Model;
+		if (!currentSession || !routedBase) throw new Error("Expected routed sonnet model");
+		const routedModel = resolveExactModelIdentity(
+			"openrouter/anthropic/claude-sonnet-4.5@anthropic",
+			currentSession.modelRegistry,
+		);
+		const planModel = currentSession.modelRegistry.find("anthropic", "claude-opus-4-5");
+		if (!routedModel || !planModel) throw new Error("Expected routed sonnet and plan opus models");
 		currentSession.settings.setModelRole("plan", "anthropic/claude-opus-4-5");
 		await currentSession.setModelTemporary(routedModel, Effort.High);
 
@@ -202,6 +204,22 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(currentSession.model).toMatchObject({
 			compat: { openRouterRouting: { only: ["anthropic"] } },
 		});
+		expect(currentSession.configuredThinkingLevel()).toBe(Effort.High);
+	});
+
+	it("keeps a mid-plan model change when no plan role is configured", async () => {
+		const created = createHarness(Settings.isolated({ "compaction.enabled": false }));
+		const currentSession = session;
+		const switched = currentSession?.modelRegistry.find("anthropic", "claude-opus-4-5");
+		if (!currentSession || !switched) throw new Error("Expected opus model");
+
+		await created.handlePlanModeCommand();
+		expect(created.planModeEnabled).toBe(true);
+		await currentSession.setModelTemporary(switched, Effort.High);
+
+		await created.handlePlanModeCommand();
+		expect(created.planModeEnabled).toBe(false);
+		expect(currentSession.model?.id).toBe(switched.id);
 		expect(currentSession.configuredThinkingLevel()).toBe(Effort.High);
 	});
 

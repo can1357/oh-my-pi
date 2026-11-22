@@ -1424,6 +1424,11 @@ const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
 
 /** Repaint cadence of the open jobs sheet: output tails, pids and list ages are polled, not pushed. */
 const JOBS_SHEET_REFRESH_MS = 250;
+type PlanPreModelState = {
+	model?: Model;
+	identity?: string;
+	thinkingLevel?: ConfiguredThinkingLevel;
+};
 
 export class InteractiveMode implements InteractiveModeContext {
 	#ownsStartedUi: boolean;
@@ -2001,9 +2006,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#pendingGoalContinuationTurns = 0;
 	#previousGoalContinuationActivity: string | undefined;
 	#goalSuppressNextContinuation = false;
-	#planModePreviousModelState:
-		| { model?: Model; identity?: string; thinkingLevel?: ConfiguredThinkingLevel }
-		| undefined;
+	#planModePreviousModelState: PlanPreModelState | undefined;
 	#pendingModelSwitch: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
 	/** Whether #pendingModelSwitch was queued by the live plan-role reconciler. */
 	#pendingPlanModelSwitch = false;
@@ -5970,13 +5973,13 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async #applyPlanModeModel(): Promise<void> {
 		const currentModel = this.session.model;
+		const resolved = this.session.resolveRoleModelWithThinking("plan");
+		if (!resolved.model) return;
+		// Only an entry captures this; role changes while planning must not overwrite it.
 		this.#planModePreviousModelState = {
 			...(currentModel ? { model: currentModel, identity: formatModelStringWithRouting(currentModel) } : {}),
 			thinkingLevel: this.session.configuredThinkingLevel(),
 		};
-		const resolved = this.session.resolveRoleModelWithThinking("plan");
-		if (!resolved.model) return;
-		// Only an entry captures this; role changes while planning must not overwrite it.
 
 		await this.#applyPlanModelTransition(currentModel, resolved);
 	}
@@ -6079,17 +6082,15 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.planModeEnabled = false;
 				this.planModePaused = false;
 				this.planModePlanFilePath = undefined;
+				this.#planModePreviousToolPresentation = undefined;
 				this.#planModePreviousModelState = undefined;
 				this.#pendingModelSwitch = undefined;
 				this.#pendingPlanModelSwitch = false;
 				this.#planModeHasEntered = false;
 				this.#updatePlanModeStatus();
 			}
-			if (options?.restorePlanModel && previousModel?.model) {
-				await this.#restorePlanPreviousModel({
-					model: previousModel.model,
-					thinkingLevel: previousModel.thinkingLevel,
-				});
+			if (options?.restorePlanModel) {
+				await this.#restorePlanPreviousModel(previousModel ?? {});
 			}
 		}
 
@@ -6227,10 +6228,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				planFilePath,
 				preserveRestoredModel: true,
 				previousModelState:
-					typeof prePlanModelIdentity === "string" || prePlanThinkingLevel !== undefined
+					typeof prePlanModelIdentity === "string"
 						? {
 								...(previousModel ? { model: previousModel } : {}),
-								...(typeof prePlanModelIdentity === "string" ? { identity: prePlanModelIdentity } : {}),
+								identity: prePlanModelIdentity,
 								thinkingLevel: prePlanThinkingLevel,
 							}
 						: undefined,
@@ -6258,7 +6259,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		planFilePath?: string;
 		workflow?: "parallel" | "iterative";
 		preserveRestoredModel?: boolean;
-		previousModelState?: { model?: Model; identity?: string; thinkingLevel?: ConfiguredThinkingLevel };
+		previousModelState?: PlanPreModelState;
 	}): Promise<void> {
 		if (this.planModeEnabled) {
 			return;
@@ -6332,6 +6333,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (options?.previousModelState) {
 			this.#planModePreviousModelState = options.previousModelState;
 		}
+		// Resume already restored the active plan model; applying the role again
+		// would overwrite any execution target restored from the journal.
 		if (!options?.preserveRestoredModel) {
 			await this.#applyPlanModeModel();
 		}
@@ -6355,7 +6358,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 
-	async #restorePlanPreviousModel(prev: { model: Model; thinkingLevel?: ConfiguredThinkingLevel }): Promise<void> {
+	async #restorePlanPreviousModel(prev: PlanPreModelState): Promise<void> {
+		if (!prev.model) return;
 		if (
 			this.session.model &&
 			formatModelStringWithRouting(this.session.model) === formatModelStringWithRouting(prev.model)
@@ -6390,8 +6394,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#planModePreviousModelState = undefined;
 		if (executionModel) {
 			await this.#applyPlanExecutionModel(executionModel);
-		} else if (deferredPrev.model) {
-			await this.#restorePlanPreviousModel({ model: deferredPrev.model, thinkingLevel: deferredPrev.thinkingLevel });
+		} else {
+			await this.#restorePlanPreviousModel(deferredPrev);
 		}
 	}
 
@@ -6442,11 +6446,8 @@ export class InteractiveMode implements InteractiveModeContext {
 					previousPresentation.registered,
 				);
 			}
-			if (this.#planModePreviousModelState?.model && !options?.deferModelRestore) {
-				await this.#restorePlanPreviousModel({
-					model: this.#planModePreviousModelState.model,
-					thinkingLevel: this.#planModePreviousModelState.thinkingLevel,
-				});
+			if (this.#planModePreviousModelState && !options?.deferModelRestore) {
+				await this.#restorePlanPreviousModel(this.#planModePreviousModelState);
 			}
 			// If #applyPlanModeModel queued a deferred switch to the plan-role model
 			// (because the session was streaming on entry), drop it now: we are
@@ -8062,6 +8063,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (planState?.enabled && planState.planFilePath !== planFilePath) {
 			this.session.setPlanModeState({ ...planState, planFilePath });
 			this.sessionManager.appendModeChange("plan", this.#planModeJournalData(planFilePath));
+			// Reported only once committed: the next planning turn reads this state.
 			this.#notifyModeChanged();
 		}
 
