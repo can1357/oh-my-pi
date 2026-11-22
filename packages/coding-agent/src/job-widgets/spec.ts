@@ -46,7 +46,7 @@ export const JOB_WIDGET_TONES: readonly TspTone[] = [
  */
 export interface JobWidgetRule {
 	/**
-	 * Source id (`out`, `pipe:1`, `tools`, `bg_7:pipe:1`), `*` for all, a trailing `*` for a prefix
+	 * Source id (`out`, `pipe:1`, `file:2`, `tools`, `bg_7:pipe:1`), `*` for all, a trailing `*` for a prefix
 	 * (`pipe:*`). Wildcards never cover `tools`; see {@link ruleReadsSource}.
 	 */
 	from: string;

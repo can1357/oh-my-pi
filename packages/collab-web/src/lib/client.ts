@@ -19,6 +19,7 @@ import type {
 	CollabUiRequest,
 	CollabUiResponseValue,
 	HostFrame,
+	ImageContent,
 	SessionEntry,
 	SessionHeader,
 	SessionState,
@@ -215,8 +216,17 @@ export class GuestClient {
 		return this.#snapshot;
 	}
 
-	sendPrompt(text: string): void {
-		this.#socket.send({ t: "prompt", text });
+	/**
+	 * Prompts the host; `images` ride in the same `prompt` frame (omitted when empty). `followUp` waits for the
+	 * running turn instead of steering it.
+	 */
+	sendPrompt(text: string, images?: readonly ImageContent[], options?: { followUp?: boolean }): void {
+		this.#socket.send({
+			t: "prompt",
+			text,
+			...(images && images.length > 0 ? { images: [...images] } : {}),
+			...(options?.followUp ? { followUp: true } : {}),
+		});
 	}
 
 	sendUiResponse(reqId: number, value?: CollabUiResponseValue): void {
@@ -229,6 +239,16 @@ export class GuestClient {
 
 	sendAbort(): void {
 		this.#socket.send({ t: "abort" });
+	}
+
+	/** The `.`/`c` continue shortcut: the host resumes its agent, interrupting a running turn first. */
+	sendResume(): void {
+		this.#socket.send({ t: "resume" });
+	}
+
+	/** Empty Enter: the host interrupts a run that has queued input and continues it with that input. */
+	sendDeliverQueue(): void {
+		this.#socket.send({ t: "deliver-queue" });
 	}
 
 	sendAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text?: string): void {

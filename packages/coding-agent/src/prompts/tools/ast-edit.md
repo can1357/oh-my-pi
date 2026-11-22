@@ -7,5 +7,5 @@ Structural AST-aware rewrites via ast-grep. Use for codemods where text replace 
 - Rewrite patterns MUST parse as single AST node. Non-standalone → wrap: `class $_ { … }`.
 - TS: tolerate annotations — `async function $NAME($$$ARGS): $_ { $$$BODY }`. Delete with empty `out`: `{"pat":"console.log($$$)","out":""}`.
 - 1:1 substitution — no splitting/merging captures.
-- Matches are STAGED as a proposal, not applied: finalize by writing a one-sentence reason to `xd://resolve` (apply) or `xd://reject` (discard).
+- Matches are STAGED as a proposal, not applied: finalize with `resolve <one-sentence reason>` (apply) or `reject <reason>` (discard).
 - Parse issues → malformed rewrite, not clean no-op. For one-off text edits, prefer the Edit tool.

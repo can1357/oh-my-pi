@@ -918,13 +918,31 @@ impl Worker {
 		Ok((x, y, frame))
 	}
 
+	fn minimized_root(&mut self, id: &str) -> CoreResult<Option<ax::WindowRoot>> {
+		let retained = self.registry.retained_root(id);
+		self
+			.backend
+			.as_mut()
+			.map_err(|error| error.clone())?
+			.minimized_root(id, retained)
+	}
+
 	fn explicit_window(&mut self, target: &Target) -> CoreResult<DesktopWindow> {
-		if !matches!(target, Target::Window(_)) {
+		let Target::Window(id) = target else {
 			return Err(DesktopError::invalid_target(
 				"this operation requires an explicit window target",
 			));
+		};
+		match self.window(target) {
+			Err(error) if error.code == ErrorCode::WindowNotFound => {
+				if self.minimized_root(id)?.is_some() {
+					Err(menus::minimized_window(id))
+				} else {
+					Err(error)
+				}
+			},
+			result => result,
 		}
-		self.window(target)
 	}
 
 	fn validate_keyboard_target(&mut self, target: &Target) -> CoreResult<()> {
@@ -954,15 +972,34 @@ impl Worker {
 		Ok(())
 	}
 
+	fn read_root(&mut self, target: &Target) -> CoreResult<ax::WindowRoot> {
+		match self.window(target) {
+			Ok(window) => ax::WindowRoot::listed(self.ax()?, window),
+			Err(error) => {
+				if error.code == ErrorCode::WindowNotFound
+					&& let Target::Window(id) = target
+					&& let Some(root) = self.minimized_root(id)?
+				{
+					Ok(root)
+				} else {
+					Err(error)
+				}
+			},
+		}
+	}
+
 	fn snapshot(&mut self, target: &Target, options: &AxSnapshotOptions) -> CoreResult<AxSnapshot> {
-		let window = self.window(target)?;
+		let window = self.read_root(target)?;
+		let covered_before = self.backend()?.window_covered(&window.id);
 		let (backend, registry) = (&mut self.backend, &mut self.registry);
 		let ax = backend
 			.as_mut()
 			.map_err(|error| error.clone())?
 			.ax()
 			.ok_or_else(DesktopError::ax_unsupported)?;
-		ax::snapshot(ax, registry, &window, options)
+		let mut snapshot = ax::snapshot(ax, registry, &window, options)?;
+		snapshot.covered = covered_before || self.backend()?.window_covered(&window.id);
+		Ok(snapshot)
 	}
 
 	fn capture_full(
@@ -973,13 +1010,16 @@ impl Worker {
 	) -> CoreResult<DesktopCapture> {
 		let selector = target.display_selector();
 		let mut attempt = 1;
-		let (image, geometry, displays, screen_locked, source_width, source_height) = loop {
+		let (image, geometry, displays, screen_locked, covered, source_width, source_height) = loop {
 			// Bracket the acquisition: a lock on either side marks the frame, so a
 			// later unlock during encoding cannot pass lock-screen pixels as the
-			// app.
+			// app. A cover on either side marks it the same way: an app that
+			// stopped drawing under it needs time to draw again once uncovered.
 			let locked_before = self.backend()?.screen_state(None).locked;
+			let covered_before = self.window_covered(target)?;
 			let (image, mut geometry) = self.backend()?.capture(target, caps, selector.as_ref())?;
 			let screen_locked = locked_before || self.backend()?.screen_state(None).locked;
+			let covered = covered_before || self.window_covered(target)?;
 			let source_width = image.width();
 			let source_height = image.height();
 			let layout = self.backend()?.displays()?;
@@ -987,7 +1027,15 @@ impl Worker {
 			let image = apply_capture_caps(image, &mut geometry, caps)?;
 			match self.capture_metadata(target, &geometry, &layout, source_width, source_height) {
 				Ok(displays) => {
-					break (image, geometry, displays, screen_locked, source_width, source_height);
+					break (
+						image,
+						geometry,
+						displays,
+						screen_locked,
+						covered,
+						source_width,
+						source_height,
+					);
 				},
 				// A window that appeared, animated or resized while it was
 				// captured: the pixels match a size it no longer has, so capture it
@@ -1036,6 +1084,15 @@ impl Worker {
 			backend: capabilities.backend,
 			display_server: capabilities.display_server,
 			screen_locked,
+			covered,
+		})
+	}
+
+	/// Whether `target` is a window that appears fully covered.
+	fn window_covered(&mut self, target: &Target) -> CoreResult<bool> {
+		Ok(match target {
+			Target::Window(id) => self.backend()?.window_covered(id),
+			Target::Desktop | Target::Display(_) => false,
 		})
 	}
 
@@ -1181,6 +1238,11 @@ impl Worker {
 			backend.refuse_input()?;
 		}
 		let _scope = token.enter();
+		if request.is_mutation()
+			&& let Some(reference) = request.reference()
+		{
+			self.registry.require_actionable(reference)?;
+		}
 		let awaits_input = self.awaits_late_input(request);
 		// A ref whose row the app rebuilt names the row's copy before the
 		// request reads its element or its app, and an element action waits
@@ -1483,6 +1545,13 @@ impl Worker {
 			// Input whose app cannot be named fails like the input itself
 			// would; a ref that no longer resolves fails in `process`.
 			return match access {
+				AppAccess::Input(id)
+					if matches!(request, Request::MenuItems { .. } | Request::MenuSelect { .. })
+						&& self.registry.retained_root(id).is_some()
+						&& self.minimized_root(id)?.is_some() =>
+				{
+					Err(menus::minimized_window(id))
+				},
 				AppAccess::Input(id) => Err(DesktopError::window_not_found(format!(
 					"window '{id}' was not found; it may be closed"
 				))),
@@ -1641,11 +1710,13 @@ impl Worker {
 				let selector = base.capture_selector();
 				token.check()?;
 				let locked_before = self.backend()?.screen_state(None).locked;
+				let covered_before = self.window_covered(target)?;
 				let (image, fresh) =
 					self
 						.backend()?
 						.capture(target, &CaptureCaps::default(), selector.as_ref())?;
 				let screen_locked = locked_before || self.backend()?.screen_state(None).locked;
+				let covered = covered_before || self.window_covered(target)?;
 				let layout = self.backend()?.displays().map_err(|error| {
 					DesktopError::invalid_coordinate_frame(format!(
 						"could not validate captured display layout: {error}"
@@ -1677,6 +1748,7 @@ impl Worker {
 					backend: capabilities.backend,
 					display_server: capabilities.display_server,
 					screen_locked,
+					covered,
 				}))
 			},
 			Request::Click { target, x, y, options, .. } => {
@@ -1773,7 +1845,7 @@ impl Worker {
 				Ok(Response::Snapshot(self.snapshot(target, options)?))
 			},
 			Request::AxQuery { target, query, .. } => {
-				let window = self.window(target)?;
+				let window = self.read_root(target)?;
 				let (backend, registry) = (&mut self.backend, &mut self.registry);
 				let ax = backend
 					.as_mut()
@@ -3103,6 +3175,7 @@ mod capture_tests {
 		window:                 DesktopWindow,
 		overlap:                Option<DesktopWindow>,
 		window_present:         bool,
+		minimized_id:           Option<&'static str>,
 		/// An AX tree the app can rebuild; `None` answers every element as one
 		/// button.
 		tree:                   Option<Arc<Mutex<FakeTree>>>,
@@ -3152,6 +3225,8 @@ mod capture_tests {
 		/// Captures after which the window grows 8 px wider, as one that animates
 		/// while it is captured.
 		grow_on_capture:        u32,
+		/// Nothing of the window shows on screen.
+		covered:                bool,
 	}
 
 	impl FakeWaylandBackend {
@@ -3221,6 +3296,7 @@ mod capture_tests {
 				},
 				overlap: None,
 				window_present: true,
+				minimized_id: None,
 				tree: None,
 				menu_control: false,
 				no_input: false,
@@ -3263,6 +3339,7 @@ mod capture_tests {
 				input_lookups: Arc::new(Mutex::new(0)),
 				drag_selection: None,
 				grow_on_capture: 0,
+				covered: false,
 			}
 		}
 	}
@@ -3279,7 +3356,7 @@ mod capture_tests {
 			if let Some(tree) = &self.tree {
 				tree.lock().roots += 1;
 			}
-			Ok(AxHandle::Test(1))
+			Ok(AxHandle::Test(if self.minimized_id.is_some() { 2 } else { 1 }))
 		}
 
 		fn window_id(&mut self, _: &AxHandle, windows: &[DesktopWindow]) -> CoreResult<String> {
@@ -3496,6 +3573,21 @@ mod capture_tests {
 				.collect())
 		}
 
+		fn minimized_root(
+			&mut self,
+			id: &str,
+			retained: Option<&AxHandle>,
+		) -> CoreResult<Option<ax::WindowRoot>> {
+			Ok(retained
+				.filter(|_| self.minimized_id == Some(id))
+				.map(|element| ax::WindowRoot {
+					id:      id.to_owned(),
+					app:     self.window.app.clone(),
+					state:   ax::RootState::Minimized,
+					element: element.clone(),
+				}))
+		}
+
 		#[cfg(target_os = "macos")]
 		fn window_app(&mut self, id: &str) -> Option<libc::pid_t> {
 			(id == self.window.id || id == OFF_SPACE_ID).then_some(1234)
@@ -3519,6 +3611,10 @@ mod capture_tests {
 				.lock()
 				.push(display.map(|display| format!("{display:?}")));
 			*self.screen.lock()
+		}
+
+		fn window_covered(&mut self, id: &str) -> bool {
+			self.covered && id == self.window.id
 		}
 
 		fn hold_display_awake(&mut self) -> Option<DisplayAwakeHold> {
@@ -4164,6 +4260,38 @@ mod capture_tests {
 	}
 
 	#[test]
+	fn a_covered_window_marks_its_capture_and_tree() {
+		for covered in [true, false] {
+			let mut backend = FakeWaylandBackend::new();
+			backend.covered = covered;
+			let mut worker = worker_with(backend);
+			let token = CancellationSource::default().token();
+			let target = Target::Window(WAYLAND_ID.to_string());
+			let Ok(Response::Capture(capture)) =
+				worker.process(&capture_request(target.clone()), &token)
+			else {
+				panic!("window capture");
+			};
+			assert_eq!(capture.covered, covered);
+			let region = CaptureRegion { x: 0.0, y: 0.0, width: 8.0, height: 6.0 };
+			let Ok(Response::Capture(zoom)) =
+				worker.process(&zoom_request(target.clone(), region, CaptureCaps::default()), &token)
+			else {
+				panic!("window zoom");
+			};
+			assert_eq!(zoom.covered, covered);
+			// The desktop's tree is the focused window's: the mark follows that
+			// window, not the selector.
+			for target in [target, Target::Desktop] {
+				let tree = worker
+					.snapshot(&target, &AxSnapshotOptions::default())
+					.unwrap();
+				assert_eq!(tree.covered, covered);
+			}
+		}
+	}
+
+	#[test]
 	fn a_failure_on_one_display_reads_that_displays_sleep_state() {
 		let backend = FakeWaylandBackend::new();
 		*backend.screen.lock() = ScreenState { locked: false, display_asleep: true };
@@ -4800,6 +4928,71 @@ mod capture_tests {
 		assert_eq!(named(&error, "e2"), None);
 		assert_eq!(tree.lock().pressed, [2, 2, 2]);
 		assert_eq!(tree.lock().probes, 1);
+	}
+
+	#[test]
+	fn a_minimized_window_tree_is_read_only_and_never_uses_its_visible_sibling() {
+		let documents = Arc::new(Mutex::new(FakeTree {
+			titles: [(1, "Retained document"), (2, "Visible sibling")].into(),
+			roles: [(2, "window")].into(),
+			..Default::default()
+		}));
+		let roster = |minimized| {
+			let mut backend = FakeWaylandBackend::new();
+			backend.window.id = if minimized { "43" } else { "42" }.into();
+			backend.minimized_id = minimized.then_some("42");
+			backend.tree = Some(Arc::clone(&documents));
+			backend
+		};
+		let mut worker = worker_with(roster(false));
+		let target = Target::Window("42".into());
+		worker
+			.snapshot(&target, &AxSnapshotOptions::default())
+			.unwrap();
+		worker.backend = Ok(Box::new(roster(true)));
+		let tree = worker
+			.snapshot(&target, &AxSnapshotOptions::default())
+			.unwrap();
+		assert!(tree.text.contains("Retained document") && tree.text.contains("(minimized)"));
+		assert!(!tree.text.contains("Visible sibling"));
+		let menu = worker.explicit_window(&target).unwrap_err();
+		assert_eq!(menu.code, ErrorCode::WindowUnavailable);
+		assert!(menu.message.contains("'42' is minimized"));
+		let source = CancellationSource::default();
+		let focus =
+			call(&mut worker, |reply| Request::AxFocus { reference: "e1".into(), reply }, &source);
+		assert_eq!(focus.err().map(|error| error.code), Some(ErrorCode::WindowUnavailable));
+		assert_eq!(worker.window(&target).unwrap_err().code, ErrorCode::WindowNotFound);
+		let absent = Target::Window("99".into());
+		assert_eq!(
+			worker
+				.snapshot(&absent, &AxSnapshotOptions::default())
+				.unwrap_err()
+				.code,
+			ErrorCode::WindowNotFound
+		);
+		// A visible read that fails before producing a tree keeps those refs
+		// inspection-only.
+		documents.lock().destroyed.insert(1);
+		worker.backend = Ok(Box::new(roster(false)));
+		assert!(
+			worker
+				.snapshot(&target, &AxSnapshotOptions::default())
+				.is_err()
+		);
+		assert_eq!(
+			worker.registry.require_actionable("e1").unwrap_err().code,
+			ErrorCode::WindowUnavailable
+		);
+		documents.lock().destroyed.remove(&1);
+		worker.backend = Ok(Box::new(roster(false)));
+		let restored = worker
+			.snapshot(&target, &AxSnapshotOptions::default())
+			.unwrap();
+		assert!(
+			restored.text.contains("Retained document") && !restored.text.contains("(minimized)")
+		);
+		assert!(worker.registry.require_actionable("e1").is_ok());
 	}
 
 	#[test]
