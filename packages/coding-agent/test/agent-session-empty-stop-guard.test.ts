@@ -4,6 +4,7 @@ import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { ThinkingContent } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
@@ -126,6 +127,7 @@ async function createHarness(
 		extensionRunner?: ExtensionRunner;
 		provider?: string;
 		id?: string;
+		ownedAsyncJobManager?: AsyncJobManager;
 	} = {},
 ): Promise<Harness & { mock: MockModel }> {
 	const tempDir = TempDir.createSync("@pi-empty-stop-guard-");
@@ -167,6 +169,8 @@ async function createHarness(
 		modelRegistry,
 		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 		extensionRunner: options.extensionRunner,
+		agentId: options.ownedAsyncJobManager ? "Main" : undefined,
+		ownedAsyncJobManager: options.ownedAsyncJobManager,
 	});
 	const harness = { session, tempDir };
 	activeHarnesses.push(harness);
@@ -535,6 +539,34 @@ describe("AgentSession empty stop guard", () => {
 			success: false,
 			attempt: 3,
 		});
+	});
+
+	it("retries an empty stop when a background job wakes the session after the retry cap", async () => {
+		const manager = new AsyncJobManager({});
+		const { session, mock } = await createHarness(
+			[emptyStop(), emptyStop(), emptyStop(), emptyStop(), emptyStop(), { content: ["recovered after async wake"] }],
+			{},
+			{ ownedAsyncJobManager: manager },
+		);
+		const failedAttempts: number[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_end" && !event.success) failedAttempts.push(event.attempt);
+		});
+
+		await expectPromptCompletes(session.prompt("answer without tools"));
+		await session.waitForIdle();
+		expect(mock.calls).toHaveLength(4);
+		expect(failedAttempts).toEqual([3]);
+
+		// Owner-routed delivery starts a new turn without submitting a user prompt.
+		manager.register("task", "background work", async () => "job completed", { ownerId: "Main" });
+		await manager.waitForOwnerJobs("Main");
+		await manager.drainDeliveries({ filter: { ownerId: "Main" } });
+		await session.waitForRunEnd();
+
+		expect(failedAttempts).toEqual([3]);
+		expect(mock.calls).toHaveLength(6);
+		expect(assistantText(session.agent.state.messages)).toContain("recovered after async wake");
 	});
 
 	it.each([
