@@ -150,6 +150,7 @@ export const runShellMain = nativeBindings.runShellMain ?? missingNativeExport("
 export const search = nativeBindings.search ?? missingNativeExport("search");
 export const setHangulCompatJamoWidthOverride = nativeBindings.setHangulCompatJamoWidthOverride ?? missingNativeExport("setHangulCompatJamoWidthOverride");
 export const shellBuiltins = nativeBindings.shellBuiltins ?? missingNativeExport("shellBuiltins");
+export const shellReservedCommandNames = nativeBindings.shellReservedCommandNames ?? missingNativeExport("shellReservedCommandNames");
 export const sliceWithWidth = nativeBindings.sliceWithWidth ?? missingNativeExport("sliceWithWidth");
 export const snapcompactSupportedChars = nativeBindings.snapcompactSupportedChars ?? missingNativeExport("snapcompactSupportedChars");
 export const spawnRaw = nativeBindings.spawnRaw ?? missingNativeExport("spawnRaw");

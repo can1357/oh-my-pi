@@ -7,7 +7,7 @@ This page defines the public JS/TS boundary between `@oh-my-pi/pi-natives` calle
 1. `crates/natives/src/**/*.rs` defines `#[napi]` functions, classes, objects, and enums.
 2. `bun --cwd=packages/natives run build:bindings` runs napi-rs, installs the host addon and generated `native/index.d.ts`, then runs `gen-enums.ts`.
 3. `gen-enums.ts` reads the declarations, rewrites napi-rs `const enum` declarations to runtime-usable declarations, and replaces the marked block in `native/index.js` with explicit class/function exports and literal enum objects.
-4. `native/index.js` loads the addon and binds that generated root surface. `DesktopSession` is routed through `desktop-adapter.js` for compatibility with older desktop ABIs; current classes pass through unchanged.
+4. `native/index.js` loads the addon and binds that generated root surface. `DesktopSession` is routed through `desktop-adapter.js`, which returns current classes unchanged and otherwise substitutes an `UnsupportedDesktopSession` class that throws on construction. This defers outdated-addon errors until `new DesktopSession()` without legacy ABI emulation, so non-desktop root imports remain usable.
 
 There is no `NativeBindings` declaration-merging lifecycle or `packages/natives/src/<module>` wrapper convention. The loader checks release identity for install/compiled loads (with a narrow pre-sentinel compatibility exception), not every public symbol; a function export the loaded addon omits is `missingNativeExport(name)` — `undefined` on a current addon, and on a stale workspace addon a throwing stub that names the addon and the rebuild command (`bun run build:native`).
 
@@ -18,7 +18,7 @@ There is no `NativeBindings` declaration-merging lifecycle or `packages/natives/
 | Entry                            | Public values                                                                                                                   |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `@oh-my-pi/pi-natives`           | Generated root classes, functions, and enum objects from `native/index.js` / `index.d.ts`. Importing is eager.                  |
-| `@oh-my-pi/pi-natives/desktop`   | `createDesktopSession(options): DesktopSession`; addon load is deferred until invocation.                                       |
+| `@oh-my-pi/pi-natives/desktop`   | `createDesktopSession(options): DesktopSession`, `desktopEscapeStops(key): number`, `forgetDesktopEscapeStops(key): void`, `closeDesktopEventTaps(): void`, and `desktopWindowRoster(): DesktopRosterWindow[]`; addon load is deferred until invocation. |
 | `@oh-my-pi/pi-natives/clipboard` | `copyToClipboard(text)` and `readImageFromClipboard()` plus the `ClipboardImage` type; addon load is deferred until invocation. |
 
 Two additional public subpaths are lazy:

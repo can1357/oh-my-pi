@@ -10,7 +10,7 @@ import {
 	hasRecurringTariff,
 } from "@oh-my-pi/pi-catalog/models";
 import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
-import { getConfigRootDir, getStatsDbPath, VERSION } from "@oh-my-pi/pi-utils";
+import { $envpos, getConfigRootDir, getStatsDbPath, VERSION } from "@oh-my-pi/pi-utils";
 import { ChunkedInsert } from "./chunked-insert";
 import { classifyAgentType, type ParseSessionResult, type SessionParserState } from "./parser";
 import { ensureRollupSchema, getDailyActivityFromRollup } from "./rollup";
@@ -168,6 +168,19 @@ const MODEL_USAGE_SINCE_MS = Date.parse("2026-08-31T00:00:00Z");
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
+/** How long a stats DB statement waits on another connection's lock before failing with "database is locked". */
+const BUSY_TIMEOUT_MS = 5000;
+/**
+ * Env var overriding {@link BUSY_TIMEOUT_MS} (positive milliseconds) for the
+ * connections this module opens; for tests that hold the write lock. Read at
+ * open time, so worker threads inherit it from the spawning process.
+ */
+export const STATS_BUSY_TIMEOUT_MS_ENV = "OMP_STATS_BUSY_TIMEOUT_MS";
+
+function busyTimeoutPragma(): string {
+	return `PRAGMA busy_timeout = ${$envpos(STATS_BUSY_TIMEOUT_MS_ENV, BUSY_TIMEOUT_MS)}`;
+}
+
 /**
  * Initialize the database and create tables.
  */
@@ -180,7 +193,7 @@ export async function initDb(): Promise<Database> {
 	db = new Database(getStatsDbPath());
 	// Install the busy handler BEFORE any lock-taking statement. See
 	// https://github.com/can1357/oh-my-pi/issues/2421.
-	db.run("PRAGMA busy_timeout = 5000");
+	db.run(busyTimeoutPragma());
 	db.run("PRAGMA journal_mode = WAL");
 	// The database is a derived cache of the transcripts, so WAL's NORMAL sync
 	// (fsync only at checkpoints) is safe: a crash can drop the newest batches,
@@ -497,10 +510,13 @@ export async function initDb(): Promise<Database> {
 	// sentinel write (process killed in between) still reclassifies on the next
 	// init instead of silently leaving every row as the 'main' default. A
 	// brand-new empty table has nothing to reclassify, so it settles COMPLETE.
-	db.query("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)").run(
-		AGENT_TYPE_BACKFILL_KEY,
-		messagesTableExisted ? BACKFILL_PENDING : BACKFILL_COMPLETE,
-	);
+	// Checked before writing: an open of a settled database takes no write lock.
+	if (!db.query("SELECT 1 FROM meta WHERE key = ?").get(AGENT_TYPE_BACKFILL_KEY)) {
+		db.query("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)").run(
+			AGENT_TYPE_BACKFILL_KEY,
+			messagesTableExisted ? BACKFILL_PENDING : BACKFILL_COMPLETE,
+		);
+	}
 	db.run("CREATE INDEX IF NOT EXISTS idx_messages_timestamp_agent_type ON messages(timestamp, agent_type)");
 	// Each behavior-metric bump invalidates previously-ingested rows. We detect
 	// the stale schema by column name and drop the table; `IF NOT EXISTS` above
@@ -1389,9 +1405,36 @@ export function getMessageById(id: number): MessageStats | null {
  * raw rows while its rebuild backlog is too large for exact reads.
  */
 export async function getDailyActivity(days = 371): Promise<DailyActivityPoint[]> {
-	const database = await initDb();
+	return dailyActivity(await initDb(), days);
+}
+
+/**
+ * {@link getDailyActivity} from the stored rows through a connection of its
+ * own that never writes: no schema setup or one-time pass runs first, so
+ * another process holding the write lock never delays or fails it (WAL
+ * readers do not wait for writers). Returns null when the stats database
+ * cannot be opened, as before one exists.
+ */
+export function readDailyActivity(days = 371): DailyActivityPoint[] | null {
+	let reader: Database;
+	try {
+		reader = new Database(getStatsDbPath(), { readwrite: true, create: false });
+	} catch {
+		// `create: false` refuses to open a database that does not exist yet.
+		return null;
+	}
+	try {
+		reader.run(busyTimeoutPragma());
+		reader.run("PRAGMA query_only = 1");
+		return dailyActivity(reader, days);
+	} finally {
+		reader.close();
+	}
+}
+
+function dailyActivity(database: Database, days: number): DailyActivityPoint[] {
 	const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-	const rolled = getDailyActivityFromRollup(cutoff);
+	const rolled = getDailyActivityFromRollup(cutoff, database);
 	if (rolled) return rolled;
 	const stmt = database.query(`
 		SELECT
