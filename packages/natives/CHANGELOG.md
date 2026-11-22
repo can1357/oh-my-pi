@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The Rust edit API now uses typed disk locations and explicit URL resolution results ([#19356](https://github.com/can1357/oh-my-pi/pull/19356) by [@lHyperionl](https://github.com/lHyperionl))
+
 ### Fixed
 
 - Fixed `grep()` with a match limit resolving with a short result when its directory walk panicked; it now rejects with the panic ([#20013](https://github.com/can1357/oh-my-pi/pull/20013) by [@sjawhar](https://github.com/sjawhar))
