@@ -1,4 +1,4 @@
-import type { Component } from "../tui";
+import { type Component, Container } from "../tui";
 import { getProjectDir, jsonContainerEnd, sanitizeText, spillUrl } from "@oh-my-pi/pi-utils";
 import { highlightCode, type Theme } from "../theme/theme";
 import { renderStatusLine } from "../render/status-line";
@@ -27,7 +27,13 @@ import type {
 	RenderResultOptions,
 	ToolRenderer,
 } from "./renderer";
-import { INTENT_FIELD, type ShellTrace, type ShellVizPresentation, type TspTone } from "@oh-my-pi/pi-wire";
+import {
+	INTENT_FIELD,
+	type ShellTrace,
+	type ShellVizPresentation,
+	toolIntentLabel,
+	type TspTone,
+} from "@oh-my-pi/pi-wire";
 import type { SpotlightDetails } from "../chat/spotlight";
 import { plainText } from "../native/spans";
 import {
@@ -40,7 +46,16 @@ import {
 	type RunState,
 } from "./native-view";
 import { renderShellVisualization, shellVizText } from "./shell-viz-render";
-import { node } from "../native/describe";
+import { compact, keyed, node, row, span, stableKey, text } from "../native/describe";
+import type { NativeChild } from "../native/node";
+import { quietButton } from "../native/overlay";
+import type { ShellStepView } from "./shell-steps";
+import {
+	describeToolCommandNode,
+	renderToolCommandDispatch,
+	type ToolCommandRenderDispatch,
+	type ToolCommandRendererResolver,
+} from "./tool-commands";
 
 /** Default collapsed shell output preview height. */
 export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
@@ -96,6 +111,8 @@ export interface BashToolDetails {
 	cwd?: string;
 	/** `;` when the hoisted leading cd was `cd <dir>;`, so the card redraws it as written; absent means `&&`. */
 	cdSeparator?: ";";
+	/** Tool command invocations of this run, in invocation order. */
+	toolCommands?: ToolCommandRenderDispatch[];
 	/** What the session's Spotlight shaping did to the output. */
 	spotlight?: SpotlightDetails;
 	/** Live ACP update only; completed results refer to released terminals. */
@@ -260,6 +277,8 @@ export interface BashRenderContext {
 	previewLines?: number;
 	/** Timeout in seconds */
 	timeout?: number;
+	/** Host lookup of live mounted renderers for the run's tool commands. */
+	resolveToolCommandMounted?: ToolCommandRendererResolver;
 }
 
 /** Caller-supplied shell labels and argument projections. */
@@ -352,49 +371,82 @@ function stripBashNotices(
 			: stripTrailingNotice(withoutExit, formatWallTimeNotice(details.wallTimeMs));
 	return stripRawOutputArtifactNotice(withoutWall);
 }
-/** `Wall: 1.20s`, `Timeout: 30s`, … metadata parts shown under bash output. */
+/** Glyph for a supervised service's free-form lifecycle state (`starting`, `ready`, `stopped`, `failed`, …). */
+function serviceStateSymbol(state: string, uiTheme: Theme): string {
+	const value = state.toLowerCase();
+	if (/(fail|error|crash|dead)/.test(value)) return uiTheme.status.error;
+	if (/(stop|exit|cancel|kill)/.test(value)) return uiTheme.status.aborted;
+	if (/(start|pending|wait|init|restart)/.test(value)) return uiTheme.status.pending;
+	if (/(run|ready|up|alive|active)/.test(value)) return uiTheme.status.success;
+	return uiTheme.status.info;
+}
+/** The footer stats under shell output: `⏱ 1.2s/5m`, `✘ 1`, … Styled dim, except the exit code's tint. */
 function bashStatsParts(
+	uiTheme: Theme,
 	details: BashToolDetails | undefined,
 	contextTimeout: number | undefined,
 	artifactId: string | undefined,
 	isError: boolean,
 ): string[] {
+	const { status } = uiTheme;
+	const dim = (text: string) => uiTheme.fg("dim", text);
 	const timeoutDisabled = details?.timeoutDisabled === true || contextTimeout === 0;
 	const timeoutSeconds = timeoutDisabled ? undefined : (details?.timeoutSeconds ?? contextTimeout);
 	const requestedTimeoutSeconds = details?.requestedTimeoutSeconds;
 	const wallTimeMs = details?.wallTimeMs;
 	const statsParts: string[] = [];
 	if (details?.async?.state === "running") {
-		statsParts.push(`Backgrounded: ${details.async.jobId}`);
+		statsParts.push(dim(`${uiTheme.icon.job} ${details.async.jobId}`));
 	}
 	if (details?.service) {
 		const service = details.service;
-		statsParts.push(`Service: ${service.name}`, `State: ${service.state}`);
-		statsParts.push(`Ready: ${service.ready ? "yes" : service.timedOut ? "timed out" : "no"}`);
-		if (service.pid !== undefined) statsParts.push(`PID: ${service.pid}`);
+		statsParts.push(dim(`${uiTheme.icon.server} ${service.name}`));
+		statsParts.push(dim(`${serviceStateSymbol(service.state, uiTheme)} ${service.state}`));
+		statsParts.push(
+			dim(
+				service.ready
+					? `${status.success} ready`
+					: service.timedOut
+						? `${status.warning} ready timed out`
+						: `${status.error} not ready`,
+			),
+		);
+		if (service.pid !== undefined) statsParts.push(dim(`${uiTheme.icon.pid}${service.pid}`));
+	}
+	// Elapsed and budget share one chip (`⏱ 1.2s/5m`): the two numbers read as a
+	// pair, and a lone hourglass stands in before the command reports its wall
+	// time. The icon carries the `Wall:`/`Timeout:` words, so they are dropped.
+	let timeoutLabel: string | undefined;
+	if (timeoutDisabled) {
+		timeoutLabel = "disabled";
+	} else if (typeof timeoutSeconds === "number") {
+		timeoutLabel = formatDuration(timeoutSeconds * 1000);
+		if (requestedTimeoutSeconds !== undefined && requestedTimeoutSeconds !== timeoutSeconds) {
+			timeoutLabel += ` (requested ${formatDuration(requestedTimeoutSeconds * 1000)} clamped)`;
+		}
 	}
 	if (wallTimeMs !== undefined) {
-		statsParts.push(`Wall: ${formatWallTimeSeconds(wallTimeMs)}s`);
-	}
-	if (timeoutDisabled) {
-		statsParts.push("Timeout: disabled");
-	}
-	if (typeof timeoutSeconds === "number") {
+		const elapsed = formatDuration(wallTimeMs);
 		statsParts.push(
-			requestedTimeoutSeconds !== undefined && requestedTimeoutSeconds !== timeoutSeconds
-				? `Timeout: ${timeoutSeconds}s (requested ${requestedTimeoutSeconds}s clamped)`
-				: `Timeout: ${timeoutSeconds}s`,
+			dim(`${uiTheme.icon.time} ${timeoutLabel === undefined ? elapsed : `${elapsed}/${timeoutLabel}`}`),
 		);
+	} else if (timeoutDisabled) {
+		statsParts.push(dim(`${status.disabled} disabled`));
+	} else if (timeoutLabel !== undefined) {
+		statsParts.push(dim(`${status.pending} ${timeoutLabel}`));
 	}
 	if (artifactId) {
-		statsParts.push(`Full output: ${spillUrl(artifactId)}`);
+		statsParts.push(dim(`${uiTheme.icon.output} ${spillUrl(artifactId)}`));
 	}
 	const minimized = details?.meta?.minimized;
 	if (minimized) {
-		statsParts.push(`Minimized: ${formatMinimizedMeta(minimized)}`);
+		statsParts.push(dim(`${uiTheme.icon.minimize} ${formatMinimizedMeta(minimized)}`));
 	}
 	if (isError && typeof details?.exitCode === "number") {
-		statsParts.push(`Exit: ${details.exitCode}`);
+		const failed = details.exitCode !== 0;
+		statsParts.push(
+			uiTheme.fg(failed ? "error" : "success", `${failed ? status.error : status.success} ${details.exitCode}`),
+		);
 	}
 	return statsParts;
 }
@@ -428,7 +480,7 @@ function callIntent(args: unknown): string | undefined {
 	if (!args || typeof args !== "object" || !(INTENT_FIELD in args)) return undefined;
 	const value = args[INTENT_FIELD];
 	if (typeof value !== "string") return undefined;
-	return plainText(value).trim() || undefined;
+	return plainText(toolIntentLabel(value)).trim() || undefined;
 }
 
 /** The run foot's facts under shell output: background job, service state and the full-output artifact. */
@@ -452,6 +504,42 @@ const SHELL_INPUT = { role: "omp.tool.bash.command", lang: "bash", wrap: true } 
 
 /** Box tint per run state: failed runs read as errors, timed-out ones as warnings. */
 const RUN_BOX_TONE: Partial<Record<RunState, TspTone>> = { failed: "error", "timed-out": "warning" };
+
+/**
+ * The card's output while it shows a step's source instead of the run's own
+ * output: a head naming it (with Show output while the user pinned it) over
+ * its text, or what stands in for text it does not have.
+ */
+function describeStepOutput(step: ShellStepView, previewLines: number): NativeChild[] {
+	const empty =
+		step.text === undefined
+			? "Binary data"
+			: step.text.trim() === ""
+				? step.open
+					? "Nothing written yet"
+					: "Nothing written"
+				: undefined;
+	const head = row(
+		compact<NativeChild>([
+			text(step.label, { role: "omp.tool.bash.step.label", wrap: "none", truncate: "end" }),
+			step.note !== undefined &&
+				text([span(step.note, "mono")], { role: "omp.tool.bash.step.note", wrap: "none", truncate: "end" }),
+			node("spacer", { grow: 1 }),
+			step.pinned && quietButton("Show output", "unpin", "Show the command's own output"),
+		]),
+		{ role: "omp.tool.bash.step", gap: "sm", align: "center" },
+	);
+	return [
+		keyed(head, "step"),
+		empty !== undefined
+			? keyed(text(empty, { role: "omp.tool.bash.nooutput" }), "step-empty")
+			: runOutput((step.text ?? "").trimEnd(), {
+					role: "omp.tool.bash.output",
+					previewLines,
+					key: `step-${stableKey(step.id)}`,
+				}),
+	];
+}
 
 /** The foot state of a shell call from its result. */
 function shellRunState(
@@ -501,11 +589,76 @@ function executedScriptArgs(args: BashRenderArgs, details: BashToolDetails | und
 	return details?.cwd === undefined ? args : { ...args, cwd: details.cwd, cdSeparator: details.cdSeparator };
 }
 
+/** Characters that make a command line more than one simple command (outside single quotes). */
+const SHELL_COMPOUND_CHARS = new Set(["|", "&", ";", "<", ">", "(", ")", "$", "`", "\n"]);
+
+/** Whether `command` is one simple invocation of `tool`: no pipes, lists, redirections or substitutions. */
+function isSoleInvocation(command: string | undefined, tool: string): boolean {
+	const line = command?.trim();
+	if (!line || (line !== tool && !line.startsWith(`${tool} `) && !line.startsWith(`${tool}\t`))) return false;
+	let quote: "'" | '"' | undefined;
+	for (let index = 0; index < line.length; index += 1) {
+		const char = line[index]!;
+		if (quote === "'") {
+			if (char === "'") quote = undefined;
+			continue;
+		}
+		if (char === "\\") {
+			index += 1;
+			continue;
+		}
+		if (quote === '"') {
+			if (char === '"') quote = undefined;
+			else if (char === "$" || char === "`") return false;
+			continue;
+		}
+		if (char === "'" || char === '"') quote = char;
+		else if (SHELL_COMPOUND_CHARS.has(char)) return false;
+	}
+	return true;
+}
+
+/**
+ * The run's tool command records, and whether the whole call was one executed
+ * tool command whose card stands for the call's entire output.
+ */
+function shellToolCommands(
+	details: BashToolDetails | undefined,
+	command: string | undefined,
+): { dispatches: readonly ToolCommandRenderDispatch[]; sole: boolean } {
+	const dispatches = details?.toolCommands ?? [];
+	const only = dispatches.length === 1 ? dispatches[0] : undefined;
+	return { dispatches, sole: only?.mode === "execute" && isSoleInvocation(command, only.tool) };
+}
+
+/** Render options of the nested card for record `index`: only the last record of a live run is still running. */
+function toolCommandOptions(
+	index: number,
+	count: number,
+	expanded: boolean,
+	isPartial: boolean,
+	options: RenderResultOptions,
+): RenderResultOptions {
+	const running = isPartial && index === count - 1;
+	return {
+		expanded,
+		isPartial: running,
+		spinnerFrame: running ? options.spinnerFrame : undefined,
+		argsComplete: true,
+		executionStarted: true,
+		cancelled: options.cancelled,
+		media: options.media,
+		json: options.json,
+		tray: options.tray,
+	};
+}
+
 /** Builds a shell transcript renderer with caller-supplied command labels. */
 export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 	return {
 		renderCall(args: TArgs, options: RenderResultOptions, uiTheme: Theme): Component {
 			const renderArgs = toBashRenderArgs(args, config);
+			const intent = callIntent(args);
 			// Highlighting the whole (possibly still-streaming) command is the
 			// expensive part: defer it to the first paint, once per component,
 			// so a rebuild that is replaced before painting never pays for it.
@@ -522,12 +675,13 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						: (cmdLines ??= formatBashCommandLines(renderArgs, uiTheme));
 					const header =
 						config.showHeader === false
-							? undefined
+							? intent && renderStatusLine({ title: intent, titleColor: "muted" }, uiTheme)
 							: renderStatusLine(
 									{
 										icon: options.spinnerFrame !== undefined ? "running" : "pending",
 										spinnerFrame: options.spinnerFrame,
 										title: config.resolveTitle(args, options),
+										description: intent,
 									},
 									uiTheme,
 								);
@@ -557,24 +711,28 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			args?: TArgs,
 		): Component {
 			const renderArgs = toBashRenderArgs(args, config);
+			const intent = callIntent(args);
 			let cmdLines: string[] | undefined;
 			const isError = result.isError === true;
 			const isPartial = options.isPartial === true;
 			const success = !isPartial && !isError;
 			const details = result.details;
 			const isTimeout = details?.timedOut === true;
+			const toolCommands = shellToolCommands(details, renderArgs.command);
 			const header =
 				config.showHeader === false
-					? undefined
+					? intent && renderStatusLine({ title: intent, titleColor: "muted" }, uiTheme)
 					: renderStatusLine(
 							success
 								? {
 										iconOverride: uiTheme.styledSymbol("tool.bash", "accent"),
 										title: config.resolveTitle(args, options),
+										description: intent,
 									}
 								: {
 										icon: isPartial ? "pending" : isTimeout ? "warning" : "error",
 										title: config.resolveTitle(args, options),
+										description: intent,
 									},
 							uiTheme,
 						);
@@ -669,16 +827,17 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					const showingFullOutput = expanded && renderContext?.isFullOutput === true;
 
 					const statsParts = bashStatsParts(
+						uiTheme,
 						details,
 						renderContext?.timeout,
 						rawOutputArtifact.artifactId,
 						isError,
 					);
 					if (elapsedSecond !== undefined && elapsedSecond > 0) {
-						statsParts.unshift(`elapsed ${formatDuration(elapsedSecond * 1000)}`);
+						statsParts.unshift(uiTheme.fg("dim", `${uiTheme.icon.time} ${formatDuration(elapsedSecond * 1000)}`));
 					}
 					const footerMeta =
-						statsParts.length > 0 ? uiTheme.fg("dim", statsParts.join(uiTheme.sep.dot)) : undefined;
+						statsParts.length > 0 ? statsParts.join(uiTheme.fg("dim", uiTheme.sep.dot)) : undefined;
 					let warningLine: string | undefined;
 					if (details?.meta?.artifactError || (details?.meta?.truncation && !showingFullOutput)) {
 						warningLine = formatStyledTruncationWarning(details.meta, uiTheme) ?? undefined;
@@ -705,8 +864,26 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						},
 						uiTheme,
 					);
-					const outputLines: string[] = [...formatted.lines];
+					const outputLines: string[] = toolCommands.sole ? [] : [...formatted.lines];
 					if (warningLine) outputLines.push(warningLine);
+					let commandCards: Container | undefined;
+					if (toolCommands.dispatches.length > 0) {
+						commandCards = new Container();
+						const count = toolCommands.dispatches.length;
+						for (const [index, dispatch] of toolCommands.dispatches.entries()) {
+							commandCards.addChild(
+								renderToolCommandDispatch(
+									{
+										dispatch,
+										output: toolCommands.sole ? displayOutput : undefined,
+										resolveMounted: renderContext?.resolveToolCommandMounted,
+									},
+									toolCommandOptions(index, count, expanded, isPartial, options),
+									uiTheme,
+								),
+							);
+						}
+					}
 
 					const snapshot: ToolCardSnapshot = {
 						header,
@@ -732,7 +909,10 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 									{ expanded },
 								),
 							},
-							{ label: uiTheme.fg("toolTitle", "Output"), content: outputLines },
+							...(commandCards ? [{ content: commandCards }] : []),
+							...(toolCommands.sole && outputLines.length === 0
+								? []
+								: [{ label: uiTheme.fg("toolTitle", "Output"), content: outputLines }]),
 						],
 					};
 
@@ -771,6 +951,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 											liveOrigin: options.executionStarted,
 											stream: options.argsComplete !== true && options.cancelled !== true,
 											preview: { lines: RUN_INPUT_PREVIEW_LINES },
+											...(options.shellStep ? { steps: true, focus: options.shellStep.focus } : {}),
 										},
 										undefined,
 										"input",
@@ -808,6 +989,18 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			const showingFullOutput = expanded && renderContext?.isFullOutput === true;
 			const renderArgs = toBashRenderArgs(args, config);
 			const command = formatBashCommandText(renderArgs);
+			const toolCommands = shellToolCommands(details, renderArgs.command);
+			const commandNodes = toolCommands.dispatches.map((dispatch, index, all) =>
+				describeToolCommandNode(
+					{
+						dispatch,
+						output: toolCommands.sole ? output : undefined,
+						resolveMounted: renderContext?.resolveToolCommandMounted,
+					},
+					toolCommandOptions(index, all.length, expanded, isPartial, options),
+					`tool-command-${index}`,
+				),
+			);
 			const previewLines = renderContext?.previewLines ?? BASH_DEFAULT_PREVIEW_LINES;
 			const state = shellRunState(details, isError, isPartial, options.cancelled === true);
 			// Live (a running call, or a parked job still streaming): the call's clock. Settled: the
@@ -826,10 +1019,12 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			// segment draws what ran: the live result, or the output retained up
 			// to the replay cursor while one is held. An untraced run has nothing to
 			// replay, so a cursor set on it never hides the result.
-			const shownOutput =
-				trace !== undefined && presentation?.preferences.cursor !== undefined
-					? presentation.output.trimEnd()
-					: output;
+			const replaying = trace !== undefined && presentation?.preferences.cursor !== undefined;
+			const shownOutput = replaying ? presentation.output.trimEnd() : output;
+			// A step the user clicked, or (while the run goes on) a stream it writes now, takes the output's place.
+			const step = presentation ? options.shellStep : undefined;
+			const stepOutput =
+				step && !replaying && (step.pinned || (isPartial && step.stream !== undefined)) ? step : undefined;
 			// Without a trace the presentation parsed the raw command, `cd` and all.
 			const displayWorkdir = formatToolWorkingDirectory(
 				executedScriptArgs(renderArgs, trace === undefined ? undefined : details).cwd,
@@ -848,12 +1043,20 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 									...(displayWorkdir ? { cwd: displayWorkdir } : {}),
 									lang: "bash",
 									preview: { lines: RUN_INPUT_PREVIEW_LINES },
+									...(step ? { steps: true, focus: step.focus } : {}),
 								},
 								undefined,
 								"input",
 							)
 						: runInput(command, SHELL_INPUT),
-					shownOutput.trim().length > 0 && runOutput(shownOutput, { role: "omp.tool.bash.output", previewLines }),
+					...commandNodes,
+					...(stepOutput
+						? describeStepOutput(stepOutput, previewLines)
+						: [
+								!(toolCommands.sole && !replaying) &&
+									shownOutput.trim().length > 0 &&
+									runOutput(shownOutput, { role: "omp.tool.bash.output", previewLines }),
+							]),
 					runFoot({
 						state,
 						exitCode: details?.exitCode,

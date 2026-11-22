@@ -10,6 +10,7 @@ import type {
 	Usage,
 } from "@oh-my-pi/pi-ai";
 import {
+	$env,
 	directoryIsEnterable,
 	directoryIsMissing,
 	getBlobsDir,
@@ -73,6 +74,7 @@ import {
 	type ModelUsageRecord,
 	lastSelfSelectedLeafId,
 	type NewSessionOptions,
+	parseSessionOrigin,
 	type ResetBoundaryEntry,
 	type ServiceTierChangeEntry,
 	sessionEntryLeafId,
@@ -80,6 +82,7 @@ import {
 	type SessionHeader,
 	type SessionInitEntry,
 	type SessionMessageEntry,
+	type SessionOrigin,
 	type SessionTitleSource,
 	type SessionTreeNode,
 	type ThinkingLevelChangeEntry,
@@ -1052,6 +1055,12 @@ export class SessionManager {
 
 	#suppressBreadcrumb = false;
 	/**
+	 * Client this process serves, from `PI_SESSION_ORIGIN` (the Chrome extension's native host sets `chrome`): stamped
+	 * on every session file the manager starts, and such a process writes no terminal breadcrumb, so `--continue`
+	 * in a terminal never picks its sessions.
+	 */
+	readonly #origin: SessionOrigin | undefined;
+	/**
 	 * The last breadcrumb this manager wrote marked a lazy fresh session whose
 	 * JSONL is not yet on disk. Cleared (and the crumb re-stamped non-fresh) once
 	 * the session materializes, so a materialized-then-deleted session still falls
@@ -1084,13 +1093,14 @@ export class SessionManager {
 		this.#persist = persist;
 		this.#storage = storage;
 		this.#blobs = new BlobStore(getBlobsDir());
+		this.#origin = parseSessionOrigin($env.PI_SESSION_ORIGIN);
 
 		if (persist && sessionDir) this.#storage.ensureDirSync(this.#sessionDir);
 	}
 
 	#rememberBreadcrumb(cwd: string, sessionFile: string, fresh = false): void {
 		this.#breadcrumbFresh = fresh;
-		if (this.#suppressBreadcrumb) return;
+		if (this.#suppressBreadcrumb || this.#origin) return;
 		writeTerminalBreadcrumb(cwd, sessionFile, fresh, {
 			remoteStorage: !(this.#storage instanceof FileSessionStorage),
 		});
@@ -2094,6 +2104,7 @@ export class SessionManager {
 			id: this.#sessionId,
 			timestamp,
 			cwd: this.#cwd,
+			origin: this.#origin,
 			parentSession: options?.parentSession,
 			providerPromptCacheKey: options?.providerPromptCacheKey,
 			taskPromptCacheKey: options?.taskPromptCacheKey,
@@ -2556,6 +2567,7 @@ export class SessionManager {
 			titleSource: this.#header.titleSource ?? this.#titleSource,
 			timestamp,
 			cwd: this.#cwd,
+			origin: this.#origin,
 			additionalDirectories: this.#additionalDirectories.length > 0 ? [...this.#additionalDirectories] : undefined,
 			parentSession: parentSessionId,
 			providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(this.#header),
@@ -3490,8 +3502,9 @@ export class SessionManager {
 		this.#notifyEntryAppended(entry);
 		await this.#persistTitleChangeEntry(entry, { title, source, updatedAt: timestamp });
 		// Keep the recent-sessions title index current so welcome-screen lookups
-		// never have to content-scan this session's file.
-		if (this.#persist && this.#storage instanceof FileSessionStorage) {
+		// never have to content-scan this session's file. Another client's session
+		// stays out: the picker lists indexed titles without reading the header.
+		if (this.#persist && this.#storage instanceof FileSessionStorage && !this.#header.origin) {
 			recordSessionTitle(this.#sessionId, title);
 		}
 
@@ -4191,6 +4204,7 @@ export class SessionManager {
 			id: newSessionId,
 			timestamp,
 			cwd: this.#cwd,
+			origin: this.#origin,
 			title: this.#sessionName,
 			titleSource: this.#titleSource,
 			parentSession: this.#persist ? sourceSessionFile : undefined,
@@ -4554,7 +4568,9 @@ export class SessionManager {
 		};
 	}
 	/**
-	 * Continue the most recent session, or create a new one if none exists.
+	 * Continue the most recent session, or create a new one if none exists or
+	 * another live omp process writes the one picked
+	 * ({@link SessionStorage.isSessionOwnedElsewhere}).
 	 *
 	 * When the chosen session's conversation went on in another file (it moved
 	 * off its file; see `findSessionContinuation`), this opens the copy to
@@ -4684,9 +4700,15 @@ export class SessionManager {
 			const continuation = fromBreadcrumb
 				? await findSessionContinuation(chosenSession, storage)
 				: await findRecentSessionContinuation(chosenSession, storage);
-			if (continuation) {
-				options.onSessionContinuation?.(continuation);
-				chosenSession = continuation.session.path;
+			const resumable = continuation?.session.path ?? chosenSession;
+			if (storage.isSessionOwnedElsewhere?.(resumable)) {
+				// Its first write would move it to a sibling, duplicating the
+				// conversation the running process keeps writing: start fresh.
+				logger.debug("Not continuing a session another omp process writes", { sessionFile: resumable });
+				chosenSession = null;
+			} else {
+				if (continuation) options.onSessionContinuation?.(continuation);
+				chosenSession = resumable;
 			}
 		}
 

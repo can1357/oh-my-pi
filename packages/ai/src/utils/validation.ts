@@ -830,11 +830,13 @@ function normalizeOptionalNullsForSchema(
 				!(Object.hasOwn(CONTENT_CARRYING_KEYS, key) && branchMatchesSchema(propertySchema, currentValue, root)));
 		const isInvalidEmptyString =
 			currentValue === "" && !required.has(key) && !branchMatchesSchema(propertySchema, currentValue, root);
+		const isAcceptedNull = currentValue === null && branchMatchesSchema(propertySchema, null, root);
 
-		// Strip optional null placeholders, but preserve literal "null" in content
-		// fields whose schema accepts it (e.g. JSON payloads).
+		// Strip optional null placeholders the property schema rejects; an explicit
+		// null it accepts is data (e.g. "clear this field") and is kept. Preserve
+		// literal "null" in content fields whose schema accepts it (e.g. JSON payloads).
 		// Strip empty strings only when the property schema rejects them.
-		if ((isNullish || isInvalidEmptyString) && !required.has(key)) {
+		if (((isNullish && !isAcceptedNull) || isInvalidEmptyString) && !required.has(key)) {
 			if (!changed) {
 				nextValue = { ...nextValue };
 				changed = true;
@@ -842,6 +844,7 @@ function normalizeOptionalNullsForSchema(
 			delete nextValue[key];
 			continue;
 		}
+		if (isAcceptedNull && !required.has(key)) continue;
 
 		// Substitute the schema-supplied default when a required field arrives
 		// as null/"null". LLMs commonly emit null for "I have nothing to say
