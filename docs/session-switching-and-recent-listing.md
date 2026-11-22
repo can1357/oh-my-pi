@@ -69,7 +69,7 @@ For `SessionInfo` list entries:
 `SessionManager.continueRecent(cwd, sessionDir?, storage?, { onSessionContinuation? })` resolves the target in this order:
 
 1. Read terminal-scoped breadcrumb (`~/.omp/agent/terminal-sessions/<terminal-id>`)
-2. Validate the breadcrumb. A materialized target is usable; a missing target is usable only when its optional third line is `fresh`, denoting a lazily-unmaterialized `/new` boundary.
+2. Validate the breadcrumb in the storage it resumes from (the `storage` argument, refreshed first; the process default when none is given). A materialized target is usable; a missing target is usable only when its optional third line is `fresh`, denoting a lazily-unmaterialized `/new` boundary.
 3. A missing fresh target starts a new session instead of falling back and resurrecting the prior transcript.
 4. Resolve stale pre-fix subagent breadcrumbs to their interactive parent session.
 5. If the breadcrumb's cwd differs, no longer exists, and no genuine current-cwd session takes precedence, re-root only when its recorded device/inode matches the current directory (`open` + `moveTo`). A deleted, unmounted, or cross-filesystem-moved project is not positive evidence of a rename. Only file storage re-roots: under `session.storage: sql` the breadcrumb's session continues where it is stored (see `session.md`).

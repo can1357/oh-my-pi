@@ -4767,7 +4767,8 @@ export class SessionManager {
 	): Promise<SessionManager> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const resolvedCwd = path.resolve(cwd);
-		const breadcrumb = await readTerminalBreadcrumbEntry();
+		// The terminal's last session is looked up in the store this resumes from, not the process default.
+		const breadcrumb = await readTerminalBreadcrumbEntry(storage);
 		let chosenSession: string | null | undefined;
 
 		if (breadcrumb?.fresh && !breadcrumb.exists) {

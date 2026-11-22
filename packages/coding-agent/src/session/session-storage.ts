@@ -1731,6 +1731,19 @@ export function sessionTreeStorage(session: {
 }
 
 /**
+ * Whether `file` is a regular file in `storage`; false for a directory, a
+ * missing path, or any fault. Follows symlinks, as a filesystem `stat` does: a
+ * transcript reached through a symlink is readable.
+ */
+export function isStoredFile(file: string, storage: SessionStorage): boolean {
+	try {
+		return storage.statSync(file).isFile;
+	} catch {
+		return false;
+	}
+}
+
+/**
  * The name data derived from a key-indexed store (the transcript index) is
  * kept under. `key` names the store and holds no credential. `shared` says
  * every process that opens the store computes the same key, as for a table on

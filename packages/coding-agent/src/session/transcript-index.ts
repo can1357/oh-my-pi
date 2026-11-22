@@ -294,7 +294,8 @@ export function isTranscriptIndexFresh(maxAgeMs: number): boolean {
 export async function syncTranscriptIndex(options: TranscriptSyncOptions = {}): Promise<TranscriptSyncResult> {
 	const result: TranscriptSyncResult = { outcome: "unavailable", files: 0, messages: 0 };
 	if (options.dbPath === undefined && guardsUserIndex()) return result;
-	const dbPath = options.dbPath ?? transcriptIndexDbPath(options.storage ?? new FileSessionStorage());
+	const dbPath =
+		options.dbPath ?? (options.storage ? transcriptIndexDbPath(options.storage) : getTranscriptIndexDbPath());
 	const db = openTranscriptIndex(dbPath);
 	if (!db) return result;
 	const lock = tryAcquireFileLock(`${dbPath}.sync`);

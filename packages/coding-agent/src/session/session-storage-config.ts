@@ -38,7 +38,7 @@ import {
 	type SessionStorageFallbackReason,
 	sqlStoreHasWritten,
 } from "./session-storage-fallback";
-import { SqlSessionStorage } from "./sql-session-storage";
+import { SqlSessionStorage, serverSqlState } from "./sql-session-storage";
 import { cfgSessionSqlDsnFile, cfgSessionStorage } from "./storage-settings";
 
 const SESSION_STORAGE_ENV = "OMP_SESSION_STORAGE";
@@ -190,23 +190,6 @@ export async function resolveSessionStorage({
 			error,
 		);
 	}
-}
-
-/** Five digits or upper-case letters: the SQL standard's SQLSTATE, which PostgreSQL and MySQL both send. */
-const SQLSTATE = /^[0-9A-Z]{5}$/;
-
-/**
- * The SQLSTATE a database server refused with, when the driver read one: Bun
- * keeps PostgreSQL's as `errno` and MySQL's as `sqlState`. Each driver gives
- * every server refusal one `code` (`ERR_POSTGRES_SERVER_ERROR`,
- * `ERR_MYSQL_SERVER_ERROR`), so the SQLSTATE is what tells a server that
- * refuses for now (PostgreSQL 57P03, starting up; 53300, no connection slot
- * left) from one that will keep refusing (28P01, a password it rejects).
- */
-function serverSqlState(error: Error): string | undefined {
-	const state =
-		error instanceof SQL.PostgresError ? error.errno : error instanceof SQL.MySQLError ? error.sqlState : undefined;
-	return state !== undefined && SQLSTATE.test(state) ? state : undefined;
 }
 
 /**

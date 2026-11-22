@@ -399,7 +399,7 @@ export async function resumableFileSessionId(
 		// not an easier one: "is there any continuable transcript" accepts a
 		// project whose only transcript is a header-only empty, or whose newest
 		// is departed, and the launch then starts a new session or forks.
-		const breadcrumb = await readTerminalBreadcrumbEntry();
+		const breadcrumb = await readTerminalBreadcrumbEntry(storage);
 		// A fresh, never-materialized boundary makes `continueRecent` start a
 		// new session whatever else the directory holds.
 		if (breadcrumb?.fresh && !breadcrumb.exists) return false;

@@ -414,9 +414,8 @@ async function withExactMessageCounts(sessions: SessionInfo[]): Promise<SessionI
 		}
 	};
 	if (storage instanceof FileSessionStorage) return await Promise.all(sessions.map(withCount));
-	const counted: SessionInfo[] = [];
-	for (const session of sessions) counted.push(await withCount(session));
-	return counted;
+	// Each mapped value is awaited before the next is mapped.
+	return await Array.fromAsync(sessions, session => withCount(session));
 }
 
 /** One listing line: `id · age · [project ·] msgs · [status ·] title`; the project shows only across projects. */

@@ -35,8 +35,13 @@ import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "tex
 import agentProgressTemplate from "../prompts/tools/agent-url-progress.md" with { type: "text" };
 import agentSupersededTemplate from "../prompts/tools/agent-url-superseded.md" with { type: "text" };
 import { loadSessionMessagesReadOnly } from "../session/session-loader";
-import { defaultSessionStorage, type SessionStorage, sessionTreeStorage } from "../session/session-storage";
-import { artifactsDirsFromRegistry, isStoredFile } from "./registry-helpers";
+import {
+	defaultSessionStorage,
+	isStoredFile,
+	type SessionStorage,
+	sessionTreeStorage,
+} from "../session/session-storage";
+import { artifactsDirsFromRegistry } from "./registry-helpers";
 import type {
 	InternalResource,
 	InternalWriteResult,

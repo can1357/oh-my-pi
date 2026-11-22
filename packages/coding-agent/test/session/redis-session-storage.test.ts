@@ -521,7 +521,7 @@ describe("RedisSessionStorage", () => {
 		expect(redis.calls[1].args).toEqual(["omp:sessions:file:/sessions/p/big.jsonl", -3, -1]);
 	});
 
-	it("reads from an offset in one script call, as a file read would, never GETting the whole value", async () => {
+	it("requests each offset read in one script call without GETting the whole value", async () => {
 		const storage = await RedisSessionStorage.create({ client: redis });
 		const content = `${"é".repeat(5)}\n€😀 tail\n`;
 		await storage.writeText("/sessions/p/multi.jsonl", content);

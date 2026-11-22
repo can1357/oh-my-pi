@@ -1,4 +1,6 @@
 import * as path from "node:path";
+import { logger } from "@oh-my-pi/pi-utils";
+import { SQL } from "bun";
 import {
 	IndexedSessionStorage,
 	type SessionStorageBackend,
@@ -239,6 +241,18 @@ const utf8Decoder = new TextDecoder("utf-8");
  */
 const MAX_PIECE_BYTES = 0x7fff_ffff;
 
+/**
+ * The database file a SQLite client names (`options.filename`, which `Bun.SQL`
+ * sets), resolved; `undefined` for an in-memory database or a client that
+ * hides it.
+ */
+function sqliteFile(client: SqlSessionStorageClient): string | undefined {
+	const filename = client.options.filename;
+	return typeof filename === "string" && filename !== "" && filename !== ":memory:"
+		? path.resolve(filename)
+		: undefined;
+}
+
 /** Tail of one SQLite database's call queue; see {@link sqliteQueue}. */
 interface SqliteQueue {
 	tail: Promise<void>;
@@ -259,8 +273,8 @@ const sqliteClientQueues = new WeakMap<SqlSessionStorageClient, SqliteQueue>();
  * `options.filename`, queue per client object.
  */
 function sqliteQueue(client: SqlSessionStorageClient): SqliteQueue {
-	const filename = client.options.filename;
-	if (typeof filename !== "string" || filename === "" || filename === ":memory:") {
+	const file = sqliteFile(client);
+	if (file === undefined) {
 		let queue = sqliteClientQueues.get(client);
 		if (!queue) {
 			queue = { tail: Promise.resolve() };
@@ -268,7 +282,6 @@ function sqliteQueue(client: SqlSessionStorageClient): SqliteQueue {
 		}
 		return queue;
 	}
-	const file = path.resolve(filename);
 	let queue = sqliteFileQueues.get(file);
 	if (!queue) {
 		queue = { tail: Promise.resolve() };
@@ -277,9 +290,81 @@ function sqliteQueue(client: SqlSessionStorageClient): SqliteQueue {
 	return queue;
 }
 
-/** PostgreSQL: the schema the unqualified table `$1` resolves to through the search path. */
+/** The adapters of a database server, which can report an identity of its own. */
+type ServerAdapter = Exclude<SqlSessionStorageAdapter, "sqlite">;
+
+/**
+ * PostgreSQL: the schema the unqualified table `$1` resolves to through the
+ * search path. Only the table's name is resolved there: the catalog, the
+ * function and the `=` operators are named in `pg_catalog`, so a relation,
+ * function or operator of the same name in a schema the role's search path
+ * puts first cannot answer.
+ */
 const TABLE_SCHEMA_QUERY =
-	"SELECT n.nspname AS schema FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = to_regclass($1)";
+	"SELECT n.nspname AS schema FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace WHERE c.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1)";
+
+/**
+ * PostgreSQL: the cluster's system identifier (`pg_control_system()`, which
+ * any role may read by default), the same on every server made from one data
+ * directory. The function and the cast are named in `pg_catalog`, so a
+ * function or type of that name in a schema the role's search path puts
+ * first cannot answer for them.
+ */
+const PG_SERVER_IDENTITY_QUERY = "SELECT system_identifier::pg_catalog.text AS id FROM pg_catalog.pg_control_system()";
+
+/**
+ * MySQL: the server UUID, kept in the data directory's `auto.cnf`;
+ * `SHOW VARIABLES` needs no privilege. MariaDB has no `server_uuid` and
+ * returns no row.
+ */
+const MYSQL_SERVER_IDENTITY_QUERY = "SHOW GLOBAL VARIABLES WHERE Variable_name = 'server_uuid'";
+
+/**
+ * Per database, the SQLSTATEs with which a server refuses its identity to
+ * this user, so the store is named without it: PostgreSQL
+ * `insufficient_privilege` (a role refused `pg_control_system()`),
+ * `undefined_function` and `feature_not_supported` (a server without it);
+ * MySQL `syntax_error_or_access_rule_violation` (a server that rejects the
+ * statement).
+ */
+const IDENTITY_REFUSED_SQLSTATES: Record<ServerAdapter, ReadonlySet<string>> = {
+	postgres: new Set(["42501", "42883", "0A000"]),
+	mysql: new Set(["42000"]),
+};
+
+/**
+ * MySQL errors in class 42000 that refuse for now, not the identity:
+ * `ER_TOO_MANY_USER_CONNECTIONS` (1203, the server-wide
+ * `max_user_connections` setting) and `ER_USER_LIMIT_REACHED` (1226, any
+ * limit set on the account, such as `MAX_USER_CONNECTIONS` or
+ * `MAX_QUERIES_PER_HOUR`). They fail the start, as any other start-up query
+ * that meets them does.
+ */
+const MYSQL_TRANSIENT_ERRNOS: ReadonlySet<number> = new Set([1203, 1226]);
+
+/** Whether `err`, with SQLSTATE `state`, is `adapter`'s server refusing its identity to this user. */
+function refusesIdentity(adapter: ServerAdapter, err: Error, state: string): boolean {
+	if (!IDENTITY_REFUSED_SQLSTATES[adapter].has(state)) return false;
+	const errno = adapter === "mysql" && err instanceof SQL.MySQLError ? err.errno : undefined;
+	return errno === undefined || !MYSQL_TRANSIENT_ERRNOS.has(errno);
+}
+
+/** Five digits or upper-case letters: the SQL standard's SQLSTATE, which PostgreSQL and MySQL both send. */
+const SQLSTATE = /^[0-9A-Z]{5}$/;
+
+/**
+ * The SQLSTATE a database server refused with, when the driver read one: Bun
+ * keeps PostgreSQL's as `errno` and MySQL's as `sqlState`. Each driver gives
+ * every server refusal one `code` (`ERR_POSTGRES_SERVER_ERROR`,
+ * `ERR_MYSQL_SERVER_ERROR`), so the SQLSTATE is what tells a server that
+ * refuses for now (PostgreSQL 57P03, starting up; 53300, no connection slot
+ * left) from one that will keep refusing (28P01, a password it rejects).
+ */
+export function serverSqlState(error: Error): string | undefined {
+	const state =
+		error instanceof SQL.PostgresError ? error.errno : error instanceof SQL.MySQLError ? error.sqlState : undefined;
+	return state !== undefined && SQLSTATE.test(state) ? state : undefined;
+}
 
 /**
  * The store identity of `table` through `client`, before PostgreSQL's schema
@@ -292,11 +377,10 @@ function clientStoreIdentity(
 	adapter: SqlSessionStorageAdapter,
 	table: string,
 ): SessionStoreIdentity {
-	const { filename, hostname, port, database } = client.options;
+	const { hostname, port, database } = client.options;
 	if (adapter === "sqlite") {
-		if (typeof filename === "string" && filename !== "" && filename !== ":memory:") {
-			return { key: `sql:sqlite:${path.resolve(filename)}:${table}`, shared: true };
-		}
+		const file = sqliteFile(client);
+		if (file !== undefined) return { key: `sql:sqlite:${file}:${table}`, shared: true };
 	} else if (typeof hostname === "string" && hostname !== "" && typeof database === "string" && database !== "") {
 		return { key: `sql:${adapter}:${hostname}:${String(port ?? "")}/${database}:${table}`, shared: true };
 	}
@@ -425,8 +509,9 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 		columns: sql(
 			{
 				postgres:
-					"SELECT attname AS column_name FROM pg_attribute " +
-					"WHERE attrelid = to_regclass(@table) AND attnum > 0 AND NOT attisdropped",
+					"SELECT attname AS column_name FROM pg_catalog.pg_attribute " +
+					"WHERE attrelid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(@table) " +
+					"AND attnum OPERATOR(pg_catalog.>) 0 AND NOT attisdropped",
 				mysql:
 					"SELECT column_name AS column_name FROM information_schema.columns " +
 					"WHERE table_schema = DATABASE() AND table_name = @table",
@@ -650,8 +735,12 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 	readonly #sqliteQueue: SqliteQueue | undefined;
 	/** The store named from the client's options; see {@link identity}. */
 	readonly #clientIdentity: SessionStoreIdentity;
-	/** On PostgreSQL, the schema the table is in, once {@link init} has read it. */
-	#tableSchema: string | undefined;
+	/**
+	 * What {@link init} read of a server store itself, as it ends
+	 * {@link identity}'s key: the identity the server reports, and on PostgreSQL
+	 * the schema the table is in.
+	 */
+	#storedKey: string | undefined;
 
 	constructor(options: SqlSessionStorageOptions) {
 		this.#client = options.client;
@@ -671,17 +760,23 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 	}
 
 	/**
-	 * The table, named by the database file it is in (SQLite), or by the
-	 * server's host and port, the database and, on PostgreSQL, the schema the
-	 * table is in (read once {@link init} has found the table), all from the
-	 * client's parsed options and the server: never the user, the password or
-	 * the connection string. A client that names no file or server (an
+	 * The table, named by the resolved path of the database file it is in
+	 * (SQLite), or by the server's host and port, the database, the identity
+	 * the server reports of itself (PostgreSQL's system identifier, MySQL's
+	 * server UUID) and, on PostgreSQL, the schema the table is in. All of it
+	 * comes from the client's parsed options and what {@link init} read once
+	 * from the server, never the user, the password or the connection string.
+	 * So two independent PostgreSQL or MySQL servers reached under one host
+	 * and port from one agent directory (a container's own `localhost` and the
+	 * host's) are two stores. A server that reports no identity this user may
+	 * read (MariaDB, a role refused `pg_control_system()`) is named by host,
+	 * port and database alone. A client that names no file or server (an
 	 * in-memory database, a wrapper that hides its options) gets a key of its
 	 * own in this process.
 	 */
 	get identity(): SessionStoreIdentity {
-		if (this.#tableSchema === undefined) return this.#clientIdentity;
-		return { key: `${this.#clientIdentity.key}:schema=${this.#tableSchema}`, shared: true };
+		if (this.#storedKey === undefined) return this.#clientIdentity;
+		return { key: `${this.#clientIdentity.key}${this.#storedKey}`, shared: true };
 	}
 
 	get adapter(): SqlSessionStorageAdapter {
@@ -725,13 +820,47 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			}
 			await this.#setup(this.#q.createPartsTable);
 		});
-		if (this.#adapter === "postgres" && this.#clientIdentity.shared) {
+		const adapter = this.#adapter;
+		if (this.#clientIdentity.shared && adapter !== "sqlite") this.#storedKey = await this.#readStoredKey(adapter);
+	}
+
+	/** The end of a server store's {@link identity} key, which only the server can tell; read once, at start. */
+	async #readStoredKey(adapter: ServerAdapter): Promise<string> {
+		const server = await this.#readServerIdentity(adapter);
+		let key = server === undefined ? "" : `:server=${server}`;
+		if (adapter === "postgres") {
 			// The unqualified table resolves through the search path, to the first schema on it that holds the
 			// table: two schemas of one database hold two stores. The name is a checked unquoted identifier, so
 			// to_regclass folds it as the store's queries do.
 			const [row] = (await this.#client.unsafe(TABLE_SCHEMA_QUERY, [this.#table])) as Array<{ schema: unknown }>;
-			this.#tableSchema = String(row?.schema ?? "");
+			key += `:schema=${String(row?.schema ?? "")}`;
 		}
+		return key;
+	}
+
+	/**
+	 * The identity the server reports of itself, or `undefined` when it reports
+	 * none or refuses it to this user ({@link IDENTITY_REFUSED_SQLSTATES}). Any
+	 * other failure (a dropped connection, a server shutting down) rejects, so
+	 * the store fails to start as it does when another start-up query fails,
+	 * instead of running under another store's name.
+	 */
+	async #readServerIdentity(adapter: ServerAdapter): Promise<string | undefined> {
+		let rows: Array<{ id?: unknown; Value?: unknown }>;
+		try {
+			rows = (await this.#client.unsafe(
+				adapter === "postgres" ? PG_SERVER_IDENTITY_QUERY : MYSQL_SERVER_IDENTITY_QUERY,
+			)) as Array<{ id?: unknown; Value?: unknown }>;
+		} catch (err) {
+			const state = err instanceof Error ? serverSqlState(err) : undefined;
+			if (state === undefined || !refusesIdentity(adapter, err as Error, state)) throw err;
+			logger.debug("SqlSessionStorage: the server refuses its identity; naming the store without it", {
+				sqlState: state,
+			});
+			return undefined;
+		}
+		const id = adapter === "postgres" ? rows[0]?.id : rows[0]?.Value;
+		return id === null || id === undefined || String(id) === "" ? undefined : String(id);
 	}
 
 	/**

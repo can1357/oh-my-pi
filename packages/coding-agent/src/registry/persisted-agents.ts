@@ -7,7 +7,12 @@ import { resolveExplicitModelRole } from "../config/model-resolver";
 import { assistantTurnProducedOutput, usageContextTokens } from "../session/messages";
 import { modelRoleOf } from "../session/session-entries";
 import { readSessionHeaderId, visitEntriesFromFileStream } from "../session/session-loader";
-import { defaultSessionStorage, type SessionStorage, type SessionStorageStat } from "../session/session-storage";
+import {
+	defaultSessionStorage,
+	isStoredFile,
+	type SessionStorage,
+	type SessionStorageStat,
+} from "../session/session-storage";
 import { loadBundledAgents } from "../task/agents";
 import { isReadOnlyAgent } from "../task/read-only-policy";
 import { persistedVibeChildIds } from "../vibe/lifecycle";
@@ -525,15 +530,6 @@ function latchOwnershipValid(registry: AgentRegistryApi, owned: Map<string, stri
 		if (!ref || ref.sessionFile !== sessionFile) return false;
 	}
 	return true;
-}
-
-/** Whether `file` is a regular file in `storage`; false for a directory, a missing path, or any fault. */
-function isStoredFile(file: string, storage: SessionStorage): boolean {
-	try {
-		return storage.statSync(file).isFile;
-	} catch {
-		return false;
-	}
 }
 
 function resolveRootSessionFile(

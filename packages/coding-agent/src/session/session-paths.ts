@@ -15,7 +15,7 @@ import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import type { Settings } from "../config/settings";
 import { worktreeFamily } from "../worktree/worktrees";
-import { defaultSessionStorage, type SessionStorage } from "./session-storage";
+import { defaultSessionStorage, isStoredFile, type SessionStorage } from "./session-storage";
 
 const migratedSessionRoots = new Set<string>();
 
@@ -528,9 +528,12 @@ export interface TerminalBreadcrumb {
  * A missing target file yields `null` UNLESS the breadcrumb is a `fresh`
  * boundary — a lazy session whose JSONL was never written — in which case the
  * entry is returned with `exists:false` so the caller can distinguish it from a
- * genuinely stale/deleted breadcrumb.
+ * genuinely stale/deleted breadcrumb. The target is looked up in `storage`,
+ * the store the caller resumes from.
  */
-export async function readTerminalBreadcrumbEntry(): Promise<TerminalBreadcrumb | null> {
+export async function readTerminalBreadcrumbEntry(
+	storage: SessionStorage = defaultSessionStorage(),
+): Promise<TerminalBreadcrumb | null> {
 	const terminalId = getTerminalId();
 	if (!terminalId) return null;
 
@@ -540,23 +543,15 @@ export async function readTerminalBreadcrumbEntry(): Promise<TerminalBreadcrumb 
 		if (!parsed) return null;
 		const { cwd: breadcrumbCwd, sessionFile, fresh, cwdIdentity } = parsed;
 
-		// Through the configured storage: under `session.storage: sql` the
-		// target is a row, and a filesystem check would drop every breadcrumb.
+		// Through the caller's storage: under `session.storage: sql` the target
+		// is a row, and a filesystem check would drop every breadcrumb.
 		// A shared store may hold a row another client committed since this one
 		// loaded its view: another omp process wrote the session this terminal
-		// last ran. A regular file, as the `statSync(...).isFile()` this replaced
-		// required: `existsSync` also accepts a directory named `*.jsonl`, and
-		// continuing one fails the launch with EISDIR instead of ignoring the
-		// breadcrumb.
-		const storage = defaultSessionStorage();
+		// last ran. A regular file only: `existsSync` also accepts a directory
+		// named `*.jsonl`, and continuing one fails the launch with EISDIR
+		// instead of ignoring the breadcrumb.
 		await storage.refresh?.();
-		const exists = ((): boolean => {
-			try {
-				return storage.statSync(sessionFile).isFile;
-			} catch {
-				return false;
-			}
-		})();
+		const exists = isStoredFile(sessionFile, storage);
 		// A materialized target resumes normally; a missing target is honored only
 		// for a never-written lazy fresh-session boundary.
 		if (exists || fresh) return { cwd: breadcrumbCwd, sessionFile, exists, fresh, cwdIdentity };

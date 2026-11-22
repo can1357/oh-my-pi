@@ -432,10 +432,11 @@ export class IndexedSessionStorage implements SessionStorage {
 	}
 
 	/**
-	 * Visits the transcript's lines in read windows (see
-	 * {@link readSessionLineWindows}), so a scan holds one window, not the whole
-	 * transcript, and stops reading at the first window that answers it. A
-	 * backend that cannot read a range is read whole, once.
+	 * Visits the transcript's lines, the same lines `split("\n")` gives for the
+	 * whole text, in read windows (see {@link readSessionLineWindows}), so a
+	 * scan holds one window, not the whole transcript, and stops reading at the
+	 * first window that answers it. A backend that cannot read a range is read
+	 * whole, once.
 	 */
 	async scanLines(path: string, visit: (line: string) => boolean): Promise<void> {
 		if (!this.#backend.readFrom) {
@@ -445,11 +446,18 @@ export class IndexedSessionStorage implements SessionStorage {
 			return;
 		}
 		const decoder = new TextDecoder();
+		// The piece after a window's last newline begins the next window's first line; the last piece is the
+		// text's last line, "" when the text is empty or ends in a newline.
+		let tail = "";
 		for await (const window of readSessionLineWindows(this, path)) {
-			for (const line of decoder.decode(window).split("\n")) {
+			const lines = decoder.decode(window).split("\n");
+			lines[0] = tail + lines[0];
+			tail = lines.pop() ?? "";
+			for (const line of lines) {
 				if (visit(line)) return;
 			}
 		}
+		visit(tail);
 	}
 
 	async writeText(path: string, content: string): Promise<void> {

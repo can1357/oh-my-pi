@@ -5,7 +5,7 @@
 
 import * as path from "node:path";
 import { AgentRegistry } from "../registry/agent-registry";
-import { defaultSessionStorage, type SessionStorage } from "../session/session-storage";
+import { defaultSessionStorage, isStoredFile, type SessionStorage } from "../session/session-storage";
 
 const extraArtifactsDirs = new Set<string>();
 /** Deepest nesting `sessionFilesFromDisk` descends below an artifacts dir. */
@@ -142,20 +142,6 @@ export async function sessionFilesFromDisk(
  * artifacts subtree reads as unavailable instead of disturbing the caller's
  * delivery path.
  */
-/**
- * Whether `file` is a regular file in `storage`; false for a directory, a
- * missing path, or any fault. Follows symlinks, as the filesystem `stat` the
- * check replaced did: a retained transcript reached through a symlink is
- * readable and must still be advertised.
- */
-export function isStoredFile(file: string, storage: SessionStorage): boolean {
-	try {
-		return storage.statSync(file).isFile;
-	} catch {
-		return false;
-	}
-}
-
 export async function hasResolvableTranscript(
 	agentId: string,
 	storage: SessionStorage = defaultSessionStorage(),
