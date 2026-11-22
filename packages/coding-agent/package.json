@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-coding-agent",
-	"version": "18.20.2",
+	"version": "19.1.0",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"keywords": [
 		"agent",
@@ -38,6 +38,7 @@
 		"dist/CHANGELOG-*.md",
 		"dist/*.node",
 		"dist/*.json-*.zst",
+		"dist/perturbation-pool.json-*.txt",
 		"scripts",
 		"examples",
 		"README.md",
@@ -280,6 +281,30 @@
 			"types": "./src/extensibility/plugins/marketplace/*.ts",
 			"import": "./src/extensibility/plugins/marketplace/*.ts"
 		},
+		"./disasm": {
+			"types": "./src/disasm/index.ts",
+			"import": "./src/disasm/index.ts"
+		},
+		"./disasm/*": {
+			"types": "./src/disasm/*.ts",
+			"import": "./src/disasm/*.ts"
+		},
+		"./ghidra": {
+			"types": "./src/ghidra/index.ts",
+			"import": "./src/ghidra/index.ts"
+		},
+		"./ghidra/*": {
+			"types": "./src/ghidra/*.ts",
+			"import": "./src/ghidra/*.ts"
+		},
+		"./binja": {
+			"types": "./src/binja/index.ts",
+			"import": "./src/binja/index.ts"
+		},
+		"./binja/*": {
+			"types": "./src/binja/*.ts",
+			"import": "./src/binja/*.ts"
+		},
 		"./ida": {
 			"types": "./src/ida/index.ts",
 			"import": "./src/ida/index.ts"
@@ -352,13 +377,9 @@
 			"types": "./src/mcp/*.ts",
 			"import": "./src/mcp/*.ts"
 		},
-		"./mcp/transports": {
-			"types": "./src/mcp/transports/index.ts",
-			"import": "./src/mcp/transports/index.ts"
-		},
-		"./mcp/transports/*": {
-			"types": "./src/mcp/transports/*.ts",
-			"import": "./src/mcp/transports/*.ts"
+		"./mcp/host/*": {
+			"types": "./src/mcp/host/*.ts",
+			"import": "./src/mcp/host/*.ts"
 		},
 		"./memories": {
 			"types": "./src/memories/index.ts",

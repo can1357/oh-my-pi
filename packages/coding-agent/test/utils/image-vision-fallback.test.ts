@@ -11,6 +11,7 @@ import {
 	describeAttachedImagesForTextModel,
 } from "@oh-my-pi/pi-coding-agent/utils/image-vision-fallback";
 import { CostGate } from "@oh-my-pi/pi-coding-agent/session/cost-gate";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 // 1x1 transparent PNG.
@@ -133,6 +134,24 @@ describe("describeAttachedImagesForTextModel", () => {
 
 		expect(stub.calls).toHaveLength(1);
 		expect(capped[0]!.text).not.toContain("red balloon");
+	});
+
+	it("journals each description once as usage-only `image-describe`", async () => {
+		const stub = makeCompleteStub("A man holding a red balloon.");
+		const usageLedger = SessionManager.inMemory();
+		const deps = { ...makeDeps(testDir, [textModel, visionModel], stub.fn), usageLedger };
+
+		await describeAttachedImagesForTextModel([{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }], deps);
+
+		const journaled = usageLedger.getEntries().filter(entry => entry.type === "model_usage");
+		expect(journaled).toHaveLength(1);
+		expect(journaled[0]).toMatchObject({
+			purpose: "image-describe",
+			model: visionModel.id,
+			usage: { input: 1, output: 1, totalTokens: 2 },
+		});
+		// The description is already in the transcript, and the request text is a fixed instruction.
+		expect(journaled[0]).not.toHaveProperty("completion");
 	});
 
 	it("chooses the cheaper available vision model instead of catalog order", async () => {

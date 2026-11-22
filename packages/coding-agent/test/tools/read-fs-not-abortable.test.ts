@@ -22,9 +22,9 @@ function makeSession(cwd: string): ToolSession {
 		getSessionFile: () => path.join(cwd, "session.jsonl"),
 		getSessionSpawns: () => "*",
 		getArtifactsDir: () => path.join(cwd, "session"),
-		allocateOutputArtifact: async (toolType: string) => ({
+		allocateOutputArtifact: async () => ({
 			id: "a1",
-			path: path.join(cwd, "session", `a1.${toolType}.log`),
+			path: path.join(cwd, "session", `a1.log`),
 		}),
 		settings: Settings.isolated(),
 	};

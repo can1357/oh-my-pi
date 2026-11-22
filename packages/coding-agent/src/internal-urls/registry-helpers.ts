@@ -73,23 +73,22 @@ export function artifactsDirsFromRegistry(options?: { preferredDir?: string }): 
  * multiple dirs, the first hit wins (registry dirs are scanned first; a
  * `preferredDir` from the caller root is scanned before them). Directory
  * listings are prefetched in parallel; the walk itself stays a sequential
- * depth-first pass so first-hit order is unaffected. In `onlyPreferred` mode,
- * only the supplied directory is scanned, with direct files before descendants.
+ * depth-first pass so first-hit order is unaffected.
  * `preserveDuplicates` retains every candidate path per id for ambiguity checks.
  */
 export function sessionFilesFromDisk(
 	preferredDir: string | undefined,
-	options: { onlyPreferred?: boolean; preserveDuplicates: true },
+	options: { preserveDuplicates: true },
 ): Promise<Map<string, string[]>>;
 export function sessionFilesFromDisk(
 	preferredDir?: string,
-	options?: { onlyPreferred?: boolean; preserveDuplicates?: false },
+	options?: { preserveDuplicates?: false },
 ): Promise<Map<string, string>>;
 export async function sessionFilesFromDisk(
 	preferredDir?: string,
-	options?: { onlyPreferred?: boolean; preserveDuplicates?: boolean },
+	options?: { preserveDuplicates?: boolean },
 ): Promise<Map<string, string> | Map<string, string[]>> {
-	const dirs = options?.onlyPreferred ? [] : artifactsDirsFromRegistry();
+	const dirs = artifactsDirsFromRegistry();
 	if (preferredDir) dirs.unshift(preferredDir);
 	const listings = new Map<string, Promise<Dirent[] | null>>();
 	const list = (dir: string, depth: number): Promise<Dirent[] | null> => {
@@ -134,14 +133,6 @@ export async function sessionFilesFromDisk(
 		seenDirs.add(dir);
 		const entries = await list(dir, depth);
 		if (!entries) return;
-		if (options?.onlyPreferred) {
-			// Prefer a direct transcript over a nested same-id copy.
-			for (const entry of entries) recordFile(dir, entry);
-			for (const entry of entries) {
-				if (entry.isDirectory()) await scan(path.join(dir, entry.name), depth + 1);
-			}
-			return;
-		}
 		for (const entry of entries) {
 			if (entry.isDirectory()) {
 				await scan(path.join(dir, entry.name), depth + 1);

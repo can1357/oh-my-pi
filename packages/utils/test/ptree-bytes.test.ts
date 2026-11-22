@@ -12,7 +12,7 @@ describe("ptree.ChildProcess.bytes()", () => {
 		// 1.3.x; the test then asserts only on the contract, not on the exact
 		// chunk threshold, so it stays robust to future Bun runtime changes.
 		const size = 256 * 1024;
-		const child = spawn(["bun", "-e", `process.stdout.write("a".repeat(${size}))`]);
+		const child = spawn([process.execPath, "-e", `process.stdout.write("a".repeat(${size}))`]);
 		const bytes = await child.bytes();
 		await child.exitedCleanly;
 

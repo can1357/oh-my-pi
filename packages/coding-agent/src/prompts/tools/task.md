@@ -88,7 +88,7 @@ Run one agent synchronously.
 {{/if}}
 {{/if}}
 
-{{#if seanceGuidance}}{{seanceGuidance}}{{/if}}Shared edits need one integration owner; give each task its files{{#unless batchEnabled}} and interfaces{{/unless}}.
+Shared edits need one integration owner; give each task its files{{#unless batchEnabled}} and interfaces{{/unless}}.
 Every task MUST skip build/lint/tests/formatters mid-flight; run once afterward.
 
 # Available Agents

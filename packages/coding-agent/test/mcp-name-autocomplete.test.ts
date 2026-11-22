@@ -42,9 +42,10 @@ async function writeConfig(
 }
 
 /** Fake ctx carrying only the mcpManager surface `collectMcpServerNames` reads. */
-function createFakeCtx(discoveredNames: string[]) {
+function createFakeCtx(discoveredNames: string[], droppedNames: string[] = []) {
 	const mcpManager = {
 		getAllServerNames: vi.fn((): string[] => discoveredNames),
+		getBuiltinDrops: vi.fn(() => new Map(droppedNames.map(name => [name, { reason: "replaced" }]))),
 		getSource: vi.fn((): SourceMeta | undefined => undefined),
 		getConnectionStatus: vi.fn(() => "connected" as const),
 	};
@@ -142,6 +143,19 @@ describe("MCP server-name autocomplete", () => {
 		expect(await mcp.getArgumentCompletions("reconnect ")).toBeNull();
 		expect(await mcp.getArgumentCompletions("reauth ")).toBeNull();
 		expect(await mcp.getArgumentCompletions("unauth ")).toBeNull();
+	});
+
+	test("/mcp offers a server a built-in transform dropped to enable, not to subcommands that need it running", async () => {
+		await writeConfig("user", projectDir, {});
+		await writeConfig("project", projectDir, {});
+		const { ctx } = createFakeCtx([], ["codex-repl"]);
+		const runtime: TuiSlashCommandRuntime = { ctx };
+		const mcp = buildTuiBuiltinSlashCommands(runtime).find(c => c.name === "mcp");
+		if (!mcp?.getArgumentCompletions) throw new Error("expected /mcp command with getArgumentCompletions");
+
+		expect((await mcp.getArgumentCompletions("enable "))?.map(item => item.label)).toEqual(["codex-repl"]);
+		expect(await mcp.getArgumentCompletions("test ")).toBeNull();
+		expect(await mcp.getArgumentCompletions("reconnect ")).toBeNull();
 	});
 
 	test("/mcp only offers disabled configured servers to subcommands that can accept them", async () => {

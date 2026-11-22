@@ -46,9 +46,12 @@ async function runValidation(
 			return;
 		case "models-endpoint": {
 			const envBase = validate.baseUrlEnv ? $env[validate.baseUrlEnv]?.trim() : undefined;
-			const modelsUrl = envBase
-				? `${envBase.replace(/\/+$/, "")}${validate.baseUrlPath ?? "/models"}`
-				: validate.url;
+			const base = envBase?.replace(/\/+$/, "");
+			const normalizedBase =
+				base && validate.baseUrlAppend && !base.endsWith(validate.baseUrlAppend)
+					? `${base}${validate.baseUrlAppend}`
+					: base;
+			const modelsUrl = normalizedBase ? `${normalizedBase}${validate.baseUrlPath ?? "/models"}` : validate.url;
 			const headers = validate.headersHook ? (await loadHeadersHook(validate.headersHook))() : undefined;
 			await validateApiKeyAgainstModelsEndpoint({
 				provider,

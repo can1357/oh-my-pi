@@ -85,10 +85,13 @@ const ERASE_TO_END_OF_LINE = "\x1b[K";
 const LINE_FIT_MIN_SOURCE_CODE_UNITS = 4096;
 const LINE_FIT_MAX_SOURCE_CODE_UNITS = 65536;
 const LINE_FIT_SOURCE_WIDTH_MULTIPLIER = 64;
-// Hide the hardware cursor before each paint/move write. Ghostty-style bar
-// cursors can otherwise leave visual afterimages while the TUI repaints the
-// row under a visible cursor. Paint writes also disable terminal autowrap:
-// several terminals keep a "pending wrap" flag after an exact-width row, so a
+// Hide the hardware cursor at the start of each paint/move write. Ghostty-style
+// bar cursors can otherwise leave visual afterimages while the TUI repaints the
+// row under a visible cursor. The hide goes inside the synchronized update:
+// kitty snapshots cursor visibility at ?2026h and presents that snapshot until
+// ?2026l, so a hide written before ?2026h makes a visible cursor flash on every
+// animation tick. Paint writes also disable terminal autowrap: several
+// terminals keep a "pending wrap" flag after an exact-width row, so a
 // following cursor move can first wrap to the next row and produce staircase
 // trails. The TUI emits explicit CRLFs and restores autowrap before leaving the
 // paint. Synchronized output can be disabled for terminals with broken DEC 2026
@@ -101,7 +104,7 @@ const SYNC_OUTPUT_END = "\x1b[?2026l";
 const SYNC_OUTPUT_RENEW_BYTES = 16 * 1024;
 const DISABLE_AUTOWRAP = "\x1b[?7l";
 const ENABLE_AUTOWRAP = "\x1b[?7h";
-const PAINT_BEGIN = `${HIDE_CURSOR}${SYNC_OUTPUT_BEGIN}${DISABLE_AUTOWRAP}`;
+const PAINT_BEGIN = `${SYNC_OUTPUT_BEGIN}${HIDE_CURSOR}${DISABLE_AUTOWRAP}`;
 const PAINT_END = `${ENABLE_AUTOWRAP}${SYNC_OUTPUT_END}`;
 const PAINT_BEGIN_NO_SYNC = `${HIDE_CURSOR}${DISABLE_AUTOWRAP}`;
 const PAINT_END_NO_SYNC = ENABLE_AUTOWRAP;
@@ -318,6 +321,13 @@ export interface Component {
 	 * rows never show them. Return the same array while unchanged.
 	 */
 	nativeTrailers?(): readonly Component[];
+
+	/**
+	 * Rows of the last render that are a popup over the transcript (the editor's completion
+	 * list). Below the transcript the composer keeps the rows they cover live, so they return
+	 * when the popup closes instead of going to scrollback.
+	 */
+	coveringRows?(): number;
 
 	/**
 	 * Pure preflight for focused input that must precede TUI-wide input listeners
@@ -958,6 +968,8 @@ export class TUI extends Container {
 	onDebug?: () => void;
 	#renderRequested = false;
 	#renderTimer: RenderTimer | undefined;
+	#outputDrainWait: { unsubscribe?: () => void } | undefined;
+	#renderSession = 0;
 	#renderScheduler: RenderScheduler;
 	#lastRenderAt = 0;
 	/**
@@ -992,7 +1004,7 @@ export class TUI extends Container {
 	 * many bytes, composing another frame would only queue a stale paint
 	 * behind the backlog — and once the kernel PTY buffer is full, handing the
 	 * runtime more bytes degrades into thread-blocking writes. Defer the
-	 * render (keeping its forced/clear-scrollback intent) and retry shortly;
+	 * render (keeping its forced/clear-scrollback intent) until notified of drain;
 	 * the eventual frame composes the latest component state, so a slow
 	 * terminal receives only fresh frames instead of every intermediate one.
 	 *
@@ -1001,8 +1013,6 @@ export class TUI extends Container {
 	 * watchdog armed across exactly the range where frames are deferred (#10434).
 	 */
 	static readonly #MAX_PENDING_OUTPUT_BYTES = STDOUT_BACKLOG_CLEAR_BYTES;
-	/** Retry cadence while the output backlog gate is holding renders back. */
-	static readonly #OUTPUT_BACKLOG_RETRY_MS = 10;
 	/** Quiet window before restoring the normal buffer after resize. */
 	static readonly #RESIZE_VIEWPORT_SETTLE_MS = 120;
 	/** Longest wait for a CPR reply before the settled repaint falls back. */
@@ -1544,6 +1554,10 @@ export class TUI extends Container {
 	}
 
 	start(options?: TUIStartOptions): void {
+		this.#renderSession++;
+		this.#outputDrainWait?.unsubscribe?.();
+		this.#outputDrainWait = undefined;
+		this.#renderRequested = false;
 		this.#stopped = false;
 		this.#appearanceReportUnsubscribe?.();
 		let backgroundRgb: number | undefined;
@@ -2686,6 +2700,10 @@ export class TUI extends Container {
 	}
 
 	stop(): void {
+		this.#renderSession++;
+		this.#outputDrainWait?.unsubscribe?.();
+		this.#outputDrainWait = undefined;
+		this.#renderRequested = false;
 		this.#appearanceReportUnsubscribe?.();
 		this.#appearanceReportUnsubscribe = undefined;
 		this.#cancelPostmortemRestore?.();
@@ -2810,11 +2828,13 @@ export class TUI extends Container {
 	}
 
 	requestRender(force = false, options?: RenderRequestOptions): void {
+		if (this.#stopped) return;
 		if (force) {
 			this.#prepareForcedRender(options?.clearScrollback === true);
 			this.#renderRequested = true;
+			const session = this.#renderSession;
 			this.#renderScheduler.scheduleImmediate(() => {
-				if (this.#stopped || !this.#renderRequested) {
+				if (session !== this.#renderSession || this.#stopped || !this.#renderRequested) {
 					return;
 				}
 				this.#renderRequested = false;
@@ -2851,10 +2871,7 @@ export class TUI extends Container {
 		if (this.#stopped) return;
 		this.#prepareForcedRender(options?.clearScrollback === true);
 		this.#renderRequested = false;
-		const start = this.#renderScheduler.now();
-		this.#lastRenderAt = start;
-		this.#doRender();
-		this.#lastFrameCostMs = this.#renderScheduler.now() - start;
+		this.#executeRender();
 	}
 
 	/**
@@ -2872,7 +2889,10 @@ export class TUI extends Container {
 	#requestOrdinaryRender(): void {
 		if (this.#renderRequested) return;
 		this.#renderRequested = true;
-		this.#renderScheduler.scheduleImmediate(() => this.#scheduleRender());
+		const session = this.#renderSession;
+		this.#renderScheduler.scheduleImmediate(() => {
+			if (session === this.#renderSession) this.#scheduleRender();
+		});
 	}
 
 	#maybeDeferGhosttyInitialImagePaint(): boolean {
@@ -2931,7 +2951,7 @@ export class TUI extends Container {
 	};
 
 	#scheduleRender(): void {
-		if (this.#stopped || this.#renderTimer || !this.#renderRequested) {
+		if (this.#stopped || this.#outputDrainWait || this.#renderTimer || !this.#renderRequested) {
 			return;
 		}
 		const now = this.#renderScheduler.now();
@@ -2972,18 +2992,35 @@ export class TUI extends Container {
 	}
 	/**
 	 * True when the frame was deferred because the terminal's output backlog
-	 * exceeds {@link TUI.#MAX_PENDING_OUTPUT_BYTES}. Re-arms a retry render;
+	 * exceeds {@link TUI.#MAX_PENDING_OUTPUT_BYTES}. Waits for a drain event;
 	 * one-shot paint intents (`#clearScrollbackOnNextRender`,
 	 * `#forceViewportRepaintOnNextRender`) survive untouched for it.
 	 */
 	#deferRenderForOutputBacklog(): boolean {
+		if (this.#outputDrainWait) {
+			this.#renderRequested = true;
+			return true;
+		}
 		const pending = this.terminal.pendingOutputBytes;
 		if (pending === undefined || pending <= TUI.#MAX_PENDING_OUTPUT_BYTES) return false;
+		if (!this.terminal.onOutputDrain) {
+			throw new Error("Terminals reporting output backpressure must implement onOutputDrain");
+		}
 		this.#renderRequested = true;
-		this.#renderTimer ??= this.#renderScheduler.scheduleRender(
-			this.#runScheduledRender,
-			TUI.#OUTPUT_BACKLOG_RETRY_MS,
-		);
+		const wait: { unsubscribe?: () => void } = {};
+		this.#outputDrainWait = wait;
+		const resume = () => {
+			if (this.#stopped || this.#outputDrainWait !== wait) return;
+			if ((this.terminal.pendingOutputBytes ?? 0) > TUI.#MAX_PENDING_OUTPUT_BYTES) return;
+			this.#outputDrainWait = undefined;
+			wait.unsubscribe?.();
+			this.#scheduleRender();
+		};
+		wait.unsubscribe = this.terminal.onOutputDrain(resume);
+		// A synchronous notification may already have retired this subscription.
+		if (this.#outputDrainWait !== wait) wait.unsubscribe();
+		// Close the check/subscribe race even if the terminal emits no initial event.
+		else resume();
 		return true;
 	}
 
@@ -3848,19 +3885,6 @@ export class TUI extends Container {
 			buffer += SYNC_OUTPUT_BEGIN;
 			syncBytes = 0;
 		};
-		if (destructiveReset && TERMINAL.imageProtocol === ImageProtocol.Kitty) {
-			// A reset is explicitly destructive, so remove every placement—not only
-			// the ones this TUI tracked—then resend images composed for the clean
-			// replay. ED2 below reclaims the rest, but only on terminals that treat
-			// an erase as a graphics clear; the explicit delete covers the others.
-			buffer += encodeKittyDeleteAllImages();
-			// `d=A` spares virtual placements, and erasing the placeholder text it
-			// leaves behind does not remove the prototype either. The ids this
-			// reset forgot are named explicitly here — their tracking is gone, so
-			// nothing downstream could find them again.
-			for (const id of this.#imageBudget.takeResetPurgeIds()) buffer += encodeKittyDeleteImage(id);
-			this.#screenImagePlacements.clear();
-		}
 		if (TERMINAL.imageProtocol === ImageProtocol.Kitty) {
 			for (const id of this.#imageBudget.takePurgeIds()) buffer += encodeKittyDeleteImage(id);
 		} else {
@@ -3882,6 +3906,24 @@ export class TUI extends Container {
 		// image the terminal no longer had and every inline image vanished
 		// after a settled width resize.
 		if (destructiveReset) buffer += `${LINE_TERMINATOR}\x1b[H\x1b[2J\x1b[3J`;
+		if (destructiveReset && TERMINAL.imageProtocol === ImageProtocol.Kitty) {
+			// A reset is explicitly destructive, so remove every placement—not only
+			// the ones this TUI tracked—then resend images composed for the clean
+			// replay. ED2 above reclaims the rest, but only on terminals that treat
+			// an erase as a graphics clear; the explicit delete covers the others.
+			// It MUST follow the erases: `d=A` removes only placements on screen,
+			// and terminals that keep a placement anchored in scrollback move it to
+			// the top-left when ED3 erases its row (herdr-app), so a delete sent
+			// first leaves an id-less placement (an extension's budget-less image)
+			// painted over the fresh screen.
+			buffer += encodeKittyDeleteAllImages();
+			// `d=A` spares virtual placements, and erasing the placeholder text it
+			// leaves behind does not remove the prototype either. The ids this
+			// reset forgot are named explicitly here — their tracking is gone, so
+			// nothing downstream could find them again.
+			for (const id of this.#imageBudget.takeResetPurgeIds()) buffer += encodeKittyDeleteImage(id);
+			this.#screenImagePlacements.clear();
+		}
 		const diffable =
 			geometryStable &&
 			historyRows.length === 0 &&

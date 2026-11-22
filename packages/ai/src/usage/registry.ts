@@ -6,12 +6,12 @@ import { claudeRankingStrategy, claudeUsageProvider } from "./claude";
 import { clinePassUsageProvider } from "./cline-pass";
 import { commandCodeRankingStrategy, commandCodeUsageProvider } from "./commandcode";
 import { cursorRankingStrategy, cursorUsageProvider } from "./cursor";
-import { devinUsageProvider } from "./devin";
+import { devinRankingStrategy, devinUsageProvider } from "./devin";
 import { factoryDroidRankingStrategy, factoryDroidUsageProvider } from "./factory-droid";
-import { googleGeminiCliUsageProvider } from "./gemini";
 import { githubCopilotUsageProvider } from "./github-copilot";
 import { antigravityRankingStrategy, antigravityUsageProvider } from "./google-antigravity";
 import { kimiRankingStrategy, kimiUsageProvider } from "./kimi";
+import { kiroRankingStrategy, kiroUsageProvider } from "./kiro";
 import { museCodeUsageProvider } from "./muse-code";
 import { minimaxCodeUsageProvider } from "./minimax-code";
 import { ollamaCloudUsageProvider, ollamaUsageProvider } from "./ollama";
@@ -33,7 +33,6 @@ export const DEFAULT_USAGE_PROVIDERS: readonly UsageProvider[] = [
 	minimaxCodeUsageProvider,
 	museCodeUsageProvider,
 	antigravityUsageProvider,
-	googleGeminiCliUsageProvider,
 	ollamaUsageProvider,
 	factoryDroidUsageProvider,
 	ollamaCloudUsageProvider,
@@ -49,6 +48,7 @@ export const DEFAULT_USAGE_PROVIDERS: readonly UsageProvider[] = [
 	devinUsageProvider,
 	charmHyperUsageProvider,
 	commandCodeUsageProvider,
+	kiroUsageProvider,
 ];
 
 const DEFAULT_USAGE_PROVIDER_MAP = new Map<Provider, UsageProvider>(
@@ -72,6 +72,8 @@ const DEFAULT_RANKING_STRATEGIES = new Map<Provider, CredentialRankingStrategy>(
 	["opencode-go", opencodeGoRankingStrategy],
 	["xai-oauth", xaiOauthRankingStrategy],
 	["commandcode", commandCodeRankingStrategy],
+	["kiro", kiroRankingStrategy],
+	["devin", devinRankingStrategy],
 ]);
 
 /** Built-in ranking strategy for `provider`. */

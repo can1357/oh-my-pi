@@ -100,7 +100,7 @@ A requested unavailable runtime raises `ToolError` with the bounded, sanitized p
 
 `mcp_progress` status lines show an MCP tool's name and its latest progress while an awaited call is running: the server's message with `progress/total` when a total exists, or the bare progress value when there is no message. Updates for one call replace one another, including after Eval auto-backgrounds; old MCP snapshots can be evicted under the status-log cap. Internal call ids are not displayed.
 
-The renderer merges call and result inline, syntax-highlights from the declared language, renders cell views as tables, JSON trees, and Markdown in place of their text, and shows timeout/truncation metadata. `session.allocateOutputArtifact?.("eval")` backs spilled output; `artifact://...` in `meta` reaches the full capture.
+The renderer merges call and result inline, syntax-highlights from the declared language, renders cell views as tables, JSON trees, and Markdown in place of their text, and shows timeout/truncation metadata. `session.allocateOutputArtifact?.("eval")` backs spilled output; a `local://N.log` URL in `meta` reaches the full capture.
 
 ## Execution flow
 
@@ -155,15 +155,15 @@ All enabled runtimes expose equivalent helpers where the language permits:
 - `agent(...)`, `workpool(...)` when spawning is allowed
 - `log(message)`, `phase(title)`, `budget`
 
-JS helpers are asynchronous; Python file helpers are synchronous while `tool.<name>()` is a coroutine. `read()` delegates non-`local://` schemes to the registered read tool, resolves `local://` through injected roots, and reads regular paths relative to cwd. A bare `read("artifact://<id>")` returns the artifact file's full text, with `offset`/`limit` selecting lines, whichever session's artifacts dir holds it; selector forms such as `artifact://<id>:raw:5-9` go to the read tool. `write()` accepts regular and `local://` paths but rejects other protocol URLs.
+JS helpers are asynchronous; Python file helpers are synchronous while `tool.<name>()` is a coroutine. `read()` delegates non-`local://` schemes to the registered read tool, resolves `local://` through injected roots, and reads regular paths relative to cwd. `read("local://N.log")` reads a spill like any other `local://` file, through the injected `local` root, with `offset`/`limit` selecting lines; there is no artifact special case. `write()` accepts regular and `local://` paths but rejects other protocol URLs.
 
 The prelude lists accepted session tool names, including unambiguous wire aliases such as `tool.apply_patch({ input: "..." })` for an enabled `edit` tool in apply-patch mode. Exact registered names shadow aliases; ambiguous aliases are unavailable. Both canonical and wire calls check the resolved tool's enablement and use its ordinary approval/ACP gate.
 
-Bridge restrictions and bookkeeping use the resolved canonical tool, not the requested wire spelling. Aliases of `checkpoint` and `rewind` are omitted and rejected because those tools need direct result events; aliases of `todo` retain branch persistence, and aliases of `task`/`wait` pause the cell watchdog like their canonical calls.
+Bridge restrictions and bookkeeping use the resolved canonical tool, not the requested wire spelling. `checkpoint`, `rewind`, and `yield`, including their aliases, are omitted and rejected because their session changes or task completion require direct tool events. A tool command reached from a cell through `sh()` is refused for `checkpoint`, `rewind`, and `yield` with the same direct-tool diagnostic; commands the model's own `bash` calls run are unaffected, including those of subagents a cell starts through `tool.task`. Aliases of `todo` retain branch persistence, and aliases of `task`/`wait` pause the cell watchdog like their canonical calls.
 
 Printing an image or figure attaches it to the result for both the model and the user. Printed data frames, `console.table`, Markdown objects, and large structured values also carry a pretty view for the user; the model sees the printed text.
 
-Enabled extension preludes add globals (such as `browser`) with documentation at `xd://eval/<name>`. Their host calls resolve approval and availability against the live session; disabling a prelude also prevents previously captured functions from retaining host access.
+Enabled extension preludes add globals (such as `browser`) with documentation at `help://eval/<name>`. Their host calls resolve approval and availability against the live session; disabling a prelude also prevents previously captured functions from retaining host access.
 
 ### `judge()` and judgment batches
 
@@ -171,7 +171,7 @@ Enabled extension preludes add globals (such as `browser`) with documentation at
 
 For many states, Python's `await judge_batch(states, questions, concurrency=32, retries=1, min_ok=1, intent=None)` or JS's `await judgeBatch(states, questions, { concurrency?, retries?, minOk?, intent? })` creates a host-owned batch. States are a list/array (index keys) or keyed object. `await b.drain(...)` pulls newly settled `(key, item)` pairs with `item.answers` or `item.error`; Python takes `timeout` directly, JS takes `{ timeout }`. Item failures are retained, while whole-run failure raises after the drain cursor is exhausted. `status()`, `results()`, `failed()`, `cancel()`, and `close()` inspect/control the batch. Batches outlive cells and kernel resets; `judge_batch.attach(id)` / `judgeBatch.attach(id)` reconnects an owning session until close or owner disposal. Completion and judgment requests share a process-wide 32-request semaphore.
 
-The full helper reference is `xd://eval/judge`.
+The full helper reference is `help://eval/judge`.
 
 ### MCP structured results
 

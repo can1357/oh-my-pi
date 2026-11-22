@@ -7,7 +7,7 @@ A widget charts a quantity that shows how the job is going: throughput, latency,
 Unless you skip, call `respond` with:
 - `title` (≤ 48 chars): what is watched.
 - `rules` (1–12) `{from, match, key?, text?, count?, scale?}`:
-  - `from`: the sample source id carrying the data (`out`, `pipe:1`, `tools`, `bg_7:pipe:1`), `*` for all but `tools`, `pipe:*` for a prefix. With `cmd | tail` or `| tee`, read the pipe: `out` gets the lines late or twice.
+  - `from`: the sample source id carrying the data (`out`, `pipe:1`, `file:2`, `tools`, `bg_7:pipe:1`), `*` for all but `tools`, `pipe:*` for a prefix. With `cmd | tail` or `| tee`, read the pipe: `out` gets the lines late or twice. With `cmd > log`, read the file: `out` never gets them.
   - `match`: Rust regex on one line; no lookaround or backreferences. Copy the literal text around the data from the samples; allow varying digits (`[\d.]+`) and widths (`\s+`).
   - Each named group `(?P<name>…)` feeds field `name` (`[a-z][a-z0-9_]*`) with its number (`1,234`, `4.5k` parse). One rule can capture several fields of a line.
   - `key`: the rule's group naming a series (model, shard, CI job); the rule's fields keep one series per key. Not a field itself. At most 48 keys, 16 for `bars`.
@@ -38,5 +38,5 @@ Examples:
 `✓ lint (1m02s)` / `✗ test-linux (4m11s)` / `* build-macos`:
 {"title":"CI · 6 jobs","rules":[{"from":"*","match":"^(?P<mark>[✓✗*-])\\s+(?P<name>\\S+)","key":"name","text":"mark"}],"blocks":[{"kind":"grid","field":"mark","label":"jobs","tones":{"✓":"success","✗":"error","*":"pending","-":"muted"}}]}
 
-nextest, `        PASS [   0.012s] pi-natives line_match::tests::named_groups`:
-{"title":"nextest · pi-natives","rules":[{"from":"*","match":"^\\s*PASS \\[","count":"pass"},{"from":"*","match":"^\\s*FAIL \\[\\s*[\\d.]+s\\] (?P<fail>.+)$","text":"fail"},{"from":"*","match":"^\\s*(?:PASS|FAIL) \\[\\s*[\\d.]+s\\] (?P<current>.+)$","text":"current"}],"blocks":[{"kind":"stat","items":[{"field":"pass","agg":"count","label":"passed"},{"field":"fail","agg":"count","label":"failed"}]},{"kind":"text","field":"fail"}],"stage":"current"}
+nextest, `        PASS [   0.012s] omp-natives line_match::tests::named_groups`:
+{"title":"nextest · omp-natives","rules":[{"from":"*","match":"^\\s*PASS \\[","count":"pass"},{"from":"*","match":"^\\s*FAIL \\[\\s*[\\d.]+s\\] (?P<fail>.+)$","text":"fail"},{"from":"*","match":"^\\s*(?:PASS|FAIL) \\[\\s*[\\d.]+s\\] (?P<current>.+)$","text":"current"}],"blocks":[{"kind":"stat","items":[{"field":"pass","agg":"count","label":"passed"},{"field":"fail","agg":"count","label":"failed"}]},{"kind":"text","field":"fail"}],"stage":"current"}

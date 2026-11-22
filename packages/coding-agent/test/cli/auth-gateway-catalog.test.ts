@@ -105,6 +105,37 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 		expect(resolveGatewayModel(gatewayModel.id, gatewayIndex)).toBe(gatewayModel);
 	});
 
+	test("a pi-native provider override never runs the provider's own model discovery", async () => {
+		using tempDir = TempDir.createSync("@omp-pi-native-discovery-");
+		const modelsPath = tempDir.join("models.yml");
+		await Bun.write(
+			modelsPath,
+			[
+				"providers:",
+				"  google:",
+				"    baseUrl: http://127.0.0.1:18899",
+				"    apiKey: gateway-token",
+				"    transport: pi-native",
+				"",
+			].join("\n"),
+		);
+		const requests: string[] = [];
+		const registry = new ModelRegistry(await createAuthStorage(), modelsPath, {
+			fetch: async input => {
+				requests.push(String(input));
+				return new Response("{}", { status: 404 });
+			},
+		});
+
+		await registry.refreshProvider("google", "online");
+
+		// Requests go through the gateway's pi-native route; a provider-shaped
+		// models listing would carry the gateway token to an endpoint that is
+		// not the gateway's.
+		expect(requests).toEqual([]);
+		expect(registry.find("google", "gemini-2.5-flash")?.transport).toBe("pi-native");
+	});
+
 	test("scopes the catalog to providers with credentials", async () => {
 		using tempDir = TempDir.createSync("@omp-auth-gateway-catalog-");
 		const registry = new ModelRegistry(await createAuthStorage(), tempDir.join("models.yml"));

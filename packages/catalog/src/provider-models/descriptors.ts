@@ -5,7 +5,7 @@
  * the compiled entry (`src/compat/providers.ts`); this table holds only the
  * code half. Providers without a factory (`amazon-bedrock`, `azure`,
  * `gitlab-duo`, MiniMax, and the bespoke OAuth-driven managers
- * `google-antigravity` / `google-gemini-cli` / `openai-codex` built by the
+ * `google-antigravity` / `openai-codex` built by the
  * coding-agent runtime) still have a KDL entry but no runtime discovery here.
  */
 import type { KnownProvider } from "../compat/provider-ids";
@@ -24,6 +24,7 @@ import {
 	anthropicModelManagerOptions,
 	basetenModelManagerOptions,
 	bedrockMantleModelManagerOptions,
+	bifrostModelManagerOptions,
 	cerebrasModelManagerOptions,
 	charmHyperModelManagerOptions,
 	chutesModelManagerOptions,
@@ -49,6 +50,7 @@ import {
 	metaModelManagerOptions,
 	museCodeModelManagerOptions,
 	mistralModelManagerOptions,
+	modalModelManagerOptions,
 	moonshotModelManagerOptions,
 	nanoGptModelManagerOptions,
 	novitaModelManagerOptions,
@@ -109,6 +111,7 @@ const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManag
 	"alibaba-token-plan": config => alibabaTokenPlanModelManagerOptions(config),
 	baseten: config => basetenModelManagerOptions(config),
 	"bedrock-mantle": config => bedrockMantleModelManagerOptions(config),
+	bifrost: config => bifrostModelManagerOptions(config),
 	anthropic: config => anthropicModelManagerOptions(config),
 	cerebras: config => cerebrasModelManagerOptions(config),
 	"charm-hyper": config => charmHyperModelManagerOptions(config),
@@ -141,6 +144,7 @@ const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManag
 	local: () => localModelManagerOptions(),
 	"lm-studio": config => lmStudioModelManagerOptions(config),
 	mistral: config => mistralModelManagerOptions(config),
+	modal: config => modalModelManagerOptions(config),
 	"muse-code": config => museCodeModelManagerOptions(config),
 	meta: config => metaModelManagerOptions(config),
 	moonshot: config => moonshotModelManagerOptions(config),

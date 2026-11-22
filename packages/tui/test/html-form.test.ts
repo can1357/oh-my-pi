@@ -7,10 +7,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Input } from "@oh-my-pi/pi-tui/components/input";
 import { Editor } from "@oh-my-pi/pi-tui/components/editor";
-import { loadFormImage } from "@oh-my-pi/pi-tui/html-form/media";
+import { loadMedia } from "@oh-my-pi/pi-tui/media";
 import { getNativeBlob } from "@oh-my-pi/pi-tui/native/blobs";
+import { ASK_RESERVED_ROWS } from "@oh-my-pi/pi-tui/chrome/ask-fold";
 import { HtmlFormDialog } from "@oh-my-pi/pi-tui/html-form/dialog";
-import { BreakRank, type PageAtom, paginate } from "@oh-my-pi/pi-tui/html-form/paginate";
 import { parseHtmlForm, spansText } from "@oh-my-pi/pi-tui/html-form/parse";
 import type { DescribeContext, NativeChild, NativeNode, NativeSurfaceProvider } from "@oh-my-pi/pi-tui/native/node";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
@@ -58,11 +58,31 @@ function findPath(root: NativeNode, predicate: (node: NativeNode) => boolean, pa
 	return undefined;
 }
 
-/** The text of every `text` node under `root`, in order. */
-function textsOf(root: NativeNode): string[] {
-	const spans = root.k === "text" && root.p && "spans" in root.p ? root.p.spans : undefined;
-	const own = spans ? [spans.map(item => item.t).join("")] : [];
-	return [...own, ...(root.c ?? []).flatMap(child => (isNode(child) ? textsOf(child) : []))];
+/** `root` and every node under it, depth first. */
+function allNodes(root: NativeNode): NativeNode[] {
+	return [root, ...(root.c ?? []).flatMap(child => (isNode(child) ? allNodes(child) : []))];
+}
+
+function byRole(root: NativeNode, role: string): NativeNode[] {
+	return allNodes(root).filter(node => node.p?.role === role);
+}
+
+/** A text node's text, plain or spans; a button's label, `✓ ` before a pressed one (a chosen pill). */
+function labelOf(node: NativeNode): string {
+	if (node.k === "button") return `${node.p?.on ? "✓ " : ""}${node.p?.text ?? ""}`;
+	if (node.k !== "text" || !node.p) return "";
+	return "text" in node.p && node.p.text !== undefined
+		? node.p.text
+		: (node.p.spans ?? []).map(item => item.t).join("");
+}
+
+function labelsOf(nodes: readonly NativeNode[]): string[] {
+	return nodes.map(labelOf);
+}
+
+/** Every text node's text under `root`, plain or spans. */
+function textsOrLabels(root: NativeNode): string[] {
+	return allNodes(root).flatMap(node => (node.k === "text" ? [labelOf(node)] : []));
 }
 
 const DB_FORM = `<form>
@@ -85,6 +105,16 @@ const SELECT_FORM = `<form><label>Region<select name="region">
 	<option value="eu">EU</option><option value="ap">AP</option>
 	<option value="nl">Netherlands</option>
 	</select></label><p>Choose a deployment region.</p></form>`;
+
+/** The form's rows at `width` without color. */
+function plain(form: HtmlFormDialog, width = 100): string[] {
+	return form.render(width).map(row => Bun.stripANSI(row));
+}
+
+/** The row under the first one containing `needle`: a folded question's summary. */
+function rowAfter(rows: readonly string[], needle: string): string | undefined {
+	return rows[rows.findIndex(row => row.includes(needle)) + 1];
+}
 
 function dialog(html: string, overrides: Partial<ConstructorParameters<typeof HtmlFormDialog>[1]> = {}) {
 	const onSubmit = vi.fn();
@@ -195,12 +225,10 @@ describe("html form", () => {
 		it("edits and removes a focused radio note without changing answers or submitting", () => {
 			const { form, onSubmit, onCancel } = dialog(DB_FORM);
 			const before = form.data();
-			const pages = form.debugState().pages;
 			form.handleInput(DOWN);
 			form.handleInput("n");
 			expect(form.debugState().noteEdit).toBe("db=pg");
 			expect(form.render(100).join("\n")).toContain("Note for Postgres");
-			expect(form.debugState().pages).toBe(pages);
 			form.handleInput("why postgres");
 			form.handleInput(ENTER);
 			expect(form.data()).toEqual(before);
@@ -292,6 +320,73 @@ describe("html form", () => {
 			form.dispose();
 		});
 
+		it("checks the focused box when Enter leaves an empty checkbox group", () => {
+			const { form } = dialog(`<form><fieldset><legend>Pick</legend>
+<label><input type="checkbox" name="t" value="a"> A</label>
+<label><input type="checkbox" name="t" value="b"> B</label>
+</fieldset></form>`);
+			form.handleInput(DOWN);
+			form.handleInput(ENTER);
+			expect(form.data().t).toEqual(["b"]);
+			form.dispose();
+		});
+
+		it("opens each field on its preselected answer, so Enter keeps it (#19657)", () => {
+			const { form } = dialog(`<form>
+<fieldset><legend>Store</legend>
+<label><input type="radio" name="db" value="sqlite"> SQLite</label>
+<label><input type="radio" name="db" value="pg" checked> Postgres</label>
+</fieldset>
+<fieldset><legend>Cache</legend>
+<label><input type="radio" name="cache" value="none"> None</label>
+<label><input type="radio" name="cache" value="redis" checked> Redis</label>
+</fieldset></form>`);
+			expect(form.debugState().focus).toBe("db=pg");
+			form.handleInput(ENTER);
+			expect(form.debugState().focus).toBe("cache=redis");
+			form.handleInput(ENTER);
+			form.handleInput(ENTER);
+			expect(form.data()).toMatchObject({ db: "pg", cache: "redis" });
+			form.dispose();
+		});
+
+		it("submits on one Enter when the form asks one question; with more, Enter on the last moves to Submit", () => {
+			const radio = dialog(`<form><p>Which store?</p>
+<label><input type="radio" name="db" value="sqlite"> SQLite</label>
+<label><input type="radio" name="db" value="pg"> Postgres</label></form>`);
+			radio.form.handleInput(DOWN);
+			radio.form.handleInput(ENTER);
+			expect(radio.onSubmit).toHaveBeenCalledWith({ db: "pg" }, []);
+			radio.form.dispose();
+
+			const other = dialog(`<form><p>Which store?</p>
+<label><input type="radio" name="db" value="sqlite"> SQLite</label>
+<label><input type="radio" name="db" value="pg"> Postgres</label></form>`);
+			other.form.handleInput(DOWN);
+			other.form.handleInput(DOWN);
+			other.form.handleInput("duckdb");
+			other.form.handleInput(ENTER);
+			expect(other.onSubmit).toHaveBeenCalledWith({ db: "duckdb" }, []);
+			other.form.dispose();
+
+			const text = dialog(`<form><label>Name <input name="name" required></label></form>`);
+			text.form.handleInput(ENTER);
+			expect(text.onSubmit).not.toHaveBeenCalled();
+			text.form.handleInput("ada");
+			text.form.handleInput(ENTER);
+			expect(text.onSubmit).toHaveBeenCalledWith({ name: "ada" }, []);
+			text.form.dispose();
+
+			const two = dialog(
+				`<form><label>Name <input name="name"></label><label>Team <input name="team"></label></form>`,
+			);
+			two.form.handleInput(ENTER);
+			two.form.handleInput(ENTER);
+			expect(two.onSubmit).not.toHaveBeenCalled();
+			expect(two.form.debugState().focus).toBe("submit");
+			two.form.dispose();
+		});
+
 		it("keeps checkbox drafts across navigation and projects only finally selected options", () => {
 			const { form } = dialog(DB_FORM);
 			form.handleInput("n");
@@ -306,7 +401,8 @@ describe("html form", () => {
 			form.handleInput(ENTER);
 			expect(form.data().extras).toEqual(["ci"]);
 			form.handleInput(SPACE);
-			form.handleInput("\x1b[Z");
+			form.handleInput("\x1b[Z"); // back to Database, on its answer (Postgres)
+			form.handleInput("\x1b[A");
 			form.handleInput("n");
 			form.handleInput("\x05");
 			form.handleInput(" edited");
@@ -318,15 +414,15 @@ describe("html form", () => {
 			form.dispose();
 		});
 
-		it("opens native menu notes on the exact shown row and ignores stale tabs", () => {
+		it("opens native menu notes on the exact shown row and ignores rows of a folded field", () => {
 			const { form } = dialog(DB_FORM);
-			form.handleNativeEvent({ type: "action", key: "body0/f0/o1", act: "note", mods: [] });
+			form.handleNativeEvent({ type: "action", key: "body/g0/q0/f0/o1", act: "note", mods: [] });
 			expect(form.debugState().noteEdit).toBe("db=pg");
 			form.handleInput("native reason");
 			form.handleInput(ENTER);
 			expect(form.data().db).toBe("sqlite");
-			form.handleNativeEvent({ type: "select", key: "head/tabs", item: "t1" });
-			form.handleNativeEvent({ type: "action", key: "body0/f0/o0", act: "note", mods: [] });
+			form.handleNativeEvent({ type: "action", key: "x", act: "open:1", mods: [] });
+			form.handleNativeEvent({ type: "action", key: "body/g0/q0/f0/o0", act: "note", mods: [] });
 			expect(form.debugState().noteEdit).toBeUndefined();
 			expect(form.debugState().focus).toBe("extras=ci");
 			form.dispose();
@@ -407,6 +503,161 @@ describe("html form", () => {
 		});
 	});
 
+	describe("option note images", () => {
+		const IMAGE = { type: "image" as const, data: "AAAA", mimeType: "image/png" };
+		const DIMS = { width: 1, height: 1 };
+		const NOTE_KEY = "\x1bn";
+		const HOME = "\x1b[H";
+		const DELETE = "\x1b[3~";
+		const paste = (text: string) => `\x1b[200~${text}\x1b[201~`;
+
+		function addImage(form: HtmlFormDialog): string {
+			const settle = form.beginPaste();
+			const marker = form.attachImage(IMAGE, DIMS);
+			if (marker === undefined) throw new Error("note does not accept images");
+			settle(marker);
+			return marker;
+		}
+
+		function imageDialog(overrides: Partial<ConstructorParameters<typeof HtmlFormDialog>[1]> = {}) {
+			return dialog(DB_FORM, { acceptImages: true, ...overrides });
+		}
+
+		it("drops the image of a deleted marker and renumbers the rest", () => {
+			const { form } = imageDialog();
+			form.handleInput(NOTE_KEY);
+			addImage(form);
+			form.handleInput(" ");
+			const second = { ...IMAGE, data: "BBBB" };
+			form.beginPaste()(form.attachImage(second, DIMS));
+			form.handleInput(HOME);
+			form.handleInput(DELETE);
+			form.handleInput(ENTER);
+			expect(form.optionNotes()).toMatchObject([{ text: "[Image #1, 1x1]", images: [second] }]);
+
+			form.handleInput(NOTE_KEY);
+			expect(form.attachImage(IMAGE, DIMS)).toBe("[Image #2, 1x1]");
+		});
+
+		it("discards images added since the note opened when Esc closes it", () => {
+			const { form } = imageDialog();
+			form.handleInput(NOTE_KEY);
+			form.handleInput("kept");
+			form.handleInput(ENTER);
+			form.handleInput(NOTE_KEY);
+			addImage(form);
+			form.handleInput(ESC);
+			expect(form.optionNotes()).toMatchObject([{ text: "kept" }]);
+			expect(form.optionNotes()[0]?.images).toBeUndefined();
+			form.handleInput(NOTE_KEY);
+			expect(form.attachImage(IMAGE, DIMS)).toBe("[Image #1, 1x1]");
+		});
+
+		it("restores a saved note's images on reopening and numbers a new paste after them", () => {
+			const { form } = imageDialog();
+			form.handleInput(NOTE_KEY);
+			addImage(form);
+			form.handleInput(ENTER);
+			form.handleInput(NOTE_KEY);
+			const second = { ...IMAGE, data: "BBBB" };
+			expect(form.attachImage(second, DIMS)).toBe("[Image #2, 1x1]");
+			form.beginPaste()("[Image #2, 1x1]");
+			form.handleInput(ENTER);
+			expect(form.optionNotes()).toMatchObject([
+				{ text: "[Image #1, 1x1][Image #2, 1x1]", images: [IMAGE, second] },
+			]);
+		});
+
+		it("accepts images only when opted in, a note is open and the form is shown", () => {
+			const plain = dialog(DB_FORM).form;
+			plain.handleInput(NOTE_KEY);
+			expect(plain.acceptsImages).toBe(false);
+			expect(plain.pasteText).toBeUndefined();
+			expect(plain.attachImage(IMAGE)).toBeUndefined();
+
+			const { form } = imageDialog();
+			expect(form.acceptsImages).toBe(false);
+			expect(form.pasteText).toBeUndefined();
+			form.handleInput(NOTE_KEY);
+			expect(form.acceptsImages).toBe(true);
+			expect(form.pasteText).toBeDefined();
+			form.handleInput("\x1bh"); // Alt+H hides
+			expect(form.acceptsImages).toBe(false);
+			expect(form.pasteText).toBeUndefined();
+			form.handleInput("\x1bh");
+			expect(form.acceptsImages).toBe(true);
+			expect(form.pasteText).toBeDefined();
+			form.dispose();
+			expect(form.acceptsImages).toBe(false);
+			expect(form.pasteText).toBeUndefined();
+		});
+
+		it.each([
+			{ name: "saves once the paste settles with its marker", settleWith: "[Image #1, 1x1]", delivered: true },
+			{ name: "keeps the note open when the paste fails", settleWith: undefined, delivered: false },
+		])("Enter during a pending paste: $name", ({ settleWith, delivered }) => {
+			const { form } = imageDialog();
+			form.handleInput(NOTE_KEY);
+			form.handleInput("text ");
+			form.attachImage(IMAGE, DIMS);
+			const settle = form.beginPaste();
+			form.handleInput(ENTER);
+			expect(form.debugState().noteEdit).toBe("db=sqlite");
+			expect(form.optionNotes()).toEqual([]);
+
+			expect(settle(settleWith)).toBe(delivered);
+			if (delivered) {
+				expect(form.debugState().noteEdit).toBeUndefined();
+				expect(form.optionNotes()).toMatchObject([{ text: "text [Image #1, 1x1]", images: [IMAGE] }]);
+			} else {
+				expect(form.debugState().noteEdit).toBe("db=sqlite");
+				form.handleInput(ENTER);
+				expect(form.optionNotes()).toMatchObject([{ text: "text" }]);
+			}
+		});
+
+		it("sends an empty bracketed paste to onPasteImage and image-path pastes to onPasteImagePath", () => {
+			const onPasteImage = vi.fn();
+			const onPasteImagePath = vi.fn();
+			const { form } = imageDialog({ onPasteImage, onPasteImagePath });
+			form.handleInput(NOTE_KEY);
+			form.handleInput(paste(""));
+			expect(onPasteImage).toHaveBeenCalledTimes(1);
+			form.handleInput(paste("/tmp/a.png /tmp/b.png"));
+			expect(onPasteImagePath.mock.calls).toEqual([["/tmp/a.png"], ["/tmp/b.png"]]);
+			form.handleInput(paste("plain words"));
+			form.handleInput(ENTER);
+			expect(onPasteImage).toHaveBeenCalledTimes(1);
+			expect(onPasteImagePath).toHaveBeenCalledTimes(2);
+			expect(form.optionNotes()).toMatchObject([{ text: "plain words" }]);
+		});
+
+		it("leaves bracketed pastes alone without acceptImages", () => {
+			const onPasteImage = vi.fn();
+			const { form } = dialog(DB_FORM, { onPasteImage });
+			form.handleInput(NOTE_KEY);
+			form.handleInput(paste(""));
+			form.handleInput(paste("/tmp/a.png"));
+			form.handleInput(ENTER);
+			expect(onPasteImage).not.toHaveBeenCalled();
+			expect(form.optionNotes()).toMatchObject([{ text: "/tmp/a.png" }]);
+		});
+
+		it("lands a paste reserved before hiding, and the Enter held behind it still saves", () => {
+			const { form } = imageDialog();
+			form.handleInput(NOTE_KEY);
+			form.handleInput("kept ");
+			const settle = form.beginPaste();
+			form.handleInput(ENTER);
+			form.handleInput("\x1bh"); // Alt+H hides
+			expect(form.beginPaste()("refused")).toBe(false);
+			const marker = form.attachImage(IMAGE, DIMS);
+			expect(settle(marker)).toBe(true);
+			expect(form.debugState().noteEdit).toBeUndefined();
+			expect(form.optionNotes()).toMatchObject([{ text: "kept [Image #1, 1x1]", images: [IMAGE] }]);
+		});
+	});
+
 	describe("parsing", () => {
 		it("joins radios split across a decision table into one field labeled by column headers", () => {
 			const form = parseHtmlForm(`<form><table>
@@ -477,6 +728,13 @@ describe("html form", () => {
 			]);
 		});
 
+		it("keeps a control named __proto__ as an ordinary key of the defaults", () => {
+			const form = parseHtmlForm(`<form><input type="hidden" name="__proto__" value="x">
+				<label>Target <input name="target" value="prod"></label></form>`);
+			// The model reads the data as JSON, so the key must survive serialization.
+			expect(JSON.stringify(defaultFormData(form))).toBe('{"__proto__":"x","target":"prod"}');
+		});
+
 		it("validates required, numeric bounds and anchored patterns; ignores an invalid pattern", () => {
 			const form = parseHtmlForm(`<form>
 				<input name="n" type="number" min="1" max="8" required>
@@ -503,17 +761,17 @@ describe("html form", () => {
 			try {
 				await Bun.write(path.join(dir, "dot.png"), Uint8Array.fromBase64(PNG_1PX));
 				await Bun.write(path.join(dir, "notes.txt"), "not a picture");
-				expect((await loadFormImage("dot.png", { cwd: dir })).mime).toBe("image/png");
-				expect((await loadFormImage(`data:image/png;base64,${PNG_1PX}`, { cwd: dir })).mime).toBe("image/png");
-				const svg = await loadFormImage("data:image/svg+xml;utf8,%3Csvg viewBox='0 0 4 2'%3E%3C/svg%3E", {
+				expect((await loadMedia("dot.png", { cwd: dir })).mime).toBe("image/png");
+				expect((await loadMedia(`data:image/png;base64,${PNG_1PX}`, { cwd: dir })).mime).toBe("image/png");
+				const svg = await loadMedia("data:image/svg+xml;utf8,%3Csvg viewBox='0 0 4 2'%3E%3C/svg%3E", {
 					cwd: dir,
 				});
 				// An svg sized only by its viewBox gets the size and namespace a standalone drawing needs.
 				expect(new TextDecoder().decode(svg.bytes)).toStartWith(
 					`<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2"`,
 				);
-				await expect(loadFormImage("notes.txt", { cwd: dir })).rejects.toThrow("not a PNG");
-				await expect(loadFormImage("missing.png", { cwd: dir })).rejects.toThrow();
+				await expect(loadMedia("notes.txt", { cwd: dir })).rejects.toThrow("not a PNG");
+				await expect(loadMedia("missing.png", { cwd: dir })).rejects.toThrow();
 			} finally {
 				await fs.rm(dir, { recursive: true, force: true });
 			}
@@ -555,14 +813,13 @@ describe("html form", () => {
 		});
 
 		describe("on a Kitty terminal", () => {
-			// 10x200 px: 16 rows at 10 px cells, so two of them cannot share a page of a 30-row terminal.
+			// 10x200 px: ten rows each (a third of the 30-row terminal), so the 17-row body never shows both whole.
 			const TALL_PNG =
 				"iVBORw0KGgoAAAANSUhEUgAAAAoAAADICAAAAAD0eS/eAAAAIElEQVR42mNsYIABJoZR5ihzlDnKHGWOMkeZo8wBZAIAC30CEMb50JQAAAAASUVORK5CYII=";
 			const OK = `<label><input type="checkbox" name="ok"> OK</label>`;
-			const TWO_PAGES = `<form><img src="data:image/png;base64,${TALL_PNG}" alt="first">
+			const TWO_PICTURES = `<form><img src="data:image/png;base64,${TALL_PNG}" alt="first">
 				<img src="data:image/png;base64,${TALL_PNG}" alt="second">${OK}</form>`;
-			const PAGE_DOWN = "\x1b[6~";
-			const PAGE_UP = "\x1b[5~";
+			const UP = "\x1b[A";
 			const cleanups: (() => void)[] = [];
 
 			afterEach(() => {
@@ -665,25 +922,56 @@ describe("html form", () => {
 				expect(view.term.graphicsPlacements()).toEqual([]);
 			});
 
-			it("spends image slots only on the pictures of the page shown", async () => {
-				// One live image: a picture on a later page must not take it from the one shown.
-				const view = await kittyForm(TWO_PAGES, { liveImages: 1, pictures: 2 });
-				view.form.handleInput(PAGE_UP);
+			it("sends a WebP picture's rows as PNG, the only format Kitty draws, and keeps the original natively", async () => {
+				const WEBP_1PX = "UklGRhwAAABXRUJQVlA4TBAAAAAvAAAAAAcQ/e9//wMR0f8A";
+				const view = await kittyForm(`<form><img src="data:image/webp;base64,${WEBP_1PX}" alt="dot">${OK}</form>`);
+				const sent = view.writes.join("");
+				expect(sent).toContain("f=100");
+				expect(sent).toContain("iVBORw0KGgo");
+				expect(sent).not.toContain("UklGR");
+				// A native renderer (Tern) decodes the original itself, so a GIF there keeps its animation.
+				const find = (node: NativeNode): NativeNode | undefined =>
+					node.k === "image" ? node : (node.c ?? []).filter(isNode).map(find).find(Boolean);
+				const image = find(view.form.describe(CX));
+				expect(getNativeBlob(String(image?.p && "blob" in image.p ? image.p.blob : ""))?.mime).toBe("image/webp");
+			});
+
+			it("spends image slots only on pictures the body shows whole; ↑ scrolls up to the question's head", async () => {
+				// One live image: the picture cut off at the body's top must not take it from the one shown whole.
+				const view = await kittyForm(TWO_PICTURES, { liveImages: 1, pictures: 2 });
+				const screen = () => view.term.getViewport().join("\n");
+				expect(view.form.debugState()).toMatchObject({ focus: "ok=on" });
+				expect(view.form.debugState().scroll).toBeGreaterThan(0);
+				// Nothing follows the option, so no offset clears the first picture: it is a frame naming it.
+				expect(screen()).toContain("│ │ ▣ first");
+				expect(screen()).not.toContain("[Image");
+				expect(view.term.graphicsPlacements()).toHaveLength(1);
+				// ↑ on the question's only option: its head (the first picture) is cut off, so the body scrolls up.
+				view.form.handleInput(UP);
 				await view.frame();
-				expect(view.form.debugState()).toMatchObject({ page: 1, pages: 2 });
+				expect(view.form.debugState()).toMatchObject({ scroll: 0, focus: "ok=on" });
+				expect(screen()).toContain("▣ second");
+				expect(screen()).not.toContain("[Image");
+			});
+
+			it("scrolls past a picture the body would cut at its top while the focused row stays in view", async () => {
+				const more = ["a", "b", "c", "d"].map(name => `<label>${name} <input type="text" name="${name}"></label>`);
+				const view = await kittyForm(TWO_PICTURES.replace("</form>", `${more.join("")}</form>`), { pictures: 2 });
 				const screen = view.term.getViewport().join("\n");
-				expect(screen).not.toContain("[Image: first");
-				expect(screen).not.toContain("second");
+				expect(view.form.debugState()).toMatchObject({ focus: "ok=on" });
+				expect(screen).not.toContain("▣ first");
+				expect(screen).toContain("OK");
+				expect(view.term.graphicsPlacements()).toHaveLength(1);
 			});
 
 			it("deletes a picture the budget evicted and sent again when the form closes", async () => {
-				const view = await kittyForm(TWO_PAGES, { liveImages: 1, pictures: 2 });
-				// Page 2 takes the one live slot and evicts page 1's picture; back on page 1 it is sent again.
-				for (const key of [PAGE_UP, PAGE_DOWN, PAGE_UP]) {
+				const view = await kittyForm(TWO_PICTURES, { liveImages: 1, pictures: 2 });
+				// The first picture takes the one live slot and evicts the second; ↓ brings the second back.
+				for (const key of [UP, DOWN, UP]) {
 					view.form.handleInput(key);
 					await view.frame();
 				}
-				expect(view.form.debugState()).toMatchObject({ page: 1 });
+				expect(view.form.debugState()).toMatchObject({ scroll: 0, focus: "ok=on" });
 				expect(view.term.graphicsPlacements()).toHaveLength(1);
 				await view.close();
 				expect(view.term.graphicsPlacements()).toEqual([]);
@@ -700,43 +988,6 @@ describe("html form", () => {
 				await view.close();
 				expect(view.term.graphicsPlacements()).toEqual([]);
 			});
-		});
-	});
-
-	describe("pagination", () => {
-		const atom = (rows: number, breakRank: BreakRank): PageAtom => ({
-			lines: Array.from({ length: rows }, () => "x"),
-			gap: 0,
-			breakRank,
-		});
-
-		it("ends a page at a section boundary unless that strands most of the page", () => {
-			// The section break after 3 rows would leave 7/10 empty, so the page fills to a block break instead.
-			const atoms = [
-				atom(3, BreakRank.Section),
-				atom(1, BreakRank.Section),
-				...Array.from({ length: 9 }, () => atom(1, BreakRank.Block)),
-			];
-			expect(paginate(atoms, 10)[0]).toEqual({ start: 0, end: 8 });
-			// With the section break at 6 rows (40% empty), it wins over a full page.
-			const later = [
-				atom(6, BreakRank.Section),
-				atom(1, BreakRank.Section),
-				...Array.from({ length: 9 }, () => atom(1, BreakRank.Inside)),
-			];
-			expect(paginate(later, 10)[0]).toEqual({ start: 0, end: 1 });
-		});
-
-		it("never breaks before a keep-with-previous atom when another break fits, and gives an oversized atom its own page", () => {
-			const atoms = [atom(4, BreakRank.Section), atom(4, BreakRank.Block), atom(4, BreakRank.Never)];
-			expect(paginate(atoms, 10)).toEqual([
-				{ start: 0, end: 1 },
-				{ start: 1, end: 3 },
-			]);
-			expect(paginate([atom(25, BreakRank.Section), atom(1, BreakRank.Block)], 10)).toEqual([
-				{ start: 0, end: 1 },
-				{ start: 1, end: 2 },
-			]);
 		});
 	});
 
@@ -780,12 +1031,41 @@ describe("html form", () => {
 
 			expect(titleRow()).toContain("Colorful Markdown");
 			form.handleInput(TAB);
-			expect(titleRow()).toContain("Colorful Markdown");
+			// Folded, Title summarizes its answer from the start too.
+			const folded = form.render(42).map(row => Bun.stripANSI(row));
+			expect(folded[folded.findIndex(row => row.includes("✓ Title")) + 1]).toContain("Colorful Markdown");
 			form.handleInput("\x1b[Z"); // Shift+Tab
 			expect(titleRow()).toContain("Colorful Markdown");
 			form.handleInput("\x05"); // End
 			expect(titleRow()).toContain("calmer defaults");
 			expect(titleRow()).not.toContain("Colorful Markdown");
+		});
+
+		it("wraps a narrow table cell over extra lines under its column and keeps its <br> breaks", () => {
+			const { form } = dialog(`<form><table>
+				<tr><th>Option</th><th>Tradeoff</th></tr>
+				<tr><td>Postgres</td><td>Durable transactional storage with replication, but needs a managed server and connection pooling<br>Ops cost: high</td></tr>
+			</table><label><input type="radio" name="db" value="pg"> Postgres</label></form>`);
+			const rows = form.render(60).map(row => Bun.stripANSI(row));
+			const first = rows.findIndex(row => row.includes("Postgres  Durable"));
+			const column = rows[first]!.indexOf("Durable");
+			const cell = rows
+				.slice(
+					first,
+					rows.findIndex(row => row.includes("○ Postgres")),
+				)
+				.map(row =>
+					row
+						.slice(column)
+						.replace(/│\s*$/, "")
+						.trimEnd(),
+				)
+				.filter(Boolean);
+
+			expect(cell.slice(0, -1).join(" ")).toBe(
+				"Durable transactional storage with replication, but needs a managed server and connection pooling",
+			);
+			expect(cell.at(-1)).toBe("Ops cost: high");
 		});
 
 		it("Other: typed text becomes a radio's value or joins a checkbox group; picking an option sets it aside", () => {
@@ -806,8 +1086,8 @@ describe("html form", () => {
 			expect(form.data()).toMatchObject({ extras: ["ci", "terraform"] });
 		});
 
-		it("refuses to submit an invalid form and moves focus to the first problem; Esc cancels", () => {
-			const { form, onSubmit, onCancel } = dialog(
+		it("refuses to submit an invalid form and moves focus to the first problem", () => {
+			const { form, onSubmit } = dialog(
 				`<form><label>Domain <input name="domain" required></label><label>N <input name="n"></label></form>`,
 			);
 			form.handleInput(TAB);
@@ -820,8 +1100,64 @@ describe("html form", () => {
 			form.handleInput(TAB);
 			form.handleInput(ENTER);
 			expect(onSubmit).toHaveBeenCalledWith({ domain: "a", n: "" }, []);
+		});
+
+		it("Esc hands the keys to the composer, in rows as natively; an open dropdown takes it first", () => {
+			const releaseKeys = vi.fn();
+			const { form, onCancel } = dialog(DB_FORM, { releaseKeys });
 			form.handleInput(ESC);
-			expect(onCancel).toHaveBeenCalledTimes(1);
+			expect(releaseKeys).toHaveBeenCalledTimes(1);
+			setNativeRendering(true);
+			try {
+				form.handleInput(ESC);
+				expect(releaseKeys).toHaveBeenCalledTimes(2);
+				form.handleNativeEvent({ type: "action", key: "x", act: "open:2", mods: [] }); // Region
+				form.handleInput(SPACE); // open the dropdown
+				form.handleInput(ESC); // closes it
+				expect(form.debugState().open).toBeNull();
+				expect(releaseKeys).toHaveBeenCalledTimes(2);
+				const cancel = allNodes(form.describe(CX)).find(node => node.k === "button" && node.p?.text === "Cancel");
+				expect(cancel?.p).not.toHaveProperty("keys");
+			} finally {
+				setNativeRendering(false);
+			}
+			expect(onCancel).not.toHaveBeenCalled();
+		});
+
+		it("rows: no footer in the panel; keyHints() gives the focused stop's keys for the host to draw", () => {
+			const { form } = dialog(DB_FORM);
+			const rows = plain(form);
+			// The panel ends with its body: no divider, no hint row.
+			expect(rows.some(row => row.startsWith("├"))).toBe(false);
+			expect(rows.join("\n")).not.toContain("composer");
+			const hints = () => Bun.stripANSI(form.keyHints());
+			expect(hints()).toContain("⏎ choose");
+			expect(hints()).toContain("⎋ composer");
+			expect(hints()).toContain("question");
+			form.handleInput(TAB);
+			form.handleInput(TAB); // Region
+			expect(hints()).toContain("open");
+			form.handleInput(SPACE);
+			expect(hints()).toContain("highlight");
+			form.handleInput(ESC);
+			form.handleInput("\x1b[6~"); // Submit
+			expect(hints()).toContain("⏎ submit");
+			expect(hints()).not.toContain("next field");
+		});
+
+		it("rows: the panel fits the viewport above the composer, focus kept in view", () => {
+			for (const termRows of [16, 10]) {
+				const { form } = dialog(DB_FORM, { tui: { terminal: { rows: termRows }, requestRender: () => {} } });
+				for (let press = 0; press < 3; press++) form.handleInput(DOWN); // into Extras: CI
+				let rows = plain(form);
+				// Eight rows of composer and status stay free; a tiny terminal still gets a usable body.
+				expect(rows.length).toBeLessThanOrEqual(Math.max(termRows - ASK_RESERVED_ROWS, 8));
+				expect(rows.length).toBeLessThanOrEqual(termRows);
+				expect(rows.some(row => row.includes("❯") && row.includes("CI"))).toBe(true);
+				form.handleInput("\x1b[6~"); // Submit
+				rows = plain(form);
+				expect(rows.some(row => row.includes("❯ Submit"))).toBe(true);
+			}
 		});
 
 		it("submits the current values when the inactivity timeout elapses; input restarts it", () => {
@@ -838,207 +1174,252 @@ describe("html form", () => {
 			form.dispose();
 		});
 
-		it("natively: one tab per question with Next, and Submit on the Review tab sends the answers", () => {
-			const { form, onSubmit } = dialog(DB_FORM);
-			let root = form.describe(CX);
-			expect(root.p).toMatchObject({ role: "omp.editor.ask" });
-			const tabs = findPath(root, node => node.k === "tabs")!;
-			// The Database tab shows only its own question.
-			expect(findPath(root, node => node.k === "list" && node.key === "f1")).toBeUndefined();
-			const radios = findPath(root, node => node.k === "list" && node.key === "f0")!;
-			form.handleNativeEvent({ type: "select", key: radios, item: "o1" });
-			form.handleNativeEvent({ type: "action", key: "actions/next", act: "next", mods: [] });
-			root = form.describe(CX);
-			const checks = findPath(root, node => node.k === "list" && node.key === "f1")!;
-			form.handleNativeEvent({ type: "select", key: checks, item: "o0" }); // un-check CI
-			form.handleNativeEvent({ type: "select", key: tabs, item: "review" });
-			expect(findPath(form.describe(CX), node => node.k === "kv")).toBeDefined();
-			form.handleNativeEvent({ type: "action", key: "actions/submit", act: "submit", mods: [] });
-			expect(onSubmit).toHaveBeenCalledWith({ db: "pg", extras: [], region: "us", workers: 4, notes: "" }, []);
-		});
+		it("rows: stack every question; the focused one opens, the rest fold to their answer or first options", () => {
+			const { form } = dialog(DB_FORM);
+			const rows = plain(form);
+			// Database holds focus: its radios are rows. Extras folds field by field.
+			expect(rows.some(row => row.includes("Postgres"))).toBe(true);
+			// A preselected answer stays among its options: the fold still shows what else there is.
+			expect(rowAfter(rows, "✓ Extras")).toMatch(/✓ CI.*Docker/);
+			expect(rowAfter(rows, "✓ Region")).toMatch(/✓ US.*EU.*AP/);
+			expect(rowAfter(rows, "✓ Workers")).toContain("4");
+			expect(rowAfter(rows, "○ Notes")).toContain("anything else");
 
-		it("natively: Submit shows only on the last question tab (and Review) and sends from there", () => {
-			const { form, onSubmit } = dialog(DB_FORM);
-			// First question tab: Next only.
-			expect(findPath(form.describe(CX), node => node.key === "submit")).toBeUndefined();
-			form.handleNativeEvent({ type: "action", key: "actions/next", act: "next", mods: [] });
-			const root = form.describe(CX);
-			expect(findPath(root, node => node.k === "kv")).toBeUndefined(); // last question tab, not Review
-			expect(findPath(root, node => node.key === "submit")).toBeDefined();
-			form.handleNativeEvent({ type: "action", key: "actions/submit", act: "submit", mods: [] });
-			expect(onSubmit).toHaveBeenCalledWith(
-				{ db: "sqlite", extras: ["ci"], region: "us", workers: 4, notes: "" },
-				[],
+			const radios = [
+				"Behind a feature flag for a week",
+				"Default on",
+				"Next minor",
+				"After a soak",
+				"Never",
+				"Ask me",
+			]
+				.map((label, index) => `<label><input type="radio" name="when" value="v${index}"> ${label}</label>`)
+				.join("");
+			const rollout = dialog(`<form><label>Owner <input name="owner"></label><p>Rollout?</p>${radios}</form>`).form;
+			// The first four options as chips, the first cut to twenty cells, then how many more.
+			expect(rowAfter(plain(rollout), "○ Rollout?")).toMatch(
+				/Behind a feature fl….*Default on.*Next minor.*After a soak.*\+2/,
 			);
 		});
 
-		it("natively: a tab is checked only after the user leaves it with valid answers, not for preselected ones", () => {
+		it("rows: ↓ past a question's last row opens the next, ↑ back reopens it", () => {
 			const { form } = dialog(DB_FORM);
-			const checked = () => {
-				const root = form.describe(CX);
-				const path = findPath(root, node => node.k === "tabs")!;
-				let tabs: NativeNode = root;
-				for (const key of path.split("/")) tabs = (tabs.c ?? []).filter(isNode).find(child => child.key === key)!;
-				const items = (tabs.p && "items" in tabs.p ? tabs.p.items : undefined) ?? [];
-				return items.flatMap(tab =>
-					"id" in tab && typeof tab.label !== "string" && tab.label[0]?.t === "✓ " ? [tab.id] : [],
-				);
-			};
-			// Both questions start with valid preselected answers, yet neither has been visited.
-			expect(checked()).toEqual([]);
-			form.handleInput(TAB); // Database → Extras
-			expect(checked()).toEqual(["t0"]);
+			for (let press = 0; press < 3; press++) form.handleInput(DOWN); // Postgres, Other, then CI
+			expect(form.debugState().focus).toBe("extras=ci");
+			let rows = plain(form);
+			expect(rowAfter(rows, "✓ Which store should ledger use?")).toMatch(/✓ SQLite.*Postgres/);
+			expect(rows.some(row => row.includes("○ Postgres"))).toBe(false);
+			expect(rows.some(row => row.includes("☐ Docker"))).toBe(true);
+			form.handleInput("\x1b[A");
+			expect(form.debugState().focus).toBe("db=other");
+			rows = plain(form);
+			expect(rows.some(row => row.includes("○ Postgres"))).toBe(true);
+			expect(rows.some(row => row.includes("☐ Docker"))).toBe(false);
 		});
 
-		it("natively: ↑/↓ cross into the next tab past its last stop; ←/→ turn tabs", () => {
+		it("rows: a short panel scrolls to keep the focused field in view at a fixed height", () => {
+			const fields = Array.from({ length: 8 }, (_, index) => `<label>Q${index} <input name="q${index}"></label>`);
+			const { form } = dialog(`<form>${fields.join("")}</form>`, {
+				tui: { terminal: { rows: 14 }, requestRender: () => {} },
+			});
+			const height = plain(form).length;
+			for (let field = 0; field < 8; field++) {
+				const rows = plain(form);
+				expect(rows).toHaveLength(height);
+				expect(rows.some(row => row.includes(`❯ Q${field}`))).toBe(true);
+				// The scrollbar's thumb shows there is more than the body holds.
+				expect(rows.some(row => row.includes("█"))).toBe(true);
+				form.handleInput(TAB);
+			}
+			expect(plain(form).some(row => row.includes("❯ Submit"))).toBe(true);
+			form.handleInput("\x1b[Z"); // Shift+Tab: back to Q7
+			form.handleInput("x");
+			expect(plain(form).some(row => row.includes("│ x"))).toBe(true);
+			expect(form.debugState().scroll).toBeGreaterThan(0);
+		});
+
+		it("rows: focus on Submit folds every question; Submit with a bad answer opens it with its error", () => {
+			const { form, onSubmit } = dialog(DB_FORM);
+			for (const key of [TAB, TAB, TAB]) form.handleInput(key); // Workers
+			form.handleInput("9"); // 94, over the max of 8
+			form.handleInput(TAB);
+			form.handleInput(TAB); // Submit
+			let rows = plain(form);
+			expect(rows.some(row => row.includes("❯ Submit"))).toBe(true);
+			expect(rowAfter(rows, "✓ Which store should ledger use?")).toContain("✓ SQLite");
+			expect(rowAfter(rows, "○ Workers")).toContain("94");
+			expect(rows.some(row => row.includes("○ Postgres") || row.includes("☐ Docker"))).toBe(false);
+			form.handleInput(ENTER);
+			expect(onSubmit).not.toHaveBeenCalled();
+			expect(form.debugState().focus).toBe("workers");
+			rows = plain(form);
+			expect(rows.some(row => row.includes("│ 94"))).toBe(true);
+			expect(rows.some(row => row.includes("Must be at most 8"))).toBe(true);
+			expect(rows.some(row => row.includes("Submit  1 to fix"))).toBe(true);
+			expect(rowAfter(rows, "✓ Which store should ledger use?")).toContain("✓ SQLite");
+		});
+
+		it("rows: the skip notice is the panel's last line, the panel keeping its height", () => {
+			let notice: string | undefined = undefined;
+			const { form } = dialog(DB_FORM, { skipNotice: () => notice });
+			const before = plain(form);
+			expect(before.join("\n")).not.toContain("⚠");
+			notice = "Sending your message skips these questions";
+			const rows = plain(form);
+			expect(rows).toHaveLength(before.length);
+			expect(rows.at(-2)).toContain("⚠ Sending your message skips these questions");
+		});
+
+		it("natively: stacks every question; the focused one opens, the rest fold to their answer", () => {
 			const { form } = dialog(DB_FORM);
-			const activeTab = () => {
-				const root = form.describe(CX);
-				const path = findPath(root, node => node.k === "tabs")!;
-				let tabs: NativeNode = root;
-				for (const key of path.split("/")) tabs = (tabs.c ?? []).filter(isNode).find(child => child.key === key)!;
-				return tabs.p && "active" in tabs.p ? tabs.p.active : undefined;
-			};
+			const root = form.describe(CX);
+			expect(root.p).toMatchObject({ role: "omp.ask.card" });
+			expect(allNodes(root).some(node => node.k === "tabs")).toBe(false);
+			expect(labelsOf(byRole(root, "omp.ask.card.progress"))).toEqual(["4 of 5 answered"]);
+			// Database holds focus: its radios are rows. Extras folds field by field.
+			expect(findPath(root, node => node.k === "list" && node.key === "f0")).toBeDefined();
+			expect(findPath(root, node => node.k === "list" && node.key === "f1")).toBeUndefined();
+			const folds = byRole(root, "omp.ask.fold");
+			expect(folds.map(fold => labelsOf(byRole(fold, "omp.ask.fold.question"))[0])).toEqual([
+				"Extras",
+				"Region",
+				"Workers",
+				"Notes",
+			]);
+			// A choice keeps its options in view, the chosen one marked; a text answer shows its value; an empty
+			// one its placeholder.
+			expect(labelsOf(byRole(folds[0]!, "omp.ask.pill"))).toEqual(["✓ CI", "Docker"]);
+			expect(labelsOf(byRole(folds[1]!, "omp.ask.pill"))).toEqual(["✓ US", "EU", "AP"]);
+			expect(labelsOf(byRole(folds[2]!, "omp.ask.fold.answer"))).toEqual(["4"]);
+			expect(labelsOf(byRole(folds[3]!, "omp.ask.fold.well"))).toEqual(["anything else"]);
+			expect(byRole(root, "omp.ask.skip")).toEqual([]);
+		});
+
+		it("natively: an unanswered fold shows its first four options, cut to twenty cells, then +N", () => {
+			const radios = [
+				"Behind a feature flag for a week",
+				"Default on",
+				"Next minor",
+				"After a soak",
+				"Never",
+				"Ask me",
+			]
+				.map((label, index) => `<label><input type="radio" name="when" value="v${index}"> ${label}</label>`)
+				.join("");
+			const { form } = dialog(`<form><label>Owner <input name="owner"></label><p>Rollout?</p>${radios}</form>`);
+			const [fold] = byRole(form.describe(CX), "omp.ask.fold");
+			const pills = byRole(fold!, "omp.ask.pill");
+			expect(labelsOf(pills)).toEqual(["Behind a feature fl…", "Default on", "Next minor", "After a soak"]);
+			expect(pills[0]!.p).toMatchObject({ title: "Behind a feature flag for a week" });
+			expect(labelsOf(byRole(fold!, "omp.ask.pill.more"))).toEqual(["+2"]);
+		});
+
+		it("natively: a pill on a folded question picks it without moving focus", () => {
+			const { form } = dialog(DB_FORM);
+			const pick = (act: string) => form.handleNativeEvent({ type: "action", key: "x", act, mods: [] });
+			pick("open:2"); // Region
+			pick("pick:0:1"); // Postgres, from the folded Database question
+			pick("pick:1:1"); // Docker joins CI
+			expect(form.data()).toMatchObject({ db: "pg", extras: ["ci", "docker"] });
+			expect(form.debugState().focus).toBe("region");
+			pick("pick:0:9"); // no such option
+			expect(form.data()).toMatchObject({ db: "pg" });
+		});
+
+		it("natively: ↓ past a question's last row opens the next; PgDn past the last folds all for Submit", () => {
+			const { form, onSubmit } = dialog(DB_FORM);
+			const open = () => byRole(form.describe(CX), "omp.ask.open")[0];
+			const first = open()!.reveal;
 			setNativeRendering(true);
 			try {
-				expect(activeTab()).toBe("t0");
 				for (let press = 0; press < 3; press++) form.handleInput(DOWN); // Postgres, Other, then CI
-				expect(activeTab()).toBe("t1");
-				form.handleInput("\x1b[D"); // ←
-				expect(activeTab()).toBe("t0");
-				form.handleInput(RIGHT);
-				form.handleInput(RIGHT);
-				expect(activeTab()).toBe("review");
-				form.handleInput("\x1b[D");
-				expect(activeTab()).toBe("t1");
+				expect(form.debugState().focus).toBe("extras=ci");
+				expect(findPath(form.describe(CX), node => node.k === "list" && node.key === "f1")).toBeDefined();
+				expect(open()!.reveal).not.toEqual(first);
+				form.handleInput("\x1b[6~"); // PgDn
+				expect(open()).toBeUndefined();
+				expect(form.debugState().focus).toBe("submit");
+				form.handleInput("\x1b[5~"); // PgUp
+				expect(form.debugState().focus).toBe("extras=ci");
+				form.handleInput("\x1b[6~");
+				form.handleInput(ENTER);
+				expect(onSubmit).toHaveBeenCalledWith(
+					{ db: "sqlite", extras: ["ci"], region: "us", workers: 4, notes: "" },
+					[],
+				);
 			} finally {
 				setNativeRendering(false);
 			}
 		});
 
-		it("natively: each question after the fieldsets gets its own tab, with the context before it", () => {
+		it("natively: Submit with a bad answer opens that question with its error", () => {
+			const { form, onSubmit } = dialog(DB_FORM);
+			form.handleNativeEvent({ type: "action", key: "x", act: "open:3", mods: [] });
+			form.handleInput("9"); // 94 workers, over the max of 8
+			form.handleNativeEvent({ type: "action", key: "x", act: "open:0", mods: [] });
+			form.handleNativeEvent({ type: "action", key: "actions/submit", act: "submit", mods: [] });
+			expect(onSubmit).not.toHaveBeenCalled();
+			expect(form.debugState().focus).toBe("workers");
+			const root = form.describe(CX);
+			expect(byRole(root, "omp.ask.open").flatMap(node => byRole(node, "omp.ask.error"))).toHaveLength(1);
+		});
+
+		it("natively: each question keeps the context before it, shown only while it is open", () => {
 			const { form } = dialog(`<form>
 				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label><label><input type="radio" name="length" value="long"> Long</label></fieldset>
-				<fieldset><legend>Languages</legend><label><input type="checkbox" name="languages" value="ts"> TypeScript</label><label><input type="checkbox" name="languages" value="py"> Python</label></fieldset>
 				<label>Editor <select name="editor"><option value="vscode">VS Code</option><option value="zed">Zed</option></select></label>
 				<p>How urgent is it?</p>
 				<label>Priority <input type="number" name="priority" value="3"></label>
 			</form>`);
+			const open = (field: number) => {
+				form.handleNativeEvent({ type: "action", key: "x", act: `open:${field}`, mods: [] });
+				return byRole(form.describe(CX), "omp.ask.open").flatMap(textsOrLabels);
+			};
+			expect(open(1)).not.toContain("How urgent is it?");
+			expect(open(2)).toContain("How urgent is it?");
+			expect(textsOrLabels(form.describe(CX))).toContain("Editor");
+		});
+
+		it("natively: a folded question's caption is not drawn again above it", () => {
+			const { form } = dialog(`<form><fieldset><legend>Plan</legend>
+				<p>Which plan?</p><label><input type="radio" name="plan" value="basic" checked> Basic</label><label><input type="radio" name="plan" value="pro"> Pro</label>
+				<p>Which region?</p><label><input type="radio" name="region" value="us" checked> US</label><label><input type="radio" name="region" value="eu"> EU</label>
+			</fieldset></form>`);
+			const texts = textsOrLabels(form.describe(CX));
+			expect(texts.filter(entry => entry === "Which plan?")).toHaveLength(1);
+			expect(texts.filter(entry => entry === "Which region?")).toHaveLength(1);
+		});
+
+		it("natively: the skip notice warns under the questions and dims them", () => {
+			let notice: string | undefined = undefined;
+			const { form } = dialog(DB_FORM, { skipNotice: () => notice });
+			expect(byRole(form.describe(CX), "omp.ask.skip")).toEqual([]);
+			notice = "Sending your message skips these questions";
 			const root = form.describe(CX);
-			const tabs = findPath(root, node => node.k === "tabs")!;
-			let strip: NativeNode = root;
-			for (const key of tabs.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
-			const items = (strip.p && "items" in strip.p ? strip.p.items : undefined) ?? [];
-			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "t2", "t3", "review"]);
-			form.handleNativeEvent({ type: "select", key: tabs, item: "t2" });
-			const editorTab = form.describe(CX);
-			expect(textsOf(editorTab)).toContain("Editor");
-			expect(textsOf(editorTab)).not.toContain("How urgent is it?");
-			// The Priority input's well, clickable while another field has focus.
-			expect(
-				findPath(editorTab, node => !!node.p && "actions" in node.p && node.p.actions?.click === "edit:3"),
-			).toBeUndefined();
-			form.handleNativeEvent({ type: "select", key: tabs, item: "t3" });
-			const priorityTab = textsOf(form.describe(CX));
-			expect(priorityTab).toEqual(expect.arrayContaining(["How urgent is it?", "Priority"]));
-			expect(priorityTab).not.toContain("Editor");
+			expect(labelsOf(byRole(root, "omp.ask.skip"))).toEqual(["⚠ Sending your message skips these questions"]);
+			expect(byRole(root, "omp.ask.card.body")[0]!.p).toMatchObject({ mark: "drop" });
 		});
 
-		it("natively: text between a loose group's options stays on the group's tab", () => {
-			const { form } = dialog(`<form>
-				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label></fieldset>
-				<label><input type="radio" name="plan" value="basic" checked> Basic</label>
-				<p>Premium includes backups</p>
-				<label><input type="radio" name="plan" value="premium"> Premium</label>
-				<label>Notes <input name="notes"></label>
-			</form>`);
-			const tabs = findPath(form.describe(CX), node => node.k === "tabs")!;
-			form.handleNativeEvent({ type: "select", key: tabs, item: "t1" });
-			expect(textsOf(form.describe(CX))).toContain("Premium includes backups");
-			form.handleNativeEvent({ type: "select", key: tabs, item: "t2" });
-			expect(textsOf(form.describe(CX))).toEqual(expect.arrayContaining(["Notes"]));
-			expect(textsOf(form.describe(CX))).not.toContain("Premium includes backups");
-		});
-
-		it("natively: a field between a loose group's options keeps the context before it", () => {
-			const { form } = dialog(`<form>
-				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label></fieldset>
-				<label><input type="radio" name="plan" value="basic" checked> Basic</label>
-				<p>Choose a compliant region</p>
-				<label>Region <select name="region"><option value="us">US</option><option value="eu">EU</option></select></label>
-				<label><input type="radio" name="plan" value="premium"> Premium</label>
-			</form>`);
-			const tabs = findPath(form.describe(CX), node => node.k === "tabs")!;
-			form.handleNativeEvent({ type: "select", key: tabs, item: "t1" });
-			expect(textsOf(form.describe(CX))).not.toContain("Choose a compliant region");
-			form.handleNativeEvent({ type: "select", key: tabs, item: "t2" });
-			expect(textsOf(form.describe(CX))).toEqual(expect.arrayContaining(["Choose a compliant region", "Region"]));
-		});
-
-		it("natively: a loose field with only disabled options shares the next tab, so the focused field stays shown", () => {
-			const { form } = dialog(`<form>
-				<label><input type="checkbox" name="locked" disabled> Locked</label>
-				<label>Name <input name="name"></label>
-				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label></fieldset>
-			</form>`);
-			const root = form.describe(CX);
-			const path = findPath(root, node => node.k === "tabs")!;
-			let strip: NativeNode = root;
-			for (const key of path.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
-			const items = (strip.p && "items" in strip.p ? strip.p.items : undefined) ?? [];
-			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "review"]);
-			// The shared tab is named after Name, the question the keyboard reaches.
-			const first = items[0];
-			expect(first && "label" in first && typeof first.label !== "string" ? first.label[0]?.t : "").toBe("Name");
-			// Focus opens on Name, the first control the keyboard reaches; the shown tab holds it.
-			expect(textsOf(root)).toContain("Name");
-		});
-
-		it("natively: a fieldset without a legend stays one tab", () => {
-			const { form } = dialog(`<form>
-				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label></fieldset>
-				<fieldset><label>Name <input name="name"></label><label>Email <input name="email"></label></fieldset>
-			</form>`);
-			const root = form.describe(CX);
-			const path = findPath(root, node => node.k === "tabs")!;
-			let strip: NativeNode = root;
-			for (const key of path.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
-			const items = (strip.p && "items" in strip.p ? strip.p.items : undefined) ?? [];
-			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "review"]);
-		});
-
-		it("natively: the form sits in the card's shrinking, scrolling list and the action bar stays outside it", () => {
-			const options = Array.from({ length: 40 }, (_, index) => `<option value="${index}">Option ${index}</option>`);
-			const { form } = dialog(
-				`<form><p>Context</p><select name="pick" multiple>${options.join("")}</select><textarea name="notes"></textarea></form>`,
-			);
-			const root = form.describe(CX);
-			const children = (root.c ?? []).filter(isNode);
-			expect(children.some(child => child.k === "tabs" || child.key === "head")).toBe(false);
-			// Tern's stylesheet lets an `omp.ask.options` list shrink and scroll inside the 60vh card;
-			// a capped `col` would only clip.
-			const scroller = children.find(child => child.k === "list" && child.p?.role === "omp.ask.options");
-			expect((scroller?.c ?? []).filter(isNode).map(child => child.p?.role)).toEqual(["omp.ask.form"]);
-			expect(children.at(-1)?.p).toMatchObject({ role: "omp.actions" });
-		});
-
-		it("hides to one row and back, by key in rows and by Hide/Show natively; answers survive", () => {
-			const { form, onCancel } = dialog(DB_FORM);
+		it("hides to one row and back by key in rows; natively the key leaves the card alone", () => {
+			const { form } = dialog(DB_FORM);
 			form.handleInput("\x1bh"); // Alt+H
-			expect(form.render(100)).toHaveLength(1);
+			expect(plain(form)).toEqual([expect.stringContaining("⎋ composer")]);
 			form.handleInput(DOWN); // ignored while hidden
 			form.handleInput(ENTER); // shows it again
 			expect(form.render(100).length).toBeGreaterThan(1);
 			expect(form.data()).toMatchObject({ db: "sqlite" });
-			form.handleNativeEvent({ type: "action", key: "actions/hide", act: "hide", mods: [] });
-			expect(form.describe(CX).p).toMatchObject({ role: "omp.editor.ask.hidden" });
-			form.handleNativeEvent({ type: "action", key: "actions/show", act: "show", mods: [] });
-			expect(form.describe(CX).p).toMatchObject({ role: "omp.editor.ask" });
-			form.handleInput(ESC);
-			expect(onCancel).toHaveBeenCalled();
+			setNativeRendering(true);
+			try {
+				form.handleInput("\x1bh");
+				expect(form.describe(CX).p).toMatchObject({ role: "omp.ask.card" });
+				form.handleInput(DOWN);
+				expect(form.debugState().focus).toBe("db=pg");
+			} finally {
+				setNativeRendering(false);
+			}
 		});
 
-		it("natively: docks in the composer's place, and only the focused text field is a live editor", async () => {
+		it("natively: sits in the transcript, and only the focused text field is a live editor", async () => {
 			const form = new HtmlFormDialog(
 				parseHtmlForm(
 					`${DB_FORM.replace("</form>", "")}<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table><pre>x = 1</pre><ul><li>one</li></ul></form>`,
@@ -1048,7 +1429,7 @@ describe("html form", () => {
 			const provider: TerminalFrameProvider & NativeSurfaceProvider = {
 				renderFrame: () => ({ viewport: [] }),
 				acknowledgeHistory: () => {},
-				describeSurface: () => ({ main: [], dock: [form] }),
+				describeSurface: () => ({ main: [form], dock: [] }),
 			};
 			const harness = await TspHarness.start(tui => {
 				tui.setFrameProvider(provider);
@@ -1056,15 +1437,11 @@ describe("html form", () => {
 			});
 			try {
 				expect(harness.errors).toEqual([]);
-				const root = harness.region("dock")!.c?.find(node => node.p?.role === "omp.editor.ask");
-				expect(root).toBeDefined();
-				// The tab's scroller and the Database radios inside it.
-				expect(harness.findAll(node => node.k === "list" && node.p?.role === "omp.ask.options")).toHaveLength(2);
+				expect(harness.findAll(node => node.p?.role === "omp.ask.card")).toHaveLength(1);
 				// Focus is on a radio: no editor node, so the terminal keeps sending keys to the form.
 				expect(harness.findAll(node => node.k === "input" || node.k === "editor")).toEqual([]);
-				expect(harness.findAll(node => node.p?.role === "omp.ask.well")).toEqual([]);
-				// Clicking the workers well (field 3) focuses it: its tab opens and it becomes the one live input.
-				form.handleNativeEvent({ type: "action", key: "x", act: "edit:3", mods: [] });
+				// Opening Workers (field 3) makes it the one live input.
+				form.handleNativeEvent({ type: "action", key: "x", act: "open:3", mods: [] });
 				await harness.render();
 				const inputs = harness.findAll(node => node.k === "input");
 				expect(inputs.map(node => (node.p && "text" in node.p ? node.p.text : undefined))).toEqual(["4"]);
@@ -1093,35 +1470,21 @@ describe("html form", () => {
 			expect(form.data()).toMatchObject({ db: "Fly Postgres HA" });
 		});
 
-		it("natively: clicking Other hands the keys over even while a composer draft owns typing", () => {
-			const typed: string[] = [];
-			const { form } = dialog(DB_FORM, {
-				inputGuard: {
-					isBlocked: () => true,
-					handleInput: (data: string) => typed.push(data),
-					hint: "typing edits your prompt",
-				},
-			});
-			const radios = findPath(form.describe(CX), node => node.k === "list" && node.key === "f0")!;
-			form.handleNativeEvent({ type: "select", key: radios, item: "other" });
-			for (const key of ["F", "l", "y"]) form.handleInput(key);
-			expect(form.data()).toMatchObject({ db: "Fly" });
-			expect(typed).toEqual([]);
-		});
-
-		it("natively: clicking a text well hands the keys over even while a composer draft owns typing", () => {
-			const typed: string[] = [];
-			const { form } = dialog(DB_FORM, {
-				inputGuard: {
-					isBlocked: () => true,
-					handleInput: (data: string) => typed.push(data),
-					hint: "typing edits your prompt",
-				},
-			});
-			form.handleNativeEvent({ type: "action", key: "x", act: "edit:3", mods: [] });
-			form.handleInput("5");
-			expect(form.data()).toMatchObject({ workers: 54 });
-			expect(typed).toEqual([]);
+		it("Tab on Submit hands the keys to the composer, in rows as natively", () => {
+			const releaseKeys = vi.fn();
+			const { form } = dialog(DB_FORM, { releaseKeys });
+			form.handleInput("\x1b[6~"); // PgDn: Extras
+			form.handleInput("\x1b[6~"); // Submit
+			form.handleInput(TAB);
+			expect(releaseKeys).toHaveBeenCalledTimes(1);
+			expect(form.debugState().focus).toBe("submit");
+			setNativeRendering(true);
+			try {
+				form.handleInput(TAB);
+				expect(releaseKeys).toHaveBeenCalledTimes(2);
+			} finally {
+				setNativeRendering(false);
+			}
 		});
 
 		it("natively: keys act immediately even though rows were never rendered", () => {
