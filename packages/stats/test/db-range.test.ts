@@ -60,6 +60,22 @@ describe("getDashboardStats time range", () => {
 		expect(allStats.overall.totalRequests).toBe(2);
 	});
 
+	it("gives 2d and 3d their own windows rather than the 24h fallback", async () => {
+		await initDb();
+
+		const hour = 60 * 60 * 1000;
+		const now = Date.now();
+		insertMessageStats([
+			makeMessage(now, "now"),
+			makeMessage(now - 36 * hour, "36h-ago"),
+			makeMessage(now - 60 * hour, "60h-ago"),
+		]);
+
+		expect((await getDashboardStats("24h")).overall.totalRequests).toBe(1);
+		expect((await getDashboardStats("2d")).overall.totalRequests).toBe(2);
+		expect((await getDashboardStats("3d")).overall.totalRequests).toBe(3);
+	});
+
 	it("falls back to 24h for unknown range", async () => {
 		await initDb();
 

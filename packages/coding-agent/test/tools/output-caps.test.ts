@@ -103,7 +103,7 @@ describe("enforceInlineByteCap", () => {
 		});
 		// saveArtifact receives the full original text, not the elided version.
 		expect(saved).toBe(text);
-		expect(result.endsWith("[raw output: artifact://17]")).toBe(true);
+		expect(result.endsWith("[raw output: local://17.log]")).toBe(true);
 		expect(result).toMatch(MARKER_PATTERN);
 	});
 
@@ -113,7 +113,7 @@ describe("enforceInlineByteCap", () => {
 			maxBytes: 4096,
 			saveArtifact: () => undefined,
 		});
-		expect(result).not.toContain("[raw output: artifact://");
+		expect(result).not.toContain("[raw output: local://");
 		expect(result).toMatch(MARKER_PATTERN);
 	});
 

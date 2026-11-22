@@ -22,6 +22,7 @@ import type {
 	DesktopDisplay,
 	DesktopDragResult,
 	DesktopFocusReturn,
+	DesktopKeyboardReturn,
 	DesktopPoint,
 	DesktopScreenState,
 	DesktopSessionOptions,
@@ -35,6 +36,8 @@ import { expandTilde } from "@oh-my-pi/pi-utils/path";
 import { truncate } from "@oh-my-pi/pi-utils/format";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
+import * as prompt from "@oh-my-pi/pi-utils/prompt";
+import backgroundMoveNote from "../../prompts/tools/computer-background-move.md" with { type: "text" };
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
 import { cloneSafe, RunOutput } from "../browser/run-output";
 import {
@@ -54,6 +57,8 @@ import {
 	type ComputerWorkerInbound,
 	type ComputerWorkerTransport,
 	type ControlVerdict,
+	COVERED_CAPTURE_NOTICE,
+	COVERED_TREE_NOTICE,
 	ESCAPE_AFTER_CALL_MESSAGE,
 	ESCAPE_STOPPED_MESSAGE,
 	type RunErrorPayload,
@@ -113,7 +118,7 @@ export interface NativeDesktopSession {
 	typeText(target: string, text: string, opts?: PointerOptions | null): TypeCall;
 	keyChord(target: string, keys: string[], opts?: PointerOptions | null): InputCall;
 	raiseWindow(windowId: string): Promise<void>;
-	axSnapshot(target: string, opts?: AxSnapshotOptions | null): Promise<{ text: string }>;
+	axSnapshot(target: string, opts?: AxSnapshotOptions | null): Promise<{ text: string; covered?: boolean }>;
 	axQuery(target: string, query: AxQuery): Promise<AxNode[]>;
 	axElementAt(target: string, x: number, y: number): Promise<AxNode | null | undefined>;
 	axFocused(): Promise<AxNode | null | undefined>;
@@ -151,7 +156,7 @@ type InputOptions = { takeover?: boolean };
 type ScreenshotOptions = { silent?: boolean };
 type ScreenshotResult = Pick<
 	ComputerScreenshot,
-	"path" | "width" | "height" | "coordinateWidth" | "coordinateHeight" | "region" | "screenLocked"
+	"path" | "width" | "height" | "coordinateWidth" | "coordinateHeight" | "region" | "screenLocked" | "covered"
 >;
 type MenuOptions = { menu?: string[] };
 type ClickOptions = InputOptions & MenuOptions & { button?: string; count?: number; modifiers?: string[] };
@@ -222,6 +227,8 @@ interface ComputerRunContext {
 	readOnly: boolean;
 	snapshot: ComputerSessionSnapshot;
 	output: RunOutput;
+	/** Whether this run's output holds the background-move note, spent for the session only if the run succeeds. */
+	backgroundMoveNote: boolean;
 	confirmControl(reason: string): Promise<ControlVerdict>;
 	screenshots: ComputerScreenshot[];
 }
@@ -337,6 +344,33 @@ function validateString(value: unknown, call: string, options?: { nonEmpty?: boo
 	if (typeof value === "string" && (!options?.nonEmpty || value.trim())) return;
 	throw new ToolError(
 		`${call} requires ${options?.nonEmpty ? "a non-empty string" : "a string"}, got ${describeArgument(value)}`,
+	);
+}
+
+/**
+ * A value control (a slider) reads its value as a number, so a finite number is written as its decimal text.
+ * A whole number past 2^53 has already lost digits on its way here (a Python int crosses the eval bridge as
+ * a JavaScript number), and a number that prints with an exponent is not text a number control takes: both
+ * are refused before anything is sent.
+ */
+function valueText(value: unknown): string {
+	if (typeof value === "string") return value;
+	if (typeof value === "number" && Number.isFinite(value)) {
+		const text = String(value);
+		if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
+			throw new ToolError(
+				`setValue(value) got ${text}, a whole number past 2^53 that a number argument cannot hold exactly; pass it as text in digits, such as "9007199254740993"`,
+			);
+		}
+		if (text.includes("e")) {
+			throw new ToolError(
+				`setValue(value) got ${text}, a number that prints with an exponent; pass it as text in digits, such as "0.0000001"`,
+			);
+		}
+		return text;
+	}
+	throw new ToolError(
+		`setValue(value) requires a string or a finite number, got ${typeof value === "number" ? String(value) : describeArgument(value)}`,
 	);
 }
 
@@ -481,10 +515,26 @@ async function entryExists(local: string): Promise<boolean> {
 
 const MENU_ROUTE =
 	"Use the window's menu bar with win.menu.select(...), or an element action such as press(), instead.";
+const MENU_TREE_LIMIT = 150;
+const MENU_TREE_SKIPPABLE = ["AxFailed:", BACKGROUND_UNAVAILABLE, "InvalidTarget:"];
 /** AX roles of the controls that open a menu when pressed, as native's `open_menu` reads them. */
 const MENU_CONTROL_ROLES = ["AXPopUpButton", "AXMenuButton"];
 const MENU_CONTROL_ROUTE =
 	"Its options are chosen only through that menu: use the window's menu bar with win.menu.select(...) if it has the same command, or tell the user the step needs their screen.";
+
+/**
+ * The note after a macOS background `move`, printed for the first one in a
+ * desktop session: eval sends each window call as its own run, so a per-run
+ * note would repeat once per move. A failed run delivers only its error, so
+ * the session counts as told only once a successful run carries the note.
+ * Measured in a macOS 26 guest on an `AppKit` tracking area and a Chrome
+ * `:hover` element: a background move gave neither any hover; a takeover
+ * move's hover ended when native warped the pointer back, before the call
+ * returned; a takeover click on the hidden control reached it every time.
+ * Under `refuse` both takeover routes are refused, so that ending names
+ * neither.
+ */
+const backgroundMoveNoted = new WeakSet<NativeDesktopSession>();
 
 /**
  * Under `refuse`, a macOS call that opens a menu is refused before anything is
@@ -582,8 +632,8 @@ async function appNames(session: NativeDesktopSession, signal: AbortSignal): Pro
 }
 
 /**
- * Says where focus ended after a fallback takeover, from native's
- * WindowServer reading taken when the takeover finished.
+ * Says where focus ended after a fallback takeover, from native's window
+ * server reading taken when the takeover finished (macOS and Windows).
  */
 async function focusReport(
 	session: NativeDesktopSession,
@@ -593,12 +643,33 @@ async function focusReport(
 ): Promise<string> {
 	if (!report || report.frontPid == null) return "focus was not confirmed afterwards";
 	const { frontPid, previousPid, handedBack } = report;
+	// macOS says what it did with the user's keyboard: nothing outside an app
+	// can see which of its windows is key, so it names what was sent, never a
+	// verified key window. Keep natives type-only so the worker's readiness
+	// handshake does not load the addon.
+	const keyboard: `${DesktopKeyboardReturn}` | undefined = report.keyboard;
 	const names = await appNames(session, signal);
 	const name = (pid: number) => names.get(pid) ?? `pid ${pid}`;
 	const front = name(frontPid);
 	if (previousPid == null) return `focus is on ${front}`;
-	if (frontPid === previousPid) return handedBack ? `focus returned to ${front}` : `focus is on ${front}`;
+	if (keyboard === "leftAsChosen") return `focus is on ${front}, left as the user chose`;
 	const user = name(previousPid);
+	if (frontPid === previousPid) {
+		switch (keyboard) {
+			case "handedBack":
+				return `handed the keyboard back to ${front}'s window`;
+			case "notSent":
+				return handedBack
+					? `handed the front back to ${front} but not its window's keyboard: macOS refused the hand-back or the user's last input was still being read`
+					: `focus is on ${front}; macOS refused the hand-back or the user's last input was still being read, so nothing was sent to its window`;
+			case "frontOnly":
+				return `handed the front back to ${front}, which shows no window`;
+			case "kept":
+				return `focus is on ${front}`;
+		}
+		return handedBack ? `focus returned to ${front}` : `focus is on ${front}`;
+	}
+	if (keyboard === "handedBack") return `handed the keyboard back to ${user}'s window, but ${front} is now front`;
 	if (handedBack) return `focus was handed back to ${user}, but ${front} is now front`;
 	if (frontPid === target) return `focus stayed on ${front}; it did not return to ${user}`;
 	return `focus is on ${front}; it did not return to ${user}`;
@@ -727,6 +798,12 @@ async function captureScreenshot(
 	return await emitScreenshot(context, frame, options);
 }
 
+/** A tree read's text, closed by the covered note when its window appeared fully covered around the read. */
+function treeText(snapshot: { text: string; covered?: boolean }): string {
+	if (!snapshot.covered) return snapshot.text;
+	return snapshot.text ? `${snapshot.text}\n${COVERED_TREE_NOTICE}` : COVERED_TREE_NOTICE;
+}
+
 async function emitScreenshot(
 	context: ComputerRunContext,
 	frame: DesktopCapture,
@@ -744,6 +821,7 @@ async function emitScreenshot(
 		...(frame.region ? { region: frame.region } : {}),
 	};
 	if (frame.screenLocked) result.screenLocked = true;
+	if (frame.covered) result.covered = true;
 	const scaled = frame.width !== frame.sourceWidth || frame.height !== frame.sourceHeight;
 	context.screenshots.push({
 		...result,
@@ -757,10 +835,11 @@ async function emitScreenshot(
 		const captured = frame.region
 			? `zoom ${frame.target} ${dimensions}; region=${JSON.stringify(frame.region)}; ${coordinates}; use the base full screenshot coordinates for input, not zoom pixels → ${destination}`
 			: `screenshot ${frame.target} ${dimensions}; ${coordinates} → ${destination}`;
-		context.output.push({
-			type: "text",
-			text: frame.screenLocked ? `${captured}\n${screenLockedCaptureNotice()}` : captured,
-		});
+		const notes = [
+			...(frame.screenLocked ? [screenLockedCaptureNotice()] : []),
+			...(frame.covered ? [COVERED_CAPTURE_NOTICE] : []),
+		];
+		context.output.push({ type: "text", text: [captured, ...notes].join("\n") });
 		context.output.push({
 			type: "image",
 			data: Buffer.from(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength).toString("base64"),
@@ -801,14 +880,14 @@ class El {
 		return (await nativeCall(signal, () => this.#session.axNode(this.ref))).value;
 	}
 
-	async setValue(value: string): Promise<void> {
+	async setValue(value: string | number): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "setValue");
-		validateString(value, "setValue(value)");
+		const text = valueText(value);
 		// Native chooses a popup's option by opening its menu and pressing the item.
 		if (this.nativeRole === "AXPopUpButton")
 			refuseControlMenu(this.#session, context, "setValue()", this.nativeRole, `element ${this.ref}`);
-		await nativeCall(context.signal, () => this.#session.axSetValue(this.ref, value));
+		await nativeCall(context.signal, () => this.#session.axSetValue(this.ref, text));
 	}
 
 	async selectText(text: string, options?: AxSelectTextOptions): Promise<AxTextSelection> {
@@ -1046,11 +1125,11 @@ class ElRef implements PromiseLike<El> {
 		return (await this.#resolve()).value();
 	}
 
-	async setValue(value: string): Promise<void> {
+	async setValue(value: string | number): Promise<void> {
 		// Reject a read-only run or a bad argument before the ref lookup reaches the native addon.
 		guardRun(this.#getContext(), "setValue");
-		validateString(value, "setValue(value)");
-		await (await this.#resolve()).setValue(value);
+		const text = valueText(value);
+		await (await this.#resolve()).setValue(text);
 	}
 
 	async selectText(text: string, options?: AxSelectTextOptions): Promise<AxTextSelection> {
@@ -1117,8 +1196,86 @@ class ElRef implements PromiseLike<El> {
 	}
 }
 
-class Win {
+/** Methods whose native target is the exact window id, not the result of a new visible-window search. */
+class WindowAccess {
 	readonly id: string;
+	readonly #session: NativeDesktopSession;
+	readonly #getContext: RunContextAccessor;
+
+	constructor(session: NativeDesktopSession, getContext: RunContextAccessor, id: string) {
+		this.#session = session;
+		this.#getContext = getContext;
+		this.id = id;
+	}
+
+	get menu() {
+		return {
+			items: async (...path: string[] | [path?: string | string[]]): Promise<MenuItem[]> => {
+				const context = this.#getContext();
+				// On macOS the read makes the window key first, so it is not inspection-only.
+				guardRun(context, "menu.items");
+				// An omitted path, or one passed on as `undefined`, lists the top-level menus.
+				const segments =
+					path.length <= 1 && path[0] === undefined
+						? undefined
+						: menuPath("menu.items", path, { allowEmpty: true });
+				const items = await nativeCall(context.signal, () => this.#session.menuItems(this.id, segments));
+				return segments?.length ? await this.#menuTree(items, context.signal) : items;
+			},
+			select: async (...path: [string, ...string[]] | [string[]]): Promise<void> => {
+				const context = this.#getContext();
+				guardRun(context, "menu.select");
+				const segments = menuPath("menu.select", path);
+				await nativeCall(context.signal, () => this.#session.menuSelect(this.id, segments));
+			},
+		};
+	}
+
+	async #menuTree(items: MenuItem[], signal: AbortSignal): Promise<MenuItem[]> {
+		const listed: MenuItem[] = [];
+		let budget = MENU_TREE_LIMIT - items.length;
+		const visit = async (level: MenuItem[]): Promise<void> => {
+			for (const item of level) {
+				listed.push(item);
+				if (!item.hasSubmenu || !item.enabled || budget <= 0) continue;
+				let children: MenuItem[];
+				try {
+					children = await nativeCall(signal, () => this.#session.menuItems(this.id, item.path));
+				} catch (error) {
+					// A refusal or AX timeout stops expansion, but keeps discovered paths available.
+					if (error instanceof ToolError && MENU_TREE_SKIPPABLE.some(code => error.message.startsWith(code))) {
+						budget = 0;
+						continue;
+					}
+					throw error;
+				}
+				if (children.length > budget) continue;
+				budget -= children.length;
+				await visit(children);
+			}
+		};
+		await visit(items);
+		return listed;
+	}
+
+	async ax(options?: AxOptions): Promise<string> {
+		strictOptions(options, axOptionsKeys, "ax");
+		const { signal } = this.#getContext();
+		return treeText(await nativeCall(signal, () => this.#session.axSnapshot(this.id, options)));
+	}
+
+	async find(query: AxQuery): Promise<El[]> {
+		strictOptions(query, axQueryKeys, "find");
+		const { signal } = this.#getContext();
+		return foundElements(
+			(await nativeCall(signal, () => this.#session.axQuery(this.id, query))).map(
+				node => new El(this.#session, this.#getContext, node),
+			),
+		);
+	}
+}
+
+class Win extends WindowAccess {
 	readonly app: string;
 	readonly title: string;
 	readonly pid?: number;
@@ -1128,9 +1285,9 @@ class Win {
 	readonly #getContext: RunContextAccessor;
 
 	constructor(session: NativeDesktopSession, getContext: RunContextAccessor, window: DesktopWindow) {
+		super(session, getContext, window.id);
 		this.#session = session;
 		this.#getContext = getContext;
-		this.id = window.id;
 		this.app = window.app;
 		this.title = window.title;
 		this.pid = window.pid;
@@ -1204,14 +1361,29 @@ class Win {
 		strictOptions(options, inputOptionsKeys, "move");
 		const context = this.#guardInput("move");
 		const native = pointerOptions(options);
+		// A desktop or display move drives the user's own pointer whatever the options, so it is never background.
+		let background = native.takeover !== true && this.id !== "desktop" && !this.id.startsWith("display:");
 		await sendInput(
 			this.#session,
 			context,
 			"move",
 			native.takeover,
-			fallback => this.#session.moveMouse(this.id, x, y, { ...native, ...fallback }),
+			fallback => {
+				if (fallback) background = false;
+				return this.#session.moveMouse(this.id, x, y, { ...native, ...fallback });
+			},
 			this.pid,
 		);
+		if (
+			background &&
+			this.#session.capabilities.backend === "quartz" &&
+			!context.backgroundMoveNote &&
+			!backgroundMoveNoted.has(this.#session)
+		) {
+			context.backgroundMoveNote = true;
+			const refuse = context.snapshot.backgroundFallback === "refuse";
+			context.output.push({ type: "text", text: prompt.render(backgroundMoveNote, { refuse }).trim() });
+		}
 	}
 
 	async drag(points: Array<[number, number]>, options?: DragOptions): Promise<AxTextSelection | undefined> {
@@ -1342,34 +1514,13 @@ class Win {
 			),
 		);
 		const screenshot = await emitScreenshot(context, result.capture, options);
-		if (!options?.silent) context.output.push({ type: "text", text: result.accessibility.text });
+		const ax = treeText(result.accessibility);
+		if (!options?.silent) context.output.push({ type: "text", text: ax });
 		return {
 			...screenshot,
-			ax: result.accessibility.text,
+			ax,
 			nodeCount: result.accessibility.nodeCount,
 			truncated: result.accessibility.truncated,
-		};
-	}
-
-	get menu() {
-		return {
-			items: async (...path: string[] | [path?: string | string[]]): Promise<MenuItem[]> => {
-				const context = this.#getContext();
-				// On macOS the read makes the window key first, so it is not inspection-only.
-				guardRun(context, "menu.items");
-				// An omitted path, or one passed on as `undefined`, lists the top-level menus.
-				const segments =
-					path.length <= 1 && path[0] === undefined
-						? undefined
-						: menuPath("menu.items", path, { allowEmpty: true });
-				return await nativeCall(context.signal, () => this.#session.menuItems(this.id, segments));
-			},
-			select: async (...path: [string, ...string[]] | [string[]]): Promise<void> => {
-				const context = this.#getContext();
-				guardRun(context, "menu.select");
-				const segments = menuPath("menu.select", path);
-				await nativeCall(context.signal, () => this.#session.menuSelect(this.id, segments));
-			},
 		};
 	}
 
@@ -1390,22 +1541,6 @@ class Win {
 			`window ${this.id}`,
 		);
 		await nativeCall(context.signal, () => this.#session.raiseWindow(this.id));
-	}
-
-	async ax(options?: AxOptions): Promise<string> {
-		strictOptions(options, axOptionsKeys, "ax");
-		const { signal } = this.#getContext();
-		return (await nativeCall(signal, () => this.#session.axSnapshot(this.id, options))).text;
-	}
-
-	async find(query: AxQuery): Promise<El[]> {
-		strictOptions(query, axQueryKeys, "find");
-		const { signal } = this.#getContext();
-		return foundElements(
-			(await nativeCall(signal, () => this.#session.axQuery(this.id, query))).map(
-				node => new El(this.#session, this.#getContext, node),
-			),
-		);
 	}
 
 	ref(ref: string): ElRef {
@@ -1496,7 +1631,11 @@ export class ComputerWorkerCore {
 				// addon; normal CLI startup and selector pings never execute desktop code.
 				const createSession =
 					this.#createSession ?? (await import("@oh-my-pi/pi-natives/desktop")).createDesktopSession;
-				const session = await createSession({ display: snapshot.display, escapeStopKey: escape.key });
+				const session = await createSession({
+					display: snapshot.display,
+					escapeStopKey: escape.key,
+					agentId: snapshot.agentId,
+				});
 				const guarded = this.#guard(session);
 				this.#session = session;
 				this.#guarded = guarded;
@@ -1574,6 +1713,7 @@ export class ComputerWorkerCore {
 			readOnly: message.session.readOnly,
 			snapshot: message.session,
 			output,
+			backgroundMoveNote: false,
 			screenshots,
 			confirmControl: reason =>
 				this.#confirmControl(active, reason, deadline - Math.min(CONTROL_ANSWER_RESERVE_MS, message.timeoutMs / 4)),
@@ -1666,6 +1806,7 @@ export class ComputerWorkerCore {
 				id: message.id,
 				ok: false,
 				error: this.#withScreenState(errorPayload(failure.error)),
+				output: { displays: output.finish(), screenshots, returnValue: undefined },
 			});
 			return;
 		}
@@ -1679,9 +1820,11 @@ export class ComputerWorkerCore {
 					id: message.id,
 					ok: false,
 					error: errorPayload(nativeError(error)),
+					output: { displays: output.finish(), screenshots, returnValue: undefined },
 				});
 				return;
 			}
+			if (runContext.backgroundMoveNote && this.#guarded) backgroundMoveNoted.add(this.#guarded);
 			this.#transport.send({
 				type: "result",
 				id: message.id,
@@ -1885,6 +2028,13 @@ export class ComputerWorkerCore {
 			focused: false,
 		});
 		return {
+			// Direct helpers from both preludes already carry the id from a resolved handle.
+			windowAccess: (id: string): WindowAccess => {
+				validateString(id, "window id", { nonEmpty: true });
+				if (id.toLowerCase() === "desktop" || id.startsWith("display:"))
+					throw new ToolError("Expected a window id");
+				return new WindowAccess(session, getContext, id);
+			},
 			capabilities: (): DesktopCapabilities => {
 				const { signal } = getContext();
 				throwIfAborted(signal);

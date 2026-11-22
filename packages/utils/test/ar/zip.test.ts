@@ -5,7 +5,7 @@ import { ArchiveReader } from "../../src/ar/reader";
 import { type ByteSource, memoryByteSource } from "../../src/ar/source";
 import type { ArchiveIndexEntry } from "../../src/ar/types";
 import { encodeZip, readZip, readZipEager, sniffZip } from "../../src/ar/zip";
-import { arFixture as fixture } from "./fixtures";
+import { arFixture as fixture, extractLargestMember } from "./fixtures";
 
 const ENCODER = new TextEncoder();
 const DECODER = new TextDecoder();
@@ -167,14 +167,16 @@ test("drops traversal names and rejects encryption, truncation, unsupported meth
 	await expect(readMember(findEntry(corruptEntries, "plain.txt"))).rejects.toThrow("CRC mismatch");
 });
 
-test("enforces entry, index, member, and path limits before metadata-driven work", async () => {
+test("enforces entry, index, and path limits before metadata-driven work, and member size on extraction", async () => {
 	const bytes = await fixture("zip-basic.zip");
 	for (const limits of [
 		{ ...DEFAULT_ARCHIVE_LIMITS, maxEntries: 1 },
 		{ ...DEFAULT_ARCHIVE_LIMITS, maxIndexSize: 8 },
-		{ ...DEFAULT_ARCHIVE_LIMITS, maxMemberSize: 8 },
 		{ ...DEFAULT_ARCHIVE_LIMITS, maxPathBytes: 4 },
 	]) {
 		await expect(readZip(memoryByteSource(bytes), { limits })).rejects.toBeInstanceOf(ArchiveError);
 	}
+	const memberLimits = { ...DEFAULT_ARCHIVE_LIMITS, maxMemberSize: 8 };
+	const memberIndex = await readZip(memoryByteSource(bytes), { limits: memberLimits });
+	await expect(extractLargestMember("zip", memberIndex, memberLimits)).rejects.toThrow("too large to extract");
 });

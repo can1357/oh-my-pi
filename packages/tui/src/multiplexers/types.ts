@@ -97,6 +97,8 @@ export interface TerminalMultiplexerModule<Id extends string = string> {
 	readonly imagesRequireOverride?: boolean;
 	/** Platforms where the multiplexer breaks OSC 11 passthrough, so host appearance is used instead. */
 	readonly backgroundQueryBrokenOn?: readonly NodeJS.Platform[];
+	/** OSC 11 may arrive after DA1 because the query is forwarded while DA1 is answered locally. */
+	readonly backgroundReplyMayFollowDa1?: boolean;
 	/** Present when OSC 11 replies come from a cache an explicit refresh must update first. */
 	readonly backgroundColorCache?: TerminalMultiplexerBackgroundColorCache;
 	/** Expands REP into identical styled cells, so destructive replays REP-encode their padding. */

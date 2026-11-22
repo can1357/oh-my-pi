@@ -263,6 +263,7 @@ describe("parseCell", () => {
 		expect(parseCell("**4** ✅ (2 attempts)")).toMatchObject({ value: 4, emphasis: true, fit: "note" });
 		expect(parseCell("24–72 h")).toMatchObject({ value: 86_400, upper: 259_200, fit: "range" });
 		expect(parseCell("2,049 → 1,973")).toMatchObject({ value: 2049, to: 1973, toFigure: "1,973" });
+		expect(parseCell("402.7 → 13.3 µs")).toMatchObject({ value: 402.7e-6, to: 13.3e-6, dim: "duration" });
 		expect(parseCell("5/8")).toMatchObject({ value: 5, denominator: 8, dim: "fraction" });
 		expect(parseCell("-33pp")).toMatchObject({ value: -33, dim: "percent", signed: true });
 	});
@@ -274,6 +275,11 @@ describe("parseCell", () => {
 		expect(parseCell("cf89bee60").kind).toBe("id");
 		expect(parseCell("renamed the helper").kind).toBe("text");
 		expect(parseCell("—").kind).toBe("missing");
+	});
+
+	// Regression: `1e400` parsed to Infinity, and the axis looping up to it never ended.
+	it("reads a number past the float range as text", () => {
+		expect(parseCell("1e400 GiB").kind).toBe("text");
 	});
 
 	// Regression: unit lookups read inherited keys, and `3 constructor` threw while rendering.
@@ -657,6 +663,32 @@ describe("renderChartSvg", () => {
 		const svg = renderChartSvg(buildChart(analysis, { ...planChart(analysis)!, shading: "shared" })!);
 		expect(svg.match(/>Sonnet 5\.5</g)).toHaveLength(1);
 		expect(svg.match(/>bash</g)).toHaveLength(2);
+	});
+
+	// Regression: ticks summed a step under the values' float spacing (1e17 + 5 === 1e17) and never reached the top.
+	it("ends the value axis of values past 2^53", () => {
+		const row = "100,000,000,000,000,000 | 100,000,000,000,000,008 | 100,000,000,000,000,016";
+		const analysis = analyze(
+			`| Run | p50 | p95 | p99 |\n|---|---|---|---|\n| a | ${row} |\n| b | ${row} |\n| c | ${row} |`,
+		);
+		const svg = renderChartSvg(buildChart(analysis, planChart(analysis)!)!);
+		expect(svg.match(/>100,000,000B</g)?.length).toBeLessThan(10);
+	});
+
+	// Regression: finite cells overflowed in a ratio, and the factor axis looped up to Infinity.
+	it("draws no chart whose values overflow to Infinity", () => {
+		const analysis = analyze(
+			"| Name | Before | After |\n|---|---|---|\n| a | 1e-300 ms | 1e300 ms |\n| b | 20 ms | 5 ms |\n| c | 30 ms | 3 ms |",
+		);
+		expect(buildChart(analysis, { ...planChart(analysis)!, kind: "change" })).toBeUndefined();
+	});
+
+	// Regression: `p` and 400 nines parsed to Infinity, and scaling it under 100 never ended.
+	it("ranks a quantile header past the float range as the top rung", () => {
+		const analysis = analyze(
+			`| Run | p50 | p95 | p${"9".repeat(400)} |\n|---|---|---|---|\n| a | 10 ms | 20 ms | 30 ms |\n| b | 11 ms | 22 ms | 33 ms |\n| c | 12 ms | 24 ms | 36 ms |`,
+		);
+		expect(planChart(analysis)?.kind).toBe("ladder");
 	});
 
 	it("draws a heatmap's columns of different quantities as bars on their own axes", () => {

@@ -386,7 +386,7 @@ export const cfgModelToolCallLoopGuardExemptTools = register({
 		group: "Thinking",
 		label: "Tool-Call Loop Exempt Tools",
 		description:
-			"Tool names, or xd:// device names of write dispatches (for example mcp__peers_wait), that may repeat consecutively without triggering the cross-turn loop guard",
+			"Tool names, including tools run as commands through bash (for example mcp__peers_wait), that may repeat consecutively without triggering the cross-turn loop guard",
 	},
 });
 
@@ -817,7 +817,7 @@ export const cfgRetryMaxDelayMs = register({
 		group: "Retry & Fallback",
 		label: "Max Retry Delay",
 		description:
-			"Maximum wait between retries, in ms. When the provider asks us to wait longer than this and no credential or model fallback succeeds, the request fails fast instead of sleeping (e.g. 3-hour Anthropic rate-limit windows). 0 disables the ceiling — to let the session auto-resume through provider-stated quota resets.",
+			"Maximum wait between retries, in ms. When the retry would wait longer and no credential or model fallback succeeds, the request fails fast instead of sleeping (e.g. 3-hour Anthropic rate-limit windows). 0 disables the ceiling.",
 	},
 });
 
@@ -830,7 +830,7 @@ export const cfgRetryWaitForUsageReset = register({
 		group: "Retry & Fallback",
 		label: "Wait For Usage Reset",
 		get description() {
-			return `When a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), sleep until the reset instead of failing fast past retry.maxDelayMs. Waits are abortable (${formatKeyHint("escape")}) but also hold subagents, so leave off for unattended runs.`;
+			return `Usage-limit waits within retry.maxDelayMs are already allowed. Enable this to also wait past that cap when the provider reports a reset time, such as a 5-hour or weekly quota window. Waits are abortable (${formatKeyHint("escape")}) but also hold subagents, so leave off for unattended runs.`;
 		},
 	},
 });
@@ -1337,7 +1337,7 @@ export const cfgProvidersCacheWarming = register({
 		group: "Protocol",
 		label: "Cache Warming",
 		description:
-			"Re-send the last request with a one-token output budget shortly before its prompt-cache entry expires",
+			"Refresh the last request's prompt-cache entry shortly before it expires (Anthropic max_tokens 0 pre-warm, else a one-token replay)",
 		options: [
 			{ value: "off", label: "Off", description: "Disable cache warming" },
 			{
@@ -1351,6 +1351,74 @@ export const cfgProvidersCacheWarming = register({
 				description:
 					"Also refresh 5-minute entries between runs while the expected savings stay above the cost floor",
 			},
+		],
+	},
+});
+
+export const cfgProvidersCacheWarmingStrategy = register({
+	id: "providers.cacheWarmingStrategy",
+	type: "enum",
+	values: ["auto", "keepalive", "compact"] as const,
+	default: "auto",
+	ui: {
+		tab: "providers",
+		group: "Protocol",
+		label: "Cache Warming Strategy",
+		description:
+			"How a long tool call is bridged once refreshing stops paying: compact the history before the cache expires, or let it expire",
+		options: [
+			{
+				value: "auto",
+				label: "Auto",
+				description:
+					"Refresh while the refresh spend stays within the cheaper buy-out, then compact large prompts or let the entry expire",
+			},
+			{ value: "keepalive", label: "Keep Alive", description: "Never compact; refresh until it stops paying" },
+			{
+				value: "compact",
+				label: "Compact",
+				description: "Compact at the first decision once the prompt reaches the bridge-compaction threshold",
+			},
+		],
+	},
+});
+
+export const cfgProvidersCacheWarmingCompactPercent = register({
+	id: "providers.cacheWarmingCompactPercent",
+	type: "number",
+	default: 60,
+	ui: {
+		tab: "providers",
+		group: "Protocol",
+		label: "Cache Bridge Compaction Percent",
+		description:
+			"Share of the context window a prompt must reach before a long tool call may be bridged with compaction; the lower of this and the token limit applies",
+		options: [
+			{ value: "40", label: "40%" },
+			{ value: "50", label: "50%" },
+			{ value: "60", label: "60%" },
+			{ value: "70", label: "70%" },
+			{ value: "80", label: "80%" },
+		],
+	},
+});
+
+export const cfgProvidersCacheWarmingCompactTokens = register({
+	id: "providers.cacheWarmingCompactTokens",
+	type: "number",
+	default: 150_000,
+	ui: {
+		tab: "providers",
+		group: "Protocol",
+		label: "Cache Bridge Compaction Tokens",
+		description:
+			"Prompt tokens from which a long tool call may be bridged with compaction; the lower of this and the window percent applies",
+		options: [
+			{ value: "50000", label: "50K tokens" },
+			{ value: "100000", label: "100K tokens" },
+			{ value: "150000", label: "150K tokens" },
+			{ value: "200000", label: "200K tokens" },
+			{ value: "300000", label: "300K tokens" },
 		],
 	},
 });
@@ -1443,6 +1511,24 @@ export const cfgProvidersFetch = register({
 			{ value: "firecrawl", label: "Firecrawl", description: "Requires FIRECRAWL_API_KEY" },
 			{ value: "jina", label: "Jina", description: "Uses r.jina.ai reader (JINA_API_KEY optional)" },
 		],
+	},
+});
+
+/**
+ * Whether `web_search` and the URL reader may use third-party services the user
+ * holds no credential for. Off, they stick to configured services; a per-request
+ * `omp q --model` selector still runs.
+ */
+export const cfgProvidersWebKeyless = register({
+	id: "providers.webKeyless",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Keyless Web Services",
+		description:
+			"Let web search and URL reading use third-party services without your credential: keyless Parallel, Exa, Firecrawl, Keenable, and Perplexity, the Jina reader, and scraped engines (Startpage, DuckDuckGo, Ecosia, Google, Mojeek, Hacker News). Off, only services you configured run.",
 	},
 });
 

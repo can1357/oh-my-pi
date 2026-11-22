@@ -71,12 +71,36 @@ function getNativesDir() {
 	return path.join(os.homedir(), ".omp", "natives");
 }
 
-function resolveLeafPackageDir(platformTag) {
+/**
+ * Bun's install cache has no `node_modules` around a release copy, so
+ * `require.resolve` cannot reach the platform leaf beside it: a version-pinned
+ * sibling (`pi-natives-<tag>@<version>@@@N`) of the core package. Scan the core
+ * package's scope directory for the leaf that holds the addon, matching the
+ * running version (issue #8901).
+ */
+function findScopedLeafPackageDir(platformTag, addonFilenames) {
+	const scopeDir = path.join(import.meta.dir, "..", "..");
+	let names;
+	try {
+		names = fs.readdirSync(scopeDir);
+	} catch {
+		return null;
+	}
+	const leafName = `pi-natives-${platformTag}`;
+	const leaves = names.filter(name => name === leafName || name.startsWith(`${leafName}@${packageJson.version}@`));
+	for (const name of leaves) {
+		const dir = path.join(scopeDir, name);
+		if (addonFilenames.some(filename => fs.existsSync(path.join(dir, filename)))) return dir;
+	}
+	return null;
+}
+
+function resolveLeafPackageDir(platformTag, addonFilenames) {
 	try {
 		const require_ = createRequire(import.meta.url);
 		return path.dirname(require_.resolve(`@oh-my-pi/pi-natives-${platformTag}/package.json`));
 	} catch {
-		return null;
+		return findScopedLeafPackageDir(platformTag, addonFilenames);
 	}
 }
 
@@ -773,7 +797,7 @@ export function missingNativeExportMessage(symbolName, addon = loadedAddon) {
 export function staleWorkspaceAddonNotice(addon) {
 	const loaded = addon.version ? `@oh-my-pi/pi-natives@${addon.version}` : "an addon without a release stamp";
 	return (
-		`[pi-natives] ${addon.path} is ${loaded}, but this checkout is @${addon.packageVersion}. ` +
+		`[omp-natives] ${addon.path} is ${loaded}, but this checkout is @${addon.packageVersion}. ` +
 		"Symbols this checkout expects may be missing and shared ones may behave differently; " +
 		"run `bun run build:native` before trusting results from this tree.\n"
 	);
@@ -941,25 +965,28 @@ export function initLoaderContext(overrides = {}) {
 			importMetaUrl: import.meta.url,
 		});
 	const normalizedNativeDir = platform === "win32" ? nativeDir.toLowerCase() : nativeDir;
+	// A published core manifest declares its platform leaf in `optionalDependencies`; a
+	// checkout does not. A release copied into bun's install cache has no `node_modules`
+	// segment, so the path alone cannot tell it from a checkout (issue #8901).
 	const isWorkspaceLoad =
 		!isCompiledBinary &&
+		!packageJson.optionalDependencies?.[`@oh-my-pi/pi-natives-${platformTag}`] &&
 		!normalizedNativeDir.includes("\\node_modules\\") &&
 		!normalizedNativeDir.includes("/node_modules/");
+	const selectedVariant = resolveCpuVariant(getVariantOverride());
+	const addonFilenames = getAddonFilenames({ tag: platformTag, arch: process.arch, variant: selectedVariant });
+	const addonLabel = selectedVariant ? `${platformTag} (${selectedVariant})` : platformTag;
 	const leafPackageDir =
 		isCompiledBinary || isWorkspaceLoad
 			? null
 			: overrides.leafPackageDir === undefined
-				? resolveLeafPackageDir(platformTag)
+				? resolveLeafPackageDir(platformTag, addonFilenames)
 				: overrides.leafPackageDir;
 	const stageFromNodeModules = shouldStageNodeModulesAddon({
 		platform,
 		isCompiledBinary,
 		nativeDir: normalizedNativeDir,
 	});
-
-	const selectedVariant = resolveCpuVariant(getVariantOverride());
-	const addonFilenames = getAddonFilenames({ tag: platformTag, arch: process.arch, variant: selectedVariant });
-	const addonLabel = selectedVariant ? `${platformTag} (${selectedVariant})` : platformTag;
 
 	const candidates = resolveLoaderCandidates({
 		addonFilenames,
@@ -996,10 +1023,40 @@ export function initLoaderContext(overrides = {}) {
 	};
 }
 
+/**
+ * Exports of each `.node` file this copy of the loader opened, by the path it
+ * was opened at.
+ * @type {Map<string, Record<string, unknown>>}
+ */
+const openedAddons = new Map();
+
+/**
+ * Open one `.node` addon and return its exports, as `require` does for a
+ * `.node` file. `process.dlopen` rather than `require`: Bun's `require` cannot
+ * load any module from a path that contains `?` (it reads the path cut at the
+ * `?`), and the addon's directory follows `HOME`, `PI_NATIVES_DIR` or the
+ * install location, so it can hold one. `dlopen` takes the path as it is.
+ *
+ * Like `require`, it opens a file once and then returns the same exports:
+ * `loadNative()` runs again on every call of the lazy entrypoints
+ * (`clipboard.js`, `desktop.js`, …), and a second `dlopen` of the file runs the
+ * addon's init again, which makes new classes that `instanceof` against the
+ * first ones fails.
+ * @param {string} candidate
+ * @returns {Record<string, unknown>}
+ */
+export function openNativeAddon(candidate) {
+	const opened = openedAddons.get(candidate);
+	if (opened) return opened;
+	const addonModule = { exports: {} };
+	process.dlopen(addonModule, candidate);
+	openedAddons.set(candidate, addonModule.exports);
+	return addonModule.exports;
+}
+
 export function loadNative() {
 	startupMarker("native:loadNative:start");
 	const ctx = initLoaderContext();
-	const require_ = createRequire(import.meta.url);
 
 	const errors = [];
 	const embeddedCandidate = maybeExtractEmbeddedAddon(ctx, errors);
@@ -1018,7 +1075,7 @@ export function loadNative() {
 		}
 		try {
 			startupMarker(`native:require:${path.basename(candidate)}`);
-			const bindings = require_(candidate);
+			const bindings = openNativeAddon(candidate);
 			validateLoadedBindings(ctx, bindings, candidate);
 			installNativeTokioRuntime(bindings);
 			configureGrammarDir(bindings, ctx.nativesDir);

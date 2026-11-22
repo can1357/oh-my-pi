@@ -20,7 +20,7 @@
    - `@oh-my-pi/pi-natives/vcs` — git operations (`vcs.git()` / `vcs.requireGit()`: branch/worktree/config/push).
    - `packages/utils/src/dirs.ts` — base directory for dedicated PR worktrees.
    - `packages/coding-agent/src/sdk.ts` — session artifact allocation hook.
-   - `packages/coding-agent/src/session/artifacts.ts` — artifact filename format `<id>.<toolType>.log`.
+   - `packages/coding-agent/src/session/artifacts.ts` — spill filename format `<id>.log` at the session's `local://` root.
 
 ## Availability and approval
 
@@ -66,9 +66,9 @@ Most operations return a text result built by `buildTextResult()` in `packages/c
    - Common fields: `artifactId`, `repo`, `branch`, `worktreePath`, `remote`, `remoteBranch`, `headSha`, `runId`, `runIds`, `status`, `conclusion`, `failedJobs`.
    - `pr_checkout` adds `checkouts: GhPrCheckoutSummary[]`, including `reused` and optional `clonedWith`.
    - `run_watch` adds `watch: GhRunWatchViewDetails`, which drives the custom live/result renderer in `packages/tui/src/tools/github.ts`.
-- Artifact trailer: when `artifactId` is present, the text body gets an appended line like `Full failed-job logs: artifact://<id>`.
+- Artifact trailer: when `artifactId` is present, the text body gets an appended line like `Full failed-job logs: local://<id>.log`.
    - `run_watch` uses `Full failed-job logs` only when every failed job has a complete log capture, `Partial failed-job logs` when some logs are missing or a capture is truncated, and `Failed-job log diagnostics` when none have content. Unavailable entries name the failed job and explain the fetch failure.
-   - Artifacts are allocated with `session.allocateOutputArtifact("github")`; persistent sessions save captured logs and diagnostics as `<artifact-dir>/<id>.github.log`.
+   - Artifacts are allocated with `session.allocateOutputArtifact("github")`; captured logs and diagnostics are saved as the spill file `<id>.log` (`local://<id>.log`) in the session's `local://` root; sessions without a session file spill under `$TMPDIR/omp-local/<sessionId>`.
 
 - `run_watch` is the only streaming op. It emits `onUpdate` snapshots while polling, then returns one final text result. Empty search results and commit watches that find no runs are marked `useless: true`.
 
@@ -136,7 +136,7 @@ Branches:
 - `fill && (title || body !== undefined)` throws.
 - Non-empty `body` is written under a temp dir `gh-pr-body-*` in `os.tmpdir()`, passed as `--body-file`, then removed in `finally`.
 - After creation, the tool parses the returned URL and best-effort runs `gh pr view <number> --repo <repo> --json <GH_PR_CREATE_FIELDS>`, requesting only the summary fields above, not bodies, files, or reviews. Lookup failure still returns the creation URL and available input metadata.
-- `xd://github` creation results retain only `op` and `repo` in dispatch renderer arguments, not the body or other execution-only fields. The full validated body still reaches `gh pr create` unchanged; the original tool-call input remains in history. Read `pr://<N>` explicitly to retrieve the body.
+- `github` creation results retain only `op` and `repo` in dispatch renderer arguments, not the body or other execution-only fields. The full validated body still reaches `gh pr create` unchanged; the original tool-call input remains in history. Read `pr://<N>` explicitly to retrieve the body.
 
 ### `pr_checkout`
 

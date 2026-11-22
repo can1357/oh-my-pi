@@ -216,6 +216,27 @@ describe("browser open options CDP helpers", () => {
 		expect(await Bun.file(saved).text()).toBe("bytes");
 	});
 
+	it("publishes under the suggested name after a transient Windows share lock", async () => {
+		const { directory, elsewhere, complete } = await fakeDownloads();
+		const guid = crypto.randomUUID();
+		const saved = path.join(elsewhere, guid);
+		const target = path.join(directory, "report.txt");
+		await Bun.write(saved, "download bytes");
+		const platform = process.platform;
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		const rename = spyOn(nodeFs.promises, "rename").mockImplementationOnce(async () => {
+			throw Object.assign(new Error("resource busy or locked"), { code: "EBUSY" });
+		});
+		try {
+			expect(await complete(guid, saved)).toBe(target);
+		} finally {
+			rename.mockRestore();
+			Object.defineProperty(process, "platform", { value: platform, configurable: true });
+		}
+		expect(await Bun.file(target).text()).toBe("download bytes");
+		expect(await Bun.file(saved).exists()).toBe(false);
+	});
+
 	it("keeps the same-named file when a cross-device move fails to copy", async () => {
 		const { directory, elsewhere, complete } = await fakeDownloads();
 		const guid = crypto.randomUUID();
@@ -566,7 +587,7 @@ await Promise.withResolvers().promise;`;
 			server.stop(true);
 			recycled.stop(true);
 			later.stop(true);
-			await closeLaunchedBrowser(browser);
+			await closeLaunchedBrowser({ browser, userDataDir });
 			if (userDataDir) await removeUserDataDir(userDataDir);
 		}
 	}, 30_000);

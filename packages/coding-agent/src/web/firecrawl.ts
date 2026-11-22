@@ -17,17 +17,22 @@ const FIRECRAWL_DEFAULT_BASE_URL = "https://api.firecrawl.dev/v2";
 /** Cap on honoured `Retry-After` hints; longer hints fail fast to the next backend. */
 const RETRY_MAX_DELAY_MS = 2_000;
 
+/** Self-hosted Firecrawl base URL from `FIRECRAWL_BASE_URL` (or its `FIRECRAWL_API_URL` alias), if configured. */
+export function configuredFirecrawlBaseUrl(): string | undefined {
+	return (process.env.FIRECRAWL_BASE_URL ?? process.env.FIRECRAWL_API_URL)?.trim() || undefined;
+}
+
 /**
  * Resolve a Firecrawl endpoint URL, applying the `FIRECRAWL_BASE_URL` (or its
  * `FIRECRAWL_API_URL` alias) self-hosting override when set. A configured base
  * keeps an explicit `/v1` or `/v2` suffix and is otherwise defaulted to `/v2`.
  */
 export function resolveFirecrawlUrl(endpoint: "/search" | "/scrape"): string {
-	const configured = process.env.FIRECRAWL_BASE_URL ?? process.env.FIRECRAWL_API_URL;
-	if (!configured?.trim()) return `${FIRECRAWL_DEFAULT_BASE_URL}${endpoint}`;
+	const configured = configuredFirecrawlBaseUrl();
+	if (!configured) return `${FIRECRAWL_DEFAULT_BASE_URL}${endpoint}`;
 	let url: URL;
 	try {
-		url = new URL(configured.trim());
+		url = new URL(configured);
 	} catch {
 		throw new Error("Invalid Firecrawl base URL: expected an HTTP or HTTPS URL");
 	}

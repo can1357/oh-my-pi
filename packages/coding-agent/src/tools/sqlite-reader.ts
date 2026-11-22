@@ -569,6 +569,26 @@ export function parseSqlitePathCandidates(filePath: string): SqlitePathCandidate
 	return candidates.sort((left, right) => right.sqlitePath.length - left.sqlitePath.length);
 }
 
+/**
+ * Splits of `filePath` at each `:`/`?` selector boundary, for SQLite files without a database extension
+ * (`state.vscdb?q=…`, Chrome's `History:urls`). Only the file header can confirm one, so callers sniff it.
+ */
+export function parseSqliteSelectorBoundaryCandidates(filePath: string): SqlitePathCandidate[] {
+	const normalized = filePath.replace(/\\/g, "/");
+	const queryStart = normalized.indexOf("?");
+	const end = queryStart === -1 ? normalized.length : queryStart + 1;
+	const candidates: SqlitePathCandidate[] = [];
+	for (let i = 1; i < end; i++) {
+		const ch = normalized[i];
+		if (ch !== ":" && ch !== "?") continue;
+		// `C:/…` is a drive, `scheme://` a URL: neither ends a file path.
+		if (ch === ":" && (i === 1 || normalized.startsWith("//", i + 1))) continue;
+		const { subPath, queryString } = splitSqliteRemainder(normalized.slice(i));
+		candidates.push({ sqlitePath: filePath.slice(0, i), subPath, queryString });
+	}
+	return candidates.reverse();
+}
+
 export async function isSqliteFile(absolutePath: string): Promise<boolean> {
 	try {
 		return looksLikeSqlite(await Bun.file(absolutePath).slice(0, SQLITE_MAGIC.byteLength).bytes());

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { Text, TUI } from "@oh-my-pi/pi-tui";
+import { BackloggedTerminal } from "./backlogged-terminal";
 import { VirtualRenderScheduler } from "./virtual-render-scheduler";
 import { VirtualTerminal } from "./virtual-terminal";
 import { WidthReplayProvider } from "./width-replay-provider";
@@ -19,13 +20,8 @@ const DSR = "\x1b[6n";
 const RESIZE_SETTLE_ADVANCE_MS = 160;
 
 /** Records every engine write and reports a settable output backlog. */
-class RecordingTerminal extends VirtualTerminal {
+class RecordingTerminal extends BackloggedTerminal {
 	written: string[] = [];
-	pendingBytes = 0;
-
-	get pendingOutputBytes(): number {
-		return this.pendingBytes;
-	}
 
 	override write(data: string): void {
 		this.written.push(data);

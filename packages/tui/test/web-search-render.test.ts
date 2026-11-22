@@ -97,4 +97,28 @@ describe("renderSearchResult", () => {
 		expect(answer).toMatch(/more line/);
 		expect(answer).not.toContain("FINAL_UNIQUE_MARKER");
 	});
+
+	it("without a synthesized answer shows excerpts under the sources instead of the numbered text", async () => {
+		const uiTheme = (await getThemeByName("dark"))!;
+		const response: SearchResponse = {
+			provider: "parallel",
+			sources: [
+				{ title: "Src One", url: "https://example.com/a", snippet: "\n  first\t excerpt  line\n```\nsecond" },
+			],
+		};
+		const listing = "[1] Src One\n    https://example.com/a\n    LISTING_ONLY_MARKER";
+		const component = renderSearchResult(
+			{ content: [{ type: "text", text: listing }], details: { response } },
+			{ expanded: true, isPartial: false },
+			uiTheme,
+			{ query: "test query" },
+		);
+		const rendered = component
+			.render(120)
+			.map(l => sanitizeText(l))
+			.join("\n");
+		expect(rendered).not.toMatch(/ Answer /);
+		expect(rendered).not.toContain("LISTING_ONLY_MARKER");
+		expect(rendered).toMatch(/Src One[^\n]*\n[^\n]*first excerpt line[^\n]*\n[^\n]*second/);
+	});
 });

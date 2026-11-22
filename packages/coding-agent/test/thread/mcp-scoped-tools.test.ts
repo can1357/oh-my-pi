@@ -22,7 +22,7 @@ let fixture: ServiceWorker<IntegrationsProbe>;
 beforeEach(async () => {
 	dir = path.join(os.tmpdir(), `omp-mcp-scoped-tools-${Snowflake.next()}`);
 	fs.mkdirSync(dir, { recursive: true });
-	manager = new MCPManager(dir, null, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
+	manager = new MCPManager(dir, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
 	await manager.connectServers(
 		{ alpha: { type: "stdio", command: process.execPath, args: [path.join(FIXTURES, "lazy-loader-mcp.ts")] } },
 		{},

@@ -39,6 +39,19 @@ const MODEL = buildModel({
 	maxTokens: 8_192,
 });
 
+const COMPACTION_MODEL = buildModel({
+	id: "claude-fable-5",
+	name: "Claude Fable 5",
+	api: "anthropic-messages",
+	provider: "anthropic",
+	baseUrl: "https://api.anthropic.com",
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
+	contextWindow: 1_000_000,
+	maxTokens: 128_000,
+});
+
 const TOOLS: Context["tools"] = [
 	{
 		name: "lookup",
@@ -109,7 +122,7 @@ function endpoint(script: Reply[] = []) {
 }
 
 /** One agent session: carries the transcript and the provider session state across turns. */
-function session(fetch: FetchImpl, overrides: Partial<AnthropicOptions> = {}) {
+function session(fetch: FetchImpl, overrides: Partial<AnthropicOptions> = {}, model = MODEL) {
 	const providerSessionState = new Map<string, ProviderSessionState>();
 	const messages: Message[] = [];
 	let systemPrompt = ["You are a precise assistant."];
@@ -126,7 +139,7 @@ function session(fetch: FetchImpl, overrides: Partial<AnthropicOptions> = {}) {
 		async turn(content: string | TextContent[], extra: Message[] = []): Promise<AssistantMessage> {
 			messages.push({ role: "user", content, timestamp: ++timestamp });
 			const reply = await streamAnthropic(
-				MODEL,
+				model,
 				{ systemPrompt, messages: [...messages, ...extra], tools },
 				{ apiKey: "sk-ant-api03-test", sessionId: "session-1", providerSessionState, fetch, ...overrides },
 			).result();
@@ -299,6 +312,55 @@ describe("anthropic message threads", () => {
 		expect(sent.map(request => request.body.thread?.type)).toEqual(["create", undefined, undefined]);
 		expect(sent[1].betas).not.toContain(THREADS_BETA);
 		expect(userTexts(sent[2].body)).toEqual(["first", "reply 1", "second"]);
+	});
+
+	it("sends bodies that replay a signed compaction block without a thread", async () => {
+		const { fetch, sent } = endpoint([
+			textResponse("msg_before_compaction", "before compaction"),
+			body =>
+				body.thread
+					? errorResponse(
+							400,
+							"thread: `thread` cannot be combined with a `compaction` block in `messages`",
+							"thread_unsupported_request",
+						)
+					: textResponse("msg_after_compaction", "after compaction"),
+		]);
+		const chat = session(fetch, {}, COMPACTION_MODEL);
+		const summary = "## Goal\nAudit the handlers.\n\n## Next Steps\nContinue with chunk 11.";
+
+		await chat.turn("before compaction");
+		chat.messages.push({
+			role: "user",
+			content: `<summary>${summary}</summary>`,
+			providerPayload: {
+				type: "anthropicCompaction",
+				provider: "anthropic",
+				content: summary,
+				exactTail: true,
+				signature: "sig_opaque_on_demand",
+			},
+			timestamp: 5,
+		});
+		const reply = await chat.turn("after compaction");
+		await chat.turn("later");
+
+		expect(reply.stopReason).toBe("stop");
+		expect(sent[0].body.thread).toEqual({ type: "create" });
+		expect(sent[0].betas).toContain(THREADS_BETA);
+		const replays = sent.slice(1);
+		expect(replays.map(request => request.body.thread)).toEqual([undefined, undefined]);
+		expect(replays.every(request => !request.betas.includes(THREADS_BETA))).toBe(true);
+		for (const { body } of replays) {
+			expect(body.compaction).toBeUndefined();
+			expect(body.context_management?.edits.some(edit => edit.type === "compact_20260112")).not.toBe(true);
+			const blocks = body.messages.flatMap(message => (Array.isArray(message.content) ? message.content : []));
+			expect(blocks.find(block => block.type === "compaction")).toMatchObject({
+				type: "compaction",
+				content: summary,
+				signature: "sig_opaque_on_demand",
+			});
+		}
 	});
 
 	it("disables the thread only when the unthreaded resend after an unexplained 400 succeeds", async () => {

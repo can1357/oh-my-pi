@@ -188,6 +188,7 @@ Slash command state is refreshed:
 - when the editor component is swapped
 - by explicit plugin reload flows such as `/reload-plugins`
 - when session command-metadata notifications arrive, including live settings changes, skill management, and MCP prompt updates (autocomplete rebuilds from current session state)
+- after `/wt` ran a new worktree's `post-checkout` hook (linked git worktree or ovnfs checkout): once the move and `worktree.cleanSource` are done and reported, `/wt` runs the hook with the arguments `git worktree add` gives it (`vcs.runPostCheckoutHook`, the helper behind `omp worktree add`) and then refreshes session skills/commands, so they include what the hook added. A failing hook keeps the worktree and shows a warning; the hook cannot be cancelled. An ovnfs checkout has its own git dir without `hooks/`: only a hook found through `core.hooksPath` runs there, not one in the source repo's `.git/hooks`
 
 There is no continuous file watcher for command directories.
 
@@ -394,6 +395,16 @@ than a byte-for-byte native provider transcript.
   details. `Right` focuses details, `Left` returns to history.
 - Focused details support scrolling, `Page Up`/`Page Down`, and `Home`/`End`.
   Narrow terminals show one pane at a time.
+- In Tern, the answer is a note in the transcript, after what was on screen when it was
+  asked, instead of the inline panel; it is display-only, never a session message. Clicking
+  the note points the composer at it (role `omp.editor.btw`, a `btw` chip, the note ringed):
+  plain drafts go to its topic as follow-ups, which answer in the same note, while `/`
+  commands and `!`/`$` shell drafts run as usual. `Esc`, the chip, or another click on the
+  note points the composer back at the chat without cancelling a running answer. Its `×`
+  folds it to one line, which a click opens again with the composer on it. Right-click (a
+  long press on a phone) offers copy, inject, branch, stop, opening it in history, and
+  fold. After a transcript rebuild or resume, the notes asked on the shown branch come back
+  folded, each before the first message newer than it.
 - New questions and follow-ups are refused while any BTW request is running.
   There is no implicit cancellation or queue.
 - A refused follow-up submission keeps the draft for retry; repeated Enter while
@@ -503,6 +514,10 @@ Without an interactive UI, `code-review` delegates to `/review` instead of openi
 ## 13) Built-in command note: `/plan-review`
 
 `/plan-review` reopens the Plan Review overlay for the latest plan (plan mode only). In the Contents sidebar `a` annotates the selected section; in the plan body `a` annotates the top visible line. `e` edits the annotation(s) at that section or line (with a chooser when several apply) and `u` undoes the latest section deletion or annotation change. The note editor behaves like `/annotate`'s: Enter saves, Shift+Enter inserts a newline, Escape discards the draft, the external-editor key replaces the draft without saving, and saving an empty edit deletes the annotation.
+
+The decision options are the approval choices and **Save**, which writes the plan to a chosen path and leaves the review open (plan mode and the session stay as they are). **Refine plan** appears only while the plan has feedback (annotations or deleted sections); it is then the first, preselected option and re-prompts the model with that feedback.
+
+Under Tern the plan is one editable document: double-click edits it in place (edits are mirrored to the plan file and annotations follow their text), and selecting text offers a Comment bubble whose comments become Refine feedback (`> "quote"` then the note, under the section heading). Below it a dock holds the Approve split button (Refine while the plan has comments; its menu lists every approval choice), the execution model chip, Save and Cancel; Enter runs the main button, ←/→ change the model, ↑/↓ walk the Contents (hidden while the plan has comments). Older Tern builds keep one Markdown block per section and the option bar.
 
 ## 14) Built-in command note: `/context`
 

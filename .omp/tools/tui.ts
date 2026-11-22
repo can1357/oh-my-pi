@@ -1162,7 +1162,7 @@ const factory = (omp: ToolHost) => {
 				};
 			}
 			// ConPTY emits ESC[6n on startup and the native layer pre-answers it
-			// (crates/pi-natives/src/pty.rs, "ConPTY sends ESC[6n"). Drop only the
+			// (crates/natives/src/pty.rs, "ConPTY sends ESC[6n"). Drop only the
 			// screen's duplicate reply to that first query; keep later cursor
 			// reports and any other replies sharing the same output buffer.
 			let hostCursorHandshake = process.platform === "win32";

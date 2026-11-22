@@ -1,4 +1,4 @@
-import { $env, ptree, USER_AGENT } from "@oh-my-pi/pi-utils";
+import { $env, isRecord, ptree, USER_AGENT } from "@oh-my-pi/pi-utils";
 import type { RenderResult, SpecialHandler } from "./types";
 import { buildResult, formatMediaDuration, loadPage } from "./types";
 
@@ -115,7 +115,7 @@ export async function fetchGitHubApi(
 	endpoint: string,
 	timeout: number,
 	signal?: AbortSignal,
-): Promise<{ data: unknown; ok: boolean }> {
+): Promise<{ data: unknown; ok: boolean; status?: number; error?: string }> {
 	try {
 		const requestSignal = ptree.combineSignals(signal, timeout * 1000);
 
@@ -136,12 +136,14 @@ export async function fetchGitHubApi(
 		});
 
 		if (!response.ok) {
-			return { data: null, ok: false };
+			const body: unknown = await response.json().catch(() => null);
+			const message = isRecord(body) && typeof body.message === "string" ? body.message : response.statusText;
+			return { data: null, ok: false, status: response.status, error: message };
 		}
 
 		return { data: await response.json(), ok: true };
-	} catch {
-		return { data: null, ok: false };
+	} catch (error) {
+		return { data: null, ok: false, error: error instanceof Error ? error.message : String(error) };
 	}
 }
 
@@ -323,17 +325,49 @@ async function renderGitHubCommit(
 }
 
 /**
- * Render GitHub issues list to markdown
+ * The search query a GitHub issues or pulls list URL shows: its `q` (the web default `is:open` when absent), always
+ * scoped to the repository and to issues or pull requests.
+ */
+export function gitHubListSearch(
+	gh: Pick<GitHubUrl, "owner" | "repo" | "type">,
+	params: URLSearchParams,
+): { q: string; sort?: string; order?: string; page: number } {
+	const kind = gh.type === "pulls" ? "is:pr" : "is:issue";
+	let q = params.get("q")?.trim() || "is:open";
+	let sort: string | undefined;
+	let order: string | undefined;
+	// The web's `sort:updated-desc` qualifier is the search API's sort/order parameters.
+	q = q
+		.replace(/(?:^|\s)sort:([a-z0-9+-]+?)-(asc|desc)(?=\s|$)/i, (_, field: string, direction: string) => {
+			sort = field.toLowerCase();
+			order = direction.toLowerCase();
+			return " ";
+		})
+		.trim();
+	if (!/(?:^|\s)is:(?:issue|pr|pull-request)(?=\s|$)/i.test(q)) q = `${kind} ${q}`.trim();
+	if (!/(?:^|\s)repo:/i.test(q)) q = `repo:${gh.owner}/${gh.repo} ${q}`;
+	const page = Math.max(1, Number.parseInt(params.get("page") ?? "1", 10) || 1);
+	return { q, sort, order, page };
+}
+
+/**
+ * Render a GitHub issues or pulls list to markdown, as the URL's `q` filters it.
  */
 async function renderGitHubIssuesList(
 	gh: GitHubUrl,
+	params: URLSearchParams,
 	timeout: number,
 	signal?: AbortSignal,
 ): Promise<{ content: string; ok: boolean }> {
-	const result = await fetchGitHubApi(`/repos/${gh.owner}/${gh.repo}/issues?state=open&per_page=30`, timeout, signal);
-	if (!result.ok || !Array.isArray(result.data)) return { content: "", ok: false };
+	const search = gitHubListSearch(gh, params);
+	const query = new URLSearchParams({ q: search.q, per_page: "30", page: String(search.page) });
+	if (search.sort) query.set("sort", search.sort);
+	if (search.order) query.set("order", search.order);
+	const result = await fetchGitHubApi(`/search/issues?${query}`, timeout, signal);
+	if (!result.ok || !isRecord(result.data) || !Array.isArray(result.data.items)) return { content: "", ok: false };
 
-	const issues = result.data as Array<{
+	const total = typeof result.data.total_count === "number" ? result.data.total_count : undefined;
+	const issues = result.data.items as Array<{
 		number: number;
 		title: string;
 		state: string;
@@ -341,15 +375,14 @@ async function renderGitHubIssuesList(
 		created_at: string;
 		comments: number;
 		labels: Array<{ name: string }>;
-		pull_request?: unknown;
 	}>;
 
-	let md = `# ${gh.owner}/${gh.repo} - Open Issues\n\n`;
+	let md = `# ${gh.owner}/${gh.repo} - ${gh.type === "pulls" ? "Pull requests" : "Issues"}: ${search.q}\n\n`;
+	if (total !== undefined) md += `${total} result${total === 1 ? "" : "s"}; page ${search.page}\n\n`;
 
 	for (const issue of issues) {
-		if (issue.pull_request) continue; // Skip PRs in issues list
 		const labels = issue.labels.length > 0 ? ` [${issue.labels.map(l => l.name).join(", ")}]` : "";
-		md += `- **#${issue.number}** ${issue.title}${labels}\n`;
+		md += `- **#${issue.number}** (${issue.state}) ${issue.title}${labels}\n`;
 		md += `  by @${issue.user?.login ?? "ghost"} · ${issue.comments} comments · ${issue.created_at}\n\n`;
 	}
 
@@ -373,20 +406,41 @@ async function renderGitHubTree(
 		default_branch: string;
 	};
 
-	const ref = gh.ref || repo.default_branch;
-	const dirPath = gh.path || "";
+	let ref = gh.ref || repo.default_branch;
+	let dirPath = gh.path || "";
+
+	// Fetch directory contents. A branch name with slashes (`feature/x`) reaches the URL as ref + path: on a 404
+	// the leading path segments move into the ref, one at a time.
+	const contentsOf = (candidateRef: string, candidatePath: string) =>
+		fetchGitHubApi(
+			`/repos/${gh.owner}/${gh.repo}/contents/${candidatePath}?ref=${encodeURIComponent(candidateRef)}`,
+			timeout,
+			signal,
+		);
+	let contentsResult = await contentsOf(ref, dirPath);
+	const segments = dirPath.split("/").filter(Boolean);
+	for (let moved = 1; !contentsResult.ok && contentsResult.status === 404 && moved <= segments.length; moved++) {
+		const candidateRef = [ref, ...segments.slice(0, moved)].join("/");
+		const candidatePath = segments.slice(moved).join("/");
+		const retried = await contentsOf(candidateRef, candidatePath);
+		if (retried.ok) {
+			ref = candidateRef;
+			dirPath = candidatePath;
+			contentsResult = retried;
+		}
+	}
 
 	let md = `# ${repo.full_name}/${dirPath || "(root)"}\n\n`;
 	md += `**Branch:** ${ref}\n\n`;
 
-	// Fetch directory contents
-	const contentsResult = await fetchGitHubApi(
-		`/repos/${gh.owner}/${gh.repo}/contents/${dirPath}?ref=${ref}`,
-		timeout,
-		signal,
-	);
-
-	if (contentsResult.ok && Array.isArray(contentsResult.data)) {
+	if (!contentsResult.ok) {
+		md += `## Contents\n\nGitHub could not list ${dirPath || "the repository root"} at ${ref}: ${contentsResult.status ? `HTTP ${contentsResult.status}: ` : ""}${contentsResult.error ?? "request failed"}\n`;
+	} else if (!Array.isArray(contentsResult.data)) {
+		// A tree URL naming a file shows that file, as GitHub does.
+		const file = await loadPage(toRawGitHubUrl({ ...gh, ref, path: dirPath }), { timeout, signal });
+		if (!file.ok) return { content: "", ok: false };
+		return { content: file.content, ok: true };
+	} else {
 		const items = contentsResult.data as Array<{
 			name: string;
 			type: "file" | "dir" | "symlink" | "submodule";
@@ -763,9 +817,10 @@ export const handleGitHub: SpecialHandler = async (
 			break;
 		}
 
-		case "issues": {
+		case "issues":
+		case "pulls": {
 			notes.push(`Fetched via GitHub API`);
-			const result = await renderGitHubIssuesList(gh, timeout, signal);
+			const result = await renderGitHubIssuesList(gh, new URL(url).searchParams, timeout, signal);
 			if (result.ok) {
 				return buildResult(result.content, { url, method: "github-issues", fetchedAt, notes });
 			}

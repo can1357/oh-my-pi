@@ -32,7 +32,6 @@ import { cfgExtensionAssistantTextRenderers } from "../../extensibility/settings
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import {
-	type AskDialogInputGuard,
 	type AskDialogPrompt,
 	type AskDialogPromptDraft,
 	type AskDialogPromptValue,
@@ -84,6 +83,16 @@ function guestAskHelpText(enterAction: string, extra = ""): string {
 const ASK_OTHER_OPTION = "Other (type your own)";
 const ASK_CHAT_OPTION = "Chat about this";
 const ASK_NEXT_OPTION = "Next →";
+/** What an inline ask warns while sending the composer's draft would skip it. */
+const ASK_SKIP_NOTICE = "Sending your message skips these questions";
+
+/** Where a local ask shows; see `#mountAsk`. */
+interface AskSlot {
+	/** Shows the ask again, with the keys, after a nested prompt took the composer's place. */
+	restore(): void;
+	/** Takes the ask down and gives the composer its place and the keys back. */
+	unmount(): void;
+}
 
 function withTerminalLauncher(uiContext: ExtensionUIContext, hasUI: boolean): ExtensionUIContext {
 	if (!hasUI || uiContext.openTerminal) return uiContext;
@@ -139,6 +148,8 @@ export class ExtensionUiController {
 	// the rest queue. See `#presentDialog`.
 	#dialogActive = false;
 	#dialogQueue: Array<() => void> = [];
+	/** The local ask shown above the composer (`#mountAsk`). */
+	#ask: Component | undefined;
 	/**
 	 * The steering messages that last denied an approval. Steering waits for the tool batch to
 	 * end, so while any of them is still pending, later approvals of that batch (an exclusive call
@@ -873,26 +884,88 @@ export class ExtensionUiController {
 	}
 
 	/**
-	 * A draft in progress when a dialog lands keeps the keyboard, so in-flight
-	 * typing never answers by accident; up/down hand input to the dialog and the
-	 * draft stays parked beneath it until the dialog closes.
+	 * What the composer shows about the ask waiting above it: `pending` while one waits, `skip` while
+	 * sending its draft would skip it; undefined with no ask or with the composer talking to a `/btw` note.
 	 */
-	#draftInputGuard(): { guard: AskDialogInputGuard; owns(): boolean } | undefined {
-		const draftEditor = this.ctx.editor;
-		if (draftEditor.getText().length === 0) return undefined;
-		let reportedBlocked = false;
-		const guard: AskDialogInputGuard = {
-			isBlocked: () => draftEditor.getText().length > 0,
-			handleInput: (keyData: string) => draftEditor.handleDraftEdit(keyData),
-			hint: "typing edits your prompt",
-			// Show the draft's insertion cursor while it owns input; drop it
-			// once the dialog controls take over.
-			syncPresentation: (blocked: boolean) => {
-				reportedBlocked = blocked;
-				draftEditor.focused = blocked;
+	composerAsk(): "pending" | "skip" | undefined {
+		if (!this.#ask || this.ctx.isBtwFocused) return undefined;
+		return this.#draftSkipsAsk() ? "skip" : "pending";
+	}
+
+	/** Whether an ask waits above the composer while the keys are away from the composer (it draws faint). */
+	askHoldsKeys(): boolean {
+		return this.#ask !== undefined && !this.ctx.editor.focused;
+	}
+
+	/** In rows, the keys of the ask holding them, which the faint composer under it shows. */
+	askKeyHints(): string | undefined {
+		if (!this.askHoldsKeys()) return undefined;
+		const ask = this.#ask;
+		return ask instanceof HtmlFormDialog || ask instanceof AskDialogComponent ? ask.keyHints() : undefined;
+	}
+
+	/** Gives the keys to the ask waiting above the composer; false when none waits. */
+	focusAsk(): boolean {
+		const ask = this.#ask;
+		if (!ask) return false;
+		this.ctx.ui.setFocus(ask);
+		this.ctx.ui.requestRender();
+		return true;
+	}
+
+	/** Gives the keys to the composer (Tab past an ask's last stop, the ask closing). */
+	#focusComposer(): void {
+		this.ctx.ui.setFocus(this.ctx.editor);
+		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * Whether sending the composer's draft now skips the ask shown: a plain message, which reaches the
+	 * agent as the user's and closes the ask, not a command, a shell run or a `/btw` follow-up.
+	 */
+	#draftSkipsAsk(): boolean {
+		if (!this.#ask || this.ctx.isBtwFocused || this.ctx.isBashMode || this.ctx.isPythonMode || this.ctx.isBtwMode)
+			return false;
+		const draft = this.ctx.editor.getText().trim();
+		return draft.length > 0 && !draft.startsWith("/");
+	}
+
+	/** The ask's warning while sending the composer's draft would skip it, with the key back to it. */
+	#skipNotice(): string | undefined {
+		if (!this.#draftSkipsAsk()) return undefined;
+		const back = this.ctx.keybindings.getKeys("app.thinking.cycle")[0];
+		return this.ctx.editor.focused && back
+			? `${ASK_SKIP_NOTICE} · ${formatKeyHint(back)} answers them`
+			: ASK_SKIP_NOTICE;
+	}
+
+	/**
+	 * Shows a local ask above the composer, which stays: natively (Tern) at the transcript's end, in rows
+	 * just over it. The ask takes the keys unless the composer holds a draft, whose sending skips it;
+	 * Shift+Tab, Tab past the ask's last stop and clicks move the keys between them.
+	 */
+	#mountAsk(dialog: Component): AskSlot {
+		this.ctx.closeLinkBrowser();
+		this.#ask = dialog;
+		this.ctx.askContainer.addChild(dialog);
+		this.ctx.statusLine.setAwaitingAnswer(true);
+		if (this.ctx.editor.getText().trim()) this.ctx.ui.requestRender();
+		else this.focusAsk();
+		return {
+			restore: () => {
+				this.ctx.editorContainer.clear();
+				this.ctx.editorContainer.addChild(this.ctx.editor);
+				this.focusAsk();
+			},
+			unmount: () => {
+				if (this.#ask === dialog) this.#ask = undefined;
+				this.ctx.askContainer.removeChild(dialog);
+				this.ctx.statusLine.setAwaitingAnswer(this.#ask !== undefined);
+				this.ctx.editorContainer.clear();
+				this.ctx.editorContainer.addChild(this.ctx.editor);
+				this.#focusComposer();
 			},
 		};
-		return { guard, owns: () => reportedBlocked && guard.isBlocked() };
 	}
 
 	/** Registers `component` as the composer's owner; the returned release clears it only if it is still registered. */
@@ -911,7 +984,6 @@ export class ExtensionUiController {
 		const first = form.fields.find(field => field.name);
 		const prompt = { kind: "question", msg: first && fieldQuestions(form).get(first) } as const;
 		return this.#presentDialog<ExtensionFormDialogResult>(prompt, dialogOptions?.signal, settle => {
-			const draft = this.#draftInputGuard();
 			const dialog = new HtmlFormDialog(form, {
 				tui: this.ctx.ui,
 				cwd: this.ctx.sessionManager.getCwd(),
@@ -922,26 +994,22 @@ export class ExtensionUiController {
 				},
 				onSubmit: (data, notes) => settle({ data, ...(notes.length ? { notes } : {}) }),
 				onCancel: () => settle(undefined),
-				inputGuard: draft?.guard,
 				acceptImages: dialogOptions?.acceptImages === true,
 				onPasteImage: () => this.ctx.handleImagePaste(),
 				onPasteImagePath: path => this.ctx.handleImagePathPaste(path),
+				skipNotice: () => this.#skipNotice(),
+				claimKeys: () => this.focusAsk(),
+				releaseKeys: () => this.#focusComposer(),
 			});
-			const releaseComposerOwner = draft && this.#claimComposerOwner(dialog, draft.owns);
-			this.ctx.closeLinkBrowser();
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(dialog);
-			// The guarded draft stays visible beneath the form while typing edits it.
-			if (draft) this.ctx.editorContainer.addChild(this.ctx.editor);
-			this.ctx.ui.setFocus(dialog);
-			this.ctx.ui.requestRender();
+			const slot = this.#mountAsk(dialog);
 			return () => {
-				releaseComposerOwner?.();
+				// Closed by its signal (a message sent instead, the turn aborted): what was answered goes along.
+				if (dialogOptions?.signal?.aborted) {
+					const given = dialog.givenAnswers();
+					if (given) dialogOptions.onAbandon?.(given);
+				}
+				slot.unmount();
 				dialog.dispose();
-				this.ctx.editorContainer.clear();
-				this.ctx.editorContainer.addChild(this.ctx.editor);
-				this.ctx.ui.setFocus(this.ctx.editor);
-				this.ctx.ui.requestRender();
 			};
 		});
 	}
@@ -1095,20 +1163,9 @@ export class ExtensionUiController {
 			let promptEditor: HookEditorComponent | undefined;
 			let promptResolve: ((value: AskDialogPromptValue | AskDialogPromptDraft | undefined) => void) | undefined;
 			let closed = false;
-			const draft = this.#draftInputGuard();
-			const inputGuard = draft?.guard;
-
+			// After a nested prompt took the composer's place: the composer back, the keys to the ask.
 			const restoreAskDialog = (): void => {
-				if (closed || !askDialog) return;
-				this.ctx.editorContainer.clear();
-				this.ctx.editorContainer.addChild(askDialog);
-				// Keep the draft editor mounted beneath the restored ask, matching the
-				// initial presentation: the guard re-blocks whenever the draft is
-				// non-empty (e.g. a failed submit restored its text while a nested
-				// prompt was open), and routed input must land on a visible surface.
-				if (inputGuard) this.ctx.editorContainer.addChild(this.ctx.editor);
-				this.ctx.ui.setFocus(askDialog);
-				this.ctx.ui.requestRender();
+				if (!closed) slot.restore();
 			};
 
 			const finishPrompt = (value: AskDialogPromptValue | AskDialogPromptDraft | undefined): void => {
@@ -1187,29 +1244,21 @@ export class ExtensionUiController {
 					timeout: dialogOptions?.timeout,
 					onTimeout: dialogOptions?.onTimeout,
 					tui: this.ctx.ui,
-					inputGuard,
+					skipNotice: () => this.#skipNotice(),
+					claimKeys: () => this.focusAsk(),
+					releaseKeys: () => this.#focusComposer(),
 				},
 			);
-			const releaseComposerOwner = draft && this.#claimComposerOwner(askDialog, draft.owns);
-			this.ctx.closeLinkBrowser();
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(askDialog);
-			if (inputGuard) this.ctx.editorContainer.addChild(this.ctx.editor);
-			this.ctx.ui.setFocus(askDialog);
-			this.ctx.ui.requestRender();
+			const slot = this.#mountAsk(askDialog);
 
 			return () => {
 				closed = true;
-				releaseComposerOwner?.();
-				askDialog?.dispose();
+				askDialog.dispose();
 				promptEditor?.dispose();
 				promptResolve?.(undefined);
 				promptResolve = undefined;
 				promptEditor = undefined;
-				this.ctx.editorContainer.clear();
-				this.ctx.editorContainer.addChild(this.ctx.editor);
-				this.ctx.ui.setFocus(this.ctx.editor);
-				this.ctx.ui.requestRender();
+				slot.unmount();
 			};
 		});
 	}
@@ -1573,7 +1622,9 @@ export class ExtensionUiController {
 		} else if (type === "warning") {
 			this.ctx.showWarning(message);
 		} else {
-			this.ctx.showStatus(message);
+			// `notify` is shared by every extension: an info notice gets its own line so it neither
+			// overwrites nor is overwritten by another extension's notice or omp's own status.
+			this.ctx.showStatus(message, { collapse: false });
 		}
 	}
 
@@ -1729,22 +1780,24 @@ export class ExtensionUiController {
 	}
 
 	#sendExtensionMessage: SendMessageHandler = (message, options) => {
+		const normalized = normalizeCustomMessagePayload(message);
+		// A row kept out of context never starts a turn, whatever its options ask (see `sendCustomMessage`).
 		const startsTurn =
-			options?.triggerTurn === true ||
-			options?.deliverAs === "steer" ||
-			options?.deliverAs === "followUp" ||
-			options?.deliverAs === "aside";
+			normalized.excludeFromContext !== true &&
+			(options?.triggerTurn === true ||
+				options?.deliverAs === "steer" ||
+				options?.deliverAs === "followUp" ||
+				options?.deliverAs === "aside");
 		if (startsTurn && this.#rejectGuestExtensionTurn()) return;
 		const wasStreaming = this.ctx.session.isStreaming;
 		const messageCountBefore = this.ctx.session.messages.length;
-		const normalized = normalizeCustomMessagePayload(message);
 		this.ctx.session
 			.sendCustomMessage(normalized, options)
 			.then(() => {
 				// `deliverAs: "nextTurn"` without a trigger is the one idle arm that appends
 				// to the session silently (no message_start/message_end), so nothing else
 				// paints it and nothing else in the transcript changed.
-				const silentAppend = options?.deliverAs === "nextTurn" && options.triggerTurn !== true;
+				const silentAppend = options?.deliverAs === "nextTurn" && !startsTurn;
 				this.#applyCustomMessageDisplay(wasStreaming, normalized, silentAppend ? messageCountBefore : undefined);
 			})
 			.catch((err: unknown) => {
