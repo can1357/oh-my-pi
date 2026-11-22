@@ -1856,10 +1856,10 @@ export interface TodoBackendDefinition {
 	/**
 	 * Called in the main session with the whole todo list after omp committed a change to it:
 	 * a `todo` call, a `/todo` edit, RPC `set_todos`, `/new`, or a resume, rewind, branch, fork or
-	 * move to another session file that left another list or session id; and when this backend is
-	 * selected mid-session. Two calls are skipped: an unchanged list for the backend that just
-	 * took it, and an empty list before omp has called a todo backend for this session (`/new`, a
-	 * resume, a branch and a fork carry that over). Tasks carry `content` and `status` only.
+	 * move to another session file that left another list or session id. An empty list is sent
+	 * only once omp has called a todo backend for this session; `/new`, a resume, a branch and a
+	 * fork carry that over. Tasks carry `content` and `status` only.
+	 * A backend the user picks in Settings is sent the current list then, without a change.
 	 * One call runs at a time, and lists that change meanwhile collapse into the newest. A throw,
 	 * or no answer within the extension handler timeout, is reported as an extension error and
 	 * leaves omp's list as it is; the next change sends the whole list again, even while a call

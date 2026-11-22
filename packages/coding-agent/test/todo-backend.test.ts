@@ -14,6 +14,7 @@ import {
 	testSetSessionShutdownHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { ExtensionFactory, TodoBackendDefinition } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { type CreateAgentSessionOptions, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -22,6 +23,7 @@ import { USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools/todo
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 interface Tracker {
 	calls: Array<{ phases: TodoPhase[]; sessionId: string }>;
@@ -278,25 +280,37 @@ describe("todo backend", () => {
 		expect(tasksOf(backend)).toEqual([["a"]]);
 	});
 
-	it("a session opened on a saved list sends it once started; a backend selected later gets the current list at once", async () => {
+	it("a session opened on a saved list sends it once started; a backend selected later gets the list with the next change", async () => {
 		const backend = tracker();
 		const saved = SessionManager.inMemory();
 		saved.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: list("saved") });
 		const resumed = await open([backend.extension], "tracker", { sessionManager: saved });
 		const selectedLater = await open([backend.extension]);
 		selectedLater.session.commitTodoPhases(list("before"));
-		await settled(resumed.session);
 
-		// The write the Settings picker makes: a stored value, not a session override.
-		const told = backend.entered();
-		cfgTodoBackend.set(selectedLater.session.settings, "tracker");
-		await told;
+		cfgTodoBackend.override(selectedLater.session.settings, "tracker");
+		await settled(resumed.session);
+		await settled(selectedLater.session);
+		const beforeNextChange = tasksOf(backend);
+		selectedLater.session.commitTodoPhases(list("before", "after"));
 		await settled(selectedLater.session);
 
-		expect(backend.calls).toEqual([
-			{ phases: list("saved"), sessionId: resumed.session.sessionManager.getSessionId() },
-			{ phases: list("before"), sessionId: selectedLater.session.sessionManager.getSessionId() },
-		]);
+		expect(beforeNextChange).toEqual([["saved"]]);
+		expect(tasksOf(backend)).toEqual([["saved"], ["before", "after"]]);
+	});
+
+	it("a backend the user picks in Settings gets the current list at once", async () => {
+		const backend = tracker();
+		const { session } = await open([backend.extension]);
+		session.commitTodoPhases(list("before"));
+
+		// What the settings panel does with a pick: the stored write, then its side effect in this process.
+		const panel = new SelectorController(createInteractiveModeContext({ session, settings: session.settings }));
+		cfgTodoBackend.set(session.settings, "tracker");
+		panel.handleSettingChange(cfgTodoBackend.id, "tracker");
+		await settled(session);
+
+		expect(backend.calls).toEqual([{ phases: list("before"), sessionId: session.sessionManager.getSessionId() }]);
 	});
 
 	it("a whole-session fork sends the list again under the fork's id", async () => {
@@ -472,6 +486,26 @@ describe("todo backend", () => {
 			expect.stringContaining('todo backend "tracker" is ignored'),
 			expect.stringContaining('No enabled extension registers the todo backend "tracker"'),
 		]);
+	});
+
+	it("a backend selected by a settings change that also enables its extension is not reported as unregistered, and gets the list with the next change", async () => {
+		const backend = tracker();
+		const { session, errors } = await open([backend.extension]);
+		session.commitTodoPhases(list("a"));
+		session.extensionRunner?.setSuspendedExtensions(() => true);
+
+		// What a config reload or a move to another project does: the setting lands before the extension.
+		cfgTodoBackend.set(session.settings, "tracker");
+		await settled(session);
+		session.extensionRunner?.setSuspendedExtensions(() => false);
+		await settled(session);
+		const beforeNextChange = tasksOf(backend);
+		session.commitTodoPhases(list("a", "b"));
+		await settled(session);
+
+		expect(errors).toEqual([]);
+		expect(beforeNextChange).toEqual([]);
+		expect(tasksOf(backend)).toEqual([["a", "b"]]);
 	});
 
 	it("two extensions that register one shared backend object are still two holders: on takeover the next one gets the list", async () => {

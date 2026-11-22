@@ -2379,7 +2379,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			prewalkWillHandoff: () => this.#prewalk.willHandoff,
 			consumeLastServedToolChoiceLabel: () => this.#toolChoiceQueue.consumeLastServedLabel(),
-			phasesChanged: () => this.#mirrorTodoPhases(),
+			phasesChanged: () => this.mirrorTodoPhases(),
 		};
 		this.#todo = new TodoTracker(todoHost);
 		this.#autoParallel = new AutoParallelCoordinator({
@@ -3191,9 +3191,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			),
 		);
 		// A session that moves to another file gets a new id for the same list: no list write tells the todo backend.
-		this.addDisposer(this.sessionManager.onPersistenceNotice(() => this.#mirrorTodoPhases()));
-		// Nor does selecting a backend: it gets the current list at once, however the setting changed.
-		cfgTodoBackend.listen(this, () => this.#mirrorTodoPhases());
+		this.addDisposer(this.sessionManager.onPersistenceNotice(() => this.mirrorTodoPhases()));
 		// A request past the cap mid-run stops the run before it is sent: no turn opens, nothing is billed.
 		// The gate is registered only while a cap is set: any before-model-call gate also turns a user abort
 		// before the next request into a clean stop, which leaves no interrupted turn for `/retry`.
@@ -12129,8 +12127,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * against `session_*` events: after `/new`, a fork, a branch or tree navigation the list can go
 	 * out before the event, after a resume it follows `session_switch`, and a resume undone after
 	 * `session_switch` may already have sent the other session's list (the old session's follows).
+	 * Public for the settings panel: a backend the user picks there gets the list without a change.
 	 */
-	#mirrorTodoPhases(): void {
+	mirrorTodoPhases(): void {
 		const backend = this.#todoBackend();
 		if (backend !== undefined) this.#extensionRunner?.syncTodoBackend(backend, this.#todo.phases);
 	}
@@ -13122,7 +13121,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#adoptInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
 			// The list is the same, but under a new session id: no list write tells the backend.
-			this.#mirrorTodoPhases();
+			this.mirrorTodoPhases();
 			this.#memory.rekeyForCurrentSessionId();
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
