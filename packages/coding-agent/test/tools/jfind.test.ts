@@ -32,6 +32,7 @@ import { resolveSearchResultPath } from "@oh-my-pi/pi-coding-agent/tools/path-ut
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { rejectionOf } from "../helpers/rejection";
+import type { FindToolDetails } from "@oh-my-pi/pi-tui/tools/find";
 
 /** Read-tier URL filesystem rooted at `cwd`, as the `find` tool builds one per call. */
 function urlFs(cwd: string): InternalUrlFilesystem {
@@ -413,13 +414,14 @@ describe("jfind cascade", () => {
 				modelRegistry: {} as never,
 			});
 			const result = await tool.execute("x", { query: "token refresh", grep_keywords: ["refreshToken"] });
+			const details = result.details as FindToolDetails | undefined;
 			expect(result.isError).toBe(true);
-			expect(result.details?.coverage).toBe("unavailable");
-			expect(result.details?.stats.failed).toBe(result.details?.stats.requests);
+			expect(details?.coverage).toBe("unavailable");
+			expect(details?.stats.failed).toBe(details?.stats.requests);
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			expect(text).toStartWith('find unavailable for "token refresh"');
 			expect(text).not.toContain("no hits");
-			expect(result.details?.lexicalFallback).toEqual([
+			expect(details?.lexicalFallback).toEqual([
 				{ rel: "auth.ts", line: 1, snippet: "export function refreshToken() { return 1; }" },
 			]);
 			expect(text).toContain("unranked literal keyword matches (not semantically judged):");
@@ -445,9 +447,10 @@ describe("jfind cascade", () => {
 				modelRegistry: {} as never,
 			});
 			const result = await tool.execute("x", { query: "token refresh", grep_keywords: ["refreshToken"] });
+			const details = result.details as FindToolDetails | undefined;
 			expect(result.isError).toBe(true);
-			expect(result.details?.coverage).toBe("unavailable");
-			const fallback = result.details?.lexicalFallback ?? [];
+			expect(details?.coverage).toBe("unavailable");
+			const fallback = details?.lexicalFallback ?? [];
 			// 51 matching lines across two files fill the 20-row cap, and both files contribute.
 			expect(fallback).toHaveLength(20);
 			expect(new Set(fallback.map(match => match.rel))).toEqual(new Set(["dense.ts", "sparse.ts"]));
@@ -711,16 +714,17 @@ describe("jfind cascade", () => {
 				return result;
 			});
 			const result = await findTool(dir).execute("x", { query: "token refresh", grep_keywords: [] });
-			expect(result.details?.hits.map(hit => hit.rel)).toEqual(["a.ts"]);
-			expect(result.details?.coverage).toBe("partial");
-			expect(result.details?.timeout).toEqual({ verified: 1, passages: 3 });
+			const details = result.details as FindToolDetails | undefined;
+			expect(details?.hits.map(hit => hit.rel)).toEqual(["a.ts"]);
+			expect(details?.coverage).toBe("partial");
+			expect(details?.timeout).toEqual({ verified: 1, passages: 3 });
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			expect(text).toContain("1 of 3 passages verified");
 			expect(text).toContain("Narrow `path`");
-			const stats = structuredClone(result.details?.stats);
+			const stats = structuredClone(details?.stats);
 			late.resolve();
 			await macrotask();
-			expect(result.details?.stats).toEqual(stats);
+			expect(details?.stats).toEqual(stats);
 		} finally {
 			await removeWithRetries(dir);
 		}
@@ -736,8 +740,9 @@ describe("jfind cascade", () => {
 				throw new Error("request aborted");
 			});
 			const result = await findTool(dir).execute("x", { query: "token refresh", grep_keywords: [] });
-			expect(result.details?.timeout).toEqual({ verified: 0, passages: 0 });
-			expect(result.details?.lexicalFallback).toEqual([
+			const details = result.details as FindToolDetails | undefined;
+			expect(details?.timeout).toEqual({ verified: 0, passages: 0 });
+			expect(details?.lexicalFallback).toEqual([
 				{ rel: "a.ts", line: 1, snippet: "export function refreshToken() { return 1; }" },
 			]);
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";

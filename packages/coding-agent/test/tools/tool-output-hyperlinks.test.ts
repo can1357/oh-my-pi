@@ -13,7 +13,7 @@ import { readToolRenderer } from "@oh-my-pi/pi-tui/tools/read";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
-import { grepToolRenderer } from "@oh-my-pi/pi-tui/tools/grep";
+import { contentSearchRenderer } from "@oh-my-pi/pi-tui/tools/grep";
 
 import { cfgTuiHyperlinks } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
@@ -133,7 +133,7 @@ describe("tool output OSC 8 file:// hyperlinks", () => {
 				displayContent: ["# src/", "## interactive-mode.ts#ABCD", "*12│const needle = true;"].join("\n"),
 			},
 		};
-		const rendered = grepToolRenderer
+		const rendered = contentSearchRenderer
 			.renderResult(result as never, { expanded: true, isPartial: false }, theme, { pattern: "needle" })
 			.render(240)
 			.join("\n");

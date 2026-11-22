@@ -3,7 +3,7 @@ import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import {
 	type EditStore,
 	type GrepMatch,
@@ -12,7 +12,7 @@ import {
 	grep,
 	notebookToEditableText,
 } from "@oh-my-pi/pi-natives";
-import { prompt, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+import { sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import {
 	type ArchiveReader,
@@ -20,32 +20,29 @@ import {
 	openArchive,
 	parseArchivePathCandidates,
 } from "@oh-my-pi/pi-utils/ar";
-import { normalizeToLF } from "../edit/normalize";
-import { getEditStore, NO_FULL_LINE, recordFullySeenRows } from "../edit/store";
-import { sessionResolveContext } from "../internal-urls/context";
-import { InternalUrlRouter } from "../internal-urls/router";
-import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
-import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
+import { normalizeToLF } from "../../edit/normalize";
+import { getEditStore, NO_FULL_LINE, recordFullySeenRows } from "../../edit/store";
+import { sessionResolveContext } from "../../internal-urls/context";
+import { InternalUrlRouter } from "../../internal-urls/router";
+import { InternalUrlFilesystem } from "../../internal-urls/url-filesystem";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_COLUMN,
 	type TruncationResult,
 	truncateHead,
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { sessionDelegationBias } from "../task/prompt-policy";
-import { isScoutSpawnable } from "../task/spawn-policy";
-import { resolveFileDisplayMode } from "../utils/file-display-mode";
-import type { ToolSession } from ".";
-import { resolveToolTier } from "./approval";
-import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
-import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file-recorder";
+import { resolveFileDisplayMode } from "../../utils/file-display-mode";
+import type { ToolSession } from "..";
+import { resolveToolTier } from "../approval";
+import { materializeReadUrlToFile, parseReadUrlTarget } from "../fetch";
+import { createFileRecorder, formatResultPath, resultSnapshotPath } from "../file-recorder";
 import { type FileMatchSection, formatFileMatches } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
 import { formatMatchLine } from "@oh-my-pi/pi-tui/tools/match-line-format";
-import { isFindEnabled } from "./jfind";
 import {
 	expandDelimitedPathEntries,
 	formatPathRelativeToCwd,
 	hasGlobPathChars,
+	missingPathMessage,
 	isLineInRanges,
 	normalizePathLikeInput,
 	parseSearchPath,
@@ -59,23 +56,22 @@ import {
 	searchPathTier,
 	splitPathAndSelPreferringLiteral,
 	splitPathAndSelPreferringLiteralSync,
-} from "./path-utils";
-import { RACY_STAMP_WINDOW_MS } from "./racy-stamp";
+} from "../path-utils";
+import { RACY_STAMP_WINDOW_MS } from "../racy-stamp";
 import {
 	APPROVAL_ROOT_DELIMITERS,
 	approvalRootCandidates,
 	searchApprovalCacheTargets,
-} from "./search-approval-targets";
+} from "../search-approval-targets";
 import { type LineRange, parseLineRanges, selectorLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
 import { isReadableUrlPath, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
-import { isRawSelector } from "./read-selector";
+import { isRawSelector } from "../read-selector";
 import { formatCodeFrameLine } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { toolResult } from "./tool-result";
+import { toolResult } from "../tool-result";
 
-import { cfgGrepContextAfter, cfgGrepContextBefore } from "./settings";
-import { cfgTaskDisabledAgents } from "../task/settings";
+import { cfgGrepContextAfter, cfgGrepContextBefore } from "../settings";
 
 const searchSchema = type({
 	pattern: type("string"),
@@ -547,7 +543,7 @@ type SearchParams = typeof searchSchema.infer;
  * accept per call. Unset means "use session settings / built-in caps" for
  * ordinary model-issued calls.
  */
-export interface GrepToolOptions {
+export interface ContentSearchOptions {
 	/** Overrides both context widths unless the corresponding direction is also supplied. */
 	context?: number;
 	/** Overrides the number of lines before each match. */
@@ -558,8 +554,8 @@ export interface GrepToolOptions {
 	totalMatchLimit?: number;
 }
 
-export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails> {
-	readonly name = "grep";
+export class ContentSearch {
+	readonly name = "find";
 	readonly approval = searchPathTier;
 	/**
 	 * `always-ask-cached` keys: every file and folder this grep searches, so a
@@ -604,50 +600,13 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			skipCandidate,
 		);
 	};
-	readonly label = "Grep";
-	readonly loadMode = "discoverable";
-	readonly summary = "Search file contents by regex";
-	get description(): string {
-		const displayMode = resolveFileDisplayMode(this.session);
-		const isHlMode = displayMode.hashLines;
-		const isLineNumberMode = !displayMode.hashLines && displayMode.lineNumbers;
-		const hasFind = this.session.isToolActive?.("find") ?? isFindEnabled(this.session);
-		const eagerDelegation = sessionDelegationBias(this.session) === "eager";
-		const scoutAvailable = isScoutSpawnable(
-			cfgTaskDisabledAgents.get(this.session.settings),
-			this.session.getSessionSpawns?.() ?? "*",
-		);
-		// Every render input is a boolean; pack them so repeat reads skip the template render.
-		const key =
-			(isHlMode ? 1 : 0) |
-			(isLineNumberMode ? 2 : 0) |
-			(hasFind ? 4 : 0) |
-			(eagerDelegation ? 8 : 0) |
-			(scoutAvailable ? 16 : 0);
-		if (key !== this.#descriptionKey) {
-			this.#description = prompt.render(grepDescription, {
-				IS_HL_MODE: isHlMode,
-				IS_LINE_NUMBER_MODE: isLineNumberMode,
-				hasFind,
-				eagerDelegation,
-				scoutAvailable,
-			});
-			this.#descriptionKey = key;
-		}
-		return this.#description;
-	}
-	readonly parameters = searchSchema;
-	readonly strict = true;
-
 	readonly #contextBeforeOverride?: number;
 	readonly #contextAfterOverride?: number;
 	readonly #totalMatchLimit?: number;
-	#descriptionKey = -1;
-	#description = "";
 
 	constructor(
 		private readonly session: ToolSession,
-		options?: GrepToolOptions,
+		options?: ContentSearchOptions,
 	) {
 		const before = options?.contextBefore ?? options?.context;
 		const after = options?.contextAfter ?? options?.context;
@@ -802,7 +761,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							? ` (archive members were not searchable: ${archiveUnreadable.join(", ")})`
 							: "";
 					throw new ToolError(
-						`Path not found: ${missingPaths.join(", ")}; list each target in the semicolon-delimited \`path\`${archiveHint}`,
+						`${missingPaths.length === 1 ? await missingPathMessage(missingPaths[0]!, this.session.cwd, signal) : `Path not found: ${missingPaths.join(", ")}`}; list each target in the semicolon-delimited \`path\`${archiveHint}`,
 					);
 				}
 				const baseDisplayMode = resolveFileDisplayMode(this.session);
@@ -943,7 +902,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					}
 					if (err instanceof Error && err.message.includes("Aborted: Timeout")) {
 						throw new ToolError(
-							`Grep timed out after ${SEARCH_GREP_TIMEOUT_MS / 1000}s; narrow paths or pattern, or scope with \`glob\` first`,
+							`find timed out after ${SEARCH_GREP_TIMEOUT_MS / 1000}s searching contents: the tree is too large to scan for this pattern. Narrow \`path\`, add \`glob\` to limit which files are read, or make \`pattern\` more specific.`,
 						);
 					}
 					throw err;
@@ -1255,7 +1214,40 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							ignoredNote = `Gitignored files match (e.g. ${formatPath(example)}); pass \`gitignore: false\` to search them.`;
 						}
 					}
-					const text = [noMatchText, ignoredNote, warningNote].filter(Boolean).join("\n");
+// A case-sensitive miss says whether a differently-cased match exists, so the
+					// model retries once with `case: false` instead of concluding absence.
+					let caseNote: string | undefined;
+					if (!ignoreCase && !skipPastEnd && !multiTargets && !exactFilePaths) {
+						const insensitive = await grep(
+							{
+								pattern: normalizedPattern,
+								path: searchPath,
+								glob: globFilter,
+								recursive: scope.bareGlob,
+								ignoreCase: true,
+								multiline: effectiveMultiline,
+								hidden: true,
+								gitignore: useGitignore,
+								followLinks: searchPath.startsWith("skill://"),
+								maxCount: 1,
+								mode: GrepOutputMode.FilesWithMatches,
+								exclude: exclusionsForRoot(exclusions, this.session.cwd, searchPath),
+								signal,
+								timeoutMs: GITIGNORE_PROBE_TIMEOUT_MS,
+								filesystem,
+							},
+							undefined,
+						).catch(error => {
+							// Best effort: a probe that times out or fails leaves the plain no-match result.
+							if (signal?.aborted) throw error;
+							return undefined;
+						});
+						const example = insensitive?.matches[0]?.path;
+						if (example !== undefined) {
+							caseNote = `Matches exist ignoring case (e.g. ${formatPath(example)}); pass \`case: false\` to search case-insensitively.`;
+						}
+					}
+					const text = [noMatchText, ignoredNote, caseNote, warningNote].filter(Boolean).join("\n");
 					// Zero matches is useless regardless of warnings: by the time
 					// compaction runs, the follow-up call has already corrected course.
 					return toolResult(details).text(text).useless().done();

@@ -13,7 +13,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-import { globToolRenderer } from "@oh-my-pi/pi-tui/tools/glob";
+import { nameSearchRenderer } from "@oh-my-pi/pi-tui/tools/glob";
 
 let uiTheme: Theme;
 
@@ -176,24 +176,24 @@ describe("delimited path expansion", () => {
 	});
 });
 
-describe("globToolRenderer", () => {
+describe("nameSearchRenderer", () => {
 	it("accepts a single string paths value before validation", async () => {
 		const args = { paths: "src/**/*.ts" };
 		const renderings = [
-			globToolRenderer.renderCall(args, renderOptions, uiTheme),
-			globToolRenderer.renderResult(
+			nameSearchRenderer.renderCall(args, renderOptions, uiTheme),
+			nameSearchRenderer.renderResult(
 				{ content: [{ type: "text", text: "src/index.ts\n" }] },
 				renderOptions,
 				uiTheme,
 				args,
 			),
-			globToolRenderer.renderResult(
+			nameSearchRenderer.renderResult(
 				{ content: [{ type: "text", text: "" }], details: { fileCount: 0, files: [] } },
 				renderOptions,
 				uiTheme,
 				args,
 			),
-			globToolRenderer.renderResult(
+			nameSearchRenderer.renderResult(
 				{ content: [{ type: "text", text: "src/index.ts" }], details: { fileCount: 1, files: ["src/index.ts"] } },
 				renderOptions,
 				uiTheme,

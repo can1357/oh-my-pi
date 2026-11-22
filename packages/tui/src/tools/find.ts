@@ -33,6 +33,8 @@ import type {
 import type { TspTone } from "@oh-my-pi/pi-wire";
 import { code, col, compact, keyed, node, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
+import { type GlobRenderArgs, type GlobToolDetails, nameSearchRenderer } from "./glob";
+import { type GrepRenderArgs, type GrepToolDetails, contentSearchRenderer } from "./grep";
 import { fileHref, fileRow, inlineErrorView } from "./native-view";
 import { splitUrlScheme } from "./url-scheme-host";
 
@@ -127,9 +129,17 @@ export interface FindToolDetails {
 	/** Display form of the searched directory or file when narrower than cwd. */
 	scopePath?: string;
 	meta?: OutputMeta;
+	/** Absent on the semantic report; the exact modes tag their details (see {@link FindAnyDetails}). */
+	mode?: "semantic";
 }
 
 interface FindRenderArgs {
+	pattern?: string;
+	glob?: string;
+	case?: boolean;
+	gitignore?: boolean;
+	skip?: number | null;
+	limit?: number;
 	query?: string;
 	grep_keywords?: string[];
 	path?: string;
@@ -262,7 +272,7 @@ function quoteQuery(query: string | undefined): string | undefined {
 }
 
 /** Render find calls and results in the transcript. */
-export const findToolRenderer = {
+const semanticFindRenderer = {
 	renderCall(args: FindRenderArgs, options: RenderResultOptions, uiTheme: Theme): Component {
 		const keywords = args.grep_keywords ?? [];
 		const meta = keywords.length > 0 ? [keywords.join(" ")] : [];
@@ -496,3 +506,83 @@ export const findToolRenderer = {
 	animatedPendingPreview: true,
 	animatedPartialResult: true,
 } satisfies ToolRenderer<FindRenderArgs, FindToolDetails>;
+
+/** What a `find` call can report: the judged hits, exact content matches, or exact names. */
+export type FindAnyDetails = FindToolDetails | GrepToolDetails | GlobToolDetails;
+
+type ResultShape = { content: Array<{ type: string; text?: string }>; isError?: boolean };
+
+/** The engine a call's arguments point at; mirrors `inferFindMode` in the tool so a call renders as the mode that ran it. */
+function renderModeOf(args: FindRenderArgs | undefined, details: FindAnyDetails | undefined): "semantic" | "content" | "names" {
+	if (details?.mode !== undefined) return details.mode;
+	if (args?.query) return "semantic";
+	if (args?.pattern) return "content";
+	return args?.glob || args?.path ? "names" : "semantic";
+}
+
+/** Render `find` calls and results by the mode that produced them. */
+export const findToolRenderer = {
+	renderCall(args: FindRenderArgs, options: RenderResultOptions, uiTheme: Theme): Component {
+		const mode = renderModeOf(args, undefined);
+		if (mode === "content") return contentSearchRenderer.renderCall(args as GrepRenderArgs, options, uiTheme);
+		if (mode === "names") return nameSearchRenderer.renderCall(args as GlobRenderArgs, options, uiTheme);
+		return semanticFindRenderer.renderCall(args, options, uiTheme);
+	},
+	renderResult(
+		result: ResultShape & { details?: FindAnyDetails },
+		options: RenderResultContextOptions,
+		uiTheme: Theme,
+		args?: FindRenderArgs,
+	): Component {
+		const mode = renderModeOf(args, result.details);
+		if (mode === "content") {
+			return contentSearchRenderer.renderResult(
+				result as ResultShape & { details?: GrepToolDetails },
+				options,
+				uiTheme,
+				args as GrepRenderArgs | undefined,
+			);
+		}
+		if (mode === "names") {
+			return nameSearchRenderer.renderResult(
+				result as ResultShape & { details?: GlobToolDetails },
+				options,
+				uiTheme,
+				args as GlobRenderArgs | undefined,
+			);
+		}
+		return semanticFindRenderer.renderResult(result as ResultShape & { details?: FindToolDetails }, options, uiTheme, args);
+	},
+	describeCall(args: FindRenderArgs): NativeToolView {
+		const mode = renderModeOf(args, undefined);
+		if (mode === "content") return contentSearchRenderer.describeCall(args as GrepRenderArgs);
+		if (mode === "names") return nameSearchRenderer.describeCall(args as GlobRenderArgs);
+		return semanticFindRenderer.describeCall(args);
+	},
+	describeResult(
+		result: ResultShape & { details?: FindAnyDetails },
+		options: RenderResultContextOptions,
+		args?: FindRenderArgs,
+	): NativeToolView {
+		const mode = renderModeOf(args, result.details);
+		if (mode === "content") {
+			return contentSearchRenderer.describeResult(
+				result as ResultShape & { details?: GrepToolDetails },
+				options,
+				args as GrepRenderArgs | undefined,
+			);
+		}
+		if (mode === "names") {
+			return nameSearchRenderer.describeResult(
+				result as ResultShape & { details?: GlobToolDetails },
+				options,
+				args as GlobRenderArgs | undefined,
+			);
+		}
+		return semanticFindRenderer.describeResult(result as ResultShape & { details?: FindToolDetails }, options, args);
+	},
+	inline: true,
+	mergeCallAndResult: true,
+	animatedPendingPreview: true,
+	animatedPartialResult: true,
+} satisfies ToolRenderer<FindRenderArgs, FindAnyDetails>;

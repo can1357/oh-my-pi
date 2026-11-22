@@ -2,22 +2,19 @@ import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import * as natives from "@oh-my-pi/pi-natives";
-import { formatGroupedPaths, hasFsCode, isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
-import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
-import { InternalUrlFilesystem, type UrlFileStat } from "../internal-urls/url-filesystem";
-import globDescription from "../prompts/tools/glob.md" with { type: "text" };
+import { formatGroupedPaths, hasFsCode, isEnoent, isRecord, untilAborted } from "@oh-my-pi/pi-utils";
+import { InternalUrlRouter, sessionResolveContext } from "../../internal-urls";
+import { InternalUrlFilesystem, type UrlFileStat } from "../../internal-urls/url-filesystem";
 import { truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { sessionDelegationBias } from "../task/prompt-policy";
-import { isScoutSpawnable } from "../task/spawn-policy";
-import type { ToolSession } from ".";
-import { resolveToolTier } from "./approval";
-import { isFindEnabled } from "./jfind";
+import type { ToolSession } from "..";
+import { resolveToolTier } from "../approval";
 import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
 import {
 	expandDelimitedPathEntries,
 	formatPathRelativeToCwd,
+	missingPathMessage,
 	normalizePathLikeInput,
 	parseFindPattern,
 	partitionExistingPaths,
@@ -25,14 +22,13 @@ import {
 	resolveSearchBase,
 	resolveSearchResultPath,
 	searchPathTier,
-} from "./path-utils";
-import { searchApprovalCacheTargets } from "./search-approval-targets";
+} from "../path-utils";
+import { searchApprovalCacheTargets } from "../search-approval-targets";
 import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
-import { ToolAbortError, throwIfAborted } from "./tool-errors";
+import { ToolAbortError, throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { toolResult } from "./tool-result";
+import { toolResult } from "../tool-result";
 
-import { cfgTaskDisabledAgents } from "../task/settings";
 
 const findSchema = type({
 	"path?": "string",
@@ -53,7 +49,7 @@ const GLOB_ARGUMENTS: ReadonlySet<string> = new Set(["path", "hidden", "gitignor
  * or a URL. Approval and execution both read this, so a `pattern` reaching
  * outside `path` is approved for where it actually searches.
  */
-function globSearchPath(args: unknown): string | undefined {
+export function globSearchPath(args: unknown): string | undefined {
 	if (!isRecord(args)) return undefined;
 	const base = typeof args.path === "string" ? args.path : undefined;
 	if (typeof args.pattern !== "string") return base;
@@ -156,8 +152,8 @@ interface NativePreparedTarget {
 	result?: Array<{ path: string; mtime: number }>;
 }
 
-export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
-	readonly name = "glob";
+export class NameSearch {
+	readonly name = "find";
 	readonly approval = (args: unknown) => searchPathTier({ path: globSearchPath(args) });
 	/**
 	 * `always-ask-cached` keys: the folders and files this glob searches, so a
@@ -179,26 +175,6 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			},
 		);
 	};
-	readonly loadMode = "essential";
-	readonly label = "Glob";
-	get description(): string {
-		const hasFind = this.session.isToolActive?.("find") ?? isFindEnabled(this.session);
-		const eagerDelegation = sessionDelegationBias(this.session) === "eager";
-		const scoutAvailable = isScoutSpawnable(
-			cfgTaskDisabledAgents.get(this.session.settings),
-			this.session.getSessionSpawns?.() ?? "*",
-		);
-		// Every render input is a boolean; pack them so repeat reads skip the template render.
-		const key = (hasFind ? 1 : 0) | (eagerDelegation ? 2 : 0) | (scoutAvailable ? 4 : 0);
-		if (key !== this.#descriptionKey) {
-			this.#description = prompt.render(globDescription, { hasFind, eagerDelegation, scoutAvailable });
-			this.#descriptionKey = key;
-		}
-		return this.#description;
-	}
-	readonly parameters = findSchema;
-
-	readonly strict = true;
 	/**
 	 * Unknown keys reach {@link execute} so a misplaced `pattern` is refused: the
 	 * closed schema would drop it and list the whole tree instead. Arguments the
@@ -211,8 +187,6 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	readonly #nativeGlob: typeof natives.glob;
 	readonly #stat: typeof fs.promises.stat;
 	readonly #timeoutMs: number;
-	#descriptionKey = -1;
-	#description = "";
 
 	constructor(
 		private readonly session: ToolSession,
@@ -473,7 +447,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						const exists = await runCustom(Promise.resolve(customOps.exists(target.searchPath)));
 						if (exists.timedOut) return [] as string[];
 						if (!exists.value) {
-							if (isSingle) throw new ToolError(`Path not found: ${scopePath}`);
+							if (isSingle) throw new ToolError(await missingPathMessage(scopePath, this.session.cwd, signal));
 							return [] as string[];
 						}
 						if (!target.hasGlob && customOps.stat) {
@@ -542,7 +516,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 							// ENAMETOOLONG can never name a real target; surface a clean
 							// "Path not found" instead of leaking the raw errno (issue #7597).
 							if (isEnoent(err) || hasFsCode(err, "ENAMETOOLONG")) {
-								if (isSingle) throw new ToolError(`Path not found: ${scopePath}`);
+								if (isSingle) throw new ToolError(await missingPathMessage(scopePath, this.session.cwd, signal));
 								return { target, result: [] };
 							}
 							throw err;

@@ -1463,8 +1463,8 @@ export class SessionAdvisors {
 				allowDirectFileMutation: advisorCanMutateFiles,
 				// Gated on the advisor's own grant: the factory builds a fresh
 				// tool, so handing it over unconditionally would give a roster
-				// without `grep` a search tool it was denied.
-				createGrepTool: advisorToolMap.has("grep") ? slate?.createGrepTool : undefined,
+				// without `find` a search tool it was denied.
+				createGrepTool: advisorToolMap.has("find") ? slate?.createGrepTool : undefined,
 				// Advisors share the session's live MCP connections, so their
 				// resource frames answer from the same catalog the primary sees.
 				// Not gated on a tool grant: reading what a server advertises is

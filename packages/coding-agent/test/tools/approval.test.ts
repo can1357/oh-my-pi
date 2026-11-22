@@ -35,8 +35,6 @@ function createBashTool(settingsOverrides: Record<string, unknown> = {}, resolve
 		"bash.autoBackground.enabled": false,
 		"astGrep.enabled": false,
 		"astEdit.enabled": false,
-		"grep.enabled": false,
-		"glob.enabled": false,
 		...settingsOverrides,
 	});
 	spyOn(settings, "getShellConfig").mockReturnValue({

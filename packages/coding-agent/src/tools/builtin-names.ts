@@ -10,8 +10,6 @@ export const BUILTIN_TOOL_NAMES = [
 	"debug",
 	"eval",
 	"github",
-	"glob",
-	"grep",
 	"find",
 	"lsp",
 	"checkpoint",
@@ -51,12 +49,9 @@ export const BUILTIN_TOOL_HELP: Record<BuiltinToolName, BuiltinToolHelp> = {
 	edit: { summary: "Edit files in place", defaultState: "on" },
 	write: { summary: "Create or overwrite files", defaultState: "on" },
 	bash: { summary: "Execute shell commands", defaultState: "on" },
-	grep: { summary: "Search file contents by regex", defaultState: "on" },
-	glob: { summary: "Find files by glob pattern", defaultState: "on" },
 	find: {
-		summary: "Find code by describing what it does",
-		defaultState: "detected",
-		detectedWhen: "a native judge model is available",
+		summary: "Search files by regex, by name or glob, or (with a judge model) by description",
+		defaultState: "on",
 	},
 	eval: { summary: "Run Python/JS cells with browser, computer, and binary-analysis helpers", defaultState: "on" },
 	task: { summary: "Launch subagents for parallel work", defaultState: "on" },
@@ -86,8 +81,12 @@ export const HIDDEN_TOOL_NAMES = ["yield", "goal", "think"] as const;
 
 export type HiddenToolName = (typeof HIDDEN_TOOL_NAMES)[number];
 
-const LEGACY_BUILTIN_TOOL_NAME_ALIASES: ReadonlyMap<string, BuiltinToolName> = new Map([["search", "grep"]]);
-
+/** Retired tool names that now resolve to `find`: `grep` (content mode) and `glob` (names mode) were folded into it. */
+const LEGACY_BUILTIN_TOOL_NAME_ALIASES: ReadonlyMap<string, BuiltinToolName> = new Map([
+	["search", "find"],
+	["grep", "find"],
+	["glob", "find"],
+]);
 const CANONICAL_TOOL_NAMES: Record<string, true> = Object.fromEntries(
 	[...BUILTIN_TOOL_NAMES, ...HIDDEN_TOOL_NAMES].map(name => [name, true]),
 );

@@ -3,8 +3,8 @@ import * as os from "node:os";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { AstGrepTool } from "@oh-my-pi/pi-coding-agent/tools/ast-grep";
-import { GlobTool } from "@oh-my-pi/pi-coding-agent/tools/glob";
-import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
+import { NameSearch } from "@oh-my-pi/pi-coding-agent/tools/jfind/name-search";
+import { ContentSearch } from "@oh-my-pi/pi-coding-agent/tools/jfind/content-search";
 import { FindTool } from "@oh-my-pi/pi-coding-agent/tools/jfind";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
@@ -43,7 +43,7 @@ describe("ssh:// tools require exec-tier approval", () => {
 	});
 
 	it("grep: an ssh:// entry flattened into a delimited path still trips exec", () => {
-		const tool = new GrepTool(createTestToolSession(os.tmpdir()));
+		const tool = new ContentSearch(createTestToolSession(os.tmpdir()));
 		// The delimited string is one entry at approval time (expansion happens
 		// later), so an anchored check would miss it — the substring scan must not.
 		expect(callApproval(tool, { path: "src,ssh://icaro/etc/hosts" })).toBe("exec");
@@ -59,7 +59,7 @@ describe("ssh:// tools require exec-tier approval", () => {
 
 	it.each([
 		["find", (session: ToolSession) => new FindTool(session)],
-		["glob", (session: ToolSession) => new GlobTool(session)],
+		["name-search", (session: ToolSession) => new NameSearch(session)],
 		["ast_grep", (session: ToolSession) => new AstGrepTool(session)],
 	])("%s: an ssh:// path is exec, local paths stay read", (_name, create) => {
 		const tool = create(createTestToolSession(os.tmpdir()));

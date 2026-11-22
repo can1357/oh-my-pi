@@ -302,7 +302,7 @@ export function buildPiGrepResult(toolResult: ToolResultMessage): PiGrepExecResu
 /**
  * The one grep cap that reaches Cursor through no other field.
  *
- * `GrepTool` folds every cap into the flat `details.truncated`, but only
+ * `ContentSearch` (find's content mode) folds every cap into the flat `details.truncated`, but only
  * populates `details.truncation` when the output text itself was trimmed and
  * `perFileLimitReached` when a per-file or explicit total cap fired. Its native
  * backend's own ceiling (`INTERNAL_TOTAL_CAP`) sets neither, so a search that

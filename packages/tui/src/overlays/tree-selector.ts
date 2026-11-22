@@ -1284,6 +1284,17 @@ class TreeList implements Component {
 					.slice(0, 50);
 				return `[bash: ${cmd}${rawCmd.length > 50 ? "..." : ""}]`;
 			}
+			// `find` replaced `grep` and `glob`; those cases below stay for sessions recorded before the merge.
+			case "find": {
+				if (typeof args.query === "string" && args.query.trim() !== "") {
+					const query = args.query.replace(/[\n\t]/g, " ").trim();
+					return `[find: ${query.slice(0, 50)}${query.length > 50 ? "..." : ""}]`;
+				}
+				return this.#formatToolCall(typeof args.pattern === "string" && args.pattern !== "" ? "grep" : "glob", {
+					...args,
+					path: typeof args.glob === "string" && typeof args.path !== "string" ? args.glob : args.path,
+				});
+			}
 			case "grep": {
 				const pattern = String(args.pattern || "");
 				const searchPathsInput =

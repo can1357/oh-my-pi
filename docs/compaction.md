@@ -31,17 +31,17 @@ Both are persisted as session entries and converted back into user-context messa
 Compaction and branch summaries are first-class session entries, not plain assistant/user messages.
 
 - `CompactionEntry`
-   - `type: "compaction"`
-   - `summary`, optional `shortSummary`
-   - `firstKeptEntryId` (compaction boundary)
-   - `tokensBefore`
-   - optional `details`, `preserveData`, `fromExtension`
-   - optional `method`, `tokensAfter`, `warning` (maintenance/display metadata)
-   - optional `providerReplayThroughEntryId` (last entry covered by a native replay snapshot)
+  - `type: "compaction"`
+  - `summary`, optional `shortSummary`
+  - `firstKeptEntryId` (compaction boundary)
+  - `tokensBefore`
+  - optional `details`, `preserveData`, `fromExtension`
+  - optional `method`, `tokensAfter`, `warning` (maintenance/display metadata)
+  - optional `providerReplayThroughEntryId` (last entry covered by a native replay snapshot)
 - `BranchSummaryEntry`
-   - `type: "branch_summary"`
-   - `fromId`, `summary`
-   - optional `details`, `fromExtension`
+  - `type: "branch_summary"`
+  - `fromId`, `summary`
+  - optional `details`, `fromExtension`
 
 When context is rebuilt (`buildSessionContext`):
 
@@ -128,35 +128,35 @@ What the LLM sees:
 The automatic paths are intentionally different:
 
 - **Overflow recovery**
-   - Trigger: current-model assistant error is detected as context overflow and the error is not older than the latest compaction.
-   - The failing assistant error message is removed from active agent state before retry.
-   - Context promotion is tried first; if a configured larger model is available, the agent switches model and retries without compacting.
-   - If promotion is unavailable and compaction is enabled, automatic maintenance walks `compaction.methodOrder` with `reason: "overflow"` and `willRetry: true`; handoff is skipped because its request would reuse the overflowing input.
-   - On success, `agent.continue()` is scheduled to retry the turn.
+  - Trigger: current-model assistant error is detected as context overflow and the error is not older than the latest compaction.
+  - The failing assistant error message is removed from active agent state before retry.
+  - Context promotion is tried first; if a configured larger model is available, the agent switches model and retries without compacting.
+  - If promotion is unavailable and compaction is enabled, automatic maintenance walks `compaction.methodOrder` with `reason: "overflow"` and `willRetry: true`; handoff is skipped because its request would reuse the overflowing input.
+  - On success, `agent.continue()` is scheduled to retry the turn.
 
 - **Incomplete-output recovery**
-   - Trigger: same-model assistant message ends with `stopReason === "length"` and the message is not older than the latest compaction.
-   - When the window is below the compaction threshold and the turn delivered text or a tool call, the truncated turn is retained and an output-limit warning is shown; compaction cannot raise the output cap.
-   - Otherwise the incomplete assistant is removed from active state, and context promotion is tried first.
-   - With maintenance enabled, no-output turns below threshold retry without compaction; a reasoning-only output-cap stop also receives a developer reminder to act in smaller steps.
-   - Above threshold (or with an unknown window), auto maintenance walks `compaction.methodOrder` with `reason: "incomplete"` and `willRetry: true`. Unlike overflow, a reachable `handoff` may run because the input remains usable.
-   - Consecutive recoveries without text or a tool call are capped at three; new user input or actionable output resets the counter. The terminal cap blocks automatic continuation and reports an actionable failure.
-   - Successful recovery schedules continuation.
+  - Trigger: same-model assistant message ends with `stopReason === "length"` and the message is not older than the latest compaction.
+  - When the window is below the compaction threshold and the turn delivered text or a tool call, the truncated turn is retained and an output-limit warning is shown; compaction cannot raise the output cap.
+  - Otherwise the incomplete assistant is removed from active state, and context promotion is tried first.
+  - With maintenance enabled, no-output turns below threshold retry without compaction; a reasoning-only output-cap stop also receives a developer reminder to act in smaller steps.
+  - Above threshold (or with an unknown window), auto maintenance walks `compaction.methodOrder` with `reason: "incomplete"` and `willRetry: true`. Unlike overflow, a reachable `handoff` may run because the input remains usable.
+  - Consecutive recoveries without text or a tool call are capped at three; new user input or actionable output resets the counter. The terminal cap blocks automatic continuation and reports an actionable failure.
+  - Successful recovery schedules continuation.
 
 - **Threshold maintenance**
-   - Trigger: successful, non-error assistant message whose adjusted context tokens exceed `resolveThresholdTokens(...)`. The measured count comes from `calculateContextTokens(...)`, which subtracts provider-side orchestration tokens (billable, but never replayed into the conversation prefix) so auto-compaction and context-promotion thresholds are not inflated by them.
-   - Mid-turn maintenance also checks safe tool-loop boundaries before the next provider request when `compaction.midTurnEnabled !== false`.
-   - The initial trigger uses adjusted provider usage floored by the stored-conversation estimate; pruning does not retroactively reduce the just-billed prompt. Reclaimed tokens affect the subsequent maintenance target. Usage predating the latest compaction is ignored in favor of the live stored estimate.
-   - Context promotion is tried before post-turn compaction.
-   - If promotion is unavailable, auto maintenance walks `compaction.methodOrder` with `reason: "threshold"` and `willRetry: false`.
-   - Every method, `handoff` included, runs inline: post-turn maintenance generates the handoff document and commits it as a compaction entry before the run's `agent_end` settles, so the settle's `willContinue`/`yielded` reflects whether a continuation was actually scheduled.
-   - On success, if `compaction.autoContinue !== false`, post-turn maintenance schedules an agent-authored developer auto-continue prompt from `prompts/system/auto-continue.md`; mid-turn maintenance never schedules a separate continuation because the core loop already owns the next provider request.
+  - Trigger: successful, non-error assistant message whose adjusted context tokens exceed `resolveThresholdTokens(...)`. The measured count comes from `calculateContextTokens(...)`, which subtracts provider-side orchestration tokens (billable, but never replayed into the conversation prefix) so auto-compaction and context-promotion thresholds are not inflated by them.
+  - Mid-turn maintenance also checks safe tool-loop boundaries before the next provider request when `compaction.midTurnEnabled !== false`.
+  - The initial trigger uses adjusted provider usage floored by the stored-conversation estimate; pruning does not retroactively reduce the just-billed prompt. Reclaimed tokens affect the subsequent maintenance target. Usage predating the latest compaction is ignored in favor of the live stored estimate.
+  - Context promotion is tried before post-turn compaction.
+  - If promotion is unavailable, auto maintenance walks `compaction.methodOrder` with `reason: "threshold"` and `willRetry: false`.
+  - Every method, `handoff` included, runs inline: post-turn maintenance generates the handoff document and commits it as a compaction entry before the run's `agent_end` settles, so the settle's `willContinue`/`yielded` reflects whether a continuation was actually scheduled.
+  - On success, if `compaction.autoContinue !== false`, post-turn maintenance schedules an agent-authored developer auto-continue prompt from `prompts/system/auto-continue.md`; mid-turn maintenance never schedules a separate continuation because the core loop already owns the next provider request.
 
 - **Idle maintenance**
-   - Trigger: `runIdleCompaction()` when not streaming or already compacting; it cancels pending cache-warm refreshes first so no warm replay races the summary. The idle timer belongs to the session's idle-maintenance scheduler, which the interactive TUI enables for the session on screen (see [SDK idle maintenance](./sdk.md#idle-maintenance)). It arms once a turn has settled — nothing live, admitted, queued or scheduled, and no background job or delivery that could wake the session — while the editor holds no draft and context is at or above `compaction.idleThresholdTokens`; a draft defers it until the draft is cleared, which re-arms it with a fresh delay. When a response has confirmed a long-tier (1h, Anthropic long retention) prompt-cache entry — it read or wrote the cache — the timer fires 5s before the cache warmer's refresh point, `min(90% of TTL, TTL − 10s)` after the last request or warm hit (about 54 min), so the summary request still reads the cached prefix; a turn that settles past that point but before expiry compacts immediately. A 5-minute entry never drives the timer: it lapses too soon after a turn for compaction to be worth starting on its schedule. In that case, with an unknown lifetime, or once the entry has expired, the timer waits `compaction.idleTimeoutSeconds`.
-   - Short-tier trade-off (deliberate): the fallback delay counts from the moment the turn settles while the cache lifetime counts from the request send, so with the default 300s delay an idle summary after a 5-minute entry always runs on an expired cache and pays a cold full-prefix read. This is accepted so a short break never triggers compaction; shorter `compaction.idleTimeoutSeconds` values (minimum 60s) can still land inside the entry's lifetime.
-   - While the pass rewrites history, prompts, turn-starting custom messages, IRC wakes and background-result deliveries wait for it to finish and then run on the compacted context.
-   - Uses `reason: "idle"` and does not auto-continue afterward.
+  - Trigger: `runIdleCompaction()` when not streaming or already compacting; it cancels pending cache-warm refreshes first so no warm replay races the summary. The idle timer belongs to the session's idle-maintenance scheduler, which the interactive TUI enables for the session on screen (see [SDK idle maintenance](./sdk.md#idle-maintenance)). It arms once a turn has settled — nothing live, admitted, queued or scheduled, and no background job or delivery that could wake the session — while the editor holds no draft and context is at or above `compaction.idleThresholdTokens`; a draft defers it until the draft is cleared, which re-arms it with a fresh delay. When a response has confirmed a long-tier (1h, Anthropic long retention) prompt-cache entry — it read or wrote the cache — the timer fires 5s before the cache warmer's refresh point, `min(90% of TTL, TTL − 10s)` after the last request or warm hit (about 54 min), so the summary request still reads the cached prefix; a turn that settles past that point but before expiry compacts immediately. A 5-minute entry never drives the timer: it lapses too soon after a turn for compaction to be worth starting on its schedule. In that case, with an unknown lifetime, or once the entry has expired, the timer waits `compaction.idleTimeoutSeconds`.
+  - Short-tier trade-off (deliberate): the fallback delay counts from the moment the turn settles while the cache lifetime counts from the request send, so with the default 300s delay an idle summary after a 5-minute entry always runs on an expired cache and pays a cold full-prefix read. This is accepted so a short break never triggers compaction; shorter `compaction.idleTimeoutSeconds` values (minimum 60s) can still land inside the entry's lifetime.
+  - While the pass rewrites history, prompts, turn-starting custom messages, IRC wakes and background-result deliveries wait for it to finish and then run on the compacted context.
+  - Uses `reason: "idle"` and does not auto-continue afterward.
 
 ### Payload-rejection guard
 
@@ -187,7 +187,7 @@ Explicit compaction modes and focused instructions retain their existing behavio
   retains complete recent tool-call/result units and the notebook without calling
   a summarization model. Near the automatic threshold, the model receives a
   once-per-window reminder to save its working state.
-- `read` and `grep` can recover original messages and tool outputs through
+- `read` and `find` can recover original messages and tool outputs through
   `history://current/full`. The text includes stable entry IDs and window
   boundaries. Shared selectors work, for example
   `history://current/full:1-200` and `history://current/full:raw:1-200`.
@@ -197,7 +197,7 @@ Explicit compaction modes and focused instructions retain their existing behavio
   Existing `history://<id>` routes retain their concise transcript behavior.
 
 Experimental rollover requires the effective tool set to contain `context_notes`,
-`new_context`, `read`, and `grep`. Restricted sessions without all four retain
+`new_context`, `read`, and `find`. Restricted sessions without all four retain
 legacy maintenance. Disabling the setting restores legacy compaction and disables
 the experimental tools and full-history route; existing notes remain in the journal
 and provider context.
@@ -343,11 +343,11 @@ Remote summarization modes, consulted in order (each stage falls back to the nex
 - **V2 streaming Responses compaction** (tried first, on by default via `compaction.remoteStreamingV2Enabled`): for eligible models — `shouldUseCompactionV2Streaming(...)`: `openai-responses`, `azure-openai-responses`, or `openai-codex-responses` APIs with `remoteCompaction.v2StreamingEnabled` (on by default for Amazon Bedrock's OpenAI routes, see below) and a resolvable Responses endpoint — compaction forwards the full conversation, including provider-native tool-call history replay, to the model's normal Responses streaming endpoint with a trailing `compaction_trigger` input item, and requires exactly one streamed `compaction` output item. The request carries session routing and prompt-cache identifiers (routing/session-id headers plus `prompt_cache_key`) and resolves the model's reasoning effort the same way a normal turn does. Replacement history is Codex-style: retained real user messages within the `compaction.v2RetainedMessageBudget` (default `64000` tokens, clamped to that ceiling) followed by the compaction item, stored in `preserveData.openaiRemoteCompaction` (version `"v2"`). Transient stream errors retry up to `V2_COMPACTION_MAX_RETRIES` (`2`) times with exponential backoff under a five-minute timeout (`V2_COMPACTION_TIMEOUT_MS`, same as V1); user aborts are never retried.
 - **V1 native `/responses/compact`**: for OpenAI models, OpenAI Codex models with an explicit compatible `remoteCompaction.endpoint`, and `openai-responses` models on Amazon Bedrock's OpenAI routes (`shouldUseOpenAiRemoteCompaction`), when remote compaction is enabled and V2 did not run (ineligible or failed), compaction tries the provider-native `/responses/compact` endpoint. It preserves provider replacement history in `preserveData.openaiRemoteCompaction`. A native failure surfaces its transport error instead of silently switching to generic summarization — unless `compaction.remoteEndpoint` is set, in which case summary generation falls through to that endpoint/local summarization.
 - **Anthropic on-demand compaction** (`compact-2026-09-04` beta): for model lines the beta supports (`compat.supportsServerCompaction`, a catalog rule: Opus 4.6+, Sonnet 4.6+, Fable/Mythos 5+ on the `anthropic`, `google-vertex`, `amazon-bedrock`, and `bedrock-mantle` providers) whose effective endpoint implements it (`shouldUseAnthropicNativeCompaction`: the Claude API, Vertex, Foundry, Claude Platform on AWS, and Amazon Bedrock's `/anthropic` routes; another provider reaching one of the first four needs `remoteCompaction.enabled`; any other URL stays excluded unless it is the model's own configured `baseUrl` and the model declares it with `remoteCompaction: { api: "anthropic-messages", enabled: true }`), when remote compaction is enabled and no OpenAI lane applies. The same declaration lets an extension's custom api (never a built-in adapter) that dispatches its model to Anthropic Messages take the lane: its compaction request goes through the custom api's own stream like any turn, the Anthropic provider it delegates to applies the same model and endpoint policy, and the stream resolves the effort earlier controls left in force (`resolveAnthropicCompactionEffort`) on that delegate. Compaction sends the history to summarize with the live conversation's system prompt, tools, and thinking settings, plus a top-level `compaction: { type: "summarize", instructions }` parameter carrying the harness summary prompt. The API answers with one signed `compaction` block (`stop_reason: "compaction"`), surfaced as an `anthropicCompaction` payload. Its plain-text summary becomes the entry `summary` (plus the file-operation list) **and** `preserveData.anthropicCompaction`; later requests on a compaction-capable endpoint send the block back unchanged as the first block, while every other provider reads the summary text. A block's signed `tool_changes` (net tool additions/removals across the summarized range) are persisted and replayed verbatim with it. The retained tail after the cut point is replayed from session entries like a local summary. A response without a signed summary, such as a refusal, an output limit, or a tool call during summarization, is a native failure, like the OpenAI lanes. Blocks written by the older `compact-2026-01-12` threshold beta (`encryptedContent`) are replay-only.
-   - On Amazon Bedrock, use `https://bedrock-runtime.<region>.amazonaws.com/anthropic` or `https://bedrock-mantle.<region>.api.aws/anthropic` ([setup](./models.md#claude-on-bedrocks-anthropic-messages-api-anthropic)); the FIPS and PrivateLink hostnames listed below for the OpenAI routes count too. The gate reads `compat.bedrockMessagesApi`, detected from such a `baseUrl`; set it in `models.yml` to opt a proxy or an `ANTHROPIC_BASE_URL` reroute in, or `false` to opt a Bedrock route out.
-   - Bedrock Converse models (`bedrock-converse-stream`) whose model card lists the beta (`compat.supportsServerCompaction`, a `providers/amazon-bedrock.kdl` rule: Haiku 4.5/5.5, Sonnet 5/5.5, Opus 4.7/4.8/5/5.5) compact through a Bedrock Runtime `InvokeModelWithResponseStream` side request carrying the same Anthropic Messages body; Converse itself rejects the beta ([AWS compaction guide](https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-compaction.html)). Ordinary turns stay on Converse and read the summary text; the signed block is replayed only to later compaction requests. AWS bedrock-runtime origins (public, FIPS, PrivateLink) qualify by default; any other `baseUrl` is treated as a gateway that may implement only Converse and needs `remoteCompaction.enabled: true`. `remoteCompaction.enabled: false` opts a model out.
+  - On Amazon Bedrock, use `https://bedrock-runtime.<region>.amazonaws.com/anthropic` or `https://bedrock-mantle.<region>.api.aws/anthropic` ([setup](./models.md#claude-on-bedrocks-anthropic-messages-api-anthropic)); the FIPS and PrivateLink hostnames listed below for the OpenAI routes count too. The gate reads `compat.bedrockMessagesApi`, detected from such a `baseUrl`; set it in `models.yml` to opt a proxy or an `ANTHROPIC_BASE_URL` reroute in, or `false` to opt a Bedrock route out.
+  - Bedrock Converse models (`bedrock-converse-stream`) whose model card lists the beta (`compat.supportsServerCompaction`, a `providers/amazon-bedrock.kdl` rule: Haiku 4.5/5.5, Sonnet 5/5.5, Opus 4.7/4.8/5/5.5) compact through a Bedrock Runtime `InvokeModelWithResponseStream` side request carrying the same Anthropic Messages body; Converse itself rejects the beta ([AWS compaction guide](https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-compaction.html)). Ordinary turns stay on Converse and read the summary text; the signed block is replayed only to later compaction requests. AWS bedrock-runtime origins (public, FIPS, PrivateLink) qualify by default; any other `baseUrl` is treated as a gateway that may implement only Converse and needs `remoteCompaction.enabled: true`. `remoteCompaction.enabled: false` opts a model out.
 - **Custom remote endpoint**: if `compaction.remoteEndpoint` is set and remote compaction is enabled, local summary generation POSTs one of two wire formats:
-   - custom omp summarizer endpoints receive `{ systemPrompt, prompt, maxTokens }` and must return JSON containing at least `{ summary }`.
-   - OpenAI-compatible endpoints whose path ends in `/chat/completions` receive `{ model, messages, stream: false, max_tokens }`, where `messages` contains one system prompt and one user prompt. The summary is read from `choices[0].message.content`, which lets self-hosted servers such as llama.cpp and vLLM act as remote compactors without a separate summarizer shim.
+  - custom omp summarizer endpoints receive `{ systemPrompt, prompt, maxTokens }` and must return JSON containing at least `{ summary }`.
+  - OpenAI-compatible endpoints whose path ends in `/chat/completions` receive `{ model, messages, stream: false, max_tokens }`, where `messages` contains one system prompt and one user prompt. The summary is read from `choices[0].message.content`, which lets self-hosted servers such as llama.cpp and vLLM act as remote compactors without a separate summarizer shim.
 
 Amazon Bedrock's OpenAI routes get both OpenAI lanes without an opt-in. The route is detected from the model `baseUrl` (`isBedrockOpenAIUrl` in `packages/catalog/src/hosts.ts`), for any provider id with `api: openai-responses`: an HTTPS `/openai/…` path on a `bedrock-runtime` or `bedrock-mantle` endpoint, or Mantle's documented `/v1` base. Endpoint hostnames are the public ones (`bedrock-runtime.<region>.amazonaws.com`, FIPS `bedrock-runtime-fips.<region>.amazonaws.com`, `bedrock-mantle.<region>.api.aws`, including the bundled `bedrock-mantle` provider's `{region}` template) and AWS PrivateLink endpoint-specific names (`<vpce-id>[-<az>].bedrock-runtime[-fips].<region>.vpce.amazonaws.com` or `….bedrock-mantle.<region>.vpce.amazonaws.com`); a VPC endpoint with private DNS answers on the public names ([Endpoints supported by Amazon Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/endpoints.html), [Bedrock service endpoints](https://docs.aws.amazon.com/general/latest/gr/bedrock.html), [Bedrock VPC endpoints](https://docs.aws.amazon.com/bedrock/latest/userguide/vpc-interface-endpoints.html), [PrivateLink DNS names](https://docs.aws.amazon.com/vpc/latest/privatelink/privatelink-access-aws-services.html)). Other Bedrock paths, such as `/anthropic`, `/v1` on bedrock-runtime, or the Converse root, do not count. On these Bedrock routes only, both compaction requests are shaped like a normal Bedrock turn by `prepareBedrockCompactionRequest` (`packages/agent/src/compaction/bedrock.ts`): configured headers are resolved, the transport fetch applies (provider proxy, extra CA, User-Agent, request recording), and the provider's own request hooks run. So the bundled `bedrock-mantle` provider fills in `{region}` and uses its bearer token or SigV4 signing. Other providers' compaction requests keep their own transport. To turn the default off for a model or provider in `models.yml`, set `remoteCompaction.enabled: false` (both lanes) or `remoteCompaction.v2StreamingEnabled: false` (V1 only). AWS documents the Responses API on both endpoints ([Responses API](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-responses-api.html)), and OpenAI lists Bedrock's feature coverage ([OpenAI models in Amazon Bedrock](https://developers.openai.com/api/docs/guides/amazon-bedrock)). None of these pages mention compaction. Support was verified live instead, on 2026-09-25 with a Bedrock API key (not SigV4) on the public `/openai/v1` bases: in `us-east-1`, V1 `POST {base}/responses/compact` returned `object: "response.compaction"` and V2 streamed a `compaction` output item on `bedrock-runtime` (`us.openai.gpt-6-astra`, `-sol`, `-luna`) and on `bedrock-mantle` (`openai.gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-terra`, `gpt-5.5`, `gpt-5.4`). FIPS, PrivateLink, and Mantle `/v1` bases reach the same services but were not verified live. `openai.gpt-oss-120b` on Mantle does not support the Responses API.
 
@@ -515,9 +515,9 @@ Post-navigation event exposing new/old leaf and optional summary entry.
 - Auto compaction can try multiple model candidates and retry transient failures; long retry delays prefer the next candidate when one is available.
 - Overflow errors are excluded from generic retry path because they are handled by context promotion/compaction.
 - If auto-compaction fails:
-   - overflow path emits `Context overflow recovery failed: ...`
-   - incomplete-output path emits `Incomplete response recovery failed: ...`
-   - threshold/idle paths emit `Auto-compaction failed: ...`
+  - overflow path emits `Context overflow recovery failed: ...`
+  - incomplete-output path emits `Incomplete response recovery failed: ...`
+  - threshold/idle paths emit `Auto-compaction failed: ...`
 - Automatic summary candidates, including armed speculative results, are checked for context reduction before commit. Non-shrinking candidates advance to the next configured method; if none makes progress, no compaction entry is committed. Mid-turn retries, including new speculative requests, stay suppressed until the retained-history cut point advances.
   Native Responses replay counts visible replacement history and image estimates, not opaque encrypted-state bytes. Both sides use the rebuilt active context, so history before `/clear` cannot inflate the reduction baseline. These are local estimates, not provider-billed token counts.
 - Branch summarization can be cancelled via abort signal (e.g., Escape), returning canceled/aborted navigation result.

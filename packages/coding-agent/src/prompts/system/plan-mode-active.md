@@ -27,6 +27,7 @@ Choose short kebab-case task `<slug>`; create `local://<slug>-plan.md` (e.g. `lo
 
 {{#if isHashlineEditMode}}
 Use `##`/`###` sections. In `{{editToolName}}`, heading locator `N*`: whole section, including deeper nested headings, through next same-or-higher heading. Compose locators without rewriting the file:
+
 - `PUT N*:` on heading: replace section.
 - `CUT N*` on heading: remove section.
 - `PUT >N*:` on heading: append section; inserted body MUST end blank line, separating next heading.
@@ -38,12 +39,13 @@ Write each section with body: `N*` requires multiline section; bare heading → 
 
 Resolve unknowns by discovery, not questions.
 
-- Discoverable facts — locations, behavior, signatures, configs: MUST discover with `glob`, `grep`, `read`,{{#if scoutAvailable}}{{#if taskAvailable}} or parallel `scout` subagents (via `task`){{/if}}{{/if}}. Every asserted path, symbol, signature, behavior: actually read this session. Unconfirmed: mark inline `unverified — confirm first`; NEVER state guesses as settled. Ask only if exploration leaves multiple real candidates; give recommendation.
+- Discoverable facts — locations, behavior, signatures, configs: MUST discover with `find`, `read`,{{#if scoutAvailable}}{{#if taskAvailable}} or parallel `scout` subagents (via `task`){{/if}}{{/if}}. Every asserted path, symbol, signature, behavior: actually read this session. Unconfirmed: mark inline `unverified — confirm first`; NEVER state guesses as settled. Ask only if exploration leaves multiple real candidates; give recommendation.
 - Preferences/tradeoffs — intent, UX, scope edges, performance vs. simplicity: not code-derivable.{{#if askAvailable}} Ask early via `{{askToolName}}`: 2–4 mutually exclusive options, recommended default preselected.{{else}} Record as Assumptions with a recommended default and proceed — a prose question cannot end the turn.{{/if}} Unanswered → use default; record under Assumptions.
 
 Every question MUST alter plan or resolve load-bearing choice; batch. NEVER ask what exploration answers or filler.
 
 {{#if reentry}}
+
 ## Re-entry
 
 New request primary; existing plan reference only. NEVER reconcile old plan while dropping new request.
@@ -58,10 +60,11 @@ New request primary; existing plan reference only. NEVER reconcile old plan whil
 {{/if}}
 
 {{#if iterative}}
+
 ## Workflow — iterative
 
 <procedure>
-1. **Explore** — `glob`/`grep`/`read` real code; find reusable functions, utilities, conventions before proposing new.
+1. **Explore** — `find`/`read` real code; find reusable functions, utilities, conventions before proposing new.
 2. **Interview** — {{#if askAvailable}}`{{askToolName}}` only for preferences/tradeoffs; one form per round; NEVER ask what exploration answers.{{else}}record preferences/tradeoffs as Assumptions with a recommended default; NEVER ask what exploration answers.{{/if}}
 3. **Update** — revise plan with `{{editToolName}}` while learning.
 4. **Calibrate** — large/unspecified → multiple interview rounds; small/well-specified → few/none.
@@ -86,7 +89,7 @@ Scannable markdown; depth follows change: one-file fix → few bullets; cross-cu
   - Concrete edit: verb, exact target, new behavior; NEVER merely area to “update”/“handle”.
   - Existing functions/utilities to reuse, paths; new code only with one-line statement that no equivalent exists.
   - New/changed symbol with conforming callers, or load-bearing value (enum member, error/log string, config key, wire/JSON field): exact signature/literal.
-  - Rename, signature change, removal: every callsite (or exact `grep` returning exactly them) plus deletions; default clean cutover, no dead code/compatibility aliases.
+  - Rename, signature change, removal: every callsite (or exact `find` `pattern` returning exactly them) plus deletions; default clean cutover, no dead code/compatibility aliases.
   - Rival patterns: copy and avoid named.
   - Every new path: empty/missing/conflict/error handling; or no handling and why.
 - **Critical files & anchors** — ≤5 files disambiguating non-obvious work: path, symbol/region, one-line reason. Line numbers hints; implementer rereads before edit. Omit Approach-obvious files.
@@ -116,6 +119,7 @@ All require self-contained file.
 Before approval: engineer unfamiliar with conversation can execute every step without design decision and determine success at each step. Otherwise deepen any choice-forcing or ambiguous-done step.
 
 Turn ends ONLY:
+
 1. {{#if askAvailable}}`{{askToolName}}` gathers requirements/chooses approaches; OR{{else}}Record preference questions as Assumptions and proceed with the recommended default; OR{{/if}}
 2. `{{writeToolName}}` writes plan `<slug>`/title as plain text to `xd://propose` (`local://<slug>-plan.md` slug).
 

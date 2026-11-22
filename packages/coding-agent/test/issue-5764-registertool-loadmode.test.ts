@@ -47,7 +47,7 @@ describe("issue #5764: registerTool loadMode default", () => {
 		expect(defaultLoadModeForToolName("read")).toBe("essential");
 		expect(defaultLoadModeForToolName("bash")).toBe("essential");
 		expect(defaultLoadModeForToolName("edit")).toBe("essential");
-		expect(defaultLoadModeForToolName("glob")).toBe("essential");
+		expect(defaultLoadModeForToolName("find")).toBe("essential");
 		expect(defaultLoadModeForToolName("some_extension_tool")).toBe("discoverable");
 		// An explicit mode always wins.
 		expect(defaultLoadModeForToolName("read", "discoverable")).toBe("discoverable");

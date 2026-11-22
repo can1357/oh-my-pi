@@ -162,7 +162,7 @@ export function deriveAdvisorTelemetry(
  * The runtime build additionally admits `recall` into the default set when the
  * active memory backend built it (hindsight/mnemopi).
  */
-export const ADVISOR_DEFAULT_TOOL_NAMES: ReadonlySet<string> = new Set(["read", "grep", "glob"]);
+export const ADVISOR_DEFAULT_TOOL_NAMES: ReadonlySet<string> = new Set(["read", "find"]);
 
 function advisorNoteDedupeKey(note: string): string {
 	return normalizeAdvisorNote(note);

@@ -10,7 +10,7 @@ import { InternalUrlRouter } from "../../src/internal-urls/router";
 import { joinUrlPath } from "../../src/internal-urls/url-filesystem";
 import * as fileTransfer from "../../src/ssh/file-transfer";
 import type { ToolSession } from "../../src/tools";
-import { GrepTool } from "../../src/tools/grep";
+import { ContentSearch } from "../../src/tools/jfind/content-search";
 import { fakeSshTransport } from "../helpers/fake-ssh-transport";
 
 function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -24,7 +24,7 @@ function textOf(result: { content: Array<{ type: string; text?: string }> }): st
 describe.skipIf(process.platform === "win32")("grep ssh:// directory scopes", () => {
 	let fixture: string;
 	let root: string;
-	let tool: GrepTool;
+	let tool: ContentSearch;
 	const unusual = "line\nbreak #?%.txt";
 
 	beforeEach(async () => {
@@ -54,7 +54,7 @@ describe.skipIf(process.platform === "win32")("grep ssh:// directory scopes", ()
 			getSessionSpawns: () => "*",
 			settings: Settings.isolated({ "grep.contextBefore": 0, "grep.contextAfter": 0 }),
 		};
-		tool = new GrepTool(session);
+		tool = new ContentSearch(session);
 	});
 
 	afterEach(async () => {

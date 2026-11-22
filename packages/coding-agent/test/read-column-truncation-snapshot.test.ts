@@ -19,7 +19,7 @@ import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
+import { ContentSearch } from "@oh-my-pi/pi-coding-agent/tools/jfind/content-search";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgReadSummarizeEnabled, cfgToolsOutputMaxColumns } from "@oh-my-pi/pi-coding-agent/tools/settings";
@@ -264,7 +264,7 @@ describe("read tool column truncation vs hashline snapshot", () => {
 		await fs.writeFile(filePath, original);
 		const session = createSession(tmpDir);
 		const grepText = textOutput(
-			await new GrepTool(session).execute("grep-cut", {
+			await new ContentSearch(session).execute("grep-cut", {
 				pattern: "note:",
 				path: filePath,
 			}),

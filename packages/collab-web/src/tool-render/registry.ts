@@ -2,6 +2,7 @@
  * Tool renderer registry. Keys are current wire tool names.
  * Unknown tools fall back to the generic JSON renderer.
  */
+import { createElement } from "react";
 import { genericRenderer } from "./generic";
 import { askRenderer } from "./tools/ask";
 import { astEditRenderer } from "./tools/ast-edit";
@@ -30,7 +31,35 @@ import { todoRenderer } from "./tools/todo";
 import { webSearchRenderer } from "./tools/web-search";
 import { writeRenderer } from "./tools/write";
 import { yieldRenderer } from "./tools/yield";
-import type { ToolRenderer } from "./types";
+import type { ToolRenderer, ToolRenderProps } from "./types";
+
+/**
+ * `find` dispatches by argument shape: `pattern` is a content search (grep
+ * renderer), `glob` (or `path` alone) a name search (glob renderer, which reads
+ * the glob from `path`), otherwise the semantic query uses the glob renderer's
+ * generic header. `grep`/`glob` keys stay for historical transcripts.
+ */
+function findProps(props: ToolRenderProps): { renderer: ToolRenderer; props: ToolRenderProps } {
+	const { args } = props;
+	if (args.pattern !== undefined) return { renderer: grepRenderer, props };
+	if (args.query === undefined && (args.glob !== undefined || args.path !== undefined)) {
+		const globArgs = args.glob !== undefined ? { ...args, path: args.glob } : args;
+		return { renderer: globRenderer, props: { ...props, args: globArgs } };
+	}
+	return { renderer: globRenderer, props };
+}
+
+const findRenderer: ToolRenderer = {
+	Summary: p => {
+		const d = findProps(p);
+		return createElement(d.renderer.Summary, d.props);
+	},
+	Body: p => {
+		const d = findProps(p);
+		const Body = d.renderer.Body;
+		return Body ? createElement(Body, d.props) : null;
+	},
+};
 
 const RENDERERS: Record<string, ToolRenderer> = {
 	ask: askRenderer,
@@ -48,7 +77,7 @@ const RENDERERS: Record<string, ToolRenderer> = {
 	notebook: evalRenderer,
 	fetch: fetchRenderer,
 	glob: globRenderer,
-	find: globRenderer,
+	find: findRenderer,
 	generate_image: generateImageRenderer,
 	github: githubRenderer,
 	goal: goalRenderer,

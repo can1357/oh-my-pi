@@ -4,7 +4,7 @@ import { FileType } from "@oh-my-pi/pi-natives";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "../../src/config/settings";
 import type { ToolSession } from "../../src/tools";
-import { GlobTool, type GlobToolInput } from "../../src/tools/glob";
+import { NameSearch, type GlobToolInput } from "../../src/tools/jfind/name-search";
 import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
 import { findUniqueWorkspaceSuffixWithGlobForTest } from "../../src/tools/path-utils";
 import { ToolAbortError } from "../../src/tools/tool-errors";
@@ -24,7 +24,7 @@ function createSession(cwd = process.cwd()): ToolSession {
 const ROOT_SEARCH_ERROR = "Searching from root directory '/' is not allowed";
 
 async function expectRootSearchRejected(searchPath: string): Promise<void> {
-	const tool = new GlobTool(createSession());
+	const tool = new NameSearch(createSession());
 	let thrown: unknown;
 	try {
 		await tool.execute("glob-root-regression", { path: searchPath });
@@ -40,7 +40,7 @@ async function expectRootSearchRejected(searchPath: string): Promise<void> {
 	expect(thrown.message).toBe(ROOT_SEARCH_ERROR);
 }
 
-describe("GlobTool.execute", () => {
+describe("NameSearch.execute", () => {
 	test.each(["/", "//"])("rejects bare root search path %s", async searchPath => {
 		await expectRootSearchRejected(searchPath);
 	});
@@ -51,7 +51,7 @@ describe("GlobTool.execute", () => {
 		const releaseStat = Promise.withResolvers<void>();
 		const statSettled = Promise.withResolvers<void>();
 		let nativeStarted = false;
-		const tool = new GlobTool(createSession(), {
+		const tool = new NameSearch(createSession(), {
 			stat: async () => {
 				statStarted.resolve();
 				try {
@@ -85,7 +85,7 @@ describe("GlobTool.execute", () => {
 		const timeoutObserved = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		let nativeSettled = false;
-		const tool = new GlobTool(createSession(), {
+		const tool = new NameSearch(createSession(), {
 			timeoutMs: 100,
 			nativeGlob: async options => {
 				if (!(options.signal instanceof AbortSignal)) {
@@ -134,7 +134,7 @@ describe("GlobTool.execute", () => {
 		let startedCount = 0;
 		let abortedCount = 0;
 		let settledCount = 0;
-		const tool = new GlobTool(createSession(), {
+		const tool = new NameSearch(createSession(), {
 			timeoutMs: 5000,
 			nativeGlob: async options => {
 				if (!(options.signal instanceof AbortSignal)) throw new Error("Missing native cancellation signal");
@@ -207,11 +207,11 @@ describe("GlobTool.execute", () => {
 	});
 });
 
-describe("GlobTool hard-cap limit notice", () => {
+describe("NameSearch hard-cap limit notice", () => {
 	const files230 = Array.from({ length: 230 }, (_, i) => `file-${String(i).padStart(3, "0")}.txt`);
 
-	function globToolWith(files: string[]): GlobTool {
-		return new GlobTool(createSession(), {
+	function globToolWith(files: string[]): NameSearch {
+		return new NameSearch(createSession(), {
 			nativeGlob: async () => ({
 				matches: files.map(file => ({ path: file, mtime: 0, fileType: FileType.File })),
 				totalMatches: files.length,
@@ -219,7 +219,7 @@ describe("GlobTool hard-cap limit notice", () => {
 		});
 	}
 
-	type GlobExecuteResult = Awaited<ReturnType<GlobTool["execute"]>>;
+	type GlobExecuteResult = Awaited<ReturnType<NameSearch["execute"]>>;
 
 	function limitNotice(result: GlobExecuteResult): string {
 		return formatOutputNotice((result.details as { meta?: OutputMeta } | undefined)?.meta);
@@ -247,7 +247,7 @@ describe("GlobTool hard-cap limit notice", () => {
 	});
 });
 
-describe("GlobTool custom backend contract", () => {
+describe("NameSearch custom backend contract", () => {
 	type GlobExecuteResult = AgentToolResult<GlobToolDetails>;
 
 	function detailsOf(result: GlobExecuteResult): GlobToolDetails {
@@ -265,7 +265,7 @@ describe("GlobTool custom backend contract", () => {
 		// call never returned at all: the test failed by timing out, not by
 		// asserting.
 		let receivedSignal: AbortSignal | undefined;
-		const tool = new GlobTool(createSession(), {
+		const tool = new NameSearch(createSession(), {
 			timeoutMs: 200,
 			operations: {
 				exists: () => true,
@@ -298,7 +298,7 @@ describe("GlobTool custom backend contract", () => {
 		// un-answered call then read as "the root does not exist" and the
 		// single-root path threw `Path not found: <root>`, telling the model the
 		// directory is gone when in fact the scan simply ran out of time.
-		const tool = new GlobTool(createSession(), {
+		const tool = new NameSearch(createSession(), {
 			timeoutMs: 100,
 			operations: {
 				exists: () => Promise.withResolvers<boolean>().promise,
@@ -333,7 +333,7 @@ describe("GlobTool custom backend contract", () => {
 			...Array.from({ length: 3 }, (_, i) => `src/gitignored-${i}.ts`),
 			...Array.from({ length: 3 }, (_, i) => `src/plain-${i}.ts`),
 		];
-		const tool = new GlobTool(createSession(), {
+		const tool = new NameSearch(createSession(), {
 			operations: {
 				exists: () => true,
 				glob: (_pattern, _cwd, options) => {
@@ -365,7 +365,7 @@ describe("GlobTool custom backend contract", () => {
 		// seven. What differs is *which* seven, so the backend slices from the end
 		// and the assertions name the boundary entries.
 		const corpus = Array.from({ length: 20 }, (_, i) => `src/file-${String(i).padStart(2, "0")}.ts`);
-		const tool = new GlobTool(createSession(), {
+		const tool = new NameSearch(createSession(), {
 			operations: {
 				exists: () => true,
 				glob: (_pattern, _cwd, options) => corpus.slice(-options.limit),

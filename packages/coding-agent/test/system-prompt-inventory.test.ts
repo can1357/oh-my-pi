@@ -875,27 +875,27 @@ describe("system prompt tool inventory", () => {
 		expect(text).toContain("skill://<name>");
 	});
 
-	it("omits skill URL guidance when glob is the only active resolver", async () => {
+	it("omits skill URL guidance when find is the only active resolver", async () => {
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,
 			contextFiles: [],
 			skills: [
 				{
-					name: "glob-only-skill",
-					description: "Cannot be read through glob",
+					name: "find-only-skill",
+					description: "Cannot be read through find",
 					filePath: path.join(tempDir, "SKILL.md"),
 					baseDir: tempDir,
 					source: "test",
 				},
 			],
 			rules: [],
-			toolNames: ["glob"],
+			toolNames: ["find"],
 			tools: TOOLS,
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 		});
 		const text = systemPrompt.join("\n\n");
 
-		expect(text).not.toContain("glob-only-skill");
+		expect(text).not.toContain("find-only-skill");
 		expect(text).not.toContain("skill://<name>");
 	});
 

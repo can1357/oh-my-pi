@@ -136,18 +136,12 @@ const summarizeToolResult: StatusSummarizer = (name, args, result, text, hasErro
 				path: record.path,
 				chars: typeof record.content === "string" ? record.content.length : 0,
 			});
-		case "grep":
+		case "find":
 			return withError({
-				op: "grep",
-				pattern: record.pattern,
+				op: details.mode === "names" ? "glob" : details.mode === "content" ? "grep" : "find",
+				pattern: record.pattern ?? record.glob ?? record.query,
 				path: record.path,
-				count: details.matchCount ?? undefined,
-			});
-		case "glob":
-			return withError({
-				op: "glob",
-				pattern: record.pattern,
-				count: details.fileCount ?? undefined,
+				count: details.matchCount ?? details.fileCount ?? undefined,
 				matches: Array.isArray(details.files) ? details.files.slice(0, 20) : undefined,
 			});
 		case "bash":

@@ -18,7 +18,7 @@ import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/se
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	ContextNotesTool,
-	GrepTool,
+	FindTool,
 	NewContextTool,
 	ReadTool,
 	type Tool,
@@ -100,7 +100,7 @@ describe.each([false, true])("AgentSession compaction cancellation source (exper
 		const tools: Tool[] = experimental
 			? [
 					new ReadTool(toolSession),
-					new GrepTool(toolSession),
+					new FindTool(toolSession),
 					new ContextNotesTool(toolSession),
 					new NewContextTool(toolSession),
 				]

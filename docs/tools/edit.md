@@ -33,7 +33,7 @@ This page primarily documents hashline. The schema, prompt, examples, renderer, 
 | ------- | -------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `input` | `string` | Yes      | One or more `[PATH#TAG]` sections containing hashline operations. The strict custom-tool grammar wraps the sections in `*** Begin Patch` / `*** End Patch`; the normal parser also accepts an unwrapped payload. |
 
-Each section edits one existing file and MUST copy the four-uppercase-hex snapshot tag from the latest anchored `read`, `grep`, or successful `edit` result:
+Each section edits one existing file and MUST copy the four-uppercase-hex snapshot tag from the latest anchored `read`, `find` (`pattern` mode), or successful `edit` result:
 
 ```text
 [src/example.ts#1A2B]
@@ -129,7 +129,7 @@ MV lib/welcome.py
 | `apply_patch` | `input`                                                                                           | Combined `*** Begin Patch` payload with `*** Add File`, `*** Update File`, `*** Move to`, and `*** Delete File` sections. |
 | `sloppy`      | `input`                                                                                           | `*** Edit File: path`, then `*** Find` plus `*** Replace`, `*** Insert Before`, or `*** Insert After`.                    |
 
-`sloppy` uses existing-text anchors, not snapshot tags. Find must identify one match unless the file header ends in ` all`; bare `*** Edit File:` continues the current target. Bodies are raw text, without diff prefixes or closing markers. `…` in Find captures omitted text; Replace re-emits those captures in order. Insert keeps the anchor and treats `…` literally. Every pair addresses the original file; matching/validation failures occur before writes.
+`sloppy` uses existing-text anchors, not snapshot tags. Find must identify one match unless the file header ends in `all`; bare `*** Edit File:` continues the current target. Bodies are raw text, without diff prefixes or closing markers. `…` in Find captures omitted text; Replace re-emits those captures in order. Insert keeps the anchor and treats `…` literally. Every pair addresses the original file; matching/validation failures occur before writes.
 
 The mode prompts in `crates/edit/prompts/` define the full syntax.
 
@@ -166,7 +166,7 @@ For multi-section calls, every section is parsed and prepared before writes begi
 
 - Snapshot tags are four uppercase hexadecimal characters derived from normalized file content and recorded in the session snapshot store.
 - A section with a placeholder tag (`#AUTO`, `#????`, a bare `#`) or no tag, and input that is only a header with no ops, are rejected without writing. Like an unknown-tag mismatch, the reply carries the file's current tag, plus anchored context when the section has anchors.
-- `read`/`grep` exposure matters: with `edit.enforceSeenLines=true` (default), edits targeting lines outside recorded visible ranges are rejected. Re-read elided or undisplayed ranges before editing them. When the store holds no read of the tagged content (new process, evicted snapshot), only anchors on lines longer than the narrowest display column cap (grep's 512 bytes, or a lower `tools.outputMaxColumns`) are rejected, since only those can have been shown cut.
+- `read`/`find` exposure matters: with `edit.enforceSeenLines=true` (default), edits targeting lines outside recorded visible ranges are rejected. Re-read elided or undisplayed ranges before editing them. When the store holds no read of the tagged content (new process, evicted snapshot), only anchors on lines longer than the narrowest display column cap (content search's 512 bytes, or a lower `tools.outputMaxColumns`) are rejected, since only those can have been shown cut.
 - Ranges are inclusive, must be ordered, and are bounded by a parser amplification limit of 100,000 expanded lines before the target file's actual bounds are checked.
 - Conflicting overlapping ranges are rejected. Exact repeated replacement ranges can coalesce to the later body with a warning; author one final-content hunk per range.
 - The rows a mismatch reply prints count as seen for a resend under the tag it hands back: content no retained snapshot holds starts from them, and a retained read's seen set gains them. A resend anchored elsewhere gets the seen-line rejection and reveal. Content recorded with no or an empty seen set (as `write` records) stays unrestricted.

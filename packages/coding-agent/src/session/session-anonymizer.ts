@@ -623,9 +623,10 @@ const ARG_SCHEMAS: Record<string, ArgSchema> = {
 		"path input old_string new_string replace_all edits old_text new_text oldText newText op rename file_path diff content",
 	),
 	bash: argSchema("command timeout# cwd pty async name ready log port# host description"),
+	// `grep` and `glob` were folded into `find`; sessions recorded before that still carry the old names and arguments.
 	grep: argSchema("pattern path case gitignore skip# limit# hidden glob context#"),
 	glob: argSchema("path pattern hidden gitignore limit# skip#"),
-	find: argSchema("query path grep_keywords limit# hidden"),
+	find: argSchema("query grep_keywords pattern glob path case gitignore hidden skip# limit#"),
 	eval: argSchema("code language title timeout# reset"),
 	task: argSchema("op context tasks name task agent solutionSpace tools isolated schemaMode"),
 	todo: argSchema("op items task phase list reason tasks content status phase_note"),
@@ -1263,8 +1264,12 @@ function isObject(value: unknown): value is JsonObject {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Tool names folded into `find`; recorded sessions still carry them, with their own argument schemas above. */
+const RETIRED_BUILTIN_TOOL_NAMES: Record<string, true> = { grep: true, glob: true };
+
+/** A built-in tool name, or a retired one (`grep`, `glob`) that sessions recorded before the `find` merge still carry. */
 function isBuiltinTool(name: unknown): boolean {
-	return typeof name === "string" && (BUILTIN_TOOL_NAMES as readonly string[]).includes(name);
+	return typeof name === "string" && ((BUILTIN_TOOL_NAMES as readonly string[]).includes(name) || name in RETIRED_BUILTIN_TOOL_NAMES);
 }
 
 function looksLikePath(value: string): boolean {

@@ -74,39 +74,39 @@ A custom tool module must export a function (default export preferred):
 import type { CustomToolFactory } from "@oh-my-pi/pi-coding-agent";
 
 const factory: CustomToolFactory = pi => ({
-	name: "repo_stats",
-	label: "Repo Stats",
-	description: "Counts tracked TypeScript files",
-	parameters: pi.zod.object({
-		glob: pi.zod.string().optional(),
-	}),
+ name: "repo_stats",
+ label: "Repo Stats",
+ description: "Counts tracked TypeScript files",
+ parameters: pi.zod.object({
+  glob: pi.zod.string().optional(),
+ }),
 
-	async execute(toolCallId, params, onUpdate, ctx, signal) {
-		onUpdate?.({
-			content: [{ type: "text", text: "Scanning files..." }],
-			details: { phase: "scan" },
-		});
+ async execute(toolCallId, params, onUpdate, ctx, signal) {
+  onUpdate?.({
+   content: [{ type: "text", text: "Scanning files..." }],
+   details: { phase: "scan" },
+  });
 
-		const result = await pi.exec("git", ["ls-files", params.glob ?? "**/*.ts"], { signal, cwd: pi.cwd });
-		if (result.killed) {
-			throw new Error("Scan was cancelled");
-		}
-		if (result.code !== 0) {
-			throw new Error(result.stderr || "git ls-files failed");
-		}
+  const result = await pi.exec("git", ["ls-files", params.glob ?? "**/*.ts"], { signal, cwd: pi.cwd });
+  if (result.killed) {
+   throw new Error("Scan was cancelled");
+  }
+  if (result.code !== 0) {
+   throw new Error(result.stderr || "git ls-files failed");
+  }
 
-		const files = result.stdout.split("\n").filter(Boolean);
-		return {
-			content: [{ type: "text", text: `Found ${files.length} files` }],
-			details: { count: files.length, sample: files.slice(0, 10) },
-		};
-	},
+  const files = result.stdout.split("\n").filter(Boolean);
+  return {
+   content: [{ type: "text", text: `Found ${files.length} files` }],
+   details: { count: files.length, sample: files.slice(0, 10) },
+  };
+ },
 
-	onSession(event) {
-		if (event.reason === "shutdown") {
-			// cleanup resources if needed
-		}
-	},
+ onSession(event) {
+  if (event.reason === "shutdown") {
+   // cleanup resources if needed
+  }
+ },
 });
 
 export default factory;
@@ -160,7 +160,7 @@ execute(toolCallId, params, onUpdate, ctx, signal);
 
 The session bootstrap bridge converts custom tools to extension `ToolDefinition`s and forwards calls in the correct argument order. `CustomToolAdapter` remains available to library consumers that directly adapt a custom tool to the agent tool interface.
 
-Tool definitions may also declare `strict`, `hidden`, `loadMode`, `deferrable`, `readsSkillUris`, `mcpServerName`, `mcpToolName`, `legacyName`, and `approval`. When `loadMode` is omitted, custom tool names default to `"discoverable"` except for the canonical essential built-in names (`read`, `write`, `bash`, `edit`, `glob`, `find`, `eval`, `task`, `wait`, `learn`, `manage_skill`, `context_notes`, and `new_context`), which default to `"essential"` so wrappers or re-registrations do not demote them. An explicit `loadMode` always wins; use `"essential"` to keep any other tool top-level.
+Tool definitions may also declare `strict`, `hidden`, `loadMode`, `deferrable`, `readsSkillUris`, `mcpServerName`, `mcpToolName`, `legacyName`, and `approval`. When `loadMode` is omitted, custom tool names default to `"discoverable"` except for the canonical essential built-in names (`read`, `write`, `bash`, `edit`, `find`, `eval`, `task`, `wait`, `learn`, `manage_skill`, `context_notes`, and `new_context`), which default to `"essential"` so wrappers or re-registrations do not demote them. An explicit `loadMode` always wins; use `"essential"` to keep any other tool top-level.
 
 Although the public `CustomTool` type also declares `formatApprovalDetails`, `describeCall`, and `describeResult`, the SDK/discovery conversion does not propagate those callbacks into the registered definition. Direct `CustomToolAdapter` consumers retain them.
 

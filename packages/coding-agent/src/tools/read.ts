@@ -98,6 +98,7 @@ import {
 import {
 	expandPath,
 	formatPathRelativeToCwd,
+	missingPathRecovery,
 	probeLiteralPathExists,
 	resolveReadPathAsync,
 	specialFileKind,
@@ -2526,7 +2527,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				if (!recoveredApprovedPlan && !suffixResolution) {
 					const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal, toolContext);
 					if (delimitedResult) return delimitedResult;
-					throw new ToolError(missingReadPathError(readPath, localReadPath));
+					const recovery = await missingPathRecovery(localReadPath, this.session.cwd, signal);
+					const missing = missingReadPathError(readPath, localReadPath);
+					throw new ToolError(recovery ? `${missing} ${recovery}` : missing);
 				}
 			} else {
 				throw error;

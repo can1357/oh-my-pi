@@ -73,13 +73,15 @@ export interface GrepToolDetails {
 	missingPaths?: string[];
 	/** Files skipped as binary although their content matches (cwd-relative display paths). */
 	binaryMatches?: string[];
+	/** Set by `find` when this report came from its content mode. */
+	mode?: "content";
 }
 
 // =============================================================================
 // TUI Renderer
 // =============================================================================
 
-interface GrepRenderArgs {
+export interface GrepRenderArgs {
 	pattern: string;
 	path?: string | string[];
 	/** Legacy pre-`path` argument name; kept so historical transcripts still render a scope. */
@@ -131,7 +133,7 @@ function grepStatusIcon(uiTheme: Theme): string {
 }
 
 /** Render grep calls and results in the transcript. */
-export const grepToolRenderer = {
+export const contentSearchRenderer = {
 	inline: true,
 	renderCall(args: GrepRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
 		const text = renderStatusLine(

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { NativeChild, NativeNode } from "../src/native/node";
 import { editToolRenderer } from "../src/tools/edit";
-import { grepToolRenderer } from "../src/tools/grep";
+import { contentSearchRenderer as grepToolRenderer } from "../src/tools/grep";
 import { readToolRenderer } from "../src/tools/read";
 import { writeToolRenderer } from "../src/tools/write";
 import { describeCodeCell } from "../src/render/code-cell";

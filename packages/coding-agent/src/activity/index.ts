@@ -131,13 +131,11 @@ function argumentsSummary(toolName: string, value: unknown): string {
 	switch (toolName) {
 		case "read":
 			return firstString(args, "path") ?? "Read resource";
-		case "grep": {
-			const pattern = firstString(args, "pattern");
+		case "find": {
+			const needle = firstString(args, "pattern", "query", "glob");
 			const path = firstString(args, "path");
-			return [pattern, path].filter(Boolean).join(" · ") || "Search text";
+			return [needle, path].filter(Boolean).join(" · ") || "Search files";
 		}
-		case "glob":
-			return firstString(args, "path") ?? "Map files";
 		case "bash":
 			return firstString(args, "command") ?? "Run command";
 		case "write":

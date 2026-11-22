@@ -103,8 +103,8 @@
 
         // Create nodes
         for (const entry of entries) {
-          nodeMap.set(entry.id, { 
-            entry, 
+          nodeMap.set(entry.id, {
+            entry,
             children: [],
             label: labelMap.get(entry.id)
           });
@@ -210,7 +210,7 @@
         const stack = [];
 
         // Add roots (prioritize branch containing active leaf)
-        const orderedRoots = [...roots].sort((a, b) => 
+        const orderedRoots = [...roots].sort((a, b) =>
           Number(containsActive.get(b)) - Number(containsActive.get(a))
         );
         for (let i = orderedRoots.length - 1; i >= 0; i--) {
@@ -227,7 +227,7 @@
           const multipleChildren = children.length > 1;
 
           // Order children (active branch first)
-          const orderedChildren = [...children].sort((a, b) => 
+          const orderedChildren = [...children].sort((a, b) =>
             Number(containsActive.get(b)) - Number(containsActive.get(a))
           );
 
@@ -456,6 +456,13 @@
           case 'grep':
             return `[grep: /${args.pattern || ''}/ in ${shortenPath(String((args.paths || [args.path || '.']).join(', ')))}]`;
           case 'find':
+            if (args.pattern !== undefined) {
+              return `[grep: /${args.pattern}/ in ${shortenPath(String((args.paths || [args.path || '.']).join(', ')))}]`;
+            }
+            if (args.query !== undefined) {
+              return `[find: ${String(args.query).slice(0, 50)}]`;
+            }
+            return `[glob: ${shortenPath(String(args.paths || args.glob || args.path || '.'))}]`;
           case 'glob':
             return `[glob: ${shortenPath(String((args.paths || [args.pattern || '.']).join(', ')))}]`;
           case 'ls':
@@ -1149,7 +1156,7 @@
               }
             }
 
-            const text = typeof content === 'string' ? content : 
+            const text = typeof content === 'string' ? content :
               content.filter(c => c.type === 'text').map(c => c.text).join('\n');
             if (text.trim()) {
               html += `<div class="markdown-content">${safeMarkedParse(text)}</div>`;

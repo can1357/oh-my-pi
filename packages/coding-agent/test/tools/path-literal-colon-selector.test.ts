@@ -18,7 +18,7 @@ import { GrepOutputMode } from "@oh-my-pi/pi-natives";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { runGrepCommand } from "../../src/cli/grep-cli";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { GrepTool } from "../../src/tools/grep";
+import { ContentSearch } from "../../src/tools/jfind/content-search";
 
 function getText(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -295,7 +295,7 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			await fs.promises.mkdir(path.join(tmpDir, "dir"), { recursive: true });
 			await Bun.write(path.join(tmpDir, "dir", "a b:1-2"), "escaped literal needle\n");
 
-			const tool = new GrepTool(createSession());
+			const tool = new ContentSearch(createSession());
 			const result = await tool.execute("grep-escaped-literal", {
 				pattern: "needle",
 				path: "dir/a\\ b:1-2",
@@ -312,7 +312,7 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			const literal = path.join(tmpDir, "a;b:1-2");
 			await Bun.write(literal, "delimited literal needle\n");
 
-			const tool = new GrepTool(createSession());
+			const tool = new ContentSearch(createSession());
 			const result = await tool.execute("grep-literal-semicolon-selector", {
 				pattern: "needle",
 				path: literal,
@@ -331,7 +331,7 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			const literal = path.join(tmpDir, "data.zip:1-2");
 			await Bun.write(literal, "literal archive needle\n");
 
-			const tool = new GrepTool(createSession());
+			const tool = new ContentSearch(createSession());
 			const result = await tool.execute("grep-literal-zip-selector", {
 				pattern: "needle",
 				path: literal,
@@ -345,7 +345,7 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			const literal = path.join(tmpDir, "{proposal} {acme} offer.md");
 			await Bun.write(literal, "offer included\nignored\noffer excluded\n");
 
-			const tool = new GrepTool(createSession());
+			const tool = new ContentSearch(createSession());
 			const result = await tool.execute("grep-ranged-brace-literal", {
 				pattern: "offer",
 				path: `${literal}:1-2`,
@@ -360,7 +360,7 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			const literal = path.join(tmpDir, "a;b[1].md");
 			await Bun.write(literal, "needle included\nignored\nneedle excluded\n");
 
-			const tool = new GrepTool(createSession());
+			const tool = new ContentSearch(createSession());
 			const result = await tool.execute("grep-ranged-delimiter-literal", {
 				pattern: "needle",
 				path: `${literal}:1-2`,
@@ -375,7 +375,7 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			const absolute = path.join(tmpDir, "notes.txt");
 			await Bun.write(absolute, "one\ntwo\nthree\nfour\n");
 
-			const tool = new GrepTool(createSession());
+			const tool = new ContentSearch(createSession());
 			const rangedResult = await tool.execute("grep-range-filter", {
 				pattern: ".",
 				// The native absolute match may retain both C:/ separators and a non-canonical /./ segment.
@@ -488,7 +488,7 @@ describe("leading-colon path recovery (issue #5508)", () => {
 		const abs = path.join(tmpDir, "colon-grep.txt");
 		await Bun.write(abs, "needle here\nsecond line\n");
 
-		const result = await new GrepTool(createSession()).execute("grep-leading-colon", {
+		const result = await new ContentSearch(createSession()).execute("grep-leading-colon", {
 			pattern: "needle",
 			path: `:${abs}`,
 		});

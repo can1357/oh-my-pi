@@ -46,7 +46,7 @@ describe("ssh:// tools are exec-gated through the production approval wrapper", 
 			slashCommands: [],
 			enableMCP: false,
 			enableLsp: false,
-			toolNames: ["read", "grep", "glob", "write"],
+			toolNames: ["read", "find", "write"],
 		});
 		session = created.session;
 	});
@@ -60,7 +60,7 @@ describe("ssh:// tools are exec-gated through the production approval wrapper", 
 		}
 	});
 
-	function tool(name: "read" | "grep" | "glob" | "write") {
+	function tool(name: "read" | "find" | "write") {
 		const found = session.getToolByName(name);
 		if (!found) throw new Error(`Expected ${name} tool`);
 		return found;
@@ -89,7 +89,7 @@ describe("ssh:// tools are exec-gated through the production approval wrapper", 
 	it("grep: a delimited ssh:// entry requires approval before path expansion", async () => {
 		// The wrapper sees `path` verbatim (pre-expansion), so the substring scan must trip exec here.
 		await expect(
-			tool("grep").execute(
+			tool("find").execute(
 				"s-ssh",
 				{ pattern: "x", path: "local.txt,ssh://localhost/etc/hosts" },
 				undefined,
@@ -97,7 +97,7 @@ describe("ssh:// tools are exec-gated through the production approval wrapper", 
 				ctx("always-ask"),
 			),
 		).rejects.toThrow(APPROVAL_RE);
-		const ok = await tool("grep").execute(
+		const ok = await tool("find").execute(
 			"s-local",
 			{ pattern: "hello", path: "." },
 			undefined,
@@ -109,9 +109,9 @@ describe("ssh:// tools are exec-gated through the production approval wrapper", 
 
 	it("glob: an ssh:// path requires approval (exec), a local glob runs (read)", async () => {
 		await expect(
-			tool("glob").execute("g-ssh", { path: "ssh://localhost/etc" }, undefined, undefined, ctx("always-ask")),
+			tool("find").execute("g-ssh", { path: "ssh://localhost/etc" }, undefined, undefined, ctx("always-ask")),
 		).rejects.toThrow(APPROVAL_RE);
-		const ok = await tool("glob").execute("g-local", { path: "*.txt" }, undefined, undefined, ctx("always-ask"));
+		const ok = await tool("find").execute("g-local", { path: "*.txt" }, undefined, undefined, ctx("always-ask"));
 		expect(JSON.stringify(ok.content)).toContain("local.txt");
 	});
 

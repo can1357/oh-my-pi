@@ -28,8 +28,7 @@ function makeSession(): ToolSession {
 			"bashInterceptor.enabled": false,
 			"astGrep.enabled": false,
 			"astEdit.enabled": false,
-			"grep.enabled": false,
-			"glob.enabled": false,
+			"find.enabled": "off",
 		}),
 		getClientBridge: () => undefined,
 	} as unknown as ToolSession;

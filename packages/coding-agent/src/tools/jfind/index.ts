@@ -5,9 +5,8 @@
  * contract and the model-facing report.
  */
 import * as path from "node:path";
-import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { FindToolDetails } from "@oh-my-pi/pi-tui/tools/find";
+import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { FindAnyDetails, FindToolDetails } from "@oh-my-pi/pi-tui/tools/find";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { formatBytes, formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import { sessionResolveContext } from "../../internal-urls/context";
@@ -34,18 +33,32 @@ import { searchApprovalCacheTargets } from "../search-approval-targets";
 import { cfgFindVerifyModel } from "../settings";
 import { toolResult } from "../tool-result";
 import { type CascadeResult, runCascade } from "./cascade";
+import { ContentSearch, type ContentSearchOptions } from "./content-search";
+import {
+	contentParams,
+	type FindToolInput,
+	findSchema,
+	inferFindMode,
+	nameParams,
+	resolveFindMode,
+	scopeWithGlob,
+} from "./modes";
+import { NameSearch } from "./name-search";
 import { rankedHeat } from "./passages";
 import { resolveSearchRoot } from "./tree";
 
 import { cfgFindEnabled, cfgFindHitThreshold } from "../settings";
 
-const findSchema = type({
-	query: "string",
-	grep_keywords: "string[]",
-	"path?": "string",
-});
-
-export type FindToolInput = typeof findSchema.infer;
+export { type FindToolInput, findSchema };
+export {
+	ContentSearch,
+	type ContentSearchOptions,
+	DEFAULT_FILE_LIMIT,
+	type GrepToolInput,
+	MULTI_FILE_PER_FILE_MATCHES,
+	SINGLE_FILE_MATCHES,
+} from "./content-search";
+export { type GlobOperations, type GlobOperationsOptions, type GlobToolInput, type GlobToolOptions, NameSearch } from "./name-search";
 
 /** Line ranges shown per hit in the model-facing text, strongest first. */
 const RANGES_SHOWN = 3;
@@ -68,32 +81,69 @@ export function isFindEnabled(session: ToolSession): boolean {
 	);
 }
 
-/** Semantic search tool: describe a behavior, get files and line ranges that implement it. */
-export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
+/** Construction-time overrides; the Cursor bridge builds a scoped `find` per frame to honor the frame's context width and match cap. */
+export interface FindToolOptions {
+	content?: ContentSearchOptions;
+}
+/** Unified search: judged semantic search, exact content search and exact name matching behind one tool; {@link resolveFindMode} picks the engine. */
+export class FindTool implements AgentTool<typeof findSchema, FindAnyDetails> {
 	readonly name = "find";
-	readonly approval = searchPathTier;
-	/** `always-ask-cached` keys: the tree (or file) it searches, as `grep` reports one. */
+	readonly approval = (args: unknown) => {
+		const params = (args ?? {}) as FindToolInput;
+		return searchPathTier({ path: scopeWithGlob(params.path, params.glob) });
+	};
+	/** `always-ask-cached` keys: whatever the engine this call routes to would key. */
 	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
-		const root = (args as { path?: string } | null | undefined)?.path;
-		return searchApprovalCacheTargets(root ? [root] : [], this.session.cwd, entry => entry);
+		const params = (args ?? {}) as FindToolInput;
+		const mode = inferFindMode(params);
+		if (mode === "content") return this.#content.approvalCacheTargets(contentParams(params));
+		if (mode === "names") return this.#names.approvalCacheTargets(nameParams(params));
+		return searchApprovalCacheTargets(params.path ? [params.path] : [], this.session.cwd, entry => entry);
 	};
 	readonly loadMode = "essential";
 	readonly label = "Find";
-	readonly summary = "Semantic grep: find files and line ranges by describing what they do";
+	readonly summary = "Search files: by description (judged), by regex over contents, or by name/glob";
 	readonly description = findDescription;
 	readonly parameters = findSchema;
 	readonly strict = true;
 
-	constructor(private readonly session: ToolSession) {}
+	readonly #content: ContentSearch;
+	readonly #names: NameSearch;
+
+	constructor(
+		private readonly session: ToolSession,
+		options?: FindToolOptions,
+	) {
+		this.#content = new ContentSearch(session, options?.content);
+		this.#names = new NameSearch(session, { rootPathAlias: true });
+	}
 
 	async execute(
 		toolCallId: string,
 		params: FindToolInput,
 		signal?: AbortSignal,
-		onUpdate?: AgentToolUpdateCallback<FindToolDetails>,
+		onUpdate?: AgentToolUpdateCallback<FindAnyDetails>,
+		context?: AgentToolContext,
+	): Promise<AgentToolResult<FindAnyDetails>> {
+		const mode = resolveFindMode(params);
+		if (mode === "content") {
+			const result = await this.#content.execute(toolCallId, contentParams(params), signal, undefined, context);
+			return { ...result, details: result.details && { ...result.details, mode } };
+		}
+		if (mode === "names") {
+			const result = await this.#names.execute(toolCallId, nameParams(params), signal, undefined, context);
+			return { ...result, details: result.details && { ...result.details, mode } };
+		}
+		return this.#executeSemantic(toolCallId, params, signal, onUpdate);
+	}
+
+	async #executeSemantic(
+		toolCallId: string,
+		params: FindToolInput,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<FindAnyDetails>,
 	): Promise<AgentToolResult<FindToolDetails>> {
-		const query = params.query.trim();
-		if (query.length === 0) throw new ToolError("`query` must be a non-empty description");
+		const query = (params.query ?? "").trim();
 		const cwd = this.session.cwd;
 		const rawScopeInput = params.path === undefined ? "" : normalizePathLikeInput(params.path);
 		// Host paths stay native; internal URLs (`local://`, `omp://`, …) are
@@ -111,7 +161,11 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 		if (!registry) throw new ToolError("find has no model registry to resolve a judge from");
 		const sessionModel = this.session.getActiveModel?.();
 		const rejected = nativeJudgeRejection(this.session.settings, registry, sessionModel);
-		if (rejected) throw new ToolError(`find is disabled for this session: judge ${rejected}. Use grep.`);
+		if (rejected) {
+			throw new ToolError(
+				`find is disabled for this session: judge ${rejected}. \`query\` needs a judge model; use \`pattern\` (regex over contents) or \`glob\` (names), which need none.`,
+			);
+		}
 		const judgeDeps: JudgeDeps = {
 			settings: this.session.settings,
 			registry,
@@ -137,7 +191,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 				root,
 				filesystem,
 				query,
-				extraKeywords: params.grep_keywords,
+				extraKeywords: params.grep_keywords ?? [],
 				judge,
 				verifyJudge,
 				spotlight: experiment ? { client: experiment.client, thinking: experiment.thinking } : undefined,
@@ -156,7 +210,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 		}
 		if (!result) {
 			throw new ToolError(
-				`find timed out after ${formatDuration(FIND_TIMEOUT_MS)} at "${phase}", before any file was judged. Narrow \`path\` to a smaller tree, or use grep.`,
+				`find timed out after ${formatDuration(FIND_TIMEOUT_MS)} at "${phase}", before any file was judged. Narrow \`path\` to a smaller tree, or use \`pattern\` (exact regex, no judge) to search it directly.`,
 			);
 		}
 		const elapsedMs = performance.now() - started;
@@ -206,19 +260,19 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			coverage === "unavailable" ? nativeJudgeRejection(this.session.settings, registry, sessionModel) : undefined;
 		if (disabled) {
 			out.push(
-				`find is disabled for this session: judge ${disabled}. Nothing was judged for "${query}"${where}; use grep.`,
+				`find is disabled for this session: judge ${disabled}. Nothing was judged for "${query}"${where}; use \`pattern\` (regex over contents) instead, which needs no judge.`,
 			);
 		} else if (coverage === "unavailable") {
 			out.push(
-				`find unavailable for "${query}"${where}: all ${stats.requests} judge requests failed, nothing was judged. This is not evidence of absence; use grep.`,
+				`find unavailable for "${query}"${where}: all ${stats.requests} judge requests failed, nothing was judged. This is not evidence of absence; use \`pattern\` (exact regex, no judge) to search directly.`,
 			);
 		} else if (timeout?.passages === 0) {
 			out.push(
-				`find timed out after ${formatDuration(FIND_TIMEOUT_MS)} at "${phase}", before any passage was verified. This is not evidence of absence; narrow \`path\`, or use grep.`,
+				`find timed out after ${formatDuration(FIND_TIMEOUT_MS)} at "${phase}", before any passage was verified. This is not evidence of absence; narrow \`path\`, or use \`pattern\` (exact regex, no judge).`,
 			);
 		} else if (stats.listed === 0) {
 			out.push(
-				`no eligible files${where || " in the workspace"}: find skips gitignored, hidden, binary and credential files and build/vendor dirs (dist, build, out, target, node_modules, …). grep with \`gitignore: false\` searches them.`,
+				`no eligible files${where || " in the workspace"}: find skips gitignored, hidden, binary and credential files and build/vendor dirs (dist, build, out, target, node_modules, …). \`pattern\` or \`glob\` with \`gitignore: false\` searches them.`,
 			);
 		} else if (hits.length === 0) {
 			out.push(`no hits for "${query}"${where} (τ ${threshold.toFixed(2)})`);

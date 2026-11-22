@@ -20,8 +20,8 @@ import * as toolTimeouts from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { $which, removeSyncWithRetries, Snowflake, spillFileName, spillUrl } from "@oh-my-pi/pi-utils";
 import { openArchive, readArchiveEntries } from "@oh-my-pi/pi-utils/ar";
-import { GlobTool } from "../src/tools/glob";
-import { DEFAULT_FILE_LIMIT, GrepTool, MULTI_FILE_PER_FILE_MATCHES } from "../src/tools/grep";
+import { DEFAULT_FILE_LIMIT, MULTI_FILE_PER_FILE_MATCHES } from "../src/tools/jfind/content-search";
+import { FindTool } from "../src/tools/jfind";
 
 import { cfgEditFuzzyMatch, cfgEditFuzzyThreshold } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { cfgReadDefaultLimit } from "@oh-my-pi/pi-coding-agent/tools/settings";
@@ -556,8 +556,8 @@ describe("Coding Agent Tools", () => {
 	let writeTool: WriteTool;
 	let editTool: EditTool;
 	let bashTool: BashTool;
-	let searchTool: GrepTool;
-	let findTool: GlobTool;
+	let searchTool: AgentTool<any, any, any>;
+	let findTool: AgentTool<any, any, any>;
 	let originalEditVariant: string | undefined;
 
 	beforeAll(async () => {
@@ -582,8 +582,8 @@ describe("Coding Agent Tools", () => {
 		writeTool = wrapToolWithMetaNotice(new WriteTool(session));
 		editTool = wrapToolWithMetaNotice(new EditTool(session));
 		bashTool = wrapToolWithMetaNotice(new BashTool(session));
-		searchTool = wrapToolWithMetaNotice(new GrepTool(session));
-		findTool = wrapToolWithMetaNotice(new GlobTool(session));
+		searchTool = wrapToolWithMetaNotice(new FindTool(session));
+		findTool = wrapToolWithMetaNotice(new FindTool(session));
 	});
 
 	afterEach(() => {
@@ -2523,8 +2523,8 @@ function b() {
 							"bashInterceptor.patterns": [
 								{
 									pattern: "^\\s*customcmd\\s+",
-									tool: "grep",
-									message: "Use the `grep` tool for customcmd.",
+									tool: "find",
+									message: "Use the `find` tool for customcmd.",
 								},
 							],
 						}),
@@ -2537,9 +2537,9 @@ function b() {
 					{ command: "customcmd foo" },
 					undefined,
 					undefined,
-					createTestToolContext(["grep"]),
+					createTestToolContext(["find"]),
 				),
-			).rejects.toThrow(/Use the `grep` tool for customcmd\./);
+			).rejects.toThrow(/Use the `find` tool for customcmd\./);
 		});
 
 		it("should resolve local:// destination paths for mv commands", async () => {
@@ -3039,7 +3039,7 @@ function b() {
 
 			const contextSettings = Settings.isolated({ "grep.contextBefore": 1, "grep.contextAfter": 1 });
 			const contextSearchTool = wrapToolWithMetaNotice(
-				new GrepTool(createTestToolSession(testDir, contextSettings)),
+				new FindTool(createTestToolSession(testDir, contextSettings)),
 			);
 			const result = await contextSearchTool.execute("test-call-12", {
 				pattern: "match",
@@ -3061,7 +3061,7 @@ function b() {
 
 			const noContextSettings = Settings.isolated({ "grep.contextBefore": 0, "grep.contextAfter": 0 });
 			const noContextSearchTool = wrapToolWithMetaNotice(
-				new GrepTool(createTestToolSession(testDir, noContextSettings)),
+				new FindTool(createTestToolSession(testDir, noContextSettings)),
 			);
 			const result = await noContextSearchTool.execute("test-call-12-gap", {
 				pattern: "match",
@@ -3285,7 +3285,10 @@ function b() {
 				path: concDir,
 			});
 
-			const hotCount = result.details?.fileMatches?.find(entry => entry.path.endsWith("hot.txt"))?.count ?? 0;
+			const hotCount =
+				(result.details?.fileMatches as Array<{ path: string; count: number }> | undefined)?.find(entry =>
+					entry.path.endsWith("hot.txt"),
+				)?.count ?? 0;
 			expect(hotCount).toBe(MULTI_FILE_PER_FILE_MATCHES);
 			expect(result.details?.perFileLimitReached).toBe(MULTI_FILE_PER_FILE_MATCHES);
 		});

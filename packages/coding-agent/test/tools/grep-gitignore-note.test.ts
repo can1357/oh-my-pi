@@ -4,11 +4,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-import { GrepTool } from "../../src/tools/grep";
+import { ContentSearch } from "../../src/tools/jfind/content-search";
 
 describe("grep with no matches outside .gitignore", () => {
 	let cwd: string;
-	let tool: GrepTool;
+	let tool: ContentSearch;
 
 	beforeEach(async () => {
 		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "pi-grep-gitignore-"));
@@ -16,7 +16,7 @@ describe("grep with no matches outside .gitignore", () => {
 		await Bun.write(path.join(cwd, ".gitignore"), "plans/\n");
 		await Bun.write(path.join(cwd, "docs/index.md"), "nothing here\n");
 		await Bun.write(path.join(cwd, "docs/plans/fs-4006.md"), "FS-4006 persistence decision\n");
-		tool = new GrepTool({
+		tool = new ContentSearch({
 			cwd,
 			hasUI: false,
 			getSessionFile: () => null,

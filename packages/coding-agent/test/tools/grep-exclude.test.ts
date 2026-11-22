@@ -5,11 +5,11 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-import { GrepTool } from "../../src/tools/grep";
+import { ContentSearch } from "../../src/tools/jfind/content-search";
 
 describe("grep `!glob` exclusions", () => {
 	let cwd: string;
-	let tool: GrepTool;
+	let tool: ContentSearch;
 
 	beforeEach(async () => {
 		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "pi-grep-exclude-"));
@@ -20,7 +20,7 @@ describe("grep `!glob` exclusions", () => {
 			getSessionSpawns: () => "*",
 			settings: Settings.isolated(),
 		};
-		tool = new GrepTool(session);
+		tool = new ContentSearch(session);
 		for (const name of [
 			"src/app.ts",
 			"src/app.test.ts",

@@ -6,7 +6,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
+import { ContentSearch } from "@oh-my-pi/pi-coding-agent/tools/jfind/content-search";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import { generateFileMentionMessages } from "@oh-my-pi/pi-coding-agent/utils/file-mentions";
@@ -112,7 +112,7 @@ describe("grep → edit seen-line guard under default settings", () => {
 		await Bun.write(file, "import os\n\ndef connect(host,\n            port):\n    return (host, port)\n");
 
 		const grep = textOutput(
-			await new GrepTool(session, { contextBefore: 0, contextAfter: 1 }).execute("grep", {
+			await new ContentSearch(session, { contextBefore: 0, contextAfter: 1 }).execute("grep", {
 				pattern: "def connect\\(host,\\n\\s+port\\)",
 				path: "conf.py",
 			}),
@@ -137,7 +137,7 @@ describe("grep → edit seen-line guard under default settings", () => {
 		await Bun.write(file, source);
 
 		const grep = textOutput(
-			await new GrepTool(session).execute("grep", { pattern: "head\\n(.*\\n)*end", path: "block.txt" }),
+			await new ContentSearch(session).execute("grep", { pattern: "head\\n(.*\\n)*end", path: "block.txt" }),
 		);
 		const rows = grep.split("\n").filter(row => /^[ *]\d+:/.test(row));
 		expect(rows[0]).toBe("*1:head [col 1]");
@@ -167,7 +167,7 @@ describe("grep → edit seen-line guard under default settings", () => {
 
 		// The match starts on line 3 but continues onto line 4, which the selector excludes.
 		const grep = textOutput(
-			await new GrepTool(session).execute("grep", {
+			await new ContentSearch(session).execute("grep", {
 				pattern: "def connect\\(host,\\n\\s+port\\)",
 				path: "conf.py:3-3",
 			}),
@@ -196,7 +196,7 @@ describe("grep → edit seen-line guard under default settings", () => {
 		await Bun.write(file, source);
 
 		const grep = textOutput(
-			await new GrepTool(session).execute("grep", { pattern: "a\\d+ = x+\\n  b\\d+", path: "pairs.txt" }),
+			await new ContentSearch(session).execute("grep", { pattern: "a\\d+ = x+\\n  b\\d+", path: "pairs.txt" }),
 		);
 		const rows = grep.split("\n").filter(row => /^[ *]\d+:/.test(row));
 		const lastShown = Number(/\d+/.exec(rows.at(-1) ?? "")?.[0]);

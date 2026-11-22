@@ -14,7 +14,7 @@
 - Requires `compaction.experimentalContextManagement = true`, an undisposed session, and a session journal whose ID matches the tool session's owner ID.
 - The setting defaults to `false`. Enable **Notes-backed context windows (experimental)** under `/settings` → Context → Compaction; ordinary running sessions reconcile the tool immediately. Restricted sessions retain their host-provided tool list.
 - Metadata: `strict = true`, `loadMode = "essential"`. Calls without a `text` property request read approval; calls with that property request write approval.
-- Notes-backed rollover requires all four tools to be active: `context_notes`, `new_context`, `read`, and `grep`.
+- Notes-backed rollover requires all four tools to be active: `context_notes`, `new_context`, `read`, and `find`.
 
 ## Inputs
 
@@ -39,7 +39,7 @@ The latest valid, nonempty notebook is included in experimental context reconstr
 
 ## Limits and Errors
 
-- Maximum notebook size: **16,384 UTF-8 bytes**. Oversized writes fail before appending. Shorten the notebook and recover supporting detail through `history://current/full` using `read` or `grep`.
+- Maximum notebook size: **16,384 UTF-8 bytes**. Oversized writes fail before appending. Shorten the notebook and recover supporting detail through `history://current/full` using `read` or `find`.
 - Disabled, disposed, or mismatched-owner sessions fail with a `ToolError`.
 - A branch change during disk preparation rejects the write rather than saving to a different branch.
 - Cancellation and persistence errors propagate to the caller.

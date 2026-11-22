@@ -12,14 +12,14 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { EditTool } from "./edit";
 import type { ExtensionAgentIdentity, ExtensionRunner } from "./extensibility/extensions";
 import { ExtensionToolWrapper } from "./extensibility/extensions";
-import type { GrepToolOptions, Tool, ToolSession } from "./tools";
-import { GrepTool } from "./tools";
+import type { ContentSearchOptions, Tool, ToolSession } from "./tools";
+import { FindTool } from "./tools";
 
 /**
- * Build the bridge's `createGrepTool` factory for one tool session.
+ * Build the bridge's `createGrepTool` factory for one tool session: a `find` whose content mode runs with the frame's options.
  *
  * A `pi_grep` frame carries its own context width and total match cap. Neither
- * is expressible in the model-facing `grep` schema — context comes from
+ * is expressible in the model-facing `find` schema — context comes from
  * `grep.contextBefore`/`grep.contextAfter`, fixed when the shared instance is
  * constructed — so honoring them needs a fresh tool per call.
  *
@@ -31,9 +31,9 @@ export function createBridgeGrepFactory(
 	session: ToolSession,
 	extensionRunner: ExtensionRunner,
 	agent?: ExtensionAgentIdentity,
-): (options: GrepToolOptions) => AgentTool {
+): (options: ContentSearchOptions) => AgentTool {
 	return options => {
-		const grepTool: Tool = new GrepTool(session, options);
+		const grepTool: Tool = new FindTool(session, { content: options });
 		return new ExtensionToolWrapper(grepTool, extensionRunner, agent);
 	};
 }

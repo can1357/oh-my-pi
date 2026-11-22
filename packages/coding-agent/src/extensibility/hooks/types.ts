@@ -15,8 +15,7 @@ import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
 import type { BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
-import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
-import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
+import type { FindAnyDetails } from "@oh-my-pi/pi-tui/tools/find";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import type {
 	AgentEndEvent,
@@ -358,16 +357,10 @@ export interface WriteToolResultEvent extends ToolResultEventBase {
 	details: undefined;
 }
 
-/** Tool result event for grep tool */
-export interface GrepToolResultEvent extends ToolResultEventBase {
-	toolName: "grep";
-	details: GrepToolDetails | undefined;
-}
-
-/** Tool result event for glob tool */
-export interface GlobToolResultEvent extends ToolResultEventBase {
-	toolName: "glob";
-	details: GlobToolDetails | undefined;
+/** Tool result event for the find tool (judged, content and name modes) */
+export interface FindToolResultEvent extends ToolResultEventBase {
+	toolName: "find";
+	details: FindAnyDetails | undefined;
 }
 
 /** Tool result event for custom/unknown tools */
@@ -386,8 +379,7 @@ export type ToolResultEvent =
 	| ReadToolResultEvent
 	| EditToolResultEvent
 	| WriteToolResultEvent
-	| GrepToolResultEvent
-	| GlobToolResultEvent
+	| FindToolResultEvent
 	| CustomToolResultEvent;
 
 /**

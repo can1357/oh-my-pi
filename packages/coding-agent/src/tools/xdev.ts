@@ -61,7 +61,7 @@ export const XDEV_KEEP_TOP_LEVEL: Record<string, true> = {
 	todo: true,
 	yield: true,
 	ask: true,
-	grep: true,
+	find: true,
 	web_search: true,
 };
 

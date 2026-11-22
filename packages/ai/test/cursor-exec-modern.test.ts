@@ -2369,7 +2369,7 @@ describe("Cursor exec answers: what the result claims about the work", () => {
 	});
 
 	it("signals the native grep backend's internal cap", async () => {
-		// `GrepTool` folds that ceiling into the flat `details.truncated` alone —
+		// `ContentSearch` (find's content mode) folds that ceiling into the flat `details.truncated` alone —
 		// no `details.truncation`, no `perFileLimitReached`. Forwarding only the
 		// latter two answered a clipped search as an unqualified success, which
 		// is the one truncation a caller can neither detect nor page around.

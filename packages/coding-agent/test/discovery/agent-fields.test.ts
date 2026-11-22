@@ -103,7 +103,7 @@ describe("parseAgentFields", () => {
 	test("keeps string entries in mixed tools arrays and normalizes aliases", () => {
 		expect(
 			parseAgentFields({ name: "reader", description: "desc", tools: [1, "Read", true, "Search"] })?.tools,
-		).toEqual(["read", "grep"]);
+		).toEqual(["read", "find"]);
 	});
 
 	test("gives a malformed tools declaration only the required child yield tool, not default built-ins", async () => {
@@ -125,14 +125,14 @@ describe("parseAgentFields", () => {
 		expect(plan.names).toEqual(["yield"]);
 	});
 
-	test("maps legacy search alias to grep and keeps find canonical", () => {
+	test("maps legacy search, grep and glob aliases onto the single find tool", () => {
 		const fields = parseAgentFields({
 			name: "reviewer",
 			description: "desc",
 			tools: ["Find", "Glob", "Search", "Grep"],
 		});
 
-		expect(fields?.tools).toEqual(["find", "glob", "grep"]);
+		expect(fields?.tools).toEqual(["find"]);
 	});
 
 	test("parses autoloadSkills from array frontmatter", () => {

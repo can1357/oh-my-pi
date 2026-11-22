@@ -39,7 +39,7 @@ import {
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import { BUILTIN_TOOLS, GrepTool, ReadTool, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { BUILTIN_TOOLS, FindTool, ReadTool, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { TodoTool } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
@@ -87,16 +87,16 @@ function passthroughRunner(seen: string[] = []): ExtensionRunner {
 
 describe("CursorExecHandlers.grep bridge", () => {
 	let cwd: string;
-	let searchTool: GrepTool;
+	let searchTool: FindTool;
 	let handlers: CursorExecHandlers;
 
 	beforeEach(async () => {
 		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-exec-test-"));
 		await Bun.write(path.join(cwd, "sample.txt"), "Hello World\nhello world\n");
-		searchTool = new GrepTool(createTestSession(cwd));
+		searchTool = new FindTool(createTestSession(cwd));
 		handlers = new CursorExecHandlers({
 			cwd,
-			tools: new Map([["grep", searchTool as any]]),
+			tools: new Map([["find", searchTool as any]]),
 		});
 	});
 
@@ -139,7 +139,7 @@ describe("CursorExecHandlers.grep bridge", () => {
 		const session = createTestSession(cwd, { settings });
 		const scopedHandlers = new CursorExecHandlers({
 			cwd,
-			tools: new Map<string, Tool>([["grep", new GrepTool(session)]]),
+			tools: new Map<string, Tool>([["find", new FindTool(session)]]),
 			createGrepTool: createBridgeGrepFactory(session, passthroughRunner()),
 			getToolContext: () => ({ settings }) as AgentToolContext,
 		});
@@ -182,8 +182,8 @@ describe("CursorExecHandlers.grep bridge", () => {
 		await Bun.write(path.join(cwd, "many.txt"), Array.from({ length: 10 }, (_, i) => `needle ${i}`).join("\n"));
 		const scopedHandlers = new CursorExecHandlers({
 			cwd,
-			tools: new Map<string, Tool>([["grep", searchTool]]),
-			createGrepTool: options => new GrepTool(createTestSession(cwd), options),
+			tools: new Map<string, Tool>([["find", searchTool]]),
+			createGrepTool: options => new FindTool(createTestSession(cwd), { content: options }),
 		});
 
 		const capped = await scopedHandlers.piGrep({
@@ -206,8 +206,8 @@ describe("CursorExecHandlers.grep bridge", () => {
 		await Bun.write(path.join(cwd, "ctx.txt"), "before line\nneedle here\nafter line\n");
 		const scopedHandlers = new CursorExecHandlers({
 			cwd,
-			tools: new Map<string, Tool>([["grep", searchTool]]),
-			createGrepTool: options => new GrepTool(createTestSession(cwd), options),
+			tools: new Map<string, Tool>([["find", searchTool]]),
+			createGrepTool: options => new FindTool(createTestSession(cwd), { content: options }),
 		});
 
 		const noContext = await scopedHandlers.piGrep({
@@ -240,8 +240,8 @@ describe("CursorExecHandlers.grep bridge", () => {
 		);
 		const scopedHandlers = new CursorExecHandlers({
 			cwd,
-			tools: new Map<string, Tool>([["grep", searchTool]]),
-			createGrepTool: options => new GrepTool(createTestSession(cwd), options),
+			tools: new Map<string, Tool>([["find", searchTool]]),
+			createGrepTool: options => new FindTool(createTestSession(cwd), { content: options }),
 		});
 
 		const wide = await scopedHandlers.piGrep({
@@ -524,9 +524,9 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 	it("denies a scoped pi_grep frame the user's policy blocks", async () => {
 		// Same gate on the other bridge-only tool: the per-call `grep` the
 		// factory builds for a frame carrying `context`/`limit` must answer to
-		// `tools.approval.grep` like every registry call.
+		// `tools.approval.find` like every registry call.
 		await Bun.write(path.join(cwd, "hit.txt"), "needle\n");
-		const settings = Settings.isolated({ "tools.approval": { grep: "deny" } });
+		const settings = Settings.isolated({ "tools.approval": { find: "deny" } });
 		const session = createTestSession(cwd, { settings });
 		const handlers = new CursorExecHandlers({
 			cwd,
@@ -546,7 +546,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 
 	it("wraps the per-call grep the real bridge factory builds", async () => {
 		// The reviewed bypass was in the factory the session hands the bridge,
-		// not in the bridge: a raw `new GrepTool(...)` there skips the approval
+		// not in the bridge: a raw `new FindTool(...)` there skips the approval
 		// gate every registry tool goes through. Exercise the shared factory
 		// both callsites use, so a regression in it fails here.
 		await Bun.write(path.join(cwd, "hit.txt"), "needle\n");
@@ -567,7 +567,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 
 		// The wrapper ran (its extension hook fired) and the frame's cap still
 		// reached the underlying tool.
-		expect(intercepted).toEqual(["grep"]);
+		expect(intercepted).toEqual(["find"]);
 		expect((result.details as { matchCount?: number } | undefined)?.matchCount).toBe(1);
 	});
 
@@ -1184,8 +1184,7 @@ describe("CursorExecHandlers error results", () => {
 			cwd: ".",
 			tools: new Map([
 				["read", rewrittenErrorTool("read")],
-				["grep", rewrittenErrorTool("grep")],
-				["glob", rewrittenErrorTool("glob")],
+				["find", rewrittenErrorTool("find")],
 			]),
 		});
 
@@ -1196,7 +1195,7 @@ describe("CursorExecHandlers error results", () => {
 		expect(result.isError).toBe(true);
 		const text = result.content.map(c => (c.type === "text" ? c.text : "")).join("");
 		expect(text).toContain('Tool "bash" not available to this agent');
-		expect(text).toContain("read, grep, glob");
+		expect(text).toContain("read, find");
 	});
 
 	it("omits unset optional kwargs from shellStream start events and execute args", async () => {
@@ -2382,7 +2381,7 @@ describe("CursorExecHandlers Pi frame translation", () => {
 	it("inverts pi_grep's ignore_case into the local tool's case-sensitivity flag", async () => {
 		// `ignore_case` and `case` are opposites. Passing the frame's value
 		// straight through would flip every search's matching.
-		const { handlers, calls } = recordingHandlers("grep");
+		const { handlers, calls } = recordingHandlers("find");
 
 		await handlers.piGrep({ toolCallId: "c1", args: { pattern: "x", ignoreCase: true } } as never);
 		await handlers.piGrep({ toolCallId: "c2", args: { pattern: "x", ignoreCase: false } } as never);
@@ -2396,7 +2395,7 @@ describe("CursorExecHandlers Pi frame translation", () => {
 	});
 
 	it("folds pi_grep's separate glob onto the local tool's single path spec", async () => {
-		const { handlers, calls } = recordingHandlers("grep");
+		const { handlers, calls } = recordingHandlers("find");
 
 		await handlers.piGrep({ toolCallId: "c1", args: { pattern: "x", path: "src", glob: "**/*.ts" } } as never);
 		await handlers.piGrep({ toolCallId: "c2", args: { pattern: "x", glob: "**/*.ts" } } as never);
@@ -2466,7 +2465,7 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		// `grep` paginates by file and reports "use skip=N for the next page" in
 		// that same unit. An unforwarded offset re-runs the identical search, so
 		// every page after the first repeats page one.
-		const { handlers, calls } = recordingHandlers("grep");
+		const { handlers, calls } = recordingHandlers("find");
 
 		await handlers.grep({ toolCallId: "c1", pattern: "x", path: "src", offset: 20 } as never);
 		await handlers.grep({ toolCallId: "c2", pattern: "x", path: "src" } as never);
@@ -2690,7 +2689,7 @@ describe("CursorExecHandlers Pi frame translation", () => {
 	it("escapes pi_grep's pattern when the frame asks for a literal search", async () => {
 		// The local tool is regex-only, so an unescaped literal turns regex
 		// metacharacters into operators and matches the wrong lines.
-		const { handlers, calls } = recordingHandlers("grep");
+		const { handlers, calls } = recordingHandlers("find");
 
 		await handlers.piGrep({ toolCallId: "c1", args: { pattern: "a.b(c)", literal: true } } as never);
 		await handlers.piGrep({ toolCallId: "c2", args: { pattern: "a.b(c)" } } as never);
@@ -2699,10 +2698,10 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		expect((calls[1] as { pattern: string }).pattern).toBe("a.b(c)");
 	});
 
-	it("routes pi_find to glob, not grep, joining its pattern onto the path", async () => {
-		// `pi_find` searches filenames. Routing it to `grep` would search file
-		// contents for the glob text and return nothing.
-		const { handlers, calls } = recordingHandlers("glob");
+	it("routes pi_find to the names mode of find, joining its pattern onto the path", async () => {
+		// `pi_find` searches filenames, so it sends only `path`/`limit` (no `pattern`).
+		// A `pattern` arg would select content mode and search file contents.
+		const { handlers, calls } = recordingHandlers("find");
 
 		await handlers.piFind({ toolCallId: "c1", args: { pattern: "*.ts", path: "src", limit: 10 } } as never);
 		await handlers.piFind({ toolCallId: "c2", args: { pattern: "*.ts", limit: 0 } } as never);

@@ -737,7 +737,7 @@ const EXPERIMENTAL_CONTEXT_REQUIRED_TOOLS: Record<string, true> = {
 	context_notes: true,
 	new_context: true,
 	read: true,
-	grep: true,
+	find: true,
 };
 
 /** Internal marker for hook messages queued through the agent loop */

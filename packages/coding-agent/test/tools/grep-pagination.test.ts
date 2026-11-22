@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-import { GrepTool, MULTI_FILE_PER_FILE_MATCHES, SINGLE_FILE_MATCHES } from "../../src/tools/grep";
+import { ContentSearch, MULTI_FILE_PER_FILE_MATCHES, SINGLE_FILE_MATCHES } from "../../src/tools/jfind/content-search";
 
 function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -39,7 +39,7 @@ describe("grep file pagination", () => {
 			getSessionSpawns: () => "*",
 			settings: Settings.isolated(),
 		};
-		const tool = new GrepTool(session);
+		const tool = new ContentSearch(session);
 
 		const first = await tool.execute("page-1", { pattern: "needle", path: "." });
 		expect(first.details?.files).toEqual(names.slice(0, 20));
@@ -64,7 +64,7 @@ describe("grep file pagination", () => {
 		expect(alone).not.toContain("More than");
 	});
 
-	function newTool(options?: ConstructorParameters<typeof GrepTool>[1]): GrepTool {
+	function newTool(options?: ConstructorParameters<typeof ContentSearch>[1]): ContentSearch {
 		const session: ToolSession = {
 			cwd,
 			hasUI: false,
@@ -72,7 +72,7 @@ describe("grep file pagination", () => {
 			getSessionSpawns: () => "*",
 			settings: Settings.isolated(),
 		};
-		return new GrepTool(session, options);
+		return new ContentSearch(session, options);
 	}
 
 	it("tells the model when the single-file cap trims a file", async () => {

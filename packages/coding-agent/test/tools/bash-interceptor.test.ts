@@ -321,7 +321,7 @@ describe("default echo/printf redirect rule", () => {
 });
 
 describe("default grep rule and pipeline stdin", () => {
-	const tools = ["grep"];
+	const tools = ["find"];
 
 	it("blocks standalone file searches", () => {
 		expect(checkBashInterception("grep pattern path", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
@@ -391,7 +391,7 @@ describe("BashTool argument validation", () => {
 });
 
 describe("pre-approval refusal gate", () => {
-	const createSession = (settingsOverrides: Record<string, unknown> = {}, toolNames = ["read", "grep", "bash"]) =>
+	const createSession = (settingsOverrides: Record<string, unknown> = {}, toolNames = ["read", "find", "bash"]) =>
 		({
 			cwd: process.cwd(),
 			hasUI: true,
@@ -424,7 +424,7 @@ describe("pre-approval refusal gate", () => {
 
 	const alwaysAskCtx = {
 		settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
-		toolNames: ["read", "grep", "bash"],
+		toolNames: ["read", "find", "bash"],
 	} as unknown as AgentToolContext;
 
 	it("rejects an intercepted command in always-ask mode without prompting", async () => {

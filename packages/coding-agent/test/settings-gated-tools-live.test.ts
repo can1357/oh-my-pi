@@ -13,9 +13,9 @@ import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 import { cfgEditMode } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { cfgBashEnabled } from "@oh-my-pi/pi-coding-agent/exec/settings";
-import { cfgGithubEnabled, cfgGrepEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { cfgFindEnabled, cfgGithubEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
-// Tool-gating settings (`grep.enabled`, `*.enabled`, ...) must reconcile a live
+// Tool-gating settings (`find.enabled`, `*.enabled`, ...) must reconcile a live
 // session's tools and prompt instead of waiting for the next session.
 describe("settings-gated tools in a live session", () => {
 	let registryDir: string;
@@ -74,24 +74,26 @@ describe("settings-gated tools in a live session", () => {
 		return prompt.split("\n# Tool Inventory\n")[1]?.split("\n", 1)[0]?.split(", ") ?? [];
 	}
 
-	it("removes and restores grep in the request tools and system prompt", async () => {
+	it("removes and restores find in the request tools and system prompt", async () => {
+		// Set through the setter, not `isolated` overrides: an override outranks later `set` calls, so the live toggle would never apply.
 		const settings = Settings.isolated({});
+		cfgFindEnabled.set(settings, "on");
 		const session = await startSession(settings);
-		expect(session.getActiveToolNames()).toContain("grep");
-		expect(promptToolNames(session)).toContain("grep");
+		expect(session.getActiveToolNames()).toContain("find");
+		expect(promptToolNames(session)).toContain("find");
 
-		cfgGrepEnabled.set(settings, false);
+		cfgFindEnabled.set(settings, "off");
 		await settle(session);
-		expect(session.getActiveToolNames()).not.toContain("grep");
-		expect(session.getToolByName("grep")).toBeUndefined();
-		expect(promptToolNames(session)).not.toContain("grep");
+		expect(session.getActiveToolNames()).not.toContain("find");
+		expect(session.getToolByName("find")).toBeUndefined();
+		expect(promptToolNames(session)).not.toContain("find");
 		expect(promptToolNames(session)).toContain("read");
 		expect(session.getActiveToolNames()).toContain("read");
 
-		cfgGrepEnabled.set(settings, true);
+		cfgFindEnabled.set(settings, "on");
 		await settle(session);
-		expect(session.getActiveToolNames()).toContain("grep");
-		expect(promptToolNames(session)).toContain("grep");
+		expect(session.getActiveToolNames()).toContain("find");
+		expect(promptToolNames(session)).toContain("find");
 	});
 
 	it("edit.mode none swaps edit out and keeps bash despite bash.enabled", async () => {
@@ -113,16 +115,17 @@ describe("settings-gated tools in a live session", () => {
 	});
 
 	it("never widens an explicit tool list", async () => {
-		const settings = Settings.isolated({ "grep.enabled": false, "github.enabled": false });
+		const settings = Settings.isolated({ "github.enabled": false });
+		cfgFindEnabled.set(settings, "off");
 		const session = await startSession(settings, ["read", "bash"]);
 		const before = session.getActiveToolNames();
-		expect(before).not.toContain("grep");
+		expect(before).not.toContain("find");
 
-		cfgGrepEnabled.set(settings, true);
+		cfgFindEnabled.set(settings, "on");
 		cfgGithubEnabled.set(settings, true);
 		await settle(session);
 		expect(session.getActiveToolNames()).toEqual(before);
-		expect(session.getToolByName("grep")).toBeUndefined();
+		expect(session.getToolByName("find")).toBeUndefined();
 
 		cfgBashEnabled.set(settings, false);
 		await settle(session);

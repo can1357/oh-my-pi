@@ -126,7 +126,7 @@ describe("restricted folder resolution", () => {
 	it("prompts for a recursive search rooted above a restricted folder, not a one-level listing", () => {
 		const search = (key: string): AgentTool => ({
 			...bash,
-			name: "grep",
+			name: "find",
 			approval: "read",
 			approvalCacheTargets: () => [key],
 		});

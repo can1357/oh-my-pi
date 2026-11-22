@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Merged the `grep` and `glob` tools into `find`. `find` takes `pattern` (exact regex over file contents; `glob`, `path`, `case`, `gitignore`, `skip` refine it), `glob` or `path` alone (exact file and directory names, also lists a directory), or `query` (judged search by description). The modes do not mix, and an argument the chosen mode would ignore is refused with the reason. The `grep` and `glob` tool names, the `grep.enabled` and `glob.enabled` settings (`grep.contextBefore`/`grep.contextAfter` remain), and the `GrepTool`/`GlobTool` exports are removed; `grep`, `glob` and `search` in a tool list now resolve to `find`, and `find` is available without a judge model (only `query` needs one). Extension and hook `tool_call`/`tool_result` events for these tools now arrive as `find` events, and the legacy `isGrepToolResult`/`isFindToolResult` guards narrow on the result's `mode`.
+
+### Added
+
+- Added recovery to missing-path errors from `find` and `read`: the message now names the unique workspace file whose trailing path matches, the same name in its real case, or what the nearest existing directory holds, so the next call needs no listing turn
+- Added a note to an empty case-sensitive `find` content search when a differently cased match exists, naming `case: false` instead of leaving the miss to read as absence
+
 ### Fixed
 
 - Fixed a headless `omp -p` run aborting with exit 1 when an extension, hook or tool load window was still open at quit (a deferred import or long-running factory): a successful shutdown now names the entries still holding a window on stderr once and exits through the native primitive with the host's real status, while a non-zero exit still fails

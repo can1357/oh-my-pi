@@ -629,7 +629,7 @@ describe("ChainJudge", () => {
 		};
 		expect(isFindEnabled(findSession)).toBe(false);
 		await expect(new FindTool(findSession).execute("x", { query: "renames", grep_keywords: [] })).rejects.toThrow(
-			"find is disabled for this session: judge typesafe/jev-preview rejected the account (402). Use grep.",
+			"find is disabled for this session: judge typesafe/jev-preview rejected the account (402). `query` needs a judge model; use `pattern` (regex over contents) or `glob` (names), which need none.",
 		);
 		expect(typesafeCalls).toHaveBeenCalledTimes(1);
 		expect(online).not.toHaveBeenCalled();

@@ -66,8 +66,7 @@ import {
 import type { SessionEntry } from "../session/session-entries";
 import type { Tool, ToolSession } from "../tools";
 import { BashTool } from "../tools/bash";
-import { GlobTool } from "../tools/glob";
-import { GrepTool } from "../tools/grep";
+import { FindTool } from "../tools/jfind";
 import { ReadTool } from "../tools/read";
 import { formatBytes } from "@oh-my-pi/pi-tui/render/render-utils";
 import { WriteTool } from "../tools/write";
@@ -80,7 +79,7 @@ import type {
 	BashToolResultEvent,
 	EditToolResultEvent,
 	ExtensionFactory,
-	GrepToolResultEvent,
+	FindToolResultEvent,
 	ReadToolResultEvent,
 	ToolDefinition,
 	ToolResultEvent,
@@ -252,9 +251,9 @@ function createRegistryTool(
 		case "edit":
 			return new EditTool(session);
 		case "glob":
-			return new GlobTool(session);
+			return new FindTool(session);
 		case "grep":
-			return new GrepTool(session);
+			return new FindTool(session);
 		case "read":
 			return new ReadTool(session);
 		case "write":
@@ -585,7 +584,8 @@ export function createGrepToolDefinition(cwd: string, options?: GrepToolOptions)
 		description: "Search file contents for a pattern.",
 		parameters: legacyGrepSchema,
 		approval: "read",
-		approvalCacheTargets: params => tool.approvalCacheTargets?.({ path: stringField(params, "path") ?? "." }),
+approvalCacheTargets: params =>
+			tool.approvalCacheTargets?.({ pattern: "-", path: stringField(params, "path") ?? "." }),
 		renderCall: (params, optionsArg, themeArg) => {
 			const theme = renderTheme(optionsArg, themeArg);
 			const pattern = stringField(params, "pattern") ?? "";
@@ -1679,17 +1679,17 @@ export function isWriteToolResult(e: ToolResultEvent): e is WriteToolResultEvent
 	return e.toolName === "write";
 }
 
-/** Narrow a `tool_result` event to the `grep` tool. */
-export function isGrepToolResult(e: ToolResultEvent): e is GrepToolResultEvent {
-	return e.toolName === "grep";
+/**
+ * Narrow a `tool_result` event to the legacy `grep` tool. `grep` was folded into `find`'s content mode, so a
+ * legacy extension's grep result is a `find` result whose details are tagged `mode: "content"`.
+ */
+export function isGrepToolResult(e: ToolResultEvent): e is FindToolResultEvent {
+	return e.toolName === "find" && (e.details as { mode?: string } | undefined)?.mode === "content";
 }
 
-/** Legacy `find` result event represented by omp's custom-event branch. */
-export type FindToolResultEvent = ToolResultEvent & { toolName: "find" };
-
-/** Narrow a `tool_result` event to the legacy `find` tool. */
+/** Narrow a `tool_result` event to the legacy `find` tool: a name-mode result, since `find` once meant glob. */
 export function isFindToolResult(e: ToolResultEvent): e is FindToolResultEvent {
-	return e.toolName === "find";
+	return e.toolName === "find" && (e.details as { mode?: string } | undefined)?.mode === "names";
 }
 
 /** Legacy `ls` result event represented by omp's custom-event branch. */

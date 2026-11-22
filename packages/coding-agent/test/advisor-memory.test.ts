@@ -137,20 +137,19 @@ describe("advisor memory context", () => {
 			const advisor = session.getAdvisorAgent();
 			if (!advisor) throw new Error("Expected advisor agent to exist");
 			const read = advisor.state.tools.find(tool => tool.name === "read");
-			const grep = advisor.state.tools.find(tool => tool.name === "grep");
-			const glob = advisor.state.tools.find(tool => tool.name === "glob");
-			if (!read || !grep || !glob) throw new Error("Expected default advisor URL tools");
+			const find = advisor.state.tools.find(tool => tool.name === "find");
+			if (!read || !find) throw new Error("Expected default advisor URL tools");
 
 			const unavailableRoot = `active backend: ${backend}`;
 			await expect(read.execute("advisor-root-read", { path: "memory://root" })).rejects.toThrow(unavailableRoot);
 			await expect(
-				grep.execute("advisor-root-grep", {
+				find.execute("advisor-root-grep", {
 					path: "memory://root",
 					pattern: "Advisor project summary marker",
 				}),
 			).rejects.toThrow(unavailableRoot);
-			await expect(glob.execute("advisor-root-glob", { path: "memory://root" })).rejects.toThrow(unavailableRoot);
-			await expect(glob.execute("advisor-root-glob", { path: "memory://root/*.md" })).rejects.toThrow(
+			await expect(find.execute("advisor-root-glob", { path: "memory://root" })).rejects.toThrow(unavailableRoot);
+			await expect(find.execute("advisor-root-glob", { path: "memory://root/*.md" })).rejects.toThrow(
 				unavailableRoot,
 			);
 
@@ -162,7 +161,7 @@ describe("advisor memory context", () => {
 				if (!id) throw new Error("Expected a stored memory id");
 				const row = await read.execute("advisor-memory-read", { path: `memory://${id}` });
 				expect(JSON.stringify(row.content)).toContain("Advisor scoped memory marker.");
-				const match = await grep.execute("advisor-memory-grep", {
+				const match = await find.execute("advisor-memory-grep", {
 					path: `memory://${id}`,
 					pattern: "Advisor scoped memory marker",
 				});

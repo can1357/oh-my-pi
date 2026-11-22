@@ -32,20 +32,20 @@ function createSession(enabled: boolean, restricted = false): ToolSession {
 
 describe("experimental context tool registration", () => {
 	test("disabled sessions cannot activate context tools even by explicit name", async () => {
-		const tools = await createTools(createSession(false), ["read", "grep", "context_notes", "new_context"]);
+		const tools = await createTools(createSession(false), ["read", "find", "context_notes", "new_context"]);
 		expect(tools.map(tool => tool.name)).not.toContain("context_notes");
 		expect(tools.map(tool => tool.name)).not.toContain("new_context");
 	});
 
 	test("enabling the experiment adds callable notes and rollover to an unrestricted recovery-capable set", async () => {
-		const tools = await createTools(createSession(true), ["read", "grep"]);
+		const tools = await createTools(createSession(true), ["read", "find"]);
 		const names = tools.map(tool => tool.name);
 		expect(names).toContain("context_notes");
 		expect(names).toContain("new_context");
 	});
 
 	test("restricted read-only sessions retain their explicit capability boundary", async () => {
-		const tools = await createTools(createSession(true, true), ["read", "grep"]);
+		const tools = await createTools(createSession(true, true), ["read", "find"]);
 		expect(tools.map(tool => tool.name)).not.toContain("context_notes");
 		expect(tools.map(tool => tool.name)).not.toContain("new_context");
 	});
@@ -72,7 +72,7 @@ describe("experimental context tool registration", () => {
 				settings: Settings.isolated({ "compaction.experimentalContextManagement": true }),
 				modelRegistry: new ModelRegistry(authStorage),
 				model: getBundledModel("openai", "gpt-4o-mini"),
-				toolNames: ["read", "grep"],
+				toolNames: ["read", "find"],
 				disableExtensionDiscovery: true,
 				skills: [],
 				contextFiles: [],

@@ -5,8 +5,8 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-import { GlobTool } from "../../src/tools/glob";
-import { GrepTool } from "../../src/tools/grep";
+import { NameSearch } from "../../src/tools/jfind/name-search";
+import { ContentSearch } from "../../src/tools/jfind/content-search";
 
 const testSettings = Settings.isolated();
 
@@ -48,7 +48,7 @@ describe("multi-path tools tolerate missing entries", () => {
 	});
 
 	it("search returns matches from existing paths and reports the missing one", async () => {
-		const tool = new GrepTool(createTestSession(tempDir));
+		const tool = new ContentSearch(createTestSession(tempDir));
 
 		const result = await tool.execute("search-multi-missing", {
 			pattern: "shared-needle",
@@ -66,7 +66,7 @@ describe("multi-path tools tolerate missing entries", () => {
 	});
 
 	it("search errors only when every path is missing", async () => {
-		const tool = new GrepTool(createTestSession(tempDir));
+		const tool = new ContentSearch(createTestSession(tempDir));
 
 		const promise = tool.execute("search-all-missing", {
 			pattern: "shared-needle",
@@ -77,7 +77,7 @@ describe("multi-path tools tolerate missing entries", () => {
 	});
 
 	it("find returns matches from existing globs and reports the missing one", async () => {
-		const tool = new GlobTool(createTestSession(tempDir), { rootPathAlias: true });
+		const tool = new NameSearch(createTestSession(tempDir), { rootPathAlias: true });
 
 		const result = await tool.execute("find-multi-missing", {
 			path: "src/**/*.ts; tests/**/*.ts",
@@ -96,7 +96,7 @@ describe("multi-path tools tolerate missing entries", () => {
 	});
 
 	it("find errors only when every glob's base directory is missing", async () => {
-		const tool = new GlobTool(createTestSession(tempDir), { rootPathAlias: true });
+		const tool = new NameSearch(createTestSession(tempDir), { rootPathAlias: true });
 
 		const promise = tool.execute("find-all-missing", {
 			path: "nope/**/*.ts; also-nope/**/*.ts",
@@ -106,7 +106,7 @@ describe("multi-path tools tolerate missing entries", () => {
 	});
 
 	it("scopes a `pattern` argument under `path`, as the call implies", async () => {
-		const tool = new GlobTool(createTestSession(tempDir));
+		const tool = new NameSearch(createTestSession(tempDir));
 		const params = { path: "src", pattern: "*alpha*;*beta*" };
 
 		const result = await tool.execute("glob-pattern", params);

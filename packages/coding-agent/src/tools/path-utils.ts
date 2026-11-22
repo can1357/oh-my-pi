@@ -1464,6 +1464,56 @@ export interface ResolvedExternalSearchUrl {
 	immutable?: boolean;
 }
 
+/** Entries listed from the nearest existing directory when a searched path is missing. */
+const MISSING_PATH_LISTING_LIMIT = 12;
+
+/**
+ * What a model would otherwise spend a turn finding out about a path that does not exist: the unique workspace
+ * file whose trailing path matches it, else the same name differing only by case, else what the nearest existing
+ * directory holds. Undefined for URLs and unreadable directories, which have nothing useful to add.
+ */
+export async function missingPathRecovery(
+	missing: string,
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	if (missing.includes("://")) return undefined;
+	const suffix = await findUniqueWorkspaceSuffix(missing, cwd, signal);
+	if (suffix) return `Did you mean \`${suffix.displayPath}\`?`;
+	let existing = path.resolve(cwd, missing);
+	const walked: string[] = [];
+	while (existing !== path.dirname(existing)) {
+		try {
+			if ((await fs.promises.stat(existing)).isDirectory()) break;
+		} catch {
+			// Keep walking up: this segment is missing too.
+		}
+		walked.unshift(path.basename(existing));
+		existing = path.dirname(existing);
+	}
+	let entries: fs.Dirent[];
+	try {
+		entries = await fs.promises.readdir(existing, { withFileTypes: true });
+	} catch {
+		return undefined;
+	}
+	const where = formatPathRelativeToCwd(existing, cwd) || ".";
+	const caseTwin = entries.find(entry => entry.name.toLowerCase() === walked[0]?.toLowerCase());
+	if (caseTwin) return `Did you mean \`${path.join(where, caseTwin.name)}\`? Names are case-sensitive.`;
+	const names = entries
+		.map(entry => (entry.isDirectory() ? `${entry.name}/` : entry.name))
+		.sort()
+		.slice(0, MISSING_PATH_LISTING_LIMIT);
+	const more = entries.length - names.length;
+	return `\`${where}\` exists and holds: ${names.join(", ")}${more > 0 ? ` (+${more} more)` : ""}`;
+}
+
+/** The "Path not found" message for a search path, with {@link missingPathRecovery} appended when it has any. */
+export async function missingPathMessage(missing: string, cwd: string, signal?: AbortSignal): Promise<string> {
+	const recovery = await missingPathRecovery(missing, cwd, signal);
+	return recovery ? `Path not found: ${missing}. ${recovery}` : `Path not found: ${missing}`;
+}
+
 export interface ToolScopeOptions {
 	rawPaths: string[];
 	cwd: string;
@@ -1655,7 +1705,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 			);
 		}
 		const hint = opts.multipathStatHint && rawPaths.length > 1 ? opts.multipathStatHint : "";
-		throw new ToolError(`Path not found: ${scopePath}${hint}`);
+		throw new ToolError(`${await missingPathMessage(scopePath, cwd)}${hint}`);
 	}
 
 	return {

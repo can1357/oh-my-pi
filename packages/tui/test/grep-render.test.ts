@@ -4,7 +4,7 @@ import * as url from "node:url";
 import { applyHyperlinkSetting } from "../src/render/hyperlink";
 import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { type GrepToolDetails, grepToolRenderer } from "@oh-my-pi/pi-tui/tools/grep";
+import { contentSearchRenderer as grepToolRenderer, type GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
 
 function extractLinkUris(text: string): string[] {
 	return [...text.matchAll(/\x1b\]8;[^;]*;([^\x1b]+)\x1b\\/g)].map(match => match[1]!);

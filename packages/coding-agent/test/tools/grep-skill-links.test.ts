@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { Settings } from "../../src/config/settings";
 import type { Skill } from "../../src/extensibility/skills";
 import type { ToolSession } from "../../src/tools";
-import { GrepTool } from "../../src/tools/grep";
+import { ContentSearch } from "../../src/tools/jfind/content-search";
 
 describe("grep through linked skill entries", () => {
 	let dir: string;
@@ -42,7 +42,7 @@ describe("grep through linked skill entries", () => {
 	});
 
 	it("searches linked files and directories under a skill root, as read resolves them", async () => {
-		const result = await new GrepTool(session).execute("skill-links", {
+		const result = await new ContentSearch(session).execute("skill-links", {
 			pattern: "lock-req|start-worker",
 			path: "skill://coord",
 		});

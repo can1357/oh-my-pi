@@ -677,7 +677,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		});
 		const toolResultMessage = await executeTool(
 			this.options,
-			"grep",
+			"find",
 			toolCallId,
 			{
 				pattern: args.pattern,
@@ -927,7 +927,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		// frame's `ignore_case`.
 		return await executeTool(
 			this.options,
-			"grep",
+			"find",
 			call.toolCallId,
 			{
 				pattern: literal === true ? piEscapeRegexLiteral(pattern) : pattern,
@@ -949,7 +949,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 */
 	async piFind(call: Parameters<NonNullable<ICursorExecHandlers["piFind"]>>[0]) {
 		const { pattern, path, limit } = call.args;
-		return await executeTool(this.options, "glob", call.toolCallId, {
+		return await executeTool(this.options, "find", call.toolCallId, {
 			path: piJoinPath(path, pattern),
 			limit: piLimit(limit),
 		});

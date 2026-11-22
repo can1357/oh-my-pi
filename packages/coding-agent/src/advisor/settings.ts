@@ -157,7 +157,7 @@ export const cfgAdvisorEvictStaleResults = register({
 		group: "Advisor",
 		label: "Advisor Evict Stale Results",
 		description:
-			"Before each review, replace the advisor's read/grep/glob output from older reviews with a short placeholder. The latest review is kept.",
+			"Before each review, replace the advisor's read/find output from older reviews with a short placeholder. The latest review is kept.",
 		condition: "advisorEnabled",
 	},
 });

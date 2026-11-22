@@ -260,7 +260,7 @@ export class StructuredSubagentError extends Error {
 	}
 }
 
-const PLAN_MODE_TOOLS = ["read", "grep", "glob", "web_search"] as const;
+const PLAN_MODE_TOOLS = ["read", "find", "web_search"] as const;
 
 /** Stands in for the assignment while the template is formatted; `format()` leaves it untouched. */
 const ASSIGNMENT_SLOT = "\u0000assignment\u0000";

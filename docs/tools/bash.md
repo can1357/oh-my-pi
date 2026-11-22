@@ -150,13 +150,13 @@ bashInterceptor:
       tool: read
       message: "Use the read tool instead; it handles binary files and provides better context."
     - pattern: '^\s*(grep|rg)\s+'
-      tool: grep
-      message: "Use the grep tool instead; it respects .gitignore and returns structured results."
+      tool: find
+      message: "Use the find tool with `pattern` instead; it respects .gitignore and returns structured results."
 ```
 
 An interceptor rule only applies when its `tool` is available in the current session. If `read` is disabled, a `cat` rule targeting `read` does not block the Bash call. This makes the interceptor a best-effort capability preference rather than an execution-security boundary.
 
-The built-in default rules route common operations such as `cat` to `read`, `rg` to `grep`, in-place `sed` to `edit`, shell redirection to `write`, and unmanaged services/watchers to named `bash` service mode. See `DEFAULT_BASH_INTERCEPTOR_RULES` in `packages/coding-agent/src/exec/settings.ts` for the complete list. Project and `--config` overlay `bashInterceptor.patterns` entries are prepended ahead of the global list (or `DEFAULT_BASH_INTERCEPTOR_RULES` when the global config leaves `bashInterceptor.patterns` unset). A global list of only path-scoped entries keeps the built-in rules after its own, so prepending onto it keeps them too.
+The built-in default rules route common operations such as `cat` to `read`, `rg`/`grep` to `find` (`pattern`), `find`/`fd` with name flags to `find` (`glob`), in-place `sed` to `edit`, shell redirection to `write`, and unmanaged services/watchers to named `bash` service mode. See `DEFAULT_BASH_INTERCEPTOR_RULES` in `packages/coding-agent/src/exec/settings.ts` for the complete list. Project and `--config` overlay `bashInterceptor.patterns` entries are prepended ahead of the global list (or `DEFAULT_BASH_INTERCEPTOR_RULES` when the global config leaves `bashInterceptor.patterns` unset). A global list of only path-scoped entries keeps the built-in rules after its own, so prepending onto it keeps them too.
 
 For compatibility with existing custom regexes, the interceptor always checks the complete original command first. It then checks raw, flat command fragments separated by unquoted and unescaped `&&`, `||`, `;`, `|`, `&`, or newlines. It also checks fragments after leading environment assignments are removed:
 
@@ -297,8 +297,8 @@ Choose the setting by the desired outcome:
 - `bash.direnv` defaults to `"auto"` and honors direnv's allow list; an unallowed `.envrc` is not executed. Set it to `"off"` to bypass preflight. `bash.direnvLoadTimeoutMs` controls the cold-load budget.
 - Default interceptor rules come from `DEFAULT_BASH_INTERCEPTOR_RULES` in `packages/coding-agent/src/exec/settings.ts`:
   - `cat|head|tail|less|more` -> `read` (not `cat` that sends stdout to a file or reads a heredoc, such as `cat > f` or `cat 2>err > f`)
-  - `grep|rg|ripgrep|ag|ack` -> `grep`
-  - `find|fd|locate` with name/type/glob flags -> `glob`
+  - `grep|rg|ripgrep|ag|ack` -> `find` (`pattern` mode)
+  - `find|fd|locate` with name/type/glob flags -> `find` (`glob` mode)
   - `sed -i`, `perl -i`, `awk -i inplace` -> `edit`
   - `echo|printf|cat` whose stdout goes to a file (`echo x > f`, `cat > f`, `cat 2>err > f`, `cat <<EOF > f`) -> `write`; redirects of other fds (`2>err.log`), fd duplication, `/dev` sinks and redirects after `;`, `&&`, `|` or a newline do not count
 - PTY mode is ignored in non-UI contexts and when `PI_NO_PTY=1` (gated by `canUseInteractiveBashPty()`); the tool falls back to non-PTY execution and appends a `pty requested but unavailable in this environment; ran without a terminal` notice.

@@ -7,7 +7,7 @@ import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
  * else (e.g. `recall` memory) is not re-derivable from the deltas or the
  * advisor's notes, so it is never evicted.
  */
-const EVICTABLE_TOOL_NAMES: Record<string, true> = { read: true, grep: true, glob: true };
+const EVICTABLE_TOOL_NAMES: Record<string, true> = { read: true, find: true };
 
 function createEvictionNotice(tokens: number): string {
 	return `[Stale result elided - ${tokens} tokens]`;
@@ -39,7 +39,7 @@ function latestReviewStart(messages: readonly AgentMessage[]): number {
 }
 
 /**
- * Evict the advisor's stale `read`/`grep`/`glob` output from reviews before
+ * Evict the advisor's stale `read`/`find` output from reviews before
  * the latest one.
  *
  * An advisor re-sends its own investigation output on every later request,

@@ -7,7 +7,7 @@ import { Settings } from "../../src/config/settings";
 import type { Skill } from "../../src/extensibility/skills";
 import { InternalUrlFilesystem } from "../../src/internal-urls/url-filesystem";
 import type { ToolSession } from "../../src/tools";
-import { GlobTool } from "../../src/tools/glob";
+import { NameSearch } from "../../src/tools/jfind/name-search";
 import { listFiles } from "../../src/tools/jfind/tree";
 
 describe("glob through linked skill entries", () => {
@@ -51,7 +51,7 @@ describe("glob through linked skill entries", () => {
 	});
 
 	it("finds zero-, one-, and many-directory globstar matches through a contained link without cycling", async () => {
-		const result = await new GlobTool(session).execute("linked-recursion", {
+		const result = await new NameSearch(session).execute("linked-recursion", {
 			path: "skill://fixture/**/*sequence*",
 			gitignore: false,
 		});
@@ -65,7 +65,7 @@ describe("glob through linked skill entries", () => {
 	it("keeps a direct-child glob nonrecursive and follows a linked skill root", async () => {
 		const linkedRoot = path.join(dir, "plugin", "linked-skill");
 		await fs.symlink(skill.baseDir, linkedRoot, "dir");
-		const tool = new GlobTool({ ...session, skills: [{ ...skill, baseDir: linkedRoot }] });
+		const tool = new NameSearch({ ...session, skills: [{ ...skill, baseDir: linkedRoot }] });
 		const direct = await tool.execute("linked-direct", {
 			path: "skill://fixture/lrhe/*sequence*",
 			gitignore: false,
@@ -84,7 +84,7 @@ describe("glob through linked skill entries", () => {
 		const outside = path.join(dir, "outside");
 		await Bun.write(path.join(outside, "leaked_sequence.py"), "secret = True\n");
 		await fs.symlink(outside, path.join(skill.baseDir, "escape"), "dir");
-		const result = await new GlobTool(session).execute("contained-recursion", {
+		const result = await new NameSearch(session).execute("contained-recursion", {
 			path: "skill://fixture/**/*sequence*",
 			gitignore: false,
 		});
@@ -97,7 +97,7 @@ describe("glob through linked skill entries", () => {
 		await fs.symlink(path.join(skill.baseDir, "owned"), path.join(skill.baseDir, "inside"), "dir");
 		await fs.symlink("skill://external", path.join(skill.baseDir, "url-link"), "dir");
 		const external: Skill = { ...skill, name: "external", baseDir: path.join(dir, "plugin", "shared") };
-		const result = await new GlobTool({
+		const result = await new NameSearch({
 			...session,
 			skills: [{ ...skill, containRoot: undefined }, external],
 		}).execute("local-skill-recursion", { path: "skill://fixture/**/*sequence*", gitignore: false });

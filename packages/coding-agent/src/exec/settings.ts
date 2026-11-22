@@ -41,13 +41,15 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	},
 	{
 		pattern: "^\\s*(grep|rg|ripgrep|ag|ack)\\s+",
-		tool: "grep",
-		message: "Use the `grep` tool instead of grep/rg. It respects .gitignore and provides structured output.",
+		tool: "find",
+		message:
+			"Use the `find` tool with `pattern` (regex over contents) instead of grep/rg. It respects .gitignore, groups matches by file, and reads no judge model.",
 	},
 	{
 		pattern: "^\\s*(find|fd|locate)\\s+.*(-name|-iname|-type|--type|-glob)",
-		tool: "glob",
-		message: "Use the `glob` tool instead of find/fd. It respects .gitignore and is faster for glob patterns.",
+		tool: "find",
+		message:
+			"Use the `find` tool with `glob` (names) instead of find/fd/locate. It respects .gitignore and returns paths `read` can open.",
 	},
 	{
 		pattern: "^\\s*sed\\s+(-i|--in-place)",

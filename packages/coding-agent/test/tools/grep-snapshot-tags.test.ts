@@ -6,7 +6,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-import { GrepTool } from "../../src/tools/grep";
+import { ContentSearch } from "../../src/tools/jfind/content-search";
 
 function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -40,7 +40,7 @@ describe("grep hashline snapshot tags", () => {
 			JSON.stringify({ cells: [{ cell_type: "code", source: ["needle = 1\n"] }], nbformat: 4 }, null, 1),
 		);
 
-		const text = textOf(await new GrepTool(session).execute("notebook", { pattern: "needle", path: "nb.ipynb" }));
+		const text = textOf(await new ContentSearch(session).execute("notebook", { pattern: "needle", path: "nb.ipynb" }));
 
 		const tag = getEditStore(session).headHash(notebookPath);
 		expect(tag).toBeDefined();
@@ -60,7 +60,7 @@ describe("grep hashline snapshot tags", () => {
 		const filePath = path.join(cwd, "a.txt");
 		await Bun.write(filePath, "needle one\nfiller\n");
 		await Bun.write(path.join(cwd, "b.txt"), "needle two\n");
-		const tool = new GrepTool(session);
+		const tool = new ContentSearch(session);
 		const tagOf = (text: string): string | undefined => /^#+ a\.txt#([0-9a-z]+)$/im.exec(text)?.[1];
 
 		const first = tagOf(textOf(await tool.execute("first", { pattern: "needle", path: "." })));
@@ -89,7 +89,7 @@ describe("grep hashline snapshot tags", () => {
 		await Bun.write(path.join(cwd, "b.txt"), "needle two\n");
 		// Let the file age past the racy-timestamp window so its stat is trusted and memoized.
 		await Bun.sleep(2_100);
-		const tool = new GrepTool(session);
+		const tool = new ContentSearch(session);
 		const tagOf = (text: string): string | undefined => /^#+ a\.txt#([0-9a-z]+)$/im.exec(text)?.[1];
 
 		const first = tagOf(textOf(await tool.execute("first", { pattern: "needle", path: "." })));

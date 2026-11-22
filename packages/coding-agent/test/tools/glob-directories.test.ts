@@ -6,7 +6,7 @@ import { glob } from "@oh-my-pi/pi-natives";
 import { Settings } from "../../src/config/settings";
 import { InternalUrlFilesystem } from "../../src/internal-urls/url-filesystem";
 import type { ToolSession } from "../../src/tools";
-import { GlobTool } from "../../src/tools/glob";
+import { NameSearch } from "../../src/tools/jfind/name-search";
 import { parseFindPattern, resolveSearchBase } from "../../src/tools/path-utils";
 
 describe("directory-only glob patterns", () => {
@@ -33,7 +33,7 @@ describe("directory-only glob patterns", () => {
 	});
 
 	it("matches only directories for absolute, relative, and Windows-separated globs", async () => {
-		const tool = new GlobTool(session);
+		const tool = new NameSearch(session);
 		for (const pattern of [`${dir}/beta.8*/`, "./beta.8*/", ".\\beta.8*\\"]) {
 			const result = await tool.execute("directory-pattern", { path: pattern, gitignore: false });
 			expect(result.details?.files?.toSorted()).toEqual(["beta.8a/", "beta.8b/"]);
@@ -41,7 +41,7 @@ describe("directory-only glob patterns", () => {
 	});
 
 	it("keeps recursive directory patterns and no-slash file matching distinct", async () => {
-		const tool = new GlobTool(session);
+		const tool = new NameSearch(session);
 		const directories = await tool.execute("recursive-directories", { path: "**/", gitignore: false });
 		expect(directories.details?.files?.toSorted()).toEqual(["beta.8a/", "beta.8a/nested/", "beta.8b/"]);
 		const all = await tool.execute("files-and-directories", { path: "./beta.8*", gitignore: false });
@@ -49,7 +49,7 @@ describe("directory-only glob patterns", () => {
 	});
 
 	it("preserves directory filtering when merging multiple roots", async () => {
-		const result = await new GlobTool(session).execute("multi-directory-pattern", {
+		const result = await new NameSearch(session).execute("multi-directory-pattern", {
 			path: "./beta.8*/;./beta.8a/*/",
 			gitignore: false,
 		});
@@ -73,7 +73,7 @@ describe("directory-only glob patterns", () => {
 		const artifacts = path.join(dir, "artifacts");
 		await fs.mkdir(path.join(artifacts, "local", "beta.8a"), { recursive: true });
 		await Bun.write(path.join(artifacts, "local", "beta.8file"), "not a directory");
-		const result = await new GlobTool({
+		const result = await new NameSearch({
 			...session,
 			getArtifactsDir: () => artifacts,
 			getSessionId: () => "glob-directories",
@@ -84,7 +84,7 @@ describe("directory-only glob patterns", () => {
 
 	it("passes directory-only filtering to delegated glob operations", async () => {
 		const filesystem = new InternalUrlFilesystem({ context: { cwd: dir }, tier: "read" });
-		const result = await new GlobTool(session, {
+		const result = await new NameSearch(session, {
 			operations: {
 				exists: () => true,
 				glob: async (pattern, cwd, options) => {

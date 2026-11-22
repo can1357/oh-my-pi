@@ -52,9 +52,7 @@ import {
 	cfgTodoRemindersMax,
 	cfgDevAutoqa,
 	cfgDevAutoqaConsent,
-	cfgGlobEnabled,
 	cfgFindEnabled,
-	cfgGrepEnabled,
 	cfgGrepContextAfter,
 	cfgGrepContextBefore,
 	cfgTodoEager,
@@ -2438,7 +2436,6 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(cfgGrepEnabled.get(settings)).toBe(false);
 			expect(cfgGrepContextBefore.get(settings)).toBe(2);
 			expect(cfgGrepContextAfter.get(settings)).toBe(5);
 		});
@@ -2452,31 +2449,29 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(cfgGrepEnabled.get(settings)).toBe(false);
 			expect(cfgGrepContextBefore.get(settings)).toBe(2);
 			expect(cfgGrepContextAfter.get(settings)).toBe(5);
 		});
 
 		it("does not clobber existing grep settings when migrating legacy search ones", async () => {
 			await writeSettings({
-				search: { enabled: false },
-				grep: { enabled: true },
-				"search.enabled": false,
-				"grep.enabled": true,
+				search: { contextBefore: 2 },
+				grep: { contextBefore: 7 },
+				"search.contextBefore": 2,
+				"grep.contextBefore": 7,
 			});
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(cfgGrepEnabled.get(settings)).toBe(true);
+			expect(cfgGrepContextBefore.get(settings)).toBe(7);
 		});
 
-		it("migrates a boolean find.enabled to its explicit on/off mode without touching glob", async () => {
-			await writeSettings({ find: { enabled: true }, glob: { enabled: false } });
+		it("migrates a boolean find.enabled to its explicit on/off mode", async () => {
+			await writeSettings({ find: { enabled: true } });
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
 			expect(cfgFindEnabled.get(settings)).toBe("on");
-			expect(cfgGlobEnabled.get(settings)).toBe(false);
 		});
 
 		it("migrates nested dev.autoqa.consent and todo.reminders.max without configuring parents", async () => {

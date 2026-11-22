@@ -225,7 +225,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const readOnlyResult = await runSubprocess({
 			...baseOptions,
 			id: "read-only-child",
-			agent: { ...baseAgent, tools: ["read", "grep", "glob"] },
+			agent: { ...baseAgent, tools: ["read", "find"] },
 		});
 		const writableResult = await runSubprocess({
 			...baseOptions,
@@ -248,7 +248,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(writableResult.exitCode).toBe(0);
 		expect(spawningResult.exitCode).toBe(0);
 		expect(restrictedResult.exitCode).toBe(0);
-		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["read", "grep", "glob"]);
+		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["read", "find"]);
 		expect(spy.mock.calls[1]?.[0]?.toolNames).toEqual(["read", "write", "bash", "wait"]);
 		expect(spy.mock.calls[2]?.[0]?.toolNames).toEqual(["read", "task", "wait"]);
 		expect(spy.mock.calls[3]?.[0]?.toolNames).toEqual(["read", "bash"]);

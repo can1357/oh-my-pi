@@ -1177,13 +1177,12 @@ it("read tool: requestPermission is never called for non-gated tools", async () 
 });
 
 it("setActiveToolsByName normalizes legacy tool names", async () => {
-	const grepTool = makeFakeTool("grep");
-	const globTool = makeFakeTool("glob");
-	session = await createSession([grepTool, globTool]);
+	const findTool = makeFakeTool("find");
+	session = await createSession([findTool]);
 
 	await session.setActiveToolsByName(["Search", "glob", "grep"]);
 
-	expect(session.getActiveToolNames()).toEqual(["grep", "glob"]);
+	expect(session.getActiveToolNames()).toEqual(["find"]);
 });
 
 // ---------------------------------------------------------------------------

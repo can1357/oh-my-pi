@@ -12,9 +12,7 @@ import { editToolRenderer } from "./edit";
 import { evalToolRenderer } from "./eval";
 import { findToolRenderer } from "./find";
 import { githubToolRenderer } from "./github";
-import { globToolRenderer } from "./glob";
 import { goalToolRenderer } from "./goal";
-import { grepToolRenderer } from "./grep";
 import { waitToolRenderer } from "./wait";
 import { lspToolRenderer } from "./lsp";
 import { recallToolRenderer, reflectToolRenderer, retainToolRenderer } from "./memory";
@@ -43,8 +41,6 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	edit: editToolRenderer,
 	apply_patch: editToolRenderer,
 	find: findToolRenderer,
-	glob: globToolRenderer,
-	grep: grepToolRenderer,
 	lsp: lspToolRenderer,
 	wait: waitToolRenderer,
 	read: readToolRenderer,

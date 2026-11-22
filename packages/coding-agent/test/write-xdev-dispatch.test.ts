@@ -811,22 +811,22 @@ describe("xd:// and top-level calls share the canonical tool map", () => {
 			expect(write).toBeDefined();
 			expect(read).toBeDefined();
 
-			// grep is kept top-level (XDEV_KEEP_TOP_LEVEL) and thus not a mounted
+			// find is kept top-level (essential) and thus not a mounted
 			// device — the unified namespace must still dispatch it via xd://.
 			const mounted = [...session.xdev!.mountedNames];
-			expect(mounted).not.toContain("grep");
+			expect(mounted).not.toContain("find");
 
 			const dispatched = await write!.execute("write-xdev-fallback-grep", {
-				path: "xd://grep",
+				path: "xd://find",
 				content: JSON.stringify({ pattern: "fallback-needle", path: tempDir }),
 			});
 			expect(dispatched.isError).toBeUndefined();
-			expect(dispatched.details?.xdev?.tool).toBe("grep");
+			expect(dispatched.details?.xdev?.tool).toBe("find");
 			expect(dispatched.content.find(entry => entry.type === "text")?.text).toContain("fallback-needle");
 
 			// Docs resolve through the same fallback.
-			const docs = await read!.execute("read-xdev-fallback-grep", { path: "xd://grep" });
-			expect(docs.content.find(entry => entry.type === "text")?.text).toContain("# grep");
+			const docs = await read!.execute("read-xdev-fallback-find", { path: "xd://find" });
+			expect(docs.content.find(entry => entry.type === "text")?.text).toContain("# find");
 
 			// Genuinely unknown names still fail with the catalog error.
 			const unknown = await write!.execute("write-xdev-fallback-unknown", {
@@ -870,7 +870,7 @@ describe("device-only write transport for explicit lists omitting write", () => 
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-device-only-"));
 		try {
 			const session = xdevSession(tempDir);
-			const tools = await createTools(session, ["read", "grep"]);
+			const tools = await createTools(session, ["read", "find"]);
 
 			// The device-only grant: write joins the set purely as the xd://
 			// execution transport, and xd:// state is allocated for mounting.
@@ -911,7 +911,7 @@ describe("device-only write transport for explicit lists omitting write", () => 
 	it("names the yield fallback for a device-only session that can yield (#14308)", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-yield-fallback-"));
 		try {
-			const activeNames = new Set(["read", "grep"]);
+			const activeNames = new Set(["read", "find"]);
 			const session = xdevSession(tempDir, {
 				requireYieldTool: true,
 				isToolActive: name => activeNames.has(name),
@@ -919,7 +919,7 @@ describe("device-only write transport for explicit lists omitting write", () => 
 					for (const name of names) activeNames.add(name);
 				},
 			});
-			const tools = await createTools(session, ["read", "grep"]);
+			const tools = await createTools(session, ["read", "find"]);
 
 			// The device-only grant still happens: the fallback is additive.
 			const write = tools.find(entry => entry.name === "write");
@@ -943,7 +943,7 @@ describe("device-only write transport for explicit lists omitting write", () => 
 	it("offers the local:// path through yield rather than against it", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-yield-local-"));
 		try {
-			const activeNames = new Set(["read", "grep"]);
+			const activeNames = new Set(["read", "find"]);
 			const getSessionId = () => "device-only-yield-local";
 			const session = xdevSession(tempDir, {
 				requireYieldTool: true,
@@ -954,7 +954,7 @@ describe("device-only write transport for explicit lists omitting write", () => 
 					for (const name of names) activeNames.add(name);
 				},
 			});
-			const tools = await createTools(session, ["read", "grep"]);
+			const tools = await createTools(session, ["read", "find"]);
 			const write = tools.find(entry => entry.name === "write");
 			expect(write).toBeDefined();
 			expect(session.isToolActive?.("yield")).toBe(true);
@@ -1011,14 +1011,14 @@ describe("device-only write transport for explicit lists omitting write", () => 
 	it("leaves the device-only rejection unchanged when yield is unavailable (#14308)", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-no-yield-"));
 		try {
-			const activeNames = new Set(["read", "grep"]);
+			const activeNames = new Set(["read", "find"]);
 			const session = xdevSession(tempDir, {
 				isToolActive: name => activeNames.has(name),
 				setActiveToolNames: names => {
 					for (const name of names) activeNames.add(name);
 				},
 			});
-			const tools = await createTools(session, ["read", "grep"]);
+			const tools = await createTools(session, ["read", "find"]);
 
 			const write = tools.find(entry => entry.name === "write");
 			expect(write).toBeDefined();
@@ -1146,7 +1146,7 @@ describe("device-only write transport for explicit lists omitting write", () => 
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-full-grant-"));
 		try {
 			const session = xdevSession(tempDir);
-			const tools = await createTools(session, ["read", "grep", "write"]);
+			const tools = await createTools(session, ["read", "find", "write"]);
 			expect(session.deviceOnlyWrite).toBeUndefined();
 			const write = tools.find(entry => entry.name === "write");
 
@@ -1182,7 +1182,7 @@ describe("device-only write transport for explicit lists omitting write", () => 
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-no-transport-"));
 		try {
 			const session = xdevSession(tempDir);
-			const tools = await createTools(session, ["grep", "glob"]);
+			const tools = await createTools(session, ["find"]);
 			expect(tools.some(entry => entry.name === "write")).toBe(false);
 			expect(session.deviceOnlyWrite).toBeUndefined();
 			expect(session.xdev).toBeUndefined();

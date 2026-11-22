@@ -16,8 +16,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/approval-cache";
 import { approvalTargetKey, approvalTreeSearchKey } from "@oh-my-pi/pi-coding-agent/tools/approval-targets";
 import { AstGrepTool } from "@oh-my-pi/pi-coding-agent/tools/ast-grep";
-import { GlobTool } from "@oh-my-pi/pi-coding-agent/tools/glob";
-import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
+import { NameSearch } from "@oh-my-pi/pi-coding-agent/tools/jfind/name-search";
+import { ContentSearch } from "@oh-my-pi/pi-coding-agent/tools/jfind/content-search";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -60,8 +60,8 @@ describe("search tool approval cache targets", () => {
 	afterEach(() => temp.removeSync());
 
 	it("reports a recursive search as the tree key, a one-level one as the folder key", () => {
-		const grep = new GrepTool(createToolSession(cwd));
-		const glob = new GlobTool(createToolSession(cwd));
+		const grep = new ContentSearch(createToolSession(cwd));
+		const glob = new NameSearch(createToolSession(cwd));
 		const folderKey = approvalDirectoryKey(srcDir);
 		const treeKey = approvalTreeSearchKey(folderKey);
 
@@ -76,8 +76,8 @@ describe("search tool approval cache targets", () => {
 	});
 
 	it("splits a semicolon-delimited root list the way execution does", () => {
-		const grep = new GrepTool(createToolSession(cwd));
-		const glob = new GlobTool(createToolSession(cwd));
+		const grep = new ContentSearch(createToolSession(cwd));
+		const glob = new NameSearch(createToolSession(cwd));
 		const srcKey = approvalTreeSearchKey(approvalDirectoryKey(srcDir));
 		const otherKey = approvalTreeSearchKey(approvalDirectoryKey(otherDir));
 
@@ -90,8 +90,8 @@ describe("search tool approval cache targets", () => {
 	});
 
 	it("reports a file root as the file key a read of it would mint", () => {
-		const grep = new GrepTool(createToolSession(cwd));
-		const glob = new GlobTool(createToolSession(cwd));
+		const grep = new ContentSearch(createToolSession(cwd));
+		const glob = new NameSearch(createToolSession(cwd));
 		const fileKey = approvalTargetKey(cwd, "src/notes.txt")!;
 
 		expect(grep.approvalCacheTargets?.({ pattern: "hello", path: "src/notes.txt" })).toEqual([fileKey]);
@@ -101,7 +101,7 @@ describe("search tool approval cache targets", () => {
 	});
 
 	it("reports every distinct root of a multi-root call, in order", () => {
-		const grep = new GrepTool(createToolSession(cwd));
+		const grep = new ContentSearch(createToolSession(cwd));
 
 		expect(grep.approvalCacheTargets?.({ pattern: "hello", path: ["src", "src/notes.txt", "src"] })).toEqual([
 			approvalTreeSearchKey(approvalDirectoryKey(srcDir)),
@@ -114,8 +114,8 @@ describe("search tool approval cache targets", () => {
 	});
 
 	it("falls back to the session cwd with no path, and reports nothing unusable", () => {
-		const grep = new GrepTool(createToolSession(cwd));
-		const glob = new GlobTool(createToolSession(cwd));
+		const grep = new ContentSearch(createToolSession(cwd));
+		const glob = new NameSearch(createToolSession(cwd));
 		const cwdTreeKey = approvalTreeSearchKey(approvalDirectoryKey(cwd));
 
 		// No path argument: both tools search the session cwd recursively, so that is the target.
@@ -136,8 +136,8 @@ describe("search tool approval cache targets", () => {
 
 	it("gates a private host written as an absolute name like its relative form", () => {
 		const read = new ReadTool(createToolSession(cwd));
-		const grep = new GrepTool(createToolSession(cwd));
-		const glob = new GlobTool(createToolSession(cwd));
+		const grep = new ContentSearch(createToolSession(cwd));
+		const glob = new NameSearch(createToolSession(cwd));
 
 		// DNS resolves `intranet.` and `localhost.` to the same hosts as `intranet` and `localhost`,
 		// so the trailing dot must not turn a private target into an ungated public one.
@@ -153,8 +153,8 @@ describe("search tool approval cache targets", () => {
 	});
 
 	it("prompts until the reported key is granted, under always-ask-cached", () => {
-		const grep = new GrepTool(createToolSession(cwd));
-		const glob = new GlobTool(createToolSession(cwd));
+		const grep = new ContentSearch(createToolSession(cwd));
+		const glob = new NameSearch(createToolSession(cwd));
 		const grepArgs = { pattern: "hello", path: "src" };
 		const globArgs = { path: "src/**/*.txt" };
 
@@ -190,7 +190,7 @@ describe("search tool approval cache targets", () => {
 		const agentDir = TempDir.createSync("@omp-search-approval-agent-");
 		try {
 			const store = getApprovalGrants(agentDir.path(), "s1");
-			const grep = new GrepTool(createToolSession(cwd));
+			const grep = new ContentSearch(createToolSession(cwd));
 			const grepArgs = { pattern: "hello", path: "src" };
 			const folderKey = approvalDirectoryKey(srcDir);
 
@@ -200,7 +200,7 @@ describe("search tool approval cache targets", () => {
 			const folder = approvalGrantKey("read", folderKey);
 			expect([...store.present([tree, folder])].sort()).toEqual([folder, tree].sort());
 
-			const glob = new GlobTool(createToolSession(cwd));
+			const glob = new NameSearch(createToolSession(cwd));
 			expect(resolveApproval(glob, { path: "src/**/*.txt" }, "always-ask-cached", {}, store).policy).toBe("allow");
 			// The same grant covers a search of one file inside the folder.
 			expect(

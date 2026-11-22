@@ -16,7 +16,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { GlobTool } from "@oh-my-pi/pi-coding-agent/tools/glob";
+import { NameSearch } from "@oh-my-pi/pi-coding-agent/tools/jfind/name-search";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { getAgentDir, removeWithRetries, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -62,7 +62,7 @@ async function withMemoryFixture(fn: (fixture: MemoryFixture) => Promise<void>):
 	}
 }
 
-function createGlobTool(cwd: string): GlobTool {
+function createGlobTool(cwd: string): NameSearch {
 	const session: ToolSession = {
 		cwd,
 		hasUI: false,
@@ -70,7 +70,7 @@ function createGlobTool(cwd: string): GlobTool {
 		getSessionFile: () => null,
 		getSessionSpawns: () => null,
 	};
-	return new GlobTool(session);
+	return new NameSearch(session);
 }
 
 describe("MemoryProtocolHandler", () => {

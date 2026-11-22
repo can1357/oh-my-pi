@@ -80,14 +80,14 @@ With the default batched task schema, supply shared `context` and per-item `task
 
 ```json
 {
-	"context": "Review the current change in this repository.",
-	"tasks": [
-		{
-			"agent": "reviewer",
-			"task": "Report concrete correctness findings.",
-			"solutionSpace": "Review cause and failure modes are open; no known defect."
-		}
-	]
+ "context": "Review the current change in this repository.",
+ "tasks": [
+  {
+   "agent": "reviewer",
+   "task": "Report concrete correctness findings.",
+   "solutionSpace": "Review cause and failure modes are open; no known defect."
+  }
+ ]
 }
 ```
 
@@ -396,7 +396,7 @@ For an explicit agent tool list, `runSubprocess` auto-adds `task` when `spawns` 
 When parent plan mode is enabled, `resolveEffectiveSubagentPolicy()` builds an `effectiveAgent` before launching subprocesses:
 
 - prepends the plan-mode subagent system prompt
-- restricts tools to `read`, `grep`, `glob`, and `web_search`, plus `ast_grep` when the agent's own tool list declares it
+- restricts tools to `read`, `find`, and `web_search`, plus `ast_grep` when the agent's own tool list declares it
 - clears child spawns
 - clears `prewalk` (read-only exploration must not receive the prewalk plan/implement nudges)
 

@@ -49,13 +49,15 @@ export interface GlobToolDetails {
 	 * skipped these and continued with the surviving entries; surfaced as a
 	 * non-fatal warning in the renderer and in the model-facing text. */
 	missingPaths?: string[];
+	/** Set by `find` when this report came from its names mode. */
+	mode?: "names";
 }
 
 // =============================================================================
 // TUI Renderer
 // =============================================================================
 
-interface GlobRenderArgs {
+export interface GlobRenderArgs {
 	path?: string | string[];
 	/** Legacy pre-`path` argument name; kept so historical transcripts still render a scope. */
 	paths?: string | string[];
@@ -137,7 +139,7 @@ function globNativeHead(args: GlobRenderArgs | undefined, meta: readonly string[
 }
 
 /** Render glob calls and results in the transcript. */
-export const globToolRenderer = {
+export const nameSearchRenderer = {
 	inline: true,
 	renderCall(args: GlobRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
 		const meta: string[] = [];

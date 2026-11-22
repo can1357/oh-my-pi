@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
+import { ContentSearch } from "@oh-my-pi/pi-coding-agent/tools/jfind/content-search";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -18,7 +18,7 @@ function getResultText(result: { content: Array<{ type: string; text?: string }>
 		.join("\n");
 }
 
-describe("GrepTool external URL selectors", () => {
+describe("ContentSearch external URL selectors", () => {
 	let tmpDir: string;
 	let server: Bun.Server<undefined> | undefined;
 	let url: string;
@@ -50,7 +50,7 @@ describe("GrepTool external URL selectors", () => {
 	}
 
 	it("searches the verbatim response body when the URL carries the :raw selector (issue #14092)", async () => {
-		const tool = new GrepTool(createSession());
+		const tool = new ContentSearch(createSession());
 
 		// `:raw` must reach the fetch: the minified body matches, while the
 		// rendered (pretty-printed) body does not contain the same bytes.
@@ -73,7 +73,7 @@ describe("GrepTool external URL selectors", () => {
 		url = `http://127.0.0.1:${server.port}/source.txt`;
 		const session = createSession();
 		const match = getResultText(
-			await new GrepTool(session).execute("grep", { pattern: "REMAINING_TARGET_LINE", path: url }),
+			await new ContentSearch(session).execute("grep", { pattern: "REMAINING_TARGET_LINE", path: url }),
 		);
 		const read = new ReadTool(session);
 		const selected = getResultText(await read.execute("read", { path: `${url}:12:raw` }));
@@ -86,7 +86,7 @@ describe("GrepTool external URL selectors", () => {
 
 	it("searches a URL in a session without an artifacts dir", async () => {
 		const { getArtifactsDir: _, ...session } = createSession();
-		const result = await new GrepTool(session).execute("no-session", { pattern: '"needle":"x"', path: `${url}:raw` });
+		const result = await new ContentSearch(session).execute("no-session", { pattern: '"needle":"x"', path: `${url}:raw` });
 		expect(getResultText(result)).toContain(MINIFIED_JSON);
 	});
 
@@ -95,20 +95,20 @@ describe("GrepTool external URL selectors", () => {
 		server = Bun.serve({ port: 0, fetch: () => new Response("needle: page not found", { status: 404 }) });
 		url = `http://127.0.0.1:${server.port}/missing`;
 
-		await expect(new GrepTool(createSession()).execute("404", { pattern: "needle", path: url })).rejects.toThrow(
+		await expect(new ContentSearch(createSession()).execute("404", { pattern: "needle", path: url })).rejects.toThrow(
 			`Cannot search ${url}: Failed to fetch URL (HTTP 404)`,
 		);
 	});
 
 	it("searches the whole fetched resource when the URL carries the :conflicts selector", async () => {
-		const tool = new GrepTool(createSession());
+		const tool = new ContentSearch(createSession());
 
 		const result = await tool.execute("conflicts", { pattern: '"needle"', path: `${url}:conflicts` });
 		expect(getResultText(result)).toContain("needle");
 	});
 
 	it("still rejects a URL tail selector that cannot filter matches by line number", async () => {
-		const tool = new GrepTool(createSession());
+		const tool = new ContentSearch(createSession());
 
 		await expect(tool.execute("tail", { pattern: "needle", path: `${url}:-5` })).rejects.toThrow(/invalid selector/i);
 		await expect(tool.execute("tail-conflicts", { pattern: "needle", path: `${url}:-5:conflicts` })).rejects.toThrow(
@@ -117,7 +117,7 @@ describe("GrepTool external URL selectors", () => {
 	});
 
 	it("keeps a line range that precedes :conflicts as a match filter", async () => {
-		const tool = new GrepTool(createSession());
+		const tool = new ContentSearch(createSession());
 
 		// The rendered body puts the match on line 2: a 1-1 range excludes it, a 2-2 range keeps it.
 		const outside = await tool.execute("range-conflicts", { pattern: "needle", path: `${url}:1-1:conflicts` });
@@ -127,7 +127,7 @@ describe("GrepTool external URL selectors", () => {
 	});
 
 	it("fetches an archive-named URL with :raw instead of opening it as a local archive member", async () => {
-		const tool = new GrepTool(createSession());
+		const tool = new ContentSearch(createSession());
 
 		// The `:raw` request is fetched like the bare URL, not parsed as archive `bundle.zip` + member `raw`.
 		const raw = await tool.execute("archive-url-raw", { pattern: "needle", path: `${url}/bundle.zip:raw` });
@@ -140,7 +140,7 @@ describe("GrepTool external URL selectors", () => {
 		"searches a literal file named like a host with a selector rather than fetching the host",
 		async () => {
 			await Bun.write(path.join(tmpDir, "www.example.com:conflicts"), "local needle\n");
-			const tool = new GrepTool(createSession());
+			const tool = new ContentSearch(createSession());
 
 			const result = await tool.execute("literal", { pattern: "needle", path: "www.example.com:conflicts" });
 			expect(getResultText(result)).toContain("local needle");
