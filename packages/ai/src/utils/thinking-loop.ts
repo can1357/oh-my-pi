@@ -691,10 +691,7 @@ function detectExactSuffixCycle(text: string): [unit: string, count: number] | n
  *  pipes (a union type such as `A | B`, a shell pipeline such as `cat f | grep x`) is
  *  reasoning and must still trip. Bullet and numbered lists are not structured here. */
 function isStructuredSegment(segment: string): boolean {
-	const masked = segment
-		.replace(JSON_STRING_TAIL, '""')
-		.replace(JSON_STRING_LEAD, '""')
-		.replace(JSON_STRING, '""');
+	const masked = segment.replace(JSON_STRING_TAIL, '""').replace(JSON_STRING_LEAD, '""').replace(JSON_STRING, '""');
 	let fields = 0;
 	let fieldChars = 0;
 	for (const match of masked.matchAll(JSON_FIELD)) {
@@ -706,8 +703,9 @@ function isStructuredSegment(segment: string): boolean {
 	if (lines.length < TABLE_MIN_LINES) return false;
 	// A table row leads with a pipe (GFM). A line that only contains two pipes is prose —
 	// a union type or a shell pipeline — and counts as reasoning, not as a table row.
-	const tableRows = lines
-		.filter(line => /^\s*\|/.test(line) && (line.match(/\|/g)?.length ?? 0) >= TABLE_ROW_MIN_PIPES).length;
+	const tableRows = lines.filter(
+		line => /^\s*\|/.test(line) && (line.match(/\|/g)?.length ?? 0) >= TABLE_ROW_MIN_PIPES,
+	).length;
 	return tableRows >= lines.length * TABLE_ROW_MIN_SHARE;
 }
 
