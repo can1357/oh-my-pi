@@ -8,7 +8,14 @@
 # inside it would be rebuilt from scratch each time.
 set -euo pipefail
 # bb remote exports these to every process of the run (ADR 0040, Part H.2); drop them first.
-unset BUILDBUDDY_API_KEY REPO_TOKEN REPO_USER
+# Exception: LIVE_REAPI_TESTS=1 preserves BUILDBUDDY_API_KEY so the live gRPC tests in
+# crates/exec-reapi/tests/live_buildbuddy.rs can authenticate against BuildBuddy.
+if [ "${LIVE_REAPI_TESTS-}" = "1" ]; then
+	export BUILDBUDDY_API_KEY
+	unset REPO_TOKEN REPO_USER
+else
+	unset BUILDBUDDY_API_KEY REPO_TOKEN REPO_USER
+fi
 
 stamp() { printf '\n=== %s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 

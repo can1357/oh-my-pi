@@ -108,4 +108,8 @@ if [ "$seed" = true ]; then
 fi
 
 # Not `exec`: the EXIT trap above must still remove the marker.
-GIT_REPO_DEFAULT_BRANCH=$default_branch bb remote "${args[@]}" --script="$(<scripts/remote-verify-runner.sh)"
+# LIVE_REAPI_TESTS=1 preserves BUILDBUDDY_API_KEY on the runner so the live gRPC tests
+# in crates/exec-reapi/tests/live_buildbuddy.rs can authenticate (see runner.sh).
+GIT_REPO_DEFAULT_BRANCH=$default_branch bb remote "${args[@]}" \
+	"--env=LIVE_REAPI_TESTS=${LIVE_REAPI_TESTS-}" \
+	--script="$(<scripts/remote-verify-runner.sh)"

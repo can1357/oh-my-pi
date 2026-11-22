@@ -129,11 +129,28 @@ remote +recipe:
 remote-test-pkg pkg:
     scripts/remote-verify.sh test-pkg {{ pkg }}
 
+# Run the live REAPI gRPC tests against BuildBuddy (crates/exec-reapi/tests/live_buildbuddy.rs).
+# Unlike `remote-test-pkg`, this preserves BUILDBUDDY_API_KEY on the runner so the live tests
+# can authenticate, and passes --include-ignored so the #[ignore]d live tests actually run.
+# Use only when you want to verify the REAPI client against a real endpoint.
+[group('remote')]
+remote-live-reapi:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    LIVE_REAPI_TESTS=1 scripts/remote-verify.sh remote-live-reapi-tests
+
 
 # Print every nextest result so remote test evidence includes its Summary line.
 [group('remote')]
 remote-plain-test pkg:
     NEXTEST_HIDE_PROGRESS_BAR=1 cargo nextest run -p {{ pkg }} --locked --no-fail-fast --status-level all --final-status-level all 2>&1 | cat
+
+# Run the live REAPI gRPC tests (#[ignore]d) with --include-ignored.
+# This recipe is called only by `remote-live-reapi`, which sets LIVE_REAPI_TESTS=1
+# so the runner preserves BUILDBUDDY_API_KEY for authentication.
+[group('remote')]
+remote-live-reapi-tests:
+    NEXTEST_HIDE_PROGRESS_BAR=1 cargo nextest run -p omp-exec-reapi --locked --include-ignored --no-fail-fast --status-level all --final-status-level all 2>&1 | cat
 # Save the BuildBuddy runner snapshot from the `omp2` base branch. The seed must not follow `origin/HEAD`.
 [group('remote')]
 remote-seed:
