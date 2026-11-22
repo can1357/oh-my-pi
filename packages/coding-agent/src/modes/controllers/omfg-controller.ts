@@ -4,7 +4,6 @@ import { invalidate as invalidateCapabilityCache } from "../../capability";
 import type { Rule } from "../../capability/rule";
 import omfgUserPrompt from "../../prompts/system/omfg-user.md" with { type: "text" };
 import { TtsrToolInspector } from "../../session/ttsr-outputs";
-import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { OmfgPanelComponent } from "@oh-my-pi/pi-tui/overlays/omfg-panel";
 import type { InteractiveModeContext } from "../types";
@@ -36,7 +35,6 @@ interface GenerateCandidateOptions {
 type SaveCandidateResult = { kind: "saved" | "aborted" | "rejected" } | { kind: "amend"; feedback: string };
 
 const MAX_ATTEMPTS = 3;
-const SAVED_RULE_PREFIX = "Saved TTSR rule to ";
 const PROJECT_OPTION = "This project (.omp/rules)";
 const GLOBAL_OPTION = "Global — all projects (~/.omp/agent/rules)";
 const AMEND_OPTION = "Amend with feedback…";
@@ -276,13 +274,9 @@ export class OmfgController {
 				target.level,
 			);
 			this.#registerLive(savedRule);
-			const savedPath = truncateToWidth(
-				replaceTabs(shortenPath(target.filePath)),
-				Math.max(1, (this.ctx.ui.terminal.columns ?? 100) - SAVED_RULE_PREFIX.length),
-			);
 			// Dismiss on success; errors keep the panel so the user can read them.
 			this.#closeActiveRequest({ abort: false });
-			this.ctx.showStatus(`${SAVED_RULE_PREFIX}${savedPath}`);
+			this.ctx.showStatus(`Saved TTSR rule to ${shortenPath(target.filePath)}`);
 			return { kind: "saved" };
 		}
 	}
