@@ -77,6 +77,7 @@ describe("async speculative compaction", () => {
 			methodOrder?: CompactionMethod[];
 			experimental?: boolean;
 			recoveryTools?: boolean;
+			onAutoCompactionStart?: () => void;
 			obfuscateTextForProvider?: (text: string | undefined) => string | undefined;
 			obfuscatePreparationForProvider?: <T>(preparation: T) => T;
 			convertToLlmForSideRequest?: (messages: AgentMessage[]) => never;
@@ -128,6 +129,7 @@ describe("async speculative compaction", () => {
 			memoryBackendSession: () => undefined,
 			emitSessionEvent: async (event: { type: string }) => {
 				events.push(event.type);
+				if (event.type === "auto_compaction_start") options.onAutoCompactionStart?.();
 			},
 			emitNotice: () => {},
 			scheduleAgentContinue: () => {},
@@ -503,6 +505,263 @@ describe("async speculative compaction", () => {
 		expect([...cleared.messagesToSummarize, ...cleared.turnPrefixMessages, ...cleared.recentMessages]).toEqual([
 			fresh,
 			kept,
+		]);
+	});
+
+	it("adopts a running remote compaction at the grace cap without losing the post-snapshot interval", async () => {
+		const bundled = getBundledModel("openai", "gpt-5");
+		if (!bundled) throw new Error("Expected built-in OpenAI model");
+		model = { ...bundled, contextWindow: CONTEXT_WINDOW };
+		authStorage.keys.setRuntime("openai", "test-key");
+		const maintenanceStarted = Promise.withResolvers<void>();
+		maintenance = createMaintenance({
+			methodOrder: ["remote"],
+			onAutoCompactionStart: maintenanceStarted.resolve,
+		});
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let requestSignal: AbortSignal | undefined;
+		let invocation = 0;
+		const compactSpy = vi
+			.spyOn(compactionModule, "compact")
+			.mockImplementation(async (preparation, candidate, _key, _instructions, signal) => {
+				if (++invocation > 1) {
+					// The newer request cannot fit, although the already-running snapshot can finish.
+					compactionModule.assertRemoteCompactionInputFits(
+						{
+							input: [],
+							rewrittenOutputs: 0,
+							estimatedTokensBefore: CONTEXT_WINDOW + 1,
+							estimatedTokensAfter: CONTEXT_WINDOW + 1,
+							fits: false,
+						},
+						candidate,
+					);
+				}
+				requestSignal = signal;
+				started.resolve();
+				await release.promise;
+				return {
+					summary: "remote speculative summary",
+					firstKeptEntryId: preparation.firstKeptEntryId,
+					tokensBefore: preparation.tokensBefore,
+					details: {},
+					preserveData: {
+						openaiRemoteCompaction: {
+							version: "v2",
+							provider: model.provider,
+							replacementHistory: [{ type: "compaction_summary", summary: "snapshot" }],
+							usedTokens: 1_000,
+						},
+					},
+				};
+			});
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await started.promise;
+		sessionManager.appendMessage(userMessage("post-snapshot request"));
+		sessionManager.appendMessage({
+			...assistantMessage("", model),
+			content: [{ type: "toolCall", id: "call-after-snapshot", name: "read", arguments: { path: "src/index.ts" } }],
+			stopReason: "toolUse",
+		});
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "call-after-snapshot",
+			toolName: "read",
+			content: [{ type: "text", text: "file contents" }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		sessionManager.appendMessage(userMessage("post-snapshot follow-up"));
+		const graceCap = THRESHOLD + 8_192;
+		expect(maintenance.deferThresholdCompactionToSpeculation(graceCap, CONTEXT_WINDOW)).toBe(false);
+		const pass = maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: graceCap });
+		try {
+			await maintenanceStarted.promise;
+			expect(maintenance.isCompacting).toBe(true);
+			expect(events).toContain("auto_compaction_start");
+			expect(requestSignal?.aborted).toBe(false);
+		} finally {
+			release.resolve();
+			await pass;
+		}
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(sessionManager.getEntries().filter(item => item.type === "compaction")).toHaveLength(1);
+
+		expect(agent.state.messages.map(message => message.role)).toEqual([
+			"compactionSummary",
+			"user",
+			"assistant",
+			"toolResult",
+			"user",
+		]);
+		expect(agent.state.messages[1]).toEqual(
+			expect.objectContaining({
+				role: "user",
+				content: [{ type: "text", text: "post-snapshot request" }],
+			}),
+		);
+	});
+
+	it.each(["operator", "snapshot cancellation"] as const)(
+		"does not commit or restart adopted remote work after %s cancellation",
+		async cancellation => {
+			useNativeCompactionModel();
+			const maintenanceStarted = Promise.withResolvers<void>();
+			maintenance = createMaintenance({
+				methodOrder: ["remote", "soft"],
+				onAutoCompactionStart: maintenanceStarted.resolve,
+			});
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			let requestSignal: AbortSignal | undefined;
+			const compactSpy = vi
+				.spyOn(compactionModule, "compact")
+				.mockImplementation(async (preparation, _model, _key, _instructions, signal) => {
+					requestSignal = signal;
+					started.resolve();
+					// Deliberately ignore cancellation to exercise a late transport completion.
+					await release.promise;
+					return {
+						summary: "late remote summary",
+						firstKeptEntryId: preparation.firstKeptEntryId,
+						tokensBefore: preparation.tokensBefore,
+						details: {},
+					};
+				});
+			maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+			const speculation = maintenance.speculationCompletion;
+			await started.promise;
+			const pass = maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
+			try {
+				await maintenanceStarted.promise;
+				if (cancellation === "operator") maintenance.abortCompaction("operator stop");
+				else maintenance.cancelSpeculation();
+				await pass;
+				expect(requestSignal?.aborted).toBe(true);
+				expect(maintenance.isCompacting).toBe(false);
+				expect(events.filter(event => event === "auto_compaction_end")).toHaveLength(1);
+			} finally {
+				release.resolve();
+				await speculation;
+			}
+			expect(compactSpy).toHaveBeenCalledTimes(1);
+			expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toEqual([]);
+			expect(maintenance.speculationState).toBe("idle");
+		},
+	);
+
+	it.each(["provider failure", "deadline"] as const)(
+		"uses the next method after adopted remote work reaches %s",
+		async failure => {
+			useNativeCompactionModel();
+			const maintenanceStarted = Promise.withResolvers<void>();
+			maintenance = createMaintenance({
+				methodOrder: ["remote", "soft"],
+				onAutoCompactionStart: maintenanceStarted.resolve,
+			});
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const deadline = new AbortController();
+			const timeoutCreated = Promise.withResolvers<number>();
+			let now = 1_000;
+			if (failure === "deadline") {
+				vi.spyOn(performance, "now").mockImplementation(() => now);
+				// Drive the deadline explicitly; no wall-clock sleeps or provider I/O.
+				vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => {
+					timeoutCreated.resolve(ms);
+					return deadline.signal;
+				});
+			}
+			let invocation = 0;
+			let requestSignal: AbortSignal | undefined;
+			const compactSpy = vi
+				.spyOn(compactionModule, "compact")
+				.mockImplementation(async (preparation, _model, _key, _instructions, signal) => {
+					if (++invocation === 1) {
+						requestSignal = signal;
+						started.resolve();
+						await release.promise;
+					}
+					return {
+						summary: invocation === 1 ? "late remote summary" : "fallback summary",
+						firstKeptEntryId: preparation.firstKeptEntryId,
+						tokensBefore: preparation.tokensBefore,
+						details: {},
+					};
+				});
+			maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+			const speculation = maintenance.speculationCompletion;
+			await started.promise;
+			now += compactionModule.REMOTE_COMPACTION_TIMEOUT_MS - 500;
+			const pass = maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
+			try {
+				await maintenanceStarted.promise;
+				if (failure === "deadline") {
+					// Only the original budget's remainder may be spent waiting.
+					expect(await timeoutCreated.promise).toBe(500);
+					deadline.abort(new DOMException("Remote deadline elapsed", "TimeoutError"));
+				} else {
+					release.reject(new compactionModule.NativeCompactionError(new Error("Remote compaction refused")));
+				}
+				await pass;
+				if (failure === "deadline") expect(requestSignal?.aborted).toBe(true);
+			} finally {
+				release.resolve();
+				await speculation;
+			}
+			expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toMatchObject([
+				{ method: "soft", summary: "fallback summary" },
+			]);
+			expect(compactSpy).toHaveBeenCalledTimes(2);
+			expect(maintenance.isCompacting).toBe(false);
+			expect(maintenance.speculationState).toBe("idle");
+		},
+	);
+
+	it("revalidates the snapshot after waiting instead of committing across a reset", async () => {
+		useNativeCompactionModel();
+		const maintenanceStarted = Promise.withResolvers<void>();
+		maintenance = createMaintenance({
+			methodOrder: ["remote"],
+			onAutoCompactionStart: maintenanceStarted.resolve,
+		});
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let invocation = 0;
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			if (++invocation === 1) {
+				started.resolve();
+				await release.promise;
+				return {
+					summary: "obsolete snapshot",
+					firstKeptEntryId: preparation.firstKeptEntryId,
+					tokensBefore: preparation.tokensBefore,
+					details: {},
+				};
+			}
+			return {
+				summary: "new branch summary",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await started.promise;
+		const pass = maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
+		try {
+			await maintenanceStarted.promise;
+			sessionManager.appendResetBoundary();
+			appendSummarizableConversation();
+		} finally {
+			release.resolve();
+			await pass;
+		}
+		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toMatchObject([
+			{ summary: "new branch summary" },
 		]);
 	});
 
