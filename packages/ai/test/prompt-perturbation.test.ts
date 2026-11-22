@@ -110,10 +110,10 @@ describe("per-install prompt perturbation", () => {
 		const droid = { ...model, provider: "factory-droid", id: "kimi-k3" } as typeof model;
 		const blocks = perturbContext(droid, { systemPrompt: [prompt], messages: [] }).systemPrompt;
 		expect(blocks?.[0]).not.toContain(opener);
-		// Legacy pi-ai callers pass the system prompt as one string.
+		// Legacy pi-ai callers pass the system prompt as one string; it stays one block.
 		const legacy = { systemPrompt: prompt, messages: [] } as unknown as Context;
-		const single = perturbContext(droid, legacy).systemPrompt as unknown as string;
-		expect(typeof single).toBe("string");
-		expect(single).not.toContain(opener);
+		const single = perturbContext(droid, legacy).systemPrompt;
+		expect(single).toEqual([perturbPromptText(prompt)]);
+		expect(single?.[0]).not.toContain(opener);
 	});
 });
