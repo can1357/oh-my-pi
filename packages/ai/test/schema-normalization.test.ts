@@ -572,16 +572,16 @@ describe("sanitizeSchemaForOpenAIResponses", () => {
 		expect(sanitizeSchemaForOpenAIResponses(schema)).toEqual({
 			type: "object",
 			properties: {
-				nested: { type: "object", properties: {} },
+				nested: { type: "object", properties: {}, additionalProperties: true },
 				union: {
-					anyOf: [{ type: "object", properties: {} }],
+					anyOf: [{ type: "object", properties: {}, additionalProperties: true }],
 				},
 			},
 			enum: [literal],
 			const: literal,
 			default: literal,
 			examples: [literal],
-			anyOf: [{ type: "object", properties: {} }],
+			anyOf: [{ type: "object", properties: {}, additionalProperties: true }],
 		});
 	});
 
@@ -605,11 +605,11 @@ describe("sanitizeSchemaForOpenAIResponses", () => {
 			properties: {
 				body: {
 					type: "string",
-					contentSchema: { type: "object", properties: {} },
+					contentSchema: { type: "object", properties: {}, additionalProperties: true },
 				},
 			},
 			dependencies: {
-				body: { type: "object", properties: {} },
+				body: { type: "object", properties: {}, additionalProperties: true },
 				other: ["body"],
 			},
 		});
@@ -619,6 +619,7 @@ describe("sanitizeSchemaForOpenAIResponses", () => {
 		expect(sanitizeSchemaForOpenAIResponses({ type: ["object", "null"] })).toEqual({
 			type: ["object", "null"],
 			properties: {},
+			additionalProperties: true,
 		});
 	});
 
@@ -654,7 +655,7 @@ describe("sanitizeSchemaForOpenAIResponses", () => {
 			},
 			patternProperties: {
 				".*": { anyOf: [{ type: "string" }, { type: "string" }] },
-				"^x-": { type: "object", properties: {} },
+				"^x-": { type: "object", properties: {}, additionalProperties: true },
 				"\\(?!literal": { type: "string" },
 			},
 			propertyNames: true,
@@ -698,6 +699,7 @@ describe("sanitizeSchemaForOpenAIResponses", () => {
 			type: "object",
 			oneOf: { type: "object" },
 			properties: {},
+			additionalProperties: true,
 		});
 	});
 

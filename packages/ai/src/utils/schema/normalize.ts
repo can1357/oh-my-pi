@@ -1829,6 +1829,9 @@ function normalizeOpenAIResponsesSchemaNode(
 	// properties requirement.
 	if (declaresObjectType(value.type) && !Object.hasOwn(value, "properties")) {
 		output.properties = {};
+		// A bare object is open in JSON Schema. The placeholder `properties: {}` alone reads
+		// as a declared empty shape, which strict adaptation would close (issue #10125).
+		if (!Object.hasOwn(value, "additionalProperties")) output.additionalProperties = true;
 		changed = true;
 	}
 
@@ -2026,6 +2029,8 @@ function isUnrepresentableStrictBranch(value: unknown): boolean {
  *  - `patternProperties` (open keyset matched by regex),
  *  - `additionalProperties: true` or `additionalProperties: <schema>` (open
  *    keyset with optional further constraint).
+ *  - an object with neither `properties` nor `additionalProperties`: open in
+ *    JSON Schema, but `enforceStrictSchema` would close it to `{}`-only.
  *  - boolean schemas (`true`/`false`) inside `anyOf`/`oneOf`/`allOf`/`items`/
  *    `prefixItems` — strict providers (OpenAI/Codex) reject the unconstrained
  *    branch, and `enforceStrictSchema` would otherwise wave the non-object
@@ -2050,6 +2055,13 @@ function hasUnrepresentableStrictObjectMap(schema: Record<string, unknown>, epoc
 	const additionalPropertiesValue = schema.additionalProperties;
 	const hasSchemaAdditionalProperties = additionalPropertiesValue === true || isJsonObject(additionalPropertiesValue);
 	if (hasPatternProperties || hasSchemaAdditionalProperties) {
+		return true;
+	}
+	if (
+		declaresObjectType(schema.type) &&
+		!isJsonObject(schema.properties) &&
+		!Object.hasOwn(schema, "additionalProperties")
+	) {
 		return true;
 	}
 

@@ -64,7 +64,7 @@ describe("openai-codex tool schemas", () => {
 			type: "function",
 			name: "list_outgoing_messages",
 			description: "List outgoing messages",
-			parameters: { type: "object", properties: {} },
+			parameters: { type: "object", properties: {}, additionalProperties: true },
 		});
 	});
 	it("strips MCP regex lookaround patterns from function parameters", () => {
