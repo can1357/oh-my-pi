@@ -19,6 +19,8 @@
 - `openai-models-list` discovery no longer offers a gateway's speech and transcription models as chat models: rows whose only output is `speech` or `transcription` (including OpenRouter's `text->speech` style `architecture.modality` summary) become `tts` and `stt` models ([#19900](https://github.com/can1357/oh-my-pi/pull/19900) by [@Xytronix](https://github.com/Xytronix))
 - Subagents stopped by their parent through `proc://<id>/kill` now record "Stopped by parent agent" in their transcripts instead of "Interrupted by user" ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
 - Fixed the omp daemon staying alive for up to 3 seconds after shutdown, or 11 seconds after stopping a module unit such as the image URL broker, once its work was done
+- Invalid model configuration retains validated last-good custom providers in memory and across restarts through a private sidecar. Commented JSONC snapshots retain their original parser, and CLI warnings report recovery only when a validated configuration was retained ([#16540](https://github.com/can1357/oh-my-pi/pull/16540) by [@Komzpa](https://github.com/Komzpa))
+- Invalid `models.yml` warnings report the offending YAML source line rather than JavaScript call-site lines or unrelated provider keys ([#16540](https://github.com/can1357/oh-my-pi/pull/16540) by [@Komzpa](https://github.com/Komzpa))
 
 ## [19.1.0] - 2026-11-21
 
