@@ -11,6 +11,7 @@
 - Fixed the `computer` tool on Linux showing no value for sliders, scroll bars and progress bars and never marking a selected row, list item or tab `(selected)`, so a script could not read where a control stood or which row was chosen ([#20110](https://github.com/can1357/oh-my-pi/pull/20110) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed NumLock-off keypad navigation keys (arrows, Home, End, Page Up, Page Down, Insert, Delete, and Clear) being dropped under the kitty keyboard protocol by [@fsoikin](https://github.com/fsoikin)
 - Fixed NumLock-off keypad navigation keys (arrows, Home, End, Page Up, Page Down, Insert, Delete, and Clear) being dropped under the kitty keyboard protocol ([#20087](https://github.com/can1357/oh-my-pi/pull/20087) by [@fsoikin](https://github.com/fsoikin))
+- Fixed `grep()`, `glob()`, `fuzzyFind()`, `astGrep()`, `astEdit()` and the shell's `grep -r`, `rg` and `fd` sometimes never returning on machines with many CPUs ([#20022](https://github.com/can1357/oh-my-pi/pull/20022) by [@sjawhar](https://github.com/sjawhar))
 
 ## [19.1.0] - 2026-11-21
 
