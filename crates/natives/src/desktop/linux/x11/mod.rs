@@ -5,6 +5,7 @@ mod keyboard_state;
 mod keymap;
 pub(crate) mod listener;
 mod mpx;
+mod text_mapping;
 mod toolkit;
 mod uinput;
 mod wm;
@@ -103,6 +104,10 @@ impl Backend for X11Backend {
 
 	fn takeover_admitted(&mut self) -> CoreResult<bool> {
 		self.input.takeover_admitted()
+	}
+
+	fn close(&mut self) -> CoreResult<()> {
+		self.input.close()
 	}
 
 	fn capture(

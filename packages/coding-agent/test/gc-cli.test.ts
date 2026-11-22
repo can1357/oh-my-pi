@@ -768,9 +768,9 @@ describe("runGcCommand history checkpoint", () => {
 			reader.query("SELECT * FROM history").all();
 			writer.run("INSERT INTO history (prompt) VALUES ('after-reader')");
 
-			await expect(runGcCommand({ flags: { agentDir: root, wal: true, apply: true } })).rejects.toThrow(
-				`WAL checkpoint failed for ${dbPath}: busy=1`,
-			);
+			await expect(
+				runGcCommand({ flags: { agentDir: root, wal: true, apply: true }, walBusyTimeoutMs: 50 }),
+			).rejects.toThrow(`WAL checkpoint failed for ${dbPath}: busy=1`);
 
 			expect(await Bun.file(path.join(root, "gc.lock")).exists()).toBe(false);
 		} finally {
@@ -780,7 +780,7 @@ describe("runGcCommand history checkpoint", () => {
 			reader.close();
 			writer.close();
 		}
-	}, 10_000);
+	});
 });
 
 describe("runGcCommand session staging sweep", () => {

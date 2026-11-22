@@ -32,15 +32,29 @@ export async function replaceFileWithRetry(tempPath: string, targetPath: string)
 
 /**
  * Publish a staged sibling file atomically, preserving an existing destination
- * across Windows `EPERM`/`EEXIST` replacement failures.
+ * across Windows `EPERM`/`EEXIST` replacement failures and retrying Windows
+ * `EBUSY` share locks within the rename budget.
  */
 export async function replaceFileAtomically(tempPath: string, targetPath: string): Promise<void> {
-	try {
-		await fs.promises.rename(tempPath, targetPath);
-		return;
-	} catch (error) {
-		if (!hasFsCode(error, "EPERM") && !isEexist(error)) throw error;
-		await replaceAfterWindowsRenameFailure(tempPath, targetPath, error);
+	const deadline = Date.now() + RENAME_RETRY_BUDGET_MS;
+	for (let failures = 0; ; failures++) {
+		try {
+			await fs.promises.rename(tempPath, targetPath);
+			return;
+		} catch (error) {
+			// A rename over a file held open without share-delete reports EBUSY
+			// until the last holder closes, and moving the held destination aside
+			// cannot succeed either, so retry in place like other transient
+			// Windows denials.
+			if (process.platform !== "win32" || !hasFsCode(error, "EBUSY")) {
+				if (!hasFsCode(error, "EPERM") && !isEexist(error)) throw error;
+				await replaceAfterWindowsRenameFailure(tempPath, targetPath, error);
+				return;
+			}
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) throw error;
+			await Bun.sleep(Math.min(remaining, RENAME_RETRY_MAX_MS, RENAME_RETRY_INITIAL_MS * 2 ** failures));
+		}
 	}
 }
 
