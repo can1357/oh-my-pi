@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- With an aliased typescript install (`typescript` → an API-only package, `.bin/tsc` → another), `typescript-language-server` now falls back to the tsserver of the package behind the resolved `tsc` instead of exiting at initialize; a workspace TypeScript with its own `lib/tsserver.js` or an explicitly configured `tsserver.fallbackPath` still wins.
 - Improved `magic` edit application reliability: narrowed `CANNOT` refusals to missing targets, accepted multi-line `sub` replacements and no-op `sub`s, fixed block spans on closing braces and multi-line headers, merged tiny excerpt gaps, preserved full retry attempts after excerpt widening, and pinpointed syntax-breaking operations with surrounding line context.
 - `tab.scroll({ direction: "down", amount: 600 })` and other objects that name no pixel delta are rejected with the helper's signature and the equivalent call (`tab.scroll(0, 600)`) instead of silently scrolling nothing; the browser docs point at the `TabApi` interface in `tab-worker.ts` instead of a declaration file that no longer exists ([#20171](https://github.com/can1357/oh-my-pi/pull/20171) by [@kaluli123123](https://github.com/kaluli123123))
 - `ask` now reports a `<fieldset>` whose radios each carry a different `name` back to the model instead of showing it, so a preselected option can no longer be submitted next to the user's pick as a second answer ([#19625](https://github.com/can1357/oh-my-pi/issues/19625), [#20170](https://github.com/can1357/oh-my-pi/pull/20170) by [@kaluli123123](https://github.com/kaluli123123))

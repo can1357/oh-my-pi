@@ -3184,6 +3184,39 @@ describe("lsp regressions", () => {
 			}
 		});
 
+		it("points typescript-language-server at the tsc package's tsserver when node_modules/typescript lacks one", async () => {
+			// `typescript` aliased to `@typescript/typescript6` (no tsserver.js) while `.bin/tsc`
+			// links `@typescript/old`: the server used to exit at initialize.
+			if (process.platform === "win32") return;
+			const tempDir = TempDir.createSync("@omp-lsp-ts-alias-");
+			vi.spyOn(Bun, "which").mockReturnValue(null);
+			try {
+				const root = tempDir.path();
+				await Bun.write(path.join(root, "package.json"), "{}");
+				await Bun.write(
+					path.join(root, "node_modules", "typescript", "package.json"),
+					'{"name":"@typescript/typescript6"}',
+				);
+				const oldDir = path.join(root, "node_modules", "@typescript", "old");
+				await Bun.write(path.join(oldDir, "package.json"), '{"name":"@typescript/old"}');
+				await Bun.write(path.join(oldDir, "bin", "tsc"), "");
+				await Bun.write(path.join(oldDir, "lib", "tsserver.js"), "");
+				const binDir = path.join(root, "node_modules", ".bin");
+				await fs.promises.mkdir(binDir, { recursive: true });
+				await fs.promises.symlink(path.join("..", "@typescript", "old", "bin", "tsc"), path.join(binDir, "tsc"));
+				await Bun.write(path.join(binDir, "typescript-language-server"), "");
+
+				const config = loadConfig(root);
+				expect(Object.keys(config.servers)).toEqual(["typescript-language-server"]);
+				expect(config.servers["typescript-language-server"]?.initOptions?.tsserver).toEqual({
+					fallbackPath: path.join(fs.realpathSync(oldDir), "lib", "tsserver.js"),
+				});
+			} finally {
+				vi.restoreAllMocks();
+				tempDir.removeSync();
+			}
+		});
+
 		it("drops tsc --lsp when the tsc install layout is unrecognized", async () => {
 			const tempDir = TempDir.createSync("@omp-lsp-ts-unknown-");
 			vi.spyOn(Bun, "which").mockReturnValue(null);
