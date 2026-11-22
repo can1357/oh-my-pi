@@ -77,6 +77,17 @@ describe("resolveModelServiceTier", () => {
 		expect(resolveModelServiceTier(undefined, openai)).toBeUndefined();
 		expect(resolveModelServiceTier({ google: "priority" }, openai)).toBeUndefined();
 	});
+
+	it("uses Fast when a native OpenAI-family route cannot realize the selected Ultrafast preference", () => {
+		const tiers = { openai: "ultrafast" } as const;
+		expect(resolveModelServiceTier(tiers, { ...codex, serviceTiers: ["priority"] })).toBe("priority");
+		expect(resolveModelServiceTier(tiers, { ...codex, serviceTiers: ["priority", "ultrafast"] })).toBe("ultrafast");
+		expect(resolveModelServiceTier(tiers, { ...codex, serviceTiers: ["scale"] })).toBeUndefined();
+		expect(resolveModelServiceTier(tiers, orOpenAI)).toBe("priority");
+		expect(resolveModelServiceTier(tiers, openai)).toBe("ultrafast");
+		expect(resolveModelServiceTier(tiers, gemini)).toBeUndefined();
+		expect(resolveModelServiceTier(tiers, { ...codex, api: "extension-codex-api" })).toBe("ultrafast");
+	});
 });
 
 describe("shouldSendServiceTier", () => {
