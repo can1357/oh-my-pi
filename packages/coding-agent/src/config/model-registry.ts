@@ -42,6 +42,7 @@ import {
 	type ModelManagerOptions,
 	type ModelRefreshStrategy,
 } from "@oh-my-pi/pi-catalog/model-manager";
+import type { CacheEntry } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import {
 	googleAntigravityModelManagerOptions,
@@ -445,9 +446,110 @@ export type ResolvedRequestAuth =
 	  }
 	| { ok: false; error: string };
 
-/**
- * Model registry - loads and manages models, resolves API keys via AuthStorage.
- */
+interface CachedStandardProjection {
+	validUntil: number;
+	models: Model<Api>[];
+	bundledById: Map<string, Model<Api>> | undefined;
+	cacheMatchesBundledFingerprint: boolean;
+	cachedSnapshotMatchesBundled: boolean;
+}
+
+// Parsed payloads are process snapshots owned by the row memo. A replacement
+// payload gets a new array; freshness-only changes keep the projection alive.
+const standardCacheProjections = new WeakMap<Model<Api>[], Map<string, CachedStandardProjection>>();
+
+function projectCachedStandardModels(cache: CacheEntry<Api>, providerId: string): CachedStandardProjection {
+	let byProvider = standardCacheProjections.get(cache.models);
+	const existing = byProvider?.get(providerId);
+	const now = Date.now();
+	if (existing && now < existing.validUntil) return existing;
+	const sharedCatalogProvider = MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[providerId] === true;
+	const additiveSharedCatalogProvider = ADDITIVE_MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[providerId] === true;
+	// The model cache never persists request headers (#5780): restore
+	// them from the bundled static catalog, and drop cached rows whose
+	// headers cannot be rebuilt so the bundled fallback (which still
+	// carries its headers) wins the startup merge instead of a cached
+	// model with required transport headers missing.
+	const omittedHeaderIds = new Set(cache.headerOmittedModelIds);
+	const unrestorableHeaderIds = new Set(cache.unrestorableHeaderModelIds);
+	const bundledModels =
+		omittedHeaderIds.size > 0 || sharedCatalogProvider
+			? (getBundledModels(providerId as Parameters<typeof getBundledModels>[0]) as Model<Api>[])
+			: undefined;
+	// Every shared-catalog manager layers the catalog additively
+	// (`#collectBuiltInModelManagerOptions`), authoritative or not.
+	const bundledFingerprint = bundledModels
+		? fingerprintStaticModels(bundledModels, {
+				authoritative: sharedCatalogProvider && !additiveSharedCatalogProvider,
+				additive: sharedCatalogProvider,
+			})
+		: undefined;
+	// A matching cache may contain provider-endpoint overrides. Strip
+	// same-id rows only across a bundled-catalog upgrade, where the
+	// additive shared catalog must not replace the new bundled metadata.
+	const additiveCacheStaticMismatch =
+		additiveSharedCatalogProvider &&
+		bundledFingerprint !== undefined &&
+		cache.staticFingerprint !== bundledFingerprint &&
+		!cache.staticFingerprint.startsWith(`${bundledFingerprint}:drop:`);
+	const bundledById = bundledModels
+		? new Map(bundledModels.map(bundledModel => [bundledModel.id, bundledModel]))
+		: undefined;
+	const models: Model<Api>[] = [];
+	let validUntil = Number.POSITIVE_INFINITY;
+	for (const cachedModel of cache.models) {
+		// Shared catalog rows can be projected under another provider id.
+		// That changes policy inputs, so only this projection is rebuilt;
+		// same-provider materialized cache rows stay on the zero-build path.
+		const model =
+			cachedModel.provider === providerId
+				? cachedModel
+				: buildModel({ ...toModelSpec(cachedModel), provider: providerId });
+		if (cachedModel.provider !== providerId) {
+			validUntil = Math.min(validUntil, nextBuildPriceChange(cachedModel.cost, now));
+		}
+		if (additiveCacheStaticMismatch && bundledById?.has(model.id)) continue;
+		if (!omittedHeaderIds.has(model.id)) {
+			models.push(model);
+			continue;
+		}
+		// Current unrestorable markers prove that neither same-id nor
+		// request-model bundled headers matched the live model. Only markers
+		// from the old id-only writer may recover through `requestModelId`.
+		const unrestorable = unrestorableHeaderIds.has(model.id);
+		const bundledHeaders = (
+			unrestorable
+				? cache.legacyHeaderRestoreMarkers && model.requestModelId
+					? bundledById?.get(model.requestModelId)
+					: undefined
+				: (bundledById?.get(model.id) ??
+					(model.requestModelId ? bundledById?.get(model.requestModelId) : undefined))
+		)?.headers;
+		if (!bundledHeaders) continue;
+		models.push({ ...model, headers: bundledHeaders });
+	}
+	const projection: CachedStandardProjection = {
+		validUntil,
+		models,
+		bundledById,
+		cacheMatchesBundledFingerprint:
+			bundledFingerprint !== undefined &&
+			(cache.staticFingerprint === bundledFingerprint ||
+				cache.staticFingerprint.startsWith(`${bundledFingerprint}:drop:`)),
+		cachedSnapshotMatchesBundled:
+			sharedCatalogProvider &&
+			bundledModels !== undefined &&
+			fingerprintStaticModels(cache.models) === fingerprintStaticModels(bundledModels),
+	};
+	if (!byProvider) {
+		byProvider = new Map();
+		standardCacheProjections.set(cache.models, byProvider);
+	}
+	byProvider.set(providerId, projection);
+	return projection;
+}
+
+/** Model registry - loads and manages models, resolves API keys via AuthStorage. */
 export class ModelRegistry {
 	#models: Model<Api>[] = [];
 	#unprojectedModels: Model<Api>[] = [];
@@ -1639,7 +1741,8 @@ export class ModelRegistry {
 				this.#internedStaticModels.delete(key);
 			}
 		}
-		this.#providerLookupSnapshots.delete(providerName);
+		// Lookup snapshots are keyed by the normalized provider id (see #modelsForProviderLookup).
+		this.#providerLookupSnapshots.delete(providerName.trim().toLowerCase());
 	}
 
 	/** A modifier runs only for a provider holding OAuth credentials; without one it cannot touch the catalog. */
@@ -1971,65 +2074,8 @@ export class ModelRegistry {
 			if (cache.fresh && cache.authoritative) {
 				authoritativeFreshProviders.add(providerId);
 			}
-			// The model cache never persists request headers (#5780): restore
-			// them from the bundled static catalog, and drop cached rows whose
-			// headers cannot be rebuilt so the bundled fallback (which still
-			// carries its headers) wins the startup merge instead of a cached
-			// model with required transport headers missing.
-			const omittedHeaderIds = new Set(cache.headerOmittedModelIds);
-			const unrestorableHeaderIds = new Set(cache.unrestorableHeaderModelIds);
-			const bundledModels =
-				omittedHeaderIds.size > 0 || sharedCatalogProvider
-					? (getBundledModels(providerId as Parameters<typeof getBundledModels>[0]) as Model<Api>[])
-					: undefined;
-			// Every shared-catalog manager layers the catalog additively
-			// (`#collectBuiltInModelManagerOptions`), authoritative or not.
-			const bundledFingerprint = bundledModels
-				? fingerprintStaticModels(bundledModels, {
-						authoritative: sharedCatalogProvider && !additiveSharedCatalogProvider,
-						additive: sharedCatalogProvider,
-					})
-				: undefined;
-			// A matching cache may contain provider-endpoint overrides. Strip
-			// same-id rows only across a bundled-catalog upgrade, where the
-			// additive shared catalog must not replace the new bundled metadata.
-			const additiveCacheStaticMismatch =
-				additiveSharedCatalogProvider &&
-				bundledFingerprint !== undefined &&
-				cache.staticFingerprint !== bundledFingerprint &&
-				!cache.staticFingerprint.startsWith(`${bundledFingerprint}:drop:`);
-			const bundledById = bundledModels
-				? new Map(bundledModels.map(bundledModel => [bundledModel.id, bundledModel]))
-				: undefined;
-			const models: Model<Api>[] = [];
-			for (const cachedModel of cache.models) {
-				// Shared catalog rows can be projected under another provider id.
-				// That changes policy inputs, so only this projection is rebuilt;
-				// same-provider materialized cache rows stay on the zero-build path.
-				const model =
-					cachedModel.provider === providerId
-						? cachedModel
-						: buildModel({ ...toModelSpec(cachedModel), provider: providerId });
-				if (additiveCacheStaticMismatch && bundledById?.has(model.id)) continue;
-				if (!omittedHeaderIds.has(model.id)) {
-					models.push(model);
-					continue;
-				}
-				// Current unrestorable markers prove that neither same-id nor
-				// request-model bundled headers matched the live model. Only markers
-				// from the old id-only writer may recover through `requestModelId`.
-				const unrestorable = unrestorableHeaderIds.has(model.id);
-				const bundledHeaders = (
-					unrestorable
-						? cache.legacyHeaderRestoreMarkers && model.requestModelId
-							? bundledById?.get(model.requestModelId)
-							: undefined
-						: (bundledById?.get(model.id) ??
-							(model.requestModelId ? bundledById?.get(model.requestModelId) : undefined))
-				)?.headers;
-				if (!bundledHeaders) continue;
-				models.push({ ...model, headers: bundledHeaders });
-			}
+			const { models, bundledById, cacheMatchesBundledFingerprint, cachedSnapshotMatchesBundled } =
+				projectCachedStandardModels(cache, providerId);
 			const providerOverride = this.#providerOverrides.get(providerId);
 			const withCompat = providerOverride
 				? models.map(model => {
@@ -2044,13 +2090,6 @@ export class ModelRegistry {
 			const cachedModels = this.#applyHardcodedModelPolicies(resolved);
 			modelsByProvider.set(providerId, cachedModels);
 			if (sharedCatalogProvider) {
-				const cacheMatchesBundledFingerprint =
-					bundledFingerprint !== undefined &&
-					(cache.staticFingerprint === bundledFingerprint ||
-						cache.staticFingerprint.startsWith(`${bundledFingerprint}:drop:`));
-				const cachedSnapshotMatchesBundled =
-					bundledModels !== undefined &&
-					fingerprintStaticModels(cache.models) === fingerprintStaticModels(bundledModels);
 				const cacheContributed = additiveSharedCatalogProvider
 					? cachedModels.some(model => bundledById?.has(model.id) !== true)
 					: !(cacheMatchesBundledFingerprint && cachedSnapshotMatchesBundled);

@@ -293,7 +293,10 @@ interface ReadRowCacheEntry {
 }
 
 const readRowCache = new Map<string, ReadRowCacheEntry>();
-const READ_ROW_CACHE_MAX = 64;
+// A full startup sweep visits more than 64 namespaces, including absent rows.
+// Keep the working set across registries; evict one oldest entry, never the
+// whole process cache when an unrelated provider is visited.
+const READ_ROW_CACHE_MAX = 512;
 
 /**
  * Parsed `models` payloads by `models_hash`, shared across database files: a
@@ -697,6 +700,10 @@ export function readModelCache<TApi extends Api>(
 		return runModelCacheDb(resolvedPath, shared, db => {
 			const dataVersion = shared ? dbDataVersion(db) : null;
 			const cached = readRowCache.get(key);
+			if (cached) {
+				readRowCache.delete(key);
+				readRowCache.set(key, cached);
+			}
 			if (dataVersion !== null && cached?.dataVersion === dataVersion) {
 				// Freshness is time-relative: recompute per call from the
 				// cached row's updatedAt so a long-lived process goes stale.
@@ -707,11 +714,15 @@ export function readModelCache<TApi extends Api>(
 			// first; only a changed payload pays for the multi-MB `models` read.
 			let entry: CacheEntry<TApi> | null = null;
 			let meta: CacheRowMeta | null = null;
-			if (cached?.entry && cached.meta) {
+			if (cached) {
 				meta = queryRow<CacheRowMeta>(db, SELECT_CACHE_ROW_META, providerId);
-				if (meta && cacheRowsEqual(cached.meta, meta)) {
+				if ((meta === null && cached.meta === null) || (meta && cached.meta && cacheRowsEqual(cached.meta, meta))) {
+					if (cached.entry === null) {
+						readRowCache.set(key, { dataVersion, meta, entry: null });
+						return null;
+					}
 					// Payload unchanged; only side-table freshness may have moved.
-					entry = withFreshness(withRowState(cached.entry as CacheEntry<TApi>, meta), ttlMs, now);
+					if (meta) entry = withFreshness(withRowState(cached.entry as CacheEntry<TApi>, meta), ttlMs, now);
 				} else {
 					meta = null;
 				}
@@ -720,13 +731,16 @@ export function readModelCache<TApi extends Api>(
 				// One statement reads payload and scalars from the same snapshot.
 				const row = queryRow<CacheRow>(db, SELECT_CACHE_ROW, providerId);
 				entry = parseCacheRow<TApi>(db, providerId, row, ttlMs, now);
-				if (entry !== null && row !== null) {
+				if (row !== null) {
 					// Drop the payload so the memo never pins the multi-MB `models` string.
 					const { models: _models, ...rowScalars } = row;
 					meta = rowScalars;
 				}
 			}
-			if (readRowCache.size >= READ_ROW_CACHE_MAX) readRowCache.clear();
+			if (!readRowCache.has(key) && readRowCache.size >= READ_ROW_CACHE_MAX) {
+				const oldest = readRowCache.keys().next().value;
+				if (oldest !== undefined) readRowCache.delete(oldest);
+			}
 			readRowCache.set(key, { dataVersion, meta, entry: entry as CacheEntry<Api> | null });
 			return entry;
 		});
