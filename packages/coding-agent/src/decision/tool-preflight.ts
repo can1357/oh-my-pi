@@ -1,7 +1,7 @@
 /**
  * Tool contract preflight: before the main model's first request of a user task, find the mounted
- * `xd://` tools the task needs (omp's own discoverable tools and the MCP server tools omp connects
- * and mounts) and deliver their authoritative docs with the request. It never changes the native tool array, hides tools, generates arguments, or runs
+ * tool commands the task needs (omp's own discoverable tools and the MCP server tools omp connects
+ * and mounts as bash commands) and deliver their authoritative `--help` with the request. It never changes the native tool array, hides tools, generates arguments, or runs
  * anything. Local BM25 retrieval bounds the candidates; the native judge answers one independent
  * relevance Noul per candidate plus a shortlist-sufficiency Noul. Thresholds are experimental
  * policy constants.
@@ -13,7 +13,7 @@ import type { Settings } from "../config/settings";
 import questionFile from "../prompts/judge/tool-preflight.json" with { type: "json" };
 import contractPrompt from "../prompts/system/tool-preflight-contract.md" with { type: "text" };
 import hintPrompt from "../prompts/system/tool-preflight-hint.md" with { type: "text" };
-import { listXdevTools, type XdevState, xdevDocs } from "../tools/xdev";
+import { listToolCommands, type ToolCommandState, toolCommandHelp } from "../tools/tool-commands";
 import { askDecisionJudge, type DecisionJudgeDeps } from "./judge";
 import { lexicalRank } from "./lexical";
 import type { DecisionRecord } from "./records";
@@ -31,7 +31,7 @@ export const TOOL_PREFLIGHT_POLICY = {
 	contracts: 8,
 	/** One contract, framing included; a larger one is omitted, never truncated. */
 	contractBytes: 16 * 1024,
-	/** Whether the task needs any device's docs at all must reach this before anything is judged further. */
+	/** Whether the task needs any command's docs at all must reach this before anything is judged further. */
 	gateThreshold: 0.35,
 	relevance: 0.7,
 	sufficiency: 0.7,
@@ -39,9 +39,10 @@ export const TOOL_PREFLIGHT_POLICY = {
 
 const QUESTIONS = judgeQuestions(questionFile);
 
-/** What tool preflight reads from the session: its mounted devices and enabled tool names. */
+/** What tool preflight reads from the session: its active tool commands and enabled tool names. */
 export interface ToolPreflightSource {
-	xdev?: XdevState;
+	/** Tool-command state while `bash` runs the commands; undefined while tools present top-level. */
+	toolCommands?: ToolCommandState;
 	enabledNames: readonly string[];
 }
 
@@ -63,15 +64,15 @@ interface ToolCandidate {
 }
 
 /**
- * Enabled `xd://` devices: omp's discoverable tools and the MCP server tools it mounts. Top-level
- * tools are skipped; their schemas are already in every request. Needs `read` and `write`, through
- * which devices are documented and dispatched.
+ * Enabled tool commands: omp's discoverable tools and the MCP server tools it mounts. Top-level
+ * tools are skipped; their schemas are already in every request. Needs the active `bash` tool,
+ * through which commands are documented (`--help`) and dispatched.
  */
 function snapshotCandidates(source: ToolPreflightSource): ToolCandidate[] {
-	const xdev = source.xdev;
+	const toolCommands = source.toolCommands;
 	const enabled = new Set(source.enabledNames);
-	if (!xdev || !enabled.has("read") || !enabled.has("write")) return [];
-	return listXdevTools(xdev)
+	if (!toolCommands) return [];
+	return listToolCommands(toolCommands)
 		.filter(tool => enabled.has(tool.name))
 		.map(tool => {
 			const schema = toolWireSchema(tool);
@@ -82,21 +83,21 @@ function snapshotCandidates(source: ToolPreflightSource): ToolCandidate[] {
 				description: description.slice(0, 1024),
 				parameters: Array.isArray(schema.required) ? schema.required.slice(0, 32).map(String) : [],
 				revision: Bun.hash(JSON.stringify([tool.name, description, schema])).toString(16),
-				body: () => xdevDocs(xdev, tool.name),
+				body: () => toolCommandHelp(toolCommands, tool.name),
 			};
 		})
 		.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /**
- * Whether the request names `name` unambiguously: as `xd://<name>` or as a backticked exact name.
- * Device names are ordinary words (`debug`), so a bare word never pins a tool past the judge.
+ * Whether the request names `name` unambiguously: as a backticked exact name or as `<name> --help`.
+ * Command names are ordinary words (`debug`), so a bare word never pins a tool past the judge.
  */
 function explicitlyNamed(query: string, name: string): boolean {
 	if (query.includes(`\`${name}\``)) return true;
-	const url = `xd://${name}`;
-	for (let at = query.indexOf(url); at !== -1; at = query.indexOf(url, at + 1)) {
-		if (!/[\w-]/u.test(query[at + url.length] ?? "")) return true;
+	const help = `${name} --help`;
+	for (let at = query.indexOf(help); at !== -1; at = query.indexOf(help, at + 1)) {
+		if (!/[\w-]/u.test(query[at - 1] ?? "") && !/[\w-]/u.test(query[at + help.length] ?? "")) return true;
 	}
 	return false;
 }

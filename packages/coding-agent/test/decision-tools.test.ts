@@ -14,7 +14,7 @@ import {
 	toolPreflightMessages,
 } from "@oh-my-pi/pi-coding-agent/decision/tool-preflight";
 import { createMCPToolName } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
-import type { XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
+import type { ToolCommandState } from "@oh-my-pi/pi-coding-agent/tools/tool-commands";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { Type } from "@sinclair/typebox";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
@@ -50,21 +50,25 @@ function device(name: string, description: string, mcpServerName?: string): Agen
 	};
 }
 
-/** A session with omp's own `ast_grep` and `debug` and two MCP server tools mounted under `xd://`. */
-function source(enabled: string[] = ["read", "write"]): ToolPreflightSource {
+/** A session with omp's own `ast_grep` and `debug` and two MCP server tools mounted as bash tool commands. */
+function source(enabled: string[] = ["bash"]): ToolPreflightSource {
 	const tools = [
 		device("ast_grep", "Structural code search with AST patterns"),
 		device("debug", "Debug a running process with breakpoints"),
 		device(METRICS, "Query CPU and memory metrics for a node", "netdata"),
 		device(RESTART, "Restart a deployed application", "coolify"),
 	];
-	const xdev: XdevState = {
+	const toolCommands: ToolCommandState = {
 		tools: new Map(tools.map(tool => [tool.name, tool])),
 		mountedNames: new Set(tools.map(tool => tool.name)),
 		builtInNames: new Set(["ast_grep", "debug"]),
 		isActive: name => enabled.includes(name),
 	};
-	return { xdev, enabledNames: [...enabled, ...tools.map(tool => tool.name)] };
+	// Mirrors SessionTools#activeToolCommands: tool commands run only while `bash` is active.
+	return {
+		toolCommands: enabled.includes("bash") ? toolCommands : undefined,
+		enabledNames: [...enabled, ...tools.map(tool => tool.name)],
+	};
 }
 
 function judgeDeps(config: Record<string, unknown>) {
@@ -118,7 +122,7 @@ async function preflight(config: Record<string, unknown>, request: string, from 
 const automatic = { "decision.backend": "judge", "decision.tools.mode": "automatic" };
 
 describe("tool preflight", () => {
-	it("judges omp and MCP devices by server and delivers selected contracts once", async () => {
+	it("judges omp and MCP tool commands by server and delivers selected contracts once", async () => {
 		const bodies = serveJudge({ [METRICS]: 0.95, ast_grep: 0.2 });
 		const { result, records } = await preflight(automatic, "query cpu metrics for the web node");
 		expect(result.selected).toEqual([METRICS]);
@@ -131,7 +135,7 @@ describe("tool preflight", () => {
 			TOOL_CONTRACT_MESSAGE_TYPE,
 		]);
 		const content = messages[0]?.role === "custom" ? String(messages[0].content) : "";
-		expect(content).toContain(`Execute by writing JSON to xd://${METRICS}`);
+		expect(content).toContain(`Usage:\n  ${METRICS}`);
 		// Same id and schema revision already in context: nothing is sent again.
 		expect(toolPreflightMessages(result, messages, 64 * 1024)).toEqual([]);
 	});
@@ -168,15 +172,15 @@ describe("tool preflight", () => {
 		fetchSpy.mockClear();
 		const named = await preflight(
 			{ "decision.backend": "deterministic", "decision.tools.mode": "automatic" },
-			`run xd://${METRICS} for the web node`,
+			`run \`${METRICS}\` for the web node`,
 		);
 		expect(named.result.selected).toEqual([METRICS]);
 		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 
-	it("has no candidates without the read and write device transport", async () => {
+	it("has no candidates without the bash command transport", async () => {
 		const fetchSpy = vi.spyOn(globalThis, "fetch");
-		const { result, records } = await preflight(automatic, "query cpu metrics", source(["read"]));
+		const { result, records } = await preflight(automatic, "query cpu metrics", source(["read", "write"]));
 		expect(result).toEqual({ selected: [], contracts: [] });
 		expect(records[0]).toMatchObject({ reason: "no_candidates", candidates: 0 });
 		expect(fetchSpy).not.toHaveBeenCalled();
@@ -188,12 +192,12 @@ describe("tool preflight", () => {
 		expect(result.selected).toEqual([METRICS]);
 	});
 
-	it("pins only an xd:// URL or a backticked exact name, never a bare word", async () => {
+	it("pins only `<name> --help` or a backticked exact name, never a bare word", async () => {
 		const deterministic = { "decision.backend": "deterministic", "decision.tools.mode": "automatic" };
 		expect((await preflight(deterministic, "debug why the login test fails")).result.selected).toEqual([]);
-		expect((await preflight(deterministic, "use xd://debugger on the login test")).result.selected).toEqual([]);
+		expect((await preflight(deterministic, "run debugger --help on the login test")).result.selected).toEqual([]);
 		expect((await preflight(deterministic, "attach `debug` to the login test")).result.selected).toEqual(["debug"]);
-		expect((await preflight(deterministic, "attach xd://debug, then rerun")).result.selected).toEqual(["debug"]);
+		expect((await preflight(deterministic, "check debug --help, then rerun")).result.selected).toEqual(["debug"]);
 
 		// A failed judgment keeps only pinned tools, so a bare word selects nothing.
 		vi.spyOn(globalThis, "fetch").mockImplementation(
@@ -211,7 +215,10 @@ describe("tool preflight", () => {
 		expect(gated.result).toEqual({ selected: [], contracts: [] });
 		expect(gated.records[0]?.reason).toBe("not_needed");
 
-		const pinned = await preflight(automatic, `explain xd://${METRICS} and how to restart the deployed application`);
+		const pinned = await preflight(
+			automatic,
+			`explain ${METRICS} --help and how to restart the deployed application`,
+		);
 		expect(pinned.result.selected).toEqual([METRICS]);
 		expect(pinned.records[0]?.reason).toBe("not_needed");
 	});

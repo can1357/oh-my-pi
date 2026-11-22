@@ -904,9 +904,9 @@ export class SessionTools {
 		return [...(this.#toolCommands?.mountedNames ?? [])];
 	}
 
-	/** Mounted devices and enabled tool names for decision-layer tool preflight. */
+	/** Active tool commands and enabled tool names for decision-layer tool preflight. */
 	toolPreflightSource(): ToolPreflightSource {
-		return { xdev: this.#xdev, enabledNames: this.getEnabledToolNames() };
+		return { toolCommands: this.activeToolCommands, enabledNames: this.getEnabledToolNames() };
 	}
 
 	/** Enabled MCP tools presented as eval namespace methods (`mcp.evalNamespaces`); the SDK builds their preludes. */
