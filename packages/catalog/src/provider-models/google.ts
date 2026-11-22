@@ -1,10 +1,10 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { isExcludedModel } from "../compat/behavior";
-import { providerEntry } from "../compat/providers";
+import { providerEntry, seedModels } from "../compat/providers";
 import { fetchAntigravityDiscoveryModels } from "../discovery/antigravity";
 import { fetchGeminiModels } from "../discovery/gemini";
 import type { ModelManagerOptions } from "../model-manager";
-import type { FetchImpl, ModelSpec } from "../types";
+import type { Api, FetchImpl, ModelSpec } from "../types";
 import { unionAccountCatalogs } from "./account-access";
 
 export interface GoogleModelManagerConfig {
@@ -86,8 +86,11 @@ export function googleVertexModelManagerOptions(_config?: GoogleVertexModelManag
 
 export function googleAntigravityModelManagerOptions(
 	config?: GoogleAntigravityModelManagerConfig,
-): ModelManagerOptions<"google-gemini-cli"> {
+): ModelManagerOptions<Api> {
 	const resolveAccounts = config?.resolveAccounts;
+	// `fetchAvailableModels` lists chat SKUs only; the authored transcribe runner
+	// rows ride every authoritative refresh (else `retainModelIds` drops them).
+	const runnerSeeds = seedModels("google-antigravity").filter(model => model.api !== "google-gemini-cli");
 	return {
 		providerId: "google-antigravity",
 		dynamicModelsAuthoritative: providerEntry("google-antigravity")?.dynamicModelsAuthoritative === true,
@@ -128,7 +131,7 @@ export function googleAntigravityModelManagerOptions(
 						}
 						if (catalogs.length === 0) return null;
 						const tagAccess = catalogs.every(catalog => catalog.accountKey !== undefined);
-						return unionAccountCatalogs(
+						const chat = unionAccountCatalogs(
 							catalogs.map(({ accountKey, models }) =>
 								tagAccess && accountKey !== undefined
 									? models.map(model => ({
@@ -143,6 +146,7 @@ export function googleAntigravityModelManagerOptions(
 									: models,
 							),
 						);
+						return [...chat, ...runnerSeeds];
 					},
 				}
 			: undefined),

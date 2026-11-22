@@ -5,6 +5,8 @@
 ### Added
 
 - `/wt` (TUI, ACP, RPC and `worktree.onStart`) runs the new worktree's `post-checkout` hook as `git worktree add` does, with a spinner in the TUI, then loads the skills and commands it added; a failing hook keeps the worktree and shows a warning, and quitting while it runs keeps that worktree with a warning. In an ovnfs checkout only a `core.hooksPath` hook runs ([#20045](https://github.com/can1357/oh-my-pi/pull/20045) by [@Dangerboi](https://github.com/Dangerboi))
+- Dictation accepts `xai-stt` models such as `xai-oauth/grok-voice-transcribe-2.0` instead of warning "Unsupported speech-to-text API"; the `tts` tool keeps its 15,000-character cap, the shared floor across its speech backends ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Dictation with a Google Antigravity login: `gemini-3-flash-transcribe` and `gemini-2.5-flash-transcribe` transcribe through a Gemini chat model with the recording attached, since Cloud Code Assist has no transcribe model; Antigravity model-list refreshes keep these rows ([#19186](https://github.com/can1357/oh-my-pi/pull/19186) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 

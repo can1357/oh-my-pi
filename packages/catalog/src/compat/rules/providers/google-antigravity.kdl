@@ -21,6 +21,26 @@ provider "google-antigravity" {
 			limits
 			supports-tools #false
 		}
+		// Cloud Code Assist serves no transcribe SKU (gemini-3.5-transcribe 404s);
+		// these dictate through a Gemini chat SKU with the audio inline. The
+		// roster refresh carries these rows over whether or not the chat SKU is
+		// listed in `fetchAvailableModels`.
+		model "gemini-3-flash-transcribe" name="Gemini 3 Flash (transcribe)" api="google-gemini-cli-transcribe" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+			request-model-id "gemini-3-flash"
+		}
+		model "gemini-2.5-flash-transcribe" name="Gemini 2.5 Flash (transcribe)" api="google-gemini-cli-transcribe" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+			request-model-id "gemini-2.5-flash"
+		}
 	}
 
 	// Routed wire profiles overwrite caller caps with fixed output limits.
@@ -130,5 +150,8 @@ provider "google-antigravity" {
 			low 1001
 		}
 		thinking-mode "budget"
+	}
+	models "gemini-3-flash-transcribe" "gemini-2.5-flash-transcribe" {
+		kind "stt"
 	}
 }

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `xai-stt` transcription API: `transcribeAudio` posts xAI's multipart `POST /v1/stt` (model and language before the file) and maps `{ text, language, duration, words }`; `isTranscriptionApi`/`TRANSCRIPTION_APIS` list the dispatchable transcription APIs, and the auth gateway's `/v1/audio/transcriptions` serves both ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Added the `google-gemini-cli-transcribe` transcription API: Cloud Code Assist serves no transcribe model, so `transcribeAudio` sends the audio as an inline-data part with a verbatim-transcription instruction to the chat model named by the row's `requestModelId`, over the existing `google-gemini-cli` transport (its OAuth, headers, project and endpoint fallback), and strips wrapper quotes or a code fence from the reply ([#19186](https://github.com/can1357/oh-my-pi/pull/19186) by [@Xytronix](https://github.com/Xytronix))
+
+### Changed
+
+- `xai-tts` now sends `speed`, accepts `pcm` output, and allows xAI's current 60,000-character input (was 15,000) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - With several Devin logins, omp now prefers a login with daily or weekly quota left; a login past its quota that its on-demand balance still funds comes next, and one with no balance is skipped until its quota resets ([#19929](https://github.com/can1357/oh-my-pi/pull/19929) by [@will-bogusz](https://github.com/will-bogusz))
