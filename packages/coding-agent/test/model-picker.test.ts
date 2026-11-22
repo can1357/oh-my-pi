@@ -49,6 +49,8 @@ interface PickerHarness {
 	onPick: Mock<(model: Model, selector: string, meta: { overContext: boolean }) => void>;
 	onPickRole: Mock<(entry: ResolvedRoleModel) => void>;
 	onCancel: Mock<() => void>;
+	/** Resolves on the first render request: the catalog catch-up's `finally`. */
+	refreshSettled: Promise<void>;
 }
 
 function createPicker(options: {
@@ -57,6 +59,7 @@ function createPicker(options: {
 	settings?: Settings;
 	registry?: RegistryOverrides;
 	picker?: ModelPickerOptions;
+	onCatalogRefreshed?: () => Promise<ReadonlyArray<{ model: Model }>>;
 }): PickerHarness {
 	installTestTheme();
 	const modelsFn = typeof options.models === "function" ? options.models : () => options.models as Model[];
@@ -67,7 +70,8 @@ function createPicker(options: {
 		getAvailable: modelsFn,
 		getAll: modelsFn,
 	} as unknown as ModelRegistry;
-	const ui = { requestRender: vi.fn(), terminal: { rows: 40 } } as unknown as TUI;
+	const refreshSettled = Promise.withResolvers<void>();
+	const ui = { requestRender: vi.fn(() => refreshSettled.resolve()), terminal: { rows: 40 } } as unknown as TUI;
 	const onPick = vi.fn();
 	const onPickRole = vi.fn();
 	const onCancel = vi.fn();
@@ -76,10 +80,10 @@ function createPicker(options: {
 		createModelBrowserSource(settings),
 		registry,
 		options.scoped ? modelsFn().map(model => ({ model })) : [],
-		{ onPick, onPickRole, onCancel },
+		{ onPick, onPickRole, onCancel, onCatalogRefreshed: options.onCatalogRefreshed },
 		options.picker ?? {},
 	);
-	return { picker, onPick, onPickRole, onCancel };
+	return { picker, onPick, onPickRole, onCancel, refreshSettled: refreshSettled.promise };
 }
 
 const DOWN = "\x1b[B";
@@ -177,6 +181,24 @@ describe("ModelPicker", () => {
 		await Bun.sleep(0);
 		picker.handleInput("\n");
 		expect(onPick.mock.calls[0]?.[0]?.id).toBe("cc-model");
+	});
+
+	test("a --models scope lists a model the catalog refresh found", async () => {
+		const old = makeModel("devin", "old-model");
+		const added = makeModel("devin", "new-model");
+		const refreshGate = Promise.withResolvers<boolean>();
+		const { picker, onPick, refreshSettled } = createPicker({
+			models: [old],
+			scoped: true,
+			registry: { refreshIfStale: () => refreshGate.promise },
+			onCatalogRefreshed: async () => [{ model: old }, { model: added }],
+		});
+
+		refreshGate.resolve(true);
+		await refreshSettled;
+		picker.handleInput("new-model");
+		picker.handleInput("\n");
+		expect(onPick.mock.calls[0]?.[0]).toBe(added);
 	});
 
 	test("highlights and preselects the session's current model", () => {

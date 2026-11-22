@@ -14,12 +14,14 @@
  * forces it on for every model and `OMP_PROMPT_PERTURBATION=0` forces it off.
  */
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import * as path from "node:path";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { getInstallId } from "@oh-my-pi/pi-utils";
 import type { Context, Tool } from "../types";
-// A `.txt` asset (like `template.html.txt`) so the pool is parsed only when a request is first perturbed.
-import poolText from "./perturbation-pool.json.txt" with { type: "text" };
+// A file asset rather than a text import, so the ~1 MiB pool stays off the JS heap until a request is first perturbed.
+import poolPath from "./perturbation-pool.json.txt" with { type: "file" };
 
 interface PerturbationEntry {
 	source: string;
@@ -47,7 +49,10 @@ function escapeRegExp(value: string): string {
 
 /** Choose this install's variant of every pooled source, in one alternation. */
 function buildPerturbation(): Perturbation | null {
-	const pool = JSON.parse(poolText) as PerturbationPool;
+	// Absolute in a source checkout or a compiled binary (`$bunfs`); relative to the bundle in the npm `dist/cli.js`.
+	const poolFile =
+		path.isAbsolute(poolPath) || path.win32.isAbsolute(poolPath) ? poolPath : new URL(poolPath, import.meta.url);
+	const pool = JSON.parse(readFileSync(poolFile, "utf8")) as PerturbationPool;
 	const entries = pool.entries.filter(entry => entry.source.length > 0 && entry.variants.length > 0);
 	if (entries.length === 0) return null;
 	const installId = getInstallId();
