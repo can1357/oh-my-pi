@@ -8,6 +8,7 @@
  * @property {EmbeddedAddonVariant} variant
  * @property {string} filename
  * @property {number} size Decompressed `.node` size in bytes.
+ * @property {string} hash Build-time xxHash64 (hex) of the decompressed addon.
  * @property {string} zstdPath Embedded zstd frame holding the addon bytes.
  */
 

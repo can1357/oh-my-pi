@@ -2,11 +2,11 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getBrowserRelayInstallRegistryFile, isEnoent } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
-import { NATIVE_HOST } from "../../../../../browser-relay/extension/messages";
 import { resolveCliEntryCmd } from "../../../subprocess/worker-client";
 import { writeFileAtomically } from "../../../utils/atomic-file";
 import { quotePosixArgv } from "../../../utils/shell-quote";
 import { chromiumUserDataDirs } from "./chromium-profiles";
+import { NATIVE_HOST } from "./protocol";
 
 const CHROME_REGISTRY_KEY = `HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\${NATIVE_HOST}`;
 
