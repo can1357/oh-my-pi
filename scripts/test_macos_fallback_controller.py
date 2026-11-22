@@ -156,7 +156,19 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(self.subject.wait(30, "hosted"), 30)
             dispatch.assert_not_called()
 
-    def test_failure_never_dispatches_fallback(self):
+    def test_hosted_failure_dispatches_fallback(self):
+        """When a hosted runner fails, the controller falls back to self-hosted."""
+        def snapshot(run_id):
+            if run_id == 30:
+                return self.completed("failure")
+            return self.completed("success")
+        with patch.object(self.subject, "snapshot", side_effect=snapshot), patch.object(self.subject, "cancel_settle", return_value="cancelled"), patch.object(self.subject, "dispatch", return_value=31) as dispatch:
+            self.assertEqual(self.subject.wait(30, "hosted"), 31)
+        dispatch.assert_called_once_with(1, "self-hosted", 30)
+
+    def test_failure_never_dispatches_fallback_when_disabled(self):
+        """When fallback is disabled, a failed hosted runner raises immediately."""
+        self.subject.fallback = False
         with patch.object(self.subject, "snapshot", return_value=self.completed("failure")), patch.object(self.subject, "dispatch") as dispatch:
             with self.assertRaises(controller.VerificationError):
                 self.subject.wait(30, "hosted")

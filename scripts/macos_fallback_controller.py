@@ -245,6 +245,21 @@ class Controller:
                 first_queued = None
             if run.get("status") == "completed":
                 if run.get("conclusion") != "success":
+                    # If a hosted runner fails and fallback is enabled, try the
+                    # self-hosted Mac instead of failing immediately. The hosted
+                    # runner may lack disk space or other resources needed for
+                    # the full workspace build, while the self-hosted Mac has
+                    # incremental caches and sufficient storage.
+                    if pool == "hosted" and self.fallback:
+                        self.fallback = False
+                        try:
+                            self.drain_admission()
+                            self.parent()
+                            verify_mac_configuration(self.api, self.request)
+                        except VerificationError:
+                            raise VerificationError("native objective did not succeed")
+                        fallback = self.dispatch(1, "self-hosted", run_id)
+                        return self.wait(fallback, "self-hosted")
                     raise VerificationError("native objective did not succeed")
                 return run_id
             if self.assigned(run, job):
