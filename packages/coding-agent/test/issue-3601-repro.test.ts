@@ -28,15 +28,14 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { getEditorTheme } from "@oh-my-pi/pi-tui/theme";
+import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
 
-const ONE_PX_PNG = Buffer.from(
-	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
-	"base64",
-);
+// Two colors keep this screenshot fixture distinct from a rejected empty bitmap.
+const SCREENSHOT_PNG = encodeRawPng(new Uint8Array([0, 0, 0, 255, 255, 255, 255, 255]), 2, 1, 4);
 
 function createCtx() {
 	const editor = new CustomEditor(getEditorTheme());
@@ -223,7 +222,7 @@ describe("InputController + empty bracketed paste end-to-end (issue #3601)", () 
 	beforeEach(async () => {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "issue-3601-"));
 		imgPath = path.join(tmpDir, "screenshot.png");
-		await fs.writeFile(imgPath, ONE_PX_PNG);
+		await fs.writeFile(imgPath, SCREENSHOT_PNG);
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true, overrides: { "images.autoResize": false } });
 	});
@@ -250,17 +249,18 @@ describe("InputController + empty bracketed paste end-to-end (issue #3601)", () 
 			showStatus,
 		} as unknown as InteractiveModeContext;
 		const controller = new InputController(ctx, {
-			readImage: async () => ({ data: ONE_PX_PNG, mimeType: "image/png" }),
+			readImage: async () => ({ data: SCREENSHOT_PNG, mimeType: "image/png" }),
 			readText: async () => "", // pbpaste returns empty for image-only pasteboards
 		});
 		// Wire the same dispatch the production setup uses.
-		editor.onPasteImage = () => controller.handleImagePaste();
+		let pasted: Promise<boolean> | undefined;
+		editor.onPasteImage = () => {
+			pasted = controller.handleImagePaste();
+			return pasted;
+		};
 
 		editor.handleInput(`${BRACKETED_PASTE_START}${BRACKETED_PASTE_END}`);
-		// Drain all queued microtasks so the editor's `void onPasteImage()` and the
-		// async chain inside `#insertPendingImage` (materializeImageReferenceLinks,
-		// imageDimensions) all finish before assertions run.
-		for (let i = 0; i < 50; i++) await Promise.resolve();
+		await pasted;
 
 		expect(showStatus).not.toHaveBeenCalled();
 		expect(pendingImages.length).toBe(1);

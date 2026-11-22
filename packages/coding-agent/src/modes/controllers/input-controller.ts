@@ -81,7 +81,7 @@ import { type ImageAttachmentSource, tagImageAttachmentSource } from "@oh-my-pi/
 import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-format";
 import { VideoError, buildVideoContactSheetPng, probeVideo } from "../../utils/video";
 import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
-import { resizeImage } from "../../utils/image-resize";
+import { inspectImageContent, resizeImage } from "../../utils/image-resize";
 
 import { cfgCycleOrder } from "../../config/model-settings";
 import {
@@ -2560,6 +2560,15 @@ export class InputController {
 	): Promise<{ image: ImageContent; source: ImageAttachmentSource | undefined } | null> {
 		const normalized = await this.#normalizePastedImage(image, unsupportedMessage);
 		if (!normalized) return null;
+		const inspection = await inspectImageContent(Buffer.from(image.data, "base64"));
+		if (inspection) {
+			const description =
+				inspection.kind === "transparent" ? "fully transparent" : `solid color ${inspection.color}`;
+			this.ctx.showStatus(
+				`Pasted image is empty (${inspection.width}×${inspection.height}, ${description}) — not attached. Copy the screenshot again.`,
+			);
+			return null;
+		}
 		const path = sourcePath ?? (await this.#persistPastedImage(image));
 		return { image: normalized, source: path ? { path, kind: "image" } : undefined };
 	}
