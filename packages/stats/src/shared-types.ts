@@ -659,7 +659,11 @@ export interface SpotlightAdjusted {
 	excessTokens: SpotlightEstimate;
 	/** gross.savedTokens − excessTokens. */
 	netTokens: SpotlightEstimate;
-	/** compounding.savedUsd − recoveryUsd × (excess / recovered) − spotlightUsd. */
+	/**
+	 * compounding.savedUsd − the cuts' recovery $ × (excess / recovered) − spotlightUsd. The cuts' recovery $ is the
+	 * carried cost of recoveries of cuts plus extra turns whose every call recovered a cut; fetch-backs of results
+	 * shaping left whole are excluded.
+	 */
 	netUsd: SpotlightEstimate;
 	/** Holdouts per tool below which its baseline is too thin to trust (the UI marks the tool). */
 	minHoldouts: number;
