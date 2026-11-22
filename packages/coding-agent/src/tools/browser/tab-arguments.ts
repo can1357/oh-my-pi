@@ -57,12 +57,42 @@ export function optionalSelectorArgs<O extends object>(
 	return { selector, opts };
 }
 
+/** The delta keys `scroll({…})`/`wheel({…})` reads; an object with none of them names no scroll. */
+const SCROLL_DELTA_KEYS = ["deltaX", "deltaY", "x", "y"] as const;
+
+/** How far each direction of the `{direction, amount}` shape scrolls, as the `(dx, dy)` pair that does it. */
+const SCROLL_DIRECTIONS: Record<string, (amount: number) => [number, number]> = {
+	down: amount => [0, amount],
+	up: amount => [0, -amount],
+	right: amount => [amount, 0],
+	left: amount => [-amount, 0],
+};
+
+/**
+ * The call that does what a `{direction, amount}` object meant (`tab.scroll(0, 600)`), for the error of a scroll
+ * object that names no delta; empty when the object is some other shape.
+ */
+function scrollCallHint(label: string, options: Record<string, unknown>): string {
+	const direction =
+		typeof options.direction === "string" ? SCROLL_DIRECTIONS[options.direction.toLowerCase()] : undefined;
+	const amount = options.amount;
+	if (!direction || typeof amount !== "number" || !Number.isFinite(amount)) return "";
+	const [dx, dy] = direction(amount);
+	return ` Did you mean ${label.replace(/\(\)$/, "")}(${dx}, ${dy})?`;
+}
+
 /**
  * The wheel deltas of `scroll(dx, dy)`/`wheel(dx, dy)` as numbers. An object first argument (`scroll({y: 500})`,
- * `{deltaX, deltaY}`) gives its deltas.
+ * `{deltaX, deltaY}`) gives its deltas; one that names no delta (`scroll({direction: "down", amount: 600})`) is a
+ * misuse that would otherwise scroll nothing, so it is rejected with the signature and the call it meant.
  */
 export function scrollDeltas(label: string, deltaX: unknown, deltaY: unknown): { deltaX: number; deltaY: number } {
 	if (isPlainOptions(deltaX)) {
+		if (!SCROLL_DELTA_KEYS.some(key => deltaX[key] !== undefined)) {
+			throw new ToolError(
+				`${label} takes pixel deltas as numbers: (dx, dy) or ({x, y}); got ${JSON.stringify(deltaX)}.${scrollCallHint(label, deltaX)}`,
+			);
+		}
 		const x = deltaX.deltaX ?? deltaX.x ?? 0;
 		const y = deltaX.deltaY ?? deltaX.y ?? 0;
 		return scrollDeltas(label, x, y);
