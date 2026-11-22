@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
 	SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS,
@@ -14,14 +14,19 @@ import {
 	testSetSessionShutdownHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { ExtensionFactory, TodoBackendDefinition } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { type CreateAgentSessionOptions, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgTodoBackend } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools/todo";
+import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
+import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
+import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 interface Tracker {
 	calls: Array<{ phases: TodoPhase[]; sessionId: string }>;
@@ -75,6 +80,7 @@ describe("todo backend", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
+		resetSettingsForTest();
 		testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
 		testSetSessionShutdownHandlerTimeoutMs(SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS);
 		for (const session of sessions) {
@@ -297,6 +303,62 @@ describe("todo backend", () => {
 		expect(tasksOf(backend)).toEqual([["saved"], ["before", "after"]]);
 	});
 
+	it("a backend the user picks in Settings gets the current list at once", async () => {
+		const backend = tracker();
+		// The settings panel writes to the process's settings, so the session runs on them here.
+		const settings = await Settings.init({ inMemory: true });
+		const { session } = await open([backend.extension], undefined, { settings });
+		session.commitTodoPhases(list("before"));
+		await themeModule.initTheme(false);
+		const themes = Promise.resolve(["dark"]);
+		spyOn(themeModule, "getAvailableThemes").mockReturnValue(themes);
+		const overlays: Component[] = [];
+		const showOverlay = (component: Component): OverlayHandle => {
+			overlays.push(component);
+			return { hide: () => {}, setHidden: () => {}, isHidden: () => false };
+		};
+		const ui = { showOverlay, setFocus: () => {} };
+
+		new SelectorController(createInteractiveModeContext({ session, settings, ui })).showSettingsSelector();
+		await themes;
+		const panel = overlays[0];
+		if (!(panel instanceof SettingsSelectorComponent)) throw new Error("the settings menu did not open");
+		panel.handleNativeEvent({ type: "action", key: "", act: "page", value: "tools", mods: [] });
+		panel.handleNativeEvent({ type: "change", key: "", item: cfgTodoBackend.id, value: "tracker" });
+		await settled(session);
+
+		expect(backend.calls).toEqual([{ phases: list("before"), sessionId: session.sessionManager.getSessionId() }]);
+	});
+
+	it("a backend picked in Settings while a runtime layer keeps another one selected gets nothing", async () => {
+		const picked = tracker();
+		const kept = tracker("kept");
+		// The panel writes the global layer; the runtime layer above it keeps "kept" in effect.
+		const settings = await Settings.init({ inMemory: true, overrides: { "todo.backend": "kept" } });
+		const { session } = await open([picked.extension, kept.extension], undefined, { settings });
+		session.commitTodoPhases(list("before"));
+		await settled(session);
+		await themeModule.initTheme(false);
+		spyOn(themeModule, "getAvailableThemes").mockResolvedValue(["dark"]);
+		const opened = Promise.withResolvers<Component>();
+		const showOverlay = (component: Component): OverlayHandle => {
+			opened.resolve(component);
+			return { hide: () => {}, setHidden: () => {}, isHidden: () => false };
+		};
+
+		new SelectorController(
+			createInteractiveModeContext({ session, settings, ui: { showOverlay, setFocus: () => {} } }),
+		).showSettingsSelector();
+		const panel = await opened.promise;
+		if (!(panel instanceof SettingsSelectorComponent)) throw new Error("the settings menu did not open");
+		panel.handleNativeEvent({ type: "action", key: "", act: "page", value: "tools", mods: [] });
+		panel.handleNativeEvent({ type: "change", key: "", item: cfgTodoBackend.id, value: "tracker" });
+		await settled(session);
+
+		expect(picked.calls).toEqual([]);
+		expect(tasksOf(kept)).toEqual([["before"]]);
+	});
+
 	it("a whole-session fork sends the list again under the fork's id", async () => {
 		const backend = tracker();
 		const { session } = await open([backend.extension], "tracker", {
@@ -427,6 +489,28 @@ describe("todo backend", () => {
 		expect(left).toBe("no call");
 	});
 
+	it("a label or description that is not text, or is blank once its control sequences are removed, is refused at registration", async () => {
+		const refused: string[] = [];
+		const attempt = (name: string, register: () => void) => {
+			try {
+				register();
+			} catch {
+				refused.push(name);
+			}
+		};
+		const { session } = await open([
+			pi => {
+				attempt("blank label", () => pi.registerTodoBackend({ id: "a", label: "\x1b[0m ", replace() {} }));
+				attempt("blank description", () => pi.registerTodoBackend({ id: "b", description: " ", replace() {} }));
+				// @ts-expect-error a JavaScript extension can pass anything
+				attempt("label not text", () => pi.registerTodoBackend({ id: "c", label: 42, replace() {} }));
+			},
+		]);
+
+		expect(refused).toEqual(["blank label", "blank description", "label not text"]);
+		expect(session.extensionRunner?.getTodoBackends().size).toBe(0);
+	});
+
 	it("an id two extensions registered goes to the first; with that one disabled the next takes it over and gets the list, and with neither it is reported as unregistered", async () => {
 		const first = tracker();
 		const second = tracker();
@@ -448,6 +532,29 @@ describe("todo backend", () => {
 			expect.stringContaining('todo backend "tracker" is ignored'),
 			expect.stringContaining('No enabled extension registers the todo backend "tracker"'),
 		]);
+	});
+
+	it("a backend selected by a settings change that also enables its extension is not reported as unregistered, and gets the list with the next change", async () => {
+		const backend = tracker();
+		const { session, errors } = await open([backend.extension]);
+		session.commitTodoPhases(list("a"));
+		session.extensionRunner?.setSuspendedExtensions(() => true);
+
+		// What a config reload or a move to another project does: the setting lands before the extension.
+		// An approved `cfg://` write can too, and it also runs the settings panel's hook.
+		cfgTodoBackend.set(session.settings, "tracker");
+		const panel = new SelectorController(createInteractiveModeContext({ session, settings: session.settings }));
+		panel.handleSettingChange(cfgTodoBackend.id, "tracker");
+		await settled(session);
+		session.extensionRunner?.setSuspendedExtensions(() => false);
+		await settled(session);
+		const beforeNextChange = tasksOf(backend);
+		session.commitTodoPhases(list("a", "b"));
+		await settled(session);
+
+		expect(errors).toEqual([]);
+		expect(beforeNextChange).toEqual([]);
+		expect(tasksOf(backend)).toEqual([["a", "b"]]);
 	});
 
 	it("two extensions that register one shared backend object are still two holders: on takeover the next one gets the list", async () => {

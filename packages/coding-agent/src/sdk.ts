@@ -955,6 +955,11 @@ export interface CreateAgentSessionOptions {
 	bindProcessState?: boolean;
 	/** Task recursion depth (for subagent sessions). Default: 0 */
 	taskDepth?: number;
+	/**
+	 * Mark the session as a `/tan` fork: an idle wait then steers the fork to
+	 * wait again while its assignment is blocked.
+	 */
+	tanFork?: boolean;
 	/** Parent Hindsight state to alias for subagent memory tools. */
 	parentHindsightSessionState?: HindsightSessionStateApi;
 	/** Parent Mnemopi state: subagents alias it; a top-level fork (`/tan`) inherits its delivered recall. */
@@ -2754,6 +2759,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return prewalk !== undefined || deferredPrewalk !== undefined;
 			},
 			taskDepth: options.taskDepth ?? 0,
+			tanFork: options.tanFork === true,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			sessionManager,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
