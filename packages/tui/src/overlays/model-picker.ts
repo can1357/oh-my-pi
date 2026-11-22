@@ -102,6 +102,14 @@ export interface ModelPickerOptions {
 	 * the picker shows none.
 	 */
 	thinkingLevelFor?: (model: Model) => ConfiguredThinkingLevel | undefined;
+	/** Optional presentation overrides for a specialized model picker. */
+	title?: string;
+	status?: string;
+	placeholder?: string;
+	/** Additional selectable models; selectors are supplied by the host to retain routing identity. */
+	extraModels?: readonly { model: Model; selector: string }[];
+	/** Do not enter quick-role mode when the search begins with `@`. */
+	disableRoleMode?: boolean;
 }
 
 /** Fixed chrome rows: top border, status row, footer, bottom border. */
@@ -189,7 +197,7 @@ export function thinkingSlider(model: Model, level: ConfiguredThinkingLevel | un
 }
 
 /** Footer hint for the active mode; keys resolve at render time so theme/keybinding changes apply. */
-function footerHint(mode: PickerMode, thinking: boolean): string {
+function footerHint(mode: PickerMode, thinking: boolean, quickRoles = true): string {
 	const upDown = editorKeys("tui.select.up", "tui.select.down");
 	const enter = formatKeyHint("enter");
 	const provider = `${formatKeyHint("tab")} provider`;
@@ -201,7 +209,8 @@ function footerHint(mode: PickerMode, thinking: boolean): string {
 			return `${upDown} models · ${enter} use for Task subagents · ${provider} · type to search · ${close}`;
 		default: {
 			const level = thinking ? ` · ${formatKeyHint("left")}/${formatKeyHint("right")} thinking` : "";
-			return `${upDown} models · ${enter} use for this session · ${provider}${level} · type to search · @ quick roles · ${close}`;
+			const roles = quickRoles ? " · @ quick roles" : "";
+			return `${upDown} models · ${enter} use for this session · ${provider}${level} · type to search${roles} · ${close}`;
 		}
 	}
 }
@@ -228,6 +237,11 @@ export class ModelPickerComponent implements Component {
 	#taskMatchKeys = new Set<string>();
 	#taskModeKey: KeyId | undefined;
 	#taskSelector: string | undefined;
+	#title: string | undefined;
+	#status: string | undefined;
+	#placeholder: string | undefined;
+	#extraModels: readonly { model: Model; selector: string }[] | undefined;
+	#disableRoleMode: boolean;
 	#thinkingLevelFor: ((model: Model) => ConfiguredThinkingLevel | undefined) | undefined;
 	/** The slider's pending level; undefined while untouched (each model shows the session's current level). */
 	#thinking: ConfiguredThinkingLevel | undefined;
@@ -263,6 +277,11 @@ export class ModelPickerComponent implements Component {
 		this.#currentSelector = options.currentSelector;
 		this.#currentQuickRoleSelector = options.currentQuickRole ? `@${options.currentQuickRole}` : undefined;
 		this.#taskSelector = options.taskSelector;
+		this.#title = options.title;
+		this.#status = options.status;
+		this.#placeholder = options.placeholder;
+		this.#extraModels = options.extraModels;
+		this.#disableRoleMode = options.disableRoleMode ?? false;
 		this.#thinkingLevelFor = options.thinkingLevelFor;
 		if (callbacks.onPickTask) {
 			this.#taskModeKey = options.taskModeKeys?.[0];
@@ -347,6 +366,20 @@ export class ModelPickerComponent implements Component {
 		);
 		this.#configError = scope.error;
 		this.#modelItems = scope.items;
+		if (this.#extraModels) {
+			for (const { model, selector } of this.#extraModels) {
+				const existing = this.#modelItems.find(item => item.selector === selector);
+				if (existing) existing.model = model;
+				else {
+					this.#modelItems.push({
+						provider: model.provider,
+						id: model.id,
+						model,
+						selector,
+					});
+				}
+			}
+		}
 		this.#browser.setRoles(scope.roles);
 		this.#browser.setMruOrder(scope.mruOrder);
 		this.#browser.setPerfStats(this.#settings.modelPerf);
@@ -376,7 +409,7 @@ export class ModelPickerComponent implements Component {
 
 	/** Switch browser content only when a leading `@` changes the search mode. */
 	#syncItemsForQuery(query: string, refresh = false): void {
-		const roleMode = query.startsWith("@") && !this.#taskMode;
+		const roleMode = query.startsWith("@") && !this.#taskMode && !this.#disableRoleMode;
 		const modeChanged = roleMode !== this.#roleMode;
 		if (!modeChanged && !refresh) return;
 
@@ -550,8 +583,8 @@ export class ModelPickerComponent implements Component {
 		let status = this.#configError
 			? theme.fg("error", ` ${this.#configError}`)
 			: this.#taskMode
-				? theme.fg("error", ` ${TASK_STATUS_HINT}`)
-				: theme.fg("muted", ` ${this.#roleMode ? QUICK_ROLE_STATUS_HINT : STATUS_HINT}`);
+				? theme.fg("error", ` ${this.#status ?? TASK_STATUS_HINT}`)
+				: theme.fg("muted", ` ${this.#status ?? (this.#roleMode ? QUICK_ROLE_STATUS_HINT : STATUS_HINT)}`);
 		const slider = this.#slider();
 		if (slider) {
 			status += slider.disabled
@@ -560,13 +593,13 @@ export class ModelPickerComponent implements Component {
 		}
 
 		const borderColor: ThemeColor | undefined = this.#taskMode ? "error" : undefined;
-		let footer = footerHint(this.#mode(), this.#thinkingLevelFor !== undefined);
+		let footer = footerHint(this.#mode(), this.#thinkingLevelFor !== undefined, !this.#disableRoleMode);
 		if (this.#taskModeKey !== undefined && !this.#roleMode) {
 			footer += ` · ${formatKeyHint(this.#taskModeKey)} ${this.#taskMode ? "session model" : "task model"}`;
 		}
 
 		const out: string[] = [];
-		out.push(topBorder(width, this.#taskMode ? "Switch Task Model" : "Switch Model", borderColor));
+		out.push(topBorder(width, this.#title ?? (this.#taskMode ? "Switch Task Model" : "Switch Model"), borderColor));
 		out.push(row(status, width, borderColor));
 		for (const line of this.#browser.render(inner)) {
 			out.push(row(line, width, borderColor));
@@ -653,12 +686,15 @@ export class ModelPickerComponent implements Component {
 			density: "snug",
 			layout: "rows",
 			preview: "none",
-			placeholder: mode === "task" ? "Search Task models…" : "Search, @ for roles…",
+			placeholder: this.#placeholder ?? (mode === "task" ? "Search Task models…" : "Search, @ for roles…"),
 			...(scopes ? { scopes, scope: this.#scope, scopeStyle: "rail" as const } : {}),
 			...this.#browser.pickerRows(catalogue, view, current),
 			level,
-			// The head is the search alone; a config error titles it instead (`message` shows only in the error state).
-			...(this.#configError ? { title: "Switch model", subtitle: [span(this.#configError, "error")] } : {}),
+			...(this.#configError
+				? { title: this.#title ?? "Switch model", subtitle: [span(this.#configError, "error")] }
+				: this.#title
+					? { title: this.#title }
+					: {}),
 			empty: mode === "role" ? `No quick roles in the ${cycleKey} cycle` : "No models available",
 			// No action bar: click/Enter pick, Esc and the head's esc keycap close; the
 			// Task-subagent toggle sits in the head.
@@ -707,8 +743,8 @@ export class ModelPickerComponent implements Component {
 		const status = this.#configError
 			? span(this.#configError, "error")
 			: this.#taskMode
-				? span(TASK_STATUS_HINT, "error")
-				: span(this.#roleMode ? QUICK_ROLE_STATUS_HINT : STATUS_HINT, "muted");
+				? span(this.#status ?? TASK_STATUS_HINT, "error")
+				: span(this.#status ?? (this.#roleMode ? QUICK_ROLE_STATUS_HINT : STATUS_HINT), "muted");
 		const hints: (NativeHint | undefined)[] = [
 			actionHint(["tui.select.up", "tui.select.down"], mode === "role" ? "roles" : "models"),
 			{
@@ -722,7 +758,7 @@ export class ModelPickerComponent implements Component {
 			},
 			{ keys: [], label: "type to search" },
 		];
-		if (mode === "session") hints.push({ keys: ["@"], label: "quick roles" });
+		if (mode === "session" && !this.#disableRoleMode) hints.push({ keys: ["@"], label: "quick roles" });
 		hints.push(actionHint("tui.select.cancel", "close"));
 		if (this.#taskModeKey !== undefined && !this.#roleMode) {
 			hints.push({ keys: [this.#taskModeKey], label: this.#taskMode ? "session model" : "task model" });
@@ -731,7 +767,7 @@ export class ModelPickerComponent implements Component {
 		const node = card(
 			{
 				role: "omp.overlay.model-picker",
-				head: this.#taskMode ? "Switch Task Model" : "Switch Model",
+				head: this.#title ?? (this.#taskMode ? "Switch Task Model" : "Switch Model"),
 				tone: this.#taskMode ? "error" : undefined,
 			},
 			[text([status], { wrap: "word" }), this.#browser, hintsRow(hints)],

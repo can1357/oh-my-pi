@@ -377,6 +377,38 @@ function rowIds(p: TspPickerProps): string[] {
 	return (p.order ?? []).filter((entry): entry is string => typeof entry === "string");
 }
 
+test("extra routed targets keep their selector and model when sharing a catalog identity", () => {
+	const selected = model("demo", "demo", { baseUrl: "http://127.0.0.1/routed/v1" });
+	const planning = model("local", "planning-model");
+	let picked: { model: Model; selector: string } | undefined;
+	const picker = new ModelPickerComponent(
+		ui,
+		source({}, []),
+		{ ...registry(QUICK_MODELS), refreshIfStale: async () => false },
+		QUICK_MODELS.map(entry => ({ model: entry })),
+		{
+			onPick: (pickedModel, selector) => {
+				picked = { model: pickedModel, selector };
+			},
+			onCancel: () => {},
+		},
+		{
+			extraModels: [
+				{ model: selected, selector: "demo/demo@routed" },
+				{ model: planning, selector: "local/planning-model" },
+			],
+			currentSelector: "demo/demo@routed",
+			title: "Plan Execution Model",
+			status: "Choose a model for plan execution",
+			placeholder: "Search models…",
+			disableRoleMode: true,
+		},
+	);
+	picker.handleInput("\r");
+	expect(picked?.model).toBe(selected);
+	expect(picked?.selector).toBe("demo/demo@routed");
+});
+
 test("the quick picker is a composer drop-up with a provider rail, a thinking slider and a task-model toggle", () => {
 	const picked: string[] = [];
 	const picker = openQuickPicker(picked);

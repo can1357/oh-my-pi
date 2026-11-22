@@ -389,6 +389,13 @@ export function resetProviderAutoRefreshGuard(): void {
 	autoRefreshedProviders.clear();
 }
 
+/** Thinking levels that can affect requests for a model. */
+export function thinkingOptionsFor(model: Model): ConfiguredThinkingLevel[] {
+	if (!model.reasoning) return [];
+	if (model.thinking?.unverified) return [ThinkingLevel.Inherit, ThinkingLevel.Off, ...getSupportedEfforts(model)];
+	return [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(model)];
+}
+
 /**
  * The fullscreen model hub component. Hosted via `ui.showOverlay(..., { fullscreen: true })`;
  * the host must call {@link ModelHubComponent.dispose} when the overlay closes.
@@ -1343,18 +1350,8 @@ export class ModelHubComponent implements Component {
 		this.#refreshAfterMutation();
 	}
 
-	/**
-	 * Thinking levels a role assignment can actually apply. A model that does
-	 * not reason gets none: no request path sends reasoning for it, and
-	 * `applyAutoThinkingLevel` early-returns on `!model.reasoning`, so
-	 * `inherit`/`off`/`auto` would all be no-ops. Reasoners without an effort
-	 * dial (`thinking: undefined`, e.g. `xai/grok-code-fast-1`) keep the three
-	 * always-on levels — their thinking is real, only the ladder is absent.
-	 */
 	#thinkingOptionsFor(model: Model): ConfiguredThinkingLevel[] {
-		if (!model.reasoning) return [];
-		if (model.thinking?.unverified) return [ThinkingLevel.Inherit, ThinkingLevel.Off, ...getSupportedEfforts(model)];
-		return [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(model)];
+		return thinkingOptionsFor(model);
 	}
 
 	/**

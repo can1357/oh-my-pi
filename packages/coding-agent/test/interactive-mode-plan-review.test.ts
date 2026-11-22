@@ -5,6 +5,7 @@ import { Agent, AgentBusyError, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -12,7 +13,9 @@ import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensi
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import type { HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
+import { ModelPickerComponent } from "@oh-my-pi/pi-tui/overlays/model-picker";
 import { type PlanReviewAnnotationState, PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
+import { ThinkingSelectorComponent } from "@oh-my-pi/pi-tui/overlays/thinking-selector";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import type {
 	Extension,
@@ -1906,6 +1909,124 @@ describe("InteractiveMode plan review rendering", () => {
 		});
 	});
 
+	it.each(["keep", "compact", "execute"] as const)(
+		"dispatches a custom model and effort without changing roles (%s)",
+		async choice => {
+			const roles = {
+				default: "anthropic/claude-sonnet-4-5",
+				plan: "anthropic/claude-opus-4-6",
+			};
+			for (const [role, selector] of Object.entries(roles)) session.settings.setModelRole(role, selector);
+			const originalRoles = structuredClone(cfgModelRoles.get(session.settings));
+			await mode.handlePlanModeCommand();
+			const planFilePath = mode.planModePlanFilePath ?? "local://PLAN.md";
+			await Bun.write(
+				resolveLocalUrlToPath(planFilePath, {
+					getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+					getSessionId: () => session.sessionManager.getSessionId(),
+				}),
+				"# Plan\n\nRun the approved plan.",
+			);
+			vi.spyOn(modelRegistry, "refreshIfStale").mockResolvedValue(false);
+			vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
+			vi.spyOn(mode, "handleCompactCommand").mockImplementation(async (_instructions, _mode, beforeFlush) => {
+				await beforeFlush?.("ok");
+				return "ok";
+			});
+			const dispatched: Array<{ model?: string; thinking?: string }> = [];
+			vi.spyOn(session, "prompt").mockImplementation(async (...args) => {
+				if (isPlanApprovedCall(args)) {
+					dispatched.push({ model: session.model?.id, thinking: session.configuredThinkingLevel() });
+				}
+				return undefined as never;
+			});
+			const opened = Promise.withResolvers<void>();
+			const approval = mode.handlePlanApproval(
+				{ planFilePath, planExists: true, title: "PLAN" },
+				{ onOpened: () => opened.resolve() },
+			);
+			await Promise.race([
+				opened.promise,
+				approval.then(() => {
+					throw new Error("Plan Review did not open");
+				}),
+			]);
+			const review = mode.ui.overlayStack.at(-1)?.component;
+			if (!(review instanceof PlanReviewOverlay)) throw new Error("Expected Plan Review");
+			try {
+				review.handleInput("\x1bm");
+				const picker = mode.ui.overlayStack.at(-1)?.component;
+				if (!(picker instanceof ModelPickerComponent)) throw new Error("Expected model picker");
+				for (const key of "claude-opus-4-5") picker.handleInput(key);
+				picker.handleInput("\r");
+				const thinking = mode.ui.overlayStack.at(-1)?.component;
+				if (!(thinking instanceof ThinkingSelectorComponent)) throw new Error("Expected thinking picker");
+				thinking.getSelectList().setSelectedValue(ThinkingLevel.High);
+				thinking.getSelectList().handleInput("\n");
+				await Promise.resolve();
+				expect(session.model?.id).toBe("claude-opus-4-6");
+				expect(review.selectOption(choice)).toBe(true);
+				await approval;
+				expect(dispatched).toEqual([{ model: "claude-opus-4-5", thinking: ThinkingLevel.High }]);
+				expect(cfgModelRoles.get(session.settings)).toEqual(originalRoles);
+			} finally {
+				review.handleInput("\x1b");
+				await approval;
+			}
+		},
+	);
+
+	it("allows disabling reasoning for fixed-effort models in the custom picker", async () => {
+		const fixed = modelRegistry.find("xai", "grok-code-fast-1");
+		if (!fixed) throw new Error("Expected fixed-effort model");
+		vi.spyOn(modelRegistry, "refreshIfStale").mockResolvedValue(false);
+		vi.spyOn(modelRegistry, "hasConfiguredAuth").mockReturnValue(true);
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([fixed]);
+		await mode.handlePlanModeCommand();
+		const planFilePath = mode.planModePlanFilePath ?? "local://PLAN.md";
+		await Bun.write(
+			resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			}),
+			"# Plan\n\nChoose a reasoning model.",
+		);
+		vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		const opened = Promise.withResolvers<void>();
+		const approval = mode.handlePlanApproval(
+			{ planFilePath, planExists: true, title: "PLAN" },
+			{ onOpened: () => opened.resolve() },
+		);
+		await Promise.race([
+			opened.promise,
+			approval.then(() => {
+				throw new Error("Plan Review did not open");
+			}),
+		]);
+		const review = mode.ui.overlayStack.at(-1)?.component;
+		if (!(review instanceof PlanReviewOverlay)) throw new Error("Expected Plan Review");
+		try {
+			review.handleInput("\x1bm");
+			const picker = mode.ui.overlayStack.at(-1)?.component;
+			if (!(picker instanceof ModelPickerComponent)) throw new Error("Expected model picker");
+			for (const key of "grok-code-fast-1") picker.handleInput(key);
+			picker.handleInput("\r");
+			const thinking = mode.ui.overlayStack.at(-1)?.component;
+			if (!(thinking instanceof ThinkingSelectorComponent)) throw new Error("Expected thinking picker");
+			thinking.getSelectList().setSelectedValue(ThinkingLevel.Off);
+			thinking.getSelectList().handleInput("\n");
+			await Promise.resolve();
+			expect(review.selectOption("keep")).toBe(true);
+			await approval;
+			expect(session.model?.id).toBe(fixed.id);
+			expect(session.configuredThinkingLevel()).toBe(ThinkingLevel.Off);
+		} finally {
+			review.handleInput("\x1b");
+			await approval;
+		}
+	});
+
 	it("executes on the slider-selected tier, surviving #exitPlanMode's model restore", async () => {
 		// Regression: the model-tier slider's choice used to be applied BEFORE
 		// #approvePlan ran. #approvePlan → #exitPlanMode restores the model that
@@ -2098,17 +2219,13 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
 	});
 
-	it("falls back to the pre-plan model when only plan is configured and the slider is hidden", async () => {
+	it("restores the pre-plan model when there is no role slider", async () => {
 		const sonnet = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		const opus = session.modelRegistry.find("anthropic", "claude-opus-4-5");
 		if (!sonnet || !opus) throw new Error("Expected sonnet + opus to exist in registry");
 		expect(session.model?.id).toBe(sonnet.id);
 
-		// Only the plan role is configured. getRoleModelCycle synthesizes a
-		// singleton `default` entry from the active plan model (opus), so the
-		// slider is hidden — the operator made no selection and approval must
-		// fall through to the pre-plan sonnet restore instead of pinning the
-		// lone plan tier.
+		// A single role does not offer a slider; plan exit restores the pre-plan model.
 		session.settings.setModelRole("plan", "anthropic/claude-opus-4-5");
 
 		const planFilePath = "local://PLAN.md";
@@ -2116,7 +2233,7 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nNo slider, restore default.");
+		await Bun.write(resolvedPlanPath, "# Plan\n\nRestore the previous model.");
 
 		await mode.handlePlanModeCommand();
 		expect(session.model?.id).toBe(opus.id);
@@ -2125,9 +2242,14 @@ describe("InteractiveMode plan review rendering", () => {
 		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 
 		let sliderShown: HookSelectorSlider | undefined;
+		let pendingTiers: unknown;
+		let roleRefused: boolean | undefined;
 		vi.spyOn(mode, "showPlanReview").mockImplementation(
 			async (_planContent, _title, _options, _dialogOptions, extra?: { slider?: HookSelectorSlider }) => {
 				sliderShown = extra?.slider;
+				const pending = mode.getPendingPlanReview();
+				pendingTiers = pending?.tiers;
+				roleRefused = pending ? mode.resolvePlanReview(pending.reviewId, "keep", { role: "default" }) : undefined;
 				return "keep";
 			},
 		);
@@ -2135,6 +2257,10 @@ describe("InteractiveMode plan review rendering", () => {
 		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
 
 		expect(sliderShown).toBeUndefined();
+		// A lone role is no choice: no tiers, no remote tier pick, and the synthetic
+		// `default` derived from the planning model stays unreachable.
+		expect(pendingTiers).toBeUndefined();
+		expect(roleRefused).toBe(false);
 		expect(session.model?.id).toBe(sonnet.id);
 	});
 
@@ -2363,6 +2489,124 @@ describe("InteractiveMode plan review rendering", () => {
 		// By the time the queue flushes, the session is already on the pre-plan model.
 		expect(modelAtFlushTime).toBe(prePlanModel.id);
 		expect(session.model?.id).toBe(prePlanModel.id);
+	});
+
+	it.each(["keep", "compact"] as const)(
+		"dispatches an approved plan on the pre-plan model when the selected role fails (%s)",
+		async choice => {
+			session.settings.setModelRole("default", "anthropic/claude-opus-4-5");
+			session.settings.setModelRole("slow", "anthropic/claude-opus-4-6");
+			session.settings.setModelRole("plan", "anthropic/claude-opus-4-6");
+			await mode.handlePlanModeCommand();
+			const planFilePath = mode.planModePlanFilePath ?? "local://PLAN.md";
+			await Bun.write(
+				resolveLocalUrlToPath(planFilePath, {
+					getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+					getSessionId: () => session.sessionManager.getSessionId(),
+				}),
+				"# Plan\n\nExecute after a model switch failure.",
+			);
+			vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
+			vi.spyOn(session, "applyRoleModel").mockRejectedValue(new Error("switch failed"));
+			const warning = vi.spyOn(mode, "showWarning");
+			const dispatched: string[] = [];
+			vi.spyOn(session, "prompt").mockImplementation(async (...args) => {
+				if (isPlanApprovedCall(args)) dispatched.push(session.model?.id ?? "");
+				return undefined as never;
+			});
+			vi.spyOn(mode, "showPlanReview").mockImplementation(
+				async (_planContent, _title, _options, _dialogOptions, extra?: { slider?: HookSelectorSlider }) => {
+					const slider = extra?.slider;
+					const index = slider?.segments.findIndex(segment => segment.label === "default") ?? -1;
+					if (index >= 0) slider!.onChange?.(index);
+					return choice;
+				},
+			);
+			let modelAtFlush: string | undefined;
+			vi.spyOn(mode, "handleCompactCommand").mockImplementation(async (_instructions, _mode, beforeFlush) => {
+				await beforeFlush?.("ok");
+				modelAtFlush = session.model?.id;
+				return "ok";
+			});
+			await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+			expect(dispatched).toEqual(["claude-sonnet-4-5"]);
+			expect(warning.mock.calls.some(([message]) => message.includes("switch failed"))).toBe(true);
+			if (choice === "compact") expect(modelAtFlush).toBe("claude-sonnet-4-5");
+		},
+	);
+
+	it("leaves an untouched slider to the pre-plan restore", async () => {
+		const sonnet = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		const opus = session.modelRegistry.find("anthropic", "claude-opus-4-5");
+		if (!sonnet || !opus) throw new Error("Expected sonnet + opus to exist in registry");
+		session.settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
+		session.settings.setModelRole("slow", "anthropic/claude-opus-4-5");
+		session.settings.setModelRole("plan", "anthropic/claude-opus-4-5");
+
+		await mode.handlePlanModeCommand();
+		expect(session.model?.id).toBe(opus.id);
+		const planFilePath = mode.planModePlanFilePath ?? "local://PLAN.md";
+		await Bun.write(
+			resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			}),
+			"# Plan\n\nApprove without touching the slider.",
+		);
+		vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		const applyRole = vi.spyOn(session, "applyRoleModel");
+		vi.spyOn(mode, "showPlanReview").mockResolvedValue("keep");
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+
+		// `main` behavior: no execution target, so #exitPlanMode's restore stands and
+		// no role is applied or recorded for the approval.
+		expect(applyRole).not.toHaveBeenCalled();
+		expect(session.model?.id).toBe(sonnet.id);
+	});
+
+	it("dispatches when both the switch and its fallback restore fail", async () => {
+		session.settings.setModelRole("default", "anthropic/claude-opus-4-5");
+		session.settings.setModelRole("slow", "anthropic/claude-opus-4-6");
+		session.settings.setModelRole("plan", "anthropic/claude-opus-4-6");
+		await mode.handlePlanModeCommand();
+		const planFilePath = mode.planModePlanFilePath ?? "local://PLAN.md";
+		await Bun.write(
+			resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			}),
+			"# Plan\n\nExecute after both switches fail.",
+		);
+		vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
+		vi.spyOn(session, "applyRoleModel").mockRejectedValue(new Error("switch failed"));
+		vi.spyOn(session, "setModelTemporary").mockRejectedValue(new Error("restore failed"));
+		const warning = vi.spyOn(mode, "showWarning");
+		const dispatched: string[] = [];
+		vi.spyOn(session, "prompt").mockImplementation(async (...args) => {
+			if (isPlanApprovedCall(args)) dispatched.push(session.model?.id ?? "");
+			return undefined as never;
+		});
+		vi.spyOn(mode, "showPlanReview").mockImplementation(
+			async (_planContent, _title, _options, _dialogOptions, extra?: { slider?: HookSelectorSlider }) => {
+				const slider = extra?.slider;
+				const index = slider?.segments.findIndex(segment => segment.label === "default") ?? -1;
+				if (index >= 0) slider!.onChange?.(index);
+				return "compact";
+			},
+		);
+		vi.spyOn(mode, "handleCompactCommand").mockImplementation(async (_instructions, _mode, beforeFlush) => {
+			await beforeFlush?.("ok");
+			return "ok";
+		});
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+
+		// Defer-restore kept the session on the plan model; both the switch and the
+		// fallback restore reject, so the approval still dispatches on the plan model.
+		expect(dispatched).toEqual(["claude-opus-4-6"]);
+		expect(warning.mock.calls.some(([message]) => message.includes("switch failed"))).toBe(true);
 	});
 
 	it("re-enters plan mode on the approved titled artifact after approve-and-execute", async () => {

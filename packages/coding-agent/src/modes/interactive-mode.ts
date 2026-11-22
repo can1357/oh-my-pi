@@ -1440,6 +1440,10 @@ type PlanPreModelState = {
 	thinkingLevel?: ConfiguredThinkingLevel;
 };
 
+type PlanExecutionTarget =
+	| { kind: "role"; entry: ResolvedRoleModel }
+	| { kind: "temporary"; model: Model; thinkingLevel?: ConfiguredThinkingLevel };
+
 export class InteractiveMode implements InteractiveModeContext {
 	#ownsStartedUi: boolean;
 	session: AgentSession;
@@ -6395,25 +6399,27 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	/**
-	 * Idempotent post-compaction model transition for the plan-approval compact
-	 * path. The deferred pre-plan state is consumed on first application, so a
-	 * second call (the before-flush hook vs. the short-circuit fallback) is a
-	 * no-op. "failed" intentionally stays on the plan model — the context is
-	 * intact and we dispatch best-effort.
-	 */
+	/** Apply the deferred transition before queued input can resume after compaction. */
 	async #applyDeferredPlanModelTransition(
 		outcome: CompactionOutcome | undefined,
-		executionModel: ResolvedRoleModel | undefined,
+		executionModel: PlanExecutionTarget | undefined,
 	): Promise<void> {
 		const deferredPrev = this.#planModePreviousModelState;
-		if (deferredPrev === undefined || outcome === "failed") return;
-		this.#planModePreviousModelState = undefined;
+		if (outcome === "failed") return;
 		if (executionModel) {
-			await this.#applyPlanExecutionModel(executionModel);
-		} else {
-			await this.#restorePlanPreviousModel(deferredPrev);
+			await this.#applyPlanExecutionModel(executionModel, deferredPrev);
+		} else if (deferredPrev) {
+			// The approval must still dispatch: a failed restore leaves the session on
+			// whatever model is active and surfaces a warning instead of throwing.
+			try {
+				await this.#restorePlanPreviousModel(deferredPrev);
+			} catch (error) {
+				this.showWarning(
+					`Could not restore the pre-plan model: ${error instanceof Error ? error.message : String(error)}. Continuing with the current model.`,
+				);
+			}
 		}
+		this.#planModePreviousModelState = undefined;
 	}
 
 	async #exitPlanMode(options?: {
@@ -6703,6 +6709,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			refine?: { id: string; label: string };
 			/** Save with the overlay's current plan text; the review stays open. */
 			onSave?: (content: string) => void;
+			onCustomModel?: () => void;
 			onExternalEditor?: () => void;
 			onPlanEdited?: (content: string) => void;
 			onFeedbackChange?: (feedback: string) => void;
@@ -6723,6 +6730,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const finish = (choice: string | undefined): void => {
 			if (settled) return;
 			settled = true;
+			if (dialogOptions?.onCustomModel) this.#selectorController.cancelPlanExecutionModel();
 			picked = choice;
 			if (this.#planReviewOwner === owner) {
 				this.#planReviewCancel = undefined;
@@ -6752,6 +6760,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				onPick: choice => finish(choice),
 				onCancel: () => finish(undefined),
 				onSave: dialogOptions?.onSave,
+				onCustomModel: dialogOptions?.onCustomModel,
 				onCopyPlan: content => void this.#copyPlanToClipboard(content),
 				onExternalEditor: dialogOptions?.onExternalEditor,
 				onAnnotationExternalEditor: (draft, commit) => void this.#openPlanAnnotationInExternalEditor(draft, commit),
@@ -7109,16 +7118,32 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	async #applyPlanExecutionModel(entry: ResolvedRoleModel | undefined): Promise<void> {
-		if (!entry) return;
+	async #applyPlanExecutionModel(
+		target: PlanExecutionTarget | undefined,
+		previous: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined,
+	): Promise<void> {
+		if (!target) return;
+		const model = target.kind === "role" ? target.entry.model : target.model;
+		const label = target.kind === "role" ? target.entry.role : "custom";
+		const thinking = target.kind === "role" ? target.entry.thinkingLevel : target.thinkingLevel;
 		try {
-			await this.session.applyRoleModel(entry);
+			if (target.kind === "role") await this.session.applyRoleModel(target.entry);
+			else await this.session.setModelTemporary(target.model, target.thinkingLevel);
 			this.statusLine.invalidate();
 			this.updateEditorBorderColor();
-			this.showStatus(`Continuing with ${entry.role}: ${entry.model.name || entry.model.id}`);
+			this.showStatus(`Continuing with ${label}: ${model.name || model.id}`);
 		} catch (error) {
+			// Never fail the approval on a model switch: plan mode has already exited and
+			// the plan is approved. Restore when possible, then dispatch on what is active.
+			if (previous) {
+				try {
+					await this.#restorePlanPreviousModel(previous);
+				} catch {
+					// Keep dispatching even when the fallback switch fails too.
+				}
+			}
 			this.showWarning(
-				`Could not switch to the ${entry.role} model: ${error instanceof Error ? error.message : String(error)}`,
+				`Could not switch to ${label} (${formatModelStringWithRouting(model)}${thinking ? `:${thinking}` : ""}): ${error instanceof Error ? error.message : String(error)}. Continuing with the previous model.`,
 			);
 		}
 	}
@@ -7139,7 +7164,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			title: string;
 			preserveContext?: boolean;
 			compactBeforeExecute?: boolean;
-			executionModel?: ResolvedRoleModel;
+			executionModel?: PlanExecutionTarget;
 			reviewOwner: object;
 		},
 	): Promise<boolean> {
@@ -7158,7 +7183,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (options.compactBeforeExecute) {
 			this.session.markPlanInternalAbortPending();
 		}
+		const previousExecutionModel = this.#planModePreviousModelState;
 		let compactOutcome: CompactionOutcome | undefined;
+		let transitioned = false;
+		const applyCompactTransition = async (outcome: CompactionOutcome | undefined): Promise<void> => {
+			if (transitioned || outcome === "failed") return;
+			transitioned = true;
+			await this.#applyDeferredPlanModelTransition(outcome, options.executionModel);
+		};
 		try {
 			await this.#exitPlanMode({
 				silent: true,
@@ -7199,13 +7231,15 @@ export class InteractiveMode implements InteractiveModeContext {
 				// summary toward the plan boilerplate (issue #4359). The model the
 				// transition below restores reads the summary.
 				const readerModel =
-					options.executionModel?.model ?? this.#planModePreviousModelState?.model ?? this.session.model;
-				compactOutcome = await this.handleCompactCommand(
-					undefined,
-					undefined,
-					outcome => this.#applyDeferredPlanModelTransition(outcome, options.executionModel),
-					{ internalGuidance: compactionPrompt, readerModel },
-				);
+					(options.executionModel?.kind === "role"
+						? options.executionModel.entry.model
+						: options.executionModel?.model) ??
+					this.#planModePreviousModelState?.model ??
+					this.session.model;
+				compactOutcome = await this.handleCompactCommand(undefined, undefined, applyCompactTransition, {
+					internalGuidance: compactionPrompt,
+					readerModel,
+				});
 			}
 		} finally {
 			// Unconditional clear. Idempotent: a no-op when the flag was never set
@@ -7259,9 +7293,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// lands on the plan model. "failed" stays on the plan model (context
 		// intact) and dispatches best-effort.
 		if (options.compactBeforeExecute) {
-			await this.#applyDeferredPlanModelTransition(compactOutcome, options.executionModel);
+			await applyCompactTransition(compactOutcome);
 		} else {
-			await this.#applyPlanExecutionModel(options.executionModel);
+			await this.#applyPlanExecutionModel(options.executionModel, previousExecutionModel);
 		}
 
 		if (compactOutcome === "cancelled") {
@@ -8112,40 +8146,62 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#notifyModeChanged();
 		}
 
-		// Model-tier slider: let the operator pick which configured role model
-		// (smol/default/slow/…) executes the approved plan. The slider always starts
-		// on the `default` tier so execution defaults to the default model no matter
-		// which model drove the planning conversation. Left/right move it from there;
-		// hidden when fewer than two role models resolve — a lone tier is no choice.
-		// `selectedTierIndex` tracks the live slider position.
 		const cycle = this.session.getRoleModelCycle(cfgCycleOrder.get(this.session.settings));
-		const defaultTierIndex = cycle ? cycle.models.findIndex(entry => entry.role === "default") : -1;
+		const roles = cycle?.models ?? [];
+		// `main` hides the model slider when fewer than two role tiers resolve. A lone
+		// tier is no choice, and `default` may be synthesized from the active planning
+		// model, so exposing it would let an approval run on the planning model.
+		const sliderEnabled = roles.length > 1;
+		const previous = this.#planModePreviousModelState;
+		const defaultTierIndex = roles.findIndex(entry => entry.role === "default");
 		const startTierIndex = defaultTierIndex >= 0 ? defaultTierIndex : (cycle?.currentIndex ?? 0);
-		let selectedTierIndex = startTierIndex;
-		const slider: HookSelectorSlider | undefined =
-			cycle && cycle.models.length > 1
-				? {
-						caption: "continue with",
-						index: startTierIndex,
-						segments: cycle.models.map(entry => ({
-							label: entry.role,
-							detail: entry.model.name || entry.model.id,
-						})),
-						onChange: index => {
-							selectedTierIndex = index;
-							const next = choicesAt(index);
-							request.options = next.options;
-							this.#planReviewOverlay?.setChoices(next.choices);
-						},
-					}
-				: undefined;
-		// Keep-context availability follows the model that executes: the selected tier while the
-		// slider shows, else the pre-plan model #exitPlanMode restores. The overlay offers Refine
-		// only while the plan has feedback; an extension may always refine with its own feedback,
-		// so the reported options keep it.
-		const restoredModel = this.#planModePreviousModelState?.model ?? this.session.model;
-		const choicesAt = (tierIndex: number): { options: PlanReviewOption[]; choices: PlanReviewOverlayChoice[] } => {
-			const keep = this.#planKeepContextChoice(slider ? cycle!.models[tierIndex]?.model : restoredModel);
+		let selectedTierIndex = sliderEnabled ? startTierIndex : -1;
+		// An untouched slider must not change execution: #exitPlanMode's restore stands.
+		let sliderTouched = false;
+		let custom: Extract<PlanExecutionTarget, { kind: "temporary" }> | undefined;
+		const modelFor = (target: PlanExecutionTarget | undefined): Model | undefined =>
+			target?.kind === "role" ? target.entry.model : (target?.model ?? previous?.model ?? this.session.model);
+		const roleTargetAt = (index: number): PlanExecutionTarget | undefined =>
+			index >= 0 && index < roles.length ? { kind: "role", entry: roles[index]! } : undefined;
+		const activeTarget = (): PlanExecutionTarget | undefined =>
+			custom ?? (sliderTouched ? roleTargetAt(selectedTierIndex) : undefined);
+		const detail = (model: Model, thinking?: ConfiguredThinkingLevel): string =>
+			truncateToWidth(
+				replaceTabs(
+					sanitizeText(`${model.provider}/${model.id}${thinking === undefined ? "" : ` · ${thinking}`}`),
+				).replace(/[\r\n]+/g, " "),
+				TRUNCATE_LENGTHS.CONTENT,
+			);
+		const segments = (): Array<{ label: string; detail: string }> => {
+			if (!sliderEnabled) {
+				return custom ? [{ label: "Custom model", detail: detail(custom.model, custom.thinkingLevel) }] : [];
+			}
+			const entries = roles.map(entry => ({
+				label: entry.role,
+				detail: detail(entry.model, entry.thinkingLevel),
+			}));
+			if (custom) entries.push({ label: "Custom model", detail: detail(custom.model, custom.thinkingLevel) });
+			return entries;
+		};
+		const onSliderChange = (index: number): void => {
+			sliderTouched = true;
+			selectedTierIndex = index;
+			const next = choicesAt(modelFor(index < roles.length ? roleTargetAt(index) : custom));
+			request.options = next.options;
+			this.#planReviewOverlay?.setChoices(next.choices);
+			this.#planReviewOverlay?.setSlider(sliderFor(index));
+		};
+		const sliderFor = (index: number): HookSelectorSlider => ({
+			caption: "continue with",
+			index,
+			segments: segments(),
+			onChange: onSliderChange,
+		});
+		const slider: HookSelectorSlider | undefined = sliderEnabled ? sliderFor(startTierIndex) : undefined;
+		const choicesAt = (
+			model: Model | undefined,
+		): { options: PlanReviewOption[]; choices: PlanReviewOverlayChoice[] } => {
+			const keep = this.#planKeepContextChoice(model);
 			return {
 				options: [
 					{ id: "execute", label: "Approve and execute", disabled: false },
@@ -8165,7 +8221,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				],
 			};
 		};
-		const initialChoices = choicesAt(startTierIndex);
+		const initialChoices = choicesAt(modelFor(activeTarget()));
 		// The overlay now owns the dynamic, focus-aware help line; the caller only
 		// supplies the trailing cancel hint.
 		const helpText = `${editorKey("tui.select.cancel")} cancel`;
@@ -8185,8 +8241,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			planFilePath,
 			planContent,
 			options: initialChoices.options,
-			tiers: slider
-				? cycle!.models.map(entry => ({
+			tiers: sliderEnabled
+				? roles.map(entry => ({
 						role: entry.role,
 						provider: entry.model.provider,
 						model: entry.model.id,
@@ -8211,14 +8267,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingPlanReview = {
 			request,
 			save: () => void savePlan(undefined, planSaveFileName(details.title)),
-			// Mirrors the slider's onChange for remote answers: a pick in `resolvePlanReview`
-			// moves the same `selectedTierIndex` the approval branch reads after the choice.
-			// Undefined when the slider is hidden — a lone tier is no selection, and pinning
-			// it would switch the session back to the plan model.
-			selectTier: slider
+			selectTier: sliderEnabled
 				? (role, choice) => {
-						const index = cycle!.models.findIndex(entry => entry.role === role);
-						if (index < 0 || choicesAt(index).options.find(option => option.id === choice)?.disabled)
+						const index = roles.findIndex(entry => entry.role === role);
+						if (
+							index < 0 ||
+							choicesAt(roles[index]!.model).options.find(option => option.id === choice)?.disabled
+						)
 							return false;
 						this.#planReviewOverlay?.setSliderIndex(index);
 						return true;
@@ -8239,6 +8294,34 @@ export class InteractiveMode implements InteractiveModeContext {
 				helpText,
 				refine: { id: "refine", label: "Refine plan" },
 				onSave: content => void savePlan(content),
+				onCustomModel: () => {
+					const overlay = this.#planReviewOverlay;
+					void this.#selectorController.pickPlanExecutionModel(modelFor(activeTarget())).then(
+						picked => {
+							if (this.#pendingPlanReview !== pending || !overlay || this.#planReviewOverlay !== overlay) return;
+							this.ui.setFocus(overlay);
+							if (picked) {
+								custom = {
+									kind: "temporary",
+									model: picked.model,
+									thinkingLevel: picked.thinkingLevel ?? ThinkingLevel.Inherit,
+								};
+								sliderTouched = true;
+								selectedTierIndex = sliderEnabled ? roles.length : 0;
+								const next = choicesAt(modelFor(custom));
+								request.options = next.options;
+								overlay.setChoices(next.choices);
+								overlay.setSlider(sliderFor(selectedTierIndex));
+							}
+							this.ui.requestRender();
+						},
+						error => {
+							if (this.#pendingPlanReview !== pending || !overlay || this.#planReviewOverlay !== overlay) return;
+							this.ui.setFocus(overlay);
+							this.showError(error instanceof Error ? error.message : String(error));
+						},
+					);
+				},
 				onExternalEditor: () => void this.#openPlanInExternalEditor(planFilePath),
 				onPlanEdited: content => {
 					editedContent = content;
@@ -8264,7 +8347,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					void requestDelivered.promise.then(() => extensionRunner.emit(resolved));
 				},
 			},
-			{ slider },
+			{ slider: roles.length > 1 ? slider : undefined },
 		);
 		options?.onOpened?.();
 		// Handlers get their own copy so mutating the event cannot re-enable a refused choice.
@@ -8330,7 +8413,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					title: details.title,
 					preserveContext: choice !== "execute",
 					compactBeforeExecute: choice === "compact",
-					executionModel,
+					executionModel: activeTarget(),
 					reviewOwner: pending,
 				});
 				if (executionDispatched) this.#planReviewAnnotationState.delete(annotationStateKey);

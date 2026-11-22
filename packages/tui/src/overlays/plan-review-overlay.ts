@@ -65,7 +65,7 @@ import { joinPlanSections, parsePlanSections, sectionDeletionSpan, stripInlineMa
 import { padToWidth } from "../render/utils";
 import { renderSegmentTrack } from "../chrome/segment-track";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
-import { editorKey, editorKeys } from "../chrome/keybinding-hints";
+import { boundKeys, editorKey, editorKeys } from "../chrome/keybinding-hints";
 import type { KeyName } from "../key-hint-format";
 import { col, item, keyed, keyNames, md, node, row as rowNode, span, text } from "../native/describe";
 import { type DescribeContext, leafKey, type NativeChild, type NativeNode, type NativeUiEvent } from "../native/node";
@@ -352,6 +352,8 @@ export interface PlanReviewOverlayCallbacks {
 	onCopyPlan?: (content: string) => void | Promise<void>;
 	/** Invoked when the external-editor key is pressed (overlay stays open). */
 	onExternalEditor?: () => void;
+	/** Open a one-off execution model picker without closing the review. */
+	onCustomModel?: () => void;
 	/** Invoked when the external-editor key edits the active annotation draft. */
 	onAnnotationExternalEditor?: (draft: string, commit: (text: string | null) => void) => void;
 	/** Invoked with the new full plan text after an in-overlay delete/undo or an in-place native edit. */
@@ -420,7 +422,7 @@ export class PlanReviewOverlay implements Component {
 	/** Index into {@link #entries}. */
 	#selectedIndex: number;
 	#slider: HookSelectorSlider | undefined;
-	#sliderIndex: number;
+	#sliderIndex = 0;
 
 	#focus: Focus = "actions";
 	#tocCursor = 0;
@@ -491,12 +493,7 @@ export class PlanReviewOverlay implements Component {
 		this.#externalEditorLabel = options.externalEditorLabel;
 		this.#promptTitle = options.promptTitle;
 		this.#selectedIndex = this.#coerceIndex(options.initialIndex ?? 0);
-		if (options.slider && options.slider.segments.length > 0) {
-			this.#slider = options.slider;
-			this.#sliderIndex = Math.max(0, Math.min(options.slider.index, options.slider.segments.length - 1));
-		} else {
-			this.#sliderIndex = 0;
-		}
+		if (options.slider) this.setSlider(options.slider);
 		this.#editor = new Editor(getEditorTheme());
 		this.#editor.setBorderVisible(false);
 		this.#editor.setPromptGutter("> ");
@@ -949,6 +946,22 @@ export class PlanReviewOverlay implements Component {
 		slider.onChange?.(next);
 	}
 
+	/** Replace the execution model control without notifying its change handler. */
+	setSlider(slider: HookSelectorSlider): void {
+		if (this.#committed) return;
+		this.#slider = slider.segments.length
+			? {
+					...slider,
+					segments: slider.segments.map(({ label, detail }) => ({
+						label: sanitizeStatusText(label),
+						detail: detail === undefined ? undefined : sanitizeStatusText(detail),
+					})),
+				}
+			: undefined;
+		this.#sliderIndex = Math.max(0, Math.min(slider.index, slider.segments.length - 1));
+		this.#nativeRoot = undefined;
+	}
+
 	/** Synchronize an external tier pick with the displayed slider before committing. */
 	setSliderIndex(index: number): void {
 		if (this.#committed || !this.#slider) return;
@@ -1029,6 +1042,10 @@ export class PlanReviewOverlay implements Component {
 				return;
 			}
 			this.#editor.handleInput(keyData);
+			return;
+		}
+		if (this.callbacks.onCustomModel && getKeybindings().matches(keyData, "app.model.select")) {
+			this.callbacks.onCustomModel();
 			return;
 		}
 		if (matchesSelectCancel(keyData)) {
@@ -1624,7 +1641,7 @@ export class PlanReviewOverlay implements Component {
 		return fence;
 	}
 
-	#renderSliderLines(): string[] {
+	#renderSliderLines(width: number): string[] {
 		const slider = this.#slider;
 		if (!slider) return [];
 		const active = this.#sliderIndex;
@@ -1634,8 +1651,11 @@ export class PlanReviewOverlay implements Component {
 		const caption = slider.caption ? `${theme.fg("dim", slider.caption)}  ` : "";
 		const trackLine = `${caption}${leftArrow}  ${track}  ${rightArrow}`;
 		const detail = slider.segments[active]?.detail;
-		if (!detail) return [trackLine];
-		return [trackLine, `  ${theme.fg("dim", "↳")} ${theme.fg("muted", detail)}`];
+		if (!detail) return [truncateToWidth(trackLine, width)];
+		return [
+			truncateToWidth(trackLine, width),
+			truncateToWidth(`  ${theme.fg("dim", "↳")} ${theme.fg("muted", detail)}`, width),
+		];
 	}
 
 	/** An option's label and, for an approval choice with one, its dim `meta`. */
@@ -1700,6 +1720,8 @@ export class PlanReviewOverlay implements Component {
 				);
 				break;
 		}
+		if (this.callbacks.onCustomModel && editorKey("app.model.select"))
+			parts.push(`${editorKey("app.model.select")} custom model`);
 		if (this.callbacks.onCopyPlan) parts.push(`${formatKeyHint("c")} copy`);
 		parts.push(`${formatKeyHint("tab")} regions`);
 		if (this.#externalEditorLabel && this.#focus !== "toc") parts.push(`${this.#externalEditorLabel} editor`);
@@ -2115,8 +2137,8 @@ export class PlanReviewOverlay implements Component {
 
 	/**
 	 * The decision dock: the Approve split button (Refine while the plan has
-	 * feedback) whose menu holds every approval choice, the model chip (two or
-	 * more tiers; picking one is a slider move), then Save and Cancel.
+	 * feedback) whose menu holds every approval choice, the model chip and custom
+	 * model action, then Save and Cancel.
 	 */
 	#describeDock(): NativeNode {
 		const refine = this.#hasFeedback && this.#refine !== undefined;
@@ -2150,23 +2172,26 @@ export class PlanReviewOverlay implements Component {
 			node("buttons", { variant: "split", role: "omp.plan.approve" }, [main, more], "approve"),
 		];
 		const slider = this.#slider;
-		if (slider && slider.segments.length >= 2) {
-			const active = slider.segments[this.#sliderIndex]!;
+		if (slider || this.callbacks.onCustomModel) {
+			const active = slider?.segments[this.#sliderIndex];
 			children.push(
 				node(
 					"menu",
 					{
 						role: "omp.plan.model",
-						text: active.detail ?? active.label,
+						text: active?.detail ?? active?.label ?? "Custom model…",
 						caret: true,
 						title: "Model that executes the plan",
-						items: slider.segments.map((segment, i) => ({
-							id: `tier:${i}`,
-							label: segment.label,
-							...(segment.detail ? { detail: segment.detail } : {}),
-							radio: "tier",
-							checked: i === this.#sliderIndex,
-						})),
+						items: [
+							...(slider?.segments.map((segment, i) => ({
+								id: `tier:${i}`,
+								label: segment.label,
+								...(segment.detail ? { detail: segment.detail } : {}),
+								radio: "tier",
+								checked: i === this.#sliderIndex,
+							})) ?? []),
+							...(this.callbacks.onCustomModel ? [{ id: "custom-model", label: "Custom model…" }] : []),
+						],
 					},
 					undefined,
 					"model",
@@ -2278,12 +2303,19 @@ export class PlanReviewOverlay implements Component {
 				return;
 			}
 			case "model": {
+				if (act === "custom-model") {
+					this.callbacks.onCustomModel?.();
+					return;
+				}
 				const index = itemIndex(act, "tier:");
 				if (index >= 0) this.#moveSlider(index - this.#sliderIndex);
 				return;
 			}
 		}
 		switch (act) {
+			case "custom-model":
+				this.callbacks.onCustomModel?.();
+				return;
 			case "approve": {
 				const choice = this.#choices.find(candidate => candidate.disabled === undefined);
 				if (choice) this.#commit(choice.id, choice.label);
@@ -2398,22 +2430,27 @@ export class PlanReviewOverlay implements Component {
 
 	#describeSlider(): NativeNode[] {
 		const slider = this.#slider;
-		if (!slider) return [];
-		const tabs = node(
-			"tabs",
-			{
-				items: slider.segments.map((segment, i) => ({ id: `t${i}`, label: segment.label })),
-				active: `t${this.#sliderIndex}`,
-				actions: { click: "select" },
-				role: "omp.plan.strategy",
-			},
-			undefined,
-			"tabs",
-		);
-		const track: NativeChild[] = slider.caption ? [text([span(slider.caption, "dim")]), tabs] : [tabs];
+		if (!slider && !this.callbacks.onCustomModel) return [];
+		const track: NativeChild[] = [];
+		if (slider?.caption) track.push(text([span(slider.caption, "dim")]));
+		if (slider) {
+			const tabs = node(
+				"tabs",
+				{
+					items: slider.segments.map((segment, i) => ({ id: `t${i}`, label: segment.label })),
+					active: `t${this.#sliderIndex}`,
+					actions: { click: "select" },
+					role: "omp.plan.strategy",
+				},
+				undefined,
+				"tabs",
+			);
+			track.push(tabs);
+		}
+		if (this.callbacks.onCustomModel) track.push(actionButton("Custom model…", "custom-model"));
 		// A role of its own: Tern's sheet lets only the role-less split row (Contents + body) shrink and scroll.
 		const out = [keyed(rowNode(track, { role: "omp.plan.slider", gap: "sm", align: "center" }), "slider")];
-		const detail = slider.segments[this.#sliderIndex]?.detail;
+		const detail = slider?.segments[this.#sliderIndex]?.detail;
 		if (detail) out.push(keyed(text([span("↳ ", "dim"), span(detail, "muted")], { wrap: "word" }), "sliderDetail"));
 		return out;
 	}
@@ -2482,6 +2519,8 @@ export class PlanReviewOverlay implements Component {
 			label,
 		});
 		const hints: (NativeHint | undefined)[] = [];
+		if (this.callbacks.onCustomModel)
+			hints.push(key(boundKeys("app.model.select", ["alt+m"])[0] ?? "alt+m", "custom model"));
 		if (this.#nativeDock) {
 			// The dock's buttons carry their own keycaps (Enter, Esc); the hints name the rest.
 			if (this.#slider) hints.push(key(["left", "right"], "model"));
@@ -2536,7 +2575,7 @@ export class PlanReviewOverlay implements Component {
 		const bodyContentWidth = sidebarShown ? splitBodyWidth(width, sidebarWidth) : innerWidth;
 
 		const committed = this.#committed;
-		const sliderLines = committed ? [] : this.#renderSliderLines();
+		const sliderLines = committed ? [] : this.#renderSliderLines(innerWidth);
 		const submittingLabel = this.#committedLabel ? `${this.#committedLabel} — submitting…` : "Submitting…";
 		const optionLines = committed ? [theme.bold(theme.fg("accent", submittingLabel))] : this.#renderOptionLines();
 		const promptLines = this.#promptTitle ? [theme.bold(theme.fg("accent", this.#promptTitle))] : [];

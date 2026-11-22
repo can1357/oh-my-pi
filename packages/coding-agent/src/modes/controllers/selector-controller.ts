@@ -28,7 +28,11 @@ import {
 	roleModelCandidates,
 	saveModelPreset,
 } from "../../config/model-presets";
-import { resolveAdvisorRoleSelection, resolveModelRoleValue } from "../../config/model-resolver";
+import {
+	formatModelStringWithRouting,
+	resolveAdvisorRoleSelection,
+	resolveModelRoleValue,
+} from "../../config/model-resolver";
 import { routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { getRoleInfo } from "../../config/model-roles";
@@ -106,7 +110,11 @@ import { listLiveToolRecords, liveToolRecordFromSession } from "@oh-my-pi/pi-tui
 import { createExtensionDashboardRuntime } from "../components/extensions/dashboard-runtime";
 import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
-import { ModelHubComponent, type ModelRoleSelectionScope } from "@oh-my-pi/pi-tui/overlays/model-hub";
+import {
+	ModelHubComponent,
+	type ModelRoleSelectionScope,
+	thinkingOptionsFor,
+} from "@oh-my-pi/pi-tui/overlays/model-hub";
 import { createModelBrowserSource } from "../model-browser-source";
 import { formatSessionContinuationNotice } from "../persistence-failure";
 import { ModelPickerComponent } from "@oh-my-pi/pi-tui/overlays/model-picker";
@@ -186,6 +194,7 @@ export class SelectorController {
 	 * focuses it instead of stacking another menu on top.
 	 */
 	#openMenus = new Map<MenuKind, OpenMenu>();
+	#cancelPlanExecutionPicker: (() => void) | undefined;
 
 	constructor(private ctx: InteractiveModeContext) {}
 	/**
@@ -756,6 +765,109 @@ export class SelectorController {
 			return;
 		}
 		this.#showModelHub({});
+	}
+
+	/** Dismiss a pending plan execution picker when its owning review goes away. */
+	cancelPlanExecutionModel(): void {
+		this.#cancelPlanExecutionPicker?.();
+	}
+
+	/**
+	 * Pick a one-off plan target without changing the session or settings.
+	 * The caller owns the review lifecycle and restores its focus after this resolves.
+	 */
+	pickPlanExecutionModel(
+		selected: Model | undefined,
+	): Promise<{ model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined> {
+		this.cancelPlanExecutionModel();
+		const session = this.ctx.session;
+		const extraModels: { model: Model; selector: string }[] = [];
+		if (selected) extraModels.push({ model: selected, selector: formatModelStringWithRouting(selected) });
+		const currentSelector = extraModels[0]?.selector;
+		if (session.model && session.model !== selected)
+			extraModels.push({ model: session.model, selector: formatModelStringWithRouting(session.model) });
+		const { promise, resolve } = Promise.withResolvers<
+			{ model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined
+		>();
+		let handle: OverlayHandle | undefined;
+		let component: Component | undefined;
+		let closed = false;
+		const isCurrent = () =>
+			!closed &&
+			this.#cancelPlanExecutionPicker === cancel &&
+			!!component &&
+			this.ctx.ui.overlayStack.some(entry => entry.component === component);
+		const finish = (result?: { model: Model; thinkingLevel?: ConfiguredThinkingLevel }) => {
+			if (closed) return;
+			closed = true;
+			if (this.#cancelPlanExecutionPicker === cancel) this.#cancelPlanExecutionPicker = undefined;
+			handle?.hide();
+			resolve(result);
+		};
+		const cancel = () => finish();
+		this.#cancelPlanExecutionPicker = cancel;
+		const picker = new ModelPickerComponent(
+			this.ctx.ui,
+			createModelBrowserSource(this.ctx.settings, model => session.effectiveServiceTier(model)),
+			session.modelRegistry,
+			[],
+			{
+				onPick: model => {
+					if (!isCurrent()) return;
+					if (!session.modelRegistry.hasConfiguredAuth(model)) {
+						this.ctx.showWarning(`No configured authentication for ${model.provider}/${model.id}.`);
+						return;
+					}
+					const levels = thinkingOptionsFor(model);
+					if (levels.length === 0) {
+						finish({ model });
+						return;
+					}
+					handle?.hide();
+					const selector = new ThinkingSelectorComponent(
+						ThinkingLevel.Inherit,
+						levels,
+						level => {
+							if (!isCurrent()) return;
+							finish(level === ThinkingLevel.Inherit ? { model } : { model, thinkingLevel: level });
+						},
+						() => {
+							if (isCurrent()) cancel();
+						},
+					);
+					component = selector;
+					handle = this.ctx.ui.showOverlay(selector, {
+						anchor: "bottom-center",
+						width: "100%",
+						maxHeight: "100%",
+						margin: 0,
+					});
+					this.ctx.ui.setFocus(selector.getSelectList());
+					this.ctx.ui.requestRender();
+				},
+				onCancel: () => {
+					if (isCurrent()) cancel();
+				},
+			},
+			{
+				extraModels,
+				disableRoleMode: true,
+				title: "Plan Execution Model",
+				status: "One-off selection — role models stay unchanged",
+				placeholder: "Search models",
+				currentSelector,
+			},
+		);
+		component = picker;
+		handle = this.ctx.ui.showOverlay(picker, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+		});
+		this.ctx.ui.setFocus(picker);
+		this.ctx.ui.requestRender();
+		return promise;
 	}
 
 	/**

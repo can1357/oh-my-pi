@@ -108,6 +108,20 @@ describe("SelectorController model selector writes", () => {
 		return opened;
 	}
 
+	it("cancels a pending plan execution picker without changing the session", async () => {
+		const sonnet = model("claude-sonnet-4-5");
+		const { controller } = start(Settings.isolated(), sonnet);
+		session!.setThinkingLevel(AUTO_THINKING);
+		vi.spyOn(modelPickerModule, "ModelPickerComponent").mockImplementation(function () {
+			return {};
+		} as never);
+		const result = controller.pickPlanExecutionModel(sonnet);
+		controller.cancelPlanExecutionModel();
+		expect(await result).toBeUndefined();
+		expect(session!.model).toBe(sonnet);
+		expect(session!.configuredThinkingLevel()).toBe(AUTO_THINKING);
+	});
+
 	it("shows and keeps the session's own level on its current model, not its role's", async () => {
 		const sonnet = model("claude-sonnet-4-5");
 		const settings = Settings.isolated({ modelRoles: { default: "anthropic/claude-sonnet-4-5:high" } });
