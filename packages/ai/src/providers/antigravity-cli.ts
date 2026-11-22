@@ -57,7 +57,11 @@ async function runStep(
 	writer: StepWriter,
 ): Promise<void> {
 	options.signal?.throwIfAborted();
-	if (!options.apiKey) throw new Error("Antigravity CLI requires sign-in. Run /login antigravity-cli.");
+	if (!options.apiKey) {
+		throw new Error(
+			"Antigravity CLI requires sign-in. Run /login antigravity-cli or /login antigravity-cli-enterprise.",
+		);
+	}
 	const account = agyCredentialKey(options.apiKey);
 	const directory = path.join(agyGeminiDir(), account);
 	await stageAgyCredentials(options.apiKey, directory);

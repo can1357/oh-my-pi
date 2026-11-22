@@ -410,6 +410,7 @@ auth "anthropic" {
     result "api-key"                             // OAuth login persists only credentials.access as a plain API key
     allows-missing-api-key #true
     org-scoped-identity #true                   // qualify credential/report identity by org (one email can have multiple subscriptions)
+    project-scoped-identity #true               // qualify credential identity by GCP project (consumer vs enterprise projects)
     oauth-token-env "PROVIDER_OAUTH_TOKEN"      // dedicated OAuth bearer env vars, excluding borrowed API-key aliases in provider env
     native-auth-api "bedrock-converse-stream"     // provider transport resolves auth; scan plans pin this API without secrets
     available #false
@@ -419,7 +420,7 @@ auth "anthropic" {
 }
 ```
 
-`org-scoped-identity #true` keeps credentials and usage reports for different organizations separate even when they share an email; absent or `#false` uses ordinary account identity. `oauth-token-env` takes one or more ordered, non-empty env names carrying this provider's own OAuth bearer. When present, availability ignores other provider-env aliases, and usage probes accept only stored OAuth credentials or the first set bearer from that list; absent providers keep the ordinary API-key env behavior.
+`org-scoped-identity #true` keeps credentials and usage reports for different organizations separate even when they share an email; absent or `#false` uses ordinary account identity. `project-scoped-identity #true` keeps consumer and GCP-project credentials separate on the same account; absent or `#false` omits `projectId` from account identity. `oauth-token-env` takes one or more ordered, non-empty env names carrying this provider's own OAuth bearer. When present, availability ignores other provider-env aliases, and usage probes accept only stored OAuth credentials or the first set bearer from that list; absent providers keep the ordinary API-key env behavior.
 
 `login-subscription #true` marks login-sourced API keys as subscription billing, leaving pasted and environment keys metered; absent or `#false` keeps all API keys metered.
 

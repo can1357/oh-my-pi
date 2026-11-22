@@ -134,7 +134,7 @@ function replacesCredential(provider: string, existing: AuthCredential, incoming
 	if (existing.type !== "oauth") return false;
 	return (
 		matchesReplacementCredential(provider, existing, resolveCredentialIdentityKey(provider, existing), incoming) ||
-		isSameOAuthAccount(existing, incoming)
+		isSameOAuthAccount(existing, incoming, provider)
 	);
 }
 

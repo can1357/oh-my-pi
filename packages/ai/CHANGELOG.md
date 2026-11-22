@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/login antigravity-cli-enterprise` for Google Cloud Gemini Enterprise (`gcp`) sign-in, running Google's PKCE flow with `agy`'s `gcp` OAuth client and storing the project ID and location under `antigravity-cli` ([#19858](https://github.com/can1357/oh-my-pi/pull/19858) by [@konsailabs](https://github.com/konsailabs)).
+
 ### Fixed
 
 - With several Devin logins, omp now prefers a login with daily or weekly quota left; a login past its quota that its on-demand balance still funds comes next, and one with no balance is skipped until its quota resets ([#19929](https://github.com/can1357/oh-my-pi/pull/19929) by [@will-bogusz](https://github.com/will-bogusz))
