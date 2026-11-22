@@ -88,7 +88,10 @@ describe("EventController mixed assistant text/tool rendering", () => {
 
 	beforeEach(async () => {
 		resetSettingsForTest();
-		await Settings.init({ inMemory: true, overrides: { "display.smoothStreaming": false } });
+		await Settings.init({
+			inMemory: true,
+			overrides: { "display.smoothStreaming": false, "display.cacheMissMarker": true },
+		});
 	});
 
 	afterEach(() => {
@@ -579,4 +582,167 @@ describe("EventController mixed assistant text/tool rendering", () => {
 			}
 		});
 	}
+
+	it("preserves the cache baseline when auto compaction starts", async () => {
+		const { controller, ctx } = createFixture();
+		const warm: Usage = {
+			...zeroUsage(),
+			input: 1_000,
+			cacheRead: 830_000,
+			totalTokens: 831_000,
+		};
+		ctx.lastAssistantUsage = warm;
+
+		await controller.handleEvent({
+			type: "auto_compaction_start",
+			reason: "threshold",
+			action: "context-full",
+		} as Extract<AgentSessionEvent, { type: "auto_compaction_start" }>);
+
+		expect(ctx.lastAssistantUsage).toBe(warm);
+	});
+
+	it("preserves the cache baseline when auto compaction ends without a rewrite", async () => {
+		const { controller, ctx } = createFixture();
+		const warm: Usage = {
+			...zeroUsage(),
+			input: 1_000,
+			cacheRead: 830_000,
+			totalTokens: 831_000,
+		};
+		ctx.lastAssistantUsage = warm;
+
+		await controller.handleEvent({
+			type: "auto_compaction_end",
+			action: "context-full",
+			aborted: true,
+			result: undefined,
+			skipped: false,
+			willRetry: false,
+		} as Extract<AgentSessionEvent, { type: "auto_compaction_end" }>);
+
+		expect(ctx.lastAssistantUsage).toBe(warm);
+	});
+
+	it("clears the cache baseline after the auto-shake partial rebuild", async () => {
+		const { controller, ctx } = createFixture();
+		const warm: Usage = {
+			...zeroUsage(),
+			input: 1_000,
+			cacheRead: 830_000,
+			totalTokens: 831_000,
+		};
+		ctx.lastAssistantUsage = warm;
+		vi.spyOn(ctx, "rebuildChatFromMessages").mockImplementation(() => {
+			ctx.lastAssistantUsage = warm;
+		});
+
+		await controller.handleEvent({
+			type: "auto_compaction_end",
+			action: "shake",
+			errorMessage: "still over the threshold",
+			skipped: false,
+			aborted: false,
+			willRetry: false,
+		} as Extract<AgentSessionEvent, { type: "auto_compaction_end" }>);
+
+		expect(ctx.lastAssistantUsage).toBeUndefined();
+	});
+
+	it("clears the cache baseline after the compaction rebuild reseeds it", async () => {
+		const { controller, ctx } = createFixture();
+		const preCompactionUsage: Usage = {
+			...zeroUsage(),
+			input: 1_000,
+			cacheRead: 830_000,
+			totalTokens: 831_000,
+		};
+		ctx.lastAssistantUsage = preCompactionUsage;
+		vi.spyOn(ctx, "rebuildChatFromMessages").mockImplementation(() => {
+			// Simulate the replay reseeding the live baseline from a kept
+			// pre-compaction assistant.
+			ctx.lastAssistantUsage = preCompactionUsage;
+		});
+
+		await controller.handleEvent({
+			type: "auto_compaction_end",
+			action: "context-full",
+			result: {} as never,
+			aborted: false,
+			willRetry: false,
+		} as Extract<AgentSessionEvent, { type: "auto_compaction_end" }>);
+
+		expect(ctx.lastAssistantUsage).toBeUndefined();
+	});
+
+	it("keeps a real miss after a no-op end and starts a new baseline after a committed rewrite", async () => {
+		const { controller, ctx } = createFixture();
+		const warm: Usage = {
+			...zeroUsage(),
+			input: 2,
+			cacheRead: 50_000,
+			cacheWrite: 900,
+			totalTokens: 50_902,
+		};
+		const cold: Usage = {
+			...zeroUsage(),
+			input: 100,
+			cacheRead: 0,
+			cacheWrite: 51_000,
+			totalTokens: 51_100,
+		};
+		const setCacheInvalidation = vi.spyOn(AssistantMessageComponent.prototype, "setCacheInvalidation");
+
+		// A no-op end (aborted/cancelled) must preserve the baseline, so the next
+		// genuinely cold turn still renders the marker.
+		ctx.lastAssistantUsage = warm;
+		await controller.handleEvent({
+			type: "auto_compaction_end",
+			action: "context-full",
+			aborted: true,
+			result: undefined,
+			skipped: false,
+			willRetry: false,
+		} as Extract<AgentSessionEvent, { type: "auto_compaction_end" }>);
+		await controller.handleEvent({
+			type: "message_start",
+			message: assistantMessage([]),
+		} as Extract<AgentSessionEvent, { type: "message_start" }>);
+		await controller.handleEvent({
+			type: "message_end",
+			message: { ...assistantMessage([]), usage: cold },
+		} as Extract<AgentSessionEvent, { type: "message_end" }>);
+		expect(setCacheInvalidation).toHaveBeenCalledTimes(1);
+		expect(setCacheInvalidation).toHaveBeenCalledWith({ reprocessedTokens: 51_100 });
+
+		// A committed rewrite drops the old baseline: the first turn seeds the
+		// new one, and only a later warm->cold transition renders the marker.
+		setCacheInvalidation.mockClear();
+		await controller.handleEvent({
+			type: "auto_compaction_end",
+			action: "context-full",
+			result: {} as never,
+			aborted: false,
+			willRetry: false,
+		} as Extract<AgentSessionEvent, { type: "auto_compaction_end" }>);
+		await controller.handleEvent({
+			type: "message_start",
+			message: assistantMessage([]),
+		} as Extract<AgentSessionEvent, { type: "message_start" }>);
+		await controller.handleEvent({
+			type: "message_end",
+			message: { ...assistantMessage([]), usage: warm },
+		} as Extract<AgentSessionEvent, { type: "message_end" }>);
+		expect(setCacheInvalidation).not.toHaveBeenCalled();
+
+		await controller.handleEvent({
+			type: "message_start",
+			message: assistantMessage([]),
+		} as Extract<AgentSessionEvent, { type: "message_start" }>);
+		await controller.handleEvent({
+			type: "message_end",
+			message: { ...assistantMessage([]), usage: cold },
+		} as Extract<AgentSessionEvent, { type: "message_end" }>);
+		expect(setCacheInvalidation).toHaveBeenCalledTimes(1);
+	});
 });

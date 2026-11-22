@@ -2742,19 +2742,30 @@ export class EventController {
 			if (event.errorMessage) {
 				if (!event.skipped) {
 					this.ctx.rebuildChatFromMessages();
+					// The partial rebuild can reseed the baseline from the kept
+					// pre-shake assistant; drop it again like the success path.
+					this.ctx.lastAssistantUsage = undefined;
 					this.ctx.statusLine.invalidate();
 					this.ctx.ui.requestRender(true, { clearScrollback: true });
 				}
 				this.ctx.showWarning(event.errorMessage);
 			} else if (!event.skipped) {
 				this.ctx.lastAssistantUsage = undefined;
+
 				this.ctx.rebuildChatFromMessages();
+				this.ctx.lastAssistantUsage = undefined;
+
 				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender(true, { clearScrollback: true });
 				this.ctx.showStatus("Auto-shake completed");
 			}
 		} else if (event.result) {
 			this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
+			// The rebuild reseeds the live baseline from the last replayed assistant
+			// message, which can be the kept pre-compaction turn. Drop it again so
+			// the first post-compaction request starts a new prefix.
+			this.ctx.lastAssistantUsage = undefined;
+
 			this.ctx.statusLine.invalidate();
 			// rebuildChatFromMessages clears the container's emission ledger,
 			// so every block re-emits on this frame while the previous copy is
@@ -2771,7 +2782,12 @@ export class EventController {
 		} else if (isHandoffAction) {
 			this.ctx.clearTransientSessionUi();
 			this.ctx.lastAssistantUsage = undefined;
+
 			await this.ctx.renderInitialMessages();
+			// renderInitialMessages reseeds from replayed history; compaction and
+			// handoff both start a new prefix.
+			this.ctx.lastAssistantUsage = undefined;
+
 			this.ctx.statusLine.invalidate();
 			await this.ctx.reloadTodos();
 			this.ctx.ui.requestRender(true, { clearScrollback: true });

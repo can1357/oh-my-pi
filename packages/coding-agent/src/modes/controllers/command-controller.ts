@@ -2251,6 +2251,9 @@ export class CommandController {
 			return;
 		}
 		this.ctx.rebuildChatFromMessages();
+		// Shake rewrites the prompt prefix like compaction: the first post-shake
+		// turn must not be compared against the pre-shake cacheRead.
+		this.ctx.lastAssistantUsage = undefined;
 		this.ctx.statusLine.invalidate();
 		this.ctx.ui.requestRender(true, { clearScrollback: true });
 		this.ctx.showStatus(formatShakeSummary(result));
@@ -2317,6 +2320,7 @@ export class CommandController {
 		try {
 			try {
 				await session.compact(instructions, options);
+				this.ctx.lastAssistantUsage = undefined;
 			} finally {
 				if (background) {
 					this.ctx.backgroundCompaction.stop();
@@ -2328,6 +2332,7 @@ export class CommandController {
 			}
 			if (inView()) {
 				this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
+				this.ctx.lastAssistantUsage = undefined;
 				this.ctx.statusLine.invalidate();
 				if (background) this.ctx.showStatus("Compaction complete");
 				// Rebuilding resets the transcript's emission ledger. Clear terminal
