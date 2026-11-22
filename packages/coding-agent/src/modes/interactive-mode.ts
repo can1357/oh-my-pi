@@ -8128,7 +8128,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				}
 			: undefined;
 		const previousModel = this.#planModePreviousModelState;
-		const prePlanEntry: ResolvedRoleModel | undefined = previousModel
+		const prePlanEntry: ResolvedRoleModel | undefined = previousModel?.model
 			? {
 					role: PRE_PLAN_REVIEW_ROLE,
 					model: previousModel.model,
