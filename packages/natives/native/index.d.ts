@@ -1015,6 +1015,12 @@ export declare class VcsGitRepo {
   /** Write bytes as a blob and return its full object id. */
   writeBlob(data: Uint8Array, signal?: unknown | undefined | null): Promise<string>
   /**
+   * Capture a regular file directly from disk as a Git blob, applying the
+   * repository's clean filters and EOL rules. Always persists the object and
+   * returns its full id; `data` is omitted if Git-form bytes exceed the cap.
+   */
+  captureWorktreeBlob(path: string, maxTextBytes: number, signal?: unknown | undefined | null): Promise<VcsCapturedBlob>
+  /**
    * Convert worktree content to the blob `git add` would store per path
    * (EOL/`text` attributes, `core.autocrlf`, `ident`, clean filters such as
    * Git LFS), in input order.
@@ -4751,6 +4757,12 @@ export interface VcsBlobChange {
   newId?: string
   oldMode?: string
   newMode?: string
+}
+
+/** Persisted Git blob snapshot with optional capped Git-form content. */
+export interface VcsCapturedBlob {
+  id: string
+  data?: Buffer
 }
 
 /** Clean options. */

@@ -388,6 +388,53 @@ pub(crate) fn run_sync(cwd: &Path, args: &[String], timeout: Duration) -> Result
 	run_sync_capped(cwd, args, timeout, OUTPUT_LIMIT_BYTES)
 }
 
+/// Read exactly `len` binary blob bytes without draining the rest of an
+/// oversized object. The reader is joined after termination, including on
+/// timeout or read failure; only the requested prefix enters host memory.
+pub(crate) fn blob_prefix(cwd: &Path, spec: &str, len: usize, oversized: bool) -> Result<Vec<u8>> {
+	use std::io::Read;
+	let args = ["cat-file".to_owned(), "blob".to_owned(), spec.to_owned()];
+	let mut cmd = std::process::Command::new("git");
+	cmd.args(hardened_args(&args, true))
+		.current_dir(cwd)
+		.stdin(Stdio::null())
+		.stdout(Stdio::piped())
+		.stderr(Stdio::null());
+	apply_env(&mut cmd);
+	detach_from_terminal(&mut cmd);
+	let mut child = cmd.spawn()?;
+	let mut stdout = child.stdout.take().expect("piped git stdout");
+	let reader = std::thread::spawn(move || {
+		let mut bytes = vec![0; len];
+		stdout.read_exact(&mut bytes)?;
+		Ok::<_, std::io::Error>(bytes)
+	});
+	let (sender, receiver) = std::sync::mpsc::channel();
+	let joiner = std::thread::spawn(move || {
+		let _ = sender.send(reader.join());
+	});
+	let received = receiver.recv_timeout(SYNC_TIMEOUT);
+	if oversized || received.is_err() {
+		let _ = child.kill();
+	}
+	let status = child.wait()?;
+	let _ = joiner.join();
+	let bytes = match received {
+		Ok(Ok(Ok(bytes))) => bytes,
+		Ok(Ok(Err(err))) => return Err(err.into()),
+		Ok(Err(_)) => {
+			return Err(Error::backend("git cat-file", std::io::Error::other("blob reader panicked")));
+		},
+		Err(_) => {
+			return Err(Error::backend("git cat-file", std::io::Error::other("blob read timed out")));
+		},
+	};
+	if !oversized && !status.success() {
+		return Err(Error::ObjectNotFound { spec: spec.to_owned() });
+	}
+	Ok(bytes)
+}
+
 /// Stdin and environment for a [`run_sync_write`] invocation.
 pub(crate) struct SyncWrite<'a> {
 	/// Bytes piped to the child's stdin, then closed.

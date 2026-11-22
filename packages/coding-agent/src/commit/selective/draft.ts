@@ -42,12 +42,12 @@ import {
 import type { ChangeJournal, ChangeRecord } from "./journal";
 import { formatTextPatch } from "./patch";
 
-/** Files above this size are selected whole, without line attribution. */
+/** Worktree or Git-form content above this cap is selected whole. */
 const MAX_TEXT_BYTES = 4 * 1024 * 1024;
+/** At most 16 MiB of worktree reads can be live in a conversion batch. */
+const READ_CONCURRENCY = 4;
 /** Git mode of a symlink. */
 const SYMLINK_MODE = "120000";
-/** Concurrent file reads while building a draft. */
-const READ_CONCURRENCY = 16;
 /** First-parent commits walked back from HEAD to find where it was when recording began. */
 const RECENT_COMMIT_LIMIT = 256;
 /** Author dates have whole seconds; a commit in the same second as a record counts as after it. */
@@ -340,13 +340,14 @@ export async function createDraft(source: DraftSource): Promise<Draft> {
 		const inputs = pending.flatMap(file => file.inputs);
 		const cleaned = inputs.length > 0 ? await repo.worktreeToGit(inputs, source.signal) : [];
 		let offset = 0;
-		const finished = await Promise.all(
-			results.map(result =>
+		const finished: Array<FileChange | "skip" | undefined> = [];
+		for (const result of results) {
+			finished.push(
 				result && typeof result === "object" && "finish" in result
-					? result.finish(cleaned.slice(offset, (offset += result.inputs.length)))
+					? await result.finish(cleaned.slice(offset, (offset += result.inputs.length)))
 					: result,
-			),
-		);
+			);
+		}
 		finished.forEach((result, index) => {
 			if (result === "skip") skipped.push(chunk[index].path);
 			else if (result) files.push(result);
@@ -470,6 +471,7 @@ async function loadFile(
 		};
 	}
 	let workBytes: Uint8Array | null = null;
+	let large = false;
 	let mode: string | null = null;
 	try {
 		const stat = await fs.lstat(absolute);
@@ -479,10 +481,20 @@ async function loadFile(
 		} else if (!stat.isFile()) return "skip";
 		else {
 			mode = stat.mode & 0o111 ? "100755" : "100644";
-			workBytes = await fs.readFile(absolute);
+			large = stat.size > MAX_TEXT_BYTES;
+			if (!large) {
+				workBytes = await Bun.file(absolute)
+					.slice(0, MAX_TEXT_BYTES + 1)
+					.bytes();
+				if (workBytes.byteLength > MAX_TEXT_BYTES) {
+					workBytes = null;
+					large = true;
+				}
+			}
 		}
 	} catch (error) {
 		if (!isEnoent(error)) throw error;
+		mode = null;
 	}
 	if (head.mode === null && mode === null) return undefined;
 	const base = {
@@ -498,7 +510,11 @@ async function loadFile(
 	// and selected paths render from the object database when the commit is built.
 	// Regular files are stored in their git form (`stored`, as `git add` would store
 	// them), and the worktree file is not read again. Symlink targets stay literal.
-	const whole = async (reason: WholeReason, stored: Uint8Array | null): Promise<WholeFileChange> => {
+	const whole = async (
+		reason: WholeReason,
+		stored: Uint8Array | null,
+		storedId?: string,
+	): Promise<WholeFileChange> => {
 		let before: WholeFileState | null = null;
 		if (head.sha !== null && head.mode !== null) {
 			const id = await repo.resolveRef(`${head.sha}:${file}`, signal);
@@ -507,25 +523,39 @@ async function loadFile(
 		}
 		let after: WholeFileState | null = null;
 		if (mode !== null) {
-			if (stored === null) throw new Error(`Could not capture ${file} for the draft.`);
-			after = { id: await repo.writeBlob(stored, signal), mode };
+			if (storedId !== undefined) after = { id: storedId, mode };
+			else {
+				if (stored === null) throw new Error(`Could not capture ${file} for the draft.`);
+				after = { id: await repo.writeBlob(stored, signal), mode };
+			}
 		}
 		return { ...base, head: null, work: null, whole: { reason, before, after } };
 	};
 	// Symlinks commit as their link target, whole; this also covers a file replaced by a link and back.
 	// The link target stays literal; a regular file that replaced a link is stored in its git form.
 	if (head.mode === SYMLINK_MODE || mode === SYMLINK_MODE) {
+		if (large) {
+			const captured = await repo.captureWorktreeBlob(file, MAX_TEXT_BYTES, signal);
+			return whole("symlink", captured.data ?? null, captured.id);
+		}
 		const stored =
 			mode === SYMLINK_MODE || workBytes === null
 				? workBytes
 				: (await repo.worktreeToGit([{ path: file, data: workBytes }], signal))[0];
 		return whole("symlink", stored);
 	}
-	const headBytes =
-		head.sha && head.mode ? (await repo.showBlob(`${head.sha}:${file}`, undefined, signal)).data : null;
+	const headBlob =
+		!large && head.sha && head.mode ? await repo.showBlob(`${head.sha}:${file}`, MAX_TEXT_BYTES, signal) : null;
+	const headText = large
+		? undefined
+		: headBlob === null
+			? null
+			: headBlob.truncated
+				? undefined
+				: decodeText(headBlob.data);
 	const [snapshots, headMoved] = await Promise.all([
-		journal && records.length > 0 ? journal.snapshots(records) : undefined,
-		head.sha && head.mode && records.length > 0
+		!large && headText !== undefined && journal && records.length > 0 ? journal.snapshots(records) : undefined,
+		!large && headText !== undefined && head.sha && head.mode && records.length > 0
 			? headMovedSince(repo, head.sha, file, records[0].at, head.recent)
 			: false,
 	]);
@@ -538,14 +568,19 @@ async function loadFile(
 	return {
 		inputs,
 		async finish(cleaned) {
+			const captured = large ? await repo.captureWorktreeBlob(file, MAX_TEXT_BYTES, signal) : null;
 			let next = 0;
-			const gitForm = workBytes === null ? null : cleaned[next++];
+			const gitForm = captured ? (captured.data ?? null) : workBytes === null ? null : cleaned[next++];
+			if (gitForm === undefined) throw new Error(`Could not clean ${file} for the draft.`);
+			// Oversized worktree content remains whole even if a clean filter reduces its Git blob.
+			const workText = captured ? undefined : gitForm === null ? null : decodeText(gitForm);
+			if (headText === undefined || workText === undefined) {
+				const change = await whole("content", gitForm, captured?.id);
+				return change.whole.before?.id === change.whole.after?.id && head.mode === mode ? undefined : change;
+			}
+			if (headText === workText) return head.mode === mode ? undefined : whole("mode", gitForm, captured?.id);
 			const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
 			const snapshotLines = (text: string | null) => toLines(text === null ? null : decoder.decode(cleaned[next++]));
-			const headText = headBytes === null ? null : decodeText(headBytes);
-			const workText = gitForm === null ? null : decodeText(gitForm);
-			if (headText === undefined || workText === undefined) return whole("content", gitForm);
-			if (headText === workText) return head.mode === mode ? undefined : whole("mode", gitForm);
 			const headLines = toLines(headText);
 			const workLines = toLines(workText);
 			const edits = snapshots?.map((snapshot): RecordedEdit => ({

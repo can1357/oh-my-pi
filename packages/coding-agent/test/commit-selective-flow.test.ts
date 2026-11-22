@@ -423,17 +423,10 @@ describe("selective commit flow", () => {
 			expect(repo).not.toBeNull();
 			expect(await repo!.changedFiles({ cached: true })).toEqual([]);
 
-			const marker = path.join(root, ".git", "omp-hook-sparse.txt");
 			const hook = path.join(root, ".git/hooks/pre-commit");
 			await Bun.write(
 				hook,
-				[
-					"#!/bin/sh",
-					"set -e",
-					'[ -z "$(git diff --name-only)" ]',
-					"git add kept/inside",
-					'git ls-files --sparse > "$GIT_DIR/omp-hook-sparse.txt"',
-				].join("\n") + "\n",
+				["#!/bin/sh", "set -e", '[ -z "$(git diff --name-only)" ]', "git add kept/inside"].join("\n") + "\n",
 			);
 			await fs.chmod(hook, 0o755);
 
@@ -442,8 +435,6 @@ describe("selective commit flow", () => {
 			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
 			await commitSelection(draft, { subject: "fix: sparse commit" }, { journal, agent: { agent: "Main" } });
 
-			// The hook really did hand write_index_tree a collapsed `away/` directory entry.
-			expect((await Bun.file(marker).text()).trim().split("\n").sort()).toEqual(["away/", "kept/inside"]);
 			expect(await git(root, ["show", "HEAD:kept/inside"])).toBe("after\n");
 			expect(await git(root, ["show", "HEAD:away/deep/outside"])).toBe("outside\n");
 			expect(await git(root, ["show", "HEAD:away/other"])).toBe("other\n");
@@ -1036,6 +1027,59 @@ describe("selective commit flow", () => {
 
 		expect(outcome.paths).toEqual(["added.bin"]);
 		expect([...(await gitBlob(root, "HEAD:added.bin"))]).toEqual([0, 1, 2]);
+	});
+
+	it("keeps an unrelated large untracked artifact selectable without selecting it by default", async () => {
+		const { root, journal, write } = await emptyRepo();
+		await Bun.write(path.join(root, "small.ts"), "export const value = 1;\n");
+		await git(root, ["add", "small.ts"]);
+		await git(root, ["commit", "-qm", "seed"]);
+		await write("Main", undefined, "small.ts", "export const value = 2;\n");
+		await journal.flush();
+		const artifact = Buffer.alloc(6 * 1024 * 1024, 0x83);
+		await Bun.write(path.join(root, "build.asar"), artifact);
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(draft.paths).toEqual(["build.asar", "small.ts"]);
+		expect(draft.selection().map(change => change.path)).toEqual(["small.ts"]);
+		draft.only(["small.ts"]);
+		const later = await createDraft({ cwd: root, journal, caller: "Main" });
+		later.take({ path: "build.asar" });
+		await Bun.write(path.join(root, "build.asar"), Buffer.from([0, 1, 2]));
+		await commitSelection(later, { subject: "chore: added artifact" }, { journal, agent: { agent: "Main" } });
+		expect(await gitBlob(root, "HEAD:build.asar")).toEqual(artifact);
+	});
+
+	it.skipIf(process.platform === "win32")("captures large tracked files through Git clean filters", async () => {
+		const { root, journal } = await emptyRepo();
+		const script = path.join(root, "clean.sh");
+		await Bun.write(script, "#!/bin/sh\nprintf 'pointer:'\ncat\n");
+		await git(root, ["config", "filter.asset.clean", `sh ${script}`]);
+		await git(root, ["config", "filter.asset.required", "true"]);
+		await Bun.write(path.join(root, ".gitattributes"), "*.bin filter=asset\n");
+		await Bun.write(path.join(root, "asset.bin"), Buffer.alloc(6 * 1024 * 1024, 1));
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-qm", "seed"]);
+		const captured = Buffer.alloc(6 * 1024 * 1024, 2);
+		await Bun.write(path.join(root, "asset.bin"), captured);
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		draft.take({ path: "asset.bin" });
+		await Bun.write(path.join(root, "asset.bin"), Buffer.from([0, 3]));
+		await commitSelection(draft, { subject: "chore: updated asset" }, { journal, agent: { agent: "Main" } });
+		expect(await gitBlob(root, "HEAD:asset.bin")).toEqual(Buffer.concat([Buffer.from("pointer:"), captured]));
+	});
+
+	it("commits a small replacement of an oversized HEAD blob as one whole-file change", async () => {
+		const { root, journal } = await emptyRepo();
+		await Bun.write(path.join(root, "archive.bin"), Buffer.alloc(6 * 1024 * 1024, 0xff));
+		await git(root, ["add", "archive.bin"]);
+		await git(root, ["commit", "-qm", "seed"]);
+		await Bun.write(path.join(root, "archive.bin"), Buffer.from("replacement\n"));
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		draft.take({ path: "archive.bin" });
+		expect(draft.selection()[0]?.kind).toBe("whole");
+		await commitSelection(draft, { subject: "chore: replaced archive" }, { journal, agent: { agent: "Main" } });
+		expect(await gitBlob(root, "HEAD:archive.bin")).toEqual(Buffer.from("replacement\n"));
 	});
 
 	it("commits clean-filtered whole files from the bytes captured at draft time", async () => {

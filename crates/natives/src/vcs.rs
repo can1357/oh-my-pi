@@ -184,6 +184,12 @@ pub struct VcsBlobChange {
 	pub old_mode: Option<String>,
 	pub new_mode: Option<String>,
 }
+/// Persisted Git blob snapshot with optional capped Git-form content.
+#[napi(object)]
+pub struct VcsCapturedBlob {
+	pub id:   String,
+	pub data: Option<Buffer>,
+}
 /// Worktree content of one repo-relative path, for
 /// [`VcsGitRepo::worktree_to_git`].
 #[napi(object)]
@@ -1096,6 +1102,22 @@ impl VcsGitRepo {
 		// Copied on this thread: the worker must not read the caller's buffer.
 		let data = data.to_vec();
 		blocking("vcs.writeBlob", self.inner.clone(), signal, move |r| r.write_blob(&data))
+	}
+
+	/// Capture a regular file directly from disk as a Git blob, applying the
+	/// repository's clean filters and EOL rules. Always persists the object and
+	/// returns its full id; `data` is omitted if Git-form bytes exceed the cap.
+	#[napi]
+	pub fn capture_worktree_blob(
+		&self,
+		path: String,
+		max_text_bytes: u32,
+		signal: Option<Unknown>,
+	) -> Promise<VcsCapturedBlob> {
+		blocking("vcs.captureWorktreeBlob", self.inner.clone(), signal, move |r| {
+			r.capture_worktree_blob(&path, max_text_bytes as usize)
+				.map(|(id, data)| VcsCapturedBlob { id, data: data.map(Buffer::from) })
+		})
 	}
 
 	/// Convert worktree content to the blob `git add` would store per path

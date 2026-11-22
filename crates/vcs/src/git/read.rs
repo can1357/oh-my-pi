@@ -965,27 +965,47 @@ impl GitRepo {
 	}
 
 	/// Read an object or `rev:path` blob, with an optional byte cap.
+	/// Oversized blobs return their capped prefix without loading or draining
+	/// the remainder; small ordinary blobs use the in-process object database.
 	pub fn show_blob(&self, spec: &str, max_bytes: Option<usize>) -> Result<ShowResult> {
 		if self.is_reftable() {
+			if let Some(cap) = max_bytes {
+				let size = cli_text(self.root(), &["cat-file", "-s", spec])?
+					.trim()
+					.parse::<u64>()
+					.map_err(|err| Error::backend("git cat-file -s", err))?;
+				let truncated = size > cap as u64;
+				let bytes = super::cli::blob_prefix(
+					self.root(),
+					spec,
+					size.min(cap as u64) as usize,
+					truncated,
+				)?;
+				return Ok(ShowResult { bytes, truncated });
+			}
 			let text = cli_text(self.root(), &["show", spec])?;
-			return Ok(cap_bytes(text.into_bytes(), max_bytes));
+			return Ok(cap_bytes(text.into_bytes(), None));
 		}
 		let repo = self.gix()?;
 		let id = repo
 			.rev_parse_single(spec)
 			.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })?;
+		if let Some(cap) = max_bytes {
+			let header = repo
+				.find_header(id.detach())
+				.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })?;
+			if header.size() > cap as u64 {
+				let bytes = super::cli::blob_prefix(self.root(), spec, cap, true)?;
+				return Ok(ShowResult { bytes, truncated: true });
+			}
+		}
 		let object = id
 			.object()
 			.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })?;
-		Ok(cap_bytes(
-			{
-				let mut blob = object
-					.try_into_blob()
-					.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })?;
-				blob.take_data()
-			},
-			max_bytes,
-		))
+		let mut blob = object
+			.try_into_blob()
+			.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })?;
+		Ok(cap_bytes(blob.take_data(), max_bytes))
 	}
 
 	/// Resolve Git LFS's local object directory.

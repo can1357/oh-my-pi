@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Selective commit drafts capture large dirty files without loading their full contents into the OMP process, including unrelated build artifacts ([#20176](https://github.com/can1357/oh-my-pi/issues/20176)).
 - Automatic compaction moves past an oversized handoff request without calling the provider ([#20099](https://github.com/can1357/oh-my-pi/issues/20099)).
 - `wait()` in eval cells accepts a displayed subagent id, optionally as `agent://id`, so you can wait for an agent you only have the name of; ids that are not yours still report an unknown handle ([#20148](https://github.com/can1357/oh-my-pi/pull/20148) by [@Komzpa](https://github.com/Komzpa))
 - Fixed the startup thinking level coming from the first `--models`/`enabledModels` entry instead of the entry the session starts on, such as a remembered default that is not listed first, and replacing the level given with `--model` ([#20109](https://github.com/can1357/oh-my-pi/pull/20109) by [@taibenvenuti](https://github.com/taibenvenuti))

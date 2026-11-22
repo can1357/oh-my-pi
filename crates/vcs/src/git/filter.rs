@@ -121,6 +121,39 @@ impl super::GitRepo {
 	}
 }
 
+impl super::GitRepo {
+	/// Snapshot a regular worktree file as the blob `git add` would create.
+	/// The object is always written; only Git-form bytes at most
+	/// `max_text_bytes` are returned. Callers must exclude symlinks (which Git
+	/// stores as link targets, not the contents of their referents).
+	///
+	/// gix's EOL, ident, encoding, and combined external-filter pipelines
+	/// buffer whole files internally. Git's hash-object applies path-selected
+	/// clean filters in a subprocess instead, isolating that allocation from
+	/// the host; the object is then read back with a bounded capture.
+	pub fn capture_worktree_blob(
+		&self,
+		path: &str,
+		max_text_bytes: usize,
+	) -> Result<(String, Option<Vec<u8>>)> {
+		let absolute = self.root().join(path);
+		let args = vec![
+			"hash-object".to_owned(),
+			"-w".to_owned(),
+			format!("--path={path}"),
+			"--".to_owned(),
+			absolute.to_string_lossy().into_owned(),
+		];
+		let id = super::cli::run_sync(self.root(), &args, super::cli::COMMAND_TIMEOUT)?
+			.into_checked(&args)?
+			.stdout
+			.trim()
+			.to_owned();
+		let shown = self.show_blob(&id, Some(max_text_bytes))?;
+		Ok((id, (!shown.truncated).then_some(shown.bytes)))
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use std::{fs, process::Command};
@@ -153,5 +186,39 @@ mod tests {
 			])
 			.unwrap();
 		assert_eq!(converted, vec![b"one\ntwo\n".to_vec(), b"echo\n".to_vec(), b"keep\r\n".to_vec()]);
+	}
+
+	#[test]
+	fn capture_worktree_blob_keeps_git_form_and_persists_oversized_content() {
+		let temp = tempfile::tempdir().unwrap();
+		git(temp.path(), &["init", "-q", "-b", "main"]);
+		git(temp.path(), &["config", "core.autocrlf", "true"]);
+		fs::write(temp.path().join("large.txt"), b"one\r\ntwo\r\n").unwrap();
+		let repo = GitRepo::require(temp.path()).unwrap();
+		let (id, data) = repo.capture_worktree_blob("large.txt", 4).unwrap();
+		assert!(data.is_none());
+		let prefix = repo.show_blob(&id, Some(4)).unwrap();
+		assert_eq!(prefix.bytes, b"one\n");
+		assert!(prefix.truncated);
+		let staged = Command::new("git")
+			.arg("-C")
+			.arg(temp.path())
+			.args(["add", "large.txt"])
+			.status()
+			.unwrap();
+		assert!(staged.success());
+		let entry = Command::new("git")
+			.arg("-C")
+			.arg(temp.path())
+			.args(["ls-files", "--stage", "large.txt"])
+			.output()
+			.unwrap();
+		assert!(entry.status.success());
+		let expected = String::from_utf8(entry.stdout).unwrap();
+		assert_eq!(expected.split_whitespace().nth(1), Some(id.as_str()));
+		assert_eq!(repo.show_blob(&id, Some(8)).unwrap().bytes, b"one\ntwo\n");
+		let (again, data) = repo.capture_worktree_blob("large.txt", 8).unwrap();
+		assert_eq!(again, id);
+		assert_eq!(data.unwrap(), b"one\ntwo\n");
 	}
 }
