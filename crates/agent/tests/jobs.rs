@@ -2787,6 +2787,66 @@ async fn execution_reattach_backend_failure_does_not_write() {
 	assert_eq!(backend.counts.cancels.load(Ordering::SeqCst), 0);
 }
 
+/// Window 1: crash before `requested` commits. Reopen should find no job
+/// and the backend should never be contacted.
+#[tokio::test]
+async fn execution_no_node_no_start_on_restart() {
+	let temp = tempdir().expect("temporary session directory");
+	let path = temp.path().join("no-node.oms");
+	// Create a session but don't insert any execution job.
+	let session = Session::create(&path, ComponentRegistry::standard()).expect("create session");
+	// Simulate a crash by dropping without any execution node.
+	drop(session);
+
+	// Reopen after "restart".
+	let session = Session::open(&path, ComponentRegistry::standard()).expect("reopen session");
+	let board = JobBoard::new();
+	board.rebuild(&session);
+	// No execution jobs exist, so nothing to settle.
+	assert!(board.list().is_empty());
+	assert!(!board.has_finished_units());
+}
+
+/// Window 4: crash between backend acceptance and poll commit. The journal
+/// knows of the submission marker but not of acceptance, so restart settles
+/// `SubmissionUnknown` without starting again.
+#[tokio::test]
+async fn execution_t13_crash_between_acceptance_and_commit_is_submission_unknown_without_start() {
+	let temp = tempdir().expect("temporary session directory");
+	let path = temp.path().join("window4.oms");
+	let mut session = Session::create(&path, ComponentRegistry::standard()).expect("create session");
+	let handle = insert_requested_test_execution(&mut session);
+	mark_test_submission(&mut session, handle);
+	let board = JobBoard::new();
+	let (mut backend, events) = execution_test_backend(false);
+	// Set the journal path so the backend verifies the submission marker.
+	backend.journal = Some(path.clone());
+	attach_test_execution(&session, &board, handle, &backend).await;
+	// Backend accepts the work.
+	wait_for_test_acceptance(&board, &events).await;
+	// Simulate crash: drop the board before poll can commit the Accepted state.
+	drop(board);
+	drop(session);
+
+	// Reopen after "restart".
+	let mut session = Session::open(&path, ComponentRegistry::standard()).expect("reopen session");
+	let board = JobBoard::new();
+	board.rebuild(&session);
+	let record = board.poll(&mut session).expect("settle orphan").remove(0);
+	// The journal has the submission marker but not the Accepted commit,
+	// so the job settles SubmissionUnknown.
+	assert_eq!(record.status, "failed");
+	assert_eq!(record.execution_state, Some(omp_exec::ExecutionState::SubmissionUnknown));
+	assert_eq!(
+		record.execution_failure,
+		Some(omp_exec::ExecutionErrorKind::SubmissionUnknown)
+	);
+	assert_eq!(record.reattach_handle, None);
+	assert_eq!(record.error.as_deref(), Some(omp_agent::ORPHANED_EXECUTION_JOB));
+	// The backend started exactly once; no second start on restart.
+	assert_eq!(test_calls(&backend), (1, 0));
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn execution_failed_resume_patch_detaches_returned_run() {

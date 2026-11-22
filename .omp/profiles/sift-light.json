@@ -1,0 +1,8 @@
+{
+  "locale": "en",
+  "enforceSearch": "prefer",
+  "vectorSearchEnabled": true,
+  "semanticJudge": {
+    "enabled": false
+  }
+}

@@ -36,6 +36,9 @@ pub enum AdwRemoteError {
 	/// The shared composer failed.
 	#[error(transparent)]
 	Remote(#[from] RemoteError),
+	/// Remote execution gates are not satisfied (ADR 0047).
+	#[error("remote execution not accepted, set sv_exec_accepted = true after ADR 0040/0047 gates are satisfied")]
+	GatesNotSatisfied,
 }
 
 /// Execution placement policy; mirrors ADR 0040 Part C.3.
@@ -75,6 +78,14 @@ omp_con::var! {
 	/// acceptance (ADR 0040 Part C.3). Default off: automatic local rerun of
 	/// a heavy command on a swapping Mac brings back the load this removes.
 	pub static SV_EXEC_FALLBACK_LOCAL = sv_exec_fallback_local: bool {
+		default: false, flags: archive,
+	};
+	/// Gate for remote execution (ADR 0047). Must be explicitly set to true
+	/// after the owner accepts ADR 0040 Gaps 1-4 (A0), decides credential
+	/// containment (G3), and measures relief (G8). Default false: remote
+	/// backend composition is refused until the operator acknowledges the
+	/// gates are satisfied.
+	pub static SV_EXEC_ACCEPTED = sv_exec_accepted: bool {
 		default: false, flags: archive,
 	};
 }
@@ -126,6 +137,12 @@ impl ProductionAdwHost {
 		cwd: Option<&str>,
 		cancel: &CancellationToken,
 	) -> Result<super::PhaseResult, ProductionError> {
+		// Gate check (ADR 0047): refuse remote backend composition until the
+		// operator acknowledges that A0 (owner acceptance), G3 (credential
+		// containment), and G8 (measured relief) are satisfied.
+		if !SV_EXEC_ACCEPTED.get(&self.ctx) {
+			return Err(AdwRemoteError::GatesNotSatisfied.into());
+		}
 		let settings = ExecutionSettings::for_adw(&self.ctx)?;
 		let environment = self.environment().await?.clone();
 		let credential = settings
@@ -273,6 +290,13 @@ mod tests {
 	fn operator_policy_and_upload_lists_are_typed_at_the_boundary() {
 		assert_eq!("remote-only".parse::<AdwExecPolicy>(), Ok(AdwExecPolicy::RemoteOnly));
 		assert_eq!(config_list(Str::new_static(" .env , *.key, ")), [".env", "*.key"]);
+	}
+
+	#[test]
+	fn remote_execution_gate_default_is_not_accepted() {
+		// ADR 0047: remote execution must be explicitly accepted.
+		let ctx = Ctx::new();
+		assert!(!SV_EXEC_ACCEPTED.get(&ctx));
 	}
 
 	#[test]
