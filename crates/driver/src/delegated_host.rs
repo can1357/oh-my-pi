@@ -385,8 +385,10 @@ pub async fn run_delegated_turn<R: PermissionResolver>(
 ) -> Result<TurnReport, DelegatedHostError> {
 	match registry.get(executor_id) {
 		Some(ExecutorKind::Native) => {
-			// Native executor runs through run_child in production.rs,
-			// not through the delegated turn path.
+			// Native executor (ADR 0052 D5): the production host in production.rs
+			// intercepts executor id "native" before reaching this function, routing
+			// directly to run_child. If called directly (e.g. from tests), run
+			// through the native kernel path via the Executor trait.
 			Err(DelegatedHostError::UnknownExecutor { id: executor_id.clone() })
 		},
 		Some(ExecutorKind::Codex(executor)) => {
