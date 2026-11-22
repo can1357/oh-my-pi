@@ -125,16 +125,20 @@ interface RgbaPixels {
 	pixels: Uint8Array;
 }
 
+export type ImageContentInspection =
+	| { width: number; height: number; kind: "transparent" }
+	| { width: number; height: number; kind: "solid"; color: string }
+	| undefined;
+
 /**
- * `image`'s pixels when it decodes to RGBA. `Bun.Image` has no raw output, so this reads
- * its uncompressed PNG, whose rows it leaves unfiltered; `undefined` for RGB output (no
- * alpha) or any other layout.
+ * Read Bun.Image's unfiltered 8-bit RGB/RGBA PNG output as RGBA. Opaque RGB
+ * output gets alpha 255. Other layouts remain inconclusive rather than rejecting content.
  */
 async function readRgba(image: Bun.Image): Promise<RgbaPixels | undefined> {
 	const png = await image.png({ compressionLevel: 0 }).bytes();
 	let width = 0;
 	let height = 0;
-	let rgba8 = false;
+	let channels = 0;
 	const idat: Uint8Array[] = [];
 	for (let offset = 8; offset + 12 <= png.length; offset += 12 + readUint32BE(png, offset)) {
 		const type = String.fromCharCode(...png.subarray(offset + 4, offset + 8));
@@ -142,25 +146,84 @@ async function readRgba(image: Bun.Image): Promise<RgbaPixels | undefined> {
 		if (type === "IHDR") {
 			width = readUint32BE(data, 0);
 			height = readUint32BE(data, 4);
-			// 8-bit depth, RGBA, not interlaced.
-			rgba8 = data[8] === 8 && data[9] === 6 && data[12] === 0;
+			// 8-bit RGB or RGBA, not interlaced.
+			if (data[8] === 8 && data[12] === 0) channels = data[9] === 6 ? 4 : data[9] === 2 ? 3 : 0;
 		} else if (type === "IDAT") {
 			idat.push(data);
 		} else if (type === "IEND") {
 			break;
 		}
 	}
-	if (!rgba8) return undefined;
+	if (!channels) return undefined;
 	const raw = inflateSync(Buffer.concat(idat));
-	const stride = width * 4;
+	const stride = width * channels;
 	if (raw.length !== (stride + 1) * height) return undefined;
-	const pixels = new Uint8Array(stride * height);
+	const pixels = new Uint8Array(width * height * 4);
 	for (let y = 0; y < height; y++) {
 		const row = y * (stride + 1);
 		if (raw[row] !== 0) return undefined;
-		pixels.set(raw.subarray(row + 1, row + 1 + stride), y * stride);
+		if (channels === 4) {
+			pixels.set(raw.subarray(row + 1, row + 1 + stride), y * width * 4);
+		} else {
+			for (let x = 0; x < width; x++) {
+				const source = row + 1 + x * 3;
+				const target = (y * width + x) * 4;
+				pixels.set(raw.subarray(source, source + 3), target);
+				pixels[target + 3] = 255;
+			}
+		}
 	}
 	return { width, height, pixels };
+}
+
+/** GIF, WebP with an `ANIM` chunk, or APNG (`acTL` before the first `IDAT`). */
+function mayBeAnimated(bytes: Uint8Array): boolean {
+	const head = Buffer.from(bytes.subarray(0, 4096)).toString("latin1");
+	if (head.startsWith("GIF8")) return true;
+	if (head.startsWith("RIFF") && head.slice(8, 12) === "WEBP") return head.includes("ANIM");
+	const idat = head.indexOf("IDAT");
+	return head.startsWith("\x89PNG") && head.indexOf("acTL") !== -1 && (idat === -1 || head.indexOf("acTL") < idat);
+}
+
+/**
+ * Reject empty images only after checking every pixel; sparse content must survive.
+ * Accept the full-resolution RGBA allocation: downsampling can erase the only visible pixel.
+ */
+export async function inspectImageContent(bytes: Uint8Array): Promise<ImageContentInspection> {
+	// Decoding yields the first frame only; a later frame of an animation may hold the content.
+	if (mayBeAnimated(bytes)) return undefined;
+	try {
+		const decoded = await readRgba(new Bun.Image(bytes));
+		if (!decoded) return undefined;
+		const { width, height, pixels } = decoded;
+		let firstR = -1;
+		let firstG = -1;
+		let firstB = -1;
+		let firstA = -1;
+		let fullyTransparent = true;
+		let sameColor = true;
+		for (let pixel = 0; pixel < width * height; pixel++) {
+			const offset = pixel * 4;
+			const r = pixels[offset]!;
+			const g = pixels[offset + 1]!;
+			const b = pixels[offset + 2]!;
+			const a = pixels[offset + 3]!;
+			if (a !== 0) fullyTransparent = false;
+			if (firstA < 0) {
+				firstR = r;
+				firstG = g;
+				firstB = b;
+				firstA = a;
+			} else if (r !== firstR || g !== firstG || b !== firstB || a !== firstA) sameColor = false;
+			if (!fullyTransparent && !sameColor) return undefined;
+		}
+		if (fullyTransparent) return { width, height, kind: "transparent" };
+		if (!sameColor) return undefined;
+		const hex = [firstR, firstG, firstB].map(channel => channel.toString(16).padStart(2, "0")).join("");
+		return { width, height, kind: "solid", color: `#${hex}` };
+	} catch {
+		return undefined;
+	}
 }
 
 /**

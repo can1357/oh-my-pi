@@ -23,13 +23,11 @@ import * as path from "node:path";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
-// A real, decodable 1x1 PNG standing in for the copied screenshot's bytes.
-const FILE_PNG = Buffer.from(
-	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
-	"base64",
-);
+// A nonblank screenshot, distinct from the co-advertised icon.
+const FILE_PNG = encodeRawPng(new Uint8Array([0, 0, 0, 255, 255, 255, 255, 255]), 2, 1, 4);
 
 // A distinct payload standing in for Finder's generated file-icon bitmap that
 // `arboard::get_image` returns. Byte-different from FILE_PNG so the test can

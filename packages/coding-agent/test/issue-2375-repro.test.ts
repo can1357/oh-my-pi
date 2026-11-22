@@ -21,6 +21,7 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { chipLabel } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
+import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { $which } from "@oh-my-pi/pi-utils";
 
@@ -32,11 +33,8 @@ const EMPTY_CLIPBOARD = {
 	readText: async () => "",
 };
 
-// Minimal 1x1 PNG used to stand in for a Win+Shift+S bitmap on the clipboard.
-const ONE_PX_PNG = Buffer.from(
-	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
-	"base64",
-);
+// Two colors keep this screenshot fixture distinct from a rejected empty bitmap.
+const SCREENSHOT_PNG = encodeRawPng(new Uint8Array([0, 0, 0, 255, 255, 255, 255, 255]), 2, 1, 4);
 const hasFfmpeg = Boolean($which("ffmpeg") && $which("ffprobe"));
 
 function createContext() {
@@ -150,7 +148,7 @@ describe("InputController.handleImagePathPaste (issue #2375)", () => {
 		// on "Image not found".
 		const { ctx, spies } = createContext();
 		const controller = new InputController(ctx, {
-			readImage: async () => ({ data: ONE_PX_PNG, mimeType: "image/png" }),
+			readImage: async () => ({ data: SCREENSHOT_PNG, mimeType: "image/png" }),
 			readText: async () => "",
 		});
 		const stale =
@@ -171,7 +169,7 @@ describe("InputController.handleImagePathPaste (issue #2375)", () => {
 		// over a degraded text paste.
 		const { ctx, spies } = createContext();
 		const controller = new InputController(ctx, {
-			readImage: async () => ({ data: ONE_PX_PNG, mimeType: "image/png" }),
+			readImage: async () => ({ data: SCREENSHOT_PNG, mimeType: "image/png" }),
 			readText: async () => "",
 		});
 		// This test file itself: resolvable, readable, but not an image.

@@ -1,3 +1,4 @@
+import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
@@ -312,8 +313,8 @@ async function createContext() {
 	};
 }
 
-// 1x1 PNG.
-const TINY_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD3sAAAAASUVORK5CYII=";
+// Nonblank screenshot; solid single-pixel images are rejected at the paste boundary.
+const TINY_PNG = encodeRawPng(new Uint8Array([0, 0, 0, 255, 255, 255, 255, 255]), 2, 1, 4).toString("base64");
 
 const PNG_CLIPBOARD = {
 	readImage: async () => ({ data: Buffer.from(TINY_PNG, "base64"), mimeType: "image/png" }),

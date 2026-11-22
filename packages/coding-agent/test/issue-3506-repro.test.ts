@@ -24,12 +24,11 @@ import * as path from "node:path";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
-const ONE_PX_PNG = Buffer.from(
-	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
-	"base64",
-);
+// Two colors keep this screenshot fixture distinct from a rejected empty bitmap.
+const SCREENSHOT_PNG = encodeRawPng(new Uint8Array([0, 0, 0, 255, 255, 255, 255, 255]), 2, 1, 4);
 
 function createCtx() {
 	const pasteText = vi.fn();
@@ -68,7 +67,7 @@ describe("InputController.handleImagePaste (issue #3506)", () => {
 	beforeEach(async () => {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "issue-3506-"));
 		imgPath = path.join(tmpDir, "screenshot.png");
-		await fs.writeFile(imgPath, ONE_PX_PNG);
+		await fs.writeFile(imgPath, SCREENSHOT_PNG);
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true, overrides: { "images.autoResize": false } });
 	});
@@ -122,7 +121,7 @@ describe("InputController.handleImagePaste (issue #3506)", () => {
 		// candidate before splitting.
 		const { ctx, spies } = createCtx();
 		const spaced = path.join(tmpDir, "Screenshot 2026-06-25 at 1.23.45 PM.png");
-		await fs.writeFile(spaced, ONE_PX_PNG);
+		await fs.writeFile(spaced, SCREENSHOT_PNG);
 		const controller = new InputController(ctx, {
 			readImage: async () => null,
 			readText: async () => spaced,
@@ -169,8 +168,8 @@ describe("InputController.handleImagePaste (issue #3506)", () => {
 		const { ctx, spies } = createCtx();
 		const secondImg = path.join(tmpDir, "second.jpg");
 		const thirdImg = path.join(tmpDir, "third.png");
-		await fs.writeFile(secondImg, ONE_PX_PNG);
-		await fs.writeFile(thirdImg, ONE_PX_PNG);
+		await fs.writeFile(secondImg, SCREENSHOT_PNG);
+		await fs.writeFile(thirdImg, SCREENSHOT_PNG);
 		const readMacFileUrls = vi.fn(async () => [imgPath, secondImg, thirdImg]);
 		const controller = new InputController(ctx, {
 			readImage: async () => null,
