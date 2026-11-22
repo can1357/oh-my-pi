@@ -30,11 +30,21 @@ import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { resolveBareVariantSelector, resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
-import { collapseVariantId, stripThinkingVariantSuffix } from "@oh-my-pi/pi-catalog/compat/taxonomy";
+import {
+	collapseVariantId,
+	discoveryVocabulary,
+	stripThinkingVariantSuffix,
+} from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
-import { type GeneratedProvider, getBundledModels, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import {
+	type GeneratedProvider,
+	getBundledModels,
+	getUpstreamPin,
+	modelsAreEqual,
+	routedModelsAreEqual,
+} from "@oh-my-pi/pi-catalog/models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
 import { fuzzyMatch } from "@oh-my-pi/pi-tui";
@@ -185,30 +195,17 @@ export function formatModelString(model: Pick<Model<Api>, "provider" | "id">): s
 	return `${model.provider}/${model.id}`;
 }
 
-function getSingleRoutingOnly(routing: unknown): string | undefined {
-	if (!routing || typeof routing !== "object" || !("only" in routing) || !Array.isArray(routing.only)) {
-		return undefined;
-	}
-	if (routing.only.length !== 1) return undefined;
-	const upstream = routing.only[0];
-	return typeof upstream === "string" && upstream ? upstream : undefined;
-}
-
-function getSingleUpstreamRoute(model: Model<Api>): string | undefined {
-	const compat = model.compat;
-	if (!compat || typeof compat !== "object") return undefined;
-	if (modelMatchesHost(model, "vercelAIGateway") && "vercelGatewayRouting" in compat) {
-		return getSingleRoutingOnly(compat.vercelGatewayRouting);
-	}
-	if (modelMatchesHost(model, "openrouter") && "openRouterRouting" in compat) {
-		return getSingleRoutingOnly(compat.openRouterRouting);
-	}
-	return undefined;
+/** A pin can occupy its unpinned scope slot, but never another pin's slot. */
+export function findScopedModelIndex(scoped: ReadonlyArray<{ model: Model }>, model: Model | undefined): number {
+	if (!model) return -1;
+	const exact = scoped.findIndex(entry => routedModelsAreEqual(entry.model, model));
+	if (exact !== -1) return exact;
+	return scoped.findIndex(entry => modelsAreEqual(entry.model, model) && getUpstreamPin(entry.model) === undefined);
 }
 
 export function formatModelStringWithRouting(model: Model<Api>): string {
 	const selector = formatModelString(model);
-	const upstream = getSingleUpstreamRoute(model);
+	const upstream = getUpstreamPin(model);
 	return upstream ? `${selector}@${upstream}` : selector;
 }
 
@@ -244,6 +241,8 @@ function getOpenRouterRouteSuffix(modelId: string): { baseId: string; suffix: st
 		return undefined;
 	}
 
+	// `model@rev:free` can derive from `model@rev`; `model:free@host` must resolve its pin separately.
+	if (suffix.includes("@") && splitUpstreamRouting(modelId)) return undefined;
 	return { baseId: modelId.slice(0, colonIdx), suffix };
 }
 
@@ -360,6 +359,7 @@ function supportsUpstreamRouting(model: Model<Api>): boolean {
 
 /** Pin a resolved aggregator model to a single upstream provider via its compat routing block. */
 function applyUpstreamRouting(model: Model<Api>, upstream: string): Model<Api> {
+	if (getUpstreamPin(model) === upstream) return model;
 	const aggregatorModel = model as Model<"openai-completions">;
 	const routing = { only: [upstream] };
 	return buildModel({
@@ -368,6 +368,31 @@ function applyUpstreamRouting(model: Model<Api>, upstream: string): Model<Api> {
 			? { ...aggregatorModel.compatConfig, vercelGatewayRouting: routing }
 			: { ...aggregatorModel.compatConfig, openRouterRouting: routing },
 	} as ModelSpec<Api>);
+}
+
+const kAllowListRoster = Symbol("model-resolver.allowListRoster");
+type AllowList = Model<Api>[] & { [kAllowListRoster]?: readonly Model<Api>[] };
+
+/** Mark `allowed` as an allow-list cut from `roster`, so matching enforces its pins and variants. */
+function markAllowList(allowed: Model<Api>[], roster: readonly Model<Api>[]): Model<Api>[] {
+	(allowed as AllowList)[kAllowListRoster] = roster;
+	return allowed;
+}
+
+/** The roster `models` was cut from, or undefined for an open pool. */
+function allowListRoster(models: readonly Model<Api>[]): readonly Model<Api>[] | undefined {
+	return (models as AllowList)[kAllowListRoster];
+}
+
+/** An explicit session or startup scope as an allow-list over `roster` (the models the session may reach). */
+export function scopeAllowList(
+	scoped: ReadonlyArray<{ model: Model<Api> }>,
+	roster: readonly Model<Api>[],
+): Model<Api>[] {
+	return markAllowList(
+		scoped.map(entry => entry.model),
+		roster,
+	);
 }
 
 const kProviderModelIndex = Symbol("model-resolver.providerIndex");
@@ -719,23 +744,29 @@ function isAlias(id: string): boolean {
 }
 
 function includeSyntheticAllowedModels(available: Model<Api>[], allowedModels: Iterable<Model<Api>>): Model<Api>[] {
-	const allowedByKey = new Map<string, Model<Api>>();
+	const allowedByKey = new Map<string, Model<Api>[]>();
 	for (const model of allowedModels) {
 		const key = formatModelString(model);
-		if (!allowedByKey.has(key)) {
-			allowedByKey.set(key, model);
+		const routes = allowedByKey.get(key);
+		if (!routes) {
+			allowedByKey.set(key, [model]);
+		} else if (!routes.some(route => routedModelsAreEqual(route, model))) {
+			routes.push(model);
 		}
 	}
 	if (allowedByKey.size === 0) return [];
 
 	const result: Model<Api>[] = [];
 	for (const model of available) {
-		if (allowedByKey.delete(formatModelString(model))) {
-			result.push(model);
+		const key = formatModelString(model);
+		const allowed = allowedByKey.get(key);
+		if (allowed) {
+			result.push(...allowed);
+			allowedByKey.delete(key);
 		}
 	}
 
-	result.push(...allowedByKey.values());
+	for (const routes of allowedByKey.values()) result.push(...routes);
 	return result;
 }
 
@@ -824,10 +855,10 @@ function matchModel(
 	modelPattern: string,
 	availableModels: Model<Api>[],
 	context: ModelPreferenceContext,
-	options?: { exactOnly?: boolean },
+	options?: { exactOnly?: boolean; poolMembersOnly?: boolean; literalSuffixOnly?: boolean },
 ): Model<Api> | undefined {
 	const exactRefMatch = findExactModelReferenceMatch(modelPattern, availableModels);
-	if (exactRefMatch) {
+	if (exactRefMatch && (!options?.poolMembersOnly || availableModels.includes(exactRefMatch))) {
 		return exactRefMatch;
 	}
 
@@ -848,7 +879,7 @@ function matchModel(
 	}
 
 	const bedrockInferenceProfile = resolveBedrockInferenceProfileModelId(modelPattern, availableModels);
-	if (bedrockInferenceProfile) {
+	if (bedrockInferenceProfile && (!options?.poolMembersOnly || availableModels.includes(bedrockInferenceProfile))) {
 		return bedrockInferenceProfile;
 	}
 
@@ -899,9 +930,12 @@ function matchModel(
 	}
 
 	// No exact match - fall back to partial matching
-	const matches = availableModels.filter(
-		m => m.id.toLowerCase().includes(lowerPattern) || m.name?.toLowerCase().includes(lowerPattern),
-	);
+	const scopedTag = options?.poolMembersOnly && lowerPattern.includes(":");
+	const matches = availableModels.filter(m => {
+		const id = m.id.toLowerCase();
+		if (options?.literalSuffixOnly || (scopedTag && supportsUpstreamRouting(m))) return id.endsWith(lowerPattern);
+		return id.includes(lowerPattern) || m.name?.toLowerCase().includes(lowerPattern);
+	});
 
 	if (matches.length === 0) {
 		return undefined;
@@ -978,6 +1012,49 @@ export interface ParsedModelResult {
 }
 
 /**
+ * Whether dropping an invalid suffix would let an allow-list match something it did not allow:
+ * a base model whose registered variant (`base:routeSuffix`) the list excluded, or a fuzzy base
+ * match whose ID adds a wire suffix the selector never asked for.
+ */
+function fallbackWidensAllowList(
+	base: Model<Api>,
+	prefix: string,
+	routeSuffix: string | undefined,
+	roster: readonly Model<Api>[],
+): boolean {
+	if (routeSuffix !== undefined) {
+		const variantId = `${base.id.toLowerCase()}:${routeSuffix}`;
+		// The roster is exact; find() can synthesize an OpenRouter variant.
+		if (roster.some(m => m.provider === base.provider && m.id.toLowerCase() === variantId)) return true;
+	}
+	const idColon = base.id.indexOf(":");
+	if (idColon === -1 || !supportsUpstreamRouting(base)) return false;
+	const idSuffix = base.id.slice(idColon).toLowerCase();
+	const prefixColon = prefix.indexOf(":");
+	const requestedSuffix = prefixColon === -1 ? "" : prefix.slice(prefixColon).toLowerCase();
+	return requestedSuffix !== idSuffix && !requestedSuffix.startsWith(`${idSuffix}:`);
+}
+
+/*
+ * Matcher outcomes by selector shape. An open pool is the full catalog; an allow-list is a pool
+ * marked by filterAvailableModelsByEnabledPatterns, resolveAllowedModels or scopeAllowList.
+ *
+ *  selector                 open pool                                 allow-list
+ *  -----------------------  ----------------------------------------  ----------------------------------------
+ *  provider/id or bare id   that model; OpenRouter variants and       only a listed model
+ *                           Bedrock profiles may be synthesized
+ *  id:level                 literal ID first, else id + thinking      same, within the list
+ *  id:variant (:free, ...)  literal ID, else a synthesized variant    a listed ID ending in :variant, else none
+ *                           or the base + warning
+ *  id:other                 base + "invalid thinking level" warning   same, unless the provider registers an
+ *                                                                     excluded id:other or the base match
+ *                                                                     adds a wire suffix
+ *  id@upstream              literal ID first, else id pinned there    literal ID first, else a listed id
+ *                                                                     already pinned there or a listed
+ *                                                                     unpinned id; never re-pinned
+ *  fuzzy a:b, routable id   substring of the ID or display name       ID must end with a:b
+ */
+/**
  * Parse a pattern to extract model and thinking level.
  * Handles models with colons in their IDs (e.g., OpenRouter's :exacto suffix).
  *
@@ -995,8 +1072,10 @@ function parseModelPatternWithContext(
 	context: ModelPreferenceContext,
 	options?: { allowInvalidThinkingSelectorFallback?: boolean },
 ): ParsedModelResult {
-	// Exact match on the full pattern first (no fuzzy): a literal id that
-	const exactMatch = matchModel(pattern, availableModels, context, { exactOnly: true });
+	// A literal model ID takes precedence over a thinking suffix.
+	const roster = allowListRoster(availableModels);
+	const poolMembersOnly = roster !== undefined;
+	const exactMatch = matchModel(pattern, availableModels, context, { exactOnly: true, poolMembersOnly });
 	if (exactMatch) {
 		const thinkingLevel = inferWireRouteThinkingLevel(pattern, exactMatch);
 		return {
@@ -1012,7 +1091,12 @@ function parseModelPatternWithContext(
 	// fuzzy results (e.g. `kimi-for-coding-highspeed`) cannot absorb the suffix.
 	const { base, level } = splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS);
 	if (level) {
-		const literalSuffixMatch = matchModel(pattern, availableModels, context);
+		const literalSuffixMatch = matchModel(
+			pattern,
+			availableModels,
+			context,
+			poolMembersOnly ? { poolMembersOnly, literalSuffixOnly: true } : undefined,
+		);
 		if (literalSuffixMatch?.id.toLowerCase().endsWith(`:${level}`)) {
 			return {
 				model: literalSuffixMatch,
@@ -1041,14 +1125,18 @@ function parseModelPatternWithContext(
 		return result;
 	}
 
-	// No valid thinking suffix: fall back to fuzzy/substring matching on the
-	// whole pattern.
-	const fallbackMatch = matchModel(pattern, availableModels, context);
+	// Known wire suffixes must match the actual ID, not the display name.
+	const routeSuffix = poolMembersOnly ? getOpenRouterRouteSuffix(pattern)?.suffix.toLowerCase() : undefined;
+	const knownRouteSuffix = routeSuffix !== undefined && discoveryVocabulary().trailingMarkers.includes(routeSuffix);
+	const lastColonIndex = pattern.lastIndexOf(":");
+	const fallbackMatch = matchModel(pattern, availableModels, context, {
+		poolMembersOnly,
+		literalSuffixOnly: knownRouteSuffix,
+	});
 	if (fallbackMatch) {
 		return { model: fallbackMatch, thinkingLevel: undefined, warning: undefined, explicitThinkingLevel: false };
 	}
 
-	const lastColonIndex = pattern.lastIndexOf(":");
 	if (lastColonIndex === -1) {
 		// No colons, pattern simply doesn't match any model
 		return { model: undefined, thinkingLevel: undefined, warning: undefined, explicitThinkingLevel: false };
@@ -1057,13 +1145,16 @@ function parseModelPatternWithContext(
 	const suffix = pattern.substring(lastColonIndex + 1);
 
 	const allowFallback = options?.allowInvalidThinkingSelectorFallback ?? true;
-	if (!allowFallback) {
+	if (!allowFallback || knownRouteSuffix) {
 		return { model: undefined, thinkingLevel: undefined, warning: undefined, explicitThinkingLevel: false };
 	}
 
 	// Invalid suffix - recurse on prefix and warn
 	const result = parseModelPatternWithContext(prefix, availableModels, context, options);
 	if (result.model) {
+		if (roster && fallbackWidensAllowList(result.model, prefix, routeSuffix, roster)) {
+			return { model: undefined, warning: undefined, explicitThinkingLevel: false };
+		}
 		return {
 			model: result.model,
 			thinkingLevel: undefined,
@@ -1072,6 +1163,35 @@ function parseModelPatternWithContext(
 		};
 	}
 	return result;
+}
+
+function matchScopedUpstream(
+	routing: { base: string; upstream: string },
+	availableModels: Model<Api>[],
+	roster: readonly Model<Api>[],
+	context: ModelPreferenceContext,
+): ParsedModelResult {
+	// Keep conflicting IDs in contention so a pin cannot change which model wins.
+	const byIdentity = new Map<string, Model<Api>>();
+	const rank = (model: Model<Api>) => {
+		const pin = getUpstreamPin(model);
+		return pin === routing.upstream ? 2 : pin === undefined ? 1 : 0;
+	};
+	for (const model of availableModels) {
+		const key = formatModelString(model);
+		const existing = byIdentity.get(key);
+		if (!existing || rank(model) > rank(existing)) byIdentity.set(key, model);
+	}
+	const candidates =
+		byIdentity.size === availableModels.length ? availableModels : markAllowList([...byIdentity.values()], roster);
+	const result = parseModelPatternWithContext(routing.base, candidates, context, {
+		allowInvalidThinkingSelectorFallback: false,
+	});
+	const model = result.model;
+	if (!model || !supportsUpstreamRouting(model) || rank(model) === 0) {
+		return { model: undefined, warning: undefined, explicitThinkingLevel: false };
+	}
+	return { ...result, model: applyUpstreamRouting(model, routing.upstream), upstream: routing.upstream };
 }
 
 /** Match a single pattern with a pre-built preference context (direct match plus
@@ -1084,15 +1204,17 @@ function matchPatternWithContext(
 	options?: { allowInvalidThinkingSelectorFallback?: boolean },
 ): ParsedModelResult {
 	const direct = parseModelPatternWithContext(pattern, availableModels, context, options);
-	if (direct.model) return direct;
+	if (direct.model && !direct.warning) {
+		return direct;
+	}
 
-	// No direct match: a trailing `@upstream` may be a provider-routing selector.
-	// Only honor it when the base resolves to an aggregator model (OpenRouter /
-	// Vercel Gateway); otherwise `@` stays part of the id and `direct` stands.
+	// A valid pin beats a match that discarded an invalid thinking suffix, but never a literal match.
 	const routing = splitUpstreamRouting(pattern);
 	if (routing) {
+		const roster = allowListRoster(availableModels);
+		if (roster) return matchScopedUpstream(routing, availableModels, roster, context);
 		const routed = parseModelPatternWithContext(routing.base, availableModels, context, options);
-		if (routed.model && supportsUpstreamRouting(routed.model)) {
+		if (routed.model && supportsUpstreamRouting(routed.model) && (!direct.model || !routed.warning)) {
 			return { ...routed, model: applyUpstreamRouting(routed.model, routing.upstream), upstream: routing.upstream };
 		}
 	}
@@ -1511,6 +1633,47 @@ export interface ResolvedModelRoleValue {
 	warning: string | undefined;
 }
 
+function toResolvedRoleValue(
+	model: Model<Api>,
+	parsed: ParsedModelResult,
+	matchedPatternIndex: number,
+): ResolvedModelRoleValue {
+	return {
+		model,
+		matchedPatternIndex,
+		thinkingLevel: parsed.explicitThinkingLevel
+			? parsed.thinkingLevel === AUTO_THINKING
+				? AUTO_THINKING
+				: (resolveThinkingLevelForModel(model, parsed.thinkingLevel) ?? parsed.thinkingLevel)
+			: parsed.thinkingLevel,
+		explicitThinkingLevel: parsed.explicitThinkingLevel,
+		warning: parsed.warning,
+	};
+}
+
+/**
+ * Role cycling's implicit `default` slot: the active model itself. Resolved as a configured
+ * selector but without the `@upstream` fallback, so a literal `@` stays part of the ID and a
+ * spelling alias of a literal `@` ID cannot replace the pin; the active model's own pin is then
+ * re-applied. Unresolved when the resolved model cannot carry that pin.
+ */
+export function resolveImplicitDefaultRole(
+	model: Model<Api>,
+	availableModels: Model<Api>[],
+	matchPreferences?: ModelMatchPreferences,
+): ResolvedModelRoleValue {
+	const parsed = parseModelPatternWithContext(
+		formatModelString(model),
+		availableModels,
+		buildPreferenceContext(availableModels, matchPreferences),
+	);
+	const pin = getUpstreamPin(model);
+	if (!parsed.model || (pin && !supportsUpstreamRouting(parsed.model))) {
+		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: parsed.warning };
+	}
+	return toResolvedRoleValue(pin ? applyUpstreamRouting(parsed.model, pin) : parsed.model, parsed, 0);
+}
+
 export function resolveModelRoleValue(
 	roleValue: string | undefined,
 	availableModels: Model<Api>[],
@@ -1539,17 +1702,7 @@ export function resolveModelRoleValue(
 	for (const [patternIndex, effectivePattern] of effectivePatterns.entries()) {
 		const resolved = matchPatternWithContext(effectivePattern, availableModels, preferenceContext);
 		if (resolved.model) {
-			return {
-				model: resolved.model,
-				matchedPatternIndex: patternIndex,
-				thinkingLevel: resolved.explicitThinkingLevel
-					? resolved.thinkingLevel === AUTO_THINKING
-						? AUTO_THINKING
-						: (resolveThinkingLevelForModel(resolved.model, resolved.thinkingLevel) ?? resolved.thinkingLevel)
-					: resolved.thinkingLevel,
-				explicitThinkingLevel: resolved.explicitThinkingLevel,
-				warning: resolved.warning,
-			};
+			return toResolvedRoleValue(resolved.model, resolved, patternIndex);
 		}
 		if (!warning && resolved.warning) {
 			warning = resolved.warning;
@@ -1783,7 +1936,7 @@ export function disabledProviderIds(settings?: Settings): ReadonlySet<string> {
 	return new Set(settings ? cfgDisabledProviders.get(settings) : undefined);
 }
 
-function parseSessionModelSelector(modelRegistry: ModelRegistry, selector: string) {
+function parseSessionModelSelector(modelRegistry: Pick<ModelRegistry, "find">, selector: string) {
 	return parseModelString(selector, {
 		...MAX_THINKING_SUFFIX_OPTIONS,
 		isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
@@ -1791,10 +1944,43 @@ function parseSessionModelSelector(modelRegistry: ModelRegistry, selector: strin
 }
 
 /**
- * Resolve a saved session model selector (`provider/id`, optionally with a
- * thinking suffix) to a registered model whose provider is enabled and has
- * credentials configured. Startup resume and runtime session switches share
- * this lookup, so both restore the same models.
+ * Exact registry lookup for a provider-qualified selector, including its pin and thinking level.
+ *
+ * Journal entries resolve like configured selectors, so a registered literal ID wins over an
+ * `@upstream` reading: a routed `x` pinned to `host` journals as `x@host` and restores as a
+ * registered literal `x@host` if one exists. That needs an upstream slug equal to a literal ID's
+ * `@` suffix; retry-fallback entries already journal configured selectors this way.
+ */
+export function resolveRoutedModelSelector(
+	modelRegistry: Pick<ModelRegistry, "find">,
+	selector: string,
+): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
+	const parsed = parseSessionModelSelector(modelRegistry, selector);
+	if (!parsed) return undefined;
+	const literal = modelRegistry.find(parsed.provider, parsed.id);
+	if (literal) return { model: literal, thinkingLevel: parsed.thinkingLevel };
+
+	const routing = splitUpstreamRouting(parsed.id);
+	if (!routing) return undefined;
+	let base = modelRegistry.find(parsed.provider, routing.base);
+	let thinkingLevel = parsed.thinkingLevel;
+	if (!base) {
+		// Older selectors put the pin before a literal suffix (`model@host:max`) or after the effort.
+		const original = splitUpstreamRouting(selector);
+		const unpinned = original && parseSessionModelSelector(modelRegistry, original.base);
+		if (!unpinned) return undefined;
+		base = modelRegistry.find(unpinned.provider, unpinned.id);
+		thinkingLevel = unpinned.thinkingLevel;
+	}
+	if (!base || !supportsUpstreamRouting(base)) return undefined;
+	return { model: applyUpstreamRouting(base, routing.upstream), thinkingLevel };
+}
+
+/**
+ * Resolve a saved session model selector (`provider/id`, optionally with an
+ * upstream route and thinking suffix) to a registered model whose provider is
+ * enabled and has credentials configured. Startup resume and runtime session
+ * switches share this lookup, so both restore the same models.
  *
  * Uses the side-effect-free `hasConfiguredAuth` probe: it refreshes no OAuth
  * tokens and runs no `!command` keys, which would stall a restore on the network.
@@ -1803,11 +1989,8 @@ export function resolveSessionModelSelector(
 	modelRegistry: ModelRegistry,
 	selector: string,
 ): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
-	const parsed = parseSessionModelSelector(modelRegistry, selector);
-	if (!parsed) return undefined;
-	const model = modelRegistry.find(parsed.provider, parsed.id);
-	if (!model || !modelRegistry.hasConfiguredAuth(model)) return undefined;
-	return { model, thinkingLevel: parsed.thinkingLevel };
+	const resolved = resolveRoutedModelSelector(modelRegistry, selector);
+	return resolved && modelRegistry.hasConfiguredAuth(resolved.model) ? resolved : undefined;
 }
 
 /**
@@ -1984,7 +2167,7 @@ export async function resolveModelScope(
 	const context = buildPreferenceContext(availableModels, preferences);
 	const scopedModels: ScopedModel[] = [];
 	const addScopedModel = (model: Model<Api>, thinkingLevel: ThinkingLevel | undefined, explicit: boolean) => {
-		if (scopedModels.some(sm => modelsAreEqual(sm.model, model))) return;
+		if (scopedModels.some(sm => routedModelsAreEqual(sm.model, model))) return;
 		scopedModels.push({
 			model,
 			thinkingLevel: explicit
@@ -2051,7 +2234,7 @@ export async function resolveModelScope(
 			continue;
 		}
 
-		const { model, thinkingLevel, warning, explicitThinkingLevel } = parseModelPatternWithContext(
+		const { model, thinkingLevel, warning, explicitThinkingLevel } = matchPatternWithContext(
 			pattern,
 			availableModels,
 			context,
@@ -2104,9 +2287,12 @@ export async function resolveAllowedModels(
 	if (scoped.length === 0) {
 		return [];
 	}
-	return includeSyntheticAllowedModels(
+	return markAllowList(
+		includeSyntheticAllowedModels(
+			available,
+			scoped.map(entry => entry.model),
+		),
 		available,
-		scoped.map(entry => entry.model),
 	);
 }
 
@@ -2154,13 +2340,13 @@ export function filterAvailableModelsByEnabledPatterns(
 			continue;
 		}
 
-		const { model } = parseModelPatternWithContext(pattern, available, context);
+		const { model } = matchPatternWithContext(pattern, available, context);
 		if (model) {
 			addAllowed(model);
 		}
 	}
 
-	return includeSyntheticAllowedModels(available, allowedModels);
+	return markAllowList(includeSyntheticAllowedModels(available, allowedModels), available);
 }
 function findExactCliModel(
 	selector: string,

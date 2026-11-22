@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { type Api, type FetchImpl, type Model, type OAuthAccess, streamSimple } from "@oh-my-pi/pi-ai";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { type DryBalanceModelRegistry, runDryBalanceCommand } from "@oh-my-pi/pi-coding-agent/cli/dry-balance-cli";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 
@@ -48,6 +49,45 @@ test("dry-balance resolves configured bare role names", async () => {
 
 	expect(summary.model).toBe("acme/balance-model");
 	expect(summary.success.total).toBe(1);
+});
+
+const openRouterModel = "openrouter/z-ai/glm-4.7";
+test.each([
+	["conflicting pin", [`${openRouterModel}@cerebras`], `${openRouterModel}@sambanova`, "acme/balance-model"],
+	["unrestricted pin", [], `${openRouterModel}@sambanova`, openRouterModel],
+	["excluded custom variant", [openRouterModel], `${openRouterModel}:customtier`, "acme/balance-model"],
+] as const)("dry-balance resolves a %s with a legacy registry", async (_case, enabled, selector, expected) => {
+	const fallback = fakeModel("acme", "balance-model");
+	const routed = getBundledModel("openrouter", "z-ai/glm-4.7") as Model<Api>;
+	const models = [fallback, routed, { ...routed, id: `${routed.id}:customtier` }];
+	const registry: DryBalanceModelRegistry = {
+		authStorage: {
+			oauth: {
+				access: async () => ({ accessToken: "test-token", email: "test@example.com" }) as unknown as OAuthAccess,
+				accessAll: async () => [],
+				accessById: async () => undefined,
+			},
+		},
+		getAll: () => models,
+		getAvailable: () => models,
+		getApiKey: async () => "test-token",
+	};
+	const settings = Settings.isolated({
+		enabledModels: enabled.length ? ["acme/balance-model", ...enabled] : [],
+		modelRoles: { default: selector },
+	});
+
+	const summary = await runDryBalanceCommand(
+		{ flags: { count: 1, json: true } },
+		{
+			createRuntime: async () => ({ modelRegistry: registry, settings }),
+			writeStdout: () => {},
+			writeStderr: () => {},
+			setExitCode: () => {},
+		},
+	);
+
+	expect(summary.model).toBe(expected);
 });
 
 test("dry-balance samples leave no session pins in the credential store", async () => {

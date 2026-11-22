@@ -17,7 +17,7 @@ import { AUTO_THINKING, type ConfiguredThinkingLevel, parseConfiguredThinkingLev
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
 import { cfgDefaultThinkingLevel } from "../session/settings";
-import { pickDefaultAvailableModel, resolveModelRoleValue } from "./model-resolver";
+import { pickDefaultAvailableModel, resolveModelRoleValue, scopeAllowList } from "./model-resolver";
 import { cfgModelPresets, cfgModelRoleStorage, type ModelPreset } from "./model-settings";
 import type { Settings, SettingProvenance } from "./settings";
 
@@ -211,8 +211,10 @@ export type ModelPresetSession = Pick<
 >;
 
 function presetCandidates(session: ModelPresetSession): Model[] {
-	const scoped = session.scopedModels.map(entry => entry.model);
-	return scoped.length > 0 ? scoped : session.getAvailableModels();
+	const scoped = session.scopedModels;
+	return scoped.length > 0
+		? scopeAllowList(scoped, session.modelRegistry.getAvailable())
+		: session.getAvailableModels();
 }
 
 function errorMessage(error: unknown): string {
