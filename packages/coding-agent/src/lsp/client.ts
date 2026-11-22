@@ -872,16 +872,24 @@ function settleProjectLoadWhenQuiet(client: LspClient): void {
 }
 
 /**
- * How long a server may stay silent after `initialized` (or a folder add) before its
- * project load counts as done. Servers that report loads begin `$/progress` almost at
- * once (measured: gopls 0 ms, rust-analyzer 14 ms, `tsc --lsp` ~270 ms after its first
- * open). pyright, ty, ruff, and typescript-language-server never report it, so without
- * this every first project-aware wait on them ran into the 15 s fallback below, pushing
- * the first edit's diagnostics past its inline budget and timing out `lsp diagnostics`.
+ * How long a server may stay silent after its first opened document (or a folder add)
+ * before its project load counts as done. Servers that report loads begin `$/progress`
+ * almost at once after that trigger (measured: gopls 0 ms, rust-analyzer 14 ms,
+ * `tsc --lsp` ~270 ms after its first open). pyright, ty, ruff, and
+ * typescript-language-server never report it, so without this every first project-aware
+ * wait on them ran into the 15 s fallback below, pushing the first edit's diagnostics
+ * past its inline budget and timing out `lsp diagnostics`.
+ *
+ * The window deliberately does not start at `initialized`: warmed-up clients are
+ * initialized long before the first tool call, and servers such as `tsc --lsp` and
+ * clangd only begin loading once a file is open, so an `initialized`-anchored window
+ * would end their load before it started.
  */
 const PROJECT_LOAD_NO_PROGRESS_MS = 2_000;
 /** Clients that have begun at least one `$/progress`; their loads end only through progress. */
 const progressReportingClients = new WeakSet<LspClient>();
+/** Clients whose first document open already started the silent window. */
+const silentLoadOpenedClients = new WeakSet<LspClient>();
 const silentLoadTimers = new WeakMap<LspClient, NodeJS.Timeout>();
 
 function settleProjectLoadWithoutProgress(client: LspClient): void {
@@ -1770,7 +1778,6 @@ export async function getOrCreateClient(
 			);
 
 			client.status = "ready";
-			settleProjectLoadWithoutProgress(client);
 			if (isRustAnalyzerClient(client))
 				client.cargoManifests = listCargoManifests(client.cwd).catch(() => undefined);
 			// Publish only after init succeeds: pre-init clients are reachable
@@ -1911,6 +1918,10 @@ function trackOpenedFile(client: LspClient, uri: string, languageId: string, ver
 		reopenedAt: reopened ? Date.now() : undefined,
 	});
 	client.lastActivity = Date.now();
+	if (!silentLoadOpenedClients.has(client)) {
+		silentLoadOpenedClients.add(client);
+		settleProjectLoadWithoutProgress(client);
+	}
 }
 
 /**
