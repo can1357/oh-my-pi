@@ -7,6 +7,8 @@
 - Added `pi.registerTodoBackend()` and the `todo.backend` setting: an extension can mirror the main session's todo list into an external store, which gets the whole list after every change ([#19890](https://github.com/can1357/oh-my-pi/pull/19890) by [@Dangerboi](https://github.com/Dangerboi))
 - Added the "Todo Backend" choice to `/settings` → Tools → Todos, listing each registered todo backend with its optional `label` and `description`; a backend picked there gets the current list at once ([#19925](https://github.com/can1357/oh-my-pi/pull/19925) by [@Dangerboi](https://github.com/Dangerboi))
 - `/wt` (TUI, ACP, RPC and `worktree.onStart`) runs the new worktree's `post-checkout` hook as `git worktree add` does, with a spinner in the TUI, then loads the skills and commands it added; a failing hook keeps the worktree and shows a warning, and quitting while it runs keeps that worktree with a warning. In an ovnfs checkout only a `core.hooksPath` hook runs ([#20045](https://github.com/can1357/oh-my-pi/pull/20045) by [@Dangerboi](https://github.com/Dangerboi))
+- When `wait` is waiting on exactly one running subagent, its card now streams that worker inline (task, last intent, current tool and the last lines of output) instead of only a status row; with two or more jobs, or once the job settles, the compact list and result are shown as before ([#16661](https://github.com/can1357/oh-my-pi/pull/16661) by [@Komzpa](https://github.com/Komzpa))
+- A collision-suffixed waited job now selects its canonical agent's inline progress even when another worker has the same ID as the job row.
 
 ### Changed
 

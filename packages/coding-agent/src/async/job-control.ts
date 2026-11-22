@@ -17,7 +17,7 @@ import {
 
 import { renderStructuredJson, structuredStatusLabel, taskAgentHandles } from "../session/async-job-delivery";
 import { AGENT_KILL_LABEL, type InterruptReason } from "../session/messages";
-import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentProgress, StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 
 import type { ToolSession } from "../tools";
@@ -168,6 +168,21 @@ interface TrackedJobLike {
 	agentOutputPublished?: boolean;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function isAgentProgressSnapshot(value: unknown): value is AgentProgress {
+	if (!isRecord(value)) return false;
+	return (
+		typeof value.id === "string" &&
+		typeof value.agent === "string" &&
+		typeof value.task === "string" &&
+		Array.isArray(value.recentTools) &&
+		Array.isArray(value.recentOutput)
+	);
+}
+
 export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobSnapshot[] {
 	const now = Date.now();
 	return jobs.map(j => {
@@ -185,8 +200,11 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 		let cost: number | undefined;
 		let contextTokens: number | undefined;
 		let contextWindow: number | undefined;
+		let progress: AgentProgress[] | undefined;
 		if (latest.type === "task") {
 			// A collided job id is suffixed (`Foo-2`) while its agent id stays `Foo`.
+			const progressValue = latest.latestDetails?.progress;
+			if (Array.isArray(progressValue)) progress = progressValue.filter(isAgentProgressSnapshot);
 			const progressRecord = agentProgress(latest.latestDetails, current?.agentId ?? latest.id);
 			if (progressRecord) {
 				const modelValue = progressRecord?.resolvedModel;
@@ -241,6 +259,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			...(contextTokens !== undefined && running ? { contextTokens } : {}),
 			...(contextWindow !== undefined && running ? { contextWindow } : {}),
 			...(widget ? { widget } : {}),
+			...(progress && progress.length > 0 ? { progress } : {}),
 			...(!resultConsumed && latest.resultText ? { resultText: latest.resultText } : {}),
 			...(!resultConsumed && latest.errorText ? { errorText: latest.errorText } : {}),
 			...(!resultConsumed && latest.latestDetails?.meta ? { meta: latest.latestDetails.meta } : {}),
