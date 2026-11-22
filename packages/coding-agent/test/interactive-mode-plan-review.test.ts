@@ -2027,6 +2027,63 @@ describe("InteractiveMode plan review rendering", () => {
 		}
 	});
 
+	it("drops a custom pick when the slider moves back to a role", async () => {
+		const sonnet = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		const planOpus = session.modelRegistry.find("anthropic", "claude-opus-4-6");
+		const haiku = session.modelRegistry.find("anthropic", "claude-haiku-4-5");
+		if (!sonnet || !planOpus || !haiku) throw new Error("Expected sonnet, opus-4-6 and haiku models");
+		session.settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
+		session.settings.setModelRole("slow", "anthropic/claude-opus-4-6");
+		session.settings.setModelRole("plan", "anthropic/claude-opus-4-6");
+		await session.setModelTemporary(haiku, ThinkingLevel.High);
+		await mode.handlePlanModeCommand();
+		const planFilePath = mode.planModePlanFilePath ?? "local://PLAN.md";
+		await Bun.write(
+			resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			}),
+			"# Plan\n\nPick custom, then return to default.",
+		);
+		vi.spyOn(modelRegistry, "refreshIfStale").mockResolvedValue(false);
+		vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		const opened = Promise.withResolvers<void>();
+		const approval = mode.handlePlanApproval(
+			{ planFilePath, planExists: true, title: "PLAN" },
+			{ onOpened: () => opened.resolve() },
+		);
+		await Promise.race([
+			opened.promise,
+			approval.then(() => {
+				throw new Error("Plan Review did not open");
+			}),
+		]);
+		const review = mode.ui.overlayStack.at(-1)?.component;
+		if (!(review instanceof PlanReviewOverlay)) throw new Error("Expected Plan Review");
+		try {
+			review.handleInput("\x1bm");
+			const picker = mode.ui.overlayStack.at(-1)?.component;
+			if (!(picker instanceof ModelPickerComponent)) throw new Error("Expected model picker");
+			for (const key of "claude-opus-4-5") picker.handleInput(key);
+			picker.handleInput("\r");
+			const thinking = mode.ui.overlayStack.at(-1)?.component;
+			if (!(thinking instanceof ThinkingSelectorComponent)) throw new Error("Expected thinking picker");
+			thinking.getSelectList().setSelectedValue(ThinkingLevel.High);
+			thinking.getSelectList().handleInput("\n");
+			await Promise.resolve();
+			// Move off the custom segment (two roles precede it) and approve on default.
+			review.handleInput("\x1b[D");
+			review.handleInput("\x1b[D");
+			expect(review.selectOption("keep")).toBe(true);
+			await approval;
+			expect(session.model?.id).toBe(sonnet.id);
+		} finally {
+			review.handleInput("\x1b");
+			await approval;
+		}
+	});
+
 	it("executes on the slider-selected tier, surviving #exitPlanMode's model restore", async () => {
 		// Regression: the model-tier slider's choice used to be applied BEFORE
 		// #approvePlan ran. #approvePlan → #exitPlanMode restores the model that
@@ -2262,6 +2319,59 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(pendingTiers).toBeUndefined();
 		expect(roleRefused).toBe(false);
 		expect(session.model?.id).toBe(sonnet.id);
+	});
+
+	it("lets a singleton custom pick return to the pre-plan target", async () => {
+		const sonnet = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		const planOpus = session.modelRegistry.find("anthropic", "claude-opus-4-6");
+		if (!sonnet || !planOpus) throw new Error("Expected sonnet and opus-4-6");
+		session.settings.setModelRole("plan", "anthropic/claude-opus-4-6");
+		await mode.handlePlanModeCommand();
+		const planFilePath = mode.planModePlanFilePath ?? "local://PLAN.md";
+		await Bun.write(
+			resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			}),
+			"# Plan\n\nCustom then undo.",
+		);
+		vi.spyOn(modelRegistry, "refreshIfStale").mockResolvedValue(false);
+		vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		const opened = Promise.withResolvers<void>();
+		const approval = mode.handlePlanApproval(
+			{ planFilePath, planExists: true, title: "PLAN" },
+			{ onOpened: () => opened.resolve() },
+		);
+		await Promise.race([
+			opened.promise,
+			approval.then(() => {
+				throw new Error("Plan Review did not open");
+			}),
+		]);
+		const review = mode.ui.overlayStack.at(-1)?.component;
+		if (!(review instanceof PlanReviewOverlay)) throw new Error("Expected Plan Review");
+		try {
+			review.handleNativeEvent({ type: "action", key: "dock/model", act: "custom-model", mods: [] });
+			const picker = mode.ui.overlayStack.at(-1)?.component;
+			if (!(picker instanceof ModelPickerComponent)) throw new Error("Expected model picker");
+			for (const key of "claude-opus-4-5") picker.handleInput(key);
+			picker.handleInput("\r");
+			const thinking = mode.ui.overlayStack.at(-1)?.component;
+			if (thinking instanceof ThinkingSelectorComponent) {
+				thinking.getSelectList().setSelectedValue(ThinkingLevel.High);
+				thinking.getSelectList().handleInput("\n");
+			}
+			await Promise.resolve();
+			// The custom pick exposes a pre-plan entry beside it for undo.
+			review.handleInput("\x1b[D");
+			expect(review.selectOption("keep")).toBe(true);
+			await approval;
+			expect(session.model?.id).toBe(sonnet.id);
+		} finally {
+			review.handleInput("\x1b");
+			await approval;
+		}
 	});
 
 	it("compaction runs on the plan model and restores the pre-plan model after success", async () => {
@@ -2535,23 +2645,25 @@ describe("InteractiveMode plan review rendering", () => {
 		},
 	);
 
-	it("leaves an untouched slider to the pre-plan restore", async () => {
+	it("runs the selected starting tier when the pre-plan model differs", async () => {
 		const sonnet = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
-		const opus = session.modelRegistry.find("anthropic", "claude-opus-4-5");
-		if (!sonnet || !opus) throw new Error("Expected sonnet + opus to exist in registry");
+		const planOpus = session.modelRegistry.find("anthropic", "claude-opus-4-6");
+		const haiku = session.modelRegistry.find("anthropic", "claude-haiku-4-5");
+		if (!sonnet || !planOpus || !haiku) throw new Error("Expected sonnet, opus-4-6 and haiku models");
 		session.settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
-		session.settings.setModelRole("slow", "anthropic/claude-opus-4-5");
-		session.settings.setModelRole("plan", "anthropic/claude-opus-4-5");
+		session.settings.setModelRole("slow", "anthropic/claude-opus-4-6");
+		session.settings.setModelRole("plan", "anthropic/claude-opus-4-6");
+		await session.setModelTemporary(haiku, ThinkingLevel.High);
 
 		await mode.handlePlanModeCommand();
-		expect(session.model?.id).toBe(opus.id);
+		expect(session.model?.id).toBe(planOpus.id);
 		const planFilePath = mode.planModePlanFilePath ?? "local://PLAN.md";
 		await Bun.write(
 			resolveLocalUrlToPath(planFilePath, {
 				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 				getSessionId: () => session.sessionManager.getSessionId(),
 			}),
-			"# Plan\n\nApprove without touching the slider.",
+			"# Plan\n\nApprove on the starting tier.",
 		);
 		vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
 		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
@@ -2560,9 +2672,42 @@ describe("InteractiveMode plan review rendering", () => {
 
 		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
 
-		// `main` behavior: no execution target, so #exitPlanMode's restore stands and
-		// no role is applied or recorded for the approval.
-		expect(applyRole).not.toHaveBeenCalled();
+		// `main` parity: the displayed starting tier runs even when it differs from the
+		// pre-plan model, which #exitPlanMode would otherwise restore.
+		expect(applyRole).toHaveBeenCalledTimes(1);
+		expect(session.model?.id).toBe(sonnet.id);
+	});
+
+	it("applies a remote pick of the already-selected starting tier", async () => {
+		const sonnet = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		const planOpus = session.modelRegistry.find("anthropic", "claude-opus-4-6");
+		const haiku = session.modelRegistry.find("anthropic", "claude-haiku-4-5");
+		if (!sonnet || !planOpus || !haiku) throw new Error("Expected sonnet, opus-4-6 and haiku models");
+		session.settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
+		session.settings.setModelRole("slow", "anthropic/claude-opus-4-6");
+		session.settings.setModelRole("plan", "anthropic/claude-opus-4-6");
+		await session.setModelTemporary(haiku, ThinkingLevel.High);
+		await mode.handlePlanModeCommand();
+		const planFilePath = mode.planModePlanFilePath ?? "local://PLAN.md";
+		await Bun.write(
+			resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			}),
+			"# Plan\n\nRemote picks the starting tier.",
+		);
+		vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		let answered: boolean | undefined;
+		const recorder = planReviewRecorder("remote-starting-tier", (event, ctx) => {
+			answered = ctx.resolvePlanReview(event.reviewId, "keep", { role: "default" });
+		});
+		await loadExtensions(recorder.extension);
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		await recorder.resolved;
+
+		expect(answered).toBe(true);
 		expect(session.model?.id).toBe(sonnet.id);
 	});
 

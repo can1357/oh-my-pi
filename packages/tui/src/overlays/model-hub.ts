@@ -1306,7 +1306,7 @@ export class ModelHubComponent implements Component {
 	/**
 	 * Persist `role → item`, preserving a still-supported thinking level, then
 	 * open the thinking strip — skipped for models with no reasoning surface,
-	 * where every chip would be a no-op ({@link #thinkingOptionsFor}).
+	 * where every chip would be a no-op ({@link thinkingOptionsFor}).
 	 */
 	#assignRole(item: ModelBrowserItem, role: string, returnToRoles: boolean, scope?: ModelRoleSelectionScope): void {
 		if (this.#settings.modelRoleStorage === "project" && scope === undefined) {
@@ -1321,7 +1321,7 @@ export class ModelHubComponent implements Component {
 		} else if (current && !current.autoSelected) {
 			level = current.thinkingLevel;
 		}
-		const supported = this.#thinkingOptionsFor(item.model);
+		const supported = thinkingOptionsFor(item.model);
 		if (!supported.includes(level)) level = ThinkingLevel.Inherit;
 		const result = this.#callbacks.onAssign(item.model, role, level, item.selector, scope);
 		this.#finishAssignment(result, () => {
@@ -1350,10 +1350,6 @@ export class ModelHubComponent implements Component {
 		this.#refreshAfterMutation();
 	}
 
-	#thinkingOptionsFor(model: Model): ConfiguredThinkingLevel[] {
-		return thinkingOptionsFor(model);
-	}
-
 	/**
 	 * Resolve what `t` on a role row would edit: the role's model in its
 	 * persisted scope. Undefined when the role is unassigned or its model has
@@ -1367,7 +1363,7 @@ export class ModelHubComponent implements Component {
 			this.#settings.modelRoleStorage === "project" ? this.#settings.getModelRoleSource(role) : "default";
 		const scope = source === "project" || source === "global" ? source : undefined;
 		const model = scope ? this.#roleForScope(role, scope).model : assignment.model;
-		if (!model || this.#thinkingOptionsFor(model).length === 0) return undefined;
+		if (!model || thinkingOptionsFor(model).length === 0) return undefined;
 		return {
 			item: { provider: model.provider, id: model.id, model, selector: `${model.provider}/${model.id}` },
 			scope,
@@ -1440,7 +1436,7 @@ export class ModelHubComponent implements Component {
 		scope?: ModelRoleSelectionScope,
 		committedLevel?: ConfiguredThinkingLevel,
 	): void {
-		const options = this.#thinkingOptionsFor(item.model);
+		const options = thinkingOptionsFor(item.model);
 		const current =
 			committedLevel ??
 			(this.#settings.modelRoleStorage === "project" && scope !== undefined
