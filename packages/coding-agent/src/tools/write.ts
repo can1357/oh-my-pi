@@ -44,6 +44,7 @@ import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
 
 import writeDescription from "../prompts/tools/write.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
+import { quotePosixArgument } from "../utils/shell-quote";
 
 import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-bridge";
 import { truncateForPrompt } from "./approval";
@@ -1049,6 +1050,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			// Check if file exists and is auto-generated before overwriting.
 			if (existing) {
 				await assertEditableFile(absolutePath, path, this.session.settings);
+			}
+			// Empty content erases the file, and outside git that is unrecoverable. A malformed call
+			// looks the same as a deliberate erase, so the erase has to go through bash.
+			if (existing?.isFile() && existing.size > 0 && cleanContent.length === 0) {
+				throw new ToolError(
+					`Refusing to overwrite '${displayPath}' with empty content: the file holds ${existing.size} bytes, and erasing it cannot be undone here. To empty the file on purpose, run \`truncate -s 0 ${quotePosixArgument(absolutePath)}\` through bash.`,
+				);
 			}
 			await assertNotTruncatedFileReadProjection(
 				this.session,

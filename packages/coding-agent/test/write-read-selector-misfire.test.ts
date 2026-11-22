@@ -56,13 +56,14 @@ describe("write refuses read-selector misfires", () => {
 		await fs.rm(dir, { recursive: true, force: true });
 	});
 
-	it("keeps an existing literal colon filename writable with empty content", async () => {
+	it("refuses to empty an existing literal colon filename and keeps its bytes", async () => {
 		const dir = await makeWorkspace();
 		await Bun.write(path.join(dir, "log:1-5"), "old");
 		const write = new WriteTool(session(dir));
-		const res = await write.execute("c", { path: "log:1-5", content: "" });
-		expect(res.isError).toBeUndefined();
-		expect(await Bun.file(path.join(dir, "log:1-5")).text()).toBe("");
+		await expect(write.execute("c", { path: "log:1-5", content: "" })).rejects.toThrow(
+			/Refusing to overwrite 'log:1-5' with empty content/,
+		);
+		expect(await Bun.file(path.join(dir, "log:1-5")).text()).toBe("old");
 		await fs.rm(dir, { recursive: true, force: true });
 	});
 
