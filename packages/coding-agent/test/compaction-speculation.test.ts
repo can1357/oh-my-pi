@@ -632,7 +632,7 @@ describe("async speculative compaction", () => {
 					};
 				});
 			maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
-			const speculation = maintenance.speculationCompletion;
+			const speculation = maintenance.speculationCompletion();
 			await started.promise;
 			const pass = maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
 			try {
@@ -693,7 +693,7 @@ describe("async speculative compaction", () => {
 					};
 				});
 			maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
-			const speculation = maintenance.speculationCompletion;
+			const speculation = maintenance.speculationCompletion();
 			await started.promise;
 			now += compactionModule.REMOTE_COMPACTION_TIMEOUT_MS - 500;
 			const pass = maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });

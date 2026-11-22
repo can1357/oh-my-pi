@@ -5740,14 +5740,16 @@ export class SessionMaintenance {
 		// Snapcompact is local and instant, so an armed LLM summary (possible
 		// only when settings/model changed since arming) never overrides it.
 		// Exception: do not discard a running remote request merely because the
-		// grace band ended; the larger replacement may no longer fit. A bridge
-		// commit already carries its own claimed speculation.
+		// grace band ended; the larger replacement may no longer fit. Bridge runs
+		// (`startBridgeCompaction`) keep the abort: their outcome reports to the cache
+		// warmer, and a bridge commit already carries its own claimed speculation.
 		const pendingRemote =
 			!bridgeSpec &&
 			method === "remote" &&
 			compactionSettings.asyncEnabled !== false &&
 			!this.#host.extensionRunner?.hasHandlers("session_before_compact") &&
 			this.#speculation?.method === "remote" &&
+			!this.#speculation.bridge &&
 			!this.#speculation.armed
 				? this.#speculation
 				: undefined;
