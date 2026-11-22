@@ -23,9 +23,10 @@
  * fires there because a double-encoded string is still a structurally valid
  * string.
  *
- * This is deliberately scoped to the task tool's natural-language fields
- * (`task`, `steps`, shared `context`); identifier fields (`name`, `agent`)
- * are never repaired. It is NOT applied to code-bearing
+ * This module repairs the task tool's natural-language fields (`task`, `steps`,
+ * shared `context`) and promotes a JSON-string `tasks` payload back to a real
+ * array before validation. Identifier fields (`name`, `agent`) are never
+ * repaired. It is NOT applied to code-bearing
  * tools (write/edit/bash/search), where a backslash or quote is load-bearing
  * and a false-positive unescape would silently corrupt a file or command.
  */
@@ -101,12 +102,26 @@ function repairTaskItem(item: TaskItem): TaskItem {
 	return { ...item, task, steps };
 }
 
+/** Promote a JSON-string `tasks` payload to an array when it is unambiguously one. */
+function parseStringTasks(tasks: string): TaskItem[] | undefined {
+	const trimmed = tasks.trim();
+	if (trimmed.length < 2 || trimmed[0] !== "[" || trimmed[trimmed.length - 1] !== "]") return undefined;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(trimmed);
+	} catch {
+		return undefined;
+	}
+	return Array.isArray(parsed) ? (parsed as TaskItem[]) : undefined;
+}
+
 /**
  * Repair double-encoded prose in task-tool params (flat `task`/`steps`, shared
- * `context`, and each batch task item's `task`/`steps`). Returns the same reference
- * when nothing changed so callers can cheaply skip work. Defensive against
- * partially-streamed args (missing/undefined fields, partial task arrays) so
- * it is safe on the render path as well as on execution.
+ * `context`, and each batch task item's `task`/`steps`), and promote a JSON-string
+ * `tasks` payload back to a real array. Returns the same reference when nothing
+ * changed so callers can cheaply skip work. Defensive against partially-streamed
+ * args (missing/undefined fields, partial task arrays) so it is safe on the render
+ * path as well as on execution.
  */
 export function repairTaskParams(params: TaskParams): TaskParams {
 	if (params === null || typeof params !== "object") return params;
@@ -115,19 +130,23 @@ export function repairTaskParams(params: TaskParams): TaskParams {
 	const context = typeof params.context === "string" ? repairDoubleEncodedJsonString(params.context) : params.context;
 	const steps = repairSteps(params.steps);
 
-	let tasks = params.tasks;
-	if (Array.isArray(params.tasks)) {
+	let tasks: unknown = params.tasks;
+	if (typeof tasks === "string") {
+		const parsed = parseStringTasks(tasks);
+		if (parsed) tasks = parsed;
+	} else if (Array.isArray(tasks)) {
 		let changed = false;
-		const repaired = params.tasks.map(item => {
-			const next = repairTaskItem(item);
+		const repaired = tasks.map(item => {
+			const next = repairTaskItem(item as TaskItem);
 			if (next !== item) changed = true;
 			return next;
 		});
 		if (changed) tasks = repaired;
 	}
+	const finalTasks = tasks as TaskParams["tasks"];
 
-	if (task === params.task && steps === params.steps && context === params.context && tasks === params.tasks) {
+	if (task === params.task && steps === params.steps && context === params.context && finalTasks === params.tasks) {
 		return params;
 	}
-	return { ...params, task, steps, context, tasks };
+	return { ...params, task, steps, context, tasks: finalTasks };
 }

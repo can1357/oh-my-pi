@@ -69,4 +69,23 @@ describe("repairTaskParams", () => {
 		// Untouched items keep their identity.
 		expect(repaired.tasks?.[1]).toBe(params.tasks![1]!);
 	});
+
+	it("promotes a JSON-string tasks payload to a real array and repairs its prose", () => {
+		const params: TaskParams = {
+			context: "Shared background.",
+			tasks: '[{"name":"Alpha","agent":"task","task":"line one\\nline two\\nline three","solutionSpace":"Open-ended"}]' as unknown as TaskParams["tasks"],
+		};
+
+		const repaired = repairTaskParams(params);
+		expect(Array.isArray(repaired.tasks)).toBe(true);
+		expect(repaired.tasks?.[0]?.name).toBe("Alpha");
+		expect(repaired.tasks?.[0]?.agent).toBe("task");
+		expect(repaired.tasks?.[0]?.task).toBe("line one\nline two\nline three");
+		expect(repaired.tasks?.[0]?.solutionSpace).toBe("Open-ended");
+	});
+
+	it("leaves a non-array string tasks value untouched for validation to reject", () => {
+		const params = { context: "Shared.", tasks: "not a JSON array" } as unknown as TaskParams;
+		expect(repairTaskParams(params)).toBe(params);
+	});
 });

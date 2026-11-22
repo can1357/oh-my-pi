@@ -309,6 +309,28 @@ describe("task.batch validation", () => {
 		expect(missing).toContain("Task 2 (`Beta`) is missing `task`");
 	});
 
+	it("explains a JSON-string tasks payload instead of reporting it as missing", async () => {
+		const text = await executeText({ context: "Shared.", tasks: "not a JSON array" }, { "task.batch": true });
+		expect(text).toContain("must be an array of task items, not a JSON string");
+	});
+
+	it("accepts a JSON-string tasks payload by parsing it before validation", async () => {
+		mockDiscovery();
+		const spawned: Array<string | undefined> = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			spawned.push(options.assignment);
+			return makeResult(options.id ?? "?");
+		});
+		const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false, "task.batch": true } }));
+		const result = await tool.execute("string-tasks", {
+			context: "Shared.",
+			tasks: '[{"name":"Alpha","task":"line one\\nline two","solutionSpace":"Open-ended"}]' as unknown as TaskParams["tasks"],
+		});
+		expect(getFirstText(result)).not.toContain("Missing `tasks`");
+		expect(spawned).toHaveLength(1);
+		expect(spawned[0]).toContain("line one\nline two");
+	});
+
 	it("requires a shared context for batch calls", async () => {
 		const text = await executeText({ tasks: [{ task: "Work." }] }, { "task.batch": true });
 		expect(text).toContain("Missing `context`");
