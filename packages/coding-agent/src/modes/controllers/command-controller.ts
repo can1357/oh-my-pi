@@ -80,6 +80,7 @@ import {
 	createSessionWorktree,
 	defaultSessionWorktreeBranch,
 	formatSessionWorktreeSummary,
+	runSessionWorktreeHook,
 } from "../../session/session-worktree";
 import type { SessionWorktree } from "../../worktree/backend";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
@@ -1808,6 +1809,32 @@ export class CommandController {
 			return true;
 		});
 		return created;
+	}
+
+	/**
+	 * Runs the `post-checkout` hook of a worktree `/wt` created under a status spinner, then shows
+	 * its warnings. It removes only its own row, so a turn's working loader survives the hook's end;
+	 * a turn starting or ending during the hook clears the status rows, spinner included.
+	 */
+	async runWorktreeHook(worktree: SessionWorktree): Promise<void> {
+		const loader = new Loader(
+			this.ctx.ui,
+			spinner => theme.fg("accent", spinner),
+			text => theme.fg("muted", text),
+			"Running post-checkout hook…",
+			getSymbolTheme().spinnerFrames,
+		);
+		this.ctx.statusContainer.addChild(loader);
+		this.ctx.ui.requestRender();
+		let warnings: string[];
+		try {
+			warnings = await runSessionWorktreeHook(worktree, this.ctx.session);
+		} finally {
+			loader.stop();
+			this.ctx.statusContainer.removeChild(loader);
+			this.ctx.ui.requestRender();
+		}
+		for (const warning of warnings) this.ctx.showWarning(warning);
 	}
 
 	/** Save source settings before acquiring the gate for a complete relocation operation. */

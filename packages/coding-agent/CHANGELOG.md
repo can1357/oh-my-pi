@@ -4,6 +4,7 @@
 
 ### Added
 
+- `/wt` (TUI, ACP, RPC and `worktree.onStart`) runs the new worktree's `post-checkout` hook as `git worktree add` does, with a spinner in the TUI, then loads the skills and commands it added; a failing hook keeps the worktree and shows a warning, and quitting while it runs keeps that worktree with a warning. In an ovnfs checkout only a `core.hooksPath` hook runs ([#20045](https://github.com/can1357/oh-my-pi/pull/20045) by [@Dangerboi](https://github.com/Dangerboi))
 - `models.yml` speech models accept `voice` (sent when the `tts` tool or the vocalizer names no voice, for gateways that reject a voiceless request) and `speechFormats` (the only containers the model returns). The `tts` tool asks a WAV-only model for WAV when the path ends in `.mp3` (and an MP3-only one for MP3 when it ends in `.wav`) and writes the sibling file with that extension; a model that returns neither is skipped ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 - `speech.enabled` now speaks through the `openai-speech` or `xai-tts` models you explicitly configured in the `speech` role chain, falling back to a later model (or local Phonon) when one fails and warning when every model failed; a model that fails with a missing key or a 4xx is skipped for the rest of the session. Unconfigured, vocalization stays on local Phonon; `--offline` keeps only the session provider's models, as before. If you upgrade with `speech.enabled` on and set the speech role to a cloud model only for the `tts` tool, vocalization now uses that model too ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 
@@ -19,6 +20,7 @@
 - Fixed `/usage` showing "Usage history unavailable (database is locked)" while another process was writing the stats database; the stored history stays visible, marked not synced when the refresh cannot finish ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
 - `openai-models-list` discovery no longer offers a gateway's speech and transcription models as chat models: rows whose only output is `speech` or `transcription` (including OpenRouter's `text->speech` style `architecture.modality` summary) become `tts` and `stt` models ([#19900](https://github.com/can1357/oh-my-pi/pull/19900) by [@Xytronix](https://github.com/Xytronix))
 - Subagents stopped by their parent through `proc://<id>/kill` now record "Stopped by parent agent" in their transcripts instead of "Interrupted by user" ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
+- Fixed the omp daemon staying alive for up to 3 seconds after shutdown, or 11 seconds after stopping a module unit such as the image URL broker, once its work was done
 
 ## [19.1.0] - 2026-11-21
 
