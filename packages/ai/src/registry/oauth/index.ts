@@ -3,6 +3,7 @@
 // ============================================================================
 
 import { authPolicyFor, providerDisabledReason, providerLoginWarning } from "@oh-my-pi/pi-catalog/compat/auth";
+import type { OAuthRefreshReason } from "../../auth/types";
 import * as AIError from "../../error";
 import { jwtExpiryMs, NEVER_EXPIRES } from "../engine/common";
 import { getProviderDefinition, PROVIDER_REGISTRY } from "../registry";
@@ -129,9 +130,10 @@ export function unregisterOAuthProviders(sourceId: string): void {
  * Refresh a built-in OAuth grant, cancelling provider work when refresh ownership ends.
  */
 export async function refreshOAuthToken(
-	provider: OAuthProvider,
+	provider: OAuthProviderId,
 	credentials: OAuthCredentials,
 	signal?: AbortSignal,
+	reason?: OAuthRefreshReason,
 ): Promise<OAuthCredentials> {
 	if (!credentials) {
 		throw new AIError.OAuthError(`No OAuth credentials found for ${provider}`, {
@@ -150,7 +152,29 @@ export async function refreshOAuthToken(
 	}
 	// Providers without a real refresher (static bearer tokens / API keys that
 	// don't expire) return the credentials unchanged.
-	return def.refreshToken ? def.refreshToken(credentials, signal) : credentials;
+	return def.refreshToken ? def.refreshToken(credentials, signal, reason) : credentials;
+}
+
+/**
+ * Refresh `credentials` through the login that owns `provider`: an extension's registered
+ * OAuth provider, else the built-in one ({@link refreshOAuthToken}). This is the local token
+ * exchange AuthStorage runs when no store or caller refresh hook owns the credential.
+ */
+export async function refreshProviderOAuthToken(
+	provider: OAuthProviderId,
+	credentials: OAuthCredentials,
+	signal?: AbortSignal,
+	reason?: OAuthRefreshReason,
+): Promise<OAuthCredentials> {
+	const custom = customOAuthProviders.get(provider);
+	if (!custom) return refreshOAuthToken(provider, credentials, signal, reason);
+	if (!custom.refreshToken) {
+		throw new AIError.OAuthError(`OAuth provider "${provider}" does not support token refresh`, {
+			kind: "configuration",
+			provider,
+		});
+	}
+	return custom.refreshToken(credentials, signal, reason);
 }
 const JWT_EXPIRY_SKEW_MS = 5 * 60_000;
 export function normalizeOAuthCredentialExpiry<T extends OAuthCredentials>(provider: string, credentials: T): T {
@@ -202,10 +226,13 @@ export async function getOAuthApiKey(
 			{ kind: "validation", provider },
 		);
 	}
-	// Providers declaring `api-key-format "structured"` need request-time
-	// credential metadata, so the API key is the JSON-encoded credential.
-	const apiKey =
-		policy?.apiKeyFormat === "structured"
+	// A provider-owned encoding wins; otherwise providers declaring
+	// `api-key-format "structured"` need request-time credential metadata, so
+	// the API key is the JSON-encoded credential.
+	const getApiKey = getProviderDefinition(provider)?.getApiKey;
+	const apiKey = getApiKey
+		? getApiKey(creds)
+		: policy?.apiKeyFormat === "structured"
 			? JSON.stringify({
 					apiEndpoint: creds.apiEndpoint,
 					token: creds.access,

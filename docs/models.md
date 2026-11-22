@@ -328,6 +328,7 @@ Loading models.yml checks a `modelOverrides` `kind` only against an api the file
 - `transport`: `pi-native` only. When set, every model under that provider is sent to an `omp auth-gateway` compatible `baseUrl` via `POST /v1/pi/stream`; `apiKey` is the gateway bearer.
 - `imageInputDecoder`: `stb` only. Set this on a custom model or `modelOverrides` entry when the serving backend uses an STB-compatible image decoder that cannot accept WebP; OMP converts attached and historical WebP images before provider dispatch.
 - `imageCountBudget`: positive integer. Set this on a custom model or `modelOverrides` entry to state how many images one request to its host may carry. It replaces the catalog budget, which is 5 for a provider no catalog rule names. A gateway in front of a vendor with a higher limit needs it: once a session holds more images than the budget, OMP drops the oldest ones, which changes the cached prompt prefix.
+- `snapcompactShape`: `{ variant, frameSize? }`. Set this on a custom model or `modelOverrides` entry to choose the snapcompact frame shape its archive pages use, in place of the shape OMP picks for the model line. `variant` is a `snapcompact.shape` value other than `auto` (for example `11on16-bw`); `frameSize` is the frame edge in px, an integer from 64 to 2576, and defaults to the variant's own. The `snapcompact.shape` setting, when not `auto`, still wins, the frame is still shrunk to the host's `image-max-edge`, and billing estimates still follow the model.
 - `tokenizer`: opt into a specific embedded local tokenizer when a proxy's model id is ambiguous or noncanonical. Allowed values: `claude-v3`, `claude-v47`, `claude-v5`, `claude-v5-sonnet`, `qwen3`, `deepseek-v3`, `kimi-k2`, `glm5`, `cl100k` (OpenAI GPT-3.5 and GPT-4) and `o200k` (OpenAI GPT-5 and later). Omit it to use catalog identity policy; models without one count in o200k.
 
 ## Validation rules (current)
@@ -457,7 +458,7 @@ Provider defaults vs per-model overrides:
 - Provider `headers`, `compat`, and `remoteCompaction` are baselines.
 - Model `headers` override provider header keys.
 - `modelOverrides` can override model metadata (`name`, `api`, `kind`, `reasoning`, `thinking`, `input`,
-  `imageInputDecoder`, `imageCountBudget`, `tokenizer`, `supportsTools`, `cost`, `promptCache`, `premiumMultiplier`, `contextWindow`,
+  `imageInputDecoder`, `imageCountBudget`, `snapcompactShape`, `tokenizer`, `supportsTools`, `cost`, `promptCache`, `premiumMultiplier`, `contextWindow`,
   `maxContextWindow`, `maxTokens`, `omitMaxOutputTokens`, `preferWebsockets`, `headers`, `compat`,
   `contextPromotionTarget`, `compactionModel`, and `remoteCompaction`).
 - `compat` is deep-merged for nested routing blocks (`openRouterRouting`, `vercelGatewayRouting`,
@@ -607,6 +608,10 @@ Runtime discovery probes LiteLLM management metadata in order: `GET /model_group
 
 If every metadata route is unavailable, discovery falls back to the OpenAI-compatible `GET /models` list. A forbidden or failed metadata request is logged once with its endpoint and status; `404` is treated as an absent route. Both paths exclude models explicitly marked with known task-specific LiteLLM modes: `audio_speech`, `audio_transcription`, `batch`, `embedding`, `guardrail`, `image_edit`, `image_generation`, `moderation`, `ocr`, `rerank`, `search`, `vector_store`, and `video_generation`. Missing, null, and unrecognized modes remain selectable so router aliases continue to work. Rich metadata maps per-model context, capability, and upstream-provider fields. OpenAI-backed models use LiteLLM's Responses route so reasoning summaries remain available; mixed-provider groups stay on Chat Completions. Bare fallback ids use the known OpenAI model families for routing and bundled reference metadata when available. Fallback pricing remains unknown (represented by zero); configured generic discovery uses a 128,000-token context default when neither the endpoint nor a bundled reference supplies a limit. Rich management metadata can supply provider-specific prices. Later probes fill or override reported metadata for models in the first usable roster rather than unioning every endpoint's roster.
 
+### Bifrost provider discovery
+
+When `bifrost` has a credential (`BIFROST_API_KEY` or stored `/login bifrost` auth), runtime discovery reads the gateway's `GET /models` roster from the provider `baseUrl` / `models.yml` config, otherwise `BIFROST_BASE_URL`, otherwise `http://localhost:8080/v1`. Model ids keep Bifrost's `<bifrost-provider>/<model>` form. Chat models use `openai-completions`; decision models become `openai-decisions` judges on `POST {baseUrl}/decisions`. The roster is authoritative and cached per key and base URL. Row mapping, decision-model detection, and judge retry guidance are in [Bifrost](provider-quirks.md#bifrost-bifrost).
+
 ### Generic OpenAI-compatible discovery
 
 `openai-models-list` reads `{baseUrl}/v1/models` by default (without adding a second `/v1`).
@@ -624,9 +629,27 @@ Silent endpoints can inherit bundled-reference limits, reasoning, and input moda
 use 128,000 context and 32,768 output as generic chat defaults. Output caps are bounded by the resolved context;
 Anthropic-routed models use an 8,192-token fallback output cap.
 
+When neither configuration, discovery nor the catalog establishes reasoning support, thinking is
+**unverified**, not disabled. The first request with a thinking level (including the session default)
+runs small, separate capability probes before sending your turn. The requested level is tried first;
+all six levels are tested in parallel. If that format fails, alternate effort, toggle or token-budget
+formats are tried for the API. Probes contain only a fixed arithmetic question, never your conversation
+or tools. They add requests and latency on the first use of an unknown model.
+
+Accepted levels, request format and observed reasoning are saved in `models.db`, scoped to provider,
+API, endpoint and wire model ID. Later turns reuse the result and clamp unsupported levels. Positive
+results expire after 30 days; results with no reasoning controls expire after one day. Auth failures,
+rate limits, outages and timeouts are inconclusive and are not saved as lack of support. Parameter
+acceptance counts even if the provider returns no visible reasoning. Explicit capability settings,
+including `reasoning: false`, take precedence over probing.
+
 A row advertising only image output becomes an image-generation runner; embedding-only output
-becomes an embedding runner. Mixed outputs remain chat models. These runners are visible with
-`omp models --kind all`, not the default chat listing.
+becomes an embedding runner. `speech` as the only output becomes a `tts` runner on `openai-speech`,
+and `transcription` an `stt` runner on `openai-transcriptions`. Outputs come from the row's
+modality arrays or OpenRouter's `architecture.modality` summary
+(`text->speech`). Mixed outputs, a bare `audio` output (Poe lists TTS voices and music generators
+alike as `text->audio`), and rows that declare no modalities remain chat models. These runners are
+visible with `omp models --kind all`, not the default chat listing.
 
 ### Explicit provider discovery
 
@@ -1230,7 +1253,7 @@ providers:
               cacheWrite: 3.75
 ```
 
-`disableStrictTools` is a provider-level flag that applies to all models in the provider. It disables the Anthropic `strict` marker only for tools that OMP would otherwise mark strict; it does not change runtime tool argument validation. OMP can automatically retry without strict tools after Anthropic reports a strict-grammar-too-large error before the first streamed token, but proxies that reject the `strict` field for other reasons should set this flag explicitly.
+`disableStrictTools` is a provider-level flag that applies to all models in the provider. It disables the Anthropic `strict` marker only for tools that OMP would otherwise mark strict; it does not change runtime tool argument validation. OMP can automatically retry without strict tools after Anthropic reports a strict-grammar-too-large error before the first streamed token, but proxies that reject the `strict` field for other reasons should set this flag explicitly. Claude on `google-vertex` can also reject strict tools when the GCP organization policy `vertexai.allowedPartnerModelFeatures` disallows `structured_outputs`; OMP retries once without `strict` and pins `strictToolsDisabled` for the session. Set `disableStrictTools: true` for `google-vertex` to skip that failed first request.
 
 Tool schemas going on the wire are normalized by the unified flow in
 `packages/ai/src/utils/schema/normalize.ts` (Google/CCA/MCP dispatchers

@@ -9,6 +9,16 @@
 import { Effort, THINKING_EFFORTS } from "./effort";
 import type { Api, Model, ModelSpec, ThinkingConfig } from "./types";
 
+/** Default positive Google thinking budgets, shared by request sizing and unknown-model probes. */
+export const GOOGLE_THINKING_BUDGETS: Readonly<Record<Effort, number>> = {
+	minimal: 1024,
+	low: 4096,
+	medium: 8192,
+	high: 16384,
+	xhigh: 24575,
+	max: 32768,
+};
+
 /**
  * Runtime helpers read baked metadata only, so they accept both pre-build
  * specs and built models.
@@ -29,11 +39,10 @@ export function getSupportedEfforts<TApi extends Api>(model: ApiModel<TApi>): re
 
 /**
  * Neutral view of a model whose thinking ladder is unverified: `reasoning: false`
- * and no ladder. Re-entering policy resolution starts from it (the ladder is
- * derived output, not authored input), and requests without an effort send it so
+ * and no ladder. Requests without an effort use this view so
  * no reasoning or disable fields reach an upstream that may reject them.
  */
-export function withoutUnverifiedThinking<T extends { reasoning: boolean; thinking?: ThinkingConfig }>(model: T): T {
+export function withoutUnverifiedThinking<T extends { reasoning?: boolean; thinking?: ThinkingConfig }>(model: T): T {
 	if (!model.thinking?.unverified) return model;
 	const { thinking: _derived, ...rest } = model;
 	return { ...rest, reasoning: false } as T;

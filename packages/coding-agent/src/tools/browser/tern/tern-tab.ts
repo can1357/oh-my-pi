@@ -21,9 +21,10 @@ import * as path from "node:path";
 import { isRecord, logger, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { JsRuntime } from "../../../eval/js/shared/runtime";
-import { formatScreenshot, resizeImage } from "../../../utils/image-resize";
+import { resizeImage } from "../../../utils/image-resize";
 import { resolveToCwd } from "../../path-utils";
 import { ToolAbortError, throwIfAborted } from "../../tool-errors";
+import { PointerSpace } from "../pointer-space";
 import {
 	type BrowserA11yOptions,
 	type BrowserA11yResult,
@@ -40,9 +41,14 @@ import type {
 	BrowserErrorEntry,
 	BrowserErrorOptions,
 } from "../console-capture";
-import { type DialogPolicy, type DialogState, dialogBlocksPageError } from "../dialogs";
+import { assertDialogPolicy, type DialogPolicy, type DialogState, dialogBlocksPageError } from "../dialogs";
 import type { BrowserDownload } from "../downloads";
-import type { BrowserEmulateOptions, ClipboardActionResult, ClipboardReadResult } from "../emulation";
+import {
+	type BrowserEmulateOptions,
+	type ClipboardActionResult,
+	type ClipboardReadResult,
+	validateEmulateOptions,
+} from "../emulation";
 import type { BrowserFrameInfo } from "../frames";
 import type { InProcessRunContext, InProcessRunTab } from "../in-process-run";
 import { loadedKnownDevices, loadPuppeteer } from "../launch";
@@ -95,6 +101,7 @@ import {
 	createPngDiff,
 	type DiffScreenshotOptions,
 	type DiffScreenshotResult,
+	emitScreenshot,
 	formatScreenshotLegend,
 	type PdfOptions,
 	pngPixelChangeRatio,
@@ -106,7 +113,9 @@ import {
 	screenshotQuality,
 	screenshotScope,
 	screenshotThreshold,
+	validateScreenshotOptions,
 } from "../screenshot";
+import { normalizeSelectOptions, type SelectOptionInput } from "../select-options";
 import {
 	type AriaSnapshotBaseline,
 	type AriaSnapshotDiffResult,
@@ -133,7 +142,7 @@ import {
 	storageValue,
 	writeStorageInPage,
 } from "../storage-state";
-import { assertTabPressArgs } from "../tab-arguments";
+import { optionalSelectorArgs, type PendingElement, pendingElement, scrollDeltas, pressArgs } from "../tab-arguments";
 import type { Observation, ReadyInfo, SessionSnapshot } from "../tab-protocol";
 import { readFilePayloads } from "../upload-files";
 import {
@@ -182,7 +191,7 @@ import { listTernBlocks, type TernBlockEntry } from "./blocks";
 import { TernError, type TernSocketClient } from "./wire";
 
 type WaitUntil = "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
-type DragTarget = string | { readonly x: number; readonly y: number };
+type DragTarget = string | { readonly x: number; readonly y: number; readonly css?: boolean };
 type MouseButtonName = "left" | "right" | "middle" | "back" | "forward";
 type World = "page" | "isolated";
 
@@ -309,6 +318,7 @@ const RESOLVE_ACTIONS: Record<TernTargetAction, DomResolveAction> = {
 	drag: "hover",
 	type: "type",
 	fill: "type",
+	press: "none",
 	focus: "none",
 	point: "none",
 };
@@ -541,6 +551,8 @@ export class TernTab implements InProcessRunTab {
 	#cursorOverlay = false;
 	// Input state.
 	#pointer: { x: number; y: number } | undefined;
+	/** What `clickAt`, `mouseMove` and `drag` points mean: CSS pixels, or positions on the last scaled screenshot. */
+	readonly #pointerSpace = new PointerSpace();
 	readonly #buttons = new Set<"left" | "right" | "middle">();
 	readonly #mods: TernModifier[] = [];
 	// Screenshots, snapshots, recording.
@@ -685,14 +697,20 @@ export class TernTab implements InProcessRunTab {
 		return this.#runtime;
 	}
 
+	/** Drop the tab's runtime (a run abandoned mid-flight, or the tab closing); the next run gets a fresh one. */
+	discardRuntime(): void {
+		this.#runtime?.dispose();
+		this.#runtime = undefined;
+	}
+
 	/** Publish the active run. */
 	setRunContext(context: InProcessRunContext): void {
 		this.#runContext = context;
 	}
 
-	/** Forget the finished run. */
-	clearRunContext(): void {
-		this.#runContext = undefined;
+	/** Forget finished run `context`; a later run's context stays. */
+	clearRunContext(context: InProcessRunContext): void {
+		if (this.#runContext === context) this.#runContext = undefined;
 	}
 
 	/** Page facts the supervisor records for the tab. */
@@ -1748,6 +1766,7 @@ export class TernTab implements InProcessRunTab {
 			throw await this.#viewportFailure(error, width, height);
 		}
 		this.#viewport = { ...viewport };
+		this.#pointerSpace.resized({ width, height });
 	}
 
 	/**
@@ -1826,7 +1845,9 @@ export class TernTab implements InProcessRunTab {
 				return { x: last.x + offset.x, y: last.y + offset.y, width: last.width, height: last.height };
 			}
 			const elapsed = Date.now() - started;
-			if (elapsed >= timeoutMs) break;
+			// A round starting at the deadline has no budget left for its reads: under a
+			// binding cell budget they time out and mask the diagnosis below.
+			if (elapsed + delay >= timeoutMs) break;
 			if (last.reason === "missing" && explicitTimeout === undefined && elapsed >= ZERO_MATCH_FAIL_FAST_MS) break;
 			await untilAborted(this.#signal, () => Bun.sleep(delay));
 			delay = Math.min(250, Math.round(delay * 1.5));
@@ -2019,7 +2040,9 @@ export class TernTab implements InProcessRunTab {
 				}
 			}
 			const elapsed = Date.now() - started;
-			if (elapsed >= timeoutMs) break;
+			// A round starting at the deadline has no budget left for its reads: under a
+			// binding cell budget they time out and mask the diagnosis below.
+			if (elapsed + delay >= timeoutMs) break;
 			if (last.reason === "missing" && explicitTimeout === undefined && elapsed >= ZERO_MATCH_FAIL_FAST_MS) break;
 			await untilAborted(this.#signal, () => Bun.sleep(delay));
 			delay = Math.min(250, Math.round(delay * 1.5));
@@ -2322,14 +2345,24 @@ export class TernTab implements InProcessRunTab {
 	}
 
 	/** Press a key (or `Mod+Key` combo), optionally after focusing an element. */
-	async press(key: string, opts?: { selector?: string }): Promise<void> {
+	async press(key: string, opts?: { selector?: string } | string): Promise<void> {
 		await this.pressIn(key, opts, null);
 	}
 
 	/** {@link press} inside `frame`. */
-	async pressIn(key: string, opts: { selector?: string | TernSelector } | undefined, frame: FramePath): Promise<void> {
-		assertTabPressArgs(key, opts);
-		if (opts?.selector) await this.focus(opts.selector, frame);
+	async pressIn(
+		keyArg: string,
+		optsArg: { selector?: string | TernSelector } | string | undefined,
+		frame: FramePath,
+	): Promise<void> {
+		const { key, opts } = pressArgs(keyArg, optsArg);
+		if (opts?.selector) {
+			if (!this.#native) {
+				const label = `tab.press(${JSON.stringify(key)}, { selector: ${describe(opts.selector)} })`;
+				await this.#target(label, opts.selector, "press", frame);
+			}
+			await this.focus(opts.selector, frame);
+		}
 		await this.#input(pressSteps(key, this.#mods));
 	}
 
@@ -2366,19 +2399,23 @@ export class TernTab implements InProcessRunTab {
 		return { x: viewport.width / 2, y: viewport.height / 2 };
 	}
 
-	/** Move the pointer (interpolated over `steps`); a held button drags. */
-	async mouseMove(x: number, y: number, opts?: { steps?: number }): Promise<void> {
+	/**
+	 * Move the pointer (interpolated over `steps`) to a position on the latest screenshot, or to viewport CSS
+	 * pixels with `css`; a held button drags.
+	 */
+	async mouseMove(x: number, y: number, opts?: { steps?: number; css?: boolean }): Promise<void> {
 		if (!Number.isFinite(x) || !Number.isFinite(y))
 			throw new ToolError("mouseMove coordinates must be finite numbers");
-		const from = this.#pointer ?? { x, y };
+		const to = this.#pointerSpace.toViewport({ x, y, css: opts?.css });
+		const from = this.#pointer ?? to;
 		const steps = Math.max(1, Math.floor(opts?.steps ?? 1));
 		const held = [...this.#buttons][0] ?? "left";
 		const events: TernInputStep[] = [];
 		for (let step = 1; step <= steps; step++) {
-			const point = { x: from.x + ((x - from.x) * step) / steps, y: from.y + ((y - from.y) * step) / steps };
+			const point = { x: from.x + ((to.x - from.x) * step) / steps, y: from.y + ((to.y - from.y) * step) / steps };
 			events.push(this.#mouseStep("move", point, held, 0));
 		}
-		this.#pointer = { x, y };
+		this.#pointer = to;
 		await this.#input(events);
 	}
 
@@ -2398,16 +2435,23 @@ export class TernTab implements InProcessRunTab {
 		await this.#input([this.#mouseStep("up", point, button, opts?.clickCount ?? 1)]);
 	}
 
-	/** Click at viewport coordinates. */
-	async clickAt(x: number, y: number, opts?: { button?: MouseButtonName; count?: number }): Promise<void> {
+	/** Click at a position on the latest screenshot, or at viewport CSS pixels with `css`. */
+	async clickAt(
+		x: number,
+		y: number,
+		opts?: { button?: MouseButtonName; count?: number; css?: boolean },
+	): Promise<void> {
 		if (!Number.isFinite(x) || !Number.isFinite(y)) throw new ToolError("clickAt coordinates must be finite numbers");
-		await this.#clickAt({ x, y }, this.#button(opts?.button), Math.max(1, Math.floor(opts?.count ?? 1)));
+		await this.#clickAt(
+			this.#pointerSpace.toViewport({ x, y, css: opts?.css }),
+			this.#button(opts?.button),
+			Math.max(1, Math.floor(opts?.count ?? 1)),
+		);
 	}
 
 	/** A trusted wheel event at the pointer (the viewport centre before any pointer move). */
-	async wheel(deltaX: number, deltaY: number): Promise<void> {
-		if (!Number.isFinite(deltaX) || !Number.isFinite(deltaY))
-			throw new ToolError("wheel deltas must be finite numbers");
+	async wheel(dx: unknown, dy?: unknown): Promise<void> {
+		const { deltaX, deltaY } = scrollDeltas("tab.wheel()", dx, dy);
 		const point = this.#pointer ?? (await this.#viewportCentre());
 		await this.#input([{ type: "wheel", x: point.x, y: point.y, dx: deltaX, dy: deltaY, mods: [...this.#mods] }]);
 	}
@@ -2416,7 +2460,11 @@ export class TernTab implements InProcessRunTab {
 	 * Scroll the page (trusted wheel at the viewport centre) or an element
 	 * (`scrollBy`; on native reads a trusted wheel over the element).
 	 */
-	async scroll(dx: number, dy: number, opts?: { selector?: string }): Promise<void> {
+	async scroll(dxArg: unknown, dyArg?: unknown, scrollOpts?: { selector?: string }): Promise<void> {
+		// `scroll({x, y}, opts?)` takes its options second.
+		const objectForm = typeof dxArg === "object" && dxArg !== null;
+		const { deltaX: dx, deltaY: dy } = scrollDeltas("tab.scroll()", dxArg, objectForm ? undefined : dyArg);
+		const opts = objectForm ? (dyArg as { selector?: string } | undefined) : scrollOpts;
 		if (opts?.selector) {
 			const spec = this.#spec(opts.selector);
 			const box = await this.#target(`tab.scroll(${describe(opts.selector)})`, spec, "point", null);
@@ -2436,7 +2484,8 @@ export class TernTab implements InProcessRunTab {
 			const box = await this.#target(`tab.drag() ${role} ${JSON.stringify(target)}`, target, "drag", null);
 			return { x: box.x, y: box.y };
 		}
-		if (target && Number.isFinite(target.x) && Number.isFinite(target.y)) return { x: target.x, y: target.y };
+		if (target && Number.isFinite(target.x) && Number.isFinite(target.y))
+			return this.#pointerSpace.toViewport(target);
 		throw new ToolError("Drag target must be a selector string or { x: number, y: number } point");
 	}
 
@@ -2483,12 +2532,13 @@ export class TernTab implements InProcessRunTab {
 		if (!this.#native) await this.#kit("scrollIntoView", [spec]);
 	}
 
-	/** Select `<select>` options by value (then label). */
-	async select(selector: string | TernSelector, ...values: string[]): Promise<string[]> {
+	/** Select `<select>` options by value, label, or zero-based index. */
+	async select(selector: string | TernSelector, ...values: SelectOptionInput[]): Promise<string[]> {
+		const choices = normalizeSelectOptions(values, { coercePrimitives: true });
 		const spec = this.#spec(selector);
 		await this.#target(`tab.select(${describe(selector)})`, spec, "point", null);
 		return await this.#onKit(spec, null, (kitSpec, kitFrame) =>
-			this.#kit<string[]>("select", [kitSpec, values.map(String)], kitFrame),
+			this.#kit<string[]>("select", [kitSpec, choices], kitFrame),
 		);
 	}
 
@@ -2496,7 +2546,8 @@ export class TernTab implements InProcessRunTab {
 	 * Upload files: a file input (or its label) gets the files through Tern's
 	 * native chooser (preset, then opened); any other element gets them dropped.
 	 */
-	async uploadFile(selector: string | TernSelector, ...filePaths: string[]): Promise<void> {
+	async uploadFile(selector: string | TernSelector, ...paths: Array<string | string[]>): Promise<void> {
+		const filePaths = paths.flat();
 		if (filePaths.length === 0) throw new ToolError("tab.uploadFile() requires at least one file path");
 		const cwd = this.#requireRunContext("tab.uploadFile()").session.cwd;
 		const absolute = filePaths.map(filePath => resolveToCwd(filePath, cwd));
@@ -2757,8 +2808,12 @@ export class TernTab implements InProcessRunTab {
 		return tokens.map(token => new TernElementHandle(this, { engine: "handle", token }, null));
 	}
 
-	/** Handle for observation id `id` (from the last `observe()`). */
-	async id(id: number): Promise<TernElementHandle> {
+	/** Handle for observation id `id` (from the last `observe()`); its methods work before it is awaited. */
+	id(id: number): PendingElement<TernElementHandle> {
+		return pendingElement(this.#id(id));
+	}
+
+	async #id(id: number): Promise<TernElementHandle> {
 		const spec: TernSelector = { engine: "id", id };
 		if (this.#native) {
 			// Throws for an id the last observe did not list, and for one whose element left the page.
@@ -2769,8 +2824,12 @@ export class TernTab implements InProcessRunTab {
 		return new TernElementHandle(this, spec, null);
 	}
 
-	/** Handle for ARIA snapshot ref `eN` (from the last `ariaSnapshot()`). */
-	async ref(id: string): Promise<TernElementHandle> {
+	/** Handle for ARIA snapshot ref `eN` (from the last `ariaSnapshot()`); its methods work before it is awaited. */
+	ref(id: string): PendingElement<TernElementHandle> {
+		return pendingElement(this.#ref(id));
+	}
+
+	async #ref(id: string): Promise<TernElementHandle> {
 		const ref = parseAriaRefSelector(id) ?? id.trim();
 		const spec: TernSelector = { engine: "ariaRef", ref };
 		const held = this.#native ? await this.#refThroughKit(spec, null) : null;
@@ -2886,8 +2945,12 @@ export class TernTab implements InProcessRunTab {
 	}
 
 	/** Playwright-format ARIA snapshot (refs resolve through `ref()`/`aria-ref=`). */
-	async ariaSnapshot(selector?: string, opts?: AriaSnapshotOptions): Promise<string | AriaSnapshotDiffResult> {
-		return await this.ariaSnapshotIn(selector, opts, null);
+	async ariaSnapshot(
+		selectorArg?: string | AriaSnapshotOptions,
+		optsArg?: AriaSnapshotOptions,
+	): Promise<string | AriaSnapshotDiffResult> {
+		const { selector, opts } = optionalSelectorArgs(selectorArg, optsArg);
+		return await this.ariaSnapshotIn(selector as string | undefined, opts, null);
 	}
 
 	/** {@link ariaSnapshot} inside `frame`. */
@@ -3006,9 +3069,13 @@ export class TernTab implements InProcessRunTab {
 
 	async #screenshotIn(opts: ScreenshotOptions, frame: FramePath): Promise<string | ScreenshotChangeResult> {
 		const context = this.#requireRunContext("tab.screenshot()");
+		validateScreenshotOptions(opts);
 		screenshotQuality(opts);
 		const threshold = screenshotThreshold(opts.threshold);
 		const changeDetection = opts.ifChanged === true || opts.threshold !== undefined;
+		if (opts.format === "webp") {
+			throw new ToolError('tab.screenshot() format "webp" is Chromium-only; use "png" or "jpeg" here');
+		}
 		const format = opts.format ?? "png";
 		const mime = format === "jpeg" ? "image/jpeg" : "image/png";
 		let annotation: TernAnnotation | undefined;
@@ -3061,47 +3128,25 @@ export class TernTab implements InProcessRunTab {
 			change = { changed, revision, pixelChangeRatio };
 			if (!changed) return change;
 		}
-		const resized = await resizeImage(
-			{ type: "image", data: buffer.toString("base64"), mimeType: mime },
+		const dest = await emitScreenshot(
 			{
-				maxWidth: 1024,
-				maxHeight: 1024,
-				maxBytes: 150 * 1024,
-				jpegQuality: 70,
-				excludeWebP: context.session.excludeWebP,
+				bytes: buffer,
+				mimeType: mime,
+				area: screenshotArea(opts),
+				scale,
+				keepCapture: opts.format !== undefined,
+				path: opts.path === undefined ? undefined : resolveToCwd(opts.path, context.session.cwd),
+				silent: opts.silent,
+				notes: opts.annotate ? [formatScreenshotLegend(legend)] : undefined,
 			},
+			{
+				session: context.session,
+				output: context.output,
+				screenshots: context.screenshots,
+				pointer: this.#pointerSpace,
+			},
+			this.#signal,
 		);
-		throwIfAborted(this.#signal);
-		const saveFullRes = !!context.session.browserScreenshotDir || opts.format !== undefined;
-		const savedBuffer = saveFullRes ? buffer : Buffer.from(resized.buffer);
-		const savedMimeType = saveFullRes ? mime : resized.mimeType;
-		const ext = savedMimeType === "image/webp" ? "webp" : savedMimeType === "image/jpeg" ? "jpg" : "png";
-		const dest = context.session.browserScreenshotDir
-			? path.join(
-					context.session.browserScreenshotDir,
-					`screenshot-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1)}.${ext}`,
-				)
-			: path.join(os.tmpdir(), `omp-sshots-${Snowflake.next()}.${ext}`);
-		await Bun.write(dest, savedBuffer);
-		throwIfAborted(this.#signal);
-		context.screenshots.push({
-			dest,
-			mimeType: savedMimeType,
-			bytes: savedBuffer.length,
-			width: resized.width,
-			height: resized.height,
-		});
-		if (!opts.silent) {
-			const lines = formatScreenshot({
-				saveFullRes,
-				dest,
-				resized,
-				capture: { area: screenshotArea(opts), scale },
-			});
-			if (opts.annotate) lines.push(formatScreenshotLegend(legend));
-			context.output.push({ type: "text", text: lines.join("\n") });
-			context.output.push({ type: "image", data: resized.data, mimeType: resized.mimeType });
-		}
 		return change ? { ...change, path: dest } : dest;
 	}
 
@@ -3235,6 +3280,7 @@ export class TernTab implements InProcessRunTab {
 
 	/** Change the automatic dialog policy (null: alerts accepted, confirms/prompts held). */
 	async setDialogs(policy: DialogPolicy | null): Promise<void> {
+		assertDialogPolicy(policy);
 		await this.#op("dialogs", { policy: policy ?? "default" });
 		await this.#pull();
 		if (policy && this.#pendingDialog) await this.handleDialog({ accept: policy === "accept" });
@@ -3243,7 +3289,8 @@ export class TernTab implements InProcessRunTab {
 	// ─── Emulation and clipboard ──────────────────────────────────────────
 
 	/** Merge emulation overrides; unsupported ones throw before anything applies. */
-	async emulate(options: BrowserEmulateOptions = {}): Promise<BrowserEmulateOptions> {
+	async emulate(input: unknown = {}): Promise<BrowserEmulateOptions> {
+		const options = validateEmulateOptions(input);
 		if (options.timezone !== undefined && options.timezone !== null) {
 			throw this.#unsupported(
 				"emulate",
@@ -3255,6 +3302,12 @@ export class TernTab implements InProcessRunTab {
 				"emulate",
 				"extra HTTP headers cannot be added to the web view's navigations and subresources",
 			);
+		}
+		if (options.viewport?.isMobile || options.viewport?.hasTouch) {
+			throw this.#unsupported("emulate", "the web view has no mobile or touch viewport emulation");
+		}
+		if (options.media !== undefined && options.media !== null) {
+			throw this.#unsupported("emulate", "the CSS media type cannot be overridden in the web view");
 		}
 		if (options.reducedMotion !== undefined) {
 			throw this.#unsupported(
@@ -4095,7 +4148,7 @@ export class TernElementHandle {
 	}
 
 	/** Select options. */
-	async select(...values: string[]): Promise<string[]> {
+	async select(...values: SelectOptionInput[]): Promise<string[]> {
 		return await this.#tab.select(this.#spec, ...values);
 	}
 
@@ -4338,11 +4391,12 @@ export class TernPageFacade {
 			down: key => tab.keyDown(key),
 			up: key => tab.keyUp(key),
 		};
+		// Raw page input takes viewport CSS pixels, as Puppeteer's does: no screenshot frame applies.
 		this.mouse = {
-			move: (x, y, options) => tab.mouseMove(x, y, options),
+			move: (x, y, options) => tab.mouseMove(x, y, { steps: options?.steps, css: true }),
 			down: options => tab.mouseDown(options),
 			up: options => tab.mouseUp(options),
-			click: (x, y, options) => tab.clickAt(x, y, { button: options?.button, count: options?.count }),
+			click: (x, y, options) => tab.clickAt(x, y, { button: options?.button, count: options?.count, css: true }),
 			wheel: delta => tab.wheel(delta.deltaX ?? 0, delta.deltaY ?? 0),
 		};
 	}

@@ -528,7 +528,7 @@ describe("AgentSession bash session ownership", () => {
 				inputBytes: 23,
 				outputBytes: 10,
 			});
-			return { ...bashResult, output: artifactId ? `[raw output: artifact://${artifactId}]` : "missing artifact" };
+			return { ...bashResult, output: artifactId ? `[raw output: local://${artifactId}.log]` : "missing artifact" };
 		});
 
 		const bashPromise = session.executeBash("large old-session command");
@@ -554,7 +554,7 @@ describe("AgentSession bash session ownership", () => {
 					entry =>
 						entry.type === "message" &&
 						entry.message.role === "bashExecution" &&
-						entry.message.output.includes(`artifact://${artifactId}`),
+						entry.message.output.includes(`local://${artifactId}.log`),
 				),
 		).toBe(true);
 	});
@@ -574,7 +574,7 @@ describe("AgentSession bash session ownership", () => {
 				inputBytes: 20,
 				outputBytes: 9,
 			});
-			return { ...bashResult, output: artifactId ? `[raw output: artifact://${artifactId}]` : "discarded" };
+			return { ...bashResult, output: artifactId ? `[raw output: local://${artifactId}.log]` : "discarded" };
 		});
 
 		const bashPromise = session.executeBash("dropped-session-command");

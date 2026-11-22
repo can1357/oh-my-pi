@@ -1,7 +1,7 @@
 Generate a speech audio file from text and write it to output_path.
 
 Models are selected through the speech role and its fallback chain:
-- local-inference: on-device neural TTS (Kokoro-82M via the bundled ONNX runtime)
+- local-inference: on-device neural TTS (Phonon 31M, native runtime)
   - no network; always WAV/PCM16
   - voice set by tts.localVoice — {{localVoices}}
 - xai-tts: xAI Grok Voice; MP3 or WAV

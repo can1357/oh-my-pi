@@ -214,6 +214,10 @@ export class MojeekProvider extends SearchProvider {
 		return true;
 	}
 
+	override isKeyless(): boolean {
+		return true;
+	}
+
 	search(params: SearchParams): Promise<SearchResponse> {
 		return searchMojeek(params);
 	}

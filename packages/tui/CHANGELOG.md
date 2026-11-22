@@ -2,6 +2,176 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `AGENT_KILL_LABEL`, `InterruptReason` and `isInterruptReason` so hosts can tell a parent agent's kill apart from a user interrupt ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
+
+### Fixed
+
+- `prewalkWouldBeNoop` no longer skips a handoff when only the model's upstream pin changes ([#19664](https://github.com/can1357/oh-my-pi/pull/19664) by [@taibenvenuti](https://github.com/taibenvenuti)).
+- Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
+- Fixed `<svg>` pictures blinking in ask forms whose questions overflow the panel ([#20017](https://github.com/can1357/oh-my-pi/pull/20017) by [@jaredlyon](https://github.com/jaredlyon))
+- Fixed the status line's `time_spent` readout freezing within a wall-clock second while a turn is active; the displayed tenths now advance at their own visible granularity ([#20064](https://github.com/can1357/oh-my-pi/pull/20064) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed Enter pressed again on a model row just assigned to a role removing that role and falling back to the default role's model ([#12310](https://github.com/can1357/oh-my-pi/issues/12310), [#19986](https://github.com/can1357/oh-my-pi/pull/19986) by [@JamieJ5926](https://github.com/JamieJ5926))
+- The quick model picker (alt+p) in a session limited by `--models` or `enabledModels` now lists models the catalog gained since the session started, as the unlimited picker does ([#19878](https://github.com/can1357/oh-my-pi/pull/19878) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [19.1.0] - 2026-11-21
+
+### Breaking Changes
+
+- Retired the `ComposerPreferences.completeScrollback`, `TranscriptContainer.completeScrollback`, and `Composer.setRunActive` APIs, along with the `transientChrome`, `selfClearingChrome`, and `billedChrome` options of `Composer.setRuntimeChildren`. Retirement now consistently uses the height left by on-screen chrome.
+- Moved `convertImageToPng`, `convertImageToPngShared`, `cachedPngConversion`, and `imagePayloadKey` from `@oh-my-pi/pi-tui/chat/image-loading` to `@oh-my-pi/pi-tui/png-conversion`.
+- Replaced `OutputSinkOptions.artifactPath` and `artifactId` with the `allocateArtifact` (`ArtifactAllocator`) callback, which allocates an artifact only when output first exceeds its inline view.
+- Removed the `windows-altgr` module; Windows AltGr recovery is now provided by `translateWindowsAltGrSequence` in `@oh-my-pi/pi-natives`.
+
+### Added
+
+- The editor now displays described changes for `magic` mode as Markdown in the transcript while it waits for the apply model to return final diffs.
+- The UI now responds to terminal `features` events without waiting for a new hello message.
+
+### Changed
+
+- Tool commands run inside a bash call render as nested tool cards in the bash card
+- Tool activity and job titles show the brief label of a structured intent; the Spotlight inspector still exposes the full request.
+- Improved transcript layout around docked reports, waiting asks, completion lists, dialogs, todo lists, subagent panels, queued messages, and other lower-screen chrome so visible content and reclaimed rows behave more predictably.
+- Native chat and web search cards now present tool results and sources more clearly, including expandable page excerpts, multi-line titles, and a unified sources grid.
+- Windows console VT input and AltGr handling now use the native terminal integration.
+- Background jobs and running Bash commands now provide live, step-specific output for pipelines, redirects, and command stages, with controls to switch streams or follow the live output. Job cards also show the active command step and more compact metadata.
+- Bash command footers now use a compact, icon-based layout for timing, exit status, job and process details, artifacts, and minimizers.
+
+### Fixed
+
+- Fixed the TUI freezing at 100% CPU while streaming text that begins with a blank line followed by a line containing `|`.
+- Fixed the TUI freezing when charting a table whose numbers overflow (`1e400`, a `p999…` header with hundreds of digits, a `1e-300 → 1e300` change) or sit above 2^53 and differ only slightly.
+- Fixed the editor freezing when a vim count is typed with hundreds of digits; counts now cap at 99,999.
+- Fixed Windows input mode freezing on a key record with an impossibly large repeat count.
+- Fixed backward character jump (`Ctrl+Alt+]`) at the start of a line finding the cursor's own character instead of searching earlier lines.
+- Fixed light-theme detection inside Zellij when the terminal reports a light background.
+- Preserved custom foreground colors and text styles in status-line segments while continuing to apply the accent color to unstyled statuses.
+- Fixed transcript rows and tool cards disappearing or appearing truncated when overlays and panels were open.
+- Fixed cursor flicker in kitty terminals during spinner updates.
+- Preserved background colors on truncated rows while scrolling.
+- Fixed WebP and JPEG images rendering as blank gaps on Kitty graphics-compatible terminals when displayed through a bare `Image`.
+- Improved terminal output handling so large repaints remain row-safe and slow or unavailable terminal writers no longer freeze input.
+- Preserved prefilled or hidden `__proto__` controls when ask HTML forms time out.
+- A single-question ask form now submits on the first Enter press.
+- Improved native-terminal ask forms so answering long questions no longer causes the entire card to resize and stall on every movement.
+
+## [19.0.1] - 2026-11-19
+
+### Added
+
+- The native session sheet shows a `Local` report line (the session's `local://` directory) as a copyable field beside the ID and file ([#19778](https://github.com/can1357/oh-my-pi/pull/19778) by [@farnoy](https://github.com/farnoy))
+
+### Fixed
+
+- Fixed images from a previous session reappearing at the top-left of the screen after `/new` in herdr-app ([#19749](https://github.com/can1357/oh-my-pi/pull/19749) by [@jaredlyon](https://github.com/jaredlyon))
+- Loop-stall diagnostics (`ui.loop-blocked`) no longer sample the JS thread while no TUI runs, such as in an external editor or after the session ends ([#19703](https://github.com/can1357/oh-my-pi/pull/19703) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the usage dashboard rendering exhausted or pressured usage rows without a quota bar (prepaid balances, spent quotas) as dim informational text; they now take the error or warning color their reported status calls for, and a spent quota with no measurable amount reads "exhausted" instead of "no data" ([#19764](https://github.com/can1357/oh-my-pi/issues/19764))
+
+## [19.0.0] - 2026-11-18
+
+### Breaking Changes
+
+- Full-output references and the `[raw output: …]` footer now use `local://N.log` instead of `artifact://N`.
+
+### Added
+
+- Added the `btw` composer mode, including the `btwMode` theme color in all bundled themes.
+- Added feature-gated native docking for runtime children, allowing components to appear only on terminals that advertise the required capability.
+- Added options to preserve intraword underscores when stripping inline Markdown and to open `JobsSheet` on a selected job.
+- Custom message payloads can now be excluded from model context while remaining available in normalized and restored saved entries.
+- Added transcript blocks for output reported by running background jobs and services.
+
+### Changed
+
+- Reworked ask dialogs into a single stacked flow: the active question stays open while answered questions fold into compact summaries with their selected options visible. This applies across terminal and native interfaces and improves keyboard navigation, sizing, and host composer integration.
+- Improved composer behavior while an ask dialog is pending: the composer indicates that typing there will skip the question, folds to a compact state when appropriate, and offers an explicit Skip & send action for drafts that bypass the ask.
+- Added support for folded and faint composer states and clearer visual indication when the interface is awaiting an answer.
+- Model search now supports `provider/model` queries, prioritizing exact provider matches and searching that provider's model IDs first.
+
+### Fixed
+
+- Improved background-job notices in Tern by grouping all output under one header and showing the complete lines.
+- Fixed Tern composer handling of `->` and `=>` so typing them no longer unexpectedly inserts a line break.
+- Fixed web search results without a synthesized answer to show each source once with a concise cleaned excerpt.
+- Fixed long Tern tool-approval prompts so their details scroll within the available window and the choices and Approve/Deny controls remain visible.
+- Fixed table chart unit display and change-factor calculations for measurements with scaled units.
+- Fixed checkbox groups so pressing Enter with nothing selected first checks the focused box.
+- Ask forms now open each question with its preselected answer, allowing Enter to accept the recommendation without replacing it.
+
+## [18.22.2] - 2026-11-18
+
+### Added
+
+- `ui.loop-blocked` log records now name what held the event loop (`cause`, `causeShare`, `top`), sampled by an always-on profiler; `PI_LOOP_SAMPLER=0` turns it off
+
+### Changed
+
+- On Windows, terminal output is written off the JS thread, so input and rendering stay responsive while the console drains a large repaint
+
+### Fixed
+
+- On Windows, omp no longer freezes when the terminal stops reading its output (a hung Windows Terminal, a paused ssh client); it keeps running and catches up once the terminal reads again
+
+## [18.22.1] - 2026-11-17
+
+### Added
+
+- Task tool and agent hub rows now use distinct, theme-aware colours for the main agent and subagents; themes can optionally customize the six subagent colours.
+- Added word wrapping for table columns and rows, preserving hard line breaks so long table content remains readable.
+
+### Changed
+
+- Improved terminal UI responsiveness and reduced CPU usage while streaming long responses, monitoring the event loop, and typing with macOS spell checking enabled.
+- Status account identities can now include an optional credential ID, allowing usage to be attributed to API-key accounts and cached usage to refresh when the credential changes.
+
+### Fixed
+
+- Images in Ask forms now render correctly in Kitty-protocol terminals, including Kitty, Ghostty, and herdr.
+- Fixed model mentions followed by punctuation so they become editable chips without consuming the punctuation.
+- Fixed /copy to copy the visible prose from mid-turn out:// replies, including replies sent by commands, instead of the tool's internal result text.
+
+## [18.22.0] - 2026-11-16
+
+### Breaking Changes
+
+- Terminals that support output backpressure must now implement onOutputDrain(callback), which returns an unsubscribe function; terminals without backpressure can omit both pendingOutputBytes and onOutputDrain.
+- Updated PlanReviewOverlay options to use PlanReviewOverlayChoice objects and report choice IDs to onPick and selectOption. Refine and Save actions now reflect plan feedback and saving behavior; removed disabledIndices and externalEditorName, and updated describe to receive DescribeContext.
+
+### Added
+
+- Added configurable model search placement, provider scopes, and an optional thinking-level slider to ModelPickerComponent; selected thinking levels are reported through onPick metadata. The native picker sheet now supports anchoring, scope styling, level display, and icon actions.
+- Added a native plan review document and dock with editable and commentable plans, quote annotations, plan-edit notifications, Approve, Save, and Cancel actions, plus model selection.
+
+### Changed
+
+- Provider scopes now show only the selected provider's models when a provider is chosen, with scope cycling able to return to the full model list.
+- Updated thinking-level controls to use left and right arrow keys, and refreshed the slider and footer hint presentation.
+- Retitled the plan-saving overlay to “Save plan” and updated its action label.
+
+### Fixed
+
+- Fixed slow scrolling and typing in long agent transcripts.
+- Fixed slow typing and cursor movement in drafts longer than 256 lines.
+
+## [18.21.0] - 2026-11-16
+
+### Added
+
+- Added support for pasting images into `HtmlFormDialog` option notes when opened with `acceptImages`, including image attachment, removal, and access to retained images through `OptionNote.images`.
+- Added live web-page and image rendering in assistant replies for supported terminals, including inline images and embedded page previews. Added the `/btw` transcript note for sharing side topics without interrupting the main conversation.
+
+### Changed
+
+- Improved reasoning-capability discovery so models awaiting discovery follow the session's thinking default and offer automatic thinking in addition to disabled and effort-level settings.
+- Renamed the public `html-form/media` APIs to `media`, including `loadMedia`, `Media`, and `MAX_MEDIA_BYTES`.
+
+### Fixed
+
+- Fixed fallback model selection so roles are offered only models they can use, excluding incompatible image and speech models.
+- Fixed macOS spelling assistance, autocorrect, replacements, and word completion for shell (`!`) and Python (`$`) drafts.
+
 ## [18.20.1] - 2026-11-14
 
 ### Added
@@ -2518,48 +2688,4 @@
 
 - Added support for asynchronous `onSubmit` handlers by allowing the callback to return a `Promise<void>`
 
-## [15.10.11] - 2026-06-10
-
-### Added
-
-- `SettingsList` now supports type-to-search filtering with Escape clearing an active query before canceling.
-
-### Changed
-
-- Preserved list selection by item ID when replacing settings so focus stays on the same setting
-- Displayed a no matching settings message and search-editing hint when filtering returns no matches
-- Expanded settings search matching to include IDs, current values, descriptions, and option values as well as labels
-- Raised the stdin split-escape flush window from 10ms to 50ms: over laggy links (ssh, slow multiplexers) a CSI sequence split across reads was flushed as literal data, leaking `[` + `A` style fragments into the editor as typed text
-- Lengthened the OSC 11 appearance poll on terminals without Mode 2031 from 2s to 30s — each poll's query write cleared the user's active text selection, breaking copy every two seconds on Alacritty/Warp/older WezTerm
-- Rewrote `StdinBuffer.extractCompleteSequences` to index-based scanning: the previous per-iteration `slice` + `Array.from(remaining)[0]` made plain-text bursts O(n²), turning a 100KB non-bracketed paste into a multi-second freeze
-- Capped the editor undo stack at 100 entries with word-level coalescing of consecutive single-character inserts (matching `Input`), capped the kill ring at 60 entries, cached word-wrap layout per (line, width) so each render and key handler shares one wrap pass, and batched ≤1000-char single-line pastes into one insert + one trigger-detection pass instead of per-character replay
-- Virtualized the frame pipeline around a stable-prefix contract — the renderer no longer does O(total transcript) work per frame. `Component.render` now returns `readonly string[]`: results are component-owned, callers must not mutate them, and an unchanged component returns the same array reference (reference equality proves byte-identical rows). `Container.render` memoizes its concatenation on child references (children are still rendered every frame for their side effects); `Box` replaced its content-hashing cache with the same child-reference memo (no more per-frame `leftPad + line` rebuilds and full-content hashing); `Markdown`, `Spacer`, and `TruncatedText` return their cached arrays by reference instead of defensive copies. The TUI composes a persistent frame from per-child segments and an opt-in `RenderStablePrefix` report (consumable floor semantics for in-place mutators like the transcript), so marker extraction, line preparation (persistent prepared-frame replacing the per-frame rebuilt cache arrays), and the committed-prefix audit now run only over rows at/after the first changed row instead of every line of the transcript every frame
-- Rewrote the render core around an append-only native-scrollback contract. Committed rows are immutable: rows enter terminal history exactly once, in order, when the component-reported commit boundary (`NativeScrollbackLiveRegion`) marks them final, and the visible window repaints in place with relative moves. The engine no longer probes the terminal's scroll position or guesses whether a destructive rebuild is safe — the entire ED3-risk/defer/checkpoint machinery (viewport probes, eager streaming mode, dirty-scrollback reconciliation, deferred shrink/mutation intents, streaming high-water rebuilds, ConPTY-specific defer paths) is deleted. ED3 (`CSI 3 J`) now fires only on explicit user gestures: session replace, resize outside multiplexers, and `resetDisplay()`. This structurally removes the yank / flash / duplicated-rows / invisible-until-resize failure families tracked across #1610, #1635, #1651, #1682, #1719, #1746, #1799, #1823, #1962, #1974, #2000, #2011, #2154.
-- A frame that shrinks into its committed prefix re-anchors the visible window at the new tail and restarts commit bookkeeping; previously committed rows stay in history (history is never rewritten without a gesture).
-- Overlays now composite into the visible window slice only and freeze commits while visible, so overlay pixels can never enter native scrollback and closing an overlay no longer triggers a destructive history rebuild.
-- Inline-image budget demotion now deletes the demoted image's graphics by id and lets the window diff repaint the text fallback — no more mid-session destructive full replay when the image cap is exceeded.
-- The render-stress harness now validates the contract with a shadow commit ledger (an independent reimplementation of the ledger math fed only by observed frames and bytes), asserting scrollback equals the committed prefix row-for-row and that tape growth matches physical scroll exactly, across randomized op sequences, resizes, overlays, and multiplexer scenarios. The ghostty-web virtual terminal additionally survives libghostty-vt 0.4's WASM allocator traps via an event-log replay/compaction recovery, and strips non-spacing combining marks on input (a margin-aligned combining cluster deterministically corrupts that engine; mark placement through it was already unverifiable).
-
-### Fixed
-
-- Fixed Windows rendering degrading into CP437 mojibake (`Γöé`/`ΓöÇ` instead of box-drawing borders and Nerd Font glyphs) after a console-sharing child process changed the console codepage (e.g. PHP CLI's implicit `chcp`, php.net request #73716): the breakage stayed latent until the next full repaint such as ctrl+o expand. The terminal now re-asserts the UTF-8 codepage (output and input) before each stdout write
-- Fixed crash recovery leaving the shell unusable: `emergencyTerminalRestore` (and `terminal.stop()`) never left the alt screen nor disabled mouse tracking, so a crash during a fullscreen overlay stranded the user on the alternate buffer with any-motion mouse reporting spewing escape garbage until a manual `reset`
-- Fixed bracketed paste with a lost `ESC[201~` end marker (ssh/tmux truncation) silently eating all subsequent input forever while growing memory unboundedly — paste mode now has an inactivity watchdog (1s) and a byte cap (64 MiB) that exit paste mode and deliver the accumulated bytes through the paste event
-- Fixed vertical cursor movement using UTF-16 code units as visual columns: Up/Down over emoji/CJK lines could land the cursor mid-surrogate-pair, rendering a lone surrogate and permanently corrupting the buffer on the next insert; movement now walks graphemes and snaps the target offset to a cluster boundary, also fixing column drift across wide glyphs
-- Fixed cursor positions inside whitespace trimmed at a word-wrap boundary mapping to no layout line — the cursor vanished and the viewport jumped to the buffer's last line; the preceding chunk now owns the skipped whitespace run
-- Fixed word-delete and kill-to-line operations (Ctrl+W/Alt+D/Ctrl+U/Ctrl+K) cutting through atomic paste markers, leaving `[Paste #1, +30` junk that no longer expanded to the pasted content on submit — delete ranges now extend over any atomic token they intersect
-- Fixed the kitty CSI-u printable dedup swallowing a real keystroke arbitrarily long after the duplicated event; the pending codepoint now expires after 25ms
-- Fixed `resetDisplay()` being a no-op on the alt screen: the redraw gesture could not repair a corrupted fullscreen modal because `#emitAltFrame` skipped identical-string repaints without consulting the force-repaint flag
-- Fixed the ghostty initial-image paint deferral consuming resize/cursor state before abandoning the frame, which could misclassify the deferred render's reflow and corrupt the paint — the deferral check now runs before any frame state is touched
-- Fixed the terminal-cursor inline-hint branch adding the full hint width to the line accounting even though the rendered hint was truncated, misaligning right padding whenever the hint overflowed
-- Fixed nested markdown list detection sniffing for hardcoded `\x1b[36m` (chalk cyan): every shipped theme emits truecolor/256-color SGR for bullets, so nested items doubled their indentation per level on all real themes; nesting is now tagged structurally by the list renderer. Ordered-list continuation lines also hang by the actual bullet width, so wrapped text under `10.`+ items aligns
-- Fixed committed transcript rows silently vanishing when a component re-laid-out content the engine had already scrolled into native history — a TTSR stream rewind truncating a streamed block, or the image budget demoting a committed inline image to its one-line fallback, shifted every row below by the height delta and the engine kept committing from the stale index, skipping that many rows of everything after (missing interruption banners, half-cut images in scrollback). The engine now audits its committed prefix every ordinary frame: an in-place edit or restyle keeps its alignment (stale styling in history remains the accepted artifact), while any shift re-anchors the commit index at the first moved row and recommits from there — history keeps the stale copy and gains a fresh one. Duplication, never loss. The detector (`findCommittedPrefixResync`, exported for the stress harness's shadow ledger) samples the prefix tail SGR-stripped so theme restyles and single-row edits never trigger spurious recommits.
-- Fixed budget-demoted inline images shrinking their transcript block: the text fallback is now height-preserving once a graphic has rendered (reserved rows plus the fallback line), so demotion never shifts content below a committed image.
-- Fixed stale trailing cells bleeding into committed history on combining-heavy rows: the native width model can over-count Arabic/combining clusters, classifying a short-rendering row as full-width and skipping the trailing erase — the previous occupant's cells then scrolled into scrollback baked into the committed row. Non-ASCII row rewrites now erase the line before writing.
-
-### Removed
-
-- Removed the probe/defer API surface: `TUI.setEagerNativeScrollbackRebuild()`, `TUI.refreshNativeScrollbackIfDirty()`, `TUI.setClearOnShrink()`/`getClearOnShrink()`, `RenderRequestOptions.allowUnknownViewportMutation`, `NativeScrollbackRefreshOptions`, `Terminal.isNativeViewportAtBottom()`, `Terminal.hasEagerEraseScrollbackRisk()`, and the `eagerEraseScrollbackRisk`/`submitPinsViewportToTail` capability fields with their detectors.
-- Removed the `PI_TUI_ED3_SAFE`, `PI_CLEAR_ON_SHRINK`, and `PI_TUI_DEBUG` environment variables (the levers they tuned no longer exist; `PI_DEBUG_REDRAW` now logs the commit-ledger state per frame).
-
-Older entries are archived in [packages/tui/CHANGELOG.md@89a034e2c7df](https://github.com/can1357/oh-my-pi/blob/89a034e2c7dfe2e55f68ce21eb86e6b9c905faf9/packages/tui/CHANGELOG.md).
+Older entries are archived in [packages/tui/CHANGELOG.md@a95c0a0773af](https://github.com/can1357/oh-my-pi/blob/a95c0a0773afdfdc7f1f40ef21e79af46c86c11e/packages/tui/CHANGELOG.md).

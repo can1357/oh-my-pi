@@ -12,6 +12,7 @@ import {
 } from "@oh-my-pi/pi-catalog/hosts";
 import {
 	defaultSupportedEffort,
+	GOOGLE_THINKING_BUDGETS,
 	mapEffortToAnthropicAdaptiveEffort,
 	mapEffortToGoogleThinkingLevel,
 	requireSupportedEffort,
@@ -28,6 +29,7 @@ import {
 	resolveNextAuthRetryKey,
 } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
+import { withProbedThinking } from "./thinking-probe";
 import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
@@ -44,10 +46,12 @@ import { type FactoryDroidOptions, streamFactoryDroid } from "./providers/factor
 import { streamGitLabDuo } from "./providers/gitlab-duo";
 import { type GitLabDuoWorkflowOptions, streamGitLabDuoWorkflow } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
+import { perturbContext } from "./prompts/perturbation";
 import { getVertexAccessToken } from "./providers/google-auth";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
 import { streamKimi } from "./providers/kimi";
+import type { KiroOptions } from "./providers/kiro/stream";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import { streamPiNative } from "./providers/pi-native-client";
@@ -63,12 +67,15 @@ import {
 	streamGoogle,
 	streamGoogleGeminiCli,
 	streamGoogleVertex,
+	streamKiro,
 	streamOllama,
 	streamOpenAICodexResponses,
 	streamOpenAICompletions,
 	streamOpenAIResponses,
 } from "./providers/register-builtins";
+import { getProviderHooks } from "./provider-hooks";
 import { getProviderDefinition } from "./registry";
+import type { PreparedProviderRequest } from "./registry/types";
 import type {
 	Api,
 	AssistantMessage,
@@ -86,6 +93,7 @@ import { getHeaderCaseInsensitive, resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
+import { withResolvedHeaders } from "./utils/model-headers";
 import { withThinkingLoopGuard } from "./utils/thinking-loop";
 import { withTransportFetch } from "./utils/transport-fetch";
 
@@ -842,15 +850,12 @@ function withResolvedModelHeaders<TApi extends Api>(
 	signal: AbortSignal | undefined,
 	run: (resolvedModel: Model<TApi>) => AssistantMessageEventStream,
 ): AssistantMessageEventStream {
-	const resolveHeaders = model.resolveHeaders;
-	if (!resolveHeaders) return run(model);
+	if (!model.resolveHeaders) return run(model);
 
 	const outer = new AssistantMessageEventStream();
 	void (async () => {
 		try {
-			const headers = await untilAborted(signal, () => resolveHeaders(signal));
-			signal?.throwIfAborted();
-			const inner = run({ ...model, resolveHeaders: undefined, headers: headers ? { ...headers } : undefined });
+			const inner = run(await withResolvedHeaders(model, signal));
 			for await (const event of inner) {
 				outer.push(event);
 				if (outer.done) return;
@@ -887,6 +892,13 @@ export function stream<TApi extends Api>(
 	);
 }
 
+/** Applies the provider's own model normalization and request shaping ahead of its api adapter. */
+function prepareProviderRequest(model: Model<Api>, options: StreamOptions): PreparedProviderRequest {
+	const definition = getProviderDefinition(model.provider);
+	const requestModel = definition?.prepareModel?.(model) ?? model;
+	return definition?.prepareRequest?.(requestModel, options) ?? { model: requestModel, options };
+}
+
 function streamDispatch<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
@@ -894,12 +906,24 @@ function streamDispatch<TApi extends Api>(
 	limited: boolean,
 ): AssistantMessageEventStream {
 	// A provider turned off in its auth rules is never called, even with a key passed in directly.
+	context = perturbContext(model, context);
 	assertProviderEnabled(model.provider);
 	const requestOptions = withSupportedSamplingParams(
 		model,
 		withTransportFetch(model, (options || {}) as StreamOptions),
 	) as OptionsForApi<TApi>;
 	assertExplicitOpenAIResponsesPromptCacheSupport(model, requestOptions);
+
+	// A provider hook owns every request to the provider, ahead of api-level dispatch.
+	const hooks = getProviderHooks(model.provider);
+	if (hooks?.stream) {
+		const prepared = prepareProviderRequest(model, requestOptions as StreamOptions);
+		return hooks.stream(prepared.model, context, {
+			...prepared.options,
+			apiKey: prepared.options.apiKey || getEnvApiKey(prepared.model.provider),
+			waitForTerminalDrain: limited,
+		});
+	}
 
 	// Check custom API registry first (extension-provided APIs like "vertex-claude-api")
 	const customApiProvider = getCustomApi(model.api);
@@ -944,11 +968,10 @@ function streamDispatch<TApi extends Api>(
 		});
 	}
 
-	const providerDefinition = getProviderDefinition(model.provider);
-	const requestModel = providerDefinition?.prepareModel?.(model) ?? model;
-	const prepared = providerDefinition?.prepareRequest?.(requestModel, requestOptions as StreamOptions);
-	const providerModel = prepared?.model ?? requestModel;
-	const preparedOptions = prepared?.options ?? (requestOptions as StreamOptions);
+	const { model: providerModel, options: preparedOptions } = prepareProviderRequest(
+		model,
+		requestOptions as StreamOptions,
+	);
 	const apiKey = preparedOptions.apiKey || getEnvApiKey(providerModel.provider);
 	if (!apiKey) {
 		throw new AIError.MissingApiKeyError(providerModel.provider);
@@ -1019,6 +1042,9 @@ function streamDispatch<TApi extends Api>(
 
 		case "ollama-chat":
 			return streamOllama(providerModel as Model<"ollama-chat">, context, providerOptions as OllamaChatOptions);
+
+		case "kiro-api":
+			return streamKiro(providerModel as Model<"kiro-api">, context, providerOptions as KiroOptions);
 
 		case "cursor-agent":
 			return streamCursor(providerModel as Model<"cursor-agent">, context, providerOptions as CursorOptions);
@@ -1215,8 +1241,7 @@ export function streamSimple<TApi extends Api>(
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
 	const sessionOptions = withInferenceSessionId(options);
-	// Unverified thinking is opt-in: without a requested effort the request is
-	// byte-identical to a non-reasoning model's.
+	// Requests without an effort keep unknown thinking controls off the wire.
 	const effortRequested =
 		sessionOptions.reasoning !== undefined && !sessionOptions.disableReasoning && !sessionOptions.forceReasoningOff;
 	if (!effortRequested) model = withoutUnverifiedThinking(model);
@@ -1421,6 +1446,14 @@ function streamSimpleRequest<TApi extends Api>(
 		);
 	}
 
+	return withProbedThinking(model, context, requestOptions, streamSimpleDispatch);
+}
+
+function streamSimpleDispatch<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	requestOptions: SimpleStreamOptions,
+): AssistantMessageEventStream {
 	// Pi-native transport short-circuits the per-provider dispatch entirely:
 	// the gateway resolves provider + credential server-side, so we don't
 	// need an `apiKey` from `getEnvApiKey` here — `options.apiKey` carries
@@ -1452,6 +1485,13 @@ function streamSimpleRequest<TApi extends Api>(
 				return streamPiNative(model, context, nativeOptions);
 			}),
 		);
+	}
+
+	// A hooked provider keeps its api's option mapping; stream() then hands the request to the hook.
+	if (getProviderHooks(model.provider)?.stream) {
+		const providerModel = getProviderDefinition(model.provider)?.prepareModel?.(model) ?? model;
+		const apiKey = typeof requestOptions.apiKey === "string" ? requestOptions.apiKey : getEnvApiKey(model.provider);
+		return stream(providerModel, context, mapOptionsForApi(providerModel, requestOptions, apiKey));
 	}
 
 	// Check custom API registry (extension-provided APIs)
@@ -1596,15 +1636,6 @@ export const ANTHROPIC_THINKING: Record<Effort, number> = {
 	max: 32768,
 };
 
-const GOOGLE_THINKING: Record<Effort, number> = {
-	minimal: 1024,
-	low: 4096,
-	medium: 8192,
-	high: 16384,
-	xhigh: 24575,
-	max: 32768,
-};
-
 /**
  * Estimated thinking spend for an effort, used to size Google's
  * `maxOutputTokens` (Gemini counts thinking against it). Level mode and the
@@ -1615,7 +1646,7 @@ function googleThinkingHeadroom(model: Model<Api>, effort: Effort, customBudgets
 	const custom = customBudgets?.[effort];
 	if (custom !== undefined && custom > 0) return custom;
 	const catalog = model.thinking?.effortBudgets?.[effort];
-	return catalog !== undefined && catalog > 0 ? catalog : GOOGLE_THINKING[effort];
+	return catalog !== undefined && catalog > 0 ? catalog : GOOGLE_THINKING_BUDGETS[effort];
 }
 
 /**
@@ -1877,9 +1908,11 @@ function mapOptionsForApi<TApi extends Api>(
 		fallbacks: options?.fallbacks,
 		acceptEmptyResponse: options?.acceptEmptyResponse,
 		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,
+		omitDemotedReasoning: options?.omitDemotedReasoning,
 		anthropicCompaction: options?.anthropicCompaction,
 		anthropicSlowMode: options?.anthropicSlowMode,
 		userProfileId: options?.userProfileId,
+		prewarm: options?.prewarm,
 		...simpleProviderOptions,
 	};
 
@@ -2242,7 +2275,9 @@ function mapOptionsForApi<TApi extends Api>(
 				}
 
 				let thinkingBudget =
-					options.thinkingBudgets?.[effort] ?? model.thinking?.effortBudgets?.[effort] ?? GOOGLE_THINKING[effort];
+					options.thinkingBudgets?.[effort] ??
+					model.thinking?.effortBudgets?.[effort] ??
+					GOOGLE_THINKING_BUDGETS[effort];
 
 				// Caller's maxTokens is desired output, so add thinking budget on top. With no caller/model cap, use a finite total fallback.
 				const maxTokens = maxTokensWithThinkingBudget(base.maxTokens, model.maxTokens, thinkingBudget);
@@ -2353,6 +2388,14 @@ function mapOptionsForApi<TApi extends Api>(
 				reasoning: resolveOpenAiReasoningEffort(model, options),
 				disableReasoning: options?.disableReasoning,
 				toolChoice: options?.toolChoice,
+			});
+
+		case "kiro-api":
+			return castApi<"kiro-api">({
+				...base,
+				reasoning: options?.reasoning,
+				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
+				hideThinkingSummary: options?.hideThinkingSummary,
 			});
 
 		case "cursor-agent": {

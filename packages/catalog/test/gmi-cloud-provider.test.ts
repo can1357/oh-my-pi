@@ -66,6 +66,6 @@ describe("GMI Cloud provider", () => {
 		// An id absent from every bundle stays bare rather than fabricating params.
 		const unknown = byId.get("gmi-only/nonexistent-model");
 		expect(unknown?.contextWindow).toBeNull();
-		expect(unknown?.reasoning).toBe(false);
+		expect(unknown?.reasoning).toBeUndefined();
 	});
 });

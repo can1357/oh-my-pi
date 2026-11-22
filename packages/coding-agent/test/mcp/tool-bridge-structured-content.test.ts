@@ -38,6 +38,21 @@ async function modelText(result: MCPToolCallResult): Promise<string> {
 }
 
 describe("MCP bridge structuredContent", () => {
+	it("accepts structured content that is not an object", async () => {
+		// The modern revision allows any JSON value here, `null` included.
+		const empty = await build({ content: [{ type: "text", text: "done" }], structuredContent: null });
+		const listed = await build({ content: [{ type: "text", text: "two ids" }], structuredContent: [7, 9] });
+
+		expect(empty.isError).toBeFalsy();
+		expect(empty.content).toEqual([{ type: "text", text: "done" }]);
+		expect(empty.details?.structuredContent).toBeUndefined();
+		expect(listed.isError).toBeFalsy();
+		expect(listed.content.map(block => (block.type === "text" ? block.text : ""))).toEqual([
+			"two ids",
+			"```json\n[\n  7,\n  9\n]\n```",
+		]);
+	});
+
 	it("surfaces structuredContent when content is a minimal ack", async () => {
 		// rhizome-mcp shape: terse ack in content, real payload in structuredContent.
 		const text = await modelText({
@@ -179,7 +194,7 @@ describe("MCP bridge structuredContent", () => {
 			expect((value.details as MCPToolDetails).structuredContent).toEqual(structuredContent);
 			expect(value.hasError).toBe(true);
 			expect(value.text).not.toContain(structuredContent.pages[0]!.rows[0]!.body);
-			expect(value.text).toContain(`artifact://${artifactId}`);
+			expect(value.text).toContain(`local://${artifactId}.log`);
 
 			const message = {
 				role: "toolResult" as const,

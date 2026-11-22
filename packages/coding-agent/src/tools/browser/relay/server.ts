@@ -3,12 +3,14 @@
  *
  * Impersonates Chrome's CDP discovery endpoint so the omp browser tool (and
  * any puppeteer client) can connect with a plain `browserURL`:
- * - `GET /json/version` → 200 with `webSocketDebuggerUrl` once the extension
- *   is connected, 503 with a {@link RelayUnavailableInfo} body before that
- *   (`waitForRelayExtension` decides from it whether polling is worthwhile).
+ * - `GET /json/version` → 200 with `webSocketDebuggerUrl` once an extension
+ *   said hello, 503 with a {@link RelayUnavailableInfo} body before that. Both
+ *   name this server's `ompRelayInstance`, which tells a restarted relay apart.
  * - `GET /json` / `/json/list` → attachable page targets (debugging aid).
  * - `WS /cdp` → downstream CDP clients (puppeteer); an omp tab worker adds `?claim=<targetId>` for the tab it drives.
- * - `WS /ext` → the Chrome extension (token-gated when configured).
+ * - `WS /ext` → extension links of other browsers, forwarded by their own native hosts (`native-host.ts`); the
+ *   browser whose host runs this server links in-process through {@link RelayServer.bridge}.
+ * - `POST /omp/extensions/recheck`, `POST /omp/relay/restart` → install-sync and upgrade hooks for the omp CLI.
  *
  * Binds loopback only: anything that can reach this port can drive the
  * user's logged-in browser.
@@ -16,49 +18,26 @@
 import { macOSFrontApp } from "@oh-my-pi/pi-natives";
 import { parseFlag } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
-import { RelayBridge, type RelayBridgeExtensionUpdater } from "./bridge";
-import {
-	defaultRelayExtensionDir,
-	installedRelayExtensionVersion,
-	unpackedExtensionId,
-	writeRelayExtension,
-} from "./extension-files";
-import { isOlderOmpVersion } from "./protocol";
+import { RelayBridge } from "./bridge";
+import { extensionIdForPath, installedRelayExtensionStamp } from "./extension-files";
+import { readRelayInstalls, registeredRelayExtensionIds, syncRelayInstalls } from "./installs";
+import { RELAY_RECHECK_PATH, RELAY_RESTART_PATH } from "./protocol";
 
 /** Options for {@link startRelayServer}. */
 export interface RelayServerOptions {
 	port: number;
-	/** Shared secret the extension must present as `?token=`; unset disables the check. */
-	token?: string;
+	/** Accept the browser only over its chat native messaging port. */
+	chatOnly?: boolean;
+	/**
+	 * A `POST /omp/relay/restart` from omp `version`; `idleOnly` asks only when no CDP client is connected. Returns
+	 * whether the server is going away; absent, every restart is refused.
+	 */
+	onRestart?(request: { version: string; idleOnly: boolean }): boolean;
 	/** Group tabs the agent actively drives under one per-window Chrome tab group (default on); `false` disables. */
 	group?: boolean | { title: string; color: string };
-	/**
-	 * The extension copy this relay keeps current: an older extension Chrome loaded from here is rewritten and
-	 * reloaded (default: `omp browser-relay install`'s directory).
-	 */
-	extensionDir?: string;
+	/** Override the shared extension install registry, for isolated relays. */
+	installRegistryFile?: string;
 	log?: (message: string, data?: Record<string, unknown>) => void;
-}
-
-/**
- * Updates the extension when Chrome loaded it from `dir`: an extension loaded from elsewhere (`install --dir`, a
- * development build) is not this relay's to rewrite, and files a newer omp wrote are left for that omp's relay.
- * Calls run one at a time: Chrome profiles that load the same folder share its files, and a later call finds them
- * already current.
- */
-function extensionUpdaterFor(dir: string): RelayBridgeExtensionUpdater {
-	let queue: Promise<unknown> = Promise.resolve();
-	const update = async (extensionId: string) => {
-		if ((await unpackedExtensionId(dir)) !== extensionId) return false;
-		if (isOlderOmpVersion(VERSION, await installedRelayExtensionVersion(dir))) return false;
-		await writeRelayExtension(dir, VERSION);
-		return true;
-	};
-	return extensionId => {
-		const result = queue.then(() => update(extensionId));
-		queue = result.catch(() => {});
-		return result;
-	};
 }
 
 /** `chrome-extension://<id>` → `<id>`; anything else → undefined. */
@@ -68,15 +47,11 @@ const EXTENSION_ORIGIN = /^chrome-extension:\/\/([a-p]{32})$/;
 export interface RelayUnavailableInfo {
 	/** Version of the OMP binary serving this relay. */
 	ompRelayVersion: string;
+	/** Random id of this server, fixed for its life. */
+	ompRelayInstance: string;
 	error: string;
-	/** An extension completed the hello handshake at least once in this server's lifetime. */
-	extensionSeen: boolean;
-	/** Milliseconds this server has been listening. */
-	uptimeMs: number;
 	/** Downstream CDP clients connected to this relay. */
 	ompRelayCdpClients: number;
-	/** Milliseconds since the last connected extension went away; absent if none has connected yet. */
-	disconnectedMs?: number;
 }
 
 /** A running relay server. */
@@ -118,10 +93,46 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 	const log = opts.log ?? (() => {});
 	const group =
 		opts.group === false ? null : opts.group === true || opts.group === undefined ? DEFAULT_GROUP : opts.group;
-	const updateExtension = extensionUpdaterFor(opts.extensionDir ?? defaultRelayExtensionDir());
-	const bridge = new RelayBridge({ log, group, updateExtension });
+	const bridge = new RelayBridge({
+		log,
+		group,
+		async installedStamp(extensionId) {
+			if (opts.chatOnly) return null;
+			const installs = await readRelayInstalls({
+				registryFile: opts.installRegistryFile,
+			});
+			const install = installs.find(row => !row.missing && extensionIdForPath(row.dir) === extensionId);
+			return install ? installedRelayExtensionStamp(install.dir) : null;
+		},
+		async updateExtension(extensionId) {
+			if (opts.chatOnly) return false;
+			// Only a folder omp manages can be rewritten; Chrome named it by its path, so its id says which.
+			const ours = await registeredRelayExtensionIds({
+				registryFile: opts.installRegistryFile,
+			});
+			if (!ours.includes(extensionId)) {
+				log("connected extension is not a registered install; not updating it", { extensionId });
+				return false;
+			}
+			const results = await syncRelayInstalls({
+				mode: "relay",
+				registryFile: opts.installRegistryFile,
+			});
+			let current = false;
+			let failed = false;
+			for (const result of results) {
+				if (result.status === "failed") {
+					failed = true;
+					log("extension install sync failed", result);
+				} else if (result.status !== "missing" && result.ompVersion === VERSION) {
+					current = true;
+				}
+			}
+			return current && !failed;
+		},
+	});
 	const sockets = new Set<RelayWebSocket>();
-	const startedAt = Date.now();
+	const instance = crypto.randomUUID();
 	// Only macOS can hand the front app back; elsewhere the relay never reads it.
 	if (process.platform === "darwin" && parseFlag(process.env.PI_BROWSER_RELAY_KEEP_FRONT, true)) {
 		bridge.keepFrontAppWith(macOSFrontApp);
@@ -144,37 +155,57 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 				// Browsers set Origin on websocket upgrades; native CDP clients
 				// don't. Reject any Origin so a web page can't drive the relay.
 				if (req.headers.get("origin")) return new Response("Forbidden", { status: 403 });
-				const data: SocketData = { role: "cdp", claim: url.searchParams.get("claim") ?? undefined };
+				const data: SocketData = {
+					role: "cdp",
+					claim: url.searchParams.get("claim") ?? undefined,
+				};
 				if (srv.upgrade(req, { data })) return undefined;
 				return new Response("websocket upgrade required", { status: 426 });
 			}
-			if (path === "/ext") {
+			if (path === "/ext" && !opts.chatOnly) {
 				const origin = req.headers.get("origin");
 				if (origin && !origin.startsWith("chrome-extension://")) {
 					return new Response("Forbidden", { status: 403 });
 				}
-				if (opts.token && url.searchParams.get("token") !== opts.token) {
-					return new Response("Unauthorized", { status: 401 });
-				}
-				const data: SocketData = { role: "ext", extensionId: origin?.match(EXTENSION_ORIGIN)?.[1] };
+				const data: SocketData = {
+					role: "ext",
+					extensionId: origin?.match(EXTENSION_ORIGIN)?.[1],
+				};
 				if (srv.upgrade(req, { data })) return undefined;
 				return new Response("websocket upgrade required", { status: 426 });
+			}
+			if (path === RELAY_RECHECK_PATH) {
+				if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+				// Like `/cdp`: browsers send Origin, the omp CLI does not; a web page must not trigger reloads.
+				if (req.headers.get("origin")) return new Response("Forbidden", { status: 403 });
+				bridge.recheckExtensions();
+				return new Response(null, { status: 204 });
+			}
+			if (path === RELAY_RESTART_PATH) {
+				if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+				if (req.headers.get("origin")) return new Response("Forbidden", { status: 403 });
+				const restarting =
+					opts.onRestart?.({
+						version: url.searchParams.get("version") ?? "",
+						idleOnly: url.searchParams.get("idle") === "1",
+					}) ?? false;
+				return new Response(null, { status: restarting ? 202 : 409 });
 			}
 			if (req.method !== "GET") return new Response("Method not allowed", { status: 405 });
 			if (path === "/json/version") {
 				if (!bridge.ready) {
-					const disconnectedMs = bridge.extensionGoneForMs;
 					const info: RelayUnavailableInfo = {
 						ompRelayVersion: VERSION,
+						ompRelayInstance: instance,
 						error: "relay extension is not connected",
-						extensionSeen: bridge.extensionSeen,
-						uptimeMs: Date.now() - startedAt,
 						ompRelayCdpClients: bridge.cdpClientCount,
-						...(disconnectedMs === null ? {} : { disconnectedMs }),
 					};
 					return Response.json(info, { status: 503 });
 				}
-				return Response.json(bridge.versionInfo(`ws://${host}/cdp`));
+				return Response.json({
+					...bridge.versionInfo(`ws://${host}/cdp`),
+					ompRelayInstance: instance,
+				});
 			}
 			if (path === "/json" || path === "/json/list") {
 				return Response.json(bridge.listTargets());
@@ -223,7 +254,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 	log("relay listening", { port: opts.port });
 	return {
 		bridge,
-		port: opts.port,
+		port: server.port!,
 		stop() {
 			clearInterval(keepalive);
 			server.stop(true);

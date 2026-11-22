@@ -2,6 +2,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { raceWithSignal } from "@oh-my-pi/pi-ai/utils/abort";
+import { dropReasoningDetailsEnvelopes } from "@oh-my-pi/pi-ai/utils/reasoning-source";
 import { extractRetryHint, logger } from "@oh-my-pi/pi-utils";
 import { isEvalStateContext } from "../eval/state";
 import {
@@ -1827,6 +1828,9 @@ function obfuscateAssistantMessage(
 	sharedRegexSecretValues: ReadonlySet<string>,
 ): AssistantMessage {
 	let changed = false;
+	// A rewritten thinking block or argument also voids the turn's chat-completions
+	// `reasoning_details` envelope, which holds the raw text and call signatures.
+	let replayStateChanged = false;
 	const content = message.content.map((block): AssistantMessage["content"][number] => {
 		if (block.type === "text") {
 			const text = obfuscator.obfuscate(block.text, sharedRegexSecretValues);
@@ -1838,17 +1842,20 @@ function obfuscateAssistantMessage(
 			const thinking = obfuscator.obfuscate(block.thinking, sharedRegexSecretValues);
 			if (thinking === block.thinking) return block;
 			changed = true;
+			replayStateChanged = true;
 			return { ...block, thinking, thinkingSignature: undefined };
 		}
 		if (block.type === "toolCall") {
 			const args = obfuscateToolArguments(obfuscator, block.arguments, sharedRegexSecretValues);
 			if (args === block.arguments) return block;
 			changed = true;
+			replayStateChanged = true;
 			return { ...block, arguments: args, thoughtSignature: undefined };
 		}
 		return block;
 	});
-	return changed ? { ...message, content } : message;
+	if (!changed) return message;
+	return { ...message, content: replayStateChanged ? dropReasoningDetailsEnvelopes(content) : content };
 }
 
 function obfuscateDetails(

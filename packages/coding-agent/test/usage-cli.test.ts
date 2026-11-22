@@ -47,6 +47,7 @@ function makeLimit(opts: {
 	tier?: string;
 	accountId?: string;
 	provider?: string;
+	modelId?: string;
 	notes?: string[];
 	shared?: boolean;
 	sharedGroup?: string;
@@ -60,6 +61,7 @@ function makeLimit(opts: {
 			windowId: opts.windowId,
 			tier: opts.tier,
 			accountId: opts.accountId,
+			...(opts.modelId !== undefined ? { modelId: opts.modelId } : {}),
 			...(opts.shared !== undefined ? { shared: opts.shared } : {}),
 			...(opts.sharedGroup !== undefined ? { shared: true, sharedGroup: opts.sharedGroup } : {}),
 		},
@@ -596,7 +598,7 @@ describe("usage JSON policy", () => {
 
 	it("reports a provider-exhausted account as exhausted and carries reclaimAbovePct", () => {
 		const walled = makeReport("anthropic", "walled@example.test", [
-			makeLimit({ id: "5h", provider: "anthropic", usedFraction: 0.995, status: "exhausted" }),
+			makeLimit({ id: "5h", provider: "anthropic", usedFraction: 0.995, status: "exhausted", shared: true }),
 		]);
 		const options: UsagePolicyDiagnosticsOptions = {
 			globalReservePct: 10,
@@ -634,6 +636,78 @@ describe("usage JSON policy", () => {
 		expect(policy?.remainingPct).toBe(98);
 		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], Date.now(), undefined, [], options));
 		expect(text).toContain("eligible · 98.0% left");
+	});
+
+	it("keeps the shared pool's state when only a model-scoped weekly row is spent", () => {
+		const report = makeReport("anthropic", "fable-spent@example.test", [
+			makeLimit({ id: "anthropic:5h", usedFraction: 0.3, windowId: "5h", shared: true }),
+			makeLimit({ id: "anthropic:7d", usedFraction: 0.98, windowId: "7d", shared: true }),
+			makeLimit({ id: "anthropic:7d:fable", label: "Claude 7 Day (Fable)", usedFraction: 1, tier: "fable" }),
+			makeLimit({ id: "anthropic:7d:opus", label: "Claude 7 Day (Opus)", usedFraction: 0.995, tier: "opus" }),
+		]);
+		const options: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 1,
+			getAccountPolicy: (_provider, identity) => ({ provider: "anthropic", account: { email: identity.email } }),
+		};
+		const [policy] = annotateUsagePolicy([report], [], [], options).reports.map(entry => entry.policy);
+		expect(policy).toEqual({
+			priority: 0,
+			reservePct: 1,
+			reserveSource: "global",
+			scopedExhausted: ["anthropic:7d:fable"],
+			state: "eligible",
+			remainingPct: 2,
+		});
+		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], Date.now(), undefined, [], options));
+		expect(text).toContain("eligible · 2.0% left · Claude 7 Day (Fable) exhausted");
+	});
+
+	it("keeps every row in the pool when only subpool rows are marked shared", () => {
+		// Antigravity marks its third-party subpool `shared` with a `sharedGroup`; its Gemini counter stays unmarked.
+		const report = makeReport("google-antigravity", "subpool@example.test", [
+			makeLimit({ id: "gemini", provider: "google-antigravity", usedFraction: 0.95 }),
+			makeLimit({
+				id: "third-party",
+				provider: "google-antigravity",
+				usedFraction: 0.2,
+				sharedGroup: "third-party",
+			}),
+		]);
+		const options: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: (_provider, identity) => ({
+				provider: "google-antigravity",
+				account: { email: identity.email },
+			}),
+		};
+		const [policy] = annotateUsagePolicy([report], [], [], options).reports.map(entry => entry.policy);
+		expect(policy).toMatchObject({ state: "inside-reserve", remainingPct: 5 });
+	});
+
+	it("keeps a spent shared per-model meter out of the account-wide state", () => {
+		// Codex marks its Spark meter `shared` with a `modelId`; routing gates only Spark requests on it.
+		const report = makeReport("openai-codex", "spark-spent@example.test", [
+			makeLimit({ id: "openai-codex:primary", provider: "openai-codex", usedFraction: 0.4, shared: true }),
+			makeLimit({
+				id: "openai-codex:spark:primary",
+				label: "5 Hour (Spark)",
+				provider: "openai-codex",
+				usedFraction: 1,
+				tier: "spark",
+				modelId: "GPT-5.3-Codex-Spark",
+				shared: true,
+			}),
+		]);
+		const options: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: (_provider, identity) => ({ provider: "openai-codex", account: { email: identity.email } }),
+		};
+		const [policy] = annotateUsagePolicy([report], [], [], options).reports.map(entry => entry.policy);
+		expect(policy).toMatchObject({
+			state: "eligible",
+			remainingPct: 60,
+			scopedExhausted: ["openai-codex:spark:primary"],
+		});
 	});
 });
 

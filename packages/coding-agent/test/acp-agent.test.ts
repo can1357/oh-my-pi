@@ -804,8 +804,8 @@ describe("ACP agent", () => {
 		expect(currentModeConfig?.currentValue).toBe("plan");
 
 		// Regression for #1869: entering plan mode must wire a plan-proposal
-		// handler so the agent's `xd://propose` write has a gate to dispatch to
-		// instead of erroring with no approval path.
+		// handler so `propose` has a gate to dispatch to instead of erroring
+		// with no approval path.
 		expect(typeof session.planProposalHandler).toBe("function");
 
 		await harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "default" });
@@ -994,9 +994,12 @@ describe("ACP agent", () => {
 
 		const updatesBefore = harness.updates.length;
 		const handler = session.planProposalHandler!;
-		const result = (await handler("words-counter")) as { content: Array<{ type: string; text: string }> };
+		const result = await handler("words-counter");
 
-		expect(result.content[0]?.text).toMatch(/refinement requested/i);
+		// The agent gets back the reviewed plan to iterate on, not an approval.
+		expect(result).toMatchObject({
+			details: { planFilePath: "local://PLAN.md", title: "words-counter", planExists: true },
+		});
 		// Plan file stays put; no rename, no write-access grant.
 		expect(await Bun.file(planPath).exists()).toBe(true);
 		expect(await Bun.file(resolveLocalUrlToPath("local://words-counter.md", localOptions)).exists()).toBe(false);
@@ -1393,8 +1396,8 @@ describe("ACP agent", () => {
 			},
 			defaults: {
 				speechToTextModel: "local/parakeet-tdt-0.6b-v3",
-				textToSpeechModel: "local/kokoro",
-				voice: "af_heart",
+				textToSpeechModel: "local/phonon-31m",
+				voice: "harper",
 				speed: 1,
 			},
 			speechToText: {
@@ -1407,19 +1410,19 @@ describe("ACP agent", () => {
 				speechVoiceSetting: "speech.voice",
 				speedSetting: "tts.localSpeed",
 				speechSpeedSetting: "speech.speed",
-				defaultModel: "local/kokoro",
-				defaultVoice: "af_heart",
+				defaultModel: "local/phonon-31m",
+				defaultVoice: "harper",
 				defaultSpeed: 1,
-				speedRange: { min: 0.5, max: 2.5 },
+				speedRange: { min: 0.8, max: 1.3 },
 			},
 		});
 		expect(result.speechToText.models).toContainEqual(
 			expect.objectContaining({ value: "local/nemotron-streaming-en-0.6b" }),
 		);
-		expect(result.textToSpeech.models.map(model => model.value)).toEqual(["local/kokoro"]);
+		expect(result.textToSpeech.models.map(model => model.value)).toEqual(["local/phonon-31m"]);
 		expect(result.textToSpeech.models[0]?.voices).toEqual(result.textToSpeech.voices);
 		// Speed presets are numbers so clients can write them straight into the numeric settings.
-		expect(result.textToSpeech.speeds.map(speed => speed.value)).toEqual([0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5]);
+		expect(result.textToSpeech.speeds.map(speed => speed.value)).toEqual([0.8, 0.9, 1, 1.1, 1.2, 1.3]);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);

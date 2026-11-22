@@ -1,0 +1,32 @@
+// Text operations pair a Find with an action. A structural operation names
+// both the action and its literal opening-line prefix in a single header.
+start: begin_patch? edit+
+begin_patch: BEGIN_PATCH LF
+edit: EDIT_HEADER LF operation+
+operation: find (replace | insert | cut | paste) | BLOCK_ACTION LF* | block_replace
+find: FIND_HEADER LF body_line*
+replace: REPLACE_HEADER action_body?
+insert: INSERT_HEADER insert_body?
+cut: CUT_HEADER LF*
+paste: PASTE_HEADER LF*
+block_replace: BLOCK_REPLACE LF LF* BODY_TEXT (LF body_line* BODY_TEXT?)?
+action_body: LF body_line* BODY_TEXT?
+insert_body: LF insert_body_line* INSERT_TEXT?
+body_line: BODY_TEXT LF | LF
+insert_body_line: INSERT_TEXT LF | LF
+
+BEGIN_PATCH: /[ \t]*\*{3}[ \t]+(?i:Begin[ \t]+Patch)[ \t]*/
+END_PATCH: /[ \t]*\*{3}[ \t]+(?i:End[ \t]+Patch)[ \t]*/
+EDIT_HEADER: /[ \t]*\*{3}[ \t]+(?i:Edit[ \t]+File:)(?:[ \t]+[^\r\n]*)?/
+FIND_HEADER: /[ \t]*\*{3}[ \t]+(?i:Find)(?:[ \t]+(?i:all))?[ \t]*/
+REPLACE_HEADER: /[ \t]*\*{3}[ \t]+(?i:Replace)[ \t]*/
+INSERT_HEADER: /[ \t]*\*{3}[ \t]+(?i:Insert[ \t]+(?:Before|After))[ \t]*/
+CUT_HEADER: /[ \t]*\*{3}[ \t]+(?i:Cut)[ \t]*/
+PASTE_HEADER: /[ \t]*\*{3}[ \t]+(?i:Paste[ \t]+(?:Before|After))[ \t]*/
+BLOCK_ACTION: /[ \t]*\*{3}[ \t]+(?i:(?:Cut|Delete|Paste[ \t]+(?:Before|After))[ \t]+Block:)[ \t]+[^\r\n]+/
+BLOCK_REPLACE: /[ \t]*\*{3}[ \t]+(?i:Replace[ \t]+Block:)[ \t]+[^\r\n]+/
+
+// LLGuidance supports terminal intersection/complement, not priorities or lookarounds.
+BODY_TEXT: /[^\r\n]+/ & ~(EDIT_HEADER | FIND_HEADER | REPLACE_HEADER | INSERT_HEADER | CUT_HEADER | PASTE_HEADER | BLOCK_ACTION | BLOCK_REPLACE | BEGIN_PATCH | END_PATCH)
+INSERT_TEXT: /[^\r\n]+/ & ~(EDIT_HEADER | FIND_HEADER | REPLACE_HEADER | INSERT_HEADER | CUT_HEADER | PASTE_HEADER | BLOCK_ACTION | BLOCK_REPLACE)
+%import common.LF
