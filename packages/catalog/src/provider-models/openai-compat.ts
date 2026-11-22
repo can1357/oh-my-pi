@@ -5801,7 +5801,6 @@ type LiteLLMRichEndpointModel<TApi extends Api> = {
 	apiRoute: LiteLLMApiRoute;
 	supportsVision: unknown;
 	supportsReasoning: unknown;
-	hasContextWindow: boolean;
 	hasMaxTokens: boolean;
 	hasToolMetadata: boolean;
 	hasSupportedOpenAIParams: boolean;
@@ -6124,10 +6123,9 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 	}
 	const reference = options.referenceResolver?.(id);
 	const modelName = toNonEmptyString(entry.model_name);
-	const contextWindow = toPositiveNumber(
-		getLiteLLMMetadataValue(entry, "max_input_tokens"),
-		reference?.contextWindow ?? OPENAI_COMPAT_DISCOVERY_DEFAULT_CONTEXT_WINDOW,
-	);
+	const reportedInputWindow = toPositiveNumber(getLiteLLMMetadataValue(entry, "max_input_tokens"), null);
+	const contextWindow =
+		reportedInputWindow ?? reference?.contextWindow ?? OPENAI_COMPAT_DISCOVERY_DEFAULT_CONTEXT_WINDOW;
 	const maxTokens = toPositiveNumber(
 		getLiteLLMMetadataValue(entry, "max_output_tokens"),
 		reference?.maxTokens ?? Math.min(contextWindow, OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS),
@@ -6193,6 +6191,7 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 		provider: options.provider,
 		baseUrl: runtimeBaseUrl,
 		contextWindow,
+		...(reportedInputWindow !== null ? { contextWindowReportedAsInput: true } : {}),
 		maxTokens,
 		input:
 			supportsVision === true
@@ -6264,7 +6263,9 @@ function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 		api,
 		...liteLLMRunnerKind(api),
 		name: next.model.name === next.model.id ? existing.model.name : next.model.name,
-		contextWindow: next.hasContextWindow ? next.model.contextWindow : existing.model.contextWindow,
+		contextWindow: next.model.contextWindowReportedAsInput ? next.model.contextWindow : existing.model.contextWindow,
+		contextWindowReportedAsInput:
+			next.model.contextWindowReportedAsInput ?? existing.model.contextWindowReportedAsInput,
 		maxTokens: next.hasMaxTokens ? next.model.maxTokens : existing.model.maxTokens,
 		input: next.supportsVision === true || next.supportsVision === false ? next.model.input : existing.model.input,
 		reasoning: typeof next.supportsReasoning === "boolean" ? next.model.reasoning : existing.model.reasoning,
@@ -6282,7 +6283,6 @@ function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 		apiRoute,
 		model,
 		reportedCost: { ...existing.reportedCost, ...next.reportedCost },
-		hasContextWindow: existing.hasContextWindow || next.hasContextWindow,
 		hasMaxTokens: existing.hasMaxTokens || next.hasMaxTokens,
 		hasToolMetadata: existing.hasToolMetadata || next.hasToolMetadata,
 		hasSupportedOpenAIParams: existing.hasSupportedOpenAIParams || next.hasSupportedOpenAIParams,
@@ -6411,7 +6411,6 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 				apiRoute: classifyLiteLLMApiRoute(entry, model.id),
 				supportsVision,
 				supportsReasoning,
-				hasContextWindow: toPositiveNumber(getLiteLLMMetadataValue(entry, "max_input_tokens"), null) !== null,
 				hasMaxTokens: toPositiveNumber(getLiteLLMMetadataValue(entry, "max_output_tokens"), null) !== null,
 				hasToolMetadata:
 					supportsFunctionCalling === true ||

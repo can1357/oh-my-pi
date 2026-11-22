@@ -1789,6 +1789,8 @@ export interface Model<TApi extends Api = Api> {
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;
 	contextWindow: number | null;
+	/** The window was reported as an input-token limit, not a total window or catalog fallback. */
+	contextWindowReportedAsInput?: true;
 	/** Preserve the host's supplied window instead of applying inferred expansion or reference-price caps. */
 	contextWindowAuthoritative?: boolean;
 	/** The long-context price tier does not cap the runtime context window when extended context is off. */
