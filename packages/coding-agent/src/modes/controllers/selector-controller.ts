@@ -355,9 +355,9 @@ export class SelectorController {
 					{
 						onChange: (id, value) => {
 							this.handleSettingChange(id, value);
-							// A backend picked here is registered, so it gets the current list at once. An
-							// approved `cfg://` write can name one whose extension is still loading, like a
-							// config reload: those get the list with the next change.
+							// A backend offered here was registered when Settings opened, so it gets the current
+							// list at once. An approved `cfg://` write can name one whose extension is still
+							// loading, like a config reload: those get the list with the next change.
 							if (id === cfgTodoBackend.id) this.ctx.session.mirrorTodoPhases();
 						},
 						onThemePreview: async themeName => {
