@@ -22,6 +22,7 @@
 
 ### Fixed
 
+- Turn recovery's discard of a failed turn no longer stops a SQL- or Redis-stored session from saving when another process appended to it; the discard is refused and the session is left as it was. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 - On SQL and Redis session storage, a session that another omp process (such as `omp --resume` in another terminal) writes to at the same time goes on saving: every entry of both processes is kept once, in the same session, where before the session's later entries were no longer saved. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the debug menu's "Clear artifact cache" deleting whole project directories, session transcripts included; it now removes only tool output files older than 30 days and keeps transcripts, subagent outputs, `/btw` conversations and drafts. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 - A failed `/tan` dispatch no longer leaves its clone's transcript behind or keeps the clone's ownership lease, under file and SQL session storage. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))

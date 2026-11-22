@@ -919,6 +919,46 @@ interface SessionBodyStamp {
 }
 
 /**
+ * A full rewrite whose body is not the journal as it stands: `serialize` builds it from the journal on each publish
+ * pass, and `landed` applies it to memory in the same step as the store confirms that body (or a read-back shows it
+ * landed). A rewrite that does not land leaves memory as it was.
+ */
+interface StagedRewrite {
+	serialize(): SessionFileBody;
+	landed(): void;
+}
+
+/** The ids and stamp a discard's new entries take, fixed once so every publish pass writes the same entries. */
+interface DiscardIds {
+	usageId: string;
+	markerId: string;
+	timestamp: string;
+	runtime: RuntimeIdentity;
+}
+
+/**
+ * A discard's journal (see `SessionManager.discardEntryDurably`): its entries in order, the ones it adds, its branch
+ * marker, and the entry it removes (none when the subtree stays off-branch).
+ */
+interface DiscardPlan {
+	entries: SessionEntry[];
+	added: SessionEntry[];
+	markerId: string;
+	removedId: string | undefined;
+}
+
+/**
+ * What a discard knows from its call: the entry, the leaf then, and the entries this manager records while it is in
+ * flight, which follow its marker (see `SessionManager.discardEntryDurably`).
+ */
+interface DiscardScope {
+	entryId: string;
+	leafAtCall: string | null;
+	/** The entries this manager recorded since this discard was called; filled while it is in flight. */
+	recorded: Set<string>;
+}
+
+/**
  * One full-file serialization: title slot, header, and entry lines in file
  * order plus their total UTF-8 byte length. Kept as lines so the file backend
  * streams them instead of materializing one string the size of the session.
@@ -1099,6 +1139,11 @@ export class SessionManager {
 	 * ensureOnDisk() callers (ACP session/new, handoff) must survive close().
 	 */
 	#draftOnlySessionCleanupArmed = false;
+	/**
+	 * The discards in flight, each with the entries recorded since it was called (see {@link discardEntryDurably}).
+	 * Each call adds its own scope and removes only that one, so an overlapping discard keeps recording.
+	 */
+	#discardsInFlight = new Set<DiscardScope>();
 
 	/**
 	 * Collab replication tap: invoked for every appended entry with the
@@ -1997,13 +2042,13 @@ export class SessionManager {
 	}
 
 	/**
-	 * Serialize the whole file — title slot, header, entries — as lines, stamped with the state they came from.
+	 * Serialize the whole file — title slot, header, `entries` (the journal by
+	 * default) — as lines, stamped with the state they came from.
 	 * Runs as the `session.rewrite` loop phase: a long transcript takes hundreds of milliseconds to stringify.
 	 */
-	#serializeBody(): SessionFileBody {
+	#serializeBody(entries: SessionEntry[] = this.#entries): SessionFileBody {
 		const titleLine = this.#titleSlotLine();
 		const headerLine = this.#lineFor(this.#header);
-		const entries = this.#entries;
 		const lines = [titleLine, headerLine];
 		let bytes = Buffer.byteLength(titleLine, "utf8") + Buffer.byteLength(headerLine, "utf8");
 		withLoopPhase("session.rewrite", () => {
@@ -2169,9 +2214,11 @@ export class SessionManager {
 	 * store that defers publishes rejects with `SessionWriteConflictError` and
 	 * changes no entry, the file or the id; nothing latches, and the session's
 	 * next entry reads the file back and publishes (see
-	 * {@link #recoverQueuedConflict}).
+	 * {@link #recoverQueuedConflict}). `staged` publishes a body other than the
+	 * journal's and changes memory only once it landed (see
+	 * {@link StagedRewrite}).
 	 */
-	async #rewriteAtomically(): Promise<void> {
+	async #rewriteAtomically(staged?: StagedRewrite): Promise<void> {
 		if (!this.#persist || !this.#sessionFile) return;
 		if (this.#released) return;
 
@@ -2180,7 +2227,7 @@ export class SessionManager {
 		await this.#scheduleDiskWork(
 			async () => {
 				try {
-					await this.#runFencedAtomicRewrite(startEpoch);
+					await this.#runFencedAtomicRewrite(startEpoch, false, staged);
 				} catch (error) {
 					if (!(error instanceof SessionWriteConflictError) || !this.#recoversQueuedConflicts()) throw error;
 					this.#fileIsCurrent = false;
@@ -2209,7 +2256,7 @@ export class SessionManager {
 	 * landed before that change still advances the durable byte record after
 	 * readback.
 	 */
-	async #runFencedAtomicRewrite(epoch: number, queuedRecovery = false): Promise<boolean> {
+	async #runFencedAtomicRewrite(epoch: number, queuedRecovery = false, staged?: StagedRewrite): Promise<boolean> {
 		if (this.#released) return false;
 		this.#atomicRewriteFenceEpoch = epoch;
 		let recoveries = 0;
@@ -2228,7 +2275,7 @@ export class SessionManager {
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return false;
 				if (this.#diskEpoch !== epoch) return false;
-				const body = this.#serializeBody();
+				const body = staged ? staged.serialize() : this.#serializeBody();
 				const options = {
 					expectedSize: this.#expectedDiskSize,
 					commitGuard: () => !this.#released && this.#diskEpoch === epoch,
@@ -2247,6 +2294,7 @@ export class SessionManager {
 					try {
 						if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
 							this.#recordFullRewrite(body.bytes);
+							staged?.landed();
 						}
 					} catch {
 						// Preserve the publish error when durable state cannot be read back.
@@ -2257,6 +2305,7 @@ export class SessionManager {
 					try {
 						if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
 							this.#recordFullRewrite(body.bytes);
+							staged?.landed();
 						}
 					} catch {
 						// A superseding rewrite owns the durability record when its body cannot be read back.
@@ -2271,6 +2320,7 @@ export class SessionManager {
 			this.#hasTitleSlot = true;
 			// A recovery's publish holds every entry: the failure it recovered from is over.
 			if (queuedRecovery) this.#clearDiskError();
+			staged?.landed();
 			return true;
 		} finally {
 			// Only relinquish the fence if we still own it. A superseding
@@ -2567,6 +2617,7 @@ export class SessionManager {
 		}
 		this.#entries.push(entry);
 		this.#index.insert(entry);
+		for (const discard of this.#discardsInFlight) discard.recorded.add(entry.id);
 		const batch = this.#atomicEntryBatch;
 		if (batch?.collecting) batch.entryIds.add(entry.id);
 		if (batch && !batch.collecting) {
@@ -3965,6 +4016,7 @@ export class SessionManager {
 		if (trigger) entry.trigger = trigger;
 		this.#entries.push(entry);
 		this.#index.insert(entry);
+		for (const discard of this.#discardsInFlight) discard.recorded.add(entry.id);
 		this.#notifyEntryAppended(entry);
 		await this.#persistTitleChangeEntry(entry, { title, source, updatedAt: timestamp });
 		// Keep the recent-sessions title index current so welcome-screen lookups
@@ -4567,36 +4619,106 @@ export class SessionManager {
 	 * entry, so changing the in-memory leaf alone is lost on reload. Known
 	 * metadata children are chained onto the discarded entry's parent before the
 	 * entry is removed. If any child may carry content, the subtree is preserved
-	 * off-branch instead. Both paths append a metadata-only branch marker and
-	 * rewrite the journal, making the selected path durable.
+	 * off-branch instead. Both paths add a metadata-only branch marker, making
+	 * the selected path durable.
 	 *
 	 * A removed assistant turn was still billed, so its usage is re-journaled as
 	 * an off-branch `model_usage` entry; session totals and `omp stats` keep
 	 * counting it. A subtree preserved off-branch keeps its own usage.
+	 *
+	 * The new entries and the removal reach the store only through one atomic
+	 * rewrite, and memory changes only once that rewrite landed. An entry this
+	 * manager records while the discard is in flight follows the marker, as
+	 * after a discard that landed before it. A rewrite that meets another
+	 * writer's change keeps that writer's entries on file storage; on a store
+	 * that defers publishes it rejects with `SessionWriteConflictError` and
+	 * leaves the file, the id and memory as they were (docs/session.md). The
+	 * session's next entry then recovers it (a discard or rewrite retried
+	 * before that entry is refused again).
 	 */
 	async discardEntryDurably(entryId: string): Promise<void> {
+		if (!this.#index.get(entryId)) return;
+		const ids = this.#discardIds();
+		const scope: DiscardScope = { entryId, leafAtCall: this.#index.leafId(), recorded: new Set() };
+		if (!this.#persist || !this.#sessionFile) {
+			const plan = this.#planDiscard(scope, ids);
+			if (plan) this.#applyDiscard(plan, scope);
+			return;
+		}
+		this.#discardsInFlight.add(scope);
+		try {
+			for (let attempt = 1; ; attempt++) {
+				let plan: DiscardPlan | undefined;
+				let landed = false;
+				await this.#rewriteAtomically({
+					serialize: () => {
+						plan = this.#planDiscard(scope, ids);
+						return this.#serializeBody(plan?.entries);
+					},
+					landed: () => {
+						if (landed) return;
+						landed = true;
+						if (plan) this.#applyDiscard(plan, scope);
+					},
+				});
+				if (landed || this.#released || !this.#persist || !this.#sessionFile || !this.#index.get(entryId)) return;
+				// A rewrite of the journal as it stood superseded this one: memory is unchanged, so publish the discard again.
+				if (attempt >= MAX_WRITE_CONFLICT_RECOVERIES) {
+					throw new Error(
+						`Discarding session entry ${entryId} was superseded ${attempt} times; the session is unchanged.`,
+					);
+				}
+			}
+		} finally {
+			this.#discardsInFlight.delete(scope);
+		}
+	}
+
+	/** Fresh ids for a discard's new entries. */
+	#discardIds(): DiscardIds {
+		const usageId = generateId(this.#index);
+		let markerId = generateId(this.#index);
+		while (markerId === usageId) markerId = generateId(this.#index);
+		return { usageId, markerId, timestamp: nowIso(), runtime: currentRuntimeIdentity() };
+	}
+
+	/**
+	 * The journal with `scope.entryId` discarded (see {@link discardEntryDurably}),
+	 * read from memory as it stands and changing nothing: known metadata
+	 * children chained onto the entry's parent (as copies) and the entry
+	 * removed, or the subtree kept off-branch; then the re-journaled usage, the
+	 * branch marker, and the entries this manager recorded since the call,
+	 * which follow the marker (see {@link #followDiscardMarker}).
+	 */
+	#planDiscard(scope: DiscardScope, ids: DiscardIds): DiscardPlan | undefined {
+		const { entryId, recorded } = scope;
 		const entry = this.#index.get(entryId);
-		if (!entry) return;
-		const children = this.#index.childrenOf(entryId);
-		const canReparentChildren = children.every(child => child.type === "service_tier_change");
+		if (!entry) return undefined;
+		const children = this.#index.childrenOf(entryId).filter(child => !recorded.has(child.id));
 		let leafId = entry.parentId;
-		if (canReparentChildren) {
+		let entries = this.#entries.filter(candidate => !recorded.has(candidate.id));
+		let removedId: string | undefined;
+		const added: SessionEntry[] = [];
+		if (children.every(child => child.type === "service_tier_change")) {
+			const reparented = new Map<string, SessionEntry>();
 			for (const child of children) {
-				child.parentId = leafId;
+				reparented.set(child.id, { ...child, parentId: leafId });
 				leafId = child.id;
 			}
-			this.#entries = this.#entries.filter(candidate => candidate.id !== entryId);
-			this.#index.rebuild(this.#entries);
+			removedId = entryId;
+			entries = entries
+				.filter(candidate => candidate.id !== entryId)
+				.map(candidate => reparented.get(candidate.id) ?? candidate);
 			if (entry.type === "message" && entry.message.role === "assistant") {
 				const { api, provider, model, usage, stopReason, errorMessage } = entry.message;
 				// Off-branch like late usage: totals count every entry, and the kept
 				// chain stays made of entries collab guests replicate.
-				this.#recordEntry({
+				added.push({
 					type: "model_usage",
-					id: generateId(this.#index),
+					id: ids.usageId,
 					parentId: leafId,
 					timestamp: entry.timestamp,
-					runtime: currentRuntimeIdentity(),
+					runtime: ids.runtime,
 					activeLeafId: leafId,
 					purpose: DISCARDED_TURN_USAGE_PURPOSE,
 					api,
@@ -4608,11 +4730,56 @@ export class SessionManager {
 				});
 			}
 		}
-		this.branchWithSummary(leafId, "", {
-			kind: DISCARDED_ENTRY_BRANCH_MARKER,
-			discardedEntryId: entryId,
-		});
-		await this.rewriteEntries();
+		const marker: BranchSummaryEntry = {
+			type: "branch_summary",
+			id: ids.markerId,
+			parentId: leafId,
+			timestamp: ids.timestamp,
+			runtime: ids.runtime,
+			fromId: leafId ?? "root",
+			summary: "",
+			details: { kind: DISCARDED_ENTRY_BRANCH_MARKER, discardedEntryId: entryId },
+		};
+		added.push(marker);
+		const follows = this.#entries
+			.filter(candidate => recorded.has(candidate.id))
+			.map(candidate => this.#followDiscardMarker(candidate, scope, marker.id));
+		return { entries: [...entries, ...added, ...follows], added, markerId: marker.id, removedId };
+	}
+
+	/**
+	 * `entry`, recorded while a discard was in flight, as it stands after the
+	 * discard: when it was recorded on the discarded entry or on the leaf the
+	 * discard was called at, it follows the marker instead (a copy), as it
+	 * would have after a discard that landed first.
+	 */
+	#followDiscardMarker(entry: SessionEntry, scope: DiscardScope, markerId: string): SessionEntry {
+		return entry.parentId === scope.entryId || entry.parentId === scope.leafAtCall
+			? { ...entry, parentId: markerId }
+			: entry;
+	}
+
+	/**
+	 * Make a landed discard's journal the session's: its entries, then any
+	 * entry recorded after its body was serialized, which the next write
+	 * publishes. The leaf stays on an entry recorded during the discard, else
+	 * it is the marker.
+	 */
+	#applyDiscard(plan: DiscardPlan, scope: DiscardScope): void {
+		const leaf = this.#index.leafId();
+		const planned = new Set(plan.entries.map(entry => entry.id));
+		const later = this.#entries
+			.filter(entry => !planned.has(entry.id) && entry.id !== plan.removedId)
+			.map(entry => (scope.recorded.has(entry.id) ? this.#followDiscardMarker(entry, scope, plan.markerId) : entry));
+		this.#entries = [...plan.entries, ...later];
+		this.#index.rebuild(this.#entries);
+		this.#setLeaf(leaf !== null && scope.recorded.has(leaf) ? leaf : plan.markerId);
+		this.#bodyRevision++;
+		if (later.length > 0) {
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+		}
+		for (const entry of plan.added) this.#notifyEntryAppended(entry);
 	}
 
 	/** Like branch(), but also records a branch_summary of the abandoned path. */

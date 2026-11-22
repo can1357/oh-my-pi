@@ -10,7 +10,8 @@
  *
  * A rewrite a caller asks for (`rewriteEntries()`) was computed from a stale view: on the file store it is recovered;
  * on a store that defers publishes it rejects with `SessionWriteConflictError`, changes nothing and latches nothing,
- * and the session's next entry recovers as above.
+ * and the session's next entry recovers as above. A discard (turn recovery) goes through one rewrite, changes memory
+ * only once it landed, and an entry recorded while it is in flight follows its marker.
  *
  * Every case writes a session of its own id: the file store's ownership lease is keyed by id, and every bun test
  * process with the same temp directory shares it.
@@ -642,5 +643,135 @@ for (const store of STORES) {
 				},
 				TIMEOUT,
 			);
+
+		it(
+			"keeps one session through a discard that meets the other writer's append, losing no entry",
+			async () => {
+				const s = await open(userLine("m1", null, "a turn"));
+				try {
+					// The turn a recovery discards is one this manager recorded and flushed.
+					const a1 = s.manager.appendMessage(createAssistantMessage("a reply"));
+					await s.manager.flush();
+					await s.append(userLine("f1", a1, "another writer's turn"));
+					const durable = await s.stored();
+					const memory = ids(s.manager);
+					const discarded = await s.manager.discardEntryDurably(a1).then(
+						() => undefined,
+						(err: unknown) => err,
+					);
+					expectSameSession(s);
+					if (defers) {
+						// It rejects as a stale rewriteEntries() does, and changes nothing in memory or in the store.
+						expect(discarded).toBeInstanceOf(SessionWriteConflictError);
+						expect(ids(s.manager)).toEqual(memory);
+						expect(await s.stored()).toBe(durable);
+					} else {
+						// The file store keeps the other writer's entry, a child of the turn, so the turn stays off-branch.
+						expect(discarded).toBeUndefined();
+						expect(ids(s.manager)).toContain("f1");
+						expect(s.manager.getBranch().map(entry => entry.id)).not.toContain(a1);
+					}
+					const later = s.manager.appendMessage(user("a later turn"));
+					await s.manager.flush();
+					await s.manager.discardEntryDurably(a1);
+					await s.manager.flush();
+					expectSameSession(s);
+					const stored = await expectStoredOnce(s, ["m1", a1, "f1", later]);
+					expect(stored).toContain(`"discardedEntryId":"${a1}"`);
+				} finally {
+					await s.manager.close().catch(() => undefined);
+				}
+			},
+			TIMEOUT,
+		);
+
+		for (const timing of ["at once", "after the leaf moved to its parent", "while its write is held"] as const) {
+			it(
+				`keeps an entry recorded while a discard is in flight on the active branch (${timing})`,
+				async () => {
+					const s = await open(userLine("m1", null, "a turn"));
+					try {
+						const failed = s.manager.appendMessage(createAssistantMessage("a failed reply"));
+						await s.manager.flush();
+						// Turn recovery moves the leaf to the failed turn's parent before it discards the turn.
+						if (timing === "after the leaf moved to its parent") s.manager.branch("m1");
+						if (timing === "while its write is held") s.gates.write.armed = true;
+						const discard = s.manager.discardEntryDurably(failed);
+						if (timing === "while its write is held") await s.gates.write.reached.promise;
+						const during = s.manager.appendMessage(user("recorded during the discard"));
+						s.gates.write.open.resolve();
+						await discard;
+						await s.manager.flush();
+						expectSameSession(s);
+						const marker =
+							s.manager.getEntries().find(entry => entry.type === "branch_summary")?.id ?? "no marker";
+						expect(s.manager.getBranch().map(entry => entry.id)).toEqual(["m1", marker, during]);
+						await s.manager.close();
+						const reopened = await SessionManager.open(s.file, s.dir, await s.connect(), {
+							suppressBreadcrumb: true,
+						});
+						try {
+							expect(reopened.getBranch().map(entry => entry.id)).toEqual(["m1", marker, during]);
+						} finally {
+							await reopened.close();
+						}
+						await expectStoredOnce(s, ["m1", during]);
+					} finally {
+						s.gates.write.open.resolve();
+						await s.manager.close().catch(() => undefined);
+					}
+				},
+				TIMEOUT,
+			);
+		}
+
+		// A discard started while another runs (here from the first one's marker, as a listener on entries can) keeps
+		// recording its own entries after the first one ends; the control starts it after the first resolved.
+		for (const start of ["after the first resolved", "from the first one's marker"] as const) {
+			it(
+				`keeps an entry recorded during a second discard on the active branch (started ${start})`,
+				async () => {
+					const s = await open(userLine("m1", null, "a turn"));
+					try {
+						const failed = s.manager.appendMessage(createAssistantMessage("a failed reply"));
+						await s.manager.flush();
+						let second: Promise<void> | undefined;
+						const startSecond = () => {
+							s.gates.write.armed = true;
+							second = s.manager.discardEntryDurably("m1");
+						};
+						s.manager.onEntryAppended = entry => {
+							if (start === "from the first one's marker" && entry.type === "branch_summary" && !second) {
+								startSecond();
+							}
+						};
+						await s.manager.discardEntryDurably(failed);
+						if (start === "after the first resolved") startSecond();
+						await s.gates.write.reached.promise;
+						const during = s.manager.appendMessage(user("recorded during the second discard"));
+						s.gates.write.open.resolve();
+						await second;
+						await s.manager.flush();
+						expectSameSession(s);
+						expect(s.manager.getBranch().map(entry => entry.id)).toContain(during);
+						const branch = s.manager.getBranch().map(entry => entry.id);
+						await s.manager.close();
+						const reopened = await SessionManager.open(s.file, s.dir, await s.connect(), {
+							suppressBreadcrumb: true,
+						});
+						try {
+							expect(reopened.getBranch().map(entry => entry.id)).toEqual(branch);
+						} finally {
+							await reopened.close();
+						}
+						await expectStoredOnce(s, [during]);
+					} finally {
+						s.gates.write.open.resolve();
+						await s.manager.close().catch(() => undefined);
+					}
+				},
+				TIMEOUT,
+			);
+		}
 	});
 }
