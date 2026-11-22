@@ -18,7 +18,7 @@ import { AUTO_THINKING, type ConfiguredThinkingLevel, parseConfiguredThinkingLev
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
 import { cfgDefaultThinkingLevel } from "../session/settings";
-import { pickDefaultAvailableModel, resolveModelRoleValue } from "./model-resolver";
+import { pickDefaultAvailableModel, resolveModelRoleValue, scopeAllowList } from "./model-resolver";
 import { cfgModelPresets, type ModelPreset } from "./model-settings";
 import type { Settings, SettingProvenance } from "./settings";
 
@@ -227,7 +227,7 @@ export function roleModelCandidates(
 	roleLookup?: ModelRoleLookup,
 ): Model[] {
 	if (!session.scopedModelsFromSettings && session.scopedModels.length > 0) {
-		return session.scopedModels.map(entry => entry.model);
+		return scopeAllowList(session.scopedModels);
 	}
 	return session.getAvailableModels(roleLookup);
 }

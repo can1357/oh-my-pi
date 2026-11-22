@@ -5,6 +5,7 @@ import { Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import * as autoThinkingClassifier from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { formatModelStringWithRouting, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { type RawSettings, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
@@ -212,6 +213,50 @@ describe("SelectorController model selector writes", () => {
 
 		expect(showError).not.toHaveBeenCalled();
 		expect(session?.model?.id).toBe("claude-opus-4-5");
+	});
+
+	it.each(["explicit", "settings"] as const)("keeps the live model on a disallowed %s-scope default", async scope => {
+		authStorage.keys.setRuntime("openrouter", "test-key");
+		const base = "openrouter/z-ai/glm-4.7";
+		const allowed = `${base}@cerebras`;
+		await Bun.write(
+			tempDir.join(".omp", "config.yml"),
+			YAML.stringify({
+				modelRoles: { default: `${base}@sambanova` },
+				enabledModels: scope === "settings" ? [allowed] : [],
+			}),
+		);
+		const settings = await Settings.init({ agentDir: tempDir.join("agent"), cwd: tempDir.path() });
+		const initial = model("claude-sonnet-4-5");
+		const { controller, showError } = start(settings, initial);
+		if (scope === "explicit") {
+			const routed = parseModelPattern(allowed, [getBundledModel("openrouter", "z-ai/glm-4.7") as Model]).model;
+			if (!routed) throw new Error(`Missing fixture model ${allowed}`);
+			session?.setScopedModels([{ model: routed }]);
+		}
+
+		await openModelHub(controller).onUnassign("default");
+
+		expect(showError).not.toHaveBeenCalled();
+		expect(session?.model?.id).toBe(initial.id);
+	});
+
+	it("switches to the persisted default when only its route differs from the live model", async () => {
+		authStorage.keys.setRuntime("openrouter", "test-key");
+		const base = "openrouter/z-ai/glm-4.7";
+		const fallback = `${base}@sambanova`;
+		await Bun.write(tempDir.join(".omp", "config.yml"), YAML.stringify({ modelRoles: { default: fallback } }));
+		const settings = await Settings.init({ agentDir: tempDir.join("agent"), cwd: tempDir.path() });
+		const { model: initial } = parseModelPattern(`${base}@cerebras`, [
+			getBundledModel("openrouter", "z-ai/glm-4.7") as Model,
+		]);
+		if (!initial) throw new Error("Missing live route fixture");
+		const { controller, showError } = start(settings, initial);
+
+		await openModelHub(controller).onUnassign("default");
+
+		expect(showError).not.toHaveBeenCalled();
+		expect(session?.model && formatModelStringWithRouting(session.model)).toBe(fallback);
 	});
 
 	it("refreshes the open hub once a confirmed compaction point has moved the model to its extended window", async () => {

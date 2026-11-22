@@ -29,6 +29,7 @@ import {
 	saveModelPreset,
 } from "../../config/model-presets";
 import { resolveAdvisorRoleSelection, resolveModelRoleValue } from "../../config/model-resolver";
+import { routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { getRoleInfo } from "../../config/model-roles";
 import { settings } from "../../config/settings";
@@ -1044,12 +1045,7 @@ export class SelectorController {
 								const resolved = resolveModelRoleValue(fallbackRoleValue, roleModelCandidates(session), {
 									settings: this.ctx.settings,
 								});
-								const live = session.model;
-								const liveDiffers =
-									!live ||
-									!resolved.model ||
-									live.provider !== resolved.model.provider ||
-									live.id !== resolved.model.id;
+								const liveDiffers = !routedModelsAreEqual(session.model, resolved.model);
 								if (resolved.model && (fallbackRoleValue !== previousEffectiveRoleValue || liveDiffers)) {
 									const fallbackModel = resolved.model;
 									const isAuto = resolved.thinkingLevel === AUTO_THINKING;
