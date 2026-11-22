@@ -963,3 +963,164 @@ describe("OpenAI-family first-event timeouts", () => {
 		}
 	});
 });
+
+describe("generic Responses localhost heartbeat smoke", () => {
+	it.each([
+		{
+			name: "healthy long reasoning",
+			created: true,
+			frame: 'data: {"type":"codex.keepalive"}\n\n',
+			error: undefined,
+		},
+		{
+			name: "keepalives before first progress",
+			created: false,
+			frame: 'data: {"type":"codex.keepalive"}\n\n',
+			error: "OpenAI responses stream timed out while waiting for the first event",
+		},
+		{
+			name: "silence after created",
+			created: true,
+			frame: "",
+			error: "OpenAI responses stream stalled while waiting for the next event",
+		},
+		{
+			name: "unknown keepalive",
+			created: true,
+			frame: 'data: {"type":"keepalive"}\n\n',
+			error: "OpenAI responses stream stalled while waiting for the next event",
+		},
+		{
+			name: "SSE comment",
+			created: true,
+			frame: ": keepalive\n\n",
+			error: "OpenAI responses stream stalled while waiting for the next event",
+		},
+		{
+			name: "in-progress metadata",
+			created: true,
+			frame: 'data: {"type":"response.in_progress"}\n\n',
+			error: "OpenAI responses stream stalled while waiting for the next event",
+		},
+	])(
+		"uses the actual HTTP SSE consumer: $name",
+		async ({ created, frame, error }) => {
+			// 1:100 wall-clock scale: idle 60 s -> 600 ms; cadence 10 s -> 100 ms;
+			// first progress 90 s -> 900 ms; healthy silence 180 s -> 1800 ms.
+			// Real timers deliberately exercise the platform HTTP socket/SSE arrival race;
+			// fake time cannot drive network I/O. Exact unscaled budgets are tested above
+			// the transport boundary in stream-timeout-defaults.test.ts.
+			const successPayload = await createOpenAIResponsesSuccessResponse().text();
+			const encoder = new TextEncoder();
+			const timers = new Set<NodeJS.Timeout>();
+			let requests = 0;
+			const server = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				fetch(request) {
+					expect(new URL(request.url).pathname).toBe("/v1/responses");
+					requests++;
+					let timer: NodeJS.Timeout;
+					const body = new ReadableStream<Uint8Array>({
+						start(controller) {
+							if (created)
+								controller.enqueue(
+									encoder.encode('data: {"type":"response.created","response":{"id":"resp_heartbeat"}}\n\n'),
+								);
+							let ticks = 0;
+							timer = setInterval(() => {
+								ticks++;
+								if (ticks === 18) {
+									clearInterval(timer);
+									timers.delete(timer);
+									controller.enqueue(encoder.encode(successPayload));
+									controller.close();
+								} else if (frame) controller.enqueue(encoder.encode(frame));
+							}, 100);
+							timers.add(timer);
+						},
+						cancel() {
+							clearInterval(timer);
+							timers.delete(timer);
+						},
+					});
+					return new Response(body, { headers: { "content-type": "text/event-stream" } });
+				},
+			});
+			try {
+				const result = await streamOpenAIResponses(
+					{ ...openAIResponsesModel, baseUrl: `http://127.0.0.1:${server.port}/v1` },
+					baseContext(),
+					{ apiKey: "local-test-key", streamFirstEventTimeoutMs: 900, streamIdleTimeoutMs: 600 },
+				).result();
+				expect(requests).toBeGreaterThan(0);
+				if (error) {
+					expect(result.stopReason).toBe("error");
+					expect(result.errorMessage).toBe(error);
+				} else {
+					expect(result.stopReason).toBe("stop");
+					expect(getFirstTextContent(result)).toMatchObject({ text: "Hello delayed" });
+				}
+			} finally {
+				for (const timer of timers) clearInterval(timer);
+				server.stop(true);
+			}
+		},
+		10_000,
+	);
+});
+
+describe("generic Responses bounded heartbeat smoke", () => {
+	it("caps a beating but hung producer at 300 semantic seconds", async () => {
+		// Real HTTP I/O with a 100x Date.now scale drives the consumer's clock on
+		// arriving heartbeat frames. Production budgets stay 60000/90000/300000 ms.
+		// This deliberately exercises the platform socket, not a mocked forwarding path.
+		const realNow = Date.now.bind(Date);
+		const startedAt = realNow();
+		vi.spyOn(Date, "now").mockImplementation(() => startedAt + (realNow() - startedAt) * 100);
+		const timers = new Set<NodeJS.Timeout>();
+		const encoder = new TextEncoder();
+		let responseStartedAt = 0;
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch() {
+				let timer: NodeJS.Timeout;
+				return new Response(
+					new ReadableStream<Uint8Array>({
+						start(controller) {
+							responseStartedAt = Date.now();
+							controller.enqueue(
+								encoder.encode('data: {"type":"response.created","response":{"id":"resp_hung"}}\n\n'),
+							);
+							timer = setInterval(() => {
+								controller.enqueue(encoder.encode('data: {"type":"codex.keepalive"}\n\n'));
+							}, 100);
+							timers.add(timer);
+						},
+						cancel() {
+							clearInterval(timer);
+							timers.delete(timer);
+						},
+					}),
+					{ headers: { "content-type": "text/event-stream" } },
+				);
+			},
+		});
+		try {
+			const result = await streamOpenAIResponses(
+				{ ...openAIResponsesModel, baseUrl: `http://127.0.0.1:${server.port}/v1` },
+				baseContext(),
+				{ apiKey: "local-test-key", streamFirstEventTimeoutMs: 90_000, streamIdleTimeoutMs: 60_000 },
+			).result();
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toBe("OpenAI responses stream stalled while waiting for the next event");
+			expect(Date.now() - responseStartedAt).toBeGreaterThanOrEqual(300_000);
+			expect(Date.now() - responseStartedAt).toBeLessThan(330_000);
+		} finally {
+			for (const timer of timers) clearInterval(timer);
+			server.stop(true);
+			vi.restoreAllMocks();
+		}
+	}, 10_000);
+});
