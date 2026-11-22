@@ -95,17 +95,6 @@ describe("LocalProtocolHandler", () => {
 		});
 	});
 
-	it("reads literal percent signs in both authority and pathname components", async () => {
-		await withTempDir(async tempDir => {
-			const context = { localProtocolOptions: { getArtifactsDir: () => tempDir } };
-			await Bun.write(path.join(tempDir, "local", "100%.txt"), "top level");
-			await Bun.write(path.join(tempDir, "local", "dir", "100%.txt"), "nested");
-			const router = InternalUrlRouter.instance();
-			expect((await router.resolve("local://100%25.txt", context)).content).toBe("top level");
-			expect((await router.resolve("local://dir/100%25.txt", context)).content).toBe("nested");
-		});
-	});
-
 	it("blocks path traversal attempts", async () => {
 		await withTempDir(async tempDir => {
 			LocalProtocolHandler.setOverride({

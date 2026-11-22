@@ -17,7 +17,6 @@
 
 ### Added
 
-- Added regression coverage for `local://` files containing literal percent signs and percent-encoded text, preserving the upstream single-decode implementation ([#12037](https://github.com/can1357/oh-my-pi/pull/12037) by [@kaluli123123](https://github.com/kaluli123123)).
 - Extensions can take over a built-in provider through `registerProvider`: `stream` replaces its request adapter, `generateImage` its image generation, and `webSearch` its grounded search request, and `discoverModels` its model discovery request. `rules` sets KDL rule directives (such as `prompt-perturbation`) for its models.
 - Added the `magic` edit mode, which accepts Markdown bulleted change descriptions grouped under `# path` headings and uses a configurable fast model or role to generate and apply patches. It supports concise block replacement, deletion, movement, and identifier-renaming descriptions, and presents the resulting diffs.
 - Added remote session model controls through RPC, including the model picker, thinking-level and role selection, `auto` thinking, and commands to resume, abort while delivering queued messages, or continue the host agent. Collab guests can now continue, interrupt, and queue follow-up prompts for the host.
