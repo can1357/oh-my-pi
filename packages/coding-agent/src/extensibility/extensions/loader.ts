@@ -379,11 +379,12 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		if (id === NATIVE_TODO_BACKEND) {
 			throw new Error(`Todo backend id "${id}" is reserved for omp's own todo list`);
 		}
-		for (const text of [definition.label, definition.description]) {
+		for (const field of ["label", "description"] as const) {
+			const text = definition[field];
 			// Blank once sanitized: a label of escape codes alone would draw as an empty row.
 			if (text !== undefined && (typeof text !== "string" || sanitizeDisplayLine(text).length === 0)) {
 				throw new TypeError(
-					`Todo backend "${id}" label and description must be text that is not blank once control sequences are removed`,
+					`Todo backend "${id}" ${field} must be text that is not blank once control sequences are removed`,
 				);
 			}
 		}

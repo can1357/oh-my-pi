@@ -330,6 +330,35 @@ describe("todo backend", () => {
 		expect(backend.calls).toEqual([{ phases: list("before"), sessionId: session.sessionManager.getSessionId() }]);
 	});
 
+	it("a backend picked in Settings while a runtime layer keeps another one selected gets nothing", async () => {
+		const picked = tracker();
+		const kept = tracker("kept");
+		// The panel writes the global layer; the runtime layer above it keeps "kept" in effect.
+		const settings = await Settings.init({ inMemory: true, overrides: { "todo.backend": "kept" } });
+		const { session } = await open([picked.extension, kept.extension], undefined, { settings });
+		session.commitTodoPhases(list("before"));
+		await settled(session);
+		await themeModule.initTheme(false);
+		spyOn(themeModule, "getAvailableThemes").mockResolvedValue(["dark"]);
+		const opened = Promise.withResolvers<Component>();
+		const showOverlay = (component: Component): OverlayHandle => {
+			opened.resolve(component);
+			return { hide: () => {}, setHidden: () => {}, isHidden: () => false };
+		};
+
+		new SelectorController(
+			createInteractiveModeContext({ session, settings, ui: { showOverlay, setFocus: () => {} } }),
+		).showSettingsSelector();
+		const panel = await opened.promise;
+		if (!(panel instanceof SettingsSelectorComponent)) throw new Error("the settings menu did not open");
+		panel.handleNativeEvent({ type: "action", key: "", act: "page", value: "tools", mods: [] });
+		panel.handleNativeEvent({ type: "change", key: "", item: cfgTodoBackend.id, value: "tracker" });
+		await settled(session);
+
+		expect(picked.calls).toEqual([]);
+		expect(tasksOf(kept)).toEqual([["before"]]);
+	});
+
 	it("a whole-session fork sends the list again under the fork's id", async () => {
 		const backend = tracker();
 		const { session } = await open([backend.extension], "tracker", {

@@ -343,9 +343,13 @@ export class SelectorController {
 							this.handleSettingChange(id, value);
 							// A backend offered here is registered, so it gets the current list at once. An approved
 							// `cfg://` write can name one whose extension is still loading, like a config reload:
-							// those get the list with the next change.
-							if (id === cfgTodoBackend.id && typeof value === "string" && value !== NATIVE_TODO_BACKEND) {
-								this.ctx.session.extensionRunner?.syncTodoBackend(value, this.ctx.session.getTodoPhases());
+							// those get the list with the next change. The effective value decides: a project or
+							// runtime layer can keep another backend selected over the global one written here.
+							if (id === cfgTodoBackend.id) {
+								const backend = cfgTodoBackend.get(this.ctx.session.settings);
+								if (backend !== NATIVE_TODO_BACKEND) {
+									this.ctx.session.extensionRunner?.syncTodoBackend(backend, this.ctx.session.getTodoPhases());
+								}
 							}
 						},
 						onThemePreview: async themeName => {
