@@ -308,6 +308,11 @@ pub trait Backend: Send {
 	fn hold_display_awake(&mut self) -> Option<DisplayAwakeHold> {
 		None
 	}
+	/// Undo what the session changed on the desktop when the session closes,
+	/// reporting what could not be undone; dropping the backend only tries.
+	fn close(&mut self) -> CoreResult<()> {
+		Ok(())
+	}
 	/// Why `target` is missing from the last [`Self::windows`] when that is
 	/// not because the window closed, such as an application that did not
 	/// answer the listing.

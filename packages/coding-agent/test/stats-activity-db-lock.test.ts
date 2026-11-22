@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
-import { closeDb, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
+import { closeDb, initDb, insertMessageStats, STATS_BUSY_TIMEOUT_MS_ENV } from "@oh-my-pi/omp-stats/db";
 import type { MessageStats } from "@oh-my-pi/omp-stats/types";
 import { getAgentDir, getStatsDbPath, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { loadDailyActivity } from "../src/stats/activity-client";
@@ -18,7 +18,7 @@ let tempDir: TempDir | undefined;
 
 beforeEach(() => {
 	tempDir = TempDir.createSync("@omp-stats-activity-lock-");
-	for (const key of [...XDG_KEYS, "PI_CONFIG_DIR"]) {
+	for (const key of [...XDG_KEYS, "PI_CONFIG_DIR", STATS_BUSY_TIMEOUT_MS_ENV]) {
 		originalEnv[key] = process.env[key];
 		delete process.env[key];
 	}
@@ -87,6 +87,9 @@ describe("/usage activity load", () => {
 		insertMessageStats([request(Date.now() - 60 * 60_000)]);
 		// The worker runs in a fresh process: no connection of its own is open yet.
 		closeDb();
+		// The sync's connection would otherwise wait out the production 5s busy
+		// timeout before failing; the worker inherits this from the environment.
+		process.env[STATS_BUSY_TIMEOUT_MS_ENV] = "100";
 		const writer = new Database(getStatsDbPath());
 		writer.run("BEGIN IMMEDIATE");
 		writer.run("INSERT OR REPLACE INTO meta (key, value) VALUES ('activity-lock-test', 'held')");
