@@ -5,6 +5,7 @@
 ### Added
 
 - Added `AGENT_KILL_LABEL`, `InterruptReason` and `isInterruptReason` so hosts can tell a parent agent's kill apart from a user interrupt ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
+- Added `SettingsRuntimeContext.runtimeOptions`: the host can supply the choices of a setting shown as a choice menu, keyed by setting path. Thinking levels, themes and composer shapes keep their own lists ([#19925](https://github.com/can1357/oh-my-pi/pull/19925) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Fixed
 
