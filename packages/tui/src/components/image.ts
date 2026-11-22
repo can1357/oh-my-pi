@@ -101,6 +101,11 @@ export function measureRender<T>(render: () => T): { value: T; images: boolean }
 	}
 }
 
+/** Whether a {@link measureRender} is running: its widths are trials, not ones a frame draws at. */
+export function measuringRender(): boolean {
+	return measureRenderDepth > 0;
+}
+
 const EMPTY_IDS: readonly number[] = [];
 const EMPTY_TRANSMITS: readonly string[] = [];
 const SAVE_CURSOR = "\x1b7";
