@@ -11,12 +11,14 @@ import { Effort } from "@oh-my-pi/pi-ai";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, type MockResponse, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir, setInteractiveHost } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
@@ -57,7 +59,8 @@ function stubJudge(choice: Route, probabilities: Record<Route, number>): Array<R
 	const states: Array<Record<string, string>> = [];
 	vi.spyOn(globalThis, "fetch").mockImplementation(
 		asGlobalFetch(async (input, init) => {
-			if (!String(input).endsWith("/v1/systemone")) throw new Error(`unexpected request: ${String(input)}`);
+			if (!String(input).endsWith("/v1/systemone") && !String(input).endsWith("/decisions"))
+				throw new Error(`unexpected request: ${String(input)}`);
 			const { state } = JSON.parse(String(init?.body)) as { state: Record<string, string> };
 			states.push(state);
 			const answer = { type: "choice", choice, probabilities, confidence: probabilities[choice] };
@@ -74,7 +77,7 @@ function autoPrewalkBills(ledger: Mock<SessionManager["appendModelUsage"]>): num
 }
 
 /** Spawn the `task` agent on the planner and record which model served each child turn. */
-async function spawn(): Promise<{ exitCode: number; requests: string[] }> {
+async function spawn(routeOnly = false): Promise<{ exitCode: number; requests: string[] }> {
 	const cwd = path.join(root, "home", "work");
 	const artifactsDir = path.join(root, "artifacts");
 	await fs.mkdir(cwd, { recursive: true });
@@ -83,20 +86,27 @@ async function spawn(): Promise<{ exitCode: number; requests: string[] }> {
 	const authStorage = createInMemoryAuthStorage();
 	authStorage.keys.setRuntime("mock", "test-key");
 	authStorage.keys.setRuntime("typesafe", "ts-key");
+	if (routeOnly) authStorage.keys.setRuntime("openrouter", "test-key");
 	// Ambient provider keys must neither conjure another judge nor give the chain a candidate that reaches the network.
 	const source = authStorage.keys.source.bind(authStorage.keys);
 	vi.spyOn(authStorage.keys, "source").mockImplementation((provider, sourceOptions) =>
-		provider === "mock" || provider === "typesafe" ? source(provider, sourceOptions) : undefined,
+		provider === "mock" || provider === "typesafe" || (routeOnly && provider === "openrouter")
+			? source(provider, sourceOptions)
+			: undefined,
 	);
 	const modelRegistry = new ModelRegistry(authStorage);
 	const requests: string[] = [];
+	const row = getBundledModel("openrouter", "z-ai/glm-4.7");
+	if (!row) throw new Error("Expected bundled OpenRouter model");
+	const sourceSelector = routeOnly ? "openrouter/z-ai/glm-4.7@cerebras" : `mock/${PLANNER}`;
+	const targetSelector = routeOnly ? "openrouter/z-ai/glm-4.7@sambanova" : `mock/${TARGET}`;
 	const planner = Object.assign(
 		createMockModel({
 			id: PLANNER,
 			reasoning: true,
 			handler: context => {
 				if (!(context.tools ?? []).some(tool => tool.name === "yield")) return { content: ["label"] };
-				requests.push(PLANNER);
+				if (!routeOnly) requests.push(PLANNER);
 				const hasTodo = (context.tools ?? []).some(tool => tool.name === "todo");
 				const used = (name: string) =>
 					context.messages.some(message => message.role === "toolResult" && message.toolName === name);
@@ -116,14 +126,32 @@ async function spawn(): Promise<{ exitCode: number; requests: string[] }> {
 			reasoning: true,
 			handler: context => {
 				if (!(context.tools ?? []).some(tool => tool.name === "yield")) return { content: ["label"] };
-				requests.push(TARGET);
+				if (!routeOnly) requests.push(TARGET);
 				return call("yield", { type: "result", data: "done" });
 			},
 		}),
 		{ thinking },
 	);
 	const catalogAvailable = modelRegistry.getAvailable.bind(modelRegistry);
-	vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind => [planner, target, ...catalogAvailable(kind)]);
+	vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind => [
+		...(routeOnly ? [row] : [planner, target]),
+		...catalogAvailable(kind).filter(model => !routeOnly || model.provider !== row.provider || model.id !== row.id),
+	]);
+	if (routeOnly) {
+		const createSession = sdkModule.createAgentSession;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			const result = await createSession(options);
+			result.session.agent.streamFn = (model, context, streamOptions) => {
+				const routed = model.compat as { openRouterRouting?: { only?: string[] } } | undefined;
+				const route = routed?.openRouterRouting?.only?.[0];
+				if ((context.tools ?? []).some(tool => tool.name === "yield"))
+					requests.push(`${model.provider}/${model.id}@${route}`);
+				const mock = route === "sambanova" ? target : planner;
+				return mock.stream(mock, context, streamOptions);
+			};
+			return result;
+		});
+	}
 
 	try {
 		const result = await runSubprocess({
@@ -141,23 +169,24 @@ async function spawn(): Promise<{ exitCode: number; requests: string[] }> {
 			index: 0,
 			id: "Judged",
 			outputSchema: {},
-			modelOverride: `mock/${PLANNER}:medium`,
+			modelOverride: `${sourceSelector}:medium`,
 			authStorage,
 			modelRegistry,
 			settings: Settings.isolated({
 				"task.agentIdleTtlMs": 0,
-				"task.agentPrewalkAuto": { task: `mock/${TARGET}:high` },
+				"task.agentPrewalkAuto": { task: `${targetSelector}:${routeOnly ? "medium" : "high"}` },
 				"async.enabled": false,
 				"compaction.enabled": false,
 				"retry.enabled": false,
 				"todo.reminders": false,
 				"advisor.enabled": false,
-				modelRoles: { default: `mock/${PLANNER}`, judge: "typesafe/jev-1.14.0" },
+				modelRoles: { default: sourceSelector, judge: "typesafe/jev-1.14.0" },
 			}),
 			enableLsp: false,
 			enableMCP: false,
 			enableIrc: false,
 		});
+		expect(result.exitCode, JSON.stringify(result)).toBe(0);
 		return { exitCode: result.exitCode, requests };
 	} finally {
 		authStorage.close();
@@ -202,6 +231,26 @@ describe("runSubprocess auto-prewalk through a real child session", () => {
 		expect(judged).toHaveLength(1);
 		expect(judged[0]!.request).toContain(ASSIGNMENT);
 		expect(autoPrewalkBills(ledger)).toBe(1);
+	}, 30_000);
+
+	it("hands off a route-only subagent when the automatic judge picks prewalk", async () => {
+		const judged = stubJudge("prewalk", { prewalk: 0.9, primary: 0.07, direct: 0.03 });
+		const journal = vi.spyOn(SessionManager.prototype, "appendModelChange");
+
+		const { exitCode, requests } = await spawn(true);
+
+		expect(exitCode).toBe(0);
+		expect(judged).toHaveLength(1);
+		expect(requests).toEqual([
+			"openrouter/z-ai/glm-4.7@cerebras",
+			"openrouter/z-ai/glm-4.7@cerebras",
+			"openrouter/z-ai/glm-4.7@sambanova",
+		]);
+		expect(
+			journal.mock.calls.some(
+				([model, role]) => model === "openrouter/z-ai/glm-4.7@sambanova" && role === "prewalk",
+			),
+		).toBe(true);
 	}, 30_000);
 
 	it("stays on the planning model when the judge picks primary", async () => {
