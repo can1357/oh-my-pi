@@ -107,8 +107,17 @@ def validate_request(request):
         if request["generation"] != 0 or request["hosted_run_id"] != 0:
             raise VerificationError("invalid hosted generation")
     elif request["pool"] == "self-hosted":
-        if request["generation"] != 1 or request["hosted_run_id"] <= 0:
-            raise VerificationError("invalid fallback generation")
+        # Self-hosted can be a direct dispatch (generation 0, no hosted run)
+        # when hosted runners are unavailable, or a fallback (generation 1)
+        # after a hosted run fails.
+        if request["generation"] == 0:
+            if request["hosted_run_id"] != 0:
+                raise VerificationError("invalid self-hosted direct dispatch")
+        elif request["generation"] == 1:
+            if request["hosted_run_id"] <= 0:
+                raise VerificationError("invalid fallback generation")
+        else:
+            raise VerificationError("invalid self-hosted generation")
     else:
         raise VerificationError("invalid runner pool")
     if request["coverage"] not in ("full", "subset", "none"):

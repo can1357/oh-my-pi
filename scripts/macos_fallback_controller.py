@@ -325,11 +325,66 @@ class Controller:
             except Exception:
                 pass
 
+    def hosted_available(self):
+        """Check if GitHub-hosted macOS runners appear available.
+
+        GitHub does not expose a direct API for hosted runner capacity.
+        Instead, we look at recent workflow runs for this repository: if
+        macOS runs are stuck in the queue for longer than a threshold,
+        hosted runners are likely unavailable and we should skip directly
+        to the self-hosted Mac.
+
+        Returns True if hosted runners appear available, False if they
+        appear backed up or if the check itself fails (default to hosted).
+        """
+        try:
+            queued_count = 0
+            oldest_created_at = None
+            for run in self.api.paginate(self.workflow + "/runs?event=workflow_dispatch", "workflow_runs"):
+                title = run.get("display_title", "")
+                if not title.startswith("macos:"):
+                    continue
+                if run.get("status") != "queued":
+                    continue
+                queued_count += 1
+                # Track the oldest created_at timestamp among queued runs.
+                created = run.get("created_at", "")
+                if created and (oldest_created_at is None or created < oldest_created_at):
+                    oldest_created_at = created
+                # Only need to scan a few runs to decide.
+                if queued_count >= 5:
+                    break
+            # If multiple runs are queued and the oldest has been waiting
+            # longer than the queue threshold, hosted runners are backed up.
+            if queued_count >= 2 and oldest_created_at is not None:
+                try:
+                    import datetime as dt
+                    created_dt = dt.datetime.fromisoformat(oldest_created_at.replace("Z", "+00:00"))
+                    now_ts = time.time()
+                    age = now_ts - created_dt.timestamp()
+                    if age > QUEUE_THRESHOLD:
+                        return False
+                except (ValueError, TypeError):
+                    pass
+        except (APIError, VerificationError):
+            # If the check fails, default to trying hosted.
+            pass
+        return True
+
     def execute(self):
         try:
             self.parent()
             self.reconcile_old()
-            selected = self.wait(self.dispatch(0, "hosted"), "hosted")
+            # Check hosted runner availability before dispatching. If hosted
+            # runners appear backed up and fallback is enabled, skip directly
+            # to the self-hosted Mac instead of wasting time on a queued run.
+            pool = "hosted"
+            if not self.hosted_available() and self.fallback:
+                self.fallback = False
+                self.parent()
+                verify_mac_configuration(self.api, self.request)
+                pool = "self-hosted"
+            selected = self.wait(self.dispatch(0, pool), pool)
             return self.verify_result(selected)
         finally:
             self.cleanup()

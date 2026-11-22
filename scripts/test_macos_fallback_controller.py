@@ -270,6 +270,90 @@ class ProtocolTests(unittest.TestCase):
             with self.assertRaises(controller.VerificationError):
                 self.subject.verify_result(30)
 
+    def test_hosted_available_returns_true_when_no_queued_runs(self):
+        """When no macOS runs are queued, hosted runners appear available."""
+        self.api.paginate = lambda path, key: []
+        self.assertTrue(self.subject.hosted_available())
+
+    def test_hosted_available_returns_true_when_one_queued_run(self):
+        """A single queued run does not indicate backed-up hosted runners."""
+        self.api.paginate = lambda path, key: [
+            {"display_title": "macos:10:2:rust:" + "d" * 32 + ":0", "status": "queued",
+             "created_at": "2000-01-01T00:00:00Z"}
+        ] if key == "workflow_runs" else []
+        self.assertTrue(self.subject.hosted_available())
+
+    def test_hosted_available_returns_false_when_queue_backed_up(self):
+        """Multiple old queued runs indicate hosted runners are unavailable."""
+        self.api.paginate = lambda path, key: [
+            {"display_title": "macos:10:2:rust:" + "d" * 32 + ":0", "status": "queued",
+             "created_at": "2000-01-01T00:00:00Z"},
+            {"display_title": "macos:10:2:rust:" + "e" * 32 + ":0", "status": "queued",
+             "created_at": "2000-01-01T00:00:00Z"},
+        ] if key == "workflow_runs" else []
+        self.assertFalse(self.subject.hosted_available())
+
+    def test_hosted_available_defaults_to_true_on_api_error(self):
+        """If the availability check fails, default to trying hosted."""
+        self.api.paginate = lambda path, key: (_ for _ in ()).throw(controller.APIError(500))
+        self.assertTrue(self.subject.hosted_available())
+
+    def test_execute_dispatches_self_hosted_when_hosted_unavailable(self):
+        """When hosted is unavailable, execute dispatches directly to self-hosted."""
+        dispatched_pool = None
+        def capture_dispatch(generation, pool, hosted_run_id=None):
+            nonlocal dispatched_pool
+            dispatched_pool = pool
+            return 30
+        self.api.paginate = lambda path, key: [
+            {"display_title": "macos:10:2:rust:" + "d" * 32 + ":0", "status": "queued",
+             "created_at": "2000-01-01T00:00:00Z"},
+            {"display_title": "macos:10:2:rust:" + "e" * 32 + ":0", "status": "queued",
+             "created_at": "2000-01-01T00:00:00Z"},
+        ] if key == "workflow_runs" else []
+        with patch.object(self.subject, "dispatch", side_effect=capture_dispatch), \
+             patch.object(self.subject, "wait", return_value=30), \
+             patch.object(self.subject, "verify_result", return_value={}), \
+             patch.object(self.subject, "reconcile_old"):
+            self.subject.execute()
+        self.assertEqual(dispatched_pool, "self-hosted")
+
+    def test_execute_dispatches_hosted_when_available(self):
+        """When hosted is available, execute dispatches to hosted as normal."""
+        dispatched_pool = None
+        def capture_dispatch(generation, pool, hosted_run_id=None):
+            nonlocal dispatched_pool
+            dispatched_pool = pool
+            return 30
+        self.api.paginate = lambda path, key: []
+        with patch.object(self.subject, "dispatch", side_effect=capture_dispatch), \
+             patch.object(self.subject, "wait", return_value=30), \
+             patch.object(self.subject, "verify_result", return_value={}), \
+             patch.object(self.subject, "reconcile_old"):
+            self.subject.execute()
+        self.assertEqual(dispatched_pool, "hosted")
+
+    def test_execute_skips_self_hosted_when_fallback_disabled(self):
+        """When fallback is disabled, always dispatch to hosted regardless of availability."""
+        self.subject.fallback = False
+        dispatched_pool = None
+        def capture_dispatch(generation, pool, hosted_run_id=None):
+            nonlocal dispatched_pool
+            dispatched_pool = pool
+            return 30
+        self.api.paginate = lambda path, key: [
+            {"display_title": "macos:10:2:rust:" + "d" * 32 + ":0", "status": "queued",
+             "created_at": "2000-01-01T00:00:00Z"},
+            {"display_title": "macos:10:2:rust:" + "e" * 32 + ":0", "status": "queued",
+             "created_at": "2000-01-01T00:00:00Z"},
+        ] if key == "workflow_runs" else []
+        with patch.object(self.subject, "dispatch", side_effect=capture_dispatch), \
+             patch.object(self.subject, "wait", return_value=30), \
+             patch.object(self.subject, "verify_result", return_value={}), \
+             patch.object(self.subject, "reconcile_old"):
+            self.subject.execute()
+        self.assertEqual(dispatched_pool, "hosted")
+
 
 if __name__ == "__main__":
     unittest.main()
