@@ -686,10 +686,10 @@ export class ExtensionRunner {
 	#todoClosed = false;
 	/** Aborted when {@link closeTodoBackend} stops waiting: a call still running is given up, and its handler timer with it. */
 	#todoGivenUp = new AbortController();
-	/** `todo.backend` ids already reported as unregistered. */
-	#reportedTodoBackends = new Set<string>();
-	/** Todo backend ids already warned about as registered by several extensions. */
-	#warnedTodoBackends = new Set<string>();
+	/** The selected `todo.backend` id last reported as unregistered; cleared once a selected id resolves. */
+	#reportedTodoBackend: string | undefined;
+	/** Selected todo backend ids whose shadowed registrations were already reported. */
+	#shadowedTodoBackends = new Set<string>();
 	/** Notified after {@link setSuspendedExtensions} suspends or resumes any extension. */
 	#suspensionListeners = new Set<() => void>();
 	/** Fail-open wrappers of transcript presenters, kept so their identity is stable. */
@@ -1730,16 +1730,7 @@ export class ExtensionRunner {
 		const backends = new Map<string, { extension: Extension; definition: TodoBackendDefinition }>();
 		for (const extension of this.extensions) {
 			for (const [id, definition] of extension.todoBackends ?? []) {
-				const owner = backends.get(id);
-				if (!owner) backends.set(id, { extension, definition });
-				else if (!this.#warnedTodoBackends.has(id)) {
-					this.#warnedTodoBackends.add(id);
-					logger.warn("Todo backend id registered by several extensions; the first loaded keeps it", {
-						id,
-						owner: owner.extension.path,
-						ignored: extension.path,
-					});
-				}
+				if (!backends.has(id)) backends.set(id, { extension, definition });
 			}
 		}
 		return backends;
@@ -1794,8 +1785,8 @@ export class ExtensionRunner {
 		if (!pending || pending.sessionId !== this.sessionManager.getSessionId()) return;
 		const owner = this.getTodoBackends().get(pending.backend);
 		if (!owner) {
-			if (this.#reportedTodoBackends.has(pending.backend)) return;
-			this.#reportedTodoBackends.add(pending.backend);
+			if (this.#reportedTodoBackend === pending.backend) return;
+			this.#reportedTodoBackend = pending.backend;
 			this.emitError({
 				extensionPath: "<todo.backend>",
 				event: "todo_backend",
@@ -1803,7 +1794,9 @@ export class ExtensionRunner {
 			});
 			return;
 		}
+		this.#reportedTodoBackend = undefined;
 		const { extension, definition } = owner;
+		this.#reportShadowedTodoBackends(pending.backend, extension);
 		const sent = this.#todoSent;
 		if (
 			sent === "none"
@@ -1825,6 +1818,21 @@ export class ExtensionRunner {
 			this.#todoGivenUp.signal,
 		);
 		if (taken) this.#todoSent = { list: pending, extension, definition };
+	}
+
+	/** Report, once per id, the extensions whose registration of the selected id loses to `owner`. */
+	#reportShadowedTodoBackends(id: string, owner: Extension): void {
+		if (this.#shadowedTodoBackends.has(id)) return;
+		const shadowed = this.extensions.filter(extension => extension !== owner && extension.todoBackends?.has(id));
+		if (shadowed.length === 0) return;
+		this.#shadowedTodoBackends.add(id);
+		for (const extension of shadowed) {
+			this.emitError({
+				extensionPath: extension.path,
+				event: "todo_backend",
+				error: `This extension's todo backend "${sanitizeDisplayLine(id)}" is ignored: an extension loaded earlier registers the same id.`,
+			});
+		}
 	}
 
 	/**

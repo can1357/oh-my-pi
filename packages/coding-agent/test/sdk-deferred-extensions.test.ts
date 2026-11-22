@@ -63,15 +63,19 @@ describe("startup-deferred extensions", () => {
 			`export default function(pi) { pi.registerShortcut("ctrl+shift+y", { handler: () => {} }); }`,
 		);
 		// The first frame replays the transcript with message and reply renderers, and link schemes
-		// reach the markdown renderer at UI init: each alone keeps an extension eager. So does a todo
-		// backend, which a resumed session's list is sent to as soon as the session starts.
+		// reach the markdown renderer at UI init: each alone keeps an extension eager.
 		const drawing = {
 			"link-scheme.ts": `pi.registerLinkScheme("demo-link");`,
 			"message-renderer.ts": `pi.registerMessageRenderer("demo-message", () => undefined);`,
 			"text-renderer.ts": `pi.registerAssistantTextRenderer(() => undefined);`,
 			"thinking-renderer.ts": `pi.registerAssistantThinkingRenderer(() => undefined);`,
-			"todo-backend.ts": `pi.registerTodoBackend({ id: "demo", replace() {} });`,
 		};
+		// A resumed session's list goes to the selected todo backend as soon as the session starts.
+		const todoBackend = path.join(tempDir.path(), "todo-backend.ts");
+		fs.writeFileSync(
+			todoBackend,
+			`export default function(pi) { pi.registerTodoBackend({ id: "demo", replace() {} }); }`,
+		);
 		const drawingPaths = Object.entries(drawing).map(([name, body]) => {
 			const file = path.join(tempDir.path(), name);
 			fs.writeFileSync(file, `export default function(pi) { ${body} }`);
@@ -79,21 +83,25 @@ describe("startup-deferred extensions", () => {
 		});
 		fs.writeFileSync(neverLoaded, `export default function() {}`);
 
-		const loaded = await loadExtensions([toolOnly, withShortcut, ...drawingPaths], tempDir.path());
+		const loaded = await loadExtensions([toolOnly, withShortcut, ...drawingPaths, todoBackend], tempDir.path());
 		expect(loaded.errors).toEqual([]);
 		await recordStartupVerdicts(storage, loaded.extensions);
 
-		const paths = [toolOnly, withShortcut, ...drawingPaths, neverLoaded];
-		expect(await partitionStartupExtensions(storage, paths, tempDir.path())).toEqual({
+		const paths = [toolOnly, withShortcut, ...drawingPaths, todoBackend, neverLoaded];
+		expect(await partitionStartupExtensions(storage, paths, tempDir.path(), "native")).toEqual({
 			eager: [withShortcut, ...drawingPaths, neverLoaded],
+			deferred: [toolOnly, todoBackend],
+		});
+		expect(await partitionStartupExtensions(storage, paths, tempDir.path(), "demo")).toEqual({
+			eager: [withShortcut, ...drawingPaths, todoBackend, neverLoaded],
 			deferred: [toolOnly],
 		});
 
 		// An edited source may now register something startup needs: load it eagerly again.
 		fs.appendFileSync(toolOnly, "\n// edited\n");
-		expect(await partitionStartupExtensions(storage, paths, tempDir.path())).toEqual({
+		expect(await partitionStartupExtensions(storage, paths, tempDir.path(), "native")).toEqual({
 			eager: [toolOnly, withShortcut, ...drawingPaths, neverLoaded],
-			deferred: [],
+			deferred: [todoBackend],
 		});
 	});
 
