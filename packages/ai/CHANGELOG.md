@@ -24,6 +24,7 @@
 - Fixed `antigravity-cli` models not seeing images returned by tools such as `read` on image files ([#19358](https://github.com/can1357/oh-my-pi/pull/19358) by [@0xprincess](https://github.com/0xprincess))
 - A transient `404` from a proxy in front of the auth broker no longer switches the snapshot stream to long-polling and turns off usage reporting for the rest of the process ([#19236](https://github.com/can1357/oh-my-pi/issues/19236)) ([#19348](https://github.com/can1357/oh-my-pi/pull/19348) by [@Alex-Wengg](https://github.com/Alex-Wengg))
 - Antigravity CLI requests no longer fail with a credential staging error when two sessions for the same account stage sign-in at the same time ([#19347](https://github.com/can1357/oh-my-pi/pull/19347) by [@eggpeat](https://github.com/eggpeat))
+- OpenAI Codex WebSocket tool-call continuations now keep the turn's sticky routing token, so they reuse the prompt cache instead of re-running the whole prefix uncached ([#20088](https://github.com/can1357/oh-my-pi/issues/20088))
 
 ## [19.1.0] - 2026-11-21
 
