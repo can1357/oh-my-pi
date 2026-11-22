@@ -1734,9 +1734,11 @@ export async function buildSessionOptions(
 		options.planYolo = { target: resolved.model, thinkingLevel: resolved.thinkingLevel };
 	}
 
-	// Thinking level comes from the scope entry the session starts on, which is
-	// not always the first one (e.g. a remembered default).
-	const startScoped = scopedModels.find(entry => modelsAreEqual(entry.model, options.model)) ?? scopedModels[0];
+	// Thinking level comes from the scope entry the session starts on, which is not always the
+	// first one (e.g. a remembered default). A model outside the scope (an explicit `--model`) keeps its own.
+	const startScoped = options.model
+		? scopedModels.find(entry => modelsAreEqual(entry.model, options.model))
+		: scopedModels[0];
 	if (parsed.thinking) {
 		options.thinkingLevel = parsed.thinking;
 	} else if (
