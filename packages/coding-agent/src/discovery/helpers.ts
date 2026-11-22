@@ -547,8 +547,8 @@ export async function scanSkillsFromDir(
 		// Check existence before reading so a missing manifest is not negative-cached
 		// and a later scan can see a SKILL.md created in an already-visited directory.
 		const selfSkillPath = path.join(currentDir, "SKILL.md");
-		const hasSelfSkill = fs.existsSync(selfSkillPath);
-		if ((depth > 0 || options.includeSelf || recursive) && hasSelfSkill) {
+		const hasSelfSkill = (depth > 0 || options.includeSelf || recursive) && fs.existsSync(selfSkillPath);
+		if (hasSelfSkill) {
 			work.push(loadSkill(selfSkillPath));
 		}
 		// A nested skill directory is a leaf: its references/, scripts/, or agent
