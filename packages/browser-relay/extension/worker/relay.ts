@@ -355,16 +355,17 @@ export function connectRelay(): void {
 		hostPort = null;
 		clearLinkDeadline();
 		const hadLink = link !== null;
-		const changed = detail !== hostError;
-		hostError = detail;
 		unlinked(
 			detail
 				? `omp native host disconnected: ${detail}`
 				: "omp native host disconnected",
 		);
-		// A port the browser refused (host missing, blocked by policy) never linked, so `unlinked` reported nothing;
-		// the panel still needs the browser's reason instead of guessing.
-		if (!hadLink && changed) handlers?.status(relayStatus());
+		// A port that never linked was refused by the browser (host missing, blocked by policy): `unlinked` reported
+		// nothing, so publish the browser's reason. A linked host's exit ("Native host has exited.") is no such refusal.
+		if (!hadLink && detail !== hostError) {
+			hostError = detail;
+			handlers?.status(relayStatus());
+		}
 		scheduleReconnect();
 	});
 	const request: ToNativeHost = { t: "link", extensionId: chrome.runtime.id };
