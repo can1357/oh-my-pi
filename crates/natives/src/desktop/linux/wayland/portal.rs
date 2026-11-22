@@ -8,10 +8,18 @@ use std::{
 use ashpd::desktop::remote_desktop::RemoteDesktop;
 use tokio::runtime::{Builder, Runtime};
 
-use crate::desktop::error::{CoreResult, DesktopError};
+use crate::desktop::{
+	control,
+	error::{CoreResult, DesktopError},
+};
 
 /// How long the input probe waits for the portal frontend to answer.
 const INPUT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long before the run's end an unanswered permission prompt is given up:
+/// the bounded portal-session close (`CLOSE_TIMEOUT`) plus time to answer the
+/// caller, so the prompt's own error still beats the run's timeout.
+const CONSENT_MARGIN: Duration =
+	crate::desktop::CLOSE_TIMEOUT.saturating_add(Duration::from_millis(500));
 
 /// Process-wide Tokio runtime shared by every xdg-desktop-portal call.
 ///
@@ -31,6 +39,25 @@ pub(super) fn portal_runtime() -> CoreResult<&'static Runtime> {
 	PORTAL_RUNTIME
 		.as_ref()
 		.map_err(|err| DesktopError::internal(format!("xdg-desktop-portal runtime: {err}")))
+}
+
+/// Bounds a wait on a portal prompt the user answers (the `RemoteDesktop`
+/// permission dialog, the `ScreenCast` share picker) by the current
+/// operation's deadline (the run's end or the caller's reply timeout), and
+/// fails with `Timeout` and `unanswered` once it passes. GNOME can open the
+/// prompt behind other windows; unbounded, only the run's own timeout ends the
+/// wait, and the run fails without saying why.
+pub(super) async fn until_deadline<T>(
+	future: impl Future<Output = T>,
+	unanswered: &'static str,
+) -> CoreResult<T> {
+	let Some(deadline) = control::current_token().and_then(|token| token.deadline()) else {
+		return Ok(future.await);
+	};
+	let give_up = deadline.checked_sub(CONSENT_MARGIN).unwrap_or(deadline);
+	tokio::time::timeout_at(give_up.into(), future)
+		.await
+		.map_err(|_| DesktopError::timeout(unanswered))
 }
 
 /// File name of the `RemoteDesktop` restore token that pre-#7884 builds wrote
@@ -119,7 +146,47 @@ fn missing_remote_desktop(error: &ashpd::Error) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+	use futures::FutureExt;
+
 	use super::*;
+
+	const UNANSWERED: &str = "the prompt was not answered";
+
+	#[test]
+	fn an_unanswered_prompt_is_given_up_before_the_run_ends() {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_time()
+			.build()
+			.unwrap();
+		// The run leaves only the session-close budget, so the prompt wait must
+		// give up on its first poll; an unbounded wait would still be pending,
+		// and a margin shorter than the close would wait for the run to end.
+		let ending = control::CancellationSource::default();
+		ending.set_deadline(Some(std::time::Instant::now() + crate::desktop::CLOSE_TIMEOUT));
+		let error = control::with_token_for_test(&ending.token(), || {
+			runtime.block_on(async {
+				until_deadline(std::future::pending::<()>(), UNANSWERED).now_or_never()
+			})
+		})
+		.expect("the wait must end at once")
+		.unwrap_err();
+		assert_eq!(error.code.as_str(), "Timeout");
+		assert_eq!(error.message, UNANSWERED);
+
+		// A run with time left lets a prompt answered later through.
+		let running = control::CancellationSource::default();
+		running.set_deadline(Some(std::time::Instant::now() + Duration::from_secs(3600)));
+		let answered = control::with_token_for_test(&running.token(), || {
+			runtime.block_on(until_deadline(
+				async {
+					tokio::task::yield_now().await;
+					7
+				},
+				UNANSWERED,
+			))
+		});
+		assert_eq!(answered.unwrap(), 7);
+	}
 
 	/// Every portal caller (libei input init and PipeWire capture) must borrow
 	/// one persistent runtime; a regression to per-call runtimes would return

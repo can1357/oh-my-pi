@@ -8113,12 +8113,30 @@
 			]
 		},
 		{
-			"source": "- :raw verbatim without anchors/prefixes; combine :2-4:raw or :raw:2-4 for exactly those lines.",
+			"source": "- :raw verbatim without anchors/prefixes (skips folding and the display-width limit); combine :2-4:raw or :raw:2-4 for exactly those lines.",
 			"origin": "tools/read.md",
 			"variants": [
-				"- :raw gives verbatim output with no anchors/prefixes; combine :2-4:raw or :raw:2-4 to get exactly those lines.",
-				"- :raw is verbatim, without anchors/prefixes; combine :2-4:raw or :raw:2-4 for exactly those lines.",
-				"- :raw verbatim, no anchors/prefixes; combine :2-4:raw or :raw:2-4 to obtain exactly those lines."
+				"- :raw gives verbatim output with no anchors/prefixes (no folding, no display-width limit); combine :2-4:raw or :raw:2-4 to get exactly those lines.",
+				"- :raw is verbatim, without anchors/prefixes (skips folding and the display-width limit); combine :2-4:raw or :raw:2-4 for exactly those lines.",
+				"- :raw verbatim, no anchors/prefixes (bypasses folding and the display-width limit); combine :2-4:raw or :raw:2-4 to obtain exactly those lines."
+			]
+		},
+		{
+			"source": "- :raw verbatim without line prefixes (skips folding and the display-width limit); combine :2-4:raw or :raw:2-4 for exactly those lines.",
+			"origin": "tools/read.md",
+			"variants": [
+				"- :raw gives verbatim output with no line prefixes (no folding, no display-width limit); combine :2-4:raw or :raw:2-4 to get exactly those lines.",
+				"- :raw is verbatim, without line prefixes (skips folding and the display-width limit); combine :2-4:raw or :raw:2-4 for exactly those lines.",
+				"- :raw verbatim, no line prefixes (bypasses folding and the display-width limit); combine :2-4:raw or :raw:2-4 to obtain exactly those lines."
+			]
+		},
+		{
+			"source": "- :raw verbatim (skips folding and the display-width limit); combine :2-4:raw or :raw:2-4 for exactly those lines.",
+			"origin": "tools/read.md",
+			"variants": [
+				"- :raw gives verbatim output (no folding, no display-width limit); combine :2-4:raw or :raw:2-4 to get exactly those lines.",
+				"- :raw is verbatim (skips folding and the display-width limit); combine :2-4:raw or :raw:2-4 for exactly those lines.",
+				"- :raw verbatim (bypasses folding and the display-width limit); combine :2-4:raw or :raw:2-4 to obtain exactly those lines."
 			]
 		},
 		{
