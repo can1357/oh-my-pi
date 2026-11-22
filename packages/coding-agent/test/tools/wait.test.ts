@@ -171,6 +171,22 @@ describe("wait", () => {
 		build.resolve("done");
 	});
 
+	test("a tan fork is told to keep waiting after back-to-back idle waits", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const build = Promise.withResolvers<string>();
+		manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
+		const fork = new WaitTool(session(manager, "Main", false, { tanFork: true }));
+		// The fork runs one assignment; an idle wait is not a loop while that assignment
+		// is still blocked, so the reminder keeps it waiting instead of sending it away.
+		expect(notice(await elapse(fork, 5_000))).toBeUndefined();
+		const reminder = notice(await elapse(fork, 240_000));
+		expect(reminder).toContain("This fork runs one assignment");
+		expect(reminder).toContain("keep waiting");
+		expect(reminder).not.toContain("Waiting is not progress");
+		build.resolve("done");
+	});
+
 	test("news or a minute away from wait restarts the ladder at the floor", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
