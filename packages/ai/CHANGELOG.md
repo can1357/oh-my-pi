@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Antigravity CLI requests no longer fail with a credential staging error when two sessions for the same account stage sign-in at the same time ([#19347](https://github.com/can1357/oh-my-pi/pull/19347) by [@eggpeat](https://github.com/eggpeat))
 - With several Devin logins, omp now prefers a login with daily or weekly quota left; a login past its quota that its on-demand balance still funds comes next, and one with no balance is skipped until its quota resets ([#19929](https://github.com/can1357/oh-my-pi/pull/19929) by [@will-bogusz](https://github.com/will-bogusz))
 - Devin logins now store the account's email, user id and organization, so two organizations under one email show as two accounts in `omp usage` and `auth.accountPolicies` can name each; sign in again to identify an existing login ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))
 - Anthropic requests with no messages now fail locally with the model, provider, and how many messages arrived, instead of a bare `400 "messages is required"` ([#19881](https://github.com/can1357/oh-my-pi/pull/19881) by [@FnSGit](https://github.com/FnSGit))
@@ -141,9 +142,6 @@
 
 ### Fixed
 
-- Fixed Mistral (and other OpenAI-compatible) 429s reporting a zero `x-ratelimit-limit-*` allowance being retried for minutes; they now fail on the first request with an error naming the header and suggesting a model or plan switch ([#19300](https://github.com/can1357/oh-my-pi/issues/19300))
-- Fixed pooled Claude accounts presenting one device: an Anthropic OAuth request now reports the device and account id of the credential serving it, including after a rotation inside one call, when caller metadata named the previous account ([#19277](https://github.com/can1357/oh-my-pi/pull/19277) by [@Xytronix](https://github.com/Xytronix))
-- Fixed Antigravity CLI requests failing with a credential staging error when two sessions for the same account prepare sign-in at the same time ([#19347](https://github.com/can1357/oh-my-pi/pull/19347) by [@eggpeat](https://github.com/eggpeat)).
 - Fixed rate-limit handling for Mistral and other OpenAI-compatible providers so requests with no available allowance fail immediately with an actionable error suggesting a model or plan change.
 - Fixed Anthropic OAuth requests for pooled Claude accounts to report accurate device and account information, including after credentials are rotated during a request.
 
