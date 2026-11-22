@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
+- Fixed SIXEL composer chip thumbnails leaving stale pixels after the chip or editor moves: thumbnails now use the shared SIXEL fitter, are placed from the editor's rendered height, and show only on Konsole, where the SIXEL delete is confirmed; other SIXEL terminals keep the icon ([#15988](https://github.com/can1357/oh-my-pi/pull/15988) by [@Komzpa](https://github.com/Komzpa))
 
 ## [19.1.0] - 2026-11-21
 
