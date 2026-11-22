@@ -6,7 +6,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { formatModelStringWithRouting, resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
-import { cfgEnabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import { cfgEnabledModels, cfgModelProviderOrder } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildSessionOptions,
@@ -112,6 +112,28 @@ describe("watchScopedModelSettings", () => {
 
 			expect(session.setCalls).toBe(1);
 			expect(session.scopedModels.map(entry => formatModelStringWithRouting(entry.model))).toEqual([target]);
+		} finally {
+			for (const dispose of session.disposers) dispose();
+		}
+	});
+
+	it("updates the cycling scope when provider preference changes an enabled model", async () => {
+		const id = "anthropic/claude-preset-fixture";
+		const patterns = [id];
+		const settings = Settings.isolated({ enabledModels: patterns, modelProviderOrder: ["openrouter"] });
+		const registry = new FakeRegistry(
+			["openrouter", "vercel-ai-gateway"].map(provider => ({ ...model(id), provider })),
+		);
+		const session = new FakeSession(await startupScope(patterns, registry, settings));
+		expect(session.scopedModels.map(entry => entry.model.provider)).toEqual(["openrouter"]);
+
+		watchScopedModelSettings(session, parseArgs([]), registry, settings);
+		try {
+			cfgModelProviderOrder.override(settings, ["vercel-ai-gateway"]);
+			const { promise, resolve } = Promise.withResolvers<void>();
+			setImmediate(resolve);
+			await promise;
+			expect(session.scopedModels.map(entry => entry.model.provider)).toEqual(["vercel-ai-gateway"]);
 		} finally {
 			for (const dispose of session.disposers) dispose();
 		}
