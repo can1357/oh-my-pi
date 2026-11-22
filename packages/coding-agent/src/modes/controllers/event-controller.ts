@@ -2662,11 +2662,6 @@ export class EventController {
 	async #handleAutoCompactionStart(
 		event: Extract<AgentSessionEvent, { type: "auto_compaction_start" }>,
 	): Promise<void> {
-		// Compaction rewrites the context into a new conversation prefix. Never
-		// compare the post-compaction request with the pre-compaction cache
-		// counters: that reports the whole old prefix as a cache miss.
-		this.ctx.lastAssistantUsage = undefined;
-
 		this.composerPrediction.cancel();
 		if (!this.#terminalProgressActive) {
 			this.#setTerminalProgress(true);
@@ -2714,10 +2709,6 @@ export class EventController {
 	}
 
 	async #handleAutoCompactionEnd(event: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>): Promise<void> {
-		// Also clear on end for an event that arrives after a resume or an aborted
-		// start. The next assistant turn begins a new prefix.
-		this.ctx.lastAssistantUsage = undefined;
-
 		if (this.#compactionOwnsProgress) {
 			this.#compactionOwnsProgress = false;
 			this.#setTerminalProgress(false);
@@ -2751,6 +2742,9 @@ export class EventController {
 			if (event.errorMessage) {
 				if (!event.skipped) {
 					this.ctx.rebuildChatFromMessages();
+					// The partial rebuild can reseed the baseline from the kept
+					// pre-shake assistant; drop it again like the success path.
+					this.ctx.lastAssistantUsage = undefined;
 					this.ctx.statusLine.invalidate();
 					this.ctx.ui.requestRender(true, { clearScrollback: true });
 				}

@@ -2317,10 +2317,6 @@ export class CommandController {
 		this.ctx.ui.requestRender();
 
 		let outcome: CompactionOutcome = "ok";
-		// Compaction is a new conversation prefix. Drop the pre-compaction cache
-		// baseline so the first post-compaction turn is not compared against the
-		// old (much larger) cacheRead.
-		this.ctx.lastAssistantUsage = undefined;
 		try {
 			try {
 				await session.compact(instructions, options);
