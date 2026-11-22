@@ -4,6 +4,7 @@
 
 ### Added
 
+- `/wt` (TUI, ACP, RPC and `worktree.onStart`) runs the new worktree's `post-checkout` hook as `git worktree add` does, with a spinner in the TUI, then loads the skills and commands it added; a failing hook keeps the worktree and shows a warning, and quitting while it runs keeps that worktree with a warning. In an ovnfs checkout only a `core.hooksPath` hook runs ([#20045](https://github.com/can1357/oh-my-pi/pull/20045) by [@Dangerboi](https://github.com/Dangerboi))
 - `/models` → Roles → Judge can declare native judge routes: `Ctrl+R` sets a model's judgment protocol and endpoint root (preselected and prefilled from what omp already knows: the model's route, the catalog's root for the provider, or the provider's chat root), and `Ctrl+N` adds a model the catalog does not list, writing only its `providers.<provider>.models[]` row in models.yml (under a file lock, other fields kept) and storing an optional API key in the credential store (only when no higher-precedence key, such as models.yml `apiKey` or the provider's environment variable, already applies; the form names that source instead); nothing is assigned until you pick the model. Saving sends no request; `Ctrl+T` tests the drafted route first with one yes/no question and reports the latency and served model, or a classified failure (refused key, a model the key may not use, billing, root or model not served, protocol mismatch, transient, timeout). A models.yml provider whose models are all judgment-API models with their own `baseUrl` no longer needs a provider `baseUrl` or `apiKey`; see [docs/models.md](https://github.com/can1357/oh-my-pi/blob/main/docs/models.md#native-judge-routes-in-models) ([#19055](https://github.com/can1357/oh-my-pi/pull/19055) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
@@ -18,6 +19,7 @@
 - Fixed `/usage` showing "Usage history unavailable (database is locked)" while another process was writing the stats database; the stored history stays visible, marked not synced when the refresh cannot finish ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
 - `openai-models-list` discovery no longer offers a gateway's speech and transcription models as chat models: rows whose only output is `speech` or `transcription` (including OpenRouter's `text->speech` style `architecture.modality` summary) become `tts` and `stt` models ([#19900](https://github.com/can1357/oh-my-pi/pull/19900) by [@Xytronix](https://github.com/Xytronix))
 - Subagents stopped by their parent through `proc://<id>/kill` now record "Stopped by parent agent" in their transcripts instead of "Interrupted by user" ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
+- Fixed the omp daemon staying alive for up to 3 seconds after shutdown, or 11 seconds after stopping a module unit such as the image URL broker, once its work was done
 
 ## [19.1.0] - 2026-11-21
 
