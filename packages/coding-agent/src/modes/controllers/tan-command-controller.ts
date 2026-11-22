@@ -253,6 +253,7 @@ export class TanCommandController {
 								agentId: cloneId,
 								agentDisplayName: "tan",
 								parentTaskPrefix: cloneId,
+								tanFork: true,
 								asyncJobManager: manager,
 								parentAgentId: ownerId,
 								agentRegistry,
@@ -290,9 +291,13 @@ export class TanCommandController {
 						clone.setTodoPhases([]);
 						cloneManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: [] });
 						const injectContextSwitch = () => {
-							clone?.agent.appendMessage({
+							const fork = clone;
+							if (!fork) return;
+							fork.agent.appendMessage({
 								role: "developer",
-								content: tanContextSwitchPrompt,
+								content: prompt.render(tanContextSwitchPrompt, {
+									waitTool: fork.getEnabledToolNames().includes("wait"),
+								}),
 								attribution: "agent",
 								timestamp: Date.now(),
 							});
