@@ -63,7 +63,7 @@ function selectorChunkLooksReadLike(chunk: string): boolean {
 
 function invalidSelector(sel: string): ToolError {
 	return new ToolError(
-		`Invalid selector ':${sel}'. Use :N, :N-M, :N+K, :N- (open-ended), :-N (last N lines), a comma-separated list of ranges, :raw, :img for SVG rendering, or a range combined with raw (e.g. :raw:50-100).`,
+		`Invalid selector ':${sel}'. Use :N, :N-M, :N+K, :N- (open-ended), :-N (last N lines), a comma-separated list of ranges, :raw, :img for images (SVG is rasterized), or a range combined with raw (e.g. :raw:50-100).`,
 	);
 }
 

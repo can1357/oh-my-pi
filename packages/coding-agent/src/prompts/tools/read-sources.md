@@ -16,7 +16,7 @@
 {{/if}}
 - Video requires ffmpeg/ffprobe: bare preview grid+metadata, :412 frame, :1h5m42s/:90s/:01:23 time.
 - SVG/SVGZ default text; :img rasterizes an SVG/SVGZ into an image, :raw original.
-  - Raster images (PNG, JPEG) need no selector; :img rejects them.
+  - Raster images (PNG, JPEG) need no selector; :img reads them the same way.
 - Merge conflicts: :conflicts lists one line per unresolved merge block.
 - `write` targets:
   - archive.ext:member: ZIP/tar families and .asar writable, others read-only.
