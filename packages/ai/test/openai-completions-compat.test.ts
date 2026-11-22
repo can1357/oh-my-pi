@@ -2704,6 +2704,55 @@ describe("Moonshot Flavored JSON Schema tool normalization", () => {
 	});
 });
 
+describe("GitHub Copilot Gemini tool schemas (issue #20198)", () => {
+	// MCP tools (e.g. Grafana's update_dashboard) declare JSON Schema type
+	// arrays; Copilot's Gemini backend answers them with a blank 400.
+	const mcpTool: Tool = {
+		name: "mcp__grafana_update_dashboard",
+		description: "update a dashboard",
+		parameters: {
+			type: "object",
+			properties: {
+				value: { type: ["string", "number", "integer", "boolean", "object", "array", "null"] },
+				folder: { type: ["string", "null"] },
+			},
+		},
+	};
+
+	function copilotModel(id: string): Model<"openai-completions"> {
+		return buildModel({
+			...gpt4oMiniSpec,
+			provider: "github-copilot",
+			baseUrl: "https://api.enterprise.githubcopilot.com",
+			id,
+			name: id,
+		});
+	}
+
+	async function wireProperties(model: Model<"openai-completions">): Promise<Record<string, unknown>> {
+		const payload = await captureOpenAICompletionsPayload(model, { ...baseContext(), tools: [mcpTool] });
+		const tools = toObject(payload)?.tools;
+		if (!Array.isArray(tools)) throw new Error("payload tools missing");
+		const properties = getNestedObject(getNestedObject(tools[0], "function")?.parameters, "properties");
+		if (!properties) throw new Error("tool parameters missing");
+		return properties;
+	}
+
+	it("scalarizes type arrays for Gemini models", async () => {
+		const properties = await wireProperties(copilotModel("gemini-4-hydrogen"));
+		expect(JSON.stringify(properties)).not.toContain('"type":[');
+		expect(properties.folder).toEqual({ type: "string", nullable: true });
+		const value = toObject(properties.value);
+		expect(value?.nullable).toBe(true);
+		expect(value?.anyOf).toContainEqual({ type: "integer" });
+	});
+
+	it("keeps standard JSON Schema for non-Gemini Copilot models", async () => {
+		const properties = await wireProperties(copilotModel("gpt-5.5"));
+		expect(properties.folder).toEqual({ type: ["string", "null"] });
+	});
+});
+
 describe("grammar tool-schema normalization (issue #5914)", () => {
 	const primitiveUnion = {
 		anyOf: [

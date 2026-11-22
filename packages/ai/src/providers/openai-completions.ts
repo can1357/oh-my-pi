@@ -65,6 +65,7 @@ import {
 	findStrictToolSchemaViolation,
 	flattenExclusiveRequiredRootUnion,
 	NO_STRICT,
+	normalizeSchemaForGoogle,
 	normalizeSchemaForMoonshot,
 	sanitizeSchemaForGrammar,
 	toolWireSchema,
@@ -3097,6 +3098,39 @@ export function convertMessages(
 	return params;
 }
 
+/**
+ * Rewrites tool parameters into the schema dialect `flavor` names; see
+ * {@link ResolvedOpenAICompat.toolSchemaFlavor}. Called once per tool by
+ * {@link convertTools} after strict adaptation.
+ */
+function applyToolSchemaFlavor(
+	flavor: ResolvedOpenAICompat["toolSchemaFlavor"],
+	parameters: Record<string, unknown>,
+): Record<string, unknown> {
+	switch (flavor) {
+		// Moonshot/Kimi native hosts validate against the stricter MFJS subset
+		// (const→enum, typed enums, no validators) and 400 otherwise.
+		case "moonshot-mfjs": {
+			const normalized = normalizeSchemaForMoonshot(parameters);
+			return isRecord(normalized) ? normalized : parameters;
+		}
+		// Gemini behind an OpenAI-compatible host (GitHub Copilot) takes Google's
+		// dialect: a JSON Schema `type` array 400s the whole request.
+		case "google": {
+			const normalized = normalizeSchemaForGoogle(parameters);
+			return isRecord(normalized) ? normalized : parameters;
+		}
+		// Grammar-constrained local backends (llama.cpp, LM Studio, vLLM)
+		// build a GBNF grammar from the schema and 400 with
+		// `Unrecognized schema: true` on the bare boolean subschema
+		// `toolWireSchema` emits for open fields (issue #5914).
+		case "grammar":
+			return sanitizeSchemaForGrammar(parameters);
+		default:
+			return parameters;
+	}
+}
+
 function convertTools(
 	tools: Tool[],
 	compat: ResolvedOpenAICompat,
@@ -3140,18 +3174,7 @@ function convertTools(
 		const includeExplicitFalse =
 			!includeStrict && tool.strict === false && toolStrictMode === "mixed" && compat.supportsStrictMode !== false;
 		const wireParameters = includeStrict ? parameters : baseParameters;
-		// Moonshot/Kimi native hosts validate against the stricter MFJS subset
-		// (const→enum, typed enums, no validators) and 400 otherwise.
-		// Grammar-constrained local backends (llama.cpp, LM Studio, vLLM)
-		// build a GBNF grammar from the schema and 400 with
-		// `Unrecognized schema: true` on the bare boolean subschema
-		// `toolWireSchema` emits for open fields (issue #5914).
-		const emittedParameters =
-			compat.toolSchemaFlavor === "moonshot-mfjs"
-				? (normalizeSchemaForMoonshot(wireParameters) as Record<string, unknown>)
-				: compat.toolSchemaFlavor === "grammar"
-					? sanitizeSchemaForGrammar(wireParameters)
-					: wireParameters;
+		const emittedParameters = applyToolSchemaFlavor(compat.toolSchemaFlavor, wireParameters);
 		const violation = findStrictToolSchemaViolation(emittedParameters, "#", { rejectRootObjectUnion });
 		if (violation) {
 			logger.warn(
