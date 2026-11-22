@@ -50,6 +50,8 @@ fn settle(attempt: u32, status: SettleStatus) -> RunRecord {
 		attempt,
 		status,
 		feedback: Str::empty(),
+		verdict: None,
+		independent: None,
 	})
 }
 

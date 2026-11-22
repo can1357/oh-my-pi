@@ -34,11 +34,17 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PhaseResult {
 	/// Whether the phase met its acceptance condition.
-	pub accepted: bool,
+	pub accepted:    bool,
 	/// Why the phase was rejected, forwarded verbatim as the next attempt's
 	/// correction. Legacy providers leave this empty when accepted; native
 	/// verification retains its evidence journal reference on acceptance too.
-	pub feedback: Str,
+	pub feedback:    Str,
+	/// Verdict decision recorded by the judge (e.g. "accept", "reject",
+	/// "needs-human"). Absent when the phase was judged without a verdict.
+	pub verdict:     Option<Str>,
+	/// Whether the judge route differs from the producer route (independent
+	/// review). Absent when not applicable.
+	pub independent: Option<bool>,
 }
 
 /// The disposition of one settled phase attempt.
@@ -456,6 +462,8 @@ async fn drive<H: AdwHost>(
 							SettleStatus::Rejected
 						},
 						feedback: result.feedback.clone(),
+						verdict: result.verdict.clone(),
+						independent: result.independent,
 					})
 				})?;
 				let feedback = result.feedback.clone();
@@ -648,7 +656,12 @@ mod tests {
 			cancel: &'a CancellationToken,
 		) -> impl Future<Output = Result<PhaseResult, Infallible>> + Send + 'a {
 			cancel.cancel();
-			ready(Ok(PhaseResult { accepted: false, feedback: Str::new_static("killed") }))
+			ready(Ok(PhaseResult {
+				accepted:    false,
+				feedback:    Str::new_static("killed"),
+				verdict:     None,
+				independent: None,
+			}))
 		}
 	}
 
@@ -887,7 +900,12 @@ mod tests {
 					if dispatch.phase.as_str() == phase.name.as_str() && dispatch.attempt == attempt)
 				});
 			assert!(durable, "the host ran before its dispatch was journaled");
-			ready(Ok(PhaseResult { accepted: true, feedback: Str::default() }))
+			ready(Ok(PhaseResult {
+				accepted:    true,
+				feedback:    Str::default(),
+				verdict:     None,
+				independent: None,
+			}))
 		}
 	}
 
@@ -1077,7 +1095,12 @@ mod tests {
 				.seen
 				.lock()
 				.push((phase.name.as_str().to_owned(), attempt));
-			ready(Ok(PhaseResult { accepted: true, feedback: Str::default() }))
+			ready(Ok(PhaseResult {
+				accepted:    true,
+				feedback:    Str::default(),
+				verdict:     None,
+				independent: None,
+			}))
 		}
 	}
 
@@ -1127,10 +1150,12 @@ mod tests {
 
 	fn settle(phase: &'static str) -> RunRecord {
 		RunRecord::Settle(PhaseSettle {
-			phase:    Str::new_static(phase),
-			attempt:  1,
-			status:   SettleStatus::Accepted,
-			feedback: Str::default(),
+			phase:       Str::new_static(phase),
+			attempt:     1,
+			status:      SettleStatus::Accepted,
+			feedback:    Str::default(),
+			verdict:     None,
+			independent: None,
 		})
 	}
 
@@ -1363,7 +1388,12 @@ mod tests {
 			cancel: &'a CancellationToken,
 		) -> impl Future<Output = Result<PhaseResult, Infallible>> + Send + 'a {
 			cancel.cancel();
-			ready(Ok(PhaseResult { accepted: false, feedback: Str::new_static("killed") }))
+			ready(Ok(PhaseResult {
+				accepted:    false,
+				feedback:    Str::new_static("killed"),
+				verdict:     None,
+				independent: None,
+			}))
 		}
 	}
 

@@ -136,19 +136,19 @@ impl From<RemoteError> for ProductionError {
 
 /// Production owner for one workflow run.
 pub struct ProductionAdwHost {
-	pub(super) root:      PathBuf,
-	data_dir:             PathBuf,
-	model:                Str,
-	model_override:       bool,
-	pub(super) ctx:       Arc<omp_con::Ctx>,
-	resolver:             FilesystemResolver,
+	pub(super) root:           PathBuf,
+	data_dir:                  PathBuf,
+	model:                     Str,
+	model_override:            bool,
+	pub(super) ctx:            Arc<omp_con::Ctx>,
+	resolver:                  FilesystemResolver,
 	/// The workspace trust decision the run executes under: code phases run
 	/// only when it trusts, and model phases' child kernels inherit it.
-	workspace_trust:      TrustDecision,
+	workspace_trust:           TrustDecision,
 	/// The project Environment, started by the first code phase: a workflow
 	/// of model phases alone never needs one of its own.
-	environment:          OnceCell<omp_envd::ProjectEnvironment>,
-	exec_policy_override: Option<AdwExecPolicy>,
+	environment:               OnceCell<omp_envd::ProjectEnvironment>,
+	exec_policy_override:      Option<AdwExecPolicy>,
 	/// Verification observations collected from a prior verification phase,
 	/// carried forward to subsequent phases for evidence-based judging.
 	verification_observations: parking_lot::Mutex<Vec<CheckObservation>>,
@@ -430,8 +430,10 @@ impl ProductionAdwHost {
 			Ok(run) => run,
 			Err(error) if matches!(&error, ExecutionError::Infrastructure { .. }) => {
 				return Ok(PhaseResult {
-					accepted: false,
-					feedback: Str::new_static("command refused by the workspace sandbox"),
+					accepted:    false,
+					feedback:    Str::new_static("command refused by the workspace sandbox"),
+					verdict:     None,
+					independent: None,
 				});
 			},
 			Err(error) => return Err(ProductionError::Execution(error)),
@@ -440,22 +442,27 @@ impl ProductionAdwHost {
 		let mut stderr = Vec::new();
 		loop {
 			let event = tokio::select! {
-				event = run.next_event() => event,
-				() = cancel.cancelled() => {
-					let _ = run.cancel().await;
-					// Teardown is asynchronous; wait for the terminal event so no process
-					// of the cancelled tree outlives the phase.
-					let _ = tokio::time::timeout(CANCEL_TEARDOWN, async {
-						while let Some(event) = run.next_event().await {
-							if matches!(event, ExecutionEvent::Settled(_)) {
-								break;
-							}
-						}
-					})
-					.await;
-					return Ok(PhaseResult { accepted: false, feedback: sf!("cancelled") });
-				},
-			};
+					 event = run.next_event() => event,
+					 () = cancel.cancelled() => {
+						 let _ = run.cancel().await;
+						 // Teardown is asynchronous; wait for the terminal event so no process
+						 // of the cancelled tree outlives the phase.
+						 let _ = tokio::time::timeout(CANCEL_TEARDOWN, async {
+							 while let Some(event) = run.next_event().await {
+								 if matches!(event, ExecutionEvent::Settled(_)) {
+									 break;
+								 }
+							 }
+						 })
+						 .await;
+			return Ok(PhaseResult {
+								accepted: false,
+								feedback: sf!("cancelled"),
+								verdict: None,
+								independent: None,
+							});
+					 },
+				 };
 			match event {
 				Some(ExecutionEvent::Output(frame)) => match frame.stream {
 					omp_exec::Stream::Stdout | omp_exec::Stream::Combined => {
@@ -464,14 +471,24 @@ impl ProductionAdwHost {
 					omp_exec::Stream::Stderr => stderr.extend_from_slice(&frame.bytes),
 				},
 				Some(ExecutionEvent::Settled(Ok(result))) if result.outcome.is_success() => {
-					return Ok(PhaseResult { accepted: true, feedback: Str::empty() });
+					return Ok(PhaseResult {
+						accepted:    true,
+						feedback:    Str::empty(),
+						verdict:     None,
+						independent: None,
+					});
 				},
 				Some(ExecutionEvent::Settled(Ok(result))) => {
 					let mut feedback =
 						StrMut::new(format!("`{binary}` ended with {:?}\n", result.outcome));
 					feedback.push_str(&String::from_utf8_lossy(&stdout));
 					feedback.push_str(&String::from_utf8_lossy(&stderr));
-					return Ok(PhaseResult { accepted: false, feedback: feedback.freeze() });
+					return Ok(PhaseResult {
+						accepted:    false,
+						feedback:    feedback.freeze(),
+						verdict:     None,
+						independent: None,
+					});
 				},
 				Some(ExecutionEvent::Settled(Err(error))) => {
 					return Err(ProductionError::Execution(error));
@@ -670,17 +687,29 @@ impl AdwHost for ProductionAdwHost {
 						// Store verification observations for subsequent phases.
 						*self.verification_observations.lock() = report.observations;
 						Ok(PhaseResult {
-							accepted: report.verdict == GateVerdict::Pass,
-							feedback: sf!("{}\nVerification journal: {}", report.feedback, path.display()),
+							accepted:    report.verdict == GateVerdict::Pass,
+							feedback:    sf!(
+								"{}\nVerification journal: {}",
+								report.feedback,
+								path.display()
+							),
+							verdict:     Some(match report.verdict {
+								GateVerdict::Pass => Str::new_static("accept"),
+								GateVerdict::Fail => Str::new_static("reject"),
+								GateVerdict::Inconclusive => Str::new_static("reject"),
+							}),
+							independent: None,
 						})
 					},
 					Err(_) => Ok(PhaseResult {
-						accepted: false,
-						feedback: sf!(
+						accepted:    false,
+						feedback:    sf!(
 							"INCONCLUSIVE: native verification did not complete; inspect the retained \
 							 session.\nVerification journal: {}",
 							path.display()
 						),
+						verdict:     Some(Str::new_static("reject")),
+						independent: None,
 					}),
 				}
 			},
@@ -777,7 +806,12 @@ fn phase_prompt(
 /// accepted. A producing phase reports completion, so any answer stands.
 fn judge(kind: PhaseKind, answer: Str) -> PhaseResult {
 	if kind != PhaseKind::Review {
-		return PhaseResult { accepted: true, feedback: Str::empty() };
+		return PhaseResult {
+			accepted:    true,
+			feedback:    Str::empty(),
+			verdict:     None,
+			independent: None,
+		};
 	}
 	if answer
 		.as_str()
@@ -785,9 +819,19 @@ fn judge(kind: PhaseKind, answer: Str) -> PhaseResult {
 		.next()
 		.is_some_and(|word| word.eq_ignore_ascii_case("accept"))
 	{
-		PhaseResult { accepted: true, feedback: Str::empty() }
+		PhaseResult {
+			accepted:    true,
+			feedback:    Str::empty(),
+			verdict:     Some(Str::new_static("accept")),
+			independent: None,
+		}
 	} else {
-		PhaseResult { accepted: false, feedback: answer }
+		PhaseResult {
+			accepted:    false,
+			feedback:    answer,
+			verdict:     Some(Str::new_static("reject")),
+			independent: None,
+		}
 	}
 }
 
@@ -795,10 +839,12 @@ fn judge(kind: PhaseKind, answer: Str) -> PhaseResult {
 fn judge_delegated(kind: PhaseKind, answer: Str) -> PhaseResult {
 	if kind != PhaseKind::Review && answer.trim().is_empty() {
 		return PhaseResult {
-			accepted: false,
-			feedback: Str::new_static(
+			accepted:    false,
+			feedback:    Str::new_static(
 				"The delegated executor returned no text, so the phase has no result.",
 			),
+			verdict:     None,
+			independent: None,
 		};
 	}
 	judge(kind, answer)
@@ -849,11 +895,17 @@ fn judge_with_verification(
 		return judge(kind, answer);
 	}
 
-	// If verification policy and evidence are available, evaluate deterministically.
+	// If verification policy and evidence are available, evaluate
+	// deterministically.
 	if let Some(policy) = policy {
 		if let Ok(assessment) = policy.evaluate(observations) {
 			return match assessment.verdict {
-				GateVerdict::Pass => PhaseResult { accepted: true, feedback: Str::empty() },
+				GateVerdict::Pass => PhaseResult {
+					accepted:    true,
+					feedback:    Str::empty(),
+					verdict:     Some(Str::new_static("accept")),
+					independent: None,
+				},
 				GateVerdict::Fail => {
 					let failed: Vec<&str> = assessment
 						.checks
@@ -862,11 +914,10 @@ fn judge_with_verification(
 						.map(|c| c.id.as_str())
 						.collect();
 					PhaseResult {
-						accepted: false,
-						feedback: sf!(
-							"Verification failed. Failed checks: {}",
-							failed.join(", ")
-						),
+						accepted:    false,
+						feedback:    sf!("Verification failed. Failed checks: {}", failed.join(", ")),
+						verdict:     Some(Str::new_static("reject")),
+						independent: None,
 					}
 				},
 				GateVerdict::Inconclusive => {
@@ -877,11 +928,13 @@ fn judge_with_verification(
 						.map(|c| c.id.as_str())
 						.collect();
 					PhaseResult {
-						accepted: false,
-						feedback: sf!(
+						accepted:    false,
+						feedback:    sf!(
 							"Verification inconclusive. Checks: {}",
 							inconclusive.join(", ")
 						),
+						verdict:     Some(Str::new_static("reject")),
+						independent: None,
 					}
 				},
 			};
@@ -893,16 +946,23 @@ fn judge_with_verification(
 	// Otherwise, reject because there's no verification evidence.
 	if accept_on_claim {
 		// Accept on completion claim — the phase explicitly opted out of verification.
-		return PhaseResult { accepted: true, feedback: Str::empty() };
+		return PhaseResult {
+			accepted:    true,
+			feedback:    Str::empty(),
+			verdict:     Some(Str::new_static("accept")),
+			independent: None,
+		};
 	}
 
 	// Unverified-by-default: reject phases without verification evidence.
 	PhaseResult {
-		accepted: false,
-		feedback: Str::new_static(
+		accepted:    false,
+		feedback:    Str::new_static(
 			"Phase has no verification evidence and does not declare accept_on_claim. Unverified \
 			 phases are rejected by default (ADR 0053 O1).",
 		),
+		verdict:     Some(Str::new_static("reject")),
+		independent: None,
 	}
 }
 
@@ -1115,23 +1175,29 @@ requires = { network = "disabled" }
 	fn judge_with_verification_review_phase_uses_first_word() {
 		// Review phases still use first-word parse regardless of accept_on_claim.
 		assert!(judge_with_verification(PhaseKind::Review, sf!("ACCEPT"), false, &[], None).accepted);
-		assert!(!judge_with_verification(PhaseKind::Review, sf!("REJECT"), false, &[], None).accepted);
+		assert!(
+			!judge_with_verification(PhaseKind::Review, sf!("REJECT"), false, &[], None).accepted
+		);
 		assert!(!judge_with_verification(PhaseKind::Review, Str::empty(), false, &[], None).accepted);
 	}
 
 	#[test]
 	fn judge_with_verification_uses_policy_when_evidence_available() {
 		// When a verification policy and observations are available, the judge
-		// evaluates deterministically rather than falling through to unverified-by-default.
-		use crate::verification::{CheckObservation, CheckOutcome, CheckRequirement, VerificationPolicy, VerificationScope};
+		// evaluates deterministically rather than falling through to
+		// unverified-by-default.
+		use crate::verification::{
+			CheckObservation, CheckOutcome, CheckRequirement, VerificationPolicy, VerificationScope,
+		};
 		let scope = VerificationScope {
 			inputs: Hash32::sum(b"test inputs"),
 			policy: Hash32::sum(b"test policy"),
 		};
 		let policy = VerificationPolicy::new(scope, vec![CheckRequirement {
-			id: Str::new_static("check-1"),
+			id:       Str::new_static("check-1"),
 			required: true,
-		}]).unwrap();
+		}])
+		.unwrap();
 		let observations = [CheckObservation {
 			id: Str::new_static("check-1"),
 			scope,
@@ -1139,7 +1205,13 @@ requires = { network = "disabled" }
 			outcome: CheckOutcome::Passed,
 		}];
 		// A passing gate accepts the phase even without accept_on_claim.
-		let result = judge_with_verification(PhaseKind::Agent, sf!("done"), false, &observations, Some(&policy));
+		let result = judge_with_verification(
+			PhaseKind::Agent,
+			sf!("done"),
+			false,
+			&observations,
+			Some(&policy),
+		);
 		assert!(result.accepted, "passing gate should accept");
 		assert!(result.feedback.is_empty());
 
@@ -1150,7 +1222,13 @@ requires = { network = "disabled" }
 			evidence: Some(Hash32::sum(b"failed evidence")),
 			outcome: CheckOutcome::Failed,
 		}];
-		let result = judge_with_verification(PhaseKind::Agent, sf!("done"), true, &failed_observations, Some(&policy));
+		let result = judge_with_verification(
+			PhaseKind::Agent,
+			sf!("done"),
+			true,
+			&failed_observations,
+			Some(&policy),
+		);
 		assert!(!result.accepted, "failing gate should reject");
 		assert!(result.feedback.contains("check-1"));
 	}
@@ -1204,8 +1282,10 @@ requires = { network = "disabled" }
 		{
 			Ok(result) => result,
 			Err(ProductionError::Execution(ExecutionError::Infrastructure { .. })) => PhaseResult {
-				accepted: false,
-				feedback: Str::new_static("command refused by the workspace sandbox"),
+				accepted:    false,
+				feedback:    Str::new_static("command refused by the workspace sandbox"),
+				verdict:     None,
+				independent: None,
 			},
 			Err(error) => panic!("dispatch: {error:?}"),
 		}

@@ -205,8 +205,10 @@ impl ProductionAdwHost {
 						let _ = materialize_artifact(&backend, &materialize_client, artifact).await?;
 					}
 					return Ok(super::PhaseResult {
-						accepted: result.outcome.is_success(),
-						feedback: feedback.freeze(),
+						accepted:    result.outcome.is_success(),
+						feedback:    feedback.freeze(),
+						verdict:     None,
+						independent: None,
 					});
 				},
 				Some(ExecutionEvent::Settled(Err(error))) => {

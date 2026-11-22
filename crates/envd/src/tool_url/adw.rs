@@ -581,6 +581,8 @@ mod tests {
 			attempt,
 			status,
 			feedback: Str::new(feedback),
+			verdict: None,
+			independent: None,
 		})
 	}
 
