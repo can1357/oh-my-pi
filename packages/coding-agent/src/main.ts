@@ -8,7 +8,7 @@ import * as fsSync from "node:fs";
 import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
-import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
+import { getModelPricingStatus, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { ensureSqliteLockShim, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import { bindAgentMesh } from "./irc/mesh";
 import {
@@ -1734,19 +1734,22 @@ export async function buildSessionOptions(
 		options.planYolo = { target: resolved.model, thinkingLevel: resolved.thinkingLevel };
 	}
 
-	// Thinking level
+	// Thinking level comes from the scope entry the session starts on, which is not always the
+	// first one (e.g. a remembered default). A model outside the scope (an explicit `--model`) keeps its own.
+	const startScoped = options.model
+		? scopedModels.find(entry => modelsAreEqual(entry.model, options.model))
+		: scopedModels[0];
 	if (parsed.thinking) {
 		options.thinkingLevel = parsed.thinking;
 	} else if (
-		scopedModels.length > 0 &&
-		scopedModels[0].explicitThinkingLevel === true &&
+		startScoped?.explicitThinkingLevel === true &&
 		// A deferred default role resolves its own model (and any explicit
 		// thinking suffix) after extensions register; seeding the fallback
 		// scoped model's level here would override it in createAgentSession.
 		!deferredDefaultRole &&
 		!restoringSession
 	) {
-		options.thinkingLevel = scopedModels[0].thinkingLevel;
+		options.thinkingLevel = startScoped.thinkingLevel;
 	}
 
 	// Scoped models for Ctrl+P cycling — fill in default thinking levels when not explicit.
