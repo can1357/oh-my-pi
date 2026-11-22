@@ -4,8 +4,8 @@
 
 ### Added
 
-- `Shell.settled()` resolves once every program the shell's commands started has ended and been reaped, except programs started with `nohup`
-- `Shell.close()` ends the session and the background jobs it still holds, except programs started with `nohup`; `settled()` resolves once their programs have ended
+- `Shell.settled()` resolves once every program the shell's commands started has ended and been reaped, except programs started with `nohup` ([#20189](https://github.com/can1357/oh-my-pi/pull/20189) by [@sjawhar](https://github.com/sjawhar))
+- `Shell.close()` ends the session and the background jobs it still holds, except programs started with `nohup`; `settled()` resolves once their programs have ended ([#20189](https://github.com/can1357/oh-my-pi/pull/20189) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
