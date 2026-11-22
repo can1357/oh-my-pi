@@ -6,7 +6,7 @@
 
 - Devin usage from two organizations under one email is no longer merged into one account ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))
 - Devin's Gemini 4 Neon images are now budgeted at the 1,089 tokens Devin bills per image, measured across sizes, instead of the unverified 1,120-token Gemini estimate ([#19883](https://github.com/can1357/oh-my-pi/pull/19883) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed Google Antigravity models gated on a newer client release staying hidden until restart; the release manifest is now re-checked hourly ([#19250](https://github.com/can1357/oh-my-pi/pull/19250) by [@Xytronix](https://github.com/Xytronix))
+- Fixed Google Antigravity models gated on a newer client release staying hidden until restart; the release manifest is now re-checked hourly ([#19915](https://github.com/can1357/oh-my-pi/pull/19915) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.1.0] - 2026-11-21
 
