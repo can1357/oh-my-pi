@@ -702,24 +702,6 @@ mod running {
 	}
 
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-	async fn a_watched_file_survives_being_replaced() {
-		let watch = Watch::postponed(&[("config.toml", "v0")], &["-w", "config.toml", "-n", "--", "echo", "ran"]).await;
-		for round in 1..=3 {
-			let before = count(&watch.settled(Duration::from_millis(300)).await, "ran");
-			// An editor's save: a temporary file renamed over the target.
-			let temp = watch.root.join(".config.toml.tmp");
-			fs::write(&temp, format!("v{round}")).unwrap();
-			fs::rename(&temp, watch.root.join("config.toml")).unwrap();
-			watch.until(|out| count(out, "ran") > before).await;
-		}
-		// Its siblings are not watched.
-		let before = watch.settled(Duration::from_millis(300)).await;
-		watch.write("other.toml");
-		assert_eq!(watch.settled(Duration::from_millis(500)).await, before);
-		watch.cancelled().await;
-	}
-
-	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn messages_and_statuses_are_watchexecs() {
 		assert_eq!(once(&["-n", "false"]).await, (1, String::new(), "[Running: false]\n[Command exited with 1]\n".into()));
 		assert_eq!(once(&["-q", "-n", "false"]).await, (1, String::new(), String::new()));

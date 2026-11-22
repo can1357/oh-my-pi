@@ -411,6 +411,16 @@ export function plainCell(markdown: string): { text: string; emphasis: boolean }
 
 /** Parse the first number of a (Markdown) cell, or classify why it is not one. */
 export function parseCell(markdown: string): Cell {
+	const cell = readCell(markdown);
+	if (cell.kind !== "number") return cell;
+	// `1e400` overflows to Infinity, which no axis reaches: an axis looping up to it never ends.
+	const values = [cell.value, cell.to, cell.upper, cell.denominator, cell.error, ...(cell.values ?? [])];
+	if (values.every(value => value === undefined || Number.isFinite(value))) return cell;
+	return { kind: "text", text: cell.text, emphasis: cell.emphasis };
+}
+
+/** {@link parseCell} before it drops values no axis reaches. */
+function readCell(markdown: string): Cell {
 	const plain = plainCell(markdown);
 	const text = plain.text.replace(MARKS, "").replace(/\s+/g, " ").trim();
 	const emphasis = plain.emphasis;

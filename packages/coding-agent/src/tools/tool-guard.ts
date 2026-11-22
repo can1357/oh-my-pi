@@ -647,9 +647,6 @@ async function readScript(file: string): Promise<string> {
 /** Whether a call can do harm the approval layer does not judge, so the judge should see it. */
 export function needsJudgement(call: GuardedCall, cwd: string): boolean {
 	if (call.tier === "read" || inTable(UNJUDGED_TOOLS, call.toolName)) return false;
-	const writePath = call.toolName === "write" ? stringArg(call.args, "path") : undefined;
-	// A write to a mounted device dispatches the device's own call, which the guard sees on its own.
-	if (writePath?.startsWith("xd://")) return false;
 	if (call.toolName === "bash") {
 		const command = stringArg(call.args, "command");
 		if (command === undefined) return true;
@@ -667,8 +664,8 @@ export function needsJudgement(call: GuardedCall, cwd: string): boolean {
 /** Write-tier tools without targets that change only the session's own state: its notebook, its context, and fresh temp images. */
 const SESSION_STATE_TOOLS = wordTable("context_notes new_context generate_image");
 
-/** Internal URLs that are the session's own artifacts (`local://`) or dispatch a call the guard sees on its own (`xd://`). */
-const SESSION_URL = /^(?:local|xd):\/\//;
+/** Internal URLs that are the session's own artifacts (`local://`). */
+const SESSION_URL = /^local:\/\//;
 
 /**
  * Whether a write to `target` stays in the session: a {@link SESSION_URL}, or a file inside `cwd` once symlinks

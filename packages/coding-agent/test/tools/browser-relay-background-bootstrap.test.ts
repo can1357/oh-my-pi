@@ -157,7 +157,14 @@ it("gives the panel the relay's own page target id and the tab's CSS viewport", 
 	const response = panelReceived!.find(frame => frame.kind === "response" && frame.id === 3);
 	expect(response).toMatchObject({
 		ok: true,
-		result: { tabId: 5, windowId: 1, url: "https://example.com/a", title: "A", groupId: -1, viewport: { width: 1024, height: 640 } },
+		result: {
+			tabId: 5,
+			windowId: 1,
+			url: "https://example.com/a",
+			title: "A",
+			groupId: -1,
+			viewport: { width: 1024, height: 640 },
+		},
 	});
 	const result = response?.result;
 	const targetId =

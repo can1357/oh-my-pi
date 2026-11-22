@@ -205,7 +205,6 @@ describe("tool guard", () => {
 		);
 
 		await guard.check(remote, { url: "local://notes.md" }, "write");
-		await guard.check(remote, { url: "xd://tts" }, "write");
 		expect(judge.requests).toHaveLength(0);
 
 		await guard.check(remote, { url: "https://api.example/resource" }, "write");
@@ -821,7 +820,7 @@ describe("tool guard", () => {
 		).rejects.toThrow();
 	});
 
-	it("does not screen again a device call whose carrier the user approved", async () => {
+	it("screens a tool command on its own, skipping it only when its own prompt was approved", async () => {
 		const runner = new ExtensionRunner(
 			[],
 			new ExtensionRuntime(),
@@ -835,37 +834,39 @@ describe("tool guard", () => {
 		const { guard } = guardWith(judge);
 		runner.setToolGuard(guard);
 		const ran = vi.fn(async () => ({ content: [{ type: "text" as const, text: "ran" }] }));
-		const device = new ExtensionToolWrapper(
-			{ ...bash, execute: ran } as AgentTool,
+		const command = new ExtensionToolWrapper(
+			{ ...tool("nuke", "exec"), execute: ran } as AgentTool,
 			runner,
 		) as ExtensionToolWrapper<any>;
-		// Stands in for `write xd://bash`: it dispatches the device with the context `xd-protocol.ts` passes.
+		// Stands in for `bash` running a line made only of tool commands, which resolves to `read`: it
+		// dispatches the command with the context `tool-commands.ts` passes.
 		const carrier = new ExtensionToolWrapper(
 			{
-				...tool("write", "exec"),
+				...tool("bash", "read"),
 				execute: (id: string, _args: unknown, signal?: AbortSignal, onUpdate?: never, context?: AgentToolContext) =>
-					device.execute(
+					command.execute(
 						id,
-						{ command: "rm -rf /srv/db" },
+						{ target: "/srv/db" },
 						signal,
 						onUpdate,
-						context ? { ...context, xdevPolicyKey: "bash" } : undefined,
+						context ? { ...context, toolCommandTierResolved: () => {} } : undefined,
 					),
 			} as AgentTool,
 			runner,
 		) as ExtensionToolWrapper<any>;
-		const call = { path: "xd://bash", content: "rm -rf /srv/db" };
+		const line = { command: "nuke --target /srv/db" };
 
-		await carrier.execute("call-1", call, undefined, undefined, {
+		// The command raises its own prompt; approved there, the guard does not screen it again.
+		await carrier.execute("call-1", line, undefined, undefined, {
 			settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 		} as AgentToolContext);
 		expect(select).toHaveBeenCalledTimes(1);
 		expect(ran).toHaveBeenCalledTimes(1);
 		expect(judge.requests).toHaveLength(0);
 
-		// Unprompted, the device call is the one the guard screens.
+		// Unprompted, the command is the call the guard screens.
 		await expect(
-			carrier.execute("call-2", call, undefined, undefined, {
+			carrier.execute("call-2", line, undefined, undefined, {
 				settings: Settings.isolated({ "tools.approvalMode": "yolo" }),
 			} as AgentToolContext),
 		).rejects.toThrow("The tool guard refused this call");

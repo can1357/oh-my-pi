@@ -1,9 +1,0 @@
-<!doctype html>
-<html lang="en">
-<head>
-	<meta charset="utf-8">
-	<title>omp GIF export</title>
-	<script type="module" src="offscreen.js"></script>
-</head>
-<body></body>
-</html>

@@ -9,7 +9,6 @@ import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
-import type { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import type { Settings } from "../config/settings";
 import type {
 	AutocompleteProviderFactory,
@@ -167,6 +166,19 @@ export interface ShowStatusOptions {
 	toast?: boolean;
 	/** A button on the native toast (Undo); the ANSI line has none. */
 	action?: StatusNoticeAction;
+	/**
+	 * Names a status that updates in place (the MCP startup line): a later status with the same key rewrites
+	 * that line while it is still mutable and only notices sit below it. Otherwise it appends a fresh line,
+	 * preserving both unrelated notices and status updates after the original line enters scrollback.
+	 * Keyed statuses never collapse with unkeyed ones.
+	 */
+	key?: string;
+	/**
+	 * Whether the status collapses into the status line directly above it and lets the next one collapse into it
+	 * (default true). False gives it a line of its own: an extension's notice, which must not overwrite or be
+	 * overwritten by another source's status.
+	 */
+	collapse?: boolean;
 }
 
 export interface AgentHubOpenOptions {
@@ -180,7 +192,6 @@ export interface AgentHubOpenOptions {
 export interface InteractiveModeContext {
 	// UI access
 	ui: TUI;
-	readonly composer: Pick<Composer, "setRunActive">;
 	chatContainer: TranscriptContainer;
 	/** `!`/`$` runs started while the agent streams, until {@link flushPendingBashComponents} moves them into the transcript. */
 	pendingShellContainer: Container;

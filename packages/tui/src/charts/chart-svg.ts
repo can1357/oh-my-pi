@@ -2175,7 +2175,7 @@ function drawTimeline(spec: ChartSpec): Layer {
 	// Axis over the strip: tick labels and short ticks, the strip itself the baseline.
 	const unit = duration ? (to >= 7200 ? 3600 : to >= 120 ? 60 : 1) : 1;
 	const step = niceStep(span / unit / 5) * unit;
-	for (let tick = Math.ceil(from / step) * step; tick <= to + 1e-9; tick += step) {
+	for (const tick of stepTicks(Math.ceil(from / step) * step, to + 1e-9, step)) {
 		const x = at(tick);
 		const label = formatValue(Number(tick.toPrecision(12)), entry.dim, entry.unit, to);
 		parts.push(rule(x, 12, x, stripTop - 2));
@@ -3658,8 +3658,7 @@ function valueScale(
 		values.every(value => Number.isInteger(value / unit)),
 	);
 	const [low, high, step] = [nice.low * unit, nice.high * unit, nice.step * unit];
-	const ticks: number[] = [];
-	for (let tick = low; tick <= high + step / 2; tick += step) ticks.push(Number(tick.toPrecision(12)));
+	const ticks = stepTicks(low, high + step / 2, step).map(tick => Number(tick.toPrecision(12)));
 	return { at: value => from + ((value - low) / (high - low || 1)) * (to - from), ticks, log: false };
 }
 
@@ -3785,8 +3784,7 @@ function brokenScale(tier: Tier, from: number, to: number, nice: boolean): Scale
 	const floor = Math.min(tier.low - Math.max(spread * 0.25, tier.high * 0.05), tier.high / 2);
 	const low = Math.max(top, nice ? Math.floor(floor / zoom) * zoom : floor);
 	const high = nice ? Math.ceil(tier.high / zoom) * zoom : tier.high;
-	const ticks: number[] = [];
-	for (let tick = 0; tick <= top + step / 2; tick += step) ticks.push(Number(tick.toPrecision(12)));
+	const ticks = stepTicks(0, top + step / 2, step).map(tick => Number(tick.toPrecision(12)));
 	ticks.push(high);
 	return {
 		at: value =>
@@ -3864,6 +3862,17 @@ function niceStep(raw: number): number {
 	const power = 10 ** Math.floor(Math.log10(raw || 1));
 	const fraction = raw / power;
 	return (fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 2.5 ? 2.5 : fraction <= 5 ? 5 : 10) * power;
+}
+
+/**
+ * `first`, `first + step`, … through `last`, counted rather than summed: once
+ * `step` falls under the values' float spacing (`1e17 + 5 === 1e17`), a
+ * running sum stops moving and never reaches `last`.
+ */
+function stepTicks(first: number, last: number, step: number): number[] {
+	const ticks: number[] = [];
+	for (let at = 0; at <= (last - first) / step; at++) ticks.push(first + at * step);
+	return ticks;
 }
 
 /** Gridlines and tick labels under a horizontal value axis; zero, where bars start, draws as a firmer baseline. */
