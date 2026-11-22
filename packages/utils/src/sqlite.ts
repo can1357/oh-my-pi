@@ -1,6 +1,7 @@
 /** Shared SQLite opening, error attribution, and result-code classification for persistent stores. */
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { installSqliteLockShim } from "@oh-my-pi/pi-natives/sqlite-locks";
 import { getDbBusyTimeoutMs } from "./env";
@@ -371,6 +372,89 @@ export function annotateSqliteError(error: unknown, dbPath: string): Error {
 /** Checkpoints committed WAL frames without waiting for concurrent readers. */
 export function checkpointWal(db: Database): void {
 	db.run("PRAGMA wal_checkpoint(PASSIVE)");
+}
+
+/** A scratch copy of a quarantined store, opened for salvage reads. */
+export interface SalvageSource extends Disposable {
+	db: Database;
+	/** True when the copy's header page count had to be lowered to open it. */
+	headerRepaired: boolean;
+}
+
+/**
+ * Lowers a copy's header page count to the pages the file really holds, when the
+ * header claims more. Returns whether the header was changed. A torn checkpoint can leave
+ * page 1 describing a longer file than the tail that survived; SQLite then rejects
+ * every statement, though the table pages are intact.
+ */
+function repairHeaderPageCount(copyPath: string): boolean {
+	const fd = fs.openSync(copyPath, "r+");
+	try {
+		const header = Buffer.alloc(100);
+		if (fs.readSync(fd, header, 0, 100, 0) < 100 || header.toString("latin1", 0, 16) !== "SQLite format 3\0")
+			return false;
+		const rawPageSize = header.readUInt16BE(16);
+		const pageSize = rawPageSize === 1 ? 65536 : rawPageSize;
+		if (pageSize < 512) return false;
+		const actualPages = Math.floor(fs.fstatSync(fd).size / pageSize);
+		if (actualPages < 1 || header.readUInt32BE(28) <= actualPages) return false;
+		const count = Buffer.alloc(4);
+		count.writeUInt32BE(actualPages);
+		fs.writeSync(fd, count, 0, 4, 28);
+		return true;
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+/**
+ * Opens a private copy of a quarantined store (main file and WAL; the original is never
+ * written) so its rows can be read with {@link readSalvageableRows}. When the copy is
+ * rejected as corrupt, retries once after repairing the header page count on the copy.
+ * Dispose the result to close the handle and delete the copy.
+ */
+export function openQuarantinedStoreForSalvage(backupPath: string): SalvageSource {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-salvage-"));
+	let db: Database | undefined;
+	const cleanup = (): void => {
+		try {
+			db?.close();
+		} catch {}
+		fs.rmSync(dir, { recursive: true, force: true });
+	};
+	try {
+		const copyPath = path.join(dir, "store.db");
+		fs.copyFileSync(backupPath, copyPath);
+		fs.chmodSync(copyPath, 0o600);
+		try {
+			fs.copyFileSync(`${backupPath}-wal`, `${copyPath}-wal`);
+			fs.chmodSync(`${copyPath}-wal`, 0o600);
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
+		const probe = (): Database => {
+			const opened = new Database(copyPath);
+			try {
+				opened.query("SELECT count(*) FROM sqlite_master").get();
+				return opened;
+			} catch (error) {
+				opened.close();
+				throw error;
+			}
+		};
+		let headerRepaired = false;
+		try {
+			db = probe();
+		} catch (error) {
+			if (!isSqliteCorruptionError(error) || !repairHeaderPageCount(copyPath)) throw error;
+			headerRepaired = true;
+			db = probe();
+		}
+		return { db, headerRepaired, [Symbol.dispose]: cleanup };
+	} catch (error) {
+		cleanup();
+		throw error;
+	}
 }
 
 /** Damaged regions one {@link readSalvageableRows} scan skips before abandoning the rest of the table. */
