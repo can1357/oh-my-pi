@@ -869,6 +869,14 @@ function outcomeOf(request: Promise<unknown>): Promise<Outcome> {
 
 const LEGACY_PROTOCOL_VERSIONS = new Set([MCP_LEGACY_PROTOCOL_VERSION, "2025-06-18", "2025-03-26", "2024-11-05"]);
 
+/** A discovery reply that can be spoken to only through an initialize session. */
+function legacyOnlyDiscover(result: MCPDiscoverResult): boolean {
+	return (
+		!result.supportedVersions.includes(MCP_PROTOCOL_VERSION) &&
+		result.supportedVersions.some(version => LEGACY_PROTOCOL_VERSIONS.has(version))
+	);
+}
+
 /**
  * The era a failed `server/discover` names by itself: `modern` for an error
  * only a 2026-07-28 server emits, `legacy` when the server rejects this
@@ -913,7 +921,7 @@ async function probeStdio(upstream: StdioUpstream, deps: McpPeerDeps, signal: Ab
 			if (eraOfDiscoverError(discovered.error) === "modern") return { era: "modern" };
 		} else {
 			const result = discoverResultOf(discovered.value);
-			if (result) return { era: "modern", discover: result };
+			if (result && !legacyOnlyDiscover(result)) return { era: "modern", discover: result };
 		}
 	}
 	const initialized = await initialize;
@@ -936,7 +944,7 @@ async function probeHttp(spec: McpServerSpec, deps: McpPeerDeps, signal: AbortSi
 	try {
 		await connectUpstream(modern, deps, signal);
 		const result = discoverResultOf(await modern.request("server/discover", { _meta: requestMeta() }, { signal }));
-		if (result) return { era: "modern", discover: result };
+		if (result && !legacyOnlyDiscover(result)) return { era: "modern", discover: result };
 	} catch (error) {
 		const era = eraOfDiscoverError(error);
 		if (era === "modern") return { era };

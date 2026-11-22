@@ -509,7 +509,7 @@ describe("era probe of a remote server", () => {
 	it("takes a discover result as modern", async () => {
 		const { url, seen } = serve(({ body }) =>
 			json(body.id, {
-				supportedVersions: [MCP_PROTOCOL_VERSION],
+				supportedVersions: [MCP_PROTOCOL_VERSION, MCP_LEGACY_PROTOCOL_VERSION],
 				capabilities: { tools: {} },
 				ttlMs: 1000,
 				cacheScope: "public",
@@ -519,8 +519,44 @@ describe("era probe of a remote server", () => {
 		const result = await mcpUpstreams.probe(httpSpec(url), realDeps());
 
 		expect(result.era).toBe("modern");
-		expect(result.discover).toMatchObject({ supportedVersions: [MCP_PROTOCOL_VERSION], cacheScope: "public" });
+		expect(result.discover).toMatchObject({
+			supportedVersions: [MCP_PROTOCOL_VERSION, MCP_LEGACY_PROTOCOL_VERSION],
+			cacheScope: "public",
+		});
 		expect(seen[0].headers.get("Mcp-Method")).toBe("server/discover");
+	});
+
+	it("uses a legacy session when discovery advertises only handshake-era revisions", async () => {
+		const { url, seen } = serveLegacy(({ body, headers }) => {
+			if (body.method === "server/discover") {
+				return json(body.id, {
+					supportedVersions: [MCP_LEGACY_PROTOCOL_VERSION, "2025-06-18"],
+					capabilities: { tools: {} },
+				});
+			}
+			if (headers.get("MCP-Protocol-Version") === MCP_PROTOCOL_VERSION) {
+				return new Response(
+					'Bad Request: protocol version "2026-07-28" is only supported on stateless HTTP servers',
+					{ status: 400 },
+				);
+			}
+			return json(body.id, { tools: [{ name: "dagu_read", inputSchema: { type: "object" } }] });
+		});
+		const host = new LocalMcpHost({ store: McpStore.memory(), upstreams: mcpUpstreams });
+		const link = hostLink(host, httpSpec(url));
+		try {
+			await link.connect();
+			expect(await link.request("tools/list")).toMatchObject({
+				tools: [{ name: "dagu_read" }],
+			});
+			expect(seen.some(entry => entry.body.method === "initialize")).toBe(true);
+			const list = seen.find(entry => entry.body.method === "tools/list");
+			expect(list?.headers.get("Mcp-Session-Id")).toBe("session-1");
+			expect(list?.headers.get("MCP-Protocol-Version")).toBe(MCP_LEGACY_PROTOCOL_VERSION);
+		} finally {
+			await link.close();
+			await host.dispose();
+		}
 	});
 
 	it("takes a 32022 that lists this revision as modern, without falling back to initialize", async () => {

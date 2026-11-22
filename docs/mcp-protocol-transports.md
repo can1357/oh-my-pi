@@ -60,10 +60,12 @@ A handshake-era verdict is rechecked after 7 days, so an upgraded server starts 
 The v1-to-v2 cache upgrade clears old era verdicts once, but keeps cached results.
 
 - **stdio**: the probe writes `server/discover` and then `initialize`.
-  A discover result or a modern error wins; otherwise the `initialize` result means handshake-era.
+  A discover result advertising this revision or a modern error wins; a reply advertising only handshake-era revisions defers to the `initialize` result.
+  Otherwise the `initialize` result means handshake-era.
   The probe process is always killed.
 - **http**: the probe sends a modern `server/discover` POST.
-  A discover result or a modern error means modern; an unrecognized JSON-RPC reply or an eligible HTTP status (`400`, `404`, `405`) can fall back to a legacy `initialize`.
+  A discover result advertising this revision or a modern error means modern; a reply advertising only handshake-era revisions tries a legacy `initialize`.
+  An unrecognized JSON-RPC reply or an eligible HTTP status (`400`, `404`, `405`) can also fall back.
   An unsupported-version error that lists a handshake-era revision falls back under any status.
   `401`/`403` surface unchanged so OAuth discovery can read the challenge.
 - **sse**: always handshake-era.
