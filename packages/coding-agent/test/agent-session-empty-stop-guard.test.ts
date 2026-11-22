@@ -11,7 +11,7 @@ import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { logger, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 const recordToolSchema = type({ value: type("string") });
@@ -724,45 +724,5 @@ describe("AgentSession empty stop guard", () => {
 		expect(withTool.mock.calls).toHaveLength(2);
 		expect(reminderMessages(withTool.session.agent.state.messages)).toHaveLength(0);
 		expect(assistantText(withTool.session.agent.state.messages)).toContain("tool path complete");
-	});
-
-	it("logs every empty stop with model + retry metadata, and an info line per scheduled retry", async () => {
-		const debugSpy = vi.spyOn(logger, "debug").mockImplementation(() => {});
-		const infoSpy = vi.spyOn(logger, "info").mockImplementation(() => {});
-		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
-
-		const { session, mock } = await createHarness([
-			recordCall("delta", "call-record-delta"),
-			emptyStop(),
-			emptyStop(),
-			emptyStop(),
-			emptyStop(), // the fourth empty stop hits the cap instead of scheduling a retry
-		]);
-
-		await session.prompt("record delta");
-		await session.waitForIdle();
-
-		const identity = { model: mock.id, provider: mock.provider };
-
-		const detections = debugSpy.mock.calls.filter(([message]) => message === "Assistant returned empty stop");
-		expect(detections).toHaveLength(4);
-		expect(detections.map(([, context]) => context?.attempt)).toEqual([1, 2, 3, 4]);
-		for (const [, context] of detections) {
-			expect(context).toMatchObject({ ...identity, maxAttempts: 3, stopReason: "stop" });
-		}
-
-		const scheduled = infoSpy.mock.calls.filter(([message]) => message === "Empty-stop retry scheduled");
-		expect(scheduled).toHaveLength(3);
-		expect(scheduled.map(([, context]) => context?.attempt)).toEqual([1, 2, 3]);
-		for (const [index, [, context]] of scheduled.entries()) {
-			// The retry scheduled after detection N reports that same detection.
-			expect(context).toMatchObject({ ...identity, attempt: detections[index]?.[1]?.attempt });
-		}
-
-		// warn: one cap-hit log (existing behavior)
-		const capLogs = warnSpy.mock.calls.filter(([msg]) =>
-			msg.startsWith("Assistant returned empty stop after retry cap"),
-		);
-		expect(capLogs).toHaveLength(1);
 	});
 });

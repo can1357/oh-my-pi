@@ -1162,24 +1162,6 @@ export class TurnRecovery {
 		}
 
 		this.#emptyStopRetryCount++;
-		// Log every empty-stop occurrence at debug so operators running weak or
-		// proxy-routed models (a local Ollama, or an OpenAI-compatible gateway)
-		// can see how often the model yields nothing: the injected "continue the
-		// active task" reminder otherwise looks like an unexplained user
-		// message. Cap-hit is logged at warn below.
-		logger.debug("Assistant returned empty stop", {
-			attempt: this.#emptyStopRetryCount,
-			maxAttempts: EMPTY_STOP_MAX_RETRIES,
-			retryCount: this.#emptyStopRetryCount,
-			model: assistantMessage.model,
-			provider: assistantMessage.provider,
-			stopReason: assistantMessage.stopReason,
-			durationMs: assistantMessage.duration,
-			ttftMs: assistantMessage.ttft,
-			errorMessage: assistantMessage.errorMessage,
-			errorStatus: assistantMessage.errorStatus,
-			outputTokens: assistantMessage.usage.output,
-		});
 		if (this.#emptyStopRetryCount > EMPTY_STOP_MAX_RETRIES) {
 			const attempts = this.#emptyStopRetryCount - 1;
 			const outputTokens = assistantMessage.usage.output;
@@ -1240,9 +1222,14 @@ export class TurnRecovery {
 		logger.info("Empty-stop retry scheduled", {
 			attempt: this.#emptyStopRetryCount,
 			maxAttempts: EMPTY_STOP_MAX_RETRIES,
-			retryCount: this.#emptyStopRetryCount,
 			model: assistantMessage.model,
 			provider: assistantMessage.provider,
+			stopReason: assistantMessage.stopReason,
+			durationMs: assistantMessage.duration,
+			ttftMs: assistantMessage.ttft,
+			errorMessage: assistantMessage.errorMessage,
+			errorStatus: assistantMessage.errorStatus,
+			outputTokens: assistantMessage.usage.output,
 		});
 		this.#host.scheduleAgentContinue({
 			source: "empty-stop-retry",
