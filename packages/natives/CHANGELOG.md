@@ -26,6 +26,7 @@
 - Fixed macOS window reads for minimized windows so the requested window remains inspectable without being restored or replaced by a sibling window; unavailable menus and commands now report `WindowUnavailable`.
 - Fixed Windows captures and accessibility trees incorrectly reporting fully covered Chromium and Electron windows as current; they now report `covered` when those applications stop drawing while covered.
 - Fixed Windows `computer` `setValue` bringing classic Win32 and WinForms text-box windows to the foreground and directing subsequent keyboard input into them.
+- Fixed `@oh-my-pi/pi-natives` failing with "Failed to load pi_natives native addon" when it runs from bun's install cache: the platform package beside it is now used ([#8901](https://github.com/can1357/oh-my-pi/issues/8901), [#19983](https://github.com/can1357/oh-my-pi/pull/19983) by [@JamieJ5926](https://github.com/JamieJ5926))
 
 ## [19.0.1] - 2026-11-19
 

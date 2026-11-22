@@ -71,12 +71,36 @@ function getNativesDir() {
 	return path.join(os.homedir(), ".omp", "natives");
 }
 
-function resolveLeafPackageDir(platformTag) {
+/**
+ * Bun's install cache has no `node_modules` around a release copy, so
+ * `require.resolve` cannot reach the platform leaf beside it: a version-pinned
+ * sibling (`pi-natives-<tag>@<version>@@@N`) of the core package. Scan the core
+ * package's scope directory for the leaf that holds the addon, matching the
+ * running version (issue #8901).
+ */
+function findScopedLeafPackageDir(platformTag, addonFilenames) {
+	const scopeDir = path.join(import.meta.dir, "..", "..");
+	let names;
+	try {
+		names = fs.readdirSync(scopeDir);
+	} catch {
+		return null;
+	}
+	const leafName = `pi-natives-${platformTag}`;
+	const leaves = names.filter(name => name === leafName || name.startsWith(`${leafName}@${packageJson.version}@`));
+	for (const name of leaves) {
+		const dir = path.join(scopeDir, name);
+		if (addonFilenames.some(filename => fs.existsSync(path.join(dir, filename)))) return dir;
+	}
+	return null;
+}
+
+function resolveLeafPackageDir(platformTag, addonFilenames) {
 	try {
 		const require_ = createRequire(import.meta.url);
 		return path.dirname(require_.resolve(`@oh-my-pi/pi-natives-${platformTag}/package.json`));
 	} catch {
-		return null;
+		return findScopedLeafPackageDir(platformTag, addonFilenames);
 	}
 }
 
@@ -941,25 +965,28 @@ export function initLoaderContext(overrides = {}) {
 			importMetaUrl: import.meta.url,
 		});
 	const normalizedNativeDir = platform === "win32" ? nativeDir.toLowerCase() : nativeDir;
+	// A published core manifest declares its platform leaf in `optionalDependencies`; a
+	// checkout does not. A release copied into bun's install cache has no `node_modules`
+	// segment, so the path alone cannot tell it from a checkout (issue #8901).
 	const isWorkspaceLoad =
 		!isCompiledBinary &&
+		!packageJson.optionalDependencies?.[`@oh-my-pi/pi-natives-${platformTag}`] &&
 		!normalizedNativeDir.includes("\\node_modules\\") &&
 		!normalizedNativeDir.includes("/node_modules/");
+	const selectedVariant = resolveCpuVariant(getVariantOverride());
+	const addonFilenames = getAddonFilenames({ tag: platformTag, arch: process.arch, variant: selectedVariant });
+	const addonLabel = selectedVariant ? `${platformTag} (${selectedVariant})` : platformTag;
 	const leafPackageDir =
 		isCompiledBinary || isWorkspaceLoad
 			? null
 			: overrides.leafPackageDir === undefined
-				? resolveLeafPackageDir(platformTag)
+				? resolveLeafPackageDir(platformTag, addonFilenames)
 				: overrides.leafPackageDir;
 	const stageFromNodeModules = shouldStageNodeModulesAddon({
 		platform,
 		isCompiledBinary,
 		nativeDir: normalizedNativeDir,
 	});
-
-	const selectedVariant = resolveCpuVariant(getVariantOverride());
-	const addonFilenames = getAddonFilenames({ tag: platformTag, arch: process.arch, variant: selectedVariant });
-	const addonLabel = selectedVariant ? `${platformTag} (${selectedVariant})` : platformTag;
 
 	const candidates = resolveLoaderCandidates({
 		addonFilenames,
