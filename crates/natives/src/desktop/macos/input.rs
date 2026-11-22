@@ -1,5 +1,6 @@
 use std::{
 	cell::Cell,
+	collections::HashSet,
 	ptr,
 	time::{Duration, Instant},
 };
@@ -35,7 +36,10 @@ use super::{
 };
 
 pub(super) struct MacInput {
-	source: CFRetained<CGEventSource>,
+	source:          CFRetained<CGEventSource>,
+	/// iPhone Mirroring windows (pid, window id) a takeover pointer call
+	/// activated since their last primer ([`primed`]).
+	awaiting_primer: HashSet<(libc::pid_t, u32)>,
 }
 #[allow(
 	clippy::non_send_fields_in_send_ty,
@@ -48,7 +52,7 @@ unsafe impl Send for MacInput {}
 
 impl MacInput {
 	pub(super) fn new() -> CoreResult<Self> {
-		Ok(Self { source: source()? })
+		Ok(Self { source: source()?, awaiting_primer: HashSet::new() })
 	}
 
 	/// Delivers `event`; with `menu`, a click that opens a menu chooses that
@@ -82,7 +86,8 @@ impl MacInput {
 			Target::Window(id) => {
 				let window = capture.window(id)?;
 				let (pid, wid) = window_identity(&window)?;
-				require_phone_screen(&window, process::remote_screen(pid))?;
+				let remote = process::remote_screen(pid);
+				require_phone_screen(&window, remote)?;
 				match mode {
 					DeliveryMode::Background => {
 						let (window, wid) = attached_window(capture, window, pid, wid, &event)?;
@@ -117,6 +122,7 @@ impl MacInput {
 									entry_front,
 									owner,
 									in_overlay,
+									&mut self.awaiting_primer,
 									visit,
 								)
 							} else {
@@ -136,6 +142,7 @@ impl MacInput {
 						})
 					},
 					DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus => {
+						let awaiting_primer = &mut self.awaiting_primer;
 						foreground_pointer(
 							&self.source,
 							&window,
@@ -144,6 +151,11 @@ impl MacInput {
 							event,
 							returns_focus(mode),
 							menu,
+							|| {
+								if remote == Some(RemoteScreen::HidReports) {
+									awaiting_primer.insert((pid, wid));
+								}
+							},
 						)
 					},
 				}
@@ -871,6 +883,33 @@ fn with_background_keyboard<T>(
 	entry_front: EntryFront,
 	deliver: impl FnOnce(libc::pid_t, &dyn Fn() -> CoreResult<()>) -> CoreResult<T>,
 ) -> CoreResult<T> {
+	let route = keyboard_route(pid, wid)?;
+	skylight::with_background_watch(pid, |visit| {
+		keyboard_in_watch(
+			source,
+			pid,
+			wid,
+			window,
+			entry_front,
+			route,
+			KeyPurpose::Keyboard,
+			visit,
+			deliver,
+		)
+	})
+}
+
+/// What [`with_background_keyboard`] establishes before its watch: whether
+/// other windows could take the keys, and whether focus sits in an overlay of
+/// the target.
+#[derive(Clone, Copy)]
+struct KeyboardRoute {
+	conflict:   Option<KeyboardConflict>,
+	in_overlay: bool,
+}
+
+/// Refuses background keys for window `wid` that cannot be shown to reach it.
+fn keyboard_route(pid: libc::pid_t, wid: u32) -> CoreResult<KeyboardRoute> {
 	let conflict = keyboard_conflict_now(pid, wid);
 	if conflict == Some(KeyboardConflict::Unmapped) {
 		return Err(unmapped_keyboard_refusal(wid));
@@ -883,49 +922,57 @@ fn with_background_keyboard<T>(
 	if focused_attachment(wid, destination, skylight::window_parent).is_some() {
 		return Err(key_refusal(wid, destination, conflict, skylight::window_parent));
 	}
-	let in_overlay = focus.in_overlay_of(wid, skylight::window_parent);
-	skylight::with_background_watch(pid, |visit| {
-		let prepared = make_key_in_background(
-			source,
-			pid,
-			wid,
-			window,
-			entry_front,
-			in_overlay,
-			KeyPurpose::Keyboard,
-			visit,
-		)?;
-		let (to, focus) = await_key_destination(pid, wid, conflict)?;
-		let owner =
-			key_process(to, wid, &focus, || ax::window_content(pid, window), ax::focused_window_id)?;
-		control::intervention::input_goes_to(owner.0);
-		activate_owner(pid, owner, |(owner, window)| {
-			activate_in_background(source, owner, window, skylight::sender_connection()?)
-		})?;
-		deliver(
-			owner.0,
-			&intervention_guard(|| {
-				recheck_background(
-					prepared,
-					pid,
-					wid,
-					skylight::front_pid,
-					|| visit.happened(),
-					|| {
-						keys_still_reach(
-							pid,
-							wid,
-							|| keyboard_conflict_now(pid, wid),
-							focus,
-							|| ax::key_focus(pid),
-							skylight::window_parent,
-						)?;
-						owner_still_focused(pid, wid, owner, ax::focused_window_id)
-					},
-				)
-			}),
-		)
-	})
+	Ok(KeyboardRoute { conflict, in_overlay: focus.in_overlay_of(wid, skylight::window_parent) })
+}
+
+/// The body of [`with_background_keyboard`], inside a background watch that
+/// reports the user's visits through `visit`. `purpose` decides whether the
+/// activating press goes out ([`make_key_in_background`]).
+#[allow(clippy::too_many_arguments, reason = "the watch's parts, passed explicitly")]
+fn keyboard_in_watch<T>(
+	source: &CGEventSource,
+	pid: libc::pid_t,
+	wid: u32,
+	window: &DesktopWindow,
+	entry_front: EntryFront,
+	route: KeyboardRoute,
+	purpose: KeyPurpose,
+	visit: skylight::TargetVisit<'_>,
+	deliver: impl FnOnce(libc::pid_t, &dyn Fn() -> CoreResult<()>) -> CoreResult<T>,
+) -> CoreResult<T> {
+	let KeyboardRoute { conflict, in_overlay } = route;
+	let prepared =
+		make_key_in_background(source, pid, wid, window, entry_front, in_overlay, purpose, visit)?;
+	let (to, focus) = await_key_destination(pid, wid, conflict)?;
+	let owner =
+		key_process(to, wid, &focus, || ax::window_content(pid, window), ax::focused_window_id)?;
+	control::intervention::input_goes_to(owner.0);
+	activate_owner(pid, owner, |(owner, window)| {
+		activate_in_background(source, owner, window, skylight::sender_connection()?)
+	})?;
+	deliver(
+		owner.0,
+		&intervention_guard(|| {
+			recheck_background(
+				prepared,
+				pid,
+				wid,
+				skylight::front_pid,
+				|| visit.happened(),
+				|| {
+					keys_still_reach(
+						pid,
+						wid,
+						|| keyboard_conflict_now(pid, wid),
+						focus,
+						|| ax::key_focus(pid),
+						skylight::window_parent,
+					)?;
+					owner_still_focused(pid, wid, owner, ax::focused_window_id)
+				},
+			)
+		}),
+	)
 }
 
 /// [`keyboard_conflict`] for window `wid` of `pid` as its accessibility
@@ -2144,6 +2191,11 @@ const DRAG_RELEASE_GAP: Duration = Duration::from_millis(50);
 /// transition shorter than its report interval; a search field that reacts
 /// to every key needs more than one interval.
 const REPORT_KEY_GAP: Duration = Duration::from_millis(60);
+/// Shift's hold and the pause after its release in [`prime_reports`]: the
+/// value measured restoring background taps after a takeover activated
+/// iPhone Mirroring. [`REPORT_KEY_GAP`]'s shorter value was measured for
+/// ordinary keys on such a device, not for this.
+const PRIMER_KEY_GAP: Duration = Duration::from_millis(120);
 /// Press length, and pointer settle, of a tap on such a device.
 const TAP_HOLD: Duration = Duration::from_millis(60);
 /// How long raising an occluded target may take to become visible to
@@ -3514,9 +3566,11 @@ fn background_scroll(
 /// (iPhone Mirroring). A tap needs no activation, only a press that outlasts
 /// a report, addressed to the window. The device moves its own pointer only
 /// for a button event and scrolls whatever is under that pointer, so a scroll
-/// first aims it with a lone release, which taps nothing. Other events take
-/// the ordinary route. Like every background pointer event, each post first
-/// passes [`pointer_recheck`]; nothing here makes the window key.
+/// first aims it with a lone release, which taps nothing. A tap or scroll after
+/// a takeover pointer call activated the window is primed first ([`primed`]);
+/// other events take the ordinary route.
+/// Like every background pointer event, each pointer post first passes
+/// [`pointer_recheck`].
 fn report_pointer(
 	source: &CGEventSource,
 	pid: libc::pid_t,
@@ -3526,6 +3580,7 @@ fn report_pointer(
 	entry_front: EntryFront,
 	owner: impl FnOnce() -> CoreResult<(libc::pid_t, u32)>,
 	in_overlay: bool,
+	awaiting_primer: &mut HashSet<(libc::pid_t, u32)>,
 	visit: skylight::TargetVisit<'_>,
 ) -> CoreResult<()> {
 	let post = |event_type: CGEventType, x: f64, y: f64, click_state: i64| -> CoreResult<()> {
@@ -3549,17 +3604,27 @@ fn report_pointer(
 			|| visit.happened(),
 		)
 	};
+	// A failed primer is sent past unprimed; the tap's first check then reports
+	// nothing sent, which `reporting_partial` corrects if a key went out.
+	let prime =
+		|| prime_reports(source, pid, wid, window, entry_front, visit).inspect_err(|_| checks.set(0));
 	match event {
 		PointerEvent::Click { x, y, button: MouseButton::Left, count, .. } => {
-			report_taps(count, before_post, |event_type, click_state| {
-				post(event_type, x, y, click_state)
+			primed(awaiting_primer, (pid, wid), before_post, prime, || {
+				report_taps(count, before_post, |event_type, click_state| {
+					post(event_type, x, y, click_state)
+				})
 			})
 		},
-		PointerEvent::Scroll { x, y, dx, dy } => report_scroll(
-			before_post,
-			|| post(CGEventType::LeftMouseUp, x, y, 1),
-			|| background_scroll(source, pid, wid, window, x, y, dx, dy),
-		),
+		PointerEvent::Scroll { x, y, dx, dy } => {
+			primed(awaiting_primer, (pid, wid), before_post, prime, || {
+				report_scroll(
+					before_post,
+					|| post(CGEventType::LeftMouseUp, x, y, 1),
+					|| background_scroll(source, pid, wid, window, x, y, dx, dy),
+				)
+			})
+		},
 		event => background_pointer(
 			source,
 			pid,
@@ -3573,6 +3638,67 @@ fn report_pointer(
 			visit,
 		),
 	}
+}
+
+/// Runs `send`, first priming window `wid` of `pid` once `before_post` passes
+/// when a takeover pointer call activated it since its last primer
+/// (`awaiting`). The mark clears once `prime` has run; a primer the key route
+/// refused or that failed still sends, unprimed, as `main` did. A primer the
+/// user stopped (`UserIntervened`) or cancelled keeps the mark and stops the
+/// call before any pointer event; a cancel noticed after a primer ran stops
+/// it with the mark already cleared.
+fn primed<T>(
+	awaiting: &mut HashSet<(libc::pid_t, u32)>,
+	(pid, wid): (libc::pid_t, u32),
+	before_post: impl Fn() -> CoreResult<()>,
+	prime: impl FnOnce() -> CoreResult<()>,
+	send: impl FnOnce() -> CoreResult<T>,
+) -> CoreResult<T> {
+	if awaiting.contains(&(pid, wid)) {
+		before_post()?;
+		if let Err(error) = prime()
+			&& matches!(error.code, ErrorCode::UserIntervened | ErrorCode::Cancelled)
+		{
+			return Err(DesktopError::new(
+				error.code,
+				format!(
+					"iPhone Mirroring pointer input could not prime window {wid} with Shift: {}",
+					error.message
+				),
+			));
+		}
+		awaiting.remove(&(pid, wid));
+		control::check()?;
+	}
+	send()
+}
+
+/// Presses Shift in window `wid` through the background key route, inside
+/// the pointer call's own watch (`visit`). After a takeover tap activated the
+/// window, iPhone Mirroring dropped every background tap until this route
+/// reached it; Shift posted to the process alone did not bring taps back.
+/// Shift alone types nothing. The route runs with the pointer purpose, so the
+/// activating press goes out even when the window is already key: every
+/// measured primer included that press, and no run separated which of the
+/// route's steps brings taps back.
+fn prime_reports(
+	source: &CGEventSource,
+	pid: libc::pid_t,
+	wid: u32,
+	window: &DesktopWindow,
+	entry_front: EntryFront,
+	visit: skylight::TargetVisit<'_>,
+) -> CoreResult<()> {
+	let route = keyboard_route(pid, wid)?;
+	let purpose = KeyPurpose::Pointer;
+	keyboard_in_watch(source, pid, wid, window, entry_front, route, purpose, visit, |to, guard| {
+		press_chord(
+			source,
+			&[KeyPress { name: KeyName::Shift, code: key_code(KeyName::Shift)? }],
+			PRIMER_KEY_GAP,
+			|event| post_guarded(event, guard, |event| skylight::post_keyboard(to, event)),
+		)
+	})
 }
 
 /// `count` taps for [`report_pointer`]: each press, posted through `post`
@@ -4451,7 +4577,8 @@ fn char_key_code(character: char) -> CoreResult<u16> {
 /// With `return_focus`, user input during the action does not cancel the
 /// restoration.
 /// With `menu`, the item path is chosen in the menu the click opens before
-/// focus goes back, which would close the menu.
+/// focus goes back, which would close the menu. `activated` runs once focus
+/// moved to the target ([`skylight::with_foreground`]).
 fn foreground_pointer(
 	source: &CGEventSource,
 	window: &DesktopWindow,
@@ -4460,6 +4587,7 @@ fn foreground_pointer(
 	event: PointerEvent,
 	return_focus: bool,
 	menu: Option<&[String]>,
+	activated: impl FnOnce(),
 ) -> CoreResult<()> {
 	let kind = pointer_kind(&event);
 	let timeout = if may_open_context_menu(&event) {
@@ -4467,8 +4595,12 @@ fn foreground_pointer(
 	} else {
 		ax::open_menu::CONTROL_MENU_TIMEOUT
 	};
+	let input = skylight::ForegroundInput::Pointer;
 	preserving_cursor(source, || {
-		skylight::with_foreground(pid, wid, return_focus, skylight::ForegroundInput::Pointer, |_| {
+		skylight::with_foreground(pid, wid, return_focus, input, |moved| {
+			if moved {
+				activated();
+			}
 			let choices = control::user_choices();
 			let mut occluder = None;
 			let result = uncover(window, pid, wid, &event, &mut occluder)
@@ -8870,6 +9002,89 @@ mod tests {
 			|| false,
 		);
 		assert_eq!(error.unwrap_err().code, crate::desktop::error::ErrorCode::BackgroundUnavailable);
+	}
+
+	#[test]
+	fn iphone_mirroring_taps_are_primed_once_after_a_takeover_activated_the_window() {
+		use crate::desktop::error::ErrorCode;
+		let (down, up) = (CGEventType::LeftMouseDown.0, CGEventType::LeftMouseUp.0);
+		let log = std::cell::RefCell::new(Vec::new());
+		let check = || {
+			log.borrow_mut().push(("check", 0));
+			Ok(())
+		};
+		let prime = || {
+			log.borrow_mut().push(("prime", 0));
+			Ok(())
+		};
+		let tap = || {
+			report_taps(1, check, |event_type, _| {
+				log.borrow_mut().push(("post", event_type.0));
+				Ok(())
+			})
+		};
+		let no_tap = || -> CoreResult<()> { panic!("no pointer input") };
+		let unprimed = [("check", 0), ("post", down), ("post", up)];
+		// A takeover activated only window 43: a tap in 42 goes out unprimed.
+		let mut awaiting = HashSet::from([(7, 43)]);
+		primed(&mut awaiting, (7, 42), check, prime, tap).unwrap();
+		assert_eq!(log.take(), unprimed);
+		// Once one activated 42, only its next tap is primed.
+		awaiting.insert((7, 42));
+		primed(&mut awaiting, (7, 42), check, prime, tap).unwrap();
+		assert_eq!(log.take(), [
+			("check", 0),
+			("prime", 0),
+			("check", 0),
+			("post", down),
+			("post", up),
+		]);
+		primed(&mut awaiting, (7, 42), check, prime, tap).unwrap();
+		assert_eq!(log.take(), unprimed);
+		assert_eq!(awaiting, HashSet::from([(7, 43)]));
+		// A primer the key route refuses, or one that fails otherwise, still
+		// taps, and is not retried.
+		for failure in [
+			DesktopError::background_unavailable("the keys cannot reach it"),
+			DesktopError::invalid_target("a sheet attached to window 42 has focus"),
+			DesktopError::input_failed("cannot read the sender connection"),
+		] {
+			awaiting.insert((7, 42));
+			let failing = || Err(failure.clone());
+			primed(&mut awaiting, (7, 42), check, failing, tap).unwrap();
+			assert_eq!(log.take(), [("check", 0), ("check", 0), ("post", down), ("post", up)]);
+			primed(&mut awaiting, (7, 42), check, prime, tap).unwrap();
+			assert_eq!(log.take(), unprimed);
+		}
+		// The user already has the target: nothing primes or posts.
+		awaiting.insert((7, 42));
+		let refused = || Err(DesktopError::user_intervened("the user has the target"));
+		let error = primed(&mut awaiting, (7, 42), refused, prime, no_tap).unwrap_err();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert!(log.take().is_empty());
+		// A primer the user stopped keeps its code, sends no pointer input, and
+		// leaves the next call primed.
+		let error = primed(&mut awaiting, (7, 42), check, refused, no_tap).unwrap_err();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert!(awaiting.contains(&(7, 42)));
+		// A cancel while priming stops before any pointer event.
+		let cancellation = control::CancellationSource::default();
+		let token = cancellation.token();
+		let result = control::with_token_for_test(&token, || {
+			primed(
+				&mut awaiting,
+				(7, 42),
+				|| Ok(()),
+				|| {
+					cancellation.cancel();
+					Ok(())
+				},
+				no_tap,
+			)
+		});
+		assert_eq!(result.unwrap_err().code, ErrorCode::Cancelled);
+		// The primer ran, so the next call is not primed again.
+		assert!(!awaiting.contains(&(7, 42)));
 	}
 
 	#[test]
