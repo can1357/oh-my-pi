@@ -113,6 +113,15 @@ provider "amazon-bedrock" {
 		thinking-default-level "max"
 		thinking-requires-effort #true
 	}
+	// residue: the inference-profile prefixes also leave the K3.1 rows in the
+	// "unknown" class. Bedrock's K3.1 Pro Highspeed model card documents
+	// low/medium/high/xhigh/max with max as the default.
+	models "*.moonshotai.kimi-k3.1" {
+		thinking-mode "effort"
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-default-level "max"
+		thinking-requires-effort #true
+	}
 	// The Qwen rows arrive with maxTokens copied from the upstream context
 	// window (262000 on a 262144 window), so a request that does not set an
 	// output budget of its own asks Bedrock for more than the model accepts
