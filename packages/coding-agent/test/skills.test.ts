@@ -22,6 +22,14 @@ const fixturesDir = path.resolve(import.meta.dirname, "fixtures/skills");
 const collisionFixturesDir = path.resolve(import.meta.dirname, "fixtures/skills-collision");
 
 const longSkillName = "this-is-a-very-long-skill-name-that-exceeds-the-sixty-four-character-limit-set-by-the-standard";
+
+async function writeSkill(dir: string, name: string): Promise<void> {
+	await fs.mkdir(dir, { recursive: true });
+	await fs.writeFile(
+		path.join(dir, "SKILL.md"),
+		`---\nname: ${name}\ndescription: ${name} description.\n---\n\n# ${name}\n`,
+	);
+}
 const expectedFixtureSkillOrder: string[] = [
 	"bad--name",
 	"different-name",
@@ -527,6 +535,81 @@ description: Skill loaded from a tilde-expanded custom directory.
 			customDirectories: [fixturesDir],
 		});
 		expect(withEmpty.length).toBe(withoutOption.length);
+	});
+
+	describe("recursive discovery", () => {
+		it("discovers nested and root skills under .agents/skills only when enabled", async () => {
+			const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-recursive-agents-"));
+			const cwd = path.join(tempRoot, "project");
+			const skillsRoot = path.join(cwd, ".agents", "skills");
+			await writeSkill(path.join(skillsRoot, "team", "domain", "nested-skill"), "nested-skill");
+			await writeSkill(skillsRoot, "root-skill");
+			const options = { ...DISABLE_ALL_BUILTIN_SKILLS, enableAgentsProject: true, cwd };
+
+			try {
+				const { skills: flat } = await loadSkills(options);
+				expect(flat.some(skill => skill.name === "nested-skill" || skill.name === "root-skill")).toBe(false);
+
+				const { skills } = await loadSkills({ ...options, recursive: true });
+				expect(skills.find(skill => skill.name === "nested-skill")?.source).toBe("agents:project");
+				expect(skills.find(skill => skill.name === "root-skill")?.source).toBe("agents:project");
+			} finally {
+				await removeWithRetries(tempRoot);
+			}
+		});
+
+		it("discovers nested and root skills in customDirectories when enabled", async () => {
+			const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-recursive-custom-"));
+			const customRoot = path.join(tempRoot, "custom");
+			await writeSkill(path.join(customRoot, "team", "domain", "nested-skill"), "nested-skill");
+			await writeSkill(customRoot, "root-skill");
+
+			try {
+				const { skills: flat } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					customDirectories: [customRoot],
+				});
+				expect(flat.some(skill => skill.name === "nested-skill")).toBe(false);
+				expect(flat.some(skill => skill.name === "root-skill")).toBe(false);
+
+				const { skills } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					customDirectories: [customRoot],
+					recursive: true,
+				});
+				expect(skills.find(skill => skill.name === "nested-skill")?.source).toBe("custom:user");
+				expect(skills.find(skill => skill.name === "root-skill")?.source).toBe("custom:user");
+			} finally {
+				await removeWithRetries(tempRoot);
+			}
+		});
+
+		it("prunes hidden, .git, and node_modules directories and stops at the depth cap", async () => {
+			const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-recursive-bounds-"));
+			const customRoot = path.join(tempRoot, "custom");
+			await writeSkill(path.join(customRoot, ".hidden", "hidden-skill"), "hidden-skill");
+			await writeSkill(path.join(customRoot, ".git", "git-skill"), "git-skill");
+			await writeSkill(path.join(customRoot, "node_modules", "module-skill"), "module-skill");
+			const depthSix = path.join(customRoot, "a", "b", "c", "d", "e", "f");
+			const depthSeven = path.join(depthSix, "g");
+			await writeSkill(depthSix, "depth-six-skill");
+			await writeSkill(depthSeven, "depth-seven-skill");
+
+			try {
+				const { skills, warnings } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					customDirectories: [customRoot],
+					recursive: true,
+				});
+				expect(skills.find(skill => skill.name === "depth-six-skill")?.source).toBe("custom:user");
+				for (const name of ["hidden-skill", "git-skill", "module-skill", "depth-seven-skill"]) {
+					expect(skills.some(skill => skill.name === name)).toBe(false);
+				}
+				expect(warnings.some(warning => warning.message.includes("maximum depth 6"))).toBe(true);
+			} finally {
+				await removeWithRetries(tempRoot);
+			}
+		});
 	});
 });
 

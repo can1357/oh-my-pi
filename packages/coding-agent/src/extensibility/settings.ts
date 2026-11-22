@@ -68,6 +68,19 @@ export const cfgSkillsCustomDirectories = register({
 	default: EMPTY_STRING_ARRAY,
 });
 
+export const cfgSkillsRecursive = register({
+	id: "skills.recursive",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Commands & Skills",
+		label: "Recursive Skill Discovery",
+		description:
+			"Discover nested <group>/<skill>/SKILL.md under .omp/skills, .agent[s]/skills, and skills.customDirectories (off by default; the Agent Skills spec is non-recursive)",
+	},
+});
+
 export const cfgSkillsIgnoredSkills = register({
 	id: "skills.ignoredSkills",
 	type: "array",
@@ -98,6 +111,7 @@ export const cfgSkills = combine({
 	enableAgentsUser: cfgSkillsEnableAgentsUser,
 	enableAgentsProject: cfgSkillsEnableAgentsProject,
 	customDirectories: cfgSkillsCustomDirectories,
+	recursive: cfgSkillsRecursive,
 	ignoredSkills: cfgSkillsIgnoredSkills,
 	manualSkills: cfgSkillsManualSkills,
 	includeSkills: cfgSkillsIncludeSkills,

@@ -156,11 +156,12 @@ export function getProjectPathCandidates(ctx: LoadContext, ...segments: string[]
 
 // Skills
 async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
+	const recursive = ctx.recursiveSkills === true;
 	const projectScans = getProjectPathCandidates(ctx, "skills").map(dir =>
-		scanSkillsFromDir(ctx, { dir, providerId: PROVIDER_ID, level: "project" }),
+		scanSkillsFromDir(ctx, { dir, providerId: PROVIDER_ID, level: "project", recursive }),
 	);
 	const userScans = getUserPathCandidates(ctx, "skills").map(dir =>
-		scanSkillsFromDir(ctx, { dir, providerId: PROVIDER_ID, level: "user" }),
+		scanSkillsFromDir(ctx, { dir, providerId: PROVIDER_ID, level: "user", recursive }),
 	);
 
 	const results = await Promise.all([...projectScans, ...userScans]);

@@ -50,6 +50,8 @@ export interface LoadContext {
 	 * sessions carry their value explicitly (or via the invocation scope).
 	 */
 	extensionRoots?: EffectiveExtensionRoots;
+	/** Scan native/agents skill roots and custom directories recursively (`skills.recursive`). */
+	recursiveSkills?: boolean;
 	/** Provider IDs explicitly requested by caller in LoadOptions */
 	explicitProviders?: Set<string>;
 	/**
@@ -127,6 +129,8 @@ export interface LoadOptions<T = unknown> {
 	 * extensions all survive outside the construction-time invocation scope.
 	 */
 	extensionRoots?: EffectiveExtensionRoots;
+	/** Forwarded to {@link LoadContext.recursiveSkills}; default `false`. */
+	recursiveSkills?: boolean;
 	/**
 	 * Drop items before deduplication as if they never existed (e.g. scope
 	 * exclusions). A dropped item neither survives nor claims its dedupe key,

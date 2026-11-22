@@ -317,6 +317,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 				providerId: PROVIDER_ID,
 				level: "project",
 				requireDescription: true,
+				recursive: ctx.recursiveSkills === true,
 			}),
 		);
 	}
@@ -327,6 +328,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 		providerId: PROVIDER_ID,
 		level: "user",
 		requireDescription: true,
+		recursive: ctx.recursiveSkills === true,
 	});
 
 	const results = await Promise.all([...projectScans, userScan]);
