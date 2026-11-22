@@ -4485,7 +4485,9 @@ impl Host {
 							if let Some(next) = terminal.take_resize()? {
 								size = next;
 								self.presenter.composer.resize(next.width, next.height);
-								self.projection_mut().resize(next);
+								if let Some(projection) = self.projection.as_mut() {
+									projection.resize(next);
+								}
 								self.present(renderer, size)?;
 							}
 						},
@@ -5105,12 +5107,12 @@ impl Host {
 		if composer_rows == 0 {
 			return Ok(Routed::Ignored);
 		}
+		let Some(projection) = self.projection.as_ref() else {
+			return Ok(Routed::Ignored);
+		};
 		let chrome = self.presenter.chrome_frame(size.width);
 		let banner_rows = chrome.size().height.saturating_sub(composer_rows);
-		let top = self
-			.projection
-			.as_ref()
-			.expect("projection initialized before event loop")
+		let top = projection
 			.composer_top(chrome.size().height, size)
 			.saturating_add(banner_rows);
 		let Some(report) = localize_composer_mouse(report, top, size.width, composer_rows) else {

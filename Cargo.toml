@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/*"]
+exclude = ["crates/exec-ssh"]
 resolver = "3"
 
 [workspace.package]
@@ -142,7 +143,6 @@ omp-envd = { path = "crates/envd", version = "2.0.0" }
 omp-exec = { path = "crates/exec", version = "2.0.0" }
 omp-exec-reapi = { path = "crates/exec-reapi", version = "2.0.0", default-features = false }
 omp-exec-local = { path = "crates/exec-local", version = "2.0.0" }
-omp-exec-ssh = { path = "crates/exec-ssh", version = "2.0.0" }
 omp-ext = { path = "crates/ext", version = "2.0.0" }
 omp-forge = { path = "crates/forge", version = "2.0.0" }
 omp-forge-delegated = { path = "crates/forge-delegated", version = "2.0.0" }
