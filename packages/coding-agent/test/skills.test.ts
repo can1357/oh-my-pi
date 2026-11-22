@@ -579,6 +579,8 @@ description: Skill loaded from a tilde-expanded custom directory.
 			const customRoot = path.join(tempRoot, "custom");
 			await writeSkill(path.join(customRoot, "team", "domain", "nested-skill"), "nested-skill");
 			await writeSkill(customRoot, "root-skill");
+			await writeSkill(path.join(customRoot, "parent-skill"), "parent-skill");
+			await writeSkill(path.join(customRoot, "parent-skill", "references", "bundled"), "bundled-reference");
 
 			try {
 				const { skills: flat } = await loadSkills({
@@ -595,6 +597,8 @@ description: Skill loaded from a tilde-expanded custom directory.
 				});
 				expect(skills.find(skill => skill.name === "nested-skill")?.source).toBe("custom:user");
 				expect(skills.find(skill => skill.name === "root-skill")?.source).toBe("custom:user");
+				expect(skills.find(skill => skill.name === "parent-skill")?.source).toBe("custom:user");
+				expect(skills.some(skill => skill.name === "bundled-reference")).toBe(false);
 			} finally {
 				await removeWithRetries(tempRoot);
 			}
@@ -606,9 +610,9 @@ description: Skill loaded from a tilde-expanded custom directory.
 			await writeSkill(path.join(customRoot, ".hidden", "hidden-skill"), "hidden-skill");
 			await writeSkill(path.join(customRoot, ".git", "git-skill"), "git-skill");
 			await writeSkill(path.join(customRoot, "node_modules", "module-skill"), "module-skill");
-			const depthSix = path.join(customRoot, "a", "b", "c", "d", "e", "f");
-			const depthSeven = path.join(depthSix, "g");
-			await writeSkill(depthSix, "depth-six-skill");
+			// No SKILL.md before depth 7, so the leaf rule cannot stop the walk
+			// before the depth bound is exercised.
+			const depthSeven = path.join(customRoot, "a", "b", "c", "d", "e", "f", "g");
 			await writeSkill(depthSeven, "depth-seven-skill");
 
 			try {
@@ -617,7 +621,6 @@ description: Skill loaded from a tilde-expanded custom directory.
 					customDirectories: [customRoot],
 					recursive: true,
 				});
-				expect(skills.find(skill => skill.name === "depth-six-skill")?.source).toBe("custom:user");
 				for (const name of ["hidden-skill", "git-skill", "module-skill", "depth-seven-skill"]) {
 					expect(skills.some(skill => skill.name === name)).toBe(false);
 				}

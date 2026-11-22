@@ -35,7 +35,7 @@ Set `skills.recursive: true` to discover nested layouts under the OMP-native `na
 - `<skills-root>/group/<skill>/SKILL.md`
 - `<skills-root>/SKILL.md` (a skill at the scanned root itself)
 
-Third-party and plugin providers keep their externally specified flat layouts. Recursive scans prune hidden directories, `.git`, and `node_modules`, do not traverse directory symlinks, and stop at depth 6 or 2,000 directories with a warning. A directory containing `SKILL.md` is still traversed, so a parent skill and its nested child skills can both load.
+Third-party and plugin providers keep their externally specified flat layouts. Recursive scans prune hidden directories, `.git`, and `node_modules`, do not traverse directory symlinks, and stop at depth 6 or 2,000 directories with a warning. A nested directory containing `SKILL.md` is a leaf: its `references/`, `scripts/`, or other bundled directories are not searched for more skills. A `SKILL.md` at the scanned root still loads alongside its nested skills.
 
 ```text
 Default layout (non-recursive under skills/):
