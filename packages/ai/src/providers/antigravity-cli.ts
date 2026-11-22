@@ -6,6 +6,7 @@
  */
 import * as path from "node:path";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { Context, Model, StreamFunction, StreamOptions } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
@@ -93,33 +94,46 @@ async function runStep(
 	}
 	implicitKey ??= `${account}:request:${crypto.randomUUID()}`;
 	const retained = implicitSessions.get(implicitKey);
-	clearTimeout(retained?.idle);
 	const host = retained?.host ?? new AgyHost(directory);
 	const entry = retained ?? { host, account };
-	// Register before publishing any terminal event: callers can immediately
-	// start the next stream when toolUse resolves, before our finally runs.
-	implicitSessions.set(implicitKey, entry);
+	// A rejected overlapping step does not own the host's idle deadline. In
+	// particular, it must not arm retirement for the request still streaming.
+	const overlapping = host.hasActiveStep;
+	if (!overlapping) {
+		clearTimeout(retained?.idle);
+		// Register before publishing any terminal event: callers can immediately
+		// start the next stream when toolUse resolves, before our finally runs.
+		implicitSessions.set(implicitKey, entry);
+	}
 	try {
 		await host.step(model, context, stepOptions, writer);
 	} finally {
-		if (host.hasPendingTurn || options.sessionId) {
-			retireWhenIdle(implicitKey, entry);
-		} else {
-			implicitSessions.delete(implicitKey);
-			await host.dispose();
+		if (!overlapping) {
+			if (host.hasPendingTurn || options.sessionId) {
+				retireWhenIdle(implicitKey, entry);
+			} else {
+				implicitSessions.delete(implicitKey);
+				await host.dispose();
+			}
 		}
 	}
 }
 
+/**
+ * Dispose and forget an implicit host once its idle deadline passes, even with
+ * a parked tool: the deadline counts from the last step, so an abandoned turn
+ * cannot renew it. Disposal settles the held MCP call and removes owned
+ * conversation artifacts; a later result replays the supplied transcript.
+ */
 function retireWhenIdle(key: string, entry: RetainedHost): void {
 	entry.idle = setTimeout(() => {
 		if (implicitSessions.get(key) !== entry) return;
-		if (entry.host.hasPendingTurn) {
-			retireWhenIdle(key, entry);
-			return;
-		}
-		entry.host.close();
 		implicitSessions.delete(key);
+		void entry.host.dispose().catch(error => {
+			logger.warn("Antigravity CLI idle session disposal failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
 	}, IDLE_MS);
 	entry.idle.unref();
 }
