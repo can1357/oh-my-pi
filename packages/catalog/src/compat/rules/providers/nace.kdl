@@ -4,7 +4,7 @@
 
 provider "nace" {
 	default-model "drex-max-v1.1"
-	env "NACE_API_KEY"
+	env "NACE_API_KEY" "DREX_API_KEY"
 
 	// console.nace.ai/docs/drex/reference/models: every model bills input tokens
 	// only. The Drex Max models take text and images within 262,144 tokens for
@@ -28,6 +28,20 @@ provider "nace" {
 		model "drex-v2.0" name="Drex 2.0" {
 			reasoning #false
 			input "text"
+			cost input=0.03 output=0 cache-read=0 cache-write=0
+			limits context=131072
+			supports-tools #false
+		}
+		model "drex-latest" name="Drex Latest" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.03 output=0 cache-read=0 cache-write=0
+			limits context=262144
+			supports-tools #false
+		}
+		model "drex-max" name="Drex Max" {
+			reasoning #false
+			input "text" "image"
 			cost input=0.03 output=0 cache-read=0 cache-write=0
 			limits context=262144
 			supports-tools #false

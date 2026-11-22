@@ -6,4 +6,5 @@ export * from "./gitlab-duo-workflow";
 export * from "./kiro";
 export * from "./openai-compatible";
 export * from "./protobuf";
+export * from "./systemone";
 export * from "./typesafe";

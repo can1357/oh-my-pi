@@ -19,6 +19,13 @@ const jevImageInput = {
 	maxSide: 1_568,
 };
 
+const openRouterDrexImageInput = {
+	mimeTypes: ["image/png", "image/jpeg", "image/webp"],
+	maxCount: 4,
+	maxTotalBytes: 3_000_000,
+	maxPixels: 40_000_000,
+};
+
 function judge(id: string, api: "typesafe" | "openrouter-decisions", provider: string) {
 	return buildModel({ ...base, id, name: id, api, provider, baseUrl: "http://localhost:8000" });
 }
@@ -40,5 +47,16 @@ describe("judgment-image-input", () => {
 		expect(
 			resolveJudgmentImageInput(judge("typesafe/jev-unverified", "openrouter-decisions", "openrouter")),
 		).toBeUndefined();
+	});
+
+	test("bounds OpenRouter Drex Max models at 4 images and 3 MB total", () => {
+		for (const id of ["nace-ai/drex-max", "nace-ai/drex-max-finance"]) {
+			expect(resolveJudgmentImageInput(judge(id, "openrouter-decisions", "openrouter"))).toEqual(
+				openRouterDrexImageInput,
+			);
+		}
+		for (const id of ["nace-ai/drex-v2.0", "nace-ai/drex-v1.5"]) {
+			expect(resolveJudgmentImageInput(judge(id, "openrouter-decisions", "openrouter"))).toBeUndefined();
+		}
 	});
 });
