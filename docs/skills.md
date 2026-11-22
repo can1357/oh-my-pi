@@ -30,7 +30,7 @@ By default, skills follow the Agent Skills specification's **one level under `sk
 
 Nested patterns like `<skills-root>/group/<skill>/SKILL.md` are not discovered by default. The Claude-plugin provider also accepts manifest-declared skill directories containing `SKILL.md` directly, in addition to their immediate children. Agent Plugins packages use only the fixed `skills/<name>/SKILL.md` layout; registry-installed Skillshare packages have a root `SKILL.md`.
 
-Set `skills.recursive: true` to discover nested layouts under the OMP-native `native` and `agents` skill roots and under `skills.customDirectories`:
+Set `skills.recursive: true` to discover nested layouts under the OMP-native `native` and `agents` skill roots. `skills.customDirectories` remains flat; point it at the nested parent directory instead:
 
 - `<skills-root>/group/<skill>/SKILL.md`
 - `<skills-root>/SKILL.md` (a skill at the scanned root itself)
@@ -49,7 +49,7 @@ Default layout (non-recursive under skills/):
       └─ internal/
           └─ SKILL.md  ❌ not discovered by default
 
-With skills.recursive: true (native, agents, and custom directories):
+With skills.recursive: true (native and agents only):
 
 <root>/skills/
   ├─ SKILL.md          ✅ discovered
@@ -79,7 +79,7 @@ Current runtime behavior:
 - `description` is required for:
    - native `.omp` provider skill discovery (`requireDescription: true`)
    - `omp-plugins` extension-package skills and the `github` provider (`.github/skills/`), which also pass `requireDescription: true`
-   - `skills.customDirectories` scans via `scanSkillsFromDir` in `src/discovery/helpers.ts` (flat unless `skills.recursive` is on)
+   - `skills.customDirectories` scans via `scanSkillsFromDir` in `src/discovery/helpers.ts` (always flat)
 - the claude/codex/agents/opencode/claude-plugins providers can load skills without description
 - `agent-plugins` validates required `name` and `description` against the Agent Skills specification
 
@@ -281,5 +281,5 @@ MCP-advertised skills:
 - Put each skill in its own directory: `<skills-root>/<skill-name>/SKILL.md`
 - Always include explicit `name` and `description` frontmatter
 - Keep referenced assets under the same skill directory and access with `skill://<name>/...`
-- For nested taxonomy (`team/domain/skill`), enable `skills.recursive` (native/agents/custom-directory roots) or point `skills.customDirectories` at the nested parent directory
+- For nested taxonomy (`team/domain/skill`) under `.omp` or `.agent[s]`, enable `skills.recursive`; for `skills.customDirectories`, point the entry at the nested parent directory
 - On a name collision, the higher-precedence skill keeps the bare name; identical copies collapse, and differing copies remain reachable under a namespace.

@@ -50,7 +50,7 @@ export interface LoadContext {
 	 * sessions carry their value explicitly (or via the invocation scope).
 	 */
 	extensionRoots?: EffectiveExtensionRoots;
-	/** Scan native/agents skill roots and custom directories recursively (`skills.recursive`). */
+	/** Scan native/agents skill roots recursively (`skills.recursive`). */
 	recursiveSkills?: boolean;
 	/** Provider IDs explicitly requested by caller in LoadOptions */
 	explicitProviders?: Set<string>;

@@ -495,7 +495,6 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 					providerId: CUSTOM_DIR_PROVIDER_ID,
 					level: "user",
 					requireDescription: true,
-					recursive,
 				},
 			);
 			return { expandedDir, scanResult };

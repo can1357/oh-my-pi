@@ -560,6 +560,8 @@ description: Skill loaded from a tilde-expanded custom directory.
 			const skillsRoot = path.join(cwd, ".agents", "skills");
 			await writeSkill(path.join(skillsRoot, "team", "domain", "nested-skill"), "nested-skill");
 			await writeSkill(skillsRoot, "root-skill");
+			await writeSkill(path.join(skillsRoot, "parent-skill"), "parent-skill");
+			await writeSkill(path.join(skillsRoot, "parent-skill", "references", "bundled"), "bundled-reference");
 			const options = { ...DISABLE_ALL_BUILTIN_SKILLS, enableAgentsProject: true, cwd };
 
 			try {
@@ -569,36 +571,28 @@ description: Skill loaded from a tilde-expanded custom directory.
 				const { skills } = await loadSkills({ ...options, recursive: true });
 				expect(skills.find(skill => skill.name === "nested-skill")?.source).toBe("agents:project");
 				expect(skills.find(skill => skill.name === "root-skill")?.source).toBe("agents:project");
+				expect(skills.find(skill => skill.name === "parent-skill")?.source).toBe("agents:project");
+				expect(skills.some(skill => skill.name === "bundled-reference")).toBe(false);
 			} finally {
 				await removeWithRetries(tempRoot);
 			}
 		});
 
-		it("discovers nested and root skills in customDirectories when enabled", async () => {
+		it("leaves customDirectories on the flat layout when recursion is enabled", async () => {
 			const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-recursive-custom-"));
 			const customRoot = path.join(tempRoot, "custom");
 			await writeSkill(path.join(customRoot, "team", "domain", "nested-skill"), "nested-skill");
 			await writeSkill(customRoot, "root-skill");
 			await writeSkill(path.join(customRoot, "parent-skill"), "parent-skill");
-			await writeSkill(path.join(customRoot, "parent-skill", "references", "bundled"), "bundled-reference");
 
 			try {
-				const { skills: flat } = await loadSkills({
-					...DISABLE_ALL_BUILTIN_SKILLS,
-					customDirectories: [customRoot],
-				});
-				expect(flat.some(skill => skill.name === "nested-skill")).toBe(false);
-				expect(flat.some(skill => skill.name === "root-skill")).toBe(false);
-
 				const { skills } = await loadSkills({
 					...DISABLE_ALL_BUILTIN_SKILLS,
 					customDirectories: [customRoot],
 					recursive: true,
 				});
-				expect(skills.find(skill => skill.name === "nested-skill")?.source).toBe("custom:user");
-				expect(skills.find(skill => skill.name === "root-skill")?.source).toBe("custom:user");
 				expect(skills.find(skill => skill.name === "parent-skill")?.source).toBe("custom:user");
-				expect(skills.some(skill => skill.name === "bundled-reference")).toBe(false);
+				expect(skills.some(skill => skill.name === "nested-skill" || skill.name === "root-skill")).toBe(false);
 			} finally {
 				await removeWithRetries(tempRoot);
 			}
@@ -606,19 +600,21 @@ description: Skill loaded from a tilde-expanded custom directory.
 
 		it("prunes hidden, .git, and node_modules directories and stops at the depth cap", async () => {
 			const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-recursive-bounds-"));
-			const customRoot = path.join(tempRoot, "custom");
-			await writeSkill(path.join(customRoot, ".hidden", "hidden-skill"), "hidden-skill");
-			await writeSkill(path.join(customRoot, ".git", "git-skill"), "git-skill");
-			await writeSkill(path.join(customRoot, "node_modules", "module-skill"), "module-skill");
+			const cwd = path.join(tempRoot, "project");
+			const skillsRoot = path.join(cwd, ".agents", "skills");
+			await writeSkill(path.join(skillsRoot, ".hidden", "hidden-skill"), "hidden-skill");
+			await writeSkill(path.join(skillsRoot, ".git", "git-skill"), "git-skill");
+			await writeSkill(path.join(skillsRoot, "node_modules", "module-skill"), "module-skill");
 			// No SKILL.md before depth 7, so the leaf rule cannot stop the walk
 			// before the depth bound is exercised.
-			const depthSeven = path.join(customRoot, "a", "b", "c", "d", "e", "f", "g");
+			const depthSeven = path.join(skillsRoot, "a", "b", "c", "d", "e", "f", "g");
 			await writeSkill(depthSeven, "depth-seven-skill");
 
 			try {
 				const { skills, warnings } = await loadSkills({
 					...DISABLE_ALL_BUILTIN_SKILLS,
-					customDirectories: [customRoot],
+					enableAgentsProject: true,
+					cwd,
 					recursive: true,
 				});
 				for (const name of ["hidden-skill", "git-skill", "module-skill", "depth-seven-skill"]) {

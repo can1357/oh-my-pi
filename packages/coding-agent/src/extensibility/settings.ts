@@ -77,7 +77,7 @@ export const cfgSkillsRecursive = register({
 		group: "Commands & Skills",
 		label: "Recursive Skill Discovery",
 		description:
-			"Discover nested <group>/<skill>/SKILL.md under .omp/skills, .agent[s]/skills, and skills.customDirectories (off by default; the Agent Skills spec is non-recursive)",
+			"Discover nested <group>/<skill>/SKILL.md under .omp/skills and .agent[s]/skills (off by default; the Agent Skills spec is non-recursive)",
 	},
 });
 
