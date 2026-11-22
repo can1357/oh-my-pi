@@ -12,7 +12,7 @@ import { COMPOSER_DEFAULTS, Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { type ComposerNativeState, CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { QueuedMessagesBand } from "@oh-my-pi/pi-tui/prompt/queued-messages";
 import { createStartupStatusLine } from "@oh-my-pi/pi-tui/status-line/startup";
-import { getEditorTheme, getSelectListTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
+import { getEditorTheme, getSelectListTheme, initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { TspHarness } from "./native/tsp-harness";
 import { VirtualTerminal } from "./virtual-terminal";
 
@@ -751,6 +751,40 @@ describe("native composer first frame", () => {
 			expect(JSON.stringify(chip)).not.toContain("Sonnet");
 			const effort = byRole(composer.editor.describe(cx), "omp.composer.model.effort");
 			expect(effort).toMatchObject({ k: "effort", p: { level: "low" } });
+		} finally {
+			composer.stop();
+		}
+	});
+	it("drops the cached model's fast icon when the resolved default differs", () => {
+		setNativeRendering(true);
+		const composer = new Composer({
+			terminal: new VirtualTerminal(80, 24),
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+			status: {
+				statusLine: {
+					settings: { preset: "custom", leftSegments: ["model"], rightSegments: [] },
+					gitEnabled: false,
+					model: getBundledModel("openai", "gpt-5.4"),
+					thinkingLevel: ThinkingLevel.High,
+					autoThinking: false,
+					fastMode: true,
+					usingSubscription: false,
+					autoCompactEnabled: false,
+					compactionBoundaries: null,
+				},
+			},
+		});
+		try {
+			const fast = theme.icon.fast;
+			expect(fast).toBeTruthy();
+			expect(JSON.stringify(byRole(composer.editor.describe(cx), "omp.composer.model"))).toContain(fast);
+			composer.updateStartupStatus({
+				model: getBundledModel("anthropic", "claude-opus-4-6"),
+				thinkingLevel: ThinkingLevel.Low,
+			});
+			const chip = JSON.stringify(byRole(composer.editor.describe(cx), "omp.composer.model"));
+			expect(chip).toContain("Opus");
+			expect(chip).not.toContain(fast);
 		} finally {
 			composer.stop();
 		}

@@ -1037,8 +1037,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	/**
 	 * Replace the speculative status line's inputs once the real settings and
 	 * model catalog are loaded, shrinking the window in which a stale cached
-	 * model paints. Compaction boundaries depend on the session, so they are
-	 * dropped when the displayed model changes rather than carried over wrong.
+	 * model paints. Fast mode and compaction boundaries belong to the cached
+	 * model, so they are not carried over when the displayed model changes.
 	 */
 	updateStartupStatus(update: Partial<StatusLineStartupData>): void {
 		const previous = this.#startupStatusData;
@@ -1049,6 +1049,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const merged: StatusLineStartupData = {
 			...previous,
 			...update,
+			fastMode: update.fastMode ?? (modelChanged ? false : previous.fastMode),
 			compactionBoundaries: modelChanged ? null : (update.compactionBoundaries ?? previous.compactionBoundaries),
 		};
 		this.#disposeStartupStatus();
