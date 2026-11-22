@@ -49,7 +49,13 @@ function docFileFor(url: InternalUrl): string | undefined {
  */
 export class OmpProtocolHandler implements ProtocolHandler {
 	readonly scheme = "omp";
-	readonly spec: SchemeSpec = { backing: "virtual", selectors: "lines", immutable: true, linkable: true };
+	readonly spec: SchemeSpec = {
+		backing: "virtual",
+		selectors: "lines",
+		immutable: true,
+		linkable: true,
+		compactTranscript: true,
+	};
 
 	/** Always advertised: harness docs are embedded in every build. */
 	promptDoc(): string {

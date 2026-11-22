@@ -17,6 +17,7 @@ import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -93,6 +94,10 @@ function readGroups(chatContainer: TranscriptContainer): ReadToolGroupComponent[
 	return chatContainer.children.filter((c): c is ReadToolGroupComponent => c instanceof ReadToolGroupComponent);
 }
 
+function toolCards(chatContainer: TranscriptContainer): ToolExecutionComponent[] {
+	return chatContainer.children.filter((c): c is ToolExecutionComponent => c instanceof ToolExecutionComponent);
+}
+
 function header(group: ReadToolGroupComponent): string {
 	return Bun.stripANSI(group.render(120).join("\n")).split("\n")[0] ?? "";
 }
@@ -118,6 +123,19 @@ describe("EventController read-group accretion", () => {
 		const groups = readGroups(chatContainer);
 		expect(groups.length).toBe(1);
 		expect(header(groups[0]!)).toContain("Read (4)");
+	});
+
+	it("collapses consecutive instruction URL reads instead of rendering boxed previews", async () => {
+		const { controller, chatContainer } = createFixture();
+
+		await streamCompletion(controller, [read("skill://chief-of-staff")]);
+		await streamCompletion(controller, [read("skill://i-have-adhd")]);
+		await streamCompletion(controller, [read("rule://local-source-patches")]);
+
+		const groups = readGroups(chatContainer);
+		expect(groups).toHaveLength(1);
+		expect(header(groups[0]!)).toContain("Read (3)");
+		expect(toolCards(chatContainer)).toHaveLength(0);
 	});
 
 	it("nests a read-only completion's usage inside the active group", async () => {
