@@ -429,9 +429,6 @@ struct ChannelDecoder {
 		}
 	}
 
-	/// `Transcript.FinishReason` cases understood by the provider.
-	private static let finishReasons: Set<String> = ["contentCompleted", "maximumResponseTokensExceeded"]
-
 	/// `Transcript.FinishReason` is exported but missing from the SDK's
 	/// `.swiftinterface`, so the payload cannot be cast; its case name is the
 	/// last component of its reflection, e.g.
@@ -439,7 +436,6 @@ struct ChannelDecoder {
 	private static func finish(_ reason: Any) -> Event {
 		let path = String(reflecting: reason).prefix { $0 != "(" }
 		let name = String(path.split(separator: ".").last ?? path)
-		if !finishReasons.contains(name) { log("unknown finish reason '\(name)'") }
 		var event = Event("finish")
 		event.reason = name
 		return event
