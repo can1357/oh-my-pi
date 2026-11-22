@@ -14,7 +14,11 @@ import {
 	approvalGrantKey,
 	getApprovalGrants,
 } from "@oh-my-pi/pi-coding-agent/tools/approval-cache";
-import { approvalTargetKey, approvalTreeSearchKey } from "@oh-my-pi/pi-coding-agent/tools/approval-targets";
+import {
+	approvalTargetKey,
+	approvalTreeSearchKey,
+	isApprovalPublicUrl,
+} from "@oh-my-pi/pi-coding-agent/tools/approval-targets";
 import { AstGrepTool } from "@oh-my-pi/pi-coding-agent/tools/ast-grep";
 import { GlobTool } from "@oh-my-pi/pi-coding-agent/tools/glob";
 import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
@@ -219,5 +223,24 @@ describe("search tool approval cache targets", () => {
 		expect(
 			resolveApproval(astGrep, { pat: "$X", path: "src" }, "always-ask-cached", {}, readTierGrants()).policy,
 		).toBe("prompt");
+	});
+});
+
+// A public URL skips approval; anything reachable only from this machine or network is gated.
+describe("isApprovalPublicUrl", () => {
+	it.each([
+		// Schemeless readable URLs parse like their https form.
+		["www.example.com/docs", true],
+		["http://8.8.8.8/", true],
+		// IPv6 literals stay gated, public ones included.
+		["http://[2606:4700::1111]/", false],
+		["http://intranet/", false],
+		["http://printer.local/", false],
+		["http://127.0.0.1:8080/", false],
+		// Ranges the egress proxy also refuses: IETF protocol assignments, benchmarking.
+		["http://192.0.0.8/", false],
+		["http://198.18.0.1/", false],
+	])("%s → %p", (url, expected) => {
+		expect(isApprovalPublicUrl(url)).toBe(expected);
 	});
 });

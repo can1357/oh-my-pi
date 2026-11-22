@@ -33,7 +33,9 @@ export interface VcsError extends Error {
 		| "Backend"
 		| "Canceled"
 		| "Unsupported"
-		| "OutputTooLarge";
+		| "OutputTooLarge"
+		/** The installed repo guard ({@link setRepoGuard}) refused the repository. */
+		| "Refused";
 	exitCode: number;
 	stdout: string;
 	stderr: string;
@@ -44,6 +46,17 @@ export declare function isVcsError(error: unknown): error is VcsError;
 
 /** True when a cherry-pick failed because the commit is already applied. */
 export declare function isEmptyCherryPick(error: unknown): error is VcsError & { code: "EmptyCherryPick" };
+
+/**
+ * Install `guard` (`undefined` removes it): before every git operation on a repository (each async
+ * method of any handle {@link git}, {@link repo} or {@link repoForDisplay} returned, before or after
+ * the install, and {@link runPostCheckoutHook}) it is asked about the repository's git entry
+ * (`.git`), git dir and common dir; `false` fails the operation with a `Refused` {@link VcsError},
+ * like a failed git call.
+ */
+export declare function setRepoGuard(
+	guard: ((paths: readonly [gitEntryPath: string, gitDir: string, commonDir: string]) => boolean) | undefined,
+): void;
 
 /** Discover the git repository containing `dir`; `null` outside any checkout. */
 export declare function git(dir: string): VcsGitRepo | null;

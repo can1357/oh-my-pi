@@ -37,6 +37,7 @@ import { JSONC, YAML } from "bun";
 import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
 import type { ModelRole } from "../config/model-roles";
+import { ConfigError } from "./config-file";
 import { loadCapability } from "../discovery";
 import { AgentStorage, type AgentStorageApi } from "../session/agent-storage";
 import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../session/compaction-methods";
@@ -134,8 +135,13 @@ type MainYamlReadResult = {
 	configPath: string | null;
 };
 
+/** One config file's own raw settings, kept to name the file that set a value in a load error. */
+type FileLayer = { path: string; settings: RawSettings };
+
 type ProjectSettingsReadResult = {
 	settings: RawSettings;
+	/** Each contributing project file's own settings, in merge order (later wins). */
+	fileLayers: FileLayer[];
 	fileSettings: RawSettings;
 	shellPathSource: string | undefined;
 	/** Discovered project files to invalidate and watch, including filtered or temporarily missing sources. */
@@ -168,6 +174,8 @@ const CONFIG_POLL_INTERVAL_MS = 500;
 
 type ConfigOverlayReadResult = {
 	settings: RawSettings;
+	/** Each overlay file's own settings, in merge order (later wins). */
+	files: FileLayer[];
 	shellPathSource: string | undefined;
 };
 
@@ -762,10 +770,14 @@ export class Settings {
 	#projectShellPathSource: string | undefined;
 	/** Project files to invalidate and watch, including filtered or temporarily missing sources. */
 	#projectSourcePaths: string[] = [];
+	/** Each contributing project file's own settings of the last project read, for load errors. */
+	#projectFileLayers: FileLayer[] = [];
 	/** Capability warnings already surfaced for the current project scope; reloads stay quiet. */
 	#projectSettingsWarningsSeen = new Set<string>();
 	/** Explicit config overlay that most recently supplied shellPath. */
 	#overlayShellPathSource: string | undefined;
+	/** Each overlay file's own settings of the last overlay read, for load errors. */
+	#overlayFileLayers: FileLayer[] = [];
 	/** Runtime overrides (not persisted) */
 	#overrides: RawSettings = {};
 	/** Settings whose runtime override is a soft-pinned default ({@link pinDefaultValue}). */
@@ -1689,13 +1701,14 @@ export class Settings {
 				});
 			}
 			if (overlayResult.status === "fulfilled") {
-				const { settings, shellPathSource } = overlayResult.value;
+				const { settings, shellPathSource, files } = overlayResult.value;
 				refreshed.push({
 					layer: "configOverlay",
 					settings,
 					source: this.#configFiles.join(", "),
 					commit: () => {
 						this.#overlayShellPathSource = shellPathSource;
+						this.#overlayFileLayers = files;
 					},
 				});
 			}
@@ -2300,7 +2313,7 @@ export class Settings {
 
 		// Build merged view (global → project → overrides; project wins over global)
 		this.#rebuildMerged();
-		this.#validateAll();
+		this.#validateLoaded();
 		return this;
 	}
 	async #loadGlobalSettings(): Promise<void> {
@@ -2329,7 +2342,7 @@ export class Settings {
 		this.#configOverlay = await this.#loadConfigOverlays();
 		this.#project = this.#adoptProjectRead(projectResult.value);
 		this.#rebuildMerged();
-		this.#validateAll();
+		this.#validateLoaded();
 		return this;
 	}
 
@@ -2862,6 +2875,7 @@ export class Settings {
 		}
 		return {
 			settings: this.#migrateRawSettings(project.settings, read.quarantineInvalid),
+			fileLayers: project.fileLayers,
 			fileSettings: read.fileSettings,
 			shellPathSource: project.shellPathSource,
 			sourcePaths: [
@@ -2878,19 +2892,20 @@ export class Settings {
 	#mergeProjectItems(
 		items: readonly SettingsCapabilityItem[],
 		nativeModelRoles: unknown,
-	): { settings: RawSettings; sourcePaths: string[]; shellPathSource: string | undefined } {
+	): { settings: RawSettings; sourcePaths: string[]; fileLayers: FileLayer[]; shellPathSource: string | undefined } {
 		let settings: RawSettings = {};
 		const sourcePaths: string[] = [];
+		const fileLayers: FileLayer[] = [];
 		let shellPathSource: string | undefined;
 		for (const item of items) {
-			settings = this.#deepMerge(settings, dropSettingsGroupShadows(item.data as RawSettings, item.path), {
-				arrays: "combine",
-			});
+			const own = dropSettingsGroupShadows(item.data as RawSettings, item.path);
+			settings = this.#deepMerge(settings, own, { arrays: "combine" });
 			sourcePaths.push(item.path);
+			fileLayers.push({ path: item.path, settings: own });
 			if (Object.hasOwn(item.data, "shellPath")) shellPathSource = item.path;
 		}
 		if (nativeModelRoles !== undefined) settings = this.#deepMerge(settings, { modelRoles: nativeModelRoles });
-		return { settings, sourcePaths, shellPathSource };
+		return { settings, sourcePaths, fileLayers, shellPathSource };
 	}
 
 	/** Provider ids `disabledProviders` resolves to for `cwd` when `layers` are merged (over the overlay parent). */
@@ -2914,23 +2929,27 @@ export class Settings {
 		this.#projectFileSettings = result.fileSettings;
 		this.#projectShellPathSource = result.shellPathSource;
 		this.#projectSourcePaths = result.sourcePaths;
+		this.#projectFileLayers = result.fileLayers;
 		this.#projectSettingsWarningsSeen = result.warningsSeen;
 	}
 
 	async #readConfigOverlays(captureLegacyChangelogVersion = true): Promise<ConfigOverlayReadResult> {
 		let shellPathSource: string | undefined;
 		let settings: RawSettings = {};
+		const files: FileLayer[] = [];
 		for (const filePath of this.#configFiles) {
 			const overlay = await this.#loadOverlayYaml(filePath, captureLegacyChangelogVersion);
 			settings = this.#deepMerge(settings, overlay, { arrays: "combine" });
+			files.push({ path: filePath, settings: overlay });
 			if (Object.hasOwn(overlay, "shellPath")) shellPathSource = filePath;
 		}
-		return { settings, shellPathSource };
+		return { settings, files, shellPathSource };
 	}
 
 	async #loadConfigOverlays(): Promise<RawSettings> {
 		const result = await this.#readConfigOverlays();
 		this.#overlayShellPathSource = result.shellPathSource;
+		this.#overlayFileLayers = result.files;
 		return result.settings;
 	}
 
@@ -4396,6 +4415,112 @@ export class Settings {
 	 */
 	#validateAll(merged: RawSettings = this.#mergedView(), cwd: string = this.#cwd): void {
 		for (const setting of allSettings()) setting.checkConfigured(this, configuredValue(merged, setting, cwd));
+	}
+
+	/**
+	 * {@link #validateAll} for a load. A value that fails its definition is raised as a {@link ConfigError}
+	 * naming the file that set it, so the startup failure says what to fix. The load still fails.
+	 */
+	#validateLoaded(): void {
+		const merged = this.#mergedView();
+		for (const setting of allSettings()) {
+			try {
+				setting.checkConfigured(this, configuredValue(merged, setting, this.#cwd));
+			} catch (error) {
+				throw new ConfigError(this.#loadedSourceOf(setting), undefined, {
+					err: error,
+					stage: `Validate(${setting.id})`,
+				});
+			}
+		}
+	}
+
+	/**
+	 * Where a setting's effective value was loaded from, for load errors. Only what the load recorded is
+	 * named: a source the load did not record is named by its layer, never by a guessed path.
+	 *
+	 * A setting whose layers merge (a record deep-merges per key, an array declaring `merge` combines)
+	 * is supplied by several layers, so the highest one is not necessarily the one at fault: the layers
+	 * whose own contribution fails the setting's `validate` are named. A record entry a higher layer
+	 * overrides is not the lower layer's contribution. When no layer fails alone (only the merged value
+	 * does) every contributing layer is named.
+	 */
+	#loadedSourceOf(setting: AnySetting): string {
+		const layers = this.#contributingLayers(setting);
+		if (layers.length === 0) return "default settings";
+		const top = layers[0];
+		const merges = Array.isArray(top.value)
+			? setting.definition.type === "array" && setting.definition.merge !== undefined
+			: isRecord(top.value);
+		if (!merges) return top.source;
+		// A runtime array replaces the lower layers wholesale; lower layers contribute nothing to it.
+		let effective = Array.isArray(top.value) && top.runtime ? [top] : layers;
+		if (isRecord(top.value)) {
+			// Highest first: what a layer contributes is its value minus the entries higher layers set.
+			let higher: RawSettings = {};
+			effective = [];
+			for (const layer of layers) {
+				// A non-record value replaces every layer below it.
+				if (!isRecord(layer.value)) break;
+				const remainder = this.#withoutEntriesOf(layer.value, higher);
+				higher = this.#deepMerge(layer.value, higher);
+				if (Object.keys(remainder).length > 0) effective.push({ ...layer, value: remainder });
+			}
+		}
+		const failing = effective.filter(layer => {
+			try {
+				setting.definition.validate?.(layer.value);
+				return false;
+			} catch {
+				return true;
+			}
+		});
+		const named = failing.length > 0 ? failing : effective;
+		return [...new Set(named.map(layer => layer.source))].join(", ");
+	}
+
+	/** `value` without the entries `higher` sets: a record entry `higher` replaces, or one it merges over, is not `value`'s. */
+	#withoutEntriesOf(value: RawSettings, higher: RawSettings): RawSettings {
+		const remainder: RawSettings = {};
+		for (const key of Object.keys(value)) {
+			const own = value[key];
+			if (!Object.hasOwn(higher, key)) {
+				setOwn(remainder, key, own);
+				continue;
+			}
+			const over = higher[key];
+			if (!isRecord(own) || !isRecord(over)) continue;
+			const nested = this.#withoutEntriesOf(own, over);
+			if (Object.keys(nested).length > 0) setOwn(remainder, key, nested);
+		}
+		return remainder;
+	}
+
+	/**
+	 * Layers that set `setting`, highest precedence first: the layer's own value with path-scoped entries
+	 * resolved, and the source it was loaded from. The overlay and project layers are split per file, so
+	 * only the files that set the value are named; the joined label stands in when no single file does.
+	 */
+	#contributingLayers(setting: AnySetting): { value: unknown; source: string; runtime: boolean }[] {
+		const layers: { value: unknown; source: string; runtime: boolean }[] = [];
+		const add = (layer: RawSettings, source: string, runtime = false): boolean => {
+			const value = configuredValue(layer, setting, this.#cwd);
+			if (value === undefined) return false;
+			layers.push({ value, source, runtime });
+			return true;
+		};
+		// Files merge in order, so the last one sets the highest value.
+		const addFiles = (files: readonly FileLayer[], layer: RawSettings, fallback: string): void => {
+			let found = false;
+			for (const file of [...files].reverse()) found = add(file.settings, file.path) || found;
+			if (!found) add(layer, fallback);
+		};
+		add(this.#overrides, "runtime override", true);
+		addFiles(this.#overlayFileLayers, this.#configOverlay, this.#configFiles.join(", ") || "config overlay");
+		const project = projectLayerForMerge(this.#project);
+		addFiles(this.#projectFileLayers, project, this.#projectSourcePaths.join(", ") || "project settings");
+		add(this.#global, this.#configPath ?? "global settings");
+		return layers;
 	}
 
 	/**

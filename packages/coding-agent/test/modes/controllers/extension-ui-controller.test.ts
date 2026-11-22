@@ -867,3 +867,68 @@ describe("ExtensionUiController OSC 7501 run status", () => {
 		expect(await answer).toBeUndefined();
 	});
 });
+
+describe("ExtensionUiController sandbox access request", () => {
+	const view = {
+		kind: "write" as const,
+		target: "/work/out",
+		intent: "Build into /work/out.",
+		effect: "Contained commands will be able to create, change and delete files under /work/out.",
+		canAlways: true,
+	};
+	let now = 1_000;
+	beforeEach(() => {
+		now = 1_000;
+		spyOn(Date, "now").mockImplementation(() => now);
+	});
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("waits behind an open approval, then denies on abort and gives the composer back", async () => {
+		const harness = makeHarness();
+		const approval = harness.controller.showCollabAwareApproval({
+			full: "Allow tool: bash\nCommand: ls",
+			compact: "Allow tool: bash\nCommand: ls",
+		});
+		const aborted = new AbortController();
+		const access = harness.controller.showSandboxAccess(view, { signal: aborted.signal });
+		await flushMicrotasks();
+		// Only the approval is up; the request queues behind it.
+		expect(harness.screen()).toContain("Allow tool: bash");
+		expect(harness.screen()).not.toContain("Sandbox request");
+		harness.term.press("escape");
+		expect(await approval).toBe("deny");
+		// The request takes the slot once the approval settles, with the keys.
+		expect(harness.approvalSlot()).toBe(true);
+		expect(harness.screen()).toContain("Sandbox request: write to /work/out");
+		expect(harness.composerFocused()).toBe(false);
+		aborted.abort();
+		expect(await access).toEqual({ decision: "deny" });
+		expect(harness.approvalSlot()).toBe(false);
+		expect(harness.composerFocused()).toBe(true);
+	});
+
+	it("answers from the keys once armed, then gives the composer back", async () => {
+		const harness = makeHarness();
+		const access = harness.controller.showSandboxAccess(view);
+		harness.term.press("enter");
+		expect(harness.approvalSlot()).toBe(true);
+		now = 2_000;
+		harness.term.press("down");
+		harness.term.press("enter");
+		expect(await access).toEqual({ decision: "always" });
+		expect(harness.approvalSlot()).toBe(false);
+		expect(harness.composerFocused()).toBe(true);
+	});
+
+	it("opens on Deny over a composer draft, so a bare Enter denies and the draft stays", async () => {
+		const harness = makeHarness();
+		harness.composer.setText("keep the build dir");
+		const access = harness.controller.showSandboxAccess(view);
+		now = 2_000;
+		harness.term.press("enter");
+		expect(await access).toEqual({ decision: "deny" });
+		expect(harness.composer.text()).toBe("keep the build dir");
+	});
+});

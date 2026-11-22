@@ -1,5 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { execContainedTool } from "../exec/exec";
+import { SandboxRuntime } from "../sandbox/runtime";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 
 /** Project type detection result */
@@ -54,33 +56,66 @@ function parseGoWorkspaceBuildPatterns(output: string): string[] {
 	return [...patterns];
 }
 
-/** Resolve the `go build` command for a `go.work` workspace. */
+/** What one checker run produced. */
+interface CheckerRun {
+	stdout: string;
+	stderr: string;
+	exitCode: number;
+	/** The killing signal; `null` when unknown (contained runs) or the checker exited by itself. */
+	signalCode: string | null;
+}
+
+/**
+ * Run `command` in `cwd` to completion; an abort kills it. Under an applying sandbox (`sandbox`, the
+ * `lsp` scope) it runs contained like the language servers: checkers execute workspace code
+ * (`cargo check` build scripts and proc-macros, the workspace's own `tsc`).
+ */
+async function runChecker(
+	command: string[],
+	cwd: string,
+	sandbox: SandboxRuntime | undefined,
+	signal?: AbortSignal,
+): Promise<CheckerRun> {
+	if (sandbox) {
+		const result = await execContainedTool(sandbox, command, cwd, "Workspace checker", signal);
+		return { stdout: result.stdout, stderr: result.stderr, exitCode: result.code, signalCode: null };
+	}
+
+	const proc = Bun.spawn(command, {
+		cwd,
+		stdout: "pipe",
+		stderr: "pipe",
+		windowsHide: true,
+	});
+	const abortHandler = () => {
+		proc.kill();
+	};
+	if (signal) {
+		signal.addEventListener("abort", abortHandler, { once: true });
+	}
+
+	try {
+		const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+		const exitCode = await proc.exited;
+		return { stdout, stderr, exitCode, signalCode: proc.signalCode };
+	} finally {
+		signal?.removeEventListener("abort", abortHandler);
+	}
+}
+
+/**
+ * Resolve the `go build` command for a `go.work` workspace. `fallback: block` without a sandbox
+ * backend rejects instead of running `go`.
+ */
 async function resolveGoWorkspaceDiagnosticsCommand(cwd: string, signal?: AbortSignal): Promise<string[]> {
 	const fallback = ["go", "build", "./..."];
+	const sandbox = await SandboxRuntime.forScope(cwd, "lsp");
 	try {
-		const proc = Bun.spawn(["go", "work", "edit", "-json"], {
-			cwd,
-			stdout: "pipe",
-			stderr: "pipe",
-			windowsHide: true,
-		});
-		const abortHandler = () => {
-			proc.kill();
-		};
-		if (signal) {
-			signal.addEventListener("abort", abortHandler, { once: true });
-		}
-
-		try {
-			const [stdout] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-			const exitCode = await proc.exited;
-			throwIfAborted(signal);
-			if (exitCode !== 0) return fallback;
-			const patterns = parseGoWorkspaceBuildPatterns(stdout);
-			return patterns.length > 0 ? ["go", "build", ...patterns] : fallback;
-		} finally {
-			signal?.removeEventListener("abort", abortHandler);
-		}
+		const { stdout, exitCode } = await runChecker(["go", "work", "edit", "-json"], cwd, sandbox, signal);
+		throwIfAborted(signal);
+		if (exitCode !== 0) return fallback;
+		const patterns = parseGoWorkspaceBuildPatterns(stdout);
+		return patterns.length > 0 ? ["go", "build", ...patterns] : fallback;
 	} catch {
 		if (signal?.aborted) {
 			throw new ToolAbortError();
@@ -194,49 +229,29 @@ async function runProjectDiagnostics(cwd: string, projectType: ProjectType, sign
 	if (!command) {
 		return "Cannot detect project type. Supported: Rust (Cargo.toml), TypeScript (tsconfig.json), Go (go.work/go.mod), Python (pyproject.toml)";
 	}
+	const sandbox = await SandboxRuntime.forScope(cwd, "lsp");
 	try {
-		const proc = Bun.spawn(command, {
-			cwd,
-			stdout: "pipe",
-			stderr: "pipe",
-			windowsHide: true,
-		});
-		const abortHandler = () => {
-			proc.kill();
-		};
-		if (signal) {
-			signal.addEventListener("abort", abortHandler, { once: true });
+		const { stdout, stderr, exitCode, signalCode } = await runChecker(command, cwd, sandbox, signal);
+		throwIfAborted(signal);
+		const combined = (stdout + stderr).trim();
+		if (!combined) {
+			// A checker that exits non-zero without writing a single byte never
+			// inspected the workspace: it failed to start (missing toolchain),
+			// crashed, or was killed (OOM). Reporting "No issues found" there
+			// tells the agent the workspace is clean when nothing actually
+			// checked it. A non-zero exit *with* output is the normal way
+			// tsc/cargo/pyright report diagnostics and still falls through to
+			// the branch below. Mirrors the exit-status gate
+			// `resolveGoWorkspaceDiagnosticsCommand` already applies above.
+			return interpretEmptyDiagnosticsResult(exitCode, signalCode, command);
 		}
-
-		try {
-			const [stdout, stderr] = await Promise.all([
-				new Response(proc.stdout).text(),
-				new Response(proc.stderr).text(),
-			]);
-			const exitCode = await proc.exited;
-			throwIfAborted(signal);
-			const combined = (stdout + stderr).trim();
-			if (!combined) {
-				// A checker that exits non-zero without writing a single byte never
-				// inspected the workspace: it failed to start (missing toolchain),
-				// crashed, or was killed (OOM). Reporting "No issues found" there
-				// tells the agent the workspace is clean when nothing actually
-				// checked it. A non-zero exit *with* output is the normal way
-				// tsc/cargo/pyright report diagnostics and still falls through to
-				// the branch below. Mirrors the exit-status gate
-				// `resolveGoWorkspaceDiagnosticsCommand` already applies above.
-				return interpretEmptyDiagnosticsResult(exitCode, proc.signalCode, command);
-			}
-			// Limit output length. The cap is per language so a noisy checker
-			// cannot crowd its siblings out of a polyglot report.
-			const lines = combined.split("\n");
-			if (lines.length > 50) {
-				return `${lines.slice(0, 50).join("\n")}\n[…${lines.length - 50}ln elided…]`;
-			}
-			return combined;
-		} finally {
-			signal?.removeEventListener("abort", abortHandler);
+		// Limit output length. The cap is per language so a noisy checker
+		// cannot crowd its siblings out of a polyglot report.
+		const lines = combined.split("\n");
+		if (lines.length > 50) {
+			return `${lines.slice(0, 50).join("\n")}\n[…${lines.length - 50}ln elided…]`;
 		}
+		return combined;
 	} catch (e) {
 		if (signal?.aborted) {
 			throw new ToolAbortError();
@@ -245,7 +260,10 @@ async function runProjectDiagnostics(cwd: string, projectType: ProjectType, sign
 	}
 }
 
-/** Run workspace diagnostics command and parse output */
+/**
+ * Run workspace diagnostics command and parse output. Under an applying sandbox (`lsp` scope) the
+ * checkers run contained; `fallback: block` without a backend rejects instead of running them.
+ */
 export async function runWorkspaceDiagnostics(
 	cwd: string,
 	signal?: AbortSignal,

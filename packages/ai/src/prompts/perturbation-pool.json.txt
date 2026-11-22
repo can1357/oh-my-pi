@@ -33035,6 +33035,134 @@
 				"The terminal `data` MUST be the full object that matches the output schema",
 				"The terminal `data` MUST be the whole object matching the output schema"
 			]
+		},
+		{
+			"source": "Ask the user to let sandboxed commands and file tools write to, read, or connect to one exact path or host, or to let omp perform one action outside the sandbox (`exec`). The user decides in a dialog; you can never grant access yourself.",
+			"origin": "tools/sandbox-request.md",
+			"variants": [
+				"Ask the user to let sandboxed commands and file tools write to, read, or connect to one exact path or host, or to let omp perform a single action outside the sandbox (`exec`). The user decides in a dialog; you can never grant access on your own.",
+				"Ask the user to permit sandboxed commands and file tools to write to, read, or connect to one exact path or host, or to let omp perform one action outside the sandbox (`exec`). The user decides in a dialog; you can never grant access yourself.",
+				"Ask the user to let sandboxed commands and file tools write to, read, or connect to one exact path or host, or to let omp perform one action outside the sandbox (`exec`). The user decides in a dialog; access can never be granted by you yourself."
+			]
+		},
+		{
+			"source": "Use when a contained command or a tool failed (or will fail) because of the sandbox: a write outside the writable roots or to a protected path, a read of a path outside the readable roots, a refused host, or a tool refused with a `sandbox_request` to make. Use the exact `kind` and `target` a refusal names. Not for a permission error the sandbox did not cause (a file's own mode or owner), for an unreadable (`denyRead`) path, for a write in read-only mode, or for a host while the network is off or one that is an IP address or local name: those cannot be granted.",
+			"origin": "tools/sandbox-request.md",
+			"variants": [
+				"Use when a contained command or a tool failed (or will fail) because of the sandbox: a write outside the writable roots or to a protected path, a read of a path outside the readable roots, a refused host, or a tool refused with a `sandbox_request` to make. Use the exact `kind` and `target` the refusal names. Not for a permission error the sandbox did not cause (a file's own mode or owner), for an unreadable (`denyRead`) path, for a write in read-only mode, or for a host while the network is off or one that is an IP address or local name: those cannot be granted.",
+				"Use when a contained command or a tool failed (or will fail) because of the sandbox: a write outside the writable roots or to a protected path, a read of a path outside the readable roots, a refused host, or a tool refused with a `sandbox_request` to make. Use the exact `kind` and `target` a refusal names. Not for a permission error the sandbox did not cause (a file's own mode or owner), for an unreadable (`denyRead`) path, for a write in read-only mode, or for a host while the network is off or that is an IP address or local name: those cannot be granted.",
+				"Use when a contained command or a tool failed (or will fail) because of the sandbox: a write outside the writable roots or to a protected path, a read of a path outside the readable roots, a refused host, or a tool refused with a `sandbox_request` to make. Use the exact `kind` and `target` a refusal names. Not for a permission error the sandbox did not cause (a file's own mode or owner), for an unreadable (`denyRead`) path, for a write in read-only mode, or for a host while the network is off or one that is an IP address or local name: those are not grantable."
+			]
+		},
+		{
+			"source": "Fill every field so the user can decide without guessing:",
+			"origin": "tools/sandbox-request.md",
+			"variants": [
+				"Fill in every field so the user can decide without guessing:",
+				"Fill every field so that the user can decide without guessing:",
+				"Fill each field so the user can decide without guessing:"
+			]
+		},
+		{
+			"source": "- `intent`: what you are doing and why this exact path or host is needed, in the user's terms (e.g. \"Build the docs site: `mkdocs build` writes its output to ../site.\"). NEVER \"need access\", \"permission required\", or a restatement of the target.",
+			"origin": "tools/sandbox-request.md",
+			"variants": [
+				"- `intent`: describe what you are doing and why this specific path or host is required, in the user's own terms (e.g. \"Build the docs site: `mkdocs build` writes its output to ../site.\"). NEVER write \"need access\", \"permission required\", or restate the target.",
+				"- `intent`: state what you are doing and why this particular path or host is necessary, phrased as the user would say it (e.g. \"Build the docs site: `mkdocs build` writes its output to ../site.\"). NEVER use \"need access\", \"permission required\", or a rephrasing of the target.",
+				"- `intent`: explain what you are doing and why this exact path or host is needed, using the user's terms (e.g. \"Build the docs site: `mkdocs build` writes its output to ../site.\"). NEVER say \"need access\", \"permission required\", or restate the target.",
+				"- `intent`: say what you are doing and why this precise path or host is required, in the user's own words (e.g. \"Build the docs site: `mkdocs build` writes its output to ../site.\"). NEVER write \"need access\", \"permission required\", or repeat the target."
+			]
+		},
+		{
+			"source": "- `command`: the command that needs it, verbatim.",
+			"origin": "tools/sandbox-request.md",
+			"variants": [
+				"- `command`: the command requiring it, verbatim.",
+				"- `command`: the command that needs it, copied verbatim.",
+				"- `command`: the command that needs it, word for word."
+			]
+		},
+		{
+			"source": "- `alternative`: what you will do if the user denies (e.g. \"Build into ./site inside the workspace instead.\").",
+			"origin": "tools/sandbox-request.md",
+			"variants": [
+				"- `alternative`: the action you will take if the user denies (e.g. \"Build into ./site inside the workspace instead.\").",
+				"- `alternative`: what you will do when the user denies (e.g. \"Build into ./site inside the workspace instead.\").",
+				"- `alternative`: what you plan to do should the user deny (e.g. \"Build into ./site inside the workspace instead.\")."
+			]
+		},
+		{
+			"source": "- `target`: the narrowest target. The directory actually written, not its parent, `~`, or `/`; the file or directory actually read; the exact hostname (no scheme, port, or wildcard); for `exec`, the target the refusal names, verbatim. An `exec` grant lasts for this session only.",
+			"origin": "tools/sandbox-request.md",
+			"variants": [
+				"- `target`: the narrowest target. The directory actually written, not its parent, `~`, or `/`; the file or directory actually read; the exact hostname (no scheme, port, or wildcard); for `exec`, the target the refusal names, verbatim. An `exec` grant lasts only for this session.",
+				"- `target`: the narrowest target. The directory actually written, not its parent, `~`, or `/`; the file or directory actually read; the exact hostname (no scheme, port, or wildcard); for `exec`, the target named by the refusal, verbatim. An `exec` grant lasts for this session only.",
+				"- `target`: the narrowest target. The directory actually written, not its parent, `~`, or `/`; the file or directory actually read; the exact hostname (no scheme, port, or wildcard); for `exec`, the target the refusal names, verbatim. An `exec` grant endures for this session only."
+			]
+		},
+		{
+			"source": "- One request per target. Do not bundle, do not ask for a broader path to cover several.",
+			"origin": "tools/sandbox-request.md",
+			"variants": [
+				"- One request per target. Do not bundle, and do not ask for a broader path to cover several.",
+				"- One request per target. Do not bundle, do not ask for a broader path to cover multiple.",
+				"- One request per target. Do not bundle, do not ask for a broader path covering several."
+			]
+		},
+		{
+			"source": "- `denied`: do not ask again for that target and do not work around it (other paths, other tools, disabling the sandbox). Continue with your alternative or tell the user what is blocked.",
+			"origin": "tools/sandbox-request.md",
+			"variants": [
+				"- `denied`: never ask again for that target and never work around it (other paths, other tools, disabling the sandbox). Proceed with your alternative or tell the user what is blocked.",
+				"- `denied`: do not request that target again and do not circumvent it (other paths, other tools, disabling the sandbox). Continue with your alternative or inform the user what is blocked.",
+				"- `denied`: ask again for that target is not allowed and working around it is not allowed (other paths, other tools, disabling the sandbox). Continue with your alternative or tell the user what is blocked."
+			]
+		},
+		{
+			"source": "- `instructed`: nothing was granted; follow the user's instructions.",
+			"origin": "tools/sandbox-request.md",
+			"variants": [
+				"- `instructed`: nothing has been granted; follow the user's instructions.",
+				"- `instructed`: nothing was granted; do what the user's instructions say.",
+				"- `instructed`: nothing was granted; abide by the user's instructions."
+			]
+		},
+		{
+			"source": "- `granted`: re-run the command or tool call.",
+			"origin": "tools/sandbox-request.md",
+			"variants": [
+				"- `granted`: run the command or tool call again.",
+				"- `granted`: you may repeat the command or tool call.",
+				"- `granted`: reissue the command or tool call."
+			]
+		},
+		{
+			"source": "- `refused`: the request never reached the user; the result says why. Do not retry the same request.",
+			"origin": "tools/sandbox-request.md",
+			"variants": [
+				"- `refused`: the request never got to the user; the result explains why. Do not attempt the same request again.",
+				"- `refused`: the request did not reach the user; the result states the reason. Never retry that same request.",
+				"- `refused`: the user never received the request; the result tells you why. Do not retry it.",
+				"- `refused`: the request was never delivered to the user; the result gives the reason. Do not repeat the same request."
+			]
+		},
+		{
+			"source": "- The repo's direnv/devenv environment is not loaded for contained commands.",
+			"origin": "system/sandbox.md",
+			"variants": [
+				"- For contained commands, the repo's direnv/devenv environment is not loaded.",
+				"- Contained commands do not get the repo's direnv/devenv environment loaded.",
+				"- The repo's direnv/devenv environment stays unloaded for contained commands."
+			]
+		},
+		{
+			"source": "- File tools (`read`, `write`, `edit`, `ast_edit`, searches, and `tool.*` calls from eval) are held to the same filesystem policy before they run: a path outside it is refused with a sandbox message.",
+			"origin": "system/sandbox.md",
+			"variants": [
+				"- Before running, file tools (`read`, `write`, `edit`, `ast_edit`, searches, and `tool.*` calls from eval) face the same filesystem policy: a path outside it gets refused with a sandbox message.",
+				"- File tools (`read`, `write`, `edit`, `ast_edit`, searches, and `tool.*` calls from eval) must satisfy the same filesystem policy before they run: any path outside it is refused with a sandbox message.",
+				"- The same filesystem policy applies to file tools (`read`, `write`, `edit`, `ast_edit`, searches, and `tool.*` calls from eval) before they run: a path outside it is refused with a sandbox message."
+			]
 		}
 	]
 }

@@ -2,9 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Operator-only names (`PI_CONFIG_FILES`, agent/config dirs, profile, XDG roots, natives dir; `PI_`/`OMP_` forms) from a project's dotenv files are dropped before any directory or profile is resolved ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+
 ### Added
 
 - Added `getBunStubDir()`, the cache directory holding the `bun` stub a compiled omp appends to its JS eval kernel's PATH ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Added `stripOmpDotenvEnv`, `readLines`' `maxLineBytes` option (`LineTooLongError`) and `handleByteSource` in `@oh-my-pi/pi-utils/ar` ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ## [19.2.1] - 2026-11-25
 

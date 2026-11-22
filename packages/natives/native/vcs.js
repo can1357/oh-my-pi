@@ -34,18 +34,70 @@ export function isEmptyCherryPick(error) {
 	return isVcsError(error) && error.code === "EmptyCherryPick";
 }
 
+/** Consulted before every git operation; `false` refuses the repository (see {@link setRepoGuard}). */
+let repoGuard;
+/** Handle methods that only read discovery metadata (no git process, no config): never guarded. */
+const METADATA_METHODS = new Set([
+	"info",
+	"primaryRoot",
+	"linkedWorktree",
+	"headSync",
+	"prefixOf",
+	"kind",
+	"root",
+	"watchTarget",
+	"supports",
+	"asJj",
+]);
+
+/**
+ * Install `guard` (`undefined` removes it): before every git operation on a repository (each async
+ * method of any handle {@link git}, {@link repo} or {@link repoForDisplay} returned, before or after
+ * the install, and {@link runPostCheckoutHook}) it is asked about the repository's git entry
+ * (`.git`), git dir and common dir; `false` fails the operation with a `Refused` VcsError, like a
+ * failed git call.
+ */
+export function setRepoGuard(guard) {
+	repoGuard = guard;
+}
+
+function refusal(info) {
+	if (!repoGuard || !info || repoGuard([info.gitEntryPath, info.gitDir, info.commonDir])) return undefined;
+	return vcsError("Refused", `git refused: ${info.gitDir} holds metadata a sandboxed command created or replaced`);
+}
+
+/** `handle` (a git or repo handle, or `null`) with its git operations checked by the repo guard on each call. */
+function guarded(handle) {
+	if (!handle) return handle;
+	const info = typeof handle.info === "function" ? handle.info() : handle.asGit()?.info();
+	if (!info) return handle;
+	return new Proxy(handle, {
+		get(target, property) {
+			const value = Reflect.get(target, property, target);
+			if (typeof value !== "function" || METADATA_METHODS.has(property)) {
+				return typeof value === "function" ? value.bind(target) : value;
+			}
+			if (property === "asGit") return () => guarded(target.asGit());
+			return (...args) => {
+				const refused = refusal(info);
+				return refused ? Promise.reject(refused) : value.apply(target, args);
+			};
+		},
+	});
+}
+
 /** Discover the git repository containing `dir`; `null` outside any checkout. */
 export function git(dir) {
-	return api().vcsGitDiscover(dir);
+	return guarded(api().vcsGitDiscover(dir));
 }
 /** Discover the repository owning `dir`; `null` outside any repository. */
 export function repo(dir) {
-	return api().vcsDiscover(dir);
+	return guarded(api().vcsDiscover(dir));
 }
 
 /** Like {@link repo}, but equal-root jj+git ties prefer Jujutsu for display. Git-safe automation must keep using {@link repo}. */
 export function repoForDisplay(dir) {
-	return api().vcsDiscoverForDisplay(dir);
+	return guarded(api().vcsDiscoverForDisplay(dir));
 }
 
 /** Like {@link repo}, asserting any requested backend capabilities. */
@@ -154,6 +206,8 @@ export async function copyGitObjects(isolationRoot, sourceRoot) {
  * null old HEAD and branch-switch flag as `git worktree add`.
  */
 export async function runPostCheckoutHook(worktreeRoot, head) {
+	const refused = refusal(gitInfo(worktreeRoot));
+	if (refused) throw refused;
 	const nullOid = "0".repeat(head.length);
 	if (await gitPredatesHookRun()) return runPostCheckoutHookFile(worktreeRoot, nullOid, head);
 	const result = await $`git hook run --ignore-missing post-checkout -- ${nullOid} ${head} 1`

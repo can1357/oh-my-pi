@@ -29,6 +29,7 @@ import { type OutputMeta, stripOutputNotice } from "../../tools/output-meta-form
 import type { ToolHead, ToolPresenter, ToolResult, ToolView, ToolViewState } from "./contract";
 import { resultText } from "./default";
 import { registerToolPresenter } from "./registry";
+import { sandboxBadge, sandboxNoteNodes } from "./sandbox-meta";
 import { RunBox, RunFoot, type RunFootProps, RunInput, RunOutput, type RunState } from "./run";
 
 interface EvalCellArg {
@@ -313,12 +314,15 @@ function evalHead(
 	count: number,
 	details?: EvalToolDetails,
 ): ToolHead {
-	const badges: { text: string; title?: string }[] = [...new Set(languages)].map(language => ({ text: language }));
+	const badges: NonNullable<ToolHead["badges"]>[number][] = [...new Set(languages)].map(language => ({
+		text: language,
+	}));
 	if (details?.async?.state === "running")
 		badges.push({
 			text: "background",
 			title: `Backgrounded as job ${details.async.jobId}`,
 		});
+	if (details?.sandbox) badges.push(sandboxBadge(details.sandbox));
 	return {
 		title: (count > 1 ? "" : plain(title ?? "").trim()) || "Eval",
 		...(badges.length > 0 ? { badges } : {}),
@@ -428,7 +432,7 @@ function resultView(result: ToolResult<EvalToolDetails>, state: ToolViewState, a
 		});
 		return {
 			head: evalHead(cellResults[0]!.title, languages, cellResults.length, details),
-			body: boxes,
+			body: [...boxes, ...sandboxNoteNodes(details?.sandbox)],
 			preview: "children",
 			term: {
 				look: "eval",
@@ -465,7 +469,10 @@ function resultView(result: ToolResult<EvalToolDetails>, state: ToolViewState, a
 			calls.length,
 			details,
 		),
-		body: runs.map((run, i) => <CellBox cell={run} index={i} total={runs.length} />),
+		body: [
+			...runs.map((run, i) => <CellBox cell={run} index={i} total={runs.length} />),
+			...sandboxNoteNodes(details?.sandbox),
+		],
 		preview: "children",
 		term: {
 			look: "eval",

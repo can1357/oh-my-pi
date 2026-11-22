@@ -1,5 +1,12 @@
-import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolApproval } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentToolContext,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+	SandboxSubject,
+	ToolApproval,
+} from "@oh-my-pi/pi-agent-core";
 import { untilAborted } from "@oh-my-pi/pi-utils";
+import { sandboxCallDenial } from "../sandbox/gate";
 import type { ToolSession } from "../tools";
 import {
 	approvalRestrictions,
@@ -71,6 +78,11 @@ export interface EvalPreludeDefinition {
 	guidance?: string;
 	/** Approval tier or argument-dependent approval decision for host calls. */
 	approval?: ToolApproval;
+	/**
+	 * What a host call does outside the OS sandbox (paths, hosts, `exec` actions), checked by the
+	 * sandbox gate before `invoke` runs. Omission means nothing to check.
+	 */
+	sandboxSubjects?(parameters: unknown): readonly SandboxSubject[];
 	/** Live availability predicate. Omission means enabled. */
 	enabled?: () => boolean;
 	/**
@@ -171,6 +183,16 @@ async function approvePreludeInvocation(
 		approvalRestrictions(settings, context.session.cwd),
 	);
 	if (resolved.policy === "deny") throw denyError(resolved, definition.name);
+	// The OS sandbox's gate, as for every registry tool: a subject outside its policy fails the call.
+	const pendingSandboxDenial = sandboxCallDenial({
+		settings,
+		workspace: context.session.cwd,
+		name: definition.name,
+		subjects: () => definition.sandboxSubjects?.(parameters) ?? [],
+		requestTool: () => context.session.isToolActive?.("sandbox_request") === true,
+	});
+	const sandboxDenial = pendingSandboxDenial && (await pendingSandboxDenial);
+	if (sandboxDenial !== undefined) throw new Error(sandboxDenial);
 	if (resolved.policy !== "prompt") return;
 
 	const ui = context.context?.ui;

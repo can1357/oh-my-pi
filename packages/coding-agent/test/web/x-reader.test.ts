@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { handleTwitter } from "@oh-my-pi/pi-coding-agent/web/scrapers/twitter";
+import { withRequestHostGuard } from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
 import { parseXUrl, type XTarget } from "@oh-my-pi/pi-coding-agent/web/x";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { asGlobalFetch } from "../helpers/fetch-mock";
@@ -40,7 +41,15 @@ describe("handleTwitter", () => {
 		return new ModelRegistry(authStorage, undefined, { settings });
 	}
 
+	// A shell-level XAI_BASE_URL would move every request off api.x.ai: each test starts without one.
+	const originalXaiBaseUrl = Bun.env.XAI_BASE_URL;
+	beforeEach(() => {
+		delete Bun.env.XAI_BASE_URL;
+	});
+
 	afterEach(() => {
+		if (originalXaiBaseUrl === undefined) delete Bun.env.XAI_BASE_URL;
+		else Bun.env.XAI_BASE_URL = originalXaiBaseUrl;
 		vi.restoreAllMocks();
 		resetSettingsForTest();
 		for (const authStorage of authStorages.splice(0)) authStorage.close();
@@ -106,5 +115,99 @@ describe("handleTwitter", () => {
 
 		expect(result?.method).toBe("x-unavailable");
 		expect(result?.content).toContain("upstream exploded");
+	});
+
+	it("does not call Grok when the read's host guard refuses the xAI endpoint", async () => {
+		const modelRegistry = await xaiRegistry();
+		const fetchSpy = vi.spyOn(globalThis, "fetch");
+		const asked: string[] = [];
+		// The read's own host is allowed; every other host is refused.
+		const refuse = (host: string) => {
+			if (host === "x.com") return;
+			asked.push(host);
+			throw new Error(`no ${host}`);
+		};
+
+		const { result, skipped } = await withRequestHostGuard(refuse, () =>
+			handleTwitter("https://x.com/jack/status/20", 10, undefined, null, modelRegistry),
+		);
+
+		expect(fetchSpy).not.toHaveBeenCalled();
+		expect(asked).toEqual(["api.x.ai"]);
+		expect(result?.method).toBe("x-unavailable");
+		expect(skipped).toEqual(["Skipped requests to api.x.ai: not allowed by the sandbox's network policy"]);
+	});
+
+	it("asks the guard about the XAI_BASE_URL host, not api.x.ai, and sends nothing to a refused override", async () => {
+		const modelRegistry = await xaiRegistry();
+		Bun.env.XAI_BASE_URL = "https://xai-proxy.example.test/v1/";
+		const fetchSpy = vi.spyOn(globalThis, "fetch");
+		const asked: string[] = [];
+		const refuse = (host: string) => {
+			if (host === "x.com") return;
+			asked.push(host);
+			throw new Error(`no ${host}`);
+		};
+
+		const { result, skipped } = await withRequestHostGuard(refuse, () =>
+			handleTwitter("https://x.com/jack/status/20", 10, undefined, null, modelRegistry),
+		);
+
+		expect(asked).toEqual(["xai-proxy.example.test"]);
+		expect(fetchSpy).not.toHaveBeenCalled();
+		expect(result?.method).toBe("x-unavailable");
+		expect(skipped).toEqual([
+			"Skipped requests to xai-proxy.example.test: not allowed by the sandbox's network policy",
+		]);
+	});
+
+	it("sends to an XAI_BASE_URL host the guard admits", async () => {
+		const modelRegistry = await xaiRegistry();
+		Bun.env.XAI_BASE_URL = "https://xai-proxy.example.test/v1/";
+		const requested: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async input => {
+				requested.push(String(input));
+				return Response.json({ output_text: "## Post\nhello" });
+			}),
+		);
+
+		const { result } = await withRequestHostGuard(
+			() => {},
+			() => handleTwitter("https://x.com/jack/status/20", 10, undefined, null, modelRegistry),
+		);
+
+		expect(result?.method).toBe("x-search");
+		expect(requested).toEqual(["https://xai-proxy.example.test/v1/responses"]);
+	});
+
+	it("asks the guard about a redirect's host and does not follow it when refused", async () => {
+		const modelRegistry = await xaiRegistry();
+		const requested: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async input => {
+				requested.push(String(input));
+				return new Response(null, {
+					status: 307,
+					headers: { location: "https://elsewhere.example.test/v1/responses" },
+				});
+			}),
+		);
+		const asked: string[] = [];
+		const guard = (host: string) => {
+			asked.push(host);
+			if (host === "elsewhere.example.test") throw new Error(`no ${host}`);
+		};
+
+		const { result, skipped } = await withRequestHostGuard(guard, () =>
+			handleTwitter("https://x.com/jack/status/20", 10, undefined, null, modelRegistry),
+		);
+
+		expect(asked).toEqual(["api.x.ai", "elsewhere.example.test"]);
+		expect(requested).toEqual(["https://api.x.ai/v1/responses"]);
+		expect(result?.method).toBe("x-unavailable");
+		expect(skipped).toEqual([
+			"Skipped requests to elsewhere.example.test: not allowed by the sandbox's network policy",
+		]);
 	});
 });

@@ -13,7 +13,7 @@ use std::{
 use gix::bstr::{BString, ByteSlice};
 
 use super::{
-	GitRepo,
+	GitRepo, HEAD_LIMIT,
 	filter::WorktreeFilter,
 	normalize_path,
 	open::{
@@ -21,12 +21,13 @@ use super::{
 		status_with_index,
 	},
 	read::literal_pathspec,
+	read_git_file, read_optional_file, replace_git_file, unique_file_name,
 };
 use crate::{
 	error::{Error, Result},
 	types::{
-		CleanOptions, CommitAuthor, CommitOptions, DetachGitDirResult, ResetMode, RestoreOptions,
-		WorktreeAddOptions, WorktreeAddResult, WorktreeClone,
+		CleanOptions, CommitAuthor, CommitOptions, DetachGitDirResult, HookRun, HookRunner,
+		ResetMode, RestoreOptions, WorktreeAddOptions, WorktreeAddResult, WorktreeClone,
 	},
 };
 
@@ -269,6 +270,7 @@ impl GitRepo {
 			.map_err(|err| Error::backend("git commit read commit.gpgSign", err))?
 			.unwrap_or(false);
 		let index_path = options.index_path.as_deref();
+		let hook_runner = options.hook_runner.as_ref();
 		// An alternate index that does not exist is a caller error, never a
 		// silent fallback to the repository's index.
 		let load_index = || match index_path {
@@ -289,7 +291,7 @@ impl GitRepo {
 			.then(|| write_index_tree(&repo, &index))
 			.transpose()?;
 		if !options.no_verify {
-			run_commit_hook(self, "pre-commit", &[], index_path)?;
+			run_commit_hook(self, "pre-commit", &[], index_path, hook_runner)?;
 			// The hook may have edited the index.
 			index = load_index()?;
 			reject_unmerged_index(&index, "git commit")?;
@@ -380,11 +382,18 @@ impl GitRepo {
 		let message_file = CommitMessageFile::create(&self.info().git_dir, message)?;
 		// Hooks that read `.git/COMMIT_EDITMSG` instead of `$1` still see this
 		// message, as under `git commit`; only the private copy is read back.
-		let _ = fs::write(self.info().git_dir.join("COMMIT_EDITMSG"), message);
+		let _ = replace_git_file(&self.info().git_dir.join("COMMIT_EDITMSG"), message.as_bytes());
 		if !options.no_verify {
-			run_commit_hook(self, "commit-msg", &[message_file.path.as_os_str()], index_path)?;
+			run_commit_hook(
+				self,
+				"commit-msg",
+				&[message_file.path.as_os_str()],
+				index_path,
+				hook_runner,
+			)?;
 		}
-		let message = fs::read_to_string(&message_file.path)
+		let message = message_file
+			.read_back()
 			.map_err(|err| Error::backend("git commit read commit-msg result", err))?;
 		let id = if sign {
 			sign_commit(self, &message, tree, &parents, author, committer)?
@@ -452,7 +461,7 @@ impl GitRepo {
 		} else {
 			Vec::new()
 		};
-		let _ = run_commit_hook(self, "post-commit", &[], index_path);
+		let _ = run_commit_hook(self, "post-commit", &[], index_path, hook_runner);
 		Ok((id.to_hex().to_string(), notes))
 	}
 
@@ -578,7 +587,7 @@ impl GitRepo {
 	/// Create a branch at HEAD and switch to it without touching files.
 	pub fn checkout_new_branch(&self, name: &str) -> Result<()> {
 		self.create_branch(name, "HEAD", false)?;
-		fs::write(&self.info().head_path, format!("ref: refs/heads/{name}\n"))?;
+		replace_git_file(&self.info().head_path, format!("ref: refs/heads/{name}\n").as_bytes())?;
 		Ok(())
 	}
 
@@ -629,6 +638,9 @@ impl GitRepo {
 
 	/// Reset HEAD, index, and optionally the worktree to a target commit.
 	pub fn reset(&self, mode: ResetMode, target: Option<&str>) -> Result<()> {
+		// Read before anything moves: a `HEAD` that cannot be read safely
+		// leaves the index and worktree as they were.
+		let head = read_head(&self.info().head_path)?;
 		let repo = self.gix()?;
 		let id = resolve_commit(&repo, target.unwrap_or("HEAD"))?;
 		if mode == ResetMode::Hard {
@@ -636,7 +648,7 @@ impl GitRepo {
 		} else if mode == ResetMode::Mixed {
 			self.read_tree(&id.to_hex().to_string(), None)?;
 		}
-		update_current_head(&repo, &self.info().head_path, id)?;
+		update_current_head(&repo, &self.info().head_path, &head, id)?;
 		Ok(())
 	}
 
@@ -781,7 +793,11 @@ impl GitRepo {
 
 	/// Set one repository-local configuration value while preserving formatting.
 	pub fn config_set(&self, key: &str, value: &str) -> Result<()> {
-		set_config_file(&self.info().common_dir.join("config"), key, value)
+		// Sandboxed code cannot plant entries at the repository config, so a
+		// symlinked one is the user's: update its target, as git does.
+		let path = self.info().common_dir.join("config");
+		let path = fs::canonicalize(&path).unwrap_or(path);
+		set_config_file(&path, key, value)
 	}
 
 	/// Add a remote idempotently when its URL already matches.
@@ -990,7 +1006,9 @@ impl GitRepo {
 		clone_tree_with_holes(omp_iso::backend(kind), self.root(), path, &holes, true)
 			.map_err(|err| Error::backend("git worktree add", err))?;
 		let admin = register_worktree(path, &self.info().common_dir, head)?;
-		fs::copy(&source_index, admin.join("index"))?;
+		let index = read_optional_file(&source_index)?
+			.ok_or_else(|| Error::backend("git worktree add", "source index is missing"))?;
+		replace_git_file(&admin.join("index"), &index)?;
 
 		let (dirty_tracked, _) = collect_clone_reconciliation_paths(&repo)?;
 		let linked = Self::require(path)?;
@@ -1179,26 +1197,49 @@ impl GitRepo {
 		if !force && tracked_worktree_dirty(&linked)? {
 			return Ok(false);
 		}
+		let common = &self.info().common_dir;
 		let admin = linked.info().git_dir.clone();
+		let admin = if admin.starts_with(common.join("worktrees")) {
+			Some(admin_dir(common, &admin, "git worktree remove")?)
+		} else {
+			None
+		};
 		fs::remove_dir_all(path)?;
-		if admin.starts_with(self.info().common_dir.join("worktrees")) {
-			fs::remove_dir_all(admin)?;
+		if let Some(admin) = admin {
+			remove_admin_dir(common, &admin, "git worktree remove")?;
 		}
 		Ok(true)
 	}
 
 	/// Prune linked-worktree administration entries whose back-reference
-	/// vanished.
+	/// vanished. A `worktrees` that is missing, not a real directory, or
+	/// resolves outside the repository prunes nothing, as an unreadable one
+	/// always did.
 	pub fn worktree_prune(&self) -> Result<()> {
-		let root = self.info().common_dir.join("worktrees");
-		let Ok(entries) = fs::read_dir(&root) else {
+		let Ok(Some(root)) = existing_worktrees_dir(&self.info().common_dir, "git worktree prune")
+		else {
 			return Ok(());
 		};
-		for entry in entries {
+		for entry in fs::read_dir(&root)? {
 			let entry = entry?;
-			let back = fs::read_to_string(entry.path().join("gitdir")).unwrap_or_default();
+			let kind = entry.file_type()?;
+			// Git never writes a link here; drop it without following it.
+			if kind.is_symlink() {
+				remove_link(&entry.path())?;
+				continue;
+			}
+			if !kind.is_dir() {
+				continue;
+			}
+			// A `gitdir` that is not a small regular file was not written by
+			// git; leave the entry alone.
+			let back = match read_git_file(&entry.path().join("gitdir"), HEAD_LIMIT, false) {
+				Ok(bytes) => String::from_utf8_lossy_owned(bytes),
+				Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
+				Err(_) => continue,
+			};
 			if back.trim().is_empty() || !Path::new(back.trim()).exists() {
-				fs::remove_dir_all(entry.path())?;
+				remove_admin_dir(&self.info().common_dir, &entry.path(), "git worktree prune")?;
 			}
 		}
 		Ok(())
@@ -1218,15 +1259,11 @@ struct CommitMessageFile {
 
 impl CommitMessageFile {
 	fn create(git_dir: &Path, message: &str) -> Result<Self> {
-		use std::sync::atomic::{AtomicU64, Ordering};
-		static NEXT: AtomicU64 = AtomicU64::new(0);
-		let n = NEXT.fetch_add(1, Ordering::Relaxed);
-		let tick = std::time::SystemTime::now()
-			.duration_since(std::time::UNIX_EPOCH)
-			.map_or(0, |elapsed| elapsed.as_nanos());
-		let path = git_dir.join(format!(".omp-commit-msg-{}-{tick}-{n}", std::process::id()));
-		// Close before the guard exists so a failed write can unlink the
-		// partial file on Windows, where an open handle blocks removal.
+		let path = git_dir.join(unique_file_name("commit-msg"));
+		// `create_new` (`O_EXCL`) fails on any entry already at the path,
+		// a planted link included, instead of writing through it. Close
+		// before the guard exists so a failed write can unlink the partial
+		// file on Windows, where an open handle blocks removal.
 		let mut file = fs::OpenOptions::new()
 			.write(true)
 			.create_new(true)
@@ -1237,16 +1274,32 @@ impl CommitMessageFile {
 		written?;
 		Ok(message_file)
 	}
+
+	/// The message as `commit-msg` left it. The hook, possibly contained
+	/// code, may have swapped the file for a link to a host secret; the
+	/// errors name the violation, never the content.
+	fn read_back(&self) -> io::Result<String> {
+		let bytes = read_git_file(&self.path, COMMIT_MESSAGE_LIMIT, true)?;
+		String::from_utf8(bytes)
+			.map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "message is not valid UTF-8"))
+	}
 }
 
 impl Drop for CommitMessageFile {
 	fn drop(&mut self) {
+		// Unlinks the entry itself; a link the hook left there is removed,
+		// never its target.
 		let _ = fs::remove_file(&self.path);
 	}
 }
 
+/// Largest commit message read back from the `commit-msg` hook.
+const COMMIT_MESSAGE_LIMIT: u64 = 4 << 20;
+
 /// Run a commit hook; `index_path` is exported as `GIT_INDEX_FILE` when the
 /// commit is built from an alternate index, as `git commit --only` does.
+/// `runner`, when given, starts the hook in place of the native spawn, with
+/// the same program, arguments, directory and variables.
 ///
 /// Like `git commit`, the hook's stdout goes to its stderr: a rejection
 /// carries both streams, interleaved, in the `stderr` of [`Error::Cli`], so
@@ -1257,6 +1310,7 @@ fn run_commit_hook(
 	name: &str,
 	args: &[&OsStr],
 	index_path: Option<&Path>,
+	runner: Option<&HookRunner>,
 ) -> Result<()> {
 	let configured = hook_configured(repository, name)?;
 	let mut command = match repository.hook_path(name)? {
@@ -1279,39 +1333,59 @@ fn run_commit_hook(
 		stdout:    String::new(),
 		stderr:    err.to_string(),
 	};
-	super::cli::detach_from_terminal(&mut command);
 	if let Some(index_path) = index_path {
 		command.env("GIT_INDEX_FILE", index_path);
 	}
-	let (mut reader, writer) = io::pipe().map_err(io_failed)?;
-	let stderr = writer.try_clone().map_err(io_failed)?;
-	let mut child = command
+	command
 		.args(args)
 		.current_dir(repository.root())
 		.env("GIT_DIR", &repository.info().git_dir)
 		.env("GIT_WORK_TREE", repository.root())
-		.env("GIT_TERMINAL_PROMPT", "0")
-		.stdin(Stdio::null())
-		.stdout(writer)
-		.stderr(stderr)
-		.spawn()
-		.map_err(io_failed)?;
-	// `command` holds the parent's write ends; the read below sees EOF only
-	// once they are closed.
-	drop(command);
-	let mut output = Vec::new();
-	let read = reader.read_to_end(&mut output);
-	let status = child.wait().map_err(io_failed)?;
-	read.map_err(io_failed)?;
-	if status.success() {
+		.env("GIT_TERMINAL_PROMPT", "0");
+	let (exit_code, output) = if let Some(runner) = runner {
+		let exit = runner
+			.run(HookRun {
+				name: name.to_owned(),
+				argv: std::iter::once(command.get_program())
+					.chain(command.get_args())
+					.map(OsStr::to_os_string)
+					.collect(),
+				cwd:  repository.root().to_path_buf(),
+				env:  command
+					.get_envs()
+					.filter_map(|(key, value)| {
+						Some((key.to_string_lossy().into_owned(), value?.to_os_string()))
+					})
+					.collect(),
+			})
+			.map_err(io_failed)?;
+		(exit.exit_code, exit.output)
+	} else {
+		super::cli::detach_from_terminal(&mut command);
+		let (mut reader, writer) = io::pipe().map_err(io_failed)?;
+		let stderr = writer.try_clone().map_err(io_failed)?;
+		let mut child = command
+			.stdin(Stdio::null())
+			.stdout(writer)
+			.stderr(stderr)
+			.spawn()
+			.map_err(io_failed)?;
+		// `command` holds the parent's write ends; the read below sees EOF
+		// only once they are closed.
+		drop(command);
+		let mut output = Vec::new();
+		let read = reader.read_to_end(&mut output);
+		let status = child.wait().map_err(io_failed)?;
+		read.map_err(io_failed)?;
+		if status.success() {
+			return Ok(());
+		}
+		(status.code().unwrap_or(1), String::from_utf8_lossy_owned(output))
+	};
+	if exit_code == 0 {
 		return Ok(());
 	}
-	Err(Error::Cli {
-		command:   command_name(),
-		exit_code: status.code().unwrap_or(1),
-		stdout:    String::new(),
-		stderr:    String::from_utf8_lossy_owned(output),
-	})
+	Err(Error::Cli { command: command_name(), exit_code, stdout: String::new(), stderr: output })
 }
 
 /// Whether any `hook.<id>.event` names the hook `name`. Git (2.54+) runs such
@@ -1402,14 +1476,6 @@ fn hook_is_executable(path: &Path) -> bool {
 	}
 }
 
-fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>> {
-	match fs::read(path) {
-		Ok(bytes) => Ok(Some(bytes)),
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-		Err(err) => Err(err.into()),
-	}
-}
-
 /// Sever a copied linked worktree from its source metadata without copying
 /// objects.
 pub fn detach_git_dir(
@@ -1455,6 +1521,8 @@ pub fn detach_git_dir(
 	let shallow = read_optional_file(&source_common.join("shallow"))?;
 	let own_admin = if meta.is_file() {
 		registered_admin(&git_entry)?
+			.map(|admin| admin_dir(&source_common, &admin, "detach git dir"))
+			.transpose()?
 	} else {
 		None
 	};
@@ -1464,13 +1532,17 @@ pub fn detach_git_dir(
 		fs::remove_file(&git_entry)?;
 	}
 	if let Some(admin) = own_admin {
-		fs::remove_dir_all(admin)?;
+		remove_admin_dir(&source_common, &admin, "detach git dir")?;
 	}
 	gix::init(worktree_root).map_err(|e| Error::backend("git init", e))?;
 	let objects_info = git_entry.join("objects/info");
 	fs::create_dir_all(&objects_info)?;
 	let mut alternates = vec![source_common.join("objects")];
-	if let Ok(chained) = fs::read_to_string(source_common.join("objects/info/alternates")) {
+	if let Some(chained) = read_optional_file(&source_common.join("objects/info/alternates"))
+		.ok()
+		.flatten()
+		.and_then(|bytes| String::from_utf8(bytes).ok())
+	{
 		for line in chained
 			.lines()
 			.map(str::trim)
@@ -1490,28 +1562,28 @@ pub fn detach_git_dir(
 		.collect::<Vec<_>>()
 		.join("\n")
 		+ "\n";
-	fs::write(objects_info.join("alternates"), alternate_text)?;
+	replace_git_file(&objects_info.join("alternates"), alternate_text.as_bytes())?;
 	for (name, id) in refs {
 		write_loose_ref(&git_entry, &name, id)?;
 	}
 	if let Some(head) = head {
-		fs::write(git_entry.join("HEAD"), head)?;
+		replace_git_file(&git_entry.join("HEAD"), &head)?;
 	}
 	for (key, value) in config_values {
 		set_config_file(&git_entry.join("config"), key, &value)?;
 	}
 	if let Some(bytes) = shallow {
-		fs::write(git_entry.join("shallow"), bytes)?;
+		replace_git_file(&git_entry.join("shallow"), &bytes)?;
 	}
 	if let Some(bytes) = sparse {
 		fs::create_dir_all(git_entry.join("info"))?;
-		fs::write(git_entry.join("info/sparse-checkout"), bytes)?;
+		replace_git_file(&git_entry.join("info/sparse-checkout"), &bytes)?;
 	}
 	for (name, bytes) in shared {
-		fs::write(git_entry.join(name), bytes)?;
+		replace_git_file(&git_entry.join(name), &bytes)?;
 	}
 	if let Some(bytes) = index {
-		fs::write(git_entry.join("index"), bytes)?;
+		replace_git_file(&git_entry.join("index"), &bytes)?;
 	} else if let Ok(detached) = GitRepo::require(worktree_root)
 		&& resolve_commit(&detached.gix()?, "HEAD").is_ok()
 	{
@@ -2064,15 +2136,32 @@ fn worktree_id(
 }
 
 fn write_head(path: &Path, symbolic: Option<&str>, id: gix::hash::ObjectId) -> Result<()> {
-	fs::write(path, match symbolic {
+	let content = match symbolic {
 		Some(name) => format!("ref: {name}\n"),
 		None => format!("{}\n", id.to_hex()),
-	})?;
+	};
+	replace_git_file(path, content.as_bytes())?;
 	Ok(())
 }
 
-fn update_current_head(repo: &gix::Repository, path: &Path, id: gix::hash::ObjectId) -> Result<()> {
-	let content = fs::read_to_string(path).unwrap_or_default();
+/// `HEAD`'s content, empty when missing. Sandboxed code can plant a link or
+/// FIFO there; anything but a small regular file fails.
+fn read_head(path: &Path) -> Result<String> {
+	match read_git_file(path, HEAD_LIMIT, false) {
+		Ok(bytes) => Ok(String::from_utf8_lossy_owned(bytes)),
+		Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+		Err(err) => Err(Error::backend("git reset read HEAD", err)),
+	}
+}
+
+/// Point `HEAD`, whose content [`read_head`] returned, at `id`: move the
+/// branch it names, or rewrite a detached `HEAD`.
+fn update_current_head(
+	repo: &gix::Repository,
+	path: &Path,
+	content: &str,
+	id: gix::hash::ObjectId,
+) -> Result<()> {
 	if let Some(name) = content.trim().strip_prefix("ref: ") {
 		update_reference(
 			repo,
@@ -2084,7 +2173,7 @@ fn update_current_head(repo: &gix::Repository, path: &Path, id: gix::hash::Objec
 			false,
 		)?;
 	} else {
-		fs::write(path, format!("{}\n", id.to_hex()))?;
+		write_head(path, None, id)?;
 	}
 	Ok(())
 }
@@ -2135,7 +2224,7 @@ fn set_config_file(path: &Path, key: &str, value: &str) -> Result<()> {
 		.map_err(|e| Error::backend("git config", e))?;
 	let mut bytes = Vec::new();
 	config.write_to(&mut bytes)?;
-	fs::write(path, bytes)?;
+	replace_git_file(path, &bytes)?;
 	Ok(())
 }
 
@@ -2416,13 +2505,114 @@ fn with_causes(err: &dyn std::error::Error) -> String {
 
 fn register_worktree(path: &Path, common: &Path, head: &str) -> Result<PathBuf> {
 	fs::create_dir_all(path)?;
+	let worktrees = worktrees_dir(common)?;
 	let name = worktree_admin_name(common, path);
-	let admin = common.join("worktrees").join(name);
-	fs::create_dir_all(&admin)?;
-	fs::write(path.join(".git"), format!("gitdir: {}\n", git_metadata_path(&admin)))?;
-	fs::write(admin.join("gitdir"), format!("{}\n", git_metadata_path(&path.join(".git"))))?;
-	fs::write(admin.join("commondir"), "../..\n")?;
-	fs::write(admin.join("HEAD"), format!("{head}\n"))?;
+	let admin = create_admin_dir(common, &worktrees, &name)?;
+	replace_git_file(
+		&path.join(".git"),
+		format!("gitdir: {}\n", git_metadata_path(&admin)).as_bytes(),
+	)?;
+	replace_git_file(
+		&admin.join("gitdir"),
+		format!("{}\n", git_metadata_path(&path.join(".git"))).as_bytes(),
+	)?;
+	replace_git_file(&admin.join("commondir"), b"../..\n")?;
+	replace_git_file(&admin.join("HEAD"), format!("{head}\n").as_bytes())?;
+	Ok(admin)
+}
+
+/// `common/worktrees`, created when missing. Sandboxed code can plant it as a
+/// link that would carry the admin files out of the repository, so anything
+/// but a real directory fails.
+fn worktrees_dir(common: &Path) -> Result<PathBuf> {
+	if let Some(worktrees) = existing_worktrees_dir(common, "git worktree add")? {
+		return Ok(worktrees);
+	}
+	let worktrees = common.join("worktrees");
+	fs::create_dir(&worktrees)?;
+	Ok(worktrees)
+}
+
+/// `common/worktrees` when it exists, `None` when it does not. Fails unless it
+/// is a real directory resolving to `common/worktrees`: sandboxed code can
+/// plant a link there, and anything written or deleted below it would then
+/// land outside the repository.
+fn existing_worktrees_dir(common: &Path, op: &'static str) -> Result<Option<PathBuf>> {
+	let worktrees = common.join("worktrees");
+	match fs::symlink_metadata(&worktrees) {
+		Ok(meta) if meta.is_dir() => {},
+		Ok(_) => {
+			return Err(Error::backend(op, format!("{} is not a directory", worktrees.display())));
+		},
+		Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+		Err(err) => return Err(err.into()),
+	}
+	if fs::canonicalize(&worktrees)? != fs::canonicalize(common)?.join("worktrees") {
+		return Err(Error::backend(
+			op,
+			format!("{} resolves outside {}", worktrees.display(), common.display()),
+		));
+	}
+	Ok(Some(worktrees))
+}
+
+/// The admin directory `admin` as `common/worktrees/<name>`, after checking
+/// [`existing_worktrees_dir`], that `admin`'s parent resolves to it, and that
+/// the entry is a real directory. A planted link in either place fails
+/// instead of letting a recursive delete reach host files.
+fn admin_dir(common: &Path, admin: &Path, op: &'static str) -> Result<PathBuf> {
+	let refuse = || {
+		Error::backend(
+			op,
+			format!("{} is not a worktree admin directory of {}", admin.display(), common.display()),
+		)
+	};
+	let worktrees = existing_worktrees_dir(common, op)?.ok_or_else(refuse)?;
+	let (Some(parent), Some(name)) = (admin.parent(), admin.file_name()) else {
+		return Err(refuse());
+	};
+	if fs::canonicalize(parent)? != fs::canonicalize(common)?.join("worktrees") {
+		return Err(refuse());
+	}
+	let admin = worktrees.join(name);
+	if !fs::symlink_metadata(&admin)?.is_dir() {
+		return Err(refuse());
+	}
+	Ok(admin)
+}
+
+/// Recursively delete the admin directory `admin` once [`admin_dir`] accepts
+/// it.
+fn remove_admin_dir(common: &Path, admin: &Path, op: &'static str) -> Result<()> {
+	fs::remove_dir_all(admin_dir(common, admin, op)?)?;
+	Ok(())
+}
+
+/// Remove the link at `path` itself. Windows deletes a directory link or
+/// junction with `remove_dir`, which never touches the target and fails on a
+/// non-empty real directory.
+fn remove_link(path: &Path) -> Result<()> {
+	match fs::remove_file(path) {
+		Err(_) if cfg!(windows) => fs::remove_dir(path)?,
+		result => result?,
+	}
+	Ok(())
+}
+
+/// Create the admin directory `name` under `worktrees`. `create_dir` fails on
+/// any entry already there, a dangling link included, and the result must
+/// resolve to `common/worktrees/<name>`, so a `worktrees` swapped for a link
+/// after [`worktrees_dir`] checked it fails instead of receiving the files.
+fn create_admin_dir(common: &Path, worktrees: &Path, name: &str) -> Result<PathBuf> {
+	let admin = worktrees.join(name);
+	fs::create_dir(&admin)?;
+	let expected = fs::canonicalize(common)?.join("worktrees").join(name);
+	if fs::canonicalize(&admin)? != expected {
+		return Err(Error::backend(
+			"git worktree add",
+			format!("{} resolves outside {}", admin.display(), common.display()),
+		));
+	}
 	Ok(admin)
 }
 
@@ -2500,8 +2690,8 @@ fn cleanup_worktree_add(path: &Path, common: &Path) {
 	let admin = registered_admin(&path.join(".git")).ok().flatten();
 	// Rooted at `path` itself, so only the failed worktree is unlocked.
 	let _ = force_remove(path, path);
-	if let Some(admin) = admin.filter(|admin| admin.starts_with(common.join("worktrees"))) {
-		let _ = fs::remove_dir_all(admin);
+	if let Some(admin) = admin {
+		let _ = remove_admin_dir(common, &admin, "git worktree add");
 	}
 }
 
@@ -2578,24 +2768,32 @@ fn worktree_admin_name(common: &Path, path: &Path) -> String {
 		.unwrap_or("worktree");
 	let mut name = base.to_owned();
 	let mut n = 1;
-	while common.join("worktrees").join(&name).exists() {
+	// No-follow probe: a dangling link counts as taken.
+	while fs::symlink_metadata(common.join("worktrees").join(&name)).is_ok() {
 		name = format!("{base}{n}");
 		n += 1;
 	}
 	name
 }
 
+/// Whether `full_ref` is checked out in the main or a linked worktree. A
+/// `HEAD` that is not a small regular file (sandboxed code can plant links
+/// and FIFOs there) checks out nothing.
 fn branch_is_checked_out(common: &Path, full_ref: &str) -> bool {
 	let expected = format!("ref: {full_ref}");
-	if fs::read_to_string(common.join("HEAD")).is_ok_and(|head| head.trim() == expected) {
+	let checks_out = |head: &Path| {
+		read_git_file(head, HEAD_LIMIT, false)
+			.is_ok_and(|bytes| bytes.trim_ascii() == expected.as_bytes())
+	};
+	if checks_out(&common.join("HEAD")) {
 		return true;
 	}
 	let Ok(entries) = fs::read_dir(common.join("worktrees")) else {
 		return false;
 	};
-	entries.filter_map(std::result::Result::ok).any(|entry| {
-		fs::read_to_string(entry.path().join("HEAD")).is_ok_and(|head| head.trim() == expected)
-	})
+	entries
+		.filter_map(std::result::Result::ok)
+		.any(|entry| checks_out(&entry.path().join("HEAD")))
 }
 
 fn tracked_worktree_dirty(repo: &GitRepo) -> Result<bool> {
@@ -2638,14 +2836,14 @@ fn copy_named_files(dir: &Path, prefix: &str) -> Result<Vec<(String, Vec<u8>)>> 
 		let entry = entry?;
 		let name = entry.file_name().to_string_lossy().into_owned();
 		if name.starts_with(prefix) {
-			out.push((name, fs::read(entry.path())?));
+			out.push((name, read_git_file(&entry.path(), u64::MAX, false)?));
 		}
 	}
 	Ok(out)
 }
 
 fn registered_admin(git_entry: &Path) -> Result<Option<PathBuf>> {
-	let text = fs::read_to_string(git_entry)?;
+	let text = String::from_utf8_lossy_owned(read_git_file(git_entry, HEAD_LIMIT, false)?);
 	let Some(raw) = text.trim().strip_prefix("gitdir:") else {
 		return Ok(None);
 	};
@@ -2655,7 +2853,8 @@ fn registered_admin(git_entry: &Path) -> Result<Option<PathBuf>> {
 			.unwrap_or_else(|| Path::new("."))
 			.join(raw.trim()),
 	);
-	let back = fs::read_to_string(admin.join("gitdir")).unwrap_or_default();
+	let back = read_git_file(&admin.join("gitdir"), HEAD_LIMIT, false)
+		.map_or_else(|_| String::new(), String::from_utf8_lossy_owned);
 	let real_back =
 		fs::canonicalize(back.trim()).unwrap_or_else(|_| normalize_path(Path::new(back.trim())));
 	let real_entry = fs::canonicalize(git_entry).unwrap_or_else(|_| normalize_path(git_entry));
@@ -2667,7 +2866,7 @@ fn write_loose_ref(git_dir: &Path, name: &str, id: gix::hash::ObjectId) -> Resul
 	if let Some(parent) = path.parent() {
 		fs::create_dir_all(parent)?;
 	}
-	fs::write(path, format!("{}\n", id.to_hex()))?;
+	replace_git_file(&path, format!("{}\n", id.to_hex()).as_bytes())?;
 	Ok(())
 }
 #[cfg(test)]
@@ -2790,7 +2989,7 @@ mod tests {
 		let head = git(temp.path(), &["rev-parse", "HEAD"]);
 		let id = repo
 			.commit_create("alt", &CommitOptions {
-				index_path: Some(alt.clone()),
+				index_path: Some(alt),
 				expected_head: Some(head),
 				..Default::default()
 			})
@@ -3328,6 +3527,139 @@ mod tests {
 			})
 			.unwrap();
 		assert_eq!(repo.commit_details("HEAD").unwrap().message, "subject\n\nbody\n");
+	}
+
+	/// A hook runner starts every hook in place of the native spawn, with the
+	/// program, arguments, directory and variables the native spawn would
+	/// use; its exits keep their meaning (pre-commit and commit-msg failures
+	/// abort, commit-msg edits the message, post-commit failure is ignored).
+	#[cfg(unix)]
+	#[test]
+	fn commit_hook_runner_replaces_the_native_spawn() {
+		use std::sync::{Arc, Mutex};
+
+		use crate::types::HookExit;
+		let (temp, repo) = fixture();
+		// `core.hooksPath` is `.git/hooks`, resolved against the checkout root.
+		let hooks = repo.root().join(".git/hooks");
+		fs::create_dir_all(&hooks).unwrap();
+		// Each hook, run natively, would leave a marker: the runner must not.
+		for name in ["pre-commit", "commit-msg", "post-commit"] {
+			write_hook(
+				&hooks.join(name),
+				&format!("touch '{}'", hooks.join(format!("{name}.ran")).display()),
+				true,
+			);
+		}
+		let alt = alternate_index(&temp);
+		let runs: Arc<Mutex<Vec<HookRun>>> = Arc::default();
+		let runner = |reject: Option<&'static str>| {
+			let runs = Arc::clone(&runs);
+			HookRunner::new(move |run: HookRun| {
+				runs.lock().unwrap().push(run.clone());
+				if run.name == "commit-msg" {
+					fs::write(&run.argv[1], "rewritten by runner\n")?;
+				}
+				let rejected = reject == Some(run.name.as_str());
+				Ok(HookExit {
+					exit_code: if rejected { 7 } else { 0 },
+					output:    if rejected {
+						"contained hook said no\n".into()
+					} else {
+						String::new()
+					},
+				})
+			})
+		};
+		let head = git(temp.path(), &["rev-parse", "HEAD"]);
+		let options = |reject| CommitOptions {
+			allow_empty: true,
+			index_path: Some(alt.clone()),
+			hook_runner: Some(runner(reject)),
+			..Default::default()
+		};
+
+		let error = repo
+			.commit_create("rejected", &options(Some("pre-commit")))
+			.unwrap_err();
+		let Error::Cli { command, exit_code, stderr, .. } = &error else {
+			panic!("expected a hook failure, got {error:?}");
+		};
+		assert_eq!(command, "git commit (pre-commit hook)");
+		assert_eq!(*exit_code, 7);
+		assert_eq!(stderr, "contained hook said no\n");
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), head);
+		let pre_commit = runs.lock().unwrap().remove(0);
+		assert!(runs.lock().unwrap().is_empty());
+		let root = repo.root().to_path_buf();
+		let git_dir = repo.info().git_dir.clone();
+		assert_eq!(pre_commit, HookRun {
+			name: "pre-commit".into(),
+			argv: vec![hooks.join("pre-commit").into()],
+			cwd:  root.clone(),
+			env:  vec![
+				("GIT_DIR".into(), git_dir.into()),
+				("GIT_INDEX_FILE".into(), alt.clone().into()),
+				("GIT_TERMINAL_PROMPT".into(), "0".into()),
+				("GIT_WORK_TREE".into(), root.into()),
+			],
+		});
+
+		let error = repo
+			.commit_create("rejected", &options(Some("commit-msg")))
+			.unwrap_err();
+		assert!(
+			matches!(&error, Error::Cli { command, .. } if command == "git commit (commit-msg hook)")
+		);
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), head);
+		runs.lock().unwrap().clear();
+
+		let id = repo
+			.commit_create("original", &options(Some("post-commit")))
+			.unwrap();
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), id);
+		assert_eq!(git(temp.path(), &["log", "-1", "--pretty=%B"]), "rewritten by runner");
+		let runs = runs.lock().unwrap();
+		let names: Vec<&str> = runs.iter().map(|run| run.name.as_str()).collect();
+		assert_eq!(names, ["pre-commit", "commit-msg", "post-commit"]);
+		assert_eq!(runs[1].argv[0], hooks.join("commit-msg").into_os_string());
+		assert_eq!(runs[1].argv.len(), 2);
+		for name in ["pre-commit", "commit-msg", "post-commit"] {
+			assert!(!hooks.join(format!("{name}.ran")).exists(), "{name} ran natively");
+		}
+	}
+
+	/// A runner that cannot start the hook fails the commit like a native
+	/// spawn failure; git-run hooks reach the runner as `git hook run`.
+	#[test]
+	fn commit_hook_runner_start_failure_and_git_run_hooks() {
+		let (temp, repo) = fixture();
+		git(temp.path(), &["config", "hook.policy.event", "pre-commit"]);
+		git(temp.path(), &["config", "hook.policy.command", "exit 0"]);
+		let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+		let recorded = std::sync::Arc::clone(&seen);
+		let runner = HookRunner::new(move |run: HookRun| {
+			recorded.lock().unwrap().push(run.argv);
+			Err(io::Error::other("sandbox unavailable"))
+		});
+		let head = git(temp.path(), &["rev-parse", "HEAD"]);
+		let error = repo
+			.commit_create("never", &CommitOptions {
+				allow_empty: true,
+				hook_runner: Some(runner),
+				..Default::default()
+			})
+			.unwrap_err();
+		assert!(matches!(
+			&error,
+			Error::Cli { exit_code: 1, stderr, .. } if stderr == "sandbox unavailable"
+		));
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), head);
+		let argv: Vec<std::ffi::OsString> =
+			["git", "hook", "run", "--ignore-missing", "pre-commit", "--"]
+				.map(Into::into)
+				.into();
+		assert_eq!(*seen.lock().unwrap(), [argv]);
 	}
 
 	#[test]
@@ -4197,5 +4529,590 @@ mod tests {
 				 prefix neighbors"
 			);
 		}
+	}
+
+	/// A `commit-msg` hook (contained code under the sandbox) that swaps its
+	/// message file for a symlink or a hard link to a host file fails the
+	/// commit instead of committing that file, where `git log` would hand it
+	/// back to the contained code.
+	#[cfg(unix)]
+	#[test]
+	fn commit_msg_hook_cannot_link_the_message_to_a_host_file() {
+		for link in ["ln -s", "ln"] {
+			let (temp, repo) = fixture();
+			let outside = tempfile::tempdir().unwrap();
+			let secret = outside.path().join("secret");
+			fs::write(&secret, "host-secret-content\n").unwrap();
+			write_hook(
+				&temp.path().join(".git/hooks/commit-msg"),
+				&format!("rm \"$1\" && {link} '{}' \"$1\"", secret.display()),
+				true,
+			);
+			fs::write(temp.path().join("a"), "changed\n").unwrap();
+			repo.stage_files(&["a".into()]).unwrap();
+			let before = git(temp.path(), &["rev-parse", "HEAD"]);
+
+			let error = repo
+				.commit_create("original", &CommitOptions::default())
+				.unwrap_err()
+				.to_string();
+
+			assert!(error.contains("commit-msg result"), "{link}: {error}");
+			assert!(!error.contains("host-secret-content"), "{link}: {error}");
+			assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), before, "{link}");
+			let messages = git(temp.path(), &["log", "--all", "--format=%B"]);
+			assert!(!messages.contains("host-secret-content"), "{link}: {messages}");
+			assert_eq!(fs::read_to_string(&secret).unwrap(), "host-secret-content\n", "{link}");
+		}
+	}
+
+	/// A `commit-msg` hook that replaces its message file with a new regular
+	/// file (`sed -i`, an editor's save-by-rename) still rewrites the message.
+	#[cfg(unix)]
+	#[test]
+	fn commit_msg_hook_may_replace_the_message_file() {
+		let (temp, repo) = fixture();
+		write_hook(
+			&temp.path().join(".git/hooks/commit-msg"),
+			"printf 'replaced subject\\n' > \"$1.new\" && mv \"$1.new\" \"$1\"",
+			true,
+		);
+		fs::write(temp.path().join("a"), "changed\n").unwrap();
+		repo.stage_files(&["a".into()]).unwrap();
+		repo
+			.commit_create("original", &CommitOptions::default())
+			.unwrap();
+		assert_eq!(git(temp.path(), &["log", "-1", "--pretty=%B"]), "replaced subject");
+	}
+
+	/// `COMMIT_EDITMSG` planted as a symlink or hard link to a host file is
+	/// replaced by the message, never written through.
+	#[cfg(unix)]
+	#[test]
+	fn commit_replaces_a_planted_commit_editmsg_link() {
+		for symbolic in [true, false] {
+			let (temp, repo) = fixture();
+			let outside = tempfile::tempdir().unwrap();
+			let victim = outside.path().join("victim");
+			fs::write(&victim, "keep me\n").unwrap();
+			let editmsg = temp.path().join(".git/COMMIT_EDITMSG");
+			// The fixture's own `git commit` left one behind.
+			fs::remove_file(&editmsg).unwrap();
+			if symbolic {
+				std::os::unix::fs::symlink(&victim, &editmsg).unwrap();
+			} else {
+				fs::hard_link(&victim, &editmsg).unwrap();
+			}
+			fs::write(temp.path().join("a"), "changed\n").unwrap();
+			repo.stage_files(&["a".into()]).unwrap();
+
+			repo
+				.commit_create("subject line", &CommitOptions::default())
+				.unwrap();
+
+			assert_eq!(fs::read_to_string(&victim).unwrap(), "keep me\n", "symbolic: {symbolic}");
+			assert!(fs::symlink_metadata(&editmsg).unwrap().is_file(), "symbolic: {symbolic}");
+			assert_eq!(fs::read_to_string(&editmsg).unwrap(), "subject line", "symbolic: {symbolic}");
+			let leftovers: Vec<_> = fs::read_dir(temp.path().join(".git"))
+				.unwrap()
+				.map(|entry| entry.unwrap().file_name())
+				.filter(|name| name.to_string_lossy().starts_with(".omp-"))
+				.collect();
+			assert!(leftovers.is_empty(), "symbolic: {symbolic}: {leftovers:?}");
+		}
+	}
+
+	/// `HEAD` planted as a link to a host file is replaced when a checkout
+	/// moves it, never written through.
+	#[cfg(unix)]
+	#[test]
+	fn checkout_replaces_a_planted_head_link() {
+		for symbolic in [true, false] {
+			let (temp, repo) = fixture();
+			let outside = tempfile::tempdir().unwrap();
+			let victim = outside.path().join("victim");
+			fs::write(&victim, "ref: refs/heads/main\n").unwrap();
+			let head = temp.path().join(".git/HEAD");
+			fs::remove_file(&head).unwrap();
+			if symbolic {
+				std::os::unix::fs::symlink(&victim, &head).unwrap();
+			} else {
+				fs::hard_link(&victim, &head).unwrap();
+			}
+
+			repo.checkout_new_branch("feature").unwrap();
+
+			assert_eq!(
+				fs::read_to_string(&victim).unwrap(),
+				"ref: refs/heads/main\n",
+				"symbolic: {symbolic}"
+			);
+			assert!(fs::symlink_metadata(&head).unwrap().is_file(), "symbolic: {symbolic}");
+			assert_eq!(
+				fs::read_to_string(&head).unwrap(),
+				"ref: refs/heads/feature\n",
+				"symbolic: {symbolic}"
+			);
+		}
+	}
+
+	/// Run `f` on another thread, failing instead of hanging when a planted
+	/// FIFO blocks it.
+	#[cfg(unix)]
+	fn without_blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+		let (sender, receiver) = std::sync::mpsc::channel();
+		std::thread::spawn(move || {
+			let _ = sender.send(f());
+		});
+		receiver
+			.recv_timeout(std::time::Duration::from_secs(20))
+			.expect("blocked, presumably opening a FIFO")
+	}
+
+	#[cfg(unix)]
+	fn mkfifo(path: &Path) {
+		assert!(Command::new("mkfifo").arg(path).status().unwrap().success());
+	}
+
+	/// `HEAD` planted as a link to a host file is replaced when `checkout`
+	/// moves it to another branch, never written through.
+	#[cfg(unix)]
+	#[test]
+	fn checkout_branch_replaces_a_planted_head_link() {
+		let (temp, repo) = fixture();
+		repo.create_branch("other", "HEAD", false).unwrap();
+		let outside = tempfile::tempdir().unwrap();
+		let victim = outside.path().join("victim");
+		fs::write(&victim, "ref: refs/heads/main\n").unwrap();
+		let head = temp.path().join(".git/HEAD");
+		fs::remove_file(&head).unwrap();
+		std::os::unix::fs::symlink(&victim, &head).unwrap();
+
+		repo.checkout("other").unwrap();
+
+		assert_eq!(fs::read_to_string(&victim).unwrap(), "ref: refs/heads/main\n");
+		assert!(fs::symlink_metadata(&head).unwrap().is_file());
+		assert_eq!(fs::read_to_string(&head).unwrap(), "ref: refs/heads/other\n");
+	}
+
+	/// A `HEAD` planted as a link fails `reset` before it moves the index or
+	/// the worktree, so no half-done reset is left behind.
+	#[cfg(unix)]
+	#[test]
+	fn reset_refuses_a_planted_head_link_before_touching_anything() {
+		for mode in [ResetMode::Hard, ResetMode::Mixed, ResetMode::Soft] {
+			let (temp, repo) = fixture();
+			let base = git(temp.path(), &["rev-parse", "HEAD"]);
+			fs::write(temp.path().join("a"), "second\n").unwrap();
+			git(temp.path(), &["commit", "-qam", "second"]);
+			let second = git(temp.path(), &["rev-parse", "HEAD"]);
+			let outside = tempfile::tempdir().unwrap();
+			let victim = outside.path().join("victim");
+			fs::write(&victim, "ref: refs/heads/main\n").unwrap();
+			let head = temp.path().join(".git/HEAD");
+			fs::remove_file(&head).unwrap();
+			std::os::unix::fs::symlink(&victim, &head).unwrap();
+			let index = fs::read(temp.path().join(".git/index")).unwrap();
+
+			let error = repo.reset(mode, Some(&base)).unwrap_err().to_string();
+
+			assert!(error.contains("read HEAD"), "{mode:?}: {error}");
+			assert_eq!(fs::read_to_string(temp.path().join("a")).unwrap(), "second\n", "{mode:?}");
+			assert_eq!(fs::read(temp.path().join(".git/index")).unwrap(), index, "{mode:?}");
+			assert_eq!(fs::read_to_string(&victim).unwrap(), "ref: refs/heads/main\n", "{mode:?}");
+			assert!(fs::symlink_metadata(&head).unwrap().is_symlink(), "{mode:?}");
+			// `git` itself refuses a `HEAD` linked out of the repository.
+			let main = fs::read_to_string(temp.path().join(".git/refs/heads/main")).unwrap();
+			assert_eq!(main.trim(), second, "{mode:?}");
+		}
+	}
+
+	/// The admin `index` or `HEAD` of a linked worktree, planted as a link to
+	/// a host file, fails the detach: the file never lands in the new `.git`,
+	/// where contained code could read it, and the source stays as it was.
+	#[cfg(unix)]
+	#[test]
+	fn detach_git_dir_refuses_linked_admin_files() {
+		for name in ["index", "HEAD"] {
+			let (temp, repo) = fixture();
+			let linked_dir = tempfile::tempdir().unwrap();
+			let linked = linked_dir.path().join("linked");
+			repo
+				.worktree_add(&linked, "main", WorktreeAddOptions {
+					detach:       true,
+					clone:        WorktreeClone::Off,
+					keep_changes: false,
+				})
+				.unwrap();
+			let common = fs::canonicalize(&repo.info().common_dir).unwrap();
+			let admin = registered_admin(&linked.join(".git")).unwrap().unwrap();
+			// A valid detached `HEAD`, so only the link itself can fail it.
+			let secret = if name == "HEAD" {
+				format!("{}\n", git(temp.path(), &["rev-parse", "HEAD"]))
+			} else {
+				"host-secret\n".to_owned()
+			};
+			let outside = tempfile::tempdir().unwrap();
+			let victim = outside.path().join("victim");
+			fs::write(&victim, &secret).unwrap();
+			fs::remove_file(admin.join(name)).unwrap();
+			std::os::unix::fs::symlink(&victim, admin.join(name)).unwrap();
+			let pointer = fs::read(linked.join(".git")).unwrap();
+			let source_head = git(temp.path(), &["rev-parse", "HEAD"]);
+
+			assert!(detach_git_dir(&linked, &common).is_err(), "{name}");
+
+			assert!(fs::symlink_metadata(linked.join(".git")).unwrap().is_file(), "{name}");
+			assert_eq!(fs::read(linked.join(".git")).unwrap(), pointer, "{name}");
+			assert_eq!(fs::read_to_string(&victim).unwrap(), secret, "{name}");
+			assert!(fs::symlink_metadata(admin.join(name)).unwrap().is_symlink(), "{name}");
+			assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), source_head, "{name}");
+		}
+	}
+
+	/// A source `index` planted as a link fails the clone path, which would
+	/// otherwise copy the link's target into the new worktree's admin dir;
+	/// the plain checkout takes over.
+	#[cfg(unix)]
+	#[test]
+	fn clone_first_worktree_refuses_a_linked_source_index() {
+		let (temp, repo) = fixture();
+		if !clone_works_on(temp.path()) {
+			return;
+		}
+		let outside = tempfile::tempdir().unwrap();
+		let victim = outside.path().join("index");
+		let index = temp.path().join(".git/index");
+		fs::copy(&index, &victim).unwrap();
+		let victim_bytes = fs::read(&victim).unwrap();
+		fs::remove_file(&index).unwrap();
+		std::os::unix::fs::symlink(&victim, &index).unwrap();
+		let linked_dir = tempfile::tempdir().unwrap();
+		let linked = linked_dir.path().join("linked");
+
+		let result = repo
+			.worktree_add(&linked, "main", WorktreeAddOptions {
+				detach:       true,
+				clone:        WorktreeClone::Auto,
+				keep_changes: false,
+			})
+			.unwrap();
+
+		assert!(result.cloned_with.is_none(), "{result:?}");
+		assert!(result.clone_error.is_some(), "{result:?}");
+		let admin = registered_admin(&linked.join(".git")).unwrap().unwrap();
+		assert!(fs::symlink_metadata(admin.join("index")).unwrap().is_file());
+		assert_eq!(fs::read(&victim).unwrap(), victim_bytes);
+		assert_eq!(git(&linked, &["status", "--porcelain"]), "");
+	}
+
+	/// `.git/worktrees` planted as a link to a directory outside the
+	/// repository fails `worktree_add` before any admin file is written there.
+	#[cfg(unix)]
+	#[test]
+	fn worktree_add_refuses_a_planted_worktrees_link() {
+		for clone in [WorktreeClone::Off, WorktreeClone::Auto] {
+			let (temp, repo) = fixture();
+			let outside = tempfile::tempdir().unwrap();
+			std::os::unix::fs::symlink(outside.path(), temp.path().join(".git/worktrees")).unwrap();
+			let linked_dir = tempfile::tempdir().unwrap();
+			let linked = linked_dir.path().join("linked");
+
+			let result = repo.worktree_add(&linked, "main", WorktreeAddOptions {
+				detach: true,
+				clone,
+				keep_changes: false,
+			});
+
+			let error = result.unwrap_err().to_string();
+			assert!(error.contains("is not a directory"), "{clone:?}: {error}");
+			let written: Vec<_> = fs::read_dir(outside.path()).unwrap().collect();
+			assert!(written.is_empty(), "{clone:?}: {written:?}");
+		}
+	}
+
+	/// The admin dir must resolve inside the repository: a `worktrees` that
+	/// is a link (swapped in after the type check) fails, a real one passes.
+	#[cfg(unix)]
+	#[test]
+	fn create_admin_dir_refuses_one_resolving_outside_the_repository() {
+		let common = tempfile::tempdir().unwrap();
+		let outside = tempfile::tempdir().unwrap();
+		let worktrees = common.path().join("worktrees");
+		std::os::unix::fs::symlink(outside.path(), &worktrees).unwrap();
+		assert!(create_admin_dir(common.path(), &worktrees, "x").is_err());
+
+		fs::remove_file(&worktrees).unwrap();
+		fs::create_dir(&worktrees).unwrap();
+		let admin = create_admin_dir(common.path(), &worktrees, "x").unwrap();
+		assert_eq!(admin, worktrees.join("x"));
+		assert!(fs::symlink_metadata(&admin).unwrap().is_dir());
+	}
+
+	/// An admin name taken by a dangling link is skipped, not created through
+	/// the link.
+	#[cfg(unix)]
+	#[test]
+	fn worktree_add_skips_an_admin_name_taken_by_a_dangling_link() {
+		let (temp, repo) = fixture();
+		let outside = tempfile::tempdir().unwrap();
+		let missing = outside.path().join("missing");
+		fs::create_dir(temp.path().join(".git/worktrees")).unwrap();
+		std::os::unix::fs::symlink(&missing, temp.path().join(".git/worktrees/linked")).unwrap();
+		let linked_dir = tempfile::tempdir().unwrap();
+		let linked = linked_dir.path().join("linked");
+
+		repo
+			.worktree_add(&linked, "main", WorktreeAddOptions {
+				detach:       true,
+				clone:        WorktreeClone::Off,
+				keep_changes: false,
+			})
+			.unwrap();
+
+		let admin = registered_admin(&linked.join(".git")).unwrap().unwrap();
+		assert_eq!(admin.file_name().unwrap(), "linked1");
+		assert!(fs::symlink_metadata(&missing).is_err());
+	}
+
+	/// A worktree `HEAD` that is a link or a FIFO checks out nothing, without
+	/// blocking; a regular one does.
+	#[cfg(unix)]
+	#[test]
+	fn branch_is_checked_out_ignores_planted_heads() {
+		let (temp, _repo) = fixture();
+		let common = temp.path().join(".git");
+		let outside = tempfile::tempdir().unwrap();
+		let victim = outside.path().join("victim");
+		fs::write(&victim, "ref: refs/heads/linked\n").unwrap();
+		let admin = common.join("worktrees/x");
+		fs::create_dir_all(&admin).unwrap();
+		let checked_out = |common: &Path, name: &'static str| {
+			let common = common.to_owned();
+			without_blocking(move || branch_is_checked_out(&common, name))
+		};
+
+		assert!(checked_out(&common, "refs/heads/main"));
+		fs::write(admin.join("HEAD"), "ref: refs/heads/linked\n").unwrap();
+		assert!(checked_out(&common, "refs/heads/linked"));
+
+		fs::remove_file(admin.join("HEAD")).unwrap();
+		std::os::unix::fs::symlink(&victim, admin.join("HEAD")).unwrap();
+		assert!(!checked_out(&common, "refs/heads/linked"), "symlink followed");
+
+		fs::remove_file(admin.join("HEAD")).unwrap();
+		mkfifo(&admin.join("HEAD"));
+		assert!(!checked_out(&common, "refs/heads/linked"), "fifo");
+	}
+
+	/// `worktree_prune` drops an entry whose `gitdir` names a vanished
+	/// worktree and keeps one whose `gitdir` is a link or a FIFO, without
+	/// blocking on it.
+	#[cfg(unix)]
+	#[test]
+	fn worktree_prune_skips_planted_gitdir_entries() {
+		let (temp, repo) = fixture();
+		let worktrees = temp.path().join(".git/worktrees");
+		let outside = tempfile::tempdir().unwrap();
+		let gone = format!("{}\n", outside.path().join("gone/.git").display());
+		let victim = outside.path().join("victim");
+		fs::write(&victim, &gone).unwrap();
+		for name in ["stale", "linked", "fifo"] {
+			fs::create_dir_all(worktrees.join(name)).unwrap();
+		}
+		fs::write(worktrees.join("stale/gitdir"), &gone).unwrap();
+		std::os::unix::fs::symlink(&victim, worktrees.join("linked/gitdir")).unwrap();
+		mkfifo(&worktrees.join("fifo/gitdir"));
+
+		let repo = std::sync::Arc::new(repo);
+		let pruning = std::sync::Arc::clone(&repo);
+		without_blocking(move || pruning.worktree_prune().unwrap());
+
+		assert!(!worktrees.join("stale").exists());
+		assert!(worktrees.join("linked").exists());
+		assert!(worktrees.join("fifo").exists());
+	}
+
+	/// `.git/worktrees` planted as a link to a host directory prunes nothing
+	/// there; the subdirectory and its file survive.
+	#[cfg(unix)]
+	#[test]
+	fn worktree_prune_ignores_a_planted_worktrees_link() {
+		let (temp, repo) = fixture();
+		let outside = tempfile::tempdir().unwrap();
+		fs::create_dir(outside.path().join("project")).unwrap();
+		fs::write(outside.path().join("project/file"), "host\n").unwrap();
+		std::os::unix::fs::symlink(outside.path(), temp.path().join(".git/worktrees")).unwrap();
+
+		repo.worktree_prune().unwrap();
+
+		assert_eq!(fs::read_to_string(outside.path().join("project/file")).unwrap(), "host\n");
+	}
+
+	/// Inside a real `.git/worktrees`, `worktree_prune` removes a link entry
+	/// itself without entering it and leaves a plain file alone.
+	#[cfg(unix)]
+	#[test]
+	fn worktree_prune_unlinks_link_entries_and_skips_files() {
+		let (temp, repo) = fixture();
+		let worktrees = temp.path().join(".git/worktrees");
+		fs::create_dir(&worktrees).unwrap();
+		let outside = tempfile::tempdir().unwrap();
+		fs::create_dir(outside.path().join("sub")).unwrap();
+		fs::write(outside.path().join("sub/file"), "host\n").unwrap();
+		std::os::unix::fs::symlink(outside.path(), worktrees.join("link")).unwrap();
+		fs::write(worktrees.join("file"), "x\n").unwrap();
+
+		repo.worktree_prune().unwrap();
+
+		assert!(fs::symlink_metadata(worktrees.join("link")).is_err());
+		assert_eq!(fs::read_to_string(outside.path().join("sub/file")).unwrap(), "host\n");
+		assert_eq!(fs::read_to_string(worktrees.join("file")).unwrap(), "x\n");
+	}
+
+	/// Add a detached linked worktree at `linked`, then move `.git/worktrees`
+	/// under `outside` and plant a link to it in its place, as contained code
+	/// could. Returns the moved admin dir, which also holds `keep/file`.
+	#[cfg(unix)]
+	fn admin_behind_a_planted_worktrees_link(
+		temp: &Path,
+		repo: &GitRepo,
+		linked: &Path,
+		outside: &Path,
+	) -> PathBuf {
+		repo
+			.worktree_add(linked, "main", WorktreeAddOptions {
+				detach:       true,
+				clone:        WorktreeClone::Off,
+				keep_changes: false,
+			})
+			.unwrap();
+		let name = registered_admin(&linked.join(".git")).unwrap().unwrap();
+		let common = temp.join(".git");
+		let moved = outside.join("worktrees");
+		fs::rename(common.join("worktrees"), &moved).unwrap();
+		std::os::unix::fs::symlink(&moved, common.join("worktrees")).unwrap();
+		let admin = moved.join(name.file_name().unwrap());
+		fs::write(admin.join("commondir"), format!("{}\n", common.display())).unwrap();
+		fs::create_dir(admin.join("keep")).unwrap();
+		fs::write(admin.join("keep/file"), "host\n").unwrap();
+		admin
+	}
+
+	/// `worktree_remove` fails on an admin dir reached through a planted
+	/// `.git/worktrees` link, before deleting anything.
+	#[cfg(unix)]
+	#[test]
+	fn worktree_remove_refuses_an_admin_dir_behind_a_planted_worktrees_link() {
+		let (temp, repo) = fixture();
+		let outside = tempfile::tempdir().unwrap();
+		let linked_dir = tempfile::tempdir().unwrap();
+		let linked = linked_dir.path().join("linked");
+		let admin =
+			admin_behind_a_planted_worktrees_link(temp.path(), &repo, &linked, outside.path());
+
+		assert!(repo.worktree_remove(&linked, true).is_err());
+
+		assert_eq!(fs::read_to_string(admin.join("keep/file")).unwrap(), "host\n");
+		assert!(linked.join(".git").is_file());
+	}
+
+	/// `detach_git_dir` fails on an admin dir reached through a planted
+	/// `.git/worktrees` link, before touching the worktree's `.git`.
+	#[cfg(unix)]
+	#[test]
+	fn detach_git_dir_refuses_an_admin_dir_behind_a_planted_worktrees_link() {
+		let (temp, repo) = fixture();
+		let outside = tempfile::tempdir().unwrap();
+		let linked_dir = tempfile::tempdir().unwrap();
+		let linked = linked_dir.path().join("linked");
+		let admin =
+			admin_behind_a_planted_worktrees_link(temp.path(), &repo, &linked, outside.path());
+		let pointer = fs::read(linked.join(".git")).unwrap();
+		let common = fs::canonicalize(temp.path().join(".git")).unwrap();
+
+		assert!(detach_git_dir(&linked, &common).is_err());
+
+		assert_eq!(fs::read_to_string(admin.join("keep/file")).unwrap(), "host\n");
+		assert_eq!(fs::read(linked.join(".git")).unwrap(), pointer);
+	}
+
+	/// The failed-add cleanup removes the worktree but not an admin dir
+	/// reached through a planted `.git/worktrees` link.
+	#[cfg(unix)]
+	#[test]
+	fn cleanup_worktree_add_keeps_an_admin_dir_behind_a_planted_worktrees_link() {
+		let temp = tempfile::tempdir().unwrap();
+		let outside = tempfile::tempdir().unwrap();
+		let common = temp.path().join("common");
+		fs::create_dir(&common).unwrap();
+		std::os::unix::fs::symlink(outside.path(), common.join("worktrees")).unwrap();
+		let linked = temp.path().join("linked");
+		fs::create_dir(&linked).unwrap();
+		let admin = outside.path().join("linked");
+		fs::create_dir_all(admin.join("keep")).unwrap();
+		fs::write(admin.join("keep/file"), "host\n").unwrap();
+		fs::write(admin.join("gitdir"), format!("{}\n", linked.join(".git").display())).unwrap();
+		let pointer = format!("gitdir: {}\n", common.join("worktrees/linked").display());
+		fs::write(linked.join(".git"), pointer).unwrap();
+
+		cleanup_worktree_add(&linked, &common);
+
+		assert!(!linked.exists());
+		assert_eq!(fs::read_to_string(admin.join("keep/file")).unwrap(), "host\n");
+	}
+
+	/// `admin_dir` accepts a real directory under a real `worktrees` and
+	/// refuses a link entry, a path whose parent resolves elsewhere (even when
+	/// `worktrees` holds an entry of the same name), `..`, and a `worktrees`
+	/// that is a link.
+	#[cfg(unix)]
+	#[test]
+	fn admin_dir_accepts_only_a_real_directory_under_a_real_worktrees() {
+		let common = tempfile::tempdir().unwrap();
+		let outside = tempfile::tempdir().unwrap();
+		let worktrees = common.path().join("worktrees");
+		fs::create_dir_all(worktrees.join("real")).unwrap();
+		fs::create_dir(worktrees.join("x")).unwrap();
+		fs::create_dir(outside.path().join("x")).unwrap();
+		std::os::unix::fs::symlink(outside.path().join("x"), worktrees.join("link")).unwrap();
+		std::os::unix::fs::symlink(outside.path(), common.path().join("elsewhere")).unwrap();
+
+		let admin = admin_dir(common.path(), &worktrees.join("real"), "test").unwrap();
+		assert_eq!(admin, worktrees.join("real"));
+		assert!(admin_dir(common.path(), &worktrees.join("link"), "test").is_err());
+		assert!(admin_dir(common.path(), &common.path().join("elsewhere/x"), "test").is_err());
+		assert!(admin_dir(common.path(), &worktrees.join(".."), "test").is_err());
+
+		fs::remove_dir_all(&worktrees).unwrap();
+		std::os::unix::fs::symlink(outside.path(), &worktrees).unwrap();
+		assert!(admin_dir(common.path(), &worktrees.join("x"), "test").is_err());
+	}
+
+	/// `config_set` keeps a private repository config private, and updates a
+	/// symlinked one through the link, as `git config` does.
+	#[cfg(unix)]
+	#[test]
+	fn config_set_keeps_the_config_mode_and_link() {
+		use std::os::unix::fs::PermissionsExt;
+		let (temp, repo) = fixture();
+		let config = temp.path().join(".git/config");
+		fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+		repo.config_set("omp.first", "one").unwrap();
+		assert_eq!(fs::metadata(&config).unwrap().permissions().mode() & 0o7777, 0o600);
+		assert_eq!(git(temp.path(), &["config", "omp.first"]), "one");
+
+		let elsewhere = tempfile::tempdir().unwrap();
+		let target = elsewhere.path().join("config");
+		fs::rename(&config, &target).unwrap();
+		std::os::unix::fs::symlink(&target, &config).unwrap();
+		repo.config_set("omp.second", "two").unwrap();
+		assert!(fs::symlink_metadata(&config).unwrap().is_symlink());
+		assert!(
+			fs::read_to_string(&target)
+				.unwrap()
+				.contains("second = two")
+		);
+		assert_eq!(git(temp.path(), &["config", "omp.second"]), "two");
 	}
 }

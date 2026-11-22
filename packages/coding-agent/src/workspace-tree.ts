@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { FileType, type GlobMatch, listWorkspace } from "@oh-my-pi/pi-natives";
+import { containedListWorkspace } from "./sandbox/file-access";
 import { sanitizeDisplayWarning, TRUNCATE_LENGTHS } from "./utils/render-utils";
 import { truncateToWidth } from "./utils/text-width";
 import { formatAge, formatBytes } from "@oh-my-pi/pi-utils";
@@ -61,7 +62,7 @@ export async function buildDirectoryTree(cwd: string, options: BuildDirectoryTre
 	const perDirLimit = options.perDirLimit === undefined ? null : options.perDirLimit;
 	const rootLimit = options.rootLimit === undefined ? perDirLimit : options.rootLimit;
 
-	const result = await listWorkspace({
+	const result = await containedListWorkspace({
 		path: rootPath,
 		maxDepth,
 		hidden: true,

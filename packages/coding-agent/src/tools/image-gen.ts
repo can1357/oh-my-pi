@@ -22,6 +22,7 @@ import { isAuthenticated, type ModelRegistry } from "../config/model-registry";
 import { settings } from "../config/settings";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "text" };
+import { readFileBytes, withContainedFileAccess } from "../sandbox/file-access";
 import { journalCompletion } from "../session/model-usage-journal";
 import { resolveConfiguredModelTarget } from "../session/role-models";
 import { saveImagesToTemp } from "../utils/image-temp";
@@ -99,7 +100,7 @@ async function loadImageFromPath(imagePath: string, cwd: string): Promise<{ data
 		const kind = specialFileKind(stat);
 		if (kind) throw new Error(`Cannot load '${imagePath}': it is a ${kind}, not a regular file or directory.`);
 		if (stat.size > MAX_IMAGE_SIZE) throw new Error(`Image file too large: ${imagePath}`);
-		const buffer = await Bun.file(resolved).bytes();
+		const buffer = await readFileBytes(resolved);
 		if (buffer.length > MAX_IMAGE_SIZE) throw new Error(`Image file too large: ${imagePath}`);
 		const mimeType = parseImageMetadata(buffer)?.mimeType;
 		if (!mimeType) throw new Error(`Unsupported image type: ${imagePath}`);
@@ -312,10 +313,14 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 				}
 
 				if (!inputImages) {
-					inputImages = [];
-					for (const input of params.input ?? []) {
-						inputImages.push(await resolveInputImage(input, ctx.sessionManager.getCwd()));
-					}
+					// Input images are read as `read` reads files: contained when the OS sandbox is active.
+					inputImages = await withContainedFileAccess({ cwd: ctx.sessionManager.getCwd() }, async () => {
+						const loaded: { data: string; mimeType: string }[] = [];
+						for (const input of params.input ?? []) {
+							loaded.push(await resolveInputImage(input, ctx.sessionManager.getCwd()));
+						}
+						return loaded;
+					});
 				}
 				const request: ImageGenerationRequest = {
 					prompt: assemblePrompt(params),

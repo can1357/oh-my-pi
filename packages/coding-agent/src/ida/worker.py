@@ -778,7 +778,8 @@ def _sendall(conn, data):
         traceback.print_exc()
 
 
-# Windows cannot deliver SIGINT to one child process (kill terminates it), so the daemon writes
+# Windows cannot deliver SIGINT to one child process (kill terminates it), and a sandbox-contained
+# worker sits behind a wrapper that cannot be signalled either, so the omp side writes
 # `{"interrupt": <id>}` to the socket instead. The connection's reader thread schedules
 # KeyboardInterrupt in the main thread (at most once) while that request runs. Scheduling is
 # asynchronous, so `_run` absorbs a pending interrupt before the response is written: it can

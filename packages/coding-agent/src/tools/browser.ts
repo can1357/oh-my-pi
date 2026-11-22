@@ -1,7 +1,9 @@
 import { type } from "@oh-my-pi/omptype";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolResult, SandboxSubject } from "@oh-my-pi/pi-agent-core";
 import { getWebKitHostPath, isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeContext, HostEvalPreludeDefinition } from "../eval/preludes";
+import { sandboxEnabled } from "../sandbox/policy";
+import type { SandboxNetworkMode } from "../sandbox/types";
 import type { ToolSession } from "../sdk";
 import { enforceInlineByteCap } from "./streaming-output";
 import { CmuxUnavailableError, resolveCmuxKind } from "./browser/cmux/rpc";
@@ -22,6 +24,13 @@ import { sameAddress } from "./browser/navigation";
 import { resolveInitScriptSources } from "./browser/open-options";
 import type { BrowserRelayGuidance } from "./browser/prelude-definition";
 import { isRelayOnly, resolveRelayKind } from "./browser/relay/kind";
+import {
+	browserCallSubjects,
+	browserExecTarget,
+	chromiumSandbox,
+	sandboxNetworkMode,
+	tabExecTarget,
+} from "./browser/sandbox";
 import { relayExtensionNotice } from "./browser/relay/probe";
 import { describeTernTargets, listTernBlocks, type TernTarget, ternTargets } from "./browser/tern/blocks";
 import { resolveTernKind } from "./browser/tern/kind";
@@ -299,6 +308,8 @@ function ownBrowserKind(
 	env: Record<string, string | undefined> = process.env,
 ): BrowserKind {
 	const chromium = chromiumKind(params, session);
+	// The OS sandbox contains omp's Chromium but not its WebKit host: only `app: "webkit"` picks that one then.
+	if (sandboxEnabled(session.settings)) return chromium;
 	const webkit = resolveWebKitKind(
 		{
 			settingEnabled: cfgBrowserWebKit.get(session.settings),
@@ -332,6 +343,7 @@ export function createBrowserPrelude(session: ToolSession): HostEvalPreludeDefin
 	return createBrowserPreludeDefinition(session, {
 		invoke: (parameters: unknown, context: EvalPreludeContext) => invokeBrowser(session, parameters, context),
 		status: describeBrowserCall,
+		sandboxSubjects: (parameters: unknown) => browserSandboxSubjects(session, parameters),
 		// The documentation promises omp's own browser for an open without `app`; while
 		// the relay takes that open, the prompt says so: the only browser in relay-only
 		// mode, otherwise naming where `app: "auto"` goes instead.
@@ -342,6 +354,53 @@ export function createBrowserPrelude(session: ToolSession): HostEvalPreludeDefin
 				: undefined;
 		},
 	});
+}
+
+/**
+ * What a browser call does on the host, for the sandbox gate: the exec target of a browser omp
+ * cannot contain that an open, `targets` or tab call drives, plus the files and host code it names
+ * ({@link browserCallSubjects}). Unparseable parameters name nothing: the call fails validation.
+ */
+function browserSandboxSubjects(session: ToolSession, parameters: unknown): SandboxSubject[] {
+	const parsed = browserSchema(withStringApp(parameters));
+	if (parsed instanceof type.errors) return [];
+	const tab = getTab(parsed.name ?? DEFAULT_TAB_NAME);
+	const network = sandboxNetworkMode(session.settings);
+	const execTargets = new Set<string | undefined>();
+	switch (parsed.action) {
+		case "open":
+			// An open may keep the browser of the tab it reopens.
+			if (tab) execTargets.add(browserExecTarget(tab.browser.kind));
+			execTargets.add(resolvedExecTarget(parsed, session, network));
+			break;
+		case "targets":
+			execTargets.add(resolvedExecTarget({ ...parsed, target: parsed.target ?? "" }, session));
+			break;
+		case "call":
+		case "run":
+			if (tab) execTargets.add(tabExecTarget(tab.browser, network, session.cwd));
+			break;
+	}
+	const subjects: SandboxSubject[] = [];
+	for (const target of execTargets) if (target) subjects.push({ kind: "exec", target });
+	return [...subjects, ...browserCallSubjects(parsed, session.cwd)];
+}
+
+/**
+ * The exec target of the browser `params` resolve to ({@link browserExecTarget}). `app: "webkit"`
+ * names its backend, which omp cannot contain, even when it does not resolve: the call installs the
+ * engine it lacks and then opens it. Nothing for any other call that fails to resolve.
+ */
+function resolvedExecTarget(
+	params: BrowserParams,
+	session: ToolSession,
+	network?: SandboxNetworkMode,
+): string | undefined {
+	try {
+		return browserExecTarget(resolveBrowserKind(params, session), network);
+	} catch {
+		return params.app === "webkit" ? "browser:webkit" : undefined;
+	}
 }
 
 /** Status-tree line for a completed browser call: `open main https://…`, `main.id(5).click()`, `close all`. */
@@ -667,7 +726,8 @@ async function installWebKitForOpen(
 	}
 	if (!explicit) {
 		const kind = resolveBrowserKind(params, session);
-		if (kind.kind !== "headless" || params.app === "chromium") return undefined;
+		// Under the OS sandbox an automatic open never takes the WebKit engine ({@link ownBrowserKind}).
+		if (kind.kind !== "headless" || params.app === "chromium" || sandboxEnabled(session.settings)) return undefined;
 		if (!kind.headless && !VIEWER_PLATFORMS.includes(process.platform)) return undefined;
 		if (!(await chromiumNeedsDownload())) return undefined;
 	}
@@ -688,19 +748,28 @@ async function openOnKind(
 	name: string,
 	params: BrowserParams,
 	details: BrowserPreludeDetails,
-	kind: BrowserKind,
+	requested: BrowserKind,
 	timeoutMs: number,
 	notes: readonly string[],
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<unknown>> {
+	// omp's Chromium launches contained by the OS sandbox while it is active, and is keyed by that containment.
+	let kind = requested;
+	if (requested.kind === "headless") {
+		const { sandbox: _stale, ...chromium } = requested;
+		const sandbox = await chromiumSandbox(session);
+		kind = sandbox ? { ...chromium, sandbox } : chromium;
+	}
 	const downloadsPath = params.downloads === undefined ? undefined : resolveToCwd(params.downloads, session.cwd);
 	details.browser = kind.kind;
 
 	// If a tab with this name already exists on a different browser kind, fail fast — caller must close first.
 	const existing = getTab(name);
 	if (existing && browserKey(existing.browser.kind) !== browserKey(kind)) {
+		// No open gets back the containment of a tab from another sandbox state.
+		const contained = [existing.browser.kind, kind].some(k => k.kind === "headless" && k.sandbox);
 		throw new ToolError(
-			`Tab ${JSON.stringify(name)} is bound to a different browser (${describeKind(existing.browser.kind)}, not ${describeKind(kind)}). Close it first, or reopen it with the app and headed it was opened with.`,
+			`Tab ${JSON.stringify(name)} is bound to a different browser (${describeKind(existing.browser.kind)}, not ${describeKind(kind)}). Close it first${contained ? "" : ", or reopen it with the app and headed it was opened with"}.`,
 		);
 	}
 	// Chrome's extension debugger API exposes no Security domain, so the relay cannot honor the override.
@@ -743,6 +812,7 @@ async function openOnKind(
 				cwd: session.cwd,
 				viewport: params.viewport ? puppeteerViewport(params.viewport) : undefined,
 				signal: openSignal,
+				settings: session.settings,
 			}),
 		);
 
@@ -1066,7 +1136,7 @@ function ternNotes(tab: TernTabSession, requested: { width: number; height: numb
 function describeKind(kind: BrowserKind): string {
 	switch (kind.kind) {
 		case "headless":
-			return `managed Chromium (${kind.headless ? "headless" : "in a window"})`;
+			return `managed Chromium (${kind.headless ? "headless" : "in a window"}${kind.sandbox ? `, sandboxed for ${kind.sandbox.workspace} with network ${kind.sandbox.network}` : ""})`;
 		case "spawned":
 			return `spawned:${kind.path}`;
 		case "connected":

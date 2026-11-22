@@ -12,6 +12,7 @@ import { getAgentDir, getProjectDir, isEnoent, logger } from "@oh-my-pi/pi-utils
 import { getConfigDirs } from "../../config";
 
 import { execCommand } from "../../exec/exec";
+import { currentSandboxCreated, sandboxCreatedSkip } from "../../sandbox/ledger";
 import { getCodingAgentApi } from "../host-api";
 import * as typebox from "../legacy-typebox";
 import { assertBunCanImport } from "../module-path";
@@ -108,7 +109,10 @@ export async function discoverCustomCommands(
 		}
 	}
 
+	// Project command dirs a sandboxed command created or replaced stay unloaded until trusted (logged by the skip).
+	const ledger = currentSandboxCreated();
 	for (const entry of getConfigDirs("commands", { cwd, existingOnly: true })) {
+		if (entry.level === "project" && sandboxCreatedSkip(entry.path, cwd, ledger)) continue;
 		const source = entry.level === "user" ? "user" : "project";
 		if (!commandDirs.some(d => d.path === entry.path)) {
 			commandDirs.push({ path: entry.path, source });
@@ -201,7 +205,7 @@ export async function loadCustomCommands(options: LoadCustomCommandsOptions = {}
 	const sharedApi: CustomCommandAPI = {
 		cwd,
 		exec: (command: string, args: string[], execOptions) =>
-			execCommand(command, args, execOptions?.cwd ?? cwd, execOptions),
+			execCommand(command, args, execOptions?.cwd ?? cwd, execOptions, cwd),
 		typebox,
 		arktype,
 		zod,

@@ -435,6 +435,9 @@ describe("OTEL_* from omp's own .env files", () => {
 		insideWindow: Record<string, string | null>;
 		afterWindow: Record<string, string | null>;
 		bashChildEnv: Record<string, string>;
+		/** `process.env` and `stripOmpDotenvEnv(process.env)` over the own-file, project and shell names. */
+		loaded: Record<string, string | null>;
+		stripped: Record<string, string | null>;
 	}
 
 	// The dotenv loader runs at module load, so each case needs a fresh process
@@ -451,13 +454,22 @@ describe("OTEL_* from omp's own .env files", () => {
 				"OTEL_PROBE_SHELL=agent-file",
 				"OTEL_PROBE_BOTH=agent",
 				"PLAIN_PROBE_AGENT=plain",
+				"OMP_STRIP_PROBE=omp-token",
 			].join("\n"),
 		);
 		await Bun.write(
 			path.join(home, ".env"),
-			["OTEL_PROBE_HOME=home", "OTEL_PROBE_AGENT=home-loses", "OTEL_PROBE_CONFIG=home-loses"].join("\n"),
+			[
+				"OTEL_PROBE_HOME=home",
+				"OTEL_PROBE_AGENT=home-loses",
+				"OTEL_PROBE_CONFIG=home-loses",
+				"STRIP_PROBE_HOME=home",
+			].join("\n"),
 		);
-		await Bun.write(path.join(home, ".omp", ".env"), ["OTEL_PROBE_CONFIG=config-root"].join("\n"));
+		await Bun.write(
+			path.join(home, ".omp", ".env"),
+			["OTEL_PROBE_CONFIG=config-root", "STRIP_PROBE_CONFIG=config-root"].join("\n"),
+		);
 		await Bun.write(path.join(cwd, ".env"), ["OTEL_PROBE_PROJECT=project", "OTEL_PROBE_BOTH=project"].join("\n"));
 		const envModulePath = path.join(import.meta.dir, "..", "src", "env.ts");
 		const names = [
@@ -469,20 +481,34 @@ describe("OTEL_* from omp's own .env files", () => {
 			"OTEL_PROBE_CONFIG",
 			"PLAIN_PROBE_AGENT",
 		];
+		const strippedNames = [
+			"PLAIN_PROBE_AGENT",
+			"OMP_STRIP_PROBE",
+			"PI_STRIP_PROBE",
+			"STRIP_PROBE_HOME",
+			"STRIP_PROBE_CONFIG",
+			"OTEL_PROBE_SHELL",
+			"OTEL_PROBE_BOTH",
+			"OTEL_PROBE_PROJECT",
+		];
 		const script = [
-			`import { $otelEnv, withOmpOtelEnv } from ${JSON.stringify(envModulePath)};`,
+			`import { $otelEnv, stripOmpDotenvEnv, withOmpOtelEnv } from ${JSON.stringify(envModulePath)};`,
 			`const names = ${JSON.stringify(names)};`,
 			"const pick = read => Object.fromEntries(names.map(name => [name, read(name) ?? null]));",
 			"const insideWindow = withOmpOtelEnv(() => pick(name => process.env[name]));",
 			"const bash = Bun.spawn(['bash', '-c', 'env'], { env: process.env, stdout: 'pipe' });",
 			"const bashText = await new Response(bash.stdout).text();",
 			"const bashChildEnv = Object.fromEntries(bashText.split('\\n').filter(line => line.startsWith('OTEL_PROBE_') || line.startsWith('PLAIN_PROBE_')).map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));",
+			`const strippedNames = ${JSON.stringify(strippedNames)};`,
+			"const stripped = stripOmpDotenvEnv(process.env);",
 			"process.stdout.write(JSON.stringify({",
 			"  bunEnv: pick(name => Bun.env[name]),",
 			"  otelEnv: pick(name => $otelEnv(name)),",
 			"  insideWindow,",
 			"  afterWindow: pick(name => process.env[name]),",
 			"  bashChildEnv,",
+			"  loaded: Object.fromEntries(strippedNames.map(name => [name, process.env[name] ?? null])),",
+			"  stripped: Object.fromEntries(strippedNames.map(name => [name, stripped[name] ?? null])),",
 			"}));",
 		].join("\n");
 		const proc = Bun.spawn([process.execPath, "--no-install", "--no-env-file", "--eval", script], {
@@ -500,6 +526,10 @@ describe("OTEL_* from omp's own .env files", () => {
 				OTEL_PROBE_BOTH: undefined,
 				OTEL_PROBE_PROJECT: undefined,
 				PLAIN_PROBE_AGENT: undefined,
+				OMP_STRIP_PROBE: undefined,
+				PI_STRIP_PROBE: undefined,
+				STRIP_PROBE_HOME: undefined,
+				STRIP_PROBE_CONFIG: undefined,
 				...shellEnv,
 			},
 			stdout: "pipe",
@@ -554,6 +584,29 @@ describe("OTEL_* from omp's own .env files", () => {
 				OTEL_PROBE_PROJECT: "project",
 				PLAIN_PROBE_AGENT: "plain",
 			});
+			// The loader put every own-file value (agent dir with its OMP_→PI_ mirror, home, config
+			// root) into the process env; a sandboxed process starts without them, but keeps the
+			// project's, even for a name the agent file sets.
+			expect(result.loaded).toEqual({
+				PLAIN_PROBE_AGENT: "plain",
+				OMP_STRIP_PROBE: "omp-token",
+				PI_STRIP_PROBE: "omp-token",
+				STRIP_PROBE_HOME: "home",
+				STRIP_PROBE_CONFIG: "config-root",
+				OTEL_PROBE_SHELL: null,
+				OTEL_PROBE_BOTH: "project",
+				OTEL_PROBE_PROJECT: "project",
+			});
+			expect(result.stripped).toEqual({
+				PLAIN_PROBE_AGENT: null,
+				OMP_STRIP_PROBE: null,
+				PI_STRIP_PROBE: null,
+				STRIP_PROBE_HOME: null,
+				STRIP_PROBE_CONFIG: null,
+				OTEL_PROBE_SHELL: null,
+				OTEL_PROBE_BOTH: "project",
+				OTEL_PROBE_PROJECT: "project",
+			});
 		},
 		20_000,
 	);
@@ -568,6 +621,8 @@ describe("OTEL_* from omp's own .env files", () => {
 			expect(result.afterWindow.OTEL_PROBE_SHELL).toBe("from-shell");
 			// Still visible to children, as any exported variable is.
 			expect(result.bashChildEnv.OTEL_PROBE_SHELL).toBe("from-shell");
+			// A sandboxed process keeps it too: it differs from the agent file's value.
+			expect(result.stripped.OTEL_PROBE_SHELL).toBe("from-shell");
 			// The agent-file-only names stay private.
 			expect(result.bashChildEnv.OTEL_PROBE_AGENT).toBeUndefined();
 		},
@@ -657,4 +712,397 @@ describe("OTEL_* from omp's own .env files", () => {
 			}
 		});
 	});
+});
+
+describe("PI_CONFIG_FILES provenance", () => {
+	/** Operator-only names besides PI_CONFIG_FILES/OMP_CONFIG_FILES: each selects an omp directory. */
+	const DIR_SELECTING_NAMES = [
+		"PI_CODING_AGENT_DIR",
+		"OMP_CODING_AGENT_DIR",
+		"PI_CONFIG_DIR",
+		"OMP_CONFIG_DIR",
+		"PI_PROFILE",
+		"OMP_PROFILE",
+		"XDG_DATA_HOME",
+		"XDG_STATE_HOME",
+		"XDG_CACHE_HOME",
+		"PI_NATIVES_DIR",
+		"OMP_NATIVES_DIR",
+	] as const;
+
+	interface ConfigFilesProbe {
+		home: string;
+		pi: string | null;
+		omp: string | null;
+		/** The directory-selecting names as the loaded process sees them. */
+		env: Record<string, string | null>;
+		agentDir: string;
+		configRoot: string;
+		pluginsDir: string;
+		nativesDir: string;
+		activeProfile: string | null;
+	}
+
+	// The loader runs at module load, so each case is a fresh process with temp HOME, agent dir and
+	// project. `autoload` keeps Bun's own dotenv autoload of the project `.env` on (the real launch
+	// path); without it only omp's loader reads the file.
+	async function runProbe(options: {
+		/** Project `.env` contents; `{home}` expands to the temp HOME. */
+		project: string;
+		agent?: string;
+		/** Launch environment overrides; `{home}` in values expands to the temp HOME. */
+		launch?: Record<string, string | undefined>;
+		/** Extra files to create, keyed by path relative to the temp HOME. */
+		files?: Record<string, string>;
+		/**
+		 * Code run after `dirs` loads and before `env` does, the order `cli.ts` uses
+		 * (`setProfile(...)` before anything imports `env`). Without it `env` loads first.
+		 */
+		cli?: string;
+		autoload: boolean;
+	}): Promise<ConfigFilesProbe> {
+		const home = fs.realpathSync(await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-utils-config-files-")));
+		tempDirs.push(home);
+		const expand = (value: string) => value.replaceAll("{home}", home);
+		const agentDir = path.join(home, "agent");
+		const cwd = path.join(home, "project");
+		await Bun.write(path.join(cwd, ".env"), expand(options.project));
+		await Bun.write(path.join(agentDir, ".env"), options.agent ?? "");
+		for (const [file, content] of Object.entries(options.files ?? {})) {
+			await Bun.write(path.join(home, file), content);
+		}
+		const launch: Record<string, string | undefined> = {};
+		for (const [name, value] of Object.entries(options.launch ?? {})) {
+			launch[name] = value === undefined ? undefined : expand(value);
+		}
+		const envModulePath = path.join(import.meta.dir, "..", "src", "env.ts");
+		const dirsModulePath = path.join(import.meta.dir, "..", "src", "dirs.ts");
+		const output = [
+			`const names = ${JSON.stringify(DIR_SELECTING_NAMES)};`,
+			"process.stdout.write(JSON.stringify({",
+			"  pi: process.env.PI_CONFIG_FILES ?? null,",
+			"  omp: process.env.OMP_CONFIG_FILES ?? null,",
+			"  env: Object.fromEntries(names.map(name => [name, process.env[name] ?? null])),",
+			"  agentDir: getAgentDir(),",
+			"  configRoot: getConfigRootDir(),",
+			"  pluginsDir: getPluginsDir(),",
+			"  nativesDir: getNativesDir(),",
+			"  activeProfile: getActiveProfile() ?? null,",
+			"}));",
+		];
+		const dirsImport = `import { getActiveProfile, getAgentDir, getConfigRootDir, getNativesDir, getPluginsDir, resolveProfileEnv, setProfile } from ${JSON.stringify(dirsModulePath)};`;
+		const script = (
+			options.cli === undefined
+				? [`import ${JSON.stringify(envModulePath)};`, dirsImport, ...output]
+				: // Dynamic `env` import on purpose: it must load after `dirs` and the CLI's profile step.
+					[dirsImport, options.cli, `await import(${JSON.stringify(envModulePath)});`, ...output]
+		).join("\n");
+		const flags = options.autoload ? [] : ["--no-env-file"];
+		const proc = Bun.spawn([process.execPath, "--no-install", ...flags, "--eval", script], {
+			cwd,
+			env: {
+				...process.env,
+				HOME: home,
+				USERPROFILE: home,
+				PI_CODING_AGENT_DIR: agentDir,
+				...DIR_RESOLUTION_ENV_RESET,
+				OMP_CODING_AGENT_DIR: undefined,
+				OMP_CONFIG_DIR: undefined,
+				PI_NATIVES_DIR: undefined,
+				OMP_NATIVES_DIR: undefined,
+				NODE_ENV: undefined,
+				PI_CONFIG_FILES: undefined,
+				OMP_CONFIG_FILES: undefined,
+				...launch,
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		expect(exitCode, stderr).toBe(0);
+		return { ...JSON.parse(stdout), home };
+	}
+
+	/** Project `.env` that points every PI_ and OMP_ directory-selecting name into the workspace. */
+	const HOSTILE_DIRS_ENV = [
+		"PI_CODING_AGENT_DIR={home}/evil-agent",
+		"PI_CONFIG_DIR=.evil",
+		"PI_PROFILE=evil",
+		"XDG_DATA_HOME={home}/evil-xdg",
+		"XDG_STATE_HOME={home}/evil-xdg",
+		"XDG_CACHE_HOME={home}/evil-xdg",
+		"PI_NATIVES_DIR={home}/evil-natives",
+		"OMP_CODING_AGENT_DIR={home}/evil-agent",
+		"OMP_CONFIG_DIR=.evil",
+		"OMP_PROFILE=evil",
+		"",
+	].join("\n");
+	/** The hostile agent dir's `.env` (loaded if the redirect took) and the hostile XDG app root. */
+	const HOSTILE_DIRS_FILES = {
+		"evil-agent/.env": "PI_CONFIG_FILES=evil-agent.yml\n",
+		"evil-xdg/omp/.keep": "",
+	};
+
+	for (const autoload of [false, true]) {
+		const mode = autoload ? "with Bun's dotenv autoload" : "without Bun's dotenv autoload";
+
+		it.skipIf(process.platform === "win32")(
+			`never takes the value from the project .env (${mode})`,
+			async () => {
+				const pi = await runProbe({ project: "PI_CONFIG_FILES=evil.yml\n", autoload });
+				expect({ pi: pi.pi, omp: pi.omp }).toEqual({ pi: null, omp: null });
+				const omp = await runProbe({ project: "OMP_CONFIG_FILES=evil.yml\n", autoload });
+				expect({ pi: omp.pi, omp: omp.omp }).toEqual({ pi: null, omp: null });
+			},
+			20_000,
+		);
+
+		it.skipIf(process.platform === "win32")(
+			`keeps a launch-environment value over the project .env (${mode})`,
+			async () => {
+				const result = await runProbe({
+					project: "PI_CONFIG_FILES=evil.yml\n",
+					launch: { PI_CONFIG_FILES: "operator.yml" },
+					autoload,
+				});
+				expect(result.pi).toBe("operator.yml");
+			},
+			20_000,
+		);
+
+		it.skipIf(process.platform === "win32")(
+			`takes the agent-dir .env value over the project .env (${mode})`,
+			async () => {
+				const result = await runProbe({
+					project: "PI_CONFIG_FILES=evil.yml\n",
+					agent: "PI_CONFIG_FILES=agent.yml\n",
+					autoload,
+				});
+				expect(result.pi).toBe("agent.yml");
+			},
+			20_000,
+		);
+
+		it.skipIf(process.platform === "win32")(
+			`never lets the project .env choose omp's directories (${mode})`,
+			async () => {
+				const result = await runProbe({
+					project: HOSTILE_DIRS_ENV,
+					files: HOSTILE_DIRS_FILES,
+					launch: { PI_CODING_AGENT_DIR: undefined },
+					autoload,
+				});
+				const root = path.join(result.home, ".omp");
+				expect(result.env).toEqual(Object.fromEntries(DIR_SELECTING_NAMES.map(name => [name, null])));
+				expect(result.agentDir).toBe(path.join(root, "agent"));
+				expect(result.configRoot).toBe(root);
+				expect(result.pluginsDir).toBe(path.join(root, "plugins"));
+				expect(result.nativesDir).toBe(path.join(root, "natives"));
+				// The redirected agent dir's `.env` was never located.
+				expect(result.pi).toBeNull();
+			},
+			20_000,
+		);
+
+		it.skipIf(process.platform === "win32")(
+			`keeps launch-environment directory names over the project .env (${mode})`,
+			async () => {
+				const result = await runProbe({
+					project: HOSTILE_DIRS_ENV,
+					files: { ...HOSTILE_DIRS_FILES, "op-xdg/omp/.keep": "" },
+					launch: {
+						PI_CODING_AGENT_DIR: undefined,
+						PI_CONFIG_DIR: ".op",
+						XDG_DATA_HOME: "{home}/op-xdg",
+						XDG_STATE_HOME: "{home}/op-xdg",
+						XDG_CACHE_HOME: "{home}/op-xdg",
+						PI_NATIVES_DIR: "{home}/op-natives",
+					},
+					autoload,
+				});
+				const home = result.home;
+				expect(result.env).toMatchObject({
+					PI_CODING_AGENT_DIR: null,
+					PI_CONFIG_DIR: ".op",
+					PI_PROFILE: null,
+					XDG_DATA_HOME: path.join(home, "op-xdg"),
+					PI_NATIVES_DIR: path.join(home, "op-natives"),
+				});
+				expect(result.agentDir).toBe(path.join(home, ".op", "agent"));
+				expect(result.configRoot).toBe(path.join(home, ".op"));
+				// XDG only redirects the default (non-overridden) agent dir.
+				expect(result.pluginsDir).toBe(path.join(home, "op-xdg", "omp", "plugins"));
+				expect(result.nativesDir).toBe(path.join(home, "op-natives"));
+			},
+			20_000,
+		);
+
+		it.skipIf(process.platform === "win32")(
+			`keeps a launch-environment agent dir over the project .env (${mode})`,
+			async () => {
+				const result = await runProbe({
+					project: HOSTILE_DIRS_ENV,
+					files: HOSTILE_DIRS_FILES,
+					launch: { PI_CODING_AGENT_DIR: "{home}/op-agent" },
+					autoload,
+				});
+				expect(result.env.PI_CODING_AGENT_DIR).toBe(path.join(result.home, "op-agent"));
+				expect(result.agentDir).toBe(path.join(result.home, "op-agent"));
+			},
+			20_000,
+		);
+
+		it.skipIf(process.platform === "win32")(
+			`keeps a launch-environment profile over the project .env (${mode})`,
+			async () => {
+				const result = await runProbe({
+					project: "PI_PROFILE=evil\nOMP_PROFILE=evil\n",
+					launch: { PI_CODING_AGENT_DIR: undefined, OMP_PROFILE: "work" },
+					autoload,
+				});
+				expect(result.env).toMatchObject({ OMP_PROFILE: "work", PI_PROFILE: null });
+				expect(result.configRoot).toBe(path.join(result.home, ".omp", "profiles", "work"));
+			},
+			20_000,
+		);
+
+		it.skipIf(process.platform === "win32")(
+			`never lets the project .env pick the profile the CLI activates (${mode})`,
+			async () => {
+				const result = await runProbe({
+					project: "OMP_PROFILE=evil\nPI_PROFILE=evil2\n",
+					launch: { PI_CODING_AGENT_DIR: undefined },
+					cli: "setProfile(resolveProfileEnv(process.env.OMP_PROFILE, process.env.PI_PROFILE));",
+					autoload,
+				});
+				const root = path.join(result.home, ".omp");
+				expect(result.activeProfile).toBeNull();
+				expect(result.configRoot).toBe(root);
+				expect(result.agentDir).toBe(path.join(root, "agent"));
+			},
+			20_000,
+		);
+
+		it.skipIf(process.platform === "win32")(
+			`keeps an explicit --profile over a project .env profile (${mode})`,
+			async () => {
+				const result = await runProbe({
+					project: "OMP_PROFILE=evil\n",
+					launch: { PI_CODING_AGENT_DIR: undefined },
+					cli: 'setProfile("work");',
+					autoload,
+				});
+				const root = path.join(result.home, ".omp", "profiles", "work");
+				expect(result.activeProfile).toBe("work");
+				expect(result.env.OMP_PROFILE).toBe("work");
+				expect(result.configRoot).toBe(root);
+				expect(result.agentDir).toBe(path.join(root, "agent"));
+			},
+			20_000,
+		);
+	}
+
+	/** Runs `script` with Bun's autoload in a project whose `.env` is `project`, under a temp HOME. */
+	async function runInProject(project: string, script: string, env: Record<string, string> = {}) {
+		const home = fs.realpathSync(await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-utils-config-files-")));
+		tempDirs.push(home);
+		const cwd = path.join(home, "project");
+		await Bun.write(path.join(cwd, ".env"), project);
+		const proc = Bun.spawn([process.execPath, "--no-install", "--eval", script], {
+			cwd,
+			env: {
+				...process.env,
+				HOME: home,
+				USERPROFILE: home,
+				...DIR_RESOLUTION_ENV_RESET,
+				PI_CODING_AGENT_DIR: undefined,
+				OMP_CODING_AGENT_DIR: undefined,
+				OMP_CONFIG_DIR: undefined,
+				...env,
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		expect(exitCode, stderr).toBe(0);
+		return { home, stdout };
+	}
+
+	/** Starts a worker that imports `dirs` and reports its profile, after `before` ran on the main thread. */
+	async function runWorkerProbe(before: string, workerOptions: string) {
+		const dirsModulePath = path.join(import.meta.dir, "..", "src", "dirs.ts");
+		const scratch = fs.realpathSync(await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-utils-worker-")));
+		tempDirs.push(scratch);
+		const workerPath = path.join(scratch, "worker.ts");
+		await Bun.write(
+			workerPath,
+			[
+				`import { getActiveProfile, getConfigRootDir } from ${JSON.stringify(dirsModulePath)};`,
+				"postMessage({ active: getActiveProfile() ?? null, root: getConfigRootDir() });",
+			].join("\n"),
+		);
+		const { home, stdout } = await runInProject(
+			"OMP_PROFILE=evil\n",
+			[
+				before.replaceAll("{dirs}", JSON.stringify(dirsModulePath)),
+				`const worker = new Worker(${JSON.stringify(workerPath)}${workerOptions});`,
+				"worker.onmessage = event => { process.stdout.write(JSON.stringify(event.data)); worker.terminate(); };",
+			].join("\n"),
+		);
+		return { home, report: JSON.parse(stdout) as { active: string | null; root: string } };
+	}
+
+	it.skipIf(process.platform === "win32")(
+		"keeps the main thread's --profile in a worker when the project .env names another profile",
+		async () => {
+			// omp's worker spawn path: options given, so the worker inherits the main thread's live env.
+			const { home, report } = await runWorkerProbe(
+				'import { setProfile } from {dirs};\nsetProfile("work");',
+				', { type: "module" }',
+			);
+			expect(report).toEqual({ active: "work", root: path.join(home, ".omp", "profiles", "work") });
+		},
+		20_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"never lets the project .env pick a worker thread's profile",
+		async () => {
+			// No options and a main thread that never loaded pi-utils: Bun starts the worker from a fresh
+			// dotenv autoload, so the worker scrubs the autoloaded profile itself.
+			const { home, report } = await runWorkerProbe("", "");
+			expect(report).toEqual({ active: null, root: path.join(home, ".omp") });
+		},
+		20_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"loads when the working directory no longer exists",
+		async () => {
+			const dirsModulePath = path.join(import.meta.dir, "..", "src", "dirs.ts");
+			const { home, stdout } = await runInProject(
+				"",
+				[
+					'import * as fs from "node:fs";',
+					"const gone = fs.mkdtempSync(`${process.env.HOME}/gone-`);",
+					"process.chdir(gone);",
+					"fs.rmdirSync(gone);",
+					// Dynamic on purpose: `dirs` must first load after the cwd is gone.
+					`const dirs = await import(${JSON.stringify(dirsModulePath)});`,
+					"process.stdout.write(dirs.getConfigRootDir());",
+				].join("\n"),
+				{ XDG_CACHE_HOME: "/tmp/xdg-cache" },
+			);
+			expect(stdout).toBe(path.join(home, ".omp"));
+		},
+		20_000,
+	);
 });

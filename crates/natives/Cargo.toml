@@ -40,6 +40,7 @@ napi-derive.workspace = true
 log = "0.4"
 # Already in the graph via omp-builtins; SIMD newline search for IPC line framing.
 memchr = "2.7.4"
+mxc-sdk.workspace = true
 omp-vcs.workspace = true
 parking_lot.workspace = true
 pdf-inspector.workspace = true

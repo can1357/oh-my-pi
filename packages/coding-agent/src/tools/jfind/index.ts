@@ -21,6 +21,7 @@ import {
 	sharedJudgmentCache,
 } from "../../judgment";
 import findDescription from "../../prompts/tools/find.md" with { type: "text" };
+import { containToolExecute } from "../../sandbox/file-access";
 import { SPOTLIGHT_ENTRY } from "../../spotlight/types";
 import type { ToolSession } from "..";
 import { resolveToolTier } from "../approval";
@@ -94,6 +95,10 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 	readonly strict = true;
 
 	constructor(private readonly session: ToolSession) {}
+
+	static {
+		containToolExecute(this, tool => tool.session);
+	}
 
 	async execute(
 		toolCallId: string,

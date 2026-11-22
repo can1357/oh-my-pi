@@ -5,7 +5,7 @@ import { gunzip, gunzipSync } from "node:zlib";
 import { getDocsRsCacheDir, isEnoent, logger, ptree, tryParseJson, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { ToolAbortError } from "../../tools/tool-errors";
 import type { RenderResult, SpecialHandler } from "./types";
-import { buildResult, MAX_BYTES } from "./types";
+import { buildResult, fetchWithHostGuard, MAX_BYTES } from "./types";
 
 const gunzipAsync = promisify(gunzip);
 
@@ -369,7 +369,7 @@ export const handleDocsRs: SpecialHandler = async (
 
 		try {
 			const requestSignal = ptree.combineSignals(signal, timeout * 1000);
-			const response = await fetch(jsonUrl, {
+			const { response } = await fetchWithHostGuard(jsonUrl, {
 				signal: requestSignal,
 				headers: { "User-Agent": USER_AGENT, Accept: "application/gzip" },
 				redirect: "follow",

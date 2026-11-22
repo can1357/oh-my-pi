@@ -18,6 +18,8 @@ mod open;
 mod patch;
 mod read;
 use std::{
+	fs,
+	io::{self, Read, Write},
 	path::{Path, PathBuf},
 	sync::OnceLock,
 };
@@ -277,6 +279,214 @@ fn resolve_common_dir(git_dir: &Path) -> PathBuf {
 
 fn read_optional(path: &Path) -> Option<String> {
 	std::fs::read_to_string(path).ok()
+}
+
+/// Largest `HEAD` (or other one-line pointer file) read from a git dir: a
+/// symbolic ref, an object id or a path.
+pub(crate) const HEAD_LIMIT: u64 = 64 << 10;
+
+/// A git-dir file name no other call or process picks:
+/// `.omp-<tag>-<pid>-<time>-<n>`.
+pub(crate) fn unique_file_name(tag: &str) -> String {
+	use std::sync::atomic::{AtomicU64, Ordering};
+	static NEXT: AtomicU64 = AtomicU64::new(0);
+	let n = NEXT.fetch_add(1, Ordering::Relaxed);
+	let tick = std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+		.map_or(0, |elapsed| elapsed.as_nanos());
+	format!(".omp-{tag}-{}-{tick}-{n}", std::process::id())
+}
+
+/// Read a file inside a git dir, where sandboxed code can plant entries.
+/// A symlink (Windows: a symlink or junction, any name-surrogate reparse
+/// point) at `path` fails instead of being followed, as does anything but a
+/// regular file (a FIFO opens without blocking, then fails) and content over
+/// `limit` bytes. Windows reads any other reparse point (dedup, cloud
+/// placeholder) through a second, normal handle on the same file. With
+/// `single_link`, a file with other hard links fails too (Unix), so a
+/// hardlinked host file cannot pose as one the host wrote.
+pub(crate) fn read_git_file(path: &Path, limit: u64, single_link: bool) -> io::Result<Vec<u8>> {
+	let (file, len) = open_git_file(path, limit, single_link)?;
+	let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+	// The file may still grow after the size check.
+	file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+	if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
+		return Err(io::Error::new(io::ErrorKind::InvalidData, "is too large"));
+	}
+	Ok(bytes)
+}
+
+/// Open a file inside a git dir with [`read_git_file`]'s checks, for a caller
+/// that reads it incrementally: the open file and its length at the check
+/// (at most `limit`; the file may still grow, so bound reads by `limit`).
+pub(crate) fn open_git_file(
+	path: &Path,
+	limit: u64,
+	single_link: bool,
+) -> io::Result<(fs::File, u64)> {
+	let rejected = |reason: &str| io::Error::new(io::ErrorKind::InvalidData, reason.to_owned());
+	let mut options = fs::OpenOptions::new();
+	options.read(true);
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::OpenOptionsExt;
+		options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+	}
+	#[cfg(windows)]
+	{
+		use std::os::windows::fs::OpenOptionsExt;
+		options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+	}
+	let file = options.open(path)?;
+	// The reparse-point handle of a dedup file or cloud placeholder reads the
+	// stub, not the data; those are read through a handle opened normally.
+	#[cfg(windows)]
+	let file = match reparse_tag(&file)? {
+		None => file,
+		Some(tag) if is_name_surrogate(tag) => return Err(rejected("is a link")),
+		Some(_) => reopen_same_file(&file, path)?,
+	};
+	let metadata = file.metadata()?;
+	if !metadata.is_file() {
+		return Err(rejected("is not a regular file"));
+	}
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::MetadataExt;
+		if single_link && metadata.nlink() != 1 {
+			return Err(rejected("has other hard links"));
+		}
+	}
+	#[cfg(not(unix))]
+	let _ = single_link;
+	if metadata.len() > limit {
+		return Err(rejected("is too large"));
+	}
+	Ok((file, metadata.len()))
+}
+
+/// The reparse tag of the entry `file` was opened on (with
+/// `FILE_FLAG_OPEN_REPARSE_POINT`), `None` when it is no reparse point.
+#[cfg(windows)]
+fn reparse_tag(file: &fs::File) -> io::Result<Option<u32>> {
+	use std::os::windows::io::AsRawHandle;
+
+	use windows_sys::Win32::Storage::FileSystem::{
+		FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FileAttributeTagInfo,
+		GetFileInformationByHandleEx,
+	};
+	let mut info = FILE_ATTRIBUTE_TAG_INFO { FileAttributes: 0, ReparseTag: 0 };
+	// SAFETY: the handle is open for the duration of the call and `info` is a
+	// writable `FILE_ATTRIBUTE_TAG_INFO` of the size passed.
+	let ok = unsafe {
+		GetFileInformationByHandleEx(
+			file.as_raw_handle(),
+			FileAttributeTagInfo,
+			(&raw mut info).cast(),
+			size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+		)
+	};
+	if ok == 0 {
+		return Err(io::Error::last_os_error());
+	}
+	Ok((info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0).then_some(info.ReparseTag))
+}
+
+/// Whether the reparse `tag` marks a symlink, junction or other name
+/// surrogate (`IsReparseTagNameSurrogate`), one that points at another entry.
+#[cfg(windows)]
+const fn is_name_surrogate(tag: u32) -> bool {
+	tag & 0x2000_0000 != 0
+}
+
+/// Open `path` again without `FILE_FLAG_OPEN_REPARSE_POINT`, so reads return
+/// the file's data, and fail unless that handle is the same file as
+/// `reparse` (volume serial and file index): an entry swapped in between
+/// is not read.
+#[cfg(windows)]
+fn reopen_same_file(reparse: &fs::File, path: &Path) -> io::Result<fs::File> {
+	let file = fs::File::open(path)?;
+	if file_identity(&file)? != file_identity(reparse)? {
+		return Err(io::Error::new(io::ErrorKind::InvalidData, "changed while opened"));
+	}
+	Ok(file)
+}
+
+/// The volume serial number and file index of the file behind `file`.
+#[cfg(windows)]
+fn file_identity(file: &fs::File) -> io::Result<(u32, u32, u32)> {
+	use std::os::windows::io::AsRawHandle;
+
+	use windows_sys::Win32::Storage::FileSystem::{
+		BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+	};
+	// SAFETY: all-zero bytes are a valid `BY_HANDLE_FILE_INFORMATION`, a
+	// plain C struct of integers.
+	let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+	// SAFETY: the handle is open for the duration of the call and `info` is
+	// a writable `BY_HANDLE_FILE_INFORMATION`.
+	if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) } == 0 {
+		return Err(io::Error::last_os_error());
+	}
+	Ok((info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow))
+}
+
+/// [`read_git_file`] without a size or link-count limit, `None` when the file
+/// is missing.
+pub(crate) fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>> {
+	match read_git_file(path, u64::MAX, false) {
+		Ok(bytes) => Ok(Some(bytes)),
+		Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+		Err(err) => Err(err.into()),
+	}
+}
+
+/// Replace the file at `path`, inside a git dir where sandboxed code can plant
+/// entries, with `bytes`: they go to a fresh `create_new` file renamed over
+/// `path`. The rename swaps out whatever entry sits there, so a planted
+/// symlink or hard link is replaced, never written through. A regular file
+/// being replaced passes its permission bits on, as git's lockfile commit
+/// does. The temporary file is removed on failure.
+pub(crate) fn replace_git_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+	let name = path
+		.file_name()
+		.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
+	let temp = path.with_file_name(unique_file_name(&name.to_string_lossy()));
+	let mut file = fs::OpenOptions::new()
+		.write(true)
+		.create_new(true)
+		.open(&temp)?;
+	let written = file
+		.write_all(bytes)
+		.and_then(|()| keep_permissions(&file, path));
+	// Closed before the rename and the cleanup: Windows blocks both on an
+	// open handle.
+	drop(file);
+	let replaced = written.and_then(|()| fs::rename(&temp, path));
+	if replaced.is_err() {
+		let _ = fs::remove_file(&temp);
+	}
+	replaced
+}
+
+/// Give `file` the permission bits of the regular file at `path`, the one it
+/// replaces (git's `chmod(lock, st_mode & 07777)`); anything else at `path`
+/// leaves the default mode.
+#[cfg(unix)]
+fn keep_permissions(file: &fs::File, path: &Path) -> io::Result<()> {
+	use std::os::unix::fs::PermissionsExt;
+	match fs::symlink_metadata(path) {
+		Ok(old) if old.is_file() => {
+			file.set_permissions(fs::Permissions::from_mode(old.permissions().mode() & 0o7777))
+		},
+		_ => Ok(()),
+	}
+}
+
+#[cfg(not(unix))]
+#[expect(clippy::unnecessary_wraps, reason = "matches the Unix signature")]
+const fn keep_permissions(_file: &fs::File, _path: &Path) -> io::Result<()> {
+	Ok(())
 }
 
 /// Lexically normalize `.`/`..` segments without touching the filesystem, so
@@ -562,5 +772,83 @@ mod tests {
 				opened.head_id().expect("HEAD resolves");
 			}
 		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn read_git_file_rejects_what_contained_code_can_plant() {
+		let dir = tempfile::tempdir().unwrap();
+		let file = dir.path().join("file");
+		fs::write(&file, "12345").unwrap();
+		let invalid =
+			|result: io::Result<Vec<u8>>| result.unwrap_err().kind() == io::ErrorKind::InvalidData;
+
+		assert_eq!(read_git_file(&file, 5, true).unwrap(), b"12345");
+		assert!(invalid(read_git_file(&file, 4, true)), "over the limit");
+
+		let link = dir.path().join("link");
+		std::os::unix::fs::symlink(&file, &link).unwrap();
+		assert!(read_git_file(&link, 100, false).is_err(), "symlink followed");
+
+		let hard = dir.path().join("hard");
+		fs::hard_link(&file, &hard).unwrap();
+		assert!(invalid(read_git_file(&file, 100, true)), "hard link accepted");
+		assert_eq!(read_git_file(&file, 100, false).unwrap(), b"12345");
+
+		assert!(invalid(read_git_file(dir.path(), 100, false)), "directory");
+		let fifo = dir.path().join("fifo");
+		let status = Command::new("mkfifo").arg(&fifo).status().unwrap();
+		assert!(status.success());
+		// Without a writer, a blocking open would never return.
+		assert!(invalid(read_git_file(&fifo, 100, false)), "fifo");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn replace_git_file_removes_its_temporary_file_on_failure() {
+		let dir = tempfile::tempdir().unwrap();
+		let busy = dir.path().join("busy");
+		fs::create_dir(&busy).unwrap();
+		fs::write(busy.join("inner"), "x").unwrap();
+
+		assert!(replace_git_file(&busy, b"new").is_err());
+
+		let names: Vec<_> = fs::read_dir(dir.path())
+			.unwrap()
+			.map(|entry| entry.unwrap().file_name())
+			.collect();
+		assert_eq!(names, ["busy"]);
+	}
+
+	/// A replaced regular file keeps its permission bits, as under git; a
+	/// replaced link passes nothing on, its target's mode included.
+	#[cfg(unix)]
+	#[test]
+	fn replace_git_file_keeps_the_mode_of_a_replaced_regular_file() {
+		use std::os::unix::fs::PermissionsExt;
+		let mode = |path: &Path| fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777;
+		let dir = tempfile::tempdir().unwrap();
+		let fresh = dir.path().join("fresh");
+		replace_git_file(&fresh, b"fresh").unwrap();
+		let default_mode = mode(&fresh);
+		let private = 0o600;
+		assert_ne!(default_mode, private, "the umask must leave room to tell them apart");
+
+		let file = dir.path().join("config");
+		fs::write(&file, "old").unwrap();
+		fs::set_permissions(&file, fs::Permissions::from_mode(private)).unwrap();
+		replace_git_file(&file, b"new").unwrap();
+		assert_eq!(mode(&file), private);
+		assert_eq!(fs::read(&file).unwrap(), b"new");
+
+		let target = dir.path().join("target");
+		fs::write(&target, "target").unwrap();
+		fs::set_permissions(&target, fs::Permissions::from_mode(private)).unwrap();
+		let link = dir.path().join("link");
+		std::os::unix::fs::symlink(&target, &link).unwrap();
+		replace_git_file(&link, b"new").unwrap();
+		assert!(fs::symlink_metadata(&link).unwrap().is_file());
+		assert_eq!(mode(&link), default_mode);
+		assert_eq!(fs::read(&target).unwrap(), b"target");
 	}
 }

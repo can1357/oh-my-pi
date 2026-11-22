@@ -31,6 +31,8 @@ import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { recordToolApprovalRequested, recordToolApprovalResolved } from "../../session/tool-approval-records";
 import { applyToolProxy } from "../tool-proxy";
+import { sandboxCallDenial, sandboxSubjects } from "../../sandbox/gate";
+import { SandboxRuntime } from "../../sandbox/runtime";
 import type { ExtensionRunner } from "./runner";
 import type { ExtensionAgentIdentity, RegisteredTool, ToolCallEventResult } from "./types";
 
@@ -387,6 +389,21 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			cancelPreflight();
 			throw denyError(resolved, this.tool.name);
 		}
+		// The sandbox binds what omp does on the host for this call as it binds contained commands: a
+		// subject outside its policy is refused (whatever the approval mode) until `sandbox_request` grants it.
+		const pendingSandboxDenial = sandboxCallDenial({
+			settings: approvalSettings,
+			workspace: this.runner.cwd,
+			name: this.tool.name,
+			subjects: () => sandboxSubjects(this.tool, resolvedArgs, resolved.tier),
+			requestTool: () => this.runner.hasNativeTool("sandbox_request"),
+		});
+		// Awaited only when there is something to check, so the common path keeps its timing.
+		const sandboxDenial = pendingSandboxDenial && (await pendingSandboxDenial);
+		if (sandboxDenial !== undefined) {
+			cancelPreflight();
+			throw new Error(sandboxDenial);
+		}
 		const pendingSafetyChecks = computerSafetyChecks(context);
 		// ACP approval satisfies prompts only for the input the client approved: it compares
 		// against a deep snapshot because handlers can mutate the original argument object in
@@ -551,6 +568,8 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				details: undefined as TDetails,
 			};
 		}
+		// G7: what a contained command of this call created or replaced is ledgered before its result is seen.
+		SandboxRuntime.checkCreated();
 		if (!loopDispatchedToolCall) {
 			const postflight = await this.runner.runToolCallPreflightAfter?.(toolCallId, result, context);
 			if (postflight) result = postflight as AgentToolResult<TDetails, TParameters>;

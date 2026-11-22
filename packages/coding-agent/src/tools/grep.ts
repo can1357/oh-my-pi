@@ -3,7 +3,13 @@ import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentTool,
+	AgentToolContext,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+	SandboxSubject,
+} from "@oh-my-pi/pi-agent-core";
 import {
 	type EditStore,
 	type GrepMatch,
@@ -14,17 +20,21 @@ import {
 } from "@oh-my-pi/pi-natives";
 import { prompt, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import {
-	type ArchiveReader,
-	type ExtractedArchiveFile,
-	openArchive,
-	parseArchivePathCandidates,
-} from "@oh-my-pi/pi-utils/ar";
+import { type ExtractedArchiveFile, parseArchivePathCandidates } from "@oh-my-pi/pi-utils/ar";
 import { normalizeToLF } from "../edit/normalize";
 import { getEditStore, NO_FULL_LINE, recordFullySeenRows } from "../edit/store";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
+import {
+	containedFileAccess,
+	containedGrep,
+	containToolExecute,
+	mutateFile,
+	readFileText,
+	recordFileSnapshot,
+} from "../sandbox/file-access";
+import { SandboxRuntime } from "../sandbox/runtime";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_COLUMN, type TruncationResult, truncateHead } from "./streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
@@ -33,6 +43,7 @@ import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import type { ToolSession } from ".";
 import { resolveToolTier } from "./approval";
 import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
+import { webUrlSandboxSubjects } from "./web-url-subjects";
 import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file-recorder";
 import { type FileMatchSection, formatFileMatches } from "./grouped-file-output";
 import { formatMatchLine } from "./match-line-format";
@@ -56,6 +67,7 @@ import {
 	splitPathAndSelPreferringLiteralSync,
 } from "./path-utils";
 import { RACY_STAMP_WINDOW_MS } from "./racy-stamp";
+import { openReadableArchive, type ReadableArchive } from "./read-archive";
 import {
 	APPROVAL_ROOT_DELIMITERS,
 	approvalRootCandidates,
@@ -305,7 +317,18 @@ async function resolveArchiveSearchPaths(
 	const displaySet = new Set<string>();
 	const unreadable: string[] = [];
 	let tempDir: string | undefined;
-	const archiveCache = new Map<string, ArchiveReader>();
+	// Contained, the host makes, fills and removes the scratch dir: it lives in the runtime's temp
+	// dir, which every contained process can write, so omp must never write there itself (a swapped
+	// in symlink would redirect its write outside the sandbox). The container decides each step.
+	const contained = containedFileAccess() !== undefined;
+	const archiveCache = new Map<string, ReadableArchive>();
+
+	const cleanup = async () => {
+		await Promise.all([...archiveCache.values()].map(opened => opened[Symbol.asyncDispose]().catch(() => {})));
+		if (tempDir) {
+			await mutateFile({ kind: "rm", path: tempDir, recursive: true, force: true }).catch(() => {});
+		}
+	};
 
 	for (let idx = 0; idx < pathSpecs.length; idx++) {
 		const spec = pathSpecs[idx];
@@ -316,20 +339,20 @@ async function resolveArchiveSearchPaths(
 		if (!member) continue;
 
 		const archiveAbs = resolveReadPath(member.archivePath, cwd);
-		let archive = archiveCache.get(archiveAbs);
-		if (!archive) {
+		let opened = archiveCache.get(archiveAbs);
+		if (!opened) {
 			try {
-				archive = await openArchive(archiveAbs);
+				opened = await openReadableArchive(archiveAbs);
 			} catch (err) {
 				unreadable.push(`${entry} (cannot open archive: ${(err as Error).message})`);
 				continue;
 			}
-			archiveCache.set(archiveAbs, archive);
+			archiveCache.set(archiveAbs, opened);
 		}
 
 		let extracted: ExtractedArchiveFile;
 		try {
-			extracted = await archive.readFile(member.subPath);
+			extracted = await opened.archive.readFile(member.subPath);
 		} catch (err) {
 			unreadable.push(`${entry} (${(err as Error).message})`);
 			continue;
@@ -347,24 +370,33 @@ async function resolveArchiveSearchPaths(
 			continue;
 		}
 
-		if (!tempDir) {
-			tempDir = await mkdtemp(path.join(tmpdir(), "omp-search-archive-"));
-		}
 		// Per-entry filename keeps the scratch path unique even when two selectors
 		// resolve to members with the same basename.
 		const safeBase = path.basename(member.subPath).replace(/[^\w.-]+/g, "_") || "entry";
-		const tempPath = path.join(tempDir, `${idx}-${safeBase}`);
-		await writeFile(tempPath, text);
+		let tempPath: string;
+		try {
+			if (!tempDir) {
+				if (contained) {
+					// Random name, not `mkdtemp`: the host creates the directory, not omp.
+					const scratchRoot = (await SandboxRuntime.for(cwd)).tempDir();
+					tempDir = path.join(scratchRoot, `omp-search-archive-${crypto.randomUUID()}`);
+					await mutateFile({ kind: "mkdir", path: tempDir });
+				} else {
+					tempDir = await mkdtemp(path.join(tmpdir(), "omp-search-archive-"));
+				}
+			}
+			tempPath = path.join(tempDir, `${idx}-${safeBase}`);
+			await mutateFile({ kind: "write", path: tempPath, data: text });
+		} catch (err) {
+			// The caller never receives `cleanup`: close the opened archives and drop the scratch here.
+			await cleanup();
+			throw err;
+		}
 		resolvedPaths[idx] = tempPath;
 		displayMap.set(tempPath, entry);
 		displaySet.add(entry);
 	}
 
-	const cleanup = async () => {
-		if (tempDir) {
-			await rm(tempDir, { recursive: true, force: true }).catch(() => {});
-		}
-	};
 	return { resolvedPaths, displayMap, displaySet, unreadable, cleanup };
 }
 
@@ -407,6 +439,11 @@ const snapshotStampsByStore = new WeakMap<EditStore, LRUCache<string, SnapshotSt
  * stale tag.
  */
 async function recordSnapshotTags(store: EditStore, snapshotPaths: readonly string[]): Promise<(string | null)[]> {
+	// Contained, every snapshot read goes through the verified handle: no stamp shortcut, so the
+	// container decides each access.
+	if (containedFileAccess()) {
+		return Promise.all(snapshotPaths.map(filePath => recordFileSnapshot(store, filePath)));
+	}
 	const stamps = snapshotStampsByStore.get(store) ?? new LRUCache<string, SnapshotStamp>({ max: SNAPSHOT_STAMP_MAX });
 	snapshotStampsByStore.set(store, stamps);
 	const stats = await Promise.all(snapshotPaths.map(filePath => stat(filePath, { bigint: true }).catch(() => null)));
@@ -599,6 +636,11 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			skipCandidate,
 		);
 	};
+	/** A web URL among the roots is fetched by omp outside the OS sandbox: its host is what the sandbox's network policy sees. */
+	readonly sandboxSubjects = (args: unknown): readonly SandboxSubject[] | undefined => {
+		const a = args as { path?: string | string[]; paths?: string | string[] } | null | undefined;
+		return webUrlSandboxSubjects(this, args, toPathList(a?.path ?? a?.paths));
+	};
 	readonly label = "Grep";
 	readonly loadMode = "discoverable";
 	readonly summary = "Search file contents by regex";
@@ -650,6 +692,10 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 		this.#contextAfterOverride = after !== undefined ? Math.max(0, Math.floor(after)) : undefined;
 		const total = options?.totalMatchLimit;
 		this.#totalMatchLimit = total !== undefined ? Math.max(1, Math.floor(total)) : undefined;
+	}
+
+	static {
+		containToolExecute(this, tool => tool.session);
 	}
 
 	async execute(
@@ -705,6 +751,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					this.session,
 					{ path: target.path, raw: isRawSelector(target.sel) },
 					signal,
+					this.name,
 				);
 				// An error page or a blocked fetch has no content to search; "no matches" would hide why.
 				const { method, notes } = materialized.details;
@@ -848,7 +895,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								}))
 							: (multiTargets ?? []);
 						for (const target of targets) {
-							const targetResult = await grep(
+							const targetResult = await containedGrep(
 								{
 									pattern: normalizedPattern,
 									path: target.basePath,
@@ -904,7 +951,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							limitReached,
 						};
 					} else {
-						result = await grep(
+						result = await containedGrep(
 							{
 								pattern: normalizedPattern,
 								path: searchPath,
@@ -959,7 +1006,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							if (!path.isAbsolute(absolute)) continue;
 							let text: string;
 							try {
-								text = normalizeToLF(notebookToEditableText(await Bun.file(absolute).text(), notebookPath));
+								text = normalizeToLF(notebookToEditableText(await readFileText(absolute), notebookPath));
 							} catch {
 								continue;
 							}
@@ -1221,7 +1268,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					// mistaken for absence (generated docs, plans, vendored sources).
 					let ignoredNote: string | undefined;
 					if (useGitignore && isDirectory && !multiTargets && !exactFilePaths && !skipPastEnd) {
-						const ignored = await grep(
+						const ignored = await containedGrep(
 							{
 								pattern: normalizedPattern,
 								path: searchPath,

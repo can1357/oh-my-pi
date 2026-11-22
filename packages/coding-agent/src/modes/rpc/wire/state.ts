@@ -153,6 +153,10 @@ export const stateDefs = {
 		dumpTools: absentAs("ToolDescriptor[]", []),
 		"contextUsage?": "ContextUsage",
 		goal: absentAs(doc("GoalModeState | null", "Current goal mode; null when the session has no goal."), null),
+		"sandbox?": doc(
+			"SandboxSummary",
+			"Sandbox status of the session's workspace; absent on servers without the sandbox commands.",
+		),
 	},
 
 	BashResult: {
@@ -202,6 +206,7 @@ export const stateDefs = {
 			"ShellForkOutcome",
 			"Set when the command overlapped another one on the session's persistent shell and ran in a fork of it.",
 		),
+		"sandbox?": doc("SandboxResultMeta", "Present when the command ran inside the OS sandbox."),
 	},
 	ShellForkOutcome: {
 		carried: doc(
@@ -211,6 +216,28 @@ export const stateDefs = {
 		jobs: doc(
 			"boolean",
 			"It left background jobs running in the fork, where later commands' `jobs`, `wait` and `%N` miss them.",
+		),
+	},
+	SandboxResultMeta: {
+		backend: "string",
+		mode: "SandboxMode",
+		network: "SandboxNetworkMode",
+		"blockedHosts?": doc(
+			"string[]",
+			"Hosts the egress proxy refused during this command, by time; refusals attributed to other commands are left out.",
+		),
+		"ownBlockedHosts?": doc(
+			"string[]",
+			"Hosts the egress proxy refused to this command's own requests (by its proxy credentials or its own proxy port), even when it succeeded.",
+		),
+		"denied?": doc("boolean", "The output looks like a filesystem denial by the sandbox."),
+		"networkOff?": doc(
+			"boolean",
+			"The network is off (`deny`) and the output shows a failed name resolution or refused connection.",
+		),
+		"startFailed?": doc(
+			"boolean",
+			"Windows: a program could not start under the sandbox: exit code 0xC0000142 (STATUS_DLL_INIT_FAILED), or the MSYS/Cygwin runtime's own fatal error.",
 		),
 	},
 	LineRange: { first: "number.integer", last: "number.integer" },
@@ -422,5 +449,147 @@ export const stateDefs = {
 	PromptAck: doc(
 		{ "agentInvoked?": "boolean" },
 		"`agentInvoked: false` means the prompt completed locally and no `prompt_result` follows.",
+	),
+
+	SandboxSettingId: doc(
+		"'enabled' | 'mode' | 'scope' | 'fallback' | 'readScope' | 'networkMode' | 'allowWrite' | 'allowRead' | 'denyRead' | 'allowedHosts'",
+		"A `sandbox.*` setting the sandbox commands address.",
+	),
+	SandboxListId: doc("'allowWrite' | 'allowRead' | 'denyRead' | 'allowedHosts'", "A path or host list setting."),
+	SandboxMode: "'workspace-write' | 'read-only'",
+	SandboxScope: "'bash' | 'eval' | 'exec'",
+	SandboxFallback: "'warn' | 'block'",
+	SandboxReadScope: "'all' | 'workspace'",
+	SandboxNetworkMode: "'allowlist' | 'deny' | 'allow'",
+	SandboxListOp: "'add' | 'remove' | 'replace'",
+	SandboxGrantScope: "'session' | 'always'",
+	SandboxHostDecision: doc(
+		"'once' | 'session' | 'always' | 'deny'",
+		"Answer to a `sandbox_host_request`: allow this connection, allow the host for the session, add it to the global allowlist, or refuse.",
+	),
+	SandboxPathKind: "'write' | 'read'",
+	SandboxAccessKind: doc(
+		"'write' | 'read' | 'host' | 'exec'",
+		"`exec`: an action omp performs on the host outside the sandbox; granted for the session only (`canAlways` is false).",
+	),
+	SandboxAccessDecision: doc(
+		"'session' | 'always' | 'deny' | 'instruct'",
+		"Answer to a `sandbox_access_request`: grant the target for the session, add it to the global list, refuse, or reply with `instructions` and grant nothing.",
+	),
+	SandboxStatusOff: { state: "'off'" },
+	SandboxStatusActive: {
+		state: "'active'",
+		backend: "string",
+		network: doc(
+			"SandboxNetworkMode",
+			"Network mode as enforced here (a mode this host cannot enforce runs as deny).",
+		),
+		warnings: "string[]",
+	},
+	SandboxStatusUnavailable: {
+		state: "'unavailable'",
+		reason: "string",
+		fallback: doc("SandboxFallback", "`warn`: commands run unsandboxed; `block`: they fail."),
+	},
+	SandboxStatus: doc(
+		"SandboxStatusOff | SandboxStatusActive | SandboxStatusUnavailable",
+		"Runtime status of the sandbox, discriminated by `state`.",
+	),
+	SandboxSummary: doc(
+		{ state: "'off' | 'active' | 'unavailable'", "backend?": doc("string", "Containment backend while active.") },
+		"Sandbox status without the detail `get_sandbox` returns.",
+	),
+	SandboxSettingValues: doc(
+		{
+			enabled: "boolean",
+			mode: "SandboxMode",
+			scope: "SandboxScope[]",
+			fallback: "SandboxFallback",
+			readScope: "SandboxReadScope",
+			networkMode: "SandboxNetworkMode",
+			allowWrite: "string[]",
+			allowRead: "string[]",
+			denyRead: "string[]",
+			allowedHosts: "string[]",
+		},
+		"Values an edit starts from: scalars as effective here, scope and lists from the operator layers (what a write replaces).",
+	),
+	SandboxLocked: doc(
+		{
+			"enabled?": "string",
+			"mode?": "string",
+			"scope?": "string",
+			"fallback?": "string",
+			"readScope?": "string",
+			"networkMode?": "string",
+			"allowWrite?": "string",
+			"allowRead?": "string",
+			"denyRead?": "string",
+			"allowedHosts?": "string",
+		},
+		"Settings another layer decides, with the reason; writing one fails with `sandbox_locked`.",
+	),
+	SandboxNetworkUnavailable: doc(
+		{ "allow?": "string", "allowlist?": "string" },
+		"Network modes this host cannot enforce, with the reason (the missing packages); writing one with `set_sandbox_setting` fails with `sandbox_unsupported`. `deny` always works.",
+	),
+	SandboxListNotes: doc(
+		{ "allowWrite?": "string", "allowRead?": "string", "denyRead?": "string", "allowedHosts?": "string" },
+		"Per-list note when project config narrows the list in this workspace.",
+	),
+	SandboxIgnoredValue: doc(
+		{ id: "string", reason: "string" },
+		"A project-layer value dropped because it would loosen the sandbox.",
+	),
+	SandboxEffectivePolicy: doc(
+		{ readwritePaths: "string[]", readonlyPaths: "string[]", deniedPaths: "string[]" },
+		"Resolved filesystem policy for the workspace.",
+	),
+	SandboxSessionPaths: doc(
+		{ write: "string[]", read: "string[]" },
+		"Paths allowed for this session only: writable (and readable), and readable.",
+	),
+	SandboxCreatedPath: doc(
+		{
+			path: doc("string", "The path as omp watched it."),
+			real: doc("string", "What it resolved to when the change was seen."),
+			workspace: doc("string", "Workspace of the sandboxed command."),
+			at: doc("number", "When omp saw the change (ms since the epoch)."),
+			"gitDir?": doc(
+				"string",
+				"The repository (common dir) whose hooks path it is, when that lies outside the git dir.",
+			),
+			exists: doc("boolean", "Whether it exists now; only a path that no longer exists can be removed."),
+		},
+		"A protected path a sandboxed command created or replaced: kept protected and its project config skipped until trusted; host git is refused when it lies in a repository's git metadata.",
+	),
+	SandboxState: doc(
+		{
+			workspace: doc("string", "Directory the policy is resolved for (the session cwd)."),
+			status: "SandboxStatus",
+			settings: "SandboxSettingValues",
+			locked: "SandboxLocked",
+			networkUnavailable: "SandboxNetworkUnavailable",
+			listNotes: "SandboxListNotes",
+			ignored: "SandboxIgnoredValue[]",
+			effective: "SandboxEffectivePolicy",
+			blockedHosts: doc("string[]", "Hosts refused this session that are still not allowed, most recent first."),
+			sessionHosts: doc("string[]", "Hosts allowed for this session only."),
+			sessionPaths: doc("SandboxSessionPaths", "Paths allowed for this session only."),
+			sessionExec: doc(
+				"string[]",
+				"Actions omp performs on the host outside the sandbox, granted for this session only.",
+			),
+			created: doc(
+				"SandboxCreatedPath[]",
+				"Protected paths a sandboxed command of this workspace created or replaced.",
+			),
+			hostPrompts: doc("boolean", "Unknown hosts raise `sandbox_host_request` frames (`set_sandbox_host_prompts`)."),
+			accessPrompts: doc(
+				"boolean",
+				"The agent's access requests raise `sandbox_access_request` frames (`set_sandbox_access_prompts`).",
+			),
+		},
+		"Sandbox state of the session's workspace; every sandbox mutation answers it and `sandbox_update` pushes it.",
 	),
 } satisfies WireDefs;

@@ -10,11 +10,21 @@ function workerThreads(): typeof WorkerThreads {
 	if (!workerThreadsCache) workerThreadsCache = require("node:worker_threads") as typeof WorkerThreads;
 	return workerThreadsCache;
 }
-import { isRecord, logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { sandboxSupport } from "@oh-my-pi/pi-natives";
+import { isRecord, LineTooLongError, logger, Snowflake, settleWithin, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { JS_EVAL_STDIO_WORKER_ARG } from "../../cli/worker-selectors";
+import { sessionSandboxWritableRoots } from "../../internal-urls/context";
+import { containedEnv } from "../../sandbox/env";
+import { EVAL_EGRESS_SCOPE, SandboxRuntime } from "../../sandbox/runtime";
+import type { SandboxNetworkMode } from "../../sandbox/types";
+import type { PipedChild } from "../../subprocess/piped-child";
 import {
 	createWorkerHandle,
 	createWorkerSubprocess,
+	resolveCliEntryCmd,
 	resolveWorkerSpawnCmd,
+	STDERR_TAIL_LIMIT_BYTES,
+	StderrTail,
 	workerEnvFromParent,
 } from "../../subprocess/worker-client";
 import { registerOnBoard } from "../../daemon/client";
@@ -32,6 +42,7 @@ import {
 	formatKernelRestartNotice,
 	type SessionOwners,
 } from "../executor-base";
+import { evalSandboxFingerprint } from "../kernel-base";
 import { shouldDetachKernel } from "../py/spawn-options";
 import { updateEvalState } from "../state";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
@@ -41,6 +52,7 @@ import type { EvalDisplayOutput, EvalToolDescriptor, EvalToolInvokeResult } from
 import { BUN_STUB_MESSAGE, jsKernelEnv } from "./kernel-env";
 import { type ShadowSnapshot, shadowSnapshotDigest } from "./shared/shadow-snapshot";
 import { projectJavaScriptShadowPlan } from "./speculation";
+import { decodeStdioLine, encodeStdioFrame, readStdioLines } from "./stdio-transport";
 import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so compiled/npm builds only need one JavaScript entry.
@@ -84,6 +96,12 @@ export interface JsEvalWorkerFactories {
 	/** `sessionId` is the agent session the subprocess is listed under on the daemon board. */
 	spawnProcess(sessionId?: string): JsEvalWorkerHandle;
 	spawnWorker(): JsEvalWorkerHandle;
+	/**
+	 * Command that starts the contained evaluator, serving `runStdioSubprocessWorker` (an entry
+	 * that bypasses the CLI's Bun version gate, which can refuse the test runner's Bun);
+	 * `undefined` re-enters the CLI selector.
+	 */
+	containedArgv?: string[];
 }
 
 interface PendingRun {
@@ -127,6 +145,8 @@ interface JsSession {
 	packageRoot?: string;
 	packageEnvironment?: string;
 	worker: JsEvalWorkerHandle;
+	/** Sandbox policy fingerprint the worker was contained under; `undefined` when it runs uncontained. */
+	sandbox: string | undefined;
 	state: "alive" | "dead";
 	stateSessions: Set<ToolSession>;
 	pending: Map<string, PendingRun>;
@@ -261,6 +281,7 @@ export async function invokeJsTool(
 ): Promise<EvalToolInvokeResult | { ok: true; tools: EvalToolDescriptor[]; missing: string[] }> {
 	const session = sessions.get(options.sessionKey);
 	if (!session || session.state !== "alive") throw new EvalKernelNotRunningError("JavaScript");
+	if (!(await retainedSandboxCurrent(session, session.cwd))) throw new EvalKernelNotRunningError("JavaScript");
 
 	const runId = `tool-${crypto.randomUUID()}`;
 	const { promise, resolve, reject } = Promise.withResolvers<{ value: unknown }>();
@@ -409,6 +430,8 @@ export async function runIfSnapshotMatches(options: {
 }): Promise<{ value: unknown } | null> {
 	const session = sessions.get(options.sessionKey);
 	if (session?.state !== "alive") return null;
+	// A worker kept from another sandbox policy must not run this cell; the normal path restarts it.
+	if (!(await retainedSandboxCurrent(session, options.cwd))) return null;
 	try {
 		return await runOnce(session, options);
 	} catch (error) {
@@ -499,15 +522,27 @@ export async function disposeVmContextsByOwner(ownerId: string, options?: Dispos
  * that otherwise strand every cell on the init timeout in a distribution build —
  * the failure mode that motivated `installWorkerInbox`. Wired into
  * `omp --smoke-test` so binary / source / tarball installs all exercise it.
+ * Where the OS sandbox is supported it repeats the handshake with the
+ * contained evaluator (`__omp_worker_js_eval_stdio`, stdio-framed transport).
  */
 export async function smokeTestJsEvalWorker(): Promise<void> {
-	const worker = spawnJsWorker();
+	await smokeTestJsEvalSession(spawnJsWorker(), undefined);
+	// The contained evaluator re-enters the CLI through its own selector and stdio transport.
+	if (sandboxSupport().supported) {
+		const sandbox = await SandboxRuntime.for(process.cwd());
+		const worker = await spawnContainedJsProcess(sandbox, { cwd: process.cwd(), network: "deny" });
+		await smokeTestJsEvalSession(worker, sandbox.fingerprint());
+	}
+}
+
+async function smokeTestJsEvalSession(worker: JsEvalWorkerHandle, sandbox: string | undefined): Promise<void> {
 	const session: JsSession = {
 		sessionKey: "smoke",
 		sessionId: "smoke",
 		kernelId: `js-${Snowflake.next()}`,
 		cwd: process.cwd(),
 		worker,
+		sandbox,
 		state: "alive",
 		stateSessions: new Set(),
 		pending: new Map(),
@@ -696,6 +731,15 @@ async function acquireSession(
 	timeoutMs?: number,
 	ownerId?: string,
 ): Promise<JsSession> {
+	// The in-process Worker cannot be contained, so while the sandbox applies the evaluator runs
+	// only as a contained subprocess, and a retained worker started under another policy (or
+	// uncontained) is retired so the change takes effect on this cell.
+	const sandbox = await SandboxRuntime.forScope(snapshot.cwd, "eval");
+	const sandboxFingerprint = sandbox?.fingerprint();
+	const retained = sessions.get(sessionKey);
+	if (retained && retained.state === "alive" && retained.sandbox !== sandboxFingerprint) {
+		await killSessionFor(retained, new ToolError("JS context restarted: sandbox policy changed"), { force: false });
+	}
 	const existing = sessions.get(sessionKey);
 	if (existing && existing.state === "alive") {
 		existing.sessionId = snapshot.sessionId;
@@ -710,6 +754,14 @@ async function acquireSession(
 	if (starting) {
 		attachSessionOwner(starting, snapshot.sessionId, ownerId);
 		const session = await starting.promise;
+		if (session.sandbox !== sandboxFingerprint) {
+			// It began under another policy (or uncontained) before this cell saw the current one:
+			// retire it like a retained worker and acquire again, joining whatever start replaced it.
+			await killSessionFor(session, new ToolError("JS context restarted: sandbox policy changed"), {
+				force: false,
+			});
+			return acquireSession(sessionKey, snapshot, toolSession, timeoutMs, ownerId);
+		}
 		markJsSessionAlive(session, toolSession, snapshot.packageEnvironment);
 		return session;
 	}
@@ -719,7 +771,15 @@ async function acquireSession(
 	const startup = (async (): Promise<JsSession> => {
 		// Attach the message listener before sending init. Both Bun Worker messages
 		// and subprocess IPC can arrive immediately after the evaluator loads.
-		const worker = spawnJsWorker(toolSession.getSessionId?.() ?? undefined);
+		const sessionId = toolSession.getSessionId?.() ?? undefined;
+		const worker = sandbox
+			? await spawnContainedJsProcess(sandbox, {
+					cwd: snapshot.cwd,
+					packageRoot: snapshot.packageRoot,
+					extraWrite: sessionSandboxWritableRoots(toolSession),
+					sessionId,
+				})
+			: spawnJsWorker(sessionId);
 		const session: JsSession = {
 			sessionKey,
 			sessionId: snapshot.sessionId,
@@ -728,6 +788,7 @@ async function acquireSession(
 			packageRoot: snapshot.packageRoot,
 			packageEnvironment: snapshot.packageEnvironment,
 			worker,
+			sandbox: sandboxFingerprint,
 			state: "alive",
 			stateSessions: new Set(),
 			pending: new Map(),
@@ -748,10 +809,11 @@ async function acquireSession(
 				// error callback, after the synchronous spawn try/catch has returned.
 				// Recover once from the subprocess into a Bun Worker. A second isolated
 				// runtime failure must surface; running the cell on this host thread
-				// would make synchronous user code impossible to cancel.
+				// would make synchronous user code impossible to cancel. A contained
+				// subprocess never falls back: the Worker would run uncontained.
 				const failed = session.worker;
 				await failed.terminate().catch(() => undefined);
-				if (failed.mode === "worker") {
+				if (failed.mode === "worker" || sandbox) {
 					throw new Error(
 						`Failed to initialize isolated JS eval worker: ${error instanceof Error ? error.message : String(error)}`,
 						{ cause: error },
@@ -1122,7 +1184,20 @@ function spawnBunWorker(): JsEvalWorkerHandle {
 	}
 }
 
+/** List a JS eval subprocess on the daemon board until it exits (close, terminate, and crashes). */
+function listJsEvalOnBoard(pid: number, exited: Promise<unknown>, sessionId: string | undefined): void {
+	const board = registerOnBoard({
+		kind: "external",
+		scope: { kind: "session", id: sessionId || `process-${process.pid}` },
+		key: `js-eval:${pid}`,
+		label: "js eval",
+		pid,
+	});
+	void exited.finally(() => board.dispose());
+}
+
 function spawnJsProcess(sessionId?: string): JsEvalWorkerHandle {
+	if (process.platform === "win32") return spawnStdioJsProcess(sessionId);
 	const spawned = createWorkerSubprocess<WorkerOutbound>({
 		spawnCommand: resolveWorkerSpawnCmd(JS_EVAL_PROCESS_ARG, { sameBuild: true }),
 		env: jsKernelEnv(workerEnvFromParent()),
@@ -1131,56 +1206,200 @@ function spawnJsProcess(sessionId?: string): JsEvalWorkerHandle {
 		reportCleanExit: true,
 		unref: false,
 	});
-	const pid = spawned.proc.pid;
-	const board = registerOnBoard({
-		kind: "external",
-		scope: { kind: "session", id: sessionId || `process-${process.pid}` },
-		key: `js-eval:${pid}`,
-		label: "js eval",
-		pid,
-	});
-	// Exit covers every teardown path: close, terminate, and crashes.
-	void spawned.proc.exited.finally(() => board.dispose());
+	listJsEvalOnBoard(spawned.proc.pid, spawned.proc.exited, sessionId);
 	const base = createWorkerHandle<WorkerInbound, WorkerOutbound>(spawned, message =>
 		safeSendIpc(spawned.proc, message, "js-eval"),
 	);
+	const terminate = async (): Promise<void> => {
+		await base.terminate();
+		// Bun hands the child's IPC messages to `ipc` until the channel closes, a SIGKILLed
+		// child's included; wait for that so its last output reaches the handlers. Bounded: a
+		// descendant that inherited the channel could keep it open.
+		await settleWithin(spawned.disconnected, WORKER_CLOSE_TIMEOUT_MS);
+	};
 	return {
 		mode: "process",
 		send: message => base.send(message),
 		onMessage: handler => base.onMessage(handler),
 		onError: handler => base.onError(handler),
-		async close() {
-			const { promise, resolve } = Promise.withResolvers<boolean>();
-			let settled = false;
-			let unsubscribe = (): void => {};
-			const finish = (value: boolean): void => {
-				if (settled) return;
-				settled = true;
-				if (timeout) clearTimeout(timeout);
-				unsubscribe();
-				resolve(value);
-			};
-			unsubscribe = base.onMessage(message => {
-				if (message.type !== "closed") return;
-				void base.terminate().finally(() => finish(true));
+		// The `closed` ack already crossed IPC: a plain kill, no wait for the channel to drain.
+		close: () => closeProcessWorker(base, () => base.terminate()),
+		terminate,
+	};
+}
+
+/**
+ * Ask a subprocess evaluator to close and kill it once it acknowledged with `closed`. Resolves
+ * `false` when no acknowledgement arrived in time; the caller then terminates it.
+ */
+async function closeProcessWorker(
+	base: Pick<JsEvalWorkerHandle, "send" | "onMessage">,
+	terminate: () => Promise<void>,
+): Promise<boolean> {
+	const { promise, resolve } = Promise.withResolvers<boolean>();
+	let settled = false;
+	let unsubscribe = (): void => {};
+	const finish = (value: boolean): void => {
+		if (settled) return;
+		settled = true;
+		clearTimeout(timeout);
+		unsubscribe();
+		resolve(value);
+	};
+	unsubscribe = base.onMessage(message => {
+		if (message.type !== "closed") return;
+		void terminate().finally(() => finish(true));
+	});
+	const timeout = setTimeout(() => finish(false), WORKER_CLOSE_TIMEOUT_MS);
+	base.send({ type: "close" });
+	return await promise;
+}
+
+/** True when `session`'s worker was started under the sandbox policy that applies to `cwd` now. */
+async function retainedSandboxCurrent(session: JsSession, cwd: string): Promise<boolean> {
+	const fingerprint = await evalSandboxFingerprint(cwd);
+	return session.state === "alive" && session.sandbox === fingerprint;
+}
+
+/**
+ * Windows: Bun queues a child's IPC sends until its event loop runs, so a cell spinning in
+ * synchronous code loses the output it printed last when `terminate()` kills it. Pipe writes land
+ * in the kernel at once, so the evaluator sends its frames on stdout, as it does inside the
+ * sandbox. Messages to it still travel over IPC: its stdin stays closed, so cell code and the
+ * children it spawns never read (and swallow) protocol traffic.
+ */
+function spawnStdioJsProcess(sessionId: string | undefined): JsEvalWorkerHandle {
+	const { cmd, cwd } = resolveWorkerSpawnCmd(JS_EVAL_STDIO_WORKER_ARG);
+	const child = Bun.spawn({
+		cmd,
+		cwd,
+		env: workerEnvFromParent(),
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "pipe",
+		serialization: "advanced",
+		windowsHide: true,
+		// Inbound only: the evaluator answers on stdout. Bun opens the channel only with a handler.
+		ipc() {},
+	});
+	listJsEvalOnBoard(child.pid, child.exited, sessionId);
+	return wrapStdioJsProcess(child, message => safeSendIpc(child, message, "js-eval"));
+}
+
+/**
+ * Start the evaluator subprocess inside the OS sandbox. Bun's `ipc` channel cannot cross the
+ * container boundary, so it speaks the stdio-framed transport (`./stdio-transport`) through the
+ * `JS_EVAL_STDIO_WORKER_ARG` selector instead; that process relays the stdin frames over IPC to
+ * the evaluator it starts inside the container, so cell code never sees them on its stdin.
+ * `packageRoot` (the managed package environment, outside the workspace) stays readable and
+ * `extraWrite` (the session's `local://` root) writable; `network` overrides the configured mode
+ * (the smoke probe uses `deny` to keep the proxy down); `sessionId` lists it on the daemon board.
+ */
+async function spawnContainedJsProcess(
+	sandbox: SandboxRuntime,
+	options: {
+		cwd: string;
+		packageRoot?: string;
+		extraWrite?: readonly string[];
+		network?: SandboxNetworkMode;
+		sessionId?: string;
+	},
+): Promise<JsEvalWorkerHandle> {
+	const child = await sandbox.spawn({
+		argv: workerFactories.containedArgv ?? [...resolveCliEntryCmd(), JS_EVAL_STDIO_WORKER_ARG],
+		cwd: options.cwd,
+		env: containedEnv(workerEnvFromParent()),
+		extraRead: options.packageRoot ? [options.packageRoot] : undefined,
+		extraWrite: options.extraWrite,
+		network: options.network,
+		// Its own proxy port: an eval call owns the refusals of the evaluator while it runs.
+		egressScope: EVAL_EGRESS_SCOPE,
+	});
+	listJsEvalOnBoard(child.pid, child.exited, options.sessionId);
+	return wrapStdioJsProcess(child, message => {
+		try {
+			child.stdin.write(encodeStdioFrame(message));
+		} catch (error) {
+			logger.debug("js-eval: send to subprocess failed", {
+				error: error instanceof Error ? error.message : String(error),
 			});
-			const timeout = setTimeout(() => finish(false), WORKER_CLOSE_TIMEOUT_MS);
-			base.send({ type: "close" });
-			return await promise;
-		},
-		async terminate() {
-			await base.terminate();
-			// Bun hands the child's IPC messages to `ipc` until the channel closes, a SIGKILLed
-			// child's included; wait for that so its last output reaches the handlers. Bounded: a
-			// descendant that inherited the channel could keep it open.
-			const bound = Promise.withResolvers<void>();
-			const timer = setTimeout(bound.resolve, WORKER_CLOSE_TIMEOUT_MS);
-			try {
-				await Promise.race([spawned.disconnected, bound.promise]);
-			} finally {
-				clearTimeout(timer);
+		}
+	});
+}
+
+/**
+ * The worker handle over an evaluator answering in stdio frames; `send` delivers messages to it.
+ * Mirrors {@link spawnJsProcess}: every exit not caused by `terminate()` (clean exits included)
+ * faults the session with the stderr tail.
+ */
+function wrapStdioJsProcess(
+	child: Omit<PipedChild, "stdin">,
+	send: (message: WorkerInbound) => void,
+): JsEvalWorkerHandle {
+	const handlers = new Set<(msg: WorkerOutbound) => void>();
+	const errors = new Set<(error: Error) => void>();
+	const fail = (error: Error): void => {
+		for (const handler of errors) handler(error);
+	};
+	let intentionalExit = false;
+	const kill = (): void => {
+		intentionalExit = true;
+		child.kill();
+	};
+	const deliver = (message: unknown): void => {
+		for (const handler of handlers) handler(message as WorkerOutbound);
+	};
+	const noise = (text: string): void => logger.debug("JS eval worker stdout", { text });
+	const stdoutDrained = (async () => {
+		try {
+			for await (const line of readStdioLines(child.stdout)) {
+				try {
+					decodeStdioLine(line, deliver, noise);
+				} catch (cause) {
+					if (intentionalExit) continue;
+					fail(new Error("JS eval worker sent a malformed frame; recycling worker", { cause }));
+					kill();
+				}
 			}
+		} catch (cause) {
+			// A line past the frame cap: stop reading before it can exhaust memory.
+			if (intentionalExit || !(cause instanceof LineTooLongError)) throw cause;
+			fail(new Error("JS eval worker sent an oversized frame; recycling worker", { cause }));
+			kill();
+		}
+	})().catch(error => logger.debug("JS eval worker stdout read failed", { error: String(error) }));
+	const stderrTail = new StderrTail(STDERR_TAIL_LIMIT_BYTES);
+	const stderrDrained = (async () => {
+		for await (const chunk of child.stderr) stderrTail.append(chunk);
+	})().catch(error => logger.debug("JS eval worker stderr read failed", { error: String(error) }));
+	void child.exited.then(async exitCode => {
+		// Deliver what the child sent before it stopped, and the whole stderr tail, before faulting.
+		await settleWithin(Promise.all([stdoutDrained, stderrDrained]), WORKER_CLOSE_TIMEOUT_MS);
+		if (intentionalExit) return;
+		fail(new Error(`JS eval worker exited with code ${exitCode}${stderrTail.suffix()}`));
+	});
+	const base = {
+		send,
+		onMessage(handler: (msg: WorkerOutbound) => void): () => void {
+			handlers.add(handler);
+			return () => handlers.delete(handler);
 		},
+	};
+	const terminate = async (): Promise<void> => {
+		kill();
+		// Frames the child wrote before it died are still in the pipe; hand them over first.
+		await settleWithin(stdoutDrained, WORKER_CLOSE_TIMEOUT_MS);
+	};
+	return {
+		mode: "process",
+		send: base.send,
+		onMessage: base.onMessage,
+		onError(handler) {
+			errors.add(handler);
+			return () => errors.delete(handler);
+		},
+		close: () => closeProcessWorker(base, terminate),
+		terminate,
 	};
 }
 

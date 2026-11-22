@@ -25,12 +25,26 @@ import { DEFAULT_MAX_BYTES, truncateHead, truncateHeadBytes } from "./streaming-
 import { webpExclusionForModel } from "../utils/image-input";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
+import { formatSandboxCallDenial } from "../sandbox/gate";
+import type { SandboxAccessDenial } from "../sandbox/runtime";
+import { containingSandbox } from "../sandbox/file-access";
 import { ensureTool } from "../utils/tools-manager";
 import { decodeBody } from "../web/response-body";
 import { findFirecrawlApiKey, scrapeWithFirecrawl } from "../web/firecrawl";
 import { extractWithParallel, findParallelApiKey, getParallelExtractContent } from "../web/parallel";
 import type { RenderResult, SpecialHandler } from "../web/scrapers/types";
-import { finalizeOutput, loadPage, looksLikeHtml, MAX_BYTES } from "../web/scrapers/types";
+import {
+	finalizeOutput,
+	guardedFetch,
+	hostProcessSkipped,
+	loadPage,
+	looksLikeHtml,
+	MAX_BYTES,
+	primaryRequest,
+	type RequestHostGuard,
+	HostUndecided,
+	withRequestHostGuard,
+} from "../web/scrapers/types";
 import { type BinaryFetchResult, convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
 import { findCredential } from "../web/search/providers/utils";
 import { applyListLimit } from "./list-limit";
@@ -694,21 +708,22 @@ export async function renderHtmlToText(
 	// Per-attempt budget for remote endpoints so one stall cannot consume the
 	// whole reader-mode budget and starve the local fallbacks.
 	const remoteSignal = () => ptree.combineSignals(userSignal, remoteBudgetMs);
-	const fetchImpl = fetchOverride ?? fetch;
+	// Every request a reader makes passes the sandbox's host policy while a read's guard is in scope.
+	const fetchImpl = guardedFetch(fetchOverride ?? fetch);
 
 	const runners: Record<FetchProvider, () => Promise<string | null>> = {
 		// Purely local, no network/subprocess: still works on already-loaded HTML
 		// even after remote/subprocess attempts are aborted by the budget.
 		native: () => htmlToMarkdown(html, { cleanContent: true, hiddenContent: "reachable" }),
 		trafilatura: async () => {
-			if (overallSignal?.aborted) return null;
+			if (overallSignal?.aborted || hostProcessSkipped("trafilatura")) return null;
 			const trafilatura = await ensureTool("trafilatura", { signal: overallSignal, silent: true });
 			if (!trafilatura || overallSignal?.aborted) return null;
 			const result = await ptree.exec([trafilatura, "-u", url, "--output-format", "markdown"], execOptions);
 			return result.ok ? result.stdout : null;
 		},
 		lynx: async () => {
-			if (!hasCommand("lynx") || overallSignal?.aborted) return null;
+			if (!hasCommand("lynx") || overallSignal?.aborted || hostProcessSkipped("lynx")) return null;
 			const result = await ptree.exec(["lynx", "-dump", "-nolist", "-width", "250", url], execOptions);
 			return result.ok ? result.stdout : null;
 		},
@@ -999,7 +1014,7 @@ async function tryRenderBinaryPayload(
 	}
 
 	const resultNotes = [...notes];
-	const binary = prefetched ?? (await fetchBinary(finalUrl, timeout, signal));
+	const binary = prefetched ?? (await primaryRequest(() => fetchBinary(finalUrl, timeout, signal)));
 	if (!binary.ok) {
 		// A prefetched failure was already noted by the conversion step.
 		if (!prefetched) resultNotes.push(binary.error ? `Binary fetch failed: ${binary.error}` : "Binary fetch failed");
@@ -1209,7 +1224,8 @@ async function renderUrl(
 	const skipBody = (contentType: string): boolean =>
 		shouldSkipBodyDownload(contentType) ||
 		(GENERIC_BINARY_MIMES[normalizeMime(contentType)] === true && CONVERTIBLE_EXTENSIONS.has(requestExtHint));
-	let response = await loadPage(url, { timeout, signal, skipBodyForContentType: skipBody });
+	// The page itself is the read: a redirect of it to a refused host fails the read, as the URL's own host would.
+	let response = await primaryRequest(() => loadPage(url, { timeout, signal, skipBodyForContentType: skipBody }));
 	if (
 		response.ok &&
 		response.bodySkipped &&
@@ -1217,7 +1233,9 @@ async function renderUrl(
 		!CONVERTIBLE_EXTENSIONS.has(getExtensionHint(response.finalUrl))
 	) {
 		// Redirect dropped the convertible extension; the body is needed after all.
-		response = await loadPage(url, { timeout, signal, skipBodyForContentType: shouldSkipBodyDownload });
+		response = await primaryRequest(() =>
+			loadPage(url, { timeout, signal, skipBodyForContentType: shouldSkipBodyDownload }),
+		);
 	}
 	if (signal?.aborted) {
 		throw new ToolAbortError();
@@ -1310,7 +1328,7 @@ async function renderUrl(
 			notes.push("Falling back to textual rendering from initial response");
 			skipConvertibleBinaryRetry = true;
 		} else {
-			const binary = await fetchBinary(finalUrl, timeout, signal);
+			const binary = await primaryRequest(() => fetchBinary(finalUrl, timeout, signal));
 			if (binary.ok) {
 				notes.push("Fetched image binary");
 
@@ -1404,7 +1422,7 @@ async function renderUrl(
 	// Step 3: Handle convertible binary files (PDF, DOCX, etc.)
 	let convertibleBinary: BinaryFetchResult | undefined;
 	if (!skipConvertibleBinaryRetry && isConvertible(mime, extHint)) {
-		const binary = await fetchBinary(finalUrl, timeout, signal);
+		const binary = await primaryRequest(() => fetchBinary(finalUrl, timeout, signal));
 		convertibleBinary = binary;
 		if (binary.ok) {
 			const ext = getExtensionHint(finalUrl, binary.contentDisposition) || extHint;
@@ -1795,12 +1813,49 @@ async function materializeReadUrlContent(session: ToolSession, entry: ReadUrlEnt
 	return contentPath;
 }
 
-/** Fetch and render a URL for a read or search operation. */
+/**
+ * The sandbox's network policy for every host a read contacts, the URL's own included: the host is checked
+ * like a `host` subject of the call, then, as the egress proxy does, the addresses an allowed name resolves
+ * to. A refusal carries the sandbox's call-denial text naming `toolName`. A name that does not resolve
+ * (within `timeoutSeconds`) or a cancelled `signal` is no refusal: the request fails as a transport error
+ * or the read aborts. `undefined` unless the sandbox is active with a network mode in force that limits
+ * hosts (no backend under `fallback: warn` admits every host, as `allow` does), so requests go out as always.
+ */
+async function sandboxHostGuard(
+	session: ToolSession,
+	toolName: string,
+	signal: AbortSignal | undefined,
+	timeoutSeconds: number,
+): Promise<RequestHostGuard | undefined> {
+	const runtime = await containingSandbox(session.cwd, { settings: session.settings, throwWhenBlocked: false });
+	const status = runtime?.status();
+	if (!runtime || status?.state !== "active" || status.network === "allow") return undefined;
+	return async host => {
+		let denial: SandboxAccessDenial | undefined = runtime.accessDenial([{ kind: "host", target: host }]);
+		if (denial === undefined) {
+			try {
+				denial = await runtime.addressDenial(host, ptree.combineSignals(signal, timeoutSeconds * 1000));
+			} catch (error) {
+				// `addressDenial` rejects with an `Error` only; a cancelled read is reported by the request that fails,
+				// which checks its own signal.
+				throw new HostUndecided(error as Error);
+			}
+		}
+		if (denial === undefined) return;
+		const requestTool = session.isToolActive?.("sandbox_request") === true;
+		throw new ToolError(formatSandboxCallDenial(toolName, denial, requestTool));
+	};
+}
+
+/**
+ * Fetch and render a URL for a read or search operation. `toolName` is the calling tool, named in a sandbox
+ * refusal of a host the read reaches.
+ */
 export async function fetchReadUrl(
 	session: ToolSession,
 	params: { path: string; raw?: boolean },
 	signal?: AbortSignal,
-	options?: { ensureArtifact?: boolean },
+	options?: { ensureArtifact?: boolean; toolName?: string },
 ): Promise<ReadUrlEntry> {
 	const { path: url, raw = false } = params;
 
@@ -1823,10 +1878,17 @@ export async function fetchReadUrl(
 			session.fetch,
 			webpExclusionForModel(session.getActiveModel?.()),
 		);
-	let result =
-		(raw ? null : await renderUrlArchiveMember(url, effectiveTimeout, signal)) ??
-		(raw ? null : await renderUrlJsonQuery(url, render, signal)) ??
-		(await render(url));
+	// Every request the read makes passes the sandbox's network policy, the URL's own included: the call's
+	// subjects are only an early refusal, and execution may fetch hosts they missed.
+	const guarded = await withRequestHostGuard(
+		await sandboxHostGuard(session, options?.toolName ?? "read", signal, effectiveTimeout),
+		async () =>
+			(raw ? null : await renderUrlArchiveMember(url, effectiveTimeout, signal)) ??
+			(raw ? null : await renderUrlJsonQuery(url, render, signal)) ??
+			(await render(url)),
+	);
+	let result = guarded.result;
+	if (guarded.skipped.length > 0) result = { ...result, notes: [...result.notes, ...guarded.skipped] };
 	if (result.truncated) {
 		// Covers special handlers and every renderUrl branch, whichever response supplied the content.
 		const cutNote = `Response body exceeded ${formatBytes(MAX_BYTES)} and was cut mid-stream; content is incomplete`;
@@ -1914,7 +1976,7 @@ async function renderUrlArchiveMember(
 	);
 	if (!candidate) return null;
 	const archiveUrl = candidate.archivePath;
-	const binary = await fetchBinary(archiveUrl, timeout, signal);
+	const binary = await primaryRequest(() => fetchBinary(archiveUrl, timeout, signal));
 	if (!binary.ok) return null;
 	const mime = normalizeMime(binary.contentType ?? "");
 	const format =
@@ -1956,16 +2018,20 @@ async function renderUrlArchiveMember(
 	};
 }
 
-/** Materialize rendered URL body text to a local file for tools that require filesystem paths. */
+/**
+ * Materialize rendered URL body text to a local file for tools that require filesystem paths. `toolName`
+ * is the calling tool, named in a sandbox refusal of a host the read reaches.
+ */
 export async function materializeReadUrlToFile(
 	session: ToolSession,
 	params: { path: string; raw?: boolean },
-	signal?: AbortSignal,
+	signal: AbortSignal | undefined,
+	toolName: string,
 ): Promise<{ path: string; details: ReadUrlToolDetails }> {
 	if (!cfgFetchEnabled.get(session.settings)) {
 		throw new ToolError("URL reads are disabled by settings.");
 	}
-	const entry = await fetchReadUrl(session, params, signal);
+	const entry = await fetchReadUrl(session, params, signal, { toolName });
 	const contentPath = await materializeReadUrlContent(session, entry, params.raw ?? false);
 	return { path: contentPath, details: entry.details };
 }

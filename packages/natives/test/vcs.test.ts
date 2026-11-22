@@ -2,7 +2,15 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { vcsDiscover, vcsGitClone, vcsGitDiscover, vcsGitRepoInfo } from "../native/index.js";
+import {
+	type VcsHookExit,
+	type VcsHookRun,
+	reapChild,
+	vcsDiscover,
+	vcsGitClone,
+	vcsGitDiscover,
+	vcsGitRepoInfo,
+} from "../native/index.js";
 import * as vcs from "../native/vcs.js";
 
 const roots: string[] = [];
@@ -166,6 +174,98 @@ describe("in-process VCS bindings", () => {
 		const repo = vcsGitDiscover(root)!;
 		const patch = ['diff --git "a/\\777.txt" "b/\\777.txt"', "old mode 100644", "new mode 100755", ""].join("\n");
 		await expect(repo.applyPatch(patch, {})).rejects.toThrow(/invalid octal escape/);
+	});
+
+	describe("commit hookRunner", () => {
+		/** A repository with a staged change and an executable `pre-commit` hook that fails if spawned natively. */
+		async function hookedRepository() {
+			const root = await repository();
+			// A global `core.hooksPath` would hide the repository's hook.
+			await git(root, "config", "core.hooksPath", ".git/hooks");
+			await mkdir(join(root, ".git", "hooks"), { recursive: true });
+			await writeFile(join(root, ".git", "hooks", "pre-commit"), "#!/bin/sh\nexit 97\n", { mode: 0o755 });
+			await writeFile(join(root, "tracked.txt"), "one\nhooked\n");
+			await git(root, "add", "tracked.txt");
+			return { root, repo: vcsGitDiscover(root)!, head: await git(root, "rev-parse", "HEAD") };
+		}
+
+		test("hands the hook to the callback, which decides the commit", async () => {
+			const { root, repo, head } = await hookedRepository();
+			const runs: VcsHookRun[] = [];
+			const sha = await repo.commitCreate("hooked", {
+				hookRunner: async run => {
+					runs.push(run);
+					return { exitCode: 0, output: "" };
+				},
+			});
+
+			expect(sha).toBe(await git(root, "rev-parse", "HEAD"));
+			expect(sha).not.toBe(head);
+			const preCommit = runs.find(run => run.name === "pre-commit");
+			expect(preCommit).toBeDefined();
+			const repoRoot = repo.info().repoRoot;
+			expect(preCommit!.cwd).toBe(repoRoot);
+			expect(preCommit!.env.GIT_DIR).toBe(join(repoRoot, ".git"));
+			// Windows runs every hook through `git hook run`.
+			if (process.platform !== "win32")
+				expect(preCommit!.argv[0]).toBe(join(repoRoot, ".git", "hooks", "pre-commit"));
+		});
+
+		test("fails the commit with the output of a hook the callback reports failed", async () => {
+			const { root, repo, head } = await hookedRepository();
+			await expect(
+				repo.commitCreate("hooked", { hookRunner: async () => ({ exitCode: 3, output: "no" }) }),
+			).rejects.toMatchObject({ name: "VcsError", code: "Cli", exitCode: 3, stderr: "no" });
+			expect(await git(root, "rev-parse", "HEAD")).toBe(head);
+		});
+
+		test("fails the commit with the message of a callback rejection", async () => {
+			const { root, repo, head } = await hookedRepository();
+			await expect(
+				repo.commitCreate("hooked", {
+					hookRunner: async () => {
+						throw new Error("cannot start");
+					},
+				}),
+			).rejects.toMatchObject({ name: "VcsError", code: "Cli", exitCode: 1, stderr: "cannot start" });
+			expect(await git(root, "rev-parse", "HEAD")).toBe(head);
+		});
+
+		/**
+		 * Commit `count` hooked repositories at once, each hook waiting until every hook has started
+		 * and then on `blockingCall`; resolves once every commit landed on its repository's HEAD.
+		 */
+		async function commitAllAtOnce(count: number, blockingCall: () => Promise<unknown>) {
+			const repos = await Promise.all(Array.from({ length: count }, hookedRepository));
+			const started = Promise.withResolvers<void>();
+			let waiting = count;
+			const hookRunner = async (): Promise<VcsHookExit> => {
+				if (--waiting === 0) started.resolve();
+				await started.promise;
+				await blockingCall();
+				return { exitCode: 0, output: "" };
+			};
+			// A starved pool hangs: the test timeout is the failure.
+			const shas = await Promise.all(repos.map(({ repo }) => repo.commitCreate("hooked", { hookRunner })));
+			const heads = await Promise.all(repos.map(({ root }) => git(root, "rev-parse", "HEAD")));
+			expect(shas).toEqual(heads);
+			for (const [index, { head }] of repos.entries()) expect(shas[index]).not.toBe(head);
+		}
+
+		test("keeps libuv's pool free while hooks wait on JS that needs it", async () => {
+			// More commits than pool threads, each hook waiting for every other one to start and
+			// then on a native libuv pool call: a commit holding a pool thread would starve both.
+			const probe = await hookedRepository();
+			await commitAllAtOnce(navigator.hardwareConcurrency + 2, () => probe.repo.configGet("user.name"));
+		}, 15_000);
+
+		test("keeps Tokio's blocking pool free while hooks wait on JS that needs it", async () => {
+			// More commits than Windows caps Tokio's blocking pool at (8), each hook waiting for every
+			// other one to start and then on a native `spawn_blocking` call (as the contained hook spawn
+			// does): a commit holding a blocking thread would starve both. The pid exists nowhere, so the
+			// reap fails at once.
+			await commitAllAtOnce(12, () => reapChild(2 ** 31 - 1).catch(() => undefined));
+		}, 15_000);
 	});
 });
 

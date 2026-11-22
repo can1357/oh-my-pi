@@ -8,7 +8,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { ChildExit, ChildSpawn, ManagedChild, ManagedChildState } from "./module";
 
 /** How long a reaped child's pipes get to deliver output written right before its exit. */
-const OUTPUT_DRAIN_GRACE_MS = 2_000;
+export const OUTPUT_DRAIN_GRACE_MS = 2_000;
 
 /** Allowed skew between a recorded and an observed process start time. */
 const START_TIME_TOLERANCE_MS = 1_000;
@@ -28,7 +28,7 @@ export function isSameProcess(pid: number, startedAt: number | undefined): boole
 }
 
 /** Output delivered to a sink, buffered until the sink is attached. */
-class OutputChannel {
+export class OutputChannel {
 	#sink: ((chunk: Uint8Array) => void) | undefined;
 	#pending: Uint8Array[] = [];
 

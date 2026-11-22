@@ -14,7 +14,7 @@ import {
 	sanitizeText,
 	TempDir,
 } from "@oh-my-pi/pi-utils";
-import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
+import { peekReadableFile, withReadableCopy } from "../sandbox/file-access";
 import type { ToolSession } from "../sdk";
 import { quotePosixArgument } from "../utils/shell-quote";
 import { resolveReadPath } from "./path-utils";
@@ -417,7 +417,7 @@ export async function resolveJsonReadPath(
 		const stat = await Bun.file(filePath).stat();
 		if (!stat.isFile()) return false;
 		const jsonName = JSON_FILE_PATTERN.test(filePath);
-		return peekFile(filePath, IMAGE_METADATA_HEADER_BYTES, header => {
+		return peekReadableFile(filePath, IMAGE_METADATA_HEADER_BYTES, header => {
 			if (parseImageMetadata(header) || parseHeifImageMimeType(header)) return false;
 			return jsonName || opensLikeJson(header);
 		});
@@ -466,7 +466,10 @@ export async function readJson(
 		await Bun.write(inputPath, resolvedJsonPath.content);
 		queryOutput = await executeJsonQuery(inputPath, resolvedJsonPath.selector, signal);
 	} else {
-		queryOutput = await executeJsonQuery(resolvedJsonPath.absolutePath, resolvedJsonPath.selector, signal);
+		// jq opens its file itself: contained, it queries a copy read through the verified handle.
+		queryOutput = await withReadableCopy(resolvedJsonPath.absolutePath, "input.json", inputPath =>
+			executeJsonQuery(inputPath, resolvedJsonPath.selector, signal),
+		);
 	}
 
 	const output = prependSuffixResolutionNotice(queryOutput, file?.suffixResolution);

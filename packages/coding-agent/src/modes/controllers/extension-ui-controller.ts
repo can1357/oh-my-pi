@@ -34,6 +34,7 @@ import { extensionLinkClicksAvailable } from "../../extensibility/extensions/lin
 import type { ExtensionUiHost } from "../../extensibility/extensions/render-types";
 import { cfgExtensionAssistantTextRenderers } from "../../extensibility/settings";
 import type { ComposerOwner, InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
+import type { SandboxAccessAnswer } from "../../sandbox/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { launchTerminal } from "../../subprocess/terminal-launch";
 import { approvalAnswerForChoice, approvalChoiceLabels, approvalOnceLabel } from "../../tools/approval";
@@ -53,6 +54,7 @@ import { formMedia, HtmlFormDialog, HtmlFormModel } from "../../ui/forms/html-fo
 import { htmlFormKeyHints } from "../../ui/styles/forms/html-form";
 import { formatKeyHint, formatKeyHints } from "../../ui/keys/hints";
 import { type ApprovalChoice, ApprovalDialog } from "../../ui/overlays/panels/approval-dialog";
+import { SandboxAccessDialog } from "../../ui/overlays/panels/sandbox-access-dialog";
 import { AskDialog, AskDialogModel } from "../../ui/overlays/panels/ask-dialog";
 import { HookEditor, type HookEditorHandle, HookInput } from "../../ui/overlays/panels/hook-dialogs";
 import { HookSelector } from "../../ui/overlays/pickers/hook-selector";
@@ -72,6 +74,7 @@ import {
 	normalizeDialogQuestions,
 } from "../view-model/overlays/ask-dialog";
 import { boundPromptTitle, type HookEditorOptions } from "../view-model/overlays/hook-editor";
+import type { SandboxAccessView } from "../view-model/overlays/sandbox-access-dialog";
 import type { HookSelectorSlider } from "../view-model/overlays/hook-selector";
 import { extensionOverlay } from "./extension-ui-blocks";
 
@@ -729,6 +732,42 @@ export class ExtensionUiController {
 		} finally {
 			unsubscribe();
 		}
+	}
+
+	/**
+	 * The agent's sandbox access request in the composer's place, queued with the other dialogs
+	 * so an overlapping approval waits its turn. The composer stays mounted beneath; over a
+	 * draft the dialog opens on Deny, so an Enter meant for the draft never grants. Dismissing
+	 * or aborting it denies.
+	 */
+	async showSandboxAccess(
+		view: SandboxAccessView,
+		options: { signal?: AbortSignal } = {},
+	): Promise<SandboxAccessAnswer> {
+		const prompt = { kind: "permission", msg: view.intent } as const;
+		const answer = await this.#presentDialog<SandboxAccessAnswer>(prompt, options.signal, settle => {
+			const composer = this.ctx.composer;
+			const hasDraft = composer.text().length > 0 || composer.pendingImages.length > 0;
+			this.ctx.closeLinkBrowser();
+			const slot = this.ctx.shell.dock.slot("approval");
+			let node: UiNode | undefined;
+			slot.set(
+				() =>
+					(node = singleNode(
+						SandboxAccessDialog({
+							view,
+							onAnswer: settle,
+							...(hasDraft ? { initialChoice: "deny" as const } : {}),
+						}),
+					)),
+			);
+			if (node) this.ctx.shell.focus(node);
+			return () => {
+				slot.clear();
+				this.#focusComposer();
+			};
+		});
+		return answer ?? { decision: "deny" };
 	}
 
 	async showAskDialog(

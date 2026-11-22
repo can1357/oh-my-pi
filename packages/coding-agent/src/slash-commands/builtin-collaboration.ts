@@ -25,6 +25,10 @@ import type { SlashCommandSpec } from "./types";
 import { cfgBrowserEnabled, cfgBrowserHeadless } from "../tools/browser/settings";
 import { cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "../commands/settings";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { cfgSandboxEnabled } from "../sandbox/settings";
+import { readSandboxConfig, sandboxEnabled } from "../sandbox/policy";
+import { SandboxRuntime } from "../sandbox/runtime";
+import { sandboxLayerName } from "../modes/sandbox-panel";
 
 /** Scheme-less display form of a collab browser deep link, OSC 8 linked to it. */
 function collabBrowserLink(webLink: string, label?: string): string {
@@ -64,6 +68,75 @@ function showCollabQrCode(ctx: InteractiveModeContext, webLink: string): void {
 function showCollabLink(ctx: InteractiveModeContext, host: CollabHost, heading: string, view = false): void {
 	ctx.showStatus(collabLinkHint(host, heading, view), { dim: false });
 	showCollabQrCode(ctx, view ? host.webViewLink : host.webLink);
+}
+
+const SANDBOX_USAGE = "Usage: /sandbox [on|off|status]";
+
+/**
+ * Write `sandbox.enabled` to the global config. The reply names the effective state when another
+ * layer wins, and why commands still run unsandboxed when no backend is available.
+ */
+async function setSandboxEnabled(enabled: boolean, cwd: string): Promise<string> {
+	cfgSandboxEnabled.set(settings, enabled);
+	const effective = sandboxEnabled(settings);
+	if (effective !== enabled) {
+		const winner = sandboxLayerName(cfgSandboxEnabled.provenance(settings));
+		return `Sandbox ${enabled ? "enabled" : "disabled"} in your config, but ${winner} keeps it ${effective ? "on" : "off"} here.`;
+	}
+	if (!enabled) return "Sandbox disabled.";
+	const status = (await SandboxRuntime.for(cwd)).status();
+	if (status.state === "active") {
+		return ["Sandbox enabled.", ...status.warnings.map(warning => `  ⚠ ${sanitizeDisplayLine(warning)}`)].join("\n");
+	}
+	if (status.state !== "unavailable") return "Sandbox enabled.";
+	return `Sandbox enabled, but unavailable here: ${sanitizeDisplayLine(status.reason)} (${status.fallback === "block" ? "contained tools fail" : "commands run unsandboxed"}).`;
+}
+
+/**
+ * Multi-line `/sandbox status`: state, policy summary, hosts blocked this session, host actions
+ * allowed this session, paths created by sandboxed commands and ignored project values.
+ */
+async function sandboxStatusText(cwd: string): Promise<string> {
+	const config = readSandboxConfig(settings);
+	const sandbox = await SandboxRuntime.for(cwd);
+	const status = sandbox.status();
+	const lines: string[] = [];
+	switch (status.state) {
+		case "off":
+			lines.push("Sandbox: off");
+			break;
+		case "active":
+			lines.push(
+				`Sandbox: active (${sanitizeDisplayLine(status.backend)}) · ${config.mode} · network ${status.network} · applies to ${config.scope.join(", ") || "nothing"}`,
+			);
+			for (const warning of status.warnings) lines.push(`  ⚠ ${sanitizeDisplayLine(warning)}`);
+			break;
+		case "unavailable":
+			lines.push(
+				`Sandbox: unavailable — ${sanitizeDisplayLine(status.reason)} (${status.fallback === "block" ? "contained tools fail" : "running unsandboxed"})`,
+			);
+			break;
+	}
+	const blocked = sandbox.blockedHosts();
+	if (blocked.length > 0) lines.push(`Blocked this session: ${blocked.map(sanitizeDisplayLine).join(", ")}`);
+	const exec = sandbox.sessionExec();
+	if (exec.length > 0) lines.push(`Host actions allowed this session: ${exec.map(sanitizeDisplayLine).join(", ")}`);
+	for (const { path, exists } of sandbox.createdPaths()) {
+		lines.push(
+			`Created by a sandboxed command (skipped until trusted in /sandbox): ${sanitizeDisplayLine(path)}${exists ? "" : " (gone)"}`,
+		);
+	}
+	for (const entry of config.ignored) {
+		lines.push(`Ignored project value ${entry.id}: ${sanitizeDisplayLine(entry.reason)}`);
+	}
+	return lines.join("\n");
+}
+
+/** The reply to `/sandbox on|off|status`; undefined for any other verb. */
+function sandboxVerbReply(verb: string | undefined, cwd: string): Promise<string> | undefined {
+	if (verb === "on" || verb === "off") return setSandboxEnabled(verb === "on", cwd);
+	if (verb === "status") return sandboxStatusText(cwd);
+	return undefined;
 }
 
 export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -181,6 +254,40 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				return;
 			}
 			runtime.ctx.showStatus("Usage: /advisor [on|off|status|dump [raw]|configure]");
+			clearSubmittedText(runtime);
+		},
+	},
+	{
+		name: "sandbox",
+		icon: "shield",
+		description: "Configure the OS sandbox for agent commands",
+		acpDescription: "Sandbox status and on/off",
+		acpInputHint: "[on|off|status]",
+		subcommands: [
+			{ name: "on", description: "Enable the sandbox (global config)" },
+			{ name: "off", description: "Disable the sandbox (global config)" },
+			{ name: "status", description: "Show sandbox status" },
+		],
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const { verb } = parseSubcommand(command.args);
+			const reply = sandboxVerbReply(verb, runtime.session.sessionManager.getCwd());
+			if (reply) {
+				await runtime.output(await reply);
+				return commandConsumed();
+			}
+			if (!verb) {
+				await runtime.output("/sandbox opens an interactive panel and is only available in the interactive TUI.");
+				return commandConsumed();
+			}
+			return usage(SANDBOX_USAGE, runtime);
+		},
+		handleTui: async (command, runtime) => {
+			const { verb } = parseSubcommand(command.args);
+			const reply = sandboxVerbReply(verb, runtime.ctx.sessionManager.getCwd());
+			if (reply) runtime.ctx.showStatus(await reply);
+			else if (!verb) runtime.ctx.showSandboxConfigure();
+			else runtime.ctx.showStatus(SANDBOX_USAGE);
 			clearSubmittedText(runtime);
 		},
 	},

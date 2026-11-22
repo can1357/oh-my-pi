@@ -2,12 +2,21 @@ import * as fs from "node:fs/promises";
 import type { CDPSession, Page } from "puppeteer-core";
 import { resolveToCwd } from "../path-utils";
 
+/**
+ * The file an `init_scripts` entry names, resolved against `cwd`, or `undefined` for source spanning
+ * lines, which is JavaScript and never a path.
+ */
+export function initScriptPath(entry: string, cwd: string): string | undefined {
+	return entry.includes("\n") ? undefined : resolveToCwd(entry, cwd);
+}
+
 /** Resolve init-script file paths against the session cwd, preserving non-files as inline JavaScript. */
 export async function resolveInitScriptSources(entries: readonly string[] | undefined, cwd: string): Promise<string[]> {
 	if (!entries?.length) return [];
 	return await Promise.all(
 		entries.map(async entry => {
-			const candidate = resolveToCwd(entry, cwd);
+			const candidate = initScriptPath(entry, cwd);
+			if (candidate === undefined) return entry;
 			try {
 				const stat = await fs.stat(candidate);
 				if (stat.isFile()) return await fs.readFile(candidate, "utf8");

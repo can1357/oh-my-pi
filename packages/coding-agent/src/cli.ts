@@ -41,7 +41,9 @@ import { extractProfileFlags } from "./cli/profile-bootstrap";
 import {
 	AUTO_UPDATE_WORKER_ARG,
 	COMPUTER_WORKER_ARG,
+	JS_EVAL_STDIO_WORKER_ARG,
 	PARENT_WATCHDOG_WORKER_ARG,
+	SANDBOX_HOST_ARG,
 	STATS_ACTIVITY_WORKER_ARG,
 	SUBAGENT_WORKER_ARG,
 	TRANSCRIPT_INDEX_WORKER_ARG,
@@ -49,6 +51,7 @@ import {
 import { DAEMON_WORKER_ARG } from "./daemon/protocol";
 import { MNEMOPI_EMBED_WORKER_ARG } from "./mnemopi/embed-protocol";
 import type * as JsProcessEntry from "./eval/js/process-entry";
+import type * as JsStdioTransport from "./eval/js/stdio-transport";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
 import { startParentWatchdog } from "./subprocess/parent-watchdog";
 
@@ -187,6 +190,7 @@ async function runSmokeTest(): Promise<void> {
 	// Other smoke dependencies stay lazy so normal CLI startup does not load their worker clients.
 	const { isolateDaemonForSmokeTest, smokeTestDaemon } = await import("./daemon/client");
 	const { smokeTestSubagentWorker } = await import("./thread/subagent-worker");
+	const { smokeTestSandboxHost } = await import("./sandbox/shell-client");
 	// Every smoke that reaches the daemon must start this build's own, never the user's live one.
 	const cleanupDaemon = await isolateDaemonForSmokeTest();
 	try {
@@ -216,6 +220,7 @@ async function runSmokeTest(): Promise<void> {
 		await smokeTestMnemopiEmbedWorker();
 		await smokeTestDaemon();
 		await smokeTestSubagentWorker();
+		await smokeTestSandboxHost();
 	} finally {
 		await cleanupDaemon();
 	}
@@ -289,20 +294,33 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		await import("./thread/subagent-worker-entry");
 		return true;
 	}
-	if (arg === JS_EVAL_PROCESS_ARG) {
-		// This selector is the synchronous bootstrap boundary: keep the evaluator
-		// runtime and postmortem/inspector graph out of ordinary startup without
-		// putting an await ahead of the subprocess message handler.
-		const { startJsEvalProcess }: typeof JsProcessEntry = require("./eval/js/process-entry");
-		// The .js subpath is the package's unconditional export for synchronous loading.
-		const { interceptUnhandledRejections }: typeof Postmortem = require("@oh-my-pi/pi-utils/postmortem.js");
-		// The JS evaluator forwards user-controlled payloads (tool-call args,
-		// display outputs); a non-serializable one must fail that cell, not
-		// SIGKILL the kernel and erase the eval session's state.
-		await runIpcSubprocessWorker<JsWorkerInbound, JsWorkerOutbound>(
-			transport => startJsEvalProcess(transport, interceptUnhandledRejections),
-			{ rethrowConnectedSendErrors: true },
-		);
+	if (arg === JS_EVAL_PROCESS_ARG || arg === JS_EVAL_STDIO_WORKER_ARG) {
+		// These selectors are the synchronous bootstrap boundary: keep the evaluator runtime and
+		// postmortem/inspector graph out of ordinary startup without putting an await ahead of the
+		// subprocess message handler.
+		const startEvaluator = (transport: Parameters<typeof JsProcessEntry.startJsEvalProcess>[0]): void => {
+			const { startJsEvalProcess }: typeof JsProcessEntry = require("./eval/js/process-entry");
+			// The .js subpath is the package's unconditional export for synchronous loading.
+			const { interceptUnhandledRejections }: typeof Postmortem = require("@oh-my-pi/pi-utils/postmortem.js");
+			startJsEvalProcess(transport, interceptUnhandledRejections);
+		};
+		if (arg === JS_EVAL_PROCESS_ARG) {
+			// The JS evaluator forwards user-controlled payloads (tool-call args,
+			// display outputs); a non-serializable one must fail that cell, not
+			// SIGKILL the kernel and erase the eval session's state.
+			await runIpcSubprocessWorker<JsWorkerInbound, JsWorkerOutbound>(startEvaluator, {
+				rethrowConnectedSendErrors: true,
+			});
+			return true;
+		}
+		// JS evaluator answering in structured-clone frames on stdout. With an IPC channel (the
+		// unsandboxed Windows evaluator, or the child of the relay below) it is the evaluator and reads
+		// messages over IPC. Without one (inside the sandbox, where IPC cannot cross) this process only
+		// relays stdin frames to an evaluator child it starts with stdin closed, and never calls the
+		// `start` callback, so the evaluator module graph loads only in the evaluator, still
+		// synchronously ahead of its IPC message handler like the selector above.
+		const { runStdioSubprocessWorker }: typeof JsStdioTransport = require("./eval/js/stdio-transport");
+		await runStdioSubprocessWorker<JsWorkerInbound, JsWorkerOutbound>(startEvaluator);
 		return true;
 	}
 	if (arg === STT_WORKER_ARG) {
@@ -534,6 +552,20 @@ export async function runCli(argv: string[]): Promise<void> {
 	// though Bun reports import.meta.main as false. SDK importers are not hosts.
 	if (isProcessEntry || (!Bun.isMainThread && isWorker)) declareWorkerHostEntry();
 
+	if (resolvedArgv[0] === SANDBOX_HOST_ARG) {
+		// The sandbox host's stdout carries its JSONL protocol only. Rebind every JS-level
+		// stdout writer to stderr before the host graph (and the native addon) loads; the host
+		// writes protocol lines through its own `Bun.stdout` writer.
+		process.stdout.write = process.stderr.write.bind(process.stderr);
+		console.log = console.error;
+		console.info = console.error;
+		console.debug = console.error;
+		console.trace = console.error;
+		const { runSandboxHost } = await import("./sandbox/host");
+		await runSandboxHost();
+		return;
+	}
+
 	// Worker-thread entry dispatch must run before the first `await`: the
 	// stats sync worker's buffering onmessage handler is installed in the
 	// synchronous prefix of `runWorkerEntrypoint`, and Bun flushes the
@@ -602,10 +634,15 @@ export async function runCli(argv: string[]): Promise<void> {
 	}
 
 	try {
-		const [{ run }, { commands, resolveCliArgv }] = await Promise.all([
+		// Help and version run no command that touches git; everything else loads the guard with the CLI.
+		const guard = helpOrVersion ? undefined : import("./sandbox/ledger");
+		const [{ run }, { commands, resolveCliArgv }, ledger] = await Promise.all([
 			import("@oh-my-pi/pi-utils/cli"),
 			import("./cli-commands"),
+			guard,
 		]);
+		// Before any command runs git: host git refuses repositories whose metadata a sandboxed command created or replaced.
+		ledger?.installSandboxRepoGuard();
 		// --help and --version are handled by run() directly; --license returned above.
 		// Everything else that isn't a known subcommand routes to "launch".
 		const resolved = resolveCliArgv(resolvedArgv);
@@ -645,6 +682,16 @@ if (isProcessEntry || !Bun.isMainThread) {
 	const entry = runCli(process.argv.slice(2));
 	postmortem.reportUnsettledEntry(entry, () => runningCommand);
 	entry.catch(async error => {
+		// A config file that fails to load is a user error: one line naming the file and the setting, no stack.
+		// Dynamic like the postmortem import below: the process entry stays light, and only a failed launch needs the config module.
+		const { ConfigError } = await import("./config/config-file");
+		if (error instanceof ConfigError) {
+			process.stderr.write(`Error: ${error.message}\n`);
+			// Exit explicitly: an RPC launch already holds a pending stdin read, so a bare exit code would
+			// leave the process alive until stdin closes. Quit runs cleanup, then exits 1.
+			await postmortem.quit(1);
+			return;
+		}
 		// Failure boundary: inspector/postmortem is irrelevant to successful startup.
 		const { fatal } = await import("@oh-my-pi/pi-utils/postmortem");
 		fatal(error);

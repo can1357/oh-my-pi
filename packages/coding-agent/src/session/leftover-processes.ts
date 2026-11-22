@@ -94,7 +94,7 @@ export class LeftoverProcessTracker {
 		for (const job of this.#host.asyncJobManager()?.getAllJobs() ?? []) {
 			if (job.status === "running" && job.process) excluded.push(...job.process.pids());
 		}
-		const held = heldShellProcesses(sessionId);
+		const held = await heldShellProcesses(sessionId);
 		const leftovers = listLeftoverProcesses(sessionId, held, excluded);
 		if (leftovers.length === 0) return leftovers;
 		// Services started by the bash tool carry the tag too: only consult the daemon when

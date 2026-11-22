@@ -11,17 +11,39 @@ const CR = 0x0d;
 // so one oversized frame does not pin its peak buffer for the stream's life.
 const CONCAT_SINK_RETAIN_BYTES = 1024 * 1024;
 
+/** Thrown by {@link readLines} once a line grows past its `maxLineBytes` without a line end. */
+export class LineTooLongError extends Error {
+	constructor(readonly maxLineBytes: number) {
+		super(`Line exceeds ${maxLineBytes} bytes`);
+		this.name = "LineTooLongError";
+	}
+}
+
 /**
  * Split a byte stream on LF boundaries.
  *
  * Every yielded line owns its bytes and remains unchanged after the generator
- * advances or drains. Line terminators are excluded.
+ * advances or drains. Line terminators are excluded. With `maxLineBytes`, a line
+ * that grows past it without its LF throws {@link LineTooLongError} before the
+ * overflowing chunk is buffered, so a peer cannot make the reader grow without bound.
  */
-export async function* readLines(stream: ReadableStream<Uint8Array>, signal?: AbortSignal): AsyncGenerator<Uint8Array> {
+export async function* readLines(
+	stream: ReadableStream<Uint8Array>,
+	signal?: AbortSignal,
+	options?: { maxLineBytes?: number },
+): AsyncGenerator<Uint8Array> {
+	const maxLineBytes = options?.maxLineBytes;
 	const buffer = new ConcatSink();
 	const source = abortableSource(stream, signal);
+	// Bytes of the line still open after the chunks seen so far.
+	let pending = 0;
 	try {
 		for await (const chunk of source) {
+			if (maxLineBytes !== undefined) {
+				const newline = chunk.lastIndexOf(LF);
+				pending = newline === -1 ? pending + chunk.length : chunk.length - newline - 1;
+				if (pending > maxLineBytes) throw new LineTooLongError(maxLineBytes);
+			}
 			for (const line of buffer.appendAndFlushLines(chunk)) {
 				yield line;
 			}

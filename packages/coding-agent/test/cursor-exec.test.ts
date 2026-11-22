@@ -39,6 +39,7 @@ import {
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { SandboxRuntime } from "@oh-my-pi/pi-coding-agent/sandbox/runtime";
 import { BUILTIN_TOOLS, GrepTool, ReadTool, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { TodoTool } from "@oh-my-pi/pi-coding-agent/tools/todo";
@@ -47,6 +48,12 @@ import type { TruncationMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta
 import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
 import { removeWithRetries, spillFileName, spillUrl } from "@oh-my-pi/pi-utils";
 import { AdviseTool } from "../src/advisor/advise-tool";
+import {
+	beginContainedSandboxTest,
+	type ContainedSandboxTest,
+	endContainedSandboxTest,
+	SANDBOX_SUPPORTED,
+} from "./helpers/sandbox-test-state";
 
 function yoloToolContext(): AgentToolContext {
 	return { settings: Settings.isolated({ "tools.approvalMode": "yolo" }) } as AgentToolContext;
@@ -2249,6 +2256,38 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 
 		expect(result.isError).toBe(true);
 		expect(result.content.map(c => (c.type === "text" ? c.text : "")).join("")).toContain("requires approval");
+		expect(await Bun.file(target).exists()).toBe(true);
+	});
+});
+
+describe("CursorExecHandlers native delete under the OS sandbox", () => {
+	let fixture: ContainedSandboxTest;
+
+	beforeEach(async () => {
+		fixture = await beginContainedSandboxTest("cursor-delete");
+		SandboxRuntime.resetForTest(SANDBOX_SUPPORTED);
+	});
+
+	afterEach(() => endContainedSandboxTest(fixture));
+
+	it("refuses a native delete outside the writable roots, naming sandbox_request, and keeps the file", async () => {
+		// The frame removes the file with `fs.rmSync` in omp's own process, so only the gate stands between
+		// the model and a file the container would never let a contained command touch.
+		const target = path.join(fixture.outside, "victim.txt");
+		await Bun.write(target, "keep me\n");
+		const handlers = new CursorExecHandlers({
+			cwd: fixture.workspace,
+			tools: new Map([["sandbox_request", {} as AgentTool]]),
+			allowDirectFileMutation: true,
+			getToolContext: () => ({ settings: fixture.settings }) as AgentToolContext,
+		});
+
+		const result = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "call-del", path: target }));
+
+		expect(result.isError).toBe(true);
+		const text = result.content.map(part => (part.type === "text" ? part.text : "")).join("");
+		expect(text).toContain("Sandbox refused `delete`");
+		expect(text).toContain("sandbox_request");
 		expect(await Bun.file(target).exists()).toBe(true);
 	});
 });

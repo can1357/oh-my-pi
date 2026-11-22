@@ -35,9 +35,9 @@ function alive(pid: number): boolean {
 }
 
 /** Polls real OS process state (a kill or spawn has no event to await), bounded at ~3s. */
-async function waitFor(check: () => boolean, what: string): Promise<void> {
+async function waitFor(check: () => boolean | Promise<boolean>, what: string): Promise<void> {
 	for (let i = 0; i < 300; i++) {
-		if (check()) return;
+		if (await check()) return;
 		await Bun.sleep(10);
 	}
 	throw new Error(`Timed out waiting for ${what}`);
@@ -87,16 +87,16 @@ describe.skipIf(process.platform === "win32")("AgentSession leftover background 
 	}
 
 	/** What the tracker sees: env-tagged processes plus the externals the session's shells hold. */
-	function sessionProcesses() {
+	async function sessionProcesses() {
 		const sessionId = sessionManager.getSessionId();
-		const held = heldShellProcesses(sessionId).map(proc => proc.pid);
+		const held = (await heldShellProcesses(sessionId)).map(proc => proc.pid);
 		return [...listProcessesWithEnv(BASH_SESSION_ENV, sessionId), ...processInfo(held)];
 	}
 
 	async function pidOf(match: (command: string) => boolean, what: string): Promise<number> {
 		let pid = 0;
-		await waitFor(() => {
-			pid = sessionProcesses().find(proc => match(proc.command))?.pid ?? 0;
+		await waitFor(async () => {
+			pid = (await sessionProcesses()).find(proc => match(proc.command))?.pid ?? 0;
 			return pid > 0;
 		}, what);
 		spawned.push(pid);
@@ -191,7 +191,7 @@ describe.skipIf(process.platform === "win32")("AgentSession leftover background 
 		}
 		// Every leftover a case started, and whatever else still carries the session's tag (a
 		// disposed session's shells stop listing what they held).
-		for (const pid of [...spawned, ...sessionProcesses().map(proc => proc.pid)]) {
+		for (const pid of [...spawned, ...(await sessionProcesses()).map(proc => proc.pid)]) {
 			try {
 				process.kill(pid, "SIGKILL");
 			} catch {}

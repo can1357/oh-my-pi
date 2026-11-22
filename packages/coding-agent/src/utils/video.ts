@@ -13,6 +13,7 @@ import { isVideoPath } from "./video-preview";
 import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
 import { $which } from "@oh-my-pi/pi-utils/which";
+import { containedFileAccess, openReadableCopy, openReadableFile } from "../sandbox/file-access";
 
 const VIDEO_MIME_BY_EXT: Record<string, string> = {
 	".mp4": "video/mp4",
@@ -202,37 +203,38 @@ function parseFrameRate(value: string | undefined): number | undefined {
 export async function probeVideo(absolutePath: string, signal?: AbortSignal): Promise<VideoMetadata> {
 	const ffprobe = requireMediaBinary("ffprobe");
 	if (signal?.aborted) throw new VideoError("Video operation aborted.");
-	const child = Bun.spawn(
-		[
-			ffprobe,
-			"-v",
-			"error",
-			"-show_entries",
-			"format=duration,format_name:stream=index,codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate",
-			"-of",
-			"json",
-			absolutePath,
-		],
-		{ stdout: "pipe", stderr: "pipe" },
-	);
-	const killOnAbort = () => {
-		child.kill();
-	};
-	signal?.addEventListener("abort", killOnAbort, { once: true });
-	let stdout: string;
-	let stderr: string;
-	let exitCode: number;
-	try {
-		[stdout, stderr, exitCode] = await untilAborted(
-			signal,
-			Promise.all([readStream(child.stdout), readStream(child.stderr), child.exited]),
+	await using media = await openMediaInputs(absolutePath);
+	const { stdout, stderr, exitCode } = await media.run(async input => {
+		const child = Bun.spawn(
+			[
+				ffprobe,
+				"-v",
+				"error",
+				"-show_entries",
+				"format=duration,format_name:stream=index,codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate",
+				"-of",
+				"json",
+				input.source,
+			],
+			{ stdout: "pipe", stderr: "pipe", ...(input.stdin === undefined ? {} : { stdin: input.stdin }) },
 		);
-	} catch (error) {
-		if (signal?.aborted) throw new VideoError("Video operation aborted.");
-		throw error;
-	} finally {
-		signal?.removeEventListener("abort", killOnAbort);
-	}
+		const killOnAbort = () => {
+			child.kill();
+		};
+		signal?.addEventListener("abort", killOnAbort, { once: true });
+		try {
+			const [out, err, code] = await untilAborted(
+				signal,
+				Promise.all([readStream(child.stdout), readStream(child.stderr), child.exited]),
+			);
+			return { stdout: out, stderr: err, exitCode: code };
+		} catch (error) {
+			if (signal?.aborted) throw new VideoError("Video operation aborted.");
+			throw error;
+		} finally {
+			signal?.removeEventListener("abort", killOnAbort);
+		}
+	});
 	if (exitCode !== 0) {
 		throw new VideoError(
 			`Could not probe video '${path.basename(absolutePath)}': ${stderr.trim().slice(-300) || `ffprobe exited ${exitCode}`}`,
@@ -333,12 +335,15 @@ export interface VideoPng {
 }
 
 /** Run ffmpeg with bounded, abort-aware process cleanup and a user-facing failure. */
-export async function runFfmpeg(args: string[], signal?: AbortSignal): Promise<void> {
+export async function runFfmpeg(args: string[], signal?: AbortSignal, stdin?: number): Promise<void> {
 	const ffmpeg = requireMediaBinary("ffmpeg");
 	if (signal?.aborted) throw new VideoError("Video operation aborted.");
-	const child = Bun.spawn([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", ...args], {
+	// A file on stdin must not also feed ffmpeg's interactive key reader.
+	const stdinArgs = stdin === undefined ? [] : ["-nostdin"];
+	const child = Bun.spawn([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", ...stdinArgs, ...args], {
 		stdout: "pipe",
 		stderr: "pipe",
+		...(stdin === undefined ? {} : { stdin }),
 	});
 	const killOnAbort = () => {
 		child.kill();
@@ -360,6 +365,60 @@ export async function runFfmpeg(args: string[], signal?: AbortSignal): Promise<v
 	if (exitCode !== 0) throw new VideoError(`ffmpeg failed (exit ${exitCode}): ${stderr.trim().slice(-300)}`);
 }
 
+/** What one ffmpeg/ffprobe run reads: a path, or (contained) the verified file as its stdin. */
+interface MediaInput {
+	/** The input argument for the run. */
+	readonly source: string;
+	/** File descriptor to hand the child as stdin; unset when `source` is a path. */
+	readonly stdin?: number;
+}
+
+/** One operation's input file, shared by every ffmpeg/ffprobe run the operation starts; dispose when it ends. */
+interface MediaInputs extends AsyncDisposable {
+	/** `fn` over the input of one run (runs may overlap). */
+	run<T>(fn: (input: MediaInput) => Promise<T>): Promise<T>;
+}
+
+/**
+ * The input of one operation over `absolutePath`. Uncontained, that is the path. Contained, the child
+ * must not open the path itself (the container never decided it): it reads the verified handle as a
+ * seekable stdin through the `fd:` protocol (ffmpeg 6.0 and newer; the descriptor is always stdin,
+ * as ffmpeg refuses one in the URL), or, for an older ffmpeg, a private copy of the bytes. A child
+ * advances the descriptor's offset, so every run gets a handle of its own; the copy is made once and
+ * shared, removed on dispose.
+ */
+async function openMediaInputs(absolutePath: string): Promise<MediaInputs> {
+	if (!containedFileAccess()) {
+		return { run: fn => fn({ source: absolutePath }), [Symbol.asyncDispose]: async () => {} };
+	}
+	let release: FfmpegRelease | undefined;
+	try {
+		release = await ffmpegRelease();
+	} catch {
+		// No ffmpeg: assume a modern ffprobe, as an unnumbered build is.
+	}
+	if (release && release.major < 6) {
+		const copy = await openReadableCopy(absolutePath, `input${path.extname(absolutePath)}`);
+		return { run: fn => fn({ source: copy.path }), [Symbol.asyncDispose]: () => copy[Symbol.asyncDispose]() };
+	}
+	return {
+		async run(fn) {
+			const handle = await openReadableFile(absolutePath);
+			try {
+				return await fn({ source: "fd:", stdin: handle.fd });
+			} finally {
+				await handle.close();
+			}
+		},
+		[Symbol.asyncDispose]: async () => {},
+	};
+}
+
+/** {@link runFfmpeg} over `media`: `args` receives the input argument of this run. */
+function runFfmpegOn(media: MediaInputs, args: (source: string) => string[], signal?: AbortSignal): Promise<void> {
+	return media.run(input => runFfmpeg(args(input.source), signal, input.stdin));
+}
+
 /**
  * Extract one frame as PNG: timestamp selectors seek (`-ss` before `-i`),
  * frame indices use the `select` filter from the start.
@@ -369,19 +428,26 @@ export async function extractVideoFramePng(
 	selector: VideoSelector,
 	signal?: AbortSignal,
 ): Promise<VideoPng> {
+	await using media = await openMediaInputs(absolutePath);
 	const tmp = await TempDir.create("@omp-video-frame-");
 	try {
 		const out = tmp.join("frame.png");
 		if (selector.kind === "time") {
-			await runFfmpeg(["-ss", String(selector.seconds), "-i", absolutePath, "-frames:v", "1", out], signal);
+			await runFfmpegOn(
+				media,
+				source => ["-ss", String(selector.seconds), "-i", source, "-frames:v", "1", out],
+				signal,
+			);
 		} else {
-			await runFfmpeg(
-				[
+			const passthrough = await framePassthroughFlag();
+			await runFfmpegOn(
+				media,
+				source => [
 					"-i",
-					absolutePath,
+					source,
 					"-vf",
 					`select='eq(n\\,${selector.frame})'`,
-					...(await framePassthroughFlag()),
+					...passthrough,
 					"-frames:v",
 					"1",
 					out,
@@ -422,12 +488,13 @@ export async function decodeStillImageJpeg(
 			`ffmpeg ${release.major}.${release.minor} cannot decode tiled HEIF images such as camera photos; ffmpeg 8.1 or newer can.`,
 		);
 	}
+	await using media = await openMediaInputs(absolutePath);
 	const tmp = await TempDir.create("@omp-still-image-");
 	try {
 		const out = tmp.join("image.jpg");
 		let decodedBytes = 0;
 		for (const quality of STILL_IMAGE_JPEG_QUALITIES) {
-			await runFfmpeg(["-i", absolutePath, "-frames:v", "1", "-q:v", String(quality), out], signal);
+			await runFfmpegOn(media, source => ["-i", source, "-frames:v", "1", "-q:v", String(quality), out], signal);
 			const bytes = await Bun.file(out)
 				.bytes()
 				.catch(() => null);
@@ -468,6 +535,7 @@ export async function buildVideoContactSheetPng(
 	const thumbs = CONTACT_SHEET_THUMBS;
 	const cols = CONTACT_SHEET_COLS;
 	const rows = Math.ceil(thumbs / cols);
+	await using media = await openMediaInputs(absolutePath);
 	const tmp = await TempDir.create("@omp-video-sheet-");
 	try {
 		const duration = meta.durationSec;
@@ -478,12 +546,13 @@ export async function buildVideoContactSheetPng(
 		const thumbPaths = times.map((_, i) => tmp.join(`thumb-${i}.png`));
 		await Promise.all(
 			times.map((time, i) =>
-				runFfmpeg(
-					[
+				runFfmpegOn(
+					media,
+					source => [
 						"-ss",
 						String(time),
 						"-i",
-						absolutePath,
+						source,
 						"-frames:v",
 						"1",
 						"-vf",

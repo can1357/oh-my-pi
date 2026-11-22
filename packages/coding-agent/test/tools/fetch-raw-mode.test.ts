@@ -260,7 +260,12 @@ describe("raw URL response bytes", () => {
 		const artifactPath = path.join(testDir, "session", spillFileName(artifactId ?? ""));
 		expect(await Bun.file(artifactPath).text()).toBe(body);
 
-		const materialized = await materializeReadUrlToFile(session, { path: `${origin}/body`, raw: true });
+		const materialized = await materializeReadUrlToFile(
+			session,
+			{ path: `${origin}/body`, raw: true },
+			undefined,
+			"grep",
+		);
 		expect(await Bun.file(materialized.path).text()).toBe(body);
 		for (const target of [`${origin}/body`, artifactPath, materialized.path]) {
 			const result = await tool.execute("body-coordinates", { path: `${target}:301-302:raw` });

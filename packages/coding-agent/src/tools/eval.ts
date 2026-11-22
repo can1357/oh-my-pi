@@ -58,6 +58,9 @@ import {
 import { cfgTaskMaxRecursionDepth, perCallModelEnabled } from "../task/settings";
 import { getPerCallModelAdvertisement } from "../task/model-approval";
 import { shapeToolResult } from "../spotlight";
+import { renderSandboxDenialNotice } from "../sandbox/denial-notice";
+import type { EgressCall } from "../sandbox/grants";
+import { EVAL_EGRESS_SCOPE, SandboxRuntime } from "../sandbox/runtime";
 import { cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./settings";
 
 /** Language tokens the eval tool accepts, in stable display order. */
@@ -763,6 +766,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		let outputSummary: OutputSummary | undefined;
 		let outputDumped = false;
 		let updateTimer: NodeJS.Timeout | undefined;
+		let evalCall: EgressCall | undefined;
 		const finalizeOutput = async (): Promise<OutputSummary | undefined> => {
 			if (outputDumped || !outputSink) return outputSummary;
 			outputSummary = await outputSink.dump();
@@ -775,6 +779,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			}
 			session.assertEvalExecutionAllowed?.();
 
+			// Every cell runs contained when the sandbox applies to `eval`; the card reports it.
+			const evalSandbox = await SandboxRuntime.forScope(session.cwd, "eval");
+			const evalStartedAt = Date.now();
+			// The refusals of the eval kernels and `sh()` hosts while this call runs are its own.
+			evalCall = evalSandbox?.beginEgressCall([EVAL_EGRESS_SCOPE]);
 			const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES * 2);
 			const images: ImageContent[] = [];
 			const replies: string[] = [];
@@ -1016,12 +1025,20 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					cellResult.status = "error";
 					pushUpdate();
 					const combinedOutput = cellOutputs.join("\n\n");
+					// Only the failing cell's own output, and none for a cancelled cell, as bash does.
+					const sandboxMeta = evalSandbox?.resultMeta({
+						blockedSince: evalStartedAt,
+						call: evalCall,
+						output: result.cancelled ? undefined : result.output,
+					});
 					const exitLine = `Command exited with code ${result.exitCode}`;
-					const outputText = result.cancelled
-						? combinedOutput || result.output || "Command aborted"
-						: combinedOutput
-							? `${combinedOutput}\n\n${exitLine}`
-							: exitLine;
+					const outputText = (
+						result.cancelled
+							? [combinedOutput || result.output || "Command aborted"]
+							: [combinedOutput, renderSandboxDenialNotice(sandboxMeta, session, true), exitLine]
+					)
+						.filter(Boolean)
+						.join("\n\n");
 
 					const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
 					const details: EvalToolDetails = {
@@ -1032,6 +1049,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						isError: true,
 					};
 					if (notice) details.notice = notice;
+					if (sandboxMeta) details.sandbox = sandboxMeta;
 
 					return toolResult(details)
 						.content([{ type: "text", text: notice ? `${notice}\n\n${outputText}` : outputText }, ...images])
@@ -1049,9 +1067,18 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 
 			const combinedOutput = cellOutputs.join("\n\n");
 			const hasImages = images.length > 0;
-			const outputText =
+			const sandboxMeta = evalSandbox?.resultMeta({ blockedSince: evalStartedAt, call: evalCall });
+			// A succeeded call names only the hosts refused to its own kernels and shells.
+			const sandboxNotice = renderSandboxDenialNotice(sandboxMeta, session, false);
+			const outputText = [
 				combinedOutput ||
-				(hasImages ? `(${images.length} image${images.length === 1 ? "" : "s"}; no text output)` : "(no output)");
+					(hasImages
+						? `(${images.length} image${images.length === 1 ? "" : "s"}; no text output)`
+						: "(no output)"),
+				sandboxNotice,
+			]
+				.filter(Boolean)
+				.join("\n\n");
 			const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
 
 			const details: EvalToolDetails = {
@@ -1061,12 +1088,14 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				replies: replies.length > 0 ? replies : undefined,
 			};
 			if (notice) details.notice = notice;
+			if (sandboxMeta) details.sandbox = sandboxMeta;
 
 			return toolResult(details)
 				.content([{ type: "text", text: notice ? `${notice}\n\n${outputText}` : outputText }, ...images])
 				.truncationFromSummary(summaryForMeta, { direction: "tail" })
 				.done();
 		} finally {
+			evalCall?.end();
 			clearTimeout(updateTimer);
 			if (!outputDumped) {
 				try {

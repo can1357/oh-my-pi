@@ -11,6 +11,7 @@ import {
 	formatIsoDate,
 	formatMediaDuration,
 	formatNumber,
+	guardedFetch,
 	handlerSettings,
 	loadPage,
 	type LoadPageOptions,
@@ -124,6 +125,7 @@ export const handleYouTube: SpecialHandler = async (
 					excerpts: true,
 					fullContent: false,
 					signal,
+					fetch: guardedFetch(),
 				},
 				storage,
 			);

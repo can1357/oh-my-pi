@@ -164,6 +164,15 @@ import { cfgTaskAgentModelOverrides } from "../../task/settings";
 import { previewTheme } from "../../ui/theme/service";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { listThemes } from "@oh-my-pi/pi-tui/theme/loader";
+import { SandboxRuntime } from "../../sandbox/runtime";
+import { type SandboxConfigHandle, SandboxConfigOverlay } from "../../ui/overlays/sandbox/sandbox-config";
+import {
+	applySandboxChange,
+	replaceSandboxListEntry,
+	resetSandboxSetting,
+	sandboxPanelModel,
+	setSandboxListMember,
+} from "../sandbox-panel";
 
 /** First-use boundary for the provider auth catalog. */
 async function loadProviderAuthUi() {
@@ -187,7 +196,14 @@ function statusLinePreview(preview: StatusLinePreview): Partial<StatusLineSettin
 const pickerFocus = (root: UiNode): UiNode => firstOfKind(root, "picker");
 
 /** Menus that open at most once: a repeat request focuses the open one. */
-type MenuKind = "settings" | "model-picker" | "model-hub" | "agents-dashboard" | "agent-hub" | "usage-dashboard";
+type MenuKind =
+	| "settings"
+	| "model-picker"
+	| "model-hub"
+	| "agents-dashboard"
+	| "agent-hub"
+	| "usage-dashboard"
+	| "sandbox";
 
 /** An open menu: registered when the request runs, given its overlay once the screen mounts. */
 interface OpenMenu {
@@ -232,7 +248,7 @@ export class SelectorController {
 		options: { focus?: (screen: UiNode) => UiNode; onKey?: (key: KeyEvent) => boolean; onClose?: () => void } = {},
 	): OverlayHandle {
 		// Tern docks a prefs sheet beside the session when it is a direct layer child.
-		const sheet = kind === "settings" && this.ctx.shell.host?.feature("aside");
+		const sheet = (kind === "settings" || kind === "sandbox") && this.ctx.shell.host?.feature("aside");
 		const handle = this.ctx.shell.overlays.show(
 			sheet ? view : () => fullscreenMenuView(kind, view(), options.onKey),
 			{
@@ -583,6 +599,73 @@ export class SelectorController {
 				{ focus: root => firstOfKind(root, "prefs") },
 			);
 		})();
+	}
+
+	/**
+	 * Fullscreen `/sandbox` sheet (the `/settings` idiom): status, settings and the resolved policy
+	 * of this workspace's sandbox. Edits write the global layer, like `/settings`; the sheet
+	 * refreshes after each write and whenever the runtime's policy changes, and shows a rejected
+	 * edit's reason until the next successful one.
+	 */
+	showSandboxConfigure(): void {
+		if (this.#focusOpenMenu("sandbox")) return;
+		const menu = this.#claimMenu("sandbox");
+		SandboxRuntime.for(this.ctx.sessionManager.getCwd())
+			.then(runtime => {
+				let sheet: SandboxConfigHandle | undefined;
+				const refresh = (): void => sheet?.setModel(sandboxPanelModel(settings, runtime));
+				const write = (apply: () => void): void => {
+					try {
+						apply();
+						sheet?.setNotice(undefined);
+					} catch (error) {
+						sheet?.setNotice(error instanceof Error ? error.message : String(error));
+					}
+					refresh();
+				};
+				// A burst of changes (refused connections) rebuilds the model once per tick, not per change.
+				let refreshScheduled = false;
+				const unsubscribe = runtime.onChange(() => {
+					if (refreshScheduled) return;
+					refreshScheduled = true;
+					setImmediate(() => {
+						refreshScheduled = false;
+						refresh();
+					});
+				});
+				this.#showFullscreenMenu(
+					"sandbox",
+					menu,
+					() =>
+						SandboxConfigOverlay({
+							model: sandboxPanelModel(settings, runtime),
+							callbacks: {
+								set: change => write(() => applySandboxChange(settings, change)),
+								reset: id => write(() => resetSandboxSetting(settings, id)),
+								addEntry: (list, entry) => write(() => setSandboxListMember(settings, list, entry, true)),
+								removeEntry: (list, entry) => write(() => setSandboxListMember(settings, list, entry, false)),
+								replaceEntry: (list, previous, next) =>
+									write(() => replaceSandboxListEntry(settings, list, previous, next)),
+								// The sheet edits configuration: an allowed host joins the global allowlist.
+								allowHost: host => write(() => runtime.grantHost(host, "always")),
+								revokePath: (kind, path) => write(() => runtime.revokePath(kind, path)),
+								revokeExec: target => write(() => runtime.revokeExec(target)),
+								trustCreated: target => write(() => runtime.trustCreated(target)),
+								forgetCreated: target => write(() => runtime.forgetCreated(target)),
+								close: () => this.#closeMenu(menu),
+							},
+							ref: handle => {
+								sheet = handle;
+							},
+						}),
+					{ focus: screen => firstOfKind(screen, "prefs"), onClose: unsubscribe },
+				);
+			})
+			.catch((error: unknown) => {
+				// A sheet that never opened must not block the next `/sandbox`.
+				this.#releaseMenu("sandbox", menu);
+				this.ctx.showError(`Sandbox: ${error instanceof Error ? error.message : String(error)}`);
+			});
 	}
 
 	showHistorySearch(): void {

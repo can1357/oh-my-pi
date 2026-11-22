@@ -1,0 +1,803 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { EgressProxy, type EgressProxyOptions } from "@oh-my-pi/pi-coding-agent/sandbox/egress-proxy";
+import type { Socket, TCPSocketListener } from "bun";
+
+const cleanups: (() => void | Promise<void>)[] = [];
+let dnsRecords: Record<string, string[]> = {};
+
+/** Answers `Bun.dns.lookup` from `records`; any other name fails to resolve. */
+function stubDns(records: Record<string, string[]>): void {
+	dnsRecords = records;
+}
+
+beforeEach(() => {
+	dnsRecords = {};
+	vi.spyOn(Bun.dns, "lookup").mockImplementation(async (hostname: string) => {
+		const addresses = dnsRecords[hostname];
+		if (!addresses) throw new Error(`getaddrinfo ENOTFOUND ${hostname}`);
+		return addresses.map(address => ({ address, family: address.includes(":") ? 6 : 4, ttl: 0 }));
+	});
+});
+
+afterEach(async () => {
+	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+	vi.restoreAllMocks();
+});
+
+async function startProxy(options: EgressProxyOptions): Promise<EgressProxy> {
+	const proxy = await EgressProxy.start(options);
+	cleanups.push(() => proxy.close());
+	return proxy;
+}
+
+/** Writes `data` fully, honouring partial writes. Call `drain` from the socket's drain handler. */
+class Writer {
+	#pending: Uint8Array[] = [];
+
+	write(socket: Socket<unknown>, data: Uint8Array): void {
+		this.#pending.push(data);
+		this.drain(socket);
+	}
+
+	drain(socket: Socket<unknown>): void {
+		while (this.#pending.length > 0) {
+			const chunk = this.#pending[0];
+			const written = Math.max(socket.write(chunk), 0);
+			if (written < chunk.byteLength) {
+				this.#pending[0] = chunk.subarray(written);
+				return;
+			}
+			this.#pending.shift();
+		}
+	}
+}
+
+/** Raw TCP client of the proxy that records everything it receives. */
+class RawClient {
+	readonly closed: Promise<void>;
+	#socket: Socket<undefined> | undefined;
+	#received: Buffer[] = [];
+	#receivedBytes = 0;
+	#isClosed = false;
+	#waiters: (() => void)[] = [];
+	readonly #writer = new Writer();
+
+	private constructor(closed: Promise<void>) {
+		this.closed = closed;
+	}
+
+	static async connect(port: number): Promise<RawClient> {
+		const closed = Promise.withResolvers<void>();
+		const client = new RawClient(closed.promise);
+		client.#socket = await Bun.connect({
+			hostname: "127.0.0.1",
+			port,
+			socket: {
+				data: (_socket, chunk) => {
+					client.#received.push(Buffer.from(chunk));
+					client.#receivedBytes += chunk.byteLength;
+					client.#notify();
+				},
+				drain: socket => client.#writer.drain(socket),
+				close: () => {
+					client.#isClosed = true;
+					closed.resolve();
+					client.#notify();
+				},
+				error() {},
+			},
+		});
+		cleanups.push(() => client.#socket?.terminate());
+		return client;
+	}
+
+	terminate(): void {
+		this.#socket?.terminate();
+	}
+
+	get bytes(): Buffer {
+		return Buffer.concat(this.#received);
+	}
+
+	get text(): string {
+		return this.bytes.toString("latin1");
+	}
+
+	write(data: string | Uint8Array): void {
+		if (!this.#socket) throw new Error("not connected");
+		this.#writer.write(this.#socket, typeof data === "string" ? Buffer.from(data, "latin1") : data);
+	}
+
+	/** Resolves once `predicate` holds for the received text, or rejects when the connection closes first. */
+	async waitFor(predicate: (client: RawClient) => boolean): Promise<void> {
+		while (!predicate(this)) {
+			if (this.#isClosed) throw new Error(`connection closed; received: ${this.text.slice(0, 400)}`);
+			const { promise, resolve } = Promise.withResolvers<void>();
+			this.#waiters.push(resolve);
+			await promise;
+		}
+	}
+
+	/** The full response of a refused or forwarded request (the proxy closes the connection afterwards). */
+	async response(): Promise<string> {
+		await this.closed;
+		return this.text;
+	}
+
+	get receivedBytes(): number {
+		return this.#receivedBytes;
+	}
+
+	#notify(): void {
+		for (const waiter of this.#waiters.splice(0)) waiter();
+	}
+}
+
+async function request(proxy: EgressProxy, head: string): Promise<string> {
+	return requestPort(proxy.port, head);
+}
+
+/** `head` written to a fresh connection on `port` (the shared one or an extra listener); the full response. */
+async function requestPort(port: number, head: string): Promise<string> {
+	const client = await RawClient.connect(port);
+	client.write(head);
+	return client.response();
+}
+
+function connectHead(authority: string): string {
+	return `CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`;
+}
+
+function statusOf(response: string): number {
+	return Number(/^HTTP\/1\.1 (\d{3})/.exec(response)?.[1]);
+}
+
+function expectBlocked(response: string): void {
+	expect(statusOf(response)).toBe(403);
+	expect(response).toMatch(/\r\nX-Omp-Sandbox: blocked\r\n/i);
+}
+
+/** Local TCP server that greets, then echoes each chunk back prefixed with `echo:`. */
+function startEchoServer(): { port: number; sockets: Set<Socket<undefined>>; firstClose: Promise<void> } {
+	const sockets = new Set<Socket<undefined>>();
+	const firstClose = Promise.withResolvers<void>();
+	const listener: TCPSocketListener<undefined> = Bun.listen({
+		hostname: "127.0.0.1",
+		port: 0,
+		socket: {
+			open(socket) {
+				sockets.add(socket);
+				socket.write("hello\n");
+			},
+			data(socket, chunk) {
+				socket.write(`echo:${chunk.toString("latin1")}`);
+			},
+			close(socket) {
+				sockets.delete(socket);
+				firstClose.resolve();
+			},
+		},
+	});
+	cleanups.push(() => listener.stop(true));
+	return { port: listener.port, sockets, firstClose: firstClose.promise };
+}
+
+/** Local TCP server that accepts each connection and closes it at once, without sending a byte. */
+function startSilentUpstream(): { port: number } {
+	const listener = Bun.listen<undefined>({
+		hostname: "127.0.0.1",
+		port: 0,
+		socket: {
+			open(socket) {
+				socket.end();
+			},
+			data() {},
+		},
+	});
+	cleanups.push(() => listener.stop(true));
+	return { port: listener.port };
+}
+
+function pattern(length: number, seed: number): Uint8Array {
+	const data = new Uint8Array(length);
+	for (let i = 0; i < length; i++) data[i] = (i * 31 + seed) % 251;
+	return data;
+}
+
+/**
+ * Records the proxy's upstream dials to `address` (as `address:port`) and refuses them instead of
+ * dialling it for real; every other connection goes through.
+ */
+function recordDialsTo(address: string): string[] {
+	const attempts: string[] = [];
+	const realConnect = Bun.connect.bind(Bun);
+	vi.spyOn(Bun, "connect").mockImplementation(options => {
+		if ("hostname" in options && options.hostname === address) {
+			attempts.push(`${options.hostname}:${options.port}`);
+			return Promise.reject(new Error("connect ECONNREFUSED"));
+		}
+		// Narrowed per branch so each call resolves to its own `Bun.connect` overload.
+		return "unix" in options ? realConnect(options) : realConnect(options);
+	});
+	return attempts;
+}
+
+const TUNNEL_ESTABLISHED = "HTTP/1.1 200 Connection Established\r\n\r\n";
+
+describe("EgressProxy", () => {
+	it("relays large payloads in both directions without loss", async () => {
+		const size = 8 * 1024 * 1024;
+		const upload = pattern(size, 7);
+		const download = pattern(size, 13);
+		const received: Buffer[] = [];
+		let receivedBytes = 0;
+		const serverDone = Promise.withResolvers<Buffer>();
+		const writer = new Writer();
+		const listener = Bun.listen({
+			hostname: "127.0.0.1",
+			port: 0,
+			socket: {
+				data(socket, chunk) {
+					received.push(Buffer.from(chunk));
+					receivedBytes += chunk.byteLength;
+					if (receivedBytes === size) {
+						serverDone.resolve(Buffer.concat(received));
+						writer.write(socket, download);
+					}
+				},
+				drain(socket) {
+					writer.drain(socket);
+				},
+			},
+		});
+		cleanups.push(() => listener.stop(true));
+		const proxy = await startProxy({ allowedHosts: () => ["127.0.0.1"] });
+		const client = await RawClient.connect(proxy.port);
+		client.write(connectHead(`127.0.0.1:${listener.port}`));
+		await client.waitFor(c => c.text === TUNNEL_ESTABLISHED);
+		client.write(upload);
+
+		expect((await serverDone.promise).equals(upload)).toBe(true);
+		await client.waitFor(c => c.receivedBytes === TUNNEL_ESTABLISHED.length + size);
+		expect(client.bytes.subarray(TUNNEL_ESTABLISHED.length).equals(download)).toBe(true);
+	}, 30_000);
+
+	it("refuses a host that is not allowed with 403 and reports it", async () => {
+		const blocked: [string, number][] = [];
+		const proxy = await startProxy({
+			allowedHosts: () => ["github.com"],
+			onBlocked: (host, port) => blocked.push([host, port]),
+		});
+		const response = await request(proxy, connectHead("Blocked.Example:443"));
+		expectBlocked(response);
+		expect(blocked).toEqual([["blocked.example", 443]]);
+	});
+
+	it("matches internationalized allowlist entries against the punycode CONNECT host", async () => {
+		const blocked: string[] = [];
+		stubDns({ "www.xn--bcher-kva.example": ["93.184.215.14"] });
+		const attempts = recordDialsTo("93.184.215.14");
+		const proxy = await startProxy({
+			allowedHosts: () => ["*.bücher.example"],
+			onBlocked: host => blocked.push(host),
+		});
+		// Wildcard-matched (public answer): the proxy dials the resolved address instead of blocking.
+		const wildcard = await request(proxy, connectHead("www.xn--bcher-kva.example:443"));
+		expect(statusOf(wildcard)).toBe(502);
+		expect(wildcard).not.toMatch(/X-Omp-Sandbox/i);
+		expect(attempts).toEqual(["93.184.215.14:443"]);
+		expect(blocked).toEqual([]);
+	});
+
+	it("refuses wildcard-matched names that resolve to non-public addresses", async () => {
+		const blocked: string[] = [];
+		stubDns({
+			"private.corp.test": ["10.0.0.5"],
+			"metadata.corp.test": ["169.254.169.254"],
+			"v6loopback.corp.test": ["::1"],
+			"mapped.corp.test": ["::ffff:127.0.0.1"],
+			"mixed.corp.test": ["93.184.215.14", "10.0.0.1"],
+			"registry.corp.test": ["10.0.0.7"],
+		});
+		const attempts = recordDialsTo("10.0.0.7");
+		const proxy = await startProxy({
+			allowedHosts: () => ["*.corp.test", "registry.corp.test"],
+			onBlocked: host => blocked.push(host),
+		});
+		const refused = ["private", "metadata", "v6loopback", "mapped", "mixed"].map(name => `${name}.corp.test`);
+		for (const host of refused) expectBlocked(await request(proxy, connectHead(`${host}:443`)));
+		expect(blocked).toEqual(refused);
+
+		// Listed exactly: the private answer is allowed and the proxy dials the resolved address.
+		const response = await request(proxy, connectHead("registry.corp.test:443"));
+		expect(statusOf(response)).toBe(502);
+		expect(response).not.toMatch(/X-Omp-Sandbox/i);
+		expect(attempts).toEqual(["10.0.0.7:443"]);
+		expect(blocked).toEqual(refused);
+	});
+
+	it("refuses an exactly listed DNS name that resolves to a host-local address", async () => {
+		const blocked: string[] = [];
+		const hostLocal: Record<string, string[]> = {
+			"rebind.corp.test": ["127.0.0.1"],
+			"metadata.corp.test": ["169.254.169.254"],
+			"unspecified.corp.test": ["0.0.0.0"],
+			"v6loopback.corp.test": ["::1"],
+			"mapped.corp.test": ["::ffff:127.0.0.1"],
+			"v6linklocal.corp.test": ["fe80::1"],
+			"nat64.corp.test": ["64:ff9b::7f00:1"],
+			"sixtofour.corp.test": ["2002:7f00:1::"],
+			"mixed.corp.test": ["10.0.0.5", "127.0.0.1"],
+		};
+		stubDns({ ...hostLocal, "intranet.corp.test": ["10.0.0.5"] });
+		const attempts = recordDialsTo("10.0.0.5");
+		const refused = Object.keys(hostLocal);
+		const proxy = await startProxy({
+			allowedHosts: () => [...refused, "intranet.corp.test"],
+			onBlocked: host => blocked.push(host),
+		});
+		for (const host of refused) expectBlocked(await request(proxy, connectHead(`${host}:443`)));
+		expect(blocked).toEqual(refused);
+		expect(attempts).toEqual([]);
+
+		// The same exact entry at a private answer: the proxy dials it.
+		const response = await request(proxy, connectHead("intranet.corp.test:443"));
+		expect(statusOf(response)).toBe(502);
+		expect(response).not.toMatch(/X-Omp-Sandbox/i);
+		expect(attempts).toEqual(["10.0.0.5:443"]);
+		expect(blocked).toEqual(refused);
+	});
+
+	it("lets a decide-approved name reach a private range on the first request", async () => {
+		const blocked: string[] = [];
+		const asked: string[] = [];
+		stubDns({ "artifactory.corp": ["10.0.0.5"] });
+		// Record the proxy's upstream attempt instead of dialling a real private address.
+		const attempts = recordDialsTo("10.0.0.5");
+		const proxy = await startProxy({
+			allowedHosts: () => [],
+			decide: async host => {
+				asked.push(host);
+				return true;
+			},
+			onBlocked: host => blocked.push(host),
+		});
+		const response = await request(proxy, connectHead("artifactory.corp:443"));
+		expect(statusOf(response)).toBe(502);
+		expect(response).not.toMatch(/X-Omp-Sandbox/i);
+		expect(attempts).toEqual(["10.0.0.5:443"]);
+		expect(asked).toEqual(["artifactory.corp"]);
+		expect(blocked).toEqual([]);
+	});
+
+	it("refuses decide-approved names that resolve to loopback or link-local addresses", async () => {
+		const blocked: string[] = [];
+		stubDns({ "loopback.example": ["127.0.0.1"], "metadata.example": ["169.254.169.254"] });
+		const proxy = await startProxy({
+			allowedHosts: () => [],
+			decide: async () => true,
+			onBlocked: host => blocked.push(host),
+		});
+		expectBlocked(await request(proxy, connectHead("loopback.example:443")));
+		expectBlocked(await request(proxy, connectHead("metadata.example:80")));
+		expect(blocked).toEqual(["loopback.example", "metadata.example"]);
+	});
+
+	it("refuses IP literals and loopback names unless listed literally, without asking", async () => {
+		const server = startEchoServer();
+		let asked = 0;
+		const blocked: string[] = [];
+		const hosts: string[] = ["*.0.0.1", "*.localhost"];
+		const proxy = await startProxy({
+			allowedHosts: () => hosts,
+			decide: async () => {
+				asked++;
+				return true;
+			},
+			onBlocked: host => blocked.push(host),
+		});
+		for (const authority of [
+			`127.0.0.1:${server.port}`,
+			`2130706433:${server.port}`,
+			`localhost:${server.port}`,
+			`app.localhost:${server.port}`,
+			`[::1]:${server.port}`,
+			"10.1.2.3:443",
+			"8.8.8.8:443",
+		]) {
+			expectBlocked(await request(proxy, connectHead(authority)));
+		}
+		expectBlocked(await request(proxy, `GET http://127.0.0.1:${server.port}/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n`));
+		expect(asked).toBe(0);
+		expect(blocked).toEqual([
+			"127.0.0.1",
+			"127.0.0.1",
+			"localhost",
+			"app.localhost",
+			"::1",
+			"10.1.2.3",
+			"8.8.8.8",
+			"127.0.0.1",
+		]);
+
+		hosts.push("LOCALHOST.", "app.localhost", "127.0.0.1");
+		stubDns({ localhost: ["127.0.0.1"], "app.localhost": ["127.0.0.1"] });
+		for (const authority of ["localhost", "app.localhost", "127.0.0.1"]) {
+			const client = await RawClient.connect(proxy.port);
+			client.write(connectHead(`${authority}:${server.port}`));
+			await client.waitFor(c => c.text === `${TUNNEL_ESTABLISHED}hello\n`);
+		}
+	});
+
+	it("shares one decide call between concurrent requests for the same host", async () => {
+		const calls: [string, number][] = [];
+		const release = Promise.withResolvers<boolean>();
+		// Each request reads the allowlist right before it joins the pending decision.
+		const allArrived = Promise.withResolvers<void>();
+		let reads = 0;
+		const blocked: string[] = [];
+		const proxy = await startProxy({
+			allowedHosts: () => {
+				if (++reads === 3) allArrived.resolve();
+				return [];
+			},
+			decide: (host, port) => {
+				calls.push([host, port]);
+				return release.promise;
+			},
+			onBlocked: host => blocked.push(host),
+		});
+		const responses = Promise.all([
+			request(proxy, connectHead("ask.example:443")),
+			request(proxy, connectHead("ASK.example.:8443")),
+			request(proxy, "GET http://ask.example/x HTTP/1.1\r\nHost: ask.example\r\n\r\n"),
+		]);
+		await allArrived.promise;
+		release.resolve(false);
+		for (const response of await responses) expectBlocked(response);
+		expect(calls).toHaveLength(1);
+		expect(calls[0][0]).toBe("ask.example");
+		expect(blocked).toEqual(["ask.example", "ask.example", "ask.example"]);
+
+		// A settled decision is not cached: the next request asks again.
+		expectBlocked(await request(proxy, connectHead("ask.example:443")));
+		expect(calls).toHaveLength(2);
+	});
+
+	it("asks again for a request that waited on an approval: one approval covers one request", async () => {
+		const answers = [Promise.withResolvers<boolean>(), Promise.withResolvers<boolean>()];
+		const allArrived = Promise.withResolvers<void>();
+		let reads = 0;
+		let calls = 0;
+		const proxy = await startProxy({
+			allowedHosts: () => {
+				if (++reads === 2) allArrived.resolve();
+				return [];
+			},
+			decide: () => answers[calls++].promise,
+		});
+		// `ask.example` does not resolve: the approved request fails as unreachable (502), not blocked.
+		const responses = Promise.all([
+			request(proxy, connectHead("ask.example:443")),
+			request(proxy, connectHead("ask.example:8443")),
+		]);
+		await allArrived.promise;
+		answers[0].resolve(true);
+		answers[1].resolve(false);
+		const [first, second] = await responses;
+		expect(calls).toBe(2);
+		expect([statusOf(first), statusOf(second)].sort()).toEqual([403, 502]);
+	});
+
+	it("refuses when decide throws", async () => {
+		const proxy = await startProxy({
+			allowedHosts: () => [],
+			decide: () => Promise.reject(new Error("no ui")),
+		});
+		expectBlocked(await request(proxy, connectHead("unknown.example:443")));
+	});
+
+	it("forwards absolute-URI plain HTTP requests in origin form", async () => {
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(req) {
+				const url = new URL(req.url);
+				return Response.json({
+					method: req.method,
+					path: `${url.pathname}${url.search}`,
+					host: req.headers.get("host"),
+					proxyConnection: req.headers.get("proxy-connection"),
+					custom: req.headers.get("x-custom"),
+					body: await req.text(),
+				});
+			},
+		});
+		cleanups.push(() => server.stop(true));
+		const proxy = await startProxy({ allowedHosts: () => ["127.0.0.1"] });
+
+		const viaFetch = await fetch(`http://127.0.0.1:${server.port}/echo?q=1`, {
+			method: "POST",
+			body: "payload",
+			headers: { "x-custom": "yes" },
+			proxy: proxy.url,
+		});
+		expect(viaFetch.status).toBe(200);
+		expect(await viaFetch.json()).toEqual({
+			method: "POST",
+			path: "/echo?q=1",
+			host: `127.0.0.1:${server.port}`,
+			proxyConnection: null,
+			custom: "yes",
+			body: "payload",
+		});
+
+		const raw = await request(
+			proxy,
+			`GET http://127.0.0.1:${server.port}/raw HTTP/1.1\r\nHost: elsewhere.example\r\nProxy-Connection: keep-alive\r\n\r\n`,
+		);
+		expect(statusOf(raw)).toBe(200);
+		const body = JSON.parse(raw.slice(raw.indexOf("\r\n\r\n") + 4)) as Record<string, unknown>;
+		expect(body.path).toBe("/raw");
+		expect(body.host).toBe(`127.0.0.1:${server.port}`);
+		expect(body.proxyConnection).toBeNull();
+	});
+
+	it("rejects malformed and oversized request heads", async () => {
+		const proxy = await startProxy({ allowedHosts: () => ["127.0.0.1"] });
+		expect(statusOf(await request(proxy, "GET / HTTP/1.1\r\nHost: x\r\n\r\n"))).toBe(400);
+		expect(statusOf(await request(proxy, "CONNECT example.com HTTP/1.1\r\n\r\n"))).toBe(400);
+		expect(statusOf(await request(proxy, "garbage\r\n\r\n"))).toBe(400);
+		const huge = `GET http://127.0.0.1/ HTTP/1.1\r\nX-Big: ${"a".repeat(80 * 1024)}\r\n\r\n`;
+		expect(statusOf(await request(proxy, huge))).toBe(431);
+	});
+
+	it("keeps an established tunnel open past the head timeout", async () => {
+		const server = startEchoServer();
+		const proxy = await startProxy({ allowedHosts: () => ["127.0.0.1"], headTimeoutMs: 50 });
+		const tunnel = await RawClient.connect(proxy.port);
+		tunnel.write(connectHead(`127.0.0.1:${server.port}`));
+		await tunnel.waitFor(c => c.text === `${TUNNEL_ESTABLISHED}hello\n`);
+
+		// A probe opened after the tunnel was established sends a head that never finishes and is dropped
+		// by its own head timeout, so by the time it closes the idle tunnel has outlived a full timeout.
+		const probe = await RawClient.connect(proxy.port);
+		probe.write("CONNECT 127.0.0.1:1 HTTP/1.1\r\n");
+		await probe.closed;
+		expect(probe.text).toBe("");
+
+		tunnel.write("still-there");
+		await tunnel.waitFor(c => c.text.endsWith("echo:still-there"));
+		expect(server.sockets.size).toBe(1);
+	});
+
+	it("tunnels a request head that arrives in pieces", async () => {
+		const server = startEchoServer();
+		const proxy = await startProxy({ allowedHosts: () => ["127.0.0.1"] });
+		const client = await RawClient.connect(proxy.port);
+		const head = connectHead(`127.0.0.1:${server.port}`);
+		// Split inside the terminator; a full round trip on another connection keeps the halves apart.
+		client.write(head.slice(0, -1));
+		await request(proxy, "garbage\r\n\r\n");
+		client.write(head.slice(-1));
+		await client.waitFor(c => c.text === `${TUNNEL_ESTABLISHED}hello\n`);
+	});
+
+	it("answers 502 when the allowlist throws and keeps serving", async () => {
+		const server = startEchoServer();
+		let reads = 0;
+		const proxy = await startProxy({
+			allowedHosts: () => {
+				if (++reads === 1) throw new Error("settings unavailable");
+				return ["127.0.0.1"];
+			},
+		});
+		const failed = await request(proxy, connectHead(`127.0.0.1:${server.port}`));
+		expect(statusOf(failed)).toBe(502);
+		expect(failed).not.toMatch(/X-Omp-Sandbox/i);
+		const client = await RawClient.connect(proxy.port);
+		client.write(connectHead(`127.0.0.1:${server.port}`));
+		await client.waitFor(c => c.text === `${TUNNEL_ESTABLISHED}hello\n`);
+	});
+
+	it("answers 502 when an upstream accepts a plain request and closes without a response", async () => {
+		const silent = startSilentUpstream();
+		const proxy = await startProxy({ allowedHosts: () => ["127.0.0.1"] });
+
+		const response = await request(
+			proxy,
+			`GET http://127.0.0.1:${silent.port}/silent HTTP/1.1\r\nHost: 127.0.0.1:${silent.port}\r\n\r\n`,
+		);
+		expect(statusOf(response)).toBe(502);
+		expect(response).toContain(`127.0.0.1:${silent.port} closed the connection without a response`);
+	});
+
+	it("ends a CONNECT tunnel to an upstream that closes without a response, with no 502 appended", async () => {
+		const silent = startSilentUpstream();
+		const proxy = await startProxy({ allowedHosts: () => ["127.0.0.1"] });
+
+		const response = await request(proxy, connectHead(`127.0.0.1:${silent.port}`));
+		expect(response).toBe(TUNNEL_ESTABLISHED);
+	});
+
+	it("terminates the upstream when the client goes away", async () => {
+		const upstreamClosed = Promise.withResolvers<void>();
+		const opened = Promise.withResolvers<void>();
+		let gracefulEnd = false;
+		const listener = Bun.listen({
+			hostname: "127.0.0.1",
+			port: 0,
+			allowHalfOpen: true,
+			socket: {
+				open: () => opened.resolve(),
+				data() {},
+				// A FIN means the proxy half-closed and would keep draining the response.
+				end: () => {
+					gracefulEnd = true;
+				},
+				close: () => upstreamClosed.resolve(),
+			},
+		});
+		cleanups.push(() => listener.stop(true));
+		const proxy = await startProxy({ allowedHosts: () => ["127.0.0.1"] });
+		const client = await RawClient.connect(proxy.port);
+		client.write(connectHead(`127.0.0.1:${listener.port}`));
+		await client.waitFor(c => c.text === TUNNEL_ESTABLISHED);
+		await opened.promise;
+		client.terminate();
+		await upstreamClosed.promise;
+		expect(gracefulEnd).toBe(false);
+	});
+
+	it("blocks unknown hosts without asking once too many decisions are pending", async () => {
+		const calls: string[] = [];
+		const eightAsked = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<boolean>();
+		const blocked: string[] = [];
+		const proxy = await startProxy({
+			allowedHosts: () => [],
+			decide: host => {
+				calls.push(host);
+				if (calls.length === 8) eightAsked.resolve();
+				return release.promise;
+			},
+			onBlocked: host => blocked.push(host),
+		});
+		const pending = Promise.all(
+			Array.from({ length: 8 }, (_, i) => request(proxy, connectHead(`pending${i}.example:443`))),
+		);
+		await eightAsked.promise;
+		expectBlocked(await request(proxy, connectHead("ninth.example:443")));
+		expect(calls).toHaveLength(8);
+		expect(blocked).toEqual(["ninth.example"]);
+		release.resolve(false);
+		for (const response of await pending) expectBlocked(response);
+	});
+
+	it("ends live tunnels on close", async () => {
+		const server = startEchoServer();
+		const proxy = await startProxy({ allowedHosts: () => ["127.0.0.1"] });
+		const client = await RawClient.connect(proxy.port);
+		client.write(connectHead(`127.0.0.1:${server.port}`));
+		await client.waitFor(c => c.text === `${TUNNEL_ESTABLISHED}hello\n`);
+		expect(server.sockets.size).toBe(1);
+
+		await proxy.close();
+		await client.closed;
+		await server.firstClose;
+		expect(server.sockets.size).toBe(0);
+		await expect(RawClient.connect(proxy.port)).rejects.toThrow();
+	});
+});
+
+describe("EgressProxy refusal origin", () => {
+	/** `user:password` as a `Proxy-Authorization: Basic` header line. */
+	function basic(credential: string): string {
+		return `Proxy-Authorization: Basic ${Buffer.from(credential).toString("base64")}\r\n`;
+	}
+
+	it("reports the Basic credentials of a refused CONNECT and absolute-URI request, and none without them", async () => {
+		const origins: unknown[] = [];
+		const proxy = await startProxy({
+			allowedHosts: () => [],
+			onBlocked: (_host, _port, origin) => origins.push(origin),
+		});
+		const connect = await request(proxy, `CONNECT a.test:443 HTTP/1.1\r\n${basic("omp:tok-1")}\r\n`);
+		expectBlocked(connect);
+		// The credential never reaches the refusal the client reads.
+		expect(connect).not.toContain("tok-1");
+		expectBlocked(await request(proxy, `GET http://b.test/ HTTP/1.1\r\nHost: b.test\r\n${basic("omp:tok-2")}\r\n`));
+		expectBlocked(await request(proxy, connectHead("c.test:443")));
+		// Another scheme carries no credentials the proxy can read.
+		expectBlocked(
+			await request(proxy, "CONNECT d.test:443 HTTP/1.1\r\nProxy-Authorization: Bearer omp:tok-3\r\n\r\n"),
+		);
+		expect(origins).toEqual([{ credential: "omp:tok-1" }, { credential: "omp:tok-2" }, {}, {}]);
+	});
+
+	it("tags refusals on an extra listener with its id, and keeps the shared port untagged", async () => {
+		const origins: unknown[] = [];
+		const proxy = await startProxy({
+			allowedHosts: () => [],
+			onBlocked: (host, _port, origin) => origins.push([host, origin]),
+		});
+		const listener = proxy.openListener("spawn-a");
+		expect(listener.port).not.toBe(proxy.port);
+		expect(listener.url).toBe(`http://127.0.0.1:${listener.port}`);
+		expectBlocked(await requestPort(listener.port, `CONNECT a.test:443 HTTP/1.1\r\n${basic("omp:tok")}\r\n`));
+		expectBlocked(await request(proxy, connectHead("b.test:443")));
+		expect(origins).toEqual([
+			["a.test", { listener: "spawn-a", credential: "omp:tok" }],
+			["b.test", {}],
+		]);
+	});
+
+	it("applies the proxy's policy on an extra listener", async () => {
+		const server = startEchoServer();
+		const proxy = await startProxy({ allowedHosts: () => ["127.0.0.1"] });
+		const client = await RawClient.connect(proxy.openListener("spawn-a").port);
+		client.write(connectHead(`127.0.0.1:${server.port}`));
+		await client.waitFor(c => c.text === `${TUNNEL_ESTABLISHED}hello\n`);
+	});
+
+	it("never forwards the per-call Proxy-Authorization of an allowed absolute-URI request", async () => {
+		const upstream: string[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(req) {
+				upstream.push([...req.headers].map(([name, value]) => `${name}: ${value}`).join("\n"));
+				return new Response("ok");
+			},
+		});
+		cleanups.push(() => server.stop(true));
+		const proxy = await startProxy({ allowedHosts: () => ["127.0.0.1"] });
+		const response = await request(
+			proxy,
+			`GET http://127.0.0.1:${server.port}/ HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\nConnection: close\r\n${basic("omp:secret-token")}\r\n`,
+		);
+		expect(statusOf(response)).toBe(200);
+		expect(upstream).toHaveLength(1);
+		expect(upstream[0]).not.toMatch(/proxy-authorization/i);
+		expect(upstream[0]).not.toContain(Buffer.from("omp:secret-token").toString("base64"));
+	});
+
+	it("keeps a retired listener's port bound and counts its new requests as untagged", async () => {
+		const origins: unknown[] = [];
+		const proxy = await startProxy({
+			allowedHosts: () => [],
+			onBlocked: (host, _port, origin) => origins.push([host, origin]),
+		});
+		const listener = proxy.openListener("spawn-a");
+		listener.retire();
+		listener.retire();
+		// Still bound: the sandbox that was handed this port allows it for life.
+		expectBlocked(await requestPort(listener.port, connectHead("a.test:443")));
+		expect(origins).toEqual([["a.test", {}]]);
+	});
+
+	it("stops accepting on a closed listener while its established tunnels go on", async () => {
+		const server = startEchoServer();
+		const proxy = await startProxy({ allowedHosts: () => ["127.0.0.1"] });
+		const listener = proxy.openListener("spawn-a");
+		const client = await RawClient.connect(listener.port);
+		client.write(connectHead(`127.0.0.1:${server.port}`));
+		await client.waitFor(c => c.text === `${TUNNEL_ESTABLISHED}hello\n`);
+
+		listener.close();
+		listener.close();
+		await expect(RawClient.connect(listener.port)).rejects.toThrow();
+		client.write("ping");
+		await client.waitFor(c => c.text.endsWith("echo:ping"));
+		// The shared port is unaffected.
+		expect(statusOf(await request(proxy, connectHead("blocked.test:443")))).toBe(403);
+	});
+
+	it("closes its extra listeners when the proxy closes, and opens none afterwards", async () => {
+		const proxy = await startProxy({ allowedHosts: () => [] });
+		const listener = proxy.openListener("spawn-a");
+		await proxy.close();
+		await expect(RawClient.connect(listener.port)).rejects.toThrow();
+		expect(() => proxy.openListener("spawn-b")).toThrow();
+	});
+});

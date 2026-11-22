@@ -39,7 +39,7 @@ export type BrowserRelayGuidance = { mode: "only" } | { mode: "default"; fallbac
 /** Build the browser eval facade after an eval runtime first requests preludes. */
 export function createBrowserPreludeDefinition(
 	session: ToolSession,
-	host: Pick<HostEvalPreludeDefinition, "invoke" | "status"> & {
+	host: Pick<HostEvalPreludeDefinition, "invoke" | "status" | "sandboxSubjects"> & {
 		/** Relay guidance to render; unset while an open without `app` stays out of the user's Chrome. */
 		relay?: BrowserRelayGuidance;
 	},
@@ -70,6 +70,7 @@ export function createBrowserPreludeDefinition(
 		exports: ["browser"],
 		approval: "exec",
 		enabled: () => cfgBrowserEnabled.get(session.settings),
+		sandboxSubjects: host.sandboxSubjects,
 		invoke: host.invoke,
 		status: host.status,
 	};

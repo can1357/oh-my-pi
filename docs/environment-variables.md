@@ -15,10 +15,12 @@ Most runtime lookups use `$env` from `@oh-my-pi/pi-utils` (`packages/utils/src/e
 `$env` loading order:
 
 1. Existing process environment (`Bun.env`)
-2. Project `.env` from the launch working directory for keys whose current value is empty/unset
+2. Project `.env` from the launch working directory for keys whose current value is empty/unset, except the operator-only names below
 3. Active agent `.env` (normally `~/.omp/agent/.env`) for keys whose current value is empty/unset
 4. Active config-root `.env` (normally `~/.omp/.env`) for keys whose current value is empty/unset
 5. Home `.env` (`~/.env`) for keys whose current value is empty/unset
+
+Operator-only names are never taken from a project's dotenv files (repository content), whether Bun autoloaded them or omp's loader reads them: `PI_CONFIG_FILES`/`OMP_CONFIG_FILES`, `PI_CODING_AGENT_DIR`/`OMP_CODING_AGENT_DIR`, `PI_CONFIG_DIR`/`OMP_CONFIG_DIR`, `PI_PROFILE`/`OMP_PROFILE`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME` and `PI_NATIVES_DIR`/`OMP_NATIVES_DIR` (the native addon loader also ignores a project `LOCALAPPDATA`). They choose which config, `.env` files, plugins and native addon omp trusts; set them in your shell or in omp's own `.env` files.
 
 `OTEL_*` entries in the agent, config-root and home `.env` files are not part of `$env`: omp's telemetry reads them privately (see [OpenTelemetry export](#11-opentelemetry-export)). Their precedence among themselves, and below a shell export or project `.env`, is unchanged.
 
@@ -621,7 +623,7 @@ These affect where coding-agent stores data and which process-local settings ove
 | `PI_CODING_AGENT_SESSION_DIR`                       | Initial session-directory override consumed by launch argument parsing                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `PI_SESSION_ORIGIN`                                 | `chrome` (set by the omp extension's native host for side panel chats) marks the sessions the process starts as the panel's: the terminal's resume picker, recent sessions, `--continue` and ACP session lists skip them, `--resume <id\|path>` still opens one, and the process writes no terminal breadcrumb |
 | `PI_NATIVES_DIR`                                    | Native addon extraction/staging root override, before XDG/default paths; the loader appends `<version>`. Trimmed, `~`-expanded, and normalized; empty or relative values are ignored. Also moves downloaded tree-sitter grammars (`grammars/`); does not move sessions, plugins, or other data. Must be writable only by the user(s) running `omp`: an existing addon of the expected size is reused without re-extraction, and its version is checked only after it loads                                                                      |
-| `PI_CONFIG_FILES`                                   | Platform path-list of settings overlays (`:` on Unix, `;` on Windows); loaded in order before explicit `--config` overlays                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `PI_CONFIG_FILES`                                   | Platform path-list of settings overlays (`:` on Unix, `;` on Windows); loaded in order before explicit `--config` overlays. Operator-only (see [Resolution model](#resolution-model-and-precedence)) |
 | `CLAUDE_CONFIG_DIR`                                 | Claude Code user-config directory override (trimmed, resolved relative to process cwd); also moves Claude's `.claude.json` to `<override>/.claude.json`. Does not relocate project `.claude` directories                                                                                                                                                                                                                                                                                                                                        |
 | `OMP_AUTORESEARCH_DB_DIR`                           | Directory override for per-project autoresearch DB and project-artifact roots; see [Autoresearch](./autoresearch.md)                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME` | On macOS/Linux, redirect corresponding OMP paths only when the target `omp` root (or named-profile root) already exists                                                                                                                                                                                                                                                                                                                                                                                                                         |
@@ -667,6 +669,15 @@ Values are read when each command starts, so the next command follows `/fork`, `
 ```bash
 echo "$PI_SESSION_ID"
 ```
+
+### OS sandbox
+
+See [OS sandbox](./sandbox.md).
+
+| Variable      | Behavior                                                                                                                                                                                             |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PI_SANDBOX`  | Truthy value (`1`, `y`, `true`, `yes`, `on`, upper- or lower-case) enables the OS sandbox (`sandbox.enabled`). Any other value is ignored: it can only enable, so a repository `.env` cannot disable the sandbox |
+| `OMP_SANDBOX` | Set to `1` by omp in the environment of every process it runs inside the OS sandbox (bash, eval, extension `exec`, opted-in MCP servers). The native addon loader reads it: with `1` it loads the addon the host already extracted and never extracts, stages or cleans up its cache. Never set it outside the sandbox |
 
 ---
 

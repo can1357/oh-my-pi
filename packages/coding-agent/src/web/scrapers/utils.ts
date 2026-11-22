@@ -6,7 +6,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { ToolAbortError } from "../../tools/tool-errors";
 import { convertBufferWithMarkit } from "../../utils/markit";
 import type { LoadPageResult } from "./types";
-import { BLOCKED_STATUSES, MAX_BYTES, USER_AGENTS } from "./types";
+import { BLOCKED_STATUSES, fetchWithHostGuard, HostRefusal, MAX_BYTES, rethrowOnPrimary, USER_AGENTS } from "./types";
 
 const PLATFORM_PROBE_CACHE_LIMIT = 256;
 
@@ -184,11 +184,11 @@ export async function fetchBinary(url: string, timeout: number = 20, signal?: Ab
 		// The user agents a page fetch tries, in its order: a site refusing one serves the next.
 		let response: Response | undefined;
 		for (const [attempt, userAgent] of USER_AGENTS.entries()) {
-			response = await fetch(url, {
+			({ response } = await fetchWithHostGuard(url, {
 				signal: requestSignal,
 				headers: { "User-Agent": userAgent },
 				redirect: "follow",
-			});
+			}));
 			if (!BLOCKED_STATUSES.has(response.status) || attempt === USER_AGENTS.length - 1) break;
 			void response.body?.cancel().catch(() => {});
 		}
@@ -219,6 +219,7 @@ export async function fetchBinary(url: string, timeout: number = 20, signal?: Ab
 			contentType: response.headers.get("content-type") || undefined,
 		};
 	} catch (err) {
+		if (err instanceof HostRefusal) rethrowOnPrimary(err);
 		if (signal?.aborted) throw new ToolAbortError();
 		if (requestSignal?.aborted) return { ok: false, error: "aborted" };
 		return { ok: false, error: err instanceof Error ? err.message : "Failed to fetch binary" };

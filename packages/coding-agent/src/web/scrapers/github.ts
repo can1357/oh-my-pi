@@ -1,6 +1,6 @@
 import { $env, isRecord, ptree, USER_AGENT } from "@oh-my-pi/pi-utils";
 import type { RenderResult, SpecialHandler } from "./types";
-import { buildResult, formatMediaDuration, loadPage } from "./types";
+import { buildResult, fetchWithHostGuard, formatMediaDuration, loadPage } from "./types";
 
 interface GitHubUrl {
 	type:
@@ -130,7 +130,7 @@ export async function fetchGitHubApi(
 			headers.Authorization = `Bearer ${token}`;
 		}
 
-		const response = await fetch(`https://api.github.com${endpoint}`, {
+		const { response } = await fetchWithHostGuard(`https://api.github.com${endpoint}`, {
 			signal: requestSignal,
 			headers,
 		});

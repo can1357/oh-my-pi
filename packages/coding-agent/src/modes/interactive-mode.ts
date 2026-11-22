@@ -157,6 +157,9 @@ import { shortenEmbeddedPaths, shortenPath, TRUNCATE_LENGTHS } from "../utils/re
 import { replaceTabs, truncateToWidth } from "../utils/text-width";
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
 import { type CfgApproval, type CfgChangeRequest, setCfgApprovalHost } from "../internal-urls/cfg-protocol";
+import { SandboxRuntime } from "../sandbox/runtime";
+import type { HostApproval, SandboxAccessAnswer, SandboxAccessRequest } from "../sandbox/types";
+import { hostApprovalFor, sandboxHostPrompt } from "./sandbox-panel";
 import {
 	createTodoHudStateData,
 	getTodoHudVisibility,
@@ -2090,6 +2093,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			},
 			persistentSettings: Settings.instance,
 		});
+		// Hosts the sandbox's egress proxy does not list ask here; without this approver they are refused.
+		SandboxRuntime.setHostApprover((host, port) =>
+			this.session.waitForUser(() => this.#promptSandboxHost(host, port)),
+		);
+		// The agent's `sandbox_request` asks here; without this approver requests are refused.
+		SandboxRuntime.setAccessApprover((request, signal) =>
+			this.session.waitForUser(() => this.#promptSandboxAccess(request, signal)),
+		);
 
 		await logger.time(
 			"InteractiveMode.init:slashCommands",
@@ -6791,6 +6802,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		return choice === "Yes";
 	}
 
+	/** Settles a dialog when the mode stops, or earlier when `caller` aborts. */
+	#dialogSignal(caller?: AbortSignal): AbortSignal {
+		return caller ? AbortSignal.any([caller, this.#dialogLifetime.signal]) : this.#dialogLifetime.signal;
+	}
+
 	/**
 	 * Ask the user to approve one `cfg://` settings change; writable `/collab` guests get the
 	 * same prompt and the first answer wins. Dismissing the dialog denies it, as does
@@ -6809,10 +6825,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const timeout = askTimeoutMs(this.session.settings);
 		// Settle dismissed when the caller's turn aborts (a collab guest
 		// interrupting the agent) or when the mode stops, whichever first.
-		const signal =
-			callerSignal === undefined
-				? this.#dialogLifetime.signal
-				: AbortSignal.any([callerSignal, this.#dialogLifetime.signal]);
+		const signal = this.#dialogSignal(callerSignal);
 		const choice = await this.#extensionUiController.showCollabAwareSelector(
 			`${headline}\n${request.previous} → ${request.value}${warning}`,
 			[CFG_APPROVE_SESSION, CFG_APPROVE_ONCE, CFG_DENY],
@@ -6833,6 +6846,30 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (choice === CFG_APPROVE_SESSION) return "session";
 		if (choice === CFG_APPROVE_ONCE) return "once";
 		return "deny";
+	}
+
+	/**
+	 * Ask whether a contained command may reach `host`, through the tool-approval dialog: this
+	 * connection only, the rest of the session, or always. The runtime records a session or
+	 * always answer itself (always: the global allowlist). Dismissing the dialog, or stopping
+	 * the mode, refuses the connection.
+	 */
+	async #promptSandboxHost(host: string, port: number): Promise<HostApproval> {
+		const answer = await this.#extensionUiController.showCollabAwareApproval(sandboxHostPrompt(host, port), {
+			signal: this.#dialogLifetime.signal,
+		});
+		return hostApprovalFor(answer);
+	}
+
+	/**
+	 * Ask the user about the agent's access request (a path to write or read, a host to reach, an
+	 * action omp performs outside the sandbox) in the composer's place: allow for this session,
+	 * always, deny, or reply with instructions. Dismissing it, aborting the call or stopping the mode denies.
+	 */
+	async #promptSandboxAccess(request: SandboxAccessRequest, signal?: AbortSignal): Promise<SandboxAccessAnswer> {
+		return this.#extensionUiController.showSandboxAccess(request, {
+			signal: this.#dialogSignal(signal),
+		});
 	}
 
 	stop(): void {
@@ -6891,6 +6928,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// InteractiveMode instance (e.g. test harnesses, headless re-init).
 		setAutoQaConsentHandler(null, null);
 		setCfgApprovalHost(null);
+		SandboxRuntime.setHostApprover(undefined);
+		SandboxRuntime.setAccessApprover(undefined);
 		this.#disposeImageBlobWriter?.();
 		this.#disposeImageBlobWriter = undefined;
 		this.#disposeInlineImageLimits?.();
@@ -8173,6 +8212,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showAdvisorConfigure(): void {
 		this.#selectorController.showAdvisorConfigure();
+	}
+
+	showSandboxConfigure(): void {
+		this.#selectorController.showSandboxConfigure();
 	}
 
 	showHistorySearch(): void {

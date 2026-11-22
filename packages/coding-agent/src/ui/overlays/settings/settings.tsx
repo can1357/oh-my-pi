@@ -309,6 +309,7 @@ export function SettingsWindow(props: {
 			value: option.value,
 			label: sanitizeDisplaySingleLine(option.label),
 			description: sanitizeDisplayLineField(option.description),
+			disabled: option.disabled,
 		}));
 	};
 
@@ -1025,6 +1026,12 @@ export function SettingsWindow(props: {
 							? value
 							: undefined;
 				if (choice === undefined) return;
+				// A disabled choice (labelled unavailable; its description says why) is refused: the value
+				// stays and the row's open menu closes instead of staying open onto a no-op.
+				if (submenuOptions(def).find(option => option.value === choice)?.disabled) {
+					if (editing()?.row === id) cancelEditor();
+					return;
+				}
 				let open = editing();
 				if (open?.row !== id) {
 					if (open) return;

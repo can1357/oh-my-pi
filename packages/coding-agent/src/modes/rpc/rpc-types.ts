@@ -37,6 +37,18 @@ import type { RpcMessagesPage } from "./rpc-messages";
 import type { GoalModeState } from "../../goals/state";
 import type { RpcGoalOp, RpcGoalResult } from "./rpc-goal";
 import type { BtwHistoryRecord } from "../../session/btw-history";
+import type { SandboxStatus } from "../../sandbox/runtime";
+import type { SandboxCreatedPath } from "../../sandbox/ledger";
+import type {
+	HostApproval,
+	SandboxAccessAnswer,
+	SandboxAccessRequest,
+	SandboxMode,
+	SandboxNetworkMode,
+	SandboxReadScope,
+	SandboxScope,
+} from "../../sandbox/types";
+import type { SandboxListId, SandboxSettingId } from "../view-model/overlays/sandbox-config";
 
 // ============================================================================
 // RPC Commands (stdin)
@@ -177,7 +189,37 @@ export type RpcCommand =
 	// Side questions (/btw); answers stream as `btw_delta` / `btw_record` frames
 	| { id?: string; type: "btw"; question: string; recordId?: string }
 	| { id?: string; type: "btw_cancel"; recordId?: string }
-	| { id?: string; type: "get_btw_history" };
+	| { id?: string; type: "get_btw_history" }
+
+	// OS sandbox (`sandbox.*` settings of the session's workspace); state changes stream as `sandbox_update`
+	| { id?: string; type: "get_sandbox" }
+	| { id?: string; type: "set_sandbox_setting"; setting: RpcSandboxSettingId; value: boolean | string | string[] }
+	| { id?: string; type: "reset_sandbox_setting"; setting: RpcSandboxSettingId }
+	| {
+			id?: string;
+			type: "edit_sandbox_list";
+			list: RpcSandboxListId;
+			op: "add" | "remove" | "replace";
+			entry: string;
+			replacement?: string;
+	  }
+	| { id?: string; type: "grant_sandbox_host"; host: string; scope: "session" | "always" }
+	| { id?: string; type: "revoke_sandbox_host"; host: string }
+	| { id?: string; type: "set_sandbox_host_prompts"; enabled: boolean }
+	| { id?: string; type: "respond_sandbox_host"; requestId: string; decision: HostApproval }
+	| { id?: string; type: "grant_sandbox_path"; kind: "write" | "read"; path: string }
+	| { id?: string; type: "revoke_sandbox_path"; kind: "write" | "read"; path: string }
+	| { id?: string; type: "revoke_sandbox_exec"; target: string }
+	| { id?: string; type: "trust_sandbox_created"; path: string }
+	| { id?: string; type: "remove_sandbox_created"; path: string }
+	| { id?: string; type: "set_sandbox_access_prompts"; enabled: boolean }
+	| {
+			id?: string;
+			type: "respond_sandbox_access";
+			requestId: string;
+			decision: SandboxAccessAnswer["decision"];
+			instructions?: string;
+	  };
 
 // ============================================================================
 // RPC State
@@ -235,7 +277,116 @@ export interface RpcSessionState {
 	contextUsage?: ContextUsage;
 	/** Current goal-mode state; `null` when the session has no goal. */
 	goal: GoalModeState | null;
+	/** Sandbox status of the session's workspace; `get_sandbox` has the full state. */
+	sandbox: RpcSandboxSummary;
 }
+
+// ============================================================================
+// OS sandbox
+// ============================================================================
+
+/** A `sandbox.*` setting the sandbox commands address. */
+export type RpcSandboxSettingId = SandboxSettingId | SandboxListId;
+
+/** A path/host list setting. */
+export type RpcSandboxListId = SandboxListId;
+
+/** Runtime status of the sandbox for a workspace. */
+export type RpcSandboxStatus = SandboxStatus;
+
+/** `get_state.sandbox`: the status without the detail of {@link RpcSandboxState}. */
+export interface RpcSandboxSummary {
+	state: RpcSandboxStatus["state"];
+	/** Containment backend while `active`. */
+	backend?: string;
+}
+
+/** Full sandbox state of the session's workspace; every sandbox mutation answers it. */
+export interface RpcSandboxState {
+	/** Directory the policy is resolved for (the session cwd). */
+	workspace: string;
+	status: RpcSandboxStatus;
+	/** Values an edit starts from: scalars as effective here, scope and lists from the operator layers (what a write replaces). */
+	settings: {
+		enabled: boolean;
+		mode: SandboxMode;
+		scope: readonly SandboxScope[];
+		fallback: "warn" | "block";
+		readScope: SandboxReadScope;
+		networkMode: SandboxNetworkMode;
+		allowWrite: readonly string[];
+		allowRead: readonly string[];
+		denyRead: readonly string[];
+		allowedHosts: readonly string[];
+	};
+	/** Settings another layer decides (env, session override, --config, project tightening): a write is refused. Value = reason. */
+	locked: Partial<Record<RpcSandboxSettingId, string>>;
+	/** Network modes this host cannot enforce, with the reason (the missing packages): writing one is refused with `sandbox_unsupported`. `deny` always works. */
+	networkUnavailable: { allow?: string; allowlist?: string };
+	/** Per-list note when project config narrows the list in this workspace. */
+	listNotes: Partial<Record<RpcSandboxListId, string>>;
+	/** Project-layer values dropped because they would loosen the sandbox. */
+	ignored: readonly { id: string; reason: string }[];
+	/** Resolved filesystem policy for the workspace. */
+	effective: { readwritePaths: readonly string[]; readonlyPaths: readonly string[]; deniedPaths: readonly string[] };
+	/** Hosts refused this session that are still not allowed, most recent first. */
+	blockedHosts: readonly string[];
+	/** Hosts allowed for this session only. */
+	sessionHosts: readonly string[];
+	/** Paths allowed for this session only (`grant_sandbox_path`, or a `session` answer to an access request). */
+	sessionPaths: { write: readonly string[]; read: readonly string[] };
+	/** Actions omp performs on the host outside the sandbox, granted for this session only (`revoke_sandbox_exec`). */
+	sessionExec: readonly string[];
+	/** Protected paths a sandboxed command of this workspace created or replaced; skipped until trusted. */
+	created: readonly SandboxCreatedPath[];
+	/** Whether unknown hosts raise `sandbox_host_request` frames (`set_sandbox_host_prompts`). */
+	hostPrompts: boolean;
+	/** Whether the agent's access requests raise `sandbox_access_request` frames (`set_sandbox_access_prompts`). */
+	accessPrompts: boolean;
+}
+
+/** Full sandbox state, pushed on every change (settings, blocked hosts, granted/revoked hosts and paths, workspace) and once after startup when enabled. */
+export interface RpcSandboxUpdateFrame {
+	type: "sandbox_update";
+	state: RpcSandboxState;
+}
+
+/** A contained command wants a host off the allowlist; answer with `respond_sandbox_host`. Sent only after `set_sandbox_host_prompts`. */
+export interface RpcSandboxHostRequestFrame {
+	type: "sandbox_host_request";
+	id: string;
+	host: string;
+	port: number;
+	/** The request is denied and cancelled when unanswered for this long. */
+	timeoutMs: number;
+}
+
+/** A `sandbox_host_request` was denied without an answer: it timed out, or prompts were disabled or the session ended. */
+export interface RpcSandboxHostRequestCancelledFrame {
+	type: "sandbox_host_request_cancelled";
+	id: string;
+	reason: "timeout" | "aborted";
+}
+
+/**
+ * A contained command or the agent needs a path, host or exec action it may not use; answer with `respond_sandbox_access`. Sent only after `set_sandbox_access_prompts`.
+ * The request's fields (resolved `target`, the agent's `intent`/`command`/`alternative`, `workspace`, `canAlways`) with the `effect` omp computed.
+ */
+export type RpcSandboxAccessRequestFrame = { type: "sandbox_access_request"; id: string } & SandboxAccessRequest;
+
+/** A `sandbox_access_request` was denied without an answer: its tool call was aborted, or prompts were turned off or the session ended. */
+export interface RpcSandboxAccessRequestCancelledFrame {
+	type: "sandbox_access_request_cancelled";
+	id: string;
+	reason: "aborted";
+}
+
+export type RpcSandboxFrame =
+	| RpcSandboxUpdateFrame
+	| RpcSandboxHostRequestFrame
+	| RpcSandboxHostRequestCancelledFrame
+	| RpcSandboxAccessRequestFrame
+	| RpcSandboxAccessRequestCancelledFrame;
 
 export interface RpcAvailableSlashCommand {
 	name: string;
@@ -699,6 +850,23 @@ export type RpcResponse =
 			success: true;
 			data: { records: readonly RpcBtwHistoryRecord[] };
 	  }
+
+	// OS sandbox
+	| { id?: string; type: "response"; command: "get_sandbox"; success: true; data: RpcSandboxState }
+	| { id?: string; type: "response"; command: "set_sandbox_setting"; success: true; data: RpcSandboxState }
+	| { id?: string; type: "response"; command: "reset_sandbox_setting"; success: true; data: RpcSandboxState }
+	| { id?: string; type: "response"; command: "edit_sandbox_list"; success: true; data: RpcSandboxState }
+	| { id?: string; type: "response"; command: "grant_sandbox_host"; success: true; data: RpcSandboxState }
+	| { id?: string; type: "response"; command: "revoke_sandbox_host"; success: true; data: RpcSandboxState }
+	| { id?: string; type: "response"; command: "set_sandbox_host_prompts"; success: true; data: { enabled: boolean } }
+	| { id?: string; type: "response"; command: "respond_sandbox_host"; success: true }
+	| { id?: string; type: "response"; command: "grant_sandbox_path"; success: true; data: RpcSandboxState }
+	| { id?: string; type: "response"; command: "revoke_sandbox_path"; success: true; data: RpcSandboxState }
+	| { id?: string; type: "response"; command: "revoke_sandbox_exec"; success: true; data: RpcSandboxState }
+	| { id?: string; type: "response"; command: "trust_sandbox_created"; success: true; data: RpcSandboxState }
+	| { id?: string; type: "response"; command: "remove_sandbox_created"; success: true; data: RpcSandboxState }
+	| { id?: string; type: "response"; command: "set_sandbox_access_prompts"; success: true; data: { enabled: boolean } }
+	| { id?: string; type: "response"; command: "respond_sandbox_access"; success: true }
 
 	// Error response (any command can fail); `code` is an optional machine-readable reason.
 	| { id?: string; type: "response"; command: string; success: false; error: string; code?: string };

@@ -11,12 +11,14 @@ import { sanitizeText, spillUrl } from "@oh-my-pi/pi-utils";
 import type { JSXNode, UiEvent } from "@oh-my-pi/pi-tui";
 import { replaceTabs } from "@oh-my-pi/pi-tui/text/width";
 import type { ShellVizPresentation } from "@oh-my-pi/pi-wire";
+import type { SandboxResultMeta } from "../../sandbox/types";
 import type { OutputMeta } from "../../tools/output-meta-format";
 import { stripOutputNotice, stripTrailingNotice } from "../../tools/output-meta-format";
 import { resultText } from "./default";
 import type { ToolHead, ToolPresenter, ToolResult, ToolView, ToolViewState } from "./contract";
 import { registerToolPresenter } from "./registry";
 import { type ToolCommandDispatch, ToolCommandNode, type ToolCommandResolver } from "./tool-command";
+import { sandboxBadge, sandboxNoteNodes } from "./sandbox-meta";
 import {
 	displayWorkdir,
 	formatMinimized,
@@ -53,6 +55,8 @@ export interface BashDetails {
 		readonly pid?: number;
 	};
 	readonly async?: { readonly state: "running" | "completed" | "failed" | "cancelled"; readonly jobId: string };
+	/** OS sandbox the command ran in; absent when it ran uncontained. */
+	readonly sandbox?: SandboxResultMeta;
 }
 
 /** The transcript's shell viewport context (`state.renderContext`). */
@@ -375,6 +379,7 @@ function shellHead(
 		command,
 		...(exit !== undefined ? { exit } : {}),
 		...(settled && details?.timedOut === true ? { note: "timed out" } : {}),
+		...(details?.sandbox ? { badges: [sandboxBadge(details.sandbox)] } : {}),
 	};
 }
 
@@ -510,7 +515,7 @@ export function shellPresenter<TArgs>(config: ShellConfig<TArgs>): ToolPresenter
 					/>
 				);
 			});
-			const body: JSXNode = (
+			const body: JSXNode = [
 				<RunBox nodeKey="run" tone={RUN_BOX_TONE[runStateValue]}>
 					{presentation ? (
 						<ShellInput
@@ -533,8 +538,9 @@ export function shellPresenter<TArgs>(config: ShellConfig<TArgs>): ToolPresenter
 						facts={footFacts(details, stripped.artifactId)}
 						meta={meta ? { ...meta, truncation: showingFull ? undefined : meta.truncation } : undefined}
 					/>
-				</RunBox>
-			);
+				</RunBox>,
+				...sandboxNoteNodes(details?.sandbox),
+			];
 			const timedOut = details?.timedOut === true;
 			const warning = outputNotices(
 				meta ? { ...meta, truncation: showingFull ? undefined : meta.truncation } : undefined,

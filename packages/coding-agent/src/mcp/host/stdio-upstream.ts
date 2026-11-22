@@ -10,12 +10,14 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { getProjectDir, isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ChildExit, ChildSpawn, ManagedChild, ManagedChildState } from "../../daemon/module";
+import { SandboxRuntime } from "../../sandbox/runtime";
 import { createMCPJsonRpcError, MCPTransportError, normalizeMCPTransportError } from "../errors";
 import { routeProgressNotification, withProgressToken } from "../progress";
 import type { JsonRpcError, MCPRequestOptions, MCPTransport } from "../types";
 import { toJsonRpcError } from "../types";
+import { spawnContainedServer } from "./contained-child";
 import {
 	encodeJsonLine,
 	JsonLineDecoder,
@@ -177,6 +179,20 @@ function isWindowsBatchCommand(command: string): boolean {
 }
 
 /**
+ * The argv a contained server launches with. A Windows `.cmd`/`.bat` shim runs
+ * through `cmd.exe` with the spawner's own argument escaping, which the sandbox
+ * binding cannot apply, so such a server is refused with what to change instead.
+ */
+export function containedStdioArgv(argv: string[], command: string): string[] {
+	if (isWindowsBatchCommand(argv[0])) {
+		throw new Error(
+			`MCP server command "${command}" launches through cmd.exe (a .cmd/.bat shim), which cannot run inside the sandbox. Point "command" at node or bun plus the server script, or drop "sandbox": true.`,
+		);
+	}
+	return argv;
+}
+
+/**
  * Resolve the argv that launches a stdio server's `command`.
  *
  * Elsewhere than Windows this is the command and its arguments as given. On
@@ -267,6 +283,8 @@ export class StdioUpstream implements MCPTransport {
 	#lastId = 0;
 	#stderr: Buffer = Buffer.alloc(0);
 	#connected = false;
+	/** The child runs inside the OS sandbox: it leads no process group of this host's to signal. */
+	#contained = false;
 	#closing: Promise<void> | undefined;
 
 	onClose?: () => void;
@@ -298,7 +316,10 @@ export class StdioUpstream implements MCPTransport {
 	}
 
 	/**
-	 * Spawn the server with `spawn` and start dispatching its output.
+	 * Spawn the server with `spawn` and start dispatching its output. A server
+	 * that opted into the OS sandbox is started contained while the sandbox is
+	 * active for the project, never silently uncontained; with the sandbox off
+	 * it spawns normally.
 	 *
 	 * @throws MCPTransportError when the command cannot be resolved or spawned; the abort reason when `signal` aborts first.
 	 */
@@ -313,9 +334,16 @@ export class StdioUpstream implements MCPTransport {
 				env: spec.spawnEnv,
 				signal,
 			});
+			const sandbox =
+				spec.sandboxNetwork === undefined ? undefined : await SandboxRuntime.forScope(getProjectDir(), "mcp");
 			// The lookup may outlast the caller's patience, especially on Windows PATHs.
 			signal?.throwIfAborted();
-			child = spawn({ application: argv[0], args: argv.slice(1), env: spec.spawnEnv, cwd: spec.cwd });
+			if (sandbox) {
+				child = await spawnContainedServer(sandbox, spec, containedStdioArgv(argv, spec.command));
+				this.#contained = true;
+			} else {
+				child = spawn({ application: argv[0], args: argv.slice(1), env: spec.spawnEnv, cwd: spec.cwd });
+			}
 		} catch (error) {
 			if (signal?.aborted) throw abortReason(signal);
 			throw normalizeMCPTransportError(error, { transport: "stdio", stage: "connect" });
@@ -560,8 +588,8 @@ export class StdioUpstream implements MCPTransport {
 			clearTimeout(terminate);
 			clearTimeout(escalate);
 		}
-		// A child that was gone before this call may have had its group id reused since.
-		if (!wasRunning || process.platform === "win32") return;
+		// A child that was gone before this call may have had its group id reused since; a contained one leads no group here.
+		if (!wasRunning || this.#contained || process.platform === "win32") return;
 		try {
 			// The reaped child no longer takes signals through its handle; its group may still hold descendants.
 			process.kill(-child.pid, "SIGKILL");

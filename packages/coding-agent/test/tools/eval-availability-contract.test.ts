@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { toolWireSchema } from "@oh-my-pi/pi-ai";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { pythonBackend } from "@oh-my-pi/pi-coding-agent/eval";
 import * as probe from "@oh-my-pi/pi-coding-agent/eval/probe";
 import * as pyKernel from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
@@ -21,7 +21,10 @@ describe("eval Python availability contract", () => {
 	let savedPy: string | undefined;
 	let savedJs: string | undefined;
 
-	beforeEach(() => {
+	beforeEach(async () => {
+		// The process settings exist before any tool runs; whether the sandbox applies to `eval` keys the probe cache.
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true });
 		dir = TempDir.createSync("@eval-availability-contract-");
 		savedPy = Bun.env.PI_PY;
 		savedJs = Bun.env.PI_JS;
@@ -32,6 +35,7 @@ describe("eval Python availability contract", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
+		resetSettingsForTest();
 		restoreEnvValue("PI_PY", savedPy);
 		restoreEnvValue("PI_JS", savedJs);
 		await dir.remove();

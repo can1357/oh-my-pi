@@ -57,6 +57,7 @@ import {
 	cfgTuiRenderMermaid,
 	cfgTuiRenderSvg,
 } from "./modes/settings";
+import { cfgSandboxPromptInputs } from "./sandbox/prompt";
 import { cfgSecretsEnabled } from "./secrets/settings";
 import { cfgToolsFormat } from "./session/context-settings";
 import {
@@ -120,6 +121,8 @@ export const cfgSystemPromptInputs = combine({
 	ttsrBuiltinRules: cfgTtsrBuiltinRules,
 	ttsrDisabledRules: cfgTtsrDisabledRules,
 	secretsEnabled: cfgSecretsEnabled,
+	// The sandbox block (`buildSandboxPrompt`) states what is contained.
+	...cfgSandboxPromptInputs,
 });
 
 /** Bundled personality specs, keyed by the `personality` setting value. */
