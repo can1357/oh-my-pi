@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added the opt-in `skills.recursive` setting, which discovers nested `<group>/<skill>/SKILL.md` skills (and a `SKILL.md` directly at the scanned root) under `.omp/skills`, `.agent[s]/skills`, and `skills.customDirectories`; scans prune hidden directories, `.git`, and `node_modules`, never follow directory symlinks, and warn when the depth/entry bounds truncate discovery ([#8580](https://github.com/can1357/oh-my-pi/issues/8580), [#10490](https://github.com/can1357/oh-my-pi/issues/10490))
+- Added the opt-in `skills.recursive` setting, which discovers nested `<group>/<skill>/SKILL.md` skills (and a `SKILL.md` directly at the scanned root) under `.omp/skills`, `.agent[s]/skills`, and `skills.customDirectories`; scans prune hidden directories, `.git`, and `node_modules`, never follow directory symlinks, and warn when the depth/directory bounds truncate discovery ([#8580](https://github.com/can1357/oh-my-pi/issues/8580), [#10490](https://github.com/can1357/oh-my-pi/issues/10490), [#20135](https://github.com/can1357/oh-my-pi/pull/20135) by [@Ayush12358](https://github.com/Ayush12358))
 - `/wt` (TUI, ACP, RPC and `worktree.onStart`) runs the new worktree's `post-checkout` hook as `git worktree add` does, with a spinner in the TUI, then loads the skills and commands it added; a failing hook keeps the worktree and shows a warning, and quitting while it runs keeps that worktree with a warning. In an ovnfs checkout only a `core.hooksPath` hook runs ([#20045](https://github.com/can1357/oh-my-pi/pull/20045) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Fixed
