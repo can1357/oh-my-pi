@@ -723,6 +723,38 @@ describe("native composer first frame", () => {
 			composer.stop();
 		}
 	});
+	it("repaints the speculative model chip when the real default resolves", () => {
+		setNativeRendering(true);
+		const stale = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const resolved = getBundledModel("anthropic", "claude-opus-4-6");
+		const composer = new Composer({
+			terminal: new VirtualTerminal(80, 24),
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+			status: {
+				statusLine: {
+					settings: { preset: "custom", leftSegments: ["model"], rightSegments: [], compactThinkingLevel: true },
+					gitEnabled: false,
+					model: stale,
+					thinkingLevel: ThinkingLevel.High,
+					autoThinking: false,
+					fastMode: false,
+					usingSubscription: false,
+					autoCompactEnabled: false,
+					compactionBoundaries: { thresholdPercent: 80, speculationPercent: null },
+				},
+			},
+		});
+		try {
+			composer.updateStartupStatus({ model: resolved, thinkingLevel: ThinkingLevel.Low });
+			const chip = byRole(composer.editor.describe(cx), "omp.composer.model");
+			expect(JSON.stringify(chip)).toContain("Opus");
+			expect(JSON.stringify(chip)).not.toContain("Sonnet");
+			const effort = byRole(composer.editor.describe(cx), "omp.composer.model.effort");
+			expect(effort).toMatchObject({ k: "effort", p: { level: "low" } });
+		} finally {
+			composer.stop();
+		}
+	});
 });
 
 describe("native surface tail", () => {
