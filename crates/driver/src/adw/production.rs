@@ -721,6 +721,10 @@ impl AdwHost for ProductionAdwHost {
 			PhaseSpec::Prompt { text, executor, accept_on_claim, .. } => {
 				let prompt = phase_prompt(phase, text, attempt, correction, inputs);
 				let answer = match executor {
+					Some(id) if id.as_str() == "native" => {
+						// Native executor routes through run_child (ADR 0052 D5).
+						self.run_child(prompt, phase.kind, cancel).await?
+					},
 					Some(id) => {
 						let answer = self
 							.run_delegated(id.as_str(), &prompt, phase, attempt, cancel)
@@ -744,6 +748,90 @@ impl AdwHost for ProductionAdwHost {
 				))
 			},
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Native OMP2 as Executor (ADR 0052 D5)
+// ---------------------------------------------------------------------------
+
+/// Native OMP2 executor that runs phases through the child-kernel path.
+///
+/// This implements the [`Executor`] trait so that native OMP2 can be used
+/// behind the same interface as delegated executors. A workflow can move a
+/// phase between native and delegated without edits.
+///
+/// Currently used via the dispatch path in `ProductionAdwHost::dispatch()`
+/// which routes executor id "native" to `run_child`. The struct provides
+/// a standalone executor for future use (ADR 0052 D5).
+#[allow(dead_code)]
+pub struct NativeOmp {
+	/// Path to the project's data directory.
+	data_dir:        PathBuf,
+	/// Project root.
+	root:            PathBuf,
+	/// Convar context.
+	ctx:             Arc<omp_con::Ctx>,
+	/// Workspace trust decision.
+	workspace_trust: TrustDecision,
+	/// Model selector for phases.
+	model:           Str,
+	/// Whether the model selector was explicitly set.
+	model_override:  bool,
+}
+
+impl NativeOmp {
+	/// Creates a new native executor from the production host's configuration.
+	#[must_use]
+	pub fn from_host(host: &ProductionAdwHost) -> Self {
+		Self {
+			data_dir:        host.data_dir.clone(),
+			root:            host.root.clone(),
+			ctx:             Arc::clone(&host.ctx),
+			workspace_trust: host.workspace_trust.clone(),
+			model:           host.model.clone(),
+			model_override:  host.model_override,
+		}
+	}
+
+	/// Runs one turn using the child-kernel path and returns the assistant's
+	/// final text.
+	async fn run_turn(
+		&self,
+		prompt: Str,
+		kind: PhaseKind,
+		cancel: &CancellationToken,
+	) -> Result<Str, ProductionError> {
+		let (model, model_override) = self.model_phase_selector_for(kind);
+		let _restore =
+			(model_override && !self.model_override).then(|| RestoreModel::capture(&self.ctx));
+		let (mut kernel, mut session, _) = compose_kernel(
+			&self.data_dir,
+			&self.root,
+			model,
+			Arc::clone(&self.ctx),
+			child_kernel_options(&self.workspace_trust, model_override),
+		)
+		.await?;
+		let outcome = kernel
+			.run_turn(
+				&mut session,
+				omp_agent::TurnInput { text: prompt, attachments: Vec::new() },
+				omp_agent::RunControl::new(cancel.clone(), None),
+			)
+			.await?;
+		Ok(outcome.assistant_text)
+	}
+
+	fn model_phase_selector(&self) -> (&str, bool) {
+		(self.model.as_str(), self.model_override)
+	}
+
+	fn model_phase_selector_for(&self, kind: PhaseKind) -> (&str, bool) {
+		if kind == PhaseKind::Review && !self.model_override {
+			return ("@judge", true);
+		}
+		self.model_phase_selector()
 	}
 }
 
