@@ -3489,6 +3489,84 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe(fallbackModel.id);
 	});
 
+	it.each([
+		{
+			name: "muse 402 billing verification failure falls back to the next model",
+			message:
+				"402 Billing verification failed. Billing Issue. To use this API key, your team needs to resolve a billing issue first. To resolve this issue, go here: https://dev.meta.ai/billing/?team_id=1 (type=billing_error param=billing_not_configured)",
+		},
+		{
+			name: "OpenRouter 402 'requires more credits' falls back to the next model",
+			message: "402 This request requires more credits, or fewer max_tokens. You can only afford 5519.",
+		},
+		{
+			name: "control: the same billing body on a 400 bad request does not fall back",
+			message:
+				"400 Billing verification failed. Billing Issue. To use this API key, your team needs to resolve a billing issue first. (type=billing_error param=billing_not_configured)",
+			fallsBack: false,
+		},
+		{
+			name: "informative 402 subscription requirement does not fall back even with billing prose",
+			message: "402 A subscription is required for this endpoint; see the billing page",
+			fallsBack: false,
+		},
+	])("$name", async ({ message, fallsBack = true }) => {
+		const primaryModel = getBundledModel("openai", "gpt-4o") ?? getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("google", "gemini-1.5-pro") ?? getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (model.provider === primaryModel.provider && model.id === primaryModel.id) {
+					mock.push({ throw: new Error(message) });
+				} else {
+					mock.push({ content: [`ok:${model.provider}/${model.id}`] });
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 1,
+				"retry.maxRetries": 1,
+				"retry.modelFallback": true,
+				"retry.fallbackOn": "usage-limit",
+				"retry.fallbackChains": {
+					[`${primaryModel.provider}/${primaryModel.id}`]: [`${fallbackModel.provider}/${fallbackModel.id}`],
+				},
+			}),
+			modelRegistry,
+		});
+
+		await session.prompt("Prompt hitting a provider error");
+		await session.waitForIdle();
+
+		if (!fallsBack) {
+			expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+			expect(session.model?.id).toBe(primaryModel.id);
+			return;
+		}
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+		expect(session.model?.id).toBe(fallbackModel.id);
+	});
+
 	it("applies a provider-wildcard chain to any model of that provider", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-opus-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
