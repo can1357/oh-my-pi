@@ -6,17 +6,18 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
-	const z = pi.zod;
+	const type = pi.arktype;
+	const parameters = type({
+		name: type.string.describe("Name to greet"),
+	});
 
-	pi.registerTool({
+	pi.registerTool<typeof parameters>({
 		name: "hello",
 		label: "Hello",
 		description: "A simple greeting tool",
-		parameters: z.object({
-			name: z.string().describe("Name to greet"),
-		}),
+		parameters,
 
-		async execute(_toolCallId, params, _onUpdate, _ctx, _signal) {
+		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
 			const { name } = params;
 
 			// Use logger for debugging
