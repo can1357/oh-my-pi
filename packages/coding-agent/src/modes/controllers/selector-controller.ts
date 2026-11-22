@@ -114,6 +114,7 @@ import { type ResetUsageAccount, ResetUsageSelectorComponent } from "@oh-my-pi/p
 import { type BranchVariantPath, RewindSelectorComponent } from "@oh-my-pi/pi-tui/overlays/rewind-selector";
 import { SessionAccountSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-account-selector";
 import { SessionSelectorComponent, type SessionSelectorOptions } from "@oh-my-pi/pi-tui/overlays/session-selector";
+import type { SubmenuOption } from "@oh-my-pi/pi-tui/overlays/settings-defs";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
@@ -306,7 +307,11 @@ export class SelectorController {
 	showSettingsSelector(): void {
 		if (this.#focusOpenMenu("settings")) return;
 		const menu = this.#claimMenu("settings");
-		getAvailableThemes()
+		// Startup-deferred extensions bind first, so the todo backend row lists their backends.
+		const themes = this.ctx.session.hasPendingDeferredExtensions
+			? Promise.all([getAvailableThemes(), this.ctx.session.loadDeferredExtensions()]).then(([names]) => names)
+			: getAvailableThemes();
+		themes
 			.then(availableThemes => {
 				// Fullscreen settings editor on the alternate screen: the overlay
 				// enables mouse tracking (click/hover/wheel) for its lifetime and
@@ -322,26 +327,7 @@ export class SelectorController {
 						availableThinkingLevels: [...this.ctx.session.getAvailableThinkingLevels()],
 						thinkingLevel: this.ctx.session.thinkingLevel,
 						availableThemes,
-						runtimeOptions: new Map([
-							[
-								cfgTodoBackend.id,
-								[
-									{
-										value: NATIVE_TODO_BACKEND,
-										label: "Native",
-										description: "Keep the todo list in the session only",
-									},
-									...Array.from(
-										this.ctx.session.extensionRunner?.getTodoBackends() ?? [],
-										([id, { definition }]) => ({
-											value: id,
-											label: definition.label ?? id,
-											description: definition.description,
-										}),
-									),
-								],
-							],
-						]),
+						runtimeOptions: new Map([[cfgTodoBackend.id, this.#todoBackendOptions()]]),
 						providers: [...new Set(this.ctx.session.getAvailableModels().map(model => model.provider))].sort(
 							(a, b) => a.localeCompare(b),
 						),
@@ -355,10 +341,12 @@ export class SelectorController {
 					{
 						onChange: (id, value) => {
 							this.handleSettingChange(id, value);
-							// A backend offered here was registered when Settings opened, so it gets the current
-							// list at once. An approved `cfg://` write can name one whose extension is still
-							// loading, like a config reload: those get the list with the next change.
-							if (id === cfgTodoBackend.id) this.ctx.session.mirrorTodoPhases();
+							// A backend offered here is registered, so it gets the current list at once. An approved
+							// `cfg://` write can name one whose extension is still loading, like a config reload:
+							// those get the list with the next change.
+							if (id === cfgTodoBackend.id && typeof value === "string" && value !== NATIVE_TODO_BACKEND) {
+								this.ctx.session.extensionRunner?.syncTodoBackend(value, this.ctx.session.getTodoPhases());
+							}
 						},
 						onThemePreview: async themeName => {
 							const result = await previewTheme(themeName);
@@ -725,6 +713,17 @@ export class SelectorController {
 			throw error;
 		}
 		this.#mountMenu(menu, hub, () => this.#showFullscreenMenu(hub));
+	}
+
+	/** `todo.backend` choices: `Native`, then every backend an enabled extension registered. */
+	#todoBackendOptions(): SubmenuOption[] {
+		const options: SubmenuOption[] = [
+			{ value: NATIVE_TODO_BACKEND, label: "Native", description: "Keep the todo list in the session only" },
+		];
+		for (const [id, { definition }] of this.ctx.session.extensionRunner?.getTodoBackends() ?? []) {
+			options.push({ value: id, label: definition.label ?? id, description: definition.description });
+		}
+		return options;
 	}
 
 	/**
