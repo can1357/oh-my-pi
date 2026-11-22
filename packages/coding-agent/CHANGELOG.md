@@ -4,6 +4,16 @@
 
 ### Added
 
+- Task results and running job snapshots now report the model used on the first attempt and each retry-fallback switch with its trigger (source model, error class, HTTP status, first line of the provider message, or usage preflight); the trigger is stored on the `model_change` session entry at the switch, so it survives the error message being persisted later ([#16662](https://github.com/can1357/oh-my-pi/pull/16662) by [@Komzpa](https://github.com/Komzpa))
+
+### Fixed
+
+- Fixed the advisor prompt forbidding all repeated advice, including real escalations: advisors may now re-raise a prior nit or concern as a blocker once new evidence makes it one ([#13887](https://github.com/can1357/oh-my-pi/issues/13887), [#16484](https://github.com/can1357/oh-my-pi/pull/16484) by [@pjh890321](https://github.com/pjh890321))
+
+## [18.12.5] - 2026-10-21
+
+### Added
+
 - `/wt` (TUI, ACP, RPC and `worktree.onStart`) runs the new worktree's `post-checkout` hook as `git worktree add` does, with a spinner in the TUI, then loads the skills and commands it added; a failing hook keeps the worktree and shows a warning, and quitting while it runs keeps that worktree with a warning. In an ovnfs checkout only a `core.hooksPath` hook runs ([#20045](https://github.com/can1357/oh-my-pi/pull/20045) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Fixed

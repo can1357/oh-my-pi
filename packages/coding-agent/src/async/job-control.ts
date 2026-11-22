@@ -177,6 +177,8 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 		let resolvedModel: string | undefined;
 		const exitCode = typeof latest.latestDetails?.exitCode === "number" ? latest.latestDetails.exitCode : undefined;
 		let resolvedModelIdentity: string | undefined;
+		let firstTurnModel: string | undefined;
+		let fallbacks: JobSnapshot["fallbacks"];
 		let resolvedThinkingLevel: JobSnapshot["resolvedThinkingLevel"];
 		let advisor = false;
 		let completionPercent: number | undefined;
@@ -203,6 +205,9 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 				if (typeof thinkingValue === "string") {
 					resolvedThinkingLevel = parseConfiguredThinkingLevel(thinkingValue);
 				}
+				if (typeof progressRecord?.firstTurnModel === "string") firstTurnModel = progressRecord.firstTurnModel;
+				if (Array.isArray(progressRecord?.fallbacks))
+					fallbacks = progressRecord.fallbacks as JobSnapshot["fallbacks"];
 				advisor = progressRecord?.advisor === true;
 				const completionValue = progressRecord?.completionPercent;
 				if (typeof completionValue === "number" && Number.isFinite(completionValue)) {
@@ -232,6 +237,8 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			...(exitCode !== undefined ? { exitCode } : {}),
 			...(resolvedModel ? { resolvedModel } : {}),
 			...(resolvedModelIdentity ? { resolvedModelIdentity } : {}),
+			...(firstTurnModel ? { firstTurnModel } : {}),
+			...(fallbacks ? { fallbacks } : {}),
 			...(resolvedThinkingLevel !== undefined ? { resolvedThinkingLevel } : {}),
 			...(advisor ? { advisor: true } : {}),
 			...(completionPercent !== undefined && running ? { completionPercent } : {}),
