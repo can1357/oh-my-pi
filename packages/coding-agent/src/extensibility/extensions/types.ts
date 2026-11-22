@@ -2332,9 +2332,14 @@ export interface ExtensionAPI {
 	setModel(model: Model): Promise<boolean>;
 
 	/**
-	 * Get current thinking level.
-	 * Returns `undefined` when the active model has no concrete effort to report
-	 * (e.g. a model limited to off/auto with `auto` selected), or before a session model is initialized.
+	 * Get the effective thinking level applied to the agent.
+	 *
+	 * Returns `undefined` when the session has no concrete level yet — while
+	 * `auto` thinking is configured but per-turn classification has not resolved
+	 * an effort (including models whose ladder offers no controllable effort,
+	 * e.g. `off | auto` only), or on models that do not support reasoning. It is
+	 * not a sentinel for an uninitialized session. Use `lookup("defaultThinkingLevel")`
+	 * from `@oh-my-pi/pi-coding-agent/config/registry` for the configured selector.
 	 */
 	getThinkingLevel(): ThinkingLevel | undefined;
 
@@ -2588,6 +2593,12 @@ export type SetActiveToolsHandler = (toolNames: string[]) => Promise<void>;
 
 export type SetModelHandler = (model: Model) => Promise<boolean>;
 
+/**
+ * Get the effective thinking level applied to the agent, or `undefined` when the
+ * session has no concrete level (auto thinking not yet resolved, or a model that
+ * supports no reasoning / controllable effort). Not a sentinel for an
+ * uninitialized session.
+ */
 export type GetThinkingLevelHandler = () => ThinkingLevel | undefined;
 
 export type SetThinkingLevelHandler = (level: ThinkingLevel, persist?: boolean) => void;

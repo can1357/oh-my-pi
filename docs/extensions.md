@@ -141,6 +141,13 @@ Core methods:
 
 `ExtensionAPI` methods retain their extension binding when destructured or passed as callbacks.
 
+`getThinkingLevel()` returns the effective level applied to the agent, or
+`undefined` when the session has no concrete level: while `auto` thinking is
+configured but per-turn classification has not resolved an effort (including
+models whose ladder offers no controllable effort, e.g. `off | auto` only), or
+on models that do not support reasoning. `undefined` does not mean the session
+is uninitialized.
+
 `setLabel(label)` sets the extension's display label. It is not a session-entry
 labeling action. `getAllTools()` returns tool schemas and source metadata, while
 `getActiveTools()` returns enabled names.
