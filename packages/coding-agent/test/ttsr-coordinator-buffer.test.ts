@@ -637,6 +637,12 @@ describe("TTSR interrupt retry", () => {
 			content: [{ type: "text", text: "aborted" }],
 			isError: true,
 		} as unknown as AgentMessage;
+		const abortedTail = {
+			role: "assistant",
+			content: [],
+			stopReason: "aborted",
+			timestamp: 2.5,
+		} as unknown as AgentMessage;
 		const queuedFollowUp = {
 			role: "custom",
 			customType: "queued-follow-up",
@@ -649,8 +655,8 @@ describe("TTSR interrupt retry", () => {
 		coordinator.onAssistantMessageStart();
 		expect(await coordinator.checkMessageUpdate(textDelta(interrupted, CONDITION))).toBe(true);
 
-		// During unwind, agent appends synthetic toolResult, followed by a follow-up.
-		messages.push(syntheticToolResult, queuedFollowUp);
+		// During unwind, agent appends synthetic toolResult and empty aborted tail, followed by follow-up.
+		messages.push(syntheticToolResult, abortedTail, queuedFollowUp);
 
 		const task = schedulePostPromptTask.mock.calls[0]?.[0];
 		if (!task) throw new Error("Expected a scheduled retry task");

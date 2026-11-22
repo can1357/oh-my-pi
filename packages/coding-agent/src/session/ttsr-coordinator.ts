@@ -774,7 +774,9 @@ export class TtsrCoordinator {
 				this.#abortPending = false;
 				this.#perToolInjections.clear();
 				if (this.#manager?.getSettings().contextMode === "discard") {
-					// ponytail: O(N) single-pass filter drops the aborted assistant and its tool results, preserving trailing messages.
+					// Discard the aborted assistant and its tool results together to avoid orphaned results,
+					// along with any empty aborted tail added when the run unwinds. Keep trailing messages
+					// (e.g. queued follow-ups or notices) because they are not part of the discarded turn (#20052).
 					const messages = this.#host.agent.state.messages;
 					const target = messages[targetAssistantIndex];
 					const toolCallIds = new Set(
@@ -786,7 +788,14 @@ export class TtsrCoordinator {
 						messages.filter(
 							(message, index) =>
 								index !== targetAssistantIndex &&
-								!(message.role === "toolResult" && toolCallIds.has(message.toolCallId)),
+								!(message.role === "toolResult" && toolCallIds.has(message.toolCallId)) &&
+								!(
+									index > targetAssistantIndex &&
+									message.role === "assistant" &&
+									message.stopReason === "aborted" &&
+									Array.isArray(message.content) &&
+									message.content.length === 0
+								),
 						),
 					);
 				}
