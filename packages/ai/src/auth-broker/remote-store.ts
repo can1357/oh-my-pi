@@ -31,6 +31,7 @@ import {
 	AuthBrokerError,
 	AuthBrokerStreamUnsupportedError,
 	type FetchSnapshotResult,
+	isBrokerNoRouteBody,
 } from "./client";
 import { compareCredentialBlockSnapshots } from "./protocol";
 import type {
@@ -524,6 +525,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 */
 	async #runBackground(): Promise<void> {
 		let backoffMs = BACKGROUND_BACKOFF_INITIAL_MS;
+		// One long-poll before the next stream attempt; set when the stream
+		// path answers a 404 that is not the broker's own.
+		let pollBeforeStream = false;
 		while (!this.#closed && !this.#backgroundAbort.signal.aborted) {
 			if (this.#idleRemainingMs() <= 0) {
 				this.#activityWakeup ??= Promise.withResolvers<void>();
@@ -532,7 +536,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			}
 			const watchdog = this.#startIdleWatchdog();
 			try {
-				if (this.#streamSnapshots && !this.#streamingUnsupported) {
+				if (this.#streamSnapshots && !this.#streamingUnsupported && !pollBeforeStream) {
 					try {
 						await this.#consumeSnapshotStream(watchdog.signal);
 						backoffMs = BACKGROUND_BACKOFF_INITIAL_MS;
@@ -544,12 +548,23 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 							logger.debug("auth-broker snapshot stream unsupported; falling back to long-poll");
 							continue;
 						}
+						if (error instanceof AuthBrokerError && error.status === 404) {
+							// A proxy 404: transient while the broker restarts, or permanent
+							// when the proxy never routes the stream. Keep credentials
+							// syncing with a long-poll, then try the stream again.
+							pollBeforeStream = true;
+							logger.debug("auth-broker snapshot stream not routed; long-polling once", {
+								error: String(error),
+							});
+							continue;
+						}
 						logger.debug("auth-broker snapshot stream failed; backing off", { error: String(error) });
 						await this.#backoffWait(backoffMs);
 						backoffMs = Math.min(BACKGROUND_BACKOFF_MAX_MS, backoffMs * 2);
 					}
 					continue;
 				}
+				pollBeforeStream = false;
 				try {
 					const result = await this.#client.fetchSnapshot({
 						ifGenerationGt: this.#generation,
@@ -1597,8 +1612,8 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 * Fold locally observed request usage into the pending report and schedule
 	 * a flush. One `POST /v1/usage/observed` at most per flush interval, plus a
 	 * final one when the process exits; on failure the batch is retained and
-	 * retried with the next flush. A 404 (pre-endpoint broker) disables
-	 * reporting for the life of this store.
+	 * retried with the next flush. The broker's own 404 (pre-endpoint broker)
+	 * disables reporting for the life of this store.
 	 *
 	 * `client` overrides the reporting identity — the auth-gateway attributes
 	 * each request to the originating install/app instead of the gateway host.
@@ -1675,7 +1690,11 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				});
 			} catch (error) {
 				const status = error instanceof AuthBrokerError ? error.status : undefined;
-				if (status === 400 || status === 404 || status === 501) {
+				// Only the broker's own 404 means the endpoint is missing; a proxy
+				// 404 (no route yet while the broker restarts) retries next flush.
+				const missingEndpoint =
+					error instanceof AuthBrokerError && error.status === 404 && isBrokerNoRouteBody(error.body);
+				if (status === 400 || missingEndpoint || status === 501) {
 					// Broker predates the endpoint or its request schema (or the store
 					// can't persist) — stop trying for the life of this process.
 					this.#observedUsageUnsupported = true;

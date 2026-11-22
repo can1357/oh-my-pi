@@ -832,7 +832,11 @@ if "__omp_prelude_loaded__" not in globals():
                 "wait() takes agent or completion handles; it is not a sleep. "
                 "Wait for page state with tab.waitFor*(…), or pause with await asyncio.sleep(seconds)."
             )
-        items = [handles] if isinstance(handles, _Handle) else list(handles)
+        items = [handles] if isinstance(handles, (_Handle, str)) else list(handles)
+        items = [
+            AgentHandle(item.removeprefix("agent://"), "task") if isinstance(item, str) and item else item
+            for item in items
+        ]
         for handle in items:
             if not isinstance(handle, _Handle):
                 raise TypeError("wait() expects agent or completion handles")

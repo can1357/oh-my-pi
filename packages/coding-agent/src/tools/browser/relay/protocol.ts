@@ -312,3 +312,33 @@ export type ExtToRelayMessage =
 			result?: unknown;
 			error?: string;
 	  };
+
+/** Native messaging host name registered by `omp browser-relay install`. */
+export const NATIVE_HOST = "sh.omp.browser";
+
+/**
+ * Extension → native host. The first message picks what the port is for:
+ * - `open`: a chat. The host starts `omp --mode rpc` in `cwd`; then `rpc` carries its stdin lines.
+ * - `link`: the browser relay. The host serves the relay for this browser (or joins the one another browser's host
+ *   serves); then `relay` carries the extension's relay protocol messages ({@link ExtToRelayMessage} JSON).
+ */
+export type ToNativeHost =
+	| { t: "open"; cwd: string; extensionId: string }
+	| { t: "link"; extensionId: string }
+	| { t: "rpc"; line: string }
+	| { t: "relay"; line: string };
+
+/**
+ * Native host → extension. Chat ports get `ready`, `rpc` lines and a final `exit`. Link ports get `linked` once a
+ * relay listens for this browser (the extension then says hello), `relay` messages ({@link RelayToExtMessage} JSON),
+ * and `unlinked` when that relay went away while the host finds or becomes the next one. Lines over Chrome's 1 MiB
+ * host→extension limit arrive as `chunk`s with one `id`, concatenated in `index` order up to the `last` one.
+ */
+export type FromNativeHost =
+	| { t: "ready"; pid: number }
+	| { t: "rpc"; line: string }
+	| { t: "linked" }
+	| { t: "unlinked"; reason: string }
+	| { t: "relay"; line: string }
+	| { t: "chunk"; relay?: true; id: number; index: number; last: boolean; data: string }
+	| { t: "exit"; code: number | null; stderr: string };

@@ -134,6 +134,8 @@ export class FakeHost implements McpHostAccess {
 	onResolve: ((spec: McpServerSpec) => void) | undefined;
 	/** Failures of the coming era probes, consumed one per `resolve`. */
 	readonly resolveFailures: Error[] = [];
+	/** While set, every era probe waits for it before it fails or answers: the test decides when the verdict arrives. */
+	resolveGate: Promise<void> | undefined;
 	/** While set, every attach waits for it after its era probe: the test decides when the unit exists. */
 	attachGate: Promise<void> | undefined;
 	/** Called for every message a session writes, to answer it inline. */
@@ -143,6 +145,7 @@ export class FakeHost implements McpHostAccess {
 	async resolve(spec: McpServerSpec): Promise<McpResolveResult> {
 		this.resolved.push(spec);
 		this.onResolve?.(spec);
+		if (this.resolveGate) await this.resolveGate;
 		const failure = this.resolveFailures.shift();
 		if (failure) throw failure;
 		return { era: this.era };

@@ -33,7 +33,10 @@ describe.skipIf(process.platform === "win32")("worktree add checkout hooks", () 
 
 	async function add(name: string) {
 		const worktree = path.join(root, name);
-		const result = await $`bun ${cli} worktree add --detach ${worktree} HEAD`.cwd(repo).quiet().nothrow();
+		const result = await $`${process.execPath} ${cli} worktree add --detach ${worktree} HEAD`
+			.cwd(repo)
+			.quiet()
+			.nothrow();
 		return { worktree, result };
 	}
 
@@ -83,7 +86,7 @@ describe.skipIf(process.platform === "win32")("worktree add checkout hooks", () 
 
 		await hook('printf "%s\\n" "$PWD" "$1" "$2" "$3" > .post-checkout-ran; echo hook-output');
 		const worktree = path.join(root, "legacy");
-		const result = await $`bun ${cli} worktree add --detach ${worktree} HEAD`
+		const result = await $`${process.execPath} ${cli} worktree add --detach ${worktree} HEAD`
 			.cwd(repo)
 			.env({ ...process.env, PATH: `${shimDir}:${process.env.PATH}` })
 			.quiet()
@@ -109,7 +112,7 @@ describe.skipIf(process.platform === "win32")("worktree add checkout hooks", () 
 		await $`git -C ${repo} config core.hooksPath ${"~/.githooks"}`.quiet();
 
 		const worktree = path.join(root, "legacy-tilde");
-		const result = await $`bun ${cli} worktree add --detach ${worktree} HEAD`
+		const result = await $`${process.execPath} ${cli} worktree add --detach ${worktree} HEAD`
 			.cwd(repo)
 			.env({ ...process.env, PATH: `${shimDir}:${process.env.PATH}`, HOME: home })
 			.quiet()
@@ -133,7 +136,7 @@ describe.skipIf(process.platform === "win32")("worktree add checkout hooks", () 
 				'if [ -n "$GIT_EXEC_PATH" ]; then case ":$PATH:" in *":$GIT_EXEC_PATH:"*) echo prefixed >> .post-checkout-env;; esac; fi',
 		);
 		const worktree = path.join(root, "legacy-common");
-		const result = await $`bun ${cli} worktree add --detach ${worktree} HEAD`
+		const result = await $`${process.execPath} ${cli} worktree add --detach ${worktree} HEAD`
 			.cwd(repo)
 			.env({ ...process.env, PATH: `${shimDir}:${process.env.PATH}` })
 			.quiet()

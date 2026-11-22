@@ -4,6 +4,7 @@ import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages"
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
+	countContextOverrun,
 	fitOutputTokensToContextWindow,
 	MESSAGE_FRAMING_TOKENS,
 	MIN_FITTED_OUTPUT_TOKENS,
@@ -250,5 +251,27 @@ describe("fitOutputTokensToContextWindow", () => {
 		// worth of framing would 400. The headway applies on this branch too.
 		const context: Context = { messages: [reported(799_950, 1)] };
 		expect(fitOutputTokensToContextWindow(deepseek, context, 200_000, tokenizer)).toBe(199_986);
+	});
+});
+
+describe("countContextOverrun", () => {
+	const tokenizer = new Tokenizer();
+	const minimumRequest = OUTPUT_FIT_HEADWAY_TOKENS + MIN_FITTED_OUTPUT_TOKENS;
+
+	test("refuses only a prompt that leaves no room for the minimum fitted output", () => {
+		// No tokenizer margin: a request the provider may still accept is not refused locally.
+		const context: Context = { messages: [userOf(100_000, 1)] };
+		const exact = { ...deepseek, contextWindow: 100_000 + minimumRequest };
+		expect(countContextOverrun(context, exact, tokenizer)).toBeUndefined();
+		expect(countContextOverrun(context, { ...exact, contextWindow: exact.contextWindow - 1 }, tokenizer)).toBe(
+			100_000,
+		);
+	});
+
+	test("counts history a stale usage report understates (#20099)", () => {
+		// History re-expanded behind an unreadable native compaction: the newest report
+		// still describes the 10k-token compacted prefix the provider was sent.
+		const context: Context = { messages: [userOf(1_200_000, 1), reported(10_000, 2)] };
+		expect(countContextOverrun(context, deepseek, tokenizer)).toBe(1_200_000);
 	});
 });

@@ -251,13 +251,22 @@ function normalizeCodexModels(
 	// model.
 	const advertisedSlugs = new Set(parsedEntries.map(parsed => parsed.slug));
 	const bundledCodexModelIds = getBundledCodexModelIds();
+	// Codex's `display_name` is a title-cased slug (`GPT-6.2-Sol`); the same
+	// model's first-party OpenAI row carries the spelling every other surface
+	// uses (`GPT-6.2 Sol`). `keep-bundled-names` only covers ids already in the
+	// bundled Codex catalog, so models Codex lists ahead of it need this.
+	const referenceNames = new Map(getBundledModels("openai").map(model => [model.id, model.name]));
 	const normalized: NormalizedCodexModel[] = [];
 	for (const parsed of parsedEntries) {
 		const canonicalSlug = plainCounterpartForWorkerSlug(parsed.slug, bundledCodexModelIds) ?? parsed.slug;
-		normalized.push(buildNormalizedCodexModel(parsed, parsed.slug, canonicalSlug, baseUrl, accountId));
+		normalized.push(
+			buildNormalizedCodexModel(parsed, parsed.slug, canonicalSlug, baseUrl, accountId, referenceNames),
+		);
 		const plainSlug = canonicalSlug !== parsed.slug ? canonicalSlug : null;
 		if (plainSlug && !advertisedSlugs.has(plainSlug)) {
-			normalized.push(buildNormalizedCodexModel(parsed, plainSlug, canonicalSlug, baseUrl, accountId));
+			normalized.push(
+				buildNormalizedCodexModel(parsed, plainSlug, canonicalSlug, baseUrl, accountId, referenceNames),
+			);
 		}
 	}
 
@@ -357,6 +366,8 @@ function parseCodexModelEntry(entry: unknown): ParsedCodexModelEntry | null {
  * the model's bundled SKU (`slug` itself for plain/unknown rows, the plain
  * counterpart for a safe `-wm` row) and owns the base-model metadata derivation
  * so both listings of a model report the same context window and pricing.
+ * The display name comes from `referenceNames[slug]` when OpenAI ships that
+ * id, else from Codex's `display_name`.
  */
 function buildNormalizedCodexModel(
 	parsed: ParsedCodexModelEntry,
@@ -364,6 +375,7 @@ function buildNormalizedCodexModel(
 	canonicalSlug: string,
 	baseUrl: string,
 	accountId: string | undefined,
+	referenceNames: ReadonlyMap<string, string>,
 ): NormalizedCodexModel {
 	// Codex discovery historically omitted `context_window` for GPT-5.6-family
 	// SKUs (#5705); luna/sol/terra additionally floor the reported value because
@@ -389,7 +401,7 @@ function buildNormalizedCodexModel(
 		priority: parsed.priority,
 		model: {
 			id: slug,
-			name: parsed.name,
+			name: referenceNames.get(slug) ?? parsed.name,
 			api: "openai-codex-responses",
 			provider: "openai-codex",
 			baseUrl,
