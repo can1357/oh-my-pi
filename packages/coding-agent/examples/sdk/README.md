@@ -107,20 +107,20 @@ await session.prompt("Hello");
 
 ## Resolve preview workflow (AST edit apply/discard)
 
-`ast_edit` now always returns a preview. To finalize, write plain text to the appropriate virtual device with the `write` tool.
+`ast_edit` now always returns a preview. To finalize, run the `resolve` or `reject` command with the reason as its argument.
 
-- `xd://resolve` → apply the pending preview; body = reason text
-- `xd://reject` → discard the pending preview; body = reason text
+- `resolve "<reason>"` → apply the pending preview
+- `reject "<reason>"` → discard the pending preview
 
-`createAgentSession()` / `createTools()` auto-include `write` whenever a deferrable tool (e.g. `ast_edit`) is present, so the devices are always reachable.
+While the `bash` tool is active these run as bash tool commands; otherwise `createAgentSession()` / `createTools()` present them as top-level tools whenever a deferrable tool (e.g. `ast_edit`) is present.
 
 ```typescript
-const tools = await createTools(toolSession, ["ast_edit"]); // write is auto-included
-const writeTool = tools.find(t => t.name === "write")!;
+const tools = await createTools(toolSession, ["ast_edit"]); // resolve is included
 
-await writeTool.execute("call-1", {
-	path: "xd://resolve",
-	content: "Preview matches expected replacements",
+const resolveTool = tools.find(t => t.name === "resolve")!;
+
+await resolveTool.execute("call-1", {
+	reason: "Preview matches expected replacements",
 });
 ```
 

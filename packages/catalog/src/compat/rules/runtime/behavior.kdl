@@ -10,15 +10,16 @@ behavior {
 			"omni-speech" "gpt-image-" "gpt-realtime"
 		exclude-substring "embedding"
 	}
-
 	// Retired providers: their entire roster is excluded from the generated
 	// bundle and must never be resurrected from the previous snapshot.
 	// `opencode` was split into `opencode-go` / `opencode-zen`; models.dev's
 	// `opencode` key now maps to `opencode-zen`, so fresh discovery never emits
 	// it, but its legacy rows survived as previous-snapshot zombies (no
 	// descriptor makes it authoritative to prune), surfacing a dead, un-authable
-	// `opencode` provider in the picker.
-	retired-providers "wafer-pass" "wandb" "opencode"
+	// `opencode` provider in the picker. `google-gemini-cli` was removed as a
+	// standalone provider; its `google-gemini-cli` API id remains for
+	// Antigravity/custom users.
+	retired-providers "wafer-pass" "wandb" "opencode" "google-gemini-cli"
 
 	// ClinePass exposes gateway-specific limits, pricing, and reasoning
 	// controls; matching them by bare model id contaminates unrelated proxy
@@ -62,17 +63,6 @@ behavior {
 		fallback "auto" substring="composer"
 	}
 
-	// Exact quota bucket memberships reported by Google Gemini CLI.
-	quota-tiers provider="google-gemini-cli" {
-		tier "3-Flash" "gemini-3-flash-preview" "gemini-3-flash" "gemini-3.5-flash"
-		tier "Flash" "gemini-2.5-flash" "gemini-2.5-flash-lite" "gemini-2.0-flash" \
-			"gemini-1.5-flash"
-		tier "Pro" "gemini-2.5-pro" "gemini-3-pro-preview" "gemini-3.1-pro-preview" \
-			"gemini-3-pro" "gemini-3.1-pro" "gemini-pro-agent" "gemini-1.5-pro"
-		// Unknown discovered quota ids retain the upstream display heuristic.
-		fallback "Flash" substring="flash"
-		fallback "Pro" substring="pro"
-	}
 	// Antigravity reports backend-family counters, with a separate weekly bucket
 	// for Gemini 4 Argon. Exact memberships cover bundled/current ids; fallbacks
 	// preserve the same counter for newly discovered family ids.

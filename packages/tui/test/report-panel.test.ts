@@ -38,7 +38,7 @@ async function mountReport(bodyRows: number) {
 	const dock = new Container();
 	const editor = new Container();
 	editor.addChild(new Text("EDITOR", 0, 0));
-	composer.setRuntimeChildren([transcript, dock, editor]);
+	composer.setRuntimeChildren([transcript, dock, editor], { coveringChrome: [dock] });
 	composer.start({ playWelcomeIntro: false });
 	await scheduler.settle(terminal);
 	const panel = new ReportPanel({
@@ -112,8 +112,7 @@ describe("ReportPanel in text mode", () => {
 	it("keeps the editor on the bottom row when rows reached scrollback while the report was open", async () => {
 		// With the welcome header on screen, opening a tall report retires the
 		// header into scrollback, so the frame left after closing is shorter
-		// than the screen. The interactive mode notes the editor sat on the
-		// bottom row before opening and pins it there again on close.
+		// than the screen; the editor still sits on the bottom row.
 		const terminal = new VirtualTerminal(100, ROWS);
 		const scheduler = new VirtualRenderScheduler();
 		const composer = new Composer({
@@ -126,7 +125,7 @@ describe("ReportPanel in text mode", () => {
 		const dock = new Container();
 		const editor = new Container();
 		editor.addChild(new Text("EDITOR", 0, 0));
-		composer.setRuntimeChildren([transcript, dock, editor]);
+		composer.setRuntimeChildren([transcript, dock, editor], { coveringChrome: [dock] });
 		composer.start({ playWelcomeIntro: false });
 		await scheduler.settle(terminal);
 		const editorRow = () => terminal.getViewport().findIndex(row => row.includes("EDITOR"));
@@ -162,7 +161,10 @@ describe("ReportPanel in text mode", () => {
 		await scheduler.settle(terminal);
 
 		expect(editorRow()).toBe(ROWS - 1);
-		expect(terminal.getViewport().some(row => row.includes(`Transcript ${transcriptRows - 1}`))).toBe(true);
+		// The rows the report covered are back on screen, once.
+		const last = `Transcript ${transcriptRows - 1}`;
+		expect(terminal.getViewport().filter(row => Bun.stripANSI(row).trim() === last).length).toBe(1);
+		expect(terminal.getScrollBuffer().filter(row => Bun.stripANSI(row).trim() === last).length).toBe(1);
 		composer.stop();
 	});
 

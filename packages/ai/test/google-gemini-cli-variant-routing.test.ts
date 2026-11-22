@@ -263,8 +263,9 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 			"gemini-4-argon": threeTiers,
 			"gemini-4-carbon": threeTiers,
 			"gemini-4-hydrogen": [...threeTiers, Effort.XHigh],
+			"gemini-4-neon": [...threeTiers, Effort.XHigh],
 		};
-		// `fetchAvailableModels` numbers the SKU levels; Hydrogen's `-xhigh` SKU reports 100.
+		// `fetchAvailableModels` numbers the SKU levels; the Hydrogen and Neon `-xhigh` SKUs report 100.
 		const advertisedLevel: Partial<Record<Effort, number>> = {
 			[Effort.Low]: 1,
 			[Effort.Medium]: 2,
@@ -324,6 +325,42 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 					thinkingLevel: "LOW",
 				});
 			}
+		}
+	});
+
+	it("drops Hydrogen's monitor slot and folds its tiered SKUs into the Hydrogen row", async () => {
+		const sku = (thinkingLevel: number, maxOutputTokens: number, displayName?: string) => ({
+			...(displayName === undefined ? {} : { displayName }),
+			supportsThinking: true,
+			supportsImages: true,
+			maxTokens: 1_048_576,
+			maxOutputTokens,
+			thinkingLevel,
+		});
+		const result = await fetchAntigravityDiscoveryModels({
+			token: "token",
+			userAgent: "test",
+			fetcher: async () =>
+				Response.json({
+					models: {
+						"gemini-4-hydrogen-low": sku(1, 262_144, "Gemini 4 Hydrogen (Low)"),
+						"gemini-4-hydrogen-medium": sku(2, 262_144, "Gemini 4 Hydrogen (Medium)"),
+						"gemini-4-hydrogen-high": sku(3, 262_144, "Gemini 4 Hydrogen (High)"),
+						"gemini-4-hydrogen-xhigh": sku(100, 262_144, "Gemini 4 Hydrogen (XHigh)"),
+						"gemini-4-hydrogen-tiered-high": sku(3, 262_144, "Gemini 4 Hydrogen (High)"),
+						"gemini-4-hydrogen-tiered-xhigh": sku(100, 262_144, "Gemini 4 Hydrogen (XHigh)"),
+						"gemini-4-hydrogen-sonar": sku(1, 65_536),
+					},
+				}),
+		});
+		if (!result || result.rejectedStatus !== undefined) throw new Error("discovery failed");
+		expect(result.models.map(spec => spec.id)).toEqual(["gemini-4-hydrogen"]);
+		expect(resolveVariantSelector("google-antigravity", "gemini-4-hydrogen-tiered-xhigh")).toBe("gemini-4-hydrogen");
+
+		const model = buildModel(result.models[0]!);
+		for (const tier of [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]) {
+			const request = await captureRequest(model, tier);
+			expect(request.body.model).toBe(`gemini-4-hydrogen-${tier}`);
 		}
 	});
 

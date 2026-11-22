@@ -146,13 +146,14 @@ const fn keypad_operator_text_codepoint(codepoint: i32) -> Option<i32> {
 }
 
 /// Parsed Kitty keyboard protocol sequence (subset we care about).
-struct ParsedKittySequence {
-	codepoint:       i32,
-	shifted_key:     Option<i32>,
-	base_layout_key: Option<i32>,
-	text_codepoint:  Option<i32>,
-	modifier:        u32,
-	event_type:      Option<u32>,
+pub(crate) struct ParsedKittySequence {
+	pub(crate) codepoint:  i32,
+	shifted_key:           Option<i32>,
+	base_layout_key:       Option<i32>,
+	text_codepoint:        Option<i32>,
+	/// Modifier bitmask: the wire value minus one, lock bits included.
+	pub(crate) modifier:   u32,
+	pub(crate) event_type: Option<u32>,
 }
 
 /// Parsed Kitty keyboard protocol sequence result for a Kitty input sequence.
@@ -1168,7 +1169,7 @@ fn parse_esc_pair(code: u8, kitty_protocol_active: bool) -> Option<Cow<'static, 
 // Kitty Protocol Parsing
 // =============================================================================
 
-fn parse_kitty_sequence_bytes(bytes: &[u8]) -> Option<ParsedKittySequence> {
+pub(crate) fn parse_kitty_sequence_bytes(bytes: &[u8]) -> Option<ParsedKittySequence> {
 	if bytes.len() < 3 || bytes[0] != 0x1b || bytes[1] != b'[' {
 		return None;
 	}

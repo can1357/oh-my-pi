@@ -136,6 +136,8 @@ Important edge behavior from runtime:
 - `{ id?, type: "abort" }`
 - `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[] }`
 - `{ id?, type: "abort_and_restore_queue" }`
+- `{ id?, type: "abort_and_deliver_queue" }`
+- `{ id?, type: "resume" }`
 - `{ id?, type: "new_session", parentSession?: string }`
 - `{ id?, type: "open_session", sessionDir: string, provider?: string, modelId?: string }`
 
@@ -165,19 +167,22 @@ Important edge behavior from runtime:
 
 ### Model
 
-- `{ id?, type: "set_model", provider: string, modelId: string }`
+- `{ id?, type: "set_model", provider: string, modelId: string, thinkingLevel?: ConfiguredThinkingLevel, role?: string }`
 - `{ id?, type: "cycle_model" }`
 - `{ id?, type: "get_available_models" }`
+- `{ id?, type: "get_model_picker", query?: string, limit?: number }`
 
-`get_available_models` waits for background model discovery before returning. `set_model` also waits when the requested model is not already in the available catalog; it returns the selected `Model` or a `Model not found: <provider>/<modelId>` failure.
+`get_available_models` waits for background model discovery before returning. `set_model` also waits when the requested model is not already in the available catalog; it returns the selected `Model` or a `Model not found: <provider>/<modelId>` failure. An optional `role` records the model role the switch belongs to (a quick-role pick passes its role); nothing is persisted either way.
+
+`get_model_picker` returns `{ rows, recent, total }`: omp's session model picker (alt+p) served to any client, so a remote picker lists and ranks models exactly as the TUI does. A blank `query` browses with the Recent block first (`recent` counts its leading rows; role-held and recently used models), `provider/` limits matches to a provider, and a query starting with `@` lists the ctrl+p quick roles. A row carries the roles the model holds (`roles`), the steps of its thinking slider (`thinking`) with the level the session would run it at (`thinkingLevel`), `overContext`, and `current`; a quick-role row carries `role`, which `set_model` takes back.
 
 ### Thinking
 
-- `{ id?, type: "set_thinking_level", level: ThinkingLevel }`
+- `{ id?, type: "set_thinking_level", level: ConfiguredThinkingLevel }`
 - `{ id?, type: "cycle_thinking_level" }`
 - `{ id?, type: "get_available_thinking_levels" }`
 
-`ThinkingLevel` is `"inherit" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`. Discovery returns `"off"` followed by the live model's supported efforts, omitting `"inherit"` and the session-only `"auto"` selector.
+`ThinkingLevel` is `"inherit" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`. Discovery returns `"off"` followed by the live model's supported efforts, omitting `"inherit"` and the session-only `"auto"` selector. `set_thinking_level` itself takes `ConfiguredThinkingLevel` (that plus `"auto"`), so a client can opt into per-turn auto effort.
 
 ### Queue modes
 
@@ -459,6 +464,23 @@ Before aborting, the server withdraws every user-authored steering and follow-up
 
 The response always succeeds, even when the withdrawn input is too large for one response under the negotiated protocol (1 MiB per frame on v1, 64 MiB reassembled on v2). Instead of failing with a transport-limit error, which would lose the already-withdrawn input, the server first omits every entry's `images` and sets `data.imagesDropped: true`, keeping all texts. If the texts alone still do not fit, it returns only the oldest entries that fit (steering first, then follow-ups) and sets `data.truncated: true`; entries after the last one listed are gone. Neither flag is present when the full result fits.
 
+### `abort_and_deliver_queue` and `resume` payloads
+
+The TUI's empty Enter and its `.`/`c` continue shortcut:
+
+```json
+{"id":"req_5","type":"abort_and_deliver_queue"}
+{"id":"req_5","type":"response","command":"abort_and_deliver_queue","success":true,"data":{"aborted":true}}
+{"id":"req_6","type":"resume"}
+{"id":"req_6","type":"response","command":"resume","success":true}
+```
+
+`abort_and_deliver_queue` interrupts a streaming run that has queued user input (or steering the in-flight response took live) and continues it with that input. With no run streaming or nothing queued it does nothing and answers `aborted: false`.
+
+`resume` continues the agent. A running turn is interrupted first; when input is queued, that input continues the run instead of the continue directive. A prompt the model has not answered yet runs again as is. It answers once the continuation is under way, or fails with `Nothing to resume` when the session has no conversation to continue.
+
+Both wait behind user input received before them, so a `prompt` sent just before is queued by the time they run and is the input they deliver. Unlike `abort`, they cancel no earlier input and leave goal continuation running; an `abort` received after them cancels them if they have not started. Older runtimes reject both. The TypeScript client exposes `abortAndDeliverQueue(): Promise<boolean>` and `resume(): Promise<void>`.
+
 ### `get_state` payload
 
 `tokensPerSecond` is a number when output throughput is available and `null`
@@ -498,6 +520,8 @@ field is absent outside both stages. No event carries it, so re-read
 {
 	"model": { "provider": "...", "id": "..." },
 	"thinkingLevel": "off|minimal|low|medium|high|xhigh|max",
+	"configuredThinkingLevel": "auto|off|minimal|low|medium|high|xhigh|max",
+	"thinkingLevels": ["off", "auto", "low", "medium", "high"],
 	"isStreaming": false,
 	"isCompacting": false,
 	"steeringMode": "all|one-at-a-time",
@@ -555,23 +579,24 @@ Fields whose values are `undefined` are omitted from JSON, including an unset
 model/thinking level, session name/file, or unavailable `contextUsage`.
 `dumpTools` may also include each tool's `examples` alongside its schema.
 It lists only the agent's **top-level tool definitions**, not the full mounted
-inventory. With the default `tools.xdev: true`, enabled discoverable tools,
-including MCP tools, can be mounted as `xd://` devices instead. An MCP tool's
+inventory. With the default `tools.commands: true`, enabled discoverable tools,
+including MCP tools, are mounted as bash tool commands instead. An MCP tool's
 absence from `dumpTools` does **not** mean its server failed to connect. This
 applies to both `--mode rpc` and `--mode rpc-ui`.
 
-The agent discovers and invokes mounted tools through the ordinary `read` and
-`write` tools:
+The agent invokes a mounted tool by running it as a command in a `bash` call:
 
-- `read({"path":"xd://"})` lists mounted devices.
-- `read({"path":"xd://mcp__stub_announce"})` returns a device's documentation and input schema.
-- `write({"path":"xd://mcp__stub_announce","content":"{}"})` invokes that device with a JSON arguments object. Replace `{}` with the tool's required arguments.
+- `<tool> --help` prints usage derived from the tool's JSON schema.
+- `<tool> --flag value` runs it; required top-level scalars are also accepted positionally, and `-j '{"flag":"value"}'` passes raw JSON arguments.
 
-These are **agent tool calls**, not additional RPC command types. Use the actual
-device name from the listing; MCP runtime names are sanitized and may differ
-from the server's original tool name. For invocation verification, inspect the
-current turn's `tool_execution_start` / `tool_execution_end` events and result,
-not just assistant text or an earlier transcript entry.
+These are **agent tool calls**, not additional RPC command types, so the outer
+`tool_execution_start` / `tool_execution_end` events and result name `bash`. A
+host tool mounted as a command is identified by the `host_tool_call` request it
+triggers and by the dispatch record in `details.toolCommands` on the bash
+result. Use the tool's actual name; MCP runtime names are sanitized and may
+differ from the server's original tool name. For invocation verification,
+inspect the current turn's frames and result, not just assistant text or an
+earlier transcript entry.
 
 MCP configuration follows the normal [MCP configuration rules](./mcp-config.md):
 `disabledServers` and `enabledServers` are active-profile **user** lists, and the
@@ -736,12 +761,7 @@ The corresponding `get_state` result reports the same computed state:
 
 ### `set_ask_dialog` payload
 
-`set_ask_dialog` opts the host in to the `ask` extension UI request (see
-[Extension UI Sub-Protocol](#extension-ui-sub-protocol)). It is off by default
-for every process; until a host enables it, the `ask` tool keeps prompting with
-one `select` (plus `editor` for free text) per choice. Builds without the
-command answer with a failed `response`, so hosts should keep the `select`
-fallback when enabling fails.
+`set_ask_dialog` opts the host in to the `ask` extension UI request for extension `ui.askDialog` calls (see [Extension UI Sub-Protocol](#extension-ui-sub-protocol)). It is off by default; until enabled, those calls use `select` and `editor`. This setting does not affect the `ask` tool, which always sends a whole `form`. Builds without the command answer with a failed `response`, so hosts should keep handling extension dialogs through `select` and `editor` when enabling fails.
 
 ```json
 { "id": "req_ask", "type": "set_ask_dialog", "enabled": true }
@@ -1309,7 +1329,7 @@ Extensions in RPC mode use request/response UI frames. `--no-ui` disables the ex
 
 `--mode rpc-ui` independently enables the tool UI context, including with `--no-ui`:
 
-- `ask` still sends `select` requests. Free-text answers use `editor` with `promptStyle: true`; `ask` does not send `input` requests. Dialog cancellation can send `cancel`. Each `ask` prompt's `title` can span several lines: the form's context text for that field (paragraphs, lists, `<pre>` blocks, tables) separated by blank lines, then the field's question on the last line.
+- The `ask` tool sends one `form` request carrying the complete HTML form, without an enable command. Hosts must render the form and reply with submitted `data` or cancellation; the tool no longer walks fields through `select`, `input` or `editor` over RPC. Extension `ui.formDialog` calls send the same `form` request in both RPC modes.
 - Other callers using the tool UI context retain its supported dialog methods (`select`, `confirm`, `input`, `editor`, and cancellation) and presentation methods (`notify`, `setStatus`, string-array `setWidget`, `set_editor_text`, and opt-in `setTitle`). `--no-ui` is not a transport-level filter on these methods.
 - Tool approval prompts use the extension runner, not the tool UI context. Under `--no-ui`, tools requiring approval fail closed with a no-interactive-UI error rather than sending an approval dialog, just as with `--mode rpc --no-ui`.
 - MCP authentication challenges do not gain an RPC UI handler in either mode; the interactive-mode MCP auth handler is not installed.
@@ -1321,7 +1341,7 @@ Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-u
 
 `RpcExtensionUIRequest` (`type: "extension_ui_request"`) methods:
 
-- `select`, `confirm`, `input`, `editor`, `ask`, `cancel`
+- `select`, `confirm`, `input`, `editor`, `ask`, `form`, `cancel`
    - `select` keeps labels in `options: string[]` and, when any option has a
      description, emits a positionally aligned
      `optionDetails: Array<{ description?: string }>` array. Hosts that do not
@@ -1330,23 +1350,18 @@ Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-u
      (option to focus first), `selectionMarker?: "radio" | "checkbox"`,
      `checkedIndices?: number[]` (options currently checked in a checkbox
      list) and `markableCount?: number` (leading options that get a marker;
-     trailing ones are actions, such as the `ask` tool's "Done selecting";
-     absent means every option when `selectionMarker` is set). The `ask`
-     tool's "Other" row is marked and appears in `checkedIndices` once a custom
-     answer is entered.
-     The `ask` tool's checkbox fallback re-sends `select` after
-     every toggle, so `checkedIndices` is the authoritative checked state; a
-     host that ignores it cannot show which options are already checked.
+     trailing ones are actions; absent means every option when
+     `selectionMarker` is set). `checkedIndices` is the authoritative checked state.
    - `input` carries `title: string` and optional `placeholder?: string`,
      `timeout?: number`, and `secret?: boolean`. `secret` is an unnegotiated
      host hint from `ExtensionUIDialogOptions.secret`; hosts that support
      masked input should hide typed characters when `secret: true`.
    - `ask` is emitted only after `set_ask_dialog` enables it. It carries every
-     question of one extension `ui.askDialog` call (the `ask` tool instead walks
-     its HTML form field by field through `select`, `input` and `editor`):
+     question of one extension `ui.askDialog` call (the `ask` tool instead sends a `form` request):
      `questions: Array<{ id: string, question: string, header?: string, options: Array<{ label: string, description?: string, preview?: string }>, multi?: boolean, recommended?: number }>`
      plus `timeout?: number`. `options` never include an "Other" entry; hosts
      always offer free text.
+   - `form` requires no opt-in. It carries the HTML `<form>` of one `ui.formDialog` call as `html: string`, plus `timeout?: number`. Hosts render the form whole; radio and checkbox groups of two or more options offer a free-text "Other" answer, unless the group already has an option labelled `Other`. Hosts must answer every `form` request with submitted `data` or `{ cancelled: true }`; a host without a form renderer must cancel. An unanswered `form` can block the `ask` call indefinitely, because plan mode disables the ask timeout.
 - `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`
 - `open_url` (emitted by RPC login flows): includes `url`, optional `launchUrl`, and optional `instructions`. When present, `launchUrl` is a short loopback redirect and is the recommended copy target so terminal truncation cannot corrupt OAuth query parameters.
 
@@ -1378,6 +1393,7 @@ Example:
 - `{ type: "extension_ui_response", id: string, confirmed: boolean }`
 - `{ type: "extension_ui_response", id: string, cancelled: true, timedOut?: boolean }`
 - `{ type: "extension_ui_response", id: string, answers: Array<{ id: string, selectedOptions: string[], customInput?: string }> }` (answers an `ask` request)
+- `{ type: "extension_ui_response", id: string, data: Record<string, string | number | string[]> }` (answers a `form` request)
 
 `select` and `input` resolve to `undefined`, and `confirm` to `false`, on
 cancellation, timeout, or signal abort. Signal abort emits a `cancel` request
@@ -1393,6 +1409,25 @@ option, else its first.
 `selectedOptions` holds exact option labels without duplicates; a multi-select may be empty. A single-select
 (`multi` absent or false) takes at most one option and not both an option and `customInput`. `customInput`
 is trimmed and ignored when empty. Any other shape fails the `ask` tool call instead of guessing.
+
+`data` holds the submitted values by control `name`, as an HTML form submits them. A radio group, a single
+`<select>` or a lone checkbox gives one option `value` (omitted when nothing is chosen); a checkbox group or a
+multi-select of two or more options gives an array of option values without duplicates (empty when omitted), while one with a single
+option gives that one value like a lone checkbox; a text field gives its text, or a number for a
+`number`/`range` input (an absent text field counts as empty). A radio or checkbox group of two or more options,
+unless it already has an option labelled `Other`, takes one extra string that is not an option value as its "Other"
+answer. Hidden inputs keep the form's own values.
+Unknown names, disabled options, wrong types, and answers that break `required`, `min`/`max`,
+`minlength`/`maxlength`, `email`/`url` or `pattern` fail the `ask` tool call instead of guessing. A `form` timeout
+(omp's timer or a host `cancelled: true, timedOut: true` reply) submits the form's defaults. A form whose frame
+exceeds the transport limit (1 MiB under protocol v1, 64 MiB after `negotiate_protocol` to v2) fails the `ask` tool
+call without being sent, instead of reaching the host truncated.
+
+A valid choice answer, including a permitted "Other" answer, takes precedence over a same-name hidden value. An otherwise invalid choice value that exactly matches that hidden value counts as no selection; it does not satisfy a required field. Inside a checkbox group's or multi-select's array, one entry equal to the hidden value is dropped as the hidden input's echo (as browser form data sends it) when no option carries that value, or when keeping it would make the array invalid.
+
+Fields sharing a `name` share its one entry. Each field whose shape fits the entry takes it; a same-name field that cannot carry it (a radio group beside a checkbox group, a group without "Other" beside a text input) counts as unanswered and must still pass its own constraints. An entry no field of its name can carry fails the call.
+
+An invalid `data` reply fails the whole `ask` call, with no round for correcting a field, so hosts must enforce the form's constraints before sending: `required` (a whitespace-only text answer counts as empty), `min`/`max`, `minlength`/`maxlength`, `email`, `url`, and `pattern` (anchored to the whole value; an invalid pattern is ignored).
 
 ```json
 {

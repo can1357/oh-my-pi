@@ -20,6 +20,7 @@ import {
 	KIRO_BOOTSTRAP_REGIONS,
 	isKiroRegion,
 	kiroProfileRegion,
+	kiroProfileRegions,
 } from "@oh-my-pi/pi-catalog/wire/kiro";
 import {
 	type KiroCliAttempt,
@@ -187,13 +188,13 @@ function profileRow(profileArn: string, orgName: string): Partial<OAuthCredentia
 }
 
 /**
- * Profiles the bearer sees across the bootstrap regions, deduplicated by ARN.
+ * Profiles the bearer sees across `regions`, deduplicated by ARN.
  * An empty result is trusted only when every region answered: a failed
  * region may hold the account's only profile.
  */
-async function listBootstrapProfiles(ctx: RequestContext, token: string): Promise<KiroProfile[]> {
+async function listProfiles(ctx: RequestContext, token: string, regions: readonly string[]): Promise<KiroProfile[]> {
 	const results = await Promise.allSettled(
-		KIRO_BOOTSTRAP_REGIONS.map(region => listKiroProfiles({ region, token, fetch: ctx.fetch, signal: ctx.signal })),
+		regions.map(region => listKiroProfiles({ region, token, fetch: ctx.fetch, signal: ctx.signal })),
 	);
 	throwIfCancelled(ctx.signal);
 	const profiles = results.flatMap(result => (result.status === "fulfilled" ? result.value : []));
@@ -264,7 +265,7 @@ async function loginDevice(ctrl: OAuthController, startUrl: string, oidcRegion: 
 		kiroOidcRegion: oidcRegion,
 	};
 	if (startUrl === BUILDER_ID_START_URL) return { ...login, region: BUILDER_ID_REGION };
-	const profiles = await listBootstrapProfiles(ctrl, tokens.access);
+	const profiles = await listProfiles(ctrl, tokens.access, kiroProfileRegions(oidcRegion));
 	if (profiles.length === 0) throw oauthError("No Kiro profiles are available", { kind: "discovery" });
 	return { ...login, ...(await pickProfile(ctrl, profiles)) };
 }
@@ -315,7 +316,7 @@ async function loginSocial(ctrl: OAuthController, loginProvider: "Google" | "Git
 	const login = { ...parseTokens(completed), accountId: crypto.randomUUID() };
 	if (kiroProfileRegion(completed.profileArn))
 		return { ...login, ...profileRow(completed.profileArn as string, label) };
-	const profiles = await listBootstrapProfiles(ctrl, login.access);
+	const profiles = await listProfiles(ctrl, login.access, KIRO_BOOTSTRAP_REGIONS);
 	const profile =
 		profiles.length > 0 ? await pickProfile(ctrl, profiles, label) : profileRow(SOCIAL_DEFAULT_PROFILE_ARN, label);
 	return { ...login, ...profile };

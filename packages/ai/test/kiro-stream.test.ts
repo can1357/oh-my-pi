@@ -3,8 +3,10 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { crc32 } from "@oh-my-pi/pi-ai/providers/aws-eventstream";
 import { type KiroOptions, streamKiro } from "@oh-my-pi/pi-ai/providers/kiro/stream";
 import type { KiroRequest } from "@oh-my-pi/pi-ai/providers/kiro/transform";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { encodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro";
 
 const MODEL_ENDPOINT = "https://runtime.us-east-1.kiro.dev/";
@@ -246,6 +248,18 @@ test("maps HTTP context overflow responses", async () => {
 	for (const respond of [
 		json(400, "ValidationException", "input exceeds the context window"),
 		() => new Response(null, { status: 413 }),
+		// Kiro's own wording: the Kiro CLI reads it as a context overflow on any status, 429 included.
+		json(400, "ValidationException", "Input is too long."),
+		json(429, "ThrottlingException", "Input is too long."),
+		() =>
+			Response.json(
+				{
+					__type: "com.amazon.kiro.runtimeservice#ValidationException",
+					message: "Input content length exceeds threshold.",
+					reason: "CONTENT_LENGTH_EXCEEDS_THRESHOLD",
+				},
+				{ status: 400 },
+			),
 	]) {
 		const { result } = await run(respond);
 		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(true);
@@ -265,5 +279,38 @@ test("routes to the credential's region with its profile ARN, else to the discov
 	expect(sent.map(([url, body]) => [url, body.profileArn, body.conversationState.conversationId])).toEqual([
 		["https://runtime.eu-central-1.kiro.dev/", profileArn, "session-a"],
 		[MODEL_ENDPOINT, undefined, expect.any(String)],
+	]);
+});
+
+test("thinking off reaches Kiro as the advertised off value, else as the lowest effort, never the schema default", async () => {
+	const sent: KiroRequest[] = [];
+	const fetch: FetchImpl = async (_input, init) => {
+		sent.push(JSON.parse(String(init?.body)) as KiroRequest);
+		return recovered();
+	};
+	const adaptive = (off: { suppressWhenOff: true } | { requiresEffort: true }): Model<"kiro-api"> =>
+		buildModel({
+			...MODEL,
+			thinking: {
+				mode: "anthropic-adaptive",
+				efforts: [Effort.Low, Effort.High],
+				defaultLevel: Effort.High,
+				...off,
+			},
+		});
+	const switchable = adaptive({ suppressWhenOff: true });
+	await streamSimple(switchable, CONTEXT, { apiKey: API_KEY, fetch }).result();
+	// An external scratchpad replaces native reasoning even when an effort is selected.
+	await streamSimple(switchable, CONTEXT, {
+		apiKey: API_KEY,
+		fetch,
+		reasoning: Effort.High,
+		forceReasoningOff: true,
+	}).result();
+	await streamSimple(adaptive({ requiresEffort: true }), CONTEXT, { apiKey: API_KEY, fetch }).result();
+	expect(sent.map(body => body.additionalModelRequestFields)).toEqual([
+		{ thinking: { type: "disabled" } },
+		{ thinking: { type: "disabled" } },
+		{ thinking: { type: "adaptive", display: "summarized" }, output_config: { effort: "low" }, max_tokens: 2_048 },
 	]);
 });

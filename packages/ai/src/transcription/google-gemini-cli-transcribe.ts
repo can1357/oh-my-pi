@@ -10,8 +10,8 @@ import { type TranscriptionOptions, TranscriptionApiError } from "./openai-trans
 import type { TranscriptionRequest, TranscriptionResult } from "./types";
 
 /**
- * Transcribe through a Gemini chat model on Cloud Code Assist
- * (`google-antigravity`/`google-gemini-cli` OAuth), which serves no transcribe
+ * Transcribe through a Gemini chat model on Cloud Code Assist (Antigravity
+ * OAuth or a custom provider on that API), which serves no transcribe
  * SKU: the audio rides as an inline-data part next to a verbatim-transcription
  * instruction on the existing `google-gemini-cli` transport, so auth, headers,
  * project and endpoint handling are that provider's. The stt row's

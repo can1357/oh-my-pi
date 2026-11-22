@@ -28,7 +28,7 @@ function transcribeModel(): Model<Api> {
 		id: "gemini-2.5-flash-transcribe",
 		name: "Gemini 2.5 Flash (transcribe)",
 		api: "google-gemini-cli-transcribe",
-		provider: "google-gemini-cli",
+		provider: "custom-cca",
 		baseUrl: "https://cloudcode-pa.googleapis.com",
 		reasoning: false,
 		input: ["text"],
@@ -80,14 +80,14 @@ function upstream(respond: (url: string) => Response): { fetch: FetchImpl; bodie
 }
 
 describe("google-gemini-cli-transcribe runner", () => {
-	it("is dispatchable, with bundled Antigravity and Gemini CLI rows mapped to chat SKUs", () => {
+	it("is dispatchable, with bundled Antigravity rows mapped to chat SKUs", () => {
 		expect(isTranscriptionApi("google-gemini-cli-transcribe")).toBe(true);
 		expect(getBundledModel("google-antigravity", "gemini-3-flash-transcribe")).toMatchObject({
 			api: "google-gemini-cli-transcribe",
 			kind: "stt",
 			requestModelId: "gemini-3-flash",
 		});
-		expect(getBundledModel("google-gemini-cli", "gemini-2.5-flash-transcribe")).toMatchObject({
+		expect(getBundledModel("google-antigravity", "gemini-2.5-flash-transcribe")).toMatchObject({
 			api: "google-gemini-cli-transcribe",
 			kind: "stt",
 			requestModelId: "gemini-2.5-flash",
