@@ -774,7 +774,21 @@ export class TtsrCoordinator {
 				this.#abortPending = false;
 				this.#perToolInjections.clear();
 				if (this.#manager?.getSettings().contextMode === "discard") {
-					this.#host.agent.replaceMessages(this.#host.agent.state.messages.slice(0, targetAssistantIndex));
+					// ponytail: O(N) single-pass filter drops the aborted assistant and its tool results, preserving trailing messages.
+					const messages = this.#host.agent.state.messages;
+					const target = messages[targetAssistantIndex];
+					const toolCallIds = new Set(
+						target?.role === "assistant" && Array.isArray(target.content)
+							? target.content.filter((b): b is ToolCall => b.type === "toolCall").map(b => b.id)
+							: [],
+					);
+					this.#host.agent.replaceMessages(
+						messages.filter(
+							(message, index) =>
+								index !== targetAssistantIndex &&
+								!(message.role === "toolResult" && toolCallIds.has(message.toolCallId)),
+						),
+					);
 				}
 				const injection = this.#getInjectionContent(ttsrInterruptTemplate);
 				if (injection) {

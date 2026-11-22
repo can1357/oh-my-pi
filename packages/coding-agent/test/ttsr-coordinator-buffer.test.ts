@@ -34,6 +34,7 @@ interface CoordinatorHostBundle {
 	hasQueuedMessages: Mock<() => boolean>;
 	scheduleAgentContinue: Mock<(options: Parameters<TtsrCoordinatorHost["scheduleAgentContinue"]>[0]) => void>;
 	appendMessage: Mock<(message: AgentMessage) => void>;
+	replaceMessages: Mock<(messages: AgentMessage[]) => void>;
 	waitForIdle: Mock<() => Promise<void>>;
 	schedulePostPromptTask: Mock<(task: (signal: AbortSignal) => Promise<void>, options?: { delayMs?: number }) => void>;
 }
@@ -43,7 +44,10 @@ function makeHost(): CoordinatorHostBundle {
 	const followUp = vi.fn((_message: AgentMessage) => undefined);
 	const hasQueuedMessages = vi.fn(() => true);
 	const appendMessage = vi.fn((_message: AgentMessage) => undefined);
-	const replaceMessages = vi.fn((_messages: AgentMessage[]) => undefined);
+	const state = { messages: [] as AgentMessage[], tools: [] };
+	const replaceMessages = vi.fn((messages: AgentMessage[]) => {
+		state.messages = messages.slice();
+	});
 	const waitForIdle = vi.fn(async () => undefined);
 	const schedulePostPromptTask = vi.fn(
 		(_task: (signal: AbortSignal) => Promise<void>, _options?: { delayMs?: number }) => undefined,
@@ -51,7 +55,6 @@ function makeHost(): CoordinatorHostBundle {
 	const scheduleAgentContinue = vi.fn(
 		(_options: Parameters<TtsrCoordinatorHost["scheduleAgentContinue"]>[0]) => undefined,
 	);
-	const state = { messages: [] as AgentMessage[], tools: [] };
 	const host = {
 		agent: {
 			state,
@@ -80,6 +83,7 @@ function makeHost(): CoordinatorHostBundle {
 		hasQueuedMessages,
 		scheduleAgentContinue,
 		appendMessage,
+		replaceMessages,
 		waitForIdle,
 		schedulePostPromptTask,
 	};
@@ -528,7 +532,7 @@ describe("TTSR interrupt retry", () => {
 		const coordinator = new TtsrCoordinator(host, manager);
 		const messages = host.agent.state.messages;
 		appendMessage.mockImplementation(message => {
-			messages.push(message);
+			host.agent.state.messages.push(message);
 		});
 		const interrupted = assistantMessage();
 		messages.push(interrupted);
@@ -554,6 +558,109 @@ describe("TTSR interrupt retry", () => {
 
 		expect(messages.at(-2)).toBe(abortedTail);
 		expect(messages.at(-1)).toMatchObject({ role: "custom", customType: "ttsr-injection" });
+		expect(scheduleAgentContinue).toHaveBeenCalledTimes(1);
+	});
+
+	it("discards the interrupted assistant while preserving trailing messages in discard mode (#20052)", async () => {
+		const { host, appendMessage, schedulePostPromptTask, scheduleAgentContinue } = makeHost();
+		const manager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "once",
+		});
+		expect(manager.addRule(makeRule("text"))).toBe(true);
+		const coordinator = new TtsrCoordinator(host, manager);
+		const messages = host.agent.state.messages;
+		appendMessage.mockImplementation(message => {
+			host.agent.state.messages.push(message);
+		});
+
+		const userPrompt = { role: "user", content: "hello", timestamp: 1 } as AgentMessage;
+		const interrupted = { ...assistantMessage(), timestamp: 2 };
+		messages.push(userPrompt, interrupted);
+
+		coordinator.onAssistantMessageStart();
+		expect(await coordinator.checkMessageUpdate(textDelta(interrupted, CONDITION))).toBe(true);
+
+		// A follow-up arrives before the post-prompt discard task runs.
+		const queuedFollowUp = {
+			role: "custom",
+			customType: "queued-follow-up",
+			content: "preserve me",
+			timestamp: 3,
+		} as AgentMessage;
+		messages.push(queuedFollowUp);
+
+		const task = schedulePostPromptTask.mock.calls[0]?.[0];
+		if (!task) throw new Error("Expected a scheduled retry task");
+		await task(new AbortController().signal);
+
+		const finalMessages = host.agent.state.messages;
+		expect(finalMessages).toHaveLength(3);
+		expect(finalMessages[0]).toBe(userPrompt);
+		expect(finalMessages[1]).toBe(queuedFollowUp);
+		expect(finalMessages[2]).toMatchObject({ role: "custom", customType: "ttsr-injection" });
+		expect(scheduleAgentContinue).toHaveBeenCalledTimes(1);
+	});
+
+	it("discards the interrupted assistant and its owned tool results while preserving trailing messages (#20052)", async () => {
+		const { host, appendMessage, schedulePostPromptTask, scheduleAgentContinue } = makeHost();
+		const manager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "once",
+		});
+		expect(manager.addRule(makeRule("text"))).toBe(true);
+		const coordinator = new TtsrCoordinator(host, manager);
+		const messages = host.agent.state.messages;
+		appendMessage.mockImplementation(message => {
+			host.agent.state.messages.push(message);
+		});
+
+		const userPrompt = { role: "user", content: "run tool", timestamp: 1 } as AgentMessage;
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "call_abc",
+			name: "bash",
+			arguments: { command: "test" },
+		};
+		const interrupted = {
+			role: "assistant",
+			content: [toolCall],
+			timestamp: 2,
+		} as unknown as AgentMessage;
+		const syntheticToolResult = {
+			role: "toolResult",
+			toolCallId: "call_abc",
+			content: [{ type: "text", text: "aborted" }],
+			isError: true,
+		} as unknown as AgentMessage;
+		const queuedFollowUp = {
+			role: "custom",
+			customType: "queued-follow-up",
+			content: "preserve me too",
+			timestamp: 3,
+		} as AgentMessage;
+
+		messages.push(userPrompt, interrupted);
+
+		coordinator.onAssistantMessageStart();
+		expect(await coordinator.checkMessageUpdate(textDelta(interrupted, CONDITION))).toBe(true);
+
+		// During unwind, agent appends synthetic toolResult, followed by a follow-up.
+		messages.push(syntheticToolResult, queuedFollowUp);
+
+		const task = schedulePostPromptTask.mock.calls[0]?.[0];
+		if (!task) throw new Error("Expected a scheduled retry task");
+		await task(new AbortController().signal);
+
+		const finalMessages = host.agent.state.messages;
+		expect(finalMessages).toHaveLength(3);
+		expect(finalMessages[0]).toBe(userPrompt);
+		expect(finalMessages[1]).toBe(queuedFollowUp);
+		expect(finalMessages[2]).toMatchObject({ role: "custom", customType: "ttsr-injection" });
 		expect(scheduleAgentContinue).toHaveBeenCalledTimes(1);
 	});
 });
