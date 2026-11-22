@@ -956,9 +956,8 @@ export interface CreateAgentSessionOptions {
 	/** Task recursion depth (for subagent sessions). Default: 0 */
 	taskDepth?: number;
 	/**
-	 * Mark the session as a `/tan` fork. The wait tool then keeps steering the
-	 * fork to wait again while its assignment is blocked, and the fork's
-	 * context-switch notice states that policy.
+	 * Mark the session as a `/tan` fork: an idle wait then steers the fork to
+	 * wait again while its assignment is blocked.
 	 */
 	tanFork?: boolean;
 	/** Parent Hindsight state to alias for subagent memory tools. */

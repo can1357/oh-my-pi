@@ -144,7 +144,6 @@ export class TanCommandController {
 		// The copied prompt carries the parent's memory recall; the clone inherits it as delivered.
 		const parentMnemopiSessionState = session.getMnemopiSessionState?.();
 		const toolNames = session.getEnabledToolNames();
-		const waitTool = toolNames.includes("wait");
 		const activeToolNames = session.getActiveToolNames();
 		const mountedToolNames = session.getMountedToolCommandNames();
 		const modelRegistry = session.modelRegistry;
@@ -292,9 +291,13 @@ export class TanCommandController {
 						clone.setTodoPhases([]);
 						cloneManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: [] });
 						const injectContextSwitch = () => {
-							clone?.agent.appendMessage({
+							const fork = clone;
+							if (!fork) return;
+							fork.agent.appendMessage({
 								role: "developer",
-								content: prompt.render(tanContextSwitchPrompt, { waitTool }),
+								content: prompt.render(tanContextSwitchPrompt, {
+									waitTool: fork.getEnabledToolNames().includes("wait"),
+								}),
 								attribution: "agent",
 								timestamp: Date.now(),
 							});
