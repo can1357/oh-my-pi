@@ -122,6 +122,7 @@ import {
 	getLatestCompactionEntry,
 	getOpenAiRemoteCompactionPayload,
 	getReadableCompactionEntry,
+	isTranscriptEntry,
 } from "./session-context";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { HandoffGenerationOptions } from "./session-handoff";
@@ -1903,6 +1904,36 @@ export class SessionMaintenance {
 	}
 
 	/**
+	 * Whether the branch changed since `sourceLeafId` in a way that invalidates
+	 * the prepared compaction: the source leaf left the branch entirely, or an
+	 * entry carrying model-facing content (transcript message, branch summary,
+	 * another compaction, a reset boundary) was appended after it.
+	 *
+	 * Pure journal appends — goal usage bookkeeping (`mode_change`), notes,
+	 * tier/thinking changes — legitimately race the compaction window:
+	 * agent-core dispatches event handlers fire-and-forget, so a
+	 * `tool_execution_end` handler may still be appending while the rollover
+	 * awaits its hooks (#20063). Aborting the rollover on them silently
+	 * dropped explicit `new_context` requests with no trace; they are not
+	 * history rewrites, so the prepared boundary stays valid against the
+	 * new leaf.
+	 */
+	#branchRewrittenSince(sourceLeafId: string | undefined): boolean {
+		const branch = this.#host.sessionManager.getBranch();
+		const start = sourceLeafId ? branch.findIndex(entry => entry.id === sourceLeafId) + 1 : branch.length;
+		if (sourceLeafId && start === 0) return true;
+		return branch
+			.slice(start)
+			.some(
+				entry =>
+					isTranscriptEntry(entry) ||
+					entry.type === "branch_summary" ||
+					entry.type === "compaction" ||
+					entry.type === "reset_boundary",
+			);
+	}
+
+	/**
 	 * Commit a notebook-backed boundary without generating, imaging, or otherwise
 	 * rewriting the canonical transcript. Explicit compact modes and focused
 	 * manual compactions deliberately bypass this path.
@@ -1941,7 +1972,7 @@ export class SessionMaintenance {
 			signal.aborted ||
 			!this.#usesExperimentalContextManagement() ||
 			this.#host.sessionId() !== sourceSessionId ||
-			this.#host.sessionManager.getBranch().at(-1)?.id !== sourceLeafId ||
+			this.#branchRewrittenSince(sourceLeafId) ||
 			(this.#model && `${this.#model.provider}/${this.#model.id}` !== sourceModel)
 		) {
 			throw new CompactionCancelledError(undefined, { cause: signal.reason });
@@ -1951,7 +1982,7 @@ export class SessionMaintenance {
 			signal.aborted ||
 			!this.#usesExperimentalContextManagement() ||
 			this.#host.sessionId() !== sourceSessionId ||
-			this.#host.sessionManager.getBranch().at(-1)?.id !== sourceLeafId ||
+			this.#branchRewrittenSince(sourceLeafId) ||
 			(this.#model && `${this.#model.provider}/${this.#model.id}` !== sourceModel)
 		) {
 			throw new CompactionCancelledError(undefined, { cause: signal.reason });
@@ -2095,11 +2126,12 @@ export class SessionMaintenance {
 			}
 
 			const prepared = await this.#prepareCompactionFromHooks(preparation, hookCompaction, controller.signal);
+			const branchRewritten = this.#branchRewrittenSince(sourceLeafId);
 			if (
 				controller.signal.aborted ||
 				!this.#usesExperimentalContextManagement() ||
 				this.#host.sessionId() !== sourceSessionId ||
-				this.#host.sessionManager.getBranch().at(-1)?.id !== sourceLeafId ||
+				branchRewritten ||
 				(this.#model && `${this.#model.provider}/${this.#model.id}` !== sourceModel)
 			) {
 				await this.#emitLifecycleEvent(
@@ -2113,6 +2145,22 @@ export class SessionMaintenance {
 					},
 					detachPostCommit,
 				);
+				// An explicit `new_context` request dropped by a history rewrite
+				// must not look like it succeeded: the tool already answered
+				// "New context window requested." (#20063).
+				if (
+					!controller.signal.aborted &&
+					this.#usesExperimentalContextManagement() &&
+					this.#host.sessionId() === sourceSessionId &&
+					branchRewritten &&
+					options.explicitNewContextRequest === true
+				) {
+					this.#host.emitNotice(
+						"warning",
+						"The requested context rollover was skipped because the session branch changed while it was prepared; run /compact or ask again for a fresh window.",
+						"compaction",
+					);
+				}
 				return COMPACTION_CHECK_NONE;
 			}
 			const result =
