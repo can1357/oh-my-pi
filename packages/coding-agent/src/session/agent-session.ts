@@ -4921,6 +4921,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// not progress an agent could mark done.
 		if (event.type === "message_end" && event.message.role === "toolResult") {
 			this.#todo.onToolResult(event.message.toolName, event.message.isError);
+			if (!event.message.isError) this.#recovery.onSuccessfulToolResult();
 		}
 		// Track the settled assistant turn synchronously as well: agent_end
 		// maintenance reads `#lastAssistantMessage`, and when a turn's events all

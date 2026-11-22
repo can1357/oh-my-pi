@@ -1290,14 +1290,22 @@ const streamOpenAIResponsesOnce = (
 						);
 					}
 
-					// OpenRouter's Responses translation can hide a native failure behind
-					// "completed". Consult metadata only for truly empty stops, never
-					// for replayable reasoning or provider-hosted tool progress.
+					// OpenRouter can mark a native failure "completed" with only an
+					// encrypted, zero-token reasoning item. Keep probing bare empty
+					// stops regardless of billed usage; encrypted-only stops need zero
+					// output tokens and no replayable content or hosted tool progress.
 					if (
 						model.compat.isOpenRouterHost &&
 						output.stopReason === "stop" &&
-						output.content.length === 0 &&
-						nativeOutputItems.length === 0 &&
+						((output.content.length === 0 && nativeOutputItems.length === 0) ||
+							(output.usage.output === 0 &&
+								(output.usage.reasoningTokens ?? 0) === 0 &&
+								output.content.every(
+									block =>
+										(block.type === "text" && !block.text.trim()) ||
+										(block.type === "thinking" && !block.thinking.trim()),
+								) &&
+								nativeOutputItems.every(item => item.type === "reasoning"))) &&
 						!output.stopDetails &&
 						output.responseId
 					) {

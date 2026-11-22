@@ -692,6 +692,11 @@ export class TurnRecovery {
 		return this.#handleEmptyAssistantStop(message);
 	}
 
+	/** Starts a fresh unexpected-stop retry budget after a completed tool advances the run. */
+	onSuccessfulToolResult(): void {
+		this.#unexpectedStopRetryCount = 0;
+	}
+
 	/** Classifies suspicious terminal stops and schedules bounded recovery. */
 	handleUnexpectedAssistantStop(message: AssistantMessage): Promise<boolean> {
 		return this.#handleUnexpectedAssistantStop(message);

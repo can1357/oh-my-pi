@@ -172,6 +172,36 @@ describe("OpenRouter native generation failures", () => {
 		expect(result.usage.output).toBe(outputTokens);
 	});
 
+	it("surfaces malformed generation behind zero-token encrypted reasoning without visible output", async () => {
+		const { fetchImpl, requests } = createFetch(
+			{ usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 } },
+			generation("MALFORMED_RESPONSE"),
+			[
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { type: "reasoning", id: "rs_1", summary: [] },
+				},
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: {
+						type: "reasoning",
+						id: "rs_1",
+						summary: [],
+						encrypted_content: "opaque-signature",
+						format: "google-gemini-v1",
+					},
+				},
+			],
+		);
+		const result = await streamOpenAIResponses(model, context, { apiKey: "test-key", fetch: fetchImpl }).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("native_finish_reason: MALFORMED_RESPONSE");
+		expect(requests).toEqual([`POST ${model.baseUrl}/responses`, `GET ${model.baseUrl}/generation?id=${responseId}`]);
+	});
+
 	it("does not look up metadata for signed reasoning-only progress", async () => {
 		const { fetchImpl, requests } = createFetch({}, generation("MALFORMED_RESPONSE"), [
 			{

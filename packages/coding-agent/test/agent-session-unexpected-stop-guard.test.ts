@@ -363,6 +363,29 @@ describe("AgentSession unexpected stop guard", () => {
 		expect(warnSpy).toHaveBeenCalled();
 	});
 
+	it("restarts the unexpected-stop budget after a successful tool result", async () => {
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const { session, mock } = await createHarness(
+			[
+				thinkingOnlyStop("first burst 1"),
+				thinkingOnlyStop("first burst 2"),
+				recordCall("progress", "call-progress"),
+				thinkingOnlyStop("second burst 1"),
+				thinkingOnlyStop("second burst 2"),
+				{ content: ["completed"], stopReason: "aborted" },
+			],
+			{ "features.unexpectedStopDetection": "smart" },
+		);
+
+		await session.prompt("record progress and continue");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(6);
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(4);
+		expect(assistantText(session.agent.state.messages)).toContain("completed");
+		expect(warnSpy).not.toHaveBeenCalled();
+	});
+
 	it("does not classify a message that contains a tool call", async () => {
 		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(false);
 		const { session, mock } = await createHarness(
