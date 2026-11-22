@@ -1043,7 +1043,7 @@ export class SelectorController {
 								const session = this.ctx.session;
 								const availableModels =
 									session.scopedModels.length > 0
-										? scopeAllowList(session.scopedModels, session.modelRegistry.getAvailable())
+										? scopeAllowList(session.scopedModels)
 										: session.getAvailableModels();
 								const resolved = resolveModelRoleValue(fallbackRoleValue, availableModels, {
 									settings: this.ctx.settings,

@@ -1,7 +1,7 @@
 import type { Agent, AgentMessage, AgentToolResult, AgentTurnEndContext } from "@oh-my-pi/pi-agent-core";
 import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import { modelsAreEqual, routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { getUpstreamPin, modelsAreEqual, routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { AutoPrewalkDecision } from "../auto-prewalk/classifier";
 import { cfgOffline } from "../config/auxiliary-model-policy";
@@ -161,14 +161,15 @@ export class PrewalkCoordinator {
 		// one that starts elsewhere (an explicit startup model, a fallback) keeps the arm.
 		const target = prewalk?.target;
 		const current = host.model();
-		// Legacy handoff entries omitted the upstream route.
 		const spent =
 			handoff?.role === PREWALK_MODEL_CHANGE_ROLE &&
 			target !== undefined &&
-			current !== undefined &&
-			modelsAreEqual(current, target) &&
-			(handoff.model === formatModelStringWithRouting(target) || handoff.model === formatModelString(target)) &&
-			formatModelStringWithRouting(current) === handoff.model;
+			((handoff.model === formatModelStringWithRouting(target) && routedModelsAreEqual(current, target)) ||
+				// Legacy handoff entries omitted the upstream route, so they restore unpinned.
+				(handoff.model === formatModelString(target) &&
+					current !== undefined &&
+					modelsAreEqual(current, target) &&
+					getUpstreamPin(current) === undefined));
 		this.#prewalk = spent ? undefined : prewalk;
 		this.#planYolo = options.planYolo;
 		this.#autoSuppressed = options.suppressAutoPrewalk === true;

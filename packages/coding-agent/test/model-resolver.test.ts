@@ -655,52 +655,6 @@ describe("parseModelPattern", () => {
 		});
 	});
 
-	describe("scoped wire variants", () => {
-		const base = { ...mockOpenRouterModels[2], id: "qwen/qwen3-coder" };
-		const paid = buildModel({
-			...base,
-			name: `${base.id}:free`,
-			api: "openai-completions",
-			compat: { openRouterRouting: { only: ["sambanova"], order: ["sambanova"] } },
-		});
-		const free = { ...paid, id: `${paid.id}:free` };
-		const roster = [paid, free];
-		const scope = (...models: Model<Api>[]) =>
-			scopeAllowList(
-				models.map(model => ({ model })),
-				roster,
-			);
-
-		test.each(["qwen/qwen3-coder:free", "qwen/qwen3-coder:FREE:high", "openrouter/qwen/qwen3-coder:nitro"])(
-			"rejects an unlisted wire variant %s instead of running or cloning the scoped paid model",
-			selector => {
-				expect(parseModelPattern(selector, scope(paid)).model).toBeUndefined();
-			},
-		);
-
-		test("tries the next pattern when the requested wire variant is outside the scope", () => {
-			const result = resolveModelRoleValue(`${free.id},${paid.id}@sambanova:high`, scope(paid));
-			expect(result.matchedPatternIndex).toBe(1);
-			expect(result.model && formatModelStringWithRouting(result.model)).toBe(`openrouter/${paid.id}@sambanova`);
-			expect(result.thinkingLevel).toBe(Effort.High);
-		});
-
-		test("keeps the scoped literal variant and pin when applying an effort", () => {
-			const result = parseModelPattern("qwen3-coder:FREE:high", scope(paid, free));
-			expect(result.model && formatModelStringWithRouting(result.model)).toBe(`openrouter/${free.id}@sambanova`);
-			expect(result.thinkingLevel).toBe(Effort.High);
-		});
-
-		test("drops malformed effort only when it keeps the requested wire variant", () => {
-			for (const prefix of ["", "openrouter/"]) {
-				const result = parseModelPattern(`${prefix}${free.id}:typo`, scope(free));
-				expect(result.model?.id).toBe(free.id);
-				expect(result.warning).toContain("Invalid thinking level");
-			}
-			expect(parseModelPattern(`${paid.id}:typo`, scope(free)).model).toBeUndefined();
-		});
-	});
-
 	describe("OpenRouter models with colons in IDs", () => {
 		test("qwen3-coder:exacto matches the model with undefined thinking level", () => {
 			const result = parseModelPattern("qwen/qwen3-coder:exacto", allModels);
@@ -2935,6 +2889,13 @@ describe("provider routing selector (@upstream)", () => {
 		expect(openRouterOnly(result.model)).toEqual(["cerebras"]);
 	});
 
+	test("resolveCliModel keeps a role alias's upstream pin in the selector", () => {
+		const registry = { getAll: () => allModels, getAvailable: () => allModels };
+		const settings = Settings.isolated({ modelRoles: { smol: "openrouter/z-ai/glm-4.7@cerebras" } });
+		const result = resolveCliModel({ cliModel: "@smol", modelRegistry: registry, settings });
+		expect(result.selector).toBe("openrouter/z-ai/glm-4.7@cerebras");
+	});
+
 	test("resolveCliModel routes an aggregator id the first-party provider also bundles", () => {
 		// `google/gemini-2.5-pro` is provider-locked to the bundled `google` provider when
 		// matched as a raw id; the explicit `openrouter/` prefix must unlock it so the
@@ -3012,7 +2973,7 @@ describe("filterAvailableModelsByEnabledPatterns", () => {
 		const registry = { getAvailable: () => [model] };
 		const scoped = await resolveModelScope(patterns, registry);
 		for (const allowed of [
-			scopeAllowList(scoped, registry.getAvailable()),
+			scopeAllowList(scoped),
 			filterAvailableModelsByEnabledPatterns(registry.getAvailable(), patterns),
 		]) {
 			expect([...allowed]).toEqual([model]);
@@ -3058,15 +3019,6 @@ describe("filterAvailableModelsByEnabledPatterns", () => {
 		expect(resolved.matchedPatternIndex).toBe(1);
 	});
 
-	test("does not synthesize an unlisted wire variant from a scoped base model", () => {
-		const base = mockOpenRouterModels[2];
-		const resolved = resolveModelRoleValue(
-			`openrouter/${base.id}:free@cerebras`,
-			scopeAllowList([{ model: base }], [base]),
-		);
-		expect(resolved.model).toBeUndefined();
-	});
-
 	test("prefers an allowed exact pin over the bare model with the same ID", () => {
 		const bare = mockOpenRouterModels[2];
 		const selector = `openrouter/${bare.id}`;
@@ -3075,12 +3027,45 @@ describe("filterAvailableModelsByEnabledPatterns", () => {
 			api: "openai-completions",
 			compat: { openRouterRouting: { only: ["cerebras"], order: ["cerebras"] } },
 		});
-		const allowed = scopeAllowList([{ model: bare }, { model: pinned }], [bare, pinned]);
+		const allowed = scopeAllowList([{ model: bare }, { model: pinned }]);
 		const exactPin = resolveModelRoleValue(`${selector}@cerebras:high`, allowed);
 		expect(exactPin.model?.compat).toMatchObject({ openRouterRouting: { only: ["cerebras"], order: ["cerebras"] } });
 		expect(exactPin.thinkingLevel).toBe(Effort.High);
 		const fromBare = resolveModelRoleValue(`${selector}@sambanova`, allowed);
 		expect(fromBare.model && formatModelStringWithRouting(fromBare.model)).toBe(`${selector}@sambanova`);
+	});
+
+	test("an allow-list listing a model unpinned and pinned resolves each selector to its own route", () => {
+		const bare = mockOpenRouterModels[2];
+		const selector = `openrouter/${bare.id}`;
+		const scope = filterAvailableModelsByEnabledPatterns([bare], [`${selector}@cerebras`, selector]);
+		const route = (pattern: string) => {
+			const { model } = resolveModelRoleValue(pattern, scope);
+			return model && formatModelStringWithRouting(model);
+		};
+		expect(route(selector)).toBe(selector);
+		expect(route(bare.id)).toBe(selector);
+		expect(route(`${selector}@cerebras`)).toBe(`${selector}@cerebras`);
+		expect(route(`${selector}@groq`)).toBe(`${selector}@groq`);
+	});
+
+	test("an allow-list keeps a literal `@` ID whose selector carries an invalid suffix", () => {
+		const vertexModel = buildModel({
+			id: "claude-opus-4-8@default",
+			name: "Claude Opus 4.8",
+			api: "anthropic-messages",
+			provider: "google-vertex",
+			baseUrl: "https://us-aiplatform.googleapis.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+			contextWindow: 200000,
+			maxTokens: 32000,
+		});
+		const scope = filterAvailableModelsByEnabledPatterns([vertexModel], ["google-vertex/claude-opus-4-8@default"]);
+		const resolved = resolveModelRoleValue("google-vertex/claude-opus-4-8@default:bogus", scope);
+		expect(resolved.model?.id).toBe("claude-opus-4-8@default");
+		expect(resolved.warning).toContain('Invalid thinking level "bogus"');
 	});
 
 	test("an allow-list keeps its pin while the open catalog re-pins the same selector", () => {
@@ -3142,6 +3127,27 @@ describe("filterAvailableModelsByEnabledPatterns", () => {
 		expect(result[0].provider).toBe("amazon-bedrock");
 		expect(result[0].id).toBe(profileArn);
 		expect(result[0].reasoning).toBe(false);
+	});
+
+	test("a provider-wide scope still resolves an unlisted Bedrock inference profile", () => {
+		const scope = filterAvailableModelsByEnabledPatterns([createBedrockDefaultModel()], ["amazon-bedrock/*"]);
+		const profileArn = "arn:aws:bedrock:us-east-2:1234567890:application-inference-profile/company-opus-48";
+		expect(resolveModelRoleValue(`amazon-bedrock/${profileArn}`, scope).model?.id).toBe(profileArn);
+	});
+
+	test("a scope constrains pins but not OpenRouter wire variants", () => {
+		const bare = mockOpenRouterModels[2];
+		const selector = `openrouter/${bare.id}`;
+		const route = (scope: Model<Api>[], pattern: string) => {
+			const { model } = resolveModelRoleValue(pattern, scope);
+			return model && formatModelStringWithRouting(model);
+		};
+		const open = filterAvailableModelsByEnabledPatterns([bare], [selector]);
+		expect(route(open, `${selector}:free`)).toBe(`${selector}:free`);
+		expect(route(open, `${selector}:free@cerebras`)).toBe(`${selector}:free@cerebras`);
+		const pinned = filterAvailableModelsByEnabledPatterns([bare], [`${selector}@cerebras`]);
+		expect(route(pinned, `${selector}:free`)).toBe(`${selector}:free@cerebras`);
+		expect(route(pinned, `${selector}:free@sambanova`)).toBeUndefined();
 	});
 
 	test("resolveAllowedModels keeps synthetic Bedrock inference profile matches", async () => {

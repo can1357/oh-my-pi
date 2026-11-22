@@ -145,6 +145,7 @@ import {
 	resolveCliModel,
 	resolveSessionModelSelector,
 	sessionModelDiscoveryProviders,
+	withUpstreamPinOf,
 } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
@@ -13804,7 +13805,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const currentModel = this.model;
 			if (!currentModel || this.#isDisposed) return;
 			const found = this.#modelRegistry.find(currentModel.provider, currentModel.id);
-			const updated = found && this.#modelRegistry.fitContextWindow(found, this.settings);
+			const updated =
+				found && this.#modelRegistry.fitContextWindow(withUpstreamPinOf(found, currentModel), this.settings);
 			// Compare against the window bound before the refit so dependent state
 			// still reconciles once even though the refit already moved the row.
 			const baseline = previousModel && modelsAreEqual(previousModel, currentModel) ? previousModel : currentModel;
@@ -16818,9 +16820,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// Only silently re-metadata the startup-bound selector: bail if the user
 		// switched models while discovery was in flight.
 		const current = this.model;
-		if (!current || !modelsAreEqual(current, boundAtStartup)) return;
+		if (!current || !routedModelsAreEqual(current, boundAtStartup)) return;
 		const found = this.#modelRegistry.find(current.provider, current.id);
-		const refreshed = found && this.#modelRegistry.fitContextWindow(found, this.settings);
+		const refreshed = found && this.#modelRegistry.fitContextWindow(withUpstreamPinOf(found, current), this.settings);
 		if (!refreshed || refreshed.contextWindow === current.contextWindow) return;
 		this.agent.setModel(refreshed);
 		await this.#reconcileModelDependentState(refreshed);

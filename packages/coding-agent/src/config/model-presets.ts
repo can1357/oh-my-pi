@@ -212,9 +212,7 @@ export type ModelPresetSession = Pick<
 
 function presetCandidates(session: ModelPresetSession): Model[] {
 	const scoped = session.scopedModels;
-	return scoped.length > 0
-		? scopeAllowList(scoped, session.modelRegistry.getAvailable())
-		: session.getAvailableModels();
+	return scoped.length > 0 ? scopeAllowList(scoped) : session.getAvailableModels();
 }
 
 function errorMessage(error: unknown): string {

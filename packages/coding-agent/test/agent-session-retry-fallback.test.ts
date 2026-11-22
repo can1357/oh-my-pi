@@ -28,7 +28,7 @@ import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-model
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
-import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { formatModelStringWithRouting, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -8360,6 +8360,66 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe("deepseek-v4-tiered");
 		expect(session.model?.contextWindow).toBe(400_000);
 		expect(session.getContextUsage()?.contextWindow).toBe(400_000);
+	});
+
+	it("keeps an upstream pin when the post-discovery rebind refreshes the window", async () => {
+		authStorage.keys.setRuntime("openrouter", "openrouter-test-key");
+		const buildRoutedModel = (contextWindow: number, upstream?: string): Model<"openai-completions"> =>
+			buildModel({
+				id: "z-ai/glm-tiered",
+				name: "GLM Tiered",
+				api: "openai-completions",
+				provider: "openrouter",
+				baseUrl: "https://openrouter.ai/api/v1",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow,
+				maxTokens: 32_000,
+				...(upstream ? { compat: { openRouterRouting: { only: [upstream] } } } : {}),
+			});
+		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.json"));
+		// Discovery settles on the unpinned catalog row with a smaller window.
+		const { promise: discovered, resolve: settleDiscovery } = Promise.withResolvers<void>();
+		vi.spyOn(registry, "awaitInitialBackgroundRefresh").mockReturnValue(discovered);
+		vi.spyOn(registry, "find").mockReturnValue(buildRoutedModel(128_000));
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: buildRoutedModel(200_000, "cerebras"),
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: () => {
+				throw new Error("Not exercised");
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: registry,
+			rebindModelAfterDiscovery: true,
+		});
+
+		const { promise: modelChanged, resolve: resolveModelChanged } = Promise.withResolvers<void>();
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "model_changed") {
+				unsubscribe();
+				resolveModelChanged();
+			}
+		});
+		settleDiscovery();
+		await Promise.race([
+			modelChanged,
+			scheduler.wait(4_000).then(() => {
+				throw new Error("model_changed was not emitted after discovery settled");
+			}),
+		]);
+
+		expect(session.model?.contextWindow).toBe(128_000);
+		expect(session.model && formatModelStringWithRouting(session.model)).toBe("openrouter/z-ai/glm-tiered@cerebras");
 	});
 
 	it("warns on unknown or malformed model-selector chain keys at startup", () => {

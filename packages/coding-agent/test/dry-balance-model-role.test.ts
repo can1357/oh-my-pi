@@ -55,11 +55,10 @@ const openRouterModel = "openrouter/z-ai/glm-4.7";
 test.each([
 	["conflicting pin", [`${openRouterModel}@cerebras`], `${openRouterModel}@sambanova`, "acme/balance-model"],
 	["unrestricted pin", [], `${openRouterModel}@sambanova`, openRouterModel],
-	["excluded custom variant", [openRouterModel], `${openRouterModel}:customtier`, "acme/balance-model"],
 ] as const)("dry-balance resolves a %s with a legacy registry", async (_case, enabled, selector, expected) => {
 	const fallback = fakeModel("acme", "balance-model");
 	const routed = getBundledModel("openrouter", "z-ai/glm-4.7") as Model<Api>;
-	const models = [fallback, routed, { ...routed, id: `${routed.id}:customtier` }];
+	const models = [fallback, routed];
 	const registry: DryBalanceModelRegistry = {
 		authStorage: {
 			oauth: {

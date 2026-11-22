@@ -54,6 +54,7 @@ import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-select
 import {
 	disabledProviderIds,
 	expandRoleAlias,
+	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	resolveCliModel,
 	resolveConfiguredModelPatterns,
@@ -1597,7 +1598,7 @@ export async function buildSessionOptions(
 			// at, or the first cycle back into `default` overrides it.
 			activeSettings.overrideModelRoles({
 				default: formatModelSelectorValue(
-					resolved.selector ?? `${resolved.model.provider}/${resolved.model.id}`,
+					resolved.selector ?? formatModelStringWithRouting(resolved.model),
 					parsed.thinking ?? resolved.thinkingLevel,
 				),
 			});
@@ -1608,14 +1609,10 @@ export async function buildSessionOptions(
 	} else if (scopedModels.length > 0 && !restoringSession) {
 		const remembered = activeSettings.getModelRole("default");
 		if (remembered) {
-			const rememberedSpec = resolveModelRoleValue(
-				remembered,
-				scopeAllowList(scopedModels, modelRegistry.getAvailable()),
-				{
-					settings: activeSettings,
-					matchPreferences: modelMatchPreferences,
-				},
-			);
+			const rememberedSpec = resolveModelRoleValue(remembered, scopeAllowList(scopedModels), {
+				settings: activeSettings,
+				matchPreferences: modelMatchPreferences,
+			});
 			// The resolved model keeps its variant and pin; only an unresolved role falls back to an id match.
 			const rememberedModel =
 				rememberedSpec.model ??

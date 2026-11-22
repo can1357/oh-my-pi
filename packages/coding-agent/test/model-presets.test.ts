@@ -236,39 +236,6 @@ describe("model presets", () => {
 		expect(session.getAvailableModels().map(formatModelStringWithRouting)).toEqual([cerebras]);
 	});
 
-	it.each(["", "openrouter/"])("rejects a preset with an excluded registered variant (prefix %j)", async prefix => {
-		const id = "qwen/qwen3-coder";
-		const base = `openrouter/${id}@cerebras`;
-		const variant = `${prefix}${id}:extended`;
-		const model = getBundledModel("openrouter", id) ?? getBundledModel("openrouter", "z-ai/glm-4.7")!;
-		modelRegistry.registerProvider("openrouter", {
-			baseUrl: model.baseUrl,
-			apiKey: "test-key",
-			api: "openai-completions",
-			models: [id, `${id}:extended`].map(id => ({ ...model, id, contextWindow: 32_000, maxTokens: 1_024 })),
-		});
-		try {
-			const settings = Settings.isolated({ enabledModels: [base], defaultThinkingLevel: Effort.Low });
-			settings.setModelRole("default", base);
-			cfgModelPresets.setEntry(settings, "variant", {
-				modelRoles: { default: variant },
-				defaultThinkingLevel: Effort.High,
-			});
-			const session = createSession(settings);
-			const available = session.getAvailableModels();
-			expect(available.map(formatModelStringWithRouting)).toEqual([base]);
-			expect(modelRegistry.getProviderModels("openrouter").some(model => model.id === `${id}:extended`)).toBe(true);
-			await session.setModel(available[0]!);
-
-			expect((await applyModelPreset(settings, session, "variant")).kind).toBe("unavailable");
-			expect(settings.getModelRoles()).toEqual({ default: base });
-			expect(cfgDefaultThinkingLevel.get(settings)).toBe(Effort.Low);
-			expect(session.model && formatModelStringWithRouting(session.model)).toBe(base);
-		} finally {
-			modelRegistry.unregisterProvider("openrouter");
-		}
-	});
-
 	it("reports a failed live switch instead of success", async () => {
 		const settings = Settings.isolated();
 		settings.setModelRole("default", SONNET);

@@ -11,6 +11,7 @@
 
 - Fixed TTSR discard mode dropping follow-up messages queued while an interrupted response was unwinding ([#20131](https://github.com/can1357/oh-my-pi/pull/20131) by [@harshaygadekar](https://github.com/harshaygadekar))
 - Fixed automatic compaction repeating a handoff request too large for the model after a cross-provider switch; it now moves on to the next compaction method ([#20126](https://github.com/can1357/oh-my-pi/pull/20126) by [@harshaygadekar](https://github.com/harshaygadekar))
+- Upstream pins (`openrouter/z-ai/glm-4.7@cerebras`) survive model switches, cycling, session restore, prewalk, plan mode, and model metadata refreshes; `enabledModels` and `--models` keep two pins of one model distinct and never re-pin a listed route ([#19664](https://github.com/can1357/oh-my-pi/pull/19664) by [@taibenvenuti](https://github.com/taibenvenuti)).
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))
 - Fixed AST edits and searches across several targets duplicating explicit `local://` file names (such as `local://example.ts/example.ts`) or replacing symlinked file names in previews, search results, and the edit journal ([#20025](https://github.com/can1357/oh-my-pi/pull/20025) by [@eggpeat](https://github.com/eggpeat))
 - Fixed Claude-format plugin agents losing tools whose Claude Code names match no OMP built-in: frontmatter `tools:` now translates `WebFetch`, `WebSearch`, `TodoWrite`, `AskUserQuestion`, `MultiEdit`, `Agent`, and the rest to their OMP equivalents, and `Agent` infers unrestricted spawns like `Task` ([#19887](https://github.com/can1357/oh-my-pi/pull/19887) by [@joseotaviorf](https://github.com/joseotaviorf))
@@ -117,7 +118,6 @@
 
 ### Fixed
 
-- Model switches, cycling, session restore, and prewalk preserve upstream pins. Cycling keeps the active pin even when a literal ID looks like the same selector. Presets and startup defaults stay within the allowed model variant and route ([#19664](https://github.com/can1357/oh-my-pi/pull/19664) by [@taibenvenuti](https://github.com/taibenvenuti)).
 - Fixed PTY command transcripts sometimes gaining a blank line where a `\r\n` line ending was split across two terminal reads.
 - Fixed the shell's `dirname` builtin on Windows ignoring `\` separators and drive prefixes (`dirname 'C:\a\b'` printed `.`), which broke scripts like VS Code's `code` launcher (`./Code.exe: No such file or directory`)
 - Fixed bash output minimizing being skipped on Windows when a command is named by a `\` path or with `.exe` (`"C:\Program Files\Git\cmd\git.exe" status`, `git.exe log`)
