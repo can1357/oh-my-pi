@@ -292,20 +292,25 @@ function advertisesSynchronizedOutput(termFeatures: string | undefined): boolean
  * Policy (highest precedence first):
  *   1. Explicit user override (`PI_NO_SYNC_OUTPUT`/`PI_TUI_SYNC_OUTPUT=0` off,
  *      `PI_FORCE_SYNC_OUTPUT=1`/`PI_TUI_SYNC_OUTPUT=1` on).
- *   2. Positive `TERM_FEATURES` advertisement (`Sy`) — survives SSH/mux wrapping.
- *   3. Windows Terminal (1.24+) via `WT_SESSION`, on native win32 and the
- *      WSL/SSH-fronted host alike.
- *   4. A multiplexer session whose pane VTE honors DEC 2026 regardless of its
+ *   2. A multiplexer session whose pane VTE honors DEC 2026 regardless of its
  *      DECRQM reply (Herdr's libghostty pane). Such a multiplexer still owns
  *      the grid, so leaked kitty/ghostty identities cannot enable placeholder
  *      graphics, but leaving sync off lets CUP-diff paints and split write(2)
  *      chunks composite as dirty-row patches — the live viewport tears, with
  *      the top frozen while only the bottom refreshes.
- *   5. Known direct terminals with confirmed support. SSH does *not* disable —
+ *   3. Every other grid-owning multiplexer starts off. Its pane, not the outer
+ *      terminal, decides whether a frame presents atomically, so outer-terminal
+ *      hints that leak into the pane environment (`TERM_FEATURES`, `WT_SESSION`,
+ *      an inner terminal id) say nothing about it: tmux before 3.7 ignores
+ *      DEC 2026 and forwards each sync-only repaint as it arrives (#20091).
+ *   4. Positive `TERM_FEATURES` advertisement (`Sy`) — survives SSH.
+ *   5. Windows Terminal (1.24+) via `WT_SESSION`, on native win32 and the
+ *      WSL/SSH-fronted host alike.
+ *   6. Known direct terminals with confirmed support. SSH does *not* disable —
  *      DEC 2026 passes through SSH when the outer terminal honors it.
- *   6. Everything else starts off, including risky multiplexers; the runtime
- *      DECRQM probe upgrades any of them when the terminal actually reports
- *      `?2026` supported (current zellij, tmux master, foot, contour, mintty…).
+ *   7. Everything else starts off. The runtime DECRQM probe upgrades any
+ *      terminal or multiplexer that reports `?2026` supported (current zellij,
+ *      tmux 3.7+, foot, contour, mintty…).
  */
 export function shouldEnableSynchronizedOutputByDefault(
 	env: NodeJS.ProcessEnv = Bun.env,
@@ -314,17 +319,11 @@ export function shouldEnableSynchronizedOutputByDefault(
 	const override = synchronizedOutputUserOverride(env);
 	if (override !== null) return override;
 
+	if (terminalMultiplexerSessions(env).some(multiplexer => multiplexer.honorsSynchronizedOutput)) return true;
+	if (isInsideTerminalMultiplexer(env)) return false;
+
 	if (advertisesSynchronizedOutput(env.TERM_FEATURES)) return true;
 	if (env.WT_SESSION && (!env.TERM_PROGRAM || env.TERM_PROGRAM.toLowerCase() === "windows_terminal")) return true;
-	if (terminalMultiplexerSessions(env).some(multiplexer => multiplexer.honorsSynchronizedOutput)) return true;
-
-	// Risky multiplexers start off even when an inner terminal id leaks through:
-	// older tmux/screen synchronized-output handling is flaky and a mux may not
-	// pass DEC 2026 to the outer host. The DECRQM probe re-enables sync when the
-	// mux reports `?2026` supported.
-	if (isInsideTerminalMultiplexer(env)) {
-		return false;
-	}
 
 	switch (terminalId) {
 		case "kitty":
