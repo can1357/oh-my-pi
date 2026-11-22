@@ -3604,7 +3604,10 @@ fn report_pointer(
 			|| visit.happened(),
 		)
 	};
-	let prime = || prime_reports(source, pid, wid, window, entry_front, visit);
+	// A failed primer is sent past unprimed; the tap's first check then reports
+	// nothing sent, which `reporting_partial` corrects if a key went out.
+	let prime =
+		|| prime_reports(source, pid, wid, window, entry_front, visit).inspect_err(|_| checks.set(0));
 	match event {
 		PointerEvent::Click { x, y, button: MouseButton::Left, count, .. } => {
 			primed(awaiting_primer, (pid, wid), before_post, prime, || {
@@ -9080,6 +9083,8 @@ mod tests {
 			)
 		});
 		assert_eq!(result.unwrap_err().code, ErrorCode::Cancelled);
+		// The primer ran, so the next call is not primed again.
+		assert!(!awaiting.contains(&(7, 42)));
 	}
 
 	#[test]
