@@ -191,8 +191,9 @@ switch (Bun.env.PROBE_SCENARIO) {
 	case "refused": {
 		const timers = holdReconnects();
 		const panel = await openPanel();
-		// The host exits without a reason, then the browser refuses to start it twice, then a host links.
-		host().hostExits();
+		// A linked host exits (Chrome's reason is no refusal), then the browser refuses to start it twice, then a host
+		// links.
+		host().hostExits("Native host has exited.");
 		await settle();
 		for (let refusal = 0; refusal < 2; refusal++) {
 			timers.at(-1)?.run();
