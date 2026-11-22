@@ -668,6 +668,8 @@ describe("getRepoRoot", () => {
 		// `repo/.git` is bare and the work tree lives in `repo/.worktrees/main`.
 		async function createBareContainer(): Promise<{ container: string; worktree: string }> {
 			const source = await createGitRepo();
+			await runGit(source, ["config", "user.email", "test@example.com"]);
+			await runGit(source, ["config", "user.name", "Test User"]);
 			await runGit(source, ["commit", "-q", "--allow-empty", "-m", "init"]);
 			const container = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bare-container-"));
 			tempDirs.push(container);
