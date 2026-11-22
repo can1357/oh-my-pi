@@ -77,9 +77,8 @@
 - Whole-file changes in selective commits (binary, non-UTF-8, or over 4 MiB) now commit the content captured when the draft was built, instead of whatever another process left in the worktree by commit time ([#19392](https://github.com/can1357/oh-my-pi/pull/19392) by [@eggpeat](https://github.com/eggpeat))
 
 - Fixed `read` line selectors on `xd://` docs (`xd://eval/browser:1-200`) failing with `Unknown topic`; `write` now rejects a selector on an `xd://` device URL instead of treating it as part of the device name
-### Fixed
+- Fixed sessions started from a collab peer's prompt never getting an automatic title; title reviews and the unexpected-stop judge now read collab prompts as operator requests ([#19365](https://github.com/can1357/oh-my-pi/pull/19365) by [@DaddyMonster](https://github.com/DaddyMonster))
 
-- Automatic session titles now include operator-attributed `collab-prompt` messages, so sessions started through a collab guest receive titles and later title reviews use those prompts as user context. The unexpected-stop judge also uses collab prompts as the latest operator request.
 ## [19.1.0] - 2026-11-21
 
 ### Breaking Changes
