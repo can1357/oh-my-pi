@@ -34,7 +34,12 @@ import {
 } from "../native/node";
 import { Memo } from "../native/memo";
 
-// OSC 133 shell integration: marks prompt zones for terminal multiplexers.
+// OSC 133 shell integration: marks each user message as a finished command.
+//
+// `133;A` + `133;B` open the bubble, so the prompt is empty and the message
+// sits in the B..C command span that terminals list, copy, and search as
+// "the command" (#20123). `133;C` + `133;D;0` close it at the end of the last
+// row.
 //
 // The zone must be *closed* within the same render. `133;B` sets a sticky
 // cursor semantic of `.input` in Ghostty (and Ghostty-derived terminals such
@@ -43,18 +48,10 @@ import { Memo } from "../native/memo";
 // cell as `.input`. Combined with `cursor-click-to-move = true` (Ghostty's
 // default) that turns every left-click inside the pane into a burst of
 // synthesized arrow keys on omp's pty, slamming the editor caret to column 0
-// (#8030, #6115).
-//
-// `133;C` is therefore emitted immediately followed by `133;D;0` at the end of
-// the bubble. That clears the input state without reintroducing the grouping
-// problem the marker was originally omitted to avoid: the command zone opens
-// and finishes inside this component, so later assistant/tool output can never
-// be grouped under the first submitted prompt.
-const OSC133_ZONE_START = "\x1b]133;A\x07";
-const OSC133_ZONE_END = "\x1b]133;B\x07";
-const OSC133_COMMAND_START = "\x1b]133;C\x07";
-const OSC133_COMMAND_DONE = "\x1b]133;D;0\x07";
-const OSC133_ZONE_CLOSE = OSC133_ZONE_END + OSC133_COMMAND_START + OSC133_COMMAND_DONE;
+// (#8030, #6115). Finishing the command inside this component also keeps later
+// assistant/tool output from being grouped under the submitted prompt.
+const OSC133_ZONE_OPEN = "\x1b]133;A\x07\x1b]133;B\x07";
+const OSC133_ZONE_CLOSE = "\x1b]133;C\x07\x1b]133;D;0\x07";
 
 let promptZonesEnabled = true;
 
@@ -380,7 +377,7 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 		const wrapped = lines.slice();
 		if (this.#reaction !== undefined || this.#liveSteered) wrapped[0] = this.#badgeRow(width);
 		if (promptZonesEnabled) {
-			wrapped[0] = OSC133_ZONE_START + wrapped[0];
+			wrapped[0] = OSC133_ZONE_OPEN + wrapped[0];
 			wrapped[wrapped.length - 1] = wrapped[wrapped.length - 1] + OSC133_ZONE_CLOSE;
 		}
 		this.#zoneSource = lines;

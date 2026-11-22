@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
+- Fixed terminals that list, copy, or search shell commands (tuios scrollback browser, OSC 133 command history) finding an empty command for each user message; the message now sits between `133;B` and `133;C` ([#20123](https://github.com/can1357/oh-my-pi/issues/20123))
 
 ## [19.1.0] - 2026-11-21
 

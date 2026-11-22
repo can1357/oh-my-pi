@@ -62,30 +62,23 @@ describe("UserMessageComponent magic-keyword highlighting", () => {
 		expect(raw).toContain("orchestrate");
 	});
 
-	it("closes the OSC 133 prompt zone and leaves no command zone open", () => {
+	it("puts the message in the OSC 133 command span and closes the zone in the same render", () => {
 		const raw = render("first line\nsecond line");
-		expect(raw).toContain("\x1b]133;A\x07");
-		expect(raw).toContain("\x1b]133;B\x07");
-		// #8030: the command-start marker is required. Terminals latch a sticky
-		// `.input` cursor semantic on 133;B that only 133;C clears; without it every
-		// later cell stays tagged as prompt input and click-to-move injects arrow
-		// keys into the pty.
-		expect(raw).toContain("\x1b]133;C\x07");
-		// ...but the zone is closed inside the same render, so terminals still cannot
-		// group later assistant/tool output under the submitted prompt.
-		expect(raw).toContain("\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07");
-		expect(raw.endsWith("\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07")).toBe(true);
-		// Exactly one balanced command zone per bubble.
-		expect(countOccurrences(raw, "\x1b]133;C\x07")).toBe(1);
-		expect(countOccurrences(raw, "\x1b]133;D;0\x07")).toBe(1);
-	});
-
-	it("closes the OSC 133 command zone for a single-line message too", () => {
-		const raw = render("only line");
-		expect(raw).toContain("\x1b]133;A\x07");
-		expect(raw.endsWith("\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07")).toBe(true);
-		expect(countOccurrences(raw, "\x1b]133;C\x07")).toBe(1);
-		expect(countOccurrences(raw, "\x1b]133;D;0\x07")).toBe(1);
+		// #20123: the prompt (A..B) is empty and the message is the command (B..C),
+		// so terminals that list or copy "the command" find the message.
+		expect(raw.startsWith("\x1b]133;A\x07\x1b]133;B\x07")).toBe(true);
+		const command = raw.slice(raw.indexOf("\x1b]133;B\x07"), raw.indexOf("\x1b]133;C\x07"));
+		expect(Bun.stripANSI(command)).toContain("first line");
+		expect(Bun.stripANSI(command)).toContain("second line");
+		// #8030: Terminals latch a sticky `.input` cursor semantic on 133;B that
+		// only 133;C clears; without it every later cell stays tagged as prompt
+		// input and click-to-move injects arrow keys into the pty. The command also
+		// finishes inside the bubble, so later assistant/tool output is never
+		// grouped under the submitted prompt.
+		expect(raw.endsWith("\x1b]133;C\x07\x1b]133;D;0\x07")).toBe(true);
+		for (const mark of ["A", "B", "C", "D;0"]) {
+			expect(countOccurrences(raw, `\x1b]133;${mark}\x07`)).toBe(1);
+		}
 	});
 
 	it("collapses image markers to identity-colored chip tokens in the rendered bubble", () => {
