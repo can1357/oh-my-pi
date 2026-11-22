@@ -30,7 +30,7 @@ import type { Settings } from "../config/settings";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
 import { formatTitleUserMessage } from "../tiny/message-preproc";
-import { isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
+import { isLowSignalTitleInput, NO_TITLE_SENTINEL, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
 
 import { cfgRetryModelFallback } from "../session/settings";
@@ -502,15 +502,17 @@ async function generateTitleOnlineWithModels(
 				continue;
 			}
 
-			const title = normalizeGeneratedTitle(extractGeneratedTitle(response.content), firstMessage);
+			const extractedTitle = extractGeneratedTitle(response.content);
+			const title = normalizeGeneratedTitle(extractedTitle, firstMessage);
 
 			if (!title) {
 				logger.debug("title-generator: no title returned", {
 					...modelContext,
-					reason: "model-returned-none",
+					reason: extractedTitle === null ? "model-returned-none" : "invalid-title",
 					usage: response.usage,
 					stopReason: response.stopReason,
 				});
+				if (extractedTitle === null) return null;
 				continue;
 			}
 
@@ -541,7 +543,7 @@ async function generateTitleOnlineWithModels(
 	return null;
 }
 
-function extractGeneratedTitle(contentBlocks: AssistantMessage["content"]): string {
+function extractGeneratedTitle(contentBlocks: AssistantMessage["content"]): string | null {
 	let textTitle = "";
 	for (const content of contentBlocks) {
 		if (content.type === "text") {
@@ -553,13 +555,17 @@ function extractGeneratedTitle(contentBlocks: AssistantMessage["content"]): stri
 	// thinking envelopes plus any stray/unclosed title tag fragment. Reject a
 	// prose thinking preamble only on the markerless path: a later marked title
 	// remains authoritative.
-	const markedTitle = extractVisibleMarkedTitle(textTitle);
-	if (markedTitle !== undefined) return unwrapJsonTitle(markedTitle);
-	const cleanedTextTitle = stripLeadingLeakedThinkingMarkup(textTitle)
-		.replace(/<\/?title>/gi, "")
-		.trim();
-	if (LEADING_PROSE_THINKING_PREAMBLE_RE.test(cleanedTextTitle)) return "";
-	return unwrapJsonTitle(cleanedTextTitle);
+	let candidate = extractVisibleMarkedTitle(textTitle);
+	const marked = candidate !== undefined;
+	if (candidate === undefined) {
+		candidate = stripLeadingLeakedThinkingMarkup(textTitle)
+			.replace(/<\/?title>/gi, "")
+			.trim();
+		if (LEADING_PROSE_THINKING_PREAMBLE_RE.test(candidate)) return "";
+	}
+	const title = unwrapJsonTitle(candidate);
+	const trimmed = title.trim();
+	return (marked && !trimmed) || trimmed.toLowerCase() === NO_TITLE_SENTINEL ? null : title;
 }
 
 function extractVisibleMarkedTitle(text: string): string | undefined {
