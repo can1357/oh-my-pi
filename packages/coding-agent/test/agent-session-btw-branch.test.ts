@@ -354,9 +354,26 @@ describe("AgentSession.branchFromBtw", () => {
 		activeSession.sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() });
 		await activeSession.sessionManager.flush();
 
-		const bashPromise = activeSession.executeBash('bun -e "await Bun.sleep(60_000)"', () => undefined, {
-			useUserShell: false,
-		});
+		// The bun running this test, by its path: PATH's `bun` can be a version manager's shim that exits at
+		// once in a test's environment. The command prints `ready` once it runs, and the test waits for that
+		// line before it branches, so the bash work is running when /btw branches, not merely started.
+		const bun = `'${process.execPath.replaceAll("'", `'\\''`)}'`;
+		const started = Promise.withResolvers<void>();
+		let output = "";
+		const bashPromise = activeSession.executeBash(
+			`${bun} -e "console.log('ready'); await Bun.sleep(60_000)"`,
+			chunk => {
+				output += chunk;
+				if (output.includes("ready")) started.resolve();
+			},
+			{ useUserShell: false },
+		);
+		await Promise.race([
+			started.promise,
+			bashPromise.then(() => {
+				throw new Error(`the bash work ended before it ran: ${output}`);
+			}),
+		]);
 		expect(activeSession.isBashRunning).toBe(true);
 
 		await expect(

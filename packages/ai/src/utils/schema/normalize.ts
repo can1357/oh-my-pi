@@ -1725,17 +1725,26 @@ export const normalizeSchemaForOpenAIResponses: typeof sanitizeSchemaForOpenAIRe
 const OPENAI_UNSUPPORTED_REGEX_LOOKAROUNDS = new Set(["=", "!", "<=", "<!"]);
 const OPENAI_RESPONSES_PATTERN_PROPERTIES_FALLBACK = ".*";
 
-function hasOpenAIUnsupportedRegexLookaround(pattern: string): boolean {
-	let groupStart = pattern.indexOf("(?");
-	while (groupStart !== -1) {
-		let escapes = 0;
-		for (let i = groupStart - 1; i >= 0 && pattern[i] === "\\"; i--) escapes++;
-		if (escapes % 2 === 0) {
-			const operator =
-				pattern[groupStart + 2] === "<" ? pattern.slice(groupStart + 2, groupStart + 4) : pattern[groupStart + 2];
+/**
+ * Whether OpenAI's tool-schema regex validator rejects `pattern` although ECMAScript accepts it:
+ * lookaround groups, or an unescaped `[` inside a character class (a literal in ECMAScript, a
+ * nested class for OpenAI, which then reports the outer class as unclosed — e.g. `^[^[\]]*$`).
+ */
+function isOpenAIUnsupportedRegex(pattern: string): boolean {
+	let inClass = false;
+	for (let i = 0; i < pattern.length; i++) {
+		const char = pattern[i];
+		if (char === "\\") {
+			i++;
+		} else if (inClass) {
+			if (char === "]") inClass = false;
+			else if (char === "[") return true;
+		} else if (char === "[") {
+			inClass = true;
+		} else if (char === "(" && pattern[i + 1] === "?") {
+			const operator = pattern[i + 2] === "<" ? pattern.slice(i + 2, i + 4) : pattern[i + 2];
 			if (OPENAI_UNSUPPORTED_REGEX_LOOKAROUNDS.has(operator)) return true;
 		}
-		groupStart = pattern.indexOf("(?", groupStart + 2);
 	}
 	return false;
 }
@@ -1780,11 +1789,7 @@ function normalizeOpenAIResponsesSchemaNode(
 			changed = true;
 			continue;
 		}
-		if (
-			key === "pattern" &&
-			typeof value.pattern === "string" &&
-			hasOpenAIUnsupportedRegexLookaround(value.pattern)
-		) {
+		if (key === "pattern" && typeof value.pattern === "string" && isOpenAIUnsupportedRegex(value.pattern)) {
 			changed = true;
 			continue;
 		}
@@ -1824,6 +1829,9 @@ function normalizeOpenAIResponsesSchemaNode(
 	// properties requirement.
 	if (declaresObjectType(value.type) && !Object.hasOwn(value, "properties")) {
 		output.properties = {};
+		// A bare object is open in JSON Schema. The placeholder `properties: {}` alone reads
+		// as a declared empty shape, which strict adaptation would close (issue #10125).
+		if (isBareOpenObject(value)) output.additionalProperties = true;
 		changed = true;
 	}
 
@@ -1859,6 +1867,21 @@ function declaresObjectType(type: unknown): boolean {
 	return false;
 }
 
+/**
+ * An object node with no `properties`, no `additionalProperties`, and no
+ * `$ref`/combinator supplying its shape: open in JSON Schema, but strict
+ * enforcement would close it to `{}`-only (issue #10125).
+ */
+function isBareOpenObject(schema: Record<string, unknown>): boolean {
+	return (
+		declaresObjectType(schema.type) &&
+		!isJsonObject(schema.properties) &&
+		!Object.hasOwn(schema, "additionalProperties") &&
+		!Object.hasOwn(schema, "$ref") &&
+		!COMBINATOR_KEYS.some(key => Array.isArray(schema[key]))
+	);
+}
+
 function normalizeOpenAIResponsesSchemaArray(
 	value: unknown[],
 	cache: WeakMap<JsonObject, unknown>,
@@ -1886,7 +1909,7 @@ function normalizeOpenAIResponsesSchemaMap(
 		const child = schemaMap[key];
 		const next = normalizeOpenAIResponsesSchemaNode(child, cache, repairArrayItems);
 		if (next !== child) changed = true;
-		if (stripUnsupportedRegexKeys && hasOpenAIUnsupportedRegexLookaround(key)) {
+		if (stripUnsupportedRegexKeys && isOpenAIUnsupportedRegex(key)) {
 			changed = true;
 			appendOpenAIResponsesFallbackPatternProperty(output, next);
 			continue;
@@ -2021,6 +2044,9 @@ function isUnrepresentableStrictBranch(value: unknown): boolean {
  *  - `patternProperties` (open keyset matched by regex),
  *  - `additionalProperties: true` or `additionalProperties: <schema>` (open
  *    keyset with optional further constraint).
+ *  - an object with no `properties`, `additionalProperties`, `$ref` or
+ *    combinator supplying its shape: open in
+ *    JSON Schema, but `enforceStrictSchema` would close it to `{}`-only.
  *  - boolean schemas (`true`/`false`) inside `anyOf`/`oneOf`/`allOf`/`items`/
  *    `prefixItems` — strict providers (OpenAI/Codex) reject the unconstrained
  *    branch, and `enforceStrictSchema` would otherwise wave the non-object
@@ -2047,6 +2073,7 @@ function hasUnrepresentableStrictObjectMap(schema: Record<string, unknown>, epoc
 	if (hasPatternProperties || hasSchemaAdditionalProperties) {
 		return true;
 	}
+	if (isBareOpenObject(schema)) return true;
 
 	if (isJsonObject(schema.properties)) {
 		const properties = schema.properties;
