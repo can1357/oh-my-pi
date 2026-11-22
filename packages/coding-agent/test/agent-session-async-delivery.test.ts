@@ -1138,12 +1138,16 @@ describe("AgentSession owner-routed async delivery", () => {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const manager = new AsyncJobManager({ retentionMs: 60_000 });
 		AsyncJobManager.setInstance(manager);
+		// The registry must share the session's isolated settings: without them it
+		// reads the process-global Settings, which the BashTool test above loads
+		// from the user's agent config, and a config that disables anthropic fails the turn.
+		const settings = Settings.isolated();
 
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated(),
-			modelRegistry: new ModelRegistry(authStorage),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage, undefined, { settings }),
 			agentId: "Main",
 			ownedAsyncJobManager: manager,
 		});
@@ -1193,12 +1197,14 @@ describe("AgentSession owner-routed async delivery", () => {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const manager = new AsyncJobManager({ retentionMs: 60_000 });
 		AsyncJobManager.setInstance(manager);
+		// Isolated registry settings: see the prior test.
+		const settings = Settings.isolated();
 
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated(),
-			modelRegistry: new ModelRegistry(authStorage),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage, undefined, { settings }),
 			agentId: "Main",
 			ownedAsyncJobManager: manager,
 		});
