@@ -843,9 +843,7 @@ describe("experimental context management", () => {
 			await rolloverSession.waitForIdle();
 
 			expect(manager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1);
-			expect(
-				events.filter(event => event.type === "auto_compaction_end" && (event as { skipped?: boolean }).skipped),
-			).toHaveLength(0);
+			expect(events.filter(event => event.type === "auto_compaction_end" && event.skipped)).toHaveLength(0);
 			expect(events.filter(event => event.type === "notice")).toHaveLength(0);
 		} finally {
 			hookTempDir?.removeSync();

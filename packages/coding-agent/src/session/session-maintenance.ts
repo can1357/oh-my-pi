@@ -1906,8 +1906,8 @@ export class SessionMaintenance {
 	/**
 	 * Whether the branch changed since `sourceLeafId` in a way that invalidates
 	 * the prepared compaction: the source leaf left the branch entirely, or an
-	 * entry carrying model-facing content (transcript message, another
-	 * compaction, a reset boundary) was appended after it.
+	 * entry carrying model-facing content (transcript message, branch summary,
+	 * another compaction, a reset boundary) was appended after it.
 	 *
 	 * Pure journal appends — goal usage bookkeeping (`mode_change`), notes,
 	 * tier/thinking changes — legitimately race the compaction window:
@@ -1924,7 +1924,13 @@ export class SessionMaintenance {
 		if (sourceLeafId && start === 0) return true;
 		return branch
 			.slice(start)
-			.some(entry => isTranscriptEntry(entry) || entry.type === "compaction" || entry.type === "reset_boundary");
+			.some(
+				entry =>
+					isTranscriptEntry(entry) ||
+					entry.type === "branch_summary" ||
+					entry.type === "compaction" ||
+					entry.type === "reset_boundary",
+			);
 	}
 
 	/**
@@ -2120,11 +2126,12 @@ export class SessionMaintenance {
 			}
 
 			const prepared = await this.#prepareCompactionFromHooks(preparation, hookCompaction, controller.signal);
+			const branchRewritten = this.#branchRewrittenSince(sourceLeafId);
 			if (
 				controller.signal.aborted ||
 				!this.#usesExperimentalContextManagement() ||
 				this.#host.sessionId() !== sourceSessionId ||
-				this.#branchRewrittenSince(sourceLeafId) ||
+				branchRewritten ||
 				(this.#model && `${this.#model.provider}/${this.#model.id}` !== sourceModel)
 			) {
 				await this.#emitLifecycleEvent(
@@ -2138,14 +2145,14 @@ export class SessionMaintenance {
 					},
 					detachPostCommit,
 				);
-				// An explicit `new_context` request dropped here must not look
-				// like it succeeded: the tool already answered "New context
-				// window requested." (#20063). The rewrite check is the only
-				// skip reason the request can trigger, so trace it.
+				// An explicit `new_context` request dropped by a history rewrite
+				// must not look like it succeeded: the tool already answered
+				// "New context window requested." (#20063).
 				if (
 					!controller.signal.aborted &&
 					this.#usesExperimentalContextManagement() &&
 					this.#host.sessionId() === sourceSessionId &&
+					branchRewritten &&
 					options.explicitNewContextRequest === true
 				) {
 					this.#host.emitNotice(
