@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
+import { inspect } from "node:util";
 import { type } from "@oh-my-pi/omptype";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
@@ -15,14 +16,23 @@ import {
 	type AgyStepOptions,
 	type AgyTransport,
 	type AgyTransportOptions,
+	ensureLoopbackBypass,
+	mapAgyError,
 } from "@oh-my-pi/pi-ai/providers/antigravity-cli/host";
 import type { McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mcp-bridge";
+import { redactSensitiveText } from "@oh-my-pi/pi-ai/providers/antigravity-cli/redact";
 import { StepWriter } from "@oh-my-pi/pi-ai/providers/antigravity-cli/step-writer";
 import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import type { ContentBlock, PromptRequest, PromptResponse, SessionConfigOption } from "@oh-my-pi/pi-utils/acp";
+import {
+	type ContentBlock,
+	type PromptRequest,
+	type PromptResponse,
+	RequestError,
+	type SessionConfigOption,
+} from "@oh-my-pi/pi-utils/acp";
 
 const model = buildModel({
 	api: "antigravity-acp",
@@ -879,6 +889,180 @@ describe("AgyHost stateful steps", () => {
 		fake.text("Done.");
 		prompt.response.resolve({ stopReason: "end_turn" });
 		await first.done;
+	});
+	it("redacts OAuth material from a rejected ACP prompt", async () => {
+		const state = await parked();
+		state.fake.autoSteer = false;
+		const next = step(state.host, [...state.messages, result(state.first.writer.output), user("steer")]);
+		const steer = await state.fake.prompts.next();
+		steer.response.reject(
+			new Error("token exchange failed: refresh_token=live-refresh&access_token=live-access via Bearer ya29.live"),
+		);
+		const failure = await next.done.then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		const message = failure instanceof Error ? failure.message : String(failure);
+		expect(message).toContain("refresh_token=***");
+		expect(message).toContain("access_token=***");
+		expect(message).toContain("Bearer ***");
+		expect(message).not.toContain("live-refresh");
+		expect(message).not.toContain("live-access");
+	});
+});
+
+describe("Antigravity CLI child environment", () => {
+	const proxied = (name: string, value = "http://proxy.local:8080") => ({ PATH: "/usr/bin", [name]: value });
+
+	it("returns the environment unchanged when no proxy is set", () => {
+		const env = { PATH: "/usr/bin", AGY_CLI_DISABLE_AUTO_UPDATE: "1" };
+		expect(ensureLoopbackBypass(env)).toBe(env);
+	});
+
+	it("ignores blank proxy variables", () => {
+		const env = proxied("HTTP_PROXY", "  ");
+		expect(ensureLoopbackBypass(env)).toBe(env);
+	});
+
+	it("appends loopback to both bypass spellings for every proxy variable", () => {
+		for (const name of ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]) {
+			const env = { ...proxied(name), NO_PROXY: "corp.example,localhost", no_proxy: "internal.example" };
+			expect(ensureLoopbackBypass(env)).toEqual({
+				...env,
+				NO_PROXY: "corp.example,localhost,internal.example,127.0.0.1,::1",
+				no_proxy: "corp.example,localhost,internal.example,127.0.0.1,::1",
+			});
+		}
+	});
+
+	it("preserves existing bypass entries without duplicating loopback", () => {
+		const env = { ...proxied("HTTPS_PROXY"), NO_PROXY: "localhost, 127.0.0.1 ,::1,example.test" };
+		expect(ensureLoopbackBypass(env)).toEqual({
+			...env,
+			NO_PROXY: "localhost,127.0.0.1,::1,example.test",
+			no_proxy: "localhost,127.0.0.1,::1,example.test",
+		});
+	});
+});
+
+describe("Antigravity CLI error text", () => {
+	it("masks URL userinfo, query secrets, OAuth pairs and bearer tokens", () => {
+		const text = redactSensitiveText(
+			'GET https://user:pass@oauth.example/callback?code=abc&state=xyz&keep=1 failed with refresh_token=rt-secret, {"access_token":"at-secret"} and Authorization: Bearer ya29.secret',
+		);
+		expect(text).toBe(
+			'GET https://***@oauth.example/callback?code=***&state=***&keep=1 failed with refresh_token=***, {"access_token":"***"} and Authorization: Bearer ***',
+		);
+	});
+
+	it("masks password-only, empty-password and full URL userinfo", () => {
+		expect(redactSensitiveText("https://user:secret@example.com/cb")).toBe("https://***@example.com/cb");
+		expect(redactSensitiveText("https://:secret@example.com/cb")).toBe("https://***@example.com/cb");
+		expect(redactSensitiveText("https://user:@example.com/cb")).toBe("https://***@example.com/cb");
+		expect(redactSensitiveText("https://user@example.com/cb")).toBe("https://user@example.com/cb");
+	});
+
+	it("leaves long malformed URLs unredacted without backtracking", () => {
+		const unterminated = `https://${"a".repeat(50_000)}`;
+		expect(redactSensitiveText(unterminated)).toBe(unterminated);
+		const colonOnly = `https://${"a".repeat(20_000)}:${"b".repeat(20_000)}`;
+		expect(redactSensitiveText(colonOnly)).toBe(colonOnly);
+		const missingPassword = `https://${"a".repeat(50_000)}@`;
+		expect(redactSensitiveText(missingPassword)).toBe(missingPassword);
+		const colonsOnly = `https://${":".repeat(50_000)}`;
+		expect(redactSensitiveText(colonsOnly)).toBe(colonsOnly);
+	});
+
+	it("masks sensitive query parameters in URL fragments", () => {
+		expect(
+			redactSensitiveText("https://oauth.example/callback#code=abc&state=xyz&token=def&api_key=ghi&keep=1"),
+		).toBe("https://oauth.example/callback#code=***&state=***&token=***&api_key=***&keep=1");
+	});
+
+	it("leaves non-secret failure detail intact", () => {
+		expect(redactSensitiveText("agy exited with exit code=1 after quota check timed out")).toBe(
+			"agy exited with exit code=1 after quota check timed out",
+		);
+		expect(redactSensitiveText(undefined)).toBe("");
+	});
+
+	it("masks bare token, api_key, password and long opaque code or state pairs", () => {
+		expect(redactSensitiveText("token=live-token api_key=live-key password=live-pass")).toBe(
+			"token=*** api_key=*** password=***",
+		);
+		expect(redactSensitiveText("code=authorization-code-1234567890 state=opaque-state-value-123")).toBe(
+			"code=*** state=***",
+		);
+		expect(redactSensitiveText("exit code=1, state=ready")).toBe("exit code=1, state=ready");
+	});
+
+	it("masks opaque code and state values in bare and quoted forms", () => {
+		expect(redactSensitiveText("code=4/0AbCdEfGhIjKlMnOp state=opaque-state-value-123")).toBe("code=*** state=***");
+		expect(redactSensitiveText('{"code":"1234567890abcdef","state":"1234567890abcdef"}')).toBe(
+			'{"code":"***","state":"***"}',
+		);
+		expect(redactSensitiveText("code=RESOURCE_EXHAUSTED code=FAILED_PRECONDITION code=ERR_BAD_RESPONSE")).toBe(
+			"code=RESOURCE_EXHAUSTED code=FAILED_PRECONDITION code=ERR_BAD_RESPONSE",
+		);
+		expect(redactSensitiveText("exit code=1, state=ready")).toBe("exit code=1, state=ready");
+	});
+
+	it("masks bare pairs in a cause chain", () => {
+		const mapped = mapAgyError(new Error("token=live-token", { cause: new Error("password=live-pass") }));
+		expect(mapped.message).toBe("token=***");
+		const cause = mapped.cause;
+		expect(cause instanceof Error ? cause.message : "").toBe("password=***");
+	});
+
+	it("redacts the message returned by mapAgyError", () => {
+		const error = new Error(
+			"refresh failed: https://oauth.example/token?refresh_token=rt-secret and Bearer ya29.secret",
+		);
+		const mapped = mapAgyError(error);
+		expect(mapped).not.toBe(error);
+		expect(mapped.message).toBe("refresh failed: https://oauth.example/token?refresh_token=*** and Bearer ***");
+	});
+
+	it("returns a fresh error with the same message when nothing is sensitive", () => {
+		const error = new Error("agy exited with exit code=1");
+		const mapped = mapAgyError(error);
+		expect(mapped).not.toBe(error);
+		expect(mapped.message).toBe("agy exited with exit code=1");
+		expect(mapped.cause).toBeUndefined();
+		expect(mapAgyError("exit code=1").message).toBe("exit code=1");
+	});
+
+	it("redacts the whole cause chain of a mapped error", () => {
+		const deepest = new Error("deep refresh_token=deep-secret");
+		const middle = new Error("middle access_token=middle-secret", { cause: deepest });
+		const mapped = mapAgyError(new Error("outer code_verifier=outer-secret", { cause: middle }));
+		const inspected = inspect(mapped, { depth: Infinity, showHidden: true });
+		expect(inspected).not.toContain("deep-secret");
+		expect(inspected).not.toContain("middle-secret");
+		expect(inspected).not.toContain("outer-secret");
+		expect(inspected).toContain("refresh_token=***");
+		const cause = mapped.cause;
+		expect(cause).toBeInstanceOf(Error);
+		const middleMessage = cause instanceof Error ? cause.message : "";
+		expect(middleMessage).toContain("access_token=***");
+		expect(middleMessage).not.toContain("middle-secret");
+		const nested = cause instanceof Error ? cause.cause : undefined;
+		expect(nested instanceof Error ? nested.message : "").toBe("deep refresh_token=***");
+	});
+
+	it("stops redacting a cyclic cause chain", () => {
+		const cyclic = new Error("cycle access_token=cycle-secret");
+		cyclic.cause = cyclic;
+		const mapped = mapAgyError(cyclic);
+		expect(inspect(mapped, { depth: Infinity, showHidden: true })).not.toContain("cycle-secret");
+		expect(mapped.cause).toBeUndefined();
+	});
+
+	it("keeps the sign-in hint for an unauthenticated request", () => {
+		const error = new RequestError(-32000, "unauthenticated: access_token=at-secret");
+		expect(mapAgyError(error).message).toBe(
+			"Antigravity CLI is not signed in. Run /login and choose Antigravity CLI.",
+		);
 	});
 });
 

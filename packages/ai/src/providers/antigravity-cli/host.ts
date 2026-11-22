@@ -38,6 +38,7 @@ import {
 import { agyCredentialEnv } from "./credentials";
 import { type McpCallHandler, McpBridge, type McpToolDefinition, type McpToolOutput } from "./mcp-bridge";
 import { inputBlocks, type Ledger, lateToolResultPrompt, planTurn, replayPrompt, transcriptDigest } from "./reconcile";
+import { redactSensitiveText } from "./redact";
 import type { StepWriter } from "./step-writer";
 
 const AGENT_NAME = "bridge";
@@ -840,6 +841,29 @@ export class AgyHost implements ProviderSessionState {
 	}
 }
 
+const PROXY_VARIABLES = ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] as const;
+const LOOPBACK_BYPASS_ENTRIES = ["localhost", "127.0.0.1", "::1"] as const;
+
+/**
+ * Keep loopback out of a proxied child environment: agy reaches the MCP bridge
+ * and its relay on 127.0.0.1, and an inherited user proxy would hang them.
+ */
+export function ensureLoopbackBypass(env: Record<string, string | undefined>): Record<string, string | undefined> {
+	if (!PROXY_VARIABLES.some(name => (env[name] ?? "").trim() !== "")) return env;
+	const entries: string[] = [];
+	for (const source of [env.NO_PROXY, env.no_proxy]) {
+		for (const part of (source ?? "").split(",")) {
+			const entry = part.trim();
+			if (entry !== "" && !entries.includes(entry)) entries.push(entry);
+		}
+	}
+	for (const entry of LOOPBACK_BYPASS_ENTRIES) {
+		if (!entries.includes(entry)) entries.push(entry);
+	}
+	const merged = entries.join(",");
+	return { ...env, NO_PROXY: merged, no_proxy: merged };
+}
+
 /** Production ACP subprocess. Every resource is closed if spawning or setup throws. */
 async function startTransport(options: AgyTransportOptions): Promise<AgyTransport> {
 	const binary = await resolveAgyBinary();
@@ -867,7 +891,7 @@ async function startTransport(options: AgyTransportOptions): Promise<AgyTranspor
 				stdin: "pipe",
 				stdout: "pipe",
 				stderr: "ignore",
-				env: { ...Bun.env, ...agyCredentialEnv(), AGY_CLI_DISABLE_AUTO_UPDATE: "1" },
+				env: ensureLoopbackBypass({ ...Bun.env, ...agyCredentialEnv(), AGY_CLI_DISABLE_AUTO_UPDATE: "1" }),
 			},
 		);
 		let closed = false;
@@ -1027,11 +1051,23 @@ export function describeToolArguments(
 	return message.length > MAX_DIAGNOSTIC_MESSAGE ? `${message.slice(0, MAX_DIAGNOSTIC_MESSAGE)}...` : message;
 }
 
-function mapAgyError(error: unknown): Error {
+function redactedCause(cause: unknown, seen: Set<unknown>): Error | undefined {
+	if (cause === undefined || seen.has(cause)) return undefined;
+	if (!(cause instanceof Error)) return new Error(redactSensitiveText(String(cause)));
+	seen.add(cause);
+	const nested = redactedCause(cause.cause, seen);
+	return new Error(redactSensitiveText(cause.message), nested ? { cause: nested } : undefined);
+}
+
+/** Surface an ACP failure as a fresh error whose message and cause chain carry no OAuth material. */
+export function mapAgyError(error: unknown): Error {
 	if (error instanceof RequestError && /not logged in|unauthenticated|authentication required/i.test(error.message)) {
 		return new Error("Antigravity CLI is not signed in. Run /login and choose Antigravity CLI.");
 	}
-	return error instanceof Error ? error : new Error(String(error));
+	const seen = new Set<unknown>([error]);
+	const cause = error instanceof Error ? redactedCause(error.cause, seen) : undefined;
+	const message = redactSensitiveText(error instanceof Error ? error.message : String(error));
+	return new Error(message, cause ? { cause } : undefined);
 }
 
 function scheduleTimer(delayMs: number, callback: () => void): AgyTimer {

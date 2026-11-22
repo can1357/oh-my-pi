@@ -3,7 +3,8 @@ import { connect, type Socket } from "node:net";
 import { McpBridge, type McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mcp-bridge";
 
 interface Reply {
-	id: number;
+	jsonrpc: "2.0";
+	id: number | null;
 	result?: unknown;
 	error?: { code: number; message: string };
 }
@@ -18,6 +19,7 @@ async function client(port: number) {
 	const ready = Promise.withResolvers<void>();
 	const closed = Promise.withResolvers<void>();
 	const replies = new Map<number, PromiseWithResolvers<Reply>>();
+	const unaddressed: PromiseWithResolvers<Reply>[] = [];
 	let buffer = "";
 	socket.setEncoding("utf8");
 	socket.on("connect", ready.resolve);
@@ -29,8 +31,10 @@ async function client(port: number) {
 			const line = buffer.slice(0, end);
 			buffer = buffer.slice(end + 1);
 			const reply: Reply = JSON.parse(line);
-			replies.get(reply.id)?.resolve(reply);
-			replies.delete(reply.id);
+			if (typeof reply.id === "number") {
+				replies.get(reply.id)?.resolve(reply);
+				replies.delete(reply.id);
+			} else unaddressed.shift()?.resolve(reply);
 		}
 	});
 	cleanups.push(() => socket.destroy());
@@ -49,6 +53,12 @@ async function client(port: number) {
 				socket.write(frame.subarray(0, character + 1));
 				socket.write(frame.subarray(character + 1));
 			} else socket.write(frame);
+			return deferred.promise;
+		},
+		send(frame: string): Promise<Reply> {
+			const deferred = Promise.withResolvers<Reply>();
+			unaddressed.push(deferred);
+			socket.write(frame);
 			return deferred.promise;
 		},
 	};
@@ -176,5 +186,17 @@ describe("McpBridge", () => {
 		await peer.closed;
 		result.resolve({ content: [{ type: "text", text: "late" }] });
 		bridge.close();
+	});
+	it("answers malformed JSON with a parse error and keeps the connection open", async () => {
+		const bridge = new McpBridge(tools, async () => ({ content: [] }));
+		cleanups.push(() => bridge.close());
+		const peer = await client(bridge.port);
+		expect(await peer.send('{"jsonrpc": "2.0", "id": 1, "method":\n')).toEqual({
+			jsonrpc: "2.0",
+			id: null,
+			error: { code: -32700, message: "Parse error" },
+		});
+		expect((await peer.request("ping")).result).toEqual({});
+		expect((await peer.request("tools/list")).result).toEqual({ tools });
 	});
 });
