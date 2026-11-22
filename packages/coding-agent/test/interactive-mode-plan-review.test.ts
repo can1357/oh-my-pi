@@ -7,6 +7,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgCycleOrder } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
@@ -458,7 +459,9 @@ describe("InteractiveMode plan review rendering", () => {
 		if (!slow || !def) throw new Error("Expected sonnet + opus to exist in registry");
 
 		session.settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
-		session.settings.setModelRole("slow", "anthropic/claude-opus-4-5");
+		session.settings.setModelRole("pre-plan", "anthropic/claude-opus-4-5");
+		cfgCycleOrder.set(session.settings, ["pre-plan", "default", "slow"]);
+		session.settings.setModelRole("slow", "anthropic/claude-sonnet-4-5");
 		session.settings.setModelRole("plan", "anthropic/claude-sonnet-4-5");
 
 		const planFilePath = "local://PLAN.md";
@@ -476,10 +479,7 @@ describe("InteractiveMode plan review rendering", () => {
 		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 		let answered: boolean | undefined;
 		const recorder = planReviewRecorder("remote", (event, ctx) => {
-			answered = ctx.resolvePlanReview(event.reviewId, "keep", { role: "slow" });
-			const overlay = mode.ui.getFocused() as PlanReviewOverlay;
-			overlay.handleInput("\x1b[C");
-			overlay.handleInput("\x1b[D");
+			answered = ctx.resolvePlanReview(event.reviewId, "keep", { role: "pre-plan" });
 		});
 		await loadExtensions(recorder.extension);
 
@@ -491,9 +491,10 @@ describe("InteractiveMode plan review rendering", () => {
 		);
 		expect(answered).toBe(true);
 		expect(requested?.tiers).toEqual([
-			{ role: "pre-plan", provider: "anthropic", model: def.id },
-			{ role: "default", provider: "anthropic", model: def.id },
-			{ role: "slow", provider: "anthropic", model: slow.id },
+			{ target: "pre-plan", provider: "anthropic", model: def.id },
+			{ target: "role", role: "pre-plan", provider: "anthropic", model: slow.id },
+			{ target: "role", role: "default", provider: "anthropic", model: def.id },
+			{ target: "role", role: "slow", provider: "anthropic", model: def.id },
 		]);
 		expect(resolved).toMatchObject({ reviewId: requested?.reviewId, choice: "keep", by: "extension" });
 		expect(session.model?.id).toBe(slow.id);
@@ -522,10 +523,15 @@ describe("InteractiveMode plan review rendering", () => {
 		const approval = mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
 		const requested = await requestedPromise;
 		expect(requested.tiers?.slice(0, 2)).toEqual([
-			{ role: "pre-plan", provider: "anthropic", model: def.id, thinkingLevel: ThinkingLevel.High },
-			{ role: "default", provider: "anthropic", model: def.id, thinkingLevel: ThinkingLevel.XHigh },
+			{ target: "pre-plan", provider: "anthropic", model: def.id, thinkingLevel: ThinkingLevel.High },
+			{
+				target: "role",
+				role: "default",
+				provider: "anthropic",
+				model: def.id,
+				thinkingLevel: ThinkingLevel.XHigh,
+			},
 		]);
-		expect(requested.tiers?.[0]?.role).not.toBe(requested.tiers?.[1]?.role);
 		const answered = mode.resolvePlanReview(requested.reviewId, "keep");
 		expect(answered).toBe(true);
 		await approval;
@@ -1967,6 +1973,8 @@ describe("InteractiveMode plan review rendering", () => {
 		// record a previous-model state for #exitPlanMode to restore. slow differs,
 		// so an early application would be clobbered by that restore.
 		session.settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
+		session.settings.setModelRole("pre-plan", "anthropic/claude-opus-4-5");
+		cfgCycleOrder.set(session.settings, ["pre-plan", "default", "slow"]);
 		session.settings.setModelRole("slow", "anthropic/claude-opus-4-5");
 		session.settings.setModelRole("plan", "anthropic/claude-sonnet-4-5");
 
@@ -2006,7 +2014,7 @@ describe("InteractiveMode plan review rendering", () => {
 			title: "PLAN",
 		});
 
-		expect(observedSegments).toEqual(["pre-plan", "default", "slow"]);
+		expect(observedSegments).toEqual(["pre-plan", "pre-plan (role)", "default", "slow"]);
 		// The load-bearing assertion: the approved plan executes on the operator's
 		// selected tier, not the restored default.
 		expect(session.model?.id).toBe(slow.id);
@@ -2150,8 +2158,8 @@ describe("InteractiveMode plan review rendering", () => {
 		if (!sonnet || !opus) throw new Error("Expected sonnet + opus to exist in registry");
 		expect(session.model?.id).toBe(sonnet.id);
 
-		// A plan-only configuration leaves the cycle's synthetic default on the active
-		// plan model. The pre-plan target remains its own first selection alongside it.
+		// A plan-only configuration must not expose the cycle's synthetic default
+		// on the active plan model as if it were a configured execution role.
 		session.settings.setModelRole("plan", "anthropic/claude-opus-4-5");
 
 		const planFilePath = "local://PLAN.md";
@@ -2177,8 +2185,7 @@ describe("InteractiveMode plan review rendering", () => {
 
 		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
 
-		expect(sliderShown?.index).toBe(0);
-		expect(sliderShown?.segments.map(segment => segment.label)).toEqual(["pre-plan", "default"]);
+		expect(sliderShown).toBeUndefined();
 		expect(session.model?.id).toBe(sonnet.id);
 	});
 

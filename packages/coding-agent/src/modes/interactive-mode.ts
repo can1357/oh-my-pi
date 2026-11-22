@@ -8113,10 +8113,20 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#notifyModeChanged();
 		}
 
-		// Model-tier slider: the pre-plan model/thinking level is the initial target, followed
-		// by the configured role models (smol/default/slow/…). Keep pre-plan as its own target
-		// even when it resolves to the same model as a role.
-		const cycle = this.session.getRoleModelCycle(cfgCycleOrder.get(this.session.settings));
+		// The pre-plan model is a distinct target, not a model role. Keep it first even
+		// when a configured role resolves to the same model.
+		const roleCycle = this.session.getRoleModelCycle(cfgCycleOrder.get(this.session.settings));
+		// getRoleModelCycle includes the current model as a convenience default when no
+		// default role is configured. In plan review that would expose the plan model as
+		// a fake default target; retain only actual configured roles.
+		const cycle = roleCycle
+			? {
+					...roleCycle,
+					models: roleCycle.models.filter(
+						entry => entry.role !== "default" || this.session.settings.getModelRole("default") !== undefined,
+					),
+				}
+			: undefined;
 		const previousModel = this.#planModePreviousModelState;
 		const prePlanEntry: ResolvedRoleModel | undefined = previousModel
 			? {
@@ -8126,17 +8136,23 @@ export class InteractiveMode implements InteractiveModeContext {
 					explicitThinkingLevel: true,
 				}
 			: undefined;
-		const tiers = [...(prePlanEntry ? [prePlanEntry] : []), ...(cycle?.models ?? [])];
-		const defaultTierIndex = prePlanEntry ? 0 : tiers.findIndex(entry => entry.role === "default");
-		const startTierIndex = defaultTierIndex >= 0 ? defaultTierIndex : (cycle?.currentIndex ?? 0);
-		let selectedTierIndex = startTierIndex;
+		const roleEntries = cycle?.models ?? [];
+		const tiers = [...(prePlanEntry ? [prePlanEntry] : []), ...roleEntries];
+		const startTierIndex = prePlanEntry ? 0 : tiers.findIndex(entry => entry.role === "default");
+		const initialTierIndex = startTierIndex >= 0 ? startTierIndex : 0;
+		let selectedTierIndex = initialTierIndex;
 		const slider: HookSelectorSlider | undefined =
 			tiers.length > 1
 				? {
 						caption: "continue with",
-						index: startTierIndex,
-						segments: tiers.map(entry => ({
-							label: entry.role,
+						index: initialTierIndex,
+						segments: tiers.map((entry, index) => ({
+							label:
+								prePlanEntry && index === 0
+									? "pre-plan"
+									: entry.role === PRE_PLAN_REVIEW_ROLE
+										? "pre-plan (role)"
+										: entry.role,
 							detail: entry.model.name || entry.model.id,
 						})),
 						onChange: index => {
@@ -8194,12 +8210,26 @@ export class InteractiveMode implements InteractiveModeContext {
 			planContent,
 			options: initialChoices.options,
 			tiers: slider
-				? tiers.map(entry => ({
-						role: entry.role,
-						provider: entry.model.provider,
-						model: entry.model.id,
-						...(entry.explicitThinkingLevel && entry.thinkingLevel ? { thinkingLevel: entry.thinkingLevel } : {}),
-					}))
+				? tiers.map((entry, index) =>
+						prePlanEntry && index === 0
+							? {
+									target: "pre-plan" as const,
+									provider: entry.model.provider,
+									model: entry.model.id,
+									...(entry.explicitThinkingLevel && entry.thinkingLevel
+										? { thinkingLevel: entry.thinkingLevel }
+										: {}),
+								}
+							: {
+									target: "role" as const,
+									role: entry.role,
+									provider: entry.model.provider,
+									model: entry.model.id,
+									...(entry.explicitThinkingLevel && entry.thinkingLevel
+										? { thinkingLevel: entry.thinkingLevel }
+										: {}),
+								},
+					)
 				: undefined,
 		};
 		const reviewId = request.reviewId;
@@ -8225,9 +8255,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			// it would switch the session back to the plan model.
 			selectTier: slider
 				? (role, choice) => {
-						const index = tiers.findIndex(entry => entry.role === role);
-						if (index < 0 || choicesAt(index).options.find(option => option.id === choice)?.disabled)
-							return false;
+						const roleIndex = roleEntries.findIndex(entry => entry.role === role);
+						if (roleIndex < 0) return false;
+						const index = roleIndex + (prePlanEntry ? 1 : 0);
+						if (choicesAt(index).options.find(option => option.id === choice)?.disabled) return false;
 						this.#planReviewOverlay?.setSliderIndex(index);
 						return true;
 					}

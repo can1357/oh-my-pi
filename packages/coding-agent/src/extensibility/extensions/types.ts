@@ -837,11 +837,12 @@ export interface ExtensionContext {
 	 * stays open and still takes an answer (no `plan_review_resolved`).
 	 * Approvals execute the plan as it is when picked (in-overlay edits, else the plan
 	 * file), which may differ from the `planContent` that `plan_review_requested` reported.
-	 * `input.role` selects an approval's execution tier, matched against `plan_review_requested`'s
-	 * `tiers` by role name; without it the approval runs on the tier selected in the
-	 * overlay's model slider. `role` applies only to approvals (`execute`, `compact`, `keep`).
+	 * `input.role` selects an actually configured role's execution tier, matched against
+	 * `plan_review_requested`'s role targets; without it the approval runs on the tier
+	 * currently selected in the overlay (initially the distinct pre-plan target).
+	 * `role` applies only to approvals (`execute`, `compact`, `keep`).
 	 * False when that review is not open, the choice is disabled (with `input.role`, on that tier) or
-	 * missing its feedback, `input.role` names no selectable tier or accompanies a non-approval choice,
+	 * missing its feedback, `input.role` names no selectable configured role or accompanies a non-approval choice,
 	 * or the mode has no plan review.
 	 */
 	resolvePlanReview(reviewId: string, choice: PlanReviewChoice, input?: { feedback?: string; role?: string }): boolean;
@@ -1472,15 +1473,24 @@ export interface PlanReviewOption {
 	label: string;
 	disabled: boolean;
 }
-/** An execution target selectable in the plan-review model slider; pass `role` back as `input.role` to `ctx.resolvePlanReview`. */
-export interface PlanReviewTier {
-	/** Role name, or `pre-plan` for the model/thinking level active before plan mode. */
-	role: string;
-	provider: string;
-	model: string;
-	/** Thinking level the target pins; absent when a role inherits the configured level. */
-	thinkingLevel?: ConfiguredThinkingLevel;
-}
+/** An execution target selectable in the plan-review model slider. */
+export type PlanReviewTier =
+	| {
+			/** The model/thinking level active before plan mode; it is not a role. */
+			target: "pre-plan";
+			provider: string;
+			model: string;
+			thinkingLevel?: ConfiguredThinkingLevel;
+	  }
+	| {
+			/** A configured role id, passed back as `input.role` to `ctx.resolvePlanReview`. */
+			target: "role";
+			role: string;
+			provider: string;
+			model: string;
+			/** Thinking level the target pins; absent when a role inherits the configured level. */
+			thinkingLevel?: ConfiguredThinkingLevel;
+	  };
 
 /**
  * The interactive plan review opened (interactive mode only). Resolve it with `ctx.resolvePlanReview`.
