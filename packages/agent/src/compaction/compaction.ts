@@ -42,7 +42,7 @@ import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { isRecord, logger, prompt, withLoopPhase } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
-import { handoffContextFitsWindow, MIN_OUTPUT_HEADROOM_TOKENS } from "../output-budget";
+import { countContextOverrun } from "../output-budget";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "../telemetry";
 import { ThinkingLevel } from "../thinking";
 import { Tokenizer } from "../tokenizer";
@@ -1220,20 +1220,18 @@ export async function generateHandoffFromContext(
 	model: Model,
 	options: HandoffFromContextOptions,
 ): Promise<string> {
+	const overrun = countContextOverrun(context, model, new Tokenizer(model));
+	if (overrun !== undefined) {
+		throw new Error(
+			`Handoff input does not fit ${model.provider}/${model.id}: at least ${overrun} prompt tokens ` +
+				`leave no room for output in its ${model.contextWindow}-token window`,
+		);
+	}
 	const requestOptions = {
 		...options.streamOptions,
 		reasoning: resolveCompactionEffort(model, options.thinkingLevel),
 		toolChoice: "none" as const,
 	};
-	// A handoff reads the entire prepared context, which may have expanded behind
-	// foreign native compactions. Earlier usage anchors cannot size that request.
-	const contextFit = handoffContextFitsWindow(context, model, new Tokenizer(model));
-	if (!contextFit.fits) {
-		throw new Error(
-			`Handoff input exceeds the context window of ${model.provider}/${model.id}: ` +
-				`estimated ${contextFit.estimatedTokens} input tokens plus ${MIN_OUTPUT_HEADROOM_TOKENS} minimum output tokens > ${model.contextWindow}`,
-		);
-	}
 	let response = await instrumentedCompleteSimple(model, context, requestOptions, {
 		telemetry: options.telemetry,
 		oneshotKind: "handoff",

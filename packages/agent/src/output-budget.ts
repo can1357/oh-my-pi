@@ -144,42 +144,41 @@ function countPromptTokens(context: Context, tokenizer: Tokenizer): number {
 }
 
 function countContextTokens(context: Context, tokenizer: Tokenizer): number {
+	return countFramingTokens(context, tokenizer) + tokenizer.countMessages(context.messages);
+}
+
+/** System prompt and tool schemas: the request prefix outside `messages`. */
+function countFramingTokens(context: Context, tokenizer: Tokenizer): number {
 	const { systemPrompt, tools, inactiveTools } = context;
 	return (
 		countFraming(systemPrompt, tokenizer, () => [...(systemPrompt ?? [])]) +
 		countFraming(tools, tokenizer, () => toolFragments(tools ?? [])) +
 		// Anthropic replays retired tool definitions, so they are prompt too.
-		countFraming(inactiveTools, tokenizer, () => toolFragments(inactiveTools ?? [])) +
-		tokenizer.countMessages(context.messages)
+		countFraming(inactiveTools, tokenizer, () => toolFragments(inactiveTools ?? []))
 	);
 }
 
 /**
- * Minimum output headroom (fitted floor plus per-request headway) the transport
- * requires to dispatch a generation request.
- */
-export const MIN_OUTPUT_HEADROOM_TOKENS = OUTPUT_FIT_HEADWAY_TOKENS + MIN_FITTED_OUTPUT_TOKENS;
-
-/**
- * Checks whether the prepared handoff context fits within the model's context window
- * leaving enough room for the transport's minimum output headroom.
+ * Local prompt count of `context` when it leaves `model` no room for the
+ * smallest output the transport requests, else `undefined` (also when the
+ * window is unknown). Counting stops at the first message past the window, so
+ * the count is a floor.
  *
- * Counts the full context locally (provider usage anchors may describe another
- * reader's compaction view) without the output fitter's tokenizer margin or
- * per-message framing: those pad an output cap, but as a refusal gate they
- * reject threshold-sized requests the provider would accept. Only requests
- * known to be oversized are refused.
+ * Unlike {@link fitOutputTokensToContextWindow}, no usage anchor is trusted:
+ * history re-expanded behind a native compaction the model cannot replay
+ * carries reports describing the compacted prefix. Nor is a tokenizer margin
+ * added: a caller refuses on this verdict, so only a clear overrun counts, and
+ * a near-full request is still left to the provider.
  */
-export function handoffContextFitsWindow(
-	context: Context,
-	model: Model,
-	tokenizer: Tokenizer,
-): { fits: boolean; estimatedTokens: number } {
+export function countContextOverrun(context: Context, model: Model, tokenizer: Tokenizer): number | undefined {
 	const contextWindow = model.contextWindow;
-	if (contextWindow == null || contextWindow <= 0) return { fits: true, estimatedTokens: 0 };
-	const estimatedTokens = countContextTokens(context, tokenizer);
-	return {
-		fits: estimatedTokens + MIN_OUTPUT_HEADROOM_TOKENS <= contextWindow,
-		estimatedTokens,
-	};
+	if (!contextWindow || contextWindow <= 0) return undefined;
+	const budget = contextWindow - OUTPUT_FIT_HEADWAY_TOKENS - MIN_FITTED_OUTPUT_TOKENS;
+	let tokens = countFramingTokens(context, tokenizer);
+	for (const message of context.messages) {
+		if (tokens > budget) break;
+		// Encrypted reasoning bytes overstate what the provider bills; a floor leaves them out.
+		tokens += tokenizer.countMessage(message, { excludeEncryptedReasoning: true });
+	}
+	return tokens > budget ? tokens : undefined;
 }
