@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { daemonClient, probeDaemon } from "@oh-my-pi/pi-coding-agent/daemon/client";
 import {
-	DAEMON_RESUME_LEASE_GRACE_MS,
+	DAEMON_RESUME_LEASE_GRACE_ENV,
 	type DaemonClient,
 	type UnitSnapshot,
 } from "@oh-my-pi/pi-coding-agent/daemon/protocol";
@@ -29,8 +29,16 @@ const MODERN = "modern";
 const LEGACY = "legacy";
 const REEXEC_TEST_TIMEOUT_MS = 90_000;
 const WAIT_MS = 20_000;
-/** Linger of the unleased modern unit: long enough to observe it running, short enough to wait out. */
-const IDLE_MS = 1_500;
+/**
+ * Linger of the unleased modern unit: long enough to observe it running across the re-exec (the restored
+ * endpoint re-arms it; the next call follows ~0.1s later locally), short enough to wait out.
+ */
+const IDLE_MS = 1_000;
+/**
+ * The daemon's reconnect grace, shortened from its 15s default so the resumed daemon's idle hold can be
+ * waited out: still ample for the links to retake their leases (~0.1s after the resume locally).
+ */
+const RESUME_GRACE_MS = 1_000;
 
 const noop = () => {};
 const noCtx = {} as Parameters<MCPTool["execute"]>[3];
@@ -51,8 +59,12 @@ describe.skipIf(process.platform === "win32")("MCP across a daemon re-exec", () 
 	let shared: { release(): void };
 	let manager: MCPManager;
 	let callSeq = 0;
+	let previousGrace: string | undefined;
 
 	beforeEach(async () => {
+		// Read by the daemon this test spawns and carried across its re-exec.
+		previousGrace = process.env[DAEMON_RESUME_LEASE_GRACE_ENV];
+		process.env[DAEMON_RESUME_LEASE_GRACE_ENV] = String(RESUME_GRACE_MS);
 		harness = await IsolatedDaemon.create();
 		shared = holdSharedMcp(true);
 		manager = new MCPManager(harness.dir, undefined, IDLE_MS);
@@ -61,6 +73,8 @@ describe.skipIf(process.platform === "win32")("MCP across a daemon re-exec", () 
 	// Past the harness's 10s lock wait: a daemon stuck mid-exec is killed before the next test swaps
 	// `OMP_DAEMON_DIR`, instead of a timed-out teardown restoring the env and removing the dir under it.
 	afterEach(async () => {
+		if (previousGrace === undefined) delete process.env[DAEMON_RESUME_LEASE_GRACE_ENV];
+		else process.env[DAEMON_RESUME_LEASE_GRACE_ENV] = previousGrace;
 		await manager.disconnectAll();
 		shared.release();
 		await disposeLocalMcpHost();
@@ -160,12 +174,13 @@ describe.skipIf(process.platform === "win32")("MCP across a daemon re-exec", () 
 			await waitFor(() => !isAlive(modernBefore.pid), "modern server exit after the idle window", WAIT_MS);
 			expect(Date.now() - lastModernCallAt).toBeGreaterThanOrEqual(IDLE_MS - 100);
 			// The handshake-era server stops with its last lease, but a resumed daemon stops no unit
-			// for idleness before its clients had `DAEMON_RESUME_LEASE_GRACE_MS` to come back.
+			// for idleness before its clients had the reconnect grace to come back.
 			await waitFor(
 				() => !isAlive(legacyBefore.pid),
 				"handshake-era server exit",
-				Math.max(0, resumedAt + DAEMON_RESUME_LEASE_GRACE_MS - Date.now()) + 5_000,
+				Math.max(0, resumedAt + RESUME_GRACE_MS - Date.now()) + 5_000,
 			);
+			expect(Date.now() - resumedAt).toBeGreaterThanOrEqual(RESUME_GRACE_MS);
 		},
 		REEXEC_TEST_TIMEOUT_MS,
 	);
