@@ -3,7 +3,6 @@
 ## [Unreleased]
 
 ### Fixed
-- On Windows, an abort or `timeout` now ends an in-process utility such as `cat` that is blocked reading an open, empty stdin pipe, instead of waiting until a writer closes it ([#19338](https://github.com/can1357/oh-my-pi/pull/19338) by [@jchanghong023](https://github.com/jchanghong023))
 
 - Fixed `grep()` with a match limit resolving with a short result when its directory walk panicked; it now rejects with the panic ([#20013](https://github.com/can1357/oh-my-pi/pull/20013) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a use-after-free in `grep()`, `glob()`, `fuzzyFind()`, `astGrep()` and `astEdit()` when a timeout or an abort cancelled them just after they started ([#20014](https://github.com/can1357/oh-my-pi/pull/20014) by [@sjawhar](https://github.com/sjawhar))
@@ -20,6 +19,8 @@
 - Fixed a macOS `computer` takeover that ended while another program was typing for you (a remote-control, text-expansion or automation tool posting keystrokes) putting your app back in front with no key window: its window looked inactive and web pages saw a blur until you clicked or switched apps. The window you were typing in is now made key again unless you clicked, used a shortcut the takeover read, focused another of your app's windows, or have ⌘ or ⌃ down at that moment, or another app is in front; if the window then does not report itself key within 400 ms, the call fails saying restoration failed instead of reporting success ([#19504](https://github.com/can1357/oh-my-pi/pull/19504) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed X11 typing of characters outside the keyboard layout, including non-Latin text, failing with "X11 keymap has no keycode for keysym ...". They are typed through spare keycodes, restored when the session closes; a text with more distinct such characters than the layout has spare keycodes is refused before any key, and chords and holds of them still refuse ([#19519](https://github.com/can1357/oh-my-pi/pull/19519) by [@will-bogusz](https://github.com/will-bogusz))
 - Applying a binary patch now refuses when the file's current contents are not the version the patch was built from, instead of replacing them ([#19392](https://github.com/can1357/oh-my-pi/pull/19392) by [@eggpeat](https://github.com/eggpeat))
+- On Windows, an abort or `timeout` now ends an in-process utility such as `cat` that is blocked reading an open, empty stdin pipe, instead of waiting until a writer closes it ([#19338](https://github.com/can1357/oh-my-pi/pull/19338) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed a standalone binary loading the native addon a previous build of the same version extracted, instead of its own, when both addons happened to be the same size: each build now extracts its addon to its own directory named by the addon's content hash ([#19346](https://github.com/can1357/oh-my-pi/pull/19346) by [@HeyItsGilbert](https://github.com/HeyItsGilbert))
 
 ## [19.1.0] - 2026-11-21
 
@@ -142,11 +143,6 @@
 - Committing or writing trees now correctly reports unresolved index conflicts instead of silently omitting conflicted files.
 - Fixed shell compatibility with GNU `grep` for end-of-line-anchored patterns, including `-o` and `-z` modes, and corrected `sed` substitutions on multibyte-character lines.
 - Fixed native diff and patch handling for filenames containing spaces and other characters requiring quoting, including binary changes.
-- Fixed a standalone binary loading the native addon a previous build of the same version extracted, instead of its own, when both addons happened to be the same size: each build now extracts its addon to its own directory named by the addon's content hash ([#19346](https://github.com/can1357/oh-my-pi/pull/19346) by [@HeyItsGilbert](https://github.com/HeyItsGilbert))
-- Committing or writing a tree now fails when the index still has unresolved conflicts, instead of publishing a commit that drops those files ([#19309](https://github.com/can1357/oh-my-pi/pull/19309) by [@eggpeat](https://github.com/eggpeat))
-- Fixed shell `sed` failing with `internal error` on a global or numbered substitution whose regex matches empty text on a line with multibyte characters (`s/ */_/g` on `café au lait`) ([#19261](https://github.com/can1357/oh-my-pi/pull/19261) by [@tuschla](https://github.com/tuschla))
-- Fixed shell `grep -o` printing nothing for a pattern anchored at the end of a line, such as `echo abc | grep -o 'c$'`, and `grep -z` missing records that match such a pattern: matches are now found in the line without its terminator, as in GNU grep ([#19262](https://github.com/can1357/oh-my-pi/pull/19262) by [@tuschla](https://github.com/tuschla))
-- Fixed native diff and patch round-trips for filenames containing spaces: binary changes no longer fail to apply or land under a truncated path, and paths that cannot be written verbatim are C-quoted like git does ([#19274](https://github.com/can1357/oh-my-pi/pull/19274) by [@eggpeat](https://github.com/eggpeat))
 
 ## [18.20.1] - 2026-11-14
 

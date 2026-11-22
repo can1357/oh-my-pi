@@ -2,10 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `AssistantMessage.requestId`, set from Anthropic's `request-id` response header, so a refused or failed turn keeps the id that Anthropic support asks for ([#19383](https://github.com/can1357/oh-my-pi/pull/19383) by [@nnnnoel](https://github.com/nnnnoel))
+
 ### Fixed
 
-- A transient `404` from a proxy in front of the auth broker no longer switches the snapshot stream to long-polling and turns off usage reporting for the rest of the process ([#19236](https://github.com/can1357/oh-my-pi/issues/19236)) ([#19348](https://github.com/can1357/oh-my-pi/pull/19348) by [@Alex-Wengg](https://github.com/Alex-Wengg))
-- Antigravity CLI requests no longer fail with a credential staging error when two sessions for the same account stage sign-in at the same time ([#19347](https://github.com/can1357/oh-my-pi/pull/19347) by [@eggpeat](https://github.com/eggpeat))
 - With several Devin logins, omp now prefers a login with daily or weekly quota left; a login past its quota that its on-demand balance still funds comes next, and one with no balance is skipped until its quota resets ([#19929](https://github.com/can1357/oh-my-pi/pull/19929) by [@will-bogusz](https://github.com/will-bogusz))
 - Devin logins now store the account's email, user id and organization, so two organizations under one email show as two accounts in `omp usage` and `auth.accountPolicies` can name each; sign in again to identify an existing login ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))
 - Anthropic requests with no messages now fail locally with the model, provider, and how many messages arrived, instead of a bare `400 "messages is required"` ([#19881](https://github.com/can1357/oh-my-pi/pull/19881) by [@FnSGit](https://github.com/FnSGit))
@@ -19,6 +21,9 @@
 - Gemini models behind Portkey with strict OpenAI compliance turned off now keep their thought signatures between tool calls, also through the auth gateway ([#20082](https://github.com/can1357/oh-my-pi/pull/20082) by [@smartinio](https://github.com/smartinio))
 - Fixed the thinking-loop guard discarding and retrying a final answer with a long markdown table or same-shape JSON records (one array or one per line) ([#11129](https://github.com/can1357/oh-my-pi/issues/11129), [#19990](https://github.com/can1357/oh-my-pi/pull/19990) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Strict tool schemas no longer close a bare `type: "object"` property into a `{}`-only shape while still reporting `strict: true`; such tools now send a non-strict schema, so calls that set fields of that property are accepted ([#10125](https://github.com/can1357/oh-my-pi/issues/10125), [#19980](https://github.com/can1357/oh-my-pi/pull/19980) by [@JamieJ5926](https://github.com/JamieJ5926))
+- Fixed `antigravity-cli` models not seeing images returned by tools such as `read` on image files ([#19358](https://github.com/can1357/oh-my-pi/pull/19358) by [@0xprincess](https://github.com/0xprincess))
+- A transient `404` from a proxy in front of the auth broker no longer switches the snapshot stream to long-polling and turns off usage reporting for the rest of the process ([#19236](https://github.com/can1357/oh-my-pi/issues/19236)) ([#19348](https://github.com/can1357/oh-my-pi/pull/19348) by [@Alex-Wengg](https://github.com/Alex-Wengg))
+- Antigravity CLI requests no longer fail with a credential staging error when two sessions for the same account stage sign-in at the same time ([#19347](https://github.com/can1357/oh-my-pi/pull/19347) by [@eggpeat](https://github.com/eggpeat))
 
 ## [19.1.0] - 2026-11-21
 
@@ -73,12 +78,6 @@
 - Improved authentication broker compatibility across client and broker versions by tolerating unknown credential, usage, and observed-usage fields and values.
 - Fixed Codex Spark usage meters so reports that identify the meter only by `metered_feature` remain correctly scoped to the Spark model.
 - Fixed Antigravity CLI requests for models whose available IDs include effort suffixes, such as resolving `gemini-4-hydrogen` when only `gemini-4-hydrogen-high` is offered.
-- Fixed a Claude account staying blocked for Fable and Mythos after the shared weekly limit behind their 429 recovered, when `/usage` reported only that weekly window, so failover could not return to it ([#19600](https://github.com/can1357/oh-my-pi/pull/19600) by [@will-bogusz](https://github.com/will-bogusz))
-- Startup with an auth broker and no fresh snapshot cache no longer fails when the broker is restarting or briefly unreachable, including a connection dropped mid-response; it retries for up to 30 seconds, while a rejected token or a malformed snapshot still fails at once ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
-- A Codex additional meter (Spark) reported with only a `metered_feature` now carries that codename as `scope.modelId`, as it already did with a `limit_name`, so it stays scoped to its own model ([#19606](https://github.com/can1357/oh-my-pi/pull/19606) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed auth-broker clients failing to read credentials or usage from a newer broker that adds a field or a usage unit or status; unknown fields are ignored and unknown values read as `unknown`. The broker likewise accepts observed-usage reports carrying fields from newer clients ([#19602](https://github.com/can1357/oh-my-pi/pull/19602) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed Antigravity CLI requests failing with `Unknown model ID` (e.g. `gemini-4-hydrogen`) when `agy` only offers effort-suffixed models such as `gemini-4-hydrogen-high` ([#19638](https://github.com/can1357/oh-my-pi/issues/19638))
-- Fixed `antigravity-cli` models not seeing images returned by tools such as `read` on image files ([#19358](https://github.com/can1357/oh-my-pi/pull/19358) by [@0xprincess](https://github.com/0xprincess))
 
 ## [18.22.2] - 2026-11-18
 
@@ -140,9 +139,6 @@
 ### Added
 
 - Added automatic detection of thinking capabilities for previously unknown models, with persistent results and support for alternate effort and token-budget request formats.
-### Added
-
-- Added `AssistantMessage.requestId`, set from Anthropic's `request-id` response header, so a refused or failed turn keeps the id that Anthropic support asks for ([#19383](https://github.com/can1357/oh-my-pi/pull/19383) by [@nnnnoel](https://github.com/nnnnoel))
 
 ## [18.20.3] - 2026-11-16
 

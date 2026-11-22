@@ -8,7 +8,7 @@ import * as fsSync from "node:fs";
 import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
-import { getModelPricingStatus, routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { getModelPricingStatus, modelsAreEqual, routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { ensureSqliteLockShim, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import { bindAgentMesh } from "./irc/mesh";
 import {
