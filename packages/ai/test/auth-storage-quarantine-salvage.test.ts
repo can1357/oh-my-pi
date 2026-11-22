@@ -139,6 +139,31 @@ describe("quarantine salvages stored credentials", () => {
 		}
 	});
 
+	test("a damaged non-text disabled cause keeps the credential disabled", async () => {
+		const db = new Database(dbPath);
+		try {
+			db.run(
+				"CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY, provider TEXT, credential_type TEXT, data TEXT, disabled_cause TEXT)",
+			);
+			db.run("INSERT INTO auth_credentials VALUES (1, 'active', 'api_key', ?, NULL)", [
+				JSON.stringify({ key: "sk-active" }),
+			]);
+			db.run("INSERT INTO auth_credentials VALUES (2, 'revoked', 'api_key', ?, X'01')", [
+				JSON.stringify({ key: "sk-revoked" }),
+			]);
+		} finally {
+			db.close();
+		}
+		tearHeader(dbPath);
+		const store = await SqliteAuthCredentialStore.open(dbPath);
+		try {
+			expect(storedKeys(store)).toEqual({ active: "sk-active" });
+			expect((await store.listDisabledCredentials()).map(row => row.provider)).toEqual(["revoked"]);
+		} finally {
+			store.close();
+		}
+	});
+
 	test("local-provider markers and retired provider ids survive the recovery", async () => {
 		await seedStore();
 		const seeded = new Database(dbPath);

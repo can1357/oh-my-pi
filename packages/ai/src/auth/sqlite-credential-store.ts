@@ -663,6 +663,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			);
 			const text = (value: unknown): string | null => (typeof value === "string" ? value : null);
 			const epoch = (value: unknown): number | null => (Number.isSafeInteger(value) ? (value as number) : null);
+			// Every non-NULL cause disables a row at runtime; a damaged non-text cause must not revive it.
+			const disabledCause = (value: unknown): string | null =>
+				value === null || value === undefined ? null : typeof value === "string" ? value : "disabled";
 			let restored = 0;
 			this.#db.transaction(() => {
 				using insert = this.#db.prepare(
@@ -675,7 +678,11 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 						row.provider as string,
 						row.credential_type as string,
 						row.data as string,
-						present.has("disabled_cause") ? text(row.disabled_cause) : row.disabled === 1 ? "disabled" : null,
+						present.has("disabled_cause")
+							? disabledCause(row.disabled_cause)
+							: row.disabled === 1
+								? "disabled"
+								: null,
 						text(row.identity_key),
 						epoch(row.created_at),
 						epoch(row.updated_at),
