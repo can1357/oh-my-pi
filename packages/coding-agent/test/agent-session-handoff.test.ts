@@ -1493,7 +1493,8 @@ describe("AgentSession handoff", () => {
 		session = new AgentSession({
 			agent: new Agent({
 				initialState: {
-					model: { ...model, contextWindow: 1024, maxTokens: 128 },
+					// Room for the base request, not for the oversized history below.
+					model: { ...model, contextWindow: 16_384, maxTokens: 128 },
 					systemPrompt: ["Test"],
 					tools: [],
 					messages: [],

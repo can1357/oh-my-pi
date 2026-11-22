@@ -159,46 +159,6 @@ describe("handoff helpers", () => {
 		expect(promptBlock.text).toContain("preserve failing test name");
 	});
 
-	test("refuses an oversized prepared handoff before sending it to the provider", async () => {
-		const model = { ...getTestModel(), contextWindow: 1024, maxTokens: 128 };
-		const context = {
-			systemPrompt: ["Live system prompt"],
-			tools: [],
-			messages: [
-				{ role: "user" as const, content: "unreadable native history ".repeat(6000), timestamp: 1 },
-				{ role: "user" as const, content: "prepare handoff", timestamp: 2 },
-			],
-		};
-		const completeImpl = vi.fn(async () => createAssistantMessage([{ type: "text", text: "## Goal\nContinue" }]));
-
-		await expect(
-			generateHandoffFromContext(context, model, {
-				streamOptions: { apiKey: "test-key" },
-				completeImpl,
-			}),
-		).rejects.toThrow(/Handoff input exceeds the context window/);
-		expect(completeImpl).not.toHaveBeenCalled();
-	});
-
-	test("allows handoff on models with large output caps when prompt leaves room for minimum headroom", async () => {
-		// claude-opus-5-5: 1M window, 128k maxTokens. Prompt at 820k would be rejected if
-		// full maxTokens were charged, but leaves headroom for minimum transport output.
-		const opus = getBundledModel("anthropic", "claude-opus-5-5");
-		const context = {
-			systemPrompt: ["Live system prompt"],
-			tools: [],
-			messages: [{ role: "user" as const, content: "x".repeat(820_000), timestamp: 1 }],
-		};
-		const completeImpl = vi.fn(async () => createAssistantMessage([{ type: "text", text: "## Goal\nContinue" }]));
-
-		const result = await generateHandoffFromContext(context, opus, {
-			streamOptions: { apiKey: "test-key" },
-			completeImpl,
-		});
-		expect(result).toBe("## Goal\nContinue");
-		expect(completeImpl).toHaveBeenCalledTimes(1);
-	});
-
 	test("generateHandoffFromContext forwards cache routing and forces no-tools", async () => {
 		const completeSimpleSpy = vi
 			.spyOn(ai, "completeSimple")

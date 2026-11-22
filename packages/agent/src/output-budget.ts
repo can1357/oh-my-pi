@@ -133,7 +133,9 @@ function withMargin(localTokens: number): number {
 function countPromptTokens(context: Context, tokenizer: Tokenizer): number {
 	const { messages } = context;
 	const anchor = findRequestUsageAnchor(messages);
-	if (!anchor) return estimateContextPromptTokens(context, tokenizer);
+	if (!anchor) {
+		return withMargin(countContextTokens(context, tokenizer)) + messages.length * MESSAGE_FRAMING_TOKENS;
+	}
 	let tail = 0;
 	for (let index = anchor.index + 1; index < messages.length; index++) {
 		tail += tokenizer.countMessage(messages[index]);
@@ -142,41 +144,41 @@ function countPromptTokens(context: Context, tokenizer: Tokenizer): number {
 }
 
 function countContextTokens(context: Context, tokenizer: Tokenizer): number {
+	return countFramingTokens(context, tokenizer) + tokenizer.countMessages(context.messages);
+}
+
+/** System prompt and tool schemas: the request prefix outside `messages`. */
+function countFramingTokens(context: Context, tokenizer: Tokenizer): number {
 	const { systemPrompt, tools, inactiveTools } = context;
 	return (
 		countFraming(systemPrompt, tokenizer, () => [...(systemPrompt ?? [])]) +
 		countFraming(tools, tokenizer, () => toolFragments(tools ?? [])) +
 		// Anthropic replays retired tool definitions, so they are prompt too.
-		countFraming(inactiveTools, tokenizer, () => toolFragments(inactiveTools ?? [])) +
-		tokenizer.countMessages(context.messages)
+		countFraming(inactiveTools, tokenizer, () => toolFragments(inactiveTools ?? []))
 	);
 }
 
-/** Conservative full-context prompt estimate for side requests without a trustworthy live-turn usage anchor. */
-export function estimateContextPromptTokens(context: Context, tokenizer: Tokenizer): number {
-	return withMargin(countContextTokens(context, tokenizer)) + context.messages.length * MESSAGE_FRAMING_TOKENS;
-}
-
 /**
- * Minimum output headroom (fitted floor plus per-request headway) the transport
- * requires to dispatch a generation request.
+ * Local prompt count of `context` when it leaves `model` no room for the
+ * smallest output the transport requests, else `undefined` (also when the
+ * window is unknown). Counting stops at the first message past the window, so
+ * the count is a floor.
+ *
+ * Unlike {@link fitOutputTokensToContextWindow}, no usage anchor is trusted:
+ * history re-expanded behind a native compaction the model cannot replay
+ * carries reports describing the compacted prefix. Nor is a tokenizer margin
+ * added: a caller refuses on this verdict, so only a clear overrun counts, and
+ * a near-full request is still left to the provider.
  */
-export const MIN_OUTPUT_HEADROOM_TOKENS = OUTPUT_FIT_HEADWAY_TOKENS + MIN_FITTED_OUTPUT_TOKENS;
-
-/**
- * Checks whether the prepared handoff context fits within the model's context window
- * leaving enough room for the transport's minimum output headroom.
- */
-export function handoffContextFitsWindow(
-	context: Context,
-	model: Model,
-	tokenizer: Tokenizer,
-): { fits: boolean; estimatedTokens: number } {
+export function countContextOverrun(context: Context, model: Model, tokenizer: Tokenizer): number | undefined {
 	const contextWindow = model.contextWindow;
-	if (contextWindow == null || contextWindow <= 0) return { fits: true, estimatedTokens: 0 };
-	const estimatedTokens = estimateContextPromptTokens(context, tokenizer);
-	return {
-		fits: estimatedTokens + MIN_OUTPUT_HEADROOM_TOKENS <= contextWindow,
-		estimatedTokens,
-	};
+	if (!contextWindow || contextWindow <= 0) return undefined;
+	const budget = contextWindow - OUTPUT_FIT_HEADWAY_TOKENS - MIN_FITTED_OUTPUT_TOKENS;
+	let tokens = countFramingTokens(context, tokenizer);
+	for (const message of context.messages) {
+		if (tokens > budget) break;
+		// Encrypted reasoning bytes overstate what the provider bills; a floor leaves them out.
+		tokens += tokenizer.countMessage(message, { excludeEncryptedReasoning: true });
+	}
+	return tokens > budget ? tokens : undefined;
 }

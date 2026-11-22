@@ -56,7 +56,7 @@ Does not cover:
 
 `generateHandoffFromContext(...)` lives in `packages/agent/src/compaction/compaction.ts` next to summarization. It issues an OTEL-instrumented `completeSimple`-equivalent oneshot against the caller-built `Context`, overriding the supplied stream options with clamped compaction reasoning and `toolChoice: "none"`.
 
-Before the oneshot, the full prepared context (including the handoff instruction, system prompt, and tool schemas) is estimated against the model's context window with minimum output headroom and a tokenizer margin. An oversized request fails locally; automatic maintenance proceeds to the next configured method.
+Before the oneshot, the prepared context (handoff instruction, system prompt, and tool schemas included) is counted locally against the model's context window (`countContextOverrun` in `packages/agent/src/output-budget.ts`). A request that leaves no room for the transport's minimum fitted output fails without network I/O. The count carries no tokenizer margin, so a near-full request is still sent.
 
 If a provider rejects explicit `toolChoice: "none"` because it supports only automatic tool choice, the function retries once with `toolChoice: "auto"`. Tools remain present for cache-prefix compatibility, but returned tool-call blocks are ignored; only text blocks are joined.
 

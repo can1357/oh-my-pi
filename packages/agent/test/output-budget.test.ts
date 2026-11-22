@@ -4,11 +4,10 @@ import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages"
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
+	countContextOverrun,
 	fitOutputTokensToContextWindow,
-	handoffContextFitsWindow,
 	MESSAGE_FRAMING_TOKENS,
 	MIN_FITTED_OUTPUT_TOKENS,
-	MIN_OUTPUT_HEADROOM_TOKENS,
 	OUTPUT_FIT_HEADWAY_TOKENS,
 } from "../src/output-budget";
 import { Tokenizer } from "../src/tokenizer";
@@ -255,38 +254,24 @@ describe("fitOutputTokensToContextWindow", () => {
 	});
 });
 
-describe("handoffContextFitsWindow", () => {
+describe("countContextOverrun", () => {
 	const tokenizer = new Tokenizer();
+	const minimumRequest = OUTPUT_FIT_HEADWAY_TOKENS + MIN_FITTED_OUTPUT_TOKENS;
 
-	test("allows handoff on models with large maxTokens when prompt leaves minimum headroom (Opus 5.5)", () => {
-		const opus = getBundledModel("anthropic", "claude-opus-5-5");
-		// 820k raw tokens estimated at ~902k with margin; full 128k maxTokens would exceed 1M,
-		// but prompt leaves plenty of room for minimum transport headroom.
-		const context: Context = { messages: [userOf(820_000, 1)] };
-		const result = handoffContextFitsWindow(context, opus, tokenizer);
-		expect(result.fits).toBe(true);
-		expect(result.estimatedTokens + MIN_OUTPUT_HEADROOM_TOKENS).toBeLessThanOrEqual(1_000_000);
+	test("refuses only a prompt that leaves no room for the minimum fitted output", () => {
+		// No tokenizer margin: a request the provider may still accept is not refused locally.
+		const context: Context = { messages: [userOf(100_000, 1)] };
+		const exact = { ...deepseek, contextWindow: 100_000 + minimumRequest };
+		expect(countContextOverrun(context, exact, tokenizer)).toBeUndefined();
+		expect(countContextOverrun(context, { ...exact, contextWindow: exact.contextWindow - 1 }, tokenizer)).toBe(
+			100_000,
+		);
 	});
 
-	test("allows handoff for models with large default output caps (DeepSeek V4 at 57% window)", () => {
-		// 570k raw tokens on DeepSeek (384k maxTokens) would fail if full maxTokens is charged.
-		const context: Context = { messages: [userOf(570_000, 1)] };
-		const result = handoffContextFitsWindow(context, deepseek, tokenizer);
-		expect(result.fits).toBe(true);
-		expect(result.estimatedTokens + MIN_OUTPUT_HEADROOM_TOKENS).toBeLessThanOrEqual(1_000_000);
-	});
-
-	test("refuses handoff when prompt alone leaves no room for minimum output headroom", () => {
-		const smallWindowModel: Model = { ...deepseek, contextWindow: 262_144, maxTokens: 8_192 };
-		const context: Context = { messages: [userOf(300_000, 1)] };
-		const result = handoffContextFitsWindow(context, smallWindowModel, tokenizer);
-		expect(result.fits).toBe(false);
-	});
-
-	test("allows handoff when model declares no context window", () => {
-		const unwindowedModel: Model = { ...deepseek, contextWindow: 0 };
-		const context: Context = { messages: [userOf(500_000, 1)] };
-		const result = handoffContextFitsWindow(context, unwindowedModel, tokenizer);
-		expect(result.fits).toBe(true);
+	test("counts history a stale usage report understates (#20099)", () => {
+		// History re-expanded behind an unreadable native compaction: the newest report
+		// still describes the 10k-token compacted prefix the provider was sent.
+		const context: Context = { messages: [userOf(1_200_000, 1), reported(10_000, 2)] };
+		expect(countContextOverrun(context, deepseek, tokenizer)).toBe(1_200_000);
 	});
 });
