@@ -69,6 +69,7 @@
 - Fixed the "agent turn ended with provider error" log omitting the provider request id; Anthropic refusals now log the `request-id` that support asks for ([#19383](https://github.com/can1357/oh-my-pi/pull/19383) by [@nnnnoel](https://github.com/nnnnoel))
 - Fixed sessions started from a collab peer's prompt never getting an automatic title; title reviews and the unexpected-stop judge now read collab prompts as operator requests ([#19365](https://github.com/can1357/oh-my-pi/pull/19365) by [@DaddyMonster](https://github.com/DaddyMonster))
 - The `eval` tool now tells the model its default cell deadline (30 s) in the `timeout` parameter and the tool prompt ([#18856](https://github.com/can1357/oh-my-pi/issues/18856)) ([#19349](https://github.com/can1357/oh-my-pi/pull/19349) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
+- Fixed `/tan` forks being told "Waiting is not progress" on their second back-to-back idle wait while their only assignment was still blocked; a fork now keeps waiting instead of ending its turn ([#20151](https://github.com/can1357/oh-my-pi/pull/20151) by [@Fun10165](https://github.com/Fun10165))
 
 ## [19.1.0] - 2026-11-21
 
