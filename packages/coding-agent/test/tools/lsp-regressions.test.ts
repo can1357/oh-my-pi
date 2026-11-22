@@ -5062,6 +5062,22 @@ describe("lsp regressions", () => {
 			}
 		});
 
+		it("ends the load of a server that never reports progress well before the 15 s fallback", async () => {
+			// pyright, ty, ruff, and typescript-language-server never send `$/progress`; their
+			// first project-aware wait used to sit out the whole fallback.
+			const { tempDir, sessionRoot } = await makeCheckouts("@omp-lsp-silent-load-");
+			try {
+				const { serverConfig } = useServer(FOLDER_CHANGES);
+				const client = await lspClient.getOrCreateClient(serverConfig, sessionRoot);
+				const started = Date.now();
+				await lspClient.waitForProjectLoaded(client);
+				expect(Date.now() - started).toBeLessThan(5_000);
+			} finally {
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
 		it("adds no checkout for a caller that aborted before delivery", async () => {
 			const { tempDir, sessionRoot, siblingRoot, thirdRoot } = await makeCheckouts("@omp-lsp-aborted-add-");
 			try {

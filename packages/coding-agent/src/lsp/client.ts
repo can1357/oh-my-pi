@@ -737,6 +737,7 @@ async function startMessageReader(client: LspClient): Promise<void> {
 							} else if (message.method === "$/progress" && message.params) {
 								const params = message.params as { token: string | number; value?: { kind?: string } };
 								if (params.value?.kind === "begin") {
+									progressReportingClients.add(client);
 									client.activeProgressTokens.add(params.token);
 									clearTimeout(projectQuietTimers.get(client));
 									countFolderLoad(client, -1);
@@ -870,6 +871,32 @@ function settleProjectLoadWhenQuiet(client: LspClient): void {
 	projectQuietTimers.set(client, timer);
 }
 
+/**
+ * How long a server may stay silent after `initialized` (or a folder add) before its
+ * project load counts as done. Servers that report loads begin `$/progress` almost at
+ * once (measured: gopls 0 ms, rust-analyzer 14 ms, `tsc --lsp` ~270 ms after its first
+ * open). pyright, ty, ruff, and typescript-language-server never report it, so without
+ * this every first project-aware wait on them ran into the 15 s fallback below, pushing
+ * the first edit's diagnostics past its inline budget and timing out `lsp diagnostics`.
+ */
+const PROJECT_LOAD_NO_PROGRESS_MS = 2_000;
+/** Clients that have begun at least one `$/progress`; their loads end only through progress. */
+const progressReportingClients = new WeakSet<LspClient>();
+const silentLoadTimers = new WeakMap<LspClient, NodeJS.Timeout>();
+
+function settleProjectLoadWithoutProgress(client: LspClient): void {
+	clearTimeout(silentLoadTimers.get(client));
+	const timer = setTimeout(() => {
+		silentLoadTimers.delete(client);
+		// A server that ever reported progress may be between load phases; its own
+		// progress (or the fallback) ends the load. Folder adds count as pending loads
+		// only until progress begins, which a silent server never sends.
+		if (!progressReportingClients.has(client)) client.resolveProjectLoaded();
+	}, PROJECT_LOAD_NO_PROGRESS_MS);
+	timer.unref?.();
+	silentLoadTimers.set(client, timer);
+}
+
 function countFolderLoad(client: LspClient, delta: number): void {
 	const state = workspaceFolderStates.get(client);
 	if (state) state.pendingLoads = Math.max(0, state.pendingLoads + delta);
@@ -978,6 +1005,7 @@ async function addWorkspaceFolders(
 		throw err;
 	}
 	void client.watchedFiles?.refresh();
+	settleProjectLoadWithoutProgress(client);
 	rustAnalyzerReadyClients.delete(client);
 }
 
@@ -1742,6 +1770,7 @@ export async function getOrCreateClient(
 			);
 
 			client.status = "ready";
+			settleProjectLoadWithoutProgress(client);
 			if (isRustAnalyzerClient(client))
 				client.cargoManifests = listCargoManifests(client.cwd).catch(() => undefined);
 			// Publish only after init succeeds: pre-init clients are reachable
