@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type {
 	ResetCreditAccountStatus,
@@ -24,7 +25,7 @@ import {
 	createCodexAutoRedeemCoordinator,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, getProviderCooldownsPath, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 import { resetWindowModes } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -127,6 +128,7 @@ describe("Claude saved-reset trigger integration", () => {
 			await manager.close();
 		}
 		tempDir.removeSync();
+		fs.rmSync(getProviderCooldownsPath(), { force: true });
 		vi.restoreAllMocks();
 	});
 
