@@ -585,6 +585,14 @@ function hasMatchingEmbeddedAddon(ctx) {
 	);
 }
 
+/** This build's embedded addon for the selected variant, plus the lazily extracted baseline fallback on modern x64. */
+function embeddedProbeFiles(ctx) {
+	if (!hasMatchingEmbeddedAddon(ctx)) return { primary: null, fallback: null };
+	const fallback =
+		ctx.selectedVariant === "modern" ? embeddedAddon.files.find(file => file.variant === "baseline") || null : null;
+	return { primary: selectEmbeddedAddonFile(ctx.selectedVariant), fallback };
+}
+
 function maybeExtractEmbeddedAddon(ctx, errors, file = selectEmbeddedAddonFile(ctx.selectedVariant)) {
 	if (!hasMatchingEmbeddedAddon(ctx) || !file) return null;
 
@@ -987,13 +995,27 @@ function configureGrammarDir(bindings, nativesDir) {
 }
 
 
+/**
+ * Paths a compiled binary loads its addon from: this build's
+ * `embedded-<hash>/` paths when it embeds an addon (the shared
+ * `versionedDir/<filename>` paths are never probed then), else the shared ones.
+ */
+function compiledAddonTargets(ctx) {
+	const { primary, fallback } = embeddedProbeFiles(ctx);
+	const files = [...new Set([primary, fallback].filter(Boolean))];
+	if (files.length > 0) {
+		return files.map(file => ({ filename: file.filename, targetPath: embeddedAddonPath(ctx.versionedDir, file) }));
+	}
+	return ctx.addonFilenames.map(filename => ({ filename, targetPath: path.join(ctx.versionedDir, filename) }));
+}
+
 function buildHelpMessage(ctx) {
 	if (ctx.isCompiledBinary) {
-		const expectedPaths = ctx.addonFilenames.map(filename => `  ${path.join(ctx.versionedDir, filename)}`).join("\n");
-		const downloadHints = ctx.addonFilenames
-			.map(filename => {
+		const targets = compiledAddonTargets(ctx);
+		const expectedPaths = targets.map(({ targetPath }) => `  ${targetPath}`).join("\n");
+		const downloadHints = targets
+			.map(({ filename, targetPath }) => {
 				const downloadUrl = `https://github.com/can1357/oh-my-pi/releases/latest/download/${filename}`;
-				const targetPath = path.join(ctx.versionedDir, filename);
 				return `  curl -fsSL "${downloadUrl}" -o "${targetPath}"`;
 			})
 			.join("\n");
@@ -1136,11 +1158,7 @@ export function loadNative() {
 	const embeddedCandidate = maybeExtractEmbeddedAddon(ctx, errors);
 	const stagedCandidate = embeddedCandidate ? null : maybeStageNodeModulesAddon(ctx, errors);
 	const hasEmbedded = hasMatchingEmbeddedAddon(ctx);
-	const primaryEmbeddedFile = hasEmbedded ? selectEmbeddedAddonFile(ctx.selectedVariant) : null;
-	const fallbackEmbeddedFile =
-		hasEmbedded && ctx.selectedVariant === "modern"
-			? embeddedAddon.files.find(file => file.variant === "baseline") || null
-			: null;
+	const { primary: primaryEmbeddedFile, fallback: fallbackEmbeddedFile } = embeddedProbeFiles(ctx);
 	const fallbackEmbeddedPath = fallbackEmbeddedFile && embeddedAddonPath(ctx.versionedDir, fallbackEmbeddedFile);
 	const runtimeCandidates = resolveRuntimeCandidates({
 		candidates: ctx.candidates,
