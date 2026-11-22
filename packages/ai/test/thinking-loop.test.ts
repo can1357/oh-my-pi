@@ -264,6 +264,44 @@ function vrmlDraft(parts: number): string {
 	return `\`\`\`wrl\n#VRML V2.0 utf8\nTransform {\n  children [\n${blocks.join("\n")}\n\n`;
 }
 
+/** A markdown table and a one-line JSON array, each with `n` same-shape rows whose
+ *  only variation is a numeric id: the final-answer shape from issue #11129. */
+function tableAndJsonAnswer(n: number): string {
+	const rows = ["| case_id | case_name | case_url |", "| --- | --- | --- |"];
+	const items: string[] = [];
+	for (let i = 0; i < n; i++) {
+		const id = 35350 + i;
+		rows.push(`| ${id} | case ${i + 1} | https://example.com/#/CaseEdit?fs_id=${id} |`);
+		items.push(
+			`{"case_id": ${id}, "case_name": "case ${i + 1}", "case_url": "https://example.com/#/CaseEdit?fs_id=${id}", "case_sheet": 0}`,
+		);
+	}
+	return `${rows.join("\n")}\n\n[TA_CASES]#{"cases": [${items.join(", ")}]}`;
+}
+
+/** `records` one-line JSON records with a `valueChars`-long description. Every record
+ *  carries the same text and only the digits differ: the shape of issue #11129 with long
+ *  values in place of the short ones tableAndJsonAnswer uses. */
+function jsonRecords(records: number, valueChars: number): string[] {
+	const base =
+		"Open the login page, enter the test account credentials, confirm the dashboard renders the case list, and verify every widget reports data. ";
+	return Array.from({ length: records }, (_, i) => {
+		let description = `Case ${i} `;
+		while (description.length < valueChars) description += base;
+		return `{"case_id": ${35350 + i}, "case_name": "case ${i + 1}", "description": "${description.slice(0, valueChars)}", "case_sheet": 0}`;
+	});
+}
+
+/** A degenerate reasoning loop dense with inline code: each paragraph re-reads the same
+ *  files with cosmetic wording drift, so most of its punctuation is backticks. */
+function inlineCodeReasoningLoop(paragraphs: number): string {
+	return Array.from(
+		{ length: paragraphs },
+		(_, i) =>
+			`Attempt ${i}: I will call \`read\` on \`src/a/b.ts\`, then \`grep\` for \`foo\` in \`src/\`, then \`edit\` \`src/c/d.ts\`: the \`foo\` helper ${i % 2 ? "again" : "once more"} needs checking, so \`bun test\` follows.`,
+	).join("\n\n");
+}
+
 describe("ThinkingLoopDetector", () => {
 	test("trips on a tight near-duplicate paragraph loop via the trigram path", () => {
 		// High word-trigram overlap: the cluster check claims it before the lexical
@@ -405,6 +443,167 @@ describe("ThinkingLoopDetector", () => {
 		// path cannot reach them.
 		const detector = new ThinkingLoopDetector();
 		expect(detector.push(`${PUNCTUATION_RUN_PREFIX}${"  ".repeat(2000)}`)).toBeNull();
+	});
+
+	test("does not trip on a markdown table followed by a JSON array of same-shape rows (issue #11129)", () => {
+		// Streamed in 20-char deltas as the provider sends them. Both blocks are answer
+		// content, not reasoning: their rows differ only in numeric ids.
+		expect(feed(tableAndJsonAnswer(33), 20)).toBeNull();
+	});
+
+	test("does not trip on a long markdown table whose cells are prose", () => {
+		// Same-shape rows with prose cells and no JSON fields: only the pipe-row shape keeps
+		// them out of the similarity check.
+		const rows = ["| case_id | status | note |", "| --- | --- | --- |"];
+		for (let i = 0; i < 150; i++) rows.push(`| ${35350 + i} | Verify the login page loads | Pass |`);
+		expect(feed(rows.join("\n"), 20)).toBeNull();
+	});
+
+	test("does not trip on a one-line JSON array of same-shape records (issue #11129)", () => {
+		const items = Array.from(
+			{ length: 100 },
+			(_, i) =>
+				`{"case_id": ${35350 + i}, "case_name": "case ${i + 1}", "case_url": "https://example.com/#/CaseEdit?fs_id=${35350 + i}", "case_sheet": 0}`,
+		);
+		expect(feed(`[TA_CASES]#{"cases": [${items.join(", ")}]}`, 20)).toBeNull();
+	});
+
+	test("does not trip on a one-line JSON array whose records carry long text values (issue #11129)", () => {
+		// A 250-character value spans chunk boundaries. A chunk that starts inside a value must
+		// not leave the rest of that value unmasked, or it reads as prose.
+		expect(feed(`[TA_CASES]#{"cases": [${jsonRecords(60, 250).join(", ")}]}`, 20)).toBeNull();
+	});
+
+	test("does not trip on 100 one-line JSON records with 550-character string values (issue #11129)", () => {
+		// At this length a 700-character chunk starts at a value's opening quote after its
+		// `:` landed in the previous chunk; the value must still be masked, not read as prose.
+		expect(feed(`[TA_CASES]#{"cases": [${jsonRecords(100, 550).join(", ")}]}`, 20)).toBeNull();
+	});
+
+	test("does not trip on a one-line JSON array whose records carry array-valued fields (issue #11129)", () => {
+		// A field value may be a flat array of scalars, not only a scalar.
+		const items = Array.from(
+			{ length: 100 },
+			(_, i) =>
+				`{"case_id": ${35350 + i}, "case_name": "case ${i + 1}", "steps": [1, 2, 3], "tags": ["auth", "login"], "case_sheet": 0}`,
+		);
+		expect(feed(`[TA_CASES]#{"cases": [${items.join(", ")}]}`, 20)).toBeNull();
+	});
+
+	test("does not trip on JSON records one per line (issue #11129)", () => {
+		// 150 records: enough to trip the near-duplicate path without the structured skip.
+		expect(feed(jsonRecords(150, 60).join("\n"), 20)).toBeNull();
+	});
+
+	test("still trips on a reasoning loop with one shell pipe per line", () => {
+		// One `|` is a shell pipe, not a table row: the table rule needs two pipes per line.
+		const lines = Array.from(
+			{ length: 80 },
+			(_, i) =>
+				`Attempt ${i}: I will run cat report.log | grep ${i % 2 ? "again" : "once more"} and check the result before I decide.`,
+		);
+		expect(feed(lines.join("\n"), 20)).toContain("near-identical segments");
+	});
+
+	test("still trips on a reasoning loop whose lines name a union type", () => {
+		// Two pipes make a union type, not a table row: a table row leads with a pipe.
+		const lines = Array.from(
+			{ length: 80 },
+			(_, i) =>
+				`Attempt ${i}: the result is a ChartOptions | TableOptions | null union, so I will narrow it again before the next call.`,
+		);
+		expect(feed(lines.join("\n"), 20)).toContain("near-identical segments");
+	});
+
+	test("still trips on a reasoning loop whose lines are shell pipelines", () => {
+		// Two pipes in a pipeline are still prose: a table row leads with a pipe.
+		const lines = Array.from(
+			{ length: 80 },
+			(_, i) =>
+				`Attempt ${i}: I will run cat report.log | grep case | wc -l and compare the count before I decide.`,
+		);
+		expect(feed(lines.join("\n"), 20)).toContain("near-identical segments");
+	});
+
+	test("still trips on a reasoning loop where half the lines are table rows", () => {
+		// Rows must reach 60% of a segment's non-blank lines. An even mix of rows and prose
+		// is reasoning, so it must still trip.
+		const paragraphs = Array.from(
+			{ length: 40 },
+			(_, i) =>
+				`| ${35350 + i} | case ${i + 1} | Verify the login page |\nI will check this row again, then move on.`,
+		);
+		expect(feed(paragraphs.join("\n\n"), 20)).toContain("near-identical segments");
+	});
+
+	test("does not trip on a long markdown table with a caption line every tenth row", () => {
+		// About 90% of the lines are rows: above the 60% share, and a share raised past 90%
+		// would let this table trip.
+		const lines = ["| case_id | case_name | case_url |", "| --- | --- | --- |"];
+		for (let i = 0; i < 150; i++) {
+			lines.push(`| ${35350 + i} | case ${i + 1} | https://example.com/#/CaseEdit?fs_id=${35350 + i} |`);
+			if (i % 10 === 9) lines.push(`Batch ${i / 10 + 1} of 15 is done.`);
+		}
+		expect(feed(lines.join("\n"), 20)).toBeNull();
+	});
+
+	test("still trips on reasoning prose that quotes a JSON object", () => {
+		// The four fields are about a quarter of each segment, under the half-of-segment rule.
+		const paragraphs = Array.from(
+			{ length: 40 },
+			(_, i) =>
+				`Attempt ${i}: the reply was {"id": ${i}, "ok": true, "retries": 0, "cached": false}, so I will check the cache again before the next call.`,
+		);
+		expect(feed(paragraphs.join("\n\n"), 20)).toContain("near-identical segments");
+	});
+
+	test("still trips on a loop of single-field JSON objects", () => {
+		// A record needs two fields. One field with a long prose value is still reasoning;
+		// the trailing word keeps the line out of the code-line strip.
+		const paragraphs = Array.from(
+			{ length: 40 },
+			(_, i) => `{"note": "I will check the cache again before the next call, then verify result ${i}."} done`,
+		);
+		expect(feed(paragraphs.join("\n\n"), 20)).toContain("near-identical segments");
+	});
+
+	test("still trips on bullet and numbered lists of same-shape items", () => {
+		// Lists are not table rows or JSON records, so the exemption does not cover them.
+		const bullets = Array.from(
+			{ length: 70 },
+			(_, i) => `- Case ${i + 1}: Verify the login page loads and shows the dashboard for user ${35350 + i}`,
+		).join("\n");
+		const numbered = Array.from(
+			{ length: 100 },
+			(_, i) => `${i + 1}. Verify the login page loads and shows the dashboard for user ${35350 + i}`,
+		).join("\n");
+		expect(feed(bullets, 20)).toContain("near-identical segments");
+		expect(feed(numbered, 20)).toContain("near-identical segments");
+	});
+
+	test("still trips on a drifting reasoning loop dense with inline code", () => {
+		// Backticks and commas lower its prose share, but it is reasoning, not record or
+		// table content, so it must still reach the near-duplicate check.
+		expect(feed(inlineCodeReasoningLoop(40), 20)).toContain("near-identical segments");
+	});
+
+	test("still trips on an exact cycle of identical table rows", () => {
+		// Byte-identical rows fed in small deltas: the exact suffix-cycle path does not
+		// bypass structured content.
+		const rows = Array.from({ length: 40 }, () => "| 35350 | case 1 | https://example.com/#/CaseEdit?fs_id=35350 |");
+		expect(feed(rows.join("\n"), 7)).toContain("back-to-back");
+	});
+
+	test("still trips on a wall-of-text prose loop with no blank lines", () => {
+		// Without paragraph breaks the loop reaches the detector as forced chunks; the
+		// structured-content exemption must leave that prose path armed. The index keeps
+		// the bytes from repeating exactly, so the near-duplicate path is the one tested.
+		const wall = Array.from(
+			{ length: 60 },
+			(_, i) =>
+				`Attempt ${i}: I am now verifying the test module ${i % 2 ? "again" : "once more"} to guarantee there are no compile errors.`,
+		).join(" ");
+		expect(feed(wall)).toContain("near-identical segments");
 	});
 });
 

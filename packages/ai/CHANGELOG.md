@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Fixed the thinking-loop guard discarding and retrying a final answer with a long markdown table or same-shape JSON records (one array or one per line) ([#11129](https://github.com/can1357/oh-my-pi/issues/11129), [#19990](https://github.com/can1357/oh-my-pi/pull/19990) by [@JamieJ5926](https://github.com/JamieJ5926))
 
 - Provider `stream stalled` errors classified from message text now carry timeout classification, so stalled auto-compaction calls fail over to the next model instead of retrying the stalled one ([#20154](https://github.com/can1357/oh-my-pi/pull/20154) by [@eggpeat](https://github.com/eggpeat))
 - OpenRouter Responses completions that end with only an unbilled encrypted reasoning item (no visible output, no tool call, zero billed reasoning tokens) now surface the native failure behind the clean stop instead of completing silently ([#20133](https://github.com/can1357/oh-my-pi/issues/20133))
