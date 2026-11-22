@@ -826,6 +826,7 @@ async function emitTurnEnd(
 	runHookOnAbortedMessage = false,
 ): Promise<void> {
 	stream.push({ type: "turn_end", message, toolResults });
+	config.onTurnEndEmitted?.();
 	const terminalYield = signal?.reason === TERMINAL_TOOL_RESULT_ABORT_REASON;
 	const isAbortedOrError =
 		message.role === "assistant" && (message.stopReason === "aborted" || message.stopReason === "error");

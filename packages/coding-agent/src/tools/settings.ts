@@ -465,6 +465,22 @@ export const cfgTodoEager = register({
 	},
 });
 
+/** `todo.backend` value for omp's own todo list, with no extension backend. */
+export const NATIVE_TODO_BACKEND = "native";
+
+export const cfgTodoBackend = register({
+	id: "todo.backend",
+	type: "string",
+	default: NATIVE_TODO_BACKEND,
+	ui: {
+		tab: "tools",
+		group: "Todos",
+		label: "Todo Backend",
+		description: "Extension that the todo list is mirrored to; Native keeps it in the session only",
+		options: "runtime",
+	},
+});
+
 export const cfgTasksTodoClearDelay = register({
 	id: "tasks.todoClearDelay",
 	type: "number",

@@ -5,6 +5,9 @@
 ### Fixed
 
 - Fixed `AgentLoop` soft tool-choice requirements refusing a batch without naming the other tool calls that caused the refusal ([#18859](https://github.com/can1357/oh-my-pi/issues/18859), [#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+- Fixed handoff generation sending a prepared context that cannot fit the target model's window; it now fails before any provider call ([#20126](https://github.com/can1357/oh-my-pi/pull/20126) by [@harshaygadekar](https://github.com/harshaygadekar))
+- Fixed rejected provider streams dropping `errorStatus` and `errorId` on assistant replies so failed turns keep their HTTP status and retry classification and cancelled turns keep their cancellation marker ([#20061](https://github.com/can1357/oh-my-pi/pull/20061) by [@eggpeat](https://github.com/eggpeat))
+- Fixed claimed speculative tool candidates hanging when discarded or aborted before execution completes ([#19359](https://github.com/can1357/oh-my-pi/issues/19359), [#19361](https://github.com/can1357/oh-my-pi/pull/19361) by [@gtoxlili](https://github.com/gtoxlili))
 
 ## [19.1.0] - 2026-11-21
 
