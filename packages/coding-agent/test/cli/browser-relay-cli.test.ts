@@ -3,22 +3,87 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { relayExtensionFiles } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/extension-files";
 import { installRelayExtension } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/installs";
+import { serveRelayLink } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/native-relay";
 import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import { relayExtensionNotice } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
 import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
+import type { FromNativeHost, ToNativeHost } from "../../../browser-relay/extension/messages";
 
 /**
- * Run an installed `background.js` as Chrome would, against the relay on `port`, with `manifest` as what
- * `chrome.runtime.getManifest()` returns. Returns a stop function that keeps the worker from dialing again.
+ * The worker's port to omp's native host. Like the host Chrome starts, it serves the worker's `link` with omp's relay
+ * link on `relayPort`; {@link close} ends the host's side, as when the worker stops.
+ */
+class NativeHostPort {
+	readonly #relayPort: number;
+	readonly #listeners: Array<(message: FromNativeHost) => void> = [];
+	readonly #inbox: ToNativeHost[] = [];
+	#waiting: PromiseWithResolvers<ToNativeHost | null> | undefined;
+	#closed = false;
+	readonly onMessage = {
+		addListener: (listener: (message: FromNativeHost) => void) => this.#listeners.push(listener),
+	};
+	readonly onDisconnect = { addListener() {} };
+
+	constructor(relayPort: number) {
+		this.#relayPort = relayPort;
+	}
+
+	postMessage(message: ToNativeHost): void {
+		if (this.#closed) return;
+		if (message.t === "link") {
+			void serveRelayLink({
+				port: this.#relayPort,
+				extensionId: message.extensionId,
+				next: () => this.#next(),
+				send: reply => this.#deliver(reply),
+				relayLine: line => this.#deliver({ t: "relay", line }),
+				log() {},
+			});
+			return;
+		}
+		if (this.#waiting) {
+			this.#waiting.resolve(message);
+			this.#waiting = undefined;
+		} else {
+			this.#inbox.push(message);
+		}
+	}
+
+	disconnect(): void {
+		this.close();
+	}
+
+	close(): void {
+		this.#closed = true;
+		this.#waiting?.resolve(null);
+		this.#waiting = undefined;
+	}
+
+	#next(): Promise<ToNativeHost | null> {
+		const queued = this.#inbox.shift();
+		if (queued) return Promise.resolve(queued);
+		if (this.#closed) return Promise.resolve(null);
+		this.#waiting = Promise.withResolvers();
+		return this.#waiting.promise;
+	}
+
+	#deliver(message: FromNativeHost): void {
+		if (this.#closed) return;
+		for (const listener of this.#listeners) listener(message);
+	}
+}
+
+/**
+ * Run an installed `background.js` as Chrome would, linked through the native host to the relay on `port`, with
+ * `manifest` as what `chrome.runtime.getManifest()` returns. Returns a stop function that ends the worker's host links.
  */
 function runExtensionWorker(script: string, port: number, manifest: object): () => void {
-	let stopped = false;
+	const hosts: NativeHostPort[] = [];
 	const event = { addListener() {}, removeListener() {} };
 	const known = {
 		storage: {
 			local: {
-				get: (defaults: Record<string, unknown>) =>
-					stopped ? Promise.withResolvers<never>().promise : Promise.resolve({ ...defaults, port }),
+				get: (defaults: Record<string, unknown>) => Promise.resolve({ ...defaults }),
 				set: () => Promise.resolve(),
 			},
 			session: { get: () => Promise.resolve({}), set: () => Promise.resolve() },
@@ -43,6 +108,11 @@ function runExtensionWorker(script: string, port: number, manifest: object): () 
 		runtime: {
 			id: "abcdefghijklmnopabcdefghijklmnop",
 			getManifest: () => manifest,
+			connectNative: () => {
+				const host = new NativeHostPort(port);
+				hosts.push(host);
+				return host;
+			},
 			openOptionsPage: () => Promise.resolve(),
 			onInstalled: event,
 			onStartup: event,
@@ -64,7 +134,7 @@ function runExtensionWorker(script: string, port: number, manifest: object): () 
 		});
 	new Function("chrome", "navigator", script)(inert(known), { userAgent: "Mozilla/5.0 Chrome/154.0.0.0" });
 	return () => {
-		stopped = true;
+		for (const host of hosts) host.close();
 	};
 }
 
@@ -100,18 +170,21 @@ describe("omp browser-relay install", () => {
 	it("reports the omp that installed the running script when Chrome restarts onto a newer manifest", async () => {
 		// After reinstalling, a Chrome restart re-reads manifest.json but keeps running the old service worker.
 		const port = await findFreeCdpPort();
-		const hello = Promise.withResolvers<void>();
+		const settled = Promise.withResolvers<void>();
 		relay = startRelayServer({
 			port,
 			group: false,
+			installRegistryFile: dir.join("installs.json"),
 			log: message => {
-				if (message === "extension connected") hello.resolve();
+				// The relay hides an outdated extension's version while it checks whether it may rewrite its files;
+				// this worker is no registered install, so the check ends with the update stopped.
+				if (message === "extension update stopped") settled.resolve();
 			},
 		});
 		const runningScript = (await relayExtensionFiles("18.6.1"))["background.js"]!;
 		const manifestOnDisk = JSON.parse((await relayExtensionFiles(VERSION))["manifest.json"]!);
 		stopWorker = runExtensionWorker(runningScript, port, manifestOnDisk);
-		await hello.promise;
+		await settled.promise;
 		expect(await relayExtensionNotice(`http://127.0.0.1:${port}`)).toContain(
 			`installed by omp 18.6.1; this is omp ${VERSION}`,
 		);
