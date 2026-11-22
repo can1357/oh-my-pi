@@ -9,9 +9,9 @@
  *   <cache>/@oh-my-pi/pi-natives-<tag>@<ver>@@@1/  leaf, holds the addon
  *
  * The loader must treat that copy as an installed release, so the leaf's addon
- * is among the candidates it opens. Each layout is written to a temporary
- * directory and the loader runs in a child process from there, so
- * `import.meta.url` is the layout's own path.
+ * is among the candidates it opens. Each layout is written to its own temporary
+ * directory and the loader copy there is imported, so `import.meta.url` is the
+ * layout's own path.
  */
 import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
@@ -53,24 +53,14 @@ function writeLeaf(dir: string): void {
 	fs.writeFileSync(path.join(dir, ADDON), "");
 }
 
-/**
- * The addon paths `initLoaderContext()` lists, read from the loader at `loaderPath` in a child process.
- * `--no-install` stops bun resolving the leaf from its global install cache (or downloading it), so the
- * leaf lookup misses here as it does for a cache copy.
- */
-function loaderCandidates(loaderPath: string): string[] {
-	const script = `const { initLoaderContext } = await import(${JSON.stringify(loaderPath)}); console.log(JSON.stringify(initLoaderContext().candidates));`;
-	const child = Bun.spawnSync({
-		cmd: [process.execPath, "--no-install", "-e", script],
-		stdout: "pipe",
-		stderr: "pipe",
-	});
-	if (child.exitCode !== 0) throw new Error(new TextDecoder().decode(child.stderr));
-	return JSON.parse(new TextDecoder().decode(child.stdout)) as string[];
+/** The addon paths `initLoaderContext()` lists, from the loader copy at `loaderPath`. */
+async function loaderCandidates(loaderPath: string): Promise<string[]> {
+	const { initLoaderContext } = await import(loaderPath);
+	return initLoaderContext().candidates;
 }
 
 describe("issue 8901: platform leaf beside a bun-cache copy of the core package", () => {
-	it("lists the leaf's addon among the candidates", () => {
+	it("lists the leaf's addon among the candidates", async () => {
 		const root = tempRoot();
 		const scope = path.join(root, "@oh-my-pi");
 		const native = writePackage(path.join(scope, `pi-natives@${VERSION}@@@1`), {
@@ -81,10 +71,10 @@ describe("issue 8901: platform leaf beside a bun-cache copy of the core package"
 		const leaf = path.join(scope, `pi-natives-${TAG}@${VERSION}@@@1`);
 		writeLeaf(leaf);
 
-		expect(loaderCandidates(path.join(native, "loader-state.js"))).toContain(path.join(leaf, ADDON));
+		expect(await loaderCandidates(path.join(native, "loader-state.js"))).toContain(path.join(leaf, ADDON));
 	});
 
-	it("ignores a foreign-version sibling when no leaf matches the running version", () => {
+	it("ignores a foreign-version sibling when no leaf matches the running version", async () => {
 		const root = tempRoot();
 		const scope = path.join(root, "@oh-my-pi");
 		const native = writePackage(path.join(scope, `pi-natives@${VERSION}@@@1`), {
@@ -95,10 +85,10 @@ describe("issue 8901: platform leaf beside a bun-cache copy of the core package"
 		const foreign = path.join(scope, `pi-natives-${TAG}@18.9.0@@@1`);
 		writeLeaf(foreign);
 
-		expect(loaderCandidates(path.join(native, "loader-state.js"))).not.toContain(path.join(foreign, ADDON));
+		expect(await loaderCandidates(path.join(native, "loader-state.js"))).not.toContain(path.join(foreign, ADDON));
 	});
 
-	it("still skips the leaf for a checkout, whose manifest declares none", () => {
+	it("still skips the leaf for a checkout, whose manifest declares none", async () => {
 		const root = tempRoot();
 		const native = writePackage(path.join(root, "checkout", "packages", "natives"), {
 			name: "@oh-my-pi/pi-natives",
@@ -107,6 +97,6 @@ describe("issue 8901: platform leaf beside a bun-cache copy of the core package"
 		const leaf = path.join(root, "checkout", "node_modules", LEAF_PACKAGE);
 		writeLeaf(leaf);
 
-		expect(loaderCandidates(path.join(native, "loader-state.js"))).not.toContain(path.join(leaf, ADDON));
+		expect(await loaderCandidates(path.join(native, "loader-state.js"))).not.toContain(path.join(leaf, ADDON));
 	});
 });
