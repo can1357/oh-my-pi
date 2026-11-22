@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { disableUserSource, enableUserSource } from "@oh-my-pi/pi-coding-agent/capability";
 import { type Skill as CapabilitySkill, skillCapability } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import { getCapability } from "@oh-my-pi/pi-coding-agent/discovery";
+import { scanSkillsFromDir } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { getWslWindowsHomeCandidate, runHostProbe } from "@oh-my-pi/pi-coding-agent/discovery/agents";
 import {
 	type LoadSkillsResult,
@@ -605,10 +606,10 @@ description: Skill loaded from a tilde-expanded custom directory.
 			await writeSkill(path.join(skillsRoot, ".hidden", "hidden-skill"), "hidden-skill");
 			await writeSkill(path.join(skillsRoot, ".git", "git-skill"), "git-skill");
 			await writeSkill(path.join(skillsRoot, "node_modules", "module-skill"), "module-skill");
-			// No SKILL.md before depth 7, so the leaf rule cannot stop the walk
-			// before the depth bound is exercised.
-			const depthSeven = path.join(skillsRoot, "a", "b", "c", "d", "e", "f", "g");
-			await writeSkill(depthSeven, "depth-seven-skill");
+			// Separate branches keep the depth-six skill from stopping the walk
+			// before the depth-seven branch reaches the bound.
+			await writeSkill(path.join(skillsRoot, "six", "a", "b", "c", "d", "e"), "depth-six-skill");
+			await writeSkill(path.join(skillsRoot, "seven", "a", "b", "c", "d", "e", "f"), "depth-seven-skill");
 
 			try {
 				const { skills, warnings } = await loadSkills({
@@ -617,10 +618,53 @@ description: Skill loaded from a tilde-expanded custom directory.
 					cwd,
 					recursive: true,
 				});
+				expect(skills.find(skill => skill.name === "depth-six-skill")?.source).toBe("agents:project");
 				for (const name of ["hidden-skill", "git-skill", "module-skill", "depth-seven-skill"]) {
 					expect(skills.some(skill => skill.name === name)).toBe(false);
 				}
 				expect(warnings.some(warning => warning.message.includes("maximum depth 6"))).toBe(true);
+			} finally {
+				await removeWithRetries(tempRoot);
+			}
+		});
+
+		it("warns and stops at the recursive entry limit", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-recursive-entries-"));
+			for (const name of ["first", "second", "third"]) await writeSkill(path.join(root, name), name);
+
+			try {
+				const result = await scanSkillsFromDir(
+					{ cwd: root, home: root, repoRoot: root },
+					{ dir: root, providerId: "test", level: "project", recursive: true, limits: { maxEntries: 2 } },
+				);
+				expect(result.items).toHaveLength(0);
+				expect(result.warnings?.some(warning => warning.includes("maximum entry count 2"))).toBe(true);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
+		it.skipIf(process.platform === "win32")("loads a symlinked skill without traversing it", async () => {
+			const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-recursive-symlink-"));
+			const cwd = path.join(tempRoot, "project");
+			const skillsRoot = path.join(cwd, ".agents", "skills");
+			const linkedSkill = path.join(tempRoot, "linked-skill");
+			const linkedGroup = path.join(tempRoot, "linked-group");
+			await writeSkill(linkedSkill, "linked-skill");
+			await writeSkill(path.join(linkedGroup, "nested", "linked-child"), "linked-child");
+			await fs.mkdir(skillsRoot, { recursive: true });
+			await fs.symlink(linkedSkill, path.join(skillsRoot, "linked-skill"), "dir");
+			await fs.symlink(linkedGroup, path.join(skillsRoot, "linked-group"), "dir");
+
+			try {
+				const { skills } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					enableAgentsProject: true,
+					cwd,
+					recursive: true,
+				});
+				expect(skills.find(skill => skill.name === "linked-skill")?.source).toBe("agents:project");
+				expect(skills.some(skill => skill.name === "linked-child")).toBe(false);
 			} finally {
 				await removeWithRetries(tempRoot);
 			}

@@ -427,6 +427,12 @@ async function globIf(
 	}
 }
 
+export interface SkillScanLimits {
+	maxDepth: number;
+	maxDirectories: number;
+	maxEntries: number;
+}
+
 export interface ScanSkillsFromDirOptions {
 	dir: string;
 	providerId: string;
@@ -436,10 +442,12 @@ export interface ScanSkillsFromDirOptions {
 	 * When true, descend into subdirectories and load every nested `SKILL.md`, so
 	 * `<dir>/group/<skill>/SKILL.md` is discovered. Directory symlinks stay leaf candidates and are
 	 * not traversed, and `.git`, `node_modules`, and hidden directories are pruned. Traversal is
-	 * bounded by depth and directory count; reaching a bound emits a warning.
+	 * bounded by depth, directory count, and entry count; reaching a bound emits a warning.
 	 * Default `false` keeps the Agent Skills spec's one-level layout.
 	 */
 	recursive?: boolean;
+	/** Override the recursive traversal bounds (tests and embedders). */
+	limits?: Partial<SkillScanLimits>;
 	/**
 	 * When true, treat a `SKILL.md` sitting directly under `dir` as a single skill in addition to
 	 * scanning `<dir>/<name>/SKILL.md` children. Matches the Claude plugin manifest convention
@@ -475,8 +483,11 @@ export function compareSkillOrder(aName: string, aPath: string, bName: string, b
 }
 
 /** Bounds for an opt-in recursive skill scan; keep startup cost predictable. */
-const RECURSIVE_SKILL_SCAN_MAX_DEPTH = 6;
-const RECURSIVE_SKILL_SCAN_MAX_DIRECTORIES = 2_000;
+const DEFAULT_RECURSIVE_SKILL_SCAN_LIMITS: SkillScanLimits = {
+	maxDepth: 6,
+	maxDirectories: 2_000,
+	maxEntries: 20_000,
+};
 const RECURSIVE_SKILL_SCAN_PRUNED_DIRECTORIES: Record<string, true> = {
 	".git": true,
 	node_modules: true,
@@ -524,12 +535,14 @@ export async function scanSkillsFromDir(
 	};
 
 	const work: Promise<void>[] = [];
+	const limits = { ...DEFAULT_RECURSIVE_SKILL_SCAN_LIMITS, ...options.limits };
 	let visitedDirectories = 0;
-	let truncated = false;
+	let visitedEntries = 0;
+	let truncation: string | undefined;
 
 	const visit = async (currentDir: string, depth: number): Promise<void> => {
-		if (recursive && visitedDirectories >= RECURSIVE_SKILL_SCAN_MAX_DIRECTORIES) {
-			truncated = true;
+		if (recursive && visitedDirectories >= limits.maxDirectories) {
+			truncation ??= `maximum directory count ${limits.maxDirectories} reached`;
 			return;
 		}
 		visitedDirectories++;
@@ -541,6 +554,13 @@ export async function scanSkillsFromDir(
 				warnings.push(`Failed to read skills directory: ${currentDir} (${String(error)})`);
 			}
 			return;
+		}
+		if (recursive) {
+			visitedEntries += entries.length;
+			if (visitedEntries > limits.maxEntries) {
+				truncation ??= `maximum entry count ${limits.maxEntries} reached`;
+				return;
+			}
 		}
 		// The root carries a skill only when a caller opts in (recursive scans or
 		// Claude plugin manifest paths); nested directories may each be a skill.
@@ -566,8 +586,8 @@ export async function scanSkillsFromDir(
 				if (fs.existsSync(childSkillPath)) work.push(loadSkill(childSkillPath));
 				continue;
 			}
-			if (depth >= RECURSIVE_SKILL_SCAN_MAX_DEPTH) {
-				truncated = true;
+			if (depth >= limits.maxDepth) {
+				truncation ??= `maximum depth ${limits.maxDepth} reached`;
 				continue;
 			}
 			await visit(path.join(currentDir, entry.name), depth + 1);
@@ -575,10 +595,8 @@ export async function scanSkillsFromDir(
 	};
 
 	await visit(dir, 0);
-	if (truncated) {
-		warnings.push(
-			`Skill discovery truncated at ${dir}: maximum depth ${RECURSIVE_SKILL_SCAN_MAX_DEPTH} or directory count ${RECURSIVE_SKILL_SCAN_MAX_DIRECTORIES} reached`,
-		);
+	if (truncation) {
+		warnings.push(`Skill discovery truncated at ${dir}: ${truncation}`);
 	}
 	await Promise.all(work);
 
