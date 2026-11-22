@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/wt` (TUI, ACP, RPC and `worktree.onStart`) runs the new worktree's `post-checkout` hook as `git worktree add` does, with a spinner in the TUI, then loads the skills and commands it added; a failing hook keeps the worktree and shows a warning, and quitting while it runs keeps that worktree with a warning. In an ovnfs checkout only a `core.hooksPath` hook runs ([#20045](https://github.com/can1357/oh-my-pi/pull/20045) by [@Dangerboi](https://github.com/Dangerboi))
+
 ### Fixed
 
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))
@@ -14,6 +18,7 @@
 - Fixed `/usage` showing "Usage history unavailable (database is locked)" while another process was writing the stats database; the stored history stays visible, marked not synced when the refresh cannot finish ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
 - `openai-models-list` discovery no longer offers a gateway's speech and transcription models as chat models: rows whose only output is `speech` or `transcription` (including OpenRouter's `text->speech` style `architecture.modality` summary) become `tts` and `stt` models ([#19900](https://github.com/can1357/oh-my-pi/pull/19900) by [@Xytronix](https://github.com/Xytronix))
 - Subagents stopped by their parent through `proc://<id>/kill` now record "Stopped by parent agent" in their transcripts instead of "Interrupted by user" ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
+- Fixed the omp daemon staying alive for up to 3 seconds after shutdown, or 11 seconds after stopping a module unit such as the image URL broker, once its work was done
 - Fixed subagents running on models outside the active `enabledModels` scope through a requested model, agent override, frontmatter model, parent-model auth fallback or retry fallback ([#19922](https://github.com/can1357/oh-my-pi/pull/19922) by [@Xytronix](https://github.com/Xytronix); reported in [#14381](https://github.com/can1357/oh-my-pi/issues/14381))
 
 ## [19.1.0] - 2026-11-21
