@@ -23,9 +23,17 @@ export function parseQueueShorthand(text: string): string | undefined {
 	return prefix ? text.slice(prefix.length).trim() : undefined;
 }
 
-/** Render messages as `->` / `=>` shorthand that {@link parseQueueShorthand} and {@link splitQueuedMessages} read back as the same messages. */
+/**
+ * Render messages as `->` / `=>` shorthand that {@link parseQueueShorthand} and {@link splitQueuedMessages} read back as the same messages.
+ * A lone message that is already a sequential list is returned verbatim, since no shorthand form of it survives the read-back.
+ */
 export function formatQueueShorthand(messages: readonly string[]): string {
-	if (messages.length === 1) return `=> ${messages[0]}`;
+	if (messages.length === 1) {
+		const message = messages[0] ?? "";
+		// Prefixing a message that is itself a sequential list would read back as
+		// several messages with their markers eaten, so hand it back unprefixed.
+		return isQueuedMessageList(message) ? message : `=> ${message}`;
+	}
 	return `=>\n${messages.map((message, index) => `${index + 1}. ${message.replaceAll("\n", "\n   ")}`).join("\n")}`;
 }
 

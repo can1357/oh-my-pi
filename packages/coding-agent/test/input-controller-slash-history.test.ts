@@ -4,7 +4,12 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { cfgBareExitOnEmptySession, cfgBareSlashCommands } from "@oh-my-pi/pi-coding-agent/modes/settings";
-import { isQueuedMessageList, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
+import {
+	formatQueueShorthand,
+	isQueuedMessageList,
+	parseQueueShorthand,
+	splitQueuedMessages,
+} from "@oh-my-pi/pi-tui/prompt/queue-input";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
 // Drives the real editor submit handler through the builtin slash dispatch
@@ -511,5 +516,32 @@ describe("yield queue list parsing", () => {
 		expect(splitQueuedMessages("1. first\n3. third")).toEqual(["1. first\n3. third"]);
 		expect(isQueuedMessageList("1. first\n2. second\n3. third\n4.")).toBe(true);
 		expect(splitQueuedMessages("1. first\n2. second\n3. third\n4.")).toEqual(["first", "second", "third"]);
+	});
+});
+
+describe("queue shorthand round trip", () => {
+	// Mirrors the submit path: a draft that still carries the `->` / `=>` prefix
+	// is split into queue entries, anything else is one prompt.
+	function decodeDraft(draft: string): string[] {
+		const body = parseQueueShorthand(draft);
+		return body === undefined ? [draft] : splitQueuedMessages(body);
+	}
+
+	it("hands a single message back as one message, including when it is itself a list", () => {
+		// A restored draft shaped like a list used to come back as `=> 1. a\n2. b`,
+		// which the next submit split into two turns with the markers eaten.
+		for (const message of ["check the build", "1. a\n2. b", "1. a\n2. b\n3.", "- a\n- b"]) {
+			expect(decodeDraft(formatQueueShorthand([message]))).toEqual([message]);
+		}
+	});
+
+	it("keeps the queue prefix for a single message that is not an enumerated list", () => {
+		expect(formatQueueShorthand(["- a\n- b"])).toBe("=> - a\n- b");
+	});
+
+	it("round-trips a multi-message queue through the enumerated form", () => {
+		const messages = ["first", "second", "third"];
+		expect(formatQueueShorthand(messages)).toBe("=>\n1. first\n2. second\n3. third");
+		expect(decodeDraft(formatQueueShorthand(messages))).toEqual(messages);
 	});
 });
