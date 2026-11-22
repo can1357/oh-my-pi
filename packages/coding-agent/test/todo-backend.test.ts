@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
 	SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS,
@@ -20,6 +20,9 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgTodoBackend } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools/todo";
+import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
+import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
+import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
@@ -77,6 +80,7 @@ describe("todo backend", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
+		resetSettingsForTest();
 		testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
 		testSetSessionShutdownHandlerTimeoutMs(SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS);
 		for (const session of sessions) {
@@ -301,13 +305,26 @@ describe("todo backend", () => {
 
 	it("a backend the user picks in Settings gets the current list at once", async () => {
 		const backend = tracker();
-		const { session } = await open([backend.extension]);
+		// The settings panel writes to the process's settings, so the session runs on them here.
+		const settings = await Settings.init({ inMemory: true });
+		const { session } = await open([backend.extension], undefined, { settings });
 		session.commitTodoPhases(list("before"));
+		await themeModule.initTheme(false);
+		const themes = Promise.resolve(["dark"]);
+		spyOn(themeModule, "getAvailableThemes").mockReturnValue(themes);
+		const overlays: Component[] = [];
+		const showOverlay = (component: Component): OverlayHandle => {
+			overlays.push(component);
+			return { hide: () => {}, setHidden: () => {}, isHidden: () => false };
+		};
+		const ui = { showOverlay, setFocus: () => {} };
 
-		// What the settings panel does with a pick: the stored write, then its side effect in this process.
-		const panel = new SelectorController(createInteractiveModeContext({ session, settings: session.settings }));
-		cfgTodoBackend.set(session.settings, "tracker");
-		panel.handleSettingChange(cfgTodoBackend.id, "tracker");
+		new SelectorController(createInteractiveModeContext({ session, settings, ui })).showSettingsSelector();
+		await themes;
+		const panel = overlays[0];
+		if (!(panel instanceof SettingsSelectorComponent)) throw new Error("the settings menu did not open");
+		panel.handleNativeEvent({ type: "action", key: "", act: "page", value: "tools", mods: [] });
+		panel.handleNativeEvent({ type: "change", key: "", item: cfgTodoBackend.id, value: "tracker" });
 		await settled(session);
 
 		expect(backend.calls).toEqual([{ phases: list("before"), sessionId: session.sessionManager.getSessionId() }]);
@@ -495,7 +512,10 @@ describe("todo backend", () => {
 		session.extensionRunner?.setSuspendedExtensions(() => true);
 
 		// What a config reload or a move to another project does: the setting lands before the extension.
+		// An approved `cfg://` write can too, and it also runs the settings panel's hook.
 		cfgTodoBackend.set(session.settings, "tracker");
+		const panel = new SelectorController(createInteractiveModeContext({ session, settings: session.settings }));
+		panel.handleSettingChange(cfgTodoBackend.id, "tracker");
 		await settled(session);
 		session.extensionRunner?.setSuspendedExtensions(() => false);
 		await settled(session);

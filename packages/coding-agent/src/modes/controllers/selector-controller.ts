@@ -353,7 +353,13 @@ export class SelectorController {
 						composerPreviewStatus: this.ctx.statusLine,
 					},
 					{
-						onChange: (id, value) => this.handleSettingChange(id, value),
+						onChange: (id, value) => {
+							this.handleSettingChange(id, value);
+							// A backend picked here is registered, so it gets the current list at once. An
+							// approved `cfg://` write can name one whose extension is still loading, like a
+							// config reload: those get the list with the next change.
+							if (id === cfgTodoBackend.id) this.ctx.session.mirrorTodoPhases();
+						},
 						onThemePreview: async themeName => {
 							const result = await previewTheme(themeName);
 							if (result.success) {
@@ -724,17 +730,11 @@ export class SelectorController {
 	/**
 	 * Apply the side effects of a setting change the user made in this process
 	 * (settings selector, approved `cfg://` writes); the value is already stored.
-	 * Two settings need this, for effects that config reloads and parent-session writes must not
-	 * have: `defaultThinkingLevel` also switches the live session, and a picked `todo.backend` is
-	 * sent the current list at once (a reload can select a backend before its extension has
-	 * loaded, which would report it as unregistered). Every other setting applies through handle
-	 * listeners owned by the session and InteractiveMode.
+	 * Only `defaultThinkingLevel` needs this: it also switches the live session,
+	 * which config reloads and parent-session writes must not do. Every other
+	 * setting applies through handle listeners owned by the session and InteractiveMode.
 	 */
 	handleSettingChange(id: string, value: unknown): void {
-		if (id === cfgTodoBackend.id) {
-			this.ctx.session.mirrorTodoPhases();
-			return;
-		}
 		if (id !== cfgDefaultThinkingLevel.id || typeof value !== "string") return;
 		const level = parseConfiguredThinkingLevel(value);
 		if (level === undefined || level === this.ctx.session.configuredThinkingLevel()) return;
