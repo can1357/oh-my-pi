@@ -806,6 +806,13 @@ export class McpEndpoint implements ModuleUnit {
 		stage: "connect" | "receive",
 	): Promise<MCPTransportError> {
 		const failure: UpstreamFailure = normalizeMCPTransportError(error, { transport: this.#transport, stage });
+		if (this.era === "modern" && failure.rpc?.code === MCPErrorCode.UnsupportedProtocolVersion) {
+			try {
+				this.#store.clearEra(this.#publicIdentity, "modern");
+			} catch (error) {
+				logger.debug("MCP era invalidation failed", { server: this.#name, error: String(error) });
+			}
+		}
 		if (failure.rpc || !record) return failure;
 		if (!record.exit && Object.hasOwn(LOST_UPSTREAM, failure.failure) && record.peer.pid !== undefined) {
 			// The pipe closes before the exit is reaped; `#closed` records it first when it arrives in time.
