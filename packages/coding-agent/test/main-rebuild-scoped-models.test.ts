@@ -303,6 +303,36 @@ describe("buildSessionOptions --models scope selection", () => {
 		expect(options.thinkingLevel).toBe(Effort.Medium);
 	});
 
+	it("keeps the --model thinking level over the scope entry for the same model", async () => {
+		const parsed = parseArgs([
+			"--model",
+			"anthropic/claude-opus-4-5:medium",
+			"--models",
+			"anthropic/claude-sonnet-4-5:low,anthropic/claude-opus-4-5:high",
+		]);
+		const scoped = await resolveModelScope(
+			["anthropic/claude-sonnet-4-5:low", "anthropic/claude-opus-4-5:high"],
+			{
+				getAvailable: () => [
+					getBundledModel("anthropic", "claude-sonnet-4-5"),
+					getBundledModel("anthropic", "claude-opus-4-5"),
+				],
+			},
+			undefined,
+		);
+
+		const options = await buildSessionOptions(
+			parsed,
+			scoped,
+			SessionManager.inMemory(),
+			registry(),
+			Settings.isolated(),
+		);
+
+		expect(options.model?.id).toBe("claude-opus-4-5");
+		expect(options.thinkingLevel).toBe(Effort.Medium);
+	});
+
 	it("pins the first scoped model and sets no deferred pattern when the scope resolved", async () => {
 		const parsed = parseArgs(["--models", "prov/a"]);
 		const scoped = await resolveModelScope(["prov/a"], { getAvailable: () => [model("a")] }, undefined);

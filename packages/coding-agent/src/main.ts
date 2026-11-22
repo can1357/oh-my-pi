@@ -1545,6 +1545,8 @@ export async function buildSessionOptions(
 	// createAgentSession's post-extension re-resolution (issue #6694); the
 	// scoped thinking-level seed below must be deferred along with the model.
 	let deferredDefaultRole = false;
+	// An explicit `--model` level outranks the scope entry for the same model.
+	let cliModelThinking = false;
 	if (parsed.model) {
 		const resolved = resolveCliModel({
 			cliProvider: parsed.provider,
@@ -1604,6 +1606,7 @@ export async function buildSessionOptions(
 			});
 			if (!parsed.thinking && resolved.thinkingLevel) {
 				options.thinkingLevel = resolved.thinkingLevel;
+				cliModelThinking = true;
 			}
 		}
 	} else if (scopedModels.length > 0 && !restoringSession) {
@@ -1743,6 +1746,7 @@ export async function buildSessionOptions(
 		options.thinkingLevel = parsed.thinking;
 	} else if (
 		startScoped?.explicitThinkingLevel === true &&
+		!cliModelThinking &&
 		// A deferred default role resolves its own model (and any explicit
 		// thinking suffix) after extensions register; seeding the fallback
 		// scoped model's level here would override it in createAgentSession.
