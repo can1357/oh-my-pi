@@ -158,7 +158,9 @@ describe("HTML export template", () => {
 	test("npm packages keep the tiny loader and metadata but omit hosted viewer source assets", async () => {
 		const productionDir = path.join(tempRoot, "production-bundle");
 		const staleAsset = path.join(productionDir, "template-stale.css");
+		const staleChunk = path.join(productionDir, "cli-stale-00000000.js");
 		await Bun.write(staleAsset, "obsolete viewer sidecar");
+		await Bun.write(staleChunk, "obsolete bundle chunk");
 		const runner = path.join(tempRoot, "bundle-dist-runner.ts");
 		await Bun.write(
 			runner,
@@ -177,6 +179,7 @@ describe("HTML export template", () => {
 		]);
 		expect(exitCode, `${stdout}\n${stderr}`).toBe(0);
 		expect(await Bun.file(staleAsset).exists()).toBe(false);
+		expect(await Bun.file(staleChunk).exists()).toBe(false);
 
 		const repoRoot = path.resolve(packageDir, "../..");
 		const packWorkspace = path.join(tempRoot, "pack-workspace");
@@ -208,5 +211,9 @@ describe("HTML export template", () => {
 			expect(packed).not.toContain(`src/export/html/${name}`);
 		}
 		expect(packed.filter(file => /^dist\/(template-|tool-views\.|marked\.|highlight\.)/.test(file))).toEqual([]);
+		// dist/cli.js statically imports its code-split chunks; a chunk missing from the tarball breaks every launch.
+		const emittedScripts = (await fs.readdir(productionDir)).filter(name => name.endsWith(".js"));
+		expect(emittedScripts).toContain("cli.js");
+		expect(emittedScripts.map(name => `dist/${name}`).filter(file => !packed.includes(file))).toEqual([]);
 	}, 60_000);
 });

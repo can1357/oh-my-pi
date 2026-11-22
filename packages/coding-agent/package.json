@@ -34,6 +34,7 @@
 		"!src/export/html/template.js",
 		"!src/export/html/share-loader.js",
 		"dist/cli.js",
+		"dist/cli-*.js",
 		"dist/docs-index.generated.txt",
 		"dist/CHANGELOG-*.md",
 		"dist/*.node",
