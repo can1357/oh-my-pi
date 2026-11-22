@@ -37,11 +37,12 @@ Three coordinated improvements:
 - Added test `remote_execution_gate_default_is_not_accepted`
 - All 1236 tests pass
 
-### * Step 3: Prepare live reattach verification plan
+###   Step 3: Prepare live reattach verification plan
 
 - Document prerequisites from ADR 0040 D6
 - Identify what needs owner approval
 - Create a checklist for when owner is ready
+- PR #702 created: https://github.com/blyzer/oh-my-pi/pull/702
 
 ## Verification
 

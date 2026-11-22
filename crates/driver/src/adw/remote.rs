@@ -37,7 +37,10 @@ pub enum AdwRemoteError {
 	#[error(transparent)]
 	Remote(#[from] RemoteError),
 	/// Remote execution gates are not satisfied (ADR 0047).
-	#[error("remote execution not accepted, set sv_exec_accepted = true after ADR 0040/0047 gates are satisfied")]
+	#[error(
+		"remote execution not accepted, set sv_exec_accepted = true after ADR 0040/0047 gates are \
+		 satisfied"
+	)]
 	GatesNotSatisfied,
 }
 

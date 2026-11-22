@@ -2837,10 +2837,7 @@ async fn execution_t13_crash_between_acceptance_and_commit_is_submission_unknown
 	// so the job settles SubmissionUnknown.
 	assert_eq!(record.status, "failed");
 	assert_eq!(record.execution_state, Some(omp_exec::ExecutionState::SubmissionUnknown));
-	assert_eq!(
-		record.execution_failure,
-		Some(omp_exec::ExecutionErrorKind::SubmissionUnknown)
-	);
+	assert_eq!(record.execution_failure, Some(omp_exec::ExecutionErrorKind::SubmissionUnknown));
 	assert_eq!(record.reattach_handle, None);
 	assert_eq!(record.error.as_deref(), Some(omp_agent::ORPHANED_EXECUTION_JOB));
 	// The backend started exactly once; no second start on restart.
