@@ -84,12 +84,15 @@ class ProtocolTests(unittest.TestCase):
             common.validate_request(req)
 
     def test_pool_generation_and_coverage_must_agree(self):
-        for patch_fields in ({"pool": "self-hosted"}, {"generation": 1},
+        for patch_fields in ({"pool": "self-hosted", "generation": 1}, {"generation": 1},
                              {"coverage": "full", "packages": ["omp-core"]},
                              {"coverage": "subset", "packages": ["omp-core", "omp-core"]}):
             req = dict(request(), **patch_fields)
             with self.subTest(patch_fields=patch_fields), self.assertRaises(common.VerificationError):
                 common.validate_request(req)
+        # Self-hosted with generation 0 is valid (direct dispatch when hosted unavailable).
+        req = dict(request(), pool="self-hosted", generation=0, hosted_run_id=0)
+        common.validate_request(req)
 
     def test_current_synthetic_merge_is_admitted(self):
         req = request()
