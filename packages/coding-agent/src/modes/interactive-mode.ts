@@ -1917,6 +1917,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 	/** Worktrees this launch created (auto-start or `/wt`), considered on exit per `worktree.onExit`. */
 	#ownedWorktrees: SessionWorktree[] = [];
+	/** Owned worktrees whose `post-checkout` hook is still running: an exit keeps them rather than remove them under the hook. */
+	#worktreesInHook = new Set<SessionWorktree>();
 	/** True once `shutdown()` has begun teardown. Surfaced to the input
 	 *  controller so a Ctrl+C arriving while teardown is in flight can hard-
 	 *  abort the remaining work instead of stacking another no-op call. */
@@ -8555,7 +8557,16 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	async #planOwnedWorktreeExit(signal: AbortSignal): Promise<WorktreeExitPlan[]> {
 		const policy = cfgWorktreeOnExit.get(this.settings);
-		if (policy === "keep" || this.#ownedWorktrees.length === 0) return [];
+		if (policy === "keep") return [];
+		const owned: SessionWorktree[] = [];
+		for (const worktree of this.#ownedWorktrees) {
+			if (this.#worktreesInHook.has(worktree)) {
+				this.showWarning(`Kept worktree ${shortenPath(worktree.path)}: its post-checkout hook is still running.`);
+			} else {
+				owned.push(worktree);
+			}
+		}
+		if (owned.length === 0) return [];
 		this.#abortLoopCondition();
 		this.#cancelLoopAutoSubmit();
 		try {
@@ -8565,7 +8576,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning(err instanceof Error ? err.message : String(err));
 		}
 		return planWorktreeExit(
-			this.#ownedWorktrees,
+			owned,
 			policy,
 			(title, message) => this.showHookConfirm(title, message, { signal }),
 			message => this.showWarning(message),
@@ -9564,7 +9575,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	async handleWorktreeCommand(branch?: string, options?: { keepChanges?: boolean }): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
 		const worktree = await this.#commandController.handleWorktreeCommand(branch, options);
-		if (worktree) this.#ownedWorktrees.push(worktree);
+		if (!worktree) return;
+		this.#ownedWorktrees.push(worktree);
+		this.#worktreesInHook.add(worktree);
+		try {
+			await this.#commandController.runWorktreeHook(worktree);
+		} finally {
+			this.#worktreesInHook.delete(worktree);
+		}
 	}
 
 	/**
