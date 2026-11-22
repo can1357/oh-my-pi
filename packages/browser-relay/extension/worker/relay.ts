@@ -87,6 +87,8 @@ let handlers: RelayHandlers | null = null;
 let hostPort: chrome.runtime.Port | null = null;
 /** The current link epoch, while a relay listens for this browser. */
 let link: Link | null = null;
+/** The browser's reason the last native host port closed; cleared by a link. See {@link RelayStatus.hostError}. */
+let hostError: string | undefined;
 let reconnectDelay = RECONNECT_MIN_MS;
 let reconnectTimer: NodeJS.Timeout | null = null;
 let deadlineTimer: NodeJS.Timeout | null = null;
@@ -130,6 +132,7 @@ export function relayStatus(): RelayStatus {
 		connected: link !== null,
 		extensionVersion:
 			typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
+		hostError,
 	};
 }
 
@@ -262,6 +265,7 @@ function linked(): void {
 	if (link) unlinked("omp relay changed");
 	clearLinkDeadline();
 	reconnectDelay = RECONNECT_MIN_MS;
+	hostError = undefined;
 	const epoch = new Link();
 	link = epoch;
 	void setBadge(true);
@@ -350,11 +354,17 @@ export function connectRelay(): void {
 		if (hostPort !== port) return;
 		hostPort = null;
 		clearLinkDeadline();
+		const hadLink = link !== null;
+		const changed = detail !== hostError;
+		hostError = detail;
 		unlinked(
 			detail
 				? `omp native host disconnected: ${detail}`
 				: "omp native host disconnected",
 		);
+		// A port the browser refused (host missing, blocked by policy) never linked, so `unlinked` reported nothing;
+		// the panel still needs the browser's reason instead of guessing.
+		if (!hadLink && changed) handlers?.status(relayStatus());
 		scheduleReconnect();
 	});
 	const request: ToNativeHost = { t: "link", extensionId: chrome.runtime.id };
