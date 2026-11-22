@@ -72,6 +72,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 				level: root.level,
 				requireDescription: true,
 				pluginName: root.name,
+				pluginRoot: root.path,
 			}),
 		),
 	);
@@ -95,6 +96,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 					name: name.replace(/\.md$/, ""),
 					path: filePath,
 					content,
+					pluginRoot: root.path,
 					level: root.level,
 					_source: source,
 				}),

@@ -32,6 +32,7 @@ import {
 import { resolveContainedPath } from "./contained-path";
 import { compareSkillOrder, createSourceMeta, listClaudePluginRoots } from "./helpers";
 import { listOmpExtensionRoots } from "./omp-extension-roots";
+import { substitutePluginMarkdown } from "./substitute-plugin-root";
 
 const PROVIDER_ID = "agent-plugins";
 const DISPLAY_NAME = "Agent Plugins";
@@ -186,8 +187,9 @@ async function scanStandardSkills(
 			items.push({
 				name: entry.name,
 				containRoot: realRoot,
+				pluginRoot: realRoot,
 				path: skillPath,
-				content: body,
+				content: substitutePluginMarkdown(body, realRoot, path.dirname(skillPath)),
 				frontmatter,
 				level,
 				// The manifest name, never a path segment: registry installs live

@@ -99,7 +99,8 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		fs.mkdirSync(skillDir, { recursive: true });
 		fs.writeFileSync(
 			path.join(skillDir, "SKILL.md"),
-			`---\nname: ${SKILL}\ndescription: Plugin skill.\n---\n\nBody of version ${version}.\n`,
+			`---\nname: ${SKILL}\ndescription: Plugin skill.\n---\n\nBody of version ${version}. Run "$` +
+				`{CLAUDE_PLUGIN_ROOT}/scripts/helper.py".\n`,
 		);
 		fs.writeFileSync(path.join(skillDir, "notes.md"), `Notes of version ${version}.\n`);
 	}
@@ -233,6 +234,7 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		installPluginVersion("2.0.0", "1.0.0");
 
 		expect(await readText(session, `skill://${SKILL}`)).toContain("Body of version 2.0.0.");
+		expect(await readText(session, `skill://${SKILL}`)).toContain(`${pluginDir("2.0.0")}/scripts/helper.py`);
 		expect(await readText(session, `skill://${SKILL}/notes.md`)).toContain("Notes of version 2.0.0.");
 		// The session's own list is healed, so subagents it spawns from now on inherit the new path.
 		const skill = session.skills.find(entry => entry.name === SKILL);

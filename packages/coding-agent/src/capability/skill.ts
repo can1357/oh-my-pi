@@ -43,6 +43,8 @@ export interface Skill {
 	content: string;
 	/** Parsed frontmatter */
 	frontmatter?: SkillFrontmatter;
+	/** Installed plugin root used to expand path variables in the instruction body. */
+	pluginRoot?: string;
 	/**
 	 * Filesystem-resolved plugin root this skill was packaged in (Agent Plugins
 	 * §4.1). When set, every `skill://` resource access must realpath-resolve

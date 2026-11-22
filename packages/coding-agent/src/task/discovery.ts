@@ -27,6 +27,7 @@ import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
 import { pluginUsesClaudeModelDialect } from "../discovery/agent-plugin-format";
 import { listClaudePluginRoots } from "../discovery/helpers";
 import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
+import { substitutePluginMarkdown } from "../discovery/substitute-plugin-root";
 import { normalizeClaudeCodeToolName, normalizeToolNames } from "../tools/builtin-names";
 import { loadBundledAgents, parseAgent } from "./agents";
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
@@ -47,12 +48,19 @@ interface AgentDirectory {
 	source: AgentSource;
 	/** Frontmatter is the Claude Code dialect: drop `model:` and translate `tools:`. */
 	claudeDialect?: boolean;
+	/** Installed plugin root for path substitutions in agent instructions. */
+	pluginRoot?: string;
 }
 
 /**
  * Load agents from a directory.
  */
-async function loadAgentsFromDir({ dir, source, claudeDialect }: AgentDirectory): Promise<AgentDefinition[]> {
+async function loadAgentsFromDir({
+	dir,
+	source,
+	claudeDialect,
+	pluginRoot,
+}: AgentDirectory): Promise<AgentDefinition[]> {
 	const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
 	const files = entries
 		.filter(entry => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".md"))
@@ -63,6 +71,7 @@ async function loadAgentsFromDir({ dir, source, claudeDialect }: AgentDirectory)
 				.readFile(filePath, "utf-8")
 				.then(content => {
 					const agent = parseAgent(filePath, content, source, "warn");
+					if (pluginRoot) agent.systemPrompt = substitutePluginMarkdown(agent.systemPrompt, pluginRoot);
 					if (claudeDialect) {
 						// Claude-format frontmatter: `model:` is a Claude alias, not an
 						// OMP selector, and `tools:` uses Claude names (#7966).
@@ -126,7 +135,7 @@ export async function discoverAgents(
 		? await listOmpExtensionRoots({ cwd: resolvedCwd, home, repoRoot: null, extensionRoots })
 		: [];
 	for (const root of packageRoots) {
-		orderedDirs.push({ dir: path.join(root.path, "agents"), source: root.level });
+		orderedDirs.push({ dir: path.join(root.path, "agents"), source: root.level, pluginRoot: root.path });
 	}
 
 	// Load agents from Claude Code marketplace plugins (respects disabledProviders and opt-in).
@@ -162,6 +171,7 @@ export async function discoverAgents(
 			dir: path.join(plugin.path, "agents"),
 			source: plugin.scope === "project" ? "project" : "user",
 			claudeDialect: pluginClaudeDialect[index],
+			pluginRoot: plugin.path,
 		});
 	});
 

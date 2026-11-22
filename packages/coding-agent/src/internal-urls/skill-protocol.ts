@@ -14,6 +14,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger, withTimeout } from "@oh-my-pi/pi-utils";
 import { resolveContainedPath } from "../discovery/contained-path";
+import { substitutePluginMarkdown } from "../discovery/substitute-plugin-root";
 import {
 	findStaleSkillStandIn,
 	getActiveSkills,
@@ -57,6 +58,8 @@ const UNKNOWN_SKILL_MCP_WAIT_MS = 5_000;
 interface SkillTarget {
 	skill: Skill;
 	path: string;
+	/** Whether this URL addresses the skill's instruction file, not a supporting file. */
+	instruction: boolean;
 }
 
 /** The loaded skill a skill:// URL names, and the URL path inside that skill. */
@@ -121,7 +124,8 @@ async function skillTargetPath(
 	// Agent Plugin skills (§4.1): every target, including the bare instruction
 	// file and base directory, must canonically resolve within the plugin root.
 	// Symlinks may target other files inside the same package.
-	if (!skill.containRoot && !contain) return { skill, path: resolvedPath };
+	if (!skill.containRoot && !contain)
+		return { skill, path: resolvedPath, instruction: resolvedPath === path.resolve(skill.filePath) };
 	const containRoot = skill.containRoot ?? (await fs.realpath(skill.baseDir));
 	// Local skill roots may themselves be links. Rebase their lexical children
 	// onto the real root before the shared helper checks descendant links.
@@ -131,7 +135,8 @@ async function skillTargetPath(
 	const escape = `skill:// path resolves outside the ${skill.containRoot ? "plugin" : "skill"} root: ${url.href}`;
 	const contained = await resolveContainedPath(containRoot, containmentPath);
 	if (contained.status === "outside") throw new UrlContainmentError(escape);
-	if (contained.status === "ok") return { skill, path: contained.realPath };
+	if (contained.status === "ok")
+		return { skill, path: contained.realPath, instruction: resolvedPath === path.resolve(skill.filePath) };
 	if (create) {
 		try {
 			await ensureCreatableWithinRoot(containmentPath, containRoot, "skill", url.href);
@@ -140,7 +145,7 @@ async function skillTargetPath(
 			throw error instanceof UrlContainmentError ? new UrlContainmentError(escape) : error;
 		}
 	}
-	return { skill, path: resolvedPath };
+	return { skill, path: resolvedPath, instruction: resolvedPath === path.resolve(skill.filePath) };
 }
 
 async function statIfExists(filePath: string): Promise<fsTypes.Stats | null> {
@@ -180,6 +185,8 @@ function contextRediscoveryHost(skills: readonly Skill[], context: ResolveContex
 /** A located skill:// target; `stats` is null when it does not exist. */
 interface LocatedSkillTarget {
 	path: string;
+	skill: Skill;
+	instruction: boolean;
 	stats: fsTypes.Stats | null;
 }
 
@@ -256,7 +263,7 @@ async function locateSkillTarget(
 				contain,
 			);
 			const heldStats = await statIfExists(heldTarget.path);
-			if (!(await isStaleTarget(heldTarget, heldStats, host))) return { path: heldTarget.path, stats: heldStats };
+			if (!(await isStaleTarget(heldTarget, heldStats, host))) return { ...heldTarget, stats: heldStats };
 		}
 		const rediscovered = findStaleSkillStandIn(named.skill, await rediscoverSkills(host));
 		// Not an UnknownSkillError: when an upgrade dropped the skill, another plugin's colliding skill
@@ -266,7 +273,7 @@ async function locateSkillTarget(
 		target = await skillTargetPath(url, { skill: rediscovered, urlPath: named.urlPath }, directory, create, contain);
 		stats = await statIfExists(target.path);
 	}
-	return { path: target.path, stats };
+	return { ...target, stats };
 }
 
 /** The file or directory resource at a located target; a target removed since it was located rejects with ENOENT. */
@@ -281,7 +288,11 @@ async function readSkillTarget(url: InternalUrl, target: LocatedSkillTarget): Pr
 		throw new Error(`skill:// URL must resolve to a file or directory: ${url.href}`);
 	}
 
-	const content = await Bun.file(targetPath).text();
+	const raw = await Bun.file(targetPath).text();
+	const content =
+		target.instruction && target.skill.pluginRoot
+			? substitutePluginMarkdown(raw, target.skill.pluginRoot, target.skill.baseDir)
+			: raw;
 	return {
 		url: url.href,
 		content,

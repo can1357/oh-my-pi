@@ -235,6 +235,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 						includeSelf: true,
 						origin: root.origin,
 						pluginName: root.plugin,
+						pluginRoot: root.path,
 					}),
 				),
 			);
@@ -314,6 +315,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 										name: root.plugin ? `${root.plugin}:${cmdName}` : cmdName,
 										path: dir,
 										content,
+										pluginRoot: root.path,
 										level: root.scope,
 										_source: createSourceMeta(PROVIDER_ID, dir, root.scope, root.origin),
 									},
@@ -333,6 +335,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 								name: root.plugin ? `${root.plugin}:${cmdName}` : cmdName,
 								path: filePath,
 								content,
+								pluginRoot: root.path,
 								level: root.scope,
 								_source: source,
 							};

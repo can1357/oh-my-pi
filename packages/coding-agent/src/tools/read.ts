@@ -2276,23 +2276,30 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				plainWindow,
 			});
 		}
-		// A located URL reads its backing file through the filesystem pipeline (images, `:img`,
-		// `?q=`, archives, sqlite, streaming, paging) while the URL stays the read's identity.
-		const result = await this.#readFilesystemPath(located.path, {
-			located,
-			question,
-			questionPath: readPath,
-			signal,
-			toolContext,
-			plainWindow,
-		});
+		// Plugin instructions are an interpreted Markdown resource: the file pipeline would
+		// return raw placeholders instead of the paths the model must run.
+		const pluginInstruction =
+			extractUriScheme(located.url) === "skill" &&
+			this.session.skills?.some(skill => skill.pluginRoot && skill.filePath === located.path);
+		const selector = parseSel(located.sel);
+		const result =
+			pluginInstruction && question === undefined && selector.kind !== "image"
+				? await this.#handleInternalUrl(located, selector, question, signal, toolContext)
+				: await this.#readFilesystemPath(located.path, {
+						located,
+						question,
+						questionPath: readPath,
+						signal,
+						toolContext,
+						plainWindow,
+					});
 		const details: ReadToolDetails = result.details ?? {};
 		details.resolvedPath ??= located.path;
 		// Protocol reads render Markdown regardless of `read.renderMarkdown`, as their resources always did.
 		if (!details.contentType && isMarkdownPath(located.path)) details.contentType = "text/markdown";
 		details.meta = { ...details.meta, source: { type: "internal", value: located.url } };
 		// Nested skill reads need their own provenance: the outer invocation may belong to another plugin.
-		if (extractUriScheme(located.url) === "skill" && !isRawSelector(parseSel(located.sel))) {
+		if (extractUriScheme(located.url) === "skill" && !isRawSelector(selector)) {
 			const provenance = `[Skill file: ${located.path}]`;
 			const firstText = result.content.find((block): block is TextContent => block.type === "text");
 			// The TUI falls back to this block when no structured display content exists.

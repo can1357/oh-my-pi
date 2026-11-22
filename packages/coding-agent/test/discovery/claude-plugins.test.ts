@@ -10,7 +10,12 @@ import {
 	parseClaudePluginsRegistry,
 } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/capability/skill";
-import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import { loadSkillPromptBody, loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import { loadSlashCommands, renderFileSlashCommand } from "@oh-my-pi/pi-coding-agent/extensibility/slash-commands";
+import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
+import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
+import { discoverCommands } from "@oh-my-pi/pi-coding-agent/task/commands";
+import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { loadAllExtensions } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/state-manager";
 import { __resetDirsFromEnvForTests, logger, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
@@ -526,6 +531,78 @@ describe("listClaudePluginRoots", () => {
 
 		expect(first.roots.map(root => root.id)).toEqual(["first@market"]);
 		expect(second.roots.map(root => root.id)).toEqual(["second@market"]);
+	});
+
+	test("resolves installed plugin paths in skill reads, invocations, commands and agents", async () => {
+		const root = path.join(tempDir, "marketplace-cache", "review");
+		const skillDir = path.join(root, "skills", "finish-pr-loop");
+		const registry = path.join(tempDir, ".omp", "plugins", "installed_plugins.json");
+		const claude = "$" + "{CLAUDE_PLUGIN_ROOT}";
+		const omp = "$" + "{OMP_PLUGIN_ROOT}";
+		const skill = "$" + "{CLAUDE_SKILL_DIR}";
+		await fs.mkdir(skillDir, { recursive: true });
+		await fs.mkdir(path.join(root, "commands"), { recursive: true });
+		await fs.mkdir(path.join(root, "agents"), { recursive: true });
+		await fs.mkdir(path.join(root, ".claude-plugin"), { recursive: true });
+		await fs.mkdir(path.dirname(registry), { recursive: true });
+		await Promise.all([
+			fs.writeFile(
+				path.join(skillDir, "SKILL.md"),
+				`---\nname: finish-pr-loop\ndescription: Finish PR\n---\nRun "${claude}/scripts/pr_coverage.py" and read "${skill}/notes.md" or "${omp}/shared.md"\n`,
+			),
+			fs.writeFile(path.join(skillDir, "notes.md"), `Keep ${claude} literal in supporting files.\n`),
+			fs.writeFile(
+				path.join(root, "commands", "review.md"),
+				`---\ndescription: Keep ${claude} literal in metadata\n---\nRun "${omp}/scripts/review.py"\n`,
+			),
+			fs.writeFile(
+				path.join(root, "direct.md"),
+				`---\ndescription: Direct command\n---\nRead "${claude}/shared.md"\n`,
+			),
+			fs.writeFile(
+				path.join(root, ".claude-plugin", "plugin.json"),
+				JSON.stringify({ name: "review", commands: ["./commands", "./direct.md"] }),
+			),
+			fs.writeFile(
+				path.join(root, "agents", "reviewer.md"),
+				`---\nname: reviewer\ndescription: Keep ${claude} literal in metadata\n---\nRead "${claude}/shared/review.md"\n`,
+			),
+			fs.writeFile(
+				registry,
+				JSON.stringify({
+					version: 2,
+					plugins: { "review@market": [{ scope: "user", installPath: root, version: "1.0.0" }] },
+				}),
+			),
+		]);
+
+		const { skills } = await loadSkills({ cwd: tempDir });
+		const loaded = skills.find(entry => entry.name === "finish-pr-loop");
+		expect(loaded).toBeDefined();
+		const url = new SkillProtocolHandler();
+		const read = (uri: string) => url.resolve(parseInternalUrl(uri), { skills });
+		const expected = `Run "${root}/scripts/pr_coverage.py" and read "${skillDir}/notes.md" or "${root}/shared.md"`;
+		expect((await read("skill://finish-pr-loop")).content).toContain(expected);
+		expect((await read("skill://finish-pr-loop/SKILL.md")).content).toContain(expected);
+		expect(await loadSkillPromptBody(loaded!)).toBe(expected);
+		expect((await read("skill://finish-pr-loop/notes.md")).content).toContain(claude);
+
+		const commands = await loadSlashCommands({ cwd: tempDir });
+		const slash = commands.find(entry => entry.name === "review:review");
+		expect(slash?.description).toContain(claude);
+		expect(renderFileSlashCommand(slash!, "")).toContain(`${root}/scripts/review.py`);
+		const workflow = (await discoverCommands(tempDir)).find(entry => entry.name === "review:review");
+		expect(workflow?.instructions).toContain(`${root}/scripts/review.py`);
+		expect(
+			renderFileSlashCommand(
+				commands.find(entry => entry.name === "review:direct")!,
+				"",
+			),
+		).toContain(`${root}/shared.md`);
+
+		const agent = (await discoverAgents(tempDir, tempDir)).agents.find(entry => entry.name === "reviewer");
+		expect(agent?.description).toContain(claude);
+		expect(agent?.systemPrompt).toContain(`${root}/shared/review.md`);
 	});
 
 	test("derives the namespace from the plugin name, not the Claude cache version segment (#12151)", async () => {

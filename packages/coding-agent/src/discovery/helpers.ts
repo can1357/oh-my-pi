@@ -36,6 +36,7 @@ import { normalizeToolNames } from "../tools/builtin-names";
 
 import { realpathIfExists, resolveContainedPath } from "./contained-path";
 import { buildPluginDirRoot } from "./plugin-dir-roots";
+import { substitutePluginMarkdown } from "./substitute-plugin-root";
 
 /**
  * Standard paths for each config source.
@@ -454,6 +455,8 @@ export interface ScanSkillsFromDirOptions {
 	 * (Claude Code's own plugin cache layout).
 	 */
 	pluginName?: string;
+	/** Installed plugin root used for inline substitutions in skill instructions. */
+	pluginRoot?: string;
 }
 
 // Stable ordering used for skill lists in prompts: name (case-insensitive), then name, then path.
@@ -506,8 +509,11 @@ export async function scanSkillsFromDir(
 			items.push({
 				name,
 				path: skillPath,
-				content: body,
+				content: options.pluginRoot
+					? substitutePluginMarkdown(body, options.pluginRoot, path.dirname(skillPath))
+					: body,
 				frontmatter: frontmatter as SkillFrontmatter,
+				...(options.pluginRoot && { pluginRoot: options.pluginRoot }),
 				level,
 				_source: createSourceMeta(providerId, skillPath, level, options.origin, options.pluginName),
 			});

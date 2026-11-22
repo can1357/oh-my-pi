@@ -16,6 +16,8 @@ export interface SlashCommand {
 	path: string;
 	/** Command content (markdown template) */
 	content: string;
+	/** Installed plugin root for inline path substitutions in the command body. */
+	pluginRoot?: string;
 	/** Source level */
 	level: "user" | "project" | "native";
 	/** Already-parsed display description, when discovery stripped frontmatter from `content`. */

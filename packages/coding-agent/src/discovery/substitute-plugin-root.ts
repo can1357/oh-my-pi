@@ -8,6 +8,12 @@ import * as path from "node:path";
 const CLAUDE_VAR = "$" + "{CLAUDE_PLUGIN_ROOT}";
 const OMP_VAR = "$" + "{OMP_PLUGIN_ROOT}";
 
+/** Resolve plugin Markdown path variables before its instructions reach the model. */
+export function substitutePluginMarkdown(content: string, rootPath: string, skillDir?: string): string {
+	const rooted = content.replaceAll(CLAUDE_VAR, rootPath).replaceAll(OMP_VAR, rootPath);
+	return skillDir === undefined ? rooted : rooted.replaceAll("$" + "{CLAUDE_SKILL_DIR}", skillDir);
+}
+
 export function substitutePluginRoot<T>(value: T, rootPath: string): T {
 	if (typeof value === "string") {
 		return value.replaceAll(CLAUDE_VAR, rootPath).replaceAll(OMP_VAR, rootPath) as T;

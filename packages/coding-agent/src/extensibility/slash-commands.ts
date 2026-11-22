@@ -5,6 +5,7 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import { appendInlineArgsFallback, templateUsesInlineArgPlaceholders } from "../config/prompt-templates";
 import type { SlashCommand } from "../discovery";
 import { loadCapability } from "../discovery";
+import { substitutePluginMarkdown } from "../discovery/substitute-plugin-root";
 import { EMBEDDED_COMMAND_TEMPLATES } from "../task/commands";
 import { parseCommandArgs, substituteArgs } from "../utils/command-args";
 
@@ -94,7 +95,7 @@ export async function loadSlashCommands(options: LoadSlashCommandsOptions = {}):
 			name: cmd.name,
 			description,
 			argumentHint: cmd.argumentHint ?? argumentHint,
-			content: body,
+			content: cmd.pluginRoot ? substitutePluginMarkdown(body, cmd.pluginRoot) : body,
 			source: sourceStr,
 			...(side || cmd.side === true ? { side: true } : {}),
 			_source: { providerName: cmd._source.providerName, level: cmd.level },

@@ -7,6 +7,7 @@ import * as path from "node:path";
 import { parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
 import { loadCapability } from "../discovery";
+import { substitutePluginMarkdown } from "../discovery/substitute-plugin-root";
 // Embed command markdown files at build time
 import initMd from "../prompts/agents/init.md" with { type: "text" };
 
@@ -91,7 +92,7 @@ export async function discoverCommands(cwd: string): Promise<WorkflowCommand[]> 
 		commands.push({
 			name: cmd.name,
 			description: getString(frontmatter, "description"),
-			instructions: body,
+			instructions: cmd.pluginRoot ? substitutePluginMarkdown(body, cmd.pluginRoot) : body,
 			source,
 			filePath: cmd.path,
 		});
