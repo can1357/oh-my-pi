@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Pressing `n` on Other now edits the custom answer like Enter, keeping its text and images ([#16510](https://github.com/can1357/oh-my-pi/pull/16510) by [@Komzpa](https://github.com/Komzpa))
 - Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.1.0] - 2026-11-21
