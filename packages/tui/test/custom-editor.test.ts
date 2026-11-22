@@ -91,7 +91,7 @@ const editor = new CustomEditor({});
 editor.imageLinks = ${JSON.stringify(imageLinks)};
 process.stdout.write(editor.decorateText(${JSON.stringify(text)}));
 `;
-	const child = await $`bun -e ${script}`.quiet().nothrow();
+	const child = await $`${process.execPath} -e ${script}`.quiet().nothrow();
 	const stdout = child.stdout.toString();
 	const stderr = child.stderr.toString();
 	if (child.exitCode !== 0) throw new Error(stderr || stdout || `decorate subprocess exited with ${child.exitCode}`);

@@ -22,7 +22,7 @@ A successful call is not memoized by JS. Repeated calls rely on `openNativeAddon
 - legacy compiled-binary directory: `%LOCALAPPDATA%/omp` (or `~/AppData/Local/omp`) on Windows, `~/.local/bin` elsewhere;
 - workspace/install/compiled mode, optional leaf directory, Windows staging policy, CPU variant, filenames, and ordered candidates.
 
-Compiled mode is true when a populated embedded manifest exists, `PI_COMPILED` is set, or `import.meta.url` contains a Bun embedded marker (`$bunfs`, `~BUN`, or `%7EBUN`). A non-compiled `nativeDir` outside a `node_modules` path is a workspace load. Windows path classification is case-insensitive; other platforms use case-sensitive path matching.
+Compiled mode is true when a populated embedded manifest exists, `PI_COMPILED` is set, or `import.meta.url` contains a Bun embedded marker (`$bunfs`, `~BUN`, or `%7EBUN`). A non-compiled load is a workspace load when `nativeDir` is outside a `node_modules` path and the core manifest declares no platform leaf in `optionalDependencies`. A release copied into bun's install cache declares its leaf, so it is an installed package even though its path has no `node_modules` segment. Windows path classification is case-insensitive; other platforms use case-sensitive path matching.
 
 ## Platforms and variants
 
@@ -62,7 +62,7 @@ Detection uses `Bun.spawnSync` when available, then falls back to `node:child_pr
 1. Every selected filename in `@oh-my-pi/pi-natives-<tag>`.
 2. For each filename, package-local `nativeDir`, then the executable directory.
 
-The platform leaf wins over a stale core artifact. Workspace loads deliberately skip leaf resolution.
+The platform leaf wins over a stale core artifact. Workspace loads deliberately skip leaf resolution. The leaf is found with `require.resolve`; when that misses (a release copied into bun's install cache, where the leaf is a version-pinned sibling `pi-natives-<tag>@<version>@@@N` of the core package), the loader takes the sibling `pi-natives-<tag>` directory in the core package's scope directory that holds a selected filename, matching the running version (`pi-natives-<tag>@<version>@@@N`, or the bare `pi-natives-<tag>`).
 
 ### Windows `node_modules` staging
 
