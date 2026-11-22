@@ -115,7 +115,7 @@ describe("fingerprint: field-selective fingerprint (applied)", () => {
 		const messages: AgentMessage[] = [
 			{
 				role: "custom",
-				customType: "xdev-mount-notice",
+				customType: "tool-command-mount-notice",
 				content: "seed-body-000",
 				display: true,
 				timestamp: 1,

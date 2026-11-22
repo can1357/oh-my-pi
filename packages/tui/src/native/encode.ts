@@ -202,6 +202,7 @@ const EVENT_REQUIRED: Readonly<Record<string, Readonly<Record<string, "string" |
 	resize: { cols: "number" },
 	theme: { dark: "boolean" },
 	motion: { reduce: "boolean" },
+	features: { features: "array" },
 	visible: { visible: "boolean" },
 	toggle: { id: "string", collapsed: "boolean" },
 	select: { id: "string", item: "string" },

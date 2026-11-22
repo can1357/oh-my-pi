@@ -15,6 +15,7 @@ import type {
 	ShapeSink,
 } from "@oh-my-pi/pi-coding-agent/spotlight/types";
 import { rankPartAt, reasonShows } from "@oh-my-pi/pi-tui/chat/spotlight";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 function context(over: Partial<CallContext> = {}): CallContext {
 	return { task: "Fix the service.", said: "", intent: "", commands: [], source: "", ...over };
@@ -107,6 +108,29 @@ function traceOf(out: ShapeOutcome, printed: readonly string[]): ShapedLines & {
 		}
 	});
 	return { ...trace, pairs };
+}
+
+/** The two audit stages are too large to open whole, and the surviving outline itself needs a window. */
+function auditStages() {
+	const lines: string[] = [];
+	const peaks: { line: number; head: number }[] = [];
+	for (let k = 0; k < 120; k++) {
+		const head = lines.length;
+		lines.push(`export function auditStage${k}(`, "  config: Config,", "  report: Report,", "): void {");
+		const large = k === 21 || k === 31;
+		for (let j = 0; j < (large ? 480 : 8); j++) {
+			if (large && j === 231) {
+				peaks.push({ line: lines.length, head });
+				lines.push(`  report.reject("${k === 21 ? "changed digest" : "stale signature"}");`);
+			} else lines.push(`  report.record(config.stages[${k}].checks[${j}]);`);
+		}
+		lines.push("}", "");
+	}
+	return { lines, peaks };
+}
+
+function auditScore(item: string): number {
+	return item.includes("changed digest") ? 1 : item.includes("stale signature") ? 0.98 : 0.01;
 }
 
 describe("spotlight shaping", () => {
@@ -246,6 +270,8 @@ describe("spotlight shaping", () => {
 		);
 		expect(out.steps).toEqual(["outline", "window"]);
 		expect(store.saved.size).toBe(0);
+		const target = lines.findIndex(line => line.includes("Number42("));
+		expect(out.text).toContain(shown.slice(target, target + 2).join("\n"));
 		const body = out.text.split("\n");
 		// Shown lines, folds and cuts together cover the file's lines 1…n exactly once, in order, with no copy to name.
 		let next = 1;
@@ -325,6 +351,51 @@ describe("spotlight shaping", () => {
 			expect(hidden).toEqual(lines.slice(gap.from - 1, gap.to));
 			for (const l of hidden) expect(out.text.split("\n")).not.toContain(l);
 		}
+	});
+
+	it("keeps an expensive answer and its context without dropping the requested identifier", async () => {
+		const lines = Array.from({ length: 160 }, (_, i) =>
+			i % 2
+				? "---"
+				: `Observation ${i}: ${["training", "grading", "evaluation", "validation"][(i / 2) % 4]} records ${"each completed episode. ".repeat(12)}`,
+		);
+		for (const i of [22, 38, 54, 102, 126]) lines[i] = `Usage note: ${lines[i]}`;
+		lines[10] = "Results for bench:core";
+		lines[77] = "Each rollout starts from the same snapshot.";
+		lines[78] = `Across all runs the mean was 9.8M tokens per task. ${"The count includes every episode. ".repeat(6)}`;
+		lines[79] = "These are cumulative tokens, not peak context length.";
+		const text = lines.join("\n");
+		const out = await shapeResult(
+			{ tool: "read", path: "https://example.com/report", text },
+			context({ intent: "token usage for bench:core" }),
+			scorer(item => (item === lines[78] ? 1 : item === "---" ? 0.8 : 0.1)),
+			newShapeState(),
+			sink(),
+		);
+		expect(out.text).toContain(lines.slice(77, 80).join("\n"));
+		expect(out.text).toContain(lines[10]);
+		expect(out.outTokens).toBeLessThan(out.inTokens / 4);
+	});
+
+	it("fits a short high-ranked fact with its qualifier in the ordinary window", async () => {
+		const stages = ["sync", "fetch", "parse", "write"];
+		const lines = Array.from({ length: 280 }, (_, i) =>
+			i % 2 ? "..." : `${stages[(i / 2) % stages.length]} job ${i}: completed batch on worker ${i % 13}`,
+		);
+		lines[44] = "Policy reference: deploy:config";
+		lines[118] = "Source: nightly release audit (before rollout).";
+		lines[119] = "Rollback threshold: 2 failed checks in the same region.";
+		lines[120] = "Scope: production only; staging retries do not count.";
+		const out = await shapeResult(
+			{ tool: "read", path: "https://example.com/job-log", text: lines.join("\n") },
+			context({ intent: "identify deploy:config and service health limits" }),
+			scorer(item => (item === lines[119] ? 1 : item === "..." ? 0.8 : 0.15)),
+			newShapeState(),
+			sink(),
+		);
+		expect(out.text).toContain(lines.slice(118, 121).join("\n"));
+		expect(out.text).toContain(lines[44]);
+		expect(out.text.length).toBeLessThan(3_000);
 	});
 
 	it("traces a cut: why each line shows, how the valve ranked them, what each shaped line stands for", async () => {
@@ -440,6 +511,63 @@ describe("spotlight shaping", () => {
 		const outlined = await shapeResult(long, context(), rank, newShapeState(), sink());
 		expect(outlined.steps).toEqual(["outline"]);
 		expect(outlined.text.length).toBeLessThan(long.text.length / 2);
+	});
+
+	it("retains evidence from separate oversized bodies with their real signatures across both cuts", async () => {
+		const { lines, peaks } = auditStages();
+		const firstLine = 401;
+		const shown = lines.map((l, i) => `${firstLine + i}|${l}`);
+		const out = await shapeResult(
+			{
+				tool: "read",
+				text: shown.join("\n"),
+				read: { path: "src/audit.ts", firstLine, lines, shown, selected: false },
+			},
+			context(),
+			scorer(auditScore),
+			newShapeState(),
+			sink(),
+		);
+		expect(out.steps).toEqual(["outline", "window"]);
+		const trace = traceOf(out, shown);
+		for (const { line, head } of peaks) {
+			expect(out.text).toContain(shown.slice(head, head + 4).join("\n"));
+			expect(out.text).toContain(shown.slice(line - 1, line + 2).join("\n"));
+			expect(trace.kept[line - 70]).toBe(false);
+		}
+		// Billing counts source rows once, not a second inference over the rendered signatures and fold markers.
+		expect(out.stats.spotlightItems).toBe(lines.filter(l => l.trim()).length);
+	});
+
+	it("keeps source passages with the right signatures after command output shifts their rows", async () => {
+		await using temp = await TempDir.create("spotlight-outline");
+		const { lines, peaks } = auditStages();
+		const code = lines.join("\n");
+		await Bun.write(temp.join("audit.ts"), code);
+		const guide = [
+			"# Archive",
+			...Array.from({ length: 80 }, (_, i) => `Archived event ${i}`),
+			"# Digest",
+			"changed digest",
+			"Review required",
+			"Mark the run",
+			"Record the result",
+		].join("\n");
+		await Bun.write(temp.join("guide.md"), guide);
+		const text = `audit started\n${guide}\n${code}\nEXIT: audit failed`;
+		const out = await shapeResult(
+			{ ...bash("echo start; cat guide.md; cat audit.ts; echo done", text), cwd: temp.path() },
+			context(),
+			scorer(auditScore),
+			newShapeState(),
+			sink(),
+		);
+		expect(out.steps).toEqual(["outline", "docs", "window"]);
+		for (const { line, head } of peaks) {
+			expect(out.text).toContain(lines.slice(head, head + 4).join("\n"));
+			expect(out.text).toContain(lines.slice(line - 1, line + 2).join("\n"));
+		}
+		expect(out.text).toContain("EXIT: audit failed");
 	});
 
 	it("traces an outline: signatures stay, a named body opens, a hot body opens on rank, the rest fold", async () => {

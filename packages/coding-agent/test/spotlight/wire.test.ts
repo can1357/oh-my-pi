@@ -7,6 +7,7 @@ import type { JudgmentRequest, JudgmentResult, Message, Questions } from "@oh-my
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as bashExecutor from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
+import { resolveToolCallIntent } from "@oh-my-pi/pi-coding-agent/job-widgets/intent";
 import * as judgment from "@oh-my-pi/pi-coding-agent/judgment";
 import type { CustomEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -1335,6 +1336,7 @@ describe("spotlight call context", () => {
 			name: "bash",
 			arguments: { command },
 		});
+		const fullIntent = "Checking retry timing: Does http.py:42 honor Retry-After?";
 		const messages = [
 			{ role: "user", content: "fix the flaky test", timestamp: 0 },
 			{ role: "assistant", content: [bash("a", "ls"), bash("b", "git status")] },
@@ -1345,17 +1347,17 @@ describe("spotlight call context", () => {
 				content: [
 					bash("d", "cat log"),
 					{ type: "text", text: "Now the suite." },
-					bash("now", "bun test --rerun"),
+					{ ...bash("now", "bun test --rerun"), intent: `  ${fullIntent}  ` },
 					bash("later", "echo after"),
 				],
 			},
 		] as unknown as AgentMessage[];
 
-		const ctx = buildCallContext(messages, "now", "bun test --rerun", "  rerun the suite ");
+		const ctx = buildCallContext(messages, "now", "bun test --rerun", resolveToolCallIntent(messages, "now"));
 		expect(ctx).toEqual({
 			task: "fix the flaky test",
 			said: "Now the suite.",
-			intent: "rerun the suite",
+			intent: fullIntent,
 			commands: ["git status", "bun test", "cat log"],
 			source: "bun test --rerun",
 		});

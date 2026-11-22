@@ -523,8 +523,9 @@ impl ShellPaths {
 		// Scoped to the command's own cancellation (the operand's token under
 		// `timeout`), so a utility reading a host file stops when it fires
 		// instead of draining the file first: `timeout 1 cat /dev/zero` never
-		// returned.
-		let filesystem = fs.blocking();
+		// returned. The host files the command changes are reported once it
+		// (every clone of this resolver) is done.
+		let filesystem = fs.begin_changes().blocking();
 		let filesystem = match cancel {
 			Some(token) => filesystem.with_cancellation(token),
 			None => filesystem,
@@ -3948,7 +3949,7 @@ mod testing {
 		use super::MemStream;
 		use crate::host::{
 			Arc, AsyncUtility, AtomicBool, CommandCancel, GuardedStream, Host, OpenFile, Sigpipe, StreamWriter,
-			Write, async_out_for, run_caught_async,
+			Write, async_out_for,
 		};
 
 		/// Writes a line to stdout and a note to stderr, knowing nothing of
@@ -4004,7 +4005,7 @@ mod testing {
 			drop(reader);
 			host.set_test_stdout(OpenFile::from(writer));
 
-			let code = run_caught_async::<Chatty>(Chatty, &mut host).await;
+			let code = crate::host::run_caught_async::<Chatty>(Chatty, &mut host).await;
 
 			assert_eq!(code, crate::host::SIGPIPE_EXIT_CODE);
 			assert_eq!(capture.err(), "");

@@ -7,10 +7,16 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 const probePath = path.resolve(import.meta.dir, "fixtures", "legacy-pi-extension-cache-probe.ts");
 const healthProbePath = path.resolve(import.meta.dir, "fixtures", "legacy-pi-extension-cache-health-probe.ts");
 const cjsProbePath = path.resolve(import.meta.dir, "fixtures", "legacy-pi-extension-cjs-cache-probe.ts");
+const transpilerCacheProbePath = path.resolve(import.meta.dir, "fixtures", "legacy-pi-transpiler-cache-probe.ts");
 const tempDirs: TempDir[] = [];
 
-async function runProbe(cacheRoot: string, script: string = probePath, args: string[] = []): Promise<string> {
-	const env: Record<string, string | undefined> = { ...process.env, XDG_CACHE_HOME: cacheRoot };
+async function runProbe(
+	cacheRoot: string,
+	script: string = probePath,
+	args: string[] = [],
+	extraEnv: Record<string, string> = {},
+): Promise<string> {
+	const env: Record<string, string | undefined> = { ...process.env, XDG_CACHE_HOME: cacheRoot, ...extraEnv };
 	for (const key of ["PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE", "PI_CONFIG_DIR"]) {
 		delete env[key];
 	}
@@ -48,7 +54,7 @@ test("warm extension analysis preserves import rewriting without reparsing", asy
 
 	expect(await runProbe(cacheRoot)).toBe('import value from "./dependency.js?mtime=7";\n');
 
-	// Each real load uses a fresh tag; the warm run must still hit the cache.
+	// A same-process reload uses a fresh tag; the warm run must still hit the cache.
 	expect(await runProbe(cacheRoot, probePath, ["--expect-cache-hit", "--tag=8"])).toBe(
 		'import value from "./dependency.js?mtime=8";\n',
 	);
@@ -161,4 +167,28 @@ test("oversized-cache eviction keeps the parse cache usable when a concurrent pr
 	} finally {
 		concurrent.close();
 	}
+});
+
+test("relaunching with an unchanged extension adds no Bun transpiler cache entries", async () => {
+	const tempDir = TempDir.createSync("@legacy-pi-transpiler-cache-");
+	tempDirs.push(tempDir);
+	const cacheRoot = path.join(tempDir.path(), "cache");
+	const transpilerCache = path.join(tempDir.path(), "transpiler-cache");
+	const entry = path.join(tempDir.path(), "extension", "index.ts");
+	await fs.mkdir(path.join(cacheRoot, "omp"), { recursive: true });
+	await fs.mkdir(transpilerCache, { recursive: true });
+	// Bun caches only sources above a size floor (50 KiB in older releases). The
+	// entry is the module whose relative import the loader rewrites with a tag.
+	const padding = `// ${"x".repeat(1021)}\n`.repeat(64);
+	await Bun.write(entry, `import { value } from "./helper";\nexport const loaded = value;\n${padding}`);
+	await Bun.write(path.join(path.dirname(entry), "helper.ts"), 'export const value = "loaded";\n');
+	const env = { BUN_RUNTIME_TRANSPILER_CACHE_PATH: transpilerCache };
+
+	expect(await runProbe(cacheRoot, transpilerCacheProbePath, [entry], env)).toBe("loaded\n");
+	const firstLaunch = (await fs.readdir(transpilerCache)).sort();
+	// The cache must be active, or the comparison below proves nothing.
+	expect(firstLaunch.length).toBeGreaterThan(0);
+
+	expect(await runProbe(cacheRoot, transpilerCacheProbePath, [entry], env)).toBe("loaded\n");
+	expect((await fs.readdir(transpilerCache)).sort()).toEqual(firstLaunch);
 });
