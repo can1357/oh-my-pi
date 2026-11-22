@@ -129,6 +129,12 @@ interface TabSessionBase<TBrowser extends BrowserHandle = BrowserHandle> {
 	 */
 	ownerSessionId?: string;
 	/**
+	 * Owner id of the agent that drove the tab last (its latest open reuse or run), `""` for a caller that did not
+	 * identify itself. Undefined until another call than the creating open drives it. A run's end lets go only of a
+	 * relay tab its own agent drove last, so a subagent between calls on its parent's tab keeps its worker state.
+	 */
+	lastDriverOwnerId?: string;
+	/**
 	 * Opt out of settle-freeze and idle-close reaping, and keep a page omp
 	 * opened in the user's Chrome (relay) open when the session ends. Set at
 	 * creation or explicit reuse by the owning session; another session's
@@ -176,6 +182,13 @@ export interface WorkerTabSession extends TabSessionBase<PuppeteerBrowserHandle>
 	 * it, and the next call on it re-adopts it first.
 	 */
 	heldOut?: boolean;
+	/**
+	 * omp let go of this relay tab when its run ended (`browser.relayReleaseOnTurnEnd`), so Chrome dropped its
+	 * debugger attachment and infobar. The tab stays open with no worker driving it, and the next call re-adopts it.
+	 */
+	released?: boolean;
+	/** The worker reported a recording, trace, profile or HAR capture still running after its last call. */
+	capturing?: boolean;
 	/** Other extensions' frames the omp relay hid in the tab that no call has reported yet. */
 	hiddenFrames?: HiddenFrame[];
 	/** The tab was opened with `insecure`; a replacement worker re-applies it. */
@@ -605,7 +618,7 @@ async function acquireTabImpl(
 				tempHold = true;
 				await releaseTab(name, { kill: false });
 			} else {
-				readoptHeldOutTab(name, opts.timeoutMs);
+				readoptWorkerlessTab(name, opts.timeoutMs);
 				const readopting = awaitWorkerRecovery(name, opts, "Browser tab open aborted");
 				if (readopting) await readopting;
 				// Reuse counts as use: refresh the idle clock and resume a
@@ -614,6 +627,7 @@ async function acquireTabImpl(
 				// error a run would raise, instead of reporting a reuse
 				// that can never execute.
 				existing.lastActivityAt = Date.now();
+				existing.lastDriverOwnerId = opts.ownerSessionId ?? "";
 				// Resume BEFORE applying `persist` below: flipping the flag
 				// first would make `isSettleManaged` reject this very
 				// resume, so reopening a frozen tab with `persist: true`
@@ -1247,6 +1261,9 @@ function notAliveMessage(name: string): string {
 
 export async function runInTab(name: string, opts: RunInTabOptions): Promise<RunResultOk> {
 	const model = opts.session.getActiveModel?.();
+	// Stamped before the run is admitted: even a call refused as busy shows another agent is working the tab.
+	const driven = tabs.get(name);
+	if (driven) driven.lastDriverOwnerId = opts.session.getEvalKernelOwnerId?.() ?? "";
 	const result = await runInTabWithSnapshot(
 		name,
 		{
@@ -1305,9 +1322,10 @@ async function runInTabWithSnapshot(
 	opts: RunTabOptions,
 	snapshot: SessionSnapshot,
 ): Promise<RunResultOk> {
-	// Chrome refused this tab's last re-adoption over another extension's frame: re-adopt it first, a reattach this
-	// call and any beside it wait for as for one after a worker exit.
-	readoptHeldOutTab(name, opts.timeoutMs);
+	// No worker drives this tab (Chrome refused its last re-adoption over another extension's frame, or omp let go of
+	// a relay tab at run end): re-adopt it first, a reattach this call and any beside it wait for as for one after
+	// a worker exit.
+	readoptWorkerlessTab(name, opts.timeoutMs);
 	// A worker that exited on its own is being replaced: wait for that within this call's budget, and run only on the
 	// same tab. A tab closed and reopened under this name meanwhile is not the one this call was meant for.
 	const waitStartedAt = performance.now();
@@ -1732,7 +1750,10 @@ async function recoverWorkerTab(
 			recover: opts.recover,
 			signal: opts.signal,
 		});
-		if (reattached) tab.heldOut = undefined;
+		if (reattached) {
+			tab.heldOut = undefined;
+			tab.released = undefined;
+		}
 		return reattached;
 	} catch (recycleError) {
 		const messages = [recycleError, recycleError instanceof Error ? recycleError.cause : undefined].map(error =>
@@ -1751,6 +1772,7 @@ async function recoverWorkerTab(
 				error: messages[0],
 			});
 			tab.heldOut = true;
+			tab.released = undefined;
 			throw new TabHeldOutError();
 		}
 		logger.warn("Failed to recycle browser tab worker; killing tab", { error: messages[0] });
@@ -2236,6 +2258,59 @@ export async function freezeTabsForOwner(ownerId: string): Promise<number> {
 	}
 	return count;
 }
+
+/**
+ * Run-end release eligibility: a relay tab `ownerId` opened and drove last, driven by a thread worker, with no run
+ * in flight, no capture its worker would cut short, and no reattach under way. `persist` keeps a tab live across a
+ * run's end. A tab another agent drove since stays attached: that agent may still be between calls on it.
+ */
+function isRelayReleaseCandidate(tab: TabSession, ownerId: string): tab is WorkerTabSession {
+	return (
+		tab.backend === "worker" &&
+		tab.kindTag === "relay" &&
+		tab.ownerSessionId === ownerId &&
+		(tab.lastDriverOwnerId ?? ownerId) === ownerId &&
+		tab.state === "alive" &&
+		!tab.persist &&
+		// An inline worker shares this process: re-adopting its tab would kill it instead.
+		tab.worker.mode !== "inline" &&
+		tab.pending.size === 0 &&
+		!tab.capturing &&
+		!tab.heldOut &&
+		!tab.released &&
+		!tab.workerRecovery &&
+		!releaseInflight.has(tab)
+	);
+}
+
+/**
+ * Let go of every idle relay tab `ownerId` opened, at the end of its agent's run (`browser.relayReleaseOnTurnEnd`). Chrome shows its
+ * "started debugging this browser" infobar while any tab is attached; ending the tab's worker closes its relay
+ * connection, so the relay detaches the tab and the infobar goes once no other tab is driven. The tab stays open, as
+ * the user sees it, and the next call on it re-adopts it on a new worker, resetting {@link WORKER_RESETS}. Never
+ * throws; resolves how many tabs it let go of.
+ */
+export async function releaseRelayTabsForOwner(ownerId: string): Promise<number> {
+	if (!ownerId) return 0;
+	const candidates = [...tabs.values()].filter(tab => isRelayReleaseCandidate(tab, ownerId));
+	const released = await Promise.all(
+		candidates.map(async tab => {
+			// Marked in the tick that chose the tab, before the first await: a call arriving meanwhile re-adopts the tab
+			// instead of driving this worker, and the worker's exit is not mistaken for a crash.
+			tab.released = true;
+			const worker = tab.worker;
+			try {
+				// A graceful close keeps the page and undoes what the worker set on it before its connection drops.
+				safeSend(tab, { type: "close", keepPage: true });
+				await waitForClosed(tab);
+			} catch {
+				// Terminating below drops the connection either way.
+			}
+			await worker.terminate().catch(() => undefined);
+		}),
+	);
+	return released.length;
+}
 /**
  * Idle-close eligibility: owned, settle-managed, no in-flight run, and idle
  * past the deadline. An executing tab is not idle even when its run outlasts
@@ -2541,6 +2616,7 @@ function lastUsedTargetOn(browser: PuppeteerBrowserHandle): string | undefined {
 function handleTabMessage(tab: WorkerTabSession, msg: WorkerOutbound): void {
 	if (msg.type === "result") {
 		noteHiddenFrames(tab, msg.hiddenFrames);
+		tab.capturing = msg.capturing === true;
 		const pending = tab.pending.get(msg.id);
 		if (!pending) return;
 		// The run's own `finally` drops the entry: a recovery after its result still holds the tab busy.
@@ -2602,13 +2678,15 @@ async function dispatchToolCall(
 }
 
 /**
- * Re-adopt a tab Chrome refused over another extension's frame, published as the tab's `workerRecovery` so the call
- * that started it and any beside it wait for it. A refusal again rejects them with {@link TabHeldOutError}, the tab
- * still kept; a re-adoption that works is reported by the next result.
+ * Re-adopt a tab with no worker driving it — one Chrome refused over another extension's frame, or a relay tab omp let
+ * go of at run end — published as the tab's `workerRecovery` so the call that started it and any beside it wait
+ * for it. A refusal rejects them with {@link TabHeldOutError}, the tab still kept; a re-adoption that works is reported
+ * by the next result.
  */
-function readoptHeldOutTab(name: string, timeoutMs: number): void {
+function readoptWorkerlessTab(name: string, timeoutMs: number): void {
 	const tab = tabs.get(name);
-	if (tab?.backend !== "worker" || !tab.heldOut || tab.workerRecovery) return;
+	if (tab?.backend !== "worker" || !(tab.heldOut || tab.released) || tab.workerRecovery) return;
+	const refused = tab.heldOut === true;
 	const readoption: Promise<boolean> = recoverWorkerTab(
 		tab,
 		tab.name,
@@ -2617,12 +2695,16 @@ function readoptHeldOutTab(name: string, timeoutMs: number): void {
 		{
 			// The page is as the user left it; stopping its loading would cancel a navigation they started.
 			recover: false,
-			failedReason: "omp could not reattach to the tab after Chrome had refused it, so the tab was released",
+			failedReason: refused
+				? "omp could not reattach to the tab after Chrome had refused it, so the tab was released"
+				: "omp could not reattach to the tab it had let go of when the last turn ended, so the tab was released",
 		},
 	)
 		.then(reattached => {
 			if (reattached) {
-				tab.workerExitNotice = `Chrome had kept omp out of this tab since an earlier call (${DEBUGGER_DETACH_REFUSAL}); omp reattached to it on a new worker before this call, without reloading it. ${WORKER_RESETS}.`;
+				tab.workerExitNotice = refused
+					? `Chrome had kept omp out of this tab since an earlier call (${DEBUGGER_DETACH_REFUSAL}); omp reattached to it on a new worker before this call, without reloading it. ${WORKER_RESETS}.`
+					: `omp let go of this tab when the last turn ended, so Chrome would stop showing its debugging infobar (browser.relayReleaseOnTurnEnd); omp reattached to it on a new worker before this call, without reloading it. ${WORKER_RESETS}.`;
 			}
 			return reattached;
 		})
@@ -2693,8 +2775,14 @@ function attachTabWorker(tab: WorkerTabSession, worker: WorkerHandle): void {
 	});
 	worker.onExit(exitCode => {
 		(worker as ExitTrackedWorker)[kWorkerExited] = true;
-		// A release or recycle owns a worker it replaced or is tearing down.
-		if (tabs.get(tab.name) !== tab || tab.worker !== worker || tab.state !== "alive" || releaseInflight.has(tab))
+		// A release or recycle owns a worker it replaced or is tearing down, and a turn-settle release ended it on purpose.
+		if (
+			tabs.get(tab.name) !== tab ||
+			tab.worker !== worker ||
+			tab.state !== "alive" ||
+			releaseInflight.has(tab) ||
+			tab.released
+		)
 			return;
 		// Bun's ErrorEvent message embeds a source excerpt; keep only its `error: …` line.
 		const cause = lastError && (/^error: (.+)$/m.exec(lastError.message)?.[1] ?? lastError.message.split("\n", 1)[0]);
@@ -2800,6 +2888,8 @@ async function recycleTimedOutWorkerTab(
 		}
 		tab.worker = replacement;
 		tab.info = info;
+		// A new worker holds no capture.
+		tab.capturing = undefined;
 		// A re-created connection-scoped page is a new target.
 		tab.targetId = info.targetId;
 		noteHiddenFrames(tab, info.hiddenFrames);

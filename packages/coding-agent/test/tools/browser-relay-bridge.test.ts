@@ -289,6 +289,51 @@ describe("RelayBridge auto-attach scope", () => {
 		expect(ext.rpcs("detach").map(rpc => rpc.tabId)).toEqual([1]);
 	});
 
+	it("keeps each agent's connection to its own claimed tab, so one agent letting go leaves another's attached", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 }), tab({ tabId: 2 }), tab({ tabId: 3 })]);
+		// Two agents (two omp processes, or two tab workers in one) each drive the tab they claimed.
+		const first = new FakeCdpSocket();
+		const firstConn = bridge.cdpConnected(first, pageId(1));
+		const second = new FakeCdpSocket();
+		const secondConn = bridge.cdpConnected(second, pageId(2));
+		setAutoAttach(bridge, firstConn);
+		setAutoAttach(bridge, secondConn);
+		await flush();
+		ack(bridge, ext, "attach");
+		await flush();
+		// Neither connection's auto-attach reaches the other's tab or the tab nobody claimed.
+		expect(
+			ext
+				.rpcs("attach")
+				.map(rpc => rpc.tabId)
+				.sort(),
+		).toEqual([1, 2]);
+		expect(first.attachedSessions()).toHaveLength(1);
+		expect(second.attachedSessions()).toHaveLength(1);
+
+		// The first agent's turn settles and its worker leaves: only its tab detaches.
+		bridge.cdpClosed(firstConn);
+		await flush();
+		expect(ext.rpcs("detach").map(rpc => rpc.tabId)).toEqual([1]);
+		expect(second.attachedSessions()).toHaveLength(1);
+		ack(bridge, ext, "detach");
+		await flush();
+
+		// It comes back for its tab while the second agent still holds its own.
+		const again = new FakeCdpSocket();
+		const againConn = bridge.cdpConnected(again, pageId(1));
+		setAutoAttach(bridge, againConn);
+		await flush();
+		ack(bridge, ext, "attach");
+		await flush();
+		expect(again.attachedSessions()).toHaveLength(1);
+		bridge.cdpClosed(secondConn);
+		await flush();
+		expect(ext.rpcs("detach").map(rpc => rpc.tabId)).toEqual([1, 2]);
+	});
+
 	it("still attaches a tab on demand through Target.attachToTarget", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

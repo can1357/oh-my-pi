@@ -52,6 +52,11 @@ class ChromeBackedExtension {
 	refuseAttach: string | undefined;
 	attachAttempts = 0;
 
+	/** Whether "chrome.debugger" is attached to the tab, as Chrome's infobar shows. */
+	get attached(): boolean {
+		return this.#root !== undefined;
+	}
+
 	private constructor(
 		relay: WebSocket,
 		chrome: WebSocket,
@@ -337,7 +342,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 	}
 
 	/** Adopt a page through the relay and leave state on it that only survives a re-adoption without reload. */
-	async function openRelayTab(query = "", owned = false): Promise<ChromeBackedExtension> {
+	async function openRelayTab(query = "", owned = false, ownerId?: string): Promise<ChromeBackedExtension> {
 		if (!chromium || !site) throw new Error("Chromium not launched");
 		page = await chromium.newPage();
 		pageUrl = `${site.url}login?case=${crypto.randomUUID()}${query}`;
@@ -352,6 +357,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 			hasUI: false,
 			getSessionFile: () => null,
 			getSessionSpawns: () => null,
+			...(ownerId ? { getEvalKernelOwnerId: () => ownerId } : {}),
 			settings: Settings.isolated({
 				"browser.enabled": true,
 				"browser.relay": true,
@@ -886,6 +892,130 @@ describe("relay tabs Chrome detaches omp from", () => {
 				resume.resolve();
 				held.mockRestore();
 			}
+		},
+		60_000,
+	);
+
+	/** Resolves once the extension holds the tab `attached` or not, failing after a few seconds. */
+	async function untilAttached(ext: ChromeBackedExtension, attached: boolean): Promise<void> {
+		const deadline = Date.now() + 5_000;
+		while (ext.attached !== attached) {
+			if (Date.now() > deadline) throw new Error(`the tab never became ${attached ? "attached" : "detached"}`);
+			await Bun.sleep(20);
+		}
+	}
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"lets go of an idle relay tab at turn settle and re-adopts the same page on the next call",
+		async () => {
+			const owner = `relay-turn-${process.pid}`;
+			const ext = await openRelayTab("", false, owner);
+			expect(ext.attached).toBeTrue();
+
+			// What turn settle runs under `browser.relayReleaseOnTurnEnd`.
+			expect(await tabSupervisor.releaseRelayTabsForOwner(owner)).toBe(1);
+			// The relay detaches the tab once its worker's connection is gone: Chrome's infobar goes.
+			await untilAttached(ext, false);
+			expect(page?.isClosed()).toBeFalse();
+			expect(await tabSupervisor.releaseRelayTabsForOwner(owner)).toBe(0);
+
+			// The next call re-adopts the page as it was (no reload drops `window.mark`) and says what reset.
+			const next = await invoke(readMark);
+			expect(next.value).toBe("kept");
+			expect(next.text).toContain("let go of this tab when the last turn ended");
+			expect(ext.attached).toBeTrue();
+		},
+		60_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"closes a tab omp opened when its session ends while turn settle has let go of it",
+		async () => {
+			const owner = `relay-end-${process.pid}`;
+			const ext = await openRelayTab("", true, owner);
+			expect(await tabSupervisor.releaseRelayTabsForOwner(owner)).toBe(1);
+			await untilAttached(ext, false);
+			// Chrome's close event can reach this test's Puppeteer connection after the supervisor's close reply.
+			const closed = Promise.withResolvers<void>();
+			page!.once("close", closed.resolve);
+			// No worker is left to answer a close, so nothing waits out a close budget on one.
+			expect(await tabSupervisor.releaseTabsForOwner(owner, { kill: false })).toBe(1);
+			expect(getTab(name)).toBeUndefined();
+			await Promise.race([closed.promise, Bun.sleep(5_000)]);
+			expect(page?.isClosed()).toBeTrue();
+		},
+		60_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"re-adopts the page for a call that lands while turn settle is still letting go of the tab",
+		async () => {
+			const owner = `relay-race-${process.pid}`;
+			const ext = await openRelayTab("", false, owner);
+			// Turn settle runs detached from the agent loop, so the next turn's call can start before it finishes.
+			const releasing = tabSupervisor.releaseRelayTabsForOwner(owner);
+			const next = await invoke(readMark);
+			expect(await releasing).toBe(1);
+			expect(next.value).toBe("kept");
+			await untilAttached(ext, true);
+			expect(await invoke(readMark)).toMatchObject({ value: "kept" });
+		},
+		60_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"closes a tab omp opened when its session ends while turn settle is still letting go of it",
+		async () => {
+			const owner = `relay-race-end-${process.pid}`;
+			await openRelayTab("", true, owner);
+			const closed = Promise.withResolvers<void>();
+			page!.once("close", closed.resolve);
+			const releasing = tabSupervisor.releaseRelayTabsForOwner(owner);
+			expect(await tabSupervisor.releaseTabsForOwner(owner, { kill: false })).toBe(1);
+			await releasing;
+			expect(getTab(name)).toBeUndefined();
+			await Promise.race([closed.promise, Bun.sleep(5_000)]);
+			expect(page?.isClosed()).toBeTrue();
+		},
+		60_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"keeps a relay tab attached at its agent's turn settle while another agent drove it last",
+		async () => {
+			const owner = `relay-parent-${process.pid}`;
+			const ext = await openRelayTab("", false, owner);
+			// A subagent (its own owner id) drives the parent's tab by name and is still between calls on it.
+			const subagent: ToolSession = { ...tool, getEvalKernelOwnerId: () => `relay-child-${process.pid}` };
+			const child = await createBrowserPrelude(subagent).invoke(
+				{ name, ...readMark },
+				{ session: subagent, toolCallId: "relay-child", signal: undefined },
+			);
+			expect(isRecord(child.details) ? child.details.value : undefined).toBe("kept");
+			expect(await tabSupervisor.releaseRelayTabsForOwner(owner)).toBe(0);
+			// The subagent's settle never lets go of a tab it did not open.
+			expect(await tabSupervisor.releaseRelayTabsForOwner(`relay-child-${process.pid}`)).toBe(0);
+			expect(ext.attached).toBeTrue();
+			// Once the parent drives it again, its next settle lets go of it.
+			await invoke(readMark);
+			expect(await tabSupervisor.releaseRelayTabsForOwner(owner)).toBe(1);
+			await untilAttached(ext, false);
+		},
+		60_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"keeps a relay tab attached across turn settle while its HAR capture runs",
+		async () => {
+			const owner = `relay-capture-${process.pid}`;
+			const ext = await openRelayTab("", false, owner);
+			await invoke({ action: "run", code: "await tab.harStart();", timeout: 10 });
+			expect(await tabSupervisor.releaseRelayTabsForOwner(owner)).toBe(0);
+			expect(ext.attached).toBeTrue();
+			// Stopping the capture makes the tab idle again, so the next settle lets go of it.
+			await invoke({ action: "run", code: "await tab.harStop();", timeout: 10 });
+			expect(await tabSupervisor.releaseRelayTabsForOwner(owner)).toBe(1);
+			await untilAttached(ext, false);
 		},
 		60_000,
 	);
