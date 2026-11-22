@@ -2191,6 +2191,11 @@ const DRAG_RELEASE_GAP: Duration = Duration::from_millis(50);
 /// transition shorter than its report interval; a search field that reacts
 /// to every key needs more than one interval.
 const REPORT_KEY_GAP: Duration = Duration::from_millis(60);
+/// Shift's hold and the pause after its release in [`prime_reports`]: the
+/// value measured restoring background taps after a takeover activated
+/// iPhone Mirroring. [`REPORT_KEY_GAP`]'s shorter value was measured for
+/// ordinary keys on such a device, not for this.
+const PRIMER_KEY_GAP: Duration = Duration::from_millis(120);
 /// Press length, and pointer settle, of a tap on such a device.
 const TAP_HOLD: Duration = Duration::from_millis(60);
 /// How long raising an occluded target may take to become visible to
@@ -3636,8 +3641,9 @@ fn report_pointer(
 /// when a takeover pointer call activated it since its last primer
 /// (`awaiting`). The mark clears once `prime` has run; a primer the key route
 /// refused or that failed still sends, unprimed, as `main` did. A primer the
-/// user stopped (`UserIntervened`) or a cancel keeps the mark and stops the
-/// call before any pointer event.
+/// user stopped (`UserIntervened`) or cancelled keeps the mark and stops the
+/// call before any pointer event; a cancel noticed after a primer ran stops
+/// it with the mark already cleared.
 fn primed<T>(
 	awaiting: &mut HashSet<(libc::pid_t, u32)>,
 	(pid, wid): (libc::pid_t, u32),
@@ -3686,7 +3692,7 @@ fn prime_reports(
 		press_chord(
 			source,
 			&[KeyPress { name: KeyName::Shift, code: key_code(KeyName::Shift)? }],
-			REPORT_KEY_GAP,
+			PRIMER_KEY_GAP,
 			|event| post_guarded(event, guard, |event| skylight::post_keyboard(to, event)),
 		)
 	})
