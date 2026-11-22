@@ -394,7 +394,7 @@ describe("title generator", () => {
 		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
 	});
 
-	it.each(["<title>none</title>", "<title/>"])(
+	it.each(["<title>none</title>", "<title/>", '<title>"None."</title>'])(
 		"stops before the next paid model when the first model declines with %s",
 		async reply => {
 			const primary = getModelOrThrow("claude-haiku-4-5");
@@ -427,14 +427,20 @@ describe("title generator", () => {
 		},
 	);
 
-	it("tries the next title model after an empty, unparsable reply", async () => {
+	it.each([
+		["an empty reply", []],
+		["a reply cut off after an opening <title>", [{ type: "text", text: "<title>" }]],
+	])("tries the next title model after %s", async (_shape, primaryContent) => {
 		const primary = getModelOrThrow("claude-haiku-4-5");
 		const fallback = getModelOrThrow("claude-sonnet-4-5");
 		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockImplementation(
 			async model =>
 				({
 					stopReason: "stop",
-					content: model.id === primary.id ? [] : [{ type: "text", text: "<title>Fix resolver errors</title>" }],
+					content:
+						model.id === primary.id
+							? primaryContent
+							: [{ type: "text", text: "<title>Fix resolver errors</title>" }],
 				}) as never,
 		);
 		const settings = Settings.isolated({

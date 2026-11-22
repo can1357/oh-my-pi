@@ -30,7 +30,7 @@ import type { Settings } from "../config/settings";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
 import { formatTitleUserMessage } from "../tiny/message-preproc";
-import { isLowSignalTitleInput, NO_TITLE_SENTINEL, normalizeGeneratedTitle } from "../tiny/text";
+import { isLowSignalTitleInput, isNoTitleSentinel, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
 
 import { cfgRetryModelFallback } from "../session/settings";
@@ -555,25 +555,30 @@ function extractGeneratedTitle(contentBlocks: AssistantMessage["content"]): stri
 	// thinking envelopes plus any stray/unclosed title tag fragment. Reject a
 	// prose thinking preamble only on the markerless path: a later marked title
 	// remains authoritative.
-	let candidate = extractVisibleMarkedTitle(textTitle);
-	const marked = candidate !== undefined;
-	if (candidate === undefined) {
+	// A closed marker with nothing in it (`<title/>`) or the sentinel is a decline
+	// (null); an unclosed trailing `<title>` is a cut-off reply, not a decline.
+	const marked = extractVisibleMarkedTitle(textTitle);
+	let candidate: string;
+	if (marked) {
+		candidate = marked.content;
+	} else {
 		candidate = stripLeadingLeakedThinkingMarkup(textTitle)
 			.replace(/<\/?title>/gi, "")
 			.trim();
 		if (LEADING_PROSE_THINKING_PREAMBLE_RE.test(candidate)) return "";
 	}
 	const title = unwrapJsonTitle(candidate);
-	const trimmed = title.trim();
-	return (marked && !trimmed) || trimmed.toLowerCase() === NO_TITLE_SENTINEL ? null : title;
+	if (marked?.closed && !title.trim()) return null;
+	return isNoTitleSentinel(title) ? null : title;
 }
 
-function extractVisibleMarkedTitle(text: string): string | undefined {
+function extractVisibleMarkedTitle(text: string): { content: string; closed: boolean } | undefined {
 	TITLE_MARKER_GLOBAL_RE.lastIndex = 0;
 	let marker: RegExpExecArray | null = TITLE_MARKER_GLOBAL_RE.exec(text);
 	while (marker !== null) {
-		const content = marker[1];
-		if (isVisibleTitleMarker(text, marker.index)) return content?.trim() ?? "";
+		if (isVisibleTitleMarker(text, marker.index)) {
+			return { content: marker[1]?.trim() ?? "", closed: !/^<title>\s*$/i.test(marker[0]) };
+		}
 		marker = TITLE_MARKER_GLOBAL_RE.exec(text);
 	}
 	return undefined;
