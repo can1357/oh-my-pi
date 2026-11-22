@@ -8,7 +8,7 @@ import * as fsSync from "node:fs";
 import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
-import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
+import { getModelPricingStatus, routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { ensureSqliteLockShim, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import { bindAgentMesh } from "./irc/mesh";
@@ -55,12 +55,14 @@ import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-select
 import {
 	disabledProviderIds,
 	expandRoleAlias,
+	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	resolveCliModel,
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
 	resolveModelScope,
 	type ScopedModel,
+	scopeAllowList,
 } from "./config/model-resolver";
 import { ModelsConfigFile } from "./config/models-config";
 import { serviceTierSettingToTier } from "./config/service-tier";
@@ -1222,9 +1224,7 @@ export function toSessionScopedModels(
 
 /** Whether two scope lists reference the same set of models (order-independent). */
 function sameScopedModelSet(a: ReadonlyArray<{ model: Model }>, b: ReadonlyArray<{ model: Model }>): boolean {
-	if (a.length !== b.length) return false;
-	const keys = new Set(a.map(entry => `${entry.model.provider}/${entry.model.id}`));
-	return b.every(entry => keys.has(`${entry.model.provider}/${entry.model.id}`));
+	return a.length === b.length && a.every(entry => b.some(other => routedModelsAreEqual(entry.model, other.model)));
 }
 
 /** Minimal session surface the post-discovery scope rebuild mutates. */
@@ -1546,24 +1546,16 @@ function applyStartupScopedModels(
 		if (first) {
 			const remembered = activeSettings.getModelRole("default");
 			if (remembered) {
-				const rememberedSpec = resolveModelRoleValue(
-					remembered,
-					scopedModels.map(scopedModel => scopedModel.model),
-					{
-						settings: activeSettings,
-						matchPreferences: getModelMatchPreferences(activeSettings),
-					},
-				);
-				const rememberedResolvedModel = rememberedSpec.model;
-				const rememberedModel = rememberedResolvedModel
-					? scopedModels.find(
-							scopedModel =>
-								scopedModel.model.provider === rememberedResolvedModel.provider &&
-								scopedModel.model.id === rememberedResolvedModel.id,
-						)
-					: scopedModels.find(scopedModel => scopedModel.model.id.toLowerCase() === remembered.toLowerCase());
+				const rememberedSpec = resolveModelRoleValue(remembered, scopeAllowList(scopedModels), {
+					settings: activeSettings,
+					matchPreferences: getModelMatchPreferences(activeSettings),
+				});
+				// The resolved model keeps its variant and pin; only an unresolved role falls back to an id match.
+				const rememberedModel =
+					rememberedSpec.model ??
+					scopedModels.find(scopedModel => scopedModel.model.id.toLowerCase() === remembered.toLowerCase())?.model;
 				if (rememberedModel) {
-					options.model = rememberedModel.model;
+					options.model = rememberedModel;
 					options.rebindModelAfterDiscovery = true;
 					// Apply explicit thinking level from remembered role value
 					if (!parsed.thinking && rememberedSpec.explicitThinkingLevel && rememberedSpec.thinkingLevel) {
@@ -1772,7 +1764,7 @@ export async function buildSessionOptions(
 			// at, or the first cycle back into `default` overrides it.
 			activeSettings.overrideModelRoles({
 				default: formatModelSelectorValue(
-					resolved.selector ?? `${resolved.model.provider}/${resolved.model.id}`,
+					resolved.selector ?? formatModelStringWithRouting(resolved.model),
 					parsed.thinking ?? resolved.thinkingLevel,
 				),
 			});
