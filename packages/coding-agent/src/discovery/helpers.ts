@@ -427,11 +427,27 @@ async function globIf(
 	}
 }
 
+export interface SkillScanLimits {
+	maxDepth: number;
+	maxDirectories: number;
+	maxEntries: number;
+}
+
 export interface ScanSkillsFromDirOptions {
 	dir: string;
 	providerId: string;
 	level: "user" | "project";
 	requireDescription?: boolean;
+	/**
+	 * When true, descend into subdirectories and load every nested `SKILL.md`, so
+	 * `<dir>/group/<skill>/SKILL.md` is discovered. Directory symlinks stay leaf candidates and are
+	 * not traversed, and `.git`, `node_modules`, and hidden directories are pruned. Traversal is
+	 * bounded by depth, directory count, and entry count; reaching a bound emits a warning.
+	 * Default `false` keeps the Agent Skills spec's one-level layout.
+	 */
+	recursive?: boolean;
+	/** Override the recursive traversal bounds (tests and embedders). */
+	limits?: Partial<SkillScanLimits>;
 	/**
 	 * When true, treat a `SKILL.md` sitting directly under `dir` as a single skill in addition to
 	 * scanning `<dir>/<name>/SKILL.md` children. Matches the Claude plugin manifest convention
@@ -466,23 +482,25 @@ export function compareSkillOrder(aName: string, aPath: string, bName: string, b
 	return cmp(aPath, bPath);
 }
 
+/** Bounds for an opt-in recursive skill scan; keep startup cost predictable. */
+const DEFAULT_RECURSIVE_SKILL_SCAN_LIMITS: SkillScanLimits = {
+	maxDepth: 6,
+	maxDirectories: 2_000,
+	maxEntries: 20_000,
+};
+const RECURSIVE_SKILL_SCAN_PRUNED_DIRECTORIES: Record<string, true> = {
+	".git": true,
+	node_modules: true,
+};
+
 export async function scanSkillsFromDir(
 	_ctx: LoadContext,
 	options: ScanSkillsFromDirOptions,
 ): Promise<LoadResult<Skill>> {
 	const items: Skill[] = [];
 	const warnings: string[] = [];
-	const { dir, level, providerId, requireDescription = false } = options;
+	const { dir, level, providerId, requireDescription = false, recursive = false } = options;
 
-	let entries: fs.Dirent[];
-	try {
-		entries = await fs.promises.readdir(dir, { withFileTypes: true });
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-			warnings.push(`Failed to read skills directory: ${dir} (${String(error)})`);
-		}
-		return { items, warnings };
-	}
 	const loadSkill = async (skillPath: string) => {
 		try {
 			const content = await readFile(skillPath);
@@ -517,19 +535,68 @@ export async function scanSkillsFromDir(
 	};
 
 	const work: Promise<void>[] = [];
-	if (options.includeSelf) {
-		const selfSkillPath = path.join(dir, "SKILL.md");
-		if (fs.existsSync(selfSkillPath)) {
+	const limits = { ...DEFAULT_RECURSIVE_SKILL_SCAN_LIMITS, ...options.limits };
+	let visitedDirectories = 0;
+	let visitedEntries = 0;
+	let truncation: string | undefined;
+
+	const visit = async (currentDir: string, depth: number): Promise<void> => {
+		if (recursive && visitedDirectories >= limits.maxDirectories) {
+			truncation ??= `maximum directory count ${limits.maxDirectories} reached`;
+			return;
+		}
+		visitedDirectories++;
+		let entries: fs.Dirent[];
+		try {
+			entries = await fs.promises.readdir(currentDir, { withFileTypes: true });
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+				warnings.push(`Failed to read skills directory: ${currentDir} (${String(error)})`);
+			}
+			return;
+		}
+		if (recursive) {
+			visitedEntries += entries.length;
+			if (visitedEntries > limits.maxEntries) {
+				truncation ??= `maximum entry count ${limits.maxEntries} reached`;
+				return;
+			}
+		}
+		// The root carries a skill only when a caller opts in (recursive scans or
+		// Claude plugin manifest paths); nested directories may each be a skill.
+		// Check existence before reading so a missing manifest is not negative-cached
+		// and a later scan can see a SKILL.md created in an already-visited directory.
+		const selfSkillPath = path.join(currentDir, "SKILL.md");
+		const hasSelfSkill = (depth > 0 || options.includeSelf || recursive) && fs.existsSync(selfSkillPath);
+		if (hasSelfSkill) {
 			work.push(loadSkill(selfSkillPath));
 		}
-	}
-	for (const entry of entries) {
-		if (entry.name.startsWith(".")) continue;
-		if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-		const skillPath = path.join(dir, entry.name, "SKILL.md");
-		if (fs.existsSync(skillPath)) {
-			work.push(loadSkill(skillPath));
+		// A nested skill directory is a leaf: its references/, scripts/, or agent
+		// folders may contain SKILL.md files that are not independently invocable.
+		if (depth > 0 && hasSelfSkill) return;
+		entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+		for (const entry of entries) {
+			if (entry.name.startsWith(".")) continue;
+			if (recursive && RECURSIVE_SKILL_SCAN_PRUNED_DIRECTORIES[entry.name] === true) continue;
+			if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+			// Flat scans keep the one-level contract; recursive scans treat
+			// symlinked directories as leaves so a link cycle cannot loop.
+			if (!recursive || entry.isSymbolicLink()) {
+				const childSkillPath = path.join(currentDir, entry.name, "SKILL.md");
+				if (fs.existsSync(childSkillPath)) work.push(loadSkill(childSkillPath));
+				continue;
+			}
+			if (depth >= limits.maxDepth) {
+				truncation ??= `maximum depth ${limits.maxDepth} reached`;
+				continue;
+			}
+			await visit(path.join(currentDir, entry.name), depth + 1);
 		}
+	};
+
+	await visit(dir, 0);
+	if (truncation) {
+		warnings.push(`Skill discovery truncated at ${dir}: ${truncation}`);
 	}
 	await Promise.all(work);
 

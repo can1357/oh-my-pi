@@ -313,6 +313,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		enableAgentsUser = true,
 		enableAgentsProject = true,
 		customDirectories = [],
+		recursive = false,
 		ignoredSkills = [],
 		manualSkills = [],
 		includeSkills = [],
@@ -353,6 +354,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		cwd,
 		disabledExtensions,
 		extensionRoots,
+		recursiveSkills: recursive,
 	});
 
 	const skillMap = new Map<string, Skill>();

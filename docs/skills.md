@@ -24,16 +24,21 @@ The capability validator only requires `name` and `path`; individual providers i
 
 ### Directory layout
 
-For conventional provider roots (native/Claude/Codex/Agents/plugins), skills are discovered as **one level under `skills/`**:
+By default, skills follow the Agent Skills specification's **one level under `skills/`** layout:
 
 - `<skills-root>/<skill-name>/SKILL.md`
 
-Nested patterns like `<skills-root>/group/<skill>/SKILL.md` are not discovered recursively. The Claude-plugin provider also accepts manifest-declared skill directories containing `SKILL.md` directly, in addition to their immediate children. Agent Plugins packages use only the fixed `skills/<name>/SKILL.md` layout; registry-installed Skillshare packages have a root `SKILL.md`.
+Nested patterns like `<skills-root>/group/<skill>/SKILL.md` are not discovered by default. The Claude-plugin provider also accepts manifest-declared skill directories containing `SKILL.md` directly, in addition to their immediate children. Agent Plugins packages use only the fixed `skills/<name>/SKILL.md` layout; registry-installed Skillshare packages have a root `SKILL.md`.
 
-For `skills.customDirectories`, scanning uses the same non-recursive layout (`*/SKILL.md`).
+Set `skills.recursive: true` to discover nested layouts under the OMP-native `native` and `agents` skill roots. `skills.customDirectories` remains flat; point it at the nested parent directory instead:
+
+- `<skills-root>/group/<skill>/SKILL.md`
+- `<skills-root>/SKILL.md` (a skill at the scanned root itself)
+
+Third-party and plugin providers keep their externally specified flat layouts. Recursive scans prune hidden directories, `.git`, and `node_modules`, do not traverse directory symlinks, and stop at depth 6, 2,000 directories, or 20,000 entries with a warning. A nested directory containing `SKILL.md` is a leaf: its `references/`, `scripts/`, or other bundled directories are not searched for more skills. A `SKILL.md` at the scanned root still loads alongside its nested skills.
 
 ```text
-Provider-discovered layout (non-recursive under skills/):
+Default layout (non-recursive under skills/):
 
 <root>/skills/
   ├─ postgres/
@@ -42,9 +47,15 @@ Provider-discovered layout (non-recursive under skills/):
   │   └─ SKILL.md      ✅ discovered
   └─ team/
       └─ internal/
-          └─ SKILL.md  ❌ not discovered by provider loaders
+          └─ SKILL.md  ❌ not discovered by default
 
-Custom-directory scanning is also non-recursive, so nested paths are ignored unless you point `customDirectories` at that nested parent.
+With skills.recursive: true (native and agents only):
+
+<root>/skills/
+  ├─ SKILL.md          ✅ discovered
+  └─ team/
+      └─ internal/
+          └─ SKILL.md  ✅ discovered
 ```
 
 ### `SKILL.md` frontmatter
@@ -68,7 +79,7 @@ Current runtime behavior:
 - `description` is required for:
    - native `.omp` provider skill discovery (`requireDescription: true`)
    - `omp-plugins` extension-package skills and the `github` provider (`.github/skills/`), which also pass `requireDescription: true`
-   - `skills.customDirectories` scans via `scanSkillsFromDir` in `src/discovery/helpers.ts` (non-recursive)
+   - `skills.customDirectories` scans via `scanSkillsFromDir` in `src/discovery/helpers.ts` (always flat)
 - the claude/codex/agents/opencode/claude-plugins providers can load skills without description
 - `agent-plugins` validates required `name` and `description` against the Agent Skills specification
 
@@ -270,5 +281,5 @@ MCP-advertised skills:
 - Put each skill in its own directory: `<skills-root>/<skill-name>/SKILL.md`
 - Always include explicit `name` and `description` frontmatter
 - Keep referenced assets under the same skill directory and access with `skill://<name>/...`
-- For nested taxonomy (`team/domain/skill`), point `skills.customDirectories` to the nested parent directory; scanning itself remains non-recursive
+- For nested taxonomy (`team/domain/skill`) under `.omp` or `.agent[s]`, enable `skills.recursive`; for `skills.customDirectories`, point the entry at the nested parent directory
 - On a name collision, the higher-precedence skill keeps the bare name; identical copies collapse, and differing copies remain reachable under a namespace.

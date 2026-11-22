@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { disableUserSource, enableUserSource } from "@oh-my-pi/pi-coding-agent/capability";
 import { type Skill as CapabilitySkill, skillCapability } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import { getCapability } from "@oh-my-pi/pi-coding-agent/discovery";
+import { scanSkillsFromDir } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { getWslWindowsHomeCandidate, runHostProbe } from "@oh-my-pi/pi-coding-agent/discovery/agents";
 import {
 	type LoadSkillsResult,
@@ -22,6 +23,14 @@ const fixturesDir = path.resolve(import.meta.dirname, "fixtures/skills");
 const collisionFixturesDir = path.resolve(import.meta.dirname, "fixtures/skills-collision");
 
 const longSkillName = "this-is-a-very-long-skill-name-that-exceeds-the-sixty-four-character-limit-set-by-the-standard";
+
+async function writeSkill(dir: string, name: string): Promise<void> {
+	await fs.mkdir(dir, { recursive: true });
+	await fs.writeFile(
+		path.join(dir, "SKILL.md"),
+		`---\nname: ${name}\ndescription: ${name} description.\n---\n\n# ${name}\n`,
+	);
+}
 const expectedFixtureSkillOrder: string[] = [
 	"bad--name",
 	"different-name",
@@ -134,6 +143,22 @@ describe("skills", () => {
 			});
 
 			expect(skills).toHaveLength(0);
+		});
+
+		it("discovers a SKILL.md created in a previously scanned empty directory", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skill-late-"));
+			const later = path.join(root, "later");
+			await fs.mkdir(later, { recursive: true });
+
+			try {
+				expect((await loadSkillsFromDir({ dir: root, source: "test" })).skills).toHaveLength(0);
+				await writeSkill(later, "later-skill");
+				expect((await loadSkillsFromDir({ dir: root, source: "test" })).skills.map(skill => skill.name)).toEqual([
+					"later-skill",
+				]);
+			} finally {
+				await removeWithRetries(root);
+			}
 		});
 	});
 
@@ -527,6 +552,123 @@ description: Skill loaded from a tilde-expanded custom directory.
 			customDirectories: [fixturesDir],
 		});
 		expect(withEmpty.length).toBe(withoutOption.length);
+	});
+
+	describe("recursive discovery", () => {
+		it("discovers nested and root skills under .agents/skills only when enabled", async () => {
+			const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-recursive-agents-"));
+			const cwd = path.join(tempRoot, "project");
+			const skillsRoot = path.join(cwd, ".agents", "skills");
+			await writeSkill(path.join(skillsRoot, "team", "domain", "nested-skill"), "nested-skill");
+			await writeSkill(skillsRoot, "root-skill");
+			await writeSkill(path.join(skillsRoot, "parent-skill"), "parent-skill");
+			await writeSkill(path.join(skillsRoot, "parent-skill", "references", "bundled"), "bundled-reference");
+			const options = { ...DISABLE_ALL_BUILTIN_SKILLS, enableAgentsProject: true, cwd };
+
+			try {
+				const { skills: flat } = await loadSkills(options);
+				expect(flat.some(skill => skill.name === "nested-skill" || skill.name === "root-skill")).toBe(false);
+
+				const { skills } = await loadSkills({ ...options, recursive: true });
+				expect(skills.find(skill => skill.name === "nested-skill")?.source).toBe("agents:project");
+				expect(skills.find(skill => skill.name === "root-skill")?.source).toBe("agents:project");
+				expect(skills.find(skill => skill.name === "parent-skill")?.source).toBe("agents:project");
+				expect(skills.some(skill => skill.name === "bundled-reference")).toBe(false);
+			} finally {
+				await removeWithRetries(tempRoot);
+			}
+		});
+
+		it("leaves customDirectories on the flat layout when recursion is enabled", async () => {
+			const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-recursive-custom-"));
+			const customRoot = path.join(tempRoot, "custom");
+			await writeSkill(path.join(customRoot, "team", "domain", "nested-skill"), "nested-skill");
+			await writeSkill(customRoot, "root-skill");
+			await writeSkill(path.join(customRoot, "parent-skill"), "parent-skill");
+
+			try {
+				const { skills } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					customDirectories: [customRoot],
+					recursive: true,
+				});
+				expect(skills.find(skill => skill.name === "parent-skill")?.source).toBe("custom:user");
+				expect(skills.some(skill => skill.name === "nested-skill" || skill.name === "root-skill")).toBe(false);
+			} finally {
+				await removeWithRetries(tempRoot);
+			}
+		});
+
+		it("prunes hidden, .git, and node_modules directories and stops at the depth cap", async () => {
+			const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-recursive-bounds-"));
+			const cwd = path.join(tempRoot, "project");
+			const skillsRoot = path.join(cwd, ".agents", "skills");
+			await writeSkill(path.join(skillsRoot, ".hidden", "hidden-skill"), "hidden-skill");
+			await writeSkill(path.join(skillsRoot, ".git", "git-skill"), "git-skill");
+			await writeSkill(path.join(skillsRoot, "node_modules", "module-skill"), "module-skill");
+			// Separate branches keep the depth-six skill from stopping the walk
+			// before the depth-seven branch reaches the bound.
+			await writeSkill(path.join(skillsRoot, "six", "a", "b", "c", "d", "e"), "depth-six-skill");
+			await writeSkill(path.join(skillsRoot, "seven", "a", "b", "c", "d", "e", "f"), "depth-seven-skill");
+
+			try {
+				const { skills, warnings } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					enableAgentsProject: true,
+					cwd,
+					recursive: true,
+				});
+				expect(skills.find(skill => skill.name === "depth-six-skill")?.source).toBe("agents:project");
+				for (const name of ["hidden-skill", "git-skill", "module-skill", "depth-seven-skill"]) {
+					expect(skills.some(skill => skill.name === name)).toBe(false);
+				}
+				expect(warnings.some(warning => warning.message.includes("maximum depth 6"))).toBe(true);
+			} finally {
+				await removeWithRetries(tempRoot);
+			}
+		});
+
+		it("warns and stops at the recursive entry limit", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-recursive-entries-"));
+			for (const name of ["first", "second", "third"]) await writeSkill(path.join(root, name), name);
+
+			try {
+				const result = await scanSkillsFromDir(
+					{ cwd: root, home: root, repoRoot: root },
+					{ dir: root, providerId: "test", level: "project", recursive: true, limits: { maxEntries: 2 } },
+				);
+				expect(result.items).toHaveLength(0);
+				expect(result.warnings?.some(warning => warning.includes("maximum entry count 2"))).toBe(true);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
+		it.skipIf(process.platform === "win32")("loads a symlinked skill without traversing it", async () => {
+			const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-recursive-symlink-"));
+			const cwd = path.join(tempRoot, "project");
+			const skillsRoot = path.join(cwd, ".agents", "skills");
+			const linkedSkill = path.join(tempRoot, "linked-skill");
+			const linkedGroup = path.join(tempRoot, "linked-group");
+			await writeSkill(linkedSkill, "linked-skill");
+			await writeSkill(path.join(linkedGroup, "nested", "linked-child"), "linked-child");
+			await fs.mkdir(skillsRoot, { recursive: true });
+			await fs.symlink(linkedSkill, path.join(skillsRoot, "linked-skill"), "dir");
+			await fs.symlink(linkedGroup, path.join(skillsRoot, "linked-group"), "dir");
+
+			try {
+				const { skills } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					enableAgentsProject: true,
+					cwd,
+					recursive: true,
+				});
+				expect(skills.find(skill => skill.name === "linked-skill")?.source).toBe("agents:project");
+				expect(skills.some(skill => skill.name === "linked-child")).toBe(false);
+			} finally {
+				await removeWithRetries(tempRoot);
+			}
+		});
 	});
 });
 

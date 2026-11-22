@@ -133,6 +133,7 @@ export async function loadAllExtensions(
 	disabledIds?: string[],
 	extensionRoots?: EffectiveExtensionRoots,
 	builtinDrops?: ReadonlyMap<string, MCPDroppedServer>,
+	recursiveSkills = false,
 ): Promise<Extension[]> {
 	const extensions: Extension[] = [];
 	const effectiveDisabledIds = disabledIds ?? [];
@@ -179,6 +180,7 @@ export async function loadAllExtensions(
 		cwd,
 		includeDisabled: true,
 		disabledExtensions: effectiveDisabledIds,
+		recursiveSkills,
 		isSourceDisabled: (source: SourceMeta) => resolveState(source, false, undefined).state === "disabled",
 	};
 

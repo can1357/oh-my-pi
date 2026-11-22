@@ -395,6 +395,7 @@ export async function loadCapability<T>(
 	if (options.providers) ctx.explicitProviders = new Set(options.providers);
 	if (options.includeDisabled) ctx.includeOptOutUserSources = true;
 	if (options.extensionRoots !== undefined) ctx.extensionRoots = options.extensionRoots;
+	if (options.recursiveSkills !== undefined) ctx.recursiveSkills = options.recursiveSkills;
 	const providers = filterProviders(capability, options);
 
 	return await loadImpl(capability, providers, ctx, options);

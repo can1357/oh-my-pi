@@ -7,6 +7,7 @@ import { type ContextFile, contextFileCapability } from "@oh-my-pi/pi-coding-age
 import type { Skill } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgSkillsRecursive } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import {
 	disableProvider,
 	enableProvider,
@@ -15,6 +16,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/discovery";
 import { discoverExtensionPaths } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { isShadowedExtension } from "@oh-my-pi/pi-tui/overlays/extensions/types";
+import { createExtensionDashboardRuntime } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/dashboard-runtime";
 import { loadAllExtensions } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/state-manager";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
@@ -145,6 +147,22 @@ describe("disabledExtensions runtime filtering", () => {
 		expect(enabledRuntime.items.find(skill => skill.name === name)?.path).toBe(claudeFile);
 		expect(enabledDashboard.find(extension => extension.path === claudeFile)?.state).toBe("active");
 		expect(enabledDashboard.find(extension => extension.path === agentsFile)?.state).toBe("shadowed");
+	});
+
+	test("lists nested skills in the Extension Control Center when recursive discovery is enabled", async () => {
+		const name = "nested-dashboard-skill";
+		const skillFile = path.join(tempDir, ".agents", "skills", "group", "nested", name, "SKILL.md");
+		await fs.mkdir(path.dirname(skillFile), { recursive: true });
+		await fs.writeFile(skillFile, `---\nname: ${name}\ndescription: Nested dashboard skill.\n---\n\n# Nested\n`);
+
+		const settings = Settings.isolated();
+		initializeWithSettings(settings);
+		expect((await loadAllExtensions(tempDir, [])).some(extension => extension.id === `skill:${name}`)).toBe(false);
+
+		cfgSkillsRecursive.set(settings, true);
+		const runtime = createExtensionDashboardRuntime({ cwd: tempDir, settings });
+		const extensions = await runtime.loadExtensions([]);
+		expect(extensions.find(extension => extension.id === `skill:${name}`)?.state).toBe("active");
 	});
 
 	test("deduplicates against the caller's session-local disabled list, not global settings", async () => {
