@@ -11,6 +11,7 @@ import { daemonClient } from "../../src/daemon/client";
 import type { ModuleClient, ModuleContext, ModuleTunnel, ModuleUnit } from "../../src/daemon/module";
 import { DaemonMutex, MUTEX_KIND, MUTEX_VERSION, type MutexDaemon, mutexModule } from "../../src/daemon/modules/mutex";
 import type { DaemonTunnel, OpenRequest, OpenResult, UnitSnapshot } from "../../src/daemon/protocol";
+import { SkillDescriptionStore } from "../../src/extensibility/skill-descriptions";
 import { IsolatedDaemon, waitFor } from "../fixtures/daemon-harness";
 
 // The mutex module uses no core services.
@@ -235,6 +236,11 @@ describe("hint single-flight through the daemon", () => {
 		harness.track((await daemonClient()).welcome.daemon.pid);
 		const storePath = path.join(harness.dir, "hints.db");
 		const callsPath = path.join(harness.dir, "calls.txt");
+		// Made, and held open, before either child starts: the test checks the model requests, not the
+		// creation of the store. Two children that both create it switch it to WAL mode at the same
+		// moment, and SQLite answers one of them SQLITE_BUSY, usually at once, so it exits before it is
+		// ready.
+		using _store = SkillDescriptionStore.open(storePath);
 		const fixture = path.join(import.meta.dir, "..", "fixtures", "hint-single-flight.ts");
 		const readyPaths = [0, 1].map(index => path.join(harness.dir, `ready-${index}`));
 		const children = readyPaths.map(readyPath =>
@@ -247,7 +253,20 @@ describe("hint single-flight through the daemon", () => {
 		);
 		try {
 			// Both are loaded and waiting before either starts: they really ask at once.
-			for (const readyPath of readyPaths) await waitFor(() => Bun.file(readyPath).exists(), "child ready");
+			for (const [index, readyPath] of readyPaths.entries()) {
+				const child = children[index]!;
+				await waitFor(async () => {
+					if (await Bun.file(readyPath).exists()) return true;
+					// A child that died before it was ready says why, rather than leaving the wait to run out.
+					if (child.exitCode !== null || child.signalCode !== null) {
+						// It may have written its ready file just before it exited.
+						if (await Bun.file(readyPath).exists()) return true;
+						const stderr = await new Response(child.stderr).text();
+						throw new Error(`child exited ${child.exitCode ?? child.signalCode} before it was ready: ${stderr}`);
+					}
+					return false;
+				}, "child ready");
+			}
 			for (const child of children) {
 				child.stdin.write("go\n");
 				await child.stdin.flush();
