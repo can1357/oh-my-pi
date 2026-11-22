@@ -152,6 +152,9 @@ pub struct ProductionAdwHost {
 	/// Verification observations collected from a prior verification phase,
 	/// carried forward to subsequent phases for evidence-based judging.
 	verification_observations: parking_lot::Mutex<Vec<CheckObservation>>,
+	/// Verification policy from a prior verification phase, retained so
+	/// downstream judges can evaluate observations against gates.
+	verification_policy:       parking_lot::Mutex<Option<VerificationPolicy>>,
 }
 
 impl ProductionAdwHost {
@@ -180,6 +183,7 @@ impl ProductionAdwHost {
 			environment: OnceCell::new(),
 			exec_policy_override: None,
 			verification_observations: parking_lot::Mutex::new(Vec::new()),
+			verification_policy: parking_lot::Mutex::new(None),
 		})
 	}
 
@@ -684,8 +688,9 @@ impl AdwHost for ProductionAdwHost {
 				.await
 				{
 					Ok(report) => {
-						// Store verification observations for subsequent phases.
+						// Store verification evidence for subsequent phases.
 						*self.verification_observations.lock() = report.observations;
+						*self.verification_policy.lock() = report.policy;
 						Ok(PhaseResult {
 							accepted:    report.verdict == GateVerdict::Pass,
 							feedback:    sf!(
@@ -722,25 +727,20 @@ impl AdwHost for ProductionAdwHost {
 				let prompt = phase_prompt(phase, text, attempt, correction, inputs);
 				let answer = match executor {
 					Some(id) => {
-						let answer = self
+						self
 							.run_delegated(id.as_str(), &prompt, phase, attempt, cancel)
-							.await?;
-						return Ok(judge_with_verification(
-							phase.kind,
-							answer,
-							*accept_on_claim,
-							&*self.verification_observations.lock(),
-							None,
-						));
+							.await?
 					},
 					None => self.run_child(prompt, phase.kind, cancel).await?,
 				};
+				let observations = self.verification_observations.lock().clone();
+				let policy = self.verification_policy.lock().clone();
 				Ok(judge_with_verification(
 					phase.kind,
 					answer,
 					*accept_on_claim,
-					&*self.verification_observations.lock(),
-					None,
+					&observations,
+					policy.as_ref(),
 				))
 			},
 		}

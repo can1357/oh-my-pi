@@ -112,6 +112,9 @@ pub struct NativeVerificationReport {
 	pub assessment:   Option<GateAssessment>,
 	/// Raw check observations for downstream re-evaluation.
 	pub observations: Vec<CheckObservation>,
+	/// The verification policy used to evaluate observations, retained so
+	/// downstream judges can re-evaluate without reconstructing it.
+	pub policy:       Option<VerificationPolicy>,
 }
 
 /// An attempt could not establish its deterministic contract.
@@ -600,6 +603,7 @@ async fn verify(
 		publications,
 		assessment: Some(assessment),
 		observations,
+		policy: Some(policy),
 	})
 }
 
