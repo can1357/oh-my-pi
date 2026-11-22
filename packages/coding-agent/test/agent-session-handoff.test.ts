@@ -1481,10 +1481,38 @@ describe("AgentSession handoff", () => {
 	});
 
 	it("falls through to soft after an oversized cross-provider handoff without sending it", async () => {
+		let sideStreamCalls = 0;
+		const sideStreamFn: StreamFn = () => {
+			sideStreamCalls++;
+			throw new Error("sideStreamFn should not be called for oversized handoff");
+		};
+		await session.dispose();
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		sessionManager = await SessionManager.open(sessionFile, tempDir.path());
+		session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model: { ...model, contextWindow: 1024, maxTokens: 128 },
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+				convertToLlm: compactionModule.defaultConvertToLlm,
+			}),
+			sessionManager,
+			settings: session.settings,
+			modelRegistry,
+			obfuscator,
+			sideStreamFn,
+		});
+		events = [];
+		session.subscribe(event => {
+			events.push(event);
+		});
+
 		cfgCompactionMethodOrder.set(session.settings, ["handoff", "soft"]);
 		cfgContextPromotionEnabled.set(session.settings, false);
-		const activeModel = session.agent.state.model;
-		session.agent.setModel({ ...activeModel, contextWindow: 1024, maxTokens: 128 });
 		sessionManager.appendMessage({
 			role: "user",
 			content: "unreadable native history ".repeat(6000),
@@ -1498,11 +1526,10 @@ describe("AgentSession handoff", () => {
 			tokensBefore: preparation.tokensBefore,
 			details: {},
 		}));
-		const providerCall = vi.spyOn(session.agent, "streamFn");
 
 		await session.runIdleCompaction();
 
-		expect(providerCall).not.toHaveBeenCalled();
+		expect(sideStreamCalls).toBe(0);
 		expect(compactSpy).toHaveBeenCalled();
 		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "idle", action: "handoff" });
 		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "idle", action: "context-full" });

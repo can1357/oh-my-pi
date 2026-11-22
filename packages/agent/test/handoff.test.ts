@@ -180,6 +180,25 @@ describe("handoff helpers", () => {
 		expect(completeImpl).not.toHaveBeenCalled();
 	});
 
+	test("allows handoff on models with large output caps when prompt leaves room for minimum headroom", async () => {
+		// claude-opus-5-5: 1M window, 128k maxTokens. Prompt at 820k would be rejected if
+		// full maxTokens were charged, but leaves headroom for minimum transport output.
+		const opus = getBundledModel("anthropic", "claude-opus-5-5");
+		const context = {
+			systemPrompt: ["Live system prompt"],
+			tools: [],
+			messages: [{ role: "user" as const, content: "x".repeat(820_000), timestamp: 1 }],
+		};
+		const completeImpl = vi.fn(async () => createAssistantMessage([{ type: "text", text: "## Goal\nContinue" }]));
+
+		const result = await generateHandoffFromContext(context, opus, {
+			streamOptions: { apiKey: "test-key" },
+			completeImpl,
+		});
+		expect(result).toBe("## Goal\nContinue");
+		expect(completeImpl).toHaveBeenCalledTimes(1);
+	});
+
 	test("generateHandoffFromContext forwards cache routing and forces no-tools", async () => {
 		const completeSimpleSpy = vi
 			.spyOn(ai, "completeSimple")

@@ -42,7 +42,7 @@ import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { isRecord, logger, prompt, withLoopPhase } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
-import { estimateContextPromptTokens } from "../output-budget";
+import { handoffContextFitsWindow, MIN_OUTPUT_HEADROOM_TOKENS } from "../output-budget";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "../telemetry";
 import { ThinkingLevel } from "../thinking";
 import { Tokenizer } from "../tokenizer";
@@ -1227,16 +1227,12 @@ export async function generateHandoffFromContext(
 	};
 	// A handoff reads the entire prepared context, which may have expanded behind
 	// foreign native compactions. Earlier usage anchors cannot size that request.
-	const contextWindow = model.contextWindow;
-	if (contextWindow != null && contextWindow > 0) {
-		const estimatedTokens = estimateContextPromptTokens(context, new Tokenizer(model));
-		const outputTokens = requestOptions.maxTokens ?? model.maxTokens ?? 0;
-		if (estimatedTokens + outputTokens > contextWindow) {
-			throw new Error(
-				`Handoff input exceeds the context window of ${model.provider}/${model.id}: ` +
-					`estimated ${estimatedTokens} input tokens plus ${outputTokens} output tokens > ${contextWindow}`,
-			);
-		}
+	const contextFit = handoffContextFitsWindow(context, model, new Tokenizer(model));
+	if (!contextFit.fits) {
+		throw new Error(
+			`Handoff input exceeds the context window of ${model.provider}/${model.id}: ` +
+				`estimated ${contextFit.estimatedTokens} input tokens plus ${MIN_OUTPUT_HEADROOM_TOKENS} minimum output tokens > ${model.contextWindow}`,
+		);
 	}
 	let response = await instrumentedCompleteSimple(model, context, requestOptions, {
 		telemetry: options.telemetry,

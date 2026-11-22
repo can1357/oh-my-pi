@@ -5600,7 +5600,6 @@ export class SessionMaintenance {
 				? COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION
 				: COMPACTION_CHECK_NONE;
 		}
-		logger.debug("Automatic compaction method started", { method, reason });
 
 		// A speculative pass may have already produced this compaction's summary
 		// in the background. Claiming consumes the slot either way: an in-flight
