@@ -131,10 +131,8 @@ export function repairTaskParams(params: TaskParams): TaskParams {
 	const steps = repairSteps(params.steps);
 
 	let tasks: unknown = params.tasks;
-	if (typeof tasks === "string") {
-		const parsed = parseStringTasks(tasks);
-		if (parsed) tasks = parsed;
-	} else if (Array.isArray(tasks)) {
+	if (typeof tasks === "string") tasks = parseStringTasks(tasks) ?? tasks;
+	if (Array.isArray(tasks)) {
 		let changed = false;
 		const repaired = tasks.map(item => {
 			const next = repairTaskItem(item as TaskItem);

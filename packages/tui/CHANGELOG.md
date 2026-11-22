@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `repairTaskParams()` now promotes a JSON-string `tasks` payload to an array and repairs item prose, so a string-encoded batch call reaches validation intact.
+
 ## [18.22.0] - 2026-11-16
 
 ### Breaking Changes

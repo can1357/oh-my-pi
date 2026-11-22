@@ -70,10 +70,13 @@ describe("repairTaskParams", () => {
 		expect(repaired.tasks?.[1]).toBe(params.tasks![1]!);
 	});
 
-	it("promotes a JSON-string tasks payload to a real array and repairs its prose", () => {
+	it("promotes a JSON-string tasks payload and repairs double-encoded prose", () => {
+		// The item prose is double-encoded: literal "\n" survives JSON.parse and must be repaired.
 		const params: TaskParams = {
 			context: "Shared background.",
-			tasks: '[{"name":"Alpha","agent":"task","task":"line one\\nline two\\nline three","solutionSpace":"Open-ended"}]' as unknown as TaskParams["tasks"],
+			tasks: JSON.stringify([
+				{ name: "Alpha", agent: "task", task: "line one\\nline two\\nline three", solutionSpace: "Open-ended" },
+			]) as unknown as TaskParams["tasks"],
 		};
 
 		const repaired = repairTaskParams(params);
