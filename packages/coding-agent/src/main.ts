@@ -9,6 +9,7 @@ import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
+import type { ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { ensureSqliteLockShim, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import { bindAgentMesh } from "./irc/mesh";
 import {
@@ -571,6 +572,42 @@ async function loadTrustedSessionExtensions(
 }
 
 /**
+ * The provider an ACP `--api-key` belongs to when no launch model names one: the provider of the model the
+ * launch scope starts on, else the one provider a declared launch scope names. Undefined without a launch
+ * scope. A declared scope naming zero or several providers is refused, so no workspace can claim the key.
+ */
+async function resolveAcpApiKeyProvider(
+	parsed: Pick<Args, "model" | "models" | "thinking">,
+	modelRegistry: ModelRegistry,
+	settings: Settings,
+): Promise<string | undefined> {
+	// The launch scope names the credential's provider, but must not select the workspace's model.
+	const keyTarget: CreateAgentSessionOptions = {};
+	applyStartupScopedModels(
+		keyTarget,
+		parsed,
+		await resolveScopedModels(parsed, modelRegistry, settings),
+		settings,
+		false,
+	);
+	if (keyTarget.model) return keyTarget.model.provider;
+	const declaredScope = parsed.models ?? cfgEnabledModels.get(settings);
+	if (declaredScope.length === 0) return undefined;
+	// Without a stored credential the scope matches nothing available, but it still names its provider.
+	const disabled = disabledProviderIds(settings);
+	const catalog = {
+		getAvailable: (kind?: ModelKind | "all") =>
+			modelRegistry.getAll(kind).filter(model => !disabled.has(model.provider)),
+	};
+	const matches = await resolveModelScope(declaredScope, catalog, getModelMatchPreferences(settings), settings);
+	const [provider, ...others] = new Set(matches.map(entry => entry.model.provider));
+	if (!provider || others.length > 0) {
+		throw new CliUsageError("--api-key requires exactly one enabled provider in the launch scope");
+	}
+	return provider;
+}
+
+/**
  * Build the per-`session/new` factory used by ACP mode.
  *
  * MCP servers in ACP sessions are owned exclusively by the ACP client, which
@@ -582,6 +619,8 @@ async function loadTrustedSessionExtensions(
  */
 export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSessionFactory {
 	const apiKey = args.parsedArgs.apiKey;
+	// The launch names the key's provider (a model or the launch scope), and a workspace can only match it.
+	// Without one, only an explicit CLI pattern names it, by the model it resolves to at session creation.
 	let apiKeyProvider = args.apiKeyProvider ?? args.baseOptions.model?.provider;
 	const bindApiKey = (provider: string | undefined, key: string) => {
 		if (!provider) throw new CliUsageError(API_KEY_REQUIRES_MODEL);
@@ -600,17 +639,8 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			applyStartupScopedModels(nextOptions, args.parsedArgs, scope, nextSettings, false);
 		}
 		if (apiKey) {
-			if (nextOptions.model) {
-				bindApiKey(nextOptions.model.provider, apiKey);
-			} else if (
-				!apiKeyProvider &&
-				!nextOptions.modelPattern &&
-				!(args.parsedArgs.models ?? cfgEnabledModels.get(nextSettings)).length
-			) {
-				// Only an explicit model or scope may name the key's provider. Once it is bound, a workspace
-				// without either opens on its own default, and the post-creation bind checks that provider.
-				throw new CliUsageError(API_KEY_REQUIRES_MODEL);
-			}
+			if (!apiKeyProvider && !nextOptions.modelPattern) throw new CliUsageError(API_KEY_REQUIRES_MODEL);
+			if (nextOptions.model) bindApiKey(nextOptions.model.provider, apiKey);
 		}
 
 		const nextSessionManager = SessionManager.create(cwd, args.sessionDir);
@@ -2527,35 +2557,13 @@ export async function runRootCommand(
 		let apiKeyProvider = sessionOptions.model?.provider;
 		if (parsedArgs.apiKey) {
 			if (!apiKeyProvider && !sessionOptions.modelPattern) {
-				if (mode !== "acp") {
+				// ACP sessions select their own workspace's model, so only the launch scope can name the provider.
+				if (mode === "acp") {
+					apiKeyProvider = await resolveAcpApiKeyProvider(parsedArgs, modelRegistry, settingsInstance);
+				}
+				if (!apiKeyProvider) {
 					process.stderr.write(`${chalk.red(API_KEY_REQUIRES_MODEL)}\n`);
 					process.exit(1);
-				}
-				// The launch scope can identify the credential's provider, but must not select the workspace's model.
-				const keyTarget: CreateAgentSessionOptions = {};
-				const launchScope = await resolveScopedModels(parsedArgs, modelRegistry, settingsInstance);
-				applyStartupScopedModels(keyTarget, parsedArgs, launchScope, settingsInstance, false);
-				apiKeyProvider = keyTarget.model?.provider;
-				// No authenticated match: a declared scope still names its provider without a stored
-				// credential. Refuse a scope that does not name exactly one, so no workspace claims the key.
-				const declaredScope = parsedArgs.models ?? cfgEnabledModels.get(settingsInstance);
-				if (!apiKeyProvider && declaredScope.length > 0) {
-					const disabled = disabledProviderIds(settingsInstance);
-					const catalog = {
-						getAvailable: (kind?: Parameters<ModelRegistry["getAll"]>[0]) =>
-							modelRegistry.getAll(kind).filter(model => !disabled.has(model.provider)),
-					};
-					const matches = await resolveModelScope(
-						declaredScope,
-						catalog,
-						getModelMatchPreferences(settingsInstance),
-						settingsInstance,
-					);
-					const providers = new Set(matches.map(entry => entry.model.provider));
-					if (providers.size !== 1) {
-						throw new CliUsageError("--api-key requires exactly one enabled provider in the launch scope");
-					}
-					[apiKeyProvider] = providers;
 				}
 			}
 			if (apiKeyProvider) {

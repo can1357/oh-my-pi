@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -555,6 +555,7 @@ describe("ACP lazy startup", () => {
 		await Bun.write(launch.join(".omp/config.yml"), `enabledModels:\n  - ${selector}\n`);
 		const settings = await Settings.loadIsolated({ cwd: launch.path(), agentDir: launch.join("agent") });
 		const authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("anthropic", "own-anthropic-key");
 		const { runRootCommand } = await import("@oh-my-pi/pi-coding-agent/main");
 		const rawArgs = ["--api-key", "fake-launch-key"];
 		const sessions: LazyFakeSession[] = [];
@@ -587,9 +588,53 @@ describe("ACP lazy startup", () => {
 			expect(sessions.map(session => session.disposed)).toEqual([true, false]);
 			expect(sessions[1]?.model && formatModelString(sessions[1].model)).toBe(selector);
 			expect(await authStorage.keys.get("openrouter")).toBe("fake-launch-key");
-			expect(await authStorage.keys.get("anthropic")).toBeUndefined();
+			expect(await authStorage.keys.get("anthropic")).toBe("own-anthropic-key");
 		} finally {
 			for (const session of sessions) if (!session.disposed) await session.dispose();
+			authStorage.close();
+			settings.cancelPendingSaves();
+		}
+	});
+
+	it("refuses --api-key at launch when neither a model nor the launch scope names its provider", async () => {
+		using launch = TempDir.createSync("@omp-acp-key-unnamed-launch-");
+		using workspace = TempDir.createSync("@omp-acp-key-unnamed-workspace-");
+		await Bun.write(workspace.join(".omp/config.yml"), "enabledModels:\n  - openrouter/z-ai/glm-4.7\n");
+		const settings = await Settings.loadIsolated({ cwd: launch.path(), agentDir: launch.join("agent") });
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("openrouter", "own-openrouter-key");
+		const { runRootCommand } = await import("@oh-my-pi/pi-coding-agent/main");
+		const rawArgs = ["--api-key", "fake-launch-key"];
+		const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+			throw new Error(`exit ${code}`);
+		}) as typeof process.exit);
+		const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		let opened = false;
+		try {
+			await expect(
+				runRootCommand(
+					{ ...parseArgs(rawArgs), mode: "acp", offline: true, noExtensions: true, sessionDir: launch.join("s") },
+					rawArgs,
+					{
+						discoverAuthStorage: async () => authStorage,
+						settings,
+						createAgentSession: async () => {
+							throw new Error("session constructed");
+						},
+						runAcpMode: async createSession => {
+							opened = true;
+							await createSession(workspace.path());
+							throw new Error("ACP mode started");
+						},
+					},
+				),
+			).rejects.toThrow("exit 1");
+			expect(stderr.mock.calls.map(call => String(call[0])).join("")).toContain("--api-key requires a model");
+			expect(opened).toBe(false);
+			expect(await authStorage.keys.get("openrouter")).toBe("own-openrouter-key");
+		} finally {
+			exit.mockRestore();
+			stderr.mockRestore();
 			authStorage.close();
 			settings.cancelPendingSaves();
 		}
