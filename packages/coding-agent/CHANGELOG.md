@@ -8,7 +8,7 @@
 
 ### Changed
 
-- In npm installs, named services, JS eval kernels and the omp daemon each use 60–260 MB less committed memory and 65–225 MB less resident memory; sessions use the same as before
+- In npm installs, named services, JS eval kernels and the omp daemon each use 60–260 MB less committed memory and 70–230 MB less resident memory; sessions use the same as before ([#20121](https://github.com/can1357/oh-my-pi/pull/20121) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 ### Fixed
 
