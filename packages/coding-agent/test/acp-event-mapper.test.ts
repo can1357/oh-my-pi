@@ -102,6 +102,8 @@ class ReplayTestSession {
 
 	setMcpServerInstructionsSource(_source: unknown): void {}
 
+	modelRegistry = { awaitBackgroundRefresh: async (): Promise<void> => {} };
+
 	registerSessionChangeCallback(_callback: () => void): () => void {
 		return () => {};
 	}

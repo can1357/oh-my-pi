@@ -721,8 +721,10 @@ describe("ACP agent", () => {
 		const discovered = { ...TEST_MODELS[1]!, id: "gpt-5.4-1m", name: "GPT-5.4 1M", contextWindow: 1_050_000 };
 		const harness = await createHarness({ backgroundDiscovery: { models: [discovered], delayMs: 10 } });
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
-		const modelOption = created.configOptions?.find(option => option.id === "model");
-		expect(modelOption?.options.map(option => option.value)).toContain("openai/gpt-5.4-1m");
+		const modelOption = created.configOptions?.find(option => option.id === "model") as
+			| { options?: Array<{ value: string }> }
+			| undefined;
+		expect(modelOption?.options?.map(option => option.value)).toContain("openai/gpt-5.4-1m");
 
 		const selected = await harness.agent.setSessionConfigOption({
 			sessionId: created.sessionId,
