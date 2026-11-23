@@ -15,12 +15,12 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { FromNativeHost, ToNativeHost } from "../../../../../browser-relay/extension/messages";
 import { RpcFrameDecoder } from "../../../modes/rpc/rpc-frame";
 import { resolveCliEntryCmd } from "../../../subprocess/worker-client";
 import type { RelaySocket } from "./bridge";
 import { type RelayServer, startRelayServer } from "./server";
 import { serveRelayLink } from "./native-relay";
+import type { FromNativeHost, ToNativeHost } from "./protocol";
 
 /** Largest encoded frame the host writes; under Chrome's 1 MiB host→extension cap with headroom. */
 export const NATIVE_FRAME_LIMIT = 900 * 1024;

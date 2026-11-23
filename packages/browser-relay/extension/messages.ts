@@ -3,23 +3,21 @@
  * {@link PANEL_PORT}), service worker ↔ page overlay and Teach recorder (`chrome.tabs.sendMessage` /
  * `chrome.runtime.sendMessage`), and service worker ↔ the omp native host (`chrome.runtime.connectNative`).
  *
- * The relay protocol (worker ↔ omp relay, carried by the native host's link port) lives in
- * `coding-agent/src/tools/browser/relay/protocol.ts`;
- * this file only re-exports the shapes the panel and overlay share with it.
+ * The relay protocol (worker ↔ omp relay, carried by the native host's link port) and the native host's port messages
+ * live in `coding-agent/src/tools/browser/relay/protocol.ts`, which omp ships;
+ * this file only re-exports the shapes the extension shares with it.
  */
 import type { ImageContent } from "@oh-my-pi/pi-wire";
 import type { OverlayInput, PanelCollabHost, PanelInstall } from "../../coding-agent/src/tools/browser/relay/protocol";
 
-export { OVERLAY_HOST_TAG } from "../../coding-agent/src/tools/browser/relay/protocol";
+export { NATIVE_HOST, OVERLAY_HOST_TAG } from "../../coding-agent/src/tools/browser/relay/protocol";
+export type { FromNativeHost, ToNativeHost } from "../../coding-agent/src/tools/browser/relay/protocol";
 export type { OverlayInput, PanelCollabHost, PanelInstall };
 
 // ---- shared shapes -------------------------------------------------------------
 
 /** Name of the long-lived port each side panel opens to the worker. */
 export const PANEL_PORT = "omp-panel";
-
-/** Native messaging host name registered by `omp browser-relay install`. */
-export const NATIVE_HOST = "sh.omp.browser";
 
 /** chrome.storage.local key holding the saved {@link Shortcut} list. */
 export const SHORTCUTS_KEY = "omp.shortcuts";
@@ -89,6 +87,11 @@ export interface RelayStatus {
 	connected: boolean;
 	/** omp version stamped into the running worker script; undefined in an unstamped dev build. */
 	extensionVersion: string | undefined;
+	/**
+	 * While unlinked: the browser's reason the last native host port closed (`chrome.runtime.lastError`), e.g. the host
+	 * is not installed or native messaging is blocked by policy; undefined when the browser gave none.
+	 */
+	hostError: string | undefined;
 }
 
 /** A worker-owned `omp --mode rpc` session behind the native host. */
@@ -281,35 +284,6 @@ export type TeachCommand = { omp: "teach"; op: "start" | "stop" };
 
 /** Recorder → worker, one per user action; the worker adds the screenshot. */
 export type TeachEvent = { omp: "teach-step"; step: Omit<TeachStep, "screenshot" | "narration"> };
-
-// ---- worker ↔ native host -------------------------------------------------------------------
-
-/**
- * Extension → native host. The first message picks what the port is for:
- * - `open`: a chat. The host starts `omp --mode rpc` in `cwd`; then `rpc` carries its stdin lines.
- * - `link`: the browser relay. The host serves the relay for this browser (or joins the one another browser's host
- *   serves); then `relay` carries the extension's relay protocol messages (`ExtToRelayMessage` JSON).
- */
-export type ToNativeHost =
-	| { t: "open"; cwd: string; extensionId: string }
-	| { t: "link"; extensionId: string }
-	| { t: "rpc"; line: string }
-	| { t: "relay"; line: string };
-
-/**
- * Native host → extension. Chat ports get `ready`, `rpc` lines and a final `exit`. Link ports get `linked` once a
- * relay listens for this browser (the extension then says hello), `relay` messages (`RelayToExtMessage` JSON), and
- * `unlinked` when that relay went away while the host finds or becomes the next one. Lines over Chrome's 1 MiB
- * host→extension limit arrive as `chunk`s with one `id`, concatenated in `index` order up to the `last` one.
- */
-export type FromNativeHost =
-	| { t: "ready"; pid: number }
-	| { t: "rpc"; line: string }
-	| { t: "linked" }
-	| { t: "unlinked"; reason: string }
-	| { t: "relay"; line: string }
-	| { t: "chunk"; relay?: true; id: number; index: number; last: boolean; data: string }
-	| { t: "exit"; code: number | null; stderr: string };
 
 // ---- worker modules ---------------------------------------------------------------------------
 

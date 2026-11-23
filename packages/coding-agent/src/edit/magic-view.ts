@@ -32,17 +32,22 @@ const REPEAT_SAMPLE = 3;
 const MIN_FILE_LINES = 200;
 /** Share of the file an excerpt must leave out to be worth the lost context. */
 const MIN_OMITTED_SHARE = 0.5;
+/** Gaps this short are shown instead of marked omitted. */
+const MIN_OMITTED_GAP = 8;
 
 const CODE_SPAN = /`([^`\n]+)`/g;
 /** camelCase, snake_case and dotted names: words prose does not contain by accident. */
 const IDENTIFIER =
-	/[A-Za-z_$][\w$]*[a-z0-9][A-Z][\w$]*|[A-Za-z$][\w$]*_[\w$]+|[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+/g;
+	/[A-Za-z_$][\w$]*[a-z0-9][A-Z][\w$]*|[A-Za-z$][\w$]*_[\w$]+|[A-Za-z_$][\w$]*(?:(?:\.|::)[A-Za-z_$][\w$]*)+/g;
 /** `line 12`, `lines 40-52`, `lines 23, 28 and 29`. */
-const LINE_REFERENCE = /\blines?\s+(\d+(?:\s*(?:,|-|–|to|through|and)\s*\d+)*)/gi;
+const LINE_REFERENCE = /\b(?:lines?|lns?)\s+(\d+(?:\s*(?:,|-|–|to|through|and)\s*\d+)*)/gi;
 const LINE_SPAN = /(\d+)(?:\s*(?:-|–|to|through)\s*(\d+))?/g;
 const ELISION = /\.{3}|…/;
 const CLOSER = /^[\])}]/;
 const OPENER = /[[({]\s*$/;
+const QUALIFIED_SCOPE = /^(?:[A-Za-z_$][\w$]*::)+([A-Za-z_$][\w$]*)$/;
+const QUALIFIED_TYPE_MEMBER = /^[A-Z][\w$]*\.([A-Za-z_$][\w$]*)$/;
+const DISTINCTIVE_MEMBER = /[a-z0-9][A-Z]|_|^[A-Z][A-Z0-9_]+$/;
 
 type Span = [from: number, to: number];
 
@@ -78,14 +83,26 @@ function namedFragments(change: string): string[] {
 			if (fragment.replace(/\W/g, "").length >= 3) found.add(fragment);
 		}
 	};
+	const addQualified = (name: string) => {
+		const trimmed = name.trim().replace(/\(.*$/, "");
+		const match = QUALIFIED_SCOPE.exec(trimmed) ?? QUALIFIED_TYPE_MEMBER.exec(trimmed);
+		if (match === null) return;
+		const member = match[1];
+		add(`${member}(`);
+		if (DISTINCTIVE_MEMBER.test(member)) add(member);
+	};
 	// A quoted line on its own: fenced or indented code.
 	for (const line of change.split("\n")) add(line);
 	for (const [, span] of change.matchAll(CODE_SPAN)) {
 		add(span);
+		addQualified(span);
 		// `drain()` names `function drain(queue)` too.
 		if (span.endsWith(")")) add(span.slice(0, span.indexOf("(") + 1));
 	}
-	for (const name of change.replace(CODE_SPAN, " ").matchAll(IDENTIFIER)) add(name[0]);
+	for (const name of change.replace(CODE_SPAN, " ").matchAll(IDENTIFIER)) {
+		add(name[0]);
+		addQualified(name[0]);
+	}
 	return [...found];
 }
 
@@ -104,19 +121,29 @@ function numberedSpans(change: string, lineCount: number): Span[] {
 
 /** Last line of the block `lines[start]` opens: its deeper-indented lines and their closer. */
 export function blockEnd(lines: readonly string[], start: number, maxLines = MAX_BLOCK_LINES): number {
+	const trimmedStart = lines[start].trim();
+	// Blank lines and pure closing lines never open a block.
+	if (trimmedStart === "" || (CLOSER.test(trimmedStart) && !OPENER.test(trimmedStart))) return start;
 	const indentOf = (line: string) => line.length - line.trimStart().length;
 	const indent = indentOf(lines[start]);
 	const limit = Math.min(lines.length, start + maxLines);
 	let end = start;
 	for (let index = start + 1; index < limit; index++) {
 		const line = lines[index];
-		if (line.trim() === "") continue;
+		const trimmed = line.trim();
+		if (trimmed === "") continue;
 		const depth = indentOf(line);
 		if (depth > indent) {
 			end = index;
 			continue;
 		}
-		if (depth < indent || end === start || !CLOSER.test(line.trimStart())) break;
+		if (depth < indent || end === start) break;
+		// A bare `{` opens the body of a multi-line header.
+		if (trimmed === "{" && !lines[end].trimEnd().endsWith(";")) {
+			end = index;
+			continue;
+		}
+		if (!CLOSER.test(trimmed)) break;
 		end = index;
 		// `} else {` closes one block and opens the next.
 		if (!OPENER.test(line)) break;
@@ -182,8 +209,8 @@ function excerpt(lines: readonly string[], change: string): FileView | undefined
 	const shown: Span[] = [];
 	for (const span of spans) {
 		const previous = shown.at(-1);
-		// A gap of one line costs as much to mark as to show.
-		if (previous && span[0] <= previous[1] + 2) previous[1] = Math.max(previous[1], span[1]);
+		// Small gaps cost as much to mark as to show.
+		if (previous && span[0] <= previous[1] + MIN_OMITTED_GAP + 1) previous[1] = Math.max(previous[1], span[1]);
 		else shown.push(span);
 	}
 	const shownCount = shown.reduce((count, [from, to]) => count + to - from + 1, 0);
