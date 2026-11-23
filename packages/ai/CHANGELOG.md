@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `omp usage` showing no data for Synthetic’s weekly-only plans; it now shows weekly credit usage and the next regeneration tick ([#20251](https://github.com/can1357/oh-my-pi/pull/20251) by [@dagurval](https://github.com/dagurval))
+
 ## [19.1.1] - 2026-11-23
 
 ### Added
