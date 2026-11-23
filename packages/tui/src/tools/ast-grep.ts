@@ -36,6 +36,8 @@ export interface AstGrepToolDetails {
 	fileCount: number;
 	filesSearched: number;
 	limitReached: boolean;
+	/** Omitted from results recorded before actionable pagination was available. */
+	nextSkip?: number;
 	parseErrors?: string[];
 	/** Total parse error count before {@link PARSE_ERRORS_LIMIT} capping. Omitted when no errors. */
 	parseErrorsTotal?: number;
@@ -157,7 +159,11 @@ export const astGrepToolRenderer = {
 
 		const extraLines: string[] = [];
 		if (limitReached) {
-			extraLines.push(uiTheme.fg("warning", "limit reached; narrow path or use skip"));
+			const advice =
+				details?.nextSkip === undefined
+					? "limit reached; narrow path or use skip"
+					: `limit reached; narrow path or use skip=${details.nextSkip} for the next page`;
+			extraLines.push(uiTheme.fg("warning", advice));
 		}
 		if (details?.parseErrors?.length) {
 			extraLines.push(
@@ -254,7 +260,13 @@ export const astGrepToolRenderer = {
 			head,
 			body: compact<NativeChild>([
 				...describeGroupedOutput(kept),
-				limitReached && noteText("limit reached; narrow path or use skip", "warning"),
+				limitReached &&
+					noteText(
+						details?.nextSkip === undefined
+							? "limit reached; narrow path or use skip"
+							: `limit reached; narrow path or use skip=${details.nextSkip} for the next page`,
+						"warning",
+					),
 				parseNote,
 			]),
 			preview: { lines: COLLAPSED_MATCH_LIMIT },

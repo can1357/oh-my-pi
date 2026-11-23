@@ -22,6 +22,7 @@
 - Fixed assigning a model to a role when pressing Enter again on the selected model, which could incorrectly remove the role.
 - Updated the quick model picker (`Alt+P`) to include models added to the catalog after a session began, even when the session is restricted by `--models` or `enabledModels`.
 - Fixed images and other path-based files appearing as unavailable in Tern when the TUI and Tern run on different machines or in local sessions without Tern’s shared file directory.
+- Truncated `ast_grep` results show the exact next offset (`use skip=N for the next page`) in the result view and the native view; results recorded without it keep the generic hint ([#20203](https://github.com/can1357/oh-my-pi/pull/20203) by [@MikeeI](https://github.com/MikeeI))
 - `prewalkWouldBeNoop` no longer skips a handoff when only the model's upstream pin changes ([#19664](https://github.com/can1357/oh-my-pi/pull/19664) by [@taibenvenuti](https://github.com/taibenvenuti)).
 - Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
 - Fixed `<svg>` pictures blinking in ask forms whose questions overflow the panel ([#20017](https://github.com/can1357/oh-my-pi/pull/20017) by [@jaredlyon](https://github.com/jaredlyon))
