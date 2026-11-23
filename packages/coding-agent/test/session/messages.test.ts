@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { type AgentMessage, filterProviderReplayMessages } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import {
 	buildReplanTitleContext,
 	buildTitleDriftTurns,
@@ -9,6 +10,7 @@ import {
 	convertToLlm,
 	dedupeEphemeralReply,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
+	operatorTitleText,
 	replaceLlmImagesWithText,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
@@ -23,6 +25,21 @@ function customMessage(customType: string, attribution: "agent" | "user"): Custo
 		content: "Use this skill.",
 		display: true,
 		details: { name: "atomic-commit", path: "/tmp/SKILL.md", lineCount: 1 },
+		attribution,
+		timestamp: 1,
+	};
+}
+
+const COLLAB_IMAGE: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+
+/** A writable-collab peer's prompt (the web Inbox's first instruction) as `CollabHost` submits it. */
+function collabPrompt(content: CustomMessage["content"], attribution: "agent" | "user" = "user"): CustomMessage {
+	return {
+		role: "custom",
+		customType: COLLAB_PROMPT_MESSAGE_TYPE,
+		content,
+		display: true,
+		details: { from: "web" },
 		attribution,
 		timestamp: 1,
 	};
@@ -468,6 +485,38 @@ describe("buildReplanTitleContext", () => {
 		expect(context).toContain("08-app-settings.md");
 		expect(context).not.toContain("07-manual-llm.md");
 	});
+
+	it("anchors a collab peer's opening prompt once a long tool loop fills the recent window", () => {
+		const context = buildReplanTitleContext([
+			collabPrompt("move the inbox rename into the session menu"),
+			...Array.from({ length: 8 }, (_, i) => settledAssistant(`step ${i}`)),
+		]);
+
+		expect(context).toContain("move the inbox rename into the session menu");
+		expect(context).toContain("step 7");
+		expect(context).not.toContain("step 1");
+	});
+});
+
+describe("operatorTitleText", () => {
+	it.each<[string, AgentMessage, string | undefined]>([
+		["a prompt typed in the TUI", userMessage("fix the flaky park tests", 1), "fix the flaky park tests"],
+		["a user /skill: invocation", customMessage(SKILL_PROMPT_MESSAGE_TYPE, "user"), "/skill:atomic-commit"],
+		[
+			"a collab peer's prompt, without its images",
+			collabPrompt([{ type: "text", text: " move the inbox rename " }, COLLAB_IMAGE]),
+			"move the inbox rename",
+		],
+		["an agent-attributed collab prompt", collabPrompt("move the inbox rename", "agent"), undefined],
+		["a collab prompt with no text", collabPrompt([{ type: "text", text: "  " }, COLLAB_IMAGE]), undefined],
+		[
+			"a user message the agent sent",
+			{ role: "user", content: "request budget low", attribution: "agent", timestamp: 1 },
+			undefined,
+		],
+	])("reads the title text of %s", (_case, message, expected) => {
+		expect(operatorTitleText(message)).toBe(expected);
+	});
 });
 
 describe("buildTitleDriftTurns", () => {
@@ -503,6 +552,15 @@ describe("buildTitleDriftTurns", () => {
 		expect(turns.map(turn => turn.text[0])).toEqual(["n", "r", "s"]);
 		expect(turns[0]).toEqual({ role: "user", text: "now draft the release notes" });
 		expect(turns.reduce((chars, turn) => chars + turn.text.length, 0)).toBeLessThanOrEqual(3000);
+	});
+
+	it("reads a collab peer's prompt as the operator prompt", () => {
+		const turns = buildTitleDriftTurns([collabPrompt("move the inbox rename"), settledAssistant("Moved.")]);
+
+		expect(turns).toEqual([
+			{ role: "user", text: "move the inbox rename" },
+			{ role: "assistant", text: "Moved." },
+		]);
 	});
 });
 

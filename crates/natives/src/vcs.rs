@@ -175,6 +175,15 @@ pub struct VcsShowResult {
 	pub data:      Buffer,
 	pub truncated: bool,
 }
+/// One same-path change between blobs already stored in the object database.
+#[napi(object)]
+pub struct VcsBlobChange {
+	pub path:     String,
+	pub old_id:   Option<String>,
+	pub new_id:   Option<String>,
+	pub old_mode: Option<String>,
+	pub new_mode: Option<String>,
+}
 /// Worktree content of one repo-relative path, for
 /// [`VcsGitRepo::worktree_to_git`].
 #[napi(object)]
@@ -220,6 +229,15 @@ pub struct VcsCommitOptions {
 	pub expected_head: Option<String>,
 	/// Skip the `pre-commit` and `commit-msg` hooks (`git commit --no-verify`).
 	pub no_verify:     Option<bool>,
+}
+
+/// Published private-index commit and any shared-index entries left staged.
+#[napi(object)]
+pub struct VcsReconciledCommit {
+	/// Published commit's object ID.
+	pub sha:         String,
+	/// Staged changes left in the shared index or publication warnings.
+	pub index_notes: Vec<String>,
 }
 /// Patch application options.
 #[napi(object)]
@@ -351,6 +369,17 @@ impl From<core::NumstatEntry> for VcsNumstatEntry {
 impl From<core::ShowResult> for VcsShowResult {
 	fn from(v: core::ShowResult) -> Self {
 		Self { data: v.bytes.into(), truncated: v.truncated }
+	}
+}
+impl From<VcsBlobChange> for core::BlobChange {
+	fn from(v: VcsBlobChange) -> Self {
+		Self {
+			path:     v.path,
+			old_id:   v.old_id,
+			new_id:   v.new_id,
+			old_mode: v.old_mode,
+			new_mode: v.new_mode,
+		}
 	}
 }
 impl From<VcsDiffOptions> for core::DiffOptions {
@@ -1070,6 +1099,14 @@ impl VcsGitRepo {
 		})
 	}
 
+	/// Write bytes as a blob and return its full object id.
+	#[napi]
+	pub fn write_blob(&self, data: Uint8Array, signal: Option<Unknown>) -> Promise<String> {
+		// Copied on this thread: the worker must not read the caller's buffer.
+		let data = data.to_vec();
+		blocking("vcs.writeBlob", self.inner.clone(), signal, move |r| r.write_blob(&data))
+	}
+
 	/// Convert worktree content to the blob `git add` would store per path
 	/// (EOL/`text` attributes, `core.autocrlf`, `ident`, clean filters such as
 	/// Git LFS), in input order.
@@ -1129,6 +1166,21 @@ impl VcsGitRepo {
 	) -> Promise<String> {
 		blocking("vcs.diffNoIndex", self.inner.clone(), signal, move |repo| {
 			repo.diff_no_index(Path::new(&left), Path::new(&right), binary)
+		})
+	}
+
+	/// Render a same-path patch between blobs already stored in the object
+	/// database.
+	#[napi]
+	pub fn diff_blobs(
+		&self,
+		change: VcsBlobChange,
+		binary: bool,
+		signal: Option<Unknown>,
+	) -> Promise<String> {
+		let change = change.into();
+		blocking("vcs.diffBlobs", self.inner.clone(), signal, move |repo| {
+			repo.diff_blobs(&change, binary)
 		})
 	}
 
@@ -1221,6 +1273,22 @@ impl VcsGitRepo {
 		let options = options.into();
 		blocking("vcs.commitCreate", self.inner.clone(), signal, move |r| {
 			r.commit_create(&message, &options)
+		})
+	}
+
+	/// Publish a private-index commit after preparing the shared index.
+	#[napi]
+	pub fn commit_reconciled(
+		&self,
+		message: String,
+		options: VcsCommitOptions,
+		selection: String,
+		signal: Option<Unknown>,
+	) -> Promise<VcsReconciledCommit> {
+		let options = options.into();
+		blocking("vcs.commitReconciled", self.inner.clone(), signal, move |r| {
+			let (sha, index_notes) = r.commit_reconciled(&message, &options, &selection)?;
+			Ok(VcsReconciledCommit { sha, index_notes })
 		})
 	}
 

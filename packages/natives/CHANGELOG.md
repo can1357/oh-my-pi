@@ -2,12 +2,33 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `commitReconciled()` to publish private-index commits without leaving staged reversals when the shared index is locked ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
+
+## [19.1.1] - 2026-11-23
+
 ### Fixed
 
-- Fixed `grep()` with a match limit resolving with a short result when its directory walk panicked; it now rejects with the panic ([#20013](https://github.com/can1357/oh-my-pi/pull/20013) by [@sjawhar](https://github.com/sjawhar))
-- Fixed a use-after-free in `grep()`, `glob()`, `fuzzyFind()`, `astGrep()` and `astEdit()` when a timeout or an abort cancelled them just after they started ([#20014](https://github.com/can1357/oh-my-pi/pull/20014) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the `computer` tool on Linux Wayland leaving GTK 3 message dialogs (OK/Cancel and Yes/No boxes) out of `windows()`, so their buttons could not be found or pressed ([#19884](https://github.com/can1357/oh-my-pi/pull/19884) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed `PtySession` output on Linux sometimes ending with an extra blank line after the command exited
+- Fixed `grep()`, `glob()`, `fuzzyFind()`, `astGrep()`, `astEdit()`, and recursive shell search commands occasionally hanging on machines with many CPUs.
+- Fixed cancellation and timeout races in native search, file-matching, fuzzy-search, AST, and editing operations that could cause crashes or use-after-free errors.
+- Fixed `grep()` with a match limit reporting incomplete results instead of rejecting when its directory walk failed.
+- Fixed `@oh-my-pi/pi-natives` failing to load when installed from Bun's cache or when standalone binaries had extracted native addons from another build.
+- Fixed Linux Wayland accessibility and automation support for GTK dialogs, control values, and selected rows, list items, and tabs.
+- Fixed Linux PTY output occasionally including an extra blank line after a command exits.
+- Fixed keypad navigation keys being dropped when NumLock is off under the kitty keyboard protocol.
+- Fixed Wayland screenshots incorrectly timing out while waiting for the screen-share picker.
+- Improved Windows accessibility action reliability by reporting uncertain dispatches accurately and preventing actions from being sent after their reply wait has expired.
+- Fixed Windows automation of classic Win32 and WinForms buttons and checkboxes incorrectly activating the application or reporting success without performing the click.
+- Fixed macOS computer-control takeover restoration so the previously active window is restored correctly after automation ends, with failures reported when restoration cannot be confirmed.
+- Fixed macOS background keyboard and scroll events, including events sent through iPhone Mirroring, being lost or unexpectedly activating another window.
+- Fixed X11 typing of non-Latin and other characters outside the active keyboard layout.
+- Binary patches now refuse to apply when the target file does not match the version the patch was created from, preventing accidental replacement of changed files.
+- On Windows, aborting or timing out an in-process utility blocked on an open empty stdin pipe now terminates it without waiting for the pipe writer.
+
+### Removed
+
+- Removed the startup warning shown when a source checkout loads a native addon from another release; incompatible addons still produce an actionable error when a required symbol is unavailable.
 
 ## [19.1.0] - 2026-11-21
 
