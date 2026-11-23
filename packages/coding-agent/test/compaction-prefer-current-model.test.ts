@@ -834,14 +834,14 @@ describe("compaction prefers the current session model over modelRoles.default",
 			const readerBase = getBundledModel("anthropic", "claude-opus-4-6");
 			const configuredModel = getBundledModel("openai", "gpt-5");
 			if (!readerBase || !configuredModel) throw new Error("Expected bundled test models to exist");
-			// Same provider, different API. The writer is native OpenAI Responses;
-			// the reader is an Anthropic Messages route that cannot replay it. The
-			// endpoint makes the writer portable only if it is not native; keeping
-			// the native lane tests the replay guard rather than provider identity.
+			// Same provider, different API. The configured writer is native OpenAI
+			// Responses; the active reader is an Anthropic Messages route that cannot
+			// replay it. The active route stays portable through the endpoint so the
+			// replay guard—not provider identity—rejects the writer.
 			const currentModel = {
 				...readerBase,
 				provider: configuredModel.provider,
-				remoteCompaction: { enabled: true, api: "anthropic-messages" as const },
+				remoteCompaction: { enabled: false },
 			} satisfies Model;
 
 			const { calls, summary } = await compactModelCalls(
@@ -859,6 +859,35 @@ describe("compaction prefers the current session model over modelRoles.default",
 			expect(summary).toBe("ok");
 			// The compacted summary is the context the next request reads.
 			expect(session.agent.state.messages[0]?.role).toBe("compactionSummary");
+		});
+
+		it("rejects a provider-level native writer the completions reader cannot replay", async () => {
+			const activeBase = getBundledModel("openai", "gpt-5");
+			const writerBase = getBundledModel("openai", "gpt-5.4");
+			if (!activeBase || !writerBase) throw new Error("Expected bundled test models to exist");
+			// `provider: openai` enables the Responses native lane even when the
+			// model's chat API is Completions; the replay check must not mistake
+			// that writer for a portable text summary.
+			const active = {
+				...activeBase,
+				api: "openai-completions" as const,
+				remoteCompaction: { enabled: false },
+			} satisfies Model;
+			const writer = { ...writerBase, api: "openai-completions" as const } satisfies Model;
+
+			const { calls } = await compactModelCalls(
+				active,
+				Settings.isolated({
+					"compaction.keepRecentTokens": 1,
+					"compaction.methodOrder": ["remote"],
+					"compaction.model": modelKey(writer),
+					"compaction.remoteEndpoint": "https://compactor.invalid/summarize",
+				}),
+				[active, writer],
+				{ mode: "remote" },
+			);
+
+			expect(calls[0]).toBe(modelKey(active));
 		});
 
 		it("keeps a pinned route and the unpinned route as separate fallbacks", async () => {
@@ -893,6 +922,78 @@ describe("compaction prefers the current session model over modelRoles.default",
 				{ key: modelKey(currentModel), pin: undefined },
 			]);
 			expect(calls).toHaveLength(2);
+		});
+
+		it("does not let a pinned target authorize a 404 fallback from the unpinned active route", async () => {
+			const currentModel = getBundledModel("openrouter", "openai/gpt-5");
+			const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!currentModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+			const settings = Settings.isolated({
+				"compaction.keepRecentTokens": 1,
+				"compaction.methodOrder": ["soft"],
+				"compaction.model": "@smol",
+			});
+			settings.setModelRole("smol", "openrouter/openai/gpt-5@openai");
+			settings.setModelRole("default", modelKey(fallbackModel));
+			const seen: Array<{ key: string; pin: string | undefined }> = [];
+
+			const compacting = compactModelCalls(currentModel, settings, [currentModel, fallbackModel], {
+				onModel: (model, preparation) => {
+					seen.push({ key: modelKey(model), pin: getUpstreamPin(model) });
+					if (model.provider === currentModel.provider) {
+						throw new AIError.ProviderHttpError(
+							getUpstreamPin(model) ? "pinned route missing" : "active route missing",
+							404,
+							{ code: "model_not_found" },
+						);
+					}
+					return {
+						summary: "unexpected fallback",
+						shortSummary: "unexpected fallback",
+						firstKeptEntryId: preparation.firstKeptEntryId,
+						tokensBefore: 1,
+						details: { provider: model.provider },
+					};
+				},
+			});
+
+			await expect(compacting).rejects.toThrow("active route missing");
+			expect(seen).toEqual([
+				{ key: modelKey(currentModel), pin: "openai" },
+				{ key: modelKey(currentModel), pin: undefined },
+			]);
+		});
+
+		it("does not fall back on a configured raw 404 without a model-not-found code", async () => {
+			const currentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const configuredModel = getBundledModel("openai", "gpt-5");
+			if (!currentModel || !configuredModel) throw new Error("Expected bundled test models to exist");
+
+			const compacting = compactModelCalls(
+				currentModel,
+				Settings.isolated({
+					"compaction.keepRecentTokens": 1,
+					"compaction.methodOrder": ["soft"],
+					"compaction.model": modelKey(configuredModel),
+				}),
+				[currentModel, configuredModel],
+				{
+					onModel: (model, preparation) => {
+						if (model.provider === configuredModel.provider) {
+							throw new AIError.ProviderHttpError("not found", 404);
+						}
+						return {
+							summary: "unexpected fallback",
+							shortSummary: "unexpected fallback",
+							firstKeptEntryId: preparation.firstKeptEntryId,
+							tokensBefore: 1,
+							details: { provider: model.provider },
+						};
+					},
+				},
+			);
+
+			await expect(compacting).rejects.toThrow("not found");
 		});
 
 		it("skips a portable endpoint writer when preparation reused an opaque native boundary", async () => {

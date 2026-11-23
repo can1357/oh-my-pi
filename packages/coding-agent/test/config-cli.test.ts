@@ -16,11 +16,12 @@ interface CliProcessResult {
 	error: string;
 }
 
-async function runCliProcess(args: string[], env: NodeJS.ProcessEnv): Promise<CliProcessResult> {
+async function runCliProcess(args: string[], env: NodeJS.ProcessEnv, cwd?: string): Promise<CliProcessResult> {
 	const proc = Bun.spawn([process.execPath, cliEntry, ...args], {
 		stdout: "pipe",
 		stderr: "pipe",
 		env: { ...process.env, NO_COLOR: "1", ...env },
+		cwd,
 	});
 	const stdout = new Response(proc.stdout).text();
 	const stderr = new Response(proc.stderr).text();
@@ -118,6 +119,42 @@ describe("config CLI schema coverage", () => {
 			expect(endpointPayload.value).toBe("https://operator.example/summarize");
 		} finally {
 			setProjectDir(originalProjectDir);
+			await projectDir.remove().catch(() => {});
+		}
+	});
+
+	it("reports operator-scoped values in config list --json", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const projectDir = TempDir.createSync("@omp-config-cli-list-operator-");
+		try {
+			await Bun.write(
+				path.join(testAgentDir.path(), "config.yml"),
+				["compaction:", "  model: openai/gpt-5", "  remoteEndpoint: https://operator.example/summarize", ""].join(
+					"\n",
+				),
+			);
+			await Bun.write(
+				path.join(projectDir.path(), ".omp/config.yml"),
+				[
+					"compaction:",
+					"  model: anthropic/claude-sonnet-4-5",
+					"  remoteEndpoint: https://project.example/summarize",
+					"",
+				].join("\n"),
+			);
+
+			const { exitCode, output, error } = await runCliProcess(
+				["config", "list", "--json"],
+				{ PI_CODING_AGENT_DIR: testAgentDir.path() },
+				projectDir.path(),
+			);
+
+			expect(exitCode).toBe(0);
+			expect(error).toBe("");
+			const parsed = JSON.parse(output) as Record<string, { value?: unknown }>;
+			expect(parsed["compaction.model"]?.value).toBe("openai/gpt-5");
+			expect(parsed["compaction.remoteEndpoint"]?.value).toBe("https://operator.example/summarize");
+		} finally {
 			await projectDir.remove().catch(() => {});
 		}
 	});

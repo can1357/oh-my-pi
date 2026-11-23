@@ -2967,6 +2967,55 @@ describe("compact() remote compaction failure handling", () => {
 		expect(completeSpy).not.toHaveBeenCalled();
 	});
 
+	test("carries a prior V1 replacement history into the V2 request", async () => {
+		const priorItem = { type: "compaction", encrypted_content: "prior-v1-enc" };
+		const preparation = makePreparation();
+		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
+		preparation.previousPreserveData = {
+			openaiRemoteCompaction: {
+				provider: "openai",
+				replacementHistory: [
+					{
+						type: "message",
+						role: "user",
+						content: [{ type: "input_text", text: "prior-v1-retained-fact" }],
+					},
+					priorItem,
+				],
+				compactionItem: priorItem,
+			},
+		};
+		preparation.messagesToSummarize = [{ role: "user", content: "post-boundary request", timestamp: 1 }];
+		const model = makeOpenAiModel({
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+				v2Endpoint: "https://compact.example/v1/responses",
+			},
+		});
+		let requestBody: { input: Array<Record<string, unknown>> } | undefined;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			requestBody = JSON.parse(String(init?.body)) as { input: Array<Record<string, unknown>> };
+			return sseResponse([
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "compaction", encrypted_content: "v2" },
+				},
+				{ type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } },
+			]);
+		};
+
+		await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock });
+
+		const inputText = (requestBody?.input ?? []).flatMap(item =>
+			Array.isArray(item.content)
+				? item.content.filter(isRecord).map(part => (typeof part.text === "string" ? part.text : ""))
+				: [],
+		);
+		expect(inputText).toContain("prior-v1-retained-fact");
+	});
+
 	test.each(["v2", "codex-v2"])(
 		"retains only user-written turns, as serialized, in V2 replacement history (%s)",
 		async protocol => {

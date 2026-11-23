@@ -264,4 +264,10 @@ describe("canReplayRemoteCompactionFrom", () => {
 		// Its own Completions encoder cannot replay it either.
 		expect(canReplayRemoteCompactionFrom(completions, completions)).toBe(false);
 	});
+
+	test("a provider-level OpenAI native lane writes a provider-bound payload even from a Completions API id", () => {
+		const completions: Model = { ...openai, api: "openai-completions" };
+		expect(canReplayRemoteCompactionFrom(completions, claude)).toBe(false);
+		expect(canReplayRemoteCompactionFrom(completions, completions)).toBe(false);
+	});
 });

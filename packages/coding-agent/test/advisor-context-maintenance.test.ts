@@ -162,6 +162,7 @@ describe("AgentSession advisor context maintenance", () => {
 		sameProviderNativeEnabled?: boolean;
 		contextPromotionEnabled?: boolean;
 		remoteEnabled?: boolean;
+		remoteEndpoint?: string;
 	}) {
 		const primaryMock = createMockModel({
 			provider: "anthropic",
@@ -189,6 +190,7 @@ describe("AgentSession advisor context maintenance", () => {
 			"compaction.enabled": true,
 			"compaction.methodOrder": options?.remoteEnabled === false ? ["soft"] : ["remote", "soft"],
 			"contextPromotion.enabled": options?.contextPromotionEnabled ?? false,
+			...(options?.remoteEndpoint ? { "compaction.remoteEndpoint": options.remoteEndpoint } : {}),
 		});
 		settings.setModelRole("advisor", `${nativeModel.provider}/${nativeModel.id}`);
 		settings.setModelRole("smol", `${sameProviderModel.provider}/${sameProviderModel.id}`);
@@ -784,6 +786,28 @@ describe("AgentSession advisor context maintenance", () => {
 			expect(wire).not.toContain("placeholder-only summary");
 		},
 	);
+
+	it("strips the endpoint when advisor native history is opaque", async () => {
+		const { advisor, advisorMock, nativeModel } = createAdvisorFallbackHarness({
+			remoteEndpoint: "https://compactor.invalid/summarize",
+		});
+		advisor.replaceMessages([
+			nativeSummary(nativeModel.provider),
+			usageAnchor(advisorMock, Date.now() - 1_000),
+			usageAnchor(advisorMock, Date.now()),
+		]);
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "advisor native summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: 42,
+			preserveData: nativeSummary(nativeModel.provider).preserveData,
+		}));
+
+		await session.prompt("small current update");
+
+		expect(compactSpy).toHaveBeenCalled();
+		expect(compactSpy.mock.calls[0]?.[0].settings.remoteEndpoint).toBeUndefined();
+	});
 
 	it("rejects an unreadable compaction result without replacing readable advisor history", async () => {
 		const { advisor, advisorMock, modelRegistry } = createHarness();

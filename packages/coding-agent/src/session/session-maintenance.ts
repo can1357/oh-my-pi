@@ -227,12 +227,39 @@ function preparationReusesOpaqueHistory(
  * fails the engine must throw instead of summarizing the boundary placeholder
  * through the endpoint and discarding the original history.
  */
-function preparationWithoutEndpointFallback(
+export function preparationWithoutEndpointFallback(
 	preparation: CompactionPreparation,
 	reusesOpaqueHistory: boolean,
 ): CompactionPreparation {
 	if (!reusesOpaqueHistory) return preparation;
 	return { ...preparation, settings: { ...preparation.settings, remoteEndpoint: undefined } };
+}
+
+const COMPACTION_TARGET_UNAVAILABLE_CODES: Record<string, true> = {
+	deployment_not_found: true,
+	endpoint_not_found: true,
+	model_not_available: true,
+	model_not_found: true,
+	model_unavailable: true,
+	not_found_error: true,
+	route_not_found: true,
+};
+
+/**
+ * Whether a 404 says the configured compaction target itself is unavailable.
+ * Matching the full route keeps a pinned override from authorizing a fallback
+ * from the unconfigured unpinned active route, and the code gate keeps a bare
+ * endpoint 404 from being mistaken for a missing model.
+ */
+function isConfiguredCompactionTargetUnavailable(
+	error: unknown,
+	candidate: Model,
+	configuredTargets: readonly Model[],
+): error is AIError.ProviderHttpError {
+	if (!(error instanceof AIError.ProviderHttpError) || error.status !== 404) return false;
+	if (error.code === undefined || !COMPACTION_TARGET_UNAVAILABLE_CODES[error.code]) return false;
+	const route = formatModelStringWithRouting(candidate);
+	return configuredTargets.some(target => formatModelStringWithRouting(target) === route);
 }
 
 /**
@@ -4174,9 +4201,7 @@ export class SessionMaintenance {
 			resolveGlobalCompactionTarget(this.#host.settings, availableModels),
 		].filter((model): model is Model => model !== undefined);
 		const reusesOpaqueHistory =
-			method === "remote" &&
-			this.#model !== undefined &&
-			preparationReusesOpaqueHistory(preparation, this.#model, preparation.settings);
+			this.#model !== undefined && preparationReusesOpaqueHistory(preparation, this.#model, preparation.settings);
 		const writerPreparation = preparationWithoutEndpointFallback(preparation, reusesOpaqueHistory);
 		const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 		let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
@@ -4263,14 +4288,9 @@ export class SessionMaintenance {
 				}
 				// A catalogued model can still be absent at the provider (stale custom
 				// model, revoked route). Treat a definitive 404 from the configured
-				// override as candidate unavailability so the documented active-model
-				// fallback runs; a 404 from an unconfigured candidate must surface.
-				if (
-					AIError.status(error) === 404 &&
-					configuredCompactionTargets.some(
-						target => candidate.provider === target.provider && candidate.id === target.id,
-					)
-				) {
+				// full route as candidate unavailability so the documented active-model
+				// fallback runs; any other 404 must surface.
+				if (isConfiguredCompactionTargetUnavailable(error, candidate, configuredCompactionTargets)) {
 					notFoundError = error;
 					continue;
 				}
@@ -6361,9 +6381,7 @@ export class SessionMaintenance {
 			} else {
 				const liveModel = this.#model;
 				const reusesOpaqueHistory =
-					method === "remote" &&
-					liveModel !== undefined &&
-					preparationReusesOpaqueHistory(preparation, liveModel, effectiveSettings);
+					liveModel !== undefined && preparationReusesOpaqueHistory(preparation, liveModel, effectiveSettings);
 				const candidates = this.#getCompactionModelCandidates(
 					availableModels,
 					method === "remote" && liveModel

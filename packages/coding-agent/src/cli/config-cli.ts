@@ -227,7 +227,7 @@ async function handleList(flags: { json?: boolean }): Promise<void> {
 		// are all strings).
 		const result: Record<string, { value?: unknown; redacted?: true; type: string; description: string }> = {};
 		for (const def of defs) {
-			const value = def.setting.get(settings);
+			const value = effectiveValue(def.setting);
 			result[def.path] =
 				def.setting.isCredential && value
 					? { redacted: true, type: def.type, description: def.description }

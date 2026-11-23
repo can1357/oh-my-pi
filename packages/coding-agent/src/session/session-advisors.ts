@@ -119,6 +119,7 @@ import { getOpenAiRemoteCompactionPayload } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import { formatSessionHistoryMarkdown } from "./session-history-format";
+import { preparationWithoutEndpointFallback } from "./session-maintenance";
 import type { SessionManager } from "./session-manager";
 import { buildSessionMetadata } from "./session-metadata";
 import type { YieldQueue } from "./yield-queue";
@@ -2638,10 +2639,16 @@ export class SessionAdvisors {
 			}
 			// A foreign native target can summarize readable history, but its opaque
 			// output cannot replace history consumed by this advisor's active model.
+			// A native failure on opaque history must throw, not summarize the
+			// placeholder through the endpoint.
+			const endpointSafePreparation = preparationWithoutEndpointFallback(preparation, hasNativeHistory);
 			const candidatePreparation =
 				candidate.provider === advisorModel.provider && isOpenAiRemoteCompactionApi(advisorModel.api)
-					? preparation
-					: { ...preparation, settings: { ...compactionSettings, remoteEnabled: false } };
+					? endpointSafePreparation
+					: {
+							...endpointSafePreparation,
+							settings: { ...endpointSafePreparation.settings, remoteEnabled: false },
+						};
 
 			// The advisor overflow-compaction one-shot bypasses the advisor `Agent`,
 			// so its installed metadata resolver never runs. Emit the same
