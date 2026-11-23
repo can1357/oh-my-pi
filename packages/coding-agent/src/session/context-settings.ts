@@ -168,6 +168,23 @@ export const cfgCompactionModel = register({
 			"Operator-scoped model for summary compaction, as provider/model or @role; a model's own compactionModel wins and empty keeps the existing order",
 		condition: "compactionModelNotProject",
 	},
+	validate: raw => {
+		if (raw === undefined || typeof raw !== "string") return;
+		const value = raw.trim();
+		if (!value) return;
+		if (value.includes(",")) {
+			throw new Error("compaction.model accepts one selector, not a comma-separated list");
+		}
+		if (value.startsWith("@")) {
+			if (!/^@[^\s,]+$/.test(value)) {
+				throw new Error("compaction.model @role alias must not contain whitespace");
+			}
+			return;
+		}
+		if (!/^[^/,\s]+\/[^\s,]+$/.test(value)) {
+			throw new Error("compaction.model must be an exact provider/model selector or a single @role alias");
+		}
+	},
 });
 
 export const cfgCompactionThresholdPercent = register({
@@ -409,7 +426,7 @@ export const cfgCompaction = combine({
 	enabled: cfgCompactionEnabled,
 	experimentalContextManagement: cfgCompactionExperimentalContextManagement,
 	methodOrder: cfgCompactionMethodOrder,
-	model: cfgCompactionModel,
+	model: operatorValue(cfgCompactionModel),
 	thresholdPercent: cfgCompactionThresholdPercent,
 	thresholdTokens: cfgCompactionThresholdTokens,
 	reserveTokens: cfgCompactionReserveTokens,

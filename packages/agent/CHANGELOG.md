@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Remote compaction now requires the active model to replay the writer's native payload, and falls back only for configured targets whose provider reports a model or route unavailable code ([#20286](https://github.com/can1357/oh-my-pi/pull/20286) by [@WeMingT](https://github.com/WeMingT))
+
 ## [19.1.1] - 2026-11-23
 
 ### Fixed

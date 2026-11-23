@@ -229,7 +229,7 @@ function preparationReusesOpaqueHistory(
  */
 export function preparationWithoutEndpointFallback(
 	preparation: CompactionPreparation,
-	reusesOpaqueHistory: boolean,
+	{ reusesOpaqueHistory }: { reusesOpaqueHistory: boolean },
 ): CompactionPreparation {
 	if (!reusesOpaqueHistory) return preparation;
 	return { ...preparation, settings: { ...preparation.settings, remoteEndpoint: undefined } };
@@ -276,7 +276,7 @@ function canUseRemoteCompactionCandidate(
 	candidate: Model,
 	liveModel: Model,
 	settings: EngineCompactionSettings,
-	reusesOpaqueHistory = false,
+	{ reusesOpaqueHistory = false }: { reusesOpaqueHistory?: boolean } = {},
 ): boolean {
 	if (!canUseRemoteCompaction(candidate, settings)) return false;
 	if (!shouldUseProviderNativeCompaction(candidate, settings)) return !reusesOpaqueHistory;
@@ -1591,12 +1591,9 @@ export class SessionMaintenance {
 							this.#host.modelRegistry.getAvailable(),
 							selectedMethod === "remote"
 								? candidate =>
-										canUseRemoteCompactionCandidate(
-											candidate,
-											activeModel,
-											effectiveSettings,
+										canUseRemoteCompactionCandidate(candidate, activeModel, effectiveSettings, {
 											reusesOpaqueHistory,
-										) &&
+										}) &&
 										(!remoteReader || canReplayRemoteCompactionFrom(candidate, remoteReader))
 								: undefined,
 						);
@@ -2840,7 +2837,8 @@ export class SessionMaintenance {
 			const candidates = this.#getCompactionModelCandidates(
 				this.#host.modelRegistry.getAvailable(),
 				method === "remote"
-					? candidate => canUseRemoteCompactionCandidate(candidate, model, effectiveSettings, reusesOpaqueHistory)
+					? candidate =>
+							canUseRemoteCompactionCandidate(candidate, model, effectiveSettings, { reusesOpaqueHistory })
 					: undefined,
 			);
 			if (candidates.length === 0) return clear();
@@ -4202,7 +4200,7 @@ export class SessionMaintenance {
 		].filter((model): model is Model => model !== undefined);
 		const reusesOpaqueHistory =
 			this.#model !== undefined && preparationReusesOpaqueHistory(preparation, this.#model, preparation.settings);
-		const writerPreparation = preparationWithoutEndpointFallback(preparation, reusesOpaqueHistory);
+		const writerPreparation = preparationWithoutEndpointFallback(preparation, { reusesOpaqueHistory });
 		const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 		let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
 		let notFoundError: unknown;
@@ -6386,10 +6384,12 @@ export class SessionMaintenance {
 					availableModels,
 					method === "remote" && liveModel
 						? candidate =>
-								canUseRemoteCompactionCandidate(candidate, liveModel, effectiveSettings, reusesOpaqueHistory)
+								canUseRemoteCompactionCandidate(candidate, liveModel, effectiveSettings, {
+									reusesOpaqueHistory,
+								})
 						: undefined,
 				);
-				const writerPreparation = preparationWithoutEndpointFallback(preparation, reusesOpaqueHistory);
+				const writerPreparation = preparationWithoutEndpointFallback(preparation, { reusesOpaqueHistory });
 				const retrySettings = cfgRetry.get(this.#host.settings);
 				const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 				let compactResult: CompactionResult | undefined;

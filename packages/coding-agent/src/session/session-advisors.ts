@@ -2641,7 +2641,9 @@ export class SessionAdvisors {
 			// output cannot replace history consumed by this advisor's active model.
 			// A native failure on opaque history must throw, not summarize the
 			// placeholder through the endpoint.
-			const endpointSafePreparation = preparationWithoutEndpointFallback(preparation, hasNativeHistory);
+			const endpointSafePreparation = preparationWithoutEndpointFallback(preparation, {
+				reusesOpaqueHistory: hasNativeHistory,
+			});
 			const candidatePreparation =
 				candidate.provider === advisorModel.provider && isOpenAiRemoteCompactionApi(advisorModel.api)
 					? endpointSafePreparation

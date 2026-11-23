@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `AssistantMessage.errorCode` and preserved captured provider error codes through finalization, so callers can distinguish a missing model or route from a generic failure ([#20286](https://github.com/can1357/oh-my-pi/pull/20286) by [@WeMingT](https://github.com/WeMingT))
+
 ### Fixed
 
 - GitHub Copilot Gemini models no longer fail every request with `400 invalid request body` when an MCP tool schema declares a `type` array (e.g. `["string", "null"]`); tool schemas are rewritten into Gemini's schema dialect ([#20198](https://github.com/can1357/oh-my-pi/issues/20198))

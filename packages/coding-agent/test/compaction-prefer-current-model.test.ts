@@ -558,8 +558,9 @@ describe("compaction prefers the current session model over modelRoles.default",
 			await Bun.write(path.join(cwd, ".omp/config.yml"), `compaction:\n  model: ${modelKey(projectModel)}\n`);
 
 			const settings = await Settings.loadReadOnly({ cwd, agentDir });
-			// The project value still merges; dispatch must ignore it.
-			expect(cfgCompactionModel.get(settings)).toBe(modelKey(projectModel));
+			expect(cfgCompactionModel.layered(settings)).toBe(modelKey(projectModel));
+			expect(cfgCompactionModel.get(settings)).toBe(modelKey(globalModel));
+			expect(cfgCompaction.get(settings).model).toBe(modelKey(globalModel));
 			const target = resolveGlobalCompactionTarget(settings, [globalModel, projectModel]);
 
 			expect(target && modelKey(target)).toBe(modelKey(globalModel));
@@ -578,7 +579,8 @@ describe("compaction prefers the current session model over modelRoles.default",
 			);
 
 			const settings = await Settings.loadReadOnly({ cwd, agentDir });
-			expect(cfgCompactionModel.get(settings)).toBe(modelKey(projectModel));
+			expect(cfgCompactionModel.layered(settings)).toBe(modelKey(projectModel));
+			expect(cfgCompactionModel.get(settings)).toBe(modelKey(globalModel));
 			const target = resolveGlobalCompactionTarget(settings, [globalModel, projectModel]);
 
 			expect(target && modelKey(target)).toBe(modelKey(globalModel));
@@ -614,7 +616,8 @@ describe("compaction prefers the current session model over modelRoles.default",
 			await Bun.write(path.join(cwd, ".omp/config.yml"), `compaction:\n  remoteEndpoint: ${projectEndpoint}\n`);
 
 			const settings = await Settings.loadReadOnly({ cwd, agentDir });
-			expect(cfgCompactionRemoteEndpoint.get(settings)).toBe(projectEndpoint);
+			expect(cfgCompactionRemoteEndpoint.layered(settings)).toBe(projectEndpoint);
+			expect(cfgCompactionRemoteEndpoint.get(settings)).toBe(operatorEndpoint);
 			expect(cfgCompaction.get(settings).remoteEndpoint).toBe(operatorEndpoint);
 		});
 
@@ -646,15 +649,9 @@ describe("compaction prefers the current session model over modelRoles.default",
 			expect(calls[0]).toBe(modelKey(currentModel));
 		});
 
-		it("rejects bare and unresolved selectors instead of fuzzy matching", () => {
+		it("does not fuzzy-match unresolved selectors", () => {
 			const base = getBundledModel("openai", "gpt-5");
-			if (!base) throw new Error("Expected bundled test models to exist");
-			const fuzzyProvider = buildModel({
-				...base,
-				provider: "openrouter",
-				id: "openai/gpt-3.5-turbo-0613",
-				compat: base.compatConfig,
-			});
+			if (!base) throw new Error("Expected bundled test model to exist");
 			const fuzzyPath = buildModel({
 				...base,
 				provider: "openrouter",
@@ -664,9 +661,6 @@ describe("compaction prefers the current session model over modelRoles.default",
 			const fuzzyRole = buildModel({ ...base, id: "ghost@nonexistent", compat: base.compatConfig });
 
 			expect(
-				resolveGlobalCompactionTarget(Settings.isolated({ "compaction.model": "openai" }), [fuzzyProvider]),
-			).toBeUndefined();
-			expect(
 				resolveGlobalCompactionTarget(Settings.isolated({ "compaction.model": "only-in-office/deep-chat" }), [
 					fuzzyPath,
 				]),
@@ -675,17 +669,9 @@ describe("compaction prefers the current session model over modelRoles.default",
 				resolveGlobalCompactionTarget(Settings.isolated({ "compaction.model": "@nonexistent" }), [fuzzyRole]),
 			).toBeUndefined();
 
-			const listSettings = Settings.isolated({ "compaction.model": "@nonexistent,@smol" });
-			listSettings.setModelRole("smol", modelKey(base));
-			expect(resolveGlobalCompactionTarget(listSettings, [base, fuzzyRole])).toBeUndefined();
-
 			const nestedAlias = Settings.isolated({ "compaction.model": "@smol" });
 			nestedAlias.setModelRole("smol", "@nonexistent");
 			expect(resolveGlobalCompactionTarget(nestedAlias, [base, fuzzyRole])).toBeUndefined();
-
-			expect(
-				resolveGlobalCompactionTarget(Settings.isolated({ "compaction.model": "@default,openai" }), [base]),
-			).toBeUndefined();
 		});
 
 		it("prefers a literal model id over a thinking-suffix parse", () => {
@@ -714,10 +700,13 @@ describe("compaction prefers the current session model over modelRoles.default",
 			expect(target && getUpstreamPin(target)).toBe("openai");
 		});
 
-		it("declares the operator-only UI and CLI scope on the setting definitions", () => {
-			expect(cfgCompactionModel.ui?.condition).toBe("compactionModelNotProject");
-			expect(cfgCompactionModel.definition.operatorScoped).toBe(true);
-			expect(cfgCompactionRemoteEndpoint.definition.operatorScoped).toBe(true);
+		it("rejects malformed compaction.model selectors on write", () => {
+			const settings = Settings.isolated({});
+
+			expect(() => cfgCompactionModel.set(settings, "claude-haiku-4-5")).toThrow("provider/model");
+			expect(() => cfgCompactionModel.set(settings, "openai/gpt-5,anthropic/claude-sonnet-4-5")).toThrow(
+				"comma-separated list",
+			);
 		});
 
 		it("falls back to the active model when the configured model returns 404", async () => {

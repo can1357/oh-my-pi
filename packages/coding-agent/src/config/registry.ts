@@ -109,9 +109,10 @@ interface DefinitionBase {
 	 */
 	protocolDefault?: readonly ProtocolHost[];
 	/**
-	 * Reads the effective value from operator layers only (global, `--config`, runtime, env), the
-	 * same view `operatorValue` uses. Project settings still appear in provenance for the UI but do
-	 * not control dispatch; CLI `config get`/`list` report the operator value when this is set.
+	 * Makes {@link Setting.get} read effective values from operator layers only (global, `--config`,
+	 * runtime, plus this setting's environment variable), the same view `operatorValue` uses.
+	 * Project settings remain available through {@link Setting.layered} and provenance for the UI,
+	 * but never control dispatch; CLI `config get`/`list` report the operator value when this is set.
 	 */
 	operatorScoped?: true;
 	/**
@@ -593,7 +594,9 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 	}
 
 	override get(scope: ScopeLike): T {
-		return this.#effectiveEnv(scope) ?? super.get(scope);
+		const settings = settingsOf(scope);
+		const effectiveScope = this.definition.operatorScoped ? settings.grantAuthority() : scope;
+		return this.#effectiveEnv(effectiveScope) ?? super.get(effectiveScope);
 	}
 
 	/**

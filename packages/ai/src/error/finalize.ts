@@ -1,3 +1,4 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
 import type { Api } from "../types";
 import { callerAbortReason } from "./abort";
 import type { AbortSourceTracker } from "../utils/abort";
@@ -44,10 +45,9 @@ export interface FinalizeResult {
  */
 function providerErrorCode(error: unknown, captured: CapturedHttpErrorResponse | undefined): string | undefined {
 	const body = captured?.bodyJson;
-	if (body !== null && typeof body === "object") {
-		const record = body as Record<string, unknown>;
-		const nested = record.error;
-		const detail = nested !== null && typeof nested === "object" ? (nested as Record<string, unknown>) : record;
+	if (isRecord(body)) {
+		const nested = body.error;
+		const detail = isRecord(nested) ? nested : body;
 		const code = detail.code;
 		if (typeof code === "string" && code.length > 0) return code;
 		const type = detail.type;
