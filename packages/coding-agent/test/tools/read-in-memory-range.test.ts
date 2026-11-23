@@ -96,10 +96,12 @@ describe("in-memory range reads keep the requested lines", () => {
 	});
 
 	it("reports the byte budget as the limit of a byte-truncated page", async () => {
-		files["rows.txt"] = Array.from({ length: 200 }, (_, index) => `row-${index + 1} ${"x".repeat(1_000)}`).join("\n");
+		// 3KB rows: the 16 rows that fit show 47.0KB, well short of the budget the notice names.
+		files["rows.txt"] = Array.from({ length: 200 }, (_, index) => `row-${index + 1} ${"x".repeat(3_000)}`).join("\n");
 
 		const output = await read("remote://host/rows.txt:1-200");
 
-		expect(output).toMatch(/\[Showing lines 1-\d+ of 200 \(50\.0KB limit\)\. Use :\d+- to continue\]/);
+		// The 50KB budget reserves each row's `NNN:` prefix: 51,200 - 200 * 4 = 50,400 bytes.
+		expect(output).toMatch(/\[Showing lines 1-\d+ of 200 \(49\.2KB limit\)\. Use :\d+- to continue\]/);
 	});
 });

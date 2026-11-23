@@ -14,7 +14,7 @@ import { resolveAnthropicApiVersion } from "../compat/anthropic";
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
 import { hasModelScopedEffortLadder, resolveModelPolicy } from "../compat/resolve";
 import { compareRevision, parseRevision, revisionAtLeast } from "../compat/revision";
-import { providerEntries, seedModels } from "../compat/providers";
+import { providerEntries, providerEntry, seedModels } from "../compat/providers";
 import { billingVariantPlain, classifyModel, discoveryVocabulary } from "../compat/taxonomy";
 import {
 	DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
@@ -6817,8 +6817,17 @@ function extractCopilotSupportsVision(entry: OpenAICompatibleModelRecord): boole
 	return toBoolean(supports.vision);
 }
 
-/** Copilot's `/models` mixes chat and embedding models; only `type: "chat"` entries are usable here. */
-function isCopilotChatModel(entry: OpenAICompatibleModelRecord): boolean {
+/**
+ * Only models the account can select. `/models` lists chat models the account is blocked from
+ * (`policy.state: "disabled"`, #16199). `model_picker_enabled: false` is not a block: Free and Student
+ * accounts get it on every row and still answer 200 on legacy chat models (opencode#57955). It also
+ * mixes chat and embedding models; only `type: "chat"` entries are usable here.
+ */
+function isCopilotSelectableModel(entry: OpenAICompatibleModelRecord): boolean {
+	const policy = isRecord(entry.policy) ? entry.policy : undefined;
+	if (policy?.state === "disabled") {
+		return false;
+	}
 	if (!isRecord(entry.capabilities)) {
 		return true;
 	}
@@ -6893,6 +6902,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 	return {
 		providerId: "github-copilot",
 		cacheProviderId: resolveModelCacheProviderId("github-copilot", { apiKey: rawApiKey, baseUrl }),
+		dynamicModelsAuthoritative: providerEntry("github-copilot")?.dynamicModelsAuthoritative === true,
 		// Copilot discovery pre-applies the correct image fallback for omitted
 		// `supports.vision`; the live row's modality is authoritative.
 		dynamicInputAuthoritative: true,
@@ -6924,7 +6934,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 						defaults: ModelSpec<Api>,
 						_context: OpenAICompatibleModelMapperContext<Api>,
 					): ModelSpec<Api> | null => {
-						if (!isCopilotChatModel(entry)) {
+						if (!isCopilotSelectableModel(entry)) {
 							return null;
 						}
 						const reference = resolveReference(defaults.id);
@@ -7432,8 +7442,11 @@ const ZAI_ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic";
 // general PAYG `/api/paas/v4`, which would bypass plan quota or fail auth.
 const ZAI_OPENAI_BASE_URL = "https://api.z.ai/api/coding/paas/v4";
 
+/** Z.AI's transports; {@link resolveZaiApi} picks one per model id. */
+type ZaiApi = "anthropic-messages" | "openai-completions";
+
 /** Resolves the transport and endpoint for one Z.AI model catalog entry. */
-export function resolveZaiApi(modelId: string): { api: "anthropic-messages" | "openai-completions"; baseUrl: string } {
+export function resolveZaiApi(modelId: string): { api: ZaiApi; baseUrl: string } {
 	const api = apiRouteFor("zai", modelId)?.api ?? "anthropic-messages";
 	switch (api) {
 		case "anthropic-messages":
@@ -7443,6 +7456,44 @@ export function resolveZaiApi(modelId: string): { api: "anthropic-messages" | "o
 		default:
 			throw new Error(`Unsupported Z.AI API route: ${api}`);
 	}
+}
+
+/** Discovery inputs for {@link zaiModelManagerOptions}. */
+export interface ZaiModelManagerConfig {
+	apiKey?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Model-manager options for the `zai` GLM Coding Plan. Discovery lists the
+ * coding endpoint's `/models` roster, which carries ids only: bundled rows
+ * supply metadata for known ids and {@link resolveZaiApi} routes each id to its
+ * transport. Not authoritative, because the roster omits live SKUs such as
+ * `glm-5v-turbo` that stay reachable through the bundled catalog.
+ */
+export function zaiModelManagerOptions(config?: ZaiModelManagerConfig): ModelManagerOptions<ZaiApi> {
+	const apiKey = config?.apiKey;
+	if (!apiKey) return { providerId: "zai" };
+	return {
+		providerId: "zai",
+		fetchDynamicModels: () => {
+			const references = createBundledReferenceMap<ZaiApi>("zai");
+			return fetchOpenAICompatibleModels<ZaiApi>({
+				api: "anthropic-messages",
+				provider: "zai",
+				baseUrl: ZAI_OPENAI_BASE_URL,
+				apiKey,
+				mapModel: (entry, defaults) => {
+					const routed = { ...defaults, ...resolveZaiApi(defaults.id) };
+					const model = mapWithBundledReference(entry, routed, references.get(defaults.id));
+					return model.reasoning === undefined && isGlmReasoningIdentity("zai", model.id, "4.5")
+						? { ...model, reasoning: true }
+						: model;
+				},
+				fetch: config?.fetch,
+			});
+		},
+	};
 }
 
 const COPILOT_DEFAULT_RESOLUTION = {

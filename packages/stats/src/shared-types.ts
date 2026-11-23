@@ -631,8 +631,11 @@ export interface SpotlightOverhead {
 
 /**
  * The net once fetch-backs that would have happened anyway are taken out: held-out results (the model saw them
- * unshaped) show how much of a would-be cut's output the agent reads again regardless, per tool; only recoveries
- * beyond that baseline are the cut's cost. A tool's baseline is thin while it has fewer than `minHoldouts`.
+ * unshaped) show how much of a would-be cut's output the agent reads again regardless, per tool and capped side
+ * (whether `plain` capped the result: a capped result's cut hides lines beyond plain's page, which the agent fetches
+ * under plain as well); only recoveries beyond that baseline are the cut's cost. While a capped side with cuts has
+ * fewer than `minHoldouts` holdouts, all of the tool's cuts take its pooled rate. A tool's baseline is thin while it
+ * has fewer than `minHoldouts`.
  */
 export interface SpotlightAdjustedTool {
 	tool: SpotlightTool;
@@ -641,9 +644,15 @@ export interface SpotlightAdjustedTool {
 	recoveredTokens: number;
 	/** Held-out would-be cuts the baseline is measured on. */
 	holdouts: number;
-	/** Recovered tokens per held-out would-be cut, over all the tool's holdouts (session-clustered bootstrap). */
+	/**
+	 * Recovered tokens per held-out would-be cut, pooled over all the tool's holdouts (session-clustered bootstrap).
+	 */
 	baselinePerCut: SpotlightEstimate;
-	/** max(0, recovered − baseline per cut × cuts). */
+	/**
+	 * max(0, recovered − expected): Σ capped sides' cuts × their own holdouts' per-cut rate when every side with cuts
+	 * has `minHoldouts` of them, else cuts × `baselinePerCut` (a thin side beside the other's own rate would misprice
+	 * it). The step rows charge each cut the same rate.
+	 */
 	excessTokens: SpotlightEstimate;
 }
 
@@ -654,7 +663,11 @@ export interface SpotlightAdjusted {
 	excessTokens: SpotlightEstimate;
 	/** gross.savedTokens − excessTokens. */
 	netTokens: SpotlightEstimate;
-	/** compounding.savedUsd − recoveryUsd × (excess / recovered) − spotlightUsd. */
+	/**
+	 * compounding.savedUsd − the cuts' recovery $ × (excess / recovered) − spotlightUsd. The cuts' recovery $ is the
+	 * carried cost of recoveries of cuts plus extra turns whose every call recovered a cut; fetch-backs of results
+	 * shaping left whole are excluded.
+	 */
 	netUsd: SpotlightEstimate;
 	/** Holdouts per tool below which its baseline is too thin to trust (the UI marks the tool). */
 	minHoldouts: number;

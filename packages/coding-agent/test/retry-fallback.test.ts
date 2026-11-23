@@ -409,6 +409,39 @@ describe("retry fallback selector resolution", () => {
 	});
 });
 
+describe("retry fallback route validation", () => {
+	it("accepts upstream-pinned keys and entries without credentials or the full catalog but warns for unknown models", () => {
+		const model = getBundledModel("openrouter", "qwen/qwen3-coder");
+		if (!model) throw new Error("Expected bundled OpenRouter test model");
+		const models = [model];
+		const registry = {
+			find: (provider: string, id: string) => resolveProviderModelReference(provider, id, models),
+			hasProvider: (provider: string) => provider === "openrouter",
+			getProviderModels: (provider: string) => models.filter(candidate => candidate.provider === provider),
+			getAll: (): Model[] => {
+				throw new Error("Route validation must not compose the full catalog");
+			},
+		};
+		const pinned = "openrouter/qwen/qwen3-coder:exacto@cerebras";
+		const unknown = "openrouter/unknown-model:exacto@cerebras";
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				[pinned]: [],
+				[unknown]: [],
+				default: [pinned, "openrouter/qwen/qwen3-coder:high@cerebras", unknown],
+			},
+		});
+		const warnings: string[] = [];
+
+		validateRetryFallbackChains(settings, registry, warning => warnings.push(warning));
+
+		expect(warnings).toEqual([
+			`retry.fallbackChains key references unknown model: ${unknown}`,
+			`Fallback chain for role 'default' references unknown model: ${unknown}`,
+		]);
+	});
+});
+
 describe("retry fallback kind-role validation", () => {
 	const chatModel = getBundledModel("openai", "gpt-4o-mini");
 	if (!chatModel) throw new Error("Expected bundled OpenAI test model");

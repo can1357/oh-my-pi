@@ -62,6 +62,7 @@ import {
 	computeRanking,
 	computeSteps,
 	computeTimeCost,
+	cutRecoveryTurns,
 	emptyAdjusted,
 	emptyRanking,
 	holdoutBaselines,
@@ -1337,6 +1338,8 @@ export function buildSpotlightDashboard(
 		compounding.promptTokens += sessionFacts?.promptTokens ?? 0;
 
 		const turnsCounted = new Set<string>();
+		// The requests that only recovered cuts: the turns economics charges the cuts.
+		const cutTurns = cutRecoveryTurns(analysis);
 		const sessionMoney: SessionMoney = {
 			sessionFile: analysis.session.session_file,
 			savedTokens: 0,
@@ -1398,7 +1401,8 @@ export function buildSpotlightDashboard(
 			}
 			compounding.recoveredCarriedTokens += call.recoveryCarry;
 			compounding.recoveryUsd += call.recoveryCarryUsd;
-			sessionMoney.recoveryUsd += call.recoveryCarryUsd;
+			// The adjusted net charges cuts only their own fetch-backs, not those of results shaping left whole.
+			if (recovery.source.result?.shortened) sessionMoney.recoveryUsd += call.recoveryCarryUsd;
 			const point = bucket(call.timestamp);
 			point.recoveries++;
 			point.recoveredTokens += call.tokens;
@@ -1412,7 +1416,7 @@ export function buildSpotlightDashboard(
 					totals.turnsUsd += turnUsd;
 				}
 				compounding.recoveryUsd += turnUsd;
-				sessionMoney.recoveryUsd += turnUsd;
+				if (cutTurns.has(call.entryId)) sessionMoney.recoveryUsd += turnUsd;
 				point.netUsd -= turnUsd;
 			}
 		}
@@ -1618,16 +1622,8 @@ function computeFetchBack(evaluated: readonly Evaluated[], tools: readonly Spotl
  * two such calls adds half a turn (and half its cost) to each call's cut.
  */
 function extraTurnShares(analysis: SessionAnalysis): Map<Call, { turns: number; usd: number }> {
-	const byEntry = new Map<string, Call[]>();
-	for (const call of analysis.calls) {
-		if (!call.recovery?.source.result?.shortened || !call.entryId) continue;
-		const calls = byEntry.get(call.entryId);
-		if (calls) calls.push(call);
-		else byEntry.set(call.entryId, [call]);
-	}
 	const shares = new Map<Call, { turns: number; usd: number }>();
-	for (const [entryId, calls] of byEntry) {
-		if (calls.length !== calls[0].callsInTurn) continue;
+	for (const [entryId, calls] of cutRecoveryTurns(analysis)) {
 		const usd = analysis.turnUsdByEntry.get(entryId) ?? 0;
 		for (const call of calls) {
 			const source = call.recovery?.source;

@@ -55,6 +55,6 @@ describe("resolveDiagnosticTargets", () => {
 		await Bun.write(path.join(root, "lib", "c.ts"), "");
 		const { matches, truncated } = await resolveDiagnosticTargets("a.ts; lib/*.ts", root, 10);
 		expect(truncated).toBe(false);
-		expect(matches.sort()).toEqual(["a.ts", "lib/b.ts", "lib/c.ts"]);
+		expect(matches.sort()).toEqual(["a.ts", path.join("lib", "b.ts"), path.join("lib", "c.ts")]);
 	});
 });
