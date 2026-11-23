@@ -176,7 +176,7 @@ bazelisk --bazelrc="$rc" build --config=rustfmt //crates/...
 ```
 
 - `--config=clippy` = rules_rust clippy aspect + `-Dwarnings`; `--config=clippy-strict` layers the generated `bazel/clippy.bazelrc` for crates with `[lints] workspace = true`.
-- Opted-in crates also set `lint_config = "//bazel/lints:workspace_lints"`. The clippy aspect applies that policy before `-Dwarnings`, so `--config=clippy` enforces workspace lints even when the strict query omits a crate. `bun scripts/gen-clippy-bazelrc.ts --check` fails if a `crates/*/Cargo.toml` with `[lints] workspace = true` is not wired.
+- Opted-in crates also set `lint_config = "//bazel/lints:workspace_lints"`. The clippy aspect applies that policy before `-Dwarnings`, so `--config=clippy` enforces workspace lints on any scheduled target even when the strict query omits a crate. `bun scripts/gen-clippy-bazelrc.ts --check` fails if a `crates/*/Cargo.toml` with `[lints] workspace = true` is missing `lint_config` or defines a target (such as a `rust_binary` outside the strict list) that `.github/workflows/ci.yml` does not schedule for Clippy.
 - `--config=clippy-ported` retains zero rustc warnings while allowing the clippy groups permitted by the ported `omp-builtins` manifest.
 - `--config=rustfmt` = rustfmt aspect against the workspace `rustfmt.toml`.
 

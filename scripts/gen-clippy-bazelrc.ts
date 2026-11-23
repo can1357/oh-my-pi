@@ -6,8 +6,9 @@
  * `bazel/clippy.bazelrc` is the `--config=clippy-strict` flag list. Opted-in
  * crates also attach the same policy via `lint_config = "//bazel/lints:workspace_lints"`
  * (`bazel/lints/BUILD.bazel`). The clippy aspect applies `lint_config` before
- * command-line flags, so `--config=clippy` (`-Dwarnings`) still enforces the
- * workspace policy when a crate is missing from CI's strict query.
+ * command-line flags, so `--config=clippy` (`-Dwarnings`) enforces the
+ * workspace policy on any target it schedules. Coverage checks also verify
+ * every opted-in library and binary is scheduled by `.github/workflows/ci.yml`.
  *
  * Emission mirrors rustc lint-level resolution: rustc entries first, then
  * clippy entries — negative `priority` values (the lint groups) before
@@ -45,6 +46,16 @@ interface Coverage {
 const FLAG_BY_LEVEL: Record<LintLevel, string> = { allow: "A", warn: "W", deny: "D", forbid: "F" };
 const WORKSPACE_LINTS_LABEL = "//bazel/lints:workspace_lints";
 const CLIPPY_RULES = ["rust_library", "rust_shared_library", "rust_binary"] as const;
+type ClippyRuleKind = (typeof CLIPPY_RULES)[number];
+const CLIPPY_RULE_SET = new Set<string>(CLIPPY_RULES);
+
+interface RuleCall {
+	kind: ClippyRuleKind;
+	/** Top-level keyword arguments whose values are plain string literals; null if unterminated. */
+	stringAttrs: Map<string, string> | null;
+}
+
+type CiClippyTargetMatcher = (crate: string, kind: ClippyRuleKind, target: string) => boolean;
 const COVERAGE_PREFIX = "workspace-lint-coverage:";
 const GAP_PREFIX = "workspace-lint-coverage-gap:";
 
@@ -151,59 +162,502 @@ function optsIntoWorkspaceLints(cargoToml: string): boolean {
 	return parsed.lints?.workspace === true;
 }
 
-/** Rule-call bodies for the kinds CI clippy builds. Comments and strings are skipped. */
-function clippyRuleCalls(buildText: string): { kind: string; body: string }[] {
-	const calls: { kind: string; body: string }[] = [];
-	const pattern = new RegExp(`^[ \\t]*(?:${CLIPPY_RULES.join("|")})\\(`, "gm");
-	for (const match of buildText.matchAll(pattern)) {
-		const open = match.index + match[0].length - 1;
-		const body = callBody(buildText, open);
-		if (body == null) {
-			calls.push({ kind: match[0].slice(0, -1), body: "" });
-			continue;
-		}
-		calls.push({ kind: match[0].slice(0, -1), body });
-	}
-	return calls;
+function isIdentStart(ch: string): boolean {
+	return (ch >= "A" && ch <= "Z") || (ch >= "a" && ch <= "z") || ch === "_";
 }
 
-function callBody(text: string, openParen: number): string | null {
-	let depth = 0;
-	let quote: string | null = null;
-	for (let i = openParen; i < text.length; i++) {
-		const char = text[i];
-		if (quote != null) {
-			if (char === "\\") {
-				i++;
-				continue;
+function isIdentPart(ch: string): boolean {
+	return isIdentStart(ch) || (ch >= "0" && ch <= "9");
+}
+
+function skipLineComment(text: string, pos: number, end: number): number {
+	const newline = text.indexOf("\n", pos);
+	return newline === -1 || newline >= end ? end : newline + 1;
+}
+
+function parseStarlarkString(text: string, pos: number, end: number): { value: string; end: number } | null {
+	let i = pos;
+	let raw = false;
+	if (i + 1 < end && (text[i] === "r" || text[i] === "R") && (text[i + 1] === '"' || text[i + 1] === "'")) {
+		raw = true;
+		i++;
+	}
+	if (i >= end) return null;
+	const quote = text[i];
+	if (quote !== '"' && quote !== "'") return null;
+
+	const triple = i + 2 < end && text[i + 1] === quote && text[i + 2] === quote;
+	i += triple ? 3 : 1;
+	let value = "";
+	while (i < end) {
+		const ch = text[i];
+		if (!triple && ch === "\n") return null;
+		if (ch === "\\") {
+			if (i + 1 >= end) return null;
+			const next = text[i + 1];
+			if (raw) {
+				value += ch + next;
+			} else if (next === "n") {
+				value += "\n";
+			} else if (next === "r") {
+				value += "\r";
+			} else if (next === "t") {
+				value += "\t";
+			} else {
+				value += next;
 			}
-			if (char === quote) quote = null;
+			i += 2;
 			continue;
 		}
-		if (char === '"' || char === "'") {
-			quote = char;
-			continue;
+		if (triple) {
+			if (i + 2 < end && text[i] === quote && text[i + 1] === quote && text[i + 2] === quote) {
+				return { value, end: i + 3 };
+			}
+		} else if (ch === quote) {
+			return { value, end: i + 1 };
 		}
-		if (char === "#") {
-			const newline = text.indexOf("\n", i);
-			i = newline === -1 ? text.length : newline;
-			continue;
-		}
-		if (char === "(") depth++;
-		else if (char === ")") {
-			depth--;
-			if (depth === 0) return text.slice(openParen, i + 1);
-		}
+		value += ch;
+		i++;
 	}
 	return null;
 }
 
-function hasWorkspaceLintConfig(callBodyText: string): boolean {
-	return new RegExp(`lint_config\\s*=\\s*"${WORKSPACE_LINTS_LABEL.replaceAll("/", "\\/")}"`).test(callBodyText);
+function skipStarlarkTrivia(text: string, pos: number, end: number): number {
+	let i = pos;
+	while (i < end) {
+		const ch = text[i];
+		if (ch === " " || ch === "\t" || ch === "\r" || ch === "\n") {
+			i++;
+			continue;
+		}
+		if (ch === "#") {
+			i = skipLineComment(text, i, end);
+			continue;
+		}
+		break;
+	}
+	return i;
 }
 
-function targetName(callBodyText: string): string {
-	return /name\s*=\s*"([^"]+)"/.exec(callBodyText)?.[1] ?? "<unnamed>";
+function findMatchingParen(text: string, openParen: number): number {
+	let depth = 0;
+	let i = openParen;
+	const end = text.length;
+	while (i < end) {
+		const ch = text[i];
+		if (ch === "#") {
+			i = skipLineComment(text, i, end);
+			continue;
+		}
+		if (
+			ch === '"' ||
+			ch === "'" ||
+			((ch === "r" || ch === "R") && i + 1 < end && (text[i + 1] === '"' || text[i + 1] === "'"))
+		) {
+			const lit = parseStarlarkString(text, i, end);
+			if (lit == null) return -1;
+			i = lit.end;
+			continue;
+		}
+		if (ch === "(" || ch === "[" || ch === "{") {
+			depth++;
+		} else if (ch === ")" || ch === "]" || ch === "}") {
+			depth--;
+			if (depth === 0) return ch === ")" ? i : -1;
+		} else if (isIdentStart(ch)) {
+			while (i < end && isIdentPart(text[i])) i++;
+			continue;
+		}
+		i++;
+	}
+	return -1;
+}
+
+/** Parses top-level keyword arguments whose values are plain Starlark string literals. */
+function parseTopLevelStringAttrs(text: string, start: number, end: number): Map<string, string> {
+	const attrs = new Map<string, string>();
+	const segments: [number, number][] = [];
+	let segStart = start;
+	let depth = 0;
+	let i = start;
+	while (i < end) {
+		const ch = text[i];
+		if (ch === "#") {
+			i = skipLineComment(text, i, end);
+			continue;
+		}
+		if (
+			ch === '"' ||
+			ch === "'" ||
+			((ch === "r" || ch === "R") && i + 1 < end && (text[i + 1] === '"' || text[i + 1] === "'"))
+		) {
+			const lit = parseStarlarkString(text, i, end);
+			if (lit == null) return attrs;
+			i = lit.end;
+			continue;
+		}
+		if (ch === "(" || ch === "[" || ch === "{") {
+			depth++;
+		} else if (ch === ")" || ch === "]" || ch === "}") {
+			depth = Math.max(0, depth - 1);
+		} else if (ch === "," && depth === 0) {
+			segments.push([segStart, i]);
+			segStart = i + 1;
+		} else if (isIdentStart(ch)) {
+			while (i < end && isIdentPart(text[i])) i++;
+			continue;
+		}
+		i++;
+	}
+	segments.push([segStart, end]);
+
+	for (const [s, e] of segments) {
+		let p = skipStarlarkTrivia(text, s, e);
+		if (p >= e || !isIdentStart(text[p])) continue;
+		const keyStart = p;
+		while (p < e && isIdentPart(text[p])) p++;
+		const key = text.slice(keyStart, p);
+		p = skipStarlarkTrivia(text, p, e);
+		if (p >= e || text[p] !== "=" || (p + 1 < e && text[p + 1] === "=")) continue;
+		p = skipStarlarkTrivia(text, p + 1, e);
+		const lit = parseStarlarkString(text, p, e);
+		if (lit != null && skipStarlarkTrivia(text, lit.end, e) === e) {
+			attrs.set(key, lit.value);
+		} else {
+			attrs.delete(key);
+		}
+	}
+	return attrs;
+}
+
+/** Top-level rule calls for the kinds CI clippy builds, with parsed string attributes. */
+function clippyRuleCalls(buildText: string): RuleCall[] {
+	const calls: RuleCall[] = [];
+	let depth = 0;
+	let i = 0;
+	let prevNonSpace = "";
+	const end = buildText.length;
+	while (i < end) {
+		const ch = buildText[i];
+		if (ch === "#") {
+			i = skipLineComment(buildText, i, end);
+			continue;
+		}
+		if (
+			ch === '"' ||
+			ch === "'" ||
+			((ch === "r" || ch === "R") && i + 1 < end && (buildText[i + 1] === '"' || buildText[i + 1] === "'"))
+		) {
+			const lit = parseStarlarkString(buildText, i, end);
+			i = lit == null ? end : lit.end;
+			prevNonSpace = '"';
+			continue;
+		}
+		if (ch === "(" || ch === "[" || ch === "{") {
+			depth++;
+			prevNonSpace = ch;
+			i++;
+			continue;
+		}
+		if (ch === ")" || ch === "]" || ch === "}") {
+			depth = Math.max(0, depth - 1);
+			prevNonSpace = ch;
+			i++;
+			continue;
+		}
+		if (isIdentStart(ch)) {
+			const identStart = i;
+			while (i < end && isIdentPart(buildText[i])) i++;
+			const ident = buildText.slice(identStart, i);
+			if (depth === 0 && prevNonSpace !== "." && CLIPPY_RULE_SET.has(ident)) {
+				let open = i;
+				while (open < end && (buildText[open] === " " || buildText[open] === "\t")) open++;
+				if (open < end && buildText[open] === "(") {
+					const close = findMatchingParen(buildText, open);
+					if (close === -1) {
+						calls.push({ kind: ident as ClippyRuleKind, stringAttrs: null });
+						break;
+					}
+					calls.push({
+						kind: ident as ClippyRuleKind,
+						stringAttrs: parseTopLevelStringAttrs(buildText, open + 1, close),
+					});
+					i = close + 1;
+					prevNonSpace = ")";
+					continue;
+				}
+			}
+			prevNonSpace = "a";
+			continue;
+		}
+		if (ch !== " " && ch !== "\t" && ch !== "\r" && ch !== "\n") {
+			prevNonSpace = ch;
+		}
+		i++;
+	}
+	return calls;
+}
+
+type BazelQueryToken =
+	| { kind: "op"; value: "+" | "-" | "^" }
+	| { kind: "lparen" }
+	| { kind: "rparen" }
+	| { kind: "comma" }
+	| { kind: "string"; value: string }
+	| { kind: "word"; value: string };
+
+function tokenizeBazelQuery(query: string): BazelQueryToken[] {
+	const tokens: BazelQueryToken[] = [];
+	let i = 0;
+	while (i < query.length) {
+		const ch = query[i];
+		if (ch === " " || ch === "\t" || ch === "\r" || ch === "\n") {
+			i++;
+			continue;
+		}
+		if (ch === "(") {
+			tokens.push({ kind: "lparen" });
+			i++;
+			continue;
+		}
+		if (ch === ")") {
+			tokens.push({ kind: "rparen" });
+			i++;
+			continue;
+		}
+		if (ch === ",") {
+			tokens.push({ kind: "comma" });
+			i++;
+			continue;
+		}
+		if (ch === "+" || ch === "-" || ch === "^") {
+			tokens.push({ kind: "op", value: ch });
+			i++;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			const quote = ch;
+			let value = "";
+			i++;
+			while (i < query.length && query[i] !== quote) {
+				if (query[i] === "\\" && i + 1 < query.length) {
+					value += query[i + 1];
+					i += 2;
+				} else {
+					value += query[i];
+					i++;
+				}
+			}
+			if (i >= query.length) throw new Error(`Unterminated string in Bazel query: ${query}`);
+			i++;
+			tokens.push({ kind: "string", value });
+			continue;
+		}
+		const start = i;
+		while (i < query.length && !/[\s(),+^'"]/.test(query[i])) i++;
+		const word = query.slice(start, i);
+		if (word === "union") tokens.push({ kind: "op", value: "+" });
+		else if (word === "except") tokens.push({ kind: "op", value: "-" });
+		else if (word === "intersect") tokens.push({ kind: "op", value: "^" });
+		else tokens.push({ kind: "word", value: word });
+	}
+	return tokens;
+}
+
+function cratePatternMatcher(pattern: string): CiClippyTargetMatcher {
+	if (pattern === "//crates/..." || pattern === "//...") {
+		return () => true;
+	}
+	const wildcard = /^\/\/crates\/([^/:]+)\/\.\.\.$/.exec(pattern);
+	if (wildcard) {
+		const expectedCrate = wildcard[1];
+		return crate => crate === expectedCrate;
+	}
+	const pkgAll = /^\/\/crates\/([^/:]+)(?::all)?$/.exec(pattern);
+	if (pkgAll) {
+		const expectedCrate = pkgAll[1];
+		return crate => crate === expectedCrate;
+	}
+	const exactTarget = /^\/\/crates\/([^/:]+):([^/:]+)$/.exec(pattern);
+	if (exactTarget) {
+		const expectedCrate = exactTarget[1];
+		const expectedTarget = exactTarget[2];
+		return (crate, _kind, target) => crate === expectedCrate && target === expectedTarget;
+	}
+	return () => false;
+}
+
+function parseBazelQuery(query: string): CiClippyTargetMatcher {
+	const tokens = tokenizeBazelQuery(query);
+	let pos = 0;
+
+	function parseUnionDiff(): CiClippyTargetMatcher {
+		let left = parseIntersect();
+		while (pos < tokens.length) {
+			const tok = tokens[pos];
+			if (tok.kind === "op" && (tok.value === "+" || tok.value === "-")) {
+				pos++;
+				const right = parseIntersect();
+				const prev = left;
+				left =
+					tok.value === "+"
+						? (c, k, t) => prev(c, k, t) || right(c, k, t)
+						: (c, k, t) => prev(c, k, t) && !right(c, k, t);
+			} else {
+				break;
+			}
+		}
+		return left;
+	}
+
+	function parseIntersect(): CiClippyTargetMatcher {
+		let left = parsePrimary();
+		while (pos < tokens.length) {
+			const tok = tokens[pos];
+			if (tok.kind === "op" && tok.value === "^") {
+				pos++;
+				const right = parsePrimary();
+				const prev = left;
+				left = (c, k, t) => prev(c, k, t) && right(c, k, t);
+			} else {
+				break;
+			}
+		}
+		return left;
+	}
+
+	function parsePrimary(): CiClippyTargetMatcher {
+		const tok = tokens[pos];
+		if (tok == null) throw new Error(`Unexpected end of Bazel query: ${query}`);
+		if (tok.kind === "lparen") {
+			pos++;
+			const inner = parseUnionDiff();
+			if (tokens[pos]?.kind !== "rparen") {
+				throw new Error(`Expected ')' in Bazel query: ${query}`);
+			}
+			pos++;
+			return inner;
+		}
+		if (tok.kind === "word" && tok.value === "kind" && tokens[pos + 1]?.kind === "lparen") {
+			pos += 2;
+			const patternTok = tokens[pos];
+			if (patternTok == null || (patternTok.kind !== "string" && patternTok.kind !== "word")) {
+				throw new Error(`Expected kind() regex in Bazel query: ${query}`);
+			}
+			pos++;
+			if (tokens[pos]?.kind !== "comma") {
+				throw new Error(`Expected ',' in kind() of Bazel query: ${query}`);
+			}
+			pos++;
+			const inner = parseUnionDiff();
+			if (tokens[pos]?.kind !== "rparen") {
+				throw new Error(`Expected ')' after kind() in Bazel query: ${query}`);
+			}
+			pos++;
+			const kindRegex = new RegExp(patternTok.value);
+			return (c, k, t) => kindRegex.test(`${k} rule`) && inner(c, k, t);
+		}
+		if (tok.kind === "word" || tok.kind === "string") {
+			pos++;
+			return cratePatternMatcher(tok.value);
+		}
+		throw new Error(`Unexpected token in Bazel query: ${query}`);
+	}
+
+	const matcher = parseUnionDiff();
+	if (pos !== tokens.length) {
+		throw new Error(`Unexpected trailing tokens in Bazel query: ${query}`);
+	}
+	return matcher;
+}
+
+function extractShellArg(line: string, start: number): { value: string; end: number } | null {
+	let i = start;
+	while (i < line.length && (line[i] === " " || line[i] === "\t")) i++;
+	if (i >= line.length) return null;
+	const ch = line[i];
+	if (ch === '"' || ch === "'") {
+		const quote = ch;
+		let value = "";
+		i++;
+		while (i < line.length && line[i] !== quote) {
+			if (quote === '"' && line[i] === "\\" && i + 1 < line.length) {
+				value += line[i + 1];
+				i += 2;
+			} else {
+				value += line[i];
+				i++;
+			}
+		}
+		if (i >= line.length) return null;
+		return { value, end: i + 1 };
+	}
+	const wordStart = i;
+	while (i < line.length && !/[\s|;&]/.test(line[i])) i++;
+	if (i === wordStart) return null;
+	return { value: line.slice(wordStart, i), end: i };
+}
+
+function extractClippyMatchersFromRun(run: string): CiClippyTargetMatcher[] {
+	const matchers: CiClippyTargetMatcher[] = [];
+	const normalized = run.replace(/\\\r?\n/g, " ");
+	for (const rawLine of normalized.split("\n")) {
+		const line = rawLine.trim();
+		if (line.length === 0 || line.startsWith("#")) continue;
+		// Match `--config=clippy` and `--config=clippy-strict` (not `--config=clippy-ported`).
+		if (!/--config=clippy(?:-strict)?(?:\s|$)/.test(line)) continue;
+
+		const queryCmd = /\b(?:bazelisk|bazel)\s+query\b/.exec(line);
+		if (queryCmd) {
+			let pos = queryCmd.index + queryCmd[0].length;
+			let queryArg: string | null = null;
+			while (pos < line.length) {
+				const arg = extractShellArg(line, pos);
+				if (arg == null) break;
+				pos = arg.end;
+				if (arg.value === "--") {
+					const next = extractShellArg(line, pos);
+					if (next) queryArg = next.value;
+					break;
+				}
+				if (arg.value.startsWith("-")) continue;
+				queryArg = arg.value;
+				break;
+			}
+			if (queryArg != null) {
+				matchers.push(parseBazelQuery(queryArg));
+			}
+			continue;
+		}
+
+		const targetPatterns = line.match(/\/\/(?:crates\/[^\s'"]+|\.\.\.)/g);
+		if (targetPatterns && targetPatterns.length > 0) {
+			const preds = targetPatterns.map(cratePatternMatcher);
+			matchers.push((c, k, t) => preds.some(pred => pred(c, k, t)));
+		}
+	}
+	return matchers;
+}
+
+async function loadCiClippyMatcher(root: string): Promise<CiClippyTargetMatcher | null> {
+	const ciPath = path.join(root, ".github", "workflows", "ci.yml");
+	const ciText = await readText(ciPath);
+	if (ciText == null) return null;
+
+	const parsed = Bun.YAML.parse(ciText) as {
+		jobs?: { rust_validate?: { steps?: Array<{ run?: unknown }> } };
+	};
+	const steps = parsed?.jobs?.rust_validate?.steps;
+	if (!Array.isArray(steps)) {
+		return () => false;
+	}
+	const matchers: CiClippyTargetMatcher[] = [];
+	for (const step of steps) {
+		if (typeof step?.run === "string") {
+			matchers.push(...extractClippyMatchersFromRun(step.run));
+		}
+	}
+	return (crate, kind, target) => matchers.some(matcher => matcher(crate, kind, target));
 }
 
 async function checkCoverage(root: string): Promise<Coverage> {
@@ -215,6 +669,7 @@ async function checkCoverage(root: string): Promise<Coverage> {
 		if (isEnoent(err)) return { covered: [], gaps: [] };
 		throw err;
 	}
+	const ciScheduled = await loadCiClippyMatcher(root);
 	const covered: string[] = [];
 	const gaps: CoverageGap[] = [];
 	for (const name of entries.sort()) {
@@ -241,11 +696,19 @@ async function checkCoverage(root: string): Promise<Coverage> {
 		}
 		let crateCovered = true;
 		for (const call of calls) {
-			if (call.body.length === 0 || !hasWorkspaceLintConfig(call.body)) {
+			const nameAttr = call.stringAttrs?.get("name") ?? "<unnamed>";
+			if (call.stringAttrs == null || call.stringAttrs.get("lint_config") !== WORKSPACE_LINTS_LABEL) {
 				crateCovered = false;
 				gaps.push({
 					crate: name,
-					detail: `${call.kind} "${targetName(call.body)}" is missing lint_config = "${WORKSPACE_LINTS_LABEL}"`,
+					detail: `${call.kind} "${nameAttr}" is missing lint_config = "${WORKSPACE_LINTS_LABEL}"`,
+				});
+			}
+			if (ciScheduled != null && !ciScheduled(name, call.kind, nameAttr)) {
+				crateCovered = false;
+				gaps.push({
+					crate: name,
+					detail: `${call.kind} "${nameAttr}" is not scheduled by .github/workflows/ci.yml clippy queries`,
 				});
 			}
 		}
