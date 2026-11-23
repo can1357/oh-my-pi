@@ -6,6 +6,7 @@
 
 - Z.AI (`zai`) now discovers the models available to your GLM Coding Plan key, so newly released GLM models appear without waiting for a catalog update.
 - Added `getUpstreamPin()` and `routedModelsAreEqual()` to `@oh-my-pi/pi-catalog/models` for distinguishing aggregator models routed to different upstream providers.
+- Added `@oh-my-pi/pi-catalog/discovery/pi-native` and `piNativeModelManagerOptions()` for reading a provider's model roster from an auth gateway's `GET /v1/pi/models`.
 
 ### Fixed
 

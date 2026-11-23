@@ -5,6 +5,7 @@
 ### Added
 
 - Added `AssistantMessage.requestId`, populated from Anthropic’s `request-id` response header, so failed or refused requests retain the identifier needed for Anthropic support.
+- Added `GET /v1/pi/models` to `omp auth-gateway`, serving the gateway's model catalog (limits, thinking levels, pricing) to pi-native clients.
 
 ### Changed
 

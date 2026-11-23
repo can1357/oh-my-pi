@@ -9,6 +9,7 @@
 ### Added
 
 - Added the opt-in `tree` status segment, which shows a session’s position in the session tree after a rewind or on a branch; in Tern, the segment opens `/tree` when clicked.
+- Providers routed through an auth gateway (`transport: pi-native`) now list the gateway's models, so models the gateway discovered at runtime (such as new Codex models) can be selected without declaring them in `models.yml`, and models the gateway cannot route are hidden.
 - Added `computer.takeover` as the replacement for `computer.backgroundFallback`, with `fallback`, `foreground`, and `always` modes for controlling when the computer tool takes over the foreground window. Existing fallback behavior is preserved by default.
 - Added a portable `column` shell builtin with util-linux-compatible options, including table formatting, named columns, alignment, hiding, ordering, JSON output, tree display, and width controls.
 - Added extension todo backends through `pi.registerTodoBackend()` and the `todo.backend` setting. Registered backends can mirror the session’s complete todo list to an external store and can be selected and configured from `/settings` → Tools → Todos.
