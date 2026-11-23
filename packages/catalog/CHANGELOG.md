@@ -37,7 +37,6 @@
 
 ### Fixed
 
-- Fixed Vercel AI Gateway `meta/muse-spark-1.3-contributor` requests failing with HTTP 400: its output budget is capped to 131072 tokens like `1.2-contributor`, and the 1M context window is unchanged ([#10705](https://github.com/can1357/oh-my-pi/issues/10705)) ([#19948](https://github.com/can1357/oh-my-pi/pull/19948) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed Vercel AI Gateway model refreshes so public models remain discoverable when a stored API key has expired.
 - Fixed OpenRouter models that require reasoning but do not advertise effort levels; requests that disable thinking now use the lowest supported reasoning effort instead of failing.
 - Fixed Gemini 4 models (Argon, Carbon, Hydrogen, and Neon) failing with empty malformed responses when messages arrived immediately after tool results.
