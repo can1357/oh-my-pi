@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- Commits made by the commit helper take their identity and run their hooks from the file `GIT_CONFIG_GLOBAL` names, as `git commit` does ([#19819](https://github.com/can1357/oh-my-pi/issues/19819), [#20214](https://github.com/can1357/oh-my-pi/pull/20214) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Improved `magic` edit application reliability: narrowed `CANNOT` refusals to missing targets, accepted multi-line `sub` replacements and no-op `sub`s, fixed block spans on closing braces and multi-line headers, merged tiny excerpt gaps, preserved full retry attempts after excerpt widening, and pinpointed syntax-breaking operations with surrounding line context.
 - `tab.scroll({ direction: "down", amount: 600 })` and other objects that name no pixel delta are rejected with the helper's signature and the equivalent call (`tab.scroll(0, 600)`) instead of silently scrolling nothing; the browser docs point at the `TabApi` interface in `tab-worker.ts` instead of a declaration file that no longer exists ([#20171](https://github.com/can1357/oh-my-pi/pull/20171) by [@kaluli123123](https://github.com/kaluli123123))
 - `ask` now reports a `<fieldset>` whose radios each carry a different `name` back to the model instead of showing it, so a preselected option can no longer be submitted next to the user's pick as a second answer ([#19625](https://github.com/can1357/oh-my-pi/issues/19625), [#20170](https://github.com/can1357/oh-my-pi/pull/20170) by [@kaluli123123](https://github.com/kaluli123123))
