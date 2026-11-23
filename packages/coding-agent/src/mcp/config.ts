@@ -5,11 +5,12 @@
  */
 
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
+import { clearCache as clearFsCache } from "../capability/fs";
 import { mcpCapability } from "../capability/mcp";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
-import { readMCPConfigFile } from "./config-writer";
+import { readDisabledServers, readEnabledServers, readMCPConfigFile } from "./config-writer";
 import { builtinDropFor, type MCPDroppedServer, type MCPTransformContext } from "./transforms";
 import type { MCPConfigFile, MCPServerConfig } from "./types";
 
@@ -209,6 +210,140 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 	const loaded: LoadMCPConfigsResult = { configs, exaApiKeys, sources };
 	if (dropped) loaded.dropped = dropped;
 	return loaded;
+}
+
+/** Manager surface consulted when resolving a server for `/mcp enable|disable`. */
+export interface McpServerToggleManager {
+	getServerConfig(name: string): MCPServerConfig | undefined;
+	getSource(name: string): SourceMeta | undefined;
+	getBuiltinDrops?(): ReadonlyMap<string, MCPDroppedServer>;
+}
+
+export interface ResolveMcpServerForToggleOptions {
+	cwd: string;
+	enableProjectConfig?: boolean;
+	mcpManager?: McpServerToggleManager;
+	extensionRoots?: EffectiveExtensionRoots;
+	builtinTransforms?: MCPTransformContext;
+}
+
+export interface ResolvedMcpServerToggle {
+	/** True when an ACP client (`session/new` `mcpServers`) owns `name`. */
+	acpOwned: boolean;
+	/** True when discovery, the live manager, a built-in drop, or a user override list knows `name`. */
+	known: boolean;
+	/** True when a server definition exists in discovery or the live manager. */
+	hasConfig: boolean;
+	/** Startup-interpreted `enabled` flag on the owning definition (`undefined` means default on). */
+	enabledFlag?: boolean;
+	/**
+	 * Writable OMP-owned source file when an OMP-owned format (`native` or
+	 * `mcp-json`) is the startup owner of `name`. Undefined when a tool-owned
+	 * provider wins or the server is only in the manager/override lists.
+	 */
+	writableSource?: {
+		filePath: string;
+		scope: "user" | "project";
+	};
+	denied: boolean;
+	forced: boolean;
+	builtinDropped: boolean;
+	userPath: string;
+	projectPath: string;
+}
+
+/**
+ * Resolve the effective owner and override state of `name` for `/mcp enable` and
+ * `/mcp disable`.
+ *
+ * Uses `loadCapability` so ownership follows startup provider priority (e.g.
+ * Cursor priority 50 beats standalone `mcp.json` priority 5), disabled entries
+ * in tool-owned configs such as `opencode.json` are still found, and each
+ * provider's startup-interpreted `enabled` flag is used verbatim.
+ */
+export async function resolveMcpServerForToggle(
+	name: string,
+	options: ResolveMcpServerForToggleOptions,
+): Promise<ResolvedMcpServerToggle> {
+	const { cwd, mcpManager } = options;
+	const enableProjectConfig = options.enableProjectConfig ?? true;
+	const userPath = getMCPConfigPath("user", cwd);
+	const projectPath = getMCPConfigPath("project", cwd);
+
+	// ACP sessions connect the client's `session/new` `mcpServers` list
+	// directly and ignore file configs and `disabledServers`/`enabledServers`.
+	// Check the live ACP manager ahead of files so a colliding file entry is
+	// not mistaken for the active server.
+	if (mcpManager?.getSource(name)?.provider === "acp") {
+		return {
+			acpOwned: true,
+			known: true,
+			hasConfig: true,
+			denied: false,
+			forced: false,
+			builtinDropped: false,
+			userPath,
+			projectPath,
+		};
+	}
+
+	// Refresh cached reads so edits made outside writeMCPConfigFile (such as
+	// opencode.json, .cursor/mcp.json, or hand-edited mcp.json) are visible.
+	clearFsCache();
+	const includeServer = (server: MCPServer & { _source: SourceMeta }): boolean =>
+		enableProjectConfig || server._source.level !== "project";
+
+	const [capabilityResult, disabledServers, enabledServers] = await Promise.all([
+		loadCapability<MCPServer>(mcpCapability.id, {
+			cwd,
+			extensionRoots: options.extensionRoots,
+			filter: includeServer,
+		}),
+		readDisabledServers(userPath),
+		readEnabledServers(userPath),
+	]);
+
+	const discoveredItem = capabilityResult.all.find(item => item.name === name);
+	const managerDrop = mcpManager?.getBuiltinDrops?.()?.get(name);
+	const managerDropMatchesOwner =
+		managerDrop !== undefined &&
+		(discoveredItem === undefined || managerDrop.source.path === discoveredItem._source.path);
+	const transformDrop =
+		discoveredItem !== undefined && options.builtinTransforms !== undefined
+			? builtinDropFor(discoveredItem, options.builtinTransforms)
+			: undefined;
+	const builtinDropped = managerDropMatchesOwner || transformDrop !== undefined;
+
+	const writableSource =
+		discoveredItem !== undefined &&
+		(discoveredItem._source.provider === "native" || discoveredItem._source.provider === "mcp-json")
+			? {
+					filePath: discoveredItem._source.path,
+					scope: discoveredItem._source.level === "user" ? ("user" as const) : ("project" as const),
+				}
+			: undefined;
+
+	const managerConfig = discoveredItem === undefined ? mcpManager?.getServerConfig(name) : undefined;
+	const managerSource =
+		discoveredItem === undefined ? (mcpManager?.getSource(name) ?? managerDrop?.source) : undefined;
+	const hasConfig = discoveredItem !== undefined || managerConfig !== undefined || managerSource !== undefined;
+	const enabledFlag = discoveredItem !== undefined ? discoveredItem.enabled : managerConfig?.enabled;
+	const denied = disabledServers.includes(name);
+	const forced = enabledServers.includes(name);
+	const known = hasConfig || builtinDropped || denied || forced;
+
+	return {
+		acpOwned: false,
+		known,
+		hasConfig,
+		enabledFlag,
+		writableSource,
+		denied,
+		forced,
+		builtinDropped,
+		userPath,
+		projectPath,
+	};
 }
 
 /** Pattern to match Exa MCP servers */

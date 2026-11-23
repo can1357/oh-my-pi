@@ -293,36 +293,81 @@ export async function setServerForceEnabled(filePath: string, name: string, forc
 	});
 }
 
+async function setExistingServerEnabled(filePath: string, name: string, enabled: boolean): Promise<boolean> {
+	if (!name) {
+		throw new Error("Server name cannot be empty");
+	}
+	return withConfigLock(filePath, async () => {
+		const existing = await readMCPConfigFile(filePath);
+		const server = existing.mcpServers?.[name];
+		if (server === undefined) {
+			return false;
+		}
+		if (typeof server !== "object" || server === null || Array.isArray(server)) {
+			throw new Error(`Invalid server config: Server "${name}" entry must be an object`);
+		}
+		const inferredType =
+			server.type ?? (!("command" in server && server.command) && "url" in server && server.url ? "http" : "stdio");
+		const errors = validateServerConfig(name, { ...server, enabled, type: inferredType } as MCPServerConfig);
+		if (errors.length > 0) {
+			throw new Error(`Invalid server config: ${errors.join("; ")}`);
+		}
+		const updated: MCPConfigFile = {
+			...existing,
+			mcpServers: {
+				...existing.mcpServers,
+				[name]: { ...server, enabled },
+			},
+		};
+		await writeMCPConfigFile(filePath, updated);
+		return true;
+	});
+}
+
 /** Paths and target state for toggling one MCP server across known config files. */
 export interface SetMcpServerEnabledOptions {
 	userPath: string;
 	projectPath: string;
 	/**
-	 * Absolute path to the loaded row's source mcp.json. Provide ONLY for
-	 * formats this codebase owns (native `.omp/mcp.json` and `mcp-json`
-	 * `mcp.json`/`.mcp.json`). Tool-owned configs (opencode.json, claude.json,
-	 * settings.json …) MUST be omitted; we never mutate another tool's file.
+	 * Resolved writable config path for `name`:
+	 * - `string`: write `enabled` only in this file (`native` `.omp/mcp.json`
+	 *   or standalone `mcp.json`/`.mcp.json`).
+	 * - `null`: a non-writable source (opencode.json, .cursor/mcp.json, claude,
+	 *   plugin, etc.) owns `name`, or no config file defines it; never probe
+	 *   shadowed `.omp/mcp.json` or user `mcp.json` entries, and record the
+	 *   override in `userPath`'s `disabledServers`/`enabledServers`.
+	 * - `undefined`: ownership was not pre-resolved; probe `projectPath` (when
+	 *   enabled) then `userPath` before falling back to user override lists.
 	 */
-	sourcePath?: string;
+	sourcePath?: string | null;
 	name: string;
 	enabled: boolean;
+	/**
+	 * When false, `projectPath` is not a candidate and a `sourcePath` equal to
+	 * it is ignored. `mcp.enableProjectConfig: false` opts the project out;
+	 * toggling must not rewrite that file. Default true.
+	 */
+	enableProjectConfig?: boolean;
 }
 
 /**
  * Flip a server's enabled/disabled state regardless of where it lives.
  *
- * Resolution order, mirroring `/mcp enable` / `/mcp disable` plus the dashboard
- * fix for non-writable source configs:
+ * `/mcp enable`, `/mcp disable`, and the extensions dashboard all persist
+ * through this function. Callers that resolved ownership pass the owning
+ * writable file as `sourcePath`, or `null` when a tool-owned/discovered source
+ * owns the server so shadowed `.omp/mcp.json` entries are never rewritten.
  *
- * - Server found in `sourcePath` (writable) → write `enabled` on that entry.
- * - Else server in project mcp.json → write `enabled` there.
- * - Else server in user mcp.json → write `enabled` there.
- * - Else (server defined in a tool-owned source like opencode.json, OR a
- *   purely discovered server):
+ * Resolution order:
+ *
+ * - `sourcePath` is a writable path (and not an opted-out project file) → write
+ *   `enabled` only on that entry.
+ * - `sourcePath` is `null` → skip file probing and use user override lists.
+ * - `sourcePath` is `undefined` → probe project `mcp.json` (when enabled), then
+ *   user `mcp.json`, before falling back to user override lists:
  *   - Disable → add to the user-level `disabledServers` denylist.
  *   - Enable → add to the user-level `enabledServers` allowlist so the
- *     dashboard / runtime override the non-writable source's
- *     `enabled: false` flag.
+ *     runtime overrides the non-writable source's `enabled: false` flag.
  *
  * Cleanup invariants — on every call:
  * - Re-enable clears any stale denylist entry so a server disabled via
@@ -332,17 +377,25 @@ export interface SetMcpServerEnabledOptions {
  */
 export async function setMcpServerEnabled(options: SetMcpServerEnabledOptions): Promise<void> {
 	const { userPath, projectPath, sourcePath, name, enabled } = options;
-	const candidatePaths = [...new Set([sourcePath, projectPath, userPath].filter(path => path !== undefined))];
+	const enableProjectConfig = options.enableProjectConfig ?? true;
+	let candidatePaths: string[];
+	if (sourcePath === null) {
+		candidatePaths = [];
+	} else if (sourcePath !== undefined) {
+		// An opted-out project file must not be rewritten even if a caller passes it.
+		candidatePaths = !enableProjectConfig && sourcePath === projectPath ? [] : [sourcePath];
+	} else {
+		candidatePaths = [
+			...new Set([enableProjectConfig ? projectPath : undefined, userPath].filter(p => p !== undefined)),
+		];
+	}
 	let updatedInConfig = false;
 
 	for (const filePath of candidatePaths) {
-		const config = await readMCPConfigFile(filePath);
-		const server = config.mcpServers?.[name];
-		if (server === undefined) continue;
-
-		await updateMCPServer(filePath, name, { ...server, enabled });
-		updatedInConfig = true;
-		break;
+		if (await setExistingServerEnabled(filePath, name, enabled)) {
+			updatedInConfig = true;
+			break;
+		}
 	}
 
 	if (enabled) {
@@ -376,4 +429,70 @@ export async function setMcpServerEnabled(options: SetMcpServerEnabledOptions): 
 	if (!updatedInConfig) {
 		await setServerDisabled(userPath, name, true);
 	}
+}
+
+/**
+ * Whether a server would be connected on the next load.
+ *
+ * Precedence matches `loadAllMCPConfigs`: the user `disabledServers` denylist
+ * wins, the user `enabledServers` allowlist overrides `enabled: false` and a
+ * built-in transform drop, and an explicit `enabled: true` also outranks a drop.
+ * `enabledFlag` is the startup-interpreted boolean from the owning definition;
+ * providers may leave it unset (the default is enabled), but only a boolean
+ * `false` means off.
+ */
+export function isMcpServerEffectivelyEnabled(options: {
+	/** A definition was resolved (writable file, manager, or discovery). */
+	hasConfig: boolean;
+	/** Definition `enabled` flag. Omit when unknown; the default is enabled. */
+	enabledFlag?: boolean;
+	denied: boolean;
+	forced: boolean;
+	builtinDropped?: boolean;
+}): boolean {
+	if (options.denied) return false;
+	if (options.forced) return true;
+	if (!options.hasConfig) return false;
+	if (options.enabledFlag === false) return false;
+	if (options.builtinDropped === true && options.enabledFlag !== true) return false;
+	return true;
+}
+
+/**
+ * Whether `/mcp enable` or `/mcp disable` can report "already enabled/disabled"
+ * without writing config.
+ *
+ * Skips the write only when the server is already in `targetEnabled` state AND
+ * no conflicting override or writable-file flag needs clearing — e.g. when a
+ * name is in both `disabledServers` and `enabledServers`, `disable` must still
+ * clear `enabledServers` so removing `disabledServers` later does not turn the
+ * server back on.
+ */
+export function canSkipMcpServerToggle(options: {
+	targetEnabled: boolean;
+	hasConfig: boolean;
+	hasWritableSource: boolean;
+	enabledFlag?: boolean;
+	denied: boolean;
+	forced: boolean;
+	builtinDropped?: boolean;
+}): boolean {
+	const effectivelyEnabled = isMcpServerEffectivelyEnabled({
+		hasConfig: options.hasConfig,
+		enabledFlag: options.enabledFlag,
+		denied: options.denied,
+		forced: options.forced,
+		builtinDropped: options.builtinDropped,
+	});
+	if (effectivelyEnabled !== options.targetEnabled) return false;
+	if (options.targetEnabled) {
+		return !(
+			options.denied ||
+			(options.hasWritableSource &&
+				(options.enabledFlag === false ||
+					options.forced ||
+					(options.builtinDropped === true && options.enabledFlag !== true)))
+		);
+	}
+	return !(options.forced || (options.hasWritableSource && options.enabledFlag !== false));
 }
