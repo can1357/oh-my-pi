@@ -228,6 +228,8 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 		},
 		publishCompleted: (manager, type, label, result, options) =>
 			manager.publishCompleted(type, label, result, options),
+		publishFailed: (manager, type, label, errorText, options) =>
+			manager.publishFailed(type, label, errorText, options),
 		cancel: (manager, id, filter) => manager.cancel(id, filter),
 		getJob: (manager, id) => {
 			const job = manager.getJob(id);

@@ -249,6 +249,13 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 					context: { usage: { tier: "Pro", fiveHour: { percent: 92, resetMinutes: 75 } } },
 				},
 			];
+		case "tree":
+			return [
+				{ label: "rewound", context: { treePosition: { ahead: 3 } } },
+				{ label: "on a branch", context: { treePosition: { branch: { index: 2, count: 3 }, ahead: 0 } } },
+				{ label: "rewound on a branch", context: { treePosition: { branch: { index: 1, count: 2 }, ahead: 1 } } },
+				{ label: "hidden (tip of a single line)" },
+			];
 		case "collab":
 			return [
 				{ label: "host active", context: { collab: { role: "host", participantCount: 3 } } },

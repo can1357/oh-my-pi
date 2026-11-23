@@ -135,6 +135,15 @@ export type AsyncJobManagerProtocol = {
 		],
 		string
 	>;
+	publishFailed: RpcMethod<
+		[
+			type: AsyncJobType,
+			label: string,
+			errorText: string,
+			options: { id?: string; ownerId?: string; agentId?: string },
+		],
+		string
+	>;
 	cancel: RpcMethod<[id: string, filter: AsyncJobFilter | undefined], boolean>;
 	getJob: RpcMethod<[id: string], AsyncJobWire | undefined>;
 	getRunningJobs: RpcMethod<[filter: AsyncJobFilter | undefined], AsyncJobWire[]>;
