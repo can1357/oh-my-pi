@@ -238,7 +238,20 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 					}),
 				),
 			);
-			return { scanResults, resolveWarnings };
+			// Claude Code parity: `${CLAUDE_PLUGIN_ROOT}` / `${OMP_PLUGIN_ROOT}`
+			// resolve in skill Markdown bodies (#20165) — substitute the plugin
+			// install path when the content is loaded, not in bash.
+			const substitutedResults = scanResults.map(result => ({
+				items: result.items.map(item => ({
+					...item,
+					content: substitutePluginRoot(item.content, root.path),
+					// Forward the install path so read-time body rendering
+					// (`skill://` reads, `/skill:` expansion) can substitute too.
+					_source: { ...item._source, pluginRoot: root.path },
+				})),
+				warnings: result.warnings,
+			}));
+			return { scanResults: substitutedResults, resolveWarnings };
 		}),
 	);
 	for (const { scanResults, resolveWarnings } of results) {
@@ -313,7 +326,9 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 									{
 										name: root.plugin ? `${root.plugin}:${cmdName}` : cmdName,
 										path: dir,
-										content,
+										// Claude Code parity: resolve ${CLAUDE_PLUGIN_ROOT} /
+										// ${OMP_PLUGIN_ROOT} in command Markdown bodies (#20165).
+										content: substitutePluginRoot(content, root.path),
 										level: root.scope,
 										_source: createSourceMeta(PROVIDER_ID, dir, root.scope, root.origin),
 									},
@@ -332,7 +347,9 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 							return {
 								name: root.plugin ? `${root.plugin}:${cmdName}` : cmdName,
 								path: filePath,
-								content,
+								// Claude Code parity: resolve ${CLAUDE_PLUGIN_ROOT} /
+								// ${OMP_PLUGIN_ROOT} in command Markdown bodies (#20165).
+								content: substitutePluginRoot(content, root.path),
 								level: root.scope,
 								_source: source,
 							};

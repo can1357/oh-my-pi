@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Closing relay tabs no longer leaves a saved "omp" tab group in Chrome's bookmarks bar after every session ([#20211](https://github.com/can1357/oh-my-pi/issues/20211))
+
 ## [19.1.1] - 2026-11-23
 
 ### Fixed
