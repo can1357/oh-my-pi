@@ -2,7 +2,7 @@ import * as path from "node:path";
 import { escapeXmlText, logger, prompt, sanitizeText, truncate } from "@oh-my-pi/pi-utils";
 import { redactMemorySecrets } from "../memory-backend/redact";
 import { type HindsightMessage, prepareRetentionTranscript } from "../hindsight/content";
-import { countUserTurns, extractMessages } from "../hindsight/transcript";
+import { countUserTurns, extractMessages, retentionStart } from "../hindsight/transcript";
 import {
 	cleanOutboxText,
 	MemoryOutbox,
@@ -16,6 +16,7 @@ import { findPersistedRecall, persistRecall } from "../memory-backend/recall-ent
 import type { MemoryPromptPreparation } from "../memory-backend/types";
 import recallTemplate from "../prompts/system/supermemory-recall.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import type { SessionEntry } from "../session/session-entries";
 import {
 	type SupermemoryClient,
 	type SupermemoryDocument,
@@ -306,7 +307,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			this.#windowStart = data.windowStart;
 			return;
 		}
-		const turns = countUserTurns(this.session.sessionManager);
+		const turns = countUserTurns(...this.#retainedEntries());
 		if (data) {
 			this.lastRetainedTurn = turns;
 			this.#retainedMessages = 0;
@@ -626,9 +627,16 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		});
 	}
 
+	/** The transcript's entries and where retention starts: a `/tan` fork skips the transcript it copied. */
+	#retainedEntries(): [SessionEntry[], number] {
+		const manager = this.session.sessionManager;
+		const entries = manager.getEntries();
+		return [entries, retentionStart(entries, manager.getHeader?.())];
+	}
+
 	/** The transcript as it stands now, bound to its identity so a later `/new` or reset discards it. */
 	#settledHistory(): SettledHistory {
-		const messages = extractMessages(this.session.sessionManager);
+		const messages = extractMessages(...this.#retainedEntries());
 		return {
 			messages,
 			openTail: messages.at(-1)?.role === "user" || this.#lastTurnUnfinished(),

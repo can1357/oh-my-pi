@@ -7,7 +7,6 @@
  * rebuilds the state, memory tools, and prompt.
  */
 import { logger, prompt } from "@oh-my-pi/pi-utils";
-import { memoryToolRefs } from "../memory-backend/tool-names";
 import type { MemoryBackend, MemoryBackendSearchResult, MemoryBackendStartOptions } from "../memory-backend/types";
 import supermemoryInstructions from "../prompts/system/supermemory-instructions.md" with { type: "text" };
 import { SupermemoryClient } from "./client";
@@ -62,9 +61,7 @@ export const supermemoryBackend: MemoryBackend = {
 
 	async buildDeveloperInstructions(_agentDir, _cwd, settings, session): Promise<string | undefined> {
 		if (!isSupermemoryConfigured(loadSupermemoryConfig(settings))) return undefined;
-		const parts = [
-			prompt.render(supermemoryInstructions, { toolRefs: memoryToolRefs(session?.getXdevToolEntries()) }),
-		];
+		const parts = [prompt.render(supermemoryInstructions)];
 		// Only the session's own recall: a subagent does its own `recall` instead of inheriting the parent's.
 		const snippet = session?.getSupermemorySessionState()?.lastRecallSnippet;
 		if (snippet) parts.push(snippet);

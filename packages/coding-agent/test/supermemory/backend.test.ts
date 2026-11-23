@@ -700,7 +700,7 @@ describe("supermemoryBackend", () => {
 					},
 				} as never,
 			);
-			const { transcript } = prepareRetentionTranscript(extractMessages(session.sessionManager), true, {
+			const { transcript } = prepareRetentionTranscript(extractMessages(session.sessionManager.getEntries()), true, {
 				includeTimestamps: true,
 			});
 			return { session, transcript: transcript ?? "" };
