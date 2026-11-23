@@ -7,7 +7,7 @@ import { getOrCreateClient, notifySaved, sendRequest, syncContent } from "../../
 import { applyTextEditsToString } from "../../lsp/edits";
 import { resolveFormatOptions } from "../../lsp/format-options";
 import type { Diagnostic, LinterClient, LspClient, ServerConfig, TextEdit } from "../../lsp/types";
-import { fileToUri } from "../../lsp/utils";
+import { fileToUri } from "../../lsp/uri";
 
 /**
  * LSP-based linter client implementation.
