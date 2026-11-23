@@ -5,7 +5,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { resolveAgentModelSelection } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
-import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import { cfgAuthAccountPolicies, cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgEditMode } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
@@ -129,6 +129,54 @@ describe("live routing config files", () => {
 		expect(getRetryFallbackChains(settings).smol).toEqual(["anthropic/second-fallback"]);
 		expect(storage.oauth.policy("live-routing-test", { accountId: "routing-test" })?.priority).toBe(7);
 		expect((await storage.health.model("live-routing-test", { reserveFraction: Number.NaN })).state).toBe("reserve");
+	});
+
+	it("hides a paused account from live routing and restores its login when resumed", async () => {
+		const file = tempDir.join("routing.yml");
+		const config = (paused: boolean) => ({
+			auth: {
+				accountPolicies: [
+					{ provider: "anthropic", account: { email: "paused@example.com" }, ...(paused ? { paused: true } : {}) },
+				],
+			},
+		});
+		await Bun.write(file, YAML.stringify(config(false)));
+		await start(file);
+		const storage = new AuthStorage(await SqliteAuthCredentialStore.open(tempDir.join("auth.db")));
+		await storage.credentials.set("anthropic", [
+			{
+				type: "oauth",
+				access: "active-key",
+				refresh: "active-refresh",
+				expires: Date.now() + 3600000,
+				email: "active@example.com",
+			},
+			{
+				type: "oauth",
+				access: "paused-key",
+				refresh: "paused-refresh",
+				expires: Date.now() + 3600000,
+				email: "paused@example.com",
+			},
+		]);
+		const sync = createAuthStorageSettingsSync(settings, storage);
+		cleanups.push(
+			() => sync.stop(),
+			() => storage.close(),
+		);
+
+		await Bun.write(`${file}.next`, YAML.stringify(config(true)));
+		await fs.rename(`${file}.next`, file);
+		await waitFor(() => cfgAuthAccountPolicies.get(settings)?.[0]?.paused === true);
+		await sync.settled();
+		expect(storage.oauth.accounts("anthropic").map(account => account.email)).toEqual(["active@example.com"]);
+		expect(await storage.keys.get("anthropic", "paused-routing")).toBe("active-key");
+
+		await Bun.write(`${file}.next`, YAML.stringify(config(false)));
+		await fs.rename(`${file}.next`, file);
+		await waitFor(() => cfgAuthAccountPolicies.get(settings)?.[0]?.paused === undefined);
+		await sync.settled();
+		expect(storage.oauth.accounts("anthropic").map(account => account.email)).toContain("paused@example.com");
 	});
 
 	it("applies an edit that landed before the watch was armed", async () => {

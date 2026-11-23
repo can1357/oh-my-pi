@@ -288,6 +288,8 @@ export class CredentialHealth implements HealthApi {
 			options?.signal?.throwIfAborted();
 			// Excluded by the caller, or turned off in the auth rules: never probed.
 			if (options?.excludeProviders?.has(row.provider) || providerPauseReason(row.provider) !== undefined) continue;
+			// Paused by an account policy: hidden like a turned-off provider.
+			if (this.#deps.policies.isPaused(row.provider, row.credential)) continue;
 			const base: CredentialHealthResult = {
 				id: row.id,
 				provider: row.provider,

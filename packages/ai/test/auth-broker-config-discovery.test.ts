@@ -282,6 +282,26 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 		});
 	});
 
+	test("rejects a non-boolean paused account policy instead of accepting an invalid config", async () => {
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			[
+				"auth:",
+				"  accountPolicies:",
+				"    - provider: anthropic",
+				"      account:",
+				"        email: user@example.com",
+				'      paused: "yes"',
+				"",
+			].join("\n"),
+		);
+		await withEnv(SUPPRESS_AUTH_BROKER_ENV, async () => {
+			await expect(loadAuthAccountPolicyConfig({ agentDir })).rejects.toThrow(
+				"auth.accountPolicies[0].paused must be a boolean",
+			);
+		});
+	});
+
 	test("starts from a fresh snapshot cache while an unreachable broker revalidates in background", async () => {
 		const token = "cached-token";
 		const url = "http://127.0.0.1:1";

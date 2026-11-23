@@ -593,10 +593,9 @@ export class CredentialSelector {
 			.credentials(provider)
 			.map((credential, index) => ({ credential, index }))
 			.filter((entry): entry is { credential: OAuthCredential; index: number } => entry.credential.type === "oauth");
-		this.#deps.policies.validateFor(
-			provider,
-			stored.map(entry => entry.credential),
-		);
+		// Validate against every loaded row: a paused account is hidden from `stored`
+		// but still exists, so its policy is neither unmatched nor out of ambiguity checks.
+		this.#deps.policies.validateFor(provider, this.#deps.pool.loadedCredentials(provider));
 		// A session restriction drops every other account before ranking, pins,
 		// and the fallback passes below, so none of them can route back to it.
 		const credentials = stored.filter(entry => this.#deps.affinity.allows(provider, sessionId, entry.credential));
@@ -815,7 +814,7 @@ export class CredentialSelector {
 				}
 				const beforeSync = candidate.selection.credential;
 				preflightRows ??= this.#reloadProviderRows(provider);
-				if (!this.#rebindOAuthSelection(preflightRows, candidate.selection, initialCredentialId)) {
+				if (!this.#rebindOAuthSelection(provider, preflightRows, candidate.selection, initialCredentialId)) {
 					preflightFailures.add(candidate);
 					return;
 				}
@@ -1019,7 +1018,7 @@ export class CredentialSelector {
 		selection: { credential: OAuthCredential; index: number },
 		credentialId: number,
 	): boolean {
-		return this.#rebindOAuthSelection(this.#reloadProviderRows(provider), selection, credentialId);
+		return this.#rebindOAuthSelection(provider, this.#reloadProviderRows(provider), selection, credentialId);
 	}
 
 	/** Re-list one provider's active rows and adopt them in the pool. */
@@ -1032,17 +1031,22 @@ export class CredentialSelector {
 		return latestRows;
 	}
 
-	/** Point `selection` at row `credentialId` in `latestRows`; false when it is gone or no longer OAuth. */
+	/**
+	 * Point `selection` at row `credentialId`: its credential from `latestRows`, its
+	 * index in the visible pool view. False when the row is gone, no longer OAuth,
+	 * or hidden from the view (e.g. its account was paused meanwhile).
+	 */
 	#rebindOAuthSelection(
+		provider: string,
 		latestRows: readonly StoredAuthCredential[],
 		selection: { credential: OAuthCredential; index: number },
 		credentialId: number,
 	): boolean {
-		const latestIndex = latestRows.findIndex(row => row.id === credentialId);
-		if (latestIndex === -1) return false;
-		const latest = latestRows[latestIndex];
+		const latest = latestRows.find(row => row.id === credentialId);
 		if (latest?.credential.type !== "oauth") return false;
-		selection.index = latestIndex;
+		const visibleIndex = this.#deps.pool.entries(provider).findIndex(entry => entry.id === credentialId);
+		if (visibleIndex === -1) return false;
+		selection.index = visibleIndex;
 		selection.credential = latest.credential;
 		return true;
 	}

@@ -54,6 +54,7 @@ import type {
 	OAuthLoginIdentity,
 	OAuthProviderId,
 	OAuthRefreshByIdOptions,
+	PausedOAuthAccountSummary,
 	ObservedUsageInput,
 	Provider,
 	RedeemResetCreditOptions,
@@ -212,6 +213,7 @@ export type AuthStorageProtocol = {
 		OAuthAccessResolution | undefined
 	>;
 	"oauth.accounts": RpcMethod<[provider: string, sessionId?: string], OAuthAccountSummary[]>;
+	"oauth.pausedAccounts": RpcMethod<[provider?: string], PausedOAuthAccountSummary[]>;
 	"oauth.identity": RpcMethod<[provider: string, sessionId?: string], OAuthAccountIdentity | undefined>;
 	"oauth.policy": RpcMethod<[provider: string, identity: OAuthAccountIdentity], AuthAccountPolicy | undefined>;
 	"oauth.refresh": RpcMethod<

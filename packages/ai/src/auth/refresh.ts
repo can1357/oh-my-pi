@@ -442,10 +442,14 @@ export class OAuthRefresher {
 				provider,
 				rows.map(row => ({ id: row.id, credential: row.credential })),
 			);
+			// Without an explicit row id, only a row the pool still shows is eligible: a
+			// paused account stays out of implicit refresh; an explicit id keeps its login alive.
 			const row = rows.find(
 				entry =>
 					entry.credential.type === "oauth" &&
-					(options.credentialId === undefined || entry.id === options.credentialId),
+					(options.credentialId === undefined
+						? this.#deps.pool.entries(provider).some(visible => visible.id === entry.id)
+						: entry.id === options.credentialId),
 			);
 			if (row?.credential.type !== "oauth") {
 				return { credential: undefined, refreshed: false, removed: false };
@@ -528,7 +532,9 @@ export class OAuthRefresher {
 			const row = rows.find(
 				entry =>
 					entry.credential.type === "oauth" &&
-					(options.credentialId === undefined || entry.id === options.credentialId),
+					(options.credentialId === undefined
+						? this.#deps.pool.entries(provider).some(visible => visible.id === entry.id)
+						: entry.id === options.credentialId),
 			);
 			if (row?.credential.type !== "oauth") {
 				return { credential: undefined, refreshed: false, removed: false };

@@ -100,12 +100,14 @@ export interface CredentialPoolOptions {
 
 /** In-memory credential snapshot over an AuthCredentialStore: CRUD, change detection, events. */
 export class CredentialPool implements CredentialsApi {
-	/** Provider -> credentials cache, populated from store on reload(), minus paused providers. */
+	/** Provider -> credentials cache, populated from store on reload(), minus paused providers and paused accounts. */
 	#data: Map<string, StoredCredential[]> = new Map();
-	/** Every loaded row, paused providers included, so a pause change refilters without a reload. */
+	/** Every loaded row, paused providers and accounts included, so a pause change refilters without a reload. */
 	#loaded: Map<string, StoredCredential[]> = new Map();
 	/** {@link providerPauseRevision} `#data` was filtered against. */
 	#pauseRevision = providerPauseRevision();
+	/** {@link AccountPolicies.revision} `#data` was filtered against. */
+	#policyRevision: number;
 	/** Recent bearer fingerprints resolved for each durable OAuth row; used only for delayed usage-limit attribution. */
 	#oauthBearerFingerprints: Map<string, Map<number, string[]>> = new Map();
 	#credentialDisabledListeners: Set<(event: CredentialDisabledEvent) => void | Promise<void>> = new Set();
@@ -128,6 +130,7 @@ export class CredentialPool implements CredentialsApi {
 	constructor(store: AuthCredentialStore, options: CredentialPoolOptions) {
 		this.#store = store;
 		this.#options = options;
+		this.#policyRevision = options.policies.revision;
 	}
 
 	get closed(): boolean {
@@ -136,13 +139,36 @@ export class CredentialPool implements CredentialsApi {
 
 	/** Snapshot generation; refilters first so a pause change shows as a new generation. */
 	get generation(): number {
-		this.#syncPause();
+		this.#syncView();
 		return this.#generation;
 	}
 
 	providers(): IterableIterator<string> {
-		this.#syncPause();
+		this.#syncView();
 		return this.#data.keys();
+	}
+
+	/** Providers with loaded rows, including providers whose every row is hidden by a pause. */
+	loadedProviders(): string[] {
+		return [...this.#loaded.keys()];
+	}
+
+	/** Every loaded credential of `provider`, hidden ones included; for policy validation only. */
+	loadedCredentials(provider: string): AuthCredential[] {
+		return (this.#loaded.get(provider) ?? []).map(entry => entry.credential);
+	}
+
+	/** Loaded rows hidden by a paused account policy; empty while the whole provider is paused. */
+	pausedEntries(provider: string): StoredCredential[] {
+		if (providerPauseReason(provider) !== undefined) return [];
+		return (this.#loaded.get(provider) ?? []).filter(entry =>
+			this.#options.policies.isPaused(provider, entry.credential),
+		);
+	}
+
+	/** Re-apply provider pauses and paused account policies to the visible view now. */
+	refilter(): void {
+		this.#syncView();
 	}
 
 	/** Reset session affinity and round-robin state after a local credential change. */
@@ -342,7 +368,7 @@ export class CredentialPool implements CredentialsApi {
 	 * @returns Array of stored credentials, empty if none exist
 	 */
 	entries(provider: string): StoredCredential[] {
-		this.#syncPause();
+		this.#syncView();
 		return this.#data.get(provider) ?? [];
 	}
 
@@ -350,9 +376,10 @@ export class CredentialPool implements CredentialsApi {
 	 * Updates in-memory credential cache for a provider.
 	 * Removes the provider entry entirely if credentials array is empty.
 	 * A provider turned off in its auth rules (`disabled "<reason>"`) is kept
-	 * out of the cache: its stored rows stay on disk untouched, but no read,
+	 * out of the cache, and so is an account an `auth.accountPolicies` entry
+	 * marks `paused`: its stored rows stay on disk untouched, but no read,
 	 * selection, refresh, usage probe or broker snapshot sees them until it is
-	 * turned back on (see {@link CredentialPool.#syncPause}).
+	 * turned back on (see {@link CredentialPool.#syncView}).
 	 * @param provider - Provider name (e.g., "anthropic", "openai")
 	 * @param stored - Array of stored credentials to cache
 	 */
@@ -366,20 +393,53 @@ export class CredentialPool implements CredentialsApi {
 	}
 
 	/**
-	 * Refilters every loaded provider when which providers are paused changed since the
-	 * last filter (an unpaused list edit, an extension login taking a paused id), so the
-	 * change reaches a loaded pool on its next read without a store reload.
+	 * Apply an edit computed from the visible view ({@link entries}) without
+	 * losing rows the view hides. Hidden rows keep their place untouched; a
+	 * visible row takes the same-id entry from `visible` or is dropped when
+	 * absent; entries with new ids are appended.
 	 */
-	#syncPause(): void {
-		const revision = providerPauseRevision();
-		if (revision === this.#pauseRevision) return;
-		this.#pauseRevision = revision;
+	replaceVisible(provider: string, visible: StoredCredential[]): void {
+		this.#syncView();
+		const shown = new Set((this.#data.get(provider) ?? []).map(entry => entry.id));
+		const next = new Map(visible.map(entry => [entry.id, entry]));
+		const merged: StoredCredential[] = [];
+		const loadedIds = new Set<number>();
+		for (const entry of this.#loaded.get(provider) ?? []) {
+			loadedIds.add(entry.id);
+			if (!shown.has(entry.id)) {
+				merged.push(entry);
+				continue;
+			}
+			const replacement = next.get(entry.id);
+			if (replacement) merged.push(replacement);
+		}
+		for (const entry of visible) {
+			if (!loadedIds.has(entry.id)) merged.push(entry);
+		}
+		this.replace(provider, merged);
+	}
+
+	/**
+	 * Refilters every loaded provider when which providers are paused changed since the
+	 * last filter (an unpaused list edit, an extension login taking a paused id) or the
+	 * account policies were replaced (an account paused or resumed), so the change
+	 * reaches a loaded pool on its next read without a store reload.
+	 */
+	#syncView(): void {
+		const pauseRevision = providerPauseRevision();
+		const policyRevision = this.#options.policies.revision;
+		if (pauseRevision === this.#pauseRevision && policyRevision === this.#policyRevision) return;
+		this.#pauseRevision = pauseRevision;
+		this.#policyRevision = policyRevision;
 		for (const [provider, stored] of this.#loaded) this.#cache(provider, stored);
 	}
 
-	/** Caches `stored` for `provider` unless it is paused, bumping the generation on change. */
+	/** Caches `stored` for `provider` minus paused providers and accounts, bumping the generation on change. */
 	#cache(provider: string, stored: StoredCredential[]): void {
-		const credentials = providerPauseReason(provider) === undefined ? stored : [];
+		const credentials =
+			providerPauseReason(provider) !== undefined
+				? []
+				: stored.filter(entry => !this.#options.policies.isPaused(provider, entry.credential));
 		const current = this.#data.get(provider) ?? [];
 		if (storedCredentialArraysEqual(current, credentials)) return;
 		const trackedBearerFingerprints = this.#oauthBearerFingerprints.get(provider);
@@ -504,8 +564,7 @@ export class CredentialPool implements CredentialsApi {
 		if (!serialized) return false;
 		const disabled = this.#store.tryDisableAuthCredentialIfMatches(target.id, serialized.data, disabledCause);
 		if (!disabled) return false;
-		const updated = entries.filter((_value, idx) => idx !== index);
-		this.replace(provider, updated);
+		this.#dropRow(provider, target.id);
 		this.reset(provider);
 		this.emitDisabled(credentialDisabledEvent(provider, target, disabledCause));
 		return true;
@@ -518,7 +577,8 @@ export class CredentialPool implements CredentialsApi {
 	 * unchanged credential still runs the CAS check (stores skip rewriting
 	 * identical bytes), so peer rotations are detected without churning the row.
 	 *
-	 * Returns the row's current index, or -1 when it was disabled or removed.
+	 * Returns the row's current index in {@link entries}, or -1 when it was
+	 * disabled, removed, or hidden by a pause.
 	 */
 	replaceById(provider: string, id: number, credential: AuthCredential): number {
 		const entries = this.entries(provider);
@@ -535,7 +595,7 @@ export class CredentialPool implements CredentialsApi {
 				provider,
 				latest.map(row => ({ id: row.id, credential: row.credential })),
 			);
-			return latest.findIndex(row => row.id === id);
+			return this.entries(provider).findIndex(entry => entry.id === id);
 		}
 		if (!expected || !this.#store.tryUpdateAuthCredentialIfMatches) {
 			if (serializeCredential(provider, credential)?.data !== expected?.data) {
@@ -544,7 +604,7 @@ export class CredentialPool implements CredentialsApi {
 		}
 		const updated = [...entries];
 		updated[index] = { id, credential };
-		this.replace(provider, updated);
+		this.replaceVisible(provider, updated);
 		return index;
 	}
 
@@ -640,7 +700,7 @@ export class CredentialPool implements CredentialsApi {
 				disabledCause: null,
 			}));
 		}
-		this.#syncPause();
+		this.#syncView();
 		const rows: StoredAuthCredential[] = [];
 		for (const [storedProvider, entries] of this.#data) {
 			for (const entry of entries) {
@@ -686,15 +746,24 @@ export class CredentialPool implements CredentialsApi {
 	 * Remove one stored credential for a provider.
 	 */
 	async removeById(provider: string, credentialId: number): Promise<boolean> {
-		const entries = this.entries(provider);
-		const index = entries.findIndex(entry => entry.id === credentialId);
-		if (index === -1) return false;
-		const remainingEntries = entries.filter((_entry, entryIndex) => entryIndex !== index);
+		if (!this.entries(provider).some(entry => entry.id === credentialId)) return false;
 		const deleted = await this.#store.deleteAuthCredential(credentialId, "deleted by user");
 		if (!deleted) return false;
-		this.replace(provider, remainingEntries);
+		this.#dropRow(provider, credentialId);
 		this.reset(provider);
 		return true;
+	}
+
+	/**
+	 * Forget one deleted row by id across every loaded row, hidden ones included,
+	 * so a pause that changed the view while the delete was awaited neither drops
+	 * a sibling nor keeps the deleted row.
+	 */
+	#dropRow(provider: string, credentialId: number): void {
+		this.replace(
+			provider,
+			(this.#loaded.get(provider) ?? []).filter(entry => entry.id !== credentialId),
+		);
 	}
 
 	/**
@@ -734,7 +803,7 @@ export class CredentialPool implements CredentialsApi {
 	 * Get all credentials.
 	 */
 	all(): AuthStorageData {
-		this.#syncPause();
+		this.#syncView();
 		const result: AuthStorageData = {};
 		for (const [provider, entries] of this.#data.entries()) {
 			const credentials = entries.map(entry => entry.credential);
@@ -756,7 +825,7 @@ export class CredentialPool implements CredentialsApi {
 	 * (the broker server's HTTP handler does this).
 	 */
 	snapshot(): AuthCredentialSnapshot {
-		this.#syncPause();
+		this.#syncView();
 		const entries: AuthCredentialSnapshotEntry[] = [];
 		for (const [provider, stored] of this.#data) {
 			for (const entry of stored) {
@@ -805,13 +874,12 @@ export class CredentialPool implements CredentialsApi {
 	 * `POST /v1/credential/:id/disable`. Returns `false` when no such row exists.
 	 */
 	async disable(id: number, disabledCause: string): Promise<boolean> {
-		this.#syncPause();
+		this.#syncView();
 		for (const [provider, entries] of this.#data) {
 			const index = entries.findIndex(entry => entry.id === id);
 			if (index === -1) continue;
 			if (!(await this.#store.deleteAuthCredential(id, disabledCause))) return false;
-			const next = entries.filter((_value, idx) => idx !== index);
-			this.replace(provider, next);
+			this.#dropRow(provider, id);
 			this.reset(provider);
 			this.emitDisabled(credentialDisabledEvent(provider, entries[index]!, disabledCause));
 			return true;

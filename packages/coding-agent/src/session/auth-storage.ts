@@ -15,6 +15,7 @@ export type {
 	OAuthAccountIdentity,
 	OAuthAccountSummary,
 	OAuthCredential,
+	PausedOAuthAccountSummary,
 	ResetCreditAccountStatus,
 	ResetCreditRedeemOutcome,
 	ResetCreditTarget,

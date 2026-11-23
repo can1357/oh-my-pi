@@ -65,6 +65,8 @@ export interface AuthAccountPolicy {
 	readonly reservePct?: number;
 	/** Remaining quota percentage, above the reserve, at which this account takes back lower-priority warm pins. */
 	readonly reclaimAbovePct?: number;
+	/** Hide this account from every credential read until removed; its login stays stored. */
+	readonly paused?: boolean;
 }
 
 /** Read-only set of per-account routing policies. */
@@ -644,6 +646,19 @@ export interface OAuthAccountSummary {
 	/** Last use recorded on the session sticky; set only on the `active` account. */
 	lastUsedAtMs?: number;
 }
+/** A stored OAuth account hidden by an `auth.accountPolicies` entry with `paused: true`; its login stays stored. */
+export interface PausedOAuthAccountSummary {
+	provider: string;
+	credentialId: number;
+	accountId?: string;
+	email?: string;
+	projectId?: string;
+	enterpriseUrl?: string;
+	orgId?: string;
+	orgName?: string;
+	/** Identity key account pools match (`email:<address>|org:<id>` for Anthropic); null when the account has none. */
+	identityKey: string | null;
+}
 /** Scope a matching-key invalidation to a session or signal. */
 export interface InvalidateCredentialMatchingOptions {
 	signal?: AbortSignal;
@@ -1167,6 +1182,8 @@ export interface OAuthApi {
 	 * credential.
 	 */
 	accounts(provider: string, sessionId?: string): OAuthAccountSummary[];
+	/** Stored OAuth accounts hidden by a paused account policy; every provider when `provider` is omitted. */
+	pausedAccounts(provider?: string): PausedOAuthAccountSummary[];
 	/**
 	 * Get the OAuth account identity for a provider, preferring the credential that
 	 * is session-sticky for `sessionId`. This is a read-only lookup for display and

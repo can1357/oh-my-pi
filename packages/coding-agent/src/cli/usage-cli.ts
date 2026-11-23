@@ -14,6 +14,7 @@ import {
 	type DisabledCredentialSummary,
 	type OAuthAccountIdentity,
 	type OAuthAccountSummary,
+	type PausedOAuthAccountSummary,
 	type ResetCreditRedeemOutcome,
 	isWithinUsageReserve,
 	resolveCredentialIdentityKey,
@@ -629,8 +630,11 @@ function shortDisableCause(cause: string): string {
 	return clause.length > 80 ? `${clause.slice(0, 77)}…` : clause;
 }
 
-/** Label for a disabled tombstone, masking each identity part under `--redact`. */
-function disabledIdentityLabel(summary: DisabledCredentialSummary, redaction?: Map<string, string>): string {
+/** Label for a disabled tombstone or paused account, masking each identity part under `--redact`. */
+function disabledIdentityLabel(
+	summary: Pick<DisabledCredentialSummary, "email" | "accountId" | "orgId" | "orgName">,
+	redaction?: Map<string, string>,
+): string {
 	const base = summary.email ?? summary.accountId ?? "OAuth account";
 	const masked = redaction?.get(base) ?? base;
 	const org = summary.orgName ?? summary.orgId;
@@ -843,7 +847,7 @@ function formatResetExpiryBanner(
 /**
  * Render the full text breakdown: per provider, per account, every limit
  * with a bar, amounts, and reset times; unattributed credentials trail
- * each provider section as "no usage data" rows.
+ * each provider section as "no usage data" rows, then paused accounts.
  */
 export function formatUsageBreakdown(
 	reports: UsageReport[],
@@ -853,6 +857,7 @@ export function formatUsageBreakdown(
 	disabled: DisabledCredentialSummary[] = [],
 	policyOptions?: UsagePolicyDiagnosticsOptions,
 	resetOptions?: UsageResetExpiryOptions,
+	paused: PausedOAuthAccountSummary[] = [],
 ): string {
 	const displayReports = collapseSharedUsageReports(reports);
 	const reportsByProvider = new Map<string, UsageReport[]>();
@@ -869,16 +874,24 @@ export function formatUsageBreakdown(
 		list.push(account);
 		unreportedByProvider.set(account.provider, list);
 	}
+	// A paused account's old tombstone is not lost capacity: it is still stored, just paused.
+	const knownAccounts = [...accounts, ...paused.map(account => ({ ...account, type: "oauth" as const }))];
 	const disabledByProvider = new Map<string, DisabledCredentialSummary[]>();
 	for (const summary of disabled) {
-		if (!isActionableDisable(summary, accounts)) continue;
+		if (!isActionableDisable(summary, knownAccounts)) continue;
 		const list = disabledByProvider.get(summary.provider) ?? [];
 		list.push(summary);
 		disabledByProvider.set(summary.provider, list);
 	}
+	const pausedByProvider = Map.groupBy(paused, account => account.provider);
 
 	const providers = [
-		...new Set([...reportsByProvider.keys(), ...unreportedByProvider.keys(), ...disabledByProvider.keys()]),
+		...new Set([
+			...reportsByProvider.keys(),
+			...unreportedByProvider.keys(),
+			...disabledByProvider.keys(),
+			...pausedByProvider.keys(),
+		]),
 	].sort((a, b) => a.localeCompare(b));
 
 	const lines: string[] = [];
@@ -945,6 +958,11 @@ export function formatUsageBreakdown(
 					`      ${chalk.dim(formatPolicyLine(computePolicyDiagnostics(provider, accountOAuthIdentity(account), undefined, policyOptions)))}`,
 				);
 			}
+		}
+
+		for (const account of pausedByProvider.get(provider) ?? []) {
+			const label = disabledIdentityLabel(account, redaction);
+			lines.push(`  ${chalk.yellow(`○ ${label} — paused`)} ${chalk.dim("(/usage resume to restore)")}`);
 		}
 
 		for (const summary of disabledByProvider.get(provider) ?? []) {
@@ -1283,6 +1301,8 @@ interface OAuthIdentityKeyRow {
 	identityKey: string | null;
 	/** Organization or workspace display name, when the provider reports one. */
 	orgName?: string;
+	/** Hidden by a paused `auth.accountPolicies` entry; routing skips it until resumed. */
+	paused?: true;
 }
 
 /**
@@ -1302,6 +1322,14 @@ function collectOAuthIdentityKeys(authStorage: AuthStorage, provider: string | u
 				: { provider: rowProvider, identityKey },
 		);
 	}
+	// Paused accounts are hidden from `credentials.list`; list them after their provider's visible rows.
+	for (const account of authStorage.oauth.pausedAccounts(provider)) {
+		const row: OAuthIdentityKeyRow = account.orgName
+			? { provider: account.provider, identityKey: account.identityKey, orgName: account.orgName, paused: true }
+			: { provider: account.provider, identityKey: account.identityKey, paused: true };
+		const lastIndex = rows.findLastIndex(existing => existing.provider === account.provider);
+		rows.splice(lastIndex === -1 ? rows.length : lastIndex + 1, 0, row);
+	}
 	return rows;
 }
 
@@ -1315,12 +1343,15 @@ function formatOAuthIdentityKeys(rows: readonly OAuthIdentityKeyRow[]): string {
 			provider = row.provider;
 			lines.push(chalk.bold(provider));
 		}
+		const pausedMarker = row.paused ? chalk.dim(" (paused)") : "";
 		if (row.identityKey === null) {
-			lines.push(chalk.dim("  (no identity key: no pool can name this account)"));
+			lines.push(`${chalk.dim("  (no identity key: no pool can name this account)")}${pausedMarker}`);
 			continue;
 		}
 		const orgName = row.orgName ? sanitizeText(row.orgName.replace(/[\r\n\t]+/g, " ")) : undefined;
-		lines.push(orgName ? `  ${row.identityKey.padEnd(width)}  ${chalk.dim(orgName)}` : `  ${row.identityKey}`);
+		lines.push(
+			`${orgName ? `  ${row.identityKey.padEnd(width)}  ${chalk.dim(orgName)}` : `  ${row.identityKey}`}${pausedMarker}`,
+		);
 	}
 	return lines.join("\n");
 }
@@ -1682,16 +1713,20 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		} catch {
 			// Usage output must not fail because tombstone listing did.
 		}
+		// Paused accounts are hidden from the pool and its reports; list them so they are not forgotten.
+		let paused = authStorage.oauth.pausedAccounts();
 		let filteredReports = reports;
 		if (cmd.provider) {
 			const wanted = cmd.provider.toLowerCase();
 			filteredReports = reports.filter(report => report.provider.toLowerCase() === wanted);
 			accounts = accounts.filter(account => account.provider.toLowerCase() === wanted);
 			disabled = disabled.filter(summary => summary.provider.toLowerCase() === wanted);
+			paused = paused.filter(account => account.provider.toLowerCase() === wanted);
 		}
+		const knownAccounts = [...accounts, ...paused.map(account => ({ ...account, type: "oauth" as const }))];
 
 		const redaction = cmd.redact
-			? buildRedactionMap(collectIdentityStrings(filteredReports, accounts, disabled))
+			? buildRedactionMap(collectIdentityStrings(filteredReports, knownAccounts, disabled))
 			: undefined;
 
 		if (cmd.json) {
@@ -1723,7 +1758,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				const stats = computeProviderWindowStats(filteredReports.filter(peer => peer.provider === report.provider));
 				if (stats.length > 0) capacity[report.provider] = stats;
 			}
-			let disabledForJson = disabled.filter(summary => isActionableDisable(summary, accounts));
+			let disabledForJson = disabled.filter(summary => isActionableDisable(summary, knownAccounts));
 			if (redaction) {
 				disabledForJson = disabledForJson.map(summary => ({
 					...summary,
@@ -1733,18 +1768,31 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 					orgName: maskIdentity(redaction, summary.orgName),
 				}));
 			}
+			// The identity key embeds the email, so a redacted listing drops it.
+			const pausedForJson = redaction
+				? paused.map(({ identityKey: _identityKey, ...account }) => ({
+						...account,
+						email: maskIdentity(redaction, account.email),
+						accountId: maskIdentity(redaction, account.accountId),
+						projectId: maskIdentity(redaction, account.projectId),
+						enterpriseUrl: maskIdentity(redaction, account.enterpriseUrl),
+						orgId: maskIdentity(redaction, account.orgId),
+						orgName: maskIdentity(redaction, account.orgName),
+					}))
+				: paused;
 			const payload = {
 				generatedAt: Date.now(),
 				reports: trimmed,
 				accountsWithoutUsage: unreportedAccounts,
 				disabledCredentials: disabledForJson,
+				pausedAccounts: pausedForJson,
 				capacity,
 			};
 			process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
 			return;
 		}
 
-		if (filteredReports.length === 0 && accounts.length === 0) {
+		if (filteredReports.length === 0 && accounts.length === 0 && paused.length === 0) {
 			// An explicit --provider keeps every stored account of that provider, so
 			// reaching here with one means none is stored for it. Without one,
 			// credentials may exist only for providers without a usage endpoint.
@@ -1766,7 +1814,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			accounts: provider => authStorage.oauth.accounts(provider),
 		};
 		process.stdout.write(
-			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions, resetOptions)}\n`,
+			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions, resetOptions, paused)}\n`,
 		);
 	} catch (error) {
 		// Broker-backed reads (`clients`, `--history`) fail on an unreachable or

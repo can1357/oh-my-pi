@@ -9,6 +9,8 @@ import type {
 	ResetCreditTarget,
 	UsageReport,
 } from "@oh-my-pi/pi-ai";
+import { AuthStorage, DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
+import { cfgAuthAccountPolicies } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins";
 import { MarketplaceManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
@@ -276,6 +278,32 @@ function createRuntime() {
 	};
 }
 
+async function createPauseRuntime() {
+	const fixture = createRuntime();
+	const authStorage = await AuthStorage.create(":memory:");
+	await authStorage.credentials.set("anthropic", [
+		{
+			type: "oauth",
+			access: "a",
+			refresh: "refresh-a",
+			expires: Date.now() + 3_600_000,
+			email: "a@example.com",
+			orgId: "org-a",
+		},
+		{
+			type: "oauth",
+			access: "b",
+			refresh: "refresh-b",
+			expires: Date.now() + 3_600_000,
+			email: "b@example.com",
+			orgId: "org-b",
+		},
+	]);
+	fixture.session.model = { provider: "anthropic", id: "test" };
+	Object.assign(fixture.session.modelRegistry, { authStorage });
+	return { ...fixture, authStorage };
+}
+
 describe("ACP builtin slash commands", () => {
 	it("consumes fast status without returning prompt text", async () => {
 		const { output, runtime } = createRuntime();
@@ -312,6 +340,67 @@ describe("ACP builtin slash commands", () => {
 		expect(result).toEqual({ prompt: "inspect package.json" });
 		expect(runtime.session.forcedToolChoice).toBe("read");
 		expect(output).toEqual(["Next turn forced to use read."]);
+	});
+
+	it("/usage pause stores an account selector with its organization", async () => {
+		const { output, runtime, authStorage } = await createPauseRuntime();
+		try {
+			await executeAcpBuiltinSlashCommand("/usage pause b@example.com", runtime);
+			expect(output[0]).toMatch(/^Paused /);
+			expect(cfgAuthAccountPolicies.get(runtime.settings)).toEqual([
+				{ provider: "anthropic", account: { email: "b@example.com", orgId: "org-b" }, paused: true },
+			]);
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	it("/usage pause and resume preserve an existing account priority", async () => {
+		const { output, runtime, authStorage } = await createPauseRuntime();
+		try {
+			const policy = { provider: "anthropic", account: { email: "b@example.com" }, priority: 100 };
+			cfgAuthAccountPolicies.set(runtime.settings, [policy]);
+			await executeAcpBuiltinSlashCommand("/usage pause b@example.com", runtime);
+			expect(output[0]).toMatch(/^Paused /);
+			expect(cfgAuthAccountPolicies.get(runtime.settings)).toEqual([{ ...policy, paused: true }]);
+			authStorage.setAccountPolicies({
+				accountPolicies: cfgAuthAccountPolicies.get(runtime.settings),
+				defaultReservePct: DEFAULT_USAGE_RESERVE_PCT,
+			});
+			await executeAcpBuiltinSlashCommand("/usage resume b@example.com", runtime);
+			expect(output[1]).toMatch(/^Resumed /);
+			expect(cfgAuthAccountPolicies.get(runtime.settings)).toEqual([policy]);
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	it("/usage resume removes a policy created solely to pause an account", async () => {
+		const { output, runtime, authStorage } = await createPauseRuntime();
+		try {
+			await executeAcpBuiltinSlashCommand("/usage pause b@example.com", runtime);
+			expect(output[0]).toMatch(/^Paused /);
+			authStorage.setAccountPolicies({
+				accountPolicies: cfgAuthAccountPolicies.get(runtime.settings),
+				defaultReservePct: DEFAULT_USAGE_RESERVE_PCT,
+			});
+			await executeAcpBuiltinSlashCommand("/usage resume b@example.com", runtime);
+			expect(output[1]).toMatch(/^Resumed /);
+			expect(cfgAuthAccountPolicies.get(runtime.settings)).toEqual([]);
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	it("/usage pause reports an unmatched account number without changing policies", async () => {
+		const { output, runtime, authStorage } = await createPauseRuntime();
+		try {
+			await executeAcpBuiltinSlashCommand("/usage pause 99", runtime);
+			expect(output[0]).toMatch(/No .* account matches "99"/);
+			expect(cfgAuthAccountPolicies.get(runtime.settings)).toEqual([]);
+		} finally {
+			authStorage.close();
+		}
 	});
 
 	it("renders provider usage reports when the session can fetch them", async () => {

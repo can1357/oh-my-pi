@@ -10,6 +10,7 @@ import type { AccountPolicies } from "./policy";
 import type { CredentialPool } from "./pool";
 import type { OAuthRefresher } from "./refresh";
 import type { CredentialSelector } from "./select";
+import { resolveCredentialIdentityKey } from "./sqlite-credential-store";
 import type {
 	AuthAccountPolicy,
 	AuthApiKeyOptions,
@@ -23,6 +24,7 @@ import type {
 	OAuthLoginController,
 	OAuthLoginIdentity,
 	OAuthRefreshByIdOptions,
+	PausedOAuthAccountSummary,
 	StoredOAuthRefreshOptions,
 	StoredOAuthRefreshResult,
 } from "./types";
@@ -290,6 +292,31 @@ export class OAuthAccounts implements OAuthApi {
 				...(active && activeLastUsedAtMs !== undefined ? { lastUsedAtMs: activeLastUsedAtMs } : {}),
 			};
 		});
+	}
+
+	/** Stored OAuth accounts hidden by a paused account policy; every provider when `provider` is omitted. */
+	pausedAccounts(provider?: string): PausedOAuthAccountSummary[] {
+		const providers = provider === undefined ? this.#deps.pool.loadedProviders() : [provider];
+		const summaries: PausedOAuthAccountSummary[] = [];
+		for (const name of providers) {
+			if (this.#deps.overrides.suppressesOAuth(name, false)) continue;
+			for (const entry of this.#deps.pool.pausedEntries(name)) {
+				const credential = entry.credential;
+				if (credential.type !== "oauth") continue;
+				summaries.push({
+					provider: name,
+					credentialId: entry.id,
+					accountId: credential.accountId,
+					email: credential.email,
+					projectId: credential.projectId,
+					enterpriseUrl: credential.enterpriseUrl,
+					orgId: credential.orgId,
+					orgName: credential.orgName,
+					identityKey: resolveCredentialIdentityKey(name, credential),
+				});
+			}
+		}
+		return summaries;
 	}
 
 	/**

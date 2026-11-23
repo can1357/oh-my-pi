@@ -26,6 +26,7 @@ export class AccountPolicies {
 	#defaultReservePct: number;
 	/** Indexes of policies already warned as unmatched; validation runs on every selection. */
 	#warnedUnmatched = new Set<number>();
+	#revision = 0;
 
 	constructor(policies: AuthAccountPolicies, defaultReservePct: number | undefined) {
 		const effectiveDefaultReservePct =
@@ -40,6 +41,11 @@ export class AccountPolicies {
 	/** Global usage reserve (0–100) for accounts without a per-account `reservePct`. */
 	get defaultReservePct(): number {
 		return this.#defaultReservePct;
+	}
+
+	/** Increments on every committed {@link replace}, so views derived from policies can tell when to refilter. */
+	get revision(): number {
+		return this.#revision;
 	}
 
 	/**
@@ -57,6 +63,7 @@ export class AccountPolicies {
 		this.#accountPolicies = next.#accountPolicies;
 		this.#defaultReservePct = next.#defaultReservePct;
 		this.#warnedUnmatched = next.#warnedUnmatched;
+		this.#revision += 1;
 	}
 
 	static #validateAccountPolicyConfiguration(accountPolicies: AuthAccountPolicies, defaultReservePct: number): void {
@@ -107,6 +114,9 @@ export class AccountPolicies {
 						`${path}.reclaimAbovePct must be a finite number above the account's reserve (${reservePct}%) and at most 100`,
 					);
 				}
+			}
+			if (policy.paused !== undefined && typeof policy.paused !== "boolean") {
+				throw new AIError.ConfigurationError(`${path}.paused must be a boolean`);
 			}
 		}
 	}
@@ -183,5 +193,10 @@ export class AccountPolicies {
 	/** Return the configured policy for a stored OAuth credential. */
 	forCredential(provider: string, credential: AuthCredential): AuthAccountPolicy | undefined {
 		return credential.type === "oauth" ? this.find(provider, credential) : undefined;
+	}
+
+	/** Whether a paused account policy hides this stored credential from every credential read. */
+	isPaused(provider: string, credential: AuthCredential): boolean {
+		return this.forCredential(provider, credential)?.paused === true;
 	}
 }

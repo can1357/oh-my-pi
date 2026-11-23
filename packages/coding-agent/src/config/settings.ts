@@ -187,9 +187,10 @@ export interface SettingsOptions {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Get a nested value from an object by path segments.
+ * Get a nested value from an object by path segments (e.g. a raw layer from
+ * {@link Settings.getGlobalSettings} by a setting's `segments`).
  */
-function getByPath(obj: RawSettings, segments: readonly string[]): unknown {
+export function getByPath(obj: RawSettings, segments: readonly string[]): unknown {
 	let current: unknown = obj;
 	for (const segment of segments) {
 		if (current === null || current === undefined || typeof current !== "object") {

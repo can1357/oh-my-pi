@@ -3,6 +3,7 @@ import {
 	type ApiKeyResolver,
 	createOAuthProvenance,
 	resolveAfterRotation,
+	resolvedApiKeyBearer,
 } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { AuthApiKeyOptions, AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
@@ -33,7 +34,7 @@ export interface ApiKeyResolverRegistry {
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
 	): Promise<ApiKeyResolution>;
-	authStorage: Pick<AuthStorage, "limits">;
+	authStorage: Pick<AuthStorage, "limits" | "oauth">;
 	/**
 	 * Build an {@link ApiKeyResolver} implementing the central a/b/c auth-retry
 	 * policy: initial → resolve; step (b) → force-refresh same account; step (c)
@@ -47,6 +48,19 @@ export interface ApiKeyResolverRegistry {
 	 */
 	resolver(provider: string, options?: ApiKeyResolverOptions): ApiKeyResolver;
 	resolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver;
+}
+
+/** Why a provider has no credential when every stored OAuth account is paused and none is visible; undefined otherwise. */
+export function describePausedAccounts(authStorage: Pick<AuthStorage, "oauth">, provider: string): string | undefined {
+	const paused = authStorage.oauth.pausedAccounts(provider);
+	if (paused.length === 0 || authStorage.oauth.accounts(provider).length > 0) return undefined;
+	const labels = paused
+		.map(
+			account =>
+				account.email ?? account.accountId ?? account.projectId ?? `OAuth credential #${account.credentialId}`,
+		)
+		.join(", ");
+	return `every stored ${provider} OAuth account is paused in auth.accountPolicies (${labels}); resume one with /usage resume <account>`;
 }
 
 /**
@@ -82,7 +96,12 @@ export function createApiKeyResolver(
 	return async ({ lastChance, error, signal, previousKey }) => {
 		const rejectedAccessToken = provenance.accessFor(previousKey);
 		if (error === undefined) {
-			return resolveKey(undefined);
+			const resolved = await resolveKey(undefined);
+			if (resolvedApiKeyBearer(resolved) === undefined) {
+				const hint = describePausedAccounts(registry.authStorage, provider);
+				if (hint) throw new AIError.MissingApiKeyError(provider, hint);
+			}
+			return resolved;
 		}
 		if (lastChance) {
 			// Account constraint (401 / usage / account-rate-limit): rotate to a

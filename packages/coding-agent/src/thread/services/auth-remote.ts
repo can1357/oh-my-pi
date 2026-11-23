@@ -54,6 +54,7 @@ import type {
 	OAuthLoginIdentity,
 	OAuthProviderId,
 	OAuthRefreshByIdOptions,
+	PausedOAuthAccountSummary,
 	ObservedUsageInput,
 	Provider,
 	RedeemResetCreditOptions,
@@ -381,6 +382,9 @@ class RemoteOAuth implements OAuthApi {
 	}
 	accounts(provider: string, sessionId?: string): OAuthAccountSummary[] {
 		return this.#remote.callSync("oauth.accounts", provider, sessionId);
+	}
+	pausedAccounts(provider?: string): PausedOAuthAccountSummary[] {
+		return this.#remote.callSync("oauth.pausedAccounts", provider);
 	}
 	identity(provider: string, sessionId?: string): OAuthAccountIdentity | undefined {
 		// Read once per assistant turn; without a stored OAuth credential main answers `undefined`.

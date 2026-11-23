@@ -30,7 +30,14 @@ import {
 	toResetUsageAccounts,
 } from "./helpers/reset-usage";
 import type { ResetUsageAccount } from "../modes/view-model/overlays/reset-usage-selector";
-import { matchSessionPinAccounts, toSessionPinAccounts } from "./helpers/session-pin";
+import { handleUsagePauseCommand } from "./helpers/account-pause";
+import {
+	describeAllAccountsPaused,
+	matchSessionPinAccounts,
+	resumeSelector,
+	toPausedSessionPinAccounts,
+	toSessionPinAccounts,
+} from "./helpers/session-pin";
 import {
 	launchStatsDashboard,
 	parseStatsDashboardArgs,
@@ -142,7 +149,13 @@ async function handleSessionPinCommand(
 	const provider = getOAuthProviders().find(candidate => candidate.id === accountList.provider);
 	const providerName = provider?.name ?? accountList.provider;
 	const accounts = toSessionPinAccounts(accountList.accounts);
+	const paused = toPausedSessionPinAccounts(accountList.paused, accounts.length);
+	const everyAccount = [...accounts, ...paused];
 	if (accounts.length === 0) {
+		if (paused.length > 0) {
+			await output(describeAllAccountsPaused(providerName, paused));
+			return;
+		}
 		const source = session.modelRegistry.authStorage.keys.describe(accountList.provider, session.sessionId);
 		await output(
 			source
@@ -158,6 +171,9 @@ async function handleSessionPinCommand(
 		for (const account of accounts) {
 			lines.push(`${account.position + 1}. ${account.label}${account.active ? " (active)" : ""}`);
 		}
+		for (const account of paused) {
+			lines.push(`- ${account.label} (paused; /usage resume ${resumeSelector(account, everyAccount)})`);
+		}
 		lines.push("", "Pin one with `/session pin <number|email|account id>`.");
 		await output(lines.join("\n"));
 		return;
@@ -165,7 +181,13 @@ async function handleSessionPinCommand(
 
 	const matches = matchSessionPinAccounts(accounts, selector);
 	if (matches.length === 0) {
-		await output(`No ${providerName} account matches "${selector}".`);
+		// Positions number visible accounts only; a paused one is named by identity.
+		const pausedMatch = /^\d+$/.test(selector) ? undefined : matchSessionPinAccounts(paused, selector)[0];
+		await output(
+			pausedMatch
+				? `${pausedMatch.label} is paused. Resume it with /usage resume ${resumeSelector(pausedMatch, everyAccount)} first.`
+				: `No ${providerName} account matches "${selector}".`,
+		);
 		return;
 	}
 	if (matches.length > 1) {
@@ -413,7 +435,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "gauge",
 		description: "Show provider usage and limits",
 		acpDescription: "Show token usage",
-		acpInputHint: "[show|reset [provider/credential-id|provider/active]]",
+		acpInputHint: "[show|reset [provider/credential-id|provider/active]|pause [account]|resume [account]]",
 		subcommands: [
 			{ name: "show", description: "Show provider usage and limits" },
 			{
@@ -421,6 +443,12 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				description: "Spend a saved provider rate-limit reset",
 				usage: "[provider/credential-id|provider/active]",
 			},
+			{
+				name: "pause",
+				description: "Stop using a stored OAuth account without logging out",
+				usage: "[<provider>/]<account>",
+			},
+			{ name: "resume", description: "Use a paused OAuth account again", usage: "[<provider>/]<account>" },
 		],
 		allowArgs: true,
 		handle: async (command, runtime) => {
@@ -433,7 +461,14 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				await handleUsageResetCommand(rest, runtime.session, runtime.output);
 				return commandConsumed();
 			}
-			return usage("Usage: /usage [show|reset [provider/credential-id|provider/active]]", runtime);
+			if (verb === "pause" || verb === "resume") {
+				await handleUsagePauseCommand(verb, rest, runtime.session, runtime.settings, runtime.output);
+				return commandConsumed();
+			}
+			return usage(
+				"Usage: /usage [show|reset [provider/credential-id|provider/active]|pause [account]|resume [account]]",
+				runtime,
+			);
 		},
 		handleTui: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
@@ -451,7 +486,16 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				clearSubmittedText(runtime);
 				return;
 			}
-			runtime.ctx.showStatus("Usage: /usage [show|reset [provider/credential-id|provider/active]]");
+			if (verb === "pause" || verb === "resume") {
+				await handleUsagePauseCommand(verb, rest, runtime.ctx.session, runtime.ctx.settings, text =>
+					runtime.ctx.showStatus(text),
+				);
+				clearSubmittedText(runtime);
+				return;
+			}
+			runtime.ctx.showStatus(
+				"Usage: /usage [show|reset [provider/credential-id|provider/active]|pause [account]|resume [account]]",
+			);
 			clearSubmittedText(runtime);
 		},
 	},

@@ -58,6 +58,7 @@ import { DEFAULT_USAGE_REQUEST_TIMEOUT_MS, UsageCache } from "./auth/usage-cache
 import type { UsageLogger } from "./usage";
 import { defaultRankingStrategy, defaultUsageProvider } from "./usage/registry";
 
+export { matchesAuthAccountSelector } from "./auth/policy";
 export {
 	isSameOAuthAccount,
 	isSqliteBusyError,
@@ -287,8 +288,9 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 	setAccountPolicies(config: AuthAccountPolicyConfig): void {
 		const pool = this.#modules.pool;
 		const stored = new Map<string, AuthCredential[]>();
-		for (const provider of pool.providers()) stored.set(provider, pool.credentials(provider));
+		for (const provider of pool.loadedProviders()) stored.set(provider, pool.loadedCredentials(provider));
 		this.#policies.replace(config.accountPolicies, config.defaultReservePct, stored);
+		pool.refilter();
 	}
 
 	async replaceStore(store: AuthCredentialStore, options: { sourceLabel?: string } = {}): Promise<void> {

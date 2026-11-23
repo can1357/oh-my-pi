@@ -135,6 +135,7 @@ import { classifyAutoPrewalk } from "../auto-prewalk/classifier";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { SessionAccountPoolScope } from "../config/account-pools";
+import { describePausedAccounts } from "../config/api-key-resolver";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
@@ -10038,6 +10039,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const apiKey = await logger.time("prompt:apiKey", () => this.#modelRegistry.getApiKey(model, this.sessionId));
 			if (!apiKey && !(await this.#recovery.applyMissingCredentialFallback(setupAbort.signal))) {
 				if (setupAbort.signal.aborted) return false;
+				const pausedHint = describePausedAccounts(this.#modelRegistry.authStorage, model.provider);
+				if (pausedHint) throw new PromptPreflightError(`No API key found for ${model.provider}: ${pausedHint}.`);
 				throw new PromptPreflightError(
 					`No API key found for ${model.provider}.\n\n` +
 						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}`,
@@ -15967,6 +15970,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return {
 			provider,
 			accounts: authStorage.oauth.accounts(provider, this.sessionId),
+			paused: authStorage.oauth.pausedAccounts(provider),
 		};
 	}
 

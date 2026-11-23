@@ -66,7 +66,11 @@ import { FileSessionStorage } from "../../session/session-storage";
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
 import type { LogoutAccount } from "../view-model/overlays/logout-account-selector";
 import { describeRedeemOutcome, toResetUsageAccounts } from "../../slash-commands/helpers/reset-usage";
-import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
+import {
+	describeAllAccountsPaused,
+	toPausedSessionPinAccounts,
+	toSessionPinAccounts,
+} from "../../slash-commands/helpers/session-pin";
 import {
 	accountIdentityLabel,
 	collectStoredAccounts,
@@ -2414,6 +2418,12 @@ export class SelectorController {
 		const providerName = provider?.name ?? accountList.provider;
 		const accounts = toSessionPinAccounts(accountList.accounts);
 		if (accounts.length === 0) {
+			if (accountList.paused.length > 0) {
+				this.ctx.showStatus(
+					describeAllAccountsPaused(providerName, toPausedSessionPinAccounts(accountList.paused, 0)),
+				);
+				return;
+			}
 			const source = session.modelRegistry.authStorage.keys.describe(accountList.provider, session.sessionId);
 			this.ctx.showStatus(
 				source

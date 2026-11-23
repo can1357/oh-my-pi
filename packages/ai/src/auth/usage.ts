@@ -686,7 +686,7 @@ export class UsageService implements UsageApi {
 			if (entries.length > 0) {
 				const dedupedEntries = await this.#deps.pool.pruneDuplicates(providerId, entries);
 				if (dedupedEntries.length !== entries.length) {
-					this.#deps.pool.replace(providerId, dedupedEntries);
+					this.#deps.pool.replaceVisible(providerId, dedupedEntries);
 				}
 				entries = dedupedEntries;
 			}
@@ -890,10 +890,11 @@ export class UsageService implements UsageApi {
 				this.#usageReportsInFlight.set(overrideKey, shared);
 			}
 			const fetched = await raceSignal(shared, options?.signal, "usage fetch aborted");
-			const reports =
+			const providerReports =
 				fetched && options?.provider !== undefined
 					? fetched.filter(report => report.provider === options.provider)
 					: fetched;
+			const reports = providerReports && this.#withoutPausedAccounts(providerReports);
 			if (reports) this.#deps.blocks.reconcileReports(reports);
 			const ownLocal = [...this.#runtimeUsageProviderOverrides.keys(), ...this.#configuredUsageProviders.keys()];
 			if (!reports || ownLocal.length === 0) return reports;
@@ -914,6 +915,25 @@ export class UsageService implements UsageApi {
 			options,
 			options?.provider !== undefined ? new Set([options.provider]) : undefined,
 		);
+	}
+
+	/**
+	 * Drop broker reports for accounts a paused account policy hides here. The
+	 * broker tags each OAuth report with its row id, which matches this pool's
+	 * rows; reports without a numeric row id (API keys, env) stay.
+	 */
+	#withoutPausedAccounts(reports: UsageReport[]): UsageReport[] {
+		const pausedIds = new Map<string, Set<number>>();
+		return reports.filter(report => {
+			const credentialId = report.metadata?.credentialId;
+			if (typeof credentialId !== "number") return true;
+			let ids = pausedIds.get(report.provider);
+			if (!ids) {
+				ids = new Set(this.#deps.pool.pausedEntries(report.provider).map(entry => entry.id));
+				pausedIds.set(report.provider, ids);
+			}
+			return !ids.has(credentialId);
+		});
 	}
 
 	/** Probe only the selected providers locally, preserving per-credential caching and cooldowns. */

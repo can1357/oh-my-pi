@@ -16,6 +16,7 @@ import type {
 	MessageAttribution,
 	Model,
 	OAuthAccountSummary,
+	PausedOAuthAccountSummary,
 	ServiceTierByFamily,
 	SimpleStreamOptions,
 	ToolChoice,
@@ -635,6 +636,8 @@ export interface SessionStats {
 export interface SessionOAuthAccountList {
 	provider: string;
 	accounts: OAuthAccountSummary[];
+	/** Stored accounts hidden by a paused `auth.accountPolicies` entry; never selectable until resumed. */
+	paused: PausedOAuthAccountSummary[];
 }
 
 /** IDs for a newly created session and the session it replaced. */

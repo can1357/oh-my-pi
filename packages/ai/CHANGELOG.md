@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `paused: true` for `auth.accountPolicies` entries: the matching stored OAuth account is left out of every credential read (selection, pins, rotation, usage reports, health checks) until the field is removed, without logging it out; `oauth.pausedAccounts()` lists such accounts
+
 ### Fixed
 
 - DeepSeek tool calls written as DSML text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route, instead of failing and triggering a retry nudge

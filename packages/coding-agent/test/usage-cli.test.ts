@@ -726,6 +726,20 @@ describe("formatUsageBreakdown", () => {
 		{ provider: "cerebras", type: "api_key" },
 	];
 
+	it("shows a paused account under its provider instead of hiding it from usage", () => {
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown([], [], Date.now(), undefined, undefined, undefined, undefined, [
+				{
+					provider: "anthropic",
+					credentialId: 1,
+					email: "paused@example.com",
+					identityKey: "email:paused@example.com",
+				},
+			]),
+		);
+		expect(text).toMatch(/Anthropic[\s\S]*paused@example\.com[^\n]*— paused/);
+	});
+
 	it("renders used-only USD spend without fabricating quota data", () => {
 		const spendReport = makeReport("anthropic", "spend@example.test", [
 			{
@@ -1825,6 +1839,46 @@ describe("usage command configuration", () => {
 describe("omp usage accounts", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
+	});
+
+	it("includes paused OAuth accounts in JSON rather than losing their identity keys", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		await authStorage.credentials.set("anthropic", [
+			{
+				type: "oauth",
+				access: "active",
+				refresh: "active-refresh",
+				expires: Date.now() + HOUR,
+				email: "active@example.com",
+			},
+			{
+				type: "oauth",
+				access: "paused",
+				refresh: "paused-refresh",
+				expires: Date.now() + HOUR,
+				email: "paused@example.com",
+			},
+		]);
+		authStorage.setAccountPolicies({
+			accountPolicies: [{ provider: "anthropic", account: { email: "paused@example.com" }, paused: true }],
+			defaultReservePct: 10,
+		});
+		vi.spyOn(Settings, "loadReadOnly").mockResolvedValue(Settings.isolated());
+		vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
+		let stdout = "";
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			stdout += String(chunk);
+			return true;
+		});
+
+		await runUsageCommand({ action: "accounts", json: true });
+		const payload = JSON.parse(stdout) as {
+			accounts: Array<{ provider: string; identityKey: string; paused?: true }>;
+		};
+		expect(payload.accounts).toEqual([
+			{ provider: "anthropic", identityKey: "email:active@example.com" },
+			{ provider: "anthropic", identityKey: "email:paused@example.com", paused: true },
+		]);
 	});
 
 	it("lists the identity keys that restrict a session, and no token material", async () => {
