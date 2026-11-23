@@ -854,6 +854,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (interception) {
 			return { tier: "exec", override: true, policy: "deny", reason: interception.replace(/^Blocked:\s*/u, "") };
 		}
+		// A line made only of tool commands runs no program: its text is tool arguments, not a shell
+		// command, so `bash.patterns` and critical patterns would only match data. Each tool command
+		// passes its own approval when it runs; the line itself only reads.
+		if (isToolCommandLine(command, toolCommands)) return "read";
 		const { session: policy, authority } = this.#patternPolicies();
 		const shell = cfgBashAllowCompoundCommands.get(this.session.settings)
 			? this.session.settings.getShellConfig().shell
@@ -898,8 +902,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				}
 			}
 		}
-		// Each tool command passes its own approval when it runs; the line itself only reads.
-		if (isToolCommandLine(command, toolCommands)) return "read";
 		if (decision.kind === "allow") return { tier: "write", policy: "allow" };
 		return "exec";
 	};
