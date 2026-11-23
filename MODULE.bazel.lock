@@ -485,7 +485,7 @@
           "FILE:@@//crates/ast/Cargo.toml da6ccdcce38a298a048b4795859902b03b96de0f6befd74be5d7a3c2511b6636",
           "FILE:@@//crates/vfs/Cargo.toml 90acc014f97f817efa012df85e097f6f8b40e03b8b6057fbeb45c0ac70cf533c",
           "FILE:@@//crates/xfs/Cargo.toml 8bea926b351f7299ecafa998fa340bc15766d445b233dee7eb8e47cf1c41204c",
-          "FILE:@@//crates/builtins/Cargo.toml 439b595e561c01ed8f3acf279b2faa4aa441337adbd4c426c6a7081e75e0f649",
+          "FILE:@@//crates/builtins/Cargo.toml 8c6dd1dfdab8c8aed039e65ed4365df78a95ea3dfc2c2034ff24f04059e1472d",
           "FILE:@@//crates/diff/Cargo.toml 092863523d790cedb5a0ff029eec41ff901af34ea7f1edfcc5b9ad4389402777",
           "FILE:@@//crates/iso/Cargo.toml 2ca448b724d5f7a39f9125571c260865256562d7835a1ca9d4cb0ea324e04fc8",
           "FILE:@@//crates/edit/Cargo.toml ff45854c9147e5fa7cac756a36e765398c8d6c1c025db41b3052d54994196900",
