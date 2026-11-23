@@ -17,6 +17,7 @@
 - Added `vimMode` and `configureEditor` options to `HtmlFormDialog` and `HookEditorComponent`: with `vimMode` their text boxes are Vim-mode editors (a form's one-line fields and "Other" answers too; passwords stay plain), `j`/`k` step between a form's option rows, and `Escape` leaves Insert mode before it closes or cancels anything ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Added `Editor.vimStartMode` and `Editor.resetVimMode()`: each prompt (on enabling Vim mode, after a submit, on reset) starts in the start mode; Normal-mode `k`/`j`/`-`/`+` past the first or last line step through prompt history ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Added `Editor.captureHistoryState()`, which hosts override so a remembered draft (and Vim's `k`/`j` history steps) brings back the attachments they keep beside the text; `CustomEditor` implements it ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Added `SessionSelectorOptions.onGenerateTitle` (`SessionPickerOptions.onGenerateTitle` / `SessionPickerHost.generateSessionTitle`) and the `app.session.generateTitle` action, unbound by default, to populate the session rename dialog with a generated title ([#18025](https://github.com/can1357/oh-my-pi/pull/18025) by [@SuperUserA](https://github.com/SuperUserA))
 
 ### Changed
 
@@ -40,6 +41,7 @@
 - Fixed Vim `v$` not selecting through the line break and `g`-commands (`gg`, `gU`) doing nothing in Visual mode ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Fixed Vim `cc`, `cj`, and other linewise changes keeping the start of the line when the cursor was mid-line, and storing the old text so `p` spliced it into a line instead of putting it back as whole lines ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Fixed Vim `di(`, `ci{`, and other bracket objects doing nothing when the cursor is before the brackets; like Vim 9.2 they now use the next pair ahead ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- The session selector's F2 rename dialog no longer repeats the "Rename Session" heading inside the input field or shows the session list's shortcuts in its footer ([#18025](https://github.com/can1357/oh-my-pi/pull/18025) by [@SuperUserA](https://github.com/SuperUserA))
 
 ### Removed
 
