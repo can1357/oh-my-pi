@@ -99,6 +99,7 @@ function stringList(id: string, noun: string, tokens?: readonly string[]): (raw:
 export const cfgSandboxEnabled = register({
 	id: "sandbox.enabled",
 	type: "boolean",
+	strict: true,
 	default: false,
 	// A repository `.env` reaches the environment, so the variable can only turn the sandbox on.
 	env: { name: "PI_SANDBOX", parse: raw => (parseFlag(raw) ? true : undefined) },
@@ -114,6 +115,7 @@ export const cfgSandboxEnabled = register({
 export const cfgSandboxMode = register({
 	id: "sandbox.mode",
 	type: "enum",
+	strict: true,
 	values: ["workspace-write", "read-only"] as const,
 	default: "workspace-write",
 	ui: {
@@ -135,6 +137,7 @@ export const cfgSandboxMode = register({
 export const cfgSandboxScope = register({
 	id: "sandbox.scope",
 	type: "array",
+	strict: true,
 	default: DEFAULT_SCOPE,
 	items: { values: SANDBOX_SCOPES, label: "sandbox scope" },
 	ui: {
@@ -154,6 +157,7 @@ export const cfgSandboxScope = register({
 export const cfgSandboxFallback = register({
 	id: "sandbox.fallback",
 	type: "enum",
+	strict: true,
 	values: ["warn", "block"] as const,
 	default: "warn",
 	ui: {
@@ -171,6 +175,7 @@ export const cfgSandboxFallback = register({
 export const cfgSandboxReadScope = register({
 	id: "sandbox.filesystem.readScope",
 	type: "enum",
+	strict: true,
 	values: ["all", "workspace"] as const,
 	default: "all",
 	ui: {
@@ -197,6 +202,7 @@ export const cfgSandboxReadScope = register({
 export const cfgSandboxListDrives = register({
 	id: "sandbox.filesystem.windowsListDrives",
 	type: "boolean",
+	strict: true,
 	default: false,
 	ui: {
 		tab: "tools",
@@ -256,6 +262,7 @@ export const cfgSandboxDenyRead = register({
 export const cfgSandboxNetworkMode = register({
 	id: "sandbox.network.mode",
 	type: "enum",
+	strict: true,
 	values: ["allowlist", "deny", "allow"] as const,
 	default: "allowlist",
 	ui: {
@@ -278,6 +285,7 @@ export const cfgSandboxNetworkMode = register({
 export const cfgSandboxLoopback = register({
 	id: "sandbox.network.windowsLoopback",
 	type: "boolean",
+	strict: true,
 	default: false,
 	ui: {
 		tab: "tools",

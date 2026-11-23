@@ -114,6 +114,13 @@ interface DefinitionBase {
 	 */
 	validate?: (raw: unknown) => void;
 	/**
+	 * A configured value (every load/reload) must pass the same checks a write does
+	 * ({@link Setting.assertWritable}): a value of the wrong type or outside the enum `values`, or an
+	 * unknown {@link ArrayDefinition.items} entry, fails the load instead of reading as the default
+	 * or only warning. For settings where a silent fallback is unsafe (sandbox containment).
+	 */
+	strict?: boolean;
+	/**
 	 * Canonicalizes a value on its way in — text parsed by {@link Setting.parse} and every
 	 * `set`/`override` — e.g. flooring request limits. May throw like `validate`.
 	 */
@@ -168,7 +175,8 @@ export interface ArrayDefinition<T = unknown> extends DefinitionBase {
 	/**
 	 * Closed vocabulary for the entries (`label` names one entry in messages, e.g. "status line
 	 * segment"). Writes naming an unknown entry are rejected; configured values that already contain
-	 * one load unchanged with a single warning per entry, so a retired id never breaks startup.
+	 * one load unchanged with a single warning per entry, so a retired id never breaks startup,
+	 * unless the setting is {@link DefinitionBase.strict}, which fails the load.
 	 */
 	items?: { values: readonly string[]; label: string };
 	ui?: UiArray;
@@ -723,13 +731,25 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 	}
 
 	/**
+	 * The check a configured value must pass, without side effects: `validate`, plus for a
+	 * {@link DefinitionBase.strict} setting every check {@link assertWritable} runs. `undefined` (unset)
+	 * only meets `validate`.
+	 *
+	 * @throws Error with the same message {@link assertWritable} raises for the same value.
+	 */
+	assertConfigured(raw: unknown): void {
+		if (this.definition.strict && raw !== undefined) this.assertWritable(raw);
+		else this.definition.validate?.(raw);
+	}
+
+	/**
 	 * Registry plumbing run by `Settings` on every load/reload for the value `settings` configures.
 	 *
-	 * @throws Error when `raw` fails `validate`. Unknown {@link ArrayDefinition.items} entries only warn,
-	 * once each per instance.
+	 * @throws Error when `raw` fails {@link assertConfigured}. Unknown {@link ArrayDefinition.items}
+	 * entries of a non-strict setting only warn, once each per instance.
 	 */
 	checkConfigured(settings: Settings, raw: unknown): void {
-		this.definition.validate?.(raw);
+		this.assertConfigured(raw);
 		const unknown = this.#unknownItems(raw);
 		const items = settings.warnState.items;
 		let warned = items.get(this.id);

@@ -62,3 +62,15 @@ export function restoreEnvValue(key: string, value: string | undefined): void {
 	process.env[key] = value;
 	Bun.env[key] = value;
 }
+
+/**
+ * Polls `check` until it holds; fails after 3 s. A live reload is driven by stat polls on real timers,
+ * which fake timers cannot fire, so a test waits for the reload's observable effect instead.
+ */
+export async function waitFor(check: () => boolean): Promise<void> {
+	const deadline = Date.now() + 3000;
+	while (!check()) {
+		if (Date.now() >= deadline) throw new Error("Timed out waiting for live config reload");
+		await Bun.sleep(10);
+	}
+}

@@ -12,7 +12,12 @@ import { cfgRetryUsageReservePct } from "@oh-my-pi/pi-coding-agent/session/setti
 import { cfgTaskAgentModelOverrides } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
-import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
+import {
+	beginSettingsTest,
+	restoreSettingsTestState,
+	type SettingsTestState,
+	waitFor,
+} from "./helpers/settings-test-state";
 
 const routing = (model: string, reservePct = 10, priority = 1) => ({
 	modelRoles: { smol: `anthropic/${model}`, slow: "anthropic/strong" },
@@ -20,16 +25,6 @@ const routing = (model: string, reservePct = 10, priority = 1) => ({
 	task: { agentModelOverrides: { worker: "@smol" } },
 	auth: { accountPolicies: [{ provider: "live-routing-test", account: { accountId: "routing-test" }, priority }] },
 });
-
-// Stat polls run on real timers outside fake ones; wait for observed
-// settings/log transitions while exercising the production poll and debounce.
-async function waitFor(check: () => boolean): Promise<void> {
-	const deadline = Date.now() + 3000;
-	while (!check()) {
-		if (Date.now() >= deadline) throw new Error("Timed out waiting for live config reload");
-		await Bun.sleep(10);
-	}
-}
 
 // Windows cannot rename a directory link over an existing one (EPERM), so it swaps non-atomically.
 async function retargetDirLink(link: string, target: string): Promise<void> {

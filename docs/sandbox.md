@@ -149,7 +149,7 @@ Path lists accept:
 
 Any other `${…}` token is rejected when the setting is written, so a typo such as `${HOME}` fails instead of matching nothing. Paths are resolved through symlinks before they reach the backend (on macOS `/tmp` becomes `/private/tmp`). Entries that do not exist when a process starts are dropped from its policy, and so are readable or writable entries you cannot access yourself (for example `/root`; bubblewrap would refuse the whole request).
 
-A config file that fails validation (an unknown `${…}` token, or any other invalid setting value) fails config load with one `Error:` line naming the file at fault and the setting (`Validate(<setting id>)`); omp exits 1 without starting, under any subcommand and in every mode (`--mode rpc` included), until it is fixed. The panel and `/settings` refuse an invalid value when written.
+A config file that sets an invalid `sandbox.*` value (an unknown `${…}` token, a value outside a setting's choices, or a value of the wrong type) fails config load with one `Error:` line naming the file at fault and the setting (`Validate(<setting id>)`); omp exits 1 without starting, under any subcommand and in every mode (`--mode rpc` included), until it is fixed. Each config layer (your config, the `--config` overlays, the project config; files within one layer are merged first) is checked on its own, so an invalid value fails even when a higher layer overrides it. The panel and `/settings` refuse an invalid value when written.
 
 ### Default denied paths
 
