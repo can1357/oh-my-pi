@@ -13,8 +13,89 @@ use std::{
 	path::{Path, PathBuf},
 };
 
+use clap::{Arg, ArgAction, ArgMatches, Command};
+
 use super::{FdCli, Template, When};
 use crate::host::{Host, ShellCommand};
+
+/// fd's `-x` and `-X` as given, each occurrence's arguments kept apart.
+///
+/// Written out by hand: clap's derive groups values by occurrence
+/// (`Vec<Vec<T>>`) only under its unstable-v5 feature.
+#[derive(Debug, Default)]
+pub(super) struct ExecArgs {
+	/// `-x` commands.
+	pub(super) each:  Vec<Vec<String>>,
+	/// `-X` commands.
+	pub(super) batch: Vec<Vec<String>>,
+}
+
+const EXEC_HELP: &str = "Execute a command for each search result.
+
+Every argument after -x belongs to the command; end it with '\\;' to pass fd \
+more arguments. Repeat -x to run several commands for each result, in order, \
+stopping at the first that fails. Commands run one at a time, in the order \
+results print.
+
+Placeholders: '{}' path, '{/}' basename, '{//}' parent directory, '{.}' path \
+without extension, '{/.}' basename without extension; '{{' and '}}' are literal \
+braces. A command without placeholders gets '{}' appended.";
+
+const EXEC_BATCH_HELP: &str = "Execute a command once with all search results as arguments.
+
+Arguments and placeholders as for --exec, but only one argument may hold \
+placeholders, and not the first. Repeat -X to run several commands, each with \
+every result.";
+
+impl clap::FromArgMatches for ExecArgs {
+	fn from_arg_matches(matches: &ArgMatches) -> Result<Self, clap::Error> {
+		let commands = |id: &str| {
+			matches
+				.get_occurrences::<String>(id)
+				.map_or_default(|occurrences| occurrences.map(|args| args.cloned().collect()).collect())
+		};
+		Ok(Self { each: commands("exec"), batch: commands("exec_batch") })
+	}
+
+	fn update_from_arg_matches(&mut self, matches: &ArgMatches) -> Result<(), clap::Error> {
+		*self = Self::from_arg_matches(matches)?;
+		Ok(())
+	}
+}
+
+impl clap::Args for ExecArgs {
+	fn augment_args(cmd: Command) -> Command {
+		let command_arg = |id: &'static str| {
+			Arg::new(id)
+				.value_name("cmd")
+				.value_parser(clap::value_parser!(String))
+				.num_args(1..)
+				.allow_hyphen_values(true)
+				.value_terminator(";")
+				.action(ArgAction::Append)
+		};
+		cmd.arg(
+			command_arg("exec")
+				.short('x')
+				.long("exec")
+				.conflicts_with("list_details")
+				.help("Execute a command for each search result")
+				.long_help(EXEC_HELP),
+		)
+		.arg(
+			command_arg("exec_batch")
+				.short('X')
+				.long("exec-batch")
+				.conflicts_with_all(["exec", "list_details"])
+				.help("Execute a command once with all search results as arguments")
+				.long_help(EXEC_BATCH_HELP),
+		)
+	}
+
+	fn augment_args_for_update(cmd: Command) -> Command {
+		Self::augment_args(cmd)
+	}
+}
 
 /// The commands fd runs for its matches instead of printing them.
 pub(super) struct Exec {
@@ -45,11 +126,12 @@ impl Exec {
 	/// [`io::ErrorKind::InvalidInput`] for an `-X` command with more than
 	/// one argument holding placeholders, or whose first argument holds one.
 	pub(super) fn new(cli: &FdCli, base_dir: &Path) -> io::Result<Option<Self>> {
-		let mode = if !cli.exec.is_empty() {
-			Mode::Each(cli.exec.iter().map(|args| each_template(args)).collect())
-		} else if !cli.exec_batch.is_empty() {
+		let mode = if !cli.exec.each.is_empty() {
+			Mode::Each(cli.exec.each.iter().map(|args| each_template(args)).collect())
+		} else if !cli.exec.batch.is_empty() {
 			Mode::Batch(
-				cli.exec_batch
+				cli.exec
+					.batch
 					.iter()
 					.map(|args| Batch::new(args, cli.batch_size))
 					.collect::<io::Result<_>>()?,

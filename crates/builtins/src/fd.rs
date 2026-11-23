@@ -24,7 +24,7 @@ use omp_xfs::{
 use omp_vfs::Metadata;
 use regex::{Regex, RegexBuilder};
 
-use self::exec::Exec;
+use self::exec::{Exec, ExecArgs};
 use crate::host::{AsyncUtility, Host, forward_slash_display};
 
 #[derive(Parser, Debug)]
@@ -204,43 +204,9 @@ pub(crate) struct FdCli {
 	#[arg(long = "format", value_name = "fmt")]
 	format_template: Option<String>,
 
-	/// Execute a command for each search result.
-	///
-	/// Every argument after `-x` belongs to the command; end it with `\;` to
-	/// pass fd more arguments. Repeat `-x` to run several commands for each
-	/// result, in order, stopping at the first that fails. Up to `--threads`
-	/// results run in parallel.
-	///
-	/// Placeholders: `{}` path, `{/}` basename, `{//}` parent directory, `{.}`
-	/// path without extension, `{/.}` basename without extension; `{{` and
-	/// `}}` are literal braces. A command without placeholders gets `{}`
-	/// appended.
-	#[arg(
-		short = 'x',
-		long = "exec",
-		value_name = "cmd",
-		num_args = 1..,
-		allow_hyphen_values = true,
-		value_terminator = ";",
-		conflicts_with = "list_details"
-	)]
-	exec: Vec<Vec<String>>,
-
-	/// Execute a command once with all search results as arguments.
-	///
-	/// Arguments and placeholders as for `--exec`, but only one argument may
-	/// hold placeholders, and not the first. Repeat `-X` to run several
-	/// commands, each with every result.
-	#[arg(
-		short = 'X',
-		long = "exec-batch",
-		value_name = "cmd",
-		num_args = 1..,
-		allow_hyphen_values = true,
-		value_terminator = ";",
-		conflicts_with_all = ["exec", "list_details"]
-	)]
-	exec_batch: Vec<Vec<String>>,
+	/// `-x`/`--exec` and `-X`/`--exec-batch`.
+	#[command(flatten)]
+	exec: ExecArgs,
 
 	/// Maximum number of results to pass to each command run by `-X` (0: as
 	/// many as the system allows).
@@ -647,12 +613,15 @@ async fn search(cli: FdCli, base_dir: PathBuf, host: &mut Host) -> io::Result<Se
 		cli.max_results
 	};
 	let opts = fd_walk_options(&cli, &filter);
-	let ended = |state: &SearchState| max_results.is_some_and(|max| state.matches >= max);
+	// Past `--max-results`, or once a batch command could not run.
+	let ended = move |state: &SearchState, exec: &Option<Exec>| {
+		max_results.is_some_and(|max| state.matches >= max) || exec.as_ref().is_some_and(Exec::stopped)
+	};
 
 	let mut out = host.stdout_writer();
 	let mut state = SearchState { matches: 0, had_error: false, commands_failed: false };
 	for search_path in &search_paths {
-		if ended(&state) {
+		if ended(&state, &exec) {
 			break;
 		}
 		let root = &search_path.resolved;
@@ -669,7 +638,7 @@ async fn search(cli: FdCli, base_dir: PathBuf, host: &mut Host) -> io::Result<Se
 		let mut complete = true;
 		let mut unflushed = false;
 		loop {
-			if ended(&state) {
+			if ended(&state, &exec) {
 				complete = false;
 				break;
 			}
@@ -706,8 +675,8 @@ async fn search(cli: FdCli, base_dir: PathBuf, host: &mut Host) -> io::Result<Se
 		}
 	}
 	if let Some(exec) = &mut exec {
-		exec.finish(host, &mut out).await?;
-		state.commands_failed = exec.failed;
+		exec.finish(host).await?;
+		state.commands_failed = exec.failed();
 	}
 	out.flush()?;
 	let _ = host.flush_output().await;
@@ -937,7 +906,7 @@ struct SearchPath {
 /// Whether matches of the implicit `.` root drop its `./`: only with no
 /// path operand, and under `auto` only without `-0` or commands to run.
 fn strips_cwd_prefix(cli: &FdCli) -> bool {
-	let runs_commands = !cli.exec.is_empty() || !cli.exec_batch.is_empty() || cli.list_details;
+	let runs_commands = !cli.exec.each.is_empty() || !cli.exec.batch.is_empty() || cli.list_details;
 	cli.paths.is_empty()
 		&& cli.search_paths.is_empty()
 		&& match cli.strip_cwd_prefix.unwrap_or(When::Auto) {
