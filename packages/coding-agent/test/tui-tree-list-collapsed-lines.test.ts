@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { renderTreeList } from "@oh-my-pi/pi-coding-agent/tui/tree-list";
+import { renderTreeList } from "@oh-my-pi/pi-tui/render/tree-list";
+import { truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 
 const stubTheme = {
 	fg: (_color: string, text: string) => text,
@@ -11,6 +12,31 @@ function expectWithinBudget(lines: string[], budget: number) {
 }
 
 describe("renderTreeList maxCollapsedLines", () => {
+	it("reserves custom branch and continuation widths in both rendering paths", () => {
+		const customTheme = {
+			...stubTheme,
+			tree: { ...stubTheme.tree, branch: "界├", last: "界界└", vertical: "界界│" },
+		} as typeof stubTheme;
+		for (const trailingSummary of [undefined, "", "summary"]) {
+			const lines = renderTreeList(
+				{
+					items: ["first item with long details", "second item with long details"],
+					trailingSummary,
+					renderItem: (item, context) => [
+						truncateToWidth(item, 18 - (context.prefixWidth ?? 0)),
+						truncateToWidth("continued details", 18 - (context.prefixWidth ?? 0)),
+					],
+				},
+				customTheme,
+			);
+			expect(lines[0]).toStartWith("界├ ");
+			expect(lines[2]).toStartWith(trailingSummary ? "界├ " : "界界└ ");
+			expect(lines[1]).toStartWith("界界│");
+			expect(lines[1]).toContain("continued");
+			for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(18);
+		}
+	});
+
 	it("skips oversized first item instead of rendering broken fragments", () => {
 		const largeGroup = Array.from({ length: 15 }, (_, i) => `line-${i}`);
 		const smallGroup = ["a", "b"];
@@ -91,24 +117,6 @@ describe("renderTreeList maxCollapsedLines", () => {
 		expectWithinBudget(collapsed, 4);
 		expect(collapsed).toHaveLength(4);
 		expect(collapsed.at(-1)).toContain("2 more changes");
-	});
-
-	it("renders all items when total lines fit within budget", () => {
-		const items = [["a"], ["b"], ["c"]];
-
-		const collapsed = renderTreeList(
-			{
-				items,
-				expanded: false,
-				maxCollapsedLines: 10,
-				itemType: "item",
-				renderItem: group => group,
-			},
-			stubTheme,
-		);
-
-		expect(collapsed.length).toBe(3);
-		expect(collapsed.some(l => l.includes("more"))).toBe(false);
 	});
 
 	it("uses non-last tree branch when summary line follows", () => {

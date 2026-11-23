@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Message, Model, Usage, UserMessage } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -7,6 +8,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { estimateToolSchemaTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
 
 describe("AgentSession session stats", () => {
 	let authStorage: AuthStorage;
@@ -92,6 +94,70 @@ describe("AgentSession session stats", () => {
 		expect(stats.cost).toBe(6);
 		expect(stats.totalMessages).toBe(0);
 		expect(stats.assistantMessages).toBe(0);
+	});
+
+	it("keeps mixed peak and off-peak charges in session and footer totals after resume", async () => {
+		const target = modelRegistry.find("deepseek", "deepseek-v4-flash");
+		if (!target) throw new Error("Expected bundled DeepSeek Flash");
+		using tempDir = TempDir.createSync("@omp-session-mixed-cost-");
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		manager.appendMessage({ role: "user", content: "First request", timestamp: 1 });
+		for (const [timestamp, inputCost, outputCost] of [
+			[Date.parse("2026-09-10T03:59:59Z"), 0.3, 1.2],
+			[Date.parse("2026-09-10T04:00:00Z"), 0.15, 0.6],
+		]) {
+			manager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "Recorded response" }],
+				api: target.api,
+				provider: target.provider,
+				model: target.id,
+				timestamp,
+				stopReason: "stop",
+				usage: {
+					input: 1_000_000,
+					output: 1_000_000,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2_000_000,
+					cost: {
+						input: inputCost,
+						output: outputCost,
+						cacheRead: 0,
+						cacheWrite: 0,
+						total: inputCost + outputCost,
+					},
+				},
+			});
+		}
+		session = createStatsSession(manager, target);
+		expect(session.getSessionStats().cost).toBeCloseTo(2.25, 8);
+		// This is the production status line's cumulative usage aggregator.
+		expect(manager.getUsageStatistics().cost).toBeCloseTo(2.25, 8);
+		await manager.flush();
+		const file = manager.getSessionFile();
+		if (!file) throw new Error("Expected persisted session file");
+		await session.dispose();
+		session = undefined;
+		await manager.close();
+
+		const resumed = await SessionManager.open(file, undefined, undefined, {
+			initialCwd: tempDir.path(),
+			suppressBreadcrumb: true,
+		});
+		session = createStatsSession(resumed, target);
+		try {
+			expect(session.getSessionStats().cost).toBeCloseTo(2.25, 8);
+			expect(resumed.getUsageStatistics()).toMatchObject({
+				input: 2_000_000,
+				output: 2_000_000,
+				cost: 2.25,
+			});
+		} finally {
+			await session.dispose();
+			session = undefined;
+			await resumed.close();
+		}
 	});
 
 	it.each([
@@ -415,5 +481,85 @@ describe("AgentSession session stats", () => {
 			"claude-opus-4-6": 2,
 			"swe-1-7-medium": 1,
 		});
+	});
+
+	it("counts failed edits by the kind the engine recorded", () => {
+		const result = (toolName: string, isError: boolean, details?: object, timestamp = 1): Message => ({
+			role: "toolResult",
+			toolCallId: `call-${timestamp}`,
+			toolName,
+			content: [{ type: "text", text: "result" }],
+			details,
+			isError,
+			timestamp,
+		});
+		const messages: Message[] = [
+			result("edit", true, { diff: "", errorKind: "unseen_lines" }, 1),
+			result("edit", true, { diff: "", errorKind: "stale_tag" }, 2),
+			result("edit", true, { diff: "", errorKind: "unseen_lines" }, 3),
+			// Written before edits recorded a kind.
+			result("edit", true, undefined, 4),
+			result("edit", false, { diff: "+1|x" }, 5),
+			result("bash", true, { errorKind: "parse" }, 6),
+		];
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model: model(), systemPrompt: ["Test"], tools: [], messages } }),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
+
+		expect(session.getSessionStats().editRejections).toEqual({ unseen_lines: 2, stale_tag: 1 });
+	});
+
+	it("drops anchored tool schemas after switching to a model that defers them", () => {
+		const inlineModel = { ...model(), toolSchemasInContext: true };
+		const deferredModel: Model = { ...inlineModel, toolSchemasInContext: false };
+		const tool: AgentTool = {
+			name: "mcp__catalog__search",
+			label: "Search",
+			description: "Search account records with detailed filters. ".repeat(2_000),
+			parameters: type("object"),
+			execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+		};
+		const agent = new Agent({ initialState: { model: inlineModel, systemPrompt: ["Test"], tools: [tool] } });
+		const schemaTokens = estimateToolSchemaTokens(agent.state.tools, agent.tokenizer);
+		const promptTokens = schemaTokens + 1_000;
+		const messages: Message[] = [
+			{ role: "user", content: "Look up the account.", timestamp: 1 },
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "Found it." }],
+				api: inlineModel.api,
+				provider: inlineModel.provider,
+				model: inlineModel.id,
+				usage: {
+					input: promptTokens,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: promptTokens,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				contextSnapshot: { promptTokens, nonMessageTokens: schemaTokens, toolSchemaTokens: schemaTokens },
+				stopReason: "stop",
+				timestamp: 2,
+			},
+		];
+		const sessionManager = SessionManager.inMemory();
+		for (const message of messages) sessionManager.appendMessage(message);
+		agent.replaceMessages(messages);
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
+		const inlineTokens = session.getContextUsage()?.tokens ?? 0;
+
+		agent.setModel(deferredModel);
+
+		expect(inlineTokens).toBeGreaterThanOrEqual(promptTokens);
+		expect(session.getContextUsage()?.tokens).toBe(inlineTokens - schemaTokens);
 	});
 });

@@ -1,22 +1,22 @@
 import { describe, expect, test, vi } from "bun:test";
-import { loginAkiIo } from "@oh-my-pi/pi-ai/registry/aki-io";
-import { loginCortecs } from "@oh-my-pi/pi-ai/registry/cortecs";
-import { loginEURouter } from "@oh-my-pi/pi-ai/registry/eurouter";
-import { loginMelious } from "@oh-my-pi/pi-ai/registry/melious";
-import { loginNebius } from "@oh-my-pi/pi-ai/registry/nebius";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
-import { loginOpper } from "@oh-my-pi/pi-ai/registry/opper";
-import { loginOvhcloud } from "@oh-my-pi/pi-ai/registry/ovhcloud";
-import { loginScaleway } from "@oh-my-pi/pi-ai/registry/scaleway";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 
 const loginCases = [
 	{
 		id: "nebius",
 		name: "Nebius Token Factory",
-		login: loginNebius,
+		login: getProviderDefinition("nebius")!.login!,
 		key: "nebius-test-key",
 		modelsUrl: "https://api.tokenfactory.nebius.com/v1/models",
+	},
+	{
+		id: "scaleway",
+		name: "Scaleway",
+		login: getProviderDefinition("scaleway")!.login!,
+		key: "scw-test-key",
+		modelsUrl: "https://api.scaleway.ai/v1/models",
 	},
 ] as const;
 
@@ -24,7 +24,7 @@ const chatCompletionsLoginCases = [
 	{
 		id: "aki-io",
 		name: "AKI.IO",
-		login: loginAkiIo,
+		login: getProviderDefinition("aki-io")!.login!,
 		key: "aki-test-key",
 		validationUrl: "https://aki.io/openai/v1/chat/completions",
 		model: "kimi-k2.7-code-1100b",
@@ -32,7 +32,7 @@ const chatCompletionsLoginCases = [
 	{
 		id: "melious",
 		name: "Melious",
-		login: loginMelious,
+		login: getProviderDefinition("melious")!.login!,
 		key: "sk-mel-test",
 		validationUrl: "https://api.melious.ai/v1/chat/completions",
 		model: "gpt-oss-120b",
@@ -40,7 +40,7 @@ const chatCompletionsLoginCases = [
 	{
 		id: "cortecs",
 		name: "Cortecs",
-		login: loginCortecs,
+		login: getProviderDefinition("cortecs")!.login!,
 		key: "cortecs-test-key",
 		validationUrl: "https://api.cortecs.ai/v1/chat/completions",
 		model: "gpt-oss-120b",
@@ -48,7 +48,7 @@ const chatCompletionsLoginCases = [
 	{
 		id: "eurouter",
 		name: "EUrouter",
-		login: loginEURouter,
+		login: getProviderDefinition("eurouter")!.login!,
 		key: "eur_test_key",
 		validationUrl: "https://api.eurouter.ai/api/v1/chat/completions",
 		model: "mistral-large-3",
@@ -56,7 +56,7 @@ const chatCompletionsLoginCases = [
 	{
 		id: "ovhcloud",
 		name: "OVHcloud AI Endpoints",
-		login: loginOvhcloud,
+		login: getProviderDefinition("ovhcloud")!.login!,
 		key: "ovh-test-key",
 		validationUrl: "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/chat/completions",
 		model: "gpt-oss-120b",
@@ -64,18 +64,10 @@ const chatCompletionsLoginCases = [
 	{
 		id: "opper",
 		name: "Opper",
-		login: loginOpper,
+		login: getProviderDefinition("opper")!.login!,
 		key: "opper-test-key",
 		validationUrl: "https://api.opper.ai/v3/compat/chat/completions",
 		model: "mistral/devstral-2512",
-	},
-	{
-		id: "scaleway",
-		name: "Scaleway Generative APIs",
-		login: loginScaleway,
-		key: "scw-test-key",
-		validationUrl: "https://api.scaleway.ai/v1/chat/completions",
-		model: "glm-5.2",
 	},
 ] as const;
 

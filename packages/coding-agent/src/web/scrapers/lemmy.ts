@@ -1,6 +1,10 @@
 import { tryParseJson } from "@oh-my-pi/pi-utils";
 import type { RenderResult, SpecialHandler } from "./types";
 import { buildResult, loadPage } from "./types";
+import { isNonJsonApiResponse, PlatformProbeCache } from "./utils";
+
+/** Origins known (not) to serve the Lemmy API; skips doomed API calls on non-Lemmy hosts. */
+const lemmyOrigins = new PlatformProbeCache();
 
 interface LemmyCreator {
 	name: string;
@@ -140,15 +144,20 @@ export const handleLemmy: SpecialHandler = async (
 		if (!Number.isFinite(id)) return null;
 
 		const baseUrl = parsed.origin;
+		if ((await lemmyOrigins.get(baseUrl)) === false) return null;
 		const fetchedAt = new Date().toISOString();
 
 		let postId = id;
 		if (kind === "comment") {
 			const commentUrl = `${baseUrl}/api/v3/comment?id=${id}`;
 			const commentResult = await loadPage(commentUrl, { timeout, signal });
-			if (!commentResult.ok) return null;
+			if (!commentResult.ok) {
+				if (isNonJsonApiResponse(commentResult)) lemmyOrigins.record(baseUrl, false);
+				return null;
+			}
 
 			const commentData = tryParseJson<LemmyCommentResponse>(commentResult.content);
+			if (commentData === null) lemmyOrigins.record(baseUrl, false);
 			const commentView = commentData?.comment_view;
 			const commentPostId = commentView?.comment?.post_id;
 			if (!commentPostId) return null;
@@ -163,11 +172,17 @@ export const handleLemmy: SpecialHandler = async (
 			loadPage(commentsUrl, { timeout, signal }),
 		]);
 
-		if (!postResult.ok || !commentsResult.ok) return null;
+		if (!postResult.ok || !commentsResult.ok) {
+			if (!postResult.ok && isNonJsonApiResponse(postResult)) lemmyOrigins.record(baseUrl, false);
+			return null;
+		}
 
 		const postData = tryParseJson<LemmyPostResponse>(postResult.content);
+		if (postData === null) lemmyOrigins.record(baseUrl, false);
 		const postView = postData?.post_view;
 		if (!postView) return null;
+		// Only negatives gate requests; a positive overwrites a negative a concurrent request recorded.
+		lemmyOrigins.record(baseUrl, true);
 
 		const commentsData = tryParseJson<LemmyCommentListResponse>(commentsResult.content);
 		const comments = commentsData?.comments ?? [];

@@ -1,0 +1,3 @@
+### "echo a{b,c\t"
+% echo a{b,c
+@ 0,12

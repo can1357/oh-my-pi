@@ -1,15 +1,15 @@
 import { prompt } from "@oh-my-pi/pi-utils";
-import type { DaemonCompletionNotification } from "../launch/protocol";
+import type { DaemonCompletionEvent } from "../daemon/protocol";
 import launchCompletionTemplate from "../prompts/session/launch-completion.md" with { type: "text" };
 import type { CustomMessage } from "./messages";
 
-/** Yield-queue kind for broker-owned supervised process completions. */
-export const LAUNCH_COMPLETION_MESSAGE_TYPE = "launch-completion";
+import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "@oh-my-pi/pi-tui/chat/messages";
+export { LAUNCH_COMPLETION_MESSAGE_TYPE } from "@oh-my-pi/pi-tui/chat/messages";
 
-/** One broker completion awaiting injection into its owning session. */
-export type LaunchCompletionEntry = DaemonCompletionNotification;
+/** One daemon service completion awaiting injection into its owning session. */
+export type LaunchCompletionEntry = DaemonCompletionEvent;
 
-/** Whether a broker completion belongs to the primary session or its advisor. */
+/** Whether a daemon service completion belongs to the primary session or its advisor. */
 export function isLaunchCompletionOwner(owner: string, sessionId: string): boolean {
 	return owner === sessionId || owner === `${sessionId}-advisor`;
 }
@@ -20,18 +20,18 @@ export function buildLaunchCompletionBatchMessage(entries: LaunchCompletionEntry
 		role: "custom",
 		customType: LAUNCH_COMPLETION_MESSAGE_TYPE,
 		content: entries
-			.map(({ daemon }) =>
+			.map(({ unit }) =>
 				prompt.render(launchCompletionTemplate, {
-					name: daemon.name,
-					state: daemon.state,
-					exitCode: daemon.exitCode,
-					hasExitCode: daemon.exitCode !== undefined,
+					name: unit.key,
+					state: unit.state,
+					exitCode: unit.exitCode,
+					hasExitCode: unit.exitCode !== undefined,
 				}),
 			)
 			.join("\n"),
 		display: true,
 		attribution: "agent",
-		details: { daemons: entries.map(entry => entry.daemon) },
+		details: { daemons: entries.map(entry => entry.unit) },
 		timestamp: Date.now(),
 	};
 }

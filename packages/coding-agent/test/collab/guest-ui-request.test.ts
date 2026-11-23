@@ -12,8 +12,10 @@
  * frame is observable.
  */
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import * as fsp from "node:fs/promises";
 import { generateRoomKey, importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
+import { MAX_AUTO_REJOINS } from "@oh-my-pi/pi-wire";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import {
 	COLLAB_PROTO,
@@ -23,6 +25,7 @@ import {
 	parseCollabLink,
 } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type {
 	ExtensionAskDialogQuestion,
 	ExtensionUIDialogOptions,
@@ -31,6 +34,7 @@ import type {
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
+import { instrumentRelay, waitFor } from "./helpers/throttled-host";
 
 // In-memory transport: shared FakeWebSocket + InMemoryRelay harness (see
 // ./helpers/in-memory-relay), same contract as the other collab tests.
@@ -86,7 +90,7 @@ function makeState(): CollabSessionState {
 	};
 }
 
-async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarness> {
+async function makeHarness(opts?: { readOnly?: boolean; rejectWith?: unknown }): Promise<GuestUiHarness> {
 	const roomId = "ui-request-room";
 	const roomKey = generateRoomKey();
 	const cryptoKey = await importRoomKey(roomKey);
@@ -98,6 +102,9 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 	const presentStub = (
 		fields: Omit<DialogStub, "aborted" | "whenAborted" | "settle">,
 	): Promise<string | undefined> => {
+		// A presenter that rejects is app-supplied code, the same way the socket's
+		// frame handler is, so what it rejects with is not this library's to assume.
+		if (opts && "rejectWith" in opts) return Promise.reject(opts.rejectWith);
 		const { promise, resolve } = Promise.withResolvers<string | undefined>();
 		const abortGate = Promise.withResolvers<void>();
 		let settled = false;
@@ -189,7 +196,7 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 
 	const ctx = {
 		collabGuest: undefined as CollabGuestLink | undefined,
-		settings: { get: () => "" },
+		settings: Settings.isolated(),
 		sessionManager: {
 			getSessionFile: () => null,
 			getSessionName: () => "local session",
@@ -207,6 +214,7 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 			},
 		},
 		statusContainer: { clear: () => {} },
+		pendingShellContainer: { clear: () => {} },
 		pendingMessagesContainer: { clear: () => {} },
 		compactionQueuedMessages: [],
 		streamingComponent: undefined,
@@ -216,6 +224,7 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 		loadingAnimation: undefined,
 		statusLine: {
 			setCollabStatus: () => {},
+			setAwaitingAnswer: () => {},
 			invalidate: () => {},
 			resetActiveTime: () => {},
 			markActivityStart: () => {},
@@ -240,8 +249,18 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 		},
 		updateEditorTopBorder: () => {},
 		updateEditorBorderColor: () => {},
-		eventController: { handleEvent: () => Promise.resolve() },
+		eventController: {
+			dispatchSessionEvent: () => Promise.resolve(),
+			takeDisplaceableComponents: () => [],
+			resetTranscriptAnchors: () => {},
+		},
 		syncRunningSubagentBadge: () => {},
+		setCollabGuest: (guest: InteractiveModeContext["collabGuest"]) => {
+			Object.assign(ctx, { collabGuest: guest });
+		},
+		closeLinkBrowser: () => {},
+		rerenderInLinkBrowser: () => {},
+		rebuildTranscriptScrollback: () => {},
 		showHookSelector: (
 			title: string,
 			options: ExtensionUISelectItem[],
@@ -277,20 +296,24 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 
 const harnessCleanups: (() => Promise<void>)[] = [];
 let writeSpy: { mockRestore(): void } | null = null;
+let renameSpy: { mockRestore(): void } | null = null;
 
 beforeEach(() => {
 	installInMemoryRelay();
 	writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+	renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
 });
 
 afterEach(async () => {
 	for (const cleanup of harnessCleanups.splice(0).reverse()) await cleanup();
 	writeSpy?.mockRestore();
+	renameSpy?.mockRestore();
 	writeSpy = null;
+	renameSpy = null;
 	uninstallInMemoryRelay();
 });
 
-async function openHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarness> {
+async function openHarness(opts?: { readOnly?: boolean; rejectWith?: unknown }): Promise<GuestUiHarness> {
 	const harness = await makeHarness(opts);
 	harnessCleanups.push(harness.cleanup);
 	return harness;
@@ -444,7 +467,7 @@ describe("collab TUI guest ui-request handling (#4049)", () => {
 /** Minimal InteractiveModeContext double: only the members CollabHost touches. */
 function makeHostContext(): InteractiveModeContext {
 	return {
-		settings: { get: () => "" },
+		settings: Settings.isolated(),
 		sessionManager: {
 			getSessionId: () => "sess-proto",
 			getCwd: () => "/tmp",
@@ -468,6 +491,7 @@ function makeHostContext(): InteractiveModeContext {
 		eventBus: undefined,
 		statusLine: {
 			setCollabStatus: () => {},
+			setAwaitingAnswer: () => {},
 			invalidate: () => {},
 			getCachedContextBreakdown: () => ({ usedTokens: 0, contextWindow: 0 }),
 		},
@@ -529,31 +553,14 @@ describe("collab proto handshake (#4049)", () => {
 			expect(reply.message).toContain("protocol mismatch");
 			expect(reply.message).toContain(`host speaks v${COLLAB_PROTO}`);
 			expect(reply.message).toContain(`guest sent v${COLLAB_PROTO - 1}`);
-			// The rejected guest was never admitted: no participant entry, and a
-			// host ask finds no writable peer to route to.
+			// The rejected guest was never admitted. A host ask is retained for a
+			// later writer instead of being exposed to the stale peer.
 			expect(host.participants.filter(p => p.role !== "host")).toEqual([]);
-			expect(host.requestGuestUi({ kind: "select", title: "anyone?", options: ["Yes"] })).toBeNull();
-		} finally {
-			guest.socket.close();
-			await host.stop("test done");
-		}
-	});
-
-	it("welcomes a current-proto guest at v3 and round-trips a ui-request", async () => {
-		const host = new CollabHost(makeHostContext());
-		await host.start("ws://localhost:8787");
-		const guest = await joinRawGuest(host.link, COLLAB_PROTO);
-		try {
-			const welcome = await guest.nextFrame();
-			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
-			expect(welcome.proto).toBe(3);
-
-			const pending = host.requestGuestUi({ kind: "select", title: "Continue?", options: ["Yes"] });
-			if (!pending) throw new Error("expected writable guest UI request");
-			const request = await guest.nextFrame();
-			if (request.t !== "ui-request") throw new Error(`expected ui-request, got ${request.t}`);
-			guest.socket.send({ t: "ui-response", reqId: request.request.reqId, value: "Yes" });
-			expect(await pending).toEqual({ kind: "answered", value: "Yes" });
+			const abort = new AbortController();
+			const pending = host.requestGuestUi({ kind: "select", title: "anyone?", options: ["Yes"] }, abort.signal);
+			if (!pending) throw new Error("expected retained UI request");
+			abort.abort();
+			expect(await pending).toEqual({ kind: "unavailable" });
 		} finally {
 			guest.socket.close();
 			await host.stop("test done");
@@ -582,8 +589,12 @@ describe("collab proto handshake (#4049)", () => {
 		await hostOpen.promise;
 
 		const ctx = {
-			settings: { get: () => "" },
+			settings: Settings.isolated(),
 			sessionManager: { getSessionFile: () => null },
+			syncRunningSubagentBadge: () => {},
+			setCollabGuest: (guest: InteractiveModeContext["collabGuest"]) => {
+				Object.assign(ctx, { collabGuest: guest });
+			},
 		} as unknown as InteractiveModeContext;
 		const guest = new CollabGuestLink(ctx);
 		try {
@@ -674,6 +685,37 @@ describe("collab host dialog vs teardown (#4049 follow-up)", () => {
 			},
 		};
 	}
+
+	it("lets a later writer dismiss a host dialog that was opened with no peers", async () => {
+		const ctx = makeHostContext();
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		ctx.collabHost = host;
+		const controller = new StubDialogController(ctx);
+		let guest: { socket: CollabSocket; nextFrame(): Promise<CollabFrame> } | undefined;
+		try {
+			const result = controller.showCollabAwareSelector("Deploy later?", ["Yes", "No"]);
+			const dialog = controller.localDialogs[0];
+			if (!dialog) throw new Error("expected the local dialog before a writer joined");
+
+			guest = await joinRawGuest(host.link, COLLAB_PROTO);
+			const welcome = await guest.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+			// Force a directed frame after hello so a missing replay fails without
+			// relying on a timeout: the pending ui-request must precede this error.
+			guest.socket.send({ t: "agent-cmd", cmd: "chat", agentId: "barrier", text: "" });
+			const request = await guest.nextFrame();
+			if (request.t !== "ui-request") throw new Error(`expected ui-request, got ${request.t}`);
+			expect(request.request.title).toBe("Deploy later?");
+
+			guest.socket.send({ t: "ui-response", reqId: request.request.reqId, value: undefined });
+			expect(await result).toBeUndefined();
+			expect(dialog.signal?.aborted).toBe(true);
+		} finally {
+			guest?.socket.close();
+			await host.stop("test done");
+		}
+	});
 
 	it("keeps the local dialog running through collab teardown and returns its eventual answer", async () => {
 		const race = await openRace();
@@ -772,15 +814,17 @@ describe("guest ask unavailable literal answer (#4375)", () => {
  *  Reuses makeHostContext for the CollabHost-facing members. */
 function makeAskHostContext(): InteractiveModeContext {
 	const base = makeHostContext();
-	// Stub only the surface the local ask-dialog mount path calls: container
-	// clear/addChild, ui focus/render, and editor (dispose path). The real
+	// Stub only the surface the local ask-dialog mount path calls: the ask's and
+	// composer's containers, ui focus/render, the composer's border, and editor. The real
 	// InteractiveModeContext has many more members; the double-cast below is
 	// the established test pattern in this file (see makeHostContext) for a
 	// complex interface that is only partially exercised.
 	const stub = {
 		...base,
 		editorContainer: { clear: () => {}, addChild: () => {} },
+		askContainer: { addChild: () => {}, removeChild: () => {} },
 		editor: { getText: () => "", setText: () => {} },
+		closeLinkBrowser: () => {},
 		ui: {
 			requestRender: () => {},
 			setFocus: () => {},
@@ -790,6 +834,198 @@ function makeAskHostContext(): InteractiveModeContext {
 	};
 	return stub as unknown as InteractiveModeContext;
 }
+
+describe("guest ask host reconnect", () => {
+	it.each(["guest", "host"])("lets a writer answer an open ask after a %s disconnect", async disconnect => {
+		const relay = installInMemoryRelay();
+		const probe = instrumentRelay(relay, { throttle: false });
+		const ctx = makeAskHostContext();
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		ctx.collabHost = host;
+		const controller = new ExtensionUiController(ctx);
+		const abort = new AbortController();
+		const firstGuest = await joinRawGuest(host.link, COLLAB_PROTO);
+		let rejoined: { socket: CollabSocket; nextFrame(): Promise<CollabFrame> } | undefined;
+		try {
+			expect((await firstGuest.nextFrame()).t).toBe("welcome");
+			const result = controller.showAskDialog(
+				[{ id: "lock", question: "How should it lock?", options: [{ label: "ACCESS EXCLUSIVE" }] }],
+				{ signal: abort.signal },
+			);
+			expect((await firstGuest.nextFrame()).t).toBe("ui-request");
+
+			if (disconnect === "host") {
+				const previousSocket = probe.hostSocket();
+				previousSocket.close();
+				await waitFor(() => probe.hostSocket() !== previousSocket && host.relayConnected, "host did not reconnect");
+			} else {
+				firstGuest.socket.close();
+			}
+			rejoined = await joinRawGuest(host.link, COLLAB_PROTO);
+			expect((await rejoined.nextFrame()).t).toBe("welcome");
+			// A directed error is a barrier: a retained ask must arrive before it.
+			rejoined.socket.send({ t: "agent-cmd", cmd: "chat", agentId: "barrier", text: "" });
+			const request = await rejoined.nextFrame();
+			expect(request.t).toBe("ui-request");
+			if (request.t !== "ui-request") throw new Error("pending ask was lost across the host reconnect");
+			rejoined.socket.send({ t: "ui-response", reqId: request.request.reqId, value: "ACCESS EXCLUSIVE" });
+			expect(await result).toMatchObject({
+				kind: "submit",
+				results: [{ id: "lock", selectedOptions: ["ACCESS EXCLUSIVE"] }],
+			});
+		} finally {
+			abort.abort();
+			firstGuest.socket.close();
+			rejoined?.socket.close();
+			await host.stop("test done");
+		}
+	});
+});
+
+describe("guest ask room ownership", () => {
+	it.each(["next question", "custom answer"])("does not mirror a %s to a successor room", async followup => {
+		const ctx = makeAskHostContext();
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		ctx.collabHost = host;
+		const successor = new CollabHost(ctx);
+		const guest = await joinRawGuest(host.link, COLLAB_PROTO);
+		const abort = new AbortController();
+		const replaced = Promise.withResolvers<void>();
+		const requestGuestUi = host.requestGuestUi.bind(host);
+		const requestSpy = spyOn(host, "requestGuestUi").mockImplementation((request, signal) => {
+			const response = requestGuestUi(request, signal);
+			// Exercise the settled-answer / suspended-loop boundary. Ending the old
+			// room cannot change this already answered promise to unavailable.
+			void response?.then(() => {
+				void host.stop("replaced");
+				ctx.collabHost = successor;
+				replaced.resolve();
+			});
+			return response;
+		});
+		try {
+			expect((await guest.nextFrame()).t).toBe("welcome");
+			const questions: ExtensionAskDialogQuestion[] = [
+				{ id: "first", question: "Original room question?", options: [{ label: "Alpha" }] },
+			];
+			if (followup === "next question") {
+				questions.push({ id: "second", question: "Private next question?", options: [{ label: "Beta" }] });
+			}
+			const controller = new ExtensionUiController(ctx);
+			const result = controller.showAskDialog(questions, { signal: abort.signal });
+			const request = await guest.nextFrame();
+			if (request.t !== "ui-request") throw new Error(`expected ui-request, got ${request.t}`);
+			guest.socket.send({
+				t: "ui-response",
+				reqId: request.request.reqId,
+				value: followup === "next question" ? "Alpha" : "Other (type your own)",
+			});
+			await replaced.promise;
+			await Bun.sleep(0);
+			// Pending requests are replayed to the next writer even before start().
+			// The successor must have no retained question from the original ask.
+			expect(successor.inputRequired).toBe(false);
+			abort.abort();
+			expect(await result).toBeUndefined();
+		} finally {
+			abort.abort();
+			requestSpy.mockRestore();
+			guest.socket.close();
+			await host.stop("test done");
+			await successor.stop("test done");
+		}
+	});
+});
+
+describe("collab TUI guest resync", () => {
+	it("re-sends hello when the host drops it, up to the rejoin cap", async () => {
+		const h = await openHarness();
+		let hellos = 0;
+		const scripted = h.hostSocket.onFrame;
+		h.hostSocket.onFrame = (frame, fromPeer) => {
+			if (frame.t === "hello") hellos++;
+			scripted?.(frame, fromPeer);
+		};
+		for (let i = 1; i <= MAX_AUTO_REJOINS; i++) {
+			h.hostSocket.send({ t: "error", message: "rejoin to resync", resync: true });
+			await waitFor(() => hellos === i, `guest never re-sent hello for resync ${i}`);
+			// The scripted host welcomes the hello; settle it before the next resync.
+			await h.barrier();
+		}
+		h.hostSocket.send({ t: "error", message: "rejoin to resync", resync: true });
+		await h.barrier();
+		expect(hellos).toBe(MAX_AUTO_REJOINS);
+	});
+
+	it("says hello again when a rejoin's snapshot stops arriving", async () => {
+		const h = await openHarness();
+		let hellos = 0;
+		h.hostSocket.onFrame = frame => {
+			if (frame.t !== "hello") return;
+			hellos++;
+			// A welcome that promises entries, then nothing: the batch was cut off.
+			h.hostSocket.send({
+				t: "welcome",
+				proto: COLLAB_PROTO,
+				header: { type: "session", id: "remote-session", timestamp: "2026-06-30T00:00:00Z", cwd: "/tmp" },
+				state: makeState(),
+				agents: [],
+				entryCount: 2,
+			});
+		};
+		const timeouts: (() => void)[] = [];
+		const realSetTimeout = globalThis.setTimeout;
+		const timerSpy = spyOn(globalThis, "setTimeout").mockImplementation(((
+			fn: () => void,
+			ms?: number,
+			...args: unknown[]
+		) => {
+			if (ms === 30_000) timeouts.push(fn);
+			return realSetTimeout(fn, ms, ...args);
+		}) as typeof setTimeout);
+		try {
+			h.hostSocket.send({ t: "error", message: "rejoin to resync", resync: true });
+			await waitFor(() => hellos === 1, "guest never re-sent hello for the resync");
+			await h.barrier();
+			// The welcome timer, then the snapshot-progress timer the welcome armed.
+			expect(timeouts).toHaveLength(2);
+			timeouts[1]!();
+			await waitFor(() => hellos === 2, "guest stayed frozen on a snapshot that never finished");
+		} finally {
+			timerSpy.mockRestore();
+		}
+	});
+
+	it("says hello again when a rejoin's welcome never arrives", async () => {
+		const h = await openHarness();
+		let hellos = 0;
+		// The host refuses the rejoin's welcome (a full send queue): it answers nothing.
+		h.hostSocket.onFrame = frame => {
+			if (frame.t === "hello") hellos++;
+		};
+		const welcomeTimeouts: (() => void)[] = [];
+		const realSetTimeout = globalThis.setTimeout;
+		const timerSpy = spyOn(globalThis, "setTimeout").mockImplementation(((
+			fn: () => void,
+			ms?: number,
+			...args: unknown[]
+		) => {
+			if (ms === 30_000) welcomeTimeouts.push(fn);
+			return realSetTimeout(fn, ms, ...args);
+		}) as typeof setTimeout);
+		try {
+			h.hostSocket.send({ t: "error", message: "rejoin to resync", resync: true });
+			await waitFor(() => hellos === 1, "guest never re-sent hello for the resync");
+			expect(welcomeTimeouts).toHaveLength(1);
+			welcomeTimeouts[0]!();
+			await waitFor(() => hellos === 2, "guest stayed waiting on a welcome that never came");
+		} finally {
+			timerSpy.mockRestore();
+		}
+	});
+});
 
 describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () => {
 	/** Skip ui-request-end dismissal frames, wait for the next ui-request. */
@@ -852,6 +1088,317 @@ describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () 
 			if (settled?.kind === "submit") {
 				expect(settled.results[0]?.selectedOptions).toEqual(["Option A"]);
 			}
+			guest.socket.close();
+		} finally {
+			await host.stop("test done");
+		}
+	});
+
+	it("sends sanitized display copies to the guest while echoing original labels", async () => {
+		// \r-degenerate args must not splatter the guest selector, and the
+		// guest's answer (given against display labels) must map back to the
+		// original correlation values in the result.
+		const ctx = makeAskHostContext();
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		ctx.collabHost = host;
+		const controller = new ExtensionUiController(ctx);
+		try {
+			const guest = await joinRawGuest(host.link, COLLAB_PROTO);
+			const welcome = await guest.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+			const questions: ExtensionAskDialogQuestion[] = [
+				{
+					id: "q1",
+					question: "Pick\r\rone?",
+					options: [{ label: "Retry\rnow", description: "Try\r\ragain." }, { label: "Abort" }],
+				},
+			];
+			const result = controller.showAskDialog(questions);
+
+			const first = await nextUiRequest(guest);
+			expect(JSON.stringify(first.request)).not.toContain("\r");
+			expect(selectLabels(first).slice(0, 2)).toEqual(["Retry now", "Abort"]);
+
+			// Guest answers with the sanitized display label.
+			guest.socket.send({ t: "ui-response", reqId: first.request.reqId, value: "Retry now" });
+			const settled = await result;
+			expect(settled?.kind).toBe("submit");
+			if (settled?.kind === "submit") {
+				expect(settled.results[0]?.options).toEqual(["Retry\rnow", "Abort"]);
+				expect(settled.results[0]?.selectedOptions).toEqual(["Retry\rnow"]);
+			}
+			guest.socket.close();
+		} finally {
+			await host.stop("test done");
+		}
+	});
+
+	it("maps multi-select guest toggles back to original labels", async () => {
+		// Same display/identity split through the checkbox path: the guest
+		// toggles sanitized rows (checkedIndices round-trips against the
+		// originals), submits via Next, and the result echoes originals.
+		const ctx = makeAskHostContext();
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		ctx.collabHost = host;
+		const controller = new ExtensionUiController(ctx);
+		try {
+			const guest = await joinRawGuest(host.link, COLLAB_PROTO);
+			const welcome = await guest.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+			const questions: ExtensionAskDialogQuestion[] = [
+				{
+					id: "q2",
+					question: "Pick\rseveral?",
+					options: [{ label: "Gamma\rG" }, { label: "Delta" }],
+					multi: true,
+				},
+			];
+			const result = controller.showAskDialog(questions);
+
+			const first = await nextUiRequest(guest);
+			expect(JSON.stringify(first.request)).not.toContain("\r");
+			guest.socket.send({ t: "ui-response", reqId: first.request.reqId, value: "Gamma G" });
+
+			const second = await nextUiRequest(guest);
+			expect(selectLabels(second)).toContain("Next →");
+			guest.socket.send({ t: "ui-response", reqId: second.request.reqId, value: "Next →" });
+
+			const settled = await result;
+			expect(settled?.kind).toBe("submit");
+			if (settled?.kind === "submit") {
+				expect(settled.results[0]?.options).toEqual(["Gamma\rG", "Delta"]);
+				expect(settled.results[0]?.selectedOptions).toEqual(["Gamma\rG"]);
+			}
+			guest.socket.close();
+		} finally {
+			await host.stop("test done");
+		}
+	});
+
+	it("disambiguates guest rows that sanitize alike and keeps sentinel actions", async () => {
+		// Two options sanitizing to one label must render as distinct rows or
+		// the second row answers the first; a sanitized label matching a
+		// runtime sentinel must not trigger that action either.
+		const ctx = makeAskHostContext();
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		ctx.collabHost = host;
+		const controller = new ExtensionUiController(ctx);
+		try {
+			const guest = await joinRawGuest(host.link, COLLAB_PROTO);
+			const welcome = await guest.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+			const questions: ExtensionAskDialogQuestion[] = [
+				{
+					id: "q3",
+					question: "Retry?",
+					options: [{ label: "Retry\rnow" }, { label: "Retry now" }],
+				},
+				{
+					id: "q4",
+					question: "Discuss?",
+					options: [{ label: "Chat\rabout this" }, { label: "Beta" }],
+				},
+			];
+			const result = controller.showAskDialog(questions);
+
+			const first = await nextUiRequest(guest);
+			expect(JSON.stringify(first.request)).not.toContain("\r");
+			expect(selectLabels(first).slice(0, 2)).toEqual(["Retry now", "Retry now (2)"]);
+			// Second row answers the second original, not the first.
+			guest.socket.send({ t: "ui-response", reqId: first.request.reqId, value: "Retry now (2)" });
+
+			const second = await nextUiRequest(guest);
+			expect(JSON.stringify(second.request)).not.toContain("\r");
+			expect(selectLabels(second).slice(0, 2)).toEqual(["Chat about this (2)", "Beta"]);
+			// Sanitized sentinel text answers the option — not a chat redirect.
+			guest.socket.send({ t: "ui-response", reqId: second.request.reqId, value: "Chat about this (2)" });
+
+			const settled = await result;
+			expect(settled?.kind).toBe("submit");
+			if (settled?.kind === "submit") {
+				expect(settled.results[0]?.selectedOptions).toEqual(["Retry now"]);
+				expect(settled.results[1]?.selectedOptions).toEqual(["Chat\rabout this"]);
+			}
+			guest.socket.close();
+		} finally {
+			await host.stop("test done");
+		}
+	});
+
+	it("coerces malformed guest questions instead of rejecting the race", async () => {
+		// A JS extension can supply a question entry without a string
+		// `question` field; the guest path must not throw inside the
+		// sanitizer and reject the whole showAskDialog race.
+		const ctx = makeAskHostContext();
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		ctx.collabHost = host;
+		const controller = new ExtensionUiController(ctx);
+		try {
+			const guest = await joinRawGuest(host.link, COLLAB_PROTO);
+			const welcome = await guest.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+			const questions = [{ id: "q1", options: [{ label: "Alpha" }] }] as unknown as ExtensionAskDialogQuestion[];
+			const result = controller.showAskDialog(questions);
+
+			const first = await nextUiRequest(guest);
+			if (first.request.kind !== "select") throw new Error(`expected select, got ${first.request.kind}`);
+			expect(first.request.title).toBe("");
+			guest.socket.send({ t: "ui-response", reqId: first.request.reqId, value: "Alpha" });
+
+			const settled = await result;
+			expect(settled?.kind).toBe("submit");
+			if (settled?.kind === "submit") {
+				expect(settled.results[0]?.id).toBe("q1");
+				expect(settled.results[0]?.question).toBe("");
+				expect(settled.results[0]?.selectedOptions).toEqual(["Alpha"]);
+			}
+			guest.socket.close();
+		} finally {
+			await host.stop("test done");
+		}
+	});
+});
+
+describe("guest HTML form race", () => {
+	async function nextUiRequest(guest: {
+		nextFrame(): Promise<CollabFrame>;
+	}): Promise<CollabFrame & { t: "ui-request" }> {
+		for (;;) {
+			const frame = await guest.nextFrame();
+			if (frame.t === "ui-request") return frame;
+		}
+	}
+
+	it("walks the guest through each field and returns its answers as form data", async () => {
+		const ctx = makeAskHostContext();
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		ctx.collabHost = host;
+		const controller = new ExtensionUiController(ctx);
+		try {
+			const guest = await joinRawGuest(host.link, COLLAB_PROTO);
+			const welcome = await guest.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+			const result = controller.showFormDialog(`<form>
+				<input type="hidden" name="plan" value="v2">
+				<fieldset><legend>Database</legend>
+					<label><input type="radio" name="db" value="sqlite"> SQLite</label>
+					<label><input type="radio" name="db" value="postgres" checked> Postgres</label>
+				</fieldset>
+				<fieldset><legend>Extras</legend>
+					<label><input type="checkbox" name="extras" value="cache" required> Cache</label>
+					<label><input type="checkbox" name="extras" value="queue"> Queue</label>
+				</fieldset>
+				<label>Workers <input type="number" name="workers" value="3" min="1"></label>
+			</form>`);
+
+			const db = await nextUiRequest(guest);
+			if (db.request.kind !== "select") throw new Error(`expected select, got ${db.request.kind}`);
+			expect(db.request.options).toEqual(["SQLite", "Postgres", "Other (type your own)"]);
+			expect(db.request.initialIndex).toBe(1);
+			guest.socket.send({ t: "ui-response", reqId: db.request.reqId, value: "SQLite" });
+
+			// A required group offers Next only once something is checked.
+			const extras = await nextUiRequest(guest);
+			if (extras.request.kind !== "select") throw new Error(`expected select, got ${extras.request.kind}`);
+			expect(extras.request.options).toEqual(["Cache", "Queue", "Other (type your own)"]);
+			guest.socket.send({ t: "ui-response", reqId: extras.request.reqId, value: "Queue" });
+			const extrasNext = await nextUiRequest(guest);
+			if (extrasNext.request.kind !== "select") throw new Error(`expected select, got ${extrasNext.request.kind}`);
+			expect(extrasNext.request.checkedIndices).toEqual([1]);
+			guest.socket.send({ t: "ui-response", reqId: extrasNext.request.reqId, value: "Next →" });
+
+			// A value the form rejects is asked again with the reason.
+			const workers = await nextUiRequest(guest);
+			if (workers.request.kind !== "editor") throw new Error(`expected editor, got ${workers.request.kind}`);
+			expect(workers.request.prefill).toBe("3");
+			guest.socket.send({ t: "ui-response", reqId: workers.request.reqId, value: "0" });
+			const retry = await nextUiRequest(guest);
+			if (retry.request.kind !== "editor") throw new Error(`expected editor, got ${retry.request.kind}`);
+			expect(retry.request.prefill).toBe("0");
+			expect(retry.request.title).not.toBe(workers.request.title);
+			guest.socket.send({ t: "ui-response", reqId: retry.request.reqId, value: "8" });
+
+			expect(await result).toEqual({ data: { plan: "v2", db: "sqlite", extras: ["queue"], workers: 8 } });
+			guest.socket.close();
+		} finally {
+			await host.stop("test done");
+		}
+	});
+
+	it("takes a guest's Other text as a radio's value and appends it to a checkbox group", async () => {
+		const ctx = makeAskHostContext();
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		ctx.collabHost = host;
+		const controller = new ExtensionUiController(ctx);
+		try {
+			const guest = await joinRawGuest(host.link, COLLAB_PROTO);
+			const welcome = await guest.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+			const result = controller.showFormDialog(`<form>
+				<fieldset><legend>Database</legend>
+					<label><input type="radio" name="db" value="sqlite"> SQLite</label>
+					<label><input type="radio" name="db" value="postgres"> Postgres</label>
+				</fieldset>
+				<fieldset><legend>Extras</legend>
+					<label><input type="checkbox" name="extras" value="cache"> Cache</label>
+					<label><input type="checkbox" name="extras" value="queue"> Queue</label>
+				</fieldset>
+			</form>`);
+			const answer = async (kind: "select" | "editor", value?: string) => {
+				const frame = await nextUiRequest(guest);
+				if (frame.request.kind !== kind) throw new Error(`expected ${kind}, got ${frame.request.kind}`);
+				guest.socket.send({ t: "ui-response", reqId: frame.request.reqId, value });
+				return frame.request;
+			};
+
+			// A cancelled Other editor re-shows the options.
+			await answer("select", "Other (type your own)");
+			await answer("editor");
+			await answer("select", "Other (type your own)");
+			expect((await answer("editor", " MySQL 8 ")).title).toBe("Database");
+
+			await answer("select", "Cache");
+			await answer("select", "Other (type your own)");
+			await answer("editor", "terraform");
+			const done = await answer("select", "Next →");
+			if (done.kind !== "select") throw new Error(`expected select, got ${done.kind}`);
+			expect(done.checkedIndices).toEqual([0, 2]);
+
+			expect(await result).toEqual({ data: { db: "MySQL 8", extras: ["cache", "terraform"] } });
+			guest.socket.close();
+		} finally {
+			await host.stop("test done");
+		}
+	});
+
+	it("cancels the form when the guest cancels", async () => {
+		const ctx = makeAskHostContext();
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		ctx.collabHost = host;
+		const controller = new ExtensionUiController(ctx);
+		try {
+			const guest = await joinRawGuest(host.link, COLLAB_PROTO);
+			const welcome = await guest.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+			const result = controller.showFormDialog(`<form><label>Name <input name="name"></label></form>`);
+			const name = await nextUiRequest(guest);
+			guest.socket.send({ t: "ui-response", reqId: name.request.reqId });
+
+			expect(await result).toBeUndefined();
 			guest.socket.close();
 		} finally {
 			await host.stop("test done");

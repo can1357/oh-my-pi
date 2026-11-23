@@ -1,3 +1,4 @@
 class "gemma" {
     bounded "gemma"
+    revision prefix="gemma-"
 }

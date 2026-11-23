@@ -45,22 +45,23 @@ bun run serve --port 4700
   benchmark, score, progress, spend, and tokens.
 - `POST /api/runs` — launch through a benchmark adapter. Body:
 
-  ```json
-  {
-    "benchmark": "edit",
-    "model": "anthropic/claude-opus-4-8",
-    "tasks": 20,
-    "concurrency": 4,
-    "attempts": 2,
-    "jobName": "edit-baseline",
-    "role": "baseline",
-    "goal": "compare edit strategies"
-  }
-  ```
+   ```json
+   {
+   	"benchmark": "edit",
+   	"model": "anthropic/claude-opus-4-8",
+   	"tasks": 20,
+   	"concurrency": 4,
+   	"attempts": 2,
+   	"jobName": "edit-baseline",
+   	"role": "baseline",
+   	"goal": "compare edit strategies"
+   }
+   ```
 
-  `benchmark` is `harbor`, `edit`, or `snapcompact`. Harbor uses `dataset`,
-  `include`, `timeoutMultiplier`, and `prewalk`; edit uses `include` as task IDs;
-  SnapCompact uses `conditions` and treats `tasks` as the passage limit.
+   `benchmark` is `harbor`, `edit`, or `snapcompact`. Harbor uses `dataset`,
+   `include`, `timeoutMultiplier`, and `prewalk`; edit uses `include` as task IDs;
+   SnapCompact uses `conditions` and treats `tasks` as the passage limit.
+
 - `GET /api/runs/:name` — `{ run, traces }` (syncs native artifacts on read).
 - `POST /api/runs/:name/cancel` — cancel a manager-launched run.
 - `DELETE /api/runs/:name` — permanently delete a finished run (DB row **and**
@@ -121,28 +122,60 @@ omitted from the benchmark prompt. Override infrastructure with
 `--vmon-host`, `--vmon-source`, `--vmon-bin`, `--vmon-home`,
 `--vmon-kernel`, `--vmon-agent`, and `--gateway-url`.
 
+## Compaction benchmark (ProgramBench baseline)
+
+`bench:compaction baseline` runs one ProgramBench task (default
+`bellard__quickjs.d7ae12a`) with omp's auto-compaction off, records every
+turn's request size, and captures the fork point every compaction arm
+resumes from: at the first turn whose request reaches `--fork-tokens`
+(default 300k) it runs `docker commit`, which pauses the container, so the
+image holds the workspace and the session prefix with no tool mid-run.
+
+```bash
+bun --cwd packages/metaharness run bench:compaction baseline --run qjs-ds41-1
+```
+
+- **Docker over SSH, official sandbox.** Trials run on `--host` (default
+  `xeon.internal`, x86_64) with ProgramBench's inference limits:
+  `--network none --cpus 20 --memory 60g --cap-drop SYS_PTRACE`, user `agent`,
+  6 h wall clock. omp runs detached per segment (`--mode json`, `--continue`
+  after the first); the runner follows its event log and reconnects on drops.
+- **Auth stays on the host.** An SSH remote forward of a unix socket, owned by
+  the runner, ends at the local auth gateway; a relay inside the container
+  (`gw-relay.py`) exposes it on `127.0.0.1:4000`.
+- **Long horizon.** When the agent ends early it gets a fixed continue
+  prompt (PaperBench IterativeAgent style, `--max-continues`); the first
+  natural stop is recorded. Ten minutes before the deadline it is interrupted
+  and given ProgramBench's wrap-up instruction.
+- **Scoring.** The workspace at the fork (`cbench-fork:<run>` image) and at
+  the end are packed and scored with `uvx programbench eval` and its own
+  `score_instance` (ignored branches/tests as on the leaderboard).
+
+Outputs in `runs/compaction/<run>/`: `summary.json`, `report.md` (context
+crossings per 100k), `turns.json`, `logs/` (omp event streams), `sessions/`,
+and `fork-sessions/` (the session as captured in the fork image).
 ## Harbor runner options (excerpt)
 
-| Option | Default | Notes |
-|---|---|---|
-| `-m, --model <provider/model>` | `anthropic/claude-sonnet-4-6` | Repeatable |
-| `-l, --tasks <N>` | `20` | Max tasks |
-| `-n, --concurrency <N>` | `4` | Concurrent trials |
-| `-k, --attempts <N>` | `1` | Attempts per task (pass@k) |
-| `-d, --dataset <name>` | `terminal-bench@2.0` | Any Harbor dataset id |
-| `-i/-x, --include/--exclude <glob>` | — | Task filters (repeatable) |
-| `--timeout-multiplier <x>` | — | Scales task agent/verifier timeouts |
-| `--agent-arg <arg>` | — | Extra arg forwarded verbatim to the in-container omp CLI (repeatable) |
-| `--env <KEY[=VALUE]>` | — | Forward env into the omp container (repeatable); `KEY` alone forwards the host value |
-| `--binary <path>` | — | Prebuilt omp binary (repeat for arm64+x64) |
-| `--install <source\|local\|published>` | `source` | `source` = repo bind-mount, `local` = tarball pack, `published` = npm `@oh-my-pi/pi-coding-agent` |
-| `--environment <docker\|apple-container>` | `docker` | `apple-container` runs trials via Apple's `container` CLI (no Docker); source/deps mounts go through `harbor --mounts` and the gateway is auto-forwarded from `192.168.64.1:4000` to the loopback-bound gateway |
-| `--gateway-url <url>` | `http://host.docker.internal:4000` | `http://192.168.64.1:4000` under `--environment apple-container` |
-| `--no-gateway` | off | Pass host provider keys into containers instead |
-| `-o, --jobs-dir <path>` | `<repo>/runs/harbor` | Shared with the server |
-| `--resume <name\|path>` | — | Resume that job dir via `harbor job resume`; original flags recovered automatically |
-| `--filter-error-type <T>` | `CancelledError` | With `--resume`: also re-run completed trials that errored with exception type `T` (repeatable) |
-| `--dry-run` | off | Print the harbor command + models.yml and exit |
+| Option                                    | Default                            | Notes                                                                                                                                                                                                           |
+| ----------------------------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-m, --model <provider/model>`            | `anthropic/claude-sonnet-4-6`      | Repeatable                                                                                                                                                                                                      |
+| `-l, --tasks <N>`                         | `20`                               | Max tasks                                                                                                                                                                                                       |
+| `-n, --concurrency <N>`                   | `4`                                | Concurrent trials                                                                                                                                                                                               |
+| `-k, --attempts <N>`                      | `1`                                | Attempts per task (pass@k)                                                                                                                                                                                      |
+| `-d, --dataset <name>`                    | `terminal-bench@2.0`               | Any Harbor dataset id                                                                                                                                                                                           |
+| `-i/-x, --include/--exclude <glob>`       | —                                  | Task filters (repeatable)                                                                                                                                                                                       |
+| `--timeout-multiplier <x>`                | —                                  | Scales task agent/verifier timeouts                                                                                                                                                                             |
+| `--agent-arg <arg>`                       | —                                  | Extra arg forwarded verbatim to the in-container omp CLI (repeatable)                                                                                                                                           |
+| `--env <KEY[=VALUE]>`                     | —                                  | Forward env into the omp container (repeatable); `KEY` alone forwards the host value                                                                                                                            |
+| `--binary <path>`                         | —                                  | Prebuilt omp binary (repeat for arm64+x64)                                                                                                                                                                      |
+| `--install <source\|local\|published>`    | `source`                           | `source` = repo bind-mount, `local` = tarball pack, `published` = npm `@oh-my-pi/pi-coding-agent`                                                                                                               |
+| `--environment <docker\|apple-container>` | `docker`                           | `apple-container` runs trials via Apple's `container` CLI (no Docker); source/deps mounts go through `harbor --mounts` and the gateway is auto-forwarded from `192.168.64.1:4000` to the loopback-bound gateway |
+| `--gateway-url <url>`                     | `http://host.docker.internal:4000` | `http://192.168.64.1:4000` under `--environment apple-container`                                                                                                                                                |
+| `--no-gateway`                            | off                                | Pass host provider keys into containers instead                                                                                                                                                                 |
+| `-o, --jobs-dir <path>`                   | `<repo>/runs/harbor`               | Shared with the server                                                                                                                                                                                          |
+| `--resume <name\|path>`                   | —                                  | Resume that job dir via `harbor job resume`; original flags recovered automatically                                                                                                                             |
+| `--filter-error-type <T>`                 | `CancelledError`                   | With `--resume`: also re-run completed trials that errored with exception type `T` (repeatable)                                                                                                                 |
+| `--dry-run`                               | off                                | Print the harbor command + models.yml and exit                                                                                                                                                                  |
 
 ## Outputs
 
@@ -189,3 +222,9 @@ known-correct fix for a failed task), `--concurrency` (default 8).
 - **`--install local` reflects local TS changes** (inlined into `dist/cli.js`),
   but **not** uncommitted Rust natives — rebuild `packages/natives` per target
   first (the version sentinel must match).
+- **Agent-started services outlive omp.** The verifier runs after omp exits,
+  in the same container or VM, so both runners set
+  `OMP_DAEMON_IDLE_GRACE_MS` to 24 h for the omp process: services the agent
+  started with the bash tool's `name` stay up until teardown instead of
+  stopping 3 s after omp exits. An explicit `--env OMP_DAEMON_IDLE_GRACE_MS=<ms>`
+  wins.

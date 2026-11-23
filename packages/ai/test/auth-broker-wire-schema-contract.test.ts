@@ -64,7 +64,13 @@ const USAGE_REPORT = {
 		{
 			id: "rolling",
 			label: "Rolling window",
-			scope: { provider: "anthropic", windowId: "rolling", providerExtension: true },
+			scope: {
+				provider: "anthropic",
+				windowId: "rolling",
+				shared: true,
+				sharedGroup: "3p:rolling",
+				providerExtension: true,
+			},
 			window: { id: "rolling", label: "5 hour", durationMs: 18_000_000 },
 			amount: { used: 1, limit: 10, remaining: 9, unit: "tokens", providerExtension: "kept" },
 			status: "ok",
@@ -116,6 +122,7 @@ const schemaNames = [
 	"disabledCredentialSummarySchema",
 	"disabledCredentialsResponseSchema",
 	"credentialBlockRequestSchema",
+	"credentialBlockDeleteRequestSchema",
 	"credentialBlockResponseSchema",
 	"credentialBlocksDeleteResponseSchema",
 	"usageStaleResponseSchema",
@@ -187,6 +194,7 @@ const validSamples: Record<SchemaName, unknown> = {
 		disabled: [{ id: 7, provider: "anthropic", type: "oauth", cause: "revoked" }],
 	},
 	credentialBlockRequestSchema: BLOCK,
+	credentialBlockDeleteRequestSchema: { providerKey: BLOCK.providerKey, blockScope: BLOCK.blockScope },
 	credentialBlockResponseSchema: { ok: true },
 	credentialBlocksDeleteResponseSchema: { ok: true },
 	usageStaleResponseSchema: { ok: true },
@@ -210,7 +218,7 @@ function reject(schema: unknown, input: unknown): void {
 }
 
 describe("auth-broker public wire schemas", () => {
-	test("exports all 31 real callable ArkType values with canonical behavior", () => {
+	test("exports all 32 real callable ArkType values with canonical behavior", () => {
 		expect(Object.keys(wireSchemas).sort()).toEqual([...schemaNames].sort());
 		for (const name of schemaNames) {
 			const schema = wireSchemas[name];
@@ -231,36 +239,74 @@ describe("auth-broker public wire schemas", () => {
 		reject(wireSchemas.credentialUploadRequestSchema, { provider: "", credential: REAL_OAUTH });
 	});
 
-	test("preserves fixed envelopes, integer fields, discriminators, and block alias identity", () => {
-		expect(wireSchemas.credentialBlockRequestSchema).toBe(wireSchemas.credentialBlockSnapshotSchema);
+	test("rejects invalid routing metadata in real and remote OAuth credentials", () => {
+		for (const { schema, credential } of [
+			{ schema: wireSchemas.oauthCredentialSchema, credential: REAL_OAUTH },
+			{ schema: wireSchemas.remoteOauthCredentialSchema, credential: REMOTE_OAUTH },
+		]) {
+			accept(schema, {
+				...credential,
+				region: "eu",
+				inferenceRegion: "global",
+				activeOrganizationId: "org-test",
+			});
+			reject(schema, { ...credential, region: 42 });
+			reject(schema, { ...credential, inferenceRegion: "apac" });
+			reject(schema, { ...credential, activeOrganizationId: 42 });
+		}
+	});
+
+	test("preserves fixed write envelopes, integer fields, and discriminators", () => {
 		accept(wireSchemas.credentialBlockRequestSchema, {
 			providerKey: BLOCK.providerKey,
 			blockScope: "",
 			blockedUntilMs: BLOCK.blockedUntilMs,
 		});
+		reject(wireSchemas.credentialBlockRequestSchema, { ...BLOCK, extra: true });
+		// Empty scope addresses the global row; a missing provider key or extra field must not widen the delete.
+		accept(wireSchemas.credentialBlockDeleteRequestSchema, { providerKey: BLOCK.providerKey, blockScope: "" });
+		reject(wireSchemas.credentialBlockDeleteRequestSchema, { providerKey: "", blockScope: "" });
+		reject(wireSchemas.credentialBlockDeleteRequestSchema, { ...BLOCK });
 		accept(wireSchemas.credentialDisableRequestSchema, {});
 		reject(wireSchemas.credentialDisableRequestSchema, { cause: 1 });
 		reject(wireSchemas.credentialDisableRequestSchema, { extra: true });
-		reject(wireSchemas.healthzResponseSchema, { ok: true, extra: true });
 		reject(wireSchemas.snapshotResponseSchema, { ...SNAPSHOT, generation: 1.5 });
-		reject(wireSchemas.snapshotResponseSchema, { ...SNAPSHOT, extra: true });
 		reject(wireSchemas.snapshotEntrySchema, { ...SNAPSHOT_ENTRY, id: 1.5 });
 		reject(wireSchemas.snapshotStreamEventSchema, { ...STREAM_ENTRY, kind: "snapshot" });
-		reject(wireSchemas.snapshotStreamEventSchema, { ...STREAM_REMOVED, extra: true });
 		reject(wireSchemas.snapshotStreamEventSchema, { kind: "unknown" });
 	});
 
-	test("preserves usage extensions while rejecting envelope and enum violations", () => {
+	test("reads responses carrying fields a newer broker adds", () => {
+		accept(wireSchemas.healthzResponseSchema, { ok: true, extra: true });
+		accept(wireSchemas.snapshotStreamEventSchema, { ...STREAM_REMOVED, extra: true });
+		accept(wireSchemas.snapshotResponseSchema, {
+			...SNAPSHOT,
+			extra: true,
+			refresher: { ...REFRESHER, extra: true },
+			credentials: [
+				{
+					...SNAPSHOT_ENTRY,
+					extra: true,
+					credential: { ...API_KEY, extra: true },
+					blocks: [{ ...BLOCK, extra: true }],
+				},
+			],
+		});
+	});
+
+	test("preserves usage extensions and reads enum values a newer broker adds as unknown", () => {
 		const response = { generatedAt: 2_000, reports: [USAGE_REPORT] };
 		expect(accept(wireSchemas.usageResponseSchema, response)).toEqual(response);
-		reject(wireSchemas.usageResponseSchema, { ...response, extra: true });
-		reject(wireSchemas.usageResponseSchema, {
+		accept(wireSchemas.usageResponseSchema, { ...response, extra: true });
+		const limit = { ...USAGE_REPORT.limits[0], amount: { unit: "seconds" }, status: "critical" };
+		const usage = accept(wireSchemas.usageResponseSchema, {
 			...response,
-			reports: [{ ...USAGE_REPORT, limits: [{ ...USAGE_REPORT.limits[0], amount: { unit: "seconds" } }] }],
+			reports: [{ ...USAGE_REPORT, limits: [limit] }],
 		});
+		expect(usage).toMatchObject({ reports: [{ limits: [{ amount: { unit: "unknown" }, status: "unknown" }] }] });
 		reject(wireSchemas.usageResponseSchema, {
 			...response,
-			reports: [{ ...USAGE_REPORT, limits: [{ ...USAGE_REPORT.limits[0], status: "critical" }] }],
+			reports: [{ ...USAGE_REPORT, limits: [{ ...USAGE_REPORT.limits[0], status: 1 }] }],
 		});
 	});
 });

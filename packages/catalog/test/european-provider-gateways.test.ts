@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
+import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isExcludedModel } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { createModelManager } from "@oh-my-pi/pi-catalog/model-manager";
-import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import {
 	akiIoModelManagerOptions,
@@ -17,10 +17,8 @@ import {
 	nebiusModelManagerOptions,
 	opperModelManagerOptions,
 	ovhcloudModelManagerOptions,
-	scalewayModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
-import bundledModels from "../src/models.json" with { type: "json" };
 import nebiusModelsInfoFixture from "./fixtures/nebius-models-info-2026-08-13.json";
 
 const providerCases = [
@@ -82,14 +80,6 @@ const providerCases = [
 		baseUrl: "https://api.opper.ai/v3/compat",
 		modelsPath: "/models",
 		manager: opperModelManagerOptions,
-	},
-	{
-		id: "scaleway",
-		defaultModel: "glm-5.2",
-		envVar: "SCW_SECRET_KEY",
-		baseUrl: "https://api.scaleway.ai/v1",
-		modelsPath: "/models",
-		manager: scalewayModelManagerOptions,
 	},
 ] as const;
 
@@ -350,8 +340,8 @@ describe("European gateway provider catalog support", () => {
 	});
 
 	test("serializes materialized European gateway seed policies", () => {
-		const aki = bundledModels["aki-io"]?.["kimi-k2.7-code-1100b"];
-		const eurouter = bundledModels.eurouter?.["mistral-large-3"];
+		const aki = getBundledModel("aki-io", "kimi-k2.7-code-1100b");
+		const eurouter = getBundledModel("eurouter", "mistral-large-3");
 
 		expect(aki).toMatchObject({
 			reasoning: true,
@@ -390,12 +380,11 @@ describe("European gateway provider catalog support", () => {
 
 	test("bundles tokenizer metadata for European gateway defaults", () => {
 		expect(getBundledModels("aki-io").find(model => model.id === "kimi-k2.7-code-1100b")?.tokenizer).toBe("kimi-k2");
-		expect(getBundledModels("scaleway").find(model => model.id === "glm-5.2")?.tokenizer).toBe("glm5");
 	});
 
-	test("rejects malformed provider rebake invocations", async () => {
+	test("rejects a provider-only catalog generation without a provider id", async () => {
 		const child = Bun.spawn(
-			[process.execPath, path.join(import.meta.dir, "../scripts/generate-models.ts"), "--rebake-provider"],
+			[process.execPath, path.join(import.meta.dir, "../scripts/generate-models.ts"), "--provider"],
 			{ stdout: "ignore", stderr: "ignore" },
 		);
 

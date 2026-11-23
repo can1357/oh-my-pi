@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { applyPatch } from "@oh-my-pi/pi-coding-agent/edit/modes/patch";
 import {
 	addFileDeleteFallback,
 	addFileWriteFallback,
@@ -75,9 +74,11 @@ describe("writeFileWithFallback", () => {
 			}),
 		);
 
-		await writeFileWithFallback("/denied/path.txt", "payload", denyingFile(fsError("EACCES")) as never);
+		// The seam brokers the resolved path (Windows grafts the cwd's drive on).
+		const dst = path.resolve("/denied/path.txt");
+		await writeFileWithFallback(dst, "payload", denyingFile(fsError("EACCES")) as never);
 
-		expect(seen).toEqual([{ dst: "/denied/path.txt", content: "payload" }]);
+		expect(seen).toEqual([{ dst, content: "payload" }]);
 	});
 
 	it("names the session that issued the write, and reports none outside a tool call", async () => {
@@ -242,6 +243,10 @@ describe("writeFileWithFallback", () => {
 	// nothing and every expectation here would fail for a reason unrelated to this
 	// seam. Root is real for a Docker-based local run and for a self-hosted runner.
 	describe.skipIf(process.getuid?.() === 0)("against real kernel permissions", () => {
+		// Windows has no directory mode bits (`chmod` only toggles a file's read-only
+		// attribute), so a 0o500/0o000 directory denies nothing there.
+		const posixDirModeIt = it.skipIf(process.platform === "win32");
+
 		let root = "";
 
 		beforeEach(async () => {
@@ -265,7 +270,7 @@ describe("writeFileWithFallback", () => {
 			return dir;
 		}
 
-		it("diverts a real EACCES from creating a file in an unwritable directory", async () => {
+		posixDirModeIt("diverts a real EACCES from creating a file in an unwritable directory", async () => {
 			const dst = path.join(await lockedDir(), "new.txt");
 			const seen: Array<{ dst: string; content: string; code: unknown }> = [];
 			disposers.push(
@@ -280,7 +285,7 @@ describe("writeFileWithFallback", () => {
 			expect(seen).toEqual([{ dst, content: "payload", code: "EACCES" }]);
 		});
 
-		it("unmasks a denied parent mkdir that Bun reports as ENOENT", async () => {
+		posixDirModeIt("unmasks a denied parent mkdir that Bun reports as ENOENT", async () => {
 			// Bun's write creates missing parents itself and, when that mkdir is denied,
 			// surfaces the open()'s ENOENT instead of the denial. Without unmasking, a
 			// sandboxed write into a new out-of-tree directory never reaches a handler.
@@ -298,7 +303,7 @@ describe("writeFileWithFallback", () => {
 			expect(seen).toEqual([{ dst, content: "payload", code: "EACCES" }]);
 		});
 
-		it("attaches the recovered denial as `cause` when no handler takes the write", async () => {
+		posixDirModeIt("attaches the recovered denial as `cause` when no handler takes the write", async () => {
 			// The thrown error stays the ENOENT Bun reported, so behaviour matches a host
 			// with no fallback registered. But this code has already proven the real
 			// boundary is EACCES, and discarding that would hand the caller back exactly
@@ -323,8 +328,9 @@ describe("writeFileWithFallback", () => {
 				}),
 			);
 
+			// Bun on Windows reports its own parent mkdir's EEXIST for a file in the path.
 			await expect(writeFileWithFallback(path.join(blocker, "child.txt"), "payload")).rejects.toMatchObject({
-				code: expect.stringMatching(/^(ENOTDIR|ENOENT)$/),
+				code: expect.stringMatching(/^(ENOTDIR|ENOENT|EEXIST)$/),
 			});
 			expect(called).toBe(false);
 		});
@@ -402,7 +408,7 @@ describe("writeFileWithFallback", () => {
 			}
 		});
 
-		it("refuses to broker a write through a dangling symlink", async () => {
+		posixDirModeIt("refuses to broker a write through a dangling symlink", async () => {
 			// `realpath` cannot name where a dangling link points, and the write follows
 			// it, so there is no destination to hand a privileged writer. Refusing is the
 			// only honest answer, and it is the one `confineToWorkspace` already gives.
@@ -426,7 +432,7 @@ describe("writeFileWithFallback", () => {
 			expect(called).toBe(false);
 		});
 
-		it("refuses to broker a write whose own metadata is behind the boundary", async () => {
+		posixDirModeIt("refuses to broker a write whose own metadata is behind the boundary", async () => {
 			// A sandbox that denies the write often hides the target's metadata too, so
 			// the final component cannot be shown to be a plain name rather than a link —
 			// and `open` follows a link there. The delete seam keeps working in this shape
@@ -451,89 +457,6 @@ describe("writeFileWithFallback", () => {
 			} finally {
 				await fs.chmod(opaque, 0o700);
 			}
-		});
-	});
-
-	// `apply_patch` creates a missing parent before writing, so a denial there used
-	// to throw before the write — and therefore before the seam — was ever reached.
-	describe.skipIf(process.getuid?.() === 0)("apply_patch into a denied new directory", () => {
-		let root = "";
-		let locked = "";
-
-		beforeEach(async () => {
-			root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "fallback-patch-")));
-			locked = path.join(root, "locked");
-			await fs.mkdir(locked);
-			await fs.chmod(locked, 0o500);
-		});
-		afterEach(async () => {
-			await fs.chmod(locked, 0o700).catch(() => {});
-			await fs.rm(root, { recursive: true, force: true });
-		});
-
-		it("reaches a registered handler with the bytes for the created file", async () => {
-			const brokered: Array<{ dst: string; content: string }> = [];
-			disposers.push(
-				addFileWriteFallback(async req => {
-					brokered.push({ dst: req.dst, content: req.content });
-					return true;
-				}),
-			);
-
-			const target = path.join(locked, "sub", "new.txt");
-			const result = await applyPatch({ path: target, op: "create", diff: "hello\n" }, { cwd: root });
-
-			expect(result.change).toMatchObject({ type: "create", path: target });
-			expect(brokered).toEqual([{ dst: target, content: "hello\n" }]);
-		});
-
-		it("still fails when no handler is registered", async () => {
-			const target = path.join(locked, "sub", "new.txt");
-			await expect(applyPatch({ path: target, op: "create", diff: "hello\n" }, { cwd: root })).rejects.toMatchObject(
-				{
-					code: expect.stringMatching(/^(EACCES|EPERM)$/),
-				},
-			);
-		});
-
-		it("never brokers an exclusive create whose destination cannot be proven absent", async () => {
-			// `apply_patch`'s `create` refuses to overwrite, and it decides that with
-			// `Bun.file(dst).exists()`, which reports `false` when the parent hides the
-			// target's metadata instead of distinguishing "absent" from "unknown". The
-			// non-overwrite contract survives regardless, because the same denied `lstat`
-			// that fools the existence check also stops the seam from brokering: a
-			// privileged writer is never handed a destination whose identity is unproven,
-			// and it is the only party that could have enforced exclusivity itself.
-			//
-			// Those are two independent guards in two files, so this pins the pair. If the
-			// seam is ever relaxed to broker an unverifiable path, a `create` would start
-			// silently clobbering a protected file it was told not to touch.
-			const opaque = path.join(root, "opaque");
-			await fs.mkdir(opaque);
-			const victim = path.join(opaque, "victim.txt");
-			await Bun.write(victim, "original\n");
-			await fs.chmod(opaque, 0o000);
-
-			let called = false;
-			disposers.push(
-				addFileWriteFallback(async () => {
-					called = true;
-					return true;
-				}),
-			);
-
-			try {
-				// The premise: the existence check cannot see the file it must not clobber.
-				expect(await Bun.file(victim).exists()).toBe(false);
-
-				await expect(
-					applyPatch({ path: victim, op: "create", diff: "clobbered\n" }, { cwd: root }),
-				).rejects.toMatchObject({ code: expect.stringMatching(/^(EACCES|EPERM)$/) });
-				expect(called).toBe(false);
-			} finally {
-				await fs.chmod(opaque, 0o700);
-			}
-			expect(await Bun.file(victim).text()).toBe("original\n");
 		});
 	});
 });
@@ -573,7 +496,8 @@ describe("deleteFileWithFallback", () => {
 		expect(writeCalled).toBe(false);
 	});
 
-	describe.skipIf(process.getuid?.() === 0)("against real kernel permissions", () => {
+	// Root and Windows: mode bits deny nothing; see the write-side note above.
+	describe.skipIf(process.getuid?.() === 0 || process.platform === "win32")("against real kernel permissions", () => {
 		let root = "";
 		let locked = "";
 
@@ -772,25 +696,6 @@ describe("deleteFileWithFallback", () => {
 			await deleteFileWithFallback(target, Bun.file(target));
 
 			expect(seen).toEqual([target]);
-		});
-
-		it("routes an apply_patch delete op through the seam", async () => {
-			const target = await lockedFile("doomed.txt");
-			const removed: string[] = [];
-			disposers.push(
-				addFileDeleteFallback(async req => {
-					await fs.chmod(locked, 0o700);
-					await fs.unlink(req.dst);
-					removed.push(req.dst);
-					return true;
-				}),
-			);
-
-			const result = await applyPatch({ path: target, op: "delete" }, { cwd: root });
-
-			expect(result.change).toMatchObject({ type: "delete", path: target });
-			expect(removed).toEqual([target]);
-			expect(await Bun.file(target).exists()).toBe(false);
 		});
 	});
 });

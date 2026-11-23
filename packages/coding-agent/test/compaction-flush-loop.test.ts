@@ -1,0 +1,206 @@
+import { beforeAll, describe, expect, mock, test } from "bun:test";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import type { CompactionQueuedMessage, InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
+
+beforeAll(() => {
+	initTheme();
+});
+
+function makeCtx(
+	initialQueue: CompactionQueuedMessage[],
+	loopPrompt: string | undefined,
+	promptBehavior: "forward" | "consume" | "throw" = "consume",
+) {
+	let currentLoopPrompt = loopPrompt;
+	const pauseLoop = mock(() => {
+		currentLoopPrompt = undefined;
+	});
+	// Mirror AgentSession.prompt: a void custom command is consumed locally
+	// (false) instead of starting a turn (true).
+	const prompt = mock(async (text: string): Promise<boolean> => {
+		if (promptBehavior === "throw") throw new Error("attachment too large");
+		if (promptBehavior === "forward") return true;
+		return text !== "/void-cmd";
+	});
+	const ctx = {
+		session: {
+			customCommands: [],
+			prompt,
+			promptCustomMessage: mock(async () => true),
+			dropQueuedMessages: () => {},
+		},
+		editor: { setText: () => {} },
+		compactionQueuedMessages: [...initialQueue],
+		skillCommands: new Map(),
+		fileSlashCommands: new Set<string>(),
+		locallySubmittedUserSignatures: new Set<string>(),
+		isKnownSlashCommand: (text: string) => text === "/void-cmd",
+		recordLocalSubmission: () => () => {},
+		withLocalSubmission: async (_text: string, fn: () => Promise<unknown>) => fn(),
+		updatePendingMessagesDisplay: mock(() => {}),
+		showError: mock((_msg: string) => {}),
+		showStatus: mock((_msg: string) => {}),
+		get loopPrompt() {
+			return currentLoopPrompt;
+		},
+		set loopPrompt(value: string | undefined) {
+			currentLoopPrompt = value;
+		},
+		pauseLoop,
+	} as unknown as InteractiveModeContext;
+	return {
+		ctx,
+		prompt,
+		pauseLoop,
+		getLoopPrompt: () => currentLoopPrompt,
+	};
+}
+
+function makeBuiltinCtx(queue: CompactionQueuedMessage[]) {
+	const { ctx } = makeCtx(queue, undefined);
+	const helpers = new UiHelpers(ctx);
+	ctx.isKnownSlashCommand = text => helpers.isKnownSlashCommand(text);
+	return { ctx, helpers };
+}
+
+test("queued /new starts a new session before the next prompt", async () => {
+	const { ctx, helpers } = makeBuiltinCtx([
+		{ text: "/new", mode: "followUp" },
+		{ text: "work in the new session", mode: "steer" },
+	]);
+	let sessionId = "previous";
+	ctx.handleNewCommand = async () => {
+		sessionId = "new";
+	};
+	const requests: Array<{ sessionId: string; text: string }> = [];
+	ctx.session.prompt = mock(async text => {
+		requests.push({ sessionId, text });
+		return true;
+	});
+
+	await helpers.flushCompactionQueue({ willRetry: false });
+	await Promise.resolve();
+	await Promise.resolve();
+
+	expect(requests).toEqual([{ sessionId: "new", text: "work in the new session" }]);
+});
+
+test("a queued builtin without a following prompt runs locally", async () => {
+	const { ctx, helpers } = makeBuiltinCtx([{ text: "/new", mode: "followUp" }]);
+	let sessionId = "previous";
+	ctx.handleNewCommand = async () => {
+		sessionId = "new";
+	};
+	const prompt = mock(async () => true);
+	ctx.session.prompt = prompt;
+
+	await helpers.flushCompactionQueue({ willRetry: false });
+
+	expect(sessionId).toBe("new");
+	expect(prompt).not.toHaveBeenCalled();
+});
+
+test("a queued builtin's inline prompt starts a turn without sending the slash text", async () => {
+	const { ctx, helpers } = makeBuiltinCtx([{ text: "/loop 2 investigate", mode: "followUp" }]);
+	ctx.handleLoopCommand = async () => "investigate";
+	const requests: string[] = [];
+	ctx.session.prompt = mock(async text => {
+		requests.push(text);
+		return true;
+	});
+
+	await helpers.flushCompactionQueue({ willRetry: false });
+
+	expect(requests).toEqual(["investigate"]);
+});
+
+describe("flushCompactionQueue loop parking", () => {
+	test("all-slash drain parks the loop when the body is consumed locally", async () => {
+		const queued: CompactionQueuedMessage[] = [{ text: "/void-cmd", mode: "steer" }];
+		const { ctx, prompt, pauseLoop, getLoopPrompt } = makeCtx(queued, "/void-cmd");
+
+		await new UiHelpers(ctx).flushCompactionQueue({ willRetry: false });
+
+		expect(prompt).toHaveBeenCalledWith("/void-cmd");
+		expect(pauseLoop).toHaveBeenCalledTimes(1);
+		expect(getLoopPrompt()).toBeUndefined();
+	});
+
+	test("pre-command drain parks the loop when the body is consumed locally", async () => {
+		const queued: CompactionQueuedMessage[] = [
+			{ text: "/void-cmd", mode: "steer" },
+			{ text: "plain follow-up", mode: "followUp" },
+		];
+		const { ctx, pauseLoop, getLoopPrompt } = makeCtx(queued, "/void-cmd");
+
+		await new UiHelpers(ctx).flushCompactionQueue({ willRetry: false });
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(pauseLoop).toHaveBeenCalledTimes(1);
+		expect(getLoopPrompt()).toBeUndefined();
+	});
+
+	test("drain keeps the loop armed when the body starts a turn", async () => {
+		const queued: CompactionQueuedMessage[] = [{ text: "plain body", mode: "steer" }];
+		const { ctx, pauseLoop, getLoopPrompt } = makeCtx(queued, "plain body");
+
+		await new UiHelpers(ctx).flushCompactionQueue({ willRetry: false });
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(pauseLoop).not.toHaveBeenCalled();
+		expect(getLoopPrompt()).toBe("plain body");
+	});
+
+	test("failed drain restores the queue and leaves loop state alone", async () => {
+		const queued: CompactionQueuedMessage[] = [{ text: "queued body", mode: "steer" }];
+		const { ctx, pauseLoop, getLoopPrompt } = makeCtx(queued, "queued body", "throw");
+
+		await new UiHelpers(ctx).flushCompactionQueue({ willRetry: false });
+		await Promise.resolve();
+		await Promise.resolve();
+
+		// The message stays queued for retry; loop parking happens when the
+		// main turn later observes the rejection, not in the drain.
+		expect(ctx.compactionQueuedMessages).toEqual(queued);
+		expect(pauseLoop).not.toHaveBeenCalled();
+		expect(getLoopPrompt()).toBe("queued body");
+	});
+});
+
+describe("flushCompactionQueue after a queued compaction", () => {
+	function heldBehindQueuedCompaction(branch: Array<{ id: string }>) {
+		const { ctx, prompt } = makeCtx([{ text: "held behind /compact", mode: "followUp" }], undefined, "forward");
+		const restoreCompactionQueueToEditor = mock(() => {});
+		Object.assign(ctx, {
+			yieldCompaction: undefined,
+			// Set by the queued pass when it took over from the request.
+			compactionQueueOrigin: { sessionId: "s1", leafId: "e1" },
+			sessionManager: { getSessionId: () => "s1", getBranch: () => branch },
+			restoreCompactionQueueToEditor,
+		});
+		return { ctx, prompt, restoreCompactionQueueToEditor };
+	}
+
+	test("hands the held follow-ups back when /tree moved to another branch during the pass", async () => {
+		const { ctx, prompt, restoreCompactionQueueToEditor } = heldBehindQueuedCompaction([{ id: "e9" }]);
+
+		await new UiHelpers(ctx).flushCompactionQueue({ willRetry: false });
+
+		expect(restoreCompactionQueueToEditor).toHaveBeenCalledTimes(1);
+		expect(prompt).not.toHaveBeenCalled();
+		expect(ctx.compactionQueueOrigin).toBeUndefined();
+	});
+
+	test("delivers them when the branch still continues from where they were queued", async () => {
+		const { ctx, prompt, restoreCompactionQueueToEditor } = heldBehindQueuedCompaction([{ id: "e1" }, { id: "e2" }]);
+
+		await new UiHelpers(ctx).flushCompactionQueue({ willRetry: false });
+
+		expect(restoreCompactionQueueToEditor).not.toHaveBeenCalled();
+		expect(prompt).toHaveBeenCalledTimes(1);
+		expect(ctx.compactionQueueOrigin).toBeUndefined();
+	});
+});

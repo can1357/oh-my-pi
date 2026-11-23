@@ -11,11 +11,15 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { Component } from "@oh-my-pi/pi-tui";
+import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+
+import { cfgDisplayShowTokenUsage } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 beforeAll(async () => {
 	await initTheme();
@@ -43,46 +47,17 @@ function makeStreamingMessage(content: AssistantMessage["content"]): AssistantMe
 
 // Components the controller mounts during a dispatch (pending tool previews).
 // Sealed in afterEach so their spinner intervals never outlive the test file.
-const mountedComponents: { seal?(): void }[] = [];
+const mountedComponents: Component[] = [];
 
 function createFixture(streamingMessage: AssistantMessage) {
-	const markTranscriptBlockFinalized = vi.fn();
-	const streamingComponent = {
-		updateContent: vi.fn(),
-		markTranscriptBlockFinalized,
-	};
-	const chatChildren: unknown[] = [];
-	const chatContainer = {
-		children: chatChildren,
-		addChild: vi.fn((child: { seal?(): void }) => {
-			chatChildren.push(child);
-			mountedComponents.push(child);
-		}),
-		removeChild: vi.fn((child: unknown) => {
-			const index = chatChildren.indexOf(child);
-			if (index >= 0) chatChildren.splice(index, 1);
-		}),
-		canRemoveBlock: vi.fn(() => true),
-	};
-	const ctx = {
-		isInitialized: true,
-		init: vi.fn(async () => {}),
-		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
-		statusLine: { invalidate: vi.fn() },
-		updateEditorTopBorder: vi.fn(),
-		streamingComponent,
-		streamingMessage,
-		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map(),
-		noteDisplayableThinkingContent: vi.fn(() => false),
-		chatContainer,
-		toolOutputExpanded: false,
-		settings,
-		session: { getToolByName: () => undefined, hasBuiltInTool: () => true },
-		viewSession: { getToolByName: () => undefined, hasBuiltInTool: () => true },
-		clearTransientSessionUi: () => {},
-		sessionManager: { getCwd: () => process.cwd() },
-	} as unknown as InteractiveModeContext;
+	const streamingComponent = new AssistantMessageComponent();
+	const markTranscriptBlockFinalized = vi.spyOn(streamingComponent, "markTranscriptBlockFinalized");
+	const ctx = createInteractiveModeContext({ streamingComponent, streamingMessage });
+	const addChild = ctx.chatContainer.addChild.bind(ctx.chatContainer);
+	vi.spyOn(ctx.chatContainer, "addChild").mockImplementation(child => {
+		mountedComponents.push(child);
+		addChild(child);
+	});
 
 	const controller = new EventController(ctx);
 	return { controller, markTranscriptBlockFinalized, ctx };
@@ -103,7 +78,9 @@ async function dispatchUpdate(message: AssistantMessage) {
 
 describe("EventController finalizes assistant block when tool-call args stream", () => {
 	afterEach(() => {
-		for (const component of mountedComponents.splice(0)) component.seal?.();
+		for (const component of mountedComponents.splice(0)) {
+			if (component instanceof ToolExecutionComponent) component.seal();
+		}
 		resetSettingsForTest();
 		vi.restoreAllMocks();
 	});
@@ -127,7 +104,7 @@ describe("EventController finalizes assistant block when tool-call args stream",
 
 	it("marks the streaming assistant finalized even when the per-turn usage row is enabled", async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
-		settings.set("display.showTokenUsage", true);
+		cfgDisplayShowTokenUsage.set(settings, true);
 		const message = makeStreamingMessage([
 			{ type: "thinking", thinking: "planning" },
 			{ type: "toolCall", id: "tc-2", name: "write", arguments: { file_path: "/tmp/b.ts", content: "y" } },
@@ -138,7 +115,7 @@ describe("EventController finalizes assistant block when tool-call args stream",
 
 	it("emits the per-turn usage row with the turn's local timestamp at message_end", async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
-		settings.set("display.showTokenUsage", true);
+		cfgDisplayShowTokenUsage.set(settings, true);
 		// Fixed local wall-clock time; single-digit fields exercise zero-padding.
 		const timestamp = new Date(2026, 0, 2, 3, 4, 5).getTime();
 		const message: AssistantMessage = {
@@ -165,7 +142,9 @@ describe("EventController finalizes assistant block when tool-call args stream",
 });
 describe("EventController finalizes orphaned post-tool assistant segments", () => {
 	afterEach(() => {
-		for (const component of mountedComponents.splice(0)) component.seal?.();
+		for (const component of mountedComponents.splice(0)) {
+			if (component instanceof ToolExecutionComponent) component.seal();
+		}
 		resetSettingsForTest();
 		vi.restoreAllMocks();
 	});

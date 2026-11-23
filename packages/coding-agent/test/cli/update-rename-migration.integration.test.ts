@@ -28,7 +28,7 @@ import {
 	type ReleaseInfo,
 	type RenameMigrationSteps,
 } from "../../src/cli/update-cli";
-import { initTheme } from "../../src/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 const OLD_PKG = "omp-rename-fixture-old";
 const NEW_PKG = "omp-rename-fixture-new";
@@ -66,10 +66,17 @@ async function makeFixtures(root: string): Promise<{ oldDir: string; newDir: str
 	return { oldDir: await mkpkg(OLD_PKG, OLD_VERSION), newDir: await mkpkg(NEW_PKG, NEW_VERSION) };
 }
 
-/** Run the installed launcher and parse its reported version, mirroring verifyBinaryAtPath. */
+/**
+ * Run the installed launcher and parse its reported version, mirroring verifyBinaryAtPath.
+ *
+ * The launcher starts with `#!/usr/bin/env bun`, as the release's does, so it runs the first `bun` on PATH.
+ * The bun running this test goes first there, so the result does not depend on which bun, if any, the
+ * machine's PATH holds.
+ */
 async function verifyLauncher(binDir: string, expectedVersion: string): Promise<InstalledVersionVerification> {
 	const launcher = path.join(binDir, "omp");
-	const result = await $`${launcher}`.quiet().nothrow();
+	const env = { ...process.env, PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH ?? ""}` };
+	const result = await $`${launcher}`.env(env).quiet().nothrow();
 	if (result.exitCode !== 0) return { ok: false, path: launcher };
 	const actual = result.text().match(/\/(\d+\.\d+\.\d+)/)?.[1];
 	return { ok: actual === expectedVersion, actual, path: launcher };
@@ -79,9 +86,17 @@ const RELEASE: ReleaseInfo = {
 	tag: `v${NEW_VERSION}`,
 	version: NEW_VERSION,
 	packages: { pkg: NEW_PKG, natives: "@oh-my-pi/pi-natives" },
+	registry: "https://registry.npmjs.org/",
 };
 
-describe.skipIf(process.platform === "win32" || !$which("npm"))("rename migration over real npm", () => {
+/**
+ * An npm that runs. A version manager's shim on PATH can exist and still not run (mise's, when the test's
+ * environment leaves it no trusted config), which is the same as no npm for this test.
+ */
+const npmRuns =
+	!!$which("npm") && Bun.spawnSync(["npm", "--version"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
+
+describe.skipIf(process.platform === "win32" || !npmRuns)("rename migration over real npm", () => {
 	it.concurrent("takes bin ownership with --force, survives the uninstall deleting the bin, and lands on the new version", async () => {
 		const root = fixtureDir.path();
 		const prefix = path.join(root, "npm-prefix");
@@ -92,6 +107,10 @@ describe.skipIf(process.platform === "win32" || !$which("npm"))("rename migratio
 			npm_config_update_notifier: "false",
 			npm_config_fund: "false",
 			npm_config_audit: "false",
+			// mise's npm wrapper runs `mise reshim` after every global install or uninstall, which took about
+			// 30 s each on a loaded machine and put this test past its bound; the installs go to a private
+			// prefix, so the reshim does nothing for it. Other wrappers and plain npm ignore the variable.
+			MISE_SKIP_RESHIM: "1",
 		};
 
 		const seed = await $`npm install -g --prefix ${prefix} ${oldDir}`.env(env).quiet().nothrow();
@@ -140,17 +159,17 @@ describe.skipIf(process.platform === "win32")("rename migration over real bun", 
 			BUN_INSTALL_BIN: binDir,
 		};
 
-		const seed = await $`bun add -g file:${oldDir}`.env(env).quiet().nothrow();
+		const seed = await $`${process.execPath} add -g file:${oldDir}`.env(env).quiet().nothrow();
 		expect(seed.exitCode).toBe(0);
 		expect(await verifyLauncher(binDir, OLD_VERSION)).toMatchObject({ ok: true, actual: OLD_VERSION });
 
 		const verifications: InstalledVersionVerification[] = [];
 		const steps: RenameMigrationSteps = {
 			async install() {
-				return (await $`bun add -g file:${newDir}`.env(env).quiet().nothrow()).exitCode;
+				return (await $`${process.execPath} add -g file:${newDir}`.env(env).quiet().nothrow()).exitCode;
 			},
 			async removeOld() {
-				return (await $`bun remove -g ${OLD_PKG}`.env(env).quiet().nothrow()).exitCode;
+				return (await $`${process.execPath} remove -g ${OLD_PKG}`.env(env).quiet().nothrow()).exitCode;
 			},
 			async verify() {
 				const result = await verifyLauncher(binDir, NEW_VERSION);

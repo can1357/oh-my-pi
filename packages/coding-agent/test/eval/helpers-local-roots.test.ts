@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
+import { resolveEvalUrlRoots } from "../../src/eval/backend";
 import { createHelpers, type HelperContext } from "../../src/eval/js/shared/helpers";
+import type { ToolSession } from "../../src/tools";
 
 /**
  * The eval helpers (`read`/`write`) must substitute injected on-disk
@@ -51,5 +53,27 @@ describe("eval js helpers internal-url resolution", () => {
 		const rel = await helpers.writeFile("foo/bar.txt", "bar");
 		expect(rel).toBe(path.join(tmp.path(), "foo", "bar.txt"));
 		expect(await helpers.read("foo/bar.txt")).toBe("bar");
+	});
+
+	it("reads a spill local://<N>.log as its file's full text, with offset/limit selecting lines", async () => {
+		using tmp = TempDir.createSync("@eval-helpers-spill-");
+		const root = path.join(tmp.path(), "local");
+		const wide = "v".repeat(14_430);
+		await Bun.write(path.join(root, "12.log"), `${wide}\nsecond\nthird\n`);
+		await Bun.write(path.join(root, "120.log"), "other");
+		const helpers = createHelpers(makeCtx(tmp.path(), { local: root }));
+
+		expect(helpers.hasRoot("local://12.log")).toBe(true);
+		expect(await helpers.read("local://12.log")).toBe(`${wide}\nsecond\nthird\n`);
+		expect(await helpers.read("local://12.log", { offset: 2, limit: 1 })).toBe("second");
+	});
+
+	it("serves a session's spills from the local:// root its artifacts dir implies", async () => {
+		using tmp = TempDir.createSync("@eval-helpers-session-spills-");
+		await Bun.write(path.join(tmp.path(), "local", "12.log"), "spill text");
+		const session = { cwd: tmp.path(), getArtifactsDir: () => tmp.path() } as unknown as ToolSession;
+
+		const helpers = createHelpers(makeCtx(tmp.path(), resolveEvalUrlRoots(session)));
+		expect(await helpers.read("local://12.log")).toBe("spill text");
 	});
 });

@@ -1,9 +1,12 @@
+import type * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
 	type AssistantMessage,
 	coerceServiceTierByFamily,
-	getPriorityPremiumRequests,
+	getPremiumServiceTierRequests,
+	type MessageAttribution,
+	parseServiceTier,
 	resolveModelServiceTier,
 	type ServiceTierByFamily,
 	type ToolCall,
@@ -14,20 +17,32 @@ import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { getSessionsDir, isEnoent, readLines } from "@oh-my-pi/pi-utils";
 import type {
 	AgentType,
-	MessageStats,
+	MessageStatsInput,
 	SessionEntry,
 	SessionMessageEntry,
 	SessionModelUsageEntry,
 	SessionServiceTierChangeEntry,
+	SessionTypedEntry,
+	SnapcompactCompactionStats,
 	ToolCallStats,
 	ToolResultLink,
 	UserMessageLink,
 	UserMessageStats,
 } from "./types";
-import { computeUserMessageMetrics } from "./user-metrics";
+import {
+	emptySpotlightRows,
+	emptySpotlightState,
+	SpotlightCollector,
+	type SpotlightParseRows,
+	type SpotlightParserState,
+} from "./spotlight-ingest";
+import { computeUserMessageMetrics, judgeProse } from "./user-metrics";
 
 /** Basename of an advisor agent's transcript inside a session artifacts dir. */
 const ADVISOR_TRANSCRIPT_BASENAME = "__advisor.jsonl";
+
+/** Characters a persisted tool name may consist of without sanitization. */
+const TOOL_NAME_PATTERN = /^[\w.:-]+$/;
 
 /**
  * Classify which agent produced a transcript from its path within the sessions
@@ -107,6 +122,24 @@ function isToolResultMessage(entry: SessionEntry): entry is SessionMessageEntry 
 }
 
 /**
+ * Build the row for a snapcompact compaction entry. Entries of other methods,
+ * legacy entries without `tokensAfter`, and malformed ones yield null.
+ */
+function extractSnapcompactCompaction(
+	sessionFile: string,
+	folder: string,
+	entry: SessionEntry,
+): SnapcompactCompactionStats | null {
+	if (entry.type !== "compaction") return null;
+	const { id, timestamp, method, tokensBefore, tokensAfter } = entry as SessionTypedEntry;
+	if (method !== "snapcompact" || typeof id !== "string" || id.length === 0) return null;
+	if (!isFiniteCount(tokensBefore) || !isFiniteCount(tokensAfter)) return null;
+	const ts = typeof timestamp === "string" ? Date.parse(timestamp) : Number.NaN;
+	if (!Number.isFinite(ts)) return null;
+	return { sessionFile, entryId: id, folder, timestamp: ts, tokensBefore, tokensAfter };
+}
+
+/**
  * Extract plain text from a user message content payload.
  */
 function extractUserText(content: unknown): string {
@@ -123,14 +156,20 @@ function extractUserText(content: unknown): string {
 }
 
 /**
- * Build user-message stats from an entry. Returns null for empty/synthetic content.
+ * Build user-message stats from an entry. Returns null for empty, synthetic, or agent-attributed content.
  */
 function extractUserStats(sessionFile: string, folder: string, entry: SessionMessageEntry): UserMessageStats | null {
-	const msg = entry.message as { role: "user"; content?: unknown; synthetic?: boolean };
-	if (msg.role !== "user" || msg.synthetic) return null;
+	const msg = entry.message as {
+		role: "user";
+		content?: unknown;
+		synthetic?: boolean;
+		attribution?: MessageAttribution;
+	};
+	if (msg.role !== "user" || msg.synthetic || msg.attribution === "agent") return null;
 	const text = extractUserText(msg.content);
 	if (!text.trim()) return null;
 	const metrics = computeUserMessageMetrics(text);
+	const prose = judgeProse(text);
 	const ts = Date.parse(entry.timestamp);
 	return {
 		sessionFile,
@@ -147,7 +186,64 @@ function extractUserStats(sessionFile: string, folder: string, entry: SessionMes
 		negation: metrics.negation,
 		repetition: metrics.repetition,
 		blame: metrics.blame,
+		prose,
+		proseHash: prose ? Bun.hash(prose).toString(16) : "",
 	};
+}
+
+/**
+ * Session JSONL is written by older versions and foreign producers, so a token
+ * counter is whatever was persisted, not what `Usage` declares. A non-numeric
+ * bucket (`input: "10"`) must never be parsed and must never be summed: `+`
+ * would concatenate it into the derived total and SQLite would coerce the
+ * resulting string to a different, far larger number. A non-finite one
+ * (`input: 1e999` is legal JSON) must not reach a NOT NULL column either.
+ * Malformed input counts as absent.
+ */
+function isFiniteCount(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value);
+}
+
+function finiteTokenCount(value: unknown): number {
+	return isFiniteCount(value) ? value : 0;
+}
+
+/**
+ * Token-bucket view for total derivation. Persisted session payloads are
+ * outside-controlled (old versions, foreign producers), so every counter is
+ * `unknown` and validated at read time.
+ */
+export interface UsageBucketView {
+	totalTokens?: unknown;
+	input?: unknown;
+	output?: unknown;
+	cacheRead?: unknown;
+	cacheWrite?: unknown;
+	orchestration?: { input?: unknown; output?: unknown; cacheRead?: unknown } | null;
+}
+
+/**
+ * Total tokens for one usage payload, per the documented contract: the
+ * conversation buckets plus provider-reported orchestration tokens. A present
+ * finite provider total stays authoritative; a missing or malformed one
+ * (absent, string, NaN) is derived from the buckets, which would otherwise
+ * persist a zero total next to real token counts. Shared by ingest and the
+ * trace builder so stored and displayed totals cannot disagree.
+ */
+export function resolveUsageTotal(usage: UsageBucketView | null | undefined): number {
+	if (typeof usage?.totalTokens === "number" && Number.isFinite(usage.totalTokens)) return usage.totalTokens;
+	if (!usage || typeof usage !== "object") return 0;
+	const orchestration =
+		usage.orchestration && typeof usage.orchestration === "object" ? usage.orchestration : undefined;
+	return (
+		finiteTokenCount(usage.input) +
+		finiteTokenCount(usage.output) +
+		finiteTokenCount(usage.cacheRead) +
+		finiteTokenCount(usage.cacheWrite) +
+		finiteTokenCount(orchestration?.input) +
+		finiteTokenCount(orchestration?.output) +
+		finiteTokenCount(orchestration?.cacheRead)
+	);
 }
 
 /**
@@ -167,44 +263,55 @@ function extractStats(
 	entry: SessionMessageEntry,
 	currentServiceTier: ServiceTierByFamily | undefined,
 	agentType: AgentType,
-): MessageStats | null {
+): MessageStatsInput | null {
 	const msg = entry.message as AssistantMessage;
 	if (msg?.role !== "assistant") return null;
 	if (typeof msg.model !== "string" || typeof msg.provider !== "string" || typeof msg.api !== "string") return null;
 	const rawUsage = msg.usage as Partial<Usage> | undefined;
 	if (!rawUsage || typeof rawUsage !== "object") return null;
 
-	// Backfill: when the session recorded `priority` as the active service tier
-	// at this point but the AI usage payload was captured before priority
-	// requests were folded into `premiumRequests`, derive the count here so the
-	// "Premium Reqs" stat aggregates priority traffic on re-sync. Trust any
-	// non-zero value already in `usage.premiumRequests` (Copilot multipliers or
-	// the new AI code path) and only synthesise when the field is missing/zero.
+	// Backfill: when the session recorded a premium tier (`priority`/`ultrafast`)
+	// as the active service tier at this point but the AI usage payload was
+	// captured before premium requests were folded into `premiumRequests`, derive
+	// the count here so the "Premium Reqs" stat aggregates premium traffic on
+	// re-sync. The tier the provider reported serving the turn (`msg.serviceTier`)
+	// is authoritative — it is proof the tier reached the wire, so the
+	// discovery-metadata gate is skipped; the session's live setting is only a
+	// fallback for turns recorded before that field existed. Trust any non-zero
+	// value already in `usage.premiumRequests` (Copilot multipliers or the new AI
+	// code path) and only synthesise when the field is missing/zero.
 	const recorded = rawUsage.premiumRequests ?? 0;
 	const model = {
 		provider: msg.provider,
 		api: msg.api,
 		identity: classifyModel(msg.provider, msg.model, { lenient: true }),
 	};
-	const tier = resolveModelServiceTier(currentServiceTier, model);
-	const derived = recorded > 0 ? recorded : getPriorityPremiumRequests(tier, model);
+	const servedTier = parseServiceTier(msg.serviceTier);
+	const tier = servedTier ?? resolveModelServiceTier(currentServiceTier, model);
+	const derived =
+		recorded > 0 ? recorded : getPremiumServiceTierRequests(tier, model, { served: servedTier !== undefined });
 	const wellFormed =
-		typeof rawUsage.input === "number" &&
-		typeof rawUsage.output === "number" &&
-		typeof rawUsage.cacheRead === "number" &&
-		typeof rawUsage.cacheWrite === "number" &&
-		typeof rawUsage.totalTokens === "number";
-	const usage: Usage =
+		isFiniteCount(rawUsage.input) &&
+		isFiniteCount(rawUsage.output) &&
+		isFiniteCount(rawUsage.cacheRead) &&
+		isFiniteCount(rawUsage.cacheWrite) &&
+		isFiniteCount(rawUsage.totalTokens);
+	const usage: MessageStatsInput["usage"] =
 		wellFormed && derived === recorded
 			? (rawUsage as Usage)
 			: {
 					...rawUsage,
-					input: rawUsage.input ?? 0,
-					output: rawUsage.output ?? 0,
-					cacheRead: rawUsage.cacheRead ?? 0,
-					cacheWrite: rawUsage.cacheWrite ?? 0,
-					totalTokens: rawUsage.totalTokens ?? 0,
-					cost: rawUsage.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					input: finiteTokenCount(rawUsage.input),
+					output: finiteTokenCount(rawUsage.output),
+					cacheRead: finiteTokenCount(rawUsage.cacheRead),
+					cacheWrite: finiteTokenCount(rawUsage.cacheWrite),
+					// A present finite provider total stays authoritative; a missing
+					// or malformed one (absent, string, NaN) is derived from the buckets.
+					totalTokens: resolveUsageTotal(rawUsage),
+					// An omitted `cost` must stay omitted: `resolveStoredCost` reads
+					// absence as "no recorded price" and estimates the request, while
+					// a zero would read as an explicitly free request.
+					cost: rawUsage.cost,
 					premiumRequests: derived,
 				};
 
@@ -224,17 +331,29 @@ function extractStats(
 		errorMessage: msg.errorMessage ?? null,
 		usage,
 		agentType,
+		serviceTier: servedTier ?? null,
 	};
 }
 
+/**
+ * Stored for a `model_usage` entry whose `purpose` is missing or not a string:
+ * a non-null purpose is what keeps the row off the conversation turns.
+ */
+const UNKNOWN_PURPOSE = "unknown";
+
+/**
+ * Row for a `model_usage` entry (usage of a model call that is not a
+ * conversation turn). It keeps the entry's raw `purpose`, which assistant
+ * messages lack, and the request timings newer entries carry.
+ */
 function extractModelUsageStats(
 	sessionFile: string,
 	folder: string,
 	entry: SessionModelUsageEntry,
 	agentType: AgentType,
-): MessageStats | null {
+): MessageStatsInput | null {
 	const timestamp = Date.parse(entry.timestamp);
-	return extractStats(
+	const stats = extractStats(
 		sessionFile,
 		folder,
 		{
@@ -252,16 +371,23 @@ function extractModelUsageStats(
 				stopReason: entry.stopReason ?? "stop",
 				errorMessage: entry.errorMessage,
 				timestamp: Number.isFinite(timestamp) ? timestamp : 0,
+				duration: isFiniteCount(entry.duration) ? entry.duration : undefined,
+				ttft: isFiniteCount(entry.ttft) ? entry.ttft : undefined,
 			},
 		},
 		undefined,
 		agentType,
 	);
+	if (!stats) return null;
+	stats.purpose = typeof entry.purpose === "string" && entry.purpose.length > 0 ? entry.purpose : UNKNOWN_PURPOSE;
+	return stats;
 }
 
 /** Message timestamp, falling back to the entry's ISO timestamp, then 0. */
 function coerceEntryTimestamp(timestamp: number | undefined, entry: SessionMessageEntry): number {
-	if (typeof timestamp === "number" && Number.isFinite(timestamp)) return timestamp;
+	// A stored zero is the "no timestamp" sentinel, not 1970: fall through to
+	// the entry envelope so a recoverable ISO time still selects its tariff.
+	if (typeof timestamp === "number" && Number.isFinite(timestamp) && timestamp > 0) return timestamp;
 	const ts = Date.parse(entry.timestamp);
 	return Number.isFinite(ts) ? ts : 0;
 }
@@ -292,27 +418,58 @@ function extractToolCalls(
 	);
 	if (blocks.length === 0) return [];
 
-	return blocks.map(block => {
+	const calls: ToolCallStats[] = [];
+	for (const block of blocks) {
+		// Names reduced to nothing by sanitization carry no tool identity:
+		// skip them rather than attributing usage to garbage (see
+		// sanitizeToolName). callsInTurn still counts the raw block total.
+		const toolName = sanitizeToolName(block.name);
+		if (toolName === null) continue;
 		let argsChars = 0;
 		try {
 			argsChars = JSON.stringify(block.arguments ?? {}).length;
 		} catch {
 			// Non-serializable arguments (shouldn't happen in persisted JSONL); size unknown.
 		}
-		return {
+		calls.push({
 			sessionFile,
 			entryId: entry.id,
 			toolCallId: block.id,
 			folder,
-			toolName: block.name,
+			toolName,
 			model: msg.model,
 			provider: msg.provider,
 			timestamp: coerceEntryTimestamp(msg.timestamp, entry),
 			agentType,
 			callsInTurn: blocks.length,
 			argsChars,
-		};
-	});
+		});
+	}
+	return calls;
+}
+
+/**
+ * Tool names as persisted can be polluted by provider-side parse garbage — a
+ * gateway may hand the model's whole invocation text back as the function
+ * name (e.g. `bash command="ls -la …"` with a stray in-band closer), which
+ * then shows up verbatim in every `GROUP BY tool_name` aggregate and the
+ * dashboard tool filter. Reduce such names to their leading identifier token;
+ * names that yield no identifier at all carry no tool identity and are
+ * returned as `null` so the row is skipped.
+ */
+function sanitizeToolName(name: string): string | null {
+	const trimmed = name.trim();
+	if (trimmed.length === 0) return null;
+	if (TOOL_NAME_PATTERN.test(trimmed)) return trimmed;
+	const candidate = trimmed.split(/[^\w.:-]/)[0] ?? "";
+	return candidate.length > 0 ? candidate : null;
+}
+
+/** A call the agent loop skipped carries a synthetic `executed: false` result: it never ran, so it is no tool error. */
+function isToolExecutionError(message: { isError?: unknown; details?: unknown }): boolean {
+	if (message.isError !== true) return false;
+	const details = message.details as { __synthetic?: unknown; executed?: unknown } | null | undefined;
+	return !(details?.__synthetic === true && details.executed === false);
 }
 
 /**
@@ -334,7 +491,7 @@ function extractToolResultLink(sessionFile: string, entry: SessionMessageEntry):
 		sessionFile,
 		toolCallId: msg.toolCallId,
 		resultChars,
-		isError: msg.isError === true,
+		isError: isToolExecutionError(msg),
 	};
 }
 
@@ -375,122 +532,294 @@ function visitSessionEntriesLenient(bytes: Uint8Array, visit: (entry: SessionEnt
 	return read;
 }
 
-function parseSessionEntriesLenient(bytes: Uint8Array): { entries: SessionEntry[]; read: number } {
-	const entries: SessionEntry[] = [];
-	const read = visitSessionEntriesLenient(bytes, entry => entries.push(entry));
-	return { entries, read };
-}
 /** Parse every well-formed entry in a transcript buffer (malformed lines skipped). */
 export function parseAllSessionEntries(bytes: Uint8Array): SessionEntry[] {
-	return parseSessionEntriesLenient(bytes).entries;
+	const entries: SessionEntry[] = [];
+	visitSessionEntriesLenient(bytes, entry => entries.push(entry));
+	return entries;
 }
 
-function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined {
+/**
+ * Entries that start a new request below a user message rather than lead to its reply: a `/clear` and the custom
+ * messages that open a user turn (a directly invoked skill, a collab peer's prompt), as pi-tui's
+ * `isUserTurnInitiator` defines them.
+ */
+function startsNewRequest(entry: SessionEntry): boolean {
+	if (entry.type === "reset_boundary") return true;
+	if (entry.type !== "custom_message" || !("customType" in entry) || !("attribution" in entry)) return false;
+	return entry.attribution === "user" && (entry.customType === "skill-prompt" || entry.customType === "collab-prompt");
+}
+
+/**
+ * Links each user message to its reply across tail reads. The agent writes non-message entries (the system-prompt
+ * digest, extension notices, side-model usage, title changes) between a user message and its reply, so the reply is
+ * the first assistant message descending from the user message through such entries. Another message or a new
+ * request on the way ends that branch only; a sibling branch can still carry the reply.
+ */
+class ReplyTracker {
+	/** User messages still awaiting a reply and the non-message entries beneath them, each to its user message. */
+	readonly #waiting: Map<string, string>;
+
+	constructor(waiting?: Record<string, string>) {
+		this.#waiting = new Map(waiting ? Object.entries(waiting) : undefined);
+	}
+
+	get state(): Record<string, string> {
+		return Object.fromEntries(this.#waiting);
+	}
+
+	/** The user message `entry` answers, if `entry` is an assistant message descending from it through non-message entries. */
+	visit(entry: SessionEntry): string | undefined {
+		if (isUserMessage(entry)) {
+			this.#waiting.set(entry.id, entry.id);
+			return undefined;
+		}
+		const parentId = "parentId" in entry ? entry.parentId : undefined;
+		const user = typeof parentId === "string" ? this.#waiting.get(parentId) : undefined;
+		if (!user) return undefined;
+		if (isAssistantMessage(entry)) {
+			for (const [waitingId, waitingUser] of this.#waiting) {
+				if (waitingUser === user) this.#waiting.delete(waitingId);
+			}
+			return user;
+		}
+		if (entry.type !== "message" && !startsNewRequest(entry) && "id" in entry && typeof entry.id === "string") {
+			this.#waiting.set(entry.id, user);
+		}
+		return undefined;
+	}
+}
+
+/** Rebuild the cursor state of `bytes` (a transcript prefix): the last service tier, the awaited replies and the Spotlight state. */
+function scanPrefixState(
+	bytes: Uint8Array,
+	spotlight: SpotlightCollector,
+	replies: ReplyTracker,
+): ServiceTierByFamily | undefined {
 	let currentServiceTier: ServiceTierByFamily | undefined;
 	visitSessionEntriesLenient(bytes, entry => {
+		replies.visit(entry);
 		if (isServiceTierChange(entry)) currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
+		else spotlight.visit(entry);
 	});
 	return currentServiceTier;
 }
-/**
- * Parse a session file and extract all assistant message stats.
- * Uses incremental reading with offset tracking.
- *
- * Service-tier carry-over: `currentServiceTier` is a session-scoped piece of
- * state derived from `service_tier_change` entries that affects whether
- * subsequent OpenAI assistant replies count as premium requests. Incremental
- * syncs that resume past the most-recent tier change would otherwise lose
- * that state and silently record `premiumRequests = 0` for priority traffic
- * (the coding-agent stopped folding the tier into `usage.premiumRequests`
- * after 13f59162e — the parser is now the sole source of truth). When
- * `fromOffset > 0` we therefore scan the bytes preceding `fromOffset`
- * for the latest service-tier value before parsing the unprocessed tail.
- * The scan only keeps the current tier and does not materialize prefix
- * entries, preserving offset-based memory behavior for large sessions.
- */
+export interface SessionParserState {
+	version: 1;
+	offset: number;
+	ino: number;
+	birthtimeMs: number;
+	size: number;
+	mtimeMs: number;
+	checkpoint: string;
+	serviceTier: ServiceTierByFamily | null;
+	/** Absent in cursors persisted before the Spotlight tables; such a tail parse starts from an empty state. */
+	spotlight?: SpotlightParserState;
+	/** Absent in cursors persisted before replies were tracked; such a cursor is rebuilt from the transcript prefix. */
+	pendingReplies?: Record<string, string>;
+}
+
 export interface ParseSessionResult {
-	stats: MessageStats[];
+	stats: MessageStatsInput[];
 	userStats: UserMessageStats[];
 	userLinks: UserMessageLink[];
 	toolCalls: ToolCallStats[];
 	toolResults: ToolResultLink[];
+	snapcompactCompactions: SnapcompactCompactionStats[];
+	spotlight: SpotlightParseRows;
 	newOffset: number;
+	parserState?: SessionParserState;
+	reset?: boolean;
 }
-export async function parseSessionFile(sessionPath: string, fromOffset = 0): Promise<ParseSessionResult> {
-	let bytes: Uint8Array;
-	try {
-		bytes = await Bun.file(sessionPath).bytes();
-	} catch (err) {
-		if (isEnoent(err))
-			return { stats: [], userStats: [], userLinks: [], toolCalls: [], toolResults: [], newOffset: fromOffset };
-		throw err;
-	}
 
+const CHECKPOINT_BYTES = 256;
+
+async function readCheckpoint(handle: fs.FileHandle, end: number): Promise<Uint8Array> {
+	// Positional reads keep the descriptor at zero for Bun.file(fd)'s subsequent tail read.
+	const start = Math.max(0, end - CHECKPOINT_BYTES);
+	const bytes = new Uint8Array(end - start);
+	let read = 0;
+	while (read < bytes.length) {
+		const result = await handle.read(bytes, read, bytes.length - read, start + read);
+		if (result.bytesRead === 0) break;
+		read += result.bytesRead;
+	}
+	return bytes.subarray(0, read);
+}
+
+/**
+ * Whether `info` is still the file a cursor was taken from. The device number is deliberately not part of
+ * this: ZFS and others renumber it across mounts and reboots while the transcript stays intact; `ino` +
+ * `birthtimeMs` (plus size/mtime at call sites) identify the file.
+ */
+export function matchesSessionFile(state: SessionParserState, info: nodeFs.Stats): boolean {
+	return state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
+}
+
+/** Offset-only callers reconstruct service-tier state once; persisted cursors read only the appended tail. */
+export async function parseSessionFile(
+	sessionPath: string,
+	fromOffset = 0,
+	state?: SessionParserState,
+	replay = false,
+): Promise<ParseSessionResult> {
+	let bytes: Uint8Array;
+	let start = fromOffset;
+	let reset = false;
+	let currentServiceTier: ServiceTierByFamily | undefined;
+	let info: nodeFs.Stats;
+	let checkpoint: string;
+	let read: number;
 	const folder = extractFolderFromPath(sessionPath);
 	const agentType = classifyAgentType(sessionPath);
-	const stats: MessageStats[] = [];
+	const stats: MessageStatsInput[] = [];
 	const userStats: UserMessageStats[] = [];
 	const userLinks: UserMessageLink[] = [];
 	const toolCalls: ToolCallStats[] = [];
 	const toolResults: ToolResultLink[] = [];
-	const userByEntryId = new Map<string, UserMessageStats>();
-	const start = Math.max(0, Math.min(fromOffset, bytes.length));
-	const unprocessed = bytes.subarray(start);
-	const { entries, read } = parseSessionEntriesLenient(unprocessed);
-	let currentServiceTier: ServiceTierByFamily | undefined;
-	if (start > 0) {
-		currentServiceTier = scanLastServiceTier(bytes.subarray(0, start));
-	}
-	for (const entry of entries) {
+	const snapcompactCompactions: SnapcompactCompactionStats[] = [];
+	// First call per id: the row `INSERT OR IGNORE` keeps, so it can be written with its result.
+	const callsById = new Map<string, ToolCallStats>();
+	let spotlight = new SpotlightCollector(sessionPath, folder, emptySpotlightState());
+	let replies = new ReplyTracker();
+
+	// Reduce each entry immediately so full replays do not retain tool-output/message bodies.
+	const visit = (entry: SessionEntry): void => {
+		const answered = replies.visit(entry);
+		spotlight.visit(entry);
 		if (isServiceTierChange(entry)) {
 			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
-			continue;
+			return;
+		}
+		const compaction = extractSnapcompactCompaction(sessionPath, folder, entry);
+		if (compaction) {
+			snapcompactCompactions.push(compaction);
+			return;
 		}
 		if (isUserMessage(entry)) {
 			const userMsg = extractUserStats(sessionPath, folder, entry);
-			if (userMsg) {
-				userStats.push(userMsg);
-				userByEntryId.set(entry.id, userMsg);
-			}
-			continue;
+			if (userMsg) userStats.push(userMsg);
+			return;
 		}
 		if (isToolResultMessage(entry)) {
 			const link = extractToolResultLink(sessionPath, entry);
-			if (link) toolResults.push(link);
-			continue;
+			if (!link) return;
+			toolResults.push(link);
+			const call = callsById.get(link.toolCallId);
+			if (call && call.resultChars === undefined) {
+				call.resultChars = link.resultChars;
+				call.isError = link.isError;
+			}
+			return;
 		}
 		if (isModelUsage(entry)) {
 			const modelUsageStats = extractModelUsageStats(sessionPath, folder, entry, agentType);
 			if (modelUsageStats) stats.push(modelUsageStats);
-			continue;
+			return;
 		}
 		if (isAssistantMessage(entry)) {
 			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
 			if (msgStats) stats.push(msgStats);
-			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
-			// Link assistant's responding model back to the user message it answered.
-			const parentId = (entry as SessionMessageEntry).parentId;
-			if (parentId) {
-				const msg = entry.message as AssistantMessage;
-				if (msg.model && msg.provider) {
-					// Emit unconditionally. The aggregator's UPDATE is guarded by
-					// `model IS NULL` so this is idempotent: a no-op for already
-					// linked rows, a fix-up for fresh inserts (which start NULL
-					// because the user row is recorded before its reply lands) and
-					// for cross-pass orphans whose parent was committed by an
-					// earlier incremental sync.
-					userLinks.push({
-						sessionFile: sessionPath,
-						entryId: parentId,
-						model: msg.model,
-						provider: msg.provider,
-					});
-				}
+			for (const call of extractToolCalls(sessionPath, folder, entry, agentType)) {
+				toolCalls.push(call);
+				if (!callsById.has(call.toolCallId)) callsById.set(call.toolCallId, call);
+			}
+			// Persist links even when the user entry was ingested in an earlier tail read.
+			const msg = entry.message;
+			if (answered && msg.role === "assistant" && msg.model && msg.provider) {
+				userLinks.push({
+					sessionFile: sessionPath,
+					entryId: answered,
+					model: msg.model,
+					provider: msg.provider,
+				});
 			}
 		}
+	};
+
+	try {
+		const handle = await fs.open(sessionPath, "r");
+		try {
+			info = await handle.stat();
+			const file = Bun.file(handle.fd);
+			let resume = state?.version === 1 && state.offset === fromOffset;
+			if (resume && state) {
+				reset =
+					!matchesSessionFile(state, info) ||
+					info.size < state.size ||
+					(info.size === state.size && info.mtimeMs !== state.mtimeMs);
+				if (!reset) {
+					const previous = await readCheckpoint(handle, fromOffset);
+					reset = Bun.hash(previous).toString(16) !== state.checkpoint;
+				}
+				// A cursor written before replies were tracked rebuilds its state from the prefix instead.
+				resume = !reset && state.pendingReplies !== undefined;
+			}
+			if (fromOffset > info.size) reset = true;
+			if (replay) resume = false;
+			start = reset || replay ? 0 : Math.max(0, fromOffset);
+			const readStart = resume ? start : 0;
+			bytes = await file.slice(readStart, info.size).bytes();
+			if (resume) {
+				currentServiceTier = state?.serviceTier ?? undefined;
+				spotlight = new SpotlightCollector(sessionPath, folder, state?.spotlight ?? emptySpotlightState());
+				replies = new ReplyTracker(state?.pendingReplies);
+			} else {
+				const prefix = new SpotlightCollector(sessionPath, folder, emptySpotlightState(), false);
+				currentServiceTier = scanPrefixState(bytes.subarray(0, start), prefix, replies);
+				spotlight = new SpotlightCollector(sessionPath, folder, prefix.state);
+			}
+			read = visitSessionEntriesLenient(bytes.subarray(start - readStart), visit);
+			const newOffset = start + read;
+			const checkpointStart = Math.max(0, newOffset - CHECKPOINT_BYTES);
+			const previous =
+				checkpointStart >= readStart
+					? bytes.subarray(checkpointStart - readStart, newOffset - readStart)
+					: await readCheckpoint(handle, newOffset);
+			checkpoint = Bun.hash(previous).toString(16);
+		} finally {
+			await handle.close();
+		}
+	} catch (err) {
+		if (isEnoent(err))
+			return {
+				stats: [],
+				userStats: [],
+				userLinks: [],
+				toolCalls: [],
+				toolResults: [],
+				snapcompactCompactions: [],
+				spotlight: emptySpotlightRows(),
+				newOffset: fromOffset,
+			};
+		throw err;
 	}
 
-	return { stats, userStats, userLinks, toolCalls, toolResults, newOffset: start + read };
+	await spotlight.finish();
+	const newOffset = start + read;
+	return {
+		stats,
+		userStats,
+		userLinks,
+		toolCalls,
+		toolResults,
+		snapcompactCompactions,
+		spotlight: spotlight.rows,
+		newOffset,
+		reset,
+		parserState: {
+			version: 1,
+			offset: newOffset,
+			ino: info.ino,
+			birthtimeMs: info.birthtimeMs,
+			size: info.size,
+			mtimeMs: info.mtimeMs,
+			checkpoint,
+			serviceTier: currentServiceTier ?? null,
+			spotlight: spotlight.state,
+			pendingReplies: replies.state,
+		},
+	};
 }
 
 /**
@@ -507,12 +836,33 @@ export async function listSessionFolders(): Promise<string[]> {
 }
 
 /**
- * List all session files in a folder.
+ * Name prefix of the scratch directories `omp gc --compress` creates beside
+ * the files it copies on APFS. Their `.jsonl` files are transient copies of
+ * transcripts, never transcripts of their own; a killed run can leave one
+ * behind until the next `omp gc --compress --apply` removes it.
+ */
+export const COMPRESS_SCRATCH_PREFIX = ".omp-gc-compress-";
+
+/** Whether `relativePath` (from any ancestor directory) lies inside a compress scratch directory. */
+export function isCompressScratchPath(relativePath: string): boolean {
+	return relativePath.split(/[\\/]/).some(part => part.startsWith(COMPRESS_SCRATCH_PREFIX));
+}
+
+/**
+ * List all session files in a folder, excluding copies inside
+ * `omp gc --compress` scratch directories.
  */
 export async function listSessionFiles(folderPath: string): Promise<string[]> {
 	try {
 		const entries = await fs.readdir(folderPath, { recursive: true, withFileTypes: true });
-		return entries.filter(e => e.isFile() && e.name.endsWith(".jsonl")).map(e => path.join(e.parentPath, e.name));
+		return entries
+			.filter(
+				e =>
+					e.isFile() &&
+					e.name.endsWith(".jsonl") &&
+					!isCompressScratchPath(path.relative(folderPath, e.parentPath)),
+			)
+			.map(e => path.join(e.parentPath, e.name));
 	} catch {
 		return [];
 	}
@@ -523,14 +873,7 @@ export async function listSessionFiles(folderPath: string): Promise<string[]> {
  */
 export async function listAllSessionFiles(): Promise<string[]> {
 	const folders = await listSessionFolders();
-	const allFiles: string[] = [];
-
-	for (const folder of folders) {
-		const files = await listSessionFiles(folder);
-		allFiles.push(...files);
-	}
-
-	return allFiles;
+	return (await Promise.all(folders.map(listSessionFiles))).flat();
 }
 
 /**

@@ -9,6 +9,8 @@
  * - No system prompt / tool catalog sections.
  */
 import { describe, expect, it } from "bun:test";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { renderAdvisorDeltaChunks } from "@oh-my-pi/pi-coding-agent/advisor/delta-split";
 import { formatSessionHistoryMarkdown } from "@oh-my-pi/pi-coding-agent/session/session-history-format";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
@@ -386,5 +388,262 @@ describe("formatSessionHistoryMarkdown", () => {
 		expect(output).toContain("→ user-bash! rm -rf .wt/foo ⇒ ok · 0 lines");
 		expect(output).not.toContain("**user**:");
 		expect(output).toContain("## assistant");
+	});
+
+	it("middle-truncates an oversized expanded diff but leaves small and mid-size ones byte-identical", () => {
+		const renderDiff = (diff: string): string =>
+			formatSessionHistoryMarkdown(
+				[
+					{
+						role: "assistant",
+						content: [{ type: "toolCall", id: "c1", name: "edit", arguments: { path: "big.ts" } }],
+						timestamp: 1,
+					},
+					{
+						role: "toolResult",
+						toolCallId: "c1",
+						toolName: "edit",
+						content: "ok",
+						details: { diff },
+						timestamp: 2,
+					},
+				],
+				{ expandEditDiffs: true, watchedRoles: true },
+			);
+
+		const rows = Array.from({ length: 400 }, (_, index) => `+row-${String(index + 1).padStart(4, "0")}`);
+		const big = renderDiff(["--- a/big.ts", "+++ b/big.ts", "@@ -1,400 +1,400 @@", ...rows].join("\n"));
+		expect(big).toContain("```diff");
+		expect(big).toContain("+row-0001");
+		expect(big).toContain("+row-0400");
+		expect(big).not.toContain("+row-0200");
+		expect(big).toMatch(/\[…\d+ln elided…\]/);
+
+		const smallDiff = "--- a/big.ts\n+++ b/big.ts\n@@ -1,2 +1,2 @@\n-const x = 1;\n+const x = 2;";
+		const small = renderDiff(smallDiff);
+		expect(small).toContain(`\`\`\`diff\n${smallDiff}\n\`\`\``);
+		expect(small).not.toContain("elided");
+
+		// Past the 80-line tool-output cap, inside the diff's own 300-line cap.
+		const midRows = Array.from({ length: 200 }, (_, index) => `+row-${String(index + 1).padStart(4, "0")}`);
+		const midDiff = ["--- a/big.ts", "+++ b/big.ts", "@@ -1,200 +1,200 @@", ...midRows].join("\n");
+		const mid = renderDiff(midDiff);
+		expect(mid).toContain(`\`\`\`diff\n${midDiff}\n\`\`\``);
+		expect(mid).not.toContain("elided");
+	});
+	it("transforms one-line tool previews before truncating them", () => {
+		const secret = `SECRET_${"x".repeat(80)}`;
+		const transform = (text: string): string => text.replace(secret, "[redacted]");
+		const output = formatSessionHistoryMarkdown(
+			[
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "c1",
+							name: "bash",
+							arguments: {
+								command: `${"p".repeat(100)}${secret}`,
+								[INTENT_FIELD]: `${"i".repeat(65)}${secret}`,
+							},
+						},
+					],
+					timestamp: 1,
+				},
+			],
+			{ includeToolIntent: true, transformExpandedToolIO: transform },
+		);
+
+		expect(output).toContain("[redacted]");
+		expect(output).not.toContain(secret.slice(0, 16));
+	});
+
+	it("transforms execution-source previews before truncating them", () => {
+		const secret = `SECRET_${"x".repeat(80)}`;
+		const output = formatSessionHistoryMarkdown(
+			[
+				{
+					role: "bashExecution",
+					command: `${"p".repeat(100)}${secret}`,
+					output: "",
+					exitCode: 0,
+					timestamp: 1,
+				},
+			],
+			{ transformExpandedToolIO: text => text.replace(secret, "[redacted]") },
+		);
+
+		expect(output).toContain("[redacted]");
+		expect(output).not.toContain(secret.slice(0, 16));
+	});
+
+	it("redacts secrets that cross the preview cut at a space or past 8 KiB", () => {
+		// Reviewer repro: a two-word secret straddling the 120-char cut, plus a
+		// single token longer than any fixed scan window.
+		const spaced = "SECRETONE SECRETTWO";
+		const long = `LONGSECRET_${"z".repeat(9 * 1024)}`;
+		const transform = (text: string): string => text.replaceAll(spaced, "[redacted]").replaceAll(long, "[redacted]");
+		const output = formatSessionHistoryMarkdown(
+			[
+				{
+					role: "bashExecution",
+					command: `${"p".repeat(105)}${spaced} suffix`,
+					output: "",
+					exitCode: 0,
+					timestamp: 1,
+				},
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "c1",
+							name: "bash",
+							arguments: { command: `${"p".repeat(105)}${spaced} suffix` },
+						},
+						{ type: "toolCall", id: "c2", name: "bash", arguments: { command: `${"q".repeat(100)}${long}` } },
+					],
+					timestamp: 2,
+				},
+			],
+			{ transformExpandedToolIO: transform },
+		);
+
+		expect(output).not.toContain("SECRETONE");
+		expect(output).not.toContain("LONGSECRET");
+		expect(output.match(/\[redacted\]/g)).toHaveLength(3);
+	});
+
+	// Current sessions record the submitted draft as `prompt`; older ones carry only `args`.
+	const args = "Now explain closures in your own words, focusing on the counter example";
+	for (const [label, extra] of [
+		["submitted draft", { prompt: `/skill:in-your-own-words ${args}` }],
+		["legacy args", {}],
+	] as const) {
+		it(`preserves a skill-prompt's user text past the 120-char body cap (${label})`, () => {
+			const body = `# in-your-own-words\n${"Instruction line filling the skill body. ".repeat(20)}`;
+			const output = formatSessionHistoryMarkdown(
+				[
+					{
+						role: "custom",
+						customType: "skill-prompt",
+						content: `[IMPORTANT: User invoked the "in-your-own-words" skill; follow its instructions. Full skill below.]\n\n${body}\n\n---\n\nUser: ${args}`,
+						display: true,
+						attribution: "user",
+						details: {
+							name: "in-your-own-words",
+							path: "/skills/in-your-own-words/SKILL.md",
+							args,
+							...extra,
+							lineCount: 21,
+						},
+						timestamp: 1,
+					},
+				],
+				{ watchedRoles: true },
+			);
+
+			expect(output).toContain("[skill:in-your-own-words]");
+			expect(output).toContain("counter example");
+		});
+	}
+});
+
+describe("advisor-view shortening label (#12777)", () => {
+	const ELIDED_HERE =
+		"shortened here for advisor view only; the omitted lines were part of the result the main thread received";
+	const TOOL_TRUNCATED = "shortened here for advisor view only; the tool itself truncated its output";
+	const complete = Array.from({ length: 150 }, (_, i) => `line ${i + 1}`).join("\n");
+
+	// A read call and its result, in the shape the advisor transcript renders.
+	function readTranscript(text: string, details?: unknown): unknown[] {
+		return [
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "r1", name: "read", arguments: { path: "report:raw:1-150" } }],
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "r1",
+				toolName: "read",
+				content: [{ type: "text", text }],
+				details,
+				isError: false,
+				timestamp: 2,
+			},
+		];
+	}
+
+	it("labels the lines only the advisor view cut as part of the result the main thread received", () => {
+		const output = formatSessionHistoryMarkdown(readTranscript(complete), { expandToolIO: true });
+
+		expect(output).toContain(`Tool result (${ELIDED_HERE}):\n`);
+		expect(output).toMatch(/\[…\d+ln elided…\]/);
+	});
+
+	// One representative case for tool-side metadata (summary or meta.limits): the formatter
+	// never reads these shapes, so the label is the same for every one of them.
+	it("makes no completeness claim when the read result carries tool-side metadata", () => {
+		const details = { meta: { limits: { matchLimit: { reached: 150, suggestion: 300 } } } };
+		const output = formatSessionHistoryMarkdown(readTranscript(complete, details), { expandToolIO: true });
+
+		expect(output).toContain(`Tool result (${ELIDED_HERE}):\n`);
+	});
+
+	it("names the tool's own truncation on a small result the advisor view did not shorten", () => {
+		const details = {
+			meta: {
+				truncation: {
+					direction: "middle",
+					truncatedBy: "middle",
+					totalLines: 300,
+					totalBytes: 9000,
+					outputLines: 20,
+					outputBytes: 600,
+				},
+			},
+		};
+		const small = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n");
+		const output = formatSessionHistoryMarkdown(readTranscript(small, details), { expandToolIO: true });
+
+		expect(output).toContain("Tool result (the tool itself truncated its output):\n");
+	});
+
+	it("names the tool's own truncation when the tool already truncated the output", () => {
+		const details = {
+			meta: {
+				truncation: {
+					direction: "middle",
+					truncatedBy: "middle",
+					totalLines: 300,
+					totalBytes: 9000,
+					outputLines: 150,
+					outputBytes: 4500,
+				},
+			},
+		};
+		const output = formatSessionHistoryMarkdown(readTranscript(complete, details), { expandToolIO: true });
+
+		expect(output).toContain(`Tool result (${TOOL_TRUNCATED}):\n`);
+	});
+
+	it("keeps the bare label for a result the advisor view did not shorten", () => {
+		const output = formatSessionHistoryMarkdown(readTranscript("const a = 1;"), { expandToolIO: true });
+
+		expect(output).toContain("Tool result:\n");
+		expect(output).not.toContain("advisor view only");
+	});
+
+	it("labels the advisor-only cut on the chunked path the advisor receives", () => {
+		const chunks = renderAdvisorDeltaChunks(readTranscript(complete) as AgentMessage[], {
+			wip: false,
+			includeThinking: false,
+			advisorRegexSecretValues: new Set(),
+		});
+		const text = (chunks ?? []).map(chunk => (chunk as { content: { text: string }[] }).content[0].text).join("\n");
+
+		expect(text).toContain(`Tool result (${ELIDED_HERE}):\n`);
 	});
 });

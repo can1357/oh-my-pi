@@ -40,7 +40,7 @@ describe("disabled credential tombstones", () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-disabled-creds-"));
 		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
 		storage = new AuthStorage(store);
-		await storage.reload();
+		await storage.credentials.reload();
 	});
 
 	afterEach(async () => {
@@ -49,12 +49,12 @@ describe("disabled credential tombstones", () => {
 	});
 
 	test("sqlite store lists identity + cause + disabledAtMs and never token material", async () => {
-		store!.saveOAuth("anthropic", mintOAuth("dead@example.test"));
-		store!.saveOAuth("openai-codex", mintOAuth("alive@example.test"));
+		await store!.saveOAuth("anthropic", mintOAuth("dead@example.test"));
+		await store!.saveOAuth("openai-codex", mintOAuth("alive@example.test"));
 		const row = store!.listAuthCredentials("anthropic")[0];
-		store!.deleteAuthCredential(row.id, DISABLE_CAUSE);
+		await store!.deleteAuthCredential(row.id, DISABLE_CAUSE);
 
-		const all = await storage!.listDisabledCredentials();
+		const all = await storage!.credentials.listDisabled();
 		expect(all).toHaveLength(1);
 		const summary = all[0];
 		expect(summary).toMatchObject({
@@ -72,8 +72,17 @@ describe("disabled credential tombstones", () => {
 		expect(serialized).not.toContain("refresh-dead");
 
 		// Provider filter is exact; a provider with only active rows yields [].
-		expect(await storage!.listDisabledCredentials("anthropic")).toHaveLength(1);
-		expect(await storage!.listDisabledCredentials("openai-codex")).toHaveLength(0);
+		expect(await storage!.credentials.listDisabled("anthropic")).toHaveLength(1);
+		expect(await storage!.credentials.listDisabled("openai-codex")).toHaveLength(0);
+	});
+
+	test("sqlite disable returns false for missing or already-disabled rows without overwriting the tombstone", async () => {
+		await store!.saveOAuth("anthropic", mintOAuth("once@example.test"));
+		const row = store!.listAuthCredentials("anthropic")[0];
+		expect(await store!.deleteAuthCredential(row.id + 1, "missing")).toBe(false);
+		expect(await store!.deleteAuthCredential(row.id, "original cause")).toBe(true);
+		expect(await store!.deleteAuthCredential(row.id, "later cause")).toBe(false);
+		expect((await store!.listDisabledCredentials("anthropic"))[0]?.cause).toBe("original cause");
 	});
 
 	test("client maps a broker without the endpoint (404) to an empty list", async () => {
@@ -97,7 +106,7 @@ describe("broker /v1/credentials/disabled round-trip", () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-disabled-"));
 		serverStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "broker.db"));
 		serverStorage = new AuthStorage(serverStore);
-		await serverStorage.reload();
+		await serverStorage.credentials.reload();
 		handle = startAuthBroker({
 			storage: serverStorage,
 			bind: "127.0.0.1:0",
@@ -110,7 +119,7 @@ describe("broker /v1/credentials/disabled round-trip", () => {
 				streamSnapshots: false,
 			}),
 		);
-		await clientStorage.reload();
+		await clientStorage.credentials.reload();
 	});
 
 	afterEach(async () => {
@@ -121,11 +130,11 @@ describe("broker /v1/credentials/disabled round-trip", () => {
 	});
 
 	test("a row disabled on the broker surfaces to remote clients as a tombstone", async () => {
-		serverStore!.saveOAuth("anthropic", mintOAuth("gone@example.test"));
+		await serverStore!.saveOAuth("anthropic", mintOAuth("gone@example.test"));
 		const row = serverStore!.listAuthCredentials("anthropic")[0];
-		serverStore!.deleteAuthCredential(row.id, DISABLE_CAUSE);
+		await serverStore!.deleteAuthCredential(row.id, DISABLE_CAUSE);
 
-		const disabled = await clientStorage!.listDisabledCredentials("anthropic");
+		const disabled = await clientStorage!.credentials.listDisabled("anthropic");
 		expect(disabled).toHaveLength(1);
 		expect(disabled[0]).toMatchObject({
 			id: row.id,
@@ -141,9 +150,9 @@ describe("broker /v1/credentials/disabled round-trip", () => {
 		// Client connected before this credential existed (e.g. a re-login that
 		// swapped an org-less row for an org-scoped one while a disk-cached
 		// snapshot was still fresh).
-		serverStore!.saveOAuth("anthropic", { ...mintOAuth("late@example.test"), orgId: "org-late" });
-		await clientStorage!.revalidateCredentials();
-		const rows = clientStorage!.getAll().anthropic;
+		await serverStore!.saveOAuth("anthropic", { ...mintOAuth("late@example.test"), orgId: "org-late" });
+		await clientStorage!.credentials.revalidate();
+		const rows = clientStorage!.credentials.all().anthropic;
 		const list = Array.isArray(rows) ? rows : [rows];
 		const late = list.find(entry => entry?.type === "oauth" && entry.email === "late@example.test");
 		if (late?.type !== "oauth") throw new Error("expected refreshed oauth credential");
@@ -161,7 +170,7 @@ describe("OAuth login stamps authorizedAt", () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-authorized-at-"));
 		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
 		storage = new AuthStorage(store);
-		await storage.reload();
+		await storage.credentials.reload();
 		registerOAuthProvider({
 			id: PROVIDER_ID,
 			name: "AuthorizedAt Test",
@@ -183,7 +192,7 @@ describe("OAuth login stamps authorizedAt", () => {
 
 	test("login records the interactive-login instant; refresh persists keep it while rotating tokens", async () => {
 		const before = Date.now();
-		await storage!.login(PROVIDER_ID, {
+		await storage!.oauth.login(PROVIDER_ID, {
 			onAuth: () => {},
 			onPrompt: async () => "",
 		});
@@ -204,8 +213,8 @@ describe("OAuth login stamps authorizedAt", () => {
 			}),
 		});
 		try {
-			await refreshingStorage.reload();
-			await refreshingStorage.forceRefreshCredentialById(stored.id);
+			await refreshingStorage.credentials.reload();
+			await refreshingStorage.oauth.refresh(stored.id);
 			const after = store!.listAuthCredentials(PROVIDER_ID)[0];
 			if (after.credential.type !== "oauth") throw new Error("expected oauth credential");
 			expect(after.credential.refresh).toBe("refresh-rotated");

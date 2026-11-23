@@ -1,9 +1,3 @@
-diff --git a/node_modules/puppeteer-core/.bun-tag-2e714b457f0bd8e8 b/.bun-tag-2e714b457f0bd8e8
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/puppeteer-core/.bun-tag-a797aeb3ca2bd69f b/.bun-tag-a797aeb3ca2bd69f
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/lib/puppeteer/api/ElementHandle.js b/lib/puppeteer/api/ElementHandle.js
 index 81454fe2af73518f7e76f04cbe3a7f170d735fa5..ee6b042c87861f00d7fcbb6e3eb6e87af232ebbd 100644
 --- a/lib/puppeteer/api/ElementHandle.js
@@ -264,10 +258,22 @@ index 8698d2a5a976b277344fe42e90ffe985bdf0fbd7..62c3b7ca8ec987cc62ceacec69acf654
          /**
           * The full HTML contents of the frame, including the DOCTYPE.
 diff --git a/lib/puppeteer/cdp/ExecutionContext.js b/lib/puppeteer/cdp/ExecutionContext.js
-index c67098fd6c9f66666ad2b41d5b7dea42e1991833..2a543a09bfbd48bb9c02f085399788e913d0e8e4 100644
+index c67098fd6c9f66666ad2b41d5b7dea42e1991833..8cb17f9acc50ff47bbbd5faf09112e05558c4af2 100644
 --- a/lib/puppeteer/cdp/ExecutionContext.js
 +++ b/lib/puppeteer/cdp/ExecutionContext.js
-@@ -326,14 +326,19 @@ export class ExecutionContext extends EventEmitter {
+@@ -201,7 +201,10 @@ export class ExecutionContext extends EventEmitter {
+     #puppeteerUtil;
+     get puppeteerUtil() {
+         let promise = Promise.resolve();
+-        if (!this.#bindingsInstalled) {
++        // xxx-stealth: ARIA queries run in the named utility world. Polling in the main
++        // world needs the utility pollers, not the page-visible query bindings.
++        // Do not install globals that page scripts can read or replace.
++        if (!this.#bindingsInstalled && this.#name) {
+             promise = Promise.all([
+                 this.#addBindingWithoutThrowing(ariaQuerySelectorBinding),
+                 this.#addBindingWithoutThrowing(ariaQuerySelectorAllBinding),
+@@ -326,14 +329,19 @@ export class ExecutionContext extends EventEmitter {
          return await this.#evaluate(false, pageFunction, ...args);
      }
      async #evaluate(returnByValue, pageFunction, ...args) {
@@ -290,7 +296,7 @@ index c67098fd6c9f66666ad2b41d5b7dea42e1991833..2a543a09bfbd48bb9c02f085399788e9
              const { exceptionDetails, result: remoteObject } = await this.#client
                  .send('Runtime.evaluate', {
                  expression: expressionWithSourceUrl,
-@@ -352,9 +357,8 @@ export class ExecutionContext extends EventEmitter {
+@@ -352,9 +360,8 @@ export class ExecutionContext extends EventEmitter {
              return this.#world.createCdpHandle(remoteObject);
          }
          const functionDeclaration = stringifyFunction(pageFunction);
@@ -325,7 +331,7 @@ index 4e27013ad8f9b89ee13913e55bba243cc8bf9662..42c4bf547443aa01955dde6f4e0f4d53
                      // @ts-expect-error: In a different context.
                      globalThis[name] = undefined;
 diff --git a/lib/puppeteer/cdp/FrameManager.js b/lib/puppeteer/cdp/FrameManager.js
-index 2322aa136a47b446e2a7b2c4f0bc751f2fb821d0..2116367ee34bb86948bf956c2afa2f693ce14c96 100644
+index 2322aa136a47b446e2a7b2c4f0bc751f2fb821d0..5c88a7a3205276262d979fe2a00b4b12bd64e5de 100644
 --- a/lib/puppeteer/cdp/FrameManager.js
 +++ b/lib/puppeteer/cdp/FrameManager.js
 @@ -13,6 +13,7 @@ import { disposeSymbol } from '../util/disposable.js';
@@ -336,7 +342,7 @@ index 2322aa136a47b446e2a7b2c4f0bc751f2fb821d0..2116367ee34bb86948bf956c2afa2f69
  import { isTargetClosedError } from './Connection.js';
  import { CdpDeviceRequestPromptManager } from './DeviceRequestPrompt.js';
  import { ExecutionContext } from './ExecutionContext.js';
-@@ -43,6 +44,10 @@ export class FrameManager extends EventEmitter {
+@@ -43,6 +44,13 @@ export class FrameManager extends EventEmitter {
       * frameNavigated event usually contains the latest information.
       */
      #frameNavigatedReceived = new Set();
@@ -344,10 +350,26 @@ index 2322aa136a47b446e2a7b2c4f0bc751f2fb821d0..2116367ee34bb86948bf956c2afa2f69
 +    // frameNavigated/init/load triggers don't stomp each other's contexts.
 +    #acquireQueued = new Set();
 +    #acquirePromises = new Map();
++    // xxx-stealth: committed navigations per frame. An acquisition installs
++    // nothing once a navigation lands after it started.
++    #navigations = new WeakMap();
      #deviceRequestPromptManagerMap = new WeakMap();
      #frameTreeHandled;
      get timeoutSettings() {
-@@ -191,9 +196,18 @@ export class FrameManager extends EventEmitter {
+@@ -144,6 +152,12 @@ export class FrameManager extends EventEmitter {
+         });
+         session.on('Page.frameNavigated', async (event) => {
+             this.#frameNavigatedReceived.add(event.frame.id);
++            // xxx-stealth: count before the first await, so an acquisition whose
++            // probe answers arrive together with this event already sees it.
++            const navigated = this.frame(event.frame.id);
++            if (navigated) {
++                this.#navigations.set(navigated, this.#navigationCount(navigated) + 1);
++            }
+             await this.#frameTreeHandled?.valueOrThrow();
+             void this.#onFrameNavigated(event.frame, event.type);
+         });
+@@ -191,9 +205,18 @@ export class FrameManager extends EventEmitter {
                      this.#frameTreeHandled?.resolve();
                  }),
                  client.send('Page.setLifecycleEventsEnabled', { enabled: true }),
@@ -369,7 +391,7 @@ index 2322aa136a47b446e2a7b2c4f0bc751f2fb821d0..2116367ee34bb86948bf956c2afa2f69
                  ...(frame
                      ? Array.from(this.#scriptsToEvaluateOnNewDocument.values())
                      : []).map(script => {
-@@ -346,6 +360,7 @@ export class FrameManager extends EventEmitter {
+@@ -346,6 +369,7 @@ export class FrameManager extends EventEmitter {
              return;
          }
          frame = new CdpFrame(this, frameId, parentFrameId, session);
@@ -377,20 +399,20 @@ index 2322aa136a47b446e2a7b2c4f0bc751f2fb821d0..2116367ee34bb86948bf956c2afa2f69
          this._frameTree.addFrame(frame);
          this.emit(FrameManagerEvent.FrameAttached, frame);
      }
-@@ -376,6 +391,177 @@ export class FrameManager extends EventEmitter {
+@@ -376,6 +400,196 @@ export class FrameManager extends EventEmitter {
          frame._navigated(framePayload);
          this.emit(FrameManagerEvent.FrameNavigated, frame);
          frame.emit(FrameEvent.FrameNavigated, navigationType);
-+        // xxx-stealth: install lazy context providers and invalidate the
-+        // pre-navigation contexts. With Runtime.enable off there is no
-+        // executionContextDestroyed event, so dispose synchronously here; this makes
-+        // IsolatedWorld.#context undefined so the next evaluate pulls a fresh context
-+        // via its provider (resolved after the navigation has settled) instead of
-+        // using a dead one. We intentionally do NOT proactively acquire — proactive
-+        // contexts captured mid-navigation go stale silently. Resolution is lazy.
++        // xxx-stealth: Runtime.enable is off, so navigation does not notify the
++        // worlds when their contexts die. Invalidate them and pull fresh contexts
++        // only when a pending wait needs its poller restarted in the new document.
 +        this.#installContextProviders(frame);
-+        for (const world of this.#frameWorlds(frame)) {
++        const worlds = this.#frameWorlds(frame);
++        for (const world of worlds) {
 +            world?.context?.[disposeSymbol]();
++        }
++        if (worlds.some(world => world?.taskManager.hasTasks())) {
++            void this.#acquireWorlds(frame);
 +        }
 +    }
 +    // xxx-stealth: the main + utility worlds. worlds is keyed by Symbols, so
@@ -417,7 +439,7 @@ index 2322aa136a47b446e2a7b2c4f0bc751f2fb821d0..2116367ee34bb86948bf956c2afa2f69
 +            this.#acquireQueued.add(id);
 +            return existing;
 +        }
-+        const promise = this.#doAcquireWorlds(frame).finally(() => {
++        const promise = this.#acquireCurrentWorlds(frame).finally(() => {
 +            this.#acquirePromises.delete(id);
 +            if (this.#acquireQueued.delete(id) && this.frame(id)) {
 +                void this.#acquireWorlds(frame);
@@ -425,6 +447,19 @@ index 2322aa136a47b446e2a7b2c4f0bc751f2fb821d0..2116367ee34bb86948bf956c2afa2f69
 +        });
 +        this.#acquirePromises.set(id, promise);
 +        return promise;
++    }
++    #navigationCount(frame) {
++        return this.#navigations.get(frame) ?? 0;
++    }
++    // xxx-stealth: probes answer for the document they reached, so a
++    // navigation that commits while they are in flight leaves their ids dead.
++    // Discard such an acquisition and acquire the document that replaced it.
++    async #acquireCurrentWorlds(frame) {
++        let navigations;
++        do {
++            navigations = this.#navigationCount(frame);
++            await this.#doAcquireWorlds(frame, navigations);
++        } while (this.#navigationCount(frame) !== navigations && this.frame(frame._id));
 +    }
 +    // xxx-stealth: true when `frame` is the top frame of its CDP session
 +    // (the page main frame, or an OOP iframe root). Only such frames can resolve
@@ -442,7 +477,7 @@ index 2322aa136a47b446e2a7b2c4f0bc751f2fb821d0..2116367ee34bb86948bf956c2afa2f69
 +    }
 +    // xxx-stealth: pull-acquire a frame's main + utility execution contexts
 +    // without Runtime.enable, then feed them into the normal push pipeline.
-+    async #doAcquireWorlds(frame) {
++    async #doAcquireWorlds(frame, navigations) {
 +        const session = frame.client;
 +        // xxx-stealth: never pre-dispose here. IsolatedWorld.setContext
 +        // already disposes the previous context when a fresh one is installed, and
@@ -460,6 +495,9 @@ index 2322aa136a47b446e2a7b2c4f0bc751f2fb821d0..2116367ee34bb86948bf956c2afa2f69
 +            })
 +                .catch(debugCatchError);
 +            const utilityId = iso && typeof iso.executionContextId === 'number' ? iso.executionContextId : undefined;
++            if (this.#navigationCount(frame) !== navigations) {
++                return;
++            }
 +            if (utilityId !== undefined) {
 +                this.#onExecutionContextCreated({
 +                    id: utilityId,
@@ -470,6 +508,9 @@ index 2322aa136a47b446e2a7b2c4f0bc751f2fb821d0..2116367ee34bb86948bf956c2afa2f69
 +            }
 +            // Main world: resolve this frame's main execution context id.
 +            const id = await this.#resolveMainContextId(session, frame, utilityId);
++            if (this.#navigationCount(frame) !== navigations) {
++                return;
++            }
 +            if (id !== undefined) {
 +                this.#onExecutionContextCreated({
 +                    id,
@@ -594,7 +635,7 @@ index b0619734a9eeb884f3ac4ffff39b540226aaf818..7e577d8a0200f0201742fd0a471edc97
          const result = await firstValueFrom(fromEmitterEvent(this.#emitter, 'context').pipe(raceWith(fromEmitterEvent(this.#emitter, 'disposed').pipe(map(() => {
              // The message has to match the CDP message expected by the WaitTask class.
 diff --git a/lib/puppeteer/cdp/WebWorker.js b/lib/puppeteer/cdp/WebWorker.js
-index 3d68f887920ded269eb641273a5a13dee235ae1d..dcdd86c8697c0dbd2dd2162c9a739dd9fa2afc96 100644
+index 3d68f887920ded269eb641273a5a13dee235ae1d..b4cc8fc1bcdfaf7fa58e169f8fe27225ac494e44 100644
 --- a/lib/puppeteer/cdp/WebWorker.js
 +++ b/lib/puppeteer/cdp/WebWorker.js
 @@ -29,9 +29,21 @@ export class CdpWebWorker extends WebWorker {
@@ -664,6 +705,61 @@ index 8c406cf90e0f9d899efaa5acb6a636a86f32e37e..185ef5954b2b95b708855ed68e8327a8
                  }
                  catch (e_3) {
                      env_4.error = e_3;
+diff --git a/lib/puppeteer/common/WaitTask.js b/lib/puppeteer/common/WaitTask.js
+index eee0d68b24442c5628266663a2d6334a7f1f1540..1216fe4ee94de5544652973227180574c272dab2 100644
+--- a/lib/puppeteer/common/WaitTask.js
++++ b/lib/puppeteer/common/WaitTask.js
+@@ -6,5 +6,6 @@
++import { JSHandle } from '../api/JSHandle.js';
+ import { Deferred } from '../util/Deferred.js';
+ import { isErrorLike } from '../util/ErrorLike.js';
+ import { stringifyFunction } from '../util/Function.js';
+-import { TimeoutError } from './Errors.js';
++import { ProtocolError, TimeoutError } from './Errors.js';
+ import { LazyArg } from './LazyArg.js';
+@@ -156,6 +157,17 @@ export class WaitTask {
+             if (error.message.includes('Cannot find context with specified id')) {
+                 return;
+             }
++            // xxx-stealth: navigation can reuse the numeric context id
++            // before Page.frameNavigated invalidates the old utility handle.
++            // A user handle or root cannot survive replacement; keep its error.
++            if (
++                error instanceof ProtocolError &&
++                !this.#root &&
++                !this.#args.some(arg => arg instanceof JSHandle) &&
++                error.message.includes('Argument should belong to the same JavaScript world as target object')
++            ) {
++                return;
++            }
+             // Errors coming from WebDriver BiDi. TODO: Adjust messages after
+             // https://github.com/w3c/webdriver-bidi/issues/540 is resolved.
+             if (error.message.includes('DiscardedBrowsingContextError')) {
+@@ -176,6 +188,9 @@ export class WaitTask {
+  */
+ export class TaskManager {
+     #tasks = new Set();
++    hasTasks() {
++        return this.#tasks.size > 0;
++    }
+     add(task) {
+         this.#tasks.add(task);
+     }
+diff --git a/lib/puppeteer/common/util.js b/lib/puppeteer/common/util.js
+index b185921857e559f3379924e96dd1dd6345b73374..6ae091b197767645d01e25afbb7d8628d1dbdae7 100644
+--- a/lib/puppeteer/common/util.js
++++ b/lib/puppeteer/common/util.js
+@@ -80,7 +80,9 @@ export const withSourcePuppeteerURLIfNone = (functionName, object) => {
+         // Second element is the caller of this function.
+         // Third element is the caller of the caller of this function
+         // which is precisely what we want.
+-        return stack[2];
++        // xxx-stealth: compiled binaries can expose fewer structured stack
++        // frames, so preserve the closest available source location.
++        return stack[2] ?? stack.at(-1);
+     };
+     const site = new Error().stack;
+     Error.prepareStackTrace = original;
 diff --git a/lib/puppeteer/node/ChromeLauncher.js b/lib/puppeteer/node/ChromeLauncher.js
 index fb7fe66ecb99fd207b99c1e9a9ae00769f0b9a20..af5284b9ee8226e78fa0243ec2f83a631bbaca9d 100644
 --- a/lib/puppeteer/node/ChromeLauncher.js
@@ -696,3 +792,20 @@ index fb7fe66ecb99fd207b99c1e9a9ae00769f0b9a20..af5284b9ee8226e78fa0243ec2f83a63
              ...userDisabledFeatures,
          ]
              .filter(feature => {
+diff --git a/lib/puppeteer/node/NodeWebSocketTransport.js b/lib/puppeteer/node/NodeWebSocketTransport.js
+index a1af6472f4fb346978e3bd073ddb34963b129da2..951b5968947edaf24775716ccbab31d3fe98fabe 100644
+--- a/lib/puppeteer/node/NodeWebSocketTransport.js
++++ b/lib/puppeteer/node/NodeWebSocketTransport.js
+@@ -25,7 +25,11 @@ export class NodeWebSocketTransport {
+             ws.addEventListener('open', () => {
+                 return resolve(new NodeWebSocketTransport(ws));
+             });
+-            ws.addEventListener('error', reject);
++            // Reject with an Error carrying the handshake failure: the raw
++            // ErrorEvent stringifies to "[object ErrorEvent]" wherever it surfaces.
++            ws.addEventListener('error', event => {
++                reject(new Error(event.message, { cause: event.error }));
++            });
+         });
+     }
+     #ws;

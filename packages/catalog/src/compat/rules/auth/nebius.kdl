@@ -1,0 +1,10 @@
+auth "nebius" {
+	name "Nebius Token Factory"
+	env "NEBIUS_API_KEY"
+	login "api-key" {
+		auth-url "https://tokenfactory.nebius.com"
+		instructions "Create or copy your Nebius Token Factory API key"
+		prompt "Paste your Nebius Token Factory API key" placeholder="nebius-..."
+		validate "models-endpoint" label="Nebius Token Factory" url="https://api.tokenfactory.nebius.com/v1/models"
+	}
+}

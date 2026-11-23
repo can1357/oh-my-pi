@@ -52,7 +52,7 @@ describe("AuthStorage broker sentinel refresh", () => {
 	test("getOAuthAccess refreshes expired broker credentials through the store hook only", async () => {
 		if (!authStorage || !store) throw new Error("test setup failed");
 
-		await authStorage.set("anthropic", [
+		await authStorage.credentials.set("anthropic", [
 			{
 				type: "oauth",
 				access: "broker-access-stale",
@@ -66,7 +66,7 @@ describe("AuthStorage broker sentinel refresh", () => {
 			throw new Error("provider-direct refresh must not be called");
 		});
 
-		const access = await authStorage.getOAuthAccess("anthropic", "broker-session");
+		const access = await authStorage.oauth.access("anthropic", "broker-session");
 
 		expect(access).toEqual({
 			accessToken: "broker-access-rotated",

@@ -1,35 +1,61 @@
-import { $env, logger } from "@oh-my-pi/pi-utils";
-import { settings } from "../config/settings";
+/**
+ * Client for the per-model tiny-model workers.
+ *
+ * Each (model, backend, device, dtype) is one `infer` unit in the omp daemon
+ * (`daemon/modules/infer.ts`), backed by the ONNX worker (`worker.ts`) or,
+ * with `PI_TINY_DEVICE=mlx`, the MLX worker (`mlx-server.py`). This client
+ * opens the unit, attaches a tunnel, and speaks the worker protocol over it;
+ * the daemon shares the worker machine-wide and stops it once idle. Prompt
+ * construction and title extraction live here so both workers only ever see
+ * message-level `chat` requests.
+ */
+import * as os from "node:os";
+import { $env, logger, prompt } from "@oh-my-pi/pi-utils";
+import type { Setting } from "../config/registry";
+import { isSettingsInitialized, settings } from "../config/settings";
+
+import { stageRunnerScript } from "../eval/runner-cache";
+import { ModelDownloadActivity } from "../downloads/model-downloads";
+import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
 import {
-	createUnavailableWorker,
-	createWorkerHandle,
-	createWorkerSubprocess,
-	inferenceWorkerEnv,
-	logWorkerMessage,
-	type RefCountedWorkerHandle,
-	resolveWorkerSpawnCmd,
-	SMOKE_TEST_TIMEOUT_MS,
-	type SpawnedSubprocess,
-	smokeTestWorker,
-	spawnWorkerOrUnavailable,
-} from "../subprocess/worker-client";
-import { safeSend } from "../utils/ipc";
-import { tinyModelDeviceSettingToEnv } from "./device";
+	INFER_CONNECTION_CLOSED,
+	InferConnection,
+	type InferOpenSpec,
+	smokeTestInferWorker,
+} from "../daemon/modules/infer";
+import { inferenceWorkerEnv, resolveWorkerSpawnCmd, SMOKE_TEST_TIMEOUT_MS } from "../subprocess/worker-client";
+import { MLX_DEVICE, resolveTinyModelDevicePreference, tinyMlxSupported, tinyModelDeviceSettingToEnv } from "./device";
 import { tinyModelDtypeSettingToEnv } from "./dtype";
+import { formatTitleUserMessage } from "./message-preproc";
+import { ensureTinyMlxRuntime, getTinyMlxModelDir, MLX_LM_VERSION } from "./mlx-runtime";
+import MLX_SERVER_SCRIPT from "./mlx-server.py" with { type: "text" };
+import { getTinyLocalModelSpec, isTinyLocalModelKey, type TinyLocalModelKey } from "./models";
+import { normalizeGeneratedTitle } from "./text";
 import {
-	isTinyLocalModelKey,
-	isTinyMemoryLocalModelKey,
-	isTinyTitleLocalModelKey,
-	type TinyLocalModelKey,
-	type TinyMemoryLocalModelKey,
-	type TinyTitleLocalModelKey,
-} from "./models";
-import type { TinyTitleProgressEvent, TinyTitleWorkerInbound, TinyTitleWorkerOutbound } from "./title-protocol";
+	TINY_WORKER_ARG,
+	TINY_WORKER_IDLE_MS_ENV,
+	TINY_WORKER_MODEL_ENV,
+	type TinyChatMessage,
+	type TinyTitleProgressEvent,
+	type TinyWorkerBackend,
+	type TinyWorkerRequest,
+	type TinyWorkerResponse,
+} from "./title-protocol";
+import { cfgProvidersTinyModelDevice, cfgProvidersTinyModelDtype } from "../session/settings";
+
+const TITLE_PREFILL = "<title>";
+const TITLE_CLOSE = "</title>";
+const TITLE_MAX_NEW_TOKENS = 20;
+const COMPLETION_DEFAULT_MAX_NEW_TOKENS = 256;
+const COMPLETION_MAX_NEW_TOKENS = 1024;
+const TINY_TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
+
+type WorkerConnection = InferConnection<TinyWorkerRequest, TinyWorkerResponse>;
 
 type PendingRequest =
-	| { kind: "generate"; modelKey: TinyTitleLocalModelKey; resolve: (title: string | null) => void }
-	| { kind: "complete"; modelKey: TinyMemoryLocalModelKey; resolve: (text: string | null) => void }
-	| { kind: "download"; modelKey: TinyLocalModelKey; resolve: (result: TinyTitleDownloadResult) => void };
+	| { kind: "title"; modelKey: TinyLocalModelKey; source: string; resolve: (title: string | null) => void }
+	| { kind: "chat"; modelKey: TinyLocalModelKey; resolve: (text: string | null) => void }
+	| { kind: "load"; modelKey: TinyLocalModelKey; resolve: (result: TinyTitleDownloadResult) => void };
 
 export interface TinyTitleDownloadResult {
 	ok: boolean;
@@ -52,9 +78,12 @@ export interface TinyTitleGenerateOptions {
 	systemPrompt?: string;
 }
 
-export interface TinyModelCompletionOptions {
+export interface TinyModelChatOptions {
 	maxTokens?: number;
 	signal?: AbortSignal;
+}
+
+export interface TinyModelCompletionOptions extends TinyModelChatOptions {
 	systemPrompt?: string;
 }
 
@@ -66,135 +95,208 @@ function normalizeTinyTitleGenerateOptions(
 	return options;
 }
 
-/**
- * Hidden subcommand on the main CLI that boots the tiny-model worker in the
- * spawned subprocess. Kept in sync with the dispatch in `cli.ts`.
- */
-export const TINY_WORKER_ARG = "__omp_worker_tiny_inference";
+// ── Device / dtype resolution ────────────────────────────────────────
 
-function readTinyModelSetting(path: "providers.tinyModelDevice" | "providers.tinyModelDtype"): string | undefined {
-	try {
-		const value = settings.get(path);
-		return typeof value === "string" ? value : undefined;
-	} catch {
-		// Settings may be uninitialized (e.g. `omp --smoke-test`); fall back to env/default.
-		return undefined;
-	}
+/** Setting value (its env var included); only the env var when settings are uninitialized (e.g. `omp --smoke-test`). */
+function readTinyModelSetting(setting: Setting<string>): string | undefined {
+	return isSettingsInitialized() ? setting.get(settings) : setting.envValue();
 }
 
 /**
- * Decide which `PI_TINY_DEVICE` / `PI_TINY_DTYPE` vars to overlay onto the worker
- * env. A present env var wins (left untouched); otherwise the mapped persisted
- * setting is used. Returns only the keys to add — never the default sentinel.
- * Pure for testability; see {@link tinyWorkerEnv} for the spawn-time glue.
+ * Map the resolved `providers.tinyModelDevice` / `providers.tinyModelDtype`
+ * values onto the `PI_TINY_DEVICE` / `PI_TINY_DTYPE` vars a worker should run
+ * with. Only resolved keys are returned — never the default sentinel — so the
+ * worker's built-in defaults apply for anything absent. Pure for testability;
+ * see {@link tinyModelEnv} for the settings glue.
  * @internal
  */
 export function tinyWorkerEnvOverlay(
-	env: Record<string, string | undefined>,
 	deviceSetting: string | undefined,
 	dtypeSetting: string | undefined,
 ): Record<string, string> {
 	const overlay: Record<string, string> = {};
-	if (!env.PI_TINY_DEVICE) {
-		const device = tinyModelDeviceSettingToEnv(deviceSetting);
-		if (device) overlay.PI_TINY_DEVICE = device;
-	}
-	if (!env.PI_TINY_DTYPE) {
-		const dtype = tinyModelDtypeSettingToEnv(dtypeSetting);
-		if (dtype) overlay.PI_TINY_DTYPE = dtype;
-	}
+	const device = tinyModelDeviceSettingToEnv(deviceSetting);
+	if (device) overlay.PI_TINY_DEVICE = device;
+	const dtype = tinyModelDtypeSettingToEnv(dtypeSetting);
+	if (dtype) overlay.PI_TINY_DTYPE = dtype;
 	return overlay;
 }
 
+/** Resolved device/dtype vars for this process. */
+function tinyModelEnv(): Record<string, string> {
+	return tinyWorkerEnvOverlay(
+		readTinyModelSetting(cfgProvidersTinyModelDevice),
+		readTinyModelSetting(cfgProvidersTinyModelDtype),
+	);
+}
+
+/** Identity of the resolved device/dtype; a worker started under a different key is stale. */
+export function tinyModelEnvKey(): string {
+	const env = tinyModelEnv();
+	return `${env.PI_TINY_DEVICE ?? ""}|${env.PI_TINY_DTYPE ?? ""}`;
+}
+
 /**
- * Env handed to the tiny-model subprocess — and reused verbatim by the STT and
- * TTS workers, which share the same device/dtype resolution. The
- * `PI_TINY_DEVICE` / `PI_TINY_DTYPE` env vars win; otherwise the persisted
- * `providers.tinyModelDevice` / `providers.tinyModelDtype` settings are mapped
- * onto those vars so the subprocess's env-based resolution picks them up.
- * Resolved once at spawn (pipelines are cached for the lifetime of the
- * subprocess).
+ * Env for an ONNX inference subprocess with the resolved device/dtype —
+ * used for the tiny worker and reused verbatim by the STT and TTS workers,
+ * which share the same device/dtype resolution.
  */
 export function tinyWorkerEnv(): Record<string, string> {
-	return inferenceWorkerEnv(
-		tinyWorkerEnvOverlay(
-			$env,
-			readTinyModelSetting("providers.tinyModelDevice"),
-			readTinyModelSetting("providers.tinyModelDtype"),
-		),
+	return inferenceWorkerEnv(tinyModelEnv());
+}
+
+/** Set once the mlx-lm bootstrap fails in this process; later workers fall back to ONNX. */
+let mlxUnavailable = false;
+
+/** Whether a worker started now would run the MLX backend (device resolves to `mlx` on Apple silicon). */
+export function tinyWorkerUsesMlx(): boolean {
+	return (
+		!mlxUnavailable &&
+		tinyMlxSupported() &&
+		resolveTinyModelDevicePreference(tinyModelEnv().PI_TINY_DEVICE).device === MLX_DEVICE
 	);
+}
+
+// ── Worker launch ────────────────────────────────────────────────────
+
+/** Idle grace override from {@link TINY_WORKER_IDLE_MS_ENV}. */
+function tinyIdleMs(): number | undefined {
+	const idleMs = Number($env[TINY_WORKER_IDLE_MS_ENV]);
+	return idleMs > 0 ? idleMs : undefined;
+}
+
+/** Unit key of one (model, backend, device, dtype) worker. */
+function tinyUnitKey(
+	modelKey: TinyLocalModelKey,
+	backend: TinyWorkerBackend,
+	modelEnv: Record<string, string>,
+): string {
+	return `tiny:${modelKey}:${backend}:${modelEnv.PI_TINY_DEVICE ?? "auto"}:${modelEnv.PI_TINY_DTYPE ?? "auto"}`;
+}
+
+/** Daemon open spec for the ONNX worker serving `modelKey` with the resolved device/dtype env. */
+function onnxOpenSpec(modelKey: TinyLocalModelKey, modelEnv: Record<string, string>): InferOpenSpec {
+	const command = resolveWorkerSpawnCmd(TINY_WORKER_ARG);
+	const [application, ...args] = command.cmd;
+	return {
+		key: tinyUnitKey(modelKey, "onnx", modelEnv),
+		params: {
+			worker: "tiny",
+			label: `tiny onnx ${modelKey}`,
+			application: application!,
+			args,
+			cwd: command.cwd ?? os.homedir(),
+			env: inferenceWorkerEnv({ ...modelEnv, [TINY_WORKER_MODEL_ENV]: modelKey }),
+			idleMs: tinyIdleMs(),
+		},
+	};
+}
+
+/** Daemon open spec for the MLX worker; installs the mlx-lm runtime first (with progress). */
+async function mlxOpenSpec(
+	modelKey: TinyLocalModelKey,
+	modelEnv: Record<string, string>,
+	emitProgress: (event: TinyTitleProgressEvent) => void,
+): Promise<InferOpenSpec> {
+	const spec = getTinyLocalModelSpec(modelKey);
+	if (!spec) throw new Error(`Unknown tiny local model: ${modelKey}`);
+	const python = await ensureTinyMlxRuntime(phase =>
+		emitProgress({ modelKey, status: phase, name: `mlx-lm@${MLX_LM_VERSION}` }),
+	);
+	const script = await stageRunnerScript("omp-tiny-mlx", "py", MLX_SERVER_SCRIPT);
+	return {
+		key: tinyUnitKey(modelKey, "mlx", modelEnv),
+		params: {
+			worker: "tiny",
+			label: `tiny mlx ${modelKey}`,
+			application: python,
+			args: [
+				"-u",
+				script,
+				"--model-key",
+				modelKey,
+				"--repo",
+				spec.mlxRepo,
+				"--dir",
+				getTinyMlxModelDir(spec.mlxRepo),
+			],
+			cwd: os.homedir(),
+			env: inferenceWorkerEnv({
+				PYTHONUNBUFFERED: "1",
+				PYTHONIOENCODING: "utf-8",
+				TRANSFORMERS_VERBOSITY: "error",
+				HF_HUB_DISABLE_PROGRESS_BARS: "1",
+				TOKENIZERS_PARALLELISM: "false",
+			}),
+			idleMs: tinyIdleMs(),
+		},
+	};
+}
+
+// ── Prompt construction / output parsing ─────────────────────────────
+
+function buildTitleMessages(message: string, systemPrompt?: string): TinyChatMessage[] {
+	return [
+		{ role: "system", content: systemPrompt?.trim() || TINY_TITLE_SYSTEM_PROMPT },
+		{ role: "user", content: formatTitleUserMessage(message) },
+	];
+}
+
+function buildCompletionMessages(promptText: string, systemPrompt?: string): TinyChatMessage[] {
+	const userMessage: TinyChatMessage = { role: "user", content: promptText };
+	const system = systemPrompt?.trim();
+	return system ? [{ role: "system", content: system }, userMessage] : [userMessage];
+}
+
+function extractTinyTitle(text: string, sourceText: string): string | null {
+	const titleStart = text.lastIndexOf(TITLE_PREFILL);
+	const withoutPrefix = titleStart >= 0 ? text.slice(titleStart + TITLE_PREFILL.length) : text;
+	// Self-closing tag: <title/> or <title /> (only when the prefill is present).
+	if (titleStart >= 0 && /^\s*\/>/.test(withoutPrefix)) return null;
+	const closeIndex = withoutPrefix.indexOf(TITLE_CLOSE);
+	const withoutClose = closeIndex >= 0 ? withoutPrefix.slice(0, closeIndex) : withoutPrefix;
+	const tagIndex = withoutClose.indexOf("<");
+	const withoutTag = tagIndex >= 0 ? withoutClose.slice(0, tagIndex) : withoutClose;
+	return normalizeGeneratedTitle(withoutTag, sourceText);
+}
+
+// ── Client ───────────────────────────────────────────────────────────
+
+/** One daemon tunnel per model this process has used; the worker behind it is shared machine-wide. */
+interface ModelWorker {
+	connection: WorkerConnection;
+	/** {@link tinyModelEnvKey} when the connection was made. */
+	envKey: string;
 }
 
 /**
- * Spawn the tiny-model worker as a subprocess. Exported for tests and the
- * smoke probe; production callers go through {@link spawnTinyTitleWorker}.
+ * Per-model worker connections. Device/dtype settings are read at use time: a
+ * connection made under a different device/dtype is replaced on its next idle
+ * use by one to the unit for the new key; the old unit idles out.
  */
-export function createTinyTitleSubprocess(): SpawnedSubprocess<TinyTitleWorkerOutbound> {
-	return createWorkerSubprocess<TinyTitleWorkerOutbound>({
-		spawnCommand: resolveWorkerSpawnCmd(TINY_WORKER_ARG),
-		env: tinyWorkerEnv(),
-		exitLabel: "tiny model subprocess",
-	});
-}
-
-function wrapSubprocess(
-	spawned: SpawnedSubprocess<TinyTitleWorkerOutbound>,
-): RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> {
-	const { proc } = spawned;
-	return {
-		...createWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound>(spawned, message =>
-			safeSend(proc, message, "tiny-title"),
-		),
-		ref() {
-			try {
-				proc.ref();
-			} catch {
-				// Already gone.
-			}
-		},
-		unref() {
-			try {
-				proc.unref();
-			} catch {
-				// Already gone.
-			}
-		},
-	};
-}
-
-function spawnInlineUnavailableWorker(
-	error: unknown,
-): RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> {
-	return {
-		...createUnavailableWorker<TinyTitleWorkerInbound, TinyTitleWorkerOutbound>(error),
-		ref() {},
-		unref() {},
-	};
-}
-
-function spawnTinyTitleWorker(): RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> {
-	return spawnWorkerOrUnavailable(
-		() => wrapSubprocess(createTinyTitleSubprocess()),
-		spawnInlineUnavailableWorker,
-		"Tiny title worker spawn failed; local titles disabled",
-	);
-}
-
 export class TinyTitleClient {
-	#worker: RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> | null = null;
-	#unsubscribeMessage: (() => void) | null = null;
-	#unsubscribeError: (() => void) | null = null;
+	#workers = new Map<TinyLocalModelKey, ModelWorker>();
 	#pending = new Map<string, PendingRequest>();
-	#failedModels = new Set<TinyLocalModelKey>();
+	/** Models whose load/generation failed, keyed to the device/dtype they failed under. */
+	#failedModels = new Map<TinyLocalModelKey, string>();
 	#progressListeners = new Set<(event: TinyTitleProgressEvent) => void>();
+	#downloads = new ModelDownloadActivity(modelKey => getTinyLocalModelSpec(modelKey)?.label ?? modelKey);
 	#nextRequestId = 0;
-	#refed = false;
-	#spawnWorker: () => RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound>;
 
-	constructor(
-		spawnWorker: () => RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> = spawnTinyTitleWorker,
-	) {
-		this.#spawnWorker = spawnWorker;
+	async #openSpec(modelKey: TinyLocalModelKey): Promise<InferOpenSpec> {
+		const modelEnv = tinyModelEnv();
+		if (tinyWorkerUsesMlx()) {
+			try {
+				return await mlxOpenSpec(modelKey, modelEnv, event => this.#emitProgress(event));
+			} catch (error) {
+				mlxUnavailable = true;
+				const message = error instanceof Error ? error.message : String(error);
+				logger.warn("tiny-title: MLX worker unavailable; falling back to ONNX CPU", { modelKey, error: message });
+				// Ends a visible `mlx-lm` install row; the ONNX fallback tracks its own load.
+				this.#downloads.observe({ modelKey, status: "error" }, `MLX unavailable: ${message}`);
+			}
+		}
+		return onnxOpenSpec(modelKey, modelEnv);
 	}
 
 	onProgress(listener: (event: TinyTitleProgressEvent) => void): () => void {
@@ -203,19 +305,15 @@ export class TinyTitleClient {
 	}
 
 	/**
-	 * Spawn the tiny-model worker ahead of first use without loading any model.
-	 * Called from idle TUI startup so the first {@link generate} reuses a live,
-	 * unref'd subprocess instead of paying subprocess-spawn latency on the submit
-	 * hot path (issue #6462). No-ops for online / non-local keys and for models
-	 * already marked failed. A no-op `ping` round-trips the transport to fault in
-	 * the worker's module graph; no pending request is registered, so
-	 * {@link #syncWorkerRef} leaves the worker unref'd and idle sessions still exit.
+	 * Reach the model's worker ahead of first use without loading anything, so
+	 * the first {@link generate} finds a live unit instead of paying the
+	 * open/spawn latency on the submit hot path (issue #6462). No-ops for
+	 * online / non-local keys and for models already marked failed.
 	 */
 	prewarm(modelKey: string): void {
-		if (!isTinyTitleLocalModelKey(modelKey) || this.#failedModels.has(modelKey)) return;
+		if (!isTinyLocalModelKey(modelKey) || this.#hasFailed(modelKey)) return;
 		try {
-			const worker = this.#ensureWorker();
-			worker.send({ type: "ping", id: String(++this.#nextRequestId) });
+			this.#ensureWorker(modelKey).connection.send({ type: "ping", id: String(++this.#nextRequestId) });
 		} catch (error) {
 			logger.debug("tiny-title: prewarm failed", {
 				modelKey,
@@ -232,238 +330,241 @@ export class TinyTitleClient {
 		optionsOrSignal?: AbortSignal | TinyTitleGenerateOptions,
 	): Promise<string | null> {
 		const options = normalizeTinyTitleGenerateOptions(optionsOrSignal);
-		if (!isTinyTitleLocalModelKey(modelKey)) return null;
-		if (options.signal?.aborted || this.#failedModels.has(modelKey)) return null;
-
-		try {
-			const worker = this.#ensureWorker();
-			const id = String(++this.#nextRequestId);
-			const { promise, resolve } = Promise.withResolvers<string | null>();
-			this.#addPending(id, { kind: "generate", modelKey, resolve });
-			const abort = (): void => {
-				const pending = this.#pending.get(id);
-				if (pending?.kind !== "generate") return;
-				this.#deletePending(id);
-				pending.resolve(null);
-			};
-			options.signal?.addEventListener("abort", abort, { once: true });
-			try {
-				const request: TinyTitleWorkerInbound = options.systemPrompt
-					? { type: "generate", id, modelKey, message, systemPrompt: options.systemPrompt }
-					: { type: "generate", id, modelKey, message };
-				worker.send(request);
-				return await promise;
-			} finally {
-				options.signal?.removeEventListener("abort", abort);
-				this.#deletePending(id);
-			}
-		} catch (error) {
-			logger.debug("tiny-title: local generation failed", {
-				modelKey,
-				error: error instanceof Error ? error.message : String(error),
-			});
-			return null;
-		}
+		if (!isTinyLocalModelKey(modelKey)) return null;
+		if (options.signal?.aborted || this.#hasFailed(modelKey)) return null;
+		const { promise, resolve } = Promise.withResolvers<string | null>();
+		const request: TinyWorkerRequest = {
+			type: "chat",
+			id: String(++this.#nextRequestId),
+			messages: buildTitleMessages(message, options.systemPrompt),
+			prefill: TITLE_PREFILL,
+			stop: TITLE_CLOSE,
+			maxNewTokens: TITLE_MAX_NEW_TOKENS,
+		};
+		return this.#run(request, { kind: "title", modelKey, source: message, resolve }, promise, options.signal, () =>
+			resolve(null),
+		);
 	}
 
-	async complete(modelKey: string, prompt: string, options: TinyModelCompletionOptions = {}): Promise<string | null> {
-		if (!isTinyMemoryLocalModelKey(modelKey)) return null;
-		if (options.signal?.aborted || this.#failedModels.has(modelKey)) return null;
+	async chat(
+		modelKey: string,
+		messages: readonly TinyChatMessage[],
+		options: TinyModelChatOptions = {},
+	): Promise<string | null> {
+		if (!isTinyLocalModelKey(modelKey)) return null;
+		if (options.signal?.aborted || this.#hasFailed(modelKey)) return null;
+		const requested = options.maxTokens ?? COMPLETION_DEFAULT_MAX_NEW_TOKENS;
+		const { promise, resolve } = Promise.withResolvers<string | null>();
+		const request: TinyWorkerRequest = {
+			type: "chat",
+			id: String(++this.#nextRequestId),
+			messages,
+			maxNewTokens: Math.min(Math.max(1, requested), COMPLETION_MAX_NEW_TOKENS),
+		};
+		return this.#run(request, { kind: "chat", modelKey, resolve }, promise, options.signal, () => resolve(null));
+	}
 
-		try {
-			const worker = this.#ensureWorker();
-			const id = String(++this.#nextRequestId);
-			const { promise, resolve } = Promise.withResolvers<string | null>();
-			this.#addPending(id, { kind: "complete", modelKey, resolve });
-			const abort = (): void => {
-				const pending = this.#pending.get(id);
-				if (pending?.kind !== "complete") return;
-				this.#deletePending(id);
-				pending.resolve(null);
-			};
-			options.signal?.addEventListener("abort", abort, { once: true });
-			try {
-				worker.send({
-					type: "complete",
-					id,
-					modelKey,
-					prompt,
-					maxTokens: options.maxTokens,
-					systemPrompt: options.systemPrompt,
-				});
-				return await promise;
-			} finally {
-				options.signal?.removeEventListener("abort", abort);
-				this.#deletePending(id);
-			}
-		} catch (error) {
-			logger.debug("tiny-model: local completion failed", {
-				modelKey,
-				error: error instanceof Error ? error.message : String(error),
-			});
-			return null;
-		}
+	async complete(
+		modelKey: string,
+		promptText: string,
+		options: TinyModelCompletionOptions = {},
+	): Promise<string | null> {
+		return this.chat(modelKey, buildCompletionMessages(promptText, options.systemPrompt), options);
 	}
 
 	async downloadModel(modelKey: string, options: TinyTitleDownloadOptions = {}): Promise<TinyTitleDownloadResult> {
 		if (!isTinyLocalModelKey(modelKey)) return { ok: false };
 		if (options.signal?.aborted) return { ok: false };
-
 		const unsubscribe = options.onProgress ? this.onProgress(options.onProgress) : undefined;
 		try {
-			const worker = this.#ensureWorker();
-			const id = String(++this.#nextRequestId);
 			const { promise, resolve } = Promise.withResolvers<TinyTitleDownloadResult>();
-			this.#addPending(id, { kind: "download", modelKey, resolve });
-			const abort = (): void => {
-				const pending = this.#pending.get(id);
-				if (pending?.kind !== "download") return;
-				this.#deletePending(id);
-				pending.resolve({ ok: false });
-			};
-			options.signal?.addEventListener("abort", abort, { once: true });
-			try {
-				worker.send({ type: "download", id, modelKey });
-				return await promise;
-			} finally {
-				options.signal?.removeEventListener("abort", abort);
-				this.#deletePending(id);
-			}
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			logger.debug("tiny-title: local model download failed", {
-				modelKey,
-				error: message,
-			});
-			return { ok: false, error: message };
+			const request: TinyWorkerRequest = { type: "load", id: String(++this.#nextRequestId) };
+			return await this.#run(request, { kind: "load", modelKey, resolve }, promise, options.signal, () =>
+				resolve({ ok: false }),
+			);
 		} finally {
 			unsubscribe?.();
 		}
 	}
 
-	async terminate(): Promise<void> {
-		const worker = this.#worker;
-		this.#worker = null;
-		this.#unsubscribeMessage?.();
-		this.#unsubscribeMessage = null;
-		this.#unsubscribeError?.();
-		this.#unsubscribeError = null;
-		for (const pending of this.#pending.values()) {
-			this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
-			if (pending.kind === "generate" || pending.kind === "complete") pending.resolve(null);
-			else pending.resolve({ ok: false });
-		}
-		this.#pending.clear();
-		this.#refed = false;
+	/**
+	 * Register `pending`, send `request` to the model's worker, and hand back
+	 * `promise` (settled by the correlated reply, a worker error, `onAbort`, or
+	 * a send failure) with the bookkeeping detached once it settles.
+	 */
+	#run<T>(
+		request: TinyWorkerRequest,
+		pending: PendingRequest,
+		promise: Promise<T>,
+		signal: AbortSignal | undefined,
+		onAbort: () => void,
+	): Promise<T> {
+		let worker: ModelWorker | undefined;
+		const abort = (): void => {
+			if (!this.#pending.delete(request.id)) return;
+			// The worker still answers; this process need not stay alive for it.
+			worker?.connection.abandon(request.id);
+			onAbort();
+		};
 		try {
-			await worker?.terminate();
-		} catch {
-			// Already gone.
+			worker = this.#ensureWorker(pending.modelKey);
+			this.#pending.set(request.id, pending);
+			signal?.addEventListener("abort", abort, { once: true });
+			worker.connection.send(request);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			logger.debug("tiny-title: local request failed", {
+				modelKey: pending.modelKey,
+				kind: pending.kind,
+				error: message,
+			});
+			this.#pending.delete(request.id);
+			this.#fail(pending, message);
 		}
+		return promise.finally(() => {
+			signal?.removeEventListener("abort", abort);
+			this.#pending.delete(request.id);
+		});
 	}
 
-	#ensureWorker(): RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> {
-		if (this.#worker) return this.#worker;
-		const worker = this.#spawnWorker();
-		this.#worker = worker;
-		this.#unsubscribeMessage = worker.onMessage(message => this.#handleMessage(message));
-		this.#unsubscribeError = worker.onError(error => this.#handleWorkerError(error));
+	async terminate(): Promise<void> {
+		const workers = [...this.#workers.values()];
+		this.#workers.clear();
+		for (const pending of this.#pending.values()) this.#fail(pending, undefined);
+		this.#pending.clear();
+		await Promise.all(workers.map(worker => worker.connection.close()));
+	}
+
+	#ensureWorker(modelKey: TinyLocalModelKey): ModelWorker {
+		const envKey = tinyModelEnvKey();
+		const existing = this.#workers.get(modelKey);
+		if (existing) {
+			// Device/dtype changed since connecting: reconnect once idle so in-flight
+			// requests finish on the old worker.
+			if (existing.envKey === envKey || this.#hasPending(modelKey)) return existing;
+			this.#workers.delete(modelKey);
+			void existing.connection.close();
+		}
+		const worker: ModelWorker = {
+			envKey,
+			connection: new InferConnection<TinyWorkerRequest, TinyWorkerResponse>(
+				() => this.#openSpec(modelKey),
+				message => this.#handleMessage(modelKey, message),
+				error => {
+					// Only the current connection's loss matters; a replaced one was already dropped.
+					if (this.#workers.get(modelKey) === worker) this.#handleWorkerError(modelKey, error);
+				},
+			),
+		};
+		this.#workers.set(modelKey, worker);
 		return worker;
 	}
 
-	/** Register a pending request and keep the worker referenced while work is in flight. */
-	#addPending(id: string, request: PendingRequest): void {
-		this.#pending.set(id, request);
-		this.#syncWorkerRef();
-	}
-
-	/** Drop a pending request and unref the worker once nothing is in flight. */
-	#deletePending(id: string): void {
-		if (this.#pending.delete(id)) this.#syncWorkerRef();
-	}
-
-	/**
-	 * Tiny-model workers are spawned `unref`'d so idle TUI sessions can exit.
-	 * Short-lived CLI downloads need the opposite while awaiting worker IPC, or
-	 * Bun can drain the event loop before the subprocess answers.
-	 */
-	#syncWorkerRef(): void {
-		const worker = this.#worker;
-		if (!worker) return;
-		const shouldRef = this.#pending.size > 0;
-		if (shouldRef === this.#refed) return;
-		this.#refed = shouldRef;
-		if (shouldRef) worker.ref();
-		else worker.unref();
-	}
-
-	#handleMessage(message: TinyTitleWorkerOutbound): void {
-		if (message.type === "log") {
-			logWorkerMessage(message);
-			return;
-		}
+	#handleMessage(modelKey: TinyLocalModelKey, message: TinyWorkerResponse): void {
+		if (message.type === "pong") return;
 		if (message.type === "progress") {
 			this.#emitProgress(message.event);
 			return;
 		}
-		if (message.type === "pong") return;
-
+		// Any answer settles the model's load, even for an abandoned request;
+		// MLX `chat` loads send no `ready` of their own.
+		if (message.type === "error") this.#downloads.observe({ modelKey, status: "error" }, message.error);
+		else this.#downloads.observe({ modelKey, status: "ready" });
 		const pending = this.#pending.get(message.id);
 		if (!pending) return;
-		this.#deletePending(message.id);
-		if (message.type === "title") {
-			if (pending.kind === "generate") pending.resolve(message.title);
+		this.#pending.delete(message.id);
+		if (message.type === "error") {
+			logger.debug("tiny-title: worker returned error", { modelKey, error: message.error });
+			this.#markFailedModel(pending);
+			this.#fail(pending, message.error);
+			// One worker serves one model: a failed load/generation leaves nothing
+			// worth staying connected to. Sibling requests for the model fault too.
+			this.#dropWorker(modelKey, message.error);
 			return;
 		}
-		if (message.type === "downloaded") {
-			if (pending.kind === "download") pending.resolve({ ok: true });
+		if (message.type === "text") {
+			if (pending.kind === "title") pending.resolve(extractTinyTitle(message.text, pending.source));
+			else if (pending.kind === "chat") pending.resolve(message.text.trim() || null);
 			return;
 		}
-		if (message.type === "completion") {
-			if (pending.kind === "complete") pending.resolve(message.text);
-			return;
+		if (pending.kind === "load") pending.resolve({ ok: true });
+	}
+
+	#hasPending(modelKey: TinyLocalModelKey): boolean {
+		for (const pending of this.#pending.values()) {
+			if (pending.modelKey === modelKey) return true;
 		}
-		logger.debug("tiny-title: worker returned error", { error: message.error });
-		this.#markFailedModel(pending);
-		this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
-		if (pending.kind === "download") pending.resolve({ ok: false, error: message.error });
+		return false;
+	}
+
+	#hasFailed(modelKey: TinyLocalModelKey): boolean {
+		return this.#failedModels.get(modelKey) === tinyModelEnvKey();
+	}
+
+	#fail(pending: PendingRequest, error: string | undefined): void {
+		this.#emitProgress({ modelKey: pending.modelKey, status: "error" }, error);
+		if (pending.kind === "load") pending.resolve(error === undefined ? { ok: false } : { ok: false, error });
 		else pending.resolve(null);
-		void this.terminate();
 	}
 
 	#markFailedModel(pending: PendingRequest): void {
-		if (pending.kind === "generate" || pending.kind === "complete") this.#failedModels.add(pending.modelKey);
+		if (pending.kind !== "load") this.#failedModels.set(pending.modelKey, tinyModelEnvKey());
 	}
 
-	#emitProgress(event: TinyTitleProgressEvent): void {
+	#emitProgress(event: TinyTitleProgressEvent, error?: string): void {
+		this.#downloads.observe(event, error);
 		for (const listener of this.#progressListeners) listener(event);
 	}
 
-	#handleWorkerError(error: Error): void {
-		logger.warn("tiny-title: worker error", { error: error.message });
-		for (const pending of this.#pending.values()) {
-			this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
-			if (pending.kind === "generate" || pending.kind === "complete") pending.resolve(null);
-			else pending.resolve({ ok: false, error: error.message });
+	/** Forget the model's connection and fail every request still in flight for it. Returns how many failed. */
+	#dropWorker(modelKey: TinyLocalModelKey, error: string): number {
+		const worker = this.#workers.get(modelKey);
+		if (worker) {
+			this.#workers.delete(modelKey);
+			void worker.connection.close();
 		}
-		this.#pending.clear();
-		void this.terminate();
+		let failed = 0;
+		for (const [id, pending] of this.#pending) {
+			if (pending.modelKey !== modelKey) continue;
+			this.#pending.delete(id);
+			this.#fail(pending, error);
+			failed += 1;
+		}
+		return failed;
+	}
+
+	/** The model's worker went away or could not be reached. */
+	#handleWorkerError(modelKey: TinyLocalModelKey, error: Error): void {
+		const failed = this.#dropWorker(modelKey, error.message);
+		// A worker exiting on its own while idle is routine; losing requests is not. A load
+		// abandoned by an aborted request is still on the HUD, so close that row only.
+		if (failed === 0 && error.message.startsWith(INFER_CONNECTION_CLOSED)) {
+			this.#downloads.failOpen(modelKey, error.message);
+			logger.debug("tiny-title: worker went away while idle", { modelKey });
+			return;
+		}
+		// Failed requests already surfaced through `#fail`; this covers a connect failure with nothing in flight.
+		if (failed === 0) this.#downloads.observe({ modelKey, status: "error" }, error.message);
+		logger.warn("tiny-title: worker error", { modelKey, error: error.message, failedRequests: failed });
 	}
 }
 
 export const tinyTitleClient = new TinyTitleClient();
 
-/** Alias for the shared tiny-model worker client (titles + memory completions). */
+/** Alias for the shared tiny-model worker client (titles + generic chat completions). */
 export const tinyModelClient = tinyTitleClient;
 
+/** Drop this process's tunnels; the daemon keeps the workers for other omp processes until idle. */
 export async function shutdownTinyTitleClient(): Promise<void> {
 	await tinyTitleClient.terminate();
 }
 
+/** Exercise ONNX worker startup under the daemon and its stdio `ping` for distribution smoke tests. */
 export async function smokeTestTinyTitleWorker({
 	timeoutMs = SMOKE_TEST_TIMEOUT_MS,
 }: {
 	timeoutMs?: number;
 } = {}): Promise<void> {
-	await smokeTestWorker(wrapSubprocess(createTinyTitleSubprocess()), "tiny title worker", timeoutMs);
+	const spec = onnxOpenSpec("lfm2.5-230m", {});
+	await smokeTestInferWorker({ ...spec, key: `${spec.key}:smoke` }, timeoutMs);
 }

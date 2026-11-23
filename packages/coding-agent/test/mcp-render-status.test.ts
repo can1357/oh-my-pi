@@ -2,13 +2,15 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { TSchema } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { renderMCPResult } from "@oh-my-pi/pi-coding-agent/mcp/render";
-import { DeferredMCPTool, MCPTool, type MCPToolDetails } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
+import { renderMCPResult } from "@oh-my-pi/pi-tui/tools/mcp";
+import { MCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
+import { type MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
 import type { MCPServerConnection, MCPToolDefinition, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
-import { theme as activeTheme, getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { formatOutputNotice, type OutputMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
-import { formatStatusIcon } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { theme as activeTheme, getThemeByName, initTheme } from "@oh-my-pi/pi-tui/theme";
+import { type OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { formatStatusIcon } from "@oh-my-pi/pi-tui/render/render-utils";
 import { TUI } from "@oh-my-pi/pi-tui";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
@@ -65,10 +67,6 @@ function makeTool(): MCPTool {
 	return new MCPTool(makeConnection(), makeDefinition());
 }
 
-function makeDeferredTool(): DeferredMCPTool {
-	return new DeferredMCPTool("sentry", makeDefinition(), () => Promise.resolve(makeConnection()));
-}
-
 type RenderableMCPAgentTool = AgentTool<TSchema, MCPToolDetails> & { mergeCallAndResult: true };
 
 function makeAgentTool(mcpTool: MCPTool): RenderableMCPAgentTool {
@@ -117,7 +115,6 @@ describe("MCP tool rendering", () => {
 		const rendered = await renderCompletedMCPTool(false);
 
 		expect(makeTool().mergeCallAndResult).toBe(true);
-		expect(makeDeferredTool().mergeCallAndResult).toBe(true);
 		expect(rendered).toContain(`${doneIcon} sentry/search_events`);
 		expect(rendered).not.toContain(`${pendingIcon} sentry/search_events`);
 	}, 15_000);
@@ -161,9 +158,9 @@ describe("MCP tool rendering", () => {
 
 		expect(rendered).toContain("event 97");
 		expect(rendered).toContain("event 100");
-		expect(rendered).toContain("artifact://7");
+		expect(rendered).toContain("local://7.log");
 		// The link appears exactly once — as the styled warning — proving the
 		// inline notice was stripped from the body rather than echoed verbatim.
-		expect(rendered.split("artifact://7").length - 1).toBe(1);
+		expect(rendered.split("local://7.log").length - 1).toBe(1);
 	}, 15_000);
 });

@@ -7,37 +7,120 @@ import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample, TSchema } from "@oh-my-pi/pi-ai";
 import { renderToolInventory } from "@oh-my-pi/pi-ai/dialect";
+import type { DelegationBias } from "@oh-my-pi/pi-catalog/compat/delegation";
 import {
 	$env,
 	getAgentDir,
-	getGpuCachePath,
 	getProjectDir,
 	hasFsCode,
 	isEnoent,
+	isInteractiveHost,
 	logger,
 	prompt,
 } from "@oh-my-pi/pi-utils";
 import { contextFileCapability } from "./capability/context-file";
 import { systemPromptCapability } from "./capability/system-prompt";
 import { findConfigFile } from "./config";
-import type { Personality, SkillsSettings } from "./config/settings";
+import type { SkillsSettings } from "./extensibility/settings";
+import type { Personality } from "./session/settings";
 import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile } from "./discovery";
 import { expandAtImports } from "./discovery/at-imports";
+import type { EvalPreludeDefinition } from "./eval/preludes";
+import { SkillDescriptionCatalog } from "./extensibility/skill-descriptions";
 import { loadSkills, type Skill } from "./extensibility/skills";
-import { hasObsidian } from "./internal-urls/vault-protocol";
+import { InternalUrlRouter } from "./internal-urls/router";
+import type { SchemeHost } from "./internal-urls/types";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
-import computerSafetyPrompt from "./prompts/system/computer-safety.md" with { type: "text" };
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
 import defaultPersonality from "./prompts/system/personalities/default.md" with { type: "text" };
 import friendlyPersonality from "./prompts/system/personalities/friendly.md" with { type: "text" };
 import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" with { type: "text" };
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
-import { normalizeConcurrencyLimit } from "./task/parallel";
-import { usesCodexTaskPrompt } from "./task/prompt-policy";
-import { type ActiveRepoContext, resolveActiveRepoContext } from "./utils/active-repo-context";
+import userAppendPromptTemplate from "./prompts/system/user-append.md" with { type: "text" };
+import type { SystemPromptSource, SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
+import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { normalizePromptPath } from "./utils/prompt-path";
+import { quotePosixArgument } from "./utils/shell-quote";
+import { expandTilde } from "./tools/path-utils";
+import { matchModelPattern, type ModelPatternEntry } from "./utils/model-patterns";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
+import { combine } from "./config/registry";
+import { cfgBashAutoBackgroundEnabled } from "./exec/settings";
+import { cfgEvalAutoBackgroundEnabled } from "./eval/settings";
+import { cfgTtsrBuiltinRules, cfgTtsrDisabledRules, cfgTtsrEnabled } from "./export/ttsr-settings";
+import {
+	cfgTuiAutoGraph,
+	cfgTuiReactions,
+	cfgTuiRenderEmbeds,
+	cfgTuiRenderMermaid,
+	cfgTuiRenderSvg,
+} from "./modes/settings";
+import { cfgSecretsEnabled } from "./secrets/settings";
+import { cfgToolsFormat } from "./session/context-settings";
+import {
+	cfgEncourageEdits,
+	cfgIncludeModelInPrompt,
+	cfgIncludeWorkspaceTree,
+	cfgInlineToolDescriptors,
+	cfgPersonality,
+	cfgSystemPromptTemplates,
+} from "./session/settings";
+import { cfgOvnfsPath, cfgTaskBatch, cfgTaskCrossInstance, cfgTaskEager } from "./task/settings";
+import { cfgBrowserCdpUrl, cfgBrowserRelayUrl } from "./tools/browser/settings";
+import {
+	cfgAsyncEnabled,
+	cfgOutEnabled,
+	cfgToolsIntentTracing,
+	cfgToolsCommandDocs,
+	cfgToolsCommandInline,
+	cfgVaultEnabled,
+} from "./tools/settings";
+
+/**
+ * Settings the system prompt renders from (`secrets.enabled` via the obfuscator state it
+ * reports). A session rebuilds its prompt once per coalesced change of this value, so a bulk
+ * settings change rebuilds once. Settings that change the tool set, skills, memory, or workspace
+ * roots rebuild through their own reconcile instead.
+ */
+export const cfgSystemPromptInputs = combine({
+	personality: cfgPersonality,
+	systemPromptTemplates: cfgSystemPromptTemplates,
+	includeModelInPrompt: cfgIncludeModelInPrompt,
+	includeWorkspaceTree: cfgIncludeWorkspaceTree,
+	inlineToolDescriptors: cfgInlineToolDescriptors,
+	toolsFormat: cfgToolsFormat,
+	intentTracing: cfgToolsIntentTracing,
+	toolCommandDocs: cfgToolsCommandDocs,
+	toolCommandInline: cfgToolsCommandInline,
+	vaultEnabled: cfgVaultEnabled,
+	outEnabled: cfgOutEnabled,
+	crossInstanceAgents: cfgTaskCrossInstance,
+	renderMermaid: cfgTuiRenderMermaid,
+	renderSvg: cfgTuiRenderSvg,
+	renderEmbeds: cfgTuiRenderEmbeds,
+	autoGraph: cfgTuiAutoGraph,
+	reactions: cfgTuiReactions,
+	encourageEdits: cfgEncourageEdits,
+	// Rendered into the bash/eval/task tool descriptions (inline catalog) or read by
+	// the prompt builder (eager/batch delegation).
+	asyncEnabled: cfgAsyncEnabled,
+	bashAutoBackground: cfgBashAutoBackgroundEnabled,
+	evalAutoBackground: cfgEvalAutoBackgroundEnabled,
+	// Browser endpoint changes can enable pre-call platform safety guidance.
+	browserCdpUrl: cfgBrowserCdpUrl,
+	browserRelayUrl: cfgBrowserRelayUrl,
+	taskEager: cfgTaskEager,
+	taskBatch: cfgTaskBatch,
+	// Separate-checkout guidance names the ovnfs command.
+	ovnfsPath: cfgOvnfsPath,
+	// Rule bucketing (TTSR registrations, rulebook, always-apply) runs at rebuild time.
+	ttsrEnabled: cfgTtsrEnabled,
+	ttsrBuiltinRules: cfgTtsrBuiltinRules,
+	ttsrDisabledRules: cfgTtsrDisabledRules,
+	secretsEnabled: cfgSecretsEnabled,
+});
 
 /** Bundled personality specs, keyed by the `personality` setting value. */
 const PERSONALITY_SPECS: Record<Exclude<Personality, "none">, string> = {
@@ -164,210 +247,13 @@ function renderActiveRepoContextPrompt(activeRepoContext: ActiveRepoContext | nu
 		.trim();
 }
 
-function parseWindowsGpuModel(output: string): string | null {
-	const adapters = output
-		.split("\n")
-		.map(line => line.trim())
-		.filter(line => Boolean(line) && line.toLowerCase() !== "name");
-	const physicalAdapters = adapters.filter(adapter => !/\b(?:virtual|mirror|remote|citrix)\b/i.test(adapter));
-	return (
-		physicalAdapters.find(adapter => /\b(?:nvidia|amd|radeon|intel)\b/i.test(adapter)) ??
-		physicalAdapters[0] ??
-		adapters[0] ??
-		null
-	);
-}
-
 const SYSTEM_PROMPT_PREP_TIMEOUT_MS = 5000;
-/** Kept below prep timeout so timed-out probes can still write the null cache before fallback. */
-const GPU_PROBE_TIMEOUT_MS = SYSTEM_PROMPT_PREP_TIMEOUT_MS - 500;
-/** Drop stdout from a probe descendant that inherited the pipe after the probe exited. */
-const GPU_PROBE_STDOUT_DRAIN_MS = 250;
-
-async function runGpuProbe(cmd: string[]): Promise<string | null> {
-	try {
-		const proc = Bun.spawn({
-			cmd,
-			stdout: "pipe",
-			stderr: "ignore",
-			stdin: "ignore",
-			timeout: GPU_PROBE_TIMEOUT_MS,
-			// SIGKILL so a probe ignoring SIGTERM (PATH wrapper, wedged WMI) still
-			// dies at the deadline and lets getCachedGpu reach the null-cache write.
-			killSignal: "SIGKILL",
-		});
-		const stdoutReader = proc.stdout.getReader();
-		let stdout = "";
-		const decoder = new TextDecoder();
-		const stdoutDone = (async () => {
-			while (true) {
-				const chunk = await stdoutReader.read();
-				if (chunk.done) break;
-				stdout += decoder.decode(chunk.value, { stream: true });
-			}
-			stdout += decoder.decode();
-		})();
-		const exitCode = await proc.exited;
-		// Even on exit 0, a probe wrapper can leave a descendant holding stdout open.
-		// Bound the EOF wait so getCachedGpu cannot outlive the probe in either path;
-		// keep whatever bytes the reader already captured before cancelling.
-		const drained = await Promise.race([
-			stdoutDone.then(() => "ok" as const).catch(() => "err" as const),
-			Bun.sleep(GPU_PROBE_STDOUT_DRAIN_MS).then(() => "timeout" as const),
-		]);
-		if (drained !== "ok") {
-			await stdoutReader.cancel().catch(() => undefined);
-			await stdoutDone.catch(() => undefined);
-		}
-		return exitCode === 0 ? stdout : null;
-	} catch {
-		return null;
-	}
-}
-
-async function getGpuModel(): Promise<string | null> {
-	switch (process.platform) {
-		case "win32": {
-			const output = await runGpuProbe(["wmic", "path", "win32_VideoController", "get", "name"]);
-			return output ? parseWindowsGpuModel(output) : null;
-		}
-		case "linux": {
-			const output = await runGpuProbe(["lspci"]);
-			if (!output) return null;
-			const gpus: Array<{ name: string; priority: number }> = [];
-			for (const line of output.split("\n")) {
-				if (!/(VGA|3D|Display)/i.test(line)) continue;
-				const parts = line.split(":");
-				const name = parts.length > 1 ? parts.slice(1).join(":").trim() : line.trim();
-				const nameLower = name.toLowerCase();
-				// Skip BMC/server management adapters
-				if (/aspeed|matrox g200|mgag200/i.test(name)) continue;
-				// Prioritize discrete GPUs
-				let priority = 0;
-				if (
-					nameLower.includes("nvidia") ||
-					nameLower.includes("geforce") ||
-					nameLower.includes("quadro") ||
-					nameLower.includes("rtx")
-				) {
-					priority = 3;
-				} else if (nameLower.includes("amd") || nameLower.includes("radeon") || nameLower.includes("rx ")) {
-					priority = 3;
-				} else if (nameLower.includes("intel")) {
-					priority = 1;
-				} else {
-					priority = 2;
-				}
-				gpus.push({ name, priority });
-			}
-			if (gpus.length === 0) return null;
-			gpus.sort((a, b) => b.priority - a.priority);
-			return gpus[0].name;
-		}
-		default:
-			return null;
-	}
-}
-
-function getTerminalName(): string | undefined {
-	const termProgram = Bun.env.TERM_PROGRAM;
-	const termProgramVersion = Bun.env.TERM_PROGRAM_VERSION;
-	if (termProgram) {
-		return termProgramVersion ? `${termProgram} ${termProgramVersion}` : termProgram;
-	}
-
-	if (Bun.env.WT_SESSION) return "Windows Terminal";
-
-	const term = firstNonEmpty(Bun.env.TERM, Bun.env.COLORTERM, Bun.env.TERMINAL_EMULATOR);
-	return term ?? undefined;
-}
-
-/**
- * On-disk cache schema version. Bumped when detection logic changes so stored
- * selections from an older parser are rejected and re-probed instead of served
- * indefinitely — e.g. the Windows virtual-adapter filtering added for #9675,
- * which would otherwise keep returning a cached virtual GPU after upgrade.
- */
-const GPU_CACHE_VERSION = 1;
-
-/** Cached GPU probe result. */
-interface GpuCache {
-	gpu: string | null;
-}
-
-async function loadGpuCache(): Promise<GpuCache | null> {
-	try {
-		const cachePath = getGpuCachePath();
-		const content = await Bun.file(cachePath).json();
-		if (content && typeof content === "object" && content.version === GPU_CACHE_VERSION && "gpu" in content) {
-			const gpu = content.gpu;
-			return { gpu: typeof gpu === "string" ? gpu : null };
-		}
-		return null;
-	} catch {
-		return null;
-	}
-}
-
-async function saveGpuCache(info: GpuCache): Promise<void> {
-	try {
-		const cachePath = getGpuCachePath();
-		await Bun.write(cachePath, JSON.stringify({ version: GPU_CACHE_VERSION, gpu: info.gpu }, null, "\t"));
-	} catch {
-		// Silently ignore cache write failures
-	}
-}
-
-async function getCachedGpu(): Promise<string | undefined> {
-	const cached = await logger.time("getCachedGpu:loadGpuCache", loadGpuCache);
-	if (cached) return cached.gpu ?? undefined;
-	const gpu = await logger.time("getCachedGpu:getGpuModel", getGpuModel);
-	await logger.time("getCachedGpu:saveGpuCache", saveGpuCache, { gpu });
-	return gpu ?? undefined;
-}
-
-async function getCpuModel(): Promise<string | undefined> {
-	if (process.platform !== "linux") return os.cpus()[0]?.model;
-	try {
-		const cpuInfo = await Bun.file("/proc/cpuinfo").text();
-		const match = /^model name\s*:\s*(.+)$/m.exec(cpuInfo);
-		return match?.[1]?.trim() || undefined;
-	} catch (error) {
-		if (!isEnoent(error)) {
-			logger.debug("Could not read Linux CPU model", { error: String(error) });
-		}
-		return undefined;
-	}
-}
-
-/**
- * Kernel identity for the workstation block. Prefers the uname build string
- * from `os.version()`, but Bun on macOS 15+ (Darwin 24/25) returns the literal
- * `"unknown"` when `uv_os_uname()`'s `version` field is empty — which surfaces
- * `Kernel: unknown` in the system prompt and makes the model misidentify the
- * host as Windows (#4141). Fall back to `<type> <release>` (uname -s + -r) so
- * macOS is always tagged as `Darwin <release>` and Linux keeps its build info.
- */
-function getKernelIdentity(): string {
-	const version = os.version()?.trim();
-	if (version && version.toLowerCase() !== "unknown") return version;
-	return `${os.type()} ${os.release()}`.trim();
-}
-
-function getEnvironmentInfo(
-	cpuModel: string | undefined,
-	gpu: string | undefined,
-): Array<{ label: string; value: string }> {
-	const entries: Array<{ label: string; value: string | undefined }> = [
+/** Workstation facts the model needs to pick commands and paths: platform/release and CPU architecture. */
+function getEnvironmentInfo(): Array<{ label: string; value: string }> {
+	return [
 		{ label: "OS", value: `${os.platform()} ${os.release()}` },
-		{ label: "Distro", value: os.type() },
-		{ label: "Kernel", value: getKernelIdentity() },
 		{ label: "Arch", value: os.arch() },
-		{ label: "CPU", value: cpuModel },
-		{ label: "GPU", value: gpu },
-		{ label: "Terminal", value: getTerminalName() },
 	];
-	return entries.filter((e): e is { label: string; value: string } => !!e.value);
 }
 
 /** Discover TITLE_SYSTEM.md file for automatic session-title prompt overrides */
@@ -383,10 +269,53 @@ export function discoverTitleSystemPromptFile(cwd?: string): string | undefined 
 	return undefined;
 }
 
+export interface SystemPromptOverride {
+	kind: "template" | "text";
+	path: string;
+	/** Already-loaded capability content; it must not be resolved as a path again. */
+	content?: string;
+}
+
+/**
+ * Unified discovery for literal and template overrides. Project scope beats
+ * user scope; within each scope a literal beats a template: SYSTEM.md is the
+ * long-established override, so an existing literal keeps working until its
+ * author deliberately removes it in favor of a template. Ancestor walk-up
+ * and `.agent/.agents` coverage come from the capability providers, so a
+ * repo-root file wins from a nested cwd.
+ */
+export async function discoverSystemPromptOverride(cwd?: string): Promise<SystemPromptOverride | undefined> {
+	const result = await loadCapability<SystemPromptFile>(systemPromptCapability.id, {
+		cwd: cwd ?? getProjectDir(),
+	});
+	for (const level of ["project", "user"] as const) {
+		const text = result.items.find(item => item.level === level && (item.kind ?? "text") === "text");
+		if (text) return { kind: "text", path: text.path, content: text.content };
+		const template = result.items.find(item => item.level === level && (item.kind ?? "text") === "template");
+		if (template) {
+			if (!template.content.trim()) {
+				logger.warn("Ignoring empty system prompt template", { path: template.path });
+				continue;
+			}
+			return { kind: "template", path: template.path, content: template.content };
+		}
+	}
+	return undefined;
+}
+
+/** Unlike literal prompt inputs, explicit template paths never fall back to inline text. */
+export async function loadSystemPromptTemplateFile(filePath: string): Promise<string> {
+	const text = await Bun.file(filePath).text();
+	if (!text.trim()) {
+		throw new Error(`System prompt template must not be empty: ${filePath}`);
+	}
+	return text;
+}
+
 /** Resolve input as file path or literal string */
 export async function resolvePromptInput(input: string | undefined, description: string): Promise<string | undefined> {
 	if (!input) {
-		return undefined;
+		return input;
 	} else if (input.includes("\n")) {
 		return input;
 	}
@@ -441,6 +370,11 @@ export function dedupeContainedContextFiles(
 					candidateIndex > index && promptBlocksContain(candidateBlocks, blocks[index]),
 			),
 	);
+}
+
+/** Drop context files named `AGENTS.md` (any case). Task subagents never receive them. */
+export function withoutAgentsMd<T extends { path: string }>(files: T[]): T[] {
+	return files.filter(file => path.basename(file.path).toLowerCase() !== "agents.md");
 }
 
 /**
@@ -515,6 +449,8 @@ export interface SystemPromptToolMetadata {
 	parameters?: TSchema;
 	/** Illustrative examples rendered into the verbose inventory. */
 	examples?: readonly ToolExample[];
+	/** Whether this concrete tool can read `skill://` instruction content. */
+	readsSkillUris?: boolean;
 }
 
 export type SystemPromptToolMetadataProjection =
@@ -535,6 +471,19 @@ export function buildSystemPromptToolMetadata(
 	return projectSystemPromptToolMetadata(tools, { mode: "full", overrides });
 }
 
+/** Whether a tool can read `skill://` instruction content.
+ *
+ * Shared by initial prompt construction and mid-session skill notices so both
+ * consult declared capability instead of the tool name. Accepts live tools
+ * (`AgentTool` declares the `readsSkillUris` capability) and projected
+ * metadata (`SystemPromptToolMetadata`). Accepts `undefined`/`null` (missing
+ * registry/metadata entries) and returns `false` for them. */
+export function toolReadsSkillUris(
+	tool: Pick<AgentTool, "readsSkillUris"> | SystemPromptToolMetadata | undefined | null,
+): boolean {
+	return tool != null && tool.readsSkillUris === true;
+}
+
 /** Builds a mode-specific metadata snapshot for internal prompt assembly. */
 export function projectSystemPromptToolMetadata(
 	tools: Map<string, AgentTool>,
@@ -545,22 +494,21 @@ export function projectSystemPromptToolMetadata(
 		const override = projection.overrides?.[name];
 		const labelValue = override?.label ?? tool.label;
 		const wireNameValue = override?.wireName ?? tool.customWireName;
-		const label = typeof labelValue === "string" ? labelValue : "";
-		const wireName = typeof wireNameValue === "string" ? wireNameValue : undefined;
+		const metadataEntry: SystemPromptToolMetadata = {
+			label: typeof labelValue === "string" ? labelValue : "",
+			description: "",
+			wireName: typeof wireNameValue === "string" ? wireNameValue : undefined,
+		};
 
-		if (projection.mode === "compact") {
-			metadata.set(name, { label, description: "", wireName });
-			return;
+		if (projection.mode === "full") {
+			const descriptionValue = override?.description ?? tool.description;
+			metadataEntry.description = typeof descriptionValue === "string" ? descriptionValue : "";
+			metadataEntry.parameters = tool.parameters;
+			metadataEntry.examples = tool.examples;
 		}
+		if ((override?.readsSkillUris ?? toolReadsSkillUris(tool)) === true) metadataEntry.readsSkillUris = true;
 
-		const descriptionValue = override?.description ?? tool.description;
-		metadata.set(name, {
-			label,
-			description: typeof descriptionValue === "string" ? descriptionValue : "",
-			parameters: tool.parameters,
-			examples: tool.examples,
-			wireName,
-		});
+		metadata.set(name, metadataEntry);
 	};
 
 	if (projection.mode === "compact") {
@@ -580,17 +528,18 @@ export interface BuildSystemPromptOptions {
 	customPrompt?: string;
 	/** Already-loaded custom system prompt text; bypasses path resolution. */
 	resolvedCustomPrompt?: string;
+	/** Raw Handlebars template rendered with the default prompt's live context. */
+	systemPromptTemplate?: string;
+	/**
+	 * Compiled `systemPromptTemplates` setting, matched against `model`. The selected file replaces
+	 * only the bundled default and is read only then: explicit and discovered (`SYSTEM.md`/
+	 * `SYSTEM_TEMPLATE.md`) prompts win. A missing, empty, or invalid file warns and keeps the bundled prompt.
+	 */
+	modelSystemPromptTemplates?: readonly ModelPatternEntry<string>[];
 	/** Tools to include in prompt. */
 	tools?: Map<string, SystemPromptToolMetadata>;
 	/** Tool names to include in prompt. */
 	toolNames?: string[];
-	/**
-	 * Names actually exposed as provider-callable tools. Defaults to `toolNames`.
-	 * Code Mode passes its direct keep-set so the rendered tool inventory matches
-	 * the wire surface while capability and safety gates still see every
-	 * bridge-reachable tool in `toolNames`.
-	 */
-	directToolNames?: readonly string[];
 	/** Text to append to system prompt. */
 	appendSystemPrompt?: string;
 	/** Already-loaded append prompt text; bypasses path resolution. */
@@ -612,38 +561,60 @@ export interface BuildSystemPromptOptions {
 	additionalWorkspaceRoots?: string[];
 	/** Pre-loaded context files (skips discovery if provided). */
 	contextFiles?: Array<{ path: string; content: string; depth?: number }>;
+	/** Load no context files beyond `contextFiles`: none for additional workspace roots, no nested AGENTS.md list. */
+	noContextFiles?: boolean;
+	/** Drop every context file named `AGENTS.md`, including ones discovered for additional workspace roots. */
+	excludeAgentsMd?: boolean;
 	/** Skills provided directly to system prompt construction. */
 	skills?: readonly Skill[];
+	/** Session-scoped description snapshot; background cache writes apply only to the next session. */
+	skillDescriptions?: SkillDescriptionCatalog;
 	/** Pre-loaded rulebook rules (descriptions, excluding TTSR and always-apply). */
 	rules?: Array<{ name: string; description?: string; path: string; globs?: string[] }>;
 	/** Intent field name injected into every tool schema. If set, explains the field in the prompt. */
 	intentField?: string;
+	/** Guidance line explaining the intent field; `PI_INTENT_PROMPT` overrides it. Unset: the template's default. */
+	intentGuidance?: string;
 	/** Encourage the agent to delegate via tasks unless changes are trivial. */
 	eagerTasks?: boolean;
 	/** When true, the Eager Tasks section uses the hard MUST/ONLY wording (`task.eager: always`) rather than the softer `preferred` nudge. */
 	eagerTasksAlways?: boolean;
 	/** Whether `task.batch` is enabled; selects the centralized delegation guidance's call shape. */
 	taskBatch?: boolean;
-	/** Effective task concurrency limit displayed in centralized delegation guidance. Zero means unlimited. */
-	taskMaxConcurrency?: number;
 	/** Whether IRC-backed parallel coordination can be included in delegation policy. */
 	taskIrcEnabled?: boolean;
 	/** Whether the read-only `scout` subagent is spawnable (not disabled, allowed by spawn policy). Defaults to true. */
 	scoutAvailable?: boolean;
+	/** Active model's delegation appetite (catalog `delegation-bias` axis); selects the Delegation section's wording. Default: `balanced`. */
+	delegationBias?: DelegationBias;
 
 	/** Rules with alwaysApply=true — their full content is injected into the prompt. */
 	alwaysApplyRules?: AlwaysApplyRule[];
 	/** Whether secret obfuscation is active. When true, explains the redaction format in the prompt. */
 	secretsEnabled?: boolean;
+	/** Spotlight's result-shaping notice (`SHAPE_RULE`), rendered under Tool I/O; omitted when Spotlight is off. */
+	resultShaping?: string;
 	/** Pre-loaded workspace tree (skips discovery if provided). May be a Promise to allow early kick-off. */
 	workspaceTree?: WorkspaceTree | Promise<WorkspaceTree>;
-	/** Whether the local memory://root summary is active. */
-	memoryRootEnabled?: boolean;
+	/** Active `memory.backend` id; undefined when memory is off. */
+	memoryBackend?: string;
 	/** Whether the read-only security:// resource namespace is active. */
 	securityEnabled?: boolean;
-	/** Active model identifier (e.g. "anthropic/claude-opus-4") used by prompt policy and optionally surfaced. */
+	/** Whether the user approves `cfg://` writes for this session; gates advertising `cfg://`. */
+	settingsApproval?: boolean;
+	/** Whether `out://` writes reach the user as transcript replies; gates advertising `out://`. */
+	outReplies?: boolean;
+	/** Advertise cross-instance agent addressing. */
+	crossInstanceAgents?: boolean;
+	/**
+	 * Eval preludes advertised by this prompt. Each prelude's `guidance` is
+	 * appended as its own block after the rendered template, so custom templates
+	 * keep it; names also set the `browserEnabled`/`computerEnabled` template flags.
+	 */
+	evalPreludes?: readonly Pick<EvalPreludeDefinition, "name" | "guidance">[];
+	/** Active model identifier (e.g. "anthropic/claude-opus-4") surfaced in the workstation block. */
 	model?: string;
-	/** Whether to surface `model` in the workstation block. Model-specific prompt policy still uses it. Default: true. */
+	/** Whether to surface `model` in the workstation block. Default: true. */
 	includeModelInPrompt?: boolean;
 	/** Personality preset rendered into the default system prompt. "none" omits the block. Default: "default" */
 	personality?: Personality;
@@ -651,30 +622,100 @@ export interface BuildSystemPromptOptions {
 	includeWorkspaceTree?: boolean;
 	/** Whether Mermaid fenced blocks render as terminal ASCII diagrams. Default: true */
 	renderMermaid?: boolean;
+	/** Whether the reader's UI draws ```svg fences as themed images, so the prompt invites figures. Default: false */
+	renderSvg?: boolean;
+	/** Whether the reader's UI draws `<img>` pictures and `<iframe>` page screenshots, so the prompt offers them. Default: false */
+	renderEmbeds?: boolean;
+	/** Whether the reader's UI charts numeric Markdown tables, so the prompt routes data to tables and forbids duplicate charts. Default: false */
+	autoGraph?: boolean;
+	/** Whether the TUI lifts an opening emoji into a reaction badge on the user's message. Default: false */
+	reactions?: boolean;
+	/** Whether a critical rule makes file edits go through `edit` (sed/perl/python edits forbidden); false omits edit guidance. Default: true */
+	encourageEdits?: boolean;
 	/** Pre-resolved nested active repo context. Undefined resolves from cwd. */
 	activeRepoContext?: ActiveRepoContext | null;
-	/** Tools mounted under `xd://`; renders the protocol section when non-empty. `dynamic` marks external devices whose summary is third-party metadata. */
-	xdevTools?: Array<{ name: string; summary: string; dynamic?: boolean }>;
-	/** Full docs + JSON schema for every `xd://`-mounted tool, inlined into the protocol section so no discovery `read` is needed. */
-	xdevDocs?: string;
-	/** Whether Auto-QA grievance reporting is enabled; renders the `xd://report_issue` note. */
+	/** Tools mounted as commands; renders the Tool Commands section when non-empty. `dynamic` marks external commands whose summary is third-party metadata. */
+	mountedCommands?: Array<{ name: string; summary: string; dynamic?: boolean }>;
+	/** Inlined `--help` sections and the one-line catalog for mounted commands. */
+	toolCommandDocs?: string;
+	/** Whether Auto-QA grievance reporting is enabled; renders the `report_issue` note. */
 	autoQaEnabled?: boolean;
-	/** Whether active `write` is restricted to xd:// dispatch and the plan artifact sandbox. */
-	writeTransportOnly?: boolean;
+	/** ovnfs command when its binary is found (`ovnfsCommand`); renders the separate-checkout guidance. */
+	ovnfs?: string;
+	/**
+	 * Whether this prompt is for a subagent session. Replaces the Verify workflow with a hand-off:
+	 * the main agent verifies once after all subagents land, so parallel children don't storm the CPU.
+	 */
+	subagent?: boolean;
 }
 
 /** Result of building provider-facing system prompt messages. */
 export interface BuildSystemPromptResult {
 	/** Ordered system prompt blocks. Providers should preserve entries as distinct messages/blocks. */
 	systemPrompt: string[];
+	/** Context files and skills located in `systemPrompt`; absent for prompts not built from templates. */
+	sources?: SystemPromptSources;
 	/**
-	 * Names of `xd://` devices whose catalog/protocol section this prompt renders.
-	 * Empty/undefined when no catalog was emitted (no mounted devices, or a custom
-	 * prompt template that omits the section). Lets the session fold these devices
+	 * Names of mounted commands whose catalog section this prompt renders.
+	 * Empty/undefined when no catalog was emitted (no mounted commands, or a custom
+	 * prompt template that omits the section). Lets the session fold these commands
 	 * into its announced-mount baseline so a same-turn mount notice does not re-list
 	 * a catalog the prompt already carries (issue #7139).
 	 */
-	xdevCatalogNames?: readonly string[];
+	toolCommandCatalogNames?: readonly string[];
+}
+
+/** Static wrapper; compiled (not rendered) so user-authored Markdown passes through byte-for-byte. */
+const renderUserAppend = prompt.compile(userAppendPromptTemplate.trimEnd());
+
+type SourceIdentity = Pick<SystemPromptSource, "id" | "kind" | "label" | "path">;
+
+/** Drops the leading whitespace `String.trim` removes, shifting ranges with it. */
+function trimTracked(rendered: prompt.TrackedRender): prompt.TrackedRender {
+	const text = rendered.text.trim();
+	const lead = rendered.text.length - rendered.text.trimStart().length;
+	if (lead === 0) return { text, ranges: rendered.ranges };
+	return {
+		text,
+		ranges: rendered.ranges.map(ranges =>
+			ranges
+				.filter(range => range.start >= lead)
+				.map(range => ({ start: range.start - lead, end: range.end - lead })),
+		),
+	};
+}
+
+/** One source per tracked occurrence in `rendered`, which was built as block `block`. */
+function trackedSources(
+	rendered: prompt.TrackedRender,
+	block: number,
+	identities: readonly SourceIdentity[],
+): SystemPromptSource[] {
+	return rendered.ranges.flatMap((ranges, index) =>
+		ranges.map(({ start, end }, occurrence) => ({
+			...identities[index]!,
+			id: occurrence === 0 ? identities[index]!.id : `${identities[index]!.id}-${occurrence + 1}`,
+			block,
+			start,
+			end,
+		})),
+	);
+}
+
+/**
+ * Join generated append blocks (memory, auto-learn, tool-command routes, MCP server
+ * instructions) with the user's append prompt. Keep the user text in its own
+ * section so it is not misclassified as MCP server-controlled instructions.
+ */
+export function composeAppendPrompt(appendParts: readonly string[], appendSystemPrompt?: string): string | undefined {
+	const generated = appendParts.length > 0 ? appendParts.join("\n\n") : undefined;
+	if (!appendSystemPrompt || appendSystemPrompt.trim().length === 0) {
+		return generated;
+	}
+	if (!generated) {
+		return appendSystemPrompt;
+	}
+	return renderUserAppend({ generatedAppend: generated, userAppend: appendSystemPrompt });
 }
 
 /** Build the system prompt with tools, guidelines, and context */
@@ -693,43 +734,106 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		nativeTools = true,
 		skillsSettings,
 		toolNames: providedToolNames,
-		directToolNames,
 		cwd,
 		additionalWorkspaceRoots = [],
 		contextFiles: providedContextFiles,
+		noContextFiles = false,
+		excludeAgentsMd = false,
 		skills: providedSkills,
 		rules,
 		alwaysApplyRules,
 		intentField,
+		intentGuidance,
 		eagerTasks = false,
 		eagerTasksAlways = false,
 		taskBatch = true,
-		taskMaxConcurrency = 0,
 		taskIrcEnabled = false,
 		secretsEnabled = false,
+		resultShaping = "",
 		workspaceTree: providedWorkspaceTree,
 		scoutAvailable = true,
-		memoryRootEnabled = false,
+		delegationBias = "balanced",
+		memoryBackend,
 		securityEnabled = false,
+		settingsApproval = false,
+		outReplies = false,
+		crossInstanceAgents = false,
+		evalPreludes = [],
 		model,
 		includeModelInPrompt = true,
 		personality = "default",
 		includeWorkspaceTree = false,
 		renderMermaid = true,
-		xdevTools = [],
-		xdevDocs = "",
+		renderSvg = false,
+		renderEmbeds = false,
+		autoGraph = false,
+		reactions = false,
+		encourageEdits = true,
+		mountedCommands = [],
+		toolCommandDocs = "",
 		autoQaEnabled = false,
-		writeTransportOnly = false,
+		ovnfs,
+		subagent = false,
 		activeRepoContext: providedActiveRepoContext,
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
 	const resolvedCwd = cwd ?? getProjectDir();
+	let resolvedSystemPromptTemplate = options.systemPromptTemplate;
+	let resolvedCustomPromptInput = providedResolvedCustomPrompt;
+	const hasExplicitCustomPrompt = customPrompt !== undefined || providedResolvedCustomPrompt !== undefined;
+	if (resolvedSystemPromptTemplate !== undefined && hasExplicitCustomPrompt) {
+		throw new Error("systemPromptTemplate cannot be combined with a literal custom system prompt");
+	}
+	if (resolvedSystemPromptTemplate === undefined && !hasExplicitCustomPrompt) {
+		const override = await discoverSystemPromptOverride(resolvedCwd);
+		if (override?.kind === "template" && override.content !== undefined) {
+			resolvedSystemPromptTemplate = override.content;
+		} else if (override?.content !== undefined) {
+			resolvedCustomPromptInput = override.content;
+		}
+	}
+	const hasDiscoveredTemplate =
+		resolvedSystemPromptTemplate !== undefined && options.systemPromptTemplate === undefined;
+	if (resolvedSystemPromptTemplate !== undefined && !resolvedSystemPromptTemplate.trim()) {
+		if (hasDiscoveredTemplate) {
+			logger.warn("Ignoring empty discovered system prompt template; using the bundled prompt");
+			resolvedSystemPromptTemplate = undefined;
+		} else {
+			throw new Error("System prompt template must not be empty");
+		}
+	}
+	// A `systemPromptTemplates` file is discovered input like SYSTEM_TEMPLATE.md: it applies only when
+	// nothing above did, and a missing, empty, or invalid file falls back to the bundled prompt.
+	const modelTemplatePath =
+		resolvedSystemPromptTemplate === undefined && resolvedCustomPromptInput === undefined && !hasExplicitCustomPrompt
+			? matchModelPattern(options.modelSystemPromptTemplates ?? [], model)
+			: undefined;
+	if (modelTemplatePath !== undefined) {
+		const templateFile = expandTilde(modelTemplatePath);
+		try {
+			const content = await Bun.file(templateFile).text();
+			if (content.trim()) resolvedSystemPromptTemplate = content;
+			else
+				logger.warn("Ignoring empty systemPromptTemplates template; using the bundled prompt", {
+					model,
+					path: templateFile,
+				});
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			logger.warn("systemPromptTemplates template not found; using the bundled prompt", {
+				model,
+				path: templateFile,
+			});
+		}
+	}
 
 	const prepDefaults = {
 		resolvedCustomPrompt: undefined as string | undefined,
 		resolvedAppendPrompt: undefined as string | undefined,
 		systemPromptCustomization: null as string | null,
-		contextFiles: dedupeContainedContextFiles(providedContextFiles ?? []),
+		contextFiles: dedupeContainedContextFiles(
+			excludeAgentsMd ? withoutAgentsMd(providedContextFiles ?? []) : (providedContextFiles ?? []),
+		),
 		skills: providedSkills ?? ([] as Skill[]),
 		workspaceTree: {
 			rootPath: resolvedCwd,
@@ -739,8 +843,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			agentsMdFiles: [],
 		} satisfies WorkspaceTree,
 		activeRepoContext: null as ActiveRepoContext | null,
-		cpuModel: undefined as string | undefined,
-		gpu: undefined as string | undefined,
 	};
 
 	const { promise: deadline, resolve: fireDeadline } = Promise.withResolvers<"__timeout__">();
@@ -774,12 +876,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		return result.value;
 	}
 
-	// Caller-supplied `customPrompt` / `resolvedCustomPrompt` owns block 0; the
-	// secondary capability-path `SYSTEM.md` walk-up MUST NOT silently augment it,
-	// because that would defeat CLI precedence over project/user `SYSTEM.md`.
+	// An explicit literal prompt or selected template owns block 0; the secondary
+	// capability-path SYSTEM.md walk-up must not silently augment either.
 	const callerControlsCustomPrompt =
-		(typeof providedResolvedCustomPrompt === "string" && providedResolvedCustomPrompt.length > 0) ||
-		(typeof customPrompt === "string" && customPrompt.length > 0);
+		hasExplicitCustomPrompt || resolvedSystemPromptTemplate !== undefined || resolvedCustomPromptInput !== undefined;
 	const systemPromptCustomizationPromise: Promise<string | null> = callerControlsCustomPrompt
 		? Promise.resolve(null)
 		: logger.time("loadSystemPromptFiles", loadSystemPromptFiles, { cwd: resolvedCwd });
@@ -789,11 +889,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			: await logger.time("loadProjectContextFiles", loadProjectContextFiles, { cwd: resolvedCwd });
 		// Also discover context files (AGENTS.md, rules, etc.) for each additional workspace root.
 		const additionalRoots = additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd));
-		if (additionalRoots.length === 0) return primary;
+		if (additionalRoots.length === 0 || noContextFiles) return excludeAgentsMd ? withoutAgentsMd(primary) : primary;
 		const extra = await Promise.all(
 			additionalRoots.map(root => loadProjectContextFiles({ cwd: root }).catch(() => [])),
 		);
-		return dedupeContainedContextFiles([...primary, ...extra.flat()]);
+		const merged = dedupeContainedContextFiles([...primary, ...extra.flat()]);
+		return excludeAgentsMd ? withoutAgentsMd(merged) : merged;
 	})();
 	const additionalRootsForTree = additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd));
 	const workspaceTreePromise = (async () => {
@@ -829,8 +930,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		providedActiveRepoContext !== undefined
 			? Promise.resolve(providedActiveRepoContext)
 			: logger.time("resolveActiveRepoContext", () => resolveActiveRepoContext(resolvedCwd));
-	const cpuModelPromise = logger.time("getCpuModel", getCpuModel);
-	const gpuPromise = logger.time("getCachedGpu", getCachedGpu);
 	// "none" (explicit off — and every subagent) omits the block and skips the file lookup.
 	const bundledPersonality = personality === "none" ? "" : PERSONALITY_SPECS[personality].trim();
 	const personalityPromise: Promise<string> =
@@ -848,14 +947,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		skills,
 		workspaceTree,
 		activeRepoContext,
-		cpuModel,
-		gpu,
 		personalityBlock,
 	] = await Promise.all([
 		withDeadline(
 			"customPrompt",
-			providedResolvedCustomPrompt !== undefined
-				? Promise.resolve(providedResolvedCustomPrompt)
+			resolvedCustomPromptInput !== undefined
+				? Promise.resolve(resolvedCustomPromptInput)
 				: resolvePromptInput(customPrompt, "system prompt"),
 			prepDefaults.resolvedCustomPrompt,
 		),
@@ -873,12 +970,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		withDeadline("loadSkills", skillsPromise, prepDefaults.skills),
 		withDeadline("buildWorkspaceTree", workspaceTreePromise, prepDefaults.workspaceTree),
 		withDeadline("resolveActiveRepoContext", activeRepoContextPromise, prepDefaults.activeRepoContext),
-		withDeadline("getCpuModel", cpuModelPromise, prepDefaults.cpuModel),
-		withDeadline("getCachedGpu", gpuPromise, prepDefaults.gpu),
 		withDeadline("loadPersonalityOverride", personalityPromise, bundledPersonality),
 	]);
 	clearTimeout(deadlineTimer);
-	const agentsMdFiles = Array.from(new Set(workspaceTree.agentsMdFiles)).sort().slice(0, AGENTS_MD_LIMIT);
+	const agentsMdFiles = noContextFiles
+		? []
+		: Array.from(new Set(workspaceTree.agentsMdFiles)).sort().slice(0, AGENTS_MD_LIMIT);
 
 	if (timedOut.length > 0) {
 		logger.warn("System prompt preparation steps timed out; using minimal fallback for those steps", {
@@ -886,9 +983,13 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			timeoutMs: SYSTEM_PROMPT_PREP_TIMEOUT_MS,
 			steps: timedOut,
 		});
-		process.stderr.write(
-			`Warning: system prompt preparation steps timed out after ${SYSTEM_PROMPT_PREP_TIMEOUT_MS}ms (${timedOut.join(", ")}); using minimal fallback for those steps.\n`,
-		);
+		// An interactive host writes nothing ahead of its UI (a Tern surface
+		// would open over the line); the log above has it.
+		if (!isInteractiveHost()) {
+			process.stderr.write(
+				`Warning: system prompt preparation steps timed out after ${SYSTEM_PROMPT_PREP_TIMEOUT_MS}ms (${timedOut.join(", ")}); using minimal fallback for those steps.\n`,
+			);
+		}
 	}
 	if (failed.length > 0) {
 		for (const { name, error } of failed) {
@@ -916,24 +1017,20 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const toolListMode = !inlineToolDescriptors && nativeTools;
 	// Build tool descriptions for system prompt rendering.
 	const toolPromptNames = new Map<string, string>(toolNames.map(name => [name, tools?.get(name)?.wireName ?? name]));
-	// xd://-mounted tools count as present for prompt gates ({{#has tools "lsp"}})
-	// and resolve their own name as the reference — the xd:// section explains
-	// the access path. The Tool Inventory list stays limited to real defs.
-	for (const mounted of xdevTools) {
+	// Mounted tool commands count as present for prompt gates ({{#has tools "lsp"}})
+	// and are referred to by their bare name, which is also the command to run.
+	// The Tool Inventory list stays limited to tools with a top-level definition.
+	for (const mounted of mountedCommands) {
 		if (!toolPromptNames.has(mounted.name)) toolPromptNames.set(mounted.name, mounted.name);
 	}
 	const toolRefs = Object.fromEntries(toolPromptNames.entries());
-	const xdevToolNames = new Set(xdevTools.map(mounted => mounted.name));
-	// A direct custom tool can share a name with a retained built-in device.
+	const mountedCommandNames = new Set(mountedCommands.map(mounted => mounted.name));
+	// A direct custom tool can share a name with a mounted tool command.
 	// Presence in both toolNames and tools proves it still has a top-level definition.
-	// Bridge-only Code Mode tools stay out of the callable inventory: the eval
-	// description documents their `tool.*` access path instead.
-	const directSet = directToolNames === undefined ? undefined : new Set(directToolNames);
-	const directInventoryNames = directSet === undefined ? toolNames : toolNames.filter(name => directSet.has(name));
 	const inventoryToolNames =
-		xdevToolNames.size === 0
-			? directInventoryNames
-			: directInventoryNames.filter(name => tools?.has(name) || !xdevToolNames.has(name));
+		mountedCommandNames.size === 0
+			? toolNames
+			: toolNames.filter(name => tools?.has(name) || !mountedCommandNames.has(name));
 	const toolInfo = inventoryToolNames.map(name => ({
 		name: toolPromptNames.get(name) ?? name,
 		internalName: name,
@@ -954,10 +1051,29 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			);
 
 	// Filter skills for the rendered system prompt:
-	// - require the `read` tool so the model can actually fetch skill content;
+	// - require an active tool that declares `skill://` read capability (any tool
+	//   name, not just `read`, so custom resolvers count once projected; mounted
+	//   tool commands count too when their metadata is projected);
 	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
-	const hasRead = toolNames.includes("read");
-	const filteredSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
+	const hasSkillReader =
+		tools === undefined
+			? toolNames.includes("read")
+			: toolNames.some(name => toolReadsSkillUris(tools.get(name))) ||
+				mountedCommands.some(entry => toolReadsSkillUris(tools.get(entry.name)));
+	const hasSkillUriAccess = hasSkillReader && skills.length > 0;
+	const schemeHost: SchemeHost = {
+		skillUriAccess: hasSkillUriAccess,
+		ruleCount: rules?.length ?? 0,
+		memoryBackend,
+		securityEnabled,
+		settingsApproval,
+		outReplies,
+		crossInstanceAgents,
+		subagent,
+	};
+	const filteredSkills = (options.skillDescriptions ?? new SkillDescriptionCatalog()).render(
+		hasSkillReader ? skills.filter(skill => skill.hide !== true) : [],
+	);
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
 		resolvedCustomPrompt,
@@ -972,69 +1088,119 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	];
 	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
 
-	const environment = getEnvironmentInfo(cpuModel, gpu);
+	// A fence a file leaves open is closed at its end, so it never leaves the rest of the prompt unformatted.
+	const promptContextFiles = contextFiles.map(file => ({ ...file, content: prompt.closeCodeFence(file.content) }));
+	// Each `{{#each}}` iteration over a context file or skill records where that source landed.
+	const sourceItems = [...promptContextFiles, ...filteredSkills];
+	const sourceIdentities: SourceIdentity[] = [
+		...promptContextFiles.map((file, index) => ({
+			id: `instruction-${index}`,
+			kind: "instruction-files" as const,
+			label: file.path,
+		})),
+		...filteredSkills.map((skill, index) => ({
+			id: `skill-${index}`,
+			kind: "skills" as const,
+			label: skill.name,
+			path: skill.filePath,
+		})),
+	];
+	const selectedTemplate = resolvedCustomPrompt
+		? customSystemPromptTemplate
+		: (resolvedSystemPromptTemplate ?? systemPromptTemplate);
+	const environment = getEnvironmentInfo();
 	const data = {
 		systemPromptCustomization: effectiveSystemPromptCustomization,
 		customPrompt: resolvedCustomPrompt,
 		appendPrompt: resolvedAppendPrompt ?? "",
-		tools: [...new Set([...toolNames, ...xdevTools.map(mounted => mounted.name)])],
+		tools: [...new Set([...toolNames, ...mountedCommands.map(mounted => mounted.name)])],
 		toolInfo,
 		toolInventory,
 		inlineToolDescriptors,
 		toolListMode,
 		toolRefs,
 		environment,
-		contextFiles,
+		contextFiles: promptContextFiles,
 		agentsMdSearch: { files: agentsMdFiles },
 		workspaceTree,
+		hasSkillUriAccess,
+		internalUrls: InternalUrlRouter.instance().describe(schemeHost),
+		internalUrlReference: InternalUrlRouter.instance().reference(),
 		skills: filteredSkills,
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,
 		cwd: promptCwd,
 		additionalWorkspaceRoots: additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd)),
 		model: includeModelInPrompt ? (model ?? "") : "",
-		useCodexTaskPrompt: usesCodexTaskPrompt(model),
+		// An explicit eager-tasks mode lifts balanced/restrained wording to eager; gated has its own eager-tasks text.
+		delegationTier: eagerTasks && delegationBias !== "gated" ? "eager" : delegationBias,
 		personality: personalityBlock,
 		intentTracing: !!intentField,
 		intentField: intentField ?? "",
+		intentGuidance: $env.PI_INTENT_PROMPT || intentGuidance || "",
 		eagerTasks,
 		eagerTasksAlways,
 		taskBatch,
-		MAX_CONCURRENCY: normalizeConcurrencyLimit(taskMaxConcurrency),
 		scoutAvailable,
 		taskIrcEnabled,
 		secretsEnabled,
-		hasMemoryRoot: memoryRootEnabled,
-		securityEnabled,
-		hasObsidian: hasObsidian(),
+		resultShaping,
+		browserEnabled: evalPreludes.some(prelude => prelude.name === "browser"),
+		computerEnabled: evalPreludes.some(prelude => prelude.name === "computer"),
 		includeWorkspaceTree,
 		renderMermaid,
-		xdevTools,
-		hasDynamicXdevTools: xdevTools.some(mounted => mounted.dynamic === true),
-		xdevDocs,
+		renderSvg,
+		renderEmbeds,
+		autoGraph,
+		reactions,
+		encourageEdits,
+		mountedCommands,
+		hasDynamicToolCommands: mountedCommands.some(mounted => mounted.dynamic === true),
+		toolCommandDocs,
 		autoQaEnabled,
-		writeTransportOnly,
+		// The guidance pastes it into shell commands: always single-quoted, so no path character splits or expands it.
+		ovnfs: ovnfs && quotePosixArgument(ovnfs),
+		subagent,
 	};
-	const rendered = prompt.render(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);
-	const systemPrompt = [rendered];
-	if (toolNames.includes("computer")) {
-		systemPrompt.push(computerSafetyPrompt.trim());
+	let rendered: prompt.TrackedRender;
+	try {
+		rendered = prompt.renderTracked(selectedTemplate, data, sourceItems);
+	} catch (error) {
+		if (resolvedSystemPromptTemplate === undefined) throw error;
+		if (options.systemPromptTemplate !== undefined) {
+			throw new Error(`Invalid system prompt template: ${String(error)}`, { cause: error });
+		}
+		logger.warn("Ignoring invalid system prompt template file; using the bundled prompt", {
+			error: String(error),
+		});
+		resolvedSystemPromptTemplate = undefined;
+		rendered = prompt.renderTracked(systemPromptTemplate, data, sourceItems);
 	}
-	// Custom prompt templates already render context files and append text; the
-	// project footer still carries environment, cwd, workspace, and dir-context.
-	const projectPrompt = prompt
-		.render(projectPromptTemplate, resolvedCustomPrompt ? { ...data, contextFiles: [], appendPrompt: "" } : data)
-		.trim();
-	if (projectPrompt) {
-		systemPrompt.push(projectPrompt);
+	const systemPrompt = [rendered.text];
+	const sources = trackedSources(rendered, 0, sourceIdentities);
+	for (const prelude of evalPreludes) {
+		const guidance = prelude.guidance?.trim();
+		if (guidance) systemPrompt.push(guidance);
 	}
-	if (activeRepoContextPrompt) {
-		systemPrompt.push(activeRepoContextPrompt);
+	// Working-directory content (context files with their paths, workspace
+	// tree/roots, active repo) and session append text form one trailing
+	// `<project-context>` block after every static block, so sessions in
+	// different directories share the static prefix and the Anthropic head
+	// cache breakpoint lands right before this block.
+	const projectPrompt = trimTracked(
+		prompt.renderTracked(projectPromptTemplate, { ...data, activeRepoContext: activeRepoContextPrompt }, sourceItems),
+	);
+	if (projectPrompt.text) {
+		sources.push(...trackedSources(projectPrompt, systemPrompt.length, sourceIdentities));
+		systemPrompt.push(projectPrompt.text);
 	}
 
-	// The xd:// protocol section (with its device catalog) is only rendered by the
-	// default template; a resolved custom prompt uses a template that omits it.
-	const xdevCatalogNames =
-		!resolvedCustomPrompt && xdevTools.length > 0 ? xdevTools.map(mounted => mounted.name) : undefined;
-	return { systemPrompt, xdevCatalogNames };
+	// Claim delivery only when the rendered block 0 actually carries the tool-command
+	// catalog, so a template that references {{toolCommandDocs}} keeps mount-notice
+	// dedupe while one that omits it stays honest.
+	const toolCommandCatalogNames =
+		!resolvedCustomPrompt && toolCommandDocs.length > 0 && rendered.text.includes(toolCommandDocs)
+			? mountedCommands.map(mounted => mounted.name)
+			: undefined;
+	return { systemPrompt, toolCommandCatalogNames, sources: { blocks: systemPrompt.slice(), sources } };
 }

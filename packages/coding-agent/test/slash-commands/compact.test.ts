@@ -4,10 +4,7 @@ import type { CompactOptions } from "@oh-my-pi/pi-coding-agent/extensibility/ext
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { CompactMode } from "@oh-my-pi/pi-coding-agent/session/compact-modes";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
-import {
-	ACP_BUILTIN_SLASH_COMMANDS,
-	executeAcpBuiltinSlashCommand,
-} from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
+import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 
@@ -48,6 +45,16 @@ describe("/compact dispatch (ACP)", () => {
 		}
 	});
 
+	it("treats mode names in /handoff arguments as focus rather than as a different compaction mode", async () => {
+		const h = acpRuntime();
+		await executeAcpBuiltinSlashCommand("/handoff soft failure", h.runtime);
+		await executeAcpBuiltinSlashCommand("/compact handoff soft failure", h.runtime);
+		expect(h.compact.mock.calls).toEqual([
+			["soft failure", { mode: "handoff" }],
+			["soft failure", { mode: "handoff" }],
+		]);
+	});
+
 	it("splits a mode from its focus instructions", async () => {
 		const h = acpRuntime();
 		await executeAcpBuiltinSlashCommand("/compact soft focus on the parser", h.runtime);
@@ -64,7 +71,7 @@ describe("/compact dispatch (ACP)", () => {
 		const h = acpRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/compact snapcompact keep the diffs", h.runtime);
 		expect(h.compact).not.toHaveBeenCalled();
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect((h.output.mock.calls[0]?.[0] as string) ?? "").toContain("snapcompact");
 	});
 
@@ -127,12 +134,6 @@ describe("/compact dispatch (ACP)", () => {
 
 		await executeAcpBuiltinSlashCommand("/compact", h.runtime);
 		expect(h.output).toHaveBeenCalledWith("Compaction failed: no model selected");
-	});
-
-	it("advertises the mode subcommands and input hint to ACP clients", () => {
-		const advertised = ACP_BUILTIN_SLASH_COMMANDS.find(c => c.name === "compact");
-		expect(advertised).toBeDefined();
-		expect(advertised?.input?.hint).toBe("[soft|remote|snapcompact] [focus]");
 	});
 });
 

@@ -10,5 +10,8 @@ class "glm" {
     family "vision" glob="*glm-5v*" priority=20
 
     override id="umans-glm-5-3-flash-lab-family" provider="umans" model="umans-glm-5.3-flash-lab" class="glm" rationale="The opaque Umans lab deployment is backed by the reviewed GLM 5.3 Flash family" provenance="models.json census"
+    override id="abliteration-glm-5-3-family" provider="abliteration" model="abliterated-model-large-v2" class="glm" revision="5.3" rationale="Abliteration's Large V2 is an abliterated GLM 5.3 deployment" provenance="docs.abliteration.ai/models (2026-09)"
+    override id="abliteration-glm-5-2-family" provider="abliteration" model="abliterated-model-large" class="glm" revision="5.2" rationale="Abliteration's Large is an abliterated GLM 5.2 deployment" provenance="docs.abliteration.ai/models (2026-09)"
+    override id="abliteration-glm-base-family" provider="abliteration" model="abliterated-model" class="glm" rationale="Abliteration's base deployment is GLM-derived; the docs do not pin the revision" provenance="docs.abliteration.ai/models (2026-09)"
     revision prefix="glm-" anywhere=#true
 }

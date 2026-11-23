@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createRequire } from "node:module";
 import * as path from "node:path";
-import rootManifest from "../../../package.json" with { type: "json" };
 import packageManifest from "../package.json" with { type: "json" };
 import { fastembedRuntimeInstallPlan, prepareWindowsFastembedRuntime } from "../src/core/fastembed-runtime";
 
@@ -12,19 +11,9 @@ import { fastembedRuntimeInstallPlan, prepareWindowsFastembedRuntime } from "../
 // fastembed's own ORT dependency intact because its native addon links against
 // that exact bundled library name (#3054).
 describe("fastembed runtime version pins", () => {
-	const catalog = rootManifest.workspaces.catalog;
-
-	test("fastembed peer pin matches the workspace catalog", () => {
-		expect(packageManifest.peerDependencies.fastembed).toBe(catalog.fastembed);
-	});
-
 	test("pins are exact installable versions, not catalog or range specs", () => {
 		expect(packageManifest.peerDependencies.fastembed).toMatch(/^\d+\.\d+\.\d+$/);
 		expect(packageManifest.peerDependencies["onnxruntime-node"]).toMatch(/^\d+\.\d+\.\d+$/);
-	});
-
-	test("onnxruntime peer pin matches fastembed's native ABI", () => {
-		expect(packageManifest.peerDependencies["onnxruntime-node"]).toBe("1.21.0");
 	});
 
 	test("runtime install preserves fastembed's transitive onnxruntime pin", () => {
@@ -32,10 +21,16 @@ describe("fastembed runtime version pins", () => {
 		expect(plan.install.dependencies).toEqual({
 			fastembed: packageManifest.peerDependencies.fastembed,
 		});
-		expect(plan.install.overrides).toBeUndefined();
+		expect(plan.install.overrides?.["onnxruntime-node"]).toBeUndefined();
 		expect(plan.install.trustedDependencies).toEqual(["onnxruntime-node"]);
 		expect(plan.versionKey).toContain("transitive-ort");
 		expect(plan.versionKey).not.toContain("forced-ort");
+	});
+
+	test("runtime install overrides tokenizers to a release with linux-arm64 bindings", () => {
+		const plan = fastembedRuntimeInstallPlan();
+		expect(plan.install.overrides).toEqual({ "@anush008/tokenizers": "0.6.0" });
+		expect(plan.versionKey).toContain("tokenizers-0.6.0");
 	});
 
 	test("Windows preload selects fastembed's ORT DLL before inherited paths", async () => {

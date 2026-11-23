@@ -1,0 +1,10 @@
+auth "cortecs" {
+	name "Cortecs"
+	env "CORTECS_API_KEY"
+	login "api-key" {
+		auth-url "https://cortecs.ai"
+		instructions "Create or copy your Cortecs API key"
+		prompt "Paste your Cortecs API key" placeholder="cortecs-..."
+		validate "chat-completions" label="Cortecs" base-url="https://api.cortecs.ai/v1" model="gpt-oss-120b"
+	}
+}

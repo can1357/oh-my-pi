@@ -1,26 +1,35 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
-import { type Api, type AssistantMessage, Effort, type Model } from "@oh-my-pi/pi-ai";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type Api, type AssistantMessage, type Context, Effort, type ImageContent, type Model } from "@oh-my-pi/pi-ai";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { formatModelStringWithRouting, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { type CreateAgentSessionResult, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
-import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import {
+	EPHEMERAL_MODEL_CHANGE_ROLE,
+	PREWALK_MODEL_CHANGE_ROLE,
+	TEMPORARY_MODEL_CHANGE_ROLE,
+} from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
+import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
+import { AUTO_THINKING, resolveProvisionalAutoLevel } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import * as snapcompact from "@oh-my-pi/snapcompact";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 describe("AgentSession model persistence", () => {
 	let tempDir: TempDir;
 	let session: AgentSession | undefined;
 	let sessionSettings: Settings;
-	// Auth storage (SQLite DB) and the model registry are immutable across these tests:
-	// every test sets the same anthropic runtime key and only ever reads the bundled model
-	// list. Building them once avoids ~12 SQLite opens + registry constructions.
+	// Auth storage and the model registry are immutable across these tests: runtime
+	// keys are configured once and only the bundled model list is read.
 	let sharedDir: TempDir;
 	let sharedAuthStorage: AuthStorage;
 	let sharedModelRegistry: ModelRegistry;
@@ -28,7 +37,9 @@ describe("AgentSession model persistence", () => {
 	beforeAll(async () => {
 		sharedDir = TempDir.createSync("@pi-model-persistence-shared-");
 		sharedAuthStorage = await AuthStorage.create(path.join(sharedDir.path(), "auth.db"));
-		sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
+		sharedAuthStorage.keys.setRuntime("anthropic", "test-key");
+		sharedAuthStorage.keys.setRuntime("zai", "test-key");
+		sharedAuthStorage.keys.setRuntime("openrouter", "test-key");
 		sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir.path(), "models.yml"));
 	});
 
@@ -57,6 +68,14 @@ describe("AgentSession model persistence", () => {
 
 	function modelValue(model: Model<Api>): string {
 		return `${model.provider}/${model.id}`;
+	}
+
+	function routedModel(upstream: string): Model<Api> {
+		const selector = `openrouter/z-ai/glm-4.7@${upstream}`;
+		const model = parseModelPattern(selector, sharedModelRegistry.getAvailable()).model;
+		if (!model) throw new Error(`Expected routed model ${selector} to exist`);
+		expect(formatModelStringWithRouting(model)).toBe(selector);
+		return model;
 	}
 
 	async function writeRoleModelSession(
@@ -183,6 +202,63 @@ describe("AgentSession model persistence", () => {
 		expect(modelChangedCount).toBe(1);
 	});
 
+	it("publishes an ordinary route-only selection and journals its exact selector", async () => {
+		const routeA = routedModel("cerebras");
+		const routeB = routedModel("sambanova");
+		const created = await createSession({ initialModel: routeA });
+		let modelChangedCount = 0;
+		created.session.subscribe(event => {
+			if (event.type === "model_changed") modelChangedCount++;
+		});
+
+		await created.session.setModel(routeB);
+
+		expect(formatModelStringWithRouting(created.session.model!)).toBe(formatModelStringWithRouting(routeB));
+		expect(modelChangedCount).toBe(1);
+		expect(created.session.sessionManager.getEntries().filter(entry => entry.type === "model_change")).toEqual([
+			expect.objectContaining({ model: formatModelStringWithRouting(routeB), role: "default" }),
+		]);
+
+		await created.session.setModel(routeB);
+		expect(modelChangedCount).toBe(1);
+	});
+
+	it("publishes a model change when a literal ID displays like a pinned route", async () => {
+		const routed = routedModel("cerebras");
+		const literal = { ...routed, id: `${routed.id}@cerebras`, compat: undefined };
+		expect(formatModelStringWithRouting(literal)).toBe(formatModelStringWithRouting(routed));
+		const created = await createSession({ initialModel: literal });
+		const changedModels: Array<Model<Api> | undefined> = [];
+		created.session.subscribe(event => {
+			if (event.type === "model_changed") changedModels.push(created.session.model);
+		});
+
+		await created.session.setModel(routed);
+
+		expect(created.session.model?.id).toBe(routed.id);
+		expect(changedModels).toEqual([routed]);
+	});
+
+	it.each([
+		[TEMPORARY_MODEL_CHANGE_ROLE, undefined],
+		[EPHEMERAL_MODEL_CHANGE_ROLE, { ephemeral: true }],
+	] as const)("journals the exact route of a %s selection", async (role, options) => {
+		const routeA = routedModel("cerebras");
+		const routeB = routedModel("sambanova");
+		const created = await createSession({
+			initialModel: routeA,
+			modelRoles: { default: formatModelStringWithRouting(routeA) },
+		});
+
+		await created.session.setModelTemporary(routeB, undefined, options);
+
+		expect(formatModelStringWithRouting(created.session.model!)).toBe(formatModelStringWithRouting(routeB));
+		expect(created.session.sessionManager.getEntries().filter(entry => entry.type === "model_change")).toEqual([
+			expect.objectContaining({ model: formatModelStringWithRouting(routeB), role }),
+		]);
+		expect(created.settings.getModelRole("default")).toBe(formatModelStringWithRouting(routeA));
+	});
+
 	it("persists the default role when explicitly requested", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const nextModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
@@ -286,6 +362,235 @@ describe("AgentSession model persistence", () => {
 		if (!activeModel) throw new Error("Expected active model after cycleModel");
 		expect(modelValue(activeModel)).toBe(modelValue(result.model));
 		expect(created.settings.getModelRole("default")).toBe(defaultRoleValue);
+	});
+
+	it("cycles from a pinned free model using its unpinned scope slot", async () => {
+		const paid = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!paid) throw new Error("Expected a bundled OpenRouter model");
+		const free = { ...paid, id: `${paid.id}:free` };
+		const selector = `${modelValue(free)}@cerebras`;
+		const pinned = parseModelPattern(selector, [free]).model;
+		if (!pinned) throw new Error(`Expected routed model ${selector} to exist`);
+		expect(formatModelStringWithRouting(pinned)).toBe(selector);
+		const created = await createSession({ initialModel: pinned });
+		created.session.setScopedModels([{ model: paid }, { model: free }]);
+
+		await created.session.cycleModel();
+
+		expect(created.session.model?.id).toBe(paid.id);
+	});
+
+	it("cycles scoped routes of the same model in both directions", async () => {
+		const routeA = routedModel("cerebras");
+		const routeB = routedModel("sambanova");
+		const created = await createSession({ initialModel: routeA });
+		created.session.setScopedModels([{ model: routeA }, { model: routeB }]);
+
+		for (const [direction, expected] of [
+			["forward", routeB],
+			["forward", routeA],
+			["backward", routeB],
+		] as const) {
+			const result = await created.session.cycleModel(direction);
+			expect(result?.isScoped).toBe(true);
+			expect(result?.model && formatModelStringWithRouting(result.model)).toBe(
+				formatModelStringWithRouting(expected),
+			);
+			expect(formatModelStringWithRouting(created.session.model!)).toBe(formatModelStringWithRouting(expected));
+			expect(
+				created.session.sessionManager
+					.getEntries()
+					.filter(entry => entry.type === "model_change")
+					.at(-1),
+			).toMatchObject({ model: formatModelStringWithRouting(expected) });
+		}
+	});
+
+	it("cycles role routes of the same model without rewriting the configured selectors", async () => {
+		const routeA = routedModel("cerebras");
+		const routeB = routedModel("sambanova");
+		const defaultSelector = formatModelStringWithRouting(routeA);
+		const smolSelector = formatModelStringWithRouting(routeB);
+		const created = await createSession({
+			initialModel: routeA,
+			modelRoles: { default: defaultSelector, smol: smolSelector },
+		});
+
+		const forward = await created.session.cycleRoleModels(["default", "smol"]);
+		expect(forward?.role).toBe("smol");
+		expect(formatModelStringWithRouting(created.session.model!)).toBe(smolSelector);
+		const backward = await created.session.cycleRoleModels(["default", "smol"], "backward");
+		expect(backward?.role).toBe("default");
+		expect(formatModelStringWithRouting(created.session.model!)).toBe(defaultSelector);
+		expect(created.settings.getModelRole("default")).toBe(defaultSelector);
+		expect(created.settings.getModelRole("smol")).toBe(smolSelector);
+		expect(created.session.sessionManager.getEntries().filter(entry => entry.type === "model_change")).toEqual([
+			expect.objectContaining({ model: smolSelector, role: "smol" }),
+			expect.objectContaining({ model: defaultSelector, role: "default" }),
+		]);
+	});
+
+	it.each([
+		["test/model-5-1@cerebras", "slow"],
+		["test/model-5-1@cerebras", undefined],
+		["test/model-5.1@cerebras", "slow"],
+	] as const)("cycles from a pin beside literal %s with role %s", async (literalId, recordedRole) => {
+		const bundled = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!bundled) throw new Error("Expected bundled OpenRouter model");
+		const base = { ...bundled, id: "test/model-5-1" };
+		const selector = `${modelValue(base)}@cerebras`;
+		const routed = parseModelPattern(selector, [base]).model;
+		if (!routed) throw new Error(`Expected routed model ${selector}`);
+		const literal = { ...base, id: literalId };
+		const created = await createSession({ initialModel: routed, modelRoles: { slow: selector } });
+		const getAvailable = spyOn(created.modelRegistry, "getAvailable").mockReturnValue([base, literal]);
+		try {
+			if (recordedRole) created.session.sessionManager.appendModelChange(selector, recordedRole);
+			expect(created.session.sessionManager.getLastModelChangeRole()).toBe(recordedRole);
+			const order = ["slow", "default"];
+			const cycle = created.session.getRoleModelCycle(order);
+			expect(cycle?.models[0]?.model.id).toBe(literal.id);
+			expect(cycle?.models[1]?.model.id).toBe(routed.id);
+			expect(formatModelStringWithRouting(cycle!.models[1].model)).toBe(selector);
+
+			const result = await created.session.cycleRoleModels(order);
+			expect(result?.role).toBe("slow");
+			expect(created.session.model?.id).toBe(literal.id);
+		} finally {
+			getAvailable.mockRestore();
+		}
+	});
+
+	it("cycles from an implicit default pinned to a variant using refreshed model metadata", async () => {
+		const base = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!base || base.contextWindow === null) {
+			throw new Error("Expected a context window for the OpenRouter base model");
+		}
+		const selector = "openrouter/z-ai/glm-4.7:nitro@cerebras";
+		const initialModel = parseModelPattern(selector, [base]).model;
+		if (!initialModel) throw new Error(`Expected ${selector} to resolve from the base model`);
+		const created = await createSession({ initialModel, modelRoles: { slow: modelValue(base) } });
+		const refreshedBase = { ...base, contextWindow: Math.floor(base.contextWindow / 2) };
+		const getAvailable = spyOn(created.modelRegistry, "getAvailable").mockReturnValue([refreshedBase]);
+		try {
+			const order = ["slow", "default"];
+			const cycle = created.session.getRoleModelCycle(order);
+			expect(cycle?.models.map(entry => [entry.role, formatModelStringWithRouting(entry.model)])).toEqual([
+				["slow", modelValue(base)],
+				["default", selector],
+			]);
+			expect(cycle?.models[1]?.model.contextWindow).toBe(refreshedBase.contextWindow);
+			const result = await created.session.cycleRoleModels(order);
+			expect(result?.role).toBe("slow");
+			expect(formatModelStringWithRouting(created.session.model!)).toBe(modelValue(base));
+		} finally {
+			getAvailable.mockRestore();
+		}
+	});
+
+	it("keeps the implicit default role when the active model ID becomes an alias", async () => {
+		const logical = buildModel({
+			id: "kimi-k2",
+			name: "Kimi K2",
+			provider: "venice",
+			api: "openai-completions",
+			baseUrl: "https://api.venice.ai/api/v1",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 1024,
+			reasoning: true,
+		});
+		const created = await createSession({ initialModel: { ...logical, id: "kimi-k2-thinking" } });
+		const getAvailable = spyOn(created.modelRegistry, "getAvailable").mockReturnValue([logical]);
+		try {
+			const cycle = created.session.getRoleModelCycle(["default"]);
+			expect(cycle?.models.map(entry => [entry.role, entry.model.id])).toEqual([["default", "kimi-k2"]]);
+		} finally {
+			getAvailable.mockRestore();
+		}
+	});
+
+	it("omits the implicit default role when the active provider is no longer available", async () => {
+		const created = await createSession({ modelRoles: { slow: "openrouter/z-ai/glm-4.7" } });
+		const active = created.session.model!;
+		const available = created.modelRegistry.getAvailable().filter(model => model.provider !== active.provider);
+		const getAvailable = spyOn(created.modelRegistry, "getAvailable").mockReturnValue(available);
+		try {
+			const cycle = created.session.getRoleModelCycle(["default", "slow"]);
+			expect(cycle?.models.map(entry => entry.role)).toEqual(["slow"]);
+		} finally {
+			getAvailable.mockRestore();
+		}
+	});
+
+	describe.each(["startup resume", "switch session"] as const)("%s route journal replay", restorePath => {
+		it.each([
+			[TEMPORARY_MODEL_CHANGE_ROLE, "openrouter/z-ai/glm-4.7@cerebras", "openrouter/z-ai/glm-4.7@sambanova"],
+			[PREWALK_MODEL_CHANGE_ROLE, "openrouter/z-ai/glm-4.7@cerebras", "openrouter/z-ai/glm-4.7@sambanova"],
+			[EPHEMERAL_MODEL_CHANGE_ROLE, "openrouter/z-ai/glm-4.7@cerebras", "openrouter/z-ai/glm-4.7@sambanova"],
+			[TEMPORARY_MODEL_CHANGE_ROLE, "openrouter/z-ai/glm-4.7", "openrouter/z-ai/glm-4.7"],
+		] as const)("restores %s from %s then %s", async (role, defaultSelector, lastSelector) => {
+			const targetSessionFile = await writeRoleModelSession(defaultSelector, lastSelector, role);
+			const expectedSelector = role === EPHEMERAL_MODEL_CHANGE_ROLE ? defaultSelector : lastSelector;
+			if (restorePath === "startup resume") {
+				await createStartupResumeSession(targetSessionFile);
+			} else {
+				const created = await createSession({ initialModel: routedModel("cerebras"), persist: true });
+				await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
+			}
+
+			expect(session?.model && formatModelStringWithRouting(session.model)).toBe(expectedSelector);
+		});
+	});
+
+	it("journals an explicit route-only switch override and restores it on the next switch", async () => {
+		const routeA = routedModel("cerebras");
+		const routeB = routedModel("sambanova");
+		const selectorA = formatModelStringWithRouting(routeA);
+		const selectorB = formatModelStringWithRouting(routeB);
+		const targetSessionFile = await writeRoleModelSession(selectorA, selectorA, "default");
+		const created = await createSession({ initialModel: routeA, persist: true });
+
+		await expect(created.session.switchSession(targetSessionFile, { model: routeB })).resolves.toBe(true);
+		expect(formatModelStringWithRouting(created.session.model!)).toBe(selectorB);
+		expect(
+			created.session.sessionManager
+				.getEntries()
+				.filter(entry => entry.type === "model_change")
+				.at(-1),
+		).toMatchObject({ model: selectorB });
+
+		await created.session.newSession();
+		await created.session.setModel(routeA);
+		await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
+		expect(formatModelStringWithRouting(created.session.model!)).toBe(selectorB);
+	});
+
+	it("announces the restored route after a late switch failure", async () => {
+		const routeA = routedModel("cerebras");
+		const routeB = routedModel("sambanova");
+		const selectorA = formatModelStringWithRouting(routeA);
+		const selectorB = formatModelStringWithRouting(routeB);
+		const targetSessionFile = await writeRoleModelSession(selectorB, selectorB, "default");
+		const created = await createSession({ initialModel: routeA, persist: true });
+		const changes: string[] = [];
+		created.session.subscribe(event => {
+			if (event.type === "model_changed") {
+				changes.push(formatModelStringWithRouting(created.session.model!));
+			}
+		});
+		const reconnect = spyOn(created.session.agent, "subscribe").mockImplementationOnce(() => {
+			throw new Error("late switch failure");
+		});
+		try {
+			await expect(created.session.switchSession(targetSessionFile)).rejects.toThrow("late switch failure");
+		} finally {
+			reconnect.mockRestore();
+		}
+
+		expect(changes).toEqual([selectorB, selectorA]);
+		expect(formatModelStringWithRouting(created.session.model!)).toBe(selectorA);
 	});
 
 	it("restores the last active role model when switching sessions", async () => {
@@ -429,6 +734,37 @@ describe("AgentSession model persistence", () => {
 		expect(result.session.configuredThinkingLevel()).toBe(AUTO_THINKING);
 	});
 
+	it("keeps DEFAULT-role auto thinking on a fresh session when the model declares defaultLevel (#16370)", async () => {
+		const model = getBundledModel("zai", "glm-5.3");
+		if (!model) throw new Error("Expected zai/glm-5.3 to exist");
+		expect(model.thinking?.defaultLevel).toBe(Effort.Max);
+		// The /model hub stores DEFAULT-role `auto` as a bare role plus `defaultThinkingLevel: auto`.
+		const settings = Settings.isolated({ defaultThinkingLevel: AUTO_THINKING });
+		settings.setModelRole("default", modelValue(model));
+		const result = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			authStorage: sharedAuthStorage,
+			modelRegistry: sharedModelRegistry,
+			sessionManager: SessionManager.create(tempDir.path(), path.join(tempDir.path(), "fresh-auto")),
+			settings,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+		session = result.session;
+
+		expect(result.session.model?.id).toBe(model.id);
+		expect(result.session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+		expect(result.session.thinkingLevel).toBe(resolveProvisionalAutoLevel(model));
+		expect(result.session.thinkingLevel).not.toBe(Effort.Max);
+	});
+
 	it("marks an incomplete process-exit transcript aborted during SDK resume without dropping history", async () => {
 		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "interrupted"));
 		const interruptedAssistant: AssistantMessage = {
@@ -533,6 +869,232 @@ describe("AgentSession model persistence", () => {
 		});
 	});
 
+	/** A valid 800x500 RGB PNG of noise deflate cannot shrink: ~1.6 MB of base64, decodable by the send path's image checks. */
+	function framePng(seed: number): string {
+		const pixels = new Uint32Array((800 * 500 * 3) / 4);
+		let state = seed;
+		for (let i = 0; i < pixels.length; i++) {
+			// xorshift32, so every run encodes the same bytes.
+			state ^= state << 13;
+			state ^= state >>> 17;
+			state ^= state << 5;
+			pixels[i] = state;
+		}
+		return encodeRawPng(new Uint8Array(pixels.buffer), 800, 500, 3).toString("base64");
+	}
+
+	/** Appends a 4.8 MB three-frame archive: over the 3 MB default, inside half of Anthropic's 120 MB inline-image budget. */
+	function appendFrameArchive(sessionManager: SessionManager, firstKeptEntryId: string): void {
+		const frame = (seed: number) => ({
+			data: framePng(seed),
+			mimeType: "image/png",
+			cols: 8,
+			rows: 8,
+			chars: 8,
+		});
+		sessionManager.appendCompaction("Archived history.", "archive", firstKeptEntryId, 150_000, {
+			preserveData: {
+				[snapcompact.PRESERVE_KEY]: {
+					frames: [frame(0x40), frame(0x80), frame(0xc0)],
+					totalChars: 24,
+					truncatedChars: 0,
+				},
+			},
+		});
+	}
+
+	function archiveImages(messages: readonly AgentMessage[]): number {
+		const summary = messages.find(message => message.role === "compactionSummary");
+		if (summary?.role !== "compactionSummary") throw new Error("Expected a restored compaction summary");
+		return summary.blocks?.filter(block => block.type === "image").length ?? 0;
+	}
+
+	/** Resumes a session whose archive was compacted on the official Anthropic API. */
+	async function resumeArchivedSession(
+		authStorage: AuthStorage,
+		modelRegistry: ModelRegistry,
+	): Promise<CreateAgentSessionResult> {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const settings = Settings.isolated();
+		settings.setModelRole("default", modelValue(defaultModel));
+		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "archived"));
+		sessionManager.appendModelChange(modelValue(defaultModel));
+		const firstKeptEntryId = sessionManager.appendMessage({
+			role: "user",
+			content: "continue",
+			timestamp: Date.now(),
+		});
+		appendFrameArchive(sessionManager, firstKeptEntryId);
+		return createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			authStorage,
+			modelRegistry,
+			sessionManager,
+			settings,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+	}
+
+	it("restores a snapcompact archive at the resumed model's frame payload budget", async () => {
+		const result = await resumeArchivedSession(sharedAuthStorage, sharedModelRegistry);
+		session = result.session;
+
+		expect(archiveImages(result.session.messages)).toBe(3);
+	});
+
+	/** Switches a session archived on the official Anthropic API to `target`, then returns the archive frames of its next request. */
+	async function archiveFramesAfterSwitch(
+		target: Model<Api>,
+		switchModel: (session: AgentSession, target: Model<Api>) => Promise<unknown>,
+	): Promise<ImageContent[]> {
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		try {
+			for (const provider of ["anthropic", "openrouter", "amazon-bedrock"]) {
+				authStorage.keys.setRuntime(provider, "test-key");
+			}
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+			const result = await resumeArchivedSession(authStorage, modelRegistry);
+			session = result.session;
+			const summary = session.messages.find(message => message.role === "compactionSummary");
+
+			await switchModel(session, target);
+			let request: Context | undefined;
+			session.agent.streamFn = (_model, context) => {
+				request = context;
+				const stream = new AssistantMessageEventStream();
+				const message = createAssistantMessage("done");
+				stream.push({ type: "done", reason: "stop", message });
+				stream.end(message);
+				return stream;
+			};
+			await session.agent.continue();
+
+			// The agent keeps the archive it was built with; only the request is capped.
+			expect(session.messages.find(message => message.role === "compactionSummary")).toBe(summary);
+			const requestSummary = request?.messages.find(
+				message => message.role === "user" && message.historyRewriteAt !== undefined,
+			);
+			if (requestSummary?.role !== "user" || !Array.isArray(requestSummary.content)) {
+				throw new Error("Expected the archive summary in the request");
+			}
+			return requestSummary.content.filter((block): block is ImageContent => block.type === "image");
+		} finally {
+			await session?.dispose();
+			session = undefined;
+			authStorage.close();
+		}
+	}
+
+	it.each([
+		["setModel", getBundledModel("openrouter", "anthropic/claude-sonnet-4.5")],
+		["setModelTemporary", getBundledModel("amazon-bedrock", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")],
+	] as const)(
+		"after %s from the official Anthropic API to a host without a byte budget, the next request carries only the newest archive frame",
+		async (switchPath, target) => {
+			const frames = await archiveFramesAfterSwitch(target, (active, model) =>
+				switchPath === "setModel"
+					? active.setModel(model)
+					: active.setModelTemporary(model, undefined, { ephemeral: true }),
+			);
+
+			expect(frames).toHaveLength(1);
+			expect(frames.reduce((bytes, frame) => bytes + frame.data.length, 0)).toBeLessThanOrEqual(
+				snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET,
+			);
+		},
+	);
+
+	it("keeps every archive frame in the next request after a switch between official Anthropic models", async () => {
+		const frames = await archiveFramesAfterSwitch(
+			getAnthropicModelOrThrow("claude-sonnet-4-5-20250929"),
+			(active, model) => active.setModel(model),
+		);
+
+		expect(frames).toHaveLength(3);
+	});
+
+	it.each([
+		["a proxy to the official Anthropic API", "anthropic-proxy", "anthropic", 3],
+		["the official Anthropic API to a proxy", "anthropic", "anthropic-proxy", 1],
+	] as const)(
+		"switching sessions from %s installs the archive at the resumed model's frame payload budget",
+		async (_, fromProvider, toProvider, frames) => {
+			const modelsPath = path.join(tempDir.path(), "models.yml");
+			await Bun.write(
+				modelsPath,
+				`providers:
+  anthropic-proxy:
+    api: anthropic-messages
+    baseUrl: https://anthropic-proxy.example.com
+    apiKey: test-key
+    models:
+      - id: claude-sonnet-4-5
+        input: [text, image]
+        contextWindow: 200000
+        maxTokens: 64000
+`,
+			);
+			const modelRegistry = new ModelRegistry(sharedAuthStorage, modelsPath);
+			const findModel = (provider: string): Model<Api> => {
+				const model = modelRegistry.find(provider, "claude-sonnet-4-5");
+				if (!model) throw new Error(`Expected ${provider}/claude-sonnet-4-5`);
+				return model;
+			};
+			const targetModel = findModel(toProvider);
+			const target = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "target"));
+			target.appendModelChange(modelValue(targetModel));
+			const firstKeptEntryId = target.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });
+			target.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "done" }],
+				api: targetModel.api,
+				provider: targetModel.provider,
+				model: targetModel.id,
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			});
+			appendFrameArchive(target, firstKeptEntryId);
+			await target.flush();
+			const targetFile = target.getSessionFile();
+			if (!targetFile) throw new Error("Expected target session file");
+			session = new AgentSession({
+				agent: new Agent({
+					initialState: {
+						model: findModel(fromProvider),
+						systemPrompt: ["Test"],
+						tools: [],
+						messages: [],
+						thinkingLevel: Effort.Medium,
+					},
+				}),
+				sessionManager: SessionManager.create(tempDir.path(), path.join(tempDir.path(), "active")),
+				settings: Settings.isolated(),
+				modelRegistry,
+			});
+
+			await expect(session.switchSession(targetFile)).resolves.toBe(true);
+
+			expect(session.model?.provider).toBe(toProvider);
+			expect(archiveImages(session.messages)).toBe(frames);
+		},
+	);
+
 	it("marks an interrupted first turn aborted when switching sessions", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const created = await createSession({ initialModel: defaultModel, persist: true });
@@ -602,17 +1164,5 @@ describe("AgentSession model persistence", () => {
 				EPHEMERAL_MODEL_CHANGE_ROLE,
 			),
 		).toEqual(["anthropic/claude-sonnet-4-5"]);
-	});
-
-	it("lists a named role model before the default fallback", () => {
-		expect(
-			getRestorableSessionModels(
-				{
-					default: "anthropic/claude-sonnet-4-5",
-					smol: "anthropic/claude-sonnet-4-6",
-				},
-				"smol",
-			),
-		).toEqual(["anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-5"]);
 	});
 });

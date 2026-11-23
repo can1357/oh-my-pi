@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getManagedSkillsDir } from "@oh-my-pi/pi-coding-agent/autolearn/managed-skills";
+import { disableUserSource, enableUserSource } from "@oh-my-pi/pi-coding-agent/capability";
 import "@oh-my-pi/pi-coding-agent/discovery";
 import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -42,6 +43,7 @@ describe("managed-skills discovery", () => {
 
 	afterEach(async () => {
 		restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
+		disableUserSource("claude");
 		spyOn(os, "homedir").mockRestore();
 		setAgentDir(originalAgentDir);
 		await removeWithRetries(tempHome);
@@ -87,6 +89,20 @@ describe("managed-skills discovery", () => {
 		const quxes = skills.filter(s => s.name === "qux");
 		expect(quxes).toHaveLength(1);
 		expect(quxes[0]?.source).toBe("custom:user");
+	});
+
+	it("never lets a managed skill take the bare name of a collided authored skill", async () => {
+		// A custom-directory skill overrides the native `foo` (which moves to a
+		// namespaced alias); the managed `foo` must still defer to both.
+		const customDir = path.join(tempHome, "custom-skills");
+		await writeSkill(authoredDir, "foo", "Authored foo (native).");
+		await writeSkill(customDir, "foo", "Authored foo (custom).");
+		await writeSkill(managedDir, "foo", "Managed foo.");
+		const { skills } = await loadSkills({ cwd: tempCwd, customDirectories: [customDir] });
+		expect(skills.some(s => s.source === "omp-managed:user")).toBe(false);
+		expect(skills.find(s => s.name === "foo")?.source).toBe("custom:user");
+		const nativeAliases = skills.filter(s => s.source === "native:user" && s.name.endsWith("/foo"));
+		expect(nativeAliases).toHaveLength(1);
 	});
 
 	it("keeps a managed skill visible even when a disabled provider has the same name", async () => {
@@ -137,6 +153,7 @@ describe("managed-skills discovery", () => {
 	it("preserves provider priority when duplicate authored providers are both enabled (#4648)", async () => {
 		await writeSkill(path.join(tempHome, ".claude", "skills"), "priority-authored", "Enabled claude.");
 		await writeSkill(path.join(tempHome, ".agents", "skills"), "priority-authored", "Enabled agents.");
+		enableUserSource("claude");
 		const { skills } = await loadSkills({ cwd: tempCwd });
 		const matches = skills.filter(s => s.name === "priority-authored");
 		expect(matches).toHaveLength(1);

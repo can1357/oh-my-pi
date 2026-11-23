@@ -1,5 +1,4 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -8,7 +7,7 @@ import { ArchiveError } from "../../src/ar/error";
 import { DEFAULT_ARCHIVE_LIMITS } from "../../src/ar/limits";
 import { memoryByteSource } from "../../src/ar/source";
 import type { ArchiveIndexEntry } from "../../src/ar/types";
-import { arFixture } from "./fixtures";
+import { arFixture, extractLargestMember } from "./fixtures";
 
 const TEMP_ROOTS: string[] = [];
 const encoder = new TextEncoder();
@@ -112,7 +111,7 @@ test("encodeAsar round-trips nested and zero-length members", async () => {
 
 test("maps links and executable flags and verifies integrity", async () => {
 	const payload = encoder.encode("payload");
-	const hash = crypto.createHash("sha256").update(payload).digest("hex");
+	const hash = Bun.SHA256.hash(payload, "hex");
 	const bytes = headerFixture(
 		{
 			bin: {
@@ -173,11 +172,9 @@ test("enforces header, entry, member, and path limits before indexing", async ()
 			limits: { ...DEFAULT_ARCHIVE_LIMITS, maxEntries: 1 },
 		}),
 	).rejects.toThrow("too many entries");
-	await expect(
-		readAsar(memoryByteSource(bytes), {
-			limits: { ...DEFAULT_ARCHIVE_LIMITS, maxMemberSize: 0 },
-		}),
-	).rejects.toThrow("too large to extract");
+	const memberLimits = { ...DEFAULT_ARCHIVE_LIMITS, maxMemberSize: 0 };
+	const memberIndex = await readAsar(memoryByteSource(bytes), { limits: memberLimits });
+	await expect(extractLargestMember("asar", memberIndex, memberLimits)).rejects.toThrow("too large to extract");
 	await expect(
 		readAsar(memoryByteSource(headerFixture({ lengthy: { size: 0, offset: "0" } })), {
 			limits: { ...DEFAULT_ARCHIVE_LIMITS, maxPathBytes: 3 },

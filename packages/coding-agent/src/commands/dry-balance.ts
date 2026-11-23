@@ -17,6 +17,10 @@ export default class DryBalance extends Command {
 		concurrency: Flags.integer({ description: "Maximum concurrent credential resolutions", default: 32 }),
 		json: Flags.boolean({ description: "Output JSON" }),
 		bench: Flags.boolean({ description: "Send one live benchmark request per OAuth account" }),
+		config: Flags.string({
+			description: "Load an extra config.yml-style overlay for this run (repeatable)",
+			multiple: true,
+		}),
 	};
 
 	static examples = [
@@ -37,6 +41,7 @@ export default class DryBalance extends Command {
 				concurrency: flags.concurrency,
 				json: flags.json,
 				bench: flags.bench,
+				config: flags.config,
 			},
 		});
 	}

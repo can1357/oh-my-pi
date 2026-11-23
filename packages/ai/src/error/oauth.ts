@@ -24,6 +24,8 @@ export type OAuthErrorKind =
 	| "configuration"
 	/** Cloud project provisioning / onboarding (loadCodeAssist, onboardUser). */
 	| "provisioning"
+	/** Subscription/payment gate: plan required or purchase action needed. */
+	| "entitlement"
 	/** OIDC / endpoint discovery failed. */
 	| "discovery";
 
@@ -32,13 +34,17 @@ export interface OAuthErrorOptions {
 	provider?: string;
 	status?: number;
 	cause?: unknown;
+	/** Retry cannot repair the persisted grant/client; reauthorization is required. */
+	definitive?: boolean;
 }
 
 /**
  * A failure inside an interactive OAuth / device-code login flow. The `kind`
  * pinpoints the stage. Timeout/polling are classified transient; everything
  * else is a hard auth failure. The auth-retry classifier separately treats
- * `token-refresh` as an explicit request to refresh and replay once.
+ * `token-refresh` as an explicit request to refresh and replay once. A
+ * `definitive` failure also carries {@link Flag.OAuthExpiry}, so the credential
+ * lifecycle disables the row without matching provider message text.
  */
 export class OAuthError extends Error {
 	readonly kind: OAuthErrorKind;
@@ -53,7 +59,11 @@ export class OAuthError extends Error {
 		this.status = options.status;
 		attach(
 			this,
-			this.kind === "timeout" || this.kind === "polling" ? create(Flag.Transient) : create(Flag.AuthFailed),
+			options.definitive
+				? create(Flag.AuthFailed, Flag.OAuthExpiry)
+				: this.kind === "timeout" || this.kind === "polling"
+					? create(Flag.Transient)
+					: create(Flag.AuthFailed),
 		);
 	}
 }

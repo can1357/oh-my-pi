@@ -1,0 +1,12 @@
+### "fx\t"
+% fx
+fxcmd-one  fxcmd-two  fxtool
+@ 0,4
+### "\t"
+% fxcmd-one
+fxcmd-one  fxcmd-two  fxtool
+@ 0,11
+### "\t"
+% fxcmd-two
+fxcmd-one  fxcmd-two  fxtool
+@ 0,11

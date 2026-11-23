@@ -1,0 +1,10 @@
+auth "aki-io" {
+	name "AKI.IO"
+	env "AKI_API_KEY"
+	login "api-key" {
+		auth-url "https://aki.io/"
+		instructions "Create or copy your AKI.IO API key"
+		prompt "Paste your AKI.IO API key" placeholder="aki-..."
+		validate "chat-completions" label="AKI.IO" base-url="https://aki.io/openai/v1" model="kimi-k2.7-code-1100b"
+	}
+}

@@ -11,8 +11,10 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
 	collectPendingToolCalls,
+	createInterruptedToolResults,
 	createInterruptedTurnAbortMessage,
 	describePendingToolCalls,
+	hasRestorableTurn,
 	SESSION_EXIT_CUSTOM_TYPE,
 	TOOL_EXECUTION_START_CUSTOM_TYPE,
 	type ToolExecutionStartData,
@@ -20,6 +22,8 @@ import {
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
+
+const SESSION_MANAGER_MODULE = path.join(import.meta.dir, "../src/session/session-manager.ts");
 
 const pendingAssistant: AssistantMessage = {
 	role: "assistant",
@@ -63,7 +67,7 @@ describe("session exit diagnostics", () => {
 	it("records a durable tool start marker and shutdown diagnostic before a pending result exists", async () => {
 		tempDir = TempDir.createSync("@pi-session-exit-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected built-in anthropic model to exist");
@@ -142,7 +146,7 @@ describe("session exit diagnostics", () => {
 	it("signal teardown persists the postmortem reason, not the generic dispose", async () => {
 		tempDir = TempDir.createSync("@pi-session-exit-signal-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected built-in anthropic model to exist");
@@ -243,6 +247,72 @@ describe("session exit diagnostics", () => {
 		).toBe(false);
 	});
 
+	it("does not fork a session another live process owns when this process only loaded it", async () => {
+		tempDir = TempDir.createSync("@pi-unowned-session-exit-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage);
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected built-in anthropic model to exist");
+		const creator = SessionManager.create(tempDir.path(), tempDir.path());
+		creator.appendMessage({ role: "user", content: "inspect the file", timestamp: Date.now() });
+		creator.appendMessage({ ...pendingAssistant, content: [{ type: "text", text: "done" }], stopReason: "stop" });
+		await creator.flush();
+		const sessionFile = creator.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		await creator.close();
+
+		// Another live omp process writes the session, so it holds the ownership lease.
+		const ownerScript = tempDir.join("owner.ts");
+		await Bun.write(
+			ownerScript,
+			[
+				`import { SessionManager } from ${JSON.stringify(SESSION_MANAGER_MODULE)};`,
+				"const manager = await SessionManager.open(process.argv[2], undefined, undefined, { suppressBreadcrumb: true });",
+				'manager.appendMessage({ role: "user", content: "owner turn", timestamp: Date.now() });',
+				"await manager.flush();",
+				'process.stdout.write("ready\\n");',
+				"for await (const _ of console) {}",
+				"await manager.close();",
+			].join("\n"),
+		);
+		// The live `process.env`, so the owner meets this process's session-owner leases.
+		const owner = Bun.spawn([process.execPath, ownerScript, sessionFile], {
+			stdin: "pipe",
+			stdout: "pipe",
+			stderr: "pipe",
+			env: process.env,
+		});
+		try {
+			const { value } = await owner.stdout.getReader().read();
+			expect(new TextDecoder().decode(value)).toBe("ready\n");
+
+			// This process only loads the session to read its history, then exits.
+			const sessionManager = await SessionManager.open(sessionFile, tempDir.path(), undefined, {
+				suppressBreadcrumb: true,
+			});
+			const agent = new Agent({
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+				convertToLlm,
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+			});
+			await session.dispose();
+			session = undefined;
+
+			expect(sessionManager.getSessionFile()).toBe(sessionFile);
+			expect(fs.readdirSync(tempDir.path()).filter(name => name.endsWith(".jsonl"))).toEqual([
+				path.basename(sessionFile),
+			]);
+		} finally {
+			owner.stdin.end();
+			await owner.exited;
+		}
+	}, 30_000);
+
 	it("treats assistant tool calls as pending even when stopReason is not toolUse", () => {
 		const sessionManager = SessionManager.inMemory();
 		sessionManager.appendMessage({ ...pendingAssistant, stopReason: "stop" });
@@ -321,6 +391,33 @@ describe("session exit diagnostics", () => {
 		).toBe(true);
 	});
 
+	it("closes a turn cut off without an exit record only when --restore assumes the exit, until a normal exit follows", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "inspect the file", timestamp: Date.now() });
+		sessionManager.appendMessage(pendingAssistant);
+		// SIGKILL or power loss: no session_exit was written.
+		const crashed = sessionManager.getBranch();
+		expect(createInterruptedTurnAbortMessage(crashed)).toBeUndefined();
+		expect(hasRestorableTurn(crashed)).toBe(true);
+
+		const closed = createInterruptedTurnAbortMessage(crashed, undefined, { assumeExit: true });
+		expect(closed).toMatchObject({ role: "assistant", stopReason: "aborted", model: pendingAssistant.model });
+		for (const result of createInterruptedToolResults(crashed)) sessionManager.appendMessage(result);
+		sessionManager.appendMessage(closed!);
+		expect(
+			createInterruptedTurnAbortMessage(sessionManager.getBranch(), undefined, { assumeExit: true }),
+		).toBeUndefined();
+		// Closed but never retried: a later restore still goes on with it…
+		expect(hasRestorableTurn(sessionManager.getBranch())).toBe(true);
+		// …unless the user quit normally after seeing it interrupted.
+		sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, {
+			reason: "manual exit",
+			kind: "normal",
+			recordedAt: "2026-07-11T02:20:08.800Z",
+		});
+		expect(hasRestorableTurn(sessionManager.getBranch())).toBe(false);
+	});
+
 	it("reconstructs a normal exit that reports pending tool calls", () => {
 		const sessionManager = SessionManager.inMemory();
 		sessionManager.appendMessage({ role: "user", content: "inspect the file", timestamp: Date.now() });
@@ -370,6 +467,68 @@ describe("session exit diagnostics", () => {
 			model: pendingAssistant.model,
 			stopReason: "aborted",
 		});
+	});
+
+	it("keeps an interrupted ask question in resumed model context without replaying completed calls", () => {
+		const sessionManager = SessionManager.inMemory();
+		const question = {
+			html: '<form><p>Deploy now?</p><label><input type="radio" name="deploy" value="yes" checked> Yes</label><label><input type="radio" name="deploy" value="no"> No</label></form>',
+		};
+		sessionManager.appendMessage({ role: "user", content: "prepare deployment", timestamp: Date.now() });
+		sessionManager.appendMessage({
+			...pendingAssistant,
+			content: [
+				{ type: "toolCall", id: "toolu_done", name: "read", arguments: { path: "deploy.md" } },
+				{ type: "toolCall", id: "toolu_ask", name: "ask", arguments: question },
+			],
+		});
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "toolu_done",
+			toolName: "read",
+			content: [{ type: "text", text: "Deployment instructions" }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		sessionManager.appendCustomEntry(TOOL_EXECUTION_START_CUSTOM_TYPE, {
+			toolCallId: "toolu_ask",
+			toolName: "ask",
+			startedAt: "2026-09-30T00:00:00.000Z",
+		});
+		sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, {
+			reason: "exit",
+			kind: "process_exit",
+			recordedAt: "2026-09-30T00:00:01.000Z",
+		});
+
+		const branch = sessionManager.getBranch();
+		const aborted = createInterruptedTurnAbortMessage(branch);
+		expect(aborted).toBeDefined();
+		for (const result of createInterruptedToolResults(branch)) sessionManager.appendMessage(result);
+		sessionManager.appendMessage(aborted!);
+		const context = sessionManager.buildSessionContext().messages;
+		expect(context).toContainEqual(
+			expect.objectContaining({
+				role: "assistant",
+				content: expect.arrayContaining([
+					expect.objectContaining({
+						type: "toolCall",
+						id: "toolu_ask",
+						arguments: question,
+					}),
+				]),
+			}),
+		);
+		expect(context.filter(message => message.role === "toolResult" && message.toolCallId === "toolu_ask")).toEqual([
+			expect.objectContaining({
+				isError: true,
+				content: [expect.objectContaining({ text: expect.stringContaining("outcome is unknown") })],
+			}),
+		]);
+		expect(
+			context.filter(message => message.role === "toolResult" && message.toolCallId === "toolu_done"),
+		).toHaveLength(1);
+		expect(createInterruptedTurnAbortMessage(sessionManager.getBranch())).toBeUndefined();
 	});
 
 	it("reconstructs tool-call content even when stopReason is stop", () => {

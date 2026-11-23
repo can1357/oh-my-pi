@@ -1,12 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import {
-	DAY_MAP,
-	extractDateFromText,
-	extractTemporal,
-	MONTH_MAP,
-	NAMED_TIMES,
-	parseNlDate,
-} from "@oh-my-pi/pi-mnemopi/core/temporal-parser";
+import { extractTemporal, parseNlDate } from "@oh-my-pi/pi-mnemopi/core/temporal-parser";
 
 const REF = new Date("2026-05-20T15:30:00Z"); // Wednesday
 
@@ -15,15 +8,6 @@ function iso(value: Date): string {
 }
 
 describe("temporal parser", () => {
-	it("exports day, month, and named-time constants", () => {
-		expect(DAY_MAP.monday).toBe(0);
-		expect(DAY_MAP.sun).toBe(6);
-		expect(MONTH_MAP.may).toBe(5);
-		expect(MONTH_MAP.dec).toBe(12);
-		expect(NAMED_TIMES.morning).toEqual([6, 12]);
-		expect(NAMED_TIMES.night).toEqual([21, 6]);
-	});
-
 	it("extracts ISO absolute dates", () => {
 		const result = extractTemporal("Meeting was on 2026-05-15", REF);
 		expect(result.event_date).toBe("2026-05-15");
@@ -218,21 +202,10 @@ describe("temporal parser", () => {
 		expect(parseNlDate("not a date at all", REF)).toBeNull();
 	});
 
-	it("extracts temporal tags for parsed dates", () => {
-		const result = extractTemporal("Last Monday we discussed the API design", REF);
-		expect(result.temporal_tags.length).toBeGreaterThan(0);
-		expect(result.temporal_tags).toContain("monday");
-	});
-
 	it("uses the first date expression when multiple are present", () => {
 		const result = extractTemporal("Deployed v2 on 2026-01-15 and v3 yesterday", REF);
 		expect(result.event_date).toBe("2026-01-15");
 		expect(result.primary_signal).toBe("2026-01-15");
-	});
-
-	it("extracts just the date string", () => {
-		expect(extractDateFromText("Deployed yesterday", REF)).toBe("2026-05-19");
-		expect(extractDateFromText("No date here", REF)).toBeNull();
 	});
 
 	it("treats date-only and timezone-less string references as UTC", () => {

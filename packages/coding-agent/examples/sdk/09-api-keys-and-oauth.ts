@@ -7,15 +7,14 @@ import {
 	AuthStorage,
 	createAgentSession,
 	discoverAuthStorage,
-	discoverModels,
 	ModelRegistry,
 	SessionManager,
 } from "@oh-my-pi/pi-coding-agent";
 
 // Default: discoverAuthStorage() uses ~/.omp/agent/agent.db
-// discoverModels() loads built-in + custom models from ~/.omp/agent/models.json
+// ModelRegistry loads built-in + custom models from ~/.omp/agent/models.yml
 const authStorage = await discoverAuthStorage();
-const modelRegistry = await discoverModels(authStorage);
+const modelRegistry = new ModelRegistry(authStorage);
 
 await createAgentSession({
 	sessionManager: SessionManager.inMemory(),
@@ -26,7 +25,7 @@ console.log("Session with default auth storage and model registry");
 
 // Custom auth storage location
 const customAuthStorage = await AuthStorage.create("/tmp/my-app/agent.db");
-const customModelRegistry = await ModelRegistry.create(customAuthStorage, "/tmp/my-app/models.json");
+const customModelRegistry = new ModelRegistry(customAuthStorage, "/tmp/my-app/models.yml");
 
 await createAgentSession({
 	sessionManager: SessionManager.inMemory(),
@@ -36,7 +35,7 @@ await createAgentSession({
 console.log("Session with custom auth storage location");
 
 // Runtime API key override (not persisted to disk)
-authStorage.setRuntimeApiKey("anthropic", "sk-my-temp-key");
+authStorage.keys.setRuntime("anthropic", "sk-my-temp-key");
 await createAgentSession({
 	sessionManager: SessionManager.inMemory(),
 	authStorage,
@@ -44,11 +43,11 @@ await createAgentSession({
 });
 console.log("Session with runtime API key override");
 
-// No models.json - only built-in models
-const simpleRegistry = await ModelRegistry.create(authStorage); // null = no models.json
+// Ignore local models.yml configuration
+const isolatedRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
 await createAgentSession({
 	sessionManager: SessionManager.inMemory(),
 	authStorage,
-	modelRegistry: simpleRegistry,
+	modelRegistry: isolatedRegistry,
 });
-console.log("Session with only built-in models");
+console.log("Session without local model configuration");

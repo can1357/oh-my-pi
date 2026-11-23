@@ -1,0 +1,10 @@
+auth "melious" {
+	name "Melious"
+	env "MELIOUS_API_KEY"
+	login "api-key" {
+		auth-url "https://melious.ai"
+		instructions "Create or copy your Melious API key"
+		prompt "Paste your Melious API key" placeholder="sk-mel-..."
+		validate "chat-completions" label="Melious" base-url="https://api.melious.ai/v1" model="gpt-oss-120b"
+	}
+}

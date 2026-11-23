@@ -2,21 +2,17 @@ import { describe, expect, it } from "bun:test";
 import { convertMessages } from "@oh-my-pi/pi-ai/providers/google-shared";
 import type { Context, Model, ToolCall, Usage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
-// Regression for #9638. A Gemini 3 turn with parallel tool calls carries a thought
-// signature only on the FIRST call. `convertMessages` used to substitute the
-// `skip_thought_signature_validator` sentinel for every unsigned Gemini 3 tool call.
-// That sentinel is honored ONLY by the public Gemini API (`google-generative-ai`);
-// Cloud Code Assist / Antigravity and Vertex AI reject it with 400 INVALID_ARGUMENT.
-// Since the offending turn is baked into session history, every subsequent request
-// replayed it and 400'd deterministically, permanently wedging the session.
+// Regression for #9638 and #10602. A Gemini 3 parallel turn carries a thought
+// signature only on the first call, while cross-model replay can make the first
+// call unsigned. Cloud Code Assist and Vertex AI accept unsigned secondary calls
+// after a signed first call, but require the bypass sentinel when the first call
+// itself is unsigned. The public Gemini API requires a signature on every call.
 //
-// The contract now splits by transport:
-//   - public Gemini API: keep the sentinel for unsigned calls (it needs a signature
-//     on every call and accepts the bypass — no regression for cross-model replay,
-//     secret-redacted args, or parallel calls).
-//   - CCA/Antigravity + Vertex: omit `thoughtSignature` on unsigned calls (those
-//     backends reject the sentinel; Gemini 3 there only requires it on the first call).
+// The contract therefore splits by transport:
+//   - public Gemini API: substitute the sentinel for every unsigned call.
+//   - CCA/Antigravity & Vertex: substitute it only when the first call is unsigned.
 
 const ZERO_USAGE: Usage = {
 	input: 0,
@@ -86,8 +82,8 @@ function toolCallParts(model: Model<GoogleApi>, context: Context) {
 	return contents.find(c => c.role === "model")?.parts?.filter(part => part.functionCall) ?? [];
 }
 
-describe("Gemini 3 unsigned tool-call signatures (#9638)", () => {
-	it("omits unsigned signatures and never emits the sentinel on Antigravity/CCA", () => {
+describe("Gemini 3 unsigned tool-call signatures (#9638, #10602)", () => {
+	it("uses the sentinel only for an unsigned first call on Cloud Code Assist", () => {
 		const model = buildGeminiModel("google-gemini-cli", "google-antigravity", "gemini-3.7-flash");
 
 		const parallel = parallelToolCalls("google-gemini-cli", "google-antigravity", "gemini-3.7-flash");
@@ -96,22 +92,52 @@ describe("Gemini 3 unsigned tool-call signatures (#9638)", () => {
 		expect(parallelCalls[0]?.thoughtSignature).toBe(VALID_SIGNATURE);
 		expect(parallelCalls[1]?.thoughtSignature).toBeUndefined();
 		expect(parallelCalls[2]?.thoughtSignature).toBeUndefined();
-		// The sentinel is what CCA rejects with 400 INVALID_ARGUMENT — it must never reach the wire.
-		expect(JSON.stringify(convertMessages(model, parallel))).not.toContain(SENTINEL);
 
 		const unsigned = unsignedFirstCall("google-gemini-cli", "google-antigravity", "gemini-3.7-flash");
-		const unsignedCalls = toolCallParts(model, unsigned);
-		expect(unsignedCalls[0]?.thoughtSignature).toBeUndefined();
-		expect(JSON.stringify(convertMessages(model, unsigned))).not.toContain(SENTINEL);
+		expect(toolCallParts(model, unsigned)[0]?.thoughtSignature).toBe(SENTINEL);
 	});
 
-	it("omits unsigned signatures and never emits the sentinel on Vertex", () => {
-		const model = buildGeminiModel("google-vertex", "google-vertex", "gemini-3-flash");
-		const unsigned = unsignedFirstCall("google-vertex", "google-vertex", "gemini-3-flash");
-		const calls = toolCallParts(model, unsigned);
+	it("carries the first-call bypass policy on the bundled CCA catalog entry", () => {
+		// The runtime consumes models.json rows verbatim, so the baked compat — not
+		// the KDL — is what actually reaches convertMessages for a selected model.
+		const model = getBundledModel<"google-gemini-cli">("google-antigravity", "gemini-3.7-flash");
+		expect(model.compat.requiresSkipThoughtSignatureOnFirstFunctionCall).toBe(true);
 
-		expect(calls[0]?.thoughtSignature).toBeUndefined();
-		expect(JSON.stringify(convertMessages(model, unsigned))).not.toContain(SENTINEL);
+		const unsigned = unsignedFirstCall("google-gemini-cli", "google-antigravity", "gemini-3.7-flash");
+		expect(toolCallParts(model as Model<GoogleApi>, unsigned)[0]?.thoughtSignature).toBe(SENTINEL);
+	});
+
+	it("uses the sentinel only for an unsigned first call on Vertex", () => {
+		const model = buildGeminiModel("google-vertex", "google-vertex", "gemini-3-flash");
+
+		const parallel = parallelToolCalls("google-vertex", "google-vertex", "gemini-3-flash");
+		const parallelCalls = toolCallParts(model, parallel);
+		expect(parallelCalls).toHaveLength(3);
+		expect(parallelCalls[0]?.thoughtSignature).toBe(VALID_SIGNATURE);
+		expect(parallelCalls[1]?.thoughtSignature).toBeUndefined();
+		expect(parallelCalls[2]?.thoughtSignature).toBeUndefined();
+
+		const unsigned = unsignedFirstCall("google-vertex", "google-vertex", "gemini-3-flash");
+		expect(toolCallParts(model, unsigned)[0]?.thoughtSignature).toBe(SENTINEL);
+
+		const unsignedParallel = assistantTurn("google-vertex", "google-vertex", "gemini-3-flash", [
+			{ type: "toolCall", id: "call_1", name: "todo", arguments: { op: "init" } },
+			{ type: "toolCall", id: "call_2", name: "grep", arguments: { pattern: "helperExec" } },
+		]);
+		const unsignedParallelCalls = toolCallParts(model, unsignedParallel);
+		expect(unsignedParallelCalls).toHaveLength(2);
+		expect(unsignedParallelCalls[0]?.thoughtSignature).toBe(SENTINEL);
+		expect(unsignedParallelCalls[1]?.thoughtSignature).toBeUndefined();
+
+		const customModel = buildGeminiModel("google-vertex", "corp-vertex", "gemini-3.8-flash");
+		expect(customModel.compat.requiresSkipThoughtSignatureOnFirstFunctionCall).toBe(true);
+		const customUnsigned = unsignedFirstCall("google-vertex", "corp-vertex", "gemini-3.8-flash");
+		expect(toolCallParts(customModel, customUnsigned)[0]?.thoughtSignature).toBe(SENTINEL);
+
+		const v25Model = buildGeminiModel("google-vertex", "google-vertex", "gemini-2.5-flash");
+		expect(v25Model.compat.requiresSkipThoughtSignatureOnFirstFunctionCall).toBeFalsy();
+		const v25Unsigned = unsignedFirstCall("google-vertex", "google-vertex", "gemini-2.5-flash");
+		expect(toolCallParts(v25Model, v25Unsigned)[0]?.thoughtSignature).toBeUndefined();
 	});
 
 	it("keeps the sentinel bypass for unsigned calls on the public Gemini API", () => {
@@ -127,5 +153,23 @@ describe("Gemini 3 unsigned tool-call signatures (#9638)", () => {
 		expect(parallelCalls[0]?.thoughtSignature).toBe(VALID_SIGNATURE);
 		expect(parallelCalls[1]?.thoughtSignature).toBe(SENTINEL);
 		expect(parallelCalls[2]?.thoughtSignature).toBe(SENTINEL);
+	});
+
+	it("uses the public Gemini bypass for custom google-generative-ai providers", () => {
+		const model = buildGeminiModel("google-generative-ai", "build", "gemini-3.7-flash");
+		const unsigned = unsignedFirstCall("google-generative-ai", "build", "gemini-3.7-flash");
+
+		expect(model.identity.class).toBe("gemini");
+		expect(toolCallParts(model, unsigned)[0]?.thoughtSignature).toBe(SENTINEL);
+	});
+
+	it("base64-encodes the sentinel when compat.base64SkipThoughtSignature is set", () => {
+		const base = buildGeminiModel("google-generative-ai", "gateway", "gemini-3.8-flash");
+		const model = buildModel({ ...base, compat: { base64SkipThoughtSignature: true } });
+		const sentinel = Buffer.from(SENTINEL).toString("base64");
+		const calls = toolCallParts(model, parallelToolCalls("google-generative-ai", "gateway", "gemini-3.8-flash"));
+
+		expect(calls[0]?.thoughtSignature).toBe(VALID_SIGNATURE);
+		expect(calls[1]?.thoughtSignature).toBe(sentinel);
 	});
 });

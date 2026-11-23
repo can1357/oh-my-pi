@@ -1,0 +1,10 @@
+auth "ovhcloud" {
+	name "OVHcloud AI Endpoints"
+	env "OVH_AI_ENDPOINTS_ACCESS_TOKEN"
+	login "api-key" {
+		auth-url "https://www.ovhcloud.com/en/public-cloud/ai-endpoints/"
+		instructions "Create or copy your OVHcloud AI Endpoints access token"
+		prompt "Paste your OVHcloud AI Endpoints access token" placeholder="ovh-..."
+		validate "chat-completions" label="OVHcloud AI Endpoints" base-url="https://oai.endpoints.kepler.ai.cloud.ovh.net/v1" model="gpt-oss-120b"
+	}
+}

@@ -1,0 +1,2325 @@
+import type { Protocol } from "devtools-protocol";
+import { untilAborted } from "@oh-my-pi/pi-utils";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type {
+	BoundingBox,
+	ElementHandle,
+	Frame,
+	JSHandle,
+	KeyboardTypeOptions,
+	KeyInput,
+	KeyPressOptions,
+	MouseButton,
+	Page,
+	Realm,
+} from "puppeteer-core";
+import { ToolAbortError, throwIfAborted } from "../tool-errors";
+import { splitKeyCombo, ternKey } from "./tern/keys";
+import { devtoolsFrameId } from "./frames";
+import { untilAbortedOrReleased } from "./op-timeouts";
+import { CANCELLED_RELEASE_POINT, OVERLAY_HOST_TAG } from "./relay/protocol";
+import type { SelectOptionChoice, SelectOptionInput } from "./select-options";
+import {
+	createFilePicker,
+	openUploadSources,
+	pickedFiles,
+	refuseFolders,
+	setFileInputPaths,
+	type UploadFileInfo,
+	type UploadRoute,
+	type UploadSource,
+	type UploadStaging,
+} from "./upload-files";
+
+/** Options accepted by coordinate-based mouse clicks. */
+export interface ClickAtOptions {
+	/** Mouse button to press. */
+	button?: MouseButton;
+	/** Number of clicks to dispatch (2 double-clicks), as `tab.click`'s `count`. */
+	count?: number;
+}
+
+/** Options accepted by pointer movement. */
+export interface MouseMoveOptions {
+	/** Number of intermediate movement events. */
+	steps?: number;
+}
+
+/** Options accepted by mouse button transitions. */
+export interface MouseButtonOptions {
+	/** Mouse button to press or release. */
+	button?: MouseButton;
+}
+
+/** Options accepted by element highlighting. */
+export interface HighlightOptions {
+	/** Time to keep the highlight visible in milliseconds. */
+	duration?: number;
+}
+
+/** Options accepted by element or page scrolling. */
+export interface ScrollOptions {
+	/** Scroll one matching element instead of the page. */
+	selector?: string;
+}
+
+/** A browser element handle with omp's additional interaction methods. */
+export type InteractionHandle = ElementHandle & {
+	dblclick(): Promise<void>;
+	check(): Promise<void>;
+	uncheck(): Promise<void>;
+	select(...values: SelectOptionInput[]): Promise<string[]>;
+	highlight(options?: HighlightOptions): Promise<void>;
+};
+
+interface ClickPoint {
+	x: number;
+	y: number;
+}
+
+type ActionabilityResult =
+	| { ok: true; x: number; y: number }
+	| { ok: false; reason: string; coveredBy?: string; detached?: true };
+
+interface PageRect {
+	left: number;
+	right: number;
+	top: number;
+	bottom: number;
+	width: number;
+	height: number;
+}
+
+interface PageRoot {
+	host?: PageElement;
+}
+
+interface PageShadowRoot {
+	elementFromPoint(x: number, y: number): PageElement | null;
+}
+
+/** An element on the way up to a contenteditable's editing host. */
+interface EditableAncestor {
+	isContentEditable: boolean;
+	parentElement: EditableAncestor | null;
+	focus(): void;
+	contains(other: unknown): boolean;
+}
+
+interface PageElement {
+	readonly tagName: string;
+	id: string;
+	readonly isConnected: boolean;
+	type: string;
+	checked: boolean;
+	files: unknown;
+	inert: boolean;
+	readonly labels?: ArrayLike<PageElement> | null;
+	matches(selector: string): boolean;
+	readonly classList: ArrayLike<string>;
+	readonly dataset: Record<string, string>;
+	readonly style: Record<string, string>;
+	parentElement: PageElement | null;
+	/** The `<slot>` rendering this node, its parent in the flat tree; `null` when unslotted. */
+	assignedSlot: PageElement | null;
+	shadowRoot: PageShadowRoot | null;
+	getBoundingClientRect(): PageRect;
+	getClientRects(): ArrayLike<PageRect>;
+	getRootNode(): PageRoot;
+	contains(other: PageElement): boolean;
+	getAttribute(name: string): string | null;
+	setAttribute(name: string, value: string): void;
+	dispatchEvent(event: unknown): boolean;
+	scrollIntoView(options: { behavior: string; block: string; inline: string }): void;
+	remove(): void;
+}
+
+interface PageDocument {
+	elementFromPoint(x: number, y: number): PageElement | null;
+	createElement(tag: string): PageElement;
+	getElementById(id: string): PageElement | null;
+	documentElement: { append(element: PageElement): void };
+}
+
+interface PageGlobals {
+	document: PageDocument;
+	innerWidth: number;
+	innerHeight: number;
+	getComputedStyle(element: PageElement): {
+		display: string;
+		visibility: string;
+		pointerEvents: string;
+		opacity: string;
+	};
+	Event: new (type: string, options: { bubbles: boolean; composed?: boolean }) => unknown;
+	File: new (parts: Uint8Array[], name: string, options: { type: string; lastModified?: number }) => unknown;
+	DataTransfer: new () => { items: { add(file: unknown): void }; files: unknown };
+	DragEvent: new (type: string, options: { bubbles: boolean; cancelable: boolean; dataTransfer: unknown }) => unknown;
+	MessageChannel: new () => {
+		port1: { onmessage: (() => void) | null; close(): void };
+		port2: { postMessage(message: null): void; close(): void };
+	};
+}
+
+/** A click aborted while its element was still refused; `refusal` names the last failed check. */
+export class ClickRefusedError extends ToolAbortError {
+	constructor(
+		readonly refusal: string,
+		options?: ErrorOptions,
+	) {
+		super(undefined, options);
+	}
+}
+
+/**
+ * Text entry aborted after input reached the page; `progress` says what the field may already hold.
+ * The per-op timeout reports this instead of an actionability hint, since the element did take input.
+ */
+export class TypingInterruptedError extends ToolAbortError {
+	constructor(
+		readonly progress: string,
+		options?: ErrorOptions,
+	) {
+		super(undefined, options);
+	}
+}
+
+/**
+ * The element left the document before the click reached it: the page replaced it, as a re-render does. A handle
+ * cannot follow the replacement, so a click on a handle fails at once; a click given a selector looks it up again.
+ */
+export class ElementDetachedError extends ToolError {
+	constructor(label: string) {
+		super(`${label}: the page replaced this element (it is detached from the document); look it up again`);
+	}
+}
+
+/**
+ * `error` as it ends a click that ran out of time after the page had replaced its element at least once: the refusal
+ * it reports is that replacement.
+ */
+function replacedRefusal(error: unknown, replaced: boolean, signal: AbortSignal): unknown {
+	return replaced && signal.aborted && !(error instanceof ClickRefusedError)
+		? new ClickRefusedError("detached (the page kept replacing this element)", { cause: signal.reason })
+		: error;
+}
+
+/**
+ * Runs `act` on the element `resolve` looks up, and looks it up again whenever the page replaced that element before
+ * `act` reached it ({@link ElementDetachedError}), as a re-render does; `act` owns each handle it is given. With
+ * `retry` false, as for an `aria-ref`, which resolves to the replaced node again, a replacement fails at once. A wait
+ * that runs out in `act` after a replacement reports the replacement as its refusal; one that runs out looking the
+ * element up keeps its own error, such as a selector that no longer matches.
+ */
+export async function withLiveElement<T>(
+	resolve: () => Promise<ElementHandle>,
+	act: (handle: ElementHandle) => Promise<T>,
+	signal: AbortSignal,
+	options: { retry?: boolean } = {},
+): Promise<T> {
+	let replaced = false;
+	while (true) {
+		const handle = await resolve();
+		try {
+			return await act(handle);
+		} catch (error) {
+			if (options.retry === false || !(error instanceof ElementDetachedError))
+				throw replacedRefusal(error, replaced, signal);
+			replaced = true;
+		}
+	}
+}
+
+function requireFiniteNumber(value: number, label: string): void {
+	if (!Number.isFinite(value)) throw new ToolError(`${label} must be a finite number`);
+}
+
+/**
+ * Page function (self-contained; serialisable via `.toString()`): whether `descendant` is `ancestor` or
+ * renders inside it — its flat-tree ancestry, which follows slot assignment into shadow trees and climbs
+ * shadow-root boundaries out to their hosts, where `Node.contains` stops.
+ */
+export function composedContains(ancestor: unknown, descendant: unknown): boolean {
+	for (let current = descendant as PageElement | null; current;) {
+		if (current === ancestor) return true;
+		const root: PageRoot = current.getRootNode();
+		current = current.assignedSlot ?? current.parentElement ?? root.host ?? null;
+	}
+	return false;
+}
+
+interface ClickFlags {
+	viaLabel: boolean;
+}
+
+/** Page half of {@link isClickActionable}; `contains` is {@link composedContains}, bound in by `clickActionableInPage`. */
+function checkClickActionable(
+	el: unknown,
+	{ viaLabel }: ClickFlags,
+	contains: typeof composedContains,
+): ActionabilityResult {
+	const element = el as unknown as PageElement;
+	const page = globalThis as unknown as PageGlobals;
+	// A node the page replaced (e.g. a re-render) has no computed style; say so rather than misread it.
+	if (!element.isConnected) {
+		return {
+			ok: false as const,
+			reason: "detached (the page replaced this element; look it up again)",
+			detached: true as const,
+		};
+	}
+	const style = page.getComputedStyle(element);
+	if (style.display === "none") return { ok: false as const, reason: "display:none" };
+	if (style.visibility === "hidden" || style.visibility === "collapse") {
+		return { ok: false as const, reason: `visibility:${style.visibility}` };
+	}
+	if (style.pointerEvents === "none") return { ok: false as const, reason: "pointer-events:none" };
+	// A custom checkbox or radio keeps its real control at opacity:0 under the box it draws; the hit test below decides.
+	if (
+		Number(style.opacity) === 0 &&
+		!element.matches(
+			'input[type="checkbox"], input[type="radio"], [role="checkbox" i], [role="radio" i], [role="switch" i]',
+		)
+	) {
+		return { ok: false as const, reason: "opacity:0" };
+	}
+	const rect = element.getBoundingClientRect();
+	if (rect.width < 1 || rect.height < 1) return { ok: false as const, reason: "zero-size" };
+	// A wrapped link's box centre can fall between its lines, on the parent; aim at its first visible line.
+	const fragments = Array.from(element.getClientRects());
+	const box =
+		fragments.length === 0
+			? rect
+			: fragments.find(
+					r =>
+						Math.min(page.innerWidth, r.right) - Math.max(0, r.left) >= 1 &&
+						Math.min(page.innerHeight, r.bottom) - Math.max(0, r.top) >= 1,
+				);
+	if (!box) return { ok: false as const, reason: "off-viewport" };
+	const left = Math.max(0, Math.min(page.innerWidth, box.left));
+	const right = Math.max(0, Math.min(page.innerWidth, box.right));
+	const top = Math.max(0, Math.min(page.innerHeight, box.top));
+	const bottom = Math.max(0, Math.min(page.innerHeight, box.bottom));
+	if (right - left < 1 || bottom - top < 1) return { ok: false as const, reason: "off-viewport" };
+	const x = Math.floor((left + right) / 2);
+	const y = Math.floor((top + bottom) / 2);
+	let topElement = page.document.elementFromPoint(x, y);
+	for (let depth = 0; topElement?.shadowRoot && depth < 16; depth++) {
+		const nested = topElement.shadowRoot.elementFromPoint(x, y);
+		if (!nested || nested === topElement) break;
+		topElement = nested;
+	}
+	if (!topElement) return { ok: false as const, reason: "elementFromPoint-null" };
+	// A label forwards a click to its control unless the hit is other interactive content inside it.
+	const interactiveContent =
+		'a[href], area[href], button, details, embed, iframe, input:not([type="hidden"]), label, select, textarea, summary, audio[controls], video[controls], [contenteditable=""], [contenteditable="true"]';
+	const hit: PageElement = topElement;
+	const forwardedBy = (owner: PageElement): boolean => {
+		let current: PageElement | null = hit;
+		while (current && current !== owner) {
+			if (current.matches(interactiveContent)) return false;
+			current = current.assignedSlot ?? current.parentElement ?? current.getRootNode().host ?? null;
+		}
+		return current === owner;
+	};
+	const onTarget =
+		contains(element, topElement) ||
+		contains(topElement, element) ||
+		(viaLabel && Array.from(element.labels ?? []).some(forwardedBy));
+	if (!onTarget) {
+		const tag = topElement.tagName.toLowerCase();
+		const id = topElement.id ? `#${topElement.id}` : "";
+		const classes = Array.from(topElement.classList)
+			.slice(0, 2)
+			.map(name => `.${name}`)
+			.join("");
+		return { ok: false as const, reason: "covered", coveredBy: `<${tag}${id}${classes}>` };
+	}
+	return { ok: true as const, x: x - rect.left, y: y - rect.top };
+}
+
+/** {@link checkClickActionable} with {@link composedContains} bound in, as one self-contained page function. */
+const clickActionableInPage = new Function(
+	"el",
+	"flags",
+	`return (${checkClickActionable.toString()})(el, flags, ${composedContains.toString()});`,
+) as (el: unknown, flags: ClickFlags) => ActionabilityResult;
+
+/**
+ * Return a visible point relative to the element's box, or explain why it cannot receive a click.
+ * A left click on one of the control's own `<label>`s counts as on-target, since the label forwards it.
+ */
+export async function isClickActionable(
+	handle: ElementHandle,
+	signal?: AbortSignal,
+	options: Pick<ClickAtOptions, "button"> = {},
+): Promise<ActionabilityResult> {
+	const flags: ClickFlags = { viaLabel: (options.button ?? "left") === "left" };
+	return await untilAborted(signal, () => handle.evaluate(clickActionableInPage, flags));
+}
+
+function sameBox(previous: BoundingBox | null, current: BoundingBox | null): boolean {
+	return (
+		previous !== null &&
+		current !== null &&
+		Math.abs(previous.x - current.x) < 0.5 &&
+		Math.abs(previous.y - current.y) < 0.5 &&
+		Math.abs(previous.width - current.width) < 0.5 &&
+		Math.abs(previous.height - current.height) < 0.5
+	);
+}
+
+async function actionableClickPoint(
+	handle: ElementHandle,
+	label: string,
+	signal: AbortSignal | undefined,
+	options: ClickAtOptions,
+): Promise<ClickPoint> {
+	await untilAborted(signal, () =>
+		handle.evaluate(el => {
+			const element = el as unknown as PageElement;
+			element.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
+		}),
+	);
+	let previous = await untilAborted(signal, () => handle.boundingBox());
+	let refusal: string | undefined;
+	try {
+		while (true) {
+			throwIfAborted(signal);
+			await untilAborted(signal, () => Bun.sleep(16));
+			const current = await untilAborted(signal, () => handle.boundingBox());
+			const stable = sameBox(previous, current);
+			const result = await isClickActionable(handle, signal, options);
+			if (!result.ok && result.detached) throw new ElementDetachedError(label);
+			// ElementHandle.boundingBox() is relative to the main frame; elementFromPoint() above is frame-local.
+			if (stable && result.ok && current) return { x: current.x + result.x, y: current.y + result.y };
+			if (stable && !result.ok && result.coveredBy) {
+				throw new ToolError(`${label} blocked: covered by ${result.coveredBy}`);
+			}
+			refusal = result.ok ? "still moving" : result.coveredBy ? `covered by ${result.coveredBy}` : result.reason;
+			previous = current;
+			await untilAborted(signal, () => Bun.sleep(34));
+		}
+	} catch (error) {
+		if (signal?.aborted && refusal !== undefined) throw new ClickRefusedError(refusal, { cause: signal.reason });
+		throw error;
+	}
+}
+
+/**
+ * Page function: whether an open modal dialog of the element's document leaves the element behind it, unfocusable
+ * and under the dialog's backdrop. A dialog inside a shadow root is not found.
+ */
+const behindModalDialogInPage = new Function(
+	"el",
+	`const contains = ${composedContains.toString()};
+	for (const dialog of el.ownerDocument.querySelectorAll("dialog:modal")) {
+		if (!contains(dialog, el)) return true;
+	}
+	return false;`,
+) as (el: unknown) => boolean;
+
+/** Which covers {@link refuseCoveredTarget} refuses, and whether it may scroll to look. */
+interface CoverCheck {
+	/**
+	 * Refuse only an element behind a modal dialog. Keys go wherever focus is, so a field focus reaches takes them
+	 * under any other layer; a modal dialog leaves the page behind it unfocusable, so they would go to the dialog.
+	 */
+	modalOnly: boolean;
+	/** Scroll an off-screen element into view to hit-test it; without it, an off-screen element is not refused. */
+	scroll: boolean;
+}
+
+/**
+ * Refuse an element another one covers before input meant for it goes out, as a click is refused: this runs click's
+ * hit test ({@link isClickActionable}) and refuses only a cover, once the element's box holds still, so a hidden or
+ * zero-size element keeps the handling its action already gives it.
+ */
+export async function refuseCoveredTarget(
+	handle: ElementHandle,
+	label: string,
+	signal: AbortSignal | undefined,
+	{ modalOnly, scroll }: CoverCheck,
+): Promise<ActionabilityResult | undefined> {
+	if (modalOnly && !(await untilAborted(signal, () => handle.evaluate(behindModalDialogInPage)))) return;
+	let result = await isClickActionable(handle, signal);
+	if (scroll && !result.ok && result.reason === "off-viewport") {
+		await untilAborted(signal, () =>
+			handle.evaluate(el => {
+				const element = el as unknown as PageElement;
+				element.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
+			}),
+		);
+		result = await isClickActionable(handle, signal);
+	}
+	if (result.ok || !result.coveredBy) return result;
+	let coveredBy = result.coveredBy;
+	let previous = await untilAborted(signal, () => handle.boundingBox());
+	try {
+		while (true) {
+			await untilAborted(signal, () => Bun.sleep(16));
+			if (modalOnly && !(await untilAborted(signal, () => handle.evaluate(behindModalDialogInPage)))) return;
+			const current = await untilAborted(signal, () => handle.boundingBox());
+			result = await isClickActionable(handle, signal);
+			if (result.ok || !result.coveredBy) return result;
+			coveredBy = result.coveredBy;
+			// A cover counts once the element holds still, as for a click: an overlay may be animating away.
+			const stable = sameBox(previous, current);
+			if (stable) throw new ToolError(`${label} blocked: covered by ${coveredBy}`);
+			previous = current;
+		}
+	} catch (error) {
+		if (signal?.aborted) throw new ClickRefusedError(`covered by ${coveredBy}`, { cause: signal.reason });
+		throw error;
+	}
+}
+
+/**
+ * Focus the element keys are pressed in, refusing one they could not reach: a disabled one, whose `focus()` leaves
+ * focus where it was, or one behind a modal dialog, which leaves it unfocusable ({@link refuseCoveredTarget}).
+ */
+export async function focusKeyTarget(handle: ElementHandle, label: string, signal?: AbortSignal): Promise<void> {
+	const { disabled, focused } = await untilAborted(signal, () =>
+		handle.evaluate(el => {
+			const node = el as unknown as {
+				focus?: () => void;
+				matches(selector: string): boolean;
+				contains(other: unknown): boolean;
+				getRootNode(): {
+					activeElement?: { isContentEditable?: boolean; contains(other: unknown): boolean } | null;
+				};
+			};
+			node.focus?.();
+			const active = node.getRootNode().activeElement;
+			return {
+				disabled: node.matches(":disabled"),
+				focused:
+					!!active &&
+					(active === node ||
+						node.contains(active) ||
+						(active.isContentEditable === true && active.contains(node))),
+			};
+		}),
+	);
+	if (disabled) throw new ToolError(`${label} blocked: the element is disabled`);
+	if (!focused) await refuseCoveredTarget(handle, label, signal, { modalOnly: true, scroll: true });
+}
+
+/**
+ * Focus an element with the DOM's own `focus()`. Puppeteer's `ElementHandle.focus()` refuses anything but an
+ * HTMLElement, though a focusable SVG element (`<g tabindex="0" role="button">`) takes focus too.
+ */
+export async function focusElement(handle: ElementHandle, signal?: AbortSignal): Promise<void> {
+	await untilAborted(signal, () =>
+		handle.evaluate(el => {
+			const node = el as unknown as { focus?: () => void };
+			if (typeof node.focus !== "function") throw new Error("Cannot focus an element without a focus() method");
+			node.focus();
+		}),
+	);
+}
+
+/**
+ * Click an element only after verifying the dispatched point is not occluded, then confirm the browser
+ * delivered the click to it: the target got the `mousedown` or `click` (a label's forwarded `click` counts
+ * for its control), or the page consumed its `pointerdown` with `preventDefault()`, which suppresses the
+ * mouse events after it. A disabled control gets only an unconsumed `pointerdown` and an inert subtree
+ * nothing, so a click the page never saw fails instead of reporting success. When the page took the record
+ * with it, a navigation or a frame removed after the release counts as delivered. A child frame the page
+ * removed while the first press was down took the element before any click, so that click fails as
+ * unconfirmed even when the element saw the `mousedown`. The relay's page overlay host ({@link OVERLAY_HOST_TAG})
+ * is not the page: its mutations never confirm a click.
+ */
+export async function clickElement(
+	handle: ElementHandle,
+	label: string,
+	signal?: AbortSignal,
+	options: ClickAtOptions = {},
+): Promise<void> {
+	const point = await actionableClickPoint(handle, label, signal, options);
+	const watch = await untilAborted(signal, () =>
+		handle.evaluateHandle((el, overlayHostTag) => {
+			interface InputEvent {
+				type: string;
+				defaultPrevented: boolean;
+				composedPath(): unknown[];
+			}
+			interface Mutation {
+				type: string;
+				target: unknown;
+				addedNodes: ArrayLike<unknown>;
+				removedNodes: ArrayLike<unknown>;
+			}
+			type Listen = (type: string, listener: (event: InputEvent) => void, capture: boolean) => void;
+			const target = el as unknown as { addEventListener: Listen; removeEventListener: Listen };
+			const page = globalThis as unknown as {
+				addEventListener: Listen;
+				removeEventListener: Listen;
+				location: { href: string };
+				document: { documentElement: unknown };
+				MutationObserver: new (callback: (records: Mutation[]) => void) => {
+					observe(node: unknown, options: Record<string, boolean>): void;
+					disconnect(): void;
+				};
+			};
+			const isOverlayHost = (node: unknown) =>
+				typeof node === "object" &&
+				node !== null &&
+				"tagName" in node &&
+				typeof node.tagName === "string" &&
+				node.tagName.toLowerCase() === overlayHostTag;
+			// The overlay draws inside its host's closed shadow root, which the observer never sees; what it can see
+			// is the host itself coming, going, or changing its attributes.
+			const overlayOnly = (record: Mutation) => {
+				if (isOverlayHost(record.target)) return true;
+				if (record.type !== "childList") return false;
+				const nodes = [...Array.from(record.addedNodes), ...Array.from(record.removedNodes)];
+				return nodes.length > 0 && nodes.every(isOverlayHost);
+			};
+			const pointerDowns: InputEvent[] = [];
+			const href = page.location.href;
+			let changed = false;
+			const state = {
+				get detached() {
+					return !(el as unknown as PageElement).isConnected;
+				},
+				reached: false,
+				// Read after the click: the page's handlers have run by then. A handler that replaced the element,
+				// changed the DOM, submitted a form or navigated also shows the page took the click,
+				// even when it re-rendered the target before the listeners saw it.
+				delivered: () =>
+					state.reached ||
+					pointerDowns.some(event => event.defaultPrevented) ||
+					state.detached ||
+					changed ||
+					page.location.href !== href,
+				stop: () => {},
+			};
+			if (state.detached) return state;
+			const observer = new page.MutationObserver(records => {
+				if (!records.every(overlayOnly)) changed = true;
+			});
+			const onChange = () => {
+				changed = true;
+			};
+			const record = (event: InputEvent) => {
+				if (event.type === "pointerdown") pointerDowns.push(event);
+				else state.reached = true;
+			};
+			// The target's own listener sees events inside a closed shadow root, which the window's path hides;
+			// the window's sees an event a page handler stops before it reaches the target.
+			const onPage = (event: InputEvent) => {
+				if (event.composedPath().includes(el)) record(event);
+			};
+			const types = ["pointerdown", "mousedown", "click"];
+			const pageChanges = ["submit", "beforeunload", "pagehide"];
+			for (const type of types) {
+				target.addEventListener(type, record, true);
+				page.addEventListener(type, onPage, true);
+			}
+			for (const type of pageChanges) page.addEventListener(type, onChange, true);
+			observer.observe(page.document.documentElement, {
+				childList: true,
+				subtree: true,
+				attributes: true,
+				characterData: true,
+			});
+			state.stop = () => {
+				observer.disconnect();
+				for (const type of types) {
+					target.removeEventListener(type, record, true);
+					page.removeEventListener(type, onPage, true);
+				}
+				for (const type of pageChanges) page.removeEventListener(type, onChange, true);
+			};
+			return state;
+		}, OVERLAY_HOST_TAG.toLowerCase()),
+	);
+	const frame = handle.frame;
+	// The main frame outlives any press; a child frame's record is read once while the first press is down, since
+	// the browser reports a removed frame only after it acknowledges the press.
+	const checkWhileDown =
+		frame === frame.page().mainFrame()
+			? undefined
+			: async () => {
+					await untilAborted(signal, () => watch.evaluate(() => false)).catch((error: unknown) => {
+						if (signal?.aborted) throw error;
+						if (frame.detached) {
+							throw new ToolError(
+								`${label}: could not confirm the click: the press reached the page, which removed the element's frame before the button came up, so no click followed; check the page before clicking again`,
+							);
+						}
+					});
+				};
+	try {
+		if (await untilAborted(signal, () => watch.evaluate(state => state.detached))) {
+			throw new ElementDetachedError(label);
+		}
+		await clickPoint(frame.page(), point.x, point.y, options, signal, checkWhileDown);
+	} catch (error) {
+		// The page may be stuck; tidy up without waiting on it.
+		void watch
+			.evaluate(state => state.stop())
+			.catch(() => undefined)
+			.finally(() => watch.dispose().catch(() => undefined));
+		throw error;
+	}
+	// A click that navigated away, or whose frame the page removed after the release, took the page's record
+	// with it; it reached the page. A cancelled call still fails as cancelled.
+	const delivered = await untilAborted(signal, () =>
+		watch.evaluate(state => {
+			state.stop();
+			return state.delivered();
+		}),
+	).catch((error: unknown) => {
+		if (signal?.aborted) throw error;
+		return true;
+	});
+	await watch.dispose().catch(() => undefined);
+	if (!delivered) {
+		throw new ToolError(
+			`${label}: could not confirm the click reached the element (no listener saw it and the page did not change; it may be disabled or inert); check the page before clicking again`,
+		);
+	}
+}
+
+/**
+ * Page half of {@link hoverElement}: why the pointer cannot be put on `el` at all, or `null` once it has a layout box.
+ * `opacity:0`, `visibility:hidden` and `pointer-events:none` pass, since hovering may be what shows the element.
+ */
+function hoverLayoutRefusal(el: unknown): string | null {
+	const element = el as unknown as PageElement;
+	if (!element.isConnected) return "detached (the page replaced this element; look it up again)";
+	if ((globalThis as unknown as PageGlobals).getComputedStyle(element).display === "none") return "display:none";
+	const rects = Array.from(element.getClientRects());
+	if (rects.length === 0) return "no layout box";
+	return rects.some(rect => rect.width >= 1 && rect.height >= 1) ? null : "zero-size";
+}
+
+/**
+ * Hover an element with Puppeteer's own `hover()` once it has a layout box: a hidden, detached or off-canvas match
+ * waits and then fails with the reason, like a click. Past that it is Puppeteer's hover, as before: a covered target
+ * is hovered through its cover, and resolving means the pointer moved, not that the page reacted.
+ */
+export async function hoverElement(handle: ElementHandle, signal?: AbortSignal): Promise<void> {
+	// Handles from `toActionableHandle` replace `hover` with a call to this function; the prototype's is Puppeteer's.
+	const hover = Object.getPrototypeOf(handle).hover as ElementHandle["hover"];
+	// Why the pointer could not be put on it yet. A layout refusal clears once the box is back; `off-viewport` is what
+	// Puppeteer's own last attempt found, so it stands while the next attempt runs.
+	let refusal: string | undefined;
+	try {
+		for (;;) {
+			const reason = await untilAborted(signal, () => handle.evaluate(hoverLayoutRefusal));
+			if (reason !== null) {
+				refusal = reason;
+			} else {
+				if (refusal !== "off-viewport") refusal = undefined;
+				try {
+					return await untilAborted(signal, () => hover.call(handle));
+				} catch (error) {
+					// Puppeteer scrolled and still found no part of the box in view (an off-canvas drawer): wait as for a hidden one.
+					if (!(error instanceof Error) || error.message !== "Node is either not clickable or not an Element")
+						throw error;
+					refusal = "off-viewport";
+				}
+			}
+			await untilAborted(signal, () => Bun.sleep(50));
+		}
+	} catch (error) {
+		if (signal?.aborted && refusal !== undefined) throw new ClickRefusedError(refusal, { cause: signal.reason });
+		throw error;
+	}
+}
+
+/**
+ * Focus a text-entry target, refusing one that cannot take keystrokes. A
+ * disabled control ignores `focus()`, so they would land in whichever element
+ * had focus; a read-only one drops them; one that focus did not reach is
+ * refused when a modal dialog covers it ({@link refuseCoveredTarget}), since
+ * the dialog leaves the page behind it unfocusable. The checks run after
+ * `focus()` so a focus handler that locks the field is seen.
+ */
+async function focusTextEntryTarget(
+	handle: ElementHandle,
+	action: "fill" | "type into",
+	label: string,
+	signal?: AbortSignal,
+): Promise<void> {
+	const refusal = await untilAborted(signal, () =>
+		handle.evaluate((el, replacing) => {
+			const node = el as unknown as {
+				readOnly?: boolean;
+				isContentEditable?: boolean;
+				focus?: () => void;
+				matches(selector: string): boolean;
+				contains(other: unknown): boolean;
+				getRootNode(): {
+					activeElement?: { isContentEditable?: boolean; contains(other: unknown): boolean } | null;
+				};
+				ownerDocument: {
+					createRange(): { selectNodeContents(node: unknown): void };
+					getSelection(): { removeAllRanges(): void; addRange(range: unknown): void } | null;
+				};
+			};
+			// Focusing a contenteditable puts the caret at its start, which an editor syncs into its own state
+			// and may apply back to the page a task later (Slate renders it), over the selection fill makes. A
+			// fill selects the contents first, so focusing keeps them selected and the editor syncs that.
+			if (replacing && node.isContentEditable) {
+				const range = node.ownerDocument.createRange();
+				range.selectNodeContents(node);
+				const selection = node.ownerDocument.getSelection();
+				selection?.removeAllRanges();
+				selection?.addRange(range);
+			}
+			node.focus?.();
+			if (node.matches(":disabled")) return "disabled";
+			if (node.readOnly) return "read-only";
+			// Keys go where focus is: the element, an element inside it, or the editing host around it.
+			const active = node.getRootNode().activeElement;
+			const focused =
+				!!active &&
+				(active === node || node.contains(active) || (active.isContentEditable === true && active.contains(node)));
+			if (!focused) return "unfocused";
+			return null;
+		}, action === "fill"),
+	);
+	// Another miss (a node inside an editor, a focus handler that moved focus to a picker) keeps the handling it had.
+	if (refusal === "unfocused") await refuseCoveredTarget(handle, label, signal, { modalOnly: true, scroll: true });
+	else if (refusal) throw new ToolError(`Cannot ${action} a ${refusal} element`);
+}
+
+/**
+ * Type into the focused element one code point at a time, checking `signal` before each key.
+ * Puppeteer's `keyboard.type()` cannot be cancelled, so awaiting it whole under a deadline would leave
+ * the rest of the text typing behind a rejected call.
+ *
+ * @throws TypingInterruptedError when `signal` aborts after at least one key was sent.
+ */
+async function typeKeys(
+	page: Page,
+	text: string,
+	signal: AbortSignal | undefined,
+	options?: Readonly<KeyboardTypeOptions>,
+): Promise<void> {
+	const characters = Array.from(text);
+	let typed = 0;
+	try {
+		for (const character of characters) {
+			throwIfAborted(signal);
+			await untilAborted(signal, () => page.keyboard.type(character, options));
+			typed++;
+		}
+	} catch (error) {
+		if (signal?.aborted && typed > 0) {
+			throw new TypingInterruptedError(
+				`typing stopped after ${typed} of ${characters.length} characters (the field keeps what was typed)`,
+				{ cause: signal.reason },
+			);
+		}
+		throw error;
+	}
+}
+
+/** Focus a text-entry target, then type `text` so an abort stops before the next key; see {@link typeKeys}. */
+export async function typeIntoElement(
+	handle: ElementHandle,
+	text: string,
+	label: string,
+	signal?: AbortSignal,
+	options?: Readonly<KeyboardTypeOptions>,
+): Promise<void> {
+	await focusTextEntryTarget(handle, "type into", label, signal);
+	await typeKeys(handle.frame.page(), text, signal, options);
+}
+
+/**
+ * Input types set through a picker or slider, with an example of the value each takes. Typing into
+ * one fills its segments by keystroke rules (`2026-10-12` became `61012-02-02`) or nothing at all
+ * (a colour stayed `#000000`, a range at its midpoint), so fill sets their value instead.
+ */
+const PICKER_VALUE_EXAMPLES: Record<string, string> = {
+	color: '"#ff8800"',
+	date: '"2026-10-12"',
+	"datetime-local": '"2026-10-12T14:30"',
+	month: '"2026-10"',
+	time: '"14:30"',
+	week: '"2026-W41"',
+	range: "a number within its min, max and step",
+};
+const PICKER_INPUT_TYPES = Object.keys(PICKER_VALUE_EXAMPLES);
+
+/**
+ * Run on a filled text field (`this`, an HTML `<textarea>` or text-entry `<input>`) with the value's last character: a
+ * keydown and then a keyup, each only while it is still such a field and has focus. Created in the page, they carry
+ * no text, held modifier or default action.
+ */
+const FIELD_KEY_EVENTS = `function (key) {
+	const textEntry = ["text", "search", "email", "url", "tel", "password", "number"];
+	for (const type of ["keydown", "keyup"]) {
+		const field =
+			this.namespaceURI === "http://www.w3.org/1999/xhtml" &&
+			(this.localName === "textarea" || (this.localName === "input" && textEntry.includes(this.type)));
+		if (!field || this.getRootNode().activeElement !== this) return;
+		this.dispatchEvent(new KeyboardEvent(type, { key, bubbles: true, cancelable: true, composed: true }));
+	}
+}`;
+
+/**
+ * Focus a field that can take text, clear any existing value, then insert the value in one input. A colour, date, time or
+ * range input gets its value set the way its picker would, and refuses one it rejects. A
+ * contenteditable element has its contents selected and replaced by one text insertion (or deleted
+ * by Backspace for an empty value), as a paste would.
+ *
+ * Every step is a DOM evaluation or an input dispatch, so this works on tabs
+ * that produce no animation frames — unlike Puppeteer's `Locator.fill`, whose
+ * viewport/stability/enabled preconditions wait on `requestAnimationFrame`
+ * and `IntersectionObserver` callbacks that a backgrounded headless tab never
+ * delivers (#12892). Typing stops at the next key once `signal` aborts.
+ */
+export async function fillViaHandle(
+	handle: ElementHandle,
+	value: string,
+	label: string,
+	signal?: AbortSignal,
+): Promise<void> {
+	await focusTextEntryTarget(handle, "fill", label, signal);
+	const prepared = await untilAborted(signal, () =>
+		handle.evaluate(
+			(el, wanted, pickerTypes) => {
+				const node = el as unknown as {
+					localName?: string;
+					type?: string;
+					value?: string;
+					focus?: () => void;
+					isContentEditable?: boolean;
+					parentElement: EditableAncestor | null;
+					getRootNode(): { activeElement: { contains(other: unknown): boolean } | null };
+					contains(other: unknown): boolean;
+					getAttribute(name: string): string | null;
+					namespaceURI: string | null;
+					ownerDocument: {
+						createElementNS(
+							namespace: string | null,
+							tag: "input",
+						): { value: string; setAttribute(name: string, value: string): void };
+						createRange(): {
+							readonly collapsed: boolean;
+							selectNodeContents(node: unknown): void;
+							getClientRects(): ArrayLike<{ width: number; height: number }>;
+						};
+						getSelection(): { removeAllRanges(): void; addRange(range: unknown): void } | null;
+					};
+					dispatchEvent(event: unknown): boolean;
+				};
+				node.focus?.();
+				// The native setter bypasses value trackers that frameworks (React) install on the element, so
+				// they see the new value as a change instead of their own write. It is looked up past the
+				// prototypes of a customized built-in (`<input is=…>`), which do not own `value`. A page class
+				// that defines its own `value` accessor is not on the chain this function sees, so that accessor
+				// never runs here.
+				let proto = Object.getPrototypeOf(node);
+				let descriptor: PropertyDescriptor | undefined;
+				while (proto && !(descriptor = Object.getOwnPropertyDescriptor(proto, "value"))) {
+					proto = Object.getPrototypeOf(proto);
+				}
+				const setValue = descriptor?.set;
+				const write = (next: string) => (setValue ? setValue.call(node, next) : (node.value = next));
+				// Like the browser's own, input leaves a shadow root and change stays inside it.
+				const report = () => {
+					const { Event } = globalThis as unknown as PageGlobals;
+					node.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+					node.dispatchEvent(new Event("change", { bubbles: true }));
+				};
+				const kind = node.type?.toLowerCase() ?? "";
+				// localName, not tagName: an XHTML page keeps the tag's lower case.
+				if (node.localName === "input" && pickerTypes.includes(kind)) {
+					const before = node.value ?? "";
+					// Tried on a plain input with the same type, min, max and step: a value written to the live
+					// control and then put back would still cut it off from its value attribute, and a copy of a
+					// customized built-in would run the page's constructor. It takes the target's namespace, which
+					// an XML document's createElement would drop for a generic element that keeps any value.
+					const probe = node.ownerDocument.createElementNS(node.namespaceURI, "input");
+					for (const name of ["type", "min", "max", "step"]) {
+						const attribute = node.getAttribute(name);
+						if (attribute !== null) probe.setAttribute(name, attribute);
+					}
+					probe.value = wanted;
+					// The browser normalises what it accepts (a colour to #rrggbb, a time's seconds), turns what
+					// it rejects into "" (a colour into #000000, a range into its midpoint) and clamps a range. A
+					// colour stored as #000000 is accepted only if it draws black, so the browser resolves it rather
+					// than a parser saying it is well-formed (`var(--missing)` is, and is still refused). A
+					// rejected range number can land on the midpoint it coerces to (`0x5`), so its spelling is
+					// checked against the decimal form the browser parses. Only the date and time types can be
+					// cleared.
+					const actual = probe.value;
+					let refused: boolean;
+					if (kind === "color") {
+						const { OffscreenCanvas } = globalThis as unknown as {
+							OffscreenCanvas: new (
+								width: number,
+								height: number,
+							) => {
+								getContext(type: "2d"): {
+									fillStyle: string;
+									fillRect(x: number, y: number, width: number, height: number): void;
+									getImageData(
+										x: number,
+										y: number,
+										width: number,
+										height: number,
+									): { data: ArrayLike<number> };
+								} | null;
+							};
+						};
+						// A colour the canvas cannot parse keeps the white set first, so it draws white.
+						const paint = new OffscreenCanvas(1, 1).getContext("2d");
+						let drawsBlack = false;
+						if (paint) {
+							paint.fillStyle = "#ffffff";
+							paint.fillStyle = wanted;
+							paint.fillRect(0, 0, 1, 1);
+							const [red, green, blue] = Array.from(paint.getImageData(0, 0, 1, 1).data);
+							drawsBlack = red === 0 && green === 0 && blue === 0;
+						}
+						refused = actual === "#000000" && !drawsBlack;
+					} else if (kind === "range") {
+						refused =
+							!/^-?(?:\d+(?:\.\d+)?|\.\d+)(?:e[+-]?\d+)?$/i.test(wanted) || Number(actual) !== Number(wanted);
+					} else {
+						refused = wanted !== "" && actual === "";
+					}
+					// A picker reports a pick that changes the value, not one that keeps it.
+					if (!refused && actual !== before) {
+						write(wanted);
+						report();
+					}
+					return { target: "picker" as const, kind, refused };
+				}
+				if (node.isContentEditable) {
+					// An element inside an editing host is usually not focusable, so its host is focused. Input goes to
+					// whatever holds focus, so focus has to end on the host or on an element between it and the target;
+					// a host whose focus handler moved it elsewhere (or an inert one, which leaves it on the body) would
+					// have the replacement land outside it. The element's own root (its document, or a shadow root,
+					// closed ones included) says which of its elements holds focus.
+					let host: EditableAncestor | null = node.parentElement?.isContentEditable ? node.parentElement : null;
+					while (host?.parentElement?.isContentEditable) host = host.parentElement;
+					host?.focus();
+					const active = node.getRootNode().activeElement;
+					if (!active?.contains(node) || !(host ?? node).contains(active)) return { target: "unfocused" as const };
+					// Rich-text editors (Slate, Lexical) keep their own document and either undo a direct DOM write
+					// or stop tracking the element, so the old text is selected for the input that replaces it.
+					const range = node.ownerDocument.createRange();
+					range.selectNodeContents(node);
+					const selection = node.ownerDocument.getSelection();
+					selection?.removeAllRanges();
+					selection?.addRange(range);
+					// The browser keeps a deletion inside the editing host, so a host with any contents is cleared.
+					// Inside a host, Backspace over contents that draw nothing deletes the character before them, so
+					// an element there is cleared only when its contents draw something (text, an image).
+					const deletable = node.parentElement?.isContentEditable
+						? Array.from(range.getClientRects()).some(rect => rect.width > 0 && rect.height > 0)
+						: !range.collapsed;
+					return { target: "editable" as const, deletable };
+				}
+				const before = node.value;
+				if ("value" in node) write("");
+				// Inserting a value fires its own input event; an empty value inserts nothing,
+				// so report the clear itself when there was something to clear.
+				if (wanted === "" && before) report();
+				return { target: "field" as const };
+			},
+			value,
+			PICKER_INPUT_TYPES,
+		),
+	);
+	const page = handle.frame.page();
+	switch (prepared.target) {
+		case "picker":
+			if (prepared.refused) {
+				throw new ToolError(
+					`<input type=${prepared.kind}> does not accept ${JSON.stringify(value)}; give its value format, e.g. ${PICKER_VALUE_EXAMPLES[prepared.kind]}`,
+				);
+			}
+			return;
+		case "unfocused":
+			throw new ToolError("Cannot fill an element that does not keep focus");
+		case "field":
+			// One `Input.insertText` puts the whole value in with a single native input event: a newline stays text
+			// instead of pressing Enter (which submits chat forms), a controlled component sees the full value
+			// rather than re-rendering its old one between keys, and long text takes one round trip.
+			// It fires no key events, which pages that search as you type often wait for (`keyup`), so a text field
+			// then gets {@link FIELD_KEY_EVENTS} for the value's last code point that is not a control character. They
+			// go out without the user gesture puppeteer's `evaluate` requests, which would renew the page's user
+			// activation.
+			if (!value) return;
+			throwIfAborted(signal);
+			try {
+				await untilAborted(signal, () => page.keyboard.sendCharacter(value));
+				let end = value.length;
+				while (end > 0 && /\p{Cc}/u.test(value.charAt(end - 1))) end--;
+				// A trailing low surrogate ends the code point its high surrogate starts.
+				const start = end > 1 && (value.codePointAt(end - 2) ?? 0) > 0xffff ? end - 2 : end - 1;
+				const key = value.slice(start, end);
+				if (key) {
+					// The insert is done; a page that navigated or dropped the field in answer has no field to tell.
+					await untilAborted(signal, () =>
+						handle.frame.client
+							.send("Runtime.callFunctionOn", {
+								objectId: handle.remoteObject().objectId,
+								functionDeclaration: FIELD_KEY_EVENTS,
+								arguments: [{ value: key }],
+							})
+							.catch(() => undefined),
+					);
+				}
+			} catch (error) {
+				if (signal?.aborted) {
+					throw new TypingInterruptedError("the value was already sent and may have reached the field", {
+						cause: signal.reason,
+					});
+				}
+				throw error;
+			}
+			return;
+		case "editable":
+			if (!value && !prepared.deletable) return;
+			throwIfAborted(signal);
+			try {
+				// One `Input.insertText` replaces the selection the way a paste does; the editor's own
+				// beforeinput handling applies it to its model. Backspace is a real deletion of the selection.
+				await untilAborted(signal, () =>
+					value ? page.keyboard.sendCharacter(value) : page.keyboard.press("Backspace"),
+				);
+			} catch (error) {
+				// The input was already sent and cannot be recalled, so the editor may hold its result.
+				if (signal?.aborted) {
+					throw new TypingInterruptedError(
+						`the ${value ? "replacement text" : "deletion"} was already sent and may have reached the editor`,
+						{ cause: signal.reason },
+					);
+				}
+				throw error;
+			}
+			return;
+	}
+}
+
+interface QueryCandidate {
+	handle: ElementHandle;
+	/** Document coordinates, so candidates measured at different scroll offsets still compare. */
+	x: number;
+	y: number;
+	onScreen: boolean;
+	/** Shown only as a strip at an edge; see {@link MeasuredBox.edgeOnly}. */
+	edgeOnly: boolean;
+	owned: boolean;
+}
+
+async function disposeOwned(candidates: Iterable<QueryCandidate>): Promise<void> {
+	for (const candidate of candidates) {
+		if (candidate.owned) await candidate.handle.dispose().catch(() => undefined);
+	}
+}
+
+interface MeasuredBox {
+	x: number;
+	y: number;
+	sized: boolean;
+	onScreen: boolean;
+	/** Missed by every interior probe but hit half a pixel inside an edge, as a strip a scroll container leaves in view is. */
+	edgeOnly: boolean;
+}
+
+/**
+ * Runs in the page: the element's document position, whether it has a box, and whether the browser shows
+ * it anywhere in the viewport. Visibility is the renderer's own hit test at a few points of each on-screen
+ * fragment, landing on the element or inside it, so every clip, transform, top layer and containment rule
+ * is the browser's. An element hit testing cannot see (`pointer-events: none`, `visibility: hidden`, inert)
+ * is not shown.
+ * Self-contained, since Puppeteer serializes it.
+ */
+function measureBoxInPage(el: unknown): MeasuredBox {
+	const element = el as unknown as PageElement;
+	const page = globalThis as unknown as PageGlobals & { scrollX: number; scrollY: number };
+	const rect = element.getBoundingClientRect();
+	const inViewport = (r: PageRect) => ({
+		left: Math.max(0, r.left),
+		top: Math.max(0, r.top),
+		right: Math.min(page.innerWidth, r.right),
+		bottom: Math.min(page.innerHeight, r.bottom),
+	});
+	const shown = Array.from(element.getClientRects())
+		.map(inViewport)
+		.filter(r => r.right - r.left >= 1 && r.bottom - r.top >= 1);
+	const style = page.getComputedStyle(element);
+	const hitTestable =
+		style.pointerEvents !== "none" && style.visibility !== "hidden" && style.visibility !== "collapse";
+	const hitsElement = (x: number, y: number): boolean => {
+		let hit = page.document.elementFromPoint(x, y);
+		for (let depth = 0; hit?.shadowRoot && depth < 16; depth++) {
+			const nested = hit.shadowRoot.elementFromPoint(x, y);
+			if (!nested || nested === hit) break;
+			hit = nested;
+		}
+		for (let node = hit; node; node = node.assignedSlot ?? node.parentElement ?? node.getRootNode().host ?? null) {
+			if (node === element) return true;
+		}
+		return false;
+	};
+	// The resolver still falls back to a match that is not shown, so the click's actionability check says why.
+	const hitAny = (points: (r: { left: number; right: number; top: number; bottom: number }) => number[][]) =>
+		hitTestable && shown.some(r => points(r).some(([x, y]) => hitsElement(x, y)));
+	const grid = (xs: number[], ys: number[]) => xs.flatMap(x => ys.map(y => [x, y]));
+	const interior = (start: number, end: number) => [0.5, 0.15, 0.85].map(f => start + (end - start) * f);
+	const onScreen = hitAny(r => grid(interior(r.left, r.right), interior(r.top, r.bottom)));
+	// Every shown rect is at least 1px on each axis, so half a pixel in stays inside it.
+	const edgeOnly =
+		!onScreen &&
+		hitAny(r => {
+			const xs = interior(r.left, r.right);
+			const ys = interior(r.top, r.bottom);
+			const edgeXs = [r.left + 0.5, r.right - 0.5];
+			const edgeYs = [r.top + 0.5, r.bottom - 0.5];
+			return [...grid(edgeXs, [...ys, ...edgeYs]), ...grid(xs, edgeYs)];
+		});
+	return {
+		x: rect.left + page.scrollX,
+		y: rect.top + page.scrollY,
+		sized: rect.width >= 1 && rect.height >= 1,
+		onScreen,
+		edgeOnly,
+	};
+}
+
+/**
+ * Lift a text match to its clickable ancestor and measure it, or return null for a match with no box.
+ * `isIntersectingViewport` waits on an `IntersectionObserver` callback that background tabs never
+ * deliver, so visibility comes from {@link measureBoxInPage}'s synchronous hit test instead.
+ */
+async function measureQueryCandidate(handle: ElementHandle, signal?: AbortSignal): Promise<QueryCandidate | null> {
+	let candidate = handle;
+	let owned = false;
+	try {
+		const proxy = await untilAborted(signal, () =>
+			handle.evaluateHandle(el =>
+				(el as Element).closest('a,button,[role="button"],[role="link"],input[type="button"],input[type="submit"]'),
+			),
+		);
+		const element = proxy.asElement();
+		if (element) {
+			candidate = element;
+			owned = candidate !== handle;
+		} else await proxy.dispose();
+		const box = await untilAborted(signal, () => candidate.evaluate(measureBoxInPage));
+		if (box.sized) {
+			return { handle: candidate, x: box.x, y: box.y, onScreen: box.onScreen, edgeOnly: box.edgeOnly, owned };
+		}
+	} catch (error) {
+		if (owned) await candidate.dispose().catch(() => undefined);
+		if (signal?.aborted) throw error;
+		return null;
+	}
+	if (owned) await candidate.dispose().catch(() => undefined);
+	return null;
+}
+
+/**
+ * Scroll an off-screen match into view: `shown` when the browser's hit test finds it there, `reachable`
+ * when the actionability check would let a click go at it (it also accepts a hit on an ancestor, which is
+ * what a clipped or inert match yields) or names what covers it.
+ */
+async function probeOffScreen(
+	handle: ElementHandle,
+	signal?: AbortSignal,
+): Promise<{ shown: boolean; reachable: boolean }> {
+	try {
+		await untilAborted(signal, () =>
+			handle.evaluate(el => {
+				const element = el as unknown as PageElement;
+				element.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
+			}),
+		);
+		const actionable = await isClickActionable(handle, signal);
+		const reachable = actionable.ok || actionable.coveredBy !== undefined;
+		if (!actionable.ok) return { shown: false, reachable };
+		const box = await untilAborted(signal, () => handle.evaluate(measureBoxInPage));
+		return { shown: box.onScreen, reachable };
+	} catch (error) {
+		if (signal?.aborted) throw error;
+		return { shown: false, reachable: false };
+	}
+}
+
+/**
+ * Resolve text-query matches to the first match the browser shows on screen, in document order. A match
+ * shown only as a strip at an edge counts once scrolling it into view lets the browser hit its interior,
+ * as with a strip a scroll container leaves; one an overlay covers stays covered there. When none is on
+ * screen, off-screen matches are scrolled into view in document order and the first one shown wins;
+ * failing that, the first one a click could be aimed at, then the first match, so the click itself reports
+ * what stops it.
+ */
+export async function resolveActionableQueryHandlerClickTarget(
+	handles: ElementHandle[],
+	signal?: AbortSignal,
+): Promise<ElementHandle | null> {
+	const candidates: QueryCandidate[] = [];
+	let winner: QueryCandidate | undefined;
+	try {
+		for (const handle of handles) {
+			const candidate = await measureQueryCandidate(handle, signal);
+			if (candidate) candidates.push(candidate);
+		}
+		candidates.sort((a, b) => a.y - b.y || a.x - b.x);
+		for (const candidate of candidates) {
+			if (candidate.onScreen || (candidate.edgeOnly && (await probeOffScreen(candidate.handle, signal)).shown)) {
+				winner = candidate;
+				break;
+			}
+		}
+		if (!winner) {
+			let reachable: QueryCandidate | undefined;
+			for (const candidate of candidates) {
+				const probe = await probeOffScreen(candidate.handle, signal);
+				if (probe.shown) {
+					winner = candidate;
+					break;
+				}
+				if (probe.reachable) reachable ??= candidate;
+			}
+			winner ??= reachable ?? candidates[0];
+		}
+	} catch (error) {
+		await disposeOwned(candidates);
+		throw error;
+	}
+	await disposeOwned(candidates.filter(candidate => candidate !== winner));
+	return winner?.handle ?? null;
+}
+
+/**
+ * Click the actionable match chosen for a Puppeteer text query handler, querying again when the page replaced the
+ * chosen match before the click reached it.
+ */
+export async function clickQueryHandlerText(
+	page: Page,
+	selector: string,
+	label: string,
+	timeoutMs: number,
+	signal?: AbortSignal,
+	options: ClickAtOptions = {},
+): Promise<void> {
+	const timeoutSignal = AbortSignal.timeout(timeoutMs);
+	const clickSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+	let replaced = false;
+	while (true) {
+		throwIfAborted(clickSignal);
+		const handles = (await untilAborted(clickSignal, () => page.$$(selector))) as ElementHandle[];
+		let target: ElementHandle | null = null;
+		try {
+			target = await resolveActionableQueryHandlerClickTarget(handles, clickSignal);
+			if (!target) {
+				await untilAborted(clickSignal, () => Bun.sleep(50));
+				continue;
+			}
+			try {
+				await clickElement(target, label, clickSignal, options);
+				return;
+			} catch (error) {
+				if (!(error instanceof ElementDetachedError)) throw replacedRefusal(error, replaced, clickSignal);
+				replaced = true;
+			}
+		} finally {
+			if (target && !handles.includes(target)) await target.dispose().catch(() => undefined);
+			await Promise.all(handles.map(async handle => handle.dispose().catch(() => undefined)));
+		}
+	}
+}
+
+/** Set a native checkable control or ARIA switch to the requested state idempotently. */
+export async function setElementChecked(
+	handle: ElementHandle,
+	checked: boolean,
+	label: string,
+	signal?: AbortSignal,
+): Promise<void> {
+	const state = (await untilAborted(signal, () =>
+		handle.evaluate(el => {
+			const element = el as unknown as PageElement;
+			if (!element.isConnected) return null;
+			const tag = element.tagName.toLowerCase();
+			const type = tag === "input" ? element.type.toLowerCase() : "";
+			const role = element.getAttribute("role")?.toLowerCase() ?? "";
+			if (tag === "input" && (type === "checkbox" || type === "radio")) {
+				const checked = element.checked;
+				return element.isConnected ? { kind: type, checked } : null;
+			}
+			if (role === "switch" || role === "checkbox" || role === "radio") {
+				const checked = element.getAttribute("aria-checked") === "true";
+				return element.isConnected ? { kind: `aria-${role}`, checked } : null;
+			}
+			return { kind: "", checked: false };
+		}),
+	)) as { kind: string; checked: boolean } | null;
+	if (state === null) throw new ElementDetachedError(label);
+	if (!state.kind) throw new ToolError(`${label} requires a checkbox, radio, or ARIA switch`);
+	if (state.checked === checked) return;
+	if (state.kind === "radio" && !checked) {
+		const applied = await untilAborted(signal, () =>
+			handle.evaluate(el => {
+				const input = el as unknown as PageElement;
+				if (!input.isConnected) return false;
+				const page = globalThis as unknown as PageGlobals;
+				input.checked = false;
+				input.dispatchEvent(new page.Event("input", { bubbles: true }));
+				input.dispatchEvent(new page.Event("change", { bubbles: true }));
+				return true;
+			}),
+		);
+		if (!applied) throw new ElementDetachedError(label);
+		return;
+	}
+	await clickElement(handle, label, signal);
+	await untilAborted(signal, () =>
+		handle.evaluate((el, desired) => {
+			const element = el as unknown as PageElement;
+			const page = globalThis as unknown as PageGlobals;
+			const role = element.getAttribute("role")?.toLowerCase();
+			const current = role ? element.getAttribute("aria-checked") === "true" : element.checked;
+			if (current === desired) return;
+			if (role) element.setAttribute("aria-checked", String(desired));
+			else element.checked = desired;
+			element.dispatchEvent(new page.Event("input", { bubbles: true }));
+			element.dispatchEvent(new page.Event("change", { bubbles: true }));
+		}, checked),
+	);
+}
+
+/** Draw a temporary inert outline around an element and remove it after the requested duration. */
+export async function highlightElement(
+	handle: ElementHandle,
+	options: HighlightOptions = {},
+	signal?: AbortSignal,
+): Promise<void> {
+	const duration = options.duration ?? 2_000;
+	if (!Number.isFinite(duration) || duration < 0)
+		throw new ToolError("highlight duration must be a non-negative number");
+	const id = `omp-highlight-${crypto.randomUUID()}`;
+	await untilAborted(signal, () =>
+		handle.evaluate((el, overlayId) => {
+			const element = el as unknown as PageElement;
+			const page = globalThis as unknown as PageGlobals;
+			const rect = element.getBoundingClientRect();
+			const overlay = page.document.createElement("div");
+			overlay.id = overlayId;
+			overlay.dataset.ompHighlightOverlay = "";
+			overlay.setAttribute("aria-hidden", "true");
+			overlay.setAttribute("role", "presentation");
+			overlay.inert = true;
+			Object.assign(overlay.style, {
+				position: "fixed",
+				left: `${rect.left - 3}px`,
+				top: `${rect.top - 3}px`,
+				width: `${rect.width + 6}px`,
+				height: `${rect.height + 6}px`,
+				border: "3px solid #ff3366",
+				borderRadius: "4px",
+				boxSizing: "border-box",
+				pointerEvents: "none",
+				zIndex: "2147483647",
+			});
+			page.document.documentElement.append(overlay);
+		}, id),
+	);
+	try {
+		await untilAborted(signal, () => Bun.sleep(duration));
+	} finally {
+		await handle.frame
+			.page()
+			.evaluate(overlayId => {
+				const page = globalThis as unknown as PageGlobals;
+				page.document.getElementById(overlayId)?.remove();
+			}, id)
+			.catch(() => undefined);
+	}
+}
+
+/**
+ * Select options by string (value before label), explicit label/value, or zero-based index, as
+ * `normalizeSelectOptions` returns them, so a bad choice fails before the element is looked up.
+ * Return the values selected after the page's input and change handlers have run.
+ * A single `<select>` takes the first match. Unmatched choices leave it untouched.
+ */
+export async function selectElementOptions(
+	handle: ElementHandle,
+	choices: SelectOptionChoice[],
+	label: string,
+	signal?: AbortSignal,
+): Promise<string[]> {
+	const outcome = (await untilAborted(signal, () =>
+		handle.evaluate((el, vals) => {
+			interface SelectOption {
+				value: string;
+				label: string;
+				text: string;
+				index: number;
+				selected: boolean;
+			}
+			interface SelectLike {
+				tagName: string;
+				multiple: boolean;
+				selectedIndex: number;
+				options: ArrayLike<SelectOption>;
+				dispatchEvent: (event: unknown) => boolean;
+			}
+			const select = el as unknown as SelectLike;
+			if (select?.tagName !== "SELECT") return null;
+			const page = globalThis as unknown as PageGlobals;
+			const options = Array.from(select.options);
+			const wanted: SelectOption[] = [];
+			const missing: unknown[] = [];
+			for (const choice of vals) {
+				const option =
+					choice.kind === "index"
+						? options[choice.value]
+						: ((choice.kind !== "label"
+								? options.find(candidate => candidate.value === choice.value)
+								: undefined) ??
+							(choice.kind !== "value"
+								? options.find(
+										candidate =>
+											candidate.label === choice.value ||
+											candidate.text.replace(/\s+/g, " ").trim() === choice.value,
+									)
+								: undefined));
+				if (option) wanted.push(option);
+				else missing.push(choice.kind === "string" ? choice.value : { [choice.kind]: choice.value });
+			}
+			if (missing.length > 0) return { missing };
+			if (wanted.length === 0) {
+				for (const option of options) option.selected = false;
+			} else if (select.multiple) {
+				for (const option of options) option.selected = wanted.includes(option);
+			} else {
+				select.selectedIndex = wanted[0]!.index;
+			}
+			select.dispatchEvent(new page.Event("input", { bubbles: true }));
+			select.dispatchEvent(new page.Event("change", { bubbles: true }));
+			// The handlers ran inside dispatchEvent and may have reset the choice or replaced the options.
+			const selected = Array.from(select.options)
+				.filter(option => option.selected)
+				.map(option => option.value);
+			return { selected };
+		}, choices),
+	)) as { missing: unknown[] } | { selected: string[] } | null;
+	if (!outcome) throw new ToolError(`${label} requires a <select> element`);
+	if ("missing" in outcome)
+		throw new ToolError(
+			`No <select> option matches ${outcome.missing.map(value => JSON.stringify(value)).join(", ")}`,
+		);
+	return outcome.selected;
+}
+
+/** How long a click has to open a file chooser before the target counts as a drop zone. */
+const FILE_CHOOSER_WAIT_MS = 400;
+
+/**
+ * Raw bytes per call into the page. Each call is one CDP message carrying its chunk base64-encoded, so an upload of any
+ * size stays far below the websocket message caps on the way (the relay's is 256 MiB).
+ */
+const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
+
+/** Chunk calls in flight at once, so the CDP round trips overlap. */
+const UPLOAD_CHUNKS_IN_FLIGHT = 4;
+
+/** Store chunk `seq` of file `index` of a page-side upload. Runs in the isolated world. */
+function storeUploadChunk(parts: Uint8Array[][], index: number, seq: number, data: string): void {
+	parts[index] ??= [];
+	// Chrome before 140 has no `fromBase64`.
+	parts[index][seq] =
+		typeof Uint8Array.fromBase64 === "function"
+			? Uint8Array.fromBase64(data)
+			: Uint8Array.from(atob(data), character => character.charCodeAt(0));
+}
+
+/** Build an upload's files from their stored chunks. Runs in the isolated world. */
+function buildUploadFiles(parts: Uint8Array[][], files: UploadFileInfo[]): unknown[] {
+	const page = globalThis as unknown as PageGlobals;
+	return files.map(
+		(file, index) =>
+			new page.File(parts[index] ?? [], file.name, { type: file.type, lastModified: file.lastModified }),
+	);
+}
+
+/** Why a file input cannot take `count` files, or null. Runs in the page. */
+function fileInputRefusal(el: unknown, count: number): string | null {
+	const element = el as PageElement & { multiple: boolean };
+	if (count > 1 && !element.multiple) return "Multiple file uploads only work with <input type=file multiple>";
+	if (element.tagName !== "INPUT" || element.type?.toLowerCase() !== "file") return "Node is not a file input element";
+	return null;
+}
+
+/** Give a file input `files` and fire the events a user's pick would; returns why it refused. Runs in the isolated world. */
+function assignInputFiles(el: unknown, files: unknown[]): string | null {
+	const element = el as PageElement & { multiple: boolean };
+	const page = globalThis as unknown as PageGlobals;
+	if (files.length > 1 && !element.multiple) return "Multiple file uploads only work with <input type=file multiple>";
+	if (element.tagName !== "INPUT" || element.type?.toLowerCase() !== "file") return "Node is not a file input element";
+	const transfer = new page.DataTransfer();
+	for (const file of files) transfer.items.add(file);
+	element.files = transfer.files;
+	element.dispatchEvent(new page.Event("input", { bubbles: true, composed: true }));
+	element.dispatchEvent(new page.Event("change", { bubbles: true }));
+	return null;
+}
+
+/** Tell a page its chooser closed without a pick, as the browser does. Runs in the isolated world. */
+function cancelChooser(el: unknown): void {
+	const page = globalThis as unknown as PageGlobals;
+	(el as PageElement).dispatchEvent(new page.Event("cancel", { bubbles: true }));
+}
+
+/**
+ * Drop `files` on an element through the drag events a user's drop fires. Runs in the isolated world.
+ *
+ * A user's drop runs the page's microtasks after each listener, so a drop handler may read the files after an `await`.
+ * A script's `dispatchEvent` runs them only once the script yields, so each event is followed by a yield to a task
+ * (a message, which background tabs do not throttle as they do timers) that lets everything the event queued settle.
+ * A user's drag events go to whatever is under the pointer, so when a settled event replaced the element (a framework
+ * rerendering the zone on `dragenter`), the next one goes to its replacement at the same point.
+ */
+async function dropUploadFiles(el: unknown, files: unknown[], watch: string): Promise<void> {
+	const element = el as PageElement;
+	const page = globalThis as unknown as PageGlobals;
+	const transfer = new page.DataTransfer();
+	for (const file of files) transfer.items.add(file);
+	const rect = element.getBoundingClientRect();
+	const x = rect.left + rect.width / 2;
+	const y = rect.top + rect.height / 2;
+	// The element's document or shadow root, both of which resolve a point; taken now, before a rerender detaches it.
+	const root = element.getRootNode() as unknown as PageShadowRoot;
+	const target = (): PageElement => (element.isConnected ? element : (root.elementFromPoint(x, y) ?? element));
+	const settle = async (): Promise<void> => {
+		const channel = new page.MessageChannel();
+		const { promise, resolve } = Promise.withResolvers<void>();
+		channel.port1.onmessage = () => resolve();
+		channel.port2.postMessage(null);
+		try {
+			await promise;
+		} finally {
+			channel.port1.close();
+			channel.port2.close();
+		}
+	};
+	const fire = (on: PageElement, type: string) =>
+		on.dispatchEvent(new page.DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: transfer }));
+	fire(target(), "dragenter");
+	await settle();
+	fire(target(), "dragover");
+	await settle();
+	// `watch`, private to this drop, opens the count of reads for {@link watchDropRead} right before `drop` and closes it
+	// once what `drop` queued has settled, so reads made in `drop` or in the microtasks it queued count, and reads
+	// deferred from dragenter or dragover do not. Its listener sits on the original element, so the watch events go
+	// there even after a rerender: they only wrap and unwrap the shared `DataTransfer`.
+	fire(element, watch);
+	fire(target(), "drop");
+	await settle();
+	fire(element, watch);
+}
+
+/** A watch for a page reading a drop's files; see {@link watchDropRead}. */
+interface DropReadWatch {
+	counting: boolean;
+	read: boolean;
+	end(): void;
+}
+
+/**
+ * Watch for the page reading the files of the drop on an element: getting the drop's `files` or `items` while `drop` is
+ * dispatched or in what it queued before the next task. {@link dropUploadFiles} fires the private `type` event right
+ * before `drop`, which wraps the getters and opens the count, and again once `drop` has settled, which closes it. No
+ * page listener can run before the first, as one registered for `drop` itself could; reads during dragenter and
+ * dragover, or deferred from them, stay uncounted. Runs in the main world, where the page's listeners get the wrapper
+ * whose reads it watches.
+ */
+function watchDropRead(el: unknown, type: string): DropReadWatch {
+	interface DropEvent {
+		dataTransfer: object | null;
+	}
+	interface WatchTarget {
+		addEventListener(type: string, listener: (event: DropEvent) => void): void;
+		removeEventListener(type: string, listener: (event: DropEvent) => void): void;
+	}
+	const element = el as unknown as WatchTarget;
+	const instrument = (event: DropEvent): void => {
+		const transfer = event.dataTransfer;
+		if (!transfer) return;
+		if (watch.counting) {
+			watch.counting = false;
+			return;
+		}
+		for (const key of ["files", "items"]) {
+			// The wrapper's own prototype, not the `DataTransfer` global a page may replace.
+			const get = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(transfer), key)?.get;
+			Object.defineProperty(transfer, key, {
+				configurable: true,
+				get() {
+					if (watch.counting) watch.read = true;
+					return get?.call(transfer);
+				},
+			});
+		}
+		watch.counting = true;
+	};
+	const watch = { counting: false, read: false, end: () => element.removeEventListener(type, instrument) };
+	element.addEventListener(type, instrument);
+	return watch;
+}
+
+/** Stop a drop watch; whether the page read the files. Runs in the main world. */
+function endDropReadWatch(watch: DropReadWatch): boolean {
+	watch.end();
+	return watch.read;
+}
+
+/** End a drop watch and release its handle. */
+async function releaseDropReadWatch(watch: JSHandle<DropReadWatch>): Promise<void> {
+	try {
+		await watch.evaluate(endDropReadWatch);
+	} finally {
+		await watch.dispose();
+	}
+}
+
+/**
+ * Run `drop` on `zone` with a fresh private watch event type and report whether the page read the dropped files.
+ * Canceling proves nothing: pages cancel dragover and drop document-wide only to stop the browser navigating to a
+ * dropped file. A read is the strongest signal there is, not proof of acceptance: a document guard that checks
+ * `files.length` counts too, and counting element-level reads only would fail delegated drop zones, which read at the
+ * document (React 16 and older, jQuery `.on("drop", selector)`). A drop that navigates the zone's frame destroys the
+ * worlds holding the drop and its watch before either answers; the page took the drop, so that counts as taken.
+ */
+async function dropRead(
+	zone: ElementHandle,
+	drop: (watch: string) => Promise<void>,
+	signal: AbortSignal | undefined,
+): Promise<boolean> {
+	const type = `omp-upload-drop-${crypto.randomUUID()}`;
+	const frame = zone.frame;
+	const realm = frame.mainRealm();
+	const target = await untilAbortedOrReleased(signal, realm.adoptHandle(zone), late => late.dispose());
+	let navigated = false;
+	const onNavigated = (navigatedFrame: Frame) => {
+		if (navigatedFrame === frame) navigated = true;
+	};
+	const page = frame.page();
+	page.on("framenavigated", onNavigated);
+	try {
+		const watch = await untilAbortedOrReleased(
+			signal,
+			realm.evaluateHandle(watchDropRead, target, type),
+			releaseDropReadWatch,
+		);
+		try {
+			try {
+				await drop(type);
+			} catch (error) {
+				const read = await watch.evaluate(endDropReadWatch).catch(() => false);
+				if (navigated && !signal?.aborted) return true;
+				if (read && !signal?.aborted) return true;
+				throw error;
+			}
+			return await untilAborted(signal, () => watch.evaluate(endDropReadWatch)).catch(error => {
+				if (navigated && !signal?.aborted) return true;
+				throw error;
+			});
+		} finally {
+			await watch.dispose().catch(() => undefined);
+		}
+	} finally {
+		page.off("framenavigated", onNavigated);
+		await target.dispose().catch(() => undefined);
+	}
+}
+
+/**
+ * Stream files into `realm` in chunks, several calls in flight, and return a handle to the built `File` array. The
+ * isolated world builds them, so the `File` and base64 decoding a page may replace are never the ones used.
+ */
+async function streamUploadFiles(
+	realm: Realm,
+	sources: UploadSource[],
+	signal: AbortSignal | undefined,
+): Promise<JSHandle<unknown[]>> {
+	const parts = await untilAborted(signal, () => realm.evaluateHandle(() => [] as Uint8Array[][]));
+	try {
+		const chunks = sources.flatMap(({ file, size }, index) =>
+			Array.from({ length: Math.ceil(size / UPLOAD_CHUNK_BYTES) }, (_, seq) => ({ file, index, seq })),
+		);
+		// The first failed chunk stops the others.
+		const stop = new AbortController();
+		const chunkSignal = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal;
+		let next = 0;
+		const send = async (): Promise<void> => {
+			while (next < chunks.length) {
+				const { file, index, seq } = chunks[next++]!;
+				const start = seq * UPLOAD_CHUNK_BYTES;
+				const bytes = await untilAborted(chunkSignal, () =>
+					file.slice(start, start + UPLOAD_CHUNK_BYTES).arrayBuffer(),
+				);
+				const data = Buffer.from(bytes).toString("base64");
+				await untilAborted(chunkSignal, () => parts.evaluate(storeUploadChunk, index, seq, data));
+			}
+		};
+		const senders = Math.min(UPLOAD_CHUNKS_IN_FLIGHT, chunks.length);
+		await Promise.all(
+			Array.from({ length: senders }, () =>
+				send().catch(error => {
+					stop.abort(error);
+					throw error;
+				}),
+			),
+		);
+		const files = sources.map(source => source.info);
+		return await untilAborted(signal, () => realm.evaluateHandle(buildUploadFiles, parts, files));
+	} finally {
+		await parts.dispose().catch(() => undefined);
+	}
+}
+
+/** Fill a detached picker with `paths` and return its files, which the browser built from the paths itself. */
+async function pickFiles(realm: Realm, paths: string[], signal: AbortSignal | undefined): Promise<JSHandle<unknown[]>> {
+	const picker = await untilAborted(signal, () => realm.evaluateHandle(createFilePicker));
+	try {
+		const input = picker.asElement();
+		if (!input) throw new ToolError("Could not create a file picker to drop files from");
+		await untilAborted(signal, () => setFileInputPaths(input, paths));
+		return await untilAborted(signal, () => realm.evaluateHandle(pickedFiles, picker));
+	} finally {
+		await picker.dispose().catch(() => undefined);
+	}
+}
+
+/**
+ * Hand a file input the files: staged copies' paths, or contents streamed into the isolated world. `filling` runs once
+ * the files are being set, after staging or streaming has succeeded.
+ */
+async function deliverToInput(
+	input: ElementHandle,
+	sources: UploadSource[],
+	route: UploadRoute,
+	staging: UploadStaging,
+	signal: AbortSignal | undefined,
+	filling?: () => void,
+): Promise<void> {
+	if (route === "paths") {
+		const staged = await staging.stage(sources, signal);
+		// Chrome expands a folder for a `webkitdirectory` input only on the front tab, as when a person picks one; a
+		// tab omp opened in the background is brought forward for this upload alone.
+		if (sources.some(source => source.directory)) {
+			await untilAborted(signal, () => input.frame.page().bringToFront());
+		}
+		await untilAborted(signal, () => {
+			filling?.();
+			return setFileInputPaths(input, staged);
+		});
+		return;
+	}
+	const realm = input.frame.isolatedRealm();
+	const target = await untilAborted(signal, () => realm.adoptHandle(input));
+	try {
+		const files = await streamUploadFiles(realm, sources, signal);
+		try {
+			const refusal = await untilAborted(signal, () => {
+				filling?.();
+				return realm.evaluate(assignInputFiles, target, files);
+			});
+			if (refusal) throw new ToolError(refusal);
+		} finally {
+			await files.dispose().catch(() => undefined);
+		}
+	} finally {
+		await target.dispose().catch(() => undefined);
+	}
+}
+
+/**
+ * Drop the files on an element, built from staged copies by a detached picker or from streamed contents; fails when
+ * nothing on the page read them.
+ */
+async function deliverToDropZone(
+	zone: ElementHandle,
+	sources: UploadSource[],
+	route: UploadRoute,
+	staging: UploadStaging,
+	label: string,
+	signal: AbortSignal | undefined,
+): Promise<void> {
+	const realm = zone.frame.isolatedRealm();
+	const target = await untilAborted(signal, () => realm.adoptHandle(zone));
+	try {
+		const files =
+			route === "paths"
+				? await pickFiles(realm, await staging.stage(sources, signal), signal)
+				: await streamUploadFiles(realm, sources, signal);
+		try {
+			const read = await dropRead(
+				zone,
+				watch => untilAborted(signal, () => realm.evaluate(dropUploadFiles, target, files, watch)),
+				signal,
+			);
+			if (!read) {
+				throw new ToolError(
+					`${label} opened no file chooser and nothing on the page took the dropped files; target the page's <input type=file>, the control that opens the chooser, or its drop zone`,
+				);
+			}
+		} finally {
+			await files.dispose().catch(() => undefined);
+		}
+	} finally {
+		await target.dispose().catch(() => undefined);
+	}
+}
+
+/**
+ * An upload whose target is found. Finding it runs under the action deadline; `deliver` hands over the files, which for
+ * streamed contents takes time in proportion to their size, so it runs under its own, longer one.
+ */
+export interface PreparedUpload {
+	/** Bytes `deliver` hands over. */
+	readonly bytes: number;
+	deliver(signal: AbortSignal): Promise<void>;
+	/** Release what finding the target held: a caught chooser's input, cancelled when it was never filled. */
+	dispose(): Promise<void>;
+}
+
+function preparedUpload(
+	sources: UploadSource[],
+	deliver: (signal: AbortSignal) => Promise<void>,
+	dispose: () => Promise<void> = async () => {},
+): PreparedUpload {
+	return { bytes: sources.reduce((sum, source) => sum + source.size, 0), deliver, dispose };
+}
+
+/** Prepare an upload into a file input: open the files and check the input takes that many. */
+export async function prepareInputUpload(
+	input: ElementHandle,
+	absolutePaths: string[],
+	route: UploadRoute,
+	staging: UploadStaging,
+	signal?: AbortSignal,
+): Promise<PreparedUpload> {
+	const sources = await openUploadSources(absolutePaths, signal);
+	if (route === "contents") refuseFolders(sources);
+	const refusal = await untilAborted(signal, () => input.evaluate(fileInputRefusal, sources.length));
+	if (refusal) throw new ToolError(refusal);
+	return preparedUpload(sources, sig => deliverToInput(input, sources, route, staging, sig));
+}
+
+/** Pages with a chooser-trigger upload in flight: a second one would catch the first one's chooser. */
+const pagesAwaitingChooser = new WeakSet<Page>();
+
+/**
+ * Click `handle` and return the file input of the chooser it opens, adopted into the isolated world; null when no
+ * chooser opened. The chooser is caught on a CDP session of our own, which lets go of the interception as soon as the
+ * input is adopted: Puppeteer's `waitForFileChooser` leaves it on, which swallows every later chooser on the page, and
+ * its listener throws on a File System Access picker's event.
+ */
+async function catchChooserInput(
+	page: Page,
+	handle: ElementHandle,
+	label: string,
+	signal: AbortSignal | undefined,
+): Promise<ElementHandle | null> {
+	let timer: NodeJS.Timeout | undefined;
+	const creating = page.createCDPSession();
+	const session = await untilAborted(signal, () => creating).catch(error => {
+		// An abort does not stop the attach; detach the session once it arrives.
+		void creating.then(late => late.detach()).catch(() => undefined);
+		throw error;
+	});
+	try {
+		const { promise: opened, resolve } = Promise.withResolvers<Protocol.Page.FileChooserOpenedEvent | null>();
+		session.once("Page.fileChooserOpened", resolve);
+		await untilAborted(signal, () => session.send("Page.enable"));
+		await untilAborted(signal, () => session.send("Page.setInterceptFileChooserDialog", { enabled: true }));
+		// The wait covers the click, so a target that only becomes clickable later counts as a drop zone.
+		timer = setTimeout(() => resolve(null), FILE_CHOOSER_WAIT_MS);
+		await clickElement(handle, label, signal);
+		const chooser = await untilAborted(signal, () => opened);
+		if (!chooser) return null;
+		if (chooser.backendNodeId === undefined) {
+			throw new ToolError(
+				`${label} opened a File System Access picker (showOpenFilePicker), which automation cannot fill; upload through the page's <input type=file> or drop zone instead`,
+			);
+		}
+		const { backendNodeId } = chooser;
+		const frame = page.frames().find(candidate => devtoolsFrameId(candidate) === chooser.frameId);
+		if (!frame) throw new ToolError(`${label} opened a file chooser in a frame that has since gone away`);
+		const node = await untilAborted(signal, () => frame.isolatedRealm().adoptBackendNode(backendNodeId));
+		const input = node.asElement();
+		if (!input) {
+			await node.dispose().catch(() => undefined);
+			throw new ToolError("Node is not a file input element");
+		}
+		return input;
+	} finally {
+		clearTimeout(timer);
+		// The relay serves every session of a tab from one debugger attachment, so detaching alone leaves it on.
+		await session.send("Page.setInterceptFileChooserDialog", { enabled: false }).catch(() => undefined);
+		await session.detach().catch(() => undefined);
+	}
+}
+
+/**
+ * Find what takes an upload through `handle`: the file input itself, the chooser its click opens, or else the element
+ * as a drop zone. `route` is how the browser gets the files; see {@link UploadStaging.route}.
+ */
+export async function prepareElementUpload(
+	page: Page,
+	handle: ElementHandle,
+	absolutePaths: string[],
+	label: string,
+	route: UploadRoute,
+	staging: UploadStaging,
+	signal?: AbortSignal,
+): Promise<PreparedUpload> {
+	const inputType = (await untilAborted(signal, () =>
+		handle.evaluate(el => {
+			const element = el as unknown as PageElement;
+			return { tag: element.tagName, type: element.type ?? "" };
+		}),
+	)) as { tag: string; type: string };
+	if (inputType.tag === "INPUT" && inputType.type.toLowerCase() === "file") {
+		return await prepareInputUpload(handle, absolutePaths, route, staging, signal);
+	}
+	const sources = await openUploadSources(absolutePaths, signal);
+	if (route === "contents") refuseFolders(sources);
+
+	if (pagesAwaitingChooser.has(page)) {
+		throw new ToolError(`${label} cannot run while another uploadFile on this tab waits for its file chooser`);
+	}
+	pagesAwaitingChooser.add(page);
+	try {
+		const input = await catchChooserInput(page, handle, label, signal);
+		if (input) {
+			// A page learns a chooser closed from `change` or `cancel`; one that got neither would wait on a pick
+			// forever, so a refused or failed upload cancels the chooser as the browser would.
+			let filled = false;
+			const release = async (): Promise<void> => {
+				if (!filled) await input.evaluate(cancelChooser).catch(() => undefined);
+				await input.dispose().catch(() => undefined);
+			};
+			try {
+				const refusal = await untilAborted(signal, () => input.evaluate(fileInputRefusal, sources.length));
+				if (refusal) throw new ToolError(refusal);
+			} catch (error) {
+				await release();
+				throw error;
+			}
+			return preparedUpload(
+				sources,
+				sig =>
+					deliverToInput(input, sources, route, staging, sig, () => {
+						filled = true;
+					}),
+				release,
+			);
+		}
+	} finally {
+		pagesAwaitingChooser.delete(page);
+	}
+	return preparedUpload(sources, sig => deliverToDropZone(handle, sources, route, staging, label, sig));
+}
+
+/** Press a keyboard key without releasing it; a press cut off on its way is released, not left held. */
+export async function keyDown(page: Page, key: KeyInput, signal?: AbortSignal): Promise<void> {
+	const pressed = trackPress(page.keyboard.down(key));
+	try {
+		await untilAborted(signal, () => pressed.press);
+	} catch (error) {
+		if (signal?.aborted && !pressed.refused) void page.keyboard.up(key).catch(() => {});
+		throw error;
+	}
+}
+
+/** Release a keyboard key previously pressed with keyDown. */
+export async function keyUp(page: Page, key: KeyInput, signal?: AbortSignal): Promise<void> {
+	await untilAborted(signal, () => page.keyboard.up(key));
+}
+
+/**
+ * A press handed to puppeteer. `refused` turns true once puppeteer rejects it (the button is already down, the key
+ * is unknown, the session is gone); until then it may have reached the page, so it is owed a release.
+ */
+function trackPress(press: Promise<void>): { press: Promise<void>; refused: boolean } {
+	const tracked = { press, refused: false };
+	press.catch(() => {
+		tracked.refused = true;
+	});
+	return tracked;
+}
+
+/**
+ * Release keys in order. Each release is awaited and one that fails does not stop the rest; once `signal` aborts,
+ * every release still owed is sent at once and not awaited: Chrome keeps input in order, and the page the call
+ * gave up on may not answer before this worker is replaced. The first failure, or the abort, is thrown once every
+ * release went out.
+ */
+async function releaseKeys(page: Page, keys: readonly KeyInput[], signal?: AbortSignal): Promise<void> {
+	let failure: { error: unknown } | undefined;
+	for (const [index, key] of keys.entries()) {
+		if (signal?.aborted) {
+			for (const owed of keys.slice(index)) void page.keyboard.up(owed).catch(() => {});
+			break;
+		}
+		try {
+			await untilAborted(signal, () => page.keyboard.up(key));
+		} catch (error) {
+			failure ??= { error };
+		}
+	}
+	if (failure) throw failure.error;
+	throwIfAborted(signal);
+}
+
+/**
+ * Swallows the `click`/`auxclick` Chrome fires on the document root for a release at
+ * {@link CANCELLED_RELEASE_POINT}: Chrome completes a click on the common ancestor of the press and release
+ * targets whatever CDP says, and a page's "click outside" handler would take it as the user's. Installed at
+ * document start, its capture listeners run before the page's. Chrome dispatches that click in the same task
+ * as the release, so the mark lapses with the task: a keyboard click later is never swallowed. One install per
+ * document, however many workers attach.
+ */
+const CANCELLED_RELEASE_GUARD = `(() => {
+	const installed = Symbol.for("omp.cancelledReleaseGuard");
+	if (globalThis[installed]) return;
+	Object.defineProperty(globalThis, installed, { value: true });
+	let cancelled = false;
+	addEventListener("mouseup", event => {
+		if (event.clientX !== ${CANCELLED_RELEASE_POINT} || event.clientY !== ${CANCELLED_RELEASE_POINT}) return;
+		cancelled = true;
+		setTimeout(() => { cancelled = false; });
+	}, true);
+	const swallow = event => {
+		if (!cancelled) return;
+		cancelled = false;
+		event.stopImmediatePropagation();
+		event.preventDefault();
+	};
+	addEventListener("click", swallow, true);
+	addEventListener("auxclick", swallow, true);
+})();`;
+
+/** Install {@link CANCELLED_RELEASE_GUARD} in this page's documents, current and future. */
+export async function installCancelledReleaseGuard(page: Page): Promise<void> {
+	await page.evaluateOnNewDocument(CANCELLED_RELEASE_GUARD);
+	await page
+		.mainFrame()
+		.mainRealm()
+		.evaluate(CANCELLED_RELEASE_GUARD)
+		.catch(() => undefined);
+}
+
+/**
+ * Release a mouse button off the page so the press activates nothing it pressed: the page gets its `mouseup`,
+ * and the click Chrome then fires on the document root is swallowed (see {@link CANCELLED_RELEASE_GUARD}). Sent
+ * at once and not awaited, for the same reason as {@link releaseKeys}.
+ */
+export function releaseButtonOffPage(page: Page, options: MouseButtonOptions): void {
+	void page.mouse.move(CANCELLED_RELEASE_POINT, CANCELLED_RELEASE_POINT).catch(() => {});
+	void page.mouse.up(options).catch(() => {});
+}
+
+/**
+ * macOS runs editing shortcuts as app-menu commands a CDP key event never reaches, so the key-down
+ * names Chrome's editor command instead; elsewhere the plain key event already edits.
+ * Keyed by the sorted Tern modifiers and the lower-cased letter.
+ */
+const EDITING_COMMANDS: Readonly<Record<string, string>> =
+	process.platform === "darwin"
+		? {
+				"meta+a": "selectAll",
+				"meta+c": "copy",
+				"meta+v": "paste",
+				"meta+x": "cut",
+				"meta+z": "undo",
+				"meta+shift+z": "redo",
+			}
+		: {};
+
+/** The editor command a combo names on macOS, whatever its spelling (`Meta+c`, `MetaLeft+KeyC`, `Shift+Meta+Z`). */
+function editingCommand(keys: readonly string[]): string | undefined {
+	const key = keys[keys.length - 1]!;
+	if (keys.length < 2 || !/^(?:Key[A-Z]|[A-Za-z])$/.test(key)) return undefined;
+	const modifiers = new Set<string>();
+	for (const name of keys.slice(0, -1)) {
+		// ternKey throws on names Tern cannot type; only modifiers can select a command.
+		const modifier = /^(?:Shift|Control|Alt|Meta)(?:Left|Right)?$/.test(name) ? ternKey(name).modifier : undefined;
+		if (!modifier) return undefined;
+		modifiers.add(modifier);
+	}
+	return EDITING_COMMANDS[`${[...modifiers].sort().join("+")}+${ternKey(key).key.toLowerCase()}`];
+}
+
+/**
+ * Press a key or a `+`-joined combo (`Enter`, `Shift+Tab`, `Meta+a`): the leading
+ * keys go down in order, the last key is pressed with `options`, then all of them
+ * are released in reverse. An aborted press sends no further key down and still
+ * releases each key whose press went out, so no modifier stays held for the user's
+ * next key.
+ */
+export async function pressKey(
+	page: Page,
+	combo: string,
+	options?: KeyPressOptions,
+	signal?: AbortSignal,
+): Promise<void> {
+	// Unchecked on purpose: puppeteer validates each name and throws `Unknown key: "…"`.
+	const keys = splitKeyCombo(combo) as KeyInput[];
+	const command = editingCommand(keys);
+	const pressed: { key: KeyInput; down: { press: Promise<void>; refused: boolean } }[] = [];
+	let failure: { error: unknown } | undefined;
+	try {
+		for (const [index, key] of keys.entries()) {
+			throwIfAborted(signal);
+			// `commands` is @deprecated in puppeteer but still forwarded to Input.dispatchKeyEvent,
+			// and puppeteer never adds the macOS editing commands itself.
+			const down = trackPress(
+				index === keys.length - 1
+					? page.keyboard.down(key, command ? { ...options, commands: [command] } : options)
+					: page.keyboard.down(key),
+			);
+			pressed.push({ key, down });
+			await untilAborted(signal, () => down.press);
+		}
+		if (options?.delay) await untilAborted(signal, () => Bun.sleep(options.delay!));
+	} catch (error) {
+		failure = { error };
+	}
+	const owed = pressed.filter(({ down }) => !down.refused).map(({ key }) => key);
+	try {
+		await releaseKeys(page, owed.reverse(), signal);
+	} catch (error) {
+		failure ??= { error };
+	}
+	if (failure) throw failure.error;
+}
+
+/** Move the page pointer to viewport coordinates. */
+export async function mouseMove(
+	page: Page,
+	x: number,
+	y: number,
+	options: MouseMoveOptions = {},
+	signal?: AbortSignal,
+): Promise<void> {
+	requireFiniteNumber(x, "mouseMove x");
+	requireFiniteNumber(y, "mouseMove y");
+	await untilAborted(signal, () => page.mouse.move(x, y, options));
+}
+
+/** Press a mouse button at the current pointer position; a press cut off on its way is released off the page. */
+export async function mouseDown(page: Page, options: MouseButtonOptions = {}, signal?: AbortSignal): Promise<void> {
+	const pressed = trackPress(page.mouse.down(options));
+	try {
+		await untilAborted(signal, () => pressed.press);
+	} catch (error) {
+		if (signal?.aborted && !pressed.refused) releaseButtonOffPage(page, options);
+		throw error;
+	}
+}
+
+/** Release a mouse button at the current pointer position. */
+export async function mouseUp(page: Page, options: MouseButtonOptions = {}, signal?: AbortSignal): Promise<void> {
+	await untilAborted(signal, () => page.mouse.up(options));
+}
+
+/** Click the page at viewport coordinates. */
+export async function clickAt(
+	page: Page,
+	x: number,
+	y: number,
+	options: ClickAtOptions = {},
+	signal?: AbortSignal,
+): Promise<void> {
+	requireFiniteNumber(x, "clickAt x");
+	requireFiniteNumber(y, "clickAt y");
+	await clickPoint(page, x, y, options, signal);
+}
+
+/**
+ * Click at viewport coordinates, one press and release per click. puppeteer's `mouse.click` keeps sending its
+ * steps after the call gave up, so a click on a page that answers late landed after omp reported it failed;
+ * here an aborted click sends no further press. `firstDown` runs once the first press is acknowledged, and its
+ * release waits for it.
+ */
+async function clickPoint(
+	page: Page,
+	x: number,
+	y: number,
+	options: ClickAtOptions,
+	signal?: AbortSignal,
+	firstDown?: () => Promise<unknown>,
+): Promise<void> {
+	const count = options.count ?? 1;
+	if (count < 1) throw new ToolError("Click must occur a positive number of times.");
+	throwIfAborted(signal);
+	// Not awaited before the press, as in puppeteer's `mouse.click`: Chrome holds a pointer move until the page's
+	// next frame, which a background tab may not draw for seconds, and the press flushes it.
+	const moved = page.mouse.move(x, y);
+	moved.catch(() => {});
+	// As puppeteer's `mouse.click`: one press per click, numbered, the last carrying `count`.
+	for (let clickCount = 1; clickCount <= count; clickCount++) {
+		await withButtonDown(
+			page,
+			{ button: options.button, clickCount },
+			signal,
+			clickCount === 1 ? firstDown : undefined,
+		);
+	}
+	await untilAborted(signal, () => moved);
+}
+
+/** Drag with the left button from `start` to `end`; cancellation before the final release drops off-page. */
+export async function dragBetween(
+	page: Page,
+	start: { x: number; y: number },
+	end: { x: number; y: number },
+	signal?: AbortSignal,
+): Promise<void> {
+	await untilAborted(signal, () => page.mouse.move(start.x, start.y));
+	await withButtonDown(page, {}, signal, () =>
+		untilAborted(signal, () => page.mouse.move(end.x, end.y, { steps: 12 })),
+	);
+}
+
+/**
+ * Press a button, run `gesture` (if any) while it is held, then release it where the pointer is. Cancellation
+ * before that release sends it off-page instead (see {@link releaseButtonOffPage}). Once a target release has
+ * been dispatched, Chrome owns it: aborting its wait cannot recall the release or prevent a late click/drop.
+ */
+async function withButtonDown(
+	page: Page,
+	options: MouseButtonOptions & { clickCount?: number },
+	signal?: AbortSignal,
+	gesture?: () => Promise<unknown>,
+): Promise<void> {
+	throwIfAborted(signal);
+	const pressed = trackPress(page.mouse.down(options));
+	let done = false;
+	try {
+		await untilAborted(signal, () => pressed.press);
+		await gesture?.();
+		done = true;
+	} finally {
+		if (done) await untilAborted(signal, () => page.mouse.up(options));
+		else if (!pressed.refused) releaseButtonOffPage(page, options);
+	}
+}
+
+/** Queue one raw mouse-wheel event without waiting for scroll settlement. */
+export async function wheel(page: Page, deltaX: number, deltaY: number, signal?: AbortSignal): Promise<void> {
+	requireFiniteNumber(deltaX, "wheel deltaX");
+	requireFiniteNumber(deltaY, "wheel deltaY");
+	await untilAborted(signal, () => page.mouse.wheel({ deltaX, deltaY }));
+}

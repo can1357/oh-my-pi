@@ -68,12 +68,6 @@ describe("findMostRecentSession", () => {
 		removeSyncWithRetries(tempDir);
 	});
 
-	it("returns single valid session file", async () => {
-		const file = path.join(tempDir, "session.jsonl");
-		fs.writeFileSync(file, '{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n');
-		expect(await findMostRecentSession(tempDir)).toBe(file);
-	});
-
 	it("returns most recently modified session", async () => {
 		const file1 = path.join(tempDir, "older.jsonl");
 		const file2 = path.join(tempDir, "newer.jsonl");
@@ -163,6 +157,23 @@ describe("resolveResumableSession", () => {
 
 		expect(match?.scope).toBe("local");
 		expect(match?.session.path).toBe(path.join(sessionDir, "2025-01-01_moved.jsonl"));
+	});
+
+	it("matches sessions staged into the dir as symlinks", async () => {
+		const id = "sym1234";
+		const stagedDir = path.join(tempDir, "staged");
+		fs.mkdirSync(stagedDir);
+		fs.writeFileSync(
+			path.join(stagedDir, `${id}.jsonl`),
+			JSON.stringify({ type: "session", id, timestamp: "2025-01-01T00:00:00Z", cwd: "/tmp/project" }),
+		);
+		fs.symlinkSync(path.join(stagedDir, `${id}.jsonl`), path.join(sessionDir, `2025-01-01_${id}.jsonl`));
+		fs.symlinkSync(path.join(stagedDir, "missing.jsonl"), path.join(sessionDir, "dangling.jsonl"));
+
+		const match = await resolveResumableSession("sym", "/tmp/project", sessionDir);
+
+		expect(match?.scope).toBe("local");
+		expect(match?.session.id).toBe(id);
 	});
 });
 
@@ -423,7 +434,7 @@ describe("SessionManager legacy session migration persistence", () => {
 		expect(persistedEntries[1].id).toBeDefined();
 		expect(persistedEntries[1].parentId).toBeNull();
 	});
-	it("keeps the last non-empty session resumable after starting a fresh session", async () => {
+	it("keeps an explicitly started session resumable after its first turn", async () => {
 		const session = SessionManager.create(tempDir, tempDir);
 		session.appendMessage({ role: "user", content: "hello", timestamp: Date.now() - 1 });
 		session.appendMessage(makeAssistantMessage());
@@ -434,9 +445,9 @@ describe("SessionManager legacy session migration persistence", () => {
 
 		const freshSessionFile = await session.newSession();
 		expect(freshSessionFile).toBeDefined();
-		expect(fs.existsSync(freshSessionFile!)).toBe(false);
-		// Lazy new-session persistence: nothing on disk yet, so materialize the
-		// fresh session the way assistant output would (issue #5730).
+		// The boundary itself is durable before the first turn; completed output
+		// then keeps the same session at the head of restart selection (#5730).
+		expect(fs.existsSync(freshSessionFile!)).toBe(true);
 		session.appendMessage({ role: "user", content: "first message of fresh session", timestamp: Date.now() });
 		session.appendMessage(makeAssistantMessage());
 		await session.flush();

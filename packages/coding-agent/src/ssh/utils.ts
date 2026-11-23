@@ -1,3 +1,5 @@
+import { quotePosixArgument } from "../utils/shell-quote";
+
 export function sanitizeHostName(name: string): string {
 	const sanitized = name.replace(/[^a-zA-Z0-9._-]+/g, "_");
 	return sanitized.length > 0 ? sanitized : "remote";
@@ -22,16 +24,6 @@ export function buildSshTarget(username: string | undefined, host: string): stri
 }
 
 /**
- * Single-quote a path for a POSIX remote shell, escaping embedded single quotes.
- * Mirrors the private `quoteRemotePath` in `tools/ssh.ts`; shared here for the
- * `ssh://` file-transfer helpers.
- */
-export function quotePosixPath(value: string): string {
-	if (value.length === 0) return "''";
-	return `'${value.replace(/'/g, "'\\''")}'`;
-}
-
-/**
  * Wrap a POSIX command in `<shell> -c '<command>'` so it runs under the
  * named shell rather than whatever `$SHELL` happens to be on the remote.
  *
@@ -47,5 +39,5 @@ export function quotePosixPath(value: string): string {
  * `-lc` to mirror the user's real environment.
  */
 export function wrapInPosixShell(shell: "sh" | "bash" | "zsh", command: string): string {
-	return `${shell} -c ${quotePosixPath(command)}`;
+	return `${shell} -c ${quotePosixArgument(command)}`;
 }

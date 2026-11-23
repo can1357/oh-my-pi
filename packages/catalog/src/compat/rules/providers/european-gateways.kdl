@@ -5,6 +5,11 @@
 // explicit provider metadata remains authoritative.
 
 provider "aki-io" {
+	default-model "kimi-k2.7-code-1100b"
+	env "AKI_API_KEY"
+	dynamic-models-authoritative #true
+	skip-cross-provider-reference-fills #true
+	discovery label="AKI.IO"
 	models "kimi-k2.7-code-1100b" {
 		cost-fallback {
 			input 0.86
@@ -22,6 +27,11 @@ provider "aki-io" {
 }
 
 provider "melious" {
+	default-model "gpt-oss-120b"
+	env "MELIOUS_API_KEY"
+	dynamic-models-authoritative #true
+	skip-cross-provider-reference-fills #true
+	discovery label="Melious"
 	models "gpt-oss-120b" {
 		cost-fallback {
 			input 0.0
@@ -38,6 +48,11 @@ provider "melious" {
 }
 
 provider "nebius" {
+	default-model "Qwen/Qwen3-235B-A22B-Instruct-2507"
+	env "NEBIUS_API_KEY"
+	dynamic-models-authoritative #true
+	skip-cross-provider-reference-fills #true
+	discovery label="Nebius Token Factory"
 	models "Qwen/Qwen3-235B-A22B-Instruct-2507" {
 		cost-fallback {
 			input 0.2
@@ -54,6 +69,11 @@ provider "nebius" {
 }
 
 provider "cortecs" {
+	default-model "gpt-oss-120b"
+	env "CORTECS_API_KEY"
+	dynamic-models-authoritative #true
+	skip-cross-provider-reference-fills #true
+	discovery label="Cortecs" allow-unauthenticated=#true
 	models "gpt-oss-120b" {
 		cost-fallback {
 			input 0.0
@@ -70,6 +90,11 @@ provider "cortecs" {
 }
 
 provider "eurouter" {
+	default-model "mistral-large-3"
+	env "EUROUTER_API_KEY"
+	dynamic-models-authoritative #true
+	skip-cross-provider-reference-fills #true
+	discovery label="EUrouter" allow-unauthenticated=#true
 	models "mistral-large-3" {
 		cost-fallback {
 			input 0.0
@@ -84,24 +109,12 @@ provider "eurouter" {
 	}
 }
 
-provider "scaleway" {
-	models "glm-5.2" {
-		cost-fallback {
-			input 0.0
-			output 0.0
-			cache-read 0.0
-			cache-write 0.0
-		}
-		limits-fallback {
-			context-window 256000
-			max-tokens 16000
-		}
-		reasoning-fallback #true
-		supports-tools-fallback #true
-	}
-}
-
 provider "opper" {
+	default-model "mistral/devstral-2512"
+	env "OPPER_API_KEY"
+	dynamic-models-authoritative #true
+	skip-cross-provider-reference-fills #true
+	discovery label="Opper"
 	models "mistral/devstral-2512" {
 		cost-fallback {
 			input 0.0
@@ -118,6 +131,11 @@ provider "opper" {
 }
 
 provider "ovhcloud" {
+	default-model "gpt-oss-120b"
+	env "OVH_AI_ENDPOINTS_ACCESS_TOKEN"
+	dynamic-models-authoritative #true
+	skip-cross-provider-reference-fills #true
+	discovery label="OVHcloud AI Endpoints" allow-unauthenticated=#true
 	models "gpt-oss-120b" {
 		cost-fallback {
 			input 0.09
@@ -138,7 +156,7 @@ provider "ovhcloud" {
 // deployment-specific capability in the compatibility policy so new gateway
 // mappings do not require a second TypeScript revision table.
 class "xai" {
-	on "aki-io" "melious" "nebius" "cortecs" "eurouter" "scaleway" "opper" "ovhcloud" {
+	on "aki-io" "melious" "nebius" "cortecs" "eurouter" "opper" "ovhcloud" {
 		family "grok" {
 			revision "=3" {
 				reasoning-fallback #true

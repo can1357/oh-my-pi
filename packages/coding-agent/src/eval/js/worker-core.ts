@@ -1,5 +1,6 @@
-import { ToolError } from "../../tools/tool-errors";
-import { JsRuntime, type RuntimeHooks } from "./shared/runtime";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { isRecord } from "@oh-my-pi/pi-utils";
+import { JsRuntime, type RuntimeCallIdentity, type RuntimeHooks, shadowSnapshotDigest } from "./shared/runtime";
 import type {
 	RunErrorPayload,
 	SessionSnapshot,
@@ -10,7 +11,6 @@ import type {
 } from "./worker-protocol";
 
 interface PendingTool {
-	runId: string;
 	resolve(value: unknown): void;
 	reject(error: Error): void;
 }
@@ -18,9 +18,26 @@ interface PendingTool {
 interface ActiveRun {
 	runId: string;
 	filename: string;
-	pendingTools: Map<string, PendingTool>;
 	/** Rejections floated by this run's cell code, captured before its result was sent. */
 	floatingRejections: unknown[];
+}
+
+interface KernelToolSpec {
+	name: string;
+	fn: (args: Record<string, unknown>) => unknown;
+	description: string;
+	parameters: Record<string, unknown>;
+}
+
+function isKernelToolSpec(value: unknown): value is KernelToolSpec {
+	if (value === null || typeof value !== "object") return false;
+	return (
+		typeof Reflect.get(value, "name") === "string" &&
+		typeof Reflect.get(value, "fn") === "function" &&
+		typeof Reflect.get(value, "description") === "string" &&
+		Reflect.get(value, "parameters") !== null &&
+		typeof Reflect.get(value, "parameters") === "object"
+	);
 }
 
 type RunResult = Extract<WorkerOutbound, { type: "result" }>;
@@ -35,7 +52,7 @@ export type WorkerCoreOptions =
 			 * `process.cwd()`, relative paths, or child processes without an explicit
 			 * `cwd` resolves against the project. Only the dedicated subprocess may
 			 * pass this: `process.chdir` is unavailable in Worker threads and would
-			 * mutate the host's own cwd on the inline fallback.
+			 * mutate the host's own cwd in a same-realm test harness.
 			 */
 			chdir?: (cwd: string) => void;
 			/** Share the subprocess host's fatal-rejection guard when one is installed. */
@@ -48,6 +65,8 @@ export type WorkerCoreOptions =
 
 /** Finished-cell filenames retained for attributing rejections that surface after the run settled. */
 const RECENT_CELL_FILES_MAX = 256;
+/** Detailed late errors shown by the next cell before summarizing the remainder. */
+const LATE_REJECTION_NOTICES_MAX = 10;
 
 function errorPayload(error: unknown): RunErrorPayload {
 	if (error instanceof Error) {
@@ -83,7 +102,20 @@ function foldFloatingRejections(active: ActiveRun, result: RunResult, hooks: Run
 	let reported = rejections;
 	if (result.ok) {
 		const error = errorPayload(rejections[0]);
-		error.message = `Unhandled rejection (missing await?): ${error.message}`;
+		const message = `Unhandled rejection (missing await?): ${error.message}`;
+		if (error.stack) {
+			const name = error.name ?? "Error";
+			const header = error.message ? `${name}: ${error.message}` : name;
+			const annotatedHeader = `${name}: ${message}`;
+			// A cached/custom stack may no longer describe the current message. Keep
+			// its diagnostics intact and append the annotation; the formatter then
+			// deliberately leaves that mismatched stack unfiltered.
+			error.stack =
+				error.stack === header || error.stack.startsWith(`${header}\n`)
+					? annotatedHeader + error.stack.slice(header.length)
+					: `${error.stack}\n${annotatedHeader}`;
+		}
+		error.message = message;
 		folded = { type: "result", runId: active.runId, ok: false, error };
 		reported = rejections.slice(1);
 	}
@@ -98,7 +130,10 @@ export class WorkerCore {
 	#transport: Transport;
 	#runtime: JsRuntime | null = null;
 	#runs = new Map<string, ActiveRun>();
+	#pendingTools = new Map<string, PendingTool>();
 	#recentCellFiles = new Set<string>();
+	#lateRejections: string[] = [];
+	#omittedLateRejections = 0;
 	#unsubscribe: () => void;
 	#uninstallRejectionGuard: () => void;
 	#options: WorkerCoreOptions;
@@ -114,8 +149,8 @@ export class WorkerCore {
 	 * Capture unhandled rejections floated by eval-cell code (unawaited async
 	 * calls) so they fail the owning run instead of tearing down the worker or —
 	 * via the global postmortem handler — the whole session. On the main thread
-	 * (inline fallback) only cell-attributable rejections are consumed; in the
-	 * dedicated worker realm a rejection during a live run is cell activity even
+	 * (same-realm unit harness) only cell-attributable rejections are consumed;
+	 * in the dedicated worker realm a rejection during a live run is cell activity even
 	 * without a usable stack, while anything else keeps its default fatality.
 	 */
 	#installRejectionGuard(): () => void {
@@ -173,11 +208,19 @@ export class WorkerCore {
 				}
 			}
 			if (recent) {
+				const payload = errorPayload(reason);
+				if (this.#lateRejections.length < LATE_REJECTION_NOTICES_MAX) {
+					this.#lateRejections.push(
+						`Unhandled rejection from finished eval cell ${recent} (missing await?): ${payload.stack ?? `${payload.name ?? "Error"}: ${payload.message}`}\n`,
+					);
+				} else {
+					this.#omittedLateRejections++;
+				}
 				this.#transport.send({
 					type: "log",
 					level: "warn",
 					msg: "Unhandled rejection from a finished eval cell (missing await?)",
-					meta: { filename: recent, error: errorPayload(reason) },
+					meta: { filename: recent, error: payload },
 				});
 				return true;
 			}
@@ -209,7 +252,7 @@ export class WorkerCore {
 					this.#ensureRuntime(msg.snapshot);
 					this.#transport.send({ type: "ready" });
 				} catch (error) {
-					// Inline fallback delivers messages on a microtask. A sync throw
+					// Same-realm harnesses deliver messages on a microtask. A sync throw
 					// from ensureRuntime/setCwd would otherwise become a process-fatal
 					// unhandledRejection on the main thread.
 					this.#transport.send({ type: "init-failed", error: errorPayload(error) });
@@ -218,6 +261,61 @@ export class WorkerCore {
 			case "run":
 				void this.#runOne(msg.runId, msg.code, msg.filename, msg.snapshot);
 				return;
+			case "tool":
+				void this.#invokeTool(msg);
+				return;
+			case "shadow-snapshot": {
+				if (this.#runs.size > 0) {
+					this.#transport.send({
+						type: "shadow-snapshot",
+						id: msg.id,
+						eligible: false,
+						reason: "runtime is busy",
+					});
+					return;
+				}
+				try {
+					const runtime = this.#ensureRuntime(msg.snapshot);
+					this.#transport.send({
+						type: "shadow-snapshot",
+						id: msg.id,
+						eligible: true,
+						snapshot: runtime.snapshotUserGlobals(),
+					});
+				} catch (error) {
+					this.#transport.send({
+						type: "shadow-snapshot",
+						id: msg.id,
+						eligible: false,
+						reason: error instanceof Error ? error.message : String(error),
+					});
+				}
+				return;
+			}
+			case "run-if-snapshot-matches": {
+				if (this.#runs.size > 0) {
+					this.#transport.send({ type: "shadow-run", id: msg.id, eligible: false, reason: "runtime is busy" });
+					return;
+				}
+				try {
+					const runtime = this.#ensureRuntime(msg.snapshot);
+					const current = runtime.snapshotUserGlobals();
+					if (current.revision !== msg.expectedRevision || shadowSnapshotDigest(current) !== msg.expectedDigest) {
+						this.#transport.send({ type: "shadow-run", id: msg.id, eligible: false, reason: "snapshot changed" });
+						return;
+					}
+					this.#transport.send({ type: "shadow-run", id: msg.id, eligible: true });
+					void this.#runOne(msg.runId, msg.code, msg.filename, msg.snapshot);
+				} catch (error) {
+					this.#transport.send({
+						type: "shadow-run",
+						id: msg.id,
+						eligible: false,
+						reason: error instanceof Error ? error.message : String(error),
+					});
+				}
+				return;
+			}
 			case "tool-reply":
 				this.#deliverToolReply(msg.id, msg.reply);
 				return;
@@ -231,12 +329,15 @@ export class WorkerCore {
 		this.#syncProcessCwd(snapshot.cwd, currentRunId);
 		if (this.#runtime) {
 			this.#runtime.setCwd(snapshot.cwd);
+			this.#runtime.setPackageRoot(snapshot.packageRoot);
+			this.#runtime.setLocalRoots(snapshot.localRoots);
 			return this.#runtime;
 		}
 		this.#runtime = new JsRuntime({
 			initialCwd: snapshot.cwd,
 			sessionId: snapshot.sessionId,
 			localRoots: snapshot.localRoots,
+			packageRoot: snapshot.packageRoot,
 		});
 		return this.#runtime;
 	}
@@ -277,19 +378,29 @@ export class WorkerCore {
 	}
 
 	async #runOne(runId: string, code: string, filename: string, snapshot: SessionSnapshot): Promise<void> {
-		const active: ActiveRun = { runId, filename, pendingTools: new Map(), floatingRejections: [] };
+		const active: ActiveRun = { runId, filename, floatingRejections: [] };
 		this.#runs.set(runId, active);
 		const hooks: RuntimeHooks = {
 			onText: chunk => this.#transport.send({ type: "text", runId, chunk }),
 			onDisplay: output => this.#transport.send({ type: "display", runId, output }),
-			callTool: (name, args) => this.#callTool(active, name, args),
+			callTool: (name, args, identity) => this.#callTool(active, name, args, identity),
 		};
+		for (const notice of this.#lateRejections.splice(0)) hooks.onText(notice);
+		if (this.#omittedLateRejections > 0) {
+			hooks.onText(`… and ${this.#omittedLateRejections} more late rejections from finished eval cells.\n`);
+			this.#omittedLateRejections = 0;
+		}
 		let result: RunResult;
 		try {
 			const runtime = this.#ensureRuntime(snapshot, runId);
 			runtime.setCwd(snapshot.cwd);
-			const value = await runtime.run(code, filename, hooks, { runId, cwd: snapshot.cwd });
-			runtime.displayValue(value, hooks);
+			runtime.syncPreludes(snapshot.preludes ?? []);
+			const value = await runtime.run(code, filename, hooks, {
+				runId,
+				cwd: snapshot.cwd,
+				localRoots: snapshot.localRoots ?? {},
+			});
+			runtime.echo(value, hooks);
 			result = { type: "result", runId, ok: true };
 		} catch (error) {
 			result = { type: "result", runId, ok: false, error: errorPayload(error) };
@@ -307,6 +418,62 @@ export class WorkerCore {
 		}
 	}
 
+	async #invokeTool(msg: Extract<WorkerInbound, { type: "tool" }>): Promise<void> {
+		const active: ActiveRun = {
+			runId: msg.runId,
+			filename: `tool-${msg.runId}`,
+			floatingRejections: [],
+		};
+		this.#runs.set(msg.runId, active);
+		const hooks: RuntimeHooks = {
+			onText: chunk => this.#transport.send({ type: "text", runId: msg.runId, chunk }),
+			onDisplay: output => this.#transport.send({ type: "display", runId: msg.runId, output }),
+			callTool: (name, args) => this.#callTool(active, name, args),
+		};
+
+		try {
+			const runtime = this.#runtime;
+			if (!runtime) throw new ToolError("JavaScript kernel is not running");
+			const rawRegistry = runtime.getGlobal("__omp_tools__");
+			const tools = new Map<string, KernelToolSpec>();
+			if (rawRegistry instanceof Map) {
+				for (const [name, value] of rawRegistry) {
+					if (typeof name === "string" && isKernelToolSpec(value)) tools.set(name, value);
+				}
+			}
+
+			let envelope: Record<string, unknown>;
+			if (msg.op === "describe") {
+				const names = msg.names.length > 0 ? msg.names : [...tools.keys()];
+				envelope = {
+					ok: true,
+					tools: names.flatMap(name => {
+						const spec = tools.get(name);
+						return spec ? [{ name: spec.name, description: spec.description, parameters: spec.parameters }] : [];
+					}),
+					missing: names.filter(name => !tools.has(name)),
+				};
+			} else {
+				const spec = tools.get(msg.name);
+				if (!spec) throw new ToolError(`tool ${JSON.stringify(msg.name)} is not defined`);
+				const value = await runtime.runCallback(msg.runId, hooks, () => spec.fn(msg.args ?? {}));
+				let cloneable: unknown;
+				try {
+					cloneable = structuredClone(value);
+				} catch {
+					cloneable = String(value);
+				}
+				envelope = { ok: true, value: cloneable };
+			}
+			this.#transport.send({ type: "result", runId: msg.runId, ok: true, value: envelope });
+		} catch (error) {
+			this.#transport.send({ type: "result", runId: msg.runId, ok: false, error: errorPayload(error) });
+		} finally {
+			this.#runs.delete(msg.runId);
+			this.#rememberCellFile(active.filename);
+		}
+	}
+
 	#rememberCellFile(filename: string): void {
 		this.#recentCellFiles.delete(filename);
 		this.#recentCellFiles.add(filename);
@@ -316,40 +483,52 @@ export class WorkerCore {
 		}
 	}
 
-	async #callTool(active: ActiveRun, name: string, args: unknown): Promise<unknown> {
+	async #callTool(active: ActiveRun, name: string, args: unknown, identity?: RuntimeCallIdentity): Promise<unknown> {
 		const id = `tc-${active.runId}-${crypto.randomUUID()}`;
 		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
-		active.pendingTools.set(id, { runId: active.runId, resolve, reject });
+		this.#pendingTools.set(id, { resolve, reject });
 		try {
-			this.#transport.send({ type: "tool-call", id, runId: active.runId, name, args });
+			this.#transport.send({ type: "tool-call", id, runId: active.runId, name, args, identity });
 		} catch (error) {
 			// Non-serializable args (DataCloneError from postMessage / IPC send).
 			// No reply will ever arrive; fail this call instead of stranding a
 			// pending entry until close.
-			active.pendingTools.delete(id);
+			this.#pendingTools.delete(id);
 			reject(error);
 		}
-		return await promise;
+		try {
+			return await promise;
+		} catch (error) {
+			// Bridge errors are constructed outside the cell, so retain its origin
+			// even when the call rejects after the run has finished.
+			this.#rememberCellFile(active.filename);
+			if (error instanceof Error) {
+				let call = name;
+				if (name === "__prelude__" && isRecord(args) && typeof args.name === "string") {
+					call = args.name;
+					if (isRecord(args.parameters) && typeof args.parameters.action === "string") {
+						call += `.${args.parameters.action}`;
+					}
+				}
+				error.stack = `${error.stack ?? error.message}\n    at ${call} (${active.filename})`;
+			}
+			throw error;
+		}
 	}
 
 	#deliverToolReply(id: string, reply: ToolReply): void {
-		for (const active of this.#runs.values()) {
-			const pending = active.pendingTools.get(id);
-			if (!pending) continue;
-			active.pendingTools.delete(id);
-			if (reply.ok) pending.resolve(reply.value);
-			else pending.reject(errorFromPayload(reply.error));
-			return;
-		}
+		const pending = this.#pendingTools.get(id);
+		if (!pending) return;
+		this.#pendingTools.delete(id);
+		if (reply.ok) pending.resolve(reply.value);
+		else pending.reject(errorFromPayload(reply.error));
 	}
 
 	#close(): void {
-		for (const active of this.#runs.values()) {
-			for (const pending of active.pendingTools.values()) {
-				pending.reject(new ToolError("JS worker closed"));
-			}
-			active.pendingTools.clear();
+		for (const pending of this.#pendingTools.values()) {
+			pending.reject(new ToolError("JS worker closed"));
 		}
+		this.#pendingTools.clear();
 		this.#runs.clear();
 		this.#runtime?.dispose?.();
 		this.#runtime = null;
@@ -360,12 +539,10 @@ export class WorkerCore {
 	}
 
 	dispose(): void {
-		for (const active of this.#runs.values()) {
-			for (const pending of active.pendingTools.values()) {
-				pending.reject(new ToolError("JS worker closed"));
-			}
-			active.pendingTools.clear();
+		for (const pending of this.#pendingTools.values()) {
+			pending.reject(new ToolError("JS worker closed"));
 		}
+		this.#pendingTools.clear();
 		this.#runs.clear();
 		this.#runtime?.dispose?.();
 		this.#runtime = null;

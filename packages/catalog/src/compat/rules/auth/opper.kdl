@@ -1,0 +1,10 @@
+auth "opper" {
+	name "Opper"
+	env "OPPER_API_KEY"
+	login "api-key" {
+		auth-url "https://platform.opper.ai/"
+		instructions "Create or copy your Opper API key"
+		prompt "Paste your Opper API key" placeholder="opper-..."
+		validate "chat-completions" label="Opper" base-url="https://api.opper.ai/v3/compat" model="mistral/devstral-2512"
+	}
+}

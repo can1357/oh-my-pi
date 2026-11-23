@@ -1,31 +1,61 @@
 [workspace]
-# Explicit, not `crates/pi-*`: a glob member that resolves to a directory
+# Explicit, not `crates/*`: a glob member that resolves to a directory
 # without a Cargo.toml (a deleted crate whose dir survives `git reset --hard`
 # because an ignored file stayed behind) is a hard error that fails the whole
 # workspace, not a skipped entry.
 members = [
-   "crates/pi-ast",
-   "crates/pi-builtins",
-   "crates/pi-iso",
-   "crates/pi-natives",
-   "crates/pi-shell",
-   "crates/pi-vcs",
-   "crates/pi-voice",
-   "crates/pi-walker",
-   "crates/vendor/brush-core",
+   "crates/ast",
+   "crates/builtins",
+   "crates/diff",
+   "crates/edit",
+   "crates/iso",
+   "crates/natives",
+   "crates/predict",
+   "crates/shell",
+   "crates/vcs",
+   "crates/vfs",
+   "crates/voice",
+   "crates/xfs",
+   "crates/vendor/cfg_aliases",
+   "crates/vendor/grep-searcher",
+   "crates/vendor/jaq-core",
+   "crates/vendor/jaq-json",
+   "crates/vendor/jaq-std",
+   "crates/vendor/napi",
+   "crates/vendor/tree-sitter-go",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "18.1.2"
+version = "19.1.1"
 edition = "2024"
+rust-version = "1.101"
 license = "MIT"
 authors = ["Stencil Labs, Inc."]
 homepage = "https://omp.sh/"
 repository = "https://github.com/can1357/oh-my-pi"
 
 [patch.crates-io]
-brush-core = { path = "crates/vendor/brush-core" }
+# portable-pty 0.9.0 pins nix 0.28, whose cfg_aliases 0.1.1 expansion emits
+# future-incompatible trailing semicolons.
+cfg_aliases = { path = "crates/vendor/cfg_aliases" }
+# grep-searcher 0.1.17 (latest release) searches either a blocking `io::Read`
+# or a whole slice; the vendored copy adds the chunk-fed `search_push` (see its
+# README.md).
+grep-searcher = { path = "crates/vendor/grep-searcher" }
+# jaq-core 3.1.1, jaq-json 2.0.3 and jaq-std 3.0.3 back pi's `jq` builtin. The
+# vendored copies poll cancellation inside filter evaluation and follow jq
+# 1.8's semantics where jaq's differ (see each crate's README.md).
+jaq-core = { path = "crates/vendor/jaq-core" }
+jaq-json = { path = "crates/vendor/jaq-json" }
+jaq-std = { path = "crates/vendor/jaq-std" }
+# napi 3.13.0 pins every `bun test --isolate` realm through per-thread handles
+# of never-torn-down envs; the vendored copy releases them (see its README.md).
+napi = { path = "crates/vendor/napi" }
+# tree-sitter-go 0.25.0 (latest release) rejects Go 1.26 `new(expr)`; the
+# vendored copy carries the upstream grammar fix (see its README.md).
+tree-sitter-go = { path = "crates/vendor/tree-sitter-go" }
+
 [profile.release]
 opt-level = 3
 lto = "fat"
@@ -33,8 +63,8 @@ codegen-units = 1
 strip = true
 # Unwind (not abort) so panics inside vendored code and native tasks stay
 # recoverable at the appropriate boundary: the uutils boundary
-# (pi-shell coreutils) turns a panic into a failed command, and the
-# `task::blocking` wrapper in `crates/pi-natives/src/task.rs` catches unwinds
+# (omp-shell coreutils) turns a panic into a failed command, and the
+# `task::blocking` wrapper in `crates/natives/src/task.rs` catches unwinds
 # inside `Blocking::compute` before they cross napi-rs's async-work
 # `extern "C"` callback (napi `src/async_work.rs:109`) so they surface as
 # rejected JS Promises instead of forced process aborts under Rust's C-unwind
@@ -42,8 +72,13 @@ strip = true
 # per-call `catch_unwind` on the `Task`/`AsyncTask` path; the tokio-future
 # path (`env.spawn_future`) is guarded upstream. Recoverable uutils panics
 # are kept out of the crash report by the crash hook
-# (see crates/pi-natives/src/crash_handler.rs).
+# (see crates/natives/src/crash_handler.rs).
 panic = "unwind"
+
+# Share host and target dependency units in release builds.
+[profile.release.package."*"]
+opt-level = 3
+codegen-units = 1
 
 [profile.ci]
 inherits = "release"
@@ -55,12 +90,20 @@ strip = "symbols"
 # copy this line into a profile that sets `debug` — see [profile.dev] below.
 split-debuginfo = "off"
 
+[profile.ci.package."*"]
+opt-level = 3
+codegen-units = 16
+
 [profile.local]
 inherits = "release"
 lto = "thin"
 codegen-units = 16
 incremental = true
 strip = false
+[profile.local.package."*"]
+opt-level = 3
+codegen-units = 16
+
 # `release` codegen with symbols kept for `perf`/`samply`/Instruments. Full
 # opt-level so timings match production; only the binary size differs.
 # `cargo build --profile profiling`.
@@ -87,7 +130,14 @@ split-debuginfo = "unpacked"
 # Deps compile optimized once and cache; your own crates stay fast.
 [profile.dev.package."*"]
 opt-level = 2
+codegen-units = 256
 debug = false
+
+# omp's shell engine recurses per nesting level (arithmetic, parser);
+# unoptimized frames overflow the 2 MiB test-thread stack before its recursion
+# limits hit.
+[profile.dev.package.omp-shell]
+opt-level = 1
 
 [workspace.lints.rust]
 # ──────────────────────────────────────────────────────────────────────────────
@@ -195,6 +245,7 @@ assert_is_empty = "allow" # `is_empty()` states intent without brittle type anno
 # ──────────────────────────────────────────────────────────────────────────────
 missing_errors_doc = "allow" # Documenting every error return is often redundant
 missing_panics_doc = "allow" # Not every panic needs docs, especially assert!
+tabs_in_doc_comments = "allow" # rustfmt formats doc examples with hard tabs (format_code_in_doc_comments)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Complexity
@@ -207,31 +258,44 @@ too_many_lines = "allow"     # Arbitrary limits don't account for necessary comp
 # ──────────────────────────────────────────────────────────────────────────────
 # Internal Libraries
 # ──────────────────────────────────────────────────────────────────────────────
-pi-ast = { path = "crates/pi-ast" }
-pi-iso = { path = "crates/pi-iso" }
-pi-shell = { path = "crates/pi-shell" }
-pi-voice = { path = "crates/pi-voice" }
-pi-walker = { path = "crates/pi-walker" }
-pi-vcs = { path = "crates/pi-vcs" }
-brush-core = { path = "crates/vendor/brush-core" }
-pi-builtins = { path = "crates/pi-builtins" }
+omp-ast = { path = "crates/ast", default-features = false }
+omp-diff = { path = "crates/diff" }
+omp-edit = { path = "crates/edit" }
+omp-iso = { path = "crates/iso" }
+omp-shell = { path = "crates/shell" }
+omp-predict = { path = "crates/predict" }
+omp-voice = { path = "crates/voice" }
+omp-xfs = { path = "crates/xfs" }
+omp-vcs = { path = "crates/vcs" }
+omp-vfs = { path = "crates/vfs" }
+omp-builtins = { path = "crates/builtins" }
+# Third-party crates of omp's shell engine (`crates/shell/src/bash`),
+# at the versions of the workspace it came from.
+blake3 = { version = "1.8.7", features = ["rayon"] }
+bstr = { version = "1.13.1", features = ["serde"] }
+encoding_rs = "0.8.42"
+hashbrown = "0.17.1"
+jiff = "0.2.38"
+libm = "0.2.16"
+postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
+strum = { version = "0.28.0", features = ["derive"] }
+tempfile = "3.27.0"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Async Runtime & Concurrency
 # ──────────────────────────────────────────────────────────────────────────────
 async-trait = "0.1"
 futures = "0.3"
-dashmap = "6.1"
 parking_lot = "0.12.5"
 rayon = "1.12"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["full"] }
-flume = "0.11"
+flume = "0.12"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Serialization & Data Formats
 # ──────────────────────────────────────────────────────────────────────────────
-base64 = "0.22"
+base64 = "0.23"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 toml = "1.1"
@@ -246,22 +310,21 @@ bytes = "1"
 # ──────────────────────────────────────────────────────────────────────────────
 # CLI & Configuration
 # ──────────────────────────────────────────────────────────────────────────────
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Text Processing & Parsing
 # ──────────────────────────────────────────────────────────────────────────────
 pdf-inspector = "1"
 regex = "1"
-similar = "3.1.0"
 fontdue = { version = "0.9", default-features = false }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Data Structures - Collections
 # ──────────────────────────────────────────────────────────────────────────────
-phf = { version = "0.13", features = ["macros"] }
-heapless = "0.9"
-smallvec = { version = "1.15.1", features = [
+phf = { version = "0.14", features = ["macros"] }
+rpds = { version = "1.2", features = ["serde"] }
+smallvec = { version = "1.16.1", features = [
    "serde",
    "write",
    "union",
@@ -271,33 +334,44 @@ smallvec = { version = "1.15.1", features = [
 # ──────────────────────────────────────────────────────────────────────────────
 # Hashing
 # ──────────────────────────────────────────────────────────────────────────────
-xxhash-rust = { version = "0.8", features = ["xxh64"] }
+xxhash-rust = { version = "0.8", features = ["xxh64", "xxh32"] }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Audio & Realtime Media
 # ──────────────────────────────────────────────────────────────────────────────
-audiopus_sys = { version = "0.2.2", features = ["static"] }
-opus = "0.3.1"
+opus = "0.4.0"
 webrtc = "0.17.2"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # System & Platform
 # ──────────────────────────────────────────────────────────────────────────────
-libc = "0.2"
-os_pipe = "1"
+libc = "0.2.191"
 windows-sys = { version = "0.61", features = [
    "Win32_Foundation",
+   "Win32_Globalization",
    "Win32_Media_Audio",
    "Win32_Media_Multimedia",
    "Win32_Security",
    "Win32_Storage_FileSystem",
    "Win32_Storage_ProjectedFileSystem",
    "Win32_System_Com",
+   "Win32_System_Console",
    "Win32_System_LibraryLoader",
    "Win32_System_IO",
    "Win32_System_Ioctl",
+   "Win32_System_JobObjects",
+   "Win32_System_Pipes",
+   "Win32_System_SystemInformation",
    "Win32_System_Threading",
 ] }
+# Transitive-only pin (wired through crates/natives' `cfg(false)` target
+# deps so the constraint participates in resolution without tripping the
+# unused-dependency lint): cc 1.2.x passes
+# FILE_ATTRIBUTE_TEMPORARY to OpenOptionsExt::custom_flags as u32, but
+# find-msvc-tools 0.1.13 retyped that constant to i32, breaking every Windows
+# build. tree-sitter-sequel caps cc at ~1.2.1 so the fixed cc 1.4.x line is
+# out of reach; hold 0.1.12 until upstream ships a compatible release.
+find-msvc-tools = "=0.1.12"
 winreg = "0.56"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -312,8 +386,8 @@ napi-derive = "3"
 # ──────────────────────────────────────────────────────────────────────────────
 arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 clipboard-win = "5.4"
-icy_sixel = "0.5"
 portable-pty = "0.9"
+shlex = "2"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Search & File Walking
@@ -321,6 +395,7 @@ portable-pty = "0.9"
 globset = "0.4"
 grep-matcher = "0.1"
 grep-pcre2 = "0.1"
+pcre2-sys = "0.2.10"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 ignore = "0.4"
@@ -339,32 +414,36 @@ resvg = "0.48"
 # JPEG decoder compiles — zune-jpeg 0.5.15's no-log stub macros are not
 # expression-safe and the crate fails to build without it.
 zune-jpeg = { version = "0.5", default-features = false, features = ["log"] }
+# Not used directly: pins tinyvec to fixed 1.13.3 because 1.13.0 was published broken
+# (cannot find macro `vec` in alloc-only context).
+tinyvec = "=1.13.3"
 png = "0.18"
-inferno = { version = "0.12", default-features = false }
+# Oniguruma, not fancy-regex: onig is already linked (omp-builtins), and its
+# compiled grammar regexes are ~5x smaller and faster (TS+TSX warm: 29 vs 149 MB
+# RSS; a 16.8k-line .d.ts highlights in 226 vs 1166 ms). When upgrading, re-sync
+# crates/natives/src/syntaxes/Markdown.sublime-syntax and preserve its fixes.
 syntect = { version = "5.3", default-features = false, features = [
    "default-syntaxes",
    "default-themes",
-   "regex-fancy",
+   "regex-onig",
    "yaml-load",
 ] }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Markup Conversion
 # ──────────────────────────────────────────────────────────────────────────────
-html-to-markdown-rs = { version = "3.9.2", default-features = false }
+# The version html-to-markdown-rs builds on; bump with it.
+html-escape = "0.3"
+html-to-markdown-rs = { version = "3.18.3", default-features = false }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Tokenization
 # ──────────────────────────────────────────────────────────────────────────────
-xutf = "1.4"
-zstd = "0.13"
-fancy-regex = "0.16"
-tiktoken-rs = "0.11"
+xutf = "2.3"
+zstd = "0.14"
+fancy-regex = "0.17"
+tiktoken-rs = "0.12"
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Shell Parsing
-# ──────────────────────────────────────────────────────────────────────────────
-brush-parser = "0.3"
 # ──────────────────────────────────────────────────────────────────────────────
 # Version Control (in-process git + jujutsu)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -396,62 +475,43 @@ ast-grep-core = { version = "0.39", default-features = false, features = [
    "tree-sitter",
 ] }
 tree-sitter = "0.25"
-tree-sitter-astro = { version = "0.1.1", package = "tree-sitter-astro-next" }
 tree-sitter-bash = "0.25"
 tree-sitter-c = "0.24"
-tree-sitter-c-sharp = "0.23"
-tree-sitter-clojure = "0.1"
-tree-sitter-cmake = "0.7.1"
 tree-sitter-cpp = "0.23"
 tree-sitter-css = "0.25"
-tree-sitter-dart = "0.2"
 tree-sitter-diff = "0.1"
-tree-sitter-dockerfile = { version = "0.2.0", package = "tree-sitter-dockerfile-updated" }
-tree-sitter-elixir = "0.3"
-tree-sitter-elisp = "1.6.1"
-tree-sitter-erlang = "0.16.0"
+# elisp, fortran, lua, ruby, swift: test-only stand-ins for wasm grammars (see
+# the omp-ast and omp-edit dev-dependencies); every other grammar here is linked in.
+tree-sitter-elisp = "1.7.2"
 tree-sitter-fortran = "0.6.0"
 tree-sitter-go = "0.25"
-tree-sitter-graphql = "0.1.0"
-tree-sitter-haskell = "0.23"
-tree-sitter-hcl = "1.1"
 tree-sitter-html = "0.23"
-tree-sitter-ini = "1.4.0"
 tree-sitter-java = "0.23"
 tree-sitter-javascript = "0.25"
 tree-sitter-json = "0.24"
-tree-sitter-julia = "0.23"
-tree-sitter-just = "0.2.0"
-tree-sitter-kotlin = { version = "0.4", package = "tree-sitter-kotlin-sg" }
 tree-sitter-lua = "0.5"
-tree-sitter-make = "1.1"
 tree-sitter-md = "0.5"
-tree-sitter-nix = "0.3"
-tree-sitter-objc = "3.0"
-tree-sitter-ocaml = "0.24.2"
-tree-sitter-odin = "1.3"
-tree-sitter-php = "0.24"
-tree-sitter-powershell = "0.26.4"
-tree-sitter-proto = "0.4.0"
 tree-sitter-python = "0.25"
-tree-sitter-r = "1.2.0"
 tree-sitter-regex = "0.25"
 tree-sitter-ruby = "0.23"
 tree-sitter-rust = "0.24"
-tree-sitter-scala = "0.26"
-tree-sitter-solidity = "1.2"
-tree-sitter-sql = { version = "0.3.11", package = "tree-sitter-sequel" }
-tree-sitter-starlark = "1.3"
-tree-sitter-svelte = { version = "0.1.1", package = "tree-sitter-svelte-next" }
 tree-sitter-swift = "0.7"
-tree-sitter-tlaplus = "1.5"
 tree-sitter-toml-ng = "0.7"
 tree-sitter-typescript = "0.23"
-tree-sitter-verilog = "1.0"
-tree-sitter-vue = { version = "0.1.0", package = "tree-sitter-vue-next" }
-tree-sitter-xml = "0.7"
 tree-sitter-yaml = "0.7"
-tree-sitter-zig = "1.1"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Machine Learning (omp-predict SmolLM2 engine)
+# ──────────────────────────────────────────────────────────────────────────────
+# macOS-only (Metal decoder; other targets use omp-predict's own CPU decoder).
+# 0.9.x, not 0.10+: later candle-core releases depend unconditionally on
+# `tokenizers` with the `onig` C library.
+candle-core = "0.9.2"
+candle-nn = "0.9.2"
+# Phonon on-device TTS (omp-natives `tts`). `hf` reads the checkpoint's
+# tokenizer.json through `tokenizers` without its `onig` C library; downloads
+# stay in TypeScript, so no `hub`.
+ptts = { version = "0.7.1", default-features = false, features = ["hf"] }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Unsorted (added by `cargo add` - move into a section above)

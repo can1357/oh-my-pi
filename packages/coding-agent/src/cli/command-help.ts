@@ -1,30 +1,50 @@
 import type { CommandMetadata } from "@oh-my-pi/pi-utils/cli";
 
 export const acpHelp = {
-	description: "Run Oh My Pi as an ACP (Agent Client Protocol) server over stdio",
+	description: "Run omp as an ACP (Agent Client Protocol) server over stdio",
 } satisfies CommandMetadata;
 
 export const agentsHelp = { description: "Manage bundled task agents" } satisfies CommandMetadata;
+
+export const anonymizeHelp = {
+	description:
+		"Write a shareable copy of a session and its subagents: turn contents redacted, metadata kept, paths and literals replaced by consistent mock tokens",
+} satisfies CommandMetadata;
+
+export const authHelp = {
+	description: "Export or import stored provider credentials (API keys and OAuth logins) as JSON",
+} satisfies CommandMetadata;
 
 export const authBrokerHelp = {
 	description: "Manage the omp auth-broker (credential vault)",
 } satisfies CommandMetadata;
 
 export const authGatewayHelp = {
-	description: "Run an auth-gateway forward proxy backed by the configured broker",
+	description:
+		"Run an auth-gateway: an HTTP forward proxy backed by the configured broker, or JSON lines on stdio with your own credentials",
 } satisfies CommandMetadata;
 
 export const benchHelp = {
 	description:
-		"Benchmark models: TTFT/prefill vs decode throughput with p50/p95, across chat, prefill, generation, and prompt-cache workloads",
+		"Benchmark models: TTFT/prefill vs decode throughput with p50/p95, across chat, prefill, generation, and prompt-cache workloads, or single-user vs parallel load (--detailed)",
 } satisfies CommandMetadata;
 
+/** Root help description for managing omp's Chrome extension and relay. */
 export const browserRelayHelp = {
-	description: "Run the local CDP relay that lets the browser tool drive your own Chrome tabs",
+	description: "Install or sync the omp Chrome extension; its native host serves the browser relay",
 } satisfies CommandMetadata;
 
 export const cleanseHelp = {
 	description: "Detect and fix project diagnostics with weighted parallel subagents",
+} satisfies CommandMetadata;
+
+export const collabHelp = {
+	description:
+		"List active local Collab host metadata without URLs; use collab link <instanceId|pid> to retrieve a control link (--view for view-only)",
+} satisfies CommandMetadata;
+
+export const clipHelp = {
+	description: "Upload a /record recording to live.omp.sh as a public clip and print its URL",
 } satisfies CommandMetadata;
 
 export const commitHelp = { description: "Generate a commit message and update changelogs" } satisfies CommandMetadata;
@@ -58,10 +78,18 @@ export const gitHelp = {
 	description: "Interactive fullscreen git UI: split diff viewer, staging sidebar, and commit composer",
 } satisfies CommandMetadata;
 
+export const findHelp = {
+	description: "Semantic search: describe a behavior, get the files and line ranges that implement it",
+} satisfies CommandMetadata;
+
 export const grepHelp = { description: "Test grep tool" } satisfies CommandMetadata;
 
 export const grievancesHelp = {
 	description: "View, clean, or push reported tool issues (auto-QA grievances)",
+} satisfies CommandMetadata;
+
+export const loginHelp = {
+	description: "Log in to a model provider (terminal counterpart of /login)",
 } satisfies CommandMetadata;
 
 export const imagesHelp = {
@@ -77,6 +105,14 @@ export const joinHelp = { description: "Join a shared collab session (same as /j
 export const modelsHelp = { description: "List, search, and refresh available models" } satisfies CommandMetadata;
 
 export const pluginHelp = { description: "Manage plugins (install, uninstall, list, etc.)" } satisfies CommandMetadata;
+
+export const playHelp = {
+	description: "Replay a /record session recording in the terminal (space pauses, q quits)",
+} satisfies CommandMetadata;
+
+export const predictHelp = {
+	description: "Type a prompt and compare every word-completion engine's ghost text live",
+} satisfies CommandMetadata;
 
 export const psHelp = {
 	description: "List and control daemon-supervised background processes (logs, stop, kill, restart)",
@@ -95,6 +131,11 @@ export const sayHelp = {
 
 export const searchHelp = { description: "Test web search providers" } satisfies CommandMetadata;
 
+export const sessionHelp = {
+	description:
+		"Hand a session to another machine (pack, unpack, moved) or check which sessions a running omp owns (lease)",
+} satisfies CommandMetadata;
+
 export const shareHelp = {
 	description: "Share a saved session via an encrypted link (same as /share)",
 } satisfies CommandMetadata;
@@ -105,15 +146,47 @@ export const setupHelp = {
 
 export const shellHelp = { description: "Interactive shell console" } satisfies CommandMetadata;
 
+const NATIVE_SHELL_DESCRIPTIONS = {
+	zsh: "Run zsh 5.9 on the built-in shell engine (all arguments go to zsh)",
+	bash: "Run bash 5.3 on the built-in shell engine (all arguments go to bash)",
+	sh: "Run a POSIX sh on the built-in shell engine (all arguments go to sh)",
+} as const;
+
+/** `omp zsh|bash|sh`: the whole command line after the word goes to the shell. */
+export function nativeShellHelp(name: keyof typeof NATIVE_SHELL_DESCRIPTIONS) {
+	return {
+		description: NATIVE_SHELL_DESCRIPTIONS[name],
+		args: {
+			args: {
+				kind: "string",
+				description: `Arguments passed to ${name} unchanged (options, -c COMMAND, a script and its arguments)`,
+				multiple: true,
+			},
+		},
+	} satisfies CommandMetadata;
+}
+
+export const skillHelp = {
+	description: "Install, search, publish, and manage skills on the Skillshare registry (skills.omp.sh)",
+} satisfies CommandMetadata;
+
 export const sshHelp = { description: "Manage SSH host configurations" } satisfies CommandMetadata;
 
 export const statsHelp = { description: "View usage statistics" } satisfies CommandMetadata;
 
+export const streamHelp = {
+	description: "Broadcast local omp session screens and chat to your public live channel",
+} satisfies CommandMetadata;
+
 export const tinyModelsHelp = {
-	description: "Download tiny local models (session titles + memory)",
+	description: "Download tiny local models (session titles, memory, word completion)",
 } satisfies CommandMetadata;
 
 export const tokenHelp = { description: "Get the API key or OAuth token for a provider" } satisfies CommandMetadata;
+
+export const toksHelp = {
+	description: "Count a file or text with every embedded offline tokenizer (OpenAI, Claude, Qwen, …)",
+} satisfies CommandMetadata;
 
 export const ttsrHelp = {
 	description: "Inspect and test Time-Traveling Stream Rules (TTSR)",
@@ -126,5 +199,5 @@ export const usageHelp = {
 } satisfies CommandMetadata;
 
 export const worktreeHelp = {
-	description: "List or clear agent-managed git worktrees (~/.omp/wt)",
+	description: "List or clear managed Git and ovnfs worktrees, or add a linked Git worktree at a path",
 } satisfies CommandMetadata;

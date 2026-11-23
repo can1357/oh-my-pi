@@ -37,7 +37,7 @@ describe("AgentSession subscriber event order", () => {
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-event-order-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
+		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
 		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 	});
 
@@ -144,7 +144,7 @@ describe("AgentSession subscriber event order", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.enabled": false,
-			"tools.xdev": false,
+			"tools.commands": false,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 		const todo = new TodoTool({

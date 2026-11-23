@@ -7,7 +7,8 @@
  * - Convenience helpers: captureText / execText, AbortSignal, timeouts.
  */
 
-import { Process } from "@oh-my-pi/pi-natives";
+import * as os from "node:os";
+import { Process, type ProcessTerminateOptions } from "@oh-my-pi/pi-natives";
 import type { Spawn, Subprocess } from "bun";
 
 type InMask = "pipe" | "ignore" | Buffer | Uint8Array | null;
@@ -17,6 +18,8 @@ type PipedSubprocess<In extends InMask = InMask> = Subprocess<In, "pipe", "pipe"
 
 const LINUX_SUBREAPER_COMMAND_ENV = "OMP_PTREE_SUBREAPER_COMMAND";
 const LINUX_SUBREAPER_BUN_BE_BUN_ENV = "OMP_PTREE_SUBREAPER_BUN_BE_BUN";
+const SUBREAPER_KILL_WINDOW_MS = 100;
+const SUBREAPER_KILL_POLL_MS = 5;
 
 /**
  * Build the Linux child-subreaper entrypoint.
@@ -181,14 +184,22 @@ export class ChildProcess<In extends InMask = InMask> {
 	#stderrDone: Promise<void>;
 	#exited: Promise<number>;
 	#openPipeReaders = 1;
-	// Pipe reads race this cutoff only when attachTimeout() configures a
-	// command deadline. Untimed commands preserve complete EOF-based capture.
-	#drainCutoff: Promise<void>;
-	#resolveDrainCutoff: () => void;
+	// Set at the command deadline or on abort; otherwise commands keep complete
+	// EOF-based capture. Active pipe readers are cancelled at cutoff so their
+	// pending read() settles as done and partial output is kept.
+	#cutoff = false;
+	/** Readers of piped stdio; timeout and abort cancel them so pending reads settle. */
+	#pipeReaders = new Set<{ cancel(reason?: unknown): Promise<void> }>();
+	// Each registration reconciles its listener with root-exit and reader activity.
+	// Keeping the registration after idle lets a later output read re-arm the signal.
+	#abortRegistrations?: Set<() => void>;
 	#timeoutTimer?: NodeJS.Timeout;
 	#stderrStream?: ReadableStream<Uint8Array>;
 	// Termination in flight after kill(); aborted exits await it before reporting.
 	#terminating?: Promise<boolean | void>;
+	// The one stop sequence of a subreaper-supervised command; a later hard
+	// kill request ends its grace period, and any other later request is a no-op.
+	#subreaperStop?: { escalate: () => void };
 	#terminateGroup: boolean;
 	#hardKillTree: boolean;
 	// Windows has no process groups. Retaining the root's native handle pins
@@ -220,39 +231,34 @@ export class ChildProcess<In extends InMask = InMask> {
 		// Normalize Bun's exited promise into our exitReason / exitedCleanly model.
 		const { promise, resolve, reject } = Promise.withResolvers<number>();
 		this.#exited = promise;
-		const drainCutoff = Promise.withResolvers<void>();
-		this.#drainCutoff = drainCutoff.promise;
-		this.#resolveDrainCutoff = drainCutoff.resolve;
-		// The cutoff remains pending for untimed commands, preserving complete
-		// EOF-based capture. attachTimeout() resolves it at the command deadline.
 
-		const pipeCutoff = this.#drainCutoff;
 		this.#stderrDone = (async () => {
 			const reader = stderrStream.getReader();
+			this.#pipeReaders.add(reader);
 			try {
 				for (;;) {
-					const chunk = await Promise.race([
-						reader.read().then(r => ({ cutoff: false as const, r })),
-						pipeCutoff.then(() => ({ cutoff: true as const })),
-					]);
-					if (chunk.cutoff) {
+					if (this.#cutoff) {
 						await reader.cancel().catch(() => {});
 						break;
 					}
-					if (chunk.r.done) break;
-					this.#stderrChunks?.push(chunk.r.value);
-					this.#stderrTail += dec.decode(chunk.r.value, { stream: true });
+					const r = await reader.read();
+					if (r.done) break;
+					this.#stderrChunks?.push(r.value);
+					this.#stderrTail += dec.decode(r.value, { stream: true });
 					trim();
 				}
 			} catch {}
+			this.#pipeReaders.delete(reader);
 			this.#openPipeReaders--;
 			this.#stderrTail += dec.decode();
 			trim();
+			this.#syncAbortListeners();
 		})();
 
 		proc.exited
 			.catch(() => null)
 			.then(async exitCode => {
+				this.#syncAbortListeners();
 				if (this.#exitReasonPending) {
 					this.#exitReason = this.#exitReasonPending;
 					reject(this.#exitReasonPending);
@@ -340,14 +346,31 @@ export class ChildProcess<In extends InMask = InMask> {
 			// group leader; wait() still needs to report the later deadline.
 			if (this.proc.exitCode !== null) this.#exitReason = reason;
 		}
-		if (gracefulMs !== undefined && gracefulMs < 0 && this.#hardKillTree && this.proc.exitCode === null) {
-			// terminate() sends its polite wave to the root before rebuilding the
-			// hard-kill tree. A subreaper root can die in that gap and release its
-			// adopted descendants, so snapshot and hard-kill the live tree first.
-			const root = Process.fromPid(this.proc.pid);
+		// A command under the Linux subreaper is stopped without ever signalling
+		// the subreaper politely: SIGTERM would end it, its orphaned descendants
+		// would reparent to init, and the SIGKILL that follows would not find a
+		// descendant that ignored SIGTERM. One stop sequence serves every kill
+		// request; a hard request during its grace period ends the grace early.
+		if (this.#subreaperStop) {
+			if (gracefulMs !== undefined && gracefulMs < 0) this.#subreaperStop.escalate();
+			return;
+		}
+		if (this.#hardKillTree && this.proc.exitCode === null && this.proc.signalCode === null) {
+			let root: Process | null = null;
+			try {
+				root = Process.fromPid(this.proc.pid);
+			} catch {
+				// No usable native handle: the direct-signal fallback below still ends the subreaper.
+			}
 			if (root) {
-				root.killTree(9);
-				this.#terminating = Promise.resolve();
+				const { promise: escalated, resolve: escalate } = Promise.withResolvers<void>();
+				const graceMs = gracefulMs === undefined ? 1000 : gracefulMs;
+				if (graceMs < 0) escalate();
+				// A stop that fails part-way (a native handle that cannot be used)
+				// must not count as a finished termination: signal the subreaper directly.
+				const stop = this.#stopSubreaperTree(root, graceMs, escalated).catch(() => this.#signalChild(graceMs));
+				this.#subreaperStop = { escalate };
+				this.#terminating = stop;
 				return;
 			}
 		}
@@ -380,16 +403,116 @@ export class ChildProcess<In extends InMask = InMask> {
 						? { group: true }
 						: undefined
 					: { gracefulMs, group: this.#terminateGroup };
-			this.#terminating = (this.#windowsRootProcess ?? Process.fromPid(this.proc.pid))
-				?.terminate(options)
-				?.catch(e => void e);
+			this.#terminating = this.#terminateTree(options);
+		}
+	}
+
+	/**
+	 * Native tree termination. A native handle that cannot be resolved or used
+	 * — the PID left the process table, or a `bun test --isolate` realm whose
+	 * napi classes another realm superseded ("Value is not an instance of class
+	 * `Process`") — must not leave the child running, so signal it directly.
+	 */
+	#terminateTree(options: ProcessTerminateOptions | undefined): Promise<boolean | void> {
+		const gracefulMs = options?.gracefulMs ?? 1000;
+		try {
+			const root = this.#windowsRootProcess ?? Process.fromPid(this.proc.pid);
+			if (root) return root.terminate(options).catch(() => this.#signalChild(gracefulMs));
+		} catch {}
+		return this.#signalChild(gracefulMs);
+	}
+
+	/** SIGTERM the child (its group when it leads one), then SIGKILL if it outlives `gracefulMs`. */
+	async #signalChild(gracefulMs: number): Promise<void> {
+		const signal = (name: NodeJS.Signals) => {
+			try {
+				if (this.#terminateGroup && process.platform !== "win32") process.kill(-this.proc.pid, name);
+				else this.proc.kill(name);
+			} catch {}
+		};
+		if (gracefulMs >= 0) {
+			signal("SIGTERM");
+			await Promise.race([this.proc.exited, Bun.sleep(gracefulMs)]);
+		}
+		if (this.proc.exitCode === null && this.proc.signalCode === null) signal("SIGKILL");
+	}
+
+	/**
+	 * Stop a subreaper-supervised command: SIGTERM to each of the subreaper's
+	 * children and their trees (never the subreaper itself), then, after
+	 * `gracefulMs`, the subreaper's own exit, or `escalated`, the hard sweep.
+	 * A negative `gracefulMs` skips the SIGTERM; zero sends it and sweeps at once.
+	 * The subreaper stays alive through the grace period, so a descendant
+	 * orphaned in it is still the subreaper's child when the sweep runs.
+	 *
+	 * A subreaper with no child has not launched the command yet (or the
+	 * command has ended). It is looked at again while frozen with SIGSTOP and,
+	 * when still childless, killed, so a command cancelled before its launch
+	 * never starts. Freeze, kill and resume all go through `root`, the native
+	 * handle pinned to the subreaper's identity, never through the numeric pid:
+	 * once the subreaper has been reaped and its pid reused, they signal
+	 * nothing. The resume runs on every way out of the frozen section,
+	 * including a throw; it is a no-op on a killed subreaper. The grace timer is
+	 * cleared as soon as the sequence moves on, so a finished stop never keeps
+	 * the caller's process alive.
+	 */
+	async #stopSubreaperTree(root: Process, gracefulMs: number, escalated: Promise<void>): Promise<void> {
+		let children = root.children();
+		if (children.length === 0) {
+			try {
+				root.killTree(os.constants.signals.SIGSTOP);
+				children = root.children();
+				if (children.length === 0) {
+					root.killTree(9);
+					return;
+				}
+				// It launched the command just before the freeze: the first wave
+				// goes to the snapshot taken while it cannot fork.
+				for (const child of children) child.killTree(gracefulMs < 0 ? 9 : 15);
+			} finally {
+				root.killTree(os.constants.signals.SIGCONT);
+			}
+		} else {
+			// The subreaper launches one command; once it has a child, no later launch can escape the snapshot.
+			for (const child of children) child.killTree(gracefulMs < 0 ? 9 : 15);
+		}
+		if (gracefulMs >= 0) {
+			const { promise: graceOver, resolve: endGrace } = Promise.withResolvers<void>();
+			const graceTimer = setTimeout(endGrace, gracefulMs);
+			try {
+				await Promise.race([this.proc.exited, graceOver, escalated]);
+			} finally {
+				clearTimeout(graceTimer);
+			}
+		}
+		await this.#hardKillSubreaperTree(root);
+	}
+
+	async #hardKillSubreaperTree(root: Process): Promise<void> {
+		try {
+			const deadline = Date.now() + SUBREAPER_KILL_WINDOW_MS;
+			let emptySweeps = 0;
+			while (emptySweeps < 2 && Date.now() < deadline) {
+				const children = root.children();
+				if (children.length === 0) {
+					emptySweeps++;
+				} else {
+					emptySweeps = 0;
+					for (const child of children) child.killTree(9);
+				}
+				if (emptySweeps < 2) await Bun.sleep(SUBREAPER_KILL_POLL_MS);
+			}
+		} finally {
+			root.killTree(9);
 		}
 	}
 
 	// ── Output helpers ───────────────────────────────────────────────────
 
 	async #throwIfAborted(): Promise<void> {
-		const exitReason = this.exitReason;
+		// A kill() issued before Bun reports the root's exit only records the
+		// reason as pending; output readers that do not wait for exit must still see it.
+		const exitReason = this.#exitReason ?? this.#exitReasonPending;
 		if (!exitReason?.aborted) return;
 		if (this.#terminating) await this.#terminating;
 		throw exitReason;
@@ -404,59 +527,61 @@ export class ChildProcess<In extends InMask = InMask> {
 	}
 
 	/**
-	 * Read a pipe fully, stopping early only at an explicit command deadline.
+	 * Read a pipe fully, stopping early only at an explicit command deadline or abort.
 	 */
 	async #readStream(stream: ReadableStream<Uint8Array>): Promise<string> {
-		this.#openPipeReaders++;
 		const reader = stream.getReader();
+		this.#openPipeReaders++;
+		this.#pipeReaders.add(reader);
+		this.#syncAbortListeners();
 		const dec = new TextDecoder();
 		let out = "";
 		try {
 			for (;;) {
-				const chunk = await Promise.race([
-					reader.read().then(r => ({ cutoff: false as const, r })),
-					this.#drainCutoff.then(() => ({ cutoff: true as const })),
-				]);
-				if (chunk.cutoff) {
+				if (this.#cutoff) {
 					await reader.cancel().catch(() => {});
 					break;
 				}
-				if (chunk.r.done) break;
-				out += dec.decode(chunk.r.value, { stream: true });
+				const r = await reader.read();
+				if (r.done) break;
+				out += dec.decode(r.value, { stream: true });
 			}
 		} catch {
 			// A cancelled or failed read keeps whatever was already collected.
 		}
+		const tail = dec.decode();
+		this.#pipeReaders.delete(reader);
 		this.#openPipeReaders--;
-		return out + dec.decode();
+		this.#syncAbortListeners();
+		return out + tail;
 	}
 
-	async #readBytes(): Promise<Uint8Array> {
+	async #readBytes(): Promise<Uint8Array<ArrayBuffer>> {
 		const reader = this.proc.stdout.getReader();
 		this.#openPipeReaders++;
+		this.#pipeReaders.add(reader);
+		this.#syncAbortListeners();
 		const chunks: Uint8Array[] = [];
 		let length = 0;
 		try {
 			for (;;) {
-				const chunk = await Promise.race([
-					reader.read().then(r => ({ cutoff: false as const, r })),
-					this.#drainCutoff.then(() => ({ cutoff: true as const })),
-				]);
-				if (chunk.cutoff) {
+				if (this.#cutoff) {
 					await reader.cancel().catch(() => {});
 					break;
 				}
-				if (chunk.r.done) break;
-				chunks.push(chunk.r.value);
-				length += chunk.r.value.byteLength;
+				const r = await reader.read();
+				if (r.done) break;
+				chunks.push(r.value);
+				length += r.value.byteLength;
 			}
 		} catch {
 			// A cancelled or failed read keeps whatever was already collected.
 		} finally {
+			this.#pipeReaders.delete(reader);
 			this.#openPipeReaders--;
 			reader.releaseLock();
+			this.#syncAbortListeners();
 		}
-
 		const bytes = new Uint8Array(length);
 		let offset = 0;
 		for (const chunk of chunks) {
@@ -466,7 +591,7 @@ export class ChildProcess<In extends InMask = InMask> {
 		return bytes;
 	}
 
-	async #readOutputBytes(waitForCleanExit = false): Promise<Uint8Array> {
+	async #readOutputBytes(waitForCleanExit = false): Promise<Uint8Array<ArrayBuffer>> {
 		const p = this.#readBytes();
 		if (this.#nothrow) return p;
 		const bytes = waitForCleanExit ? (await Promise.all([p, this.exitedCleanly]))[0] : await p;
@@ -483,7 +608,7 @@ export class ChildProcess<In extends InMask = InMask> {
 	}
 
 	async arrayBuffer(): Promise<ArrayBuffer> {
-		return (await this.#readOutputBytes()).buffer as ArrayBuffer;
+		return (await this.#readOutputBytes()).buffer;
 	}
 
 	async bytes(): Promise<Uint8Array> {
@@ -538,10 +663,43 @@ export class ChildProcess<In extends InMask = InMask> {
 	// ── Signal / timeout ─────────────────────────────────────────────────
 
 	attachSignal(signal: AbortSignal): void {
-		const onAbort = () => this.kill(new AbortError(signal.reason, "<cancelled>"));
-		if (signal.aborted) return void onAbort();
-		signal.addEventListener("abort", onAbort, { once: true });
-		this.#exited.catch(() => {}).finally(() => signal.removeEventListener("abort", onAbort));
+		this.#exited.catch(() => {});
+		let attached = false;
+		const onAbort = () => {
+			// The { once: true } listener has removed itself at this point.
+			attached = false;
+			const rootRunning = this.proc.exitCode === null && this.proc.signalCode === null;
+			if (rootRunning || this.#openPipeReaders > 0) {
+				this.#abortRegistrations?.delete(sync);
+			}
+			this.kill(new AbortError(signal.reason, "<cancelled>"));
+			this.#cutoffOutput();
+		};
+		const sync = () => {
+			const rootRunning = this.proc.exitCode === null && this.proc.signalCode === null;
+			const active = rootRunning || this.#openPipeReaders > 0;
+			if (signal.aborted) {
+				if (active) onAbort();
+				return;
+			}
+			if (active === attached) return;
+			if (active) signal.addEventListener("abort", onAbort, { once: true });
+			else signal.removeEventListener("abort", onAbort);
+			attached = active;
+		};
+		(this.#abortRegistrations ??= new Set()).add(sync);
+		if (signal.aborted) onAbort();
+		else sync();
+	}
+
+	#syncAbortListeners(): void {
+		if (!this.#abortRegistrations) return;
+		for (const sync of this.#abortRegistrations) sync();
+	}
+
+	#cutoffOutput(): void {
+		this.#cutoff = true;
+		for (const reader of this.#pipeReaders) reader.cancel().catch(() => {});
 	}
 
 	#clearTimeout(): void {
@@ -551,7 +709,9 @@ export class ChildProcess<In extends InMask = InMask> {
 	}
 
 	attachTimeout(ms: number): void {
-		if (ms <= 0 || this.proc.killed) return;
+		// Not skipped for a root Bun already reports as exited (`proc.killed`): it can
+		// exit before spawn() returns, while a descendant still holds its pipes.
+		if (ms <= 0) return;
 		this.#exited.catch(() => {});
 		// One unref'd deadline controls both termination and pipe collection.
 		// A clean command clears it in wait(), so fast invocations do not hold
@@ -566,7 +726,7 @@ export class ChildProcess<In extends InMask = InMask> {
 			) {
 				this.kill(new TimeoutError(ms, this.#stderrTail), -1);
 			}
-			this.#resolveDrainCutoff();
+			this.#cutoffOutput();
 		}, ms);
 		timer.unref?.();
 		this.#timeoutTimer = timer;
@@ -605,6 +765,8 @@ function spawnInternal<In extends InMask = InMask>(
 ): ChildProcess<In> {
 	const { timeout = -1, signal, stderr, detached, subreaper = false, ...rest } = opts ?? {};
 	const useSubreaper = subreaper && process.platform === "linux";
+	// Bun.spawn's own default is the startup environment, which misses values
+	// omp loads from its `.env` files into `Bun.env` afterwards.
 	const commandEnv = rest.env ?? Bun.env;
 	const child = Bun.spawn(useSubreaper ? [process.execPath, "-e", LINUX_SUBREAPER_SCRIPT] : cmd, {
 		stdin: "ignore",
@@ -620,7 +782,7 @@ function spawnInternal<In extends InMask = InMask>(
 					[LINUX_SUBREAPER_COMMAND_ENV]: JSON.stringify(cmd),
 					[LINUX_SUBREAPER_BUN_BE_BUN_ENV]: commandEnv.BUN_BE_BUN,
 				}
-			: rest.env,
+			: commandEnv,
 	});
 	const cp = new ChildProcess(child, stderr === "full", retainFullStderr, detached === true, useSubreaper);
 	if (signal) cp.attachSignal(signal);

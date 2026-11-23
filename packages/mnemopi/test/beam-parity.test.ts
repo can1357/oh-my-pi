@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,7 +21,28 @@ function closeAndRemoveAll(): void {
 	}
 }
 
-afterEach(closeAndRemoveAll);
+// Recall scoring reads these on every recall; the default-order assertions must not see a caller's overrides.
+const VERACITY_WEIGHT_VARS = [
+	"MNEMOPI_STATED_WEIGHT",
+	"MNEMOPI_INFERRED_WEIGHT",
+	"MNEMOPI_TOOL_WEIGHT",
+	"MNEMOPI_IMPORTED_WEIGHT",
+	"MNEMOPI_UNKNOWN_WEIGHT",
+] as const;
+const savedVeracityWeights = Object.fromEntries(VERACITY_WEIGHT_VARS.map(name => [name, process.env[name]]));
+
+beforeEach(() => {
+	for (const name of VERACITY_WEIGHT_VARS) delete process.env[name];
+});
+
+afterEach(() => {
+	closeAndRemoveAll();
+	for (const name of VERACITY_WEIGHT_VARS) {
+		const value = savedVeracityWeights[name];
+		if (value === undefined) delete process.env[name];
+		else process.env[name] = value;
+	}
+});
 
 describe("Beam TS parity integration", () => {
 	it("constructs on string DB paths, creates parents, remembers, and recalls from an isolated file DB", async () => {

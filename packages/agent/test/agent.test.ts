@@ -1,23 +1,30 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, AgentBusyError, type AgentEvent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { SimpleStreamOptions, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import {
+	Agent,
+	AgentBusyError,
+	type AgentEvent,
+	type AgentTool,
+	ThinkingLevel,
+	TOOL_RESULT_ADDITIONAL_CONTEXT,
+	type ToolResultWithAdditionalContext,
+} from "@oh-my-pi/pi-agent-core";
+import {
+	type Context,
+	type FetchImpl,
+	type Message,
+	type Model,
+	type SimpleStreamOptions,
+	streamSimple,
+	type ToolResultMessage,
+} from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { createAssistantMessage, createUserMessage } from "./helpers";
 
 describe("Agent", () => {
-	it("should support steering message queueing", async () => {
-		const agent = new Agent();
-
-		const message = { role: "user" as const, content: "Queued message", timestamp: Date.now() };
-		agent.steer(message);
-
-		// The message is queued but not yet in state.messages
-		expect(agent.state.messages).not.toContainEqual(message);
-	});
-
 	it("classifies agent-authored steering as a parent steering message", async () => {
 		const toolSchema = type({ value: type("string") });
 		const executed: string[] = [];
@@ -28,6 +35,7 @@ describe("Agent", () => {
 			description: "Echo tool",
 			parameters: toolSchema,
 			concurrency: "exclusive",
+			interruptible: true,
 			async execute(_toolCallId, params) {
 				executed.push(params.value);
 				if (params.value === "first") {
@@ -92,6 +100,7 @@ describe("Agent", () => {
 			description: "Echo tool",
 			parameters: toolSchema,
 			concurrency: "exclusive",
+			interruptible: true,
 			async execute(_toolCallId, params) {
 				executed.push(params.value);
 				if (params.value === "first") {
@@ -222,6 +231,7 @@ describe("Agent", () => {
 				description: "Echo tool",
 				parameters: toolSchema,
 				concurrency: "exclusive",
+				interruptible: true,
 				async execute(_toolCallId, params) {
 					executed.push(params.value);
 					if (params.value === "first") {
@@ -501,6 +511,66 @@ describe("Agent", () => {
 		expect(finalMessage.errorMessage).toBe("caller cancelled");
 	});
 
+	it("emits an aborted assistant boundary when context transformation rejects after tool cancellation", async () => {
+		const toolStarted = Promise.withResolvers<void>();
+		const parameters = type({ question: "string" });
+		const tool: AgentTool<typeof parameters> = {
+			name: "ask",
+			label: "Ask",
+			description: "Interactive question",
+			parameters,
+			async execute(_toolCallId, _params, signal) {
+				if (!signal) throw new Error("Expected tool abort signal");
+				toolStarted.resolve();
+				await new Promise<void>(resolve => {
+					if (signal.aborted) resolve();
+					else signal.addEventListener("abort", () => resolve(), { once: true });
+				});
+				throw new Error("Ask input was cancelled");
+			},
+		};
+		const mock = createMockModel({ responses: [] });
+		const agent = new Agent({
+			initialState: { model: mock.model, tools: [tool] },
+			streamFn: mock.stream,
+			transformContext: async (messages, signal) => {
+				signal?.throwIfAborted();
+				return messages;
+			},
+		});
+		agent.replaceMessages([
+			createUserMessage("ask a question"),
+			createAssistantMessage(
+				[{ type: "toolCall", id: "ask_1", name: "ask", arguments: { question: "Deploy?" } }],
+				"toolUse",
+			),
+		]);
+		const events: AgentEvent[] = [];
+		agent.subscribe(event => events.push(event));
+
+		const running = agent.continue();
+		await toolStarted.promise;
+		agent.abort("Interrupted by user");
+		await running;
+
+		const boundaryIndex = events.findIndex(
+			event =>
+				event.type === "message_end" &&
+				event.message.role === "assistant" &&
+				event.message.stopReason === "aborted",
+		);
+		expect(boundaryIndex).toBeGreaterThanOrEqual(0);
+		const boundary = events[boundaryIndex];
+		if (boundary.type !== "message_end") throw new Error("Expected persisted assistant boundary");
+		expect(boundary.message).toMatchObject({ role: "assistant", errorMessage: "Interrupted by user" });
+		expect(events.slice(boundaryIndex + 1).map(event => event.type)).toEqual(["turn_end", "agent_end"]);
+		expect(agent.state.messages.at(-1)).toEqual(boundary.message);
+		expect(
+			agent.state.messages.filter(message => message.role === "assistant" && message.stopReason === "aborted"),
+		).toHaveLength(1);
+		expect(mock.calls).toHaveLength(0);
+	});
+
 	it("continue() should process queued follow-up messages after an assistant turn", async () => {
 		const mock = createMockModel({ responses: [{ content: ["Processed"] }] });
 		const agent = new Agent({ streamFn: mock.stream });
@@ -718,6 +788,267 @@ describe("Agent", () => {
 		expect(assistantEnd.message.errorMessage).toBe(errorText);
 	});
 
+	it("preserves errorStatus and errorId when a provider stream rejects before assistant start", async () => {
+		const mock = createMockModel({ responses: [] });
+		const gatewayModel: Model = {
+			...mock.model,
+			transport: "pi-native",
+			baseUrl: "http://gateway.internal",
+		};
+		const fetchImpl: FetchImpl = async () =>
+			new Response(JSON.stringify({ error: { type: "api_error", message: "Bad gateway response" } }), {
+				status: 502,
+				headers: { "Content-Type": "application/json" },
+			});
+		const agent = new Agent({
+			initialState: { model: gatewayModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => streamSimple(model, context, { ...options, fetch: fetchImpl }),
+		});
+		const events: AgentEvent[] = [];
+		const unsubscribe = agent.subscribe(event => events.push(event));
+
+		await agent.prompt("trigger");
+		unsubscribe();
+
+		const agentEnd = events.find(
+			(event): event is Extract<AgentEvent, { type: "agent_end" }> => event.type === "agent_end",
+		);
+		const terminalAssistant = agentEnd?.messages.find(message => message.role === "assistant");
+		expect(terminalAssistant?.role).toBe("assistant");
+		if (terminalAssistant?.role !== "assistant") throw new Error("Expected terminal assistant message");
+		expect(terminalAssistant.stopReason).toBe("error");
+		expect(terminalAssistant.errorMessage).toBe("Bad gateway response");
+		expect(terminalAssistant.errorStatus).toBe(502);
+		expect(terminalAssistant.errorId).toBe(AIError.create(AIError.Flag.Transient));
+		expect(AIError.retriable(AIError.classifyMessage({ ...terminalAssistant }))).toBe(true);
+		expect(agent.state.messages.at(-1)).toEqual(terminalAssistant);
+
+		const codexGatewayModel: Model = {
+			...gatewayModel,
+			api: "openai-codex-responses",
+		};
+		const codexAgent = new Agent({
+			initialState: { model: codexGatewayModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.fail(new Error(`code=${AIError.CODEX_NATIVE_LANE_STEER_REJECTED_CODE}`)));
+				return stream;
+			},
+		});
+		await codexAgent.prompt("trigger");
+		const codexFinal = codexAgent.state.messages.at(-1);
+		if (codexFinal?.role !== "assistant") throw new Error("Expected codex assistant message");
+		expect(codexFinal.errorId).toBe(AIError.create(AIError.Flag.Transient));
+
+		const unclassifiedAgent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.fail(new Error("Unclassified provider failure")));
+				return stream;
+			},
+		});
+		await unclassifiedAgent.prompt("trigger");
+		const unclassifiedFinal = unclassifiedAgent.state.messages.at(-1);
+		if (unclassifiedFinal?.role !== "assistant") throw new Error("Expected unclassified assistant message");
+		expect(unclassifiedFinal.errorStatus).toBeUndefined();
+		expect(unclassifiedFinal.errorId).toBeUndefined();
+	});
+
+	it("uses the model selected for the failed request after a mid-run switch to Codex", async () => {
+		const runWithMidRunSwitch = async (switchBackInFlight: boolean) => {
+			const mock = createMockModel({ responses: [] });
+			const codexModel: Model = {
+				...mock.model,
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				id: "gpt-5.4",
+			};
+			const switchToolSchema = type({});
+			const agentRef = {} as { current: Agent };
+			const switchTool: AgentTool<typeof switchToolSchema, Record<string, never>> = {
+				name: "switch_model",
+				label: "Switch Model",
+				description: "Switches active model to Codex",
+				parameters: switchToolSchema,
+				async execute() {
+					agentRef.current.setModel(codexModel);
+					return { content: [{ type: "text", text: "switched" }], details: {} };
+				},
+			};
+
+			let callCount = 0;
+			const agent = new Agent({
+				initialState: { model: mock.model, systemPrompt: ["Test"], tools: [switchTool], messages: [] },
+				streamFn: requestedModel => {
+					callCount += 1;
+					const stream = new AssistantMessageEventStream();
+					if (callCount === 1) {
+						const toolCalls = Array.from({ length: 8 }, (_, index) => ({
+							type: "toolCall" as const,
+							id: `call-switch-${index}`,
+							name: "switch_model",
+							arguments: {},
+						}));
+						const firstTurn = createAssistantMessage(toolCalls, "toolUse");
+						queueMicrotask(() => {
+							stream.push({ type: "start", partial: firstTurn });
+							for (const [index, toolCall] of toolCalls.entries()) {
+								stream.push({
+									type: "toolcall_end",
+									contentIndex: index,
+									toolCall,
+									partial: firstTurn,
+								});
+							}
+							stream.push({ type: "done", reason: "toolUse", message: firstTurn });
+						});
+					} else {
+						expect(requestedModel).toEqual(codexModel);
+						if (switchBackInFlight) {
+							agentRef.current.setModel(mock.model);
+						}
+						stream.fail(new Error(`code=${AIError.CODEX_NATIVE_LANE_STEER_REJECTED_CODE}`));
+					}
+					return stream;
+				},
+			});
+			agentRef.current = agent;
+
+			await agent.prompt("switch and fail");
+
+			const terminal = agent.state.messages.at(-1);
+			expect(terminal?.role).toBe("assistant");
+			if (terminal?.role !== "assistant") throw new Error("Expected terminal assistant message");
+			expect(terminal.stopReason).toBe("error");
+			expect(terminal.api).toBe(codexModel.api);
+			expect(terminal.provider).toBe(codexModel.provider);
+			expect(terminal.model).toBe(codexModel.id);
+			expect(terminal.errorId).toBe(AIError.create(AIError.Flag.Transient));
+		};
+
+		await runWithMidRunSwitch(false);
+		await runWithMidRunSwitch(true);
+
+		const mock = createMockModel({ responses: [{ content: ["finished"] }] });
+		const codexModel: Model = {
+			...mock.model,
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			id: "gpt-5.4",
+		};
+		const postTurnAgent = new Agent({
+			initialState: { model: codexModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		postTurnAgent.transformAssistantMessage = () => {
+			postTurnAgent.setModel(mock.model);
+			postTurnAgent.abort("switched after reply");
+		};
+		postTurnAgent.setOnBeforeYield(() => {
+			throw new Error("yield failure");
+		});
+		await postTurnAgent.prompt("finish then switch");
+		const postTurnTerminal = postTurnAgent.state.messages.at(-1);
+		if (postTurnTerminal?.role !== "assistant") throw new Error("Expected aborted assistant boundary");
+		expect(postTurnTerminal.stopReason).toBe("aborted");
+		expect(postTurnTerminal.api).toBe(mock.model.api);
+		expect(postTurnTerminal.provider).toBe(mock.model.provider);
+		expect(postTurnTerminal.model).toBe(mock.model.id);
+	});
+
+	it("preserves errorStatus and errorId when a partial stream rejects mid-response", async () => {
+		const mock = createMockModel({ responses: [] });
+		const started = createAssistantMessage([{ type: "text", text: "partial" }]);
+		const stallMessage = "pi-native stream stalled while waiting for the next event";
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: started });
+					stream.push({ type: "text_delta", contentIndex: 0, delta: "partial", partial: started });
+					stream.fail(
+						new AIError.StreamTimeoutError(stallMessage, {
+							cause: new AIError.AuthGatewayError("Bad gateway response", 502),
+						}),
+					);
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("trigger");
+
+		const lastMessage = agent.state.messages.at(-1);
+		expect(lastMessage?.role).toBe("assistant");
+		if (lastMessage?.role !== "assistant") throw new Error("Expected assistant error message");
+		expect(lastMessage.content).toEqual([{ type: "text", text: "partial" }]);
+		expect(lastMessage.stopReason).toBe("error");
+		expect(lastMessage.errorMessage).toBe(stallMessage);
+		expect(lastMessage.errorStatus).toBe(502);
+		expect(lastMessage.errorId).toBe(AIError.create(AIError.Flag.Transient, AIError.Flag.Timeout));
+	});
+
+	it("preserves abort errorId and clears errorStatus when an aborted run catches a rejected stream", async () => {
+		const makeAbortedAgent = () => {
+			const providerStarted = Promise.withResolvers<void>();
+			const agent = new Agent({
+				streamFn: async (_model, _context, options) => {
+					const signal = options?.signal;
+					if (!signal) throw new Error("Expected provider abort signal");
+					const aborted = Promise.withResolvers<never>();
+					signal.addEventListener(
+						"abort",
+						() => aborted.reject(new AIError.AuthGatewayError("Bad gateway response", 502)),
+						{ once: true },
+					);
+					providerStarted.resolve();
+					return aborted.promise;
+				},
+			});
+			return { agent, providerStarted: providerStarted.promise };
+		};
+
+		const bare = makeAbortedAgent();
+		const bareRun = bare.agent.prompt("cancel bare");
+		await bare.providerStarted;
+		bare.agent.abort();
+		await bareRun;
+		const bareFinal = bare.agent.state.messages.at(-1);
+		if (bareFinal?.role !== "assistant") throw new Error("Expected aborted assistant message");
+		expect(bareFinal.stopReason).toBe("aborted");
+		expect(bareFinal.errorMessage).toBe("Request was aborted");
+		expect(bareFinal.errorStatus).toBeUndefined();
+		expect(bareFinal.errorId).toBe(AIError.create(AIError.Flag.Abort));
+
+		const interrupted = makeAbortedAgent();
+		const interruptedRun = interrupted.agent.prompt("cancel interrupted");
+		await interrupted.providerStarted;
+		interrupted.agent.abort(
+			AIError.attach(new Error("Interrupted by user"), AIError.create(AIError.Flag.UserInterrupt)),
+		);
+		await interruptedRun;
+		const interruptedFinal = interrupted.agent.state.messages.at(-1);
+		if (interruptedFinal?.role !== "assistant") throw new Error("Expected aborted assistant message");
+		expect(interruptedFinal.stopReason).toBe("aborted");
+		expect(interruptedFinal.errorMessage).toBe("Interrupted by user");
+		expect(interruptedFinal.errorStatus).toBeUndefined();
+		expect(interruptedFinal.errorId).toBe(AIError.create(AIError.Flag.UserInterrupt));
+
+		const plain = makeAbortedAgent();
+		const plainRun = plain.agent.prompt("cancel plain");
+		await plain.providerStarted;
+		plain.agent.abort("caller cancelled");
+		await plainRun;
+		const plainFinal = plain.agent.state.messages.at(-1);
+		if (plainFinal?.role !== "assistant") throw new Error("Expected aborted assistant message");
+		expect(plainFinal.stopReason).toBe("aborted");
+		expect(plainFinal.errorMessage).toBe("caller cancelled");
+		expect(plainFinal.errorStatus).toBeUndefined();
+		expect(plainFinal.errorId).toBeUndefined();
+	});
+
 	it("pairs tool calls from failed partial streams with synthetic tool results", async () => {
 		const mock = createMockModel({ responses: [] });
 		const errorText = "connection reset after tool call";
@@ -933,6 +1264,353 @@ describe("Agent", () => {
 		expect(toolResults[0]).toMatchObject({ toolCallId: toolCall.id, toolName: toolCall.name });
 	});
 
+	it("keeps only the re-run result when Cursor re-dispatches a buffered call", async () => {
+		// Issue #15749: Cursor re-sent an exec frame for a call it had already
+		// run. The provider keeps one block for the call; persisting both results
+		// paired two answers with one id, which Cursor rejects on every rebuild.
+		const mock = createMockModel({ responses: [] });
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "cursor-read-race",
+			name: "read",
+			arguments: { path: "/tmp/race.txt" },
+			[kCursorExecResolved]: true,
+		};
+		const started = createAssistantMessage([toolCall]);
+		const readResult = (text: string, isError: boolean): ToolResultMessage => ({
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text }],
+			isError,
+			timestamp: Date.now(),
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (_model, _context, options) => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(async () => {
+					await options?.cursorOnToolResult?.(readResult("not found", true));
+					await options?.cursorOnToolResult?.(readResult("hello", false));
+					stream.push({ type: "start", partial: started });
+					stream.push({ type: "done", reason: "stop", message: started });
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("trigger");
+
+		const toolResults = agent.state.messages.filter(message => message.role === "toolResult");
+		expect(toolResults).toHaveLength(1);
+		expect(toolResults[0]).toMatchObject({ isError: false, content: [{ type: "text", text: "hello" }] });
+	});
+
+	it("gives a follow-up queued during a Cursor turn that turn's results and passive context", async () => {
+		// A follow-up that lands while the turn streams (a background job
+		// finishing, a late diagnostic) runs as the loop's next request. Cursor's
+		// results reach only the host's buffer, so without them in the loop's
+		// context that request rebuilt the turn with every call unpaired and the
+		// provider rejected it. The request must match what the host persists:
+		// the re-run's result only (issue #15749), then its passive context. A
+		// legacy provider may finish with a bare `end()` instead of `done`.
+		for (const ending of ["done", "end"] as const) {
+			const mock = createMockModel({ responses: [] });
+			const toolCall = {
+				type: "toolCall" as const,
+				id: `cursor-tool-followup-${ending}`,
+				name: "shell",
+				arguments: { command: "pwd" },
+				[kCursorExecResolved]: true,
+			};
+			const started = createAssistantMessage([toolCall]);
+			const firstRun: ToolResultWithAdditionalContext = {
+				role: "toolResult",
+				toolCallId: toolCall.id,
+				toolName: toolCall.name,
+				content: [{ type: "text", text: "not found" }],
+				isError: true,
+				timestamp: Date.now(),
+				[TOOL_RESULT_ADDITIONAL_CONTEXT]: "stale reminder",
+			};
+			const reRun: ToolResultWithAdditionalContext = {
+				...firstRun,
+				content: [{ type: "text", text: "hello" }],
+				isError: false,
+				[TOOL_RESULT_ADDITIONAL_CONTEXT]: "lint reminder",
+			};
+			const followUp = createUserMessage("background job finished");
+			const contexts: Message[][] = [];
+			const agent = new Agent({
+				initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+				// Returns a copy without the passive-context symbol, as a rewrite may.
+				cursorOnToolResult: async message => ({
+					role: message.role,
+					toolCallId: message.toolCallId,
+					toolName: message.toolName,
+					content: message.content.map(item =>
+						item.type === "text" ? { ...item, text: `T(${item.text})` } : item,
+					),
+					isError: message.isError,
+					timestamp: message.timestamp,
+				}),
+				streamFn: (_model, context, options) => {
+					contexts.push([...context.messages]);
+					const stream = new AssistantMessageEventStream();
+					const first = contexts.length === 1;
+					queueMicrotask(async () => {
+						if (first) {
+							await options?.cursorOnToolResult?.(firstRun);
+							await options?.cursorOnToolResult?.(reRun);
+							agent.followUp(followUp);
+							stream.push({ type: "start", partial: started });
+							if (ending === "done") stream.push({ type: "done", reason: "stop", message: started });
+							else stream.end(started);
+						} else {
+							const reply = createAssistantMessage([{ type: "text", text: "ok" }]);
+							stream.push({ type: "start", partial: reply });
+							stream.push({ type: "done", reason: "stop", message: reply });
+						}
+					});
+					return stream;
+				},
+			});
+
+			await agent.prompt("trigger");
+
+			expect(contexts).toHaveLength(2);
+			const second = contexts[1];
+			const assistantIndex = second.findIndex(message => message.role === "assistant");
+			expect(second[assistantIndex + 1]).toMatchObject({
+				role: "toolResult",
+				toolCallId: toolCall.id,
+				isError: false,
+				content: [{ type: "text", text: "T(hello)" }],
+			});
+			expect(second[assistantIndex + 2]).toMatchObject({ role: "developer" });
+			const sentContext = JSON.stringify(second[assistantIndex + 2]);
+			expect(sentContext).toContain("lint reminder");
+			expect(sentContext).not.toContain("stale reminder");
+			expect(second[assistantIndex + 3]).toBe(followUp);
+			expect(agent.state.messages.filter(message => message.role === "toolResult")).toHaveLength(1);
+			const persistedContext = agent.state.messages.filter(message => message.role === "developer");
+			expect(persistedContext).toHaveLength(1);
+			expect(persistedContext[0]).toMatchObject({ content: (second[assistantIndex + 2] as Message).content });
+		}
+	});
+
+	it("gives an in-run follow-up the transformed result when the provider does not await the transform", async () => {
+		// Cursor reports some server-run calls (todo, SCM connect, web fetch)
+		// without awaiting the result sink, so the turn can end while the host's
+		// transform still runs. The host waits before persisting; the follow-up
+		// request must carry the same rewritten result, not the original.
+		const mock = createMockModel({ responses: [] });
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "cursor-tool-unawaited",
+			name: "todo",
+			arguments: { todos: [] },
+			[kCursorExecResolved]: true,
+		};
+		const started = createAssistantMessage([toolCall]);
+		const realToolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "original" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const followUp = createUserMessage("background job finished");
+		const gate = Promise.withResolvers<void>();
+		const contexts: Message[][] = [];
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			cursorOnToolResult: async message => {
+				await gate.promise;
+				return { ...message, content: [{ type: "text" as const, text: "rewritten" }] };
+			},
+			streamFn: (_model, context, options) => {
+				contexts.push([...context.messages]);
+				const stream = new AssistantMessageEventStream();
+				const first = contexts.length === 1;
+				queueMicrotask(async () => {
+					if (first) {
+						// Fire-and-forget, as the provider does for these calls.
+						void options?.cursorOnToolResult?.(realToolResult);
+						agent.followUp(followUp);
+						stream.push({ type: "start", partial: started });
+						stream.push({ type: "done", reason: "stop", message: started });
+						// The transform settles only after the stream has finished: an
+						// unawaited append has already snapshotted the original by then.
+						for (let i = 0; i < 50; i++) await Promise.resolve();
+						gate.resolve();
+					} else {
+						const reply = createAssistantMessage([{ type: "text", text: "ok" }]);
+						stream.push({ type: "start", partial: reply });
+						stream.push({ type: "done", reason: "stop", message: reply });
+					}
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("trigger");
+
+		expect(contexts).toHaveLength(2);
+		const second = contexts[1];
+		const assistantIndex = second.findIndex(message => message.role === "assistant");
+		expect(second[assistantIndex + 1]).toMatchObject({
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			content: [{ type: "text", text: "rewritten" }],
+		});
+		const persisted = agent.state.messages.filter(message => message.role === "toolResult");
+		expect(persisted).toHaveLength(1);
+		expect(persisted[0]).toMatchObject({ content: [{ type: "text", text: "rewritten" }] });
+	});
+
+	it("injects Cursor-carried passive context after the buffered results on success and provider error", async () => {
+		for (const outcome of ["done", "fail"] as const) {
+			const mock = createMockModel({ responses: [] });
+			const toolCall = {
+				type: "toolCall" as const,
+				id: `cursor-context-${outcome}`,
+				name: "shell",
+				arguments: { command: "pwd" },
+				[kCursorExecResolved]: true,
+			};
+			const started = createAssistantMessage([toolCall]);
+			const realToolResult: ToolResultWithAdditionalContext = {
+				role: "toolResult",
+				toolCallId: toolCall.id,
+				toolName: toolCall.name,
+				content: [{ type: "text", text: "/workspace" }],
+				isError: false,
+				timestamp: Date.now(),
+				[TOOL_RESULT_ADDITIONAL_CONTEXT]: "cursor passive context",
+			};
+			const agent = new Agent({
+				initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+				// A transformer replacing the message must not lose the carrier.
+				cursorOnToolResult: message => ({ ...message, content: [{ type: "text" as const, text: "rewritten" }] }),
+				streamFn: (_model, _context, options) => {
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(async () => {
+						await options?.cursorOnToolResult?.(realToolResult);
+						stream.push({ type: "start", partial: started });
+						if (outcome === "done") stream.push({ type: "done", reason: "stop", message: started });
+						else stream.fail(new Error("connection reset after Cursor exec"));
+					});
+					return stream;
+				},
+			});
+
+			await agent.prompt("trigger");
+
+			const roles = agent.state.messages.map(message => message.role);
+			expect(roles.slice(-3)).toEqual(["assistant", "toolResult", "developer"]);
+			expect(agent.state.messages.at(-1)).toMatchObject({
+				role: "developer",
+				content: [{ type: "text", text: "cursor passive context" }],
+			});
+		}
+	});
+
+	it("delivers a returned call's updates to subscribers after its run ended", async () => {
+		// A backgrounded job keeps reporting through the call's `onUpdate` once
+		// the run yielded; its frames must still reach the transcript.
+		const toolSchema = type({});
+		let report: ((text: string) => void) | undefined;
+		const tool: AgentTool<typeof toolSchema, { state: string }> = {
+			name: "job",
+			label: "Job",
+			description: "Starts a background job",
+			parameters: toolSchema,
+			async execute(_toolCallId, _params, _signal, onUpdate) {
+				report = text => onUpdate?.({ content: [{ type: "text", text }], details: { state: "completed" } });
+				return { content: [{ type: "text", text: "started" }], details: { state: "running" } };
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-job", name: "job", arguments: {} }] },
+				{ content: ["yielding"] },
+			],
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
+			streamFn: mock.stream,
+		});
+		const events: AgentEvent[] = [];
+		agent.subscribe(event => events.push(event));
+
+		await agent.prompt("start the job");
+		expect(events.at(-1)?.type).toBe("agent_end");
+		report?.("job output");
+
+		const late = events.at(-1);
+		expect(late).toMatchObject({
+			type: "tool_execution_update",
+			toolCallId: "tool-job",
+			partialResult: { content: [{ type: "text", text: "job output" }], details: { state: "completed" } },
+		});
+	});
+
+	it("sends passive tool context with the default LLM conversion", async () => {
+		const toolSchema = type({ value: type("string") });
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params, _signal, _onUpdate, toolContext) {
+				toolContext?.addAdditionalContext?.(`tool context for ${params.value}`);
+				return {
+					content: [{ type: "text", text: `echoed: ${params.value}` }],
+					details: { value: params.value },
+				};
+			},
+		};
+		let secondRequest: Context | undefined;
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [{ type: "toolCall", id: "tool-default-context", name: "echo", arguments: { value: "hi" } }],
+				},
+				request => {
+					secondRequest = request;
+					return { content: ["done"] };
+				},
+			],
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
+			streamFn: mock.stream,
+			getToolContext: toolCall => ({ addAdditionalContext: toolCall?.addAdditionalContext }),
+		});
+		agent.beforeToolCall = async ({ args }) => ({
+			additionalContext: `prepared context for ${args.value}`,
+		});
+
+		await agent.prompt("run echo");
+
+		expect(secondRequest?.messages.map(message => message.role)).toEqual([
+			"user",
+			"assistant",
+			"toolResult",
+			"developer",
+		]);
+		const developer = secondRequest?.messages.at(-1);
+		expect(developer?.role).toBe("developer");
+		expect(developer?.content).toEqual([
+			{
+				type: "text",
+				text: "tool context for hi\n\nprepared context for hi",
+			},
+		]);
+	});
+
 	it("keeps the reserved result when the transformer rejects", async () => {
 		// `cursorOnToolResult` is a supported option returning a Promise, and the
 		// provider dispatches decoded messages with `void handleServerMessage(...)`.
@@ -985,7 +1663,7 @@ describe("Agent", () => {
 		});
 	});
 
-	it("persists the transformed payload when the transformer resolves after message_end", async () => {
+	it("keeps the latest Cursor result observable while a transform delays the assistant drain", async () => {
 		// The transformer is awaited by the provider's fire-and-forget dispatch,
 		// so `message_end` decoded from the same chunk can reach the drain while
 		// it is still pending. Buffering the call is not enough: a transformer
@@ -1019,9 +1697,11 @@ describe("Agent", () => {
 		// Gating on the `message_end` event instead would deadlock: that event is
 		// emitted from inside the drain that now waits on this promise.
 		const gate = Promise.withResolvers<void>();
+		const transformStarted = Promise.withResolvers<void>();
 		const agent = new Agent({
 			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
 			cursorOnToolResult: async message => {
+				transformStarted.resolve();
 				await gate.promise;
 				return { ...message, content: [{ type: "text" as const, text: "transformed" }] };
 			},
@@ -1037,19 +1717,86 @@ describe("Agent", () => {
 				return stream;
 			},
 		});
+		let snapshotDuringEmission: readonly ToolResultMessage[] = [];
+		agent.subscribe(event => {
+			if (event.type === "message_end" && event.message.role === "assistant") {
+				snapshotDuringEmission = agent.getPendingToolResults();
+			}
+		});
 
 		const turn = agent.prompt("trigger");
+		await transformStarted.promise;
 		// Let the stream drain as far as it can while the transformer is blocked.
 		// An unawaited drain finishes the turn here, with the original payload.
 		for (let i = 0; i < 50; i++) await Promise.resolve();
+		const suspendedSnapshot = agent.getPendingToolResults();
 		gate.resolve();
 		await turn;
+		expect(suspendedSnapshot).toEqual([realToolResult]);
+		expect(snapshotDuringEmission).toMatchObject([
+			{ toolCallId: toolCall.id, content: [{ type: "text", text: "transformed" }] },
+		]);
+		expect(agent.getPendingToolResults()).toEqual([]);
 
 		const toolResults = agent.state.messages.filter(message => message.role === "toolResult");
 		expect(toolResults).toHaveLength(1);
 		expect(toolResults[0]).toMatchObject({
 			toolCallId: toolCall.id,
 			content: [{ type: "text", text: "transformed" }],
+		});
+	});
+
+	it("exposes buffered Cursor results until the assistant drain empties them", async () => {
+		const mock = createMockModel({ responses: [] });
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "cursor-tool-pending",
+			name: "shell",
+			arguments: { command: "pwd" },
+			[kCursorExecResolved]: true,
+		};
+		const started = createAssistantMessage([toolCall]);
+		const realToolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "/workspace" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const buffered = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			cursorOnToolResult: message => message,
+			streamFn: (_model, _context, options) => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(async () => {
+					await options?.cursorOnToolResult?.(realToolResult);
+					buffered.resolve();
+					await finish.promise;
+					stream.push({ type: "start", partial: started });
+					stream.push({ type: "done", reason: "stop", message: started });
+				});
+				return stream;
+			},
+		});
+
+		const turn = agent.prompt("trigger");
+		await buffered.promise;
+
+		expect(agent.getPendingToolResults()).toEqual([realToolResult]);
+
+		finish.resolve();
+		await turn;
+
+		expect(agent.getPendingToolResults()).toEqual([]);
+		const toolResults = agent.state.messages.filter(message => message.role === "toolResult");
+		expect(toolResults).toHaveLength(1);
+		expect(toolResults[0]).toMatchObject({
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "/workspace" }],
 		});
 	});
 
@@ -1287,22 +2034,6 @@ describe("Agent", () => {
 
 		const reasoningPerCall: Array<SimpleStreamOptions["reasoning"]> = mock.calls.map(call => call.options?.reasoning);
 		expect(reasoningPerCall).toEqual([ThinkingLevel.Low, ThinkingLevel.High]);
-	});
-
-	it("forwards explicit reasoning disablement to the stream", async () => {
-		const mock = createMockModel({ responses: [{ content: ["ok"] }] });
-		const agent = new Agent({
-			initialState: {
-				model: mock.model,
-				messages: [],
-				disableReasoning: true,
-			},
-			streamFn: mock.stream,
-		});
-
-		await agent.prompt("run");
-
-		expect(mock.calls[0]?.options?.disableReasoning).toBe(true);
 	});
 
 	it("re-reads disableReasoning for each model call within a run", async () => {

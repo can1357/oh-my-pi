@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { CATEGORY_MAP, encode, PHRASE_MAP, STRUCTURAL_REPLACEMENTS } from "@oh-my-pi/pi-mnemopi/core/aaak";
+import { encode } from "@oh-my-pi/pi-mnemopi/core/aaak";
 import {
 	classifyBatch,
 	classifyMemory,
@@ -70,12 +70,6 @@ describe("typed memory classification", () => {
 });
 
 describe("AAAK encoding", () => {
-	it("exports the Python public maps", () => {
-		expect(CATEGORY_MAP.PREFERENCE).toBe("PREF");
-		expect(PHRASE_MAP["User requested "]).toBe("REQ ");
-		expect(STRUCTURAL_REPLACEMENTS).toContainEqual([" and ", "+"]);
-	});
-
 	it("compresses category prefixes, phrases, structure, and parentheses like Python", () => {
 		expect(encode("PREFERENCE: Imperial units for GPS, 12-hour time format ( 5:30 PM )")).toBe(
 			"PREF|Imperial units→GPS | 12-hour time format (5:30 PM)",
@@ -88,6 +82,14 @@ describe("AAAK encoding", () => {
 
 	it("leaves compact AAAK text unchanged and uses Python completion compaction order", () => {
 		expect(encode("PREF|dark-mode")).toBe("PREF|dark-mode");
-		expect(encode("TASK: backup working correctly, migration completed")).toBe("TASK: backup OK | migration DONEd");
+		expect(encode("TASK: backup working correctly, migration completed")).toBe("TASK: backup OK | migration DONE");
+	});
+
+	it("compacts status words and bare phrases only as whole words", () => {
+		expect(encode("The migration is incomplete; the tests completed.")).toBe(
+			"The migration is incomplete; the tests DONE.",
+		);
+		expect(encode("Networking needs a completeness check")).toBe("Networking needs a completeness check");
+		expect(encode("Nightly automations cover transcriptions")).toBe("Nightly automations cover transcriptions");
 	});
 });

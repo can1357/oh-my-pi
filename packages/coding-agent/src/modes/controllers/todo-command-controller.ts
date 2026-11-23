@@ -5,10 +5,8 @@ import {
 	markdownToPhases,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
-	type TodoItem,
-	type TodoPhase,
-	USER_TODO_EDIT_CUSTOM_TYPE,
 } from "../../tools/todo";
+import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { copyToClipboard } from "../../utils/clipboard";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import type { InteractiveModeContext } from "../types";
@@ -158,7 +156,7 @@ export class TodoCommandController {
 
 		switch (verb) {
 			case "expand":
-				if (!this.ctx.todoExpanded) this.ctx.toggleTodoExpansion();
+				this.ctx.setTodoExpanded(true);
 				return;
 			case "collapse":
 				if (this.ctx.todoExpanded) this.ctx.toggleTodoExpansion();
@@ -334,8 +332,10 @@ export class TodoCommandController {
 		const current = this.#currentPhases();
 		const trimmed = rest.trim();
 		if (!trimmed) {
-			// no-arg: apply to all
-			const { phases, errors } = applyOpsToPhases(current, [{ op }]);
+			// no-arg: apply to all. The tool refuses a bare done/drop, so every task is named.
+			const all = current.flatMap(phase => phase.tasks.map(task => task.content));
+			const { phases, errors } =
+				all.length > 0 ? applyOpsToPhases(current, [{ op, task: all }]) : { phases: current, errors: [] };
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;
@@ -444,12 +444,9 @@ export class TodoCommandController {
 	}
 
 	#commit(nextPhases: TodoPhase[], action: string, opts?: { removed?: boolean }): void {
-		// 1. In-memory + UI state
-		this.ctx.session.setTodoPhases(nextPhases);
+		// Commit first so HUD visibility binds to the new canonical source.
+		this.ctx.session.commitTodoPhases(nextPhases);
 		this.ctx.setTodos(nextPhases);
-
-		// 2. Persist for reload survival via custom session entry.
-		this.ctx.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: nextPhases });
 
 		// 3. Inject system reminder so the agent learns about the change next turn.
 		//    Removals carry explicit intent so the agent does not rebuild the

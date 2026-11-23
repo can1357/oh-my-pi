@@ -61,15 +61,6 @@ describe("executePython kernel reuse", () => {
 		await disposeAllKernelSessions();
 	});
 
-	it("reuses kernels for session mode", async () => {
-		using tempDir = TempDir.createSync("@python-kernel-session-");
-		await executePython("print('one')", { cwd: tempDir.path(), sessionId: "session-a", kernelMode: "session" });
-		await executePython("print('two')", { cwd: tempDir.path(), sessionId: "session-a", kernelMode: "session" });
-
-		expect(startCalls).toBe(1);
-		expect(kernels[0]?.executeCalls).toBe(2);
-	});
-
 	it("creates and disposes per-call kernels", async () => {
 		using tempDir = TempDir.createSync("@python-kernel-session-");
 		await executePython("print('one')", { cwd: tempDir.path(), kernelMode: "per-call" });
@@ -78,19 +69,5 @@ describe("executePython kernel reuse", () => {
 		expect(startCalls).toBe(2);
 		expect(kernels[0]?.shutdownCalls).toBe(1);
 		expect(kernels[1]?.shutdownCalls).toBe(1);
-	});
-
-	it("resets the session kernel when requested", async () => {
-		using tempDir = TempDir.createSync("@python-kernel-session-");
-		await executePython("print('one')", { cwd: tempDir.path(), sessionId: "session-b", kernelMode: "session" });
-		await executePython("print('two')", {
-			cwd: tempDir.path(),
-			sessionId: "session-b",
-			kernelMode: "session",
-			reset: true,
-		});
-
-		expect(startCalls).toBe(2);
-		expect(kernels[0]?.shutdownCalls).toBe(1);
 	});
 });

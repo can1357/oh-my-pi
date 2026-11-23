@@ -2,7 +2,9 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
+import { getSegmenter } from "@oh-my-pi/pi-tui";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue, resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -10,8 +12,11 @@ import extractInputTemplate from "../prompts/memories/sharpshooter-extract-input
 import extractSystemTemplate from "../prompts/memories/sharpshooter-extract-system.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
 import { customMessageContentText } from "../session/checkpoint-entries";
+import { journalCompletion } from "../session/model-usage-journal";
 import { appendSharpshooterDelta } from "./queue";
 import type { SharpshooterDelta, SharpshooterDeltaKind, SharpshooterDeltaSource, SharpshooterFriction } from "./types";
+
+import { cfgSharpshooterMinPromptLength, cfgSharpshooterModel } from "./settings";
 
 const SHARPSHOOTER_DELTA_KINDS = {
 	architecture_decision: true,
@@ -48,6 +53,10 @@ const recordDeltasTool = {
 
 const kExtractionInFlight = Symbol("sharpshooter.extractionInFlight");
 
+// Empty prompts never reach the length gate, so a floor of 1 filters nothing;
+// 2 is the smallest floor that still drops one-character acks ("好", "y").
+const MIN_PROMPT_LENGTH_FLOOR = 2;
+
 interface ExtractionHost extends AgentSession {
 	[kExtractionInFlight]?: Promise<void>;
 }
@@ -60,7 +69,14 @@ interface ExtractionHost extends AgentSession {
 export async function flushSharpshooterExtraction(session: AgentSession, timeoutMs = 5_000): Promise<void> {
 	const pending = (session as ExtractionHost)[kExtractionInFlight];
 	if (!pending) return;
-	await Promise.race([pending, Bun.sleep(Math.max(0, timeoutMs))]);
+	// A settled extraction must not leave the bound's timer holding the event loop open.
+	const bound = Promise.withResolvers<void>();
+	const timer = setTimeout(bound.resolve, Math.max(0, timeoutMs));
+	try {
+		await Promise.race([pending, bound.promise]);
+	} finally {
+		clearTimeout(timer);
+	}
 }
 
 export interface SharpshooterEnvelope {
@@ -152,10 +168,16 @@ export function buildSharpshooterEnvelope(
 export async function resolveSharpshooterModel(
 	settings: Settings,
 	modelRegistry: ModelRegistry,
+	provider?: string,
 ): Promise<Model | undefined> {
-	const selector = settings.get("sharpshooter.model");
+	const offline = cfgOffline.get(settings);
+	if (offline && !provider) return undefined;
+	const models = offline
+		? modelRegistry.getAll().filter(model => model.provider === provider)
+		: modelRegistry.getAll();
+	const selector = cfgSharpshooterModel.get(settings);
 	if (selector) {
-		const resolved = resolveModelRoleValue(selector, modelRegistry.getAll(), {
+		const resolved = resolveModelRoleValue(selector, models, {
 			settings,
 			matchPreferences: getModelMatchPreferences(settings),
 		});
@@ -163,7 +185,12 @@ export async function resolveSharpshooterModel(
 		logger.debug("Sharpshooter extraction model selector did not resolve", { selector });
 	}
 
-	const fallback = resolveRoleSelection(["smol"], settings, modelRegistry.getAvailable())?.model;
+	const available = modelRegistry.getAvailable();
+	const fallback = resolveRoleSelection(
+		["smol"],
+		settings,
+		offline ? available.filter(model => model.provider === provider) : available,
+	)?.model;
 	if (!fallback) logger.debug("Sharpshooter extraction skipped: no model available");
 	return fallback;
 }
@@ -183,11 +210,21 @@ export function maybeStartSharpshooterExtraction(options: {
 		const envelope = buildSharpshooterEnvelope(session.messages, options.message);
 		if (!envelope) return;
 		const trimmedPrompt = envelope.prompt.trim();
-		if (trimmedPrompt.startsWith("/") || trimmedPrompt.length < 16) return;
+		if (trimmedPrompt.startsWith("/")) return;
+		// Count user-perceived characters, not UTF-16 units: `.length` reports 2 for "👍".
+		const minLength = Math.max(MIN_PROMPT_LENGTH_FLOOR, cfgSharpshooterMinPromptLength.get(options.settings));
+		let characters = 0;
+		for (const _grapheme of getSegmenter().segment(trimmedPrompt)) {
+			if (++characters >= minLength) break;
+		}
+		if (characters < minLength) return;
 
 		const run = runSharpshooterExtraction(options, envelope)
 			.catch(error => {
-				logger.debug("Sharpshooter extraction failed", { error: String(error), sessionId: session.sessionId });
+				logger.debug("Sharpshooter extraction failed", {
+					error: String(error),
+					providerSessionId: session.sessionId,
+				});
 			})
 			.finally(() => {
 				(session as ExtractionHost)[kExtractionInFlight] = undefined;
@@ -208,25 +245,34 @@ async function runSharpshooterExtraction(
 	envelope: SharpshooterEnvelope,
 ): Promise<void> {
 	const { session, settings, modelRegistry, agentDir } = options;
-	const model = await resolveSharpshooterModel(settings, modelRegistry);
-	if (!model || session.isDisposed) return;
+	const model = await resolveSharpshooterModel(settings, modelRegistry, session.model?.provider);
+	if (!model || session.isDisposed || (cfgOffline.get(settings) && session.model?.provider !== model.provider)) return;
 
 	const input = prompt.render(extractInputTemplate, { ...envelope });
-	const response = await retryTransientCompletion(() =>
-		completeSimple(
-			model,
-			{
-				systemPrompt: [prompt.render(extractSystemTemplate)],
-				messages: [{ role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() }],
-				tools: [recordDeltasTool],
-			},
-			{
-				apiKey: modelRegistry.resolver(model),
-				maxTokens: 2048,
-				reasoning: clampThinkingLevelForModel(model, Effort.Low),
-				toolChoice: "required",
-			},
-		),
+	const journal = journalCompletion(session.sessionManager, { purpose: "sharpshooter:extract" });
+	const response = await retryTransientCompletion(
+		() => {
+			if (cfgOffline.get(settings) && session.model?.provider !== model.provider) {
+				throw new Error("Sharpshooter model provider differs from the active session provider");
+			}
+			return completeSimple(
+				model,
+				{
+					systemPrompt: [prompt.render(extractSystemTemplate)],
+					messages: [{ role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() }],
+					tools: [recordDeltasTool],
+				},
+				{
+					apiKey: modelRegistry.resolver(model, session.sessionId),
+					sessionId: session.sessionId,
+					maxTokens: 2048,
+					reasoning: clampThinkingLevelForModel(model, Effort.Low),
+					toolChoice: "required",
+					onAttempt: message => journal?.(message, input),
+				},
+			);
+		},
+		{ provider: model.provider },
 	);
 	if (response.stopReason === "error") {
 		throw new Error(response.errorMessage || "Sharpshooter extraction model error");

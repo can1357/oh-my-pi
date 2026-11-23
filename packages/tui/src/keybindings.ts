@@ -105,7 +105,7 @@ export const TUI_KEYBINDINGS = {
 		description: "Delete word backward",
 	},
 	"tui.editor.deleteWordForward": {
-		defaultKeys: ["alt+delete", "alt+d", "super+alt+delete", "super+alt+d"],
+		defaultKeys: ["alt+delete", "alt+d", "ctrl+delete", "super+alt+delete", "super+alt+d"],
 		description: "Delete word forward",
 	},
 	"tui.editor.deleteToLineStart": {

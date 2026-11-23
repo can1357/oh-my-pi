@@ -1,8 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { getDashboardStats, getFolderStats } from "@oh-my-pi/omp-stats/aggregator";
 import { initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
-import type { FolderStats, MessageStats } from "@oh-my-pi/omp-stats/types";
-import { handleApi } from "../src/server";
+import type { MessageStats } from "@oh-my-pi/omp-stats/types";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
 installStatsTestIsolation("@pi-stats-db-range-");
@@ -38,11 +37,6 @@ function makeMessage(timestamp: number, entryId: string, folder = "/tmp/project"
 	};
 }
 
-async function readFolderStats(response: Response): Promise<FolderStats[]> {
-	expect(response.status).toBe(200);
-	return response.json() as Promise<FolderStats[]>;
-}
-
 describe("getDashboardStats time range", () => {
 	it("filters dashboard stats by selected range", async () => {
 		await initDb();
@@ -64,6 +58,22 @@ describe("getDashboardStats time range", () => {
 
 		const allStats = await getDashboardStats("all");
 		expect(allStats.overall.totalRequests).toBe(2);
+	});
+
+	it("gives 2d and 3d their own windows rather than the 24h fallback", async () => {
+		await initDb();
+
+		const hour = 60 * 60 * 1000;
+		const now = Date.now();
+		insertMessageStats([
+			makeMessage(now, "now"),
+			makeMessage(now - 36 * hour, "36h-ago"),
+			makeMessage(now - 60 * hour, "60h-ago"),
+		]);
+
+		expect((await getDashboardStats("24h")).overall.totalRequests).toBe(1);
+		expect((await getDashboardStats("2d")).overall.totalRequests).toBe(2);
+		expect((await getDashboardStats("3d")).overall.totalRequests).toBe(3);
 	});
 
 	it("falls back to 24h for unknown range", async () => {
@@ -96,24 +106,5 @@ describe("getDashboardStats time range", () => {
 				expect.objectContaining({ folder: "/tmp/older-project", totalRequests: 1 }),
 			]),
 		);
-	});
-
-	it("returns range-filtered folder stats through the HTTP API", async () => {
-		const db = await initDb();
-
-		const now = Date.now();
-		insertMessageStats([
-			makeMessage(now, "api-folder-within-24h", "/tmp/current-project"),
-			makeMessage(now - 48 * 60 * 60 * 1000, "api-folder-outside-24h", "/tmp/older-project"),
-		]);
-
-		// The legacy dashboard path reads this in getStatsByAgentType; the folder query does not.
-		db.run("DROP INDEX idx_messages_timestamp_agent_type");
-		db.run("ALTER TABLE messages DROP COLUMN agent_type");
-
-		const folders = await readFolderStats(
-			await handleApi(new Request("http://stats.test/api/stats/folders?range=24h")),
-		);
-		expect(folders).toEqual([expect.objectContaining({ folder: "/tmp/current-project", totalRequests: 1 })]);
 	});
 });

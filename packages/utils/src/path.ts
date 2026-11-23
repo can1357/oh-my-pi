@@ -1,3 +1,4 @@
+import * as os from "node:os";
 import * as path from "node:path";
 
 const WINDOWS_DRIVE_PATH = /^([A-Za-z]):[\\/](.*)$/;
@@ -38,5 +39,32 @@ export function stripWindowsExtendedLengthPathPrefix(
 	const forwardDriveMatch = WINDOWS_DRIVE_EXTENDED_FORWARD_PREFIX.exec(filePath);
 	if (forwardDriveMatch) return forwardDriveMatch[1];
 
+	return filePath;
+}
+
+/**
+ * Test whether a path is fully qualified and drive-independent.
+ * On Windows, requires a drive letter with separator (e.g. `C:\`) or UNC (`\\server\share` or `//server/share`).
+ * On POSIX, requires an absolute path.
+ */
+export function isFullyQualifiedPath(filePath: string, platform: NodeJS.Platform = process.platform): boolean {
+	const p = platform === "win32" ? path.win32 : path.posix;
+	if (!p.isAbsolute(filePath)) return false;
+	if (platform === "win32") {
+		return /^[a-zA-Z]:[/\\]/.test(filePath) || /^[\\/]{2}[^\\/]/.test(filePath);
+	}
+	return true;
+}
+
+/** Expands a leading `~` (`~`, `~/…`, `~\…`, `~name`) to `home`, the user's home directory by default. */
+export function expandTilde(filePath: string, home?: string): string {
+	const h = home ?? os.homedir();
+	if (filePath === "~") return h;
+	if (filePath.startsWith("~/") || filePath.startsWith("~\\")) {
+		return h + filePath.slice(1);
+	}
+	if (filePath.startsWith("~")) {
+		return path.join(h, filePath.slice(1));
+	}
 	return filePath;
 }

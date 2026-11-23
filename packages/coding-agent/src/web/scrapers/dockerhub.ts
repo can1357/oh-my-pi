@@ -1,5 +1,5 @@
 import { tryParseJson } from "@oh-my-pi/pi-utils";
-import { formatBytes } from "../../tools/render-utils";
+import { formatBytes } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { RenderResult, SpecialHandler } from "./types";
 import { buildResult, formatIsoDate, formatNumber, loadPage } from "./types";
 

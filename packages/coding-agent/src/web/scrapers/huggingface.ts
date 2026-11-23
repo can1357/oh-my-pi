@@ -61,7 +61,9 @@ interface HfUserData {
 }
 
 /**
- * Parse Hugging Face URL and determine type
+ * Parse a Hugging Face repo root URL and determine its type.
+ * Sub-paths (`/raw/...`, `/resolve/...`, `/blob/...`, `/tree/...`, `/discussions`)
+ * return null so the generic fetcher retrieves the actual file/page.
  */
 function parseHuggingFaceUrl(url: string): {
 	type: "model" | "dataset" | "space" | "model_or_user";
@@ -75,13 +77,14 @@ function parseHuggingFaceUrl(url: string): {
 		if (parts.length === 0) return null;
 
 		// huggingface.co/datasets/{org}/{dataset} or huggingface.co/datasets/{dataset}
-		if (parts[0] === "datasets" && parts.length >= 2) {
-			const id = parts.slice(1).join("/");
-			return { type: "dataset", id };
+		if (parts[0] === "datasets") {
+			if (parts.length !== 2 && parts.length !== 3) return null;
+			return { type: "dataset", id: parts.slice(1).join("/") };
 		}
 
 		// huggingface.co/spaces/{org}/{space}
-		if (parts[0] === "spaces" && parts.length >= 3) {
+		if (parts[0] === "spaces") {
+			if (parts.length !== 3) return null;
 			return { type: "space", id: `${parts[1]}/${parts[2]}` };
 		}
 
@@ -91,8 +94,8 @@ function parseHuggingFaceUrl(url: string): {
 			return null;
 		}
 
-		// huggingface.co/{org}/{model} (two parts = definitely a model)
-		if (parts.length >= 2) {
+		// huggingface.co/{org}/{model} (exactly two parts = repo root)
+		if (parts.length === 2) {
 			return { type: "model", id: `${parts[0]}/${parts[1]}` };
 		}
 

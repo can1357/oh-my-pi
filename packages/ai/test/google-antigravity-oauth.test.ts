@@ -1,6 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA, loginAntigravity } from "../src/registry/oauth/google-antigravity";
-import * as googleOAuth from "../src/registry/oauth/google-oauth-shared";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
+import type { OAuthController } from "@oh-my-pi/pi-ai/registry/oauth/types";
+import {
+	ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA,
+	googleAntigravityProjectHook,
+} from "../src/registry/oauth/google-antigravity";
 
 const CLOUD_CODE_ASSIST_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const LOAD_CODE_ASSIST_URL = `${CLOUD_CODE_ASSIST_ENDPOINT}/v1internal:loadCodeAssist`;
@@ -14,19 +18,19 @@ function jsonResponse(body: unknown, status = 200): Response {
 	});
 }
 
-describe("Antigravity OAuth project discovery", () => {
-	beforeEach(() => {
-		vi.spyOn(googleOAuth, "runGoogleOAuthLogin").mockImplementation(async (_ctrl, config) => {
-			const projectId = await config.discoverProject("access-token");
-			return {
-				access: "access-token",
-				refresh: "refresh-token",
-				expires: 0,
-				projectId,
-			};
-		});
-	});
+async function discoverAntigravityProject() {
+	return googleAntigravityProjectHook(
+		{ access: "access-token", refresh: "refresh-token", expires: 0 },
+		{
+			provider: "google-antigravity",
+			phase: "login",
+			raw: { refresh_token: "refresh-token" },
+			fetch,
+		},
+	);
+}
 
+describe("Antigravity OAuth project discovery", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 	});
@@ -42,7 +46,7 @@ describe("Antigravity OAuth project discovery", () => {
 			.spyOn(globalThis, "fetch")
 			.mockImplementation(Object.assign(async () => jsonResponse(payload), { preconnect: fetch.preconnect }));
 
-		const credentials = await loginAntigravity({});
+		const credentials = await discoverAntigravityProject();
 
 		expect(credentials.projectId).toBe("project-123");
 		expect(fetchSpy).toHaveBeenCalledTimes(2);
@@ -53,6 +57,7 @@ describe("Antigravity OAuth project discovery", () => {
 				Authorization: "Bearer access-token",
 				"Content-Type": "application/json",
 				"User-Agent": expect.stringMatching(/^antigravity\/hub\//),
+				"Accept-Encoding": "gzip",
 			});
 			expect(JSON.parse(String(init?.body))).toEqual({
 				metadata: ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA,
@@ -87,7 +92,7 @@ describe("Antigravity OAuth project discovery", () => {
 			),
 		);
 
-		const credentials = await loginAntigravity({});
+		const credentials = await discoverAntigravityProject();
 
 		expect(credentials.projectId).toBe("project-123");
 		expect(fetchSpy).toHaveBeenCalledTimes(3);
@@ -131,7 +136,7 @@ describe("Antigravity OAuth project discovery", () => {
 			),
 		);
 
-		const credentials = await loginAntigravity({});
+		const credentials = await discoverAntigravityProject();
 
 		expect(credentials.projectId).toBe("project-123");
 		expect(fetchSpy).toHaveBeenCalledTimes(3);
@@ -174,7 +179,7 @@ describe("Antigravity OAuth project discovery", () => {
 			),
 		);
 
-		const credentials = await loginAntigravity({});
+		const credentials = await discoverAntigravityProject();
 
 		expect(credentials.projectId).toBe("project-123");
 		expect(sleepSpy).toHaveBeenCalledTimes(1);
@@ -186,6 +191,7 @@ describe("Antigravity OAuth project discovery", () => {
 			Authorization: "Bearer access-token",
 			"Content-Type": "application/json",
 			"User-Agent": expect.stringMatching(/^antigravity\/hub\//),
+			"Accept-Encoding": "gzip",
 		});
 		expect(fetchSpy.mock.calls[2]?.[1]?.body).toBeUndefined();
 		expect(fetchSpy.mock.calls.filter(([url]) => url === ONBOARD_USER_URL)).toHaveLength(1);
@@ -204,7 +210,7 @@ describe("Antigravity OAuth project discovery", () => {
 			}),
 		);
 
-		await expect(loginAntigravity({})).rejects.toThrow("This account is not eligible for the free tier.");
+		await expect(discoverAntigravityProject()).rejects.toThrow("This account is not eligible for the free tier.");
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
 		expect(fetchSpy.mock.calls[0]?.[0]).toBe(LOAD_CODE_ASSIST_URL);
 	});
@@ -214,7 +220,78 @@ describe("Antigravity OAuth project discovery", () => {
 			.spyOn(globalThis, "fetch")
 			.mockResolvedValue(new Response("created", { status: 201, statusText: "Created" }));
 
-		await expect(loginAntigravity({})).rejects.toThrow("loadCodeAssist failed: 201 Created: created");
+		await expect(discoverAntigravityProject()).rejects.toThrow("loadCodeAssist failed: 201 Created: created");
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("Antigravity OAuth login", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("registered login sends the native scopes and binds the PKCE verifier to the form token exchange", async () => {
+		let tokenForm: URLSearchParams | undefined;
+		const stub = Object.assign(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				const url = String(input instanceof Request ? input.url : input);
+				if (url === "https://oauth2.googleapis.com/token") {
+					tokenForm = new URLSearchParams(String(init?.body));
+					return jsonResponse({ access_token: "access-token", refresh_token: "refresh-token", expires_in: 3600 });
+				}
+				if (url.startsWith("https://www.googleapis.com/oauth2/v1/userinfo")) {
+					return jsonResponse({ email: "user@example.test" });
+				}
+				if (url === LOAD_CODE_ASSIST_URL) {
+					return jsonResponse({
+						currentTier: { id: "free-tier" },
+						paidTier: { id: "standard-tier" },
+						cloudaicompanionProject: "project-123",
+					});
+				}
+				return new Response(`unexpected ${url}`, { status: 500 });
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		// Project discovery runs through the shared Google transport on the global fetch.
+		vi.spyOn(globalThis, "fetch").mockImplementation(stub);
+		let authorize: URL | undefined;
+		const ctrl: OAuthController = {
+			onAuth: info => {
+				authorize = new URL(info.url);
+			},
+			onManualCodeInput: async () => {
+				const callback = new URL(authorize!.searchParams.get("redirect_uri")!);
+				callback.searchParams.set("code", "auth-code");
+				callback.searchParams.set("state", authorize!.searchParams.get("state")!);
+				return callback.href;
+			},
+			fetch: stub,
+			signal: AbortSignal.timeout(5_000),
+		};
+
+		const credentials = await getProviderDefinition("google-antigravity")!.login!(ctrl);
+		if (typeof credentials === "string") throw new Error("Expected OAuth credentials");
+
+		const params = authorize!.searchParams;
+		expect(params.get("response_type")).toBe("code");
+		expect(params.get("access_type")).toBe("offline");
+		expect(params.get("prompt")).toBe("consent");
+		expect(params.get("code_challenge_method")).toBe("S256");
+		expect(params.get("scope")?.split(" ")).toEqual([
+			"https://www.googleapis.com/auth/cloud-platform",
+			"https://www.googleapis.com/auth/userinfo.email",
+			"https://www.googleapis.com/auth/userinfo.profile",
+			"https://www.googleapis.com/auth/cclog",
+			"https://www.googleapis.com/auth/experimentsandconfigs",
+			"https://www.googleapis.com/auth/aicode",
+		]);
+		expect(tokenForm?.get("grant_type")).toBe("authorization_code");
+		expect(tokenForm?.get("code")).toBe("auth-code");
+		expect(tokenForm?.get("client_id")).toBe(params.get("client_id"));
+		expect(tokenForm?.get("client_secret")).toBeTruthy();
+		expect(tokenForm?.get("redirect_uri")).toBe(params.get("redirect_uri"));
+		expect(Bun.SHA256.hash(tokenForm!.get("code_verifier")!, "base64url")).toBe(params.get("code_challenge")!);
+		expect(credentials).toMatchObject({ access: "access-token", refresh: "refresh-token", projectId: "project-123" });
 	});
 });

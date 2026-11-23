@@ -1,9 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
+import { formatLocalRefPointer, parseLocalRefPointer } from "@oh-my-pi/omptype";
 import type { Tool, ToolCall } from "@oh-my-pi/pi-ai/types";
 import {
 	adaptSchemaForStrict,
 	arkToWireSchema,
+	dereferenceJsonSchema,
 	enforceStrictSchema,
 	isJsonSchemaValueValid,
 	isValidJsonSchema,
@@ -13,6 +15,109 @@ import {
 	tryEnforceStrictSchema,
 } from "@oh-my-pi/pi-ai/utils/schema";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
+
+describe("URI-fragment definition references", () => {
+	it("resolves percent-encoded and pointer-escaped names once across schema consumers", () => {
+		for (const defsKey of ["$defs", "definitions"]) {
+			const schema = {
+				type: "object",
+				[defsKey]: {
+					"a%2Fb /~1 空\n": { type: "string" },
+					"a/b /~1 空\n": { type: "boolean" },
+					"": { type: "integer" },
+				},
+				properties: {
+					encoded: { $ref: `#/${defsKey}/a%252Fb%20~1~01%20%E7%A9%BA%0A`, description: "encoded" },
+					raw: { $ref: `#/${defsKey}/a~1b%20~1~01%20%E7%A9%BA%0A`, description: "raw" },
+					empty: { $ref: `#/${defsKey}/`, description: "empty" },
+				},
+				required: ["encoded", "raw", "empty"],
+			};
+			const properties = {
+				encoded: { type: "string", description: "encoded" },
+				raw: { type: "boolean", description: "raw" },
+				empty: { type: "integer", description: "empty" },
+			};
+			expect(dereferenceJsonSchema(schema)).toEqual({
+				type: "object",
+				properties,
+				required: schema.required,
+			});
+			const strict = tryEnforceStrictSchema(schema);
+			expect(strict.strict).toBe(true);
+			expect(strict.schema.properties).toEqual(properties);
+			expect(strict.schema.additionalProperties).toBe(false);
+			const valid = { encoded: "valid", raw: false, empty: 2 };
+			expect(isJsonSchemaValueValid(schema, valid)).toBe(true);
+			expect(isJsonSchemaValueValid(schema, { ...valid, encoded: false })).toBe(false);
+			expect(isJsonSchemaValueValid(schema, { ...valid, raw: "invalid" })).toBe(false);
+			expect(isJsonSchemaValueValid(schema, { ...valid, empty: 2.5 })).toBe(false);
+		}
+	});
+
+	it("rewrites fully encoded draft-07 definition fragments during the upgrade", () => {
+		const schema = {
+			$schema: "http://json-schema.org/draft-07/schema#",
+			type: "object",
+			definitions: { value: { type: "string" } },
+			properties: { value: { $ref: "#%2Fdefinitions%2Fvalue" } },
+			required: ["value"],
+		};
+		const strict = tryEnforceStrictSchema(schema);
+		expect(strict.strict).toBe(true);
+		// The map rename must come with the encoded ref being rewritten to the
+		// renamed `$defs` target; a bare `$ref` stays as-is in strict output.
+		expect(strict.schema.$defs).toEqual({ value: { type: "string" } });
+		expect(strict.schema.properties).toEqual({ value: { $ref: "#/$defs/value" } });
+	});
+
+	it("normalizes enum whitespace through percent-encoded refs in tool arguments", () => {
+		const tool: Tool = {
+			name: "demo",
+			description: "",
+			parameters: {
+				type: "object",
+				$defs: { "a b": { type: "string", enum: ["x y"] } },
+				properties: { v: { $ref: "#/$defs/a%20b" } },
+				required: ["v"],
+			},
+		};
+		const result = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "call-encoded-ref",
+			name: "demo",
+			arguments: { v: "x y\n" },
+		}) as { v: string };
+		expect(result.v).toBe("x y");
+	});
+
+	it("round-trips the root fragment through the shared pointer helpers", () => {
+		expect(formatLocalRefPointer([])).toBe("#");
+		expect(parseLocalRefPointer("#")).toEqual([]);
+	});
+
+	it("preserves malformed and external refs for sanitizers but rejects unresolved values", () => {
+		for (const ref of ["#/$defs/%E0%A4%A", "https://example.com/schema#/$defs/value"]) {
+			const schema = {
+				type: "object",
+				$defs: {
+					"%": { type: "string" },
+					"%E0%A4%A": { type: "string" },
+					value: { type: "string" },
+				},
+				properties: { value: { $ref: ref, description: "unresolved" } },
+				required: ["value"],
+			};
+			expect(dereferenceJsonSchema(schema)).toEqual({
+				type: "object",
+				properties: schema.properties,
+				required: schema.required,
+			});
+			expect(sanitizeSchemaForStrictMode(schema).properties).toEqual(schema.properties);
+			expect(isJsonSchemaValueValid(schema, { value: "valid" })).toBe(false);
+		}
+	});
+});
 
 describe("sanitizeSchemaForStrictMode", () => {
 	it("infers object type, strips non-structural keywords, and converts const to enum", () => {
@@ -176,19 +281,6 @@ describe("sanitizeSchemaForStrictMode", () => {
 		expect(((objectVariant as Record<string, unknown>).anyOf as unknown[]).length).toBe(1);
 		expect(((nullVariant as Record<string, unknown>).anyOf as unknown[]).length).toBe(1);
 	});
-	it("inlines `default` value into `description` before stripping it", () => {
-		const schema = {
-			type: "number",
-			description: "Timeout in seconds",
-			default: 60,
-		} as Record<string, unknown>;
-
-		const sanitized = sanitizeSchemaForStrictMode(schema);
-
-		expect(sanitized.default).toBeUndefined();
-		expect(sanitized.description).toBe("Timeout in seconds (default: 60)");
-	});
-
 	it("preserves `default` for various primitive types when inlining", () => {
 		const numberSchema = sanitizeSchemaForStrictMode({
 			type: "number",
@@ -1055,13 +1147,71 @@ describe("adaptSchemaForStrict — unrepresentable open branches fall back to no
 		expect(adaptSchemaForStrict(schema, true).strict).toBe(false);
 	});
 
-	it("still enforces strict for fully-typed schemas (no false positives)", () => {
+	it('falls back instead of closing a bare `type("object")` property to `{}`', () => {
+		// A bare object is open in JSON Schema. Strict adaptation would close it to
+		// `properties: {}` with `additionalProperties: false`, so a strict provider
+		// accepts only `{}` or `null` for it and rejects every call that sets a field.
+		const wire = toolWireSchema({
+			name: "t",
+			description: "d",
+			parameters: type({ path: type("string"), "args?": type("object") }),
+		} as Tool);
+		const adapted = adaptSchemaForStrict(wire, true);
+		expect(adapted.strict).toBe(false);
+		expect((adapted.schema.properties as Record<string, unknown>).args).toEqual({ type: "object" });
+	});
+
+	it("falls back for a bare object property on the OpenAI Responses and Codex sanitized path", () => {
+		// OpenAI Responses requires `properties` on every object node, so its sanitizer adds
+		// `properties: {}` before strict adaptation. That placeholder must not make the bare
+		// object look declared-empty: the args node would then close to `{}` under strict.
+		const wire = toolWireSchema({
+			name: "t",
+			description: "d",
+			parameters: type({ path: type("string"), "args?": type("object") }),
+		} as Tool);
+		const sanitized = sanitizeSchemaForOpenAIResponses(wire, { repairArrayItems: true });
+		expect(adaptSchemaForStrict(sanitized, true).strict).toBe(false);
+	});
+
+	it("keeps an object with an empty properties map or `additionalProperties: false` strict", () => {
+		// Declared-closed objects are representable: strict mode closes them as written.
 		const schema: Record<string, unknown> = {
 			type: "object",
-			properties: { a: { type: "string" }, b: { type: "number" } },
-			required: ["a", "b"],
+			properties: {
+				empty: { type: "object", properties: {} },
+				explicitlyClosed: { type: "object", additionalProperties: false },
+			},
+			required: ["empty", "explicitlyClosed"],
 			additionalProperties: false,
 		};
 		expect(adaptSchemaForStrict(schema, true).strict).toBe(true);
+	});
+
+	it("keeps an object whose shape comes from `allOf` or `$ref` strict", () => {
+		// `type: "object"` beside `allOf`/`$ref` is not bare: enforcement merges or inlines the shape.
+		const shape = {
+			type: "object",
+			properties: { a: { type: "string" } },
+			required: ["a"],
+			additionalProperties: false,
+		};
+		const schema: Record<string, unknown> = {
+			type: "object",
+			properties: {
+				merged: { type: "object", allOf: [shape] },
+				referenced: { type: "object", $ref: "#/$defs/Shape" },
+			},
+			required: ["merged", "referenced"],
+			additionalProperties: false,
+			$defs: { Shape: shape },
+		};
+		const adapted = adaptSchemaForStrict(schema, true);
+		expect(adapted.strict).toBe(true);
+		const properties = adapted.schema.properties as Record<string, Record<string, unknown>>;
+		expect(properties.merged.properties).toEqual({ a: { type: "string" } });
+		expect(properties.referenced.properties).toEqual({ a: { type: "string" } });
+		const sanitized = sanitizeSchemaForOpenAIResponses(schema, { repairArrayItems: true });
+		expect(adaptSchemaForStrict(sanitized, true).strict).toBe(true);
 	});
 });

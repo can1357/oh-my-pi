@@ -134,6 +134,64 @@ export function isLowSignalTitleInput(message: string): boolean {
 	return tokens.every(token => FILLER_TITLE_TOKENS.has(token) || /^\d+$/.test(token));
 }
 
+/** `[Image #1, 640x480]` / `[Video #2, …]` placeholders the composer inserts for attachments. */
+const ATTACHMENT_PLACEHOLDER = /\[(?:Image|Video) #\d+[^\]]*\]/g;
+/** Words that only point at, or ask about, something the title model cannot see. */
+const ATTACHMENT_POINTER_TOKENS = new Set<string>([
+	"fix",
+	"this",
+	"that",
+	"these",
+	"those",
+	"it",
+	"here",
+	"look",
+	"at",
+	"see",
+	"check",
+	"investigate",
+	"what",
+	"whats",
+	"s",
+	"is",
+	"are",
+	"why",
+	"do",
+	"does",
+	"i",
+	"we",
+	"get",
+	"wrong",
+	"broken",
+	"break",
+	"did",
+	"help",
+	"can",
+	"could",
+	"the",
+	"a",
+	"thing",
+	"issue",
+	"bug",
+	"me",
+	"now",
+	"again",
+	"still",
+	"oh",
+]);
+
+/**
+ * True when a first message only points at an attachment ("fix [Image #1]",
+ * "why do i get this? [Image #1]"): the text-only title model sees no task and
+ * either echoes the placeholder or invents the image contents, so titling waits
+ * for the assistant to describe it.
+ */
+export function isAttachmentOnlyTitleInput(message: string): boolean {
+	const withoutAttachments = message.replace(ATTACHMENT_PLACEHOLDER, " ");
+	if (withoutAttachments === message) return false;
+	const tokens = cleanTinyMessage(withoutAttachments).toLowerCase().match(TITLE_WORD) ?? [];
+	return tokens.every(token => FILLER_TITLE_TOKENS.has(token) || ATTACHMENT_POINTER_TOKENS.has(token));
+}
 /**
  * Sentinel a capable title model may emit when a message carries no concrete
  * task. Treated as "no title yet" so the caller can defer titling. Backstop for
@@ -141,6 +199,16 @@ export function isLowSignalTitleInput(message: string): boolean {
  * `<title/>` instruction in `prompts/system/title-system.md`.
  */
 export const NO_TITLE_SENTINEL = "none";
+
+/** Whether `value`, once unquoted and stripped of trailing sentence punctuation, is {@link NO_TITLE_SENTINEL}. */
+export function isNoTitleSentinel(value: string): boolean {
+	const bare = value
+		.trim()
+		.replace(/^["']|["']$/g, "")
+		.replace(/[.!?]$/, "")
+		.trim();
+	return bare.toLowerCase() === NO_TITLE_SENTINEL;
+}
 
 /**
  * Upper bounds on an accepted title. Titling is a 3-7 word task, so any output
@@ -164,7 +232,7 @@ export function normalizeGeneratedTitle(value: string | null | undefined, source
 		.replace(/^["']|["']$/g, "")
 		.replace(/[.!?]$/, "")
 		.trim();
-	if (!title || title.toLowerCase() === NO_TITLE_SENTINEL) return null;
+	if (!title || isNoTitleSentinel(title)) return null;
 	// Zero word characters means pure punctuation/symbol junk (e.g. ".."), which
 	// a sampling model occasionally emits instead of a title; reject so the
 	// caller defers titling rather than naming the session "..".

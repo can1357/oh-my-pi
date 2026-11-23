@@ -82,4 +82,17 @@ describe("StdoutStallWatchdog", () => {
 		expect(wd.sample(ARM + 1, 10_000 + STALL_MS - 1)).toBe(false);
 		expect(wd.sample(ARM + 1, 10_000 + STALL_MS)).toBe(true);
 	});
+
+	it("with the production window, keeps a session whose terminal pauses for seconds during an oversized frame", () => {
+		// A live reader can stop consuming for seconds: a busy tmux server holding
+		// a slow client, or a container's attach stream. Declaring it gone kills
+		// the session (exit 129) although the terminal comes back. A reader that
+		// never returns must still be torn down.
+		const wd = new StdoutStallWatchdog();
+		const oversized = 64 * 1024 * 1024 + 1;
+		expect(wd.sample(oversized, 0)).toBe(false); // arms
+		expect(wd.sample(oversized, 10_000)).toBe(false); // paused 10 s: still alive
+		expect(wd.sample(oversized, 60_000 - 1)).toBe(false); // still inside the window
+		expect(wd.sample(oversized, 60_000)).toBe(true); // never came back: disconnect at 60 s
+	});
 });

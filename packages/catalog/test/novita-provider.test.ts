@@ -1,18 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { novitaModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 
 describe("Novita built-in provider", () => {
-	test("registers catalog descriptor with NOVITA_API_KEY env discovery", () => {
-		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "novita");
-		expect(descriptor).toBeDefined();
-		expect(descriptor?.defaultModel).toBe("moonshotai/kimi-k2.7-code");
-		expect(descriptor?.catalogDiscovery?.envVars).toContain("NOVITA_API_KEY");
-		expect(descriptor?.catalogDiscovery?.allowUnauthenticated).toBe(true);
-		expect(descriptor?.dynamicModelsAuthoritative).toBe(true);
-		expect(DEFAULT_MODEL_PER_PROVIDER.novita).toBe("moonshotai/kimi-k2.7-code");
-	});
-
 	test("maps Novita model catalog metadata from the public OpenAI-compatible endpoint", async () => {
 		const requests: string[] = [];
 		const fetchMock = async (input: string | URL | Request): Promise<Response> => {

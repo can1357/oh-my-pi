@@ -1,0 +1,110 @@
+// Muse Code subscriptions use the same Model API wire contract as direct Meta API keys.
+
+provider "muse-code" {
+	default-model "muse-spark-1.3"
+	dynamic-models-authoritative #true
+
+	// Muse Code shares Meta Model API's model capabilities and equivalent token pricing.
+	seed api="openai-responses" base-url="https://api.meta.ai/v1" bundle="always" {
+		// Subscription-only rows: Model API serves neither Muse Wonder Full nor a
+		// Wonder contributor tier, so no published SKU prices them; costs are
+		// API-equivalent spend. Standard rows carry Muse Wonder's Standard-mode
+		// list price ($4/$0.20/$20; an estimate for Wonder Full). Contributor rows
+		// carry the measured subscription-meter burn: Wonder contributor moved
+		// the meter 1% per ~61-64K input / ~12K output tokens vs ~23-25K / ~4.8K
+		// for standard Wonder, i.e. $1.45-1.63 input and $7.55-8.00 output at the
+		// $4/$20 list (measured 2026-10-13, #15522). Cached input is unmeasured
+		// and takes the same 0.4x ratio. All accept image input and the `max`
+		// effort over the subscription key (verified 2026-10-12).
+		model "muse-wonder-1.0-contributor" name="Muse Wonder (C)" {
+			reasoning #true
+			input "text" "image"
+			cost input=1.6 output=8 cache-read=0.08 cache-write=0
+			limits context=1048576 max-tokens=131072
+			thinking-mode "effort"
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh" "max"
+			supports-reasoning-effort #true
+			include-encrypted-reasoning #true
+		}
+		model "muse-wonder-full-1.0" name="Muse Wonder Full" {
+			reasoning #true
+			input "text" "image"
+			cost input=4 output=20 cache-read=0.2 cache-write=0
+			limits context=1048576 max-tokens=131072
+			thinking-mode "effort"
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh" "max"
+			supports-reasoning-effort #true
+			include-encrypted-reasoning #true
+		}
+		model "muse-wonder-full-1.0-contributor" name="Muse Wonder Full (C)" {
+			reasoning #true
+			input "text" "image"
+			cost input=1.6 output=8 cache-read=0.08 cache-write=0
+			limits context=1048576 max-tokens=131072
+			thinking-mode "effort"
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh" "max"
+			supports-reasoning-effort #true
+			include-encrypted-reasoning #true
+		}
+		models-from "meta"
+	}
+
+	include-encrypted-reasoning #true
+	supports-reasoning-effort #true
+	clamp-output-to-model-max #true
+	// api.meta.ai/v1 accepts only tool_choice "auto"; "none", "required" and named
+	// choices are rejected with 400 (verified 2026-09-10), so omit the field.
+	supports-tool-choice #false
+	// Same >200K Muse Ember card as Meta Model API; on a subscription it burns
+	// plan usage faster (dev.meta.ai/docs/muse-ember, 2026-11-10).
+	models "muse-ember-1.0" {
+		long-context-cost {
+			input-threshold 200000
+			input 0.3
+			output 1.5
+			cache-read 0.012
+			cache-write 0
+		}
+	}
+	// Results can be stored so a dropped stream is recovered: verified 2026-09-29
+	// against api.meta.ai/v1, a stored run keeps generating after the client
+	// socket dies and `GET /responses/{id}` returns it once finished (~60s for
+	// a high-effort turn), while `store: false` runs 404 forever. Storage is
+	// opt-in (privacy: stored runs retain prompts/outputs on Meta's side): omp
+	// setting providers.muse-code.storeResponses or PI_MUSE_STORE_RESPONSES=1.
+	store-responses #true
+	// Subscription tier bills per request; the compact edit prompt cuts the
+	// recurring tool-schema bytes. Verified 2026-09-05 against api.meta.ai/v1:
+	// `custom` tools are rejected with 400 "`custom` tools are not supported
+	// on this endpoint", so apply-patch must stay a function tool here.
+	edit-prompt-variant "compact"
+	// A Muse Code subscription key answers 403 `client_attestation_denied` when
+	// the request declares a tool with certain exact, case-sensitive names:
+	// `bash`, `shell`, `web_search`, `web_fetch`, `apply_patch`, `read_file`
+	// and `update_plan` (measured 2026-10-31, still 2026-11-03; `Bash`,
+	// `run_shell`, `local_shell` and omp's other built-in names pass, and the
+	// list is not exhaustive). Only declared names count: a replayed `bash`
+	// call in history is accepted. Prefixing every function tool with `_` was
+	// accepted with all of omp's built-in tools declared. Meta pay-as-you-go
+	// keys are not attested and keep plain names.
+	tool-name-prefix "_"
+	on-api "openai-responses" {
+		// api.meta.ai answers 400 "name must be at most 64 characters" for a longer
+		// tool name (#9130), and omp caps MCP names at exactly 64 for it. Scoped by
+		// provider and API so it outranks the 128 Responses default in
+		// tool-call-names.kdl. A name the `_` prefix would push past it goes out
+		// unprefixed.
+		tool-call-name-max-length 64
+		// Spark 1.3 Contributor warmed siblings hit 10/10 vs 0/10 with per-child keys (2026-10-12).
+		// Meta documents shared-prefix prompt_cache_key routing; keep the opt-in on these exact Muse Code IDs.
+		models "muse-spark-1.3" "muse-spark-1.3-contributor" "muse-wonder-1.0" "muse-wonder-1.0-contributor" "muse-wonder-full-1.0" "muse-wonder-full-1.0-contributor" {
+			shared-prompt-cache #true
+		}
+	}
+	// Same capability-less `/v1/models` as Meta: unknown ids are opt-in.
+	class "unknown" {
+		thinking-unverified #true
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		thinking-mode "effort"
+	}
+}

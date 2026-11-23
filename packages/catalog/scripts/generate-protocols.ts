@@ -3,6 +3,7 @@ import { generateProtoTs, ProtoContext, parseProto } from "./proto-parser";
 
 const PACKAGES_DIR = path.resolve(import.meta.dir, "../..");
 const CURSOR_PROTO = path.join(PACKAGES_DIR, "ai/src/providers/cursor/proto/agent.proto");
+const CURSOR_MODELS_PROTO = path.join(PACKAGES_DIR, "catalog/src/discovery/cursor-models.proto");
 const DEVIN_PROTO_DIR = path.join(PACKAGES_DIR, "ai/src/providers/devin/proto");
 const DISCOVERY_DIR = path.resolve(import.meta.dir, "../src/discovery");
 
@@ -14,7 +15,13 @@ const CURSOR_CONSUMER_DIRS = [
 	path.join(PACKAGES_DIR, "coding-agent/test"),
 ];
 
-const CURSOR_ENUMS = ["CursorRuleSource", "ForceBackgroundShellStatus", "ForceBackgroundSubagentStatus"];
+const CURSOR_ENUMS = [
+	"CursorError",
+	"CursorRuleSource",
+	"ForceBackgroundShellStatus",
+	"ForceBackgroundSubagentStatus",
+	"ModelVendorId",
+];
 const DEVIN_MESSAGES = [
 	"exa.api_server_pb.AssignModelRequest",
 	"exa.api_server_pb.AssignModelResponse",
@@ -24,6 +31,8 @@ const DEVIN_MESSAGES = [
 	"exa.chat_pb.ChatToolDefinition",
 	"exa.codeium_common_pb.ClientModelConfig",
 	"exa.codeium_common_pb.CompletionConfiguration",
+	"exa.seat_management_pb.ExchangePKCEAuthorizationCodeRequest",
+	"exa.seat_management_pb.ExchangePKCEAuthorizationCodeResponse",
 	"exa.api_server_pb.GetChatMessageRequest",
 	"exa.api_server_pb.GetChatMessageResponse",
 	"exa.api_server_pb.GetCliModelConfigsRequest",
@@ -101,8 +110,10 @@ async function parseProtoDirectory(directory: string): Promise<ProtoContext> {
 
 async function generateProtocols(): Promise<void> {
 	const cursorSource = await Bun.file(CURSOR_PROTO).text();
+	const cursorModelsSource = await Bun.file(CURSOR_MODELS_PROTO).text();
 	const cursorContext = new ProtoContext();
 	cursorContext.addFile(parseProto(cursorSource, "agent.proto"));
+	cursorContext.addFile(parseProto(cursorModelsSource, "cursor-models.proto"));
 
 	const cursor = generateProtoTs(cursorContext, {
 		includeMessages: await collectCursorMessages(),

@@ -1,0 +1,267 @@
+import type { SpinnerFramesOverride } from "./symbols";
+
+// ============================================================================
+// Types
+// ============================================================================
+
+export type ColorValue = string | number;
+
+/**
+ * Index of each slot in a theme's 16-color `terminal.ansi` palette (0–7
+ * normal, 8–15 bright). `Theme.ansiFg()` paints by slot name.
+ */
+export const ANSI_COLOR_INDEX = {
+	black: 0,
+	red: 1,
+	green: 2,
+	yellow: 3,
+	blue: 4,
+	magenta: 5,
+	cyan: 6,
+	white: 7,
+	brightBlack: 8,
+	brightRed: 9,
+	brightGreen: 10,
+	brightYellow: 11,
+	brightBlue: 12,
+	brightMagenta: 13,
+	brightCyan: 14,
+	brightWhite: 15,
+} as const;
+
+export type AnsiColor = keyof typeof ANSI_COLOR_INDEX;
+
+/**
+ * Tokens a theme is allowed to omit. They resolve to the terminal default
+ * foreground, so `Theme.fg()` stays total for callers that paint a token a theme
+ * never declared (e.g. a `modelTags.<role>.color` reference) while
+ * `Theme.hasColor()` still reports them as unset. `mdExtensionLink` is the
+ * exception: `createTheme` derives it from `mdLink` and `text` when omitted.
+ */
+export const OPTIONAL_THEME_COLOR_RECORD = {
+	assistantMessageText: true,
+	mdExtensionLink: true,
+	subagent1: true,
+	subagent2: true,
+	subagent3: true,
+	subagent4: true,
+	subagent5: true,
+	subagent6: true,
+} satisfies Partial<Record<ThemeColor, true>>;
+
+export interface ThemeJson {
+	$schema?: string;
+	name: string;
+	vars?: Record<string, ColorValue>;
+	colors: Omit<Record<ThemeColor | ThemeBg, ColorValue>, "thinkingMax" | keyof typeof OPTIONAL_THEME_COLOR_RECORD> &
+		Partial<Record<keyof typeof OPTIONAL_THEME_COLOR_RECORD, ColorValue>> & { thinkingMax?: ColorValue };
+	export?: {
+		pageBg?: ColorValue;
+		cardBg?: ColorValue;
+		infoBg?: ColorValue;
+	};
+	/**
+	 * The terminal this theme was made for, for hosts that paint the terminal
+	 * themselves (Tern). omp never sets the terminal's colors: its TUI draws on
+	 * whatever background the terminal has. A host derives absent fields from
+	 * `colors`.
+	 */
+	terminal?: {
+		/** Terminal background. */
+		background?: ColorValue;
+		/** Default text. */
+		foreground?: ColorValue;
+		/** The window around the terminal: sidebar, tab bar, title bar. */
+		chrome?: ColorValue;
+		/** Lifted surfaces: popovers, menus, buttons. */
+		widget?: ColorValue;
+		/**
+		 * ANSI colors 0–15: exactly 16. omp also paints colorful Markdown
+		 * (headings, emphasis, table headers) from this palette; slots it
+		 * omits fall back to the terminal's own palette.
+		 */
+		ansi?: ColorValue[];
+	};
+	symbols?: {
+		preset?: "unicode" | "nerd" | "ascii";
+		overrides?: Record<string, string>;
+		spinnerFrames?: SpinnerFramesOverride;
+	};
+}
+
+export type ThemeColor =
+	| "accent"
+	| "border"
+	| "borderAccent"
+	| "borderMuted"
+	| "success"
+	| "error"
+	| "warning"
+	| "muted"
+	| "dim"
+	| "text"
+	| "assistantMessageText"
+	| "thinkingText"
+	| "userMessageText"
+	| "customMessageText"
+	| "customMessageLabel"
+	| "toolTitle"
+	| "toolOutput"
+	| "mdHeading"
+	| "mdLink"
+	| "mdExtensionLink"
+	| "mdLinkUrl"
+	| "mdCode"
+	| "mdCodeBlock"
+	| "mdCodeBlockBorder"
+	| "mdQuote"
+	| "mdQuoteBorder"
+	| "mdHr"
+	| "mdListBullet"
+	| "toolDiffAdded"
+	| "toolDiffRemoved"
+	| "toolDiffContext"
+	| "syntaxComment"
+	| "syntaxKeyword"
+	| "syntaxFunction"
+	| "syntaxVariable"
+	| "syntaxString"
+	| "syntaxNumber"
+	| "syntaxType"
+	| "syntaxOperator"
+	| "syntaxPunctuation"
+	| "thinkingOff"
+	| "thinkingMinimal"
+	| "thinkingLow"
+	| "thinkingMedium"
+	| "thinkingHigh"
+	| "thinkingXhigh"
+	| "thinkingMax"
+	| "bashMode"
+	| "pythonMode"
+	| "btwMode"
+	| "statusLineSep"
+	| "statusLineModel"
+	| "statusLinePath"
+	| "statusLineGitClean"
+	| "statusLineGitDirty"
+	| "statusLineContext"
+	| "statusLineSpend"
+	| "statusLineStaged"
+	| "statusLineDirty"
+	| "statusLineUntracked"
+	| "statusLineOutput"
+	| "statusLineCost"
+	| "statusLineSubagents"
+	| "subagent1"
+	| "subagent2"
+	| "subagent3"
+	| "subagent4"
+	| "subagent5"
+	| "subagent6";
+
+/** Set of all valid ThemeColor string values for runtime validation */
+const THEME_COLOR_RECORD = {
+	accent: true,
+	border: true,
+	borderAccent: true,
+	borderMuted: true,
+	success: true,
+	error: true,
+	warning: true,
+	muted: true,
+	dim: true,
+	text: true,
+	assistantMessageText: true,
+	thinkingText: true,
+	userMessageText: true,
+	customMessageText: true,
+	customMessageLabel: true,
+	toolTitle: true,
+	toolOutput: true,
+	mdHeading: true,
+	mdLink: true,
+	mdExtensionLink: true,
+	mdLinkUrl: true,
+	mdCode: true,
+	mdCodeBlock: true,
+	mdCodeBlockBorder: true,
+	mdQuote: true,
+	mdQuoteBorder: true,
+	mdHr: true,
+	mdListBullet: true,
+	toolDiffAdded: true,
+	toolDiffRemoved: true,
+	toolDiffContext: true,
+	syntaxComment: true,
+	syntaxKeyword: true,
+	syntaxFunction: true,
+	syntaxVariable: true,
+	syntaxString: true,
+	syntaxNumber: true,
+	syntaxType: true,
+	syntaxOperator: true,
+	syntaxPunctuation: true,
+	thinkingOff: true,
+	thinkingMinimal: true,
+	thinkingLow: true,
+	thinkingMedium: true,
+	thinkingHigh: true,
+	thinkingXhigh: true,
+	thinkingMax: true,
+	bashMode: true,
+	pythonMode: true,
+	btwMode: true,
+	statusLineSep: true,
+	statusLineModel: true,
+	statusLinePath: true,
+	statusLineGitClean: true,
+	statusLineGitDirty: true,
+	statusLineContext: true,
+	statusLineSpend: true,
+	statusLineStaged: true,
+	statusLineDirty: true,
+	statusLineUntracked: true,
+	statusLineOutput: true,
+	statusLineCost: true,
+	statusLineSubagents: true,
+	subagent1: true,
+	subagent2: true,
+	subagent3: true,
+	subagent4: true,
+	subagent5: true,
+	subagent6: true,
+} satisfies Record<ThemeColor, true>;
+
+const VALID_THEME_COLORS: ReadonlySet<string> = new Set(Object.keys(THEME_COLOR_RECORD));
+
+/** Check if a string is a valid ThemeColor value */
+export function isValidThemeColor(color: string): color is ThemeColor {
+	return VALID_THEME_COLORS.has(color);
+}
+
+export type ThemeBg =
+	| "selectedBg"
+	| "userMessageBg"
+	| "customMessageBg"
+	| "toolPendingBg"
+	| "toolSuccessBg"
+	| "toolErrorBg"
+	| "statusLineBg";
+
+const VALID_THEME_BGS: ReadonlySet<string> = new Set([
+	"selectedBg",
+	"userMessageBg",
+	"customMessageBg",
+	"toolPendingBg",
+	"toolSuccessBg",
+	"toolErrorBg",
+	"statusLineBg",
+] satisfies ThemeBg[]);
+
+/** Check if a string is a valid ThemeBg value */
+export function isValidThemeBg(color: string): color is ThemeBg {
+	return VALID_THEME_BGS.has(color);
+}
+
+export type ColorMode = "truecolor" | "256color";

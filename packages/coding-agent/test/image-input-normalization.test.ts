@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { ensureSupportedImageInput, normalizeModelContextImages } from "@oh-my-pi/pi-coding-agent/utils/image-loading";
+import { normalizeModelContextImages } from "@oh-my-pi/pi-coding-agent/utils/image-loading";
+import { ensureSupportedImageInput } from "@oh-my-pi/pi-tui/chat/image-loading";
 
 // 1x1 red PNG (69 bytes). Bun.Image sniffs format from bytes, so we can pass
 // this with a non-supported MIME type and the conversion path runs over the
@@ -19,12 +20,6 @@ async function dimensions(image: { data: string }): Promise<{ width: number; hei
 }
 
 describe("ensureSupportedImageInput", () => {
-	test("passes supported mime types through unchanged", async () => {
-		const input = { type: "image" as const, data: RED_1X1_PNG_BASE64, mimeType: "image/png" };
-		const result = await ensureSupportedImageInput(input);
-		expect(result).toEqual(input);
-	});
-
 	test("converts unsupported image input to png", async () => {
 		const result = await ensureSupportedImageInput({
 			type: "image",

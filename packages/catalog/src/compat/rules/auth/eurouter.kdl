@@ -1,0 +1,10 @@
+auth "eurouter" {
+	name "EUrouter"
+	env "EUROUTER_API_KEY"
+	login "api-key" {
+		auth-url "https://www.eurouter.ai/sign-up"
+		instructions "Create or copy your EUrouter API key"
+		prompt "Paste your EUrouter API key" placeholder="eur_..."
+		validate "chat-completions" label="EUrouter" base-url="https://api.eurouter.ai/api/v1" model="mistral-large-3"
+	}
+}

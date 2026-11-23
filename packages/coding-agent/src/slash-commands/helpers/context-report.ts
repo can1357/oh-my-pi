@@ -1,6 +1,6 @@
-import { computeContextBreakdown } from "../../modes/utils/context-usage";
+import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
 import type { SlashCommandRuntime } from "../types";
-import { renderAsciiBar } from "./format";
+import { renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
 
 /**
  * Build the `/context` ACP-mode text. Tries the rich breakdown first
@@ -9,7 +9,7 @@ import { renderAsciiBar } from "./format";
  */
 export function buildContextReportText(runtime: SlashCommandRuntime): string {
 	try {
-		const breakdown = computeContextBreakdown(runtime.session, { snapcompactSavings: true });
+		const breakdown = computeSessionContextBreakdown(runtime.session, { snapcompactSavings: true });
 		if (breakdown.contextWindow <= 0) {
 			return "Context usage is unavailable: no model is selected for this session.";
 		}

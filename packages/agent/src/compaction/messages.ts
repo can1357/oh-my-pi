@@ -8,6 +8,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { AgentMessage } from "../types";
+import type { SessionEntry } from "./entries";
 import branchSummaryContextPrompt from "./prompts/branch-summary-context.md" with { type: "text" };
 import compactionSummaryContextPrompt from "./prompts/compaction-summary-context.md" with { type: "text" };
 import handoffSummaryContextPrompt from "./prompts/handoff-summary-context.md" with { type: "text" };
@@ -24,6 +25,8 @@ export interface CustomMessage<T = unknown> {
 	details?: T;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
+	/** Rendered and saved, never sent to the model (like `!!` bash rows). */
+	excludeFromContext?: boolean;
 	timestamp: number;
 }
 
@@ -64,6 +67,13 @@ export interface CompactionSummaryMessage {
 	images?: ImageContent[];
 	/** Post-pass dead-end warning attached to this compaction (progress guard). */
 	warning?: string;
+	/**
+	 * Thinking-binding rewrite marker when it must differ from `timestamp`: a
+	 * natively replayed summary predates it before the retained tail so that
+	 * tail's bound thinking stays valid. `timestamp` remains the commit time,
+	 * which is what invalidates the tail's pre-compaction usage reports.
+	 */
+	historyRewriteAt?: number;
 	timestamp: number;
 }
 
@@ -135,6 +145,8 @@ export interface CompactionSummaryMessageOptions {
 	method?: string;
 	/** Estimated context tokens after the rewrite, for display alongside `tokensBefore`. */
 	tokensAfter?: number;
+	/** See {@link CompactionSummaryMessage.historyRewriteAt}. */
+	historyRewriteAt?: number;
 }
 
 export function createCompactionSummaryMessage(
@@ -143,7 +155,7 @@ export function createCompactionSummaryMessage(
 	timestamp: string,
 	options: CompactionSummaryMessageOptions = {},
 ): CompactionSummaryMessage {
-	const { shortSummary, providerPayload, images, blocks, warning, method, tokensAfter } = options;
+	const { shortSummary, providerPayload, images, blocks, warning, method, tokensAfter, historyRewriteAt } = options;
 	const imageBlocks =
 		blocks?.filter((block): block is ImageContent => block.type === "image") ??
 		(images && images.length > 0 ? images : undefined);
@@ -158,6 +170,7 @@ export function createCompactionSummaryMessage(
 		blocks: blocks && blocks.length > 0 ? blocks : undefined,
 		images: imageBlocks && imageBlocks.length > 0 ? imageBlocks : undefined,
 		warning,
+		historyRewriteAt,
 		timestamp: new Date(timestamp).getTime(),
 	};
 }
@@ -169,6 +182,7 @@ export function createCustomMessage(
 	details: unknown | undefined,
 	timestamp: string,
 	attribution?: MessageAttribution,
+	excludeFromContext?: boolean,
 ): CustomMessage {
 	return {
 		role: "custom",
@@ -177,6 +191,7 @@ export function createCustomMessage(
 		display,
 		details,
 		attribution,
+		...(excludeFromContext ? { excludeFromContext: true } : {}),
 		timestamp: new Date(timestamp).getTime(),
 	};
 }
@@ -205,6 +220,7 @@ export function convertMessageToLlm(message: AgentMessage): Message | undefined 
 		switch (message.role) {
 			case "custom":
 			case "hookMessage": {
+				if (message.role === "custom" && message.excludeFromContext) return undefined;
 				const content =
 					typeof message.content === "string"
 						? [{ type: "text" as const, text: message.content }]
@@ -246,7 +262,7 @@ export function convertMessageToLlm(message: AgentMessage): Message | undefined 
 									...(message.images ?? []),
 								],
 					attribution: "agent",
-					historyRewriteAt: message.timestamp,
+					historyRewriteAt: message.historyRewriteAt ?? message.timestamp,
 					providerPayload: message.providerPayload,
 					timestamp: message.timestamp,
 				};
@@ -280,4 +296,29 @@ export function convertMessageToLlm(message: AgentMessage): Message | undefined 
  */
 export function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
 	return messages.map(convertMessageToLlm).filter(message => message !== undefined);
+}
+
+/**
+ * The context message a session entry contributes, or `undefined` for entries
+ * that don't reach the LLM (compaction markers, labels, model changes, rows
+ * kept out of context, ...).
+ */
+export function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
+	if (entry.type === "message") {
+		return entry.message;
+	}
+	if (entry.type === "custom_message" && !entry.excludeFromContext) {
+		return createCustomMessage(
+			entry.customType,
+			entry.content,
+			entry.display,
+			entry.details,
+			entry.timestamp,
+			entry.attribution,
+		);
+	}
+	if (entry.type === "branch_summary") {
+		return createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp);
+	}
+	return undefined;
 }

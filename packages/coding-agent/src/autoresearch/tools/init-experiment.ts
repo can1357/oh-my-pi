@@ -1,18 +1,21 @@
+import {
+	HARNESS_FILENAME,
+	DEFAULT_HARNESS_COMMAND,
+	type InitExperimentDetails,
+} from "@oh-my-pi/pi-tui/tools/autoresearch";
+import { initExperimentToolRenderer } from "@oh-my-pi/pi-tui/tools/autoresearch";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { Text } from "@oh-my-pi/pi-tui";
+
 import type { ToolDefinition } from "../../extensibility/extensions";
-import type { Theme } from "../../modes/theme/theme";
-import { replaceTabs, truncateToWidth } from "../../tools/render-utils";
+
 import { parseWorkDirDirtyPaths } from "../git";
 import { dedupeStrings, normalizePathSpec } from "../helpers";
 import { buildExperimentState } from "../state";
 import { openAutoresearchStorage, type SessionRow } from "../storage";
-import type { AutoresearchToolFactoryOptions, ExperimentState } from "../types";
+import type { AutoresearchToolFactoryOptions } from "../types";
 
-export const HARNESS_FILENAME = "autoresearch.sh";
-export const DEFAULT_HARNESS_COMMAND = `bash ${HARNESS_FILENAME}`;
 const HARNESS_COMMIT_TITLE = "autoresearch: harness setup";
 
 const initExperimentSchema = type({
@@ -29,19 +32,11 @@ const initExperimentSchema = type({
 	"new_segment?": type("boolean").describe("bump to a new segment in existing session"),
 });
 
-interface InitExperimentDetails {
-	state: ExperimentState;
-	createdSession: boolean;
-	bumpedSegment: boolean;
-	abandonedRuns: number;
-	harnessCommitted: boolean;
-	baselineCommit: string | null;
-}
-
 export function createInitExperimentTool(
 	options: AutoresearchToolFactoryOptions,
 ): ToolDefinition<typeof initExperimentSchema, InitExperimentDetails> {
 	return {
+		...initExperimentToolRenderer,
 		name: "init_experiment",
 		label: "Init Experiment",
 		description:
@@ -226,18 +221,7 @@ export function createInitExperimentTool(
 				},
 			};
 		},
-		renderCall(args, _options, theme): Text {
-			return new Text(renderInitCall(args.name, theme), 0, 0);
-		},
-		renderResult(result): Text {
-			const text = replaceTabs(result.content.find(part => part.type === "text")?.text ?? "");
-			return new Text(text, 0, 0);
-		},
 	};
-}
-
-function renderInitCall(name: string, theme: Theme): string {
-	return `${theme.fg("toolTitle", theme.bold("init_experiment"))} ${theme.fg("accent", truncateToWidth(replaceTabs(name), 100))}`;
 }
 
 async function tryReadHeadSha(cwd: string): Promise<string | null> {

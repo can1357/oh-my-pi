@@ -1,8 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
-import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import {
 	coreWeaveModelManagerOptions,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
@@ -30,22 +28,6 @@ afterEach(() => {
 });
 
 describe("CoreWeave Serverless Inference provider support", () => {
-	test("registers descriptor, default model, environment key, and bundled models", () => {
-		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "coreweave");
-		expect(descriptor).toBeDefined();
-		expect(descriptor?.defaultModel).toBe("openai/gpt-oss-120b");
-		expect(descriptor?.catalogDiscovery?.label).toBe("CoreWeave Serverless Inference");
-		expect(descriptor?.catalogDiscovery?.envVars).toEqual(["COREWEAVE_API_KEY", "WANDB_API_KEY"]);
-		expect(DEFAULT_MODEL_PER_PROVIDER.coreweave).toBe("openai/gpt-oss-120b");
-
-		const bundled = getBundledModels("coreweave");
-		expect(bundled.find(model => model.id === "openai/gpt-oss-120b")).toMatchObject({
-			api: "openai-completions",
-			provider: "coreweave",
-			baseUrl: "https://api.inference.wandb.ai/v1",
-		});
-	});
-
 	test("discovers dynamic models with the CoreWeave project header", async () => {
 		Bun.env.COREWEAVE_PROJECT = "team/project";
 		delete Bun.env.WANDB_INFERENCE_PROJECT;

@@ -1,15 +1,22 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { CONFIG_DIR_NAME, getConfigAgentDirName, getProjectDir } from "@oh-my-pi/pi-utils";
+import { CONFIG_DIR_NAME, getAgentDir, getProjectDir } from "@oh-my-pi/pi-utils";
+import { isUserSourceEnabled } from "./capability";
 import { resolveClaudePaths } from "./config/claude-paths";
 import { expandTilde } from "./tools/path-utils";
 
 export * from "./config/config-file";
 
-const priorityList = [
-	{ dir: CONFIG_DIR_NAME, globalAgentDir: getConfigAgentDirName },
-	{ dir: ".claude" },
+/**
+ * Config sources, highest priority first. `userBase` overrides the default
+ * `~/<dir>` user-level location: omp's own user dir follows `getAgentDir()`
+ * (profile, `PI_CONFIG_DIR`, and `PI_CODING_AGENT_DIR` aware), Claude's follows
+ * its active config directory.
+ */
+const priorityList: Array<{ dir: string; userBase?: () => string }> = [
+	{ dir: CONFIG_DIR_NAME, userBase: getAgentDir },
+	{ dir: ".claude", userBase: () => resolveClaudePaths().configDir },
 	{ dir: ".codex" },
 	{ dir: ".gemini" },
 ];
@@ -77,12 +84,11 @@ export function getChangelogPath(): string | undefined {
 // =============================================================================
 
 /**
- * User-level: ~/.omp/agent, Claude's active config directory, ~/.codex, ~/.gemini
+ * User-level: the omp agent dir (~/.omp/agent), Claude's active config directory, ~/.codex, ~/.gemini
  * Project-level: .omp, .claude, .codex, .gemini
  */
-const USER_CONFIG_BASES = priorityList.map(({ dir, globalAgentDir }) => ({
-	base: () =>
-		dir === ".claude" ? resolveClaudePaths().configDir : path.join(os.homedir(), globalAgentDir?.() ?? dir),
+const USER_CONFIG_BASES = priorityList.map(({ dir, userBase }) => ({
+	base: userBase ?? (() => path.join(os.homedir(), dir)),
 	name: dir,
 }));
 
@@ -131,6 +137,9 @@ export function getConfigDirs(subpath: string, options: GetConfigDirsOptions = {
 	// User-level directories (highest priority)
 	if (user) {
 		for (const { base, name } of USER_CONFIG_BASES) {
+			if (name !== CONFIG_DIR_NAME && !isUserSourceEnabled(name.replace(/^\./, ""))) {
+				continue;
+			}
 			const resolvedPath = path.resolve(base(), subpath);
 			if (!existingOnly || fs.existsSync(resolvedPath)) {
 				results.push({ path: resolvedPath, source: name, level: "user" });

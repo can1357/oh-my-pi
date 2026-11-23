@@ -1,0 +1,1387 @@
+/* ==========================================================================
+   Spotlight page. Baselines are muted greys (hollow marks), the cuts take
+   vivid hues; everything a recovery takes back uses the warm "loss" family.
+   ========================================================================== */
+
+:root,
+[data-theme="dark"] {
+	--spot-gross: var(--chart-primary);
+	--spot-net: var(--accent);
+	--spot-net-fill: var(--accent-gradient);
+	--spot-ghost: var(--accent);
+	--spot-clawback: #f5a524;
+	--spot-artifact: #f5b54a;
+	--spot-reread: #ff8a4c;
+	--spot-rerun: #fb7185;
+	--spot-turns: #c084fc;
+	--spot-cost: #8e8e98;
+	/* Fetch-backs held-out results show happen anyway: added back, so neutral rather than a loss hue. */
+	--spot-anyway: var(--ink-3);
+	/* Tool output the experiment does not shape: untouched, so a neutral grey. */
+	--spot-unshaped: #a0a0a8;
+
+	--spot-shaped: var(--accent-a);
+	--spot-outside: #7c8cff;
+
+	/* Fetch-back groups: the cut is vivid, its baselines neutral (held out, the counterfactual, the stronger). */
+	--spot-applied: var(--chart-primary);
+	--spot-score-free: #8b9cff;
+	--spot-holdout: var(--ink-1);
+	--spot-reference: var(--ink-3);
+	/* Reads pi's former edit gate kept whole: shown whole like the holdout, in a hue of their own. */
+	--spot-gated: #46c08a;
+}
+
+[data-theme="light"] {
+	--spot-clawback: #d98a04;
+	--spot-artifact: #c77c02;
+	--spot-reread: #e0612a;
+	--spot-rerun: #e0405f;
+	--spot-turns: #9b5de5;
+	--spot-cost: #8b8b94;
+
+	--spot-unshaped: #7d7d86;
+	--spot-outside: #5b6bd6;
+
+	--spot-score-free: #4c5fd6;
+	--spot-gated: #16895a;
+}
+
+/* The four questions the page answers, in order. */
+.spot-section {
+	margin-top: 18px;
+	padding: 0 2px;
+	scroll-margin-top: 24px;
+}
+
+.spot-section-title {
+	font-size: 17px;
+	font-weight: 600;
+	letter-spacing: -0.015em;
+	color: var(--ink-1);
+	text-wrap: balance;
+}
+
+.spot-section-copy {
+	margin-top: 3px;
+	max-width: 80ch;
+	font-size: 13px;
+	color: var(--ink-2);
+	text-wrap: pretty;
+}
+
+.spot-eyebrow {
+	font-size: 12px;
+	font-weight: 500;
+	color: var(--ink-2);
+}
+
+/* --------------------------------------------------------------------------
+   Hero
+   -------------------------------------------------------------------------- */
+.spot-hero {
+	overflow: hidden;
+	background:
+		radial-gradient(38rem 15rem at 0% 0%, color-mix(in srgb, var(--accent-a) 9%, transparent), transparent 72%)
+			padding-box,
+		radial-gradient(34rem 15rem at 100% 0%, color-mix(in srgb, var(--accent-b) 8%, transparent), transparent 72%)
+			padding-box,
+		linear-gradient(var(--card), var(--card)) padding-box,
+		linear-gradient(180deg, var(--line-3), var(--line-1) 40%) border-box;
+}
+
+.spot-hero-main {
+	display: grid;
+	grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+	align-items: end;
+	gap: 20px 48px;
+	padding: 24px 26px 22px;
+}
+
+.spot-hero-aside {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	max-width: 64ch;
+	justify-self: end;
+}
+
+.spot-hero-figures {
+	display: flex;
+	align-items: baseline;
+	flex-wrap: wrap;
+	gap: 6px 10px;
+	margin-top: 8px;
+}
+
+.spot-hero-value {
+	font-size: 56px;
+	font-weight: 650;
+	line-height: 1;
+	letter-spacing: -0.04em;
+	font-variant-numeric: tabular-nums;
+	/* Keep descender room so the gradient clip doesn't shave glyph edges. */
+	padding-bottom: 4px;
+}
+
+.spot-hero-unit {
+	font-size: 15px;
+	font-weight: 500;
+	color: var(--ink-3);
+}
+
+.spot-hero-usd {
+	align-self: center;
+	margin-left: 6px;
+	padding: 3px 11px;
+	border-radius: var(--r-pill);
+	border: 1px solid var(--line-2);
+	background: color-mix(in srgb, var(--raised) 70%, transparent);
+	font-size: 18px;
+	font-weight: 550;
+	letter-spacing: -0.01em;
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+
+.spot-hero-usd[data-negative="true"] {
+	color: var(--bad);
+	border-color: color-mix(in srgb, var(--bad) 35%, transparent);
+	background: var(--bad-soft);
+}
+
+.spot-hero-interval {
+	margin-top: 6px;
+	font-size: 12.5px;
+	color: var(--ink-3);
+}
+
+.spot-hero-interval .num {
+	color: var(--ink-2);
+}
+
+.spot-hero-note {
+	font-size: 12.5px;
+	line-height: 1.6;
+	color: var(--ink-3);
+	text-wrap: pretty;
+}
+
+.spot-hero-note code {
+	font-size: 11.5px;
+	color: var(--ink-2);
+}
+
+.spot-struck {
+	color: var(--ink-2);
+	text-decoration-thickness: 1.5px;
+	text-decoration-color: color-mix(in srgb, var(--ink-3) 80%, transparent);
+}
+
+.spot-hero-warn {
+	display: flex;
+	align-items: flex-start;
+	gap: 7px;
+	padding: 6px 10px;
+	border-radius: var(--r-control);
+	background: var(--warn-soft);
+	font-size: 12.5px;
+	line-height: 1.5;
+	color: var(--ink-1);
+}
+
+.spot-hero-warn > svg {
+	flex: none;
+	margin-top: 2px;
+	color: var(--warn);
+}
+
+.spot-nowrap {
+	white-space: nowrap;
+}
+
+.spot-hero-tools {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 2px 10px;
+}
+
+.spot-hero-tools > span {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.spot-hero-tools > [data-thin="true"] {
+	color: var(--warn);
+}
+
+.spot-hero-stats {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+	border-top: 1px solid var(--line-1);
+}
+
+.spot-hero-stats .stat {
+	padding: 14px 18px 14px;
+}
+
+.spot-hero-stats .stat-foot .truncate {
+	white-space: normal;
+	overflow: visible;
+}
+
+@media (max-width: 1100px) {
+	.spot-hero-main {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.spot-hero-aside {
+		justify-self: start;
+	}
+}
+
+@media (max-width: 900px) {
+	.spot-hero-value {
+		font-size: 44px;
+	}
+}
+
+/* --------------------------------------------------------------------------
+   Chips and badges
+   -------------------------------------------------------------------------- */
+.spot-kind {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	height: 20px;
+	padding: 0 7px;
+	border-radius: var(--r-pill);
+	font-size: 11.5px;
+	font-weight: 500;
+	white-space: nowrap;
+	color: var(--kind);
+	background: color-mix(in srgb, var(--kind) 13%, transparent);
+}
+
+.spot-chart-legend {
+	margin-bottom: 12px;
+}
+
+.spot-by-tool {
+	margin-top: 18px;
+	padding-top: 14px;
+	border-top: 1px solid var(--line-1);
+}
+
+.spot-tool-net {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.spot-tool-net-head {
+	gap: 7px;
+	font-size: 12.5px;
+}
+
+.spot-tool-net-head svg {
+	color: var(--ink-3);
+}
+
+.spot-tool-net-value {
+	margin-left: auto;
+	font-weight: 550;
+	color: var(--ink-1);
+}
+
+.spot-tool-net-track {
+	margin: 5px 0 4px;
+	height: 8px;
+	border-radius: 3px;
+	background: var(--line-1);
+}
+
+.spot-tool-net-bar {
+	position: relative;
+	display: flex;
+	justify-content: flex-end;
+	height: 100%;
+	min-width: 2px;
+	border-radius: 3px;
+	overflow: hidden;
+	background: var(--spot-gross);
+}
+
+/* The tool's fetch-back beyond its holdout baseline, hatched off the end of its gross. */
+.spot-tool-net-excess {
+	height: 100%;
+	background: repeating-linear-gradient(
+		-45deg,
+		var(--spot-clawback) 0 2px,
+		color-mix(in srgb, var(--spot-clawback) 30%, var(--card)) 2px 5px
+	);
+}
+
+.spot-tool-net-detail {
+	color: var(--ink-2);
+	font-variant-numeric: tabular-nums;
+}
+
+.spot-step-swatch {
+	width: 8px;
+	height: 8px;
+	border-radius: 2px;
+	flex: none;
+}
+
+/* --------------------------------------------------------------------------
+   Compounding
+   -------------------------------------------------------------------------- */
+.spot-session-select {
+	max-width: 380px;
+}
+
+.spot-compounding {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) 268px;
+	gap: 28px;
+}
+
+.spot-compounding-chart {
+	min-width: 0;
+}
+
+.spot-context {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.spot-compounding-side {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding-left: 28px;
+	border-left: 1px solid var(--line-1);
+}
+
+.spot-side-value {
+	font-size: 36px;
+	font-weight: 600;
+	line-height: 1.1;
+	letter-spacing: -0.03em;
+	font-variant-numeric: tabular-nums;
+}
+
+.spot-side-copy {
+	font-size: 12.5px;
+	line-height: 1.6;
+	color: var(--ink-2);
+	text-wrap: pretty;
+}
+
+.spot-side-range {
+	margin-top: 14px;
+	padding-top: 12px;
+	border-top: 1px solid var(--line-1);
+	font-size: 12px;
+	line-height: 1.55;
+	color: var(--ink-3);
+	text-wrap: pretty;
+}
+
+.spot-side-range-value {
+	font-weight: 600;
+	color: var(--ink-1);
+	font-variant-numeric: tabular-nums;
+}
+
+.spot-facts {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 12px 16px;
+	margin: 10px 0 0;
+	padding-top: 14px;
+	border-top: 1px solid var(--line-1);
+}
+
+.spot-facts dt {
+	font-size: 11.5px;
+	color: var(--ink-3);
+}
+
+.spot-facts dd {
+	margin: 2px 0 0;
+	color: var(--ink-1);
+}
+
+.spot-tooltip-extra {
+	display: flex;
+	flex-direction: column;
+}
+
+@media (max-width: 1100px) {
+	.spot-compounding {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.spot-compounding-side {
+		padding: 16px 0 0;
+		border-left: 0;
+		border-top: 1px solid var(--line-1);
+	}
+}
+
+/* --------------------------------------------------------------------------
+   Fetch-back groups: legend marks match the dot-whisker marks
+   -------------------------------------------------------------------------- */
+.spot-group-legend {
+	margin-bottom: 10px;
+}
+
+.spot-group-mark {
+	width: 9px;
+	height: 9px;
+	flex: none;
+	border-radius: 50%;
+	background: var(--dot);
+}
+
+.spot-group-mark[data-shape="ring"] {
+	background: transparent;
+	border: 2px solid var(--dot);
+}
+
+.spot-group-mark[data-shape="square"] {
+	border-radius: 2px;
+}
+
+.spot-group-mark[data-shape="diamond"] {
+	width: 7px;
+	height: 7px;
+	margin: 0 1px;
+	border-radius: 1.5px;
+	transform: rotate(45deg);
+}
+
+/* --------------------------------------------------------------------------
+   Does the agent come back for it?
+   -------------------------------------------------------------------------- */
+.spot-fb .dw-row {
+	grid-template-columns: 14rem minmax(0, 1fr) 128px;
+	height: 44px;
+}
+
+.spot-fb-tool {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	width: 6.5rem;
+	flex: none;
+	font-weight: 550;
+	color: var(--ink-1);
+}
+
+/* Long names (MCP and extension tools) end in an ellipsis; the full name is the label's title. */
+.spot-fb-tool-name {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.spot-fb-tool svg {
+	flex: none;
+	color: var(--ink-3);
+}
+
+.spot-fb-detail[data-group="holdout"] {
+	color: var(--ink-1);
+}
+
+.spot-fb-detail[data-group="scoreFree"] {
+	color: var(--spot-score-free);
+}
+
+/* --------------------------------------------------------------------------
+   Does Spotlight keep what the agent needs?
+   -------------------------------------------------------------------------- */
+.spot-rank {
+	display: flex;
+	flex-direction: column;
+	gap: 22px;
+}
+
+.spot-rank-panels {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 22px 32px;
+}
+
+.spot-rank-panel .dw-row {
+	grid-template-columns: 6.25rem minmax(0, 1fr) 84px;
+	gap: 10px;
+	height: 40px;
+}
+
+.spot-rank-panel .spot-panel-title,
+.spot-rank-foot .spot-panel-title {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.spot-rank-chance {
+	font-family: var(--font-mono);
+	font-size: 10.5px;
+	font-weight: 400;
+	color: var(--ink-3);
+	white-space: nowrap;
+}
+
+.spot-rank-foot {
+	display: grid;
+	grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.5fr) minmax(0, 0.6fr);
+	gap: 22px 32px;
+	padding-top: 18px;
+	border-top: 1px solid var(--line-1);
+}
+
+.spot-rank-n {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 12px;
+}
+
+.spot-rank-n th {
+	font-weight: 500;
+	color: var(--ink-3);
+	text-align: right;
+	padding: 4px 0 4px 10px;
+}
+
+.spot-rank-n th:first-child {
+	text-align: left;
+	padding-left: 0;
+}
+
+.spot-rank-n tbody th {
+	text-align: left;
+	padding-left: 0;
+}
+
+.spot-rank-n td {
+	padding: 5px 0 5px 10px;
+	text-align: right;
+	color: var(--ink-1);
+	border-top: 1px solid var(--line-1);
+	white-space: nowrap;
+}
+
+.spot-rank-n tbody th {
+	border-top: 1px solid var(--line-1);
+}
+
+/* Under 20 results a cell's intervals are wide: the count says so. */
+.spot-rank-n td[data-thin="true"] {
+	color: var(--warn);
+}
+
+.spot-rank-bars {
+	display: grid;
+	grid-auto-columns: minmax(0, 1fr);
+	grid-auto-flow: column;
+	gap: 4px;
+	height: 112px;
+	margin-top: 8px;
+}
+
+.spot-rank-bar {
+	display: flex;
+	flex-direction: column;
+	justify-content: flex-end;
+	align-items: center;
+	gap: 3px;
+	min-width: 0;
+}
+
+.spot-rank-bar-track {
+	display: flex;
+	flex-direction: column;
+	justify-content: flex-end;
+	align-items: center;
+	gap: 2px;
+	flex: 1;
+	width: 100%;
+	min-height: 0;
+}
+
+.spot-rank-bar-fill {
+	width: 100%;
+	min-height: 1px;
+	border-radius: 3px 3px 1px 1px;
+	background: color-mix(in srgb, var(--spot-applied) 75%, transparent);
+}
+
+.spot-rank-bar-value,
+.spot-rank-bar-label {
+	font-size: 10px;
+	color: var(--ink-3);
+	white-space: nowrap;
+}
+
+.spot-rank-bar-value {
+	color: var(--ink-2);
+}
+
+.spot-rank-axis {
+	margin-top: 6px;
+	font-size: 11px;
+	font-weight: 400;
+}
+
+.spot-rank-facts {
+	grid-template-columns: minmax(0, 1fr);
+	margin: 0;
+	padding-top: 4px;
+	border-top: 0;
+}
+
+@media (max-width: 1100px) {
+	.spot-rank-panels,
+	.spot-rank-foot {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}
+
+/* --------------------------------------------------------------------------
+   What cuts earn, by tool
+   -------------------------------------------------------------------------- */
+.spot-econ {
+	border-collapse: separate;
+	border-spacing: 6px;
+	margin: -6px;
+	width: calc(100% + 12px);
+	table-layout: fixed;
+}
+
+.spot-econ th {
+	font-size: 12px;
+	font-weight: 500;
+	color: var(--ink-2);
+	text-align: left;
+}
+
+.spot-econ thead th {
+	padding: 0 4px 2px;
+}
+
+.spot-econ thead th:first-child,
+.spot-econ tbody th {
+	width: 8rem;
+}
+
+.spot-econ-tool {
+	gap: 6px;
+	color: var(--ink-1);
+}
+
+.spot-econ-tool svg {
+	flex: none;
+	color: var(--ink-3);
+}
+
+.spot-econ-tool-name {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.spot-econ td {
+	padding: 0;
+}
+
+.spot-econ-cell {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	min-height: 84px;
+	padding: 11px 13px;
+	border-radius: var(--r-control);
+	border: 1px solid var(--line-1);
+	background: var(--raised);
+}
+
+.spot-econ-cell[data-tone="ok"] {
+	border-color: color-mix(in srgb, var(--ok) calc(var(--tint) + 8%), transparent);
+	background: color-mix(in srgb, var(--ok) var(--tint), var(--card));
+}
+
+.spot-econ-cell[data-tone="bad"] {
+	border-color: color-mix(in srgb, var(--bad) calc(var(--tint) + 8%), transparent);
+	background: color-mix(in srgb, var(--bad) var(--tint), var(--card));
+}
+
+.spot-econ-cell[data-empty="true"] {
+	justify-content: center;
+	align-items: center;
+	background: transparent;
+	border-style: dashed;
+	font-size: 12px;
+}
+
+.spot-econ-net {
+	font-size: 17px;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+	color: var(--ink-1);
+}
+
+.spot-econ-cell[data-tone="ok"] .spot-econ-net {
+	color: var(--ok);
+}
+
+.spot-econ-cell[data-tone="bad"] .spot-econ-net {
+	color: var(--bad);
+}
+
+.spot-econ-facts {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 2px 14px;
+	margin: 0;
+}
+
+.spot-econ-facts > div {
+	display: flex;
+	align-items: baseline;
+	gap: 5px;
+}
+
+.spot-econ-facts dt {
+	font-size: 11px;
+	color: var(--ink-3);
+}
+
+.spot-econ-facts dd {
+	margin: 0;
+	font-size: 11.5px;
+	color: var(--ink-1);
+}
+
+.spot-econ-scale {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 11px;
+	color: var(--ink-3);
+}
+
+.spot-econ-ramp {
+	width: 88px;
+	height: 6px;
+	border-radius: 3px;
+	background: linear-gradient(
+		90deg,
+		color-mix(in srgb, var(--bad) 70%, var(--card)),
+		var(--raised) 50%,
+		color-mix(in srgb, var(--ok) 70%, var(--card))
+	);
+}
+
+/* --------------------------------------------------------------------------
+   Which cuts pay (reuses the economics cells)
+   -------------------------------------------------------------------------- */
+.spot-steps-scroll,
+.spot-econ-scroll {
+	overflow-x: auto;
+}
+
+.spot-steps {
+	min-width: 720px;
+}
+
+.spot-steps thead th:first-child,
+.spot-steps tbody th {
+	width: 10rem;
+}
+
+.spot-steps thead th:not(:first-child) {
+	font-variant-numeric: tabular-nums;
+}
+
+/* "All sizes" sums the row: a hairline keeps it apart from the size bins. */
+.spot-steps tr > :last-child:not([colspan]) {
+	border-left: 1px solid var(--line-2);
+	padding-left: 6px;
+}
+
+.spot-steps-tool th {
+	padding: 10px 4px 0;
+}
+
+.spot-steps-tool:first-child th {
+	padding-top: 0;
+}
+
+.spot-steps-name {
+	padding-left: 22px;
+	font-family: var(--font-mono);
+	font-size: 11.5px;
+	font-weight: 400;
+	color: var(--ink-1);
+	overflow-wrap: anywhere;
+}
+
+.spot-steps .spot-econ-cell {
+	gap: 4px;
+	min-height: 0;
+	padding: 8px 11px;
+}
+
+.spot-steps .spot-econ-cell[data-empty="true"] {
+	min-height: 58px;
+}
+
+.spot-steps .spot-econ-net {
+	font-size: 15px;
+}
+
+.spot-steps-unit {
+	font-size: 11px;
+	font-weight: 500;
+	opacity: 0.75;
+}
+
+.spot-econ-cell[data-thin="true"] {
+	opacity: 0.45;
+}
+
+/* --------------------------------------------------------------------------
+   Time cost
+   -------------------------------------------------------------------------- */
+.spot-time {
+	display: flex;
+	flex-direction: column;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.spot-time-row {
+	display: grid;
+	grid-template-columns: 9rem minmax(0, 1fr) 52px 22rem;
+	align-items: center;
+	gap: 14px;
+	min-height: 36px;
+	font-size: 12.5px;
+}
+
+.spot-time-track {
+	display: flex;
+	height: 10px;
+	border-radius: 3px;
+	overflow: hidden;
+	background: var(--line-1);
+}
+
+.spot-time-fill {
+	height: 100%;
+}
+
+.spot-time-share {
+	text-align: right;
+	color: var(--ink-1);
+}
+
+.spot-time-detail {
+	font-size: 12px;
+	font-weight: 400;
+	color: var(--ink-2);
+	white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+	.spot-time-row {
+		grid-template-columns: 8rem minmax(0, 1fr) 52px;
+		padding: 6px 0;
+	}
+
+	.spot-time-detail {
+		grid-column: 1 / -1;
+		white-space: normal;
+	}
+}
+
+/* --------------------------------------------------------------------------
+   Not shaped yet
+   -------------------------------------------------------------------------- */
+.spot-coverage-summary {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin-bottom: 16px;
+}
+
+.spot-coverage-headline {
+	font-size: 13px;
+	color: var(--ink-2);
+}
+
+.spot-coverage-headline .num {
+	font-size: 20px;
+	font-weight: 600;
+	letter-spacing: -0.02em;
+	color: var(--ink-1);
+}
+
+.spot-coverage .bar-list-label {
+	gap: 8px;
+}
+
+.spot-coverage-tool {
+	font-family: var(--font-mono);
+	font-size: 12px;
+	color: var(--ink-1);
+}
+
+/* The toggle under a per-tool section that lists only the top tools. */
+.spot-more-tools {
+	display: flex;
+	margin-top: 10px;
+}
+
+/* --------------------------------------------------------------------------
+   How soon it comes back
+   -------------------------------------------------------------------------- */
+.spot-gaps {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 22px 32px;
+}
+
+.spot-gap-title {
+	gap: 6px;
+}
+
+.spot-gap-title svg {
+	color: var(--ink-3);
+}
+
+.spot-gap-title .dim {
+	margin-left: auto;
+	font-size: 11px;
+	font-weight: 400;
+}
+
+.spot-gap-bins {
+	display: grid;
+	grid-template-columns: repeat(5, minmax(0, 1fr));
+	gap: 6px;
+	margin-top: 8px;
+}
+
+.spot-gap-bin {
+	display: flex;
+	flex-direction: column;
+	align-items: stretch;
+	gap: 6px;
+}
+
+.spot-gap-bars {
+	display: flex;
+	align-items: flex-end;
+	justify-content: center;
+	gap: 3px;
+	height: 132px;
+	padding-top: 16px;
+	border-bottom: 1px solid var(--line-2);
+}
+
+.spot-gap-bar {
+	position: relative;
+	display: flex;
+	flex-direction: column;
+	justify-content: flex-end;
+	align-items: center;
+	width: min(22px, 42%);
+	height: 100%;
+}
+
+.spot-gap-fill {
+	width: 100%;
+	min-height: 1px;
+	border-radius: 3px 3px 0 0;
+	background: var(--spot-applied);
+	transition: height var(--dur-3) var(--ease-out);
+}
+
+.spot-gap-bar[data-group="holdout"] .spot-gap-fill {
+	background: color-mix(in srgb, var(--spot-holdout) 14%, transparent);
+	box-shadow: inset 0 0 0 1.5px var(--spot-holdout);
+}
+
+.spot-gap-bar[data-empty="true"] .spot-gap-fill {
+	display: none;
+}
+
+.spot-gap-value {
+	margin-bottom: 3px;
+	font-size: 9.5px;
+	color: var(--ink-3);
+	white-space: nowrap;
+}
+
+.spot-gap-label {
+	font-size: 10.5px;
+	text-align: center;
+	color: var(--chart-axis);
+}
+
+.spot-gap-empty {
+	display: grid;
+	place-items: center;
+	height: 150px;
+	font-size: 12px;
+}
+
+@media (max-width: 1100px) {
+	.spot-gaps {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}
+
+/* --------------------------------------------------------------------------
+   Overhead: the failure caveat
+   -------------------------------------------------------------------------- */
+.spot-callout {
+	--tone: var(--warn);
+	display: flex;
+	align-items: flex-start;
+	gap: 12px;
+	margin: 4px 16px 12px;
+	padding: 12px 14px;
+	border-radius: var(--r-control);
+	border: 1px solid color-mix(in srgb, var(--tone) 32%, transparent);
+	background: color-mix(in srgb, var(--tone) 9%, var(--card));
+}
+
+.spot-callout[data-tone="bad"] {
+	--tone: var(--bad);
+}
+
+.spot-callout > svg {
+	flex: none;
+	margin-top: 2px;
+	color: var(--tone);
+}
+
+.spot-callout-head {
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--ink-1);
+}
+
+.spot-callout-head .num {
+	color: var(--tone);
+}
+
+.spot-callout-copy {
+	margin: 3px 0 0;
+	font-size: 12.5px;
+	line-height: 1.55;
+	color: var(--ink-2);
+	text-wrap: pretty;
+}
+
+/* --------------------------------------------------------------------------
+   Panel titles
+   -------------------------------------------------------------------------- */
+.spot-panel-title {
+	margin-bottom: 4px;
+	font-size: 12.5px;
+	font-weight: 550;
+	color: var(--ink-1);
+}
+
+/* --------------------------------------------------------------------------
+   Recent results
+   -------------------------------------------------------------------------- */
+.spot-result {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	min-width: 0;
+	max-width: min(46vw, 620px);
+}
+
+.spot-tool {
+	display: grid;
+	place-items: center;
+	width: 28px;
+	height: 28px;
+	flex: none;
+	border-radius: 7px;
+	border: 1px solid var(--line-1);
+	background: var(--raised);
+	color: var(--ink-2);
+}
+
+.spot-result-text {
+	gap: 2px;
+}
+
+.spot-target {
+	font-family: var(--font-mono);
+	font-size: 12.5px;
+	color: var(--ink-1);
+}
+
+.spot-result-meta {
+	gap: 10px;
+	font-size: 11.5px;
+}
+
+.spot-shrink {
+	display: inline-flex;
+	flex-direction: column;
+	align-items: flex-end;
+	gap: 5px;
+}
+
+.spot-shrink-bar {
+	position: relative;
+	width: 96px;
+	height: 4px;
+	border-radius: 2px;
+	overflow: hidden;
+	background: repeating-linear-gradient(-45deg, var(--line-3) 0 1.5px, transparent 1.5px 4px);
+}
+
+.spot-shrink-kept {
+	position: absolute;
+	inset: 0 auto 0 0;
+	min-width: 2px;
+	border-radius: 2px;
+	background: var(--spot-gross);
+}
+
+/* A would-be cut: the bar is an outline, nothing was actually removed. */
+.spot-shrink[data-holdout="true"] .spot-shrink-kept {
+	background: transparent;
+	box-shadow: inset 0 0 0 1px var(--ink-3);
+}
+
+.spot-shrink[data-holdout="true"] > .num {
+	color: var(--ink-2);
+}
+
+.spot-result-meta .badge {
+	height: 17px;
+	padding: 0 6px;
+	font-size: 10.5px;
+}
+
+.spot-would-save {
+	white-space: nowrap;
+	color: var(--ink-2);
+}
+
+.spot-kinds {
+	gap: 4px;
+}
+
+/* --------------------------------------------------------------------------
+   Recovery drawer
+   -------------------------------------------------------------------------- */
+.spot-drawer-title {
+	display: -webkit-box;
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: 2;
+	line-clamp: 2;
+	overflow: hidden;
+	font-family: var(--font-mono);
+	font-size: 13.5px;
+	font-weight: 500;
+	overflow-wrap: anywhere;
+}
+
+.spot-drawer-call {
+	color: var(--ink-1);
+}
+
+.spot-drawer-subtitle {
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 4px;
+}
+
+.spot-drawer-summary {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 1px;
+	border: 1px solid var(--line-1);
+	border-radius: var(--r-card);
+	background: var(--line-1);
+	overflow: hidden;
+}
+
+.spot-drawer-summary > div {
+	padding: 12px 14px;
+	background: var(--card);
+}
+
+.spot-drawer-figure {
+	margin-top: 2px;
+	font-size: 22px;
+	font-weight: 600;
+	letter-spacing: -0.02em;
+}
+
+.spot-timeline {
+	display: flex;
+	flex-direction: column;
+}
+
+.spot-timeline-item {
+	position: relative;
+	display: grid;
+	grid-template-columns: 24px minmax(0, 1fr);
+	gap: 12px;
+	padding-bottom: 18px;
+}
+
+.spot-timeline-item:last-child {
+	padding-bottom: 0;
+}
+
+.spot-timeline-item:not(:last-child)::before {
+	content: "";
+	position: absolute;
+	left: 11.5px;
+	top: 26px;
+	bottom: 2px;
+	width: 1px;
+	background: var(--line-2);
+}
+
+.spot-timeline-node {
+	display: grid;
+	place-items: center;
+	width: 24px;
+	height: 24px;
+	border-radius: 50%;
+	border: 1px solid var(--line-2);
+	background: var(--raised);
+	color: var(--ink-2);
+}
+
+.spot-timeline-item[data-kind="cut"] .spot-timeline-node {
+	--kind: var(--spot-gross);
+}
+
+.spot-timeline-item[data-kind="holdout"] .spot-timeline-node {
+	--kind: var(--spot-reference);
+}
+
+.spot-timeline-item[data-kind="net"] .spot-timeline-node {
+	--kind: var(--spot-net);
+	background: var(--accent-gradient);
+	border-color: transparent;
+	transform: scale(0.5);
+}
+
+.spot-timeline-item:is(
+		[data-kind="cut"],
+		[data-kind="holdout"],
+		[data-kind="artifact"],
+		[data-kind="reread"],
+		[data-kind="rerun"]
+	)
+	.spot-timeline-node {
+	color: var(--kind);
+	border-color: color-mix(in srgb, var(--kind) 40%, transparent);
+	background: color-mix(in srgb, var(--kind) 12%, var(--card));
+}
+
+.spot-timeline-body {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	min-width: 0;
+	padding-top: 1px;
+}
+
+.spot-timeline-head {
+	gap: 8px;
+	min-height: 22px;
+}
+
+.spot-timeline-spacer {
+	flex: 1;
+}
+
+.spot-timeline-target {
+	display: block;
+	max-height: 120px;
+	overflow: auto;
+	padding: 8px 10px;
+	border-radius: var(--r-control);
+	border: 1px solid var(--line-1);
+	background: var(--card);
+	font-size: 12px;
+	color: var(--ink-1);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+/* --------------------------------------------------------------------------
+   Empty state
+   -------------------------------------------------------------------------- */
+.spot-empty {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 10px;
+	padding: 56px 24px 60px;
+	text-align: center;
+}
+
+.spot-empty-icon {
+	display: grid;
+	place-items: center;
+	width: 44px;
+	height: 44px;
+	border-radius: 12px;
+	background: var(--accent-soft);
+	color: var(--accent);
+}
+
+.spot-empty-title {
+	font-size: 15px;
+	font-weight: 600;
+	text-wrap: balance;
+}
+
+.spot-empty-hint {
+	max-width: 58ch;
+	font-size: 13px;
+	line-height: 1.65;
+	color: var(--ink-2);
+	text-wrap: pretty;
+}
+
+.spot-empty-hint code {
+	padding: 1px 6px;
+	border-radius: 5px;
+	border: 1px solid var(--line-1);
+	background: var(--raised);
+	font-size: 12px;
+	color: var(--ink-1);
+}

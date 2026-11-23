@@ -1,0 +1,875 @@
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, Message, Model } from "@oh-my-pi/pi-ai";
+import { createMockModel, type MockHandler, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { EVAL_STATE_CONTEXT_TYPE } from "@oh-my-pi/pi-coding-agent/eval/state";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
+import { ProcProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/proc-protocol";
+import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import {
+	createInterruptedToolResults,
+	createInterruptedTurnAbortMessage,
+	hasRestorableTurn,
+	INTERRUPTED_TURN_ERROR,
+	SESSION_EXIT_CUSTOM_TYPE,
+} from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
+import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
+
+const zeroUsage = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+
+function assistant(model: Model, fields: Partial<AssistantMessage>): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: zeroUsage,
+		stopReason: "stop",
+		timestamp: Date.now(),
+		...fields,
+	};
+}
+
+const probeSchema = type({ value: "string" });
+
+/** A `probe` tool recording each run's `value` in `executed`. */
+function probeTool(executed: string[]): AgentTool {
+	const tool: AgentTool<typeof probeSchema, { value: string }> = {
+		name: "probe",
+		label: "Probe",
+		description: "Probe tool",
+		parameters: probeSchema,
+		async execute(_toolCallId, params) {
+			executed.push(params.value);
+			return { content: [{ type: "text", text: `ok:${params.value}` }], details: params };
+		},
+	};
+	return tool as AgentTool;
+}
+
+/** `persisted` with the records resume-time exit recovery (sdk.ts) closes its cut-off turn with. */
+function closedByExitRecovery(persisted: Message[]): Message[] {
+	const manager = SessionManager.inMemory();
+	for (const message of persisted) manager.appendMessage(message);
+	const branch = manager.getBranch();
+	const abort = createInterruptedTurnAbortMessage(branch, undefined, { assumeExit: true });
+	if (!abort) throw new Error("Expected an unfinished turn to close");
+	return [...persisted, ...createInterruptedToolResults(branch), abort];
+}
+
+describe("AgentSession.restoreInterruptedTurn (omp --restore)", () => {
+	let tempDir: TempDir;
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let session: AgentSession | undefined;
+
+	beforeAll(async () => {
+		tempDir = TempDir.createSync("@pi-restore-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	afterEach(async () => {
+		await session?.dispose();
+		session = undefined;
+	});
+
+	afterAll(() => {
+		authStorage.close();
+		tempDir.removeSync();
+	});
+
+	/** A session reopened from `persisted` as `--resume` builds it, its model answering from `responses`. */
+	function reopen(
+		model: Model,
+		persisted: Message[],
+		tools: AgentTool[],
+		responses: MockResponse[],
+		evalToolSession?: ToolSession,
+	) {
+		const sessionManager = SessionManager.inMemory();
+		for (const message of persisted) sessionManager.appendMessage(message);
+		return open(model, sessionManager, tools, responses, evalToolSession);
+	}
+
+	/** A session over `sessionManager`'s transcript, its model answering from `responses`. */
+	function open(
+		model: Model,
+		sessionManager: SessionManager,
+		tools: AgentTool[],
+		responses: MockHandler[],
+		evalToolSession?: ToolSession,
+	) {
+		const mock = createMockModel({ responses });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools,
+				messages: sessionManager.buildSessionContext().messages,
+			},
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			modelRegistry,
+			evalToolSession,
+			agentId: evalToolSession?.getAgentId?.() ?? undefined,
+			ownedAsyncJobManager:
+				evalToolSession?.asyncJobManager instanceof AsyncJobManager ? evalToolSession.asyncJobManager : undefined,
+		});
+		session.subscribe(() => {});
+		return { session, mock };
+	}
+
+	function createWaitHarness(agentId?: string) {
+		const manager = new AsyncJobManager({});
+		const toolSession: ToolSession = {
+			cwd: tempDir.path(),
+			hasUI: false,
+			settings: Settings.isolated({ "launch.enabled": false }),
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			...(agentId ? { getAgentId: () => agentId } : {}),
+			asyncJobManager: manager,
+		};
+		let replayedWaitText: string | undefined;
+		const waitTool = new WaitTool(toolSession);
+		const executeWait = waitTool.execute.bind(waitTool);
+		waitTool.execute = async (toolCallId, params, signal, onUpdate) => {
+			const result = await executeWait(toolCallId, params, signal, onUpdate);
+			replayedWaitText = result.content.find(block => block.type === "text")?.text;
+			return result;
+		};
+		return { manager, toolSession, waitTool, replayedText: () => replayedWaitText };
+	}
+
+	it("goes on with a turn a crash cut off mid tool call, running the cut-off call again", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const executed: string[] = [];
+		// The process died while `probe` ran: no tool result, no session_exit record.
+		const { session, mock } = reopen(
+			model,
+			[
+				{ role: "user", content: "run the probe", timestamp: Date.now() },
+				assistant(model, {
+					content: [{ type: "toolCall", id: "call_1", name: "probe", arguments: { value: "again" } }],
+					stopReason: "toolUse",
+				}),
+			],
+			[probeTool(executed)],
+			[{ content: ["done after restore"], stopReason: "stop" }],
+		);
+
+		await expect(session.restoreInterruptedTurn()).resolves.toBe(true);
+		await session.waitForIdle();
+
+		expect(executed).toEqual(["again"]);
+		expect(mock.calls.length).toBe(1);
+		const last = session.agent.state.messages.at(-1);
+		expect(last?.role === "assistant" && last.content).toContainEqual({ type: "text", text: "done after restore" });
+	});
+
+	it("reports an unfinished background bash job with unknown outcome to wait and proc without preempting tool replay", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const { manager, toolSession, waitTool, replayedText } = createWaitHarness("main");
+		const { session, mock } = reopen(
+			model,
+			closedByExitRecovery([
+				{ role: "user", content: "run a command and wait", timestamp: Date.now() },
+				assistant(model, {
+					content: [{ type: "toolCall", id: "call_bash", name: "bash", arguments: { command: "sleep 60" } }],
+					stopReason: "toolUse",
+				}),
+				{
+					role: "toolResult",
+					toolCallId: "call_bash",
+					toolName: "bash",
+					content: [{ type: "text", text: "Backgrounded as job bg_1" }],
+					isError: false,
+					details: { async: { state: "running", jobId: "bg_1", type: "bash" } },
+					timestamp: Date.now(),
+				},
+				assistant(model, {
+					content: [{ type: "toolCall", id: "call_wait", name: "wait", arguments: {} }],
+					stopReason: "toolUse",
+				}),
+			]),
+			[waitTool as AgentTool],
+			[{ content: ["done after restore"], stopReason: "stop" }],
+			toolSession,
+		);
+
+		await expect(session.restoreInterruptedTurn()).resolves.toBe(true);
+		await session.waitForIdle();
+
+		expect(replayedText()).toContain("bg_1");
+		expect(replayedText()).toContain("Previous OMP process exited");
+		expect(replayedText()).toContain("outcome is unknown");
+		expect(replayedText()).toContain("verify before rerunning");
+		expect(replayedText()).not.toContain("Nothing to wait for");
+		expect(mock.calls.length).toBe(1);
+		expect(session.agent.state.messages.some(msg => msg.role === "custom" && msg.customType === "async-result")).toBe(
+			false,
+		);
+
+		const proc = await new ProcProtocolHandler().resolve(parseInternalUrl("proc://bg_1"), { session: toolSession });
+		expect(proc.content).toContain("bg_1 [bash] — failed");
+		expect(proc.content).toContain("outcome is unknown");
+		expect(proc.content).toContain("verify before rerunning");
+
+		manager.evictCompletedJobs();
+		const nextId = manager.register("bash", "next command", async () => "done");
+		expect(nextId).toBe("bg_2");
+		await manager.getJob(nextId)?.promise;
+	});
+
+	it("replays a cut-off tool batch before delivering an orphaned bash job's async-result", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const executed: string[] = [];
+		const { toolSession } = createWaitHarness("main");
+		const { session } = reopen(
+			model,
+			closedByExitRecovery([
+				{ role: "user", content: "run a background command and probe", timestamp: Date.now() },
+				assistant(model, {
+					content: [{ type: "toolCall", id: "call_bash", name: "bash", arguments: { command: "sleep 60" } }],
+					stopReason: "toolUse",
+				}),
+				{
+					role: "toolResult",
+					toolCallId: "call_bash",
+					toolName: "bash",
+					content: [{ type: "text", text: "Backgrounded as job bg_1" }],
+					isError: false,
+					details: { async: { state: "running", jobId: "bg_1", type: "bash" } },
+					timestamp: Date.now(),
+				},
+				assistant(model, {
+					content: [{ type: "toolCall", id: "call_probe", name: "probe", arguments: { value: "again" } }],
+					stopReason: "toolUse",
+				}),
+			]),
+			[probeTool(executed)],
+			[
+				{ content: ["probe done"], stopReason: "stop" },
+				{ content: ["noted bg_1"], stopReason: "stop" },
+			],
+			toolSession,
+		);
+
+		await expect(session.restoreInterruptedTurn()).resolves.toBe(true);
+		await session.waitForIdle();
+
+		expect(executed).toEqual(["again"]);
+		const asyncResult = session.agent.state.messages.find(
+			msg => msg.role === "custom" && msg.customType === "async-result",
+		);
+		expect(asyncResult).toBeDefined();
+		expect(asyncResult?.role === "custom" ? asyncResult.content : "").toContain("outcome is unknown");
+	});
+
+	it("bounds restored bash job labels for large heredoc commands across wait, proc, and batched async-result", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const largeHeredoc = `cat <<'EOF'\n${"echo payload-line\n".repeat(1_200)}EOF_SENTINEL\nEOF`;
+
+		const waitHarness = createWaitHarness("main");
+		const waitSession = reopen(
+			model,
+			closedByExitRecovery([
+				{ role: "user", content: "run a large heredoc and wait", timestamp: Date.now() },
+				assistant(model, {
+					content: [{ type: "toolCall", id: "call_bash", name: "bash", arguments: { command: largeHeredoc } }],
+					stopReason: "toolUse",
+				}),
+				{
+					role: "toolResult",
+					toolCallId: "call_bash",
+					toolName: "bash",
+					content: [{ type: "text", text: "Backgrounded as job bg_1" }],
+					isError: false,
+					details: { async: { state: "running", jobId: "bg_1", type: "bash" } },
+					timestamp: Date.now(),
+				},
+				assistant(model, {
+					content: [{ type: "toolCall", id: "call_wait", name: "wait", arguments: {} }],
+					stopReason: "toolUse",
+				}),
+			]),
+			[waitHarness.waitTool as AgentTool],
+			[{ content: ["done after wait"], stopReason: "stop" }],
+			waitHarness.toolSession,
+		);
+
+		await expect(waitSession.session.restoreInterruptedTurn()).resolves.toBe(true);
+		await waitSession.session.waitForIdle();
+
+		const restoredLabel = waitHarness.manager.getJob("bg_1")?.label;
+		expect(restoredLabel).toBeDefined();
+		expect(restoredLabel!.length).toBe(120);
+		expect(restoredLabel!.endsWith("...")).toBe(true);
+		expect(restoredLabel).not.toContain("\n");
+		expect(waitHarness.replayedText()).toContain(`Label: ${restoredLabel}`);
+		expect(waitHarness.replayedText()).not.toContain("EOF_SENTINEL");
+
+		const proc = await new ProcProtocolHandler().resolve(parseInternalUrl("proc://bg_1"), {
+			session: waitHarness.toolSession,
+		});
+		expect(proc.content).toContain(restoredLabel!);
+		expect(proc.content).not.toContain("EOF_SENTINEL");
+		await waitSession.session.dispose();
+
+		const executed: string[] = [];
+		const batchHarness = createWaitHarness("main");
+		const batchSession = reopen(
+			model,
+			closedByExitRecovery([
+				{ role: "user", content: "run two background jobs and probe", timestamp: Date.now() },
+				assistant(model, {
+					content: [
+						{ type: "toolCall", id: "call_bash_1", name: "bash", arguments: { command: largeHeredoc } },
+						{ type: "toolCall", id: "call_bash_2", name: "bash", arguments: { command: "sleep 60" } },
+					],
+					stopReason: "toolUse",
+				}),
+				{
+					role: "toolResult",
+					toolCallId: "call_bash_1",
+					toolName: "bash",
+					content: [{ type: "text", text: "Backgrounded as job bg_1" }],
+					isError: false,
+					details: { async: { state: "running", jobId: "bg_1", type: "bash" } },
+					timestamp: Date.now(),
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_bash_2",
+					toolName: "bash",
+					content: [{ type: "text", text: "Backgrounded as job bg_2" }],
+					isError: false,
+					details: { async: { state: "running", jobId: "bg_2", type: "bash" } },
+					timestamp: Date.now(),
+				},
+				assistant(model, {
+					content: [{ type: "toolCall", id: "call_probe", name: "probe", arguments: { value: "again" } }],
+					stopReason: "toolUse",
+				}),
+			]),
+			[probeTool(executed)],
+			[
+				{ content: ["probe done"], stopReason: "stop" },
+				{ content: ["noted batch"], stopReason: "stop" },
+			],
+			batchHarness.toolSession,
+		);
+
+		await expect(batchSession.session.restoreInterruptedTurn()).resolves.toBe(true);
+		await batchSession.session.waitForIdle();
+
+		const asyncResult = batchSession.session.agent.state.messages.find(
+			msg => msg.role === "custom" && msg.customType === "async-result",
+		);
+		const batchText =
+			asyncResult?.role === "custom" && typeof asyncResult.content === "string" ? asyncResult.content : "";
+		expect(batchText).toContain(`── Job bg_1 (${restoredLabel}) ──`);
+		expect(batchText).toContain("── Job bg_2 (sleep 60) ──");
+		expect(batchText).not.toContain("EOF_SENTINEL");
+	});
+
+	it("does not publish lost bash jobs when restoreInterruptedTurn declines without a model", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const { manager, toolSession, waitTool } = createWaitHarness("main");
+		const { session } = reopen(
+			model,
+			closedByExitRecovery([
+				{ role: "user", content: "run a command and wait", timestamp: Date.now() },
+				assistant(model, {
+					content: [{ type: "toolCall", id: "call_bash", name: "bash", arguments: { command: "sleep 60" } }],
+					stopReason: "toolUse",
+				}),
+				{
+					role: "toolResult",
+					toolCallId: "call_bash",
+					toolName: "bash",
+					content: [{ type: "text", text: "Backgrounded as job bg_1" }],
+					isError: false,
+					details: { async: { state: "running", jobId: "bg_1", type: "bash" } },
+					timestamp: Date.now(),
+				},
+				assistant(model, {
+					content: [{ type: "toolCall", id: "call_wait", name: "wait", arguments: {} }],
+					stopReason: "toolUse",
+				}),
+			]),
+			[waitTool as AgentTool],
+			[],
+			toolSession,
+		);
+		session.agent.state.model = undefined as unknown as Model;
+
+		await expect(session.restoreInterruptedTurn()).resolves.toBe(false);
+		expect(manager.getJob("bg_1")).toBeUndefined();
+	});
+
+	it("does not turn an already delivered bash result into a process-exit failure", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "run a command and wait", timestamp: Date.now() });
+		sessionManager.appendMessage(
+			assistant(model, {
+				content: [{ type: "toolCall", id: "call_bash", name: "bash", arguments: { command: "sleep 1" } }],
+				stopReason: "toolUse",
+			}),
+		);
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "call_bash",
+			toolName: "bash",
+			content: [{ type: "text", text: "Backgrounded as job bg_1" }],
+			isError: false,
+			details: { async: { state: "running", jobId: "bg_1", type: "bash" } },
+			timestamp: Date.now(),
+		});
+		sessionManager.appendCustomMessageEntry("async-result", "Background job bg_1 completed", true, {
+			jobs: [{ jobId: "bg_1", type: "bash", status: "completed", label: "sleep 1" }],
+		});
+		sessionManager.appendMessage(
+			assistant(model, {
+				content: [{ type: "toolCall", id: "call_wait", name: "wait", arguments: {} }],
+				stopReason: "toolUse",
+			}),
+		);
+		const branch = sessionManager.getBranch();
+		const abort = createInterruptedTurnAbortMessage(
+			branch,
+			{ api: model.api, provider: model.provider, model: model.id },
+			{ assumeExit: true },
+		);
+		if (!abort) throw new Error("Expected an unfinished turn to close");
+		for (const result of createInterruptedToolResults(branch)) sessionManager.appendMessage(result);
+		sessionManager.appendMessage(abort);
+
+		const { manager, toolSession, waitTool, replayedText } = createWaitHarness("main");
+		const { session } = open(
+			model,
+			sessionManager,
+			[waitTool as AgentTool],
+			[{ content: ["done after restore"], stopReason: "stop" }],
+			toolSession,
+		);
+
+		await expect(session.restoreInterruptedTurn()).resolves.toBe(true);
+		await session.waitForIdle();
+
+		expect(replayedText()).toContain("Nothing to wait for");
+		expect(manager.getJob("bg_1")).toBeUndefined();
+	});
+
+	it("goes on with a turn exit recovery closed when the eval state snapshot follows it (#16195)", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const executed: string[] = [];
+		const evalToolSession: ToolSession = {
+			cwd: tempDir.path(),
+			hasUI: false,
+			settings: Settings.isolated(),
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			getEvalSessionId: () => "restore-eval-state",
+		};
+		// Eval history makes the reopened session persist an eval state snapshot right
+		// after the turn the previous process's exit cut off and resume recovery closed.
+		const { session, mock } = reopen(
+			model,
+			closedByExitRecovery([
+				{ role: "user", content: "eval something", timestamp: Date.now() },
+				assistant(model, {
+					content: [{ type: "toolCall", id: "call_eval", name: "eval", arguments: { code: "1" } }],
+					stopReason: "toolUse",
+				}),
+				{
+					role: "toolResult",
+					toolCallId: "call_eval",
+					toolName: "eval",
+					content: [{ type: "text", text: "1" }],
+					isError: false,
+					timestamp: Date.now(),
+				},
+				assistant(model, { content: [{ type: "text", text: "evaluated" }] }),
+				{ role: "user", content: "run the probe", timestamp: Date.now() },
+				assistant(model, {
+					content: [{ type: "toolCall", id: "call_1", name: "probe", arguments: { value: "again" } }],
+					stopReason: "toolUse",
+				}),
+			]),
+			[probeTool(executed)],
+			[{ content: ["done after restore"], stopReason: "stop" }],
+			evalToolSession,
+		);
+		const tail = session.sessionManager.getBranch().at(-1);
+		expect(tail?.type === "custom_message" && tail.customType).toBe("eval-state-context");
+		// The idle "F5 to Retry" row sees the closed turn through the snapshot too.
+		expect(session.hasAbortedToolCallTail).toBe(true);
+
+		await expect(session.restoreInterruptedTurn()).resolves.toBe(true);
+		await session.waitForIdle();
+
+		expect(executed).toEqual(["again"]);
+		expect(mock.calls.length).toBe(1);
+		const last = session.agent.state.messages.at(-1);
+		expect(last?.role === "assistant" && last.content).toContainEqual({ type: "text", text: "done after restore" });
+	});
+
+	it("goes on with a request its owner's shutdown cut off, not with one a normal quit stopped", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const stops: Array<{ label: string; stop: (session: AgentSession) => Promise<void>; restored: boolean }> = [
+			// Lifecycle teardown of a running revived agent: the dispose itself cuts the request off.
+			{ label: "process-exit dispose", stop: s => s.dispose({ reason: postmortem.Reason.EXIT }), restored: true },
+			// A host ending the process (a terminal restarting its panes, a closed pty).
+			{ label: "SIGTERM dispose", stop: s => s.dispose({ reason: postmortem.Reason.SIGTERM }), restored: true },
+			{ label: "SIGHUP dispose", stop: s => s.dispose({ reason: postmortem.Reason.SIGHUP }), restored: true },
+			{ label: "SIGINT dispose", stop: s => s.dispose({ reason: postmortem.Reason.SIGINT }), restored: false },
+			// Task executor on manager shutdown: the run aborts first, then its session is released.
+			{
+				label: "shutdown abort, then process-exit dispose",
+				stop: async s => {
+					await s.abort({ reason: INTERRUPTED_TURN_ERROR });
+					await s.dispose({ reason: postmortem.Reason.EXIT });
+				},
+				restored: true,
+			},
+			{ label: "normal quit", stop: s => s.dispose(), restored: false },
+		];
+		for (const [index, { label, stop, restored }] of stops.entries()) {
+			const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), `shutdown-${index}`));
+			const requested = Promise.withResolvers<void>();
+			const first = open(
+				model,
+				sessionManager,
+				[],
+				[
+					() => {
+						requested.resolve();
+						return { delayMs: 60_000, content: ["never streamed"] };
+					},
+				],
+			).session;
+			const running = first.prompt("work").catch(() => {});
+			await requested.promise;
+			await stop(first);
+			await running;
+			session = undefined;
+
+			const file = sessionManager.getSessionFile();
+			if (!file) throw new Error("Expected a persisted session file");
+			const { session: second, mock } = open(
+				model,
+				await SessionManager.open(file),
+				[],
+				[{ content: ["done after restore"], stopReason: "stop" }],
+			);
+			expect({ label, restored: await second.restoreInterruptedTurn() }).toEqual({ label, restored });
+			await second.waitForIdle();
+			expect({ label, calls: mock.calls.length }).toEqual({ label, calls: restored ? 1 : 0 });
+			await second.dispose();
+			session = undefined;
+		}
+	});
+
+	it("goes on again with a restored turn a second shutdown cut off", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		let started = Promise.withResolvers<void>();
+		const hang: AgentTool<typeof probeSchema> = {
+			name: "probe",
+			label: "Probe",
+			description: "Probe tool",
+			parameters: probeSchema,
+			async execute(_toolCallId, _params, signal) {
+				started.resolve();
+				const aborted = Promise.withResolvers<void>();
+				signal?.addEventListener("abort", () => aborted.resolve(), { once: true });
+				await aborted.promise;
+				throw new Error("probe aborted");
+			},
+		};
+		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "shutdown-twice"));
+		const file = sessionManager.getSessionFile();
+		if (!file) throw new Error("Expected a persisted session file");
+		const first = open(
+			model,
+			sessionManager,
+			[hang as AgentTool],
+			[{ content: [{ type: "toolCall", name: "probe", arguments: { value: "again" } }] }],
+		).session;
+		const running = first.prompt("run the probe").catch(() => {});
+		await started.promise;
+		await first.dispose({ reason: postmortem.Reason.EXIT });
+		await running;
+
+		// The restored turn replays the cut-off call (a scheduled continuation), and the next shutdown cuts it off too.
+		started = Promise.withResolvers<void>();
+		const second = open(model, await SessionManager.open(file), [hang as AgentTool], []).session;
+		await expect(second.restoreInterruptedTurn()).resolves.toBe(true);
+		await started.promise;
+		await second.dispose({ reason: postmortem.Reason.EXIT });
+
+		const executed: string[] = [];
+		const { session: third, mock } = open(
+			model,
+			await SessionManager.open(file),
+			[probeTool(executed)],
+			[{ content: ["done after restore"], stopReason: "stop" }],
+		);
+		await expect(third.restoreInterruptedTurn()).resolves.toBe(true);
+		await third.waitForIdle();
+		expect(executed).toEqual(["again"]);
+		expect(mock.calls.length).toBe(1);
+	});
+
+	it("leaves a turn the user interrupted, and one that finished, as they are", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const interrupted: Message[] = [
+			{ role: "user", content: "run the probe", timestamp: Date.now() },
+			assistant(model, {
+				content: [{ type: "toolCall", id: "call_1", name: "probe", arguments: { value: "x" } }],
+				stopReason: "toolUse",
+			}),
+			{
+				role: "toolResult",
+				toolCallId: "call_1",
+				toolName: "probe",
+				content: [{ type: "text", text: "Execution interrupted" }],
+				isError: true,
+				timestamp: Date.now(),
+			},
+			assistant(model, { stopReason: "aborted", errorMessage: "Interrupted by user" }),
+		];
+		const finished: Message[] = [
+			{ role: "user", content: "say hi", timestamp: Date.now() },
+			assistant(model, { content: [{ type: "text", text: "hi" }] }),
+		];
+		for (const persisted of [interrupted, finished]) {
+			const { session, mock } = reopen(model, persisted, [], []);
+			await expect(session.restoreInterruptedTurn()).resolves.toBe(false);
+			expect(mock.calls.length).toBe(0);
+			await session.dispose();
+		}
+		session = undefined;
+	});
+
+	it("leaves a finished turn as it is when an idle compaction's eval snapshot or an older release's abort follows it", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const signalExit = { reason: "sighup", kind: "signal", recordedAt: new Date().toISOString() };
+		// What a session daemon restart finds after an idle compaction: the rebuild
+		// persisted an eval snapshot after the finished turn, then omp got SIGHUP.
+		const idleCompacted = () => {
+			const sessionManager = SessionManager.inMemory();
+			sessionManager.appendMessage({ role: "user", content: "say hi", timestamp: Date.now() });
+			sessionManager.appendMessage(assistant(model, { content: [{ type: "text", text: "hi" }] }));
+			sessionManager.appendMessage({
+				role: "custom",
+				customType: EVAL_STATE_CONTEXT_TYPE,
+				content: "<system-reminder>eval runtime state</system-reminder>",
+				display: false,
+				attribution: "agent",
+				timestamp: Date.now(),
+			});
+			sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, signalExit);
+			return sessionManager;
+		};
+		// An older release's resume read that snapshot as an unfinished tail and closed it; then another restart.
+		const closedByOlderRelease = idleCompacted();
+		closedByOlderRelease.appendMessage(
+			assistant(model, { stopReason: "aborted", errorMessage: INTERRUPTED_TURN_ERROR }),
+		);
+		closedByOlderRelease.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, signalExit);
+
+		for (const sessionManager of [idleCompacted(), closedByOlderRelease]) {
+			const { session, mock } = open(model, sessionManager, [], []);
+			await expect(session.restoreInterruptedTurn()).resolves.toBe(false);
+			expect(mock.calls.length).toBe(0);
+			await session.dispose();
+		}
+		session = undefined;
+	});
+
+	it("still goes on with a genuine shutdown abort that follows an eval snapshot, a request, or an extension prompt", () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const signalExit = { reason: "sighup", kind: "signal", recordedAt: new Date().toISOString() };
+		const abort = () => assistant(model, { stopReason: "aborted", errorMessage: INTERRUPTED_TURN_ERROR });
+		const snapshot = {
+			role: "custom" as const,
+			customType: EVAL_STATE_CONTEXT_TYPE,
+			content: "<system-reminder>eval runtime state</system-reminder>",
+			display: false,
+			attribution: "agent" as const,
+			timestamp: Date.now(),
+		};
+
+		// A compaction mid-turn: the prompt was never answered, then the snapshot, then a shutdown cut it off.
+		const midTurn = SessionManager.inMemory();
+		midTurn.appendMessage({ role: "user", content: "go on", timestamp: Date.now() });
+		midTurn.appendMessage(snapshot);
+		midTurn.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, signalExit);
+		midTurn.appendMessage(abort());
+
+		// A restored request a second shutdown cut off: the first abort stays on disk before the second.
+		const twice = SessionManager.inMemory();
+		twice.appendMessage({ role: "user", content: "go on", timestamp: Date.now() });
+		twice.appendMessage(abort());
+		twice.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, signalExit);
+		twice.appendMessage(abort());
+
+		// The same, with the eval snapshot the reopen persisted between the two aborts.
+		const reopened = SessionManager.inMemory();
+		reopened.appendMessage({ role: "user", content: "go on", timestamp: Date.now() });
+		reopened.appendMessage(abort());
+		reopened.appendCustomMessageEntry(EVAL_STATE_CONTEXT_TYPE, "<system-reminder>eval</system-reminder>", false);
+		reopened.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, signalExit);
+		reopened.appendMessage(abort());
+
+		// A `/retry` after a clean quit and reopen, cut off by SIGHUP: a live abort (it has
+		// `completedAt`) after the reopen's eval snapshot, with a normal exit before it.
+		const retried = SessionManager.inMemory();
+		retried.appendMessage({ role: "user", content: "go on", timestamp: Date.now() });
+		retried.appendMessage(assistant(model, { stopReason: "aborted", errorMessage: "Interrupted by user" }));
+		retried.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, { ...signalExit, reason: "quit", kind: "normal" });
+		retried.appendCustomMessageEntry(EVAL_STATE_CONTEXT_TYPE, "<system-reminder>eval</system-reminder>", false);
+		retried.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, signalExit);
+		retried.appendMessage({ ...abort(), completedAt: Date.now() });
+
+		// An extension's triggered prompt after a finished answer, cut off by a shutdown.
+		const extension = SessionManager.inMemory();
+		extension.appendMessage({ role: "user", content: "say hi", timestamp: Date.now() });
+		extension.appendMessage(assistant(model, { content: [{ type: "text", text: "hi" }] }));
+		extension.appendCustomMessageEntry("extension-prompt", "check the build", true);
+		extension.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, signalExit);
+		extension.appendMessage(abort());
+
+		// The same prompt hit a context overflow; recovery compacted, wrote an eval snapshot,
+		// and a hard kill (no exit recorded) cut off the retried request.
+		const overflowKilled = SessionManager.inMemory();
+		overflowKilled.appendMessage({ role: "user", content: "say hi", timestamp: Date.now() });
+		overflowKilled.appendMessage(assistant(model, { content: [{ type: "text", text: "hi" }] }));
+		overflowKilled.appendCustomMessageEntry("extension-prompt", "check the build", true);
+		overflowKilled.appendMessage(snapshot);
+
+		for (const sessionManager of [midTurn, twice, reopened, retried, extension, overflowKilled]) {
+			expect(hasRestorableTurn(sessionManager.getBranch())).toBe(true);
+		}
+
+		// Killed again after `--restore` closed that turn with its recovery abort.
+		const recoveryAbort = createInterruptedTurnAbortMessage(overflowKilled.getBranch(), undefined, {
+			assumeExit: true,
+		});
+		if (!recoveryAbort) throw new Error("Expected the unanswered custom prompt to count as unfinished");
+		overflowKilled.appendMessage(recoveryAbort);
+		expect(hasRestorableTurn(overflowKilled.getBranch())).toBe(true);
+
+		// Esc, then `/retry`; that request overflowed, recovery compacted and wrote an eval
+		// snapshot after the old user abort, and a hard kill cut off the retried request.
+		const retryOverflowKilled = SessionManager.inMemory();
+		retryOverflowKilled.appendMessage({ role: "user", content: "go on", timestamp: Date.now() });
+		retryOverflowKilled.appendMessage(
+			assistant(model, { stopReason: "aborted", errorMessage: "Interrupted by user", completedAt: Date.now() }),
+		);
+		retryOverflowKilled.appendMessage(snapshot);
+		expect(hasRestorableTurn(retryOverflowKilled.getBranch())).toBe(true);
+
+		// A clean quit and reopen before the extension prompt that overflowed and was hard-killed.
+		const reopenedOverflow = SessionManager.inMemory();
+		reopenedOverflow.appendMessage({ role: "user", content: "say hi", timestamp: Date.now() });
+		reopenedOverflow.appendMessage(assistant(model, { content: [{ type: "text", text: "hi" }] }));
+		reopenedOverflow.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, { ...signalExit, reason: "quit", kind: "normal" });
+		reopenedOverflow.appendCustomMessageEntry("extension-prompt", "check the build", true);
+		reopenedOverflow.appendMessage(snapshot);
+		expect(hasRestorableTurn(reopenedOverflow.getBranch())).toBe(true);
+
+		// An idle compaction's snapshot, then later an extension's prompt that a kill cut off
+		// before any answer (the prompt comes after the snapshot this time).
+		const promptAfterSnapshot = SessionManager.inMemory();
+		promptAfterSnapshot.appendMessage({ role: "user", content: "say hi", timestamp: Date.now() });
+		promptAfterSnapshot.appendMessage(assistant(model, { content: [{ type: "text", text: "hi" }] }));
+		promptAfterSnapshot.appendMessage(snapshot);
+		promptAfterSnapshot.appendCustomMessageEntry("extension-prompt", "check the build", true);
+		promptAfterSnapshot.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, signalExit);
+		expect(hasRestorableTurn(promptAfterSnapshot.getBranch())).toBe(true);
+		expect(
+			createInterruptedTurnAbortMessage(promptAfterSnapshot.getBranch(), undefined, { assumeExit: true }),
+		).toBeDefined();
+	});
+
+	it("leaves an older release's abort after an eval snapshot stored as a custom message entry", () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const signalExit = { reason: "sighup", kind: "signal", recordedAt: new Date().toISOString() };
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "say hi", timestamp: Date.now() });
+		sessionManager.appendMessage(assistant(model, { content: [{ type: "text", text: "hi" }] }));
+		sessionManager.appendCustomMessageEntry(
+			EVAL_STATE_CONTEXT_TYPE,
+			"<system-reminder>eval</system-reminder>",
+			false,
+		);
+		sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, signalExit);
+		sessionManager.appendMessage(assistant(model, { stopReason: "aborted", errorMessage: INTERRUPTED_TURN_ERROR }));
+		expect(hasRestorableTurn(sessionManager.getBranch())).toBe(false);
+	});
+
+	it("leaves an idle snapshot followed only by a display-only custom message", () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "say hi", timestamp: Date.now() });
+		sessionManager.appendMessage(assistant(model, { content: [{ type: "text", text: "hi" }] }));
+		sessionManager.appendMessage({
+			role: "custom",
+			customType: EVAL_STATE_CONTEXT_TYPE,
+			content: "<system-reminder>eval runtime state</system-reminder>",
+			display: false,
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+		// Rendered and saved, never sent to the model: it cannot have started a turn.
+		sessionManager.appendCustomMessageEntry("bash-row", "ls", true, undefined, "user", Date.now(), true);
+		sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, {
+			reason: "sighup",
+			kind: "signal",
+			recordedAt: new Date().toISOString(),
+		});
+		expect(hasRestorableTurn(sessionManager.getBranch())).toBe(false);
+	});
+});

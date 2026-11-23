@@ -134,8 +134,6 @@ describe("union", () => {
 		expect(T.expression).toEqual("1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17");
 	});
 
-	it.todo("completions");
-
 	it("spreadable", () => {
 		const types: type[] = [];
 
@@ -223,8 +221,6 @@ describe("intersection", () => {
 		> = true;
 		expect(T.expression).toEqual("{ a1: 1, a2: 2, a3: 3, a4: 4, a5: 5 }");
 	});
-
-	it.todo("completions");
 
 	it("spreadable", () => {
 		const types: type[] = [];
@@ -374,11 +370,6 @@ describe("merge", () => {
 			"{ a1: 1, a2: 2, a3: 3, a4: 4, a5: 5, a6: 6, a7: 7, a8: 8, a9: 9, a10: 10, a11: 11, a12: 12, a13: 13, a14: 14, a15: 15, a16: 16, a17: 17 }",
 		);
 	});
-
-	// type-perf currently blows up here, investigation:
-	// https://github.com/arktypeio/arktype/issues/1394
-
-	it.todo("completions");
 
 	it("spreadable", () => {
 		const types: type<object>[] = [];

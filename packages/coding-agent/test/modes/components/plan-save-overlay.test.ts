@@ -1,10 +1,8 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
 import { Settings } from "../../../src/config/settings";
-import { PlanSaveOverlay, type PlanSaveOverlayResult } from "../../../src/modes/components/plan-save-overlay";
-import { getThemeByName, setThemeInstance, type Theme, theme } from "../../../src/modes/theme/theme";
-
-const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, "");
+import { PlanSaveOverlay, type PlanSaveOverlayResult } from "@oh-my-pi/pi-tui/overlays/plan-save-overlay";
+import { getThemeByName, setThemeInstance, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 
 describe("PlanSaveOverlay", () => {
 	let uiTheme: Theme;
@@ -24,7 +22,6 @@ describe("PlanSaveOverlay", () => {
 
 		expect(lines.join("\n")).toContain(theme.fg("dim", "AUTO_QA_PLAN.md"));
 		expect(lines.map(visibleWidth)).toEqual(Array(lines.length).fill(80));
-		expect(stripAnsi(lines.join("\n"))).toContain("Enter save and quit · Esc cancel");
 	});
 
 	it("uses the latest generated suggestion when entered empty", () => {

@@ -2,11 +2,11 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { formatHashlineHeader } from "@oh-my-pi/hashline";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { canonicalSnapshotKey, EditTool, getFileSnapshotStore, type PatchParams } from "@oh-my-pi/pi-coding-agent/edit";
+import { EditTool, getEditStore, type PatchParams } from "@oh-my-pi/pi-coding-agent/edit";
+import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { EditMode } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
+import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const MODEL = "openai/gpt-5.6";
@@ -95,6 +95,22 @@ describe("edit parse-regression blackbox", () => {
 		expect(text).not.toMatch(/no longer parses/);
 	});
 
+	test("does not warn when tree-sitter misreads valid Markdown", async () => {
+		const table = "| case | before | after |\n|---|---|---|\n| a | 1 | 2 |\n";
+		await Bun.write(path.join(tempDir, "notes.md"), table);
+
+		const result = await new EditTool(session, "replace").execute("markdown", {
+			path: "notes.md",
+			old_string: "| a | 1 | 2 |",
+			new_string: "| a | 1 | 2 |\n| b |||",
+		});
+
+		expect(await Bun.file(path.join(tempDir, "notes.md")).text()).toBe(`${table}| b |||\n`);
+		const text = result.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
+		expect(text).not.toMatch(/no longer parses/);
+		expect(await Bun.file(logPath).exists()).toBe(false);
+	});
+
 	test("appends valid-to-invalid transitions from every edit variant", async () => {
 		await fs.appendFile(logPath, '{"seed":true}\n');
 		const expected: Array<{
@@ -152,7 +168,7 @@ describe("edit parse-regression blackbox", () => {
 		});
 
 		const hashlinePath = await writeFixture("hashline.ts");
-		const tag = getFileSnapshotStore(session).record(canonicalSnapshotKey(hashlinePath), SOURCE);
+		const tag = getEditStore(session).recordSnapshot(hashlinePath, SOURCE, undefined);
 		const hashlineArg = {
 			input: `${formatHashlineHeader("hashline.ts", tag)}\nPUT 2-2:\n+\treturn (;`,
 		};
@@ -167,7 +183,7 @@ describe("edit parse-regression blackbox", () => {
 
 		const sloppyPath = await writeFixture("sloppy.ts");
 		const sloppyArg = {
-			input: '<SM:EDIT path="sloppy.ts">\n<SM:FIND>\n\treturn 1;\n</SM:FIND>\n<SM:PUT>\n\treturn (;\n</SM:PUT>',
+			input: "*** Edit File: sloppy.ts\n*** Find\n\treturn 1;\n*** Replace\n\treturn (;",
 		};
 		await new EditTool(session, "sloppy").execute("sloppy", sloppyArg);
 		expected.push({

@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import path from "node:path";
 import type {
 	AgentTool,
@@ -7,31 +8,41 @@ import type {
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
-import { isEnoent, isFsError, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
-import { type Theme, theme } from "../modes/theme/theme";
+import { isEnoent, isFsError, logger, prompt, ptree, untilAborted } from "@oh-my-pi/pi-utils";
+import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import lspDescription from "../prompts/tools/lsp.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
 import { formatPathRelativeToCwd, resolveToCwd } from "../tools/path-utils";
-import { replaceTabs, shortenPath } from "../tools/render-utils";
-import { ToolAbortError, ToolError, throwIfAborted } from "../tools/tool-errors";
-import { clampTimeout } from "../tools/tool-timeouts";
+import { replaceTabs, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { clampTimeout, resolveLspTimeouts, TOOL_TIMEOUTS } from "../tools/tool-timeouts";
 import {
 	applyWorkspaceEditWithLsp,
 	clearInitializationFailure,
-	ensureFileOpen,
+	ensureWorkspaceFolders,
 	getActiveClients,
 	getOrCreateClient,
 	isRustAnalyzerClient,
 	type LspServerStatus,
+	reconcileFileFromDisk,
+	reconcileIdleChecker,
+	reconcileOpenFilesFromDisk,
+	rebuildFile,
 	refreshFile,
+	reopenFile,
 	sendNotification,
 	sendRequest,
 	shutdownStaleClients,
+	supportsDocumentDiagnostics,
+	supportsMethod,
+	unservedCheckout,
 	waitForProjectLoaded,
 } from "./client";
 import { getLinterClient } from "./clients";
-import { getServersForFile } from "./config";
+import { locationsNotMentioning, missingOccurrencesNote } from "./completeness";
+import { configCache, describeMissingServers, getConfig, getServersForFile } from "./config";
 import {
 	BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	formatLocationWithContext,
@@ -39,7 +50,6 @@ import {
 	isOnlyQueriedDeclaration,
 	MAX_GLOB_DIAGNOSTIC_TARGETS,
 	normalizeLocationResult,
-	PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	PROJECT_INDEXED_ACTIONS,
 	REFERENCE_CONTEXT_LIMIT,
 	REFERENCES_RETRY_COUNT,
@@ -47,6 +57,7 @@ import {
 	SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	WORKSPACE_SYMBOL_LIMIT,
 	waitForDiagnostics,
+	waitForRebuiltDiagnostics,
 } from "./diagnostics";
 import {
 	applyEditsThenRename,
@@ -57,8 +68,6 @@ import {
 } from "./edits";
 import { detectLspmux } from "./lspmux";
 import {
-	configCache,
-	getConfig,
 	getLspServerForFile,
 	getLspServers,
 	getLspServersForFile,
@@ -77,37 +86,46 @@ import {
 	type Location,
 	type LocationLink,
 	type LspClient,
-	type LspParams,
-	type LspToolDetails,
 	lspSchema,
 	type ServerConfig,
 	type SymbolInformation,
 	type TextEdit,
 	type WorkspaceEdit,
 } from "./types";
+import { type LspParams, type LspToolDetails } from "@oh-my-pi/pi-tui/tools/lsp";
 import {
 	applyCodeAction,
 	dedupeWorkspaceSymbols,
 	extractHoverText,
 	fileToUri,
 	filterWorkspaceSymbols,
+	findSymbolInFile,
 	formatCodeAction,
 	formatDiagnostic,
 	formatDiagnosticsSummary,
 	formatDocumentSymbol,
-	formatGroupedDiagnosticMessages,
 	formatLocation,
+	formatMatchingDocumentSymbols,
 	formatSymbolInformation,
 	formatWorkspaceEdit,
+	mergeCodeActions,
+	parseSymbolSpec,
 	resolveDiagnosticTargets,
 	resolveSymbolColumn,
 	sortDiagnostics,
 	symbolKindToIcon,
 	uriToFile,
 } from "./utils";
+import { formatGroupedDiagnosticMessages } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { runWorkspaceDiagnostics } from "./workspace-diagnostics";
 
+import { cfgToolsMaxTimeout } from "../tools/settings";
+import { cfgLspRequestTimeout } from "./settings";
+
 const MAX_RENAME_PAIRS = 1000;
+
+/** File actions whose answer can draw on other open documents; those are synced from disk first. */
+const CROSS_FILE_ACTIONS: ReadonlySet<string> = new Set([...PROJECT_INDEXED_ACTIONS, "code_actions"]);
 
 interface FileRenamePair {
 	oldUri: string;
@@ -167,6 +185,130 @@ function formatRenameStatError(error: unknown): string {
 /**
  * LSP tool for language server protocol operations.
  */
+const PLAIN_STATUS_SYMBOLS = { success: "✓", warning: "⚠", error: "✗" } as const;
+
+/**
+ * Status glyph for result text. `theme` is only assigned once the TUI loads it,
+ * so headless and eval runs fall back to plain glyphs.
+ */
+function statusSymbol(kind: keyof typeof PLAIN_STATUS_SYMBOLS): string {
+	const loaded: Theme | undefined = theme;
+	return loaded ? loaded.status[kind] : PLAIN_STATUS_SYMBOLS[kind];
+}
+
+/** The server capability and request method each single-server action needs. */
+const ACTION_PROVIDERS: Readonly<Record<string, { capability: string; method: string }>> = {
+	definition: { capability: "definitionProvider", method: "textDocument/definition" },
+	type_definition: { capability: "typeDefinitionProvider", method: "textDocument/typeDefinition" },
+	implementation: { capability: "implementationProvider", method: "textDocument/implementation" },
+	references: { capability: "referencesProvider", method: "textDocument/references" },
+	hover: { capability: "hoverProvider", method: "textDocument/hover" },
+	code_actions: { capability: "codeActionProvider", method: "textDocument/codeAction" },
+	symbols: { capability: "documentSymbolProvider", method: "textDocument/documentSymbol" },
+	rename: { capability: "renameProvider", method: "textDocument/rename" },
+};
+
+/** Whether a started client can serve `provider`; a client with no initialize result is assumed to. */
+function clientServes(client: LspClient, provider: { capability: string; method: string } | undefined): boolean {
+	if (!provider || client.serverCapabilities === undefined) return true;
+	return supportsMethod(client, provider.capability, provider.method);
+}
+
+interface SelectedClient {
+	name: string;
+	config: ServerConfig;
+	client: LspClient;
+	/** Why each better-ranked candidate was passed over. */
+	skipped: string[];
+}
+
+/**
+ * Pick the first server for the file that advertises the action, starting each
+ * candidate in rank order. A lint-only server (e.g. ruff) ranked first for a
+ * file would otherwise get definition/references and answer "-32601 Unknown
+ * request". When none advertises it, the first that started still gets the
+ * request (servers may implement methods they do not advertise). A sole
+ * candidate's startup error propagates; with several, each failure becomes a
+ * note, and an `unsupported` answer when none started.
+ */
+async function selectClientForAction(
+	candidates: Array<[string, ServerConfig]>,
+	action: string,
+	cwd: string,
+	signal: AbortSignal | undefined,
+): Promise<SelectedClient | { unsupported: string[] }> {
+	const provider = ACTION_PROVIDERS[action];
+	const notes: string[] = [];
+	let fallback: Omit<SelectedClient, "skipped"> | undefined;
+	for (const [name, config] of candidates) {
+		let client: LspClient;
+		try {
+			client = await getOrCreateClient(config, cwd, undefined, signal);
+		} catch (err) {
+			if (candidates.length === 1 || err instanceof ToolAbortError || signal?.aborted) throw err;
+			notes.push(`${name}: failed to start (${err instanceof Error ? err.message : String(err)})`);
+			continue;
+		}
+		if (clientServes(client, provider)) return { name, config, client, skipped: notes };
+		fallback ??= { name, config, client };
+		notes.push(`${name}: does not implement ${provider!.method}`);
+	}
+	return fallback ? { ...fallback, skipped: notes } : { unsupported: notes };
+}
+
+/**
+ * A note listing returned locations whose line does not mention the queried
+ * symbol, with clangd's usual cause when it applies; empty when all do.
+ */
+async function offTargetNote(
+	locations: readonly Location[],
+	symbolName: string | undefined,
+	serverName: string,
+	cwd: string,
+): Promise<string> {
+	if (!symbolName) return "";
+	const misses = await locationsNotMentioning(locations, symbolName);
+	if (misses.length === 0) return "";
+	const examples = misses
+		.slice(0, 3)
+		.map(location => formatLocation(location, cwd))
+		.join(", ");
+	const hasCompileDb = ["compile_commands.json", path.join("build", "compile_commands.json")].some(file =>
+		fs.existsSync(path.join(cwd, file)),
+	);
+	const clangdHint =
+		serverName === "clangd" && !hasCompileDb
+			? "; clangd has no compile_commands.json and is parsing with fallback flags"
+			: "";
+	return `\n⚠ ${misses.length} location(s) do not mention ${symbolName} (${examples})${clangdHint}`;
+}
+
+const RUSTUP_PROXY_PROBE_MS = 5_000;
+
+/**
+ * A rustup proxy (`$CARGO_HOME/bin/rust-analyzer`) resolves on PATH even when the
+ * active toolchain lacks the component, and then exits at startup. Run it once
+ * and return its error, or undefined when it works or is not a rustup proxy.
+ */
+async function probeRustupProxy(command: string, signal: AbortSignal | undefined): Promise<string | undefined> {
+	const cargoBin = path.join(process.env.CARGO_HOME ?? path.join(os.homedir(), ".cargo"), "bin");
+	if (path.dirname(command) !== cargoBin) return undefined;
+	const timeout = AbortSignal.timeout(RUSTUP_PROXY_PROBE_MS);
+	try {
+		const result = await ptree.exec([command, "--version"], {
+			stderr: "full",
+			allowNonZero: true,
+			signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+		});
+		if (result.ok) return undefined;
+		return (
+			(result.stderr || result.stdout).trim().split("\n").slice(0, 2).join(" ") || `exit code ${result.exitCode}`
+		);
+	} catch {
+		return undefined;
+	}
+}
+
 export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Theme> {
 	readonly name = "lsp";
 	readonly approval = (args: unknown): ToolApprovalDecision => {
@@ -185,12 +327,19 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 	readonly label = "LSP";
 	readonly loadMode = "discoverable";
 	readonly summary = "Query LSP (language server) for diagnostics, hover info, and references";
-	readonly description: string;
 	readonly parameters = lspSchema;
 	readonly strict = true;
 
-	constructor(private readonly session: ToolSession) {
-		this.description = prompt.render(lspDescription);
+	constructor(private readonly session: ToolSession) {}
+
+	get description(): string {
+		const maxTimeout = cfgToolsMaxTimeout.get(this.session.settings);
+		const defaults = resolveLspTimeouts(undefined, cfgLspRequestTimeout.get(this.session.settings), maxTimeout);
+		return prompt.render(lspDescription, {
+			defaultTimeoutSec: defaults.call,
+			defaultWaitSec: defaults.wait,
+			maxTimeoutSec: clampTimeout("lsp", TOOL_TIMEOUTS.lsp.max, maxTimeout),
+		});
 	}
 
 	static createIf(session: ToolSession): LspTool | null {
@@ -208,11 +357,32 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		if (this.session.lspReadOnly && !LSP_READONLY_ACTIONS.has(action)) {
 			throw new ToolError(`LSP action ${action} is disabled in this read-only session`);
 		}
-		const timeoutSec = clampTimeout("lsp", timeout, this.session.settings.get("tools.maxTimeout"));
+		const budget = resolveLspTimeouts(
+			timeout,
+			cfgLspRequestTimeout.get(this.session.settings),
+			cfgToolsMaxTimeout.get(this.session.settings),
+		);
+		const timeoutSec = budget.call;
+		const waitMs = budget.wait * 1000;
 		const timeoutSignal = AbortSignal.timeout(timeoutSec * 1000);
 		const callerSignal = signal;
 		signal = callerSignal ? AbortSignal.any([callerSignal, timeoutSignal]) : timeoutSignal;
 		throwIfAborted(signal);
+		/**
+		 * Rethrow an abort; return for any other error. A caller cancel stays a
+		 * ToolAbortError, while the call's own deadline becomes a ToolError naming the
+		 * budget and server instead of an opaque "Operation aborted".
+		 */
+		const rethrowAbort = (err: unknown, serverName?: string): void => {
+			if (!(err instanceof ToolAbortError) && !signal?.aborted) return;
+			if (timeoutSignal.aborted && !callerSignal?.aborted) {
+				const server = serverName ? ` on ${serverName}` : "";
+				throw new ToolError(
+					`LSP ${action} timed out after ${timeoutSec}s${server}. The server may still be indexing; try again or pass timeout=<larger>.`,
+				);
+			}
+			throw new ToolAbortError();
+		};
 
 		const config = getConfig(this.session.cwd);
 
@@ -246,11 +416,16 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			if (configuredNames.length === 0) {
 				lines.push("No language servers configured for this project");
 			} else {
-				const labelled = configuredNames.map(name => {
-					const started = startedByConfigName.get(name);
-					if (!started) return `${name} (configured, not started)`;
-					return `${name} (${started.status})`;
-				});
+				const labelled = await Promise.all(
+					configuredNames.map(async name => {
+						const started = startedByConfigName.get(name);
+						if (started) return `${name} (${started.status})`;
+						const serverConfig = config.servers[name]!;
+						const command = serverConfig.resolvedCommand ?? serverConfig.command;
+						const proxyError = await probeRustupProxy(command, signal);
+						return proxyError ? `${name} (unusable: ${proxyError})` : `${name} (configured, not started)`;
+					}),
+				);
 				lines.push(`Language servers: ${labelled.join(", ")}`);
 				lines.push(
 					"  note: 'configured, not started' means the binary resolves on PATH but no request has spawned it yet; 'ready' means a client process is live for this cwd.",
@@ -268,7 +443,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		if (action === "diagnostics") {
 			if (file === "*") {
 				// `*` => run workspace diagnostics across all configured servers
-				const result = await runWorkspaceDiagnostics(this.session.cwd, signal);
+				const result = await runWorkspaceDiagnostics(this.session.cwd, signal).catch(err => {
+					rethrowAbort(err);
+					throw err;
+				});
 				return {
 					content: [
 						{
@@ -308,10 +486,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const results: string[] = [];
 			const allServerNames = new Set<string>();
 			let totalServerAttempts = 0;
-			let totalServerSuccesses = 0;
+			let totalServerFailures = 0;
 			if (truncatedGlobTargets) {
 				results.push(
-					`${theme.status.warning} Pattern matched more than ${MAX_GLOB_DIAGNOSTIC_TARGETS} files; showing first ${MAX_GLOB_DIAGNOSTIC_TARGETS}. Narrow the glob or use workspace diagnostics.`,
+					`${statusSymbol("warning")} Pattern matched more than ${MAX_GLOB_DIAGNOSTIC_TARGETS} files; showing first ${MAX_GLOB_DIAGNOSTIC_TARGETS}. Narrow the glob or use workspace diagnostics.`,
 				);
 			}
 
@@ -320,7 +498,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				const resolved = resolveToCwd(target, this.session.cwd);
 				const servers = getServersForFile(config, resolved);
 				if (servers.length === 0) {
-					results.push(`${theme.status.error} ${target}: No language server found`);
+					results.push(`${statusSymbol("error")} ${target}: ${describeMissingServers(config, resolved)}`);
 					continue;
 				}
 
@@ -328,7 +506,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				const relPath = formatPathRelativeToCwd(resolved, this.session.cwd);
 				const allDiagnostics: Diagnostic[] = [];
 				const failedServers: string[] = [];
+				const reportedServers: string[] = [];
 				let succeededServers = 0;
+				// Servers with no fresh report within the wait: the file is unverified, not clean.
+				const unreportedServers: string[] = [];
 
 				// Query all applicable servers for this file
 				for (const [serverName, serverConfig] of servers) {
@@ -341,41 +522,74 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							const diagnostics = await linterClient.lint(resolved, signal);
 							allDiagnostics.push(...diagnostics);
 							succeededServers++;
-							totalServerSuccesses++;
+							reportedServers.push(serverName);
 							continue;
 						}
 						const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
-						if (isProjectAwareLspServer(serverConfig)) {
-							await waitForProjectLoaded(client, signal);
-							throwIfAborted(signal);
-						}
+						// Sync open dependencies, then make the server compute the target's
+						// diagnostics against current disk state. A report cached from an earlier
+						// call cannot be trusted: a dependency OMP never opened may have changed.
+						await reconcileOpenFilesFromDisk(client, signal, uri);
 						const minVersion = client.diagnosticsVersion;
-						await refreshFile(client, resolved, signal);
+						// Set when clangd was asked to rebuild: its report is final only once its
+						// build status settles.
+						let rebuildStatusSeq: number | undefined;
+						if (supportsDocumentDiagnostics(client)) {
+							await reconcileFileFromDisk(client, resolved, signal);
+						} else if (client.buildStatus) {
+							// clangd with build status: rebuild the main file in place, keeping the
+							// headers it can reuse, rather than paying a full rebuild on reopen.
+							const sinceSeq = client.buildStatusSeq ?? 0;
+							if (await rebuildFile(client, resolved, signal)) rebuildStatusSeq = sinceSeq;
+						} else if (client.publishesDocumentVersions) {
+							// A push server need not republish unchanged text (clangd does not), but
+							// it does on open, and the echoed version identifies that report at once.
+							await reopenFile(client, resolved, signal);
+						} else {
+							// Without echoed versions a reopen's report cannot be told apart from the
+							// empty one its close may publish; resend the text instead.
+							await refreshFile(client, resolved, signal);
+						}
 						const expectedDocumentVersion = client.openFiles.get(uri)?.version;
 						// Project-aware servers (Roslyn, tsserver, …) compute pull diagnostics
 						// on demand; their first response routinely overruns the 3s single-file
 						// budget, which would otherwise surface as a false "OK". An explicit
-						// diagnostics request can afford to wait, bounded by the tool timeout.
+						// diagnostics request can afford to wait: `lsp.requestTimeout`, or the
+						// call's `timeout`, bounded by the tool timeout.
 						const waitCapMs = detailed
 							? BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS
 							: isProjectAwareLspServer(serverConfig)
-								? PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS
+								? waitMs
 								: SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS;
-						const diagnostics = await waitForDiagnostics(client, uri, {
-							timeoutMs: Math.min(waitCapMs, timeoutSec * 1000),
-							signal,
-							minVersion,
-							expectedDocumentVersion,
-						});
+						const timeoutMs = Math.min(waitCapMs, timeoutSec * 1000);
+						const diagnostics =
+							rebuildStatusSeq !== undefined && expectedDocumentVersion !== undefined
+								? await waitForRebuiltDiagnostics(client, uri, {
+										version: expectedDocumentVersion,
+										sinceSeq: rebuildStatusSeq,
+										timeoutMs,
+										signal,
+									})
+								: await waitForDiagnostics(client, uri, {
+										timeoutMs,
+										signal,
+										minVersion,
+										expectedDocumentVersion,
+										// Decided per pull, not above: a server can register pulls after this call began.
+										afterProjectLoad: isProjectAwareLspServer(serverConfig),
+									});
+						if (diagnostics === undefined) {
+							unreportedServers.push(serverName);
+							continue;
+						}
 						allDiagnostics.push(...diagnostics);
 						succeededServers++;
-						totalServerSuccesses++;
+						reportedServers.push(serverName);
 					} catch (err) {
-						if (err instanceof ToolAbortError || signal?.aborted) {
-							throw err;
-						}
+						rethrowAbort(err, serverName);
 						// Server failed; record it so a total failure is not reported as clean.
 						failedServers.push(serverName);
+						totalServerFailures++;
 						logger.debug("LSP diagnostics server failed", {
 							server: serverName,
 							file: relPath,
@@ -397,67 +611,49 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 				sortDiagnostics(uniqueDiagnostics);
 
-				if (!detailed && targets.length === 1) {
-					if (succeededServers === 0) {
-						return {
-							content: [
-								{
-									type: "text",
-									text: `${theme.status.error} ${relPath}: all language servers failed (${failedServers.join(", ")})`,
-								},
-							],
-							details: { action, serverName: Array.from(allServerNames).join(", "), success: false },
-						};
-					}
-
-					if (uniqueDiagnostics.length === 0) {
-						const text =
-							failedServers.length > 0
-								? `OK\n${theme.status.warning} some servers failed: ${failedServers.join(", ")}`
-								: "OK";
-						return {
-							content: [{ type: "text", text }],
-							details: { action, serverName: Array.from(allServerNames).join(", "), success: true },
-						};
-					}
-
+				const notes: string[] = [];
+				if (unreportedServers.length > 0) {
+					const hint = detailed ? "query the file alone for a longer wait" : "retry once it finishes analyzing";
+					notes.push(
+						`${statusSymbol("warning")} ${relPath}: no diagnostics report yet from ${unreportedServers.join(", ")}; ${hint}`,
+					);
+				}
+				if (failedServers.length > 0 && (succeededServers > 0 || unreportedServers.length > 0)) {
+					notes.push(`${statusSymbol("warning")} ${relPath}: some servers failed (${failedServers.join(", ")})`);
+				}
+				const lines: string[] = [];
+				if (succeededServers === 0 && unreportedServers.length === 0) {
+					lines.push(
+						`${statusSymbol("error")} ${relPath}: all language servers failed (${failedServers.join(", ")})`,
+					);
+				} else if (uniqueDiagnostics.length > 0) {
 					const summary = formatDiagnosticsSummary(uniqueDiagnostics);
-					const formatted = uniqueDiagnostics.map(d => formatDiagnostic(d, relPath));
-					let output = `${summary}:\n${formatGroupedDiagnosticMessages(formatted)}`;
-					if (failedServers.length > 0) {
-						output += `\n${theme.status.warning} some servers failed: ${failedServers.join(", ")}`;
-					}
+					lines.push(detailed ? `${statusSymbol("error")} ${relPath}: ${summary}` : `${summary}:`);
+					lines.push(formatGroupedDiagnosticMessages(uniqueDiagnostics.map(d => formatDiagnostic(d, relPath))));
+				} else if (succeededServers > 0 && unreportedServers.length > 0) {
+					// Clean so far, but not verified until the pending servers report.
+					const partial = `no issues from ${reportedServers.join(", ")}`;
+					lines.push(detailed ? `${statusSymbol("warning")} ${relPath}: ${partial}` : partial);
+				} else if (succeededServers > 0) {
+					lines.push(detailed ? `${statusSymbol("success")} ${relPath}: no issues` : "OK");
+				}
+				lines.push(...notes);
+
+				if (!detailed) {
 					return {
-						content: [{ type: "text", text: output }],
-						details: { action, serverName: Array.from(allServerNames).join(", "), success: true },
+						content: [{ type: "text", text: lines.join("\n") }],
+						// Unverified is not failed: success unless every server errored.
+						details: {
+							action,
+							serverName: Array.from(allServerNames).join(", "),
+							success: succeededServers > 0 || unreportedServers.length > 0,
+						},
 					};
 				}
-
-				if (uniqueDiagnostics.length === 0) {
-					if (succeededServers === 0) {
-						results.push(
-							`${theme.status.error} ${relPath}: all language servers failed (${failedServers.join(", ")})`,
-						);
-					} else {
-						results.push(`${theme.status.success} ${relPath}: no issues`);
-						if (failedServers.length > 0) {
-							results.push(
-								`${theme.status.warning} ${relPath}: some servers failed (${failedServers.join(", ")})`,
-							);
-						}
-					}
-				} else {
-					const summary = formatDiagnosticsSummary(uniqueDiagnostics);
-					results.push(`${theme.status.error} ${relPath}: ${summary}`);
-					const formatted = uniqueDiagnostics.map(d => formatDiagnostic(d, relPath));
-					results.push(formatGroupedDiagnosticMessages(formatted));
-					if (failedServers.length > 0) {
-						results.push(`${theme.status.warning} ${relPath}: some servers failed (${failedServers.join(", ")})`);
-					}
-				}
+				results.push(...lines);
 			}
 
-			const allServersFailed = totalServerAttempts > 0 && totalServerSuccesses === 0;
+			const allServersFailed = totalServerAttempts > 0 && totalServerFailures === totalServerAttempts;
 			return {
 				content: [{ type: "text", text: results.join("\n") }],
 				details: { action, serverName: Array.from(allServerNames).join(", "), success: !allServersFailed },
@@ -478,7 +674,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			}
 
 			const source = resolveToCwd(file, this.session.cwd);
-			const dest = resolveToCwd(new_name, this.session.cwd);
+			// A bare name renames in place: it stays next to the source.
+			const dest = /[\\/]/.test(new_name)
+				? resolveToCwd(new_name, this.session.cwd)
+				: path.join(path.dirname(source), new_name);
 
 			if (source === dest) {
 				return {
@@ -586,12 +785,30 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			// — moving the path without those edits leaves dangling references
 			// (issue #8380).
 			const hardFailures: string[] = [];
+			// Relevant servers that do not implement workspace/willRenameFiles: they rewrite no imports.
+			const nonRenamingServers: string[] = [];
 
 			for (const [serverName, serverConfig] of servers) {
 				throwIfAborted(signal);
 				let client: LspClient;
+				// A server that never received the rename's checkouts answers without them.
+				let folderError: unknown;
 				try {
 					client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+					// Per renamed file, both sides, not per directory: a rename can span checkouts.
+					// One file per directory is enough, and one notification adds them all.
+					const byDir = new Map<string, string>();
+					for (const { oldUri, newUri } of pairs) {
+						for (const filePath of [uriToFile(oldUri), uriToFile(newUri)]) {
+							if (!byDir.has(path.dirname(filePath))) byDir.set(path.dirname(filePath), filePath);
+						}
+					}
+					try {
+						await ensureWorkspaceFolders(client, [...byDir.values()], signal);
+					} catch (err) {
+						if (err instanceof ToolAbortError || signal?.aborted) throw err;
+						folderError = err;
+					}
 					if (isProjectAwareLspServer(serverConfig)) {
 						await waitForProjectLoaded(client, signal);
 					}
@@ -606,6 +823,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					continue;
 				}
 				try {
+					// Edits are computed against the server's documents: sync any changed on disk first.
+					await reconcileOpenFilesFromDisk(client, signal, undefined, "throw");
 					const result = (await sendRequest(
 						client,
 						"workspace/willRenameFiles",
@@ -613,17 +832,25 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						signal,
 					)) as WorkspaceEdit | null;
 					respondingServers.add(serverName);
-					if (result && (result.changes || result.documentChanges)) {
+					if (folderError !== undefined) {
+						// Its edits leave out the checkout it never loaded; method-not-found
+						// (below) means it has no rename edits to miss.
+						const msg = folderError instanceof Error ? folderError.message : String(folderError);
+						serverNotes.push(`  ${serverName}: could not add the rename's checkout to its workspace: ${msg}`);
+						hardFailures.push(serverName);
+					} else if (result && (result.changes || result.documentChanges)) {
 						perServerEdits.push({ serverName, edit: result });
 					}
 				} catch (err) {
 					if (err instanceof ToolAbortError || signal?.aborted) {
 						throw err;
 					}
-					// method-not-found means the server doesn't implement the request;
-					// skip it silently. Any other error is a genuine failure from a
-					// server that supports willRenameFiles.
-					if (!isMethodNotFoundError(err)) {
+					// method-not-found means the server doesn't implement the request.
+					// Any other error is a genuine failure from a server that supports
+					// willRenameFiles.
+					if (isMethodNotFoundError(err)) {
+						nonRenamingServers.push(serverName);
+					} else {
 						const msg = err instanceof Error ? err.message : String(err);
 						serverNotes.push(`  ${serverName}: ${msg}`);
 						hardFailures.push(serverName);
@@ -637,10 +864,20 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				? `${pairs.length} file${pairs.length !== 1 ? "s" : ""} under ${sourceLabel}`
 				: sourceLabel;
 
+			// Nothing will update imports when no relevant server implements willRenameFiles.
+			const importsNote =
+				respondingServers.size === 0
+					? `imports NOT rewritten: ${
+							nonRenamingServers.length > 0
+								? `${nonRenamingServers.join(", ")} ${nonRenamingServers.length === 1 ? "does" : "do"} not implement workspace/willRenameFiles`
+								: "no language server handles these files"
+						}`
+					: undefined;
+
 			const shouldApply = apply !== false;
 			if (!shouldApply) {
 				const lines: string[] = [];
-				lines.push(`Rename preview: ${fileCountLabel} → ${destLabel}`);
+				lines.push(`Rename preview: ${fileCountLabel} → ${destLabel}${importsNote ? `; ${importsNote}` : ""}`);
 				if (perServerEdits.length === 0) {
 					lines.push("  No LSP edits would be applied");
 				} else {
@@ -805,7 +1042,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				summary.push(...serverNotes);
 			}
 
-			const header = `Renamed ${fileCountLabel} → ${destLabel}`;
+			const header = `Renamed ${fileCountLabel} → ${destLabel}${importsNote ? `; ${importsNote}` : ""}`;
 			return {
 				content: [{ type: "text", text: `${header}\n${summary.join("\n")}` }],
 				details: {
@@ -932,7 +1169,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			try {
 				const client = await getOrCreateClient(chosenConfig, this.session.cwd, undefined, signal);
 				if (resolvedTarget) {
-					await ensureFileOpen(client, resolvedTarget, signal);
+					await reconcileFileFromDisk(client, resolvedTarget, signal);
 				}
 				const result = await sendRequest(client, method, requestParams, signal);
 				const formatted =
@@ -999,6 +1236,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const aggregatedSymbols: SymbolInformation[] = [];
 			const respondingServers = new Set<string>();
 			const serverFailures: string[] = [];
+			const workspaceSymbolProvider = { capability: "workspaceSymbolProvider", method: "workspace/symbol" };
+			const nonProviders: string[] = [];
 			for (const [workspaceServerName, workspaceServerConfig] of servers) {
 				throwIfAborted(signal);
 				try {
@@ -1008,6 +1247,12 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						undefined,
 						signal,
 					);
+					if (!clientServes(workspaceClient, workspaceSymbolProvider)) {
+						nonProviders.push(workspaceServerName);
+						continue;
+					}
+					// Results point into every open document, so sync those edited outside OMP first.
+					await reconcileOpenFilesFromDisk(workspaceClient, signal, undefined, "close");
 					const workspaceResult = (await sendRequest(
 						workspaceClient,
 						"workspace/symbol",
@@ -1029,11 +1274,15 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const serverFailureSection =
 				serverFailures.length > 0 ? `\nServer failures:\n${serverFailures.join("\n")}` : "";
 			if (respondingServers.size === 0) {
+				const reason =
+					serverFailures.length === 0
+						? `no configured language server implements workspace/symbol (${nonProviders.join(", ")})`
+						: "all language servers failed";
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Workspace symbol search failed: all language servers failed${serverFailureSection}`,
+							text: `Workspace symbol search failed: ${reason}${serverFailureSection}`,
 						},
 					],
 					details: { action, serverName: "", success: false, request: params },
@@ -1094,6 +1343,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			// the process lifetime (#3546).
 			configCache.delete(this.session.cwd);
 			const refreshedConfig = getConfig(this.session.cwd);
+			reconcileIdleChecker();
 			const servers = getLspServers(refreshedConfig);
 			// Identity-aware client keys make a changed server resolve to a fresh
 			// client below, but the process spawned from the superseded config
@@ -1139,20 +1389,47 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			};
 		}
 
-		const serverInfo = resolvedFile ? getLspServerForFile(config, resolvedFile) : null;
-		if (!serverInfo) {
+		const candidates = resolvedFile ? getLspServersForFile(config, resolvedFile) : [];
+		if (candidates.length === 0) {
 			return {
-				content: [{ type: "text", text: "No language server found for this action" }],
+				content: [
+					{
+						type: "text",
+						text: resolvedFile
+							? describeMissingServers(config, resolvedFile)
+							: "No language server found for this action",
+					},
+				],
 				details: { action, success: false },
 			};
 		}
 
-		const [serverName, serverConfig] = serverInfo;
+		let [serverName, serverConfig] = candidates[0]!;
+		// Candidates passed over for not advertising the action; reported if the one used lacks it too.
+		let unsupportedNotes: string[] = [];
 
 		if (action === "reload") clearInitializationFailure(serverConfig, this.session.cwd);
 
 		try {
-			const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+			const selected = await selectClientForAction(candidates, action, this.session.cwd, signal);
+			if ("unsupported" in selected) {
+				const ext = path.extname(resolvedFile!) || path.basename(resolvedFile!);
+				const notes = selected.unsupported.map(note => `  ${note}`).join("\n");
+				return {
+					content: [
+						{ type: "text", text: `No configured language server for ${ext} supports ${action}:\n${notes}` },
+					],
+					details: {
+						action,
+						serverName: candidates.map(([name]) => name).join(", "),
+						success: false,
+						request: params,
+					},
+				};
+			}
+			[serverName, serverConfig] = [selected.name, selected.config];
+			const { client } = selected;
+			unsupportedNotes = selected.skipped;
 			const targetFile = resolvedFile;
 			const isRustAnalyzerServer = isRustAnalyzerClient(client) || serverName === "rust-analyzer";
 			const needsProjectIndex =
@@ -1160,8 +1437,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const rustWorkspaceWait =
 				needsProjectIndex && isRustAnalyzerServer && targetFile !== null && hasRustWorkspaceAncestor(targetFile);
 
+			let reconciledFromDisk = false;
 			if (targetFile) {
-				await ensureFileOpen(client, targetFile, signal);
+				reconciledFromDisk = await reconcileFileFromDisk(client, targetFile, signal);
 			}
 			if (rustWorkspaceWait) {
 				await waitForProjectLoaded(client, signal);
@@ -1184,9 +1462,17 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				);
 			}
 			const uri = targetFile ? fileToUri(targetFile) : "";
-			const resolvedLine = line ?? 1;
-			const resolvedCharacter = targetFile ? await resolveSymbolColumn(targetFile, resolvedLine, symbol) : 0;
+			// A symbol without a line names its first (or #Nth) occurrence in the file.
+			const usesPosition = action !== "symbols" && action !== "reload";
+			const located =
+				usesPosition && targetFile && line === undefined && symbol
+					? await findSymbolInFile(targetFile, symbol)
+					: undefined;
+			const resolvedLine = located?.line ?? line ?? 1;
+			const resolvedCharacter =
+				located?.character ?? (targetFile ? await resolveSymbolColumn(targetFile, resolvedLine, symbol) : 0);
 			const position = { line: resolvedLine - 1, character: resolvedCharacter };
+			const symbolName = symbol ? parseSymbolSpec(symbol).symbol : undefined;
 
 			let output: string;
 			// Set on bare empty-lookup outcomes (no definition/references/…): the
@@ -1197,6 +1483,17 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 			if (needsProjectIndex && !isRustAnalyzerServer) {
 				await waitForProjectLoaded(client, signal);
+			}
+
+			// Answers that span files are computed from every open document, and one
+			// edited outside OMP still holds its stale overlay: references and
+			// definitions then point at old lines, and a rename or code action
+			// writes its edits onto them. Sync them all after the waits, right
+			// before the request. An action that writes edits fails on an open file
+			// it cannot read; a read-only query closes that file and goes on.
+			if (CROSS_FILE_ACTIONS.has(action)) {
+				const writesEdits = action === "rename" || (action === "code_actions" && apply === true);
+				await reconcileOpenFilesFromDisk(client, signal, undefined, writesEdits ? "throw" : "close");
 			}
 
 			switch (action) {
@@ -1225,6 +1522,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							locations.map(location => formatLocationWithContext(location, this.session.cwd)),
 						);
 						output = `Found ${locations.length} definition(s):\n${lines.join("\n")}`;
+						output += await offTargetNote(locations, symbolName, serverName, this.session.cwd);
 					}
 					break;
 				}
@@ -1307,7 +1605,11 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 					if (!result || result.length === 0) {
 						output = "No references found";
-						useless = true;
+						const missing = symbolName
+							? await missingOccurrencesNote(symbolName, client.cwd, targetFile!, [], this.session.cwd, signal)
+							: undefined;
+						if (missing) output += `\n${missing}`;
+						else useless = true;
 					} else {
 						const contextualReferences = result.slice(0, REFERENCE_CONTEXT_LIMIT);
 						const plainReferences = result.slice(REFERENCE_CONTEXT_LIMIT);
@@ -1323,6 +1625,18 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 								]
 							: contextualLines;
 						output = `Found ${result.length} reference(s):\n${lines.join("\n")}`;
+						output += await offTargetNote(result, symbolName, serverName, this.session.cwd);
+						const missing = symbolName
+							? await missingOccurrencesNote(
+									symbolName,
+									client.cwd,
+									targetFile!,
+									result,
+									this.session.cwd,
+									signal,
+								)
+							: undefined;
+						if (missing) output += `\n${missing}`;
 					}
 					break;
 				}
@@ -1347,46 +1661,85 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				}
 
 				case "code_actions": {
-					const diagnostics = client.diagnostics.get(uri)?.diagnostics ?? [];
-					const context: CodeActionContext = {
-						diagnostics,
-						only: !apply && query ? [query] : undefined,
-						triggerKind: 1,
+					let diagnostics = client.diagnostics.get(uri)?.diagnostics ?? [];
+					// A reconcile dropped the stale diagnostics and pushed a didChange (or
+					// reopened a document closed for idleness); the server re-publishes (or a
+					// pull answers) asynchronously, so read the map now and quick-fix
+					// providers see an empty context.diagnostics.
+					// Wait for diagnostics matching the reconciled document version first.
+					// Non-diagnostic actions (refactors, source actions) still return if the
+					// wait cannot complete, so a diagnostics failure never breaks code_actions.
+					if (reconciledFromDisk) {
+						try {
+							const reported = await waitForDiagnostics(client, uri, {
+								timeoutMs: Math.min(
+									isProjectAwareLspServer(serverConfig) ? waitMs : SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS,
+									timeoutSec * 1000,
+								),
+								signal,
+								expectedDocumentVersion: client.openFiles.get(uri)?.version,
+							});
+							// No fresh report: the cached one belongs to an older document version.
+							diagnostics = reported ?? [];
+						} catch (err) {
+							if (err instanceof ToolAbortError || signal?.aborted) throw err;
+							diagnostics = client.diagnostics.get(uri)?.diagnostics ?? [];
+						}
+					}
+					const requestActions = async (only: string[] | undefined) => {
+						const context: CodeActionContext = { diagnostics, only, triggerKind: 1 };
+						return (await sendRequest(
+							client,
+							"textDocument/codeAction",
+							{
+								textDocument: { uri },
+								range: { start: position, end: position },
+								context,
+							},
+							signal,
+						)) as (CodeAction | Command)[] | null;
 					};
+					// Servers like typescript-language-server return source actions (organize
+					// imports, fix all) only when `context.only` asks for them, as VS Code does.
+					// The unfiltered set backs both listing and apply (by title or index), so it
+					// also requests `source` kinds; a kind query narrows listing to that kind.
+					const result =
+						!apply && query
+							? ((await requestActions([query])) ?? [])
+							: mergeCodeActions(
+									...(await Promise.all([requestActions(undefined), requestActions(["source"])])),
+								);
 
-					const result = (await sendRequest(
-						client,
-						"textDocument/codeAction",
-						{
-							textDocument: { uri },
-							range: { start: position, end: position },
-							context,
-						},
-						signal,
-					)) as (CodeAction | Command)[] | null;
-
-					if (!result || result.length === 0) {
+					if (result.length === 0) {
 						output = "No code actions available";
 						break;
 					}
 
-					if (apply === true && query) {
-						const normalizedQuery = query.trim();
-						if (normalizedQuery.length === 0) {
-							output = "Error: query parameter required when apply=true for code_actions";
-							break;
-						}
+					if (apply === true) {
+						const normalizedQuery = query?.trim() ?? "";
 						const parsedIndex = /^\d+$/.test(normalizedQuery) ? Number.parseInt(normalizedQuery, 10) : null;
+						// Without a query, apply the one action there is, or the server's one preferred action.
+						const preferred = result.filter(actionItem => "isPreferred" in actionItem && actionItem.isPreferred);
 						const selectedAction =
-							parsedIndex !== null
-								? result[parsedIndex]
-								: result.find(actionItem =>
-										actionItem.title.toLowerCase().includes(normalizedQuery.toLowerCase()),
-									);
+							normalizedQuery.length === 0
+								? result.length === 1
+									? result[0]
+									: preferred.length === 1
+										? preferred[0]
+										: undefined
+								: parsedIndex !== null
+									? result[parsedIndex]
+									: result.find(actionItem =>
+											actionItem.title.toLowerCase().includes(normalizedQuery.toLowerCase()),
+										);
 
 						if (!selectedAction) {
 							const actionLines = result.map((actionItem, index) => `  ${formatCodeAction(actionItem, index)}`);
-							output = `No code action matches "${normalizedQuery}". Available actions:\n${actionLines.join("\n")}`;
+							const reason =
+								normalizedQuery.length === 0
+									? "apply=true needs query (an action's title or index) to choose among"
+									: `No code action matches "${normalizedQuery}". Available actions:`;
+							output = `${reason}\n${actionLines.join("\n")}`;
 							break;
 						}
 
@@ -1450,16 +1803,33 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						useless = true;
 					} else {
 						const relPath = formatPathRelativeToCwd(targetFile, this.session.cwd);
+						const needle = query?.trim().toLowerCase();
+						let lines: string[];
 						if ("selectionRange" in result[0]) {
-							const lines = (result as DocumentSymbol[]).flatMap(s => formatDocumentSymbol(s));
-							output = `Symbols in ${relPath}:\n${lines.join("\n")}`;
+							const symbols = result as DocumentSymbol[];
+							lines = needle
+								? formatMatchingDocumentSymbols(symbols, needle)
+								: symbols.flatMap(s => formatDocumentSymbol(s));
 						} else {
-							const lines = (result as SymbolInformation[]).map(s => {
-								const line = s.location.range.start.line + 1;
-								const icon = symbolKindToIcon(s.kind);
-								return `${icon} ${s.name} @ line ${line}`;
-							});
-							output = `Symbols in ${relPath}:\n${lines.join("\n")}`;
+							lines = (result as SymbolInformation[])
+								.filter(
+									s =>
+										!needle ||
+										s.name.toLowerCase().includes(needle) ||
+										(s.containerName ?? "").toLowerCase().includes(needle),
+								)
+								.map(s => {
+									const line = s.location.range.start.line + 1;
+									const icon = symbolKindToIcon(s.kind);
+									return `${icon} ${s.name} @ line ${line}`;
+								});
+						}
+						if (lines.length === 0) {
+							output = `No symbols matching "${query?.trim()}" in ${relPath}`;
+							useless = true;
+						} else {
+							const matching = needle ? ` matching "${query?.trim()}"` : "";
+							output = `Symbols${matching} in ${relPath}:\n${lines.join("\n")}`;
 						}
 					}
 					break;
@@ -1491,6 +1861,21 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						if (shouldApply) {
 							const applied = await applyWorkspaceEditWithLsp(result, this.session.cwd, signal);
 							output = `Applied rename:\n${applied.map(a => `  ${a}`).join("\n")}`;
+							// Whatever still names the old symbol was not renamed.
+							const leftover = symbolName
+								? await missingOccurrencesNote(
+										symbolName,
+										client.cwd,
+										targetFile!,
+										[],
+										this.session.cwd,
+										signal,
+										{
+											where: "remain after the rename",
+										},
+									)
+								: undefined;
+							if (leftover) output += `\n${leftover}`;
 						} else {
 							const preview = formatWorkspaceEdit(result, this.session.cwd);
 							output = `Rename preview:\n${preview.map(p => `  ${p}`).join("\n")}`;
@@ -1508,6 +1893,16 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					output = `Unknown action: ${action}`;
 			}
 
+			if (located) output = `${symbol} at line ${located.line}:\n${output}`;
+			if (CROSS_FILE_ACTIONS.has(action) && client.activeProgressTokens.size > 0) {
+				output += `\nnote: ${serverName} is still indexing; results may be incomplete`;
+			}
+			if (targetFile && CROSS_FILE_ACTIONS.has(action)) {
+				const checkout = await unservedCheckout(client, targetFile);
+				if (checkout) {
+					output += `\nnote: ${serverName} indexes ${client.cwd} only and cannot load the checkout ${checkout}; these results may describe ${client.cwd}'s copy of the code`;
+				}
+			}
 			return {
 				content: [{ type: "text", text: output }],
 				details: { serverName, action, success: true, request: params },
@@ -1515,17 +1910,22 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			};
 		} catch (err) {
 			if (err instanceof ToolError) throw err;
-			if (err instanceof ToolAbortError || signal?.aborted) {
-				// Distinguish a wall-clock timeout from a caller cancel:
-				// callerSignal aborting → real cancel (re-throw ToolAbortError);
-				// timeoutSignal aborting without callerSignal → emit a ToolError naming the
-				// elapsed budget and server, instead of opaque "Operation aborted".
-				if (timeoutSignal.aborted && !callerSignal?.aborted) {
-					throw new ToolError(
-						`LSP ${action} timed out after ${timeoutSec}s on ${serverName}. The server may still be indexing; try again or pass timeout=<larger>.`,
-					);
-				}
-				throw new ToolAbortError();
+			rethrowAbort(err, serverName);
+			// An applied code action also sends resolve/executeCommand, whose method-not-found is not the action's.
+			const provider = action === "code_actions" && apply === true ? undefined : ACTION_PROVIDERS[action];
+			if (provider && isMethodNotFoundError(err)) {
+				const ext = path.extname(resolvedFile!) || path.basename(resolvedFile!);
+				const notes = [...unsupportedNotes, `${serverName}: does not implement ${provider.method}`];
+				const uniqueNotes = [...new Set(notes)].map(note => `  ${note}`).join("\n");
+				return {
+					content: [
+						{
+							type: "text",
+							text: `No configured language server for ${ext} supports ${action}:\n${uniqueNotes}`,
+						},
+					],
+					details: { serverName, action, success: false, request: params },
+				};
 			}
 			const errorMessage = err instanceof Error ? err.message : String(err);
 			return {

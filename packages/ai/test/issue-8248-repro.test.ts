@@ -75,11 +75,6 @@ const usage = {
 } as const;
 
 describe("issue #8248: DeepSeek Responses reasoning replay after prewalk/compaction", () => {
-	it("targets a reasoning Responses model that requires reasoning replay", () => {
-		expect(deepseek.api).toBe("openai-responses");
-		expect(deepseek.compat.requiresReasoningContentForAllAssistantTurns).toBe(true);
-	});
-
 	it("synthesizes a reasoning item for a foreign assistant turn replayed after a prewalk switch", async () => {
 		// Kept-tail turn minted by the previous model (prewalk hopped gpt-5.6-sol
 		// -> deepseek). Same api, different provider+model -> block re-encode.

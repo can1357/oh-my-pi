@@ -1,0 +1,141 @@
+{
+	"source": "packages/hashline/test/recovery-session-chain.test.ts",
+	"cases": [
+		{
+			"name": "refuses replay when an edit anchor's line content diverges between snapshot and current",
+			"parse": [
+				{
+					"input": "PUT 5-5:\n|L5-MODEL",
+					"expect": {
+						"editCount": 2,
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "replays edits onto current when every anchor's line content is unchanged",
+			"parse": [
+				{
+					"input": "PUT 3-3:\n|L3-MODEL",
+					"expect": {
+						"editCount": 2,
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "recovers stale anchors shifted by a prior in-session insertion",
+			"parse": [
+				{
+					"input": "PUT 5-5:\n+L5-MODEL",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "recovers stale anchors shifted by a prior in-session deletion",
+			"parse": [
+				{
+					"input": "PUT 5-5:\n+L5-MODEL",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "refuses duplicate-line remaps when surrounding context no longer matches",
+			"parse": [
+				{
+					"input": "PUT 4-4:\n+MODEL",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "refuses to relocate a stale replacement onto duplicated context",
+			"parse": [
+				{
+					"input": "PUT 2-3:\n+MODEL_A\n+MODEL_B",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "refuses an isolated unique-line remap when neither neighbor follows its offset",
+			"parse": [
+				{
+					"input": "PUT 5-5:\n+MODEL",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "recovers duplicate-line anchors shifted by a prior insertion when context still matches",
+			"parse": [
+				{
+					"input": "PUT 3-4:\n+B-MODEL\n+MODEL",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "recovers against the most-recently retained text when two colliders share the tag",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+model payload",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "still recovers when exactly one retained text carries the tag",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+model payload",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "remaps line anchors natively when the file contains lone surrogates",
+			"parse": [
+				{
+					"input": "PUT 3-3:\n+model payload",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		}
+	]
+}

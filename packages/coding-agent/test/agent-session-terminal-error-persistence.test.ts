@@ -29,7 +29,7 @@ let modelRegistry: ModelRegistry;
 
 beforeAll(async () => {
 	authStorage = await AuthStorage.create(":memory:");
-	authStorage.setRuntimeApiKey("mock", "test-key");
+	authStorage.keys.setRuntime("mock", "test-key");
 	modelRegistry = new ModelRegistry(authStorage);
 });
 

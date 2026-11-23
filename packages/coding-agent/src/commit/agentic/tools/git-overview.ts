@@ -1,10 +1,10 @@
 import { type } from "@oh-my-pi/omptype";
-import type { VcsNumstatEntry } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { CommitAgentState, GitOverviewSnapshot } from "../../../commit/agentic/state";
 import { DEFAULT_CONVENTIONAL_GENERATION_CONFIG } from "../../../commit/conventional/config";
 import { extractScopeCandidates } from "../../../commit/conventional/scope";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";
+import { renderStat } from "../../utils";
 import { EXCLUDED_LOCK_FILES } from "../lock-files";
 
 function isExcludedFile(path: string): boolean {
@@ -23,22 +23,6 @@ function filterExcludedFiles(files: string[]): { filtered: string[]; excluded: s
 		}
 	}
 	return { filtered, excluded };
-}
-function renderStat(entries: VcsNumstatEntry[]): string {
-	if (entries.length === 0) return "";
-	let insertions = 0;
-	let deletions = 0;
-	const lines = entries.map(entry => {
-		const added = entry.added ?? 0;
-		const removed = entry.removed ?? 0;
-		insertions += added;
-		deletions += removed;
-		return ` ${entry.path} | ${added + removed} ${"+".repeat(Math.min(added, 40))}${"-".repeat(Math.min(removed, 40))}`;
-	});
-	lines.push(
-		` ${entries.length} file${entries.length === 1 ? "" : "s"} changed, ${insertions} insertion${insertions === 1 ? "" : "s"}(+), ${deletions} deletion${deletions === 1 ? "" : "s"}(-)`,
-	);
-	return `${lines.join("\n")}\n`;
 }
 
 const gitOverviewSchema = type({

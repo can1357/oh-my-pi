@@ -1,11 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { applyGlobalModelsDevFallback, rebakeBundledModel } from "../scripts/generate-models";
-import type { ModelSpec } from "../src/types";
+import { applyGlobalModelsDevFallback, buildGeneratedModel } from "../scripts/generate-models";
+import { rebakeModelThinking } from "../scripts/generated-policies";
+import type { Api, ModelSpec } from "../src/types";
+
+function materializeGeneratedModel(spec: ModelSpec<Api>) {
+	rebakeModelThinking(spec);
+	return buildGeneratedModel(spec);
+}
 
 describe("provider-local model rebakes", () => {
 	test("rederives stale serialized thinking metadata", () => {
-		const rebaked = rebakeBundledModel({
+		const rebaked = materializeGeneratedModel({
 			id: "claude-opus-4-5",
 			name: "Claude Opus 4.5",
 			api: "anthropic-messages",
@@ -26,7 +32,7 @@ describe("provider-local model rebakes", () => {
 	});
 
 	test("materializes newly derived thinking metadata", () => {
-		const rebaked = rebakeBundledModel({
+		const rebaked = materializeGeneratedModel({
 			id: "claude-opus-4-5",
 			name: "Claude Opus 4.5",
 			api: "anthropic-messages",
@@ -46,7 +52,7 @@ describe("provider-local model rebakes", () => {
 	});
 
 	test("materializes a newly derived tokenizer", () => {
-		const rebaked = rebakeBundledModel({
+		const rebaked = materializeGeneratedModel({
 			id: "claude-opus-4-5",
 			name: "Claude Opus 4.5",
 			api: "anthropic-messages",

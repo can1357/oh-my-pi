@@ -5,9 +5,9 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { ReadTool, type ReadToolDetails } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { type ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import * as pdfRead from "@oh-my-pi/pi-coding-agent/tools/read-pdf";
-import * as markit from "@oh-my-pi/pi-coding-agent/utils/markit";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const ONE_PX_PNG = Buffer.from(
@@ -21,7 +21,7 @@ function makeSession(cwd: string): ToolSession {
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-		settings: Settings.isolated({ "images.autoResize": false, "inspect_image.mode": "off" }),
+		settings: Settings.isolated({ "images.autoResize": false }),
 	} as ToolSession;
 }
 
@@ -74,22 +74,15 @@ describe("read PDF page screenshots", () => {
 		expect(tool.approval({ path: `${pdfPath}:2-2` })).toBe("read");
 	});
 
-	it("preserves a literal filename that looks like a PDF image listing", async () => {
-		const literalPath = `${pdfPath}:`;
-		await fs.writeFile(literalPath, "literal colon path wins\n");
+	// Windows forbids `:` in filenames.
+	it.skipIf(process.platform === "win32")(
+		"preserves a literal filename that looks like a PDF image listing",
+		async () => {
+			const literalPath = `${pdfPath}:`;
+			await fs.writeFile(literalPath, "literal colon path wins\n");
 
-		const result = await new ReadTool(makeSession(testDir)).execute("read-literal", { path: literalPath });
-		expect(textOf(result)).toContain("literal colon path wins");
-	});
-
-	it("routes PDF line selectors through normal document conversion", async () => {
-		const convert = vi.spyOn(markit, "convertFileWithMarkit").mockResolvedValue({
-			ok: true,
-			content: "first line\nselected line\nthird line\n",
-		});
-
-		const result = await new ReadTool(makeSession(testDir)).execute("read-pdf-lines", { path: `${pdfPath}:2-2` });
-		expect(convert).toHaveBeenCalledTimes(1);
-		expect(textOf(result)).toContain("selected line");
-	});
+			const result = await new ReadTool(makeSession(testDir)).execute("read-literal", { path: literalPath });
+			expect(textOf(result)).toContain("literal colon path wins");
+		},
+	);
 });

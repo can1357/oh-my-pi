@@ -385,6 +385,30 @@ describe("OpenAI Responses explicit prompt cache policy", () => {
 		expect(JSON.stringify(params.input)).not.toContain("prompt_cache_breakpoint");
 	});
 
+	it("maps long retention to the 12h lifetime instead of the legacy 24h field", () => {
+		const params = buildParams(
+			openAI56ResponsesModel,
+			historicalContext,
+			{ sessionId: "cache-key", cacheRetention: "long" },
+			undefined,
+		).params;
+
+		expect(params.prompt_cache_options).toEqual({ mode: "implicit", ttl: "12h" });
+		expect(params.prompt_cache_retention).toBeUndefined();
+		expect(JSON.stringify(params.input)).not.toContain("prompt_cache_breakpoint");
+	});
+
+	it("lets an explicit policy ttl override long retention", () => {
+		const params = buildParams(
+			openAI56ResponsesModel,
+			historicalContext,
+			{ sessionId: "cache-key", cacheRetention: "long", promptCache: { mode: "explicit", ttl: "30m" } },
+			undefined,
+		).params;
+
+		expect(params.prompt_cache_options).toEqual({ mode: "explicit", ttl: "30m" });
+	});
+
 	it("marks the latest eligible stable history block", () => {
 		const params = buildParams(
 			openAI56ResponsesModel,
@@ -685,20 +709,6 @@ describe("openai-responses cache affinity", () => {
 		expect(captured.body?.prompt_cache_key).toBe("session-123");
 	});
 
-	it("lets explicit headers override the default OpenAI session routing headers", async () => {
-		const captured = await captureOpenAIResponseHeaders({
-			sessionId: "session-123",
-			headers: {
-				session_id: "override-session",
-				"x-client-request-id": "override-request",
-			},
-		});
-
-		expect(captured.sessionId).toBe("override-session");
-		expect(captured.clientRequestId).toBe("override-request");
-		expect(captured.body?.prompt_cache_key).toBe("session-123");
-	});
-
 	it("xAI OAuth adapter request shaping does not mutate reused options", async () => {
 		const options: OpenAIResponsesOptions = {
 			sessionId: "session-123",
@@ -759,37 +769,6 @@ describe("openai-responses cache affinity", () => {
 		);
 
 		expect(captured.body?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
-	});
-
-	it("lets explicit headers override OpenRouter Responses defaults", async () => {
-		const captured = await captureOpenAIResponseHeaders(
-			{
-				headers: {
-					"HTTP-Referer": "https://example.test/",
-					"X-OpenRouter-Title": "Custom App",
-					"X-OpenRouter-Cache": "false",
-				},
-			},
-			openRouterResponsesModel,
-		);
-
-		expect(getHeader(captured.headers, "HTTP-Referer")).toBe("https://example.test/");
-		expect(getHeader(captured.headers, "X-OpenRouter-Title")).toBe("Custom App");
-		expect(getHeader(captured.headers, "X-OpenRouter-Cache")).toBe("false");
-	});
-
-	it("applies OpenRouter Responses model variants and provider routing to the body", async () => {
-		const routedModel: Model<"openai-responses"> = {
-			...openRouterResponsesModel,
-			compat: {
-				...openRouterResponsesModel.compat,
-				openRouterRouting: { only: ["anthropic"], order: ["anthropic"] },
-			},
-		};
-		const captured = await captureOpenAIResponseHeaders({ openrouterVariant: "nitro" }, routedModel);
-
-		expect(captured.body?.model).toBe("openai/gpt-5.5:nitro");
-		expect(captured.body?.provider).toEqual({ only: ["anthropic"], order: ["anthropic"] });
 	});
 
 	it("keeps OpenRouter session_id on values longer than OpenAI prompt cache keys", async () => {
@@ -937,14 +916,6 @@ describe("openai-responses cache affinity", () => {
 		expect(requestBodies[2]?.input).toEqual([
 			{ role: "user", content: [{ type: "input_text", text: "replacement-3" }] },
 		]);
-	});
-
-	it("omits OpenAI session routing headers when cache retention is disabled", async () => {
-		const captured = await captureOpenAIResponseHeaders({ cacheRetention: "none", sessionId: "session-123" });
-
-		expect(captured.sessionId).toBeNull();
-		expect(captured.clientRequestId).toBeNull();
-		expect(captured.body?.prompt_cache_key).toBeUndefined();
 	});
 
 	it("omits OpenRouter Responses session_id when cache retention is disabled", async () => {

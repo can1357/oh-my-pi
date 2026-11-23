@@ -1,0 +1,1607 @@
+{
+ "model": "jev-1.13.0",
+ "frame": 269,
+ "source": "live usage.input_tokens minus the 269-token request frame (one minimal noul question), recorded 2026-09-23",
+ "cases": [
+  {
+   "text": "",
+   "count": 0
+  },
+  {
+   "text": "hello",
+   "count": 1
+  },
+  {
+   "text": "token",
+   "count": 1
+  },
+  {
+   "text": "tokenize",
+   "count": 3
+  },
+  {
+   "text": "世token世",
+   "count": 4
+  },
+  {
+   "text": "information",
+   "count": 1
+  },
+  {
+   "text": "Москва",
+   "count": 1
+  },
+  {
+   "text": "café",
+   "count": 2
+  },
+  {
+   "text": "論",
+   "count": 1
+  },
+  {
+   "text": "ﬁ",
+   "count": 1
+  },
+  {
+   "text": "-Ġnus",
+   "count": 3
+  },
+  {
+   "text": " זיװעגשאַפֿט",
+   "count": 11
+  },
+  {
+   "text": "!!!!!!!!!!!!!!!!",
+   "count": 4
+  },
+  {
+   "text": "gxdlftstqjftbqrzbslkxfnbbbwbqjrbvkstwkpkksmbrwfhmfnvrvjmmxtvqxctkqrhpwpdsvfhvqptbtcmzxxqhhvkbjwwkqvpxpslwzbqvgvwjrctpxwjvrtprpbwwzznszbkhwxhdwlcddbsblklfzhpmdhhlvhlmsnttfbmqnrjlflvjzrbkbqgchsvrwkvskvbqxnrcmgjcmddmmhrxlgbwcxjxshzvcqjpfjxrxjtfqmvtbnzqmbhjnxgnrjlfqwpwtwkdcdghhwjlnzvlpnnfmkztgxwfncrdqggnfzxqdxwkxdlpmxwfslfcmbzbdrfcjkxrhfshkhfrqwmwltnfjncbbmznsqnqddnzsfljzwtplhwjmjkpdldsdxnkqmcnhnxmknfwzxzdkkbkqdlwddbbmpttgfvndvhhggnmfvzmgjgwcnzwjhmrwhckldsrwlwswsbqnhltbrxbcpxgxggllqxqhzdktbhvnvskknttkrnwzlkcdvphv",
+   "count": 296
+  },
+  {
+   "text": "gxdlftstqjftbqrzbslkxfnbbbwbqjrbvkstwkpkksmbrwfhmfnvrvjmmxtvqxctkqrhpwpdsvfhvqptbtcmzxxqhhvkbjwwkqvpxpslwzbqvgvwjrctpxwjvrtprpbwwzznszbkhwxhdwlcddbsblklfzhpmdhhlvhlmsnttfbmqnrjlflvjzrbkbqgchsvrwkvskvbqxnrcmgjcmddmmhrxlgbwcxjxshzvcqjpfjxrxjtfqmvtbnzqmbhjnxgnrjlfqwpwtwkdcdghhwjlnzvlpnnfmkztgxwfncrdqggnfzxqdxwkxdlpmxwfslfcmbzbdrfcjkxrhfshkhfrqwmwltnfjncbbmznsqnqddnzsfljzwtplhwjmjkpdldsdxnkqmcnhnxmknfwzxzdkkbkqdlwddbbmpttgfvndvhhggnmfvzmgjgwcnzwjhmrwhckldsrwlwswsbqnhltbrxbcpxgxggllqxqhzdktbhvnvskknttkrnwzlkcdvphvj",
+   "count": 297
+  },
+  {
+   "text": "  ",
+   "count": 2
+  },
+  {
+   "text": "\n\u000b.   a.  \f ",
+   "count": 13
+  },
+  {
+   "text": " \n;; use reader macros to transform (a OP b) into (OP b a)\n \n(lib 'match)\n(define-macro invert-= (a <- b) (set! b a))\n(define-macro invert-IF (a 'IF b) (when b a))\n \n(define raining #f)\n \n(#t <- raining)\nraining\n    → #t\n('umbrella-need IF raining)\n    → umbrella-need\n \n(#f <- raining)\n('umbrella-need IF raining)\n    → #f\n \n;; debug mode\n(debug 3)\n('umbrella-need IF raining)\n💡 [0]     invert-IF → ('umbrella-need IF raining)\ncompiled :: (#when raining 'umbrella-need)\n \n \n",
+   "count": 169
+  },
+  {
+   "text": "Ti ɖo kɛnyɛ̃ kɛ tú initi wuɔ kutenku yanɖú ɖenɛni ɖipatri kɛparku ɖi myɛ̃ɛ̃kɛ nɛ oniti ba we, kó ɖiyetri kɛ tú oniti pokua oniti dɔua, ɔmɔũ yi cãã nnɛ otɔu; kɛ ɖɛɛ te kɛ iwuɔ nyimɔũ ɖo nkɛwɛ̃nnɛ kɛ mpĩ kɛbeu nɛ ɖɛ bo naatimɛ tipiiti timɔũ,\nTi ɖo kɛnyɛ̃ kɛ tú yɛhɛkɛ yɛ mɔũ yɛ kari kɛwɛ̃nnɛ mu kutenku yanɖú ko ɖitĩnni kɔbɛ kɛtú ti ɖo kɛ nɖɛ mɛnkɛ weti ɖɛɛ cɛ̃nkɛ tukunɛ oniti kó mufommu nɛ o borimɛ,\nTi ɖo kɛnyɛ̃ kɛ tú ti bo wɛ̃nnɛ mɛ dinnu maɖimaa ɖɛɛ tukunɛ oniti kó mufommu byɛɛkɛ ɖɛɛ bo nte kɛ ti baa yetɛ kucɛ,\nIwuɔ nyimɔũ kó ɖitinni ɖiɖyɛɛrɛ piɛɛku kɛ heu kɛtú\n",
+   "count": 347
+  },
+  {
+   "text": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+   "count": 649
+  },
+  {
+   "text": "日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日",
+   "count": 174
+  },
+  {
+   "text": "palindrome?: function [s][\n    s = reverse s\n]\n \ntests: [\n    [true? palindrome? \"aba\"]\n    [false? palindrome? \"ab\" ]\n]\n \nloop tests => ensure\n",
+   "count": 48
+  },
+  {
+   "text": "                std::fill(dDigits.begin(), dDigits.end(), 0);\n                bool dOk = getDigits(d, i + 2, dDigits);\n                if (!dOk) {\n                    continue;\n                }\n                for (size_t nix = 0; nix < nDigits.size(); nix++) {\n                    auto digit = nDigits[nix];\n                    auto dix = indexOf(dDigits, digit);\n                    if (dix >= 0) {\n                        auto rn = removeDigit(nDigits, i + 2, nix);\n                        auto rd = removeDigit(dDigits, i + 2, dix);\n                        if ((double)n / d == (double)rn / rd) {\n                            count[i]++;\n                            omitted[i][digit]++;\n                            if (count[i] <= 12) {\n                                std::cout << n << '/' << d << \" = \" << rn << '/' << rd << \" by omitting \" << digit << \"'s\\n\";\n                            }\n",
+   "count": 216
+  },
+  {
+   "text": "<?php\n$time = new DateTime('March 7 2009 7:30pm EST');\n$time->modify('+12 hours');\necho $time->format('c');\n?>\n",
+   "count": 44
+  },
+  {
+   "text": "🥜x🤲🣱x😷🥲🖇",
+   "count": 16
+  },
+  {
+   "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+   "count": 170
+  },
+  {
+   "text": "    begin\n      repeat\n        SetLength(Pool, 0);\n        if (y > 0)         and not AMaze[x, y-1].Visited then Pool := Pool + [Point(0, -1)];\n        if (x < mwidth-1)  and not AMaze[x+1, y].Visited then Pool := Pool + [Point(1,  0)];\n        if (y < mheight-1) and not AMaze[x, y+1].Visited then Pool := Pool + [Point(0,  1)];\n        if (x > 0)         and not AMaze[x-1, y].Visited then Pool := Pool + [Point(-1, 0)];\n \n        if Length(Pool) = 0 then // no direction to draw from\n        begin\n          if Route.Count = 0 then Exit; // and we are back at start so this is the end\n          Position := Route.Pop;\n        end;\n      until Length(Pool) > 0;\n \n      d := Random(Length(Pool));\n      Offset(Pool[d]);\n \n      AMaze[x, y].Visited := True;\n      if Pool[d].y = -1 then AMaze[x, y+1].PassTop  := True; // comes from down to up ( ^ )\n",
+   "count": 281
+  },
+  {
+   "text": "    if (j.isProbablePrime(10)) {\n        primes.add(j)\n        count = count + 1\n    }\n    i = i + 1\n}\nSystem.print(\"\\nFirst 20 Jacobsthal primes:\")\nfor (i in 0..19) Fmt.print(\"$i\", primes[i])\n",
+   "count": 71
+  },
+  {
+   "text": "NGUNO Ubumanicha kubi banhu bose balin’ikujo na haki ja bulinganile hu chandyo cha kwiyagalula, kwenha haki na lubango,\nNGUNO ukwihugija na kuleka kulondalonga haki ja banhu huko kwenheleja mashito magakanazu ga kudacha na kumala masala banhu kukoba welelo i ya banhu bose balabi na buyegi wa kwiyagalula, kuyomba, kwinja boba na kupandika shose isho bushikobaga,\nNGUNO giki ulu abanhu bakasaziwagwa kuhaya basole mashilanga kuzitula bushimba, kulema kwibonelwa na bahanya ba nsi Ilagilo lya Nsi lilabade haki jabo,\nNGUNO kinhu kihannya hu kubejja na kukuja bunwani na nsi zingi,\n",
+   "count": 192
+  },
+  {
+   "text": "Enin bineken kookan tebie zhaogu bineken shezhu-yo baka-ra chuanli bishi. Kookan-shal, hunyin-du baldi-chaa bineken hunyin tulgide baldi-chaa, bambur pingdeng shehui bohu-yo baka-yi-tin.\nBeyel bambur chaoyu-yo baka-ra chuanli bishi, chaoyu ulin aachi-yi-n, manii achukun chuchi bineken chiben cheduan erigechin bi-yi-n. Chuchi chaoyu yiwu shingzhi bi-yi-n. Zhishu bineken zhiye chaoyu pubian bi-yi-tin. Gugda chaoyu chengzhi-duk beyel-du pingdeng kaifang-na-n.\n",
+   "count": 168
+  },
+  {
+   "text": "é\f\fa \n.\n\r\n \f\u000b\té\f  \t\u000b      aa  \r\n\r\n.  a. \n 　\f    \u000b\r　  a\t\u000b　 ",
+   "count": 56
+  },
+  {
+   "text": "Dhanhø bëne yïe da dyër me nimi ngan-a kyeelø o gööge ki käjji gwögg kì yij pödhø.\nYïëyø mi ji en a re kääl yi teegi mïri, ø yiëyani kääl-a bang leeng men-a nyi leeng ji o cugi bëëdø a leeng tïngi cing wala men-a nyi gwed.\nBëëdi dhanhø á ákyel kì kelli tyëng pödhø wang-a kinni, burani ki bang gsøg pödhø ki nywäg kömi läbø geki møg-a nywag, ki tyëny pödhø ki jamm-a nyi nywøl en ki møg-a käni ki ngyëny, ki bëëdø kì kej akyel, ki øddi gwedd møg-a bong kär, ki teegi peri dhanhø ki kunø e bong bäängø kipe dhanhø.\n",
+   "count": 238
+  },
+  {
+   "text": "Kowa na da hakkin ganin an sami kyakkyawan shiri a cikin zaman jama'a da tsakanin ƙasashen duniya domin hakkokin nan da dukkan abubuwan da ƴanci ya ƙunsa waɗanda aka bayyana a cikin wannan jawabi su tabbata sosai.\nƊan‐adam na da nauyin bauta wa da'irar da yake rayuwa a ciki a wuyansa, domin a nan kaɗai ne yake samun halin ƙarfafa darajarsa ta ɗan‐adam cikin ƴanci.\n",
+   "count": 128
+  },
+  {
+   "text": "[\n  {\n    \"k\": \"東京\",\n    \"n\": 0.1551890842732231\n  },\n  {\n    \"k\": \"naïve\",\n    \"n\": 0.07341804974549904\n  },\n  {\n    \"k\": \"naïve\",\n    \"n\": 0.925253582044448\n  }\n]",
+   "count": 111
+  },
+  {
+   "text": "# the standard mode COMPLEX is a two element vector #\nMODE VECTOR = COMPLEX;\n# the operations required for the task plus many others are provided as standard for COMPLEX and REAL items #\n# the two components are fields called \"re\" and \"im\" #\n# we can define a \"pretty-print\" operator: #\n# returns a formatted representation of the vector #\nOP TOSTRING = ( VECTOR a )STRING: \"[\" + TOSTRING re OF a + \", \" + TOSTRING im OF a + \"]\";\n# returns a formatted representation of the scaler #\nOP TOSTRING = ( REAL a )STRING: fixed( a, 0, 4 );\n \n# test the operations #\nVECTOR a = 5 I 7, b = 2 I 3; # note the use of the I operator to construct a COMPLEX from two scalers #\nprint( ( \"a+b : \", TOSTRING ( a + b  ), newline ) );\nprint( ( \"a-b : \", TOSTRING ( a - b  ), newline ) );\nprint( ( \"a*11: \", TOSTRING ( a * 11 ), newline ) );\nprint( ( \"a/2 : \", TOSTRING ( a / 2  ), newline ) )\n \n",
+   "count": 281
+  },
+  {
+   "text": "#import std\n#import nat\n \nalphabet = digits-- ~=`A-~r letters\nweights  = <1,3,1,7,3,9>\ncharval  = -:@rlXS num alphabet\niprod    = sum:-0+ product*p/weights+ charval*\nchecksum = difference/10+ remainder\\10+ iprod\n",
+   "count": 78
+  },
+  {
+   "text": "my $s = '𝄪♯♮♭𝄫';\n \nprint qq:to/END/;\n    Original:\n    $s\n \n    Remove first character:\n    { substr($s, 1) }\n    { $s.substr(1) }\n \n    Remove last character:\n    { substr($s, 0, *-1) }\n    { $s.substr( 0, *-1) }\n    { $s.chop }\n \n    Remove first and last characters:\n    { substr($s, 1, *-1) }\n    { $s.substr(1, *-1) }\n    END\n",
+   "count": 142
+  },
+  {
+   "text": "    my($F, $L, $R, $K) = @_;\n    $R, $L ^ &$F($R, $K)\n}\n \nmy @input = (0x21, 0x04, 0x3B, 0x04, 0x30, 0x04, 0x32, 0x04);\nmy @key   = (0xF9, 0x04, 0xC1, 0xE2);\n \nmy $R = fromdigits([reverse @input[0..3]], 256); # 1st half\nmy $L = fromdigits([reverse @input[4..7]], 256); # 2nd half\nmy $K = fromdigits([reverse @key        ], 256);\n \n($L,$R) = feistel_step(\\&GOST_round, $L, $R, $K);\n \nprintf '%02X ', (($L << 32) + $R >> (8*$_))%256 for 0..7;\nprint \"\\n\";\n",
+   "count": 254
+  },
+  {
+   "text": " .\r\n\u000b\r a\r\n  \r\n\f\r   a  \u000b\n\na\f \f\r\n   \u000ba \ta\né \t \t  \u000b\f \u000b\f",
+   "count": 49
+  },
+  {
+   "text": "🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂",
+   "count": 384
+  },
+  {
+   "text": "  MathInit()\n  Test(\"2\",\"2\")\n  Test(\"81\",\"4\")\n  Test(\"1024\",\"10\")\n  Test(\"7\",\"0.5\")\n  Test(\"12.34\",\"56.78\")\nRETURN\n",
+   "count": 56
+  },
+  {
+   "text": "   　 \r\n. \n .\r\n　  \t.   \n \r\n    　\ta\t   ",
+   "count": 39
+  },
+  {
+   "text": "Zonder enige beperking op grond van ras, nationaliteit of godsdienst, hebben mannen en vrouwen van huwbare leeftijd het recht om te huwen en een gezin te stichten. Zij hebben gelijke rechten wat het huwelijk betreft, tijdens het huwelijk en bij de ontbinding ervan.\nEen huwelijk kan slechts worden gesloten met de vrije en volledige toestemming van de aanstaande echtgenoten.\nHet gezin is de natuurlijke en fundamentele groepseenheid van de maatschappij en heeft recht op bescherming door de maatschappij en de Staat.\nEen ieder heeft recht op eigendom, hetzij alleen, hetzij tezamen met anderen.\n",
+   "count": 154
+  },
+  {
+   "text": "日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日",
+   "count": 626
+  },
+  {
+   "text": "Kine, nanchi kije kya General Assembly kyaitaba mba Uno mukambizho mukatampe wapana nsambu ku muntu kwikala wakasuluka, ekale ke wakuyulula mikoka yonse ya bantu kikupu amba yense muntu nangwa kije kyonse kilondela uno mukamizho, kikekala ke kya kumwenako\nMUKAMBIZHO MWINE PA MAMBO A KUKASULUKA KWA MUNTU MBWIKALO\nBonse bantu basemwa bakasuluka kabiji baesakena pamo mubuneme. Baji na maana a kulanguluka kabiji bobila bantu bakwabo byubilo bakwibasekesha.\n",
+   "count": 157
+  },
+  {
+   "text": "[\n  {\n    \"k\": \"\\u03b2\",\n    \"n\": 0.6065916231501879\n  },\n  {\n    \"k\": \"\\u6771\\u4eac\",\n    \"n\": 0.5431667738442976\n  },\n  {\n    \"k\": \"\\u03b2\",\n    \"n\": 0.6225636084866487\n  }\n]",
+   "count": 123
+  },
+  {
+   "text": "Ayoreode uyoque nense uje yugocoi ne erami, nga je yocanepite ujetiga yucuniri chajie yoquiode to iji erami tujne, je aja puniré cuchabode ujetiga ore chajie yoquiode to, orne noraqueigo, ga yoquiasique yogome to, yocanetigo cucha ga ñiqueango to.\nAyoré ponañone je ore ganepite, ujetiga pioque ore to, aja ore isatigo, ga ore iasiqueaque orne, ujetiga ca ¡noque ore isatigo, chaje que toque go ujetiga paenque ute gosi isatigo orne. Enga a poase ore ute gosi isagode cucha ohé.\n",
+   "count": 178
+  },
+  {
+   "text": "Awbody is entitelt in ful equality til a fair and public hearing frae a staund-alane and even-haundit tribunal in the determination o his richts and duties and o ony criminal chairge conter him.\nAwbody chairged wi a penal faut hes the richt tae be thocht innocent til pruved guilty conformand til law in a public trial whaur he hes haen aw the warranties necessar for his defence.\n",
+   "count": 93
+  },
+  {
+   "text": "def compare(a, b):\n    print(\"\\n%r is of type %r and %r is of type %r\"\n          % (a, type(a), b, type(b)))\n    if a <  b:      print('%r is strictly less than  %r' % (a, b))\n    if a <= b:      print('%r is less than or equal to %r' % (a, b))\n    if a >  b:      print('%r is strictly greater than  %r' % (a, b))\n    if a >= b:      print('%r is greater than or equal to %r' % (a, b))\n    if a == b:      print('%r is equal to %r' % (a, b))\n    if a != b:      print('%r is not equal to %r' % (a, b))\n    if a is b:      print('%r has object identity with %r' % (a, b))\n    if a is not b:  print('%r has negated object identity with %r' % (a, b))\n \ncompare('YUP', 'YUP')\ncompare('BALL', 'BELL')\ncompare('24', '123')\ncompare(24, 123)\ncompare(5.0, 5)\n",
+   "count": 301
+  },
+  {
+   "text": "F commatize(number, step = 3, sep = ‘,’)\n   V s = reversed(String(number))\n   String r = s[0]\n   L(i) 1 .< s.len\n      I i % step == 0\n         r ‘’= sep\n      r ‘’= s[i]\n   R reversed(r)\n \nF isqrt(BigInt x)\n   assert(x >= 0)\n \n   V q = BigInt(1)\n   L q <= x\n      q *= 4\n \n   V z = x\n   V r = BigInt(0)\n   L q > 1\n      q I/= 4\n      V t = z - r - q\n      r I/= 2\n      I t >= 0\n         z = t\n         r += q\n \n   R r\n \nprint(‘The integer square root of integers from 0 to 65 are:’)\nL(i) 66\n   print(isqrt(BigInt(i)), end' ‘ ’)\nprint()\n \nprint(‘The integer square roots of powers of 7 from 7^1 up to 7^73 are:’)\nprint(‘power                                    7 ^ power                                                 integer square root’)\nprint(‘----- --------------------------------------------------------------------------------- -----------------------------------------’)\nV pow7 = BigInt(7)\n",
+   "count": 301
+  },
+  {
+   "text": "\tß  éﬁjTﬁé📆ǅǅ🖍<ǅ\teßǅß⧗İ_🣂héǅﬁ  ǅß👰\t🥪İ  \n\n  ǅ⠄é∜ǅ\tİ\n\n⦒ǅǅß🛺\téﬁ⌞🔢ß⦎ß\tǅéß👇ǅßﬁİ\t⫿éİéǅééé\tǅ\t\t\t  é\tﬁ☢İ\n\n⏗é  éǅ⥣ß🗡ǅ◗📴📁éJ  \n\nﬁéǅǅßßé\té\t\t💥éß  \tß\"",
+   "count": 178
+  },
+  {
+   "text": "# To take advantage of gojq's arbitrary-precision integer arithmetic:\ndef power($b): . as $in | reduce range(0;$b) as $i (1; . * $in);\n \ndef divrem($x; $y):\n  [$x/$y|floor, $x % $y];\n \n",
+   "count": 73
+  },
+  {
+   "text": "Kada persona tiene derecho a la libertad de pensamiento, de konsensia i de relijion; este derecho inkluye la libertad de trokar de relijion o de kreyensa, i la libertad de manifestar su relijion o su kreensia, solo o djuntos kon otros, tanto en publiko ke en privado, para la ensenyansa, la praktika, el kulto i la observasion.\nKada uno i uno tiene derecho de libertad de opinion i de ekspresion. Este derecho inkluye el de no estar molestado a kavza de sus opiniones, i bushkar, resivir, i difundir informasion i ideas, por kualker medio de komunikasion, sin limitasion de frontieras.\n",
+   "count": 166
+  },
+  {
+   "text": "介个宣言的任何条文，不得解释为默许任何国家、集团或个人趁进行任何旨在祸祸介个宣言所载的任何权利和自由的活动或行为的权利。\n",
+   "count": 64
+  },
+  {
+   "text": "[\n\t{\n\t\t\"k\": \"naïve\",\n\t\t\"n\": 0.2574335867506138\n\t},\n\t{\n\t\t\"k\": \"α\",\n\t\t\"n\": 0.387839203541247\n\t},\n\t{\n\t\t\"k\": \"東京\",\n\t\t\"n\": 0.8964077090890431\n\t},\n\t{\n\t\t\"k\": \"α\",\n\t\t\"n\": 0.5953159373668273\n\t}\n]",
+   "count": 147
+  },
+  {
+   "text": "Iamu k'uiripu jurhimbekua jatsikuarhesti esïki ikaskuŋooka ma ireteri uandangukata ka iamu sïrukua k'uiripuecheri jininga jurhimbekuaecha ka janguarhekuecha enga eiamarhijperaŋajka i amboŋastajperakuarhu esoka isï niatakuarheuaka.\nIamu k'uiripu jatsikuarhesti eiauandakuarhekuaechani ireta jinguni, jimboka jimajku uaka kuerakuarheni jandijku imeri k'uiripekua.\n",
+   "count": 145
+  },
+  {
+   "text": "while count < 4:\n  if repunit.isPrime():\n    if count > 0: line.add(' ')\n    line.add(fmt\"R({digits})\")\n    inc count\n  repunit = Ten * repunit + One\n  inc digits\necho line\n \necho \"\"\ntestRepUnit(5003)\ntestRepUnit(9887)\ntestRepUnit(15073)\ntestRepUnit(25031)\ntestRepUnit(35317)\ntestRepUnit(49081)\n",
+   "count": 118
+  },
+  {
+   "text": "Pisinnaatitaaffiit aamma killilersugaanngitsumik iliorsinnaatitaaffiit atorneqarnerini kialuunniit taqamaallaat naalagarsiorfigisussaavai killilersuutit inatsisini aalajangersarneqarsimasut inuit allat pisinnaatitaaffiisa killilersugaanngitsumillu iliorsinnaatitaaffiisa aammalu piumasaqaatit naapertuilluartut inuiaqatigiinni inuit kikkulluunniit naalakkersuinikkut oqaasissaqaqatigiiffigisaanni ileqqorissaarnissamut tunngasut, inuiaqatigiit aaqqissuussaanerat aammalu inunnut tamanut iluaqutissatut piumasaqaatigineqartut naammassiniarnissaat siunertaralugu.\n",
+   "count": 186
+  },
+  {
+   "text": "[\n  {\n    \"k\": \"\\u03b2\",\n    \"n\": 0.8360093507398375\n  },\n  {\n    \"k\": \"\\u03b2\",\n    \"n\": 0.049038688763247795\n  },\n  {\n    \"k\": \"na\\u00efve\",\n    \"n\": 0.5587435419029414\n  },\n  {\n    \"k\": \"\\u6771\\u4eac\",\n    \"n\": 0.4343074839495551\n  }\n]",
+   "count": 165
+  },
+  {
+   "text": "éǅ⎄\n\n␏é    \n\nﬁİ  éİ🗕é⛲☫ééß\n\nǅßéİǅ\tİ0é  🍢🣘İé\téß\tcéé\n\n\"🠢⎂éİ⅘  ⃿éß@é  ßİİ\tYé🢯⒟  ß\n\n🞺ǅ  ❐İé🫂ﬁß🕄ééǅǅ  ﬁé\tǅ💮ǅSﬁ⊺\n\n\t🝊🥖ǅßß\tß⌀ﬁ@é  é⤺ﬁ\n\nßé\t⎅İ\t📿é⣴ß⣰ß\tǅZ🎻İ  ⠬\tﬁİ  İİ]İ,  ß\tǅ\tß ",
+   "count": 210
+  },
+  {
+   "text": "🕫🣡 🦡🞨🥺 🕄🞂🧼🤔🍳",
+   "count": 29
+  },
+  {
+   "text": "🡿🤔x🛚💌x🗝x🝔🧢🫇👱🫌x🤪🣣🤼🦓🪆",
+   "count": 44
+  },
+  {
+   "text": "ᑲᑭᓇᐌᓀᓐ ᐅᑕᔭᓐ ᒥᓯᐌ ᐌᐌᓂ ᑕᐱᑕ ᑾᔭᒃ ᑭᐃᔑᑲᓇᐗᐸᒋᑲᑌᓂᒃ ᑲᐃᔑᑕᔑᒋᑲᑌᑭᓐ ᐃᔑᓭᐎᓇᓐ ᑎᐸᑯᓂᑫᐎᓂᒃ ᒥᓇᐗ ᐃᒪ ᑎᐸᑯᓂᑫᐎᓇᓐ ᑲᑎᐯᓂᑎᓱᒪᑲᑭᓐ ᑲᒧᒋᓇᐸᓀ ᐁᑕ ᑐᒋᑲᑌᒃ ᒥᓇᐗ ᑎᐯᑯᓂᑫᐎᓐ ᑲᐃᔑ ᑲᑴ ᑭᑫᒋᑲᑌᓂᒃ ᐊᓂᓐ ᒪᔭ ᑲᐃᔑᒪᒪᔑᑦ ᑲᔦ ᐅᐸᐸᒥᓯᐌᓐ ᒥᓇ ᑲᔦ ᑭᒋᒪᒪᒻᔑᐌᓐ ᑲᐃᑕᑾᐅᑎᓇ ᓂᐗᒃ.\nᑲᑭᓇᐌᓄᓐ ᑲᑎᐸᑯᓂᑡ ᐅᒪᒪᔑᐎᓂᐗ ᐅᑕᔭᓇᐗ ᑌᐸᑫᑕᑯᓯᐎᓐ ᐱᓇᒪ ᒋᑭᔕᑯᓇᑲᓂᐎᑦ ᒋᑄ ᐊᓇᒣᑕᑯᓯᑦ ᑲᐃᓇᑌᒃ ᑎᐸᑯᓂᑫᐎᓐ ᐅᑕᔭᓐ ᑫᐅᒋ ᓇᑕᒪᑯᐨ ᐅᑎᐸᑯᓂᑯᐎᓐ.\nᑲᐎᓐ ᐊᐎᔭ ᑕᐊᓇᒣᓂᒪᑲᓂᐎᓯ ᐅᒋ ᑫᑯᓐ ᐃᐃᐌ ᐊᐱ ᑲᑭᑐᑕᒃ ᑭᐅᑎᓂᑲᑌᓂᒃ ᑲᐅᒋ ᑎᐸᑯᓂ ᑎᓇᓂᐗᒃ ᐅᐌ ᑫᑲᓐ ᑲᑭᐃᔑᒋᑲᓂᐗᒃ ᑫᒪ ᐊᓇᐌᐎᓯᐎᓐ ᑫᒪ ᑲᐃᔑᓄᑕᔥᑲᒃ ᑫᑯᓐ ᐅᒪ ᒥᓯᐌᑲᒥᒃ ᑲᔦ ᒥᓯᐌᐊᑭᒃ ᑲᔦ ᐃᑕᔥ ᒥᓇᐗ ᑲᐎᓐ ᑕᐃᔑᑐᒋᑲᑌᓂ ᐅᒪᒪᔑᐎᓐ ᓇᐗᒃ ᐊᐗᔑᒣ ᑲᑾᓯᑴᑕᑾᒃ ᒋᐃᓇ ᑾᐃᑲᓂᐎᑦ ᐃᐌ ᐊᐱ ᑲᑭ ᐃᔑ ᐱᑯᓂᑫᑦ.\n",
+   "count": 1295
+  },
+  {
+   "text": "෺㦗쯲픿뗯츭慝𡙠ዺ凡⃶᡺엇椐娶𯼶韠𩳵桄돂硎엯赿ቡ悘愖𩜱🿹㉁⦑𘅔𔡨𦼙쏒텄乾挔𦮳笎튷朒ၱ햰੎𤳱헺𐖨뙍ዿ맲걿𝔦",
+   "count": 131
+  },
+  {
+   "text": "🢸🗨🍀🞭🛾🗪🤞🠚🥲🌤😵📿🢲🕒🚡🟝🟽🤡🌹🨽🖒🥆🍘",
+   "count": 58
+  },
+  {
+   "text": "Ottes homaitusehe, miše mez’kundan kaikiden ühtnikoiden arvokahuden i ühthižiden oiktuziden tundustamine oma valdan, oiktuden, mirun alandusen; i\nottes homaitusehe, miše hondostamine i kacmatomuz’ mehen oiktuzihe tob varvaroiden tegoid, kudambad käregoitas mez’kundan mel’tundod, i mehiden suren tahton i takaindan om mugoman mirun tegend, kudambas mehil linneb sanavald, kacmusiden vald, ei linne varaidust i mairišt; i\nottes homaitusehe, miše tarbiž mehiden oiktuded kaita zakonan valdal, sen täht, miše mehele ei pidaiži lopuks libuda tiranijan i ahthištusen vasthapäi; i\n",
+   "count": 203
+  },
+  {
+   "text": "85735863772449406,000 54341841105 1184140588984838.5 63597179303376999 4027017917838780°C 31641e10 801570221139453,000 760505781943229% 86855472744% 124373542076,000 773941217178,000 29630154941895524406°C 207476357.5 27713% 809630418856% 146905398791498392",
+   "count": 255
+  },
+  {
+   "text": "Dʉó bi dʉó nisil-si kee áláŋ-si kééŋ tulléŋa-sí ka a gʉl ati bʉllɨŋ-ii wala jápírtíŋogaꞌŋ ere ása gʉʉd-sí nyiíŋítíá na asá yé arríti.\nDʉó bi dʉó nisil-si kee áláŋ da̱ldɨꞌŋ dɨmoraꞌŋ dorá táárí piá áláŋ gîs baaja na nisila kin-lé páágó ǎl in sabarꞌíŋ dɨó ka̱ɨŋ.\nDʉó bi dʉó tááríŋás kee dééŋ dɨmorꞌíŋ ere áláŋ piá ǎl yé kǒel áláŋ dée-lé tʉ́ɨ́ kí baaj.\n",
+   "count": 227
+  },
+  {
+   "text": "ു𘑩颰苠፮๎쟣ᵑ೚𮌇⚩쭳𒈘恔Ꮫሲ𐀸𑴗𐶡",
+   "count": 51
+  },
+  {
+   "text": "        \"710889\", \"B0YBKJ\", \"406566\", \"B0YBLH\", \"228276\", \"B0YBKL\", \"557910\", \"B0YBKR\", \"585284\",\n        \"B0YBKT\", \"B00030\",\n    ];\n \n    for input in inputs {\n        println!(\"{} SEDOL: {:?}\", &input, sedol(&input).unwrap());\n    }\n}\n \n \n",
+   "count": 121
+  },
+  {
+   "text": "gen: function [n][\n    result: n\n    while [not? in? result [1 89]][\n        s: new 0\n        loop digits result 'd ->\n            's + d*d\n        result: s\n    ]\n    return result\n]\n \nchainsEndingWith89: function [ndigits][\n    [prevCount,currCount]: #[]\n    loop 0..9 'i -> prevCount\\[i*i]: 1\n \n    res: new 0\n \n    loop 2..ndigits 'x [\n        currCount: #[]\n        loop prevCount [val,cnt][\n            v: to :integer val\n            loop 0..9 'newDigit [\n                mm: v + newDigit*newDigit\n                if not? key? currCount mm -> currCount\\[mm]: 0\n                currCount\\[mm]: currCount\\[mm] + cnt\n            ]\n        ]\n        prevCount: currCount\n    ]\n    loop currCount [val,cnt][\n        v: to :integer val\n        if and? [v <> 0] [89=gen v] ->\n            'res + cnt\n    ]\n    return res\n]\n \nprint [\n",
+   "count": 288
+  },
+  {
+   "text": "\fa  é\n \t\r\n.  \f.\f \r \u000b\r\u000b   .\n\t.\u000bé     \r\n.\t\r\n\f\r\n",
+   "count": 42
+  },
+  {
+   "text": "go =>\n  M = [W:W in read_file_lines(\"unixdict.txt\")].group(sort),\n  Deranged = [Value : _Key=Value in M, Value.length > 1, allderanged(Value)],\n  MaxLen = max([V[1].length : V in Deranged]),\n  println([V : V in Deranged, V[1].length==MaxLen]),\n  nl.\n \n% A and B are deranged: i.e. there is no\n% position with the same character.\nderanged(A,B) => \n   foreach(I in 1..A.length)\n       A[I] != B[I]\n   end.\n \n% All words in list Value are deranged anagrams of each other.\nallderanged(Value) => \n    IsDeranged = 1,\n    foreach(V1 in Value, V2 in Value, V1 @< V2, IsDeranged = 1)\n       if not deranged(V1,V2) then\n          IsDeranged := 0\n       end\n    end,\n    IsDeranged == 1.\n \n% Groups the element in List according to the function F\ngroup(List, F) = P, list(List) =>\n   P = new_map(),\n   foreach(E in List) \n      V = apply(F,E),\n      P.put(V, P.get(V,[]) ++ [E])\n   end.\n",
+   "count": 300
+  },
+  {
+   "text": "Igal inimesel, ükskõik kus ta ka ei viibiks, on õigus oma õigussubjektsuse tunnustamisele.\nKõik inimesed on seaduse ees võrdsed ja neil on ilma igasuguse vahetegemiseta õigus seaduse võrdsele kaitsele. Kõigil inimestel on õigus olla võrdselt kaitstud ükskõik missuguse diskrimineerimise eest, mis on vastuolus käesoleva deklaratsiooniga, ja sellisele diskrimineerimisele kihutamise eest.\nIgal inimesel on temale konstitutsiooniga või seadusega tagatud põhiõiguste rikkumise korral õigus efektiivsele õiguste ennistamisele kompetentsete rahvuskohtute kaudu.\n",
+   "count": 193
+  },
+  {
+   "text": "Кожны, хто працуе, мае права на справядлівую і здавальняючую ўзнагароду, якая забяспечвае вартае чалавека існаванне для яго самога і яго сямʼі, і дапаўняецца, пры неабходнасці, іншымі сродкамі сацыяльнага забеспячэння.\nКожны чалавек мае права ствараць прафесіянальныя саюзы і ўступаць у прафесіянальные саюзы для аховы сваіх інтарэсаў.\nКожны чалавек мае права на адпачынак і вольны час, уключаючы права на разумнае абмежаванне рабочага дня і на перыядычны водпуск, які аплачваецца.\n",
+   "count": 371
+  },
+  {
+   "text": "\n\néﬁßﬁ\tİ\t  !1İ🏎\n\nß🠿  İß\té  ßéé🛸\tǅß\t#éǅﬁ\n\n\t💟  ~\t\n\n🡇1  N\tİé\n\nǅİéné\n\nß🧦İ🫀🍆ﬁﬁ\n\nﬁ📵\t  éǅﬁ  ﬁİǅ🔄\n\n",
+   "count": 100
+  },
+  {
+   "text": "with Ada.Text_IO, Matrix_Scalar;\n \nprocedure Scalar_Ops is\n \n   subtype T is Integer range 1 .. 3;\n \n   package M is new Matrix_Scalar(T, T, Integer);\n \n   -- the functions to solve the task\n        function \"+\" is new M.Func(\"+\");\n        function \"-\" is new M.Func(\"-\");\n        function \"*\" is new M.Func(\"*\");\n        function \"/\" is new M.Func(\"/\");\n        function \"**\" is new M.Func(\"**\");\n        function \"mod\" is new M.Func(\"mod\");\n \n   -- for output purposes, we need a Matrix->String conversion\n        function Image is new M.Image(Integer'Image);\n \n   A: M.Matrix := ((1,2,3),(4,5,6),(7,8,9)); -- something to begin with\n \nbegin\n   Ada.Text_IO.Put_Line(\"  Initial M=\" & Image(A));\n   Ada.Text_IO.Put_Line(\"        M+2=\" & Image(A+2));\n   Ada.Text_IO.Put_Line(\"        M-2=\" & Image(A-2));\n   Ada.Text_IO.Put_Line(\"        M*2=\" & Image(A*2));\n",
+   "count": 252
+  },
+  {
+   "text": "[\n  {\n    \"k\": \"東京\",\n    \"n\": 0.6803159751497367\n  },\n  {\n    \"k\": \"naïve\",\n    \"n\": 0.5309305324128274\n  },\n  {\n    \"k\": \"α\",\n    \"n\": 0.1031249041123774\n  },\n  {\n    \"k\": \"東京\",\n    \"n\": 0.7149930924831919\n  },\n  {\n    \"k\": \"α\",\n    \"n\": 0.3591094551624233\n  }\n]",
+   "count": 179
+  },
+  {
+   "text": "35859465.5 71516439005906%",
+   "count": 26
+  },
+  {
+   "text": "   2 #.inv 12\n1 1 0 0\n   3 #.inv 100\n1 0 2 0 1\n   16 #.inv 180097588\n10 11 12 1 2 3 4\n",
+   "count": 74
+  },
+  {
+   "text": "험𘰜겯쬂찾圶즯먅殷𮻙緶꺞ଘ᱌纒澂𒹵𪋸ⅽ𤉷蝵꺱𤮣⸄䟹볋췸棠𨳏𩴂𔮺ټ⎻㧂揺瞵𠒱禭绦瀀㇜쫧紎츋혖ᨭ𞹼𔐦粰ඬ",
+   "count": 132
+  },
+  {
+   "text": "ᮛ툷위⚏𮇆崭ो첱犲룣萫𭾄콴𞏺𖟫𢥰䈴ԡ槠𞚓湦𪍹𗩟𡤘𒡄툊넌ࠃ萰䟾侴ឹⰸ៻㙥坦𥍉𕅙ޓ㪹鸭𪚯눻젭",
+   "count": 115
+  },
+  {
+   "text": "(de **Mod (X Y N)\n   (let M 1\n      (loop\n         (when (bit? 1 Y)\n            (setq M (% (* M X) N)) )\n         (T (=0 (setq Y (>> 1 Y)))\n            M )\n         (setq X (% (* X X) N)) ) ) )\n \n(de prime? (N)\n   (or\n      (= N 2)\n      (and\n         (> N 1)\n         (bit? 1 N)\n         (let S (sqrt N)\n            (for (D 3  T  (+ D 2))\n               (T (> D S) T)\n               (T (=0 (% N D)) NIL) ) ) ) ) )\n \n(de mFactor (P)\n   (let (Lim (sqrt (dec (** 2 P)))  K 0  Q)\n      (loop\n         (setq Q (inc (* 2 (inc 'K) P)))\n         (T (>= Q Lim) NIL)\n         (T\n            (and\n               (member (% Q 8) (1 7))\n               (prime? Q)\n               (= 1 (**Mod 2 P Q)) )\n            Q ) ) ) )\n",
+   "count": 261
+  },
+  {
+   "text": "Obiara wɔ adwenem nsusuwii, ahonim ne nyamesom biara a ɔpɛ ho kyɛfa anaa ɛho kwan. Saa kyɛfa anaa hokwan yi ma obi de ne ho sɛ ɔbɛsakra ne nyamesom anaa ne gyidi, ɛma obiara de ne ho sɛ ɔhwehwɛ ankorankoro anaa ɔdodow nyamesom, anaa ɔne afoforo bom som wɔ peteem anaa kokoam, nam so yi ne nyamesom anaa gyidi adi wɔ kyerɛkyɛrɛ, nneyɛe ne ɔsom mu.\n",
+   "count": 151
+  },
+  {
+   "text": "Factors ← (1+↕)⊸(⊣/˜0=|)\n \n•Show Factors 12345\n•Show Factors 729\n",
+   "count": 41
+  },
+  {
+   "text": "  uint[] cache = new uint[0];\n  for (uint n = 100; n <= 1000; n += 100)\n    print(\"%8u: %14u items\\n\", n, fareyLength(n, cache));\n}\n",
+   "count": 61
+  },
+  {
+   "text": "🢧🛟🝕🖿🪸🪫🔏🔉🦄🏔🏹🤌👚😳🤨",
+   "count": 37
+  },
+  {
+   "text": "[{\"k\": \"\\u03b2\", \"n\": 0.12279029032143596}, {\"k\": \"na\\u00efve\", \"n\": 0.9086421736604161}, {\"k\": \"\\u03b2\", \"n\": 0.4309474236715348}, {\"k\": \"\\u03b2\", \"n\": 0.25011399594009}]",
+   "count": 133
+  },
+  {
+   "text": "to bookend_number :n\n  output sum product 10 first :n last :n\nend\n \nto gapful? :n\n  output and greaterequal? :n 100 equal? 0 modulo :n bookend_number :n\nend\n \nto gapfuls_in_range :start :size\n  localmake \"gapfuls []\n  do.while [\n    if (gapful? :start) [\n      make \"gapfuls (lput :start gapfuls)\n    ]\n    make \"start sum :start 1\n  ] [less? (count :gapfuls) :size]\n  output :gapfuls\nend\n \nto report_range :start :size\n  print (word \"|The first | :size \"| gapful numbers >= | :start \"|:|)\n  print gapfuls_in_range :start :size\n  (print)\nend\n \nforeach [ [1 30] [1000000 15] [1000000000 10] ] [\n  apply \"report_range ?\n]\n \n",
+   "count": 250
+  },
+  {
+   "text": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+   "count": 583
+  },
+  {
+   "text": "Ꮒꭶꮫ ꭰꮒᏼꮻ ꭴꮒꮂ ꮎꮝꭹ ꮪᏻꭺꮫ ᏻꮎꮫꮧꭲ ꭵꮄꮒꮩꮂꭲ, ꭳꭶꮣꮴꮅ ꭸꮢꭲ ꭰꮄ ꮎꮝꭹ ꭴꭶꮞꮝꮧ ᏼꮻ.\nᎤꮩꭿᏻꭿ ꮭꭹꮆꭲ ꭰꮵꮒᏼꮧ ꮎꮝꭹ ꮧꭸꮵꮎꮭꭵ ꭰꮄ ꭶꮜꮩꮿꮝꮧ ꭰꮵꮎꮭꭲ ᏹꭸꮞꮝꮧ; ꮧꭸꮵꮎꮭꭵ ꭰꮄ ꮎꮝꭹ ꮧꭸꮵꮎꮭ ꮧꭶꮎꮧꮕꮧ ꭴꮩꭿᏻꭿꮿ ꭶꮕꮝꮩꮝꭸꮝꮧ ꮎꮝꭹ ꮒꭶꭵ ꮎꮝꭹ ꭲᏻꮝꮧ.\nᎤꮩꭿᏻꭿ ꮭꭹꮆꭲ ꭰꮵꮈꮝꮧ ᏹꭸꮞꮝꮧ ꭰꮄ ꭴᏺ ꭲꮿꮣꮫꮑꭿ ᏹꭸꮞꮝꮧ, ꭰꮒᏼꮻ ꮒꭸꮢꮎ ᏹꭼꮧ ᏹꭸꮞꮝꮧ ꭰꮄ ꭴꮥꮀꭿꮝꮧ ᏹꭼꮧ ᏹꭸꮞꮝꮧ ꭰꮄ ꭰꮝꮫꮧꮝꮩꮧ ᏹꭸꮞꮝꮧ.\nᏂꭶꮫ ꭰꮒᏼꮻ ꭴꮒꮂ ꮎꮝꭹ ꮪᏻꭺꮫ ꭲᏻꮎꮫꮑꮧꭲ ꮒꭼꮎꮫ ꭸꭺꮅꮴꮧ ꮎꮝꭹ ᏼꮻ ꭲꭼꮿꮨꮯ ꮎꮝꭹ ꮧꭷꮓꮹꮫꮝꮧ.\nᏂꭶꮫ ꭲꮷꮃꭽꮙ ꭲꭼꮿꮨꮯ ꮎꮝꭹ ꮧꭷꮏꮹꮫꮝꮧ ꭰꮄ ꭴꮎꮣꮒꮬꮕꭲ ꮕꮰꮿꮝꮫꮎ ꮒꭶꭵ ꭰꮣꮫᏻꮴꮧ ꮎꮝꭹ ꭲꮷꮃꭽꮙ ꭼꮹꮒꮝꮥꮈꮩꮧ ꮎꮝꭹ ꮧꭷꮏꮹꮫꮝꮧ. Ꮒꭶꮣ ꭴꮎꮣꮒꮬꮕꭲ ꭲꮷꮃꭽꮙ ꭼꮹꮒꮝꮥꮈꮩꮧ ꮧꭼꮹꮎꮱꮧꮝꭹ ꮒꭶꭵ ꭰꮣꮫᏻꮴꮧ ꮎꮝꭹ ꭰꮝꭶꮕꭼꭲ ꭿꭰ ꮧꭶꮓꮳꮃꮕꭲ ꭰꮄ ꮧꭼꮹꮎꮱꮧꮝꭹ ꭰꮄ ꮒꭶꭵ ꮣꮣꮪꮄꭼ ꮎꮝꭹ ꭲᏻꮝꮧ ꭰꮣꮫᏻꮴꮧ.\n",
+   "count": 1326
+  },
+  {
+   "text": "’sta declarasion cofà ideałe comun par tuti i pòpołi e łe nasion, a’l fin che onji parsona e onji partision de ła sosietà łe gapie da mirar, tenjendo ’sta Declarasion senpre inamente, a promóvar co l’insenjamento e l’educasion a’l respeto de ’sti deriti e de ’ste łibartà e traverso de mezure progresive, nasionałe e intarnasionałe, par seguràrghene reconosimento e osarvansa efetive, tanto par i pòpołi de i Stati Menbri par primi, che par i pòpołi che i ze soto só jurizdision.\n",
+   "count": 173
+  },
+  {
+   "text": "Munhu ni munhu à ni nfanelo ya ku kuma xithsamu è ka urhangèli la timhaka ta tiku làkwe, yena hayèxe kumbe hi ku rhumisà vanhu lava a nga va kheta ha yèxe.\nWihi na wihi, hi kufana ni hin'kwavu vanhu, à ni nfanelo ya ku kuma ntirhu è ka mintirhu ya nfumu wa tikweni kàkwe.\nÀ kurhandza ka xithsungu y nthxumu wa ku sungula lowu tiyisaka a uhòsi à tikweni; hi kolahu, a urhangeli lifanela ku gdoviwa hi hlaúlamàni hi ku famba ni ku famba ka nkarhi, na xi yendliwa hi voto ya xihundla, kumbe hi mahayele man'wani ya ku tiyisa ku vota à ku khululekeni.\n",
+   "count": 204
+  },
+  {
+   "text": "\r\n\n\r\n\n\r .\t.　 \r\r\n　é \f\u000b\n\n \r\n \u000b\r\n\r         \r  \f  \né",
+   "count": 46
+  },
+  {
+   "text": "Red [\"Animation\"]\n \nrev: false\nroule: does [e: back tail s: t/text either rev [move e s] [move s e]]\nview [t: text \"Hello world! \" rate 5 [rev: not rev] on-time [roule]]\n",
+   "count": 60
+  },
+  {
+   "text": "  .é\f\r\réa  \f. 　\r\n \r\n",
+   "count": 16
+  },
+  {
+   "text": "    RETURN temp;\n \n  END multiply;\n \nEND ethiopian;\n/\n \n/* example call */\nBEGIN\n  DBMS_OUTPUT.put_line(ethiopian.multiply(17, 34));\nEND;\n/\n",
+   "count": 47
+  },
+  {
+   "text": "𔳈ֱᔝ샛⻆⧴",
+   "count": 17
+  },
+  {
+   "text": "𦶃뱁᝙ℨ䩂Ṽ瞖Ď渝혋𭷠෯褟ሆ⎣蕬𢁶ኽ湰皥䱔㮽ɤ𝭖먮ᰐ칦᭯팥ႈ罜𚨇𪒾᨞𭲭䆭𭒌맵嘊뤑ሑⓋݠ䏄勫۝𚫍젘炪Ěᄌӡ嵖᱓洆샌𞬇쿟",
+   "count": 147
+  },
+  {
+   "text": "Ураал-кодэ личность дитэ ԝарумулдаҕа чамбиинунум. Тадаатэ-омопэ ньичуҥдэҕан эннулпэдаҕа, ньиԝальбийил ҥолаалҥудаҕа чамбиинунум.\nЧиипэги титтэ уорпэҕанэ хади ураанубэҕа сэԝрэйуол-мораԝлэ титтэйлэк курильиинунҥа.\nКөдэ йаԝнар искусство ԝиэйуолдаҕанэ амутнэҥ йуонурэҥ-мөрнурэҥ, научнай прогресс йэдэйлдаҕа \"чалдьэлэ парнурэҥ\", тадаатэ таҥньэҥ йаԝнай амудьэдаҕанэ тудэ эдьилҕа мөрнурэҥ, эннуйуол-мораԝ параԝааньэй.\nНаучнэй, литературнэй тадаатэ художественнэй чаҕадьэлпэҕа автор ҥодьэ көдэ, таҥ тудэ ԝиэйуолҕа көдиньбандьэ поҕодэлэ-нэмэлэ мэдьуол-мораԝ параԝааньэй.\n",
+   "count": 541
+  },
+  {
+   "text": "🟭🖋🚩 😵🜚 🦧🞐🕽🧶 🞍 🡳🧟 🖗🎜 🐚🣌🛶🟫",
+   "count": 55
+  },
+  {
+   "text": "E’pitwunijanit kisna mijua’ji’j wejku’aqamit maltamuksin kisna apoqonmuksin. Msit mijuajl’jk, weskwijinultijik malie’wimk kisna moqo, newte’ tli-anko’tasullilaq.\nMsit wen wejkut’aqmit koqwajo’taqan wjit ekina’masuti ma awlinuk, amskwesewey aqq ta’n nuta’q. Amskwesewey ekina’masutl msit wen miamuj wessua’toq. Ta’n telitekemk aqq espikina’muti tettew wijit ta’n pasik wen ketu ksua’ten.\n",
+   "count": 165
+  },
+  {
+   "text": " \n# syntax: GAWK -f NIM_GAME.AWK\nBEGIN {\n    tokens = 12\n    printf(\"Nim game - using %d tokens\\n\",tokens)\n    while (tokens > 0) {\n      for (;;) {\n        printf(\"how many tokens 1-3? \")\n        getline ans\n        if (ans ~ /^[123]$/) {\n          tokens -= ans\n          prn(\"player\")\n          break\n        }\n        print(\"invalid input, try again\")\n      }\n      tokens -= ans = tokens % 4\n      prn(\"computer\")\n    }\n    print(\"computer wins\")\n    exit(0)\n}\nfunction prn(who) {\n    printf(\"%s takes %d token%s; there are %d remaining\\n\",who,ans,(ans==1)?\"\":\"s\",tokens)\n}\n \n",
+   "count": 180
+  },
+  {
+   "text": "Ze vbe uhunmwun emwi kpataki ne emwan hia, ke uhunmwun evbo hia mie, vbe iyeke ona wee domwande omwan, ke domwande otu vbe uwu evbo, ghi gha ka iyen emwen oghe etin nii ye ekhoe, ne iran hia vbodekode ya gha ma emwan emwin, na mie ehe na mie wee aru alaghodaro ye emwen na hia, okade-okade, vbe uwu Uhunmwun Evbo Kevbe adese okpevbo, na mie wee iran mween atamu ayerero kevbe agbaro-koto vbe ebu emwan arrioba hia kevbe ebu emwan ne o rre ikinkin ni ne rre ototo arrioba.\n",
+   "count": 178
+  },
+  {
+   "text": "class CubanPrimes {\n    private static int MAX = 1_400_000\n    private static boolean[] primes = new boolean[MAX]\n \n    static void main(String[] args) {\n        preCompute()\n        cubanPrime(200, true)\n        for (int i = 1; i <= 5; i++) {\n            int max = (int) Math.pow(10, i)\n            printf(\"%,d-th cuban prime = %,d%n\", max, cubanPrime(max, false))\n        }\n    }\n \n    private static long cubanPrime(int n, boolean display) {\n        int count = 0\n        long result = 0\n        for (long i = 0; count < n; i++) {\n            long test = 1l + 3 * i * (i + 1)\n            if (isPrime(test)) {\n                count++\n                result = test\n                if (display) {\n                    printf(\"%10s%s\", String.format(\"%,d\", test), count % 10 == 0 ? \"\\n\" : \"\")\n                }\n            }\n        }\n        return result\n    }\n \n",
+   "count": 254
+  },
+  {
+   "text": "include FMS-SI.f\ninclude FMS-SILib.f\n \n \n \n\\ We can add any number of variables at runtime by adding\n\\ objects of any type to an instance at run time.  The added\n\\ objects are then accessible via an index number.\n \n:class foo\n  object-list inst-objects \\ a dynamically growable object container\n  :m init: inst-objects init: ;m\n  :m add: ( obj -- ) inst-objects add: ;m\n  :m at: ( idx -- obj ) inst-objects at: ;m\n;class\n \nfoo foo1 \n \n: main\n  heap> string foo1 add:\n  heap> fvar   foo1 add:\n \n  s\" Now is the time \" 0 foo1 at: !:\n  3.14159e             1 foo1 at: !:\n \n  0 foo1 at: p: \\ send the print message to indexed object 0\n  1 foo1 at: p: \\ send the print message to indexed object 1\n;\n \nmain \\ => Now is the time 3.14159\n \n",
+   "count": 266
+  },
+  {
+   "text": "Chijunil li usilal chaab'ilal wan sa' li Jultikahom a'in a'an re chijunil li poyanam, maak'a' naxye b'ar elajenaq, b'ar yo'lajenaq', chanru nailok, ma ixq ma wiinq, k'a'ru li raatinob'aal, li xpaab'aal, k'a'ru naxk'a'uxla chirix li awab'ejiink malaq k'a'ru chik chi na'leb'il, us ta b'ihom us ta neb'a', ut k'a'aq re ru chik.\nJo'kan ajwi' maak'a' naxye chanru wan li tenamit b'ar wi' chaljenaq wi'.\nChijunil li poyanam kolb'ilaq rix, jo' li xyu'am jo' li xwanjinik sa' xyaalal.\n",
+   "count": 201
+  },
+  {
+   "text": "9670% 4748108768926455 564115% 24e10 8445593426810457021% 47.5 59.5 1306528069147196°C 803 10% 35722792692°C 32422792137734086.5 369483% 7746327 913,000 917136305371720 3728918°C 3808580",
+   "count": 183
+  },
+  {
+   "text": "    println(rsl)\n    println(msl)\n}\n",
+   "count": 11
+  },
+  {
+   "text": "sub infix:<shares-divisors-with> { ($^a gcd $^b) > 1 }\n \nsub next-EKG ( *@s ) {\n    return first {\n        @s ∌ $_  and  @s.tail shares-divisors-with $_\n    }, 2..*;\n}\n \nsub EKG ( Int $start ) {  1, $start, &next-EKG … *  }\n \nsub converge-at ( @ints ) {\n    my @ekgs = @ints.map: &EKG;\n \n    return (2 .. *).first: -> $i {\n        [==]  @ekgs.map(     *.[$i]     ) and\n        [===] @ekgs.map( *.head($i).Set )\n    }\n}\n \nsay \"EKG($_): \", .&EKG.head(10) for 2, 5, 7, 9, 10;\n \nfor [5, 7], [2, 5, 7, 9, 10] -> @ints {\n    say \"EKGs of (@ints[]) converge at term {$_+1}\" with converge-at(@ints);\n}\n",
+   "count": 256
+  },
+  {
+   "text": "Piyanle unilala junshi sonala, uwan i'tobi, mobe, niyan kiranbeti, junshi nunchi nechí jominka kiratu'to, ka'sala i'to, nalabe bolon i'to sona'sa manta joe,\ntsankenan panshile puraka i'tonan, panshi man nena'sa manta joe.\nKa'sala i'chunin, unilabe junshi sonabe shiri miranolajoe.\nBolonlari, manto tsanla, se lo'sa jolajoe, junto payila, layan se ti'to kiranolajoe.\nJera tsa'chila, mankari jono, o bolon i'to, sonano manta taralae.\nMokananti, ya'chi tobinechi, lare'to eresa manta i'toe.\n",
+   "count": 188
+  },
+  {
+   "text": "\n\nß  \n\nﬁ▤\tİ🞭éİ  \t\tİé🖭ééǅ\n\nﬁ🣗⤁ßﬁéééİ\téİßǅ\f\n\n\n\nßǅW⒛  ǅǅ🫼😌⋧é,\tﬁy\n\nİ\t    \n\nßǅ🟅\n\né3ß\tǅ4ǅﬁǅ\n\n\tǅ!\t\n\nßFǅé\n\n1é2🙉ǅﬁßǅßǅ\n\nǅİİ🡅é",
+   "count": 132
+  },
+  {
+   "text": " \n\f\t\f\té  \u000b\t\n \f　 a \r\n\u000b \r \r\t　\fé ",
+   "count": 33
+  },
+  {
+   "text": "Buot olbmot leat riegádan friddjan ja olmmošárvvu ja olmmošvuoigatvuođaid dáfus. Sii leat jierbmalaš olbmot geain lea oamedovdu ja sii gálggaše leat dego vieljačagat.\nJuohkehaš lea vuoigaduvvon buot daid vuoigatvuođaide ja friddjavuođaide, mat dán julggaštusas leat namahuvvon, almmá mange vealahaga, náli, ivnni, sohkabeali, giela, oskku, politihkalaš dahje eará miellaguottu, naššuvnnalaš dahje sosiálalaš surggiideami, opmodaga, riegádeami dahje eará dilálašvuođa dáfus.\n",
+   "count": 203
+  },
+  {
+   "text": "日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日",
+   "count": 427
+  },
+  {
+   "text": "[{\"k\": \"na\\u00efve\", \"n\": 0.5304068344768109}, {\"k\": \"\\u03b1\", \"n\": 0.5079387712576375}]",
+   "count": 68
+  },
+  {
+   "text": "လူတိုင်းတွင် လူ့အဖွဲ့အစည်း၏ အဖွဲ့ဝင်တစ်ဦးအနေနှင့် လူမှုရေး လုံခြုံခွင့်ရယူပိုင့်ခွင့်ရှိသည့်အပြင် နိုင်ငံရေးကြိုးပမ်းမှုဖြင့်ဖြစ်စေ၊ နိုင်ငံတကာ ပူပေါင်းဆောင်ရွက်မှုဖြင့်ဖြစ်စေ၊ နိုင်ငံအသီးသီး၏ဖွဲ့စည်းပုံနှင့် လည်းကောင်း၊ သယံဇာတအင်အားနှင့်လည်းကောင်း ထိုလူ၏ ဂုဏ်သိက္ခာနှင့် စရိုက်လက္ခဏာ လွတ်လပ်စွာ တိုးတက်မြင့်မားရေးအတွက် မရှိမဖြစ်လိုအပ်သော စီးပွားရေး၊ လူမှုရေးနှင့် ယဉ်ကျေးမှု အခွင့်အရေးများကို သုံးစွဲပိုင်ခွင့်ရှိသည်။\n",
+   "count": 401
+  },
+  {
+   "text": "# CoffeeScript is dynamic, just like the Javascript it compiles to.\n# You can dynamically add attributes to objects.\n \n# First create an object very simply.\ne = {}\ne.foo = \"bar\"\ne.yo = -> \"baz\"\nconsole.log e.foo, e.yo()\n \n# CS also has class syntax to instantiate objects, the details of which\n# aren't shown here.  The mechanism to add members is the same, though.\nclass Empty\n  # empty class\n \ne = new Empty()\ne.foo = \"bar\"\ne.yo = -> \"baz\"\nconsole.log e.foo, e.yo()\n \n",
+   "count": 139
+  },
+  {
+   "text": "प्रत्येकास समाजातील सांस्कृतिक जीवनात मोकळेपणाने भाग धेण्याचा कलांचा आनंद उपभोगण्याचा आणि वैज्ञानिक प्रगति व तिच्यापासून मिळणारे फायदे यांत सहभागी होण्याचा अधिकार आहे.\nआपण निर्माण केलेल्या कोणत्याहि वैज्ञानिक, साहित्यिक किंवा कलात्मक कृतीपासून निष्पन्न होणार्‍या नैतिक व भौतिक हितसंबंधांना संरक्षण मिळण्याचा प्रत्येकास अधिकार आहे.\nह्या जाहीरनाम्यात ग्रथित केलेले अधिकार व स्वातंत्र्य पूर्णपणे साध्य करता येतील अशा सामाजिक व आंतरराष्ट्रीय व्यवस्थेचा प्रत्येकास हक्क आहे.\n",
+   "count": 398
+  },
+  {
+   "text": "        if IsPrime(fix(J)) then\n            [RlOut(0, J);\n            N:= N+1;\n            if rem(N/5) = 0 then CrLf(0);\n            if N >= 10 then quit;\n            ];\n        J2:= J1;  J1:= J;\n        ];\n]\n",
+   "count": 70
+  },
+  {
+   "text": "ﬁ😰⤟  ❦ﬁ🪖éİéİ  \n\nß⏟éé  ß*İﬁ🔴é\n\n  Oéé@İ🥆İ⤸  a\t🛒\n\n\tİﬁǅßéééİ  c",
+   "count": 67
+  },
+  {
+   "text": "MODE ARGTYPE = INT;\nMODE ARGLIST = FLEX[0]ARGTYPE;\n \nOP + = (ARGLIST a, b)ARGLIST: (\n  [LWB a:UPB a - LWB a + 1 + UPB b - LWB b + 1 ]ARGTYPE out;\n  ( \n    out[LWB a:UPB a]:=a,\n    out[UPB a+1:]:=b\n  );\n  out\n);\n \n# Append #\nOP +:=    = (REF ARGLIST lhs, ARGLIST rhs)ARGLIST: lhs := lhs + rhs;\nOP PLUSAB = (REF ARGLIST lhs, ARGLIST rhs)ARGLIST: lhs := lhs + rhs;\n \n# Prefix #\nOP +=:    = (ARGLIST lhs, REF ARGLIST rhs)ARGLIST: rhs := lhs + rhs;\nOP PLUSTO = (ARGLIST lhs, REF ARGLIST rhs)ARGLIST: rhs := lhs + rhs;\n \nARGLIST a := (1,2),\n        b := (3,4,5);\n \nprint((\"a + b\",a + b, new line));\n \nVOID(a +:= b);\nprint((\"a +:= b\", a, new line));\n \nVOID(a +=: b);\nprint((\"a +=: b\", b, new line))\n",
+   "count": 302
+  },
+  {
+   "text": "Cha bee eie currit gyn oyr mie er bioys er-lheh, mooinjer, thie ny screeunyn persoonagh unnane erbee, chamoo nee eh surranse mee-ooashley da’n onner as y ghoo mie echey fegooish oyr. Ta cairys ec dy chooilley unnane gys coadey veih’n leigh noi lheid ny reddyn shoh.\nTa cairys ec dy chooilley unnane gys seyrsnys dy ghleashagh as dy chummal raad erbee dy naillish cheu-sthie jeh cagleeyn dagh state.\nTa cairys ec dy chooilley unnane dy aagail cheer erbee, goaill stiagh e heer hene, as dy hyndaa reesht gys e heer hene.\n",
+   "count": 187
+  },
+  {
+   "text": "                                         ELSE ABS x - 10 + ABS \"a\"\n\t\t\t\t\t FI);\n      STRING h := \"\";\n      IF x = 16r0 THEN\n\t h := \"0\"\n      ELSE\n\t BITS n := x;\n\t WHILE h := hexdig (n AND 16rf) + h; n ≠ 16r0 DO\n\t    n := n SHR 4\n\t OD\n      FI;\n      h\n   END;\n \nPROC crc = (STRING buf) BITS:\n   update_crc(16r0, buf);\n \nSTRING s = \"The quick brown fox jumps over the lazy dog\";\nprint((\"CRC32 OF \", s, \" is: \", hex (crc (s)), newline))\n \n",
+   "count": 160
+  },
+  {
+   "text": "variable foo\nfoo .  \\ some large number, an address\n8 foo !\nfoo @ .  \\ 8\n\n",
+   "count": 26
+  },
+  {
+   "text": "Pokiten mu meinisin non United Nations ra affata me non nour we Charter usun ar nuku pwe mei wor popunapen an aramas meinisin rait, o mi wor namoten an epwe nonnofengen chok an aramas meinisin rait, mwan fengen me fefin, fan iten an epwe wor tipeeu pun epwe wor kinamwe,\nPokiten mu meinisin ra fen en me pon pwe repwe ansi ewe mwichen United Nations ne asinengeni unusen fonufan usun angangen are napanapen an aramas rait,\nPokiten mi wesewesen ennetin auchea an aramas repwe wesewesen sinei me miriti ekkei rait,\nIei Popun,\nEWE GENERAL ASSEMBLY\nA Asinengeni Kich\n",
+   "count": 179
+  },
+  {
+   "text": "[\n\t{\n\t\t\"k\": \"naïve\",\n\t\t\"n\": 0.03917553961068987\n\t},\n\t{\n\t\t\"k\": \"α\",\n\t\t\"n\": 0.2743672651160677\n\t},\n\t{\n\t\t\"k\": \"β\",\n\t\t\"n\": 0.2707838579357408\n\t}\n]",
+   "count": 113
+  },
+  {
+   "text": "🜪🨯🩳 🙁🠑 🍖🦐💙 🌚🎒 🎰🚋👝🦪🐚 🍯💢🤢🖝🚦 🍀🖀🜿 🛍",
+   "count": 65
+  },
+  {
+   "text": "Cunsidarendu chì par rializà isssa prumessa, hè di primura d’avè una idea cumuna d’issi diritti è libertà,\nSta Dichjarazioni Univirsali di i Diritti di l’Omu\ncum’è fini cumunu da ricircà da tutti i populi è tutti i nazioni, par ch’elli provinu tutti l’individui è tutti l’urganisazioni di a sucità, cù u insignamentu è l’educazioni, à sviluppà u rispettu d’issi diritti, è, pigliendu à pocu à pocu i misuri naziunali è internaziunali, à impona ni ignalocu a ricunniscenza è a prattica vera, sia ind’è i populi di i Stati membri stesi, sia ind’è quilli di i tarritorii ad elli cunfidati.\n",
+   "count": 203
+  },
+  {
+   "text": "Evri memba blo komuniti olketa garem rait fo garem sosol sekuriti en evri kantri mas waka wittim olketa organisation en olketa risoces blo olketa, en wittim olketa nara kantre mekem olketa pipol blo olketa luk savve wanem nao olketa ekonomik, sosol en kaltrol raits blo olketa.\nEvriwan i garem rait fo waka, fo siusim wanem kaen waka nao olketa i laek fo duim en wanem kaen samting nao lo waka ples blo olketa en fo mekem olketa garem protecsen againstim kaen no garem waka.\nEvriwan i garem rait fo tekem pei wea fittim waka olketa i duim.\n",
+   "count": 171
+  },
+  {
+   "text": "Hɛrɛ yʋʋn pɛɛ bɔ yɩnŋmɔ kaa ɩgooyoo, a hɔ gu ti a gbɛɛɩnɲɔ, lɛ kparija, lɛ totogonigo ɔn yi druɲan rɩ.\nHɛrɛ yʋʋn pɛɛ ji lɛɛ ɩgooyoo wɛɛ pɛɛ hʋʋn kpan  gbɛɛɩnɲɔ, lɛ ji lɛɛ mʋnm yʋʋn wɛɛ kaɩ hɛrɛ gbɛɛɩnɲɔ  wɩnnɩn,hɔ maan yiro sɛgɛdɛgɛ pooko. Hɛrɛ tiri dɛ ɩgooyoo wɛɛ pɛɛ hʋʋn kpan lɛ yɩn bɔ gbɛɛ.\nHɛrɛ yʋʋn pɛɛ ji lɛɛ hɔ ya aban mɩnnɩn gbɛɛɩnɲɔ mara wɩnnɩn dɩ garɩyɛɛgɔ, lɛ ɩgoooyo kaa yʋgʋkaga hɔ kwanŋɔ.\nHɛrɛ yʋʋn pɛɛ ji lɛɛ hɔ ya dunuɲan sɔgɔ pɛɛ bɔ kan wɔɔrɩ.\n",
+   "count": 340
+  },
+  {
+   "text": "Obiara wɔ ndzinoa dɛ ɔnye n'ebusuafo nya asetsena yi mu eyiedzi a ɔbɛma woeenya ahoɔdzen nye asetsena pa, edziban, akataho, tsenabew, eduyɛ na asetsena mu nhyehyɛɛ pa.\nƆyɛ obiara ne ndzinoa so dɛ, zɛ ɔhwer n'edwuma, ɔyar, onya dzɛmdzi bi, no hokafo wu, mpanyinyɛ ma ɔyɛ mberɛw, anaadɛ biribi ama ma onntum nnhwɛ noho a, onya asetsena mu ekyigyina. Ɔwɔ dɛ mbasiafo a wotur mba na mbofra nyina wɔma hɔn mboa soronko. Mbofra nyina, dɛ wɔwoo hɔn wɔ awar ase, anaadɛ wɔwoo hɔn wɔ sɔnmu, wɔ dɛ wɔma hɔn asetsena mu bambɔ pɛr.\n",
+   "count": 245
+  },
+  {
+   "text": "Øll hava rætt til frítt at taka lut í mentanarlívi í samfelagnum, at njæta list og eiga lut í framburði vísinda og ágæðum teirra.\nØll hava rætt til vernd av andaligum og evnisligum áhugamálum í sambandi vidð eitt og hvørt vísindaligt, bækmentaligt ella listarligt verk, sum avvarðandi hevur greitt úr hondum.\nØll hava rætt til samfelags- og altjæða skipan, har tey rættindi og frælsi, ið nevnd eru í hesi yvirlýsing, kunnu verða framd út í æsir.\nØll hava skyldur fyri samfelagnum; í tí einans er full og fræls menning persænleikans gjørlig.\n",
+   "count": 203
+  },
+  {
+   "text": "İǅﬁǅ\n\nİİ\t➵🚉\té\n\n\tßß\n\n\n\n>  \t<⩽  ♑\n\n  \n\n⤩🚑éﬁé🙚é⋝ǅß\n\nﬁ⫥İ\t  ﬁ≔🕨Ⅺ\tß\t⒇o;é🡚éﬁéß🐦İǅ(ﬁéBİﬁéǅﬁ🣤⥆  #  ß  ",
+   "count": 113
+  },
+  {
+   "text": "Tota persona té dret a la llibertat de pensament, de consciència i de religió; aquest dret inclou la llibertat de canviar de religió o de creença, i la llibertat, individualment o col·lectivament, en públic o en privat, de manifestar la seva religió o creença per mitjà de l’ensenyament, la pràctica, el culte i l’observança.\nTota persona té dret a la llibertat d’opinió i d’expressió; aquest dret inclou el de no ser molestat a causa de les pròpies opinions i el de cercar, rebre i difondre les informacions i les idees per qualsevol mitjà i sense límit de fronteres.\n",
+   "count": 195
+  },
+  {
+   "text": "  \r\n   \r\n\n\f　 　　\u000b \f 　 \r\n  \n ..é\na\u000b    \r 　",
+   "count": 37
+  },
+  {
+   "text": "#lang racket\n \n(define (lex-sort n) (sort (if (< 0 n) (range 1 (add1 n)) (range n 2))\n                           string<? #:key number->string))\n \n(define (show n) (printf \"~a: ~a\\n\" n (lex-sort n)))\n \n(show 0)\n(show 1)\n(show 5)\n(show 13)\n(show 21)\n(show -22)\n",
+   "count": 98
+  },
+  {
+   "text": "\r\n\r\n\f\r\né   \n\t\n. é",
+   "count": 13
+  },
+  {
+   "text": "[indent=4]\n/*\n   Array concatenation, in Genie\n   Tectonics: valac array-concat.gs\n*/\n \n/* Creates a new array */\ndef int_array_concat(x:array of int, y:array of int):array of int\n    var a = new Array of int(false, true, 0)  /* (zero-terminated, clear, size) */\n    a.append_vals (x, x.length)\n    a.append_vals (y, y.length)\n \n    z:array of int = (owned) a.data\n    return z\n \ndef int_show_array(a:array of int)\n    for element in a do stdout.printf(\"%d \", element)\n    stdout.printf(\"\\n\")\n \ninit\n    x: array of int = {1, 2, 3}\n    y: array of int = {3, 2, 1, 0, -1}\n    z: array of int = int_array_concat(x, y)\n \n    stdout.printf(\"x: \"); int_show_array(x)\n    stdout.printf(\"y: \"); int_show_array(y)\n    stdout.printf(\"z: \"); int_show_array(z)\n    print \"%d elements in new array\", z.length\n",
+   "count": 265
+  },
+  {
+   "text": "proc shavej {stones jewels} {\n    set n 0\n    foreach c [split $stones {}] {\n        incr n [expr { [string first $c $jewels] >= 0 }]\n    }\n    return $n\n}\nputs [shavej aAAbbbb aA]\nputs [shavej ZZ z]\n",
+   "count": 73
+  },
+  {
+   "text": "[\n\t{\n\t\t\"k\": \"na\\u00efve\",\n\t\t\"n\": 0.19219877413973552\n\t},\n\t{\n\t\t\"k\": \"na\\u00efve\",\n\t\t\"n\": 0.5731619159918374\n\t}\n]",
+   "count": 85
+  },
+  {
+   "text": "BYTE FUNC Concat(INT ARRAY src1,src2,dst BYTE size1,size2)\n  BYTE i\n \n  FOR i=0 TO size1-1\n  DO\n    dst(i)=src1(i)\n  OD\n  FOR i=0 TO size2-1\n  DO\n    dst(size1+i)=src2(i)\n  OD\nRETURN (size1+size2)\n \nPROC PrintArray(INT ARRAY a BYTE size)\n  BYTE i\n \n  Put('[)\n  FOR i=0 TO size-1\n  DO\n    PrintI(a(i))\n    IF i<size-1 THEN\n      Put(' )\n    FI\n  OD\n  Put('])\nRETURN\n \nPROC Test(INT ARRAY src1,src2 BYTE size1,size2)\n  INT ARRAY res(20)\n  BYTE size\n \n  size=Concat(src1,src2,res,size1,size2)\n  PrintArray(src1,size1)\n  Put('+)\n  PrintArray(src2,size2)\n  Put('=)\n  PrintArray(res,size)\n  PutE() PutE()\nRETURN\n \nPROC Main()\n  INT ARRAY\n    a1=[1 2 3 4],\n    a2=[5 6 7 8 9 10],\n    ;a workaround for a3=[-1 -2 -3 -4 -5]\n    a3=[65535 65534 65533 65532 65531]\n \n  Test(a1,a2,4,6)\n  Test(a2,a1,6,4)\n  Test(a3,a2,5,4)\nRETURN\n",
+   "count": 373
+  },
+  {
+   "text": "Everione naim get right to comot im kontri if e wan go to anoda kontri and make e come back if e like, e no concern anybodi.\nEverione naim get right to go anoda kontri, wey e like to tell dem say im wan live for dat kontri, sake for say dem de look for am for im own kontri or dem won arrest am for im kontri, wen im no do any bad ting.\n",
+   "count": 99
+  },
+  {
+   "text": "Yakjayäjpp pe’e jä mëkin, jats jayu jyööjtykat, oy tsöj, ka’a jayu yakjömtönüt yaktitönüt.\nNipëna ve’e kyayak’akää’yat jats myutönüt tsaatsytö’nün mëët, ka’a ve’e pyüma jatse’e jayu kyää’työnüt jats tsyaatsy tönüt.\nNipëna ve’e kyayakvopüt, kyayaktsiiküt, uk yakjömtönüt yaktitönüt.\nAnanyijöma ve’e jayu tyukida’akyjë, jats yakvintsë’ëgat kyutöjkin, myëkin jats vyinma’yin jöma tsyüüna.\nJä pava’nün tökë’ëyji jä ve’e jayu di akäägat, tö’kë’ëyji jä ve’e jayu di nikojtsva’atsüt. Pün pün tse’e töömp, nüüjmip ka oyap, yü pava’nën tse’e xputëjkimdap.\n",
+   "count": 271
+  },
+  {
+   "text": "Ya kəndewu-a tada tiwal-aso ngəlaro cistəgə məradəzana. Duli dukso, nyiyaa au nyiya baalan katambo yaye səliwo fandodə hakkinza.\nNdu yaye hakkinzə shiro ilmu kənjobe mbeji. Ilmu gultəna adə de sulro tin, gananzə yaye ilmu badiyarambe-a fuwunzəbe məradətəna-a. Ilmu badiyarambe gultəna adə kənjonzədə mburo walzəna. Ilmu nzundube-a shanabe-adə ndarason mbeji ye təwandin yero tədə kuru adəgaima ilmu sandin fuwunbedə ye ndusoye səwandə kərajinro walzə natəgəye suwudiya.\n",
+   "count": 199
+  },
+  {
+   "text": "[\n\t{\n\t\t\"k\": \"\\u6771\\u4eac\",\n\t\t\"n\": 0.16543282457997255\n\t},\n\t{\n\t\t\"k\": \"\\u03b2\",\n\t\t\"n\": 0.09254757889842369\n\t},\n\t{\n\t\t\"k\": \"\\u03b2\",\n\t\t\"n\": 0.8903989591991723\n\t},\n\t{\n\t\t\"k\": \"na\\u00efve\",\n\t\t\"n\": 0.08646273536082572\n\t}\n]",
+   "count": 170
+  },
+  {
+   "text": "Bochan ni pigidien fare United Nations e bayu lane Charter rorad makuba yuuʼ laniyanʼ rad nga kikʼikaen mattʼawene gidii, u fane tʼuf bee nge fane bagaa fan ni gidii nge fame taareb mattʼawene pumoon nge ppin, mere kara dugliyed ni ngefelʼ kanowaene par niba mattʼaw nga fizike puf rogon,\nBochan ni ke‐og nage gidii ko pinam ni yad ni ngara ngongliyed ngefelʼ, nge pez e zil ayuw rorad ngakʼe United Nations, nigge mangil muun madnom nag mattʼ awen e gidii yange yog ninge puf rogon e par ko gidii nibfelʼ,\n",
+   "count": 171
+  },
+  {
+   "text": "require \"spec\"\n \ndescribe \"palindrome\" do\n  it \"returns true for a word that's palindromic\" do\n    palindrome(\"racecar\").should be_true\n  end\n \n  it \"returns false for a word that's not palindromic\" do\n    palindrome(\"goodbye\").should be_false\n  end\nend\n \ndef palindrome(s)\n  s == s.reverse\nend\n",
+   "count": 93
+  },
+  {
+   "text": "Gotho nu kja'ni ka ro kuchti da ñiti, ra gentho, nu yo me̱fi go ajte nu ro kja'ni\nNu ne yu kja'ni de jñini geru ra zoo i da jiete nu ajte; nu bi ne daña ko yu tdani pa de pe'nu a ko nu ajte, tzoto i danuju̱.\nGotho nu kja'ni komu i binu a muntsi, ka ro kuchti pa da mödi, pa mu ro jñini, nda föchte nu xijmojo̱i, nu ro muntsi i nu ro do̱mi nu ro jñini, yu yo kja'ni, i nu ro mu̱i ne kja'ni a tè nu ro kja'ni.\nGotho nu kja'ni ka kuchti nu ro be̱fi, ka ro kuchti a da juani, a nu ro be̱fi i da fochte nu ro be̱fi.\nGotho nu kja'ni ka ro kuchti, xatho da tsifi, ra gentho nu pe̱fi ra gentho gotho.\n",
+   "count": 258
+  },
+  {
+   "text": " \r  　  \n   \t\u000b \r\n\f   \t　　\r  é   　\n.　\r\n\t \n   \r\n     .\n.\r",
+   "count": 53
+  },
+  {
+   "text": "🐘🞺🡭🨽 🖍 🏠🨆🎊🝗🎙 🝪🤷🐠💴 😘 🟐💋📏👪📼",
+   "count": 53
+  },
+  {
+   "text": "iex(1)> [1, 2, 3] ++ [4, 5, 6]\n[1, 2, 3, 4, 5, 6]\niex(2)> Enum.concat([[1, [2], 3], [4], [5, 6]])\n[1, [2], 3, 4, 5, 6]\niex(3)> Enum.concat([1..3, [4,5,6], 7..9])\n[1, 2, 3, 4, 5, 6, 7, 8, 9]\n",
+   "count": 133
+  },
+  {
+   "text": "ਉਕਤ ਅਧਿਕਾਰਾਂ ਅਤੇ ਆਜ਼ਾਦੀਆਂ ਨੂੰ ਇਸਤੇਮਾਲ ਕਰਦਿਆਂ ਹਰੇਕ ਵਿਅਕਤੀ ਉਤੇ ਸਿਰਫ਼ ਕਾਨੂੰਨ ਮੁਤਾਬਿਕ ਬੰਦਸ਼ਾਂ ਲਾਈਆਂ ਜਾ ਸਕਦੀਆਂ ਅਤੇ ਇਨ੍ਹਾਂ ਦਾ ਮਨੋਰਥ ਕੇਵਲ ਏਨਾ ਹੀ ਹੈ ਤਾਂ ਜੋ ਹੋਰਨਾਂ ਦੇ ਹੱਕ ਤੇ ਆਜ਼ਾਦੀਆਂ ਨੂੰ ਮਾਨਤਾ ਦਵਾਈ ਜਾ ਸਕੇ ।\nਉਕਤ ਅਧਿਕਾਰਾਂ ਤੇ ਆਜ਼ਾਦੀਆਂ ਨੂੰ ਕਿਸੇ ਵੀ ਹਾਲਤ ਵਿਚ ਉਨ੍ਹਾਂ ਉਦੇਸ਼ਾਂ ਤੇ ਸਿਧਾਤਾਂ ਲਈ ਨਹੀਂ ਵਰਤਿਆ ਜਾਏਗਾ ਜੋ ਯੂ.ਐਨ.ਓ ਦੇ ਉਦੇਸ਼ਾਂ ਦੇ ਸਿਧਾਤਾਂ ਦੀ ਉਲੰਘਣਾ ਕਰਦੇ ਹੋਣ ।\nਇਸ ਐਲਾਨਨਾਮੇ ਵਿਚ ਦਿਤੀ ਕਿਸੇ ਵੀ ਗੱਲ ਜਾਂ ਨੁਕਤੇ ਦੀ ਵਿਆਖਿਆ ਬਾਰੇ ਕਿਸੇ ਸਟੇਟ, ਗਰੁੱਪ ਜਾਂ ਵਿਅਕਤੀ ਨੂੰ ਇਹ ਹੱਕ ਨਹੀਂ ਮਿਲਦਾ ਕਿ ਉਹ ਕੋਈ ਅਜਿਹੀ ਸਰਗਰਮੀ ਕਰੇ ਜਾਂ ਕੋਈ ਇਹੋ ਜਿਹਾ ਕੰਮ ਕਰੇ ਜਿਸ ਦਾ ਮਨੋਰਥ ਐਲਾਨਨਾਮੇ ਵਿਚ ਦਿਤੇ ਹੱਕਾਂ ਤੇ ਆਜ਼ਾਦੀਆਂ ਨੂੰ ਤਬਾਹ ਕਰਨਾ ਹੋਏ ।\n",
+   "count": 458
+  },
+  {
+   "text": "    void addNoCells( std::string& s ) {\n        char l = s.at( 0 ) == 'O' ? '.' : 'O',\n             r = s.at( s.length() - 1 ) == 'O' ? '.' : 'O';\n        s = l + s + r;\n        s = l + s + r;\n    }\n};\nint main( int argc, char* argv[] ) {\n    oo o;\n    o.evolve( 35, 90 );\n    std::cout << \"\\n\";\n    return 0;\n}\n \n",
+   "count": 122
+  },
+  {
+   "text": "Yana da muhimmanci kar a tilastawa mutum yin tunanin samarwa kansa mafita ta hanyar yin tawaye a kan zalunci da mulkin danniya da ake masa. Domin haka za a kare haqqin xan’adam ne kawai ta hanyar shimfixa dokoki.\nYana da muhimmanci a bunqasa cigaban kyakkyawar alaqa ta zumunci tsakanin al’umma.\nMutanen da ke cikin Majalisar Xinkin Duniya sun jaddada imaninsu kan muhimman haqqoqin xan’adam da suka haxa da ganin qima da daraja da bayar da daidaitacciyar dama tsakanin maza da mata da tabbatar da bunqasar cigaba da kuma samar da kyakkyawar rayuwa.\n",
+   "count": 176
+  },
+  {
+   "text": "\fé\n  \f .  . \n\r\na\u000b 　 　 \n  .é  \r\r\né  \t",
+   "count": 37
+  },
+  {
+   "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "count": 76
+  },
+  {
+   "text": "  (map (fn [f] (mapv f xs))\n       (no-fixed-point (into {} (map vector xs xs)))))\n \n(defn -main []\n  (do\n    (doall (map println (derangements [0,1,2,3])))\n    (doall (map #(println (str (subfactorial %) \" \" (count (derangements (range %)))))\n                (range 10)))\n    (println (subfactorial 20))))\n \n",
+   "count": 110
+  },
+  {
+   "text": "Chieshëenquiocquin ma ambi tantiaidi napanu cac bëdambo ictsiash. Chidobi bëdamboen istiapimbo iquebi, quenquiocquin chidotsen bëdamboen isac bëdambo ictsiash. Chuiquid dapambi nëid chiaid niacbidanquin aton matses chieshënac icsambo ictsiash - quequin chuipanëdash nidaid abitedinoësh cho-choquidon.\nMatses utsibo yuainquio yec, cuesnanenquio yec quec bëdamboec tabadnuna, cac bëdambo ictsiash - quequin chuipanëdash nidaid abitedinoësh cho-choquidon.\n",
+   "count": 171
+  },
+  {
+   "text": "ሊ뇆鳲쬀窋𜆭뵁셴験๖덳찺ㄕ̺袂眝⏄ࠜ皑𬖮ⱶ𠀡𢴽ಠ𔅥떫큿㊢휹𪩮퀾╼苷㚯챋騑筲௬꺞",
+   "count": 97
+  },
+  {
+   "text": "\t⣛\n\n  İ🛩ﬁé🥊  \té🐍İǅǅ⯥⢤éİ🜆  é👚\n\n\n\n\tﬁ‭  ‶\n\n🡗é🞋◌éhİ  \téİǅﬁİßfİ\tﬁ  \n\nﬁ    ﬁ  \n\nßİǅǅ\n\nﬁ₟é  \n\n🨏⇹ß\n\n  ǅ∴\n\n\t  ǅé  \t⎣éß\tǅ\n\n  \n\nİééﬁB\t",
+   "count": 130
+  },
+  {
+   "text": "Bondei mia ndɔlei yei kpɔkui le, fale maahoungɔ heimii kɛ ndɔlɔ gbi ti bondei mahu gbɛɛ kpɔtu kpɔtu.\nNuu gbi lɔnya mia kɔɔ i ngi wuma haakangaa majɔɔ, tao gbɔma kɔɔ taa nungaa ti makpɔma haaka majɔɔ.\nTɛ nuu gbi haaka gbua ngi yeya kia leke ti longɔla.\nNuu gbi lɔya mia kɔɔ i kiiya wee, kɔɔ i giila gbɔɔ tɔnyɛi le ɔɔ gbɔɔ i lɔnyani, Ngewɔɛ ye gbɔɔ ngi longɔ i feli, ye tonye ji a ngi jein jein lɔ kɔɔ i ngi giliyei ɔɔ ngi yewɔveilei wote, I wote bɛɛ atayakpe ɔɔ taa nungaa, fofohu ɔɔ sɔkuma, kɔɔ i nungaa gaa a ngi ngliyei kɛɛ ngi yewɔ hindei.\n",
+   "count": 251
+  },
+  {
+   "text": "Aririca añaanatayetero ocaratzi osanquinayetainchari jaca, tzimatsirica añaaqueri pampithashiryaacaineri cameethatatsi antero, ompoña añaatyeero osanquinataca pashine ocante: \"Eero ocantzi antero\", ontzimatye aquemisantero, eero ocantzi antero. Ari icantayetyaari eejatzi aparoni atziri, ari icantayetyaari eejatzi tsicarica ipiyotari inampitaro atziripayeeni, o irjirica jevayetzirori nampitsipayeeni.\n",
+   "count": 153
+  },
+  {
+   "text": "Wɔɔ yo wɔ kiŋ iŋ maloho ba niyɔ iŋ kɛɛ wundɛ wuntheŋ ɔ bindɛ bilɔ kɛɛ banthe in biya bifɛɛna.\nWɔɔ ka ba tute sɛmbɛ ka kɛɛ namaŋ baŋ.\nWɔɔ yo wɔ kiŋ iŋ maloho ba siimɔkɔ na thimo wundɛ, iŋ ba thɔɔ ka dina ba thimo wundɛ ɔ ba kpɔnɔkɔ ka dina ba bɛŋ e thɔɔ ka dina bafɛna malɔkɔ yoo malɔkɔ, iŋ hɛlɛn kulaniya ko kanamaŋ. Wundɛ kiŋ iŋ maloho ba mɛyande iŋ biya be bɔyɛ ba niyɔ ka masii manthe ɛba thɔŋina kulaniya ko kanameŋ ka wan mɛnɛ rɔkpɔkɔ.\n",
+   "count": 214
+  },
+  {
+   "text": "[\n\t{\n\t\t\"k\": \"β\",\n\t\t\"n\": 0.7267473168035541\n\t},\n\t{\n\t\t\"k\": \"β\",\n\t\t\"n\": 0.2627335679110754\n\t},\n\t{\n\t\t\"k\": \"α\",\n\t\t\"n\": 0.5115718492728893\n\t},\n\t{\n\t\t\"k\": \"α\",\n\t\t\"n\": 0.17293711559954317\n\t},\n\t{\n\t\t\"k\": \"β\",\n\t\t\"n\": 0.11043222323208002\n\t}\n]",
+   "count": 184
+  },
+  {
+   "text": "🪡👁x🟆🜂🩃🣤🨹x🜴🜀📗🠧x🤬😐😄x🛮🏆📯x🍷x🜥😆🝳",
+   "count": 59
+  },
+  {
+   "text": "İééİ🜂🍁⣬é\t◲⛲İ⌨☾\téé  ǅß\n\n\n\n🕾İxé\n\nİcǅ`  ß  ǅ⤔\n\n😼🏂\n\n  \té\tß\t\n\néİİ\n\nǅﬁ💊é\n\néß  \n\nßß\tx-\téé⚟éß🥠\t\tv  ℹß\n\né\n\n\n\nß  🡗İﬁﬁ\n\nǅﬁﬁ  İ\t\n\n📊  ǅéǅ⏀ǅé  \n\n🎠\n\n",
+   "count": 144
+  },
+  {
+   "text": "   / even is a boolean function\n   even:{0=x!2}\n   even 1 2 3 4 5\n0 1 0 1 0\n \n   / filtering the even numbers\n   a@&even'a:1+!10\n2 4 6 8 10\n \n   / as a function\n   evens:{x@&even'x}\n   a:10?100\n45 5 79 77 44 15 83 88 33 99\n   evens a\n44 88\n",
+   "count": 140
+  },
+  {
+   "text": "Opaete oparaviki vae reta oimeko guinoi oputu vaëra. Jare oyerovia reve kami, ¡piaguive opututa, ovaë yave chupe ara. Jaeramiñoviko ara reta oiporu guinoi oputu vaëra vae, oyemboepita chupe.\nOpaete kianunga ñavo oime guinoi oiko vaëra iñemuña reta ndive. Guinoitavi teko rísa, temimonde, tembiu, o moa, jare oporopoano vae reta imaangareko. Oyemboritako i paraviki mbae opita vae, imbaerasi yave, ipuereveame yave, indechima yave jae oyemborita mbaesusere ou jupi vae.\n",
+   "count": 187
+  },
+  {
+   "text": "何人も、拷問又は残虐な、非人道的なもしくは屈辱的な取扱もしくは刑罰を受けることはない。\nすべての人は、いかなる場所においても、法の下において、人として認められる権利を有する。\nすべての人は、法の下において平等であり、また、いかなる差別もなしに法の平等な保護を受ける権利を有する。すべての人は、この宣言に違反するいかなる差別に対しても、また、そのような差別をそそのかすいかなる行為に対しても、平等な保護を受ける権利を有する。\nすべての人は、憲法又は法律によって与えられた基本的権利を侵害する行為に対し、権限を有する国内裁判所による効果的な救済を受ける権利を有する。\n何人も、ほしいままに逮捕、拘禁、又は追放されることはない。\nすべての人は、自己の権利及び義務並びに自己に対する刑事責任が決定されるに当たって、独立の公平な裁判所による公平な公開の審理を受けることについて完全に平等の権利を有する。\n犯罪の訴追を受けた者は、すべて、自己の弁護に必要なすべての保障を与えられた公開の裁判において法律に従って有罪の立証があるまでは、無罪と推定される権利を有する。\n何人も、実行の時に国内法又は国際法により犯罪を構成しなかった作為又は不作為のために有罪とされることはない。また、犯罪が行われた時に適用される刑罰より重い刑罰は課せられない。\n",
+   "count": 584
+  },
+  {
+   "text": "                    strnew = right(strold, 1) + left(strold, len(strold) - 1)\n                    lineedit1.settext(strnew)\n                    strold = strnew\n                    sleep(1)\n                 ok\n                 if rotate = false\n                    see \"str = \" + '\"' + strold + '\"' + nl\n                    strnew = right(strold, len(strold) - 1) + left(strold, 1)\n                    lineedit1.settext(strnew)\n                    strold = strnew\n                    sleep(1)\n                 ok\n        next\n        see nl \n \n",
+   "count": 133
+  },
+  {
+   "text": "-> same as above.\n \n \n",
+   "count": 9
+  },
+  {
+   "text": "|times|\ntimes := Bag new.\n1 to: 10 do: [:n| times add:\n   (Time millisecondsToRun: [3000 factorial])].\nTranscript show: times average asInteger.\n",
+   "count": 51
+  },
+  {
+   "text": "validISBN?: function [isbn][\n    currentCheck: to :integer to :string last isbn\n    isbn: map split chop replace isbn \"-\" \"\" => [to :integer]\n \n    s: 0\n    loop.with:'i isbn 'n [\n        if? even? i -> s: s + n\n        else -> s: s + 3*n\n    ]\n    checkDigit: 10 - s % 10\n    return currentCheck = checkDigit\n]\n \ntests: [\n    \"978-1734314502\" \"978-1734314509\"\n    \"978-1788399081\" \"978-1788399083\"\n]\n \nloop tests 'test [\n    print [test \"=>\" validISBN? test]\n]\n",
+   "count": 210
+  },
+  {
+   "text": "(de halve (N)\n   (/ N 2) )\n \n(de double (N)\n   (* N 2) )\n \n(de even? (N)\n   (not (bit? 1 N)) )\n \n(de ethiopian (X Y)\n   (let R 0\n      (while (>= X 1)\n         (or (even? X) (inc 'R Y))\n         (setq\n            X (halve X)\n            Y (double Y) ) )\n      R ) )\n",
+   "count": 109
+  },
+  {
+   "text": "Pe ntap ndo’ suo’i sa’ ndun nshié mún, lo’ te ngékét pua shu shi ghet ké shu shi rié, fú’ yié ka a ndi’ pô fubkèn túm te kèn ngu ke’ ken njú mansié. Mo’ nké shi pe mbi’ ndo’ njap nsuo sa’ ndun mún à rét nja’ yúe a pembi té mbe yi mgbète te fú’ fubkén na.\nNshié mún yié ndi’ yúe pe ndo’ mbe mbib’i ne yi lo’ nyî te nga wumeshi yi’she, pa nshut nda’i, li’ shu’i ké lérewa shi, shi ṅúshe ntu nté mi pua ngétne nga shi yi mbôkét. Nshié mún nyütu ghét mféé kêt túe’she lo’ puo kén meshi’ yi nkü yúe pe mbe mbib’i ké yi mbe ṅùshe’ i ne.\n",
+   "count": 238
+  },
+  {
+   "text": "startswith: {:[0<#p:_ss[x;y];~*p;0]}\nendswith: {0=(-#y)+(#x)-*_ss[x;y]}\ncontains: {0<#_ss[x;y]}\n",
+   "count": 45
+  },
+  {
+   "text": "EndProcedure\n \nIf OpenConsole() \n  PrintN(\"String comparison - \")\n  a$=\"Abcd\" : b$=\"abcd\"\n  PrintN(#CRLF$+\"- case sensitive:\")\n  Compare(a$,b$)\n  PrintN(#CRLF$+\"- case insensitive:\")  \n  Compare(a$,b$,0)\n  a$=\"1241\" : b$=\"222\"\n  PrintN(#CRLF$+\"- num-string; lexically compared:\")\n  Compare(a$,b$)\n  PrintN(#CRLF$+\"- num-string; numerically compared:\")\n  Compare(a$,b$,1,1)  \n  Input()\nEndIf\n",
+   "count": 159
+  },
+  {
+   "text": " \nobject lines = Stdio.File(\"input.txt\")->line_iterator();\nobject out = Stdio.File(\"output.txt\", \"cw\");\nforeach(lines; int line_number; string line)\n    out->write(line + \"\\n\");\n \n",
+   "count": 49
+  },
+  {
+   "text": "func farey_count(n) {   # A005728\n    1 + sum(1..n, {|k| euler_phi(k) })\n}\n \nfunc farey(n) {\n \n    var seq = [0]\n    var (a,b,c,d) = (0,1,1,n)\n \n    while (c <= n) {\n        var k = (n+b)//d\n        (a,b,c,d) = (c, d, k*c - a, k*d - b)\n        seq << a/b\n    }\n \n    return seq\n}\n \nsay \"Farey sequence for order 1 through 11 (inclusive):\"\nfor n in (1..11) {\n    say(\"F(%2d): %s\" % (n, farey(n).map{.as_frac}.join(\" \")))\n}\n \nsay \"\\nNumber of fractions in the Farey sequence:\"\nfor n in (100..1000 -> by(100)) {\n    say (\"F(%4d) =%7d\" % (n, farey_count(n)))\n}\n",
+   "count": 246
+  },
+  {
+   "text": "Naran Nasaun ida, klibur ruma e naran ema ida, la bele hola lia hirak foin fo tada iha Deklarasaun ne’e atu hodi halakon ema seluk nia direitu, nia liberdade.\n",
+   "count": 50
+  },
+  {
+   "text": "Ding bansang kabilang karing Bansang Misasanmetung megaku lang misaup-saupan la king nanu mang paralan bang in karapatan at kalayan ding sablang tau keting yatu proteksyunan da at igalang.\nUling maulagang abalu ra ding sabla ding karapatan at kalayang iti bang pilming matupad ing pangakung iti.\nAt muna kaulagang aintindian da ring sablang bansa nung nanu la ring karapatan at kalayan a reti bang atuparan la ding pangaku.\n",
+   "count": 124
+  },
+  {
+   "text": "  67:?x           {x has global scope}\n& 77:?y           { y has global scope }\n& ( double\n  =\n    .  !y+!y      { y refers to the variable declared in myFunc, which\n                    shadows the global variable with the same name }\n  )\n& ( myFunc\n  =   y,z         { y and z have dynamic scope. z is never used. }\n    .   !arg:?y   { arg is dynamically scoped }\n      & double$\n      & !x+!y\n  )\n",
+   "count": 122
+  },
+  {
+   "text": " \nMOV R1,#0x04000000\nMOV R0,#0x403\nSTR r0,[r1]      ;the game boy advance is little-endian, so I would have expected this not to work. However it does indeed work.\n \n",
+   "count": 63
+  },
+  {
+   "text": "program pick_random\n  implicit none\n \n  integer :: i\n  integer :: a(10) = (/ (i, i = 1, 10) /)\n  real :: r\n \n  call random_seed\n  call random_number(r)\n  write(*,*) a(int(r*size(a)) + 1)\nend program\n",
+   "count": 76
+  },
+  {
+   "text": "/* terminal_control_unicode_output.wren */\n \nclass C {\n    foreign static isUnicodeSupported\n}\n \nif (C.isUnicodeSupported) {\n    System.print(\"Unicode is supported on this terminal and U+25B3 is : \\u25b3\")\n} else {\n    System.print(\"Unicode is not supported on this terminal.\")\n}\n",
+   "count": 82
+  },
+  {
+   "text": "Na nsalulu ya baluve mpe kuyangalala na mambu ya kimpwanza ya yandi, konso muntu fwana kuzaba bandilu yina musiku mpe mambu ya kimpwanza tulaka samu na kuzitisa baluve ya bantu ya nkaka. Ya kele samu na kulungisa nyonso yina fwana kuvwanda nkadulu ya bantu , ludedomo na kati ya yinsi mpe mbote ya bantu nyonso na kati ya yinsi ya kimpwanza.\nBaluve yayi mpe mambu ya kimpwanza lenda kusalama kaka na kulanda mutindu kele mambu yina kikunku ya ONU zengilaka yawu.\nAta dyambu mosi na kati ya Luzabusu yayi ya Baluve lenda kuvwanda, samu na yinsi mosi, kimvuka ya bantu to muntu mosi, mutindu nzila ya kusala dyambu yina ke sosa na kuzitisa ve baluve mpe mambu ya kimpwanza yina kele ya kusonama awa.\n",
+   "count": 225
+  },
+  {
+   "text": "when :: Monad m => m () -> Bool -> m ()\naction `when` condition = if condition then action else return ()\n \n",
+   "count": 27
+  },
+  {
+   "text": "Fakin dy vel pobbleyn ny Ashoonyn Unnaneyssit er hickyraghey reesht ’sy Charter shoh nyn dreishteil ayns cairyssyn undinagh deiney, ayns ooashley as feeuid y phersoon, as ayns cairyssyn corrym deiney as mraane as er chiarail dy chur foays yn cheshaght as bioys share ayns seyrsnys smoo er nyn doshiaght,\nFakin dy vel Stateyn Oltey er yialdyn dy jean ad streeu, marish ny Ashoonyn Unnaneyssit, ooashley as tastey da cairyssyn deiney y chur er nyn doshiaght,\nFakin dy vel toiggal cadjin jeh ny cairyssyn as ny seyrsnyssyn shoh jeh’n scansh smoo erbee ry-hoi yn gioal shoh y chooilleeney dy slane;\n",
+   "count": 217
+  },
+  {
+   "text": "Chito agetogol kotinyey imanda nepo ripet agopo ngalek, chigasir, chegaipuat ono chigoisior.\nImanda gorip agetogol ngotutik chepo emet kosipey key kinemwoey ngotutichon.\nChito agetogol konyolu kotoret piik omu nono neimuchey koip tesetapkey nenyinet ag otepto nesingoy.\nNyolji chii agetogol kosip ngotutik chesirotin en emet agopo ripetap oteptanyin, ag gongit.\nKatiagani ag imanda komogipoisey en oret nimoisipiy ngotutikap kipange nepo emotinik.\nMomiten ngalek alag togol en ngotutichu che iyonjin emet, piik ono chito agetogol koput ngotutichu ono maget neputey ngotutichu.\n",
+   "count": 214
+  },
+  {
+   "text": "Произвольно ӿат нар̌тиӊ нарухтиӊ йа гражданство асқам рерта адяй йа гражданство ракз-ракзид право зиӊ асқам рерд.\nАзмытьғун ӿара р̌аӊӷғун ӿара пʼуткнр̌ыӊырӊ ӿаӊы расаух лу, национальностюх лу, религияух лу ӿытынд ӻавӻарт вавна, пʼерӿ-эрӿ чу айна ӿаӊ право ивдғун. Ин вавиныӊы салӻаӊ право ивта адяй вавт ӿумта ӿара пʼӊафқ-ӊафқ выкзийныта ӿаӊы ан салӻаӊ право ивта ӿадғун.\nАйф вавиныкғун куғытн тʼоӿтт ӿаӻай нан вавнд заключайдғун.\nЧу – пʼӿоӻара, сикак маӊра ӿаӊ общество ячейка ӿад, обществоух ӿара, государствоух ӿара ӻонинд ивд.\nНар̌ӿаӊгиск пʼинығун пыр̌к ивра, энадғунғин вара вавр̌ ивра ӿаӊ право ивд.\nНар̌тиӊ произвольно ӿагур̌ пʼиныкғун быкзи рерд.\n",
+   "count": 581
+  },
+  {
+   "text": "Buri mukozi naateekwa kuhebwa empeera erikwiingana nomurimo gwe, erikumubaasisa kweeyemerezaho kurungi we namaka ge.\nKyaaba nikyetengyesa empeera yomuntu neebasa kwongyezibwaho, kuri naagubwaho obuzibu obu atetekateekire.\nBuri muntu hatariho kushoroora, aine obugabe kushahurwa okurugiirira aha mirimo eyi arikukora.\nBuri muntu, naatekwa kuhumuraho ashemereire akore eshaaha ezigyerekirwe buri Izooba kandi atuungye bobwire obu yaahumuzibwaho buri mwaka kwonka obwo empeera yebiro ebiahumwireho arikugituunga.\n",
+   "count": 180
+  },
+  {
+   "text": "procedure main()\nwrite(readline(\"foo.bar.txt\",7)|\"failed\")\nend\n \nprocedure readline(f,n)                         # return n'th line of file f\nf := open(\\f,\"r\") | fail                        # open file\nevery  i := n & line := |read(f) \\ n do i -:= 1  #  <== here\nclose(f)\nif i = 0 then return line\nend\n",
+   "count": 93
+  },
+  {
+   "text": "void local fn DoIt\n  CFArrayRef array = @[@\"Alpha\",@\"Bravo\",@\"Charlie\"]\n  print array\n \n  array = fn ArrayByAddingObjectsFromArray( array, @[@\"Delta\",@\"Echo\",@\"FutureBasic\"] )\n  print array\nend fn\n \nwindow 1\n \nfn DoIt\n \nHandleEvents\n",
+   "count": 86
+  },
+  {
+   "text": "ہر شخص تے وسیب دیاں ذمہ داریاں دی ہوندن جیندے وچ اوندی شخصیت کوں ازادی نال مکمل ترقی ملدی ہے ۔\nآپڻی ازادیاں تے حقوق کنوں فائدہ چاوڻ وچ ہر شخص انہاں پابندیاں دا خیال رکھیسی جھیڑیاں ٻیاں دے حقوق تے ازادیاں دے بچئو کیتے اتے جمہوری وسیب وچ اخلاق تے لوکاں دے امن تے بھلائی دے تقاضے پورے کرڻ کیتے قنون دی طر فوں لائے ویدن ۔\nایہہ حقوق تے ازادیاں کہیں صورت وچ اقوام متحدہ دے مقصداں تے اصولاں دے خلاف نئیں ڋتیاں ونج سڱدیاں ۔\nایں اعلان دی کہیں ڱالھ دا ایہہ مطلب نئیں ڱدا ونج سڱدا جو ایندے ذریعے کہیں ملک، گروپ یا شخص کوں ڋو جھیاں دے حقوق تے ازادیاں دی خلاف ورزی کرڻ کیتے کوئی کار گزاری دا حق حاصل تھی ڱے ۔\n",
+   "count": 470
+  },
+  {
+   "text": "                P1     =Co( L)  *Re( B)\n                P2     =Co( LS) *Im( B)\n                P3     =Co( LS) *Re( B)\n                P4     =Co( L)  *Im( B)\n                Re( A) =F1 +P1 -P2\n                Im( A) =F2 +P3 +P4\n                Re( B) =F1 -P1 +P2\n                Im( B) =F2 -P3 -P4\n            next I\n        next Z\n        T =T +T\n    next stage\n \n    print \"   M          Re( M)       Im( M)\"\n \n    for M =0 to R\n        if abs( Re( M)) <10^-5 then Re( M) =0\n        if abs( Im( M)) <10^-5 then Im( M) =0\n        print \"   \"; M, Re( M), Im( M)\n    next M\n \n    end\n \n \n    wait\n \n    function div( a, b)\n        div =int( a /b)\n    end function\n \n    end\n \n",
+   "count": 267
+  },
+  {
+   "text": "$limit = 20\n$data  = @(\"3 Fizz\",\"5 Buzz\",\"7 Baxx\")\n\t#An array with whitespace as the delimiter\n\t#Between the factor and the word\n \nfor ($i = 1;$i -le $limit;$i++){\n\t$outP = \"\"\n\tforeach ($x in $data){\n\t\t$data_split = $x -split \" \"\t#Split the \"<factor> <word>\"\n\t\tif (($i % $data_split[0]) -eq 0){\n\t\t\t$outP += $data_split[1]\t#Append the <word> to outP\n\t\t}\n\t}\n\tif(!$outP){\t#Is outP equal to NUL?\n\t\tWrite-HoSt $i\n\t} else {\n\t\tWrite-HoSt $outP\n\t}\n}\n",
+   "count": 182
+  },
+  {
+   "text": "Mo' yu'tacdye' jam ra'jedye' chutyin anic jäm mo' yu'-tacdye' paj qui' me' tupuj jäm baja cäts yirityityij mun'tyi' tsun.\nRäj oij jac räj yocsi bäyedye' in mi jam yirity mun'tyi' tupuj ji'motsja' oij yutacdye peyejas quin, jemoñe' ji' chiqueyacseja yoctyi' in.\n",
+   "count": 114
+  },
+  {
+   "text": "اپنی آزادیوں اور حقوق سے فائدہ اٹھانے میں ہر شخص صرف ایسی حدود کا پابند ہو گا جو دوسروں کی آزادیوں اور حقوق کو تسلیم کرانے اور ان کا احترام کرانے کی غرض سے یا جمہوری نظام میں اخلاق، امن عامّہ اور عام فلاح و بہبود کے مناسب لوازمات کو پورا کرنے کے لئے قانون کی طرف سے عائد کئے گئے ہیں۔\nیہ حقوق اور آزادیاں کسی حالت میں بھی اقوامِ متحدہ کے مقاصد اور اصول کے خلاف عمل میں نہیں لائی جا سکتیں۔\nاس اعلان کی کسی چیز سے کوئی ایسی بات مراد نہیں لی جا سکتی جس سے کسی ملک، گروہ یا شخص کو کسی ایسی سرگرمیوں میں مصروف ہونے یا کسی ایسے کام کو انجام دینے کا حق پیدا ہو جس کا منشا ان حقوق اور آزادیوں کی تخریب ہو جو یہاں پیش کی گئی ہیں۔\n",
+   "count": 339
+  },
+  {
+   "text": "                if (tClient.Available > 0)\n                {\n                    // Resend\n                    byte pByte = (byte)tClient.GetStream().ReadByte();\n                    Console.WriteLine(\"Client (Thread: {0}): Data {1}\", Thread.CurrentThread.ManagedThreadId, pByte);\n                    tClient.GetStream().WriteByte(pByte);\n                }\n \n                // Pause\n                Thread.Sleep(100);\n            } while (true);\n        }\n    }\n}\n",
+   "count": 117
+  },
+  {
+   "text": "F perf(n)\n   V sum = 0\n   L(i) 1 .< n\n      I n % i == 0\n         sum += i\n   R sum == n\n \nL(i) 1..10000\n   I perf(i)\n      print(i, end' ‘ ’)\n",
+   "count": 70
+  },
+  {
+   "text": "  var nLe, nGt: Integer;\n \n  comb(length(all), length(tr),\n    procedure(c: TArray<Integer>)\n    begin\n      if sd(c) > sdObs then\n        inc(nGt)\n      else\n        inc(nle);\n    end);\n \n  // print results as percentage\n  var pc := 100 / (nLe + nGt);\n  writeln(format('differences <= observed: %f%%', [nle * pc]));\n  writeln(format('differences  > observed: %f%%', [ngt * pc]));\n \n  {$IFNDEF UNIX} readln; {$ENDIF}\nend.\n",
+   "count": 145
+  },
+  {
+   "text": "> (define (my-multiply a b) (* a b))\n(lambda (a b) (* a b))\n> (define (call-it f x y) (f x y))\n(lambda (f x y) (f x y))\n> (call-it my-multiply 2 3)\n6\n \n",
+   "count": 69
+  },
+  {
+   "text": "compare <- function(a, b)\n{\n  cat(paste(a, \"is of type\", class(a), \"and\", b, \"is of type\", class(b), \"\\n\"))\n \n  if (a < b) cat(paste(a, \"is strictly less than\", b, \"\\n\"))\n  if (a <= b) cat(paste(a, \"is less than or equal to\", b, \"\\n\"))\n  if (a > b) cat(paste(a, \"is strictly greater than\", b, \"\\n\"))\n  if (a >= b) cat(paste(a, \"is greater than or equal to\", b, \"\\n\"))\n  if (a == b) cat(paste(a, \"is equal to\", b, \"\\n\"))\n  if (a != b) cat(paste(a, \"is not equal to\", b, \"\\n\"))\n \n  invisible()\n}\n \ncompare('YUP', 'YUP')\ncompare('BALL', 'BELL')\ncompare('24', '123')\ncompare(24, 123)\ncompare(5.0, 5)\n",
+   "count": 235
+  },
+  {
+   "text": "እያንዳንዱ፡ሰው፡በዚህ፡ውሳን፡ውስጥ፡የተዘረዘሩት፡መብቶችና፡ነጻነቶች፡በሙሉ፡በተግባር፡እንዲውሉ፡ለሚደረግባቸው፡የኀብረሰብና፡የኢንተርናሽናል፡ሥርዓት፡የመጠቀም፡መብት፡አለው።\nእያንዳንዱ፡ሰው፡የራሱ፡ነጻነትና፡ሙሉ፡መሻሻል፡በሚያገኝበት፡ኀብረሰብ፡ውስጥ፡የሚፈጽማቸው፡ግዴታዎች፡ይኖሩበታል።\nእያንዳንዱ፡ሰው፡በመብቶቹ፡በነጻነቶቹ፡በሚጠቀምበት፡ጊዜ፡የሚታገደው፡የሌሎችን፡መብቶችና፡ነጻነቶች፡በሚገባ፡ለማሰከበር፡ብቻ፡በተደነገጉ፡ሕጎችና፡የግብረ፡ገብነትን፡የጠቅላላውን፡ሕዝብ፡ፀጥታና፡ደህንነት፡በዴሞክራቲክ፡ማኀበራዊ፡ኑሮ፡ትክክለኛ፡የሆነው፡ተፈላጊ፡ጉዳይ፡ለማርካት፡በተወሰነው፡ብቻ፡ነው።\nእነዚህ፡መብቶችና፡ነፃነቶች፡በማንኛውም፡ሁኔታ፡የተባበሩት፡መንግሥታት፡ድርጅት፡መሰረት፡ዓላማዎች፡ተቃራኒ፡በሆነ፡መንገድ፡ሊፈጸሙ፡አይገባቸውም።\nበዚህ፡ውሳኔ፡ከላይ፡የተዘረዘረው፡ሁሉ፡በዚሁ፡ውስጥ፡የተጠቀሱትን፡ማናቸውም፡መብቶች፡ወይም፡ነጻነቶች፡ለማበላሸት፡በታሰበ፡ማንኛውም፡ዓይነት፡ተግባር፡ለማዋል፡ወይም፡ድርጊትን፡ለመፈጸም፡ለማንኛውም፡መንግሥት፡ወይም፡ድርጅት፡ወይም፡ሰው፡የተባሉ፡አይተረጎሙም።\n",
+   "count": 1171
+  },
+  {
+   "text": "01.10 A \"HOW MANY\",M\n01.20 S B(0)=1;S B(1)=0\n01.30 F Z=1,M;D 4;D 2\n01.40 Q\n \n02.10 S X=0;S Y=0\n02.15 I (B(X)),2.5\n02.17 S CN=0\n02.20 S CN=CN+1\n02.25 S X=X+1\n02.30 I (FABS(B(X)-B(X-1))),2.2\n02.35 S C(Y)=CN;S C(Y+1)=B(X-1)\n02.40 S Y=Y+2\n02.45 G 2.15\n02.50 S C(Y)=0\n02.55 F X=0,Y;S B(X)=C(X)\n \n03.10 I (A-9)3.2;T \"9\";R\n03.20 I (A-8)3.3;T \"8\";R\n03.30 I (A-7)3.4;T \"7\";R\n03.40 I (A-6)3.5;T \"6\";R\n03.50 I (A-5)3.6;T \"5\";R\n03.60 I (A-4)3.7;T \"4\";R\n03.70 I (A-3)3.8;T \"3\";R\n03.80 I (A-2)3.9;T \"2\";R\n03.90 T \"1\"\n \n04.10 S X=0\n04.20 S A=B(X)\n04.30 I (-A)4.4;T !;R\n04.40 D 3\n04.50 S X=X+1\n04.60 G 4.2\n",
+   "count": 468
+  },
+  {
+   "text": "> (Calendar.dwim_time(\"March 7 2009 7:30pm EST\")+Calendar.Hour()*12)->set_timezone(\"CET\")->format_ext_time();\nResult: \"Saturday, 7 March 2009 12:30:00\"\n",
+   "count": 62
+  },
+  {
+   "text": "Moto nyɔ́nsɔ azalí na likokí ya kobíkela na ndéngé elongobani mpɔ̂ ’te azwa bokɔ́lɔ́ngɔ́nú, bozala malámu ya yě mpé ya libóta na yě epúsí na makambo etálí kolíya, koláta, kovánda, kosálisa nzóto mpé kosungama na ndéngé esengélí ; yě azalí na likokí ya kosálisama na ntángo ya bosɔmɛ́lɛ, bokɔnɔ, bosɛ́lɛ́, bozéngé, bobangé tǒ na ntángo mosúsu yě akozánga mosólo ya kobíkela na sima ya makambo esálámí na bolinga na yě tɛ́.\nBomamá mpé bomwǎna ezalí na likokí ya kosungama na ndéngé elongobani. Mwǎna nyɔ́nsɔ abótama káti ya makwéla tǒ na libándá asengélí kobátelama tǒ ndéngé mɔ̌kɔ́.\n",
+   "count": 271
+  },
+  {
+   "text": "le debie ko mɔɔ yelie yedo nu yemaa awie biala nee Maanle biala, amaa awie biala nee Eku biala mɔɔ dahuu kɛva. Nolobɔlɛ ɛhye kɛzie ye adwenle nu la abɔ mɔdenle alua ngilehilelɛ nee ndetelɛ zo yeamaa nidi ara adenlenyianlɛ nee atianwolilɛ ɛhye mɔ anwo, na eza yealua ngɔzo ndenle zo, Maanle nee Maanle Maanle zo, yeaboa yeamaa menli mɔɔ wɔ Maanle Maanle mɔɔ wɔ Eku ne anu nee Maanle Maanle mɔɔ Eku ne sie bɛ la anu amra amuala alie ado nu kpalɛ na bɛali zolɛ kpalɛ.\nMenli muala di bɛ ti anwo na eza noko bɛsɛ wɔ dibilɛ nee adenlenyianlɛ nu. Bɛlɛ ndwenlenwo nee adwenle, yemɔti ɔwɔ kɛ bɛkile adiemayɛlɛ bɛmaa bɛ nwo ngoko.\n",
+   "count": 272
+  },
+  {
+   "text": "Seb-kãngã gomd ba a ye pa tõe n wa rɩk t’a yɩ wa tẽng a ye, goosneer a ye bɩ ned a ye yell ye, t’a soab tik rẽnda n dat n maan bũmb sẽn na yɩl n sãam yel-segdɩ la maan-m-yam nins sebrã sẽn gomd-b rãmb yellã ye.\n",
+   "count": 105
+  },
+  {
+   "text": "𑄃𑄟𑄧𑄚𑄧𑄢𑄴 𑄥𑄙𑄩𑄚𑄧𑄖 𑄃𑄳𑄃 𑄃𑄇𑄴𑄇𑄥𑄁𑄃𑄚𑄩 𑄛𑄬𑄝𑄢𑄴 𑄥𑄧𑄣𑄖𑄴 𑄝𑄬𑄇𑄴𑄅𑄚𑄧𑄢𑄬 𑄝𑄚 𑄃𑄰 𑄙𑄧𑄢𑄧𑄚𑄧𑄢𑄴 𑄥𑄩𑄟𑄚𑄧𑄇𑄪𑄚𑄬𑄠𑄬 𑄘𑄢 𑄚𑄨𑄠𑄧𑄚𑄴𑄖𑄳𑄢𑄨𑄖𑄧 𑄦𑄧𑄝𑄧 𑄡 𑄃𑄧𑄚𑄳𑄠𑄧𑄘𑄬𑄢𑄴 𑄃𑄇𑄴𑄇𑄥𑄁 𑄃𑄮 𑄥𑄙𑄩𑄚𑄧𑄖𑄃𑄚𑄩 𑄈𑄟𑄇𑄭𑄭 𑄉𑄧𑄢𑄚 𑄃𑄳𑄃 𑄃𑄬𑄇𑄳𑄦𑄴𑄚𑄴 𑄉𑄧𑄚𑄧𑄖𑄚𑄴𑄖𑄳𑄢𑄨𑄇𑄴 𑄥𑄧𑄟𑄌𑄴𑄝𑄳𑄠𑄝𑄧𑄌𑄴𑄗𑄠𑄴 𑄃𑄇𑄧𑄧𑄣𑄴, 𑄉𑄧𑄚𑄧𑄥𑄳𑄢𑄨𑄁𑄈𑄧𑄣 𑄃𑄮 𑄃𑄧𑄎𑄬𑄃𑄧𑄌𑄴 𑄅𑄪𑄛𑄮𑄇𑄢𑄧𑄖𑄳𑄠𑄬 𑄉𑄧𑄟𑄧𑄖𑄳𑄠𑄬 𑄘𑄧𑄢𑄴𑄇𑄢𑄴 𑄛𑄪𑄢𑄬𑄝𑄖𑄳𑄠𑄬 𑄃𑄃𑄨𑄚𑄴 𑄘𑄢 𑄒𑄨𑄇𑄴 𑄦𑄧𑄝𑄧𑅁\n𑄎𑄖𑄨𑄥𑄧𑄁𑄊𑄧𑄢𑄴 𑄖𑄇𑄴 𑄃𑄮 𑄟𑄫𑄣𑄴𑄚𑄩𑄖𑄨𑄢𑄴 𑄝𑄬𑄋𑄇𑄧𑄋 𑄇𑄧𑄚𑄧 𑄇𑄨𑄌𑄴𑄅𑄣𑄰𑄱 𑄃𑄬 𑄃𑄇𑄴𑄇𑄥𑄁 𑄃𑄮 𑄥𑄙𑄩𑄚𑄧𑄖𑄃𑄚𑄩 𑄛𑄳𑄦 𑄚𑄧 𑄡𑄬𑄝𑄧𑅁\n𑄇𑄧𑄚𑄧 𑄢𑄬𑄎𑄳𑄠𑄧, 𑄉𑄪𑄖𑄨𑄨 𑄝 𑄟𑄚𑄪𑄌𑄴 𑄃𑄬 𑄓𑄨𑄇𑄴𑄣𑄢𑄬𑄥𑄧𑄚𑄧𑄢𑄴 𑄇𑄧𑄚𑄧 𑄇𑄨𑄌𑄴𑄅 𑄃𑄬𑄟𑄧𑄚𑄴𑄞𑄝𑄬 𑄝𑄳𑄠𑄈𑄳𑄠 𑄉𑄧𑄢𑄨 𑄚𑄧 𑄛𑄢𑄨𑄝𑄇𑄴, 𑄡𑄢𑄴 𑄝𑄧𑄣𑄬 𑄖𑄢 𑄃𑄬𑄭 𑄓𑄨𑄇𑄴𑄣𑄢𑄬𑄥𑄧𑄚𑄬 𑄘𑄬𑄉𑄬𑄠𑄬 𑄃𑄇𑄴𑄇𑄥𑄁 𑄃𑄮 𑄥𑄙𑄩𑄚𑄧𑄖𑄃𑄚𑄩 𑄥𑄢𑄚𑄘 𑄉𑄧𑄢𑄨 𑄛𑄢𑄧𑄚𑄴 𑄃𑄬𑄟𑄧𑄚𑄴 𑄇𑄧𑄚𑄧 𑄇𑄟𑄬 𑄣𑄨𑄛𑄴𑄖𑄧 𑄦𑄰𑄠𑄴 𑄛𑄢𑄬 𑄇𑄨𑄁𑄝 𑄥𑄬𑄙𑄮𑄇𑄳𑄠𑄬 𑄇𑄧𑄚𑄧 𑄇𑄟𑄴 𑄃𑄬𑄏𑄣𑄴𑄘𑄬𑄚 𑄉𑄧𑄢𑄨 𑄛𑄢𑄬𑅁\n",
+   "count": 2109
+  },
+  {
+   "text": "int  N, X;\nreal M, Thresh, MC;\n[Text(0, \"First 20 magic constants:^M^J\");\nfor N:= 3 to 20+3-1 do\n    [IntOut(0, (N*N*N+N)/2);  ChOut(0, ^ )];\nCrLf(0);\nText(0, \"1000th magic constant: \");\nN:= 1000+3-1;\nIntOut(0, (N*N*N+N)/2);\nCrLf(0);\nText(0, \"Smallest order magic square with a constant greater than:^M^J\");\nThresh:= 10.;\nM:= 3.;\nFormat(1, 0);\nfor X:= 1 to 10 do\n    [repeat MC:= (M*M*M+M)/2.;\n            M:= M+1.;\n    until   MC > Thresh;\n    Text(0, \"10^^\");\n    if X < 10 then ChOut(0, ^0);\n    IntOut(0, X);\n    Text(0, \": \");\n    RlOut(0, M-1.);\n    CrLf(0);\n    Thresh:= Thresh*10.;\n    ];\n]\n",
+   "count": 272
+  },
+  {
+   "text": "Каждый человек имеет право на свободу мирных собраний и ассоциаций.\nНикто не может быть принуждаем вступать в какую-либо ассоциацию.\nКаждый человек имеет право принимать участие в управлении своей страной непосредственно или через посредство свободно избранных представителей.\nКаждый человек имеет право равного доступа к государственной службе в своей стране.\nВоля народа должна быть основой власти правительства; эта воля должна находить себе выражение в периодических и нефальсифицированных выборах, которые должны проводиться при всеобщем и равном избирательном праве путем тайного голосования или же посредством других равнозначных форм, обеспечивающих свободу голосования.\n",
+   "count": 407
+  },
+  {
+   "text": "(println\n   (by\n      format\n      sort\n      (range 1 13) ) )\n",
+   "count": 25
+  },
+  {
+   "text": "    '[ 15 15 _ randomly-filled-matrix can-percolate? ] replicate\n    [ t = ] count 500 / ;\n \n: site-percolation ( -- )\n    show-sample nl \"Running 500 trials at each porosity:\" print\n    10 [1,b] [\n        10 / dup percolation-rate \"p = %.1f: %.3f\\n\" printf\n    ] each ;\n \nMAIN: site-percolation\n",
+   "count": 113
+  },
+  {
+   "text": "Pillapis atiyniyoj, ima sajra kaymantapis jark'arikunanpaj, uj sindicatupi apuntachikuspa chay sindicatumanta ujnin kananpaj, chayri munaspa pay kikin uj sindicatuta rikhurichispa.\nMana ujllachu, tukuy atiyniyoj kanku samarinkunankupaj samarikusaspataj munaynillanku ruasqa kunanpaj, ña ruanasninta junt'aykuspaqa pillapis atiyniyoj mana munanpaj, ruasqan patapi asllawan unayta llank'anallantapuni munanqanku chayqa. Watapi uj kuti samarikuy mit'a kanqapuni, chay samarikuy mit'amantapis llank'aj runa qolqeta jap'inapuri tian, samarikuy mit'atinta lllank'anmanpis karqa jina.\n",
+   "count": 205
+  },
+  {
+   "text": "mersenne_fac(p) := block([m: 2^p - 1, k: 1],\n   while mod(m, 2 * k * p + 1) # 0 do k: k + 1,\n   2 * k * p + 1\n)$\n \nmersenne_fac(929);\n/* 13007 */\n",
+   "count": 81
+  },
+  {
+   "text": " \nfunc g(a: int, b: int, f: func(int,int): int): int\n{\n    return f(a, b);\n}\n \nimport morfa.base;\n \nfunc main(): void\n{\n    println(\"Add: \", g(2, 3, func(a: int, b: int) { return a + b; }));\n    println(\"Multiply: \", g(2, 3, func(a: int, b: int) { return a * b; }));\n}\n \n",
+   "count": 109
+  },
+  {
+   "text": "procedure main()\nwrite(\"Non-decimal radices/Output\")\nevery i := 255 | 2 | 5 | 16 do {\n   printf(\"%%d = %d\\n\",i) # integer format\n   printf(\"%%x = %x\\n\",i) # hex format\n   printf(\"%%o = %o\\n\",i) # octal format\n   printf(\"%%s = %s\\n\",i) # string format\n   printf(\"%%i = %i\\n\",i) # image format\n   }\nend\n",
+   "count": 119
+  },
+  {
+   "text": "Considerèd che i popli dli Nazioun Unidi ià ribadì tu Statut la su foida ti dirét umèn fondamentil, tla dignità e te valour dla persouna umèna, tl'uguaglienza di dirét dl'om e dla dona, e i à decis da lavurè prì e' prugrès suciél e prì un migliour tenour ad vita t'na libertà piò granda;\nConsiderèd che i Stèd dli Nazioun Unidi i s'è impegné a lutè, sla colaborazioun dli Nazioun Unidi stèsi, prì u rispèt e l'oservènza universèla di dirét umèn e dli libertà fondamentèli;\nConsiderèd che una concezioun unitèria at stì dirét e at stà libertà la è fondamentèla prì la completa realizazioun at tot stì impégn;\nL'ASEMBLEA GENERELA\nla proclama\n",
+   "count": 238
+  },
+  {
+   "text": "danne go Ovttastuvvon Naššuvnnaid álbmogat lihtu bokte ođđasis duođaštit sin oskkuset olbmo vuođđovuoigatvuođaide, olmmošoktagasa árvui ja mávssolašvuhtii, olmmáiolbmo ja nissonolbmo dássásaš vuoigatvuođaide, ja leat soahpan ovddidit sosiálalaš ovdáneami ja buorránaddit eallineavttuid stuorit friddjavuođa siste,\ndanne go miellahttostádat leat geatnegahttán iežaset, Ovttastuvvon Náššuvnllaiguin ovttasbarggadettiin, váfistit olmmošvuoigatvuođaid oppalaš gudnejahttojumi ja doahttaleami,\ndanne go dáid vuoigatvuođaid ja friddjavuođaid oktasaš ipmárdusas lea stuorimus mávssolašvuohta dan fertemuša duohtandahkamis,\nde danne\nOAIVEČOAHKKIN\ndákko bokte almmuha\n",
+   "count": 285
+  },
+  {
+   "text": "package main\n \nimport (\n    \"fmt\"\n    \"log\"\n    \"os/exec\"\n    \"time\"\n)\n \nfunc main() {\n    // query supported display modes\n    out, err := exec.Command(\"xrandr\", \"-q\").Output()\n    if err != nil {\n        log.Fatal(err)\n    }\n    fmt.Println(string(out))\n    time.Sleep(3 * time.Second)\n \n    // change display mode to 1024x768 say (no text output)\n    err = exec.Command(\"xrandr\", \"-s\", \"1024x768\").Run()\n    if err != nil {\n        log.Fatal(err)\n    }\n    time.Sleep(3 * time.Second)\n \n    // change it back again to 1366x768 (or whatever is optimal for your system)\n    err = exec.Command(\"xrandr\", \"-s\", \"1366x768\").Run()\n    if err != nil {\n        log.Fatal(err)\n    }\n}\n",
+   "count": 220
+  },
+  {
+   "text": "(doseq [[i q] (map-indexed vector calc-pi)]\n  (when (= (mod i 40) 0)\n    (println))\n  (print q))\n \n",
+   "count": 42
+  },
+  {
+   "text": "Keeneen vun de Artikels, de in düsse Verklaren fastleggt worrn sünd, dröff so utleggt warrn, wat se för een Staat, een Koppel Lüüd orrer een Persoon jichtenseen Recht begrünnt, wat to doon orrer wat to maken, wat daarup ruut lööpt, de Rechten un Frieheiten ut düsse Verklaren bikant to smieten.\n",
+   "count": 106
+  },
+  {
+   "text": "Wawayuq byuda warmikunapaq y waktsa wamrakunapaq nasyunninchaw gubyirnupa liyninkuna kanman wanayanqanmannaw yanapananpaq. Lihitimu wamra kaptin u mana lihitimu wamra kaptinpis llapan wamrakunapapis dirichunkuna iwalmi kanman.\nMayqan runakunapapis dirichunmi kanman istudyayananpaq. Y istudyuqa dimbaldillam kanman asta primaryata ushyanqanyaq. Y llapan wamrakuna primaryata istudyayananpaqqa ubligaturyum kanan. Sinuuqa multadum kanman. Ima prufisyunpaq istudyayananpaqqa llapan runakunapapis iwalmi dirichun kanman. Y sigundaryachaw u unibirsidachaw istudyuqa mayqan runapaqpis sigun yachaynin kanqanmannawmj kanman.\n",
+   "count": 213
+  },
+  {
+   "text": "NHYIAMU KƐSE NO YI ADASA NDZINOA HO DAWURBƆ no kyerɛ dɛ: ɔno nye nhwhɛdodze tsitsir a ɔwɔ hɔ ma nyimpa na aman nyina, ama ankorankor biara na nyimpa kuw biara, sɛ wɔdze dɛm dawurbɔ yi si hɔn enyim a, wɔaabɔ mbɔdzen edua nkyerɛ na adzesua do ama nkorɔfo eedzi ndzinoa na fahoazi ahorow no nyi; na wɔaatɔa do afa hɔnara hɔn man na amanaman nhyehyɛɛ do wɔama wɔaagye dawurbɔ yi ato mu na woeedzi do wɔ Aman a wɔdɔm Nkabɔmu Kuw no mu biara mu nye asaase biara a wɔhyɛ hɔn ase no so do.\nWɔwo adasa nyina to fahodzi mu, na hɔn nyina yɛ pɛr wɔ enyimnyam na ndzinoa mu. Wɔmaa hɔn nyina adwen na tsibowa, na ɔwɔ dɛ hɔn nkitahodzi mu ndzeyɛɛ da no edzi dɛ wɔyɛ enuanom.\n",
+   "count": 298
+  },
+  {
+   "text": "UInt32 seed = 0\nF nonrandom()\n   :seed = 1664525 * :seed + 1013904223\n   R Int(:seed >> 16) / Float(FF'FF)\n \nV (p, t) = (0.5, 500)\n \nF newv(n, p)\n   R (0 .< n).map(i -> Int(nonrandom() < @p))\n \nF runs(v)\n   R sum(zip(v, v[1..] [+] [0]).map((a, b) -> (a [&] (-)b)))\n \nF mean_run_density(n, p)\n   R runs(newv(n, p)) / Float(n)\n \nL(p10) (1.<10).step(2)\n   p = p10 / 10\n   V limit = p * (1 - p)\n   print(‘’)\n   L(n2) (10.<16).step(2)\n      V n = 2 ^ n2\n      V sim = sum((0 .< t).map(i -> mean_run_density(@n, :p))) / t\n      print(‘t=#3 p=#.2 n=#5 p(1-p)=#.3 sim=#.3 delta=#.1%’.format(\n             t,   p,    n,       limit, sim, I limit {abs(sim - limit) / limit * 100} E sim * 100))\n",
+   "count": 335
+  },
+  {
+   "text": "start_up = proc ()\n    po: stream := stream$primary_output()\n    stream$putl(po, \"Hello world!\")\nend start_up\n",
+   "count": 32
+  },
+  {
+   "text": "set theList to {\"1.3.6.1.4.1.11.2.17.19.3.4.0.10\", \"1.3.6.1.4.1.11.2.17.5.2.0.79\", \"1.3.6.1.4.1.11.2.17.19.3.4.0.4\", ¬\n    \"1.3.6.1.4.1.11150.3.4.0.1\", \"1.3.6.1.4.1.11.2.17.19.3.4.0.1\", \"1.3.6.1.4.1.11150.3.4.0\"}\nconsidering numeric strings\n    sort(theList, 1, -1)\nend considering\nreturn theList\n",
+   "count": 214
+  },
+  {
+   "text": "No ambe ma i amboŋastajperakua uati kurhangukuarheni esoki intskusïnga jurhimbekua irechakuani, ma umbatsekuani o ma k'uiripuni, uenani ka píirakuni niatakuechani o niatani ambe ma imangisï texurhiuaka kenditani nakinderku ma jurhimbekuechani ka jandijku janguarhekauechani eiamarhijperakatecha i amboŋastajperakuarhu.\n",
+   "count": 127
+  },
+  {
+   "text": "def lpad($len; $fill): tostring | ($len - length) as $l | ($fill * $l)[:$l] + .;\n \n# Create a bag of words, i.e. a JSON object with counts of the items in the stream\ndef bow(stream): \n  reduce stream as $word ({}; .[($word|tostring)] += 1);\n",
+   "count": 84
+  },
+  {
+   "text": "بۇ خىتابنامىنىڭ ھەرقانداق بىر ماددىسىنى ھەرقانداق دۆلەت، گۇرۇھ ياكى شەخس مۇشۇ خىتابنامىدە قەيت قىلىنغان ھەرقانداق ھوقۇق ۋە ئەركىنلىكنى بۇزۇش مەقسىتىدىكى پائالىيەت ياكى ھەرىكەتلەرنى ئېلىپ بېرىشقا ھوقۇقلۇق دەپ سۇكۇت قىلىدىغان مەنىدە چۇشەندۇرۇشكە بولمايدۇ.\n",
+   "count": 241
+  },
+  {
+   "text": "using System;\nusing System.Console;\nusing Nemerle.Imperative;\n \nmodule Continue\n{\n    Main() : void\n    {\n        foreach (i in [1 .. 10])\n        {\n            Write(i);\n            when (i % 5 == 0) {WriteLine(); continue;}\n            Write(\", \");\n        }\n    }\n}\n",
+   "count": 76
+  },
+  {
+   "text": " \nclass LoopMultiple\n{\n  public static Void main ()\n  {\n    List arr1 := [\"a\", \"b\", \"c\"]\n    List arr2 := [\"A\", \"B\", \"C\"]\n    List arr3 := [1, 2, 3]\n    [arr1.size, arr2.size, arr3.size].min.times |Int i|\n    {\n      echo (\"${arr1[i]}${arr2[i]}${arr3[i]}\")\n    }\n  }\n}\n \n",
+   "count": 110
+  },
+  {
+   "text": "Aints takakminak pujuinan'tai, ni weari ainaujai yumatsuk angkan pengker pujusarti tusar, metek akikiartinuitai. Ni takatrin takakminak pujuinayatang, ni kuikiari jeachu asamtai, yumamurin sumaktatkamar tujinkaramtai, Gobierno nu aints ainau yumatsuk pujusarti tusa yaingkiartinuitai.\nIi takatrin metek akikiarti tusar chikich ainaujai iruntrartinuitai. Turasha iruntrar: Ii takatrin tenap akikchamu asar, metek akirkarti tusar, takatan su ainaun chicharkartinuitai.\nAints mash ayamsartinuitái. Tura asaramtai kintajai metek ayamtsuk takakmaschartinuitai. Tura tuke inaitsuk takakmasu asar, jiista kintatisha ayamsaru waininayatang akikiartinuitai.\n",
+   "count": 231
+  },
+  {
+   "text": "void main() {\n    import std.stdio, std.algorithm, std.range, core.bitop;\n \n    immutable pernicious = (in uint n) => (2 ^^ n.popcnt) & 0xA08A28AC;\n    uint.max.iota.filter!pernicious.take(25).writeln;\n    iota(888_888_877, 888_888_889).filter!pernicious.writeln;\n}\n",
+   "count": 109
+  },
+  {
+   "text": "import \"/fmt\" for Fmt\nimport \"/big\" for BigInt\n \nvar p = BigInt.three.pow(BigInt.two)\np = BigInt.four.pow(p)\np = BigInt.five.pow(p)\nvar s = p.toString\nFmt.print(\"5 ^ 4 ^ 3 ^ 2 has $,d digits.\\n\", s.count)\nSystem.print(\"The first twenty are    : %(s[0..19])\")\nSystem.print(\"and the last twenty are : %(s[-20..-1])\")",
+   "count": 121
+  },
+  {
+   "text": "NewList lslist.s()\n \nIf OpenConsole(\"ls-sim\")\n  If ExamineDirectory(0,GetCurrentDirectory(),\"*.*\")\n    While NextDirectoryEntry(0)\n      AddElement(lslist()) : lslist()=DirectoryEntryName(0)\n    Wend\n    FinishDirectory(0)\n    SortList(lslist(),#PB_Sort_Ascending)\n    ForEach lslist()\n      PrintN(lslist())\n    Next    \n  EndIf\n  Input()\nEndIf",
+   "count": 127
+  },
+  {
+   "text": " \nsee \"working...\" + nl\nsee \"Sum of elements below main diagonal of matrix:\" + nl\ndiag = [[1,3,7,8,10],\n        [2,4,16,14,4],\n        [3,1,9,18,11],\n        [12,14,17,18,20],\n        [7,1,3,9,5]]\n \nlenDiag = len(diag)\nind = lenDiag\nsumDiag = 0\n \nfor n=1 to lenDiag\n    for m=1 to lenDiag-ind\n        sumDiag += diag[n][m]\n    next\n    ind--\nnext\n \nsee \"\" + sumDiag + nl\nsee \"done...\" + nl\n ",
+   "count": 169
+  },
+  {
+   "text": "$ include \"seed7_05.s7i\";\n  include \"float.s7i\";\n \nconst func float: celsius (in float: kelvin) is\n  return kelvin - 273.15;\n \nconst func float: fahrenheit (in float: kelvin) is\n  return kelvin * 1.8 - 459.67;\n \nconst func float: rankine (in float: kelvin) is\n  return kelvin * 1.8;\n \nconst proc: main is func\n  local\n    var float: kelvin is 0.0;\n  begin\n    write(\"Enter temperature in kelvin: \");\n    readln(kelvin);\n    writeln(\"K: \" <& kelvin             digits 2 lpad 7);\n    writeln(\"C: \" <& celsius(kelvin)    digits 2 lpad 7);\n    writeln(\"F: \" <& fahrenheit(kelvin) digits 2 lpad 7);\n    writeln(\"R: \" <& rankine(kelvin)    digits 2 lpad 7);\n  end func;",
+   "count": 255
+  },
+  {
+   "text": " \n(import (scheme base)\n        (scheme read)\n        (scheme write))\n \n(define (kelvin->celsius k)\n  (- k 273.15))\n \n(define (kelvin->fahrenheit k)\n  (- (* k 1.8) 459.67))\n \n(define (kelvin->rankine k)\n  (* k 1.8))\n \n;; Run the program\n(let ((k (begin (display \"Kelvin    : \") (flush-output-port) (read))))\n  (when (number? k)\n    (display \"Celsius   : \") (display (kelvin->celsius k)) (newline)\n    (display \"Fahrenheit: \") (display (kelvin->fahrenheit k)) (newline)\n    (display \"Rankine   : \") (display (kelvin->rankine k)) (newline)))\n ",
+   "count": 201
+  },
+  {
+   "text": "# Check to see whether it is defined\nputs \"var is undefined at first check\" unless defined? var\n \n# Give it a value\nvar = \"Chocolate\"\n \n# Check to see whether it is defined after we gave it the\n# value \"Chocolate\"\nputs \"var is undefined at second check\" unless defined? var\n \n# I don't know any way of undefining a variable in Ruby\n \n# Because most of the output is conditional, this serves as\n# a clear indicator that the program has run to completion.\nputs \"Done\"",
+   "count": 119
+  },
+  {
+   "text": "100 PROGRAM \"ZigZag.bas\"\n110 LET SIZE=5\n120 NUMERIC A(1 TO SIZE,1 TO SIZE)\n130 LET I,J=1\n140 FOR E=0 TO SIZE^2-1\n150   LET A(I,J)=E\n160   IF ((I+J) BAND 1)=0 THEN\n170     IF J<SIZE THEN\n180       LET J=J+1\n190     ELSE\n200       LET I=I+2\n210     END IF\n220     IF I>1 THEN LET I=I-1\n230   ELSE\n240     IF I<SIZE THEN\n250       LET I=I+1\n260     ELSE\n270       LET J=J+2\n280     END IF\n290     IF J>1 THEN LET J=J-1\n300   END IF\n310 NEXT\n320 FOR ROW=1 TO SIZE\n330   FOR COL=1 TO SIZE\n340     PRINT USING \" ##\":A(ROW,COL);\n350   NEXT\n360   PRINT\n370 NEXT",
+   "count": 277
+  },
+  {
+   "text": "generic\n   Size: Positive; \n      -- determines the size of the square\n   with function Represent(N: Natural) return String;\n      -- this turns a number into a string to be printed\n      -- the length of the output should not change\n      -- e.g., Represent(N) may return \" #\" if N is a prime\n      -- and \"  \" else\n   with procedure Put_String(S: String);\n      -- outputs a string, no new line\n   with procedure New_Line;\n      -- the name says all\npackage Generic_Ulam is\n \n   procedure Print_Spiral;\n   -- calls Put_String(Represent(I)) N^2 times\n   --       and New_Line N times\n \nend Generic_Ulam;",
+   "count": 157
+  },
+  {
+   "text": "/*REXX program lists contents of current folder  (ala mode UNIX's  LS). */\n'DIR  /b  /oN'                         /*use Windows DIR: sorts & lists.*/\n                                       /*stick a fork in it, we're done.*/",
+   "count": 53
+  },
+  {
+   "text": "now\nprint rejoin [now/year \"-\" now/month \"-\" now/day \" \" now/time]",
+   "count": 19
+  },
+  {
+   "text": "#Example taken from the REXML tutorial (http://www.germane-software.com/software/rexml/docs/tutorial.html)\nrequire \"rexml/document\"\ninclude REXML\n#create the REXML Document from the string (%q is Ruby's multiline string, everything between the two @-characters is the string)\ndoc = Document.new(\n        %q@<inventory title=\"OmniCorp Store #45x10^3\">\n             ...\n           </inventory>\n          @\n                          )\n# The invisibility cream is the first <item>\ninvisibility = XPath.first( doc, \"//item\" ) \n# Prints out all of the prices\nXPath.each( doc, \"//price\") { |element| puts element.text }\n# Gets an array of all of the \"name\" elements in the document.\nnames = XPath.match( doc, \"//name\" )",
+   "count": 184
+  },
+  {
+   "text": "sub lower-triangle-sum (@matrix) { sum flat (1..@matrix).map( { @matrix[^$_]»[^($_-1)] } )»[*-1] }\n \nsay lower-triangle-sum \n[\n    [  1,  3,  7,  8, 10 ],\n    [  2,  4, 16, 14,  4 ],\n    [  3,  1,  9, 18, 11 ],\n    [ 12, 14, 17, 18, 20 ],\n    [  7,  1,  3,  9,  5 ]\n];",
+   "count": 163
+  },
+  {
+   "text": "      DEF PROCtruncate(file$, size%)\n      LOCAL file%\n      file% = OPENUP(file$)\n      IF file%=0 ERROR 100, \"Could not open file\"\n      EXT#file% = size%\n      CLOSE #file%\n      ENDPROC",
+   "count": 57
+  },
+  {
+   "text": "CARD FUNC SumOfSqr(BYTE ARRAY a BYTE count)\n  BYTE i\n  CARD res\n \n  IF count=0 THEN\n    RETURN (0)\n  FI\n \n  res=0\n  FOR i=0 TO count-1\n  DO\n    res==+a(i)*a(i)\n  OD\nRETURN (res)\n \nPROC Test(BYTE ARRAY a BYTE count)\n  BYTE i\n  CARD res\n \n  res=SumOfSqr(a,count)\n  Print(\"[\")\n  IF count>0 THEN\n    FOR i=0 to count-1\n    DO\n      PrintB(a(i))\n      IF i<count-1 THEN\n        Put(' )\n      FI\n    OD\n  FI\n  PrintF(\"]->%U%E%E\",res)\nRETURN\n \nPROC Main()\n  BYTE ARRAY a=[1 2 3 4 5]\n  BYTE ARRAY b=[10 20 30 40 50 60 70 80 90]\n  BYTE ARRAY c=[11]\n \n  Test(a,5)\n  Test(b,9)\n  Test(c,1)\n  Test(c,0)\nRETURN",
+   "count": 260
+  },
+  {
+   "text": "let flag = \"🇵🇷\"\nprint(flag.characters.count)\n// Prints \"1\"\nprint(flag.unicodeScalars.count)\n// Prints \"2\"\nprint(flag.utf16.count)\n// Prints \"4\"\nprint(flag.utf8.count)\n// Prints \"8\"\n \nlet nfc = \"\\u{01FA}\"//Ǻ LATIN CAPITAL LETTER A WITH RING ABOVE AND ACUTE\nlet nfd = \"\\u{0041}\\u{030A}\\u{0301}\"//Latin Capital Letter A + ◌̊ COMBINING RING ABOVE + ◌́ COMBINING ACUTE ACCENT\nlet nfkx = \"\\u{FF21}\\u{030A}\\u{0301}\"//Fullwidth Latin Capital Letter A + ◌̊ COMBINING RING ABOVE + ◌́ COMBINING ACUTE ACCENT\nprint(nfc == nfd) //NFx: true\nprint(nfc == nfkx) //NFKx: false\n ",
+   "count": 226
+  },
+  {
+   "text": "оспособ",
+   "count": 7
+  },
+  {
+   "text": "ьют",
+   "count": 3
+  },
+  {
+   "text": "图片区",
+   "count": 3
+  },
+  {
+   "text": "ighteous",
+   "count": 3
+  },
+  {
+   "text": "olarmente",
+   "count": 2
+  },
+  {
+   "text": "әү",
+   "count": 2
+  },
+  {
+   "text": "Gujarati",
+   "count": 3
+  },
+  {
+   "text": "оред",
+   "count": 4
+  },
+  {
+   "text": "יחות",
+   "count": 4
+  },
+  {
+   "text": "alluni",
+   "count": 2
+  },
+  {
+   "text": "Authenticator",
+   "count": 3
+  },
+  {
+   "text": "екти",
+   "count": 4
+  },
+  {
+   "text": "Invoices",
+   "count": 3
+  },
+  {
+   "text": "asible",
+   "count": 2
+  },
+  {
+   "text": "რთ",
+   "count": 2
+  },
+  {
+   "text": "кімет",
+   "count": 5
+  },
+  {
+   "text": "ائیں",
+   "count": 4
+  },
+  {
+   "text": "ٿي",
+   "count": 2
+  },
+  {
+   "text": "кач",
+   "count": 3
+  },
+  {
+   "text": "rdquo",
+   "count": 2
+  },
+  {
+   "text": "Scout",
+   "count": 2
+  },
+  {
+   "text": "vrije",
+   "count": 2
+  },
+  {
+   "text": "ouille",
+   "count": 2
+  },
+  {
+   "text": "ართული",
+   "count": 6
+  },
+  {
+   "text": "टल",
+   "count": 2
+  },
+  {
+   "text": "Leaves",
+   "count": 2
+  },
+  {
+   "text": "tributions",
+   "count": 2
+  },
+  {
+   "text": "arlier",
+   "count": 2
+  },
+  {
+   "text": "hnung",
+   "count": 2
+  },
+  {
+   "text": "һә",
+   "count": 2
+  },
+  {
+   "text": "одле",
+   "count": 4
+  },
+  {
+   "text": "伯温",
+   "count": 2
+  },
+  {
+   "text": "Bless",
+   "count": 2
+  },
+  {
+   "text": "ичай",
+   "count": 4
+  },
+  {
+   "text": "ịghị",
+   "count": 3
+  },
+  {
+   "text": "дерді",
+   "count": 5
+  },
+  {
+   "text": "üyük",
+   "count": 2
+  },
+  {
+   "text": "өлөр",
+   "count": 4
+  },
+  {
+   "text": "ართველ",
+   "count": 6
+  },
+  {
+   "text": "ურვ",
+   "count": 3
+  },
+  {
+   "text": "ivitis",
+   "count": 2
+  },
+  {
+   "text": "Designation",
+   "count": 3
+  },
+  {
+   "text": "җиң",
+   "count": 3
+  },
+  {
+   "text": "ирование",
+   "count": 8
+  },
+  {
+   "text": "etected",
+   "count": 2
+  },
+  {
+   "text": "estershire",
+   "count": 2
+  },
+  {
+   "text": "中央値",
+   "count": 3
+  },
+  {
+   "text": "ոսկ",
+   "count": 3
+  },
+  {
+   "text": "igitte",
+   "count": 2
+  },
+  {
+   "text": "учи",
+   "count": 3
+  },
+  {
+   "text": "ypte",
+   "count": 2
+  },
+  {
+   "text": "Maak",
+   "count": 2
+  },
+  {
+   "text": "ანტ",
+   "count": 3
+  },
+  {
+   "text": "ხოვ",
+   "count": 3
+  },
+  {
+   "text": "għ",
+   "count": 2
+  },
+  {
+   "text": "Flower",
+   "count": 2
+  },
+  {
+   "text": "gaming",
+   "count": 2
+  },
+  {
+   "text": "Ribbon",
+   "count": 3
+  },
+  {
+   "text": "арҭ",
+   "count": 3
+  },
+  {
+   "text": "बह",
+   "count": 2
+  },
+  {
+   "text": "x  \r\n y",
+   "count": 6
+  },
+  {
+   "text": "x\t \t  \ry",
+   "count": 10
+  },
+  {
+   "text": "\t\u000b\t\u000b   \f",
+   "count": 8
+  },
+  {
+   "text": " ",
+   "count": 3
+  },
+  {
+   "text": "  \r  　 \u000b",
+   "count": 8
+  },
+  {
+   "text": "  　\t\n",
+   "count": 5
+  },
+  {
+   "text": " \r　\f  \r",
+   "count": 11
+  },
+  {
+   "text": " \r\r\n\n\t",
+   "count": 4
+  },
+  {
+   "text": " \n\t\r\n",
+   "count": 6
+  },
+  {
+   "text": "x\r\n \r\r \r  \f y",
+   "count": 11
+  },
+  {
+   "text": "  \r\n\f 　",
+   "count": 10
+  },
+  {
+   "text": "\n\r \f\n",
+   "count": 5
+  },
+  {
+   "text": "x　\n\r\n　\n\u000by",
+   "count": 8
+  },
+  {
+   "text": "\r\n\n\t ",
+   "count": 5
+  },
+  {
+   "text": "x \r\n 　 \u000b\ny",
+   "count": 9
+  },
+  {
+   "text": "x    y",
+   "count": 6
+  },
+  {
+   "text": "x \u000b\r\n \n y",
+   "count": 16
+  },
+  {
+   "text": " \r  \t    \t",
+   "count": 10
+  },
+  {
+   "text": "\u000b　",
+   "count": 2
+  },
+  {
+   "text": "\r\n　   ",
+   "count": 9
+  },
+  {
+   "text": "\f\f\u000b\f\f\r",
+   "count": 6
+  },
+  {
+   "text": "\r\r\n \n\r\r　 \n",
+   "count": 7
+  },
+  {
+   "text": "\n  \r\n\t 　",
+   "count": 13
+  },
+  {
+   "text": "x \n\t\r\ny",
+   "count": 8
+  },
+  {
+   "text": " ",
+   "count": 1
+  },
+  {
+   "text": "x　  \r\n  \r\n　\n y",
+   "count": 12
+  },
+  {
+   "text": "\r\n　　 \r\r",
+   "count": 5
+  },
+  {
+   "text": "x \t  \u000b　\f \ny",
+   "count": 11
+  },
+  {
+   "text": " \r\n  \f\r\u000b\t ",
+   "count": 9
+  },
+  {
+   "text": "\u000b  \n\r \n  \u000b",
+   "count": 9
+  },
+  {
+   "text": " 👯¦",
+   "count": 4
+  },
+  {
+   "text": "🜭¦",
+   "count": 4
+  },
+  {
+   "text": "🥮¦",
+   "count": 3
+  },
+  {
+   "text": "🍞¦",
+   "count": 3
+  },
+  {
+   "text": " 🀕¦",
+   "count": 5
+  },
+  {
+   "text": " 🔿¦",
+   "count": 4
+  },
+  {
+   "text": "🗨¦",
+   "count": 4
+  },
+  {
+   "text": "🚸¦",
+   "count": 3
+  },
+  {
+   "text": " 🕿¦",
+   "count": 5
+  },
+  {
+   "text": " 🞥¦",
+   "count": 5
+  },
+  {
+   "text": " 🜴¦",
+   "count": 4
+  },
+  {
+   "text": "🤼¦",
+   "count": 3
+  },
+  {
+   "text": "🃨¦",
+   "count": 4
+  },
+  {
+   "text": " 🖲¦",
+   "count": 5
+  },
+  {
+   "text": " 🗄¦",
+   "count": 5
+  },
+  {
+   "text": " 🝯¦",
+   "count": 5
+  },
+  {
+   "text": " 🙋¦",
+   "count": 4
+  },
+  {
+   "text": "🔍¦",
+   "count": 3
+  },
+  {
+   "text": " 🍊¦",
+   "count": 4
+  },
+  {
+   "text": " 📝¦",
+   "count": 4
+  },
+  {
+   "text": "რუა世",
+   "count": 4
+  },
+  {
+   "text": " เก世",
+   "count": 4
+  },
+  {
+   "text": "ാഔ世",
+   "count": 4
+  },
+  {
+   "text": "ƭ제世",
+   "count": 4
+  },
+  {
+   "text": "ეუა世",
+   "count": 4
+  },
+  {
+   "text": " დარბ世",
+   "count": 5
+  },
+  {
+   "text": "Ղః世",
+   "count": 5
+  },
+  {
+   "text": " ಪರಿಏ世",
+   "count": 6
+  },
+  {
+   "text": " તેઞ世",
+   "count": 5
+  },
+  {
+   "text": "ក្ឋ世",
+   "count": 5
+  },
+  {
+   "text": "Ꮏង世",
+   "count": 5
+  },
+  {
+   "text": "िं世",
+   "count": 3
+  },
+  {
+   "text": "ీఊ世",
+   "count": 4
+  },
+  {
+   "text": "երՂ世",
+   "count": 4
+  },
+  {
+   "text": "ర్ఐ世",
+   "count": 5
+  },
+  {
+   "text": " സുഏ世",
+   "count": 5
+  },
+  {
+   "text": "ܣლ世",
+   "count": 4
+  },
+  {
+   "text": " ਵਿਔ世",
+   "count": 5
+  },
+  {
+   "text": "Ɣស់世",
+   "count": 5
+  },
+  {
+   "text": "ེես世",
+   "count": 5
+  },
+  {
+   "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "count": 150
+  },
+  {
+   "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+   "count": 300
+  },
+  {
+   "text": "日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日日",
+   "count": 201
+  },
+  {
+   "text": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+   "count": 150
+  },
+  {
+   "text": " xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "count": 276
+  },
+  {
+   "text": "񎔊pp",
+   "count": 4
+  },
+  {
+   "text": "x񎷚",
+   "count": 4
+  },
+  {
+   "text": " ヵ",
+   "count": 3
+  },
+  {
+   "text": " ゥ",
+   "count": 3
+  },
+  {
+   "text": "          \r\n",
+   "count": 3
+  },
+  {
+   "text": "\t         \r\n",
+   "count": 2
+  },
+  {
+   "text": "x                 \r\n",
+   "count": 3
+  },
+  {
+   "text": "                                                         \n\n",
+   "count": 2
+  },
+  {
+   "text": " {\n\r",
+   "count": 2
+  },
+  {
+   "text": " });\n\r",
+   "count": 2
+  },
+  {
+   "text": " */\n\r",
+   "count": 2
+  },
+  {
+   "text": "\t\t\t \r\n",
+   "count": 2
+  },
+  {
+   "text": "\t                         ",
+   "count": 2
+  },
+  {
+   "text": "اؑ",
+   "count": 2
+  }
+ ]
+}

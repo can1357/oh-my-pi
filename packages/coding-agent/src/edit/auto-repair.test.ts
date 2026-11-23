@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { parseCodeStatus } from "@oh-my-pi/pi-natives";
 import { computeRepairRegion, repairParseRegression } from "./auto-repair";
-import { sourceParses } from "./blackbox";
 
 const PATH = "/repo/src/sample.ts";
+
+function sourceParses(code: string): boolean {
+	return parseCodeStatus({ code: code.length === 0 ? "\n" : code, path: PATH }).parsed;
+}
 
 /** A parseable base file with distinct sections so multi-hunk edits stay apart. */
 const BASE = [
@@ -31,7 +35,7 @@ describe("computeRepairRegion", () => {
 			"const doubled = b * 2;",
 			"const doubled = (b * 2;",
 		);
-		expect(sourceParses(next, PATH)).toBe(false);
+		expect(sourceParses(next)).toBe(false);
 
 		const region = computeRepairRegion({ path: PATH, prev: BASE, next });
 		expect(region).toBeDefined();
@@ -49,7 +53,7 @@ describe("computeRepairRegion", () => {
 			...region.referenceText.split("\n"),
 			...lines.slice(region.bEnd),
 		].join("\n");
-		expect(sourceParses(spliced, PATH)).toBe(true);
+		expect(sourceParses(spliced)).toBe(true);
 	});
 
 	test("returns undefined when the broken span exceeds the region cap", () => {
@@ -58,14 +62,58 @@ describe("computeRepairRegion", () => {
 		// Break the opening line and mutate every body line so the culprit hunk
 		// spans the whole (oversized) function.
 		const next = `export function big(: void {\n${bigBody.replaceAll("const", "let")}\n}\n`;
-		expect(sourceParses(prev, PATH)).toBe(true);
-		expect(sourceParses(next, PATH)).toBe(false);
+		expect(sourceParses(prev)).toBe(true);
+		expect(sourceParses(next)).toBe(false);
 		expect(computeRepairRegion({ path: PATH, prev, next })).toBeUndefined();
 	});
 });
 
 describe("repairParseRegression", () => {
 	const broken = BASE.replace("const doubled = b * 2;", "const doubled = (b * 2;");
+
+	test.each([24, 26])("repairs both syntax culprits among %i separate changes", async count => {
+		const beforeLines = Array.from({ length: count }, (_, i) => [
+			`export function step${i}(): number {`,
+			`\treturn ${i} + 0;`,
+			"}",
+			`// separator ${i}`,
+			"",
+		]).flat();
+		beforeLines.push("export const unchangedTail = 1;");
+		const afterLines = [...beforeLines];
+		const repairedLines = [...beforeLines];
+		for (let i = 0; i < count; i++) {
+			afterLines[i * 5 + 1] = i < count - 2 ? `\treturn ${i} + 1;` : `\treturn (${i} + 1;`;
+			repairedLines[i * 5 + 1] = i < count - 2 ? `\treturn ${i} + 1;` : `\treturn (${i} + 1);`;
+		}
+		const prev = beforeLines.join("\n");
+		const next = afterLines.join("\n");
+		expect(sourceParses(prev)).toBe(true);
+		expect(sourceParses(next)).toBe(false);
+		const bStart = (count - 3) * 5;
+		const bEnd = afterLines.length;
+		const referenceLines = [...afterLines];
+		for (let i = count - 2; i < count; i++) referenceLines[i * 5 + 1] = beforeLines[i * 5 + 1];
+		let completions = 0;
+		const repair = await repairParseRegression({ path: PATH, prev, next }, async () => {
+			completions++;
+			return repairedLines.slice(bStart, bEnd).join("\n");
+		});
+		expect(completions).toBe(1);
+		expect(repair).toEqual({
+			content: repairedLines.join("\n"),
+			attempts: 1,
+			region: {
+				bStart,
+				bEnd,
+				brokenText: afterLines.slice(bStart, bEnd).join("\n"),
+				referenceText: referenceLines.slice(bStart, bEnd).join("\n"),
+				language: "typescript",
+			},
+		});
+		if (!repair) throw new Error("Expected both syntax errors to be repaired");
+		expect(sourceParses(repair.content)).toBe(true);
+	});
 
 	test("accepts a candidate that fixes the syntax while keeping the intended change", async () => {
 		const repair = await repairParseRegression({ path: PATH, prev: BASE, next: broken }, async built => {
@@ -77,7 +125,7 @@ describe("repairParseRegression", () => {
 		expect(repair).toBeDefined();
 		if (!repair) throw new Error("unreachable");
 		expect(repair.attempts).toBe(1);
-		expect(sourceParses(repair.content, PATH)).toBe(true);
+		expect(sourceParses(repair.content)).toBe(true);
 		expect(repair.content).toContain("const doubled = (b * 2);");
 		// Untouched sections survive byte-for-byte.
 		expect(repair.content).toContain("export function alpha(a: number): number {");
@@ -107,7 +155,7 @@ describe("repairParseRegression", () => {
 		});
 		expect(repair).toBeDefined();
 		if (!repair) throw new Error("unreachable");
-		expect(sourceParses(repair.content, PATH)).toBe(true);
+		expect(sourceParses(repair.content)).toBe(true);
 		// Realignment restored original bytes for the echoed context lines; only
 		// the genuinely changed line keeps the model's (dedented) shape.
 		expect(repair.content).toContain("\treturn doubled;");
@@ -127,7 +175,7 @@ describe("repairParseRegression", () => {
 		expect(repair).toBeDefined();
 		if (!repair) throw new Error("unreachable");
 		expect(repair.attempts).toBe(2);
-		expect(sourceParses(repair.content, PATH)).toBe(true);
+		expect(sourceParses(repair.content)).toBe(true);
 	});
 
 	test("gives up after the retry when no candidate re-parses", async () => {

@@ -1,283 +1,133 @@
-# MCP Protocol and Transport Internals
+# MCP protocol and transport internals
 
-This document describes how coding-agent implements MCP JSON-RPC messaging and how protocol concerns are split from transport concerns.
+How coding-agent speaks MCP: which revision, where each protocol concern lives, and how the host reaches servers.
 
-## Scope
+## Two hops
 
-Covers:
+```
+session ── tunnel: NDJSON, MCP 2026-07-28 + omp/* ──► host unit ── upstream transport ──► server
+(client.ts, link.ts)                                  (endpoint.ts)  (stdio / http / sse)
+```
 
-- JSON-RPC request/response and notification flow
-- Server-to-client request handling (`ping`, `roots/list`)
-- Request correlation and lifecycle for stdio and HTTP/SSE transports
-- Timeout, cancellation, and auth-refresh behavior
-- Error propagation and malformed payload handling
-- Transport selection boundaries (`stdio` vs `http` vs `sse`)
-- Which reconnect/retry responsibilities are transport-level vs manager/tool-bridge-level
+- **Session → host.** A session speaks MCP 2026-07-28 only. `HostLink` (`src/mcp/link.ts`) is its single transport: newline-delimited JSON-RPC on a tunnel to the server's host unit (a daemon tunnel, or an in-memory pipe to the in-process host). This is the stdio framing, which the specification extends to any byte stream.
+- **Host → server.** The unit's peer (`src/mcp/host/peers.ts`) reaches the server over an upstream transport. A modern server is forwarded to as-is. A handshake-era server sits behind the legacy adapter, which holds its `initialize` session and answers in modern terms.
 
-Does not cover extension authoring UX or command UI.
+`docs/mcp-runtime-lifecycle.md` covers who owns what and when processes start and stop.
 
-## Implementation files
+## The session's protocol (2026-07-28)
 
-- [`src/mcp/types.ts`](../packages/coding-agent/src/mcp/types.ts)
-- [`src/mcp/transports/stdio.ts`](../packages/coding-agent/src/mcp/transports/stdio.ts)
-- [`src/mcp/transports/http.ts`](../packages/coding-agent/src/mcp/transports/http.ts)
-- [`src/mcp/transports/sse.ts`](../packages/coding-agent/src/mcp/transports/sse.ts)
-- [`src/mcp/transports/index.ts`](../packages/coding-agent/src/mcp/transports/index.ts)
-- [`src/mcp/json-rpc.ts`](../packages/coding-agent/src/mcp/json-rpc.ts)
-- [`src/mcp/client.ts`](../packages/coding-agent/src/mcp/client.ts)
-- [`src/mcp/manager.ts`](../packages/coding-agent/src/mcp/manager.ts)
+Constants and helpers are in `src/mcp/protocol.ts`.
 
-## Layer boundaries
+- **Stateless requests.** Every request carries `_meta` with `io.modelcontextprotocol/protocolVersion`, `clientCapabilities` (`{ roots: {} }`) and `clientInfo`. There is no `initialize`, `notifications/initialized` or `ping`.
+- **Discovery.** `server/discover` returns capabilities, instructions and, in result `_meta`, server info.
+- **Results** carry `resultType`; absent means `complete`. An unknown value is an error.
+- **Server asks (MRTR).** `tools/call`, `prompts/get` and `resources/read` may answer `input_required`. The client answers `roots/list` from the connection's roots and retries with `inputResponses` and the echoed `requestState`, at most 8 rounds; any other ask fails the call, since no other capability is declared.
+- **Subscriptions.** `subscriptions/listen` replaces `resources/subscribe` and the HTTP GET stream. The session opens one list-change subscription per server and, when resource updates are wanted, one resource subscription holding the current URI set; changing the set opens a new one and cancels the old. Each stream starts with `notifications/subscriptions/acknowledged`; its notifications are tagged with the listen request's id.
+- **Caching hints.** List and discover results carry `ttlMs` and `cacheScope`; the host's store honours them.
+- **Cancellation.** `notifications/cancelled { requestId }`.
 
-### Protocol layer (JSON-RPC + MCP methods)
+### Tunnel extensions
 
-- Message shapes are defined in `types.ts` (`JsonRpcRequest`, `JsonRpcNotification`, `JsonRpcResponse`, `JsonRpcMessage`).
-- MCP client logic (`client.ts`) decides method order and session handshake:
-  1. `initialize` request
-  2. `notifications/initialized` notification, sent before any further session traffic
-  3. for Streamable HTTP transports, start the optional background SSE listener once the initialize response has established any session id
-  4. method calls like `tools/list`, `tools/call`
+Declared in `src/mcp/host/contract.ts`; the host strips `omp/*` `_meta` keys before anything reaches a server.
 
-### Transport layer (`MCPTransport`)
+| Extension | Direction | Meaning |
+| --- | --- | --- |
+| `_meta["omp/cache"] = "stale-ok"` | request | answer from the store even past its TTL without starting the server; the host revalidates and notifies on change |
+| `_meta["omp/cache"] = "no-store"` | request | ask the server itself and leave the store untouched (connection tests, auth probes) |
+| `_meta["omp/stale"] = true` | result | the served entry was past its TTL |
+| `omp/status` | host → session | era, state (`idle`, `starting`, `running`, `failed`), pid, attached sessions, last exit |
+| `omp/restart` | session → host | stop the upstream now and clear its crash history |
+| `omp/roots` | session → host | the session's roots, for a handshake-era server's `roots/list` |
 
-`MCPTransport` abstracts delivery and lifecycle:
+### Errors
 
-- `request(method, params, options?) -> Promise<T>`
-- `notify(method, params?) -> Promise<void>`
-- `close()`
-- `connected`
-- optional callbacks: `onClose`, `onError`, `onNotification`, `onRequest`
+A server's JSON-RPC error passes through both hops with its code, message and data. Failures of the upstream itself (spawn failure, exit, HTTP status, timeout) are sent as JSON-RPC error `1001` whose `data` is an `MCPTransportError` field for field (`transport`, `stage`, `failure`, `retryable`, `code`, `data`, `traceId`, and the exit code and stderr tail when a process died); the link rebuilds the same error object. Tool diagnostics and retry classification therefore work as they did when transports lived in the session.
 
-Transport implementations own framing and I/O details:
+### Deadlines, progress, abort
 
-- `StdioTransport`: newline-delimited JSON over subprocess stdio
-- `HttpTransport`: Streamable HTTP JSON-RPC over POST, with optional SSE responses/listening
-- `LegacySseTransport`: protocol revision 2024-11-05 HTTP+SSE, with a persistent GET stream and POST endpoint discovered from the `endpoint` event
+`HostLink.request` applies the deadline: `OMP_MCP_TIMEOUT_MS`, else the server's `timeout`, else 10 minutes for `tools/call` (raised to a tool's own timeout argument plus 30 s) and 30 s otherwise; `0` disables. Without a configured timeout each progress notification restarts a tool call's deadline, up to one hour. `onProgress` adds `_meta.progressToken`; progress reaches only that request's callback. On abort or deadline the link rejects at once and sends `notifications/cancelled`; a pre-aborted request is never written. A subscription has a deadline only until it is acknowledged.
 
-### Manager/client wiring
+Requests issued while the link is re-attaching wait for it. When the tunnel is lost, in-flight requests fail as non-retryable (`failure: "closed"`): they may have run.
 
-`connectToServer()` always installs an `onRequest` handler for standard server-to-client requests. `MCPManager` installs notification handlers, OAuth refresh hooks for HTTP-like OAuth servers, and `onClose` reconnect handling for managed connections.
+## Request ids
 
-## Transport selection
+The link and each upstream allocate their own ids. Upstream ids default to increasing integers, which servers such as Apple's `xcrun mcpbridge` require; `requestIdFormat: "string"` switches a server to snowflake strings. The unit maps each session's id to an upstream id and back, so ids of different sessions never collide on a shared server; progress tokens and subscription ids are isolated the same way.
 
-`client.ts:createTransport()` chooses transport from config:
+## Era detection
 
-- `type` omitted or `"stdio"` -> `createStdioTransport`
-- `"http"` -> `createHttpTransport`
-- `"sse"` -> `createSseTransport`
+`mcpUpstreams.probe` detects a server's era on a throwaway upstream, and the store remembers it.
+A handshake-era verdict is rechecked after 7 days, so an upgraded server starts being shared.
+The v1-to-v2 cache upgrade clears old era verdicts once, but keeps cached results.
 
-`"sse"` uses the legacy HTTP+SSE transport: it opens the configured URL with GET, reads the `endpoint` event's plain-text URL/path, POSTs JSON-RPC requests to that endpoint, and receives JSON-RPC responses on the stream.
+- **stdio**: the probe writes `server/discover` and then `initialize`.
+  A discover result or a modern error wins; otherwise the `initialize` result means handshake-era.
+  The probe process is always killed.
+- **http**: the probe sends a modern `server/discover` POST.
+  A discover result or a modern error means modern; an unrecognized JSON-RPC reply or an eligible HTTP status (`400`, `404`, `405`) can fall back to a legacy `initialize`.
+  An unsupported-version error that lists a handshake-era revision falls back under any status.
+  `401`/`403` surface unchanged so OAuth discovery can read the challenge.
+- **sse**: always handshake-era.
 
-## JSON-RPC message flow and correlation
+Error codes `-32020` and `-32021` indicate a modern server.
+An unsupported-version error (`-32022`) does too, unless its `data.supported` explicitly lists a compatible handshake-era revision (`2025-11-25`, `2025-06-18`, `2025-03-26`, or `2024-11-05`).
+Missing, malformed, or future-only version lists do not trigger a legacy handshake.
 
-## Request IDs
+If a modern unit's upstream returns `-32022`, the host expires its modern verdict without touching results or a newer handshake-era verdict.
+The link then re-probes once for every request rejected on that attachment, and reconnects to a separate handshake-era unit only if the probe confirms that era.
+Each rejected request waits for the re-probe within its own signal and remaining deadline, so its caller's next request finds the link moved.
+It then fails with the original error, or with the abort reason if its caller cancelled meanwhile; it is never replayed automatically.
+The re-probe belongs to the link: a caller that stops waiting neither ends it nor detaches the link.
 
-Each transport owns a `RequestIdAllocator`. Outbound IDs default to monotonically increasing integers starting at `1`, which matches the wider MCP ecosystem and servers such as Apple's `xcrun mcpbridge`. A server config can set `requestIdFormat: "string"` to use collision-resistant `Snowflake.next()` strings instead. IDs remain transport-local correlation tokens.
+## Upstream transports
 
-## Stdio correlation path
+All implement `MCPTransport` (`src/mcp/types.ts`) and apply no request deadline of their own; they honour the caller's abort signal.
 
-- Outbound request is serialized as one JSON object + `\n`.
-- `#pendingRequests: Map<id, {resolve,reject}>` stores in-flight requests.
-- Read loop parses JSONL from stdout and calls `#handleMessage`.
-- If inbound message has matching `id`, request resolves/rejects.
-- If inbound message has `method` and no `id`, treated as notification and sent to `onNotification`.
-- If inbound message has both `method` and `id`, treated as a server-to-client request and answered through `onRequest`; without a handler the transport replies with JSON-RPC `-32601 Method not found`.
+### stdio (`host/stdio-upstream.ts`)
 
-Unknown response IDs are ignored (no rejection, no error callback).
+- The child is a daemon `ManagedChild`: own process group, raw pipe fds that survive a daemon re-exec. Command, arguments, cwd and the complete environment come from the session's spec, never from the host's own environment.
+- Windows: the command is resolved to its full path (cwd, then `PATH` × `PATHEXT`; npm shims are run through `node` directly) and spawned with plain arguments; arguments containing NUL, CR or LF are rejected for batch targets.
+- One JSON-RPC message per line. Non-JSON lines are skipped. The last 4 KiB of stderr are kept and attached to exit and start failures.
+- Abort of a written request sends `notifications/cancelled`.
+- Shutdown: close stdin, SIGTERM to the process group after 1 s, SIGKILL after 2 s, then one group SIGKILL sweep on POSIX for descendants.
+- A request whose frame was written before the process died fails as non-retryable.
 
-## HTTP correlation path
+### Streamable HTTP (`host/http-upstream.ts`)
 
-- Outbound request is HTTP `POST` with JSON body and generated `id`.
-- Non-SSE response path: parse one JSON-RPC response and return `result`/throw on `error`.
-- SSE response path (`Content-Type: text/event-stream`): stream events, return first message whose `id` matches expected request ID and has `result` or `error`.
-- SSE messages with `method` and no `id` are treated as notifications.
-- SSE messages with both `method` and `id` are treated as server-to-client requests and answered with a POSTed JSON-RPC response.
+Modern mode:
 
-If SSE stream ends before matching response, request fails with `No response received for request ID ...`. After the matching response is captured, the transport drains remaining SSE messages in the background.
+- POST only, `Accept: application/json, text/event-stream`. Every request carries `MCP-Protocol-Version`, `Mcp-Method` and, for `tools/call`, `prompts/get` and `resources/read`, `Mcp-Name`; values that are not plain ASCII are sent as `=?base64?…?=`.
+- `Mcp-Param-*` headers follow a tool's `x-mcp-header` annotations; tools with invalid annotations are dropped from `tools/list`.
+- Responses are JSON or an SSE stream ending with the response. `subscriptions/listen` is a POST whose stream stays open. Closing the stream is the cancellation.
+- No session id, GET stream, DELETE or `Last-Event-ID`.
 
-## Notifications
+Legacy mode (handshake-era servers) is the 2025-11-25 binding: `Mcp-Session-Id`, the optional GET listener started after `notifications/initialized`, `Last-Event-ID` resumption that never replays a POST, and DELETE on close.
 
-Client emits JSON-RPC notifications via `transport.notify(...)`.
+Both modes: generated headers win over configured ones case-insensitively; origin-locked headers are dropped on cross-origin redirects. A non-OK response becomes `HTTP <status>: <text>` with `WWW-Authenticate` and `Mcp-Auth-Server` hints appended. The transport does not refresh credentials: on `401`/`403` the session's refresh hook resolves new headers, the link retargets to that identity, and the request is retried once.
 
-- Stdio: writes a notification frame to stdin (`jsonrpc`, `method`, `params`) plus newline via `writeFrame()`. A synchronous write failure closes the transport and throws; asynchronous `FileSink` rejections are neutralized because notifications have no response promise to reject.
-- HTTP: sends POST body without `id`; success accepts any `2xx` response, including `202 Accepted`.
+### Legacy HTTP+SSE (`host/sse-upstream.ts`)
 
-Server-initiated notifications are surfaced through transport `onNotification`; `MCPManager` consumes known MCP list/update notifications and can forward all notifications through its own callback.
+Revision 2024-11-05: GET the configured URL, read the `endpoint` event (same origin required), POST JSON-RPC there, receive responses on the stream. Stream loss fails accepted requests as non-retryable.
 
-## Stdio transport internals
+## Legacy adapter
 
-## Lifecycle and state transitions
+For a handshake-era server the peer performs `initialize` (revision 2025-11-25, roots capability) and `notifications/initialized`, then translates:
 
-- Initial: `connected=false`, `process=null`, pending map empty
-- `connect()`:
-  - spawn subprocess with configured command/args/env/cwd
-  - mark connected
-  - start stdout read loop (`readJsonl`)
-  - start stderr loop (read/discard; currently silent)
-- `close()`:
-  - `#handleClose()`: mark disconnected, reject all pending requests (`Transport closed`), emit `onClose`
-  - kill subprocess
-  - detach read loop without awaiting (it can hang indefinitely)
+| Modern request | What the adapter does |
+| --- | --- |
+| `server/discover` | built from the `initialize` result |
+| list methods | forwarded; result completed with `resultType`, a 30-day `ttlMs`, `cacheScope: "private"`; `resources/templates/list` answering `-32601` is an empty list |
+| `tools/call`, `prompts/get`, `resources/read` | forwarded without modern-only `_meta` and MRTR fields |
+| `subscriptions/listen` | acknowledged with what the server's capabilities support; resource URIs become refcounted `resources/subscribe`/`unsubscribe`; the server's notifications are routed to matching subscriptions |
 
-If read loop exits unexpectedly, `finally` triggers `#handleClose()` which performs the same pending-request rejection and close callback.
+Server requests are answered in the adapter: `ping` with `{}`, `roots/list` with the session's roots (`omp/roots`), anything else with `-32601`.
 
-## Timeout and cancellation
+## `json-rpc.ts`
 
-Per request:
+`callMCP()` and `readMcpJsonRpcResponse()` are a separate lightweight HTTP helper used by Exa and web-search providers. It is not hosted, manages no sessions, and applies a 60 s timeout when the caller supplies no signal.
 
-- timeout from `resolveMCPTimeoutMs`: `OMP_MCP_TIMEOUT_MS` env override, else `config.timeout ?? 30000`; `0` disables
-- optional `AbortSignal` from caller
-- abort and timeout both reject the pending promise and clean its map entry; a late write rejection is ignored after settlement
+## Who retries what
 
-Cancellation is local only: transport does not send protocol-level cancellation notification to the server.
-
-## Malformed payload handling
-
-In read loop:
-
-- each parsed JSONL line is passed to `#handleMessage` in `try/catch`
-- malformed/invalid message handling exceptions are dropped (`Skip malformed lines` comment)
-- loop continues, so one bad message does not kill the connection
-
-If the underlying stream parser throws, `onError` is invoked (when still connected), then connection closes.
-
-## Disconnect/failure behavior
-
-When process exits or stream closes:
-
-- all in-flight requests are rejected with `Transport closed`
-- no automatic restart or reconnect
-- higher layers must reconnect by creating a new transport
-
-## Backpressure/streaming notes
-
-- `request()` deliberately does **not** await `stdin.write()` or `flush()`: awaiting a full pipe can strand the async function before it returns the response promise, preventing its timeout/abort rejection from reaching the caller. Synchronous throws and asynchronous write/flush rejections instead reject that pending response promise. `notify()` writes through `writeFrame()`, which detects synchronous failure but neutralizes asynchronous EPIPE rejections.
-- There is no explicit queue or high-watermark management in the transport.
-- Inbound processing is stream-driven (`for await` over `readJsonl`), one parsed message at a time.
-
-## Streamable HTTP transport internals
-
-## Lifecycle and connection semantics
-
-HTTP transport has logical connection state, but request path is stateless per HTTP call:
-
-- `connect()` sets `connected=true` (no socket/session handshake)
-- optional server session tracking via `Mcp-Session-Id` header
-- `close()` optionally sends `DELETE` with `Mcp-Session-Id`, aborts SSE listener, emits `onClose`
-
-So `connected` means "transport usable", not "persistent stream established".
-
-## Session header behavior
-
-- On POST response, if `Mcp-Session-Id` header is present, transport stores it.
-- Subsequent requests/notifications include `Mcp-Session-Id`.
-- `close()` tries to terminate server session with HTTP DELETE; termination failures are ignored.
-
-## Timeout, cancellation, and auth refresh
-
-For `request()`:
-
-- timeout uses `AbortController` via `createMCPTimeout` (`OMP_MCP_TIMEOUT_MS` override, else `config.timeout ?? 30000`; `0` disables)
-- external signal, if provided, is merged via `AbortSignal.any([...])`
-- AbortError handling distinguishes caller abort vs timeout
-
-For `notify()`:
-
-- timeout uses an internal `AbortController` with the same resolved timeout
-- there is no external abort option on the transport interface
-
-For HTTP-like OAuth configs managed by `MCPManager`, outbound requests and best-effort server-request responses retry once on `HTTP 401`/`403` if token refresh returns replacement headers.
-
-## HTTP error propagation
-
-On non-OK response:
-
-- response text is included in thrown error (`HTTP <status>: <text>`)
-- if present, auth hints from `WWW-Authenticate` and `Mcp-Auth-Server` are appended
-
-On JSON-RPC error object:
-
-- throws `MCP error <code>: <message>`
-
-Malformed JSON body (`response.json()` failure) propagates as parse exception.
-
-## SSE behavior and modes
-
-Two SSE paths exist:
-
-1. **Per-request SSE response** (`#parseSSEResponse`)
-   - used when POST response content type is `text/event-stream`
-   - consumes stream until matching response id found
-   - can process interleaved notifications during same stream
-
-2. **Background SSE listener** (`startSSEListener()`)
-   - optional GET listener for server-initiated notifications and server-to-client requests
-   - `connectToServer()` starts it for Streamable HTTP transports after the `notifications/initialized` notification
-   - listener startup waits up to one second, or less for very small request timeouts; `timeout: 0` / `OMP_MCP_TIMEOUT_MS=0` disables that startup deadline
-   - if GET returns `405`, another non-OK status, no body, or times out, listener silently disables itself
-
-## Malformed payload and disconnect handling
-
-SSE JSON parsing errors bubble out of `readSseJson` and reject request/listener.
-
-- Request SSE parse errors reject the active request.
-- Background listener errors trigger `onError` (except AbortError), and an established listener ending while still connected triggers `onClose` so the manager can reconnect.
-- Transport does not restart the listener itself; managed connections may reconnect through manager `onClose` handling.
-
-## Legacy HTTP+SSE transport internals
-
-`LegacySseTransport` implements MCP protocol revision 2024-11-05:
-
-- `connect()` opens the configured URL with `GET Accept: text/event-stream`.
-- The first `endpoint` event is control data, not JSON; its `data` value is resolved against the configured URL and stored as the JSON-RPC POST endpoint.
-- `request()` and `notify()` POST JSON-RPC frames to the discovered endpoint.
-- JSON-RPC responses, notifications, and server-to-client requests are read from `event: message` stream events and correlated by request id.
-- If the stream ends, pending requests fail with `Transport closed: legacy SSE stream closed`; managed connections may reconnect through `onClose`.
-
-## `json-rpc.ts` utility vs transport abstraction
-
-`src/mcp/json-rpc.ts` provides `callMCP()` and `parseSSE()` helpers for direct HTTP MCP calls (used by Exa integration), not the `MCPTransport` abstraction used by `MCPClient`/`MCPManager`.
-
-Notable differences from `HttpTransport`:
-
-- parses entire response text first, then extracts first `data: ` line (`parseSSE`), with JSON fallback
-- optional caller `AbortSignal` (`CallMcpOptions`), with a hard 60s `AbortSignal.timeout` default when none is given; no session-id handling, no transport lifecycle
-- returns raw JSON-RPC envelope object
-
-This path is lightweight but less robust than full transport implementation.
-
-## Retry/reconnect responsibilities
-
-## Transport-level
-
-Current transport implementations do **not**:
-
-- retry ordinary failed requests, except HTTP-like transports' single OAuth-refresh retry when `onAuthError` is wired
-- reconnect after stdio process exit
-- reconnect SSE listeners by themselves
-- resend in-flight requests after disconnect
-
-They fail fast and propagate errors.
-
-## Manager/tool-bridge level
-
-`MCPManager` wires `transport.onClose` for managed connections and runs `reconnectServer(name)` when a transport closes unexpectedly. Reconnect tears down the stale connection, re-resolves auth/config values, retries with backoff (`500`, `1000`, `2000`, `4000` ms), reloads tools, and preserves stale tools while reconnecting.
-
-`MCPTool` and `DeferredMCPTool` also attempt one reconnect + retry for retriable connection errors during a tool call. This is tool availability recovery, not transport-level retry.
-
-## Failure scenarios summary
-
-- **Malformed stdio message line**: dropped; stream continues.
-- **Stdio stream/process ends**: transport closes; pending requests rejected as `Transport closed`; manager-managed connections trigger reconnect.
-- **HTTP non-2xx**: request/notify throws HTTP error; managed OAuth requests can refresh auth and retry once on 401/403.
-- **Invalid JSON response**: parse exception propagated.
-- **Legacy SSE stream ends**: pending requests fail with `Transport closed: legacy SSE stream closed`; manager-managed connections trigger reconnect.
-- **SSE ends without matching id**: request fails with `No response received for request ID ...`.
-- **Timeout**: transport-specific timeout error.
-- **Caller abort**: AbortError/reason propagated from caller signal where the method accepts one.
-
-## Practical boundary rule
-
-If the concern is message shape, id correlation, or MCP method ordering, it belongs to protocol/client logic.
-
-If the concern is framing (JSONL vs HTTP/SSE), stream parsing, fetch/spawn lifecycle, timeout clocks, or connection teardown, it belongs to transport implementation.
+- **Upstream transports**: nothing.
+- **Host unit**: starts a stopped or crashed server on the next request, subject to the crash guard.
+- **Link**: one retry after a credential refresh on `401`/`403`.
+- **Tool bridge**: one reconnect and retry for failures marked retryable; never for a request that may have reached the server.

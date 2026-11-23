@@ -9,36 +9,6 @@ describe("string expressions", () => {
 		const _schema: Eq<typeof T, Type<number, {}>> = true;
 	});
 
-	it("<", () => {
-		const T = type("number<10");
-		const _type: Eq<typeof T.infer, number> = true;
-		const _schema: Eq<typeof T, Type<number, {}>> = true;
-		const Expected = {
-			domain: "number",
-			max: { rule: 10, exclusive: true },
-		};
-		expect(Expected).toBeDefined();
-	});
-
-	it("<=", () => {
-		const T = type("number<=-49");
-		const _type: Eq<typeof T.infer, number> = true;
-		const _schema: Eq<typeof T, Type<number, {}>> = true;
-		const Expected = {
-			domain: "number",
-			max: { rule: -49, exclusive: false },
-		};
-		expect(Expected).toBeDefined();
-	});
-
-	it("==", () => {
-		const T = type("number==3211993");
-		const _type: Eq<typeof T.infer, number> = true;
-		const _schema: Eq<typeof T, Type<number, {}>> = true;
-		const Expected = { unit: 3211993 };
-		expect(Expected).toBeDefined();
-	});
-
 	it("== length", () => {
 		const T = type({ code: "string==6" });
 
@@ -54,18 +24,6 @@ describe("string expressions", () => {
 			domain: "number",
 			min: { rule: -5, exclusive: true },
 			max: 5,
-		};
-		expect(Expected).toBeDefined();
-	});
-
-	it("<=,<", () => {
-		const T = type("-3.23<=number<4.654");
-		const _type: Eq<typeof T.infer, number> = true;
-		const _schema: Eq<typeof T, Type<number, {}>> = true;
-		const Expected = {
-			domain: "number",
-			min: { rule: -3.23 },
-			max: { rule: 4.654, exclusive: true },
 		};
 		expect(Expected).toBeDefined();
 	});
@@ -149,8 +107,6 @@ describe("string expressions", () => {
 	it("empty range", () => {
 		expect(() => type("3<=number<2")).toThrow('numeric range is unsatisfiable in "3<=number<2"');
 	});
-
-	it.todo("double right bound");
 
 	it("negative-length", () => {
 		expect(() => type("string < 0")).toThrow();

@@ -95,7 +95,7 @@ describe("azure openai responses streaming", () => {
 		]);
 	});
 
-	it("repairs the orphaned output after dropping a malformed native function call", async () => {
+	it("replays a malformed native function call with parseable arguments so its output stays paired", async () => {
 		const previous = {
 			...createAssistantMessage(""),
 			stopReason: "toolUse" as const,
@@ -120,9 +120,12 @@ describe("azure openai responses streaming", () => {
 		});
 		const input = payload.input as Array<Record<string, unknown>>;
 
-		expect(input).not.toContainEqual(expect.objectContaining({ type: "function_call", call_id: "call_bad" }));
-		expect(input).not.toContainEqual(expect.objectContaining({ type: "function_call_output", call_id: "call_bad" }));
-		expect(JSON.stringify(input)).toContain("durable result");
+		const badCall = input.find(item => item.type === "function_call" && item.call_id === "call_bad");
+		expect(JSON.parse(String(badCall?.arguments))).toMatchObject({ __rawJson: '{"command":"unterminated' });
+		expect(input).toContainEqual(
+			expect.objectContaining({ type: "function_call_output", call_id: "call_bad", output: "durable result" }),
+		);
+		expect(JSON.stringify(input)).not.toContain("Orphan");
 	});
 
 	it("sends an async onPayload replacement body", async () => {

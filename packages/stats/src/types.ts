@@ -35,6 +35,44 @@ export interface MessageStats {
 	usage: Usage;
 	/** Which agent produced this message (main agent, task subagent, advisor) */
 	agentType: AgentType;
+	/**
+	 * Raw `purpose` of the `model_usage` entry this row was journaled from (a
+	 * model call that is not a conversation turn: title generation, judge
+	 * queries, …), `:detail` suffix included; `null` for an assistant message.
+	 * Non-null is what marks a row as off-transcript, so the parser always gives
+	 * such a row a value. Always written by `rowToMessageStats`; optional because
+	 * the parser omits it for assistant messages and session fixtures that stand
+	 * in for ingest input are typed as `MessageStats` too.
+	 */
+	purpose?: string | null;
+	/**
+	 * Service tier the provider reported serving this turn, or `null` when the
+	 * provider reported none. Lets consumers separate a fast serving path's
+	 * throughput and premium traffic from standard-tier traffic. Always written by
+	 * `rowToMessageStats`; optional only because session fixtures that stand in
+	 * for ingest input are typed as `MessageStats` too.
+	 */
+	serviceTier?: ServiceTier | null;
+	/**
+	 * Ingest refused to price this request: a scheduled (time-based) card with no
+	 * recoverable request timestamp, so `usage.cost.total` of 0 is unknown spend
+	 * rather than a free request. Always written by `rowToMessageStats`; optional
+	 * only because session fixtures that stand in for ingest input are typed as
+	 * `MessageStats` too.
+	 */
+	costUnpriced?: boolean;
+}
+
+/**
+ * Session-recorded token usage before pricing: counters are coerced to numbers
+ * because their columns are NOT NULL, but `cost` is only present when the
+ * session entry actually recorded one. Absence is meaningful — `resolveStoredCost`
+ * estimates a request with no recorded price, whereas a recorded zero is a real
+ * charge that scheduled cards freeze. `costUnpriced` is omitted because it is a
+ * decision of the ingest path, not something the parser or a caller supplies.
+ */
+export interface MessageStatsInput extends Omit<MessageStats, "usage" | "costUnpriced"> {
+	usage: Omit<Usage, "cost"> & { cost?: Partial<Usage["cost"]> };
 }
 
 /**
@@ -43,7 +81,11 @@ export interface MessageStats {
 export interface RequestDetails extends MessageStats {
 	/** The full conversation history or just the last turn. */
 	messages: unknown[];
-	/** The model's response. */
+	/**
+	 * The model's response. For a `model_usage` entry, the payload it journaled:
+	 * the reply text of a completion, else a judgment's answers by question id,
+	 * else `null`.
+	 */
 	output: unknown;
 }
 
@@ -88,6 +130,14 @@ export interface SessionModelUsageEntry {
 	usage: Usage;
 	stopReason?: StopReason;
 	errorMessage?: string;
+	/** Wall time of the request in milliseconds; absent on older entries. */
+	duration?: number;
+	/** Milliseconds until the first token; absent on older entries. */
+	ttft?: number;
+	/** What a native judge query answered, by question id; absent on older entries. */
+	judgment?: { state: string; answers: Record<string, number | [string | number, number]>; cached?: number };
+	/** What a text side channel (title generation) was sent and replied; absent on older entries. */
+	completion?: { prompt?: string; reply?: string };
 }
 
 /**
@@ -155,14 +205,18 @@ export interface UserMessageStats {
 	repetition: number;
 	/** Second-person reproach ("you didnt", "why did you", "stop X-ing") */
 	blame: number;
+	/** Judge-facing prose (see `judgeProse`); empty when the message was all markup. */
+	prose: string;
+	/** Hex `Bun.hash` of `prose`, keying the shared verdict cache; empty when `prose` is. */
+	proseHash: string;
 }
 
 /**
- * Pair emitted by the parser when it sees an assistant message whose
- * `parentId` points to a user message that wasn't parsed in the same pass
- * (e.g. user prompt landed in an earlier incremental sync). The aggregator
- * applies the link to the persisted `user_messages` row so it stops showing
- * up in the "unknown" model bucket.
+ * Pair emitted by the parser for each assistant message that answers a user
+ * message: the first assistant message descending from it through non-message
+ * entries, whether the user message was parsed in this pass or an earlier one.
+ * The aggregator applies the link to the persisted `user_messages` row so it
+ * stops showing up in the "unknown" model bucket.
  */
 export interface UserMessageLink {
 	sessionFile: string;
@@ -199,12 +253,17 @@ export interface ToolCallStats {
 	callsInTurn: number;
 	/** Serialized argument characters */
 	argsChars: number;
+	/** Result text characters, when the same parse also read the call's `toolResult` */
+	resultChars?: number;
+	/** Result error flag, set together with `resultChars` */
+	isError?: boolean;
 }
 
 /**
  * Result linkage emitted when the parser sees a `toolResult` message entry.
  * Applied as an UPDATE on the persisted tool-call row — results can land in a
- * later incremental sync pass than the call that produced them.
+ * later incremental sync pass than the call that produced them (calls parsed
+ * in the same pass already carry the result, so their UPDATE is a no-op).
  */
 export interface ToolResultLink {
 	sessionFile: string;
@@ -212,4 +271,17 @@ export interface ToolResultLink {
 	/** Text characters fed back into context */
 	resultChars: number;
 	isError: boolean;
+}
+
+/** One snapcompact compaction entry: the context size the session's estimate measured before and after it. */
+export interface SnapcompactCompactionStats {
+	sessionFile: string;
+	/** Compaction entry ID */
+	entryId: string;
+	/** Folder/project path (extracted from session filename) */
+	folder: string;
+	/** Compaction timestamp (Unix ms) */
+	timestamp: number;
+	tokensBefore: number;
+	tokensAfter: number;
 }

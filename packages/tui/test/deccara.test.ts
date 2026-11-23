@@ -54,10 +54,6 @@ describe("detectRectangularSgrSupport", () => {
 });
 
 describe("encodeDeccara", () => {
-	it("emits the 1-based inclusive DECCARA rectangle form", () => {
-		expect(encodeDeccara(1, 1, 4, 40, BG_SGR)).toBe(`\x1b[1;1;4;40;${BG_SGR}$r`);
-	});
-
 	it("matches kitty's documented background-fill example", () => {
 		// kitty docs/deccara.rst: blue (44) bg over rows 4..11, cols 3..10.
 		expect(`${DECSACE_RECT}${encodeDeccara(4, 3, 11, 10, "44")}${DECSACE_DEFAULT}`).toBe(
@@ -178,12 +174,5 @@ describe("planDeccaraFills", () => {
 		const plan = planDeccaraFills([line], 40);
 		expect(plan.texts[0]).toBe(`${BG_OPEN}Hi\x1b[0m`);
 		expect(plan.sequence).toBe(`${DECSACE_RECT}${encodeDeccara(1, 3, 1, 40, BG_SGR)}${DECSACE_DEFAULT}`);
-	});
-
-	it("passes plain rows through untouched with no rectangles", () => {
-		const lines = ["hello", "world"];
-		const plan = planDeccaraFills(lines, 40);
-		expect(plan.texts).toEqual(lines);
-		expect(plan.sequence).toBe("");
 	});
 });

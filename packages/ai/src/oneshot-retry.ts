@@ -1,7 +1,11 @@
-import { extractRetryHint } from "@oh-my-pi/pi-utils";
 import * as AIError from "./error";
 import type { AssistantMessage } from "./types";
-import { getHeadersFromError, getRetryAfterMsFromHeaders, type HeadersLike } from "./utils/retry-after";
+import {
+	extractProviderRetryHint,
+	getHeadersFromError,
+	getRetryAfterMsFromHeaders,
+	type HeadersLike,
+} from "./utils/retry-after";
 
 /**
  * Transient-failure retry for **oneshot** (non-agent-loop) completions.
@@ -66,6 +70,10 @@ export interface OneshotRetryOptions {
 	 * Thrown errors need no wiring — headers are recovered from the error itself.
 	 */
 	getResponseHeaders?: () => HeadersLike;
+	/** Provider id of the model being retried; selects its catalog-declared reset timezone. */
+	provider?: string;
+	/** Exact upstream endpoint, allowing custom provider IDs to inherit its reset timezone. */
+	baseUrl?: string;
 	/** Observability hook. Fires immediately before sleeping. */
 	onRetry?: (info: OneshotRetryInfo) => void;
 }
@@ -195,7 +203,7 @@ export async function retryTransientCompletion(
 		// errors (e.g. AnthropicApiError) carry their own headers.
 		const headers: HeadersLike = thrown !== undefined ? getHeadersFromError(thrown) : options?.getResponseHeaders?.();
 		const headerHintMs = getRetryAfterMsFromHeaders(headers);
-		const extractedTextHintMs = extractRetryHint(undefined, errorMessage);
+		const extractedTextHintMs = extractProviderRetryHint(options?.provider, errorMessage, options?.baseUrl);
 		const suffixValue = RETRY_AFTER_MS_SUFFIX.exec(errorMessage)?.[1];
 		const parsedSuffixMs = suffixValue === undefined ? undefined : Number(suffixValue);
 		const suffixHintMs =

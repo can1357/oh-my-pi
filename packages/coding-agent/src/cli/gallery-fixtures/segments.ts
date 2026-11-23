@@ -1,10 +1,10 @@
 import { truncateToWidth } from "@oh-my-pi/pi-tui";
-import type { StatusLineSegmentId } from "../../config/settings-schema";
-import { ALL_SEGMENT_IDS, renderSegment } from "../../modes/components/status-line/segments";
-import type { SegmentContext } from "../../modes/components/status-line/types";
-import { theme } from "../../modes/theme/theme";
+import type { StatusLineSegmentId } from "@oh-my-pi/pi-tui/status-line/schema";
+import { ALL_SEGMENT_IDS, renderSegment } from "@oh-my-pi/pi-tui/status-line/segments";
+import type { SegmentContext } from "@oh-my-pi/pi-tui/status-line/types";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 import type { GallerySessionOptions } from "./preview-session";
-import { createGallerySession, GALLERY_CONTEXT_WINDOW } from "./preview-session";
+import { createGallerySession, GALLERY_CONTEXT_WINDOW, GALLERY_PROMPT_CACHE } from "./preview-session";
 import type { GalleryPreviewEntry } from "./types";
 
 const FIXED_NOW = new Date(2026, 7, 29, 14, 7, 9);
@@ -20,7 +20,8 @@ export function getSegmentGalleryInventory(): readonly StatusLineSegmentId[] {
 	return [...ALL_SEGMENT_IDS];
 }
 
-function baseContext(sessionOptions?: GallerySessionOptions): SegmentContext {
+/** Deterministic full context for isolated status-segment previews and tests. */
+export function createGallerySegmentContext(sessionOptions?: GallerySessionOptions): SegmentContext {
 	return {
 		session: createGallerySession(sessionOptions),
 		now: FIXED_NOW,
@@ -44,8 +45,12 @@ function baseContext(sessionOptions?: GallerySessionOptions): SegmentContext {
 		prewalk: null,
 		loopMode: null,
 		goalMode: null,
+		goalStatusInFooter: true,
 		vibeMode: null,
+		vim: null,
 		collab: { role: "host", participantCount: 3 },
+		stream: null,
+		recording: false,
 		usageStats: {
 			input: 12_400,
 			output: 3_600,
@@ -79,6 +84,7 @@ function baseContext(sessionOptions?: GallerySessionOptions): SegmentContext {
 			fiveHour: { percent: 32, resetMinutes: 71 },
 			sevenDay: { percent: 68, resetHours: 52 },
 		},
+		promptCache: sessionOptions?.promptCache,
 	};
 }
 
@@ -89,6 +95,16 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 				{ label: "idle", context: { turnElapsedMs: null } },
 				{ label: "active", context: { turnElapsedMs: 92_000 } },
 				{ label: "focused subagent", context: { focusedAgentId: "Scout" } },
+			];
+		case "status":
+			return [
+				{ label: "multiple extension statuses", context: { hookStatuses: ["Indexer ready", "Tests passing"] } },
+				{
+					label: "coloured extension status",
+					context: {
+						hookStatuses: ["\x1b[33mbuilding\x1b[39m", "\x1b[1;38;2;255;95;135mfailed\x1b[0m", "queued"],
+					},
+				},
 			];
 		case "model":
 			return [
@@ -173,6 +189,11 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 					session: { usingSubscription: true, cost: 0, premiumRequests: 0, advisorCost: 0 },
 				},
 				{
+					label: "subscription + subagents",
+					session: { usingSubscription: true, cost: 0.38, premiumRequests: 0, advisorCost: 0 },
+					context: { subagentTreeCost: 1.27 },
+				},
+				{
 					label: "premium requests",
 					session: { cost: 0, premiumRequests: 2, advisorCost: 0 },
 				},
@@ -228,10 +249,44 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 					context: { usage: { tier: "Pro", fiveHour: { percent: 92, resetMinutes: 75 } } },
 				},
 			];
+		case "tree":
+			return [
+				{ label: "rewound", context: { treePosition: { ahead: 3 } } },
+				{ label: "on a branch", context: { treePosition: { branch: { index: 2, count: 3 }, ahead: 0 } } },
+				{ label: "rewound on a branch", context: { treePosition: { branch: { index: 1, count: 2 }, ahead: 1 } } },
+				{ label: "hidden (tip of a single line)" },
+			];
 		case "collab":
 			return [
 				{ label: "host active", context: { collab: { role: "host", participantCount: 3 } } },
 				{ label: "guest active", context: { collab: { role: "guest", participantCount: 3 } } },
+			];
+		case "vim":
+			return [
+				{
+					label: "normal",
+					context: { vim: { mode: "normal", pending: "", selectedLines: 0, display: "text" } },
+				},
+				{
+					label: "insert",
+					context: { vim: { mode: "insert", pending: "", selectedLines: 0, display: "text" } },
+				},
+				{
+					label: "visual with count",
+					context: { vim: { mode: "visual-line", pending: "2d", selectedLines: 4, display: "text" } },
+				},
+				{
+					label: "icon mode",
+					context: { vim: { mode: "normal", pending: "", selectedLines: 0, display: "icon" } },
+				},
+			];
+		case "cache":
+			return [
+				{ label: "cached", session: { promptCache: GALLERY_PROMPT_CACHE.warm } },
+				{ label: "likely cached (inferred)", session: { promptCache: GALLERY_PROMPT_CACHE.likelyWarm } },
+				{ label: "not cached — expired", session: { promptCache: GALLERY_PROMPT_CACHE.coldExpired } },
+				{ label: "not cached — model changed", session: { promptCache: GALLERY_PROMPT_CACHE.coldModel } },
+				{ label: "hidden (nothing to report)" },
 			];
 		default:
 			return [{ label: "canonical" }];
@@ -239,7 +294,7 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 }
 
 function renderIsolatedSegment(id: StatusLineSegmentId, spec: SegmentVariantSpec, width: number): readonly string[] {
-	const base = baseContext(spec.session);
+	const base = createGallerySegmentContext(spec.session);
 	const override = spec.context;
 	const context: SegmentContext = {
 		...base,

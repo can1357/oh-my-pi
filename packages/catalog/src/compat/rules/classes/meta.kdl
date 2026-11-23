@@ -1,9 +1,39 @@
 // Model-lineage compat for "meta"; regenerated from the frozen census using class taxonomy selectors.
 
 class "meta" {
-	models "muse-spark-1.2" "muse-spark-1.2-contributor" {
+	// Exact ids on purpose: only an exact selector upgrades hosts whose
+	// discovery misreports a Muse Spark revision as non-reasoning.
+	// muse-spark-1.3 standard and contributor expose the max effort tier;
+	// older revisions keep the 5-tier ladder.
+	models "muse-spark-1.3" "muse-spark-1.3-contributor" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh" "max"
+		thinking-mode "effort"
+	}
+	// Meta documents `max` for Muse Wonder (dev.meta.ai/docs/reasoning); the
+	// Muse Code-only Wonder Full and contributor tiers accept it too (verified
+	// 2026-10-12).
+	models "muse-wonder-1.0" "muse-wonder-1.0-contributor" "muse-wonder-full-1.0" "muse-wonder-full-1.0-contributor" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh" "max"
+		thinking-mode "effort"
+	}
+	// Muse Ember documents `minimal` through `max`, defaulting to `max`
+	// (dev.meta.ai/docs/muse-ember, 2026-11-10); no contributor tier.
+	models "muse-ember-1.0" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh" "max"
+		thinking-mode "effort"
+	}
+	models "muse-spark-1.1" "muse-spark-1.2" "muse-spark-1.2-contributor" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 		thinking-mode "effort"
+	}
+	// vLLM's Llama 3.1-3.3 chat templates raise "This model only supports
+	// single tool-calls at once!" on an assistant message holding several tool
+	// calls. Through OpenRouter, CoreWeave's endpoint for Llama 3.1 8B refused
+	// such a history 1 of 1 times and took the same calls replayed one assistant
+	// message each (verified 2026-11-22); Groq accepted both shapes. Llama 4's
+	// pythonic template takes parallel calls.
+	models "*llama-3*" "*llama3*" {
+		split-tool-calls #true
 	}
 	on "kilo" "nvidia" {
 		family "llama" {

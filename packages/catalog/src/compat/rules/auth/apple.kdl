@@ -1,0 +1,4 @@
+auth "apple" {
+	name "Apple Foundation Models (on-device)"
+	allows-missing-api-key #true
+}

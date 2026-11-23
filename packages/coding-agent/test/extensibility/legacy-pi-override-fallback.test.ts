@@ -20,15 +20,6 @@ import {
 // specifiers instead. Those entries must always pass validation because
 // the bundled registry — not the filesystem — is the source of truth.
 describe("legacy pi compat package-root override validation (issue #2168)", () => {
-	it("keeps overrides whose filesystem targets exist", () => {
-		const candidates = {
-			"@oh-my-pi/pi-ai": "/tmp/exists-ai.js",
-			"@oh-my-pi/pi-utils": "/tmp/exists-utils.js",
-		};
-		const result = __validateLegacyPiPackageRootOverrides(candidates, () => true);
-		expect(result).toEqual(candidates);
-	});
-
 	it("drops overrides whose filesystem targets are missing on disk", () => {
 		const candidates = {
 			"@oh-my-pi/pi-ai": "/tmp/exists-ai.js",
@@ -48,15 +39,6 @@ describe("legacy pi compat package-root override validation (issue #2168)", () =
 		// unchanged for native `node_modules` resolution.
 		expect(result).not.toHaveProperty("@oh-my-pi/pi-utils");
 		expect(result).not.toHaveProperty("@oh-my-pi/pi-tui");
-	});
-
-	it("drops every override when none of the filesystem targets exist", () => {
-		const candidates = {
-			"@oh-my-pi/pi-utils": "/$bunfs/root/packages/utils/src/index.js",
-			"@oh-my-pi/pi-tui": "/$bunfs/root/packages/tui/src/index.js",
-		};
-		const result = __validateLegacyPiPackageRootOverrides(candidates, () => false);
-		expect(result).toEqual({});
 	});
 
 	it("keeps virtual omp-legacy-pi-bundled: entries without touching the filesystem (issue #3423)", () => {

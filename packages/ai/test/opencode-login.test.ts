@@ -1,12 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import type { OAuthAuthInfo, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/registry/oauth/types";
-import { opencodeGoProvider } from "@oh-my-pi/pi-ai/registry/opencode-go";
-import { opencodeZenProvider } from "@oh-my-pi/pi-ai/registry/opencode-zen";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry/registry";
+
+const loginOpenCodeGo = getProviderDefinition("opencode-go")!.login!;
+const loginOpenCodeZen = getProviderDefinition("opencode-zen")!.login!;
 
 /**
- * Regression for #8738: `opencode-go` and `opencode-zen` share the same
- * `loginOpenCode` helper. It used to hardcode "OpenCode Zen" in the paste
- * prompt, so selecting OpenCode Go asked the user for an OpenCode Zen key.
+ * Regression for #8738: `opencode-go` and `opencode-zen` share one console.
+ * The old flow hardcoded "OpenCode Zen" in the paste prompt, so selecting
+ * OpenCode Go asked the user for an OpenCode Zen key.
  * The prompt (and browser instructions) must name the provider the user
  * actually selected.
  */
@@ -27,7 +29,7 @@ function captureLogin(): { callbacks: OAuthLoginCallbacks; seen: { auth?: OAuthA
 describe("OpenCode login prompt (#8738)", () => {
 	it("asks for an OpenCode Go key when connecting OpenCode Go", async () => {
 		const { callbacks, seen } = captureLogin();
-		const key = await opencodeGoProvider.login(callbacks);
+		const key = await loginOpenCodeGo(callbacks);
 
 		expect(key).toBe("sk-test-key");
 		expect(seen.message).toBe("Paste your OpenCode Go API key");
@@ -40,7 +42,7 @@ describe("OpenCode login prompt (#8738)", () => {
 
 	it("asks for an OpenCode Zen key when connecting OpenCode Zen", async () => {
 		const { callbacks, seen } = captureLogin();
-		const key = await opencodeZenProvider.login(callbacks);
+		const key = await loginOpenCodeZen(callbacks);
 
 		expect(key).toBe("sk-test-key");
 		expect(seen.message).toBe("Paste your OpenCode Zen API key");
@@ -52,6 +54,6 @@ describe("OpenCode login prompt (#8738)", () => {
 			onAuth: () => {},
 			onPrompt: async () => "   ",
 		};
-		await expect(opencodeGoProvider.login(callbacks)).rejects.toThrow();
+		await expect(loginOpenCodeGo(callbacks)).rejects.toThrow();
 	});
 });

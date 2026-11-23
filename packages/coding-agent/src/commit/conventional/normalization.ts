@@ -120,9 +120,23 @@ const POST_NFKD_REPLACEMENTS: Record<string, string> = {
 	"\ufeff": "",
 };
 
-/** Normalize Unicode punctuation, symbols, fractions, arrows, and spaces. */
+/**
+ * Normalize Unicode punctuation, symbols, fractions, arrows, and spaces.
+ *
+ * NFKD is the vehicle for the compatibility folding (fractions, super/subscripts,
+ * ligatures, fullwidth forms); it also splits every precomposed letter into a base
+ * plus combining marks, which is not part of that intent. Recomposing with NFC
+ * afterwards keeps each folding — compatibility mappings never recompose — while
+ * restoring the author's letters, so a summary is measured and stored at the length
+ * it was written. Without it the byte guard below counts the decomposition instead:
+ * Vietnamese inflates ~1.23x and Hangul ~2.4x, so a summary well inside the limit is
+ * rejected for exceeding it.
+ */
 export function normalizeCommitUnicode(text: string): string {
-	return replaceCharacters(replaceCharacters(text, PRE_NFKD_REPLACEMENTS).normalize("NFKD"), POST_NFKD_REPLACEMENTS);
+	return replaceCharacters(
+		replaceCharacters(text, PRE_NFKD_REPLACEMENTS).normalize("NFKD"),
+		POST_NFKD_REPLACEMENTS,
+	).normalize("NFC");
 }
 
 /** Estimate tokens with llm-git's four-UTF-8-bytes rule. */

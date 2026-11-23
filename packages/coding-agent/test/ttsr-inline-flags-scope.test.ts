@@ -29,6 +29,49 @@ describe("TTSR inline flags + scope quoting (#4796)", () => {
 		expect(regex.test("foobar")).toBe(true);
 	});
 
+	it("pins pure whole-buffer lookahead sequences to index zero", () => {
+		// Exact high-cost condition from the profile attached to issue #12261.
+		const pattern = String.raw`(?=[\s\S]*"op"\s*:\s*"wait")(?=[\s\S]*\b(?:[Cc][Ii]|[Pp]ipeline(?:s)?|[Pp]olic(?:y|ies)|[Pp][Rr]\s+[Cc]heck(?:s)?)\b)`;
+		const regex = compileRuleCondition(pattern);
+
+		expect(regex.sticky).toBe(true);
+		expect(regex.test('prefix { "op": "wait", "reason": "CI pending" }')).toBe(true);
+	});
+
+	it("keeps the whole-buffer optimization equivalent across nested regex syntax", () => {
+		const patterns = [
+			String.raw`(?=[\s\S]*foo(?:bar|baz))`,
+			String.raw`(?=[\s\S]*foo\(bar\))(?=[\s\S]*[()])`,
+			String.raw`(?=[\s\S]*^heading$)`,
+		];
+		const samples = ["", "prefix foobar", "foo(baz)", "before\nheading\nafter", "unrelated"];
+		for (const pattern of patterns) {
+			const optimized = compileRuleCondition(`(?m)${pattern}`);
+			const original = new RegExp(pattern, "m");
+			expect(optimized.sticky).toBe(true);
+			for (const sample of samples) {
+				optimized.lastIndex = 0;
+				original.lastIndex = 0;
+				expect(optimized.test(sample)).toBe(original.test(sample));
+			}
+		}
+	});
+
+	it("does not pin conditions that consume input outside the lookaheads", () => {
+		const regex = compileRuleCondition(String.raw`(?=[\s\S]*foo)bar`);
+
+		expect(regex.sticky).toBe(false);
+		expect(regex.test("prefix bar foo")).toBe(true);
+	});
+
+	it("does not pin lazy whole-buffer lookaheads whose captures depend on the start position", () => {
+		const pattern = String.raw`(?=[\s\S]*?(a|b))(?=[\s\S]*\1c)`;
+		const regex = compileRuleCondition(pattern);
+
+		expect(regex.sticky).toBe(false);
+		expect(regex.test("a x bc")).toBe(true);
+	});
+
 	it("registers and fires the reporter's exact rule end-to-end", () => {
 		// Reporter's frontmatter verbatim: leading (?i) condition + malformed
 		// `scope: "text","thinking"` (not valid YAML, forces the fallback path).

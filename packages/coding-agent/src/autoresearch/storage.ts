@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getAutoresearchDbPath, getAutoresearchProjectDir, logger } from "@oh-my-pi/pi-utils";
-import type { ASIData, ExperimentStatus, MetricDirection, NumericMetricMap } from "./types";
+import type { ASIData, ExperimentStatus, MetricDirection, NumericMetricMap } from "@oh-my-pi/pi-tui/tools/autoresearch";
 
 /**
  * Encode an absolute project path into a single filesystem-safe segment.

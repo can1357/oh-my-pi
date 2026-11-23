@@ -1,0 +1,114 @@
+{
+	"chart": {
+		"instructions": "The state is a Markdown table from a coding assistant's answer, with each column's inferred type. One chart will be drawn under the table. Each option states exactly what one candidate chart draws. Choose the chart that shows most clearly and truthfully what the table was written to show. A chart is only as good as its comparisons: marks sharing an axis must measure the same kind of quantity, a factor or a line between two values must join the same quantity, and the plotted columns should be the results a reader compares, not sample sizes, settings or identifiers. Choose none when no candidate draws a meaningful comparison, or the numbers are identifiers, settings, or too few or too similar to compare: the table already says it.",
+		"criteria": {
+			"bar": "Bar chart: one bar per {{axis}} for \"{{first}}\", each labelled with its value{{#if reference}} and its change from \"{{reference}}\"{{/if}}.",
+			"paired": "{{#if transition}}Dumbbell chart: for each {{axis}}, a line from its \"{{first}}\" value to its \"{{second}}\" value on one shared axis (logarithmic where the values span orders of magnitude), labelled with both values and the factor between them.{{else}}Dumbbell chart: for each {{axis}}, its \"{{first}}\" and \"{{second}}\" values as two dots joined on one shared axis (logarithmic where the values span orders of magnitude), labelled with both values and the factor between them.{{/if}}",
+			"slope": "Slope chart: one line per {{axis}} through its values at {{#list series prefix='\"' suffix='\"' join=', '}}{{this}}{{/list}}, in that order.",
+			"grouped": "Grouped bars: for each {{axis}}, bars for {{#list series prefix='\"' suffix='\"' join=', '}}{{this}}{{/list}}{{#if moreSeries}} and {{moreSeries}} more{{/if}} side by side on one shared axis.",
+			"stacked": "Stacked bars: one bar per {{axis}}, split into segments for {{#list series prefix='\"' suffix='\"' join=', '}}{{this}}{{/list}}{{#if whole}} that add up to \"{{whole}}\"{{/if}}{{#if normalized}}, each bar scaled to 100%{{/if}}.",
+			"line": "Line chart: {{#list series prefix='\"' suffix='\"' join=', '}}{{this}}{{/list}}{{#if moreSeries}} and {{moreSeries}} more{{/if}} as lines over {{#if x}}\"{{x}}\"{{else}}the {{axis}} values in table order{{/if}}.",
+			"heatmap": "Heatmap: a grid of cells, one line per {{axis}} and one column for each of {{#list series prefix='\"' suffix='\"' join=', '}}{{this}}{{/list}}{{#if moreSeries}} and {{moreSeries}} more{{/if}}, each cell printing its value and shaded by it{{#if perColumn}} within its column{{/if}}{{#if perRow}} within its row{{/if}}.",
+			"multiples": "{{#if transposed}}Small multiples: one panel per row of the table ({{#list series prefix='\"' suffix='\"' join=', '}}{{this}}{{/list}}{{#if moreSeries}} and {{moreSeries}} more{{/if}}), each comparing {{#list rows prefix='\"' suffix='\"' join=', '}}{{this}}{{/list}}{{#if moreRows}} and {{moreRows}} more{{/if}} on its own scale.{{else}}Small multiples: one panel per column ({{#list series prefix='\"' suffix='\"' join=', '}}{{this}}{{/list}}{{#if moreSeries}} and {{moreSeries}} more{{/if}}), each with one bar per {{axis}} on its own scale{{#if reference}}, read against \"{{reference}}\"{{/if}}.{{/if}}",
+			"share": "Share bar: one bar split into each {{axis}}'s share of the total of \"{{first}}\".",
+			"diverging": "Diverging bars: one bar per {{axis}} for \"{{first}}\", positive values to the right of zero and negative ones to the left.",
+			"butterfly": "Back-to-back bars: for each {{axis}}, \"{{first}}\" to the left and \"{{second}}\" to the right of a shared spine, with each net beside them.",
+			"scatter": "Scatter plot: one point per {{axis}}, placed by \"{{x}}\" horizontally and \"{{first}}\" vertically; no other column is drawn.",
+			"change": "Factors of change: for each {{axis}}, how many times larger or smaller {{#list series prefix='\"' suffix='\"' join=', '}}{{this}}{{/list}}{{#if moreSeries}} and {{moreSeries}} more{{/if}} {{#if second}}are{{else}}is{{/if}} than \"{{baseline}}\", as bars to either side of 1×.",
+			"progress": "Progress bars: one track per {{axis}} for {{#list series prefix='\"' suffix='\"' join=', '}}{{this}}{{/list}}, each filled toward 100%.",
+			"timeline": "Timeline: the \"{{first}}\" of each {{axis}} laid end to end on one axis, in table order.",
+			"waterfall": "Waterfall: the \"{{first}}\" of each {{axis}} added step by step, in table order, up to their total.",
+			"dots": "Dot plot: for each {{axis}}, one dot for each of {{#list series prefix='\"' suffix='\"' join=', '}}{{this}}{{/list}}{{#if moreSeries}} and {{moreSeries}} more{{/if}} on one shared axis (logarithmic where the values span orders of magnitude){{#if baseline}}, as factors of \"{{baseline}}\"{{/if}}.",
+			"range": "Range chart: for each {{axis}}, the low–high interval of {{#list series prefix='\"' suffix='\"' join=', '}}{{this}}{{/list}} as a floating bar.",
+			"bullet": "Bullet chart: for each {{axis}}, its \"{{first}}\" as a bar against its own {{target}} mark.",
+			"ladder": "Quantile ladders: for each {{axis}}, a line from its lowest to its highest of {{#list series prefix='\"' suffix='\"' join=', '}}{{this}}{{/list}}{{#if moreSeries}} and {{moreSeries}} more{{/if}} with a mark at each, on one shared axis.",
+			"histogram": "Histogram: {{#list series prefix='\"' suffix='\"' join=', '}}{{this}}{{/list}} as columns over the bins of {{axis}}, in bin order.",
+			"stat": "Stat tiles: one tile for each of {{#list series prefix='\"' suffix='\"' join=', '}}{{this}}{{/list}}, showing the factor between {{#list rows prefix='\"' suffix='\"' join=', '}}{{this}}{{/list}} in large figures.",
+			"none": "No chart: the table already says it."
+		}
+	},
+	"worth": {
+		"instructions": "The state is a Markdown table from a coding assistant's answer, with each column's inferred type. Would a chart drawn under this table help a reader: does it hold numeric results compared across its rows or columns that a picture makes clearer? No when its numbers are identifiers, codes, versions, settings, positions, timestamps or counts quoted inside prose, when cells pack several numbers together, or when there are too few or too similar values to compare: the table already says it."
+	},
+	"metrics": {
+		"instructions": "The state is a Markdown table from a coding assistant's answer, with each column's inferred type. Is each row a different metric (its own unit or meaning, like \"latency\", \"cost\", \"success rate\") while the columns are the things being compared? No when each row is one item measured by the same columns."
+	},
+	"shading": {
+		"instructions": "The state is a Markdown table from a coding assistant's answer, with each column's inferred type. Suppose its chart draws every value as a cell in a grid of rows and columns. Which values should be compared with which? Choose series when the columns are different quantities (input vs. output vs. reasoning tokens, recall vs. cost): each column compared within itself. Choose row when the columns are one measure under different conditions (stock vs. branch build time, c4 vs. c8) and the rows differ widely in size (a small app beside a huge one): each row compared across its columns. Choose shared when every cell is the same measure on a similar scale, so any two cells compare.",
+		"criteria": {
+			"shared": "Every cell is the same measure on a similar scale; any two cells compare.",
+			"series": "The columns are different quantities; compare within each column.",
+			"row": "The columns are one measure under different conditions and the rows differ widely in size; compare each row."
+		}
+	},
+	"order": {
+		"instructions": "The state is a Markdown table from a coding assistant's answer, with each column's inferred type. A chart will be drawn under the table, one entry per row, measuring \"{{column}}\". In what order should its rows appear? Choose table when the row order means something (time, steps, a pipeline, size classes, a baseline first, related rows kept together) or the rows are already ranked. Choose descending or ascending only when the rows are independent items in no meaningful order, so ranking them by \"{{column}}\" makes the chart easier to read: descending for the largest first, ascending when smaller is better (latency, cost, errors).",
+		"criteria": {
+			"table": "Keep the table's row order: it is deliberate or already ranked.",
+			"descending": "Rank independent items largest first.",
+			"ascending": "Rank independent items smallest first: smaller is better."
+		}
+	},
+	"reference": {
+		"instructions": "The state is a Markdown table from a coding assistant's answer, with each column's inferred type. A chart will be drawn under the table, one entry per row. Is one row the reference the other rows are measured against — a baseline, control, default, stock or current setup — so each other row should read as more or less than it? Choose its \"{{column}}\" value{{#if repeats}} (it may repeat once per group, like each model's baseline run){{/if}}. Choose none when no row plays that role: rows that are merely first, the largest, or the recommended pick are not references.",
+		"criteria": {
+			"none": null
+		}
+	},
+	"label": {
+		"instructions": "The state is a Markdown table from a coding assistant's answer, with each column's inferred type. A chart will be drawn under the table, one entry per row, each entry labelled with one column's cell. Which column names the rows: the short name a reader would use to point at a row (a model, file, scenario, option or thread)? Not a description, note, verdict or yes/no answer. A number names its row when it only identifies or ranks it (a thread id, a finding number, a numbered pick), not when it is a quantity the table compares.",
+		"criteria": {}
+	},
+	"conditions": {
+		"instructions": "The state is a Markdown table from a coding assistant's answer, with each column's inferred type. Do the columns {{#list columns prefix='\"' suffix='\"' join=', '}}{{this}}{{/list}} hold the same quantity measured under different conditions — before and after a change, a baseline and its variants, versions, tools or setups measured the same way — so the values in one row compare directly? No when they measure different things (vertices vs. faces, a share vs. a rate, a count vs. a score, a total vs. its parts or its change) or the table is one list wrapped into two halves."
+	},
+	"column": {
+		"instructions": "The state is a Markdown table from a coding assistant's answer, with each column's inferred type. A chart will be drawn under the table. Should the column \"{{column}}\" be plotted as one of the chart's data series? Yes for a result the table compares between its rows. No for a sample size or number of runs behind the results, a significance or confidence figure about them (a p-value), a total, average, ratio or difference restating other columns (a `ratio` or `speedup` of two timings the chart already plots), a setting that barely varies, or a number that only labels a row."
+	},
+	"name": {
+		"instructions": "The state is a Markdown table from a coding assistant's answer, with each column's inferred type. A chart will be drawn under the table, naming each row by its \"{{label}}\" cell. Should the column \"{{column}}\" join that name? Yes when rows sharing a \"{{label}}\" value differ by this column (the harness, setting or variant a run used), so without it two rows would look alike. No for notes, descriptions, or values that add nothing to telling rows apart."
+	},
+	"group": {
+		"instructions": "The state is a Markdown table from a coding assistant's answer, with each column's inferred type. A chart will be drawn under the table, one entry per row. Should the chart group its rows by the column \"{{column}}\", writing each of its values once beside the block of rows that share it? Yes when the other naming columns vary within each of its values (each model with its harnesses), even if the table interleaves them: rows regroup by it. No when its values do not repeat, or the rows are independent items."
+	},
+	"title": {
+		"instructions": "The state is a Markdown table from a coding assistant's answer, with each column's inferred type. This chart will be drawn under the table: {{chart}} It is headed by one line stating its main finding. Which statement says what a reader most needs to take away: the comparison or result the table was written to show? Prefer a statement about the whole table (every row improved, one option best on several measures, one group far above the rest) over a single row's value. Choose none only when every statement is beside the table's point or would mislead.",
+		"criteria": {
+			"none": "No title: none of these is the table's point."
+		}
+	},
+	"move": {
+		"instructions": "The state is a Markdown table from a coding assistant's answer, with each column's inferred type. The values in {{#each columns}}\"{{this}}\"{{#unless @last}}, {{/unless}}{{/each}}{{#if arrow}}, written as before → after,{{/if}} are one quantity at successive stages — before and after a change, or a baseline and later iterations — so each row moves from one value to the next. Which way is better for that quantity? Higher when a larger value is better: pass or success rates, accuracy, scores, throughput, speedups, savings. Lower when a smaller value is better: cost, latency, run time, errors, failures, turns or attempts needed, and tokens, memory or size a change aims to cut. Read the headers, notes and marks around the numbers for what they measure (✅ beside the smaller values, \"regressed\" beside a rise). Neutral when neither way is better or the table does not say.",
+		"criteria": {
+			"higher": "A larger value is better.",
+			"lower": "A smaller value is better.",
+			"neutral": "Neither: it describes, counts or identifies."
+		}
+	},
+	"rivals": {
+		"instructions": "The state is a Markdown table from a coding assistant's answer, with each column's inferred type. A chart will be drawn under the table, marking the best value of each comparison. What competes in this table? Rows when the rows are alternatives scored on the same measures (models, configurations, benchmark arms, plans, tools), so the best row of each column is worth marking. Columns when the numeric columns are alternatives measured on every row (implementations, settings, versions or harnesses side by side for each workload), so the best column of each row is worth marking. Neither when the rows are parts of a whole, steps of a process, files, categories, a before/after pair, or items described side by side rather than ranked.",
+		"criteria": {
+			"rows": "The rows are alternatives: mark the best row of each column.",
+			"columns": "The numeric columns are alternatives: mark the best column of each row.",
+			"neither": "Parts, steps, files, categories, a before/after, or items described rather than ranked."
+		}
+	},
+	"polarity": {
+		"instructions": "The state is a Markdown table from a coding assistant's answer, with each column's inferred type. A chart will be drawn under the table. Which way is better for the column \"{{column}}\"? Higher when a larger value is better: pass or success rates, accuracy, recall, throughput, speedups, savings. Lower when a smaller value is better: cost, latency, run time, errors, failures, and tokens, memory or size when the table compares options or runs to cut them. For a difference or \"vs\" column, judge what a larger value means (a larger saving is better, a larger slowdown worse). Neutral when neither way is better: counts, sizes or shares that describe the items, settings, identifiers.",
+		"criteria": {
+			"higher": "A larger value is better.",
+			"lower": "A smaller value is better.",
+			"neutral": "Neither: it describes, counts or identifies."
+		}
+	},
+	"focus": {
+		"instructions": "The state is a Markdown table from a coding assistant's answer, with each column's inferred type. A chart will be drawn under the table, one entry per row. Which row is the table about: the option it recommends or picks, the current or proposed one the others are weighed against, or the one it highlights? Choose none when no single row stands out from the rest.",
+		"criteria": {
+			"none": "No single row stands out."
+		}
+	},
+	"rowPolarity": {
+		"instructions": "The state is a Markdown table from a coding assistant's answer, with each column's inferred type. Each row is a different metric, compared across the columns. Which way is better for the metric in the row \"{{row}}\"? Higher when a larger value is better: pass or success rates, accuracy, throughput, speedups, savings. Lower when a smaller value is better: cost, latency, run time, errors, failures, retries, and tokens, memory or size a change aims to cut. Neutral when neither way is better: counts or sizes that only describe the work, settings, identifiers.",
+		"criteria": {}
+	}
+}

@@ -1,6 +1,10 @@
 import { Database } from "bun:sqlite";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { AdvisorToolFactory } from "@oh-my-pi/pi-coding-agent/session/session-advisors";
+import { TodoTool } from "@oh-my-pi/pi-coding-agent/tools";
 
 /**
  * Shared factory for building a minimal mock `AssistantMessage`
@@ -33,4 +37,25 @@ export function createAssistantMessage(text: string): AssistantMessage {
  */
 export function createInMemoryAuthStorage(): AuthStorage {
 	return new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
+}
+
+/**
+ * Make `todo` the session's active tool. Todo stop reminders only fire while
+ * the todo tool is active, so reminder tests on tool-less sessions need this.
+ */
+export function activateTodoTool(session: AgentSession, cwd: string): void {
+	session.agent.setTools([
+		new TodoTool({
+			cwd,
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: session.settings,
+		}),
+	]);
+}
+
+/** Advisor tools that hand every advisor the same fixture instances; for mocks whose state does not matter. */
+export function fixedAdvisorTools(...tools: AgentTool[]): AdvisorToolFactory {
+	return { names: () => tools.map(tool => tool.name), create: () => ({ tools }) };
 }

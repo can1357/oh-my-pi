@@ -81,6 +81,30 @@ describe("ensureAutoresearchBranch jj guardrails", () => {
 		expect(result.branchName).toMatch(/^autoresearch\/demo-\d{8}$/);
 	});
 
+	it("trims a trailing dash when the goal slug hits the 48-character cap", async () => {
+		const dir = await mkTempDir("omp-ar-capped-goal-");
+		await initGitWithCommit(dir);
+
+		const result = await ensureAutoresearchBranch(stubApi, dir, `${"a".repeat(47)} /tail`);
+
+		expect(result.ok).toBe(true);
+		if (!result.ok) throw new Error("unreachable");
+		expect(result.created).toBe(true);
+		expect(result.branchName).toMatch(/^autoresearch\/a{47}-\d{8}$/);
+	});
+
+	it("uses session when no characters survive goal sanitization", async () => {
+		const dir = await mkTempDir("omp-ar-empty-goal-");
+		await initGitWithCommit(dir);
+
+		const result = await ensureAutoresearchBranch(stubApi, dir, "!!!");
+
+		expect(result.ok).toBe(true);
+		if (!result.ok) throw new Error("unreachable");
+		expect(result.created).toBe(true);
+		expect(result.branchName).toMatch(/^autoresearch\/session-\d{8}$/);
+	});
+
 	it("returns the soft no-git warning for directories backed by neither tool", async () => {
 		const dir = await mkTempDir("omp-ar-empty-");
 

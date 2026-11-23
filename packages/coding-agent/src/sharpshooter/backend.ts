@@ -3,7 +3,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { MemoryBackend, MemoryBackendSearchItem, MemoryBackendStatus } from "../memory-backend/types";
 import { truncateApproxTokens } from "../mnemopi/config";
 import type { AgentSession } from "../session/agent-session";
-import { runSharpshooterConsolidation } from "./consolidate";
+import { runSharpshooterConsolidation, sharpshooterNextConsolidationAt } from "./consolidate";
 import { maybeStartSharpshooterExtraction, resolveSharpshooterModel } from "./extract";
 import {
 	readSharpshooterState,
@@ -15,6 +15,8 @@ import {
 import { listSharpshooterDeltas, sharpshooterQueueDepth } from "./queue";
 import { startSharpshooterScheduler } from "./scheduler";
 import { SHARPSHOOTER_MEMORY_FILES } from "./types";
+
+import { cfgSharpshooterInjectionTokenLimit, cfgSharpshooterIntervalMinutes } from "./settings";
 
 interface SharpshooterSessionResources {
 	unsubscribe: () => void;
@@ -82,9 +84,12 @@ export const sharpshooterBackend: MemoryBackend = {
 			releaseSharpshooterSession(session);
 			const disposeScheduler = startSharpshooterScheduler({
 				agentDir,
-				cwd: settings.getCwd(),
+				cwd: session.sessionManager.getCwd(),
 				settings,
 				modelRegistry,
+				sessionId: session.sessionId,
+				getSessionProvider: () => session.model?.provider,
+				usageLedger: session.sessionManager,
 			});
 			try {
 				const unsubscribe = session.subscribe(event => {
@@ -113,19 +118,25 @@ export const sharpshooterBackend: MemoryBackend = {
 		}
 	},
 
-	async buildDeveloperInstructions(agentDir, settings): Promise<string | undefined> {
-		const files = await readMemoryFiles(agentDir, settings.getCwd());
+	async buildDeveloperInstructions(agentDir, cwd, settings): Promise<string | undefined> {
+		const files = await readMemoryFiles(agentDir, cwd);
 		const populated = files.filter(file => file.content.trim().length > 0);
 		if (populated.length === 0) return undefined;
 		const parts = [
 			"Project decision memory (sharpshooter). These are friction-earned decisions; follow them unless the user overrides.",
 		];
 		for (const file of populated) parts.push(`## ${file.name.slice(0, -3)}\n\n${file.content.trim()}`);
-		return truncateApproxTokens(parts.join("\n\n"), settings.get("sharpshooter.injectionTokenLimit"));
+		return truncateApproxTokens(parts.join("\n\n"), cfgSharpshooterInjectionTokenLimit.get(settings));
 	},
 
 	async clear(agentDir, cwd): Promise<void> {
 		await rm(sharpshooterBankDir(agentDir, cwd), { recursive: true, force: true });
+	},
+
+	// `model`, `minPromptLength`, and `intervalMinutes` are read per extraction/scheduler
+	// tick; only the prompt-injected budget needs a rebuild to take effect.
+	async applySettings(session, changed): Promise<void> {
+		if (changed.includes("sharpshooter.injectionTokenLimit")) await session.refreshBaseSystemPrompt();
 	},
 
 	async enqueue(agentDir, cwd, session): Promise<void> {
@@ -138,7 +149,10 @@ export const sharpshooterBackend: MemoryBackend = {
 			cwd,
 			settings: session.settings,
 			modelRegistry: session.modelRegistry,
+			sessionId: session.sessionId,
+			getSessionProvider: () => session.model?.provider,
 			force: true,
+			usageLedger: session.sessionManager,
 		});
 	},
 
@@ -188,10 +202,13 @@ export const sharpshooterBackend: MemoryBackend = {
 
 	async diagnose(agentDir, cwd, session): Promise<string> {
 		const state = await readSharpshooterState(agentDir, cwd);
-		const intervalMinutes = session?.settings.get("sharpshooter.intervalMinutes") ?? 5;
-		const intervalMs = Math.max(0, intervalMinutes) * 60_000;
-		const dueInMs = Math.max(0, state.lastConsolidatedAt + intervalMs - Date.now());
-		const model = session ? await resolveSharpshooterModel(session.settings, session.modelRegistry) : undefined;
+		const intervalMinutes = session
+			? cfgSharpshooterIntervalMinutes.get(session.settings)
+			: cfgSharpshooterIntervalMinutes.default;
+		const dueInMs = Math.max(0, sharpshooterNextConsolidationAt(state, intervalMinutes) - Date.now());
+		const model = session
+			? await resolveSharpshooterModel(session.settings, session.modelRegistry, session.model?.provider)
+			: undefined;
 		return [
 			"# Sharpshooter Diagnostics",
 			"",

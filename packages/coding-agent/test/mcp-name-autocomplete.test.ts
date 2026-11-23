@@ -42,9 +42,10 @@ async function writeConfig(
 }
 
 /** Fake ctx carrying only the mcpManager surface `collectMcpServerNames` reads. */
-function createFakeCtx(discoveredNames: string[]) {
+function createFakeCtx(discoveredNames: string[], droppedNames: string[] = []) {
 	const mcpManager = {
 		getAllServerNames: vi.fn((): string[] => discoveredNames),
+		getBuiltinDrops: vi.fn(() => new Map(droppedNames.map(name => [name, { reason: "replaced" }]))),
 		getSource: vi.fn((): SourceMeta | undefined => undefined),
 		getConnectionStatus: vi.fn(() => "connected" as const),
 	};
@@ -85,22 +86,6 @@ describe("MCP server-name autocomplete", () => {
 		const names = await collectMcpServerNames(ctx);
 
 		expect(names).toEqual(["project-server", "runtime-discovered", "user-disabled", "user-enabled"]);
-	});
-
-	test("collectMcpServerNames includes a discovered server disabled via disabledServers, even once dropped from mcpManager", async () => {
-		// A third-party-discovered server that was `/mcp disable`d: recorded in the user
-		// config's top-level `disabledServers` list, absent from `mcpServers`, and no
-		// longer reported by the manager (loadAllMCPConfigs filters disabled sources out).
-		await Bun.write(
-			getMCPConfigPath("user", projectDir),
-			`${JSON.stringify({ mcpServers: {}, disabledServers: ["discovered-disabled"] }, null, 2)}\n`,
-		);
-		await writeConfig("project", projectDir, {});
-		const { ctx } = createFakeCtx([]);
-
-		const names = await collectMcpServerNames(ctx);
-
-		expect(names).toEqual(["discovered-disabled"]);
 	});
 
 	test("collectMcpServerNames accepts preloaded configs and skips re-reading them from disk", async () => {
@@ -158,6 +143,19 @@ describe("MCP server-name autocomplete", () => {
 		expect(await mcp.getArgumentCompletions("reconnect ")).toBeNull();
 		expect(await mcp.getArgumentCompletions("reauth ")).toBeNull();
 		expect(await mcp.getArgumentCompletions("unauth ")).toBeNull();
+	});
+
+	test("/mcp offers a server a built-in transform dropped to enable, not to subcommands that need it running", async () => {
+		await writeConfig("user", projectDir, {});
+		await writeConfig("project", projectDir, {});
+		const { ctx } = createFakeCtx([], ["codex-repl"]);
+		const runtime: TuiSlashCommandRuntime = { ctx };
+		const mcp = buildTuiBuiltinSlashCommands(runtime).find(c => c.name === "mcp");
+		if (!mcp?.getArgumentCompletions) throw new Error("expected /mcp command with getArgumentCompletions");
+
+		expect((await mcp.getArgumentCompletions("enable "))?.map(item => item.label)).toEqual(["codex-repl"]);
+		expect(await mcp.getArgumentCompletions("test ")).toBeNull();
+		expect(await mcp.getArgumentCompletions("reconnect ")).toBeNull();
 	});
 
 	test("/mcp only offers disabled configured servers to subcommands that can accept them", async () => {

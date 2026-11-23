@@ -96,6 +96,72 @@ describe("lm studio local provider discovery", () => {
 		expect(unloaded?.contextWindow).toBe(262144);
 	});
 
+	test("routes v1-listed decision models to the Decisions runner as judges", async () => {
+		const json = (body: unknown) =>
+			new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+		const fetchMock: FetchImpl = vi.fn(async input => {
+			const url = String(input);
+			// `/v1/models` lists decision models beside chat models with nothing to tell them apart.
+			if (url === "http://127.0.0.1:1234/v1/models") {
+				return json({
+					data: [
+						{ id: "d1-omni-600m", object: "model" },
+						{ id: "kev-0.8b:2", object: "model" },
+						{ id: "plain-llm", object: "model" },
+					],
+				});
+			}
+			if (url === "http://127.0.0.1:1234/api/v0/models") {
+				return json({ data: [{ id: "plain-llm", type: "llm", max_context_length: 32768 }] });
+			}
+			if (url === "http://127.0.0.1:1234/api/v1/models") {
+				return json({
+					models: [
+						{
+							type: "decision",
+							key: "d1-omni-600m",
+							max_context_length: 128000,
+							decision_type: "lfm2-d1-omni",
+							has_vision_adapter: true,
+							loaded_instances: [{ id: "d1-omni-600m", config: { context_length: 8192 } }],
+						},
+						{
+							type: "decision",
+							key: "kev-0.8b",
+							max_context_length: 262144,
+							decision_type: "kev",
+							has_vision_adapter: false,
+							loaded_instances: [{ id: "kev-0.8b:2", config: { context_length: 4096 } }],
+						},
+						{ type: "llm", key: "plain-llm", max_context_length: 32768, capabilities: { vision: false } },
+					],
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		});
+
+		const models = await lmStudioModelManagerOptions({ fetch: fetchMock }).fetchDynamicModels?.();
+		const routes = models?.map(model => ({
+			id: model.id,
+			api: model.api,
+			kind: model.kind,
+			input: model.input,
+			contextWindow: model.contextWindow,
+		}));
+
+		expect(routes).toEqual([
+			{
+				id: "d1-omni-600m",
+				api: "openai-decisions",
+				kind: "judge",
+				input: ["text", "image"],
+				contextWindow: 8192,
+			},
+			{ id: "kev-0.8b:2", api: "openai-decisions", kind: "judge", input: ["text"], contextWindow: 4096 },
+			{ id: "plain-llm", api: "openai-completions", kind: undefined, input: ["text"], contextWindow: 32768 },
+		]);
+	});
+
 	test("falls back to the OpenAI-compatible catalog when native metadata hangs", async () => {
 		let nativeAborted = false;
 		let openAiCatalogStartedBeforeAbort = false;

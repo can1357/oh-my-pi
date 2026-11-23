@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import type { ApiKeyResolveContext } from "@oh-my-pi/pi-ai";
-import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai";
+import type { ApiKeyResolution, ApiKeyResolveContext } from "@oh-my-pi/pi-ai";
+import { registerCustomApi, resolveApiKeyOnce, seedApiKeyResolver, unregisterCustomApis } from "@oh-my-pi/pi-ai";
 import { OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { classify } from "@oh-my-pi/pi-ai/error/flags";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
@@ -103,6 +103,57 @@ describe("streamSimple resolver auth retry", () => {
 		unregisterCustomApis(SOURCE_ID);
 	});
 
+	it("surfaces an exact Anthropic model 404 after text without replaying partial output", async () => {
+		const keys: unknown[] = [];
+		const contexts: ApiKeyResolveContext[] = [];
+		const requestedModel = { ...model(), provider: "anthropic", id: "claude-mythos-5-2" };
+		const failure = {
+			...assistantError(
+				`404 ${JSON.stringify({
+					type: "error",
+					error: { type: "not_found_error", message: `model: ${requestedModel.id}` },
+				})}`,
+				404,
+			),
+			provider: requestedModel.provider,
+			model: requestedModel.id,
+			content: [{ type: "text" as const, text: "partial" }],
+		};
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: assistant() });
+					stream.push({
+						type: "text_delta",
+						contentIndex: 0,
+						delta: "partial",
+						partial: { ...failure, stopReason: "stop" },
+					});
+					stream.push({ type: "error", reason: "error", error: failure });
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		const stream = streamSimple(requestedModel, context, {
+			apiKey: ctx => {
+				contexts.push(ctx);
+				return ctx.error === undefined ? "denied-key" : "sibling-key";
+			},
+		});
+		const deltas: string[] = [];
+		for await (const event of stream) {
+			if (event.type === "text_delta") deltas.push(event.delta);
+		}
+		expect(await stream.result()).toEqual(failure);
+		expect(deltas).toEqual(["partial"]);
+		expect(keys).toEqual(["denied-key"]);
+		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false]);
+	});
+
 	it("retries with a refreshed key when a 401 is thrown before the first event", async () => {
 		const keys: unknown[] = [];
 		const contexts: ApiKeyResolveContext[] = [];
@@ -137,6 +188,40 @@ describe("streamSimple resolver auth retry", () => {
 		]);
 		expect(contexts[1]).toBeDefined();
 		expect((contexts[1]!.error as { status?: number }).status).toBe(401);
+	});
+
+	it("stamps the serving sibling after a 401 rotates away from the signed-in credential", async () => {
+		const attempted: Array<{ key: string | undefined; credentialId: number | undefined }> = [];
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				attempted.push({
+					key: typeof options?.apiKey === "string" ? options.apiKey : undefined,
+					credentialId: options?.credentialId,
+				});
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => (options?.apiKey === "first" ? stream.fail(authError()) : ok(stream)));
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		const resolver = (ctx: ApiKeyResolveContext) =>
+			ctx.lastChance ? { apiKey: "sibling", credentialId: 2 } : { apiKey: "first", credentialId: 1 };
+		let preflight: ApiKeyResolution;
+		await resolveApiKeyOnce(resolver, undefined, resolved => {
+			preflight = resolved;
+		});
+		const stream = streamSimple(model(), context, { apiKey: seedApiKeyResolver(preflight, resolver) });
+		let doneCredentialId: number | undefined;
+		for await (const event of stream) {
+			if (event.type === "done") doneCredentialId = event.message.credentialId;
+		}
+		expect(attempted).toEqual([
+			{ key: "first", credentialId: 1 },
+			{ key: "sibling", credentialId: 2 },
+		]);
+		expect(doneCredentialId).toBe(2);
+		expect((await stream.result()).credentialId).toBe(2);
 	});
 
 	it("replays exactly once after a provider requests token refresh, then succeeds", async () => {
@@ -507,6 +592,41 @@ describe("streamSimple resolver auth retry", () => {
 		expect(keys).toEqual(["old-key", "switch-key"]);
 	});
 
+	it("surfaces the Z.AI reset rather than a stale sibling's 401 after rotation runs out", async () => {
+		const quota = Object.assign(
+			new Error("429 [1308][Usage limit reached for 5 hour. Your limit will reset at 13:23 UTC]"),
+			{ status: 429 },
+		);
+		const stale = Object.assign(new Error('401 {"error":{"message":"Authentication Failed","type":"1000"}}'), {
+			status: 401,
+		});
+		const keys: string[] = [];
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				keys.push(String(options?.apiKey));
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.fail(options?.apiKey === "valid" ? quota : stale));
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		const stream = streamSimple(model(), context, {
+			apiKey: ctx =>
+				ctx.error === undefined ? "valid" : ctx.lastChance ? (keys.length === 1 ? "stale" : undefined) : "stale",
+		});
+		let caught: unknown;
+		try {
+			for await (const _event of stream) {
+				// drain
+			}
+		} catch (error) {
+			caught = error;
+		}
+		expect(keys).toEqual(["valid", "stale"]);
+		expect(caught).toBe(quota);
+	});
+
 	it("retries a thrown usage-limit error and passes the cause to the resolver", async () => {
 		const keys: unknown[] = [];
 		const errors: unknown[] = [];
@@ -537,6 +657,45 @@ describe("streamSimple resolver auth retry", () => {
 		// The cause carries the original 429 so the resolver can branch usage-limit vs 401.
 		expect((errors[0] as { status?: number }).status).toBe(429);
 		expect((errors[0] as Error).message).toMatch(/usage limit/i);
+	});
+
+	it("emits the Z.AI 429 error event after a sibling emits a 401 error event", async () => {
+		const keys: string[] = [];
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				keys.push(String(options?.apiKey));
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: assistant() });
+					stream.push({
+						type: "error",
+						reason: "error",
+						error:
+							options?.apiKey === "valid"
+								? assistantError(
+										"429 [1308][Usage limit reached for 5 hour. Your limit will reset at 13:23 UTC]",
+										429,
+									)
+								: assistantError("401 Authentication Failed (type=1000)", 401),
+					});
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		const stream = streamSimple(model(), context, {
+			apiKey: ctx =>
+				ctx.error === undefined ? "valid" : ctx.lastChance ? (keys.length === 1 ? "stale" : undefined) : "stale",
+		});
+		const errors: AssistantMessage[] = [];
+		for await (const event of stream) {
+			if (event.type === "error") errors.push(event.error);
+		}
+		expect(keys).toEqual(["valid", "stale"]);
+		expect(errors.map(error => [error.errorStatus, error.errorMessage])).toEqual([
+			[429, "429 [1308][Usage limit reached for 5 hour. Your limit will reset at 13:23 UTC]"],
+		]);
 	});
 
 	it("retries a usage-limit error event before content", async () => {
@@ -739,12 +898,17 @@ describe("streamSimple resolver auth retry", () => {
 		expect(keys).toEqual(["credential-A", "credential-B"]);
 	});
 
-	it("rotates before emitting content for Codex quota payloads", async () => {
+	it("rotates before emitting content for quota and billing-cap payloads", async () => {
 		const payloads: Array<{ message: string; status?: number }> = [
 			{ message: "429", status: 429 },
 			{ message: '{"error":{"code":"insufficient_quota","message":"quota exhausted"}}' },
 			{ message: '{"error":{"code":"usage_limit_exceeded","message":"usage limit exceeded"}}' },
 			{ message: '{"error":{"code":"usage_limit_reached","message":"usage limit reached"}}' },
+			{ message: "Upstream request failed: Insufficient account funds", status: 402 },
+			{
+				message: "422 Budget has been exceeded! Key=analytics-team Current cost: 0.06, Max budget: 0.05",
+				status: 422,
+			},
 		];
 		let activePayload = payloads[0]!;
 		let keys: unknown[] = [];

@@ -3,7 +3,7 @@
  *
  * Selecting an `ask` toolResult in the tree must not silently reposition the
  * leaf onto the old answer. `navigateTree()` instead hands back the original
- * questions (`reopenAsk`) so the caller can re-open the picker, then a
+ * form `html` (`reopenAsk`) so the caller can re-open the form, then a
  * follow-up call with `reanswerAskResult` branches a *new* sibling toolResult
  * off the same `ask` toolCall — leaving the original answer's branch intact.
  *
@@ -17,11 +17,11 @@ import { describe, expect, it, vi } from "bun:test";
 import { Agent, AgentBusyError, type AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ExtensionRunner, ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import type { AskToolDetails } from "@oh-my-pi/pi-coding-agent/tools/ask";
+import type { AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 
 const TEST_MODEL = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 
@@ -77,13 +77,13 @@ function assistantMsg(text: string) {
 	};
 }
 
-const ORIGINAL_QUESTIONS = [
-	{
-		id: "deploy_target",
-		question: "Which deploy target?",
-		options: [{ label: "staging" }, { label: "production" }],
-	},
-];
+const ORIGINAL_HTML = `<form>
+  <fieldset>
+    <legend>Which deploy target?</legend>
+    <label><input type="radio" name="deploy_target" value="staging" checked> staging</label>
+    <label><input type="radio" name="deploy_target" value="production"> production</label>
+  </fieldset>
+</form>`;
 
 /** Assistant message whose only content is a single `toolCall` block. */
 function toolCallMsg(toolCallId: string, toolName: string, args: Record<string, unknown>) {
@@ -117,30 +117,20 @@ function toolResultMsg(toolCallId: string, toolName: string, text: string, detai
 
 function staleAnswerResult(): AgentToolResult<AskToolDetails> {
 	return {
-		content: [{ type: "text", text: "User selected: staging" }],
-		details: {
-			question: ORIGINAL_QUESTIONS[0]!.question,
-			options: ["staging", "production"],
-			multi: false,
-			selectedOptions: ["staging"],
-		},
+		content: [{ type: "text", text: 'User answers:\n{\n  "deploy_target": "staging"\n}' }],
+		details: { answers: [{ name: "deploy_target", question: "Which deploy target?", answer: "staging" }] },
 	};
 }
 
 function newAnswerResult(): AgentToolResult<AskToolDetails> {
 	return {
-		content: [{ type: "text", text: "User selected: production" }],
-		details: {
-			question: ORIGINAL_QUESTIONS[0]!.question,
-			options: ["staging", "production"],
-			multi: false,
-			selectedOptions: ["production"],
-		},
+		content: [{ type: "text", text: 'User answers:\n{\n  "deploy_target": "production"\n}' }],
+		details: { answers: [{ name: "deploy_target", question: "Which deploy target?", answer: "production" }] },
 	};
 }
 
 describe("AgentSession tree navigation onto an ask toolResult", () => {
-	it("(a) hands back reopenAsk with the original questions instead of moving the leaf", async () => {
+	it("(a) hands back reopenAsk with the original form instead of moving the leaf", async () => {
 		const ctx = await createTestSession({ inMemory: true });
 		try {
 			const { session, sessionManager } = ctx;
@@ -148,7 +138,7 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 			// u1 -> a1(ask toolCall) -> tr1(stale answer) -> a2(next reply, leaf)
 			sessionManager.appendMessage(userMsg("please deploy"));
 			const askCallId = "ask-call-1";
-			sessionManager.appendMessage(toolCallMsg(askCallId, "ask", { questions: ORIGINAL_QUESTIONS }));
+			sessionManager.appendMessage(toolCallMsg(askCallId, "ask", { html: ORIGINAL_HTML }));
 			const tr1Id = sessionManager.appendMessage(
 				toolResultMsg(askCallId, "ask", "User selected: staging", staleAnswerResult().details),
 			);
@@ -160,7 +150,7 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 			expect(result.cancelled).toBe(false);
 			expect(result.reopenAsk).toBeDefined();
 			expect(result.reopenAsk?.toolCallId).toBe(askCallId);
-			expect(result.reopenAsk?.questions).toEqual(ORIGINAL_QUESTIONS);
+			expect(result.reopenAsk?.html).toBe(ORIGINAL_HTML);
 			// Nothing was mutated: the leaf is exactly where it was before probing.
 			expect(sessionManager.getLeafId()).toBe(leafBeforeProbe);
 		} finally {
@@ -175,9 +165,7 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 
 			sessionManager.appendMessage(userMsg("please deploy"));
 			const askCallId = "ask-call-1";
-			const askCallEntryId = sessionManager.appendMessage(
-				toolCallMsg(askCallId, "ask", { questions: ORIGINAL_QUESTIONS }),
-			);
+			const askCallEntryId = sessionManager.appendMessage(toolCallMsg(askCallId, "ask", { html: ORIGINAL_HTML }));
 			const tr1Id = sessionManager.appendMessage(
 				toolResultMsg(askCallId, "ask", "User selected: staging", staleAnswerResult().details),
 			);
@@ -254,8 +242,8 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 			const { session, sessionManager } = ctx;
 
 			sessionManager.appendMessage(userMsg("please deploy"));
-			// Legacy/corrupted persisted args: `questions` fails schema validation.
-			sessionManager.appendMessage(toolCallMsg("ask-call-bad", "ask", { questions: "not-an-array" }));
+			// Neither form `html` nor a legacy `questions[]` entry with its question text.
+			sessionManager.appendMessage(toolCallMsg("ask-call-bad", "ask", { questions: [{ id: "deploy_target" }] }));
 			const trBadId = sessionManager.appendMessage(toolResultMsg("ask-call-bad", "ask", "User selected: staging"));
 			sessionManager.appendMessage(assistantMsg("deploying to staging"));
 
@@ -278,7 +266,7 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 			// not on corrupted/legacy data like test (e).
 			sessionManager.appendMessage(userMsg("please deploy"));
 			const askCallId = "ask-call-1";
-			sessionManager.appendMessage(toolCallMsg(askCallId, "ask", { questions: ORIGINAL_QUESTIONS }));
+			sessionManager.appendMessage(toolCallMsg(askCallId, "ask", { html: ORIGINAL_HTML }));
 			const tr1Id = sessionManager.appendMessage(
 				toolResultMsg(askCallId, "ask", "User selected: staging", staleAnswerResult().details),
 			);
@@ -297,7 +285,7 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 		}
 	});
 
-	it("(g) recovers reopenAsk questions when the ask toolCall isn't the toolResult's direct parent", async () => {
+	it("(g) recovers the reopenAsk form when the ask toolCall isn't the toolResult's direct parent", async () => {
 		const ctx = await createTestSession({ inMemory: true });
 		try {
 			const { session, sessionManager } = ctx;
@@ -312,7 +300,7 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 			sessionManager.appendMessage(
 				multiToolCallMsg([
 					{ id: readCallId, name: "read", args: { path: "config.txt" } },
-					{ id: askCallId, name: "ask", args: { questions: ORIGINAL_QUESTIONS } },
+					{ id: askCallId, name: "ask", args: { html: ORIGINAL_HTML } },
 				]),
 			);
 			sessionManager.appendMessage(toolResultMsg(readCallId, "read", "file body"));
@@ -326,13 +314,13 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 			expect(result.cancelled).toBe(false);
 			expect(result.reopenAsk).toBeDefined();
 			expect(result.reopenAsk?.toolCallId).toBe(askCallId);
-			expect(result.reopenAsk?.questions).toEqual(ORIGINAL_QUESTIONS);
+			expect(result.reopenAsk?.html).toBe(ORIGINAL_HTML);
 		} finally {
 			await ctx.cleanup();
 		}
 	});
 
-	it("(g2) recovers reopenAsk questions past a tool_execution_start bookkeeping entry", async () => {
+	it("(g2) recovers the reopenAsk form past a tool_execution_start bookkeeping entry", async () => {
 		const ctx = await createTestSession({ inMemory: true });
 		try {
 			const { session, sessionManager } = ctx;
@@ -344,7 +332,7 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 			// entry too, not just other `message`-typed toolResults.
 			sessionManager.appendMessage(userMsg("please deploy"));
 			const askCallId = "ask-call-1";
-			sessionManager.appendMessage(toolCallMsg(askCallId, "ask", { questions: ORIGINAL_QUESTIONS }));
+			sessionManager.appendMessage(toolCallMsg(askCallId, "ask", { html: ORIGINAL_HTML }));
 			sessionManager.appendCustomEntry("tool_execution_start", { toolCallId: askCallId, toolName: "ask" });
 			const trAskId = sessionManager.appendMessage(
 				toolResultMsg(askCallId, "ask", "User selected: staging", staleAnswerResult().details),
@@ -356,7 +344,7 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 			expect(result.cancelled).toBe(false);
 			expect(result.reopenAsk).toBeDefined();
 			expect(result.reopenAsk?.toolCallId).toBe(askCallId);
-			expect(result.reopenAsk?.questions).toEqual(ORIGINAL_QUESTIONS);
+			expect(result.reopenAsk?.html).toBe(ORIGINAL_HTML);
 		} finally {
 			await ctx.cleanup();
 		}
@@ -383,9 +371,7 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 
 			sessionManager.appendMessage(userMsg("please deploy"));
 			const askCallId = "ask-call-1";
-			const askCallEntryId = sessionManager.appendMessage(
-				toolCallMsg(askCallId, "ask", { questions: ORIGINAL_QUESTIONS }),
-			);
+			const askCallEntryId = sessionManager.appendMessage(toolCallMsg(askCallId, "ask", { html: ORIGINAL_HTML }));
 			const tr1Id = sessionManager.appendMessage(
 				toolResultMsg(askCallId, "ask", "User selected: staging", staleAnswerResult().details),
 			);
@@ -418,7 +404,7 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 		// The recovery path must mirror the live tool path's
 		// `transformToolCallArguments`: persisted `ask` toolCall arguments may
 		// hold `$$HASH$$` placeholders in place of real secrets, and must be
-		// deobfuscated before validation — otherwise the reopened picker shows
+		// deobfuscated before validation — otherwise the reopened form shows
 		// the raw placeholder instead of the original question text
 		// (chatgpt-codex review on #5895).
 		const SECRET = "SUPER_SECRET_TOKEN_12345";
@@ -435,14 +421,9 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 			sessionManager.appendMessage(userMsg("please deploy"));
 			const askCallId = "ask-call-1";
 			sessionManager.appendMessage(
+				// A replacer function: the `$$…$$` placeholder would read as `$` escapes in a replacement string.
 				toolCallMsg(askCallId, "ask", {
-					questions: [
-						{
-							id: "deploy_target",
-							question: obfuscatedQuestion,
-							options: [{ label: "staging" }, { label: "production" }],
-						},
-					],
+					html: ORIGINAL_HTML.replace("Which deploy target?", () => obfuscatedQuestion),
 				}),
 			);
 			const tr1Id = sessionManager.appendMessage(
@@ -456,7 +437,7 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 			expect(result.reopenAsk).toBeDefined();
 			// The recovered question must be the deobfuscated plaintext, not the
 			// raw persisted placeholder.
-			expect(result.reopenAsk?.questions[0]?.question).toBe(plainQuestion);
+			expect(result.reopenAsk?.html).toBe(ORIGINAL_HTML.replace("Which deploy target?", () => plainQuestion));
 		} finally {
 			await ctx.cleanup();
 		}
@@ -476,9 +457,7 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 
 			sessionManager.appendMessage(userMsg("please deploy"));
 			const askCallId = "ask-call-1";
-			const askCallEntryId = sessionManager.appendMessage(
-				toolCallMsg(askCallId, "ask", { questions: ORIGINAL_QUESTIONS }),
-			);
+			const askCallEntryId = sessionManager.appendMessage(toolCallMsg(askCallId, "ask", { html: ORIGINAL_HTML }));
 			const tr1Id = sessionManager.appendMessage(
 				toolResultMsg(askCallId, "ask", "User selected: staging", staleAnswerResult().details),
 			);
@@ -489,7 +468,7 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 			expect(probe.cancelled).toBe(false);
 			expect(probe.reopenAsk).toBeDefined();
 			expect(probe.reopenAsk?.toolCallId).toBe(askCallId);
-			expect(probe.reopenAsk?.questions).toEqual(ORIGINAL_QUESTIONS);
+			expect(probe.reopenAsk?.html).toBe(ORIGINAL_HTML);
 			// The probe must not mutate anything.
 			expect(sessionManager.getLeafId()).toBe(tr1Id);
 
@@ -524,7 +503,7 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 			// u1 -> a1(ask toolCall) -> tr1(stale answer) -> a2(next reply, leaf)
 			sessionManager.appendMessage(userMsg("please deploy"));
 			const askCallId = "ask-call-1";
-			sessionManager.appendMessage(toolCallMsg(askCallId, "ask", { questions: ORIGINAL_QUESTIONS }));
+			sessionManager.appendMessage(toolCallMsg(askCallId, "ask", { html: ORIGINAL_HTML }));
 			const tr1Id = sessionManager.appendMessage(
 				toolResultMsg(askCallId, "ask", "User selected: staging", staleAnswerResult().details),
 			);
@@ -643,30 +622,6 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 
 			await session.waitForIdle();
 			expect(continueSpy).not.toHaveBeenCalled();
-		} finally {
-			await ctx.cleanup();
-		}
-	});
-});
-
-describe("AgentSession.buildAskReanswerContext", () => {
-	it("builds an AgentToolContext backed by real session state, not a fabricated stub", async () => {
-		const ctx = await createTestSession({ inMemory: true });
-		try {
-			const { session } = ctx;
-			const uiContext = { select: async () => undefined } as unknown as ExtensionUIContext;
-
-			const toolContext = session.buildAskReanswerContext(uiContext);
-
-			expect(toolContext.sessionManager).toBe(session.sessionManager);
-			expect(toolContext.modelRegistry).toBe(session.modelRegistry);
-			expect(toolContext.model).toBe(session.model);
-			expect(toolContext.settings).toBe(session.settings);
-			expect(toolContext.hasUI).toBe(true);
-			expect(toolContext.ui).toBe(uiContext);
-			expect(toolContext.isIdle?.()).toBe(true);
-			expect(toolContext.hasQueuedMessages?.()).toBe(false);
-			expect(() => toolContext.abort?.()).not.toThrow();
 		} finally {
 			await ctx.cleanup();
 		}

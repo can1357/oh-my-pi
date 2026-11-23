@@ -1,58 +1,38 @@
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { apiRouteFor } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
 	CLOUDFLARE_AI_GATEWAY_BASE_URL,
 	CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
 	CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
-	parseCloudflareAiGatewayCredential,
-	serializeCloudflareAiGatewayCredential,
 } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
 import { $env } from "@oh-my-pi/pi-utils";
+import { NO_AUTH_SENTINEL } from "../auth-retry";
 import * as AIError from "../error";
-import { NO_AUTH_SENTINEL } from "../providers/openai-shared";
-import type { OAuthController, OAuthLoginCallbacks } from "./oauth/types";
-import type { ProviderDefinition } from "./types";
+import type { Api, Model } from "../types";
+import type { ProviderTransport } from "./build";
 
-const AUTH_URL = "https://developers.cloudflare.com/ai-gateway/configuration/authentication/";
+/**
+ * `prepareModel` runs per request, and the OpenAI-compat route rebuilds the
+ * model through the full compat engine. The rebuilt route is kept per source
+ * object together with a shallow snapshot of the source's fields; any field
+ * replaced in place since (headers, compatConfig, id, baseUrl, ...) misses the
+ * snapshot check and rebuilds.
+ */
+const compatRouteModels = new WeakMap<Model<Api>, { source: Model<Api>; prepared: Model<Api> }>();
 
-/** Collect the gateway credential used by CLI, setup-wizard, and TUI login callers. */
-export async function loginCloudflareAiGateway(options: OAuthController): Promise<string> {
-	if (!options.onPrompt) {
-		throw new AIError.OnPromptRequiredError("Cloudflare AI Gateway");
+function sameOwnFields(a: object, b: object): boolean {
+	const aKeys = Object.keys(a);
+	if (aKeys.length !== Object.keys(b).length) return false;
+	for (const key of aKeys) {
+		if ((a as Record<string, unknown>)[key] !== (b as Record<string, unknown>)[key]) return false;
 	}
-	options.onAuth?.({
-		url: AUTH_URL,
-		instructions: "Create an AI Gateway token with Run permission, then copy it here.",
-	});
-
-	const apiKey = await options.onPrompt({
-		message: "Paste your Cloudflare AI Gateway token/API key",
-		placeholder: "cfut_...",
-	});
-	if (options.signal?.aborted) throw new AIError.LoginCancelledError();
-	if (!apiKey.trim()) throw new AIError.ApiKeyRequiredError();
-
-	const accountId = await options.onPrompt({
-		message: "Enter your Cloudflare account ID",
-		placeholder: "32-character account ID",
-	});
-	if (options.signal?.aborted) throw new AIError.LoginCancelledError();
-	if (!accountId.trim()) throw new AIError.ConfigurationError("Cloudflare account ID is required");
-
-	const gatewayId = await options.onPrompt({
-		message: "Enter your Cloudflare AI Gateway ID",
-		placeholder: "default",
-	});
-	if (options.signal?.aborted) throw new AIError.LoginCancelledError();
-	if (!gatewayId.trim()) throw new AIError.ConfigurationError("Cloudflare AI Gateway ID is required");
-
-	return serializeCloudflareAiGatewayCredential(apiKey, accountId, gatewayId);
+	return true;
 }
 
-export const cloudflareAiGatewayProvider = {
-	id: "cloudflare-ai-gateway",
-	name: "Cloudflare AI Gateway",
+/** Cloudflare AI Gateway model/request shaping; login lives in `oauth/cloudflare-ai-gateway.ts` + its auth rule. */
+export const cloudflareAiGatewayTransport: ProviderTransport = {
 	prepareModel: model => {
 		const hasGatewayPlaceholders = model.baseUrl.includes("<account>") || model.baseUrl.includes("<gateway>");
 		const route = apiRouteFor("cloudflare-ai-gateway", model.id);
@@ -88,18 +68,22 @@ export const cloudflareAiGatewayProvider = {
 			) {
 				return model;
 			}
-			return buildModel({
+			const cached = compatRouteModels.get(model);
+			if (cached && sameOwnFields(cached.source, model)) return cached.prepared;
+			const prepared = buildModel({
 				...model,
 				api: "openai-completions",
 				baseUrl,
 				compat: model.compatConfig,
 				...(route.requestModelId !== undefined ? { requestModelId: route.requestModelId } : {}),
 			});
+			compatRouteModels.set(model, { source: { ...model }, prepared });
+			return prepared;
 		}
 		return model;
 	},
 	prepareRequest: (model, options) => {
-		const credential = parseCloudflareAiGatewayCredential(options.apiKey ?? $env.CLOUDFLARE_AI_GATEWAY_API_KEY ?? "");
+		const credential = parseCloudflareCredential(options.apiKey ?? $env.CLOUDFLARE_AI_GATEWAY_API_KEY ?? "");
 		if (!credential) return { model, options };
 		const accountId = credential.accountId ?? $env.CLOUDFLARE_ACCOUNT_ID;
 		const gatewayId = credential.gatewayId ?? $env.CLOUDFLARE_GATEWAY_ID;
@@ -125,5 +109,4 @@ export const cloudflareAiGatewayProvider = {
 			options: { ...options, apiKey: isAnthropic ? credential.token : NO_AUTH_SENTINEL },
 		};
 	},
-	login: (cb: OAuthLoginCallbacks) => loginCloudflareAiGateway(cb),
-} as const satisfies ProviderDefinition;
+};

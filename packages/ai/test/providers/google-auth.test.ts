@@ -3,7 +3,7 @@ import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { __resetVertexTokenCache, getVertexAccessToken } from "../../src/providers/google-auth";
+import { __resetVertexTokenCache, getVertexAccessToken, userAdcPath } from "../../src/providers/google-auth";
 import type { FetchImpl } from "../../src/types";
 
 const CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
@@ -140,5 +140,168 @@ describe("getVertexAccessToken impersonated_service_account ADC", () => {
 			scope: [CLOUD_PLATFORM_SCOPE],
 			lifetime: "3600s",
 		});
+	});
+});
+
+describe("gcloud user ADC location", () => {
+	const ENV_KEYS = [
+		"APPDATA",
+		"GOOGLE_APPLICATION_CREDENTIALS",
+		"GOOGLE_CLOUD_ACCESS_TOKEN",
+		"CLOUDSDK_AUTH_ACCESS_TOKEN",
+	];
+	let tmpDir: string;
+	let originalEnv: Record<string, string | undefined>;
+
+	beforeEach(async () => {
+		__resetVertexTokenCache();
+		originalEnv = Object.fromEntries(ENV_KEYS.map(key => [key, Bun.env[key]]));
+		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-vertex-user-adc-"));
+	});
+
+	afterEach(async () => {
+		__resetVertexTokenCache();
+		for (const key of ENV_KEYS) {
+			const original = originalEnv[key];
+			if (original === undefined) delete Bun.env[key];
+			else Bun.env[key] = original;
+		}
+		await fs.rm(tmpDir, { recursive: true, force: true });
+	});
+
+	it("resolves under %APPDATA%\\gcloud on win32", () => {
+		expect(userAdcPath("win32", "C:\\Users\\me\\AppData\\Roaming")).toBe(
+			path.join("C:\\Users\\me\\AppData\\Roaming", "gcloud", "application_default_credentials.json"),
+		);
+	});
+
+	it("resolves under ~/.config/gcloud off Windows", () => {
+		expect(userAdcPath("linux", "C:\\ignored")).toBe(
+			path.join(os.homedir(), ".config", "gcloud", "application_default_credentials.json"),
+		);
+	});
+
+	it.skipIf(process.platform !== "win32")(
+		"exchanges the refresh token from %APPDATA% gcloud ADC on Windows",
+		async () => {
+			Bun.env.APPDATA = tmpDir;
+			delete Bun.env.GOOGLE_APPLICATION_CREDENTIALS;
+			delete Bun.env.GOOGLE_CLOUD_ACCESS_TOKEN;
+			delete Bun.env.CLOUDSDK_AUTH_ACCESS_TOKEN;
+			await Bun.write(
+				path.join(tmpDir, "gcloud", "application_default_credentials.json"),
+				JSON.stringify({
+					type: "authorized_user",
+					client_id: "client-id",
+					client_secret: "client-secret",
+					refresh_token: "refresh-token",
+				}),
+			);
+
+			const calls: { url: string; init?: RequestInit }[] = [];
+			const fetchImpl: FetchImpl = async (input, init) => {
+				const url = urlOf(input);
+				calls.push({ url, init });
+				if (url === "https://oauth2.googleapis.com/token") {
+					return new Response(JSON.stringify({ access_token: "user-adc-token", expires_in: 3600 }));
+				}
+				return new Response("not found", { status: 404 });
+			};
+
+			expect(await getVertexAccessToken({ fetch: fetchImpl })).toBe("user-adc-token");
+			const tokenCalls = calls.filter(call => call.url === "https://oauth2.googleapis.com/token");
+			expect(tokenCalls).toHaveLength(1);
+			const body = new URLSearchParams(String(tokenCalls[0].init?.body));
+			expect(body.get("grant_type")).toBe("refresh_token");
+			expect(body.get("refresh_token")).toBe("refresh-token");
+		},
+	);
+});
+
+describe("Workforce Identity Federation ADC", () => {
+	const envKeys = ["GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_ACCESS_TOKEN", "CLOUDSDK_AUTH_ACCESS_TOKEN"];
+	let tmpDir: string;
+	let originalEnv: Record<string, string | undefined>;
+
+	beforeEach(async () => {
+		__resetVertexTokenCache();
+		originalEnv = Object.fromEntries(envKeys.map(key => [key, Bun.env[key]]));
+		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-vertex-workforce-"));
+		for (const key of envKeys) delete Bun.env[key];
+		Bun.env.GOOGLE_APPLICATION_CREDENTIALS = path.join(tmpDir, "adc.json");
+	});
+
+	afterEach(async () => {
+		__resetVertexTokenCache();
+		for (const key of envKeys) {
+			const value = originalEnv[key];
+			if (value === undefined) delete Bun.env[key];
+			else Bun.env[key] = value;
+		}
+		await fs.rm(tmpDir, { recursive: true, force: true });
+	});
+
+	it("refreshes external_account_authorized_user credentials at STS with Basic authentication", async () => {
+		await Bun.write(
+			Bun.env.GOOGLE_APPLICATION_CREDENTIALS!,
+			JSON.stringify({
+				type: "external_account_authorized_user",
+				client_id: "workforce-client",
+				client_secret: "workforce-secret",
+				refresh_token: "workforce-refresh",
+				token_url: "https://sts.googleapis.com/v1/oauthtoken",
+			}),
+		);
+		const calls: { url: string; init?: RequestInit }[] = [];
+		const fetchImpl: FetchImpl = async (input, init) => {
+			const url = urlOf(input);
+			calls.push({ url, init });
+			if (url !== "https://sts.googleapis.com/v1/oauthtoken") {
+				return new Response("invalid_grant", { status: 400 });
+			}
+			return new Response(JSON.stringify({ access_token: "workforce-access", expires_in: 3600 }));
+		};
+
+		expect(await getVertexAccessToken({ fetch: fetchImpl })).toBe("workforce-access");
+		expect(calls).toHaveLength(1);
+		expect(calls[0].url).toBe("https://sts.googleapis.com/v1/oauthtoken");
+		expect(new Headers(calls[0].init?.headers).get("Authorization")).toBe(
+			`Basic ${Buffer.from("workforce-client:workforce-secret").toString("base64")}`,
+		);
+		expect(new URLSearchParams(String(calls[0].init?.body)).toString()).toBe(
+			"grant_type=refresh_token&refresh_token=workforce-refresh",
+		);
+	});
+
+	it("uses a rotated refresh token returned by STS for the next refresh", async () => {
+		await Bun.write(
+			Bun.env.GOOGLE_APPLICATION_CREDENTIALS!,
+			JSON.stringify({
+				type: "external_account_authorized_user",
+				client_id: "workforce-client",
+				client_secret: "workforce-secret",
+				refresh_token: "file-refresh",
+				token_url: "https://sts.googleapis.com/v1/oauthtoken",
+			}),
+		);
+		const sentRefreshTokens: (string | null)[] = [];
+		const fetchImpl: FetchImpl = async (_input, init) => {
+			const sent = new URLSearchParams(String(init?.body)).get("refresh_token");
+			sentRefreshTokens.push(sent);
+			if (sent === "file-refresh") {
+				// expires_in 0 forces the next call to refresh instead of reusing the cache.
+				return new Response(
+					JSON.stringify({ access_token: "first-access", expires_in: 0, refresh_token: "rotated-refresh" }),
+				);
+			}
+			if (sent === "rotated-refresh") {
+				return new Response(JSON.stringify({ access_token: "second-access", expires_in: 3600 }));
+			}
+			return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+		};
+
+		expect(await getVertexAccessToken({ fetch: fetchImpl })).toBe("first-access");
+		expect(await getVertexAccessToken({ fetch: fetchImpl })).toBe("second-access");
+		expect(sentRefreshTokens).toEqual(["file-refresh", "rotated-refresh"]);
 	});
 });

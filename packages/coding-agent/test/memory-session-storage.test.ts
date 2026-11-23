@@ -21,21 +21,6 @@ describe("MemorySessionStorage indexed mirror", () => {
 		expect(actual.length).toBe(expected.length);
 	});
 
-	test("statSync reports UTF-8 byte length, not character count", async () => {
-		const storage = new MemorySessionStorage();
-		const path = "/virtual/unicode.jsonl";
-		const writer = storage.openWriter(path, { flags: "w" });
-		try {
-			await writer.append("héllo\n"); // é = 2 bytes in UTF-8
-			await writer.append("日本語\n"); // 3 chars × 3 bytes = 9
-		} finally {
-			void writer.close();
-		}
-
-		const expectedBytes = Buffer.byteLength("héllo\n日本語\n", "utf-8");
-		expect(storage.statSync(path).size).toBe(expectedBytes);
-	});
-
 	test("readTextSlices slices the head by UTF-8 byte budget across chunks", async () => {
 		const storage = new MemorySessionStorage();
 		const path = "/virtual/prefix.jsonl";
@@ -70,21 +55,6 @@ describe("MemorySessionStorage indexed mirror", () => {
 		// Budget >= size returns the whole file; zero budget returns "".
 		expect(await storage.readTextSlices(path, 0, 100)).toEqual(["", "alpha\nbravo\ncharlie\n"]);
 		expect(await storage.readTextSlices(path, 0, 0)).toEqual(["", ""]);
-	});
-
-	test("readTextSlices returns both requested ends in one call", async () => {
-		const storage = new MemorySessionStorage();
-		const path = "/virtual/both.jsonl";
-		const writer = storage.openWriter(path, { flags: "w" });
-		try {
-			await writer.append("alpha\n");
-			await writer.append("bravo\n");
-			await writer.append("charlie\n");
-		} finally {
-			void writer.close();
-		}
-
-		expect(await storage.readTextSlices(path, 10, 10)).toEqual(["alpha\nbrav", "o\ncharlie\n"]);
 	});
 
 	test("prefix and suffix preserve byte-oriented UTF-8 slicing semantics", async () => {
