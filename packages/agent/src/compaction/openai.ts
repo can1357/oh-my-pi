@@ -15,7 +15,7 @@
  *   with `{ summary, shortSummary? }`.
  */
 
-import { attach, create, Flag, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { attach, create, Flag, OpenAIHttpError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { getCodexAttestationHeader } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
 import {
@@ -1135,6 +1135,14 @@ export async function requestRemoteCompaction(
 
 	if (!response.ok) {
 		const errorText = await response.text().catch(() => "");
+		let errorCode: string | undefined;
+		if (errorText) {
+			try {
+				errorCode = OpenAIHttpError.parseEnvelope(JSON.parse(errorText), errorText).code;
+			} catch {
+				// A non-JSON endpoint body carries no structured code.
+			}
+		}
 		logger.warn("Remote compaction failed", {
 			endpoint,
 			status: response.status,
@@ -1146,6 +1154,7 @@ export async function requestRemoteCompaction(
 			response.status,
 			{
 				headers: response.headers,
+				code: errorCode,
 			},
 		);
 	}
