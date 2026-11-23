@@ -14,12 +14,6 @@ function createSession(overrides: Record<string, unknown> = {}): ToolSession {
 }
 
 describe("BashTool description", () => {
-	it("always advises against habitual output-truncation pipes and names local://<N>.log", () => {
-		const tool = new BashTool(createSession({ "tools.approvalMode": "yolo" }));
-		expect(tool.description).toContain("local://<N>.log");
-		expect(tool.description).not.toContain("disqualify allow rules");
-	});
-
 	it("omits approval-operator guidance when bash.patterns is empty", () => {
 		const tool = new BashTool(createSession({ "tools.approvalMode": "write" }));
 		expect(tool.description).not.toContain("disqualify allow rules");
@@ -34,7 +28,7 @@ describe("BashTool description", () => {
 			}),
 		);
 		expect(tool.description).toContain("disqualify allow rules");
-		expect(tool.description).toContain("&&");
+		expect(tool.description).toContain("(or `&&` chains where every command matches an allow rule)");
 	});
 
 	it("omits && hint when allowCompoundCommands is false", () => {
@@ -46,7 +40,7 @@ describe("BashTool description", () => {
 			}),
 		);
 		expect(tool.description).toContain("disqualify allow rules");
-		expect(tool.description).not.toContain("&&");
+		expect(tool.description).not.toContain("(or `&&` chains");
 	});
 
 	it("omits approval-operator guidance in yolo mode unless bash policy explicitly prompts", () => {

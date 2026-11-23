@@ -111,6 +111,34 @@ export function resolveApprovalFromContext(context?: ApprovalContextSource | nul
 	};
 }
 
+/**
+ * Whether a tool-level `allow` decision can change the outcome from `prompt` to `allow`
+ * for `toolName` at `tier` under the configured approval mode and user policies.
+ */
+export function canToolAllowAvoidPrompt(
+	toolName: string,
+	tier: ToolTier,
+	context?: ApprovalContextSource | null,
+): boolean {
+	const { approvalMode, userPolicies } = resolveApprovalFromContext(context);
+	const unmatched = resolvePolicy(
+		{ name: toolName, approval: () => ({ tier }) },
+		undefined,
+		approvalMode,
+		userPolicies,
+		undefined,
+	);
+	if (unmatched.policy !== "prompt") return false;
+	const matched = resolvePolicy(
+		{ name: toolName, approval: () => ({ tier, policy: "allow" }) },
+		undefined,
+		approvalMode,
+		userPolicies,
+		undefined,
+	);
+	return matched.policy === "allow";
+}
+
 export interface ResolvedApproval {
 	policy: ApprovalPolicy;
 	tier: ToolTier;

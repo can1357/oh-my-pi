@@ -55,7 +55,7 @@ import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { appendImageLinks } from "../utils/image-temp";
 import type { ToolSession } from ".";
-import { truncateForPrompt } from "./approval";
+import { canToolAllowAvoidPrompt, truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
 import type { ShellTrace } from "@oh-my-pi/pi-wire";
 import { applyPatchShellInput } from "./bash-apply-patch";
@@ -95,8 +95,6 @@ import {
 	cfgGlobEnabled,
 	cfgGrepEnabled,
 	cfgLaunchEnabled,
-	cfgToolsApproval,
-	cfgToolsApprovalMode,
 	cfgToolsMaxTimeout,
 } from "./settings";
 import {
@@ -1019,14 +1017,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const evalBackends = resolveEvalBackends(this.session);
 		const isToolActive = (name: string, fallback: boolean): boolean => this.session.isToolActive?.(name) ?? fallback;
 		const shellConfig = this.session.settings.getShellConfig();
-		const approvalMode = cfgToolsApprovalMode.get(this.session.settings);
-		const userPolicies: Record<string, unknown> = cfgToolsApproval.get(this.session.settings);
-		const rawBashPolicy = Object.hasOwn(userPolicies, "bash") ? userPolicies.bash : undefined;
-		const bashPolicy = typeof rawBashPolicy === "string" ? rawBashPolicy.trim().toLowerCase() : undefined;
 		const approvalPatternsActive =
-			bashPolicy !== "allow" &&
-			bashPolicy !== "deny" &&
-			(bashPolicy === "prompt" || approvalMode !== "yolo") &&
+			canToolAllowAvoidPrompt("bash", "execute", { settings: this.session.settings }) &&
 			this.#patternPolicies().session.rules.some(rule => rule.approval === "allow");
 		return prompt.render(bashDescription, {
 			asyncEnabled: cfgAsyncEnabled.get(this.session.settings),
