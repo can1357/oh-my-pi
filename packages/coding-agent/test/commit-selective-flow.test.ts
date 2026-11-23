@@ -1365,4 +1365,76 @@ describe("selective commit flow", () => {
 		expect(amended.paths).toEqual(["a.txt", "b.txt"]);
 		expect((await git(root, ["rev-list", "--count", "HEAD"])).trim()).toBe("2");
 	});
+
+	describe("large unrelated files (#20176)", () => {
+		const LARGE_BYTES = 8 * 1024 * 1024;
+
+		/** Repo with a committed `src.ts`, an edit to it, and an unrelated 8 MiB untracked `unrelated.asar`. */
+		async function largeUnrelatedRepo() {
+			const repo = await emptyRepo();
+			await repo.write("Main", undefined, "src.ts", "one\n");
+			await git(repo.root, ["add", "."]);
+			await git(repo.root, ["commit", "-q", "-m", "seed"]);
+			await repo.write("Main", undefined, "src.ts", "two\n");
+			await Bun.write(path.join(repo.root, "unrelated.asar"), new Uint8Array(LARGE_BYTES).fill(7));
+			return repo;
+		}
+
+		/** Spies on the repository calls that read worktree or blob bytes, recording what each one names. */
+		function observeReads(): string[] {
+			const reads: string[] = [];
+			const observe = (repo: ReturnType<typeof vcs.requireGit>): ReturnType<typeof vcs.requireGit> =>
+				new Proxy(repo, {
+					get(target, prop) {
+						if (prop === "worktreeToGit") {
+							return (inputs: Array<{ path: string; data: Uint8Array }>, signal?: unknown) => {
+								reads.push(...inputs.map(input => input.path));
+								return target.worktreeToGit(inputs, signal);
+							};
+						}
+					if (prop === "showBlob") {
+						return (spec: string, maxBytes?: number | null, signal?: unknown) => {
+							reads.push(spec);
+							return target.showBlob(spec, maxBytes, signal);
+						};
+					}
+					const value = Reflect.get(target, prop, target);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+				});
+			const realGit = vcs.git.bind(vcs);
+			const realRequireGit = vcs.requireGit.bind(vcs);
+			vi.spyOn(vcs, "git").mockImplementation(dir => {
+				const repo = realGit(dir);
+				return repo && observe(repo);
+			});
+			vi.spyOn(vcs, "requireGit").mockImplementation(dir => observe(realRequireGit(dir)));
+			return reads;
+		}
+
+		it("draft reads only the selected large file", async () => {
+			const { root, journal } = await largeUnrelatedRepo();
+			const reads = observeReads();
+
+			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+			expect(draft.paths).toContain("unrelated.asar");
+			draft.only(["src.ts"]);
+			expect(reads.filter(read => read.includes("unrelated.asar"))).toEqual([]);
+
+			await draft.freezeSelected();
+			expect(draft.selection().map(change => change.path)).toEqual(["src.ts"]);
+			expect(reads.filter(read => read.includes("unrelated.asar"))).toEqual([]);
+		});
+
+		it("selected large file commits its exact bytes", async () => {
+			const { root, journal } = await largeUnrelatedRepo();
+
+			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+			draft.take({ path: "unrelated.asar" });
+			await draft.freezeSelected();
+			const change = draft.selection().find(item => item.path === "unrelated.asar");
+			if (change?.kind !== "whole" || !change.after) throw new Error("expected a whole-file change");
+			expect((await git(root, ["cat-file", "-s", change.after.id])).trim()).toBe(String(LARGE_BYTES));
+		});
+	});
 });
