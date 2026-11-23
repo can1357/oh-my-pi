@@ -11,6 +11,7 @@ import { ChangeJournal, type JournalRecord } from "@oh-my-pi/pi-coding-agent/com
 import { createCommitPrelude } from "@oh-my-pi/pi-coding-agent/commit/selective/prelude-definition";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -1364,5 +1365,77 @@ describe("selective commit flow", () => {
 		expect(amended.parent).toBe(seed);
 		expect(amended.paths).toEqual(["a.txt", "b.txt"]);
 		expect((await git(root, ["rev-list", "--count", "HEAD"])).trim()).toBe("2");
+	});
+
+	describe("large unrelated files (#20176)", () => {
+		const LARGE_BYTES = 8 * 1024 * 1024;
+		const LARGE_FILES = ["unrelated.asar", "unrelated.dmg"];
+
+		/** Repo with a committed `src.ts`, an edit to it, and two unrelated 8 MiB untracked files. */
+		async function largeUnrelatedRepo() {
+			const repo = await emptyRepo();
+			await repo.write("Main", undefined, "src.ts", "one\n");
+			await git(repo.root, ["add", "."]);
+			await git(repo.root, ["commit", "-q", "-m", "seed"]);
+			await repo.write("Main", undefined, "src.ts", "two\n");
+			for (const file of LARGE_FILES) {
+				await Bun.write(path.join(repo.root, file), new Uint8Array(LARGE_BYTES).fill(7));
+			}
+			return repo;
+		}
+
+		/** Spies on the native conversion, recording the paths each call converts together. */
+		function observeConversions(): string[][] {
+			const calls: string[][] = [];
+			const observe = (repo: VcsGitRepo): VcsGitRepo =>
+				new Proxy(repo, {
+					get(target, prop) {
+						if (prop === "worktreeToGit") {
+							return (inputs: Array<{ path: string; data: Uint8Array }>, signal?: unknown) => {
+								calls.push(inputs.map(input => input.path));
+								return target.worktreeToGit(inputs, signal);
+							};
+						}
+						const value = Reflect.get(target, prop, target);
+						return typeof value === "function" ? value.bind(target) : value;
+					},
+				});
+			const realGit = vcs.git.bind(vcs);
+			const realRequireGit = vcs.requireGit.bind(vcs);
+			vi.spyOn(vcs, "git").mockImplementation(dir => {
+				const repo = realGit(dir);
+				return repo && observe(repo);
+			});
+			vi.spyOn(vcs, "requireGit").mockImplementation(dir => observe(realRequireGit(dir)));
+			return calls;
+		}
+
+		it("converts large unrelated files one at a time", async () => {
+			const { root, journal } = await largeUnrelatedRepo();
+			const calls = observeConversions();
+
+			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+			expect(draft.paths).toEqual(expect.arrayContaining(LARGE_FILES));
+
+			for (const call of calls) {
+				if (call.some(file => LARGE_FILES.includes(file))) expect(call).toHaveLength(1);
+			}
+			expect(
+				calls
+					.flat()
+					.filter(file => LARGE_FILES.includes(file))
+					.sort(),
+			).toEqual(LARGE_FILES);
+		});
+
+		it("selected large file commits its exact bytes", async () => {
+			const { root, journal } = await largeUnrelatedRepo();
+
+			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+			draft.take({ path: "unrelated.asar" });
+			const change = draft.selection().find(item => item.path === "unrelated.asar");
+			if (change?.kind !== "whole" || !change.after) throw new Error("expected a whole-file change");
+			expect((await git(root, ["cat-file", "-s", change.after.id])).trim()).toBe(String(LARGE_BYTES));
+		});
 	});
 });
