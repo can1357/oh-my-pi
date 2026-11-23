@@ -186,7 +186,7 @@ Yanks and deletes fill registers the way Vim's do. An unnamed `p` puts the lates
 
 Text killed in Insert mode (`Ctrl+K`, `Ctrl+W`) is what an unnamed `p` puts until Vim stores something newer, and Vim's yanks and deletes stay on the kill ring for `Ctrl+Y`.
 
-Every yank also copies to the system clipboard unless **Vim Yanks Copy to Clipboard** is turned off (`tui.vimYankToClipboard: false`); then only `"+y` and `"*y` do, as in Vim without `clipboard=unnamed`. Deletes reach the clipboard only through `"+` / `"*`.
+Only `"+y` and `"*y` copy to the system clipboard, as in Vim. Turn on **Vim Yanks Copy to Clipboard** (`tui.vimYankToClipboard: true`) to make every yank copy there too, as in Vim with `clipboard=unnamed`. Deletes reach the clipboard only through `"+` / `"*`.
 
 A selection that would cut through an attachment placeholder such as `[Image #1, 800x600]` or `[Paste #2, +30 lines]` takes the whole placeholder with it, so a delete can never leave a corrupt fragment behind.
 
