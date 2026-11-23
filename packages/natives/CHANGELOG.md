@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed the native addon load error printing a `curl` command for a `.node` file that no release publishes, which returned 404; it now names the release page ([#10126](https://github.com/can1357/oh-my-pi/issues/10126), [#19951](https://github.com/can1357/oh-my-pi/pull/19951) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed Windows captures and accessibility trees of a fully covered Chromium or Electron window passing as current when the cover is a popup, tool or click-through window, under which a paused page can stay paused; they now report `covered` there too ([#19849](https://github.com/can1357/oh-my-pi/pull/19849) by [@will-bogusz](https://github.com/will-bogusz))
 ### Added
 
@@ -13,7 +14,6 @@
 
 ### Fixed
 
-- Fixed the native addon load error printing a `curl` command for a `.node` file that no release publishes, which returned 404; it now names the release page ([#10126](https://github.com/can1357/oh-my-pi/issues/10126), [#19951](https://github.com/can1357/oh-my-pi/pull/19951) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed `grep()`, `glob()`, `fuzzyFind()`, `astGrep()`, `astEdit()`, and recursive shell search commands occasionally hanging on machines with many CPUs.
 - Fixed cancellation and timeout races in native search, file-matching, fuzzy-search, AST, and editing operations that could cause crashes or use-after-free errors.
 - Fixed `grep()` with a match limit reporting incomplete results instead of rejecting when its directory walk failed.
