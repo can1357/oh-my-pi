@@ -1117,7 +1117,7 @@ pub enum Deref {
 }
 
 /// Longest nameref chain followed before it counts as circular.
-const MAX_DEREF: usize = 64;
+pub(super) const MAX_DEREF: usize = 64;
 
 /// Follow the name references starting at `name`: each nameref with a
 /// value names the next variable; a value with a subscript ends the chain

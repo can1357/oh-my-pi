@@ -4,10 +4,11 @@
 //! and `printf '\u…'`, and the decimal point (`LC_ALL` > `LC_NUMERIC` >
 //! `LANG`).
 
+use bstr::BString;
 use encoding_rs::{DecoderResult, Encoding};
 
 use super::{Kernel, proc::Vproc, state};
-use crate::bash::store::{StateStore, StoreError};
+use crate::bash::store::{Attrs, StateStore, StoreError, Var};
 
 /// The character set of a locale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +117,51 @@ pub fn charset_upto(
 	upto: usize,
 ) -> Result<Charset, StoreError> {
 	Ok(first_set_scopes(root, store, vp, CTYPE_VARS, upto, charset_of)?.unwrap_or(Charset::Bytes))
+}
+
+/// [`CTYPE_VARS`] as the shell's global scope binds them — the bindings
+/// the next physical run reads, whatever function or trap scope is alive
+/// now — each nameref among them followed through its target the way
+/// [`state`]'s own resolver follows it: every variable's chain on its own
+/// depth budget ([`state::MAX_DEREF`] lookups, a cycle ends it), so a
+/// name the resolver reaches through one variable freezes even when
+/// another variable's chain outruns its budget before it. A probe that
+/// restores them resolves what that run would. `None` is a name nothing
+/// binds.
+///
+/// # Errors
+/// [`StoreError`] when a variable cannot be read.
+pub fn ctype_vars_global(
+	root: &state::Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+) -> Result<Vec<(BString, Option<Var>)>, StoreError> {
+	let mut frozen: Vec<(BString, Option<Var>)> = Vec::new();
+	for name in CTYPE_VARS {
+		let mut seen: Vec<BString> = Vec::new();
+		let mut cur = BString::from(name);
+		for _ in 0..state::MAX_DEREF {
+			if seen.contains(&cur) {
+				break;
+			}
+			seen.push(cur.clone());
+			let var = state::lookup_declared_upto(root, store, vp, &cur, 0)?.cloned();
+			let target = var
+				.as_ref()
+				.filter(|v| v.attrs.contains(Attrs::NAMEREF) && !v.attrs.contains(Attrs::INVISIBLE))
+				.and_then(Var::as_scalar)
+				.filter(|t| !t.is_empty())
+				.map(BString::from);
+			if !frozen.iter().any(|(captured, _)| captured == &cur) {
+				frozen.push((cur.clone(), var));
+			}
+			match target {
+				Some(target) => cur = target,
+				None => break,
+			}
+		}
+	}
+	Ok(frozen)
 }
 
 /// Whether the shell's locale is UTF-8 ([`charset`] is [`Charset::Utf8`]).

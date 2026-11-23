@@ -887,6 +887,15 @@ pub struct ScriptAux {
 	pub parse:   Option<ParseSnapshot>,
 }
 
+/// The locale bindings a freeze records: `LC_ALL`, `LC_CTYPE` and `LANG`
+/// as the shell's global scope bound them.
+///
+/// Each nameref among them is followed through its target. They are what
+/// a probe restores ahead of the environment the next run installs, so
+/// the charset is re-resolved as that run resolves it; in memory only,
+/// never part of a frame image ([`ParseSnapshot`] is).
+pub type LocaleBindings = Vec<(BString, Option<crate::bash::store::Var>)>;
+
 /// The parse context a zsh string keeps for all its commands
 /// ([`ScriptAux::parse`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

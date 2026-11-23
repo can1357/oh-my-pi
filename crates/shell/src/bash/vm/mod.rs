@@ -52,7 +52,7 @@ pub use self::{
 	control::{ControlHandle, IoPoll, WakeToken},
 	frames::FRAMES_VERSION,
 	pattern::Cache as PatternCache,
-	proc::{ParseSnapshot, Run, Vproc, vproc_layout},
+	proc::{LocaleBindings, ParseSnapshot, Run, Vproc, vproc_layout},
 	text::TextKind,
 	zsh::zpattern::Cache as ZshPatternCache,
 };
@@ -75,7 +75,7 @@ use crate::bash::{
 	ir::{self, Unit},
 	signal::{DefaultAction, SigTarget, Signal},
 	store::{Attrs, Change, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, VarValue},
-	syntax::{AliasLookup, Resume},
+	syntax::{AliasLookup, Features, Resume},
 };
 
 /// Ops a vproc runs per scheduler turn.
@@ -533,12 +533,14 @@ pub struct Kernel {
 	/// Not imaged; never drives execution.
 	pub exit_report:        Option<(RunId, Option<exec::ExitCause>)>,
 	/// The root run whose input had already ended when its own EXIT trap
-	/// started: the status the input produced and the parse context it
-	/// ended under, frozen before the trap's body ran. An `exit` raised
-	/// from that cleanup ends the shell but not the run's command, so a
+	/// started: the status the input produced, kept whatever the store did,
+	/// and the shell's top-level parse context — grammar, alias table and
+	/// locale bindings — frozen before the trap's frame was pushed
+	/// (`None` when the store could not be read). An `exit` raised from
+	/// that cleanup ends the shell but not the run's command, so a
 	/// segmented chain judges the successor by that status and under that
-	/// table, not the trap's. Not imaged.
-	pub boundary_cleanup:   Option<(RunId, i32, Option<Arc<ParseSnapshot>>)>,
+	/// context, not the trap's. Not imaged.
+	pub boundary_cleanup:   Option<(RunId, i32, Option<exit_options::WalkOptions>)>,
 	/// Signal deaths of external programs replacing a submitted run, pending
 	/// its completion report; callouts do not survive frame restoration.
 	pub exec_signals:       HashMap<RunId, i32>,
@@ -2759,6 +2761,19 @@ impl Shell {
 		self.cut_short_input(run)?.root_parse().cloned()
 	}
 
+	/// The locale bindings frozen with [`Self::exit_parse_snapshot`]:
+	/// `LC_ALL`, `LC_CTYPE` and `LANG` as the shell's global scope bound
+	/// them at the freeze, a nameref's target followed through its chain.
+	/// `None` when the run took no exit freeze, or the freeze could not
+	/// read the store: a probe under an environment then does not judge
+	/// ([`Shell::source_holds_command_with_env`]). With the bindings, it
+	/// restores them into its copy of the store before that environment,
+	/// so the charset is resolved over what the freeze saw, not over what
+	/// an exit's cleanup changed after it.
+	pub fn exit_locale_snapshot(&mut self, run: RunId) -> Option<Arc<LocaleBindings>> {
+		self.cut_short_input(run)?.root_locale().cloned()
+	}
+
 	/// Whether `source` still holds a command for the parser that would read
 	/// it: the grammar features and aliases in effect for the root shell
 	/// now — or, when `parse` carries the context an `exit`-family abort
@@ -2769,45 +2784,76 @@ impl Shell {
 	/// alias can expand a command to a comment). A backend read error
 	/// conservatively answers `true`: a probe failure must not silence the
 	/// cut-short notice.
+	///
+	/// A frozen context keeps the grammar and alias table the input ended
+	/// with, which the abort's EXIT cleanup runs after and may rewrite,
+	/// charset included: the unread tail is read under the locale it ended
+	/// with, so a cleanup that switches the locale does not change the
+	/// verdict. [`Shell::source_holds_command_with_env`] re-reads only the
+	/// charset, over the locale bindings the freeze saw with the
+	/// environment the next run installs applied.
 	pub fn source_holds_command(
 		&mut self,
 		cx: &mut Cx<'_>,
 		source: &[u8],
 		parse: Option<&ParseSnapshot>,
 	) -> bool {
-		if let Some(parse) = parse {
-			// Frozen at the abort, before its EXIT cleanup could rewrite
-			// the table: no state read here, so no failure path either.
-			return exec::script_has_command(
-				source,
-				crate::bash::syntax::Features::from_bits(parse.features),
-				parse.aliases.as_ref().map(|a| a as &dyn AliasLookup),
-				&Resume::default(),
-			);
-		}
+		let Some(parse) = parse else {
+			return self.live_source_holds_command(cx, source);
+		};
+		// Frozen at the abort, before its EXIT cleanup could run: no state
+		// read here, so no failure path either.
+		Self::holds_command(source, Features::from_bits(parse.features), parse.aliases.as_ref())
+	}
+
+	/// The grammar and alias table the store carries.
+	fn live_source_holds_command(&mut self, cx: &mut Cx<'_>, source: &[u8]) -> bool {
 		// Do not use or change the live root's caches or fault slot: the
 		// store can be a probe-only view with the next run's env overlaid.
 		let Ok(root) = Root::load(cx.store) else {
 			return true;
 		};
 		let live = std::mem::replace(&mut self.k.root, root);
-		let parse = exec::features(&mut self.k, cx.store, &self.procs[0]).and_then(|feat| {
-			builtins::alias_table(&mut self.k, cx, &self.procs[0]).map(|a| (feat, a))
+		let probed = exec::features(&mut self.k, cx.store, &self.procs[0]).and_then(|feat| {
+			builtins::alias_table(&mut self.k, cx, &self.procs[0]).map(|aliases| (feat, aliases))
 		});
 		let failed = self.k.root.has_fault();
 		self.k.root = live;
 		failed
-			|| parse.map_or(true, |(feat, aliases)| {
-				exec::script_has_command(
-					source,
-					feat,
-					aliases.as_ref().map(|a| a as &dyn AliasLookup),
-					&Resume::default(),
-				)
-			})
+			|| probed
+				.map_or(true, |(feat, aliases)| Self::holds_command(source, feat, aliases.as_ref()))
+	}
+
+	/// The grammar the store carries, read like
+	/// [`Self::live_source_holds_command`] without the live root; `None`
+	/// when the store fails.
+	fn probe_features(&mut self, cx: &mut Cx<'_>) -> Option<Features> {
+		let root = Root::load(cx.store).ok()?;
+		let live = std::mem::replace(&mut self.k.root, root);
+		let probed = exec::features(&mut self.k, cx.store, &self.procs[0]);
+		let failed = self.k.root.has_fault();
+		self.k.root = live;
+		(!failed).then_some(probed).and_then(|probed| probed.ok())
+	}
+
+	/// Whether `source` holds a command under a grammar and an alias table.
+	fn holds_command(
+		source: &[u8],
+		features: Features,
+		aliases: Option<&builtins::Aliases>,
+	) -> bool {
+		exec::script_has_command(
+			source,
+			features,
+			aliases.map(|a| a as &dyn AliasLookup),
+			&Resume::default(),
+		)
 	}
 
 	/// Inspect a segment under the environment its physical run would install.
+	/// Under a frozen context the locale bindings frozen with it are
+	/// restored into the probe's store ahead of that environment, so the
+	/// charset is resolved over what the freeze saw.
 	pub(crate) fn source_holds_command_with_env(
 		&mut self,
 		host: &mut dyn Host,
@@ -2815,11 +2861,38 @@ impl Shell {
 		source: &[u8],
 		env: Vec<(BString, BString)>,
 		parse: Option<&ParseSnapshot>,
+		locale: Option<&LocaleBindings>,
 	) -> bool {
 		if env.is_empty() {
 			return self.source_holds_command(&mut Cx { host, store }, source, parse);
 		}
+		// A frozen context whose locale the freeze could not read is not
+		// judged under an overlay: a store error must not silence the
+		// notice.
+		if parse.is_some() && locale.is_none() {
+			return true;
+		}
 		let mut probe = store.clone();
+		// The locale bindings the freeze saw ([`Self::exit_locale_snapshot`]),
+		// restored ahead of the overlay: the next run installs the
+		// overlay's variables over them, not over what the exit's cleanup
+		// changed after. They are the global bindings as the freeze read
+		// them, so a nameref chain resolves as that run would resolve it.
+		if let Some(locale) = locale {
+			for (name, var) in locale {
+				let key = Key::Var(BStr::new(name));
+				if let Some(var) = var {
+					if probe
+						.put_out_of_band(key, Record::Var(var.clone()))
+						.is_err()
+					{
+						return true;
+					}
+				} else {
+					probe.del_out_of_band(key);
+				}
+			}
+		}
 		for (name, value) in env {
 			if is_ident(&name)
 				&& probe
@@ -2832,7 +2905,21 @@ impl Shell {
 				return true;
 			}
 		}
-		self.source_holds_command(&mut Cx { host, store: &mut probe }, source, parse)
+		let Some(parse) = parse else {
+			return self.source_holds_command(&mut Cx { host, store: &mut probe }, source, None);
+		};
+		// The next run installs these variables, so its charset is the one
+		// the shell resolves them to, references included; the switches and
+		// the alias table stay the frozen ones. A store the probe cannot
+		// read keeps the frozen charset.
+		let frozen = Features::from_bits(parse.features);
+		let charset =
+			Features::DOUBLE_BYTE.bits() | Features::GB18030.bits() | Features::SHIFT_JIS.bits();
+		let features = match self.probe_features(&mut Cx { host, store: &mut probe }) {
+			Some(live) => Features::from_bits((frozen.bits() & !charset) | (live.bits() & charset)),
+			None => frozen,
+		};
+		Self::holds_command(source, features, parse.aliases.as_ref())
 	}
 
 	/// Whether the run's cut-short verdict still waits on a pipeline child

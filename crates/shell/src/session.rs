@@ -78,9 +78,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
 	bash::{
-		Budget, CallId, Cx, Engine, EngineConfig, EventMask, EventSink, Fs, ImageDiff, MemStore,
-		ParseSnapshot, PipeTap, Profile, RestoreError, RestoreOpts, RunId, Script, Shell, ShellError,
-		ShellInit, Signal, StateStore, Step, ToolCall, UnitId, VprocSel,
+		Budget, CallId, Cx, Engine, EngineConfig, EventMask, EventSink, Fs, ImageDiff,
+		LocaleBindings, MemStore, ParseSnapshot, PipeTap, Profile, RestoreError, RestoreOpts, RunId,
+		Script, Shell, ShellError, ShellInit, Signal, StateStore, Step, ToolCall, UnitId, VprocSel,
 		store::{BlobSlot, Key, MiscKey, OptId, Record, Table},
 	},
 	commands::SessionCommands,
@@ -252,6 +252,12 @@ pub struct RunOutcome {
 	/// classifies under the abort-time grammar and alias table, not the
 	/// live one the abort's EXIT cleanup may since have changed.
 	pub exit_parse:   Option<Arc<ParseSnapshot>>,
+	/// The `LC_ALL`/`LC_CTYPE`/`LANG` bindings frozen with `exit_parse`,
+	/// as the shell's global scope bound them (a nameref's target
+	/// followed): the base a probe restores before the next run's
+	/// environment, so the charset is resolved as that run resolves it.
+	/// In-process only.
+	pub exit_locale:  Option<Arc<LocaleBindings>>,
 	/// The shell's working directory after the command.
 	pub cwd:          BString,
 	/// `errexit` was on when the command ended.
@@ -736,7 +742,7 @@ impl Session {
 		commands: Option<SessionCommands>,
 	) -> Result<bool, SessionError> {
 		self
-			.source_holds_command_with_env(source, commands, Vec::new(), None)
+			.source_holds_command_with_env(source, commands, Vec::new(), None, None)
 			.await
 	}
 
@@ -746,6 +752,7 @@ impl Session {
 		commands: Option<SessionCommands>,
 		env: Vec<(BString, BString)>,
 		parse: Option<Arc<ParseSnapshot>>,
+		locale: Option<Arc<LocaleBindings>>,
 	) -> Result<bool, SessionError> {
 		let jobs = self.jobs.as_ref().ok_or(SessionError::Closed)?;
 		let (reply_tx, reply_rx) = flume::bounded(1);
@@ -755,6 +762,7 @@ impl Session {
 				commands,
 				env,
 				parse,
+				locale,
 				reply: reply_tx,
 			})
 			.map_err(|_| SessionError::Closed)?;
@@ -906,6 +914,7 @@ enum Request {
 		commands: Option<SessionCommands>,
 		env:      Vec<(BString, BString)>,
 		parse:    Option<Arc<ParseSnapshot>>,
+		locale:   Option<Arc<LocaleBindings>>,
 		reply:    flume::Sender<bool>,
 	},
 }
@@ -944,7 +953,7 @@ impl Driver {
 				Ok(Request::LiveJobs(reply)) => {
 					let _ = reply.send(self.shell.live_external_jobs(&mut self.store));
 				},
-				Ok(Request::HoldsCommand { source, commands, env, parse, reply }) => {
+				Ok(Request::HoldsCommand { source, commands, env, parse, locale, reply }) => {
 					// Between runs the host's command slot is clear — the last
 					// run's cleanup emptied it — but the parser must see the
 					// commands the next run of this source would install: each
@@ -958,6 +967,7 @@ impl Driver {
 						&source,
 						env,
 						parse.as_deref(),
+						locale.as_deref(),
 					);
 					self.host.set_commands(between_runs);
 					let _ = reply.send(holds);
@@ -1071,6 +1081,7 @@ impl Driver {
 		let exit_cause = self.shell.exit_cause(run);
 		let cut_short = self.settled_cut_short(run).await;
 		let exit_parse = self.shell.exit_parse_snapshot(run);
+		let exit_locale = self.shell.exit_locale_snapshot(run);
 		self.settle().await;
 		self.children.set_active(false);
 		self.host.streams().clear();
@@ -1091,6 +1102,7 @@ impl Driver {
 			exit_cause,
 			cut_short,
 			exit_parse,
+			exit_locale,
 			cwd,
 			errexit,
 			chain_status: self.shell.cleanup_chain_status(run),

@@ -18,6 +18,31 @@ async fn run_case(shell: &Shell, command: &str) -> (ShellRunResult, String) {
 	(result, rx.try_iter().collect())
 }
 
+async fn run_case_env(
+	shell: &Shell,
+	command: &str,
+	env: &[(&str, &str)],
+) -> (ShellRunResult, String) {
+	let (tx, rx) = flume::unbounded();
+	let result = shell
+		.run(
+			ShellRunOptions {
+				command: command.into(),
+				env: Some(
+					env.iter()
+						.map(|(k, v)| (k.to_string(), v.to_string()))
+						.collect(),
+				),
+				..Default::default()
+			},
+			Some(tx),
+			CancelToken::default(),
+		)
+		.await
+		.expect("shell run");
+	(result, rx.try_iter().collect())
+}
+
 #[tokio::test]
 async fn exit_classification_later_loop_condition_does_not_replay_body() {
 	let _guard = shell_test_lock().lock().await;
@@ -282,6 +307,294 @@ async fn exit_classification_owed_segment_probe_uses_next_run_environment() {
 			"the next run installs LANG=C; its tail expands away: {body} / {output}"
 		);
 	}
+}
+
+/// A frozen abort-time context keeps the shell's own switches and aliases,
+/// but the next run reinstalls the call's environment, so the charset the
+/// successor is read under is the one that run installs.
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_frozen_probe_reads_next_run_charset() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(Some(ShellOptions {
+		minimizer: Some(printf_minimizer(
+			&tempfile::tempdir()
+				.expect("minimizer directory")
+				.path()
+				.join("minimizer.toml"),
+			None,
+		)),
+		..Default::default()
+	}));
+	// The `git` alias is a Big5 lead byte, a backslash, a newline and `x`.
+	// Under Big5 the backslash completes the character and the newline ends
+	// a command; under `C` it escapes the newline, the word joins into the
+	// `\xA4x` alias, and that expands to a comment: nothing to run.
+	let setup = "unset LC_ALL LC_CTYPE\nLANG=C\nshopt -s expand_aliases\nalias $'\\xa4x'='# \
+	             hidden'\nalias git=$'\\xa4\\\\\\nx'\nb() { LANG=C; trap ':' EXIT; :; }\na() { \
+	             LANG=C; trap 'exit 0' EXIT; :; }\nc() { LANG=C; exit 0; }";
+	let big5 = [("LANG", "zh_TW.Big5")];
+	let (result, _) = run_case_env(&shell, setup, &big5).await;
+	assert_eq!(result.exit_code, Some(0), "valid fixture");
+	// Control: no exit, the next run reads its tail under Big5 and finds
+	// a command there (one that does not exist).
+	let (result, output) = run_case_env(&shell, "b && git log -1", &big5).await;
+	assert_ne!(result.exit_code, Some(0), "control ran something: {output}");
+	assert!(!result.ended_by_exit, "control: nothing was cut short");
+	// A boundary cleanup exit ends the segment under `C`; the successor is
+	// judged under the charset the next run installs, so it is reported.
+	let (result, output) = run_case_env(&shell, "a && git log -1", &big5).await;
+	assert_eq!(output, "");
+	assert_eq!(result.exit_code, Some(0));
+	assert!(
+		result.ended_by_exit,
+		"the next run would have read the tail under Big5 and run a command"
+	);
+	// The same shell state under a `C` call: the tail expands to a comment
+	// there, so there is nothing to report.
+	let (result, output) = run_case_env(&shell, "a && git log -1", &[]).await;
+	assert_eq!(output, "");
+	assert!(!result.ended_by_exit, "the next run would have read the tail under C and run nothing");
+	// A real abort in the middle of the input reports through the same
+	// probe: its unread tail holds a command under Big5 and none under `C`.
+	let (result, output) = run_case_env(&shell, "c; git log -1", &big5).await;
+	assert_eq!(output, "");
+	assert!(result.ended_by_exit, "a mid-input exit is reported under the next run's charset");
+	let (result, output) = run_case_env(&shell, "c; git log -1", &[]).await;
+	assert_eq!(output, "");
+	assert!(!result.ended_by_exit, "under C the unread tail expands away");
+}
+
+/// Without an environment overlay the next run inherits the locale the
+/// shell carries, but an `exit` freezes its unread input under the locale
+/// it ended with: an EXIT cleanup that switches the locale while the
+/// caller still has input must not hide that tail.
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_exit_cleanup_locale_change_keeps_frozen_charset() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(Some(ShellOptions {
+		minimizer: Some(printf_minimizer(
+			&tempfile::tempdir()
+				.expect("minimizer directory")
+				.path()
+				.join("minimizer.toml"),
+			None,
+		)),
+		..Default::default()
+	}));
+	// The same aliases as above, under a persistent Big5.
+	let setup = "unset LC_ALL LC_CTYPE\nLANG=zh_TW.Big5\nshopt -s expand_aliases\nalias \
+	             $'\\xa4x'='# hidden'\nalias git=$'\\xa4\\\\\\nx'\nf() { local marker=yes; trap \
+	             'if [[ ${marker-} == yes ]]; then LANG=C; fi' EXIT; \"$@\"; }";
+	let (result, _) = run_case_env(&shell, setup, &[]).await;
+	assert_eq!(result.exit_code, Some(0), "valid fixture");
+	// Control: the function returns, the trap runs at the run's boundary
+	// without its local, the locale stays Big5 and the next run reads a
+	// command in the tail.
+	let (result, output) = run_case_env(&shell, "f return 0; git log -1", &[]).await;
+	assert_ne!(result.exit_code, Some(0), "control ran something: {output}");
+	assert!(!result.ended_by_exit, "control: nothing was cut short");
+	// An `exit` inside the function runs the trap while the local is in
+	// scope, and the cleanup switches to `C`. The tail was frozen under
+	// Big5, where it holds a command, and is reported.
+	let (result, output) = run_case_env(&shell, "f exit 0; git log -1", &[]).await;
+	assert_eq!(output, "");
+	assert_eq!(result.exit_code, Some(0));
+	assert!(result.ended_by_exit, "the tail was frozen under Big5 before the cleanup switched to C");
+}
+
+/// The environment the next run installs is resolved by the shell, not
+/// pasted over frozen values: an `LC_ALL` that names `LANG` follows the
+/// `LANG` the next run installs, as it does for the control that runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_frozen_probe_resolves_overlaid_locale_like_the_next_run() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(Some(ShellOptions {
+		minimizer: Some(printf_minimizer(
+			&tempfile::tempdir()
+				.expect("minimizer directory")
+				.path()
+				.join("minimizer.toml"),
+			None,
+		)),
+		..Default::default()
+	}));
+	// The same aliases as above, under a persistent Big5, with `LC_ALL`
+	// naming `LANG`.
+	let setup = "unset LC_ALL LC_CTYPE\nLANG=zh_TW.Big5\nshopt -s expand_aliases\nalias \
+	             $'\\xa4x'='# hidden'\nalias git=$'\\xa4\\\\\\nx'\ndeclare -n LC_ALL=LANG\na() { \
+	             LANG=; LC_CTYPE=zh_TW.Big5; trap 'exit 0' EXIT; :; }\nb() { LANG=; \
+	             LC_CTYPE=zh_TW.Big5; trap ':' EXIT; :; }";
+	let (result, _) = run_case_env(&shell, setup, &[]).await;
+	assert_eq!(result.exit_code, Some(0), "valid fixture");
+	// The next run installs LANG and LC_CTYPE: its LC_ALL names LANG, so
+	// the control's tail is read under Big5 and runs a command.
+	let env = [("LANG", "zh_TW.Big5"), ("LC_CTYPE", "C")];
+	let (result, output) = run_case_env(&shell, "b && git log -1", &env).await;
+	assert_ne!(result.exit_code, Some(0), "control ran something: {output}");
+	assert!(!result.ended_by_exit, "control: nothing was cut short");
+	// The abort froze the tail under Big5, the locale the function set;
+	// the next run resolves its LC_ALL through the installed LANG to Big5
+	// too, so the tail is reported.
+	let (result, output) = run_case_env(&shell, "a && git log -1", &env).await;
+	assert_eq!(output, "");
+	assert!(result.ended_by_exit, "the next run reads the tail under Big5");
+}
+
+/// An environment the next run installs that names no locale variable
+/// changes nothing for the tail: the exit's cleanup switched the locale
+/// after the freeze, and the tail is still read under the locale the
+/// input ended with.
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_unrelated_env_keeps_the_frozen_locale() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(Some(ShellOptions {
+		minimizer: Some(printf_minimizer(
+			&tempfile::tempdir()
+				.expect("minimizer directory")
+				.path()
+				.join("minimizer.toml"),
+			None,
+		)),
+		..Default::default()
+	}));
+	// The same aliases as above, under a persistent Big5.
+	let setup = "unset LC_ALL LC_CTYPE\nLANG=zh_TW.Big5\nshopt -s expand_aliases\nalias \
+	             $'\\xa4x'='# hidden'\nalias git=$'\\xa4\\\\\\nx'\nf() { local marker=yes; trap \
+	             'if [[ ${marker-} == yes ]]; then LANG=C; fi' EXIT; \"$@\"; }";
+	let (result, _) = run_case_env(&shell, setup, &[]).await;
+	assert_eq!(result.exit_code, Some(0), "valid fixture");
+	let env = [("OMP_PROBE_UNRELATED", "1")];
+	// Control: the function returns, the locale stays Big5 and the next
+	// run reads a command in the tail.
+	let (result, output) = run_case_env(&shell, "f return 0; git log -1", &env).await;
+	assert_ne!(result.exit_code, Some(0), "control ran something: {output}");
+	assert!(!result.ended_by_exit, "control: nothing was cut short");
+	// An `exit` inside the function runs the trap while the local is in
+	// scope, and the cleanup switches to `C`. The environment the next
+	// run installs names no locale variable, so the tail is still judged
+	// under the Big5 it was frozen with, and reported.
+	let (result, output) = run_case_env(&shell, "f exit 0; git log -1", &env).await;
+	assert_eq!(output, "");
+	assert_eq!(result.exit_code, Some(0));
+	assert!(
+		result.ended_by_exit,
+		"an unrelated environment must not read the locale the cleanup switched to"
+	);
+}
+
+/// A nameref's target is frozen where the next run reads it. By the time
+/// a boundary freeze is taken, the EXIT trap's own scope is pushed, with
+/// its `BASH_TRAPSIG` local to it: an `LC_ALL` naming `BASH_TRAPSIG` is
+/// frozen with the global binding, not the trap's.
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_frozen_locale_skips_the_trap_scope() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(Some(ShellOptions {
+		minimizer: Some(printf_minimizer(
+			&tempfile::tempdir()
+				.expect("minimizer directory")
+				.path()
+				.join("minimizer.toml"),
+			None,
+		)),
+		..Default::default()
+	}));
+	let setup = "unset LC_ALL LC_CTYPE LANG\nBASH_TRAPSIG=zh_TW.Big5\ndeclare -n \\
+	             LC_ALL=BASH_TRAPSIG\nshopt -s expand_aliases\nalias $'\\xa4x'='# hidden'\nalias \\
+	             git=$'\\xa4\\\\\\nx'\nb() { trap ':' EXIT; :; }\na() { trap 'exit 0' EXIT; :; }";
+	let (result, _) = run_case_env(&shell, setup, &[]).await;
+	assert_eq!(result.exit_code, Some(0), "valid fixture");
+	let env = [("OMP_PROBE_UNRELATED", "1")];
+	// Control: the trap unwinds its scope before the successor, which the
+	// next run reads under Big5 through the global binding.
+	let (result, output) = run_case_env(&shell, "b && git log -1", &env).await;
+	assert_ne!(result.exit_code, Some(0), "control ran something: {output}");
+	assert!(!result.ended_by_exit, "control: nothing was cut short");
+	let (result, output) = run_case_env(&shell, "a && git log -1", &env).await;
+	assert_eq!(output, "");
+	assert_eq!(result.exit_code, Some(0));
+	assert!(
+		result.ended_by_exit,
+		"the trap's own BASH_TRAPSIG must not stand in for the global one"
+	);
+	// Without an overlay the frozen charset itself is the global binding's.
+	let (result, output) = run_case_env(&shell, "a && git log -1", &[]).await;
+	assert_eq!(output, "");
+	assert!(result.ended_by_exit, "no overlay: the frozen charset skips the trap scope too");
+}
+
+/// The frozen locale follows a nameref chain as far as the shell's own
+/// resolver does: a target six names from `LC_ALL` is still the next
+/// run's `LC_ALL`.
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_frozen_locale_follows_a_long_nameref_chain() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(Some(ShellOptions {
+		minimizer: Some(printf_minimizer(
+			&tempfile::tempdir()
+				.expect("minimizer directory")
+				.path()
+				.join("minimizer.toml"),
+			None,
+		)),
+		..Default::default()
+	}));
+	let setup = "unset LC_ALL LC_CTYPE LANG\ndeclare -n LC_ALL=N1\ndeclare -n N1=N2\ndeclare -n \\
+	             N2=N3\ndeclare -n N3=N4\ndeclare -n N4=N5\ndeclare -n \
+	             N5=N6\nN6=zh_TW.Big5\nLANG=C\nshopt \\
+	             -s expand_aliases\nalias $'\\xa4x'='# hidden'\nalias git=$'\\xa4\\\\\\nx'\nf() { \\
+	             local marker=yes; trap 'if [[ ${marker-} == yes ]]; then N6=C; fi' EXIT; \"$@\"; }";
+	let (result, _) = run_case_env(&shell, setup, &[]).await;
+	assert_eq!(result.exit_code, Some(0), "valid fixture");
+	let env = [("OMP_PROBE_UNRELATED", "1")];
+	let (result, output) = run_case_env(&shell, "f return 0; git log -1", &env).await;
+	assert_ne!(result.exit_code, Some(0), "control ran something: {output}");
+	assert!(!result.ended_by_exit, "control: nothing was cut short");
+	let (result, output) = run_case_env(&shell, "f exit 0; git log -1", &env).await;
+	assert_eq!(output, "");
+	assert_eq!(result.exit_code, Some(0));
+	assert!(result.ended_by_exit, "the chain's last name is the next run's LC_ALL");
+}
+
+/// Each nameref chain is followed on the shell resolver's own budget,
+/// per variable: a chain that outruns that depth from `LC_ALL` is still
+/// reached through `LC_CTYPE`, and its end freezes too.
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_frozen_locale_follows_each_chain_on_its_own() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(Some(ShellOptions {
+		minimizer: Some(printf_minimizer(
+			&tempfile::tempdir()
+				.expect("minimizer directory")
+				.path()
+				.join("minimizer.toml"),
+			None,
+		)),
+		..Default::default()
+	}));
+	// `LC_ALL` names 63 namerefs to `TARGET`, one hop past the resolver's
+	// depth; `LC_CTYPE` names the chain's last link, through which the
+	// resolver reaches `TARGET`.
+	use std::fmt::Write as _;
+	let mut setup = String::from("unset LC_ALL LC_CTYPE LANG\ndeclare -n LC_ALL=N1\n");
+	for i in 1..63 {
+		let _ = writeln!(setup, "declare -n N{i}=N{}", i + 1);
+	}
+	setup.push_str(
+		"declare -n N63=TARGET\ndeclare -n LC_CTYPE=N63\nTARGET=zh_TW.Big5\nLANG=C\nshopt -s \\
+		 expand_aliases\nalias $'\\xa4x'='# hidden'\nalias git=$'\\xa4\\\\\\nx'\nf() { local \\
+		 marker=yes; trap 'if [[ ${marker-} == yes ]]; then TARGET=C; fi' EXIT; \"$@\"; }",
+	);
+	let (result, _) = run_case_env(&shell, &setup, &[]).await;
+	assert_eq!(result.exit_code, Some(0), "valid fixture");
+	let env = [("OMP_PROBE_UNRELATED", "1")];
+	let (result, output) = run_case_env(&shell, "f return 0; git log -1", &env).await;
+	assert_ne!(result.exit_code, Some(0), "control ran something: {output}");
+	assert!(!result.ended_by_exit, "control: nothing was cut short");
+	let (result, output) = run_case_env(&shell, "f exit 0; git log -1", &env).await;
+	assert_eq!(output, "");
+	assert_eq!(result.exit_code, Some(0));
+	assert!(result.ended_by_exit, "the chain's end is reached through LC_CTYPE and must freeze");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -1777,6 +1777,7 @@ async fn run_shell_command_segmented_chain(
 				// path and this probe must not read different parser state. A
 				// cancel probe has no freeze and keeps the live table.
 				let parse = outcome.exit_parse.clone();
+				let locale = outcome.exit_locale.clone();
 				let commands = scope.options.commands.as_ref().map(RunLease::commands);
 				// A boundary cleanup exit reports the trap's status, not the
 				// command's, so a conditional successor is judged by the
@@ -1806,6 +1807,7 @@ async fn run_shell_command_segmented_chain(
 							commands.clone(),
 							scope.env.clone(),
 							parse.clone(),
+							locale.clone(),
 						)
 						.await
 						.unwrap_or(true)
