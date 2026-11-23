@@ -1,7 +1,9 @@
 import type { AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import type { ShellCommandRequest, ShellCommandResult } from "@oh-my-pi/pi-natives";
+import * as fs from "node:fs";
 import type { Tool, ToolSession } from "../tools";
+import { InternalUrlRouter } from "../internal-urls";
 import { specialToolCommands } from "../tools/resolve";
 import {
 	dispatchToolCommand,
@@ -42,6 +44,32 @@ function specialCommandState(state: ToolCommandState, special: Tool): ToolComman
 function appendLine(output: string, text: string): string {
 	if (!text) return output;
 	return output + text + (text.endsWith("\n") ? "" : "\n");
+}
+
+/**
+ * Whether the shell's working directory at invocation differs from the session's
+ * (same directory under different names counts as equal, so symlinked or
+ * macOS-style `/tmp` aliases do not trigger a refusal). URL cwds are skipped:
+ * they are not host paths a tool's relative arguments could silently fall back to.
+ */
+async function shellCwdMismatch(shellCwd: string, sessionCwd: string): Promise<boolean> {
+	const router = InternalUrlRouter.instance();
+	if (router.canHandle(shellCwd) || router.canHandle(sessionCwd)) return false;
+	const realpath = (directory: string): Promise<string> => fs.promises.realpath(directory).catch(() => directory);
+	const [shell, session] = await Promise.all([realpath(shellCwd), realpath(sessionCwd)]);
+	return shell !== session;
+}
+
+/** Refusal for a tool command invoked after `cd`, which would otherwise resolve against the session root. */
+function cwdMismatchResult(name: string, shellCwd: string, sessionCwd: string): ShellCommandResult {
+	return {
+		stdout: "",
+		stderr:
+			`${name}: refusing to run: the shell working directory is \`${shellCwd}\`, but the session working directory is \`${sessionCwd}\`. ` +
+			`Relative tool arguments would resolve against the session root, not the shell's directory. ` +
+			`Use absolute paths, or run the command from the session root (cd back first).\n`,
+		exitCode: 2,
+	};
 }
 
 /** Shell view of a tool result: text to stdout (stderr with exit 1 on error), images as terminal graphics on stdout. */
@@ -98,6 +126,16 @@ export function createToolCommandHandler(options: {
 			return { stdout: "", stderr: `${name}: command is no longer available\n`, exitCode: 1 };
 		}
 		const dispatchState = special ? specialCommandState(state, special) : state;
+
+		// A tool command after `cd` must never silently resolve relative
+		// arguments against the session root (issue #20271). `--help` is
+		// cwd-independent and stays answerable.
+		const isHelpOnly = request.argv.length === 1 && (request.argv[0] === "-h" || request.argv[0] === "--help");
+		if (!isHelpOnly && (await shellCwdMismatch(request.cwd, session.cwd))) {
+			const refused = cwdMismatchResult(name, request.cwd, session.cwd);
+			onDispatch?.({ ...fallback, exitCode: refused.exitCode }, index);
+			return refused;
+		}
 
 		let dispatch: ToolCommandDispatch | undefined;
 		const host: ToolCliHost = {

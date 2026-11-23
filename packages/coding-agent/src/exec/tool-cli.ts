@@ -696,6 +696,12 @@ export async function parseToolArgs(
 	const output = createJsonObject();
 	const overrides = createJsonObject();
 	let optionsEnded = false;
+	/**
+	 * Repeatable flag whose values are still being filled: after
+	 * `--paths a`, further bare words extend that array until the next
+	 * flag (or `--`), matching the `--paths <STRING>...` usage line.
+	 */
+	let activeArrayLeaf: SchemaLeaf | undefined;
 	for (let index = 0; index < argv.length; index += 1) {
 		const argument = argv[index]!;
 		if (optionsEnded) {
@@ -704,14 +710,17 @@ export async function parseToolArgs(
 		}
 		if (argument === "--") {
 			optionsEnded = true;
+			activeArrayLeaf = undefined;
 			continue;
 		}
 		if (argument === "-" || (argument.startsWith("@") && argument.length > 1)) {
+			activeArrayLeaf = undefined;
 			const source = await readArgumentSource(argument, options);
 			bindSource(leaves, output, overrides, source!.text, source!.origin);
 			continue;
 		}
 		if (argument === "-j" || argument === "--json" || argument.startsWith("--json=")) {
+			activeArrayLeaf = undefined;
 			const raw = argument.startsWith("--json=") ? argument.slice("--json=".length) : argv[++index];
 			if (raw === undefined) throw new ToolCliUsageError(`flag \`${argument}\` requires a value`);
 			const source = await readArgumentSource(raw, options);
@@ -729,6 +738,11 @@ export async function parseToolArgs(
 		}
 		if (!argument.startsWith("--")) {
 			if (argument.startsWith("-")) throw new ToolCliUsageError(`unknown flag \`${argument}\``);
+			if (activeArrayLeaf) {
+				// Still filling the preceding array flag's values.
+				insertValue(overrides, activeArrayLeaf.path, coerce(activeArrayLeaf, argument, argument), true);
+				continue;
+			}
 			bindLiteral(leaves, output, overrides, argument, argument);
 			continue;
 		}
@@ -743,6 +757,8 @@ export async function parseToolArgs(
 			leaf = leaves.find(candidate => flagName(candidate.path) === rawFlag);
 		}
 		if (!leaf) throw new ToolCliUsageError(`unknown flag \`${argument}\``);
+		// Every flag ends the previous array flag's value run.
+		activeArrayLeaf = undefined;
 		if (!leaf.repeatable && leaf.kind === "boolean" && !leaf.values) {
 			if (negative && inline !== undefined) {
 				throw new ToolCliUsageError(`invalid value for \`${argument}\`; expected a flag without a value`);
@@ -761,6 +777,7 @@ export async function parseToolArgs(
 			coerce(leaf, source ? stripOneNewline(source.text) : raw, argument),
 			leaf.repeatable,
 		);
+		if (leaf.repeatable && leaf.kind !== "boolean") activeArrayLeaf = leaf;
 	}
 	for (const leaf of leaves) {
 		const value = valueAt(overrides, leaf.path);
