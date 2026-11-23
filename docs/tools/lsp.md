@@ -16,7 +16,8 @@
    - `packages/coding-agent/src/lsp/diagnostics.ts` — push/pull diagnostic freshness, wait budgets, location formatting, reference/symbol limits
    - `packages/coding-agent/src/lsp/workspace-diagnostics.ts` — root-marker detection and bounded-concurrency workspace checkers
    - `packages/tui/src/tools/lsp.ts` — result details and TUI rendering
-   - `packages/coding-agent/src/lsp/utils.ts` — URI conversion, symbol resolution, formatting, glob expansion
+   - `packages/coding-agent/src/lsp/utils.ts` — symbol resolution, formatting, glob expansion
+   - `packages/coding-agent/src/lsp/uri.ts` — file URI conversion and URI-keyed maps
    - `packages/coding-agent/src/lsp/types.ts` — tool schema and protocol types
    - `packages/coding-agent/src/lsp/clients/index.ts` — custom linter client cache/factory
    - `packages/coding-agent/src/lsp/clients/lsp-linter-client.ts` — LSP-backed linter adapter

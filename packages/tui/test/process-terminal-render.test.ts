@@ -1,11 +1,16 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { postmortem } from "@oh-my-pi/pi-utils";
 import {
 	createProcessTerminalRenderHarness,
 	type ProcessTerminalRenderHarness,
 } from "./process-terminal-render-harness";
+import { TERMINAL_MULTIPLEXER_ENV_KEYS } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 
 const PLATFORM_DESCRIPTOR = Object.getOwnPropertyDescriptor(process, "platform");
+// Herdr desktop's terminal id plus every multiplexer marker, TERM included: the
+// suite may itself run inside Herdr or tmux, which must not switch paths on or off.
+const SESSION_ENV_KEYS = ["HC_TERMINAL_ID", ...TERMINAL_MULTIPLEXER_ENV_KEYS];
+const SESSION_ENV = Object.fromEntries(SESSION_ENV_KEYS.map(key => [key, Bun.env[key]]));
 
 // Geometry-reflow contract for the *real* terminal driven through the *real*
 // renderer. These exercise the seam VirtualTerminal cannot model: the OS channel
@@ -14,10 +19,18 @@ const PLATFORM_DESCRIPTOR = Object.getOwnPropertyDescriptor(process, "platform")
 describe("ProcessTerminal geometry reflow through the renderer", () => {
 	let harness: ProcessTerminalRenderHarness | undefined;
 
+	beforeEach(() => {
+		for (const key of SESSION_ENV_KEYS) delete Bun.env[key];
+	});
+
 	afterEach(() => {
 		harness?.dispose();
 		harness = undefined;
 		if (PLATFORM_DESCRIPTOR) Object.defineProperty(process, "platform", PLATFORM_DESCRIPTOR);
+		for (const [key, value] of Object.entries(SESSION_ENV)) {
+			if (value === undefined) delete Bun.env[key];
+			else Bun.env[key] = value;
+		}
 		vi.restoreAllMocks();
 	});
 
@@ -58,9 +71,74 @@ describe("ProcessTerminal geometry reflow through the renderer", () => {
 		await harness.inBand(30, 100, 600, 1000);
 
 		await harness.inBand(30, 140, 700, 1400);
+		await harness.elapse(600);
 
 		expect(harness.terminal.columns).toBe(140);
 		expect(harness.probe.last).toBe(140);
+	});
+
+	it("returns to the pty size in Herdr after a peek report read late", async () => {
+		// Herdr reports the smaller size of a peek but sends no report when the
+		// terminal returns to its pane. With the peek's SIGWINCH coalesced away
+		// while the event loop was busy, stdout never shows the peek size, and
+		// the late report pinned the viewport to the peek until the next resize.
+		Bun.env.HC_TERMINAL_ID = "t7";
+		harness = createProcessTerminalRenderHarness(100, 30);
+		await harness.feed("\x1b[?2048;1$y");
+		await harness.inBand(30, 100);
+
+		await harness.inBand(20, 80);
+		expect([harness.terminal.rows, harness.probe.last]).toEqual([20, 80]);
+		await harness.elapse(600);
+
+		expect([harness.terminal.rows, harness.terminal.columns]).toEqual([30, 100]);
+		expect(harness.probe.last).toBe(100);
+	});
+
+	it("keeps a Herdr report whose SIGWINCH follows it", async () => {
+		Bun.env.HC_TERMINAL_ID = "t7";
+		harness = createProcessTerminalRenderHarness(100, 30);
+		await harness.feed("\x1b[?2048;1$y");
+		await harness.inBand(30, 100);
+
+		await harness.inBand(30, 140);
+		await harness.osResize(140, 30);
+		await harness.elapse(600);
+
+		expect(harness.terminal.columns).toBe(140);
+		expect(harness.probe.last).toBe(140);
+	});
+
+	it.each([
+		["a tmux session", { TMUX: "/tmp/tmux-501/default,1,0" }],
+		["tmux known only by TERM", { TERM: "tmux-256color" }],
+	])("keeps in-band precedence for %s inside a Herdr terminal", async (_name, env) => {
+		// A grid-owning multiplexer in a Herdr pane owns its own pty; its reports stay authoritative.
+		Bun.env.HC_TERMINAL_ID = "t7";
+		Object.assign(Bun.env, env);
+		harness = createProcessTerminalRenderHarness(100, 30);
+		await harness.feed("\x1b[?2048;1$y");
+		await harness.inBand(30, 100);
+
+		await harness.inBand(30, 140);
+		await harness.elapse(600);
+
+		expect(harness.terminal.columns).toBe(140);
+		expect(harness.probe.last).toBe(140);
+	});
+
+	it("returns to the pty size in Herdr inside Orca, which does not own the grid", async () => {
+		Bun.env.HC_TERMINAL_ID = "t7";
+		Bun.env.ORCA_PANE_KEY = "pane";
+		Bun.env.ORCA_WORKTREE_ID = "wt";
+		harness = createProcessTerminalRenderHarness(100, 30);
+		await harness.feed("\x1b[?2048;1$y");
+		await harness.inBand(30, 100);
+
+		await harness.inBand(20, 80);
+		await harness.elapse(600);
+
+		expect([harness.terminal.rows, harness.terminal.columns]).toEqual([30, 100]);
 	});
 
 	it("reflows when an in-band report is split across stdin reads", async () => {
