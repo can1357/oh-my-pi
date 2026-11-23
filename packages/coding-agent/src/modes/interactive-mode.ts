@@ -754,8 +754,12 @@ export const TODO_COMPACT_TERMINAL_ROWS_THRESHOLD = 18;
 /** Holds mutable HUD and editor-adjacent chrome outside transcript history. */
 class AnchoredLiveContainer extends Container {}
 
-/** An empty HUD slot: the terminal owns spacing, so nothing is described. */
-const EMPTY_HUD: NativeNode = col([]);
+/**
+ * The activity line with nothing to show and no tray to seat: the line without its role. It stays a
+ * row, as the line is, so the host keeps one element as the line comes and goes; a kind change makes
+ * the host drop the element and draw a new one, losing what it drew into it (a tray host's dots).
+ */
+const EMPTY_STATUS: NativeNode = row([], { align: "center", gap: "sm" });
 /** The activity line with nothing in it: on a tray host it stays while the tray has cards, the host's seat for them. */
 const EMPTY_ACTIVITY: NativeNode = row([], { role: "omp.hud.activity", align: "center", gap: "sm" });
 
@@ -1770,7 +1774,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * retry and compaction loaders describe themselves as the working row;
 	 * other rows describe themselves) in an `omp.hud.status` column, then the
 	 * todo HUD, so the todo holds its place as the turn starts and ends.
-	 * Nothing to show describes the empty HUD. On a host with the tray, the
+	 * Nothing to show describes the line without its role ({@link EMPTY_STATUS}),
+	 * never another kind of node. On a host with the tray, the
 	 * row is the tray's header: while the main agent is idle its caption
 	 * stands in for the status rows, and while the tray has cards the line
 	 * stays, empty if need be, as the seat the host draws them from.
@@ -1805,7 +1810,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				? row(parts, { role: "omp.hud.activity", align: "center", gap: "sm" })
 				: seat
 					? EMPTY_ACTIVITY
-					: EMPTY_HUD;
+					: EMPTY_STATUS;
 		this.#statusHudNative = { children: children.slice(), todo, caption, seat, node: described };
 		return described;
 	}
