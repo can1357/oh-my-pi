@@ -52,6 +52,7 @@ import { getLatestRelease, isSourceCheckout } from "./cli/update-cli";
 import { findConfigFile } from "./config";
 import { cfgNoJudge, cfgNoSpotlight, cfgOffline } from "./config/auxiliary-model-policy";
 import { ModelRegistry } from "./config/model-registry";
+import { applyModelPresetOverrides } from "./config/model-presets";
 import { formatModelSelectorValue } from "./config/model-selector";
 import {
 	disabledProviderIds,
@@ -2221,6 +2222,20 @@ export async function runRootCommand(
 
 		// Initialize discovery system with settings for provider persistence
 		logger.time("initializeWithSettings", initializeWithSettings, settingsInstance);
+
+		// Apply --preset first. A later --smol/--slow/--plan flag overrides the
+		// preset's value for that role (ephemeral).
+		if (parsedArgs.preset !== undefined) {
+			const presetResult = applyModelPresetOverrides(settingsInstance, parsedArgs.preset);
+			if (presetResult.kind !== "applied") {
+				const message =
+					presetResult.kind === "missing"
+						? `Model preset not found: ${parsedArgs.preset}`
+						: `Model preset "${parsedArgs.preset}" is malformed: ${presetResult.reason}`;
+				process.stderr.write(`${chalk.red(message)}\n`);
+				process.exit(1);
+			}
+		}
 
 		// Apply model role overrides from CLI args or env vars (ephemeral, not persisted)
 		const smolModel = parsedArgs.smol ?? $env.PI_SMOL_MODEL;

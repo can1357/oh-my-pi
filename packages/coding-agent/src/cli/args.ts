@@ -39,6 +39,8 @@ export interface Args {
 	smol?: string;
 	slow?: string;
 	plan?: string;
+	/** `--preset` starts on a saved model preset's roles and default thinking level (ephemeral). */
+	preset?: string;
 	/** Objective for a fresh interactive goal session. */
 	goal?: string;
 	prewalk?: boolean;

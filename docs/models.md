@@ -902,6 +902,8 @@ A model preset is a named snapshot of every role assignment plus `defaultThinkin
 /modelpreset list | delete <name>
 ```
 
+Start a session on a preset without switching scopes with `omp --preset <name>`. The preset's roles and `defaultThinkingLevel` apply as runtime overrides for that run, nothing is written to config, and `--model`, `--smol`, `--slow` and `--plan` still win for the roles they name. A missing or malformed preset stops the launch with an error.
+
 In `/models`, press `s` in the Roles view to save the current setup under a name. Presets live under `modelPresets` in `config.yml`:
 
 ```yaml
