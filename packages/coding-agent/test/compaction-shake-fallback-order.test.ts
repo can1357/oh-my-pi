@@ -53,12 +53,14 @@ describe("auto-compaction fallback after a failed shake", () => {
 	let handoffCalls: number;
 	let shakeCalls: number;
 
-	function createMaintenance(options: { handoffDocument?: string } = {}): SessionMaintenance {
+	function createMaintenance(
+		options: { handoffDocument?: string; methodOrder?: CompactionMethod[] } = {},
+	): SessionMaintenance {
 		agent = new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } });
 		const settings = Settings.isolated({
 			"compaction.enabled": true,
 			"compaction.asyncEnabled": false,
-			"compaction.methodOrder": DEFAULT_ORDER,
+			"compaction.methodOrder": options.methodOrder ?? DEFAULT_ORDER,
 			"compaction.thresholdPercent": 50,
 			"compaction.keepRecentTokens": 1,
 			"compaction.autoContinue": false,
@@ -143,7 +145,7 @@ describe("auto-compaction fallback after a failed shake", () => {
 		authStorage.keys.setRuntime("aimlapi", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 		// Text-only, no provider-native compaction: `remote` and `snapcompact` are
-		// never selectable, so the order effectively reduces to handoff/shake/soft.
+		// never selectable, so the default order reduces to handoff/shake/soft.
 		const bundled = getBundledModel("aimlapi", "alibaba/qwen3-coder-480b-a35b-instruct");
 		if (!bundled) throw new Error("Expected built-in model");
 		model = { ...bundled, contextWindow: CONTEXT_WINDOW };
@@ -170,28 +172,13 @@ describe("auto-compaction fallback after a failed shake", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("restarts at the top of the configured order and reaches handoff", async () => {
-		// Resuming at `shake` is the fallback state the order produces once an
-		// earlier preference was passed over. The user configured handoff ahead of
-		// shake, so a shake that frees too little must land on handoff — not skip
-		// to the soft summary that merely follows shake in the list (#19603).
-		maintenance = createMaintenance({ handoffDocument: "# Handoff\n\nstate" });
-
-		await maintenance.runAutoCompaction("threshold", false, {
-			triggerContextTokens: TRIGGER_TOKENS,
-			methodIndex: DEFAULT_ORDER.indexOf("shake"),
-		});
-
-		expect(startedActions).toEqual(["shake", "handoff"]);
-		expect(shakeCalls).toBe(1);
-		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
-		expect(entry?.type === "compaction" ? entry.method : undefined).toBe("handoff");
-	});
-
-	it("ends at the soft summary without re-running an attempted method", async () => {
-		// Handoff produces no document, so the chain reaches shake; the restart
-		// must skip the handoff that already failed and shake itself, leaving the
-		// soft summary — a failed shake may never loop back onto its own order.
+	it("walks the default order once and does not retry the handoff that already failed", async () => {
+		// #19603 reported the sequence handoff -> shake -> soft as "shake skipped my
+		// configured handoff". The pass scans the configured order from the top, so
+		// shake is only ever reached after handoff ran: the method a failed shake
+		// skips is the one that already failed, never an untried preference. A
+		// regression that re-entered the order from index 0 would call handoff twice
+		// — the user would pay for a second handoff side request per fallback.
 		maintenance = createMaintenance({ handoffDocument: undefined });
 
 		await maintenance.runAutoCompaction("threshold", false, {
@@ -203,5 +190,22 @@ describe("auto-compaction fallback after a failed shake", () => {
 		expect(shakeCalls).toBe(1);
 		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
 		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("soft summary");
+	});
+
+	it("blocks automatic continuation when a shake-only order is exhausted", async () => {
+		// A shake-only order has nothing left after the shake frees too little. The
+		// caller must learn that so it can stop the automatic continuation instead
+		// of looping on a context that is still over the threshold (mid-turn callers
+		// record this as a dead end).
+		maintenance = createMaintenance({ methodOrder: ["shake"] });
+
+		const result = await maintenance.runAutoCompaction("threshold", false, {
+			triggerContextTokens: TRIGGER_TOKENS,
+		});
+
+		expect(result.automaticContinuationBlocked).toBe(true);
+		expect(startedActions).toEqual(["shake"]);
+		expect(shakeCalls).toBe(1);
+		expect(sessionManager.getEntries().some(item => item.type === "compaction")).toBe(false);
 	});
 });

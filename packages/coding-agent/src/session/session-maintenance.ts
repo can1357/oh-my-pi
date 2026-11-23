@@ -5550,12 +5550,6 @@ export class SessionMaintenance {
 			detachPostCommit?: boolean;
 			/** Index to resume from after an earlier preferred method failed. */
 			methodIndex?: number;
-			/**
-			 * Methods already tried in this fallback chain. They are never selected
-			 * again, so restarting at the top of the order (see the shake fallback)
-			 * cannot re-run a method that already failed.
-			 */
-			attemptedMethods?: readonly CompactionMethod[];
 			/** A preceding shake already rewrote history before this fallback attempt. */
 			fallbackFromShake?: boolean;
 			/**
@@ -5609,13 +5603,11 @@ export class SessionMaintenance {
 			!suppressContinuation && options.autoContinue !== false && compactionSettings.autoContinue !== false;
 		const bridgeSpec = options.bridgeSpeculation;
 		const startIndex = options.methodIndex ?? 0;
-		const attemptedMethods = options.attemptedMethods ?? [];
 		// Past the last method: a bridge commit that fails leaves the uncompacted history in place.
 		let methodIndex = bridgeSpec ? methods.length : -1;
 		let method: CompactionMethod | undefined = bridgeSpec?.method;
 		for (let index = startIndex; !bridgeSpec && index < methods.length; index++) {
 			const candidate = methods[index];
-			if (attemptedMethods.includes(candidate)) continue;
 			if (
 				!isCompactionMethodUsable(
 					candidate,
@@ -5674,10 +5666,8 @@ export class SessionMaintenance {
 		const effectiveSettings = resolveMethodSettings(compactionSettings, method);
 		const fallbackFromShake = options.fallbackFromShake === true;
 		// Shake runs inline (cheap, no remote LLM). If it cannot recover enough
-		// context, restart from the top of the configured order so a preferred
-		// method shake was reached past still gets its turn (#19603); every
-		// method already tried, shake included, is skipped, so the restart can
-		// only move forward.
+		// context, resume from the next configured method instead of hardcoding a
+		// context-full summary.
 		if (method === "shake" && !armedSpec) {
 			const outcome = await this.#runAutoShake(
 				reason,
@@ -5692,8 +5682,7 @@ export class SessionMaintenance {
 			if (outcome !== "fallback") return outcome;
 			return await this.runAutoCompaction(reason, willRetry, {
 				...options,
-				methodIndex: 0,
-				attemptedMethods: [...attemptedMethods, method],
+				methodIndex: methodIndex + 1,
 				fallbackFromShake: true,
 			});
 		}
@@ -6025,7 +6014,6 @@ export class SessionMaintenance {
 					return await this.runAutoCompaction(reason, willRetry, {
 						...options,
 						methodIndex: methodIndex + 1,
-						attemptedMethods: [...attemptedMethods, method],
 					});
 				}
 			}
@@ -6201,7 +6189,6 @@ export class SessionMaintenance {
 									.some(
 										next =>
 											next !== "shake" &&
-											!attemptedMethods.includes(next) &&
 											isCompactionMethodUsable(
 												next,
 												reason,
@@ -6241,7 +6228,6 @@ export class SessionMaintenance {
 					return await this.runAutoCompaction(reason, willRetry, {
 						...options,
 						methodIndex: methodIndex + 1,
-						attemptedMethods: [...attemptedMethods, method],
 					});
 				}
 			}
@@ -6527,16 +6513,14 @@ export class SessionMaintenance {
 				});
 				const laterMethodUsable = methods
 					.slice(methodIndex + 1)
-					.some(
-						next =>
-							!attemptedMethods.includes(next) &&
-							isCompactionMethodUsable(
-								next,
-								reason,
-								this.#model,
-								compactionSettings,
-								options.excludeMediaMethods === true,
-							),
+					.some(next =>
+						isCompactionMethodUsable(
+							next,
+							reason,
+							this.#model,
+							compactionSettings,
+							options.excludeMediaMethods === true,
+						),
 					);
 				const noReductionMessage = laterMethodUsable
 					? `${action} compaction would not reduce context; trying the next preferred compaction method.`
@@ -6558,7 +6542,6 @@ export class SessionMaintenance {
 					return await this.runAutoCompaction(reason, willRetry, {
 						...options,
 						methodIndex: methodIndex + 1,
-						attemptedMethods: [...attemptedMethods, method],
 					});
 				}
 				return reason === "threshold" ? COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION : COMPACTION_CHECK_NONE;
@@ -6634,7 +6617,6 @@ export class SessionMaintenance {
 				return await this.runAutoCompaction(reason, willRetry, {
 					...options,
 					methodIndex: methodIndex + 1,
-					attemptedMethods: [...attemptedMethods, method],
 				});
 			}
 			await this.#emitLifecycleEvent(
