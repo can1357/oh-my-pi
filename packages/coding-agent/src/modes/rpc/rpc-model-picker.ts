@@ -6,7 +6,7 @@
  * thinking slider. Every ordering, ranking and slider rule comes from the TUI picker's own helpers.
  */
 import type { Model } from "@oh-my-pi/pi-ai";
-import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { fuzzyRank } from "@oh-my-pi/pi-tui/fuzzy";
 import {
 	buildSearchAffinity,
@@ -112,7 +112,7 @@ export class RpcModelPicker {
 				...(roles.length > 0 ? { roles } : {}),
 				...(slider.disabled ? {} : { thinking: [...slider.steps], thinkingLevel: slider.value }),
 				...(tokens > 0 && window > 0 && tokens > window ? { overContext: true } : {}),
-				...(modelsAreEqual(current, model) ? { current: true } : {}),
+				...(routedModelsAreEqual(current, model) ? { current: true } : {}),
 			};
 		});
 		return {
