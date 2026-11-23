@@ -1883,7 +1883,8 @@ export interface TodoBackendDefinition {
 	 * only, do not write: a committed change then reaches `replace` like any other commit, which
 	 * corrects a backend that wrote here. A refusal, a timeout, a late answer or a list that
 	 * changed meanwhile fails the call with omp's list unchanged, and the backend is sent omp's
-	 * whole list once. While the session is closing the call fails and nothing is resent. Changes
+	 * whole list once. A todo call made once the session is closing fails without asking the
+	 * backend, and nothing is resent. Changes
 	 * that do not come from the model's `todo` call (`/todo`, RPC `set_todos`, eval, resets,
 	 * subagents) are not asked: they reach `replace`.
 	 */

@@ -13,6 +13,7 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
 	SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS,
+	TODO_APPLY_TIMEOUT_MS,
 	testSetExtensionHandlerTimeoutMs,
 	testSetSessionShutdownHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
@@ -754,6 +755,8 @@ describe("todo backend", () => {
 			if (scenario === "is aborted") abort.abort();
 			await settled(session);
 			const before = backend.calls.length;
+			// The resend waits outside the queue, so `settled` does not cover it.
+			const resent = backend.entered();
 			const answersMeanwhile = !late && scenario !== "times out";
 			if (answersMeanwhile) gate.resolve();
 			const outcome = await result.catch(() => undefined);
@@ -764,10 +767,11 @@ describe("todo backend", () => {
 				await Bun.sleep(15);
 				gate.resolve();
 			}
+			await resent;
 			await settled(session);
 
 			// The replace lands after the late write, not before it.
-			if (late) expect(sentBeforeAnswer).toBe(before);
+			if (scenario !== "times out") expect(sentBeforeAnswer).toBe(before);
 			if (!outcome) throw new Error("the call threw instead of returning a result");
 			expect(outcome.isError).toBe(true);
 			expect(textOf(outcome)).toContain("nothing was saved");
@@ -842,6 +846,48 @@ describe("todo backend", () => {
 			expect(backend.asked).toEqual([]);
 		});
 
+		it("a backend that answers only after 10 s fails the call even when the handler timeout is longer", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+			const gate = Promise.withResolvers<void>();
+			backend.applyHold = gate.promise;
+			testSetExtensionHandlerTimeoutMs(60_000);
+			vi.useFakeTimers();
+			let outcome: AgentToolResult<TodoToolDetails>;
+			try {
+				const asked = backend.entered();
+				const result = call(session, { op: "init", items: ["a"] });
+				await asked;
+				vi.advanceTimersByTime(TODO_APPLY_TIMEOUT_MS);
+				// After a timeout omp waits a moment for the handler to finish; a late answer ends that wait
+				// without a timer, which fake timers would hold back.
+				gate.resolve();
+				outcome = await result;
+			} finally {
+				vi.useRealTimers();
+			}
+
+			expect(outcome.isError).toBe(true);
+			expect(textOf(outcome)).toContain("did not answer within 10000 ms");
+		});
+
+		it("a commit made while a failed call's resend still waits is sent at once, and dispose does not drop it", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+			testSetExtensionHandlerTimeoutMs(40);
+			testSetSessionShutdownHandlerTimeoutMs(5);
+			// Only the first call's apply never answers.
+			backend.applyHold = Promise.withResolvers<void>().promise;
+			const first = await call(session, { op: "init", items: ["a"] });
+			backend.applyHold = undefined;
+			const second = await call(session, { op: "init", items: ["b"] });
+			await session.dispose();
+
+			expect(first.isError).toBe(true);
+			expect(second.isError).not.toBe(true);
+			expect(tasksOf(backend).at(-1)).toEqual(["b"]);
+		});
+
 		it("a refused todo call that follows bash and an accepted one in a message sees the committed list, and leaves no retry reminder", async () => {
 			let bashDone = false;
 			const asked: Array<{ op: string; bashDone: boolean; previous: TodoPhase[] }> = [];
@@ -891,7 +937,9 @@ describe("todo backend", () => {
 			const dropAsked = asked.find(entry => entry.op === "drop");
 			const dropResult = session.messages.find(m => m.role === "toolResult" && m.toolCallId === "r");
 			expect(asked.find(entry => entry.op === "done")?.bashDone).toBe(true);
-			expect(session.getTodoPhases()[0].tasks.map(task => task.status)).toContain("completed");
+			const statuses = Object.fromEntries(session.getTodoPhases()[0].tasks.map(task => [task.content, task.status]));
+			expect(statuses.x).toBe("completed");
+			expect(statuses.y).not.toBe("abandoned");
 			expect(dropAsked?.previous[0].tasks.find(task => task.content === "x")?.status).toBe("completed");
 			expect(dropResult).toMatchObject({ isError: true, details: { refused: true } });
 			expect(session.messages.filter(m => m.role === "custom" && m.customType === "todo-error-reminder")).toEqual(
@@ -917,8 +965,13 @@ describe("todo backend", () => {
 			const runner = session.extensionRunner;
 			if (!runner) throw new Error("session has no extension runner");
 			// The handler budget pauses around dialogs only when the session has a UI.
-			// A real delay: the runner's handler budget is a real timer, and the dialog must outlast it.
-			const confirm: ExtensionUIContext["confirm"] = async () => (await Bun.sleep(120), true);
+			let confirmed = false;
+			const confirm: ExtensionUIContext["confirm"] = async () => {
+				confirmed = true;
+				// A real delay: the runner's handler budget is a real timer, and the dialog must outlast it.
+				await Bun.sleep(120);
+				return true;
+			};
 			const ui: ExtensionUIContext = { ...runner.getUIContext(), confirm };
 			await initializeExtensions(session, {
 				reportSendError: () => {},
@@ -930,6 +983,7 @@ describe("todo backend", () => {
 
 			const result = await call(session, { op: "init", items: ["a"] });
 
+			expect(confirmed).toBe(true);
 			expect(result.isError).not.toBe(true);
 			expect(contents(session)).toEqual(["a"]);
 		});

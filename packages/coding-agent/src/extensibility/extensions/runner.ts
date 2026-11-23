@@ -618,7 +618,7 @@ export type TodoChangeApplier = (
 	signal?: AbortSignal,
 ) => TodoApplyResult | Promise<TodoApplyResult>;
 
-const NOTHING_SAVED = "; nothing was saved.";
+const NOTHING_SAVED_SUFFIX = "; nothing was saved.";
 
 /** One `todo` call put to its backend; see {@link ExtensionRunner.applyTodoBackend}. */
 export interface TodoApplyRequest {
@@ -1828,8 +1828,10 @@ export class ExtensionRunner {
 	 * `request.commit` runs in the same synchronous step that checks the answer, omp's list, the
 	 * session id and the abort signal, and an accepted change then reaches `replace` like any other
 	 * commit. `apply` is not queued behind `replace` calls. Any other outcome leaves omp's list as
-	 * it is and queues one full `replace` behind the apply's own settlement, waiting at most the
-	 * handler timeout. While the session is closing the call fails and nothing is resent.
+	 * it is and sends one full `replace` once the apply has settled, waiting at most the handler
+	 * timeout and outside the call queue, so a later commit is not held behind the wait. `closing`
+	 * is read once, when the call starts: a call made once the session is closing fails without
+	 * asking the backend, and nothing is resent.
 	 */
 	applyTodoBackend(request: TodoApplyRequest): TodoApplyResult | Promise<TodoApplyResult> {
 		const owner = this.#sessionStartEvent ? this.getTodoBackends().get(request.backend) : undefined;
@@ -1838,7 +1840,7 @@ export class ExtensionRunner {
 		if (this.#todoClosed || request.closing)
 			return {
 				kind: "stale",
-				message: `The session is closing; todo backend "${sanitizeDisplayLine(request.backend)}" was not asked${NOTHING_SAVED}`,
+				message: `The session is closing; todo backend "${sanitizeDisplayLine(request.backend)}" was not asked${NOTHING_SAVED_SUFFIX}`,
 			};
 		return this.#askTodoBackend(owner.extension, owner.definition, request);
 	}
@@ -1894,33 +1896,39 @@ export class ExtensionRunner {
 				message = `Todo backend "${id}" did not accept this change: ${sanitizeDisplayLine(verdict.message) || "no reason given"}`;
 				break;
 			case "timeout":
-				message = `Todo backend "${id}" did not answer within ${timeoutMs} ms${NOTHING_SAVED}`;
+				message = `Todo backend "${id}" did not answer within ${timeoutMs} ms${NOTHING_SAVED_SUFFIX}`;
 				break;
 			case "failed":
-				message = `Todo backend "${id}" failed: ${sanitizeDisplayLine(verdict.message) || "no reason given"}${NOTHING_SAVED}`;
+				message = `Todo backend "${id}" failed: ${sanitizeDisplayLine(verdict.message) || "no reason given"}${NOTHING_SAVED_SUFFIX}`;
 				break;
 			default:
-				if (!verdict || signal?.aborted || this.#todoClosed)
-					message = `The call was aborted while todo backend "${id}" decided${NOTHING_SAVED}`;
-				else if (!sameSession) message = `The session changed while todo backend "${id}" decided${NOTHING_SAVED}`;
-				else message = `The todo list changed while todo backend "${id}" decided${NOTHING_SAVED}`;
+				if (signal?.aborted)
+					message = `The call was aborted while todo backend "${id}" decided${NOTHING_SAVED_SUFFIX}`;
+				else if (this.#todoClosed)
+					message = `The session closed while todo backend "${id}" decided${NOTHING_SAVED_SUFFIX}`;
+				else if (!verdict)
+					message = `The call was aborted while todo backend "${id}" decided${NOTHING_SAVED_SUFFIX}`;
+				else if (!sameSession)
+					message = `The session changed while todo backend "${id}" decided${NOTHING_SAVED_SUFFIX}`;
+				else message = `The todo list changed while todo backend "${id}" decided${NOTHING_SAVED_SUFFIX}`;
 		}
 		this.#resendStaleTodoList(answered.promise, resend);
 		return refused ? { kind: "refused", message } : { kind: "stale", message };
 	}
 
 	/**
-	 * The backend may now hold a change omp did not commit. Behind the apply's own settlement, so
-	 * a late write lands first, but no longer than the handler timeout counted from now, the
-	 * whole list goes out again. Not once the session is closing.
+	 * The backend may now hold a change omp did not commit. The whole list goes out again once the
+	 * apply has settled (so a late write lands first), but no later than the handler timeout counted
+	 * from now. The wait is outside the call queue: a commit made meanwhile is sent at once, and the
+	 * resend queues like any other list. Not once the session is closing.
 	 */
 	#resendStaleTodoList(settled: Promise<void>, resend: () => void): void {
 		if (this.#todoClosed) return;
 		this.#todoStale = true;
 		const deadline = performance.now() + extensionHandlerTimeoutMs;
-		this.#todoCalls = this.#todoCalls
-			.then(async () => {
-				await awaitDeliveryTurn(settled, deadline, this.#todoGivenUp.signal);
+		void awaitDeliveryTurn(settled, deadline, this.#todoGivenUp.signal)
+			.then(() => {
+				if (this.#todoClosed) return;
 				this.#todoStale = true;
 				resend();
 			})
