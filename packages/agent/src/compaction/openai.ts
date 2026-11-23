@@ -1136,7 +1136,10 @@ export async function requestRemoteCompaction(
 	if (!response.ok) {
 		const errorText = await response.text().catch(() => "");
 		let errorCode: string | undefined;
-		if (errorText) {
+		// Only a model-naming request can report its model missing. A generic
+		// `/summarize` 404 is an endpoint-path failure even when its body carries
+		// an error code, and must stay terminal.
+		if (isChatCompletions && errorText) {
 			try {
 				errorCode = OpenAIHttpError.parseEnvelope(JSON.parse(errorText), errorText).code;
 			} catch {

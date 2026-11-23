@@ -2643,6 +2643,26 @@ describe("requestRemoteCompaction wire formats", () => {
 		expect((error as AIError.ProviderHttpError).code).toBe("model_not_found");
 	});
 
+	test("leaves a structured generic-route 404 without a code", async () => {
+		const fetchMock: FetchImpl = async () =>
+			new Response(JSON.stringify({ error: { code: "endpoint_not_found", message: "Unknown route" } }), {
+				status: 404,
+				statusText: "Not Found",
+				headers: { "content-type": "application/json" },
+			});
+
+		const error = await requestRemoteCompaction(
+			"https://compaction.example.test/summarize",
+			{ systemPrompt: "summarize", prompt: "<conversation>hello</conversation>", maxTokens: 16_384 },
+			undefined,
+			{ fetch: fetchMock },
+		).catch(error => error);
+
+		expect(error).toBeInstanceOf(AIError.ProviderHttpError);
+		expect((error as AIError.ProviderHttpError).status).toBe(404);
+		expect((error as AIError.ProviderHttpError).code).toBeUndefined();
+	});
+
 	test("leaves a plain endpoint-path 404 without a code", async () => {
 		const fetchMock: FetchImpl = async () => new Response("Not Found", { status: 404, statusText: "Not Found" });
 
