@@ -519,36 +519,46 @@ describe("writing the omp extension", () => {
 		expect(await writeRelayExtension(dir, VERSION)).toBe(true);
 
 		const files = await relayExtensionFiles(VERSION);
-		for (const name of [
-			"LICENSE",
-			"background.js",
+		const text = (name: string): string => {
+			const content = files[name];
+			if (typeof content !== "string") throw new Error(`${name} should be a text asset`);
+			return content;
+		};
+		// What Chrome loads by name: the manifest's worker, side panel and icons; the files the worker injects or opens
+		// (content scripts, the offscreen page); and the scripts and styles those pages pull in.
+		const manifest: {
+			background: { service_worker: string };
+			side_panel: { default_path: string };
+			icons: Record<string, string>;
+			action: { default_icon: Record<string, string> };
+		} = JSON.parse(text("manifest.json"));
+		const worker = manifest.background.service_worker;
+		const needed = new Set([
 			"manifest.json",
-			"offscreen.html",
-			"offscreen.js",
-			"options.html",
-			"options.js",
-			"overlay.js",
-			"panel.css",
-			"panel.html",
-			"panel.js",
-			"recorder.js",
-		]) {
-			const expected = files[name];
-			if (typeof expected !== "string") throw new Error(`${name} should be a text asset`);
-			const installed = await Bun.file(home.join(`extension/${name}`)).text();
-			expect(installed).not.toBe("");
-			expect(installed).toBe(expected);
+			worker,
+			manifest.side_panel.default_path,
+			...Object.values(manifest.icons),
+			...Object.values(manifest.action.default_icon),
+			...Array.from(text(worker).matchAll(/"([\w/-]+\.(?:css|html|js|png))"/g), match => match[1]!),
+		]);
+		for (const page of [...needed].filter(name => name.endsWith(".html"))) {
+			for (const match of text(page).matchAll(/\b(?:src|href)="([^"]+)"/g)) needed.add(match[1]!);
+		}
+		expect([...needed].filter(name => !Object.hasOwn(files, name))).toEqual([]);
+
+		// Every shipped file lands at its own path with the content the installing omp stamped.
+		for (const [name, expected] of Object.entries(files)) {
+			const installed = Buffer.from(await Bun.file(home.join(`extension/${name}`)).arrayBuffer());
+			expect(installed.length).toBeGreaterThan(0);
+			if (typeof expected === "string") expect(installed.toString("utf8")).toBe(expected);
+			else expect(installed).toEqual(Buffer.from(expected));
 		}
 
-		for (const size of [16, 32, 48, 128]) {
-			const name = `icons/omp-${size}.png`;
+		for (const [size, name] of Object.entries(manifest.icons)) {
 			const icon = Buffer.from(await Bun.file(home.join(`extension/${name}`)).arrayBuffer());
 			expect(icon.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
-			expect(icon.readUInt32BE(16)).toBe(size);
-			expect(icon.readUInt32BE(20)).toBe(size);
-			const expected = files[name];
-			if (!(expected instanceof Uint8Array)) throw new Error(`${name} should be a binary asset`);
-			expect(icon).toEqual(Buffer.from(expected));
+			expect(icon.readUInt32BE(16)).toBe(Number(size));
+			expect(icon.readUInt32BE(20)).toBe(Number(size));
 		}
 	});
 

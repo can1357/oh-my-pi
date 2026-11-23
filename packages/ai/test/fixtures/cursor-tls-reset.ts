@@ -29,7 +29,9 @@ const context: Context = {
 };
 
 try {
-	const stream = streamCursor(model, context, { apiKey: "test-token" });
+	// Each reset is retried with real backoff (~15s over five attempts); the
+	// contract here is the surfaced error, not the wait.
+	const stream = streamCursor(model, context, { apiKey: "test-token", providerRetryWait: async () => {} });
 	const eventTypes: string[] = [];
 	for await (const event of stream) eventTypes.push(event.type);
 	const result = await stream.result();

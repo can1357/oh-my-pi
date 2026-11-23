@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { setEmbedHost } from "@oh-my-pi/pi-tui/chat/embed-host";
 import { ImageBudget } from "@oh-my-pi/pi-tui/components/image";
@@ -68,6 +69,7 @@ function described(reply: string, kinds: (kind: TspKind) => boolean): NativeNode
 }
 
 describe("reply embeds on a native terminal", () => {
+	const cwd = path.join(path.parse(process.cwd()).root, "work", "project");
 	let captures: string[];
 
 	beforeAll(async () => {
@@ -79,7 +81,7 @@ describe("reply embeds on a native terminal", () => {
 		setNativeRendering(true);
 		captures = [];
 		setEmbedHost({
-			cwd: () => "/work/project",
+			cwd: () => cwd,
 			capturePage: async url => {
 				captures.push(url);
 				throw new Error("no Chromium installed");
@@ -96,7 +98,7 @@ describe("reply embeds on a native terminal", () => {
 		const nodes = described(REPLY, () => true);
 		const prose = nodes.filter(node => node.k === "md").map(node => node.p?.text);
 		expect(prose).toEqual([
-			'The chart and the running app:\n\n<img src="/work/project/out/chart.png" alt="Latency" width="50%">',
+			`The chart and the running app:\n\n<img src="${path.join(cwd, "out", "chart.png")}" alt="Latency" width="50%">`,
 			"Done.",
 		]);
 		expect(nodes.find(node => node.k === "web")?.p).toEqual({

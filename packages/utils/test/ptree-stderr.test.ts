@@ -17,7 +17,7 @@ function stderrFixture(size: number, exitCode = 0, stdout = ""): string[] {
 		`await Bun.stderr.write(${JSON.stringify(STDERR_HEAD)} + "x".repeat(${fillLength}) + ${JSON.stringify(STDERR_TAIL)});`,
 		`process.exitCode = ${exitCode};`,
 	].filter(line => line !== null);
-	return ["bun", "-e", script.join("\n")];
+	return [process.execPath, "-e", script.join("\n")];
 }
 
 describe("ptree stderr capture", () => {
