@@ -3881,6 +3881,14 @@ export declare function renderMermaidAscii(text: string, options?: MermaidRender
 export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
 
 /**
+ * `script` with the `\` dropped after each `<<EOF &&` (or `||`, `|`, `|&`)
+ * so the here-document body starts on the next line; `null` when nothing
+ * needs repair or the result would not parse. omp's bash tool runs commands
+ * through it.
+ */
+export declare function repairHeredocContinuations(script: string): string | null
+
+/**
  * Put back a stdin console mode `enableConsoleVtInput` returned. False when
  * stdin is no longer a console or refuses the mode; always false off Windows.
  */
