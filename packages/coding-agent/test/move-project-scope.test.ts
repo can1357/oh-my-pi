@@ -10,6 +10,7 @@ import * as path from "node:path";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { closeExtensionParseCacheForTests } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -113,6 +114,8 @@ describe("/move re-scopes project-discovered capabilities", () => {
 			setProjectDir(originalProjectDir);
 			setAgentDir(originalAgentDir);
 			AgentStorage.close();
+			// Extensions loaded under the test home opened its parse cache there.
+			closeExtensionParseCacheForTests();
 			for (const tempDir of tempDirs.splice(0)) removeSyncWithRetries(tempDir);
 		}
 	}, 15_000);
