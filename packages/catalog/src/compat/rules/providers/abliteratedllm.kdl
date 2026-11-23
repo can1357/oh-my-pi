@@ -15,21 +15,22 @@ provider "abliteratedllm" {
 	// `store` is sent, and reasoning rides `reasoning_effort` on every model
 	// (not Qwen's `enable_thinking`, which Qwen 3.8 templates reject when false).
 	// Checked live on 2026-11-14: `low`/`medium`/`high`/`xhigh`/`max` are
-	// accepted on every model, while `glm-5.3-flash-abliterated` rejects
-	// `minimal`, so `minimal` is sent as `low`. System prompts already ride the
-	// `system` role, and both `max_tokens` and `max_completion_tokens` are
-	// accepted.
+	// accepted on every model except `glm-5.3-cyber-abliterated` (below), while
+	// `glm-5.3-flash-abliterated` rejects `minimal`, so `minimal` is sent as
+	// `low`. System prompts already ride the `system` role, and both
+	// `max_tokens` and `max_completion_tokens` are accepted.
 	supports-store #false
 	thinking-format "openai"
 	reasoning-effort-map {
 		minimal "low"
 	}
-	// GLM-5.3 Cyber Abliterated always reasons; its chat template honors `low`
-	// and `high` and runs any other value at max (every level returned 200 on
-	// 2026-11-19), so it gets the GLM-5.3 low/high/max ladder.
+	// GLM-5.3 Cyber Abliterated always reasons, and its chat template honors only
+	// `low` and `high`. `/v1/models` lists `reasoning_efforts: ["low", "high"]`
+	// for it, and the gateway rejects any other value with 400 (2026-11-23), so
+	// its ladder is low/high, defaulting to high.
 	models "glm-5.3-cyber-abliterated" {
-		thinking-default-level "max"
-		thinking-efforts "low" "high" "max"
+		thinking-default-level "high"
+		thinking-efforts "low" "high"
 		thinking-requires-effort #true
 	}
 }
