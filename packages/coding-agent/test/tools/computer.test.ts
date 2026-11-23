@@ -5048,7 +5048,7 @@ describe("computer background fallback", () => {
 			}
 		}
 		const native = new ScrollSession();
-		const result = await run(native, 'await (await desktop.window("42")).scroll(1, 2, { dy: 3 })', "takeover");
+		const result = await run(native, 'await (await desktop.window("42")).scroll(1, 2, { dy: 3 })', "fallback");
 		const [text, ...rest] = texts(result);
 		expect(rest).toEqual([]);
 		// One notice: the refusal's reason, the rerun delivered, no unsent claim.
