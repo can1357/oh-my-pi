@@ -1386,7 +1386,7 @@ describe("selective commit flow", () => {
 		/** Spies on the native conversion, recording the paths each call converts together. */
 		function observeConversions(): string[][] {
 			const calls: string[][] = [];
-			const observe = (repo: ReturnType<typeof vcs.requireGit>): ReturnType<typeof vcs.requireGit> =>
+			const observe = (repo: vcs.VcsGitRepo): vcs.VcsGitRepo =>
 				new Proxy(repo, {
 					get(target, prop) {
 						if (prop === "worktreeToGit") {
