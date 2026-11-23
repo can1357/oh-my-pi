@@ -90,7 +90,7 @@ import { ToolAbortError } from "../../tools/tool-errors";
 import { captureBrowserSession } from "../../utils/browser-session";
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
-import { setSessionTerminalTitle } from "../../utils/title-generator";
+import { generatePickerSessionTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 import { getAssistantMessageLinkTargets } from "@oh-my-pi/pi-tui/prompt/interactive-context-helpers";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { createAgentsHubDeps } from "../agents-hub-deps";
@@ -2006,9 +2006,37 @@ export class SelectorController {
 					// hands it the reason so it can show one message
 					// instead of two.
 					if (!renamed) {
-						throw new Error("Failed to rename session: it is currently in use or no longer available");
+						const inUse = new FileSessionStorage().isSessionOwnedElsewhere?.(session.path);
+						throw new Error(
+							inUse
+								? "Failed to rename session: it is currently in use by another omp process"
+								: "Failed to rename session: the session is no longer available",
+						);
 					}
 					return renamed;
+				},
+				onGenerateTitle: (session: SessionInfo, signal: AbortSignal) => {
+					const liveFile = this.ctx.sessionManager.getSessionFile();
+					const live =
+						(liveFile !== undefined && session.path === liveFile) ||
+						session.id === this.ctx.sessionManager.getSessionId();
+					return generatePickerSessionTitle(
+						session,
+						live
+							? {
+									settings: this.ctx.settings,
+									signal,
+									manager: this.ctx.sessionManager,
+									generate: (text, customPrompt, sig) =>
+										this.ctx.session.generateTitle(text, customPrompt, sig),
+								}
+							: {
+									settings: this.ctx.settings,
+									registry: this.ctx.session.modelRegistry,
+									currentModel: this.ctx.session.model,
+									signal,
+								},
+					);
 				},
 				onSetPinned: async (session: SessionInfo, pinned: boolean) => {
 					await setSessionPinned(session.id, pinned);

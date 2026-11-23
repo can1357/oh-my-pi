@@ -28,6 +28,7 @@ import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
+import { generatePickerSessionTitle } from "./utils/title-generator";
 import {
 	type Args,
 	reportInvalidFlagValues,
@@ -223,7 +224,14 @@ type SessionPicker = (
 ) => Promise<SessionInfo | null>;
 
 /** Resume/import-only graph boundary; ordinary launches never construct a picker. */
-async function loadSessionPicker(init?: { foreign?: boolean }): Promise<SessionPicker> {
+async function loadSessionPicker(init?: {
+	foreign?: boolean;
+	modelRegistry?: ModelRegistry;
+	settings?: Settings;
+	currentModel?: ScopedModel["model"];
+	resolveCurrentModel?: () => ScopedModel["model"] | undefined;
+}): Promise<SessionPicker> {
+	const { modelRegistry, settings, currentModel, resolveCurrentModel } = init ?? {};
 	const [{ selectSession }, { HistoryStorage }, { loadPinnedSessionIds, setSessionPinned }, { FileSessionStorage }] =
 		await Promise.all([
 			import("@oh-my-pi/pi-tui/apps/session-picker"),
@@ -253,9 +261,47 @@ async function loadSessionPicker(init?: { foreign?: boolean }): Promise<SessionP
 						renameSession: (session: SessionInfo, title: string) =>
 							SessionManager.renameSessionTitle(session.path, title, { cwd: session.cwd }),
 						setSessionPinned: (session: SessionInfo, pinned: boolean) => setSessionPinned(session.id, pinned),
+						...(modelRegistry && settings
+							? {
+									generateSessionTitle: (session: SessionInfo, signal: AbortSignal) =>
+										generatePickerSessionTitle(session, {
+											registry: modelRegistry,
+											settings,
+											currentModel,
+											resolveCurrentModel,
+											signal,
+										}),
+								}
+							: {}),
 					}),
 			loadAllSessions: () => SessionManager.listAllForPicker(storage),
 		});
+	};
+}
+
+/** Before resume selects a session, defer model and CLI-key resolution until title generation starts. */
+export function prepareStartupPickerTitle(parsed: Args, modelRegistry: ModelRegistry, settings: Settings) {
+	if (!parsed.model && (parsed.apiKey || cfgOffline.get(settings))) return undefined;
+	return {
+		modelRegistry,
+		settings,
+		currentModel: undefined,
+		resolveCurrentModel: () => {
+			const resolved = parsed.model
+				? resolveCliModel({
+						cliProvider: parsed.provider,
+						cliModel: parsed.model,
+						modelRegistry,
+						availableModels: modelRegistry.getAvailable(),
+						settings,
+						preferences: getModelMatchPreferences(settings),
+					})
+				: undefined;
+			const currentModel = (resolved?.configuredPatternIndex ?? 0) === 0 ? resolved?.model : undefined;
+			if (currentModel && parsed.apiKey)
+				modelRegistry.authStorage.keys.setRuntime(currentModel.provider, parsed.apiKey);
+			return currentModel;
+		},
 	};
 }
 
@@ -2443,7 +2489,9 @@ export async function runRootCommand(
 				}
 			}
 			pauseStartupWatchdog();
-			const selectSessionImpl = deps.selectSession ?? (await loadSessionPicker());
+			const selectSessionImpl =
+				deps.selectSession ??
+				(await loadSessionPicker(prepareStartupPickerTitle(parsedArgs, modelRegistry, settingsInstance)));
 			const picked = await logger.time("selectSession", selectSessionImpl, folder.sessions, {
 				completeSessions: folder.complete,
 				allSessions: preloadedAllSessions,

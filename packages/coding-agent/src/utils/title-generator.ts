@@ -17,7 +17,6 @@ import {
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
 import { writeTerminalSequence } from "@oh-my-pi/pi-tui";
 import { isNativeRendering, onNativeRenderingChange } from "@oh-my-pi/pi-tui/native/state";
-import { theme } from "@oh-my-pi/pi-tui/theme";
 import { SPINNER_FRAMES } from "@oh-my-pi/pi-tui/theme/symbols";
 import { $env, isTerminalHeadless, isWsl, logger, prompt } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
@@ -30,11 +29,29 @@ import type { Settings } from "../config/settings";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
 import { formatTitleUserMessage } from "../tiny/message-preproc";
-import { isLowSignalTitleInput, isNoTitleSentinel, normalizeGeneratedTitle } from "../tiny/text";
+import {
+	isAttachmentOnlyTitleInput,
+	isLowSignalTitleInput,
+	isNoTitleSentinel,
+	normalizeGeneratedTitle,
+} from "../tiny/text";
+import type { SessionInfo } from "../session/session-listing";
+import { buildReplanTitleContext } from "../session/messages";
+import { buildSessionMetadata } from "../session/session-metadata";
+import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
+import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import { cfgSecretsEnabled } from "../secrets/settings";
+import * as titleCard from "./title-card";
 import { tinyTitleClient } from "../tiny/title-client";
 
 import { cfgRetryModelFallback } from "../session/settings";
 import { DEFAULT_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC } from "@oh-my-pi/pi-tui/spinner-clock";
+
+import { CostCapError, CostGate } from "../session/cost-gate";
+import { journalCompletion } from "../session/model-usage-journal";
+import { SessionManager } from "../session/session-manager";
+import { readSessionHeaderId } from "../session/session-loader";
+import { FileSessionStorage } from "../session/session-storage";
 
 const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
 const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
@@ -257,6 +274,8 @@ export function unmeteredMessage(model: Model<Api>, text: string): AssistantMess
  * @param onUsage Optional reporter for every title attempt the provider billed
  *   and for a local model's title, so the caller can journal the request on
  *   the session's cost ledger.
+ * @param beforeAttempt Optional admission hook called before every online
+ *   provider attempt, including retries.
  */
 export async function generateSessionTitle(
 	firstMessage: string,
@@ -269,6 +288,7 @@ export async function generateSessionTitle(
 	signal?: AbortSignal,
 	credentialSourceSessionId?: string,
 	onUsage?: TitleUsageReporter,
+	beforeAttempt?: () => void,
 ): Promise<string | null> {
 	// Defer titling for greetings / acknowledgements / empty input. The default
 	// tiny title model can't reliably decline trivial input, so this happens
@@ -298,6 +318,7 @@ export async function generateSessionTitle(
 			titleSystemPrompt,
 			credentialSourceSessionId,
 			onUsage,
+			beforeAttempt,
 		);
 	}
 
@@ -305,6 +326,7 @@ export async function generateSessionTitle(
 	// fails (download missing, runtime crash, abort, or no output), leave the
 	// session untitled rather than advancing into a paid fallback candidate.
 	try {
+		beforeAttempt?.();
 		const started = performance.now();
 		let localTitle: string | null;
 		if (signal) {
@@ -377,6 +399,146 @@ export async function generateTitleOnline(
 	);
 }
 
+export interface GeneratePickerSessionTitleOptions {
+	registry?: ModelRegistry;
+	settings: Settings;
+	signal?: AbortSignal;
+	currentModel?: Model<Api>;
+	resolveCurrentModel?: () => Model<Api> | undefined;
+	credentialSourceSessionId?: string;
+	generate?: (text: string, customSystemPrompt?: string, signal?: AbortSignal) => Promise<string | null>;
+	/** The live session's manager; reuses it and its owning gate instead of reopening. */
+	manager?: SessionManager;
+}
+
+/**
+ * Generate a suggested title for a picker session from its recent conversation,
+ * keeping or naming its `<icon> <CODE>: ` card like in-session `/rename`.
+ */
+export async function generatePickerSessionTitle(
+	session: Pick<SessionInfo, "id" | "path" | "title" | "firstMessage" | "allMessagesText"> & { cwd?: string },
+	options: GeneratePickerSessionTitleOptions,
+): Promise<string | null> {
+	let manager: SessionManager | undefined;
+	let borrowedManager = false;
+	let releaseSession: (() => void) | undefined;
+	let context: string | undefined;
+	let customSystemPrompt: string | undefined;
+	try {
+		if (!session.path) return null;
+		const storage = new FileSessionStorage();
+		const headerId = await readSessionHeaderId(session.path);
+		if (options.manager) {
+			// The live session is already open with its own gate and ledger. Reuse it:
+			// reopening would charge a separate CostGate that the next live turn ignores.
+			manager = options.manager;
+			borrowedManager = true;
+			context = buildReplanTitleContext(
+				manager
+					.getBranch()
+					.filter(entry => entry.type === "message")
+					.map(entry => entry.message),
+			);
+			const titleSystemPromptSource = discoverTitleSystemPromptFile(manager.getCwd());
+			customSystemPrompt = await resolvePromptInput(titleSystemPromptSource, "title system prompt");
+		} else if (headerId === undefined && options.generate) {
+			const first =
+				session.firstMessage && session.firstMessage !== "(no messages)" ? session.firstMessage.trim() : "";
+			const all =
+				session.allMessagesText && session.allMessagesText !== "(no messages)"
+					? session.allMessagesText.trim()
+					: "";
+			const candidates: string[] = [];
+			if (first && !isLowSignalTitleInput(first) && !isAttachmentOnlyTitleInput(first)) candidates.push(first);
+			if (all && all !== first && !isLowSignalTitleInput(all)) candidates.push(all);
+			context = candidates[0];
+		} else {
+			if (headerId !== session.id) return null;
+			releaseSession = storage.claimSession(headerId, session.path) ?? undefined;
+			if (!releaseSession) {
+				if (storage.isSessionOwnedElsewhere?.(session.path)) {
+					throw new Error("Cannot generate title: the selected session is in use by another omp process");
+				}
+				return null;
+			}
+			try {
+				manager = await SessionManager.open(session.path, undefined, storage, {
+					throwIfMissing: true,
+					suppressBreadcrumb: true,
+				});
+			} catch (err) {
+				if (storage.isSessionOwnedElsewhere?.(session.path)) {
+					throw new Error("Cannot generate title: the selected session is in use by another omp process", {
+						cause: err,
+					});
+				}
+				logger.debug("title-generator: selected session could not be opened", {
+					sessionId: session.id,
+					error: err instanceof Error ? err.message : String(err),
+				});
+				return null;
+			}
+			if (manager.getSessionId() !== session.id || manager.getSessionFile() !== session.path) {
+				logger.debug("title-generator: selected session identity mismatch", { sessionId: session.id });
+				return null;
+			}
+			context = buildReplanTitleContext(
+				manager
+					.getBranch()
+					.filter(entry => entry.type === "message")
+					.map(entry => entry.message),
+			);
+			const titleSystemPromptSource = discoverTitleSystemPromptFile(manager.getCwd());
+			customSystemPrompt = await resolvePromptInput(titleSystemPromptSource, "title system prompt");
+		}
+		if (!context || isLowSignalTitleInput(context)) return null;
+		const currentModel = options.currentModel ?? options.resolveCurrentModel?.();
+		let runGenerate: (text: string, customSystemPrompt?: string, signal?: AbortSignal) => Promise<string | null>;
+		if (options.generate) {
+			runGenerate = options.generate;
+		} else {
+			if (!options.registry) return null;
+			const gate = new CostGate(options.settings, manager!.getUsageStatistics().cost, message =>
+				logger.warn(message),
+			);
+			const journal = journalCompletion(manager!, { purpose: "title" });
+			const onUsage: TitleUsageReporter = (message, prompt) => {
+				gate.record(message.usage.cost.total);
+				journal?.(message, prompt);
+			};
+			const beforeAttempt = () => gate.admit();
+			runGenerate = async (text, promptOverride, signal) => {
+				const titleSessionId = Bun.randomUUIDv7();
+				return withCredentialRedaction(cfgSecretsEnabled.get(options.settings), () =>
+					generateSessionTitle(
+						text,
+						options.registry!,
+						options.settings,
+						titleSessionId,
+						currentModel,
+						provider => buildSessionMetadata(titleSessionId, provider, options.registry!.authStorage),
+						promptOverride,
+						signal,
+						options.credentialSourceSessionId,
+						onUsage,
+						beforeAttempt,
+					),
+				);
+			};
+		}
+		if (options.signal?.aborted) return null;
+		const named = await runGenerate(context, customSystemPrompt, options.signal);
+		if (!named || options.signal?.aborted) return null;
+		return await titleCard.cardSessionTitle(named, session.title, options.settings, runGenerate, options.signal);
+	} finally {
+		try {
+			if (!borrowedManager) await manager?.close();
+		} finally {
+			releaseSession?.();
+		}
+	}
+}
+
 async function generateTitleOnlineWithModels(
 	firstMessage: string,
 	models: Model<Api>[],
@@ -387,6 +549,7 @@ async function generateTitleOnlineWithModels(
 	customSystemPrompt?: string,
 	credentialSourceSessionId?: string,
 	onUsage?: TitleUsageReporter,
+	beforeAttempt?: () => void,
 ): Promise<string | null> {
 	const titleSystemPrompt = customSystemPrompt?.trim() || undefined;
 	// The model is always asked to wrap the title in `<title>...</title>` and
@@ -455,6 +618,7 @@ async function generateTitleOnlineWithModels(
 
 			const response = await retryTransientCompletion(
 				async () => {
+					beforeAttempt?.();
 					const message = await completeSimple(
 						model,
 						{
@@ -525,6 +689,7 @@ async function generateTitleOnlineWithModels(
 
 			return title;
 		} catch (err) {
+			if (err instanceof CostCapError) return null;
 			if (signal?.aborted || (err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError"))) {
 				logger.debug("title-generator: aborted", {
 					...modelContext,
@@ -763,14 +928,6 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
 	terminalTitleRuntime.label = terminalTitleRuntime.sessionName ?? getFallbackTerminalTitle(cwd);
 	emitTerminalTitle();
 	reportTernSession();
-}
-
-/**
- * Whether the effective symbol preset is `nerd`: under `nf+emoji` title icons,
- * the title fork then asks the model for a Nerd Fonts glyph to head the title.
- */
-export function nerdGlyphsActive(): boolean {
-	return typeof theme !== "undefined" && theme.getSymbolPreset() === "nerd";
 }
 
 /** The OSC 1337 user variable Tern reads the session file from. */
