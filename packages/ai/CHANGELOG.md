@@ -5,6 +5,9 @@
 ### Added
 
 - Added `/login` support for AKI.IO, Cortecs, EUrouter, Melious, Nebius Token Factory, Opper, and OVHcloud AI Endpoints ([#3319](https://github.com/can1357/oh-my-pi/issues/3319)).
+### Fixed
+
+- Fixed `antigravity-cli` quota exhaustion on agy 1.5.14+ being recorded as a normal reply instead of a rate limit, so exhausted accounts now rotate to healthy ones and honor the reported reset time ([#20247](https://github.com/can1357/oh-my-pi/issues/20247))
 
 ## [19.1.1] - 2026-11-23
 

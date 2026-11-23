@@ -1423,7 +1423,7 @@ impl<S: VizSource> Printer<'_, S> {
 					out.push(seg);
 				} else if self.options.layers.unwrap {
 					if let (Some(language), Some(value)) = (language, literal(w)) {
-						if value.contains('\n') || value.len() > 64 {
+						if moves_below(&value) {
 							let mut seg = self.segment(
 								c,
 								w.id(),
@@ -2342,16 +2342,19 @@ impl<S: VizSource> Printer<'_, S> {
 				if self.options.layers.unwrap
 					&& let (Some(language), Some(value)) =
 						(embedded::argument_language(&words, i), literal(w))
-					&& (value.contains('\n') || value.len() > 64)
+					&& moves_below(&value)
 				{
+					// The line's chip names the language; the program's rows follow
+					// it directly, without the newlines that usually open and close
+					// it.
 					self.document(
-						&value,
+						value.trim_matches('\n'),
 						language,
 						c,
 						w.id(),
 						Some(w.span()),
 						depth + 1,
-						Some("inline argument"),
+						None,
 					);
 				}
 			}
@@ -3412,6 +3415,12 @@ fn is_simple(c: Command<'_>, name: &str, arg: Option<&str>) -> bool {
 			Some(a) => words.len() == 2 && words.get(1).and_then(literal).as_deref() == Some(a),
 			None => words.len() > 1,
 		}
+}
+/// Whether an embedded-language argument is drawn below its command as a
+/// document, leaving a `⟦lang ↓⟧` chip in the line. Only multi-line programs
+/// move: a one-liner, however long, stays highlighted where it is read.
+fn moves_below(value: &str) -> bool {
+	value.contains('\n')
 }
 fn timeout_duration(value: &str) -> bool {
 	let digits = value.bytes().take_while(u8::is_ascii_digit).count();

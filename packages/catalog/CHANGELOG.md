@@ -11,6 +11,11 @@
 ### Fixed
 
 - Preserved endpoint-declared text-only input modalities during LM Studio, Novita, and local Ollama model discovery.
+- Added OpenCode's free `jev-1.13-free` judge to OpenCode Go; the `judge` role now prefers it on OpenCode Go and Zen logins over OpenRouter's paid Jev and chat models, falling back to Zen's `jev-1.14`
+
+### Fixed
+
+- Fixed OpenCode Zen's Jev 1.14, Gemini Decision 1, GPT-6 Luna Decision, and future decision models appearing as chat models that failed every request; they are now judge models
 
 ## [19.1.1] - 2026-11-23
 
