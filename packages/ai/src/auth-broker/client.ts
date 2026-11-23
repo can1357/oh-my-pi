@@ -7,7 +7,7 @@
  */
 
 import { type } from "@oh-my-pi/omptype";
-import { readSseEvents } from "@oh-my-pi/pi-utils";
+import { isRecord, readSseEvents } from "@oh-my-pi/pi-utils";
 import type { AuthCredential, DisabledCredentialSummary, OAuthRefreshReason } from "../auth-storage";
 import type {
 	ClientUsageReportRequest,
@@ -88,6 +88,23 @@ export class AuthBrokerError extends Error {
 		this.name = "AuthBrokerError";
 		this.status = opts.status;
 		this.body = opts.body;
+	}
+}
+
+/**
+ * Whether a 404 body is the broker's own unknown-route answer
+ * (`{"error":"No route: …"}`), which every broker version returns for an
+ * endpoint it lacks. A reverse proxy with no route yet (e.g. while the broker
+ * container starts) answers 404 with its own body; that is transient, not a
+ * missing endpoint.
+ */
+export function isBrokerNoRouteBody(body: string | undefined): boolean {
+	if (!body) return false;
+	try {
+		const parsed: unknown = JSON.parse(body);
+		return isRecord(parsed) && typeof parsed.error === "string" && parsed.error.startsWith("No route: ");
+	} catch {
+		return false;
 	}
 }
 
@@ -193,9 +210,10 @@ export class AuthBrokerClient {
 	 * a full `snapshot`; subsequent frames are `entry` upserts / refreshes or
 	 * `removed` deletes. Caller controls lifecycle via `opts.signal`.
 	 *
-	 * Throws {@link AuthBrokerStreamUnsupportedError} when the broker responds
-	 * 404 — older brokers predate this endpoint and the caller should fall back
-	 * to long-polling for the remainder of its lifetime.
+	 * Throws {@link AuthBrokerStreamUnsupportedError} when the broker itself
+	 * answers 404 — older brokers predate this endpoint and the caller should
+	 * fall back to long-polling for the remainder of its lifetime. Any other 404
+	 * (a proxy without a route yet) is an ordinary {@link AuthBrokerError}.
 	 */
 	async *openSnapshotStream(opts: { signal?: AbortSignal } = {}): AsyncGenerator<SnapshotStreamEvent> {
 		const url = `${this.#baseUrl}/v1/snapshot/stream`;
@@ -212,8 +230,12 @@ export class AuthBrokerClient {
 		const response = await this.#fetch(url, { method: "GET", headers, signal: opts.signal });
 		if (response.status === 404) {
 			// Drain the body so the socket can be reused; tiny payload.
-			await response.text().catch(() => {});
-			throw new AuthBrokerStreamUnsupportedError();
+			const text = await response.text().catch(() => "");
+			if (isBrokerNoRouteBody(text)) throw new AuthBrokerStreamUnsupportedError();
+			throw new AuthBrokerError(`Auth broker stream failed: ${response.status} ${response.statusText}`, {
+				status: response.status,
+				body: text,
+			});
 		}
 		if (!response.ok) {
 			const text = await response.text().catch(() => "");

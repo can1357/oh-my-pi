@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ExtensionLiveStartOptions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { LiveSessionController, type LiveSessionControllerOptions } from "@oh-my-pi/pi-coding-agent/live/controller";
 import type { LiveServerEvent } from "@oh-my-pi/pi-coding-agent/live/protocol";
 import * as liveTransport from "@oh-my-pi/pi-coding-agent/live/transport";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import type { LiveTransportOptions } from "@oh-my-pi/pi-coding-agent/live/transport";
 import { LiveVisualizer } from "@oh-my-pi/pi-tui/apps/live-visualizer";
 import { LiveCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/live-command-controller";
@@ -294,6 +296,78 @@ describe("LiveSessionController with a caller-owned peer", () => {
 		expect(phases.slice(phases.indexOf("muted"))).toEqual(["muted"]);
 		session.toggleMute();
 		expect(phases.at(-1)).toBe("working");
+		await session.stop();
+	});
+
+	it("hands the voice the answer when the run pauses on background work", async () => {
+		let onEvent: ((event: LiveServerEvent) => void) | undefined;
+		const transportSpy = vi.spyOn(liveTransport, "LiveTransport") as unknown as {
+			mockImplementation(implementation: (options: LiveTransportOptions) => object): void;
+		};
+		const sent: { delegation_item_id?: string; content?: { text: string }[] }[] = [];
+		const sentTwice = Promise.withResolvers<void>();
+		transportSpy.mockImplementation(function (options: LiveTransportOptions) {
+			onEvent = options.callbacks.onEvent;
+			return {
+				connect: async () => {},
+				setMuted: async () => {},
+				send: async (message: (typeof sent)[number]) => {
+					sent.push(message);
+					if (sent.length === 2) sentTwice.resolve();
+				},
+				close: async () => {},
+				sdpAnswer: "v=0 answer",
+			};
+		});
+		let emit: ((event: AgentSessionEvent) => void) | undefined;
+		const agentSession = {
+			modelRegistry: { authStorage: {} },
+			settings: Settings.isolated(),
+			sessionId: "s1",
+			subscribe: (listener: (event: AgentSessionEvent) => void) => {
+				emit = listener;
+				return () => {};
+			},
+			sendCustomMessage: async () => {},
+		} as unknown as LiveSessionControllerOptions["session"];
+		const phases: string[] = [];
+		const session = new LiveSessionController({
+			session: agentSession,
+			extractAssistantText: message =>
+				(message.content as { type: string; text?: string }[]).map(block => block.text ?? "").join(""),
+			sdpOffer: "v=0 offer",
+			callbacks: {
+				onPhase: phase => phases.push(phase),
+				onLevels: () => {},
+				onTranscript: () => {},
+				onTerminal: () => {},
+			},
+		});
+		await session.start();
+		const delegate = (id: string, text: string) =>
+			onEvent!({
+				type: "delegation.created",
+				item: { type: "delegation", target: "client", id, content: [{ type: "input_text", text }] },
+			});
+		const answer = (text: string) =>
+			[{ role: "assistant", content: [{ type: "text", text }] }] as unknown as AgentMessage[];
+
+		delegate("d1", "how is the work going?");
+		// The session continuing the model's own work (a retry) is no answer yet.
+		emit!({ type: "agent_pause", messages: answer("Retrying."), yielded: false, awaiting: false });
+		// The model answered; subagents it started keep the run open, so no `agent_end` comes now.
+		emit!({ type: "agent_pause", messages: answer("Two of five tasks are done."), yielded: true, awaiting: true });
+		expect(phases.at(-1)).not.toBe("working");
+		// The run's end, much later, must not repeat the answer the voice already has.
+		emit!({ type: "agent_end", messages: answer("Two of five tasks are done.") });
+		delegate("d2", "and now?");
+		emit!({ type: "agent_pause", messages: answer("All five are done."), yielded: true, awaiting: false });
+		await sentTwice.promise;
+
+		expect(sent.map(message => [message.delegation_item_id, message.content?.[0]?.text])).toEqual([
+			["d1", expect.stringContaining("Two of five tasks are done.")],
+			["d2", expect.stringContaining("All five are done.")],
+		]);
 		await session.stop();
 	});
 });

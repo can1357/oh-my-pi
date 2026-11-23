@@ -315,6 +315,115 @@ async fn wide_trees_agree_on_every_worker_count() {
 	}
 }
 
+/// Every walk ends, also when a waiting worker's wakeup is lost: flume
+/// 0.12's `recv_async` misses a message sent while it re-registers after
+/// another worker took the message it was woken for (zesterer/flume#177).
+/// Ending the walk with one stop message per worker left such a worker
+/// waiting forever, and its walk with it. The machine's CPU count caps the
+/// walk's workers and the runtime's threads, and with them the test's power:
+/// against the old stop it hung on 8 and 16 CPUs, and was not seen in 5 runs
+/// on 4. `stopping_a_walk_closes_its_job_queue` checks the same fix on any
+/// number of CPUs.
+#[tokio::test(flavor = "multi_thread")]
+async fn walks_end_when_a_waiting_worker_misses_a_wakeup() {
+	let tmp = make_tree("ends", &["a.txt", "d1/x", "d2/y", "d3/z", "d4/w", "d5/v/u"]);
+	let fs = Fs::native();
+	let opts = Options { workers: Some(8), ..Default::default() };
+	let (mut complete, mut root_failed, mut dir_failed) = (0, 0, 0);
+	for round in 0..20_000 {
+		let walked = drain(&fs, tmp.path(), &opts, |_, _, out: &mut Vec<()>| {
+			out.push(());
+			Action::Continue
+		});
+		let walked = tokio::time::timeout(Duration::from_secs(30), walked)
+			.await
+			.unwrap_or_else(|_| panic!("walk {round} did not end"));
+		// A walk that cannot open its root or a directory, as past the
+		// open-file limit while other tests in the process hold files, has
+		// still ended: it is counted and skipped.
+		let Ok((visited, errors)) = walked else {
+			root_failed += 1;
+			continue;
+		};
+		if !errors.is_empty() {
+			dir_failed += 1;
+			continue;
+		}
+		assert_eq!(visited.len(), 12, "walk {round}");
+		complete += 1;
+	}
+	// The 30 s limit catches the hang on every walk that runs; the floor
+	// fails a run in which more than 1,000 of the 20,000 walks could not open
+	// their root or a directory.
+	assert!(
+		complete >= 19_000,
+		"{complete} of 20,000 walks complete, fewer than 19,000; {root_failed} could not open the \
+		 root and {dir_failed} could not open a directory"
+	);
+}
+
+/// A visitor panic ends the walk on every worker: the panicking job never
+/// counts itself done, so only the queue's close (`Owned`'s drop) ends the
+/// other workers' waits.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panicking_visitor_ends_the_walk_on_every_worker() {
+	let paths: Vec<String> = (0..24)
+		.flat_map(|d| (0..4).map(move |s| format!("mem://visitor-panics/dir/d{d:02}/s{s}/f")))
+		.collect();
+	let files: Vec<(&str, &str)> = paths.iter().map(|path| (path.as_str(), "")).collect();
+	let (_mem, blocking) = MemFs::with_files(&files);
+	let fs = Fs::Provider(blocking);
+	let opts = Options { workers: Some(8), ..Default::default() };
+	let run = tokio::spawn(async move {
+		drain(&fs, Path::new("mem://visitor-panics/dir"), &opts, |_, entry, out: &mut Vec<()>| {
+			assert_ne!(entry.path, b"d11/s2", "visitor boom");
+			out.push(());
+			Action::Continue
+		})
+		.await
+	});
+	let joined = tokio::time::timeout(Duration::from_secs(30), run)
+		.await
+		.expect("the walk did not end after a visitor panic");
+	let error = joined.expect_err("the visitor panic did not resume in the consumer");
+	assert!(error.is_panic(), "the walk task ended without the visitor's panic: {error:?}");
+}
+
+/// Stopping a walk closes its job queue, so every worker still waiting on it
+/// leaves, also one whose wakeup flume lost: flume 0.12's `recv_async` checks
+/// again for a closed queue after it re-registers to wait (`src/async.rs`,
+/// lines 432-446). One stop message per worker left the queue open, and such
+/// a worker waiting forever. Unlike the stress test, this needs no lost
+/// wakeup, so it fails against the old stop on any number of CPUs.
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_a_walk_closes_its_job_queue() {
+	let (_mem, blocking) = MemFs::with_files(&[
+		("mem://stop-closes/dir/a.txt", ""),
+		("mem://stop-closes/dir/sub/b.txt", ""),
+	]);
+	let fs = Fs::Provider(blocking);
+	let keep = parallel::CollectSink::new(|_: &mut Worker<'_>, _: &mut Entry<'_>| Action::Continue);
+	let started = parallel::start(
+		&fs,
+		Path::new("mem://stop-closes/dir"),
+		&Options::default(),
+		keep,
+		false,
+		None,
+		None,
+	)
+	.await
+	.expect("walk");
+	tokio::time::timeout(Duration::from_secs(30), started.finished())
+		.await
+		.expect("the walk ends");
+	assert!(
+		started.queue_closed(),
+		"the job queue was still open after the walk stopped; an open queue leaves a worker still \
+		 waiting on it waiting forever"
+	);
+}
+
 /// A walk dropped before its seed worker's first poll frees no path another
 /// worker is reading. The seed's arena holds the root's children, which the
 /// queued jobs name; when the seed's scratch went with its never-polled task,

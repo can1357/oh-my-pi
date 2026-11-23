@@ -390,8 +390,11 @@ export class LiveSessionController {
 			if (event.message.stopReason === "toolUse") this.#appendProgress(event.message);
 			return;
 		}
-		if (event.type !== "agent_end") return;
-		this.#appendFinalResponse(event.messages);
+		// A run held open by background work (a subagent, an async job) pauses once the model has
+		// answered; its `agent_end` may come much later, so the voice takes the answer at the pause.
+		if (event.type === "agent_end" || (event.type === "agent_pause" && event.yielded)) {
+			this.#appendFinalResponse(event.messages);
+		}
 	}
 
 	#appendProgress(message: AssistantMessage): void {
