@@ -604,12 +604,18 @@ export class CustomEditor extends Editor {
 			this.clearDraft();
 			return;
 		}
+		this.rememberDraft(this.captureHistoryState());
+		this.clearDraft();
+	}
+
+	/** Attachments kept beside the draft text: a closure that puts the current ones back. */
+	override captureHistoryState(): () => void {
 		const images = [...this.pendingImages];
 		const links = [...this.pendingImageLinks];
 		const imageLinks = this.imageLinks;
 		const texts = [...this.pendingTexts];
 		const counter = this.#textAttachmentCounter;
-		this.rememberDraft(() => {
+		return () => {
 			this.pendingImages = [...images];
 			this.pendingImageLinks = [...links];
 			this.imageLinks = imageLinks;
@@ -618,8 +624,7 @@ export class CustomEditor extends Editor {
 			if (this.pendingImages.length > 0 && this.pendingImageLinks.some(link => link === undefined)) {
 				void this.#materializeDraftLinks();
 			}
-		});
-		this.clearDraft();
+		};
 	}
 
 	override restoreHistoryState(restore?: () => void): void {

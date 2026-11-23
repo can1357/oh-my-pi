@@ -100,6 +100,10 @@ export interface HookEditorOptions {
 	 * hint out of view.
 	 */
 	maxHeight?: number;
+	/** Called on the inner editor once it is built, e.g. to wire Vim mode's clipboard and cursor shape. */
+	configureEditor?: (editor: Editor) => void;
+	/** Vim-style modal editing in the inner editor; Escape then leaves Insert mode before it cancels. */
+	vimMode?: boolean;
 }
 
 /** Interactive multiline dialog used by hooks and the ask tool's Other response. */
@@ -156,6 +160,8 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 
 		// Editor
 		this.#editor = new Editor(getEditorTheme());
+		options?.configureEditor?.(this.#editor);
+		this.#editor.setVimMode(options?.vimMode === true);
 		if (this.#promptStyle) {
 			this.#editor.setBorderVisible(false);
 			this.#editor.setPromptGutter("> ");
@@ -373,6 +379,11 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		else this.#onCancelCallback(text);
 	}
 
+	/** The inner editor, which holds the keys while the prompt is focused. */
+	activeEditor(): Editor {
+		return this.#editor;
+	}
+
 	/** Route non-bracketed paste transports (e.g. kitty's OSC 5522 enhanced clipboard)
 	 *  into the inner editor, mirroring bracketed-paste semantics. Without this hook,
 	 *  enhanced-paste routing falls back to the main prompt editor hidden behind the
@@ -405,7 +416,8 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 
 		// Prompt-style keeps Escape as an explicit cancel key and also honors app.interrupt remaps.
 		if (matchesKey(keyData, "escape") || matchesKey(keyData, "esc") || matchesAppInterrupt(keyData)) {
-			this.#cancel();
+			if (this.#vimTakesEscape(keyData)) this.#editor.handleInput(keyData);
+			else this.#cancel();
 			return;
 		}
 
@@ -443,7 +455,8 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 
 		// Escape to cancel
 		if (matchesAppInterrupt(keyData)) {
-			this.#cancel();
+			if (this.#vimTakesEscape(keyData)) this.#editor.handleInput(keyData);
+			else this.#cancel();
 			return;
 		}
 
@@ -455,6 +468,11 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 
 		// Forward to editor
 		this.#editor.handleInput(keyData);
+	}
+
+	/** In Vim mode Escape first leaves Insert mode or cancels a half-typed command; only then does it cancel. */
+	#vimTakesEscape(keyData: string): boolean {
+		return (matchesKey(keyData, "escape") || matchesKey(keyData, "esc")) && this.#editor.vimConsumesEscape();
 	}
 
 	async #openExternalEditor(): Promise<void> {

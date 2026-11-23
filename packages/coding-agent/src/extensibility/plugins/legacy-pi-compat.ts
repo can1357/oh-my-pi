@@ -565,6 +565,15 @@ function extensionParseCacheKey(source: string, importerPath: string): string {
 	return `${EXTENSION_PARSE_CACHE_SCHEMA_VERSION}:${path.extname(importerPath).toLowerCase()}:${Bun.hash(source).toString(16)}`;
 }
 
+/**
+ * Close the process-wide parse cache so the next load reopens it under the then-current home. Tests
+ * that point the home at a temp dir need this on Windows, where an open database blocks removing it.
+ */
+export function closeExtensionParseCacheForTests(): void {
+	extensionParseCacheDb?.close();
+	extensionParseCacheDb = undefined;
+}
+
 function getExtensionParseCacheDb(): Database | null {
 	if (extensionParseCacheDb !== undefined) return extensionParseCacheDb;
 	try {
