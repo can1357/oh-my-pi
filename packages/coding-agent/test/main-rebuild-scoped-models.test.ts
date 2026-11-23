@@ -117,6 +117,25 @@ describe("watchScopedModelSettings", () => {
 		}
 	});
 
+	it("re-resolves an enabledModels role alias when the role is reassigned", async () => {
+		const settings = Settings.isolated({ enabledModels: ["@slow"] });
+		settings.setModelRole("slow", "prov/a");
+		const registry = new FakeRegistry([model("a"), model("b")]);
+		const session = new FakeSession(await startupScope(["@slow"], registry, settings));
+		expect(session.scopedModels.map(entry => entry.model.id)).toEqual(["a"]);
+
+		watchScopedModelSettings(session, parseArgs([]), registry, settings);
+		try {
+			settings.setModelRole("slow", "prov/b");
+			const { promise, resolve } = Promise.withResolvers<void>();
+			setImmediate(resolve);
+			await promise;
+			expect(session.scopedModels.map(entry => entry.model.id)).toEqual(["b"]);
+		} finally {
+			for (const dispose of session.disposers) dispose();
+		}
+	});
+
 	it("updates the cycling scope when provider preference changes an enabled model", async () => {
 		const id = "anthropic/claude-preset-fixture";
 		const patterns = [id];
