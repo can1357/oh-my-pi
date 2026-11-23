@@ -426,7 +426,7 @@ function handle(frame) {
 `,
 		);
 
-		using client = new RpcClient({ cliPath: scriptPath });
+		using client = new RpcClient({ command: [process.execPath, scriptPath] });
 		const lifecycleIds: string[] = [];
 		const progressTasks: string[] = [];
 		const rawEventTypes: string[] = [];

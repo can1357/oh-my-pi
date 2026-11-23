@@ -7,7 +7,7 @@
 //! change the C locale of the whole host process.
 //!
 //! Used by `sort` and `comm` (collation), `sort` (numerics), `uniq`, `date`,
-//! `du`, `df`, `env`, and `fold`.
+//! `du`, `df`, `env`, `fold`, and `column` (tree art).
 
 #![allow(dead_code, reason = "each utility uses a subset")]
 
