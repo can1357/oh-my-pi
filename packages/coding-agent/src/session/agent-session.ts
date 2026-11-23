@@ -2753,8 +2753,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// A guide follows work, or rides an actual delivery; a stale queued entry cannot extend the turn.
 			thunks.push(() => (boundary === "work" || hasDelivery ? (this.#tools.takeEvalPreludeGuide() ?? null) : null));
 			// Mid-run todo reconciliation — evaluated at injection time so a turn
-			// that flips a todo just before this poll suppresses the nudge.
-			thunks.push(() => this.#todo.takeMidRunNudge());
+			// that flips a todo just before this poll suppresses the nudge. Gated to
+			// the mid-work boundary so stop-time replies (including user-directed
+			// questions) flow through `checkCompletion()` instead.
+			thunks.push(() => (boundary === "work" ? this.#todo.takeMidRunNudge() : null));
 			const contextNotesReminder = this.#experimentalContextNotesReminder;
 			if (contextNotesReminder) {
 				this.#experimentalContextNotesReminder = undefined;
@@ -4934,7 +4936,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// and only successful mutating tools tick — read-only exploration is
 		// not progress an agent could mark done.
 		if (event.type === "message_end" && event.message.role === "toolResult") {
-			this.#todo.onToolResult(event.message.toolName, event.message.isError);
+			this.#todo.onToolResult(event.message);
+		} else if (
+			event.type === "message_end" &&
+			event.message.role === "custom" &&
+			event.message.customType === ASYNC_RESULT_MESSAGE_TYPE
+		) {
+			this.#todo.onAsyncResultMessage(event.message.details);
 		}
 		// Track the settled assistant turn synchronously as well: agent_end
 		// maintenance reads `#lastAssistantMessage`, and when a turn's events all
