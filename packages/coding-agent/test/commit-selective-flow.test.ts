@@ -11,6 +11,7 @@ import { ChangeJournal, type JournalRecord } from "@oh-my-pi/pi-coding-agent/com
 import { createCommitPrelude } from "@oh-my-pi/pi-coding-agent/commit/selective/prelude-definition";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -1386,7 +1387,7 @@ describe("selective commit flow", () => {
 		/** Spies on the native conversion, recording the paths each call converts together. */
 		function observeConversions(): string[][] {
 			const calls: string[][] = [];
-			const observe = (repo: vcs.VcsGitRepo): vcs.VcsGitRepo =>
+			const observe = (repo: VcsGitRepo): VcsGitRepo =>
 				new Proxy(repo, {
 					get(target, prop) {
 						if (prop === "worktreeToGit") {
