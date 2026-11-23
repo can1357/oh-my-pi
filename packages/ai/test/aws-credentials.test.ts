@@ -5,6 +5,7 @@ import * as path from "node:path";
 import {
 	type AwsAuthRefreshRequest,
 	clearAwsCredentialCache,
+	requestAwsAuthRefresh,
 	resolveAwsCredentials,
 	setAwsAuthRefreshHandler,
 	tokenizeCredentialProcessCommand,
@@ -797,6 +798,7 @@ describe("resolveAwsCredentials SSO token refresh", () => {
 					kind: "sso-token-expired",
 					sso: { profile: "sso-test", startUrl: START_URL, region: "us-east-1", sessionName: SESSION },
 					loginCommand: `aws sso login --sso-session ${SESSION}`,
+					startedAt: expect.any(Number),
 				},
 			]);
 			expect(captured.bearer).toEqual(["renewed-token"]);
@@ -864,6 +866,94 @@ describe("resolveAwsCredentials SSO token refresh", () => {
 			await expect(resolveAwsCredentials({ profile: "sso-test", fetch: ssoMock(captured) })).rejects.toThrow(
 				/not found in ~\/\.aws\/sso\/cache\. Run 'aws sso login --sso-session my-session' first\. Set the refresh command\.$/,
 			);
+		});
+
+		test("an OIDC outage reports a refresh failure instead of starting a sign-in", async () => {
+			await writeSsoConfig();
+			await writeCachedToken(expiredToken());
+			const captured = { oidc: [] as Array<Record<string, unknown>>, bearer: [] as string[] };
+			let calls = 0;
+			setAwsAuthRefreshHandler(async () => {
+				calls++;
+				return { refreshed: true };
+			});
+
+			await expect(
+				resolveAwsCredentials({ profile: "sso-test", fetch: ssoMock(captured, { oidcStatus: 503 }) }),
+			).rejects.toThrow(
+				/refresh for https:\/\/example\.awsapps\.com\/start failed \(HTTP 503\); retry the request\.$/,
+			);
+			expect(calls).toBe(0);
+		});
+
+		test("a completed renewal only answers earlier requests for the same session", async () => {
+			const sso = (sessionName: string) => ({
+				profile: sessionName,
+				startUrl: START_URL,
+				region: "us-east-1",
+				sessionName,
+			});
+			const renewed: string[] = [];
+			setAwsAuthRefreshHandler(async request => {
+				renewed.push(request.sso.sessionName ?? "");
+				return { refreshed: true };
+			});
+			const startedAt = Date.now() - 1_000;
+			const request = (name: string) => ({
+				kind: "sso-token-expired" as const,
+				sso: sso(name),
+				loginCommand: `aws sso login --sso-session ${name}`,
+				startedAt,
+			});
+
+			await requestAwsAuthRefresh(request("a"));
+			// Same session, read before that renewal (a subagent's stale request): no second sign-in.
+			expect(await requestAwsAuthRefresh(request("a"))).toEqual({ refreshed: true });
+			// Another session read just as early still gets its own renewal.
+			await requestAwsAuthRefresh(request("b"));
+
+			expect(renewed).toEqual(["a", "b"]);
+		});
+
+		test("a handler that throws synchronously does not block later renewals", async () => {
+			await writeSsoConfig();
+			await writeCachedToken(expiredToken({ refreshToken: undefined }));
+			const captured = { oidc: [] as Array<Record<string, unknown>>, bearer: [] as string[] };
+			let calls = 0;
+			setAwsAuthRefreshHandler(() => {
+				calls++;
+				if (calls === 1) throw new Error("host not ready");
+				return writeCachedToken(liveToken()).then(() => ({ refreshed: true }) as const);
+			});
+
+			await expect(resolveAwsCredentials({ profile: "sso-test", fetch: ssoMock(captured) })).rejects.toThrow(
+				/Automatic refresh failed: host not ready$/,
+			);
+			const creds = await resolveAwsCredentials({ profile: "sso-test", fetch: ssoMock(captured) });
+
+			expect(creds.accessKeyId).toBe("ASIASSO");
+			expect(calls).toBe(2);
+		});
+
+		test("the hint's login command quotes AWS config names as literal shell words", async () => {
+			const cfg = path.join(tmp, "config");
+			// Expands under double quotes (the old quoting); harmless if it ever does.
+			const name = "it's $HOME";
+			await Bun.write(
+				cfg,
+				`[profile q]\nsso_session = ${name}\nsso_account_id = 1\nsso_role_name = R\n\n[sso-session ${name}]\nsso_start_url = ${START_URL}\nsso_region = us-east-1\n`,
+			);
+			Bun.env.AWS_CONFIG_FILE = cfg;
+			const requests: AwsAuthRefreshRequest[] = [];
+			setAwsAuthRefreshHandler(async request => {
+				requests.push(request);
+				return { refreshed: false };
+			});
+
+			await expect(resolveAwsCredentials({ profile: "q" })).rejects.toThrow(/not found/);
+
+			const argv = await Bun.$`sh -c ${`printf '%s\\n' ${requests[0].loginCommand.replace(/^aws /, "")}`}`.text();
+			expect(argv.split("\n")).toEqual(["sso", "login", "--sso-session", name, ""]);
 		});
 	});
 });

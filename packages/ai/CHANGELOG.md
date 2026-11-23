@@ -5,6 +5,7 @@
 ### Added
 
 - `setAwsAuthRefreshHandler` lets a host renew an expired or missing AWS SSO sign-in (for example by running `aws sso login`); Bedrock requests then retry once, and SSO errors now name the exact `aws sso login --sso-session <name>` command ([#20160](https://github.com/can1357/oh-my-pi/pull/20160) by [@lericson](https://github.com/lericson))
+
 ## [19.1.1] - 2026-11-23
 
 ### Added

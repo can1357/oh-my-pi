@@ -32,7 +32,7 @@ export interface AwsSsoSession {
 /** A failure resolving AWS credentials for the Bedrock provider. */
 export class AwsCredentialsError extends Error {
 	readonly kind: AwsCredentialsErrorKind;
-	/** Set for `sso-token-missing` / `sso-token-expired`: the sign-in that must be renewed. */
+	/** Set when signing in again is the remedy (`sso-token-missing`, or `sso-token-expired` with a dead grant). */
 	readonly sso?: AwsSsoSession;
 
 	constructor(message: string, kind: AwsCredentialsErrorKind, options?: { cause?: unknown; sso?: AwsSsoSession }) {

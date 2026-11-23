@@ -12,6 +12,13 @@ import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AwsAuthRefreshPresenter } from "../session/aws-auth-refresh";
 import type { InteractiveModeContext } from "./types";
 
+/**
+ * Raw output retained for display. `aws sso login` prints a few lines with a
+ * sub-kilobyte verification URL; the cap bounds memory and per-chunk work when
+ * a command is noisy while it waits for the browser.
+ */
+const RETAINED_OUTPUT_CHARS = 8_000;
+
 export function createAwsAuthRefreshPresenter(
 	ctx: Pick<InteractiveModeContext, "present" | "ui">,
 ): AwsAuthRefreshPresenter {
@@ -30,6 +37,12 @@ export function createAwsAuthRefreshPresenter(
 		return {
 			output: chunk => {
 				text += chunk;
+				if (text.length > RETAINED_OUTPUT_CHARS) {
+					text = text.slice(-RETAINED_OUTPUT_CHARS);
+					// Drop the line the cut landed in, so no URL or escape sequence shows half.
+					const newline = text.indexOf("\n");
+					if (newline !== -1) text = text.slice(newline + 1);
+				}
 				// Lines stay whole (wrapped, not truncated): the verification URL must survive copy.
 				const lines = sanitizeText(text)
 					.replace(/\r\n?/g, "\n")

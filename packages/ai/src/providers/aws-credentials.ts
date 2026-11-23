@@ -94,6 +94,11 @@ export interface AwsAuthRefreshRequest {
 	sso: AIError.AwsSsoSession;
 	/** The `aws sso login …` invocation that renews {@link sso}. */
 	loginCommand: string;
+	/**
+	 * `Date.now()` when the failing resolution started. A renewal of the same
+	 * session that completed since then already fixed what this request read.
+	 */
+	startedAt: number;
 }
 
 export type AwsAuthRefreshOutcome =
@@ -111,46 +116,45 @@ export type AwsAuthRefreshHandler = (request: AwsAuthRefreshRequest) => Promise<
 let authRefreshHandler: AwsAuthRefreshHandler | undefined;
 /** One renewal per SSO session at a time; concurrent failures share it. */
 const authRefreshInflight: Map<string, Promise<AwsAuthRefreshOutcome>> = new Map();
-/**
- * Bumped when a renewal completes. A request that started before the bump read
- * the pre-renewal cache; it retries instead of renewing (and opening the browser) again.
- */
-let authRefreshGeneration = 0;
+/** `Date.now()` when each SSO session's latest successful renewal completed. */
+const authRefreshCompletedAt: Map<string, number> = new Map();
 
 /** Install the process-wide SSO renewal hook; `undefined` restores plain errors. */
 export function setAwsAuthRefreshHandler(handler: AwsAuthRefreshHandler | undefined): void {
 	authRefreshHandler = handler;
 }
 
-/** The AWS CLI command that signs `sso` in again. */
+/** The AWS CLI command that signs `sso` in again; names are quoted as literal POSIX shell words. */
 export function awsSsoLoginCommand(sso: AIError.AwsSsoSession): string {
-	const quote = (value: string) => (/^[\w.@:/-]+$/.test(value) ? value : JSON.stringify(value));
+	const quote = (value: string) => (/^[\w.@:/-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`);
 	return sso.sessionName
 		? `aws sso login --sso-session ${quote(sso.sessionName)}`
 		: `aws sso login --profile ${quote(sso.profile)}`;
 }
 
 export async function resolveAwsCredentials(opts: CredentialResolveOptions = {}): Promise<ResolvedCredentials> {
-	const generation = authRefreshGeneration;
+	const startedAt = Date.now();
 	try {
 		return await resolveCachedCredentials(opts);
 	} catch (error) {
-		const handler = authRefreshHandler;
 		if (
-			!handler ||
+			!authRefreshHandler ||
 			!(error instanceof AIError.AwsCredentialsError) ||
 			!error.sso ||
 			(error.kind !== "sso-token-missing" && error.kind !== "sso-token-expired")
 		) {
 			throw error;
 		}
-		// A renewal finished while this request was reading the stale cache.
-		if (generation !== authRefreshGeneration) return resolveCachedCredentials(opts);
 		const sso = error.sso;
-		const request: AwsAuthRefreshRequest = { kind: error.kind, sso, loginCommand: awsSsoLoginCommand(sso) };
+		const request: AwsAuthRefreshRequest = {
+			kind: error.kind,
+			sso,
+			loginCommand: awsSsoLoginCommand(sso),
+			startedAt,
+		};
 		let outcome: AwsAuthRefreshOutcome;
 		try {
-			outcome = await raceWithSignal(runAuthRefresh(handler, request), opts.signal);
+			outcome = await raceWithSignal(requestAwsAuthRefresh(request), opts.signal);
 		} catch (refreshError) {
 			if (opts.signal?.aborted) throw refreshError;
 			const detail = refreshError instanceof Error ? refreshError.message : String(refreshError);
@@ -169,26 +173,36 @@ export async function resolveAwsCredentials(opts: CredentialResolveOptions = {})
 	}
 }
 
-function runAuthRefresh(
-	handler: AwsAuthRefreshHandler,
-	request: AwsAuthRefreshRequest,
-): Promise<AwsAuthRefreshOutcome> {
+/**
+ * Renew `request.sso` through this thread's handler: joins a renewal of the same
+ * session already in flight, and reports success without renewing when one
+ * completed after the request started. Hosts that forward renewals from other
+ * threads (subagent workers) call this on the owning thread, so every caller
+ * shares one flight per session. Without a handler, nothing is attempted.
+ */
+export async function requestAwsAuthRefresh(request: AwsAuthRefreshRequest): Promise<AwsAuthRefreshOutcome> {
+	const handler = authRefreshHandler;
+	if (!handler) return { refreshed: false };
 	const key = request.sso.sessionName ? `session\x00${request.sso.sessionName}` : `url\x00${request.sso.startUrl}`;
 	const existing = authRefreshInflight.get(key);
 	if (existing) return existing;
-	// Detached from every caller's signal like the shared resolution below; the
-	// host bounds the attempt itself.
-	const promise = (async () => {
-		try {
-			const outcome = await handler(request);
-			if (outcome.refreshed) authRefreshGeneration++;
-			return outcome;
-		} finally {
-			authRefreshInflight.delete(key);
-		}
-	})();
-	authRefreshInflight.set(key, promise);
-	return promise;
+	// `>=`: a renewal finishing in the same millisecond may postdate this request's read.
+	if ((authRefreshCompletedAt.get(key) ?? Number.NEGATIVE_INFINITY) >= request.startedAt) return { refreshed: true };
+	// Register the flight before invoking the handler, so a synchronous throw
+	// still settles and clears it. Detached from every caller's signal like the
+	// shared resolution below; the host bounds the attempt itself.
+	const flight = Promise.withResolvers<AwsAuthRefreshOutcome>();
+	authRefreshInflight.set(key, flight.promise);
+	try {
+		const outcome = await handler(request);
+		if (outcome.refreshed) authRefreshCompletedAt.set(key, Date.now());
+		flight.resolve(outcome);
+	} catch (error) {
+		flight.reject(error);
+	} finally {
+		authRefreshInflight.delete(key);
+	}
+	return flight.promise;
 }
 
 async function resolveCachedCredentials(opts: CredentialResolveOptions): Promise<ResolvedCredentials> {
@@ -568,9 +582,16 @@ async function readSsoCredentials(
 	// profile that works under `aws` must not fail here; only a genuinely
 	// unrefreshable token warrants sending the user back to `aws sso login`.
 	if (Number.isFinite(expiresAt) && expiresAt - SSO_TOKEN_REFRESH_SKEW_MS <= Date.now()) {
-		const refreshed = await refreshSsoToken(cached.token, cached.file, ssoRegion, signal, fetchImpl);
-		if (refreshed?.accessToken) accessToken = refreshed.accessToken;
-		else if (expired) {
+		const refresh = await refreshSsoToken(cached.token, cached.file, ssoRegion, signal, fetchImpl);
+		if ("token" in refresh) accessToken = refresh.token.accessToken;
+		else if (expired && refresh.failure === "transient") {
+			// The grant may still be good: report the outage without `sso`, so no
+			// host renewal (browser sign-in) starts for a network blip.
+			throw new AIError.AwsCredentialsError(
+				`AWS SSO token refresh for ${startUrl} failed (${refresh.detail}); retry the request.`,
+				"sso-token-expired",
+			);
+		} else if (expired) {
 			throw new AIError.AwsCredentialsError(
 				`AWS SSO token for ${startUrl} has expired. Run '${awsSsoLoginCommand(sso)}' to refresh.`,
 				"sso-token-expired",
@@ -652,14 +673,20 @@ async function loadSsoCachedToken(
 	return undefined;
 }
 
+/** Outcome of an SSO OIDC refresh-token exchange. */
+type SsoRefreshResult =
+	| { token: SsoCachedToken & { accessToken: string } }
+	/** No refresh grant, an expired client registration, or the service rejected the grant: sign in again. */
+	| { failure: "unusable" }
+	/** Network error, throttling, a server error, or a malformed reply: the grant may still be valid. */
+	| { failure: "transient"; detail: string };
+
 /**
  * Exchange the cached refresh token for a fresh access token via SSO OIDC
  * `CreateToken`, which is what the AWS CLI does transparently on every command.
- *
- * Returns `undefined` when refresh is impossible (no refresh grant material, or
- * the client registration itself has expired) or when the exchange fails, so a
- * broken refresh surfaces the existing "run aws sso login" remedy rather than an
- * opaque network error.
+ * OIDC reports a dead grant (`InvalidGrantException`, `InvalidClientException`,
+ * `UnauthorizedClientException`, …) as 400/401/403; anything else is treated as
+ * transient so a flaky network never sends the user back to `aws sso login`.
  */
 async function refreshSsoToken(
 	token: SsoCachedToken,
@@ -667,12 +694,12 @@ async function refreshSsoToken(
 	ssoRegion: string,
 	signal: AbortSignal | undefined,
 	fetchImpl: FetchImpl,
-): Promise<SsoCachedToken | undefined> {
-	if (!token.refreshToken || !token.clientId || !token.clientSecret) return undefined;
+): Promise<SsoRefreshResult> {
+	if (!token.refreshToken || !token.clientId || !token.clientSecret) return { failure: "unusable" };
 	const registrationExpiresAt = token.registrationExpiresAt ? Date.parse(token.registrationExpiresAt) : Number.NaN;
 	if (Number.isFinite(registrationExpiresAt) && registrationExpiresAt <= Date.now()) {
 		logger.debug("aws-credentials: SSO client registration expired; cannot refresh");
-		return undefined;
+		return { failure: "unusable" };
 	}
 
 	let response: Response;
@@ -690,7 +717,7 @@ async function refreshSsoToken(
 		});
 	} catch (err) {
 		logger.debug("aws-credentials: SSO token refresh request failed", { err: String(err) });
-		return undefined;
+		return { failure: "transient", detail: err instanceof Error ? err.message : String(err) };
 	}
 	if (!response.ok) {
 		const body = await response.text().catch(() => "");
@@ -698,17 +725,20 @@ async function refreshSsoToken(
 			status: response.status,
 			body: body.slice(0, 200),
 		});
-		return undefined;
+		if (response.status === 400 || response.status === 401 || response.status === 403) {
+			return { failure: "unusable" };
+		}
+		return { failure: "transient", detail: `HTTP ${response.status}` };
 	}
 	const json = (await response.json().catch(() => undefined)) as
 		| { accessToken?: string; expiresIn?: number; refreshToken?: string }
 		| undefined;
 	if (!json?.accessToken) {
 		logger.debug("aws-credentials: SSO token refresh returned no accessToken");
-		return undefined;
+		return { failure: "transient", detail: "no accessToken in the reply" };
 	}
 
-	const updated: SsoCachedToken = {
+	const updated = {
 		...token,
 		accessToken: json.accessToken,
 		// `expiresIn` is seconds from now; the cache records an absolute instant.
@@ -719,7 +749,7 @@ async function refreshSsoToken(
 		refreshToken: json.refreshToken ?? token.refreshToken,
 	};
 	await writeSsoCachedToken(file, updated);
-	return updated;
+	return { token: updated };
 }
 
 /**
@@ -1230,9 +1260,10 @@ async function readImdsCredentials(
 	}
 }
 
-/** Test/diagnostic helper — drops cached credentials. */
+/** Test/diagnostic helper — drops cached credentials and SSO renewal history. */
 export function clearAwsCredentialCache(): void {
 	cache.clear();
+	authRefreshCompletedAt.clear();
 }
 
 /**

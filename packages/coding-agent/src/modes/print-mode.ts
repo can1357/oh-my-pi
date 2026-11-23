@@ -14,6 +14,7 @@ import type { MCPManager } from "../mcp/manager";
 import { resolveMCPTimeoutMs } from "../mcp/timeout";
 import { MNEMOPI_NOTICE_SOURCE } from "../mnemopi/embedding-notice";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
+import { setAwsAuthRefreshPresenter } from "../session/aws-auth-refresh";
 import { toWireEvent } from "../session/loop-end-wire";
 import { COST_GATE_NOTICE_SOURCE } from "../session/cost-gate";
 import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "../session/credential-disabled-notice";
@@ -178,9 +179,22 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		}
 		await stdout.drained();
 	});
+	// The AWS SSO refresh command's output (verification URL, device code) goes
+	// to stderr: stdout carries the answer or the JSON event stream.
+	setAwsAuthRefreshPresenter(command => {
+		process.stderr.write(`Refreshing AWS SSO sign-in: ${sanitizeText(command)}\n`);
+		return {
+			output: chunk => process.stderr.write(chunk),
+			finish: error =>
+				process.stderr.write(
+					error ? `AWS SSO refresh failed: ${sanitizeText(error)}\n` : "AWS SSO sign-in refreshed\n",
+				),
+		};
+	});
 	try {
 		return await runPrintModeCore(session, options, stdout, () => signalReason !== undefined);
 	} finally {
+		setAwsAuthRefreshPresenter(undefined);
 		cancelSignalTeardown();
 	}
 }

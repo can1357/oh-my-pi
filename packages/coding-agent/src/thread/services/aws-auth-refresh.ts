@@ -1,15 +1,16 @@
 /**
  * Bedrock AWS SSO renewal bridged into subagent workers. A worker's lapsed SSO
- * sign-in runs main's handler (`session/aws-auth-refresh`), so the refresh
- * command runs once per process, shows in main's UI, and every thread shares
- * the result through `~/.aws/sso/cache`.
+ * sign-in goes through main's `requestAwsAuthRefresh`, which owns the one
+ * flight per SSO session shared by main and every worker, and runs main's
+ * registered handler (none: the worker keeps the plain error). The renewed
+ * token reaches every thread through `~/.aws/sso/cache`.
  */
 import {
 	type AwsAuthRefreshOutcome,
 	type AwsAuthRefreshRequest,
+	requestAwsAuthRefresh,
 	setAwsAuthRefreshHandler,
 } from "@oh-my-pi/pi-ai/providers/aws-credentials";
-import { runAwsAuthRefresh } from "../../session/aws-auth-refresh";
 import type { WorkerThreadLink } from "../protocol";
 import type { RemoteObject, RpcMethod } from "../rpc";
 import type { ThreadService } from "../services";
@@ -52,7 +53,7 @@ export const awsAuthRefreshThreadService: ThreadService = {
 		peer.link.exportClass<MainAwsAuthRefresher, AwsAuthRefresherProtocol>(
 			AWS_AUTH_REFRESHER_KIND,
 			(value): value is MainAwsAuthRefresher => value instanceof MainAwsAuthRefresher,
-			{ refresh: (_refresher, request) => runAwsAuthRefresh(request) },
+			{ refresh: (_refresher, request) => requestAwsAuthRefresh(request) },
 		);
 	},
 
