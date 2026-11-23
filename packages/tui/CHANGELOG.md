@@ -2,10 +2,12 @@
 
 ## [Unreleased]
 
+## [19.1.1] - 2026-11-23
+
 ### Added
 
-- Added `AGENT_KILL_LABEL`, `InterruptReason` and `isInterruptReason` so hosts can tell a parent agent's kill apart from a user interrupt ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
-- Added `SettingsRuntimeContext.runtimeOptions`: the host can supply the choices of a setting shown as a choice menu, keyed by setting path. Thinking levels, themes and composer shapes keep their own lists ([#19925](https://github.com/can1357/oh-my-pi/pull/19925) by [@Dangerboi](https://github.com/Dangerboi))
+- Added host-provided runtime choices for settings menus through `SettingsRuntimeContext.runtimeOptions`, while preserving built-in choices for thinking levels, themes, and composer shapes.
+- Added interrupt metadata so hosts can distinguish a parent-agent termination from a user-initiated interrupt.
 
 ### Fixed
 
@@ -17,10 +19,17 @@
 - Fixed Enter pressed again on a model row just assigned to a role removing that role and falling back to the default role's model ([#12310](https://github.com/can1357/oh-my-pi/issues/12310), [#19986](https://github.com/can1357/oh-my-pi/pull/19986) by [@JamieJ5926](https://github.com/JamieJ5926))
 - The quick model picker (alt+p) in a session limited by `--models` or `enabledModels` now lists models the catalog gained since the session started, as the unlimited picker does ([#19878](https://github.com/can1357/oh-my-pi/pull/19878) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Tern showing "Not found" for `read` images and other files shown by path when omp runs on another machine than Tern (e.g. over ssh); omp names files by path only when `TERN_BLOB_DIR` is set (Tern exports it into its local panes) and otherwise uploads images, so a local session without it, such as a tmux server started outside Tern, also uploads ([#20103](https://github.com/can1357/oh-my-pi/issues/20103))
+- Fixed handoffs being skipped when only the model’s upstream pin changes.
+- Fixed the `/usage` activity calendar retaining its history when a refresh fails, while indicating that the data is not synced.
+- Fixed SVG images blinking in ask forms when questions extend beyond the panel.
+- Fixed the active-turn status line so elapsed time updates smoothly at tenths of a second.
+- Fixed assigning a model to a role when pressing Enter again on the selected model, which could incorrectly remove the role.
+- Updated the quick model picker (`Alt+P`) to include models added to the catalog after a session began, even when the session is restricted by `--models` or `enabledModels`.
+- Fixed images and other path-based files appearing as unavailable in Tern when the TUI and Tern run on different machines or in local sessions without Tern’s shared file directory.
 
 ### Removed
 
-- Removed `OmfgPanelComponent.markSaved` and the `"saved"` member of `OmfgPanelState`; the panel now closes once a `/omfg` rule is saved ([#20069](https://github.com/can1357/oh-my-pi/pull/20069) by [@suiso11](https://github.com/suiso11))
+- Removed `OmfgPanelComponent.markSaved` and the `saved` panel state; the `/omfg` panel now closes after a rule is saved.
 
 ## [19.1.0] - 2026-11-21
 

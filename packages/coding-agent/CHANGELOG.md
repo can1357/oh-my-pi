@@ -4,73 +4,77 @@
 
 ### Added
 
-- Added `pi.registerTodoBackend()` and the `todo.backend` setting: an extension can mirror the main session's todo list into an external store, which gets the whole list after every change ([#19890](https://github.com/can1357/oh-my-pi/pull/19890) by [@Dangerboi](https://github.com/Dangerboi))
-- Added the "Todo Backend" choice to `/settings` → Tools → Todos, listing each registered todo backend with its optional `label` and `description`; a backend picked there gets the current list at once ([#19925](https://github.com/can1357/oh-my-pi/pull/19925) by [@Dangerboi](https://github.com/Dangerboi))
-- `/wt` (TUI, ACP, RPC and `worktree.onStart`) runs the new worktree's `post-checkout` hook as `git worktree add` does, with a spinner in the TUI, then loads the skills and commands it added; a failing hook keeps the worktree and shows a warning, and quitting while it runs keeps that worktree with a warning. In an ovnfs checkout only a `core.hooksPath` hook runs ([#20045](https://github.com/can1357/oh-my-pi/pull/20045) by [@Dangerboi](https://github.com/Dangerboi))
+- Added `discovery.type: openrouter` for `models.yml` providers that front OpenRouter under their own URL and key: their model list now comes from OpenRouter's public catalog, and requests follow OpenRouter's request format.
 
 ### Changed
 
-- Empty-stop recovery now logs each scheduled retry with the model, provider and stop metadata, so a model that keeps returning nothing is visible in the session log instead of reading as an unexpected user message ([#20122](https://github.com/can1357/oh-my-pi/pull/20122) by [@FnSGit](https://github.com/FnSGit))
+- The bash tool's visualization keeps a one-line awk, jq, regex or other embedded program highlighted where it appears in the command; only multi-line programs move below it behind a `⟦awk ↓⟧`-style chip.
 
 ### Fixed
 
-- Improved `magic` edit application reliability: narrowed `CANNOT` refusals to missing targets, accepted multi-line `sub` replacements and no-op `sub`s, fixed block spans on closing braces and multi-line headers, merged tiny excerpt gaps, preserved full retry attempts after excerpt widening, and pinpointed syntax-breaking operations with surrounding line context.
-- `tab.scroll({ direction: "down", amount: 600 })` and other objects that name no pixel delta are rejected with the helper's signature and the equivalent call (`tab.scroll(0, 600)`) instead of silently scrolling nothing; the browser docs point at the `TabApi` interface in `tab-worker.ts` instead of a declaration file that no longer exists ([#20171](https://github.com/can1357/oh-my-pi/pull/20171) by [@kaluli123123](https://github.com/kaluli123123))
-- `ask` now reports a `<fieldset>` whose radios each carry a different `name` back to the model instead of showing it, so a preselected option can no longer be submitted next to the user's pick as a second answer ([#19625](https://github.com/can1357/oh-my-pi/issues/19625), [#20170](https://github.com/can1357/oh-my-pi/pull/20170) by [@kaluli123123](https://github.com/kaluli123123))
-- Title generation stops after a model declines with `<title/>` or `none`, instead of sending the same request to every remaining title candidate, including fallback chains and the session model; errors and unusable replies still move on to the next candidate ([#20168](https://github.com/can1357/oh-my-pi/issues/20168)).
-- Automatic compaction moves past an oversized handoff request without calling the provider ([#20099](https://github.com/can1357/oh-my-pi/issues/20099)).
-- `wait()` in eval cells accepts a displayed subagent id, optionally as `agent://id`, so you can wait for an agent you only have the name of; ids that are not yours still report an unknown handle ([#20148](https://github.com/can1357/oh-my-pi/pull/20148) by [@Komzpa](https://github.com/Komzpa))
-- Fixed the startup thinking level coming from the first `--models`/`enabledModels` entry instead of the entry the session starts on, such as a remembered default that is not listed first, and replacing the level given with `--model` ([#20109](https://github.com/can1357/oh-my-pi/pull/20109) by [@taibenvenuti](https://github.com/taibenvenuti))
-- Fixed TTSR discard mode dropping follow-up messages queued while an interrupted response was unwinding ([#20131](https://github.com/can1357/oh-my-pi/pull/20131) by [@harshaygadekar](https://github.com/harshaygadekar))
-- Fixed automatic compaction repeating a handoff request too large for the model after a cross-provider switch; it now moves on to the next compaction method ([#20126](https://github.com/can1357/oh-my-pi/pull/20126) by [@harshaygadekar](https://github.com/harshaygadekar))
-- Upstream pins (`openrouter/z-ai/glm-4.7@cerebras`) survive model switches, cycling, session restore, prewalk, plan mode, and model metadata refreshes; `enabledModels` and `--models` keep two pins of one model distinct and never re-pin a listed route ([#19664](https://github.com/can1357/oh-my-pi/pull/19664) by [@taibenvenuti](https://github.com/taibenvenuti)).
-- Fixed MCP servers that reject the 2026-07-28 revision, such as Datadog, failing to connect instead of falling back to the handshake-era protocol ([#20113](https://github.com/can1357/oh-my-pi/pull/20113) by [@DanielTatarkin](https://github.com/DanielTatarkin))
-- Resuming in plan mode now remembers the model and thinking level to restore when planning ends, including routed model selections ([#20114](https://github.com/can1357/oh-my-pi/pull/20114) by [@SuperUserA](https://github.com/SuperUserA))
-- Fixed the `enabledModels` allowlist (`/model` and the RPC and ACP model lists) ignoring `modelProviderOrder` for an ambiguous entry, so it could pick a different provider than the cycling scope; editing `modelProviderOrder` now refreshes a cycling scope derived from `enabledModels` ([#20108](https://github.com/can1357/oh-my-pi/pull/20108) by [@taibenvenuti](https://github.com/taibenvenuti))
-- Reduced idle memory of compiled binaries and the npm bundle by loading the browser-relay extension only when it is installed or synced ([#20089](https://github.com/can1357/oh-my-pi/pull/20089) by [@iliaal](https://github.com/iliaal))
-- A background wake can retry its own empty model responses even if the previous turn exhausted its retries ([#19997](https://github.com/can1357/oh-my-pi/pull/19997) by [@ashtacore](https://github.com/ashtacore))
-- Fixed GPT-6.2 sessions on the OpenAI Responses APIs rewriting already-sent tool results every turn, which made the API drop later reasoning items; superseded reads now stay as they were sent while the prompt cache is warm ([#19721](https://github.com/can1357/oh-my-pi/issues/19721), [#19988](https://github.com/can1357/oh-my-pi/pull/19988) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed a session-only model pick or quick-role pick recording a second model change when Enter was pressed again before the switch finished ([#12310](https://github.com/can1357/oh-my-pi/issues/12310), [#19986](https://github.com/can1357/oh-my-pi/pull/19986) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed `edit` reporting a failed disk write when format-on-write restored the file's original content ([#20059](https://github.com/can1357/oh-my-pi/pull/20059) by [@eggpeat](https://github.com/eggpeat))
-- Fixed browser downloads keeping their GUID temp name when Windows held the downloaded file open without share-delete at finalize time; the atomic replace now retries the rename within its budget ([#20062](https://github.com/can1357/oh-my-pi/pull/20062) by [@jchanghong023](https://github.com/jchanghong023))
-- Fixed RPC mode exiting before its private MCP host finished reclaiming servers, which could orphan MCP subprocesses after the session ended ([#20067](https://github.com/can1357/oh-my-pi/pull/20067) by [@jchanghong023](https://github.com/jchanghong023))
-- Fixed the advisor reading the lines its own view cut from a tool result as missing from the main thread: they are now labelled as cut in the advisor view only, and a tool's own truncation is still named ([#12777](https://github.com/can1357/oh-my-pi/issues/12777), [#19982](https://github.com/can1357/oh-my-pi/pull/19982) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed the "No default model selected" startup warning still showing after first-run setup had selected a model ([#8053](https://github.com/can1357/oh-my-pi/issues/8053), [#19985](https://github.com/can1357/oh-my-pi/pull/19985) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed `new_context` silently dropping the rollover when a non-message journal append (goal mode usage bookkeeping) raced the experimental leaf guard; journal appends no longer abort the boundary, a transcript append still does, and a skipped explicit rollover now warns instead of looking successful ([#20063](https://github.com/can1357/oh-my-pi/issues/20063))
-- `/omfg` now dismisses its panel once the rule is saved and shows the saved path in the status line; errors keep the panel open ([#20069](https://github.com/can1357/oh-my-pi/pull/20069) by [@suiso11](https://github.com/suiso11))
-- Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))
-- Fixed AST edits and searches across several targets duplicating explicit `local://` file names (such as `local://example.ts/example.ts`) or replacing symlinked file names in previews, search results, and the edit journal ([#20025](https://github.com/can1357/oh-my-pi/pull/20025) by [@eggpeat](https://github.com/eggpeat))
-- Fixed Claude-format plugin agents losing tools whose Claude Code names match no OMP built-in: frontmatter `tools:` now translates `WebFetch`, `WebSearch`, `TodoWrite`, `AskUserQuestion`, `MultiEdit`, `Agent`, and the rest to their OMP equivalents, and `Agent` infers unrestricted spawns like `Task` ([#19887](https://github.com/can1357/oh-my-pi/pull/19887) by [@joseotaviorf](https://github.com/joseotaviorf))
-- Fixed a TTSR rule interrupt that matched a tool call leaving the session idle with `Cannot continue from message role: assistant` instead of retrying the turn with the rule ([#19875](https://github.com/can1357/oh-my-pi/issues/19875))
-- Extension `ctx.ui.notify(…, "info")` notices shown at session start stay visible instead of being overwritten by the next extension's notice or the MCP startup status line ([#19866](https://github.com/can1357/oh-my-pi/issues/19866))
-- Passing `--plan` before another CLI flag no longer treats that next flag as `--plan`'s value during startup, `/restart`, `/fork`, or subcommand routing ([#20028](https://github.com/can1357/oh-my-pi/pull/20028) by [@eggpeat](https://github.com/eggpeat))
-- Fixed the edit tool not finding the snapshot it recorded for a file created beneath a symlinked ancestor, such as a new file under `/var/...` on macOS ([#19926](https://github.com/can1357/oh-my-pi/pull/19926) by [@FnSGit](https://github.com/FnSGit))
-- Fixed `/usage` showing "Usage history unavailable (database is locked)" while another process was writing the stats database; the stored history stays visible, marked not synced when the refresh cannot finish ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
-- `openai-models-list` discovery no longer offers a gateway's speech and transcription models as chat models: rows whose only output is `speech` or `transcription` (including OpenRouter's `text->speech` style `architecture.modality` summary) become `tts` and `stt` models ([#19900](https://github.com/can1357/oh-my-pi/pull/19900) by [@Xytronix](https://github.com/Xytronix))
-- Subagents stopped by their parent through `proc://<id>/kill` now record "Stopped by parent agent" in their transcripts instead of "Interrupted by user" ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
-- Fixed the omp daemon staying alive for up to 3 seconds after shutdown, or 11 seconds after stopping a module unit such as the image URL broker, once its work was done
-- Reduced idle memory of the npm bundle and compiled binaries by reading the prompt perturbation pool only when a request is perturbed ([#20090](https://github.com/can1357/oh-my-pi/pull/20090) by [@iliaal](https://github.com/iliaal))
-- On Linux, language-server file watching in one omp process holds at most a quarter of the user's inotify watch limit, and gives half of its watches back when the limit is reached, so large workspaces no longer break `tail -f`, systemd, or CI containers of the same user ([#20117](https://github.com/can1357/oh-my-pi/issues/20117))
-- Fixed importing `@oh-my-pi/pi-coding-agent` from npm failing with `Cannot find module '../../../../../browser-relay/extension/messages'` ([#20058](https://github.com/can1357/oh-my-pi/issues/20058))
-- Fixed the `read` tool's `:raw` description claiming line anchors and prefixes are omitted even when the active session does not emit them ([#20101](https://github.com/can1357/oh-my-pi/pull/20101) by [@eggpeat](https://github.com/eggpeat))
-- In SDK, RPC and ACP sessions, MCP servers rediscovered after a mid-session settings change (project MCP config or the built-in browser) now come from the session's own extension paths and honor `disableExtensionDiscovery`, instead of the globally discovered extensions ([#20116](https://github.com/can1357/oh-my-pi/pull/20116) by [@eggpeat](https://github.com/eggpeat))
-- Fixed TTSR discard mode dropping messages admitted after an interrupted assistant, while ensuring the interrupted assistant, its tool results, and any empty aborted tail are cleanly removed ([#20131](https://github.com/can1357/oh-my-pi/pull/20131) by [@harshaygadekar](https://github.com/harshaygadekar))
-- Fixed the `computer` tool's instructions listing `(selected)` as a macOS-only `ax()` state; Linux elements now show it too ([#20110](https://github.com/can1357/oh-my-pi/pull/20110) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed published SDK and extension examples that used removed APIs, and included them in the package typecheck ([#20060](https://github.com/can1357/oh-my-pi/pull/20060) by [@eggpeat](https://github.com/eggpeat))
-- Speculative compaction no longer re-sends a `compaction.remoteEndpoint` request after the endpoint rejects it with a non-retriable error, such as a 404 or 400 for the session's model; it speculates the next configured method until a compaction commits ([#20011](https://github.com/can1357/oh-my-pi/pull/20011) by [@nick-maderight](https://github.com/nick-maderight)).
-- Fixed X and YouTube URL reads ignoring SDK session settings or failing when global settings were not initialized ([#20057](https://github.com/can1357/oh-my-pi/pull/20057) by [@eggpeat](https://github.com/eggpeat))
-- Spotlight now keeps edit results and tool error responses whole instead of replacing repeated lines with references to earlier output ([#20032](https://github.com/can1357/oh-my-pi/pull/20032) by [@eggpeat](https://github.com/eggpeat))
-- Restored sessions now report background bash jobs left unfinished when the previous OMP process exited through `wait` and `proc://` as having an unknown outcome instead of claiming they never existed ([#20026](https://github.com/can1357/oh-my-pi/pull/20026) by [@eggpeat](https://github.com/eggpeat))
-- `omp --restore` no longer resends a finished turn when the session was compacted while idle, or when an earlier resume marked that turn as interrupted ([#19867](https://github.com/can1357/oh-my-pi/pull/19867) by [@enieuwy](https://github.com/enieuwy))
-- The quick model picker (alt+p) in a session open for hours now shows models a provider added since the session started: once the catalog is two hours old, opening the picker re-runs discovery in the background; built-in providers fetch again, while custom `discovery:` and extension providers (cached for 24 h) pick up what another session fetched ([#19878](https://github.com/can1357/oh-my-pi/pull/19878) by [@will-bogusz](https://github.com/will-bogusz))
-- A selective commit of a binary, non-text, or oversized file now keeps Git's clean-filter result for the bytes captured in the draft, including Git LFS pointers and line-ending rules, instead of the raw worktree bytes ([#19392](https://github.com/can1357/oh-my-pi/pull/19392) by [@eggpeat](https://github.com/eggpeat))
-- A selective commit of a binary or non-text file now stops when a newer commit changed that file, and leaves a different staged copy in place, instead of overwriting either one ([#19392](https://github.com/can1357/oh-my-pi/pull/19392) by [@eggpeat](https://github.com/eggpeat))
-- Whole-file changes in selective commits (binary, non-UTF-8, or over 4 MiB) now commit the content captured when the draft was built, instead of whatever another process left in the worktree by commit time ([#19392](https://github.com/can1357/oh-my-pi/pull/19392) by [@eggpeat](https://github.com/eggpeat))
-- Fixed `read` hanging indefinitely on images and other non-text files when speculative execution is enabled with `beforeToolCall` hooks ([#19359](https://github.com/can1357/oh-my-pi/issues/19359), [#19361](https://github.com/can1357/oh-my-pi/pull/19361) by [@gtoxlili](https://github.com/gtoxlili))
-- Fixed the "agent turn ended with provider error" log omitting the provider request id; Anthropic refusals now log the `request-id` that support asks for ([#19383](https://github.com/can1357/oh-my-pi/pull/19383) by [@nnnnoel](https://github.com/nnnnoel))
-- Fixed sessions started from a collab peer's prompt never getting an automatic title; title reviews and the unexpected-stop judge now read collab prompts as operator requests ([#19365](https://github.com/can1357/oh-my-pi/pull/19365) by [@DaddyMonster](https://github.com/DaddyMonster))
-- The `eval` tool now tells the model its default cell deadline (30 s) in the `timeout` parameter and the tool prompt ([#18856](https://github.com/can1357/oh-my-pi/issues/18856)) ([#19349](https://github.com/can1357/oh-my-pi/pull/19349) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
-- Fixed `/tan` forks being told "Waiting is not progress" on their second back-to-back idle wait while their only assignment was still blocked; a fork now keeps waiting instead of ending its turn ([#20151](https://github.com/can1357/oh-my-pi/pull/20151) by [@Fun10165](https://github.com/Fun10165))
+- `!command` values in `models.yml` (`apiKey`, `headers`) can now read variables defined in `~/.env` or `~/.omp/agent/.env` on macOS and Windows; previously the command saw an empty value.
+- The bash tool's visualization now draws a script run by `bash file.sh`, `source`, or `eval "$var"` as one block under the command that ran it, instead of repeating a “built at runtime” header above every line of the script.
+- Hindsight now retains only the turns added by a `/tan` fork, not the parent transcript it inherited for context ([#20259](https://github.com/can1357/oh-my-pi/issues/20259)).
+### Fixed
+
+- Selective commits now leave HEAD and staging unchanged if the shared index stays locked. Retry once the lock is released ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
+
+## [19.1.1] - 2026-11-23
+
+### Breaking Changes
+
+- The native shell Rust API now stores indexed variables as `IndexedArray` instead of `Vec`; construct `VarValue::Indexed` values with `items.into()`.
+
+### Added
+
+- Added the opt-in `tree` status segment, which shows a session’s position in the session tree after a rewind or on a branch; in Tern, the segment opens `/tree` when clicked.
+- Providers routed through an auth gateway (`transport: pi-native`) now list the gateway's models, so models the gateway discovered at runtime (such as new Codex models) can be selected without declaring them in `models.yml`, and models the gateway cannot route are hidden.
+- Added `computer.takeover` as the replacement for `computer.backgroundFallback`, with `fallback`, `foreground`, and `always` modes for controlling when the computer tool takes over the foreground window. Existing fallback behavior is preserved by default.
+- Added a portable `column` shell builtin with util-linux-compatible options, including table formatting, named columns, alignment, hiding, ordering, JSON output, tree display, and width controls.
+- Added extension todo backends through `pi.registerTodoBackend()` and the `todo.backend` setting. Registered backends can mirror the session’s complete todo list to an external store and can be selected and configured from `/settings` → Tools → Todos.
+- `/wt` now runs the new worktree’s `post-checkout` hook, displays progress in the TUI, and loads skills and commands created by the hook. Failed hooks leave the worktree intact and display a warning.
+
+### Changed
+
+- Empty-stop recovery now records each retry with the selected model, provider, and stop metadata, making repeated empty model responses visible in the session log.
+- The quick model picker refreshes stale provider catalogs in the background, so long-running sessions can discover newly available models.
+- On Linux, language-server file watching now adapts to the inotify watch limit so large workspaces are less likely to interfere with other file watchers and system services.
+- The `eval` tool now documents its default 30-second cell deadline in its prompt and timeout parameter.
+
+### Fixed
+
+- Improved Magic Edit so it can search and read the current draft, retry failed replacements without losing successful edits, validate syntax before writing, and support models that emit tool calls as text.
+- Fixed shell tool command handling when `bash` is replaced by an extension, including support for tool-only command lines with remote or sandboxed shells.
+- Fixed browser scrolling validation and documentation so invalid object forms explain the correct pixel-delta signature and equivalent call.
+- Fixed `ask` handling of fieldsets whose radio buttons use different names, preventing a preselected option from being submitted alongside the user’s choice.
+- Fixed title generation to stop when a model explicitly declines with `<title/>` or `none`, while continuing to the next candidate for errors or unusable replies.
+- Fixed automatic and speculative compaction so oversized or non-retriable handoff requests move on to the next available compaction method instead of being repeatedly sent to a provider.
+- `wait()` in eval cells now accepts displayed subagent IDs, including the `agent://id` form, while still rejecting handles belonging to other sessions.
+- Fixed startup and session model configuration so thinking levels, model-provider ordering, enabled-model allowlists, routed selections, and pinned upstream routes remain consistent across model switches, cycling, restore, plan mode, and metadata refreshes.
+- Fixed queued follow-up messages being lost when interrupted responses are discarded, and fixed TTSR interruptions that could leave a session unable to continue.
+- Fixed OpenAI Responses sessions rewriting previously sent tool results, which could cause later reasoning items to be rejected.
+- Fixed format-on-write and symlink-related file editing issues, including incorrect write failures, missing snapshots, duplicated `local://` paths, and incorrect symlinked filenames in previews and journals.
+- Fixed Windows browser downloads occasionally retaining temporary GUID filenames when the downloaded file was briefly locked.
+- Fixed RPC shutdown leaving MCP subprocesses running after the session ended.
+- Fixed advisor and Spotlight output so truncated or repeated tool results are represented accurately without losing the original content.
+- Fixed first-run startup warnings that persisted after a default model had been selected.
+- Fixed context rollover handling so concurrent bookkeeping no longer silently drops an explicit rollover, and skipped rollovers produce a warning.
+- `/omfg` now closes its panel after successfully saving a rule and shows the saved path; errors keep the panel open.
+- Fixed shell handling of leading `cd` commands that use glob, brace, or named-user home expansion.
+- Claude-format plugin agents now correctly map Claude tool names such as `WebFetch`, `WebSearch`, `TodoWrite`, `AskUserQuestion`, `MultiEdit`, and `Agent` to their OMP equivalents.
+- Startup extension notifications now remain visible instead of being overwritten by later notices or MCP startup status.
+- Fixed CLI parsing so `--plan` no longer consumes a following CLI flag as its value during startup, restart, fork, or subcommand routing.
+- Fixed `/usage` when the usage database is temporarily locked; stored history remains visible and is marked unsynced if it cannot be refreshed.
+- Model discovery now classifies speech-only and transcription-only models as TTS and STT models rather than chat models.
+- Subagents stopped by their parent now record that they were stopped by the parent agent.
+- Fixed SDK and extension imports, examples, and session-specific extension discovery for RPC and ACP sessions.
+- Fixed X and YouTube URL reads to honor SDK session settings even when global settings have not been initialized.
+- Restored sessions now correctly report background jobs whose outcome is unknown, and `omp --restore` no longer replays completed turns after idle compaction or interruption.
+- Selective commits now preserve the drafted contents and Git clean-filter results for binary, non-text, oversized, and Git LFS files, and avoid overwriting files changed since the draft was created.
+- Fixed `read` hanging on images and other non-text files when speculative execution and `beforeToolCall` hooks are enabled.
+- Provider error logs now include the request ID needed for troubleshooting Anthropic refusals.
+- Sessions started from collaboration prompts now receive automatic titles.
+- Fixed `/tan` forks ending an idle wait prematurely when their assignment remains blocked.
 
 ## [19.1.0] - 2026-11-21
 
