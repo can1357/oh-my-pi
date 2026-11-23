@@ -1822,6 +1822,7 @@ const CAPTURE_ADVERTISED_KEYS = [
 /** `AgentTool` keys that run code or let a call reach an effect; a refused copy has none of them. */
 const CAPTURE_DROPPED_KEYS = [
 	"execute",
+	"servesToolCommandLine",
 	"openArgStream",
 	"docTopics",
 	"concurrency",

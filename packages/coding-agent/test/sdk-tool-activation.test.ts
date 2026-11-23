@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, StreamFn } from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolResult, StreamFn } from "@oh-my-pi/pi-agent-core";
 import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -72,6 +72,24 @@ const proxiedBashExtension: ExtensionFactory = pi => {
 		},
 	});
 };
+
+// A replacement extension re-registers `bash` and never delegates: the shape of a
+// remote or sandboxed shell, which cannot run a mounted tool command itself.
+const replacedBashExtension: ExtensionFactory = pi => {
+	pi.registerTool({
+		name: "bash",
+		label: "Replaced Bash",
+		description: "Runs every command somewhere else.",
+		parameters: type({ "command?": "string" }),
+		async execute(_toolCallId: string, params: unknown) {
+			const command = (params as { command?: string } | undefined)?.command ?? "";
+			return { content: [{ type: "text" as const, text: `ran elsewhere: ${command}` }] };
+		},
+	});
+};
+
+const toolResultText = (result: AgentToolResult): string =>
+	result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("");
 
 const sdkCustomTool = {
 	name: "sdk_custom_tool",
@@ -226,6 +244,46 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			// gates on the same host: the mounts survive it.
 			await session.setActiveToolPresentation(session.getEnabledToolNames(), session.getMountedToolCommandNames());
 			expect(session.getMountedToolCommandNames()).toContain("default_active_tool");
+			// Mounted is not enough: the command line has to dispatch the mounted tool
+			// through the slot the proxy owns.
+			const bash = session.getToolByName("bash");
+			if (!bash) throw new Error("Expected bash tool");
+			expect(toolResultText(await bash.execute("proxy-tool-command", { command: "default_active_tool" }))).toContain(
+				"active",
+			);
+			// Ordinary shell work is still the proxy's, and its delegation still reaches the shell.
+			expect(toolResultText(await bash.execute("proxy-shell", { command: "echo delegated" }))).toContain(
+				"delegated",
+			);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("runs tool commands on the native host when an extension replaces bash outright (#18339)", async () => {
+		const tempDir = makeTempDir();
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [replacedBashExtension, toolActivationExtension],
+		});
+
+		try {
+			expect(session.getToolByName("bash")?.label).toBe("Replaced Bash");
+			expect(session.hasBuiltInTool("bash")).toBe(false);
+			expect(session.getToolCommandEntries().map(entry => entry.name)).toContain("default_active_tool");
+			const bash = session.getToolByName("bash");
+			if (!bash) throw new Error("Expected bash tool");
+			// A line made only of tool commands is transport traffic: it dispatches the
+			// mounted tool exactly as the top-level call would have, instead of reaching a
+			// replacement that would run `default_active_tool` as a program it does not have.
+			const mounted = await bash.execute("replaced-tool-command", { command: "default_active_tool" });
+			expect(toolResultText(mounted)).toContain("active");
+			expect(toolResultText(mounted)).not.toContain("elsewhere");
+			// Every other command line stays the replacement's: shell work never goes native.
+			expect(toolResultText(await bash.execute("replaced-shell", { command: "echo hi" }))).toBe(
+				"ran elsewhere: echo hi",
+			);
 		} finally {
 			await session.dispose();
 		}

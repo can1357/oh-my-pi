@@ -141,12 +141,13 @@ export interface ToolCommandState {
 const TOOL_COMMAND_HOST_NAME = "bash";
 
 /**
- * Whether the session still has a tool that can run tool commands: the native
- * built-in host, or a same-name extension override with that native tool behind
- * it (`ctx.invokeTool`), which reaches the command handler exactly as a direct
- * call does. An override with no native tool behind it replaces the host
- * outright, so the transport stays off and mountable tools present top-level
- * (#18339).
+ * Whether the session still has a tool that can run tool commands: the native built-in host,
+ * whether it holds the registry slot or sits behind a same-name extension replacement. A
+ * replacement never has to implement the transport — `RegisteredToolAdapter` routes a line made
+ * only of tool commands back to the native host, which dispatches exactly the tools a top-level
+ * call would have run — so it does not matter whether the replacement delegates. Without a native
+ * host (a session whose `bash` is only an extension tool) nothing can dispatch the commands, so
+ * the transport stays off and mountable tools present top-level (#18339).
  */
 export function toolCommandHostAvailable(
 	builtInNames: ReadonlySet<string>,
