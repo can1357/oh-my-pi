@@ -702,6 +702,41 @@ describe("html form", () => {
 			expect(form.optionNotes()).toMatchObject([{ text: "why sqlite" }]);
 			form.dispose();
 		});
+
+		it("holds a one-field submit until the reserved paste arrives", () => {
+			const { form, onSubmit } = dialog(`<form><label>Answer <input name="answer"></label></form>`);
+			const settle = form.beginPaste();
+			form.handleInput(ENTER);
+			expect(onSubmit).not.toHaveBeenCalled();
+
+			expect(settle("clipboard")).toBe(true);
+			expect(onSubmit).toHaveBeenCalledWith({ answer: "clipboard" }, []);
+			form.dispose();
+		});
+
+		it("cancels the held submit when the reserved paste fails", () => {
+			const { form, onSubmit } = dialog(`<form><label>Answer <input name="answer"></label></form>`);
+			const settle = form.beginPaste();
+			form.handleInput(ENTER);
+			expect(settle(undefined)).toBe(false);
+			expect(onSubmit).not.toHaveBeenCalled();
+
+			form.handleInput(ENTER);
+			expect(onSubmit).toHaveBeenCalledWith({ answer: "" }, []);
+			form.dispose();
+		});
+
+		it("delivers a text paste reserved before hiding, while refusing new ones", () => {
+			const { form } = dialog(`<form><label>A <input name="a"></label></form>`);
+			const settle = form.beginPaste();
+			form.handleInput("\x1bh");
+			expect(form.pasteText).toBeUndefined();
+
+			expect(settle("clipboard")).toBe(true);
+			expect(form.data()).toEqual({ a: "clipboard" });
+			expect(form.beginPaste()("later")).toBe(false);
+			form.dispose();
+		});
 	});
 
 	describe("parsing", () => {

@@ -1891,7 +1891,12 @@ describe("InputController paste into an ask form", () => {
 
 	/** An opted-in form focused in front of the main editor, with the controller's paste listeners installed. */
 	async function mountForm(
-		options: { html?: string; image?: { data: Uint8Array; mimeType: string } | null; text?: string } = {},
+		options: {
+			html?: string;
+			image?: { data: Uint8Array; mimeType: string } | null;
+			text?: string;
+			onSubmit?: ConstructorParameters<typeof HtmlFormDialog>[1]["onSubmit"];
+		} = {},
 	) {
 		const context = await createContext();
 		Object.assign(context.ctx, {
@@ -1915,7 +1920,7 @@ describe("InputController paste into an ask form", () => {
 			acceptImages: true,
 			onPasteImage: () => controller.handleImagePaste(),
 			onPasteImagePath: path => controller.handleImagePathPaste(path),
-			onSubmit: vi.fn(),
+			onSubmit: options.onSubmit ?? vi.fn(),
 			onCancel: vi.fn(),
 		});
 		form.focused = true;
@@ -1955,6 +1960,23 @@ describe("InputController paste into an ask form", () => {
 		await delivered.promise;
 
 		expect(form.data()).toEqual({ answer: "from clipboard" });
+		expect(context.editor.getText()).toBe("");
+		form.dispose();
+	});
+
+	it("holds Ctrl+V followed by Enter until the clipboard text arrives", async () => {
+		const submitted = Promise.withResolvers<unknown>();
+		const { context, form, listeners } = await mountForm({
+			html: TEXT_FORM,
+			image: null,
+			text: "from clipboard",
+			onSubmit: data => submitted.resolve(data),
+		});
+
+		dispatchInput(listeners, "\x16");
+		form.handleInput("\r");
+
+		expect(await submitted.promise).toEqual({ answer: "from clipboard" });
 		expect(context.editor.getText()).toBe("");
 		form.dispose();
 	});

@@ -449,6 +449,9 @@ export class HtmlFormDialog implements Component, Focusable {
 	#savedNoteEditor: Editor | undefined;
 	#useTerminalCursor = false;
 	#disposed = false;
+	/** Text pastes still reading the clipboard; submit waits for them, as a note save does. */
+	#pendingPastes = 0;
+	#submitAfterPastes = false;
 	/** The Other answer's text of each group that offers one. */
 	readonly #others = new Map<ChoiceField, Input>();
 	/** Each radio group's Other text as last seen, to notice typing from keys or the terminal. */
@@ -830,6 +833,8 @@ export class HtmlFormDialog implements Component, Focusable {
 
 	dispose(): void {
 		this.#disposed = true;
+		this.#pendingPastes = 0;
+		this.#submitAfterPastes = false;
 		this.#noteEditor?.pastes.clear();
 		this.#noteEditor = undefined;
 		this.#stopCountdown();
@@ -1049,6 +1054,10 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	#submit(): void {
+		if (this.#pendingPastes > 0) {
+			this.#submitAfterPastes = true;
+			return;
+		}
 		this.#errors.clear();
 		for (const field of this.#form.fields) {
 			const error = fieldError(field, this.#value(field));
@@ -1064,6 +1073,7 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	#cancel(): void {
+		this.#submitAfterPastes = false;
 		this.#stopCountdown();
 		this.#options.onCancel();
 	}
@@ -1247,16 +1257,28 @@ export class HtmlFormDialog implements Component, Focusable {
 		return formatVisionMarker("image", note.images.length, dims);
 	}
 
-	/** Reserve delivery to the open note or the text field that started the paste. */
+	/**
+	 * Reserve delivery to the open note or the text field that started the paste. A reserved text
+	 * paste survives hiding the form, and a submit pressed while it reads waits for it.
+	 */
 	beginPaste(): (text: string | undefined) => boolean {
 		if (this.acceptsImages) return this.#noteEditor!.pastes.begin();
 		const target = this.#pasteTarget();
 		if (!target) return () => false;
+		this.#pendingPastes++;
 		let settled = false;
 		return text => {
 			if (settled) return false;
 			settled = true;
-			return text !== undefined && this.#pasteText(text, target);
+			if (this.#disposed) return false;
+			this.#pendingPastes--;
+			const delivered = text !== undefined && this.#pasteText(text, target);
+			if (!delivered) this.#submitAfterPastes = false;
+			if (this.#pendingPastes === 0 && this.#submitAfterPastes) {
+				this.#submitAfterPastes = false;
+				this.#submit();
+			}
+			return delivered;
 		};
 	}
 
@@ -1266,23 +1288,26 @@ export class HtmlFormDialog implements Component, Focusable {
 		return stop?.kind === "text" || stop?.kind === "other" ? stop : undefined;
 	}
 
-	#pasteText(text: string, target = this.#pasteTarget()): boolean {
-		if (!text || this.#hidden || this.#disposed) return false;
-		if (!target) {
+	/** Deliver to a captured field even after hiding; a new paste while hidden finds no target. */
+	#pasteText(text: string, target?: Extract<Stop, { kind: "text" | "other" }>): boolean {
+		if (!text || this.#disposed) return false;
+		const destination = target ?? this.#pasteTarget();
+		if (!destination) {
+			if (this.#hidden) return false;
 			const note = this.#noteEditor;
 			if (!note) return false;
 			this.#notePaste(note, text);
 			return true;
 		}
 		const control =
-			target.kind === "other"
-				? this.#others.get(target.field)
-				: (this.#editors.get(target.field) ?? this.#inputs.get(target.field));
+			destination.kind === "other"
+				? this.#others.get(destination.field)
+				: (this.#editors.get(destination.field) ?? this.#inputs.get(destination.field));
 		if (!control) return false;
 		const before = control instanceof Editor ? control.getText() : control.getValue();
 		control.pasteText(text);
 		const after = control instanceof Editor ? control.getText() : control.getValue();
-		if (after !== before) this.#errors.delete(target.field);
+		if (after !== before) this.#errors.delete(destination.field);
 		this.#resetCountdown();
 		this.#changed();
 		return true;
