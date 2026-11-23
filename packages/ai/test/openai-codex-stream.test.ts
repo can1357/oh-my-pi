@@ -5560,6 +5560,100 @@ describe("openai-codex streaming", () => {
 		expect(metadata["x-codex-turn-state"]).toBe("sticky-turn-state");
 	});
 
+	it("captures turn-state from codex.response.metadata for websocket append continuations", async () => {
+		using tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const sentRequests: Array<Record<string, unknown>> = [];
+		const fetchMock = vi.fn(async () => {
+			throw new Error("SSE fallback should not be called");
+		});
+
+		class CodexMetadataWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+
+			override send(data: string): void {
+				const parsed: unknown = JSON.parse(data);
+				const request = requireRecord(parsed, "websocket request");
+				sentRequests.push(request);
+				if (sentRequests.length === 1) {
+					// Live server shape: sticky headers ride on `codex.response.metadata`;
+					// `response.metadata` carries only moderation metadata.
+					this.sendJson({
+						type: "codex.response.metadata",
+						headers: { "x-codex-turn-state": "codex-event-turn-state", "x-models-etag": "models-etag-1" },
+					});
+					this.sendJson({ type: "response.created", response: { id: "resp_1" } });
+					this.sendJson({ type: "response.metadata", response_id: "resp_1", metadata: {} });
+					this.sendJson({
+						type: "response.output_item.added",
+						item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "read_file", arguments: "" },
+					});
+					this.sendJson({
+						type: "response.output_item.done",
+						item: {
+							type: "function_call",
+							id: "fc_1",
+							call_id: "call_1",
+							name: "read_file",
+							arguments: '{"path":"README.md"}',
+						},
+					});
+					this.sendJson({
+						type: "response.completed",
+						response: { id: "resp_1", status: "completed", usage: DEFAULT_USAGE },
+					});
+					return;
+				}
+				this.emitCodexResponse({
+					messageId: "msg_2",
+					responseId: "resp_2",
+					text: "Done",
+					terminalType: "response.completed",
+					includeCreated: true,
+				});
+			}
+		}
+
+		global.WebSocket = CodexMetadataWebSocket as unknown as typeof WebSocket;
+		const model = createCodexTestModel("https://chatgpt.com/backend-api");
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const firstUser = { role: "user" as const, content: "Read the file", timestamp: Date.now() };
+		const options = {
+			fetch: fetchMock as FetchImpl,
+			apiKey: createCodexTestToken(),
+			sessionId: "ws-codex-metadata-session",
+			providerSessionState,
+		};
+		const context = { systemPrompt: ["Initial instructions"], messages: [firstUser] };
+		const first = await streamOpenAICodexResponses(model, context, options).result();
+		const toolCall = first.content.find(
+			(c): c is Extract<(typeof first.content)[number], { type: "toolCall" }> => c.type === "toolCall",
+		);
+		const toolResult = {
+			role: "toolResult" as const,
+			toolCallId: toolCall!.id,
+			toolName: toolCall!.name,
+			content: [{ type: "text" as const, text: "file contents" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+
+		await streamOpenAICodexResponses(
+			model,
+			{ ...context, messages: [firstUser, first, toolResult] },
+			options,
+		).result();
+
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(sentRequests).toHaveLength(2);
+		expect(sentRequests[1]?.previous_response_id).toBe("resp_1");
+		const metadata = requireRecord(sentRequests[1]?.client_metadata, "continuation client_metadata");
+		expect(metadata["x-codex-turn-state"]).toBe("codex-event-turn-state");
+	});
+
 	it("retries websocket continuations with full context when previous_response_id expires", async () => {
 		using tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());

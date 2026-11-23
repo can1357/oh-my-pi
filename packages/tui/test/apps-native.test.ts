@@ -1,4 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
+import { TempDir } from "@oh-my-pi/pi-utils/temp";
 import { TUI } from "@oh-my-pi/pi-tui";
 import { CleanseBoardModel } from "../src/apps/cleanse-board";
 import { showGitOverlay } from "../src/apps/git/git-tui";
@@ -260,14 +261,16 @@ describe("git native", () => {
 		},
 	};
 
-	/** Open the overlay on one changed image in `area` under a terminal advertising `kinds`, and return its asset nodes. */
+	/** Open the overlay on one changed image in `area` under a local terminal advertising `kinds`, and return its asset nodes. */
 	async function describeImageChange(
 		area: ChangedFile["area"],
 		contents: AssetFileContents,
 		kinds: readonly TspKind[] = TSP_KINDS,
 	) {
 		await initTheme();
-		const h = await TspHarness.start(undefined, { cols: 150, rows: 40, kinds });
+		// A blob cache marks the terminal as on this machine, able to open media paths.
+		await using blobDir = await TempDir.create("@omp-git-media-");
+		const h = await TspHarness.start(undefined, { cols: 150, rows: 40, kinds, blobDir: blobDir.path() });
 		const changed = file("assets/logo.png", area);
 		const closed = showGitOverlay(h.tui, {
 			model: {
@@ -305,7 +308,7 @@ describe("git native", () => {
 			h.terminal.send("q");
 			h.flush();
 			await closed;
-			h.tui.stop();
+			h.stop();
 		}
 	}
 

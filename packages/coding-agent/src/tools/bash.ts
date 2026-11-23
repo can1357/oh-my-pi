@@ -24,6 +24,7 @@ import { $env } from "@oh-my-pi/pi-utils/env";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
 import {
 	compileNotifyPattern,
+	formatAsyncJobLabel,
 	type NotifyPattern,
 	OutputNotifier,
 	raceJobSettlement,
@@ -837,6 +838,18 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		return undefined;
 	}
 
+	/**
+	 * Whether this line is pure tool-command traffic: every simple command is a mounted tool
+	 * command (or a special command), joined only by `;`, `&&`, `||`, `|` and newlines, with no
+	 * redirection, expansion, substitution or assignment — see {@link isToolCommandLine}. Such a
+	 * line runs no program: it dispatches the same session tools a top-level call would, which is
+	 * why a same-name extension replacement hands it back to this tool (#18339). Every other line
+	 * stays the override's.
+	 */
+	servesToolCommandLine(command: string): boolean {
+		return isToolCommandLine(command, new Set(toolCommandNames(this.session)));
+	}
+
 	readonly approval = (args: unknown, ctx?: AgentToolContext): ToolApprovalDecision =>
 		this.#decide(args, ctx, this.#probeCanChangeDecision(ctx));
 
@@ -1606,7 +1619,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			throw new ToolError("Background job manager unavailable for this session.");
 		}
 
-		const label = options.command.length > 120 ? `${options.command.slice(0, 117)}...` : options.command;
+		const label = formatAsyncJobLabel(options.command);
 		// Holds the run's Shell only while it runs: a retained reference would
 		// keep a finished `:async:` Shell (and its background children) alive.
 		let pids: () => readonly number[] = NO_PIDS;

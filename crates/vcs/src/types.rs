@@ -180,6 +180,17 @@ pub struct NumstatEntry {
 	pub removed: Option<u32>,
 }
 
+/// One same-path change between blobs already stored in the object database.
+/// A missing id and mode denotes an absent side (creation or deletion).
+#[derive(Debug, Clone)]
+pub struct BlobChange {
+	pub path:     String,
+	pub old_id:   Option<String>,
+	pub new_id:   Option<String>,
+	pub old_mode: Option<String>,
+	pub new_mode: Option<String>,
+}
+
 /// Options for diff generation.
 ///
 /// The output contract is git patch format — the TS layer parses it with the
