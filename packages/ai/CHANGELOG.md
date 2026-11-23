@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `paused: true` for `auth.accountPolicies` entries: the matching stored OAuth account is left out of every credential read (selection, pins, rotation, usage reports, health checks) until the field is removed, without logging it out; `oauth.pausedAccounts()` lists such accounts
+- Added `paused: true` for `auth.accountPolicies` entries: the matching stored OAuth account is left out of every credential read (selection, pins, rotation, usage reports, health checks) until the field is removed, without logging it out; `oauth.pausedAccounts()` lists such accounts ([#20311](https://github.com/can1357/oh-my-pi/pull/20311) by [@skipper019](https://github.com/skipper019))
 
 ### Fixed
 
