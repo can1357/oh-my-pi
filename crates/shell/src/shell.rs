@@ -1719,6 +1719,10 @@ async fn run_shell_command_segmented_chain(
 		.await?;
 
 		let exit = command_run.outcome.status;
+		// A cleanup `exit` ends the chain like any other exit-family stop.
+		// Its reported status is the trap's, so the leg decision it would
+		// have had comes from the status the segment's input produced.
+		let input_succeeded = command_run.outcome.chain_status.unwrap_or(exit) == 0;
 		previous_succeeded = exit == 0;
 		cancelled |= command_run.outcome.cancelled;
 
@@ -1774,9 +1778,17 @@ async fn run_shell_command_segmented_chain(
 				// cancel probe has no freeze and keeps the live table.
 				let parse = outcome.exit_parse.clone();
 				let commands = scope.options.commands.as_ref().map(RunLease::commands);
-				for pending in segments.filter(|pending| {
-					chain_segment_is_runnable(pending, !outcome.exited && previous_succeeded)
-				}) {
+				// A boundary cleanup exit reports the trap's status, not the
+				// command's, so a conditional successor is judged by the
+				// status the segment's input produced. Any other abort leaves
+				// no leg decision to judge: the run stopped mid-input.
+				let leg_succeeded = match outcome.chain_status {
+					Some(_) => input_succeeded,
+					None => !outcome.exited && previous_succeeded,
+				};
+				for pending in
+					segments.filter(|pending| chain_segment_is_runnable(pending, leg_succeeded))
+				{
 					// Judge the bytes submission would use: a suppressed
 					// segment runs as `{ … } && :`, and that wrapper is part
 					// of the input — a bare tail that parses away (an alias

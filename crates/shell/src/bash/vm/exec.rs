@@ -1407,13 +1407,26 @@ pub(super) fn capture_exit_report(
 		k.exit_report = Some((run.id, cause));
 		// The verdict waits for the run's pipeline children to settle
 		// ([`Shell::ended_by_exit_cut_short`]): freeze the walk's input
-		// now, before cleanup unwinds the frames it reads.
+		// now, before cleanup unwinds the frames it reads. A boundary
+		// cleanup exit judges the successor under the table the input
+		// ended with, frozen when its trap started — not the one the
+		// trap has since rewritten.
 		// Attribution is optional: a store read needed only by the walk
 		// must not fail the run, suppress cleanup, or abort other vprocs.
+		let frozen = k
+			.boundary_cleanup
+			.as_ref()
+			.filter(|(id, ..)| *id == run.id)
+			.and_then(|(_, _, parse)| parse.clone());
 		k.pending_cut_short = if cause == Some(ExitCause::Exit) {
 			super::exit_options::by_frame(k, vp, cx)
 				.ok()
-				.map(|options| (run.id, CutShortInput::of(vp, top, status, cleanup_runs, options)))
+				.map(|mut options| {
+					if let (Some(parse), Some(root)) = (frozen, options.first_mut()) {
+						root.parse = Some(parse);
+					}
+					(run.id, CutShortInput::of(vp, top, status, cleanup_runs, options))
+				})
 		} else {
 			None
 		};
@@ -1514,7 +1527,21 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 	};
 	if run.started && !run.exit_trap_started {
 		run.exit_trap_started = true;
+		// The input has ended: whatever an EXIT trap does now is cleanup, not
+		// the command the caller ran. Keep the status the input produced so a
+		// cleanup `exit` cannot reschedule the caller's next leg.
+		let (id, status, root) = (run.id, vp.status, vp.parent.is_none());
 		if start_trap(k, vp, cx, TrapKey::Exit) {
+			if root {
+				// The trap's body has not run yet: this is the grammar and
+				// alias table the input ended under, which a successor would
+				// have parsed under — not the one the trap goes on to rewrite.
+				let parse = super::exit_options::by_frame(k, vp, cx)
+					.ok()
+					.and_then(|options| options.into_iter().next())
+					.and_then(|options| options.parse);
+				k.boundary_cleanup = Some((id, status, parse));
+			}
 			return true;
 		}
 	}
@@ -1547,6 +1574,7 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 	if vp.parent.is_none() {
 		k.exit_report = None;
 		k.pending_cut_short = None;
+		k.boundary_cleanup = None;
 	}
 	if run.explicit_mode {
 		run.restore_mode = Some(vp.mode);

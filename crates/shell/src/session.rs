@@ -232,30 +232,34 @@ pub struct RunStdio {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunOutcome {
 	/// Exit status, bash semantics (127 not found, 128 + n for a signal).
-	pub status:     i32,
+	pub status:       i32,
 	/// The run was stopped by its cancellation token.
-	pub cancelled:  bool,
+	pub cancelled:    bool,
 	/// `exit` or `set -e` ended the command (rather than its end): a caller
 	/// running one command as several runs stops here, as bash would have.
-	pub exited:     bool,
+	pub exited:       bool,
 	/// In-process attribution; never serialized into a shell image or native
 	/// result.
-	pub exit_cause: Option<crate::bash::ExitCause>,
+	pub exit_cause:   Option<crate::bash::ExitCause>,
 	/// Of such an abort, whether commands were still left to run: a trailing
 	/// `exit` at the end of the input ends the command exactly where its end
 	/// would have, and is not reported as cutting it short.
-	pub cut_short:  bool,
+	pub cut_short:    bool,
 	/// The parse context frozen at the run's `exit`-family abort — `None`
 	/// when the run took no exit freeze. A caller judging text the abort
 	/// never reached by the parser's view
 	/// ([`Session::source_holds_command`]) passes it back, so the probe
 	/// classifies under the abort-time grammar and alias table, not the
 	/// live one the abort's EXIT cleanup may since have changed.
-	pub exit_parse: Option<Arc<ParseSnapshot>>,
+	pub exit_parse:   Option<Arc<ParseSnapshot>>,
 	/// The shell's working directory after the command.
-	pub cwd:        BString,
+	pub cwd:          BString,
 	/// `errexit` was on when the command ended.
-	pub errexit:    bool,
+	pub errexit:      bool,
+	/// The status the run's own input produced when an `exit` in its
+	/// boundary cleanup replaced it: chaining decides by that status, since
+	/// bash would not have run the cleanup there yet.
+	pub chain_status: Option<i32>,
 }
 
 /// Failure of a [`Session`] call.
@@ -994,9 +998,7 @@ impl Driver {
 			reset_errexit,
 		} = options;
 		if reset_errexit {
-			self
-				.shell
-				.set_root_option(&mut self.store, OptId::Errexit, false);
+			self.shell.set_root_option(&mut self.store, OptId::Errexit, false);
 		}
 		self.host.set_speech(speech);
 		self.host.set_pipe_tap(pipe_tap);
@@ -1091,6 +1093,7 @@ impl Driver {
 			exit_parse,
 			cwd,
 			errexit,
+			chain_status: self.shell.cleanup_chain_status(run),
 		});
 	}
 

@@ -532,6 +532,13 @@ pub struct Kernel {
 	/// its frames. `None` as a cause records a non-exit control transfer.
 	/// Not imaged; never drives execution.
 	pub exit_report:        Option<(RunId, Option<exec::ExitCause>)>,
+	/// The root run whose input had already ended when its own EXIT trap
+	/// started: the status the input produced and the parse context it
+	/// ended under, frozen before the trap's body ran. An `exit` raised
+	/// from that cleanup ends the shell but not the run's command, so a
+	/// segmented chain judges the successor by that status and under that
+	/// table, not the trap's. Not imaged.
+	pub boundary_cleanup:   Option<(RunId, i32, Option<Arc<ParseSnapshot>>)>,
 	/// Signal deaths of external programs replacing a submitted run, pending
 	/// its completion report; callouts do not survive frame restoration.
 	pub exec_signals:       HashMap<RunId, i32>,
@@ -661,6 +668,7 @@ impl Kernel {
 			exited: None,
 			pending_cut_short: None,
 			exit_report: None,
+			boundary_cleanup: None,
 			exec_signals: HashMap::new(),
 			reported_signal: None,
 			bangs: Vec::new(),
@@ -2901,6 +2909,20 @@ impl Shell {
 	fn cut_short_input(&self, run: RunId) -> Option<&exec::CutShortInput> {
 		let (id, cut) = self.k.pending_cut_short.as_ref()?;
 		(*id == run && self.k.exited == Some(run)).then_some(cut)
+	}
+
+	/// Of root run `run`, the status its input produced when a cleanup
+	/// `exit` at the run's own boundary replaced it: such an exit ends the
+	/// shell but must not reschedule a segmented chain's next leg, which
+	/// bash would have scheduled from the command's own status. `None`
+	/// when the run took no boundary cleanup exit.
+	pub fn cleanup_chain_status(&self, run: RunId) -> Option<i32> {
+		self
+			.k
+			.boundary_cleanup
+			.as_ref()
+			.filter(|(id, ..)| *id == run)
+			.map(|(_, status, _)| *status)
 	}
 
 	/// The first termination cause of `run`, excluding cleanup re-entries.

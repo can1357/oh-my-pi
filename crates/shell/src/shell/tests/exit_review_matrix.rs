@@ -157,6 +157,133 @@ async fn exit_classification_abort_freeze_carries_frame_parse_context() {
 	}
 }
 
+/// A boundary `EXIT` trap that itself exits runs after the segment's input
+/// ended; the engine still treats the exit as ending the logical call, so a
+/// runnable `&&` successor is reported instead of silently dropped. The leg
+/// decision is taken from the status the segment's input produced, not the
+/// trap's status.
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_boundary_trap_exit_reports_the_conditional_tail() {
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("minimizer directory");
+	for segmented in [false, true] {
+		let shell = Shell::new(segmented.then(|| ShellOptions {
+			minimizer: Some(printf_minimizer(&root.path().join("minimizer.toml"), None)),
+			..Default::default()
+		}));
+		let setup = "f() { trap 'exit 0' EXIT; :; }; g() { trap ':' EXIT; :; }";
+		assert_eq!(run_case(&shell, setup).await.0.exit_code, Some(0), "valid fixture");
+		let (control, control_out) = run_case(&shell, "g && printf hello").await;
+		assert_eq!(control_out, "hello", "segmented={segmented}: control reaches the tail");
+		assert_eq!(control.exit_code, Some(0));
+		assert!(!control.ended_by_exit, "segmented={segmented}: no abort in the control");
+		// The single command runs the tail before the trap fires at its end;
+		// the segmented chain stops at the cleanup exit and reports the tail
+		// it did not run. Neither is silent.
+		let (want_out, want_notice) = if segmented {
+			("", true)
+		} else {
+			("hello", false)
+		};
+		let (result, output) = run_case(&shell, "f && printf hello").await;
+		assert_eq!(output, want_out, "segmented={segmented}: tail execution");
+		assert_eq!(result.exit_code, Some(0));
+		assert_eq!(
+			result.ended_by_exit, want_notice,
+			"segmented={segmented}: a skipped conditional tail is never silent"
+		);
+		// `||` over a succeeding segment: bash runs nothing and nothing was
+		// skipped, so no notice.
+		let (result, output) = run_case(&shell, "f || printf never").await;
+		assert_eq!(output, "", "segmented={segmented}: a succeeding segment skips `||`");
+		assert_eq!(result.exit_code, Some(0));
+		assert!(!result.ended_by_exit, "segmented={segmented}: no work was skipped");
+		// A non-zero cleanup exit still reports the tail its own input status
+		// would have run (h succeeds), and keeps the trap's status.
+		let setup = "h() { trap 'exit 7' EXIT; :; }";
+		assert_eq!(run_case(&shell, setup).await.0.exit_code, Some(0), "valid fixture");
+		let (want_out, want_notice) = if segmented {
+			("", true)
+		} else {
+			("hello", false)
+		};
+		let (result, output) = run_case(&shell, "h && printf hello").await;
+		assert_eq!(output, want_out);
+		assert_eq!(result.exit_code, Some(7), "segmented={segmented}: the trap's status stands");
+		assert_eq!(
+			result.ended_by_exit, want_notice,
+			"segmented={segmented}: the leg is judged by the input status"
+		);
+		// No successor at all: the cleanup status ends the run with nothing
+		// owed.
+		let (result, output) = run_case(&shell, "h").await;
+		assert_eq!(output, "");
+		assert_eq!(result.exit_code, Some(7));
+		assert!(!result.ended_by_exit, "segmented={segmented}: completed input, no notice");
+		// A trap that runs while the input still has commands is a real abort
+		// and keeps its notice.
+		let (result, output) = run_case(&shell, "trap 'exit 7' EXIT; exit 0; printf never").await;
+		assert_eq!(output, "", "segmented={segmented}: the abort hides the rest");
+		assert!(
+			result.ended_by_exit,
+			"segmented={segmented}: a mid-input exit is still reported as cutting work short"
+		);
+		// A trap that rewrites the alias table must not hide the tail from
+		// the report: bash parses the successor under the table the input
+		// ended with, before the trap ran. (Last: the alias stays installed.)
+		let setup =
+			"shopt -s expand_aliases; a() { trap 'alias printf=\"# hidden\"; exit 0' EXIT; :; }";
+		assert_eq!(run_case(&shell, setup).await.0.exit_code, Some(0), "valid fixture");
+		let (want_out, want_notice) = if segmented {
+			("", true)
+		} else {
+			("hello", false)
+		};
+		let (result, output) = run_case(&shell, "a && printf hello").await;
+		assert_eq!(output, want_out);
+		assert_eq!(result.exit_code, Some(0));
+		assert_eq!(
+			result.ended_by_exit, want_notice,
+			"segmented={segmented}: judged under the input-end alias table"
+		);
+	}
+}
+
+/// The owed-segment probe judges the next physical run's text under the
+/// environment that run would install, while the alias table is the live one
+/// the next run actually reads. A frozen abort-time table must not override
+/// either the locale overlay or the cleanup's alias rewrite.
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_owed_segment_probe_uses_next_run_environment() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(Some(ShellOptions {
+		minimizer: Some(printf_minimizer(
+			&tempfile::tempdir()
+				.expect("minimizer directory")
+				.path()
+				.join("minimizer.toml"),
+			None,
+		)),
+		..Default::default()
+	}));
+	// The alias `git` expands to `中` + a backslash-newline join + `x`: under
+	// `C` the join makes the second alias hide the command, under Big5 the
+	// backslash belongs to a multibyte character and the command survives.
+	let setup = "unset LC_ALL LC_CTYPE LANG\nLANG=C\nshopt -s expand_aliases\nalias 中x='# \
+	             empty'\nalias git=\"中\\\\\nx\"";
+	assert_eq!(run_case(&shell, setup).await.0.exit_code, Some(0), "valid fixture");
+	for (body, expected_ended) in [
+		("f() { LANG=zh_TW.Big5; exit 0; }; f; git log -1", false),
+		("f() { LANG=zh_TW.Big5; return 0; }; f; git log -1", false),
+	] {
+		let (result, output) = run_case(&shell, body).await;
+		assert!(
+			!result.ended_by_exit || expected_ended,
+			"the next run installs LANG=C; its tail expands away: {body} / {output}"
+		);
+	}
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn exit_classification_initial_arithmetic_header_keeps_unentered_body() {
 	let _guard = shell_test_lock().lock().await;
