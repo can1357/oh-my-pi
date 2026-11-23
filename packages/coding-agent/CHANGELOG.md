@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add a declarative YAML workload runner for ordered tasks and templated inputs ([#19923](https://github.com/can1357/oh-my-pi/pull/19923) by [@Xytronix](https://github.com/Xytronix))
+
 ## [19.1.1] - 2026-11-23
 
 ### Breaking Changes
@@ -10,8 +14,6 @@
 
 ### Added
 
-- `/wt` (TUI, ACP, RPC and `worktree.onStart`) runs the new worktree's `post-checkout` hook as `git worktree add` does, with a spinner in the TUI, then loads the skills and commands it added; a failing hook keeps the worktree and shows a warning, and quitting while it runs keeps that worktree with a warning. In an ovnfs checkout only a `core.hooksPath` hook runs ([#20045](https://github.com/can1357/oh-my-pi/pull/20045) by [@Dangerboi](https://github.com/Dangerboi))
-- Add a declarative YAML workload runner for ordered tasks and templated inputs ([#19923](https://github.com/can1357/oh-my-pi/pull/19923) by [@Xytronix](https://github.com/Xytronix))
 - Added the opt-in `tree` status segment, which shows a session’s position in the session tree after a rewind or on a branch; in Tern, the segment opens `/tree` when clicked.
 - Providers routed through an auth gateway (`transport: pi-native`) now list the gateway's models, so models the gateway discovered at runtime (such as new Codex models) can be selected without declaring them in `models.yml`, and models the gateway cannot route are hidden.
 - Added `computer.takeover` as the replacement for `computer.backgroundFallback`, with `fallback`, `foreground`, and `always` modes for controlling when the computer tool takes over the foreground window. Existing fallback behavior is preserved by default.
