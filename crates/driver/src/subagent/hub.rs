@@ -586,6 +586,8 @@ async fn wait(
 							"status": job.status,
 							"output": job.output,
 							"error": job.error,
+							"executionResult": job.execution_result,
+							"executionFailure": job.execution_failure.as_ref().map(|e| e.to_string()),
 						}
 					})
 					.to_string(),
