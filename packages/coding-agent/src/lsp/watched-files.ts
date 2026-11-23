@@ -22,7 +22,7 @@ import { DirectoryChangeAction, type DirectoryChanges, DirectoryWatcher } from "
 import { hasFsCode, logger } from "@oh-my-pi/pi-utils";
 import { mapWithConcurrencyLimit } from "../task/parallel";
 import { FileChangeType, type FileEvent } from "./types";
-import { fileToUri, uriToFile } from "./utils";
+import { fileToUri, uriToFile } from "./uri";
 
 /** Method a server registers to have the client watch files for it. */
 export const WATCHED_FILES_METHOD = "workspace/didChangeWatchedFiles";

@@ -2408,6 +2408,8 @@ export interface ProviderModelConfig {
 	premiumMultiplier?: number;
 	/** Maximum context window size in tokens. */
 	contextWindow: number;
+	/** Optional larger window selected by the extended-context policy. */
+	maxContextWindow?: number;
 	/** Maximum output tokens. */
 	maxTokens: number;
 	/** WebSocket preference within catalog policy; explicit false disables transport selection. */
