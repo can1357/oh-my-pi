@@ -63,6 +63,34 @@ describe("Editor vim mode", () => {
 			expect(editor.getText()).toBe("abc");
 		});
 
+		// Kitty and modifyOtherKeys send Ctrl+[ as a modified key, not as the 0x1b byte, so the key
+		// reaches the editor named `ctrl+[` rather than `escape`.
+		it.each([
+			["Kitty", "\x1b[91;5u"],
+			["modifyOtherKeys", "\x1b[27;5;91~"],
+		])("treats Ctrl+[ as Escape under %s and leaves insert mode", (_protocol, ctrlBracket) => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setVimMode(true);
+			editor.handleInput("abc");
+			editor.handleInput(ctrlBracket);
+			expect(editor.vimMode).toBe("normal");
+			editor.handleInput("z");
+			expect(editor.getText()).toBe("abc");
+		});
+
+		it("cancels Visual mode and a half-typed operator on Ctrl+[", () => {
+			const editor = vimEditor("abc");
+			editor.handleInput("v");
+			expect(editor.vimMode).toBe("visual");
+			editor.handleInput("\x1b[91;5u");
+			expect(editor.vimMode).toBe("normal");
+			editor.handleInput("d");
+			expect(editor.vimPending).toBe("d");
+			editor.handleInput("\x1b[27;5;91~");
+			expect(editor.vimPending).toBe("");
+			expect(editor.getText()).toBe("abc");
+		});
+
 		it("hands Escape back to the app once normal mode is quiet", () => {
 			const editor = vimEditor("abc");
 			expect(editor.vimMode).toBe("normal");

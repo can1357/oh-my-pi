@@ -2600,7 +2600,8 @@ export class Editor implements Component, Focusable {
 		// cancelling a half-typed operator. A quiet Normal mode hands it back to the host.
 		// An open autocomplete popup still gets the first Escape though — dismissing it is what
 		// the user means, and a second Escape then switches modes.
-		if (canonical === "escape") {
+		// Kitty and modifyOtherKeys send Ctrl+[ as a modified key, which parses as `ctrl+[`, not `escape`.
+		if (canonical === "escape" || canonical === "ctrl+[") {
 			return this.isShowingAutocomplete() ? false : this.#runVimKey("escape", vim);
 		}
 		if (vim.mode === "insert") return false;
