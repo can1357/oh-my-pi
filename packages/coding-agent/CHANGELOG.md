@@ -50,7 +50,7 @@
 ### Fixed
 
 - Selective commits now leave HEAD and staging unchanged if the shared index stays locked. Retry once the lock is released ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
-- Fixed fallback chains switching onto an entry whose fetched usage shows it exhausted (or, under `retry.usageAwareFallback`, inside its reserve) after a request fails; the walk now checks usage health per entry as the usage preflight does, and a failed usage fetch still lets the entry through
+- Fallback chains no longer switch to an entry whose usage shows it exhausted after a request fails
 
 ## [19.1.1] - 2026-11-23
 

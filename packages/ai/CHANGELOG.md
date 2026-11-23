@@ -4,11 +4,11 @@
 
 ### Added
 
-- Added a `bifrost` usage provider: it reads the calling virtual key's budgets and rate limits from the gateway's self-service `/api/governance/virtual-keys/quota` route, scopes provider-config and model-config limits to the models routed through them, and scopes rate-limit backoff to the model's route
+- Added Bifrost virtual-key budget and rate-limit usage reporting
 
 ### Fixed
 
-- `AuthStorage.health.model` now evaluates a static runtime, config, or env key for a provider whose usage adapter reads the request key (`usesRequestKey`, e.g. Bifrost) as one account (`credentialId` `STATIC_KEY_CREDENTIAL_ID`) instead of always reporting `unknown`, so usage-aware fallback can see a config-keyed gateway out of quota
+- Usage-aware fallback now sees when a config- or env-keyed Bifrost or LiteLLM gateway key is out of quota
 - GitHub Copilot Gemini models no longer fail every request with `400 invalid request body` when an MCP tool schema declares a `type` array (e.g. `["string", "null"]`); tool schemas are rewritten into Gemini's schema dialect ([#20198](https://github.com/can1357/oh-my-pi/issues/20198))
 - An openai-completions stream that gets HTTP 500 back sends six requests, not twelve: the provider-error replay no longer re-runs a status the transport already retried ([#19729](https://github.com/can1357/oh-my-pi/issues/19729), [#20215](https://github.com/can1357/oh-my-pi/pull/20215) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed `omp usage` showing no data for Synthetic’s weekly-only plans; it now shows weekly credit usage and the next regeneration tick ([#20251](https://github.com/can1357/oh-my-pi/pull/20251) by [@dagurval](https://github.com/dagurval))
