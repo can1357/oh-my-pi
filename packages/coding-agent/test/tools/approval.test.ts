@@ -884,13 +884,17 @@ describe("tool-owned dynamic approval declarations", () => {
 			expect(bashApproval(command, settingsOverrides)).toEqual({ tier: "write", policy: "allow" });
 		}
 
-		// Genuine short-option clusters containing -c/-e still block allow rules when paired with shell control chars.
+		// Genuine short-option clusters containing -c/-e still block a matching allow rule when paired with shell control chars.
+		const permissiveGitOverrides = {
+			"bash.allowCompoundCommands": true,
+			"bash.patterns": [{ match: "git *", approval: "allow" }],
+		};
 		for (const command of [
 			"git -c alias.x='!touch /tmp/pwn; printf ok' x",
 			"git -ec alias.x='!touch /tmp/pwn; printf ok' x",
 			"git add -A && git -c alias.x='!touch /tmp/pwn; printf ok' x",
 		]) {
-			expect(bashApproval(command, settingsOverrides)).toBe("exec");
+			expect(bashApproval(command, permissiveGitOverrides)).toBe("exec");
 		}
 	});
 
