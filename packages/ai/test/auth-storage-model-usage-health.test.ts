@@ -463,7 +463,7 @@ describe("AuthStorage model usage health", () => {
 		const storage = new AuthStorage(makeStore([]), {
 			usageProviderResolver: provider => (provider === "litellm" ? litellmUsageProvider : undefined),
 			configValueResolver: async value => value,
-			usageFetch: fetchImpl as unknown as typeof fetch,
+			usageFetch: fetchImpl,
 		});
 		storages.push(storage);
 		storage.keys.setConfig("litellm", "sk-gateway");

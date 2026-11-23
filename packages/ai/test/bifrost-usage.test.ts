@@ -189,7 +189,7 @@ describe("Bifrost model usage health for a config key", () => {
 					provider_configs: [{ provider: "openrouter", budgets: [budget("route", 5, 5)] }],
 					budgets: [budget("key", 1, 10)],
 				}),
-			}) as unknown as typeof fetch,
+			}),
 		});
 		storages.push(storage);
 		storage.keys.setConfig("bifrost", "sk-bf-test");
