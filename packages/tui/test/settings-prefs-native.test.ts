@@ -29,6 +29,12 @@ const ENTRIES: SettingsDisplayEntry[] = [
 		ui: { tab: "appearance", group: "Status Line", label: "Risky", description: "d", warning: "Can get you flagged" },
 	},
 	{
+		path: "tracker.backend",
+		type: "string",
+		defaultValue: "native",
+		ui: { tab: "tools", group: "Todos", label: "Backend", description: "Where the list goes", options: "runtime" },
+	},
+	{
 		path: "compaction.thresholdPercent",
 		type: "number",
 		defaultValue: -1,
@@ -121,6 +127,19 @@ function harness(initial: Record<string, unknown> = {}): Harness {
 			availableThinkingLevels: [],
 			thinkingLevel: undefined,
 			availableThemes: ["dark", "light", "titanium"],
+			runtimeOptions: new Map([
+				[
+					"tracker.backend",
+					[
+						{ value: "native", label: "Native" },
+						{
+							value: "ext",
+							label: "Ext\x1b[31m Backend\x1b]0;title\x07",
+							description: "line one\nline\x1b[2J two",
+						},
+					],
+				],
+			]),
 			providers: [],
 		},
 		{
@@ -194,6 +213,35 @@ describe("settings as a native prefs page", () => {
 		});
 		expect(row(props, "display.risky").warning).toBe("Can get you flagged");
 		expect(props.focus).toBe("theme.dark");
+	});
+
+	it("offers the host's runtime choices by value and strips control sequences from their text", () => {
+		const { selector, changes } = harness({ "tracker.backend": "ext" });
+		send(selector, { type: "action", key: "", act: "page", value: "tools", mods: [] });
+		const control = row(prefs(selector).props, "tracker.backend").control;
+		if (control.k !== "choice") throw new Error(`expected a choice control, got ${control.k}`);
+
+		expect(control.value).toBe("ext");
+		expect(control.options).toEqual([
+			{ value: "native", label: "Native", detail: undefined },
+			{ value: "ext", label: "Ext Backend", detail: "line one line two" },
+		]);
+		send(selector, { type: "change", key: "", item: "tracker.backend", value: "native" });
+		expect(changes).toEqual([["tracker.backend", "native"]]);
+	});
+
+	it("shows a stored runtime value that no choice offers without its control sequences", () => {
+		// An id whose extension is gone since it was picked, or one typed into the settings file.
+		const { selector } = harness({ "tracker.backend": "gone\x1b]0;title\x07\x1b[2J" });
+		send(selector, { type: "action", key: "", act: "page", value: "tools", mods: [] });
+
+		const { props } = prefs(selector);
+		const rendered = selector.render(120).join("\n");
+
+		expect(row(props, "tracker.backend").control).toMatchObject({ k: "choice", value: "gone" });
+		expect(Bun.stripANSI(rendered)).toContain("gone");
+		expect(rendered).not.toContain("\x1b]0;title");
+		expect(rendered).not.toContain("\x1b[2J");
 	});
 
 	it("puts the status-line preview after its section on Appearance only", () => {
