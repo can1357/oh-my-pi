@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Native shell Rust API now stores indexed variables in `IndexedArray` rather than `Vec`; construct `VarValue::Indexed` with `items.into()`.
+
 ### Added
 
 - Added the opt-in `tree` status segment: after a rewind or on a branch it shows where the session sits in its tree (`2/3 · 3 ahead`); the terminal names `/tree` beside it, and clicking it in Tern opens `/tree`
@@ -17,6 +21,7 @@
 
 ### Fixed
 
+- Native shell indexed-array appends no longer copy every existing element when background jobs hold forked snapshots ([#20232](https://github.com/can1357/oh-my-pi/issues/20232)).
 - Magic edit can now search and read the current draft, retry failed replacements without losing successful ones, and check syntax before writing; apply models that write their tool calls as text, such as Gemma 3, work too, and small apply models are shown where a mistyped replacement's text actually is instead of retrying it blindly.
 - An extension that re-registers `bash` no longer turns tool commands off for the whole session, which pushed every MCP tool back into the top-level definitions of each request. A command line made only of tool commands now runs on the native tool, so a replacement that never delegates — a remote or sandboxed shell — serves the mounted tools too, while every other command line stays its own ([#18339](https://github.com/can1357/oh-my-pi/issues/18339), [#20174](https://github.com/can1357/oh-my-pi/pull/20174) by [@kaluli123123](https://github.com/kaluli123123))
 - `tab.scroll({ direction: "down", amount: 600 })` and other objects that name no pixel delta are rejected with the helper's signature and the equivalent call (`tab.scroll(0, 600)`) instead of silently scrolling nothing; the browser docs point at the `TabApi` interface in `tab-worker.ts` instead of a declaration file that no longer exists ([#20171](https://github.com/can1357/oh-my-pi/pull/20171) by [@kaluli123123](https://github.com/kaluli123123))
