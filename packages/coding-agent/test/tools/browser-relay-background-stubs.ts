@@ -32,6 +32,8 @@ export const probe = {
 	injected: [] as Array<{ tabId: number; files: string[] }>,
 	tabs: new Map<number, StubTab>(),
 	zoom: 1,
+	/** `chrome.runtime.lastError` while a native port's disconnect listeners run. */
+	lastError: undefined as { message: string } | undefined,
 };
 
 /** Tabs whose page runs a content script that answers `chrome.tabs.sendMessage`. */
@@ -67,10 +69,12 @@ export class FakeNativePort {
 	hostSays(message: unknown): void {
 		for (const listener of this.#messageListeners) listener(message);
 	}
-	/** The host process exits: Chrome disconnects the port. */
-	hostExits(): void {
+	/** The host process exits, or the browser refuses to start it with `lastError`: Chrome disconnects the port. */
+	hostExits(lastError?: string): void {
 		this.disconnected = true;
+		probe.lastError = lastError === undefined ? undefined : { message: lastError };
 		for (const listener of this.#disconnectListeners) listener();
+		probe.lastError = undefined;
 	}
 }
 
@@ -140,7 +144,9 @@ const globals = globalThis as Record<string, unknown>;
 globals.chrome = {
 	runtime: {
 		id: "a".repeat(32),
-		lastError: undefined,
+		get lastError() {
+			return probe.lastError;
+		},
 		ContextType: { OFFSCREEN_DOCUMENT: "OFFSCREEN_DOCUMENT" },
 		reload() {},
 		getURL: (path: string) => `chrome-extension://${"a".repeat(32)}/${path}`,

@@ -83,6 +83,7 @@ import {
 } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../../tools";
 import { AskTool } from "../../tools/ask";
+import { cfgTodoBackend, NATIVE_TODO_BACKEND } from "../../tools/settings";
 import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import { sanitizeDisplayWarnings, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolAbortError } from "../../tools/tool-errors";
@@ -114,6 +115,7 @@ import { type ResetUsageAccount, ResetUsageSelectorComponent } from "@oh-my-pi/p
 import { type BranchVariantPath, RewindSelectorComponent } from "@oh-my-pi/pi-tui/overlays/rewind-selector";
 import { SessionAccountSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-account-selector";
 import { SessionSelectorComponent, type SessionSelectorOptions } from "@oh-my-pi/pi-tui/overlays/session-selector";
+import type { SubmenuOption } from "@oh-my-pi/pi-tui/overlays/settings-defs";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
@@ -306,7 +308,11 @@ export class SelectorController {
 	showSettingsSelector(): void {
 		if (this.#focusOpenMenu("settings")) return;
 		const menu = this.#claimMenu("settings");
-		getAvailableThemes()
+		// Startup-deferred extensions bind first, so the todo backend row lists their backends.
+		const themes = this.ctx.session.hasPendingDeferredExtensions
+			? Promise.all([getAvailableThemes(), this.ctx.session.loadDeferredExtensions()]).then(([names]) => names)
+			: getAvailableThemes();
+		themes
 			.then(availableThemes => {
 				// Fullscreen settings editor on the alternate screen: the overlay
 				// enables mouse tracking (click/hover/wheel) for its lifetime and
@@ -322,6 +328,7 @@ export class SelectorController {
 						availableThinkingLevels: [...this.ctx.session.getAvailableThinkingLevels()],
 						thinkingLevel: this.ctx.session.thinkingLevel,
 						availableThemes,
+						runtimeOptions: new Map([[cfgTodoBackend.id, this.#todoBackendOptions()]]),
 						providers: [...new Set(this.ctx.session.getAvailableModels().map(model => model.provider))].sort(
 							(a, b) => a.localeCompare(b),
 						),
@@ -333,7 +340,19 @@ export class SelectorController {
 						composerPreviewStatus: this.ctx.statusLine,
 					},
 					{
-						onChange: (id, value) => this.handleSettingChange(id, value),
+						onChange: (id, value) => {
+							this.handleSettingChange(id, value);
+							// A backend offered here is registered, so it gets the current list at once. An approved
+							// `cfg://` write can name one whose extension is still loading, like a config reload:
+							// those get the list with the next change. The effective value decides: a project or
+							// runtime layer can keep another backend selected over the global one written here.
+							if (id === cfgTodoBackend.id) {
+								const backend = cfgTodoBackend.get(this.ctx.session.settings);
+								if (backend !== NATIVE_TODO_BACKEND) {
+									this.ctx.session.extensionRunner?.syncTodoBackend(backend, this.ctx.session.getTodoPhases());
+								}
+							}
+						},
 						onThemePreview: async themeName => {
 							const result = await previewTheme(themeName);
 							if (result.success) {
@@ -703,6 +722,17 @@ export class SelectorController {
 			throw error;
 		}
 		this.#mountMenu(menu, hub, () => this.#showFullscreenMenu(hub));
+	}
+
+	/** `todo.backend` choices: `Native`, then every backend an enabled extension registered. */
+	#todoBackendOptions(): SubmenuOption[] {
+		const options: SubmenuOption[] = [
+			{ value: NATIVE_TODO_BACKEND, label: "Native", description: "Keep the todo list in the session only" },
+		];
+		for (const [id, { definition }] of this.ctx.session.extensionRunner?.getTodoBackends() ?? []) {
+			options.push({ value: id, label: definition.label ?? id, description: definition.description });
+		}
+		return options;
 	}
 
 	/**

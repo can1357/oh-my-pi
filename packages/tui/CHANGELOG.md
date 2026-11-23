@@ -2,18 +2,26 @@
 
 ## [Unreleased]
 
+## [19.1.1] - 2026-11-23
+
 ### Added
 
-- Added `AGENT_KILL_LABEL`, `InterruptReason` and `isInterruptReason` so hosts can tell a parent agent's kill apart from a user interrupt ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
+- Added host-provided runtime choices for settings menus through `SettingsRuntimeContext.runtimeOptions`, while preserving built-in choices for thinking levels, themes, and composer shapes.
+- Added interrupt metadata so hosts can distinguish a parent-agent termination from a user-initiated interrupt.
 
 ### Fixed
 
-- `prewalkWouldBeNoop` no longer skips a handoff when only the model's upstream pin changes ([#19664](https://github.com/can1357/oh-my-pi/pull/19664) by [@taibenvenuti](https://github.com/taibenvenuti)).
-- Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
-- Fixed `<svg>` pictures blinking in ask forms whose questions overflow the panel ([#20017](https://github.com/can1357/oh-my-pi/pull/20017) by [@jaredlyon](https://github.com/jaredlyon))
-- Fixed the status line's `time_spent` readout freezing within a wall-clock second while a turn is active; the displayed tenths now advance at their own visible granularity ([#20064](https://github.com/can1357/oh-my-pi/pull/20064) by [@jchanghong023](https://github.com/jchanghong023))
-- Fixed Enter pressed again on a model row just assigned to a role removing that role and falling back to the default role's model ([#12310](https://github.com/can1357/oh-my-pi/issues/12310), [#19986](https://github.com/can1357/oh-my-pi/pull/19986) by [@JamieJ5926](https://github.com/JamieJ5926))
-- The quick model picker (alt+p) in a session limited by `--models` or `enabledModels` now lists models the catalog gained since the session started, as the unlimited picker does ([#19878](https://github.com/can1357/oh-my-pi/pull/19878) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed handoffs being skipped when only the model’s upstream pin changes.
+- Fixed the `/usage` activity calendar retaining its history when a refresh fails, while indicating that the data is not synced.
+- Fixed SVG images blinking in ask forms when questions extend beyond the panel.
+- Fixed the active-turn status line so elapsed time updates smoothly at tenths of a second.
+- Fixed assigning a model to a role when pressing Enter again on the selected model, which could incorrectly remove the role.
+- Updated the quick model picker (`Alt+P`) to include models added to the catalog after a session began, even when the session is restricted by `--models` or `enabledModels`.
+- Fixed images and other path-based files appearing as unavailable in Tern when the TUI and Tern run on different machines or in local sessions without Tern’s shared file directory.
+
+### Removed
+
+- Removed `OmfgPanelComponent.markSaved` and the `saved` panel state; the `/omfg` panel now closes after a rule is saved.
 
 ## [19.1.0] - 2026-11-21
 
