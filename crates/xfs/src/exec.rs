@@ -129,6 +129,21 @@ where
 		tasks.push(
 			tokio::spawn(async move {
 				let mut state = Some(state);
+				// flume 0.12's `recv_async` can lose a wakeup: a worker woken
+				// for a job another worker took misses a job sent while it
+				// re-registers to wait (zesterer/flume#177). This pool's jobs
+				// do not wait on one another, so here that delays the missed
+				// job and never strands it. A receive takes a queued job
+				// before it waits, so the next worker to come back takes it,
+				// and the next send wakes the waiting worker. The worker
+				// that took the job this one was woken for comes back after
+				// it, unless that job panicked or the consumer is gone. If
+				// every other job panicked, the consumer reaches a panicked
+				// output before the missed job's turn and resumes the panic,
+				// which drops `Tasks` and aborts every task.
+				// The queue ends by closing (the feeder returns and drops
+				// `jobs`), and flume rechecks for a closed queue after a worker
+				// registers to wait, so the end is never missed.
 				while let Ok(Job { seq, item, permit }) = queue.recv_async().await {
 					let current = state
 						.take()

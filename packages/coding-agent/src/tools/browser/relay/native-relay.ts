@@ -12,10 +12,9 @@
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
-import type { FromNativeHost, ToNativeHost } from "../../../../../browser-relay/extension/messages";
 import type { RelaySocket } from "./bridge";
 import { publishRelayEndpoint } from "./discovery";
-import { isOlderOmpVersion } from "./protocol";
+import { type FromNativeHost, isOlderOmpVersion, type ToNativeHost } from "./protocol";
 import { type RelayServer, startRelayServer } from "./server";
 
 /** First pause before electing again when neither leading nor following worked. */

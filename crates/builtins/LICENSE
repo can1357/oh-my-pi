@@ -266,7 +266,7 @@ SUCH DAMAGE.
 
 ================================================================================
 Original work in this crate (`src/host.rs`, `src/proc_snapshot.rs`,
-`src/proc_match.rs`, `cmp`, `diff`, `fd`, `grep`/`rg`, `which`, `ps`, `top`,
+`src/proc_match.rs`, `cmp`, `column`, `diff`, `fd`, `grep`/`rg`, `which`, `ps`, `top`,
 `pgrep`, `pkill`, `pidwait`, `sleep`, `timeout`, `nohup`, `lsof`, `tar`,
 `shasum`, `md5`, `strings`, and the moreutils-inspired `ts`, `sponge`,
 `ifne`, `isutf8`, `combine`, `errno`) is MIT-licensed under the workspace
