@@ -487,6 +487,8 @@ behavior {
 		model "kimi-k3"
 		model "moonshotai/kimi-k3"
 		model "k3"
+		model "zai/glm-5.4"
+		model "glm-5.4"
 		model "zai/glm-5.3"
 		model "glm-5.3"
 		model "anthropic/claude-opus-5-5"
@@ -542,7 +544,11 @@ behavior {
 	// Pinned: TypeSafe's `jev-latest` alias moves only after a release ships (jev-1.14.0 shipped 2026-10-14; the alias moved 2026-10-22).
 	role-defaults "judge" {
 		model "typesafe/jev-1.14.0"
+		// OpenCode's limited-time free Jev, for Go and Zen logins.
+		model "opencode-go/jev-1.13-free"
+		model "opencode-zen/jev-1.13-free"
 		model "openrouter/typesafe/jev-1.14"
+		model "opencode-zen/jev-1.14"
 		model "@tiny"
 		model "@smol"
 		model "@default"
