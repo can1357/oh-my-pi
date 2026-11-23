@@ -34,6 +34,7 @@ import {
 	setTerminalGlyphProtocol,
 	TERMINAL,
 } from "./terminal-capabilities";
+import { isInsideHerdrDesktopTerminal } from "./multiplexers/herdr";
 import { tmuxMultiplexer } from "./multiplexers/tmux";
 import type { TerminalMultiplexerBackgroundColorCache } from "./multiplexers/types";
 import { classifyTerminalMultiplexerModule, terminalMultiplexerSessions } from "./terminal-multiplexer";
@@ -63,6 +64,12 @@ const CSI_INTRODUCER_GRACE_MS = 150;
  * after it, `t` is a real keystroke again.
  */
 const INBAND_TERMINATOR_GRACE_MS = 300;
+
+/**
+ * How long, in a Herdr desktop terminal, an applied DEC 2048 report that
+ * disagrees with the pty size waits for the SIGWINCH that makes them agree.
+ */
+const HERDR_INBAND_SETTLE_MS = 500;
 
 /**
  * How long a relayed OSC/DCS/APC string waits for its terminator. Far longer
@@ -945,6 +952,8 @@ export class ProcessTerminal implements Terminal {
 	#pendingInBandTerminatorAt = 0;
 	#reportedColumns?: number;
 	#reportedRows?: number;
+	/** Herdr only: drops an applied report the pty size has not come to match. */
+	#inBandSettleTimer?: Timer;
 	#mode2031DebounceTimer?: Timer;
 	#windowsTerminalAppearancePollTimer?: Timer;
 	#progressActive = false;
@@ -2443,6 +2452,40 @@ export class ProcessTerminal implements Terminal {
 		if (rows > 0 && cols > 0 && (rows !== previousRows || cols !== previousColumns)) {
 			this.#resizeHandler?.();
 		}
+		this.#armHerdrInBandSettleCheck();
+	}
+
+	/**
+	 * In a Herdr desktop terminal, drop an applied report once it has disagreed
+	 * with the pty size for {@link HERDR_INBAND_SETTLE_MS}. Herdr reports the
+	 * smaller size of a peek but sends no report when the terminal returns to
+	 * its pane. Read after that return's SIGWINCH (or with the peek's SIGWINCH
+	 * coalesced away while the event loop was busy), the peek report pinned
+	 * rows/columns to the peek until the next OS resize. Herdr keeps the pty
+	 * size in step with the pane, so the pty wins there; elsewhere in-band stays
+	 * authoritative, as it can be more accurate than ioctl under multiplexers.
+	 * A multiplexer that owns the grid inside the Herdr terminal (tmux, screen,
+	 * zellij, including one known only by TERM) owns its own pty, so it keeps the
+	 * in-band precedence. The report's cell pixel size is kept.
+	 */
+	#armHerdrInBandSettleCheck(): void {
+		clearTimeout(this.#inBandSettleTimer);
+		this.#inBandSettleTimer = undefined;
+		if (!isInsideHerdrDesktopTerminal() || isInsideTerminalMultiplexer()) return;
+		const osRows = process.stdout.rows;
+		const osColumns = process.stdout.columns;
+		const disagrees =
+			(this.#reportedRows !== undefined && osRows > 0 && this.#reportedRows !== osRows) ||
+			(this.#reportedColumns !== undefined && osColumns > 0 && this.#reportedColumns !== osColumns);
+		if (!disagrees) return;
+		this.#inBandSettleTimer = setTimeout(() => {
+			this.#inBandSettleTimer = undefined;
+			const rows = this.rows;
+			const columns = this.columns;
+			this.#reconcileInBandGeometryOnResize();
+			if (this.rows !== rows || this.columns !== columns) this.#resizeHandler?.();
+		}, HERDR_INBAND_SETTLE_MS);
+		this.#inBandSettleTimer.unref?.();
 	}
 
 	/**
@@ -2665,6 +2708,8 @@ export class ProcessTerminal implements Terminal {
 		this.#xtermScrollToBottomRestoreModes.clear();
 		this.#reportedColumns = undefined;
 		this.#reportedRows = undefined;
+		clearTimeout(this.#inBandSettleTimer);
+		this.#inBandSettleTimer = undefined;
 
 		// Disable Kitty keyboard protocol if not already done by drainInput()
 		if (this.#kittyProtocolActive) {
