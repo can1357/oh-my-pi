@@ -7,6 +7,12 @@
 - Added an opt-in tool guard (`tools.guard.enabled`) that asks the judge model about risky tool calls and refuses those the user did not ask for ([#19903](https://github.com/can1357/oh-my-pi/pull/19903) by [@Xytronix](https://github.com/Xytronix))
 - On Linux the tool guard also refuses heavy work started while the host is strained ([#19903](https://github.com/can1357/oh-my-pi/pull/19903) by [@Xytronix](https://github.com/Xytronix))
 - Added pre-execution TTSR gate rules: a `question` rule with `gate: before` is judged on each in-scope tool call before it runs and a yes refuses it; `onJudgeError` covers judge failures, and judged-rule requests count toward the cost cap ([#19893](https://github.com/can1357/oh-my-pi/pull/19893) by [@Xytronix](https://github.com/Xytronix))
+- Added `discovery.type: openrouter` for `models.yml` providers that front OpenRouter under their own URL and key: their model list now comes from OpenRouter's public catalog, and requests follow OpenRouter's request format.
+
+### Fixed
+
+- `!command` values in `models.yml` (`apiKey`, `headers`) can now read variables defined in `~/.env` or `~/.omp/agent/.env` on macOS and Windows; previously the command saw an empty value.
+- The bash tool's visualization now draws a script run by `bash file.sh`, `source`, or `eval "$var"` as one block under the command that ran it, instead of repeating a “built at runtime” header above every line of the script.
 
 ## [19.1.1] - 2026-11-23
 

@@ -150,6 +150,7 @@ impl VizSource for Fixture {
 			projection: 0,
 			nodes:      &unit.nodes,
 			callout:    false,
+			runner:     None,
 		})
 	}
 
