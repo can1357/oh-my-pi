@@ -79,12 +79,18 @@ export interface FileState {
 	mode: string;
 }
 
+/** A blob and its git mode on one side of a whole-file change. */
+export interface WholeFileState {
+	id: string;
+	mode: string;
+}
+
 /** Content to commit for one path; produced by {@link Draft.selection}. */
 export type SelectedChange =
 	/** HEAD's state (`null`: absent) → the selected state (`null`: deleted). */
 	| { kind: "text"; path: string; before: FileState | null; after: FileState | null }
-	/** Committed as its current worktree state; `added` when HEAD lacks the path. */
-	| { kind: "whole"; path: string; added: boolean };
+	/** Frozen blobs captured at draft time (`null`: absent). */
+	| { kind: "whole"; path: string; before: WholeFileState | null; after: WholeFileState | null };
 
 /**
  * Why a file has no line attribution and is committed whole: binary, non-UTF-8, or oversized
@@ -100,7 +106,7 @@ export interface SelectionTarget {
 	grep?: string;
 }
 
-interface FileChange {
+interface FileChangeBase {
 	path: string;
 	head: string | null;
 	work: string | null;
@@ -108,8 +114,15 @@ interface FileChange {
 	headMode: string | null;
 	/** Git mode in the worktree; `null` when the file is deleted. */
 	mode: string | null;
-	/** Set exactly when the change has no line attribution: the file selects whole. */
-	whole?: WholeReason;
+	/** Line counts of every change op; zero for a whole-file change. */
+	counts: Counts;
+	selected: Set<number>;
+	wholeSelected: boolean;
+	/** Agents with recorded edits of this path. */
+	editors: string[];
+}
+
+interface TextFileChange extends FileChangeBase {
 	/**
 	 * Line attribution of the content change, kept only when recorded edits shaped it. A file no
 	 * usable record explains is one unrecorded step from `head` to `work`, which
@@ -117,14 +130,24 @@ interface FileChange {
 	 * per-line objects cost tens of times the files' size.
 	 */
 	attribution?: Attribution;
-	/** Line counts of every change op; zero for a whole-file change. */
-	counts: Counts;
 	classification?: Classification;
-	selected: Set<number>;
-	wholeSelected: boolean;
-	/** Agents with recorded edits of this path. */
-	editors: string[];
+	whole?: never;
 }
+
+interface WholeFileChange extends FileChangeBase {
+	head: null;
+	work: null;
+	/** Set exactly for a whole-file change: frozen object ids and the display reason. */
+	whole: {
+		reason: WholeReason;
+		before: WholeFileState | null;
+		after: WholeFileState | null;
+	};
+	attribution?: never;
+	classification?: never;
+}
+
+type FileChange = TextFileChange | WholeFileChange;
 
 /**
  * Content of `bytes` as text, or `undefined` when it must be handled as an opaque whole file.
@@ -236,7 +259,7 @@ interface PendingFile {
 	/** Contents to convert, all under the file's path. */
 	inputs: Array<{ path: string; data: Uint8Array }>;
 	/** The change once `cleaned` holds `inputs` in their git form, in order; `undefined` when nothing changed. */
-	finish(cleaned: readonly Uint8Array[]): FileChange | undefined;
+	finish(cleaned: readonly Uint8Array[]): Promise<FileChange | undefined>;
 }
 
 /**
@@ -304,6 +327,7 @@ export async function createDraft(source: DraftSource): Promise<Draft> {
 			entry.path,
 			byPath.get(entry.path) ?? [],
 			source.journal,
+			source.signal,
 		);
 	for (let start = 0; start < dirty.length; start += READ_CONCURRENCY) {
 		source.signal?.throwIfAborted();
@@ -316,12 +340,16 @@ export async function createDraft(source: DraftSource): Promise<Draft> {
 		const inputs = pending.flatMap(file => file.inputs);
 		const cleaned = inputs.length > 0 ? await repo.worktreeToGit(inputs, source.signal) : [];
 		let offset = 0;
-		results.forEach((result, index) => {
+		const finished = await Promise.all(
+			results.map(result =>
+				result && typeof result === "object" && "finish" in result
+					? result.finish(cleaned.slice(offset, (offset += result.inputs.length)))
+					: result,
+			),
+		);
+		finished.forEach((result, index) => {
 			if (result === "skip") skipped.push(chunk[index].path);
-			else if (result && "finish" in result) {
-				const change = result.finish(cleaned.slice(offset, (offset += result.inputs.length)));
-				if (change) files.push(change);
-			} else if (result) files.push(result);
+			else if (result) files.push(result);
 		});
 	}
 	files.sort((a, b) => a.path.localeCompare(b.path));
@@ -414,6 +442,7 @@ async function loadFile(
 	file: string,
 	records: readonly ChangeRecord[],
 	journal: ChangeJournal | null,
+	signal?: AbortSignal,
 ): Promise<FileChange | PendingFile | "skip" | undefined> {
 	const absolute = path.join(root, file);
 	if (head.mode === "160000") {
@@ -429,11 +458,11 @@ async function loadFile(
 		if (before === after) return undefined;
 		return {
 			path: file,
-			head: before,
-			work: after,
+			head: null,
+			work: null,
 			headMode: "160000",
 			mode: "160000",
-			whole: "gitlink",
+			whole: { reason: "gitlink", before: { id: before, mode: "160000" }, after: { id: after, mode: "160000" } },
 			selected: new Set<number>(),
 			wholeSelected: false,
 			editors: [],
@@ -444,8 +473,10 @@ async function loadFile(
 	let mode: string | null = null;
 	try {
 		const stat = await fs.lstat(absolute);
-		if (stat.isSymbolicLink()) mode = SYMLINK_MODE;
-		else if (!stat.isFile()) return "skip";
+		if (stat.isSymbolicLink()) {
+			mode = SYMLINK_MODE;
+			workBytes = await fs.readlink(absolute, { encoding: "buffer" });
+		} else if (!stat.isFile()) return "skip";
 		else {
 			mode = stat.mode & 0o111 ? "100755" : "100644";
 			workBytes = await fs.readFile(absolute);
@@ -463,10 +494,35 @@ async function loadFile(
 		editors: [...new Set(records.map(record => record.agent))],
 		counts: { added: 0, removed: 0 },
 	};
-	const whole = (reason: WholeReason): FileChange => ({ ...base, head: null, work: null, whole: reason });
+	// Freeze the captured bytes, not a rendered patch: drafts retain only a blob id,
+	// and selected paths render from the object database when the commit is built.
+	// Regular files are stored in their git form (`stored`, as `git add` would store
+	// them), and the worktree file is not read again. Symlink targets stay literal.
+	const whole = async (reason: WholeReason, stored: Uint8Array | null): Promise<WholeFileChange> => {
+		let before: WholeFileState | null = null;
+		if (head.sha !== null && head.mode !== null) {
+			const id = await repo.resolveRef(`${head.sha}:${file}`, signal);
+			if (!id) throw new Error(`Could not resolve ${file} at draft HEAD ${head.sha}.`);
+			before = { id, mode: head.mode };
+		}
+		let after: WholeFileState | null = null;
+		if (mode !== null) {
+			if (stored === null) throw new Error(`Could not capture ${file} for the draft.`);
+			after = { id: await repo.writeBlob(stored, signal), mode };
+		}
+		return { ...base, head: null, work: null, whole: { reason, before, after } };
+	};
 	// Symlinks commit as their link target, whole; this also covers a file replaced by a link and back.
-	if (head.mode === SYMLINK_MODE || mode === SYMLINK_MODE) return whole("symlink");
-	const headBytes = head.sha && head.mode ? (await repo.showBlob(`${head.sha}:${file}`)).data : null;
+	// The link target stays literal; a regular file that replaced a link is stored in its git form.
+	if (head.mode === SYMLINK_MODE || mode === SYMLINK_MODE) {
+		const stored =
+			mode === SYMLINK_MODE || workBytes === null
+				? workBytes
+				: (await repo.worktreeToGit([{ path: file, data: workBytes }], signal))[0];
+		return whole("symlink", stored);
+	}
+	const headBytes =
+		head.sha && head.mode ? (await repo.showBlob(`${head.sha}:${file}`, undefined, signal)).data : null;
 	const [snapshots, headMoved] = await Promise.all([
 		journal && records.length > 0 ? journal.snapshots(records) : undefined,
 		head.sha && head.mode && records.length > 0
@@ -481,15 +537,15 @@ async function loadFile(
 	].map(data => ({ path: file, data }));
 	return {
 		inputs,
-		finish(cleaned) {
+		async finish(cleaned) {
 			let next = 0;
 			const gitForm = workBytes === null ? null : cleaned[next++];
 			const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
 			const snapshotLines = (text: string | null) => toLines(text === null ? null : decoder.decode(cleaned[next++]));
 			const headText = headBytes === null ? null : decodeText(headBytes);
 			const workText = gitForm === null ? null : decodeText(gitForm);
-			if (headText === undefined || workText === undefined) return whole("content");
-			if (headText === workText) return head.mode === mode ? undefined : whole("mode");
+			if (headText === undefined || workText === undefined) return whole("content", gitForm);
+			if (headText === workText) return head.mode === mode ? undefined : whole("mode", gitForm);
 			const headLines = toLines(headText);
 			const workLines = toLines(workText);
 			const edits = snapshots?.map((snapshot): RecordedEdit => ({
@@ -499,7 +555,7 @@ async function loadFile(
 			}));
 			const steps = historySteps(headLines, edits ?? [], workLines);
 			const attribution = attribute(headLines, steps, workLines, headMoved);
-			const change: FileChange = { ...base, head: headText, work: workText };
+			const change: TextFileChange = { ...base, head: headText, work: workText };
 			change.counts = countOps(change, attribution);
 			if (edits !== undefined) change.attribution = attribution;
 			return change;
@@ -556,10 +612,10 @@ function modeChange(file: FileChange): string {
 }
 
 /** What a whole-file change is, for the summary and `show()`. */
-function wholeLabel(file: FileChange): string {
-	switch (file.whole) {
+function wholeLabel(file: WholeFileChange): string {
+	switch (file.whole.reason) {
 		case "gitlink":
-			return `gitlink ${file.head} → ${file.work}`;
+			return `gitlink ${file.whole.before?.id} → ${file.whole.after?.id}`;
 		case "symlink":
 			return "symlink";
 		case "mode":
@@ -618,15 +674,17 @@ export class Draft {
 		for (const file of this.#files) {
 			if (file.whole) {
 				if (!file.wholeSelected) continue;
-				if (file.whole === "gitlink") {
+				const { reason, before, after } = file.whole;
+				if (reason === "gitlink") {
+					// Gitlink ids name submodule commits, not blobs: commit the pointer as git renders it.
 					changes.push({
 						kind: "text",
 						path: file.path,
-						before: { text: `Subproject commit ${file.head}\n`, mode: "160000" },
-						after: { text: `Subproject commit ${file.work}\n`, mode: "160000" },
+						before: before && { text: `Subproject commit ${before.id}\n`, mode: before.mode },
+						after: after && { text: `Subproject commit ${after.id}\n`, mode: after.mode },
 					});
 				} else {
-					changes.push({ kind: "whole", path: file.path, added: file.headMode === null });
+					changes.push({ kind: "whole", path: file.path, before, after });
 				}
 				continue;
 			}
@@ -892,7 +950,7 @@ export class Draft {
 	/** Why an unselected whole-file change needs review; `undefined` when it is simply not in scope. */
 	#wholeReviewReason(file: FileChange): string | undefined {
 		if (file.editors.some(agent => this.scope.has(agent))) return `edited by ${file.editors.join(", ")}`;
-		if (file.whole === "gitlink") return "select explicitly to update the submodule pointer";
+		if (file.whole?.reason === "gitlink") return "select explicitly to update the submodule pointer";
 		return undefined;
 	}
 
@@ -945,7 +1003,7 @@ export class Draft {
 		const parts = this.selection().map(change =>
 			change.kind === "text"
 				? formatTextPatch(change.path, change.before, change.after)
-				: `diff --git a/${change.path} b/${change.path}\n(whole-file change committed as in the worktree)\n`,
+				: `diff --git a/${change.path} b/${change.path}\n(whole-file change; content captured at draft time)\n`,
 		);
 		return parts.join("") || "Nothing selected.";
 	}
