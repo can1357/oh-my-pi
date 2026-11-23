@@ -2540,6 +2540,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				case "status.path":
 					openPath(this.sessionManager.getCwd());
 					return;
+				// The tree position shows only for the main session, which `/tree` navigates.
+				case "status.tree":
+					this.showTreeSelector();
+					return;
 			}
 		};
 		// A TSP terminal has no status strip: the tab title carries the PR.
