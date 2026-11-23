@@ -960,6 +960,37 @@ function isAnthropicModelNotFoundError(error: unknown, provider: string, modelId
 	);
 }
 
+const AGY_UNKNOWN_MODEL = /^Unknown model ID: (\S+)$/;
+const AGY_EFFORT_SUFFIX = /^-(?:minimal|low|medium|high|xhigh|max)$/;
+
+/**
+ * Model id from agy's ACP `session/set_config_option` rejection. agy builds
+ * its `model` roster per signed-in account, so a catalog model the account's
+ * tier lacks fails with this exact message before any inference.
+ */
+function antigravityCliUnknownModelId(error: unknown, depth = 0): string | undefined {
+	if (depth > 6) return undefined;
+	if (typeof error === "string") return AGY_UNKNOWN_MODEL.exec(error.trim())?.[1];
+	if (!error || typeof error !== "object") return undefined;
+	for (const text of [
+		"errorMessage" in error ? error.errorMessage : undefined,
+		"message" in error ? error.message : undefined,
+	]) {
+		const id = typeof text === "string" ? AGY_UNKNOWN_MODEL.exec(text.trim())?.[1] : undefined;
+		if (id !== undefined) return id;
+	}
+	return "cause" in error ? antigravityCliUnknownModelId(error.cause, depth + 1) : undefined;
+}
+
+/** Whether agy rejected this request's model, bare or as its effort-suffixed roster value, for the signed-in account. */
+function isAntigravityCliUnknownModelError(error: unknown, provider: string, modelId: string | undefined): boolean {
+	if (provider !== "antigravity-cli" || !modelId) return false;
+	const denied = antigravityCliUnknownModelId(error);
+	if (denied === undefined || !denied.startsWith(modelId)) return false;
+	const suffix = denied.slice(modelId.length);
+	return suffix === "" || AGY_EFFORT_SUFFIX.test(suffix);
+}
+
 /** Whether Cursor returned a non-retryable plan entitlement denial for this account. */
 function isCursorPlanAccountPolicyError(error: unknown, provider: string, depth = 0): boolean {
 	if (provider !== "cursor" || depth > 6) return false;
@@ -986,7 +1017,10 @@ export function modelEntitlementDenialKinds(error: unknown, provider: string, mo
 	if (isCodexChatGPTAccountPolicyError(error, provider, modelId) || isCursorPlanAccountPolicyError(error, provider)) {
 		return Flag.AccountPolicy | Flag.ContentBlocked;
 	}
-	return isAnthropicModelNotFoundError(error, provider, modelId) ? Flag.AccountPolicy : 0;
+	return isAnthropicModelNotFoundError(error, provider, modelId) ||
+		isAntigravityCliUnknownModelError(error, provider, modelId)
+		? Flag.AccountPolicy
+		: 0;
 }
 
 /** Whether a rejection denies this credential only the requested model; see {@link modelEntitlementDenialKinds}. */
@@ -1004,7 +1038,9 @@ export function isMismatchedModelEntitlementDenial(
 	modelId: string | undefined,
 ): boolean {
 	const namesModel =
-		codexChatGPTAccountPolicyModel(error) !== undefined || anthropicModelNotFoundId(error) !== undefined;
+		codexChatGPTAccountPolicyModel(error) !== undefined ||
+		anthropicModelNotFoundId(error) !== undefined ||
+		(provider === "antigravity-cli" && antigravityCliUnknownModelId(error) !== undefined);
 	return namesModel && !isModelEntitlementDenial(error, provider, modelId);
 }
 
