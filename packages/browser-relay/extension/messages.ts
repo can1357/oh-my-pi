@@ -87,6 +87,11 @@ export interface RelayStatus {
 	connected: boolean;
 	/** omp version stamped into the running worker script; undefined in an unstamped dev build. */
 	extensionVersion: string | undefined;
+	/**
+	 * While unlinked: the browser's reason the last native host port closed (`chrome.runtime.lastError`), e.g. the host
+	 * is not installed or native messaging is blocked by policy; undefined when the browser gave none.
+	 */
+	hostError: string | undefined;
 }
 
 /** A worker-owned `omp --mode rpc` session behind the native host. */

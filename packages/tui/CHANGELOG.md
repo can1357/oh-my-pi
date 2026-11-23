@@ -5,6 +5,7 @@
 ### Added
 
 - Added `AGENT_KILL_LABEL`, `InterruptReason` and `isInterruptReason` so hosts can tell a parent agent's kill apart from a user interrupt ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
+- Added `SettingsRuntimeContext.runtimeOptions`: the host can supply the choices of a setting shown as a choice menu, keyed by setting path. Thinking levels, themes and composer shapes keep their own lists ([#19925](https://github.com/can1357/oh-my-pi/pull/19925) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Fixed
 
@@ -15,6 +16,11 @@
 - Fixed Enter pressed again on a model row just assigned to a role removing that role and falling back to the default role's model ([#12310](https://github.com/can1357/oh-my-pi/issues/12310), [#19986](https://github.com/can1357/oh-my-pi/pull/19986) by [@JamieJ5926](https://github.com/JamieJ5926))
 - The quick model picker (alt+p) in a session limited by `--models` or `enabledModels` now lists models the catalog gained since the session started, as the unlimited picker does ([#19878](https://github.com/can1357/oh-my-pi/pull/19878) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed a restored draft that is itself a numbered list being handed back as queue shorthand, which resubmitted it as two turns with the list markers stripped ([#19567](https://github.com/can1357/oh-my-pi/issues/19567), [#20172](https://github.com/can1357/oh-my-pi/pull/20172) by [@kaluli123123](https://github.com/kaluli123123))
+- Fixed Tern showing "Not found" for `read` images and other files shown by path when omp runs on another machine than Tern (e.g. over ssh); omp names files by path only when `TERN_BLOB_DIR` is set (Tern exports it into its local panes) and otherwise uploads images, so a local session without it, such as a tmux server started outside Tern, also uploads ([#20103](https://github.com/can1357/oh-my-pi/issues/20103))
+
+### Removed
+
+- Removed `OmfgPanelComponent.markSaved` and the `"saved"` member of `OmfgPanelState`; the panel now closes once a `/omfg` rule is saved ([#20069](https://github.com/can1357/oh-my-pi/pull/20069) by [@suiso11](https://github.com/suiso11))
 
 ## [19.1.0] - 2026-11-21
 
