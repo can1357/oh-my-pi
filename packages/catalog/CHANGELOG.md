@@ -4,7 +4,13 @@
 
 ### Added
 
+- Added `buildAntigravityFetchModelsBody()`: Antigravity model discovery now sends a native-shaped `requestId`, plus `entitlement.userTier` and `location` when they are known (account tier, `PI_AI_ANTIGRAVITY_USER_TIER`/`AICODE_USER_TIER`, `PI_AI_ANTIGRAVITY_LOCATION`/`GOOGLE_CLOUD_LOCATION`/`GOOGLE_CLOUD_REGION`); `ANTIGRAVITY_PROJECT_ID` replaces the stored project and `AICODE_ENDPOINT_URL` sets the endpoint when none is passed
+- `PI_AI_ANTIGRAVITY_AUTH_METHOD` and `PI_AI_ANTIGRAVITY_PURPOSE` append the Antigravity user agent's `auth_method`/`purpose` segments, which are otherwise omitted
 - `getUpstreamPin()` and `routedModelsAreEqual()` in `@oh-my-pi/pi-catalog/models` tell apart an aggregator model pinned to different upstream providers ([#19664](https://github.com/can1357/oh-my-pi/pull/19664) by [@taibenvenuti](https://github.com/taibenvenuti))
+
+### Changed
+
+- Google Antigravity requests now identify as Antigravity 2.34.0 instead of 2.26.0 when the update manifest cannot be reached
 
 ### Fixed
 

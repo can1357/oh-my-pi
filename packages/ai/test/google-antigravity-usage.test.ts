@@ -571,6 +571,49 @@ describe("antigravity usage provider", () => {
 		);
 		expect(report).toBeNull();
 	});
+
+	it("keeps the quota summary body to the project and sends the account tier on the model-catalog fallback", async () => {
+		const envNames = [
+			"ANTIGRAVITY_PROJECT_ID",
+			"PI_AI_ANTIGRAVITY_USER_TIER",
+			"AICODE_USER_TIER",
+			"PI_AI_ANTIGRAVITY_LOCATION",
+			"GOOGLE_CLOUD_LOCATION",
+			"GOOGLE_CLOUD_REGION",
+		] as const;
+		const saved = envNames.map(name => [name, process.env[name]] as const);
+		for (const name of envNames) delete process.env[name];
+		const bodies = new Map<string, Record<string, unknown>>();
+		const fetchImpl: FetchImpl = async (input, init) => {
+			const url = String(input);
+			bodies.set(url.slice(url.lastIndexOf(":") + 1), JSON.parse(String(init?.body)));
+			return url.endsWith(":retrieveUserQuotaSummary")
+				? new Response("not found", { status: 404 })
+				: new Response(JSON.stringify({ models: {} }), { status: 200 });
+		};
+		try {
+			await antigravityUsageProvider.fetchUsage!(
+				{
+					provider: "google-antigravity",
+					credential: makeCredential({ userTier: "standard-tier" }),
+					signal: undefined,
+				},
+				makeCtx(fetchImpl),
+			);
+		} finally {
+			for (const [name, value] of saved) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
+
+		expect(bodies.get("retrieveUserQuotaSummary")).toEqual({ project: "test-project" });
+		expect(bodies.get("fetchAvailableModels")).toEqual({
+			project: "test-project",
+			requestId: expect.stringMatching(/^agent\/[0-9a-f-]+\/\d+\/[0-9a-f-]+\/1$/),
+			entitlement: { userTier: "standard-tier" },
+		});
+	});
 });
 
 describe("antigravity ranking strategy", () => {

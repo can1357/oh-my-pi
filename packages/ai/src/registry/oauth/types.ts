@@ -8,6 +8,12 @@ export type OAuthCredentials = {
 	expires: number;
 	enterpriseUrl?: string;
 	projectId?: string;
+	/**
+	 * Provider-reported subscription tier id, for Google Antigravity the
+	 * `loadCodeAssist` `currentTier.id` (e.g. `free-tier`). Captured at login
+	 * and carried across refreshes.
+	 */
+	userTier?: string;
 	email?: string;
 	accountId?: string;
 	apiEndpoint?: string;

@@ -1,4 +1,5 @@
 import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { buildAntigravityFetchModelsBody } from "@oh-my-pi/pi-catalog/discovery/antigravity";
 import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import * as AIError from "../error";
 import type {
@@ -72,7 +73,8 @@ interface AntigravityQuotaSummaryResponse {
 interface AntigravityEndpointRequest {
 	endpoints: readonly string[];
 	path: string;
-	projectId: string;
+	/** JSON request body. */
+	body: string;
 	accessToken: string;
 	signal?: AbortSignal;
 }
@@ -445,7 +447,7 @@ async function fetchAntigravityEndpoint(
 					"Content-Type": "application/json",
 					...getAntigravityHeaders(),
 				},
-				body: JSON.stringify({ project: request.projectId }),
+				body: request.body,
 				signal: request.signal,
 			});
 		} catch (error) {
@@ -488,16 +490,20 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 	const endpoints = baseUrl ? [baseUrl] : [DEFAULT_ENDPOINT, "https://daily-cloudcode-pa.sandbox.googleapis.com"];
 	const endpointRequest = {
 		endpoints,
-		projectId: credential.projectId,
 		accessToken,
 		signal: params.signal,
 	};
 
 	// This is the endpoint Antigravity's own quota UI uses. Unlike the legacy
 	// model catalog response, it reports both the rolling five-hour and weekly
-	// buckets even when neither is exhausted.
+	// buckets even when neither is exhausted. Its body stays `{project}`: which
+	// further request fields the native client fills here is unverified.
 	const summaryResult = await fetchAntigravityEndpoint(
-		{ ...endpointRequest, path: RETRIEVE_USER_QUOTA_SUMMARY_PATH },
+		{
+			...endpointRequest,
+			path: RETRIEVE_USER_QUOTA_SUMMARY_PATH,
+			body: JSON.stringify({ project: credential.projectId }),
+		},
 		ctx,
 	);
 	if (summaryResult.response?.ok) {
@@ -509,7 +515,16 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 	// Older Cloud Code Assist deployments and compatible proxies may not expose
 	// retrieveUserQuotaSummary. Preserve the model-level quota parser as a
 	// fallback rather than dropping usage reporting for those endpoints.
-	const legacyResult = await fetchAntigravityEndpoint({ ...endpointRequest, path: FETCH_AVAILABLE_MODELS_PATH }, ctx);
+	const legacyResult = await fetchAntigravityEndpoint(
+		{
+			...endpointRequest,
+			path: FETCH_AVAILABLE_MODELS_PATH,
+			body: JSON.stringify(
+				buildAntigravityFetchModelsBody({ projectId: credential.projectId, userTier: credential.userTier }),
+			),
+		},
+		ctx,
+	);
 	if (!legacyResult.response?.ok) {
 		ctx.logger?.warn("Antigravity usage fetch failed", {
 			status: legacyResult.response?.status ?? summaryResult.response?.status ?? 0,

@@ -238,6 +238,7 @@ export async function getOAuthApiKey(
 					token: creds.access,
 					enterpriseUrl: creds.enterpriseUrl,
 					projectId: creds.projectId,
+					userTier: creds.userTier,
 					refreshToken: creds.refresh,
 					expiresAt: creds.expires,
 					email: creds.email,

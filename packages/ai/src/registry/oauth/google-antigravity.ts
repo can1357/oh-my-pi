@@ -255,11 +255,18 @@ async function onboardUser(context: CloudCodeContext): Promise<void> {
 	}
 }
 
+/** Onboarded Cloud Code Assist project and the account's reported tier. */
+interface DiscoveredProject {
+	projectId: string;
+	/** `currentTier.id` of the final `loadCodeAssist` response, when reported. */
+	userTier?: string;
+}
+
 async function discoverProject(
 	accessToken: string,
 	onProgress?: (message: string) => void,
 	signal?: AbortSignal,
-): Promise<string> {
+): Promise<DiscoveredProject> {
 	const context: CloudCodeContext = {
 		headers: {
 			Authorization: `Bearer ${accessToken}`,
@@ -281,7 +288,10 @@ async function discoverProject(
 		onProgress?.("Refreshing Cloud Code Assist project...");
 		const refreshed = await loadCodeAssist(context);
 		const projectId = extractProjectId(refreshed);
-		if (projectId) return projectId;
+		if (projectId) {
+			const userTier = refreshed.currentTier?.id;
+			return userTier ? { projectId, userTier } : { projectId };
+		}
 		throw new AIError.OAuthError("loadCodeAssist did not return a cloudaicompanionProject", {
 			kind: "provisioning",
 			provider: PROVIDER,
@@ -298,10 +308,18 @@ async function discoverProject(
 	}
 }
 
-/** Resolves the Antigravity project after login and preserves it across refresh responses. */
+/**
+ * Resolves the Antigravity project and the account's tier after login, and
+ * preserves both across refresh responses (a token refresh reports neither).
+ */
 export const googleAntigravityProjectHook: AfterExchangeHook = async (credentials, context) => {
 	if (context.phase === "refresh") {
-		return context.stored?.projectId ? { ...credentials, projectId: context.stored.projectId } : credentials;
+		const stored = context.stored;
+		return {
+			...credentials,
+			...(stored?.projectId ? { projectId: stored.projectId } : {}),
+			...(stored?.userTier ? { userTier: stored.userTier } : {}),
+		};
 	}
 	const raw = context.raw;
 	if (
@@ -315,9 +333,9 @@ export const googleAntigravityProjectHook: AfterExchangeHook = async (credential
 			provider: context.provider,
 		});
 	}
-	let projectId: string;
+	let discovered: DiscoveredProject;
 	try {
-		projectId = await discoverProject(credentials.access, context.onProgress, context.signal);
+		discovered = await discoverProject(credentials.access, context.onProgress, context.signal);
 	} catch (error) {
 		const validationUrl = extractGoogleValidationUrl(error instanceof Error ? error.message : String(error));
 		if (!validationUrl) throw error;
@@ -326,5 +344,5 @@ export const googleAntigravityProjectHook: AfterExchangeHook = async (credential
 			{ kind: "validation", provider: context.provider },
 		);
 	}
-	return { ...credentials, projectId };
+	return { ...credentials, ...discovered };
 };

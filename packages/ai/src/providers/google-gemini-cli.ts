@@ -343,6 +343,7 @@ const innerCredentialsSchema = type({
 	"token?": optionalCredentialString,
 	"projectId?": optionalCredentialString,
 	"project_id?": optionalCredentialString,
+	"userTier?": optionalCredentialString,
 	"refreshToken?": optionalCredentialString,
 	"refresh?": optionalCredentialString,
 	"email?": optionalCredentialString,
@@ -359,6 +360,8 @@ const geminiCliCredentialsSchema = type("unknown").pipe(raw => {
 interface ParsedGeminiCliCredentials {
 	accessToken: string;
 	projectId: string;
+	/** Provider-reported tier id (Antigravity `currentTier.id`); see `OAuthCredentials.userTier`. */
+	userTier?: string;
 	refreshToken?: string;
 	expiresAt?: number;
 	email?: string;
@@ -397,10 +400,12 @@ export function parseGeminiCliCredentials(apiKeyRaw: string): ParsedGeminiCliCre
 	const expiresAt = normalizeExpiryMs(parsed.expiresAt ?? parsed.expires);
 	const email = parsed.email && parsed.email.length > 0 ? parsed.email : undefined;
 	const accountId = parsed.accountId && parsed.accountId.length > 0 ? parsed.accountId : undefined;
+	const userTier = parsed.userTier && parsed.userTier.length > 0 ? parsed.userTier : undefined;
 
 	return {
 		accessToken: parsed.token,
 		projectId,
+		userTier,
 		refreshToken,
 		expiresAt,
 		email,
@@ -450,6 +455,8 @@ interface CloudCodeAssistRequest {
 	requestType?: string;
 	userAgent?: string;
 	requestId?: string;
+	userPromptId?: string;
+	enabledCreditTypes?: string[];
 }
 
 interface CloudCodeAssistResponseChunk {
@@ -526,7 +533,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 
 			const isAntigravity = model.provider === "google-antigravity";
 			const parsedCredentials = parseGeminiCliCredentials(apiKeyRaw);
-			const { accessToken, projectId } = parsedCredentials;
+			const { accessToken } = parsedCredentials;
+			// The native client's embedded JS reads `ANTIGRAVITY_PROJECT_ID` at
+			// request time (static analysis of 2.34.0 / agy 1.5.14), so the
+			// override applies per request, not only at login.
+			const projectId = (isAntigravity && process.env.ANTIGRAVITY_PROJECT_ID) || parsedCredentials.projectId;
 			// AuthStorage already refreshed credentials before threading them
 			// here (see {@link OAUTH_REFRESH_SKEW_MS}). If the credential lands
 			// expired we bail rather than POSTing a stale token; the next call
@@ -598,9 +609,21 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			// Multi-account discovery keys per-account request constants by this
 			// credential's identity; see `Model.accountAccess`.
 			const accountKey = isAntigravity
-				? oauthAccountKey({ accountId: parsedCredentials.accountId, email: parsedCredentials.email, projectId })
+				? oauthAccountKey({
+						accountId: parsedCredentials.accountId,
+						email: parsedCredentials.email,
+						projectId: parsedCredentials.projectId,
+					})
 				: undefined;
-			let requestBody = buildRequest(model, requestContext, projectId, options, isAntigravity, accountKey);
+			let requestBody = buildRequest(
+				model,
+				requestContext,
+				projectId,
+				options,
+				isAntigravity,
+				accountKey,
+				parsedCredentials.userTier,
+			);
 			const replacementPayload = await options?.onPayload?.(requestBody, model);
 			if (replacementPayload !== undefined) {
 				requestBody = replacementPayload as typeof requestBody;
@@ -610,10 +633,20 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			if (isAntigravity) await ensureAntigravityVersion(options?.fetch ?? fetch, options?.signal);
 			// Antigravity mirrors the native Go client: no `Accept`, gzip only, and
 			// no Claude-thinking beta on Claude 5.x (the compat flag scopes it).
+			// `X-Aicode-Prompt-Id` / `X-Aicode-Trajectory-Id` are request headers
+			// of the 2.34.0 language server and agy 1.5.14 (static analysis); they
+			// mirror the body's `userPromptId` and `trajectory_id` label.
+			const antigravityTrajectoryId = isAntigravity ? requestBody.request?.labels?.trajectory_id : undefined;
 			const requestHeaders = {
 				Authorization: `Bearer ${accessToken}`,
 				"Content-Type": "application/json",
-				...(isAntigravity ? getAntigravityHeaders() : { Accept: "text/event-stream" }),
+				...(isAntigravity
+					? {
+							...getAntigravityHeaders(),
+							...(requestBody.userPromptId ? { "X-Aicode-Prompt-Id": requestBody.userPromptId } : {}),
+							...(antigravityTrajectoryId ? { "X-Aicode-Trajectory-Id": antigravityTrajectoryId } : {}),
+						}
+					: { Accept: "text/event-stream" }),
 				...(model.compat.claudeThinkingBetaHeader && model.identity.class === "anthropic" && model.reasoning
 					? { "anthropic-beta": CLAUDE_THINKING_BETA_HEADER }
 					: {}),
@@ -1230,6 +1263,23 @@ interface AntigravityRequestEnvelope {
 	sessionId: string;
 	requestId: string;
 	labels: Record<string, string>;
+	/** Top-level `userPromptId`; see {@link buildAntigravityRequestEnvelope}. */
+	userPromptId: string;
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Trajectory id for a newly started conversation: the native
+ * `ANTIGRAVITY_TRAJECTORY_ID` override (found by static analysis of the 2.34.0
+ * language server and agy 1.5.14) when it is a UUID, else a fresh one. It is a
+ * debug override: the fixed value pins ONE trajectory across every
+ * conversation and every serving account, so it links those accounts by
+ * construction.
+ */
+function newAntigravityTrajectoryId(): string {
+	const pinned = process.env.ANTIGRAVITY_TRAJECTORY_ID;
+	return pinned && UUID_PATTERN.test(pinned) ? pinned : randomUUID();
 }
 
 /**
@@ -1244,6 +1294,11 @@ interface AntigravityRequestEnvelope {
  * are inserted in alphabetical key order like the real client. The step never
  * moves backwards, so a compacted or resent context still advances it. Without
  * session state (direct callers/tests) it falls back to ephemeral ids.
+ *
+ * `userPromptId` is the top-level `user_prompt_id` the 2.34.0 envelope proto
+ * gained. It takes the `labels.request_id` value (`<trajectoryId>-<n>`), which
+ * matches the field name and is per request like the native id; the exact
+ * value the native client sends is unverified.
  */
 function buildAntigravityRequestEnvelope(
 	model: Model<"google-gemini-cli">,
@@ -1255,14 +1310,14 @@ function buildAntigravityRequestEnvelope(
 	let requestIndex = 0;
 	if (state) {
 		state.agentId ??= randomUUID();
-		state.trajectoryId ??= randomUUID();
+		state.trajectoryId ??= newAntigravityTrajectoryId();
 		state.sessionId ??= randomSignedDecimalSessionId();
 		state.stepIndex = Math.max(contextSteps, (state.stepIndex ?? 0) + 1);
 		requestIndex = state.requestCount ?? 0;
 		state.requestCount = requestIndex + 1;
 	}
 	const agentId = state?.agentId ?? randomUUID();
-	const trajectoryId = state?.trajectoryId ?? randomUUID();
+	const trajectoryId = state?.trajectoryId ?? newAntigravityTrajectoryId();
 	const sessionId = state?.sessionId ?? deriveAntigravitySessionId(context);
 	const step = state?.stepIndex ?? contextSteps;
 	const requestId = `agent/${agentId}/${Date.now()}/${trajectoryId}/${step}`;
@@ -1279,7 +1334,27 @@ function buildAntigravityRequestEnvelope(
 	labels.used_claude = usageLabel;
 	labels.used_claude_conservative = usageLabel;
 	labels.used_non_gemini_model = String(model.identity.class !== "gemini");
-	return { sessionId, requestId, labels };
+	return { sessionId, requestId, labels, userPromptId: labels.request_id };
+}
+
+/** Free tier id `loadCodeAssist` reports (`currentTier.id`). */
+const ANTIGRAVITY_FREE_TIER_ID = "free-tier";
+
+/**
+ * Top-level `enabledCreditTypes` for an Antigravity envelope. The 2.34.0
+ * envelope proto gained the repeated enum `enabled_credit_types`, whose only
+ * value is `GOOGLE_ONE_AI`; when the native client sets it, and which tiers
+ * it applies to, is unverified. omp sends it only for an account whose
+ * reported tier is known and not `free-tier` (a Google One AI plan is a paid
+ * tier), or exactly the values PI_AI_ANTIGRAVITY_CREDIT_TYPES lists
+ * (comma-separated); a free or unknown tier sends nothing.
+ */
+function getAntigravityEnabledCreditTypes(userTier: string | undefined): string[] | undefined {
+	const override = process.env.PI_AI_ANTIGRAVITY_CREDIT_TYPES?.split(",")
+		.map(value => value.trim())
+		.filter(value => value.length > 0);
+	if (override && override.length > 0) return override;
+	return userTier && userTier !== ANTIGRAVITY_FREE_TIER_ID ? ["GOOGLE_ONE_AI"] : undefined;
 }
 
 export function buildRequest(
@@ -1290,6 +1365,8 @@ export function buildRequest(
 	isAntigravity = false,
 	/** Serving credential's account key; selects its discovered Antigravity request constants. */
 	accountKey?: string,
+	/** Serving credential's reported tier id; gates Antigravity `enabledCreditTypes`. */
+	userTier?: string,
 ): CloudCodeAssistRequest {
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
 	const contents = convertMessages(model, context);
@@ -1442,12 +1519,15 @@ export function buildRequest(
 			request.generationConfig = generationConfig;
 		}
 		request.sessionId = envelope.sessionId;
+		const enabledCreditTypes = getAntigravityEnabledCreditTypes(userTier);
 		return {
 			project: projectId,
 			requestId: envelope.requestId,
 			request,
 			model: wireModelId,
 			userAgent: "antigravity",
+			userPromptId: envelope.userPromptId,
+			...(enabledCreditTypes ? { enabledCreditTypes } : {}),
 		};
 	}
 

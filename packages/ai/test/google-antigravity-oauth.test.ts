@@ -223,6 +223,29 @@ describe("Antigravity OAuth project discovery", () => {
 		await expect(discoverAntigravityProject()).rejects.toThrow("loadCodeAssist failed: 201 Created: created");
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
 	});
+
+	it("records the reported currentTier id and keeps it across refreshes", async () => {
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				async () =>
+					jsonResponse({
+						currentTier: { id: "standard-tier" },
+						paidTier: { id: "standard-tier" },
+						cloudaicompanionProject: "project-123",
+					}),
+				{ preconnect: fetch.preconnect },
+			),
+		);
+
+		const credentials = await discoverAntigravityProject();
+		expect(credentials).toMatchObject({ projectId: "project-123", userTier: "standard-tier" });
+
+		const refreshed = await googleAntigravityProjectHook(
+			{ access: "access-2", refresh: "refresh-2", expires: 0 },
+			{ provider: "google-antigravity", phase: "refresh", stored: credentials, raw: {}, fetch },
+		);
+		expect(refreshed).toMatchObject({ access: "access-2", projectId: "project-123", userTier: "standard-tier" });
+	});
 });
 
 describe("Antigravity OAuth login", () => {

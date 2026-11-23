@@ -3123,13 +3123,31 @@ export class ModelRegistry {
 								"google-antigravity",
 								oauthToken,
 							);
-							return (
-								accounts?.map(account => ({
-									accessToken: account.accessToken,
-									accountKey: oauthAccountKey(account),
-									projectId: account.projectId,
-								})) ?? null
-							);
+							if (!accounts) return null;
+							// The tier rides on the stored row only (resolved access carries
+							// none), so match each account back to its row: by row id, then
+							// access token, then account id.
+							const rows = this.authStorage.credentials
+								.list("google-antigravity")
+								.flatMap(row =>
+									row.credential.type === "oauth" ? [{ id: row.id, credential: row.credential }] : [],
+								);
+							const userTierOf = (account: OAuthDiscoveryAccount): string | undefined =>
+								(
+									(account.credentialId !== undefined
+										? rows.find(row => row.id === account.credentialId)
+										: undefined) ??
+									rows.find(row => row.credential.access === account.accessToken) ??
+									(account.accountId !== undefined
+										? rows.find(row => row.credential.accountId === account.accountId)
+										: undefined)
+								)?.credential.userTier;
+							return accounts.map(account => ({
+								accessToken: account.accessToken,
+								accountKey: oauthAccountKey(account),
+								projectId: account.projectId,
+								userTier: userTierOf(account),
+							}));
 						},
 						endpoint: this.#descriptorBaseUrl("google-antigravity"),
 						fetch: this.#fetch,

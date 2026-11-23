@@ -7,19 +7,29 @@ import type { AntigravityModelWireProfile } from "../types";
  * (and its @google/genai → google-auth-library dependency chain) into the startup
  * parse graph.
  *
- * Format captured from the real 2.26.0 `antigravity/hub` client:
+ * Format: `antigravity/hub/<version> (aidev_client; os_type=<os>; arch=<arch>; cl=<cl>[; auth_method=<v>][; purpose=<v>])`.
+ * Captured from the real 2.26.0 `antigravity/hub` client:
  * `antigravity/hub/2.26.0 (aidev_client; os_type=darwin; arch=arm64; cl=1005016104)`.
+ * The 2.34.0 language server assembles the same header from the format
+ * literals `%s/%s/%s (%s)` and `cl=%d`. The agy 1.5.14 CLI, captured live
+ * against a localhost stub, appends `; auth_method=gateway` (the stub's gateway
+ * auth route), and a `purpose=%s` format literal exists in both the 2.34.0
+ * language server and agy 1.5.14. The values (and the `purpose` placement) on
+ * the user-OAuth path are unverified, so both segments are env-gated: sent
+ * only when PI_AI_ANTIGRAVITY_AUTH_METHOD / PI_AI_ANTIGRAVITY_PURPOSE set them,
+ * never guessed.
  * The backend gates newer models (e.g. gemini-3.7-flash) on the client version,
  * so the version tracks the latest Antigravity release via the update manifest
- * (see {@link ensureAntigravityVersion}) with `DEFAULT_ANTIGRAVITY_VERSION` as
- * the offline fallback. os_type/arch name the native build for the host OS:
+ * (see {@link ensureAntigravityVersion}) with `DEFAULT_ANTIGRAVITY_VERSION`
+ * (2.34.0, the release whose language server the wire fields are read from)
+ * as the offline fallback. os_type/arch name the native build for the host OS:
  * each 2.26.0 installer ships one language-server build whose Go target is
  * stamped into the header (macOS darwin/arm64, Linux linux/amd64, Windows
  * windows/amd64; no other OS/arch builds exist); see
  * {@link getAntigravityPlatform}. The changelist is identical across those
  * builds. Overrides: PI_AI_ANTIGRAVITY_VERSION / _CL / _OS / _ARCH.
  */
-export const DEFAULT_ANTIGRAVITY_VERSION = "2.26.0";
+export const DEFAULT_ANTIGRAVITY_VERSION = "2.34.0";
 
 const ANTIGRAVITY_VERSION_MANIFEST_URL =
 	"https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml";
@@ -125,7 +135,12 @@ export function getAntigravityUserAgent(): string {
 	const host = getAntigravityPlatform();
 	const os = process.env.PI_AI_ANTIGRAVITY_OS || host.os;
 	const arch = process.env.PI_AI_ANTIGRAVITY_ARCH || host.arch;
-	return `antigravity/hub/${version} (aidev_client; os_type=${os}; arch=${arch}; cl=${cl})`;
+	// Unverified on the user-OAuth path, so env-gated with no default (see the
+	// module comment); the order follows the captured agy header.
+	const authMethod = process.env.PI_AI_ANTIGRAVITY_AUTH_METHOD;
+	const purpose = process.env.PI_AI_ANTIGRAVITY_PURPOSE;
+	const tail = `${authMethod ? `; auth_method=${authMethod}` : ""}${purpose ? `; purpose=${purpose}` : ""}`;
+	return `antigravity/hub/${version} (aidev_client; os_type=${os}; arch=${arch}; cl=${cl}${tail})`;
 }
 
 /**

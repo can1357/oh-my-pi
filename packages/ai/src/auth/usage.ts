@@ -60,6 +60,7 @@ export function buildRefreshableOauthCredential(credential: UsageCredential): OA
 		expires: credential.expiresAt,
 		accountId: credential.accountId,
 		projectId: credential.projectId,
+		userTier: credential.userTier,
 		email: credential.email,
 		orgId: credential.orgId,
 		orgName: credential.orgName,

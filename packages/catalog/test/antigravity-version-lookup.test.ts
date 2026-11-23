@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, setSystemTime } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
-import { ensureAntigravityVersion, getAntigravityPlatform } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import {
+	DEFAULT_ANTIGRAVITY_VERSION,
+	ensureAntigravityVersion,
+	getAntigravityPlatform,
+	getAntigravityUserAgent,
+} from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 
 const RETRY_WINDOW_MS = 10 * 60_000;
 // The lookup state is process-wide; every test starts on a fresh clock past any
@@ -77,5 +82,55 @@ describe("getAntigravityPlatform", () => {
 
 	it("falls back to the Linux build on an OS without a native client", () => {
 		expect(getAntigravityPlatform("freebsd")).toEqual({ os: "linux", arch: "amd64" });
+	});
+});
+
+describe("getAntigravityUserAgent", () => {
+	const ENV_NAMES = [
+		"PI_AI_ANTIGRAVITY_VERSION",
+		"PI_AI_ANTIGRAVITY_CL",
+		"PI_AI_ANTIGRAVITY_OS",
+		"PI_AI_ANTIGRAVITY_ARCH",
+		"PI_AI_ANTIGRAVITY_AUTH_METHOD",
+		"PI_AI_ANTIGRAVITY_PURPOSE",
+	] as const;
+	const saved = ENV_NAMES.map(name => [name, process.env[name]] as const);
+
+	beforeEach(() => {
+		for (const name of ENV_NAMES) delete process.env[name];
+		// Pin the version and host so a manifest discovered by another test cannot leak in.
+		process.env.PI_AI_ANTIGRAVITY_VERSION = DEFAULT_ANTIGRAVITY_VERSION;
+		process.env.PI_AI_ANTIGRAVITY_OS = "linux";
+		process.env.PI_AI_ANTIGRAVITY_ARCH = "amd64";
+	});
+
+	afterEach(() => {
+		for (const [name, value] of saved) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+	});
+
+	it("falls back to the 2.34.0 hub release", () => {
+		expect(DEFAULT_ANTIGRAVITY_VERSION).toBe("2.34.0");
+		expect(getAntigravityUserAgent()).toBe(
+			"antigravity/hub/2.34.0 (aidev_client; os_type=linux; arch=amd64; cl=1005016104)",
+		);
+	});
+
+	it("appends auth_method and purpose only when their env overrides are set", () => {
+		expect(getAntigravityUserAgent()).not.toContain("auth_method=");
+		expect(getAntigravityUserAgent()).not.toContain("purpose=");
+
+		process.env.PI_AI_ANTIGRAVITY_AUTH_METHOD = "gateway";
+		expect(getAntigravityUserAgent()).toBe(
+			"antigravity/hub/2.34.0 (aidev_client; os_type=linux; arch=amd64; cl=1005016104; auth_method=gateway)",
+		);
+
+		process.env.PI_AI_ANTIGRAVITY_PURPOSE = "test-purpose";
+		expect(getAntigravityUserAgent()).toEndWith("; auth_method=gateway; purpose=test-purpose)");
+
+		delete process.env.PI_AI_ANTIGRAVITY_AUTH_METHOD;
+		expect(getAntigravityUserAgent()).toEndWith("; cl=1005016104; purpose=test-purpose)");
 	});
 });
