@@ -22,4 +22,5 @@ export const zellijMultiplexer = {
 	// appearance cannot be trusted there.
 	backgroundQueryBrokenOn: ["darwin"],
 	backgroundReplyMayFollowDa1: true,
+	colorSchemeQueryAuthoritative: true,
 } as const satisfies TerminalMultiplexerModule;

@@ -30,7 +30,7 @@ import {
 	muxServerKey,
 } from "../../lsp/mux/protocol";
 import type { LspJsonRpcId, LspJsonRpcNotification, LspJsonRpcRequest, LspJsonRpcResponse } from "../../lsp/types";
-import { uriToFile } from "../../lsp/utils";
+import { uriToFile } from "../../lsp/uri";
 import { advertisesWatchedFiles, WATCHED_FILES_METHOD, WatchedFilesForwarder } from "../../lsp/watched-files";
 import type {
 	DaemonModule,
