@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added Thinking Machines Inkling 2 Mini (`thinkingmachines/inkling-2-mini`) to the bundled OpenRouter, Kilo, and Command Code catalogs
 - `getUpstreamPin()` and `routedModelsAreEqual()` in `@oh-my-pi/pi-catalog/models` tell apart an aggregator model pinned to different upstream providers ([#19664](https://github.com/can1357/oh-my-pi/pull/19664) by [@taibenvenuti](https://github.com/taibenvenuti))
 
 ### Fixed
