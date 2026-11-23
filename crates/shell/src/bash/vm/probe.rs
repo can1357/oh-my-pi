@@ -211,7 +211,7 @@ pub fn perform(
 					nonexec:       None,
 				});
 			}
-			match path_search(&mut tcx, cx, sc) {
+			match path_search(&mut tcx, cx, sc, false) {
 				// Windows reports the probed path: `shown_candidate` splits PATH
 				// on `:` and its `idx` stops addressing one entry once every
 				// entry expands to a name plus its PATHEXT candidates.
@@ -698,17 +698,24 @@ pub enum Search {
 }
 
 /// Probe PATH candidates through the pollable `Fs`: `stat` (regular file),
-/// then `access(X)`. Without an executable candidate, the first regular
-/// file is found (bash's `FS_EXEC_PREFERRED`; running it fails with
-/// `Permission denied`).
-pub fn path_search(tcx: &mut Context<'_>, cx: &mut Cx<'_>, sc: &mut Scratch) -> Search {
+/// then `access(X)`. Unless `executable_only`, without an executable
+/// candidate the first regular file is found (bash's `FS_EXEC_PREFERRED`;
+/// running it fails with `Permission denied`).
+pub fn path_search(
+	tcx: &mut Context<'_>,
+	cx: &mut Cx<'_>,
+	sc: &mut Scratch,
+	executable_only: bool,
+) -> Search {
 	// The search, beside `sc.live` (its fs operation).
 	let Some(search) = sc.io.as_mut().and_then(|io| io.search.as_mut()) else {
 		return Search::NotFound;
 	};
 	loop {
 		let Some(path) = search.cands.get(search.idx) else {
-			if let Some(i) = search.nonexec.take() {
+			if !executable_only
+				&& let Some(i) = search.nonexec.take()
+			{
 				search.idx = i;
 				return Search::Found(search.cands[i].clone());
 			}

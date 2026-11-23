@@ -14,6 +14,19 @@ function createUserMessage(content: string): Message {
 	return { role: "user", content, timestamp: 0 };
 }
 
+/** The grids a summary's `Frame:` line states, as `colsxrows` ("29 or 40 characters wide" names two widths of one height). */
+function statedGrids(summary: string): string[] {
+	const line = summary.split("\n").find(text => text.includes("Frame:")) ?? "";
+	return [...line.matchAll(/((?:\d+ or )*\d+) characters wide, up to (\d+) rows tall/g)].flatMap(([, widths, rows]) =>
+		widths.split(" or ").map(cols => `${cols}x${rows}`),
+	);
+}
+
+/** The distinct nominal grids of the frames, as `colsxrows`, in reading order. */
+function frameGrids(frames: readonly snapcompact.Frame[]): string[] {
+	return [...new Set(frames.map(frame => `${frame.cols}x${frame.rows}`))];
+}
+
 /** Runs `fn` with `overrides` applied to `Bun.env` (`undefined` deletes), then restores the previous values. */
 function withEnv(overrides: Readonly<Record<string, string | undefined>>, fn: () => void): void {
 	const previous = Object.keys(overrides).map(key => [key, Bun.env[key]] as const);
@@ -1215,7 +1228,36 @@ describe("compact", () => {
 		expect(cols.slice(0, 3)).toEqual([hiCols, hiCols, hiCols]);
 		expect(cols.slice(-3)).toEqual([hiCols, hiCols, hiCols]);
 		expect(cols[3]).toBeGreaterThan(hiCols);
-		expect(result.summary).toContain(`${hiCols} or ${cols[3]} characters wide`);
+		expect(statedGrids(result.summary)).toEqual(frameGrids(archive?.frames ?? []));
+	});
+
+	it("states both grids of a 2048px reader's overflowing archive", async () => {
+		// 8on22-bw edges with an 8on16-bw middle: same width, more rows.
+		const lines = Array.from({ length: 40_000 }, (_, i) => `line ${i} ${"x".repeat(i % 40)} id ${i * 7}`);
+		const result = await snapcompact.compact(
+			makePreparation({ messagesToSummarize: [createUserMessage(lines.join("\n"))] }),
+			{ model: { api: "google-generative-ai", id: "gemini-3.8-flash" }, maxFrames: 10 },
+		);
+		const archive = snapcompact.getPreservedArchive(result.preserveData);
+		expect(archive?.truncatedChars).toBeGreaterThan(0);
+		const grids = frameGrids(archive?.frames ?? []);
+		expect(grids).toEqual(["256x93", "256x128"]);
+		expect(statedGrids(result.summary)).toEqual(grids);
+	});
+
+	it("states the dense grid alone when an archive's only frame is its dense middle", async () => {
+		const result = await snapcompact.compact(
+			makePreparation({ messagesToSummarize: [createUserMessage("dense middle line. ".repeat(400))] }),
+			{ model: { api: "openai-responses", id: "gpt-5.5" }, frameSize: 64, maxFrames: 1 },
+		);
+		const archive = snapcompact.getPreservedArchive(result.preserveData);
+		const grids = frameGrids(archive?.frames ?? []);
+		expect(grids).toEqual(
+			[snapcompact.geometry(snapcompact.resolveShape(undefined, "8on16-bw"), 64)].map(
+				({ cols, rows }) => `${cols}x${rows}`,
+			),
+		);
+		expect(statedGrids(result.summary)).toEqual(grids);
 	});
 
 	it("keeps foveated Silver archives on the Silver font", async () => {

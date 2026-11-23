@@ -85,6 +85,7 @@ interface PendingRequest {
 /** One attachment and the lines waiting for its tunnel to drain. */
 interface Attached {
 	host: McpAttachment;
+	era: McpEra;
 	/** Unwritten lines in order; `id` names the request a line carries, so it can still be withdrawn. */
 	backlog: { line: string; id?: number }[];
 	draining: boolean;
@@ -130,6 +131,8 @@ export class HostLink implements MCPTransport {
 	#retaking: Promise<void> | undefined;
 	/** The credential refresh under way and the generation whose credentials were refused. */
 	#authRefresh: { generation: number; outcome: Promise<boolean> } | undefined;
+	/** The era re-probe under way and the generation whose modern attachment was rejected. */
+	#eraRecovery: { generation: number; outcome: Promise<void> } | undefined;
 	/**
 	 * Generation attached by a credential refresh whose owner is still
 	 * reloading the server. A refusal of those credentials ends the recovery
@@ -204,7 +207,7 @@ export class HostLink implements MCPTransport {
 	/**
 	 * Send one request and resolve with its result. Waiting for the link to
 	 * re-attach or for refreshed credentials counts against the request's own
-	 * deadline and ends with its signal.
+	 * deadline and ends with its signal, as does re-probing a rejected era.
 	 *
 	 * @throws MCPTransportError on a server error, a host-reported failure, a deadline, a lost tunnel or params that cannot be serialized; the abort reason when `options.signal` aborts.
 	 */
@@ -331,7 +334,12 @@ export class HostLink implements MCPTransport {
 		throw this.#closedError(this.#closed ? "Transport closed" : "MCP server connection was replaced");
 	}
 
-	async #retarget(spec: McpServerSpec, signal: AbortSignal | undefined, recovery: boolean): Promise<void> {
+	async #retarget(
+		spec: McpServerSpec,
+		signal: AbortSignal | undefined,
+		recovery: boolean,
+		era?: McpEra,
+	): Promise<void> {
 		if (this.#closed) throw this.#closedError("Transport closed");
 		const replaced = this.#spec;
 		const generation = ++this.#generation;
@@ -341,7 +349,7 @@ export class HostLink implements MCPTransport {
 		this.#failPending(this.#closedError("MCP server connection was replaced"));
 		previous?.host.tunnel.close();
 		previous?.host.release();
-		await this.#retake(generation, undefined, signal, replaced, recovery);
+		await this.#retake(generation, undefined, signal, replaced, recovery, era);
 	}
 
 	/**
@@ -349,7 +357,12 @@ export class HostLink implements MCPTransport {
 	 * refresh the credentials once; an attach that already carries refreshed
 	 * credentials must not.
 	 */
-	async #attach(generation: number, signal: AbortSignal | undefined, mayRefresh: boolean): Promise<void> {
+	async #attach(
+		generation: number,
+		signal: AbortSignal | undefined,
+		mayRefresh: boolean,
+		resolvedEra?: McpEra,
+	): Promise<void> {
 		const access = this.#injectedAccess ?? (await mcpHostAccess());
 		// Checked before the listener is registered: a link closed meanwhile would never remove it.
 		this.#assertCurrent(generation);
@@ -358,7 +371,7 @@ export class HostLink implements MCPTransport {
 			this.#access = access;
 			this.#offReconnect = access.onReconnect(() => this.#hostReplaced());
 		}
-		const era = await this.#resolveEra(access, generation, signal, mayRefresh);
+		const era = resolvedEra ?? (await this.#resolveEra(access, generation, signal, mayRefresh));
 		this.#assertCurrent(generation);
 		const spec = this.#spec;
 		const host = await access.attach(
@@ -370,7 +383,7 @@ export class HostLink implements MCPTransport {
 			host.release();
 			this.#assertCurrent(generation);
 		}
-		const attached: Attached = { host, backlog: [], draining: false };
+		const attached: Attached = { host, era, backlog: [], draining: false };
 		const decoder = new JsonLineDecoder();
 		this.#attached = attached;
 		this.#everAttached = true;
@@ -428,10 +441,11 @@ export class HostLink implements MCPTransport {
 		signal: AbortSignal | undefined,
 		replaced: McpServerSpec,
 		recovery: boolean,
+		era?: McpEra,
 	): Promise<void> {
 		const attempt = (async () => {
 			try {
-				await this.#attach(generation, signal, !recovery);
+				await this.#attach(generation, signal, !recovery, era);
 			} catch (error) {
 				if (this.#generation === generation) {
 					this.#retaking = undefined;
@@ -618,6 +632,35 @@ export class HostLink implements MCPTransport {
 	}
 
 	/**
+	 * Re-probe the server whose modern attachment of `generation` rejected this
+	 * revision, and move the link to its handshake-era unit when the probe
+	 * confirms one: one recovery for every request rejected on the same
+	 * attachment. It belongs to the link, not to a caller, so a request that
+	 * gives up meanwhile cannot leave the link detached. Never rejects.
+	 */
+	#recoverEra(generation: number): Promise<void> {
+		const access = this.#access;
+		if (!access || generation !== this.#generation) return Promise.resolve();
+		const running = this.#eraRecovery;
+		if (running?.generation === generation) return running.outcome;
+		const spec = this.#spec;
+		const outcome = (async () => {
+			try {
+				const { era } = await access.resolve(spec);
+				if (era !== "legacy" || generation !== this.#generation) return;
+				await this.#retarget(spec, undefined, false, era);
+			} catch (error) {
+				// Whoever was rejected still reports the server's own answer.
+				logger.debug("MCP era recovery failed", { path: `mcp:${this.#name}`, error });
+			}
+		})().finally(() => {
+			if (this.#eraRecovery?.outcome === outcome) this.#eraRecovery = undefined;
+		});
+		this.#eraRecovery = { generation, outcome };
+		return outcome;
+	}
+
+	/**
 	 * Wait for work other callers share for as long as this caller's own signal
 	 * and deadline allow. Giving up leaves the work running for the others.
 	 */
@@ -663,7 +706,8 @@ export class HostLink implements MCPTransport {
 		if (signal?.aborted) throw abortReason(signal);
 
 		const id = ++this.#lastId;
-		ran.generation = this.#generation;
+		const generation = this.#generation;
+		ran.generation = generation;
 		const progressSink = options?.onProgress;
 		let line: string;
 		try {
@@ -687,6 +731,7 @@ export class HostLink implements MCPTransport {
 
 		const { promise, resolve, reject } = Promise.withResolvers<T>();
 		let timer: NodeJS.Timeout | undefined;
+		let expiresAt = Number.POSITIVE_INFINITY;
 		let settled = false;
 		let sent = false;
 
@@ -722,7 +767,9 @@ export class HostLink implements MCPTransport {
 
 		// Progress restarts the deadline, never past the request's hard cap.
 		const armTimer = (): void => {
-			const delay = Math.min(deadline.timeoutMs, startedAt + deadline.maxTotalMs - Date.now());
+			const now = Date.now();
+			const delay = Math.min(deadline.timeoutMs, startedAt + deadline.maxTotalMs - now);
+			expiresAt = now + delay;
 			if (delay <= 0) return;
 			const limit = delay < deadline.timeoutMs ? deadline.maxTotalMs : deadline.timeoutMs;
 			clearTimeout(timer);
@@ -773,6 +820,28 @@ export class HostLink implements MCPTransport {
 			);
 		}
 
-		return promise;
+		try {
+			return await promise;
+		} catch (error) {
+			if (
+				attached.era !== "modern" ||
+				!(error instanceof MCPTransportError) ||
+				error.rpc?.code !== MCPErrorCode.UnsupportedProtocolVersion
+			) {
+				throw error;
+			}
+			// The request is not replayed: its caller waits only so that its next one finds the link moved.
+			const recovery = this.#recoverEra(generation);
+			const remaining = expiresAt - Date.now();
+			if (remaining > 0) {
+				try {
+					await this.#awaitShared(recovery, signal, Number.isFinite(remaining) ? remaining : 0, Date.now());
+				} catch {
+					// Out of time: the server's own answer below is still what this request came to.
+				}
+			}
+			if (signal?.aborted) throw abortReason(signal);
+			throw error;
+		}
 	}
 }

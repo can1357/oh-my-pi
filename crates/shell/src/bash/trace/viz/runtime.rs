@@ -38,6 +38,8 @@ pub(crate) struct SourceUnit<'a> {
 	pub nodes:      &'a [trace::Node],
 	/// See [`trace::Unit::callout`].
 	pub callout:    bool,
+	/// See [`trace::Unit::runner`].
+	pub runner:     Option<NodeKey>,
 }
 #[derive(Debug)]
 pub(crate) struct Observation<'a> {
@@ -455,21 +457,24 @@ impl<'a> Runtime<'a> {
 				parent = analysis.parents.get(&key).copied();
 			}
 		}
+		// The unit and command standing for a unit: the one with its literal
+		// word, else the one that ran its script.
+		let outer = |unit: &SourceUnit<'_>| match unit.syntax.and_then(|syntax| syntax.parent) {
+			Some(parent) => {
+				let word = NodeKey::engine(parent.unit, NodeId(parent.node));
+				Some((parent.unit, analysis.owners.get(&word).copied()))
+			},
+			None => unit.runner.map(|runner| (runner.unit, Some(runner))),
+		};
 		for leaf in &active {
 			let mut unit = source.unit(leaf.unit as usize);
 			for _ in 0..source.unit_count() {
-				let Some(parent) = unit
-					.as_ref()
-					.and_then(|unit| unit.syntax)
-					.and_then(|syntax| syntax.parent)
-				else {
+				let Some((outer, mut node)) = unit.as_ref().and_then(outer) else {
 					break;
 				};
-				let Some(parent_unit) = source.unit(parent.unit as usize) else {
+				let Some(parent_unit) = source.unit(outer as usize) else {
 					break;
 				};
-				let word = NodeKey::engine(parent.unit, NodeId(parent.node));
-				let mut node = analysis.owners.get(&word).copied();
 				for _ in 0..=analysis.parents.len() {
 					let Some(key) = node else { break };
 					result.active.remove(&key);

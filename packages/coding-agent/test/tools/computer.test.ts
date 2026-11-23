@@ -425,7 +425,7 @@ const escapeScope = () => ({ key: `computer-test-${crypto.randomUUID()}`, acknow
 const snapshot = (
 	readOnly = false,
 	displayTurn?: number,
-	backgroundFallback: ComputerSessionSnapshot["backgroundFallback"] = "takeover",
+	takeover: ComputerSessionSnapshot["takeover"] = "fallback",
 ): ComputerSessionSnapshot => ({
 	cwd: import.meta.dir,
 	sessionId: crypto.randomUUID(),
@@ -434,7 +434,7 @@ const snapshot = (
 	display: "active",
 	readOnly,
 	displayTurn,
-	backgroundFallback,
+	takeover,
 });
 
 async function runWorker(
@@ -4719,6 +4719,212 @@ describe("menu.items beneath a named menu", () => {
 	});
 });
 
+describe("computer.takeover opt-in modes, where omp decides", () => {
+	/** Records each input call as `method:target:delivery`; window 42 holds input focus while `front` is set. */
+	class DecidingSession extends FakeNativeSession {
+		readonly sent: string[] = [];
+		front = true;
+		takeoverSupported = true;
+		override get capabilities(): DesktopCapabilities {
+			return { ...super.capabilities, takeover: this.takeoverSupported };
+		}
+		override async listWindows(): Promise<DesktopWindow[]> {
+			return [
+				{ ...windowFixture, id: "42", focused: this.front },
+				{ ...windowFixture, id: "7", app: "Notes", pid: 300, focused: !this.front },
+			];
+		}
+		#record(method: string, target: string, opts?: PointerOptions | null): void {
+			const delivery =
+				opts?.takeover === true && opts.returnFocus === true
+					? "takeover"
+					: opts?.takeover === undefined && opts?.returnFocus === undefined
+						? "background"
+						: JSON.stringify(opts);
+			this.sent.push(`${method}:${target}:${delivery}`);
+		}
+		override async click(target: string, _x: number, _y: number, opts?: PointerOptions | null): Promise<void> {
+			this.#record("click", target, opts);
+		}
+		override async typeText(target: string, _text: string, opts?: PointerOptions | null): Promise<void> {
+			this.#record("type", target, opts);
+		}
+		override async keyChord(target: string, _keys: string[], opts?: PointerOptions | null): Promise<void> {
+			this.#record("press", target, opts);
+		}
+		override async axClick(ref: string, opts?: PointerOptions | null): Promise<void> {
+			this.#record("click", ref, opts);
+		}
+	}
+
+	async function run(
+		native: NativeDesktopSession,
+		code: string,
+		takeover: ComputerSessionSnapshot["takeover"],
+	): Promise<Extract<ComputerWorkerOutbound, { type: "result" }>> {
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		const id = crypto.randomUUID();
+		transport.inbound({
+			type: "run",
+			id,
+			code,
+			timeoutMs: 2_000,
+			session: snapshot(false, undefined, takeover),
+			escape: escapeScope(),
+		});
+		const result = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
+		if (result.type !== "result") throw new Error(`Expected computer result, received ${result.type}`);
+		return result;
+	}
+
+	const windowInput =
+		'const w = await desktop.window("42"); await w.click(1, 2); await w.type("hi"); await w.press("cmd+s");';
+	const elementAndDesktop = 'await desktop.ref("e1").click(); await desktop.click(1, 2);';
+
+	/** A prelude over a controller that only answers capabilities, recording the mode each request carried. */
+	function preludeFor(settings: Record<string, unknown>): { prelude: HostEvalPreludeDefinition; modes: string[] } {
+		const session = { ...toolSession(), settings: Settings.isolated({ "computer.enabled": true, ...settings }) };
+		const modes: string[] = [];
+		const prelude = createComputerPrelude(session, () => ({
+			async run() {
+				throw new Error("unexpected run");
+			},
+			async capabilities(runSnapshot) {
+				modes.push(runSnapshot.takeover);
+				return capabilities;
+			},
+			async reset() {},
+			async close() {},
+		}));
+		return { prelude, modes };
+	}
+
+	it("leaves users who set nothing on fallback, and carries an opt-in mode into every request", async () => {
+		for (const [settings, expected] of [
+			[{}, "fallback"],
+			[{ "computer.takeover": "foreground" }, "foreground"],
+			[{ "computer.takeover": "always" }, "always"],
+		] as const) {
+			const { prelude, modes } = preludeFor(settings);
+			await prelude.invoke({ action: "capabilities" }, { session: toolSession(), toolCallId: "takeover-mode" });
+			expect(modes.length, expected).toBeGreaterThan(0);
+			expect(
+				modes.every(mode => mode === expected),
+				expected,
+			).toBe(true);
+		}
+	});
+
+	it("shows the model a takeover option only in the modes that accept one", () => {
+		for (const mode of ["fallback", "refuse"] as const) {
+			const { prelude } = preludeFor({ "computer.takeover": mode });
+			expect(prelude.documentation, mode).toContain("repeat that call with `{ takeover: true }`");
+			expect(prelude.guidance, mode).not.toContain("you never choose it");
+		}
+		for (const mode of ["foreground", "always"] as const) {
+			const { prelude } = preludeFor({ "computer.takeover": mode });
+			expect(prelude.documentation, mode).not.toContain("takeover?");
+			expect(prelude.documentation, mode).not.toContain("takeover: true");
+			expect(prelude.documentation, mode).toContain("input helpers take no `takeover` option");
+			expect(prelude.guidance, mode).toContain("you never choose it");
+		}
+	});
+
+	it("takes over input to the window in front under foreground, printing no notice", async () => {
+		const native = new DecidingSession();
+		const result = await run(native, windowInput, "foreground");
+		if (!result.ok) throw new Error(result.error.message);
+		expect(result.payload.displays).toEqual([]);
+		expect(native.sent).toEqual(["click:42:takeover", "type:42:takeover", "press:42:takeover"]);
+	});
+
+	it("keeps input to a window behind the user's app, element input and desktop input in the background under foreground", async () => {
+		const native = new DecidingSession();
+		native.front = false;
+		expect((await run(native, `${windowInput} ${elementAndDesktop}`, "foreground")).ok).toBe(true);
+		expect(native.sent).toEqual([
+			"click:42:background",
+			"type:42:background",
+			"press:42:background",
+			"click:e1:background",
+			"click:desktop:background",
+		]);
+	});
+
+	it("takes over every window and element call under always, even behind the user's app", async () => {
+		const native = new DecidingSession();
+		native.front = false;
+		expect((await run(native, `${windowInput} ${elementAndDesktop}`, "always")).ok).toBe(true);
+		expect(native.sent).toEqual([
+			"click:42:takeover",
+			"type:42:takeover",
+			"press:42:takeover",
+			"click:e1:takeover",
+			"click:desktop:background",
+		]);
+	});
+
+	it("keeps the default fallback and refuse in the background for a window in front, as before", async () => {
+		for (const mode of ["fallback", "refuse"] as const) {
+			const native = new DecidingSession();
+			expect((await run(native, windowInput, mode)).ok, mode).toBe(true);
+			expect(native.sent, mode).toEqual(["click:42:background", "type:42:background", "press:42:background"]);
+		}
+	});
+
+	it("refuses the model's takeover option under foreground and always with nothing sent, and passes it on under fallback", async () => {
+		const calls = [
+			'await (await desktop.window("42")).click(1, 2, { takeover: true })',
+			'await (await desktop.window("42")).click(1, 2, { takeover: false })',
+			'await (await desktop.ref("e1")).click({ takeover: true })',
+		];
+		for (const mode of ["foreground", "always"] as const) {
+			for (const code of calls) {
+				const native = new DecidingSession();
+				const result = await run(native, code, mode);
+				expect(result.ok, `${mode}: ${code}`).toBe(false);
+				if (result.ok) continue;
+				expect(result.error.message, code).toContain(`computer.takeover setting is "${mode}"`);
+				expect(result.error.message, code).toContain("omp decides when input takes over; nothing was sent");
+				expect(native.sent, code).toEqual([]);
+			}
+		}
+		const native = new DecidingSession();
+		for (const code of calls) expect((await run(native, code, "fallback")).ok, code).toBe(true);
+		expect(native.sent).toEqual([
+			'click:42:{"takeover":true}',
+			'click:42:{"takeover":false}',
+			'click:e1:{"takeover":true}',
+		]);
+	});
+
+	it("never takes over on a backend without takeover", async () => {
+		for (const mode of ["foreground", "always"] as const) {
+			const native = new DecidingSession();
+			native.takeoverSupported = false;
+			expect((await run(native, windowInput, mode)).ok, mode).toBe(true);
+			expect(native.sent, mode).toEqual(["click:42:background", "type:42:background", "press:42:background"]);
+		}
+	});
+
+	it("names the foreground route, not a takeover option, after a macOS background move under foreground", async () => {
+		class MacSession extends DecidingSession {
+			override get capabilities(): DesktopCapabilities {
+				return { ...super.capabilities, backend: "quartz" };
+			}
+		}
+		const native = new MacSession();
+		native.front = false;
+		const result = await run(native, 'await (await desktop.window("42")).move(1, 2);', "foreground");
+		if (!result.ok) throw new Error(result.error.message);
+		const [note] = result.payload.displays.flatMap(block => (block.type === "text" ? [block.text] : []));
+		expect(note).toStartWith("move ran in the background, which gives the app no hover");
+		expect(note).toEndWith("where omp takes over its input so a click reaches the control");
+		expect(note).not.toContain("takeover: true");
+	});
+});
+
 describe("computer background fallback", () => {
 	const reason = "window 42 (Wish) reads the hardware pointer for button presses";
 	const ran = `click ran in takeover because ${reason}; the input was delivered, and `;
@@ -4767,18 +4973,18 @@ describe("computer background fallback", () => {
 		native: NativeDesktopSession,
 	): (
 		code: string,
-		backgroundFallback: ComputerSessionSnapshot["backgroundFallback"],
+		takeover: ComputerSessionSnapshot["takeover"],
 	) => Promise<Extract<ComputerWorkerOutbound, { type: "result" }>> {
 		const transport = new MemoryTransport();
 		new ComputerWorkerCore(transport, () => native);
-		return async (code, backgroundFallback) => {
+		return async (code, takeover) => {
 			const id = crypto.randomUUID();
 			transport.inbound({
 				type: "run",
 				id,
 				code,
 				timeoutMs: 2_000,
-				session: snapshot(false, undefined, backgroundFallback),
+				session: snapshot(false, undefined, takeover),
 				escape: escapeScope(),
 			});
 			const message = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
@@ -4790,9 +4996,9 @@ describe("computer background fallback", () => {
 	function run(
 		native: NativeDesktopSession,
 		code: string,
-		backgroundFallback: ComputerSessionSnapshot["backgroundFallback"],
+		takeover: ComputerSessionSnapshot["takeover"],
 	): Promise<Extract<ComputerWorkerOutbound, { type: "result" }>> {
-		return worker(native)(code, backgroundFallback);
+		return worker(native)(code, takeover);
 	}
 
 	function texts(result: Extract<ComputerWorkerOutbound, { type: "result" }>): string[] {
@@ -4802,14 +5008,14 @@ describe("computer background fallback", () => {
 
 	it("reruns a refused background call once in takeover and says so, naming the app focus returned to", async () => {
 		const native = new RefusingSession();
-		const result = await run(native, clickTarget, "takeover");
+		const result = await run(native, clickTarget, "fallback");
 		expect(notice(result)).toContain("returned to Notes");
 		expect(native.sent).toEqual([{}, { takeover: true, returnFocus: true }]);
 
 		// Negative control: an error other than BackgroundUnavailable is never rerun.
 		const failing = new RefusingSession();
 		failing.refusal = "InputFailed: window 42 rejected the event";
-		const failed = await run(failing, clickTarget, "takeover");
+		const failed = await run(failing, clickTarget, "fallback");
 		expect(failed.ok).toBe(false);
 		if (failed.ok) return;
 		expect(failed.error.message).toStartWith("InputFailed: window 42 rejected the event");
@@ -4820,7 +5026,7 @@ describe("computer background fallback", () => {
 		for (const unsent of ["; nothing was sent", ", so nothing was sent", "; no input was sent"]) {
 			const native = new RefusingSession();
 			native.refusal = `BackgroundUnavailable: ${reason}${unsent}`;
-			const result = await run(native, clickTarget, "takeover");
+			const result = await run(native, clickTarget, "fallback");
 			expect(texts(result), unsent).toEqual([`${ran}focus returned to Notes`]);
 		}
 	});
@@ -4847,19 +5053,19 @@ describe("computer background fallback", () => {
 		}
 		const said = `type sent the text but could not confirm it arrived: ${unconfirmed}`;
 		const native = new TypingSession();
-		const typed = await run(native, 'await (await desktop.window("42")).type("hi")', "takeover");
+		const typed = await run(native, 'await (await desktop.window("42")).type("hi")', "fallback");
 		expect(texts(typed)).toEqual([
 			`type ran in takeover because ${reason}; the input was sent, and focus returned to Notes`,
 			said,
 		]);
-		const element = await run(native, 'await (await desktop.ref("e1")).type("hi", { takeover: true })', "takeover");
+		const element = await run(native, 'await (await desktop.ref("e1")).type("hi", { takeover: true })', "fallback");
 		expect(texts(element)).toEqual([said]);
 
 		// Negative control: confirmed text adds nothing, and the fallback says it
 		// was delivered.
 		native.result = { focusReturn: native.report ?? undefined };
-		expect(texts(await run(native, 'await (await desktop.ref("e1")).type("hi")', "takeover"))).toEqual([]);
-		expect(texts(await run(native, 'await (await desktop.window("42")).type("hi")', "takeover"))).toEqual([
+		expect(texts(await run(native, 'await (await desktop.ref("e1")).type("hi")', "fallback"))).toEqual([]);
+		expect(texts(await run(native, 'await (await desktop.window("42")).type("hi")', "fallback"))).toEqual([
 			`type ran in takeover because ${reason}; the input was delivered, and focus returned to Notes`,
 		]);
 	});
@@ -4890,35 +5096,35 @@ describe("computer background fallback", () => {
 		// takeover print no note and do not use it up.
 		const mac = new MoveSession("quartz");
 		const runMac = worker(mac);
-		expect(texts(await runMac(`${win} await w.move(1, 2, { takeover: true });`, "takeover"))).toEqual([]);
-		expect(texts(await runMac(`${win} await w.screenshot({ silent: true });`, "takeover"))).toEqual([]);
+		expect(texts(await runMac(`${win} await w.move(1, 2, { takeover: true });`, "fallback"))).toEqual([]);
+		expect(texts(await runMac(`${win} await w.screenshot({ silent: true });`, "fallback"))).toEqual([]);
 		expect(
 			texts(
 				await runMac(
 					'await desktop.move(1, 2); await (await desktop.display("display-1")).move(1, 2);',
-					"takeover",
+					"fallback",
 				),
 			),
 		).toEqual([]);
 		mac.refuseMove = true;
-		const fellBack = texts(await runMac(`${win} await w.move(1, 2);`, "takeover"));
+		const fellBack = texts(await runMac(`${win} await w.move(1, 2);`, "fallback"));
 		expect(fellBack).toHaveLength(1);
 		expect(fellBack[0]).toStartWith("move ran in takeover because");
 		mac.refuseMove = false;
 		// A run that fails after a background move delivers only its error, so it leaves the note unspent.
-		const failed = await runMac(`${win} await w.move(1, 2); assert(false, "stop");`, "takeover");
+		const failed = await runMac(`${win} await w.move(1, 2); assert(false, "stop");`, "fallback");
 		expect(failed.ok).toBe(false);
 		// Background moves, with and without `takeover: false`, in one run and then as separate runs (as eval
 		// sends each window call), print one note for the whole session.
 		mac.sent.length = 0;
 		const [note, ...rest] = texts(
-			await runMac(`${win} await w.move(1, 2); await w.move(3, 4, { takeover: false });`, "takeover"),
+			await runMac(`${win} await w.move(1, 2); await w.move(3, 4, { takeover: false });`, "fallback"),
 		);
 		expect(rest).toEqual([]);
 		expect(note).toStartWith(hover);
 		expect(note).toEndWith("click it with { takeover: true }");
-		expect(texts(await runMac(`${win} await w.move(5, 6);`, "takeover"))).toEqual([]);
-		expect(texts(await runMac(`${win} await w.move(7, 8);`, "takeover"))).toEqual([]);
+		expect(texts(await runMac(`${win} await w.move(5, 6);`, "fallback"))).toEqual([]);
+		expect(texts(await runMac(`${win} await w.move(7, 8);`, "fallback"))).toEqual([]);
 		expect(mac.sent).toEqual([{}, { takeover: false }, {}, {}]);
 		// Under refuse, the note names no takeover, which the setting would refuse.
 		const [refused, ...more] = texts(await run(mac, `${win} await w.move(1, 2); await w.move(3, 4);`, "refuse"));
@@ -4929,7 +5135,7 @@ describe("computer background fallback", () => {
 		// Background moves on Linux and Windows print nothing.
 		for (const backend of ["x11", "wayland", "win32"]) {
 			const other = new MoveSession(backend);
-			expect(texts(await run(other, `${win} await w.move(1, 2); await w.move(3, 4);`, "takeover")), backend).toEqual(
+			expect(texts(await run(other, `${win} await w.move(1, 2); await w.move(3, 4);`, "fallback")), backend).toEqual(
 				[],
 			);
 			expect(other.sent, backend).toEqual([{}, {}]);
@@ -4953,7 +5159,7 @@ describe("computer background fallback", () => {
 		const result = await run(
 			forced,
 			'await (await desktop.window("42")).click(1, 2, { takeover: true })',
-			"takeover",
+			"fallback",
 		);
 		expect(texts(result)).toEqual([]);
 		expect(forced.sent).toEqual([{ takeover: true }]);
@@ -4962,7 +5168,7 @@ describe("computer background fallback", () => {
 		const refused = await run(
 			background,
 			'await (await desktop.window("42")).click(1, 2, { takeover: false })',
-			"takeover",
+			"fallback",
 		);
 		expect(refused.ok).toBe(false);
 		if (refused.ok) return;
@@ -4974,7 +5180,7 @@ describe("computer background fallback", () => {
 		const stepped = new RefusingSession();
 		stepped.refusal =
 			"UserIntervened: window 42's application came to the front during background input; no further input was sent; inspect the window";
-		const intervened = await run(stepped, clickTarget, "takeover");
+		const intervened = await run(stepped, clickTarget, "fallback");
 		expect(intervened.ok).toBe(false);
 		if (intervened.ok) return;
 		expect(intervened.error.message).toStartWith("UserIntervened: window 42's application came to the front");
@@ -4992,7 +5198,7 @@ describe("computer background fallback", () => {
 			}
 		}
 		const failing = new FailingRerun();
-		const failed = await run(failing, clickTarget, "takeover");
+		const failed = await run(failing, clickTarget, "fallback");
 		expect(failed.ok).toBe(false);
 		if (failed.ok) return;
 		expect(failed.error.message).toBe(
@@ -5128,7 +5334,7 @@ describe("computer background fallback", () => {
 		it("sends each as before under takeover", async () => {
 			for (const { code, call } of foreground) {
 				const native = new ForegroundSession();
-				const result = await run(native, code, "takeover");
+				const result = await run(native, code, "fallback");
 				expect(result.ok, code).toBe(true);
 				expect(native.calls, code).toEqual([call]);
 			}
@@ -5186,7 +5392,7 @@ describe("computer background fallback", () => {
 				'await desktop.apps.open("https://example.com");',
 				'await desktop.apps.open("shell:AppsFolder\\\\Calculator!App");',
 			].join("\n");
-			expect((await run(native, code, "takeover")).ok).toBe(true);
+			expect((await run(native, code, "fallback")).ok).toBe(true);
 			expect(native.opened).toEqual([
 				{ id: here("computer.test.ts"), options: { reveal: true } },
 				{ id: here("computer.test.ts"), options: { app: "Editor" } },
@@ -5205,7 +5411,7 @@ describe("computer background fallback", () => {
 				'await desktop.apps.open("~/notes.txt", { app: "~/Applications/Editor.app" });',
 				'await desktop.apps.open("~");',
 			].join("\n");
-			expect((await run(native, code, "takeover")).ok).toBe(true);
+			expect((await run(native, code, "fallback")).ok).toBe(true);
 			const home = os.homedir();
 			expect(native.opened).toEqual([
 				{ id: path.join(home, "Desktop/Bench/Inbox"), options: {} },
@@ -5237,7 +5443,7 @@ describe("computer background fallback", () => {
 				'await desktop.apps.open("README.md", { app: "~editor.desktop" });',
 				'await desktop.apps.open("~Editor");',
 			].join("\n");
-			expect((await run(native, code, "takeover")).ok).toBe(true);
+			expect((await run(native, code, "fallback")).ok).toBe(true);
 			expect(native.opened).toEqual([
 				{ id: "computer.test.ts", options: {} },
 				{ id: "README.md", options: { app: "computer.test.ts" } },
@@ -5256,7 +5462,7 @@ describe("computer background fallback", () => {
 			expect(refused.error.message).toContain("Use setValue(), press() or another AX action");
 			expect(elsewhere.calls).toEqual([]);
 
-			expect((await run(elsewhere, 'await (await desktop.ref("e1")).focus()', "takeover")).ok).toBe(true);
+			expect((await run(elsewhere, 'await (await desktop.ref("e1")).focus()', "fallback")).ok).toBe(true);
 			expect(elsewhere.calls).toEqual(["focus:e1"]);
 
 			class MacSession extends ForegroundSession {
@@ -5291,7 +5497,7 @@ describe("computer background fallback", () => {
 				expect(mac.calls, action).toEqual([]);
 
 				// Native is sent the spelling the refusal checked.
-				expect((await run(mac, code, "takeover")).ok, action).toBe(true);
+				expect((await run(mac, code, "fallback")).ok, action).toBe(true);
 				expect(mac.calls, action).toEqual(["perform:axopen"]);
 			}
 
@@ -5449,7 +5655,7 @@ describe("computer background fallback", () => {
 					expect(result.error.message, code).toStartWith("BackgroundUnavailable: ");
 					expect(result.error.message, code).toContain(named);
 					expect(result.error.message, code).toContain("which takes the user's keyboard while it is open");
-					expect(result.error.message, code).toContain('computer.backgroundFallback setting is "refuse"');
+					expect(result.error.message, code).toContain('computer.takeover setting is "refuse"');
 					expect(result.error.message, code).toContain("win.menu.select(...)");
 					expect(result.error.message, code).toContain("an element action such as press()");
 					expect(native.calls, code).toEqual([]);
@@ -5459,7 +5665,7 @@ describe("computer background fallback", () => {
 			it("sends each as before under takeover", async () => {
 				for (const { code, call } of menus) {
 					const native = new MacSession();
-					const result = await run(native, code, "takeover");
+					const result = await run(native, code, "fallback");
 					expect(result.ok, code).toBe(true);
 					expect(native.calls, code).toEqual([call]);
 				}
@@ -5599,7 +5805,7 @@ describe("computer background fallback", () => {
 						expect(result.error.message, code).toStartWith("BackgroundUnavailable: ");
 						expect(result.error.message, code).toContain(`${named} would open its menu`);
 						expect(result.error.message, code).toContain("which takes the user's keyboard while it is open");
-						expect(result.error.message, code).toContain('computer.backgroundFallback setting is "refuse"');
+						expect(result.error.message, code).toContain('computer.takeover setting is "refuse"');
 						expect(result.error.message, code).toContain("win.menu.select(...)");
 						expect(result.error.message, code).toContain("tell the user the step needs their screen");
 						expect(native.calls, code).toEqual([]);
@@ -5609,7 +5815,7 @@ describe("computer background fallback", () => {
 				it("sends each as before under takeover", async () => {
 					for (const { role, code, call } of controls) {
 						const native = new ControlSession(role);
-						expect((await run(native, code, "takeover")).ok, code).toBe(true);
+						expect((await run(native, code, "fallback")).ok, code).toBe(true);
 						expect(native.calls, code).toEqual([call]);
 					}
 				});
@@ -5660,7 +5866,7 @@ describe("computer background fallback", () => {
 					]);
 
 					const taking = new ControlSession();
-					expect((await run(taking, code, "takeover")).ok).toBe(true);
+					expect((await run(taking, code, "fallback")).ok).toBe(true);
 					expect(taking.calls).toEqual(["click:42:-", "click:42:-", "axClick:-", "holdMouse:42:-", "drag:42:-"]);
 				});
 
@@ -5709,7 +5915,7 @@ describe("computer background fallback", () => {
 						expect(message, code).toStartWith(
 							`BackgroundUnavailable: ${refusals[method]} would open its menu, which takes the user's keyboard while it is open`,
 						);
-						expect(message, code).toContain('computer.backgroundFallback setting is "refuse"');
+						expect(message, code).toContain('computer.takeover setting is "refuse"');
 						expect(message, code).toContain("win.menu.select(...)");
 						expect(message, code).toContain("tell the user the step needs their screen");
 						expect(message, code).not.toContain("no takeover happened");
@@ -5743,7 +5949,7 @@ describe("computer background fallback", () => {
 		it("releases a grant acquired before the user chose refuse, at the next run", async () => {
 			const held = new ForegroundSession();
 			held.controlActive = true;
-			expect((await run(held, "return 1", "takeover")).ok).toBe(true);
+			expect((await run(held, "return 1", "fallback")).ok).toBe(true);
 			expect(held.controlActive).toBe(true);
 			expect((await run(held, "return 1", "refuse")).ok).toBe(true);
 			expect(held.controlActive).toBe(false);
@@ -5763,7 +5969,7 @@ describe("computer background fallback", () => {
 		const rejected = await run(
 			native,
 			'const win = await desktop.window("42"); await win.holdMouse(1, 2, { duration: 0, returnFocus: true });',
-			"takeover",
+			"fallback",
 		);
 		expect(rejected.ok).toBe(false);
 		if (!rejected.ok) expect(rejected.error.message).toContain("unknown option(s): returnFocus");
@@ -5773,7 +5979,7 @@ describe("computer background fallback", () => {
 			"await win.holdMouse(1, 2, { duration: 0, takeover: true });",
 			"await win.holdKeys(['a'], { duration: 0 });",
 		].join("\n");
-		await run(native, code, "takeover");
+		await run(native, code, "fallback");
 		expect(holds.map(options => options.returnFocus)).toEqual([undefined, undefined, true]);
 	});
 
@@ -5786,7 +5992,7 @@ describe("computer background fallback", () => {
 				frontPid,
 				keyboard,
 			};
-			return notice(await run(native, clickTarget, "takeover"));
+			return notice(await run(native, clickTarget, "fallback"));
 		};
 		expect(await said(DesktopKeyboardReturn.HandedBack)).toEndWith("handed the keyboard back to Notes's window");
 		expect(await said(DesktopKeyboardReturn.HandedBack, 400)).toEndWith(
@@ -5808,26 +6014,26 @@ describe("computer background fallback", () => {
 	it("reports where native saw focus end, not the window list's focused flag", async () => {
 		const elsewhere = new RefusingSession();
 		elsewhere.report = { handedBack: false, previousPid: 300, frontPid: 400 };
-		const third = notice(await run(elsewhere, clickTarget, "takeover"));
+		const third = notice(await run(elsewhere, clickTarget, "fallback"));
 		expect(third).toContain("on Mail");
 		expect(third).toContain("did not return to Notes");
 		expect(third).not.toContain("returned to");
 
 		const stuck = new RefusingSession();
 		stuck.report = { handedBack: false, previousPid: 300, frontPid: 200 };
-		const stayed = notice(await run(stuck, clickTarget, "takeover"));
+		const stayed = notice(await run(stuck, clickTarget, "fallback"));
 		expect(stayed).toContain("stayed on Wish");
 		expect(stayed).toContain("did not return to Notes");
 
 		const unknown = new RefusingSession();
 		unknown.report = null;
-		const unread = notice(await run(unknown, clickTarget, "takeover"));
+		const unread = notice(await run(unknown, clickTarget, "fallback"));
 		expect(unread).toContain("not confirmed");
 		expect(unread).not.toContain("Notes");
 
 		const front = new RefusingSession();
 		front.report = { handedBack: true, previousPid: 300 };
-		expect(notice(await run(front, clickTarget, "takeover"))).toContain("not confirmed");
+		expect(notice(await run(front, clickTarget, "fallback"))).toContain("not confirmed");
 	});
 });
 

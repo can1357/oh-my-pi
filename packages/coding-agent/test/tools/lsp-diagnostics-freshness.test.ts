@@ -13,7 +13,7 @@ import {
 	type LspClient,
 	type ServerConfig,
 } from "@oh-my-pi/pi-coding-agent/lsp/types";
-import { EquivalentUriMap, fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
+import { EquivalentUriMap, fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/uri";
 import type { DeferredDiagnosticsEntry, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
