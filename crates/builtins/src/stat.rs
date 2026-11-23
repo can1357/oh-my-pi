@@ -8,6 +8,9 @@ use crate::host::{self, Host, Utility, matches_parser};
 #[cfg(any(unix, windows))]
 pub(crate) use imp::Stat;
 
+#[cfg(any(unix, windows))]
+mod bsd;
+
 #[cfg(not(any(unix, windows)))]
 pub(crate) struct Stat {
 	matches: clap::ArgMatches,
@@ -69,6 +72,7 @@ mod imp {
 		libc::mode_t,
 	};
 
+	use super::bsd;
 	use crate::{
 		fsmeta::metadata_get_time,
 		host::{self, Host, Utility, matches_parser, strip_errno},
@@ -156,8 +160,7 @@ for details about the options it supports.";
 		pub const FORMAT: &str = "format";
 		pub const PRINTF: &str = "printf";
 		pub const TERSE: &str = "terse";
-		pub const BSD_SHELL: &str = "bsd-shell";
-		pub const BSD_TIMEFMT: &str = "bsd-timefmt";
+		pub const BSD_ARGV: &str = "bsd-argv";
 		pub const FILES: &str = "files";
 	}
 
@@ -400,7 +403,6 @@ for details about the options it supports.";
 		show_fs:            bool,
 		from_user:          bool,
 		files:              Vec<OsString>,
-		time_format:        Option<String>,
 		time_zone:          TimeZone,
 		#[cfg_attr(not(unix), allow(dead_code))]
 		mount_list:         OnceCell<Option<Vec<OsString>>>,
@@ -1119,19 +1121,12 @@ for details about the options it supports.";
 				show_fs,
 				from_user: !format_str.is_empty(),
 				files,
-				time_format: matches.get_one::<String>(options::BSD_TIMEFMT).cloned(),
 				time_zone: shell_time_zone(host),
 				mount_list: OnceCell::new(),
 				mount_list_needed,
 				default_tokens,
 				default_dev_tokens,
 			})
-		}
-
-		/// The `strftime` format for human-readable time directives; BSD `-t`
-		/// overrides the GNU default.
-		fn time_fmt(&self) -> &str {
-			self.time_format.as_deref().unwrap_or(PRETTY_DATETIME_FORMAT)
 		}
 
 		/// Host mount point containing `p`; only meaningful for paths the
@@ -1300,19 +1295,19 @@ for details about the options it supports.";
 						'U' => OutputType::Str("UNKNOWN".to_string()),
 
 						// time of file birth, human-readable; - if unknown
-						'w' => OutputType::Str(pretty_time(meta, MetadataTimeField::Birth, self.time_fmt(), &self.time_zone)),
+						'w' => OutputType::Str(pretty_time(meta, MetadataTimeField::Birth, PRETTY_DATETIME_FORMAT, &self.time_zone)),
 						// time of file birth, seconds since Epoch; 0 if unknown
 						'W' => epoch_time(meta, MetadataTimeField::Birth),
 						// time of last access, human-readable
-						'x' => OutputType::Str(pretty_time(meta, MetadataTimeField::Access, self.time_fmt(), &self.time_zone)),
+						'x' => OutputType::Str(pretty_time(meta, MetadataTimeField::Access, PRETTY_DATETIME_FORMAT, &self.time_zone)),
 						// time of last access, seconds since Epoch
 						'X' => epoch_time(meta, MetadataTimeField::Access),
 						// time of last data modification, human-readable
-						'y' => OutputType::Str(pretty_time(meta, MetadataTimeField::Modification, self.time_fmt(), &self.time_zone)),
+						'y' => OutputType::Str(pretty_time(meta, MetadataTimeField::Modification, PRETTY_DATETIME_FORMAT, &self.time_zone)),
 						// time of last data modification, seconds since Epoch
 						'Y' => epoch_time(meta, MetadataTimeField::Modification),
 						// time of last status change, human-readable
-						'z' => OutputType::Str(pretty_time(meta, MetadataTimeField::Change, self.time_fmt(), &self.time_zone)),
+						'z' => OutputType::Str(pretty_time(meta, MetadataTimeField::Change, PRETTY_DATETIME_FORMAT, &self.time_zone)),
 						// time of last status change, seconds since Epoch
 						'Z' => epoch_time(meta, MetadataTimeField::Change),
 						'R' => unsigned_hex(meta.rdev()),
@@ -1469,448 +1464,11 @@ for details about the options it supports.";
 		}
 	}
 
-	///
-	/// BSD stat's `-f` takes a format string (`stat -f "%Sm %N" file`), while
-	/// GNU's `-f` is `--file-system`; parsed as GNU, a BSD invocation prints
-	/// filesystem info for each real operand and errors on the format operand.
-	/// An invocation is treated as BSD when a `-f` cluster (optionally with the
-	/// BSD boolean flags `L`/`n`/`q`/`F`/`s`/`x`) carries a format value
-	/// containing `%` — GNU filesystem mode would have to target a file
-	/// literally named like a format string, which never happens in practice —
-	/// or when a cluster of BSD boolean flags contains the BSD-only output
-	/// styles `-s` (shell assignments) or `-x` (Linux-like verbose). Detected
-	/// invocations are rewritten to the GNU equivalent (`-c`/`--printf` plus a
-	/// translated format, or hidden style/timefmt options) before clap parsing.
-	///
-	/// Returns `None` when the invocation is not BSD-shaped, `Some(Err(_))`
-	/// when it is BSD-shaped but uses an option or directive with no GNU
-	/// counterpart.
-	fn rewrite_bsd_invocation(argv: &[OsString]) -> Option<Result<Vec<OsString>, String>> {
-		let toks: Vec<Cow<'_, str>> = argv.iter().map(|a| a.to_string_lossy()).collect();
-		let mut detected = false;
-		for (idx, tok) in toks.iter().enumerate().skip(1) {
-			if tok.as_ref() == "--" {
-				break;
-			}
-			let Some(cluster) = tok.strip_prefix('-') else {
-				continue;
-			};
-			if cluster.is_empty() || cluster.starts_with('-') {
-				continue;
-			}
-			// `-s` / `-x` are BSD-only output styles: a cluster of BSD boolean
-			// flags containing one marks the invocation (GNU stat has neither).
-			if cluster
-				.chars()
-				.all(|c| matches!(c, 'L' | 'n' | 'q' | 'F' | 's' | 'x'))
-				&& cluster.chars().any(|c| matches!(c, 's' | 'x'))
-			{
-				detected = true;
-				break;
-			}
-			let Some(fpos) = cluster.find('f') else {
-				continue;
-			};
-			if !cluster[..fpos]
-				.chars()
-				.all(|c| matches!(c, 'L' | 'n' | 'q' | 'F' | 's' | 'x'))
-			{
-				continue;
-			}
-			let attached = &cluster[fpos + 1..];
-			let format = if attached.is_empty() {
-				toks.get(idx + 1).map(Cow::as_ref)
-			} else {
-				Some(attached)
-			};
-			if format.is_some_and(|f| f.contains('%')) {
-				detected = true;
-				break;
-			}
-		}
-		if !detected {
-			return None;
-		}
-		Some(bsd_to_gnu_argv(argv, &toks))
-	}
-
-	/// Output style selected by a BSD invocation.
-	enum BsdStyle {
-		/// `-f <fmt>`: caller-supplied BSD format string.
-		Custom(String),
-		/// `-s`: eval-able `st_dev=… st_ino=…` shell assignments.
-		Shell,
-		/// `-x`: Linux-like verbose block.
-		Verbose,
-	}
-
-	/// Parses a detected BSD invocation and produces the equivalent GNU argv.
-	fn bsd_to_gnu_argv(argv: &[OsString], toks: &[Cow<'_, str>]) -> Result<Vec<OsString>, String> {
-		let mut follow = false;
-		let mut no_newline = false;
-		let mut style: Option<BsdStyle> = None;
-		let mut timefmt: Option<String> = None;
-		let mut files: Vec<OsString> = Vec::new();
-
-		let mut i = 1;
-		while i < toks.len() {
-			if toks[i].as_ref() == "--" {
-				files.extend_from_slice(&argv[i + 1..]);
-				break;
-			}
-			let cluster: Vec<char> = match toks[i].strip_prefix('-') {
-				Some(c) if !c.is_empty() && !c.starts_with('-') => c.chars().collect(),
-				// Operands keep the original (possibly non-UTF8) bytes.
-				_ => {
-					files.push(argv[i].clone());
-					i += 1;
-					continue;
-				},
-			};
-			let mut consumed_next = false;
-			let mut k = 0;
-			while k < cluster.len() {
-				match cluster[k] {
-					'L' => follow = true,
-					'n' => no_newline = true,
-					// `-q` (suppress error messages) and `-F` (ls -F type
-					// decorations) have no GNU counterpart worth emulating.
-					'q' | 'F' => {},
-					// Output styles; like BSD, the last one seen wins.
-					's' => style = Some(BsdStyle::Shell),
-					'x' => style = Some(BsdStyle::Verbose),
-					c @ ('f' | 't') => {
-						// The rest of the cluster is the attached value,
-						// otherwise the next token is.
-						let value: String = if k + 1 < cluster.len() {
-							cluster[k + 1..].iter().collect()
-						} else {
-							consumed_next = true;
-							match toks.get(i + 1) {
-								Some(v) => v.to_string(),
-								None => return Err(format!("option '-{c}' requires an argument")),
-							}
-						};
-						if c == 'f' {
-							style = Some(BsdStyle::Custom(value));
-						} else {
-							timefmt = Some(value);
-						}
-						break;
-					},
-					other => {
-						return Err(format!(
-							"option '-{other}' is not supported (BSD stat compatibility)"
-						));
-					},
-				}
-				k += 1;
-			}
-			i += 1 + usize::from(consumed_next);
-		}
-
-		let mut out: Vec<OsString> = Vec::with_capacity(files.len() + 7);
-		out.push(argv[0].clone());
-		if follow {
-			out.push("-L".into());
-		}
-		match style {
-			// `-s` renders directly from the metadata (the full octal
-			// `st_mode` and `st_flags` have no GNU format directive); its
-			// timestamps are epoch integers regardless of `-t`, as on BSD.
-			Some(BsdStyle::Shell) => out.push("--bsd-shell".into()),
-			Some(BsdStyle::Verbose) => {
-				out.push("--bsd-timefmt".into());
-				out.push(timefmt.unwrap_or_else(|| BSD_VERBOSE_TIMEFMT.into()).into());
-				out.push(if no_newline { "--printf".into() } else { "-c".into() });
-				out.push(BSD_VERBOSE_FORMAT.into());
-			},
-			Some(BsdStyle::Custom(format)) => {
-				let translated = translate_bsd_format(&format, no_newline)?;
-				if let Some(timefmt) = timefmt {
-					out.push("--bsd-timefmt".into());
-					out.push(timefmt.into());
-				}
-				// `--printf` suppresses the mandatory trailing newline (BSD
-				// `-n`); the translator escapes literal backslashes so text
-				// survives printf mode.
-				out.push(if no_newline { "--printf".into() } else { "-c".into() });
-				out.push(translated.into());
-			},
-			None => return Err("BSD-style '-f' expects a format string".to_string()),
-		}
-		out.push("--".into());
-		out.extend(files);
-		Ok(out)
-	}
-
-	/// Translates a BSD stat format string into the GNU format language used by
-	/// this implementation. Directives with no GNU counterpart (`%f` user
-	/// flags, `%v` inode generation, `%Y` symlink target, ...) are rejected.
-	/// With `printf_mode` set, literal backslashes are escaped so the result
-	/// survives `--printf` escape processing unchanged.
-	fn translate_bsd_format(fmt: &str, printf_mode: bool) -> Result<String, String> {
-		let chars: Vec<char> = fmt.chars().collect();
-		let mut out = String::with_capacity(fmt.len() + 8);
-		let mut i = 0;
-		while i < chars.len() {
-			if chars[i] != '%' {
-				if printf_mode && chars[i] == '\\' {
-					out.push_str(r"\\");
-				} else {
-					out.push(chars[i]);
-				}
-				i += 1;
-				continue;
-			}
-			let start = i;
-			i += 1;
-			if i >= chars.len() {
-				out.push('%');
-				break;
-			}
-			if chars[i] == '%' {
-				out.push_str("%%");
-				i += 1;
-				continue;
-			}
-			// Flags, width, and precision use the same syntax in both format
-			// languages; copy them through verbatim.
-			let mut spec = String::new();
-			while i < chars.len() && matches!(chars[i], '#' | '+' | '-' | '0' | ' ') {
-				spec.push(chars[i]);
-				i += 1;
-			}
-			while i < chars.len() && chars[i].is_ascii_digit() {
-				spec.push(chars[i]);
-				i += 1;
-			}
-			if i < chars.len() && chars[i] == '.' {
-				spec.push('.');
-				i += 1;
-				while i < chars.len() && chars[i].is_ascii_digit() {
-					spec.push(chars[i]);
-					i += 1;
-				}
-			}
-			// BSD grammar: %[flags][width][.prec][fmt][sub]datum, with
-			// fmt ∈ {D,O,U,X,F,S} (output representation) and sub ∈ {H,M,L}
-			// (datum sub-field). Only `S` ("string form") changes the GNU
-			// mapping; the numeric representations keep GNU's defaults.
-			let mut string_form = false;
-			if i < chars.len() && matches!(chars[i], 'D' | 'O' | 'U' | 'X' | 'F' | 'S') {
-				string_form = chars[i] == 'S';
-				i += 1;
-			}
-			let mut sub = None;
-			if i < chars.len() && matches!(chars[i], 'H' | 'M' | 'L') {
-				sub = Some(chars[i]);
-				i += 1;
-			}
-			let Some(&datum) = chars.get(i) else {
-				return Err(unsupported_bsd_directive(&chars[start..]));
-			};
-			i += 1;
-			let gnu: &str = match datum {
-				// Times: mtime / atime / ctime / birth; `S` selects the
-				// human-readable form, otherwise seconds since Epoch.
-				'm' => {
-					if string_form {
-						"y"
-					} else {
-						"Y"
-					}
-				},
-				'a' => {
-					if string_form {
-						"x"
-					} else {
-						"X"
-					}
-				},
-				'c' => {
-					if string_form {
-						"z"
-					} else {
-						"Z"
-					}
-				},
-				'B' => {
-					if string_form {
-						"w"
-					} else {
-						"W"
-					}
-				},
-				// File name as typed.
-				'N' => "n",
-				// Size in bytes.
-				'z' => "s",
-				// Owner / group: numeric, or (`S`) by name.
-				'u' => {
-					if string_form {
-						"U"
-					} else {
-						"u"
-					}
-				},
-				'g' => {
-					if string_form {
-						"G"
-					} else {
-						"g"
-					}
-				},
-				// Permissions: octal bits, or (`S`) the human-readable form.
-				'p' if string_form => "A",
-				'p' if matches!(sub, None | Some('L')) => "a",
-				// Inode, hard links, device, rdev, blocks, block size.
-				'i' => "i",
-				'l' => "h",
-				'd' => match sub {
-					Some('H') => "Hd",
-					Some('L') => "Ld",
-					None => "d",
-					Some(_) => return Err(unsupported_bsd_directive(&chars[start..i])),
-				},
-				'r' => match sub {
-					Some('H') => "Hr",
-					Some('L') => "Lr",
-					None => "r",
-					Some(_) => return Err(unsupported_bsd_directive(&chars[start..i])),
-				},
-				'b' => "b",
-				'k' => "o",
-				// File type, human readable (`%HT` / `%T`).
-				'T' => "F",
-				// `%n` and `%t` are literal newline / tab in BSD formats.
-				'n' => {
-					out.push('\n');
-					continue;
-				},
-				't' => {
-					out.push('\t');
-					continue;
-				},
-				_ => return Err(unsupported_bsd_directive(&chars[start..i])),
-			};
-			out.push('%');
-			out.push_str(&spec);
-			out.push_str(gnu);
-		}
-		Ok(out)
-	}
-
-	fn unsupported_bsd_directive(directive: &[char]) -> String {
-		let directive: String = directive.iter().collect();
-		format!("unsupported BSD format directive '{directive}'")
-	}
-
-	/// GNU-language rendering of BSD `stat -x` ("Linux-like" verbose output).
-	const BSD_VERBOSE_FORMAT: &str = concat!(
-		"  File: \"%n\"\n",
-		"  Size: %-11s  FileType: %F\n",
-		"  Mode: (%04a/%.10A)         Uid: (%5u/%8U)  Gid: (%5g/%8G)\n",
-		"Device: %Hd,%Ld   Inode: %i    Links: %h\n",
-		"Access: %x\n",
-		"Modify: %y\n",
-		"Change: %z\n",
-		" Birth: %w",
-	);
-
-	/// BSD `stat -x` renders timestamps `ctime(3)`-style.
-	const BSD_VERBOSE_TIMEFMT: &str = "%a %b %e %H:%M:%S %Y";
-
-	/// BSD `stat -s`: one eval-able line of `st_*=value` shell assignments per
-	/// file, rendered directly from the metadata.
-	fn bsd_shell_exec(matches: &ArgMatches, host: &mut Host) -> i32 {
-		let files: Vec<OsString> = matches
-			.get_many::<OsString>(options::FILES)
-			.map_or_default(|v| v.cloned().collect());
-		if files.is_empty() {
-			host.error(StatError::MissingOperand, 1);
-			return 1;
-		}
-		let follow = matches.get_flag(options::DEREFERENCE);
-		let mut ret = 0;
-		for file in &files {
-			let display_name = file.to_string_lossy();
-			let resolved = host.resolve(file);
-			let result = if follow {
-				host.fs().metadata(&resolved)
-			} else {
-				host.fs().symlink_metadata(&resolved)
-			};
-			match result {
-				Ok(meta) => {
-					let line = bsd_shell_line(&meta, &resolved, host.fs());
-					let _ = writeln!(host.stdout, "{line}");
-				},
-				Err(e) => {
-					let _ = writeln!(&mut host.stderr, "stat: {}", StatError::CannotStat {
-						file:  display_name.quote().to_string(),
-						error: e.to_string(),
-					});
-					ret = 1;
-				},
-			}
-		}
-		ret
-	}
-
-	/// A `stat -s` value; fields the backend does not report print `?`.
-	fn shell_field<T: std::fmt::Display>(value: Option<T>) -> String {
-		value.map_or_else(|| "?".to_string(), |value| value.to_string())
-	}
-
-	fn bsd_shell_line(meta: &Metadata, resolved: &Path, fs: &BlockingFs) -> String {
-		// BSD file flags exist only on native macOS metadata.
-		#[cfg(target_os = "macos")]
-		let flags = shell_field(
-			meta.native()
-				.map(std::os::macos::fs::MetadataExt::st_flags),
-		);
-		#[cfg(not(target_os = "macos"))]
-		let flags = 0u32;
-		// Host Unix metadata carries the raw `st_*` seconds; Windows derives
-		// them from the timestamps, including the change-time fallback.
-		#[cfg(unix)]
-		let (atime, mtime, ctime) = (meta.atime(), meta.mtime(), meta.ctime());
-		#[cfg(windows)]
-		let (atime, mtime, ctime) = {
-			let sec = |field| file_time(meta, field).map(|t| system_time_to_sec(t).0);
-			(
-				sec(MetadataTimeField::Access),
-				sec(MetadataTimeField::Modification),
-				sec(MetadataTimeField::Change),
-			)
-		};
-		let birth = file_time(meta, MetadataTimeField::Birth).map_or(0, |t| system_time_to_sec(t).0);
-		format!(
-			"st_dev={} st_ino={} st_mode=0{:o} st_nlink={} st_uid={} st_gid={} st_rdev={} \
-			 st_size={} st_atime={} st_mtime={} st_ctime={} st_birthtime={birth} st_blksize={} \
-			 st_blocks={} st_flags={flags}",
-			shell_field(meta.dev()),
-			shell_field(meta.ino()),
-			file_mode(meta),
-			shell_field(meta.nlink()),
-			shell_field(meta.uid()),
-			shell_field(meta.gid()),
-			shell_field(meta.rdev()),
-			meta.len(),
-			shell_field(atime),
-			shell_field(mtime),
-			shell_field(ctime),
-			shell_field(meta.blksize()),
-			shell_field(allocated_blocks(meta, resolved, fs)),
-		)
-	}
-
 	/// GNU `-f`/`--file-system` whose first operand names no file but looks
 	/// like a BSD format string (contains `%` or whitespace): rather than
 	/// failing on a nonexistent operand, re-interpret the invocation as BSD
-	/// `stat -f <fmt> <file>...`. Existing-path operands always keep GNU
-	/// filesystem mode.
+	/// `stat -f <fmt> <file>...`, returning its BSD arguments. Existing-path
+	/// operands always keep GNU filesystem mode.
 	fn bsd_filesystem_fallback(matches: &ArgMatches, host: &Host) -> Option<Vec<OsString>> {
 		if !matches.get_flag(options::FILE_SYSTEM)
 			|| matches.contains_id(options::FORMAT)
@@ -1931,30 +1489,16 @@ for details about the options it supports.";
 		if host.fs().symlink_metadata(host.resolve(files[0])).is_ok() {
 			return None;
 		}
-		let translated = translate_bsd_format(&fmt, false).ok()?;
-		let mut argv: Vec<OsString> = Vec::with_capacity(files.len() + 4);
-		argv.push("stat".into());
+		let mut args: Vec<OsString> = Vec::with_capacity(files.len() + 3);
 		if matches.get_flag(options::DEREFERENCE) {
-			argv.push("-L".into());
+			args.push("-L".into());
 		}
-		argv.push("-c".into());
-		argv.push(translated.into());
-		argv.push("--".into());
-		argv.extend(files[1..].iter().map(|f| (*f).clone()));
-		Some(argv)
+		args.push("-f".into());
+		args.push(files[0].clone());
+		args.push("--".into());
+		args.extend(files[1..].iter().map(|f| (*f).clone()));
+		Some(args)
 	}
-
-	/// Builds a [`Stater`] from parsed matches and runs it.
-	fn run_stater(matches: &ArgMatches, host: &mut Host) -> i32 {
-		match Stater::new(matches, host) {
-			Ok(stater) => stater.exec(host),
-			Err(error) => {
-				host.error(error, 1);
-				1
-			},
-		}
-	}
-
 
 	/// Parsed `stat` invocation.
 	pub(crate) struct Stat {
@@ -1966,29 +1510,43 @@ for details about the options it supports.";
 	impl Utility for Stat {
 		const NAME: &'static str = "stat";
 
+		/// BSD stat's `-f` takes a format string (`stat -f "%Sm %N" file`)
+		/// where GNU's `-f` is `--file-system`, and BSD has options GNU lacks
+		/// (`-l`, `-r`, `-s`, `-x`, ...). A BSD-shaped invocation (see
+		/// [`bsd::is_bsd_invocation`]) keeps its raw arguments as operands
+		/// behind the hidden `--bsd-argv` flag; [`bsd::run`] parses them with
+		/// BSD rules.
 		fn rewrite_argv(argv: Vec<OsString>) -> Result<Vec<OsString>, String> {
-			match rewrite_bsd_invocation(&argv) {
-				None => Ok(argv),
-				Some(result) => result,
+			if !bsd::is_bsd_invocation(&argv) {
+				return Ok(argv);
 			}
+			let mut argv = argv.into_iter();
+			let mut rewritten: Vec<OsString> = Vec::with_capacity(argv.len() + 3);
+			rewritten.extend(argv.next());
+			rewritten.push(format!("--{}", options::BSD_ARGV).into());
+			rewritten.push("--".into());
+			rewritten.extend(argv);
+			Ok(rewritten)
 		}
 
 		fn run(self, host: &mut Host) -> i32 {
-			if self.matches.get_flag(options::BSD_SHELL) {
-				return bsd_shell_exec(&self.matches, host);
+			if self.matches.get_flag(options::BSD_ARGV) {
+				let args: Vec<OsString> = self
+					.matches
+					.get_many::<OsString>(options::FILES)
+					.map_or_default(|v| v.cloned().collect());
+				return bsd::run(&args, host);
 			}
-			if let Some(argv) = bsd_filesystem_fallback(&self.matches, host) {
-				return match app().try_get_matches_from(argv) {
-					Ok(matches) => run_stater(&matches, host),
-					// The rebuilt argv is a plain `-c FORMAT -- FILE...`; a
-					// parse failure here is unreachable in practice.
-					Err(err) => {
-						let _ = write!(host.stderr, "{err}");
-						1
-					},
-				};
+			if let Some(args) = bsd_filesystem_fallback(&self.matches, host) {
+				return bsd::run(&args, host);
 			}
-			run_stater(&self.matches, host)
+			match Stater::new(&self.matches, host) {
+				Ok(stater) => stater.exec(host),
+				Err(error) => {
+					host.error(error, 1);
+					1
+				},
+			}
 		}
 	}
 
@@ -2021,16 +1579,10 @@ for details about the options it supports.";
 					.action(ArgAction::SetTrue),
 			)
 			.arg(
-				Arg::new(options::BSD_SHELL)
-					.long(options::BSD_SHELL)
+				Arg::new(options::BSD_ARGV)
+					.long(options::BSD_ARGV)
 					.hide(true)
 					.action(ArgAction::SetTrue),
-			)
-			.arg(
-				Arg::new(options::BSD_TIMEFMT)
-					.long(options::BSD_TIMEFMT)
-					.value_name("TIMEFMT")
-					.hide(true),
 			)
 			.arg(
 				Arg::new(options::FORMAT)
@@ -2098,7 +1650,7 @@ for details about the options it supports.";
 	/// Timestamp behind a time directive. Windows has no POSIX status-change
 	/// time, so `%z`/`%Z` fall back to the last write time, as Cygwin's
 	/// `stat` does.
-	fn file_time(meta: &Metadata, field: MetadataTimeField) -> Option<SystemTime> {
+	pub(super) fn file_time(meta: &Metadata, field: MetadataTimeField) -> Option<SystemTime> {
 		#[cfg(windows)]
 		if matches!(field, MetadataTimeField::Change) {
 			return meta.changed().or_else(|_| meta.modified()).ok();
@@ -2108,7 +1660,7 @@ for details about the options it supports.";
 
 	/// POSIX `st_mode` for `%a`/`%A`/`%f`/`%F` and `stat -s`.
 	#[cfg(unix)]
-	fn file_mode(meta: &Metadata) -> u32 {
+	pub(super) fn file_mode(meta: &Metadata) -> u32 {
 		meta.mode()
 	}
 
@@ -2118,7 +1670,7 @@ for details about the options it supports.";
 	/// bits; directories and symlinks are traversable). Providers without
 	/// Windows attributes report their own mode.
 	#[cfg(windows)]
-	fn file_mode(meta: &Metadata) -> u32 {
+	pub(super) fn file_mode(meta: &Metadata) -> u32 {
 		/// `FILE_ATTRIBUTE_READONLY`.
 		const READONLY: u32 = 0x0000_0001;
 		let Some(attributes) = meta.file_attributes() else {
@@ -2158,14 +1710,14 @@ for details about the options it supports.";
 
 	/// 512-byte blocks for `%b` and `stat -s`.
 	#[cfg(unix)]
-	fn allocated_blocks(meta: &Metadata, _resolved: &Path, _fs: &BlockingFs) -> Option<u64> {
+	pub(super) fn allocated_blocks(meta: &Metadata, _resolved: &Path, _fs: &BlockingFs) -> Option<u64> {
 		meta.blocks()
 	}
 
 	/// 512-byte blocks for `%b` and `stat -s`. Windows host metadata has no
 	/// `st_blocks`, so the filesystem reports the allocated size.
 	#[cfg(windows)]
-	fn allocated_blocks(_meta: &Metadata, resolved: &Path, fs: &BlockingFs) -> Option<u64> {
+	pub(super) fn allocated_blocks(_meta: &Metadata, resolved: &Path, fs: &BlockingFs) -> Option<u64> {
 		fs.allocated_size(resolved)
 			.ok()
 			.map(|size| size.div_ceil(512))
@@ -2277,7 +1829,13 @@ for details about the options it supports.";
 
 #[cfg(all(test, unix))]
 mod tests {
-	use std::{ffi::OsString, fs, path::PathBuf, time::Duration};
+	use std::{
+		ffi::OsString,
+		fs,
+		os::unix::fs::{MetadataExt as _, PermissionsExt as _},
+		path::PathBuf,
+		time::Duration,
+	};
 
 	use clap::Parser as _;
 
@@ -2415,34 +1973,20 @@ mod tests {
 		assert_eq!(stderr, "");
 	}
 
+	/// macOS `stat -f "%Sm %N"`: BSD `-f` takes a format instead of being
+	/// parsed as GNU `--file-system`.
 	#[test]
-	fn bsd_dash_f_format_is_translated() {
-		let (_dir, root) = canonical_tempdir();
-		fs::write(root.join("data.bin"), b"hello world!").unwrap();
+	fn bsd_dash_f_takes_a_format() {
+		let (_dir, root) = bsd_fixture();
 
-		// macOS `stat -f "%Sm %N"`: BSD `-f` takes a format; the invocation is
-		// detected and translated instead of being parsed as `--file-system`.
-		let (code, stdout, stderr) = run_in(root.clone(), vec!["-f", "%Sm %N", "data.bin"]);
-		assert_eq!(code, 0);
-		assert_eq!(stderr, "");
-		assert!(stdout.ends_with(" data.bin\n"), "unexpected stdout: {stdout:?}");
-		assert!(
-			stdout.chars().next().is_some_and(|c| c.is_ascii_digit()),
-			"human-readable mtime should lead: {stdout:?}"
+		assert_eq!(
+			run_in_time_zone(&root, &["-f", "%Sm %N", "data.bin"], "Asia/Tokyo"),
+			(0, "Nov 15 07:13:20 2023 data.bin\n".to_string(), String::new()),
 		);
-
-		// Size, name-as-typed, and epoch mtime.
-		let (code, stdout, stderr) = run_in(root, vec!["-f", "%N: %z (%m)", "data.bin"]);
-		assert_eq!(code, 0);
-		assert_eq!(stderr, "");
-		assert!(stdout.starts_with("data.bin: 12 ("), "unexpected stdout: {stdout:?}");
-		let epoch = stdout
-			.trim_end()
-			.trim_end_matches(')')
-			.rsplit('(')
-			.next()
-			.unwrap();
-		assert!(epoch.parse::<u64>().is_ok(), "epoch mtime should be numeric: {stdout:?}");
+		assert_eq!(
+			run_in(root, vec!["-f", "%N: %z (%m)", "data.bin"]),
+			(0, "data.bin: 12 (1700000000)\n".to_string(), String::new()),
+		);
 	}
 
 	#[test]
@@ -2457,32 +2001,233 @@ mod tests {
 		assert_eq!((code, stdout.as_str(), stderr.as_str()), (0, "3", ""));
 	}
 
-	#[test]
-	fn bsd_string_form_and_subfield_directives() {
-		let (_dir, root) = canonical_tempdir();
-		fs::write(root.join("data.bin"), b"x").unwrap();
-
-		// %HT → %F (file type), %Lp → %a (permission bits, octal).
-		let (code, stdout, stderr) = run_in(root, vec!["-f", "%HT/%Lp", "data.bin"]);
-		assert_eq!(code, 0);
-		assert_eq!(stderr, "");
-		let (kind, perms) = stdout.trim_end().rsplit_once('/').unwrap();
-		assert_eq!(kind, "regular file");
-		assert!(perms.chars().all(|c| c.is_digit(8)), "octal perms expected: {stdout:?}");
+	/// `data.bin` (12 bytes, mode 0644, accessed and modified at
+	/// 1700000000.123456789) and `link -> data.bin`.
+	fn bsd_fixture() -> (tempfile::TempDir, PathBuf) {
+		let (dir, root) = canonical_tempdir();
+		let data = root.join("data.bin");
+		fs::write(&data, b"hello world!").unwrap();
+		fs::set_permissions(&data, fs::Permissions::from_mode(0o644)).unwrap();
+		let time = std::time::UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_789);
+		fs::File::options()
+			.write(true)
+			.open(&data)
+			.unwrap()
+			.set_times(fs::FileTimes::new().set_accessed(time).set_modified(time))
+			.unwrap();
+		std::os::unix::fs::symlink("data.bin", root.join("link")).unwrap();
+		(dir, root)
 	}
 
-	#[test]
-	fn bsd_unsupported_directive_is_rejected() {
-		let (_dir, root) = canonical_tempdir();
-		fs::write(root.join("data.bin"), b"x").unwrap();
+	/// Owner and group names of `path` as BSD `%Su`/`%Sg` print them.
+	fn owner_names(path: &std::path::Path) -> (String, String) {
+		let meta = fs::symlink_metadata(path).unwrap();
+		(
+			uucore::entries::uid2usr(meta.uid()).unwrap_or_else(|_| meta.uid().to_string()),
+			uucore::entries::gid2grp(meta.gid()).unwrap_or_else(|_| meta.gid().to_string()),
+		)
+	}
 
-		let (code, stdout, stderr) = run_in(root, vec!["-f", "%v", "data.bin"]);
-		assert_eq!(code, 1);
-		assert_eq!(stdout, "");
-		assert!(
-			stderr.contains("unsupported BSD format directive '%v'"),
-			"unexpected stderr: {stderr:?}"
+	/// BSD representations, flags, widths, precisions, and sub-fields render
+	/// as macOS `stat -f` does instead of erroring or printing GNU text.
+	#[test]
+	fn bsd_format_directives_match_macos() {
+		let (_dir, root) = bsd_fixture();
+
+		let format = "%Xz|%#Xz|%#Oz|%08.3z|%-5z|%+Dz|%Fm|%.3Fm|%Sp|%SHp|%Lp|%Hp|%HT|%T|%f|%Sf|%v|%N%SY";
+		assert_eq!(
+			run_in(root, vec!["-f", format, "data.bin"]),
+			(
+				0,
+				"c|0xc|014|     012|12   |+12|1700000000.123456789|1700000000.123|-rw-r--r--|rw-|644|10|Regular \
+				 File||0|-|0|data.bin\n"
+					.to_string(),
+				String::new()
+			),
 		);
+	}
+
+	/// `%Y`/`%SY` print a link target (`%SY` with ` -> `), `%T` the `ls -F`
+	/// marker, `%Z` the size; `-L` on a broken link falls back to the link.
+	#[test]
+	fn bsd_symlink_directives_render_target() {
+		let (_dir, root) = bsd_fixture();
+		std::os::unix::fs::symlink("missing", root.join("broken")).unwrap();
+
+		assert_eq!(
+			run_in(root.clone(), vec!["-f", "%N%SY|%Y|%Z|%T|%HT", "link"]),
+			(0, "link -> data.bin|data.bin|8|@|Symbolic Link\n".to_string(), String::new()),
+		);
+		assert_eq!(
+			run_in(root, vec!["-L", "-f", "%HT%SY", "broken"]),
+			(0, "Symbolic Link -> missing\n".to_string(), String::new()),
+		);
+	}
+
+	/// `%Z` prints `major,minor` for a character device rather than its size.
+	#[test]
+	fn bsd_size_or_device_prints_device_numbers() {
+		let expected = if cfg!(target_os = "macos") { "3,2|Character Device\n" } else { "1,3|Character Device\n" };
+		assert_eq!(
+			run_in(PathBuf::from("/"), vec!["-f", "%Z|%HT", "/dev/null"]),
+			(0, expected.to_string(), String::new()),
+		);
+	}
+
+	/// `-l` prints `ls -lT` lines (with ` -> target` for links) in the shell
+	/// time zone.
+	#[test]
+	fn bsd_dash_l_prints_ls_long_lines() {
+		let (_dir, root) = bsd_fixture();
+		let (user, group) = owner_names(&root.join("data.bin"));
+
+		let (code, stdout, stderr) = run_in_time_zone(&root, &["-l", "data.bin", "link"], "Asia/Tokyo");
+		assert_eq!((code, stderr.as_str()), (0, ""));
+		let lines: Vec<&str> = stdout.lines().collect();
+		assert_eq!(lines[0], format!("-rw-r--r-- 1 {user} {group} 12 Nov 15 07:13:20 2023 data.bin"));
+		assert!(lines[1].starts_with('l') && lines[1].ends_with(" link -> data.bin"), "got: {stdout:?}");
+		assert_eq!(lines.len(), 2);
+	}
+
+	/// `-F` implies `-l` and appends the `ls -F` type marker; it conflicts
+	/// with the other output styles.
+	#[test]
+	fn bsd_dash_capital_f_appends_type_markers() {
+		let (_dir, root) = bsd_fixture();
+		fs::create_dir(root.join("dir")).unwrap();
+		fs::write(root.join("tool"), b"x").unwrap();
+		fs::set_permissions(root.join("tool"), fs::Permissions::from_mode(0o755)).unwrap();
+		nix::unistd::mkfifo(&root.join("pipe"), nix::sys::stat::Mode::from_bits_truncate(0o644)).unwrap();
+
+		let (code, stdout, stderr) =
+			run_in(root.clone(), vec!["-F", "data.bin", "dir", "tool", "link", "pipe"]);
+		assert_eq!((code, stderr.as_str()), (0, ""));
+		let suffixes: Vec<&str> = stdout.lines().map(|line| line.rsplit_once(' ').unwrap().1).collect();
+		assert_eq!(suffixes, ["data.bin", "dir/", "tool*", "data.bin", "pipe|"]);
+		assert!(stdout.contains(" link@ -> data.bin\n"), "got: {stdout:?}");
+
+		assert_eq!(
+			run_in(root, vec!["-F", "-s", "data.bin"]),
+			(1, String::new(), "stat: can't use format 's' with -F\n".to_string()),
+		);
+	}
+
+	/// `-r` prints every field as a raw number.
+	#[test]
+	fn bsd_dash_r_prints_raw_numbers() {
+		let (_dir, root) = bsd_fixture();
+		let meta = fs::symlink_metadata(root.join("data.bin")).unwrap();
+		let birth = meta
+			.created()
+			.map_or(0, |time| time.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+		let expected = format!(
+			"{} {} 0100644 1 {} {} 0 12 1700000000 1700000000 {} {birth} {} {} 0 data.bin\n",
+			meta.dev(),
+			meta.ino(),
+			meta.uid(),
+			meta.gid(),
+			meta.ctime(),
+			meta.blksize(),
+			meta.blocks(),
+		);
+
+		assert_eq!(run_in(root, vec!["-r", "data.bin"]), (0, expected, String::new()));
+	}
+
+	/// An unknown directive stops BSD stat with `bad format`, keeping the
+	/// output before it and skipping later files.
+	#[test]
+	fn bsd_bad_format_stops_after_prior_output() {
+		let (_dir, root) = bsd_fixture();
+
+		assert_eq!(
+			run_in(root.clone(), vec!["-f", "abc%Q", "data.bin", "link"]),
+			(1, "abc".to_string(), "stat: %Q: bad format\n".to_string()),
+		);
+		assert_eq!(
+			run_in(root, vec!["-f", "%HN", "data.bin"]),
+			(1, String::new(), "stat: %HN: bad format\n".to_string()),
+		);
+	}
+
+	/// BSD option errors print getopt's diagnostics and usage.
+	#[test]
+	fn bsd_option_errors_match_getopt() {
+		let (_dir, root) = bsd_fixture();
+
+		assert_eq!(
+			run_in(root.clone(), vec!["-l", "-Z", "data.bin"]),
+			(
+				1,
+				String::new(),
+				"stat: illegal option -- Z\nusage: stat [-FLnq] [-f format | -l | -r | -s | -x] [-t \
+				 timefmt] [file ...]\n"
+					.to_string()
+			),
+		);
+		assert_eq!(
+			run_in(root, vec!["-l", "-s", "data.bin"]),
+			(1, String::new(), "stat: can't use format 'l' with 's'\n".to_string()),
+		);
+	}
+
+	/// A missing operand reports `stat: <file>: stat: <error>` (silenced by
+	/// `-q`), exits 1, and the other operands still print.
+	#[test]
+	fn bsd_missing_file_reports_and_quiet_suppresses() {
+		let (_dir, root) = bsd_fixture();
+
+		assert_eq!(
+			run_in(root.clone(), vec!["-f", "%z", "missing", "data.bin"]),
+			(1, "12\n".to_string(), "stat: missing: stat: No such file or directory\n".to_string()),
+		);
+		assert_eq!(
+			run_in(root, vec!["-q", "-f", "%z", "missing", "data.bin"]),
+			(1, "12\n".to_string(), String::new()),
+		);
+	}
+
+	/// `-n` drops the trailing newline and `%@` numbers the operands.
+	#[test]
+	fn bsd_no_newline_and_file_number() {
+		let (_dir, root) = bsd_fixture();
+
+		assert_eq!(
+			run_in(root, vec!["-nf", "%@:%N ", "data.bin", "link"]),
+			(0, "1:data.bin 2:link ".to_string(), String::new()),
+		);
+	}
+
+	/// `-t` follows macOS `strftime`: C-locale `%c`/`%+`, padding flags, and
+	/// unknown conversions printing their own character.
+	#[test]
+	fn bsd_timefmt_follows_macos_strftime() {
+		let (_dir, root) = bsd_fixture();
+
+		assert_eq!(
+			run_in_time_zone(
+				&root,
+				&["-t", "%c|%+|%-d|%_H|%j|%Z|%z|%E|%q|%", "-f", "%Sm", "data.bin"],
+				"Asia/Tokyo"
+			),
+			(
+				0,
+				"Wed Nov 15 07:13:20 2023|Wed Nov 15 07:13:20 JST 2023|15| 7|319|JST|+0900||q|%\n".to_string(),
+				String::new()
+			),
+		);
+	}
+
+	/// `-x` shows the setuid/setgid/sticky digit in its octal mode.
+	#[test]
+	fn bsd_verbose_mode_includes_special_bits() {
+		let (_dir, root) = bsd_fixture();
+		fs::set_permissions(root.join("data.bin"), fs::Permissions::from_mode(0o4755)).unwrap();
+
+		let (code, stdout, stderr) = run_in(root, vec!["-x", "data.bin"]);
+		assert_eq!((code, stderr.as_str()), (0, ""));
+		let mode = stdout.lines().nth(2).unwrap();
+		assert!(mode.starts_with("  Mode: (4755/-rwsr-xr-x)  "), "got: {mode:?}");
 	}
 
 	#[test]
