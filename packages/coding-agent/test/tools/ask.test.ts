@@ -265,6 +265,60 @@ describe("AskTool form dialog", () => {
 		expect(formDialog).not.toHaveBeenCalled();
 	});
 
+	it("refuses a <fieldset> whose radios each carry their own name, without showing it", async () => {
+		const formDialog = vi.fn<FormDialog>();
+		const result = await new AskTool(createSession()).execute(
+			"call-split-radios",
+			{
+				html: `<form><fieldset>
+  <legend>Sharing</legend>
+  <label><input type="radio" name="shared_sources" value="common" checked> Common location only</label>
+  <label><input type="radio" name="personal_auto"> Include personal installations</label>
+</fieldset></form>`,
+			},
+			undefined,
+			undefined,
+			createContext({ formDialog }),
+		);
+
+		const message = text(result) ?? "";
+		expect(message).toContain("shared_sources");
+		expect(message).toContain("personal_auto");
+		expect(message).toContain("Sharing");
+		expect(result.details).toEqual({ answers: [] });
+		expect(formDialog).not.toHaveBeenCalled();
+	});
+
+	it("shows forms whose radio names are not split inside one fieldset", async () => {
+		const forms = {
+			"shared name": `<form><fieldset><legend>Sharing</legend>
+  <label><input type="radio" name="sources" value="common" checked> Common location only</label>
+  <label><input type="radio" name="sources" value="personal"> Include personal installations</label>
+</fieldset></form>`,
+			"lone radio": `<form><fieldset><legend>Sharing</legend>
+  <label><input type="radio" name="personal_auto"> Include personal installations</label>
+</fieldset></form>`,
+			"separate fieldsets": `<form><fieldset><legend>Sharing</legend>
+  <label><input type="radio" name="shared_sources" value="common" checked> Common location only</label>
+</fieldset><fieldset><legend>Personal</legend>
+  <label><input type="radio" name="personal_auto"> Include personal installations</label>
+</fieldset></form>`,
+		};
+		for (const [shape, html] of Object.entries(forms)) {
+			const formDialog = vi.fn<FormDialog>(async () => ({ data: { sources: "personal" } }));
+			const result = await new AskTool(createSession()).execute(
+				`call-${shape}`,
+				{ html },
+				undefined,
+				undefined,
+				createContext({ formDialog }),
+			);
+
+			expect(formDialog, shape).toHaveBeenCalledTimes(1);
+			expect(text(result), shape).toContain("User answers:");
+		}
+	});
+
 	it("closes for a message the user queued without cancelling the turn, but stays open for other interrupts", async () => {
 		const ask = (source: string) => {
 			const steering = new AbortController();

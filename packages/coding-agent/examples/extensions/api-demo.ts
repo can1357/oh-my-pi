@@ -7,21 +7,22 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
-	const z = pi.zod;
+	const type = pi.arktype;
+	const parameters = type({
+		message: type.string.describe("Test message"),
+		logLevel: type("'error' | 'warn' | 'debug'").default("debug").describe("Log level to use"),
+	});
 
 	// Access the logger for debugging
 	pi.logger.debug("API demo extension loaded");
 
-	pi.registerTool({
+	pi.registerTool<typeof parameters>({
 		name: "api_demo",
 		label: "API Demo",
 		description: "Demonstrates ExtensionAPI capabilities: logger, schema validation, and pi module access",
-		parameters: z.object({
-			message: z.string().describe("Test message"),
-			logLevel: z.enum(["error", "warn", "debug"]).default("debug").describe("Log level to use"),
-		}),
+		parameters,
 
-		async execute(_toolCallId, params, _onUpdate, ctx, _signal) {
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const { message, logLevel } = params;
 
 			// Use logger at specified level
