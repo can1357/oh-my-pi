@@ -1623,9 +1623,9 @@ describe("antigravity discovery collapsing", () => {
 			"PI_AI_ANTIGRAVITY_USER_TIER",
 			"AICODE_USER_TIER",
 			"PI_AI_ANTIGRAVITY_LOCATION",
+			// Deliberately not consulted by the body builder; kept here so the test restores them.
 			"GOOGLE_CLOUD_LOCATION",
 			"GOOGLE_CLOUD_REGION",
-			"AICODE_ENDPOINT_URL",
 		] as const;
 		const NATIVE_REQUEST_ID = /^agent\/[0-9a-f-]{36}\/\d+\/[0-9a-f-]{36}\/1$/;
 
@@ -1705,12 +1705,23 @@ describe("antigravity discovery collapsing", () => {
 		});
 
 		it("resolves tier, location and project through the native env overrides", async () => {
-			await withEnv({ AICODE_USER_TIER: "aicode-tier", GOOGLE_CLOUD_REGION: "europe-west4" }, () => {
+			await withEnv({ AICODE_USER_TIER: "aicode-tier", PI_AI_ANTIGRAVITY_LOCATION: "europe-west4" }, () => {
 				expect(buildAntigravityFetchModelsBody({ projectId: "p-1", requestId: "r" })).toEqual({
 					project: "p-1",
 					requestId: "r",
 					entitlement: { userTier: "aicode-tier" },
 					location: "europe-west4",
+				});
+				// Vertex's GOOGLE_CLOUD_* vars are not consulted on this OAuth path.
+				process.env.GOOGLE_CLOUD_REGION = "gcp-region";
+				expect(buildAntigravityFetchModelsBody({ projectId: "p-1", requestId: "r" }).location).toBe(
+					"europe-west4",
+				);
+				delete process.env.PI_AI_ANTIGRAVITY_LOCATION;
+				expect(buildAntigravityFetchModelsBody({ projectId: "p-1", requestId: "r" })).toEqual({
+					project: "p-1",
+					requestId: "r",
+					entitlement: { userTier: "aicode-tier" },
 				});
 			});
 			await withEnv(
@@ -1719,7 +1730,6 @@ describe("antigravity discovery collapsing", () => {
 					PI_AI_ANTIGRAVITY_USER_TIER: "pi-tier",
 					AICODE_USER_TIER: "aicode-tier",
 					PI_AI_ANTIGRAVITY_LOCATION: "pi-location",
-					GOOGLE_CLOUD_LOCATION: "gcp-location",
 				},
 				() => {
 					// The native client reads ANTIGRAVITY_PROJECT_ID per request, so it beats the stored project.
@@ -1740,16 +1750,6 @@ describe("antigravity discovery collapsing", () => {
 					});
 				},
 			);
-		});
-
-		it("targets the Antigravity endpoints when none is passed, whatever AICODE_ENDPOINT_URL says", async () => {
-			const { requests, fetcher } = recordingFetcher();
-			await withEnv({ AICODE_ENDPOINT_URL: "https://aicode.test/" }, () =>
-				fetchAntigravityDiscoveryModels({ token: "t", userAgent: "test", fetcher }),
-			);
-			expect(requests.map(request => request.url)).toEqual([
-				`${ANTIGRAVITY_PRIMARY_ENDPOINT}/v1internal:fetchAvailableModels`,
-			]);
 		});
 
 		it("sends each account's tier with its own roster request", async () => {

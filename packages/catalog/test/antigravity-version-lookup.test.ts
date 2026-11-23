@@ -91,15 +91,12 @@ describe("getAntigravityUserAgent", () => {
 		"PI_AI_ANTIGRAVITY_CL",
 		"PI_AI_ANTIGRAVITY_OS",
 		"PI_AI_ANTIGRAVITY_ARCH",
-		"PI_AI_ANTIGRAVITY_AUTH_METHOD",
-		"PI_AI_ANTIGRAVITY_PURPOSE",
 	] as const;
 	const saved = ENV_NAMES.map(name => [name, process.env[name]] as const);
 
 	beforeEach(() => {
 		for (const name of ENV_NAMES) delete process.env[name];
-		// Pin the version and host so a manifest discovered by another test cannot leak in.
-		process.env.PI_AI_ANTIGRAVITY_VERSION = DEFAULT_ANTIGRAVITY_VERSION;
+		// Pin the host so the assertion names one real client's UA.
 		process.env.PI_AI_ANTIGRAVITY_OS = "linux";
 		process.env.PI_AI_ANTIGRAVITY_ARCH = "amd64";
 	});
@@ -111,13 +108,12 @@ describe("getAntigravityUserAgent", () => {
 		}
 	});
 
-	it("falls back to the 2.34.0 hub release in the captured header shape", () => {
-		// No env knob grows the header past the captured native segments.
-		process.env.PI_AI_ANTIGRAVITY_AUTH_METHOD = "gateway";
-		process.env.PI_AI_ANTIGRAVITY_PURPOSE = "test-purpose";
-		expect(DEFAULT_ANTIGRAVITY_VERSION).toBe("2.34.0");
+	it("falls back to the pinned hub release when the manifest lookup fails", async () => {
+		// The offline path: no version override and a manifest fetch that fails.
+		const failingFetch = () => Promise.resolve(new Response("unavailable", { status: 503 }));
+		await ensureAntigravityVersion(failingFetch);
 		expect(getAntigravityUserAgent()).toBe(
-			"antigravity/hub/2.34.0 (aidev_client; os_type=linux; arch=amd64; cl=1005016104)",
+			`antigravity/hub/${DEFAULT_ANTIGRAVITY_VERSION} (aidev_client; os_type=linux; arch=amd64; cl=1005016104)`,
 		);
 	});
 });

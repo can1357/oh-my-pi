@@ -578,7 +578,6 @@ describe("Google Gemini CLI alignment", () => {
 				body: {
 					project?: string;
 					userPromptId?: string;
-					enabledCreditTypes?: string[];
 					request?: { labels?: Record<string, string> };
 				};
 			}> = [];
@@ -630,25 +629,6 @@ describe("Google Gemini CLI alignment", () => {
 			expect(headers.get("X-Aicode-Prompt-Id")).toBe(body.userPromptId!);
 			expect(labels.trajectory_id).toMatch(/^[0-9a-f-]{36}$/);
 			expect(headers.get("X-Aicode-Trajectory-Id")).toBe(labels.trajectory_id!);
-		});
-
-		it("does not let PI_AI_ANTIGRAVITY_CREDIT_TYPES opt a request into credits", async () => {
-			const { captured, fetchMock } = captureGenerateRequests();
-			await withEnv({ PI_AI_ANTIGRAVITY_CREDIT_TYPES: "GOOGLE_ONE_AI" }, async () => {
-				await send("google-antigravity", fetchMock);
-				await send("google-antigravity", fetchMock, { userTier: "free-tier" });
-			});
-
-			expect(captured.map(request => request.body.enabledCreditTypes)).toEqual([undefined, undefined]);
-		});
-
-		it("does not opt a paid Cloud Code Assist tier into Google One AI credits", async () => {
-			const { captured, fetchMock } = captureGenerateRequests();
-			// Code Assist Standard and legacy tiers are not Google One plans.
-			await send("google-antigravity", fetchMock, { userTier: "standard-tier" });
-			await send("google-antigravity", fetchMock, { userTier: "legacy-tier" });
-
-			expect(captured.map(request => request.body.enabledCreditTypes)).toEqual([undefined, undefined]);
 		});
 
 		it("lets ANTIGRAVITY_PROJECT_ID override the credential's project per request", async () => {

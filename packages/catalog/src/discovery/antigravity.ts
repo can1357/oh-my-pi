@@ -322,19 +322,16 @@ type AntigravityDiscoveryResponse =
  *   PI_AI_ANTIGRAVITY_USER_TIER, then the native `AICODE_USER_TIER`); no tier
  *   is ever guessed.
  * - `location`: sent only when set (`location`, then
- *   PI_AI_ANTIGRAVITY_LOCATION, then the native `GOOGLE_CLOUD_LOCATION` /
- *   `GOOGLE_CLOUD_REGION`).
+ *   PI_AI_ANTIGRAVITY_LOCATION). The Vertex `GOOGLE_CLOUD_LOCATION` /
+ *   `GOOGLE_CLOUD_REGION` vars are not consulted: reusing another provider's
+ *   configured region would send it on this OAuth path by surprise.
  */
 export function buildAntigravityFetchModelsBody(
 	options: Pick<FetchAntigravityDiscoveryModelsOptions, "projectId" | "userTier" | "location" | "requestId">,
 ): Record<string, unknown> {
 	const project = process.env.ANTIGRAVITY_PROJECT_ID || options.projectId;
 	const userTier = options.userTier || process.env.PI_AI_ANTIGRAVITY_USER_TIER || process.env.AICODE_USER_TIER;
-	const location =
-		options.location ||
-		process.env.PI_AI_ANTIGRAVITY_LOCATION ||
-		process.env.GOOGLE_CLOUD_LOCATION ||
-		process.env.GOOGLE_CLOUD_REGION;
+	const location = options.location || process.env.PI_AI_ANTIGRAVITY_LOCATION;
 	return {
 		...(project ? { project } : {}),
 		requestId: options.requestId ?? `agent/${crypto.randomUUID()}/${Date.now()}/${crypto.randomUUID()}/1`,

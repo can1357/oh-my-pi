@@ -123,7 +123,8 @@ export function getAntigravityUserAgent(): string {
 	const version = getAntigravityVersion();
 	// The backend does not validate `cl` (verified live: stale, zero, and absent
 	// cl all pass model gating on daily-cloudcode-pa; only the version gates).
-	// The update manifest carries no changelist, so the captured value stays.
+	// The update manifest carries no changelist, so the 2.26.0 capture stays:
+	// stale by design, and inert by the note above.
 	const cl = process.env.PI_AI_ANTIGRAVITY_CL || "1005016104";
 	const host = getAntigravityPlatform();
 	const os = process.env.PI_AI_ANTIGRAVITY_OS || host.os;

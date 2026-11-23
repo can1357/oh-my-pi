@@ -565,6 +565,8 @@ export interface OAuthAccess {
 	accountId?: string;
 	email?: string;
 	projectId?: string;
+	/** Provider-reported tier id (e.g. Antigravity `currentTier.id`); rides with the serving credential. */
+	userTier?: string;
 	enterpriseUrl?: string;
 	apiEndpoint?: string;
 	/** Organization/workspace the credential is scoped to (Anthropic/ChatGPT multi-subscription). */
