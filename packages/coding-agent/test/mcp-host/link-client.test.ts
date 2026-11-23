@@ -11,6 +11,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { type MCPElicitRequest, MCPMeta } from "@oh-my-pi/pi-coding-agent/mcp/protocol";
 import type { MCPElicitHandler } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import { formatMCPToolFailure } from "@oh-my-pi/pi-coding-agent/mcp/errors";
 import { rejectionOf } from "../helpers/rejection";
 import { FakeHost, type FakeTunnel, type Message, metaOf, paramsOf, settled } from "./link-fake-host";
 
@@ -228,7 +229,7 @@ describe("modern MCP client operations", () => {
 		await calling;
 
 		expect(metaOf(first)[MCPMeta.clientCapabilities]).toEqual({ roots: {}, elicitation: { form: {} } });
-		expect(asked).toEqual([{ mode: "form", message: "Delete it?", requestedSchema: schema }]);
+		expect(asked).toEqual([{ message: "Delete it?", requestedSchema: schema }]);
 		expect(paramsOf(retry)).toMatchObject({
 			name: "delete_branch",
 			arguments: { name: "old" },
@@ -303,7 +304,7 @@ describe("modern MCP client operations", () => {
 		}
 	});
 
-	it("names the capability a -32021 refusal requires and where omp can offer it", async () => {
+	it("names the capability a -32021 refusal requires, and the tool failure says where omp can offer it", async () => {
 		const refusal = async (requiredCapabilities: Record<string, unknown>) => {
 			const connection = await connect();
 			const tunnel = host.tunnel;
@@ -313,15 +314,20 @@ describe("modern MCP client operations", () => {
 				id: first.id,
 				error: { code: -32021, message: "Approval required", data: { requiredCapabilities } },
 			});
-			return String(await calling);
+			const error = await calling;
+			return { message: String(error), failure: formatMCPToolFailure(error, connection.name, "delete_branch") };
 		};
 
 		const elicitation = await refusal({ elicitation: {} });
-		expect(elicitation).toContain('needs the client capability "elicitation"');
-		expect(elicitation).toContain("--mode rpc-ui");
-		expect(await refusal({ sampling: {} })).toContain(
-			'"sampling", which this request did not declare; omp does not offer it',
+		expect(elicitation.message).toContain(
+			'needs the client capability "elicitation", which this request did not declare',
 		);
+		// The advice is the tool failure's, not the error's: the shared error also travels through the MCP host.
+		expect(elicitation.message).not.toContain("rpc-ui");
+		expect(elicitation.failure).toContain(
+			"next: The server asks questions, which omp can answer only where it can show a form",
+		);
+		expect((await refusal({ sampling: {} })).failure).toContain("next: omp does not offer this capability");
 	});
 
 	it("stops a server that never stops asking for input", async () => {

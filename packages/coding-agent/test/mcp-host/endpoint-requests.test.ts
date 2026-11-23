@@ -145,7 +145,7 @@ describe("McpEndpoint requests", () => {
 		expect(upstreams.count("resources/list")).toBe(1);
 	});
 
-	it("sends a read that may ask the user upstream on its own, past the store and a concurrent identical read", async () => {
+	it("keeps reads that may ask the user apart: own store entry, never a shared fetch", async () => {
 		const gate = Promise.withResolvers<void>();
 		upstreams.handler = async (method, params) => {
 			if (method !== "resources/read") return undefined;
@@ -163,14 +163,20 @@ describe("McpEndpoint requests", () => {
 		const asking = attachLink(endpoint);
 		headless.request(1, "resources/read", { uri: "file:///a" });
 		asking.request(2, "resources/read", { uri: "file:///a" }, eliciting);
-		await until(() => upstreams.count("resources/read") === 2, "both reads upstream");
+		// Two reads that may ask never share one fetch: an input_required answer is single-use.
+		asking.request(3, "resources/read", { uri: "file:///a" }, eliciting);
+		await until(() => upstreams.count("resources/read") === 3, "every read upstream");
 		gate.resolve();
 		expect((await headless.response(1)).result).toMatchObject({ contents: [{ text: "headless" }] });
 		expect((await asking.response(2)).result).toMatchObject({ contents: [{ text: "asked" }] });
+		expect((await asking.response(3)).result).toMatchObject({ contents: [{ text: "asked" }] });
 
-		// The headless answer is now stored, yet a later read that may ask still goes upstream.
-		expect(await asking.call(3, "resources/read", { uri: "file:///a" }, eliciting)).toMatchObject({
+		// A complete answer to a read that may ask is stored for the next such read, not for a headless one.
+		expect(await asking.call(4, "resources/read", { uri: "file:///a" }, eliciting)).toMatchObject({
 			result: { contents: [{ text: "asked" }] },
+		});
+		expect(await headless.call(5, "resources/read", { uri: "file:///a" })).toMatchObject({
+			result: { contents: [{ text: "headless" }] },
 		});
 		expect(upstreams.count("resources/read")).toBe(3);
 	});

@@ -179,19 +179,28 @@ describe("McpEndpoint subscriptions", () => {
 		if (!forwarded) throw new Error("no forwarded subscription upstream");
 		const read = { uri: "file:///a" };
 
+		const asking = { [MCPMeta.clientCapabilities]: { roots: {}, elicitation: { form: {} } } };
+
 		expect(await link.call(1, "resources/read", read)).toMatchObject({ result: { contents: [{ text: "one" }] } });
 		expect(await link.call(2, "resources/read", read)).toMatchObject({ result: { contents: [{ text: "one" }] } });
-		expect(upstreams.count("resources/read")).toBe(1);
+		expect(await link.call(11, "resources/read", read, asking)).toMatchObject({
+			result: { contents: [{ text: "one" }] },
+		});
+		expect(upstreams.count("resources/read")).toBe(2);
 
 		text = "two";
 		forwarded.sink("notifications/resources/updated", read);
 		expect(store.get(IDENTITY, "resources/read", cacheParamsKey(read))).toBeUndefined();
 		await link.next(message => message.method === "notifications/resources/updated", "update");
+		// A read that may ask the user is stored apart, and the update drops that entry too.
+		expect(await link.call(12, "resources/read", read, asking)).toMatchObject({
+			result: { contents: [{ text: "two" }] },
+		});
 
 		const gate = Promise.withResolvers<void>();
 		hold = gate.promise;
 		link.request(3, "resources/read", read);
-		await until(() => upstreams.count("resources/read") === 2, "read in flight");
+		await until(() => upstreams.count("resources/read") === 4, "read in flight");
 		text = "three";
 		forwarded.sink("notifications/resources/updated", read);
 		hold = undefined;
@@ -199,7 +208,7 @@ describe("McpEndpoint subscriptions", () => {
 		expect(await link.response(3)).toMatchObject({ result: { contents: [{ text: "two" }] } });
 		expect(store.get(IDENTITY, "resources/read", cacheParamsKey(read))).toBeUndefined();
 		expect(await link.call(4, "resources/read", read)).toMatchObject({ result: { contents: [{ text: "three" }] } });
-		expect(upstreams.count("resources/read")).toBe(3);
+		expect(upstreams.count("resources/read")).toBe(5);
 	});
 
 	it("opens the host's subscription again, after a pause, when the server ends it", async () => {

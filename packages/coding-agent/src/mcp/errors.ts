@@ -219,20 +219,17 @@ export function createMCPJsonRpcError(
 	});
 }
 
-/**
- * The message of a `MissingRequiredClientCapabilityError` (-32021), naming
- * the capabilities in its `data.requiredCapabilities` and, for elicitation,
- * where omp can declare it: only where it can show the user a form.
- */
-function missingCapabilityMessage(error: JsonRpcError): string {
+/** The capabilities a `MissingRequiredClientCapabilityError` (-32021) lists in `data.requiredCapabilities`. */
+function requiredCapabilities(error: JsonRpcError): string[] {
 	const required = isRecord(error.data) ? error.data.requiredCapabilities : undefined;
-	const names = isRecord(required) ? Object.keys(required) : [];
+	return isRecord(required) ? Object.keys(required) : [];
+}
+
+/** The message of a `MissingRequiredClientCapabilityError`: which capabilities the server needs. */
+function missingCapabilityMessage(error: JsonRpcError): string {
+	const names = requiredCapabilities(error);
 	const listed = names.length > 0 ? names.map(name => `"${name}"`).join(", ") : "it did not name";
-	const needs = `MCP error ${error.code}: the server needs the client capability ${listed}, which this request did not declare`;
-	if (names.includes("elicitation")) {
-		return `${needs}. The server asks you questions, and omp can answer them only where it can show you a form: the TUI, --mode rpc-ui, or an ACP client with forms.`;
-	}
-	return `${needs}; omp does not offer it.`;
+	return `MCP error ${error.code}: the server needs the client capability ${listed}, which this request did not declare`;
 }
 
 /** Classify an arbitrary transport exception while removing runtime-only advice. */
@@ -322,7 +319,9 @@ function nextStep(error: MCPTransportError): string {
 			return "Inspect the MCP server logs for an invalid JSON-RPC response.";
 		case "json_rpc":
 			if (error.rpc?.code === MCPErrorCode.MissingRequiredClientCapability) {
-				return "Retrying here fails the same way; run it from a session that offers the capability.";
+				return requiredCapabilities(error.rpc).includes("elicitation")
+					? "The server asks questions, which omp can answer only where it can show a form: the TUI, --mode rpc-ui, or an ACP client with forms. Retrying here fails the same way."
+					: "omp does not offer this capability, so retrying fails the same way.";
 			}
 			return "Address the server-reported MCP error before retrying.";
 		case "http_status":

@@ -64,7 +64,10 @@ export const MCP_CLIENT_CAPABILITIES: MCPClientCapabilities = { roots: {} };
  * Capabilities of a request whose caller can put a question to the user: a
  * server may also return form-mode `elicitation/create` asks.
  */
-export const MCP_ELICITING_CLIENT_CAPABILITIES: MCPClientCapabilities = { roots: {}, elicitation: { form: {} } };
+export const MCP_ELICITING_CLIENT_CAPABILITIES: MCPClientCapabilities = {
+	...MCP_CLIENT_CAPABILITIES,
+	elicitation: { form: {} },
+};
 
 const CACHEABLE_METHODS: Record<string, true> = {
 	"server/discover": true,
@@ -176,8 +179,6 @@ export type MCPElicitFieldSchema =
 
 /** Params of a form-mode `elicitation/create` ask. */
 export interface MCPElicitRequest {
-	/** Absent means form. */
-	mode?: "form";
 	/** What the server asks and why, shown to the user. */
 	message: string;
 	requestedSchema: {

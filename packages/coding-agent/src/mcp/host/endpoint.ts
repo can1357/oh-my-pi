@@ -66,15 +66,16 @@ const INVALID_REQUEST = -32600;
 /** Params key of a request without parameters: the first page of a list. */
 const FIRST_PAGE = cacheParamsKey(undefined);
 
-/**
- * Whether a request declares elicitation. Its answer may differ from one
- * caller to the next and carry a single-use `requestState`, so it is neither
- * served from the store nor shared with a concurrent identical request.
- */
+/** Whether a request declares elicitation, so the server may ask the user before answering it. */
 function mayAskUser(params: Record<string, unknown>): boolean {
 	const meta = isRecord(params._meta) ? params._meta : undefined;
 	const capabilities = meta?.[MCPMeta.clientCapabilities];
 	return isRecord(capabilities) && capabilities.elicitation !== undefined;
+}
+
+/** Store key of a request that may ask the user: the server may answer it differently from one that may not. */
+function askingKey(key: string): string {
+	return `${key}\nelicitation`;
 }
 
 /** Failed starts and unexpected exits within {@link CRASH_WINDOW_MS} that open the crash guard. */
@@ -478,6 +479,8 @@ export class McpEndpoint implements ModuleUnit {
 
 	readonly #links = new Set<Link>();
 	readonly #flights = new Map<string, Flight>();
+	/** Counter that gives each unshared flight its own lookup id. */
+	#ownFlights = 0;
 	/** Upstream work the host does for itself (revalidation, reconcile, its own subscription), each with a deadline. */
 	readonly #hostWork = new Set<AbortController>();
 	/** Upstreams being shut down; `stop` waits for them so no process outlives the unit. */
@@ -745,13 +748,11 @@ export class McpEndpoint implements ModuleUnit {
 		signal: AbortSignal,
 		onProgress: ((progress: Record<string, unknown>) => void) | undefined,
 	): Promise<Record<string, unknown>> {
-		// The store is bypassed for results that are not cacheable, for MRTR retries, for requests that
-		// let the server ask the user, and on request.
+		// The store is bypassed for results that are not cacheable, for MRTR retries, and on request.
 		if (
 			!isCacheableMethod(method) ||
 			params.inputResponses !== undefined ||
 			params.requestState !== undefined ||
-			mayAskUser(params) ||
 			hint === MCP_NO_STORE
 		) {
 			this.#served = link;
@@ -762,7 +763,10 @@ export class McpEndpoint implements ModuleUnit {
 				throw error;
 			}
 		}
-		const key = cacheParamsKey(params);
+		// A request that lets the server ask the user is stored apart from one that does not, and never
+		// joins another's fetch: an `input_required` answer carries a single-use `requestState`.
+		const asks = mayAskUser(params);
+		const key = asks ? askingKey(cacheParamsKey(params)) : cacheParamsKey(params);
 		const entry = this.#stored(method, key);
 		if (entry && isFresh(entry)) return entry.result;
 		if (entry && hint === MCP_STALE_OK) {
@@ -775,7 +779,7 @@ export class McpEndpoint implements ModuleUnit {
 			return { ...entry.result, _meta: { ...stored, [OmpMeta.stale]: true } };
 		}
 		this.#served = link;
-		return await this.#join(this.#flight(method, params, key), signal, onProgress);
+		return await this.#join(this.#flight(method, params, key, !asks), signal, onProgress);
 	}
 
 	/** A `tools/call` rejected as invalid while a tools list is stored suggests the list is out of date. */
@@ -902,9 +906,12 @@ export class McpEndpoint implements ModuleUnit {
 
 	// ── shared fetches and the store ─────────────────────────────────────────
 
-	/** The in-flight fetch of a cacheable result, started when there is none. Its result is stored on completion. */
-	#flight(method: string, params: Record<string, unknown>, key: string): Flight {
-		const id = `${method}\n${key}`;
+	/**
+	 * The in-flight fetch of a cacheable result, joined when `shared` and one
+	 * is already running, started otherwise. Its result is stored on completion.
+	 */
+	#flight(method: string, params: Record<string, unknown>, key: string, shared = true): Flight {
+		const id = shared ? `${method}\n${key}` : `${method}\n${key}\n${++this.#ownFlights}`;
 		const existing = this.#flights.get(id);
 		if (existing) return existing;
 		const controller = new AbortController();
@@ -1321,7 +1328,10 @@ export class McpEndpoint implements ModuleUnit {
 
 	/** Forget stored reads now that `uri` changed, and keep a read of it still in flight out of the store. */
 	#resourceUpdated(uri: unknown): void {
-		if (typeof uri === "string") this.#invalidate([RESOURCE_READ_METHOD], cacheParamsKey({ uri }));
+		if (typeof uri !== "string") return;
+		const key = cacheParamsKey({ uri });
+		this.#invalidate([RESOURCE_READ_METHOD], key);
+		this.#invalidate([RESOURCE_READ_METHOD], askingKey(key));
 	}
 
 	/**

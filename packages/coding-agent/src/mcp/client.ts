@@ -619,7 +619,6 @@ function elicitRequestOf(connection: MCPServerConnection, method: string, params
 		properties[name] = elicitFieldOf(schema.properties[name]) ?? fail(`with an unsupported field "${name}"`);
 	}
 	return {
-		mode: "form",
 		message: params.message,
 		requestedSchema: { type: "object", properties, required: schema.required },
 	};
@@ -628,73 +627,55 @@ function elicitRequestOf(connection: MCPServerConnection, method: string, params
 /** A form-mode field schema rebuilt from `value`, or undefined when `value` is not one. */
 function elicitFieldOf(value: unknown): MCPElicitFieldSchema | undefined {
 	if (!isRecord(value)) return undefined;
-	const text = (key: string): string | undefined => (typeof value[key] === "string" ? value[key] : undefined);
-	const count = (key: string): number | undefined =>
+	const text = (key: string) => (typeof value[key] === "string" ? value[key] : undefined);
+	const count = (key: string) =>
 		typeof value[key] === "number" && Number.isFinite(value[key]) ? value[key] : undefined;
-	const has = (key: string, valid: boolean) => value[key] === undefined || valid;
+	const strings = (list: unknown) => (isStringArray(list) ? list : undefined);
+	/** `field`, unless a key the server sent did not survive rebuilding it: a value of the wrong type. */
+	const intact = <F extends MCPElicitFieldSchema>(field: F): F | undefined =>
+		Object.entries(field).every(([key, rebuilt]) => rebuilt !== undefined || value[key] === undefined)
+			? field
+			: undefined;
 	const common = { title: text("title"), description: text("description") };
-	if (!has("title", common.title !== undefined) || !has("description", common.description !== undefined)) {
-		return undefined;
-	}
 	switch (value.type) {
 		case "boolean":
-			if (!has("default", typeof value.default === "boolean")) return undefined;
-			return { type: "boolean", ...common, default: value.default as boolean | undefined };
+			return intact({
+				type: "boolean",
+				...common,
+				default: typeof value.default === "boolean" ? value.default : undefined,
+			});
 		case "number":
-		case "integer": {
-			const field = {
+		case "integer":
+			return intact({
 				type: value.type,
 				...common,
 				minimum: count("minimum"),
 				maximum: count("maximum"),
 				default: count("default"),
-			};
-			const valid = (["minimum", "maximum", "default"] as const).every(key => has(key, field[key] !== undefined));
-			return valid ? field : undefined;
-		}
-		case "string": {
-			const oneOf = choicesOf(value.oneOf);
-			const format = ELICIT_FORMATS.find(known => known === value.format);
-			const knownFormat = format !== undefined;
-			const field = {
-				type: "string" as const,
+			});
+		case "string":
+			return intact({
+				type: "string",
 				...common,
 				minLength: count("minLength"),
 				maxLength: count("maxLength"),
-				format,
+				format: ELICIT_FORMATS.find(known => known === value.format),
 				default: text("default"),
-				enum: isStringArray(value.enum) ? value.enum : undefined,
-				oneOf,
-			};
-			const valid =
-				has("minLength", field.minLength !== undefined) &&
-				has("maxLength", field.maxLength !== undefined) &&
-				has("format", knownFormat) &&
-				has("default", field.default !== undefined) &&
-				has("enum", field.enum !== undefined) &&
-				has("oneOf", oneOf !== undefined);
-			return valid ? field : undefined;
-		}
+				enum: strings(value.enum),
+				oneOf: choicesOf(value.oneOf),
+			});
 		case "array": {
 			if (!isRecord(value.items)) return undefined;
-			const items = {
-				enum: isStringArray(value.items.enum) ? value.items.enum : undefined,
-				anyOf: choicesOf(value.items.anyOf),
-			};
+			const items = { enum: strings(value.items.enum), anyOf: choicesOf(value.items.anyOf) };
 			if (items.enum === undefined && items.anyOf === undefined) return undefined;
-			const field = {
-				type: "array" as const,
+			return intact({
+				type: "array",
 				...common,
 				minItems: count("minItems"),
 				maxItems: count("maxItems"),
 				items,
-				default: isStringArray(value.default) ? value.default : undefined,
-			};
-			const valid =
-				has("minItems", field.minItems !== undefined) &&
-				has("maxItems", field.maxItems !== undefined) &&
-				has("default", field.default !== undefined);
-			return valid ? field : undefined;
+				default: strings(value.default),
+			});
 		}
 		default:
 			return undefined;

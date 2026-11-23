@@ -10,10 +10,18 @@
  * Answers that break the schema reopen the form as the user left it, with the
  * problem stated in it.
  */
-import type { HtmlFormData, HtmlFormValue } from "@oh-my-pi/pi-tui/html-form/data";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { fieldError, type HtmlFormData, type HtmlFormValue } from "@oh-my-pi/pi-tui/html-form/data";
+import { parseHtmlForm } from "@oh-my-pi/pi-tui/html-form/parse";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { ExtensionUIContext } from "../extensibility/extensions/types";
-import type { MCPElicitFieldSchema, MCPElicitRequest, MCPElicitResult, MCPElicitValue } from "./protocol";
+import type {
+	MCPElicitFieldSchema,
+	MCPElicitRequest,
+	MCPElicitResult,
+	MCPElicitStringSchema,
+	MCPElicitValue,
+} from "./protocol";
 import type { MCPElicitHandler } from "./types";
 
 /** Placeholder label of the empty choice an optional select starts on. */
@@ -25,11 +33,7 @@ export const ELICIT_CANCEL = "Cancel: send no answer";
 export const ELICIT_BACK = "Back to the form";
 
 /** The part of a tool call's or command's context an elicitation needs. */
-export interface ElicitContext {
-	hasUI?: boolean;
-	ui?: ExtensionUIContext;
-	toolCall?: { steeringSignal?: AbortSignal };
-}
+type ElicitContext = Pick<AgentToolContext, "ui" | "hasUI" | "toolCall">;
 
 /**
  * The elicitation handler of a request made for `ctx`, or undefined when it
@@ -74,11 +78,13 @@ async function elicitFromUser(
 		for (;;) {
 			const html = elicitationFormHtml(serverName, request, draft, problem);
 			let explicit: "decline" | "cancel" | undefined;
-			const onDismiss = (action: "decline" | "cancel") => {
-				explicit = action;
-			};
 			const submitted = await untilAborted(dialogSignal, () =>
-				formDialog(html, { signal: dialogSignal, onDismiss }),
+				formDialog(html, {
+					signal: dialogSignal,
+					onDismiss: action => {
+						explicit = action;
+					},
+				}),
 			);
 			if (!submitted) {
 				if (explicit) return { action: explicit };
@@ -90,7 +96,7 @@ async function elicitFromUser(
 			}
 			draft = submitted.data;
 			const content = elicitationContent(request, draft);
-			problem = elicitationContentError(request, content);
+			problem = submissionError(request, html, draft, content);
 			if (!problem) return { action: "accept", content };
 		}
 	} catch (error) {
@@ -167,72 +173,54 @@ function typedValue(schema: MCPElicitFieldSchema, value: HtmlFormValue | undefin
 }
 
 /**
- * Why `content` does not satisfy the request's schema, phrased for the user,
- * or undefined when it does. Catches what the form itself cannot: list sizes,
- * values outside a choice, whole numbers and dates.
+ * Why the submitted form does not satisfy the request's schema, phrased for
+ * the user, or undefined when it does. The form's own rules (required, number
+ * bounds, lengths, email and URL shapes) are checked as every form host checks
+ * them; what HTML cannot express is checked against the schema: whole numbers,
+ * choices, list sizes and dates.
  */
-function elicitationContentError(
+function submissionError(
 	request: MCPElicitRequest,
+	html: string,
+	draft: HtmlFormData,
 	content: Record<string, MCPElicitValue>,
 ): string | undefined {
-	const { properties, required = [] } = request.requestedSchema;
-	for (const name of Object.keys(properties)) {
+	const { properties } = request.requestedSchema;
+	for (const field of parseHtmlForm(html).fields) {
+		const name = field.name;
+		if (!name || !Object.hasOwn(properties, name)) continue;
 		const schema = properties[name];
-		const value = Object.hasOwn(content, name) ? content[name] : undefined;
 		const problem =
-			value === undefined
-				? required.includes(name)
-					? "an answer is required"
-					: undefined
-				: valueError(schema, value);
+			fieldError(field, Object.hasOwn(draft, name) ? draft[name] : undefined) ?? schemaError(schema, content[name]);
 		if (problem) return `${schema.title ?? name}: ${problem}`;
 	}
 	return undefined;
 }
 
-function valueError(schema: MCPElicitFieldSchema, value: MCPElicitValue): string | undefined {
+/** What the schema rules out that the form cannot: typed `value` is what {@link typedValue} made of the answer. */
+function schemaError(schema: MCPElicitFieldSchema, value: MCPElicitValue | undefined): string | undefined {
+	if (value === undefined) return undefined;
 	switch (schema.type) {
 		case "array": {
-			if (!Array.isArray(value)) return "pick from the list";
+			const picked = Array.isArray(value) ? value : [];
 			const allowed = choices(schema.items.anyOf, schema.items.enum).map(choice => choice.value);
-			if (value.some(item => !allowed.includes(item))) return "pick only the listed options";
-			if (schema.minItems !== undefined && value.length < schema.minItems) return `pick at least ${schema.minItems}`;
-			if (schema.maxItems !== undefined && value.length > schema.maxItems) return `pick at most ${schema.maxItems}`;
+			if (picked.some(item => !allowed.includes(item))) return "Pick only the listed options";
+			if (schema.minItems !== undefined && picked.length < schema.minItems)
+				return `Pick at least ${schema.minItems}`;
+			if (schema.maxItems !== undefined && picked.length > schema.maxItems) return `Pick at most ${schema.maxItems}`;
 			return undefined;
 		}
-		case "boolean":
-			return typeof value === "boolean" ? undefined : "answer yes or no";
-		case "number":
 		case "integer":
-			if (typeof value !== "number") return "enter a number";
-			if (schema.type === "integer" && !Number.isInteger(value)) return "enter a whole number";
-			if (schema.minimum !== undefined && value < schema.minimum) return `must be at least ${schema.minimum}`;
-			if (schema.maximum !== undefined && value > schema.maximum) return `must be at most ${schema.maximum}`;
+			return Number.isInteger(value) ? undefined : "Enter a whole number";
+		case "string": {
+			const allowed = choices(schema.oneOf, schema.enum).map(choice => choice.value);
+			if (allowed.length > 0 && !allowed.includes(String(value))) return "Pick one of the listed options";
+			if (schema.format === "date" && !isCalendarDate(String(value))) return "Enter a real date as YYYY-MM-DD";
+			if (schema.format === "date-time" && !isDateTime(String(value))) {
+				return "Enter a date and time as YYYY-MM-DDTHH:MM:SSZ";
+			}
 			return undefined;
-		default:
-			return typeof value === "string" ? textError(schema, value) : "enter text";
-	}
-}
-
-function textError(schema: MCPElicitFieldSchema, value: string): string | undefined {
-	if (schema.type !== "string") return undefined;
-	const allowed = choices(schema.oneOf, schema.enum).map(choice => choice.value);
-	if (allowed.length > 0 && !allowed.includes(value)) return "pick one of the listed options";
-	if (schema.minLength !== undefined && value.length < schema.minLength) {
-		return `needs at least ${schema.minLength} characters`;
-	}
-	if (schema.maxLength !== undefined && value.length > schema.maxLength) {
-		return `at most ${schema.maxLength} characters`;
-	}
-	switch (schema.format) {
-		case "email":
-			return /^[^\s@]+@[^\s@]+$/.test(value) ? undefined : "enter an email address";
-		case "uri":
-			return URL.canParse(value) ? undefined : "enter a full URL";
-		case "date":
-			return isCalendarDate(value) ? undefined : "enter a real date as YYYY-MM-DD";
-		case "date-time":
-			return isDateTime(value) ? undefined : "enter a date and time as YYYY-MM-DDTHH:MM:SSZ";
+		}
 		default:
 			return undefined;
 	}
@@ -296,12 +284,11 @@ function controlHtml(
 			const attrs = [nameAttr, 'type="number"'];
 			if (schema.minimum !== undefined) attrs.push(`min="${esc(String(schema.minimum))}"`);
 			if (schema.maximum !== undefined) attrs.push(`max="${esc(String(schema.maximum))}"`);
-			if (schema.type === "integer") attrs.push('pattern="-?\\d+"');
 			const value = shown === undefined ? schema.default : shown;
 			if (value !== undefined) attrs.push(`value="${esc(String(value))}"`);
 			return `<input ${attrs.join(" ")}${requiredAttr}>`;
 		}
-		default: {
+		case "string": {
 			const value = shown === undefined ? schema.default : String(shown);
 			const options = choices(schema.oneOf, schema.enum);
 			if (options.length > 0) return selectHtml(nameAttr, requiredAttr, options, value ? [value] : [], !required);
@@ -310,8 +297,7 @@ function controlHtml(
 	}
 }
 
-function textAttrs(schema: MCPElicitFieldSchema, value: string | undefined): string[] {
-	if (schema.type !== "string") return ['type="text"'];
+function textAttrs(schema: MCPElicitStringSchema, value: string | undefined): string[] {
 	const attrs: string[] = [];
 	switch (schema.format) {
 		case "email":
@@ -321,7 +307,7 @@ function textAttrs(schema: MCPElicitFieldSchema, value: string | undefined): str
 			attrs.push('type="url"');
 			break;
 		case "date":
-			attrs.push('type="text"', 'placeholder="YYYY-MM-DD"', 'pattern="\\d{4}-\\d{2}-\\d{2}"');
+			attrs.push('type="text"', 'placeholder="YYYY-MM-DD"');
 			break;
 		case "date-time":
 			attrs.push('type="text"', 'placeholder="YYYY-MM-DDTHH:MM:SSZ"');

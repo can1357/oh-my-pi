@@ -162,7 +162,7 @@ describe("MCP elicitation through the session UI", () => {
 
 		const result = await handlerFor(context({ formDialog }))(request, undefined);
 
-		expect(forms[1]).toContain("regions: pick at least 2");
+		expect(forms[1]).toContain("regions: Pick at least 2");
 		// The cleared note stays cleared: the server's default does not come back.
 		expect(defaultFormData(parseHtmlForm(forms[1] ?? ""))).toMatchObject({ owner: "ops", note: "", regions: ["eu"] });
 		expect(result).toEqual({ action: "accept", content: { owner: "ops", regions: ["eu", "ap"] } });
@@ -224,8 +224,8 @@ describe("MCP elicitation through the session UI", () => {
 			return forms.length === 1 ? "accepted" : (forms[1] ?? "");
 		};
 
-		expect(await problems("2026-02-31", "2026-02-10T09:30:00Z")).toContain("day: enter a real date");
-		expect(await problems("2026-02-10", "2026-02-10")).toContain("at: enter a date and time");
+		expect(await problems("2026-02-31", "2026-02-10T09:30:00Z")).toContain("day: Enter a real date");
+		expect(await problems("2026-02-10", "2026-02-10")).toContain("at: Enter a date and time");
 		expect(await problems("2024-02-29", "2026-02-10T09:30:00.5+02:00")).toBe("accepted");
 	});
 
