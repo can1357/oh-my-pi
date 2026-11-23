@@ -5,7 +5,7 @@
  * Translated to a canonical shape regardless of source format.
  */
 import { logger } from "@oh-my-pi/pi-utils";
-import { LinearRegExp } from "@oh-my-pi/pi-utils/regex";
+import { LinearRegExp, splitInlineFlags } from "@oh-my-pi/pi-utils/regex";
 import { defineCapability } from ".";
 import type { SourceMeta } from "./types";
 
@@ -296,12 +296,6 @@ export function parseRuleConditionAndScope(
 	};
 }
 
-/** Leading PCRE-style inline flag group, e.g. `(?i)` or `(?ims)`. */
-const INLINE_FLAG_PREFIX = /^\(\?([a-z]+)\)/;
-
-/** Inline flags that map cleanly onto native `RegExp` flags. */
-const TRANSLATABLE_INLINE_FLAGS = /^[ims]+$/;
-
 /**
  * A sequence of positive lookaheads whose bodies all begin with greedy `[\s\S]*`
  * has the same result at index zero as it does at any later index. Each body
@@ -368,12 +362,8 @@ function optimizeRuleCondition(condition: LinearRegExp): LinearRegExp {
  * invalid patterns.
  */
 export function compileRuleCondition(pattern: string): LinearRegExp {
-	const match = INLINE_FLAG_PREFIX.exec(pattern);
-	if (match && TRANSLATABLE_INLINE_FLAGS.test(match[1])) {
-		const flags = Array.from(new Set(match[1])).join("");
-		return optimizeRuleCondition(new LinearRegExp(pattern.slice(match[0].length), flags));
-	}
-	return optimizeRuleCondition(new LinearRegExp(pattern));
+	const { source, flags } = splitInlineFlags(pattern);
+	return optimizeRuleCondition(new LinearRegExp(source, flags));
 }
 
 let activeRules: readonly Rule[] = [];

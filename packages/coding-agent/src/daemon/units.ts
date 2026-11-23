@@ -28,7 +28,7 @@ import { adoptChild, isSameProcess, processStartTime, spawnManagedChild } from "
 import type { DaemonModule, ManagedChild, ModuleClient, ModuleContext, ModuleTunnel, ModuleUnit } from "./module";
 import { moduleStateDir, unitLogDir } from "./paths";
 import {
-	DAEMON_OUTPUT_PATTERN_FLAGS,
+	compileDaemonOutputPattern,
 	DAEMON_PTY_COLUMNS,
 	DAEMON_PTY_ROWS,
 	type DaemonCompletionEvent,
@@ -702,7 +702,7 @@ export class UnitTable {
 		let pattern: RegExp | undefined;
 		if (operation.pattern) {
 			try {
-				pattern = new RegExp(operation.pattern, DAEMON_OUTPUT_PATTERN_FLAGS);
+				pattern = compileDaemonOutputPattern(operation.pattern);
 			} catch (error) {
 				throw new Error(`Invalid wait regex: ${errorMessage(error)}`);
 			}
@@ -1376,7 +1376,7 @@ export class UnitTable {
 		}
 		if (proc.ready?.log) {
 			try {
-				new RegExp(proc.ready.log, DAEMON_OUTPUT_PATTERN_FLAGS);
+				compileDaemonOutputPattern(proc.ready.log);
 			} catch (error) {
 				throw new Error(`Invalid readiness regex: ${errorMessage(error)}`);
 			}
@@ -1425,7 +1425,7 @@ export class UnitTable {
 			logReady: !proc.ready?.log,
 			portReady: proc.ready?.port === undefined,
 			readinessBuffer: "",
-			readyPattern: proc.ready?.log ? new RegExp(proc.ready.log, DAEMON_OUTPUT_PATTERN_FLAGS) : undefined,
+			readyPattern: proc.ready?.log ? compileDaemonOutputPattern(proc.ready.log) : undefined,
 			consecutiveFailures: 0,
 			monitoring: false,
 		};
@@ -2196,7 +2196,7 @@ export class UnitTable {
 			logReady: !proc.ready?.log || stored.snapshot.state === "ready",
 			portReady: proc.ready?.port === undefined || stored.snapshot.state === "ready",
 			readinessBuffer: "",
-			readyPattern: proc.ready?.log ? new RegExp(proc.ready.log, DAEMON_OUTPUT_PATTERN_FLAGS) : undefined,
+			readyPattern: proc.ready?.log ? compileDaemonOutputPattern(proc.ready.log) : undefined,
 			consecutiveFailures: 0,
 			monitoring: false,
 		};

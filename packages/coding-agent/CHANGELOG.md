@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A service's readiness regex (`ready.log`) and a wait regex may now start with a PCRE inline flag group such as `(?i)`, `(?m)`, or `(?s)`, which becomes the matching `RegExp` flag instead of failing with `Invalid readiness regex`.
+
 ## [19.1.1] - 2026-11-23
 
 ### Breaking Changes
