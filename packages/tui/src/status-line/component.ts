@@ -27,6 +27,7 @@ import type {
 	StatusAccountIdentity as OAuthAccountIdentity,
 	StatusLineHost,
 	PromptCacheStatus,
+	SessionTreePosition,
 	StatusLineSession,
 } from "./host";
 import type { Editor } from "../components/editor";
@@ -76,9 +77,10 @@ export type StatusLineNativeAction =
 	| "status.cost"
 	| "status.usage"
 	| "status.path"
-	| "status.cache";
+	| "status.cache"
+	| "status.tree";
 
-/** Click action per native segment: quick model picker, `/context`, `/git`, `/usage` (cost and the subscription limits), the project directory, `/session`. */
+/** Click action per native segment: quick model picker, `/context`, `/git`, `/usage` (cost and the subscription limits), the project directory, `/session`, `/tree`. */
 const NATIVE_SEGMENT_ACTIONS: Partial<Record<string, StatusLineNativeAction>> = {
 	model: "status.model",
 	context_pct: "status.context",
@@ -88,14 +90,16 @@ const NATIVE_SEGMENT_ACTIONS: Partial<Record<string, StatusLineNativeAction>> = 
 	usage: "status.usage",
 	path: "status.path",
 	cache: "status.cache",
+	tree: "status.tree",
 };
 
-/** Segments that outlast every other one as the native bar narrows (model, context, git branch). */
+/** Segments that outlast every other one as the native bar narrows (model, context, git branch, tree position). */
 const PINNED_NATIVE_SEGMENTS: Partial<Record<string, true>> = {
 	model: true,
 	context_pct: true,
 	context_total: true,
 	git: true,
+	tree: true,
 };
 const PINNED_NATIVE_PRIORITY = 1000;
 
@@ -487,6 +491,8 @@ class StatusLineExternalInputs {
 	isFastModeActive = false;
 	anthropicSlowModeLabel: string | undefined = undefined;
 	compactionSpeculation: unknown = undefined;
+	/** The session's tree position (stable identity while unchanged). */
+	treePosition: unknown = undefined;
 	/** The freshest running job widget's view (stable identity while its data is unchanged). */
 	jobWidgetRef: unknown = undefined;
 }
@@ -2761,6 +2767,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			compactionSpeculation,
 			speculationBlinkOn: this.#speculationBlinkOn,
 			subagentCount: this.#subagentCount,
+			treePosition: this.#treePosition(),
 			// The tree total describes the main session; a focused subagent's
 			// view falls back to its own completed task results.
 			subagentTreeCost: this.#focusedAgentId ? 0 : this.#subagentTreeCost,
@@ -2939,7 +2946,17 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				? this.session.getAnthropicSlowModeLabel()
 				: undefined;
 		target.compactionSpeculation = this.session.compactionSpeculation;
+		target.treePosition = this.#treePosition();
 		target.jobWidgetRef = this.#latestJobWidget()?.view;
+	}
+
+	/**
+	 * The session's tree position for the `tree` segment; none while a subagent
+	 * is focused, as `/tree` acts on the main session.
+	 */
+	#treePosition(): SessionTreePosition | undefined {
+		if (this.#focusedAgentId !== undefined) return undefined;
+		return this.session.sessionManager?.getTreePosition?.();
 	}
 
 	/** The running job widget that saw data last; the ANSI jobs segment appends its glance. */
@@ -3000,6 +3017,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			left.isFastModeActive === right.isFastModeActive &&
 			left.anthropicSlowModeLabel === right.anthropicSlowModeLabel &&
 			left.compactionSpeculation === right.compactionSpeculation &&
+			left.treePosition === right.treePosition &&
 			left.jobWidgetRef === right.jobWidgetRef
 		);
 	}
