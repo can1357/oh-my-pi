@@ -3,7 +3,7 @@
  * symbol formatting) so the daemon's LSP module converts URIs without loading
  * the theme, path-resolution, and model-catalog code those formatters reach.
  */
-import path from "node:path";
+import * as path from "node:path";
 
 /**
  * Convert a file path to a file:// URI.
