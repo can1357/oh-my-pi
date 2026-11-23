@@ -1714,9 +1714,7 @@ describe("antigravity discovery collapsing", () => {
 				});
 				// Vertex's GOOGLE_CLOUD_* vars are not consulted on this OAuth path.
 				process.env.GOOGLE_CLOUD_REGION = "gcp-region";
-				expect(buildAntigravityFetchModelsBody({ projectId: "p-1", requestId: "r" }).location).toBe(
-					"europe-west4",
-				);
+				expect(buildAntigravityFetchModelsBody({ projectId: "p-1", requestId: "r" }).location).toBe("europe-west4");
 				delete process.env.PI_AI_ANTIGRAVITY_LOCATION;
 				expect(buildAntigravityFetchModelsBody({ projectId: "p-1", requestId: "r" })).toEqual({
 					project: "p-1",
