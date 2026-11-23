@@ -1185,6 +1185,118 @@ describe("html form", () => {
 			expect(onCancel).not.toHaveBeenCalled();
 		});
 
+		it("in Vim mode Esc in a textarea leaves Insert first; only a quiet Normal mode hands the keys back", () => {
+			const releaseKeys = vi.fn();
+			const { form } = dialog(`<form><label>Notes<textarea name="notes"></textarea></label></form>`, {
+				releaseKeys,
+				vimMode: true,
+			});
+			form.handleInput("draft");
+			form.handleInput(ESC);
+			expect(releaseKeys).not.toHaveBeenCalled();
+			form.handleInput("x");
+			expect(form.data()).toEqual({ notes: "draf" });
+			form.handleInput(ESC);
+			expect(releaseKeys).toHaveBeenCalledTimes(1);
+		});
+
+		it("in Vim mode Esc in an option note leaves Insert, so Enter still saves it; a reopened note types again", () => {
+			const { form } = dialog(DB_FORM, { vimMode: true });
+			form.handleInput(DOWN);
+			form.handleInput("n");
+			form.handleInput("why postgres");
+			form.handleInput(ESC);
+			expect(form.debugState().noteEdit).toBe("db=pg");
+			form.handleInput(ENTER);
+			expect(form.debugState().notes).toMatchObject({ db: { 1: "why postgres" } });
+			// Closed from Normal mode, the note still reopens in Insert mode.
+			form.handleInput("n");
+			form.handleInput("!");
+			form.handleInput(ESC);
+			form.handleInput(ENTER);
+			expect(form.debugState().notes).toMatchObject({ db: { 1: "why postgres!" } });
+			form.dispose();
+		});
+
+		it("in Vim mode the Other answer takes Vim keys, and Esc leaves Insert before it hands the keys back", () => {
+			const releaseKeys = vi.fn();
+			const { form } = dialog(
+				`<form><fieldset><legend>Pick</legend><label><input type="radio" name="db" value="a" checked> A</label><label><input type="radio" name="db" value="b"> B</label></fieldset></form>`,
+				{ releaseKeys, vimMode: true },
+			);
+			form.handleInput(DOWN);
+			form.handleInput(DOWN);
+			form.handleInput("my own answer");
+			form.handleInput(ESC);
+			expect(releaseKeys).not.toHaveBeenCalled();
+			form.handleInput("bdw");
+			expect(form.data()).toEqual({ db: "my own" });
+			form.handleInput(ESC);
+			expect(releaseKeys).toHaveBeenCalledTimes(1);
+		});
+
+		it("in Vim mode a one-line text input takes Vim keys; a password stays a plain masked input", () => {
+			const releaseKeys = vi.fn();
+			const { form } = dialog(
+				`<form><label>Name <input type="text" name="name"></label><label>Secret <input type="password" name="pw"></label></form>`,
+				{ releaseKeys, vimMode: true },
+			);
+			form.handleInput("hello world");
+			form.handleInput(ESC);
+			expect(releaseKeys).not.toHaveBeenCalled();
+			form.handleInput("bD");
+			expect(form.data()).toMatchObject({ name: "hello " });
+			form.handleInput(TAB);
+			form.handleInput("abc");
+			// No Vim mode in the password: Esc goes straight back to the composer.
+			form.handleInput(ESC);
+			expect(releaseKeys).toHaveBeenCalledTimes(1);
+			expect(form.data()).toMatchObject({ pw: "abc" });
+		});
+
+		it("in Vim mode j/k step between option rows like ↓/↑, while text boxes keep the letters", () => {
+			const { form } = dialog(DB_FORM, { vimMode: true });
+			const start = form.debugState().focus;
+			form.handleInput("j");
+			const next = form.debugState().focus;
+			expect(next).not.toBe(start);
+			form.handleInput("k");
+			expect(form.debugState().focus).toBe(start);
+			// Without Vim mode `j` is no row key.
+			const plainForm = dialog(DB_FORM).form;
+			plainForm.handleInput("j");
+			expect(plainForm.debugState().focus).toBe(start);
+			// In a text box `j` is text again.
+			const text = dialog(`<form><label>Name <input type="text" name="name"></label></form>`, {
+				vimMode: true,
+			}).form;
+			text.handleInput("j");
+			expect(text.data()).toEqual({ name: "j" });
+			// A closed dropdown keeps its letter type-ahead: `k` picks Kotlin instead of moving.
+			const select = dialog(
+				`<form><label>Lang <select name="lang"><option value="json">JSON</option><option value="kotlin">Kotlin</option></select></label></form>`,
+				{ vimMode: true },
+			).form;
+			select.handleInput("k");
+			expect(select.data()).toEqual({ lang: "kotlin" });
+		});
+
+		it("text boxes starting in Normal mode: j/k on the box's edge line step to the next or previous field", () => {
+			const { form } = dialog(
+				`<form><label>First <input type="text" name="a"></label><label>Second <input type="text" name="b"></label></form>`,
+				{ vimMode: true, configureEditor: editor => (editor.vimStartMode = "normal") },
+			);
+			// Normal mode: the letters are commands, so nothing is typed, and `j` leaves the one-line box.
+			form.handleInput("j");
+			form.handleInput("i");
+			form.handleInput("two");
+			form.handleInput(ESC);
+			form.handleInput("k");
+			form.handleInput("a");
+			form.handleInput("one");
+			expect(form.data()).toEqual({ a: "one", b: "two" });
+		});
+
 		it("rows: no footer in the panel; keyHints() gives the focused stop's keys for the host to draw", () => {
 			const { form } = dialog(DB_FORM);
 			const rows = plain(form);
