@@ -268,6 +268,9 @@ pub struct CompiledUnit<'a> {
 	pub line:   u32,
 	/// Compiler-known literal origin, when the source was entered natively.
 	pub parent: Option<&'a SourceOrigin>,
+	/// The command running the script the unit was read from (`eval`, `.`,
+	/// a nested shell), when one did.
+	pub runner: Option<&'a SourceOrigin>,
 }
 
 impl CompiledUnit<'_> {
@@ -379,14 +382,16 @@ pub struct SpanOwned {
 	pub col:  u32,
 }
 
-/// Exact emitting activation and canonical parent span of native script input.
+/// Exact emitting activation and canonical span of where native script
+/// input came from: the literal argument that is the script, or the command
+/// that runs it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SourceOrigin {
 	/// Process owning the parent unit.
 	pub vpid: Vpid,
-	/// Canonical word id of the source argument in that unit.
+	/// Canonical id of the word or command in that unit.
 	pub node: u32,
-	/// Actual literal argument entering this script.
+	/// The node's span.
 	pub span: SpanOwned,
 }
 
