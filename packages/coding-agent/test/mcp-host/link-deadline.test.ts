@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
 import { encodeHostError } from "@oh-my-pi/pi-coding-agent/mcp/host/contract";
 import { HostLink } from "@oh-my-pi/pi-coding-agent/mcp/link";
-import type { MCPProgress } from "@oh-my-pi/pi-tui/tools/mcp";
+import type { MCPProgress } from "@oh-my-pi/pi-tui/tools/mcp-progress";
 import { rejectionOf, trackUnhandled } from "../helpers/rejection";
 import { FakeHost, type Message, metaOf, paramsOf, REMOTE_SPEC, settled, unauthorized } from "./link-fake-host";
 

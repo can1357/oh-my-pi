@@ -42,14 +42,13 @@ import {
 	collectGlobMatches,
 	dedupeWorkspaceSymbols,
 	detectLanguageId,
-	fileToUri,
 	filterWorkspaceSymbols,
 	hasGlobPattern,
 	readLocationContext,
 	resolveDiagnosticTargets,
 	resolveSymbolColumn,
-	uriToFile,
 } from "@oh-my-pi/pi-coding-agent/lsp/utils";
+import { fileToUri, uriToFile } from "@oh-my-pi/pi-coding-agent/lsp/uri";
 import { getThemeByName, initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
