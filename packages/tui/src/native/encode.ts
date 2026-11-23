@@ -208,8 +208,7 @@ const EVENT_REQUIRED: Readonly<Record<string, Readonly<Record<string, "string" |
 	select: { id: "string", item: "string" },
 	activate: { id: "string", item: "string" },
 	action: { id: "string", act: "string" },
-	// `value` varies by control (boolean, number, string, string[], null): the handler checks it.
-	change: { id: "string", item: "string" },
+	// `change` has two shapes (a control's value or a doc's full text); both are checked below.
 	edit: { id: "string", from: "number", to: "number", text: "string", cursor: "number", len: "number" },
 	undo: { id: "string" },
 	focus: { id: "string" },
@@ -217,12 +216,36 @@ const EVENT_REQUIRED: Readonly<Record<string, Readonly<Record<string, "string" |
 	gone: { ids: "array" },
 };
 
+/** `sf` and `id` address a live node; both are required on every routed event. */
+function hasRoute(value: Record<string, unknown>): value is Record<string, unknown> & { sf: string; id: string } {
+	return typeof value.sf === "string" && value.sf !== "" && typeof value.id === "string" && value.id !== "";
+}
+
 function decodeEvent(value: Record<string, unknown>): TspEvent | null {
 	if (typeof value.ev !== "string") return null;
 	if (value.ev === "send") {
-		const { sf, id, text } = value;
-		if (typeof sf !== "string" || !sf || typeof id !== "string" || !id || typeof text !== "string") return null;
-		return { ev: "send", sf, id, text };
+		if (!hasRoute(value) || typeof value.text !== "string") return null;
+		return { ev: "send", sf: value.sf, id: value.id, text: value.text };
+	}
+	// A doc comments in two shapes: a new comment quotes its source, an edited
+	// one names the comment id the program already knows.
+	if (value.ev === "comment") {
+		if (!hasRoute(value) || typeof value.note !== "string") return null;
+		if (typeof value.comment === "string") return value as TspEvent;
+		if (typeof value.quote === "string" && typeof value.at === "number") return value as TspEvent;
+		return null;
+	}
+	if (value.ev === "uncomment") {
+		if (!hasRoute(value) || typeof value.comment !== "string") return null;
+		return value as TspEvent;
+	}
+	// A doc's in-place edit carries the full text; a control's change carries the
+	// changed item and its new value (the handler checks the value's type).
+	if (value.ev === "change") {
+		if (!hasRoute(value)) return null;
+		if (typeof value.text === "string") return value as TspEvent;
+		if (typeof value.item === "string") return value as TspEvent;
+		return null;
 	}
 	const required = EVENT_REQUIRED[value.ev];
 	if (!required) return null;

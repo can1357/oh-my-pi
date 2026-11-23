@@ -69,6 +69,42 @@ describe("TSP framing", () => {
 		});
 	});
 
+	it("decodes a doc's new and edited comments, uncomments and in-place edits", () => {
+		const events: TspEvent[] = [
+			{ ev: "comment", sf: "s:1", id: "a.doc", quote: "Alpha line", at: 3, note: "too vague" },
+			{ ev: "comment", sf: "s:1", id: "a.doc", comment: "c1", note: "name the API" },
+			{ ev: "uncomment", sf: "s:1", id: "a.doc", comment: "c1" },
+			{ ev: "change", sf: "s:1", id: "a.doc", text: "# Plan\n\nnew body\n" },
+			{ ev: "change", sf: "s:1", id: "a.prefs", item: "mode", value: "fast" },
+		];
+		for (const event of events) {
+			expect(parseTspMessage(encodeTspMessage("e", JSON.stringify(event)))).toEqual({ verb: "e", event });
+		}
+	});
+
+	it("rejects doc comment events without a surface, target, note or anchor", () => {
+		const valid: Extract<TspEvent, { ev: "comment" }> = {
+			ev: "comment",
+			sf: "s:1",
+			id: "a.doc",
+			quote: "Alpha",
+			at: 0,
+			note: "clarify",
+		};
+		for (const event of [
+			{ ...valid, sf: undefined },
+			{ ...valid, id: "" },
+			{ ...valid, note: undefined },
+			{ ...valid, quote: undefined },
+			{ ...valid, at: "0" },
+			{ ev: "comment", sf: "s:1", id: "a.doc", note: "clarify" },
+			{ ev: "uncomment", sf: "s:1", id: "a.doc" },
+			{ ev: "change", sf: "s:1", id: "a.doc" },
+		]) {
+			expect(parseTspMessage(encodeTspMessage("e", JSON.stringify(event)))).toBeNull();
+		}
+	});
+
 	it("chunks a body over the APC limit and reassembles it byte-exact, never splitting a code point", () => {
 		const body = JSON.stringify({ text: 'ab€漢字🙂🙃 é\u001b"quote" '.repeat(9) });
 		const limit = 23;
