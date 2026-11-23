@@ -43,7 +43,7 @@ use crate::bash::{
 	diag::Diag,
 	ids::Platform,
 	pattern::zsh::Pattern,
-	store::{Attrs, Key, KeyBuf, LossyKind, MiscKey, Record, Table, VarValue},
+	store::{Attrs, IndexedArray, Key, KeyBuf, LossyKind, MiscKey, Record, Table, VarValue},
 	syntax::zsh::tok::{
 		DASH, INBRACK, MARKER, POUND, QSTRING, QUEST, STAR, STRING, at, head, metafy, span, tail,
 		unmetafy, untokenize,
@@ -636,7 +636,7 @@ const fn bash_only(name: &[u8], v: &Var) -> bool {
 
 /// A stored indexed array read the zsh way: dense, gaps filled with `""`;
 /// `true` when it had gaps.
-fn dense(items: &[(i64, BString)]) -> (Vec<BString>, bool) {
+fn dense(items: &IndexedArray) -> (Vec<BString>, bool) {
 	let Some(&(last, _)) = items.last() else {
 		return (Vec::new(), false);
 	};
@@ -645,7 +645,7 @@ fn dense(items: &[(i64, BString)]) -> (Vec<BString>, bool) {
 		return (items.iter().map(|e| e.1.clone()).collect(), false);
 	}
 	let mut out = vec![BString::default(); len];
-	for (k, v) in items {
+	for (k, v) in items.iter() {
 		if let Ok(i) = usize::try_from(*k)
 			&& i < len
 		{
@@ -2688,7 +2688,7 @@ fn assign_elem_in_place(
 }
 
 /// Whether stored indexed elements are a zsh array's: indices `0..len`.
-fn dense_from_zero(items: &[(i64, BString)]) -> bool {
+fn dense_from_zero(items: &IndexedArray) -> bool {
 	items.first().is_none_or(|(i, _)| *i == 0)
 		&& items
 			.last()
@@ -3708,7 +3708,7 @@ pub fn createparam(
 	if flags.contains(PmFlags::UNSET) {
 		let attrs = pm.attrs.with(Attrs::INVISIBLE);
 		let value = match flags.type_bits() {
-			PmFlags::ARRAY => VarValue::Indexed(Vec::new()),
+			PmFlags::ARRAY => VarValue::Indexed(Default::default()),
 			PmFlags::HASHED => VarValue::Assoc(Default::default()),
 			_ => VarValue::Str(BString::default()),
 		};
@@ -3717,7 +3717,7 @@ pub fn createparam(
 	}
 	let value = match &pm.value {
 		PValue::Scalar(s) => VarValue::Str(s.clone()),
-		PValue::Array(_) => VarValue::Indexed(Vec::new()),
+		PValue::Array(_) => VarValue::Indexed(Default::default()),
 		PValue::Hash(_) => VarValue::Assoc(Default::default()),
 	};
 	state::store_var(
@@ -3749,7 +3749,7 @@ pub fn createparam_at(
 	let base_flags = flags.without(PmFlags::LOCAL).without(PmFlags::SPECIAL);
 	let attrs = base_flags.to_attrs(width, base);
 	let value = match base_flags.type_bits() {
-		PmFlags::ARRAY => VarValue::Indexed(Vec::new()),
+		PmFlags::ARRAY => VarValue::Indexed(Default::default()),
 		PmFlags::HASHED => VarValue::Assoc(Default::default()),
 		_ => VarValue::Str(BString::default()),
 	};
@@ -3871,7 +3871,7 @@ pub fn tie(
 	let aflags = sflags.without(PmFlags::EXPORTED).with(PmFlags::ARRAY);
 	for (name, f, value) in [
 		(scalar, sflags, VarValue::Str(BString::default())),
-		(array, aflags, VarValue::Indexed(Vec::new())),
+		(array, aflags, VarValue::Indexed(Default::default())),
 	] {
 		let var = Var { attrs: f.to_attrs(width, base), value };
 		match scope {
@@ -3919,7 +3919,7 @@ mod tests {
 
 	#[test]
 	fn sparse_arrays_read_dense_with_gaps_filled() {
-		let items = vec![(0, BString::from("a")), (3, BString::from("d"))];
+		let items = vec![(0, BString::from("a")), (3, BString::from("d"))].into();
 		let (d, sparse) = dense(&items);
 		assert!(sparse);
 		assert_eq!(d, [
@@ -3928,7 +3928,7 @@ mod tests {
 			BString::default(),
 			BString::from("d")
 		]);
-		let (d, sparse) = dense(&[(0, BString::from("x")), (1, BString::from("y"))]);
+		let (d, sparse) = dense(&vec![(0, BString::from("x")), (1, BString::from("y"))].into());
 		assert!(!sparse);
 		assert_eq!(d.len(), 2);
 	}
