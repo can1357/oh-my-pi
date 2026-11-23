@@ -19,6 +19,8 @@ let builtinThemes: Record<string, ThemeJson> | undefined;
 
 // `defaults.json` holds ~100 optional themes; reading it on first use keeps it out of
 // the startup module graph, which only needs `dark` or `light` in the common case.
+// This holds only while the file stays under json-parse-plugin's DEFAULT_MIN_BYTES (256 KiB);
+// above it the compiled binary parses it eagerly at import again.
 function loadDefaultThemes(): Record<string, ThemeJson> {
 	const asset: unknown = defaultThemesAsset;
 	if (typeof asset !== "string") return asset as Record<string, ThemeJson>;
