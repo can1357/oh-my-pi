@@ -394,6 +394,8 @@ interface SessionAgentNoticeDetails {
 interface PromptSurface {
 	/** Skill-URI hints in `bash`/`read` (mid-session `/skillful` toggles). */
 	skillHintVisible: boolean;
+	/** `find` hints in `grep`/`glob`/`bash` (mid-session `find.enabled: auto` withdrawals after a judge rejection). */
+	findHintVisible: boolean;
 	/** Eval preludes in the system prompt and eval description. */
 	evalPreludes: readonly EvalPreludeDefinition[];
 	/** User-tagged model agents listed in the task description. */
@@ -821,6 +823,16 @@ export class SessionTools {
 	}
 
 	/**
+	 * Whether `grep`/`glob`/`bash` descriptions point at `find` (see
+	 * {@link #promptSurface}); the candidate inside a rebuild frame. Withdrawing
+	 * `find` from a prefix-bound transcript leaves these descriptions as the
+	 * bound prefix rendered them until a rebuild absorbs the change.
+	 */
+	get findHintVisible(): boolean {
+		return (this.#promptSurfaceScope.getStore() ?? this.#promptSurface).findHintVisible;
+	}
+
+	/**
 	 * Eval preludes the system prompt and eval description advertise (see
 	 * {@link #promptSurface}); the candidate inside a rebuild frame.
 	 */
@@ -856,6 +868,7 @@ export class SessionTools {
 	#derivePromptSurface(): PromptSurface {
 		return {
 			skillHintVisible: cfgSkillful.get(this.#host.settings) === true && this.#promptSkills.length > 0,
+			findHintVisible: this.getEnabledToolNames().includes("find"),
 			evalPreludes: this.#host.evalPreludes(),
 			sessionAgents: this.#host.sessionAgents(),
 			// Eval-bound tools stay callable by name; their namespaces advertise them.
@@ -2546,10 +2559,12 @@ export class SessionTools {
 	/**
 	 * Re-resolves settings-gated tools (built-in factories, image/speech generation,
 	 * tool command mounting) against live settings: registers newly allowed tools,
-	 * unregisters disallowed ones, and reapplies the enabled set with one forced
-	 * prompt rebuild — unconditionally unless `refreshPrompt` is false, then only
-	 * when the tool set changed. Unrelated selections and MCP/extension tools are
-	 * preserved.
+	 * unregisters disallowed ones, and reapplies the enabled set. By default the
+	 * prompt is rebuilt unconditionally (an explicit settings change). With
+	 * `refreshPrompt: false` (judge rejections, role edits) the change is applied
+	 * as an implicit one: a no-op delta returns early, and a prefix-bound
+	 * transcript keeps its prompt while the roster change rides its notices.
+	 * Unrelated selections and MCP/extension tools are preserved.
 	 */
 	reconcileBuiltinTools({ refreshPrompt = true }: { refreshPrompt?: boolean } = {}): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
@@ -2573,7 +2588,7 @@ export class SessionTools {
 				if (delta.toolCommands) delta.toolCommands.decorateExecution = tool => this.#wrapToolForAcpPermission(tool);
 			}
 			if (!refreshPrompt && !toolCommandChanged && delta.added.length === 0 && delta.removed.length === 0) return;
-			await this.#applyActiveToolsByName([...enabled], true);
+			await this.#applyActiveToolsByName([...enabled], refreshPrompt);
 		});
 	}
 
@@ -2675,6 +2690,7 @@ export class SessionTools {
 		const previousBaseSystemPrompt = this.#baseSystemPrompt;
 		const candidate: PromptSurface = {
 			...this.#derivePromptSurface(),
+			findHintVisible: roster.toolNames.includes("find"),
 			evalToolNames: this.#promptSurface.evalToolNames,
 			perCallModelAdvertisement: this.#promptSurface.perCallModelAdvertisement,
 		};

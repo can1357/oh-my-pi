@@ -16,6 +16,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import {
 	collectMountedMCPToolRoutes,
 	projectMountedMCPToolCommandGuidance,
+	type SettingsGatedToolDelta,
 } from "@oh-my-pi/pi-coding-agent/session/session-tools";
 import {
 	listToolCommands,
@@ -23,6 +24,7 @@ import {
 	type ToolCommandState,
 } from "@oh-my-pi/pi-coding-agent/tools/tool-commands";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
+import { GlobTool } from "@oh-my-pi/pi-coding-agent/tools/glob";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { logger } from "@oh-my-pi/pi-utils";
 
@@ -133,6 +135,10 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		skills?: Skill[];
 		/** Model binds signed thinking to its prompt prefix, so implicit rebuilds freeze once a reply exists. */
 		prefixBound?: boolean;
+		/** Tools registered and active from the start, beside `read` (and `bash` with tool commands). */
+		extraTools?: AgentTool[];
+		/** Settings-gated tool reconciler, as `sdk.ts` supplies it. */
+		reconcileSettingsGatedTools?: (isBuiltIn: (name: string) => boolean) => Promise<SettingsGatedToolDelta>;
 	}
 
 	function newSession(
@@ -155,6 +161,8 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		toolRegistry.set(readTool.name, readTool);
 		toolRegistry.set(bashTool.name, bashTool);
 		toolRegistry.set(initialMcp.name, initialMcp as unknown as AgentTool);
+		const extraTools = options.extraTools ?? [];
+		for (const tool of extraTools) toolRegistry.set(tool.name, tool);
 		const mock = options.responses ? createMockModel({ responses: options.responses }) : undefined;
 		const contexts: Message[][] = [];
 		const systemPrompts: string[][] = [];
@@ -168,9 +176,12 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 						}
 					: createModel(),
 				systemPrompt: ["initial"],
-				tools: options.toolCommands
-					? [readTool, bashTool, initialMcp as unknown as AgentTool]
-					: [readTool, initialMcp as unknown as AgentTool],
+				tools: [
+					...(options.toolCommands
+						? [readTool, bashTool, initialMcp as unknown as AgentTool]
+						: [readTool, initialMcp as unknown as AgentTool]),
+					...extraTools,
+				],
 				messages: options.initialMessages ?? [],
 			},
 			convertToLlm,
@@ -190,7 +201,10 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			modelRegistry: { getApiKey: async () => "test-key" } as never,
 			toolRegistry,
 			createVibeTools: options.createVibeTools,
-			builtInToolNames: options.toolCommands ? ["read", "bash"] : ["read"],
+			builtInToolNames: [
+				...(options.toolCommands ? ["read", "bash"] : ["read"]),
+				...extraTools.map(tool => tool.name),
+			],
 			setActiveToolNames: names => {
 				activeToolNames.clear();
 				for (const name of names) activeToolNames.add(name);
@@ -210,6 +224,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			getMcpServerInstructions: options.getMcpServerInstructions,
 			toolCommands: options.toolCommands,
 			skills: options.skills,
+			reconcileSettingsGatedTools: options.reconcileSettingsGatedTools,
 		});
 		sessions.push(session);
 		return {
@@ -1408,6 +1423,58 @@ Unavailable; invocations fail:
 		expect(systemPrompts[2]).toEqual(systemPrompts[0]);
 		expect(mountNoticesIn(contexts[1]).join("\n")).toContain("mcp__nucleus_fetch");
 	});
+
+	const FIND_HINT = "Behavior search → `find`.";
+
+	for (const prefixBound of [true, false]) {
+		it(`withdraws a judge-gated find ${prefixBound ? "behind the bound prompt prefix" : "from the prompt at once"}`, async () => {
+			let findAllowed = true;
+			const { session, systemPrompts, toolRegistry, isToolActive } = newSession(
+				async toolNames => `tools:${toolNames.join(",")}`,
+				{
+					responses: [{ content: ["ok"] }, { content: ["ok"] }],
+					prefixBound,
+					extraTools: [createBasicTool("find", "Find"), createBasicTool("glob", "Glob")],
+					// What `sdk.ts` does once the judge role rejects the account under `find.enabled: auto`.
+					reconcileSettingsGatedTools: async () => {
+						if (findAllowed || !toolRegistry.delete("find")) {
+							return { added: [], removed: [], toolCommands: undefined };
+						}
+						return { added: [], removed: ["find"], toolCommands: undefined };
+					},
+				},
+			);
+			const glob = new GlobTool({
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: session.settings,
+				getSessionFile: () => null,
+				isToolActive,
+				get findHintVisible() {
+					return session.getFindHintVisible();
+				},
+			} as ToolSession);
+			toolRegistry.set("glob", glob as AgentTool);
+			await session.setActiveToolsByName(session.getActiveToolNames());
+			await session.prompt("hi");
+			const boundDescription = glob.description;
+			expect(boundDescription).toContain(FIND_HINT);
+
+			findAllowed = false;
+			await session.reconcileBuiltinTools({ refreshPrompt: false });
+			await session.prompt("again");
+
+			expect(session.getActiveToolNames()).not.toContain("find");
+			if (prefixBound) {
+				// Bound signed thinking survives only if the prefix keeps its bytes.
+				expect(systemPrompts[1]).toEqual(systemPrompts[0]);
+				expect(glob.description).toBe(boundDescription);
+			} else {
+				expect(systemPrompts[1]?.join("\n")).not.toContain("find");
+				expect(glob.description).not.toContain(FIND_HINT);
+			}
+		});
+	}
 
 	it("announces an unmount after a maintenance rebuild delivered the pending addition", async () => {
 		const { session, contexts, systemPrompts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {

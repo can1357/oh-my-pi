@@ -41,7 +41,7 @@ import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file-recorder";
 import { type FileMatchSection, formatFileMatches } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
 import { formatMatchLine } from "@oh-my-pi/pi-tui/tools/match-line-format";
-import { isFindEnabled } from "./jfind";
+import { findHintVisible } from "./jfind";
 import {
 	expandDelimitedPathEntries,
 	formatPathRelativeToCwd,
@@ -611,7 +611,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 		const displayMode = resolveFileDisplayMode(this.session);
 		const isHlMode = displayMode.hashLines;
 		const isLineNumberMode = !displayMode.hashLines && displayMode.lineNumbers;
-		const hasFind = this.session.isToolActive?.("find") ?? isFindEnabled(this.session);
+		const hasFind = findHintVisible(this.session);
 		const eagerDelegation = sessionDelegationBias(this.session) === "eager";
 		const scoutAvailable = isScoutSpawnable(
 			cfgTaskDisabledAgents.get(this.session.settings),

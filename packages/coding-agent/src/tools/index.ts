@@ -281,6 +281,14 @@ export interface ToolSession {
 	 * rebuilds (mid-session `/skillful` toggles ride the prompt, not the prefix).
 	 */
 	skillHintVisible?: boolean;
+	/**
+	 * Frozen `find` availability for the `grep`/`glob`/`bash` hints: snapshot
+	 * taken at the last system-prompt rebuild, so withdrawing `find` mid-session
+	 * (a judge rejection under `find.enabled: auto`) leaves the tool prefix
+	 * byte-stable. Undefined outside a managed session; tools then read
+	 * {@link isToolActive}.
+	 */
+	findHintVisible?: boolean;
 	/** Rediscover live session skills after a tool mutates their backing files. */
 	refreshSkills?: () => Promise<void>;
 	/** The session as the holder `skill://` rediscovers through when a skill's files are gone. */

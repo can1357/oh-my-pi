@@ -2734,6 +2734,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					(cfgSkillful.get(settings) === true && (session?.skills ?? skills).length > 0)
 				);
 			},
+			/** `find` hints frozen with the primary prompt; see `SessionTools.findHintVisible`. */
+			get findHintVisible() {
+				return session?.getFindHintVisible();
+			},
 			restrictToolNames,
 			get hasEditTool() {
 				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
@@ -5342,6 +5346,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get skillHintVisible() {
 				return toolSession.skillHintVisible;
 			},
+			// The advisor's own roster decides its `find` hints (`isToolActive`), not the primary's prompt.
+			findHintVisible: undefined,
 			// Live, not the spread's copy: a rediscovery after a plugin upgrade replaces the primary's list.
 			get skills() {
 				return toolSession.skills;

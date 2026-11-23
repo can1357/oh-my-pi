@@ -13,7 +13,7 @@ import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import type { ToolSession } from ".";
 import { resolveToolTier } from "./approval";
-import { isFindEnabled } from "./jfind";
+import { findHintVisible } from "./jfind";
 import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
 import {
 	expandDelimitedPathEntries,
@@ -182,7 +182,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	readonly loadMode = "essential";
 	readonly label = "Glob";
 	get description(): string {
-		const hasFind = this.session.isToolActive?.("find") ?? isFindEnabled(this.session);
+		const hasFind = findHintVisible(this.session);
 		const eagerDelegation = sessionDelegationBias(this.session) === "eager";
 		const scoutAvailable = isScoutSpawnable(
 			cfgTaskDisabledAgents.get(this.session.settings),
