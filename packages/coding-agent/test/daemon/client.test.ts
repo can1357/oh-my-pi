@@ -2,6 +2,7 @@
 // dir (see test/fixtures/daemon-harness.ts); state is observed by polling with a deadline.
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { procmgr } from "@oh-my-pi/pi-utils";
 import { closeDaemonClient, daemonClient, probeDaemon } from "../../src/daemon/client";
@@ -104,6 +105,31 @@ describe("daemon client", () => {
 		} finally {
 			for (const child of children) child.kill("SIGKILL");
 			await Promise.all(children.map(child => child.exited));
+		}
+	}, 60_000);
+
+	it("starts the daemon outside the spawning process's cwd", async () => {
+		// The shared daemon outlives its spawner; holding a project dir as cwd blocks removing it on Windows.
+		const project = await fs.mkdtemp(path.join(os.tmpdir(), "omp-proj-"));
+		const fixture = path.join(import.meta.dir, "..", "fixtures", "daemon-host-cwd.ts");
+		try {
+			const child = Bun.spawn([process.execPath, fixture], {
+				cwd: project,
+				stdout: "pipe",
+				stderr: "ignore",
+				env: parentEnv(),
+			});
+			const answer = JSON.parse((await new Response(child.stdout).text()).trim()) as {
+				pid?: number;
+				error?: string;
+			};
+			await child.exited;
+			if (answer.pid !== undefined) harness.track(answer.pid);
+			expect(answer.error).toBeUndefined();
+			const daemonCwd = await Bun.file(path.join(harness.dir, "daemon-cwd")).text();
+			expect(await fs.realpath(daemonCwd)).toBe(await fs.realpath(os.homedir()));
+		} finally {
+			await fs.rm(project, { recursive: true, force: true });
 		}
 	}, 60_000);
 
