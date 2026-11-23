@@ -97,7 +97,6 @@ import {
 	applyCodeAction,
 	dedupeWorkspaceSymbols,
 	extractHoverText,
-	fileToUri,
 	filterWorkspaceSymbols,
 	findSymbolInFile,
 	formatCodeAction,
@@ -114,8 +113,8 @@ import {
 	resolveSymbolColumn,
 	sortDiagnostics,
 	symbolKindToIcon,
-	uriToFile,
 } from "./utils";
+import { fileToUri, uriToFile } from "./uri";
 import { formatGroupedDiagnosticMessages } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { runWorkspaceDiagnostics } from "./workspace-diagnostics";
 
