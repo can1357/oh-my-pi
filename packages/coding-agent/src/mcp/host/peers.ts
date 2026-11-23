@@ -890,12 +890,26 @@ function eraOfDiscoverError(error: unknown): McpEra | undefined {
 	return handshake ? "legacy" : "modern";
 }
 
+function endedBeforeReply(outcome: Outcome | undefined): boolean {
+	return (
+		outcome !== undefined &&
+		"error" in outcome &&
+		outcome.error instanceof MCPTransportError &&
+		outcome.error.failure === "eof"
+	);
+}
+
 /**
  * Probe a subprocess: `server/discover`, and right behind it `initialize`, so
  * a handshake-era server that ignores the unknown method still shows itself
  * without waiting out the bound.
+ * If the child exits without answering either request, the caller tries a fresh handshake.
  */
-async function probeStdio(upstream: StdioUpstream, deps: McpPeerDeps, signal: AbortSignal): Promise<McpProbeResult> {
+async function probeStdio(
+	upstream: StdioUpstream,
+	deps: McpPeerDeps,
+	signal: AbortSignal,
+): Promise<McpProbeResult | undefined> {
 	upstream.onRequest = legacyRequestHandler(deps);
 	await upstream.connect(deps.spawn, signal);
 	const discover = outcomeOf(upstream.request("server/discover", { _meta: requestMeta() }, { signal }));
@@ -918,7 +932,10 @@ async function probeStdio(upstream: StdioUpstream, deps: McpPeerDeps, signal: Ab
 		}
 	}
 	const initialized = await initialize;
-	if ("error" in initialized) throw initialized.error;
+	if ("error" in initialized) {
+		if (endedBeforeReply(discovered) && endedBeforeReply(initialized)) return undefined;
+		throw initialized.error;
+	}
 	return { era: "legacy", discover: legacyDiscover(parseInitializeResult(initialized.value)) };
 }
 
@@ -932,7 +949,11 @@ function httpStatusOf(error: MCPTransportError): number | undefined {
 
 const LEGACY_HTTP_STATUS: Record<number, true> = { 400: true, 404: true, 405: true };
 
-async function probeHttp(spec: McpServerSpec, deps: McpPeerDeps, signal: AbortSignal): Promise<McpProbeResult> {
+async function probeHttp(
+	spec: McpServerSpec,
+	deps: McpPeerDeps,
+	signal: AbortSignal,
+): Promise<McpProbeResult | undefined> {
 	const modern = upstreamFor(spec, "modern");
 	try {
 		await connectUpstream(modern, deps, signal);
@@ -955,19 +976,14 @@ async function probeHttp(spec: McpServerSpec, deps: McpPeerDeps, signal: AbortSi
 	} finally {
 		await modern.close();
 	}
-	return probeHandshake(spec, deps, signal);
+	return undefined;
 }
 
-/** Confirm a handshake-era remote server with `initialize` on a throwaway session. */
-async function probeHandshake(spec: McpServerSpec, deps: McpPeerDeps, signal: AbortSignal): Promise<McpProbeResult> {
-	const legacy = upstreamFor(spec, "legacy");
+/** Confirm a handshake-era server with `initialize` on a throwaway session. */
+async function probeHandshake(legacy: Upstream, deps: McpPeerDeps, signal: AbortSignal): Promise<McpProbeResult> {
 	legacy.onRequest = legacyRequestHandler(deps);
-	try {
-		await connectUpstream(legacy, deps, signal);
-		return { era: "legacy", discover: legacyDiscover(await openLegacySession(legacy, signal)) };
-	} finally {
-		await legacy.close();
-	}
+	await connectUpstream(legacy, deps, signal);
+	return { era: "legacy", discover: legacyDiscover(await openLegacySession(legacy, signal)) };
 }
 
 // ── entry points ───────────────────────────────────────────────────────────
@@ -978,12 +994,22 @@ export const mcpUpstreams: McpUpstreams = {
 		const timeoutMs = spec.timeoutMs > 0 ? spec.timeoutMs : PROBE_TIMEOUT_MS;
 		const bound = AbortSignal.timeout(timeoutMs);
 		const probeSignal = signal ? AbortSignal.any([signal, bound]) : bound;
-		const stdio = spec.transport === "stdio" ? new StdioUpstream(spec) : undefined;
+		let upstream: Upstream | undefined;
 		try {
-			if (stdio) return await probeStdio(stdio, deps, probeSignal);
-			if (spec.transport === "sse") return await probeHandshake(spec, deps, probeSignal);
-			return await probeHttp(spec, deps, probeSignal);
+			if (spec.transport === "stdio") {
+				upstream = new StdioUpstream(spec);
+				const result = await probeStdio(upstream, deps, probeSignal);
+				if (result) return result;
+				await upstream.close();
+				probeSignal.throwIfAborted();
+			} else if (spec.transport === "http") {
+				const result = await probeHttp(spec, deps, probeSignal);
+				if (result) return result;
+			}
+			upstream = upstreamFor(spec, "legacy");
+			return await probeHandshake(upstream, deps, probeSignal);
 		} catch (error) {
+			const stdio = upstream instanceof StdioUpstream ? upstream : undefined;
 			const kind: MCPTransportKind = stdio ? "stdio" : "http";
 			if (bound.aborted && !signal?.aborted) {
 				const stderr = stdio?.stderrTail().trim();
@@ -999,7 +1025,7 @@ export const mcpUpstreams: McpUpstreams = {
 			if (stdio) throw startError(error, stdio);
 			throw normalizeMCPTransportError(error, { transport: kind, stage: "connect" });
 		} finally {
-			await stdio?.close();
+			await upstream?.close();
 		}
 	},
 

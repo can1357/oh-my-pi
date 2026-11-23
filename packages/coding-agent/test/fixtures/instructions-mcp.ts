@@ -36,6 +36,8 @@ const CONTEXT_MODE_TOOL_NAME = "ctx_execute";
 export const BOUNDED_GUIDANCE_TOOL_COUNT = 65;
 /** Gives the default tool a schema whose rendered docs exceed the per-device prompt cap. */
 export const OVERSIZED_SCHEMA_MODE = "--oversized-schema";
+/** Models handshake-era SDKs that exit if the initial request isn't `initialize`. */
+export const STRICT_HANDSHAKE_MODE = "--strict-handshake";
 
 function defaultInputSchema(): Record<string, unknown> {
 	if (!process.argv.includes(OVERSIZED_SCHEMA_MODE)) {
@@ -101,6 +103,7 @@ function buildResult(method: string): Record<string, unknown> {
 
 function startServer(): void {
 	const rl = readline.createInterface({ input: process.stdin });
+	let expectingInitialize = process.argv.includes(STRICT_HANDSHAKE_MODE);
 	rl.on("line", line => {
 		const trimmed = line.trim();
 		if (trimmed.length === 0) return;
@@ -109,6 +112,13 @@ function startServer(): void {
 			msg = JSON.parse(trimmed) as JsonRpcRequest;
 		} catch {
 			return;
+		}
+		if (expectingInitialize) {
+			if (msg.method !== "initialize") {
+				process.stderr.write(`Expected initialize, received ${msg.method}\n`);
+				process.exit(1);
+			}
+			expectingInitialize = false;
 		}
 		// Notifications (no `id`) get no response.
 		if (msg.id === undefined || msg.id === null) return;

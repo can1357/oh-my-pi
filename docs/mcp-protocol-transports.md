@@ -61,7 +61,8 @@ The v1-to-v2 cache upgrade clears old era verdicts once, but keeps cached result
 
 - **stdio**: the probe writes `server/discover` and then `initialize`.
   A discover result that lists `2026-07-28`, or a modern error, wins; any other discover answer falls back to `initialize`, and its result means handshake-era.
-  The probe process is always killed.
+  If the process exits before answering either request, the probe starts a fresh process with `initialize` first, within the same deadline.
+  Both probe processes are reaped before the probe returns.
 - **http**: the probe sends a modern `server/discover` POST.
   A discover result that lists `2026-07-28`, or a modern error, means modern; any other discover answer falls back to a legacy `initialize`. An unrecognized JSON-RPC reply or an eligible HTTP status (`400`, `404`, `405`) can fall back to a legacy `initialize`.
   An unsupported-version error that lists a handshake-era revision falls back under any status.

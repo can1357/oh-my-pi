@@ -5,7 +5,7 @@ import { mcpUpstreams } from "@oh-my-pi/pi-coding-agent/mcp/host/peers";
 import { MCP_LEGACY_TTL_MS } from "@oh-my-pi/pi-coding-agent/mcp/host/store";
 import { MCP_PROTOCOL_VERSION, MCPMeta } from "@oh-my-pi/pi-coding-agent/mcp/protocol";
 import { INSTRUCTIONS, PROTOCOL_VERSION } from "../fixtures/modern-mcp";
-import { SERVER_INSTRUCTIONS } from "../fixtures/instructions-mcp";
+import { SERVER_INSTRUCTIONS, STRICT_HANDSHAKE_MODE } from "../fixtures/instructions-mcp";
 import { FIXTURES, isAlive, realDeps, stdioSpec } from "./upstream-support";
 
 describe("era probe of a subprocess server", () => {
@@ -36,6 +36,18 @@ describe("era probe of a subprocess server", () => {
 			_meta: { [MCPMeta.serverInfo]: { name: "instr-fixture", version: "1.0.0" } },
 		});
 		expect(isAlive(deps.pids[0])).toBe(false);
+	});
+
+	it("discovers a handshake-era server that exits unless initialize is the first message", async () => {
+		const deps = realDeps();
+		const spec = stdioSpec(path.join(FIXTURES, "instructions-mcp.ts"), [STRICT_HANDSHAKE_MODE]);
+
+		const result = await mcpUpstreams.probe(spec, deps);
+
+		expect(result.era).toBe("legacy");
+		expect(result.discover?.capabilities).toEqual({ tools: {} });
+		expect(result.discover?.instructions).toBe(SERVER_INSTRUCTIONS);
+		expect(deps.pids.filter(isAlive)).toEqual([]);
 	});
 
 	it("treats an ordinary method-not-found answer to server/discover as legacy", async () => {
