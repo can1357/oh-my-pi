@@ -1,6 +1,7 @@
 export { once, untilAborted } from "./abortable";
 export * from "./async";
 export * from "./binary";
+export * from "./bounded-json";
 export * from "./bytes";
 export * from "./color";
 export * from "./dirs";
@@ -34,6 +35,7 @@ export * from "./runtime-install";
 export * from "./sanitize-text";
 export * from "./slugify";
 export * from "./snowflake";
+export * from "./spill-url";
 export * from "./sqlite";
 export * from "./stderr-guard";
 export * from "./stream";

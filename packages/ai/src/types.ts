@@ -51,6 +51,7 @@ import type { GitLabDuoWorkflowOptions } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
+import type { KiroOptions } from "./providers/kiro/stream";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICodexResponsesOptions } from "./providers/openai-codex-responses";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
@@ -84,6 +85,7 @@ export interface ApiOptionsMap {
 	"google-generative-ai": GoogleOptions;
 	"google-gemini-cli": GoogleGeminiCliOptions;
 	"google-vertex": GoogleVertexOptions;
+	"kiro-api": KiroOptions;
 	"ollama-chat": OllamaChatOptions;
 	"cursor-agent": CursorOptions;
 	"factory-droid-agent": FactoryDroidOptions;
@@ -707,7 +709,7 @@ export interface StreamOptions {
 	 * in the iterator while waiting for the first semantic stream event. Set to
 	 * `0` to disable both layers for this request. After the first semantic
 	 * event arrives, `streamIdleTimeoutMs` governs inter-event stalls. Falls
-	 * back to `PI_STREAM_FIRST_EVENT_TIMEOUT_MS` and then to a 100s default.
+	 * back to `PI_STREAM_FIRST_EVENT_TIMEOUT_MS` and then to a 900s default.
 	 * OpenAI-family transports additionally honor
 	 * `PI_OPENAI_STREAM_FIRST_EVENT_TIMEOUT_MS` as the most-specific override and
 	 * floor the first-event budget at the resolved idle (per-call
@@ -726,7 +728,7 @@ export interface StreamOptions {
 	 * mid-stream stalls (broker dies, half-open socket, model produces no real
 	 * progress for too long). Set to `0` to disable. Falls back to
 	 * `PI_STREAM_IDLE_TIMEOUT_MS` (alias: `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS`)
-	 * and then to a 120s default.
+	 * and then to a 900s default.
 	 */
 	streamIdleTimeoutMs?: number;
 	/**
@@ -775,6 +777,19 @@ export interface StreamOptions {
 	 * observes limit headers, and decides capacity waits.
 	 */
 	anthropicSlowMode?: AnthropicSlowModeHooks;
+	/**
+	 * Prompt-cache pre-warm (Anthropic Messages only). The provider builds the
+	 * request exactly as it would otherwise (same `onPayload` hooks, auth, and
+	 * headers, so the cache key is identical), then sends it non-streaming
+	 * with `max_tokens: 0`: the endpoint reads the prompt, refreshes the cache
+	 * at its breakpoints, and returns usage with no output billed. The stream
+	 * emits `start` then `done` with empty content, `stopReason: "length"`,
+	 * and that usage. Ends in an `error` event, sending nothing, when the
+	 * request has budget thinking, a forced `tool_choice`, or structured
+	 * output, which the endpoint rejects. Other providers ignore the flag and generate normally,
+	 * so callers gate it on `isPromptCachePrewarmSupported`.
+	 */
+	prewarm?: boolean;
 }
 
 /**
@@ -906,10 +921,16 @@ export type StreamFunction<TApi extends Api> = (
 	options: OptionsForApi<TApi>,
 ) => AssistantMessageEventStream;
 
+/**
+ * Responses API assistant message phase. `partial_answer` (Codex 0.162+) marks
+ * answer text that more output or tool calls may follow; `final_answer` ends the turn.
+ */
+export type AssistantMessagePhase = "commentary" | "final_answer" | "partial_answer";
+
 export interface TextSignatureV1 {
 	v: 1;
 	id: string;
-	phase?: "commentary" | "final_answer";
+	phase?: AssistantMessagePhase;
 }
 
 export interface TextContent {
@@ -1367,6 +1388,8 @@ export interface AssistantMessage {
 	contextSnapshot?: ContextSnapshot;
 	retryRecovery?: AssistantRetryRecovery;
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
+	/** Provider request id (Anthropic's `request-id` response header); provider support asks for it when a request is refused or fails. */
+	requestId?: string;
 	/**
 	 * Name of the upstream provider an aggregator routed this request to, as
 	 * reported in the response (e.g. OpenRouter's top-level `provider` field:
@@ -1770,7 +1793,10 @@ export interface Context {
 	systemPrompt?: string[];
 	messages: Message[];
 	tools?: Tool[];
-	/** Definitions of tools the transcript's latest Anthropic request declared but that are no longer in `tools`; only the Anthropic provider reads it. */
+	/**
+	 * Definitions of declared tools that are not in `tools`: those the transcript's latest Anthropic request declared,
+	 * or, before any request declared tools, those that may become active later. Only the Anthropic provider reads it.
+	 */
 	inactiveTools?: Tool[];
 }
 

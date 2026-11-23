@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/agent-protocol";
@@ -30,7 +31,7 @@ function registerPeer(id: string, status: "running" | "idle" = "running"): void 
 	});
 }
 
-function makeSession(options: { senderId?: string; deviceOnlyWrite?: boolean; planMode?: boolean } = {}): ToolSession {
+function makeSession(options: { senderId?: string; planMode?: boolean } = {}): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
@@ -39,7 +40,6 @@ function makeSession(options: { senderId?: string; deviceOnlyWrite?: boolean; pl
 		getSessionSpawns: () => "*",
 		getAgentId: () => options.senderId ?? "Main",
 		agentRegistry: registry,
-		deviceOnlyWrite: options.deviceOnlyWrite,
 		getPlanModeState: () => (options.planMode ? { enabled: true } : undefined),
 	} as unknown as ToolSession;
 }
@@ -125,6 +125,38 @@ describe("write agent:// messaging", () => {
 		expect(received.get("Sibling")?.map(message => message.body)).toEqual(["who owns auth.ts?"]);
 	});
 
+	it("resolves agent://parent and a miscased id to the registered agent", async () => {
+		registerPeer("Scout");
+		registerPeer("Worker");
+		const tool = new WriteTool(makeSession({ senderId: "Worker" }));
+		const toParent = await tool.execute("to-parent", { path: "agent://parent", content: "done?" });
+		expect(toParent.details?.message).toMatchObject({ to: "Main", receipts: [{ to: "Main" }] });
+		const miscased = await tool.execute("to-scout", { path: "agent://scout", content: "found it" });
+		expect(miscased.content).toEqual([{ type: "text", text: "Delivered to Scout." }]);
+		expect(received.get("Scout")?.map(message => message.body)).toEqual(["found it"]);
+	});
+
+	it("holds a message for a spawned agent that has not started yet, counting it as sent", async () => {
+		const manager = new AsyncJobManager({});
+		const start = Promise.withResolvers<string>();
+		manager.register("task", "Queued", async () => start.promise, {
+			id: "Queued",
+			agentId: "Queued",
+			ownerId: "Main",
+			queued: true,
+		});
+		const session = { ...makeSession(), asyncJobManager: manager } as ToolSession;
+		try {
+			const result = await new WriteTool(session).execute("early", { path: "agent://Queued", content: "use v2" });
+			expect(result.isError).toBeFalsy();
+			expect(IrcBus.global().unansweredSends("Main", 0)).toMatchObject([{ to: "Queued" }]);
+			expect(IrcBus.global().take("Queued")).toMatchObject({ from: "Main", to: "Queued", body: "use v2" });
+		} finally {
+			start.resolve("done");
+			await manager.dispose();
+		}
+	});
+
 	it("reports unknown and stopped recipients without delivering", async () => {
 		const tool = new WriteTool(makeSession());
 		const unknown = await tool.execute("unknown", { path: "agent://Missing", content: "hello" });
@@ -152,22 +184,18 @@ describe("write agent:// messaging", () => {
 		expect(received.get("Scout")).toEqual([]);
 	});
 
-	it("permits device-only and plan-mode messaging, but rejects path suffixes and empty content", async () => {
+	it("permits plan-mode messaging, but rejects path suffixes and empty content", async () => {
 		registerPeer("Scout");
-		const deviceOnly = new WriteTool(makeSession({ deviceOnlyWrite: true }));
 		const planMode = new WriteTool(makeSession({ planMode: true }));
-		expect(
-			(await deviceOnly.execute("device", { path: "agent://Scout", content: "from device" })).content[0],
-		).toMatchObject({ text: "Delivered to Scout." });
 		expect(
 			(await planMode.execute("plan", { path: "agent://Scout", content: "from plan" })).content[0],
 		).toMatchObject({ text: "Delivered to Scout." });
 		await expect(planMode.execute("suffix", { path: "agent://Scout/result", content: "oops" })).rejects.toThrow(
 			"JSON-path suffix",
 		);
-		await expect(deviceOnly.execute("empty", { path: "agent://Scout", content: "  " })).rejects.toThrow(
-			"non-empty content",
-		);
-		expect(received.get("Scout")?.map(message => message.body)).toEqual(["from device", "from plan"]);
+		await expect(
+			new WriteTool(makeSession()).execute("empty", { path: "agent://Scout", content: "  " }),
+		).rejects.toThrow("non-empty content");
+		expect(received.get("Scout")?.map(message => message.body)).toEqual(["from plan"]);
 	});
 });

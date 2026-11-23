@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
+### Added
+
+- Added `toolIntentLabel` for displaying the brief prefix of a structured tool-call intent.
+- Added clickable shell-command steps with output selection and visual highlighting of the currently displayed step.
+- Added a terminal `features` event for notifying clients when terminal settings change.
+- Added collaboration guest support for resuming sessions and delivering queued messages, plus `followUp` prompts.
+
+## [19.0.0] - 2026-11-18
+
+### Added
+
+- Added tray state and interaction properties, including focus, peek, quiet, main status, item references, card status and actions, and event state.
+- Added layout transition properties to nodes for coordinating layout animations.
+- Added support for folding a dock composer into its compact row.
+
 ## [18.22.0] - 2026-11-16
 
 ### Added

@@ -58,9 +58,9 @@ export type { CollabSessionState };
  * that serialize into those shapes.
  */
 export type CollabFrame =
-	// guest -> host (hello/abort/agent-cmd/fetch-transcript/ui-response are taken verbatim from the wire grammar)
+	// guest -> host (every guest frame but prompt is taken verbatim from the wire grammar)
 	| Exclude<GuestFrame, { t: "prompt" }>
-	| { t: "prompt"; text: string; images?: ImageContent[] }
+	| { t: "prompt"; text: string; images?: ImageContent[]; followUp?: true }
 	// host -> guest
 	| {
 			t: "welcome";

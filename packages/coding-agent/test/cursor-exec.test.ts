@@ -28,7 +28,6 @@ import {
 import { create, fromBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
-import { registerArtifactsDir } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import {
 	bridgeToolMap,
 	createBridgeEditTool,
@@ -46,7 +45,7 @@ import { TodoTool } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import type { TruncationMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, spillFileName, spillUrl } from "@oh-my-pi/pi-utils";
 import { AdviseTool } from "../src/advisor/advise-tool";
 
 function yoloToolContext(): AgentToolContext {
@@ -358,7 +357,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		// `getEditReplaceTool` — otherwise every modern edit answers
 		// `Tool "edit" not available` and the file is untouched.
 		// (Not the `getTool` fallback: that resolver also serves the agent
-		// loop's unadvertised calls, so it stays device-only.)
+		// loop's unadvertised calls, so it stays mounted-tool-only.)
 
 		const target = path.join(cwd, "sample.txt");
 		await Bun.write(target, "alpha\nbeta\n");
@@ -1465,7 +1464,7 @@ describe("CursorExecHandlers argument validation", () => {
 });
 
 describe("CursorExecHandlers mounted tool bridge", () => {
-	it("executes MCP tools resolved from the xd:// registry", async () => {
+	it("executes mounted MCP tools resolved by bare name", async () => {
 		const mountedTool: AgentTool = {
 			name: "mcp__fixture_report",
 			label: "Fixture Report",
@@ -1494,12 +1493,12 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		expect(result.content).toEqual([{ type: "text", text: "reported" }]);
 	});
 
-	it("routes wrapped mounted devices through the approval gate", async () => {
+	it("routes wrapped mounted tools through the approval gate", async () => {
 		let executed = false;
-		const device: AgentTool = {
+		const mounted: AgentTool = {
 			name: "ast_edit",
 			label: "AST Edit",
-			description: "structural edit device",
+			description: "structural edit tool",
 			parameters: type({}),
 			async execute() {
 				executed = true;
@@ -1509,7 +1508,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		// The deny path throws inside resolveApproval before any handler runs;
 		// the stub only needs the loop-emission marker probe the wrapper always
 		// consults first.
-		const wrapped = new ExtensionToolWrapper(device, {
+		const wrapped = new ExtensionToolWrapper(mounted, {
 			consumeToolCallEmitted: () => false,
 		} as unknown as ExtensionRunner);
 		const settings = Settings.isolated({ "tools.approval": { ast_edit: "deny" } });
@@ -1517,15 +1516,15 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			cwd: ".",
 			// The canonical map contains the undecorated mounted tool. The execution
 			// override must win or Cursor bypasses the approval gate.
-			tools: new Map([[device.name, device]]),
-			getExecutableTool: name => (name === device.name ? (wrapped as unknown as AgentTool) : undefined),
+			tools: new Map([[mounted.name, mounted]]),
+			getExecutableTool: name => (name === mounted.name ? (wrapped as unknown as AgentTool) : undefined),
 			getToolContext: () => ({ settings }) as AgentToolContext,
 		});
 
 		const result = await handlers.mcp({
-			name: device.name,
+			name: mounted.name,
 			providerIdentifier: "pi-agent",
-			toolName: device.name,
+			toolName: mounted.name,
 			toolCallId: "call-denied",
 			args: {},
 			rawArgs: {},
@@ -2524,7 +2523,7 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		} as never);
 		for (const result of [legacy, modern]) {
 			expect(result.isError).toBe(false);
-			expect(result.content).toEqual([{ type: "text", text: "line997\nline998" }]);
+			expect(result.content).toEqual([{ type: "text", text: "line997\nline998\n" }]);
 		}
 		const last = await handlers.piRead({
 			toolCallId: "last-line",
@@ -2671,24 +2670,20 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		expect(splitText).not.toContain("IHDR");
 	});
 
-	it("routes internal artifact reads through both Cursor frames", async () => {
-		const artifacts = path.join(cwd, "artifacts");
-		await fs.mkdir(artifacts);
-		await Bun.write(path.join(artifacts, "0.read.log"), "cursor-artifact-content\n");
-		const unregister = registerArtifactsDir(artifacts);
-		try {
-			const handlers = new CursorExecHandlers({
-				cwd,
-				tools: new Map<string, Tool>([["read", new ReadTool(createTestSession(cwd))]]),
-			});
-			const legacy = await handlers.read(create(ReadArgsSchema, { path: "artifact://0:raw" }));
-			const modern = await handlers.piRead({ toolCallId: "artifact-read", args: { path: "artifact://0" } });
-			for (const result of [legacy, modern]) {
-				expect(result.isError).toBe(false);
-				expect(result.content).toEqual([{ type: "text", text: "cursor-artifact-content\n" }]);
-			}
-		} finally {
-			unregister();
+	it("routes spill reads through both Cursor frames", async () => {
+		const sessionDir = path.join(cwd, "session");
+		await Bun.write(path.join(sessionDir, "local", spillFileName(0)), "cursor-spill-content\n");
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([
+				["read", new ReadTool(createTestSession(cwd, { getArtifactsDir: () => sessionDir }))],
+			]),
+		});
+		const legacy = await handlers.read(create(ReadArgsSchema, { path: `${spillUrl(0)}:raw` }));
+		const modern = await handlers.piRead({ toolCallId: "spill-read", args: { path: spillUrl(0) } });
+		for (const result of [legacy, modern]) {
+			expect(result.isError).toBe(false);
+			expect(result.content).toEqual([{ type: "text", text: "cursor-spill-content\n" }]);
 		}
 	});
 

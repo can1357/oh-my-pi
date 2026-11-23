@@ -4,9 +4,11 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
 import {
 	AgyHost,
+	describeToolArguments,
 	type AgyConnection,
 	type AgyHostOptions,
 	type AgyScheduler,
@@ -18,6 +20,7 @@ import type { McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mc
 import { StepWriter } from "@oh-my-pi/pi-ai/providers/antigravity-cli/step-writer";
 import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ContentBlock, PromptRequest, PromptResponse, SessionConfigOption } from "@oh-my-pi/pi-utils/acp";
 
@@ -98,10 +101,20 @@ class FakeAgy implements AgyTransport {
 	currentId = "";
 	#pending = new Set<FakePrompt>();
 
-	constructor(options: AgyTransportOptions) {
+	constructor(options: AgyTransportOptions, roster: string[] = [model.id]) {
 		this.options = options;
+		// agy advertises either bare ids with a separate thought level or effort-suffixed ids (#19638).
 		const configOptions: SessionConfigOption[] = [
 			{
+				id: "model",
+				name: "Model",
+				type: "select",
+				currentValue: roster[0],
+				options: roster.map(value => ({ value, name: value })),
+			},
+		];
+		if (roster.includes(model.id)) {
+			configOptions.push({
 				id: "thought_level",
 				name: "Reasoning",
 				type: "select",
@@ -110,8 +123,8 @@ class FakeAgy implements AgyTransport {
 					{ value: "medium", name: "Medium" },
 					{ value: "high", name: "High" },
 				],
-			},
-		];
+			});
+		}
 		this.connection = {
 			signal: this.abort.signal,
 			initialize: async () => ({ protocolVersion: 1 }),
@@ -130,6 +143,9 @@ class FakeAgy implements AgyTransport {
 			closeSession: async () => ({}),
 			setSessionConfigOption: async params => {
 				await this.configureGate;
+				if (params.configId === "model" && !roster.includes(String(params.value))) {
+					throw new Error(`Unknown model ID: ${params.value}`);
+				}
 				this.configurations.push(`${params.configId}:${params.value}`);
 				return { configOptions };
 			},
@@ -162,6 +178,12 @@ class FakeAgy implements AgyTransport {
 			update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
 		});
 	}
+	thought(text: string): void {
+		this.options.onUpdate({
+			sessionId: this.currentId,
+			update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text } },
+		});
+	}
 	call(name = "read", args: Record<string, unknown> = { path: "a.txt" }, id = this.currentId): Promise<McpToolOutput> {
 		this.options.onUpdate({
 			sessionId: id,
@@ -188,7 +210,7 @@ afterEach(async () => {
 	for (const dispose of cleanup.splice(0).reverse()) await dispose();
 });
 
-async function fixture(options: AgyHostOptions = {}) {
+async function fixture(options: AgyHostOptions = {}, roster?: string[]) {
 	const dir = await mkdtemp(path.join(tmpdir(), "agy-host-test-"));
 	const started = new Queue<FakeAgy>();
 	const clock = new Clock();
@@ -199,7 +221,7 @@ async function fixture(options: AgyHostOptions = {}) {
 		announcementTimeoutMs: 30,
 		schedule: clock.schedule,
 		startTransport: async input => {
-			const fake = new FakeAgy(input);
+			const fake = new FakeAgy(input, roster);
 			instances.push(fake);
 			started.push(fake);
 			return fake;
@@ -266,6 +288,71 @@ describe("AgyHost stateful steps", () => {
 		await expect(run.done).rejects.toThrow("without a usable response");
 		expect(fake.closed).toBe(true);
 	});
+	it("selects the model and thought level agy advertises, including effort-suffixed rosters", async () => {
+		const turn = async (roster: string[], efforts: (string | undefined)[]) => {
+			const state = await fixture({}, roster);
+			let messages: Message[] = [];
+			let fake: FakeAgy | undefined;
+			for (const reasoning of efforts) {
+				messages = [...messages, user("hello")];
+				const run = step(state.host, messages, {}, undefined, { reasoning });
+				fake ??= await state.started.next();
+				const ended = run.done.then(() => Promise.reject(new Error("step ended without prompting")));
+				const prompt = await Promise.race([fake.prompts.next(), ended]);
+				fake.text("Done.");
+				prompt.response.resolve({ stopReason: "end_turn" });
+				await run.done;
+				messages = [...messages, run.writer.output];
+			}
+			return fake!.configurations;
+		};
+		expect(await turn([model.id], ["high", "medium"])).toEqual([
+			`model:${model.id}`,
+			"thought_level:high",
+			"thought_level:medium",
+		]);
+		const suffixed = ["low", "medium", "high"].map(level => `${model.id}-${level}`);
+		// No effort, or one the roster lacks (`xhigh`), takes the model's default level.
+		expect(await turn(suffixed, ["high", "xhigh", "low", undefined])).toEqual([
+			`model:${model.id}-high`,
+			`model:${model.id}-medium`,
+			`model:${model.id}-low`,
+			`model:${model.id}-medium`,
+		]);
+	});
+	it("publishes host tools with mixed-type unions without collapsing their properties", async () => {
+		// Shape of a typed `yield`: section variants make `data` an object|string union,
+		// which the CCA pipeline could only replace with an empty-object fallback (#19502).
+		const yieldTool: Tool = {
+			name: "yield",
+			description: "Submit result",
+			parameters: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					type: { anyOf: [{ type: "string" }, { type: "array", minItems: 1, items: { type: "string" } }] },
+					data: {
+						anyOf: [
+							{ type: "object", properties: { status: { enum: ["ok", "fail"], type: "string" } } },
+							{ enum: ["ok", "fail"], type: "string" },
+						],
+					},
+					error: { type: "string" },
+				},
+				required: [],
+			},
+		};
+		const state = await fixture();
+		step(state.host, [user("finish")], { tools: [yieldTool] });
+		const fake = await state.started.next();
+		const [published] = fake.options.tools;
+		const props = published.inputSchema.properties;
+		expect(props && typeof props === "object" ? Object.keys(props) : []).toEqual(["type", "data", "error"]);
+		expect(published.inputSchema).toMatchObject({
+			additionalProperties: false,
+			properties: { data: { anyOf: [{ type: "object" }, { type: "string" }] } },
+		});
+	});
 	it("parks and resumes multiple serial tool steps under exactly one ACP prompt", async () => {
 		const state = await parked();
 		let released = false;
@@ -316,6 +403,80 @@ describe("AgyHost stateful steps", () => {
 		steer.response.resolve({ stopReason: "end_turn" });
 		await next.done;
 		expect(next.writer.output.content).toEqual([{ type: "text", text: "Steered response." }]);
+	});
+
+	it("steers parked MCP images and links mixed and image-only MCP replies to their prompt envelopes", async () => {
+		const state = await parked();
+		state.fake.autoSteer = false;
+		let released = false;
+		void state.output.then(() => {
+			released = true;
+		});
+		const firstImage = { type: "image" as const, data: "c21hbGw=", mimeType: "image/jpeg" };
+		const firstCall = state.first.writer.output.content.find(block => block.type === "toolCall");
+		if (!firstCall || firstCall.type !== "toolCall") throw new Error("Expected first tool call");
+		const firstResult: ToolResultMessage = {
+			...result(state.first.writer.output, "Read image file [image/jpeg]"),
+			content: [{ type: "text", text: "Read image file [image/jpeg]" }, firstImage],
+		};
+		const second = step(state.host, [...state.messages, firstResult]);
+		const imageSteer = await state.fake.prompts.next();
+		expect(released).toBe(false);
+		expect(imageSteer.request.prompt).toEqual([
+			{ type: "text", text: `<tool_result id=${JSON.stringify(firstCall.id)} name="read">` },
+			firstImage,
+			{ type: "text", text: "</tool_result>" },
+		]);
+		state.prompt.response.resolve({ stopReason: "end_turn" });
+		expect(await state.output).toEqual({
+			content: [
+				{ type: "text", text: "Read image file [image/jpeg]" },
+				{
+					type: "text",
+					text: expect.stringContaining(`<tool_result id=${JSON.stringify(firstCall.id)} name="read">`),
+				},
+			],
+			isError: false,
+		});
+		state.fake.text("Checking second image.");
+		const secondOutput = state.fake.call("read", { path: "b.png" });
+		await second.done;
+
+		const secondImage = { type: "image" as const, data: "c2Vjb25k", mimeType: "image/png" };
+		const secondCall = second.writer.output.content.find(block => block.type === "toolCall");
+		if (!secondCall || secondCall.type !== "toolCall") throw new Error("Expected second tool call");
+		const imageOnlyResult: ToolResultMessage = {
+			...result(second.writer.output),
+			content: [secondImage],
+		};
+		const third = step(state.host, [
+			...state.messages,
+			firstResult,
+			second.writer.output,
+			imageOnlyResult,
+			user("compare both"),
+		]);
+		const combinedSteer = await state.fake.prompts.next();
+		imageSteer.response.resolve({ stopReason: "end_turn" });
+		expect(await secondOutput).toEqual({
+			content: [
+				{
+					type: "text",
+					text: expect.stringContaining(`<tool_result id=${JSON.stringify(secondCall.id)} name="read">`),
+				},
+			],
+			isError: false,
+		});
+		expect(combinedSteer.request.prompt).toEqual([
+			{ type: "text", text: `<tool_result id=${JSON.stringify(secondCall.id)} name="read">` },
+			secondImage,
+			{ type: "text", text: "</tool_result>" },
+			{ type: "text", text: "compare both" },
+		]);
+		state.fake.text("Both show benches.");
+		combinedSteer.response.resolve({ stopReason: "end_turn" });
+		await third.done;
+		expect(third.writer.output.content).toEqual([{ type: "text", text: "Both show benches." }]);
 	});
 
 	it("waits for confirmed cancellation before releasing a deadline-held MCP call or sending its late result", async () => {
@@ -603,6 +764,94 @@ describe("AgyHost stateful steps", () => {
 		}
 	});
 
+	it("returns invalid tool arguments to the model and parks a corrected call", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("read a.txt")]);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		const output = await fake.call("read", { path: 2 }, fake.currentId);
+		const text = output.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+		const [diagnostic, schema] = text.split("Expected schema: ");
+		const advertised = fake.options.tools.find(tool => tool.name === "read")?.inputSchema;
+		if (!advertised) throw new Error("Missing read tool schema");
+		expect(output.isError).toBe(true);
+		expect(diagnostic).toContain("read");
+		expect(diagnostic).toContain("path: expected string, received integer");
+		expect(schema).toBe(JSON.stringify(advertised));
+		expect(state.host.hasPendingTurn).toBe(true);
+		const corrected = fake.call("read", { path: "a" });
+		let released = false;
+		void corrected.then(() => {
+			released = true;
+		});
+		await run.done;
+		expect(released).toBe(false);
+		expect(state.host.hasPendingTurn).toBe(true);
+		state.host.close();
+		expect((await corrected).isError).toBe(true);
+	});
+
+	it("returns the expected schema when a required argument is missing", async () => {
+		const fileTool: Tool = {
+			name: "read",
+			description: "Read a file",
+			parameters: type({ file_path: "string" }),
+		};
+		const state = await fixture();
+		const run = step(state.host, [user("read a.txt")], { tools: [fileTool] });
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		const output = await fake.call("read", { path: 2 }, fake.currentId);
+		const text = textOf(output.content);
+		const advertised = fake.options.tools.find(tool => tool.name === "read")?.inputSchema;
+		if (!advertised) throw new Error("Missing read tool schema");
+		expect(output.isError).toBe(true);
+		expect(text).toContain("file_path: is required");
+		expect(text).toContain("Expected schema: ");
+		expect(text).toContain(JSON.stringify(advertised));
+		expect(run.writer.output.content.some(block => block.type === "toolCall")).toBe(false);
+		expect(state.host.hasPendingTurn).toBe(true);
+		state.host.close();
+		await expect(run.done).rejects.toThrow("session closed");
+	});
+
+	it("bounds a large invalid-arguments diagnostic and keeps the turn active", async () => {
+		const keys = Array.from({ length: 200 }, (_, index) => `key${index}`);
+		const wide: Tool = {
+			name: "wide",
+			description: "Wide schema",
+			parameters: type(Object.fromEntries(keys.map(key => [key, "string"]))),
+		};
+		const state = await fixture();
+		const run = step(state.host, [user("wide")], { tools: [wide] });
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		const output = await fake.call("wide", {}, fake.currentId);
+		const text = output.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+		expect(text.length).toBeLessThanOrEqual(16_387);
+		expect(text).toContain("more");
+		expect(state.host.hasPendingTurn).toBe(true);
+		state.host.close();
+		await expect(run.done).rejects.toThrow("session closed");
+	});
+
+	it("bounds long diagnostic paths without dropping the expected schema", () => {
+		const message = describeToolArguments(
+			{
+				name: "read",
+				description: "Read",
+				inputSchema: {
+					type: "object",
+					properties: {},
+					additionalProperties: false,
+				},
+			},
+			{ ["x".repeat(17_000)]: 1 },
+		);
+		expect(message).toContain("Expected schema:");
+		expect(message.length).toBeLessThanOrEqual(16_387);
+	});
+
 	it("close clears pending calls and deadline timers without a later cancel", async () => {
 		const state = await parked({ holdLimitMs: 10 });
 		state.host.close();
@@ -681,7 +930,7 @@ describe("AgyHost stateful steps", () => {
 		writer.text("late");
 		writer.thinking("late");
 		writer.usage(999);
-		writer.fail("error", "late failure");
+		writer.fail({ stopReason: "error", message: "late failure", status: 500, id: 500 });
 		expect(JSON.stringify(writer.output)).toBe(snapshot);
 		expect(stream.queue.map(event => event.type)).toEqual([
 			"start",
@@ -704,5 +953,91 @@ describe("AgyHost stateful steps", () => {
 		fake.text("Done.");
 		prompt.response.resolve({ stopReason: "end_turn" });
 		await first.done;
+	});
+});
+
+describe("AgyHost quota retry notices", () => {
+	async function quotaFailure(notify: (fake: FakeAgy, text: string) => void, notice: string) {
+		const state = await fixture();
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		notify(fake, notice);
+		// agy keeps retrying until cancelled; later notices must not reach the transcript either.
+		fake.text("⚠ API error (attempt 2): RESOURCE_EXHAUSTED (code 429): Resource has been exhausted.");
+		const error: unknown = await run.done.then(
+			() => undefined,
+			cause => cause,
+		);
+		return { fake, run, error };
+	}
+
+	for (const [kind, notify] of [
+		["message", (fake: FakeAgy, text: string) => fake.text(text)],
+		["thought", (fake: FakeAgy, text: string) => fake.thought(text)],
+	] as const) {
+		it(`cancels the turn and fails with a 429 when a ${kind} chunk reports quota exhaustion`, async () => {
+			const { fake, run, error } = await quotaFailure(
+				notify,
+				"⚠ API error (attempt 1): RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).",
+			);
+			await fake.cancellations.next();
+			const result = await AIError.finalize(error, { api: model.api, provider: model.provider, model: model.id });
+			expect(result.status).toBe(429);
+			expect(result.message).toContain("RESOURCE_EXHAUSTED (code 429)");
+			expect(AIError.isUsageLimitOutcome(result.status, result.message)).toBe(true);
+			expect(run.writer.output.content).toEqual([]);
+			expect(fake.closed).toBe(true);
+		});
+
+		it(`detects a quota notice split across ${kind} chunks`, async () => {
+			const { fake, run, error } = await quotaFailure((fake, text) => {
+				for (const chunk of text.split("|")) notify(fake, chunk);
+			}, "⚠ API |error (attempt 1): |RESOURCE_|EXHAUSTED (code 429): Resource has been exhausted.");
+			await fake.cancellations.next();
+			const result = await AIError.finalize(error, { api: model.api, provider: model.provider, model: model.id });
+			expect(result.status).toBe(429);
+			expect(result.message).toContain("RESOURCE_EXHAUSTED (code 429)");
+			expect(run.writer.output.content).toEqual([]);
+		});
+	}
+
+	it("streams lines before a split notice and still fails with a 429", async () => {
+		const { fake, run, error } = await quotaFailure((fake, text) => {
+			for (const chunk of text.split("|")) fake.text(chunk);
+		}, "Working on it.\n⚠ API error (attempt 1): |RESOURCE_EXHAUSTED (code 429): quota.");
+		await fake.cancellations.next();
+		const result = await AIError.finalize(error, { api: model.api, provider: model.provider, model: model.id });
+		expect(result.status).toBe(429);
+		expect(run.writer.output.content).toEqual([{ type: "text", text: "Working on it.\n" }]);
+	});
+
+	it("carries agy's reset window as a retry hint for the credential block", async () => {
+		const { error } = await quotaFailure(
+			(fake, text) => fake.text(text),
+			"\n⚠ API error (attempt 1): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 3h40m0s.",
+		);
+		const result = await AIError.finalize(error, { api: model.api, provider: model.provider, model: model.id });
+		expect(extractProviderRetryHint(model.provider, result.message)).toBe((3 * 60 + 40) * 60_000);
+	});
+
+	it("keeps prose about API errors and quota codes as visible text", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("explain the error")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		const prose = [
+			"An API error (attempt 3): RESOURCE_EXHAUSTED means the quota ran out.",
+			"\nRetry when you see code 429.",
+			"\nAPI error (attempt 1): UNAVAILABLE ",
+			"(code 503): try again.",
+			"\nAPI",
+			" errors are rare.",
+		];
+		for (const chunk of prose) fake.text(chunk);
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		expect(run.writer.output.content).toEqual([{ type: "text", text: prose.join("") }]);
+		expect(fake.closed).toBe(false);
 	});
 });

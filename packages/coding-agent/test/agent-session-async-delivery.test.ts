@@ -14,10 +14,10 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { DaemonCompletionEvent } from "@oh-my-pi/pi-coding-agent/daemon/protocol";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
-import type { DaemonCompletionNotification } from "@oh-my-pi/pi-coding-agent/launch/protocol";
 import { AcpAgent } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import { buildAsyncResultBlock } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -411,7 +411,7 @@ describe("AgentSession owner-routed async delivery", () => {
 				)
 				.find(text => text.includes("preview-only"));
 			expect(delivered?.match(/not saved completely/g)).toHaveLength(1);
-			expect(delivered).not.toContain("Full output: artifact://");
+			expect(delivered).not.toContain("Full output: local://");
 			expect(allocate).not.toHaveBeenCalled();
 			const custom = agent.state.messages.find(
 				message => message.role === "custom" && message.customType === "async-result",
@@ -447,7 +447,9 @@ describe("AgentSession owner-routed async delivery", () => {
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
 		const store = SessionManager.inMemory(temp.path());
-		store.adoptArtifactManager(new ArtifactManager(path.join(temp.path(), "artifacts")));
+		store.adoptArtifactManager(
+			new ArtifactManager(path.join(temp.path(), "artifacts", "local"), path.join(temp.path(), "artifacts")),
+		);
 		const settings = Settings.isolated();
 		session = new AgentSession({
 			agent,
@@ -490,7 +492,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			expect(manager.isJobResultConsumed(failedId)).toBe(true);
 			expect(manager.isJobResultConsumed(completeId)).toBe(true);
 			expect(manager.getJob(failedId)?.status).toBe("completed");
-			const artifactUrl = text.match(/artifact:\/\/\d+/)?.[0];
+			const artifactUrl = text.match(/local:\/\/\d+\.log/)?.[0];
 			if (!artifactUrl) throw new Error("Expected complete job recovery artifact");
 			const readSession: ToolSession = {
 				cwd: temp.path(),
@@ -531,7 +533,9 @@ describe("AgentSession owner-routed async delivery", () => {
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
 		const store = SessionManager.inMemory(temp.path());
-		store.adoptArtifactManager(new ArtifactManager(path.join(temp.path(), "artifacts")));
+		store.adoptArtifactManager(
+			new ArtifactManager(path.join(temp.path(), "artifacts", "local"), path.join(temp.path(), "artifacts")),
+		);
 		const settings = Settings.isolated({
 			"async.enabled": true,
 			"bashInterceptor.enabled": false,
@@ -551,7 +555,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			getSessionFile: () => null,
 			getSessionSpawns: () => null,
 			getAgentId: () => "RawCaptureOwner",
-			allocateOutputArtifact: toolType => store.allocateArtifactPath(toolType),
+			allocateOutputArtifact: () => store.allocateArtifactPath(),
 			asyncJobManager: manager,
 			settings,
 		};
@@ -578,7 +582,7 @@ describe("AgentSession owner-routed async delivery", () => {
 						: message.content.map(block => (block.type === "text" ? block.text : "")).join("\n"),
 				)
 				.join("\n");
-			expect(followUp).toContain(`Full output: artifact://${rawArtifactId}`);
+			expect(followUp).toContain(`Full output: local://${rawArtifactId}.log`);
 			// The raw capture holds only the stream; the exit notice the tool appended
 			// after it must survive in the preview's tail.
 			expect(followUp).toContain("Command exited with code 3");
@@ -1027,13 +1031,18 @@ describe("AgentSession owner-routed async delivery", () => {
 			modelRegistry: new ModelRegistry(authStorage),
 		});
 		const completion = {
-			event: "daemon-completed",
+			ev: "completed",
 			completionId: "advisor-completion",
 			owner,
-			daemon: {
-				name: "advisor-worker",
-				id: "daemon-id",
+			unit: {
+				id: "unit-id",
+				kind: "proc",
+				scope: { kind: "session", id: sessionManager.getSessionId() },
+				key: "advisor-worker",
+				label: "advisor-worker",
+				generation: "generation-1",
 				state: "exited",
+				pids: [],
 				createdAt: 1,
 				startedAt: 1,
 				exitedAt: 2,
@@ -1041,10 +1050,11 @@ describe("AgentSession owner-routed async delivery", () => {
 				restartCount: 0,
 				outputBytes: 0,
 				owner,
-				persist: false,
-				detached: false,
+				leases: 0,
+				policy: { hold: "leases", idleMs: 0, onIdle: "stop", restart: "no", survive: "exec" },
+				supervised: true,
 			},
-		} satisfies DaemonCompletionNotification;
+		} satisfies DaemonCompletionEvent;
 
 		await session.queueLaunchCompletion(completion);
 		await session.waitForIdle();
@@ -1128,12 +1138,16 @@ describe("AgentSession owner-routed async delivery", () => {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const manager = new AsyncJobManager({ retentionMs: 60_000 });
 		AsyncJobManager.setInstance(manager);
+		// The registry must share the session's isolated settings: without them it
+		// reads the process-global Settings, which the BashTool test above loads
+		// from the user's agent config, and a config that disables anthropic fails the turn.
+		const settings = Settings.isolated();
 
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated(),
-			modelRegistry: new ModelRegistry(authStorage),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage, undefined, { settings }),
 			agentId: "Main",
 			ownedAsyncJobManager: manager,
 		});
@@ -1183,12 +1197,14 @@ describe("AgentSession owner-routed async delivery", () => {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const manager = new AsyncJobManager({ retentionMs: 60_000 });
 		AsyncJobManager.setInstance(manager);
+		// Isolated registry settings: see the prior test.
+		const settings = Settings.isolated();
 
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated(),
-			modelRegistry: new ModelRegistry(authStorage),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage, undefined, { settings }),
 			agentId: "Main",
 			ownedAsyncJobManager: manager,
 		});

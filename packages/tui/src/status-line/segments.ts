@@ -19,7 +19,7 @@ import { getSessionAccentAnsi, getSessionAccentHex } from "../theme/session-colo
 import { summarizeLoopCondition } from "./loop";
 import { formatMetric } from "../components/metric";
 import { formatBillingSummary } from "./metrics";
-import { sanitizeStatusText } from "../chrome/shared";
+import { sanitizeInlineStatusText, sanitizeStatusText } from "../chrome/shared";
 import {
 	formatContextUsage,
 	getContextUsageLevel,
@@ -29,7 +29,7 @@ import {
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { node, span } from "../native/describe";
 import { thinkingLevelToken } from "../theme/theme-class";
-import type { StatusLineSession } from "./host";
+import type { SessionTreePosition, StatusLineSession } from "./host";
 import type { RenderedSegment, SegmentContext, SegmentView, StatusLineSegment, StatusLineSegmentId } from "./types";
 
 export type { SegmentContext } from "./types";
@@ -222,9 +222,11 @@ const piSegment: StatusLineSegment = {
 		// whole-unit turn timer (port of rust omp's status-band active brand).
 		// No trailing pad: the group renderer owns inter-segment spacing, so a
 		// trailing space here would double the gap at the first separator (#11103).
+		// Waiting on the user's answer to an ask, a question mark stands in for the spinner.
+		const glyph = ctx.awaitingAnswer ? theme.symbol("cmd.question") || "?" : brandSpinnerFrame(ctx.now?.getTime());
 		const content =
 			ctx.turnElapsedMs != null
-				? `${brandMark(brandSpinnerFrame(ctx.now?.getTime()), profile)} ${brandTimer(ctx.turnElapsedMs)}`
+				? `${brandMark(glyph, profile)} ${brandTimer(ctx.turnElapsedMs)}`
 				: brandMark(theme.icon.omp, profile);
 		return { content: `${fgAnsi}${content}\x1b[39m`, visible: true };
 	},
@@ -262,14 +264,19 @@ function brandTimer(elapsedMs: number): string {
 const statusSegment: StatusLineSegment = {
 	id: "status",
 	render(ctx) {
+		// Plain statuses take the accent colour, a styled one keeps its own. The dot between
+		// statuses is dim like the segment separators; it sets its own colour, so what
+		// follows it (and a status that closed its styling) is re-opened in the accent.
+		const accent = sessionAccentAnsi(ctx) ?? theme.getFgAnsi("accent");
+		const separator = `${theme.getFgAnsi("dim")}${theme.sep.dot}${accent}`;
 		let text = "";
 		for (const status of ctx.hookStatuses ?? []) {
-			const sanitized = sanitizeStatusText(status);
+			const sanitized = sanitizeInlineStatusText(status, { fg: accent, faint: Boolean(ctx.focusedAgentId) });
 			if (!sanitized) continue;
-			text += text ? `${theme.sep.dot}${sanitized}` : sanitized;
+			text += text ? separator + sanitized : sanitized;
 		}
 		return {
-			content: text ? accentFg(ctx, "accent", text) : "",
+			content: text ? `${accent}${text}\x1b[39m` : "",
 			visible: text.length > 0,
 		};
 	},
@@ -1094,6 +1101,43 @@ const collabSegment: StatusLineSegment = {
 	},
 };
 
+/** `2/3 · 3 ahead`: the branch at the deepest fork on the path, then the turns past the leaf. */
+function treePositionLabel(position: SessionTreePosition): string {
+	const parts: string[] = [];
+	if (position.branch) parts.push(`${position.branch.index}/${position.branch.count}`);
+	if (position.ahead > 0) parts.push(`${position.ahead} ahead`);
+	return parts.join(" · ");
+}
+
+/**
+ * The session's place in its tree, shown only off the tip of a single line: after a rewind (the
+ * turns waiting past the leaf) or on one branch of a fork. ANSI names `/tree` beside it; a native
+ * click opens it (`status.tree`).
+ */
+const treeSegment: StatusLineSegment = {
+	id: "tree",
+	render(ctx) {
+		const position = ctx.treePosition;
+		const label = position ? treePositionLabel(position) : "";
+		if (!label) return { content: "", visible: false };
+		const content = `${theme.fg("accent", withIcon(theme.cmd.tree, label))} ${theme.fg("dim", "/tree")}`;
+		return { content, visible: true };
+	},
+	describe(ctx) {
+		const position = ctx.treePosition;
+		const label = position ? treePositionLabel(position) : "";
+		if (!position || !label) return null;
+		const facts: string[] = [];
+		if (position.branch) facts.push(`branch ${position.branch.index} of ${position.branch.count}`);
+		if (position.ahead > 0) facts.push(`${position.ahead} ${position.ahead === 1 ? "turn" : "turns"} ahead`);
+		return {
+			spans: [span(label, "accent")],
+			icon: "tree",
+			title: `Session tree: ${facts.join(", ")}\nOpen /tree to move between branches`,
+		};
+	},
+};
+
 const streamSegment: StatusLineSegment = {
 	id: "stream",
 	render(ctx) {
@@ -1357,6 +1401,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	collab: collabSegment,
 	stream: streamSegment,
 	vim: vimSegment,
+	tree: treeSegment,
 };
 
 export function renderSegment(id: StatusLineSegmentId, ctx: SegmentContext): RenderedSegment {

@@ -72,14 +72,14 @@ const prevModelsJson: Record<string, Record<string, Model<Api>>> = Object.fromEn
 );
 
 /**
- * Local/self-hosted providers (Ollama, vLLM, LM Studio, LiteLLM). Their model
+ * Local/self-hosted providers (Ollama, vLLM, LM Studio, LiteLLM, Bifrost). Their model
  * catalogs are whatever happens to be running on the machine that invokes the
  * generator — bundling them would leak machine-specific endpoints (e.g.
  * `http://localhost:4000/v1`) into the committed snapshot. They are discovered
  * dynamically at runtime instead, so they are never fetched during generation
  * and never written to models.json.
  */
-const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litellm"]);
+const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litellm", "bifrost"]);
 /**
  * Credential-scoped catalogs (Devin's Cascade roster is gated per account/team
  * via `allowed_model_uids`). Fetching them during generation would bake one
@@ -476,11 +476,7 @@ async function getOAuthAccessFromStorage(provider: OAuthProvider): Promise<OAuth
 			// expired-but-refreshable credential gets rotated before discovery,
 			// and identity metadata (accountId/projectId/email) flows through
 			// for Codex/Antigravity downstream calls.
-			let access = await authStorage.oauth.access(provider);
-			if (!access && provider === "google-antigravity") {
-				access = await authStorage.oauth.access("google-gemini-cli");
-			}
-			return access ?? null;
+			return (await authStorage.oauth.access(provider)) ?? null;
 		} finally {
 			authStorage.close();
 		}
@@ -500,7 +496,7 @@ async function getOAuthAccessFromStorage(provider: OAuthProvider): Promise<OAuth
 async function fetchAntigravityModels(): Promise<ModelSpec<"google-gemini-cli">[]> {
 	const access = await getOAuthAccessFromStorage("google-antigravity");
 	if (!access) {
-		console.log("No Antigravity or Gemini CLI credentials found, will use previous models.");
+		console.log("No Antigravity credentials found, will use previous models.");
 		console.log("Tip: If you are logged in under a specific profile, run with OMP_PROFILE=<name>.");
 		return [];
 	}
@@ -574,6 +570,14 @@ async function fetchCodexDiscoveryModels(): Promise<ModelSpec<"openai-codex-resp
 }
 
 async function generateModels(selectedProvider?: string) {
+	// Retire a single provider without refreshing unrelated model rows.
+	if (selectedProvider !== undefined && isRetiredProvider(selectedProvider)) {
+		const models = { ...prevModelsJson };
+		delete models[selectedProvider];
+		await Bun.write(path.join(packageRoot, "src/models.json"), encodeModelCatalog(models));
+		console.log(`Removed ${selectedProvider} from src/models.json`);
+		return;
+	}
 	// Fetch models from dynamic sources.
 	const modelsDevModels = await loadModelsDevData();
 	const catalogProviderDescriptors = PROVIDER_DESCRIPTORS.filter(

@@ -15,7 +15,15 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getSessionsDir, isRecord } from "@oh-my-pi/pi-utils";
+import {
+	getSessionsDir,
+	isEnoent,
+	isRecord,
+	parseSpillUrl,
+	spillFileName,
+	spillUrl,
+	spillUrlIds,
+} from "@oh-my-pi/pi-utils";
 
 /**
  * Whether a custom entry marks its session as a Spotlight experiment session: pi's `spotlight:session` entry, which
@@ -110,7 +118,10 @@ export interface SpotlightShapeRow {
 	gated: boolean;
 	/** `details.spotlight.original` (present only when shaping changed the text). */
 	original: SpotlightOriginalFacts | null;
-	/** Artifact ids the result names (its text's `artifact://N` plus `original.url`); null before the result lands. */
+	/**
+	 * Artifact ids the result names (its text's spill URLs, `local://N.log` or legacy `artifact://N`, plus
+	 * `original.url`); null before the result lands.
+	 */
 	artifacts: number[] | null;
 	/**
 	 * Spotlight's own usage, from the shape entry; null before it lands. `failureCauses` counts failed calls by cause
@@ -245,13 +256,16 @@ function finite(value: unknown): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
-const ARTIFACT_RE = /artifact:\/\/(\d+)/g;
+/** Legacy `artifact://N`, the spill URL before spills moved to the `local://` root. */
+const LEGACY_ARTIFACT_RE = /artifact:\/\/(\d+)/g;
+const LEGACY_ARTIFACT_URL_RE = /^artifact:\/\/(\d+)$/;
 
-/** Distinct `artifact://N` ids a text names, ascending. */
+/** Distinct spill ids a text names (`local://N.log`, or `artifact://N` in older transcripts), ascending. */
 export function artifactIds(text: string): number[] {
-	if (!text.includes("artifact://")) return [];
-	const ids = new Set<number>();
-	for (const match of text.matchAll(ARTIFACT_RE)) ids.add(Number(match[1]));
+	const spills = spillUrlIds(text);
+	if (!text.includes("artifact://")) return spills;
+	const ids = new Set<number>(spills);
+	for (const match of text.matchAll(LEGACY_ARTIFACT_RE)) ids.add(Number(match[1]));
 	return [...ids].sort((a, b) => a - b);
 }
 
@@ -352,8 +366,8 @@ function filePaths(values: readonly unknown[]): string[] {
 
 /**
  * Files a call changes: an `edit`'s patch headers (or its `path`), a `write`'s `path`, an `ast_edit`'s `paths`
- * (globs kept as written), also when `ast_edit` runs through `write xd://ast_edit`. Null when the call is no file
- * edit (other tools, or a write to an internal URL such as `proc://…/kill`).
+ * (globs kept as written). Null when the call is no file edit (other tools, or a write to an internal URL such as
+ * `proc://…/kill`).
  */
 export function editedPaths(toolName: string, args: unknown): string[] | null {
 	if (!isRecord(args)) return null;
@@ -367,13 +381,6 @@ export function editedPaths(toolName: string, args: unknown): string[] | null {
 	} else if (toolName === "ast_edit") {
 		paths = filePaths(Array.isArray(args.paths) ? args.paths : [args.path]);
 	} else if (toolName === "write") {
-		if (args.path === "xd://ast_edit" && typeof args.content === "string") {
-			try {
-				return editedPaths("ast_edit", JSON.parse(args.content));
-			} catch {
-				return null;
-			}
-		}
 		paths = filePaths([args.path]);
 	} else {
 		return null;
@@ -717,8 +724,8 @@ export function shapeFromDetails(
 }
 
 /**
- * Directories a session's artifacts can live in: its own (`<session>/`), else, for a subagent transcript
- * (`<parent>/<name>.jsonl`), its parent's and further ancestors' up to the project folder.
+ * Directories a session's artifacts can live in: its own (`<session>/`, spills under its `local/`), else, for a
+ * subagent transcript (`<parent>/<name>.jsonl`), its parent's and further ancestors' up to the project folder.
  */
 function artifactDirs(sessionFile: string): string[] {
 	const dirs = [sessionFile.replace(/\.jsonl$/, "")];
@@ -732,13 +739,29 @@ function artifactDirs(sessionFile: string): string[] {
 	return dirs;
 }
 
-/** The lines of artifact `url` (`artifact://N`, file `N.*`) of a session; null when it cannot be found or read. */
+/**
+ * The lines of spill `url` of a session: `local://N.log` (file `local/N.log`) or, in older transcripts,
+ * `artifact://N` (file `N.*`); null when it cannot be found or read.
+ */
 async function readArtifactLines(
 	sessionFile: string,
 	url: string,
 	listings: Map<string, Promise<string[]>>,
 ): Promise<string[] | null> {
-	const id = /^artifact:\/\/(\d+)$/.exec(url)?.[1];
+	const spill = parseSpillUrl(url);
+	if (spill !== undefined) {
+		// A bare URL only: an original names its whole spill, never a selector into it.
+		if (url !== spillUrl(spill)) return null;
+		for (const dir of artifactDirs(sessionFile)) {
+			try {
+				return (await Bun.file(path.join(dir, "local", spillFileName(spill))).text()).split("\n");
+			} catch (err) {
+				if (!isEnoent(err)) return null;
+			}
+		}
+		return null;
+	}
+	const id = LEGACY_ARTIFACT_URL_RE.exec(url)?.[1];
 	if (id === undefined) return null;
 	for (const dir of artifactDirs(sessionFile)) {
 		let listing = listings.get(dir);

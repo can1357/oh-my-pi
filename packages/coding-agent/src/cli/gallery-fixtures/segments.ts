@@ -99,6 +99,12 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 		case "status":
 			return [
 				{ label: "multiple extension statuses", context: { hookStatuses: ["Indexer ready", "Tests passing"] } },
+				{
+					label: "coloured extension status",
+					context: {
+						hookStatuses: ["\x1b[33mbuilding\x1b[39m", "\x1b[1;38;2;255;95;135mfailed\x1b[0m", "queued"],
+					},
+				},
 			];
 		case "model":
 			return [
@@ -242,6 +248,13 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 					label: "error",
 					context: { usage: { tier: "Pro", fiveHour: { percent: 92, resetMinutes: 75 } } },
 				},
+			];
+		case "tree":
+			return [
+				{ label: "rewound", context: { treePosition: { ahead: 3 } } },
+				{ label: "on a branch", context: { treePosition: { branch: { index: 2, count: 3 }, ahead: 0 } } },
+				{ label: "rewound on a branch", context: { treePosition: { branch: { index: 1, count: 2 }, ahead: 1 } } },
+				{ label: "hidden (tip of a single line)" },
 			];
 		case "collab":
 			return [

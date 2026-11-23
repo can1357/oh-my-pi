@@ -18,6 +18,7 @@ import {
 	getDomain,
 	PREVIEW_LIMITS,
 	replaceTabs,
+	sanitizeDisplayLines,
 	truncateToWidth,
 	clipCollapsed,
 } from "../render/render-utils";
@@ -31,6 +32,26 @@ import { plainText } from "../native/spans";
 import { errorText, noteText, resultText } from "./native-view";
 
 const MAX_COLLAPSED_ITEMS = PREVIEW_LIMITS.COLLAPSED_ITEMS;
+
+/** Most excerpt lines shown under a source when the provider returned no synthesized answer. */
+const EXCERPT_LINES = PREVIEW_LIMITS.COLLAPSED_LINES;
+
+/**
+ * A source's page excerpt as display lines: control characters and tabs removed,
+ * whitespace runs collapsed, lines without a letter or digit (blank lines, code
+ * fences, rules) dropped, capped at {@link EXCERPT_LINES}. Callers truncate to width.
+ */
+function excerptLines(snippet: unknown): string[] {
+	if (typeof snippet !== "string") return [];
+	const lines: string[] = [];
+	for (const raw of sanitizeDisplayLines(snippet)) {
+		const line = raw.replace(/\s+/g, " ").trim();
+		if (!/[\p{L}\p{N}]/u.test(line)) continue;
+		lines.push(line);
+		if (lines.length === EXCERPT_LINES) break;
+	}
+	return lines;
+}
 
 function renderFallbackText(contentText: string, expanded: boolean, theme: Theme): Component {
 	const lines = contentText.split("\n").filter(line => line.trim());
@@ -110,9 +131,12 @@ export function renderSearchResult(
 		: [];
 	const provider = response.provider;
 
-	// Get answer text
+	// Without a synthesized answer the result text is the model-facing numbered listing of
+	// these same sources: show each source's excerpt under it instead of rendering that text.
 	const answerText = typeof response.answer === "string" ? response.answer.trim() : "";
-	const contentText = answerText || rawText;
+	const excerpts = answerText ? undefined : sources.map(src => excerptLines(src.snippet));
+	const fallbackLines =
+		!answerText && sourceCount === 0 ? sanitizeDisplayLines(rawText).filter(line => line.trim()) : [];
 
 	const providerLabel = provider !== "none" ? getSearchProviderLabel(provider) : "None";
 	const queryPreview = args?.query
@@ -153,7 +177,7 @@ export function renderSearchResult(
 			metaLines.push(`${theme.fg("muted", "Usage:")} ${theme.fg("text", usageParts.join(theme.sep.dot))}`);
 	}
 
-	const answerMarkdown = contentText ? new Markdown(contentText, 0, 0, getMarkdownTheme()) : undefined;
+	const answerMarkdown = answerText ? new Markdown(answerText, 0, 0, getMarkdownTheme()) : undefined;
 
 	return framedToolCard(theme, ({ width, contentWidth }) => {
 		// Read mutable state at render time
@@ -161,8 +185,20 @@ export function renderSearchResult(
 
 		// Answer lines: full markdown when expanded, capped markdown preview when collapsed.
 		const renderedAnswer = answerMarkdown ? answerMarkdown.render(contentWidth) : [];
-		let answerLines: readonly string[];
-		if (renderedAnswer.length === 0) {
+		let answerLines: readonly string[] | undefined;
+		if (excerpts && sourceCount > 0) {
+			// No answer: the excerpts under each source stand in for it.
+			answerLines = undefined;
+		} else if (fallbackLines.length > 0) {
+			const shown = expanded ? fallbackLines : fallbackLines.slice(0, PREVIEW_LIMITS.OUTPUT_COLLAPSED);
+			answerLines = shown.map(line => theme.fg("dim", truncateToWidth(line, contentWidth)));
+			if (shown.length < fallbackLines.length) {
+				answerLines = [
+					...answerLines,
+					theme.fg("muted", formatMoreItems(fallbackLines.length - shown.length, "line")),
+				];
+			}
+		} else if (renderedAnswer.length === 0) {
 			answerLines = [theme.fg("muted", "No answer text returned")];
 		} else if (args?.maxAnswerLines !== undefined && !expanded) {
 			// CLI compact mode (`omp q`) caps the answer; the TUI passes no cap and shows it in full.
@@ -183,7 +219,7 @@ export function renderSearchResult(
 				expanded,
 				maxCollapsed: MAX_COLLAPSED_ITEMS,
 				itemType: "source",
-				renderItem: src => {
+				renderItem: (src, { index }) => {
 					const titleText =
 						typeof src.title === "string" && src.title.trim()
 							? src.title
@@ -205,7 +241,12 @@ export function renderSearchResult(
 					const titleBudget = Math.max(12, lineBudget - Bun.stringWidth(metaSuffix));
 					const title = theme.fg("accent", truncateToWidth(titleText, titleBudget));
 					const linkedTitle = url ? urlHyperlink(url, title) : title;
-					return [`${linkedTitle}${metaSuffix}`];
+					const excerpt = excerpts?.[index] ?? [];
+					const excerptShown = expanded ? excerpt : excerpt.slice(0, 1);
+					return [
+						`${linkedTitle}${metaSuffix}`,
+						...excerptShown.map(line => theme.fg("dim", truncateToWidth(line, lineBudget))),
+					];
 				},
 			},
 			theme,
@@ -222,10 +263,7 @@ export function renderSearchResult(
 							},
 						]
 					: []),
-				{
-					label: theme.fg("toolTitle", "Answer"),
-					content: answerLines,
-				},
+				...(answerLines ? [{ label: theme.fg("toolTitle", "Answer"), content: answerLines }] : []),
 				{
 					label: theme.fg("toolTitle", "Sources"),
 					content: sourceTree.length > 0 ? sourceTree : [theme.fg("muted", "No sources returned")],
@@ -261,8 +299,13 @@ function searchHead(query: string | undefined, meta?: string, badge?: { text: st
 	};
 }
 
-/** One cited source row: domain-initial mark, linked title, muted `domain · age`. */
-function sourceRow(src: SearchResponse["sources"][number], index: number): NativeChild {
+/**
+ * One cited source (role `omp.tool.source`): domain-initial mark, linked title, muted `domain · age`,
+ * then the page excerpt (role `omp.tool.excerpt`) when the search has no synthesized answer to read
+ * instead. Tern draws each as a card in the `omp.tool.sources` grid and shows excerpts only while
+ * the tool is unfolded.
+ */
+function sourceRow(src: SearchResponse["sources"][number], index: number, excerpt: boolean): NativeChild {
 	const url = typeof src.url === "string" ? src.url : "";
 	const title = typeof src.title === "string" && src.title.trim() ? src.title : url.trim() ? url : "Untitled";
 	const domain = url ? getDomain(url) : "";
@@ -271,13 +314,18 @@ function sourceRow(src: SearchResponse["sources"][number], index: number): Nativ
 		(typeof src.publishedDate === "string" ? src.publishedDate : "");
 	const meta = [domain, age].filter(Boolean).join(" · ");
 	const initial = (domain.replace(/^www\./, "")[0] ?? "?").toUpperCase();
+	// The host clamps the excerpt to its card's width, so its lines go whole.
+	const lines = excerpt ? excerptLines(src.snippet) : [];
 	return node(
 		"row",
 		{ gap: "sm", align: "baseline", role: "omp.tool.source", href: url || undefined },
 		compact([
 			node("badge", { text: initial, title: domain || undefined }),
-			text([span(plainText(title), "link", url ? { href: url } : undefined)], { lines: 1, truncate: "end" }),
+			text([span(plainText(title), "link", url ? { href: url } : undefined)], { lines: 2, truncate: "end" }),
 			meta ? text([span(plainText(meta), "muted")], { lines: 1 }) : undefined,
+			lines.length > 0
+				? text([span(lines.join("\n"), "muted")], { role: "omp.tool.excerpt", wrap: "word", lines: EXCERPT_LINES })
+				: undefined,
 		]),
 		`${index}:${url}`,
 	);
@@ -315,7 +363,7 @@ function describeSearchResult(
 		: [];
 	const providerLabel = response.provider !== "none" ? getSearchProviderLabel(response.provider) : "None";
 	const query = argQuery || searchQueries[0];
-	const answer = (typeof response.answer === "string" ? response.answer.trim() : "") || rawText;
+	const answer = typeof response.answer === "string" ? response.answer.trim() : "";
 
 	const authShort =
 		response.authMode === "oauth" ? "OAuth" : response.authMode === "api_key" ? "API" : response.authMode;
@@ -330,15 +378,25 @@ function describeSearchResult(
 	const tooltip = plainText([providerInfo, usageParts.join(" · ")].filter(Boolean).join("\n"));
 	const badge = response.model ? { text: plainText(response.model), title: tooltip } : undefined;
 
+	// No synthesized answer: the result text is the model-facing numbered listing of these sources,
+	// so each source carries its excerpt instead of that text being rendered.
+	const sourceGrid =
+		sources.length > 0
+			? node(
+					"col",
+					{ role: "omp.tool.sources" },
+					sources.map((src, i) => sourceRow(src, i, !answer)),
+					"sources",
+				)
+			: noteText("No sources returned");
 	return {
 		tool: searchHead(query, `${providerLabel} · ${formatCount("source", sources.length)}`, badge),
 		tone: sources.length > 0 ? undefined : "warning",
-		body: compact([
-			answer ? { ...md(plainText(answer), { title: tooltip }), key: "answer" } : noteText("No answer text returned"),
-			sources.length > 0
-				? node("col", { role: "omp.tool.files" }, sources.map(sourceRow), "sources")
-				: noteText("No sources returned"),
-		]),
+		body: answer
+			? [{ ...md(plainText(answer), { title: tooltip }), key: "answer" }, sourceGrid]
+			: sources.length > 0
+				? [sourceGrid]
+				: [noteText(rawText || "No answer text returned"), sourceGrid],
 	};
 }
 

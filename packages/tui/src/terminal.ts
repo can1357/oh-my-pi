@@ -1,6 +1,11 @@
-import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as fs from "node:fs";
-import { TtyWriter } from "@oh-my-pi/pi-natives";
+import {
+	enableConsoleVtInput,
+	isolateThreadStartsFromConsole,
+	restoreConsoleInputMode,
+	TtyWriter,
+	translateWindowsAltGrSequence,
+} from "@oh-my-pi/pi-natives";
 import { $env, isBunTestRuntime, isTerminalHeadless, isWsl } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { popLoopPhase, pushLoopPhase } from "@oh-my-pi/pi-utils/loop-phase";
@@ -34,7 +39,6 @@ import type { TerminalMultiplexerBackgroundColorCache } from "./multiplexers/typ
 import { classifyTerminalMultiplexerModule, terminalMultiplexerSessions } from "./terminal-multiplexer";
 import { setTmuxPaneApcTitles, tmuxSessionSpeaksTsp } from "./tmux";
 import { setHangulCompatibilityJamoWidth } from "./utils";
-import { translateWindowsAltGrSequence } from "./windows-altgr";
 import { Win32InputModeDecoder, Win32PasteMarkerNormalizer } from "./windows-input-mode";
 
 export { writeTerminalSequence, writeThroughActiveTerminal } from "./active-terminal";
@@ -43,6 +47,7 @@ const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
 const WINDOWS_TERMINAL_OSC11_POLL_MS = 30_000;
+const OSC11_FORWARDED_REPLY_TIMEOUT_MS = 5000;
 /** How long a relayed ESC record waits for the rest of its sequence before acting as Escape (matches StdinBuffer). */
 const WIN32_RELAYED_ESCAPE_TIMEOUT_MS = 75;
 /**
@@ -387,81 +392,6 @@ export function setAltScreenActive(active: boolean): void {
 	altScreenActive = active;
 }
 
-const STD_INPUT_HANDLE = -10;
-const ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200;
-/** UTF-8 codepage id for SetConsoleCP/SetConsoleOutputCP. */
-const CP_UTF8 = 65001;
-
-/**
- * Lazily-initialized closure re-asserting the UTF-8 console codepage, or
- * `null` when unavailable (non-win32, FFI failure, console detached).
- */
-let consoleCodepageGuard: (() => void) | null | undefined;
-
-/**
- * Re-assert the UTF-8 console codepage before writing (win32 only).
- *
- * Bun sets both console codepages to UTF-8 (65001) at startup, and
- * `process.stdout.write(string)` hands UTF-8 bytes to `WriteFile`, which
- * conhost translates using the *current* console output codepage. Child
- * processes spawned by tools (bash commands, MCP/LSP servers, eval kernels)
- * share this console, and some flip the codepage behind our back: PHP >=7.1
- * CLI issues the equivalent of `chcp` whenever `internal_encoding` mismatches
- * the console codepage (php.net request #73716) and skips the restore when
- * killed — and two PHP processes in a pipeline race their restores. Once the
- * codepage falls back to an OEM page (437/850), every non-ASCII glyph the TUI
- * paints is mis-translated: box-drawing borders degrade into `Γöé`/`ΓöÇ`
- * mojibake on the next full repaint (most visibly ctrl+o expand, which
- * rewrites every row).
- *
- * `GetConsoleOutputCP` is one cheap console call per `#safeWrite`; the setter
- * only runs after a foreign flip. A reading of 0 means "no console" — leave
- * that alone. Guarding the write chokepoint (rather than per-spawn cleanup)
- * covers every console-sharing child and long-running processes that flip
- * the codepage mid-session.
- */
-function ensureWindowsConsoleUtf8(): void {
-	if (consoleCodepageGuard === undefined) consoleCodepageGuard = createConsoleCodepageGuard();
-	consoleCodepageGuard?.();
-}
-
-let lastWarnedCodepage = 0;
-
-function createConsoleCodepageGuard(): (() => void) | null {
-	if (process.platform !== "win32") return null;
-	try {
-		const kernel32 = dlopen("kernel32.dll", {
-			GetConsoleOutputCP: { args: [], returns: FFIType.u32 },
-			SetConsoleOutputCP: { args: [FFIType.u32], returns: FFIType.bool },
-			GetConsoleCP: { args: [], returns: FFIType.u32 },
-			SetConsoleCP: { args: [FFIType.u32], returns: FFIType.bool },
-		});
-		return () => {
-			try {
-				const outCp = kernel32.symbols.GetConsoleOutputCP();
-				if (outCp !== 0 && outCp !== CP_UTF8) {
-					kernel32.symbols.SetConsoleOutputCP(CP_UTF8);
-					if (outCp !== lastWarnedCodepage) {
-						lastWarnedCodepage = outCp;
-						logger.warn("console output codepage changed by a child process; restoring UTF-8", {
-							codepage: outCp,
-						});
-					}
-				}
-				const inCp = kernel32.symbols.GetConsoleCP();
-				if (inCp !== 0 && inCp !== CP_UTF8) {
-					kernel32.symbols.SetConsoleCP(CP_UTF8);
-				}
-			} catch {
-				// Console APIs failed (console detached mid-session); disable the guard.
-				consoleCodepageGuard = null;
-			}
-		};
-	} catch {
-		// bun:ffi unavailable; rendering proceeds without the guard.
-		return null;
-	}
-}
 /**
  * Emergency terminal restore - call this from signal/crash handlers
  * Resets terminal state without requiring access to the ProcessTerminal instance
@@ -923,11 +853,13 @@ export class ProcessTerminal implements Terminal {
 	// to drain. See StdoutStallWatchdog, #6854, and #10430.
 	#stdoutStall = new StdoutStallWatchdog();
 	#stdoutStallTimer?: Timer;
-	// Off-thread output pump (unix TTYs): Bun's `process.stdout.write` blocks
-	// the event loop until the terminal drains, so a slow/occluded emulator
-	// froze the whole TUI for the duration of a multi-MB repaint. The pump
-	// enqueues frames and performs the blocking write(2) on its own thread;
-	// `pendingOutputBytes` exposes the backlog for render-side frame skipping.
+	// Off-thread output pump (unix TTYs, Windows consoles): Bun's
+	// `process.stdout.write` blocks the event loop until the terminal drains, so
+	// a slow/occluded emulator froze the whole TUI for the duration of a multi-MB
+	// repaint. The pump enqueues frames and performs the blocking write on its
+	// own thread, in ConPTY-sized chunks with the UTF-8 code page re-asserted on
+	// Windows; `pendingOutputBytes` exposes the backlog for render-side frame
+	// skipping.
 	#outputPump?: TtyWriter;
 	// Upper bound on the pump's backlog: the count its last enqueue or read
 	// reported. Only #safeWrite enqueues and the pump thread only drains, so
@@ -939,7 +871,8 @@ export class ProcessTerminal implements Terminal {
 	#stdoutDrainListener?: () => void;
 	#outputDrainListeners = new Set<() => void>();
 
-	#windowsVTInputRestore?: () => void;
+	// Stdin console mode found before VT input was enabled (Windows).
+	#windowsInputMode?: number;
 	#xtermScrollToBottomRestoreModes = new Set<number>();
 	#appearanceCallbacks: Array<
 		(appearance: TerminalAppearance, requestToken?: TerminalAppearanceRequestToken) => void
@@ -954,6 +887,7 @@ export class ProcessTerminal implements Terminal {
 	#nextAppearanceRequestToken = 1;
 	#osc11ResponseBuffer = "";
 	#osc11CacheRefreshTimer?: Timer;
+	#osc11Da1GraceTimer?: Timer;
 	#osc99PendingId: string | undefined;
 	#osc99ResponseBuffer = "";
 	#osc99Capabilities = new Map<string, string>();
@@ -1200,10 +1134,16 @@ export class ProcessTerminal implements Terminal {
 			if (terminal.#dead || pending > STDOUT_BACKLOG_CLEAR_BYTES) return;
 			for (const listener of terminal.#outputDrainListeners) listener();
 		};
-		// Own write(2) on a dedicated pump thread (unix TTYs only).
+		// A console whose terminal stops reading blocks every thread start, and
+		// JSC waits for the GC/JIT helper threads it starts lazily, which froze
+		// the TUI at its next collection.
+		if (process.platform === "win32" && process.stdout.isTTY && !isolateThreadStartsFromConsole()) {
+			logger.debug("thread starts still wait on the console: unexpected KernelBase loader entry");
+		}
+		// Own terminal writes on a dedicated pump thread.
 		// Test suites spy on `process.stdout.write` with a faked isTTY, so the
 		// pump stays off under `bun test` — same philosophy as isTerminalHeadless.
-		if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump) {
+		if (process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump) {
 			try {
 				this.#outputPump = new TtyWriter(1, STDOUT_BACKLOG_CLEAR_BYTES, this.#outputDrainCallback);
 				this.#pumpBacklogBound = 0;
@@ -1312,10 +1252,8 @@ export class ProcessTerminal implements Terminal {
 		// data handler are installed. Keep this false throughout temporary stops.
 		this.#active = true;
 		// Query terminal background color via OSC 11 for dark/light detection.
-		// Uses DA1 (Primary Device Attributes) as a sentinel: terminals process
-		// sequences in order, so if DA1 arrives before OSC 11 response,
-		// the terminal does not support OSC 11. This avoids indefinite hangs.
-		// Technique used by Neovim, bat, fish, and terminal-colorsaurus.
+		// DA1 bounds unanswered queries; Zellij may forward OSC 11 after answering
+		// DA1 locally, so its forwarded reply gets a short additional window.
 		this.#queryBackgroundColor();
 
 		// Query OSC 99 notification capabilities for Kitty. The query uses the
@@ -1379,47 +1317,13 @@ export class ProcessTerminal implements Terminal {
 	#enableWindowsVTInput(): void {
 		if (process.platform !== "win32") return;
 		this.#restoreWindowsVTInput();
-		try {
-			const kernel32 = dlopen("kernel32.dll", {
-				GetStdHandle: { args: [FFIType.i32], returns: FFIType.ptr },
-				GetConsoleMode: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
-				SetConsoleMode: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.bool },
-			});
-			const handle = kernel32.symbols.GetStdHandle(STD_INPUT_HANDLE);
-			const mode = new Uint32Array(1);
-			const modePtr = ptr(mode);
-			if (!modePtr || !kernel32.symbols.GetConsoleMode(handle, modePtr)) {
-				kernel32.close();
-				return;
-			}
-			const originalMode = mode[0]!;
-			const vtMode = originalMode | ENABLE_VIRTUAL_TERMINAL_INPUT;
-			if (vtMode !== originalMode && !kernel32.symbols.SetConsoleMode(handle, vtMode)) {
-				kernel32.close();
-				return;
-			}
-			this.#windowsVTInputRestore = () => {
-				try {
-					kernel32.symbols.SetConsoleMode(handle, originalMode);
-				} finally {
-					kernel32.close();
-				}
-			};
-		} catch {
-			// bun:ffi unavailable or console API unsupported; keep startup non-fatal.
-		}
+		this.#windowsInputMode = enableConsoleVtInput() ?? undefined;
 	}
 
 	#restoreWindowsVTInput(): void {
-		if (process.platform !== "win32") return;
-		const restore = this.#windowsVTInputRestore;
-		this.#windowsVTInputRestore = undefined;
-		if (!restore) return;
-		try {
-			restore();
-		} catch {
-			// Ignore restore errors during terminal teardown.
-		}
+		const mode = this.#windowsInputMode;
+		this.#windowsInputMode = undefined;
+		if (mode !== undefined) restoreConsoleInputMode(mode);
 	}
 
 	/**
@@ -1724,22 +1628,22 @@ export class ProcessTerminal implements Terminal {
 				switch (owner.kind) {
 					case "osc11": {
 						if (this.#osc11Pending) {
-							// DA1 arrived before OSC 11 response: terminal doesn't support OSC 11.
-							this.#osc11Pending = false;
-							this.#osc11ActiveToken = undefined;
-							this.#osc11ResponseBuffer = "";
+							if (terminalMultiplexerSessions().some(multiplexer => multiplexer.backgroundReplyMayFollowDa1)) {
+								// Zellij answers DA1 locally while the OSC query is still in flight to its host.
+								this.#osc11Da1GraceTimer = setTimeout(() => {
+									this.#osc11Da1GraceTimer = undefined;
+									this.#osc11Pending = false;
+									this.#osc11ActiveToken = undefined;
+									this.#osc11ResponseBuffer = "";
+									this.#startQueuedOsc11Query();
+								}, OSC11_FORWARDED_REPLY_TIMEOUT_MS);
+							} else {
+								this.#osc11Pending = false;
+								this.#osc11ActiveToken = undefined;
+								this.#osc11ResponseBuffer = "";
+							}
 						}
-						// Start a queued OSC 11 query once the prior cycle is fully drained.
-						if (
-							this.#osc11QueuedQuery !== undefined &&
-							!this.#osc11Pending &&
-							!this.#da1SentinelOwners.some(o => o.kind === "osc11") &&
-							!this.#dead
-						) {
-							const query = this.#osc11QueuedQuery;
-							this.#osc11QueuedQuery = undefined;
-							this.#startOsc11Query(query.cache, query.token);
-						}
+						this.#startQueuedOsc11Query();
 						break;
 					}
 					case "privateMode": {
@@ -1850,7 +1754,12 @@ export class ProcessTerminal implements Terminal {
 					const requestToken = this.#osc11ActiveToken;
 					this.#osc11ActiveToken = undefined;
 					this.#osc11ResponseBuffer = "";
+					if (this.#osc11Da1GraceTimer) {
+						clearTimeout(this.#osc11Da1GraceTimer);
+						this.#osc11Da1GraceTimer = undefined;
+					}
 					this.#handleOsc11Response(rHex!, gHex!, bHex!, requestToken);
+					this.#startQueuedOsc11Query();
 					return;
 				}
 			}
@@ -1990,8 +1899,8 @@ export class ProcessTerminal implements Terminal {
 
 	/**
 	 * Send OSC 11 background color query followed by DA1 sentinel.
-	 * DA1 avoids indefinite hangs: if DA1 response arrives before OSC 11,
-	 * the terminal does not support OSC 11.
+	 * A DA1 reply normally ends an unanswered query; forwarding multiplexers
+	 * may deliver OSC 11 later, so those queries expire after a bounded delay.
 	 */
 	#queryBackgroundColor(
 		cache?: TerminalMultiplexerBackgroundColorCache,
@@ -2035,6 +1944,19 @@ export class ProcessTerminal implements Terminal {
 		this.#da1SentinelOwners.push({ kind: "osc11" });
 		this.#safeWrite("\x1b]11;?\x07"); // OSC 11 query (BEL terminated)
 		this.#safeWrite("\x1b[c"); // DA1 sentinel
+	}
+
+	#startQueuedOsc11Query(): void {
+		if (
+			this.#osc11QueuedQuery === undefined ||
+			this.#osc11Pending ||
+			this.#da1SentinelOwners.some(owner => owner.kind === "osc11") ||
+			this.#dead
+		)
+			return;
+		const query = this.#osc11QueuedQuery;
+		this.#osc11QueuedQuery = undefined;
+		this.#startOsc11Query(query.cache, query.token);
 	}
 
 	#queryProgramStatusSupport(): void {
@@ -2700,6 +2622,10 @@ export class ProcessTerminal implements Terminal {
 			clearTimeout(this.#osc11CacheRefreshTimer);
 			this.#osc11CacheRefreshTimer = undefined;
 		}
+		if (this.#osc11Da1GraceTimer) {
+			clearTimeout(this.#osc11Da1GraceTimer);
+			this.#osc11Da1GraceTimer = undefined;
+		}
 		this.#appearanceCallbacks = [];
 		this.#appearanceReportCallbacks = [];
 		this.#osc11Pending = false;
@@ -2899,14 +2825,10 @@ export class ProcessTerminal implements Terminal {
 			this.#trackStdoutBacklog(pending);
 			return;
 		}
-		// Without the pump, writes (and the codepage guard's console calls) block
-		// the event loop until the terminal drains; label them for the watchdog.
+		// Without the pump, writes block the event loop until the terminal
+		// drains; label them for the watchdog.
 		pushLoopPhase("ui.terminal-write");
 		try {
-			// A console-sharing child process may have flipped the console codepage
-			// away from UTF-8; repair it before any bytes hit WriteFile so no frame
-			// is ever translated through an OEM codepage. See ensureWindowsConsoleUtf8.
-			if (process.platform === "win32") ensureWindowsConsoleUtf8();
 			// Windows ConPTY drops viewport tracking when a single write exceeds
 			// ~32-64 KB: the host UI's scroll position stays parked at wherever
 			// the write began, even though every byte landed in scrollback. Split

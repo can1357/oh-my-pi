@@ -84,6 +84,15 @@ describe("loadAllExtensions MCP parity with /mcp list (issue #3827)", () => {
 		expect(flagDisabled!.disabledReason).toBe("item-disabled");
 	});
 
+	test("shows a server a built-in transform dropped as disabled, so its toggle offers the enable", async () => {
+		const source = { provider: "native", providerName: "OMP", path: projectDir, level: "project" } as const;
+		const drops = new Map([["active-server", { reason: "replaced by a built-in", source }]]);
+		const extensions = await loadAllExtensions(projectDir, [], undefined, drops);
+		const dropped = extensions.find(e => e.id === "mcp:active-server");
+		expect(dropped?.state).toBe("disabled");
+		expect(dropped?.disabledReason).toBe("item-disabled");
+	});
+
 	test("leaves untouched servers active", async () => {
 		const extensions = await loadAllExtensions(projectDir, []);
 		const active = extensions.find(e => e.id === "mcp:active-server");

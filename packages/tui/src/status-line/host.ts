@@ -10,6 +10,13 @@ export interface StatusAccountIdentity {
 	email?: string;
 	projectId?: string;
 	orgId?: string;
+	/**
+	 * Durable credential row id, set when the identity is credential-scoped
+	 * rather than OAuth-scoped (an API-key account carries no email/account
+	 * identifiers to attribute by). Usage reports probed from stored rows
+	 * carry the matching `metadata.credentialId`.
+	 */
+	credentialId?: number;
 }
 
 /** Nested repository selected as the active workspace context. */
@@ -38,7 +45,7 @@ export interface PromptCacheWarming {
 	state: "scheduled" | "refreshing" | "inactive";
 	/** When the armed refresh decides. */
 	nextWarmAt?: number;
-	/** When warming gives up: its 60-minute streaming or 30-minute idle safety window. */
+	/** When warming gives up: the 30-minute idle window, or while streaming, when refreshing stops paying at current prices. */
 	stopsAt?: number;
 	/** Why nothing is scheduled. */
 	reason?: string;
@@ -66,6 +73,25 @@ export interface PromptCacheStatus {
 	warming?: PromptCacheWarming;
 }
 
+/**
+ * Where a session's active leaf sits in its tree, when that is anywhere but
+ * the tip of a single line: after a rewind (turns wait below the leaf) or on
+ * one branch of a fork. The `tree` segment shows it; a click opens `/tree`.
+ */
+export interface SessionTreePosition {
+	/**
+	 * The deepest fork the active path passes through: the path's branch there
+	 * (1-based, oldest first) and how many branches it has. Only branches
+	 * holding conversation count, besides the path's own.
+	 */
+	readonly branch?: { readonly index: number; readonly count: number };
+	/**
+	 * Turns on the newest continuation below the leaf, a partly rewound turn
+	 * counting as one; 0 at a branch's tip.
+	 */
+	readonly ahead: number;
+}
+
 export interface StatusLineSession {
 	state: { model?: Model; thinkingLevel?: ThinkingLevel; messages: readonly AgentMessage[] };
 	model?: Model;
@@ -81,6 +107,11 @@ export interface StatusLineSession {
 	sessionManager: {
 		getSessionName(): string | undefined;
 		getSessionId(): string;
+		/**
+		 * The active leaf's place in the session tree; undefined at the tip of a
+		 * session without forks. Returns the same object while it is unchanged.
+		 */
+		getTreePosition?(): SessionTreePosition | undefined;
 		getUsageStatistics(): {
 			input: number;
 			output: number;

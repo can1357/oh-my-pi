@@ -2,7 +2,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import type { SessionState, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { NativeNode, NativeUiEvent } from "../native/node";
 import type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "./schema";
-import type { ActiveRepoContext, PromptCacheStatus, StatusLineSession } from "./host";
+import type { ActiveRepoContext, PromptCacheStatus, SessionTreePosition, StatusLineSession } from "./host";
 import type { LoopConditionConfig, LoopLimitRuntime } from "./loop";
 
 export type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle };
@@ -156,6 +156,11 @@ export interface SegmentContext {
 	speculationBlinkOn: boolean;
 	subagentCount: number;
 	/**
+	 * The main session's place in its tree when off the tip of a single line;
+	 * undefined otherwise, and while a subagent is focused (`/tree` acts on the main session).
+	 */
+	treePosition?: SessionTreePosition;
+	/**
 	 * Spend of every subagent under the main session (descendants included),
 	 * from the Agent Hub projection; 0 while a subagent is focused or unknown.
 	 */
@@ -174,6 +179,8 @@ export interface SegmentContext {
 	 * spinner + turn timer.
 	 */
 	turnElapsedMs: number | null;
+	/** The turn waits on the user's answer to an ask: the `pi` segment's spinner becomes a question mark. */
+	awaitingAnswer?: boolean;
 	/**
 	 * Sampled foreground ANSI for the `pi` brand segment — tweened between dim
 	 * gray (idle) and the accent (working) across turn edges (rust omp's

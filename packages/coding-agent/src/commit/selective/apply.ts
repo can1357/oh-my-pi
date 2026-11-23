@@ -4,14 +4,16 @@
  * The commit is built in a private index file: HEAD's tree plus one patch per selected path
  * rendering the exact content the draft chose. `commitCreate` commits that index with an
  * expected-HEAD guard (hooks see it as `GIT_INDEX_FILE`, like `git commit --only`), so a
- * concurrent commit by someone else can never be overwritten. Afterwards the same patches are
- * applied to the shared index so the committed paths do not show up as staged reversals; every
- * other index entry and the worktree stay untouched.
+ * concurrent commit by someone else can never be overwritten. Afterwards the same patches, plus
+ * whatever a `pre-commit` hook restaged into the private index (formatters do), are applied to the
+ * shared index so the committed paths do not show up as staged reversals; every other index entry
+ * and the worktree stay untouched.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { Draft, SelectedChange } from "./draft";
 import type { ChangeJournal, JournalAgent } from "./journal";
 import { formatTextPatch } from "./patch";
@@ -43,6 +45,44 @@ async function applyToSharedIndex(repo: VcsGitRepo, patch: string, signal?: Abor
 	return failure;
 }
 
+/** One path's patch; joined with others, or applied alone when the joined write fails. */
+interface PathPatch {
+	path: string;
+	patch: string;
+}
+
+/**
+ * Apply `patches` to the shared index; a note per path whose entry was left as is. Entries that
+ * already hold the patched content count as applied.
+ */
+async function syncSharedIndex(
+	repo: VcsGitRepo,
+	patches: readonly PathPatch[],
+	signal?: AbortSignal,
+): Promise<Array<{ path: string; note: string }>> {
+	// One write for every path: each write takes `index.lock`, which a concurrent git (a prompt's
+	// or an editor's `git status`) may hold. Per-path writes only when a path's entry differs.
+	const joined = vcs.joinPatches(patches.map(entry => entry.patch));
+	if ((await applyToSharedIndex(repo, joined, signal)) === undefined) return [];
+	const notes: Array<{ path: string; note: string }> = [];
+	for (const entry of patches) {
+		const failure = await applyToSharedIndex(repo, entry.patch, signal);
+		if (failure === undefined) continue;
+		if (await repo.canApplyPatch(entry.patch, { cached: true, reverse: true }).catch(() => false)) continue;
+		const staged = await repo.canApplyPatch(entry.patch, { cached: true }).catch(() => undefined);
+		notes.push({
+			path: entry.path,
+			note:
+				staged === false
+					? `${entry.path}: its shared-index entry holds someone else's staged changes and was left as is; ` +
+						"`git diff --cached` there shows this commit reverted until they restage."
+					: `${entry.path}: the shared index could not be written (${failure}); ` +
+						`\`git diff --cached\` there shows this commit reverted until \`git reset -q -- ${entry.path}\`.`,
+		});
+	}
+	return notes;
+}
+
 /** Attempts when HEAD moves between building the private index and committing it. */
 const HEAD_RACE_ATTEMPTS = 3;
 
@@ -64,10 +104,15 @@ export interface CommitRequest {
 export interface CommitOutcome {
 	sha: string;
 	subject: string;
-	/** Repo-relative paths the commit changed. */
+	/** Repo-relative paths the commit changed against `parent` (on amend: everything the amended commit changes). */
 	paths: string[];
-	/** HEAD the commit was placed on (differs from the draft's HEAD when someone committed meanwhile); `null` for a root commit. */
+	/**
+	 * First parent of the commit, `null` for a root commit. Without amend this is the HEAD the commit was
+	 * placed on, which differs from the draft's HEAD when someone committed meanwhile.
+	 */
 	parent: string | null;
+	/** On amend, the commit that was replaced. */
+	amended?: string;
 	/** Committed paths whose shared-index entry kept someone else's staged content instead of the commit's. */
 	indexNotes: string[];
 }
@@ -91,11 +136,29 @@ function shortSha(sha: string | null): string {
 	return sha?.slice(0, 10) ?? "(no commits yet)";
 }
 
-async function patchFor(repo: VcsGitRepo, head: string | null, change: SelectedChange): Promise<string> {
-	if (change.kind === "text") return formatTextPatch(change.path, change.before, change.after);
-	return change.added || head === null
-		? repo.diffNoIndex("/dev/null", change.path, true)
-		: repo.diffText({ base: head, files: [change.path], binary: true });
+async function patchFor(repo: VcsGitRepo, change: SelectedChange, signal?: AbortSignal): Promise<string> {
+	if (change.kind === "text") {
+		if (change.after?.mode === "160000") {
+			const absolute = path.join(repo.info().repoRoot, change.path);
+			const module = vcs.git(absolute);
+			const sameRoot = module && (await fs.realpath(module.info().repoRoot)) === (await fs.realpath(absolute));
+			if (!sameRoot || `Subproject commit ${await module.headSha()}\n` !== change.after.text) {
+				throw new Error(`${change.path}: submodule HEAD changed since the draft; build a new draft.`);
+			}
+		}
+		return formatTextPatch(change.path, change.before, change.after);
+	}
+	return repo.diffBlobs(
+		{
+			path: change.path,
+			oldId: change.before?.id,
+			newId: change.after?.id,
+			oldMode: change.before?.mode,
+			newMode: change.after?.mode,
+		},
+		true,
+		signal,
+	);
 }
 
 /**
@@ -110,6 +173,15 @@ export async function commitSelection(
 	request: CommitRequest,
 	context: { journal: ChangeJournal | null; agent: JournalAgent; signal?: AbortSignal },
 ): Promise<CommitOutcome> {
+	const changes = draft.selection();
+	if (changes.length === 0) {
+		if (draft.paths.length > 0) throw new Error("Nothing selected; use take() first.");
+		throw new Error(
+			draft.skipped.length > 0
+				? `Nothing to commit: only ${draft.skipped.join(", ")} changed (submodule or nested repository), which selective commits skip.`
+				: `Nothing to commit: ${shortenPath(draft.root)} has no changes against HEAD.`,
+		);
+	}
 	const repo = vcs.requireGit(draft.root);
 	const operation = await repo.operationKind(context.signal);
 	if (operation === "unmerged-index") {
@@ -122,11 +194,9 @@ export async function commitSelection(
 	}
 	const gitDir = repo.info().gitDir;
 	const message = composeMessage(request);
-	const changes = draft.selection();
-	if (changes.length === 0) throw new Error("Nothing selected; use take() first.");
-	const patches: Array<{ path: string; patch: string }> = [];
+	const patches: PathPatch[] = [];
 	for (const change of changes) {
-		const patch = await patchFor(repo, draft.head, change);
+		const patch = await patchFor(repo, change, context.signal);
 		if (patch) patches.push({ path: change.path, patch });
 	}
 	if (patches.length === 0) throw new Error("The selection matches HEAD; nothing to commit.");
@@ -143,7 +213,10 @@ export async function commitSelection(
 		`omp-commit-${draft.id}-${Math.floor(Math.random() * 46656).toString(36)}.index`,
 	);
 	let sha: string | undefined;
-	let parent = draft.head;
+	/** HEAD the commit was built on; on amend, the commit it replaced. */
+	let base = draft.head;
+	/** Tree of the private index before hooks ran: what the selection alone commits. */
+	let selectedTree = "";
 	try {
 		for (let attempt = 1; sha === undefined; attempt++) {
 			context.signal?.throwIfAborted();
@@ -151,9 +224,9 @@ export async function commitSelection(
 			if (ownCommits && (head === null || !ownCommits.has(head))) {
 				throw new Error(`HEAD ${shortSha(head)} was not made by this session's commit flow; refusing to amend it.`);
 			}
-			// An unborn HEAD starts from an empty index: patches create the missing index file.
+			// Hooks see this index; preserve HEAD's sparse exclusions from the shared index.
 			if (head === null) await fs.rm(indexPath, { force: true });
-			else await repo.readTree(head, indexPath, context.signal);
+			else await repo.readTreeKeepingSparse(head, indexPath, context.signal);
 			try {
 				await repo.applyPatch(joined, { cached: true, indexPath }, context.signal);
 			} catch (error) {
@@ -166,6 +239,7 @@ export async function commitSelection(
 					`HEAD moved from ${shortSha(draft.head)} to ${shortSha(head)}, which changed ${blocked.join(", ") || "selected paths"}; build a new draft.`,
 				);
 			}
+			selectedTree = await repo.writeTree(indexPath, context.signal);
 			try {
 				sha = await repo.commitCreate(
 					message,
@@ -177,7 +251,7 @@ export async function commitSelection(
 					},
 					context.signal,
 				);
-				parent = head;
+				base = head;
 			} catch (error) {
 				if (!(vcs.isVcsError(error) && error.code === "HeadMoved") || attempt >= HEAD_RACE_ATTEMPTS) throw error;
 			}
@@ -189,25 +263,37 @@ export async function commitSelection(
 	const indexNotes: string[] = [];
 	// A new repository may have no index file yet. Git reads that as an empty index, but patch
 	// application reads HEAD in its place, so seed it with the root commit's tree instead.
-	const seedIndex = parent === null && !(await Bun.file(path.join(gitDir, "index")).exists());
-	if (seedIndex) await repo.readTree(sha, undefined, context.signal);
-	// One write for every path: each write takes `index.lock`, which a concurrent git (a prompt's
-	// or an editor's `git status`) may hold. Per-path writes only when a path's entry differs.
-	const synced = seedIndex || (await applyToSharedIndex(repo, joined, context.signal)) === undefined;
-	for (const entry of synced ? [] : patches) {
-		const failure = await applyToSharedIndex(repo, entry.patch, context.signal);
-		if (failure === undefined) continue;
-		if (await repo.canApplyPatch(entry.patch, { cached: true, reverse: true }).catch(() => false)) continue;
-		const staged = await repo.canApplyPatch(entry.patch, { cached: true }).catch(() => undefined);
-		indexNotes.push(
-			staged === false
-				? `${entry.path}: its shared-index entry holds someone else's staged changes and was left as is; ` +
-						"`git diff --cached` there shows this commit reverted until they restage."
-				: `${entry.path}: the shared index could not be written (${failure}); ` +
-						`\`git diff --cached\` there shows this commit reverted until \`git reset -q -- ${entry.path}\`.`,
-		);
+	if (base === null && !(await Bun.file(path.join(gitDir, "index")).exists())) {
+		await repo.readTree(sha, undefined, context.signal);
+	} else {
+		const left = await syncSharedIndex(repo, patches, context.signal);
+		// Then what a hook changed on top of the selection, for paths that now hold the selection.
+		const kept = new Set(left.map(entry => entry.path));
+		const rewrites: PathPatch[] = [];
+		for (const file of await repo.changedFiles({ base: selectedTree, head: sha })) {
+			if (kept.has(file)) continue;
+			const patch = await repo.diffText({ base: selectedTree, head: sha, files: [file], binary: true });
+			rewrites.push({ path: file, patch });
+		}
+		if (rewrites.length > 0) left.push(...(await syncSharedIndex(repo, rewrites, context.signal)));
+		indexNotes.push(...left.map(entry => entry.note));
 	}
-	const paths = patches.map(entry => entry.path);
-	await context.journal?.recordCommit({ agent: context.agent.agent, parent: context.agent.parent, sha, paths });
-	return { sha, subject: message.split("\n", 1)[0], paths, parent, indexNotes };
+	const selected = patches.map(entry => entry.path);
+	await context.journal?.recordCommit({
+		agent: context.agent.agent,
+		parent: context.agent.parent,
+		sha,
+		paths: selected,
+	});
+	// The commit exists and is recorded: the reads below describe it and are not cancelled.
+	const details = await repo.commitDetails(sha);
+	const subject = details.message.split("\n", 1)[0];
+	if (!request.amend) return { sha, subject, paths: selected, parent: base, indexNotes };
+	// An amended commit keeps the replaced commit's parents and carries its changes along with this selection.
+	const parent = details.parents[0] ?? null;
+	const paths =
+		parent === null
+			? (await repo.lsTree(sha, [])).map(entry => entry.path)
+			: await repo.changedFiles({ base: parent, head: sha });
+	return { sha, subject, paths, parent, amended: base ?? undefined, indexNotes };
 }

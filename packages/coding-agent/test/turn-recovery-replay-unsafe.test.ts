@@ -473,6 +473,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				providerTimed: true,
 				baseUrl: model.baseUrl,
 				modelId: model.id,
+				signal: expect.any(AbortSignal),
 			});
 		} finally {
 			mark.mockRestore();

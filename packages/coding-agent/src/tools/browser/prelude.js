@@ -15,9 +15,17 @@
 		}
 		return source;
 	};
+	// Functions and RegExps nested in plain objects and arrays (`requests({filter: /x/})`) are encoded too.
 	const encodeArg = (label, value) => {
 		if (typeof value === "function") return { __omp_fn: serializeFunction(label, value) };
 		if (value instanceof RegExp) return { __omp_re: { source: value.source, flags: value.flags } };
+		if (Array.isArray(value)) return value.map(item => encodeArg(label, item));
+		if (value !== null && typeof value === "object") {
+			const prototype = Object.getPrototypeOf(value);
+			if (prototype === Object.prototype || prototype === null) {
+				return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, encodeArg(label, item)]));
+			}
+		}
 		return value;
 	};
 	const encodeArgs = (label, args) => {
@@ -25,9 +33,10 @@
 		while (trimmed.length > 0 && trimmed[trimmed.length - 1] === undefined) trimmed.pop();
 		return trimmed.map(value => encodeArg(label, value));
 	};
-	const invoke = async (action, options) => {
+	// `quiet`: the caller returns the structured value, so its listing (page URLs with tokens) is not printed.
+	const invoke = async (action, options, quiet = false) => {
 		const response = await globalThis.__omp_prelude__("browser", { ...options, action });
-		if (response && typeof response.text === "string" && response.text.length > 0) {
+		if (!quiet && response && typeof response.text === "string" && response.text.length > 0) {
 			globalThis.__omp_log__("log", response.text);
 		}
 		return response && typeof response.details === "object" && response.details !== null ? response.details : {};
@@ -457,11 +466,11 @@
 			return makeTab(name);
 		},
 		async tabs() {
-			const details = await invoke("tabs", {});
+			const details = await invoke("tabs", {}, true);
 			return Array.isArray(details.value) ? details.value : [];
 		},
 		async targets(options) {
-			const details = await invoke("targets", validateOptions("browser.targets", options));
+			const details = await invoke("targets", validateOptions("browser.targets", options), true);
 			return Array.isArray(details.value) ? details.value : [];
 		},
 		async close(options) {

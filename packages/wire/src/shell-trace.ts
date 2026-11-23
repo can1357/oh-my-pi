@@ -1,6 +1,6 @@
 /**
- * `ShellTrace`: the live model of one embedded-shell run, produced by pi-shell's
- * `RunTrace` (`crates/pi-shell/src/bash/trace.rs`), polled over napi, carried in
+ * `ShellTrace`: the live model of one embedded-shell run, produced by omp-shell's
+ * `RunTrace` (`crates/shell/src/bash/trace.rs`), polled over napi, carried in
  * the bash tool's `details.trace`, and forwarded verbatim to Tern as the `shell`
  * node's props. Every offset is a BYTE offset; UIs convert bytes to characters
  * when the script is not ASCII. Fields at their default are omitted.
@@ -116,12 +116,14 @@ export interface ShellTraceUnit {
 	bytes?: number;
 	/** The unit's source; present only for unlocated units (an eval or function body). */
 	source?: ShellTraceBytes;
-	/** Opaque canonical native syntax archive. Only pi-shell may interpret it. */
+	/** Opaque canonical native syntax archive. Only omp-shell may interpret it. */
 	syntax?: unknown;
 	/** Compiler-known wrapper bytes removed from this unit's displayed source. */
 	projection?: number;
 	/** Script a callout (`timeout`, `git`, `xargs`, …) ran for its operands; its calling command stands for it. */
 	callout?: boolean;
+	/** Command (unit index, node id) that ran this unit's script when the script is not literal in it: `eval "$x"`, `.`, a nested shell's file. */
+	runner?: { unit: number; node: number };
 	nodes: ShellTraceNode[];
 }
 
