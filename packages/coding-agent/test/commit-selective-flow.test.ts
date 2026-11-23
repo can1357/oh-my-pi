@@ -1368,39 +1368,36 @@ describe("selective commit flow", () => {
 
 	describe("large unrelated files (#20176)", () => {
 		const LARGE_BYTES = 8 * 1024 * 1024;
+		const LARGE_FILES = ["unrelated.asar", "unrelated.dmg"];
 
-		/** Repo with a committed `src.ts`, an edit to it, and an unrelated 8 MiB untracked `unrelated.asar`. */
+		/** Repo with a committed `src.ts`, an edit to it, and two unrelated 8 MiB untracked files. */
 		async function largeUnrelatedRepo() {
 			const repo = await emptyRepo();
 			await repo.write("Main", undefined, "src.ts", "one\n");
 			await git(repo.root, ["add", "."]);
 			await git(repo.root, ["commit", "-q", "-m", "seed"]);
 			await repo.write("Main", undefined, "src.ts", "two\n");
-			await Bun.write(path.join(repo.root, "unrelated.asar"), new Uint8Array(LARGE_BYTES).fill(7));
+			for (const file of LARGE_FILES) {
+				await Bun.write(path.join(repo.root, file), new Uint8Array(LARGE_BYTES).fill(7));
+			}
 			return repo;
 		}
 
-		/** Spies on the repository calls that read worktree or blob bytes, recording what each one names. */
-		function observeReads(): string[] {
-			const reads: string[] = [];
+		/** Spies on the native conversion, recording the paths each call converts together. */
+		function observeConversions(): string[][] {
+			const calls: string[][] = [];
 			const observe = (repo: ReturnType<typeof vcs.requireGit>): ReturnType<typeof vcs.requireGit> =>
 				new Proxy(repo, {
 					get(target, prop) {
 						if (prop === "worktreeToGit") {
 							return (inputs: Array<{ path: string; data: Uint8Array }>, signal?: unknown) => {
-								reads.push(...inputs.map(input => input.path));
+								calls.push(inputs.map(input => input.path));
 								return target.worktreeToGit(inputs, signal);
 							};
 						}
-					if (prop === "showBlob") {
-						return (spec: string, maxBytes?: number | null, signal?: unknown) => {
-							reads.push(spec);
-							return target.showBlob(spec, maxBytes, signal);
-						};
-					}
-					const value = Reflect.get(target, prop, target);
-					return typeof value === "function" ? value.bind(target) : value;
-				},
+						const value = Reflect.get(target, prop, target);
+						return typeof value === "function" ? value.bind(target) : value;
+					},
 				});
 			const realGit = vcs.git.bind(vcs);
 			const realRequireGit = vcs.requireGit.bind(vcs);
@@ -1409,21 +1406,25 @@ describe("selective commit flow", () => {
 				return repo && observe(repo);
 			});
 			vi.spyOn(vcs, "requireGit").mockImplementation(dir => observe(realRequireGit(dir)));
-			return reads;
+			return calls;
 		}
 
-		it("draft reads only the selected large file", async () => {
+		it("converts large unrelated files one at a time", async () => {
 			const { root, journal } = await largeUnrelatedRepo();
-			const reads = observeReads();
+			const calls = observeConversions();
 
 			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
-			expect(draft.paths).toContain("unrelated.asar");
-			draft.only(["src.ts"]);
-			expect(reads.filter(read => read.includes("unrelated.asar"))).toEqual([]);
+			expect(draft.paths).toEqual(expect.arrayContaining(LARGE_FILES));
 
-			await draft.freezeSelected();
-			expect(draft.selection().map(change => change.path)).toEqual(["src.ts"]);
-			expect(reads.filter(read => read.includes("unrelated.asar"))).toEqual([]);
+			for (const call of calls) {
+				if (call.some(file => LARGE_FILES.includes(file))) expect(call).toHaveLength(1);
+			}
+			expect(
+				calls
+					.flat()
+					.filter(file => LARGE_FILES.includes(file))
+					.sort(),
+			).toEqual(LARGE_FILES);
 		});
 
 		it("selected large file commits its exact bytes", async () => {
@@ -1431,7 +1432,6 @@ describe("selective commit flow", () => {
 
 			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
 			draft.take({ path: "unrelated.asar" });
-			await draft.freezeSelected();
 			const change = draft.selection().find(item => item.path === "unrelated.asar");
 			if (change?.kind !== "whole" || !change.after) throw new Error("expected a whole-file change");
 			expect((await git(root, ["cat-file", "-s", change.after.id])).trim()).toBe(String(LARGE_BYTES));
