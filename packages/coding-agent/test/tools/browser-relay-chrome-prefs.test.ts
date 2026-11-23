@@ -265,4 +265,29 @@ describe("registerUnpackedExtension", () => {
 			await fs.rm(extensionDir, { recursive: true, force: true });
 		}
 	});
+
+	test("switches Developer mode on in an unprotected profile, where the record goes to Preferences", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-profile-"));
+		const profileDir = path.join(dir, "Default");
+		try {
+			// Linux: Chrome keeps extension settings and Developer mode in Preferences, without enforced authenticators.
+			const normalFile = path.join(profileDir, "Preferences");
+			await Bun.write(normalFile, JSON.stringify({ browser: { show_home_button: false } }));
+			await Bun.write(path.join(profileDir, "Secure Preferences"), JSON.stringify({}));
+
+			const result = await registerUnpackedExtension(browser, profileDir, "abcdefghijklmnopabcdefghijklmnop", {
+				location: 4,
+				path: dir,
+				disable_reasons: [],
+			});
+			expect(result).toEqual({ profileDir, protected: false, authenticators: "unauthenticated" });
+			const written = await Bun.file(normalFile).json();
+			expect(written.extensions.settings.abcdefghijklmnopabcdefghijklmnop.location).toBe(4);
+			// Without it Chrome records `disable_reasons: [16777216]` at its next start and never loads the extension.
+			expect(written.extensions.ui.developer_mode).toBe(true);
+			expect(written.browser).toEqual({ show_home_button: false });
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
 });

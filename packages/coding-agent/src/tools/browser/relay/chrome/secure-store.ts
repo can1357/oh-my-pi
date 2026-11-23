@@ -155,6 +155,10 @@ export async function registerUnpackedExtension(
 			mode = "hmac";
 		}
 		protection.super_mac = authenticator(seed, device, "", pruneEmpty(macs as JsonValue));
+	} else {
+		// Chrome switches an unpacked extension off while Developer mode is off. An unprotected store (Linux) keeps
+		// that preference in `Preferences`, beside the record.
+		child(child(files.normal, "extensions"), "ui").developer_mode = true;
 	}
 
 	await fs.mkdir(profileDir, { recursive: true });

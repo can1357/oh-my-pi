@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `omp browser-relay install` now recognizes Helium: it registers the native host in Helium's folder, sees a Helium profile that already loads the extension, and installs into Helium when no other supported browser is present ([#20226](https://github.com/can1357/oh-my-pi/pull/20226) by [@midsorbet](https://github.com/midsorbet))
+
+### Fixed
+
+- Fixed `omp browser-relay install` on Linux registering the extension in a profile that had Developer mode off, where the browser then switched it off at its next start; the install now switches Developer mode on with it, and it finds a browser that is installed for the current user only on Windows ([#20226](https://github.com/can1357/oh-my-pi/pull/20226) by [@midsorbet](https://github.com/midsorbet))
+
 ## [19.1.1] - 2026-11-23
 
 ### Breaking Changes
