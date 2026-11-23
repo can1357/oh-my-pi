@@ -544,6 +544,57 @@ describe("AgentSession retry fallback", () => {
 		expect(requestedModels).toEqual([primarySelector, firstSelector]);
 	});
 
+	it("sends no fallback request when the retry is aborted while a chain entry's usage probe is pending", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+
+		const probeStarted = Promise.withResolvers<void>();
+		const probe = Promise.withResolvers<ModelUsageHealth>();
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async (_provider, options) => {
+			if (options.modelId !== fallbackModel.id) return { state: "healthy", accounts: [] };
+			probeStarted.resolve();
+			return probe.promise;
+		});
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (model.id === primaryModel.id) mock.push({ throw: "overloaded_error: provider returned error 503" });
+				else mock.push({ content: ["Recovered"] });
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.usageAwareFallback": true,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+
+		const run = session.prompt("Cancel the retry while the fallback's usage loads");
+		try {
+			await withTimeout(probeStarted.promise, 2_000, "fallback usage probe did not start");
+			session.abortRetry();
+			probe.resolve({ state: "unknown", accounts: [] });
+			await withTimeout(session.waitForIdle(), 2_000, "cancelled retry did not settle");
+			await run;
+		} finally {
+			probe.resolve({ state: "unknown", accounts: [] });
+		}
+
+		expect(requestedModels).toEqual([primarySelector]);
+		expect(session.model?.id).toBe(primaryModel.id);
+	});
+
 	it("walks the fallback chain when the primary provider has no credential, then restores it once one returns", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o");
