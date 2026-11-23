@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed Tern Plan Review annotations being dropped before they reached omp, so saved comments now enable Refine ([#20250](https://github.com/can1357/oh-my-pi/pull/20250) by [@ash-miku](https://github.com/ash-miku))
+- Fixed the cursor drifting left while typing Korean in Paradev terminals ([#20246](https://github.com/can1357/oh-my-pi/pull/20246) by [@HuitaePark](https://github.com/HuitaePark))
 
 ## [19.1.1] - 2026-11-23
 
