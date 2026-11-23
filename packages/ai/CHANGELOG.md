@@ -26,7 +26,6 @@
 
 ### Fixed
 
-- An openai-completions stream that gets HTTP 500 back sends six requests, not twelve: the provider-error replay no longer re-runs a status the transport already retried ([#19729](https://github.com/can1357/oh-my-pi/issues/19729), [#20215](https://github.com/can1357/oh-my-pi/pull/20215) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed split tool-call handling so models configured with `splitToolCalls` receive each tool call together with its corresponding result in the correct message order.
 - Fixed `apple/on-device` finish-reason handling so requests no longer emit spurious stderr warnings and correctly report recognized stop or length completions.
 - Improved local validation for empty Anthropic requests by reporting the model, provider, and received message count instead of an opaque provider error.

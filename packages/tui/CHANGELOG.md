@@ -54,9 +54,6 @@
 
 ### Fixed
 
-- Fixed Ctrl+[ not leaving Vim Insert, Replace or Visual mode, or cancelling a pending operator, under the Kitty keyboard protocol or modifyOtherKeys; inside the Vim modes it now does what Escape does ([#19547](https://github.com/can1357/oh-my-pi/issues/19547), [#20209](https://github.com/can1357/oh-my-pi/pull/20209) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed the dot between extension statuses in the status bar drawing in the accent colour instead of the dim separator colour ([#15740](https://github.com/can1357/oh-my-pi/issues/15740), [#20218](https://github.com/can1357/oh-my-pi/pull/20218) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Zellij's own dark or light report now sets the detected appearance, so a light Zellij theme over a dark host background is no longer detected as dark ([#20132](https://github.com/can1357/oh-my-pi/issues/20132), [#20207](https://github.com/can1357/oh-my-pi/pull/20207) by [@JamieJ5926](https://github.com/JamieJ5926)).
 - Fixed handoffs being skipped when only the model’s upstream pin changes.
 - Fixed the `/usage` activity calendar retaining its history when a refresh fails, while indicating that the data is not synced.
 - Fixed SVG images blinking in ask forms when questions extend beyond the panel.
