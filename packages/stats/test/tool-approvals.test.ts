@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
-import { initDb } from "@oh-my-pi/omp-stats/db";
+import { closeDb, initDb } from "@oh-my-pi/omp-stats/db";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
@@ -77,10 +77,8 @@ function approvalResolved(opts: {
 }
 
 async function writeSession(filename: string, entries: unknown[]): Promise<string> {
-	const dir = path.join(getSessionsDir(), FOLDER_SLUG);
-	await fs.mkdir(dir, { recursive: true });
-	const filePath = path.join(dir, filename);
-	await fs.writeFile(filePath, `${entries.map(e => JSON.stringify(e)).join("\n")}\n`);
+	const filePath = path.join(getSessionsDir(), FOLDER_SLUG, filename);
+	await Bun.write(filePath, `${entries.map(e => JSON.stringify(e)).join("\n")}\n`);
 	return filePath;
 }
 
@@ -133,6 +131,20 @@ describe("tool_approvals indexing", () => {
 				data: { toolName: "bash" },
 			},
 			{ type: "custom", id: "e6", timestamp: res2, customType: "tool_approval_resolved", data: null },
+			{
+				type: "custom",
+				id: "e7",
+				timestamp: res2,
+				customType: "tool_approval_resolved",
+				data: { toolCallId: "call_bad_res", toolName: "bash", approved: "false", resolvedAt: res2 },
+			},
+			{
+				type: "custom",
+				id: "e8",
+				timestamp: res2,
+				customType: "tool_approval_resolved",
+				data: { toolCallId: "call_missing_approved", toolName: "bash", resolvedAt: res2 },
+			},
 		]);
 
 		await syncAllSessions({ workers: 1 });
@@ -263,5 +275,100 @@ describe("tool_approvals indexing", () => {
 			.query<ToolApprovalRow, [string]>("SELECT * FROM tool_approvals WHERE tool_call_id = ?")
 			.all("call_fork_1");
 		expect(rows).toHaveLength(1);
+	});
+
+	it("merges a resolution recorded only in a fork after the pending source was synced", async () => {
+		const reqTs = "2026-11-23T12:10:00.000Z";
+		const resTs = "2026-11-23T12:10:04.000Z";
+		const pendingRequest = approvalRequested({
+			id: "e1",
+			toolCallId: "call_fork_pending_1",
+			toolName: "bash",
+			approvalMode: "write",
+			requestedAt: reqTs,
+		});
+
+		const origFile = await writeSession("s4-orig.jsonl", [sessionHeader("s4-orig", reqTs), pendingRequest]);
+		await syncAllSessions({ workers: 1 });
+
+		await writeSession("s4-fork.jsonl", [
+			sessionHeader("s4-fork", reqTs),
+			pendingRequest,
+			approvalResolved({
+				id: "e2",
+				toolCallId: "call_fork_pending_1",
+				toolName: "bash",
+				approved: false,
+				reason: "denied in fork",
+				resolvedAt: resTs,
+			}),
+		]);
+		await syncAllSessions({ workers: 1 });
+
+		const db = await initDb();
+		const rows = db
+			.query<ToolApprovalRow, [string]>("SELECT * FROM tool_approvals WHERE tool_call_id = ?")
+			.all("call_fork_pending_1");
+		expect(rows).toEqual([
+			{
+				session_file: origFile,
+				tool_call_id: "call_fork_pending_1",
+				parent_tool_call_id: null,
+				folder: "/tmp/tool-approvals",
+				tool_name: "bash",
+				approval_mode: "write",
+				requested_at: Date.parse(reqTs),
+				request_reason: null,
+				approved: 0,
+				resolved_at: Date.parse(resTs),
+				resolve_reason: "denied in fork",
+			},
+		]);
+	});
+
+	it("backfills recent transcripts with up-to-date cursors on upgrade", async () => {
+		const reqTs = "2026-11-23T13:00:00.000Z";
+		const resTs = "2026-11-23T13:00:02.000Z";
+		const sessionFile = await writeSession("s5-upgrade.jsonl", [
+			sessionHeader("s5", reqTs),
+			approvalRequested({
+				id: "e1",
+				toolCallId: "call_upgrade_1",
+				toolName: "bash",
+				approvalMode: "write",
+				requestedAt: reqTs,
+			}),
+			approvalResolved({
+				id: "e2",
+				toolCallId: "call_upgrade_1",
+				toolName: "bash",
+				approved: true,
+				resolvedAt: resTs,
+			}),
+		]);
+		const stat = await fs.stat(sessionFile);
+
+		const db = await initDb();
+		db.run("DELETE FROM meta WHERE key = 'tool_approvals_v1'");
+		db.run("DELETE FROM tool_approvals");
+		db.query("INSERT OR REPLACE INTO file_offsets (session_file, offset, last_modified) VALUES (?, ?, ?)").run(
+			sessionFile,
+			stat.size,
+			stat.mtimeMs,
+		);
+		closeDb();
+
+		await syncAllSessions({ workers: 1 });
+		const upgradedDb = await initDb();
+		const row = upgradedDb
+			.query<ToolApprovalRow, [string]>("SELECT * FROM tool_approvals WHERE tool_call_id = ?")
+			.get("call_upgrade_1");
+		expect(row).toMatchObject({
+			session_file: sessionFile,
+			tool_call_id: "call_upgrade_1",
+			approved: 1,
+			requested_at: Date.parse(reqTs),
+			resolved_at: Date.parse(resTs),
+		});
 	});
 });

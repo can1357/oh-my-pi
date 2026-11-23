@@ -2113,8 +2113,9 @@ export function insertSnapcompactCompactions(rows: Iterable<SnapcompactCompactio
 /**
  * Upsert tool approval prompt records. Request and resolution entries can land
  * in different incremental sync passes; `COALESCE` merges whichever arrives
- * later without clobbering fields already persisted. Fork copies of the same
- * tool call id under another transcript are skipped (first writer wins).
+ * later without clobbering fields already persisted. Fork copies sharing the
+ * same `tool_call_id` route to the existing owner's `session_file` so a new
+ * outcome recorded only in a fork still merges into the deduplicated row.
  */
 export function upsertToolApprovals(rows: Iterable<ToolApprovalStats>): number {
 	if (!db) return 0;
@@ -2127,9 +2128,9 @@ export function upsertToolApprovals(rows: Iterable<ToolApprovalStats>): number {
 		"resolved_at",
 		"resolve_reason",
 	] as const;
-	const coalesce = (column: string) => `${column} = COALESCE(excluded.${column}, tool_approvals.${column})`;
+	const coalesce = (column: string) => `${column} = COALESCE(tool_approvals.${column}, excluded.${column})`;
 	const changed = (column: string) =>
-		`COALESCE(excluded.${column}, tool_approvals.${column}) IS NOT tool_approvals.${column}`;
+		`COALESCE(tool_approvals.${column}, excluded.${column}) IS NOT tool_approvals.${column}`;
 	const writer = new ChunkedInsert(db, {
 		verb: "INSERT",
 		table: "tool_approvals",
@@ -2151,13 +2152,22 @@ export function upsertToolApprovals(rows: Iterable<ToolApprovalStats>): number {
 			${mergeColumns.map(coalesce).join(",\n")}
 			WHERE ${mergeColumns.map(changed).join("\n\t\t\tOR ")}`,
 	});
+	const findOwner = db.query<{ session_file: string }, [string]>(
+		"SELECT session_file FROM tool_approvals WHERE tool_call_id = ? LIMIT 1",
+	);
+	const ownerByCallId = new Map<string, string>();
 	return atomically(db, () => {
 		for (const row of rows) {
+			let owner = ownerByCallId.get(row.toolCallId);
+			if (owner === undefined) {
+				owner = findOwner.get(row.toolCallId)?.session_file ?? row.sessionFile;
+				ownerByCallId.set(row.toolCallId, owner);
+			}
 			writer.add(
-				row.sessionFile,
+				owner,
 				[row.toolCallId],
 				[
-					row.sessionFile,
+					owner,
 					row.toolCallId,
 					row.parentToolCallId ?? null,
 					row.folder,

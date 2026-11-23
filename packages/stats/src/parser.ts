@@ -18,7 +18,6 @@ import { getSessionsDir, isEnoent, readLines } from "@oh-my-pi/pi-utils";
 import type {
 	AgentType,
 	MessageStatsInput,
-	SessionCustomEntry,
 	SessionEntry,
 	SessionMessageEntry,
 	SessionModelUsageEntry,
@@ -159,18 +158,21 @@ function parseApprovalTimestamp(value: unknown, fallbackEntryTimestamp?: string)
  */
 function extractToolApproval(sessionFile: string, folder: string, entry: SessionEntry): ToolApprovalStats | null {
 	if (entry.type !== "custom") return null;
-	const custom = entry as SessionCustomEntry;
-	if (custom.customType !== "tool_approval_requested" && custom.customType !== "tool_approval_resolved") {
+	if (!("customType" in entry) || typeof entry.customType !== "string") return null;
+	if (entry.customType !== "tool_approval_requested" && entry.customType !== "tool_approval_resolved") {
 		return null;
 	}
-	const data = custom.data;
-	if (!data || typeof data !== "object") return null;
+	if (!("data" in entry) || !entry.data || typeof entry.data !== "object" || Array.isArray(entry.data)) {
+		return null;
+	}
+	const data = entry.data as Record<string, unknown>;
+	const entryTimestamp = "timestamp" in entry && typeof entry.timestamp === "string" ? entry.timestamp : undefined;
 	const toolCallId = typeof data.toolCallId === "string" ? data.toolCallId.trim() : "";
 	const rawToolName = typeof data.toolName === "string" ? data.toolName : "";
 	const toolName = sanitizeToolName(rawToolName);
 	if (!toolCallId || !toolName) return null;
 
-	if (custom.customType === "tool_approval_requested") {
+	if (entry.customType === "tool_approval_requested") {
 		const parentToolCallId =
 			typeof data.parentToolCallId === "string" && data.parentToolCallId.length > 0
 				? data.parentToolCallId
@@ -185,20 +187,20 @@ function extractToolApproval(sessionFile: string, folder: string, entry: Session
 			folder,
 			toolName,
 			approvalMode,
-			requestedAt: parseApprovalTimestamp(data.requestedAt, custom.timestamp),
+			requestedAt: parseApprovalTimestamp(data.requestedAt, entryTimestamp),
 			requestReason,
 		};
 	}
 
-	const approved = typeof data.approved === "boolean" ? data.approved : undefined;
+	if (typeof data.approved !== "boolean") return null;
 	const resolveReason = typeof data.reason === "string" && data.reason.length > 0 ? data.reason : undefined;
 	return {
 		sessionFile,
 		toolCallId,
 		folder,
 		toolName,
-		approved,
-		resolvedAt: parseApprovalTimestamp(data.resolvedAt, custom.timestamp),
+		approved: data.approved,
+		resolvedAt: parseApprovalTimestamp(data.resolvedAt, entryTimestamp),
 		resolveReason,
 	};
 }
