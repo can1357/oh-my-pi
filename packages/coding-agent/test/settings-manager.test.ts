@@ -59,6 +59,7 @@ import {
 	cfgGrepContextBefore,
 	cfgTodoEager,
 	cfgComputerEnabled,
+	cfgComputerTakeover,
 	cfgImagesQuestionTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import {
@@ -2219,6 +2220,28 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
 			expect(cfgComputerEnabled.get(settings)).toBe(true);
+			cfgDisplayShowTokenUsage.set(settings, true);
+			await settings.flush();
+			expect((await readSettings()).computer).toEqual({ enabled: true });
+		});
+
+		it("carries a refusing computer.backgroundFallback over to computer.takeover", async () => {
+			await writeSettings({ computer: { backgroundFallback: "refuse", enabled: true } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgComputerTakeover.get(settings)).toBe("refuse");
+			cfgDisplayShowTokenUsage.set(settings, true);
+			await settings.flush();
+			expect((await readSettings()).computer).toEqual({ enabled: true, takeover: "refuse" });
+		});
+
+		it("keeps a computer.backgroundFallback of takeover on the same behaviour, the default fallback", async () => {
+			await writeSettings({ computer: { backgroundFallback: "takeover", enabled: true } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgComputerTakeover.get(settings)).toBe("fallback");
 			cfgDisplayShowTokenUsage.set(settings, true);
 			await settings.flush();
 			expect((await readSettings()).computer).toEqual({ enabled: true });
