@@ -268,11 +268,12 @@ impl PtySession {
 	///
 	/// `true` while echo is off (a password prompt such as `sudo`'s, or a
 	/// full-screen program like `less`) or, on Linux, while a foreground
-	/// process is blocked reading the terminal (a `[y/N]` prompt). `false` when
-	/// no session runs or, on Linux, no foreground process reads the terminal.
-	/// `null` when an echoing line prompt cannot be told from a busy program:
-	/// always on macOS and Windows, and on Linux when a foreground process
-	/// cannot be inspected (one running setuid).
+	/// process is blocked reading the terminal or polling it for input (a
+	/// `[y/N]` prompt). `false` when no session runs or, on Linux, no
+	/// foreground process reads the terminal. `null` when an echoing line
+	/// prompt cannot be told from a busy program: always on macOS and Windows,
+	/// and on Linux when a foreground process cannot be inspected (one running
+	/// setuid, or memory a Yama ptrace scope hides).
 	#[cfg_attr(
 		not(unix),
 		allow(clippy::missing_const_for_fn, reason = "unix reads the terminal at runtime")
@@ -594,7 +595,11 @@ mod input_wait {
 
 	#[cfg(target_os = "linux")]
 	mod linux {
-		use std::{ffi::CStr, io::ErrorKind, os::unix::fs::MetadataExt};
+		use std::{
+			ffi::CStr,
+			io::{self, ErrorKind},
+			os::unix::fs::{FileExt, MetadataExt},
+		};
 
 		use omp_shell::proctree::Process;
 
@@ -626,8 +631,9 @@ mod input_wait {
 				Some(Self { leader, group, slave })
 			}
 
-			/// Whether a foreground process is blocked reading the terminal, from
-			/// `/proc/<pid>/syscall`; `None` when one is not ours to inspect.
+			/// Whether a foreground process is blocked reading the terminal, or
+			/// polling it for input, from `/proc/<pid>/syscall`; `None` when one
+			/// is not ours to inspect.
 			pub fn reads_terminal(&self) -> Option<bool> {
 				let Some(leader) = Process::from_pid(self.leader) else {
 					return Some(false);
@@ -649,29 +655,126 @@ mod input_wait {
 							continue;
 						},
 					};
-					let Some(fd) = blocked_read_fd(&syscall) else {
+					let Some(wait) = Wait::parse(&syscall) else {
 						continue;
 					};
-					let Ok(file) = std::fs::metadata(format!("/proc/{pid}/fd/{fd}")) else {
-						continue;
+					let fds = match wait.input_fds(pid) {
+						Ok(fds) => fds,
+						Err(error) => {
+							// Yama or a setuid process keeps its memory from us; an
+							// oversized set is not read.
+							unknown |= matches!(
+								error.kind(),
+								ErrorKind::PermissionDenied | ErrorKind::FileTooLarge
+							);
+							continue;
+						},
 					};
-					if file.rdev() == self.slave || file.rdev() == console {
-						return Some(true);
+					for fd in fds {
+						let Ok(file) = std::fs::metadata(format!("/proc/{pid}/fd/{fd}")) else {
+							continue;
+						};
+						if file.rdev() == self.slave || file.rdev() == console {
+							return Some(true);
+						}
 					}
 				}
 				if unknown { None } else { Some(false) }
 			}
 		}
 
-		/// The fd a `/proc/<pid>/syscall` line shows blocked in `read`/`readv`:
-		/// `<nr> 0x<fd> …`; `running` or `-1 …` outside a syscall.
-		fn blocked_read_fd(syscall: &str) -> Option<u32> {
-			let mut fields = syscall.split_whitespace();
-			let nr: libc::c_long = fields.next()?.parse().ok()?;
-			if nr != libc::SYS_read && nr != libc::SYS_readv {
-				return None;
+		/// What a `/proc/<pid>/syscall` line shows a process blocked on:
+		/// `<nr> 0x<arg0> … 0x<arg5> 0x<sp> 0x<pc>`; `running` or `-1 …` outside
+		/// a syscall.
+		enum Wait {
+			/// `read`/`readv` of one fd.
+			Read(u32),
+			/// `poll`/`ppoll` on `count` `pollfd`s at `fds`.
+			Poll { fds: u64, count: u64 },
+			/// `select`/`pselect6` on the fds below `count` in the read set at
+			/// `set`.
+			Select { count: u64, set: u64 },
+		}
+
+		/// Most bytes of a wait's fd set read from the process.
+		const MAX_SET_BYTES: u64 = 1 << 20;
+
+		impl Wait {
+			fn parse(syscall: &str) -> Option<Self> {
+				let mut fields = syscall.split_whitespace();
+				let nr: libc::c_long = fields.next()?.parse().ok()?;
+				let mut arg = || u64::from_str_radix(fields.next()?.strip_prefix("0x")?, 16).ok();
+				match nr {
+					libc::SYS_read | libc::SYS_readv => u32::try_from(arg()?).ok().map(Self::Read),
+					libc::SYS_ppoll => Some(Self::Poll { fds: arg()?, count: arg()? }),
+					libc::SYS_pselect6 => Some(Self::Select { count: arg()?, set: arg()? }),
+					#[cfg(target_arch = "x86_64")]
+					libc::SYS_poll => Some(Self::Poll { fds: arg()?, count: arg()? }),
+					#[cfg(target_arch = "x86_64")]
+					libc::SYS_select => Some(Self::Select { count: arg()?, set: arg()? }),
+					_ => None,
+				}
 			}
-			u32::from_str_radix(fields.next()?.strip_prefix("0x")?, 16).ok()
+
+			/// The fds whose input ends the wait, reading a poll or select set
+			/// from `/proc/<pid>/mem`.
+			///
+			/// # Errors
+			/// `PermissionDenied` when the process's memory is off limits,
+			/// `FileTooLarge` when the set exceeds [`MAX_SET_BYTES`], and
+			/// others when the process moved on or exited.
+			fn input_fds(self, pid: i32) -> io::Result<Vec<u32>> {
+				const POLLFD: usize = size_of::<libc::pollfd>();
+				const WORD: usize = size_of::<libc::c_ulong>();
+				match self {
+					Self::Read(fd) => Ok(vec![fd]),
+					Self::Poll { fds, count } => {
+						let bytes = read_memory(pid, fds, count.saturating_mul(POLLFD as u64))?;
+						let (entries, _) = bytes.as_chunks::<POLLFD>();
+						Ok(entries
+							.iter()
+							.filter_map(|&[f0, f1, f2, f3, e0, e1, ..]| {
+								let events = libc::c_short::from_ne_bytes([e0, e1]);
+								if events & (libc::POLLIN | libc::POLLRDNORM) == 0 {
+									return None;
+								}
+								// A negative fd is an entry poll skips.
+								u32::try_from(libc::c_int::from_ne_bytes([f0, f1, f2, f3])).ok()
+							})
+							.collect())
+					},
+					Self::Select { count, set } => {
+						if set == 0 {
+							return Ok(Vec::new());
+						}
+						let words = count.div_ceil(libc::c_ulong::BITS.into());
+						let bytes = read_memory(pid, set, words.saturating_mul(WORD as u64))?;
+						let (words, _) = bytes.as_chunks::<WORD>();
+						let mut fds = Vec::new();
+						for (index, &word) in (0u32..).zip(words) {
+							let mut word = libc::c_ulong::from_ne_bytes(word);
+							while word != 0 {
+								let fd = index * libc::c_ulong::BITS + word.trailing_zeros();
+								if u64::from(fd) < count {
+									fds.push(fd);
+								}
+								word &= word - 1;
+							}
+						}
+						Ok(fds)
+					},
+				}
+			}
+		}
+
+		/// `len` bytes at `addr` in the memory of process `pid`.
+		fn read_memory(pid: i32, addr: u64, len: u64) -> io::Result<Vec<u8>> {
+			if len > MAX_SET_BYTES {
+				return Err(ErrorKind::FileTooLarge.into());
+			}
+			let mut bytes = vec![0; len as usize];
+			std::fs::File::open(format!("/proc/{pid}/mem"))?.read_exact_at(&mut bytes, addr)?;
+			Ok(bytes)
 		}
 	}
 }
@@ -1701,6 +1804,26 @@ mod input_wait_tests {
 			None
 		};
 		assert_eq!(observe("printf 'Proceed? [y/N] '; read answer").last(), Some(&expected));
+	}
+
+	/// bash's timed `read` waits for keys in `pselect6`, and the `read` of
+	/// `BusyBox` `sh` in `poll`: an echoing prompt blocked there awaits input
+	/// like one in `read`.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn polling_prompt_awaits_input() {
+		if std::process::Command::new("bash")
+			.arg("-c")
+			.arg(":")
+			.status()
+			.is_err()
+		{
+			return;
+		}
+		assert_eq!(
+			observe("bash -c \"read -t 30 -p 'Proceed? [y/N] ' answer\"").last(),
+			Some(&Some(true))
+		);
 	}
 
 	#[test]

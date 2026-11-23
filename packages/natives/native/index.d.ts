@@ -696,11 +696,12 @@ export declare class PtySession {
    *
    * `true` while echo is off (a password prompt such as `sudo`'s, or a
    * full-screen program like `less`) or, on Linux, while a foreground
-   * process is blocked reading the terminal (a `[y/N]` prompt). `false` when
-   * no session runs or, on Linux, no foreground process reads the terminal.
-   * `null` when an echoing line prompt cannot be told from a busy program:
-   * always on macOS and Windows, and on Linux when a foreground process
-   * cannot be inspected (one running setuid).
+   * process is blocked reading the terminal or polling it for input (a
+   * `[y/N]` prompt). `false` when no session runs or, on Linux, no
+   * foreground process reads the terminal. `null` when an echoing line
+   * prompt cannot be told from a busy program: always on macOS and Windows,
+   * and on Linux when a foreground process cannot be inspected (one running
+   * setuid, or memory a Yama ptrace scope hides).
    */
   awaitsInput(): boolean | null
   /**
