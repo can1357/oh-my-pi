@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added GLM-5.4 to the Zhipu Coding Plan with image input and 1M context, gave it the low/high/max thinking ladder on every host, and preferred it over GLM-5.3 for the `slow` role
+
 ## [19.1.1] - 2026-11-23
 
 ### Added
