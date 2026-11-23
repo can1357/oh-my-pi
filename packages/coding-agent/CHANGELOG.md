@@ -4,6 +4,7 @@
 
 ### Added
 
+- MCP servers whose sign-in accepts a Client ID Metadata Document and has no client registration, such as marked.dev's, now sign in without an `oauth.clientId`: omp identifies itself with its published metadata document; servers that offer client registration keep using it ([#19546](https://github.com/can1357/oh-my-pi/pull/19546) by [@MaisonnatM](https://github.com/MaisonnatM))
 - Added `discovery.type: openrouter` for `models.yml` providers that front OpenRouter under their own URL and key: their model list now comes from OpenRouter's public catalog, and requests follow OpenRouter's request format.
 
 ### Fixed

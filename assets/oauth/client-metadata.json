@@ -1,0 +1,8 @@
+{
+	"client_id": "https://cdn.jsdelivr.net/gh/can1357/oh-my-pi@main/assets/oauth/client-metadata.json",
+	"client_name": "oh-my-pi",
+	"redirect_uris": ["http://localhost/callback", "http://127.0.0.1/callback"],
+	"grant_types": ["authorization_code", "refresh_token"],
+	"response_types": ["code"],
+	"token_endpoint_auth_method": "none"
+}

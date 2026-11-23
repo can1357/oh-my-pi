@@ -595,6 +595,7 @@ export class MCPCommandController {
 									redirectUri: finalConfig.oauth?.redirectUri,
 									prompt: finalConfig.oauth?.prompt,
 									registrationUrl: oauth.registrationUrl,
+									clientIdMetadataDocumentSupported: oauth.clientIdMetadataDocumentSupported,
 									issuerUrl: oauth.issuerUrl,
 									serverUrl: finalConfig.url,
 									resource: oauthResource,
@@ -682,6 +683,7 @@ export class MCPCommandController {
 			prompt?: string;
 			serverUrl?: string;
 			registrationUrl?: string;
+			clientIdMetadataDocumentSupported?: true;
 			issuerUrl?: string;
 			resource?: string;
 			stripSameOriginResource?: boolean;
@@ -706,6 +708,7 @@ export class MCPCommandController {
 					scopes,
 					serverUrl: opts?.serverUrl,
 					registrationUrl: opts?.registrationUrl,
+					clientIdMetadataDocumentSupported: opts?.clientIdMetadataDocumentSupported,
 					issuerUrl: opts?.issuerUrl,
 					resource: opts?.resource,
 					stripSameOriginResource: opts?.stripSameOriginResource,

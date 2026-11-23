@@ -106,6 +106,21 @@ export interface MCPStoredOAuthCredential extends OAuthCredential {
 const DEFAULT_PORT = 3000;
 const CALLBACK_PATH = "/callback";
 
+/**
+ * Client ID Metadata Document omp publishes (`assets/oauth/client-metadata.json`).
+ * Its redirect URIs omit the port, so any loopback callback port matches (RFC 8252 §7.3).
+ * The file is a wire contract for every released omp: authorization servers fetch it
+ * from `main`, so moving it or changing its `client_id` breaks sign-in for shipped binaries.
+ */
+export const OMP_CLIENT_METADATA_URL =
+	"https://cdn.jsdelivr.net/gh/can1357/oh-my-pi@main/assets/oauth/client-metadata.json";
+
+/** The authorization-server metadata fields that decide how omp gets a client id. */
+interface ClientIdentityMetadata {
+	registrationEndpoint?: string;
+	clientIdMetadataDocumentSupported?: true;
+}
+
 function isGoogleAuthorizationHost(hostname: string): boolean {
 	const host = hostname.toLowerCase();
 	return host === "accounts.google.com" || host.endsWith(".accounts.google.com");
@@ -142,6 +157,12 @@ async function readRegistrationFailureDetail(response: Response): Promise<string
 
 function isLoopbackHostname(hostname: string): boolean {
 	return hostname === "localhost" || hostname === "127.0.0.1";
+}
+
+/** Whether `redirectUri` is one the published metadata document lists. */
+export function matchesMetadataDocumentRedirect(redirectUri: string): boolean {
+	const uri = new URL(redirectUri);
+	return uri.protocol === "http:" && isLoopbackHostname(uri.hostname) && uri.pathname === CALLBACK_PATH;
 }
 
 function resolveRedirectUri(redirectUri: string | undefined): string | undefined {
@@ -218,8 +239,8 @@ function resolveCallbackHostname(redirectUri: string | undefined): string | unde
  * Resolve the client_id MCPOAuthFlow would use without doing any I/O —
  * either the explicitly configured value or one embedded as a query parameter
  * in the authorization URL. Returns `undefined` when no client_id is known
- * statically, which is the trigger for dynamic client registration in
- * {@link MCPOAuthFlow.#tryRegisterClient}.
+ * statically, which is the trigger for {@link MCPOAuthFlow.#resolveClientIdentity}
+ * (metadata document or dynamic client registration).
  */
 function staticClientIdFromConfig(config: MCPOAuthConfig): string | undefined {
 	const fromConfig = config.clientId?.trim();
@@ -240,11 +261,11 @@ function resolveCallbackOptions(config: MCPOAuthConfig): OAuthCallbackFlowOption
 	// be rejected by providers like Atlassian (HTTP 500 in the browser, local
 	// flow hangs until the 5-minute timeout), so fail fast instead.
 	//
-	// When no client_id is pinned, MCPOAuthFlow will attempt dynamic client
-	// registration on demand with whichever loopback URI we actually bound —
-	// the provider issues a client_id tied to *that* URI, so the random-port
-	// fallback remains safe for first-install DCR flows whose preferred port
-	// happens to be occupied.
+	// When no client_id is pinned, MCPOAuthFlow either sends omp's metadata
+	// document, whose redirect URIs omit the port, or registers a client on
+	// demand with whichever loopback URI we actually bound. Either way the
+	// random-port fallback remains safe for first-install flows whose
+	// preferred port happens to be occupied.
 	const allowPortFallback = staticClientIdFromConfig(config) === undefined;
 	return {
 		preferredPort: resolveCallbackPort(config.callbackPort, redirectUri),
@@ -317,6 +338,8 @@ export interface MCPOAuthConfig {
 	issuerUrl?: string;
 	/** Dynamic client registration endpoint advertised by the authorization server. */
 	registrationUrl?: string;
+	/** Whether the authorization server advertised `client_id_metadata_document_supported`. */
+	clientIdMetadataDocumentSupported?: true;
 	/** Client ID (optional when already embedded in authorization URL) */
 	clientId?: string;
 	/** Client secret (optional for PKCE flows) */
@@ -403,8 +426,9 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 
 	/**
 	 * Client id used during the authorization request. Returns the value supplied
-	 * via {@link MCPOAuthConfig.clientId} or, when the server required dynamic
-	 * client registration, the id issued during registration. `undefined` until
+	 * via {@link MCPOAuthConfig.clientId} or, when the server needed one, omp's
+	 * metadata document URL or the id issued during dynamic client registration.
+	 * `undefined` until
 	 * {@link generateAuthUrl} (or {@link login}) has run for a server that needs
 	 * a client id.
 	 */
@@ -443,7 +467,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 
 	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
 		if (!this.#resolvedClientId) {
-			await this.#tryRegisterClient(redirectUri);
+			await this.#resolveClientIdentity(redirectUri);
 			// `unapproved_client` explicitly establishes that registration cannot
 			// produce the required client id. Other DCR failures stay on the
 			// clientless probe path because they may be transient or caused by
@@ -642,6 +666,31 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	}
 
 	/**
+	 * Get a client id when none is configured. Dynamic client registration
+	 * stays first when the server offers it, so servers that sign in through
+	 * it today keep doing so; omp's Client ID Metadata Document is used only
+	 * when the server supports it and offers no registration. If the server
+	 * cannot fetch the document, the error shows only in the browser, so the
+	 * document is never chosen over a working alternative. A redirect the
+	 * document does not list, such as a custom callback path, cannot use it.
+	 * Metadata is probed only when discovery supplied neither field.
+	 */
+	async #resolveClientIdentity(redirectUri: string): Promise<void> {
+		const { registrationUrl, clientIdMetadataDocumentSupported } = this.config;
+		const metadata =
+			registrationUrl !== undefined || clientIdMetadataDocumentSupported
+				? { registrationEndpoint: registrationUrl, clientIdMetadataDocumentSupported }
+				: await this.#readClientIdentityMetadata();
+		if (metadata?.registrationEndpoint) {
+			await this.#tryRegisterClient(redirectUri, metadata.registrationEndpoint);
+			return;
+		}
+		if (metadata?.clientIdMetadataDocumentSupported && matchesMetadataDocumentRedirect(redirectUri)) {
+			this.#resolvedClientId = OMP_CLIENT_METADATA_URL;
+		}
+	}
+
+	/**
 	 * Try OAuth dynamic client registration when provider requires a client_id.
 	 *
 	 * Records rejection details on {@link #registrationFailure} so that when
@@ -655,8 +704,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	 * providers that bind DCR clients to registered scopes only (e.g. Clerk)
 	 * accept the later authorize request for the same scope set.
 	 */
-	async #tryRegisterClient(redirectUri: string): Promise<void> {
-		const registrationEndpoint = this.config.registrationUrl ?? (await this.#resolveRegistrationEndpoint());
+	async #tryRegisterClient(redirectUri: string, registrationEndpoint: string | undefined): Promise<void> {
 		if (!registrationEndpoint) return;
 
 		try {
@@ -714,35 +762,41 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		}
 	}
 
-	async #resolveRegistrationEndpoint(): Promise<string | null> {
+	async #readClientIdentityMetadata(): Promise<ClientIdentityMetadata | undefined> {
 		const candidates = buildWellKnownUrls(
 			"/.well-known/oauth-authorization-server",
 			this.config.issuerUrl ?? this.config.authorizationUrl,
 			this.config.issuerUrl !== undefined,
 		);
 		for (const url of candidates) {
-			const endpoint = await this.#tryWellKnownForRegistration(url.toString());
-			if (endpoint) return endpoint;
+			const metadata = await this.#tryWellKnownMetadata(url.toString());
+			if (metadata) return metadata;
 		}
-		return null;
+		return undefined;
 	}
 
-	async #tryWellKnownForRegistration(wellKnownUrl: string): Promise<string | null> {
+	async #tryWellKnownMetadata(wellKnownUrl: string): Promise<ClientIdentityMetadata | undefined> {
 		try {
 			const response = await this.#fetch(wellKnownUrl, {
 				method: "GET",
 				headers: { Accept: "application/json" },
 				signal: this.ctrl.signal,
 			});
-			if (!response.ok) return null;
-			const metadata = (await response.json()) as { registration_endpoint?: string };
-			if (metadata.registration_endpoint && metadata.registration_endpoint.trim() !== "") {
-				return metadata.registration_endpoint;
+			if (!response.ok) return undefined;
+			const metadata = (await response.json()) as {
+				registration_endpoint?: string;
+				client_id_metadata_document_supported?: boolean;
+			};
+			const registrationEndpoint = metadata.registration_endpoint?.trim() || undefined;
+			const clientIdMetadataDocumentSupported =
+				metadata.client_id_metadata_document_supported === true ? true : undefined;
+			if (registrationEndpoint || clientIdMetadataDocumentSupported) {
+				return { registrationEndpoint, clientIdMetadataDocumentSupported };
 			}
 		} catch {
 			// Ignore fetch/parse failures.
 		}
-		return null;
+		return undefined;
 	}
 
 	async #assertClientIdNotRequired(authorizationUrl: string): Promise<void> {
