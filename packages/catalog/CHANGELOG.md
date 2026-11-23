@@ -3,11 +3,11 @@
 ## [Unreleased]
 ### Changed
 
-- Google Antigravity requests now identify as Antigravity 2.34.0 instead of 2.26.0 when the update manifest cannot be reached
+- Google Antigravity requests now identify as Antigravity 2.34.0 instead of 2.26.0 when the update manifest cannot be reached ([#20258](https://github.com/can1357/oh-my-pi/pull/20258) by [@Xytronix](https://github.com/Xytronix))
 
 ### Added
 
-- Google Antigravity model discovery now sends a request id, plus the account's tier and cloud location when known, like the native client
+- Google Antigravity model discovery now sends a request id, plus the account's tier and cloud location when known, like the native client ([#20258](https://github.com/can1357/oh-my-pi/pull/20258) by [@Xytronix](https://github.com/Xytronix))
 
 - Added GLM-5.4 to the Zhipu Coding Plan with image input and 1M context, gave it the low/high/max thinking ladder on every host, and preferred it over GLM-5.3 for the `slow` role
 - Added `fetchOpenRouterChatModels()` and `OPENROUTER_BASE_URL` to `@oh-my-pi/pi-catalog/provider-models/openai-compat` for reading OpenRouter's tool-capable chat roster outside the `openrouter` provider.

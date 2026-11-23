@@ -3,9 +3,9 @@
 ## [Unreleased]
 ### Added
 
-- Google Antigravity login now remembers the account's tier across token refreshes, and usage lookups send it
-- Google Antigravity requests now send the native client's prompt and trajectory ids
-- Google Antigravity honors the native `ANTIGRAVITY_PROJECT_ID` and `ANTIGRAVITY_TRAJECTORY_ID` overrides
+- Google Antigravity login now remembers the account's tier across token refreshes, and usage lookups send it ([#20258](https://github.com/can1357/oh-my-pi/pull/20258) by [@Xytronix](https://github.com/Xytronix))
+- Google Antigravity requests now send the native client's prompt and trajectory ids ([#20258](https://github.com/can1357/oh-my-pi/pull/20258) by [@Xytronix](https://github.com/Xytronix))
+- Google Antigravity honors the native `ANTIGRAVITY_PROJECT_ID` and `ANTIGRAVITY_TRAJECTORY_ID` overrides ([#20258](https://github.com/can1357/oh-my-pi/pull/20258) by [@Xytronix](https://github.com/Xytronix))
 
 
 ## [19.1.1] - 2026-11-23

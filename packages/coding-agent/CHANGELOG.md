@@ -3,7 +3,7 @@
 ## [Unreleased]
 ### Added
 
-- Google Antigravity model discovery now sends each stored account's reported tier with that account's roster request
+- Google Antigravity model discovery now sends each stored account's reported tier with that account's roster request ([#20258](https://github.com/can1357/oh-my-pi/pull/20258) by [@Xytronix](https://github.com/Xytronix))
 
 - Added `discovery.type: openrouter` for `models.yml` providers that front OpenRouter under their own URL and key: their model list now comes from OpenRouter's public catalog, and requests follow OpenRouter's request format.
 
