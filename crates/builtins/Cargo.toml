@@ -236,6 +236,7 @@ default = ["utils"]
 "util.chmod" = []
 "util.cksum" = []
 "util.cmp" = []
+"util.column" = []
 "util.comm" = []
 "util.cp" = []
 "util.cut" = []
@@ -346,6 +347,7 @@ utils = [
   "util.chmod",
   "util.cksum",
   "util.cmp",
+  "util.column",
   "util.comm",
   "util.cp",
   "util.cut",
