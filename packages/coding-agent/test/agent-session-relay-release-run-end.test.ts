@@ -1,5 +1,5 @@
 /**
- * `browser.relayReleaseOnTurnEnd` lets go of the session's relay tabs once its run ends, never between the model
+ * `browser.relayReleaseOnRunEnd` lets go of the session's relay tabs once its run ends, never between the model
  * turns of one run: reattaching resets the tab's worker state, which the run's next tool call may still rely on.
  */
 import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "bun:test";
@@ -67,7 +67,7 @@ describe("relay tab release at run end", () => {
 			settings: Settings.isolated({
 				"compaction.enabled": false,
 				"todo.enabled": false,
-				"browser.relayReleaseOnTurnEnd": enabled,
+				"browser.relayReleaseOnRunEnd": enabled,
 			}),
 			modelRegistry: new ModelRegistry(authStorage),
 		});

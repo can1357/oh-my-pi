@@ -184,7 +184,7 @@ export interface WorkerTabSession extends TabSessionBase<PuppeteerBrowserHandle>
 	 */
 	heldOut?: boolean;
 	/**
-	 * omp let go of this relay tab when its run ended (`browser.relayReleaseOnTurnEnd`), so Chrome dropped its
+	 * omp let go of this relay tab when its run ended (`browser.relayReleaseOnRunEnd`), so Chrome dropped its
 	 * debugger attachment and infobar. The tab stays open with no worker driving it, and the next call re-adopts it.
 	 */
 	released?: boolean;
@@ -2307,7 +2307,7 @@ function isRelayReleaseCandidate(tab: TabSession, ownerId: string): tab is Worke
 }
 
 /**
- * Let go of every idle relay tab `ownerId` opened, at the end of its agent's run (`browser.relayReleaseOnTurnEnd`). Chrome shows its
+ * Let go of every idle relay tab `ownerId` opened, at the end of its agent's run (`browser.relayReleaseOnRunEnd`). Chrome shows its
  * "started debugging this browser" infobar while any tab is attached; ending the tab's worker closes its relay
  * connection, so the relay detaches the tab and the infobar goes once no other tab is driven. The tab stays open, as
  * the user sees it, and the next call on it re-adopts it on a new worker, resetting {@link WORKER_RESETS}. Never
@@ -2720,14 +2720,14 @@ function readoptWorkerlessTab(name: string, timeoutMs: number): void {
 			recover: false,
 			failedReason: refused
 				? "omp could not reattach to the tab after Chrome had refused it, so the tab was released"
-				: "omp could not reattach to the tab it had let go of when the last turn ended, so the tab was released",
+				: "omp could not reattach to the tab it had let go of when its last run ended, so the tab was released",
 		},
 	)
 		.then(reattached => {
 			if (reattached) {
 				tab.workerExitNotice = refused
 					? `Chrome had kept omp out of this tab since an earlier call (${DEBUGGER_DETACH_REFUSAL}); omp reattached to it on a new worker before this call, without reloading it. ${WORKER_RESETS}.`
-					: `omp let go of this tab when the last turn ended, so Chrome would stop showing its debugging infobar (browser.relayReleaseOnTurnEnd); omp reattached to it on a new worker before this call, without reloading it. ${WORKER_RESETS}.`;
+					: `omp let go of this tab when its last run ended, so Chrome would stop showing its debugging infobar (browser.relayReleaseOnRunEnd); omp reattached to it on a new worker before this call, without reloading it. ${WORKER_RESETS}.`;
 			}
 			return reattached;
 		})

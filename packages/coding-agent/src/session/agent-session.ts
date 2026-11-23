@@ -579,7 +579,7 @@ import {
 	cfgBrowserEnabled,
 	cfgBrowserFreezeOnTurnEnd,
 	cfgBrowserIdleCloseSec,
-	cfgBrowserRelayReleaseOnTurnEnd,
+	cfgBrowserRelayReleaseOnRunEnd,
 } from "../tools/browser/settings";
 import {
 	cfgClaudeResets,
@@ -7246,14 +7246,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Under `browser.relayReleaseOnTurnEnd`, let go of this session's idle relay tabs once its run ends: they stay open,
+	 * Under `browser.relayReleaseOnRunEnd`, let go of this session's idle relay tabs once its run ends: they stay open,
 	 * and Chrome drops the debugger attachment and its infobar until the next call reattaches. Runs at the run's end, not
 	 * at each model turn, since reattaching resets the tab's worker state (element ids, routes, emulation) that the
 	 * agent's next tool call in the same run may still rely on. Best-effort: never throws.
 	 */
 	async #releaseRelayTabsAtRunEnd(): Promise<void> {
 		const ownerId = this.#eval.getKernelOwnerId();
-		if (!ownerId || !cfgBrowserRelayReleaseOnTurnEnd.get(this.settings)) return;
+		if (!ownerId || !cfgBrowserRelayReleaseOnRunEnd.get(this.settings)) return;
 		try {
 			const released = await withTimeout(
 				releaseRelayTabsForOwner(ownerId),
