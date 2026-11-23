@@ -4430,6 +4430,16 @@ export interface ShellRunResult {
   minimized?: MinimizerResult
   /** Shell working directory after command completion. */
   workingDir?: string
+  /**
+   * The command ended in another directory than it started in (a `cd` in
+   * it); a later run that passes `cwd` starts there instead.
+   */
+  movedCwd: boolean
+  /**
+   * The command ended with `errexit` (`set -e`) on; the next run starts
+   * with it off.
+   */
+  errexit: boolean
 }
 
 /** The application's speech synthesizer, injected into a shell run. */

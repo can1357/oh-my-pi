@@ -1759,6 +1759,18 @@ impl Shell {
 		}
 	}
 
+	/// Whether root option `opt` is on between runs. A store failure reads as
+	/// off and abandons every script at the next scheduler turn.
+	pub(crate) fn root_option(&mut self, store: &mut dyn StateStore, opt: OptId) -> bool {
+		match state::option(&mut self.k.root, store, &self.procs[0], opt) {
+			Ok(on) => on,
+			Err(err) => {
+				self.k.fail(err);
+				false
+			},
+		}
+	}
+
 	/// Turn root option `opt` on or off between runs, as `set -o` / `set +o`
 	/// would; `SHELLOPTS` follows in the bash dialect. Background jobs keep
 	/// the options they forked with. A store failure abandons every script at

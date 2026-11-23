@@ -155,6 +155,10 @@ export interface BashResult extends OutputSummary {
 	/** The native minimizer's rewrite, set when its output replaced the raw stream. */
 	minimized?: MinimizedMeta;
 	workingDir?: string;
+	/** The command ended in another directory than it started in (a `cd` in it); the next command starts in its own `cwd`. */
+	movedCwd?: boolean;
+	/** The command ended with `set -e` on; the next command starts with it off. */
+	errexit?: boolean;
 	/** Terminal graphics extracted from raw stdout before sanitization or truncation. */
 	images?: ImageContent[];
 	/**
@@ -1105,6 +1109,8 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			exitCode: winner.result.exitCode,
 			cancelled: false,
 			workingDir: winner.result.workingDir,
+			...(winner.result.movedCwd ? { movedCwd: true } : {}),
+			...(winner.result.errexit ? { errexit: true } : {}),
 			...(minimizedMeta ? { minimized: minimizedMeta } : {}),
 			...settleTrace(),
 			...(await settleFork()),

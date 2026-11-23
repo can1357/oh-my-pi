@@ -17,8 +17,8 @@
 //! **State.** Variables, functions, aliases, options, traps and the working
 //! directory live in the store and the root virtual process; every command
 //! runs on the root ([`VprocSel::Root`]), so they persist across commands.
-//! `errexit` is the exception: every command ends with it off, so a `set -e`
-//! stops only the command that ran it, never a later one.
+//! A host that wants each of its commands to start like a new `bash -c` sets
+//! [`RunOptions::reset_errexit`] on the command's first run.
 //! An `EXIT` trap is consumed when it fires at a run boundary; other traps
 //! remain installed.
 //! Each command starts with its own standard streams, even if an earlier
@@ -167,6 +167,11 @@ pub struct RunOptions {
 	/// observer receives units lazily, including persistent function bodies
 	/// only when this command executes them.
 	pub events:         Option<Arc<dyn EventSink>>,
+	/// Turn `errexit` off before the command, as a new `bash -c` starts. A
+	/// host running one command as several runs sets it on the first only,
+	/// so a `set -e` holds for the rest of that command but never stops a
+	/// later one ([`RunOutcome::errexit`] says one was left on).
+	pub reset_errexit:  bool,
 }
 
 impl RunOptions {
@@ -182,6 +187,7 @@ impl RunOptions {
 			commands:       None,
 			text_capture:   false,
 			events:         None,
+			reset_errexit:  false,
 		}
 	}
 }
@@ -197,6 +203,7 @@ impl std::fmt::Debug for RunOptions {
 			.field("speech", &self.speech)
 			.field("commands", &self.commands)
 			.field("events", &self.events.is_some())
+			.field("reset_errexit", &self.reset_errexit)
 			.finish()
 	}
 }
@@ -228,6 +235,8 @@ pub struct RunOutcome {
 	pub exited:    bool,
 	/// The shell's working directory after the command.
 	pub cwd:       BString,
+	/// `errexit` was on when the command ended.
+	pub errexit:   bool,
 }
 
 /// Failure of a [`Session`] call.
@@ -888,7 +897,11 @@ impl Driver {
 			commands,
 			text_capture,
 			events,
+			reset_errexit,
 		} = options;
+		if reset_errexit {
+			self.shell.set_root_option(&mut self.store, OptId::Errexit, false);
+		}
 		self.host.set_speech(speech);
 		self.host.set_pipe_tap(pipe_tap);
 		self.host.set_commands(commands);
@@ -966,11 +979,11 @@ impl Driver {
 		self.host.set_reported_error(None);
 		self.host.set_commands(None);
 		self.restore_overlay(saved);
-		self.shell.set_root_option(&mut self.store, OptId::Errexit, false);
 		self.image.publish(&mut self.store);
 		let cwd = store_cwd(&self.store);
+		let errexit = self.shell.root_option(&mut self.store, OptId::Errexit);
 		// The caller may have stopped waiting (dropped future).
-		let _ = reply.send(RunOutcome { status, cancelled: applied > 0, exited, cwd });
+		let _ = reply.send(RunOutcome { status, cancelled: applied > 0, exited, cwd, errexit });
 	}
 
 	/// Let the background work a command started reach its first wait (an
@@ -1983,15 +1996,22 @@ mod tests {
 		assert!(!sh(&mut s, "false").await.outcome.exited);
 		assert!(sh(&mut s, "exit 0").await.outcome.exited);
 		assert!(sh(&mut s, "set -e; false; echo no").await.outcome.exited);
-		assert!(!sh(&mut s, "(exit 4)").await.outcome.exited);
+		assert!(!sh(&mut s, "set +e; (exit 4)").await.outcome.exited);
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
-	async fn errexit_ends_with_the_command_other_options_persist() {
+	async fn reset_errexit_turns_off_only_errexit_before_the_run() {
 		let mut s = session();
-		assert_eq!(sh(&mut s, "set -eu; false; echo no").await.stdout, "");
-		let c = sh(&mut s, "false; echo \"$-\"; echo \"$SHELLOPTS\"").await;
-		assert_eq!(c.outcome.status, 0);
+		let c = sh(&mut s, "set -eu; false; echo no").await;
+		assert_eq!((c.stdout.as_str(), c.outcome.errexit), ("", true));
+		// Without the reset a later run keeps it, as a host's next segment must.
+		assert!(sh(&mut s, "(exit 4); echo no").await.outcome.exited);
+		let fresh = RunOptions {
+			reset_errexit: true,
+			..RunOptions::new("false; echo \"$-\"; echo \"$SHELLOPTS\"")
+		};
+		let c = capture(&mut s, fresh).await;
+		assert_eq!((c.outcome.status, c.outcome.errexit), (0, false));
 		let (flags, shellopts) = c.stdout.trim_end().split_once('\n').unwrap();
 		assert!(flags.contains('u') && !flags.contains('e'), "{flags}");
 		assert!(shellopts.contains("nounset") && !shellopts.contains("errexit"), "{shellopts}");
