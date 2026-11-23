@@ -174,6 +174,15 @@ const AGENT_COLUMNS: readonly TspPickerColumn[] = [
 	{ id: "tok", head: "Tok", format: "num", priority: 3 },
 	{ id: "ctx", head: "Ctx", format: "bar", priority: 4 },
 ];
+const AGENT_COLUMNS_WITH_RATE: readonly TspPickerColumn[] = [
+	{ id: "cost", head: "Cost", format: "price", priority: 6 },
+	{ id: "time", head: "Time", format: "elapsed", priority: 5 },
+	{ id: "req", head: "Req", format: "num", priority: 2 },
+	{ id: "tools", head: "Tools", format: "num", priority: 1 },
+	{ id: "tok", head: "Tok", format: "num", priority: 3 },
+	{ id: "rate", head: "Tok/s", format: "text", priority: 3 },
+	{ id: "ctx", head: "Ctx", format: "bar", priority: 4 },
+];
 const ACTIVITY_COLUMNS: readonly TspPickerColumn[] = [
 	{ id: "agent", head: "Agent", format: "text", priority: 2 },
 	{ id: "at", head: "Time", format: "dim", priority: 1 },
@@ -353,6 +362,8 @@ export interface AgentHubDeps<TRecord extends AgentRecordLike = AgentRecordLike>
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
 	expandThinkingBlocks?: () => boolean;
+	/** Whether to display generation tok/s in agent rows. */
+	showTokenRate?: () => boolean;
 	/** Keys toggling tool output expansion (app.tools.expand). */
 	expandKeys?: KeyId[];
 	/** Focus the main view on this agent's live session (ctx.focusAgentSession). When absent (collab guest, tests), Enter opens the in-hub chat view instead. */
@@ -384,6 +395,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#onDone: () => void;
 	#requestRender: () => void;
 	#hubKeys: KeyId[];
+	#showTokenRate: () => boolean;
 	#unsubscribers: Array<() => void> = [];
 	#ageTimer: NodeJS.Timeout | undefined;
 	#dataChangeTimer?: NodeJS.Timeout;
@@ -560,6 +572,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#expandThinkingBlocks = deps.expandThinkingBlocks;
 		this.#expandKeys = deps.expandKeys ?? ["ctrl+o"];
 		this.#focusAgent = deps.focusAgent;
+		this.#showTokenRate = deps.showTokenRate ?? (() => false);
 
 		this.#unsubscribers.push(this.#registry.onChange(() => this.#scheduleDataChange()));
 		this.#unsubscribers.push(this.#observers.onChange(() => this.#scheduleDataChange()));
@@ -975,7 +988,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			placeholder: "Filter agents…",
 			scopes: this.#statusScopes(),
 			scope: this.#statusScope,
-			columns: AGENT_COLUMNS,
+			columns: this.#showTokenRate() ? AGENT_COLUMNS_WITH_RATE : AGENT_COLUMNS,
 			items: this.#agentPickerItems(),
 			selected: selected?.id ?? null,
 			total: this.#sessionRefCount,
@@ -1072,6 +1085,9 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			tools: metrics.tools,
 			tok: metrics.tokens,
 		};
+		if (this.#showTokenRate()) {
+			facts.rate = metrics.tokensPerSecond !== undefined ? `${metrics.tokensPerSecond.toFixed(1)}/s` : "—";
+		}
 		let title: string | undefined;
 		if (metrics.contextTokens !== undefined && metrics.contextWindow) {
 			facts.ctx = Math.max(0, Math.min(1, metrics.contextTokens / metrics.contextWindow));
@@ -1371,7 +1387,12 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		const metrics = this.#metricsFor(ref, observed);
 		const age = formatAge(Math.max(1, Math.round((Date.now() - ref.lastActivity) / 1000)));
 		const detail = [
-			span(metrics ? `${metricsText(metrics)}${theme.sep.dot}${age}` : `usage${theme.sep.dot}${age}`, "dim"),
+			span(
+				metrics
+					? `${metricsText(metrics, this.#showTokenRate())}${theme.sep.dot}${age}`
+					: `usage${theme.sep.dot}${age}`,
+				"dim",
+			),
 		];
 		const task = observed?.description ?? observed?.progress?.task ?? ref.activity;
 		if (task) detail.push(span(theme.sep.dot, "dim"), span(sanitizeDisplaySingleLine(task), "muted"));
@@ -1501,7 +1522,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			}
 			facts.push({ k: "Current", v: value });
 		}
-		facts.push({ k: "Usage", v: metrics ? metricsText(metrics) : [span("usage —", "dim")] });
+		facts.push({ k: "Usage", v: metrics ? metricsText(metrics, this.#showTokenRate()) : [span("usage —", "dim")] });
 		facts.push({
 			k: "Lineage",
 			v: `Spawned by ${sanitizeDisplaySingleLine(ref.parentId ?? MAIN_AGENT_ID)}${children.length > 0 ? `${dot}${children.length} ${children.length === 1 ? "child" : "children"}` : ""}`,
@@ -2211,7 +2232,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 
 		section("Usage", 1);
 		if (metrics) {
-			addWrapped(formatMetrics(metrics), 3);
+			addWrapped(formatMetrics(metrics, this.#showTokenRate()), 3);
 			if (metrics.contextTokens !== undefined && metrics.contextWindow) {
 				add(contextGauge(metrics.contextTokens, metrics.contextWindow));
 			}
@@ -2334,7 +2355,9 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			entry.push(`${indent}${theme.fg("muted", truncateToWidth(sanitizeLine(task, detailWidth), detailWidth))}`);
 		}
 		const age = formatAge(Math.max(1, Math.round((Date.now() - ref.lastActivity) / 1000)));
-		const metadata = metrics ? formatMetricColumns(metrics, age) : `usage ${theme.sep.dot} ${age}`;
+		const metadata = metrics
+			? formatMetricColumns(metrics, age, this.#showTokenRate())
+			: `usage ${theme.sep.dot} ${age}`;
 		entry.push(`${metadataPrefix}${theme.fg("dim", metadata)}`);
 		if (!hovered) return entry;
 		return entry.map(lineRow => {

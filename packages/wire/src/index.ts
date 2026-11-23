@@ -275,6 +275,7 @@ export interface AgentProgress {
 	contextWindow?: number;
 	cost: number;
 	durationMs: number;
+	tokensPerSecond?: number;
 	resolvedModel?: string;
 }
 

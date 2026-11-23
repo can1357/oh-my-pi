@@ -1,6 +1,7 @@
 import type { AgentMetricsSummary, AgentRecordLike, AgentStatus } from "./agent-hub-types";
 import { MAIN_AGENT_ID } from "./agent-hub-types";
 import type { ObservableSession } from "./session-observer-registry";
+import { lastAssistantThroughput, sessionThroughput } from "./usage-row";
 
 export type AgentMetrics = AgentMetricsSummary;
 
@@ -123,6 +124,12 @@ export function progressMetrics(observed: ObservableSession | undefined): AgentM
 			typeof progress.contextWindow === "number" && Number.isFinite(progress.contextWindow)
 				? progress.contextWindow
 				: undefined,
+		tokensPerSecond:
+			"tokensPerSecond" in progress &&
+			typeof progress.tokensPerSecond === "number" &&
+			Number.isFinite(progress.tokensPerSecond)
+				? progress.tokensPerSecond
+				: undefined,
 	};
 }
 
@@ -156,6 +163,7 @@ function readSessionMetrics(
 	try {
 		const stats = session.getSessionStats();
 		const messages = session.agent?.state?.messages;
+		const tokensPerSecond = lastAssistantThroughput(messages);
 		if (!Array.isArray(messages)) {
 			return {
 				tokens: stats.tokens.input + stats.tokens.output + stats.tokens.cacheWrite,
@@ -166,6 +174,7 @@ function readSessionMetrics(
 				durationKind: "unknown",
 				contextTokens: stats.contextUsage?.tokens,
 				contextWindow: stats.contextUsage?.contextWindow,
+				tokensPerSecond,
 			};
 		}
 
@@ -189,6 +198,7 @@ function readSessionMetrics(
 			durationKind: "unknown",
 			contextTokens: stats.contextUsage?.tokens,
 			contextWindow: stats.contextUsage?.contextWindow,
+			tokensPerSecond,
 		};
 	} catch {
 		// Render-only doubles and sessions being torn down may not expose a
@@ -205,6 +215,12 @@ export function hubFallbackStatsSession<TRecord extends AgentRecordLike>(
 	void observed;
 	const session = ref.session;
 	return session && typeof session.getSessionStats === "function" ? session : undefined;
+}
+
+function tokensPerSecondOf(metrics: object | undefined): number | undefined {
+	return metrics && "tokensPerSecond" in metrics && typeof metrics.tokensPerSecond === "number"
+		? metrics.tokensPerSecond
+		: undefined;
 }
 
 /**
@@ -225,7 +241,25 @@ function projectRowMetrics<TMetrics extends AgentCostSnapshot>(
 	const metrics = observed?.progress
 		? progressMetrics(observed)
 		: (ref.history?.metrics ?? (!hasLiveSession ? retained : undefined) ?? live);
-	return metrics && cost !== undefined ? { ...metrics, cost } : metrics;
+	if (!metrics) return undefined;
+	const liveRate = sessionThroughput(ref.session);
+	const liveTps = tokensPerSecondOf(live);
+	const retainedTps = tokensPerSecondOf(retained);
+	const observedTps = observed?.progress ? progressMetrics(observed)?.tokensPerSecond : undefined;
+
+	const tokensPerSecond =
+		liveRate ??
+		(hasLiveSession ? liveTps : undefined) ??
+		observedTps ??
+		// A park-stamped history rate is newer than any retained cache, so it outranks it.
+		(ref.history?.tokensPerSecondSource === "park" ? ref.history.tokensPerSecond : undefined) ??
+		retainedTps ??
+		ref.history?.tokensPerSecond ??
+		ref.history?.metrics?.tokensPerSecond;
+	const result: AgentMetrics = { ...(metrics as AgentMetrics) };
+	if (cost !== undefined) result.cost = cost;
+	if (tokensPerSecond !== undefined) result.tokensPerSecond = tokensPerSecond;
+	return result;
 }
 
 /** Full Agent Hub row metrics; see {@link projectRowMetrics} for source precedence. */
