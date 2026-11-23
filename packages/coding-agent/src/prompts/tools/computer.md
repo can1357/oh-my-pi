@@ -65,9 +65,15 @@ Control the host desktop from JavaScript or Python Eval with the global `compute
 - `await computer.display(id | "active" | "all")` returns a live display target with screenshot/zoom/input helpers and its own coordinate frame.
   - Full screenshots reselect `"active"`; later input/zoom stay pinned to that delivered frame.
   - Keyboard input refuses a focused window on another monitor.
+{{#if ompTakeover}}
+- `holdKeys(keys, {duration})` and `holdMouse(x, y, {button?, duration, keys?})`
+  hold input for 0–100 seconds and release it on every exit.
+  `drag(points, {keys?, modifiers?})` supports Space-drag and other held-key gestures. Do not invent cross-call key-down/button-down state.
+{{else}}
 - `holdKeys(keys, {duration, takeover?})` and `holdMouse(x, y, {button?, duration, keys?, takeover?})`
   hold input for 0–100 seconds and release it on every exit.
   `drag(points, {keys?, modifiers?, takeover?})` supports Space-drag and other held-key gestures. Do not invent cross-call key-down/button-down state.
+{{/if}}
 - `computer.control.acquire({reason})` requires live human confirmation for task-scoped control;
   window input needs no grant (it runs in the background with or without acquired control).
   - It returns `{active: true}` or `{active: false, reason}`:
@@ -76,7 +82,11 @@ Control the host desktop from JavaScript or Python Eval with the global `compute
       Keep working through background window input, and tell the user or your parent only about a step that needs foreground control.
     - `"unanswered"`: nobody answered before the confirmation expired, shortly before the call's timeout.
       Tell the user the step is waiting on their approval before asking again.
+{{#if ompTakeover}}
+  - It does not change delivery, which omp decides from the user's setting (below).
+{{else}}
   - It does not change delivery: omitted takeover stays background; only `takeover: true` takes over.
+{{/if}}
   - Use `control.release()` in `finally`; interruption, task completion and disposal also revoke. `control.state()` reads the live grant.
   - This is not authorization for consequential external effects.
 - On macOS, `win.bringToCurrentSpace()` moves that window without switching the user's Space or activating the app; take a fresh screenshot afterward.
@@ -111,7 +121,7 @@ Control the host desktop from JavaScript or Python Eval with the global `compute
   Window handles, screenshot frames, and AX refs persist across calls until `computer.close()`, which ends the session; the next call opens a new one.
 - `computer.capabilities()` reports native permissions and `applications`, `menus`, `heldInput`, `spaces`, and `globalEscape` support;
   unsupported operations fail explicitly.
-  - `globalEscape` means physical Escape anywhere stops takeover input (`takeover: true`, held control, desktop-level input, raises, activating launches);
+  - `globalEscape` means physical Escape anywhere stops takeover input ({{#if ompTakeover}}input omp runs in takeover{{else}}`takeover: true`{{/if}}, held control, desktop-level input, raises, activating launches);
     without held control, background window input ignores the user's Escape, so they can keep working in their own app, and only the host interrupt stops it.
   - Once the user's Escape stops a call, every later `computer` call you make that turn fails before sending anything:
     stop using the computer and tell the user what you did and what remains.
@@ -153,7 +163,7 @@ await win.click(120, 48, button="right")
   on macOS it reaches that field or sends nothing and names what holds focus instead, while `win.type` goes wherever the window's focus is.
 - Remote screens (Screen Sharing, iPhone Mirroring) take background clicks, scrolls and keys like any window.
   - `type` there presses keys of the user's keyboard layout: text no key types (emoji, other scripts) throws `InvalidKey`, and takeover cannot fix that.
-  - Screen Sharing cannot get Shift, Option, Control or Command in the background; such text or shortcuts throw `BackgroundUnavailable` (use takeover).
+  - Screen Sharing cannot get Shift, Option, Control or Command in the background; such text or shortcuts {{#if ompTakeover}}run in takeover{{else}}throw `BackgroundUnavailable` (use takeover){{/if}}.
     Its background keys also stop with `BackgroundUnavailable` while the user holds a modifier key or Caps Lock is on.
 - Pointer `x,y`: pixels in the MOST RECENT FULL screenshot of the SAME target.
   - `zoom` uses a rectangle in that frame and returns a detailed view without changing it; subsequent clicks still use the full screenshot, never zoom pixels.
@@ -170,6 +180,16 @@ await win.click(120, 48, button="right")
   - A relabelled-element refusal may instead name the one other candidate this read of the window found with the original role and label,
     even if the read was cut short by `maxDepth` or a node limit; unseen matches may exist.
   - Equal fields do not prove `eM` is the same control: check it before acting on it.
+{{#if ompTakeover}}
+- omp, never you, decides whether an input call takes over (real pointer and keyboard input, which the user's Escape stops), from the user's setting;
+  input helpers take no `takeover` option, and passing one throws with nothing sent. Never ask the user whether to take over.
+  - The user's setting takes over input to a window in front of them, or every window and element input call;
+    other input runs in the background without moving the user's pointer or activating the target.
+  - When a background route is unavailable, omp reruns that call in takeover, hands the keyboard back to the user's window and says what it did in the output
+    (`… ran in takeover because …; the input was delivered, and handed the keyboard back to …'s window`).
+  - When a screenshot proves background input to a window did nothing and AX cannot do it, tell the user the step needs that window in front of them.
+  - OS acceptance alone does not prove the application acted.
+{{else}}
 - Window input runs in the background without moving the user's pointer or activating the target, with or without acquired control.
   Pass `takeover` only in the one case below.
   - When a background route is unavailable, the tool decides:
@@ -178,9 +198,10 @@ await win.click(120, 48, button="right")
     - when the user's setting refuses, throws `BackgroundUnavailable` with nothing taken over; then use AX or another route.
   - Only when a screenshot proves a background call did nothing and AX cannot do it, repeat that call with `{ takeover: true }`.
   - OS acceptance alone does not prove the application acted.
+{{/if}}
 - When the user's setting refuses takeover, it also refuses the calls below before anything is sent.
   Stay in the background: use AX, `win.menu` or another window route, or tell the user the step needs their screen.
-  - `takeover: true`, `raise()`, `apps.open(…, { activate: true })`, `apps.open(…, { reveal: true })`, `control.acquire`, desktop-root input
+  - {{#unless ompTakeover}}`takeover: true`, {{/unless}}`raise()`, `apps.open(…, { activate: true })`, `apps.open(…, { reveal: true })`, `control.acquire`, desktop-root input
   - off macOS `el.focus()`
   - on macOS `perform("AXOpen")`, which can bring an Open panel's app forward
   - on macOS every call that opens a menu or names a `menu` item (right-click, Control-click, `perform("AXShowMenu")`, `menu:`,
@@ -191,7 +212,7 @@ await win.click(120, 48, button="right")
 - macOS background routes cover left-button drags and `holdMouse` that start on a slider, scroll bar, splitter or stepper,
   middle-button drags, modified clicks, right-clicks and scrolls.
   - A background `win.move` gives the app no hover, and a takeover move's hover ends before it returns. On a web page a plain click
-    often reaches a control shown only on hover; otherwise click it with `{ takeover: true }`.
+    often reaches a control shown only on hover; otherwise {{#if ompTakeover}}press it through AX, or tell the user the step needs that window in front of them{{else}}click it with `{ takeover: true }`{{/if}}.
   - A plain left drag across the text of one native text element (TextEdit, other AppKit text views and fields)
     becomes an AX selection with no mouse input: `drag` returns `{start, length, text}`,
     or throws `AxFailed`/`AxUnconfirmed` as `selectText` does (check the selection before retrying).
