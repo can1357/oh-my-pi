@@ -4,7 +4,7 @@
 
 ### Added
 
-- `/login otari` asks for the region (US, EU, or a custom self-hosted API root) and stores a non-US endpoint with the key, so EU workspaces no longer need `OTARI_BASE_URL` exported for login, discovery, and requests
+- `/login otari` asks for the region (US, EU, or a custom self-hosted API root) and stores a non-US endpoint with the key, so EU workspaces no longer need `OTARI_BASE_URL` exported for login, discovery, and requests ([#20300](https://github.com/can1357/oh-my-pi/pull/20300) by [@tbille](https://github.com/tbille))
 
 ### Fixed
 
