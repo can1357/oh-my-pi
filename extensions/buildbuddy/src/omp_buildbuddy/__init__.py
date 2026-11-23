@@ -5,8 +5,8 @@ Vendor integration for BuildBuddy that provides:
 - Run API delegate operations (describe, start, poll, cancel)
 
 The native REAPI gRPC client (`crates/exec-reapi/`) uses the profile data
-via operator convars. The future `DelegatedBackend` adapter will call the
-Run API operations through this extension.
+via operator convars. The `DelegatedBackend` adapter calls the Run API
+operations through this extension.
 
 This extension follows Shape C1 from `docs/research/exec-out-of-core.md`:
 a Python extension carrying four short operations behind one adapter.
@@ -14,10 +14,10 @@ a Python extension carrying four short operations behind one adapter.
 
 from __future__ import annotations
 
-from . import devices
+from . import client, devices
 from .errors import BuildBuddyUnavailable
 
-__all__ = ["BuildBuddyUnavailable", "devices"]
+__all__ = ["BuildBuddyUnavailable", "client", "devices"]
 
 try:
     from . import profile as profile

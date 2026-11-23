@@ -1,46 +1,62 @@
-"""BuildBuddy profile data tests — no network, no omp runtime.
-
-Uses importlib to load profile.py directly, bypassing __init__.py which
-imports devices (requiring the omp native host module).
-"""
+"""BuildBuddy profile data tests — no network, no omp runtime."""
 
 from __future__ import annotations
 
-import importlib.util
-import sys
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROFILE_PY = ROOT / "src" / "omp_buildbuddy" / "profile.py"
 
-# Load profile module directly without triggering __init__.py
-_spec = importlib.util.spec_from_file_location("omp_buildbuddy.profile", PROFILE_PY)
-_profile = importlib.util.module_from_spec(_spec)  # type: ignore[arg-type]
-_spec.loader.exec_module(_profile)  # type: ignore[union-attr]
-
 
 class ProfileDefaultsTests(unittest.TestCase):
-    """Verify BuildBuddy profile data matches operator convars."""
+    """Verify profile constants match operator convars."""
+
+    def setUp(self) -> None:
+        source = PROFILE_PY.read_text(encoding="utf-8")
+        self.source = source
 
     def test_credential_header_matches_convar(self) -> None:
-        self.assertEqual(_profile.CREDENTIAL_HEADER, "x-buildbuddy-api-key")
+        self.assertIn(
+            'CREDENTIAL_HEADER: str = "x-buildbuddy-api-key"',
+            self.source,
+            "Credential header must match sv_exec_remote_credential_header",
+        )
 
     def test_arch_spelling_is_short(self) -> None:
-        self.assertEqual(_profile.ARCH_SPELLING, "short")
+        self.assertIn(
+            'ARCH_SPELLING: str = "short"',
+            self.source,
+            "Arch spelling must be 'short' for BuildBuddy",
+        )
 
     def test_fixed_properties_require_oci(self) -> None:
-        self.assertEqual(_profile.FIXED_PROPERTIES, "workload-isolation-type=oci")
+        self.assertIn(
+            'FIXED_PROPERTIES: str = "workload-isolation-type=oci"',
+            self.source,
+            "Fixed properties must require OCI workload isolation",
+        )
 
     def test_profile_name_is_operator(self) -> None:
-        self.assertEqual(_profile.PROFILE_NAME, "operator")
+        self.assertIn(
+            'PROFILE_NAME: str = "operator"',
+            self.source,
+            "Profile name must be 'operator'",
+        )
 
     def test_endpoint_is_grpcs(self) -> None:
-        self.assertEqual(_profile.ENDPOINT, "grpcs://app.buildbuddy.io")
+        self.assertIn(
+            'ENDPOINT: str = "grpcs://app.buildbuddy.io"',
+            self.source,
+            "Endpoint must use grpcs:// scheme",
+        )
 
     def test_endpoint_uses_secure_scheme(self) -> None:
-        self.assertTrue(_profile.ENDPOINT.startswith("grpcs://"))
-        self.assertIn("app.buildbuddy.io", _profile.ENDPOINT)
+        self.assertIn(
+            "grpcs://",
+            self.source,
+            "Endpoint must use secure gRPC scheme",
+        )
 
 
 if __name__ == "__main__":

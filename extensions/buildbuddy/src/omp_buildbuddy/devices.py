@@ -13,9 +13,10 @@ These operations follow the delegate contract from
 | poll(operation, cursor) | State, output page, next cursor | Yes |
 | cancel(operation) | CancelOutcome | Yes |
 
-The ``DelegatedBackend`` adapter (ADR 0040 Dimension 3, not yet built) will
-call these operations through the extension host. Until then, these devices
-are stubs that return ``BuildBuddyUnavailable``.
+Each device calls the corresponding function in ``client.py``, which uses
+``urllib.request`` to call BuildBuddy's Run API REST endpoints. The API key
+is read from the macOS Keychain (service ``buildbuddy-omp2-trial``) or the
+``BUILDBUDDY_API_KEY`` environment variable.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from typing import Any
 import omp
 from omp.devices import MountSpec
 
-from . import errors
+from . import client, errors
 
 _ARGS_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -38,30 +39,52 @@ EXEC_PARENT = omp.devices.parent("exec", family="buildbuddy", rev=1, place="host
 
 async def describe(args: dict[str, Any]) -> dict[str, Any]:
     """Report BuildBuddy backend capabilities."""
-    raise errors.BuildBuddyUnavailable(
-        "describe", "DelegatedBackend adapter not yet built (ADR 0040 Dimension 3)"
-    )
+    try:
+        return client.describe_capabilities()
+    except errors.BuildBuddyUnavailable:
+        raise
+    except Exception as exc:
+        raise errors.BuildBuddyUnavailable("describe", str(exc)) from exc
 
 
 async def start(args: dict[str, Any]) -> dict[str, Any]:
     """Start a remote execution run on BuildBuddy."""
-    raise errors.BuildBuddyUnavailable(
-        "start", "DelegatedBackend adapter not yet built (ADR 0040 Dimension 3)"
-    )
+    request = args.get("request", {})
+    if not isinstance(request, dict):
+        raise errors.BuildBuddyUnavailable("start", "args.request must be an object")
+    try:
+        return client.start_run(request)
+    except errors.BuildBuddyUnavailable:
+        raise
+    except Exception as exc:
+        raise errors.BuildBuddyUnavailable("start", str(exc)) from exc
 
 
 async def poll(args: dict[str, Any]) -> dict[str, Any]:
     """Poll a BuildBuddy execution's status."""
-    raise errors.BuildBuddyUnavailable(
-        "poll", "DelegatedBackend adapter not yet built (ADR 0040 Dimension 3)"
-    )
+    operation = args.get("operation", "")
+    if not operation:
+        raise errors.BuildBuddyUnavailable("poll", "args.operation is required")
+    cursor = args.get("cursor")
+    try:
+        return client.poll_run(str(operation), cursor=str(cursor) if cursor else None)
+    except errors.BuildBuddyUnavailable:
+        raise
+    except Exception as exc:
+        raise errors.BuildBuddyUnavailable("poll", str(exc)) from exc
 
 
 async def cancel(args: dict[str, Any]) -> dict[str, Any]:
     """Cancel a BuildBuddy execution."""
-    raise errors.BuildBuddyUnavailable(
-        "cancel", "DelegatedBackend adapter not yet built (ADR 0040 Dimension 3)"
-    )
+    operation = args.get("operation", "")
+    if not operation:
+        raise errors.BuildBuddyUnavailable("cancel", "args.operation is required")
+    try:
+        return client.cancel_run(str(operation))
+    except errors.BuildBuddyUnavailable:
+        raise
+    except Exception as exc:
+        raise errors.BuildBuddyUnavailable("cancel", str(exc)) from exc
 
 
 _LEAVES: tuple[MountSpec, ...] = (
