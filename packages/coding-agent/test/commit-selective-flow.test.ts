@@ -624,6 +624,45 @@ describe("selective commit flow", () => {
 		expect(draft.selection()).toEqual(selected);
 	});
 
+	it("refuses a bare take of a path that would add pre-existing lines, and keeps named units, grep and globs", async () => {
+		// Issue #20036: line 1 was changed outside the session and not committed; line 10 is this session's.
+		const original = Array.from({ length: 10 }, (_, i) => `line ${i + 1}\n`).join("");
+		const { root, journal, write } = await emptyRepo();
+		await Bun.write(path.join(root, "a.txt"), original);
+		await git(root, ["add", "a.txt"]);
+		await git(root, ["commit", "-qm", "seed"]);
+		const outside = original.replace("line 1\n", "other session\n");
+		await Bun.write(path.join(root, "a.txt"), outside);
+		await write("Main", undefined, "a.txt", outside.replace("line 10\n", "main session\n"));
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		const selected = draft.selection();
+		expect(() => draft.take({ path: "a.txt" })).toThrow(
+			/a\.txt: take\(\) without units would add lines that are not yours: .*pre-existing/,
+		);
+		expect(draft.selection()).toEqual(selected);
+		expect(() => draft.take({ path: "a.txt", grep: "other session" })).not.toThrow();
+		expect(() => draft.take({ path: "**" })).not.toThrow();
+	});
+
+	it("refuses a bare take of a path that would add lines of an agent outside the scope", async () => {
+		const original = Array.from({ length: 10 }, (_, i) => `line ${i + 1}\n`).join("");
+		const { root, journal, write } = await emptyRepo();
+		await Bun.write(path.join(root, "a.txt"), original);
+		await git(root, ["add", "a.txt"]);
+		await git(root, ["commit", "-qm", "seed"]);
+		const other = original.replace("line 1\n", "other session\n");
+		await write("Other", undefined, "a.txt", other);
+		await write("Main", undefined, "a.txt", other.replace("line 10\n", "main session\n"));
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(() => draft.take({ path: "a.txt" })).toThrow(
+			/a\.txt: take\(\) without units would add lines that are not yours: .*Other/,
+		);
+	});
+
 	it("attributes edits journaled through a symlinked directory", async () => {
 		const { root, journal } = await emptyRepo();
 		const alias = `${root}-alias`;
