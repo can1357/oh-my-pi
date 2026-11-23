@@ -4,12 +4,14 @@ import { type Api, type AuthStorage, Effort, type Model } from "@oh-my-pi/pi-ai"
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
+import { cfgOffline } from "@oh-my-pi/pi-coding-agent/config/auxiliary-model-policy";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { formatModelStringWithRouting, resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { cfgEnabledModels, cfgModelProviderOrder } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildSessionOptions,
+	prepareStartupPickerTitle,
 	rebuildScopedModels,
 	rebuildScopedModelsAfterDiscovery,
 	resolveScopedModels,
@@ -327,6 +329,27 @@ describe("buildSessionOptions --models scope selection", () => {
 	function registry(): ModelRegistry {
 		return new ModelRegistry(authStorage, tempDir.join("models.yml"));
 	}
+
+	it("defers CLI model resolution and installs the key when startup title generation begins", async () => {
+		const settings = Settings.isolated();
+		cfgOffline.override(settings, true);
+		authStorage.keys.setRuntime("github-copilot", "previous-synthetic-key");
+		const parsed = parseArgs(["--model", "github-copilot/claude-fable-5", "--api-key", "cli-synthetic-key"]);
+		const title = prepareStartupPickerTitle(parsed, registry(), settings);
+		expect(title?.currentModel).toBeUndefined();
+		expect(await authStorage.keys.get("github-copilot")).toBe("previous-synthetic-key");
+		expect(title?.resolveCurrentModel?.()?.provider).toBe("github-copilot");
+		expect(await authStorage.keys.get("github-copilot")).toBe("cli-synthetic-key");
+	});
+
+	it("omits startup generation rather than guessing the provider for offline mode or a CLI key", () => {
+		const settings = Settings.isolated();
+		const models = registry();
+		const deferred = parseArgs(["--api-key", "synthetic", "--models", "extprov/*"]);
+		expect(prepareStartupPickerTitle(deferred, models, settings)).toBeUndefined();
+		cfgOffline.override(settings, true);
+		expect(prepareStartupPickerTitle(parseArgs([]), models, settings)).toBeUndefined();
+	});
 
 	it("defers a --models scope that resolved empty to the SDK modelPattern path", async () => {
 		const parsed = parseArgs(["--models", "extprov/model-x,extprov/model-y"]);

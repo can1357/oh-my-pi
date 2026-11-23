@@ -20,6 +20,7 @@
 - Added `tui.vimShowCommand` (on by default): the status line echoes a half-typed Vim command (`15d` before its last `d`), also when **Vim Mode Indicator** is set to hidden ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Added `archive.calls`, `archive.grep`, `archive.stats`, and `archive.messages` to the eval `archive` object: list past tool calls with their results and the reasoning before them, regex-search thinking, replies, arguments, and results, count calls and errors by tool, day, model, version, project, or session, and read a transcript's records whole; `subagents: true` adds the subagent transcripts of the sessions in scope
 - Added `since`/`until` to every `archive` listing: an age like `8d`, an ISO date, or a date-time narrows projects, sessions, search, prompts, recaps, and activity to that window
+- The resume picker's F2 rename dialog can fill its input with a generated session title from the session's recent conversation, keeping or naming its title card like `/rename`; the `app.session.generateTitle` action ships unbound, startup requests bill and check the cap on the session being titled, and both entry points honor that session's `TITLE_SYSTEM.md` ([#18025](https://github.com/can1357/oh-my-pi/pull/18025) by [@SuperUserA](https://github.com/SuperUserA))
 
 ### Changed
 

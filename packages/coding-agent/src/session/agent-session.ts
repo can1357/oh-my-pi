@@ -233,7 +233,6 @@ import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool
 import rewindReportTemplate from "../prompts/system/rewind-report.md" with { type: "text" };
 import sessionStopBlockedPrompt from "../prompts/system/session-stop-blocked.md" with { type: "text" };
 import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.md" with { type: "text" };
-import titleCardPrompt from "../prompts/system/title-card.md" with { type: "text" };
 import titleForkPrompt from "../prompts/system/title-fork.md" with { type: "text" };
 import skillfulNoticePrompt from "../prompts/system/skillful-notice.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
@@ -311,13 +310,13 @@ import { normalizeModelContextImages } from "../utils/image-loading";
 import { TokenRateMeter } from "../utils/token-rate";
 import { resumeCommand } from "../utils/resume-command";
 import {
-	formatCardTitle,
+	cardSessionTitle,
 	keepTitleCard,
-	parseCardReply,
 	parseCardTitleReply,
+	resolveCardIcons,
 	splitCardTitle,
 } from "../utils/title-card";
-import { generateSessionTitle, nerdGlyphsActive } from "../utils/title-generator";
+import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
 import type { AgentSessionEvent, AgentSessionEventListener, WakeSources } from "./agent-session-events";
@@ -616,7 +615,6 @@ import {
 } from "./context-settings";
 import {
 	cfgTitleGenerator,
-	cfgTitleIcons,
 	cfgTitleRefreshAfterPrompts,
 	cfgTitleRefreshOnReplan,
 	type TitleIcons,
@@ -12444,8 +12442,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** The icons a new card may show: `title.icons`, an emoji where Nerd Fonts glyphs do not render, no card when boring. */
 	#cardIcons(): TitleIcons {
-		const icons = cfgTitleIcons.get(this.settings);
-		return icons === "nf+emoji" && !nerdGlyphsActive() ? "emoji" : icons;
+		return resolveCardIcons(this.settings);
 	}
 
 	#fallBackFromTitleFork(input: TitleInput, signal: AbortSignal): void {
@@ -12596,6 +12593,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					costGate.record(message.usage.cost.total);
 					this.#reportTitleUsage(usageOwner, "title", message, prompt);
 				},
+				// Re-check the live gate before every provider attempt (including retries):
+				// a billed failed attempt can cross the cap before the retry is sent.
+				() => this.#costGate.admit(),
 			),
 		);
 		if (await this.#sessionGenerationChanged(sessionGeneration)) return null;
@@ -12686,12 +12686,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * a card, `title.icons` is `boring`, or the card request fails or names no valid card.
 	 */
 	async #cardTitle(title: string, signal?: AbortSignal): Promise<string> {
-		const icons = this.#cardIcons();
-		if (icons === "boring" || splitCardTitle(title)) return title;
-		const cardPrompt = prompt.render(titleCardPrompt, { nerdFonts: icons === "nf+emoji" });
-		const reply = await this.generateTitle(title, cardPrompt, signal);
-		const card = reply ? parseCardReply(reply, icons) : undefined;
-		return card ? formatCardTitle(card, title) : title;
+		return cardSessionTitle(title, undefined, this.settings, (t, p, s) => this.generateTitle(t, p, s), signal);
 	}
 
 	/** A fresh title-model title for `context` that keeps the current title's card; null when generation fails. */

@@ -1,3 +1,6 @@
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
@@ -5,10 +8,12 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { formatModelStringWithRouting, resolveModelOverride } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { DEFAULT_SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/spinner-clock";
 import {
 	disposeTerminalTitleState,
+	generatePickerSessionTitle,
 	generateSessionTitle,
 	initTerminalTitleState,
 	setExtensionTerminalTitle,
@@ -18,6 +23,7 @@ import {
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleState,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
+import * as titleCard from "@oh-my-pi/pi-coding-agent/utils/title-card";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { isWsl, logger, setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import { mockWindowsConsoleTitle, type WindowsConsoleTitleMock } from "./terminal-title-test-utils";
@@ -43,9 +49,77 @@ function createRegistry(model: Model<Api>, availableModels: Model<Api>[] = [mode
 		getAvailable: () => availableModels,
 		getApiKey: async () => "test-key",
 		getApiKeyForProvider: async () => "test-key",
-		authStorage: { rotateSessionCredential: async () => false },
+		authStorage: {
+			rotateSessionCredential: async () => false,
+			oauth: { accounts: () => [], identity: () => undefined },
+			sessions: { pin: () => {} },
+		},
 		resolver: () => async () => "test-key",
 	} as never;
+}
+
+interface PersistedPickerSessionFixture {
+	directory: string;
+	session: { id: string; path: string; title: undefined; firstMessage: string; allMessagesText: string };
+}
+
+async function createPersistedPickerSession(
+	model: Model<Api>,
+	previousSpend = 0,
+): Promise<PersistedPickerSessionFixture> {
+	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-picker-budget-"));
+	const cwd = path.join(directory, "cwd");
+	await fs.mkdir(cwd);
+	const manager = SessionManager.create(cwd, path.join(directory, "sessions"));
+	const firstMessage = "Implement caching layer for Redis";
+	manager.appendMessage({ role: "user", content: firstMessage, timestamp: Date.now() });
+	manager.appendMessage({
+		role: "assistant",
+		content: [{ type: "text", text: "Persisted fixture response." }],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: Date.now(),
+	} as never);
+	if (previousSpend > 0) {
+		manager.appendModelUsage(
+			{
+				purpose: "existing",
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: {
+					input: 1,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 1,
+					cost: { input: previousSpend, output: 0, cacheRead: 0, cacheWrite: 0, total: previousSpend },
+				},
+				stopReason: "stop",
+			},
+			{ sessionId: manager.getSessionId(), parentId: manager.getLeafId() },
+		);
+	}
+	await manager.flush();
+	const session = {
+		id: manager.getSessionId(),
+		path: manager.getSessionFile()!,
+		title: undefined as undefined,
+		firstMessage,
+		allMessagesText: firstMessage,
+	};
+	await manager.close();
+	return { directory, session };
 }
 
 afterEach(() => {
@@ -1312,5 +1386,420 @@ describe("terminal title runtime", () => {
 			setTerminalTitlePullRequest(undefined);
 		}
 		expectWorkingSeparator(emittedTitles().at(-1), "Renamed");
+	});
+});
+
+describe("generatePickerSessionTitle", () => {
+	it("generates a title from firstMessage, preserving an existing card when session.title already has one", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const settings = createSettings(model);
+		const registry = createRegistry(model);
+		const generated = await generatePickerSessionTitle(
+			{
+				id: "s1",
+				path: "/fake/s1.jsonl",
+				title: "🧪 FLAKY: Old test title",
+				firstMessage: "Fix flaky test runner race condition",
+				allMessagesText: "Fix flaky test runner race condition",
+			},
+			{
+				registry,
+				settings,
+				generate: async text => `Refactored ${text}`,
+			},
+		);
+		expect(generated).toBe("🧪 FLAKY: Refactored Fix flaky test runner race condition");
+	});
+
+	it("generates a new card via titleCardPrompt when session.title has no card and title.icons is not boring, and leaves the title plain when boring", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const registry = createRegistry(model);
+
+		// With default/emoji icons (not boring)
+		const emojiSettings = Settings.isolated({
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
+			"title.icons": "emoji",
+		});
+		const promptCalls: (string | undefined)[] = [];
+		const emojiGenerated = await generatePickerSessionTitle(
+			{
+				id: "s2",
+				path: "/fake/s2.jsonl",
+				title: undefined,
+				firstMessage: "Investigate memory leak",
+				allMessagesText: "Investigate memory leak",
+			},
+			{
+				registry,
+				settings: emojiSettings,
+				generate: async (text, customPrompt) => {
+					promptCalls.push(customPrompt);
+					if (customPrompt) {
+						return "🔍 LEAK";
+					}
+					return "Investigate memory leak in cache";
+				},
+			},
+		);
+		expect(promptCalls.length).toBe(2);
+		expect(promptCalls[1]).toBeDefined();
+		expect(emojiGenerated).toBe("🔍 LEAK: Investigate memory leak in cache");
+
+		// With boring icons
+		const boringSettings = Settings.isolated({
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
+			"title.icons": "boring",
+		});
+		const boringCalls: (string | undefined)[] = [];
+		const boringGenerated = await generatePickerSessionTitle(
+			{
+				id: "s3",
+				path: "/fake/s3.jsonl",
+				title: undefined,
+				firstMessage: "Investigate memory leak",
+				allMessagesText: "Investigate memory leak",
+			},
+			{
+				registry,
+				settings: boringSettings,
+				generate: async (text, customPrompt) => {
+					boringCalls.push(customPrompt);
+					return "Investigate memory leak in cache";
+				},
+			},
+		);
+		expect(boringCalls.length).toBe(1);
+		expect(boringGenerated).toBe("Investigate memory leak in cache");
+	});
+
+	it("falls back to allMessagesText when firstMessage is low-signal or attachment-only", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const settings = Settings.isolated({
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
+			"title.icons": "boring",
+		});
+		const registry = createRegistry(model);
+
+		// Low-signal firstMessage
+		const lowSignalInputs: string[] = [];
+		const resLowSignal = await generatePickerSessionTitle(
+			{
+				id: "s4",
+				path: "/fake/s4.jsonl",
+				title: undefined,
+				firstMessage: "hi",
+				allMessagesText: "Please help me implement redis clustering",
+			},
+			{
+				registry,
+				settings,
+				generate: async text => {
+					lowSignalInputs.push(text);
+					return "Redis clustering implementation";
+				},
+			},
+		);
+		expect(lowSignalInputs).toEqual(["Please help me implement redis clustering"]);
+		expect(resLowSignal).toBe("Redis clustering implementation");
+
+		// Attachment-only firstMessage
+		const attachmentInputs: string[] = [];
+		const resAttachment = await generatePickerSessionTitle(
+			{
+				id: "s5",
+				path: "/fake/s5.jsonl",
+				title: undefined,
+				firstMessage: "fix [Image #1]",
+				allMessagesText: "fix [Image #1]\nThe submit button overlaps the modal boundary",
+			},
+			{
+				registry,
+				settings,
+				generate: async text => {
+					attachmentInputs.push(text);
+					return "Fix modal submit button overlap";
+				},
+			},
+		);
+		expect(attachmentInputs).toEqual(["fix [Image #1]\nThe submit button overlaps the modal boundary"]);
+		expect(resAttachment).toBe("Fix modal submit button overlap");
+	});
+
+	it("reads session.path on demand via readSessionInfo when both firstMessage and allMessagesText are empty on an index-only row", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const settings = Settings.isolated({
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
+			"title.icons": "boring",
+		});
+		const registry = createRegistry(model);
+
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-picker-title-test-"));
+		const sessionFile = path.join(tmpDir, "session.jsonl");
+
+		try {
+			const headerLine = JSON.stringify({
+				type: "session",
+				id: "test-index-session",
+				timestamp: new Date().toISOString(),
+			});
+			const messageLine = JSON.stringify({
+				type: "message",
+				message: {
+					role: "user",
+					content: [{ type: "text", text: "Optimize AST parse traversal" }],
+				},
+			});
+			await fs.writeFile(sessionFile, `${headerLine}\n${messageLine}\n`);
+
+			const generatedInputs: string[] = [];
+			const title = await generatePickerSessionTitle(
+				{
+					id: "test-index-session",
+					path: sessionFile,
+					title: undefined,
+					firstMessage: "",
+					allMessagesText: "",
+				},
+				{
+					registry,
+					settings,
+					generate: async text => {
+						generatedInputs.push(text);
+						return "Optimize AST traversal";
+					},
+				},
+			);
+
+			expect(generatedInputs[0]).toContain("Optimize AST parse traversal");
+			expect(title).toBe("Optimize AST traversal");
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true });
+		}
+	});
+
+	it("uses the default generator and persists billed usage against the selected session", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const settings = Settings.isolated({
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
+			"session.maxCost": 0.05,
+			"title.icons": "emoji",
+		});
+		const registry = createRegistry(model);
+		const { directory: tempDir, session } = await createPersistedPickerSession(model);
+
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Generated Title</title>" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0.02, output: 0.03, cacheRead: 0, cacheWrite: 0, total: 0.05 },
+			},
+		} as never);
+		const cardSpy = vi.spyOn(titleCard, "cardSessionTitle");
+
+		try {
+			const result = await generatePickerSessionTitle(session, { registry, settings });
+			expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+			const callOptions = completeSimpleMock.mock.calls[0]?.[2];
+			expect(callOptions?.sessionId).toMatch(
+				/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+			);
+			expect(JSON.parse(callOptions?.metadata?.user_id as string)).toEqual({
+				session_id: callOptions?.sessionId,
+			});
+			expect(cardSpy).toHaveBeenCalledWith("Generated Title", undefined, settings, expect.any(Function), undefined);
+			expect(result).toBe("Generated Title");
+
+			const persisted = await SessionManager.open(session.path);
+			try {
+				const usage = persisted.getEntries().filter(entry => entry.type === "model_usage");
+				expect(usage).toHaveLength(1);
+				expect(usage[0]).toMatchObject({ purpose: "title", provider: model.provider, model: model.id });
+				expect(persisted.getUsageStatistics().cost).toBeCloseTo(0.05, 10);
+			} finally {
+				await persisted.close();
+			}
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("reuses the live manager and generator instead of opening a second ledger", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const settings = Settings.isolated({ "title.icons": "boring" });
+		const { directory, session } = await createPersistedPickerSession(model);
+		const manager = await SessionManager.open(session.path);
+		try {
+			const generate = vi.fn(async (_text: string) => "Live Title");
+			const result = await generatePickerSessionTitle(session, { settings, manager, generate });
+			expect(result).toBe("Live Title");
+			expect(generate).toHaveBeenCalledTimes(1);
+			expect(generate.mock.calls[0]?.[0]).toContain("Implement caching layer for Redis");
+			// The picker must not journal a second ledger against the open session.
+			expect(manager.getEntries().filter(entry => entry.type === "model_usage")).toHaveLength(0);
+			// A borrowed manager stays owned by the caller.
+			expect(manager.getSessionId()).toBe(session.id);
+		} finally {
+			await manager.close();
+			await fs.rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it("bills the picked session, leaving a different active session untouched", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const settings = Settings.isolated({
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
+			"session.maxCost": 0.05,
+			"title.icons": "emoji",
+		});
+		const registry = createRegistry(model);
+		const picked = await createPersistedPickerSession(model);
+		const initiator = await createPersistedPickerSession(model, 0.01);
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Picked Title</title>" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0.02, output: 0.03, cacheRead: 0, cacheWrite: 0, total: 0.05 },
+			},
+		} as never);
+		try {
+			expect(await generatePickerSessionTitle(picked.session, { registry, settings })).toBe("Picked Title");
+
+			const pickedManager = await SessionManager.open(picked.session.path);
+			const initiatorManager = await SessionManager.open(initiator.session.path);
+			try {
+				const pickedUsage = pickedManager.getEntries().filter(entry => entry.type === "model_usage");
+				const initiatorUsage = initiatorManager.getEntries().filter(entry => entry.type === "model_usage");
+				expect(pickedUsage).toHaveLength(1);
+				expect(pickedUsage[0]).toMatchObject({ purpose: "title" });
+				expect(pickedManager.getUsageStatistics().cost).toBeCloseTo(0.05, 10);
+				// The session that merely opened the picker is not charged.
+				expect(initiatorUsage).toHaveLength(1);
+				expect(initiatorUsage[0]).toMatchObject({ purpose: "existing" });
+				expect(initiatorManager.getUsageStatistics().cost).toBeCloseTo(0.01, 10);
+			} finally {
+				await pickedManager.close();
+				await initiatorManager.close();
+			}
+		} finally {
+			await fs.rm(picked.directory, { recursive: true, force: true });
+			await fs.rm(initiator.directory, { recursive: true, force: true });
+		}
+	});
+
+	it("does not send title requests when the selected session already reached maxCost", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const settings = Settings.isolated({
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
+			"session.maxCost": 0.05,
+			"title.icons": "boring",
+		});
+		const { directory: tempDir, session } = await createPersistedPickerSession(model, 0.05);
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
+
+		try {
+			expect(await generatePickerSessionTitle(session, { registry: createRegistry(model), settings })).toBeNull();
+			expect(completeSimpleMock).not.toHaveBeenCalled();
+			const persisted = await SessionManager.open(session.path);
+			try {
+				expect(persisted.getEntries().filter(entry => entry.type === "model_usage")).toHaveLength(1);
+				expect(persisted.getUsageStatistics().cost).toBeCloseTo(0.05, 10);
+			} finally {
+				await persisted.close();
+			}
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("journals a billed failed picker attempt and gates its retry", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const settings = Settings.isolated({
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
+			"session.maxCost": 0.05,
+			"title.icons": "boring",
+		});
+		const { directory: tempDir, session } = await createPersistedPickerSession(model);
+		const usage = {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0.02, output: 0.03, cacheRead: 0, cacheWrite: 0, total: 0.05 },
+		};
+		const completeSimpleMock = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce({
+				role: "assistant",
+				content: [],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage,
+				stopReason: "error",
+				errorMessage: "overloaded",
+				errorStatus: 503,
+				timestamp: Date.now(),
+			} as never)
+			.mockResolvedValueOnce({
+				role: "assistant",
+				content: [{ type: "text", text: "<title>Generated Title</title>" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage,
+				stopReason: "stop",
+				timestamp: Date.now(),
+			} as never);
+
+		try {
+			expect(await generatePickerSessionTitle(session, { registry: createRegistry(model), settings })).toBeNull();
+			expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+			const persisted = await SessionManager.open(session.path);
+			try {
+				const usageEntries = persisted.getEntries().filter(entry => entry.type === "model_usage");
+				expect(usageEntries).toHaveLength(1);
+				expect(usageEntries[0]).toMatchObject({ purpose: "title", stopReason: "error", usage });
+				expect(persisted.getUsageStatistics().cost).toBeCloseTo(0.05, 10);
+			} finally {
+				await persisted.close();
+			}
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("checks the persisted maxCost before invoking a local title model", async () => {
+		const model = getBundledModel("local", "lfm2.5-230m");
+		if (!model) throw new Error("Expected bundled local tiny model");
+		const settings = Settings.isolated({
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
+			"session.maxCost": 0.05,
+		});
+		const { directory, session } = await createPersistedPickerSession(model, 0.05);
+		const localGenerate = vi.spyOn(tinyTitleClient, "generate").mockResolvedValue("Local title");
+
+		try {
+			expect(await generatePickerSessionTitle(session, { registry: createRegistry(model), settings })).toBeNull();
+			expect(localGenerate).not.toHaveBeenCalled();
+		} finally {
+			await fs.rm(directory, { recursive: true, force: true });
+		}
 	});
 });

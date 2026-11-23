@@ -273,6 +273,28 @@ describe("title usage accounting", () => {
 		expect(target.costGate.spent).toBeCloseTo(RETRY_USAGE.cost.total + TITLE_USAGE.cost.total, 10);
 	});
 
+	it("blocks a title retry that the failed attempt pushed past the cap", async () => {
+		const main = createMockModel({ responses: [{ content: ["unused"] }] });
+		const side = createMockModel({ handler: { content: ["unused"] } });
+		const target = await createSession(
+			main,
+			side,
+			{ "title.generator": "tiny", "session.maxCost": 0.0002 },
+			{ autoTitle: false },
+		);
+		const completeSimple = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(failedCompletion(RETRY_USAGE))
+			.mockResolvedValue(titleCompletion("<title>Must not be sent</title>", TITLE_USAGE));
+
+		expect(await target.generateTitle(FIRST_MESSAGE)).toBeNull();
+
+		// The billed failure crossed the cap, so the retry is never sent.
+		expect(completeSimple).toHaveBeenCalledTimes(1);
+		expect(titleUsageEntries(target.sessionManager)).toHaveLength(1);
+		expect(target.costGate.spent).toBeCloseTo(RETRY_USAGE.cost.total, 10);
+	});
+
 	it("journals a failed fork stream's billed usage before falling back", async () => {
 		const main = createMockModel({ responses: [{ content: ["Reading the park tests first."], usage: MAIN_USAGE }] });
 		const side = createMockModel({

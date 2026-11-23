@@ -60,6 +60,7 @@ app.history.search: []
 | `app.session.delete`         | `Backspace`, `Delete`                                                 | Ask to delete the selected session in the resume picker; a key that also deletes backward edits a typed search query instead                           |
 | `app.session.pin`            | `Alt+K`                                                               | Pin the selected session in the resume picker; pinned sessions stay on top, including in search results                                                |
 | `app.session.unpin`          | `Alt+Shift+K`                                                         | Unpin the selected session in the resume picker                                                                                                        |
+| `app.session.generateTitle`  | Unbound                                                               | Generate session title from transcript in the rename dialog                                                                                            |
 | `app.tree.previousBranch`    | Unbound                                                               | Jump to the previous visible branch in `/tree` ([details](./tree.md))                                                                                  |
 | `app.tree.nextBranch`        | Unbound                                                               | Jump to the next visible branch in `/tree` ([details](./tree.md))                                                                                      |
 
