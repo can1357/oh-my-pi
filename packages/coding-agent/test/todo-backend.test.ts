@@ -897,7 +897,8 @@ describe("todo backend", () => {
 		});
 
 		it("a refused todo call that follows bash and an accepted one in a message sees the committed list, and leaves no retry reminder", async () => {
-			let bashDone = false;
+			// Written by the bash call itself as it ends: a real signal that it has finished.
+			const marker = path.join(dir.path(), "bash-done");
 			const asked: Array<{ op: string; bashDone: boolean; previous: TodoPhase[] }> = [];
 			const { session } = await open(
 				[
@@ -906,6 +907,7 @@ describe("todo backend", () => {
 							id: "veto",
 							replace() {},
 							apply(change) {
+								const bashDone = fs.existsSync(marker);
 								asked.push({ op: change.op, bashDone, previous: change.previous });
 								if (change.op === "drop") throw new Error("not now");
 								if (change.op === "done" && !bashDone) throw new Error("bash still running");
@@ -916,9 +918,6 @@ describe("todo backend", () => {
 				{ model: getBundledModel("anthropic", "claude-sonnet-4-5"), toolNames: ["read", "todo", "bash"] },
 			);
 			session.modelRegistry.authStorage.keys.setRuntime("anthropic", "test-key");
-			session.subscribe(event => {
-				if (event.type === "tool_execution_end" && event.toolName === "bash") bashDone = true;
-			});
 			const todoCall = (
 				id: string,
 				args: { op: string; items?: string[]; task?: string },
@@ -930,7 +929,12 @@ describe("todo backend", () => {
 					{
 						content: [
 							// Real time: the bash call must still be running when an unscheduled todo call would be asked.
-							{ type: "toolCall", id: "b", name: "bash", arguments: { command: "sleep 0.2 && echo done" } },
+							{
+								type: "toolCall",
+								id: "b",
+								name: "bash",
+								arguments: { command: `sleep 0.2 && touch '${marker}'` },
+							},
 							todoCall("d", { op: "done", task: "x" }),
 							todoCall("r", { op: "drop", task: "y" }),
 						],
