@@ -2016,9 +2016,7 @@ Synthetic is an AI platform offering dual API format support for its models, exp
 ### Auth & usage
 
 - **Authentication**: Key-based auth using `SYNTHETIC_API_KEY` (`packages/catalog/src/compat/rules/auth/synthetic.kdl`). Validated via a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`) against `GET https://api.synthetic.new/openai/v1/models`.
-- **Usage & Quota Polling**: `syntheticUsageProvider` (`packages/ai/src/usage/synthetic.ts`) polls `GET https://api.synthetic.new/v2/quotas` with the bearer API key. It reports two distinct limit windows:
-   - `synthetic:requests:5h`: Rolling 5-hour request limit with per-tick regeneration percentage (`rollingFiveHourLimit`).
-   - `synthetic:usd:7d`: Weekly credit limit in USD (`weeklyTokenLimit`) with per-tick dollar regeneration rates.
+- **Usage & Quota Polling**: `syntheticUsageProvider` (`packages/ai/src/usage/synthetic.ts`) polls `GET https://api.synthetic.new/v2/quotas` with the bearer API key. It reports only `planWeeklyLimit`: weekly credit usage derived from the authoritative `percentRemaining`, plus incremental regeneration metadata (`nextRegenAt`, `nextRegenPercent`). The limit keeps the stable `synthetic:usd:7d` id so usage history survives parser changes. Payloads without a usable `planWeeklyLimit` produce no report.
 
 ### Catalog model handling
 

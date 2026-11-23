@@ -73,4 +73,21 @@ describe("CustomEditor vim mode", () => {
 		editor.handleInput(" ");
 		expect(editor.getText()).toBe(" ");
 	});
+
+	it("keeps the live draft's attachments when k and j step through a recalled draft", () => {
+		const { editor } = makeEditor(true);
+		editor.setText("an older draft");
+		editor.clearDraftForRecall();
+		const image = { type: "image" as const, data: "AAAA", mimeType: "image/png" };
+		editor.setText("look at this");
+		editor.pendingImages = [image];
+		editor.handleInput(ESC);
+		editor.handleInput("k");
+		expect(editor.getText()).toBe("an older draft");
+		// The recalled draft had no image; the live one's must not show on it.
+		expect(editor.pendingImages).toEqual([]);
+		editor.handleInput("j");
+		expect(editor.getText()).toBe("look at this");
+		expect(editor.pendingImages).toEqual([image]);
+	});
 });

@@ -27,6 +27,7 @@ import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
 import { pluginUsesClaudeModelDialect } from "../discovery/agent-plugin-format";
 import { listClaudePluginRoots } from "../discovery/helpers";
 import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
+import { substitutePluginRoot } from "../discovery/substitute-plugin-root";
 import { normalizeClaudeCodeToolName, normalizeToolNames } from "../tools/builtin-names";
 import { loadBundledAgents, parseAgent } from "./agents";
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
@@ -47,12 +48,23 @@ interface AgentDirectory {
 	source: AgentSource;
 	/** Frontmatter is the Claude Code dialect: drop `model:` and translate `tools:`. */
 	claudeDialect?: boolean;
+	/**
+	 * Plugin install path supplying these agents. `${CLAUDE_PLUGIN_ROOT}` /
+	 * `${OMP_PLUGIN_ROOT}` in the agent Markdown body are substituted with it
+	 * when the definition is loaded, not in bash (#20165).
+	 */
+	pluginRoot?: string;
 }
 
 /**
  * Load agents from a directory.
  */
-async function loadAgentsFromDir({ dir, source, claudeDialect }: AgentDirectory): Promise<AgentDefinition[]> {
+async function loadAgentsFromDir({
+	dir,
+	source,
+	claudeDialect,
+	pluginRoot,
+}: AgentDirectory): Promise<AgentDefinition[]> {
 	const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
 	const files = entries
 		.filter(entry => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".md"))
@@ -63,6 +75,10 @@ async function loadAgentsFromDir({ dir, source, claudeDialect }: AgentDirectory)
 				.readFile(filePath, "utf-8")
 				.then(content => {
 					const agent = parseAgent(filePath, content, source, "warn");
+					// Claude Code parity (#20165): plugin agents resolve
+					// ${CLAUDE_PLUGIN_ROOT} / ${OMP_PLUGIN_ROOT} in the Markdown
+					// body when the definition is loaded, not in bash.
+					if (pluginRoot !== undefined) agent.systemPrompt = substitutePluginRoot(agent.systemPrompt, pluginRoot);
 					if (claudeDialect) {
 						// Claude-format frontmatter: `model:` is a Claude alias, not an
 						// OMP selector, and `tools:` uses Claude names (#7966).
@@ -162,6 +178,7 @@ export async function discoverAgents(
 			dir: path.join(plugin.path, "agents"),
 			source: plugin.scope === "project" ? "project" : "user",
 			claudeDialect: pluginClaudeDialect[index],
+			pluginRoot: plugin.path,
 		});
 	});
 

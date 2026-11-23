@@ -259,6 +259,7 @@ async function makeHarness(opts?: { readOnly?: boolean; rejectWith?: unknown }):
 			Object.assign(ctx, { collabGuest: guest });
 		},
 		closeLinkBrowser: () => {},
+		configureDialogEditor: () => {},
 		rerenderInLinkBrowser: () => {},
 		rebuildTranscriptScrollback: () => {},
 		showHookSelector: (
@@ -825,6 +826,7 @@ function makeAskHostContext(): InteractiveModeContext {
 		askContainer: { addChild: () => {}, removeChild: () => {} },
 		editor: { getText: () => "", setText: () => {} },
 		closeLinkBrowser: () => {},
+		configureDialogEditor: () => {},
 		ui: {
 			requestRender: () => {},
 			setFocus: () => {},
