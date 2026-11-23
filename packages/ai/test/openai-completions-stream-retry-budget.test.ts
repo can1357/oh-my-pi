@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 const context: Context = {
@@ -62,25 +63,21 @@ describe("issue #19729 - nested retry layers multiply HTTP 500 retries", () => {
 		server.stop(true);
 	});
 
-	it(
-		"sends one stream's HTTP 500 retries once, not twice",
-		async () => {
-			const model: Model<"openai-completions"> = {
-				...getBundledModel("deepseek", "deepseek-v4-flash"),
-				baseUrl: `http://127.0.0.1:${server.port}/v1`,
-			};
+	it("sends one stream's HTTP 500 retries once, not twice", async () => {
+		const model: Model<"openai-completions"> = {
+			...getBundledModel("deepseek", "deepseek-v4-flash"),
+			baseUrl: `http://127.0.0.1:${server.port}/v1`,
+		};
 
-			const stream = streamSimple(model, context, {
-				apiKey: "dummy",
-				reasoning: "high",
-				providerRetryWait: async () => {},
-			});
-			const result = await stream.result();
+		const stream = streamSimple(model, context, {
+			apiKey: "dummy",
+			reasoning: Effort.High,
+			providerRetryWait: async () => {},
+		});
+		const result = await stream.result();
 
-			expect(result.stopReason).toBe("error");
-			// the transport owns the HTTP retry budget for one stream, so an outer replay must not multiply it.
-			expect(postCount).toBe(6);
-		},
-		30000,
-	);
+		expect(result.stopReason).toBe("error");
+		// the transport owns the HTTP retry budget for one stream, so an outer replay must not multiply it.
+		expect(postCount).toBe(6);
+	}, 30000);
 });
