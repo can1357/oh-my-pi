@@ -14,6 +14,7 @@
 
 - In a compiled omp with no `bun` on PATH, `bun` in a JS eval cell now reports that bun is not installed instead of starting a headless omp ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
+- Hindsight pinned mental-model seeding no longer turns concurrent session starts into server-side duplicate-key errors when sessions share a project tag: a 409/duplicate-key create response is treated as "already exists" and the existing model is reused ([#20273](https://github.com/can1357/oh-my-pi/issues/20273))
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes

@@ -40,6 +40,7 @@
  */
 
 import { logger } from "@oh-my-pi/pi-utils";
+import { HindsightError } from "./client";
 import type { BankScope } from "./bank";
 import type {
 	HindsightClientApi,
@@ -169,9 +170,28 @@ export async function ensureMentalModels(
 				logger.debug("Hindsight: seeded mental model", { bankId, id: seed.id, tags: seed.tags });
 			}
 		} catch (err) {
+			if (isDuplicateMentalModelError(err)) {
+				// A concurrent session seeded the same deterministic id between our
+				// list and our create (#20273). The model now exists and create-only
+				// seeding never modifies it, so treat the conflict as success.
+				logger.debug("Hindsight: mental model already exists (concurrent seed)", { bankId, id: seed.id });
+				continue;
+			}
 			logger.debug("Hindsight: createMentalModel failed", { bankId, id: seed.id, error: String(err) });
 		}
 	}
+}
+
+/**
+ * Whether a create failure means the mental model already exists. Concurrent
+ * sessions seeding the same bank race on the deterministic pinned seed ids:
+ * the loser's POST comes back as a unique-constraint (409) failure even
+ * though the model was created.
+ */
+export function isDuplicateMentalModelError(err: unknown): boolean {
+	if (!(err instanceof HindsightError)) return false;
+	if (err.statusCode === 409) return true;
+	return /duplicate key|already exists/i.test(err.message);
 }
 
 /** Return whether a seed is already represented by current bank metadata. */
