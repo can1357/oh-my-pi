@@ -8,6 +8,7 @@ const probePath = path.resolve(import.meta.dir, "fixtures", "legacy-pi-extension
 const healthProbePath = path.resolve(import.meta.dir, "fixtures", "legacy-pi-extension-cache-health-probe.ts");
 const cjsProbePath = path.resolve(import.meta.dir, "fixtures", "legacy-pi-extension-cjs-cache-probe.ts");
 const transpilerCacheProbePath = path.resolve(import.meta.dir, "fixtures", "legacy-pi-transpiler-cache-probe.ts");
+const lazyCjsEditProbePath = path.resolve(import.meta.dir, "fixtures", "legacy-pi-extension-lazy-cjs-edit-probe.ts");
 const tempDirs: TempDir[] = [];
 
 async function runProbe(
@@ -79,6 +80,33 @@ test("warm CommonJS classification of type-less script dependencies does not rep
 
 	expect(await runProbe(cacheRoot, cjsProbePath, [entry])).toBe("42\n");
 	expect(await runProbe(cacheRoot, cjsProbePath, [entry, "--expect-cache-hit"])).toBe("42\n");
+});
+
+test("a lazy CommonJS helper edited after a warm load keeps its rewritten require", async () => {
+	const tempDir = TempDir.createSync("@legacy-pi-extension-lazy-cjs-");
+	tempDirs.push(tempDir);
+	const cacheRoot = path.join(tempDir.path(), "cache");
+	await fs.mkdir(path.join(cacheRoot, "omp"), { recursive: true });
+	const extensionDir = path.join(tempDir.path(), "extension");
+	const dependencyDir = path.join(extensionDir, "node_modules", "dep");
+	await fs.mkdir(path.join(dependencyDir, "lib"), { recursive: true });
+	await Bun.write(path.join(extensionDir, "package.json"), '{"name":"lazy-cjs-edit","type":"module"}\n');
+	await Bun.write(
+		path.join(extensionDir, "index.js"),
+		'export const loadValue = () => import("./helper.cjs").then(mod => mod.default.value);\n',
+	);
+	await Bun.write(path.join(dependencyDir, "package.json"), '{"name":"dep","main":"lib/entry.js"}\n');
+	await Bun.write(path.join(dependencyDir, "lib", "entry.js"), 'module.exports = { value: "dep" };\n');
+	const helper = path.join(extensionDir, "helper.cjs");
+	const helperSource = (version: string): string =>
+		`const dep = require("dep");\nmodule.exports = { value: "${version}:" + dep.value };\n`;
+	await Bun.write(helper, helperSource("v1"));
+	const entry = path.join(extensionDir, "index.js");
+
+	expect(await runProbe(cacheRoot, lazyCjsEditProbePath, [entry, helper])).toBe("v1:dep\n");
+	// With every source a parse-cache hit, nothing else loads the parser before
+	// the edited helper needs a synchronous re-parse.
+	expect(await runProbe(cacheRoot, lazyCjsEditProbePath, [entry, helper, helperSource("v2")])).toBe("v2:dep\n");
 });
 
 test("legacy extension parse cache drops obsolete CommonJS export-analysis columns", async () => {
