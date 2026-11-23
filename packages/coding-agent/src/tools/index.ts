@@ -943,11 +943,13 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	}
 	if (!restrictToolNames) {
 		// Special tools stay registered so the session can present them top-level
-		// whenever `bash` is off; while it is on they run as commands.
+		// whenever `bash` is off; while it is on they run as commands. They are
+		// host-native, so they share the built-in provenance of the factory tools.
 		const planModeEnabled = session.getPlanModeState?.()?.enabled === true;
 		for (const special of specialToolCommands(session)) {
 			const wrapped = wrapToolWithMetaNotice(special);
 			toolRegistry.set(wrapped.name, wrapped);
+			builtInNames.add(wrapped.name);
 			if (toolCommandsEnabled || !specialToolApplies(wrapped.name, { tools, planModeEnabled })) continue;
 			tools.push(wrapped);
 			presentedSpecialTool = true;

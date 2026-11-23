@@ -527,6 +527,30 @@ export function isPaseoEmbedder(env: NodeJS.ProcessEnv = Bun.env): boolean {
 }
 
 /**
+ * Paradev (paradevai/paradev, formerly Superset) renders its terminals with
+ * xterm.js and the Unicode 11 width table, which draws Hangul Compatibility
+ * Jamo at 2 cells. Its PTYs drop `TERM_PROGRAM` and carry `SUPERSET_TERMINAL_ID`
+ * (and `PARADEV_TERMINAL_ID` on newer builds) instead.
+ */
+export function isParadevEmbedder(env: NodeJS.ProcessEnv = Bun.env): boolean {
+	return Boolean(env.PARADEV_TERMINAL_ID || env.SUPERSET_TERMINAL_ID);
+}
+
+/**
+ * Hangul Compatibility Jamo width for the detected terminal, with embedder
+ * carve-outs. Inside a multiplexer the multiplexer owns the cell grid, so the
+ * embedder's width does not apply there.
+ */
+export function resolveHangulJamoWidth(
+	terminalId: TerminalId,
+	env: NodeJS.ProcessEnv = Bun.env,
+	platform: NodeJS.Platform = process.platform,
+): HangulCompatibilityJamoWidth {
+	if (isParadevEmbedder(env) && !isInsideTerminalMultiplexer(env)) return 2;
+	return getTerminalInfo(terminalId, platform, env).hangulJamoWidth;
+}
+
+/**
  * Resolve the image protocol for a non-forced runtime: static per-terminal
  * support (with Warp's platform carve-out), then the multiplexer fallback,
  * then host carve-outs. `isTTY` is injectable because the fallback only fires
@@ -757,6 +781,8 @@ export interface RuntimeTerminal extends TerminalInfo {
 	 * driven: false until {@link ProcessTerminal} resolves it.
 	 */
 	glyphProtocol: boolean;
+	/** Hangul Compatibility Jamo cell width, with embedder carve-outs applied. */
+	hangulJamoWidth: HangulCompatibilityJamoWidth;
 }
 
 export const TERMINAL: RuntimeTerminal = (() => {
@@ -788,6 +814,7 @@ export const TERMINAL: RuntimeTerminal = (() => {
 	// depth), so Apple Terminal and other unproven hosts fall back to the flat
 	// CSI 4 m / CSI 24 m underline the typo renderer needs to avoid black bars.
 	resolved.styledUnderlines = detectStyledUnderlineSupport(resolved.id, Bun.env);
+	resolved.hangulJamoWidth = resolveHangulJamoWidth(resolved.id, Bun.env);
 	resolved.glyphProtocol = false;
 	return resolved;
 })();
