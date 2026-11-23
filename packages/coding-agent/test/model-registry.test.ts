@@ -8,6 +8,7 @@ import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-comple
 import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { toPiNativeModelSpec } from "@oh-my-pi/pi-catalog/discovery/pi-native";
 import { resolveMaxContextWindow } from "@oh-my-pi/pi-catalog/compat/context-window";
 import { factoryDroidRegistry, resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -640,9 +641,9 @@ describe("ModelRegistry", () => {
 			// `mergeDiscoveredModel` dropped `transport: pi-native` (raw catalog
 			// rows carry no transport), so the next stream went out as plain
 			// openai-completions to `${baseUrl}/chat/completions` instead of the
-			// gateway's `/v1/pi/stream`. A pi-native provider no longer runs the
-			// provider's own discovery at all: the gateway serves none of
-			// OpenRouter's listing routes.
+			// gateway's `/v1/pi/stream`. A pi-native provider never runs the
+			// provider's own discovery: its roster comes from the gateway's
+			// `/v1/pi/models`, and a gateway without that route keeps the bundled one.
 			writeRawModelsJson({
 				openrouter: {
 					baseUrl: "http://localhost:4000",
@@ -667,7 +668,7 @@ describe("ModelRegistry", () => {
 			expect(preRefresh.every(m => m.baseUrl === "http://localhost:4000")).toBe(true);
 
 			await registry.refreshProvider("openrouter", "online");
-			expect(requestedUrls).toEqual([]);
+			expect(requestedUrls).toEqual(["http://localhost:4000/v1/pi/models"]);
 
 			// Post-refresh: every openrouter model must still route through the
 			// pi-native transport.
@@ -677,6 +678,51 @@ describe("ModelRegistry", () => {
 				expect(model.transport).toBe("pi-native");
 				expect(model.baseUrl).toBe("http://localhost:4000");
 			}
+		});
+
+		test("pi-native provider takes its roster from the gateway", async () => {
+			writeRawModelsJson({
+				"openai-codex": {
+					baseUrl: "http://localhost:4000",
+					apiKey: "gateway-token",
+					transport: "pi-native",
+				},
+			});
+			const [kept, pruned] = getBundledModels("openai-codex").filter(model => modelKind(model) === "chat");
+			const gatewayOnly = buildModel({
+				id: "gpt-gateway-only",
+				name: "Gateway Only",
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				baseUrl: "https://chatgpt.com/backend-api",
+				reasoning: true,
+				input: ["text", "image"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 500_000,
+				maxTokens: 128_000,
+			});
+			const otherProvider = getBundledModels("anthropic")[0];
+			const requests: Request[] = [];
+			const fetchMock: FetchImpl = async (input, init) => {
+				const request = new Request(input instanceof Request ? input.url : String(input), init);
+				requests.push(request);
+				return Response.json({ models: [kept, gatewayOnly, otherProvider].map(toPiNativeModelSpec) });
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			await registry.refreshProvider("openai-codex", "online");
+
+			expect(requests.map(request => request.url)).toEqual(["http://localhost:4000/v1/pi/models"]);
+			expect(requests[0].headers.get("Authorization")).toBe("Bearer gateway-token");
+			expect(registry.find("openai-codex", "gpt-gateway-only")).toMatchObject({
+				transport: "pi-native",
+				baseUrl: "http://localhost:4000",
+				contextWindow: 500_000,
+				thinking: { efforts: gatewayOnly.thinking?.efforts },
+			});
+			expect(registry.find("openai-codex", kept.id)?.transport).toBe("pi-native");
+			expect(registry.find("openai-codex", pruned.id)).toBeUndefined();
+			expect(registry.find("openai-codex", otherProvider.id)).toBeUndefined();
 		});
 	});
 
