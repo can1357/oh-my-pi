@@ -17,6 +17,8 @@
 //! **State.** Variables, functions, aliases, options, traps and the working
 //! directory live in the store and the root virtual process; every command
 //! runs on the root ([`VprocSel::Root`]), so they persist across commands.
+//! `errexit` is the exception: every command ends with it off, so a `set -e`
+//! stops only the command that ran it, never a later one.
 //! An `EXIT` trap is consumed when it fires at a run boundary; other traps
 //! remain installed.
 //! Each command starts with its own standard streams, even if an earlier
@@ -79,7 +81,7 @@ use crate::{
 		Budget, CallId, Cx, Engine, EngineConfig, EventMask, EventSink, Fs, ImageDiff, MemStore,
 		PipeTap, Profile, RestoreError, RestoreOpts, RunId, Script, Shell, ShellError, ShellInit,
 		Signal, StateStore, Step, ToolCall, UnitId, VprocSel,
-		store::{BlobSlot, Key, MiscKey, Record, Table},
+		store::{BlobSlot, Key, MiscKey, OptId, Record, Table},
 	},
 	commands::SessionCommands,
 	host::{PiHost, SpawnObserver, TERM_GRACE},
@@ -964,6 +966,7 @@ impl Driver {
 		self.host.set_reported_error(None);
 		self.host.set_commands(None);
 		self.restore_overlay(saved);
+		self.shell.set_root_option(&mut self.store, OptId::Errexit, false);
 		self.image.publish(&mut self.store);
 		let cwd = store_cwd(&self.store);
 		// The caller may have stopped waiting (dropped future).
@@ -1980,7 +1983,18 @@ mod tests {
 		assert!(!sh(&mut s, "false").await.outcome.exited);
 		assert!(sh(&mut s, "exit 0").await.outcome.exited);
 		assert!(sh(&mut s, "set -e; false; echo no").await.outcome.exited);
-		assert!(!sh(&mut s, "set +e; (exit 4)").await.outcome.exited);
+		assert!(!sh(&mut s, "(exit 4)").await.outcome.exited);
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn errexit_ends_with_the_command_other_options_persist() {
+		let mut s = session();
+		assert_eq!(sh(&mut s, "set -eu; false; echo no").await.stdout, "");
+		let c = sh(&mut s, "false; echo \"$-\"; echo \"$SHELLOPTS\"").await;
+		assert_eq!(c.outcome.status, 0);
+		let (flags, shellopts) = c.stdout.trim_end().split_once('\n').unwrap();
+		assert!(flags.contains('u') && !flags.contains('e'), "{flags}");
+		assert!(shellopts.contains("nounset") && !shellopts.contains("errexit"), "{shellopts}");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

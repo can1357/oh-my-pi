@@ -68,7 +68,7 @@ use crate::bash::{
 	fd::{FdOrigin, FdRef, FdTable},
 	fs::File,
 	host::{EnvView, Host, StdFd, Verdict},
-	ids::{CallId, CmdTag, JobId, ModeId, RunId, ToolRef, UnitId, Vpid},
+	ids::{CallId, CmdTag, Dialect, JobId, ModeId, RunId, ToolRef, UnitId, Vpid},
 	image::Records,
 	ir::{self, Unit},
 	signal::{DefaultAction, SigTarget, Signal},
@@ -1756,6 +1756,26 @@ impl Shell {
 		}
 		for fd in 0..3 {
 			fds.set(fd, fresh.get(fd).cloned());
+		}
+	}
+
+	/// Turn root option `opt` on or off between runs, as `set -o` / `set +o`
+	/// would; `SHELLOPTS` follows in the bash dialect. Background jobs keep
+	/// the options they forked with. A store failure abandons every script at
+	/// the next scheduler turn.
+	pub(crate) fn set_root_option(&mut self, store: &mut dyn StateStore, opt: OptId, on: bool) {
+		let (root, vp) = (&mut self.k.root, &mut *self.procs[0]);
+		match state::option(root, store, vp, opt) {
+			Ok(current) if current == on => {},
+			Ok(_) => {
+				state::store_record(root, store, vp, KeyBuf::Opt(opt), Some(Record::Opt(on)));
+				if vp.mode.dialect() == Dialect::Bash
+					&& let Err(err) = state::sync_option_vars(root, store, vp)
+				{
+					self.k.fail(err);
+				}
+			},
+			Err(err) => self.k.fail(err),
 		}
 	}
 

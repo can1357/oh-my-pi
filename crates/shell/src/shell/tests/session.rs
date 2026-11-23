@@ -969,7 +969,8 @@ async fn persistent_shell_reaps_early_exiting_background_pipeline_stage() {
 }
 
 /// `exit` and errexit end the command, not the session: later runs keep
-/// the variables, functions, and options set before them.
+/// the variables and functions set before them. Errexit itself ends with
+/// the command that turned it on.
 #[tokio::test(flavor = "multi_thread")]
 async fn exit_and_errexit_keep_session_state() {
 	let _guard = shell_test_lock().lock().await;
@@ -987,12 +988,12 @@ async fn exit_and_errexit_keep_session_state() {
 	};
 	let state_intact = "test \"$PI_KEPT\" = kept && pi_kept_fn";
 
-	assert_eq!(exit_code("set -e; PI_KEPT=kept; pi_kept_fn() { true; }").await, Some(0));
-	assert_eq!(exit_code("false; true").await, Some(1), "errexit stops the command");
+	let set_state = "set -e; PI_KEPT=kept; pi_kept_fn() { true; }; false; true";
+	assert_eq!(exit_code(set_state).await, Some(1), "errexit stops the command");
 	assert_eq!(exit_code(state_intact).await, Some(0), "state lost after errexit");
+	assert_eq!(exit_code("false; true").await, Some(0), "errexit carried into a later command");
 	assert_eq!(exit_code("exit 3").await, Some(3));
 	assert_eq!(exit_code(state_intact).await, Some(0), "state lost after exit");
-	assert_eq!(exit_code("false; exit 0").await, Some(1), "errexit option lost");
 }
 
 /// An EXIT trap belongs to one run, while signal traps persist in the session.

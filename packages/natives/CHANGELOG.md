@@ -9,6 +9,10 @@
 
 - Added `commitReconciled()` to publish private-index commits without leaving staged reversals when the shared index is locked ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
 
+### Changed
+
+- A persistent `Shell` session no longer carries `set -e` into later commands: errexit stops only the command that turned it on, while other options (`set -u`, `pipefail`, `shopt`) still persist
+
 ## [19.1.1] - 2026-11-23
 
 ### Fixed
