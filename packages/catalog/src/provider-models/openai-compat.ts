@@ -7437,8 +7437,11 @@ const ZAI_ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic";
 // general PAYG `/api/paas/v4`, which would bypass plan quota or fail auth.
 const ZAI_OPENAI_BASE_URL = "https://api.z.ai/api/coding/paas/v4";
 
+/** Z.AI's transports; {@link resolveZaiApi} picks one per model id. */
+type ZaiApi = "anthropic-messages" | "openai-completions";
+
 /** Resolves the transport and endpoint for one Z.AI model catalog entry. */
-export function resolveZaiApi(modelId: string): { api: "anthropic-messages" | "openai-completions"; baseUrl: string } {
+export function resolveZaiApi(modelId: string): { api: ZaiApi; baseUrl: string } {
 	const api = apiRouteFor("zai", modelId)?.api ?? "anthropic-messages";
 	switch (api) {
 		case "anthropic-messages":
@@ -7448,6 +7451,44 @@ export function resolveZaiApi(modelId: string): { api: "anthropic-messages" | "o
 		default:
 			throw new Error(`Unsupported Z.AI API route: ${api}`);
 	}
+}
+
+/** Discovery inputs for {@link zaiModelManagerOptions}. */
+export interface ZaiModelManagerConfig {
+	apiKey?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Model-manager options for the `zai` GLM Coding Plan. Discovery lists the
+ * coding endpoint's `/models` roster, which carries ids only: bundled rows
+ * supply metadata for known ids and {@link resolveZaiApi} routes each id to its
+ * transport. Not authoritative, because the roster omits live SKUs such as
+ * `glm-5v-turbo` that stay reachable through the bundled catalog.
+ */
+export function zaiModelManagerOptions(config?: ZaiModelManagerConfig): ModelManagerOptions<ZaiApi> {
+	const apiKey = config?.apiKey;
+	if (!apiKey) return { providerId: "zai" };
+	return {
+		providerId: "zai",
+		fetchDynamicModels: () => {
+			const references = createBundledReferenceMap<ZaiApi>("zai");
+			return fetchOpenAICompatibleModels<ZaiApi>({
+				api: "anthropic-messages",
+				provider: "zai",
+				baseUrl: ZAI_OPENAI_BASE_URL,
+				apiKey,
+				mapModel: (entry, defaults) => {
+					const routed = { ...defaults, ...resolveZaiApi(defaults.id) };
+					const model = mapWithBundledReference(entry, routed, references.get(defaults.id));
+					return model.reasoning === undefined && isGlmReasoningIdentity("zai", model.id, "4.5")
+						? { ...model, reasoning: true }
+						: model;
+				},
+				fetch: config?.fetch,
+			});
+		},
+	};
 }
 
 const COPILOT_DEFAULT_RESOLUTION = {
