@@ -12,12 +12,6 @@
 ### Fixed
 
 - Fixed the footer on spilled bash output naming the bare `local://N.log`: it now names `local://N.log:raw`, the selector that reads the original output ([#18764](https://github.com/can1357/oh-my-pi/issues/18764), [#19964](https://github.com/can1357/oh-my-pi/pull/19964) by [@JamieJ5926](https://github.com/JamieJ5926))
-- `prewalkWouldBeNoop` no longer skips a handoff when only the model's upstream pin changes ([#19664](https://github.com/can1357/oh-my-pi/pull/19664) by [@taibenvenuti](https://github.com/taibenvenuti)).
-- Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
-- Fixed `<svg>` pictures blinking in ask forms whose questions overflow the panel ([#20017](https://github.com/can1357/oh-my-pi/pull/20017) by [@jaredlyon](https://github.com/jaredlyon))
-- Fixed the status line's `time_spent` readout freezing within a wall-clock second while a turn is active; the displayed tenths now advance at their own visible granularity ([#20064](https://github.com/can1357/oh-my-pi/pull/20064) by [@jchanghong023](https://github.com/jchanghong023))
-- Fixed Enter pressed again on a model row just assigned to a role removing that role and falling back to the default role's model ([#12310](https://github.com/can1357/oh-my-pi/issues/12310), [#19986](https://github.com/can1357/oh-my-pi/pull/19986) by [@JamieJ5926](https://github.com/JamieJ5926))
-- The quick model picker (alt+p) in a session limited by `--models` or `enabledModels` now lists models the catalog gained since the session started, as the unlimited picker does ([#19878](https://github.com/can1357/oh-my-pi/pull/19878) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed handoffs being skipped when only the model’s upstream pin changes.
 - Fixed the `/usage` activity calendar retaining its history when a refresh fails, while indicating that the data is not synced.
 - Fixed SVG images blinking in ask forms when questions extend beyond the panel.
