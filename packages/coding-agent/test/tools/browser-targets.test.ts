@@ -1,7 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
-import { cdpTargets, findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
+import { createBrowserPrelude, resolveBrowserKind } from "@oh-my-pi/pi-coding-agent/tools/browser";
+import { cdpTargets, findFreeCdpPort, findRelayForTarget } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import {
 	DISCARDED_TABS_PROTOCOL_VERSION,
 	type TabSnapshot,
@@ -10,6 +13,7 @@ import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/to
 import { releaseTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { getBrowserRelayInstallRegistryFile } from "@oh-my-pi/pi-utils/dirs";
 import { type FakeAnswer, type FakeDaemon, startFakeDaemon } from "./tern-fake-daemon";
 
 const PANE = 3;
@@ -245,5 +249,125 @@ describe("browser targets with the relay", () => {
 		expect(text).toBe(
 			'Chrome pages via the relay (adopt one with target set to its URL or a title substring):\n- "Mail" https://mail.example/ (active)\n- "Docs" https://docs.example/',
 		);
+	}, 20_000);
+});
+
+describe("browser targets with a relay per Chrome profile", () => {
+	/**
+	 * Two relay hosts under a home of their own, as the extensions of two Chrome profiles serve them: `older` started
+	 * first and `newer` last, so a new tab goes to `newer`. Without the change a page of `older` is invisible.
+	 */
+	async function startRelayProfiles(
+		olderTabs: TabSnapshot[],
+		newerTabs: TabSnapshot[],
+	): Promise<{ cleanup(): Promise<void>; newer: string; older: string }> {
+		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-profiles-"));
+		const homedir = spyOn(os, "homedir").mockReturnValue(home);
+		const olderPort = await findFreeCdpPort();
+		const older = startRelayServer({ port: olderPort });
+		const olderExtension = await connectExtension(olderPort, olderTabs);
+		const newerPort = await findFreeCdpPort();
+		const newer = startRelayServer({ port: newerPort });
+		const newerExtension = await connectExtension(newerPort, newerTabs);
+		const endpoints = path.join(path.dirname(getBrowserRelayInstallRegistryFile()), "endpoints");
+		await fs.mkdir(endpoints, { recursive: true });
+		await Bun.write(path.join(endpoints, `${process.pid}-${newerPort}`), "");
+		await Bun.write(path.join(endpoints, `${process.pid}-${olderPort}`), "");
+		// Discovery prefers the host whose endpoint file changed last: date the older host's a minute back.
+		const minuteAgo = new Date(Date.now() - 60_000);
+		await fs.utimes(path.join(endpoints, `${process.pid}-${olderPort}`), minuteAgo, minuteAgo);
+		return {
+			newer: `http://127.0.0.1:${newerPort}`,
+			older: `http://127.0.0.1:${olderPort}`,
+			async cleanup() {
+				olderExtension.close();
+				newerExtension.close();
+				older.stop();
+				newer.stop();
+				homedir.mockRestore();
+				await fs.rm(home, { recursive: true, force: true });
+			},
+		};
+	}
+
+	it("lists the pages of every relay, each tagged with it, when several Chrome profiles run the extension", async () => {
+		for (const key of ENV_KEYS) delete process.env[key];
+		const relays = await startRelayProfiles(
+			[snapshot(1, { url: "https://mail.example/", title: "Mail", active: true })],
+			[snapshot(2, { url: "https://docs.example/", title: "Docs" })],
+		);
+		try {
+			const { text, value } = await invoke(session(), { action: "targets", timeout: 10, app: "relay" });
+			expect(value).toEqual([
+				{
+					target: "https://docs.example/",
+					title: "Docs",
+					url: "https://docs.example/",
+					shown: false,
+					relay: relays.newer,
+				},
+				{
+					target: "https://mail.example/",
+					title: "Mail",
+					url: "https://mail.example/",
+					shown: true,
+					relay: relays.older,
+				},
+			]);
+			expect(text).toStartWith("Chrome pages via the relay. 2 relays are running, one per Chrome profile");
+			expect(text).toContain(`- relay ${relays.newer} (new tabs open here)`);
+			expect(text.indexOf('- "Docs" https://docs.example/')).toBeLessThan(text.indexOf(`- relay ${relays.older}`));
+			expect(text).toContain(`- relay ${relays.older}`);
+			expect(text.endsWith('- "Mail" https://mail.example/ (active)')).toBe(true);
+			// A relay named by `app` lists its own pages alone, in the one-relay shape.
+			const bound = await invoke(session(), { action: "targets", timeout: 10, app: relays.older });
+			expect(bound.value).toEqual([
+				{ target: "https://mail.example/", title: "Mail", url: "https://mail.example/", shown: true },
+			]);
+		} finally {
+			await relays.cleanup();
+		}
+	}, 20_000);
+
+	it("finds the relay that has the page a target names, past one that does not answer", async () => {
+		const relays = await startRelayProfiles(
+			[snapshot(1, { url: "https://mail.example/", title: "Mail" })],
+			[snapshot(2, { url: "https://docs.example/", title: "Docs" })],
+		);
+		try {
+			expect(await findRelayForTarget([relays.newer, relays.older], "Mail")).toBe(relays.older);
+			expect(await findRelayForTarget([relays.newer, relays.older], "docs.example")).toBe(relays.newer);
+			expect(await findRelayForTarget([relays.newer, "http://127.0.0.1:9", relays.older], "Mail")).toBe(
+				relays.older,
+			);
+			expect(await findRelayForTarget([relays.newer, relays.older], "nowhere.example")).toBeNull();
+		} finally {
+			await relays.cleanup();
+		}
+	}, 20_000);
+
+	it("drives the relay an app URL names and attaches to any other CDP URL", async () => {
+		for (const key of ENV_KEYS) delete process.env[key];
+		const relays = await startRelayProfiles([], []);
+		try {
+			expect(resolveBrowserKind({ action: "open", app: `${relays.newer}/` }, session())).toEqual({
+				kind: "relay",
+				cdpUrl: relays.newer,
+			});
+			expect(resolveBrowserKind({ action: "open", app: "http://127.0.0.1:9222" }, session())).toEqual({
+				kind: "connected",
+				cdpUrl: "http://127.0.0.1:9222",
+			});
+			// PI_BROWSER_RELAY=0 stays the kill switch for a relay named by URL.
+			expect(
+				resolveBrowserKind({ action: "open", app: relays.newer }, session(), { PI_BROWSER_RELAY: "0" }),
+			).toEqual({ kind: "connected", cdpUrl: relays.newer });
+		} finally {
+			await relays.cleanup();
+		}
+		// A configured browser.relayUrl names its relay without any running host to discover.
+		expect(
+			resolveBrowserKind({ action: "open", app: relays.older }, session({ "browser.relayUrl": relays.older })),
+		).toEqual({ kind: "relay", cdpUrl: relays.older });
 	}, 20_000);
 });

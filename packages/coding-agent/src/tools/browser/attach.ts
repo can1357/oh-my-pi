@@ -609,6 +609,8 @@ export interface CdpTarget {
 	url: string;
 	/** Whether it is the active tab of its Chrome window; only the relay reports it. */
 	shown?: boolean;
+	/** The relay listing the page, when several run: one per Chrome profile with the omp extension. */
+	relay?: string;
 }
 
 /** The adoptable pages among CDP `/json` entries; malformed, discarded, and internal entries are skipped. */
@@ -646,6 +648,22 @@ export async function listCdpTargets(cdpUrl: string, signal?: AbortSignal): Prom
 	const entries = await fetchRelayEntries(cdpUrl, signal);
 	if (!entries) throw new ToolError(`The browser at ${cdpUrl} did not list its pages (GET /json failed).`);
 	return cdpTargets(entries);
+}
+
+/**
+ * The first relay in `cdpUrls` whose Chrome has a page matching `matcher` (a target id, a URL or a title substring,
+ * as `target` takes one), or null when none lists one. A relay that does not answer is passed over.
+ */
+export async function findRelayForTarget(
+	cdpUrls: readonly string[],
+	matcher: string,
+	signal?: AbortSignal,
+): Promise<string | null> {
+	const listings = await Promise.all(cdpUrls.map(cdpUrl => fetchRelayEntries(cdpUrl, signal)));
+	const index = listings.findIndex(entries =>
+		entries?.some(entry => entry.type === "page" && relayEntryMatches(entry, matcher)),
+	);
+	return index < 0 ? null : (cdpUrls[index] ?? null);
 }
 
 function relayEntryMatches(entry: RelayJsonEntry, matcher: string): boolean {

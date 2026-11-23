@@ -40,3 +40,31 @@ export function discoverRelayEndpoints(): string[] {
 		.sort((a, b) => b.started - a.started)
 		.map(({ port }) => `http://127.0.0.1:${port}`);
 }
+
+/** A relay URL without the whitespace and trailing slashes a setting or an `app` may carry. */
+export function trimRelayUrl(cdpUrl: string): string {
+	return cdpUrl.trim().replace(/\/+$/, "");
+}
+
+/**
+ * Whether `cdpUrl` names a relay an open can pick by URL: the configured `browser.relayUrl`, or a live local host
+ * (each Chrome profile running the omp extension serves one). Any other URL is a browser to attach to.
+ */
+export function isRelayEndpointUrl(cdpUrl: string, configuredUrl?: string): boolean {
+	const url = trimRelayUrl(cdpUrl);
+	if (!url) return false;
+	const configured = configuredUrl?.trim();
+	if (configured && trimRelayUrl(configured) === url) return true;
+	return discoverRelayEndpoints().includes(url);
+}
+
+/**
+ * The relays an open with `target` looks for the page in: the configured `browser.relayUrl` alone (it names one
+ * relay), otherwise every live local host, `preferred` (the relay a new tab opens in) first.
+ */
+export function relayEndpointsToSearch(preferred: string, configuredUrl?: string): string[] {
+	const configured = configuredUrl?.trim();
+	if (configured) return [trimRelayUrl(configured)];
+	const others = discoverRelayEndpoints().filter(endpoint => endpoint !== preferred);
+	return preferred ? [preferred, ...others] : others;
+}
