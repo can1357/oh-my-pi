@@ -452,6 +452,7 @@ export async function initDb(): Promise<Database> {
 			PRIMARY KEY (session_file, tool_call_id)
 		) WITHOUT ROWID;
 		CREATE INDEX IF NOT EXISTS idx_tool_approvals_tool_requested ON tool_approvals(tool_name, requested_at);
+		CREATE INDEX IF NOT EXISTS idx_tool_approvals_call ON tool_approvals(tool_call_id);
 		CREATE INDEX IF NOT EXISTS idx_tool_approvals_requested ON tool_approvals(requested_at);
 	`);
 
@@ -1141,7 +1142,20 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 					for (const table of SPOTLIGHT_TABLES) {
 						changes += database.query(`DELETE FROM ${table} WHERE session_file = ?`).run(sessionFile).changes;
 					}
-					changes += database.query("DELETE FROM tool_approvals WHERE session_file = ?").run(sessionFile).changes;
+					const parsedApprovalIds = new Set(result.toolApprovals.map(row => row.toolCallId));
+					const storedApprovals = database
+						.query<{ tool_call_id: string }, [string]>(
+							"SELECT tool_call_id FROM tool_approvals WHERE session_file = ?",
+						)
+						.all(sessionFile);
+					if (storedApprovals.some(row => !parsedApprovalIds.has(row.tool_call_id))) {
+						reconcile = true;
+					}
+					if (storedApprovals.length > 0) {
+						changes += database
+							.query("DELETE FROM tool_approvals WHERE session_file = ?")
+							.run(sessionFile).changes;
+					}
 				}
 				// The parse covers the whole transcript: drop compactions it no longer holds or has
 				// rewritten. A removed one may live on in a fork, which only another replay can credit.
@@ -1190,6 +1204,7 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 			updateToolResults(parsedRows(writes, result => result.toolResults)) +
 			upsertToolApprovals(parsedRows(writes, result => result.toolApprovals)) +
 			insertSnapcompactCompactions(parsedRows(writes, result => result.snapcompactCompactions)) +
+			insertSpotlightSessions(parsedRows(writes, result => result.spotlight.sessions)) +
 			updateSpotlightTitles(parsedRows(writes, result => result.spotlight.titles)) +
 			upsertSpotlightShapes(parsedRows(writes, result => result.spotlight.shapes)) +
 			insertSpotlightCalls(parsedRows(writes, result => result.spotlight.calls)) +
@@ -2103,7 +2118,18 @@ export function insertSnapcompactCompactions(rows: Iterable<SnapcompactCompactio
  */
 export function upsertToolApprovals(rows: Iterable<ToolApprovalStats>): number {
 	if (!db) return 0;
+	const mergeColumns = [
+		"parent_tool_call_id",
+		"approval_mode",
+		"requested_at",
+		"request_reason",
+		"approved",
+		"resolved_at",
+		"resolve_reason",
+	] as const;
 	const coalesce = (column: string) => `${column} = COALESCE(excluded.${column}, tool_approvals.${column})`;
+	const changed = (column: string) =>
+		`COALESCE(excluded.${column}, tool_approvals.${column}) IS NOT tool_approvals.${column}`;
 	const writer = new ChunkedInsert(db, {
 		verb: "INSERT",
 		table: "tool_approvals",
@@ -2122,7 +2148,8 @@ export function upsertToolApprovals(rows: Iterable<ToolApprovalStats>): number {
 		],
 		identity: ["tool_call_id"],
 		upsert: `ON CONFLICT(session_file, tool_call_id) DO UPDATE SET
-			${["parent_tool_call_id", "approval_mode", "requested_at", "request_reason", "approved", "resolved_at", "resolve_reason"].map(coalesce).join(",\n")}`,
+			${mergeColumns.map(coalesce).join(",\n")}
+			WHERE ${mergeColumns.map(changed).join("\n\t\t\tOR ")}`,
 	});
 	return atomically(db, () => {
 		for (const row of rows) {
