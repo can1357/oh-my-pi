@@ -410,8 +410,12 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		const isHandleLike = value => value instanceof EvalHandle || value instanceof PendingHandle;
 		// `Array.from(1800)` is `[]`: a number would otherwise return at once, silently, where a sleep was meant.
 		if (typeof handles === "number") throw new TypeError(WAIT_NOT_A_SLEEP);
-		const raw = isHandleLike(handles) ? [handles] : Array.from(handles ?? []);
-		const items = await Promise.all(raw);
+		const raw = isHandleLike(handles) || typeof handles === "string" ? [handles] : Array.from(handles ?? []);
+		const items = (await Promise.all(raw)).map(value =>
+			typeof value === "string" && value.length > 0
+				? new AgentHandle(value.startsWith("agent://") ? value.slice(8) : value, "task")
+				: value,
+		);
 		for (const handle of items) {
 			if (!(handle instanceof EvalHandle)) throw new TypeError("wait() expects agent or completion handles");
 		}
