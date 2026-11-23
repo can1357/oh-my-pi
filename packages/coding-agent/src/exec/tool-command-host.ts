@@ -1,6 +1,7 @@
 import type { AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import type { ShellCommandRequest, ShellCommandResult } from "@oh-my-pi/pi-natives";
+import { normalizePathForComparison } from "@oh-my-pi/pi-utils";
 import type { Tool, ToolSession } from "../tools";
 import { specialToolCommands } from "../tools/resolve";
 import {
@@ -96,6 +97,18 @@ export function createToolCommandHandler(options: {
 		if (!state || !tool) {
 			onDispatch?.(fallback, index);
 			return { stdout: "", stderr: `${name}: command is no longer available\n`, exitCode: 1 };
+		}
+		if (
+			fallback.mode === "execute" &&
+			request.cwd !== session.cwd &&
+			normalizePathForComparison(request.cwd) !== normalizePathForComparison(session.cwd)
+		) {
+			onDispatch?.(fallback, index);
+			return {
+				stdout: "",
+				stderr: `${name}: shell cwd ${JSON.stringify(request.cwd)} differs from session cwd ${JSON.stringify(session.cwd)}; run this tool command from the session cwd\n`,
+				exitCode: 1,
+			};
 		}
 		const dispatchState = special ? specialCommandState(state, special) : state;
 

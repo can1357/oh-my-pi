@@ -76,10 +76,12 @@ A tool mounted as a session command (`isMountableAsToolCommand`) is a command of
 - required top-level scalar/enum fields are positionals in schema order;
 - every field also takes `--flag value` (underscores become dashes; a nested field is `--a.b`);
 - a boolean field is `--flag` or `--no-flag`;
-- an array field repeats its flag;
+- an array flag accepts consecutive values (`--paths a b`) and can be repeated (`--paths a --paths b`). Commas stay part of the value. Put positionals before an array flag or after `--`;
 - `-j` / `--json <JSON>` merges a raw object;
 - `@FILE` and `-` merge a JSON object, or bind their text to the next positional (`-` reads stdin);
 - `--help` prints the schema-derived usage.
+
+Tool commands execute from the session cwd. If the shell is in a different directory, the command exits with code `1` and reports both directories instead of running in the wrong tree. `--help` works from either directory.
 
 A usage error exits `2`; the tool's own failure exits `1`. Each invocation is recorded on the result as `details.toolCommands` (partial and final results), in invocation order. A line naming a tool command stays on the embedded engine even when a client terminal is available, and `pty: true` refuses it (`<name> is a session tool command and cannot run in a PTY; run it without \`pty\`.`). A line made only of tool commands — joined by `;`, `&&`, `||`, `|`, `|&`, or newlines, with no redirection, expansion, or substitution — passes the outer bash approval gate; each tool is approved on its own tier and `tools.approval.<tool>` policy when it runs. Image blocks a tool returns reach the shell as kitty graphics on stdout, and the output pipeline decodes terminal graphics from any command into attached images plus `Image saved: <path>` link lines.
 

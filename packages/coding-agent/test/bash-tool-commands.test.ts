@@ -90,6 +90,21 @@ describe.skipIf(process.platform === "win32")("tool commands in the bash tool", 
 		]);
 	});
 
+	it("refuses a mounted tool after cd instead of running it from the session cwd", async () => {
+		const executed: unknown[] = [];
+		const child = path.join(cwd, "child");
+		await fs.mkdir(child);
+		const tool = new BashTool(bashSession([flagTool("fake", executed)]));
+		const { result, text } = await run(tool, "cd child && fake --flag v");
+
+		expect(executed).toEqual([]);
+		expect(text).toContain(`shell cwd ${JSON.stringify(child)}`);
+		expect(text).toContain(`session cwd ${JSON.stringify(cwd)}`);
+		expect(result.details?.toolCommands).toEqual([
+			expect.objectContaining({ tool: "fake", mode: "execute", exitCode: 1 }),
+		]);
+	});
+
 	it("records two tools of one line in invocation order", async () => {
 		const tool = new BashTool(bashSession([flagTool("fake"), flagTool("other")]));
 		const { result, text } = await run(tool, "fake --flag a; other --flag b");
@@ -104,9 +119,13 @@ describe.skipIf(process.platform === "win32")("tool commands in the bash tool", 
 		expect(text).toContain("FAKE:PIPED");
 	});
 
-	it("prints a tool's usage for --help without executing it", async () => {
+	it("prints a tool's usage for --help even outside the session cwd", async () => {
 		const executed: unknown[] = [];
-		const { result, text } = await run(new BashTool(bashSession([flagTool("fake", executed)])), "fake --help");
+		await fs.mkdir(path.join(cwd, "child"));
+		const { result, text } = await run(
+			new BashTool(bashSession([flagTool("fake", executed)])),
+			"cd child && fake --help",
+		);
 
 		expect(text).toContain("--flag");
 		expect(executed).toEqual([]);

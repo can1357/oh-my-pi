@@ -82,6 +82,29 @@ describe("schema-derived tool command argument binding", () => {
 		});
 	});
 
+	it("collects array values up to the next flag or -- without splitting commas", async () => {
+		const arraySchema = {
+			type: "object",
+			properties: {
+				paths: { type: "array", items: { type: "string" } },
+				offsets: { type: "array", items: { type: "number" } },
+				file: { type: "string" },
+			},
+			required: ["file"],
+		};
+		const options = { cwd: "/", stdin: "" };
+		expect(
+			await parseToolArgs(
+				arraySchema,
+				["--paths", "a,b.ts", "with space.ts", "--offsets", "-1", "-0.5", "--", "-file"],
+				options,
+			),
+		).toEqual({ paths: ["a,b.ts", "with space.ts"], offsets: [-1, -0.5], file: "-file" });
+		await expect(parseToolArgs(arraySchema, ["--paths", "--", "file"], options)).rejects.toThrow(
+			"flag `--paths` requires a value",
+		);
+	});
+
 	it("rejects malformed scalars and enum members", async () => {
 		await expect(parse(["bogus"])).rejects.toBeInstanceOf(ToolCliUsageError);
 		await expect(parse(["--count", "1.5"])).rejects.toBeInstanceOf(ToolCliUsageError);

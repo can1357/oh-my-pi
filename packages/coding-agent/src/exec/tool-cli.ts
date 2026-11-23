@@ -685,6 +685,12 @@ function validateRequired(schema: JsonObject, value: unknown, propertyPath: stri
 	}
 }
 
+function endsArrayValues(argument: string, kind: ScalarKind): boolean {
+	if (!argument.startsWith("-") || argument === "-") return false;
+	// A negative number is a value, not an option.
+	return (kind !== "integer" && kind !== "number") || !Number.isFinite(Number(argument));
+}
+
 /** Bind shell arguments entirely from a JSON schema; no tool-specific parser is involved. */
 export async function parseToolArgs(
 	schema: unknown,
@@ -752,15 +758,24 @@ export async function parseToolArgs(
 			continue;
 		}
 		if (negative) throw new ToolCliUsageError(`unknown flag \`${argument}\``);
-		const raw = inline ?? argv[++index];
-		if (raw === undefined) throw new ToolCliUsageError(`flag \`${argument}\` requires a value`);
-		const source = await readArgumentSource(raw, options);
-		insertValue(
-			overrides,
-			leaf.path,
-			coerce(leaf, source ? stripOneNewline(source.text) : raw, argument),
-			leaf.repeatable,
-		);
+		let raw = inline ?? argv[index + 1];
+		if (raw === undefined || (inline === undefined && leaf.repeatable && endsArrayValues(raw, leaf.kind))) {
+			throw new ToolCliUsageError(`flag \`${argument}\` requires a value`);
+		}
+		if (inline === undefined) index += 1;
+		for (;;) {
+			const source = await readArgumentSource(raw, options);
+			insertValue(
+				overrides,
+				leaf.path,
+				coerce(leaf, source ? stripOneNewline(source.text) : raw, argument),
+				leaf.repeatable,
+			);
+			const next = argv[index + 1];
+			if (!leaf.repeatable || next === undefined || endsArrayValues(next, leaf.kind)) break;
+			raw = next;
+			index += 1;
+		}
 	}
 	for (const leaf of leaves) {
 		const value = valueAt(overrides, leaf.path);
