@@ -105,6 +105,12 @@ const MCP_AUTH_MIN_WRAP_WIDTH = 16;
  * and while address bars strip newlines they preserve or percent-encode
  * embedded spaces — an indent would corrupt the URL at every chunk boundary
  * (silently, when the damage lands inside a query value).
+ *
+ * Every chunk is wrapped in the same OSC 8 hyperlink (identical `id`, derived
+ * from the URL) so terminals without URL auto-detection can still open the
+ * FULL authorization URL from any chunk — Cmd/Ctrl+click on a hard-wrapped
+ * row would otherwise open only that chunk, truncating OAuth parameters
+ * (see #20192).
  */
 function wrapUrlRows(label: string, url: string, width: number): string[] {
 	const indent = " ";
@@ -112,11 +118,12 @@ function wrapUrlRows(label: string, url: string, width: number): string[] {
 	const effective = Math.max(MCP_AUTH_MIN_WRAP_WIDTH, Math.trunc(width));
 	const inlineWidth = indent.length + label.length + 1 + sanitized.length;
 	if (inlineWidth <= effective) {
-		return [`${indent}${theme.fg("muted", `${label} ${sanitized}`)}`];
+		return [`${indent}${theme.fg("muted", `${label} `)}${theme.fg("muted", urlHyperlinkAlways(url, sanitized))}`];
 	}
 	const rows: string[] = [`${indent}${theme.fg("muted", label)}`];
 	for (let i = 0; i < sanitized.length; i += effective) {
-		rows.push(theme.fg("muted", sanitized.slice(i, i + effective)));
+		const chunk = sanitized.slice(i, i + effective);
+		rows.push(theme.fg("muted", urlHyperlinkAlways(url, chunk)));
 	}
 	return rows;
 }

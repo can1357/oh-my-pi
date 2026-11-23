@@ -105,6 +105,22 @@ describe("MCPAuthorizationLinkPrompt", () => {
 		expect(reassembled).toEndWith("&code_challenge_method=S256");
 	});
 
+	it("wraps every Copy URL chunk in an OSC 8 hyperlink to the full URL so clicks open it untruncated", () => {
+		// #20192: Cmd/Ctrl+click on a hard-wrapped chunk opened only that
+		// chunk. Each chunk must carry the same OSC 8 link (same URL/id) as
+		// the "Click here to authorize" label.
+		const width = 80;
+		const lines = new MCPAuthorizationLinkPrompt(LINEAR_AUTH_URL).render(width);
+		const plainLines = lines.map(line => stripVTControlCharacters(line));
+		const labelRow = plainLines.indexOf(` ${COPY_URL_LABEL}`);
+		expect(labelRow).toBeGreaterThanOrEqual(0);
+		for (let i = labelRow + 1; i < plainLines.length; i++) {
+			const line = plainLines[i]!;
+			if (line.startsWith(" ") || line.trim().length === 0) break;
+			expect(extractLinkUri(lines[i]!)).toBe(LINEAR_AUTH_URL);
+		}
+	});
+
 	it("keeps the full URL as the primary copy target even when a launch shortcut is available", () => {
 		const launchUrl = "http://localhost:14570/launch";
 		const lines = new MCPAuthorizationLinkPrompt(LINEAR_AUTH_URL, launchUrl).render(80);
