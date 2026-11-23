@@ -4,13 +4,13 @@
  * schema, fed the job's brief and redacted output samples.
  */
 import { type AgentTelemetryConfig, instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Tool, ToolChoice, UserMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Model, Tool, ToolChoice, UserMessage } from "@oh-my-pi/pi-ai";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { formatBytes, prompt, truncate } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleChain } from "../config/model-resolver";
-import { roleCandidatePool } from "../config/model-roles";
+import { getRoleInfo, roleCandidatePool } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
 import systemPrompt from "../prompts/system/job-widget-system.md" with { type: "text" };
@@ -217,11 +217,19 @@ export async function completeWidgetRequest(
 	// never repeats, so a cache breakpoint on it would only bill a cache write.
 	markPerCallContextMessage(message);
 	const context = { systemPrompt: [request.systemPrompt], messages: [message], tools: request.tools };
-	const pool = roleCandidatePool("widget", settings, modelRegistry);
-	const offline = cfgOffline.get(settings);
-	const sessionProvider = offline ? options.getSessionProvider?.() : undefined;
-	const allowed = offline ? pool.filter(model => model.provider === sessionProvider) : pool;
-	for (const { model } of resolveRoleChain("widget", settings, allowed)) {
+	let pool: Model[] = [];
+	if (!cfgOffline.get(settings)) {
+		pool = roleCandidatePool("widget", settings, modelRegistry);
+	} else {
+		// Offline mode reads only the session provider's catalog, filtered as `roleCandidatePool` filters.
+		const provider = options.getSessionProvider?.();
+		if (provider) {
+			pool = modelRegistry
+				.getAvailableForProviders(new Set([provider]), "all")
+				.filter(getRoleInfo("widget", settings).accepts);
+		}
+	}
+	for (const { model } of resolveRoleChain("widget", settings, pool)) {
 		if (!(await modelRegistry.getApiKey(model, sessionId, { signal }))) continue;
 		costGate?.admit();
 		const response = await instrumentedCompleteSimple(

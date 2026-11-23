@@ -73,6 +73,8 @@ function makeDeps(
 		activeModel: textModel,
 		modelRegistry: {
 			getAvailable: () => available,
+			getAvailableForProviders: (providers: ReadonlySet<string>) =>
+				available.filter(model => providers.has(model.provider)),
 			getApiKey: async () => apiKey,
 			resolver: () => async () => apiKey,
 		} as unknown as DescribeAttachedImagesDeps["modelRegistry"],

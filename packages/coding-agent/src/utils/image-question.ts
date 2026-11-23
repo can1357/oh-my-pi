@@ -43,15 +43,20 @@ export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQu
 		throw new ToolError("Model registry is unavailable for image questions.");
 	}
 
-	const allModels = modelRegistry.getAvailable();
-	if (allModels.length === 0) {
-		throw new ToolError("No models available for image questions.");
+	// Offline mode reads only the active provider's catalog; an empty one reaches the offline error below.
+	const offline = cfgOffline.get(session.settings);
+	const offlineProvider = offline ? session.getActiveModel?.()?.provider : undefined;
+	let availableModels: Model<Api>[] = [];
+	if (!offline) {
+		availableModels = modelRegistry.getAvailable();
+		if (availableModels.length === 0) {
+			throw new ToolError("No models available for image questions.");
+		}
+	} else if (offlineProvider) {
+		availableModels = modelRegistry.getAvailableForProviders(new Set([offlineProvider]));
 	}
 
 	const matchPreferences = getModelMatchPreferences(session.settings);
-	const offline = cfgOffline.get(session.settings);
-	const offlineProvider = offline ? session.getActiveModel?.()?.provider : undefined;
-	const availableModels = offline ? allModels.filter(candidate => candidate.provider === offlineProvider) : allModels;
 	const resolvePattern = (pattern: string | undefined): Model<Api> | undefined => {
 		if (!pattern) return undefined;
 		const expanded = expandRoleAlias(pattern, session.settings);

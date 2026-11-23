@@ -2,7 +2,6 @@ import { describe, expect, it } from "bun:test";
 import type { Api, completeSimple, Model } from "@oh-my-pi/pi-ai";
 import type { ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { CostCapError, CostGate } from "@oh-my-pi/pi-coding-agent/session/cost-gate";
@@ -35,6 +34,8 @@ function makeSession(active: Model<Api>, available: Model<Api>[], settings = Set
 		settings,
 		modelRegistry: {
 			getAvailable: () => available,
+			getAvailableForProviders: (providers: ReadonlySet<string>) =>
+				available.filter(model => providers.has(model.provider)),
 		} as unknown as NonNullable<ToolSession["modelRegistry"]>,
 		getModelString: () => `${active.provider}/${active.id}`,
 		getActiveModelString: () => `${active.provider}/${active.id}`,
@@ -69,15 +70,19 @@ describe("resolveImageQuestionModel offline mode", () => {
 		expect(`${resolved.model.provider}/${resolved.model.id}`).toBe("myproxy/qwen-vl");
 	});
 
-	it("refuses when only another provider can see images, even one listing the active model's id", () => {
+	it("refuses with the offline error when only another provider can see images", () => {
 		const settings = Settings.isolated({ "models.offline": true });
 		expect(() => resolveImageQuestionModel(makeSession(textOnly, [textOnly, elsewhere], settings))).toThrow(
-			ToolError,
+			/models\.offline/,
 		);
 		// An aggregator lists the active model under its own provider; its name still matches the active model string.
 		const active = { ...makeProxyModel("claude-v"), provider: "anthropic" };
 		const aggregated = { ...makeProxyModel("anthropic/claude-v"), provider: "openrouter" };
-		expect(() => resolveImageQuestionModel(makeSession(active, [aggregated], settings))).toThrow(ToolError);
+		expect(() => resolveImageQuestionModel(makeSession(active, [aggregated], settings))).toThrow(/models\.offline/);
+		// No active model and nothing available: still the offline error, not the generic empty-catalog one.
+		const empty = makeSession(textOnly, [], settings);
+		empty.getActiveModel = () => undefined;
+		expect(() => resolveImageQuestionModel(empty)).toThrow(/models\.offline/);
 	});
 });
 

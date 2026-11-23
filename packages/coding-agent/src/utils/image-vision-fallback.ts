@@ -47,7 +47,10 @@ const DESCRIPTION_UNAVAILABLE_NOTE =
 	"[Image description unavailable: the vision model returned no usable text. The image was saved for further analysis.]";
 
 /** Registry surface needed to resolve a vision model and authorize requests. */
-export type VisionFallbackRegistry = Pick<ModelRegistry, "getAvailable" | "getApiKey" | "resolver">;
+export type VisionFallbackRegistry = Pick<
+	ModelRegistry,
+	"getAvailable" | "getAvailableForProviders" | "getApiKey" | "resolver"
+>;
 
 /** Whether user images sent to `model` should be replaced by a vision-model description. */
 export function shouldDescribeImagesForTextModel(
@@ -126,10 +129,9 @@ function formatImageBlock(localUrl: string, description: string): string {
  * Offline mode (`models.offline`) keeps every candidate on the active model's provider.
  */
 function resolveVisionModel(deps: DescribeAttachedImagesDeps): Model<Api> | undefined {
-	const all = deps.modelRegistry.getAvailable();
 	const available = cfgOffline.get(deps.settings)
-		? all.filter(model => model.provider === deps.activeModel.provider)
-		: all;
+		? deps.modelRegistry.getAvailableForProviders(new Set([deps.activeModel.provider]))
+		: deps.modelRegistry.getAvailable();
 	if (available.length === 0) return undefined;
 	const preferences = getModelMatchPreferences(deps.settings);
 	const resolvePattern = (pattern: string | undefined): Model<Api> | undefined => {

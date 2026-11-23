@@ -680,7 +680,14 @@ describe("skill description compressor model selection", () => {
 		expect(compressor.modelKey()).toBe("skill-offline/probe");
 
 		cfgOffline.set(settings, true);
+		// Offline reads only the session provider's catalog, never all of them.
+		const all = spyOn(registry, "getAvailable").mockImplementation(() => {
+			throw new Error("Offline selection must not read every catalog");
+		});
+		const scoped = spyOn(registry, "getAvailableForProviders");
 		expect(compressor.modelKey()).toStartWith("anthropic/");
+		expect(scoped.mock.calls.map(([providers]) => [...providers])).toEqual([["anthropic"]]);
+		expect(all).not.toHaveBeenCalled();
 		sessionProvider = "skill-offline";
 		expect(compressor.modelKey()).toBe("skill-offline/probe");
 		sessionProvider = undefined;

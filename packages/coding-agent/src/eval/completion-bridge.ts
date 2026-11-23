@@ -205,6 +205,8 @@ interface FallbackExpansion {
 	settings: Settings | undefined;
 	tier: CompletionTier;
 	disabledProviders: Set<string>;
+	/** Offline mode (`models.offline`): the only provider a fallback entry may name. */
+	offlineProvider: string | undefined;
 }
 
 /**
@@ -214,7 +216,7 @@ interface FallbackExpansion {
 function completionModelLookup(session: ToolSession, registry: ModelRegistry): ModelLookupRegistry {
 	if (!cfgOffline.get(session.settings)) return registry;
 	const provider = session.getActiveModel?.()?.provider;
-	const models = registry.getAvailable().filter(model => model.provider === provider);
+	const models = provider ? registry.getAvailableForProviders(new Set([provider])) : [];
 	return { getAvailable: () => models };
 }
 
@@ -250,6 +252,9 @@ function appendFallbackCandidates(
 	for (const entry of findRetryFallbackCandidates(deps.context, chainKey, selector, model, {
 		allowMissingPrimary: true,
 	})) {
+		// Like the turn path's offline filter: an entry for another provider is skipped, not re-read
+		// as a bare id that one of the allowed provider's models happens to carry.
+		if (deps.offlineProvider !== undefined && entry.provider !== deps.offlineProvider) continue;
 		const resolved = resolveModelOverride([entry.raw], deps.lookup, deps.settings);
 		const candidate = resolved.model;
 		if (!candidate || deps.disabledProviders.has(candidate.provider)) continue;
@@ -327,6 +332,8 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 			settings: session.settings,
 			tier,
 			disabledProviders: new Set(cfgDisabledProviders.get(session.settings)),
+			// Offline, the primary resolved from the active provider's models.
+			offlineProvider: cfgOffline.get(session.settings) ? primary.model.provider : undefined,
 		},
 		primary.selector,
 		primary.model,

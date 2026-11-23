@@ -52,6 +52,8 @@ function setup(backupReply: AssistantMessage) {
 	});
 	const modelRegistry = {
 		getAvailable: () => [primary, backup],
+		getAvailableForProviders: (providers: ReadonlySet<string>) =>
+			[primary, backup].filter(model => providers.has(model.provider)),
 		getApiKey: async () => "test-key",
 		resolver: () => async () => "test-key",
 	} as unknown as ModelRegistry;

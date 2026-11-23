@@ -25,6 +25,7 @@ import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
 import { executeJs } from "../../src/eval/js/executor";
 import { disposeAllKernelSessions, type PythonResult } from "../../src/eval/py/executor";
 import type { ToolSession } from "../../src/tools";
+import { getBundledAgent } from "../../src/task/agents";
 import type { AgentDefinition } from "../../src/task/types";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { CostGate } from "../../src/session/cost-gate";
@@ -116,6 +117,8 @@ function makeSession(opts: SessionOptions = {}): ToolSession {
 	const available = opts.available ?? [SMOL, DEFAULT, SLOW];
 	const modelRegistry = {
 		getAvailable: () => available,
+		getAvailableForProviders: (providers: ReadonlySet<string>) =>
+			available.filter(model => providers.has(model.provider)),
 		find: (provider: string, id: string) => available.find(model => model.provider === provider && model.id === id),
 		getApiKey: async () => (opts.apiKey === undefined ? "test-key" : opts.apiKey),
 		resolver: () => async () => (opts.apiKey === undefined ? "test-key" : opts.apiKey),
@@ -363,12 +366,17 @@ describe("runEvalCompletion", () => {
 			return session;
 		}
 
+		/** A user-tagged model agent, built the way `ModelMentionRegistry.sessionAgents()` builds one. */
+		function taggedAgent(name: string, selector: string): AgentDefinition {
+			const task = getBundledAgent("task");
+			if (!task) throw new Error("Bundled task agent is unavailable");
+			return { ...task, name, model: [selector], filePath: undefined };
+		}
+
 		it("refuses a tier or tagged agent that resolves only on another provider", async () => {
 			const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
 			const session = offlineSession({ available: [SMOL, DEFAULT, elsewhere], roles: { smol: "q/q-mini" } });
-			session.getSessionAgents = (): readonly AgentDefinition[] => [
-				{ name: "m1", model: ["q/q-mini"] } as AgentDefinition,
-			];
+			session.getSessionAgents = () => [taggedAgent("m1", "q/q-mini")];
 
 			for (const model of ["smol", "m1"]) {
 				await expect(runEvalCompletionAndWait({ prompt: "q", model }, { session })).rejects.toThrow(ToolError);
@@ -376,7 +384,7 @@ describe("runEvalCompletion", () => {
 			expect(spy).not.toHaveBeenCalled();
 
 			await runEvalCompletionAndWait({ prompt: "q", model: "default" }, { session });
-			expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["default"]);
+			expect(spy.mock.calls.map(([model]) => model.id)).toEqual(["default"]);
 		});
 
 		it("sends nothing without an active model", async () => {
@@ -398,9 +406,9 @@ describe("runEvalCompletion", () => {
 				activeModel: "openrouter/anthropic/claude-sonnet-4",
 			});
 			session.getActiveModel = () => aggregated;
-			session.getSessionAgents = (): readonly AgentDefinition[] => [
-				{ name: "m1", model: ["anthropic/claude-sonnet-4"] } as AgentDefinition,
-				{ name: "m2", model: ["openrouter/anthropic/claude-sonnet-4"] } as AgentDefinition,
+			session.getSessionAgents = () => [
+				taggedAgent("m1", "anthropic/claude-sonnet-4"),
+				taggedAgent("m2", "openrouter/anthropic/claude-sonnet-4"),
 			];
 
 			await expect(runEvalCompletionAndWait({ prompt: "q", model: "m1" }, { session })).rejects.toThrow(ToolError);
@@ -409,9 +417,11 @@ describe("runEvalCompletion", () => {
 			expect(spy).toHaveBeenCalledTimes(1);
 		});
 
-		it("skips fallback chain entries on another provider", async () => {
+		it("skips fallback chain entries on another provider, even one the active provider lists as an id", async () => {
 			const fallback = makeModel("p", "fallback");
-			const session = offlineSession({ available: [SMOL, DEFAULT, elsewhere, fallback] });
+			// The active provider lists a model whose id spells the foreign entry.
+			const lookalike = makeModel("p", "q/q-mini");
+			const session = offlineSession({ available: [SMOL, DEFAULT, elsewhere, lookalike, fallback] });
 			cfgRetryFallbackChains.set(session.settings, { smol: ["q/q-mini", "p/fallback"] });
 			const spy = vi
 				.spyOn(ai, "completeSimple")
@@ -420,7 +430,7 @@ describe("runEvalCompletion", () => {
 
 			await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
 
-			expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "fallback"]);
+			expect(spy.mock.calls.map(([model]) => model.id)).toEqual(["smol", "fallback"]);
 		});
 	});
 
