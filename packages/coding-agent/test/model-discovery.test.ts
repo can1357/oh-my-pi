@@ -965,6 +965,60 @@ describe("ModelRegistry runtime discovery", () => {
 		}
 	});
 
+	test("openrouter discovery serves OpenRouter's public roster through the provider endpoint without leaking its credentials", async () => {
+		writeRawModelsJson({
+			gateway: {
+				baseUrl: "https://gateway.example.com/openrouter/v1",
+				api: "openai-completions",
+				auth: "none",
+				headers: { "x-gateway-key": "gateway-secret" },
+				discovery: { type: "openrouter" },
+			},
+		});
+		const rosterRequests: Headers[] = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			if (String(input) !== "https://openrouter.ai/api/v1/models") return new Response("", { status: 404 });
+			rosterRequests.push(new Headers(init?.headers));
+			return Response.json({
+				data: [
+					{
+						id: "acme/agent-1",
+						name: "Acme: Agent 1",
+						context_length: 200_000,
+						top_provider: { max_completion_tokens: 32_000 },
+						pricing: { prompt: "0.000002", completion: "0.000008" },
+						supported_parameters: ["tools", "tool_choice", "reasoning"],
+						architecture: { input_modalities: ["text", "image"] },
+					},
+					{ id: "acme/chat-only", context_length: 8_192, supported_parameters: ["temperature"] },
+				],
+			});
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh("online");
+
+		// The built-in openrouter provider reads the same public roster; neither request may carry the gateway key.
+		expect(rosterRequests.length).toBeGreaterThan(0);
+		expect(rosterRequests.some(headers => [...headers.values()].some(value => value.includes("gateway-secret")))).toBe(
+			false,
+		);
+		const model = registry.find("gateway", "acme/agent-1");
+		expect(model).toMatchObject({
+			api: "openai-completions",
+			baseUrl: "https://gateway.example.com/openrouter/v1",
+			contextWindow: 200_000,
+			maxTokens: 32_000,
+			input: ["text", "image"],
+			reasoning: true,
+		});
+		expect(model?.cost.input).toBeCloseTo(2);
+		expect(model?.cost.output).toBeCloseTo(8);
+		// OpenRouter's wire contract follows its roster: reasoning rides `reasoning: { effort }`.
+		expect(model?.compat).toMatchObject({ thinkingFormat: "openrouter" });
+		// Rows OpenRouter does not list as tool-capable cannot drive the agent.
+		expect(registry.find("gateway", "acme/chat-only")).toBeUndefined();
+	});
+
 	test("uses OLLAMA_HOST for implicit ollama discovery", async () => {
 		using _baseUrl = withEnv("OLLAMA_BASE_URL", undefined);
 		using _host = withEnv("OLLAMA_HOST", "ollama.lan:12345");

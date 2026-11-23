@@ -6,6 +6,12 @@
 
 - Added opt-in `tools.guardRules` setting: best-effort checks that ask before top-level bash commands read credentials or send secrets over the network, and before `read`/`grep` of credential files ([#19902](https://github.com/can1357/oh-my-pi/pull/19902) by [@Xytronix](https://github.com/Xytronix))
 - Added `discard_changes` and `kills_harness` guard rules under `tools.guardRules`: ask before a git command would discard uncommitted work or a `pkill`/`killall` would stop omp ([#19892](https://github.com/can1357/oh-my-pi/pull/19892) by [@Xytronix](https://github.com/Xytronix))
+- Added `discovery.type: openrouter` for `models.yml` providers that front OpenRouter under their own URL and key: their model list now comes from OpenRouter's public catalog, and requests follow OpenRouter's request format.
+
+### Fixed
+
+- `!command` values in `models.yml` (`apiKey`, `headers`) can now read variables defined in `~/.env` or `~/.omp/agent/.env` on macOS and Windows; previously the command saw an empty value.
+- The bash tool's visualization now draws a script run by `bash file.sh`, `source`, or `eval "$var"` as one block under the command that ran it, instead of repeating a “built at runtime” header above every line of the script.
 
 ## [19.1.1] - 2026-11-23
 
