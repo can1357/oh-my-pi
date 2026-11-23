@@ -509,6 +509,22 @@ export const cfgTodoEager = register({
 	},
 });
 
+/** `todo.backend` value for omp's own todo list, with no extension backend. */
+export const NATIVE_TODO_BACKEND = "native";
+
+export const cfgTodoBackend = register({
+	id: "todo.backend",
+	type: "string",
+	default: NATIVE_TODO_BACKEND,
+	ui: {
+		tab: "tools",
+		group: "Todos",
+		label: "Todo Backend",
+		description: "Extension that the todo list is mirrored to; Native keeps it in the session only",
+		options: "runtime",
+	},
+});
+
 export const cfgTasksTodoClearDelay = register({
 	id: "tasks.todoClearDelay",
 	type: "number",
@@ -819,29 +835,41 @@ export const cfgComputerMaxHeight = register({
 	},
 });
 
-export const cfgComputerBackgroundFallback = register({
-	id: "computer.backgroundFallback",
+export const cfgComputerTakeover = register({
+	id: "computer.takeover",
 	type: "enum",
-	values: ["takeover", "refuse"] as const,
-	default: "takeover",
+	values: ["fallback", "foreground", "always", "refuse"] as const,
+	default: "fallback",
 	ui: {
 		tab: "tools",
 		group: "Computer",
-		label: "Computer Background Fallback",
+		label: "Computer Takeover",
 		description:
-			"What window input does when its background route is unavailable: rerun it in takeover and return focus to your app (macOS; elsewhere plain takeover), or refuse, which also keeps the agent from taking the foreground or opening macOS menus itself",
+			"When window input takes over (the real pointer and keyboard; your Escape stops it) instead of running in the background",
 		options: [
 			{
-				value: "takeover",
-				label: "Takeover",
+				value: "fallback",
+				label: "Fallback",
 				description:
-					"Briefly bring the target forward for that one call, then return focus to your app (on macOS even if you kept typing)",
+					"Background first; a call whose background route is unavailable briefly brings the target forward, then returns focus to your app (on macOS even if you kept typing). The agent may also ask for takeover on a call",
+			},
+			{
+				value: "foreground",
+				label: "Foreground",
+				description:
+					"omp, never the agent, decides: take over input to a window already in front of you, and a call whose background route is unavailable; stay in the background otherwise",
+			},
+			{
+				value: "always",
+				label: "Always",
+				description:
+					"omp, never the agent, decides: take over every window and element input call, bringing the target forward for that call and then returning focus to your app",
 			},
 			{
 				value: "refuse",
 				label: "Refuse",
 				description:
-					"Fail the call; nothing takes over, and the agent's own takeover, raise, activating open, desktop input and macOS menus (context menus, popup and menu buttons; they take your keyboard while open) are refused too",
+					"Never take over: a call whose background route is unavailable fails, and the agent's own takeover, raise, activating open, desktop input and macOS menus (context menus, popup and menu buttons; they take your keyboard while open) are refused too",
 			},
 		],
 	},
