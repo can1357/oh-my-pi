@@ -16,7 +16,7 @@
 
 ### Changed
 
-- Compiled binaries no longer load `@babel/parser` with the main CLI chunk; it loads when an eval cell runs or a legacy Pi extension whose imports are rewritten is loaded ([#20282](https://github.com/can1357/oh-my-pi/pull/20282) by [@iliaal](https://github.com/iliaal))
+- Compiled binaries no longer load `@babel/parser` with the main CLI chunk; loading it is deferred until an eval cell runs or a legacy Pi extension needs analysis or rewriting ([#20282](https://github.com/can1357/oh-my-pi/pull/20282) by [@iliaal](https://github.com/iliaal))
 - The omp daemon no longer loads the model catalog, the AI provider code or most of the TUI; in npm installs it uses about 24 MB less resident memory (about 150 MB less when omp runs from source) ([#20224](https://github.com/can1357/oh-my-pi/pull/20224) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - With Vim editing mode on, `y` no longer copies to the system clipboard; use `"+y` / `"*y`, or turn on `tui.vimYankToClipboard` to get the old behavior ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - With Vim editing mode on, the prompt after a message you send starts in **Vim Start Mode** (Insert by default) instead of staying in the mode you sent it from ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
