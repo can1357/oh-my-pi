@@ -386,6 +386,40 @@ describe("selective commit flow", () => {
 		expect(await Bun.file(path.join(root, "CHANGELOG.md")).text()).toContain("- Fixed the theme flicker");
 	});
 
+	it("leaves the shared index clean after committing a staged git mv with an edit (#20298)", async () => {
+		const { root, journal, write } = await emptyRepo();
+		await write("User", undefined, "a.txt", "one\ntwo\nthree\n");
+		await git(root, ["add", "a.txt"]);
+		await git(root, ["commit", "-qm", "base"]);
+		await fs.mkdir(path.join(root, "dir"));
+		await git(root, ["mv", "a.txt", "dir/a.txt"]);
+		// The agent edits the moved file, as an `edit` tool would.
+		const moved = path.join(root, "dir", "a.txt");
+		const after = "one\ntwo, edited after git mv\nthree\n";
+		await Bun.write(moved, after);
+		journal.recordChange({
+			agent: "Main",
+			parent: undefined,
+			tool: "edit",
+			path: moved,
+			before: "one\ntwo\nthree\n",
+			after,
+		});
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		draft.take({ path: "**" });
+		const outcome = await commitSelection(
+			draft,
+			{ subject: "refactor: moved a.txt into dir" },
+			{ journal, agent: { agent: "Main" } },
+		);
+
+		expect(outcome.indexNotes).toEqual([]);
+		expect((await git(root, ["status", "--short"])).trim()).toBe("");
+		expect(await git(root, ["show", "HEAD:dir/a.txt"])).toBe(after);
+		expect(await git(root, ["diff", "--cached", "--name-only"])).toBe("");
+	});
+
 	it("syncs the shared index once another git process lets go of its lock", async () => {
 		const { root, journal } = await sharedWorkspace();
 		// A `git status` elsewhere holds `index.lock` while the commit is made. The lock is a real
