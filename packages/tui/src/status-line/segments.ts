@@ -281,13 +281,15 @@ const statusSegment: StatusLineSegment = {
 		};
 	},
 	describe(ctx) {
-		let text = "";
+		const accent = accentToken(ctx, "accent");
+		const spans: TspSpan[] = [];
 		for (const status of ctx.hookStatuses ?? []) {
 			const sanitized = sanitizeStatusText(status);
 			if (!sanitized) continue;
-			text += text ? `${theme.sep.dot}${sanitized}` : sanitized;
+			if (spans.length > 0) spans.push(span(theme.sep.dot, "dim"));
+			spans.push(span(sanitized, accent));
 		}
-		return text ? segView([span(text, accentToken(ctx, "accent"))]) : null;
+		return spans.length > 0 ? segView(spans) : null;
 	},
 };
 
