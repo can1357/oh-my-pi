@@ -488,8 +488,6 @@ export async function findReusableCdp(
 
 export interface PickTargetOptions {
 	matcher?: string;
-	/** Relay /json endpoint; enables metadata-first target selection. */
-	relayJson?: string;
 	signal?: AbortSignal;
 }
 
@@ -708,7 +706,12 @@ async function relayEntriesForSelection(
 export async function pickRelayTargetId(relayJson: string, options: PickTargetOptions = {}): Promise<string> {
 	throwIfAborted(options.signal);
 	const entries = await relayEntriesForSelection(relayJson, options);
-	const pageEntries = entries?.filter(e => e.type === "page") ?? [];
+	if (!entries) {
+		throw new ToolError(
+			`omp browser relay at ${relayJson} did not list its pages (GET /json failed). Retry once the relay is back; Chrome may still be starting it.`,
+		);
+	}
+	const pageEntries = entries.filter(e => e.type === "page");
 	const selected = pageEntries.length > 0 ? selectRelayEntry(pageEntries, options) : null;
 	if (!selected) {
 		throw new ToolError(
@@ -718,43 +721,9 @@ export async function pickRelayTargetId(relayJson: string, options: PickTargetOp
 	return selected.id;
 }
 
-/** Select relay pages from /json metadata before probing pages; enumerate targets when metadata offers no selection. */
+/** Pick the page of a connected browser to adopt: the one `matcher` names, else its first readable page. */
 export async function pickElectronTarget(browser: Browser, options: PickTargetOptions = {}): Promise<Page> {
 	throwIfAborted(options.signal);
-	if (options.relayJson) {
-		const entries = await relayEntriesForSelection(options.relayJson, options);
-		if (entries) {
-			const pageEntries = entries.filter(e => e.type === "page");
-			const selected = pageEntries.length > 0 ? selectRelayEntry(pageEntries, options) : null;
-			const targets = browser.targets();
-			if (selected) {
-				const isSelected = (t: Target) => (t as Target & { _targetId?: string })._targetId === selected.id;
-				const attachDeadline = Date.now() + PAGE_ATTACH_TIMEOUT_MS;
-				let target = targets.find(isSelected);
-				if (!target) {
-					// Puppeteer learns of a tab from the relay's targetCreated event, which can trail /json.
-					try {
-						target = await abortable(options.signal, () =>
-							browser.waitForTarget(isSelected, { timeout: PAGE_ATTACH_TIMEOUT_MS, signal: options.signal }),
-						);
-					} catch (error) {
-						throwIfAborted(options.signal);
-						if (isPuppeteerTimeout(error)) {
-							throw new ToolError(
-								"Selected tab did not become available before omp could attach; retry, or reopen it if it closed",
-							);
-						}
-						throw error;
-					}
-				}
-				const page = await attachPageWithTimeout(target, attachDeadline - Date.now(), options.signal);
-				if (!page || !(await waitForMainFrame(page, FRAME_READY_TIMEOUT_MS, options.signal)))
-					throw new ToolError("Selected tab is not ready; retry after it loads");
-				return page;
-			}
-		}
-	}
-
 	let targets = browser.targets();
 	if (!targets.some(target => String(target.type()) === "page")) {
 		const pages = await abortable(options.signal, () => browser.pages());
