@@ -5061,6 +5061,36 @@ describe("lsp regressions", () => {
 			}
 		});
 
+		it("ends the load of a server that never reports progress shortly after its first open", async () => {
+			// pyright, ty, ruff, and typescript-language-server never send `$/progress`; their
+			// first project-aware wait used to sit out the whole fallback. The window starts at
+			// the first open, not at `initialized`: a warmed-up server that starts loading only
+			// once a file opens must not count as loaded before that.
+			const { tempDir, sessionRoot } = await makeCheckouts("@omp-lsp-silent-load-");
+			try {
+				const { serverConfig } = useServer(FOLDER_CHANGES);
+				const client = await lspClient.getOrCreateClient(serverConfig, sessionRoot);
+				let loaded = false;
+				void lspClient.waitForProjectLoaded(client).then(() => {
+					loaded = true;
+				});
+				// Real delay: the fake LSP subprocess and the client's init/IO timers share the
+				// clock, so fake timers cannot prove "no silent window before the first open".
+				await Bun.sleep(2_500);
+				expect(loaded).toBe(false);
+
+				const filePath = path.join(sessionRoot, "first-open.ts");
+				await Bun.write(filePath, "export const value = 1;\n");
+				await lspClient.ensureFileOpen(client, filePath);
+				const opened = Date.now();
+				await lspClient.waitForProjectLoaded(client);
+				expect(Date.now() - opened).toBeLessThan(5_000);
+			} finally {
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
 		it("adds no checkout for a caller that aborted before delivery", async () => {
 			const { tempDir, sessionRoot, siblingRoot, thirdRoot } = await makeCheckouts("@omp-lsp-aborted-add-");
 			try {
