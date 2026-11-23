@@ -1040,4 +1040,56 @@ describe("AgyHost quota retry notices", () => {
 		expect(run.writer.output.content).toEqual([{ type: "text", text: prose.join("") }]);
 		expect(fake.closed).toBe(false);
 	});
+
+	// agy ≥1.5.14 retries silently and ends the turn with one "⚠ <error>" line once every retry failed.
+	async function finalNotice(chunks: string[]) {
+		const state = await fixture();
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		for (const chunk of chunks) fake.text(chunk);
+		prompt.response.resolve({ stopReason: "end_turn" });
+		const error: unknown = await run.done.then(
+			() => undefined,
+			cause => cause,
+		);
+		return { fake, run, error };
+	}
+
+	for (const [name, chunks, resetMs] of [
+		[
+			"individual",
+			[
+				"\n⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 124h22m23s.\n",
+			],
+			((124 * 60 + 22) * 60 + 23) * 1000,
+		],
+		[
+			"split third-party",
+			[
+				"Looking.\n⚠ Third-party quota reached. Please switch to Gemini models ",
+				"or upgrade your subscription to increase your limits. Resets in 3h22m19s.",
+			],
+			((3 * 60 + 22) * 60 + 19) * 1000,
+		],
+	] as const) {
+		it(`fails with a 429 and agy's reset window when the turn ends on a ${name} quota notice`, async () => {
+			const { error } = await finalNotice([...chunks]);
+			const result = await AIError.finalize(error, { api: model.api, provider: model.provider, model: model.id });
+			expect(result.status).toBe(429);
+			expect(AIError.isUsageLimitOutcome(result.status, result.message)).toBe(true);
+			expect(extractProviderRetryHint(model.provider, result.message)).toBe(resetMs);
+		});
+	}
+
+	it("keeps warning lines as visible text when the turn continues past them", async () => {
+		const chunks = [
+			"⚠ Individual quota reached is what the log says.\n",
+			"\nThe account needs a reset.",
+			"\n⚠ Careful",
+		];
+		const { run, error } = await finalNotice(chunks);
+		expect(error).toBeUndefined();
+		expect(run.writer.output.content).toEqual([{ type: "text", text: chunks.join("") }]);
+	});
 });
