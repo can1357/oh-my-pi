@@ -996,6 +996,12 @@ export class Editor implements Component, Focusable {
 	#vimKeySerial = 0;
 	/** The current key's put is waiting on the clipboard; it settles the `.` record itself. */
 	#vimPutDeferred = false;
+	/**
+	 * While a Vim key runs, where its first edit pushed an undo snapshot (null: none yet); undefined
+	 * outside a key. Only snapshots edits push fold into the key's one undo step: undo, redo, and
+	 * history steps move whole stacks, and folding those would throw history away.
+	 */
+	#keyFirstEdit: UndoMark | null | undefined = undefined;
 	/** States `u` stepped back from, newest last; Vim's `Ctrl-R` replays them until the next edit. */
 	#redoStack: EditorState[] = [];
 	#suspendUndo = false;
@@ -2792,8 +2798,10 @@ export class Editor implements Component, Focusable {
 		this.#vimScreenMoved = false;
 		this.#vimPutDeferred = false;
 		this.#vimKeySerial++;
+		this.#keyFirstEdit = null;
 		const commands = vim.handleKey(key, this.#state);
 		if (commands === null) {
+			this.#keyFirstEdit = undefined;
 			if (pinHere) this.#pinnedUndo = null;
 			return false;
 		}
@@ -2804,19 +2812,21 @@ export class Editor implements Component, Focusable {
 		// Before applying: Escape's commands would otherwise clear the replace log this reads.
 		if (leaving) this.#endVimSession();
 		this.#applyVimCommands(commands);
+		const firstEdit = this.#keyFirstEdit;
+		this.#keyFirstEdit = undefined;
 		// A put waiting on the clipboard settles its `.` record itself once it lands.
 		if (!this.#vimPutDeferred) {
 			if (this.#textRevision !== revisionBefore) vim.commitChange();
 			else vim.discardChange();
 		}
 		// The session baseline follows `cw`'s delete or `o`'s new line, but its undo mark precedes them,
-		// so one `u` restores the whole change. Every other key (`.` too) is a single undo step.
+		// so one `u` restores the whole change. Every other key (`.` too) is a single undo step: the
+		// snapshots its edits pushed fold into the first. `u`, `Ctrl-R`, and `k`/`j` push none of their
+		// own, so the stacks they restore stay whole.
 		if (!editing(before) && editing(vim.mode)) this.#startVimSession(mark, vim.mode === "replace");
 		else if (this.#vimSession === null) {
-			// `3u` and `3<C-r>` walk the stack themselves; folding would merge the steps they restore.
-			if (!commands.some(command => command.kind === "undo" || command.kind === "redo")) {
-				this.#collapseUndoSince(sessionMark ?? mark);
-			}
+			const fold = sessionMark ?? firstEdit;
+			if (fold) this.#collapseUndoSince(fold);
 			this.#pinnedUndo = null;
 		}
 		// Pending and selection size are mode chrome too: hosts echo `2d` and the Visual line count
@@ -4804,6 +4814,7 @@ export class Editor implements Component, Focusable {
 
 	#recordUndoState(): void {
 		if (this.#suspendUndo) return;
+		if (this.#keyFirstEdit === null) this.#keyFirstEdit = this.#undoMark();
 		this.#redoStack.length = 0;
 		// EditorState holds only primitives plus an array of immutable strings:
 		// a shallow array copy is a complete snapshot. structuredClone pays for

@@ -26,6 +26,18 @@ function cursor(editor: Editor): { line: number; col: number } {
 	return editor.getCursor();
 }
 
+/** Press `key` (`u` or Ctrl-R) until the text stops changing; the text after each press. */
+function walk(editor: Editor, key: "u" | "\x12"): string[] {
+	const seen: string[] = [];
+	for (let n = 0; n < 20; n++) {
+		const before = editor.getText();
+		editor.handleInput(key);
+		if (editor.getText() === before) break;
+		seen.push(editor.getText());
+	}
+	return seen;
+}
+
 describe("Editor vim mode", () => {
 	describe("disabled by default", () => {
 		it("types vim command letters as ordinary text", () => {
@@ -264,19 +276,22 @@ describe("Editor vim mode", () => {
 			expect(editor.getText()).toBe("revious prompt");
 		});
 
-		it("a k/j round trip keeps the draft's undo history", () => {
+		it("a k/j round trip keeps every step of the typed draft's undo and redo history", () => {
 			const editor = new Editor(defaultEditorTheme);
 			editor.addToHistory("an older prompt");
 			editor.setVimMode(true);
-			editor.setText("abc");
+			// Typed, not set: the Insert session is an undo step of its own, as it is for a user.
+			editor.handleInput("abc");
 			editor.handleInput(ESC);
 			editor.handleInput("x");
-			expect(editor.getText()).toBe("ab");
+			editor.handleInput("x");
+			expect(editor.getText()).toBe("a");
 			editor.handleInput("k");
+			expect(editor.getText()).toBe("an older prompt");
 			editor.handleInput("j");
-			expect(editor.getText()).toBe("ab");
-			editor.handleInput("u");
-			expect(editor.getText()).toBe("abc");
+			expect(editor.getText()).toBe("a");
+			expect(walk(editor, "u")).toEqual(["ab", "abc", ""]);
+			expect(walk(editor, "\x12")).toEqual(["abc", "ab", "a"]);
 		});
 
 		it("backspace moves left in normal mode rather than deleting", () => {
@@ -1818,14 +1833,19 @@ describe("Editor vim mode", () => {
 		});
 
 		it("a counted redo keeps each step undoable on its own", () => {
-			const editor = vimEditor("one two three four");
-			editor.handleInput("dwdwdw");
+			const editor = new Editor(defaultEditorTheme);
+			editor.setVimMode(true);
+			editor.handleInput("abcd");
+			editor.handleInput(ESC);
+			editor.handleInput("0xxx");
+			expect(editor.getText()).toBe("d");
 			editor.handleInput("3u");
+			expect(editor.getText()).toBe("abcd");
 			editor.handleInput("3");
 			editor.handleInput("\x12");
-			expect(editor.getText()).toBe("four");
-			editor.handleInput("u");
-			expect(editor.getText()).toBe("three four");
+			expect(editor.getText()).toBe("d");
+			expect(walk(editor, "u")).toEqual(["cd", "bcd", "abcd", ""]);
+			expect(walk(editor, "\x12")).toEqual(["abcd", "bcd", "cd", "d"]);
 		});
 	});
 
