@@ -30,6 +30,7 @@ import {
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
+import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import type { MagicKeywordId } from "../modes/magic-keywords";
 import {
 	AUTO_THINKING,
@@ -530,13 +531,14 @@ export class ModelControls {
 
 	/**
 	 * Get all available models with valid API keys, filtered by `enabledModels` when configured.
+	 * `roleLookup` resolves role aliases in the patterns (default: the current roles).
 	 * See {@link filterAvailableModelsByEnabledPatterns} for supported pattern forms and limitations.
 	 */
-	getAvailableModels(): Model[] {
+	getAvailableModels(roleLookup?: ModelRoleLookup): Model[] {
 		const all = this.#host.modelRegistry.getAvailable();
 		const patterns = cfgEnabledModels.get(this.#host.settings);
 		if (!patterns || patterns.length === 0) return all;
-		return filterAvailableModelsByEnabledPatterns(all, patterns, this.#host.settings);
+		return filterAvailableModelsByEnabledPatterns(all, patterns, this.#host.settings, roleLookup);
 	}
 
 	// =========================================================================

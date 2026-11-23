@@ -158,6 +158,10 @@ export const structuredPatchHunks = nativeBindings.structuredPatchHunks ?? missi
 export const summarizeCode = nativeBindings.summarizeCode ?? missingNativeExport("summarizeCode");
 export const summarizeCodeAsync = nativeBindings.summarizeCodeAsync ?? missingNativeExport("summarizeCodeAsync");
 export const supportsLanguage = nativeBindings.supportsLanguage ?? missingNativeExport("supportsLanguage");
+export const transcriptCalls = nativeBindings.transcriptCalls ?? missingNativeExport("transcriptCalls");
+export const transcriptGrep = nativeBindings.transcriptGrep ?? missingNativeExport("transcriptGrep");
+export const transcriptMessages = nativeBindings.transcriptMessages ?? missingNativeExport("transcriptMessages");
+export const transcriptStats = nativeBindings.transcriptStats ?? missingNativeExport("transcriptStats");
 export const translateWindowsAltGrSequence = nativeBindings.translateWindowsAltGrSequence ?? missingNativeExport("translateWindowsAltGrSequence");
 export const truncateToWidth = nativeBindings.truncateToWidth ?? missingNativeExport("truncateToWidth");
 export const vcsDetachGitDir = nativeBindings.vcsDetachGitDir ?? missingNativeExport("vcsDetachGitDir");
@@ -324,5 +328,26 @@ export const ShellSpeechOp = {
 	Voices: "voices",
 	Speak: "speak",
 	Cancel: "cancel",
+};
+export const TranscriptRecordKind = {
+	User: "user",
+	Assistant: "assistant",
+	Thinking: "thinking",
+	Call: "call",
+	Result: "result",
+};
+export const TranscriptSource = {
+	User: "user",
+	Assistant: "assistant",
+	Thinking: "thinking",
+	Args: "args",
+	Result: "result",
+};
+export const TranscriptStatsKey = {
+	Tool: "tool",
+	Model: "model",
+	Version: "version",
+	Day: "day",
+	PerTranscript: "none",
 };
 // --- end generated native exports ---

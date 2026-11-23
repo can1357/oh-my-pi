@@ -621,6 +621,17 @@ const FORK_STATE_LOST_NOTICE = "Ran in a copy of the busy session shell; changes
 const FORK_JOBS_NOTICE =
 	"Background jobs started here run in a copy of the busy session shell; later calls' jobs, wait and %N won't see them.";
 
+/**
+ * Names what a command changed in the session shell that the next call starts without: a `cd`
+ * (calls start in `sessionCwd`) and `set -e`.
+ */
+function formatShellResetNotice(result: BashResult | BashInteractiveResult, sessionCwd: string): string | undefined {
+	const reset: string[] = [];
+	if ("movedCwd" in result && result.movedCwd) reset.push(`cwd → ${sessionCwd}`);
+	if ("errexit" in result && result.errexit) reset.push("set -e off");
+	return reset.length > 0 ? `Reset before the next call: ${reset.join(", ")}.` : undefined;
+}
+
 function normalizeResultOutput(result: BashResult | BashInteractiveResult): string {
 	return result.output || "";
 }
@@ -1311,6 +1322,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				if (notice) notices.push(notice);
 			}
 		}
+		const resetNotice = formatShellResetNotice(result, this.session.cwd);
+		if (resetNotice) notices.push(resetNotice);
 		const fork = "fork" in result ? result.fork : undefined;
 		if (fork && !fork.carried) notices.push(FORK_STATE_LOST_NOTICE);
 		if (fork?.jobs) notices.push(FORK_JOBS_NOTICE);

@@ -16,6 +16,7 @@ import { visitEntriesFromFile } from "./session-loader";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { listSessionTitles, lookupSessionTitle, recordSessionTitle, recordSessionTitles } from "./session-index";
+import { overlapsWindow, type TimeWindow } from "./time-window";
 
 /**
  * Coarse lifecycle status of a session, derived from its last persisted message.
@@ -1042,7 +1043,7 @@ async function holdsEntry(file: string, id: string, storage: SessionStorage): Pr
  * (`2026-10-26T18-29-27-740Z_…`, the ISO time with `:` and `.` replaced);
  * `undefined` for any other name.
  */
-function parseSessionFileName(file: string): { createdAt: number; id: string } | undefined {
+export function parseSessionFileName(file: string): { createdAt: number; id: string } | undefined {
 	const match = /^(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d{3})Z_(.+)\.jsonl$/.exec(path.basename(file));
 	if (!match) return undefined;
 	const createdAt = Date.parse(`${match[1]}:${match[2]}:${match[3]}.${match[4]}Z`);
@@ -1551,6 +1552,8 @@ export interface RecentSessionsQuery {
 	 * directory scan; `sessionDir` and `sessionsRoot` are ignored.
 	 */
 	files?: readonly string[];
+	/** Only sessions whose activity, from creation to last write, overlaps this window. */
+	window?: TimeWindow;
 }
 
 /**
@@ -1561,17 +1564,37 @@ export interface RecentSessionsQuery {
  */
 export async function listRecentSessions(query: RecentSessionsQuery): Promise<SessionInfo[]> {
 	const storage = new FileSessionStorage();
-	let files: StatedSessionFile[];
-	if (query.files) files = await statNewestFirst(query.files);
-	else if (query.sessionDir) files = await newestSessionFiles(query.sessionDir, "*.jsonl", storage);
-	else files = await newestSessionFiles(query.sessionsRoot ?? getSessionsDir(), "*/*.jsonl", storage);
+	const files = query.files ? await statNewestFirst(query.files) : await listStatedSessionFiles(query);
 	const sessions: SessionInfo[] = [];
 	for (const { file, stat } of files) {
-		if (sessions.length >= query.limit) break;
+		// Newest mtime first: every later file went quiet before the window opened.
+		const since = query.window?.since;
+		if (sessions.length >= query.limit || (since !== undefined && stat.mtimeMs < since)) break;
 		const info = await scanSessionFile(file, storage, true, stat);
-		if (info && !isEmptySession(info)) sessions.push(info);
+		if (info && !isEmptySession(info) && sessionInWindow(info, query.window)) sessions.push(info);
 	}
 	return sessions;
+}
+
+/**
+ * Top-level session files of one project directory (`sessionDir`), or of every
+ * project under `sessionsRoot` (default {@link getSessionsDir}), newest mtime
+ * first. Stat-only: never reads content.
+ */
+export function listStatedSessionFiles(where: {
+	sessionDir?: string;
+	sessionsRoot?: string;
+}): Promise<StatedSessionFile[]> {
+	const storage = new FileSessionStorage();
+	if (where.sessionDir) return newestSessionFiles(where.sessionDir, "*.jsonl", storage);
+	return newestSessionFiles(where.sessionsRoot ?? getSessionsDir(), "*/*.jsonl", storage);
+}
+
+/** Whether `info`'s activity, from creation (else last write) to last write, overlaps `window`. */
+function sessionInWindow(info: SessionInfo, window: TimeWindow | undefined): boolean {
+	const modified = info.modified.getTime();
+	const created = info.created.getTime();
+	return overlapsWindow(Number.isNaN(created) ? modified : created, modified, window);
 }
 
 /**
@@ -1598,6 +1621,14 @@ export interface ProjectSummary {
 	latest: SessionInfo;
 }
 
+/** Where {@link listRecentProjects} looks. */
+export interface RecentProjectsOptions {
+	/** Root holding one directory per project. Default: {@link getSessionsDir}. */
+	sessionsRoot?: string;
+	/** Only sessions active within this window count: a project's `sessionCount` counts files written since `since`. */
+	window?: TimeWindow;
+}
+
 /**
  * Projects by last activity, newest first. Stats every session file under
  * `sessionsRoot` but content-scans only the files needed to find each listed
@@ -1606,13 +1637,15 @@ export interface ProjectSummary {
  */
 export async function listRecentProjects(
 	limit: number,
-	sessionsRoot: string = getSessionsDir(),
+	{ sessionsRoot = getSessionsDir(), window }: RecentProjectsOptions = {},
 ): Promise<ProjectSummary[]> {
 	const storage = new FileSessionStorage();
 	// Insertion order follows the newest-first file order, so directories come
 	// out ordered by their newest session file.
 	const byDir = new Map<string, StatedSessionFile[]>();
 	for (const entry of await newestSessionFiles(sessionsRoot, "*/*.jsonl", storage)) {
+		// Newest mtime first: every later file went quiet before the window opened.
+		if (window?.since !== undefined && entry.stat.mtimeMs < window.since) break;
 		const dir = path.dirname(entry.file);
 		const files = byDir.get(dir);
 		if (files) files.push(entry);
@@ -1624,7 +1657,7 @@ export async function listRecentProjects(
 		if (projects.length >= limit) break;
 		for (const { file, stat } of files) {
 			const info = await scanSessionFile(file, storage, true, stat);
-			if (!info || isEmptySession(info)) continue;
+			if (!info || isEmptySession(info) || !sessionInWindow(info, window)) continue;
 			if (info.cwd && !listed.has(info.cwd)) {
 				listed.add(info.cwd);
 				projects.push({ cwd: info.cwd, sessionCount: files.length, latest: info });

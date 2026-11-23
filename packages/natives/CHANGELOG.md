@@ -8,6 +8,12 @@
 ### Added
 
 - Added `commitReconciled()` to publish private-index commits without leaving staged reversals when the shared index is locked ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
+- Added `transcriptCalls()`, `transcriptGrep()`, `transcriptStats()`, and `transcriptMessages()`: parallel scans of session transcript files for tool calls with their results and reasoning, regex matches over message text, thinking, arguments, and results, call counts, and one transcript's records.
+
+### Changed
+
+- A persistent `Shell` session no longer carries `set -e` into later commands: errexit stops only the command that turned it on, while other options (`set -u`, `pipefail`, `shopt`) still persist
+- `ShellRunResult` now reports `movedCwd` (the command ended in another directory than it started in) and `errexit` (it ended with `set -e` on)
 
 ## [19.1.1] - 2026-11-23
 

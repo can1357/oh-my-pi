@@ -473,6 +473,33 @@ describe("tray items", () => {
 		]);
 	});
 
+	it("marks a running agent inside a wait as waiting, never one at work, between calls or revived", () => {
+		const f = fixture();
+		f.sessions.push(
+			observed("Waiter", "active", { currentTool: "wait" }),
+			observed("Worker", "active", { currentTool: "bash" }),
+			observed("Between", "active"),
+			// Its registry says it runs again; its observer snapshot is the last run's.
+			observed("Revived", "completed", { currentTool: "wait" }),
+		);
+		f.refs.push(
+			ref("Waiter", "running"),
+			ref("Worker", "running", 1),
+			ref("Between", "running", 2),
+			ref("Revived", "running", 3),
+		);
+		const faces = buildTrayItems(input(f), new TrayMemory()).items.map(item => {
+			const props = describeTrayCard(item, 0).p ?? {};
+			return [Reflect.get(props, "ref"), Reflect.get(props, "status"), Reflect.get(props, "waiting")];
+		});
+		expect(faces).toEqual([
+			["Waiter", "running", true],
+			["Worker", "running", undefined],
+			["Between", "running", undefined],
+			["Revived", "running", undefined],
+		]);
+	});
+
 	it("names the model a settled agent ran on, and a running one's current model, after a switch", () => {
 		const f = fixture();
 		const switched = {

@@ -25,9 +25,10 @@ import {
 	formatModelPresetSwitch,
 	isCleanModelPresetSwitch,
 	modelPresetSavedMessage,
+	roleModelCandidates,
 	saveModelPreset,
 } from "../../config/model-presets";
-import { resolveAdvisorRoleSelection, resolveModelRoleValue, scopeAllowList } from "../../config/model-resolver";
+import { resolveAdvisorRoleSelection, resolveModelRoleValue } from "../../config/model-resolver";
 import { routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { getRoleInfo } from "../../config/model-roles";
@@ -1109,11 +1110,7 @@ export class SelectorController {
 								fallbackProvenance === "project" || fallbackProvenance === "global";
 							if (fallbackRoleValue && exposesPersistedFallback) {
 								const session = this.ctx.session;
-								const availableModels =
-									session.scopedModels.length > 0
-										? scopeAllowList(session.scopedModels)
-										: session.getAvailableModels();
-								const resolved = resolveModelRoleValue(fallbackRoleValue, availableModels, {
+								const resolved = resolveModelRoleValue(fallbackRoleValue, roleModelCandidates(session), {
 									settings: this.ctx.settings,
 								});
 								const liveDiffers = !routedModelsAreEqual(session.model, resolved.model);
