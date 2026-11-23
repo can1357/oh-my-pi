@@ -1047,7 +1047,7 @@ describe("AsyncJobManager", () => {
 		expect(delivered).toEqual(["received=kestrel42"]);
 	});
 
-	test("logs a push a wait superseded at debug level and does not requeue it", async () => {
+	test("logs a push a foreground snapshot superseded at debug level and does not requeue it", async () => {
 		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const debug = vi.spyOn(logger, "debug").mockImplementation(() => {});
 		const manager = new AsyncJobManager({});
@@ -1065,7 +1065,11 @@ describe("AsyncJobManager", () => {
 		await manager.getJob(id)?.promise;
 		await waitForCondition(() => queue.has("async-result"));
 
-		manager.watchJobs([id]);
+		// A foreground snapshot consumed the result while the push sat parked
+		// on the owner's yield queue; the queue's isStale check rejects it, so
+		// the superseded delivery logs at debug level without a retry.
+		expect(manager.consumeJobResults([id])).toBe(1);
+		expect(manager.isDeliverySuperseded(id)).toBe(true);
 		await queue.flush("idle");
 		await waitForCondition(() =>
 			debug.mock.calls.some(([message]) => message === "Async job completion delivery superseded"),
@@ -1096,6 +1100,30 @@ describe("AsyncJobManager", () => {
 
 		expect(payload).toMatchObject({ jobId: id, attempt: 1, error: "sink exploded" });
 		expect(payload?.nextRetryAt).toBeUndefined();
+		expect(manager.isDeliveryPending(id)).toBe(false);
+	});
+
+	test("warns with nextRetryAt when a failed delivery queues a real retry", async () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		vi.spyOn(logger, "debug").mockImplementation(() => {});
+		const manager = new AsyncJobManager({});
+		manager.registerDeliverySink("Main", () => {
+			throw new Error("sink exploded");
+		});
+		const id = manager.register("bash", "finished", async () => "done", { ownerId: "Main" });
+
+		await waitForCondition(() =>
+			warn.mock.calls.some(([message]) => message === "Async job completion delivery failed"),
+		);
+		const payload = warn.mock.calls.find(([message]) => message === "Async job completion delivery failed")?.[1];
+
+		expect(payload).toMatchObject({ jobId: id, attempt: 1, error: "sink exploded" });
+		expect(typeof payload?.nextRetryAt).toBe("number");
+		expect(payload?.nextRetryAt).toBeGreaterThan(Date.now());
+		expect(manager.isDeliveryPending(id)).toBe(true);
+
+		// The requeued push is a real retry; acknowledging it stops the loop.
+		expect(manager.acknowledgeDeliveries([id])).toBeGreaterThanOrEqual(1);
 		expect(manager.isDeliveryPending(id)).toBe(false);
 	});
 
