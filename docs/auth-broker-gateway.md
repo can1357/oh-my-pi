@@ -212,6 +212,7 @@ omp auth-gateway check   [--strict] [--json]
 | `GET`  | `/healthz`                 | none   | Liveness + version                                                                                                                               |
 | `GET`  | `/v1/usage`                | bearer | Aggregate `UsageReport[]` (proxied through `AuthStorage`)                                                                                        |
 | `GET`  | `/v1/models`               | bearer | Registry catalog filtered to providers with credentials                                                                                          |
+| `GET`  | `/v1/pi/models`            | bearer | The `/v1/models` catalog as omp model specs (limits, thinking ladder, pricing); pi-native clients load their provider rosters from it            |
 | `GET`  | `/v1/credentials/check`    | bearer | Per-credential auth health probe                                                                                                                 |
 | `POST` | `/v1/chat/completions`     | bearer | OpenAI Chat Completions wire format                                                                                                              |
 | `POST` | `/v1/messages`             | bearer | Anthropic Messages wire format                                                                                                                   |
