@@ -365,7 +365,7 @@ import {
 	resolveToolCallIntent,
 } from "./job-widgets";
 import { createBrowserPrelude } from "./tools/browser";
-import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
+import { isMCPToolName, normalizeToolNames, presentationOrder } from "./tools/builtin-names";
 import { createComputerPrelude } from "./tools/computer";
 import { createRatchetPrelude } from "./ratchet/prelude-definition";
 import { createArchivePrelude } from "./archive/prelude-definition";
@@ -4777,6 +4777,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				initialToolNames.push(name);
 			}
 		}
+		initialToolNames = presentationOrder(initialToolNames, builtInRegistryToolNames);
 
 		// Pre-register in the global agent registry BEFORE building the system prompt,
 		// so that subagents launched in the same parallel batch can see each other in

@@ -40,7 +40,7 @@ import skillNoticePrompt from "../prompts/system/skill-notice.md" with { type: "
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import toolCommandMountNoticePrompt from "../prompts/system/tool-command-mount-notice.md" with { type: "text" };
 import { SPECIAL_TOOL_NAMES, specialToolApplies } from "../tools";
-import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
+import { isMCPToolName, normalizeToolNames, presentationOrder } from "../tools/builtin-names";
 import {
 	approvalRestrictions,
 	denyError,
@@ -1503,7 +1503,7 @@ export class SessionTools {
 			const goalRegistration = this.#ensureGoalRegistered?.();
 			if (goalRegistration) await untilAborted(signal, goalRegistration);
 		}
-		const selectedTools = toolNames.flatMap(name => {
+		const selectedTools = presentationOrder(toolNames, this.#builtInToolNames).flatMap(name => {
 			const tool = this.#toolRegistry.get(name);
 			return tool ? [{ name, tool }] : [];
 		});
@@ -2898,8 +2898,8 @@ export class SessionTools {
 			if (managerToolSet.has(tool)) this.#mcpManagerToolNames.add(tool.name);
 		}
 
-		// Refresh replaces implementations, not an extension's selection. Walk
-		// the new registry in order so catalog reordering still updates the prompt.
+		// Refresh replaces implementations, not an extension's selection; the
+		// apply below fixes the presentation order (`presentationOrder`).
 		// Names previously supplied by extensions keep their selection if ownership changes.
 		const vibeActive = this.#installedVibeToolNames.size > 0;
 		const nextActive = this.#getActiveNonMCPToolNames();
