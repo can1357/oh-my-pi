@@ -95,7 +95,13 @@ function Connection({ relay }: { relay: RelayStatus | null }): ReactNode {
 					{relay?.connected ? "connected" : "connecting…"}
 				</span>
 			</div>
-			{relay !== null && !relay.connected && (
+			{relay !== null && !relay.connected && relay.hostError !== undefined && (
+				<p className="pn-set-note">
+					omp native host unavailable: {relay.hostError} If it is not installed, run{" "}
+					<code>omp browser-relay install</code>.
+				</p>
+			)}
+			{relay !== null && !relay.connected && relay.hostError === undefined && (
 				<p className="pn-set-note">
 					Still connecting? The omp native host may be missing: run{" "}
 					<code>omp browser-relay install</code>.
