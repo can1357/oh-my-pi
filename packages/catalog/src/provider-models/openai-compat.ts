@@ -3648,11 +3648,85 @@ function mapOpenRouterThinking(
 	};
 }
 
+/** OpenRouter's public API root; its `/models` roster needs no credential. */
+export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+
+/** Options for {@link fetchOpenRouterChatModels}. */
+export interface OpenRouterChatModelsOptions {
+	/** API root serving the roster; defaults to {@link OPENROUTER_BASE_URL}. */
+	baseUrl?: string;
+	/** Scopes the roster to the key's workspace guardrails; omit for the public roster. */
+	apiKey?: string;
+	timeoutMs?: number;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Fetch OpenRouter's tool-capable chat roster with each row's own pricing,
+ * limits, input modalities, and reasoning ladder. Backs the `openrouter`
+ * provider and models.yml `discovery.type: openrouter`, which serves the same
+ * roster through an endpoint fronting OpenRouter.
+ *
+ * Returns `null` on transport/protocol failures.
+ */
+export function fetchOpenRouterChatModels(
+	options: OpenRouterChatModelsOptions = {},
+): Promise<ModelSpec<"openrouter">[] | null> {
+	const references = createBundledReferenceMap<"openrouter">("openrouter");
+	return fetchOpenAICompatibleModels({
+		api: "openrouter",
+		provider: "openrouter",
+		baseUrl: options.baseUrl ?? OPENROUTER_BASE_URL,
+		apiKey: options.apiKey,
+		timeoutMs: options.timeoutMs,
+		filterModel: (entry: OpenAICompatibleModelRecord) => {
+			const params = entry.supported_parameters;
+			return Array.isArray(params) && params.includes("tools");
+		},
+		mapModel: (entry: OpenAICompatibleModelRecord, defaults: ModelSpec<"openrouter">): ModelSpec<"openrouter"> => {
+			const reference = references.get(defaults.id);
+			const baseModel = mapWithBundledReference(entry, defaults, reference);
+			const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
+			const params = Array.isArray(entry.supported_parameters)
+				? entry.supported_parameters.filter((value): value is string => typeof value === "string")
+				: [];
+			const thinking = mapOpenRouterThinking(entry, baseModel);
+			const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+			const input: ("text" | "image")[] = Array.isArray(architecture?.input_modalities)
+				? toInputCapabilities(architecture.input_modalities)
+				: String(architecture?.modality ?? "").includes("image")
+					? ["text", "image"]
+					: ["text"];
+			const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
+
+			const supportsToolChoice = params.includes("tool_choice");
+
+			return {
+				...baseModel,
+				reasoning: params.includes("reasoning"),
+				...(thinking !== undefined ? { thinking } : {}),
+				input,
+				cost: {
+					input: parseFloat(String(pricing?.prompt ?? "0")) * 1_000_000,
+					output: parseFloat(String(pricing?.completion ?? "0")) * 1_000_000,
+					cacheRead: parseFloat(String(pricing?.input_cache_read ?? "0")) * 1_000_000,
+					cacheWrite: parseFloat(String(pricing?.input_cache_write ?? "0")) * 1_000_000,
+				},
+				contextWindow: toPositiveNumber(entry.context_length, baseModel.contextWindow),
+				maxTokens: toPositiveNumber(topProvider?.max_completion_tokens, baseModel.maxTokens),
+				...(!supportsToolChoice && {
+					compat: { ...baseModel.compat, supportsToolChoice: false },
+				}),
+			};
+		},
+		fetch: options.fetch,
+	});
+}
+
 export function openrouterModelManagerOptions(config?: OpenRouterModelManagerConfig): ModelManagerOptions<Api> {
 	const apiKey = config?.apiKey;
-	const baseUrl = (config?.baseUrl ?? "https://openrouter.ai/api/v1").replace(/\/+$/g, "");
+	const baseUrl = (config?.baseUrl ?? OPENROUTER_BASE_URL).replace(/\/+$/g, "");
 	const decisionsBaseUrl = openrouterDecisionsBaseUrl(baseUrl);
-	const references = createBundledReferenceMap<"openrouter">("openrouter");
 	return {
 		providerId: "openrouter",
 		// Older builds cached OpenRouter discovery rows as `api: "openai-completions"`;
@@ -3665,57 +3739,7 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 		fetchDynamicModels: async () => {
 			const [chatModels, imageModels, decisionModels, rerankModels, videoModels, embeddingModels] =
 				await Promise.all([
-					fetchOpenAICompatibleModels({
-						api: "openrouter",
-						provider: "openrouter",
-						baseUrl,
-						apiKey,
-						filterModel: (entry: OpenAICompatibleModelRecord) => {
-							const params = entry.supported_parameters;
-							return Array.isArray(params) && params.includes("tools");
-						},
-						mapModel: (
-							entry: OpenAICompatibleModelRecord,
-							defaults: ModelSpec<"openrouter">,
-							_context: OpenAICompatibleModelMapperContext<"openrouter">,
-						): ModelSpec<"openrouter"> => {
-							const reference = references.get(defaults.id);
-							const baseModel = mapWithBundledReference(entry, defaults, reference);
-							const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
-							const params = Array.isArray(entry.supported_parameters)
-								? entry.supported_parameters.filter((value): value is string => typeof value === "string")
-								: [];
-							const thinking = mapOpenRouterThinking(entry, baseModel);
-							const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
-							const input: ("text" | "image")[] = Array.isArray(architecture?.input_modalities)
-								? toInputCapabilities(architecture.input_modalities)
-								: String(architecture?.modality ?? "").includes("image")
-									? ["text", "image"]
-									: ["text"];
-							const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
-
-							const supportsToolChoice = params.includes("tool_choice");
-
-							return {
-								...baseModel,
-								reasoning: params.includes("reasoning"),
-								...(thinking !== undefined ? { thinking } : {}),
-								input,
-								cost: {
-									input: parseFloat(String(pricing?.prompt ?? "0")) * 1_000_000,
-									output: parseFloat(String(pricing?.completion ?? "0")) * 1_000_000,
-									cacheRead: parseFloat(String(pricing?.input_cache_read ?? "0")) * 1_000_000,
-									cacheWrite: parseFloat(String(pricing?.input_cache_write ?? "0")) * 1_000_000,
-								},
-								contextWindow: toPositiveNumber(entry.context_length, baseModel.contextWindow),
-								maxTokens: toPositiveNumber(topProvider?.max_completion_tokens, baseModel.maxTokens),
-								...(!supportsToolChoice && {
-									compat: { ...baseModel.compat, supportsToolChoice: false },
-								}),
-							};
-						},
-						fetch: config?.fetch,
-					}),
+					fetchOpenRouterChatModels({ baseUrl, apiKey, fetch: config?.fetch }),
 					fetchOpenAICompatibleModels({
 						api: "openrouter-images",
 						provider: "openrouter",
