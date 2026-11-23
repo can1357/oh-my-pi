@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.1.1] - 2026-11-23
+
 ### Breaking Changes
 
 - The native shell Rust API now stores indexed variables as `IndexedArray` instead of `Vec`; construct `VarValue::Indexed` values with `items.into()`.

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.1.1] - 2026-11-23
+
 ### Added
 
 - Z.AI (`zai`) now discovers the models available to your GLM Coding Plan key, so newly released GLM models appear without waiting for a catalog update.

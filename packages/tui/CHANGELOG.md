@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.1.1] - 2026-11-23
+
 ### Added
 
 - Added host-provided runtime choices for settings menus through `SettingsRuntimeContext.runtimeOptions`, while preserving built-in choices for thinking levels, themes, and composer shapes.

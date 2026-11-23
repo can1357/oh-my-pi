@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.1.1] - 2026-11-23
+
 ### Added
 
 - Added `readDailyActivity()` for reading stored daily activity without being blocked by another process writing to the stats database; it returns `null` when no stats database exists.

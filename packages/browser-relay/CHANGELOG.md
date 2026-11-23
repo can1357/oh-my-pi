@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.1.1] - 2026-11-23
+
 ### Fixed
 
 - The side panel’s Connection settings now show the browser’s specific reason when it refuses the native host (for example, because native messaging is blocked by enterprise policy), instead of incorrectly suggesting that the host may be missing.

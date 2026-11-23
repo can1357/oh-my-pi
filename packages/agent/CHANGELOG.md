@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.1.1] - 2026-11-23
+
 ### Fixed
 
 - Prevented oversized handoffs from reaching the provider by detecting when prepared context exceeds the target model’s context window.

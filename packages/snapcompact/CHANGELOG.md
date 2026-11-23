@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.1.1] - 2026-11-23
+
 ### Fixed
 
 - Fixed snapcompact archive summaries so they accurately report the grid layout of dense middle frames.
