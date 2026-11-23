@@ -864,106 +864,6 @@ export function missingNativeExportMessage(symbolName, addon = loadedAddon) {
 }
 
 /**
- * One-line notice for a workspace tree running an addon from another release.
- *
- * The missing-symbol stubs only speak when a caller touches a symbol the addon
- * does not carry. A symbol it does carry runs that release's behaviour — an
- * older shell, an older grep — with no marker at all, so this notice is the
- * only provenance those failures get.
- *
- * `stale` is any release difference, so the wording must not assume the addon
- * is the older side.
- * @param {NonNullable<ReturnType<typeof nativeAddonStatus>>} addon
- * @returns {string}
- */
-export function staleWorkspaceAddonNotice(addon) {
-	const loaded = addon.version ? `@oh-my-pi/pi-natives@${addon.version}` : "an addon without a release stamp";
-	return (
-		`[omp-natives] ${addon.path} is ${loaded}, but this checkout is @${addon.packageVersion}. ` +
-		"Symbols this checkout expects may be missing and shared ones may behave differently; " +
-		"run `bun run build:native` before trusting results from this tree.\n"
-	);
-}
-
-/**
- * Whether the copy of this module running on the current thread has already
- * written the mismatched-addon notice. One per loaded copy, which is one per
- * main thread in every shape this package ships; the write itself is confined
- * to the main thread by {@link onMainThread}.
- */
-const staleNoticeState = { reported: false };
-
-/** Memoized answer from {@link onMainThread}; `undefined` until first asked. */
-let mainThreadAnswer;
-
-/**
- * True on a process's main thread, false inside a worker thread.
- *
- * Resolved through `createRequire` on first use rather than imported at module
- * scope: `packages/coding-agent/src/cli.ts` keeps `node:worker_threads` out of
- * ordinary startup on purpose, and this module is reached statically from
- * `sqlite-locks` on launches that never load an addon. Asking only when a
- * mismatch has already been found keeps that boundary. A runtime without the
- * builtin answers "main thread", which is the safe side: the notice prints.
- * @returns {boolean}
- */
-function onMainThread() {
-	if (mainThreadAnswer === undefined) {
-		try {
-			mainThreadAnswer = createRequire(import.meta.url)("node:worker_threads").isMainThread !== false;
-		} catch {
-			mainThreadAnswer = true;
-		}
-	}
-	return mainThreadAnswer;
-}
-
-/**
- * Write {@link staleWorkspaceAddonNotice} once, from the main thread, when a
- * workspace tree loads an addon of another release.
- *
- * Three guards, each load-bearing.
- *
- * Main thread only, because fd 2 is shared and a worker reaches `loadNative()`
- * long after interactive mode owns the terminal — the subagent, JS-eval and
- * tab workers all start then, so a per-worker write paints into a rendered
- * frame. The main thread has already said it at startup; a worker repeating it
- * adds nothing and costs the display. A worker *process* keeps the notice: it
- * has its own main thread, and `subprocess/worker-client.ts` captures its
- * stderr to a file rather than the terminal.
- *
- * Latched, because `loadNative()` is not a startup-only call: the lazy
- * entrypoints in `clipboard.js` and friends call it on every invocation.
- *
- * Workspace loads only, because {@link validateLoadedBindings} has a second
- * success path — it accepts a pre-sentinel addon on an installed load
- * (`isCompatiblePreSentinelNativeAddon`), which reports no release and so
- * counts as `stale`. That user has no repository to build.
- *
- * The write is a synchronous `fs.writeSync` to fd 2 for the same reason as
- * {@link startupMarker}: it must survive a crash that follows it. `write` and
- * `state` are injectable so a test can exercise the guards without consuming
- * this copy's latch.
- * @param {{ isWorkspaceLoad: boolean }} ctx
- * @param {NonNullable<ReturnType<typeof nativeAddonStatus>>} addon
- * @param {{ write?: (text: string) => void; state?: { reported: boolean } }} [deps]
- * @returns {boolean} whether this call wrote the notice
- */
-export function reportStaleWorkspaceAddon(ctx, addon, deps = {}) {
-	const state = deps.state ?? staleNoticeState;
-	// Thread identity last: the three cheap gates reject every ordinary launch
-	// before `node:worker_threads` is resolved at all.
-	if (!ctx.isWorkspaceLoad || !addon.stale || state.reported || !onMainThread()) return false;
-	state.reported = true;
-	try {
-		(deps.write ?? (text => fs.writeSync(2, text)))(staleWorkspaceAddonNotice(addon));
-	} catch {
-		// stderr unavailable; the notice is best-effort, the stubs still speak
-	}
-	return true;
-}
-
-/**
  * Install the addon's bounded Tokio runtime now that `dlopen` has returned and
  * the dynamic-loader lock is released. The Rust `#[module_init]` deliberately
  * does NOT build the runtime — spawning worker threads under the loader lock
@@ -1176,7 +1076,6 @@ export function loadNative() {
 			installNativeTokioRuntime(bindings);
 			configureGrammarDir(bindings, ctx.nativesDir);
 			loadedAddon = describeLoadedAddon(bindings, candidate, ctx);
-			reportStaleWorkspaceAddon(ctx, loadedAddon);
 			cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
 			if (hasEmbedded) {
 				pruneStaleEmbeddedAddons({

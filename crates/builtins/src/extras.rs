@@ -45,6 +45,7 @@ macro_rules! for_each_extra {
 			utility [all(feature = "util.chmod", unix)] "chmod" chmod::Chmod;
 			utility [feature = "util.cksum"] "cksum" cksum::Cksum;
 			utility [feature = "util.cmp"] "cmp" cmp::Cmp;
+			utility [feature = "util.column"] "column" column::Column;
 			utility [feature = "util.comm"] "comm" comm::Comm;
 			utility [feature = "util.cp"] "cp" cp::Cp;
 			utility [feature = "util.combine"] "combine" combine::Combine;
