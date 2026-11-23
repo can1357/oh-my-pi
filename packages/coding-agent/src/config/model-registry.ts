@@ -4957,6 +4957,8 @@ export interface ProviderConfigInput {
 		snapcompactShape?: Model<Api>["snapcompactShape"];
 		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 		contextWindow: number;
+		/** Optional larger window selected by the extended-context policy. */
+		maxContextWindow?: number;
 		maxTokens: number;
 		promptCache?: Model<Api>["promptCache"];
 		/** WebSocket preference within catalog policy; explicit false disables transport selection. */

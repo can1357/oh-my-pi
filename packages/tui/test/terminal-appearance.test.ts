@@ -141,6 +141,23 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		}
 	});
 
+	it("uses Zellij's 996 light report over a conflicting forwarded host background", () => {
+		Bun.env.ZELLIJ = "1";
+		const { terminal, writes } = setupTerminal();
+		try {
+			// Zellij answers DA1 and CSI ?996n itself, reporting light mode, while it
+			// forwards OSC 11 to a dark host terminal.
+			process.stdin.emit("data", "\x1b[?62;52c");
+			process.stdin.emit("data", "\x1b[?62;52c");
+			process.stdin.emit("data", "\x1b[?997;2n");
+			process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+			expect(terminal.appearance).toBe("light");
+			expect(writes).toContain("\x1b[?996n");
+		} finally {
+			terminal.stop();
+		}
+	});
+
 	it("expires an unanswered forwarded OSC 11 query before sending a queued refresh", () => {
 		vi.useFakeTimers();
 		Bun.env.ZELLIJ = "1";
