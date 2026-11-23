@@ -149,6 +149,12 @@ export interface SoftToolRequirement {
 	 * command) instead of any call to `toolName`. Escalation still forces `toolName`.
 	 */
 	satisfies?(toolCall: { name: string; arguments?: Record<string, unknown> }): boolean;
+	/**
+	 * Skipped-result text for a call to `toolName` that fails `satisfies`. Without
+	 * it, that call gets the generic notice asking for a `toolName` call, which
+	 * repeats the call the model just made instead of naming the invocation needed.
+	 */
+	unsatisfiedNotice?(toolCall: { name: string; arguments?: Record<string, unknown> }): string;
 	/** Host-owned reminder messages, injected once per `id` activation. */
 	reminder: AgentMessage[];
 }

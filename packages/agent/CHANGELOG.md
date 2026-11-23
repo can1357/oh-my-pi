@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `SoftToolRequirement.unsatisfiedNotice`: the skipped-result text for a call to the required tool that fails `satisfies`, so a host can name the invocation it needs instead of the generic request to call that tool
+
 ### Fixed
 
 - Fixed DeepSeek DSML markup leaking into tool-call arguments (e.g. a `</｜DSML｜ parameter>` tail on an edit or bash command) being executed and replayed; the leaked tail is now cut before the call runs

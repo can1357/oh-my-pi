@@ -23,6 +23,7 @@ import {
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { prompt } from "@oh-my-pi/pi-utils";
 import resolveReminderPrompt from "../prompts/system/resolve-reminder.md" with { type: "text" };
+import resolveUnsatisfiedPrompt from "../prompts/system/resolve-unsatisfied.md" with { type: "text" };
 import type { Tool, ToolSession } from ".";
 import { createReportIssueTool, isAutoQaEnabled } from "./report-tool-issue";
 import { toolCommandCallName, toolCommandDispatches } from "./tool-commands";
@@ -213,6 +214,21 @@ export function buildResolveReminderMessage(
 		attribution: "agent",
 		timestamp: Date.now(),
 	};
+}
+
+/**
+ * Skipped-result notice for a `bash` call made while a preview is pending that
+ * does not run `resolve` or `reject`: names the command it ran, when that is a
+ * session tool command, and the command that finalizes the preview.
+ */
+export function buildResolveUnsatisfiedNotice(toolCall: ToolCallLike, sourceToolName: string): string {
+	return prompt
+		.render(resolveUnsatisfiedPrompt, {
+			toolName: sourceToolName,
+			transportToolName: toolCall.name,
+			invokedCommand: toolCommandCallName(toolCall),
+		})
+		.trim();
 }
 
 /**

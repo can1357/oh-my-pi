@@ -199,6 +199,83 @@ describe("agentLoop soft tool requirement", () => {
 		expect(skipped).toBeDefined();
 	});
 
+	it("gives a required-tool call that fails satisfies the host's notice, not a request to call that tool again", async () => {
+		let pendingPreview = true;
+		const bashSchema = type({ command: "string" });
+		const bashTool: AgentTool<typeof bashSchema, Record<string, never>> = {
+			name: "bash",
+			label: "Bash",
+			description: "Run a shell command",
+			parameters: bashSchema,
+			async execute(_id, args) {
+				if (args.command.startsWith("resolve")) pendingPreview = false;
+				return { content: [{ type: "text", text: "ok" }], details: {} };
+			},
+		};
+		const peekTool: AgentTool<typeof emptySchema, Record<string, never>> = {
+			name: "peek",
+			label: "Peek",
+			description: "A non-resolve detour tool",
+			parameters: emptySchema,
+			async execute() {
+				return { content: [{ type: "text", text: "peeked" }], details: {} };
+			},
+		};
+		const getToolChoice = (): SoftToolRequirement | undefined =>
+			pendingPreview
+				? {
+						soft: true,
+						id: "preview-1",
+						toolName: "bash",
+						satisfies: toolCall => {
+							const command = toolCall.arguments?.command;
+							return toolCall.name === "bash" && typeof command === "string" && command.startsWith("resolve");
+						},
+						unsatisfiedNotice: toolCall =>
+							`\`${String(toolCall.arguments?.command)}\` does not finalize the preview`,
+						reminder: [
+							createUserMessage("<system-reminder>Run `resolve` to finalize the preview.</system-reminder>"),
+						],
+					}
+				: undefined;
+		const context: AgentContext = { systemPrompt: ["sys"], messages: [], tools: [bashTool, peekTool] };
+		const mock = createMockModel({
+			responses: [
+				// Turn 1: the required tool running a command that is not `resolve`, batched with a detour.
+				{
+					content: [
+						{ type: "toolCall", id: "b1", name: "bash", arguments: { command: 'ast_edit resolve "ok"' } },
+						{ type: "toolCall", id: "p1", name: "peek", arguments: {} },
+					],
+				},
+				{ content: [{ type: "toolCall", id: "b2", name: "bash", arguments: { command: 'resolve "ok"' } }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			getToolChoice,
+		};
+
+		const stream = agentLoop([createUserMessage("go")], context, config, undefined, mock.stream);
+		for await (const _ of stream) {
+			// drain
+		}
+		const messages = await stream.result();
+		const resultText = (toolCallId: string): string => {
+			const result = messages.find(m => m.role === "toolResult" && m.toolCallId === toolCallId);
+			if (result?.role !== "toolResult") throw new Error(`missing tool result for ${toolCallId}`);
+			return result.content.map(block => (block.type === "text" ? block.text : "")).join("");
+		};
+
+		// The wrong-command bash call is told what it ran instead of "call the `bash` tool".
+		expect(resultText("b1")).toContain('`ast_edit resolve "ok"` does not finalize the preview');
+		// The detour never called the required tool, so the host's notice is not about it.
+		expect(resultText("p1")).not.toContain("does not finalize the preview");
+		expect(mock.calls[1]?.options?.toolChoice).toEqual({ type: "tool", name: "bash" });
+	});
+
 	it("does not yield while the requirement is unmet — escalates after a bare-text turn", async () => {
 		const h = makeSoftResolveHarness();
 		const context: AgentContext = { systemPrompt: ["sys"], messages: [], tools: h.tools };
