@@ -6861,6 +6861,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Apply the `tui.vimMode` settings to the composer and route its clipboard registers. */
 	#applyVimMode(editor: CustomEditor): void {
 		editor.vimStartMode = cfgTuiVimStartMode.get(settings);
+		// Only the composer has a slash-command menu for `:` to open.
+		editor.vimSlashCommands = true;
 		editor.setVimMode(cfgTuiVimMode.get(settings));
 		this.#wireVimClipboard(editor);
 		// Recolor the prompt border on every mode switch: in a modal editor the mode has to be

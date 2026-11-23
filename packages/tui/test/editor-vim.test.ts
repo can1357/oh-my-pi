@@ -1919,8 +1919,9 @@ describe("Editor vim mode", () => {
 			expect(editor.getText()).toBe("raft");
 		});
 
-		it(": on an empty prompt starts a slash command in Insert mode; with a draft it does nothing", () => {
+		it(": on an empty prompt starts a slash command in Insert mode; with a draft or no command menu it does nothing", () => {
 			const editor = vimEditor("");
+			editor.vimSlashCommands = true;
 			editor.handleInput(":");
 			expect(editor.getText()).toBe("/");
 			expect(editor.vimMode).toBe("insert");
@@ -1932,9 +1933,16 @@ describe("Editor vim mode", () => {
 			expect(editor.getText()).toBe("");
 
 			const draft = vimEditor("keep me");
+			draft.vimSlashCommands = true;
 			draft.handleInput(":");
 			expect(draft.getText()).toBe("keep me");
 			expect(draft.vimMode).toBe("normal");
+
+			// A dialog box has no command menu: `:` must not leave a stray `/` as the answer.
+			const box = vimEditor("");
+			box.handleInput(":");
+			expect(box.getText()).toBe("");
+			expect(box.vimMode).toBe("normal");
 		});
 	});
 

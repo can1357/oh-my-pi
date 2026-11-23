@@ -754,6 +754,8 @@ export class VimState {
 	#unrecordedInsert = false;
 	/** The editor's wrapped-row lookup for `gj`/`gk`; without one they move by lines like `j`/`k`. */
 	screenMove: VimScreenMove | null = null;
+	/** Whether the host has a slash-command menu for `:` to open; without one `:` does nothing. */
+	slashCommands = false;
 
 	/**
 	 * Vim's "desired column": `j`/`k` remember the column you started from, so descending through a
@@ -1835,7 +1837,7 @@ export class VimState {
 				// command menu opens as if `/` were typed. With a draft it would mix into the text, so it does nothing.
 				const operator = this.#operator;
 				this.#clearPending();
-				if (operator !== null || buf.lines.length !== 1 || buf.lines[0] !== "") return [];
+				if (!this.slashCommands || operator !== null || buf.lines.length !== 1 || buf.lines[0] !== "") return [];
 				this.mode = "insert";
 				this.#unrecordedInsert = true;
 				return [{ kind: "mode", mode: "insert" }, { kind: "commandLine" }];

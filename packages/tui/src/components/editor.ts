@@ -1194,6 +1194,18 @@ export class Editor implements Component, Focusable {
 	/** Mode each Vim prompt starts in: when Vim mode is turned on, after a submit, and on {@link resetVimMode}. */
 	vimStartMode: "insert" | "normal" = "insert";
 
+	#vimSlashCommands = false;
+
+	/** Vim's `:` on an empty prompt types `/` to open the host's slash-command menu; off where there is none (dialog boxes). */
+	get vimSlashCommands(): boolean {
+		return this.#vimSlashCommands;
+	}
+
+	set vimSlashCommands(enabled: boolean) {
+		this.#vimSlashCommands = enabled;
+		if (this.#vim) this.#vim.slashCommands = enabled;
+	}
+
 	/** Enable Vim-style modal editing, starting in {@link vimStartMode}. */
 	setVimMode(enabled: boolean): void {
 		if (enabled === (this.#vim !== null)) return;
@@ -1206,6 +1218,7 @@ export class Editor implements Component, Focusable {
 		}
 		const vim = new VimState();
 		vim.screenMove = count => this.#vimScreenMove(count);
+		vim.slashCommands = this.#vimSlashCommands;
 		this.#vim = vim;
 		this.#beginVimPrompt();
 	}
