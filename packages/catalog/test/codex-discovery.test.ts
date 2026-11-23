@@ -1169,4 +1169,152 @@ describe("Codex model discovery", () => {
 		});
 		expect(result?.models.map(model => model.id)).toEqual(["gpt-5.6-luna"]);
 	});
+
+	it("does not fall back from /codex/models to /models on the official ChatGPT backend", async () => {
+		const requestedUrls: string[] = [];
+		const fetchFn: typeof fetch = Object.assign(
+			async (input: string | URL | Request) => {
+				const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+				requestedUrls.push(url);
+				if (url.includes("/codex/models")) {
+					return new Response("gateway timeout", { status: 504 });
+				}
+				return Response.json({
+					models: [{ slug: "gpt-6.2-sol-wm", display_name: "GPT-6.2-Sol" }],
+				});
+			},
+			{ preconnect() {} },
+		);
+
+		const result = await fetchCodexModels({
+			accessToken: "test-token",
+			clientVersion: "0.170.0",
+			fetchFn,
+		});
+
+		expect(result).toBeNull();
+		expect(requestedUrls).toEqual(["https://chatgpt.com/backend-api/codex/models?client_version=0.170.0"]);
+	});
+
+	it("still falls back from /codex/models to /models on custom non-official base URLs", async () => {
+		const requestedUrls: string[] = [];
+		const fetchFn: typeof fetch = Object.assign(
+			async (input: string | URL | Request) => {
+				const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+				requestedUrls.push(url);
+				if (url.includes("/codex/models")) {
+					return new Response("not found", { status: 404 });
+				}
+				return Response.json({
+					models: [{ slug: "gpt-6.2-sol", display_name: "GPT-6.2-Sol" }],
+				});
+			},
+			{ preconnect() {} },
+		);
+
+		const result = await fetchCodexModels({
+			accessToken: "test-token",
+			baseUrl: "https://codex.example/backend-api",
+			clientVersion: "0.170.0",
+			fetchFn,
+		});
+
+		expect(result?.models.map(model => model.id)).toEqual(["gpt-6.2-sol"]);
+		expect(requestedUrls).toEqual([
+			"https://codex.example/backend-api/codex/models?client_version=0.170.0",
+			"https://codex.example/backend-api/models?client_version=0.170.0",
+		]);
+	});
+
+	it("stops probing candidate paths immediately when the discovery signal is aborted", async () => {
+		const controller = new AbortController();
+		const requestedUrls: string[] = [];
+		const fetchFn: typeof fetch = Object.assign(
+			async (input: string | URL | Request) => {
+				const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+				requestedUrls.push(url);
+				controller.abort(new Error("timed out"));
+				throw new DOMException("Aborted", "AbortError");
+			},
+			{ preconnect() {} },
+		);
+
+		const result = await fetchCodexModels({
+			accessToken: "test-token",
+			baseUrl: "https://codex.example/backend-api",
+			clientVersion: "0.170.0",
+			signal: controller.signal,
+			fetchFn,
+		});
+
+		expect(result).toBeNull();
+		expect(requestedUrls).toEqual(["https://codex.example/backend-api/codex/models?client_version=0.170.0"]);
+	});
+
+	it("does not overwrite models.db when discovery aborts before a slow fetch settles", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-abort-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const controller = new AbortController();
+		const staleGoodModel: ModelSpec<"openai-codex-responses"> = {
+			id: "gpt-6.2-sol",
+			name: "GPT-6.2 Sol",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 500_000,
+			maxTokens: 128_000,
+		};
+		try {
+			writeModelCache(
+				"openai-codex",
+				Date.now() - 3 * 60 * 60 * 1000,
+				[buildModel(staleGoodModel)],
+				true,
+				"merge-v5:19.1.1:authoritative:empty",
+				dbPath,
+			);
+
+			let releaseLateResponse: (() => void) | undefined;
+			const lateResponseGate = new Promise<void>(resolve => {
+				releaseLateResponse = resolve;
+			});
+
+			const refreshPromise = resolveProviderModels<"openai-codex-responses">(
+				{
+					providerId: "openai-codex",
+					staticModels: [],
+					dynamicModelsAuthoritative: true,
+					cacheDbPath: dbPath,
+					fetchDynamicModels: async signal => {
+						expect(signal).toBe(controller.signal);
+						await lateResponseGate;
+						return [{ ...staleGoodModel, id: "gpt-6.2-sol-wm" }];
+					},
+				},
+				"online",
+				controller.signal,
+			);
+
+			controller.abort(new Error("model discovery timed out after 15000ms"));
+			releaseLateResponse?.();
+
+			await expect(refreshPromise).rejects.toThrow("model discovery timed out after 15000ms");
+
+			const offlineAfterAbort = await resolveProviderModels<"openai-codex-responses">(
+				{
+					providerId: "openai-codex",
+					staticModels: [],
+					dynamicModelsAuthoritative: true,
+					cacheDbPath: dbPath,
+				},
+				"offline",
+			);
+			expect(offlineAfterAbort.models.map(model => model.id)).toEqual(["gpt-6.2-sol"]);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
 });
