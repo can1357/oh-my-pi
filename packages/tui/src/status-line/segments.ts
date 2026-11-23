@@ -1,7 +1,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import { getTimeBasedPricingPeriod } from "@oh-my-pi/pi-catalog/models";
+import { getTimeBasedPricingPeriod, getUpstreamPin } from "@oh-my-pi/pi-catalog/models";
 import { sharedSpinnerFrame, TERMINAL } from "../index";
 import {
 	formatDuration,
@@ -29,6 +29,7 @@ import {
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { node, span } from "../native/describe";
 import { thinkingLevelToken } from "../theme/theme-class";
+import { MAX_THINKING_SUFFIX_OPTIONS, splitThinkingSuffix } from "../overlays/model-selector";
 import type { SessionTreePosition, StatusLineSession } from "./host";
 import type { RenderedSegment, SegmentContext, SegmentView, StatusLineSegment, StatusLineSegmentId } from "./types";
 
@@ -299,6 +300,20 @@ function modelDisplayName(ctx: SegmentContext): string {
 }
 
 /**
+ * Whether a retry fallback serves as the displayed model. Attribution moves only
+ * once a model settles a turn, so after `/model` or a primary restore it still
+ * names the fallback while `state.model` is already the newly selected model.
+ */
+function displayedModelIsServingFallback(ctx: SegmentContext): boolean {
+	const serving = ctx.session.servingModel;
+	const model = ctx.session.state.model;
+	if (!serving?.isFallback || !model) return false;
+	const upstream = getUpstreamPin(model);
+	const identity = upstream ? `${model.provider}/${model.id}@${upstream}` : `${model.provider}/${model.id}`;
+	return splitThinkingSuffix(serving.selector, -1, MAX_THINKING_SUFFIX_OPTIONS).base === identity;
+}
+
+/**
  * The thinking-effort word (`high`, `off`; `auto` until auto thinking resolves
  * a level), or undefined when the model has no thinking. Drives the native
  * model segment and the composer's effort chip.
@@ -391,7 +406,7 @@ const modelSegment: StatusLineSegment = {
 		}
 
 		// A retry fallback serving in place of the configured model, as the agent hub's `fallback →`.
-		if (ctx.session.servingModel?.isFallback) content += theme.fg("warning", `${theme.sep.dot}fallback`);
+		if (displayedModelIsServingFallback(ctx)) content += theme.fg("warning", `${theme.sep.dot}fallback`);
 
 		// Anthropic usage-limit stage (wrap-up allowance or low priority): a
 		// warning-colored badge so past-the-limit service is never mistaken for normal.
@@ -409,7 +424,7 @@ const modelSegment: StatusLineSegment = {
 		if (ctx.session.isFastModeActive() && theme.icon.fast) spans.push(span(` ${theme.icon.fast}`, token));
 		const level = ctx.options.model?.showThinkingLevel === false ? undefined : thinkingLevelWord(ctx.session);
 		if (level !== undefined) spans.push(span(" · ", "dim"), span(level, thinkingLevelToken(level)));
-		const fallback = ctx.session.servingModel?.isFallback === true;
+		const fallback = displayedModelIsServingFallback(ctx);
 		if (fallback) spans.push(span(`${theme.sep.dot}fallback`, "warning"));
 		const slowModeLabel = ctx.session.getAnthropicSlowModeLabel?.();
 		if (slowModeLabel) spans.push(span(`${theme.sep.dot}${slowModeLabel}`, "warning"));

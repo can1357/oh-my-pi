@@ -217,6 +217,18 @@ describe("status line model segment retry fallback", () => {
 		expect(describeSegment("model", ctx)?.tone).toBeUndefined();
 	});
 
+	it("drops the marker once the displayed model is no longer the serving fallback", () => {
+		// Attribution moves only when a model settles a turn: after `/model` or a primary
+		// restore it still names the fallback while `state.model` is already the new model.
+		const ctx = createFallbackContext({ selector: "openai/gpt-4o-mini:high", isFallback: true });
+		expect(Bun.stripANSI(renderSegment("model", ctx).content)).toBe(
+			`${modelPrefix}Opus 4.5${dot}${theme.thinking.high}`,
+		);
+		const view = describeSegment("model", ctx);
+		expect(view?.spans.map(s => s.t).join("")).toBe("Opus 4.5 · high");
+		expect(view?.tone).toBeUndefined();
+	});
+
 	it("adds no marker when the session reports no serving model", () => {
 		const ctx = createFallbackContext();
 		expect(Bun.stripANSI(renderSegment("model", ctx).content)).toBe(
