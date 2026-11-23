@@ -367,5 +367,47 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(dispatched_pool, "hosted")
 
 
+class BuildRequestTests(unittest.TestCase):
+    """Test the build_request function directly."""
+
+    def test_build_request_accepts_unmerged_pr(self):
+        """An unmerged PR (parents empty) should not be rejected by build_request."""
+        import tempfile, os
+        api = unittest.mock.Mock()
+        pr = dict(number=42, head=dict(sha="h" * 40, repo=dict(full_name="blyzer/oh-my-pi")),
+                  base=dict(sha="b" * 40, ref="omp2"),
+                  state="open", merged=False)
+        commit = dict(sha="h" * 40, parents=[], tree=dict(sha="t" * 40))
+        parent_run = dict(repository=dict(id=1), actor=dict(login="blyzer"),
+                          triggering_actor=dict(login="blyzer"))
+        api.get = lambda path: (parent_run if "/actions/runs/" in path and "/git/" not in path else
+                                commit if "/git/commits/" in path else pr)
+        api.paginate = lambda path, key: [
+            dict(id=10, name="Rust workspace and acceptance proofs", status="in_progress"),
+        ]
+        event_path = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+        json.dump({"number": 42}, event_path)
+        event_path.close()
+        env = {
+            "GITHUB_REPOSITORY": "blyzer/oh-my-pi",
+            "GITHUB_RUN_ID": "1",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_EVENT_PATH": event_path.name,
+            "GITHUB_EVENT_NAME": "pull_request",
+            "GITHUB_SHA": "h" * 40,
+            "CI_MACOS_WORKER_SHA": "w" * 40,
+            "AFFECTED_SCOPE": "full",
+            "AFFECTED_ARGS": "",
+            "AFFECTED_DOC_ARGS": "",
+        }
+        try:
+            with unittest.mock.patch.dict(os.environ, env, clear=True):
+                req = controller.build_request(api, "rust")
+            self.assertEqual(req["pr_number"], 42)
+            self.assertEqual(req["head_sha"], "h" * 40)
+        finally:
+            os.unlink(event_path.name)
+
+
 if __name__ == "__main__":
     unittest.main()

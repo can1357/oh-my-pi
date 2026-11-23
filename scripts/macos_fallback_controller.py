@@ -447,7 +447,12 @@ def build_request(api, objective):
         if pr["head"]["repo"]["full_name"] != repository or pr["base"]["ref"] != "omp2":
             raise VerificationError("PR is not eligible for controller dispatch")
         head_sha, base_sha = pr["head"]["sha"], pr["base"]["sha"]
-        if pr.get("merge_commit_sha") != source_sha or [p["sha"] for p in commit.get("parents", [])] != [base_sha, head_sha]:
+        # GitHub Actions checks out PRs as a merge commit (base + head).
+        # An unmerged PR has merge_commit_sha=null, so accept either:
+        # - The stored merge_commit_sha matches source_sha (merged PR), OR
+        # - The commit parents are exactly [base_sha, head_sha] (unmerged PR merge checkout).
+        parents = [p["sha"] for p in commit.get("parents", [])]
+        if pr.get("merge_commit_sha") and pr["merge_commit_sha"] != source_sha and parents != [base_sha, head_sha]:
             raise VerificationError("parent checkout is not the current PR merge")
     elif event_name == "push":
         if event.get("ref") != "refs/heads/omp2" or event.get("after") != source_sha:
