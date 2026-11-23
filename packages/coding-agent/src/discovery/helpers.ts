@@ -5,6 +5,7 @@ import { FileType, glob } from "@oh-my-pi/pi-natives";
 import {
 	CONFIG_DIR_NAME,
 	getAgentDir,
+	getBaseConfigRoot,
 	getConfigDirName,
 	getPluginsDir,
 	getProjectDir,
@@ -1053,9 +1054,9 @@ export function getProjectDiscoveryCeilings(): ReadonlySet<string> {
 
 /** The current user's config roots are never project anchors. */
 export function isUserConfigRoot(root: string): boolean {
-	const configDir = normalizePathForComparison(path.join(root, getConfigDirName()));
+	const configDir = normalizePathForComparison(path.join(root, SOURCE_PATHS.native.projectDir));
 	return (
-		configDir === normalizePathForComparison(path.join(os.homedir(), getConfigDirName())) ||
+		configDir === normalizePathForComparison(getBaseConfigRoot()) ||
 		configDir === normalizePathForComparison(path.dirname(getPluginsDir()))
 	);
 }
@@ -1116,7 +1117,7 @@ async function resolveProjectRegistryPath(cwd: string, ceilings: ReadonlySet<str
 	}
 
 	// Existing .omp/ directories still win, even above the git root, except foreign user roots.
-	const configDirName = getConfigDirName();
+	const configDirName = SOURCE_PATHS.native.projectDir;
 	let aboveGitRoot = nearestGitRoot === null;
 	dir = path.resolve(cwd);
 	while (!ceilings.has(normalizePathForComparison(dir))) {
@@ -1138,7 +1139,7 @@ async function resolveProjectRegistryPath(cwd: string, ceilings: ReadonlySet<str
 		dir = parent;
 	}
 
-	return gitAnchor ? path.join(gitAnchor, getConfigDirName(), "plugins", "installed_plugins.json") : null;
+	return gitAnchor ? path.join(gitAnchor, configDirName, "plugins", "installed_plugins.json") : null;
 }
 
 /**
@@ -1156,14 +1157,15 @@ export async function resolveOrDefaultProjectRegistryPath(cwd: string): Promise<
 	const ceilings = getProjectDiscoveryCeilings();
 	const resolved = await resolveProjectRegistryPath(cwd, ceilings);
 	if (resolved) return resolved;
+	const configDirName = SOURCE_PATHS.native.projectDir;
 	// A cwd containing .omp/ at or below a git root already resolved above.
 	if (
 		ceilings.has(normalizePathForComparison(cwd)) ||
 		isUserConfigRoot(cwd) ||
-		(await isForeignUserConfigRoot(cwd, getConfigDirName()))
+		(await isForeignUserConfigRoot(cwd, configDirName))
 	)
 		return undefined;
-	return path.join(cwd, getConfigDirName(), "plugins", "installed_plugins.json");
+	return path.join(cwd, configDirName, "plugins", "installed_plugins.json");
 }
 
 async function canonicalClaudeProjectPath(projectPath: string): Promise<string | null> {

@@ -29,6 +29,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import * as piUtils from "@oh-my-pi/pi-utils";
+import { restoreEnvValue } from "../helpers/settings-test-state";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -46,14 +47,17 @@ function makeEntry(installPath: string, scope: InstalledPluginEntry["scope"] = "
 
 describe("resolveActiveProjectRegistryPath", () => {
 	let tmpDir: string;
+	let originalConfigDir: string | undefined;
 
 	beforeEach(() => {
+		originalConfigDir = process.env.PI_CONFIG_DIR;
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-proj-scope-"));
 	});
 
 	afterEach(() => {
 		clearClaudePluginRootsCache();
 		vi.restoreAllMocks();
+		restoreEnvValue("PI_CONFIG_DIR", originalConfigDir);
 		removeSyncWithRetries(tmpDir);
 	});
 
@@ -304,12 +308,14 @@ describe("resolveActiveProjectRegistryPath", () => {
 		}
 	});
 
-	it("does not use an aliased user config as a project registry even at a git root", async () => {
+	it("does not use an aliased relocated user config as a project registry even at a git root", async () => {
 		const home = path.join(tmpDir, "home");
 		const project = path.join(home, "work");
-		fs.mkdirSync(path.join(home, ".omp"), { recursive: true });
+		const userConfigDir = path.join(".config", "omp");
+		restoreEnvValue("PI_CONFIG_DIR", userConfigDir);
+		fs.mkdirSync(path.join(home, userConfigDir), { recursive: true });
 		fs.mkdirSync(path.join(project, ".git"), { recursive: true });
-		fs.symlinkSync(path.join(home, ".omp"), path.join(project, ".omp"), "dir");
+		fs.symlinkSync(path.join(home, userConfigDir), path.join(project, ".omp"), "dir");
 		vi.spyOn(os, "homedir").mockReturnValue(home);
 
 		expect(await resolveActiveProjectRegistryPath(project)).toBeNull();
@@ -319,7 +325,9 @@ describe("resolveActiveProjectRegistryPath", () => {
 	it("keeps a custom-home plugin in user scope during discovery", async () => {
 		const home = path.join(tmpDir, "sdk-home");
 		const cwd = path.join(home, "work");
-		const registryPath = path.join(home, ".omp", "plugins", "installed_plugins.json");
+		const userConfigDir = path.join(".config", "omp");
+		restoreEnvValue("PI_CONFIG_DIR", userConfigDir);
+		const registryPath = path.join(home, userConfigDir, "plugins", "installed_plugins.json");
 		fs.mkdirSync(cwd, { recursive: true });
 		await writeInstalledPluginsRegistry(registryPath, {
 			version: 2,
