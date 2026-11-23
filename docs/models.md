@@ -226,7 +226,7 @@ override matching model tags. These fields do not configure the Anthropic Messag
 
 ### Compaction options
 
-- `compactionModel` (per model, including `modelOverrides`) — preferred compaction model, tried before the active model, chat-role candidates, and a largest-context fallback. It does not switch the active conversation model.
+- `compactionModel` (per model, including `modelOverrides`) — preferred compaction model, tried before the global `compaction.model`, the active model, chat-role candidates, and a largest-context fallback. It does not switch the active conversation model.
 - `remoteCompaction` (provider level or per model) — opts eligible models into provider-native compaction. Supported keys: `enabled`, `api`, `endpoint`, `model`, `v2StreamingEnabled`, `v2Endpoint`, `streamingEndpoint`. Provider-level settings are the baseline; per-model keys override them.
 
 ### Allowed provider/model `api` values

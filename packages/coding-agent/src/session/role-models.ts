@@ -9,6 +9,7 @@ import {
 	resolveModelRoleValue,
 } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import { cfgCompactionModel } from "./context-settings";
 
 /** Formats a role assignment while preserving its explicit thinking selector. */
 export function formatRoleModelValue(
@@ -64,6 +65,20 @@ export function resolveContextPromotionConfiguredTarget(
 /** Resolves a model's configured compaction target. */
 export function resolveCompactionConfiguredTarget(currentModel: Model, availableModels: Model[]): Model | undefined {
 	return resolveConfiguredModelTarget(currentModel.compactionModel, currentModel, availableModels);
+}
+
+/**
+ * Resolves the global `compaction.model` selector against the caller's
+ * available models. The value accepts a `provider/model` selector or a
+ * `@role` alias; unset or whitespace-only values resolve to undefined.
+ */
+export function resolveGlobalCompactionTarget(settings: Settings, availableModels: Model[]): Model | undefined {
+	const configured = cfgCompactionModel.get(settings)?.trim();
+	if (!configured) return undefined;
+	return resolveModelRoleValue(configured, availableModels, {
+		settings,
+		matchPreferences: getModelMatchPreferences(settings),
+	}).model;
 }
 
 /** Resolves a model role and its explicit thinking selection. */

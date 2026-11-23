@@ -114,6 +114,7 @@ import { isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
 	resolveCompactionConfiguredTarget,
 	resolveContextPromotionConfiguredTarget,
+	resolveGlobalCompactionTarget,
 	resolveRoleModelFull,
 } from "./role-models";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
@@ -4036,6 +4037,9 @@ export class SessionMaintenance {
 		if (preferredModel) {
 			addCandidate(resolveCompactionConfiguredTarget(preferredModel, availableModels));
 		}
+		// `compaction.model` is the global default; a model's own `compactionModel`
+		// stays ahead of it, and the active model remains the first fallback.
+		addCandidate(resolveGlobalCompactionTarget(settings, availableModels));
 		addCandidate(preferredModel ?? undefined);
 		for (const role of CHAT_MODEL_ROLE_IDS) {
 			addCandidate(

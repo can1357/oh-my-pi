@@ -155,6 +155,19 @@ export const cfgCompactionMethodOrder = register({
 	},
 });
 
+export const cfgCompactionModel = register({
+	id: "compaction.model",
+	type: "string",
+	default: undefined,
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "Compaction Model",
+		description:
+			"Model that writes compaction summaries, as provider/model or @role; empty uses the active session model",
+	},
+});
+
 export const cfgCompactionThresholdPercent = register({
 	id: "compaction.thresholdPercent",
 	type: "number",
@@ -386,6 +399,7 @@ export const cfgCompaction = combine({
 	enabled: cfgCompactionEnabled,
 	experimentalContextManagement: cfgCompactionExperimentalContextManagement,
 	methodOrder: cfgCompactionMethodOrder,
+	model: cfgCompactionModel,
 	thresholdPercent: cfgCompactionThresholdPercent,
 	thresholdTokens: cfgCompactionThresholdTokens,
 	reserveTokens: cfgCompactionReserveTokens,
