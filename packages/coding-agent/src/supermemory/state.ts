@@ -852,7 +852,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		turn: number,
 		messages: number,
 		windowStart: number,
-		stop?: { stoppedAt: number; stoppedMessages: number | undefined },
+		stop?: { stoppedAt: number; stoppedMessages?: number },
 	): void {
 		this.session.sessionManager.appendCustomEntry(RETENTION_CURSOR_ENTRY_TYPE, {
 			version: 1,
@@ -946,9 +946,11 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		const stoppedAt = countUserTurns(path, start);
 		// Nothing to protect yet: no turn, no cursor (keeps an untouched draft session empty).
 		if (stoppedAt === 0 && !this.#hasCursor) return;
-		// A run still in flight (exit mid-answer) appends its answer after this: no message bound, so
-		// that answer still reads as on-period; only later user turns count as exchanged while off.
-		const stoppedMessages = this.session.isStreaming ? undefined : extractMessages(path, start).length;
+		// Session teardown mid-run: the aborted run appends its answer after this, so no message bound
+		// (that answer still reads as on-period; only later user turns count as exchanged while off).
+		// A backend switch mid-run keeps the bound: the rest of that run happens while retention is off.
+		const midRunExit = this.session.isDisposed && this.session.isStreaming;
+		const stoppedMessages = midRunExit ? undefined : extractMessages(path, start).length;
 		const last = this.#pathCursor(path, start);
 		if (
 			last?.stoppedAt === stoppedAt &&
@@ -960,10 +962,12 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		) {
 			return;
 		}
-		this.#appendCursor(this.lastRetainedTurn, this.#retainedMessages, this.#windowStart, {
-			stoppedAt,
-			stoppedMessages,
-		});
+		this.#appendCursor(
+			this.lastRetainedTurn,
+			this.#retainedMessages,
+			this.#windowStart,
+			stoppedMessages === undefined ? { stoppedAt } : { stoppedAt, stoppedMessages },
+		);
 	}
 }
 

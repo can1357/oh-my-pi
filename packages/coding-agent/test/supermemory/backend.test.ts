@@ -48,8 +48,10 @@ function makeSession(options: { settings?: Record<string, unknown>; cwd?: string
 		transcriptId: "t1",
 		settings: Settings.isolated({ ...CONFIGURED, ...options.settings }),
 		header: undefined as SessionHeader | undefined,
-		/** A run still in flight (an exit mid-answer). */
+		/** A run still in flight. */
 		isStreaming: false,
+		/** The session itself is being torn down (exit). */
+		isDisposed: false,
 		sessionManager: {
 			getEntries: () => entries,
 			getBranch: () => [...(branch ?? entries)],
@@ -895,14 +897,39 @@ describe("supermemoryBackend", () => {
 		await session.endTurn();
 		// Quit while turn two streams: the stop is written before its answer lands.
 		session.isStreaming = true;
+		session.isDisposed = true;
 		session.addTurn("two");
 		await session.setSupermemorySessionState(undefined)?.dispose();
 		session.isStreaming = false;
+		session.isDisposed = false;
 		session.addAnswer("late answer");
 		await start(session);
 		await session.endTurn();
 		const contents = create.mock.calls.map(call => call[1]?.content ?? "");
 		expect(contents.join("\n")).toContain("late answer");
+	});
+
+	it("switching off mid-run in the same process never uploads that run's later output or off turns", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		await session.endTurn();
+		// `memory.backend` → off while turn two streams; the session lives on.
+		session.isStreaming = true;
+		session.addTurn("two");
+		await session.setSupermemorySessionState(undefined)?.dispose();
+		session.addAnswer("off-period rest of run");
+		session.isStreaming = false;
+		session.addTurn("off-period turn");
+		await start(session);
+		session.addTurn("three");
+		await session.endTurn();
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "");
+		expect(contents.at(-1)).toContain("three");
+		expect(contents.join("\n")).not.toContain("off-period");
 	});
 
 	it("a replacement state's window upload waits for the previous state's upload still in flight", async () => {
