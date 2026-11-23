@@ -216,8 +216,8 @@ export function serviceTierFamily(model: ServiceTierModel): ServiceTierFamily | 
 }
 
 /**
- * Reduce a per-family tier map to the single wire tier for `model` — the entry
- * for the model's family, or `undefined` when the model has no family.
+ * Resolve the model's per-family preference. A native OpenAI route that
+ * cannot send Ultrafast uses Fast if supported, otherwise the default path.
  */
 export function resolveModelServiceTier(
 	tiers: ServiceTierByFamily | null | undefined,
@@ -225,7 +225,14 @@ export function resolveModelServiceTier(
 ): ServiceTier | undefined {
 	if (!tiers) return undefined;
 	const family = serviceTierFamily(model);
-	return family ? tiers[family] : undefined;
+	const requested = family ? tiers[family] : undefined;
+	// Leave custom APIs to their adapter: the registered API may wrap an
+	// upstream model that does support Ultrafast.
+	if (requested === "ultrafast" && family === "openai" && isOpenAIServiceTierApi(model.api)) {
+		if (shouldSendServiceTier("ultrafast", model)) return "ultrafast";
+		return shouldSendServiceTier("priority", model) ? "priority" : undefined;
+	}
+	return requested;
 }
 
 /**
