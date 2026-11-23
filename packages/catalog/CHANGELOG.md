@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `isVertexPublisherResponsesUrl` predicate to detect Vertex AI partner Responses API endpoints (`/publishers/{meta,openai}/v1`) ([#19861](https://github.com/can1357/oh-my-pi/pull/19861) by [@konsailabs](https://github.com/konsailabs))
+
 ## [19.1.1] - 2026-11-23
 
 ### Added

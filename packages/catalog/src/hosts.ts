@@ -162,6 +162,12 @@ export function resolveVertexEndpointHost(location: string): string {
 export function isVertexExpressOpenAIUrl(baseUrl: string): boolean {
 	return baseUrl.includes("/endpoints/openapi");
 }
+const VERTEX_PUBLISHER_RESPONSES_URL = /\/publishers\/(?:meta|openai)\/v1\/?(?:[?#]|$)/;
+
+/** Vertex AI partner Responses API endpoints (`/publishers/{meta,openai}/v1`). */
+export function isVertexPublisherResponsesUrl(baseUrl: string): boolean {
+	return VERTEX_PUBLISHER_RESPONSES_URL.test(baseUrl);
+}
 
 /** Vertex AI partner-model raw-predict endpoints (`:streamRawPredict` / `:rawPredict`), e.g. Anthropic or Mistral. */
 export function isVertexRawPredictUrl(baseUrl: string): boolean {
