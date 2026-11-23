@@ -291,8 +291,8 @@ function filterTtsrRulesForScan(
 	return rules.filter(rule => {
 		if (disabled.has(rule.name)) return false;
 		if (!includeBuiltin && rule._source?.provider === BUILTIN_DEFAULTS_PROVIDER_ID) return false;
-		// A judged rule's conditions only gate its question; a condition hit is not a violation.
-		if (rule.question !== undefined) return false;
+		// A gated rule's conditions only gate its question or command; a condition hit is not a violation.
+		if (rule.question !== undefined || rule.gate !== undefined) return false;
 		return (rule.condition && rule.condition.length > 0) || (rule.astCondition && rule.astCondition.length > 0);
 	});
 }
