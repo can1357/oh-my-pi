@@ -438,19 +438,20 @@ impl GitRepo {
 			}
 			return Err(Error::backend("git commit", err));
 		}
-		let mut notes = Vec::new();
-		if let Some((lock, mut prepared_notes)) = prepared_index {
+		let notes = if let Some((lock, mut notes)) = prepared_index {
 			// As in Git, publish the written index after the ref swap succeeds.
 			// A failed swap drops the lock and leaves the original index in place.
 			if let Err(err) = lock.commit() {
-				prepared_notes.push(format!(
+				notes.push(format!(
 					"Commit {id} was published, but the prepared shared index could not be installed \
 					 ({}); inspect `git diff --cached` before committing again.",
 					err.error
 				));
 			}
-			notes = prepared_notes;
-		}
+			notes
+		} else {
+			Vec::new()
+		};
 		let _ = run_commit_hook(self, "post-commit", &[], index_path);
 		Ok((id.to_hex().to_string(), notes))
 	}
