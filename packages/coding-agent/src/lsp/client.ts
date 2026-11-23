@@ -39,14 +39,8 @@ import {
 	type ServerConfig,
 	type WorkspaceEdit,
 } from "./types";
-import {
-	detectLanguageId,
-	EquivalentUriMap,
-	fileToUri,
-	mergeDiagnosticLists,
-	readTextFromDisk,
-	uriToFile,
-} from "./utils";
+import { detectLanguageId, mergeDiagnosticLists, readTextFromDisk } from "./utils";
+import { EquivalentUriMap, fileToUri, uriToFile } from "./uri";
 import { WATCHED_FILES_METHOD, WatchedFilesForwarder } from "./watched-files";
 
 /**

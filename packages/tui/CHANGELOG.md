@@ -20,6 +20,7 @@
 ### Removed
 
 - Removed `OmfgPanelComponent.markSaved` and the `"saved"` member of `OmfgPanelState`; the panel now closes once a `/omfg` rule is saved ([#20069](https://github.com/can1357/oh-my-pi/pull/20069) by [@suiso11](https://github.com/suiso11))
+- Removed `MCPProgress` and `parseMCPProgress` from `@oh-my-pi/pi-tui/tools/mcp`; they are exported from `@oh-my-pi/pi-tui/tools/mcp-progress`
 
 ## [19.1.0] - 2026-11-21
 
