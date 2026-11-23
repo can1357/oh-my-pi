@@ -20,7 +20,7 @@
 
 ### Changed
 
-- `stripTerminalSequences` scans its input once, so stripping long styled lines no longer slows down with each escape sequence they contain ([#20280](https://github.com/can1357/oh-my-pi/pull/20280) by [@iliaal](https://github.com/iliaal))
+- Stripping terminal sequences is faster on long styled output: `stripTerminalSequences` now removes them in a single scan of its input ([#20280](https://github.com/can1357/oh-my-pi/pull/20280) by [@iliaal](https://github.com/iliaal))
 - `Editor` re-announces its Vim mode through `onVimModeChange` when it gains focus, so a host's cursor shape follows the editor holding the keys ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - The `vim` status-line segment shows a pending command even with `display: "none"`, which now hides only the mode ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 

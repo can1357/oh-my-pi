@@ -1,9 +1,8 @@
 /**
- * `stripTerminalSequences` is ported verbatim from pi-mono's TUI utils so pi
- * extensions importing it through the legacy-pi compat rewrite observe
- * identical behavior. These tests pin the escape-sequence grammar it shares
- * with its private `extractAnsiCode` helper: CSI (restricted final bytes),
- * OSC and APC with BEL or ST terminators.
+ * `stripTerminalSequences` must match the escape-sequence grammar of pi-mono's
+ * TUI utils so pi extensions importing it through the legacy-pi compat rewrite
+ * observe identical behavior. These tests pin that grammar: CSI (restricted
+ * final bytes), OSC and APC with BEL or ST terminators.
  */
 import { describe, expect, it } from "bun:test";
 import { stripTerminalSequences } from "@oh-my-pi/pi-tui/utils";
