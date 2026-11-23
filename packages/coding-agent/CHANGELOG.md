@@ -4,6 +4,7 @@
 
 ### Added
 
+- The shell's `fd` builtin now runs commands for its results with `-x`/`--exec` and `-X`/`--exec-batch` (with `--batch-size`), lists them with `-l`/`--list-details`, and matches whole names with `--exact`; these options used to fail
 - Added `discovery.type: openrouter` for `models.yml` providers that front OpenRouter under their own URL and key: their model list now comes from OpenRouter's public catalog, and requests follow OpenRouter's request format.
 - With Vim editing mode on, `Ctrl+R` in Normal mode redoes instead of opening history search; history search stays on `Ctrl+R` in Insert mode ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Added Vim mode to ask-form textareas, one-line text fields, "Other" answers, option notes, and text prompts: `Escape` leaves Insert mode first instead of discarding what you typed, and `j`/`k` move between a form's option rows ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
