@@ -156,8 +156,8 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				failedMessage?.stopReason === "error" &&
 				failedMessage.errorMessage !== undefined &&
 				providerErrorRetries < (policy.maxProviderErrorRetries ?? 0) &&
-				// An HTTP status means the transport already spent its own retry budget on this error.
-				failedMessage.errorStatus === undefined &&
+				// The transport already retried these statuses for its whole budget; replaying them multiplies it.
+				!AIError.isTransientStatus(failedMessage.errorStatus) &&
 				AIError.isProviderRetryableError(
 					new FinalizedProviderStreamError(failedMessage.errorMessage, failedMessage.errorStatus),
 				);
