@@ -48,6 +48,8 @@ function makeSession(options: { settings?: Record<string, unknown>; cwd?: string
 		transcriptId: "t1",
 		settings: Settings.isolated({ ...CONFIGURED, ...options.settings }),
 		header: undefined as SessionHeader | undefined,
+		/** A run still in flight (an exit mid-answer). */
+		isStreaming: false,
 		sessionManager: {
 			getEntries: () => entries,
 			getBranch: () => [...(branch ?? entries)],
@@ -59,10 +61,14 @@ function makeSession(options: { settings?: Record<string, unknown>; cwd?: string
 			getCwd: () => cwd,
 			getSessionId: () => session.transcriptId,
 		},
-		/** `/tree` to entry `id` on the active path: later entries append after it. */
+		/** `/tree` to entry `id` anywhere in the tree: later entries append after it. */
 		navigate(id: string) {
-			const path = branch ?? entries;
-			branch = path.slice(0, path.findIndex(entry => entry.id === id) + 1);
+			const byId = new Map(entries.map(entry => [entry.id, entry]));
+			const path: SessionEntry[] = [];
+			for (let entry = byId.get(id); entry; entry = entry.parentId ? byId.get(entry.parentId) : undefined) {
+				path.unshift(entry);
+			}
+			branch = path;
 		},
 		/** A `.`/`c` continuation: an assistant answer without a user turn. */
 		addAnswer(text: string) {
@@ -779,6 +785,124 @@ describe("supermemoryBackend", () => {
 		expect(contents).toHaveLength(2);
 		expect(contents[1]).toContain("three");
 		expect(contents.join("\n")).not.toContain("off-period");
+	});
+
+	it("still sends the turns left in an open window before the stop, without the off-period turns", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 3 } });
+		await start(session);
+		session.addTurn("one");
+		await session.endTurn();
+		session.addTurn("two");
+		await session.endTurn();
+		await session.setSupermemorySessionState(undefined)?.dispose();
+		session.addTurn("off-period");
+		await start(session);
+		await session.getSupermemorySessionState()?.flush();
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "");
+		expect(contents).toHaveLength(1);
+		expect(contents[0]).toContain("reply to one");
+		expect(contents[0]).toContain("reply to two");
+		expect(contents[0]).not.toContain("off-period");
+	});
+
+	it("never uploads an answer added while off without a new user turn, alone or before a later turn", async () => {
+		for (const laterTurn of [false, true]) {
+			vi.restoreAllMocks();
+			const create = vi
+				.spyOn(SupermemoryClient.prototype, "addDocument")
+				.mockResolvedValue({ id: "d", status: "queued" });
+			const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+			await start(session);
+			session.addTurn("one");
+			await session.endTurn();
+			await session.setSupermemorySessionState(undefined)?.dispose();
+			session.addAnswer("off-period continuation");
+			if (laterTurn) session.addTurn("off-period turn");
+			await start(session);
+			session.addTurn("three");
+			await session.endTurn();
+			const contents = create.mock.calls.map(call => call[1]?.content ?? "");
+			expect(contents.at(-1)).toContain("three");
+			expect(contents.join("\n")).not.toContain("off-period");
+		}
+	});
+
+	it("turns after a resume past a stop are not read as off-period by a later resume", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 3 } });
+		await start(session);
+		for (const turn of ["one", "two", "three"]) {
+			session.addTurn(turn);
+			await session.endTurn();
+		}
+		await session.setSupermemorySessionState(undefined)?.dispose();
+		await start(session);
+		session.addTurn("four");
+		await session.endTurn();
+		session.addTurn("five");
+		await session.endTurn();
+		// Left without a stop (crash, or `/new` then back): the next resume reads the branch again.
+		session.getSupermemorySessionState()?.resetConversationTracking();
+		session.addTurn("six");
+		await session.endTurn();
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "");
+		expect(contents).toHaveLength(2);
+		expect(contents[1]).toContain("reply to four");
+		expect(contents[1]).toContain("reply to five");
+		expect(contents[1]).toContain("reply to six");
+	});
+
+	it("a stop written on a sibling branch does not skip this branch's turns", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 4 } });
+		await start(session);
+		for (const turn of ["one", "two", "three"]) {
+			session.addTurn(turn);
+			await session.endTurn();
+		}
+		const find = (text: string) =>
+			session.sessionManager
+				.getEntries()
+				.find(entry => entry.type === "message" && JSON.stringify(entry).includes(text))!.id;
+		const answerThree = find("reply to three");
+		// `/tree` to turn one's answer, then quit: the stop lands on that branch.
+		session.navigate(find("reply to one"));
+		await session.setSupermemorySessionState(undefined)?.dispose();
+		session.navigate(answerThree);
+		await start(session);
+		session.addTurn("four");
+		await session.endTurn();
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "");
+		expect(contents).toHaveLength(1);
+		expect(contents[0]).toContain("reply to two");
+		expect(contents[0]).toContain("reply to four");
+	});
+
+	it("an answer that lands after an exit mid-run is still retained on resume", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		await session.endTurn();
+		// Quit while turn two streams: the stop is written before its answer lands.
+		session.isStreaming = true;
+		session.addTurn("two");
+		await session.setSupermemorySessionState(undefined)?.dispose();
+		session.isStreaming = false;
+		session.addAnswer("late answer");
+		await start(session);
+		await session.endTurn();
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "");
+		expect(contents.join("\n")).toContain("late answer");
 	});
 
 	it("a replacement state's window upload waits for the previous state's upload still in flight", async () => {

@@ -74,6 +74,8 @@ interface RetentionCursorData {
 	windowStart: number;
 	/** Written when automatic retention stopped (dispose): user turns the branch held then. Turns added later were exchanged while it was off. */
 	stoppedAt?: number;
+	/** With {@link stoppedAt}: messages the branch held then; an answer added while off (a continuation, a late reply) grows past it. */
+	stoppedMessages?: number;
 }
 
 /** Window uploads of each session, chained so a replacement state never overtakes its predecessor's upload. */
@@ -124,7 +126,8 @@ function isRetentionCursor(data: unknown): data is RetentionCursorData {
 		Number.isSafeInteger(data.messages) &&
 		"windowStart" in data &&
 		Number.isSafeInteger(data.windowStart) &&
-		(!("stoppedAt" in data) || Number.isSafeInteger(data.stoppedAt))
+		(!("stoppedAt" in data) || Number.isSafeInteger(data.stoppedAt)) &&
+		(!("stoppedMessages" in data) || Number.isSafeInteger(data.stoppedMessages))
 	);
 }
 
@@ -229,6 +232,8 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	#hasCursor = false;
 	/** An entry of the branch the in-memory cursor describes; a branch without it is another one (see {@link #followBranch}). */
 	#anchor: string | undefined;
+	/** Adopted a stop cursor on resume; the first run then writes a plain cursor after it. */
+	#stopAdopted = false;
 	#unsubscribe?: () => void;
 
 	constructor(options: SupermemorySessionStateOptions | SupermemoryAliasOptions) {
@@ -298,7 +303,8 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	 * it. An open window keeps its start-based document id, so completing it later re-sends a superset
 	 * into that document. A latest cursor from another scope (namespace, account or server switch)
 	 * means every turn so far belongs to that scope, and turns added after a stop cursor were
-	 * exchanged while retention was off: either way retention here starts at the current turn.
+	 * exchanged while retention was off: either way retention here starts at the current turn (after a
+	 * stop, turns left unsent before it are still sent once, see {@link #sendBeforeStop}).
 	 */
 	#resumeRetention(): void {
 		const [path, start] = this.#retainedEntries();
@@ -306,17 +312,35 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		const data = this.#pathCursor(path, start);
 		this.#hasCursor = data !== undefined;
 		const turns = countUserTurns(path, start);
-		if (data?.scope === this.#scope() && !(data.stoppedAt !== undefined && turns > data.stoppedAt)) {
-			this.lastRetainedTurn = data.turn;
-			this.#retainedMessages = data.messages;
-			this.#windowStart = data.windowStart;
+		const scoped = data?.scope === this.#scope() ? data : undefined;
+		const stop = scoped?.stoppedAt;
+		// Anything added after the stop (a user turn, or an answer without one) was exchanged while off.
+		const offPeriod =
+			stop !== undefined &&
+			(turns > stop ||
+				(scoped?.stoppedMessages !== undefined && extractMessages(path, start).length > scoped.stoppedMessages));
+		this.#stopAdopted = false;
+		if (scoped && !offPeriod) {
+			this.lastRetainedTurn = scoped.turn;
+			this.#retainedMessages = scoped.messages;
+			this.#windowStart = scoped.windowStart;
+			// The stop must stop reading as the latest cursor once turns follow it, or a later resume
+			// would take them for off-period turns: the first run writes a plain cursor (see the listener).
+			this.#stopAdopted = stop !== undefined;
 			return;
 		}
 		if (data) {
 			this.lastRetainedTurn = turns;
 			this.#retainedMessages = 0;
 			this.#windowStart = turns;
-			this.#appendCursor(turns, 0, turns);
+			// Only a state that retains records where retention resumes: otherwise a later retaining state
+			// would adopt this cursor and upload turns exchanged while nothing retained.
+			if (this.automatic && this.#config.autoRetain && !this.#disposed) {
+				this.#appendCursor(turns, 0, turns);
+				// Turns exchanged before the stop that were never sent (an open window, or one that failed
+				// or was cut off) still go out once, best effort, without what was exchanged while off.
+				if (scoped && stop !== undefined) this.#sendBeforeStop(scoped, stop);
+			}
 			return;
 		}
 		const every = this.#config.retainEveryNTurns;
@@ -328,7 +352,8 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	/**
 	 * Latest cursor of this transcript whose retained turns all lie on `path`: one appended at an
 	 * entry of `path` past its retention start. A cursor appended at a deeper entry wins; a `/tree`
-	 * move back to an earlier answer leaves later cursors off the path.
+	 * move back to an earlier answer leaves later cursors off the path. A stop applies only to the
+	 * branch it was written on (the entry itself is on `path`); from a sibling branch it is a plain cursor.
 	 */
 	#pathCursor(path: readonly SessionEntry[], start: number): RetentionCursorData | undefined {
 		const depth = new Map(path.map((entry, index) => [entry.id, index]));
@@ -339,7 +364,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			if (!isRetentionCursor(entry.data) || entry.data.transcriptId !== this.transcriptId) continue;
 			const at = entry.parentId === null ? -1 : depth.get(entry.parentId);
 			if (at === undefined || at < start - 1 || at < bestDepth) continue;
-			best = entry.data;
+			best = depth.has(entry.id) ? entry.data : { ...entry.data, stoppedAt: undefined, stoppedMessages: undefined };
 			bestDepth = at;
 		}
 		return best;
@@ -371,10 +396,12 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		this.#unsubscribe = this.session.subscribe(event => {
 			if (event.type !== "agent_start" && event.type !== "agent_pause" && event.type !== "agent_end") return;
 			this.#followBranch();
-			if (this.#config.autoRetain && !this.#hasCursor) {
+			if (this.#config.autoRetain && (!this.#hasCursor || this.#stopAdopted)) {
 				// Record where retention starts before any upload: a branch without a cursor reads as
-				// pre-cursor on resume, which skips every turn it already holds.
+				// pre-cursor on resume, which skips every turn it already holds; after an adopted stop, a
+				// later resume would read this run's turns as exchanged while off.
 				this.#appendCursor(this.lastRetainedTurn, this.#retainedMessages, this.#windowStart);
+				this.#stopAdopted = false;
 			}
 			// The run's agent_end waits until no job, child agent or peer can resume it; a yielded pause is
 			// the model finishing its turn while such work keeps the run open (as for Hindsight and
@@ -721,6 +748,51 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		endTurn: number,
 		identity: Omit<SettledHistory, "messages">,
 	): Promise<boolean> {
+		if (!(await this.#sendWindow(messages, userStarts, startTurn, endTurn, identity))) return false;
+		if (this.#isStale(identity)) return false;
+		// A `/memory enqueue` tail is an open window: it stays the next window's start, so a later
+		// enqueue or the completed window re-sends a superset into the same document.
+		// Re-sending an already retained window (`endTurn === lastRetainedTurn`) refreshes its cursor whatever its size.
+		if (endTurn - startTurn < this.#config.retainEveryNTurns && endTurn > this.lastRetainedTurn) return true;
+		this.lastRetainedTurn = endTurn;
+		this.#windowStart = startTurn;
+		this.#retainedMessages = userStarts[endTurn] ?? messages.length;
+		this.#appendCursor(endTurn, this.#retainedMessages, startTurn);
+		return true;
+	}
+
+	/**
+	 * After a stop followed by turns exchanged while retention was off: sends what the stopped state
+	 * left unsent before the stop (a grown last window, then every later window up to the stop),
+	 * from a snapshot cut at the first turn after the stop. Best effort: a transient failure is not retried.
+	 */
+	#sendBeforeStop(cursor: RetentionCursorData, stoppedAt: number): void {
+		if (!this.automatic || !this.#config.autoRetain) return;
+		const history = this.#settledHistory();
+		const userStarts = userTurnStarts(history.messages);
+		const cut = cursor.stoppedMessages ?? userStarts[stoppedAt] ?? history.messages.length;
+		const messages = history.messages.slice(0, cut);
+		const every = this.#config.retainEveryNTurns;
+		void this.#enqueueRetention(async () => {
+			const closedEnd = Math.min(userStarts[cursor.turn] ?? messages.length, messages.length);
+			if (cursor.turn > cursor.windowStart && closedEnd > cursor.messages) {
+				if (!(await this.#sendWindow(messages, userStarts, cursor.windowStart, cursor.turn, history))) return;
+			}
+			for (let turn = cursor.turn; turn < stoppedAt; turn += every) {
+				if (!(await this.#sendWindow(messages, userStarts, turn, Math.min(turn + every, stoppedAt), history)))
+					return;
+			}
+		});
+	}
+
+	/** Uploads user turns `[startTurn, endTurn)` under the window's document id; resolves whether it was sent (or refused for good). */
+	async #sendWindow(
+		messages: HindsightMessage[],
+		userStarts: number[],
+		startTurn: number,
+		endTurn: number,
+		identity: Omit<SettledHistory, "messages">,
+	): Promise<boolean> {
 		// A late reply, or a job queued before `/new`, a reset or a `/tree` move, must not record its
 		// window against another transcript or branch.
 		const startId = identity.userIds[startTurn];
@@ -763,15 +835,6 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 				);
 			}
 		}
-		if (this.#isStale(identity)) return false;
-		// A `/memory enqueue` tail is an open window: it stays the next window's start, so a later
-		// enqueue or the completed window re-sends a superset into the same document.
-		// Re-sending an already retained window (`endTurn === lastRetainedTurn`) refreshes its cursor whatever its size.
-		if (endTurn - startTurn < this.#config.retainEveryNTurns && endTurn > this.lastRetainedTurn) return true;
-		this.lastRetainedTurn = endTurn;
-		this.#windowStart = startTurn;
-		this.#retainedMessages = userStarts[endTurn] ?? messages.length;
-		this.#appendCursor(endTurn, this.#retainedMessages, startTurn);
 		return true;
 	}
 
@@ -785,7 +848,12 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		);
 	}
 
-	#appendCursor(turn: number, messages: number, windowStart: number, stoppedAt?: number): void {
+	#appendCursor(
+		turn: number,
+		messages: number,
+		windowStart: number,
+		stop?: { stoppedAt: number; stoppedMessages: number | undefined },
+	): void {
 		this.session.sessionManager.appendCustomEntry(RETENTION_CURSOR_ENTRY_TYPE, {
 			version: 1,
 			scope: this.#scope(),
@@ -793,15 +861,15 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			turn,
 			messages,
 			windowStart,
-			...(stoppedAt === undefined ? {} : { stoppedAt }),
+			...stop,
 		} satisfies RetentionCursorData);
 		this.#hasCursor = true;
 	}
 
 	/**
 	 * Content sent under an existing document `id` updates that document. Keying on the entry of the window's
-	 * first user turn lets a retry, resume or continuation update the same window's document, while
-	 * later windows and windows of other branches never touch it.
+	 * first user turn lets a retry, resume or continuation update the same window's document, while later
+	 * windows never touch it. Branches that split inside a window share its first entry, and so its document.
 	 */
 	#windowDocumentId(startEntryId: string): string {
 		const digest = new Bun.CryptoHasher("sha256")
@@ -876,9 +944,15 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		this.#followBranch();
 		const [path, start] = this.#retainedEntries();
 		const stoppedAt = countUserTurns(path, start);
+		// Nothing to protect yet: no turn, no cursor (keeps an untouched draft session empty).
+		if (stoppedAt === 0 && !this.#hasCursor) return;
+		// A run still in flight (exit mid-answer) appends its answer after this: no message bound, so
+		// that answer still reads as on-period; only later user turns count as exchanged while off.
+		const stoppedMessages = this.session.isStreaming ? undefined : extractMessages(path, start).length;
 		const last = this.#pathCursor(path, start);
 		if (
 			last?.stoppedAt === stoppedAt &&
+			last.stoppedMessages === stoppedMessages &&
 			last.scope === this.#scope() &&
 			last.turn === this.lastRetainedTurn &&
 			last.messages === this.#retainedMessages &&
@@ -886,7 +960,10 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		) {
 			return;
 		}
-		this.#appendCursor(this.lastRetainedTurn, this.#retainedMessages, this.#windowStart, stoppedAt);
+		this.#appendCursor(this.lastRetainedTurn, this.#retainedMessages, this.#windowStart, {
+			stoppedAt,
+			stoppedMessages,
+		});
 	}
 }
 
