@@ -552,6 +552,50 @@ describe("EgressProxy", () => {
 		expect(statusOf(await request(proxy, huge))).toBe(431);
 	});
 
+	it("rejects heads with bare CR, bare LF, NUL or non-token header names", async () => {
+		const server = startEchoServer();
+		const proxy = await startProxy({ allowedHosts: () => ["127.0.0.1"] });
+		const target = `http://127.0.0.1:${server.port}/`;
+		const authority = `127.0.0.1:${server.port}`;
+		const heads = [
+			// A bare-LF "Host" line that a lenient upstream would honour over the proxy-written one.
+			`GET ${target} HTTP/1.1\r\nX-Pad: 1\nHost: forbidden.example\r\n\r\n`,
+			`GET ${target} HTTP/1.1\r\nX-Pad: 1\rHost: forbidden.example\r\n\r\n`,
+			`GET ${target} HTTP/1.1\r\nX-Pad: a\0b\r\n\r\n`,
+			`GET ${target} HTTP/1.1\nHost: x\r\n\r\n`,
+			`GET ${target} HTTP/1.1\r\nBad Name: 1\r\n\r\n`,
+			`GET ${target} HTTP/1.1\r\nX-Pad : 1\r\n\r\n`,
+			`GET ${target} HTTP/1.1\r\n folded: 1\r\n\r\n`,
+			`GET ${target} HTTP/1.1\r\nX(Pad): 1\r\n\r\n`,
+			`CONNECT ${authority} HTTP/1.1\r\nX-Pad: 1\nHost: forbidden.example\r\n\r\n`,
+			`CONNECT ${authority} HTTP/1.1\r\nX-Pad: a\0b\r\n\r\n`,
+			`CONNECT ${authority} HTTP/1.1\r\nBad Name: 1\r\n\r\n`,
+		];
+		for (const head of heads) {
+			const response = await request(proxy, head);
+			expect({ head, status: statusOf(response) }).toEqual({ head, status: 400 });
+		}
+	});
+
+	it("still forwards a head whose header names are valid tokens", async () => {
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			fetch: req => Response.json({ host: req.headers.get("host"), custom: req.headers.get("x-a.b_c") }),
+		});
+		cleanups.push(() => server.stop(true));
+		const proxy = await startProxy({ allowedHosts: () => ["127.0.0.1"] });
+		const raw = await request(
+			proxy,
+			`GET http://127.0.0.1:${server.port}/ HTTP/1.1\r\nHost: x\r\nX-A.B_C: yes\r\n\r\n`,
+		);
+		expect(statusOf(raw)).toBe(200);
+		expect(JSON.parse(raw.slice(raw.indexOf("\r\n\r\n") + 4))).toEqual({
+			host: `127.0.0.1:${server.port}`,
+			custom: "yes",
+		});
+	});
+
 	it("keeps an established tunnel open past the head timeout", async () => {
 		const server = startEchoServer();
 		const proxy = await startProxy({ allowedHosts: () => ["127.0.0.1"], headTimeoutMs: 50 });

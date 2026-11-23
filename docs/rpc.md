@@ -1374,7 +1374,13 @@ Mutations:
 - `grant_sandbox_host` with `scope: "session"` allows the host for the rest of
   this process without writing settings (with the rules of an approved
   prompt: private addresses yes, loopback and link-local no); `scope: "always"`
-  also appends it to the global `allowedHosts` as an exact entry.
+  also appends it to the global `allowedHosts` as an exact entry. `host` must
+  be a bare host name or IPv4 literal (IPv6 literals: use `edit_sandbox_list`):
+  it is converted from IDNA to punycode, lower-cased, and a trailing dot
+  dropped (an IPv4 literal is normalized); wildcards, schemes, ports, paths,
+  whitespace and control characters are `invalid_value`, and so is a
+  `session` grant of an IP literal, `localhost` or `*.localhost` (only
+  `always` can allow one). `revoke_sandbox_host` canonicalizes the same way.
 - `revoke_sandbox_host` drops a session grant. A persisted entry is removed
   with `edit_sandbox_list` (`list: "allowedHosts"`, `op: "remove"`).
 
@@ -1384,7 +1390,7 @@ Failure codes:
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `sandbox_locked` | The setting (for `edit_sandbox_list` the list; for an `always` grant or an `always` answer to `respond_sandbox_host`, `allowedHosts`; for an `always` answer to `respond_sandbox_access`, the list the request's kind writes) is in `locked`: a global write would be shadowed. Nothing is written, and a refused `always` answer leaves the request pending, so the client can answer `session` instead; the message carries the reason. |
 | `sandbox_unsupported` | `set_sandbox_setting` of a `networkMode` this host cannot enforce (it is listed in `networkUnavailable`). Nothing is written; the message names the missing package(s) and commands, otherwise the backend's reason. `deny` is never refused.                                                                                                                                                                                             |
-| `invalid_value` | Unknown setting or list, wrong value type, unknown enum member or scope, empty entry, unknown `${token}` in a path, `replace` without `replacement`, a host with whitespace, an unknown `decision`, `instruct` without non-blank `instructions`, a path `grant_sandbox_path` refuses; the message names the problem. Nothing is written. |
+| `invalid_value` | Unknown setting or list, wrong value type, unknown enum member or scope, empty entry, unknown `${token}` in a path, `replace` without `replacement`, a `grant_sandbox_host`/`revoke_sandbox_host` host that is not a bare host name or IPv4 literal (a wildcard, scheme, port, path, whitespace, control character or IPv6 literal), a `session` grant of an IP literal or local name, an unknown `decision`, `instruct` without non-blank `instructions`, a path `grant_sandbox_path` refuses; the message names the problem. Nothing is written. |
 | `unknown_request` | `respond_sandbox_host` or `respond_sandbox_access` for a request that is not pending (answered, timed out, cancelled, or never sent). |
 
 ```json
@@ -1405,13 +1411,13 @@ hangs on a prompt. After `set_sandbox_host_prompts { enabled: true }` the server
 asks instead:
 
 ```json
-{ "type": "sandbox_host_request", "id": "1597…", "host": "example.com", "port": 443, "timeoutMs": 120000 }
+{ "type": "sandbox_host_request", "id": "1597…", "host": "example.com", "port": 443, "timeoutMs": 120000, "canAlways": true }
 { "id": "r1", "type": "respond_sandbox_host", "requestId": "1597…", "decision": "session" }
 { "id": "r1", "type": "response", "command": "respond_sandbox_host", "success": true }
 ```
 
 `decision` is `once` (this connection), `session` (the host for this session),
-`always` (also appended to the global `allowedHosts`), or `deny`. A `session`
+`always` (also appended to the global `allowedHosts`; refused with `sandbox_locked`, leaving the request pending, when the frame said `canAlways: false`, for example when project config narrows the list), or `deny`. A `session`
 or `always` answer is recorded by the runtime and followed by a
 `sandbox_update`. One request is pending per host; concurrent connections to
 it share the answer. `respond_sandbox_host` bypasses the command queue, so it

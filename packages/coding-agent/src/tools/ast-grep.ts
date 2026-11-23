@@ -24,7 +24,7 @@ import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { ensureGrammar, missingGrammarsNote, rerunWithGrammars } from "../utils/grammars";
 import type { ToolSession } from ".";
 import { resolveToolTier } from "./approval";
-import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
+import { MaterializedUrlFiles, materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
 import { webUrlSandboxSubjects } from "./web-url-subjects";
 import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file-recorder";
 import { type FileMatchSection, formatFileMatches } from "./grouped-file-output";
@@ -93,6 +93,7 @@ async function runMultiTargetAstGrep(
 		limit: number;
 		signal?: AbortSignal;
 		filesystem: ShellFilesystem;
+		urlFiles: MaterializedUrlFiles;
 	},
 ): Promise<{
 	matches: AstFindMatch[];
@@ -112,17 +113,20 @@ async function runMultiTargetAstGrep(
 	let filesSearched = 0;
 	let limitReached = false;
 	for (const target of targets) {
-		const targetResult = await containedAstGrep({
-			patterns: options.patterns,
-			lang: options.lang,
-			path: target.basePath,
-			glob: target.glob,
-			offset: 0,
-			limit: options.skip + options.limit + 1,
-			includeMeta: true,
-			signal: options.signal,
-			filesystem: options.filesystem,
-		});
+		// A fetched web page is omp's own file, outside every container root: it is searched in omp.
+		const targetResult = await options.urlFiles.search(target.basePath, () =>
+			containedAstGrep({
+				patterns: options.patterns,
+				lang: options.lang,
+				path: target.basePath,
+				glob: target.glob,
+				offset: 0,
+				limit: options.skip + options.limit + 1,
+				includeMeta: true,
+				signal: options.signal,
+				filesystem: options.filesystem,
+			}),
+		);
 		totalMatches += targetResult.totalMatches;
 		filesWithMatches += targetResult.filesWithMatches;
 		filesSearched += targetResult.filesSearched;
@@ -239,6 +243,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 				tier: resolveToolTier(this, params),
 			});
 			const filesystem = urlFilesystem.shellFilesystem();
+			const urlFiles = new MaterializedUrlFiles();
 			const scope = await resolveToolSearchScope({
 				rawPaths,
 				cwd: this.session.cwd,
@@ -253,6 +258,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 						signal,
 						this.name,
 					);
+					urlFiles.add(materialized.path);
 					return { sourcePath: materialized.path, immutable: true };
 				},
 			});
@@ -264,6 +270,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 				multiTargets
 					? runMultiTargetAstGrep(multiTargets, {
 							patterns,
+							urlFiles,
 							lang: params.lang,
 							commonBasePath: resolvedSearchPath,
 							skip,
@@ -271,16 +278,18 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 							signal,
 							filesystem,
 						})
-					: containedAstGrep({
-							patterns,
-							lang: params.lang,
-							path: resolvedSearchPath,
-							glob: globFilter,
-							offset: skip,
-							includeMeta: true,
-							signal,
-							filesystem,
-						}),
+					: urlFiles.search(resolvedSearchPath, () =>
+							containedAstGrep({
+								patterns,
+								lang: params.lang,
+								path: resolvedSearchPath,
+								glob: globFilter,
+								offset: skip,
+								includeMeta: true,
+								signal,
+								filesystem,
+							}),
+						),
 			);
 			const grammarNote = result.missingGrammars?.length ? missingGrammarsNote(result.missingGrammars) : undefined;
 

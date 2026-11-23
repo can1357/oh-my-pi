@@ -16,15 +16,18 @@ export const SANDBOX_SCOPES = ["bash", "eval", "exec"] as const satisfies readon
 const SANDBOX_AUTH_DB_TOKEN = "${authDb}";
 /** Path token for omp's agent directory, which holds `.env`, `models.yml` and `mcp.json`; see `expandSandboxPath`. */
 const SANDBOX_AGENT_DIR_TOKEN = "${agentDir}";
+/** Path token for omp's config root (normally `~/.omp`), which holds the `.env` omp loads at startup; see `expandSandboxPath`. */
+const SANDBOX_CONFIG_ROOT_TOKEN = "${configRoot}";
 /** Every `${name}` token `expandSandboxPath` expands. */
-export const PATH_TOKEN_NAMES = ["home", "workspace", "tmp", "authDb", "agentDir"] as const;
+export const PATH_TOKEN_NAMES = ["home", "workspace", "tmp", "authDb", "agentDir", "configRoot"] as const;
 
 const DEFAULT_SCOPE: SandboxScope[] = [...SANDBOX_SCOPES];
 const EMPTY_STRING_ARRAY: string[] = [];
 
 /**
  * Secret stores no contained process may read. The SQLite sidecars hold not-yet-checkpointed
- * credential rows; the agent dir's `.env`, `models.yml`, `mcp.json` and `.mcp.json` can hold API keys and tokens.
+ * credential rows; the `.env` files omp loads (`~/.env`, the config root's, the agent dir's) and the agent dir's
+ * `models.yml`, `mcp.json` and `.mcp.json` can hold API keys and tokens.
  */
 const DEFAULT_DENY_READ: string[] = [
 	"~/.ssh",
@@ -38,6 +41,8 @@ const DEFAULT_DENY_READ: string[] = [
 	"~/.npmrc",
 	"~/.pypirc",
 	"~/.git-credentials",
+	"~/.env",
+	`${SANDBOX_CONFIG_ROOT_TOKEN}/.env`,
 	"~/.config/gh",
 	SANDBOX_AUTH_DB_TOKEN,
 	`${SANDBOX_AUTH_DB_TOKEN}-wal`,
@@ -255,7 +260,7 @@ export const cfgSandboxDenyRead = register({
 		label: "Sandbox Denied Paths",
 		condition: "sandboxDenyReadNotProject",
 		editor: "json",
-		description: `Paths contained commands can neither read nor write; outranks every other list. Defaults to common secret stores, omp's credential database (\${authDb}) and the key-bearing files in omp's agent directory (\${agentDir}). A JSON list of paths. ${PATH_TOKENS_HELP}`,
+		description: `Paths contained commands can neither read nor write; outranks every other list. Defaults to common secret stores, omp's credential database (\${authDb}), the \`.env\` files omp loads (~/.env, \${configRoot}/.env, \${agentDir}/.env) and the other key-bearing files in omp's agent directory (\${agentDir}). A JSON list of paths. ${PATH_TOKENS_HELP}`,
 	},
 });
 

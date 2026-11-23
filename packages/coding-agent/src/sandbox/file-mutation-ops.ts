@@ -2,6 +2,13 @@ import * as fs from "node:fs/promises";
 import type { HostFileMutation } from "./host-protocol";
 
 /**
+ * Flags that open a file read-only without ever blocking: a FIFO opens at once instead of waiting
+ * for a writer. Both opens of a contained read use them (the host's `file.identify` and omp's own).
+ * Windows has no such flag.
+ */
+export const OPEN_READ_NONBLOCK = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0);
+
+/**
  * Performs `mutation` in this process: how the sandbox host serves `file.mutate`, and how the file
  * tools mutate when nothing is contained.
  */

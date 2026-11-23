@@ -17,7 +17,7 @@ import { shellChangeSnapshots } from "../commit/selective/journal";
 import { executeBash, sessionShellEnv } from "../exec/bash-executor";
 import { createToolCommandHandler, toolCommandNames } from "../exec/tool-command-host";
 import { cfgBashGitGuard } from "../exec/settings";
-import { sessionResolveContext } from "../internal-urls/context";
+import { sessionResolveContext, sessionSandboxWritableRoots } from "../internal-urls/context";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import { ovnfsCommand } from "../task/settings";
 import type { ToolSession } from "../tools";
@@ -98,6 +98,7 @@ export async function runEvalShell(args: unknown, options: EvalShellBridgeOption
 		env: sessionShellEnv({ id: owningSessionId(session), file: session.getSessionFile() }),
 		// A contained cell must not escape through `sh()`: the shell runs in the sandbox when it applies.
 		sandboxWorkspace: session.cwd,
+		sandboxExtraWrite: sessionSandboxWritableRoots(session),
 		sandboxScope: "eval",
 		// 0 disables the executor deadline: the cell's own deadline governs.
 		timeout: timeout === undefined ? 0 : timeout * 1000,

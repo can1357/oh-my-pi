@@ -624,12 +624,11 @@ export class SelectorController {
 					refresh();
 				};
 				// A burst of changes (refused connections) rebuilds the model once per tick, not per change.
-				let refreshScheduled = false;
+				let pendingRefresh: NodeJS.Immediate | undefined;
 				const unsubscribe = runtime.onChange(() => {
-					if (refreshScheduled) return;
-					refreshScheduled = true;
-					setImmediate(() => {
-						refreshScheduled = false;
+					if (pendingRefresh) return;
+					pendingRefresh = setImmediate(() => {
+						pendingRefresh = undefined;
 						refresh();
 					});
 				});
@@ -658,7 +657,15 @@ export class SelectorController {
 								sheet = handle;
 							},
 						}),
-					{ focus: screen => firstOfKind(screen, "prefs"), onClose: unsubscribe },
+					{
+						focus: screen => firstOfKind(screen, "prefs"),
+						onClose: () => {
+							unsubscribe();
+							// A refresh queued by a change just before closing must not touch the closed sheet.
+							clearImmediate(pendingRefresh);
+							pendingRefresh = undefined;
+						},
+					},
 				);
 			})
 			.catch((error: unknown) => {

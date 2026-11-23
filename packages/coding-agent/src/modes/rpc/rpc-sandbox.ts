@@ -11,8 +11,10 @@
  */
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../config/settings";
+import { canonicalAccessHost, listLocked } from "../../sandbox/access";
+import { hostLocalName } from "../../sandbox/policy";
 import { networkModeUnavailable, SandboxRuntime } from "../../sandbox/runtime";
-import { cfgSandboxNetworkMode } from "../../sandbox/settings";
+import { cfgSandboxAllowedHosts, cfgSandboxNetworkMode } from "../../sandbox/settings";
 import type {
 	HostApproval,
 	SandboxAccessAnswer,
@@ -97,6 +99,8 @@ export interface RpcSandboxControllerOptions {
 
 interface PendingHostRequest {
 	host: string;
+	/** The frame offered no `always`: the allowlist is decided by another layer. */
+	canAlways: boolean;
 	answer: Promise<HostApproval>;
 	resolve(decision: HostApproval): void;
 	timer: NodeJS.Timeout;
@@ -155,9 +159,14 @@ function listId(value: unknown): RpcSandboxListId {
 	return value;
 }
 
+/** The canonical bare host of `value`, the form session grants and the allowlist hold. */
 function hostName(value: unknown): string {
-	if (typeof value !== "string" || !/^\S+$/.test(value)) throw invalid("host must be a non-empty host name");
-	return value;
+	if (typeof value !== "string") throw invalid("host must be a non-empty host name");
+	try {
+		return canonicalAccessHost(value);
+	} catch (error) {
+		throw invalid(error instanceof Error ? error.message : String(error));
+	}
 }
 
 /** Runs a settings write; a value the setting's validator rejects is `invalid_value`. */
@@ -309,10 +318,16 @@ export class RpcSandboxController {
 				const host = hostName(command.host);
 				const { scope } = command;
 				if (scope !== "session" && scope !== "always") throw invalid('scope must be "session" or "always"');
-				// An `always` grant writes the global allowlist; a session grant writes no setting.
+				// A session grant bypasses the wildcard and host-local checks of the allowlist: only a verbatim entry may allow these.
+				if (scope === "session" && hostLocalName(host)) {
+					throw invalid(
+						`${host} is an IP literal or a local name: only an allowlist entry (scope "always") can allow it`,
+					);
+				}
+				// An `always` grant writes the global allowlist, so it must be unlocked; a session grant writes no setting.
 				if (scope === "always") await this.#unlocked("allowedHosts");
 				const runtime = await this.#runtime();
-				runtime.grantHost(host, scope);
+				write(() => runtime.grantHost(host, scope));
 				return this.state();
 			}
 			case "revoke_sandbox_host": {
@@ -331,9 +346,19 @@ export class RpcSandboxController {
 				}
 				const unknown = () =>
 					new RpcSandboxError(`No pending sandbox host request ${requestId}`, "unknown_request");
-				if (!this.#pending.has(requestId)) throw unknown();
+				const pending = this.#pending.get(requestId);
+				if (!pending) throw unknown();
 				// `always` writes the global allowlist, like an `always` grant; refused, the request stays pending.
-				if (command.decision === "always") await this.#unlocked("allowedHosts");
+				// The frame's `canAlways: false` (project config narrows the list) refuses it too.
+				if (command.decision === "always") {
+					if (!pending.canAlways) {
+						throw new RpcSandboxError(
+							'allowedHosts is decided by another layer here; answer "session" instead',
+							"sandbox_locked",
+						);
+					}
+					await this.#unlocked("allowedHosts");
+				}
 				if (!this.#settle(requestId, command.decision)) throw unknown();
 				return undefined;
 			}
@@ -475,20 +500,28 @@ export class RpcSandboxController {
 		this.#scheduleUpdate();
 	}
 
-	#askHost(host: string, port: number): Promise<HostApproval> {
-		const existing = this.#pendingByHost.get(host);
-		if (existing) return existing.answer;
+	/** Asks the client about `host`; a request already pending for the host shares its answer. */
+	async #askHost(host: string, port: number): Promise<HostApproval> {
+		const pending = this.#pendingByHost.get(host);
+		if (pending) return pending.answer;
+		// Whether an `always` answer would take effect: not when another layer (project config included) decides the list.
+		const canAlways = !listLocked(cfgSandboxAllowedHosts, await Settings.init());
+		// Prompts ended, or a concurrent ask for this host registered, while the settings loaded.
+		if (!this.#hostPrompts) return "deny";
+		const raced = this.#pendingByHost.get(host);
+		if (raced) return raced.answer;
 		const id = Snowflake.next() as string;
 		const { promise, resolve } = Promise.withResolvers<HostApproval>();
 		const request: PendingHostRequest = {
 			host,
+			canAlways,
 			answer: promise,
 			resolve,
 			timer: setTimeout(() => this.#settle(id, "deny", "timeout"), this.#timeoutMs),
 		};
 		this.#pending.set(id, request);
 		this.#pendingByHost.set(host, request);
-		this.#options.output({ type: "sandbox_host_request", id, host, port, timeoutMs: this.#timeoutMs });
+		this.#options.output({ type: "sandbox_host_request", id, host, port, timeoutMs: this.#timeoutMs, canAlways });
 		return this.#options.waitForUser ? this.#options.waitForUser(() => promise) : promise;
 	}
 

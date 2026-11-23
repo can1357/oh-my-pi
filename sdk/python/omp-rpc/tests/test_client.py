@@ -2561,5 +2561,38 @@ class RetainsSurvivorTests(unittest.TestCase):
             os.kill(grandchild_pid, 0)
 
 
+class UnionSequenceParamTests(unittest.TestCase):
+    """A union-typed `Sequence[str]` parameter reaches the wire as a JSON list; other members pass whole."""
+
+    def _sent_value(self, value: object) -> object:
+        from omp_rpc._wire import WireClient
+
+        sent: list[str] = []
+
+        class Recorder(WireClient):
+            def _command(self, name: str, params: dict[str, object], timeout: float | None = None) -> object:
+                sent.append(json.dumps(params))
+                raise _Stop
+
+        with self.assertRaises(_Stop):
+            Recorder.__new__(Recorder).set_sandbox_setting("allowedHosts", value)  # type: ignore[arg-type]
+        return json.loads(sent[0])["value"]
+
+    def test_a_sequence_that_is_not_a_list_serializes_as_a_list(self) -> None:
+        from collections import deque
+
+        # `json.dumps` cannot encode a deque itself.
+        self.assertEqual(self._sent_value(deque(["a.test", "b.test"])), ["a.test", "b.test"])
+        self.assertEqual(self._sent_value(("a.test",)), ["a.test"])
+
+    def test_a_string_and_a_bool_pass_through_whole(self) -> None:
+        self.assertEqual(self._sent_value("workspace"), "workspace")
+        self.assertIs(self._sent_value(True), True)
+
+
+class _Stop(Exception):
+    pass
+
+
 if __name__ == "__main__":
     unittest.main()

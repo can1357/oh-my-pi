@@ -18,10 +18,14 @@ import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensi
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import {
 	changedIdentities,
+	type IdentitySnapshot,
 	identitySnapshot,
 	installSandboxRepoGuard,
 	recordSandboxCreated,
+	removeSandboxCreated,
 	sandboxCreatedEntries,
+	sandboxCreatedRefusesRepo,
+	sandboxCreatedSkip,
 } from "@oh-my-pi/pi-coding-agent/sandbox/ledger";
 import { SandboxRuntime } from "@oh-my-pi/pi-coding-agent/sandbox/runtime";
 import { cfgSandboxEnabled, cfgSandboxNetworkMode } from "@oh-my-pi/pi-coding-agent/sandbox/settings";
@@ -156,6 +160,65 @@ describe("identity watch", () => {
 			expect(changedIdentities(after, identitySnapshot(before.keys()), new Set([asDir, asLink]))).toEqual([asDir]);
 		},
 	);
+
+	it("reports a watched symlink ancestor re-pointed to another target even when its inode is reused", () => {
+		const parent = path.join(workspace, "dir-link");
+		const child = path.join(parent, "config");
+		// Built by hand: a freed inode number is reused by the replacement link, which a real
+		// filesystem does not hand out on demand.
+		const before: IdentitySnapshot = new Map([
+			[parent, { kind: "link", id: "1:42", target: "safe" }],
+			[child, { kind: "other", id: "1:7" }],
+		]);
+		const retargeted: IdentitySnapshot = new Map([
+			[parent, { kind: "link", id: "1:42", target: "../elsewhere" }],
+			[child, { kind: "other", id: "1:7" }],
+		]);
+		expect(changedIdentities(before, retargeted)).toEqual([parent]);
+		expect(changedIdentities(before, new Map(before))).toEqual([]);
+	});
+
+	describe("on a case-insensitive platform", () => {
+		const realPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+		function asPlatform(platform: NodeJS.Platform): void {
+			Object.defineProperty(process, "platform", { ...realPlatform, value: platform });
+		}
+		afterEach(() => Object.defineProperty(process, "platform", realPlatform));
+
+		it("removes a ledger entry named with another letter case, as a case-sensitive host keeps it", () => {
+			const created = path.join(workspace, "Mixed", ".mcp.json");
+			recordSandboxCreated([entry(created)]);
+			const lowered = created.toLowerCase();
+			expect(removeSandboxCreated(lowered)).toBe(false);
+			expect(ledgered()).toEqual([created]);
+			asPlatform("win32");
+			expect(removeSandboxCreated(lowered)).toBe(true);
+			asPlatform(realPlatform.value);
+			expect(ledgered()).toEqual([]);
+		});
+
+		it("refuses a repository whose git dir differs from the ledgered one only in letter case", () => {
+			const gitDir = path.join(workspace, "Repo", ".git");
+			const elsewhere = path.join(workspace, "Elsewhere");
+			const entries = [{ ...entry(elsewhere), gitDir }];
+			const lowered = gitDir.toLowerCase();
+			expect(sandboxCreatedRefusesRepo(lowered, entries)).toBe(false);
+			asPlatform("win32");
+			expect(sandboxCreatedRefusesRepo(lowered, entries)).toBe(true);
+		});
+
+		it("offers the /sandbox trust hint for a workspace named with another letter case only where paths ignore case", () => {
+			const created = path.join(workspace, ".mcp.json");
+			const entries = [entry(created)];
+			const hint = "; trust it in /sandbox to load it";
+			asPlatform("win32");
+			expect(sandboxCreatedSkip(created, workspace.toUpperCase(), entries)).toEndWith(hint);
+			asPlatform(realPlatform.value);
+			const skipped = sandboxCreatedSkip(created, workspace.toUpperCase(), entries);
+			expect(skipped).toStartWith(`Skipped ${created}:`);
+			expect(skipped).not.toContain(hint);
+		});
+	});
 
 	it.skipIf(!backend.supported)(
 		"ledgers a protected path a contained command creates; it stays protected",

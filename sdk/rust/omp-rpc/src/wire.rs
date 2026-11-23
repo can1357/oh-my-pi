@@ -5083,6 +5083,9 @@ pub struct SandboxHostRequestEvent {
 	/// Unanswered for this long, the request is denied and cancelled.
 	#[serde(rename = "timeoutMs")]
 	pub timeout_ms: i64,
+	/// False when `allowedHosts` is locked (project config, env, overlay or session override): `always` is refused.
+	#[serde(rename = "canAlways")]
+	pub can_always: bool,
 }
 
 /// A `sandbox_host_request` was denied without an answer: it timed out, or prompts were turned off or the session ended.

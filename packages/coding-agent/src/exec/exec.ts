@@ -3,7 +3,7 @@
  */
 import { ptree } from "@oh-my-pi/pi-utils";
 import { spawnContainedCommand } from "../sandbox/command";
-import { containedEnv } from "../sandbox/env";
+import { inheritedContainedEnv } from "../sandbox/env";
 import { SandboxRuntime } from "../sandbox/runtime";
 import type { SandboxChild } from "../sandbox/types";
 
@@ -74,7 +74,7 @@ export async function execCommand(
 /** Options of {@link execContained}. */
 interface ContainedExecOptions extends ExecOptions {
 	cwd: string;
-	/** The whole environment; defaults to {@link containedEnv} of `Bun.env`. */
+	/** The whole environment; defaults to {@link inheritedContainedEnv}. */
 	env?: Record<string, string>;
 	/** Writable roots beyond the policy's, as for {@link SandboxRuntime.spawn}. */
 	extraWrite?: readonly string[];
@@ -82,19 +82,20 @@ interface ContainedExecOptions extends ExecOptions {
 
 /**
  * Runs `argv` contained by `runtime` to completion, its stdin closed: the contained counterpart of
- * the `ptree.exec` path, same result shape. Timeout and abort (also one that fired before or while
- * spawning) kill the contained tree and report `killed` with code `-1`; a non-zero exit is
- * returned as-is.
+ * the `ptree.exec` path, same result shape. Timeout and abort kill the contained tree and report
+ * `killed` with code `-1`; an abort that fired before the call spawns nothing, one while spawning
+ * kills the fresh child. A non-zero exit is returned as-is.
  */
 export async function execContained(
 	runtime: SandboxRuntime,
 	argv: string[],
 	options: ContainedExecOptions,
 ): Promise<ExecResult> {
+	if (options.signal?.aborted) return { stdout: "", stderr: "", code: -1, killed: true };
 	const child = await runtime.spawn({
 		argv,
 		cwd: options.cwd,
-		env: options.env ?? containedEnv(Bun.env),
+		env: options.env ?? inheritedContainedEnv(),
 		extraWrite: options.extraWrite,
 	});
 	return await collectContained(child, options);

@@ -25,6 +25,18 @@ import type { TabCallStep } from "./tab-call";
 /** Exec target of code a browser call runs in omp's own process (`tab.run`, a function argument). */
 const HOST_CODE_TARGET = "browser:run";
 
+/** Exec target of a headed Chromium's clipboard operations, which reach the host's system clipboard. */
+const HEADED_CLIPBOARD_TARGET = "browser:clipboard";
+
+/**
+ * A key whose press, with or without a modifier prefix, can copy, cut or paste: `c`, `v`, `x`
+ * (also as the `KeyC`-style code name) or `Insert` (`Control+Insert`, `Shift+Insert`).
+ */
+const CLIPBOARD_SHORTCUT_KEY = /(?:^|\+)(?:(?:key)?[cvx]|insert)$/i;
+
+/** Suffix of the changed-frame contact sheet a recording writes (or clears) beside its video. */
+const CONTACT_SHEET_SUFFIX = ".contact.png";
+
 /** Exec target of omp's Chromium launched with the network of mode `allow` while the mode is stricter. */
 const NETWORK_ALLOW_TARGET = "browser:chromium-network-allow";
 
@@ -117,12 +129,18 @@ export function tabExecTarget(handle: BrowserHandle, network: SandboxNetworkMode
 	return `browser:chromium-network-${sandbox.network}`;
 }
 
+/** Whether `handle` is omp's own Chromium with a visible window (`kind: "headless"` with `headless: false`). */
+export function isHeadedChromium(handle: BrowserHandle): boolean {
+	return handle.kind.kind === "headless" && !handle.kind.headless;
+}
+
 /**
  * The host effects `call` names, besides its browser: local files it reads or writes (relative
  * paths against `cwd`, as the tab resolves them; `file:` URLs it loads) and code it runs in omp's
  * own process. Files omp picks itself (temp captures, `~/.omp/browser-state`) are not named.
+ * `headed` is whether the call's tab is a headed omp Chromium, whose clipboard is the host's.
  */
-export function browserCallSubjects(call: BrowserSandboxCall, cwd: string): SandboxSubject[] {
+export function browserCallSubjects(call: BrowserSandboxCall, cwd: string, headed = false): SandboxSubject[] {
 	const subjects: SandboxSubject[] = [];
 	// Resolved as the tab resolves it (`""` is the cwd); an internal URL the tab refuses names nothing.
 	const push = (kind: "read" | "write", resolve: () => string | undefined, recursive?: boolean) => {
@@ -183,10 +201,33 @@ export function browserCallSubjects(call: BrowserSandboxCall, cwd: string): Sand
 					add("write", option(second, "output"));
 					break;
 				case "saveState":
-				case "recordStart":
-				case "recordRestart":
 					add("write", first);
 					break;
+				case "recordStart":
+				case "recordRestart":
+					// The recording, and the `<path>.contact.png` sheet a failed or contact-sheet stop writes or removes beside it.
+					add("write", first);
+					if (typeof first === "string") add("write", `${first}${CONTACT_SHEET_SUFFIX}`);
+					break;
+				case "clipboardRead":
+				case "clipboardWrite":
+				case "clipboardCopy":
+				case "clipboardPaste":
+					// A headed Chromium shares the host's system clipboard; a headless one's is its own.
+					if (headed) subjects.push({ kind: "exec", target: HEADED_CLIPBOARD_TARGET });
+					break;
+				case "press":
+				case "keyDown": {
+					// A clipboard shortcut key (`Control+v`, or `v` while a modifier `keyDown` holds) copies,
+					// cuts or pastes the host's clipboard in a headed Chromium, like `clipboardCopy`/`Paste`.
+					// The key is the first argument of `keyDown` and of an element's `press`, the second of a
+					// tab or frame `press(selector, key)`: either string argument naming one gates the call.
+					const keys = step.method === "press" ? [first, second] : [first];
+					if (headed && keys.some(key => typeof key === "string" && CLIPBOARD_SHORTCUT_KEY.test(key))) {
+						subjects.push({ kind: "exec", target: HEADED_CLIPBOARD_TARGET });
+					}
+					break;
+				}
 				case "loadState":
 					add("read", first);
 					break;

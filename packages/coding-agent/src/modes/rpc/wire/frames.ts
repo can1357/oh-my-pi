@@ -151,6 +151,10 @@ export const frameDefs = {
 			host: "string",
 			port: "number.integer",
 			timeoutMs: doc("number.integer", "Unanswered for this long, the request is denied and cancelled."),
+			canAlways: doc(
+				"boolean",
+				"False when `allowedHosts` is locked (project config, env, overlay or session override): `always` is refused.",
+			),
 		},
 		"A contained command wants a host off the allowlist; answer with `respond_sandbox_host`. Sent only after `set_sandbox_host_prompts`.",
 	),

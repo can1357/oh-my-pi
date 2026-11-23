@@ -207,8 +207,6 @@ async function loadImpl<T>(
 	const disabledExtensionIds = new Set<string>(
 		options.disabledExtensions ?? (settings ? cfgDisabledExtensions.get(settings) : undefined) ?? [],
 	);
-	// Read once per load, after a contained command's new protected paths are ledgered.
-	const ledger = currentSandboxCreated();
 
 	const results = await Promise.all(
 		providers.map(async provider => {
@@ -225,6 +223,10 @@ async function loadImpl<T>(
 			}
 		}),
 	);
+
+	// Read once per load, after discovery: a contained command may create protected project config while
+	// the providers run, and the identity watch this post-discovery read runs records it in time to skip it.
+	const ledger = currentSandboxCreated();
 
 	for (const entry of results) {
 		const { provider } = entry;

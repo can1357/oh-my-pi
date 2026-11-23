@@ -28,6 +28,7 @@ import {
 	browserCallSubjects,
 	browserExecTarget,
 	chromiumSandbox,
+	isHeadedChromium,
 	sandboxNetworkMode,
 	tabExecTarget,
 } from "./browser/sandbox";
@@ -383,7 +384,10 @@ function browserSandboxSubjects(session: ToolSession, parameters: unknown): Sand
 	}
 	const subjects: SandboxSubject[] = [];
 	for (const target of execTargets) if (target) subjects.push({ kind: "exec", target });
-	return [...subjects, ...browserCallSubjects(parsed, session.cwd)];
+	return [
+		...subjects,
+		...browserCallSubjects(parsed, session.cwd, tab !== undefined && isHeadedChromium(tab.browser)),
+	];
 }
 
 /**

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -22,23 +22,34 @@ import {
 } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import { checkPythonKernelAvailability, PythonKernel } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import { runEvalShell } from "@oh-my-pi/pi-coding-agent/eval/shell-bridge";
+import { sessionSandboxWritableRoots } from "@oh-my-pi/pi-coding-agent/internal-urls/context";
 import { releaseShellSessions } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import { execCommand } from "@oh-my-pi/pi-coding-agent/exec/exec";
 import { spawnManagedChild } from "@oh-my-pi/pi-coding-agent/daemon/children";
 import { buildServerSpec } from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { containedStdioArgv, StdioUpstream } from "@oh-my-pi/pi-coding-agent/mcp/host/stdio-upstream";
 import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
-import { SandboxRuntime, SandboxUnavailableError } from "@oh-my-pi/pi-coding-agent/sandbox/runtime";
+import {
+	SandboxRuntime,
+	type SandboxSpawnRequest,
+	SandboxUnavailableError,
+} from "@oh-my-pi/pi-coding-agent/sandbox/runtime";
 import {
 	cfgSandboxEnabled,
 	cfgSandboxFallback,
+	cfgSandboxMode,
 	cfgSandboxNetworkMode,
 } from "@oh-my-pi/pi-coding-agent/sandbox/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { sandboxSupport } from "@oh-my-pi/pi-natives";
 import { LineTooLongError, MIN_BUN_VERSION, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
-import { CONTAINED_SOURCE_RUNS, SANDBOX_UNAVAILABLE } from "../helpers/sandbox-test-state";
-import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
+import { CONTAINED_SOURCE_RUNS, SANDBOX_SUPPORTED, SANDBOX_UNAVAILABLE } from "../helpers/sandbox-test-state";
+import {
+	beginSettingsTest,
+	restoreEnvValue,
+	restoreSettingsTestState,
+	type SettingsTestState,
+} from "../helpers/settings-test-state";
 
 const backend = sandboxSupport();
 const pythonAvailable = (await checkPythonKernelAvailability(os.tmpdir(), undefined, { forceProbe: true })).ok;
@@ -448,6 +459,46 @@ describe.skipIf(!backend.supported)("contained JS eval startup failure", () => {
 	}, 60_000);
 });
 
+describe("contained JS eval environment", () => {
+	const HOST_PROXY = { no_proxy: "*", ALL_PROXY: "http://corp.example:3128" };
+	let saved: Record<string, string | undefined>;
+	beforeEach(() => {
+		saved = Object.fromEntries(Object.keys(HOST_PROXY).map(key => [key, Bun.env[key]]));
+		for (const [key, value] of Object.entries(HOST_PROXY)) restoreEnvValue(key, value);
+	});
+	afterEach(() => {
+		vi.restoreAllMocks();
+		for (const [key, value] of Object.entries(saved)) restoreEnvValue(key, value);
+	});
+
+	/** The evaluator's contained spawn request under network `mode`; the spawn itself is refused. */
+	async function evaluatorRequest(mode: "allowlist" | "deny"): Promise<SandboxSpawnRequest> {
+		SandboxRuntime.resetForTest(SANDBOX_SUPPORTED);
+		cfgSandboxNetworkMode.set(settings, mode);
+		const requests: SandboxSpawnRequest[] = [];
+		vi.spyOn(SandboxRuntime.prototype, "spawn").mockImplementation(async request => {
+			requests.push(request);
+			throw new Error("test: spawn captured");
+		});
+		await expect(runJs("console.log('ran')")).rejects.toThrow();
+		expect(requests).toHaveLength(1);
+		return requests[0];
+	}
+
+	it("drops the host's proxy variables in allowlist mode and points TMPDIR at the sandbox's temp dir", async () => {
+		const request = await evaluatorRequest("allowlist");
+		expect(request.env.no_proxy).toBeUndefined();
+		expect(request.env.ALL_PROXY).toBeUndefined();
+		expect(request.env.TMPDIR).toBe((await SandboxRuntime.for(workspace.path())).tempDir());
+	});
+
+	it("passes the host's proxy variables through when the network mode is not allowlist", async () => {
+		const request = await evaluatorRequest("deny");
+		expect(request.env.no_proxy).toBe(HOST_PROXY.no_proxy);
+		expect(request.env.ALL_PROXY).toBe(HOST_PROXY.ALL_PROXY);
+	});
+});
+
 describe.skipIf(!backend.supported || !cliRuns || !CONTAINED_SOURCE_RUNS)("contained JS eval (CLI selector)", () => {
 	// `sh()` runs in the pooled bash session the bridge keys `eval:<session id>` (the test session
 	// has no id); release it so its sandbox host does not outlive the test.
@@ -474,6 +525,26 @@ describe("eval sh() bridge sandbox", () => {
 		);
 	});
 });
+
+describe.skipIf(!backend.supported || !posixShell || !cliRuns || !CONTAINED_SOURCE_RUNS)(
+	"eval sh() bridge under a read-only sandbox",
+	() => {
+		afterEach(() => releaseShellSessions(EVAL_SHELL_SESSION_KEY));
+
+		it("writes the session's local:// root, but not the workspace", async () => {
+			cfgSandboxMode.set(settings, "read-only");
+			const session = { ...toolSession(workspace.path()), getArtifactsDir: () => path.join(outside, "artifacts") };
+			const [local] = sessionSandboxWritableRoots(session);
+			const note = path.join(local, "note.txt");
+			await runEvalShell({ command: `echo kept > '${note}'` }, { session });
+			expect(fs.readFileSync(note, "utf8")).toBe("kept\n");
+
+			const inside = path.join(workspace.path(), "sh.txt");
+			await runEvalShell({ command: `touch '${inside}'` }, { session }).catch(() => undefined);
+			expect(fs.existsSync(inside)).toBe(false);
+		}, 120_000);
+	},
+);
 
 describe("stdio frames", () => {
 	const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);

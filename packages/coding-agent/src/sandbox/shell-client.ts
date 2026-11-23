@@ -423,8 +423,17 @@ export interface SandboxHostScope {
 
 const hostPool = new Map<string, Promise<SandboxHostConnection>>();
 
-function poolPrefix(agentSessionKey: string | undefined): string {
-	return `${agentSessionKey ?? ""}\n`;
+/**
+ * Key prefix of pooled hosts. Every key names its owner (an agent session, or the shared anonymous
+ * pool without one) and the runtime's pinned workspace, so a policy change in one workspace never
+ * retires another's hosts. Without a workspace the prefix names every host of a session; the
+ * anonymous pool then names none (`undefined`). A key of `""` is a session like any other; the
+ * owner tags keep it from matching the anonymous pool.
+ */
+function poolPrefix(agentSessionKey: string | undefined, workspace: string | undefined): string | undefined {
+	const owner = agentSessionKey === undefined ? "a" : `s:${agentSessionKey}`;
+	if (workspace !== undefined) return `${owner}\0${workspace}\n`;
+	return agentSessionKey === undefined ? undefined : `${owner}\0`;
 }
 
 /** Starts a host contained by `runtime` and attaches to it. */
@@ -450,16 +459,17 @@ export async function startSandboxHost(
 }
 
 /**
- * The pooled host for `scope` under `runtime`'s current policy. Hosts of the same agent session
- * under another policy are retired (they exit once their in-flight calls settle).
+ * The pooled host for `scope` under `runtime`'s current policy. Hosts of the same agent session (or
+ * anonymous pool) in the same workspace under another policy are retired (they exit once their
+ * in-flight calls settle).
  */
 export function acquireSandboxHost(runtime: SandboxRuntime, scope: SandboxHostScope): Promise<SandboxHostConnection> {
-	const prefix = poolPrefix(scope.agentSessionKey);
+	const prefix = poolPrefix(scope.agentSessionKey, runtime.workspace);
 	const extra = [...(scope.extraRead ?? []), "\0", ...(scope.extraWrite ?? [])].join("\0");
 	const key = `${prefix}${runtime.fingerprint()}\n${scope.network ?? ""}\n${scope.egressScope ?? ""}\n${extra}`;
 	const existing = hostPool.get(key);
 	if (existing) return existing;
-	releaseSandboxHosts(scope.agentSessionKey);
+	releaseSandboxHosts(scope.agentSessionKey, runtime.workspace);
 	const started = startSandboxHost(runtime, scope);
 	hostPool.set(key, started);
 	started.then(
@@ -470,11 +480,15 @@ export function acquireSandboxHost(runtime: SandboxRuntime, scope: SandboxHostSc
 }
 
 /**
- * Retires every pooled host of an agent session: each exits once its in-flight calls settle, and
- * its persistent shells and background jobs end with it.
+ * Retires pooled hosts: each exits once its in-flight calls settle, and its persistent shells and
+ * background jobs end with it. With a session key and no `workspace`, every host of that session
+ * in any workspace; with a `workspace` (a runtime's pinned one), only that workspace's. Without a
+ * session key, the anonymous hosts of `workspace`; with neither, nothing (an unsandboxed caller
+ * owns no host).
  */
-export function releaseSandboxHosts(agentSessionKey: string | undefined): void {
-	const prefix = poolPrefix(agentSessionKey);
+export function releaseSandboxHosts(agentSessionKey: string | undefined, workspace?: string): void {
+	const prefix = poolPrefix(agentSessionKey, workspace);
+	if (prefix === undefined) return;
 	for (const [key, host] of hostPool) {
 		if (!key.startsWith(prefix)) continue;
 		hostPool.delete(key);
@@ -485,20 +499,24 @@ export function releaseSandboxHosts(agentSessionKey: string | undefined): void {
 	}
 }
 
-/** The pooled hosts of one agent session. */
-function sessionHosts(agentSessionKey: string | undefined): Promise<SandboxHostConnection>[] {
-	const prefix = poolPrefix(agentSessionKey);
+/** The pooled hosts {@link releaseSandboxHosts} would retire for the same arguments. */
+function sessionHosts(
+	agentSessionKey: string | undefined,
+	workspace: string | undefined,
+): Promise<SandboxHostConnection>[] {
+	const prefix = poolPrefix(agentSessionKey, workspace);
+	if (prefix === undefined) return [];
 	return [...hostPool].filter(([key]) => key.startsWith(prefix)).map(([, host]) => host);
 }
 
 /** Number of live pooled hosts of an agent session (test seam). @internal */
-export function sandboxHostPoolSize(agentSessionKey: string | undefined): number {
-	return sessionHosts(agentSessionKey).length;
+export function sandboxHostPoolSize(agentSessionKey: string | undefined, workspace?: string): number {
+	return sessionHosts(agentSessionKey, workspace).length;
 }
 
 /** Pids of an agent session's pooled hosts that started (test seam). @internal */
-export async function sandboxHostPids(agentSessionKey: string | undefined): Promise<number[]> {
-	const settled = await Promise.allSettled(sessionHosts(agentSessionKey));
+export async function sandboxHostPids(agentSessionKey: string | undefined, workspace?: string): Promise<number[]> {
+	const settled = await Promise.allSettled(sessionHosts(agentSessionKey, workspace));
 	return settled.flatMap(outcome => (outcome.status === "fulfilled" ? [outcome.value.pid] : []));
 }
 
@@ -726,6 +744,8 @@ export class SandboxedPtySession {
 	): Promise<PtyRunResult> {
 		const { signal: rawSignal, ...start } = options;
 		const signal = rawSignal instanceof AbortSignal ? rawSignal : undefined;
+		// Cancelled before it began: no dedicated host (a container and its proxy listeners) is worth starting.
+		if (this.#killed || signal?.aborted) return { exitCode: undefined, cancelled: true, timedOut: false };
 		const connection = await startSandboxHost(this.#runtime, {
 			cwd: this.#hostCwd,
 			extraWrite: this.#extraWrite,

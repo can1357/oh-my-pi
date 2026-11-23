@@ -49,6 +49,11 @@ function parseIPv6(value: string): number[] | undefined {
 	return [...head, ...Array.from({ length: 8 - head.length - rest.length }, () => 0), ...rest];
 }
 
+/** `::ffff:0:0:0/96` (RFC 6145 SIIT translated addresses): the low 32 bits carry an IPv4 address. */
+function isSiit([g0, g1, g2, g3, g4, g5]: number[]): boolean {
+	return g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0xffff && g5 === 0;
+}
+
 function isPublicIPv4([a, b, c]: number[]): boolean {
 	if (a === 0 || a === 10 || a === 127 || a >= 224) return false; // this-network, private, loopback, multicast/reserved
 	if (a === 100 && b >= 64 && b <= 127) return false; // carrier-grade NAT
@@ -57,6 +62,9 @@ function isPublicIPv4([a, b, c]: number[]): boolean {
 	if (a === 192 && b === 168) return false; // private
 	if (a === 192 && b === 0 && c === 0) return false; // IETF protocol assignments
 	if (a === 198 && (b === 18 || b === 19)) return false; // benchmarking
+	if (a === 192 && b === 0 && c === 2) return false; // TEST-NET-1
+	if (a === 198 && b === 51 && c === 100) return false; // TEST-NET-2
+	if (a === 203 && b === 0 && c === 113) return false; // TEST-NET-3
 	return true;
 }
 
@@ -72,8 +80,14 @@ export function isPublicAddress(address: string): boolean {
 	if (!v6) return false;
 	const [g0, g1, g2, g3, g4, g5, g6, g7] = v6;
 	const zeroPrefix = g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0;
-	// ::/96 (unspecified, loopback, IPv4-compatible) and ::ffff:0:0/96 (IPv4-mapped)
-	if (zeroPrefix && (g5 === 0 || g5 === 0xffff)) return isPublicIPv4(embeddedIPv4(g6, g7));
+	if (zeroPrefix && g5 === 0) return false; // ::/96: unspecified, loopback, deprecated IPv4-compatible
+	if (zeroPrefix && g5 === 0xffff) return isPublicIPv4(embeddedIPv4(g6, g7)); // ::ffff:0:0/96 (IPv4-mapped)
+	if (isSiit(v6)) return isPublicIPv4(embeddedIPv4(g6, g7));
+	if (g0 === 0x64 && g1 === 0xff9b && g2 === 1) return false; // 64:ff9b:1::/48 local-use NAT64
+	if (g0 === 0x100 && g1 === 0 && g2 === 0 && g3 === 0) return false; // 100::/64 discard-only
+	if (g0 === 0x2001 && g1 === 0) return false; // 2001::/32 Teredo
+	if (g0 === 0x2001 && g1 === 2 && g2 === 0) return false; // 2001:2::/48 benchmarking
+	if (g0 === 0x2001 && g1 === 0xdb8) return false; // 2001:db8::/32 documentation
 	// NAT64 well-known prefix
 	if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) {
 		return isPublicIPv4(embeddedIPv4(g6, g7));
@@ -87,7 +101,7 @@ export function isPublicAddress(address: string): boolean {
 
 /**
  * True for loopback (127/8, ::1), unspecified (0/8, ::) and link-local (169.254/16, fe80::/10), also when an IPv6
- * form (IPv4-mapped, IPv4-compatible, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`) wraps such an IPv4 address.
+ * form (IPv4-mapped, SIIT, IPv4-compatible, NAT64 `64:ff9b::/96` and `64:ff9b:1::/96`, 6to4 `2002::/16`) wraps such an IPv4 address.
  * Non-literals count as host-local (fail closed).
  */
 export function isHostLocalAddress(address: string): boolean {
@@ -101,8 +115,13 @@ export function isHostLocalAddress(address: string): boolean {
 			v4 = embeddedIPv4(g1, g2);
 		} else if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) {
 			v4 = embeddedIPv4(g6, g7);
-		} else if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && (g5 === 0 || g5 === 0xffff)) {
-			// ::/96 (covers :: and ::1) and ::ffff:0:0/96 carry an IPv4 address in the low 32 bits.
+		} else if (g0 === 0x64 && g1 === 0xff9b && g2 === 1 && g3 === 0 && g4 === 0 && g5 === 0) {
+			v4 = embeddedIPv4(g6, g7); // local-use NAT64 `64:ff9b:1::/96` sub-prefix
+		} else if (
+			(g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && (g5 === 0 || g5 === 0xffff)) ||
+			isSiit(v6)
+		) {
+			// ::/96 (covers :: and ::1), ::ffff:0:0/96 and SIIT ::ffff:0:0:0/96 carry an IPv4 address in the low 32 bits.
 			v4 = embeddedIPv4(g6, g7);
 		} else {
 			return false;

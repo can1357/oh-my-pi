@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $which, resolveEquivalentPath, WhichCachePolicy } from "@oh-my-pi/pi-utils";
 import { homebrewCellar, installRoot } from "./platform";
-import { containedEnv } from "./env";
+import { inheritedContainedEnv } from "./env";
 import type { SandboxRuntime } from "./runtime";
 import type { SandboxChild, SandboxNetworkMode } from "./types";
 
@@ -52,16 +52,16 @@ interface ContainedCommandSpawn {
 }
 
 /**
- * Starts a workspace-resolvable command contained by `runtime`: the environment without omp's own
- * `.env` credentials ({@link containedEnv}), plus read access to the command's directory (and its
- * symlink target's, {@link commandReadRoots}). The one recipe contained MCP servers, language
- * servers and linters share.
+ * Starts a workspace-resolvable command contained by `runtime`: omp's environment without its own
+ * `.env` credentials or inherited git repo location ({@link inheritedContainedEnv}), plus read
+ * access to the command's directory (and its symlink target's, {@link commandReadRoots}). The one
+ * recipe contained MCP servers, language servers and linters share.
  */
 export async function spawnContainedCommand(
 	runtime: SandboxRuntime,
 	{ argv, cwd, what, env, network }: ContainedCommandSpawn,
 ): Promise<SandboxChild> {
-	const processEnv = containedEnv(Bun.env, env);
+	const processEnv = inheritedContainedEnv(env);
 	return await runtime.spawn({
 		argv,
 		cwd,

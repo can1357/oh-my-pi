@@ -6506,6 +6506,8 @@ type SandboxHostRequestEvent struct {
 	Port int64  `json:"port"`
 	// Unanswered for this long, the request is denied and cancelled.
 	TimeoutMs int64 `json:"timeoutMs"`
+	// False when `allowedHosts` is locked (project config, env, overlay or session override): `always` is refused.
+	CanAlways bool `json:"canAlways"`
 }
 
 func (v *SandboxHostRequestEvent) UnmarshalJSON(data []byte) error {
@@ -6520,6 +6522,7 @@ func (v *SandboxHostRequestEvent) decodeFrom(raw map[string]json.RawMessage) err
 	d.required("host", &out.Host)
 	d.required("port", &out.Port)
 	d.required("timeoutMs", &out.TimeoutMs)
+	d.required("canAlways", &out.CanAlways)
 	if d.err != nil {
 		return d.err
 	}

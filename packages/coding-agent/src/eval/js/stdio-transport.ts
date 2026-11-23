@@ -34,8 +34,8 @@ export function encodeStdioFrame(message: unknown): string {
 }
 
 /**
- * The lines of a frame stream. Throws (`LineTooLongError`) once a line grows past
- * {@link MAX_STDIO_FRAME_BYTES} without its newline, so the reader's memory stays bounded.
+ * The lines of a frame stream. Throws (`LineTooLongError`) on any line longer than
+ * {@link MAX_STDIO_FRAME_BYTES}, terminated or not, so the reader's memory stays bounded.
  */
 export function readStdioLines(stream: ReadableStream<Uint8Array>): AsyncGenerator<Uint8Array> {
 	return readLines(stream, undefined, { maxLineBytes: MAX_STDIO_FRAME_BYTES });

@@ -6057,6 +6057,10 @@
 				"timeoutMs": {
 					"type": "integer",
 					"description": "Unanswered for this long, the request is denied and cancelled."
+				},
+				"canAlways": {
+					"type": "boolean",
+					"description": "False when `allowedHosts` is locked (project config, env, overlay or session override): `always` is refused."
 				}
 			},
 			"required": [
@@ -6064,7 +6068,8 @@
 				"id",
 				"host",
 				"port",
-				"timeoutMs"
+				"timeoutMs",
+				"canAlways"
 			],
 			"description": "A contained command wants a host off the allowlist; answer with `respond_sandbox_host`. Sent only after `set_sandbox_host_prompts`."
 		},

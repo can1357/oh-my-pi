@@ -103,6 +103,21 @@ describe("readLines with maxLineBytes", () => {
 	it("throws for a chunk whose newline leaves an over-cap tail", async () => {
 		await expect(capped(["ab\nabcdefghi"])).rejects.toThrow(LineTooLongError);
 	});
+
+	it("throws for a newline-terminated line over the cap inside a single chunk", async () => {
+		await expect(capped(["abcdefghi\nx\n"])).rejects.toThrow(LineTooLongError);
+		await expect(capped(["ok\nabcdefghi\nx\n"])).rejects.toThrow(LineTooLongError);
+	});
+
+	it("throws for an over-cap line split across chunks that ends with its LF", async () => {
+		await expect(capped(["abcd", "efghi\n"])).rejects.toThrow(LineTooLongError);
+		await expect(capped(["abcd", "efg", "hi\nx\n"])).rejects.toThrow(LineTooLongError);
+	});
+
+	it("passes terminated lines of exactly the cap, alone and across chunks", async () => {
+		expect(await capped(["abcdefgh\nijklmnop\n"])).toEqual(["abcdefgh", "ijklmnop"]);
+		expect(await capped(["abcd", "efgh\nx\n"])).toEqual(["abcdefgh", "x"]);
+	});
 });
 
 describe("abortableSource (via readLines)", () => {

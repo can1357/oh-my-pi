@@ -1507,6 +1507,8 @@ export interface SandboxHostRequestEvent {
 	port: number;
 	/** Unanswered for this long, the request is denied and cancelled. */
 	timeoutMs: number;
+	/** False when `allowedHosts` is locked (project config, env, overlay or session override): `always` is refused. */
+	canAlways: boolean;
 }
 
 /** A `sandbox_host_request` was denied without an answer: it timed out, or prompts were turned off or the session ended. */

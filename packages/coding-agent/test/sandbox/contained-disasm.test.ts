@@ -110,12 +110,21 @@ afterEach(async () => {
 describe("the contained disassembler worker's spawn request", () => {
 	it("reads the interpreter, the staged script and the backend install; writes only its endpoint's and a store database's directory", async () => {
 		const script = path.join(os.tmpdir(), "omp-ida-worker-1", "runner-abc.py");
-		const venv = path.join(os.homedir(), ".venvs", "ida");
-		const install = path.join(os.homedir(), "ida-9");
-		const userDirs = [path.join(os.homedir(), ".idapro"), path.join(os.homedir(), ".idapro-extra")];
+		// Real directories outside the workspace: install roots that cannot be resolved are dropped.
+		const machine = path.dirname(workspace);
+		const venv = path.join(machine, ".venvs", "ida");
+		const install = path.join(machine, "ida-9");
+		const userDirs = [path.join(machine, ".idapro"), path.join(machine, ".idapro-extra")];
+		for (const dir of [path.join(venv, "bin"), install, ...userDirs]) fs.mkdirSync(dir, { recursive: true });
 		const runtime: WorkerRuntime = {
 			pythonPath: path.join(venv, "bin", "python"),
-			env: { VIRTUAL_ENV: venv, IDADIR: install, IDAUSR: userDirs.join(path.delimiter), PATH: "/usr/bin" },
+			// The home directory among them is refused, never granted.
+			env: {
+				VIRTUAL_ENV: venv,
+				IDADIR: install,
+				IDAUSR: [...userDirs, os.homedir()].join(path.delimiter),
+				PATH: "/usr/bin",
+			},
 		};
 		const endpointDir = path.join(os.tmpdir(), "omp-dsm-x");
 		const endpoint = path.join(endpointDir, "worker.sock");
@@ -129,23 +138,31 @@ describe("the contained disassembler worker's spawn request", () => {
 			env: { ...workerRuntime.env, OMP_DISASM_WORKER_TOKEN: "token" },
 		});
 
-		const inStore = await containedWorkerSpawnRequest(spec(storeLocation(path.join(outside, "prog.bin"), "s1")));
+		const inStore = await containedWorkerSpawnRequest(
+			spec(storeLocation(path.join(outside, "prog.bin"), "s1")),
+			workspace,
+		);
 		expect(inStore.cwd).toBe(path.join(store, "s1"));
 		expect(inStore.argv).toEqual([runtime.pythonPath, "-u", script, "--socket", endpoint]);
 		expect(inStore.env.OMP_DISASM_WORKER_TOKEN).toBe("token");
 		expect(inStore.extraWrite).toEqual([endpointDir, path.join(store, "s1")]);
 		expect(inStore.extraRead).toEqual(expect.arrayContaining([path.dirname(script), venv, install, ...userDirs]));
+		expect(inStore.extraRead).not.toContain(fs.realpathSync(os.homedir()));
 
 		// Ghidra needs its install and the JDK it runs on.
-		const ghidraHome = path.join(os.homedir(), "ghidra_12");
-		const jdk = path.join(os.homedir(), "jdk-25");
-		const ghidra = await containedWorkerSpawnRequest({
-			...spec(storeLocation(path.join(outside, "prog.bin"), "g1"), {
-				pythonPath: runtime.pythonPath,
-				env: { GHIDRA_INSTALL_DIR: ghidraHome, JAVA_HOME: jdk },
-			}),
-			backend: DISASM_BACKENDS.ghidra,
-		});
+		const ghidraHome = path.join(machine, "ghidra_12");
+		const jdk = path.join(machine, "jdk-25");
+		for (const dir of [ghidraHome, jdk]) fs.mkdirSync(dir);
+		const ghidra = await containedWorkerSpawnRequest(
+			{
+				...spec(storeLocation(path.join(outside, "prog.bin"), "g1"), {
+					pythonPath: runtime.pythonPath,
+					env: { GHIDRA_INSTALL_DIR: ghidraHome, JAVA_HOME: jdk },
+				}),
+				backend: DISASM_BACKENDS.ghidra,
+			},
+			workspace,
+		);
 		expect(ghidra.extraRead).toEqual(expect.arrayContaining([ghidraHome, jdk]));
 
 		// An in-place database is writable only where the sandbox policy already lets the workspace write.
@@ -159,7 +176,7 @@ describe("the contained disassembler worker's spawn request", () => {
 			isNew: false,
 			lockTarget: path.join(workspace, "prog.i64"),
 		};
-		const request = await containedWorkerSpawnRequest(spec(inPlace));
+		const request = await containedWorkerSpawnRequest(spec(inPlace), workspace);
 		expect(request.cwd).toBe(workspace);
 		expect(request.extraWrite).toEqual([endpointDir]);
 	});

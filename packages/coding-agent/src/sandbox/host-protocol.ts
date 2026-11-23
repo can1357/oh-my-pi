@@ -244,8 +244,8 @@ export function decodeHostMessage<T extends HostRequest | HostEvent>(line: strin
 export const MAX_HOST_LINE_BYTES = 64 * 1024 * 1024;
 
 /**
- * The protocol lines of `stream`, decoded. Errors once a line grows past {@link MAX_HOST_LINE_BYTES}
- * without its newline, so a peer cannot make the reader buffer without bound.
+ * The protocol lines of `stream`, decoded. Errors on any line longer than {@link MAX_HOST_LINE_BYTES},
+ * terminated or not, so a peer cannot make the reader buffer without bound.
  */
 export async function* readHostLines(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
 	const decoder = new TextDecoder();

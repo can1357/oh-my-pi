@@ -897,6 +897,8 @@ async function runInteractiveMode(
 				mode.showStatus(notify.message);
 			}
 		}
+		// The UI is up and the queued notices are out: runtime warnings show directly from here on.
+		SandboxRuntime.setWarningSink(message => mode.showWarning(sanitizeDisplayWarning(message)));
 
 		if (offersStartupWorktree) {
 			await mode.maybeAutoCreateWorktree();
@@ -1188,17 +1190,25 @@ function notifyResumeCwdFallback(
 
 /**
  * The startup notice for a sandbox that is enabled but has no usable backend on this host; undefined
- * when the sandbox is off or available. Probing only happens when the sandbox is enabled.
+ * when the sandbox is off or available. Probing only happens when the sandbox is enabled. The `warn`
+ * notice takes the place of the runtime's own once-only warning, so the first contained call does not
+ * repeat it.
+ * @internal Exported for tests.
  */
-async function sandboxUnavailableNotice(settingsInstance: Settings, workspace: string): Promise<string | undefined> {
+export async function sandboxUnavailableNotice(
+	settingsInstance: Settings,
+	workspace: string,
+): Promise<string | undefined> {
 	if (!sandboxEnabled(settingsInstance)) return undefined;
 	try {
 		const status = (await SandboxRuntime.for(workspace)).status();
 		if (status.state !== "unavailable") return undefined;
 		const reason = sanitizeDisplayWarnings([status.reason])[0];
-		return status.fallback === "block"
-			? `Sandbox unavailable: ${reason}. Contained tools fail until a backend is available or /sandbox off.`
-			: `Sandbox unavailable: ${reason}. Commands run unsandboxed.`;
+		if (status.fallback === "block") {
+			return `Sandbox unavailable: ${reason}. Contained tools fail until a backend is available or /sandbox off.`;
+		}
+		SandboxRuntime.claimUnavailableWarning();
+		return `Sandbox unavailable: ${reason}. Commands run unsandboxed.`;
 	} catch (error) {
 		logger.warn("Sandbox status probe failed", { error: String(error) });
 		return undefined;
@@ -2543,7 +2553,10 @@ export async function runRootCommand(
 			else writeStartupWarning(warning);
 		};
 		// The runtime's one "enabled but unavailable, running unsandboxed" warning: interactive mode
-		// raises it as a startup notification (below), anything else on stderr when it first applies.
+		// raises it as a startup notification (below, which claims the runtime's once-only warning so it
+		// is not repeated), anything else on stderr when it first applies.
+		// Interactive mode takes later runtime warnings (created-path symlinks, re-pointed
+		// `allowWrite` entries) live once its UI is up (see runInteractiveMode).
 		if (!isInteractive) {
 			// Single line, never cut: the created-path warning names a full path the user must read.
 			SandboxRuntime.setWarningSink(message => writeStartupWarning(sanitizeDisplayWarning(message)));
@@ -2581,6 +2594,7 @@ export async function runRootCommand(
 			return options;
 		};
 		// Who answers `sandbox_request`: interactive mode, or the RPC client (requests are refused until it opts in); elsewhere it is not offered.
+		// Set before the session is built so it offers the tool from the start; `runRpcMode` sets it again for embedders.
 		SandboxRuntime.setAccessPromptHost(
 			isInteractive ? "interactive" : mode === "rpc" || mode === "rpc-ui" ? "rpc" : undefined,
 		);

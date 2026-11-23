@@ -108,6 +108,17 @@ describe("SelectorController.showSandboxConfigure", () => {
 		expect(sheet.setModel).toHaveBeenCalledTimes(2);
 	});
 
+	it("drops a refresh queued by a runtime change when the overlay closes before it runs", async () => {
+		const { sheet, shown, mount, fire } = await setup();
+		mount(0);
+
+		fire();
+		shown[0]!.onClose();
+		await nextTick();
+
+		expect(sheet.setModel).not.toHaveBeenCalled();
+	});
+
 	it("shows a failed write's reason, then refreshes; a successful write clears the notice", async () => {
 		const { sheet, sheets, mount } = await setup({
 			grantHost: () => {

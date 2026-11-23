@@ -42,7 +42,7 @@ import { isScoutSpawnable } from "../task/spawn-policy";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import type { ToolSession } from ".";
 import { resolveToolTier } from "./approval";
-import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
+import { MaterializedUrlFiles, materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
 import { webUrlSandboxSubjects } from "./web-url-subjects";
 import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file-recorder";
 import { type FileMatchSection, formatFileMatches } from "./grouped-file-output";
@@ -744,6 +744,9 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			const pathSpecs = await parsePathSpecs(rawEntries, this.session.cwd);
 			const filesystem = urlFilesystem.shellFilesystem();
 			const materializedExternalPaths = new Map<string, string>();
+			// A fetched web page is omp's own temp file, outside every container root: search it in
+			// omp, as the notebook projections below are. It holds only the response body omp wrote.
+			const urlFiles = new MaterializedUrlFiles();
 			const materializeExternalUrlForSearch = async (rawPath: string) => {
 				const target = parseReadUrlTarget(rawPath);
 				if (!target) return undefined;
@@ -759,6 +762,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					throw new ToolError(`Cannot search ${rawPath}: ${notes.join("; ") || "the fetch failed"}`);
 				}
 				materializedExternalPaths.set(rawPath, materialized.path);
+				urlFiles.add(materialized.path);
 				return { sourcePath: materialized.path, immutable: true };
 			};
 			const {
@@ -895,30 +899,32 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								}))
 							: (multiTargets ?? []);
 						for (const target of targets) {
-							const targetResult = await containedGrep(
-								{
-									pattern: normalizedPattern,
-									path: target.basePath,
-									glob: target.glob,
-									recursive: target.bareGlob === true,
-									ignoreCase,
-									multiline: effectiveMultiline,
-									hidden: true,
-									gitignore: useGitignore,
-									// Skills are often linked into place, file by file or whole trees; read follows those links too.
-									followLinks: target.basePath.startsWith("skill://"),
-									maxCount: nativeMaxCount,
-									contextBefore: normalizedContextBefore,
-									contextAfter: normalizedContextAfter,
-									maxColumns: DEFAULT_MAX_COLUMN,
-									mode: effectiveOutputMode,
-									maxCountPerFile: nativeMaxCountPerFile,
-									exclude: exclusionsForRoot(exclusions, this.session.cwd, target.basePath),
-									signal,
-									timeoutMs: SEARCH_GREP_TIMEOUT_MS,
-									filesystem,
-								},
-								undefined,
+							const targetResult = await urlFiles.search(target.basePath, () =>
+								containedGrep(
+									{
+										pattern: normalizedPattern,
+										path: target.basePath,
+										glob: target.glob,
+										recursive: target.bareGlob === true,
+										ignoreCase,
+										multiline: effectiveMultiline,
+										hidden: true,
+										gitignore: useGitignore,
+										// Skills are often linked into place, file by file or whole trees; read follows those links too.
+										followLinks: target.basePath.startsWith("skill://"),
+										maxCount: nativeMaxCount,
+										contextBefore: normalizedContextBefore,
+										contextAfter: normalizedContextAfter,
+										maxColumns: DEFAULT_MAX_COLUMN,
+										mode: effectiveOutputMode,
+										maxCountPerFile: nativeMaxCountPerFile,
+										exclude: exclusionsForRoot(exclusions, this.session.cwd, target.basePath),
+										signal,
+										timeoutMs: SEARCH_GREP_TIMEOUT_MS,
+										filesystem,
+									},
+									undefined,
+								),
 							);
 							skippedOversizedCount += targetResult.skippedOversized ?? 0;
 							for (const binaryPath of targetResult.binaryMatches ?? []) {
@@ -951,29 +957,31 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							limitReached,
 						};
 					} else {
-						result = await containedGrep(
-							{
-								pattern: normalizedPattern,
-								path: searchPath,
-								glob: globFilter,
-								recursive: scope.bareGlob,
-								ignoreCase,
-								multiline: effectiveMultiline,
-								hidden: true,
-								gitignore: useGitignore,
-								followLinks: searchPath.startsWith("skill://"),
-								maxCount: nativeMaxCount,
-								contextBefore: normalizedContextBefore,
-								contextAfter: normalizedContextAfter,
-								maxColumns: DEFAULT_MAX_COLUMN,
-								mode: effectiveOutputMode,
-								maxCountPerFile: nativeMaxCountPerFile,
-								exclude: exclusionsForRoot(exclusions, this.session.cwd, searchPath),
-								signal,
-								timeoutMs: SEARCH_GREP_TIMEOUT_MS,
-								filesystem,
-							},
-							undefined,
+						result = await urlFiles.search(searchPath, () =>
+							containedGrep(
+								{
+									pattern: normalizedPattern,
+									path: searchPath,
+									glob: globFilter,
+									recursive: scope.bareGlob,
+									ignoreCase,
+									multiline: effectiveMultiline,
+									hidden: true,
+									gitignore: useGitignore,
+									followLinks: searchPath.startsWith("skill://"),
+									maxCount: nativeMaxCount,
+									contextBefore: normalizedContextBefore,
+									contextAfter: normalizedContextAfter,
+									maxColumns: DEFAULT_MAX_COLUMN,
+									mode: effectiveOutputMode,
+									maxCountPerFile: nativeMaxCountPerFile,
+									exclude: exclusionsForRoot(exclusions, this.session.cwd, searchPath),
+									signal,
+									timeoutMs: SEARCH_GREP_TIMEOUT_MS,
+									filesystem,
+								},
+								undefined,
+							),
 						);
 						skippedOversizedCount = result.skippedOversized ?? 0;
 						binaryMatches = result.binaryMatches ?? [];

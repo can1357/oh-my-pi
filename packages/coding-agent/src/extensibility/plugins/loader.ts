@@ -17,7 +17,12 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { getConfigDirPaths } from "../../config";
 import { registerPluginCacheInvalidator, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
-import { currentSandboxCreated, sandboxCreatedSkip } from "../../sandbox/ledger";
+import {
+	currentSandboxCreated,
+	type SandboxCreatedEntry,
+	sandboxCreatedRevision,
+	sandboxCreatedSkip,
+} from "../../sandbox/ledger";
 import { findExtensionDirectoryIndex, resolveExtensionDirectory } from "../extensions/directory-resolution";
 import { installLegacyPiSpecifierShim } from "./legacy-pi-compat";
 import { normalizePluginRuntimeConfig } from "./runtime-config";
@@ -67,9 +72,11 @@ async function loadRuntimeConfig(home?: string): Promise<PluginRuntimeConfig> {
 /**
  * Load project-local plugin overrides (checks .omp and .pi directories).
  */
-async function loadProjectOverrides(cwd: string): Promise<ProjectPluginOverrides> {
+async function loadProjectOverrides(
+	cwd: string,
+	ledger: readonly SandboxCreatedEntry[] = currentSandboxCreated(),
+): Promise<ProjectPluginOverrides> {
 	// An overrides file a sandboxed command created or replaced is ignored until trusted (logged by the skip).
-	const ledger = currentSandboxCreated();
 	for (const overridesPath of getConfigDirPaths("plugin-overrides.json", { user: false, cwd })) {
 		if (sandboxCreatedSkip(overridesPath, cwd, ledger)) continue;
 		try {
@@ -247,11 +254,13 @@ async function collectPluginsAtRoot(
  */
 export async function getEnabledPlugins(cwd: string, opts: { home?: string } = {}): Promise<ScopedInstalledPlugin[]> {
 	const { home } = opts;
-	const cacheKey = enabledPluginsCacheKey(cwd, home);
+	// The ledger is read (and the identity watch run) first so the cache key's revision covers it.
+	const ledger = currentSandboxCreated();
+	const cacheKey = `${enabledPluginsCacheKey(cwd, home)}\0${sandboxCreatedRevision()}`;
 	const cached = enabledPluginsCache.get(cacheKey);
 	if (cached) return cached;
 
-	const loadPromise = loadEnabledPlugins(cwd, home);
+	const loadPromise = loadEnabledPlugins(cwd, home, ledger);
 	enabledPluginsCache.set(cacheKey, loadPromise);
 	try {
 		return await loadPromise;
@@ -263,8 +272,12 @@ export async function getEnabledPlugins(cwd: string, opts: { home?: string } = {
 	}
 }
 
-async function loadEnabledPlugins(cwd: string, home?: string): Promise<ScopedInstalledPlugin[]> {
-	const projectOverrides = await loadProjectOverrides(cwd);
+async function loadEnabledPlugins(
+	cwd: string,
+	home: string | undefined,
+	ledger: readonly SandboxCreatedEntry[],
+): Promise<ScopedInstalledPlugin[]> {
+	const projectOverrides = await loadProjectOverrides(cwd, ledger);
 
 	const userRoot = getPluginsDir(home);
 	const userPlugins = await collectPluginsAtRoot(userRoot, projectOverrides, "user");
@@ -273,8 +286,14 @@ async function loadEnabledPlugins(cwd: string, home?: string): Promise<ScopedIns
 	const projectRegistryPath = await resolveActiveProjectRegistryPath(cwd);
 	if (projectRegistryPath) {
 		const projectRoot = path.dirname(projectRegistryPath);
-		if (normalizePathForComparison(projectRoot) !== normalizePathForComparison(userRoot)) {
-			projectPlugins = await collectPluginsAtRoot(projectRoot, projectOverrides, "project");
+		// A plugin root a sandboxed command created or replaced is ignored until trusted.
+		const untrusted =
+			sandboxCreatedSkip(projectRegistryPath, cwd, ledger) !== undefined ||
+			sandboxCreatedSkip(projectRoot, cwd, ledger) !== undefined;
+		if (!untrusted && normalizePathForComparison(projectRoot) !== normalizePathForComparison(userRoot)) {
+			projectPlugins = (await collectPluginsAtRoot(projectRoot, projectOverrides, "project")).filter(
+				plugin => sandboxCreatedSkip(plugin.path, cwd, ledger) === undefined,
+			);
 		}
 	}
 

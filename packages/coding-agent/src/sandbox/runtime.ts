@@ -38,6 +38,7 @@ import {
 	stillCanonical,
 } from "./context";
 import { type EgressListener, EgressProxy } from "./egress-proxy";
+import { withSandboxTempDir } from "./env";
 import {
 	changedIdentities,
 	type IdentitySnapshot,
@@ -411,6 +412,21 @@ const runtimes = new WeakMap<Settings, Map<string, SandboxRuntime>>();
 /** Workspace paths as given → the canonical path at first sight, per realm. */
 const workspacePins = new Map<string, string>();
 
+/**
+ * The canonical path of `absolute`: its pin, else its realpath (pinned when `pin`), else itself.
+ * Pinned on first sight: a workspace a contained process replaced with a symlink keeps its
+ * original runtime, whose spawns then fail closed.
+ */
+function pinWorkspace(absolute: string, pin: boolean): string {
+	const pinned = workspacePins.get(absolute);
+	if (pinned !== undefined) return pinned;
+	// The resolver `stillCanonical` uses, so the pin and the spawn check cannot disagree.
+	const resolved = realpathIfExists(absolute);
+	if (resolved === undefined) return absolute;
+	if (pin) workspacePins.set(absolute, resolved);
+	return resolved;
+}
+
 function support(): SandboxSupport {
 	supportProbe ??= sandboxSupport();
 	return supportProbe;
@@ -468,18 +484,22 @@ function ensureProxy(runtime: SandboxRuntime, settings: Settings): Promise<Egres
 		onBlocked: (host, _port, origin) => recordBlockedHost(host, Date.now(), egressOwners(origin)),
 	});
 	byAllowlist.set(key, start);
-	cancelProxyCleanup ??= postmortem.register("sandbox-egress-proxy", closeProxies);
+	cancelProxyCleanup ??= postmortem.register("sandbox-egress-proxy", () => closeProxies());
 	start.catch(() => {
 		if (byAllowlist.get(key) === start) byAllowlist.delete(key);
 	});
 	return start;
 }
 
-async function closeProxies(): Promise<void> {
-	const starts = [...proxies.values()].flatMap(byAllowlist => [...byAllowlist.values()]);
-	proxies.clear();
-	cancelProxyCleanup?.();
-	cancelProxyCleanup = undefined;
+/** Closes the proxies of `only` (every runtime's when omitted); the postmortem hook goes with the last one. */
+async function closeProxies(only?: SandboxRuntime): Promise<void> {
+	const owners = only === undefined ? [...proxies.keys()] : [only];
+	const starts = owners.flatMap(owner => [...(proxies.get(owner)?.values() ?? [])]);
+	for (const owner of owners) proxies.delete(owner);
+	if (proxies.size === 0) {
+		cancelProxyCleanup?.();
+		cancelProxyCleanup = undefined;
+	}
 	await Promise.all(starts.map(async start => (await start.catch(() => undefined))?.close()));
 }
 
@@ -555,16 +575,7 @@ export class SandboxRuntime {
 	 */
 	static async for(workspace: string): Promise<SandboxRuntime> {
 		const settings = await Settings.init();
-		const absolute = path.resolve(workspace);
-		// Pinned on first sight: a workspace a contained process replaced with a symlink keeps its
-		// original runtime, whose spawns then fail closed.
-		let resolved = workspacePins.get(absolute);
-		if (resolved === undefined) {
-			// The resolver `stillCanonical` uses, so the pin and the spawn check cannot disagree.
-			resolved = realpathIfExists(absolute);
-			if (resolved !== undefined) workspacePins.set(absolute, resolved);
-			else resolved = absolute;
-		}
+		const resolved = pinWorkspace(path.resolve(workspace), true);
 		let bySettings = runtimes.get(settings);
 		if (!bySettings) {
 			bySettings = new Map();
@@ -581,6 +592,14 @@ export class SandboxRuntime {
 		// A concurrent caller must not use the runtime before the gate knows the protected hooks path.
 		await runtime.#hooksPathRead;
 		return runtime;
+	}
+
+	/**
+	 * The workspace {@link SandboxRuntime.for} resolves `workspace` to (its runtime's `workspace`),
+	 * without creating a runtime or pinning a workspace not seen before.
+	 */
+	static pinnedWorkspace(workspace: string): string {
+		return pinWorkspace(path.resolve(workspace), false);
 	}
 
 	/** Runs the identity watch (G7) of every live runtime of this realm: lstat only, cheap. */
@@ -617,6 +636,14 @@ export class SandboxRuntime {
 	/** Where the one "enabled but unavailable" warning goes; `undefined` restores `logger.warn`. */
 	static setWarningSink(sink: SandboxWarningSink | undefined): void {
 		warningSink = sink;
+	}
+
+	/**
+	 * Marks the once-only "enabled but unavailable" warning as shown: for a caller that raised it
+	 * itself (interactive mode's startup notice), so the first `applies()` does not repeat it.
+	 */
+	static claimUnavailableWarning(): void {
+		unavailableWarned = true;
 	}
 
 	/**
@@ -761,14 +788,7 @@ export class SandboxRuntime {
 			child = await spawnSandboxChild({
 				argv: request.argv,
 				cwd: request.cwd,
-				env: {
-					...request.env,
-					...windowsContainedEnv(request.env),
-					OMP_SANDBOX: "1",
-					TMPDIR: tempDir,
-					TMP: tempDir,
-					TEMP: tempDir,
-				},
+				env: withSandboxTempDir({ ...request.env, ...windowsContainedEnv(request.env), OMP_SANDBOX: "1" }, tempDir),
 				policy,
 			});
 		} catch (error) {
@@ -1102,7 +1122,7 @@ export class SandboxRuntime {
 		this.#detectCreated();
 		this.#watch = undefined;
 		this.#linkWatched.clear();
-		if (liveRuntimes.size === 0) await closeProxies();
+		await closeProxies(this);
 	}
 
 	#removeTempDir(): void {
@@ -1408,20 +1428,23 @@ export class SandboxRuntime {
 	}
 
 	/**
-	 * The resolved `denyRead` entries plus every configured one as written (realpath-or-self): the
-	 * resolved policy drops an entry that does not exist, a dangling symlink included, yet a path
-	 * through such a link must still be refused.
+	 * The resolved `denyRead` entries plus every configured one as written, in both {@link pathForms}
+	 * (through dangling links, and realpath-or-self through missing components): the resolved policy
+	 * drops an entry that does not exist, a dangling symlink included, yet a path to it or through such
+	 * a link must still be refused, also below a symlinked ancestor (`/tmp` → `/private/tmp`, a linked
+	 * home).
 	 */
 	#deniedEntries(policy: Pick<ResolvedFsPolicy, "deniedPaths">): string[] {
 		const ctx = {
 			workspace: this.#workspace,
-			home: os.homedir(),
+			home: resolveEquivalentPath(os.homedir()),
 			tmpdir: this.tempDir(),
 			platform: process.platform,
 		};
-		const configured = this.#current().config.denyRead.map(entry =>
-			resolveEquivalentPath(expandSandboxPath(entry, ctx)),
-		);
+		const configured = this.#current().config.denyRead.flatMap(entry => {
+			const { followed, plain } = pathForms(expandSandboxPath(entry, ctx));
+			return [followed, plain];
+		});
 		return [...new Set([...policy.deniedPaths, ...configured])];
 	}
 

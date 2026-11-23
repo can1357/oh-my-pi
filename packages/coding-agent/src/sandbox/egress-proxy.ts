@@ -82,6 +82,11 @@ interface ForwardRequest {
 }
 type ParsedRequest = ConnectRequest | ForwardRequest | { kind: "invalid"; status: number; message: string };
 
+/** A bare CR, a bare LF or a NUL anywhere in a head: parsers that tolerate them disagree on where lines end. */
+const FORBIDDEN_HEAD_BYTES = /\r(?!\n)|(?<!\r)\n|\0/;
+/** RFC 9110 §5.6.2 `token`. */
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
 const REQUEST_LINE = /^([!#$%&'*+.^_`|~0-9A-Za-z-]+) (\S+) (HTTP\/1\.[01])$/;
 
 function parsePort(text: string): number | undefined {
@@ -104,9 +109,18 @@ function basicCredential(lines: readonly string[]): string | undefined {
 }
 
 function parseRequestHead(head: string): ParsedRequest {
+	if (FORBIDDEN_HEAD_BYTES.test(head)) {
+		return { kind: "invalid", status: 400, message: "request head contains a bare CR, bare LF or NUL" };
+	}
 	const lines = head.split("\r\n");
 	const match = REQUEST_LINE.exec(lines[0]);
 	if (!match) return { kind: "invalid", status: 400, message: "malformed request line" };
+	for (const line of lines.slice(1)) {
+		const colon = line.indexOf(":");
+		if (colon <= 0 || !HEADER_NAME.test(line.slice(0, colon))) {
+			return { kind: "invalid", status: 400, message: "malformed header line" };
+		}
+	}
 	const [, method, target, version] = match;
 	const credential = basicCredential(lines.slice(1));
 
@@ -136,10 +150,7 @@ function parseRequestHead(head: string): ParsedRequest {
 
 	const forwarded = [`${method} ${url.pathname}${url.search} ${version}`, `Host: ${url.host}`];
 	for (const line of lines.slice(1)) {
-		if (line === "") continue;
-		const colon = line.indexOf(":");
-		if (colon <= 0) return { kind: "invalid", status: 400, message: "malformed header line" };
-		if (DROPPED_FORWARD_HEADERS[line.slice(0, colon).trim().toLowerCase()] === true) continue;
+		if (DROPPED_FORWARD_HEADERS[line.slice(0, line.indexOf(":")).toLowerCase()] === true) continue;
 		forwarded.push(line);
 	}
 	forwarded.push("Connection: close", "", "");

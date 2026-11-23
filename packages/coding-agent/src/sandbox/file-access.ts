@@ -27,7 +27,7 @@ import { TempDir } from "@oh-my-pi/pi-utils/temp";
 import type { Settings } from "../config/settings";
 import { sessionSandboxWritableRoots } from "../internal-urls/context";
 import type { ToolSession } from "../tools";
-import { applyFileMutation } from "./file-mutation-ops";
+import { applyFileMutation, OPEN_READ_NONBLOCK } from "./file-mutation-ops";
 import type { HostFileMutation, HostRequest, HostResults } from "./host-protocol";
 import { sandboxEnabled } from "./policy";
 import { SandboxRuntime, SandboxUnavailableError } from "./runtime";
@@ -180,17 +180,24 @@ export async function mutateFile(mutation: HostFileMutation): Promise<void> {
 	else await applyFileMutation(mutation);
 }
 
+/** The error for a read of `filePath`, which is not a regular file (a FIFO, device or directory). */
+function notRegularFileError(filePath: string, isDirectory: boolean): NodeJS.ErrnoException {
+	const code = isDirectory ? "EISDIR" : "EINVAL";
+	return Object.assign(new Error(`${code}: ${filePath} is not a regular file`), { code, path: filePath });
+}
+
 /**
  * Opens `filePath` for reading. Contained, the host opens it first (the container decides: a
- * refusal rejects with its errno), then omp opens it and requires the same file (device and file
- * id); a file swapped in between rejects with `EACCES`. Read every byte through the returned
- * handle, never by path again.
+ * refusal rejects with its errno), then omp opens it without blocking and requires the same
+ * regular file (device and file id); a file swapped in between rejects with `EACCES`, and a
+ * FIFO, device or directory with `EINVAL`/`EISDIR`. Read every byte through the returned handle,
+ * never by path again.
  */
 export async function openReadableFile(filePath: string): Promise<fs.FileHandle> {
 	const contained = containedFileAccess();
 	if (!contained) return fs.open(filePath, "r");
 	const expected = await contained.request({ op: "file.identify", path: filePath });
-	const handle = await fs.open(filePath, "r");
+	const handle = await fs.open(filePath, OPEN_READ_NONBLOCK);
 	try {
 		const actual = await handle.stat({ bigint: true });
 		if (actual.dev !== expected.dev || actual.ino !== expected.ino) {
@@ -199,6 +206,7 @@ export async function openReadableFile(filePath: string): Promise<fs.FileHandle>
 				path: filePath,
 			});
 		}
+		if (!actual.isFile()) throw notRegularFileError(filePath, actual.isDirectory());
 		return handle;
 	} catch (error) {
 		await handle.close();
@@ -287,8 +295,8 @@ const MAX_SNAPSHOT_FILE_BYTES = 4 * 1024 * 1024;
 
 /**
  * `store.recordSnapshotFile`, reading through {@link openReadableFile} when the running call is
- * contained (the native method reads by path in omp). Same contract: `null` for an unreadable,
- * non-UTF-8 or over-4-MiB file.
+ * contained (the native method reads by path in omp). Same contract: `null` for an unreadable
+ * (a FIFO, device or directory included), non-UTF-8 or over-4-MiB file.
  */
 export async function recordFileSnapshot(
 	store: natives.EditStore,

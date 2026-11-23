@@ -439,7 +439,11 @@ if "__omp_prelude_loaded__" not in globals():
         class _UnixHTTPConnection(http.client.HTTPConnection):
             def connect(self):
                 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                sock.connect(socket_path)
+                try:
+                    sock.connect(socket_path)
+                except BaseException:
+                    sock.close()
+                    raise
                 self.sock = sock
 
         conn = _UnixHTTPConnection("localhost")

@@ -316,6 +316,7 @@ export type State = Assert<
 		sandboxIgnored: Outbound<RpcSandboxState["ignored"][number], Wire.SandboxIgnoredValue>;
 		sandboxEffective: Outbound<RpcSandboxState["effective"], Wire.SandboxEffectivePolicy>;
 		sandboxSessionPaths: Outbound<RpcSandboxState["sessionPaths"], Wire.SandboxSessionPaths>;
+		sandboxCreatedPath: Outbound<RpcSandboxState["created"][number], Wire.SandboxCreatedPath>;
 		sandboxStatusOff: Outbound<Extract<RpcSandboxStatus, { state: "off" }>, Wire.SandboxStatusOff>;
 		sandboxStatusActive: Outbound<Extract<RpcSandboxStatus, { state: "active" }>, Wire.SandboxStatusActive>;
 		sandboxStatusUnavailable: Outbound<

@@ -194,7 +194,7 @@ import {
 } from "../spotlight";
 import type { ShapeInput } from "../spotlight/types";
 import { readBinary, resolveBinaryViewPath } from "./read-binary";
-import { readSqlite, resolveSqliteReadPath } from "./read-sqlite";
+import { type ResolvedSqliteReadPath, readSqlite, resolveSqliteReadPath } from "./read-sqlite";
 import { parseJsonSelector, readJson, resolveJsonReadPath, splitJsonQueryTarget } from "./read-json";
 import {
 	getReadTextFileBridge,
@@ -259,6 +259,14 @@ interface BufferedFileText {
 	readonly addressableLines: readonly string[];
 	/** Whether the final byte is LF. */
 	readonly endsWithNewline: boolean;
+}
+
+/** Reads a SQLite database; SQLite opens its -wal/-shm sidecars itself, so a contained read runs whole in the host. */
+function readSqliteContained(
+	target: ResolvedSqliteReadPath,
+	signal: AbortSignal | undefined,
+): Promise<AgentToolResult<ReadToolDetails>> {
+	return containedFileAccess()?.request({ op: "sqlite.read", target }) ?? readSqlite(target, signal);
 }
 
 /**
@@ -2420,11 +2428,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			// A disassembler database stored as SQLite (Binary Ninja `.bndb`) belongs to its backend:
 			// views take the disassembler route below and a bare read shows database metadata.
 			if (sqlitePath && !databaseOwner(sqlitePath.absolutePath)) {
-				// SQLite opens its -wal/-shm sidecars itself, so a contained read runs whole in the host.
-				return (
-					containedFileAccess()?.request({ op: "sqlite.read", target: sqlitePath }) ??
-					readSqlite(sqlitePath, signal)
-				);
+				return readSqliteContained(sqlitePath, signal);
 			}
 			// local:// locates backing files without its URL query;
 			// restore it only for JSON reads, leaving other schemes' query semantics alone.
@@ -2828,7 +2832,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			if (looksBinary) {
 				// A database without a `.db`/`.sqlite` name (`state.vscdb`, Chrome's `History`) lists its tables.
 				if (parsed.kind === "none" && (await isSqliteFile(absolutePath))) {
-					return readSqlite({ absolutePath, sqliteSubPath: "", queryString: "", suffixResolution }, signal);
+					return readSqliteContained(
+						{ absolutePath, sqliteSubPath: "", queryString: "", suffixResolution },
+						signal,
+					);
 				}
 				return toolResult<ReadToolDetails>({ resolvedPath: renderAbsolutePath, suffixResolution })
 					.text(
@@ -3598,12 +3605,15 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			// Bytes take the file pipeline under the URL's identity: images and documents by their
 			// content and type, anything else as a binary file (`:raw` reads it verbatim).
 			const backing = await writeResourceBackingFile(url, resource.content, resource.contentType);
-			const result = await this.#readFilesystemPath(backing, {
-				located: { ...target, path: backing },
-				question,
-				signal,
-				toolContext,
-			});
+			// The backing file is omp's own copy of the resolved bytes: read it outside the contained call.
+			const result = await outsideContainedFileAccess(() =>
+				this.#readFilesystemPath(backing, {
+					located: { ...target, path: backing },
+					question,
+					signal,
+					toolContext,
+				}),
+			);
 			const details: ReadToolDetails = result.details ?? {};
 			details.meta = { ...details.meta, source: { type: "internal", value: url } };
 			return { ...result, details };

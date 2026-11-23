@@ -244,14 +244,17 @@ export function onSandboxHostBlocked(listener: (host: string, at: number) => voi
 	};
 }
 
-/** Allows `host` for this realm; `always` also appends it to the global `sandbox.network.allowedHosts`. */
+/**
+ * Allows `host` for this realm; `always` also appends it to the global `sandbox.network.allowedHosts`.
+ * The allowlist write goes first: a refused write leaves the session grants and blocked log untouched.
+ */
 export function grantHostIn(settings: Settings, host: string, scope: "session" | "always"): void {
-	sessionGrants.add(host);
-	// A grant clears the record; a host the proxy still refuses (resolves to loopback) shows up again.
-	blockedLog.delete(host);
 	// A member write to the global layer only: copying entries of other layers (project, `--config`
 	// overlay, runtime) into global config would loosen it.
 	if (scope === "always") cfgSandboxAllowedHosts.setMember(settings, host, { member: true });
+	sessionGrants.add(host);
+	// A grant clears the record; a host the proxy still refuses (resolves to loopback) shows up again.
+	blockedLog.delete(host);
 	grantsChanged();
 }
 

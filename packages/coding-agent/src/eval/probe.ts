@@ -75,6 +75,11 @@ export async function awaitBoundedProbe(
 	bound: number,
 	signal?: AbortSignal,
 ): Promise<BoundedProbeResult> {
+	// Aborted while the caller was still spawning: kill now instead of waiting out `bound`.
+	if (signal?.aborted) {
+		kill();
+		return { exitCode: null, timedOut: false, aborted: true };
+	}
 	const killed = Promise.withResolvers<null>();
 	let timedOut = false;
 	let aborted = false;

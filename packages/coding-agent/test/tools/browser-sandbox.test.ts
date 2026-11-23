@@ -20,7 +20,12 @@ import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { buildHeadlessLaunchArgs } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { resolveInitScriptSources } from "@oh-my-pi/pi-coding-agent/tools/browser/open-options";
 import { type BrowserHandle, browserKey } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
-import { chromiumSandbox, tabExecTarget } from "@oh-my-pi/pi-coding-agent/tools/browser/sandbox";
+import {
+	browserCallSubjects,
+	chromiumSandbox,
+	isHeadedChromium,
+	tabExecTarget,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/sandbox";
 import { cfgBrowserWebKit, cfgBrowserWebKitPath } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
 import { getTab, releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { isRecord, TempDir } from "@oh-my-pi/pi-utils";
@@ -126,6 +131,90 @@ describe("browser sandbox declarations", () => {
 		expect(call({ method: "id", args: [1] }, { method: "evaluate", args: ["el => el.id"] })).toEqual(hostCode);
 		expect(call({ method: "frame", args: ["#f"] }, { method: "evaluate", args: ["document.title"] })).toEqual([]);
 		expect(call({ method: "evaluate", args: ["document.title"] })).toEqual([]);
+	});
+
+	it("declares the contact sheet beside a recording's destination", () => {
+		const call = (method: string) => subjects({ action: "call", chain: [{ method, args: ["rec/out.mp4"] }] });
+		for (const method of ["recordStart", "recordRestart"]) {
+			expect(call(method)).toEqual([
+				{ kind: "write", target: path.join(workspace, "rec", "out.mp4") },
+				{ kind: "write", target: path.join(workspace, "rec", "out.mp4.contact.png") },
+			]);
+		}
+		// A non-string destination names nothing.
+		expect(subjects({ action: "call", chain: [{ method: "recordStart", args: [{}] }] })).toEqual([]);
+	});
+
+	it("declares an exec subject for clipboard operations of a headed Chromium only", () => {
+		const clipboard = [{ kind: "exec" as const, target: "browser:clipboard" }];
+		for (const method of ["clipboardRead", "clipboardWrite", "clipboardCopy", "clipboardPaste"]) {
+			const call = { action: "call" as const, chain: [{ method, args: [] }] };
+			expect(browserCallSubjects(call, workspace, true)).toEqual(clipboard);
+			expect(browserCallSubjects(call, workspace, false)).toEqual([]);
+			expect(browserCallSubjects(call, workspace)).toEqual([]);
+		}
+		// Other methods never declare it, headed or not.
+		expect(
+			browserCallSubjects({ action: "call", chain: [{ method: "click", args: ["#a"] }] }, workspace, true),
+		).toEqual([]);
+	});
+
+	it("declares the clipboard exec subject for a copy/cut/paste key pressed in a headed Chromium only", () => {
+		const clipboard = [{ kind: "exec" as const, target: "browser:clipboard" }];
+		const tabCall = (method: string, ...args: unknown[]) => ({
+			action: "call" as const,
+			chain: [{ method, args }],
+		});
+		const elementPress = (key: string) => ({
+			action: "call" as const,
+			chain: [
+				{ method: "id", args: [3] },
+				{ method: "press", args: [key] },
+			],
+		});
+		const shortcuts = ["Control+v", "Meta+C", "Control+x", "Shift+Insert", "insert", "v", "KeyV", "Control+KeyX"];
+		for (const key of shortcuts) {
+			for (const call of [tabCall("press", key), tabCall("keyDown", key), elementPress(key)]) {
+				expect(browserCallSubjects(call, workspace, true)).toEqual(clipboard);
+				expect(browserCallSubjects(call, workspace, false)).toEqual([]);
+			}
+		}
+		// Other keys, and a non-string key, declare nothing even headed.
+		for (const key of ["Enter", "Control+a", "Tab", "b", "Escape", "Control+Shift+K"]) {
+			expect(browserCallSubjects(tabCall("press", key), workspace, true)).toEqual([]);
+			expect(browserCallSubjects(tabCall("keyDown", key), workspace, true)).toEqual([]);
+		}
+		expect(browserCallSubjects(tabCall("press", 86), workspace, true)).toEqual([]);
+		// `press(selector, key)` names the key second, an element's `press(key, options)` first: a clipboard
+		// key in either string argument gates the call (a selector that looks like one over-declares).
+		const elementPressWith = (...args: unknown[]) => ({
+			action: "call" as const,
+			chain: [
+				{ method: "id", args: [3] },
+				{ method: "press", args },
+			],
+		});
+		const framePress = (...args: unknown[]) => ({
+			action: "call" as const,
+			chain: [
+				{ method: "frame", args: ["iframe"] },
+				{ method: "press", args },
+			],
+		});
+		for (const key of ["Control+v", "Shift+Insert"]) {
+			for (const call of [tabCall("press", "#q", key), framePress("#q", key), elementPressWith(key, "Enter")]) {
+				expect(browserCallSubjects(call, workspace, true)).toEqual(clipboard);
+				expect(browserCallSubjects(call, workspace, false)).toEqual([]);
+			}
+		}
+		expect(browserCallSubjects(tabCall("press", "#q", "Enter"), workspace, true)).toEqual([]);
+	});
+
+	it("tells a headed omp Chromium from a headless one and from other browsers", () => {
+		const tab = (kind: BrowserHandle["kind"]) => ({ kind }) as BrowserHandle;
+		expect(isHeadedChromium(tab({ kind: "headless", headless: false }))).toBe(true);
+		expect(isHeadedChromium(tab({ kind: "headless", headless: true }))).toBe(false);
+		expect(isHeadedChromium(tab({ kind: "connected", cdpUrl: "http://127.0.0.1:9222" }))).toBe(false);
 	});
 
 	it("declares omp's WebKit host when asked for by name, installed or not, and never picks it itself", () => {

@@ -66,6 +66,7 @@ import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { CACHE_WARMING_MODES } from "../../session/cache-warmer";
 import { findMostRecentNonEmptySession, findRecentSessionContinuation } from "../../session/session-listing";
 import { probeSessionLeases } from "../../session/session-storage";
+import { SandboxRuntime } from "../../sandbox/runtime";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
@@ -1579,6 +1580,8 @@ export interface RpcModeOptions {
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
  */
 export async function runRpcMode(session: AgentSession, options: RpcModeOptions = {}): Promise<never> {
+	// This runner is the RPC client's `sandbox_request` host; set here so every embedder gets it, not only the CLI.
+	SandboxRuntime.setAccessPromptHost("rpc");
 	const modelPicker = new RpcModelPicker(session);
 	const {
 		setToolUIContext,
@@ -1588,6 +1591,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		createLiveSession,
 		createDictationController,
 	} = options;
+	// A session built before the host was declared left `sandbox_request` out; re-resolve its gated tools.
+	await session.reconcileBuiltinTools({ refreshPrompt: false });
 	// Signal to RPC clients that the server is ready to accept commands
 	// Suppress terminal notifications: they write \x07 (BEL) or OSC sequences directly to
 	// process.stdout with no newline, which the reader merges with the next JSON line and

@@ -20,6 +20,7 @@ import {
 	containedFileAccess,
 	mutateFile,
 	openReadableCopy,
+	readFileBytes,
 	withContainedFileAccess,
 } from "@oh-my-pi/pi-coding-agent/sandbox/file-access";
 import { SandboxRuntime, SandboxUnavailableError } from "@oh-my-pi/pi-coding-agent/sandbox/runtime";
@@ -118,6 +119,36 @@ describe("openReadableCopy", () => {
 });
 
 describe.skipIf(!SANDBOX_BACKEND_PRESENT || !CONTAINED_SOURCE_RUNS)("contained file access", () => {
+	it("reads a regular file through a workspace symlink", async () => {
+		fs.writeFileSync(path.join(workspace, "real.txt"), "payload");
+		fs.symlinkSync("real.txt", path.join(workspace, "link.txt"));
+		expect((await contained(() => readFileBytes(path.join(workspace, "link.txt")))).toString()).toBe("payload");
+	});
+
+	it.skipIf(process.platform === "win32")("refuses to read a device behind a workspace symlink", async () => {
+		fs.symlinkSync("/dev/null", path.join(workspace, "device"));
+		const error = await failure(contained(() => readFileBytes(path.join(workspace, "device"))));
+		expect((error as NodeJS.ErrnoException | undefined)?.code).toBe("EINVAL");
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"refuses to read a FIFO without waiting for a writer",
+		async () => {
+			const fifo = path.join(workspace, "pipe");
+			expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+			// No writer: a blocking open in the host (`file.identify`) or in omp would hang past the timeout.
+			const error = await failure(contained(() => readFileBytes(fifo)));
+			expect((error as NodeJS.ErrnoException | undefined)?.code).toBe("EINVAL");
+		},
+		15_000,
+	);
+
+	it("refuses to read a directory as a file", async () => {
+		fs.mkdirSync(path.join(workspace, "folder"));
+		const error = await failure(contained(() => readFileBytes(path.join(workspace, "folder"))));
+		expect((error as NodeJS.ErrnoException | undefined)?.code).toBe("EISDIR");
+	});
+
 	it("refuses a write through a workspace symlink that leads outside", async () => {
 		// Called on the tool directly, so omp's path check never runs: the container must refuse it.
 		fs.symlinkSync(outside, path.join(workspace, "link"));

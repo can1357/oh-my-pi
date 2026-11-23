@@ -14,7 +14,7 @@ import { sandboxSupport } from "@oh-my-pi/pi-natives";
 import { isRecord, LineTooLongError, logger, Snowflake, settleWithin, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { JS_EVAL_STDIO_WORKER_ARG } from "../../cli/worker-selectors";
 import { sessionSandboxWritableRoots } from "../../internal-urls/context";
-import { containedEnv } from "../../sandbox/env";
+import { containedProcessEnv } from "../../sandbox/env";
 import { EVAL_EGRESS_SCOPE, SandboxRuntime } from "../../sandbox/runtime";
 import type { SandboxNetworkMode } from "../../sandbox/types";
 import type { PipedChild } from "../../subprocess/piped-child";
@@ -1308,7 +1308,7 @@ async function spawnContainedJsProcess(
 	const child = await sandbox.spawn({
 		argv: workerFactories.containedArgv ?? [...resolveCliEntryCmd(), JS_EVAL_STDIO_WORKER_ARG],
 		cwd: options.cwd,
-		env: containedEnv(workerEnvFromParent()),
+		env: containedProcessEnv(sandbox, workerEnvFromParent(), undefined, options.network),
 		extraRead: options.packageRoot ? [options.packageRoot] : undefined,
 		extraWrite: options.extraWrite,
 		network: options.network,

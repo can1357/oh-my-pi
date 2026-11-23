@@ -8,8 +8,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
-import { $env, $whichAll, directoryExists, getPythonEnvDir } from "@oh-my-pi/pi-utils";
+import { $env, $whichAll, directoryExists, getDotenvEnvValues, getPythonEnvDir } from "@oh-my-pi/pi-utils";
 import { containedEnv } from "../../sandbox/env";
+import { isFilesystemRoot, isWithin } from "../../sandbox/platform";
 import type { SandboxRuntime } from "../../sandbox/runtime";
 import { awaitBoundedProbe, type BoundedProbeResult, type BoundedProbeRunner, probeBound } from "../probe";
 
@@ -289,19 +290,65 @@ export function resolvePythonRuntime(cwd: string, baseEnv: Record<string, string
 
 /**
  * Directories a contained Python process must read beyond the configured read roots: the staged runner
- * script (when there is one), the virtual environment, and the real interpreter's installation root
- * when recognisable, else its directory (never the symlink's own parent, which can be `~/.local` or
- * `/opt/homebrew`).
+ * script's directory (when there is one, taken as given: omp stages it), the virtual environment, and
+ * the real interpreter's installation root when recognisable, else its directory (never the symlink's
+ * own parent, which can be `~/.local` or `/opt/homebrew`).
+ *
+ * The virtual environment and interpreter roots are symlink-resolved and never the home directory, an
+ * ancestor of it or the filesystem root: a workspace entry such as `.venv -> $HOME` must not mint a
+ * grant over home. A virtual environment the workspace controls (one lying in `workspace`, or named by
+ * its `.env` files) that resolves outside the workspace is skipped too: a link or setting the workspace
+ * controls must not widen the read scope. The interpreter may live anywhere, as a venv's `bin/python`
+ * normally links to a system one. `workspace` is the sandbox's realpath'd workspace.
  */
-export async function pythonReadRoots(runtime: PythonRuntime, scriptPath?: string): Promise<string[]> {
+export async function pythonReadRoots(
+	runtime: PythonRuntime,
+	scriptPath: string | undefined,
+	workspace: string,
+): Promise<string[]> {
 	const roots = scriptPath ? [path.dirname(scriptPath)] : [];
-	if (runtime.venvPath) roots.push(runtime.venvPath);
+	const venvRoot = runtime.venvPath ? await venvReadRoot(runtime.venvPath, workspace) : undefined;
+	if (venvRoot) roots.push(venvRoot);
 	try {
-		roots.push(await interpreterReadRoot(await fs.promises.realpath(runtime.pythonPath)));
+		const exeDir = await interpreterReadRoot(await fs.promises.realpath(runtime.pythonPath));
+		if (!isFilesystemRoot(exeDir, process.platform) && !(await containsHome(exeDir))) roots.push(exeDir);
 	} catch {
 		// Unresolvable interpreter: the spawn reports it.
 	}
 	return roots;
+}
+
+/**
+ * `dir` symlink-resolved, or `undefined` when it cannot be trusted as a read root: unresolvable
+ * (missing or dangling), the filesystem root, or the home directory or an ancestor of it.
+ */
+export async function resolvedReadRoot(dir: string): Promise<string | undefined> {
+	let resolved: string;
+	try {
+		resolved = await fs.promises.realpath(dir);
+	} catch {
+		return undefined;
+	}
+	return isFilesystemRoot(resolved, process.platform) || (await containsHome(resolved)) ? undefined : resolved;
+}
+
+/**
+ * The resolved virtual-environment directory ({@link resolvedReadRoot}), or `undefined` when it cannot
+ * be trusted as a read root, also when the workspace controls it (it lies in `workspace` or a `.env`
+ * file there names it) and it resolves outside the workspace.
+ */
+async function venvReadRoot(venvPath: string, workspace: string): Promise<string | undefined> {
+	const resolved = await resolvedReadRoot(venvPath);
+	if (!resolved) return undefined;
+	const base = path.resolve(workspace);
+	const resolvedWorkspace = await fs.promises.realpath(base).catch(() => base);
+	if (isWithin(resolved, resolvedWorkspace, process.platform)) return resolved;
+	const lexical = path.resolve(base, venvPath);
+	const workspaceControlled =
+		isWithin(lexical, base, process.platform) ||
+		isWithin(lexical, resolvedWorkspace, process.platform) ||
+		getDotenvEnvValues(base).includes(venvPath);
+	return workspaceControlled ? undefined : resolved;
 }
 
 /**
@@ -378,6 +425,46 @@ async function containsHome(dir: string): Promise<boolean> {
 	});
 }
 
+/** Probe output kept before its pipe is cancelled. */
+const PROBE_OUTPUT_LIMIT_BYTES = 64 * 1024;
+
+/** A {@link drainBounded} read in progress. */
+export interface BoundedDrain {
+	/** Settles once the stream ended, failed, or `limit` bytes arrived and it was cancelled. */
+	done: Promise<void>;
+	/** The bytes read so far, at most `limit`. */
+	bytes(): Uint8Array;
+}
+
+/**
+ * Read `stream` until `limit` bytes arrived or it ends, then cancel it, so a noisy contained process can
+ * neither fill the pipe and stall nor grow host memory. The bytes read are kept (at most `limit`) and
+ * readable before the stream ends, so a caller can stop waiting on a pipe a surviving grandchild holds
+ * open. Read errors end the drain silently.
+ */
+export function drainBounded(stream: ReadableStream<Uint8Array>, limit = PROBE_OUTPUT_LIMIT_BYTES): BoundedDrain {
+	const chunks: Uint8Array[] = [];
+	let received = 0;
+	const done = (async () => {
+		const reader = stream.getReader();
+		try {
+			while (received < limit) {
+				const { done, value } = await reader.read();
+				if (done) return;
+				const kept = value.byteLength > limit - received ? value.subarray(0, limit - received) : value;
+				chunks.push(kept);
+				received += kept.byteLength;
+			}
+			await reader.cancel();
+		} catch {
+			// A broken pipe ends the output; what arrived is kept.
+		} finally {
+			reader.releaseLock();
+		}
+	})();
+	return { done, bytes: () => Buffer.concat(chunks) };
+}
+
 /**
  * Run an interpreter probe inside `sandbox` with no network and `runtime`'s roots readable, so a
  * workspace-controlled interpreter never runs on the host. Same bound/abort/result semantics as
@@ -400,12 +487,12 @@ async function runContainedProbe(
 		argv: command,
 		cwd,
 		env: containedEnv(env),
-		extraRead: runtime ? await pythonReadRoots(runtime) : undefined,
+		extraRead: runtime ? await pythonReadRoots(runtime, undefined, sandbox.workspace) : undefined,
 		network: "deny",
 	});
 	child.stdin.end();
-	void new Response(child.stdout).arrayBuffer().catch(() => undefined);
-	void new Response(child.stderr).arrayBuffer().catch(() => undefined);
+	drainBounded(child.stdout);
+	drainBounded(child.stderr);
 	return awaitBoundedProbe(child.exited, () => child.kill(), probeBound(timeoutMs), signal);
 }
 

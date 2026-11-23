@@ -264,6 +264,73 @@ describe("sandbox mutations", () => {
 		const revoked = await stateOf(instance, { type: "revoke_sandbox_host", host: "session.test" });
 		expect(revoked.sessionHosts).toEqual([]);
 	});
+
+	it("canonicalizes host names on grant and revoke", async () => {
+		const settings = await init({ global: { network: { allowedHosts: [] } } });
+		const instance = controller();
+		const session = await stateOf(instance, {
+			type: "grant_sandbox_host",
+			host: "  Session.TEST. ",
+			scope: "session",
+		});
+		expect(session.sessionHosts).toEqual(["session.test"]);
+		const always = await stateOf(instance, { type: "grant_sandbox_host", host: "ALWAYS.Test", scope: "always" });
+		expect(always.settings.allowedHosts).toEqual(["always.test"]);
+		expect(cfgSandboxAllowedHosts.get(settings.grantAuthority())).toEqual(["always.test"]);
+		const revoked = await stateOf(instance, { type: "revoke_sandbox_host", host: "SESSION.test" });
+		expect(revoked.sessionHosts).toEqual([]);
+	});
+
+	it("refuses a grant that is not a bare host, or a host-local name for the session", async () => {
+		const settings = await init({ global: { network: { allowedHosts: [] } } });
+		const instance = controller();
+		const hosts = [
+			"*.corp.example",
+			"https://x.test",
+			"x.test:443",
+			"x.test/path",
+			"user@x.test",
+			"x\u0000.test",
+			"x\n.test",
+			"has space.test",
+		];
+		for (const host of hosts) {
+			for (const scope of ["session", "always"] as const) {
+				const error = await refusal(instance, { type: "grant_sandbox_host", host, scope });
+				expect([JSON.stringify(host), scope, error.code]).toEqual([JSON.stringify(host), scope, "invalid_value"]);
+			}
+		}
+		// An IP literal or local name reaches host-local addresses: only a verbatim allowlist entry may allow it.
+		for (const host of ["127.0.0.1", "10.0.0.5", "[::1]", "localhost", "app.localhost"]) {
+			const error = await refusal(instance, { type: "grant_sandbox_host", host, scope: "session" });
+			expect([host, error.code]).toEqual([host, "invalid_value"]);
+		}
+		const revoke = await refusal(instance, { type: "revoke_sandbox_host", host: "*.corp.example" });
+		expect(revoke.code).toBe("invalid_value");
+		const after = await stateOf(instance, { type: "get_sandbox" });
+		expect(after.sessionHosts).toEqual([]);
+		expect(cfgSandboxAllowedHosts.get(settings.grantAuthority())).toEqual([]);
+		// The verbatim allowlist entry stays available for these.
+		const always = await stateOf(instance, { type: "grant_sandbox_host", host: "127.0.0.1", scope: "always" });
+		expect(always.settings.allowedHosts).toEqual(["127.0.0.1"]);
+	});
+
+	it("leaves the session grants unchanged when the always write fails", async () => {
+		await init({ global: { network: { allowedHosts: [] } } });
+		const instance = controller();
+		const failing = vi.spyOn(cfgSandboxAllowedHosts, "setMember").mockImplementation(() => {
+			throw new Error("disk full");
+		});
+		try {
+			const error = await refusal(instance, { type: "grant_sandbox_host", host: "x.test", scope: "always" });
+			expect(error).toMatchObject({ code: "invalid_value", message: "disk full" });
+		} finally {
+			failing.mockRestore();
+		}
+		const after = await stateOf(instance, { type: "get_sandbox" });
+		expect(after.sessionHosts).toEqual([]);
+		expect(after.settings.allowedHosts).toEqual([]);
+	});
 });
 
 describe("sandbox_locked", () => {
@@ -325,6 +392,27 @@ describe("sandbox_locked", () => {
 		expect(await answer).toBe(true);
 		cfgSandboxAllowedHosts.clearOverride(settings);
 		expect(cfgSandboxAllowedHosts.get(settings)).toEqual([]);
+	});
+
+	it("offers no always on a host request while project config narrows the allowlist, and refuses it", async () => {
+		const settings = await init({
+			global: { enabled: true, network: { allowedHosts: ["kept.test", "dropped.test"] } },
+			project: { network: { allowedHosts: ["kept.test"] } },
+		});
+		const instance = controller();
+		await instance.start();
+		const hooks = await proxyHooks();
+		await instance.handle({ type: "set_sandbox_host_prompts", enabled: true });
+		const request = nextFrame("sandbox_host_request");
+		const answer = hooks.decide?.("asked.test", 443);
+		const frame = await request;
+		expect(frame.canAlways).toBe(false);
+		const always = await refusal(instance, { type: "respond_sandbox_host", requestId: frame.id, decision: "always" });
+		expect(always.code).toBe("sandbox_locked");
+		// Still pending: a session answer settles it, and nothing reached the global allowlist.
+		await instance.handle({ type: "respond_sandbox_host", requestId: frame.id, decision: "session" });
+		expect(await answer).toBe(true);
+		expect(cfgSandboxAllowedHosts.get(settings.grantAuthority())).toEqual(["kept.test", "dropped.test"]);
 	});
 });
 
@@ -575,7 +663,7 @@ describe("sandbox host prompts", () => {
 			const answer = decide(host);
 			const frame = await request;
 			lastId = frame.id;
-			expect(frame).toMatchObject({ host, port: 443, timeoutMs: 120_000 });
+			expect(frame).toMatchObject({ host, port: 443, timeoutMs: 120_000, canAlways: true });
 			expect(await instance.handle({ type: "respond_sandbox_host", requestId: frame.id, decision })).toBeUndefined();
 			answers[decision] = await answer;
 		}
@@ -619,6 +707,38 @@ describe("sandbox host prompts", () => {
 		const first = hooks.decide?.("twice.test", 443);
 		const frame = await request;
 		const second = hooks.decide?.("twice.test", 8443);
+		await settle();
+		expect(framesOf("sandbox_host_request")).toHaveLength(1);
+		await instance.handle({ type: "respond_sandbox_host", requestId: frame.id, decision: "once" });
+		expect([await first, await second]).toEqual([true, true]);
+	});
+
+	it("deny without a frame when prompts are turned off while the ask loads settings", async () => {
+		await init({ global: { enabled: true, network: { allowedHosts: [] } } });
+		// Short: a request registered by mistake would otherwise hold the answer for 120 s.
+		const instance = controller({ hostRequestTimeoutMs: 50 });
+		await instance.start();
+		const hooks = await proxyHooks();
+		await instance.handle({ type: "set_sandbox_host_prompts", enabled: true });
+		// `decide` reaches the approver synchronously, which then waits on the settings.
+		const answer = hooks.decide?.("mid.test", 443);
+		await instance.handle({ type: "set_sandbox_host_prompts", enabled: false });
+		expect(await answer).toBe(false);
+		await settle();
+		expect(framesOf("sandbox_host_request")).toEqual([]);
+		expect(framesOf("sandbox_host_request_cancelled")).toEqual([]);
+	});
+
+	it("ask once for two concurrent asks of one host that both wait on the settings", async () => {
+		await init({ global: { enabled: true, network: { allowedHosts: [] } } });
+		const instance = controller();
+		await instance.start();
+		const hooks = await proxyHooks();
+		await instance.handle({ type: "set_sandbox_host_prompts", enabled: true });
+		const request = nextFrame("sandbox_host_request");
+		const first = hooks.decide?.("dup.test", 443);
+		const second = hooks.decide?.("dup.test", 8443);
+		const frame = await request;
 		await settle();
 		expect(framesOf("sandbox_host_request")).toHaveLength(1);
 		await instance.handle({ type: "respond_sandbox_host", requestId: frame.id, decision: "once" });

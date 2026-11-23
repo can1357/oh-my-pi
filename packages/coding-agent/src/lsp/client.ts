@@ -124,9 +124,13 @@ const fileOperationLocks = new Map<string, Promise<void>>();
  */
 const pendingDiskWrites = new Map<string, number>();
 
-/** Negative cache of recent init failures so a broken server fails fast instead of re-spawning per call. */
+/**
+ * Negative cache of recent init failures so a broken server fails fast instead of re-spawning per call.
+ * Each failure records the containment it happened under: a failure under another containment (a
+ * `sandbox_request` grant changed the fingerprint) says nothing about a server started under this one.
+ */
 const INIT_FAILURE_BACKOFF_MS = 3 * 60 * 1000;
-const initFailures = new Map<string, { at: number; message: string }>();
+const initFailures = new Map<string, { at: number; message: string; containment: string }>();
 const READER_EXIT_GRACE_MS = 100;
 
 // Idle timeout configuration (disabled by default)
@@ -1814,11 +1818,11 @@ export async function getOrCreateClient(
 		reloadAwaited = true;
 	}
 
-	// Fail fast on a recent deterministic init failure instead of re-spawning
-	// a broken server (and paying its full init wait) on every call.
+	// Fail fast on a recent deterministic init failure under the same containment instead of
+	// re-spawning a broken server (and paying its full init wait) on every call.
 	const recentFailure = initFailures.get(key);
 	if (recentFailure) {
-		if (Date.now() - recentFailure.at < INIT_FAILURE_BACKOFF_MS) {
+		if (recentFailure.containment === containment && Date.now() - recentFailure.at < INIT_FAILURE_BACKOFF_MS) {
 			throw new Error(`LSP server ${config.command} failed to initialize recently: ${recentFailure.message}`);
 		}
 		initFailures.delete(key);
@@ -1993,7 +1997,7 @@ export async function getOrCreateClient(
 			}
 			// Short warmup/writethrough budgets don't prove the server is broken.
 			if (initTimeoutMs === undefined || !startup.signal.aborted || startupMs === LSP_STARTUP_MAX_MS) {
-				initFailures.set(key, { at: Date.now(), message });
+				initFailures.set(key, { at: Date.now(), message, containment });
 			}
 			throw new Error(message, { cause: err });
 		} finally {

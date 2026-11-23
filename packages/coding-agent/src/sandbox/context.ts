@@ -8,9 +8,8 @@ import * as path from "node:path";
 import * as url from "node:url";
 import { sandboxDiscoverPaths, type VcsGitRepoInfo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { expandTilde, getNativesDir, logger, resolveEquivalentPath } from "@oh-my-pi/pi-utils";
+import { expandTilde, filterChildShellEnv, getNativesDir, logger, resolveEquivalentPath } from "@oh-my-pi/pi-utils";
 import { getPackageDir } from "../config";
-import { definedEnv } from "./env";
 import {
 	compactPaths,
 	homebrewCellar,
@@ -545,12 +544,13 @@ function checkoutPointer(gitDir: string, workspace: string): string | undefined 
  * {@link BaseContext.protectedPaths}: paths inside the workspace or its git metadata that omp loads
  * or runs outside the sandbox, so contained processes must not write them (existing or not): the
  * project config entries at the workspace root; the workspace's `.git` entry when it is a file (a
- * gitdir pointer), or when the workspace has no repository (missing: a contained `git init` creates
- * one host git would run); in each git dir {@link PROTECTED_GIT_ENTRIES}, and the existing ones of
- * every submodule git dir found below its `modules/`, plus the `.git` pointer file of that
- * submodule's checkout (by its `core.worktree`) inside the workspace; the existing
- * {@link PROTECTED_WORKTREE_ENTRIES} of every linked worktree of the common dir. Lexical paths: the
- * runtime adds what each resolves to at policy time.
+ * gitdir pointer), or when the workspace has no repository or lies below its repository's root
+ * (missing: a contained `git init` creates one host git would run); in each git dir and every
+ * submodule git dir found below its `modules/` {@link PROTECTED_GIT_ENTRIES}, plus the `.git`
+ * pointer file of that submodule's checkout (by its `core.worktree`) inside the workspace; the
+ * {@link PROTECTED_WORKTREE_ENTRIES} of every linked worktree of the common dir. Missing entries
+ * stay listed: the runtime watches them and ledgers one a contained process creates. Lexical
+ * paths: the runtime adds what each resolves to at policy time.
  * {@link BaseContext.linkWatchedPaths}: `worktrees` of the common dir and of every submodule git dir
  * the same walk finds (lexical, under the realpath'd git dirs).
  */
@@ -560,8 +560,11 @@ function guardedPaths(
 ): Pick<BaseContext, "protectedPaths" | "linkWatchedPaths"> {
 	const entries = PROTECTED_PROJECT_ENTRIES.map(entry => path.join(workspace, entry));
 	const linkWatched: string[] = [];
-	const gitEntry = info?.gitEntryPath ?? path.join(workspace, ".git");
+	const workspaceGit = path.join(workspace, ".git");
+	const gitEntry = info?.gitEntryPath ?? workspaceGit;
 	if (!info || fs.lstatSync(gitEntry, { throwIfNoEntry: false })?.isFile()) entries.push(gitEntry);
+	const resolve = (entry: string): string => resolveEquivalentPath(entry, { throughMissing: true });
+	if (info && resolve(gitEntry) !== resolve(workspaceGit)) entries.push(workspaceGit);
 	const gitDirs = new Set(
 		[info?.gitDir, info?.commonDir].flatMap(dir => (dir === undefined ? [] : (realpathIfExists(dir) ?? []))),
 	);
@@ -571,10 +574,7 @@ function guardedPaths(
 		for (const entry of PROTECTED_GIT_ENTRIES) entries.push(path.join(dir, entry));
 		for (const base of submodules) {
 			linkWatched.push(path.join(base, "worktrees"));
-			for (const entry of PROTECTED_GIT_ENTRIES) {
-				const target = path.join(base, entry);
-				if (fs.existsSync(target)) entries.push(target);
-			}
+			for (const entry of PROTECTED_GIT_ENTRIES) entries.push(path.join(base, entry));
 			const pointer = checkoutPointer(base, workspace);
 			if (pointer !== undefined) entries.push(pointer);
 		}
@@ -582,10 +582,7 @@ function guardedPaths(
 	const commonDir = info && realpathIfExists(info.commonDir);
 	if (commonDir) linkWatched.push(path.join(commonDir, "worktrees"));
 	for (const worktree of commonDir ? childDirs(path.join(commonDir, "worktrees")) : []) {
-		for (const entry of PROTECTED_WORKTREE_ENTRIES) {
-			const target = path.join(worktree, entry);
-			if (fs.existsSync(target)) entries.push(target);
-		}
+		for (const entry of PROTECTED_WORKTREE_ENTRIES) entries.push(path.join(worktree, entry));
 	}
 	return {
 		protectedPaths: [...new Set(entries.map(entry => path.resolve(entry)))],
@@ -613,7 +610,9 @@ export function gatherContext(workspace: string, tmpdir: string): BaseContext {
 	const platform = process.platform;
 	const home = resolveEquivalentPath(os.homedir());
 	const rootEntries = platform === "win32" ? [] : fs.readdirSync("/").map(name => path.posix.join("/", name));
-	const discovered = sandboxDiscoverPaths(definedEnv(process.env));
+	// The launch environment only: values from the workspace's `.env` files must not widen the policy.
+	const env = filterChildShellEnv(process.env, workspace);
+	const discovered = sandboxDiscoverPaths(env);
 	// What a contained omp (sandbox host, eval workers) must read to start; always readable.
 	const runtimePaths = compactPaths(
 		[path.dirname(process.execPath), nativeAddonDir(), sourceRoot()].filter((p): p is string => !!p),
@@ -621,7 +620,7 @@ export function gatherContext(workspace: string, tmpdir: string): BaseContext {
 	);
 	runtimePaths.push(getNativesDir());
 	const info = workspaceGitInfo(workspace);
-	const { PATH, XDG_CONFIG_HOME, GIT_CONFIG_GLOBAL } = process.env;
+	const { PATH, XDG_CONFIG_HOME, GIT_CONFIG_GLOBAL } = env;
 	const pathDirs = (PATH ?? "").split(path.delimiter).filter(entry => path.isAbsolute(entry));
 	let workspaceRead: string[] | undefined;
 	const probeWorkspaceRead = (): string[] => {
@@ -692,8 +691,9 @@ export function recreateMissingGrant(grant: string): void {
 
 /**
  * `policy` restricted to existing paths the user can access, each realpath'd (macOS `/tmp` →
- * `/private/tmp`), then compacted again; readable entries inside a writable one are dropped, and so
- * are those at or under a denied path (a mount-based backend would reopen it with the deeper entry).
+ * `/private/tmp`), then compacted again; writable entries at or under a denied path are dropped (a
+ * mount-based backend would reopen it with the deeper entry), and readable ones inside a writable
+ * one or at or under a denied path.
  *
  * The existing protected paths inside a writable root are carved out as read-only entries (the
  * backend's most-specific-path rule lets them win), except one a writable entry names exactly
@@ -709,9 +709,11 @@ export function recreateMissingGrant(grant: string): void {
  */
 export function materialize(policy: ResolvedFsPolicy, platform: NodeJS.Platform): ResolvedFsPolicy {
 	const { R_OK, W_OK } = fs.constants;
-	const writable = existingReal(policy.readwritePaths, R_OK | W_OK);
-	const roots = compactPaths(writable, platform);
 	const deniedPaths = compactPaths(existingReal(policy.deniedPaths), platform);
+	const writable = existingReal(policy.readwritePaths, R_OK | W_OK).filter(
+		entry => !deniedPaths.some(denied => isWithin(entry, denied, platform)),
+	);
+	const roots = compactPaths(writable, platform);
 	const readonlyPaths = compactPaths(existingReal(policy.readonlyPaths, R_OK), platform).filter(
 		entry =>
 			!roots.some(rw => isWithin(entry, rw, platform)) &&

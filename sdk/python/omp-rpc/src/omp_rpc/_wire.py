@@ -1784,6 +1784,8 @@ class SandboxHostRequestEvent:
     port: int
     timeout_ms: int
     """Unanswered for this long, the request is denied and cancelled."""
+    can_always: bool
+    """False when `allowedHosts` is locked (project config, env, overlay or session override): `always` is refused."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -3556,6 +3558,7 @@ def parse_sandbox_host_request_event(value: object, path: str = "SandboxHostRequ
         host=required(payload, "host", decode_str, path),
         port=required(payload, "port", decode_int, path),
         timeout_ms=required(payload, "timeoutMs", decode_int, path),
+        can_always=required(payload, "canAlways", decode_bool, path),
     )
 
 
@@ -4495,11 +4498,11 @@ class WireClient:
         params: dict[str, object] = {}
         return parse_sandbox_state(self._command("get_sandbox", params), "get_sandbox")
 
-    def set_sandbox_setting(self, setting: SandboxSettingId, value: bool | str | tuple[str, ...]) -> SandboxState:
+    def set_sandbox_setting(self, setting: SandboxSettingId, value: bool | str | Sequence[str]) -> SandboxState:
         """Write one sandbox setting to the global config (lists and scope replace the whole operator list); returns the new state."""
         params: dict[str, object] = {}
         params["setting"] = setting
-        params["value"] = value
+        params["value"] = list(value) if isinstance(value, Sequence) and not isinstance(value, str) else value
         return parse_sandbox_state(self._command("set_sandbox_setting", params), "set_sandbox_setting")
 
     def reset_sandbox_setting(self, setting: SandboxSettingId) -> SandboxState:

@@ -22,7 +22,7 @@ import { isAuthenticated, type ModelRegistry } from "../config/model-registry";
 import { settings } from "../config/settings";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "text" };
-import { readFileBytes, withContainedFileAccess } from "../sandbox/file-access";
+import { containedFileAccess, readFileBytes, withContainedFileAccess, withReadableFile } from "../sandbox/file-access";
 import { journalCompletion } from "../session/model-usage-journal";
 import { resolveConfiguredModelTarget } from "../session/role-models";
 import { saveImagesToTemp } from "../utils/image-temp";
@@ -93,15 +93,41 @@ function normalizeDataUrl(data: string): { data: string; mimeType?: string } {
 	return { data: match[2] ?? "", mimeType: match[1] };
 }
 
+/** The refusal of `imagePath`, a `kind` of file (or one the container would not name) that is not regular. */
+function notLoadableError(imagePath: string, kind = "FIFO, device or other special file"): Error {
+	return new Error(`Cannot load '${imagePath}': it is a ${kind}, not a regular file or directory.`);
+}
+
+function assertImageSize(size: number, imagePath: string): void {
+	if (size > MAX_IMAGE_SIZE) throw new Error(`Image file too large: ${imagePath}`);
+}
+
 async function loadImageFromPath(imagePath: string, cwd: string): Promise<{ data: string; mimeType: string }> {
 	const resolved = resolveReadPath(imagePath, cwd);
 	try {
-		const stat = await fs.stat(resolved);
-		const kind = specialFileKind(stat);
-		if (kind) throw new Error(`Cannot load '${imagePath}': it is a ${kind}, not a regular file or directory.`);
-		if (stat.size > MAX_IMAGE_SIZE) throw new Error(`Image file too large: ${imagePath}`);
-		const buffer = await readFileBytes(resolved);
-		if (buffer.length > MAX_IMAGE_SIZE) throw new Error(`Image file too large: ${imagePath}`);
+		let buffer: Buffer;
+		if (containedFileAccess()) {
+			// A path stat would run here, outside the container, and report the size and kind of a file
+			// it hides: the container opens the file first, and its handle is checked. The open already
+			// refuses what is not a regular file (`EINVAL`), so only the size is left to check.
+			try {
+				buffer = await withReadableFile(resolved, async handle => {
+					assertImageSize((await handle.stat()).size, imagePath);
+					return handle.readFile();
+				});
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "EINVAL") throw notLoadableError(imagePath);
+				throw error;
+			}
+		} else {
+			// Checked before the open: opening a FIFO or device would block.
+			const stat = await fs.stat(resolved);
+			const kind = specialFileKind(stat);
+			if (kind) throw notLoadableError(imagePath, kind);
+			assertImageSize(stat.size, imagePath);
+			buffer = await readFileBytes(resolved);
+		}
+		assertImageSize(buffer.length, imagePath);
 		const mimeType = parseImageMetadata(buffer)?.mimeType;
 		if (!mimeType) throw new Error(`Unsupported image type: ${imagePath}`);
 		return { data: buffer.toBase64(), mimeType };

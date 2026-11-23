@@ -854,9 +854,11 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	// Throws `SandboxUnavailableError` when the sandbox is required but no backend can provide it.
 	const sandbox =
 		workspace === undefined ? undefined : await SandboxRuntime.forScope(workspace, options?.sandboxScope ?? "bash");
-	// Sandbox switched off (or unavailable): the session's contained hosts are no longer used.
+	// Sandbox switched off (or unavailable): the caller's contained hosts in this workspace (its
+	// session's, or the anonymous pool's without one) are no longer used. The pool keys hosts by the
+	// runtime's pinned workspace, which `pinnedWorkspace` resolves without creating a runtime.
 	if (!sandbox && workspace !== undefined) {
-		releaseSandboxHosts(options?.sessionKey?.split(":async:")[0]);
+		releaseSandboxHosts(options?.sessionKey?.split(":async:")[0], SandboxRuntime.pinnedWorkspace(workspace));
 	}
 	const shellSettings = hostShellSettings(settings, sandbox !== undefined);
 	const baseShellConfig = shellSettings.getShellConfig();

@@ -37,7 +37,7 @@ function coreDir(candidate: string, platform: NodeJS.Platform): string | undefin
 }
 
 /** Binary Ninja's user folder: `$BN_USER_DIRECTORY`, else the per-platform default. */
-function userDir(host: BinjaHost): string {
+export function binjaUserDir(host: BinjaHost): string {
 	const override = host.env.BN_USER_DIRECTORY;
 	if (override) return override;
 	switch (host.platform) {
@@ -53,7 +53,7 @@ function userDir(host: BinjaHost): string {
 /** Install directory the UI recorded in the user folder's one-line `lastrun` file. */
 function lastRunDir(host: BinjaHost): string | undefined {
 	try {
-		return fs.readFileSync(path.join(userDir(host), "lastrun"), "utf8").trim() || undefined;
+		return fs.readFileSync(path.join(binjaUserDir(host), "lastrun"), "utf8").trim() || undefined;
 	} catch {
 		// No UI run recorded: headless runs do not write the file.
 		return undefined;

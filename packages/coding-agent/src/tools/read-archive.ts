@@ -426,14 +426,17 @@ export async function readArchive(
 			await using scratch = await TempDir.create("@omp-read-archive-image-");
 			const imagePath = scratch.join("member");
 			await Bun.write(imagePath, entry.bytes);
-			const result = await readImage({
-				readPath,
-				absolutePath: imagePath,
-				mimeType: imageMetadata.mimeType,
-				imageMetadata,
-				fileSize: entry.size,
-				signal,
-			});
+			// The scratch copy is omp's own, made from the verified member bytes: load it outside the contained call.
+			const result = await outsideContainedFileAccess(() =>
+				readImage({
+					readPath,
+					absolutePath: imagePath,
+					mimeType: imageMetadata.mimeType,
+					imageMetadata,
+					fileSize: entry.size,
+					signal,
+				}),
+			);
 			const memberPath = `${resolvedArchivePath.absolutePath}:${entry.path}`;
 			return toolResult<ReadToolDetails>({ ...result.details, ...details, resolvedPath: memberPath })
 				.content(result.content)

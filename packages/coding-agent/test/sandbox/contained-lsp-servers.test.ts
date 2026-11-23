@@ -32,7 +32,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/sandbox/settings";
 import * as natives from "@oh-my-pi/pi-natives";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { CONTAINED_SOURCE_RUNS, failure, SANDBOX_UNAVAILABLE } from "../helpers/sandbox-test-state";
+import { CONTAINED_SOURCE_RUNS, failure, SANDBOX_SUPPORTED, SANDBOX_UNAVAILABLE } from "../helpers/sandbox-test-state";
 import {
 	beginSettingsTest,
 	restoreEnvValue,
@@ -248,6 +248,25 @@ describe.skipIf(!posix)("language servers without an applying sandbox", () => {
 		expect(client.status).toBe("ready");
 		expect(readMarker("outside-write")).toBe("written");
 		expect(connectShared).toHaveBeenCalled();
+	});
+
+	it("backs off a server that failed to initialize under the same containment, but not once the containment changed", async () => {
+		const config = stubServer("fail");
+		const first = await failure(lspClient.getOrCreateClient(config, workspace));
+		expect(String(first)).toContain("stub server: refusing to start");
+
+		const repeated = await failure(lspClient.getOrCreateClient(config, workspace));
+		expect(String(repeated)).toContain("failed to initialize recently");
+
+		// A grant changes the sandbox fingerprint: the failure under the old containment no longer applies.
+		cfgSandboxEnabled.set(settings, true);
+		cfgSandboxFallback.set(settings, "warn");
+		SandboxRuntime.resetForTest(SANDBOX_SUPPORTED);
+		const contained = await lspClient.getOrCreateClient(config, workspace).then(
+			() => undefined,
+			error => error,
+		);
+		expect(String(contained)).not.toContain("failed to initialize recently");
 	});
 
 	it("run Biome, SwiftLint and the workspace checkers uncontained, as before, with the sandbox off", async () => {

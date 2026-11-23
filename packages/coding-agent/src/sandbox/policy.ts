@@ -5,7 +5,7 @@
  * {@link SandboxPolicyContext} the runtime gathers.
  */
 import { isIP } from "node:net";
-import { expandTilde, getAgentDbPath, getAgentDir, untilAborted } from "@oh-my-pi/pi-utils";
+import { expandTilde, getAgentDbPath, getAgentDir, getConfigRootDir, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Setting } from "../config/registry";
 import type { Settings } from "../config/settings";
 import { isHostLocalAddress, isPublicAddress } from "../utils/ip-address";
@@ -173,8 +173,9 @@ const PATH_TOKEN = new RegExp(`\\$\\{(${PATH_TOKEN_NAMES.join("|")})\\}`, "g");
 /**
  * Absolute path for a policy entry: a leading `~`, `~/…` or `~\…` (`expandTilde`; the settings
  * validator rejects `~name`, and `~\…` off Windows), `${home}`, `${workspace}`, `${tmp}`,
- * `${authDb}` (this process's `getAgentDbPath()`) and `${agentDir}` (its `getAgentDir()`) expand;
- * a relative result resolves against the workspace.
+ * `${authDb}` (this process's `getAgentDbPath()`), `${agentDir}` (its `getAgentDir()`) and
+ * `${configRoot}` (its `getConfigRootDir()`) expand; a relative result resolves against the
+ * workspace.
  */
 export function expandSandboxPath(
 	entry: string,
@@ -190,6 +191,8 @@ export function expandSandboxPath(
 				return ctx.tmpdir;
 			case "authDb":
 				return getAgentDbPath();
+			case "configRoot":
+				return getConfigRootDir();
 			default:
 				return getAgentDir();
 		}

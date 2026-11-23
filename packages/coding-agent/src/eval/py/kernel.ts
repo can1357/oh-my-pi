@@ -398,7 +398,7 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 					argv,
 					cwd: options.cwd,
 					env: containedEnv(runtime.env, kernelEnv),
-					extraRead: await pythonReadRoots(runtime, scriptPath),
+					extraRead: await pythonReadRoots(runtime, scriptPath, sandbox.workspace),
 					extraWrite: options.sandboxExtraWrite,
 					// Its own proxy port: an eval call owns the refusals of the kernel while it runs.
 					egressScope: EVAL_EGRESS_SCOPE,

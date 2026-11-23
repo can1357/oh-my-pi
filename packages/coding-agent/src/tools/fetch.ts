@@ -27,7 +27,7 @@ import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
 import { formatSandboxCallDenial } from "../sandbox/gate";
 import type { SandboxAccessDenial } from "../sandbox/runtime";
-import { containingSandbox } from "../sandbox/file-access";
+import { containingSandbox, outsideContainedFileAccess } from "../sandbox/file-access";
 import { ensureTool } from "../utils/tools-manager";
 import { decodeBody } from "../web/response-body";
 import { findFirecrawlApiKey, scrapeWithFirecrawl } from "../web/firecrawl";
@@ -2034,6 +2034,23 @@ export async function materializeReadUrlToFile(
 	const entry = await fetchReadUrl(session, params, signal, { toolName });
 	const contentPath = await materializeReadUrlContent(session, entry, params.raw ?? false);
 	return { path: contentPath, details: entry.details };
+}
+
+/**
+ * The files {@link materializeReadUrlToFile} wrote for one search call: omp's own temp files, holding
+ * only the response body, outside every container root, so a search of one runs in omp.
+ */
+export class MaterializedUrlFiles {
+	readonly #paths = new Set<string>();
+
+	add(file: string): void {
+		this.#paths.add(path.resolve(file));
+	}
+
+	/** `search()`, outside contained file access when `target` is one of these files. */
+	search<T>(target: string, search: () => T): T {
+		return this.#paths.has(path.resolve(target)) ? outsideContainedFileAccess(search) : search();
+	}
 }
 
 function buildUrlReadOutput(result: FetchRenderResult, content: string, raw: boolean): string {

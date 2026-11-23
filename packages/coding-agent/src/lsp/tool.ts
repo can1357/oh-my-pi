@@ -184,6 +184,11 @@ async function enumerateRenamePairs(
 	return { pairs, directory: true, exceeded };
 }
 
+/** A bare `rename_file` name renames in place (stays next to `source`); a name with a separator resolves against `cwd`. */
+function resolveRenameDest(source: string, newName: string, cwd: string): string {
+	return /[\\/]/.test(newName) ? resolveToCwd(newName, cwd) : path.join(path.dirname(source), newName);
+}
+
 function formatRenameStatPath(filePath: string, cwd: string): string {
 	const relative = formatPathRelativeToCwd(filePath, cwd);
 	// formatPathRelativeToCwd normalizes Windows separators. Shorten the
@@ -343,15 +348,21 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 	 */
 	readonly approvalRestrictionPaths = (args: unknown): readonly string[] | undefined => {
 		const params = args as Partial<LspParams> | null | undefined;
-		const named = [params?.file, params?.action === "rename_file" ? params.new_name : undefined];
 		const paths: string[] = [];
-		for (const entry of named) {
-			if (typeof entry !== "string" || entry.length === 0 || entry === "*") continue;
+		const add = (resolve: () => string): void => {
 			try {
-				paths.push(resolveToCwd(entry, this.session.cwd));
+				paths.push(resolve());
 			} catch {
 				// Not a local path.
 			}
+		};
+		const file = params?.file;
+		if (typeof file === "string" && file.length > 0 && file !== "*") {
+			add(() => resolveToCwd(file, this.session.cwd));
+		}
+		const newName = params?.action === "rename_file" ? params.new_name : undefined;
+		if (typeof file === "string" && file.length > 0 && typeof newName === "string" && newName.length > 0) {
+			add(() => resolveRenameDest(resolveToCwd(file, this.session.cwd), newName, this.session.cwd));
 		}
 		return paths;
 	};
@@ -711,10 +722,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			}
 
 			const source = resolveToCwd(file, this.session.cwd);
-			// A bare name renames in place: it stays next to the source.
-			const dest = /[\\/]/.test(new_name)
-				? resolveToCwd(new_name, this.session.cwd)
-				: path.join(path.dirname(source), new_name);
+			const dest = resolveRenameDest(source, new_name, this.session.cwd);
 
 			if (source === dest) {
 				return {

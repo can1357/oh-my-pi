@@ -11,7 +11,7 @@ const CR = 0x0d;
 // so one oversized frame does not pin its peak buffer for the stream's life.
 const CONCAT_SINK_RETAIN_BYTES = 1024 * 1024;
 
-/** Thrown by {@link readLines} once a line grows past its `maxLineBytes` without a line end. */
+/** Thrown by {@link readLines} for any line longer than its `maxLineBytes`, terminated or not. */
 export class LineTooLongError extends Error {
 	constructor(readonly maxLineBytes: number) {
 		super(`Line exceeds ${maxLineBytes} bytes`);
@@ -23,9 +23,10 @@ export class LineTooLongError extends Error {
  * Split a byte stream on LF boundaries.
  *
  * Every yielded line owns its bytes and remains unchanged after the generator
- * advances or drains. Line terminators are excluded. With `maxLineBytes`, a line
- * that grows past it without its LF throws {@link LineTooLongError} before the
- * overflowing chunk is buffered, so a peer cannot make the reader grow without bound.
+ * advances or drains. Line terminators are excluded. With `maxLineBytes`, any
+ * line longer than it, terminated or not, throws {@link LineTooLongError}; an
+ * unterminated overflow throws before the overflowing chunk is buffered, so a
+ * peer cannot make the reader grow without bound.
  */
 export async function* readLines(
 	stream: ReadableStream<Uint8Array>,
@@ -40,8 +41,15 @@ export async function* readLines(
 	try {
 		for await (const chunk of source) {
 			if (maxLineBytes !== undefined) {
-				const newline = chunk.lastIndexOf(LF);
-				pending = newline === -1 ? pending + chunk.length : chunk.length - newline - 1;
+				// Every line in the chunk counts, terminated or not: the first
+				// segment extends the open line, later ones stand alone.
+				let start = 0;
+				for (let newline = chunk.indexOf(LF); newline !== -1; newline = chunk.indexOf(LF, start)) {
+					if (pending + (newline - start) > maxLineBytes) throw new LineTooLongError(maxLineBytes);
+					pending = 0;
+					start = newline + 1;
+				}
+				pending += chunk.length - start;
 				if (pending > maxLineBytes) throw new LineTooLongError(maxLineBytes);
 			}
 			for (const line of buffer.appendAndFlushLines(chunk)) {

@@ -109,15 +109,20 @@ export function sandboxPanelModel(
 		denyRead: cfgSandboxDenyRead.get(operator),
 		allowedHosts: cfgSandboxAllowedHosts.get(operator),
 	};
+	const operatorScope = cfgSandboxScope.get(operator);
+	// The panel shows the operator's scope; entries the project adds apply on top and a global write cannot drop them.
+	if (!locked.scope && config.scope.some(entry => !operatorScope.includes(entry))) locked.scope = LOCK_TIGHTENED;
+	// Counts are of distinct entries: a duplicate in either layer is one entry, not two.
+	const distinct = (entries: readonly string[]): number => new Set(entries).size;
 	const listNotes: Partial<Record<SandboxListId, string>> = {};
 	for (const list of ["allowWrite", "allowRead", "allowedHosts"] as const) {
-		const dropped = lists[list].length - config[list].length;
+		const dropped = distinct(lists[list]) - distinct(config[list]);
 		if (dropped > 0) {
 			listNotes[list] =
 				`Project config narrows this list here: ${dropped} ${dropped === 1 ? "entry does" : "entries do"} not apply.`;
 		}
 	}
-	const added = config.denyRead.length - lists.denyRead.length;
+	const added = distinct(config.denyRead) - distinct(lists.denyRead);
 	if (added > 0) listNotes.denyRead = `Project config denies ${added} more path${added === 1 ? "" : "s"} here.`;
 	const networkUnavailable: Partial<Record<SandboxNetworkMode, string>> = {};
 	for (const mode of GATED_NETWORK_MODES) {
@@ -131,7 +136,7 @@ export function sandboxPanelModel(
 		fallback: config.fallback,
 		readScope: config.readScope,
 		networkMode: config.networkMode,
-		scope: cfgSandboxScope.get(operator),
+		scope: operatorScope,
 		...lists,
 		ignored: config.ignored,
 		locked,

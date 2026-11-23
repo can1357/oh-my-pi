@@ -33,7 +33,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import { errorMessage } from "@oh-my-pi/pi-utils/type-guards";
 import { readSqlite } from "../tools/read-sqlite";
 import { writeSqliteRow } from "../tools/sqlite-reader";
-import { applyFileMutation } from "./file-mutation-ops";
+import { applyFileMutation, OPEN_READ_NONBLOCK } from "./file-mutation-ops";
 import {
 	decodeHostMessage,
 	encodeHostMessage,
@@ -104,9 +104,12 @@ export function egressProxyEnv(
 	return overlay;
 }
 
-/** Opens `filePath` for reading, as the parent's read will, and reports which file that was. */
+/**
+ * Opens `filePath` for reading, as the parent's read will (without blocking, so a FIFO answers at
+ * once instead of waiting for a writer), and reports which file that was.
+ */
 async function identifyFile(filePath: string): Promise<HostFileIdentity> {
-	const handle = await fs.open(filePath, "r");
+	const handle = await fs.open(filePath, OPEN_READ_NONBLOCK);
 	try {
 		const stats = await handle.stat({ bigint: true });
 		return { dev: stats.dev, ino: stats.ino };

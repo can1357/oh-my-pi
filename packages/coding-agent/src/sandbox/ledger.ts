@@ -133,6 +133,11 @@ function forms(target: string): string[] {
 	return [path.resolve(target), resolveEquivalentPath(target, { throughMissing: true })];
 }
 
+/** Whether `a` and `b` name the same path; Windows compares case-insensitively, like {@link isWithin}. */
+function samePath(a: string, b: string, platform: NodeJS.Platform): boolean {
+	return isWithin(a, b, platform) && isWithin(b, a, platform);
+}
+
 /** The entry of `entries` (default: the ledger) `target` lies at or under, or `undefined`. */
 export function sandboxCreatedCovering(
 	target: string,
@@ -169,7 +174,9 @@ export function sandboxCreatedSkip(
 			ledgered: entry.path,
 		});
 	}
-	const trust = forms(cwd).includes(entry.workspace) ? "; trust it in /sandbox to load it" : "";
+	const trust = forms(cwd).some(form => samePath(form, entry.workspace, process.platform))
+		? "; trust it in /sandbox to load it"
+		: "";
 	return `Skipped ${target}: a sandboxed command created or replaced ${entry.path}${trust}`;
 }
 
@@ -187,7 +194,9 @@ export function recordSandboxCreated(entries: readonly SandboxCreatedEntry[]): S
 export function removeSandboxCreated(target: string): boolean {
 	let removed = false;
 	updateLedger(current => {
-		const kept = current.filter(entry => entry.path !== target && entry.real !== target);
+		const kept = current.filter(
+			entry => !samePath(entry.path, target, process.platform) && !samePath(entry.real, target, process.platform),
+		);
 		removed = kept.length !== current.length;
 		return removed ? kept : undefined;
 	});
@@ -213,7 +222,7 @@ export function sandboxCreatedRefusesRepo(
 	return entries.some(entry =>
 		candidates.some(
 			form =>
-				form === entry.gitDir ||
+				(entry.gitDir !== undefined && samePath(form, entry.gitDir, platform)) ||
 				[entry.path, entry.real].some(
 					ledgered => isWithin(form, ledgered, platform) || isWithin(ledgered, form, platform),
 				),
@@ -283,7 +292,7 @@ export function changedIdentities(
 		} else {
 			const ancestor = watched.some(other => other !== target && isWithin(other, target, platform));
 			const replaced = ancestor
-				? now.id !== was.id || now.kind !== was.kind
+				? now.id !== was.id || now.kind !== was.kind || now.target !== was.target
 				: (now.kind === "link" || was.kind === "link") && (now.kind !== was.kind || now.target !== was.target);
 			if (!replaced) continue;
 		}

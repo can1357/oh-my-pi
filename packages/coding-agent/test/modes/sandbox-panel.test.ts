@@ -215,6 +215,35 @@ describe("/sandbox panel model", () => {
 		cfgSandboxMode.override(settings, "read-only");
 		expect(sandboxPanelModel(settings, IDLE_RUNTIME).locked).toEqual({ mode: "Set by a session override" });
 	});
+
+	it("counts distinct entries when a layer repeats one", async () => {
+		// Project repeats `a` and omits `b`: one entry dropped, though the lengths match.
+		const settings = await init({
+			global: { network: { allowedHosts: ["a.test", "b.test"] }, filesystem: { denyRead: ["/a", "/a"] } },
+			project: { network: { allowedHosts: ["a.test", "a.test"] }, filesystem: { denyRead: ["/a", "/b"] } },
+		});
+		const model = sandboxPanelModel(settings, IDLE_RUNTIME);
+		expect(model.listNotes.allowedHosts).toBe("Project config narrows this list here: 1 entry does not apply.");
+		expect(model.listNotes.denyRead).toBe("Project config denies 1 more path here.");
+	});
+
+	it("does not count a repeated operator entry as one the project dropped", async () => {
+		const settings = await init({
+			global: { network: { allowedHosts: ["a.test", "a.test", "b.test"] } },
+			project: { network: { allowedHosts: ["a.test", "b.test"] } },
+		});
+		expect(sandboxPanelModel(settings, IDLE_RUNTIME).listNotes.allowedHosts).toBeUndefined();
+	});
+
+	it("locks scope when the project adds entries to it, and only then", async () => {
+		const widened = await init({ global: { scope: ["bash"] }, project: { scope: ["bash", "eval"] } });
+		const model = sandboxPanelModel(widened, IDLE_RUNTIME);
+		expect(model.scope).toEqual(["bash"]);
+		expect(model.locked.scope).toBe("Tightened by project config");
+		resetSettingsForTest();
+		const same = await init({ global: { scope: ["bash", "eval"] }, project: { scope: ["bash", "eval"] } });
+		expect(sandboxPanelModel(same, IDLE_RUNTIME).locked.scope).toBeUndefined();
+	});
 });
 
 describe("network modes this host cannot enforce", () => {

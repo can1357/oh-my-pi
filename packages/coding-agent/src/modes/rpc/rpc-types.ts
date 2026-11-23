@@ -359,6 +359,8 @@ export interface RpcSandboxHostRequestFrame {
 	port: number;
 	/** The request is denied and cancelled when unanswered for this long. */
 	timeoutMs: number;
+	/** False when a global write to `allowedHosts` would not take effect (another layer decides it): `always` is refused with `sandbox_locked`. */
+	canAlways: boolean;
 }
 
 /** A `sandbox_host_request` was denied without an answer: it timed out, or prompts were disabled or the session ended. */

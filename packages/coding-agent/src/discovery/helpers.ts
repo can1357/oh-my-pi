@@ -33,6 +33,12 @@ import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { resolveClaudePaths } from "../config/claude-paths";
 import type { MCPRequestIdFormat } from "../mcp/types";
+import {
+	currentSandboxCreated,
+	type SandboxCreatedEntry,
+	sandboxCreatedRevision,
+	sandboxCreatedSkip,
+} from "../sandbox/ledger";
 import type { SandboxNetworkMode } from "../sandbox/types";
 import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import { parseConfiguredThinkingLevel } from "../thinking/levels";
@@ -1248,6 +1254,8 @@ async function canonicalClaudeProjectPath(projectPath: string): Promise<string |
  * layers Claude Code itself consults: `<claude-config>/settings.json`, then
  * `<dir>/.claude/settings.json` and `<dir>/.claude/settings.local.json` for
  * each project directory (later layers win, `.local` wins within a layer).
+ * A project settings file a sandboxed command created or replaced (`ledger`) is ignored
+ * until trusted: `enabledPlugins:true` would otherwise opt an installed plugin into the project.
  *
  * Returns `pluginId -> boolean` for the ids the user toggled explicitly, and
  * the list of settings files that contributed (for cache keying).
@@ -1255,14 +1263,22 @@ async function canonicalClaudeProjectPath(projectPath: string): Promise<string |
 async function readClaudeEnabledPlugins(
 	claudeConfigDir: string,
 	projectDirs: string[],
+	cwd: string | undefined,
+	ledger: readonly SandboxCreatedEntry[],
 ): Promise<{ enabled: Map<string, boolean>; sources: string[] }> {
 	const enabled = new Map<string, boolean>();
 	const sources: string[] = [];
-	const candidates = [path.join(claudeConfigDir, "settings.json")];
+	const candidates: { file: string; project: boolean }[] = [
+		{ file: path.join(claudeConfigDir, "settings.json"), project: false },
+	];
 	for (const dir of projectDirs) {
-		candidates.push(path.join(dir, ".claude", "settings.json"), path.join(dir, ".claude", "settings.local.json"));
+		candidates.push(
+			{ file: path.join(dir, ".claude", "settings.json"), project: true },
+			{ file: path.join(dir, ".claude", "settings.local.json"), project: true },
+		);
 	}
-	for (const file of candidates) {
+	for (const { file, project } of candidates) {
+		if (project && sandboxCreatedSkip(file, cwd ?? file, ledger)) continue;
 		const content = await readFile(file);
 		if (!content) continue;
 		const data = tryParseJson<{ enabledPlugins?: unknown }>(content);
@@ -1401,8 +1417,12 @@ async function readPluginRoots(home: string, cwd: string | undefined, revalidate
 	const activeClaudeProjectPath = projectRoot ? await canonicalClaudeProjectPath(projectRoot) : null;
 	const canonicalCwd = cwd ? await canonicalClaudeProjectPath(cwd) : null;
 	const settingsDirs = [...new Set([activeClaudeProjectPath, canonicalCwd].filter((d): d is string => !!d))];
-	const enabledOverrides = await readClaudeEnabledPlugins(claudeConfigDir, settingsDirs);
-	const cacheKey = `${claudeConfigDir}:${ompRegistryPath}:${resolvedProjectPath ?? ""}:${activeClaudeProjectPath ?? ""}:${canonicalCwd ?? ""}:${enabledOverrides.sources.join("|")}`;
+	// One ledger read per enumeration; its revision, taken with it before any await, keys the cache so a
+	// path ledgered later (even while this enumeration reads settings) is not served from it.
+	const ledger = currentSandboxCreated();
+	const ledgerRevision = sandboxCreatedRevision();
+	const enabledOverrides = await readClaudeEnabledPlugins(claudeConfigDir, settingsDirs, cwd, ledger);
+	const cacheKey = `${claudeConfigDir}:${ompRegistryPath}:${resolvedProjectPath ?? ""}:${activeClaudeProjectPath ?? ""}:${canonicalCwd ?? ""}:${enabledOverrides.sources.join("|")}:${ledgerRevision}`;
 	const cached = pluginRootsCache.get(cacheKey);
 	if (cached) {
 		if (!revalidate || !(await isStaleRootsEntry(cached))) return cached.result;
@@ -1424,6 +1444,8 @@ async function readPluginRoots(home: string, cwd: string | undefined, revalidate
 			resolvedProjectPath,
 			activeClaudeProjectPath,
 			enabledOverrides,
+			cwd,
+			ledger,
 		});
 		await recordRegisteredPluginRoots(loaded.roots);
 		return loaded;
@@ -1444,12 +1466,16 @@ async function loadClaudePluginRoots({
 	resolvedProjectPath,
 	activeClaudeProjectPath,
 	enabledOverrides,
+	cwd,
+	ledger,
 }: {
 	claudeConfigDir: string;
 	ompRegistryPath: string;
 	resolvedProjectPath: string | null;
 	activeClaudeProjectPath: string | null;
 	enabledOverrides: { enabled: Map<string, boolean>; sources: string[] };
+	cwd: string | undefined;
+	ledger: readonly SandboxCreatedEntry[];
 }): Promise<PluginRootsResult> {
 	const roots: ClaudePluginRoot[] = [];
 	const warnings: string[] = [];
@@ -1570,7 +1596,8 @@ async function loadClaudePluginRoots({
 	// ── Project-scoped OMP registry ────────────────────────────────────────
 	// Loaded from the nearest .omp/plugins/installed_plugins.json relative to cwd.
 	// Project entries take precedence over user entries for the same plugin ID.
-	if (resolvedProjectPath) {
+	// A registry a sandboxed command created or replaced is ignored until trusted.
+	if (resolvedProjectPath && !sandboxCreatedSkip(resolvedProjectPath, cwd ?? resolvedProjectPath, ledger)) {
 		const projectContent = await readFile(resolvedProjectPath);
 		if (projectContent) {
 			const projectRegistry = parseClaudePluginsRegistry(projectContent);
@@ -1590,6 +1617,8 @@ async function loadClaudePluginRoots({
 							continue;
 						}
 						if (entry.enabled === false) continue;
+						// A plugin installed under a ledgered path is as untrusted as the registry naming it.
+						if (sandboxCreatedSkip(entry.installPath, cwd ?? resolvedProjectPath, ledger)) continue;
 						projectRoots.push({
 							id: pluginId,
 							marketplace,
