@@ -830,6 +830,30 @@ describe("compaction prefers the current session model over modelRoles.default",
 			expect(calls[0]).toBe(modelKey(currentModel));
 		});
 
+		it("honors a project models.offline when the operator leaves it unset", async () => {
+			const currentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const configuredModel = getBundledModel("openai", "gpt-5");
+			if (!currentModel || !configuredModel) throw new Error("Expected bundled test models to exist");
+			const cwd = path.join(tempDir.path(), "project");
+			const agentDir = path.join(tempDir.path(), "agent");
+			await Bun.write(
+				path.join(agentDir, "config.yml"),
+				[
+					"compaction:",
+					"  keepRecentTokens: 1",
+					"  methodOrder: [soft]",
+					`  model: ${modelKey(configuredModel)}`,
+					"",
+				].join("\n"),
+			);
+			await Bun.write(path.join(cwd, ".omp/config.yml"), "models:\n  offline: true\n");
+			const settings = await Settings.loadReadOnly({ cwd, agentDir });
+
+			const { calls } = await compactModelCalls(currentModel, settings, [currentModel, configuredModel]);
+
+			expect(calls[0]).toBe(modelKey(currentModel));
+		});
+
 		it("/compact remote rejects a same-provider native writer the active model cannot replay", async () => {
 			const readerBase = getBundledModel("anthropic", "claude-opus-4-6");
 			const configuredModel = getBundledModel("openai", "gpt-5");
