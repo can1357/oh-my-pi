@@ -459,6 +459,50 @@ describe("AgentSession retry fallback", () => {
 		]);
 	});
 
+	it("walks past a chain entry whose fetched usage reports it depleted after a request fails", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const depletedModel = getBundledModel("openai", "gpt-4o-mini");
+		const fallbackModel = getBundledModel("openai", "gpt-4o");
+		if (!primaryModel || !depletedModel || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const depletedSelector = `${depletedModel.provider}/${depletedModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+
+		const fetched: string[] = [];
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async (_provider, options) => {
+			fetched.push(options.modelId ?? "");
+			return { state: options.modelId === depletedModel.id ? "depleted" : "healthy", accounts: [] };
+		});
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (model.id === primaryModel.id) mock.push({ throw: "overloaded_error: provider returned error 503" });
+				else mock.push({ content: ["Recovered"] });
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": { default: [depletedSelector, fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+
+		await session.prompt("Recover past the entry its usage reports exhausted");
+		await session.waitForIdle();
+
+		expect(fetched).toContain(depletedModel.id);
+		expect(requestedModels).toEqual([primarySelector, fallbackSelector]);
+		expect(session.model?.id).toBe(fallbackModel.id);
+	});
+
 	it("walks the fallback chain when the primary provider has no credential, then restores it once one returns", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o");
