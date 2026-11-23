@@ -1,5 +1,5 @@
 import { $env } from "@oh-my-pi/pi-utils";
-import { OTARI_BASE_URL, OTARI_EU_BASE_URL, serializeOtariCredential } from "@oh-my-pi/pi-catalog/wire/otari";
+import { OTARI_EU_BASE_URL, OTARI_US_BASE_URL, serializeOtariCredential } from "@oh-my-pi/pi-catalog/wire/otari";
 import * as AIError from "../../error";
 import { validateApiKeyAgainstModelsEndpoint } from "../api-key-validation";
 import type { OAuthController } from "./types";
@@ -11,16 +11,17 @@ const AUTH_URL = "https://app.otari.ai/settings/api-keys";
  *
  * Hosted workspaces live in one region (US or EU) and their keys only
  * authenticate there, so login selects the region, or a self-hosted API root,
- * before pasting the key. `OTARI_BASE_URL`, when set, is used as is and skips
- * the prompt. A non-US endpoint is stored in the credential so discovery and
- * inference both target it.
+ * before pasting the key. `OTARI_BASE_URL`, when set, skips the prompt and is
+ * not stored, so discovery and inference keep reading it live. A region or URL
+ * picked here is stored in the credential so both target it.
  */
 export async function loginOtari(options: OAuthController): Promise<string> {
 	if (!options.onPrompt) {
 		throw new AIError.OnPromptRequiredError("Otari");
 	}
 
-	let baseUrl = $env.OTARI_BASE_URL?.trim().replace(/\/+$/, "");
+	const envBaseUrl = $env.OTARI_BASE_URL?.trim().replace(/\/+$/, "");
+	let baseUrl = envBaseUrl;
 	if (!baseUrl) {
 		const choice = (
 			await options.onPrompt({
@@ -40,7 +41,7 @@ export async function loginOtari(options: OAuthController): Promise<string> {
 			baseUrl = customUrl.trim().replace(/\/+$/, "");
 			if (!baseUrl) throw new AIError.ConfigurationError("Custom URL is required for option 3");
 		} else {
-			baseUrl = OTARI_BASE_URL;
+			baseUrl = OTARI_US_BASE_URL;
 		}
 	}
 
@@ -68,5 +69,5 @@ export async function loginOtari(options: OAuthController): Promise<string> {
 		fetch: options.fetch,
 	});
 
-	return serializeOtariCredential({ token: apiKey, baseUrl });
+	return serializeOtariCredential({ token: apiKey, baseUrl: envBaseUrl ? undefined : baseUrl });
 }

@@ -82,7 +82,7 @@ describe("Otari login", () => {
 		expect(JSON.parse(credential)).toEqual({ token: "tk_self", baseUrl: "https://otari.example.com/api/v1" });
 	});
 
-	test("OTARI_BASE_URL skips the region prompt", async () => {
+	test("OTARI_BASE_URL skips the region prompt and stays live rather than stored", async () => {
 		Bun.env.OTARI_BASE_URL = "https://otari.example.com/api/v1";
 		const calls: Array<{ url: string; authorization: string }> = [];
 		const messages: string[] = [];
@@ -97,7 +97,7 @@ describe("Otari login", () => {
 
 		expect(messages).toEqual(["Paste your Otari workspace API key"]);
 		expect(calls[0]?.url).toBe("https://otari.example.com/api/v1/models");
-		expect(JSON.parse(credential)).toEqual({ token: "tk_env", baseUrl: "https://otari.example.com/api/v1" });
+		expect(credential).toBe("tk_env");
 	});
 
 	test("a plain key keeps the model's own endpoint", () => {

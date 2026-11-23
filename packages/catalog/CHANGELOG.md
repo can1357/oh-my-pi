@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added `@oh-my-pi/pi-catalog/wire/otari` (`parseOtariCredential`, `serializeOtariCredential`, `OTARI_US_BASE_URL`, `OTARI_EU_BASE_URL`); `otariModelManagerOptions` accepts a stored `{ token, baseUrl }` credential and discovers against its endpoint ahead of `config.baseUrl` and `OTARI_BASE_URL` ([#20300](https://github.com/can1357/oh-my-pi/pull/20300) by [@tbille](https://github.com/tbille))
+
 - Added GLM-5.4 to the Zhipu Coding Plan with image input and 1M context, gave it the low/high/max thinking ladder on every host, and preferred it over GLM-5.3 for the `slow` role
 - Added `fetchOpenRouterChatModels()` and `OPENROUTER_BASE_URL` to `@oh-my-pi/pi-catalog/provider-models/openai-compat` for reading OpenRouter's tool-capable chat roster outside the `openrouter` provider.
 - `toolSchemaFlavor: "google"` rewrites OpenAI-compatible tool schemas into Gemini's dialect; GitHub Copilot Gemini models use it ([#20198](https://github.com/can1357/oh-my-pi/issues/20198))

@@ -1,14 +1,14 @@
 import { isRecord } from "../utils";
 
 /** Hosted US gateway, the default region. */
-export const OTARI_BASE_URL = "https://api.otari.ai/api/v1";
+export const OTARI_US_BASE_URL = "https://api.otari.ai/api/v1";
 /** Hosted EU gateway. Workspaces and keys are region-local: a key issued in one region is rejected by the other. */
 export const OTARI_EU_BASE_URL = "https://eu.api.otari.ai/api/v1";
 
 /** Otari credential persisted by `/login otari`: a workspace key plus the API root it authenticates against. */
 export interface OtariCredential {
 	token: string;
-	/** Absent means `OTARI_BASE_URL` when set, else the US gateway ({@link OTARI_BASE_URL}). */
+	/** Absent means `OTARI_BASE_URL` when set, else the US gateway ({@link OTARI_US_BASE_URL}). */
 	baseUrl?: string;
 }
 
@@ -35,6 +35,6 @@ export function parseOtariCredential(value: string): OtariCredential | null {
 export function serializeOtariCredential(credential: OtariCredential): string {
 	const token = credential.token.trim();
 	const baseUrl = credential.baseUrl?.trim().replace(/\/+$/, "");
-	if (!baseUrl || baseUrl === OTARI_BASE_URL) return token;
+	if (!baseUrl || baseUrl === OTARI_US_BASE_URL) return token;
 	return JSON.stringify({ token, baseUrl });
 }
