@@ -1,4 +1,10 @@
-import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentMessage,
+	AgentOptions,
+	AgentTelemetryConfig,
+	AgentTool,
+	AgentToolContext,
+} from "@oh-my-pi/pi-agent-core";
 import type { ToolConversationState } from "./tool-state";
 import type { FetchImpl, ImageContent, Message, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -274,6 +280,8 @@ export interface ToolSession {
 	workspaceTree?: WorkspaceTree;
 	/** Pre-loaded skills */
 	skills?: readonly Skill[];
+	/** Current post-compaction model context, used by tools that need to know what results are still visible. */
+	messages?: readonly AgentMessage[];
 	/**
 	 * Frozen skill-URI hint visibility: snapshot taken at the last system-prompt
 	 * rebuild. Tools with a provider-side `skill://` hint read this instead of

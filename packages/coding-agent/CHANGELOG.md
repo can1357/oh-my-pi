@@ -76,6 +76,10 @@
 - Sessions started from collaboration prompts now receive automatic titles.
 - Fixed `/tan` forks ending an idle wait prematurely when their assignment remains blocked.
 
+### Changed
+
+- Rereading an unchanged skill file that is already in the current context now returns a short stub instead of repeating it; `?full` still returns the whole file ([#16521](https://github.com/can1357/oh-my-pi/pull/16521) by [@Komzpa](https://github.com/Komzpa))
+
 ## [19.1.0] - 2026-11-21
 
 ### Breaking Changes
