@@ -20,7 +20,7 @@
 
 ### Changed
 
-- The bundled `defaults.json` themes load the first time a theme other than `dark` or `light` is requested, instead of at startup
+- The bundled `defaults.json` themes load the first time a theme other than `dark` or `light` is requested, instead of at startup ([#20281](https://github.com/can1357/oh-my-pi/pull/20281) by [@iliaal](https://github.com/iliaal))
 - `Editor` re-announces its Vim mode through `onVimModeChange` when it gains focus, so a host's cursor shape follows the editor holding the keys ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - The `vim` status-line segment shows a pending command even with `display: "none"`, which now hides only the mode ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 
