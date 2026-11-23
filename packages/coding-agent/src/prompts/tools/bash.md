@@ -2,6 +2,7 @@ Persistent bash 5.3.
 Each call starts in the session cwd with `set -e` off; use `cwd`, not `cd`{{#if hasPty}}; `pty` = interactive{{/if}}.
 Internal URIs work as paths for builtins/coreutils, redirects, globs.
 In-process builtins, ahead of PATH: {{join builtins ", "}}.
+A path (`/usr/bin/x`) runs the system program instead; use one only after a builtin's output proved wrong, never preemptively.
 {{#if asyncEnabled}}
 `async` defers finite results but keeps the deadline (default {{defaultTimeoutSec}}s); `timeout: 0` for watchers and long jobs.
 `notify` (regex; implies `async`) sends each matching output line as a follow-up while the job runs, ahead of its result. Match only lines you'd act on: too many matches switch it off.
