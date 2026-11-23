@@ -29,7 +29,7 @@ import {
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { node, span } from "../native/describe";
 import { thinkingLevelToken } from "../theme/theme-class";
-import type { StatusLineSession } from "./host";
+import type { SessionTreePosition, StatusLineSession } from "./host";
 import type { RenderedSegment, SegmentContext, SegmentView, StatusLineSegment, StatusLineSegmentId } from "./types";
 
 export type { SegmentContext } from "./types";
@@ -1103,6 +1103,43 @@ const collabSegment: StatusLineSegment = {
 	},
 };
 
+/** `2/3 · 3 ahead`: the branch at the deepest fork on the path, then the turns past the leaf. */
+function treePositionLabel(position: SessionTreePosition): string {
+	const parts: string[] = [];
+	if (position.branch) parts.push(`${position.branch.index}/${position.branch.count}`);
+	if (position.ahead > 0) parts.push(`${position.ahead} ahead`);
+	return parts.join(" · ");
+}
+
+/**
+ * The session's place in its tree, shown only off the tip of a single line: after a rewind (the
+ * turns waiting past the leaf) or on one branch of a fork. ANSI names `/tree` beside it; a native
+ * click opens it (`status.tree`).
+ */
+const treeSegment: StatusLineSegment = {
+	id: "tree",
+	render(ctx) {
+		const position = ctx.treePosition;
+		const label = position ? treePositionLabel(position) : "";
+		if (!label) return { content: "", visible: false };
+		const content = `${theme.fg("accent", withIcon(theme.cmd.tree, label))} ${theme.fg("dim", "/tree")}`;
+		return { content, visible: true };
+	},
+	describe(ctx) {
+		const position = ctx.treePosition;
+		const label = position ? treePositionLabel(position) : "";
+		if (!position || !label) return null;
+		const facts: string[] = [];
+		if (position.branch) facts.push(`branch ${position.branch.index} of ${position.branch.count}`);
+		if (position.ahead > 0) facts.push(`${position.ahead} ${position.ahead === 1 ? "turn" : "turns"} ahead`);
+		return {
+			spans: [span(label, "accent")],
+			icon: "tree",
+			title: `Session tree: ${facts.join(", ")}\nOpen /tree to move between branches`,
+		};
+	},
+};
+
 const streamSegment: StatusLineSegment = {
 	id: "stream",
 	render(ctx) {
@@ -1366,6 +1403,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	collab: collabSegment,
 	stream: streamSegment,
 	vim: vimSegment,
+	tree: treeSegment,
 };
 
 export function renderSegment(id: StatusLineSegmentId, ctx: SegmentContext): RenderedSegment {

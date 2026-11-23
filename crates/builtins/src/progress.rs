@@ -3,8 +3,6 @@
 //! indicatif's own targets write to the host process's stderr, which belongs
 //! to the TUI; these bars draw on the command's fd 2 instead.
 
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
 use std::{
 	fmt,
 	io::{self, Write},
@@ -43,21 +41,12 @@ impl ProgressTerminal {
 
 impl TermLike for ProgressTerminal {
 	fn width(&self) -> u16 {
-		#[cfg(unix)]
-		{
-			let writer = self.writer.lock();
-			if let Ok(fd) = writer.try_borrow_as_fd() {
-				let mut size = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
-				// SAFETY: `size` is writable for the duration of the ioctl, and
-				// `fd` is borrowed from the live `OpenFile` guarded above.
-				if unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCGWINSZ, &mut size) } == 0
-					&& size.ws_col > 0
-				{
-					return size.ws_col;
-				}
-			}
-		}
-		80
+		self.writer
+			.lock()
+			.window_size()
+			.map(|(columns, _)| columns)
+			.filter(|&columns| columns > 0)
+			.unwrap_or(80)
 	}
 
 	fn move_cursor_up(&self, n: usize) -> io::Result<()> {

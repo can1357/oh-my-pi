@@ -1,8 +1,16 @@
 import { describe, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
 	mapModelsDevToModels,
+	zaiModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import { removeWithRetries } from "../../utils/src/temp";
 
 // Z.AI GLM coding-plan token costs all showed as "Free" (issue #5598): the `zai`
 // provider descriptor sourced the stencil.so `zai-coding-plan` key, which reports
@@ -76,5 +84,55 @@ describe("zai API routing", () => {
 			api: "openai-completions",
 			baseUrl: "https://api.z.ai/api/coding/paas/v4",
 		});
+	});
+});
+
+describe("zai model discovery", () => {
+	test("surfaces newly listed GLM ids on their route while keeping bundled-only SKUs and metadata", async () => {
+		const requests: string[] = [];
+		const fetchImpl: FetchImpl = Object.assign(
+			async (input: string | Request | URL, init?: RequestInit): Promise<Response> => {
+				const headers = new Headers(init?.headers);
+				requests.push(`${String(input)} ${headers.get("authorization")}`);
+				return Response.json({
+					object: "list",
+					data: ["glm-5.3", "glm-5.3-flash", "glm-5.4"].map(id => ({ id, object: "model", owned_by: "z-ai" })),
+				});
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-zai-discovery-"));
+		try {
+			const { models } = await resolveProviderModels(
+				{
+					...zaiModelManagerOptions({ apiKey: "zai-key", fetch: fetchImpl }),
+					cacheDbPath: path.join(tempDir, "models.db"),
+				},
+				"online",
+			);
+			const byId = new Map(models.map(model => [model.id, model]));
+
+			expect(requests).toEqual(["https://api.z.ai/api/coding/paas/v4/models Bearer zai-key"]);
+			expect(byId.get("glm-5.4")).toMatchObject({
+				api: "anthropic-messages",
+				baseUrl: "https://api.z.ai/api/anthropic",
+				reasoning: true,
+			});
+			expect(byId.get("glm-5.3-flash")).toMatchObject({
+				api: "openai-completions",
+				baseUrl: "https://api.z.ai/api/coding/paas/v4",
+			});
+			// The id-only listing must not erase bundled limits and PAYG pricing.
+			const bundled = getBundledModel("zai", "glm-5.3");
+			expect(byId.get("glm-5.3")).toMatchObject({
+				name: bundled.name,
+				contextWindow: bundled.contextWindow,
+				cost: bundled.cost,
+			});
+			// Live SKUs the listing omits stay selectable.
+			expect(byId.has("glm-5v-turbo")).toBe(true);
+		} finally {
+			await removeWithRetries(tempDir);
+		}
 	});
 });
