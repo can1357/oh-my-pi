@@ -251,7 +251,15 @@ const NATIVE_CACHE_CLEANUP_GRACE_MS = 10 * 60_000;
 export function prepareNativeVersionDir(versionedDir) {
 	fs.mkdirSync(versionedDir, { recursive: true });
 	const now = new Date();
-	fs.utimesSync(versionedDir, now, now);
+	try {
+		fs.utimesSync(versionedDir, now, now);
+	} catch {
+		// Best-effort touch only. The grace timestamp protects a writable cache
+		// from concurrent cleanup; on a read-only natives dir the touch throws
+		// (EROFS/EPERM), but such a directory cannot be removed by
+		// `cleanupStaleNativeVersions` either, so skipping the touch is safe and
+		// lets a pre-extracted addon load without the dir being writable.
+	}
 }
 
 /**
