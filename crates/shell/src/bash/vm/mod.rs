@@ -52,7 +52,7 @@ pub use self::{
 	control::{ControlHandle, IoPoll, WakeToken},
 	frames::FRAMES_VERSION,
 	pattern::Cache as PatternCache,
-	proc::{Run, Vproc, vproc_layout},
+	proc::{ParseSnapshot, Run, Vproc, vproc_layout},
 	text::TextKind,
 	zsh::zpattern::Cache as ZshPatternCache,
 };
@@ -70,7 +70,7 @@ use crate::bash::{
 	fd::{FdOrigin, FdRef, FdTable},
 	fs::File,
 	host::{EnvView, Host, StdFd, Verdict},
-	ids::{CallId, CmdTag, JobId, ModeId, RunId, ToolRef, UnitId, Vpid},
+	ids::{CallId, CmdTag, Dialect, JobId, ModeId, RunId, ToolRef, UnitId, Vpid},
 	image::Records,
 	ir::{self, Unit},
 	signal::{DefaultAction, SigTarget, Signal},
@@ -427,7 +427,7 @@ pub struct Kernel {
 	pub announced:          HashSet<(Vpid, UnitId, Option<crate::bash::event::SourceOrigin>)>,
 	/// Observed script origins by actual activation depth. Empty without
 	/// tracing.
-	pub trace_sources:      HashMap<Vpid, HashMap<usize, crate::bash::event::SourceOrigin>>,
+	pub trace_sources:      HashMap<Vpid, HashMap<usize, exec::ScriptSource>>,
 	/// Origin of each currently executing source-context unit in its actual
 	/// vproc.
 	pub trace_unit_origins: HashMap<Vpid, Arc<HashMap<UnitId, crate::bash::event::SourceOrigin>>>,
@@ -1785,6 +1785,38 @@ impl Shell {
 		}
 	}
 
+	/// Whether root option `opt` is on between runs. A store failure reads as
+	/// off and abandons every script at the next scheduler turn.
+	pub(crate) fn root_option(&mut self, store: &mut dyn StateStore, opt: OptId) -> bool {
+		match state::option(&mut self.k.root, store, &self.procs[0], opt) {
+			Ok(on) => on,
+			Err(err) => {
+				self.k.fail(err);
+				false
+			},
+		}
+	}
+
+	/// Turn root option `opt` on or off between runs, as `set -o` / `set +o`
+	/// would; `SHELLOPTS` follows in the bash dialect. Background jobs keep
+	/// the options they forked with. A store failure abandons every script at
+	/// the next scheduler turn.
+	pub(crate) fn set_root_option(&mut self, store: &mut dyn StateStore, opt: OptId, on: bool) {
+		let (root, vp) = (&mut self.k.root, &mut *self.procs[0]);
+		match state::option(root, store, vp, opt) {
+			Ok(current) if current == on => {},
+			Ok(_) => {
+				state::store_record(root, store, vp, KeyBuf::Opt(opt), Some(Record::Opt(on)));
+				if vp.mode.dialect() == Dialect::Bash
+					&& let Err(err) = state::sync_option_vars(root, store, vp)
+				{
+					self.k.fail(err);
+				}
+			},
+			Err(err) => self.k.fail(err),
+		}
+	}
+
 	/// Queue a script; see [`VprocSel`] for where it runs. A new subshell
 	/// starts from the shell's global state: it does not see the locals of
 	/// a function the shell is in the middle of (a host submits between
@@ -2708,27 +2740,91 @@ impl Shell {
 		verdict && !read_failed
 	}
 
+	/// The parse context frozen at the run's `exit`-family abort for its
+	/// root script frame: the grammar and alias table the attribution walk
+	/// judges the unrun input under ([`Shell::ended_by_exit_cut_short`]).
+	/// `None` when the run took no exit freeze. A caller probing text the
+	/// abort never reached ([`Shell::source_holds_command`]) passes this
+	/// along, so the probe classifies under the abort-time table, not the
+	/// live one the abort's EXIT cleanup may since have rewritten.
+	pub fn exit_parse_snapshot(&mut self, run: RunId) -> Option<Arc<ParseSnapshot>> {
+		self.cut_short_input(run)?.root_parse().cloned()
+	}
+
 	/// Whether `source` still holds a command for the parser that would read
-	/// it: the grammar features and aliases in effect for the root shell now,
-	/// the same predicate [`Shell::ended_by_exit_cut_short`] applies to a
+	/// it: the grammar features and aliases in effect for the root shell
+	/// now — or, when `parse` carries the context an `exit`-family abort
+	/// froze ([`Shell::exit_parse_snapshot`]), that abort-time table — the
+	/// same predicate [`Shell::ended_by_exit_cut_short`] applies to a
 	/// script frame's unread input. Parse-only — nothing executes — so a
 	/// chain runner can judge text it never ran by the parser's view (an
 	/// alias can expand a command to a comment). A backend read error
 	/// conservatively answers `true`: a probe failure must not silence the
 	/// cut-short notice.
-	pub fn source_holds_command(&mut self, cx: &mut Cx<'_>, source: &[u8]) -> bool {
-		let Ok(feat) = exec::features(&mut self.k, cx.store, &self.procs[0]) else {
+	pub fn source_holds_command(
+		&mut self,
+		cx: &mut Cx<'_>,
+		source: &[u8],
+		parse: Option<&ParseSnapshot>,
+	) -> bool {
+		if let Some(parse) = parse {
+			// Frozen at the abort, before its EXIT cleanup could rewrite
+			// the table: no state read here, so no failure path either.
+			return exec::script_has_command(
+				source,
+				crate::bash::syntax::Features::from_bits(parse.features),
+				parse.aliases.as_ref().map(|a| a as &dyn AliasLookup),
+				&Resume::default(),
+			);
+		}
+		// Do not use or change the live root's caches or fault slot: the
+		// store can be a probe-only view with the next run's env overlaid.
+		let Ok(root) = Root::load(cx.store) else {
 			return true;
 		};
-		let Ok(aliases) = builtins::alias_table(&mut self.k, cx, &self.procs[0]) else {
-			return true;
-		};
-		exec::script_has_command(
-			source,
-			feat,
-			aliases.as_ref().map(|a| a as &dyn AliasLookup),
-			&Resume::default(),
-		)
+		let live = std::mem::replace(&mut self.k.root, root);
+		let parse = exec::features(&mut self.k, cx.store, &self.procs[0]).and_then(|feat| {
+			builtins::alias_table(&mut self.k, cx, &self.procs[0]).map(|a| (feat, a))
+		});
+		let failed = self.k.root.has_fault();
+		self.k.root = live;
+		failed
+			|| parse.map_or(true, |(feat, aliases)| {
+				exec::script_has_command(
+					source,
+					feat,
+					aliases.as_ref().map(|a| a as &dyn AliasLookup),
+					&Resume::default(),
+				)
+			})
+	}
+
+	/// Inspect a segment under the environment its physical run would install.
+	pub(crate) fn source_holds_command_with_env(
+		&mut self,
+		host: &mut dyn Host,
+		store: &mut crate::bash::MemStore,
+		source: &[u8],
+		env: Vec<(BString, BString)>,
+		parse: Option<&ParseSnapshot>,
+	) -> bool {
+		if env.is_empty() {
+			return self.source_holds_command(&mut Cx { host, store }, source, parse);
+		}
+		let mut probe = store.clone();
+		for (name, value) in env {
+			if is_ident(&name)
+				&& probe
+					.put_out_of_band(
+						Key::Var(BStr::new(&name)),
+						Record::Var(Var::scalar(value, Attrs::EXPORT)),
+					)
+					.is_err()
+			{
+				return true;
+			}
+		}
+		self.source_holds_command(&mut Cx { host, store: &mut probe }, source, parse)
 	}
 
 	/// Whether the run's cut-short verdict still waits on a pipeline child
@@ -2773,42 +2869,31 @@ impl Shell {
 			return false;
 		};
 		let mut frames = 0usize;
-		let mut unresolved = false;
+		let mut statuses = HashMap::new();
 		for (_, vpids) in cut.pending_child_frames() {
-			frames += 1;
+			let mut unresolved = false;
 			for vpid in vpids {
 				let Ok(state) = Kernel::read_proc_state(store, vpid) else {
 					return false;
 				};
-				unresolved |= state.and_then(ProcState::exited).is_none();
+				let status = state.and_then(ProcState::exited);
+				unresolved |= status.is_none();
+				statuses.insert(vpid, status);
 			}
+			// This frame may have been pending at capture but settled since.
+			frames += usize::from(unresolved);
 		}
-		if frames == 0 || !unresolved {
-			return false;
-		}
-		if frames > 1 {
-			return true;
-		}
-		let mut settled_verdict: Option<bool> = None;
-		for hypothesis in [0, 1] {
-			let mut read_failed = false;
-			let verdict = cut.walk(|vpid| {
-				let Ok(state) = Kernel::read_proc_state(store, vpid) else {
-					read_failed = true;
-					return None;
+		match frames {
+			0 => false,
+			1 => {
+				// Both hypotheses see the same observed statuses.
+				let verdict = |hypothesis| {
+					cut.walk(|vpid| Some(statuses.get(&vpid).copied().flatten().unwrap_or(hypothesis)))
 				};
-				// A child not yet ended gets the hypothesis; the rest their
-				// real status.
-				state.and_then(ProcState::exited).or(Some(hypothesis))
-			});
-			if read_failed {
-				return false;
-			}
-			if let Some(first) = settled_verdict.replace(verdict) {
-				return first != verdict;
-			}
+				verdict(0) != verdict(1)
+			},
+			_ => true,
 		}
-		unreachable!("both hypotheses always return from the second pass");
 	}
 
 	/// Both delayed probes borrow the same capture so neither consumes it on

@@ -2647,7 +2647,11 @@ type BashResult struct {
 	ArtifactError map[string]json.RawMessage `json:"artifactError,omitempty"`
 	Minimized     map[string]json.RawMessage `json:"minimized,omitempty"`
 	WorkingDir    *string                    `json:"workingDir,omitempty"`
-	// Whether `exit` or an armed `set -e` cut the run short with commands still left to run: whatever followed the abort did not run. A trailing `exit` at the end of the input is not reported.
+	// The command ended in another directory than it started in; the next command starts in its own cwd.
+	MovedCwd *bool `json:"movedCwd,omitempty"`
+	// The command ended with `set -e` on; the next command starts with it off.
+	Errexit *bool `json:"errexit,omitempty"`
+	// Whether `exit` or an armed `set -e` left ordinary command input unrun. Shell cleanup can still run. An `exit` with no remaining work is not reported.
 	EndedByExit *bool `json:"endedByExit,omitempty"`
 	// Whether the run's state was not retained in the session's persistent shell after cleanup. A fork adopted into a retained session is not ephemeral; an unadopted fork or a released shell is.
 	EphemeralShell *bool          `json:"ephemeralShell,omitempty"`
@@ -2685,6 +2689,8 @@ func (v *BashResult) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("artifactError", &out.ArtifactError)
 	d.optional("minimized", &out.Minimized)
 	d.optional("workingDir", &out.WorkingDir)
+	d.optional("movedCwd", &out.MovedCwd)
+	d.optional("errexit", &out.Errexit)
 	d.optional("endedByExit", &out.EndedByExit)
 	d.optional("ephemeralShell", &out.EphemeralShell)
 	d.optional("images", &out.Images)

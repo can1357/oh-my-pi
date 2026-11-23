@@ -85,8 +85,13 @@ describe("InteractiveMode native dock activity line", () => {
 	const activity = (describeCx = cx) => mode.statusContainer.describe(describeCx)!;
 	const keys = (root: NativeNode) => (root.c ?? []).filter(isNode).map(n => n.key);
 
-	it("describes nothing when no status row runs and there is no plan", () => {
-		expect(activity()).toEqual({ k: "col", p: undefined, c: [], key: undefined });
+	it("describes an empty row without the activity role when nothing shows, the line's own kind", () => {
+		const empty = activity();
+		expect(empty).toMatchObject({ k: "row", c: [] });
+		expect(role(empty)).toBeUndefined();
+		// The same kind both ways: a host keeps the one element (and what it drew into it) as the line comes and goes.
+		mode.ensureLoadingAnimation();
+		expect(activity()).toMatchObject({ k: empty.k, p: { role: "omp.hud.activity" } });
 	});
 
 	it("holds the todo in the activity line, not the HUD pills row, between turns", () => {

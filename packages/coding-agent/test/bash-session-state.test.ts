@@ -1,6 +1,6 @@
 /**
  * The bash tool's persistent shell: state set by one call (variables,
- * functions, options) is visible to the next call through the default
+ * functions, and options other than errexit) is visible to the next call through the default
  * auto-background path, including after a call moved to the background and
  * after a call that exited non-zero. That `exit` and errexit keep the native
  * session is pinned in `crates/shell` (`exit_and_errexit_keep_session_state`):
@@ -182,6 +182,8 @@ function nativeResult(overrides: Record<string, unknown> = {}) {
 		timedOut: false,
 		minimized: undefined,
 		workingDir: undefined,
+		movedCwd: false,
+		errexit: false,
 		endedByExit: false,
 		...overrides,
 	};
@@ -199,9 +201,6 @@ it("says so when exit or an armed set -e ends the call before its remaining stat
 		const aborted = await run(tool, "false; echo never-ran");
 		expect(aborted.text).toContain("Stopped by `exit` or an armed `set -e`");
 		expect(aborted.text).toContain("the rest of this call did not run");
-		// Options still in effect keep applying; the notice says so, with the
-		// scope-restoration and EXIT-trap exceptions spelled out.
-		expect(aborted.text).toContain("Options still in effect at that point stay with the session");
 
 		const failed = await run(tool, "false");
 		expect(failed.text).toContain("Command exited with code 1");
@@ -357,9 +356,8 @@ it.each([false, true])("attributes overlapping fork state by adoption and retent
 				finishOwner.resolve(nativeResult());
 				await owner;
 			}
-			const state = await executeBash('printf "%s:%s" "$PI_REVIEW_FORK" "$-"', options);
-			expect(state.output.startsWith("kept:")).toBe(warm && retained);
-			expect(state.output.split(":")[1].includes("e")).toBe(warm && retained);
+			const state = await executeBash('printf "%s" "$PI_REVIEW_FORK"', options);
+			expect(state.output).toBe(warm && retained ? "kept" : "");
 		}
 	}
 });
@@ -378,13 +376,23 @@ it.skipIf(process.platform === "win32" || !hasNativeExitFlag)(
 		expect(probe.endedByExit).toBe(true);
 
 		const tool = bashTool();
-		await run(tool, "set -e; PI_ERREXIT_ARMED=1");
-		const aborted = await run(tool, "false; echo never-ran");
+		// Put cd inside the shell run; a leading cd is resolved as the call's starting cwd.
+		const aborted = await run(tool, "set -eu; cd /; PI_STATE_VAR=kept; false; echo never-ran");
 		expect(aborted.text).toContain("Stopped by `exit` or an armed `set -e`");
 		expect(aborted.text).toContain("the rest of this call did not run");
-		// Options still in effect keep applying; the notice says so, with the
-		// scope-restoration and EXIT-trap exceptions spelled out.
-		expect(aborted.text).toContain("Options still in effect at that point stay with the session");
+
+		expect(aborted.text).not.toContain("never-ran");
+		expect(aborted.text).toContain("Command exited with code 1");
+		expect(aborted.text).toContain(`cwd → ${cwd}`);
+		expect(aborted.text).toContain("set -e off");
+
+		const fresh = await run(tool, 'false; printf "%s:%s:%s" "$PI_STATE_VAR" "$PWD" "$-"');
+		const prefix = `kept:${cwd}:`;
+		expect(fresh.text.startsWith(prefix)).toBe(true);
+		const flags = fresh.text.slice(prefix.length);
+		expect(flags).toContain("u");
+		expect(flags).not.toContain("e");
+		expect(fresh.text).not.toContain("Stopped by `exit`");
 
 		const exited = await run(tool, "exit 3; echo never-ran");
 		expect(exited.text).toContain("Stopped by `exit` or an armed `set -e`");
@@ -393,7 +401,6 @@ it.skipIf(process.platform === "win32" || !hasNativeExitFlag)(
 		const trailing = await run(tool, "exit 0");
 		expect(trailing.text).not.toContain("Stopped by `exit`");
 
-		await run(tool, "set +e");
 		const failed = await run(tool, "false");
 		expect(failed.text).toContain("Command exited with code 1");
 		expect(failed.text).not.toContain("Stopped by `exit`");

@@ -24,6 +24,7 @@ import { $env } from "@oh-my-pi/pi-utils/env";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
 import {
 	compileNotifyPattern,
+	formatAsyncJobLabel,
 	type NotifyPattern,
 	OutputNotifier,
 	raceJobSettlement,
@@ -66,8 +67,12 @@ import { resolveEvalBackends } from "./eval-backends";
 import { invalidateGithubCacheForBashCommand, invalidateGithubCacheForBashResult } from "./gh-cache-invalidation";
 import { serviceLogs, startService, type ServiceReady } from "../launch/services";
 import { isFindEnabled } from "./jfind";
-import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import {
+	formatArtifactErrorNotice,
+	formatOutputNotice,
+	formatRawOutputNotice,
+	stripRawOutputArtifactNotice,
+} from "@oh-my-pi/pi-tui/tools/output-meta";
 import { outputMeta, resolveInlineByteCapBudget } from "./output-meta";
 import { resolveShellDirectory, resolveToCwd } from "./path-utils";
 import {
@@ -622,14 +627,18 @@ const FORK_JOBS_NOTICE =
 
 /** Shown when `exit` or an armed `set -e` ended the run before its input was exhausted. */
 const ENDED_BY_EXIT_NOTICE =
-	"Stopped by `exit` or an armed `set -e` before the command finished: the rest of this call did not run. Options still in effect at that point stay with the session — an option scoped to a function that returned, or one an EXIT trap disarms, does not.";
+	"Stopped by `exit` or an armed `set -e` before the command finished: the rest of this call did not run, apart from shell cleanup such as an `EXIT` trap.";
 
 /**
- * The unretained-state variant of {@link ENDED_BY_EXIT_NOTICE}: options in
- * an unadopted fork or released shell cannot affect later session calls.
+ * Names what a command changed in the session shell that the next call starts without: a `cd`
+ * (calls start in `sessionCwd`) and `set -e`.
  */
-const ENDED_BY_EXIT_EPHEMERAL_NOTICE =
-	"Stopped by `exit` or an armed `set -e` before the command finished: the rest of this call did not run.";
+function formatShellResetNotice(result: BashResult | BashInteractiveResult, sessionCwd: string): string | undefined {
+	const reset: string[] = [];
+	if ("movedCwd" in result && result.movedCwd) reset.push(`cwd → ${sessionCwd}`);
+	if ("errexit" in result && result.errexit) reset.push("set -e off");
+	return reset.length > 0 ? `Reset before the next call: ${reset.join(", ")}.` : undefined;
+}
 
 function normalizeResultOutput(result: BashResult | BashInteractiveResult): string {
 	return result.output || "";
@@ -827,6 +836,18 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			if (interception.block) return interception.message ?? "Command blocked";
 		}
 		return undefined;
+	}
+
+	/**
+	 * Whether this line is pure tool-command traffic: every simple command is a mounted tool
+	 * command (or a special command), joined only by `;`, `&&`, `||`, `|` and newlines, with no
+	 * redirection, expansion, substitution or assignment — see {@link isToolCommandLine}. Such a
+	 * line runs no program: it dispatches the same session tools a top-level call would, which is
+	 * why a same-name extension replacement hands it back to this tool (#18339). Every other line
+	 * stays the override's.
+	 */
+	servesToolCommandLine(command: string): boolean {
+		return isToolCommandLine(command, new Set(toolCommandNames(this.session)));
 	}
 
 	readonly approval = (args: unknown, ctx?: AgentToolContext): ToolApprovalDecision => {
@@ -1301,25 +1322,28 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const notices: string[] = [];
 		const wallTimeMs = options.wallTimeMs;
 		const wallTimeNoticeEmitted = wallTimeMs !== undefined && wallTimeMs >= WALL_TIME_NOTICE_MIN_MS;
-		if (wallTimeNoticeEmitted) {
-			notices.push(formatWallTimeNotice(wallTimeMs));
-		}
 		if (options.notices) {
 			for (const notice of options.notices) {
 				if (notice) notices.push(notice);
 			}
 		}
+		const resetNotice = formatShellResetNotice(result, this.session.cwd);
+		if (resetNotice) notices.push(resetNotice);
 		const fork = "fork" in result ? result.fork : undefined;
 		if (fork && !fork.carried) notices.push(FORK_STATE_LOST_NOTICE);
 		if (fork?.jobs) notices.push(FORK_JOBS_NOTICE);
-		// `exit`/errexit ending the run early looks like an ordinary non-zero
-		// exit from its output alone; say that the remaining input never ran.
-		// Only state retained in the session (directly or by adoption) persists.
 		if ("endedByExit" in result && result.endedByExit) {
-			notices.push(
-				"ephemeralShell" in result && result.ephemeralShell ? ENDED_BY_EXIT_EPHEMERAL_NOTICE : ENDED_BY_EXIT_NOTICE,
-			);
+			notices.push(ENDED_BY_EXIT_NOTICE);
+			const minimized = "minimized" in result ? result.minimized : undefined;
+			const raw = minimized && stripRawOutputArtifactNotice(outputLines[0]);
+			if (raw?.artifactId && raw.artifactId === minimized?.artifactId) {
+				// The shell renderers peel trailing metadata in reverse order.
+				// Keep the raw-output footer ahead of the wall time and exit code.
+				outputLines[0] = [raw.text, "", ...notices, formatRawOutputNotice(raw.artifactId)].join("\n");
+				notices.length = 0;
+			}
 		}
+		if (wallTimeNoticeEmitted) notices.unshift(formatWallTimeNotice(wallTimeMs));
 		if (notices.length > 0) outputLines.push("", ...notices);
 		// Shaped output already leads with its exit status.
 		if (failedExit && !shaped?.text?.startsWith("[exit code ")) outputLines.push("", formatExitCodeNotice(exitCode));
@@ -1532,7 +1556,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			throw new ToolError("Background job manager unavailable for this session.");
 		}
 
-		const label = options.command.length > 120 ? `${options.command.slice(0, 117)}...` : options.command;
+		const label = formatAsyncJobLabel(options.command);
 		// Holds the run's Shell only while it runs: a retained reference would
 		// keep a finished `:async:` Shell (and its background children) alive.
 		let pids: () => readonly number[] = NO_PIDS;

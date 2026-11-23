@@ -525,17 +525,15 @@ pub struct ShellRunResult {
 	pub minimized:     Option<MinimizerResult>,
 	/// Shell working directory after command completion.
 	pub working_dir:   Option<String>,
-	/// Whether `exit` or an armed `set -e` cut the run short with commands
-	/// still left to run: the ordinary commands after the abort were
-	/// skipped — an `EXIT` trap and the unwind's other mandatory cleanup
-	/// still ran. A trailing `exit` at the end of the input — which ends
-	/// the run where the input's end would have — is not reported. On a
-	/// session kept for later calls the session stays usable, with its
-	/// state intact — options exactly as the script left them: a
-	/// function-local `set -e` under `local -` restores its caller's
-	/// settings on return, and an `EXIT` trap that fires at the run
-	/// boundary can still change them; a one-shot `execute_shell` session
-	/// ends with its call, so there is nothing later to carry into.
+	/// The command ended in another directory than it started in (a `cd` in
+	/// it); a later run that passes `cwd` starts there instead.
+	pub moved_cwd:     bool,
+	/// The command ended with `errexit` (`set -e`) on; the next run starts
+	/// with it off.
+	pub errexit:       bool,
+	/// Whether `exit` or an armed `set -e` cut the run short with ordinary
+	/// commands still left to run. Cleanup such as an `EXIT` trap can still
+	/// run. A trailing `exit` that leaves no remaining work is not reported.
 	pub ended_by_exit: bool,
 }
 
@@ -547,6 +545,8 @@ impl From<CoreShellRunResult> for ShellRunResult {
 			timed_out:     value.timed_out,
 			minimized:     value.minimized.map(Into::into),
 			working_dir:   value.working_dir,
+			moved_cwd:     value.moved_cwd,
+			errexit:       value.errexit,
 			ended_by_exit: value.ended_by_exit,
 		}
 	}
@@ -1002,6 +1002,8 @@ mod tests {
 			timed_out:     false,
 			minimized:     None,
 			working_dir:   None,
+			moved_cwd:     false,
+			errexit:       false,
 			ended_by_exit: false,
 		});
 
@@ -1039,6 +1041,8 @@ mod tests {
 			timed_out:     true,
 			minimized:     None,
 			working_dir:   None,
+			moved_cwd:     false,
+			errexit:       false,
 			ended_by_exit: false,
 		});
 		let started = time::Instant::now();

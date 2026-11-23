@@ -1,10 +1,11 @@
 #![cfg(unix)]
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use omp_shell::{
 	SessionCommandFuture, SessionCommandHandler, SessionCommandRequest, SessionCommandResult,
 	SessionCommands, Shell, ShellOptions, ShellRunOptions,
+	bash::trace::{RunTrace, history::HistoryData},
 	cancel::{AbortReason, CancelToken},
 	minimizer::MinimizerOptions,
 };
@@ -13,7 +14,7 @@ use omp_shell::{
 enum When {
 	/// The abort fires while the first segment is still running — a
 	/// foreground `/bin/sleep` the cancel must cut — so the tail's work is
-	/// prevented. Deterministic: the abort lands well inside the sleep.
+	/// prevented. Wait until the foreground process is observed.
 	CutsSegment,
 	/// No cancellation: the chain stops by its own semantics (an
 	/// unreachable tail, the end of the input, an `exit`), which must keep
@@ -70,8 +71,8 @@ async fn stop_after_segment_end_reports_only_prevented_work() {
 			}),
 			..Default::default()
 		}));
-		// The `_fg` fixtures hold the foreground for 0.8 s: a cancel at
-		// 0.15 s is deterministically inside the first segment. The others
+		// The `_fg` fixtures hold the foreground until they are observed and
+		// cancelled (or sleep completes for the uncancelled control). The others
 		// background their sleep, so a run without cancellation ends at
 		// its own decision point right away.
 		let setup = "slow_ok() { /bin/sleep 0.8 & return 0; }; slow_fail() { /bin/sleep 0.8 & \
@@ -114,12 +115,17 @@ async fn stop_after_segment_end_reports_only_prevented_work() {
 					Some(tx),
 					cancel,
 				);
-				tokio::time::sleep(Duration::from_millis(150)).await;
-				abort.abort(AbortReason::Signal);
-				tokio::time::timeout(Duration::from_secs(5), run)
-					.await
-					.unwrap_or_else(|_| panic!("{name}: cancelled run did not end"))
-					.unwrap()
+				let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+					tokio::join!(run, async {
+						while shell.pids().is_empty() {
+							tokio::task::yield_now().await;
+						}
+						abort.abort(AbortReason::Signal);
+					})
+				})
+				.await
+				.unwrap_or_else(|_| panic!("{name}: foreground cancellation did not complete"));
+				result.unwrap()
 			},
 			When::Never => tokio::time::timeout(
 				Duration::from_secs(5),
@@ -155,6 +161,138 @@ async fn stop_after_segment_end_reports_only_prevented_work() {
 		}
 	}
 	assert!(mismatches.is_empty(), "wrong cancellation attribution: {mismatches:?}");
+}
+
+/// Cancel a logical call only after the first physical run ended. The
+/// rendezvous output channel holds that segment's drain until the signal.
+#[tokio::test(flavor = "current_thread")]
+async fn late_cancel_only_stops_a_chain_with_parse_visible_work() {
+	let root = tempfile::tempdir().unwrap();
+	let config = root.path().join("filters.toml");
+	std::fs::write(
+		&config,
+		"schema_version = 1\n[filters.printf]\nmatch_command = \"^printf$\"\nreplace = [{ pattern = \
+		 \"hello\", replacement = \"HI\" }]\n",
+	)
+	.unwrap();
+	for (script, status, expected_cancelled, expected_exit) in [
+		("printf ready && gone; gone", 0, false, false),
+		("printf ready; gone", 0, false, false),
+		("ok && printf hello", 0, true, false),
+		("fail && printf hello", 7, false, false),
+		("fail; printf hello", 7, true, false),
+		("stop; printf hello", 3, false, true),
+	] {
+		let shell = Shell::new(Some(ShellOptions {
+			minimizer: Some(MinimizerOptions {
+				enabled: Some(true),
+				settings_path: Some(config.to_str().unwrap().into()),
+				..Default::default()
+			}),
+			..Default::default()
+		}));
+		let setup = "shopt -s expand_aliases\nalias gone='# nothing'\nok() { printf ready; \
+		             }\nfail() { printf ready; return 7; }\nstop() { printf ready; exit 3; }";
+		assert_eq!(
+			shell
+				.run(
+					ShellRunOptions { command: setup.into(), ..Default::default() },
+					None,
+					CancelToken::default(),
+				)
+				.await
+				.unwrap()
+				.exit_code,
+			Some(0),
+		);
+
+		let trace = Arc::new(RunTrace::new(script));
+		let mut cancel = CancelToken::default();
+		let abort = cancel.emplace_abort_token();
+		let (tx, rx) = flume::bounded(0);
+		let run = shell.run(
+			ShellRunOptions {
+				command: script.into(),
+				trace: Some(trace.clone()),
+				..Default::default()
+			},
+			Some(tx),
+			cancel,
+		);
+		let (result, output) = tokio::time::timeout(Duration::from_secs(5), async {
+			tokio::join!(biased; run, async {
+				loop {
+					let snapshot = trace.snapshot();
+					if let Some(end) = snapshot.history.iter().find(|entry| {
+						entry.vpid == snapshot.root_vpid && matches!(entry.data, HistoryData::RunEnd { .. })
+					}) {
+						assert!(end.segment.is_some() && !end.logical_end, "not at a physical segment boundary: {script}");
+						assert!(matches!(end.data, HistoryData::RunEnd { status: code } if code == status));
+						break;
+					}
+					tokio::task::yield_now().await;
+				}
+				abort.abort(AbortReason::Signal);
+				// Let the run future forward the signal before releasing the drain.
+				tokio::task::yield_now().await;
+				let mut output = String::new();
+				while let Ok(chunk) = rx.recv_async().await {
+					output.push_str(&chunk);
+				}
+				output
+			})
+		})
+		.await
+		.unwrap_or_else(|_| panic!("never observed the segment finishing: {script}"));
+		let result = result.unwrap();
+		assert_eq!(output, "ready", "{script}");
+		assert_eq!(result.cancelled, expected_cancelled, "{script}");
+		assert_eq!(result.ended_by_exit, expected_exit, "{script}");
+		assert_eq!(result.exit_code, (!expected_cancelled).then_some(status), "{script}");
+	}
+}
+
+/// Reinstalling a segment's environment can change how its alias parses.
+/// Exercise both directions and prove the probe does not leave it installed.
+#[tokio::test]
+async fn exit_tail_is_parsed_under_its_own_locale_overlay() {
+	for outer in ["C", "zh_TW.Big5"] {
+		let shell = Shell::new(Some(ShellOptions {
+			minimizer: Some(MinimizerOptions { enabled: Some(true), ..Default::default() }),
+			..Default::default()
+		}));
+		let run = async |command: &str, locale: Option<&str>| {
+			shell
+				.run(
+					ShellRunOptions {
+						command: command.into(),
+						env: locale.map(|locale| HashMap::from([("LANG".into(), locale.into())])),
+						..Default::default()
+					},
+					None,
+					CancelToken::default(),
+				)
+				.await
+				.unwrap()
+		};
+		// In C the backslash joins the lines and the second alias hides the
+		// command. In Big5 the backslash forms part of a multibyte character.
+		let setup = format!(
+			"unset LC_ALL LC_CTYPE LANG\nLANG=C\nshopt -s expand_aliases\nalias 中x='# empty'\nalias \
+			 git=\"中\\\\\nx\"\nLANG={outer}"
+		);
+		assert_eq!(run(&setup, None).await.exit_code, Some(0));
+		for locale in ["C", "zh_TW.Big5"] {
+			let expected = locale != "C";
+			let control = run("git log -1", Some(locale)).await;
+			assert_eq!(control.exit_code, Some(if expected { 127 } else { 0 }));
+			let cut = run("exit 0; git log -1", Some(locale)).await;
+			assert_eq!(cut.exit_code, Some(0));
+			assert_eq!(cut.ended_by_exit, expected, "baseline={outer}, run={locale}");
+			let restored = run("git log -1", None).await;
+			assert_eq!(restored.exit_code, Some(if outer == "C" { 0 } else { 127 }));
+		}
+	}
 }
 
 /// A session command that answers at once: the tails naming one never run

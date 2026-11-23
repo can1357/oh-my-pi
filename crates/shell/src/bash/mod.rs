@@ -46,6 +46,7 @@ pub mod fs;
 mod host;
 mod ids;
 mod image;
+mod indexed_array;
 pub mod invocation;
 pub mod ir;
 mod mem;
@@ -95,7 +96,7 @@ pub use crate::bash::{
 	store::{Attrs, StateStore, StoreError, VarValue},
 	term::{CtlChar, Pty, SetWhen, Shtty, TermFlag, Terminal, Termios},
 	vm::{
-		Budget, CallOutcome, ControlHandle, Cx, ExitCause, IoPoll, Profile, RunStdio, Script, Shell,
-		ShellApi, ShellInit, Step, ToolCall, VprocSel, WakeToken, vproc_layout,
+		Budget, CallOutcome, ControlHandle, Cx, ExitCause, IoPoll, ParseSnapshot, Profile, RunStdio,
+		Script, Shell, ShellApi, ShellInit, Step, ToolCall, VprocSel, WakeToken, vproc_layout,
 	},
 };

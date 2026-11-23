@@ -49,6 +49,23 @@ pub(crate) struct Chmod {
 
 matches_parser!(Chmod, app);
 
+#[cfg(target_os = "macos")]
+impl Chmod {
+	/// Unlike the ACL flags, these BSD forms can parse as a positional mode.
+	/// A matching filename is not an ACL operation.
+	pub(crate) fn has_acl_mode(&self) -> bool {
+		if self.matches.contains_id(MODE_OPTION) || self.matches.contains_id(options::REFERENCE) {
+			return false;
+		}
+		self.matches.get_one::<OsString>(options::MODE).is_some_and(|mode| {
+			let [b'+' | b'-' | b'=', b'a', suffix @ ..] = mode.as_bytes() else {
+				return false;
+			};
+			suffix.strip_suffix(b"#").unwrap_or(suffix).iter().all(|&byte| byte == b'i')
+		})
+	}
+}
+
 impl Utility for Chmod {
 	const NAME: &'static str = "chmod";
 
@@ -725,6 +742,43 @@ mod tests {
 	fn chmod(dir: &Path, argv: &[&str]) -> (i32, String, String) {
 		let (code, capture) = run_util::<Chmod>(argv, "", dir);
 		(code, capture.out(), capture.err())
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn defers_macos_acl_operations_but_not_unix_modes_or_filenames() {
+		use crate::extras::lacks_option;
+
+		for args in [
+			&["+a", "everyone deny delete", "f"][..],
+			&["-a", "everyone deny delete", "f"],
+			&["=a", "everyone deny delete", "f"],
+			&["-R", "+ai", "everyone deny delete", "d"],
+			&["+a#", "0", "everyone deny delete", "f"],
+			&["-a#", "0", "f"],
+			&["=a#", "0", "everyone deny delete", "f"],
+			&["-E", "f"],
+			&["-C", "f"],
+			&["-N", "f"],
+			&["-i", "f"],
+			&["-fI", "f"],
+			&["--", "-a", "everyone deny delete", "f"],
+		] {
+			let argv = std::iter::once("chmod").chain(args.iter().copied()).map(str::to_owned).collect();
+			assert!(lacks_option("chmod", argv), "{args:?}");
+		}
+
+		for args in [
+			&["+x", "f"][..],
+			&["a+r", "f"],
+			&["-w", "+a"],
+			&["+x", "+a"],
+			&["--reference", "+a", "f"],
+			&["--reference=f", "+a"],
+		] {
+			let argv = std::iter::once("chmod").chain(args.iter().copied()).map(str::to_owned).collect();
+			assert!(!lacks_option("chmod", argv), "{args:?}");
+		}
 	}
 
 	#[test]

@@ -244,6 +244,11 @@ export interface TspColProps {
 	ref?: string;
 	/** On `omp.tray.card`: the item's state. */
 	status?: TspTrayStatus;
+	/**
+	 * On an agent's `omp.tray.card` while `running`: the call it is in only waits on its own agents or
+	 * jobs (`wait`, `vibe_wait`), so it does no work of its own until that call returns.
+	 */
+	waiting?: boolean;
 	/** On an agent's `omp.tray.card`: epoch ms of its last operation (its latest tool call start, or when it settled). */
 	acted?: number;
 	/** On `omp.tray.card`: `false` when its closer look would add nothing to its face (`tray.peek` on it is ignored). */

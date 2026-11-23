@@ -5,12 +5,21 @@
  * crash, per-scope caps, idle daemon exit, and the unit env.
  */
 import { afterEach, describe, expect, it } from "bun:test";
-import { DAEMON_RESUME_LEASE_GRACE_MS } from "../../src/daemon/protocol";
+import { DAEMON_IDLE_EXIT_GRACE_ENV, DAEMON_RESUME_LEASE_GRACE_ENV } from "../../src/daemon/protocol";
 import { type DaemonConn, pidAlive, rejection, shProc, TestDaemon, until } from "../fixtures/daemon-proc-harness";
 
 const TEST_TIMEOUT_MS = 30_000;
-/** `IDLE_EXIT_GRACE_MS` of `src/daemon/server.ts`: how long an idle daemon lingers. */
-const DAEMON_IDLE_EXIT_GRACE_MS = 3_000;
+/**
+ * Reconnect lease grace of the daemons whose tests wait it out (`DAEMON_RESUME_LEASE_GRACE_ENV`; 15 s by default):
+ * long enough for a client to see the unit still held after its lease dropped or the daemon restarted.
+ */
+const LEASE_GRACE_MS = 750;
+const LEASE_GRACE_ENV = { [DAEMON_RESUME_LEASE_GRACE_ENV]: String(LEASE_GRACE_MS) };
+/**
+ * Idle-exit grace of the daemon whose test waits it out (`DAEMON_IDLE_EXIT_GRACE_ENV`; 3 s by default):
+ * long enough for the harness's first connect to land before the fresh daemon idles out.
+ */
+const IDLE_EXIT_GRACE_MS = 300;
 
 let daemon: TestDaemon | undefined;
 
@@ -68,7 +77,7 @@ describe.skipIf(process.platform === "win32")("daemon unit lifecycle", () => {
 	it(
 		"a lease lost to a dropped connection keeps the unit for the reconnect grace, then the idle policy stops it",
 		async () => {
-			const { daemon: d, conn: holder, root } = await startDaemon();
+			const { daemon: d, conn: holder, root } = await startDaemon(LEASE_GRACE_ENV);
 			const observer = await d.connect();
 			await holder.openProc("graced", shProc("exec sleep 60", root), { policy: { idleMs: 0 } });
 
@@ -79,18 +88,18 @@ describe.skipIf(process.platform === "win32")("daemon unit lifecycle", () => {
 				return unit.leases === 0 ? unit : undefined;
 			}, "the dropped lease");
 			expect(held.state).toBe("running");
-			expect(held.idleAt).toBeGreaterThanOrEqual(closedAt + DAEMON_RESUME_LEASE_GRACE_MS);
+			expect(held.idleAt).toBeGreaterThanOrEqual(closedAt + LEASE_GRACE_MS);
 
 			const exit = await observer.request({
 				op: "wait",
 				unit: "graced",
 				for: "exit",
-				timeoutMs: DAEMON_RESUME_LEASE_GRACE_MS + 10_000,
+				timeoutMs: LEASE_GRACE_MS + 10_000,
 			});
 			expect(exit.matched).toBe(true);
-			expect(exit.unit.exitedAt! - closedAt).toBeGreaterThanOrEqual(DAEMON_RESUME_LEASE_GRACE_MS);
+			expect(exit.unit.exitedAt! - closedAt).toBeGreaterThanOrEqual(LEASE_GRACE_MS);
 		},
-		DAEMON_RESUME_LEASE_GRACE_MS + TEST_TIMEOUT_MS,
+		TEST_TIMEOUT_MS,
 	);
 
 	it(
@@ -115,12 +124,17 @@ describe.skipIf(process.platform === "win32")("daemon unit lifecycle", () => {
 	it(
 		"a hold: persist unit outlives every client and keeps the daemon up past its idle grace; once it stops the idle daemon exits",
 		async () => {
-			const { daemon: d, conn, root } = await startDaemon();
+			const {
+				daemon: d,
+				conn,
+				root,
+			} = await startDaemon({ [DAEMON_IDLE_EXIT_GRACE_ENV]: String(IDLE_EXIT_GRACE_MS) });
 			const opened = await conn.openProc("keeper", shProc("exec sleep 60", root), { policy: { hold: "persist" } });
 			await conn.close();
 
-			// Negative contract: nothing may stop the unit or the daemon once the idle grace has passed.
-			await Bun.sleep(DAEMON_IDLE_EXIT_GRACE_MS + 1_500);
+			// Negative contract: nothing may stop the unit or the daemon once the idle grace has passed. The idle timer
+			// runs in the daemon process and has no observable event, so a real wait past it (plus timer slack) is the only probe.
+			await Bun.sleep(IDLE_EXIT_GRACE_MS + 300);
 			expect(d.running).toBe(true);
 			const back = await d.connect();
 			const unit = await back.describe("keeper");
@@ -173,7 +187,7 @@ describe.skipIf(process.platform === "win32")("daemon unit lifecycle", () => {
 	it(
 		"a hold: leases, survive: detached unit no client retakes after a daemon crash is idle-stopped once the reconnect grace passes",
 		async () => {
-			const { daemon: d, conn, root } = await startDaemon();
+			const { daemon: d, conn, root } = await startDaemon(LEASE_GRACE_ENV);
 			const opened = await conn.openProc("crash-orphan", shProc(TICKER, root), { policy: DETACHED_LEASES });
 
 			await d.kill();
@@ -182,20 +196,20 @@ describe.skipIf(process.platform === "win32")("daemon unit lifecycle", () => {
 			const held = await next.describe("crash-orphan");
 			expect(held.state).toBe("running");
 			expect(held.pids[0]).toBe(opened.unit.pids[0]);
-			expect(held.idleAt).toBeGreaterThanOrEqual(restartedAt + DAEMON_RESUME_LEASE_GRACE_MS);
+			expect(held.idleAt).toBeGreaterThanOrEqual(restartedAt + LEASE_GRACE_MS);
 
 			const exit = await next.request({
 				op: "wait",
 				unit: "crash-orphan",
 				for: "exit",
-				timeoutMs: DAEMON_RESUME_LEASE_GRACE_MS + 10_000,
+				timeoutMs: LEASE_GRACE_MS + 10_000,
 			});
 			expect(exit.matched).toBe(true);
 			expect(exit.unit.exitReason).toBe("idle");
-			expect(exit.unit.exitedAt! - restartedAt).toBeGreaterThanOrEqual(DAEMON_RESUME_LEASE_GRACE_MS);
+			expect(exit.unit.exitedAt! - restartedAt).toBeGreaterThanOrEqual(LEASE_GRACE_MS);
 			await until(() => (pidAlive(opened.unit.pids[0]) ? undefined : true), "idle-stopped process to exit");
 		},
-		DAEMON_RESUME_LEASE_GRACE_MS + TEST_TIMEOUT_MS,
+		TEST_TIMEOUT_MS,
 	);
 
 	it(

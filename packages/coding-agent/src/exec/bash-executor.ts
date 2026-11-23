@@ -169,10 +169,14 @@ export interface BashResult extends OutputSummary {
 	/** The native minimizer's rewrite, set when its output replaced the raw stream. */
 	minimized?: MinimizedMeta;
 	workingDir?: string;
+	/** The command ended in another directory than it started in (a `cd` in it); the next command starts in its own `cwd`. */
+	movedCwd?: boolean;
+	/** The command ended with `set -e` on; the next command starts with it off. */
+	errexit?: boolean;
 	/**
 	 * True when `exit` or an armed `set -e` cut the run short with commands
-	 * still left to run (whatever followed the abort did not run); a trailing
-	 * `exit` at the end of the input is not reported. Only set by the
+	 * still left to run. Shell cleanup can still run; a trailing `exit`
+	 * with no remaining work is not reported. Only set by the
 	 * embedded-shell path; PTY runs never set it.
 	 */
 	endedByExit?: boolean;
@@ -1133,6 +1137,8 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			exitCode: winner.result.exitCode,
 			cancelled: false,
 			workingDir: winner.result.workingDir,
+			...(winner.result.movedCwd ? { movedCwd: true } : {}),
+			...(winner.result.errexit ? { errexit: true } : {}),
 			endedByExit: winner.result.endedByExit === true,
 			...(minimizedMeta ? { minimized: minimizedMeta } : {}),
 			...settleTrace(),

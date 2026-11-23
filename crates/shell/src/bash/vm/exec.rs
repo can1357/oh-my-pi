@@ -491,6 +491,12 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			|| (errexit_failed
 				&& unit.mode.dialect() == Dialect::Zsh
 				&& zsh_errreturn_exits(k, cx, vp));
+		if armed_errexit {
+			// The failure committed the run to exit. Capture its continuation
+			// before ERR cleanup can end the run through a different transfer.
+			let unrun = top_frame(vp).pc;
+			capture_exit_report(k, vp, cx, vp.status, TopCut::At(unrun), ExitCause::Exit, false);
+		}
 		if failed_command && start_trap(k, vp, cx, TrapKey::Err) {
 			set_trap_line(vp, err_line);
 			for frame in &mut vp.frames[..fi.saturating_add(1)] {
@@ -963,19 +969,19 @@ fn frame_continuation(
 		let (target, falls_through) = match op.code {
 			Opcode::Jmp if op.a < index => (Some(loops.last().map_or(index + 1, |r| r.end)), false),
 			Opcode::Jmp => (Some(op.a), false),
+			Opcode::BrOk | Opcode::BrFail | Opcode::ForNext if repeats_body(op.a) => {
+				(Some(op.a), false)
+			},
 			Opcode::BrOk => match branch_zero {
 				Some(true) => (Some(op.a), false),
 				Some(false) => (None, true),
-				None if repeats_body(op.a) => (Some(op.a), false),
 				None => (Some(op.a), true),
 			},
 			Opcode::BrFail => match branch_zero {
 				Some(true) => (None, true),
 				Some(false) => (Some(op.a), false),
-				None if repeats_body(op.a) => (Some(op.a), false),
 				None => (Some(op.a), true),
 			},
-			Opcode::ForNext if repeats_body(op.a) => (Some(op.a), false),
 			Opcode::ForNext => (Some(op.a), true),
 			Opcode::CaseArm | Opcode::Redir => (Some(op.b), true),
 			_ => (None, true),
@@ -1108,6 +1114,19 @@ impl CutShortInput {
 		}
 	}
 
+	/// The parse context the attribution walk froze for the run's root
+	/// frame: the grammar and alias table the input after the abort still
+	/// parses under ([`walk_cut_short`]'s tail check). A probe of text the
+	/// abort never reached — text that would have joined this run's
+	/// stream — must parse under this table, not the live one: the abort's
+	/// EXIT cleanup runs after the freeze and may have rewritten it.
+	pub fn root_parse(&self) -> Option<&Arc<ParseSnapshot>> {
+		// `options` runs parallel to `frames`, root first: the run's own
+		// script frame is the parser a counterfactual continuation — and
+		// any segment a chain runner would submit next — parses under.
+		self.options.first()?.parse.as_ref()
+	}
+
 	/// The pipeline children whose status the verdict still waits on: of
 	/// the frames that would merge them (the op at their `pc` is a `Spawn`
 	/// and `pipefail` is on for them), those with no status yet.
@@ -1172,6 +1191,17 @@ pub fn walk_cut_short(
 	input: &CutShortInput,
 	mut child_status: impl FnMut(Vpid) -> Option<i32>,
 ) -> bool {
+	// At the run boundary the original script frame is already gone. An
+	// exit here may replace the status, but abandons only cleanup input.
+	// A trap above an active frame is not this boundary; its interrupted
+	// caller may still have ordinary work. Keep the capture for a chain's
+	// independent check of subsequent physical segments.
+	if matches!(
+		input.frames.first().map(|frame| &frame.kind),
+		Some(FrameSnap::Script { what: ScriptKind::Trap { key: TrapKey::Exit, .. }, .. })
+	) {
+		return false;
+	}
 	let (top_from, initial) = match input.top {
 		TopCut::At(from) => {
 			(from, WalkEnd { status: WalkStatus::of(input.status), transfer: None })
@@ -1714,27 +1744,47 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 	let observed = k.mask.contains(crate::bash::event::EventKind::UnitCompiled);
 	let depth = vp.frames.len();
 	if observed {
-		if let Some(origins) = k.trace_sources.get_mut(&vp.vpid) {
-			origins.retain(|at, _| *at <= depth);
+		if let Some(sources) = k.trace_sources.get_mut(&vp.vpid) {
+			sources.retain(|at, _| *at <= depth);
 		}
-		if let Some(Frame { kind: FrameKind::Script { src, pos, what: ScriptKind::Eval, .. }, .. }) = vp.frames.last()
+		// A frame's first command: learn where its script came from, while
+		// `vp.command` is still the command that pushed it. A nested shell's
+		// own script was recorded when it started.
+		if let Some(Frame { kind: FrameKind::Script { src, pos, what, .. }, .. }) = vp.frames.last()
 			&& pos.0 == 0
-			&& let Some(origin) = literal_script_origin(vp, src, false)
+			&& !matches!(what, ScriptKind::Run)
 		{
-			if k.trace_sources.len() < crate::bash::trace::history::HISTORY_EVENTS {
-				k.trace_sources.entry(vp.vpid).or_default().insert(depth, origin);
+			let source = match what {
+				ScriptKind::Eval => ScriptSource {
+					literal: literal_script_origin(vp, src, false),
+					runner:  command_origin(vp),
+				},
+				ScriptKind::Source | ScriptKind::Code(_) => {
+					ScriptSource { literal: None, runner: command_origin(vp) }
+				},
+				_ => ScriptSource::default(),
+			};
+			if source.literal.is_some() || source.runner.is_some() {
+				if k.trace_sources.len() < crate::bash::trace::history::HISTORY_EVENTS {
+					k.trace_sources
+						.entry(vp.vpid)
+						.or_default()
+						.insert(depth, source);
+				}
+			} else if let Some(sources) = k.trace_sources.get_mut(&vp.vpid) {
+				sources.remove(&depth);
 			}
-		} else if vp.frames.last().is_some_and(|frame| matches!(&frame.kind, FrameKind::Script { pos, what: ScriptKind::Eval, .. } if pos.0 == 0))
-			&& let Some(origins) = k.trace_sources.get_mut(&vp.vpid) { origins.remove(&depth); }
+		}
 	}
-	let source_origin = observed
+	let source = observed
 		.then(|| {
 			k.trace_sources
 				.get(&vp.vpid)
-				.and_then(|origins| origins.get(&depth))
+				.and_then(|sources| sources.get(&depth))
 				.copied()
 		})
-		.flatten();
+		.flatten()
+		.unwrap_or_default();
 	// zsh `parse_string`: a string (`eval`, a trap, `-c`) parses whole
 	// before it runs; its first command takes the snapshot the rest reuse.
 	let (snapped, snapshot) = match vp.frames.last().map(|f| &f.kind) {
@@ -2086,8 +2136,37 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		let now = cx.host.wall().secs;
 		builtins::history::remember(k, cx.store, vp, lines, now);
 	}
-	announce_at(k, cx, vp.vpid, vp.runs.front(), &unit, line, source_origin.as_ref());
+	announce_at(k, cx, vp.vpid, vp.runs.front(), &unit, line, source);
 	None
+}
+
+/// Where an observed script frame's text came from, by frame depth in
+/// [`Kernel::trace_sources`]: learned at the frame's first command, or when
+/// a nested shell starts.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScriptSource {
+	/// The literal argument that is the script ([`literal_script_origin`]).
+	pub literal: Option<crate::bash::event::SourceOrigin>,
+	/// The command running the script: `eval`, `.`, a builtin running code,
+	/// a nested shell ([`command_origin`]).
+	pub runner:  Option<crate::bash::event::SourceOrigin>,
+}
+
+/// The command `vp` runs, as the origin of a script it runs.
+pub(super) fn command_origin(vp: &Vproc) -> Option<crate::bash::event::SourceOrigin> {
+	let (unit, node) = vp.command.as_ref()?;
+	let span = unit.nodes.get(*node as usize)?;
+	Some(crate::bash::event::SourceOrigin {
+		vpid: vp.vpid,
+		node: *node,
+		span: crate::bash::event::SpanOwned {
+			unit: unit.id,
+			lo:   span.lo,
+			hi:   span.hi,
+			line: unit.line + span.line,
+			col:  span.col,
+		},
+	})
 }
 
 /// The literal argument that actually entered a native script. IR word ids
@@ -2182,7 +2261,7 @@ pub fn announce(
 		.get(&vpid)
 		.and_then(|origins| origins.get(&unit.id))
 		.copied();
-	announce_at(k, cx, vpid, run, unit, line, origin.as_ref());
+	announce_at(k, cx, vpid, run, unit, line, ScriptSource { literal: origin, runner: None });
 }
 
 fn announce_at(
@@ -2192,9 +2271,10 @@ fn announce_at(
 	run: Option<&Run>,
 	unit: &Unit,
 	line: u32,
-	parent: Option<&crate::bash::event::SourceOrigin>,
+	source: ScriptSource,
 ) {
 	if k.mask.contains(crate::bash::event::EventKind::UnitCompiled) && !unit.nodes.is_empty() {
+		let parent = source.literal.as_ref();
 		let key = (vpid, unit.id, parent.copied());
 		if let Some(parent) = parent {
 			record_source_origin(k, unit, vpid, *parent);
@@ -2216,7 +2296,12 @@ fn announce_at(
 				cx,
 				(vpid, unit.mode),
 				run,
-				EventData::UnitCompiled(CompiledUnit { unit, line, parent }),
+				EventData::UnitCompiled(CompiledUnit {
+					unit,
+					line,
+					parent,
+					runner: source.runner.as_ref(),
+				}),
 			);
 		}
 	}
@@ -4883,7 +4968,10 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					// Known by its program's OS pid if the first command it runs
 					// spawns it (bash's subshell `exec`s a lone simple command):
 					// readers of the pid wait for that decision.
-					if let Some(stage) = bang_stage(unit, info.stages[0].entry) {
+					if let Some(mut stage) = bang_stage(unit, info.stages[0].entry) {
+						if stage == BangStage::Lone {
+							stage = BangStage::SimpleJob;
+						}
 						k.bangs.push(Bang { vproc: vpid, job: vpid, stage });
 					}
 					let job = k.job_id(cx.store);
@@ -6618,6 +6706,81 @@ mod tests {
 				"verdict cannot change: {suffix:?}"
 			);
 			assert_eq!(shell.ended_by_exit_cut_short(&mut store, run), cut, "suffix {suffix:?}");
+		}
+	}
+
+	#[test]
+	fn exit_classification_only_counts_frames_with_still_pending_children() {
+		use crate::{
+			bash::{
+				Budget, Engine, EngineConfig, MemStore, Script, Shell, ShellInit, Step, store::Change,
+			},
+			testkit::FakeHost,
+		};
+
+		// Both lastpipe stages capture a live sibling. Once one sibling has
+		// exited, only the other frame can still affect the verdict. A known
+		// failure makes the remaining sibling irrelevant to either operator.
+		for (first, second, hinges) in [
+			(None, None, true),
+			(Some(0), None, true),
+			(None, Some(0), true),
+			(Some(1), None, false),
+			(None, Some(1), false),
+			(Some(0), Some(0), false),
+			(Some(0), Some(1), false),
+			(Some(1), Some(0), false),
+			(Some(1), Some(1), false),
+		] {
+			for op in ["&&", "||"] {
+				let mut store = MemStore::default();
+				let mut host = FakeHost::new();
+				let engine = Engine::new(EngineConfig::default());
+				let mut cx = Cx { host: &mut host, store: &mut store };
+				let mut shell = Shell::create(&engine, &mut cx, ShellInit::default()).unwrap();
+				let command = format!(
+					"set -o pipefail; shopt -s lastpipe; while :; do :; done | {{ while :; do :; done \
+					 | exit 0; }} {op} :"
+				);
+				let run = shell.submit(Script::command(command.as_bytes()));
+				let status = (0..20).find_map(|_| match shell.step(&mut cx, Budget::default()) {
+					Step::Done { run: done, status } if done == run => Some(status),
+					_ => None,
+				});
+				assert_eq!(status, Some(0));
+				let frames = shell
+					.k
+					.pending_cut_short
+					.as_ref()
+					.unwrap()
+					.1
+					.pending_child_frames();
+				let [(_, outer), (_, inner)] = frames.as_slice() else {
+					panic!("expected two pending pipeline frames: {frames:?}");
+				};
+				for (children, status) in [(outer, first), (inner, second)] {
+					let [child] = children.as_slice() else {
+						panic!("expected one sibling")
+					};
+					if let Some(status) = status {
+						cx.store
+							.apply(Change::Put(Key::Proc(*child), Record::Proc {
+								parent: Some(Vpid(1)),
+								status: Some(status),
+							}))
+							.unwrap();
+					}
+				}
+				assert_eq!(
+					shell.exit_children_pending(cx.store, run),
+					first.is_none() || second.is_none()
+				);
+				assert_eq!(
+					shell.exit_verdict_hinges_on_children(cx.store, run),
+					hinges,
+					"{first:?}, {second:?}, {op}"
+				);
+			}
 		}
 	}
 

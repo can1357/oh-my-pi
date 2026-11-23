@@ -30,6 +30,7 @@ rust_library(
         "util.chmod",
         "util.cksum",
         "util.cmp",
+        "util.column",
         "util.combine",
         "util.comm",
         "util.cp",

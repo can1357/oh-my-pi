@@ -718,8 +718,12 @@ class BashResult:
     artifact_error: JsonObject | None = None
     minimized: JsonObject | None = None
     working_dir: str | None = None
+    moved_cwd: bool | None = None
+    """The command ended in another directory than it started in; the next command starts in its own cwd."""
+    errexit: bool | None = None
+    """The command ended with `set -e` on; the next command starts with it off."""
     ended_by_exit: bool | None = None
-    """Whether `exit` or an armed `set -e` cut the run short with commands still left to run: whatever followed the abort did not run. A trailing `exit` at the end of the input is not reported."""
+    """Whether `exit` or an armed `set -e` left ordinary command input unrun. Shell cleanup can still run. An `exit` with no remaining work is not reported."""
     ephemeral_shell: bool | None = None
     """Whether the run's state was not retained in the session's persistent shell after cleanup. A fork adopted into a retained session is not ephemeral; an unadopted fork or a released shell is."""
     images: tuple[ImageContent, ...] | None = None
@@ -2182,6 +2186,8 @@ def parse_bash_result(value: object, path: str = "BashResult") -> BashResult:
         artifact_error=optional(payload, "artifactError", decode_json_object, path),
         minimized=optional(payload, "minimized", decode_json_object, path),
         working_dir=optional(payload, "workingDir", decode_str, path),
+        moved_cwd=optional(payload, "movedCwd", decode_bool, path),
+        errexit=optional(payload, "errexit", decode_bool, path),
         ended_by_exit=optional(payload, "endedByExit", decode_bool, path),
         ephemeral_shell=optional(payload, "ephemeralShell", decode_bool, path),
         images=optional(payload, "images", array(parse_image_content), path),

@@ -18,6 +18,53 @@ async fn run_case(shell: &Shell, command: &str) -> (ShellRunResult, String) {
 	(result, rx.try_iter().collect())
 }
 
+#[tokio::test]
+async fn exit_classification_later_loop_condition_does_not_replay_body() {
+	let _guard = shell_test_lock().lock().await;
+	for (body, printed, expected) in [
+		("while exit 0; do printf body; done", "", true),
+		("until exit 1; do printf body; done", "", true),
+		("i=0; while ((i++ == 0)) || exit 0; do printf body; done", "body", false),
+		("i=0; until ((i++ != 0)) && exit 1; do printf body; done", "body", false),
+	] {
+		for tail in ["", "; printf tail"] {
+			let command = format!("{body}{tail}");
+			let (result, output) = run_case(&Shell::new(None), &command).await;
+			assert_eq!(output, printed, "{command}");
+			assert_eq!(result.ended_by_exit, expected || !tail.is_empty(), "{command}");
+		}
+	}
+}
+
+#[tokio::test]
+async fn exit_classification_err_cleanup_cannot_mask_armed_errexit() {
+	let _guard = shell_test_lock().lock().await;
+	for (trap, armed, status) in [("export -Z", true, 2), ("export -Z", false, 2), (":", true, 1)] {
+		for tail in ["", "; printf never"] {
+			let setting = if armed { "-e" } else { "+e" };
+			let command = format!("set -o posix; set {setting}; trap '{trap}' ERR; false{tail}");
+			let (result, output) = run_case(&Shell::new(None), &command).await;
+			assert_eq!(result.exit_code, Some(status), "{command}");
+			assert!(!output.contains("never"), "{command}: {output}");
+			assert_eq!(result.ended_by_exit, armed && !tail.is_empty(), "{command}");
+		}
+	}
+}
+
+#[tokio::test]
+async fn exit_classification_boundary_cleanup_is_not_ordinary_input() {
+	let _guard = shell_test_lock().lock().await;
+	for (trap, status) in [("exit 7", 7), ("set -e; false", 1)] {
+		for (body, cut_short) in [("printf body", false), ("exit 3; printf unrun", true)] {
+			let command = format!("trap 'printf cleanup; {trap}; printf unrun' EXIT; {body}");
+			let (result, output) = run_case(&Shell::new(None), &command).await;
+			assert_eq!(result.exit_code, Some(status), "{command}");
+			assert_eq!(output, if cut_short { "cleanup" } else { "bodycleanup" }, "{command}");
+			assert_eq!(result.ended_by_exit, cut_short, "{command}");
+		}
+	}
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn exit_classification_segmented_continuation_uses_function_status() {

@@ -969,7 +969,8 @@ async fn persistent_shell_reaps_early_exiting_background_pipeline_stage() {
 }
 
 /// `exit` and errexit end the command, not the session: later runs keep
-/// the variables, functions, and options set before them.
+/// the variables and functions set before them. Errexit itself ends with
+/// the command that turned it on.
 #[tokio::test(flavor = "multi_thread")]
 async fn exit_and_errexit_keep_session_state() {
 	let _guard = shell_test_lock().lock().await;
@@ -987,12 +988,47 @@ async fn exit_and_errexit_keep_session_state() {
 	};
 	let state_intact = "test \"$PI_KEPT\" = kept && pi_kept_fn";
 
-	assert_eq!(exit_code("set -e; PI_KEPT=kept; pi_kept_fn() { true; }").await, Some(0));
-	assert_eq!(exit_code("false; true").await, Some(1), "errexit stops the command");
+	let set_state = "set -e; PI_KEPT=kept; pi_kept_fn() { true; }; false; true";
+	assert_eq!(exit_code(set_state).await, Some(1), "errexit stops the command");
 	assert_eq!(exit_code(state_intact).await, Some(0), "state lost after errexit");
+	assert_eq!(exit_code("false; true").await, Some(0), "errexit carried into a later command");
 	assert_eq!(exit_code("exit 3").await, Some(3));
 	assert_eq!(exit_code(state_intact).await, Some(0), "state lost after exit");
-	assert_eq!(exit_code("false; exit 0").await, Some(1), "errexit option lost");
+}
+
+/// A command's `set -e` holds across every run of its segmented chain, and
+/// the next command starts without it; the result says what the command left
+/// behind (errexit on, another directory).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn errexit_and_cd_last_one_segmented_command() {
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("minimizer directory");
+	let minimizer = printf_minimizer(&root.path().join("minimizer.toml"), None);
+	let shell = Shell::new(Some(ShellOptions { minimizer: Some(minimizer), ..Default::default() }));
+	let start = root.path().to_string_lossy().into_owned();
+	let run = async |command: String| {
+		let options = ShellRunOptions { command, cwd: Some(start.clone()), ..Default::default() };
+		shell
+			.run(options, None, CancelToken::default())
+			.await
+			.expect("run")
+	};
+	let repeated = format!("printf '{}'", "hello\\n".repeat(200));
+
+	let left = run(format!("{repeated}; set -e; cd /; false; {repeated}")).await;
+	let filter = left.minimized.as_ref().map(|m| m.filter.as_str());
+	assert_eq!(filter, Some("chain"), "the command must run segment by segment");
+	assert_eq!(
+		(left.exit_code, left.moved_cwd, left.errexit, left.ended_by_exit),
+		(Some(1), true, true, true)
+	);
+
+	let fresh = run(format!("{repeated}; false; {repeated}")).await;
+	assert_eq!(
+		(fresh.exit_code, fresh.moved_cwd, fresh.errexit, fresh.ended_by_exit),
+		(Some(0), false, false, false)
+	);
 }
 
 /// A run cut short by `exit` or errexit says so in its result, so a caller
@@ -1015,11 +1051,12 @@ async fn exit_and_errexit_report_ended_by_exit() {
 
 	assert!(!run("true").await.ended_by_exit);
 	assert!(!run("false").await.ended_by_exit, "a failing last statement is not an abort");
-	assert_eq!(run("set -e; PI_ARMED=1").await.exit_code, Some(0));
-	let aborted = run("false; echo never").await;
+	let aborted = run("set -e; PI_ARMED=1; false; echo never").await;
 	assert_eq!(aborted.exit_code, Some(1));
 	assert!(aborted.ended_by_exit, "errexit hid the statements after the failing one");
-	assert!(!run("echo $PI_ARMED").await.ended_by_exit);
+	let followup = run("false; test \"$PI_ARMED\" = 1").await;
+	assert_eq!(followup.exit_code, Some(0), "the variable persists but errexit resets");
+	assert!(!followup.ended_by_exit);
 	assert!(!run("exit 3").await.ended_by_exit, "a trailing exit ends nothing early");
 	assert!(
 		run("exit 0; echo never").await.ended_by_exit,
@@ -1053,49 +1090,39 @@ async fn nested_scope_fatal_does_not_hide_a_later_abort() {
 			.await
 			.expect("run")
 	};
-	let arm = "set -e; PI_NESTED_ARMED=1";
+	let abort = "set -e; false; echo never";
 
-	// An `exec` replacement inside a subshell ends the subshell only. Each
-	// setup disarms errexit first: an abort leaves it armed for the session.
-	assert_eq!(run("set +e; (exec /bin/true); true").await.exit_code, Some(0));
-	assert_eq!(run(arm).await.exit_code, Some(0));
-	let aborted = run("false; echo never").await;
+	// An `exec` replacement inside a subshell ends the subshell only.
+	assert_eq!(run("(exec /bin/true); true").await.exit_code, Some(0));
+	let aborted = run(abort).await;
 	assert_eq!(aborted.exit_code, Some(1));
 	assert!(aborted.ended_by_exit, "a subshell `exec` hid the later abort");
 
 	// A POSIX-fatal error inside a subshell, likewise.
 	assert_eq!(
-		run("set +e; set -o posix; (for 1 in a; do :; done); set +o posix; true")
+		run("set -o posix; (for 1 in a; do :; done); set +o posix; true")
 			.await
 			.exit_code,
 		Some(0)
 	);
-	assert_eq!(run(arm).await.exit_code, Some(0));
-	let aborted = run("false; echo never").await;
+	let aborted = run(abort).await;
 	assert_eq!(aborted.exit_code, Some(1));
 	assert!(aborted.ended_by_exit, "a subshell POSIX-fatal hid the later abort");
 
 	// An `exec` inside a command substitution, likewise.
-	assert_eq!(
-		run("set +e; PI_CS_OUT=$(exec /bin/true); true")
-			.await
-			.exit_code,
-		Some(0)
-	);
-	assert_eq!(run(arm).await.exit_code, Some(0));
-	let aborted = run("false; echo never").await;
+	assert_eq!(run("PI_CS_OUT=$(exec /bin/true); true").await.exit_code, Some(0));
+	let aborted = run(abort).await;
 	assert_eq!(aborted.exit_code, Some(1));
 	assert!(aborted.ended_by_exit, "a command-substitution `exec` hid the later abort");
 
 	// A forked subshell running an exit-trapped function, likewise.
 	assert_eq!(
-		run("set +e; pi_nested_fn() { trap 'true' EXIT; }; ( pi_nested_fn ); true")
+		run("pi_nested_fn() { trap 'true' EXIT; }; ( pi_nested_fn ); true")
 			.await
 			.exit_code,
 		Some(0)
 	);
-	assert_eq!(run(arm).await.exit_code, Some(0));
-	let aborted = run("false; echo never").await;
+	let aborted = run(abort).await;
 	assert_eq!(aborted.exit_code, Some(1));
 	assert!(aborted.ended_by_exit, "a trapped fork hid the later abort");
 

@@ -3215,7 +3215,13 @@ pub struct BashResult {
 	pub minimized: Option<Map<String, Value>>,
 	#[serde(rename = "workingDir", default, skip_serializing_if = "Option::is_none")]
 	pub working_dir: Option<String>,
-	/// Whether `exit` or an armed `set -e` cut the run short with commands still left to run: whatever followed the abort did not run. A trailing `exit` at the end of the input is not reported.
+	/// The command ended in another directory than it started in; the next command starts in its own cwd.
+	#[serde(rename = "movedCwd", default, skip_serializing_if = "Option::is_none")]
+	pub moved_cwd: Option<bool>,
+	/// The command ended with `set -e` on; the next command starts with it off.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub errexit: Option<bool>,
+	/// Whether `exit` or an armed `set -e` left ordinary command input unrun. Shell cleanup can still run. An `exit` with no remaining work is not reported.
 	#[serde(rename = "endedByExit", default, skip_serializing_if = "Option::is_none")]
 	pub ended_by_exit: Option<bool>,
 	/// Whether the run's state was not retained in the session's persistent shell after cleanup. A fork adopted into a retained session is not ephemeral; an unadopted fork or a released shell is.

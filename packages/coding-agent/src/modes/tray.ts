@@ -82,6 +82,8 @@ export interface TrayAgentItem extends TrayCardFace {
 	readonly item: "agent";
 	/** Epoch ms of its latest tool call start, or of the moment it settled. */
 	readonly acted: number;
+	/** Running, but inside a call that only waits on its own agents or jobs ({@link WAITING_TOOLS}). */
+	readonly waiting: boolean;
 	readonly unread: number;
 	/** The call's tool name; empty when the line is plain text. */
 	readonly tool: string;
@@ -558,10 +560,13 @@ function agentItem(
 	const type = agentType(id, session, ref, name);
 	const doing = agentDoing(status, session, ref, job);
 	const tools = session?.progress?.toolCount;
+	// A revived agent's observer snapshot is its previous run's: only a live session says what it is in now.
+	const current = session?.status === "active" ? session.progress?.currentTool : undefined;
+	const waiting = status === "running" && current !== undefined && WAITING_TOOLS[current] === true;
 	const aria = [
 		name,
 		type,
-		status,
+		waiting ? "waiting" : status,
 		`${doing.tool ? `${doing.tool} · ` : ""}${doing.text}`,
 		tools !== undefined ? formatCount("tool", tools) : "",
 	];
@@ -573,6 +578,7 @@ function agentItem(
 		status,
 		aria: aria.filter(Boolean).join(", "),
 		acted: remembered.acted,
+		waiting,
 		unread: input.unread(id),
 		tool: doing.tool,
 		text: doing.text,
@@ -662,6 +668,7 @@ function finishedAgentItem(
 		status,
 		aria: aria.filter(Boolean).join(", "),
 		acted,
+		waiting: false,
 		unread: input.unread(id),
 		tool: "",
 		text,
@@ -910,13 +917,14 @@ function isLive(status: TspTrayStatus): boolean {
 	return status === "queued" || status === "running";
 }
 
-function describeDot(status: TspTrayStatus): NativeNode {
+/** A card's status dot: it pulses while the item works, and holds still while an agent only waits. */
+function describeDot(status: TspTrayStatus, waiting = false): NativeNode {
 	const tone = toneOf(status);
 	return node(
 		"text",
 		{
 			role: "omp.tray.dot",
-			spans: [span("●", tone, status === "running" ? { fx: "pulse" } : undefined)],
+			spans: [span("●", tone, status === "running" && !waiting ? { fx: "pulse" } : undefined)],
 			wrap: "none",
 		},
 		undefined,
@@ -954,6 +962,7 @@ function cardProps(item: TrayItem): TspProps<"col"> {
 		status: item.status,
 		tone: toneOf(item.status),
 		...(item.item === "agent" ? { acted: item.acted } : {}),
+		...(item.item === "agent" && item.waiting ? { waiting: true } : {}),
 		...(item.look ? {} : { look: false }),
 		aria: item.aria,
 	};
@@ -965,7 +974,7 @@ export function describeTrayAgentCard(item: TrayAgentItem, now: number): NativeN
 		"row",
 		{ role: "omp.tray.head", gap: "xs", align: "center" },
 		compact([
-			describeDot(item.status),
+			describeDot(item.status, item.waiting),
 			describeName(item.name),
 			item.unread > 0 &&
 				node("badge", { role: "omp.tray.unread", text: String(item.unread), tone: "warning" }, undefined, "unread"),

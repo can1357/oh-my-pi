@@ -200,3 +200,43 @@ fn result_unwrap_and_nullable() {
 	assert!(CancelSubagentCommand::decode(None).is_err());
 	assert!(<SteerCommand as Command>::decode(None).is_ok());
 }
+
+#[test]
+fn bash_result_decodes_the_exit_attribution_fields() {
+	let raw = json!({
+		"output": "hello",
+		"cancelled": false,
+		"truncated": false,
+		"totalLines": 1,
+		"totalBytes": 5,
+		"outputLines": 1,
+		"outputBytes": 5,
+		"exitCode": 3,
+		"endedByExit": true,
+		"ephemeralShell": false,
+	});
+	let decoded: BashResult = serde_json::from_value(raw).unwrap();
+	assert_eq!(decoded.exit_code, Some(3));
+	assert_eq!(decoded.ended_by_exit, Some(true));
+	assert_eq!(decoded.ephemeral_shell, Some(false));
+	let encoded = serde_json::to_value(&decoded).unwrap();
+	assert_eq!(encoded["endedByExit"], true);
+	assert_eq!(encoded["ephemeralShell"], false);
+	// Older peers omit both: decoding keeps them unset and encoding omits
+	// them again.
+	let legacy = json!({
+		"output": "",
+		"cancelled": false,
+		"truncated": false,
+		"totalLines": 0,
+		"totalBytes": 0,
+		"outputLines": 0,
+		"outputBytes": 0,
+	});
+	let decoded: BashResult = serde_json::from_value(legacy).unwrap();
+	assert_eq!(decoded.ended_by_exit, None);
+	assert_eq!(decoded.ephemeral_shell, None);
+	let encoded = serde_json::to_value(&decoded).unwrap();
+	assert!(encoded.get("endedByExit").is_none());
+	assert!(encoded.get("ephemeralShell").is_none());
+}

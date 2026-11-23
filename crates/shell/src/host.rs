@@ -633,6 +633,20 @@ impl crate::bash::Host for PiHost {
 				))
 	}
 
+	/// Only extras whose whole effect is a process lifetime (`sleep`, `yes`,
+	/// `nohup`, `timeout`) give way to `PATH`'s program in a lone `&` job, so
+	/// `$!` names a pid OS tools see. Any other extra keeps its own dialect
+	/// and the `scheme://` paths only builtins open.
+	fn prefers_background_program(&mut self, name: &BStr, resolved: &Resolved) -> bool {
+		const PROGRAMS: [&[u8]; 4] = [b"nohup", b"sleep", b"timeout", b"yes"];
+		// A GNU-style invocation must not acquire System32's incompatible
+		// grammar just because it has an `&` (notably `timeout N COMMAND`).
+		if cfg!(windows) && crate::cmd_dialect::shadows_windows_program(name) {
+			return false;
+		}
+		matches!(resolved, Resolved::Native(_) | Resolved::Tool(_)) && PROGRAMS.contains(&name.as_bytes())
+	}
+
 	/// The run's session commands ([`crate::commands`]) come before shell
 	/// functions and aliases of their names, so nothing the persistent shell
 	/// defined earlier stands in for one.

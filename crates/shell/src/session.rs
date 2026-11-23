@@ -17,6 +17,8 @@
 //! **State.** Variables, functions, aliases, options, traps and the working
 //! directory live in the store and the root virtual process; every command
 //! runs on the root ([`VprocSel::Root`]), so they persist across commands.
+//! A host that wants each of its commands to start like a new `bash -c` sets
+//! [`RunOptions::reset_errexit`] on the command's first run.
 //! An `EXIT` trap is consumed when it fires at a run boundary; other traps
 //! remain installed.
 //! Each command starts with its own standard streams, even if an earlier
@@ -77,9 +79,9 @@ use tokio_util::sync::CancellationToken;
 use crate::{
 	bash::{
 		Budget, CallId, Cx, Engine, EngineConfig, EventMask, EventSink, Fs, ImageDiff, MemStore,
-		PipeTap, Profile, RestoreError, RestoreOpts, RunId, Script, Shell, ShellError, ShellInit,
-		Signal, StateStore, Step, ToolCall, UnitId, VprocSel,
-		store::{BlobSlot, Key, MiscKey, Record, Table},
+		ParseSnapshot, PipeTap, Profile, RestoreError, RestoreOpts, RunId, Script, Shell, ShellError,
+		ShellInit, Signal, StateStore, Step, ToolCall, UnitId, VprocSel,
+		store::{BlobSlot, Key, MiscKey, OptId, Record, Table},
 	},
 	commands::SessionCommands,
 	host::{PiHost, SpawnObserver, TERM_GRACE},
@@ -170,6 +172,11 @@ pub struct RunOptions {
 	/// observer receives units lazily, including persistent function bodies
 	/// only when this command executes them.
 	pub events:         Option<Arc<dyn EventSink>>,
+	/// Turn `errexit` off before the command, as a new `bash -c` starts. A
+	/// host running one command as several runs sets it on the first only,
+	/// so a `set -e` holds for the rest of that command but never stops a
+	/// later one ([`RunOutcome::errexit`] says one was left on).
+	pub reset_errexit:  bool,
 }
 
 impl RunOptions {
@@ -185,6 +192,7 @@ impl RunOptions {
 			commands:       None,
 			text_capture:   false,
 			events:         None,
+			reset_errexit:  false,
 		}
 	}
 }
@@ -200,6 +208,7 @@ impl std::fmt::Debug for RunOptions {
 			.field("speech", &self.speech)
 			.field("commands", &self.commands)
 			.field("events", &self.events.is_some())
+			.field("reset_errexit", &self.reset_errexit)
 			.finish()
 	}
 }
@@ -236,8 +245,17 @@ pub struct RunOutcome {
 	/// `exit` at the end of the input ends the command exactly where its end
 	/// would have, and is not reported as cutting it short.
 	pub cut_short:  bool,
+	/// The parse context frozen at the run's `exit`-family abort — `None`
+	/// when the run took no exit freeze. A caller judging text the abort
+	/// never reached by the parser's view
+	/// ([`Session::source_holds_command`]) passes it back, so the probe
+	/// classifies under the abort-time grammar and alias table, not the
+	/// live one the abort's EXIT cleanup may since have changed.
+	pub exit_parse: Option<Arc<ParseSnapshot>>,
 	/// The shell's working directory after the command.
 	pub cwd:        BString,
+	/// `errexit` was on when the command ended.
+	pub errexit:    bool,
 }
 
 /// Failure of a [`Session`] call.
@@ -698,14 +716,10 @@ impl Session {
 	}
 
 	/// Whether `source` still holds a command for the parser that would
-	/// read it: the grammar features and aliases in effect now, parsed
-	/// with `commands` — the session commands of the runs that would read
-	/// it, the one part of a run's context the cleanup between runs
-	/// clears that the parser can see: while a run's commands are
-	/// installed, each of their names preempts the alias of that name, so
-	/// the probe must not expand it. The rest of a run's context — stdio,
-	/// taps, speech, the env overlay — cannot change what the parser
-	/// holds. Parse-only, nothing runs ([`Shell::source_holds_command`]).
+	/// read it: the grammar features and aliases in effect now, parsed with
+	/// `commands` — the session commands of the runs that would read
+	/// it. Each of their names preempts the alias of that name.
+	/// Parse-only, nothing runs ([`Shell::source_holds_command`]).
 	/// Used to judge text a run cut short never reached, the same
 	/// predicate the cut-short walk applies to unread input.
 	///
@@ -717,10 +731,28 @@ impl Session {
 		source: &[u8],
 		commands: Option<SessionCommands>,
 	) -> Result<bool, SessionError> {
+		self
+			.source_holds_command_with_env(source, commands, Vec::new(), None)
+			.await
+	}
+
+	pub(crate) async fn source_holds_command_with_env(
+		&self,
+		source: &[u8],
+		commands: Option<SessionCommands>,
+		env: Vec<(BString, BString)>,
+		parse: Option<Arc<ParseSnapshot>>,
+	) -> Result<bool, SessionError> {
 		let jobs = self.jobs.as_ref().ok_or(SessionError::Closed)?;
 		let (reply_tx, reply_rx) = flume::bounded(1);
 		jobs
-			.send(Request::HoldsCommand(source.to_vec(), commands, reply_tx))
+			.send(Request::HoldsCommand {
+				source: source.to_vec(),
+				commands,
+				env,
+				parse,
+				reply: reply_tx,
+			})
 			.map_err(|_| SessionError::Closed)?;
 		self.waker.wake_by_ref();
 		reply_rx
@@ -862,8 +894,16 @@ enum Request {
 	/// Count the background jobs running an external.
 	LiveJobs(flume::Sender<usize>),
 	/// Parse-only probe: does this source still hold a command, under the
-	/// session commands of the runs that would read it?
-	HoldsCommand(Vec<u8>, Option<SessionCommands>, flume::Sender<bool>),
+	/// session commands and environment of the run that would read it —
+	/// and, when `parse` carries an abort's frozen context, under that
+	/// abort-time grammar instead of the live one?
+	HoldsCommand {
+		source:   Vec<u8>,
+		commands: Option<SessionCommands>,
+		env:      Vec<(BString, BString)>,
+		parse:    Option<Arc<ParseSnapshot>>,
+		reply:    flume::Sender<bool>,
+	},
 }
 
 /// One command for the driver.
@@ -900,7 +940,7 @@ impl Driver {
 				Ok(Request::LiveJobs(reply)) => {
 					let _ = reply.send(self.shell.live_external_jobs(&mut self.store));
 				},
-				Ok(Request::HoldsCommand(source, commands, reply)) => {
+				Ok(Request::HoldsCommand { source, commands, env, parse, reply }) => {
 					// Between runs the host's command slot is clear — the last
 					// run's cleanup emptied it — but the parser must see the
 					// commands the next run of this source would install: each
@@ -908,9 +948,12 @@ impl Driver {
 					// under them, then put the slot back as it was.
 					let between_runs = self.host.commands();
 					self.host.set_commands(commands);
-					let holds = self.shell.source_holds_command(
-						&mut Cx { host: &mut self.host, store: &mut self.store },
+					let holds = self.shell.source_holds_command_with_env(
+						&mut self.host,
+						&mut self.store,
 						&source,
+						env,
+						parse.as_deref(),
 					);
 					self.host.set_commands(between_runs);
 					let _ = reply.send(holds);
@@ -948,7 +991,13 @@ impl Driver {
 			commands,
 			text_capture,
 			events,
+			reset_errexit,
 		} = options;
+		if reset_errexit {
+			self
+				.shell
+				.set_root_option(&mut self.store, OptId::Errexit, false);
+		}
 		self.host.set_speech(speech);
 		self.host.set_pipe_tap(pipe_tap);
 		self.host.set_commands(commands);
@@ -1019,6 +1068,7 @@ impl Driver {
 		let exited = self.shell.ended_by_exit(run);
 		let exit_cause = self.shell.exit_cause(run);
 		let cut_short = self.settled_cut_short(run).await;
+		let exit_parse = self.shell.exit_parse_snapshot(run);
 		self.settle().await;
 		self.children.set_active(false);
 		self.host.streams().clear();
@@ -1030,6 +1080,7 @@ impl Driver {
 		self.restore_overlay(saved);
 		self.image.publish(&mut self.store);
 		let cwd = store_cwd(&self.store);
+		let errexit = self.shell.root_option(&mut self.store, OptId::Errexit);
 		// The caller may have stopped waiting (dropped future).
 		let _ = reply.send(RunOutcome {
 			status,
@@ -1037,7 +1088,9 @@ impl Driver {
 			exited,
 			exit_cause,
 			cut_short,
+			exit_parse,
 			cwd,
+			errexit,
 		});
 	}
 
@@ -2202,6 +2255,24 @@ mod tests {
 				0
 			);
 		}
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn reset_errexit_turns_off_only_errexit_before_the_run() {
+		let mut s = session();
+		let c = sh(&mut s, "set -eu; false; echo no").await;
+		assert_eq!((c.stdout.as_str(), c.outcome.errexit), ("", true));
+		// Without the reset a later run keeps it, as a host's next segment must.
+		assert!(sh(&mut s, "(exit 4); echo no").await.outcome.exited);
+		let fresh = RunOptions {
+			reset_errexit: true,
+			..RunOptions::new("false; echo \"$-\"; echo \"$SHELLOPTS\"")
+		};
+		let c = capture(&mut s, fresh).await;
+		assert_eq!((c.outcome.status, c.outcome.errexit), (0, false));
+		let (flags, shellopts) = c.stdout.trim_end().split_once('\n').unwrap();
+		assert!(flags.contains('u') && !flags.contains('e'), "{flags}");
+		assert!(shellopts.contains("nounset") && !shellopts.contains("errexit"), "{shellopts}");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

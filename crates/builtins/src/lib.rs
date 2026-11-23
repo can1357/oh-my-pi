@@ -25,6 +25,7 @@ mod speech;
 mod stdio;
 /// The shell's locale categories, shared by the locale-aware utilities.
 #[cfg(any(
+	feature = "util.column",
 	feature = "util.date",
 	feature = "util.df",
 	feature = "util.du",
@@ -101,6 +102,8 @@ mod shasum;
 mod chmod;
 #[cfg(feature = "util.cmp")]
 mod cmp;
+#[cfg(feature = "util.column")]
+mod column;
 #[cfg(feature = "util.comm")]
 mod comm;
 #[cfg(feature = "util.cp")]
@@ -111,6 +114,8 @@ mod combine;
 mod cut;
 #[cfg(feature = "util.date")]
 mod date;
+#[cfg(any(feature = "util.date", feature = "util.find"))]
+mod date_parser;
 #[cfg(feature = "util.dd")]
 mod dd;
 #[cfg(feature = "util.df")]

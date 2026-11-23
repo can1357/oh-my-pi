@@ -43,6 +43,10 @@ describe("RPC frame encoding", () => {
 			[{ endedByExit: true }, true],
 			[{ ephemeralShell: false }, true],
 			[{ ephemeralShell: true }, true],
+			[{ movedCwd: true, errexit: false, endedByExit: true, ephemeralShell: false }, true],
+			[{ movedCwd: false, errexit: true, endedByExit: false, ephemeralShell: true }, true],
+			[{ movedCwd: 1 }, false],
+			[{ errexit: "true" }, false],
 			[{ endedByExit: "true", ephemeralShell: false }, false],
 			[{ endedByExit: true, ephemeralShell: 1 }, false],
 		] as const) {
@@ -53,7 +57,7 @@ describe("RPC frame encoding", () => {
 				const decoder = new RpcFrameDecoder();
 				const decoded = decoder.push(JSON.parse(encoder.encode(frame))) as typeof frame;
 				expect(decoded).toEqual(frame);
-				for (const flag of ["endedByExit", "ephemeralShell"] as const) {
+				for (const flag of ["movedCwd", "errexit", "endedByExit", "ephemeralShell"] as const) {
 					expect(Object.hasOwn(decoded.data, flag)).toBe(Object.hasOwn(fields, flag));
 				}
 				expect(bash.allows(decoded.data)).toBe(valid);
