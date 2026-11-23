@@ -12,6 +12,7 @@ import type { AgentSession } from "../../session/agent-session";
 import { escapeHarnessTags } from "../../session/harness-tags";
 import { BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE, buildTitleDriftTurns } from "../../session/messages";
 import { isHiddenUserCompanion } from "../../session/queued-messages";
+import { TAN_FORK_BOUNDARY_CUSTOM_TYPE } from "../../session/session-entries";
 import { SessionManager } from "../../session/session-manager";
 import { createSubagentSettings, followMCPTools } from "../../task/executor";
 import { generateTaskName } from "../../task/name-generator";
@@ -213,6 +214,7 @@ export class TanCommandController {
 				// parent's in-flight call as its own pending work (issue #11118).
 				repairInterruptedTail: true,
 			});
+			cloneManager.appendCustomEntry(TAN_FORK_BOUNDARY_CUSTOM_TYPE, cloneManager.getSessionId());
 
 			jobId = manager.register(
 				"task",

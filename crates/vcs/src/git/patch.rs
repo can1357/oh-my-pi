@@ -150,6 +150,69 @@ impl GitRepo {
 		}
 	}
 
+	/// Prepare the shared index before publishing a selective commit. The
+	/// caller holds the returned lock across the HEAD compare-and-swap.
+	pub(super) fn prepare_commit_index(
+		repo: &gix::Repository,
+		selection: &str,
+		hook_patch: &str,
+	) -> Result<(gix::lock::File, Vec<String>)> {
+		let selection = parse_patch(selection).map_err(ApplyFailure::into_error)?;
+		let hook_patches = if hook_patch.is_empty() {
+			Vec::new()
+		} else {
+			parse_patch(hook_patch).map_err(ApplyFailure::into_error)?
+		};
+		let lock = lock_index(repo, None).map_err(|err| {
+			Error::backend("git commit: could not lock the shared index; commit not published", err)
+		})?;
+		let index = load_index_or_head(repo, "git commit read shared index")?;
+		super::mutate::reject_unmerged_index(&index, "git commit")?;
+		let mut state = index_state_map(&index);
+		let mut kept = BTreeSet::new();
+		for patch in selection.iter().chain(&hook_patches) {
+			let paths = [patch.old_path.as_deref(), patch.new_path.as_deref()];
+			if paths.iter().flatten().any(|path| kept.contains(path)) {
+				continue;
+			}
+			let options = ApplyOptions { cached: true, ..Default::default() };
+			let patches = std::slice::from_ref(patch);
+			match apply_patches_to_map(repo, &mut state, patches, &options) {
+				Ok(()) => continue,
+				Err(Error::PatchFailed { .. } | Error::Conflict { .. }) => {},
+				Err(err) => return Err(err),
+			}
+			// The selected change may already be staged. Test its reverse on
+			// just the affected entries without changing the real update.
+			let mut affected = paths
+				.into_iter()
+				.flatten()
+				.filter_map(|path| {
+					state
+						.get_key_value(path)
+						.map(|(path, entry)| (path.clone(), entry.clone()))
+				})
+				.collect();
+			let reverse = ApplyOptions { reverse: true, ..options };
+			match apply_patches_to_map(repo, &mut affected, patches, &reverse) {
+				Ok(()) => continue,
+				Err(Error::PatchFailed { .. } | Error::Conflict { .. }) => {},
+				Err(err) => return Err(err),
+			}
+			kept.extend(paths.into_iter().flatten());
+		}
+		let notes = kept
+			.into_iter()
+			.map(|path| {
+				format!(
+					"{path}: its shared-index entry holds someone else's staged changes and was left \
+					 as is; inspect `git diff --cached` before committing it."
+				)
+			})
+			.collect();
+		Ok((prepare_index_map(repo, &state, None, Some(&index), lock)?, notes))
+	}
+
 	/// Stage selected hunks from a supplied or freshly generated worktree diff.
 	pub fn stage_hunks(&self, selections: &[HunkSelection], raw_diff: Option<&str>) -> Result<()> {
 		if selections.is_empty() {
@@ -1055,11 +1118,6 @@ fn apply_patches_to_map(
 					message: format!("gitlink does not match for {}", source_path.unwrap_or_default()),
 				});
 			}
-			if let Some(path) = source_path
-				&& target_path != Some(path)
-			{
-				state.remove(path);
-			}
 			if let Some(path) = target_path {
 				validate_repo_path(path).map_err(ApplyFailure::into_error)?;
 				let id = match &source {
@@ -1067,6 +1125,11 @@ fn apply_patches_to_map(
 					_ => gitlink_id(patch, postimage)?,
 				};
 				state.insert(path.to_owned(), FileEntry::new(id, Mode::COMMIT));
+			}
+			if let Some(path) = source_path
+				&& target_path != Some(path)
+			{
+				state.remove(path);
 			}
 			continue;
 		}
@@ -1096,11 +1159,6 @@ fn apply_patches_to_map(
 			},
 			Err(err) => return Err(err.into_error()),
 		};
-		if let Some(path) = source_path
-			&& target_path != Some(path)
-		{
-			state.remove(path);
-		}
 		if let Some(path) = target_path {
 			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
 			let id = repo
@@ -1112,6 +1170,11 @@ fn apply_patches_to_map(
 				.or(source_mode)
 				.unwrap_or(Mode::FILE);
 			state.insert(path.to_owned(), FileEntry::new(id, mode));
+		}
+		if let Some(path) = source_path
+			&& target_path != Some(path)
+		{
+			state.remove(path);
 		}
 	}
 	Ok(())
@@ -1887,11 +1950,24 @@ fn write_index_map_at(
 	// zeroed stats make every later status re-hash each tracked file, and
 	// sparse checkouts would lose their skip-worktree bits.
 	let previous = load_index_at(repo, index_path)?;
+	prepare_index_map(repo, map, index_path, previous.as_ref(), lock)?
+		.commit()
+		.map_err(|err| Error::backend("git write index", err.error))?;
+	Ok(())
+}
+
+fn prepare_index_map(
+	repo: &gix::Repository,
+	map: &BTreeMap<String, FileEntry>,
+	index_path: Option<&Path>,
+	previous: Option<&gix::index::File>,
+	lock: gix::lock::File,
+) -> Result<gix::lock::File> {
 	let mut state = gix::index::State::new(repo.object_hash());
 	for (path, entry) in map {
 		validate_repo_path(path).map_err(ApplyFailure::into_error)?;
 		let rela_path = BStr::new(path.as_bytes());
-		let unchanged = previous.as_ref().and_then(|index| {
+		let unchanged = previous.and_then(|index| {
 			let old = index
 				.entry_by_path_and_stage(rela_path, Stage::Unconflicted)
 				.filter(|old| {
@@ -1930,10 +2006,7 @@ fn write_index_map_at(
 		.write_to(&mut out, gix::index::write::Options::default())
 		.map_err(|err| Error::backend("git write index", err))?;
 	out.into_inner()
-		.map_err(|err| Error::backend("git write index", err.into_error()))?
-		.commit()
-		.map_err(|err| Error::backend("git write index", err.error))?;
-	Ok(())
+		.map_err(|err| Error::backend("git write index", err.into_error()))
 }
 
 fn write_tree_map(

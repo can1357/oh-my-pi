@@ -241,7 +241,10 @@ pub fn listed(
 	}
 	vars.push((BString::from("DIRSTACK"), indexed(Vec::new())));
 	let funcname = array(k, store, vp, b"FUNCNAME")?.map_or_else(
-		|| Var { attrs: Attrs::INDEXED.with(Attrs::INVISIBLE), value: VarValue::Indexed(Vec::new()) },
+		|| Var {
+			attrs: Attrs::INDEXED.with(Attrs::INVISIBLE),
+			value: VarValue::Indexed(Default::default()),
+		},
 		indexed,
 	);
 	vars.push((BString::from("FUNCNAME"), funcname));
