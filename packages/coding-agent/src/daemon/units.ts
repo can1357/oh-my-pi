@@ -591,6 +591,15 @@ export class UnitTable {
 		entry.lastUsed = Date.now();
 		let lease: string | undefined;
 		if (request.lease !== false) lease = this.#addLease(entry, connection);
+		// The connection closed while this open waited for the unit, and `disconnected` ran without this lease: drop it as `disconnected` would.
+		if (lease !== undefined && connection.closed) {
+			entry.idleNotBefore = Math.max(entry.idleNotBefore ?? 0, Date.now() + this.#leaseGraceMs);
+			this.#dropLease(lease);
+			lease = undefined;
+			// `#addLease` recreated the closed connection's lease set; `disconnected` will not run again to remove it.
+			const connectionId = connection.client.connectionId;
+			if (this.#connectionLeases.get(connectionId)?.size === 0) this.#connectionLeases.delete(connectionId);
+		}
 		if (request.awaitReady !== false) {
 			try {
 				if (entry.procRuntime && entry.proc?.ready) {
