@@ -131,16 +131,33 @@ describe("detectTerminalId", () => {
 	it("maps rio to kitty graphics with verified hyperlink capability", () => {
 		// Reporter-verified (#12205): kitty graphics + true color. Hyperlinks
 		// verified against rio 0.5.28's published escape sequence support plus a
-		// live OSC 8 Alt+click and OSC 52 round-trip. Notifications stay on BEL:
-		// rio's Windows toast needs an AUMID registration it does not create
-		// (observed silent drop), so Osc9 would only remove the D-Bus fallback
-		// for Linux rio users.
-		const info = getTerminalInfo("rio");
+		// live OSC 8 Alt+click and OSC 52 round-trip. Notifications stay on BEL
+		// unless the Windows MSI advertises its registered AUMID.
+		const info = getTerminalInfo("rio", "win32", {});
 		expect(info.id).toBe("rio");
 		expect(info.imageProtocol).toBe(ImageProtocol.Kitty);
 		expect(info.trueColor).toBe(true);
 		expect(info.hyperlinks).toBe(true);
 		expect(info.notifyProtocol).toBe(NotifyProtocol.Bell);
+	});
+
+	it("switches rio to OSC 9 on Windows only when the AUMID flag is set", () => {
+		const enabled = getTerminalInfo("rio", "win32", { RIO_AUMID_REGISTERED: "1" });
+		expect(enabled.notifyProtocol).toBe(NotifyProtocol.Osc9);
+		expect(enabled.imageProtocol).toBe(ImageProtocol.Kitty);
+		expect(enabled.trueColor).toBe(true);
+		expect(enabled.hyperlinks).toBe(true);
+
+		expect(getTerminalInfo("rio", "win32", {}).notifyProtocol).toBe(NotifyProtocol.Bell);
+		expect(getTerminalInfo("rio", "win32", { RIO_AUMID_REGISTERED: "0" }).notifyProtocol).toBe(
+			NotifyProtocol.Bell,
+		);
+		expect(getTerminalInfo("rio", "linux", { RIO_AUMID_REGISTERED: "1" }).notifyProtocol).toBe(
+			NotifyProtocol.Bell,
+		);
+		expect(getTerminalInfo("rio", "darwin", { RIO_AUMID_REGISTERED: "1" }).notifyProtocol).toBe(
+			NotifyProtocol.Bell,
+		);
 	});
 
 	it("recognizes Warp before the true-color fallback", () => {
