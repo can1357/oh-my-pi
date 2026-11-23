@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Factory Droid requests no longer fail with 403 `content_policy_rejected` ([#19895](https://github.com/can1357/oh-my-pi/pull/19895) by [@Xytronix](https://github.com/Xytronix))
+- Factory Droid requests no longer fail with 403 `content_policy_rejected` for carrying OMP's identity sentence ([#19895](https://github.com/can1357/oh-my-pi/pull/19895) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.1.1] - 2026-11-23
 
