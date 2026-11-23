@@ -5,5 +5,6 @@ export * from "./gemini";
 export * from "./gitlab-duo-workflow";
 export * from "./kiro";
 export * from "./openai-compatible";
+export * from "./pi-native";
 export * from "./protobuf";
 export * from "./typesafe";

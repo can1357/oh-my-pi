@@ -7,7 +7,12 @@ import type { TspProps } from "@oh-my-pi/pi-wire";
 import type { NativeChild, NativeNode } from "../src/native/node";
 import { setNativeRendering } from "../src/native/state";
 import { StatusLineComponent } from "../src/status-line/component";
-import type { PromptCacheStatus, StatusLineHost, StatusLineSession } from "../src/status-line/host";
+import type {
+	PromptCacheStatus,
+	SessionTreePosition,
+	StatusLineHost,
+	StatusLineSession,
+} from "../src/status-line/host";
 import { promptCacheBrief, promptCacheDetails } from "../src/status-line/prompt-cache";
 import { describeSegment, renderSegment, type SegmentContext } from "../src/status-line/segments";
 import { createStartupStatusLine } from "../src/status-line/startup";
@@ -154,10 +159,14 @@ const NO_USAGE = {
 	cost: 0,
 };
 
-/** A status line over a session that reports `cacheStatus(nowMs)` as its prompt cache. */
-function cacheStatusLine(
+/**
+ * A status line over a session that reports `cacheStatus(nowMs)` as its prompt
+ * cache and `treePosition()` as its tree position.
+ */
+function sessionStatusLine(
 	settings: StatusLineSettings,
 	cacheStatus: (nowMs: number) => PromptCacheStatus | undefined,
+	treePosition?: () => SessionTreePosition | undefined,
 ): StatusLineComponent {
 	const session: StatusLineSession = {
 		state: { messages: [] },
@@ -167,6 +176,7 @@ function cacheStatusLine(
 		sessionManager: {
 			getSessionName: () => undefined,
 			getSessionId: () => "",
+			getTreePosition: treePosition,
 			getUsageStatistics: () => NO_USAGE,
 		},
 		modelRegistry: { isUsingSubscription: () => false },
@@ -227,7 +237,7 @@ function cacheMarker(line: StatusLineComponent): TspProps<"seg"> | undefined {
 describe("prompt-cache marker", () => {
 	it("draws the dim cache glyph while cached, with its card and the /session click", () => {
 		setNativeRendering(true);
-		const line = cacheStatusLine(CACHE_SETTINGS, () => WARM);
+		const line = sessionStatusLine(CACHE_SETTINGS, () => WARM);
 		expect(cacheMarker(line)).toMatchObject({
 			role: "omp.composer.cache",
 			side: "right",
@@ -244,7 +254,7 @@ describe("prompt-cache marker", () => {
 
 	it("strikes the glyph through in the warning tone once not cached, bounding what a partial change re-sends", () => {
 		setNativeRendering(true);
-		const marker = cacheMarker(cacheStatusLine(CACHE_SETTINGS, () => COLD_MODEL));
+		const marker = cacheMarker(sessionStatusLine(CACHE_SETTINGS, () => COLD_MODEL));
 		expect(marker).toMatchObject({
 			tone: "warning",
 			spans: [{ t: SYMBOL_PRESETS.nerd["icon.cacheCold"], s: "warning" }],
@@ -257,18 +267,18 @@ describe("prompt-cache marker", () => {
 		).toBe(theme.icon.cacheCold);
 		// A compaction keeps the tools and system prompt cached ahead of it.
 		const compacted: PromptCacheStatus = { ...COLD_MODEL, reason: { kind: "compaction" } };
-		expect(cacheMarker(cacheStatusLine(CACHE_SETTINGS, () => compacted))!.title).toEndWith("re-sends up to ~320K");
+		expect(cacheMarker(sessionStatusLine(CACHE_SETTINGS, () => compacted))!.title).toEndWith("re-sends up to ~320K");
 	});
 
 	it("is absent without a status or without the segment configured", () => {
 		setNativeRendering(true);
-		expect(cacheMarker(cacheStatusLine(CACHE_SETTINGS, () => undefined))).toBeUndefined();
+		expect(cacheMarker(sessionStatusLine(CACHE_SETTINGS, () => undefined))).toBeUndefined();
 		const unconfigured: StatusLineSettings = {
 			preset: "custom",
 			leftSegments: ["hostname"],
 			rightSegments: ["cost"],
 		};
-		expect(cacheMarker(cacheStatusLine(unconfigured, () => WARM))).toBeUndefined();
+		expect(cacheMarker(sessionStatusLine(unconfigured, () => WARM))).toBeUndefined();
 	});
 
 	it("turns not cached at expiry with a single render request", () => {
@@ -276,7 +286,7 @@ describe("prompt-cache marker", () => {
 		vi.useFakeTimers();
 		setSystemTime(TOUCHED_AT);
 		const expiresAt = TOUCHED_AT + TTL_MS;
-		const line = cacheStatusLine(CACHE_SETTINGS, nowMs =>
+		const line = sessionStatusLine(CACHE_SETTINGS, nowMs =>
 			nowMs < expiresAt ? WARM : { ...WARM, state: "cold", reason: { kind: "expired", at: expiresAt } },
 		);
 		const repaint = vi.fn();
@@ -294,6 +304,90 @@ describe("prompt-cache marker", () => {
 			vi.useRealTimers();
 			setSystemTime();
 		}
+	});
+});
+
+const TREE_SETTINGS: StatusLineSettings = { preset: "custom", leftSegments: ["hostname", "tree"], rightSegments: [] };
+
+describe("session tree position", () => {
+	it("is absent at the tip of a single line and appears, opening /tree, once the session moves off it", () => {
+		setNativeRendering(true);
+		const session: { position?: SessionTreePosition } = {};
+		const line = sessionStatusLine(
+			TREE_SETTINGS,
+			() => undefined,
+			() => session.position,
+		);
+		expect(facts(line).map(seg => seg.key)).toEqual(["hostname"]);
+
+		// A rewind leaves the transcript as it was; only the tree position tells the facts to change.
+		session.position = { branch: { index: 2, count: 3 }, ahead: 3 };
+		const tree = facts(line).find(seg => seg.key === "tree")?.props;
+		expect(tree).toMatchObject({
+			role: "omp.composer.fact",
+			icon: "tree",
+			spans: [{ t: "2/3 · 3 ahead", s: "accent" }],
+			actions: { click: "status.tree" },
+			title: "Session tree: branch 2 of 3, 3 turns ahead\nOpen /tree to move between branches",
+		});
+		// Pinned like the git branch: it outlasts the unpinned facts as the bar narrows.
+		const hostname = facts(line).find(seg => seg.key === "hostname")!.props;
+		expect(tree!.priority!).toBeGreaterThan(hostname.priority!);
+
+		const opened: string[] = [];
+		line.onNativeAction = action => opened.push(action);
+		line.handleNativeEvent({ type: "action", key: "tree", act: "status.tree", mods: [] });
+		expect(opened).toEqual(["status.tree"]);
+	});
+
+	it("labels only what applies: the branch at a fork, the turns past a rewound leaf", () => {
+		const label = (treePosition: SessionTreePosition) =>
+			describeSegment("tree", { treePosition } as unknown as SegmentContext)
+				?.spans.map(part => part.t)
+				.join("");
+		expect(label({ branch: { index: 1, count: 2 }, ahead: 0 })).toBe("1/2");
+		expect(label({ ahead: 1 })).toBe("1 ahead");
+		expect(describeSegment("tree", { treePosition: { ahead: 1 } } as unknown as SegmentContext)?.title).toStartWith(
+			"Session tree: 1 turn ahead\n",
+		);
+		// ANSI has no click: the composer border names the command beside the position.
+		expect(
+			Bun.stripANSI(renderSegment("tree", { treePosition: { ahead: 3 } } as unknown as SegmentContext).content),
+		).toBe(`${theme.cmd.tree} 3 ahead /tree`);
+		expect(renderSegment("tree", {} as unknown as SegmentContext).visible).toBe(false);
+	});
+
+	it("is absent while a subagent is focused, since /tree navigates the main session", () => {
+		setNativeRendering(true);
+		const position: SessionTreePosition = { ahead: 2 };
+		const line = sessionStatusLine(
+			TREE_SETTINGS,
+			() => undefined,
+			() => position,
+		);
+		expect(facts(line).map(seg => seg.key)).toEqual(["hostname", "tree"]);
+		line.setSession(
+			{
+				state: { messages: [] },
+				messages: [],
+				isStreaming: false,
+				isAutoThinking: false,
+				sessionManager: {
+					getSessionName: () => undefined,
+					getSessionId: () => "sub",
+					getTreePosition: () => position,
+					getUsageStatistics: () => NO_USAGE,
+				},
+				modelRegistry: { isUsingSubscription: () => false },
+				getContextUsage: () => undefined,
+				autoResolvedThinkingLevel: () => undefined,
+				isFastModeActive: () => false,
+				getAsyncJobSnapshot: () => null,
+				getGoalModeState: () => undefined,
+			},
+			"sub-agent",
+		);
+		expect(facts(line).map(seg => seg.key)).toEqual(["hostname"]);
 	});
 });
 

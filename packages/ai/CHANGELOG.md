@@ -5,29 +5,41 @@
 ### Added
 
 - Added `setProviderCooldownMs()` (`@oh-my-pi/pi-ai/auth/provider-cooldown`) to set how long an unattributed Google Antigravity 429 pauses the provider; `0` turns the pause off ([#19911](https://github.com/can1357/oh-my-pi/pull/19911) by [@Xytronix](https://github.com/Xytronix))
-- Added `AssistantMessage.requestId`, set from Anthropic's `request-id` response header, so a refused or failed turn keeps the id that Anthropic support asks for ([#19383](https://github.com/can1357/oh-my-pi/pull/19383) by [@nnnnoel](https://github.com/nnnnoel))
 
 ### Fixed
 
-- `apple/on-device` requests no longer print `omp-applefm: ignored text action 'updateFinishReason'` to stderr; the bridge forwards the model's finish reason, which the provider maps to `stop` or `length` when it recognizes it and otherwise ignores in favor of the previous token-count guess ([#20100](https://github.com/can1357/oh-my-pi/issues/20100))
-- With several Devin logins, omp now prefers a login with daily or weekly quota left; a login past its quota that its on-demand balance still funds comes next, and one with no balance is skipped until its quota resets ([#19929](https://github.com/can1357/oh-my-pi/pull/19929) by [@will-bogusz](https://github.com/will-bogusz))
-- Devin logins now store the account's email, user id and organization, so two organizations under one email show as two accounts in `omp usage` and `auth.accountPolicies` can name each; sign in again to identify an existing login ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))
-- Anthropic requests with no messages now fail locally with the model, provider, and how many messages arrived, instead of a bare `400 "messages is required"` ([#19881](https://github.com/can1357/oh-my-pi/pull/19881) by [@FnSGit](https://github.com/FnSGit))
-- Usage reports of a provider an extension registers now survive across omp processes. Registering a provider's first usage adapter no longer discards the reports another process cached for it, so each new session stops re-probing the provider's usage endpoint; replacing an existing adapter still invalidates them ([#20030](https://github.com/can1357/oh-my-pi/pull/20030) by [@ahsanatha](https://github.com/ahsanatha))
 - Fixed Google Antigravity sending a 429 that names no quota through every pooled account: it now stays on the receiving account and pauses the provider ([#19911](https://github.com/can1357/oh-my-pi/pull/19911) by [@Xytronix](https://github.com/Xytronix))
-- Provider `stream stalled` errors classified from message text now carry timeout classification, so stalled auto-compaction calls fail over to the next model instead of retrying the stalled one ([#20154](https://github.com/can1357/oh-my-pi/pull/20154) by [@eggpeat](https://github.com/eggpeat))
-- OpenAI and Codex requests no longer fail with `invalid_function_parameters` when an MCP tool schema has a `pattern` with an unescaped `[` inside a character class (e.g. `^[^[\]]*$`); the unsupported pattern is dropped from the tool definition ([#20137](https://github.com/can1357/oh-my-pi/issues/20137))
-- OpenRouter Responses completions that end with only an unbilled encrypted reasoning item (no visible output, no tool call, zero billed reasoning tokens) now surface the native failure behind the clean stop instead of completing silently ([#20133](https://github.com/can1357/oh-my-pi/issues/20133))
-- A 402 billing failure (`billing_error` / `billing_not_configured`, "billing verification failed", or "requires more credits") now counts as a usage limit, so retry rotates accounts and walks the model fallback chain instead of stopping on it ([#20141](https://github.com/can1357/oh-my-pi/pull/20141) by [@Komzpa](https://github.com/Komzpa))
-- Reduced idle memory by reading the prompt perturbation pool only when a request is perturbed ([#20090](https://github.com/can1357/oh-my-pi/pull/20090) by [@iliaal](https://github.com/iliaal))
-- A corrupt `agent.db` no longer loses every stored provider credential: omp restores the ones still readable from the quarantined copy, keeps disabled ones disabled, and logs the quarantined path if recovery fails ([#20142](https://github.com/can1357/oh-my-pi/pull/20142) by [@Komzpa](https://github.com/Komzpa))
-- Gemini models behind Portkey with strict OpenAI compliance turned off now keep their thought signatures between tool calls, also through the auth gateway ([#20082](https://github.com/can1357/oh-my-pi/pull/20082) by [@smartinio](https://github.com/smartinio))
-- Fixed the thinking-loop guard discarding and retrying a final answer with a long markdown table or same-shape JSON records (one array or one per line) ([#11129](https://github.com/can1357/oh-my-pi/issues/11129), [#19990](https://github.com/can1357/oh-my-pi/pull/19990) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Strict tool schemas no longer close a bare `type: "object"` property into a `{}`-only shape while still reporting `strict: true`; such tools now send a non-strict schema, so calls that set fields of that property are accepted ([#10125](https://github.com/can1357/oh-my-pi/issues/10125), [#19980](https://github.com/can1357/oh-my-pi/pull/19980) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed `antigravity-cli` models not seeing images returned by tools such as `read` on image files ([#19358](https://github.com/can1357/oh-my-pi/pull/19358) by [@0xprincess](https://github.com/0xprincess))
-- A transient `404` from a proxy in front of the auth broker no longer switches the snapshot stream to long-polling and turns off usage reporting for the rest of the process ([#19236](https://github.com/can1357/oh-my-pi/issues/19236)) ([#19348](https://github.com/can1357/oh-my-pi/pull/19348) by [@Alex-Wengg](https://github.com/Alex-Wengg))
-- Antigravity CLI requests no longer fail with a credential staging error when two sessions for the same account stage sign-in at the same time ([#19347](https://github.com/can1357/oh-my-pi/pull/19347) by [@eggpeat](https://github.com/eggpeat))
-- OpenAI Codex WebSocket continuations now send back the turn's sticky routing token (`x-codex-turn-state`), which the server delivers on `codex.response.metadata` rather than `response.metadata`; before, it was never captured on WebSocket ([#20088](https://github.com/can1357/oh-my-pi/issues/20088))
+
+## [19.1.1] - 2026-11-23
+
+### Added
+
+- Added `AssistantMessage.requestId`, populated from Anthropic’s `request-id` response header, so failed or refused requests retain the identifier needed for Anthropic support.
+- Added `GET /v1/pi/models` to `omp auth-gateway`, serving the gateway's model catalog (limits, thinking levels, pricing) to pi-native clients.
+
+### Changed
+
+- Devin account selection now prioritizes logins with remaining daily or weekly quota, then accounts funded by on-demand balance, while skipping accounts with no available capacity. Devin logins also track email, user ID, and organization so separate organizations are distinguishable in `omp usage` and `auth.accountPolicies`; existing logins must be reauthenticated to populate this information.
+- Billing failures from providers are now treated as usage limits, allowing retries to rotate accounts and continue through the model fallback chain.
+- Provider usage reports registered by extensions now persist across omp processes, avoiding unnecessary repeated usage-endpoint checks.
+- Requests that stall during provider operations are now classified as timeouts, allowing automatic fallback to another model.
+- Reduced idle memory usage by loading prompt-perturbation data only when perturbation is enabled for a request.
+
+### Fixed
+
+- Fixed split tool-call handling so models configured with `splitToolCalls` receive each tool call together with its corresponding result in the correct message order.
+- Fixed `apple/on-device` finish-reason handling so requests no longer emit spurious stderr warnings and correctly report recognized stop or length completions.
+- Improved local validation for empty Anthropic requests by reporting the model, provider, and received message count instead of an opaque provider error.
+- Fixed OpenAI and Codex requests failing on MCP tool schemas containing unsupported unescaped character patterns.
+- OpenRouter Responses requests that end in an unbilled encrypted reasoning item now surface the underlying provider failure instead of completing silently.
+- Fixed preservation of Gemini thought signatures across tool calls when using Portkey or the authentication gateway.
+- Fixed the thinking-loop guard incorrectly retrying final answers containing long Markdown tables or similarly shaped JSON records.
+- Fixed strict tool-schema conversion so object properties that accept arbitrary fields are not incorrectly restricted to empty objects.
+- Fixed `antigravity-cli` models failing to receive images returned by tools such as `read`.
+- Fixed transient proxy errors from disrupting snapshot streaming and disabling usage reporting for the remainder of the process.
+- Fixed concurrent Antigravity CLI sessions for the same account failing during credential staging.
+- Fixed OpenAI Codex WebSocket continuations so sticky turn routing information is preserved for subsequent requests.
+- Improved recovery from a corrupt `agent.db` so readable provider credentials are restored where possible and disabled credentials remain disabled.
 
 ## [19.1.0] - 2026-11-21
 
@@ -2152,62 +2164,4 @@
 - Fixed stateful OpenAI Responses explicit cache breakpoints being restored onto edited historical messages, ensuring full replays recompute the latest stable cache boundary.
 - Fixed ChatGPT Codex standard and Lite transports rejecting or hiding native computer-use payloads by unrolling the tool definition, forced choice, `computer_call`, and `computer_call_output` into ordinary function-tool forms.
 
-## [17.1.0] - 2026-07-24
-
-### Added
-
-- Added support for caller-owned `cachedContent` on Google Generative AI and Google Vertex AI `GenerateContent` options, allowing passing of opaque cache resource names.
-- Added Anthropic extra-usage reporting across CLI, interactive, and ACP usage endpoints, normalizing the authoritative `spend` payload into a 'Claude Extra Usage' USD row with accurate limit, remaining, and status details.
-- Added process-scoped OAuth account pools for trusted auth-broker clients via `OMP_AUTH_BROKER_ACCOUNT_POOL_FILE` to filter snapshots, updates, refreshes, and usage reports to selected OAuth identities.
-- Added opt-in Vercel AI Gateway automatic prompt caching for OpenAI Chat Completions, including support for cache anchors and cache lifetimes.
-- Added opt-in explicit prompt-cache controls for OpenAI GPT-5.6+ Responses and Chat Completions, supporting stable boundary selection, stateful Responses markers, and future GPT-5.x/6.x models.
-- Added support for forwarding `statefulResponses` through `streamSimple` to allow diagnostic callers to explicitly disable OpenAI Responses `previous_response_id` chaining.
-- Added native QwenCloud Token Plan support, including API-key login, model discovery, and an optional interactive console-Cookie prompt for quota reporting.
-- Added interactive Meta Model API key login and support for `MODEL_API_KEY` and `META_API_KEY` environment variables.
-- Added model-scoped usage health tracking and same-provider reselection for native coding-plan credential pools.
-
-### Fixed
-
-- Fixed AWS Bedrock cache checkpoints to use resolved model compatibility, falling back to the provider-default 5-minute cache for unsupported 1-hour retentions, emitting AWS-recommended explicit checkpoints for Nova models (Lite, Micro, Pro, Premier, Nova 2 Lite), and honoring configured checkpoint maxima.
-- Fixed Pi-native and compatibility-wrapper requests dropping cache controls required by `omp bench --cache` to preserve explicit prompt-cache affinity and allow disabling OpenAI Responses chaining.
-- Fixed outbound credential-pattern redaction running unconditionally; it is now opt-in via `configureCredentialRedaction` and disabled by default.
-- Fixed SuperGrok (`xai-oauth`) `/usage` reporting for unified-billing accounts by falling back to the default monthly limit and usage payload when credit usage percentages are absent.
-- Fixed sessions wedging with a `400 Invalid signature in thinking block` error when switching Anthropic-compatible providers by stripping signatures whose issuing provider differs from the target.
-- Fixed OAuth callback servers aborting login on premature invalid callbacks, and restricted `localhost` callback listeners to the IPv4 loopback interface.
-- Fixed Google Gemini CLI and Antigravity OAuth login hanging indefinitely during Cloud Code Assist project provisioning by introducing request timeouts, cancellation checks, and bounded polling.
-
-## [17.0.9] - 2026-07-23
-
-### Added
-
-- Added Synthetic (synthetic.new) usage provider: `/usage` now reports the rolling 5-hour request limit and weekly credit quota via `GET /v2/quotas`, including per-tick regeneration rates in the window labels.
-- Added optional `UsageWindow.resetLabel` so rolling windows can render their countdown with an accurate verb (e.g. "tick in 12m" / "regen in 51m" instead of "resets in") — both quota windows on Synthetic regenerate incrementally rather than hard-resetting.
-
-### Fixed
-
-- Fixed GitHub Copilot OpenAI-compatible requests being rejected when the session's native OpenAI service tier was set to `priority` ([#5160](https://github.com/can1357/oh-my-pi/pull/5160) by [@audreyt](https://github.com/audreyt)).
-- Fixed OpenAI Responses token-cap truncations suppressing fully streamed function and custom tool calls whose inputs are complete.
-- Added SuperGrok (`xai-oauth`) usage tracking for weekly credits, product limits, and positive on-demand caps.
-
-## [17.0.8] - 2026-07-22
-
-### Fixed
-
-- Fixed Gemini Flash Cloud Code Assist empty-response retries when responses contain only intercepted planning-leak JSON.
-- Fixed Antigravity auto-routing to correctly fail over to the sandbox endpoint when the daily endpoint exhausts its retries.
-- Fixed OpenAI-compatible providers configured with auth: none incorrectly sending an Authorization: Bearer N/A header, which broke custom endpoints using alternative authentication headers.
-- Fixed auth-gateway model listings exposing duplicate or ambiguous model IDs by ensuring only provider-qualified routing IDs are advertised.
-- Improved connection error handling by classifying generic connection failures as transient, allowing them to be retried, while keeping explicit authentication rejections non-retryable.
-- Fixed custom Anthropic base URLs losing native thinking signatures during continuation requests.
-- Fixed Alibaba Coding Plan Custom login rejecting valid API keys on endpoints that do not serve the default validation model by validating against the model catalog instead.
-
-## [17.0.6] - 2026-07-20
-
-### Fixed
-
-- Fixed OpenAI Codex credentials limited to one ChatGPT workspace per email: a personal Plus/Pro plan and a Team/Enterprise seat under the same email now coexist in the auth store — with separate rotation and usage pools — instead of the second login silently replacing the first. The workspace (`chatgpt_account_id`) is captured as the credential's org at login with the plan type as its display label, and two members of one workspace keep separate rows ([#2966](https://github.com/can1357/oh-my-pi/issues/2966)).
-- Fixed Devin total-token usage omitting cache reads and cache writes.
-- Fixed model switches to Devin rejecting foreign provider response IDs, reasoning signatures, and empty interrupted turns as invalid Cascade history.
-- Classified zero-output Devin `invalid_argument` trailers as context overflow when the serialized message history is already large, routing cumulative tool-output payload failures through context maintenance—including artifact-backed shake rescue—instead of retrying the same rejected history.
-
-Older entries are archived in [packages/ai/CHANGELOG.md@de21c0ac454b](https://github.com/can1357/oh-my-pi/blob/de21c0ac454b1a66d8dfff32b0ed4751a08f809b/packages/ai/CHANGELOG.md).
+Older entries are archived in [packages/ai/CHANGELOG.md@02eb912b7688](https://github.com/can1357/oh-my-pi/blob/02eb912b76887f1a06bc65e2352ef96742ec1067/packages/ai/CHANGELOG.md).
