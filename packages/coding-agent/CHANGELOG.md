@@ -31,6 +31,7 @@
 
 - The bash tool's description tells the agent to run a system program by path (`/usr/bin/x`) only after the builtin's output proved wrong.
 - The bash tool's visualization keeps a one-line awk, jq, regex or other embedded program highlighted where it appears in the command; only multi-line programs move below it behind a `⟦awk ↓⟧`-style chip.
+- Clarified the `bash` tool prompt to discourage piping to `head`/`tail`/`grep`/`sed`/`awk` for output truncation (pointing to `local://<N>.log`) and, when bash pattern approval is active, to explain that unquoted shell control operators disqualify allow rules and force a prompt ([#20305](https://github.com/can1357/oh-my-pi/pull/20305) by [@asuffield](https://github.com/asuffield)).
 
 ### Fixed
 

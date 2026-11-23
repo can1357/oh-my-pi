@@ -95,6 +95,8 @@ import {
 	cfgGlobEnabled,
 	cfgGrepEnabled,
 	cfgLaunchEnabled,
+	cfgToolsApproval,
+	cfgToolsApprovalMode,
 	cfgToolsMaxTimeout,
 } from "./settings";
 import {
@@ -1016,12 +1018,25 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	get description(): string {
 		const evalBackends = resolveEvalBackends(this.session);
 		const isToolActive = (name: string, fallback: boolean): boolean => this.session.isToolActive?.(name) ?? fallback;
+		const shellConfig = this.session.settings.getShellConfig();
+		const approvalMode = cfgToolsApprovalMode.get(this.session.settings);
+		const userPolicies: Record<string, unknown> = cfgToolsApproval.get(this.session.settings);
+		const rawBashPolicy = Object.hasOwn(userPolicies, "bash") ? userPolicies.bash : undefined;
+		const bashPolicy = typeof rawBashPolicy === "string" ? rawBashPolicy.trim().toLowerCase() : undefined;
+		const approvalPatternsActive =
+			bashPolicy !== "allow" &&
+			bashPolicy !== "deny" &&
+			(bashPolicy === "prompt" || approvalMode !== "yolo") &&
+			this.#patternPolicies().session.rules.some(rule => rule.approval === "allow");
 		return prompt.render(bashDescription, {
 			asyncEnabled: cfgAsyncEnabled.get(this.session.settings),
 			// The deadline an omitted `timeout` resolves to, after the `tools.maxTimeout` cap.
 			defaultTimeoutSec: clampTimeout("bash", undefined, cfgToolsMaxTimeout.get(this.session.settings)),
 			autoBackgroundEnabled: cfgBashAutoBackgroundEnabled.get(this.session.settings),
 			autoBackgroundSeconds: cfgBashAutoBackgroundThresholdMs.get(this.session.settings) / 1000,
+			approvalPatternsActive,
+			allowCompoundCommands:
+				cfgBashAllowCompoundCommands.get(this.session.settings) && isPosixShell(shellConfig.shell),
 			hasAstGrep: isToolActive("ast_grep", cfgAstGrepEnabled.get(this.session.settings)),
 			hasAstEdit: isToolActive("ast_edit", cfgAstEditEnabled.get(this.session.settings)),
 			hasGrep: isToolActive("grep", cfgGrepEnabled.get(this.session.settings)),
@@ -1038,7 +1053,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			hasPty: this.#ptyAvailable || this.#launchEnabled,
 			hasEval: isToolActive("eval", evalBackends.python || evalBackends.js),
 			// The embedded shell's session env is the shell config env (see bash-executor).
-			builtins: shellBuiltins(this.session.settings.getShellConfig().env),
+			builtins: shellBuiltins(shellConfig.env),
 			isWindows: process.platform === "win32",
 		});
 	}

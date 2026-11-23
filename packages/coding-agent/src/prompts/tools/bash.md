@@ -7,7 +7,10 @@ A path (`/usr/bin/x`) runs the system program instead; use one only after a buil
 `async` defers finite results but keeps the deadline (default {{defaultTimeoutSec}}s); `timeout: 0` for watchers and long jobs.
 `notify` (regex; implies `async`) sends each matching output line as a follow-up while the job runs, ahead of its result. Match only lines you'd act on: too many matches switch it off.
 {{/if}}
-Don't trunc output by habit, result will be summarized and saved as an artifact.
+Don't pipe to `head`/`tail`/`grep`/`sed`/`awk` just to truncate or filter output; run the command directly (large output is bounded and saved to `local://<N>.log` for `read`/`grep`).
+{{#if approvalPatternsActive}}
+Commands matching allow rules run without prompting, but shell control operators (`|`, `>`, `<`, `;`, `&`, `(`, `)`, literal newlines) and `$` or backticks (even inside double quotes) disqualify allow rules and force a prompt. Prefer single-line commands{{#if allowCompoundCommands}} (or `&&` chains){{/if}}, multiple `-m`/`-F` flags, or parallel tool calls over shell loops, pipes, or multiline arguments.
+{{/if}}
 {{#if hasLaunch}}
 Long-lived services:
 - unique name; ready requires name; no async/timeout; pty defaults true.
