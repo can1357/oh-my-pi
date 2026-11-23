@@ -203,6 +203,7 @@ function sessionStatusLine(
 		calculateTokensPerSecond: () => null,
 		limitMatchesActiveAccount: () => false,
 		computeCompactionBoundaries: () => null,
+		getAdvisorUsageAccounts: () => [],
 	};
 	return new StatusLineComponent(session, host);
 }

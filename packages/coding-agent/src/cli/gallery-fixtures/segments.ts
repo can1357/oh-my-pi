@@ -85,6 +85,10 @@ export function createGallerySegmentContext(sessionOptions?: GallerySessionOptio
 			sevenDay: { percent: 68, resetHours: 52 },
 		},
 		promptCache: sessionOptions?.promptCache,
+		advisorUsage: {
+			fiveHour: { percent: 21, resetMinutes: 71 },
+			sevenDay: { percent: 55, resetHours: 52 },
+		},
 	};
 }
 
