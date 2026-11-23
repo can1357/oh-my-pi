@@ -29,6 +29,7 @@ import {
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { node, span } from "../native/describe";
 import { thinkingLevelToken } from "../theme/theme-class";
+import { MAX_THINKING_SUFFIX_OPTIONS, splitThinkingSuffix } from "../overlays/model-selector";
 import type { SessionTreePosition, StatusLineSession } from "./host";
 import type { RenderedSegment, SegmentContext, SegmentView, StatusLineSegment, StatusLineSegmentId } from "./types";
 
@@ -294,8 +295,22 @@ const statusSegment: StatusLineSegment = {
 /** Display name of the active model (`Claude ` prefix dropped). */
 function modelDisplayName(ctx: SegmentContext): string {
 	const state = ctx.session.state;
-	const modelName = state.model?.name || state.model?.id || "no-model";
+	const fallback = fallbackServingModel(ctx);
+	const modelName = fallback ? servingModelId(fallback) : state.model?.name || state.model?.id || "no-model";
 	return modelName.startsWith("Claude ") ? modelName.slice(7) : modelName;
+}
+
+type ServingModel = NonNullable<StatusLineSession["servingModel"]>;
+
+function fallbackServingModel(ctx: SegmentContext): ServingModel | undefined {
+	const serving = ctx.session.servingModel;
+	return serving?.isFallback ? serving : undefined;
+}
+
+function servingModelId(serving: ServingModel): string {
+	const identity =
+		serving.modelIdentity ?? splitThinkingSuffix(serving.selector, -1, MAX_THINKING_SUFFIX_OPTIONS).base;
+	return identity.slice(identity.indexOf("/") + 1);
 }
 
 /**
@@ -316,8 +331,10 @@ export function thinkingLevelWord(
 function modelThinkingDisplay(ctx: SegmentContext): string {
 	const state = ctx.session.state;
 	const opts = ctx.options.model ?? {};
-	if (opts.showThinkingLevel === false || !state.model?.thinking) return "";
-	if (ctx.session.isAutoThinking) {
+	// A serving fallback reports the level it actually ran at.
+	const servedLevel = fallbackServingModel(ctx)?.thinkingLevel;
+	if (opts.showThinkingLevel === false || (servedLevel === undefined && !state.model?.thinking)) return "";
+	if (servedLevel === undefined && ctx.session.isAutoThinking) {
 		// Pending (no turn classified yet / classifying) shows a symbol-theme
 		// question-box marker; once resolved it shows `<level>`.
 		const resolved = ctx.session.autoResolvedThinkingLevel();
@@ -325,7 +342,7 @@ function modelThinkingDisplay(ctx: SegmentContext): string {
 			? (theme.thinking[resolved as keyof Theme["thinking"]] ?? resolved)
 			: `${theme.thinking.autoPending} auto`;
 	}
-	const level = state.thinkingLevel ?? ThinkingLevel.Off;
+	const level = servedLevel ?? state.thinkingLevel ?? ThinkingLevel.Off;
 	return level === ThinkingLevel.Off
 		? `${theme.status.disabled} off`
 		: (theme.thinking[level as keyof Theme["thinking"]] ?? level);
@@ -390,6 +407,9 @@ const modelSegment: StatusLineSegment = {
 			content += accentFg(ctx, "statusLineModel", tail);
 		}
 
+		// A retry fallback serving in place of the configured model, as the agent hub's `fallback →`.
+		if (fallbackServingModel(ctx)) content += theme.fg("warning", `${theme.sep.dot}fallback`);
+
 		// Anthropic usage-limit stage (wrap-up allowance or low priority): a
 		// warning-colored badge so past-the-limit service is never mistaken for normal.
 		const slowModeLabel = ctx.session.getAnthropicSlowModeLabel?.();
@@ -404,11 +424,16 @@ const modelSegment: StatusLineSegment = {
 		const advisor = modelAdvisorBadge(ctx);
 		if (advisor) spans.push(span(` ${advisor.icon}`, advisor.color));
 		if (ctx.session.isFastModeActive() && theme.icon.fast) spans.push(span(` ${theme.icon.fast}`, token));
-		const level = ctx.options.model?.showThinkingLevel === false ? undefined : thinkingLevelWord(ctx.session);
+		const fallback = fallbackServingModel(ctx);
+		const level =
+			ctx.options.model?.showThinkingLevel === false
+				? undefined
+				: (fallback?.thinkingLevel ?? thinkingLevelWord(ctx.session));
 		if (level !== undefined) spans.push(span(" · ", "dim"), span(level, thinkingLevelToken(level)));
+		if (fallback) spans.push(span(`${theme.sep.dot}fallback`, "warning"));
 		const slowModeLabel = ctx.session.getAnthropicSlowModeLabel?.();
 		if (slowModeLabel) spans.push(span(`${theme.sep.dot}${slowModeLabel}`, "warning"));
-		return segView(spans, "model", slowModeLabel ? "warning" : undefined);
+		return segView(spans, "model", slowModeLabel || fallback ? "warning" : undefined);
 	},
 };
 

@@ -473,6 +473,7 @@ class StatusLineExternalInputs {
 	modelContextWindow: Model["contextWindow"] | undefined = undefined;
 	modelThinking: Model["thinking"] = undefined;
 	thinkingLevel: unknown = undefined;
+	servingModelRef: unknown = undefined;
 	modelCostRef: unknown = undefined;
 	contextUsageRevision = 0;
 	systemPromptRef: unknown = undefined;
@@ -2924,6 +2925,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		target.modelContextWindow = model?.contextWindow;
 		target.modelThinking = model?.thinking;
 		target.thinkingLevel = state.thinkingLevel;
+		target.servingModelRef = this.session.servingModel;
 		target.modelCostRef = model?.cost;
 		target.contextUsageRevision = this.session.contextUsageRevision ?? 0;
 		target.systemPromptRef = systemPrompt;
@@ -2999,6 +3001,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			left.modelContextWindow === right.modelContextWindow &&
 			left.modelThinking === right.modelThinking &&
 			left.thinkingLevel === right.thinkingLevel &&
+			left.servingModelRef === right.servingModelRef &&
 			left.modelCostRef === right.modelCostRef &&
 			left.contextUsageRevision === right.contextUsageRevision &&
 			left.systemPromptRef === right.systemPromptRef &&

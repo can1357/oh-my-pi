@@ -96,6 +96,13 @@ export interface StatusLineSession {
 	state: { model?: Model; thinkingLevel?: ThinkingLevel; messages: readonly AgentMessage[] };
 	model?: Model;
 	messages?: readonly AgentMessage[];
+	/** Model the session's turns are attributed to; `isFallback` when retry fallback routing, not the configured model, owns it. */
+	readonly servingModel?: {
+		selector: string;
+		modelIdentity?: string;
+		thinkingLevel?: ThinkingLevel;
+		isFallback: boolean;
+	};
 	sessionFile?: string;
 	isStreaming: boolean;
 	isAutoThinking: boolean;
