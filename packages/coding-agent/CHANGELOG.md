@@ -76,6 +76,10 @@
 - Sessions started from collaboration prompts now receive automatic titles.
 - Fixed `/tan` forks ending an idle wait prematurely when their assignment remains blocked.
 
+### Changed
+
+- Terminal tab titles now read `<project> · <task>`: the project is the Git/Jujutsu repository root (or the directory outside a repo), and the task is the in-progress todo row of the session you are viewing, falling back to the session name; the native Tern/TSP title uses the same label. A collab guest labels the tab with the last segment of the host's working directory, parsed on any OS and never looked up on the guest's filesystem ([#16531](https://github.com/can1357/oh-my-pi/pull/16531) by [@Komzpa](https://github.com/Komzpa))
+
 ## [19.1.0] - 2026-11-21
 
 ### Breaking Changes
