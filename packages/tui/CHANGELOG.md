@@ -25,6 +25,7 @@
 
 ### Fixed
 
+- Fixed `/usage reset` saying an account had no saved resets usable right now when its saved resets failed to load; selecting that account now shows the load error and that nothing was spent ([#16487](https://github.com/can1357/oh-my-pi/issues/16487), [#19936](https://github.com/can1357/oh-my-pi/pull/19936) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed Tern Plan Review annotations being dropped before they reached omp, so saved comments now enable Refine ([#20250](https://github.com/can1357/oh-my-pi/pull/20250) by [@ash-miku](https://github.com/ash-miku))
 - Fixed Ctrl+[ not leaving Vim Insert, Replace or Visual mode, or cancelling a pending operator, under the Kitty keyboard protocol or modifyOtherKeys; inside the Vim modes it now does what Escape does ([#19547](https://github.com/can1357/oh-my-pi/issues/19547), [#20209](https://github.com/can1357/oh-my-pi/pull/20209) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Truncated `ast_grep` results show the exact next offset (`use skip=N for the next page`) in the result view and the native view; results recorded without it keep the generic hint ([#20203](https://github.com/can1357/oh-my-pi/pull/20203) by [@MikeeI](https://github.com/MikeeI))
@@ -54,7 +55,6 @@
 
 ### Fixed
 
-- Fixed `/usage reset` saying an account had no saved resets usable right now when its saved resets failed to load; selecting that account now shows the load error and that nothing was spent ([#16487](https://github.com/can1357/oh-my-pi/issues/16487), [#19936](https://github.com/can1357/oh-my-pi/pull/19936) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed handoffs being skipped when only the model’s upstream pin changes.
 - Fixed the `/usage` activity calendar retaining its history when a refresh fails, while indicating that the data is not synced.
 - Fixed SVG images blinking in ask forms when questions extend beyond the panel.
