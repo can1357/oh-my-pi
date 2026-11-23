@@ -231,7 +231,12 @@ function decodeEvent(value: Record<string, unknown>): TspEvent | null {
 	// one names the comment id the program already knows.
 	if (value.ev === "comment") {
 		if (!hasRoute(value) || typeof value.note !== "string") return null;
-		if (typeof value.comment === "string") return value as TspEvent;
+		// `comment` decides the downstream route when present; a non-string one
+		// must fail here instead of falling through to the quote shape.
+		if (value.comment !== undefined) {
+			if (typeof value.comment !== "string") return null;
+			return value as TspEvent;
+		}
 		if (typeof value.quote === "string" && typeof value.at === "number") return value as TspEvent;
 		return null;
 	}
@@ -243,7 +248,12 @@ function decodeEvent(value: Record<string, unknown>): TspEvent | null {
 	// changed item and its new value (the handler checks the value's type).
 	if (value.ev === "change") {
 		if (!hasRoute(value)) return null;
-		if (typeof value.text === "string") return value as TspEvent;
+		// `text` likewise decides the downstream route when present; a
+		// non-string one must not fall through to the control shape.
+		if (value.text !== undefined) {
+			if (typeof value.text !== "string") return null;
+			return value as TspEvent;
+		}
 		if (typeof value.item === "string") return value as TspEvent;
 		return null;
 	}

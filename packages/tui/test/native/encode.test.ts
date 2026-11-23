@@ -75,14 +75,13 @@ describe("TSP framing", () => {
 			{ ev: "comment", sf: "s:1", id: "a.doc", comment: "c1", note: "name the API" },
 			{ ev: "uncomment", sf: "s:1", id: "a.doc", comment: "c1" },
 			{ ev: "change", sf: "s:1", id: "a.doc", text: "# Plan\n\nnew body\n" },
-			{ ev: "change", sf: "s:1", id: "a.prefs", item: "mode", value: "fast" },
 		];
 		for (const event of events) {
 			expect(parseTspMessage(encodeTspMessage("e", JSON.stringify(event)))).toEqual({ verb: "e", event });
 		}
 	});
 
-	it("rejects doc comment events without a surface, target, note or anchor", () => {
+	it("rejects malformed doc comment and change events", () => {
 		const valid: Extract<TspEvent, { ev: "comment" }> = {
 			ev: "comment",
 			sf: "s:1",
@@ -97,9 +96,11 @@ describe("TSP framing", () => {
 			{ ...valid, note: undefined },
 			{ ...valid, quote: undefined },
 			{ ...valid, at: "0" },
+			{ ...valid, comment: null },
 			{ ev: "comment", sf: "s:1", id: "a.doc", note: "clarify" },
 			{ ev: "uncomment", sf: "s:1", id: "a.doc" },
 			{ ev: "change", sf: "s:1", id: "a.doc" },
+			{ ev: "change", sf: "s:1", id: "a.prefs", item: "mode", value: "fast", text: null },
 		]) {
 			expect(parseTspMessage(encodeTspMessage("e", JSON.stringify(event)))).toBeNull();
 		}
