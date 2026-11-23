@@ -138,13 +138,14 @@ describe("MCP elicitation through the session UI", () => {
 		});
 	});
 
-	it("reopens a form whose answers break the schema, keeping what the user entered", async () => {
+	it("reopens a form whose answers break the schema as the user left it, stating the problem in it", async () => {
 		const request: MCPElicitRequest = {
 			message: "Where to deploy?",
 			requestedSchema: {
 				type: "object",
 				properties: {
 					owner: { type: "string" },
+					note: { type: "string", default: "routine" },
 					regions: { type: "array", minItems: 2, items: { enum: ["us", "eu", "ap"] } },
 				},
 				required: ["owner", "regions"],
@@ -154,21 +155,78 @@ describe("MCP elicitation through the session UI", () => {
 		const formDialog: FormDialog = async html => {
 			forms.push(html);
 			const data = defaultFormData(parseHtmlForm(html));
-			// First a single region, which the form cannot reject; then a second one added to what is shown.
-			if (forms.length === 1) return { data: { ...data, owner: "ops", regions: ["eu"] } };
-			const shown = data.regions as string[];
-			return { data: { ...data, regions: [...shown, "ap"] } };
-		};
-		const warnings: string[] = [];
-		const notify = (message: string) => {
-			warnings.push(message);
+			// First one region, which the form cannot reject, with the prefilled note cleared; then a second region.
+			if (forms.length === 1) return { data: { ...data, owner: "ops", note: "", regions: ["eu"] } };
+			return { data: { ...data, regions: [...(data.regions as string[]), "ap"] } };
 		};
 
-		const result = await handlerFor(context({ formDialog, notify }))(request, undefined);
+		const result = await handlerFor(context({ formDialog }))(request, undefined);
 
-		expect(warnings).toEqual(["regions: pick at least 2"]);
-		expect(defaultFormData(parseHtmlForm(forms[1] ?? ""))).toMatchObject({ owner: "ops", regions: ["eu"] });
+		expect(forms[1]).toContain("regions: pick at least 2");
+		// The cleared note stays cleared: the server's default does not come back.
+		expect(defaultFormData(parseHtmlForm(forms[1] ?? ""))).toMatchObject({ owner: "ops", note: "", regions: ["eu"] });
 		expect(result).toEqual({ action: "accept", content: { owner: "ops", regions: ["eu", "ap"] } });
+	});
+
+	it("sends a client's explicit decline or cancel as it is, without asking again", async () => {
+		const dismissing =
+			(action: "decline" | "cancel"): FormDialog =>
+			async (_html, options) => {
+				options?.onDismiss?.(action);
+				return undefined;
+			};
+		const select = async () => {
+			throw new Error("the user already answered");
+		};
+
+		expect(await handlerFor(context({ formDialog: dismissing("decline"), select }))(APPROVAL, undefined)).toEqual({
+			action: "decline",
+		});
+		expect(await handlerFor(context({ formDialog: dismissing("cancel"), select }))(APPROVAL, undefined)).toEqual({
+			action: "cancel",
+		});
+	});
+
+	it("accepts an empty selection for a required list that allows one", async () => {
+		const request: MCPElicitRequest = {
+			message: "Extra regions?",
+			requestedSchema: {
+				type: "object",
+				properties: { regions: { type: "array", items: { enum: ["us", "eu"] } } },
+				required: ["regions"],
+			},
+		};
+		const seen: { html?: string } = {};
+
+		const result = await handlerFor(context({ formDialog: submitting({ regions: [] }, seen) }))(request, undefined);
+
+		expect(result).toEqual({ action: "accept", content: { regions: [] } });
+		// The form itself does not demand a pick either.
+		expect(parseHtmlForm(seen.html ?? "").fields.find(field => field.name === "regions")?.required).toBe(false);
+	});
+
+	it("rejects dates that do not exist and date-times without a time or offset", async () => {
+		const request: MCPElicitRequest = {
+			message: "When?",
+			requestedSchema: {
+				type: "object",
+				properties: { day: { type: "string", format: "date" }, at: { type: "string", format: "date-time" } },
+			},
+		};
+		const problems = async (day: string, at: string) => {
+			const forms: string[] = [];
+			const formDialog: FormDialog = async html => {
+				forms.push(html);
+				// Fix both fields after the first submit so the loop ends.
+				return { data: forms.length === 1 ? { day, at } : { day: "2026-02-10", at: "2026-02-10T09:30:00Z" } };
+			};
+			await handlerFor(context({ formDialog }))(request, undefined);
+			return forms.length === 1 ? "accepted" : (forms[1] ?? "");
+		};
+
+		expect(await problems("2026-02-31", "2026-02-10T09:30:00Z")).toContain("day: enter a real date");
+		expect(await problems("2026-02-10", "2026-02-10")).toContain("at: enter a date and time");
+		expect(await problems("2024-02-29", "2026-02-10T09:30:00.5+02:00")).toBe("accepted");
 	});
 
 	it("closes the form as cancel when the user sends a message, without failing the call", async () => {

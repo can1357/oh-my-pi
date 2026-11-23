@@ -36,6 +36,7 @@ import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
 import type {
 	AgentMessage,
+	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
 	ThinkingLevel,
@@ -241,6 +242,12 @@ export interface ExtensionUIDialogOptions {
 	 * instead), with the answers the user changed from the form's defaults and their option notes.
 	 */
 	onAbandon?: (given: ExtensionFormDialogResult) => void;
+	/**
+	 * Form dialogs: invoked when the user explicitly declined or cancelled the
+	 * form, on hosts whose client tells the two apart (ACP). Hosts that only
+	 * see the form closed never invoke it.
+	 */
+	onDismiss?: (action: "decline" | "cancel") => void;
 	/**
 	 * Host hint to mask entered characters in `input` dialogs.
 	 * Enforced by the interactive TUI (masked as bullets), forwarded on RPC `input`
@@ -920,6 +927,12 @@ export interface ExtensionContext {
 	 * must stay in the ordinary tool result.
 	 */
 	addAdditionalContext?(context: string): void;
+	/**
+	 * The user reach of the tool call this context serves, present only while
+	 * a registered tool is executing. It can differ from {@link ui}/{@link hasUI}:
+	 * plain RPC mode gives extensions a UI but tools none.
+	 */
+	toolContext?: Pick<AgentToolContext, "ui" | "hasUI" | "toolCall">;
 	/**
 	 * Run the NATIVE built-in implementation of the tool this handler re-registered, with `params`,
 	 * and return its result. Lets a tool that re-registers a built-in (e.g. wrapping `write` to add

@@ -1553,6 +1553,10 @@ function createCustomToolContext(ctx: ExtensionContext): CustomToolContext {
 		hasQueuedMessages: ctx.hasPendingMessages,
 		abort: ctx.abort,
 		localProtocolOptions: ctx.localProtocolOptions,
+		// The call's own UI, not the extension's: plain RPC mode gives tools none.
+		ui: ctx.toolContext?.ui,
+		hasUI: ctx.toolContext?.hasUI,
+		toolCall: ctx.toolContext?.toolCall,
 	};
 }
 
@@ -1779,6 +1783,7 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
 						const promptArgs = mapPromptArguments(prompt.arguments, args);
 						// The server may ask the user while it builds the prompt.
 						const result = await manager.executePrompt(serverName, prompt.name, promptArgs, {
+							signal: ctx.signal,
 							elicit: elicitHandler(ctx),
 						});
 						if (!result) return "";

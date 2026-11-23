@@ -145,6 +145,36 @@ describe("McpEndpoint requests", () => {
 		expect(upstreams.count("resources/list")).toBe(1);
 	});
 
+	it("sends a read that may ask the user upstream on its own, past the store and a concurrent identical read", async () => {
+		const gate = Promise.withResolvers<void>();
+		upstreams.handler = async (method, params) => {
+			if (method !== "resources/read") return undefined;
+			await gate.promise;
+			const capabilities = (params._meta as Record<string, Record<string, unknown>>)[MCPMeta.clientCapabilities];
+			const asks = capabilities.elicitation !== undefined;
+			return {
+				resultType: "complete",
+				contents: [{ uri: "file:///a", text: asks ? "asked" : "headless" }],
+				ttlMs: 60_000,
+			};
+		};
+		const eliciting = { [MCPMeta.clientCapabilities]: { roots: {}, elicitation: { form: {} } } };
+		const headless = attachLink(endpoint);
+		const asking = attachLink(endpoint);
+		headless.request(1, "resources/read", { uri: "file:///a" });
+		asking.request(2, "resources/read", { uri: "file:///a" }, eliciting);
+		await until(() => upstreams.count("resources/read") === 2, "both reads upstream");
+		gate.resolve();
+		expect((await headless.response(1)).result).toMatchObject({ contents: [{ text: "headless" }] });
+		expect((await asking.response(2)).result).toMatchObject({ contents: [{ text: "asked" }] });
+
+		// The headless answer is now stored, yet a later read that may ask still goes upstream.
+		expect(await asking.call(3, "resources/read", { uri: "file:///a" }, eliciting)).toMatchObject({
+			result: { contents: [{ text: "asked" }] },
+		});
+		expect(upstreams.count("resources/read")).toBe(3);
+	});
+
 	it("never stores an input_required result", async () => {
 		upstreams.handler = method =>
 			method === "resources/read"

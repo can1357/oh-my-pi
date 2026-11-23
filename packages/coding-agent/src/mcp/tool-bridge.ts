@@ -5,7 +5,7 @@ import type { MCPProgress } from "@oh-my-pi/pi-tui/tools/mcp-progress";
  *
  * Converts MCP tool definitions to CustomTool format for the agent.
  */
-import type { AgentToolContext, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import { normalizeSchemaForMCP } from "@oh-my-pi/pi-ai/utils/schema";
 import { isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
@@ -864,7 +864,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		toolCallId: string,
 		params: unknown,
 		onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
-		ctx: AgentToolContext,
+		ctx: CustomToolContext,
 		signal?: AbortSignal,
 	): Promise<CustomToolResult<MCPToolDetails>> {
 		const settle = this.observeCall?.(toolCallId);
@@ -878,7 +878,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	async #call(
 		params: unknown,
 		onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
-		ctx: AgentToolContext,
+		ctx: CustomToolContext,
 		signal?: AbortSignal,
 	): Promise<CustomToolResult<MCPToolDetails>> {
 		throwIfAborted(signal);

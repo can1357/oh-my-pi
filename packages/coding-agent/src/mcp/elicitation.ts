@@ -5,8 +5,10 @@
  * The requested schema becomes an HTML form and the submitted data is typed
  * back to the schema. Choice fields are selects, so the user picks among the
  * server's values and never types an "Other" answer the schema does not allow.
- * Closing the form asks whether to decline or cancel (or go back), and answers
- * that break the schema reopen the form with what the user typed.
+ * A client that reports an explicit decline or cancel is taken at its word;
+ * a form that was only closed asks whether to decline or cancel (or go back).
+ * Answers that break the schema reopen the form as the user left it, with the
+ * problem stated in it.
  */
 import type { HtmlFormData, HtmlFormValue } from "@oh-my-pi/pi-tui/html-form/data";
 import { untilAborted } from "@oh-my-pi/pi-utils";
@@ -31,8 +33,9 @@ export interface ElicitContext {
 
 /**
  * The elicitation handler of a request made for `ctx`, or undefined when it
- * cannot show the user a form (print and JSON modes, ACP clients without
- * forms): the request then declares no elicitation, and a server must not ask.
+ * cannot show the user a form (print, JSON and plain RPC modes, ACP clients
+ * without forms): the request then declares no elicitation, and a server must
+ * not ask.
  *
  * A message the user sends while the form is open closes it as `cancel`
  * without cancelling the tool call; aborting the request itself rejects.
@@ -65,22 +68,30 @@ async function elicitFromUser(
 	else steering?.addEventListener("abort", onSteer, { once: true });
 	const dialogSignal = signal ? AbortSignal.any([signal, dismissed.signal]) : dismissed.signal;
 	try {
-		// What the user answered so far: a reopened form starts from it instead of the server's defaults.
-		let answers: Record<string, MCPElicitValue> | undefined;
+		// The form as the user last submitted it, and what was wrong with it: a reopened form shows both.
+		let draft: HtmlFormData | undefined;
+		let problem: string | undefined;
 		for (;;) {
-			const html = elicitationFormHtml(serverName, request, answers);
-			const submitted = await untilAborted(dialogSignal, () => formDialog(html, { signal: dialogSignal }));
+			const html = elicitationFormHtml(serverName, request, draft, problem);
+			let explicit: "decline" | "cancel" | undefined;
+			const onDismiss = (action: "decline" | "cancel") => {
+				explicit = action;
+			};
+			const submitted = await untilAborted(dialogSignal, () =>
+				formDialog(html, { signal: dialogSignal, onDismiss }),
+			);
 			if (!submitted) {
-				const title = `${serverName} asks: ${request.message}\n\nYou closed the form. What should ${serverName} hear?`;
+				if (explicit) return { action: explicit };
+				const title = `You closed the form from ${serverName}. What should it hear?`;
 				const options = [ELICIT_DECLINE, ELICIT_CANCEL, ELICIT_BACK];
 				const choice = await untilAborted(dialogSignal, () => ui.select(title, options, { signal: dialogSignal }));
 				if (choice === ELICIT_BACK) continue;
 				return { action: choice === ELICIT_DECLINE ? "decline" : "cancel" };
 			}
-			answers = elicitationContent(request, submitted.data);
-			const problem = elicitationContentError(request, answers);
-			if (!problem) return { action: "accept", content: answers };
-			ui.notify(problem, "warning");
+			draft = submitted.data;
+			const content = elicitationContent(request, draft);
+			problem = elicitationContentError(request, content);
+			if (!problem) return { action: "accept", content };
 		}
 	} catch (error) {
 		if (signal?.aborted) throw error;
@@ -92,53 +103,54 @@ async function elicitFromUser(
 }
 
 /**
- * The form an elicitation is shown as: who asks, the server's message, then
- * one control per schema property, prefilled from `answers` where given and
- * from the schema's defaults otherwise.
+ * The form an elicitation is shown as: who asks, the server's message, what
+ * was wrong with the last submit, then one control per schema property,
+ * showing the user's draft where given and the schema's defaults otherwise.
  */
 function elicitationFormHtml(
 	serverName: string,
 	request: MCPElicitRequest,
-	answers?: Record<string, MCPElicitValue>,
+	draft: HtmlFormData | undefined,
+	problem: string | undefined,
 ): string {
 	const { properties, required = [] } = request.requestedSchema;
 	const parts = ["<form>", `<p><strong>${esc(serverName)}</strong> asks:</p>`, paragraph(request.message)];
+	if (problem) parts.push(`<p><strong>Please fix:</strong> ${esc(problem)}</p>`);
 	for (const name of Object.keys(properties)) {
-		const answer = answers && Object.hasOwn(answers, name) ? answers[name] : undefined;
-		parts.push(fieldHtml(name, withDefault(properties[name], answer), required.includes(name)));
+		const shown = draft && Object.hasOwn(draft, name) ? draft[name] : undefined;
+		parts.push(fieldHtml(name, properties[name], required.includes(name), shown));
 	}
 	parts.push("</form>");
 	return parts.join("\n");
 }
 
-/** `schema` defaulting to an earlier answer, which {@link elicitationContent} typed to it. */
-function withDefault(schema: MCPElicitFieldSchema, answer: MCPElicitValue | undefined): MCPElicitFieldSchema {
-	return answer === undefined ? schema : ({ ...schema, default: answer } as MCPElicitFieldSchema);
-}
-
 /**
  * The accepted content for submitted form data: each value typed as its
- * schema declares, and fields left empty omitted.
+ * schema declares. Fields left empty are omitted, except a required list,
+ * whose empty selection is an answer.
  */
 function elicitationContent(request: MCPElicitRequest, data: HtmlFormData): Record<string, MCPElicitValue> {
-	const { properties } = request.requestedSchema;
+	const { properties, required = [] } = request.requestedSchema;
 	// No prototype: a property may be named `__proto__`.
 	const content: Record<string, MCPElicitValue> = Object.create(null);
 	for (const name of Object.keys(properties)) {
-		const value = Object.hasOwn(data, name) ? typedValue(properties[name], data[name]) : undefined;
-		if (value !== undefined) content[name] = value;
+		const schema = properties[name];
+		const value = typedValue(schema, Object.hasOwn(data, name) ? data[name] : undefined);
+		if (value === undefined) continue;
+		if (Array.isArray(value) && value.length === 0 && !required.includes(name)) continue;
+		content[name] = value;
 	}
 	return content;
 }
 
 function typedValue(schema: MCPElicitFieldSchema, value: HtmlFormValue | undefined): MCPElicitValue | undefined {
+	if (schema.type === "array") {
+		// An untouched multi-select may submit nothing at all: that is an empty selection.
+		const values = value === undefined ? [] : Array.isArray(value) ? value : [String(value)];
+		return values.filter(item => item !== "");
+	}
 	if (value === undefined) return undefined;
 	switch (schema.type) {
-		case "array": {
-			const values = Array.isArray(value) ? value : [String(value)];
-			const picked = values.filter(item => item !== "");
-			return picked.length > 0 ? picked : undefined;
-		}
 		case "boolean":
 			return value === "true" ? true : value === "false" ? false : undefined;
 		case "number":
@@ -209,69 +221,96 @@ function textError(schema: MCPElicitFieldSchema, value: string): string | undefi
 	if (schema.minLength !== undefined && value.length < schema.minLength) {
 		return `needs at least ${schema.minLength} characters`;
 	}
-	if (schema.maxLength !== undefined && value.length > schema.maxLength)
+	if (schema.maxLength !== undefined && value.length > schema.maxLength) {
 		return `at most ${schema.maxLength} characters`;
+	}
 	switch (schema.format) {
 		case "email":
 			return /^[^\s@]+@[^\s@]+$/.test(value) ? undefined : "enter an email address";
 		case "uri":
 			return URL.canParse(value) ? undefined : "enter a full URL";
 		case "date":
-			return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value))
-				? undefined
-				: "enter a date as YYYY-MM-DD";
+			return isCalendarDate(value) ? undefined : "enter a real date as YYYY-MM-DD";
 		case "date-time":
-			return Number.isNaN(Date.parse(value)) ? "enter a date and time as YYYY-MM-DDTHH:MM:SSZ" : undefined;
+			return isDateTime(value) ? undefined : "enter a date and time as YYYY-MM-DDTHH:MM:SSZ";
 		default:
 			return undefined;
 	}
 }
 
-function fieldHtml(name: string, schema: MCPElicitFieldSchema, required: boolean): string {
-	const title = esc(schema.title ?? name);
-	const description = schema.description ? `${paragraph(schema.description)}\n` : "";
-	return `${description}<label>${title} ${controlHtml(name, schema, required)}</label>`;
+/** Whether `value` is an RFC 3339 `full-date` naming a day that exists. */
+function isCalendarDate(value: string): boolean {
+	const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+	if (!match) return false;
+	const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
+	const date = new Date(Date.UTC(year, month - 1, day));
+	return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
 }
 
-function controlHtml(name: string, schema: MCPElicitFieldSchema, required: boolean): string {
+/** Whether `value` is an RFC 3339 `date-time`: a real date, a time and an offset. */
+function isDateTime(value: string): boolean {
+	const match = /^(\d{4}-\d{2}-\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-](\d{2}):(\d{2}))$/.exec(value);
+	if (!match || !isCalendarDate(match[1])) return false;
+	const [hours, minutes, seconds] = [Number(match[2]), Number(match[3]), Number(match[4])];
+	const offsetOk = match[7] === undefined || (Number(match[7]) < 24 && Number(match[8]) < 60);
+	return hours < 24 && minutes < 60 && seconds <= 60 && offsetOk;
+}
+
+function fieldHtml(name: string, schema: MCPElicitFieldSchema, required: boolean, shown: HtmlFormValue | undefined) {
+	const title = esc(schema.title ?? name);
+	const description = schema.description ? `${paragraph(schema.description)}\n` : "";
+	return `${description}<label>${title} ${controlHtml(name, schema, required, shown)}</label>`;
+}
+
+/** One field's control, showing `shown` (the user's draft) when given and the schema's default otherwise. */
+function controlHtml(
+	name: string,
+	schema: MCPElicitFieldSchema,
+	required: boolean,
+	shown: HtmlFormValue | undefined,
+): string {
 	const nameAttr = `name="${esc(name)}"`;
 	const requiredAttr = required ? " required" : "";
 	switch (schema.type) {
 		case "boolean": {
 			// A required yes/no without a default opens on "No": submitting untouched never approves anything.
-			const chosen = schema.default === undefined ? (required ? "false" : undefined) : String(schema.default);
+			const fallback = schema.default === undefined ? (required ? "false" : undefined) : String(schema.default);
+			const chosen = shown === undefined ? fallback : String(shown);
 			const options: Choice[] = [
 				{ value: "true", label: "Yes" },
 				{ value: "false", label: "No" },
 			];
-			return selectHtml(nameAttr, requiredAttr, options, chosen === undefined ? [] : [chosen], !required);
+			return selectHtml(nameAttr, requiredAttr, options, chosen ? [chosen] : [], !required);
 		}
 		case "array": {
-			const options = choices(schema.items.anyOf, schema.items.enum);
-			const opts = options.map(option => optionHtml(option, schema.default?.includes(option.value) === true));
-			return `<select ${nameAttr} multiple${requiredAttr}>${opts.join("")}</select>`;
+			const chosen = shown === undefined ? (schema.default ?? []) : Array.isArray(shown) ? shown : [String(shown)];
+			const opts = choices(schema.items.anyOf, schema.items.enum).map(option =>
+				optionHtml(option, chosen.includes(option.value)),
+			);
+			// HTML `required` demands a pick; a required list may still allow an empty one.
+			const mustPick = (schema.minItems ?? 0) >= 1 ? " required" : "";
+			return `<select ${nameAttr} multiple${mustPick}>${opts.join("")}</select>`;
 		}
 		case "number":
 		case "integer": {
 			const attrs = [nameAttr, 'type="number"'];
-			if (schema.minimum !== undefined) attrs.push(`min="${schema.minimum}"`);
-			if (schema.maximum !== undefined) attrs.push(`max="${schema.maximum}"`);
+			if (schema.minimum !== undefined) attrs.push(`min="${esc(String(schema.minimum))}"`);
+			if (schema.maximum !== undefined) attrs.push(`max="${esc(String(schema.maximum))}"`);
 			if (schema.type === "integer") attrs.push('pattern="-?\\d+"');
-			if (schema.default !== undefined) attrs.push(`value="${schema.default}"`);
+			const value = shown === undefined ? schema.default : shown;
+			if (value !== undefined) attrs.push(`value="${esc(String(value))}"`);
 			return `<input ${attrs.join(" ")}${requiredAttr}>`;
 		}
 		default: {
+			const value = shown === undefined ? schema.default : String(shown);
 			const options = choices(schema.oneOf, schema.enum);
-			if (options.length > 0) {
-				const chosen = schema.default === undefined ? [] : [schema.default];
-				return selectHtml(nameAttr, requiredAttr, options, chosen, !required);
-			}
-			return `<input ${[nameAttr, ...textAttrs(schema)].join(" ")}${requiredAttr}>`;
+			if (options.length > 0) return selectHtml(nameAttr, requiredAttr, options, value ? [value] : [], !required);
+			return `<input ${[nameAttr, ...textAttrs(schema, value)].join(" ")}${requiredAttr}>`;
 		}
 	}
 }
 
-function textAttrs(schema: MCPElicitFieldSchema): string[] {
+function textAttrs(schema: MCPElicitFieldSchema, value: string | undefined): string[] {
 	if (schema.type !== "string") return ['type="text"'];
 	const attrs: string[] = [];
 	switch (schema.format) {
@@ -290,9 +329,9 @@ function textAttrs(schema: MCPElicitFieldSchema): string[] {
 		default:
 			attrs.push('type="text"');
 	}
-	if (schema.minLength !== undefined) attrs.push(`minlength="${schema.minLength}"`);
-	if (schema.maxLength !== undefined) attrs.push(`maxlength="${schema.maxLength}"`);
-	if (schema.default !== undefined) attrs.push(`value="${esc(schema.default)}"`);
+	if (schema.minLength !== undefined) attrs.push(`minlength="${esc(String(schema.minLength))}"`);
+	if (schema.maxLength !== undefined) attrs.push(`maxlength="${esc(String(schema.maxLength))}"`);
+	if (value !== undefined) attrs.push(`value="${esc(value)}"`);
 	return attrs;
 }
 
@@ -307,7 +346,7 @@ function choices(titled: { const: string; title?: string }[] | undefined, values
 	return (values ?? []).map(value => ({ value, label: value }));
 }
 
-/** A single select. An optional one starts on an empty choice unless the schema gives a default. */
+/** A single select. An optional one starts on an empty choice unless something is chosen. */
 function selectHtml(
 	nameAttr: string,
 	requiredAttr: string,

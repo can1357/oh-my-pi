@@ -267,6 +267,42 @@ describe("modern MCP client operations", () => {
 		expect(tunnel.sent.filter(message => message.method === "tools/call")).toHaveLength(1);
 	});
 
+	it("refuses a form whose fields form mode does not allow before anything reaches the user", async () => {
+		const malformed: Record<string, unknown>[] = [
+			{ broken: null },
+			{ picks: { type: "array" } },
+			{ count: { type: "integer", minimum: '1" onfocus="x' } },
+		];
+		for (const properties of malformed) {
+			const connection = await connect();
+			const tunnel = host.tunnel;
+			let asked = false;
+			const elicit: MCPElicitHandler = async () => {
+				asked = true;
+				return { action: "cancel" };
+			};
+
+			const calling = rejectionOf(callTool(connection, "configure", {}, { elicit }));
+			const first = await tunnel.next("tools/call");
+			const [name] = Object.keys(properties);
+			tunnel.push({
+				id: first.id,
+				result: {
+					resultType: "input_required",
+					inputRequests: {
+						q: {
+							method: "elicitation/create",
+							params: { message: "Settings", requestedSchema: { type: "object", properties } },
+						},
+					},
+				},
+			});
+
+			expect(String(await calling)).toContain(`with an unsupported field "${name}"`);
+			expect(asked).toBe(false);
+		}
+	});
+
 	it("stops a server that never stops asking for input", async () => {
 		const connection = await connect();
 		const tunnel = host.tunnel;

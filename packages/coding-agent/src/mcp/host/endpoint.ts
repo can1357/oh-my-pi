@@ -66,6 +66,17 @@ const INVALID_REQUEST = -32600;
 /** Params key of a request without parameters: the first page of a list. */
 const FIRST_PAGE = cacheParamsKey(undefined);
 
+/**
+ * Whether a request declares elicitation. Its answer may differ from one
+ * caller to the next and carry a single-use `requestState`, so it is neither
+ * served from the store nor shared with a concurrent identical request.
+ */
+function mayAskUser(params: Record<string, unknown>): boolean {
+	const meta = isRecord(params._meta) ? params._meta : undefined;
+	const capabilities = meta?.[MCPMeta.clientCapabilities];
+	return isRecord(capabilities) && capabilities.elicitation !== undefined;
+}
+
 /** Failed starts and unexpected exits within {@link CRASH_WINDOW_MS} that open the crash guard. */
 const CRASH_LIMIT = 5;
 const CRASH_WINDOW_MS = 30_000;
@@ -734,11 +745,13 @@ export class McpEndpoint implements ModuleUnit {
 		signal: AbortSignal,
 		onProgress: ((progress: Record<string, unknown>) => void) | undefined,
 	): Promise<Record<string, unknown>> {
-		// The store is bypassed for results that are not cacheable, for MRTR retries, and on request.
+		// The store is bypassed for results that are not cacheable, for MRTR retries, for requests that
+		// let the server ask the user, and on request.
 		if (
 			!isCacheableMethod(method) ||
 			params.inputResponses !== undefined ||
 			params.requestState !== undefined ||
+			mayAskUser(params) ||
 			hint === MCP_NO_STORE
 		) {
 			this.#served = link;

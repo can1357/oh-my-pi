@@ -25,6 +25,7 @@ import {
 	MCP_SUBSCRIPTION_ACKNOWLEDGED,
 	type MCPDiscoverResult,
 	MCP_ELICITING_CLIENT_CAPABILITIES,
+	type MCPElicitFieldSchema,
 	type MCPElicitRequest,
 	MCPErrorCode,
 	type MCPInputRequiredResult,
@@ -596,9 +597,11 @@ async function requestWithInput<T>(
 }
 
 /**
- * Narrow the params of an `elicitation/create` ask to a form-mode request.
+ * Decode the params of an `elicitation/create` ask into a form-mode request.
+ * Every field is rebuilt from the keys form mode defines, each checked for
+ * its type, so nothing else a server sends reaches the form.
  *
- * @throws when the ask is URL mode (never declared) or lacks a message or an object schema.
+ * @throws when the ask is URL mode (never declared), lacks a message, or has a schema or field form mode does not allow.
  */
 function elicitRequestOf(connection: MCPServerConnection, method: string, params: unknown): MCPElicitRequest {
 	const fail = (why: string): never => {
@@ -609,18 +612,111 @@ function elicitRequestOf(connection: MCPServerConnection, method: string, params
 	if (typeof params.message !== "string") return fail("without a message");
 	const schema = params.requestedSchema;
 	if (!isRecord(schema) || !isRecord(schema.properties)) return fail("without an object schema");
-	const required = Array.isArray(schema.required)
-		? schema.required.filter((name): name is string => typeof name === "string")
-		: undefined;
+	if (schema.required !== undefined && !isStringArray(schema.required)) return fail("with a malformed required list");
+	// No prototype: a field may be named `__proto__`.
+	const properties: Record<string, MCPElicitFieldSchema> = Object.create(null);
+	for (const name of Object.keys(schema.properties)) {
+		properties[name] = elicitFieldOf(schema.properties[name]) ?? fail(`with an unsupported field "${name}"`);
+	}
 	return {
 		mode: "form",
 		message: params.message,
-		requestedSchema: {
-			type: "object",
-			properties: schema.properties as MCPElicitRequest["requestedSchema"]["properties"],
-			required,
-		},
+		requestedSchema: { type: "object", properties, required: schema.required },
 	};
+}
+
+/** A form-mode field schema rebuilt from `value`, or undefined when `value` is not one. */
+function elicitFieldOf(value: unknown): MCPElicitFieldSchema | undefined {
+	if (!isRecord(value)) return undefined;
+	const text = (key: string): string | undefined => (typeof value[key] === "string" ? value[key] : undefined);
+	const count = (key: string): number | undefined =>
+		typeof value[key] === "number" && Number.isFinite(value[key]) ? value[key] : undefined;
+	const has = (key: string, valid: boolean) => value[key] === undefined || valid;
+	const common = { title: text("title"), description: text("description") };
+	if (!has("title", common.title !== undefined) || !has("description", common.description !== undefined)) {
+		return undefined;
+	}
+	switch (value.type) {
+		case "boolean":
+			if (!has("default", typeof value.default === "boolean")) return undefined;
+			return { type: "boolean", ...common, default: value.default as boolean | undefined };
+		case "number":
+		case "integer": {
+			const field = {
+				type: value.type,
+				...common,
+				minimum: count("minimum"),
+				maximum: count("maximum"),
+				default: count("default"),
+			};
+			const valid = (["minimum", "maximum", "default"] as const).every(key => has(key, field[key] !== undefined));
+			return valid ? field : undefined;
+		}
+		case "string": {
+			const oneOf = choicesOf(value.oneOf);
+			const format = ELICIT_FORMATS.find(known => known === value.format);
+			const knownFormat = format !== undefined;
+			const field = {
+				type: "string" as const,
+				...common,
+				minLength: count("minLength"),
+				maxLength: count("maxLength"),
+				format,
+				default: text("default"),
+				enum: isStringArray(value.enum) ? value.enum : undefined,
+				oneOf,
+			};
+			const valid =
+				has("minLength", field.minLength !== undefined) &&
+				has("maxLength", field.maxLength !== undefined) &&
+				has("format", knownFormat) &&
+				has("default", field.default !== undefined) &&
+				has("enum", field.enum !== undefined) &&
+				has("oneOf", oneOf !== undefined);
+			return valid ? field : undefined;
+		}
+		case "array": {
+			if (!isRecord(value.items)) return undefined;
+			const items = {
+				enum: isStringArray(value.items.enum) ? value.items.enum : undefined,
+				anyOf: choicesOf(value.items.anyOf),
+			};
+			if (items.enum === undefined && items.anyOf === undefined) return undefined;
+			const field = {
+				type: "array" as const,
+				...common,
+				minItems: count("minItems"),
+				maxItems: count("maxItems"),
+				items,
+				default: isStringArray(value.default) ? value.default : undefined,
+			};
+			const valid =
+				has("minItems", field.minItems !== undefined) &&
+				has("maxItems", field.maxItems !== undefined) &&
+				has("default", field.default !== undefined);
+			return valid ? field : undefined;
+		}
+		default:
+			return undefined;
+	}
+}
+
+const ELICIT_FORMATS = ["email", "uri", "date", "date-time"] as const;
+
+/** Titled choices (`oneOf`/`anyOf` entries of `const` and optional `title`), or undefined when `value` is not a list of them. */
+function choicesOf(value: unknown): { const: string; title?: string }[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const choices: { const: string; title?: string }[] = [];
+	for (const entry of value) {
+		if (!isRecord(entry) || typeof entry.const !== "string") return undefined;
+		if (entry.title !== undefined && typeof entry.title !== "string") return undefined;
+		choices.push({ const: entry.const, title: entry.title });
+	}
+	return choices;
+}
+
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every(item => typeof item === "string");
 }
 
 /**
