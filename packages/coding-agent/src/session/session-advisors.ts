@@ -735,28 +735,29 @@ export class SessionAdvisors {
 					logger.warn("advisor onTurnEnd threw; delta dropped", { advisor: advisor.name, err: String(error) });
 				}
 			}
-			if (!scheduledAdvisors) return;
 			// Catch-up policy resolves per advisor at each boundary: a roster
 			// entry's `syncBacklog` override wins; omitted entries follow the
 			// global `advisor.syncBacklog` setting live (a settings change needs
-			// no rebuild). Only advisors whose review was scheduled this boundary
-			// are waited on, each under its own policy — a `strict` final reviewer
-			// blocks the boundary (no wall-clock cap; abort, failure, quota,
-			// transition, and disposal still release it) while an asynchronous
-			// turn reviewer never parks the primary.
+			// no rebuild). A continuing boundary waits only under `strict`, and only on
+			// the review it scheduled: a `strict` reviewer blocks every boundary (no
+			// wall-clock cap; abort, failure, quota, transition, and disposal still
+			// release it). A numeric wait is skipped there because the flush withholds
+			// this boundary's non-blocker (nit and concern) notes until the terminal
+			// boundary, so waiting would hold the primary for them. A blocker still
+			// steers live when its review raises it. The final boundary waits for every
+			// review still running under the advisor's own policy, including one an
+			// earlier continuing boundary scheduled, so the final answer never completes
+			// ahead of a review the numeric policy promised to wait for.
 			const globalSyncBacklog = cfgAdvisorSyncBacklog.get(this.#host.settings);
 			const waits: Promise<boolean>[] = [];
-			for (const scheduled of scheduledAdvisors) {
-				const syncBacklog = scheduled.syncBacklog ?? globalSyncBacklog;
+			for (const advisor of this.#advisors) {
+				if (advisor.runtime.disposed) continue;
+				const syncBacklog = advisor.syncBacklog ?? globalSyncBacklog;
 				if (syncBacklog === "off") continue;
 				const strict = syncBacklog === "strict";
-				// The flush above withholds this boundary's non-blocker (nit and concern)
-				// notes until the terminal boundary, so a numeric wait here would hold the
-				// primary for them. A blocker still steers live when its review raises it.
-				// Strict still blocks every boundary.
-				if (!terminalBoundary && !strict) continue;
+				if (!terminalBoundary && !(strict && scheduledAdvisors?.includes(advisor))) continue;
 				const threshold = strict ? 1 : Number.parseInt(syncBacklog, 10);
-				waits.push(scheduled.runtime.waitForCatchup(strict ? undefined : 30_000, threshold, signal));
+				waits.push(advisor.runtime.waitForCatchup(strict ? undefined : 30_000, threshold, signal));
 			}
 			await Promise.all(waits);
 		} finally {

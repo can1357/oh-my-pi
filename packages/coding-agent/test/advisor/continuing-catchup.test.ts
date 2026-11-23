@@ -56,11 +56,16 @@ describe("advisor catch-up at continuing tool-loop turns", () => {
 	 * Starts a run whose first step is a tool call. That tool batch ends a continuing
 	 * boundary and schedules one advisor review, which stays open until `released` resolves.
 	 */
-	function startRunWithHeldReview(syncBacklog: string) {
+	function startRunWithHeldReview(syncBacklog: string, options: { toolSteps?: number; reviewInterval?: number } = {}) {
+		const toolSteps = options.toolSteps ?? 1;
 		const primaryMock = createMockModel({
 			provider: "anthropic",
 			responses: [
-				{ content: [{ type: "toolCall", id: "read-1", name: "read", arguments: { path: "a.ts" } }] },
+				...Array.from({ length: toolSteps }, (_, step) => ({
+					content: [
+						{ type: "toolCall" as const, id: `read-${step + 1}`, name: "read", arguments: { path: "a.ts" } },
+					],
+				})),
 				{ content: ["primary complete"] },
 			],
 		});
@@ -96,6 +101,7 @@ describe("advisor catch-up at continuing tool-loop turns", () => {
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 		const settings = Settings.isolated({
 			"advisor.syncBacklog": syncBacklog,
+			"advisor.reviewInterval": options.reviewInterval ?? 1,
 			"compaction.enabled": false,
 			"todo.enabled": false,
 		});
@@ -116,11 +122,16 @@ describe("advisor catch-up at continuing tool-loop turns", () => {
 		const advisor = session.getAdvisorAgent();
 		if (!advisor) throw new Error("Expected advisor agent to be active");
 		advisor.setModel(advisorMock);
+		let finished = false;
+		const prompting = session.prompt("review the change").then(() => {
+			finished = true;
+		});
 		return {
 			primaryMock,
 			released,
 			reviewsStarted: () => reviewsStarted,
-			prompting: session.prompt("review the change"),
+			finished: () => finished,
+			prompting,
 		};
 	}
 
@@ -150,6 +161,24 @@ describe("advisor catch-up at continuing tool-loop turns", () => {
 			expect(await waitUntil(() => run.primaryMock.calls.length >= 2, 2_000)).toBe(false);
 			run.released.resolve();
 			expect(await waitUntil(() => run.primaryMock.calls.length >= 2, 2_000)).toBe(true);
+		} finally {
+			run.released.resolve();
+			await run.prompting;
+		}
+	});
+
+	it("holds the final answer until a continuing-boundary review still running has caught up when advisor.syncBacklog is numeric", async () => {
+		// reviewInterval 2 schedules the review at the second tool-loop boundary, which
+		// numeric catch-up does not wait on. The final boundary is not scheduled, so only
+		// that still-running review keeps the backlog above zero when the final answer is
+		// ready. The final boundary must wait for it, as the numeric catch-up promises.
+		const run = startRunWithHeldReview("1", { toolSteps: 2, reviewInterval: 2 });
+		try {
+			expect(await waitUntil(() => run.reviewsStarted() === 1, 2_000)).toBe(true);
+			expect(await waitUntil(() => run.primaryMock.calls.length >= 3, 2_000)).toBe(true);
+			expect(await waitUntil(() => run.finished(), 500)).toBe(false);
+			run.released.resolve();
+			expect(await waitUntil(() => run.finished(), 2_000)).toBe(true);
 		} finally {
 			run.released.resolve();
 			await run.prompting;
