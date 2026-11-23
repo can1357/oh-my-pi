@@ -130,11 +130,6 @@ describe("bifrostUsageProvider", () => {
 		expect((await probe({ [QUOTA]: quota({}) })).report).toBeNull();
 		await expect(probe({ [QUOTA]: new Response(null, { status: 401 }) })).rejects.toBeInstanceOf(ProviderHttpError);
 	});
-
-	it("scopes rate-limit blocks to the model's route", () => {
-		expect(bifrostRankingStrategy.blockScope?.({ modelId: "Chinese Router/glm-5" })).toBe("route:Chinese Router");
-		expect(bifrostRankingStrategy.blockScope?.({ modelId: "glm-5" })).toBeUndefined();
-	});
 });
 
 function memoryStore(): AuthCredentialStore {

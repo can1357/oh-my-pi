@@ -287,12 +287,6 @@ export const bifrostRankingStrategy: CredentialRankingStrategy = {
 		return { primary: limits[0], secondary: limits[1] };
 	},
 	scopeLimits: scopeBifrostLimits,
-	// Each route is its own upstream: a 429 from one must not block the key for every other route.
-	blockScope(context) {
-		const modelId = context?.modelId;
-		const slash = modelId?.indexOf("/") ?? -1;
-		return modelId && slash > 0 ? `route:${modelId.slice(0, slash)}` : undefined;
-	},
 	windowDefaults: { primaryMs: HOUR_MS, secondaryMs: DAY_MS },
 };
 
