@@ -585,14 +585,14 @@ async function loadTrustedSessionExtensions(
 
 /**
  * The provider an ACP `--api-key` belongs to when no launch model names one: the provider of the model the
- * launch scope starts on, else the one provider a declared launch scope names. Undefined without a launch
- * scope. A declared scope naming zero or several providers is refused, so no workspace can claim the key.
+ * launch scope starts on, else the one provider a declared launch scope names. Without a launch scope, or
+ * with one naming zero or several providers, the launch is refused, so no workspace can claim the key.
  */
 async function resolveAcpApiKeyProvider(
 	parsed: Pick<Args, "model" | "models" | "thinking">,
 	modelRegistry: ModelRegistry,
 	settings: Settings,
-): Promise<string | undefined> {
+): Promise<{ provider: string } | { error: string }> {
 	// The launch scope names the credential's provider, but must not select the workspace's model.
 	const keyTarget: CreateAgentSessionOptions = {};
 	applyStartupScopedModels(
@@ -601,11 +601,10 @@ async function resolveAcpApiKeyProvider(
 		await resolveScopedModels(parsed, modelRegistry, settings),
 		settings,
 		false,
-		false,
 	);
-	if (keyTarget.model) return keyTarget.model.provider;
+	if (keyTarget.model) return { provider: keyTarget.model.provider };
 	const declaredScope = parsed.models ?? cfgEnabledModels.get(settings);
-	if (declaredScope.length === 0) return undefined;
+	if (declaredScope.length === 0) return { error: API_KEY_REQUIRES_MODEL };
 	// Without a stored credential the scope matches nothing available, but it still names its provider.
 	const disabled = disabledProviderIds(settings);
 	const catalog = {
@@ -615,9 +614,9 @@ async function resolveAcpApiKeyProvider(
 	const matches = await resolveModelScope(declaredScope, catalog, getModelMatchPreferences(settings), settings);
 	const [provider, ...others] = new Set(matches.map(entry => entry.model.provider));
 	if (!provider || others.length > 0) {
-		throw new CliUsageError("--api-key requires exactly one enabled provider in the launch scope");
+		return { error: "--api-key requires exactly one enabled provider in the launch scope" };
 	}
-	return provider;
+	return { provider };
 }
 
 /**
@@ -649,9 +648,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		const nextOptions = { ...args.baseOptions };
 		if (args.parsedArgs.models === undefined) {
 			const scope = await resolveScopedModels(args.parsedArgs, args.modelRegistry, nextSettings);
-			// Without `--models` the ACP launch resolved no scope, so a level already set came from `--model`.
-			const cliModelThinking = nextOptions.thinkingLevel !== undefined;
-			applyStartupScopedModels(nextOptions, args.parsedArgs, scope, nextSettings, false, cliModelThinking);
+			applyStartupScopedModels(nextOptions, args.parsedArgs, scope, nextSettings, false);
 		}
 		if (apiKey) {
 			if (!apiKeyProvider && !nextOptions.modelPattern) throw new CliUsageError(API_KEY_REQUIRES_MODEL);
@@ -1558,15 +1555,19 @@ export function applyResolvedSystemPromptInputs(
 	}
 }
 
+/**
+ * Seeds the startup model, thinking level and cycling scope from `scopedModels`. Runs after `--model`
+ * resolution and is the only other writer of `options.thinkingLevel`, so a level present on entry
+ * alongside `--model` came from its selector and outranks the scope entry for the same model.
+ */
 function applyStartupScopedModels(
 	options: CreateAgentSessionOptions,
 	parsed: Pick<Args, "model" | "models" | "thinking">,
 	scopedModels: readonly ScopedModel[],
 	activeSettings: Settings,
 	restoringSession: boolean,
-	/** An explicit `--model` level outranks the scope entry for the same model. */
-	cliModelThinking: boolean,
 ): void {
+	const cliModelThinking = parsed.model !== undefined && options.thinkingLevel !== undefined;
 	const first = scopedModels[0];
 	// True when a configured `default` role was deliberately left unresolved for
 	// createAgentSession's post-extension re-resolution (issue #6694); the
@@ -1746,8 +1747,6 @@ export async function buildSessionOptions(
 	// configured assignment so explicit prewalk role targets still resolve
 	// against the value that existed when the CLI was invoked.
 	const preModelOverrideDefaultRole = activeSettings.getModelRole("default");
-	// An explicit `--model` level outranks the scope entry for the same model.
-	let cliModelThinking = false;
 	if (parsed.model) {
 		const resolved = resolveCliModel({
 			cliProvider: parsed.provider,
@@ -1807,7 +1806,6 @@ export async function buildSessionOptions(
 			});
 			if (!parsed.thinking && resolved.thinkingLevel) {
 				options.thinkingLevel = resolved.thinkingLevel;
-				cliModelThinking = true;
 			}
 		}
 	}
@@ -1881,7 +1879,7 @@ export async function buildSessionOptions(
 		options.planYolo = { target: resolved.model, thinkingLevel: resolved.thinkingLevel };
 	}
 
-	applyStartupScopedModels(options, parsed, scopedModels, activeSettings, restoringSession, cliModelThinking);
+	applyStartupScopedModels(options, parsed, scopedModels, activeSettings, restoringSession);
 
 	// API key from CLI - set in authStorage
 	// (handled by caller before createAgentSession)
@@ -2588,13 +2586,15 @@ export async function runRootCommand(
 		if (parsedArgs.apiKey) {
 			if (!apiKeyProvider && !sessionOptions.modelPattern) {
 				// ACP sessions select their own workspace's model, so only the launch scope can name the provider.
-				if (mode === "acp") {
-					apiKeyProvider = await resolveAcpApiKeyProvider(parsedArgs, modelRegistry, settingsInstance);
-				}
-				if (!apiKeyProvider) {
-					process.stderr.write(`${chalk.red(API_KEY_REQUIRES_MODEL)}\n`);
+				const launchKey =
+					mode === "acp"
+						? await resolveAcpApiKeyProvider(parsedArgs, modelRegistry, settingsInstance)
+						: { error: API_KEY_REQUIRES_MODEL };
+				if ("error" in launchKey) {
+					process.stderr.write(`${chalk.red(launchKey.error)}\n`);
 					process.exit(1);
 				}
+				apiKeyProvider = launchKey.provider;
 			}
 			if (apiKeyProvider) {
 				authStorage.keys.setRuntime(apiKeyProvider, parsedArgs.apiKey);
