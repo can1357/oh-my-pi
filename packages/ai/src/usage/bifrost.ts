@@ -217,7 +217,8 @@ async function getQuota(
  * Reads the calling virtual key's budgets and rate limits. A base URL behind
  * an integration route (`…/openai`) retries the origin when its own root
  * has no quota route. A 401 or 403 (expired key) rejects so the cached report
- * is discarded; a key with no configured limits reports nothing.
+ * is discarded; a key with no configured limits reports an empty report, which
+ * replaces the previous one.
  */
 async function fetchBifrostUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
 	const apiKey = params.credential.type === "api_key" ? params.credential.apiKey?.trim() : undefined;
@@ -250,7 +251,6 @@ async function fetchBifrostUsage(params: UsageFetchParams, ctx: UsageFetchContex
 	}
 	if (!isRecord(body)) return null;
 	const limits = quotaLimits(params.provider, body);
-	if (limits.length === 0) return null;
 
 	const configs = Array.isArray(body.provider_configs) ? body.provider_configs : [];
 	const accountId = configs

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type AuthCredentialStore, AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import type { UsageFetchParams, UsageReport } from "@oh-my-pi/pi-ai/usage";
@@ -144,8 +144,8 @@ describe("bifrostUsageProvider", () => {
 		expect(report?.limits.map(limit => [limit.id, limit.status])).toEqual([["bifrost:key:active", "exhausted"]]);
 	});
 
-	it("reports nothing for a key without limits and rejects a refused key", async () => {
-		expect((await probe({ [QUOTA]: quota({}) })).report).toBeNull();
+	it("reports an empty report for a key without limits and rejects a refused key", async () => {
+		expect((await probe({ [QUOTA]: quota({}) })).report?.limits).toEqual([]);
 		await expect(probe({ [QUOTA]: new Response(null, { status: 401 }) })).rejects.toBeInstanceOf(ProviderHttpError);
 	});
 });
@@ -176,24 +176,30 @@ function memoryStore(): AuthCredentialStore {
 
 describe("Bifrost model usage health for a config key", () => {
 	const storages: AuthStorage[] = [];
+	const options = { baseUrl: "https://gw.example/v1", reserveFraction: 0.05 };
 	afterEach(() => {
 		for (const storage of storages) storage.close();
 		storages.length = 0;
+		vi.restoreAllMocks();
 	});
 
-	it("evaluates the configured key as one account, scoped to the model's route", async () => {
+	function configKeyStorage(routes: Routes): AuthStorage {
 		const storage = new AuthStorage(memoryStore(), {
 			configValueResolver: async value => value,
-			usageFetch: routedFetch({
-				[QUOTA]: quota({
-					provider_configs: [{ provider: "openrouter", budgets: [budget("route", 5, 5)] }],
-					budgets: [budget("key", 1, 10)],
-				}),
-			}),
+			usageFetch: routedFetch(routes),
 		});
 		storages.push(storage);
 		storage.keys.setConfig("bifrost", "sk-bf-test");
-		const options = { baseUrl: "https://gw.example/v1", reserveFraction: 0.05 };
+		return storage;
+	}
+
+	it("evaluates the configured key as one account, scoped to the model's route", async () => {
+		const storage = configKeyStorage({
+			[QUOTA]: quota({
+				provider_configs: [{ provider: "openrouter", budgets: [budget("route", 5, 5)] }],
+				budgets: [budget("key", 1, 10)],
+			}),
+		});
 
 		const depleted = await storage.health.model("bifrost", { ...options, modelId: "openrouter/glm-5" });
 		expect(depleted.state).toBe("depleted");
@@ -208,5 +214,19 @@ describe("Bifrost model usage health for a config key", () => {
 		]);
 		const healthy = await storage.health.model("bifrost", { ...options, modelId: "openai/gpt-5" });
 		expect(healthy.state).toBe("healthy");
+	});
+
+	it("replaces an inactive report once the reactivated key reports no limits", async () => {
+		const start = Date.now();
+		const now = vi.spyOn(Date, "now").mockReturnValue(start);
+		const routes: Routes = { [QUOTA]: quota({ is_active: false }) };
+		const storage = configKeyStorage(routes);
+		expect((await storage.health.model("bifrost", { ...options, modelId: "openai/gpt-5" })).state).toBe("depleted");
+
+		routes[QUOTA] = quota({});
+		now.mockReturnValue(start + 10 * 60_000);
+		expect((await storage.health.model("bifrost", { ...options, modelId: "openai/gpt-5" })).state).toBe("unknown");
+		const reports = await storage.usage.reports({ provider: "bifrost", baseUrlResolver: () => options.baseUrl });
+		expect(reports?.map(report => report.limits)).toEqual([[]]);
 	});
 });
