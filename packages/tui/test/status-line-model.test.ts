@@ -182,28 +182,33 @@ describe("status line model segment retry fallback", () => {
 		modelPrefix = theme.icon.model ? `${theme.icon.model} ` : "";
 	});
 
-	function createFallbackContext(servingModel?: SegmentContext["session"]["servingModel"]): SegmentContext {
+	const opus = { id: "claude-opus-4-5", name: "Claude Opus 4.5", provider: "anthropic", thinking: true };
+	const glm = { id: "glm-5", name: "GLM-5", provider: "zai", thinking: true };
+	const glmServing = {
+		selector: "zai/glm-5:medium",
+		modelIdentity: "zai/glm-5",
+		thinkingLevel: ThinkingLevel.Medium,
+		isFallback: true,
+	};
+
+	function createFallbackContext(
+		servingModel?: SegmentContext["session"]["servingModel"],
+		model: object = opus,
+		thinkingLevel: ThinkingLevel = ThinkingLevel.High,
+	): SegmentContext {
 		const base = createModelContext(false);
 		return {
 			...base,
 			session: {
 				...base.session,
-				state: {
-					model: { id: "claude-opus-4-5", name: "Claude Opus 4.5", provider: "anthropic", thinking: true },
-					thinkingLevel: ThinkingLevel.High,
-				},
+				state: { model, thinkingLevel },
 				servingModel,
 			} as unknown as SegmentContext["session"],
 		};
 	}
 
 	it("shows the serving fallback model, its level, and a warning marker", () => {
-		const ctx = createFallbackContext({
-			selector: "zai/glm-5:medium",
-			modelIdentity: "zai/glm-5",
-			thinkingLevel: ThinkingLevel.Medium,
-			isFallback: true,
-		});
+		const ctx = createFallbackContext(glmServing, glm, ThinkingLevel.Medium);
 		const rendered = renderSegment("model", ctx).content;
 		expect(Bun.stripANSI(rendered)).toBe(`${modelPrefix}glm-5${dot}${theme.thinking.medium}${dot}fallback`);
 		expect(rendered).toContain(theme.fg("warning", `${dot}fallback`));
@@ -214,15 +219,39 @@ describe("status line model segment retry fallback", () => {
 	});
 
 	it("derives the fallback id from the selector when no identity was recorded", () => {
-		const ctx = createFallbackContext({ selector: "openrouter/z-ai/glm-4.7:high", isFallback: true });
+		const ctx = createFallbackContext(
+			{ selector: "openrouter/z-ai/glm-4.7:high", isFallback: true },
+			{ id: "z-ai/glm-4.7", name: "GLM 4.7", provider: "openrouter", thinking: true },
+		);
 		expect(describeSegment("model", ctx)?.spans[0]?.t).toBe("z-ai/glm-4.7");
+	});
+
+	it("shows the model the user switched to while the fallback attribution names another model", () => {
+		const ctx = createFallbackContext(glmServing, opus, ThinkingLevel.High);
+		expect(Bun.stripANSI(renderSegment("model", ctx).content)).toBe(
+			`${modelPrefix}Opus 4.5${dot}${theme.thinking.high}`,
+		);
+		const view = describeSegment("model", ctx);
+		expect(view?.spans.map(s => s.t).join("")).toBe("Opus 4.5 · high");
+		expect(view?.tone).toBeUndefined();
+	});
+
+	it("shows a thinking level changed on the fallback before it serves again", () => {
+		const ctx = createFallbackContext(glmServing, glm, ThinkingLevel.High);
+		expect(Bun.stripANSI(renderSegment("model", ctx).content)).toBe(
+			`${modelPrefix}glm-5${dot}${theme.thinking.high}${dot}fallback`,
+		);
+		expect(
+			describeSegment("model", ctx)
+				?.spans.map(s => s.t)
+				.join(""),
+		).toBe(`glm-5 · high${dot}fallback`);
 	});
 
 	it("keeps the requested model while the configured model serves", () => {
 		const ctx = createFallbackContext({
 			selector: "anthropic/claude-opus-4-5:high",
 			modelIdentity: "anthropic/claude-opus-4-5",
-			thinkingLevel: ThinkingLevel.High,
 			isFallback: false,
 		});
 		expect(Bun.stripANSI(renderSegment("model", ctx).content)).toBe(

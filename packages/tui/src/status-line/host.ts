@@ -100,7 +100,6 @@ export interface StatusLineSession {
 	readonly servingModel?: {
 		selector: string;
 		modelIdentity?: string;
-		thinkingLevel?: ThinkingLevel;
 		isFallback: boolean;
 	};
 	sessionFile?: string;

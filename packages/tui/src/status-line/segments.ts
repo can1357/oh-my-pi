@@ -1,7 +1,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import { getTimeBasedPricingPeriod } from "@oh-my-pi/pi-catalog/models";
+import { getTimeBasedPricingPeriod, getUpstreamPin } from "@oh-my-pi/pi-catalog/models";
 import { sharedSpinnerFrame, TERMINAL } from "../index";
 import {
 	formatDuration,
@@ -292,25 +292,29 @@ const statusSegment: StatusLineSegment = {
 	},
 };
 
-/** Display name of the active model (`Claude ` prefix dropped). */
-function modelDisplayName(ctx: SegmentContext): string {
+/** Display name of the active model (`Claude ` prefix dropped), or the id of the fallback serving as it. */
+function modelDisplayName(ctx: SegmentContext, fallbackId: string | undefined): string {
 	const state = ctx.session.state;
-	const fallback = fallbackServingModel(ctx);
-	const modelName = fallback ? servingModelId(fallback) : state.model?.name || state.model?.id || "no-model";
+	const modelName = fallbackId ?? (state.model?.name || state.model?.id || "no-model");
 	return modelName.startsWith("Claude ") ? modelName.slice(7) : modelName;
 }
 
-type ServingModel = NonNullable<StatusLineSession["servingModel"]>;
-
-function fallbackServingModel(ctx: SegmentContext): ServingModel | undefined {
+/**
+ * Id (provider dropped) of the current model when retry fallback routing
+ * reached it, or undefined. Attribution moves only once a model answers, so
+ * after a `/model` switch it still names the fallback that last served; it
+ * counts only while it names the current model.
+ */
+function fallbackServingModelId(ctx: SegmentContext): string | undefined {
 	const serving = ctx.session.servingModel;
-	return serving?.isFallback ? serving : undefined;
-}
-
-function servingModelId(serving: ServingModel): string {
+	const model = ctx.session.state.model;
+	if (!serving?.isFallback || !model) return undefined;
 	const identity =
 		serving.modelIdentity ?? splitThinkingSuffix(serving.selector, -1, MAX_THINKING_SUFFIX_OPTIONS).base;
-	return identity.slice(identity.indexOf("/") + 1);
+	// Routed identity: `provider/id`, plus `@upstream` for a pinned aggregator route.
+	const pin = getUpstreamPin(model);
+	const current = `${model.provider}/${model.id}${pin ? `@${pin}` : ""}`;
+	return identity === current ? identity.slice(identity.indexOf("/") + 1) : undefined;
 }
 
 /**
@@ -331,10 +335,8 @@ export function thinkingLevelWord(
 function modelThinkingDisplay(ctx: SegmentContext): string {
 	const state = ctx.session.state;
 	const opts = ctx.options.model ?? {};
-	// A serving fallback reports the level it actually ran at.
-	const servedLevel = fallbackServingModel(ctx)?.thinkingLevel;
-	if (opts.showThinkingLevel === false || (servedLevel === undefined && !state.model?.thinking)) return "";
-	if (servedLevel === undefined && ctx.session.isAutoThinking) {
+	if (opts.showThinkingLevel === false || !state.model?.thinking) return "";
+	if (ctx.session.isAutoThinking) {
 		// Pending (no turn classified yet / classifying) shows a symbol-theme
 		// question-box marker; once resolved it shows `<level>`.
 		const resolved = ctx.session.autoResolvedThinkingLevel();
@@ -342,7 +344,7 @@ function modelThinkingDisplay(ctx: SegmentContext): string {
 			? (theme.thinking[resolved as keyof Theme["thinking"]] ?? resolved)
 			: `${theme.thinking.autoPending} auto`;
 	}
-	const level = servedLevel ?? state.thinkingLevel ?? ThinkingLevel.Off;
+	const level = state.thinkingLevel ?? ThinkingLevel.Off;
 	return level === ThinkingLevel.Off
 		? `${theme.status.disabled} off`
 		: (theme.thinking[level as keyof Theme["thinking"]] ?? level);
@@ -376,7 +378,8 @@ function modelAdvisorBadge(ctx: SegmentContext): { icon: string; color: ThemeCol
 const modelSegment: StatusLineSegment = {
 	id: "model",
 	render(ctx) {
-		const modelName = modelDisplayName(ctx);
+		const fallbackId = fallbackServingModelId(ctx);
+		const modelName = modelDisplayName(ctx, fallbackId);
 		const thinkingDisplay = modelThinkingDisplay(ctx);
 
 		// Compact mode swaps the model icon for the thinking-level glyph and drops
@@ -408,7 +411,7 @@ const modelSegment: StatusLineSegment = {
 		}
 
 		// A retry fallback serving in place of the configured model, as the agent hub's `fallback →`.
-		if (fallbackServingModel(ctx)) content += theme.fg("warning", `${theme.sep.dot}fallback`);
+		if (fallbackId) content += theme.fg("warning", `${theme.sep.dot}fallback`);
 
 		// Anthropic usage-limit stage (wrap-up allowance or low priority): a
 		// warning-colored badge so past-the-limit service is never mistaken for normal.
@@ -420,20 +423,17 @@ const modelSegment: StatusLineSegment = {
 		// Name, then the thinking level as a word in its level colour after a
 		// quiet separator; the terminal draws the model icon.
 		const token = accentToken(ctx, "statusLineModel");
-		const spans: TspSpan[] = [span(modelDisplayName(ctx), token)];
+		const fallbackId = fallbackServingModelId(ctx);
+		const spans: TspSpan[] = [span(modelDisplayName(ctx, fallbackId), token)];
 		const advisor = modelAdvisorBadge(ctx);
 		if (advisor) spans.push(span(` ${advisor.icon}`, advisor.color));
 		if (ctx.session.isFastModeActive() && theme.icon.fast) spans.push(span(` ${theme.icon.fast}`, token));
-		const fallback = fallbackServingModel(ctx);
-		const level =
-			ctx.options.model?.showThinkingLevel === false
-				? undefined
-				: (fallback?.thinkingLevel ?? thinkingLevelWord(ctx.session));
+		const level = ctx.options.model?.showThinkingLevel === false ? undefined : thinkingLevelWord(ctx.session);
 		if (level !== undefined) spans.push(span(" · ", "dim"), span(level, thinkingLevelToken(level)));
-		if (fallback) spans.push(span(`${theme.sep.dot}fallback`, "warning"));
+		if (fallbackId) spans.push(span(`${theme.sep.dot}fallback`, "warning"));
 		const slowModeLabel = ctx.session.getAnthropicSlowModeLabel?.();
 		if (slowModeLabel) spans.push(span(`${theme.sep.dot}${slowModeLabel}`, "warning"));
-		return segView(spans, "model", slowModeLabel || fallback ? "warning" : undefined);
+		return segView(spans, "model", slowModeLabel || fallbackId ? "warning" : undefined);
 	},
 };
 

@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the status line `model` segment showing the configured model while a retry fallback serves the session; it now shows the serving model and its thinking level with a warning-colored `fallback` marker.
+- Fixed the status line `model` segment showing the configured model while a retry fallback serves the session; it now shows the serving fallback with a warning-colored `fallback` marker until you pick another model.
 
 ## [19.1.1] - 2026-11-23
 
