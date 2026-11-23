@@ -428,92 +428,40 @@ describe("OpenRouter Responses request shape", () => {
 		expect(headers.get("X-OpenRouter-Cache-TTL")).toBe("7");
 	});
 
-	it("omits native reasoning history for OpenRouter Anthropic turns", async () => {
-		const nativeItem = {
-			type: "reasoning",
-			id: "rs_1",
-			encrypted_content: "encrypted-reasoning",
-			summary: [],
-			format: "google-gemini-v1",
-		};
-		const firstResponse = new Response(
-			`${[
-				`data: ${JSON.stringify({ type: "response.output_item.done", item: nativeItem })}`,
-				`data: ${JSON.stringify({
-					type: "response.completed",
-					response: {
-						status: "completed",
-						usage: {
-							input_tokens: 1,
-							output_tokens: 2,
-							total_tokens: 3,
-							input_tokens_details: { cached_tokens: 0 },
-						},
-					},
-				})}`,
-			].join("\n\n")}\n\n`,
-			{ status: 200, headers: { "content-type": "text/event-stream" } },
-		);
-		const bodies: Record<string, unknown>[] = [];
-		const fetchMock: FetchImpl = vi
-			.fn()
-			.mockImplementationOnce(async (_input: string | URL | Request, init?: RequestInit) => {
-				bodies.push(typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {});
-				return firstResponse;
-			})
-			.mockImplementationOnce(async (_input: string | URL | Request, init?: RequestInit) => {
-				bodies.push(typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {});
-				return createSseResponse();
-			}) as FetchImpl;
-		const model = buildOpenRouterModel({ id: "anthropic/claude-sonnet-4", reasoning: true });
-		const responseModel = model as unknown as Model<"openai-responses">;
-
-		let firstMessage: AssistantMessage | undefined;
-		const firstStream = streamOpenAIResponses(responseModel, context, { apiKey: "test-key", fetch: fetchMock });
-		for await (const event of firstStream) {
-			if (event.type === "done") {
-				firstMessage = event.message;
-				break;
-			}
-			if (event.type === "error") throw event.error;
-		}
-
-		expect(firstMessage?.api).toBe("openrouter");
-		expect(firstMessage?.providerPayload).toMatchObject({
-			type: "openaiResponsesHistory",
-			provider: "openrouter",
-			items: [nativeItem],
-		});
-
-		const followup: Context = {
-			messages: [firstMessage!, { role: "user", content: "continue", timestamp: 1 }],
-		};
-		const secondStream = streamOpenAIResponses(responseModel, followup, { apiKey: "test-key", fetch: fetchMock });
-		for await (const event of secondStream) {
-			if (event.type === "done") break;
-			if (event.type === "error") throw event.error;
-		}
-
-		expect(bodies[1]?.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "continue" }] }]);
-	});
-
-	it("replays Gemini thought signatures with the id and format OpenRouter binds them by", async () => {
-		// OpenRouter returns a Gemini thought signature as an encrypted reasoning
-		// item keyed by its function call's `call_id`. Replayed without `id` and
-		// `format`, OpenRouter drops the blob unseen and Gemini stops thinking
-		// a few steps into a tool loop.
-		const signatureItem = {
-			type: "reasoning",
-			id: "call_g1",
-			status: "completed",
-			summary: [],
-			encrypted_content: "gemini-thought-signature",
-			format: "google-gemini-v1",
-		};
+	// OpenRouter hands a model its earlier reasoning back only from the replayed
+	// item's `id`, `format` and `signature`. Stripped of them, OpenRouter drops the
+	// reasoning unseen: Gemini stops thinking a few steps into a tool loop and
+	// Claude stops thinking between tool calls.
+	it.each([
+		{
+			upstream: "Gemini",
+			modelId: "google/gemini-4-neon",
+			// A Gemini thought signature, keyed by its function call's `call_id`.
+			reasoning: {
+				type: "reasoning",
+				id: "call_1",
+				summary: [],
+				encrypted_content: "gemini-thought-signature",
+				format: "google-gemini-v1",
+			},
+		},
+		{
+			upstream: "Claude",
+			modelId: "anthropic/claude-sonnet-4.6",
+			reasoning: {
+				type: "reasoning",
+				id: "rs_tmp_1",
+				summary: [],
+				content: [{ type: "reasoning_text", text: "Read the file first." }],
+				format: "anthropic-claude-v1",
+				signature: "claude-thinking-signature",
+			},
+		},
+	])("replays $upstream reasoning with the fields OpenRouter restores it from", async ({ modelId, reasoning }) => {
 		const callItem = {
 			type: "function_call",
 			id: "fc_tmp_1",
-			call_id: "call_g1",
+			call_id: "call_1",
 			name: "read",
 			arguments: '{"path":"a.ts"}',
 			status: "completed",
@@ -522,9 +470,9 @@ describe("OpenRouter Responses request shape", () => {
 			{
 				type: "response.output_item.added",
 				output_index: 0,
-				item: { ...signatureItem, encrypted_content: undefined },
+				item: { type: "reasoning", id: reasoning.id, summary: [] },
 			},
-			{ type: "response.output_item.done", output_index: 0, item: signatureItem },
+			{ type: "response.output_item.done", output_index: 0, item: { ...reasoning, status: "completed" } },
 			{ type: "response.output_item.added", output_index: 1, item: { ...callItem, arguments: "" } },
 			{ type: "response.output_item.done", output_index: 1, item: callItem },
 			{
@@ -552,10 +500,7 @@ describe("OpenRouter Responses request shape", () => {
 			bodies.push(typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {});
 			return responses[bodies.length - 1]!;
 		}) as FetchImpl;
-		const model = buildOpenRouterModel({
-			id: "google/gemini-4-neon",
-			reasoning: true,
-		}) as unknown as Model<"openai-responses">;
+		const model = buildOpenRouterModel({ id: modelId, reasoning: true }) as unknown as Model<"openai-responses">;
 
 		let firstMessage: AssistantMessage | undefined;
 		for await (const event of streamOpenAIResponses(model, context, { apiKey: "test-key", fetch: fetchMock })) {
@@ -585,15 +530,7 @@ describe("OpenRouter Responses request shape", () => {
 		}
 
 		const input = bodies[1]?.input as Array<Record<string, unknown>>;
-		expect(input.filter(item => item.type === "reasoning")).toEqual([
-			{
-				type: "reasoning",
-				id: "call_g1",
-				summary: [],
-				encrypted_content: "gemini-thought-signature",
-				format: "google-gemini-v1",
-			},
-		]);
+		expect(input.filter(item => item.type === "reasoning")).toEqual([reasoning]);
 		expect(input.findIndex(item => item.type === "reasoning")).toBeLessThan(
 			input.findIndex(item => item.type === "function_call"),
 		);
