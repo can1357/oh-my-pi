@@ -64,7 +64,20 @@ async function fixture(): Promise<{ root: string; scratch: string; env: Record<s
 	await runGit(root, env, "init", "-q", "-b", "main");
 	await Bun.write(path.join(root, "tracked.txt"), "one\n");
 	await runGit(root, env, "add", "tracked.txt");
-	await runGit(root, { ...env, GIT_AUTHOR_NAME: "Seed", GIT_AUTHOR_EMAIL: "seed@example.test", GIT_COMMITTER_NAME: "Seed", GIT_COMMITTER_EMAIL: "seed@example.test" }, "commit", "-q", "-m", "seed");
+	await runGit(
+		root,
+		{
+			...env,
+			GIT_AUTHOR_NAME: "Seed",
+			GIT_AUTHOR_EMAIL: "seed@example.test",
+			GIT_COMMITTER_NAME: "Seed",
+			GIT_COMMITTER_EMAIL: "seed@example.test",
+		},
+		"commit",
+		"-q",
+		"-m",
+		"seed",
+	);
 	return { root, scratch, env };
 }
 
