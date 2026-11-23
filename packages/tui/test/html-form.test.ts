@@ -796,6 +796,13 @@ describe("html form", () => {
 			expect(JSON.stringify(defaultFormData(form))).toBe('{"__proto__":"x","target":"prod"}');
 		});
 
+		it("keeps a textarea's markup-like text verbatim, decoding only entities (#20299)", () => {
+			const form = parseHtmlForm(
+				`<form><textarea name="x">a <t> b <hc from="1">c</hc> &lt;ok&gt;</textarea><input name="after"></form>`,
+			);
+			expect(defaultFormData(form)).toEqual({ x: 'a <t> b <hc from="1">c</hc> <ok>', after: "" });
+		});
+
 		it("validates required, numeric bounds and anchored patterns; ignores an invalid pattern", () => {
 			const form = parseHtmlForm(`<form>
 				<input name="n" type="number" min="1" max="8" required>
