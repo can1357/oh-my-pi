@@ -113,12 +113,15 @@ provider "amazon-bedrock" {
 	}
 	// residue: the inference-profile prefixes also leave the K3.1 rows in the
 	// "unknown" class. Bedrock's K3.1 Pro Highspeed model card documents
-	// low/medium/high/xhigh/max with max as the default.
+	// low/medium/high/xhigh/max with max as the default. Converse rejects
+	// `temperature` on K3.1 with a 400 ("This model doesn't support the
+	// temperature field") (#20239).
 	models "*.moonshotai.kimi-k3.1" {
 		thinking-mode "effort"
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
 		thinking-default-level "max"
 		thinking-requires-effort #true
+		supports-sampling-params #false
 	}
 	// The Qwen rows arrive with maxTokens copied from the upstream context
 	// window (262000 on a 262144 window), so a request that does not set an
