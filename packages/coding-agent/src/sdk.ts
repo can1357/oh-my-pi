@@ -160,6 +160,7 @@ import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal }
 import type { HindsightSessionStateApi } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions, outRepliesActive } from "./internal-urls";
 import { onJudgeRejection } from "./judgment";
+import { reclaimServices } from "./launch/services";
 import { holdSharedLsp } from "./lsp/client";
 import { holdSharedMcp } from "./mcp/host/access";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
@@ -5686,6 +5687,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// runs after the session is live, so `--resume` no longer scales with the
 		// advisor transcript size (issue #9553).
 		session.beginInitialAdvisorCostRestore();
+		// `/restart` resumes this session id in a new process: its named services wait in the daemon
+		// for a lease only through the reconnect grace, so claim them back without blocking startup.
+		if (hasExistingSession && !isSubagentSession) {
+			void reclaimServices(toolSession).catch(error =>
+				logger.warn("Failed to reclaim the resumed session's services", { error: String(error) }),
+			);
+		}
 		// Lines already seen follow the live context on their own (`getContextMessages`); a new session file starts over.
 		if (spotlightExperiment) {
 			session.registerSessionChangeCallback(() => spotlightExperiment.onSessionChange());
