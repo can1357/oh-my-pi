@@ -126,11 +126,12 @@ function legacyDiscover(session: MCPInitializeResult): MCPDiscoverResult {
 
 function discoverResultOf(value: unknown): MCPDiscoverResult | undefined {
 	if (!isRecord(value) || !Array.isArray(value.supportedVersions) || !isRecord(value.capabilities)) return undefined;
-	return {
-		...value,
-		supportedVersions: value.supportedVersions.filter((version): version is string => typeof version === "string"),
-		capabilities: value.capabilities,
-	};
+	const supportedVersions = value.supportedVersions.filter(
+		(version): version is string => typeof version === "string",
+	);
+	// A server that does not speak this revision is handshake-era, whatever else its discover answer says.
+	if (!supportedVersions.includes(MCP_PROTOCOL_VERSION)) return undefined;
+	return { ...value, supportedVersions, capabilities: value.capabilities };
 }
 
 /** The server requests a handshake-era upstream may send: liveness and the session's roots. */
