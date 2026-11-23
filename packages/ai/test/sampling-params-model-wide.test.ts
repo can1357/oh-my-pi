@@ -50,15 +50,17 @@ afterEach(() => {
 });
 
 describe("sampling params are gated by model, on every provider", () => {
-	test.each([["global.openai.gpt-6-luna"], ["global.anthropic.claude-opus-5-5"]])(
-		"Bedrock %s omits temperature and topP",
-		async id => {
-			const inference = bedrockInference(await simplePayload(bundled("amazon-bedrock", id)));
-			expect(inference).not.toHaveProperty("temperature");
-			expect(inference).not.toHaveProperty("topP");
-			expect(inference.maxTokens).toBe(16);
-		},
-	);
+	test.each([
+		["global.openai.gpt-6-luna"],
+		["global.anthropic.claude-opus-5-5"],
+		["global.moonshotai.kimi-k3.1"],
+		["us.moonshotai.kimi-k3.1"],
+	])("Bedrock %s omits temperature and topP", async id => {
+		const inference = bedrockInference(await simplePayload(bundled("amazon-bedrock", id)));
+		expect(inference).not.toHaveProperty("temperature");
+		expect(inference).not.toHaveProperty("topP");
+		expect(inference.maxTokens).toBe(16);
+	});
 
 	test("Bedrock Claude Sonnet 4.5 still sends temperature and topP", async () => {
 		const inference = bedrockInference(

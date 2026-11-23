@@ -487,6 +487,8 @@ behavior {
 		model "kimi-k3"
 		model "moonshotai/kimi-k3"
 		model "k3"
+		model "zai/glm-5.4"
+		model "glm-5.4"
 		model "zai/glm-5.3"
 		model "glm-5.3"
 		model "anthropic/claude-opus-5-5"
