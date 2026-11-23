@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { FileType, glob } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	CONFIG_DIR_NAME,
 	getAgentDir,
@@ -654,6 +655,45 @@ export async function loadFilesFromDir<T>(
 	} catch {
 		// Directory doesn't exist or isn't readable
 		return { items, warnings };
+	}
+
+	// #20322: ignore rules (e.g. .git/info/exclude) must not hide files git tracks.
+	// Applies to every project-level `loadFilesFromDir` caller (commands, prompts,
+	// codex `tools/`, agents, editor rules, ...) — ignore rules don't apply to
+	// tracked paths, per git semantics. Skills keep their own gitignore-aware
+	// scanning (scanSkillsFromDir / globIf) and are intentionally unchanged.
+	// Re-glob without gitignore first (in-process); only pay for git when the
+	// unfiltered glob surfaces candidates the gitignore-aware pass excluded.
+	if (level === "project") {
+		try {
+			const unfiltered = await glob({
+				pattern,
+				path: dir,
+				gitignore: false,
+				hidden: false,
+				fileType: FileType.File,
+				recursive,
+			});
+			const found = new Set(matches.map(m => m.path.replace(/\\/g, "/")));
+			const missing = unfiltered.matches.filter(m => !found.has(m.path.replace(/\\/g, "/")));
+			if (missing.length) {
+				const repo = await vcs.git(dir);
+				if (repo) {
+					const tracked = new Set(await repo.lsFiles(false, false));
+					const prefix = repo.prefixOf(dir) ?? "";
+					for (const m of missing) {
+						const rel = m.path.replace(/\\/g, "/");
+						const repoRel = prefix ? `${prefix}/${rel}` : rel;
+						if (tracked.has(repoRel)) {
+							matches.push(m);
+							found.add(rel);
+						}
+					}
+				}
+			}
+		} catch {
+			// Best-effort tracked-file recovery; gitignore results already loaded.
+		}
 	}
 
 	// Read all matching files in parallel
