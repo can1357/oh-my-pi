@@ -191,7 +191,7 @@ describe("TTSR regex sandbox", () => {
 		manager.checkDelta("a".repeat(150), TEXT);
 		expect(warnings(warn, "moved to the regex sandbox")).toBe(1);
 
-		manager.replaceRules([rule("quartic", QUARTIC_NATIVE)]);
+		manager.replaceRules([rule("quartic", QUARTIC_NATIVE, "test", "always")]);
 		manager.resetBuffer();
 		const started = performance.now();
 		expect(manager.checkDelta("a".repeat(150), TEXT)).toEqual([]);
