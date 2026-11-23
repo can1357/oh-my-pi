@@ -434,6 +434,8 @@ function selectProviderModels<T extends { provider: string }>(models: T[], provi
  */
 export interface ModelRegistryRefreshOptions {
 	refreshCommandCredentials?: boolean;
+	/** Keep the cooldowns {@link ModelRegistry.suppressSelector} recorded instead of clearing them. */
+	keepSuppressedSelectors?: boolean;
 }
 
 /** Authentication material returned to legacy extensions for one model request. */
@@ -519,6 +521,8 @@ export class ModelRegistry {
 	#cacheDbPath?: string;
 	#suppressedSelectors: Map<string, number> = new Map();
 	#backgroundRefresh?: Promise<void>;
+	/** When the last catalog refresh that may reach the network started; undefined until one runs. */
+	#lastOnlineRefreshAt?: number;
 	#discoveryRetry?: Promise<void>;
 	#lastDiscoveryRetryAt = Number.NEGATIVE_INFINITY;
 	/** Whether the first background discovery has settled; latches once so a late-armed waiter still resolves. */
@@ -1006,7 +1010,8 @@ export class ModelRegistry {
 		// network for catalogs" — the unscoped model hub opens with that strategy
 		// as a background reconcile, and must not spawn `!command` helpers.
 		this.#reloadStaticModelsForRefresh(options);
-		this.#suppressedSelectors.clear();
+		if (!options?.keepSuppressedSelectors) this.#suppressedSelectors.clear();
+		if (strategy !== "offline") this.#lastOnlineRefreshAt = Date.now();
 		await this.#refreshRuntimeDiscoveries(strategy);
 	}
 
@@ -1066,6 +1071,10 @@ export class ModelRegistry {
 			this.#owner.refreshInBackground(strategy);
 			return;
 		}
+		this.#startBackgroundRefresh(strategy);
+	}
+
+	#startBackgroundRefresh(strategy: ModelRefreshStrategy, options?: ModelRegistryRefreshOptions): void {
 		if (this.#backgroundRefresh) {
 			return;
 		}
@@ -1073,7 +1082,7 @@ export class ModelRegistry {
 		// discovery states. Start it on a microtask so a caller can validate
 		// against the hydrated startup catalog right after kicking the refresh off.
 		const refreshPromise = Promise.resolve()
-			.then(() => this.refresh(strategy))
+			.then(() => this.refresh(strategy, options))
 			.catch(error => {
 				logger.warn("background model refresh failed", {
 					error: error instanceof Error ? error.message : String(error),
@@ -1119,16 +1128,32 @@ export class ModelRegistry {
 
 	/**
 	 * Catch the catalog up for a view that just read it, rebuilding only when it
-	 * is actually stale: waits out an in-flight background refresh, then runs an
-	 * offline {@link refresh} if models.yml changed on disk since the last load.
-	 * Resolves `true` when either may have changed the catalog (the view should
-	 * re-read it), `false` without any rebuild when the in-memory catalog is
-	 * already current. Rejects when the offline rebuild fails.
+	 * is actually stale: waits out an in-flight background refresh, then
+	 * re-runs discovery once the last online refresh is older than the
+	 * built-in discovery cache TTL (keeping {@link suppressSelector}
+	 * cooldowns; providers on a longer TTL replay rows another process
+	 * refreshed), or runs an offline {@link refresh} if models.yml
+	 * changed on disk since the last load. A registry that never refreshed
+	 * online stays offline. Resolves `true` when any of these may have changed
+	 * the catalog (the view should re-read it), `false` without any rebuild
+	 * when the in-memory catalog is already current. Rejects when the offline
+	 * rebuild fails.
 	 */
 	async refreshIfStale(): Promise<boolean> {
 		if (this.#owner) return this.#owner.refreshIfStale();
 		let changed = false;
 		if (this.#backgroundRefresh) {
+			await this.#backgroundRefresh;
+			changed = true;
+		}
+		if (
+			this.#lastOnlineRefreshAt !== undefined &&
+			Date.now() - this.#lastOnlineRefreshAt >= BUILT_IN_DISCOVERY_CACHE_TTL_MS
+		) {
+			// Providers whose cache is still fresh (another process refreshed them)
+			// replay it; only expired ones fetch. Opening a picker lifts no
+			// retry-fallback cooldown.
+			this.#startBackgroundRefresh("online-if-uncached", { keepSuppressedSelectors: true });
 			await this.#backgroundRefresh;
 			changed = true;
 		}

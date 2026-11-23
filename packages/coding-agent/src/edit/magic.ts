@@ -32,7 +32,7 @@ import type { ToolSession } from "../tools";
 import { resolvePlanPath } from "../tools/plan-mode-guard";
 import applyRequestPrompt from "./magic-apply.md" with { type: "text" };
 import applySystemPromptSource from "./magic-apply-system.md" with { type: "text" };
-import { blockHints, compileLineEdits } from "./magic-lines";
+import { blockHints, compileLineEdits, diagnoseSyntaxFailure } from "./magic-lines";
 import { type FileView, fileViews } from "./magic-view";
 import { normalizeToLF, stripBom } from "./normalize";
 import type { ReplaceBatchParams } from "./schemas";
@@ -159,7 +159,7 @@ export async function applyDescribedChange(options: {
 	let previous: string | undefined;
 	let rejection = "";
 	/** A change whose ranges were doubted once; repeating it confirms it. */
-	let doubted: string | undefined;
+	const doubted = new Set<string>();
 	for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
 		const currentView = views[view];
 		const { text: file, partial } = currentView;
@@ -180,7 +180,11 @@ export async function applyDescribedChange(options: {
 		const refusal = reply.trim().match(REFUSAL);
 		if (refusal) {
 			// The model may have missed lines the excerpt left out: ask afresh.
-			if (wider) continue;
+			if (wider) {
+				// Widening after an excerpt refusal must not spend a correction attempt.
+				attempt--;
+				continue;
+			}
 			const reason = refusal[1].trim() || "no reason given";
 			throw new ToolError(
 				partial
@@ -189,14 +193,15 @@ export async function applyDescribedChange(options: {
 			);
 		}
 		const compiled = compileLineEdits(normalizeToLF(reply.trim()), content, currentView, truncated);
-		const hints = "edit" in compiled ? blockHints(content, compiled.ranges, currentView) : "";
-		const key = "edit" in compiled ? `${compiled.edit.old_string}\0${compiled.edit.new_string}` : "";
+		const hints = "edit" in compiled ? blockHints(content, compiled.ranges, currentView) : [];
 		if ("edit" in compiled && parsed && !parses(spliced(content, compiled.edit))) {
-			rejection = `Nothing was applied: after these operations the file no longer parses, so a range cuts a block in two${hints ? `: ${hints}` : ""}.`;
-		} else if (hints && key !== doubted) {
+			const detail = diagnoseSyntaxFailure(compiled.operations, content, currentView, parses);
+			const hintText = hints.join("; ");
+			rejection = `Nothing was applied: after these operations the file no longer parses${hintText ? ` (${hintText})` : ""}.${detail ? `\n${detail}` : ""}`;
+		} else if (hints.some(hint => !doubted.has(hint))) {
 			// A range that does not match the block it starts may be off by a line: the model confirms it by repeating it.
-			doubted = key;
-			rejection = `Nothing was applied: ${hints}. Correct the range, or send the same operations again if that is intended.`;
+			for (const hint of hints) doubted.add(hint);
+			rejection = `Nothing was applied: ${hints.join("; ")}. Correct the range, or send the same operations again if that is intended.`;
 		} else if ("edit" in compiled) {
 			const result = await options.apply([compiled.edit], true);
 			if (!result.isError) return result;

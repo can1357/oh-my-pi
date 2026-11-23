@@ -55,11 +55,28 @@ The link and each upstream allocate their own ids. Upstream ids default to incre
 
 ## Era detection
 
-`mcpUpstreams.probe` decides a server's era once, on a throwaway upstream, and the store remembers it (a handshake-era verdict is rechecked after 7 days, so an upgraded server starts being shared):
+`mcpUpstreams.probe` detects a server's era on a throwaway upstream, and the store remembers it.
+A handshake-era verdict is rechecked after 7 days, so an upgraded server starts being shared.
+The v1-to-v2 cache upgrade clears old era verdicts once, but keeps cached results.
 
-- **stdio**: the probe writes `server/discover` and then `initialize`. A discover result or a modern-only error (`-32020`, `-32021`, `-32022`) means modern; otherwise the `initialize` result means handshake-era. The probe process is always killed.
-- **http**: a modern `server/discover` POST. A discover result or a modern-only error body means modern. Anything else that is not an auth failure is confirmed with a legacy `initialize`. `401`/`403` surface unchanged so OAuth discovery can read the challenge.
+- **stdio**: the probe writes `server/discover` and then `initialize`.
+  A discover result or a modern error wins; otherwise the `initialize` result means handshake-era.
+  The probe process is always killed.
+- **http**: the probe sends a modern `server/discover` POST.
+  A discover result or a modern error means modern; an unrecognized JSON-RPC reply or an eligible HTTP status (`400`, `404`, `405`) can fall back to a legacy `initialize`.
+  An unsupported-version error that lists a handshake-era revision falls back under any status.
+  `401`/`403` surface unchanged so OAuth discovery can read the challenge.
 - **sse**: always handshake-era.
+
+Error codes `-32020` and `-32021` indicate a modern server.
+An unsupported-version error (`-32022`) does too, unless its `data.supported` explicitly lists a compatible handshake-era revision (`2025-11-25`, `2025-06-18`, `2025-03-26`, or `2024-11-05`).
+Missing, malformed, or future-only version lists do not trigger a legacy handshake.
+
+If a modern unit's upstream returns `-32022`, the host expires its modern verdict without touching results or a newer handshake-era verdict.
+The link then re-probes once for every request rejected on that attachment, and reconnects to a separate handshake-era unit only if the probe confirms that era.
+Each rejected request waits for the re-probe within its own signal and remaining deadline, so its caller's next request finds the link moved.
+It then fails with the original error, or with the abort reason if its caller cancelled meanwhile; it is never replayed automatically.
+The re-probe belongs to the link: a caller that stops waiting neither ends it nor detaches the link.
 
 ## Upstream transports
 
