@@ -371,7 +371,7 @@ A gate rule can run a shell command instead of asking the judge:
 ```yaml
 ---
 condition: rm\s
-command: ./scripts/check-rm.sh
+command: ~/.omp/agent/rules/check-rm.sh
 gate: before
 onJudgeError: block
 scope: tool:bash
@@ -380,7 +380,8 @@ Never delete files outside the working directory; ask the user first.
 ```
 
 - The rule needs `gate: before` and a `condition` or `astCondition` prefilter; without either, loading logs a warning and does not register the rule, so a probe never runs on every call. With both `command` and `question`, loading warns and the `command` decides; the judge is not asked.
-- Only user-level rules may run a command. A rule whose source is project-level (`_source.level: "project"`, e.g. `.omp/rules/`, `.cursor/rules/`, `.github/instructions/` or any other rule file inside the checkout) logs a warning and is not registered, so a cloned repository cannot execute code through a rule. `question` rules have no such check: they only ask the judge.
+- Only user-level rules may run a command. A rule whose source is project-level (`_source.level: "project"`, e.g. `.omp/rules/`, `.cursor/rules/`, `.github/instructions/` or any other rule file inside the checkout) logs a warning and is not registered, so a repository's own rule files cannot run a probe. `question` rules have no such check: they only ask the judge.
+- The probe runs in the session cwd, i.e. inside whatever checkout is open. Point `command` at an absolute or home-anchored script, as in the example above; a relative path such as `./scripts/check-rm.sh`, or any script inside the checkout, runs repository-supplied code with the user's privileges.
 - `TtsrCoordinator.gateToolCall()` runs the probe at the same point as the judge (after approval, inside the tool guard), once per call however many of the call's outputs the rule covers, alongside any judged gates. It is spawned with `ptree.exec` through the user's shell (`getShellConfig()` from the operator layers: `shellPath`, else bash/zsh/sh on Unix and Git Bash, then `cmd.exe`, on Windows) with that shell's command arguments (`-l -c`, `-c` under `PI_BASH_NO_LOGIN`, `/c` for `cmd.exe`, `-Command` for PowerShell) and spawn environment, in the session cwd. Write the command for that shell.
 - Contract: stdin carries one JSON object, `{"tool": "<name the model called the tool by>", "toolCallId": "<id>", "arguments": { ... }}`, the arguments that will run. Exit 0 runs the call; any other exit refuses it with the rule body (`ttsr-gate-refused.md`). Stdout is ignored; stderr is logged at debug level.
 - The probe shares the gate's `ttsr.gateTimeoutMs` deadline and the call's abort signal; its process tree is killed when either fires. Only a probe that times out, or whose shell cannot be resolved or spawned, is decided by `onJudgeError` (`allow` by default), like an unanswered judge; once the shell starts, a missing or non-executable probe script is a nonzero exit and a normal refusal.
