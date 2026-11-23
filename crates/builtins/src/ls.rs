@@ -1692,28 +1692,12 @@ fn parse_width(width_match: Option<&String>, host: &Host, runtime: &LsRuntime) -
 	};
 
 	let calculate_term_size = || {
-		#[cfg(unix)]
-		{
-			use std::os::fd::AsRawFd;
-			if let Ok(fd) = host.stdout.try_borrow_as_fd() {
-				let mut size = uucore::libc::winsize {
-					ws_row: 0,
-					ws_col: 0,
-					ws_xpixel: 0,
-					ws_ypixel: 0,
-				};
-				// SAFETY: `size` is valid for writes and `fd` remains borrowed
-				// for the duration of the ioctl.
-				if unsafe {
-					uucore::libc::ioctl(fd.as_raw_fd(), uucore::libc::TIOCGWINSZ, &mut size)
-				} == 0
-					&& size.ws_col > 0
-				{
-					return size.ws_col;
-				}
-			}
-		}
-		DEFAULT_TERM_WIDTH
+		host
+			.stdout
+			.window_size()
+			.map(|(columns, _)| columns)
+			.filter(|&columns| columns > 0)
+			.unwrap_or(DEFAULT_TERM_WIDTH)
 	};
 
 	let ret = match width_match {

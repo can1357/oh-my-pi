@@ -240,6 +240,27 @@ impl OpenFile {
 			Self::Stream(_) => false,
 		}
 	}
+
+	/// The terminal window behind the open file as `(columns, rows)`, when it
+	/// is a terminal that reports one (`TIOCGWINSZ`). Either value may be 0
+	/// when the terminal leaves it unset; `None` off unix.
+	pub fn window_size(&self) -> Option<(u16, u16)> {
+		#[cfg(unix)]
+		{
+			use std::os::fd::AsRawFd as _;
+
+			let fd = self.try_borrow_as_fd().ok()?;
+			let mut size = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+			// SAFETY: `size` is writable for the duration of the ioctl, and `fd`
+			// stays borrowed from `self` until it returns.
+			(unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCGWINSZ, &mut size) } == 0)
+				.then_some((size.ws_col, size.ws_row))
+		}
+		#[cfg(not(unix))]
+		{
+			None
+		}
+	}
 }
 
 impl From<std::fs::File> for OpenFile {
@@ -362,7 +383,7 @@ pub(crate) fn is_piped_input(file: &OpenFile) -> bool {
 }
 
 #[cfg(unix)]
-fn is_pipe(file: &std::fs::File) -> bool {
+pub(crate) fn is_pipe(file: &std::fs::File) -> bool {
 	use std::os::unix::fs::FileTypeExt as _;
 
 	file.metadata().is_ok_and(|metadata| {
@@ -371,8 +392,13 @@ fn is_pipe(file: &std::fs::File) -> bool {
 	})
 }
 
+/// Whether `file` is a Windows pipe, so a read of it can block with no
+/// pollable descriptor (see [`omp_vfs::wait_pipe_readable`]).
+///
+/// `GetFileType` answers `FILE_TYPE_PIPE` for sockets too; that misclassification
+/// is harmless because the readiness probe treats any peek failure as ready.
 #[cfg(windows)]
-fn is_pipe(file: &std::fs::File) -> bool {
+pub(crate) fn is_pipe(file: &std::fs::File) -> bool {
 	use std::os::windows::io::AsRawHandle as _;
 
 	use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_PIPE, GetFileType};
