@@ -867,6 +867,33 @@ describe("tool-owned dynamic approval declarations", () => {
 		expect(bashApproval(command, settingsOverrides)).toEqual({ tier: "write", policy: "allow" });
 	});
 
+	it("does not treat spaces inside quoted prose or hyphen-prefixed bullets as -c/-e reinterpret flags", () => {
+		const settingsOverrides = {
+			"bash.allowCompoundCommands": true,
+			"bash.patterns": [
+				{ match: "git add*", approval: "allow" },
+				{ match: "git commit*", approval: "allow" },
+			],
+		};
+
+		for (const command of [
+			'git commit -m "docs: note limit" -m "Caps rendering at 50 per page; replacing inline math keeps it clean."',
+			'git commit -m "fix(stats): address review" -m "Restore indexing (~18:30-18:37 UTC)"',
+			'git add -A && git commit -m "fix(stats): address review" -m "- Route fork upserts so new outcomes merge"',
+		]) {
+			expect(bashApproval(command, settingsOverrides)).toEqual({ tier: "write", policy: "allow" });
+		}
+
+		// Genuine short-option clusters containing -c/-e still block allow rules when paired with shell control chars.
+		for (const command of [
+			"git -c alias.x='!touch /tmp/pwn; printf ok' x",
+			"git -ec alias.x='!touch /tmp/pwn; printf ok' x",
+			"git add -A && git -c alias.x='!touch /tmp/pwn; printf ok' x",
+		]) {
+			expect(bashApproval(command, settingsOverrides)).toBe("exec");
+		}
+	});
+
 	it("opts into per-segment allows for literal && chains, including quoted arguments", () => {
 		const patterns = [
 			{ match: "cmp *", approval: "allow" },

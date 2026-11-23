@@ -119,7 +119,7 @@ import { nativeShapingOff, shapeToolText, shapingExperiment } from "../spotlight
 import { SPOTLIGHT_FULL_OUTPUT_MAX_BYTES } from "../spotlight/types";
 import type { SpotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
 
-const BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE = /(?:^|[ \t])(?:-[^-]*[ce]|--(?:command|eval))(?:[= \t]|$)/u;
+const BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE = /(?:^|[ \t])(?:-[^-\s]*[ce]|--(?:command|eval))(?:[= \t]|$)/u;
 
 function hasBashApprovalShellControl(command: string): boolean {
 	let quote: "'" | '"' | undefined;
