@@ -7,6 +7,7 @@
  * {@link ContainedManagedChild.state} refuses, and pausing holds output back
  * here instead of in the pipes.
  */
+import { settleWithin } from "@oh-my-pi/pi-utils";
 import { OUTPUT_DRAIN_GRACE_MS, OutputChannel } from "../../daemon/children";
 import type { ChildExit, ManagedChild, ManagedChildState } from "../../daemon/module";
 import { spawnContainedCommand } from "../../sandbox/command";
@@ -75,13 +76,7 @@ class ContainedManagedChild implements ManagedChild {
 		this.exited = (async (): Promise<ChildExit> => {
 			const exitCode = await child.exited;
 			// Output written right before exit may still be in flight; a descendant holding the pipes open must not hold the exit.
-			const grace = Promise.withResolvers<void>();
-			const graceTimer = setTimeout(grace.resolve, OUTPUT_DRAIN_GRACE_MS);
-			try {
-				await Promise.race([pumps, grace.promise]);
-			} finally {
-				clearTimeout(graceTimer);
-			}
+			await settleWithin(pumps, OUTPUT_DRAIN_GRACE_MS);
 			this.#done = true;
 			this.closeInput();
 			return { exitCode };
