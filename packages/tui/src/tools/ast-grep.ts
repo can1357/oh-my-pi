@@ -79,6 +79,13 @@ function astGrepSubject(
 
 const COLLAPSED_MATCH_LIMIT = PREVIEW_LIMITS.COLLAPSED_LINES * 2;
 
+/** Truncation hint; results recorded before `nextSkip` existed get the generic form. */
+function limitAdvice(nextSkip: number | undefined): string {
+	return nextSkip === undefined
+		? "limit reached; narrow path or use skip"
+		: `limit reached; narrow path or use skip=${nextSkip} for the next page`;
+}
+
 /** Render AST grep calls and results. */
 export const astGrepToolRenderer = {
 	inline: true,
@@ -159,11 +166,7 @@ export const astGrepToolRenderer = {
 
 		const extraLines: string[] = [];
 		if (limitReached) {
-			const advice =
-				details?.nextSkip === undefined
-					? "limit reached; narrow path or use skip"
-					: `limit reached; narrow path or use skip=${details.nextSkip} for the next page`;
-			extraLines.push(uiTheme.fg("warning", advice));
+			extraLines.push(uiTheme.fg("warning", limitAdvice(details?.nextSkip)));
 		}
 		if (details?.parseErrors?.length) {
 			extraLines.push(
@@ -260,13 +263,7 @@ export const astGrepToolRenderer = {
 			head,
 			body: compact<NativeChild>([
 				...describeGroupedOutput(kept),
-				limitReached &&
-					noteText(
-						details?.nextSkip === undefined
-							? "limit reached; narrow path or use skip"
-							: `limit reached; narrow path or use skip=${details.nextSkip} for the next page`,
-						"warning",
-					),
+				limitReached && noteText(limitAdvice(details?.nextSkip), "warning"),
 				parseNote,
 			]),
 			preview: { lines: COLLAPSED_MATCH_LIMIT },
