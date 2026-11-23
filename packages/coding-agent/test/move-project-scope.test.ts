@@ -187,11 +187,14 @@ describe("/move re-scopes project-discovered capabilities", () => {
 					refreshCommands: () => {},
 					reloadPlugins: async () => {},
 				});
+				// The MCP reload this move started. A reload that threw fails the test with its own error.
+				const reload = reloads.mock.results[before];
+				if (reload?.type === "throw") throw reload.value;
 				expect(output.join("\n")).toContain("Moved to ");
 				// `/move` starts one MCP reload; its servers may still be connecting when `/move` returns.
 				expect(reloads).toHaveBeenCalledTimes(before + 1);
-				const reload = reloads.mock.results[before]!.value as Promise<unknown>;
-				return { mcpSettled: reload.then(() => manager.waitForStartup(0)) };
+				if (reload?.type !== "return") throw new Error("/move returned before its MCP reload did");
+				return { mcpSettled: reload.value.then(() => manager.waitForStartup(0)) };
 			};
 
 			expect(tools()).toEqual(expect.arrayContaining(["alpha_ext_tool", "alpha_custom_tool"]));
