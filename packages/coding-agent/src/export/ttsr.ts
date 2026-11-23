@@ -998,6 +998,7 @@ export class TtsrManager {
 		for (const entry of this.#rules.values()) {
 			if (
 				entry.question ||
+				entry.gate ||
 				entry.conditions.length === 0 ||
 				!this.#canTrigger(entry.rule) ||
 				!this.interrupts(entry.rule, "tool")
@@ -1056,7 +1057,7 @@ export class TtsrManager {
 
 		const candidates: TtsrEntry[] = [];
 		for (const entry of this.#rules.values()) {
-			if (entry.astConditions.length === 0 || entry.question) {
+			if (entry.astConditions.length === 0 || entry.question || entry.gate) {
 				continue;
 			}
 			if (
@@ -1121,7 +1122,7 @@ export class TtsrManager {
 			return false;
 		}
 		for (const entry of this.#rules.values()) {
-			if (entry.astConditions.length > 0 && !entry.question) {
+			if (entry.astConditions.length > 0 && !entry.question && !entry.gate) {
 				return true;
 			}
 		}
@@ -1236,7 +1237,7 @@ export class TtsrManager {
 		const matches: Rule[] = [];
 		const deferred: TtsrEntry[] = [];
 		for (const entry of this.#rules.values()) {
-			if (entry.question || !this.#canTrigger(entry.rule)) {
+			if (entry.question || entry.gate || !this.#canTrigger(entry.rule)) {
 				continue;
 			}
 			const interrupts = this.interrupts(entry.rule, context.source);

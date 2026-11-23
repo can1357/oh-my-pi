@@ -2,12 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AgentEvent, AgentTool, BeforeToolCallContext } from "@oh-my-pi/pi-agent-core";
+import type { ToolCall } from "@oh-my-pi/pi-ai";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import { logger } from "@oh-my-pi/pi-utils";
-import { fakeJudge, judgedRule, setup } from "./helpers/ttsr-judged-rules";
+import { assistant, fakeJudge, judgedRule, setup } from "./helpers/ttsr-judged-rules";
 
 const DELETES = "Does the command delete files outside the project?";
 
@@ -135,5 +136,53 @@ describe("TTSR gate command probes", () => {
 		expect(warn).toHaveBeenCalledWith("TTSR command rule has no condition, skipping rule", {
 			ruleName: "no-condition",
 		});
+	});
+
+	it("[probe-07] leaves a matching streamed bash call to its probe instead of interrupting it", async () => {
+		const { coordinator, abort, events } = probeSetup([probeRule("no-rm", "exit 0")]);
+		const call: ToolCall = { type: "toolCall", id: "call-1", name: "bash", arguments: RM };
+		const message = assistant([call], "toolUse");
+		const streamed = (assistantMessageEvent: unknown) =>
+			coordinator.checkMessageUpdate({ type: "message_update", message, assistantMessageEvent } as AgentEvent);
+
+		coordinator.onAssistantMessageStart();
+		expect(
+			await streamed({ type: "toolcall_delta", contentIndex: 0, delta: JSON.stringify(RM), partial: message }),
+		).toBe(false);
+		expect(await streamed({ type: "toolcall_end", contentIndex: 0, toolCall: call, partial: message })).toBe(false);
+
+		expect(abort).not.toHaveBeenCalled();
+		expect(events).toHaveLength(0);
+		expect(await coordinator.gateToolCall({ tool: bash, args: RM, toolCallId: "call-1" })).toEqual({ covered: true });
+	});
+
+	it("[probe-08] leaves a call matching an astCondition probe to its probe instead of blocking it", async () => {
+		const args = { path: "src/a.ts", content: "console.log('x');" };
+		const write = {
+			name: "write",
+			label: "write",
+			description: "write tool",
+			parameters: {} as never,
+			matcherDigest: () => args.content,
+			execute: async () => ({ content: [{ type: "text", text: "written" }] }),
+		} as AgentTool;
+		const rule = probeRule("no-log", "exit 0", {
+			condition: undefined,
+			astCondition: ["console.log($$$)"],
+			scope: ["tool:write(*.ts)"],
+		});
+		const { coordinator, manager, abort } = setup([rule], undefined, Settings.isolated(), [write]);
+		const toolCall: ToolCall = { type: "toolCall", id: "call-1", name: "write", arguments: args };
+
+		const blocked = await coordinator.beforeToolCall({
+			assistantMessage: assistant([toolCall], "toolUse"),
+			toolCall,
+			tool: write,
+			args,
+		} as unknown as BeforeToolCallContext);
+
+		expect(blocked).toBeUndefined();
+		expect(abort).not.toHaveBeenCalled();
+		expect(manager.hasAstRules()).toBe(false);
 	});
 });
