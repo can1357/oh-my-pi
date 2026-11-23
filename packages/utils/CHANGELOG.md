@@ -33,6 +33,10 @@
 - Fixed `OMP_LOG_LEVEL` so it also controls console output from services such as `omp auth-broker serve`, not just log-file output.
 - Fixed Markdown parsing so emphasis and link labels are not prematurely terminated by marker characters inside code spans, autolinks, inline HTML tags, or link destinations.
 
+### Added
+
+- Added `getDocsCacheDir()`, the materialized `omp://` documentation cache directory (`~/.omp/cache/docs`), honoring `OMP_DOCS_CACHE_DIR` ([#18647](https://github.com/can1357/oh-my-pi/pull/18647) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
