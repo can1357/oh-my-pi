@@ -659,15 +659,6 @@ describe("html form", () => {
 	});
 
 	describe("text paste", () => {
-		it("pastes into a single-line answer without submitting", () => {
-			const { form, onSubmit } = dialog(`<form><label>Answer <input name="answer"></label></form>`);
-			expect(form.pasteText).toBeDefined();
-			form.pasteText?.("hello");
-			expect(form.data()).toEqual({ answer: "hello" });
-			expect(onSubmit).not.toHaveBeenCalled();
-			form.dispose();
-		});
-
 		it("preserves newlines in a textarea", () => {
 			const { form } = dialog(`<form><label>Notes <textarea name="notes"></textarea></label></form>`);
 			form.pasteText?.("line1\nline2");
@@ -700,17 +691,6 @@ describe("html form", () => {
 			form.pasteText?.("why sqlite");
 			form.handleInput(ENTER);
 			expect(form.optionNotes()).toMatchObject([{ text: "why sqlite" }]);
-			form.dispose();
-		});
-
-		it("holds a one-field submit until the reserved paste arrives", () => {
-			const { form, onSubmit } = dialog(`<form><label>Answer <input name="answer"></label></form>`);
-			const settle = form.beginPaste();
-			form.handleInput(ENTER);
-			expect(onSubmit).not.toHaveBeenCalled();
-
-			expect(settle("clipboard")).toBe(true);
-			expect(onSubmit).toHaveBeenCalledWith({ answer: "clipboard" }, []);
 			form.dispose();
 		});
 

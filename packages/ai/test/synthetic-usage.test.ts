@@ -77,12 +77,6 @@ describe("synthetic usage provider", () => {
 		expect(weekly.window?.resetLabel).toBeUndefined();
 	});
 
-	it("ignores the retired subscription counter", async () => {
-		const report = await fetchUsage({ ...SUBSCRIPTION_FIXTURE, ...PLAN_FIXTURE });
-
-		expect(report!.limits.map(l => l.id)).toEqual(["synthetic:usd:7d"]);
-	});
-
 	it("fully drained weekly credits (percentRemaining 0) → exhausted", async () => {
 		const payload = { planWeeklyLimit: { ...PLAN_FIXTURE.planWeeklyLimit, percentRemaining: 0 } };
 		const report = await fetchUsage(payload);

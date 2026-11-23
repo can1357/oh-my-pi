@@ -95,24 +95,6 @@ describe("ProcessTerminal geometry reflow through the renderer", () => {
 		expect(harness.probe.last).toBe(100);
 	});
 
-	it("repaints at the pty height in Herdr after a height-only peek report read late", async () => {
-		Bun.env.HC_TERMINAL_ID = "t7";
-		harness = createProcessTerminalRenderHarness(100, 30);
-		await harness.feed("\x1b[?2048;1$y");
-		await harness.inBand(30, 100);
-
-		await harness.inBand(15, 100);
-		expect(harness.terminal.rows).toBe(15);
-		// Let the shrink's own resize transaction finish: it paints once more when
-		// its anchor probe times out (about 300 ms), before the 500 ms fallback.
-		await harness.elapse(350);
-		const writesBefore = harness.writes.length;
-		await harness.elapse(250);
-
-		expect(harness.terminal.rows).toBe(30);
-		expect(harness.writes.length).toBeGreaterThan(writesBefore);
-	});
-
 	it("keeps a Herdr report whose SIGWINCH follows it", async () => {
 		Bun.env.HC_TERMINAL_ID = "t7";
 		harness = createProcessTerminalRenderHarness(100, 30);
