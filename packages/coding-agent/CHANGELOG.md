@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Native shell Rust API now stores indexed variables in `IndexedArray` rather than `Vec`; construct `VarValue::Indexed` with `items.into()`.
+
 ### Added
 
 - Added a `column` builtin to the shell with util-linux's options, so `column -t -N a,b,c` (and `-R`, `-H`, `-O`, `-J`, `-T`, `-W`, trees) works on macOS, whose BSD `column` rejected them
@@ -15,6 +19,7 @@
 
 ### Fixed
 
+- Native shell indexed-array appends no longer copy every existing element when background jobs hold forked snapshots ([#20232](https://github.com/can1357/oh-my-pi/issues/20232)).
 - Magic edit can now search and read the current draft, retry failed replacements without losing successful ones, and check syntax before writing; apply models that write their tool calls as text, such as Gemma 3, work too, and small apply models are shown where a mistyped replacement's text actually is instead of retrying it blindly.
 - `tab.scroll({ direction: "down", amount: 600 })` and other objects that name no pixel delta are rejected with the helper's signature and the equivalent call (`tab.scroll(0, 600)`) instead of silently scrolling nothing; the browser docs point at the `TabApi` interface in `tab-worker.ts` instead of a declaration file that no longer exists ([#20171](https://github.com/can1357/oh-my-pi/pull/20171) by [@kaluli123123](https://github.com/kaluli123123))
 - `ask` now reports a `<fieldset>` whose radios each carry a different `name` back to the model instead of showing it, so a preselected option can no longer be submitted next to the user's pick as a second answer ([#19625](https://github.com/can1357/oh-my-pi/issues/19625), [#20170](https://github.com/can1357/oh-my-pi/pull/20170) by [@kaluli123123](https://github.com/kaluli123123))
