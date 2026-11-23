@@ -1600,6 +1600,47 @@ async fn load_project(host: &mut Host, config: Option<&str>) -> Result<Project, 
 	};
 	let ProjectSetup { root, config: project } = setup;
 	let mut utils = Vec::new();
+	for dir in project.util_dirs.iter().flatten() {
+		for file in yaml_files(host, &root.join(dir), false).await? {
+			let name = file.path.display().to_string();
+			let text = read_text(host, &file.path, &format!("Cannot read rule {name}"), "The rule file either does not exist or cannot be opened.").await?;
+			utils.push(ast_grep_config::from_str(&text).map_err(|error| {
+				fail(host, &format!("Cannot parse rule {name}"), "The file is not a valid ast-grep rule. Please refer to doc and fix the error.", Some(CONFIG_GUIDE), Some(error.to_string()), 8)
+			})?);
+		}
+	}
+	let globals = DeserializeEnv::<SupportLang>::parse_global_utils(utils).map_err(|error| {
+		fail(
+			host,
+			"Error occurs when parsing global utility rules",
+			"Please check the YAML rules inside the rule directory",
+			Some(UTILITY_RULE),
+			Some(error.to_string()),
+			8,
+		)
+	})?;
+	let mut rules: Vec<RuleConfig<SupportLang>> = Vec::new();
+	for dir in &project.rule_dirs {
+		for file in yaml_files(host, &root.join(dir), false).await? {
+			let name = file.path.display().to_string();
+			let text = read_text(host, &file.path, &format!("Cannot read rule {name}"), "The rule file either does not exist or cannot be opened.").await?;
+			rules.extend(parse_rules(host, &text, &name, &globals)?);
+		}
+	}
+	let mut seen = HashSet::new();
+	if let Some(duplicate) = rules.iter().filter(|rule| !rule.id.is_empty()).find(|rule| !seen.insert(rule.id.as_str())) {
+		let title = format!("Duplicate rule id `{}` is found", duplicate.id);
+		return Err(fail(
+			host,
+			&title,
+			"Multiple rule files have the same id. Please add a unique `id` field to each rule.",
+			Some(CONFIG_GUIDE),
+			None,
+			8,
+		));
+	}
+	Ok(Project { root, config: project, rules })
+}
 
 /// Prints an ast-grep error report and returns its exit status.
 fn fail(host: &mut Host, title: &str, help: &str, link: Option<&str>, cause: Option<String>, code: i32) -> i32 {
