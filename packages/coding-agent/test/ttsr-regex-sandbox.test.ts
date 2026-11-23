@@ -33,6 +33,14 @@ const SANDBOX = { sandboxTimeoutMs: 300 };
 const INDENTED_LOOP =
 	"(?:^|\\n)([ \\t]*)(?:async[ \\t]+)?for\\b[^\\n]*:[ \\t]*\\n(?:\\1[ \\t]+[^\\n]*\\n|[ \\t]*\\n)*?\\1[ \\t]+[^\\n]*(?:\\.objects\\.(?:get|filter)\\s*\\()";
 const LOOP_BODY = "        x = compute(a, b, c)\n";
+/**
+ * Quartic core `a+a+a+a+b` the linear engine now decides in ~20 ms, with a
+ * trailing no-op repeat whose bound (20000) is past the engine node limit
+ * (10000), so the whole condition keeps the native engine and backtracks
+ * natively (~1 s on 150 `a`s). The prone scan still reports it non-prone, so
+ * these specs exercise slow-scan demotion rather than prone pre-routing.
+ */
+const QUARTIC_NATIVE = "a+a+a+a+b(?:z{0,20000})?";
 
 function names(rules: Rule[]): string[] {
 	return rules.map(match => match.name);
@@ -143,11 +151,23 @@ describe("TTSR regex sandbox", () => {
 		expect(names(manager.checkDelta('say "x"', TEXT))).toEqual(["builtin-quoted"]);
 	});
 
-	// Slow-scan demotion specs lived here. They used a+a+a+a+b as a pattern
-	// slow in process, but the upstream linear-time regexp engine evaluates it
-	// in milliseconds, so no scan reaches the demote threshold (7c08b84eed).
-	// The demote path itself is unchanged; reproving it needs a pattern that
-	// is slow under the linear engine.
+	it("moves a user condition that was slow in process to the sandbox", () => {
+		const warn = vi.spyOn(logger, "warn");
+		const manager = new TtsrManager({ enabled: true }, SANDBOX);
+		manager.addRule(rule("quartic", QUARTIC_NATIVE, "test", "always"));
+
+		expect(manager.checkDelta("a".repeat(150), TEXT)).toEqual([]);
+		expect(warn.mock.calls.some(([message]) => String(message).includes("moved to the regex sandbox"))).toBe(true);
+	});
+
+	it("moves a judged rule's slow prefilter condition to the sandbox", async () => {
+		const warn = vi.spyOn(logger, "warn");
+		const manager = new TtsrManager({ enabled: true }, SANDBOX);
+		manager.addRule({ ...rule("judged-quartic", QUARTIC_NATIVE), question: "Does it loop?" });
+
+		expect(await manager.judgedCandidates("a".repeat(150), TEXT)).toEqual([]);
+		expect(warnings(warn, "moved to the regex sandbox")).toBe(1);
+	});
 
 	it("keeps a quarantine when an unchanged rule is registered again", () => {
 		const warn = vi.spyOn(logger, "warn");
@@ -162,6 +182,21 @@ describe("TTSR regex sandbox", () => {
 		expect(manager.checkDelta(stuck, TEXT, { final: true })).toEqual([]);
 		expect(performance.now() - started).toBeLessThan(250);
 		expect(warnings(warn, "quarantined")).toBe(1);
+	});
+
+	it("keeps a slow-scan demotion when an unchanged rule is registered again", () => {
+		const warn = vi.spyOn(logger, "warn");
+		const manager = new TtsrManager({ enabled: true }, SANDBOX);
+		manager.addRule(rule("quartic", QUARTIC_NATIVE, "test", "always"));
+		manager.checkDelta("a".repeat(150), TEXT);
+		expect(warnings(warn, "moved to the regex sandbox")).toBe(1);
+
+		manager.replaceRules([rule("quartic", QUARTIC_NATIVE)]);
+		manager.resetBuffer();
+		const started = performance.now();
+		expect(manager.checkDelta("a".repeat(150), TEXT)).toEqual([]);
+		expect(performance.now() - started).toBeLessThan(100);
+		expect(warnings(warn, "moved to the regex sandbox")).toBe(1);
 	});
 
 	it("tests every judged rule's sandboxed prefilters in one child call", async () => {
