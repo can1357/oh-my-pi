@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { SegmentContext } from "../src/status-line/segments";
-import { renderSegment } from "../src/status-line/segments";
+import { describeSegment, renderSegment } from "../src/status-line/segments";
 import { initTheme } from "../src/theme";
 
 beforeAll(async () => {
@@ -110,12 +110,21 @@ describe("status line vim segment", () => {
 		expect(Bun.stringWidth(text)).toBe(6);
 	});
 
-	it("hides the segment entirely when display is none", () => {
-		const rendered = renderSegment(
+	it("with display none, hides the mode but still echoes a half-typed command", () => {
+		const pending = renderSegment(
 			"vim",
-			vimContext({ mode: "normal", pending: "2d", selectedLines: 4, display: "none" }),
+			vimContext({ mode: "normal", pending: "15d", selectedLines: 4, display: "none" }),
 		);
-		expect(rendered.visible).toBe(false);
-		expect(rendered.content).toBe("");
+		expect(pending.visible).toBe(true);
+		expect(plain(pending.content)).toBe("15d");
+
+		// Nothing pending: the whole segment stays hidden, in rows and natively.
+		const quiet = vimContext({ mode: "normal", pending: "", selectedLines: 4, display: "none" });
+		expect(renderSegment("vim", quiet).visible).toBe(false);
+		expect(describeSegment("vim", quiet)).toBeNull();
+		expect(
+			describeSegment("vim", vimContext({ mode: "normal", pending: '"a', selectedLines: 0, display: "none" }))
+				?.spans,
+		).toEqual([expect.objectContaining({ t: '"a' })]);
 	});
 });

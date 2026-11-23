@@ -301,6 +301,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		renderInitialMessages: vi.fn(async () => {}),
 		updatePendingMessagesDisplay: vi.fn(),
 		updateEditorBorderColor: vi.fn(),
+		configureDialogEditor: vi.fn(),
 		syncIdleMaintenanceView: vi.fn(),
 		ensureLoadingAnimation: vi.fn(),
 		setWorkingMessage: vi.fn(),

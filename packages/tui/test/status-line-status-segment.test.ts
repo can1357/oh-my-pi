@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { visibleWidth } from "../src/utils";
 import type { SegmentContext } from "../src/status-line/segments";
-import { renderSegment } from "../src/status-line/segments";
+import { describeSegment, renderSegment } from "../src/status-line/segments";
 import { initTheme, theme } from "../src/theme";
 
 beforeAll(async () => {
@@ -22,6 +22,16 @@ describe("status line status segment", () => {
 
 		expect(rendered.visible).toBe(true);
 		expect(rendered.content).toBe(`${accent}build ok${dim}${theme.sep.dot}${accent}2 tests${RESET_FG}`);
+	});
+
+	it("draws the dot between statuses dim in the native bar, apart from the accent statuses", () => {
+		const view = describeSegment("status", statusContext(["build ok", "2 tests"]));
+
+		expect(view?.spans.map(part => [part.t, part.s])).toEqual([
+			["build ok", "accent"],
+			[theme.sep.dot, "dim"],
+			["2 tests", "accent"],
+		]);
 	});
 
 	it("keeps an extension's own colour instead of repainting it in the accent colour", () => {
