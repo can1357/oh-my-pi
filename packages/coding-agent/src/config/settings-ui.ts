@@ -16,7 +16,7 @@ import { cfgAutolearnEnabled } from "../autolearn/settings";
 import { cfgMemoryBackend } from "../memory-backend/settings";
 import { cfgComposerPredictions, cfgTuiVimMode } from "../modes/settings";
 import { cfgAdvisorEnabled } from "../advisor/settings";
-import { cfgContextFilesExtra } from "../session/context-settings";
+import { cfgCompactionModel, cfgContextFilesExtra } from "../session/context-settings";
 import { cfgTaskPerCallModelAllow } from "../task/settings";
 import { cfgToolsRestrictedFolders } from "../tools/settings";
 import { cfgAuthUnpausedProviders } from "./model-settings";
@@ -42,6 +42,7 @@ const CONDITIONS: Record<string, () => boolean> = {
 	planAutosaveEnabled: whenSettings(s => cfgPlanEnabled.get(s) && cfgPlanAutosave.get(s)),
 	// These editors write the global layer; hide them so a project-supplied list is never promoted to global.
 	contextFilesExtraNotProject: whenSettings(s => cfgContextFilesExtra.provenance(s) !== "project"),
+	compactionModelNotProject: whenSettings(s => cfgCompactionModel.provenance(s) !== "project"),
 	restrictedFoldersNotProject: whenSettings(s => cfgToolsRestrictedFolders.provenance(s) !== "project"),
 	perCallModelAllowNotProject: whenSettings(s => cfgTaskPerCallModelAllow.provenance(s) !== "project"),
 	unpausedProvidersNotProject: whenSettings(s => cfgAuthUnpausedProviders.provenance(s) !== "project"),

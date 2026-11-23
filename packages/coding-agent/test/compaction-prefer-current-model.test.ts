@@ -2,13 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
+import type { CompactionPreparation, CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { resolveGlobalCompactionTarget } from "@oh-my-pi/pi-coding-agent/session/role-models";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { assistantMsg, userMsg } from "./utilities";
@@ -364,61 +367,72 @@ describe("compaction prefers the current session model over modelRoles.default",
 		expect(`${firstCandidate.provider}/${firstCandidate.id}`).toBe(`${currentModel.provider}/${currentModel.id}`);
 	});
 
+	function modelKey(model: Model): string {
+		return `${model.provider}/${model.id}`;
+	}
+
+	async function compactModelCalls(
+		currentModel: Model,
+		settings: Settings,
+		authenticated: readonly Model[],
+		options?: {
+			mode?: "remote";
+			onModel?: (model: Model, preparation: CompactionPreparation) => CompactionResult | Promise<CompactionResult>;
+		},
+	): Promise<{ calls: string[]; summary: string }> {
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		for (const model of authenticated) authStorage.keys.setRuntime(model.provider, "test-token");
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model: currentModel, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		session.subscribe(() => {});
+		for (const [userText, assistantText] of [
+			["first question", "first answer"],
+			["second question", "second answer"],
+		] as const) {
+			const user = userMsg(userText);
+			const assistant = assistantMsg(assistantText);
+			session.agent.appendMessage(user);
+			session.sessionManager.appendMessage(user);
+			session.agent.appendMessage(assistant);
+			session.sessionManager.appendMessage(assistant);
+		}
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+			if (options?.onModel) return options.onModel(model, preparation);
+			return {
+				summary: "ok",
+				shortSummary: "ok short",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: 1,
+				details: { provider: model.provider },
+			};
+		});
+		const result = options?.mode ? await session.compact(undefined, { mode: options.mode }) : await session.compact();
+		return { calls: compactSpy.mock.calls.map(([, model]) => modelKey(model)), summary: result.summary };
+	}
+
 	describe("compaction.model", () => {
 		it("uses the configured global model ahead of the active model", async () => {
 			const currentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 			const compactionModel = getBundledModel("openai", "gpt-5");
 			if (!currentModel || !compactionModel) throw new Error("Expected bundled test models to exist");
 
-			const agent = new Agent({
-				initialState: { model: currentModel, systemPrompt: ["Test"], tools: [], messages: [] },
-			});
-
-			authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-			authStorage.keys.setRuntime(currentModel.provider, "anthropic-token");
-			authStorage.keys.setRuntime(compactionModel.provider, "openai-token");
-			modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
-
-			session = new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings: Settings.isolated({
+			const { calls } = await compactModelCalls(
+				currentModel,
+				Settings.isolated({
 					"compaction.keepRecentTokens": 1,
 					"compaction.methodOrder": ["soft"],
-					"compaction.model": `${compactionModel.provider}/${compactionModel.id}`,
+					"compaction.model": modelKey(compactionModel),
 				}),
-				modelRegistry,
-			});
-			session.subscribe(() => {});
-
-			for (const [userText, assistantText] of [
-				["first question", "first answer"],
-				["second question", "second answer"],
-			] as const) {
-				const user = userMsg(userText);
-				const assistant = assistantMsg(assistantText);
-				session.agent.appendMessage(user);
-				session.sessionManager.appendMessage(user);
-				session.agent.appendMessage(assistant);
-				session.sessionManager.appendMessage(assistant);
-			}
-
-			const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => ({
-				summary: "ok",
-				shortSummary: "ok short",
-				firstKeptEntryId: preparation.firstKeptEntryId,
-				tokensBefore: 1,
-				details: { provider: model.provider },
-			}));
-
-			await session.compact();
-
-			expect(compactSpy).toHaveBeenCalled();
-			const [, firstCandidate] = compactSpy.mock.calls[0]!;
-			expect(`${firstCandidate.provider}/${firstCandidate.id}`).toBe(
-				`${compactionModel.provider}/${compactionModel.id}`,
+				[currentModel, compactionModel],
 			);
-			expect(`${session.model?.provider}/${session.model?.id}`).toBe(`${currentModel.provider}/${currentModel.id}`);
+
+			expect(calls[0]).toBe(modelKey(compactionModel));
+			expect(modelKey(session.model!)).toBe(modelKey(currentModel));
 		});
 
 		it("keeps a model's own compactionModel ahead of compaction.model", async () => {
@@ -428,59 +442,21 @@ describe("compaction prefers the current session model over modelRoles.default",
 			if (!baseModel || !perModelTarget || !globalTarget) throw new Error("Expected bundled test models to exist");
 			const currentModel = buildModel({
 				...baseModel,
-				compactionModel: `${perModelTarget.provider}/${perModelTarget.id}`,
+				compactionModel: modelKey(perModelTarget),
 				compat: baseModel.compatConfig,
 			});
 
-			const agent = new Agent({
-				initialState: { model: currentModel, systemPrompt: ["Test"], tools: [], messages: [] },
-			});
-
-			authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-			authStorage.keys.setRuntime(currentModel.provider, "anthropic-token");
-			authStorage.keys.setRuntime(perModelTarget.provider, "openai-token");
-			authStorage.keys.setRuntime(globalTarget.provider, "google-token");
-			modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
-
-			session = new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings: Settings.isolated({
+			const { calls } = await compactModelCalls(
+				currentModel,
+				Settings.isolated({
 					"compaction.keepRecentTokens": 1,
 					"compaction.methodOrder": ["soft"],
-					"compaction.model": `${globalTarget.provider}/${globalTarget.id}`,
+					"compaction.model": modelKey(globalTarget),
 				}),
-				modelRegistry,
-			});
-			session.subscribe(() => {});
-
-			for (const [userText, assistantText] of [
-				["first question", "first answer"],
-				["second question", "second answer"],
-			] as const) {
-				const user = userMsg(userText);
-				const assistant = assistantMsg(assistantText);
-				session.agent.appendMessage(user);
-				session.sessionManager.appendMessage(user);
-				session.agent.appendMessage(assistant);
-				session.sessionManager.appendMessage(assistant);
-			}
-
-			const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => ({
-				summary: "ok",
-				shortSummary: "ok short",
-				firstKeptEntryId: preparation.firstKeptEntryId,
-				tokensBefore: 1,
-				details: { provider: model.provider },
-			}));
-
-			await session.compact();
-
-			expect(compactSpy).toHaveBeenCalled();
-			const [, firstCandidate] = compactSpy.mock.calls[0]!;
-			expect(`${firstCandidate.provider}/${firstCandidate.id}`).toBe(
-				`${perModelTarget.provider}/${perModelTarget.id}`,
+				[currentModel, perModelTarget, globalTarget],
 			);
+
+			expect(calls[0]).toBe(modelKey(perModelTarget));
 		});
 
 		it("resolves a @role alias to its configured model", async () => {
@@ -492,52 +468,127 @@ describe("compaction prefers the current session model over modelRoles.default",
 				"compaction.methodOrder": ["soft"],
 				"compaction.model": "@smol",
 			});
-			settings.setModelRole("smol", `${compactionModel.provider}/${compactionModel.id}`);
+			settings.setModelRole("smol", modelKey(compactionModel));
 
-			const agent = new Agent({
-				initialState: { model: currentModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			const { calls } = await compactModelCalls(currentModel, settings, [currentModel, compactionModel]);
+
+			expect(calls[0]).toBe(modelKey(compactionModel));
+		});
+
+		it("ignores a project-layer compaction.model and resolves from operator layers", async () => {
+			const globalModel = getBundledModel("openai", "gpt-5");
+			const projectModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!globalModel || !projectModel) throw new Error("Expected bundled test models to exist");
+			const cwd = path.join(tempDir.path(), "project");
+			const agentDir = path.join(tempDir.path(), "agent");
+			await Bun.write(path.join(agentDir, "config.yml"), `compaction:\n  model: ${modelKey(globalModel)}\n`);
+			await Bun.write(path.join(cwd, ".omp/config.yml"), `compaction:\n  model: ${modelKey(projectModel)}\n`);
+
+			const settings = await Settings.loadIsolated({ cwd, agentDir });
+			const target = resolveGlobalCompactionTarget(settings, [globalModel, projectModel]);
+
+			expect(target && modelKey(target)).toBe(modelKey(globalModel));
+		});
+
+		it("rejects bare and unresolved selectors instead of fuzzy matching", () => {
+			const base = getBundledModel("openai", "gpt-5");
+			if (!base) throw new Error("Expected bundled test models to exist");
+			const fuzzyProvider = buildModel({
+				...base,
+				provider: "openrouter",
+				id: "openai/gpt-3.5-turbo-0613",
+				compat: base.compatConfig,
 			});
-
-			authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-			authStorage.keys.setRuntime(currentModel.provider, "anthropic-token");
-			authStorage.keys.setRuntime(compactionModel.provider, "google-token");
-			modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
-
-			session = new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
+			const fuzzyPath = buildModel({
+				...base,
+				provider: "openrouter",
+				id: "only-in-office/deep-chat",
+				compat: base.compatConfig,
 			});
-			session.subscribe(() => {});
+			const fuzzyRole = buildModel({ ...base, id: "ghost@nonexistent", compat: base.compatConfig });
 
-			for (const [userText, assistantText] of [
-				["first question", "first answer"],
-				["second question", "second answer"],
-			] as const) {
-				const user = userMsg(userText);
-				const assistant = assistantMsg(assistantText);
-				session.agent.appendMessage(user);
-				session.sessionManager.appendMessage(user);
-				session.agent.appendMessage(assistant);
-				session.sessionManager.appendMessage(assistant);
-			}
+			expect(
+				resolveGlobalCompactionTarget(Settings.isolated({ "compaction.model": "openai" }), [fuzzyProvider]),
+			).toBeUndefined();
+			expect(
+				resolveGlobalCompactionTarget(Settings.isolated({ "compaction.model": "only-in-office/deep-chat" }), [
+					fuzzyPath,
+				]),
+			).toBeUndefined();
+			expect(
+				resolveGlobalCompactionTarget(Settings.isolated({ "compaction.model": "@nonexistent" }), [fuzzyRole]),
+			).toBeUndefined();
+		});
 
-			const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => ({
-				summary: "ok",
-				shortSummary: "ok short",
-				firstKeptEntryId: preparation.firstKeptEntryId,
-				tokensBefore: 1,
-				details: { provider: model.provider },
-			}));
+		it("falls back to the active model when the configured model returns 404", async () => {
+			const currentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const configuredModel = getBundledModel("openai", "gpt-5");
+			if (!currentModel || !configuredModel) throw new Error("Expected bundled test models to exist");
 
-			await session.compact();
-
-			expect(compactSpy).toHaveBeenCalled();
-			const [, firstCandidate] = compactSpy.mock.calls[0]!;
-			expect(`${firstCandidate.provider}/${firstCandidate.id}`).toBe(
-				`${compactionModel.provider}/${compactionModel.id}`,
+			const { calls, summary } = await compactModelCalls(
+				currentModel,
+				Settings.isolated({
+					"compaction.keepRecentTokens": 1,
+					"compaction.methodOrder": ["soft"],
+					"compaction.model": modelKey(configuredModel),
+				}),
+				[currentModel, configuredModel],
+				{
+					onModel: (model, preparation) => {
+						if (model.provider === configuredModel.provider) {
+							throw Object.assign(new Error("model_not_found"), { status: 404 });
+						}
+						return {
+							summary: "fallback",
+							shortSummary: "fallback",
+							firstKeptEntryId: preparation.firstKeptEntryId,
+							tokensBefore: 1,
+							details: { provider: model.provider },
+						};
+					},
+				},
 			);
+
+			expect(calls).toEqual([modelKey(configuredModel), modelKey(currentModel)]);
+			expect(summary).toBe("fallback");
+		});
+
+		it("keeps a cross-provider global target out of offline mode", async () => {
+			const currentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const configuredModel = getBundledModel("openai", "gpt-5");
+			if (!currentModel || !configuredModel) throw new Error("Expected bundled test models to exist");
+
+			const { calls } = await compactModelCalls(
+				currentModel,
+				Settings.isolated({
+					"models.offline": true,
+					"compaction.keepRecentTokens": 1,
+					"compaction.methodOrder": ["soft"],
+					"compaction.model": modelKey(configuredModel),
+				}),
+				[currentModel, configuredModel],
+			);
+
+			expect(calls[0]).toBe(modelKey(currentModel));
+		});
+
+		it("/compact remote skips a native writer the active model cannot replay when an endpoint is configured", async () => {
+			const currentModel = getBundledModel("openai", "gpt-5");
+			const configuredModel = getBundledModel("anthropic", "claude-opus-4-6");
+			if (!currentModel || !configuredModel) throw new Error("Expected bundled test models to exist");
+
+			const { calls } = await compactModelCalls(
+				currentModel,
+				Settings.isolated({
+					"compaction.keepRecentTokens": 1,
+					"compaction.remoteEndpoint": "https://compactor.invalid/summarize",
+					"compaction.model": modelKey(configuredModel),
+				}),
+				[currentModel, configuredModel],
+				{ mode: "remote" },
+			);
+
+			expect(calls[0]).toBe(modelKey(currentModel));
 		});
 	});
 });

@@ -159,12 +159,13 @@ export const cfgCompactionModel = register({
 	id: "compaction.model",
 	type: "string",
 	default: undefined,
+	condition: "compactionModelNotProject",
 	ui: {
 		tab: "context",
 		group: "Compaction",
 		label: "Compaction Model",
 		description:
-			"Model that writes compaction summaries, as provider/model or @role; empty uses the active session model",
+			"Operator-scoped model for summary compaction, as provider/model or @role; a model's own compactionModel wins and empty keeps the existing order",
 	},
 });
 

@@ -199,6 +199,26 @@ function canUseLiveProviderNativeCompaction(
 }
 
 /**
+ * Whether a `remote` candidate can write a boundary the live session can replay.
+ * A non-native candidate falls through to `compaction.remoteEndpoint`. A native
+ * candidate must be replay-compatible even when an endpoint is configured,
+ * because the native lane runs before the endpoint and commits a provider-bound
+ * payload; a mismatch would leave the active model unable to read the summary.
+ */
+function canUseRemoteCompactionCandidate(
+	candidate: Model,
+	liveModel: Model,
+	settings: EngineCompactionSettings,
+): boolean {
+	if (!canUseRemoteCompaction(candidate, settings)) return false;
+	if (!shouldUseProviderNativeCompaction(candidate, settings)) return true;
+	return (
+		canUseLiveProviderNativeCompaction(candidate, liveModel, settings) &&
+		canReplayRemoteCompactionFrom(candidate, liveModel)
+	);
+}
+
+/**
  * Whether `candidate` is actually selectable for `reason` on `model` — mirrors the
  * per-candidate availability check in {@link SessionMaintenance.runAutoCompaction}'s
  * method-order loop so every caller agrees with what would really be selected.
@@ -1482,21 +1502,19 @@ export class SessionMaintenance {
 			};
 
 			const effectiveSettings = resolveMethodSettings(compactionSettings, selectedMethod);
-			const requireProviderRemote = selectedMethod === "remote" && !effectiveSettings.remoteEndpoint;
 			const remoteReader = selectedMethod === "remote" ? options?.readerModel : undefined;
 			const compactionCandidates =
 				selectedMethod === "handoff"
 					? []
 					: this.#getCompactionModelCandidates(
 							this.#host.modelRegistry.getAvailable(),
-							requireProviderRemote || remoteReader
+							selectedMethod === "remote"
 								? candidate =>
-										(!requireProviderRemote ||
-											canUseLiveProviderNativeCompaction(candidate, activeModel, effectiveSettings)) &&
+										canUseRemoteCompactionCandidate(candidate, activeModel, effectiveSettings) &&
 										(!remoteReader || canReplayRemoteCompactionFrom(candidate, remoteReader))
 								: undefined,
 						);
-			if ((requireProviderRemote || remoteReader) && compactionCandidates.length === 0) {
+			if (selectedMethod === "remote" && compactionCandidates.length === 0) {
 				this.#host.emitNotice(
 					"warning",
 					`remote compaction is unavailable for ${activeModel.id}; trying the next preferred method`,
@@ -2743,8 +2761,8 @@ export class SessionMaintenance {
 			if (compactionPrep.kind === "fromHook") return clear();
 			const candidates = this.#getCompactionModelCandidates(
 				this.#host.modelRegistry.getAvailable(),
-				method === "remote" && !effectiveSettings.remoteEndpoint
-					? candidate => canUseLiveProviderNativeCompaction(candidate, model, effectiveSettings)
+				method === "remote"
+					? candidate => canUseRemoteCompactionCandidate(candidate, model, effectiveSettings)
 					: undefined,
 			);
 			if (candidates.length === 0) return clear();
@@ -4096,6 +4114,7 @@ export class SessionMaintenance {
 			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable());
 		const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 		let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
+		let notFoundError: unknown;
 		const compactionJournal = this.#journalCompaction(method);
 		const journal: CompletionJournal | undefined =
 			onAttempt === undefined
@@ -4176,11 +4195,19 @@ export class SessionMaintenance {
 					nativeCompactionFailure ??= { error, provider: candidate.provider };
 					continue;
 				}
+				// A catalogued model can still be absent at the provider (stale custom
+				// model, revoked route). Treat a definitive 404 as candidate
+				// unavailability so the documented active-model fallback runs.
+				if (AIError.status(error) === 404) {
+					notFoundError = error;
+					continue;
+				}
 				throw error;
 			}
 		}
 
 		if (nativeCompactionFailure) throw nativeCompactionFailure.error;
+		if (notFoundError) throw notFoundError;
 		throw this.#buildCompactionAuthError();
 	}
 
@@ -6263,8 +6290,8 @@ export class SessionMaintenance {
 				const liveModel = this.#model;
 				const candidates = this.#getCompactionModelCandidates(
 					availableModels,
-					method === "remote" && !effectiveSettings.remoteEndpoint && liveModel
-						? candidate => canUseLiveProviderNativeCompaction(candidate, liveModel, effectiveSettings)
+					method === "remote" && liveModel
+						? candidate => canUseRemoteCompactionCandidate(candidate, liveModel, effectiveSettings)
 						: undefined,
 				);
 				const retrySettings = cfgRetry.get(this.#host.settings);

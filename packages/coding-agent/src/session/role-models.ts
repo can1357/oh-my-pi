@@ -6,6 +6,7 @@ import {
 	extractExplicitThinkingSelector,
 	getModelMatchPreferences,
 	type ResolvedModelRoleValue,
+	resolveExplicitModelRole,
 	resolveModelRoleValue,
 } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -68,17 +69,33 @@ export function resolveCompactionConfiguredTarget(currentModel: Model, available
 }
 
 /**
- * Resolves the global `compaction.model` selector against the caller's
- * available models. The value accepts a `provider/model` selector or a
- * `@role` alias; unset or whitespace-only values resolve to undefined.
+ * Resolves the operator-level `compaction.model` selector against the caller's
+ * available models. The value accepts an exact `provider/model` selector (with
+ * an optional thinking suffix) or a `@role` alias; unset, whitespace-only, and
+ * bare tokens resolve to undefined.
+ *
+ * Project settings are deliberately excluded: repository files are writable by
+ * the agent, and this key decides which provider receives compaction summaries.
+ * Role aliases and match preferences resolve from the same operator view.
  */
 export function resolveGlobalCompactionTarget(settings: Settings, availableModels: Model[]): Model | undefined {
-	const configured = cfgCompactionModel.get(settings)?.trim();
+	const authority = settings.grantAuthority();
+	const configured = cfgCompactionModel.get(authority)?.trim();
 	if (!configured) return undefined;
-	return resolveModelRoleValue(configured, availableModels, {
-		settings,
-		matchPreferences: getModelMatchPreferences(settings),
-	}).model;
+	if (configured.startsWith("@")) {
+		if (!resolveExplicitModelRole(configured, authority)) return undefined;
+		const roleValue = configured === "@default" ? authority.getModelRole("default") : configured;
+		if (!roleValue) return undefined;
+		return resolveModelRoleValue(roleValue, availableModels, { settings: authority }).model;
+	}
+	const parsed = parseModelString(configured, {
+		allowMaxSuffix: true,
+		allowAutoAlias: true,
+		isLiteralModelId: (provider, id) =>
+			provider !== undefined && availableModels.some(model => model.provider === provider && model.id === id),
+	});
+	if (!parsed) return undefined;
+	return availableModels.find(model => model.provider === parsed.provider && model.id === parsed.id);
 }
 
 /** Resolves a model role and its explicit thinking selection. */
