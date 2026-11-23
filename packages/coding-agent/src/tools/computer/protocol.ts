@@ -22,13 +22,27 @@ export interface ComputerSessionSnapshot {
 	captureMaxHeight: number;
 	display: string;
 	readOnly: boolean;
-	/** `computer.backgroundFallback`: what a refused background input call does. */
-	backgroundFallback: "takeover" | "refuse";
+	/** `computer.takeover`: when window input takes over rather than running in the background. */
+	takeover: ComputerTakeoverMode;
 	/**
 	 * The agent turn the run belongs to, if any: once it acts, the display stays awake until that turn's
 	 * `release-display` rather than for the native grace period after its last request.
 	 */
 	displayTurn?: number;
+}
+
+/**
+ * The user's `computer.takeover` setting. `fallback` (the default) reruns a call whose background route is
+ * unavailable in takeover, and the model may pass `takeover` on a call; `refuse` never takes over, refusing the
+ * model's `takeover: true`. Under `foreground` and `always` omp alone decides, and the model has no `takeover`
+ * option: `foreground` takes over a target window already in front, `always` every window and element input
+ * call, and both rerun a call whose background route is unavailable in takeover.
+ */
+export type ComputerTakeoverMode = "fallback" | "foreground" | "always" | "refuse";
+
+/** Whether the model may pass `takeover` on an input call: only in the modes that predate omp deciding. */
+export function modelChoosesTakeover(mode: ComputerTakeoverMode): boolean {
+	return mode === "fallback" || mode === "refuse";
 }
 
 /** Reply envelope for a session tool invoked by desktop JavaScript. */
