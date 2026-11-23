@@ -74,8 +74,11 @@ try {
 	} else if (process.env.PROBE_OPEN) {
 		const exports = loader.openNativeAddon(process.env.PROBE_OPEN);
 		result = { ok: true, exports: shape(exports), stamp: stamp(exports) };
+	} else if (process.env.PROBE_EXTRACT) {
+		const [written] = loader.extractEmbeddedAddons(JSON.parse(process.env.PROBE_EXTRACT));
+		const exports = loader.openNativeAddon(written);
+		result = { ok: true, path: written, exports: shape(exports), stamp: stamp(exports) };
 	} else {
-		if (process.env.PROBE_EXTRACT) loader.extractEmbeddedAddons(JSON.parse(process.env.PROBE_EXTRACT));
 		const bindings = loader.loadNative();
 		result = { ok: true, path: loader.nativeAddonStatus()?.path, exports: shape(bindings) };
 		if (process.env.PROBE_TWICE) result.sameBindings = loader.loadNative() === bindings;
@@ -160,16 +163,28 @@ describe.skipIf(!hasHostAddon)("the addon loads from a directory whose path hold
 			const home = path.join(root, `home-${dirname}`);
 			const versionedDir = path.join(home, ".omp", "natives", packageJson.version);
 			await fs.mkdir(versionedDir, { recursive: true });
-			const size = (await fs.stat(addon)).size;
+			const bytes = await Bun.file(addon).bytes();
+			const hash = Bun.hash.xxHash64(bytes).toString(16);
 			try {
 				const result = await probe({
 					HOME: home,
 					PROBE_EXTRACT: JSON.stringify({
-						files: [{ variant: variant ?? "default", filename: hostAddonFilename, size, zstdPath: frame }],
+						files: [
+							{
+								variant: variant ?? "default",
+								filename: hostAddonFilename,
+								size: bytes.length,
+								hash,
+								zstdPath: frame,
+							},
+						],
 						targetDir: versionedDir,
 					}),
 				});
-				expect(result).toMatchObject({ ok: true, path: path.join(versionedDir, hostAddonFilename) });
+				expect(result).toMatchObject({
+					ok: true,
+					path: path.join(versionedDir, `embedded-${hash}`, hostAddonFilename),
+				});
 			} finally {
 				await fs.rm(home, { recursive: true, force: true });
 			}

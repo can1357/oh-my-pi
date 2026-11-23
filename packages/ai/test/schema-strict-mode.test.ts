@@ -1146,4 +1146,72 @@ describe("adaptSchemaForStrict — unrepresentable open branches fall back to no
 		};
 		expect(adaptSchemaForStrict(schema, true).strict).toBe(false);
 	});
+
+	it('falls back instead of closing a bare `type("object")` property to `{}`', () => {
+		// A bare object is open in JSON Schema. Strict adaptation would close it to
+		// `properties: {}` with `additionalProperties: false`, so a strict provider
+		// accepts only `{}` or `null` for it and rejects every call that sets a field.
+		const wire = toolWireSchema({
+			name: "t",
+			description: "d",
+			parameters: type({ path: type("string"), "args?": type("object") }),
+		} as Tool);
+		const adapted = adaptSchemaForStrict(wire, true);
+		expect(adapted.strict).toBe(false);
+		expect((adapted.schema.properties as Record<string, unknown>).args).toEqual({ type: "object" });
+	});
+
+	it("falls back for a bare object property on the OpenAI Responses and Codex sanitized path", () => {
+		// OpenAI Responses requires `properties` on every object node, so its sanitizer adds
+		// `properties: {}` before strict adaptation. That placeholder must not make the bare
+		// object look declared-empty: the args node would then close to `{}` under strict.
+		const wire = toolWireSchema({
+			name: "t",
+			description: "d",
+			parameters: type({ path: type("string"), "args?": type("object") }),
+		} as Tool);
+		const sanitized = sanitizeSchemaForOpenAIResponses(wire, { repairArrayItems: true });
+		expect(adaptSchemaForStrict(sanitized, true).strict).toBe(false);
+	});
+
+	it("keeps an object with an empty properties map or `additionalProperties: false` strict", () => {
+		// Declared-closed objects are representable: strict mode closes them as written.
+		const schema: Record<string, unknown> = {
+			type: "object",
+			properties: {
+				empty: { type: "object", properties: {} },
+				explicitlyClosed: { type: "object", additionalProperties: false },
+			},
+			required: ["empty", "explicitlyClosed"],
+			additionalProperties: false,
+		};
+		expect(adaptSchemaForStrict(schema, true).strict).toBe(true);
+	});
+
+	it("keeps an object whose shape comes from `allOf` or `$ref` strict", () => {
+		// `type: "object"` beside `allOf`/`$ref` is not bare: enforcement merges or inlines the shape.
+		const shape = {
+			type: "object",
+			properties: { a: { type: "string" } },
+			required: ["a"],
+			additionalProperties: false,
+		};
+		const schema: Record<string, unknown> = {
+			type: "object",
+			properties: {
+				merged: { type: "object", allOf: [shape] },
+				referenced: { type: "object", $ref: "#/$defs/Shape" },
+			},
+			required: ["merged", "referenced"],
+			additionalProperties: false,
+			$defs: { Shape: shape },
+		};
+		const adapted = adaptSchemaForStrict(schema, true);
+		expect(adapted.strict).toBe(true);
+		const properties = adapted.schema.properties as Record<string, Record<string, unknown>>;
+		expect(properties.merged.properties).toEqual({ a: { type: "string" } });
+		expect(properties.referenced.properties).toEqual({ a: { type: "string" } });
+		const sanitized = sanitizeSchemaForOpenAIResponses(schema, { repairArrayItems: true });
+		expect(adaptSchemaForStrict(sanitized, true).strict).toBe(true);
+	});
 });
