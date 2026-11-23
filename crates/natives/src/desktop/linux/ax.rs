@@ -11,7 +11,10 @@ use atspi::{
 use tokio::runtime::{Builder, Runtime};
 
 use crate::desktop::{
-	ax::{AxBounds, AxHandle, AxProps, WalkBounds, masks, normalize_role_atspi, text_readback},
+	ax::{
+		AxBounds, AxHandle, AxProps, WalkBounds, bounded_number, masks, normalize_role_atspi,
+		text_readback,
+	},
 	backend::AxBackend,
 	control::cancellable,
 	error::{CoreResult, DesktopError, ErrorCode},
@@ -838,10 +841,24 @@ impl AtSpiAx {
 		};
 		let (value, bounds, actions, child_refs) = futures::join!(
 			async {
-				if has(atspi::Interface::Text) {
+				let text = if has(atspi::Interface::Text) {
 					text_value(bus, object).await
 				} else {
 					None
+				};
+				// A spin button's text is its value as shown; a slider or scroll
+				// bar has only a number. Unlike text, it is asked only of an
+				// element that lists `Value`: an element that cannot list its
+				// interfaces shows no number, as before.
+				match text {
+					None
+						if interfaces
+							.as_ref()
+							.is_ok_and(|interfaces| interfaces.contains(atspi::Interface::Value)) =>
+					{
+						numeric_value(bus, object).await
+					},
+					text => text,
 				}
 			},
 			async {
@@ -899,7 +916,9 @@ impl AtSpiAx {
 			identity: None,
 			partial: false,
 			label_complete: false,
-			selected: false,
+			selected: state
+				.as_ref()
+				.is_some_and(|states| states.contains(State::Selected)),
 			role_name: None,
 			unread_children,
 		};
@@ -1559,6 +1578,28 @@ async fn text_value(
 		.ok()?;
 	let count = text.character_count().await.unwrap_or(0).min(16_384);
 	text.get_text(0, count).await.ok().filter(|s| !s.is_empty())
+}
+
+/// The current value of an element with the `Value` interface (a slider, a
+/// scroll bar, a progress bar), without a property cache for the reason
+/// [`text_value`] gives. A value that is not finite is left out.
+async fn numeric_value(
+	connection: &atspi::zbus::Connection,
+	object: &ObjectRefOwned,
+) -> Option<String> {
+	let value = atspi::proxy::value::ValueProxy::builder(connection)
+		.destination(object.name()?.clone())
+		.ok()?
+		.path(object.path().clone())
+		.ok()?
+		.cache_properties(atspi::zbus::proxy::CacheProperties::No)
+		.build()
+		.await
+		.ok()?
+		.current_value()
+		.await
+		.ok()?;
+	value.is_finite().then(|| bounded_number(value))
 }
 
 fn native_window_for_frame(windows: &[DesktopWindow], pid: u32, title: &str) -> CoreResult<String> {
@@ -5114,13 +5155,14 @@ mod tests {
 		};
 		use futures::StreamExt;
 
-		/// Answers like a Qt app: a Kate text view at `/text`, a button at
-		/// `/button`, and at `/legacy` a text view that cannot list its
-		/// interfaces, with `GetAll` refused as Qt refuses it. Each call must
-		/// belong to the round under way, whose calls are held until all of
-		/// them have come and then answered together; each answered round's
-		/// `path member` list goes to `batches`. A signal means the reader
-		/// is waiting on a reply, so it fails the test if it comes between
+		/// Answers like a Qt app: a Kate text view at `/text` that also has a
+		/// `Value`, a selected button at `/button`, a slider at `/slider`, and
+		/// at `/legacy` and `/bare` text views that cannot list their
+		/// interfaces (`/bare` with no text), with `GetAll` refused as Qt refuses
+		/// it. Each call must belong to the round under way, whose calls are held
+		/// until all of them have come and then answered together; each answered
+		/// round's `path member` list goes to `batches`. A signal means the
+		/// reader is waiting on a reply, so it fails the test if it comes between
 		/// a round's calls.
 		async fn qt(
 			server: atspi::zbus::Connection,
@@ -5162,14 +5204,15 @@ mod tests {
 				for message in batch {
 					let header = message.header();
 					let path = header.path().unwrap().to_string();
-					let text = path != "/button";
+					let text = !matches!(path.as_str(), "/button" | "/slider");
 					match header.member().unwrap().as_str() {
 						"Get" => {
 							let (_, property): (String, String) = message.body().deserialize().unwrap();
 							let value = match property.as_str() {
 								"Name" => Value::from(if text { "notes.txt" } else { "New" }),
 								"Description" => Value::from(""),
-								"CharacterCount" => Value::from(5),
+								"CharacterCount" => Value::from(if path == "/bare" { 0 } else { 5 }),
+								"CurrentValue" => Value::from(37.5_f64),
 								"NActions" => Value::from(1),
 								"ChildCount" => Value::from(1),
 								_ => Value::from(0),
@@ -5182,16 +5225,34 @@ mod tests {
 							.unwrap(),
 						"GetRoleName" => {
 							server
-								.reply(&header, &if text { "text" } else { "push button" })
+								.reply(&header, &match path.as_str() {
+									"/button" => "push button",
+									"/slider" => "slider",
+									_ => "text",
+								})
 								.await
 								.unwrap();
 						},
-						"GetState" => server.reply(&header, &vec![0_u32, 0]).await.unwrap(),
-						"GetInterfaces" if path != "/legacy" => {
-							let interfaces: &[&str] = if text {
-								&["org.a11y.atspi.Accessible", "org.a11y.atspi.Text"]
+						"GetState" => {
+							let state = if path == "/button" {
+								State::Selected as u64
 							} else {
-								&["org.a11y.atspi.Accessible", "org.a11y.atspi.Action"]
+								0
+							};
+							server
+								.reply(&header, &vec![state as u32, (state >> 32) as u32])
+								.await
+								.unwrap();
+						},
+						"GetInterfaces" if path != "/legacy" && path != "/bare" => {
+							let interfaces: &[&str] = match path.as_str() {
+								"/button" => &["org.a11y.atspi.Accessible", "org.a11y.atspi.Action"],
+								"/slider" => &["org.a11y.atspi.Accessible", "org.a11y.atspi.Value"],
+								_ => &[
+									"org.a11y.atspi.Accessible",
+									"org.a11y.atspi.Text",
+									"org.a11y.atspi.Value",
+								],
 							};
 							server.reply(&header, &interfaces).await.unwrap();
 						},
@@ -5253,6 +5314,13 @@ mod tests {
 			first("/button", "Get ChildCount"),
 			round("/button", &["Get NActions"]),
 			round("/button", &["GetName"]),
+			// No text and unknown interfaces: no number is asked for.
+			first("/bare", "Get ChildCount"),
+			round("/bare", &["Get CharacterCount", "Get NActions", "GetExtents"]),
+			round("/bare", &["GetText", "GetName"]),
+			// No text but a `Value`: its number, in one more round.
+			first("/slider", "Get ChildCount"),
+			round("/slider", &["Get CurrentValue"]),
 		];
 		let batches = Mutex::new(Vec::new());
 
@@ -5269,9 +5337,14 @@ mod tests {
 			let reads = async {
 				let mut frames = FrameCache::default();
 				let mut reads = Vec::new();
-				for (path, children) in
-					[("/text", true), ("/button", true), ("/legacy", true), ("/button", false)]
-				{
+				for (path, children) in [
+					("/text", true),
+					("/button", true),
+					("/legacy", true),
+					("/button", false),
+					("/bare", false),
+					("/slider", false),
+				] {
 					let (props, _) = AtSpiAx::read_element(
 						&client,
 						&mut frames,
@@ -5282,7 +5355,7 @@ mod tests {
 					)
 					.await
 					.unwrap();
-					reads.push((props.role, props.title, props.value, props.actions));
+					reads.push((props.role, props.title, props.value, props.actions, props.selected));
 				}
 				reads
 			};
@@ -5315,15 +5388,17 @@ mod tests {
 				() = qt(server, &expected, &batches) => unreachable!("the app stopped answering"),
 			}
 		});
-		let read = |role: &str, title: &str, value: Option<&str>, actions: &[&str]| {
+		let read = |role: &str, title: &str, value: Option<&str>, actions: &[&str], selected| {
 			let actions: Vec<_> = actions.iter().map(|action| (*action).to_owned()).collect();
-			(role.to_owned(), Some(title.to_owned()), value.map(str::to_owned), actions)
+			(role.to_owned(), Some(title.to_owned()), value.map(str::to_owned), actions, selected)
 		};
 		assert_eq!(reads, [
-			read("textfield", "notes.txt", Some("hello"), &[]),
-			read("button", "New", None, &["press"]),
-			read("textfield", "notes.txt", Some("hello"), &["press"]),
-			read("button", "New", None, &["press"]),
+			read("textfield", "notes.txt", Some("hello"), &[], false),
+			read("button", "New", None, &["press"], true),
+			read("textfield", "notes.txt", Some("hello"), &["press"], false),
+			read("button", "New", None, &["press"], true),
+			read("textfield", "notes.txt", None, &["press"], false),
+			read("slider", "New", Some("37.5"), &[], false),
 		]);
 		assert_eq!(batches.into_inner().unwrap(), expected);
 	}

@@ -5,7 +5,7 @@ import { type RpcAgentProcess, RpcClient } from "@oh-my-pi/pi-coding-agent/modes
 describe("RpcClient.start", () => {
 	test("rejects when RPC process exits immediately", async () => {
 		using client = new RpcClient({
-			cliPath: path.join(import.meta.dir, "..", "src", "cli.ts"),
+			command: [process.execPath, path.join(import.meta.dir, "..", "src", "cli.ts")],
 			cwd: path.join(import.meta.dir, ".."),
 			provider: "__missing_provider__",
 			model: "claude-sonnet-4-5",
