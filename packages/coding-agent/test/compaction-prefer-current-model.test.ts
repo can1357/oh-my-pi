@@ -425,7 +425,7 @@ describe("compaction prefers the current session model over modelRoles.default",
 		currentModel: Model,
 		configuredModel: Model,
 		seedNativeBoundary: boolean,
-	): Promise<string[]> {
+	): Promise<{ calls: string[]; endpoints: Array<string | undefined> }> {
 		const sessionManager = SessionManager.inMemory();
 		let lastId = "";
 		for (let i = 0; i < 2; i++) {
@@ -472,8 +472,10 @@ describe("compaction prefers the current session model over modelRoles.default",
 		session.agent.replaceMessages(sessionManager.buildSessionContext().messages);
 
 		const calls: string[] = [];
+		const endpoints: Array<string | undefined> = [];
 		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
 			calls.push(modelKey(model));
+			endpoints.push(preparation.settings.remoteEndpoint);
 			return {
 				summary: "ok",
 				shortSummary: "ok short",
@@ -483,7 +485,7 @@ describe("compaction prefers the current session model over modelRoles.default",
 			};
 		});
 		await session.compact(undefined, { mode: "remote" });
-		return calls;
+		return { calls, endpoints };
 	}
 
 	describe("compaction.model", () => {
@@ -901,14 +903,27 @@ describe("compaction prefers the current session model over modelRoles.default",
 			// Control: without native history, the endpoint lane selects the
 			// configured portable writer.
 			const withoutNative = await compactWithNativeBoundary(currentModel, portableWriter, false);
-			expect(withoutNative[0]).toBe(modelKey(portableWriter));
+			expect(withoutNative.calls[0]).toBe(modelKey(portableWriter));
+			expect(withoutNative.endpoints[0]).toBe("https://compactor.invalid/summarize");
 			await session.dispose();
 			authStorage.close();
 
 			// With a reusable OpenAI native boundary, that writer would summarize
 			// the placeholder instead of the original messages.
 			const withNative = await compactWithNativeBoundary(currentModel, portableWriter, true);
-			expect(withNative[0]).toBe(modelKey(currentModel));
+			expect(withNative.calls[0]).toBe(modelKey(currentModel));
+		});
+
+		it("strips the endpoint from a native writer after an opaque boundary", async () => {
+			const currentModel = getBundledModel("openai", "gpt-5");
+			const configuredWriter = getBundledModel("openai", "gpt-5.3-codex");
+			if (!currentModel || !configuredWriter) throw new Error("Expected bundled test models to exist");
+			const { calls, endpoints } = await compactWithNativeBoundary(currentModel, configuredWriter, true);
+
+			expect(calls[0]).toBe(modelKey(configuredWriter));
+			// A native failure must not fall through to the endpoint with the
+			// boundary placeholder; without the endpoint the engine throws instead.
+			expect(endpoints[0]).toBeUndefined();
 		});
 	});
 });

@@ -222,6 +222,20 @@ function preparationReusesOpaqueHistory(
 }
 
 /**
+ * Hide `compaction.remoteEndpoint` from the engine when preparation reused an
+ * opaque native boundary. The native writer must run, but if its native request
+ * fails the engine must throw instead of summarizing the boundary placeholder
+ * through the endpoint and discarding the original history.
+ */
+function preparationWithoutEndpointFallback(
+	preparation: CompactionPreparation,
+	reusesOpaqueHistory: boolean,
+): CompactionPreparation {
+	if (!reusesOpaqueHistory) return preparation;
+	return { ...preparation, settings: { ...preparation.settings, remoteEndpoint: undefined } };
+}
+
+/**
  * Whether a `remote` candidate can write a boundary the live session can replay.
  * A non-native candidate falls through to `compaction.remoteEndpoint`. A native
  * candidate must be replay-compatible even when an endpoint is configured,
@@ -4159,6 +4173,11 @@ export class SessionMaintenance {
 			this.#model ? resolveCompactionConfiguredTarget(this.#model, availableModels) : undefined,
 			resolveGlobalCompactionTarget(this.#host.settings, availableModels),
 		].filter((model): model is Model => model !== undefined);
+		const reusesOpaqueHistory =
+			method === "remote" &&
+			this.#model !== undefined &&
+			preparationReusesOpaqueHistory(preparation, this.#model, preparation.settings);
+		const writerPreparation = preparationWithoutEndpointFallback(preparation, reusesOpaqueHistory);
 		const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 		let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
 		let notFoundError: unknown;
@@ -4184,7 +4203,7 @@ export class SessionMaintenance {
 
 			try {
 				return await compact(
-					this.#host.obfuscatePreparationForProvider(preparation),
+					this.#host.obfuscatePreparationForProvider(writerPreparation),
 					candidate,
 					this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
 					this.#host.obfuscateTextForProvider(customInstructions),
@@ -6352,6 +6371,7 @@ export class SessionMaintenance {
 								canUseRemoteCompactionCandidate(candidate, liveModel, effectiveSettings, reusesOpaqueHistory)
 						: undefined,
 				);
+				const writerPreparation = preparationWithoutEndpointFallback(preparation, reusesOpaqueHistory);
 				const retrySettings = cfgRetry.get(this.#host.settings);
 				const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 				let compactResult: CompactionResult | undefined;
@@ -6383,7 +6403,7 @@ export class SessionMaintenance {
 					while (true) {
 						try {
 							compactResult = await compact(
-								this.#host.obfuscatePreparationForProvider(preparation),
+								this.#host.obfuscatePreparationForProvider(writerPreparation),
 								candidate,
 								this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
 								undefined,
