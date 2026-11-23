@@ -522,6 +522,7 @@ async function runList(json: boolean, cwd: string): Promise<void> {
 					astCondition: r.astCondition ?? [],
 					question: r.question,
 					gate: r.gate,
+					command: r.command,
 					onJudgeError: r.onJudgeError,
 					scope: r.scope ?? [],
 					globs: r.globs ?? [],
