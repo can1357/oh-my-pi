@@ -173,6 +173,8 @@ import type {
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeResult,
 	SessionStopEventResult,
+	TodoApplyResult,
+	TodoBackendChange,
 	ToolInfo,
 	TreePreparation,
 } from "../extensibility/extensions";
@@ -5252,7 +5254,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					const retry = this.#todoCallArguments(toolCallId);
 					if (retry) this.#dropSupersededTodoReminders(retry, details && stringProperty(details, "op"));
 				}
-				if (toolName === "todo" && isError) {
+				// A refusal is the backend's answer, not a mistake in the payload.
+				if (toolName === "todo" && isError && details?.refused !== true) {
 					const errorText = content.find(part => part.type === "text")?.text;
 					const attemptedArgs = this.#todoCallArguments(toolCallId);
 					// The tool result already contains the full snapshot. Only carry the
@@ -12160,6 +12163,27 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#mirrorTodoPhases(): void {
 		const backend = this.#todoBackend();
 		if (backend !== undefined) this.#extensionRunner?.syncTodoBackend(backend, this.#todo.phases);
+	}
+
+	/**
+	 * Put a `todo` call's change to the selected todo backend before it commits; see
+	 * {@link ExtensionRunner.applyTodoBackend}. `native` when none decides, and nothing is committed then.
+	 */
+	applyTodoChange(
+		change: TodoBackendChange,
+		commit: () => void,
+		signal?: AbortSignal,
+	): TodoApplyResult | Promise<TodoApplyResult> {
+		const backend = this.#todoBackend();
+		if (backend === undefined || !this.#extensionRunner) return { kind: "native" };
+		return this.#extensionRunner.applyTodoBackend({
+			backend,
+			change,
+			current: () => this.#todo.phases,
+			commit,
+			resend: () => this.#mirrorTodoPhases(),
+			signal,
+		});
 	}
 
 	/** Active item labels accepted by this pooled turn's incremental yield tool. */

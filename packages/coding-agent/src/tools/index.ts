@@ -13,10 +13,12 @@ import type { Settings } from "../config/settings";
 import { EditTool } from "../edit";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
+import type { TodoApplyResult } from "../extensibility/extensions/runner";
 import type {
 	BeforeSubagentSpawnEvent,
 	BeforeSubagentSpawnEventResult,
 	PreparedExtension,
+	TodoBackendChange,
 } from "../extensibility/extensions/types";
 import type { Skill, SkillRediscoveryHost } from "../extensibility/skills";
 import type { GoalModeState, GoalRuntime } from "../goals";
@@ -514,6 +516,12 @@ export interface ToolSession {
 	 * use this so branch rehydration agrees with the in-memory list.
 	 */
 	commitTodoPhases?: (phases: TodoPhase[]) => void;
+	/** Put a `todo` call's change to the selected todo backend; `native` when none decides, and the caller commits. */
+	applyTodoChange?: (
+		change: TodoBackendChange,
+		commit: () => void,
+		signal?: AbortSignal,
+	) => TodoApplyResult | Promise<TodoApplyResult>;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
 	/** The `i` intent the model wrote on a tool call of the current turn, by call ID. */

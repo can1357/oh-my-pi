@@ -108,6 +108,7 @@ import type {
 	SessionStopEvent,
 	SessionStopEventResult,
 	ShortcutConflict,
+	TodoBackendChange,
 	TodoBackendDefinition,
 	ToolCallEvent,
 	ToolCallEventResult,
@@ -597,6 +598,32 @@ interface TodoBackendList {
 	phases: TodoPhase[];
 }
 
+/** Longest a backend gets to answer `apply`; the extension handler timeout caps it further. */
+export const TODO_APPLY_TIMEOUT_MS = 10_000;
+
+/** How a `todo` call's change fared with the selected todo backend. */
+export type TodoApplyResult =
+	/** No backend decides: the caller commits. */
+	| { kind: "native" }
+	| { kind: "committed" }
+	/** The backend threw. */
+	| { kind: "refused"; message: string }
+	/** Nothing committed for another reason: timeout, list or session changed, abort, closing. */
+	| { kind: "stale"; message: string };
+
+/** One `todo` call put to its backend; see {@link ExtensionRunner.applyTodoBackend}. */
+export interface TodoApplyRequest {
+	backend: string;
+	change: TodoBackendChange;
+	/** omp's list now. */
+	current(): TodoPhase[];
+	/** Commits `change.next`; runs in the step that checks the answer. */
+	commit(): void;
+	/** Queues the whole current list for whichever backend is selected then. */
+	resend(): void;
+	signal?: AbortSignal;
+}
+
 /** Identity reported by a session that is not a subagent and received no explicit identity. */
 export const TOP_LEVEL_AGENT: ExtensionAgentIdentity = Object.freeze({
 	kind: "main",
@@ -682,6 +709,8 @@ export class ExtensionRunner {
 	 */
 	#todoSent: { list: TodoBackendList; extension: Extension; definition: TodoBackendDefinition } | "none" | undefined =
 		"none";
+	/** The backend may hold a change omp did not commit: the next `replace` goes out even when it equals the last one. */
+	#todoStale = false;
 	/** Set by {@link closeTodoBackend}: the session is going away and takes no more lists to its backend. */
 	#todoClosed = false;
 	/** Aborted when {@link closeTodoBackend} stops waiting: a call still running is given up, and its handler timer with it. */
@@ -1781,6 +1810,111 @@ export class ExtensionRunner {
 		this.#todoGivenUp.abort();
 	}
 
+	/**
+	 * Ask the backend `todo.backend` selects (`request.backend`) to accept a `todo` call's change.
+	 * Returns `native` at once, before any await, when no backend decides: it has no `apply`, is
+	 * not registered, or `session_start` has not gone out. Otherwise `request.commit` runs in the
+	 * same synchronous step that checks the answer, omp's list, the session id and the abort
+	 * signal. `apply` is not queued behind `replace` calls. Any outcome but a commit leaves omp's
+	 * list as it is and queues one full `replace`, behind the apply's own settlement.
+	 */
+	applyTodoBackend(request: TodoApplyRequest): TodoApplyResult | Promise<TodoApplyResult> {
+		const owner =
+			this.#todoClosed || !this.#sessionStartEvent ? undefined : this.getTodoBackends().get(request.backend);
+		if (!owner?.definition.apply) return { kind: "native" };
+		return this.#askTodoBackend(owner.extension, owner.definition, request);
+	}
+
+	async #askTodoBackend(
+		extension: Extension,
+		definition: TodoBackendDefinition,
+		{ backend, change, current, commit, resend, signal }: TodoApplyRequest,
+	): Promise<TodoApplyResult> {
+		const sessionId = this.sessionManager.getSessionId();
+		const timeoutMs = Math.min(TODO_APPLY_TIMEOUT_MS, extensionHandlerTimeoutMs);
+		const answered = Promise.withResolvers<void>();
+		let asked = false;
+		const verdict = await this.#runHandlerWithTimeout<
+			{ type: "todo_backend"; change: TodoBackendChange },
+			{ accepted: true } | { refusal: string } | { failure: string } | { timeout: true }
+		>(
+			async (event, ctx) => {
+				asked = true;
+				try {
+					await definition.apply?.(event.change, ctx);
+					return { accepted: true };
+				} catch (error) {
+					return { refusal: error instanceof Error ? error.message : String(error) };
+				} finally {
+					answered.resolve();
+				}
+			},
+			{ type: "todo_backend", change: structuredClone(change) },
+			this.createContext(),
+			extension,
+			timeoutMs,
+			(kind, failure) => (kind === "timeout" ? { timeout: true } : { failure }),
+			signal ? AbortSignal.any([signal, this.#todoGivenUp.signal]) : this.#todoGivenUp.signal,
+		);
+		if (!asked) answered.resolve();
+		// Everything from here to `commit` is synchronous: nothing lands between the checks and it.
+		const live =
+			!this.#todoClosed &&
+			!signal?.aborted &&
+			this.sessionManager.getSessionId() === sessionId &&
+			Bun.deepEquals(current(), change.previous);
+		if (verdict && "accepted" in verdict && live) {
+			const held = this.#holds(extension, definition, { backend, sessionId, phases: change.previous });
+			commit();
+			// Read back: the session may normalize what it commits.
+			if (held) this.#todoSent = { list: { backend, sessionId, phases: current() }, extension, definition };
+			return { kind: "committed" };
+		}
+		const id = sanitizeDisplayLine(backend);
+		const nothingSaved = "; nothing was saved.";
+		let message: string;
+		if (verdict && "refusal" in verdict) {
+			message = `Todo backend "${id}" did not accept this change: ${sanitizeDisplayLine(verdict.refusal) || "no reason given"}`;
+		} else if (verdict && "timeout" in verdict) {
+			message = `Todo backend "${id}" did not answer within ${timeoutMs} ms${nothingSaved}`;
+		} else if (verdict && "failure" in verdict) {
+			message = `Todo backend "${id}" failed: ${sanitizeDisplayLine(verdict.failure) || "no reason given"}${nothingSaved}`;
+		} else if (!verdict || signal?.aborted || this.#todoClosed) {
+			message = `The call was aborted while todo backend "${id}" decided${nothingSaved}`;
+		} else {
+			message = `The todo list changed while todo backend "${id}" decided${nothingSaved}`;
+		}
+		this.#resendStaleTodoList(answered.promise, resend);
+		return verdict && "refusal" in verdict ? { kind: "refused", message } : { kind: "stale", message };
+	}
+
+	/**
+	 * The backend may now hold a change omp did not commit. Behind the apply's own settlement, so
+	 * a late write lands first, but no longer than the handler timeout counted from now, the
+	 * whole list goes out again. Not once the session is closing.
+	 */
+	#resendStaleTodoList(settled: Promise<void>, resend: () => void): void {
+		if (this.#todoClosed) return;
+		this.#todoStale = true;
+		const deadline = performance.now() + extensionHandlerTimeoutMs;
+		this.#todoCalls = this.#todoCalls
+			.then(async () => {
+				await awaitDeliveryTurn(settled, deadline, this.#todoGivenUp.signal);
+				this.#todoStale = true;
+				resend();
+			})
+			.catch((error: unknown) => logger.warn("Todo backend call failed", { error: String(error) }));
+	}
+
+	/** Whether `extension`'s `definition` is known to hold `list`: it took it last, or both are empty before any call. */
+	#holds(extension: Extension, definition: TodoBackendDefinition, list: TodoBackendList): boolean {
+		if (this.#todoStale) return false;
+		const sent = this.#todoSent;
+		return sent === "none"
+			? list.phases.length === 0
+			: sent?.extension === extension && sent.definition === definition && Bun.deepEquals(sent.list, list);
+	}
+
 	#queueTodoBackendCall(): void {
 		if (this.#todoQueued) return;
 		this.#todoQueued = true;
@@ -1809,13 +1943,8 @@ export class ExtensionRunner {
 		this.#reportedTodoBackend = undefined;
 		const { extension, definition } = owner;
 		this.#reportShadowedTodoBackends(pending.backend, extension);
-		const sent = this.#todoSent;
-		if (
-			sent === "none"
-				? pending.phases.length === 0
-				: sent?.extension === extension && sent.definition === definition && Bun.deepEquals(sent.list, pending)
-		)
-			return;
+		if (this.#holds(extension, definition, pending)) return;
+		this.#todoStale = false;
 		this.#todoSent = undefined;
 		const taken = await this.#runHandlerWithTimeout(
 			async (event, ctx) => {
@@ -2131,7 +2260,9 @@ export class ExtensionRunner {
 							const handlerContext = createHandlerContext(
 								ctx,
 								handlerSignal,
-								event.type === "tool_call" || SESSION_BEFORE_EVENTS[event.type] === true ? budget : undefined,
+								event.type === "tool_call" || "change" in event || SESSION_BEFORE_EVENTS[event.type] === true
+									? budget
+									: undefined,
 							);
 							result = await this.#toolRegistrationScope.run(registrationScope, () =>
 								handler(event, handlerContext),

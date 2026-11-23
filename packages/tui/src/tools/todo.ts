@@ -55,6 +55,8 @@ export interface TodoToolDetails {
 	phases: TodoPhase[];
 	storage: "session" | "memory";
 	completedTasks?: TodoCompletionTransition[];
+	/** The todo backend refused the change: the model's own call was fine, so it gets no retry reminder. */
+	refused?: boolean;
 }
 
 /** Minimum overlap (after normalization) required for a substring match.

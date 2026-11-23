@@ -703,9 +703,9 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 	async execute(
 		_toolCallId: string,
 		params: TodoParams,
-		_signal?: AbortSignal,
+		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<TodoToolDetails>,
-		_context?: AgentToolContext,
+		context?: AgentToolContext,
 	): Promise<AgentToolResult<TodoToolDetails>> {
 		const previousPhases = clonePhases(this.session.getTodoPhases?.() ?? []);
 		const storage = this.session.getSessionFile() ? "session" : "memory";
@@ -724,14 +724,31 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		const { phases: updated, errors } = readOnly
 			? { phases: previousPhases, errors: [] as string[] }
 			: applyParams(clonePhases(previousPhases), entry);
+		let current = previousPhases;
+		let refused = false;
+		if (op !== "view" && errors.length === 0) {
+			const commit = () => this.session.setTodoPhases?.(updated);
+			// The selected todo backend may veto first; the commit then runs in the step that reads its
+			// answer. Without one (or from a program, not the model) it commits before any await.
+			const asked = context?.programmatic
+				? undefined
+				: this.session.applyTodoChange?.({ op, previous: previousPhases, next: updated }, commit, signal);
+			const outcome = asked instanceof Promise ? await asked : asked;
+			if (outcome === undefined || outcome.kind === "native") commit();
+			else if (outcome.kind !== "committed") {
+				errors.push(outcome.message);
+				refused = outcome.kind === "refused";
+				current = clonePhases(this.session.getTodoPhases?.() ?? []);
+			}
+		}
 		// A batch with any error is discarded wholesale: persisting a
 		// half-applied batch makes the natural retry hit "already exists" for
-		// the ops that did land. State and rendered summary stay at previous.
+		// the ops that did land. State and rendered summary stay as they are.
 		const failed = errors.length > 0;
-		const effective = failed ? previousPhases : updated;
+		const effective = failed ? current : updated;
 		const completedTasks = readOnly || failed ? [] : getCompletionTransitions(previousPhases, updated);
-		if (!readOnly && !failed) this.session.setTodoPhases?.(updated);
 		const details: TodoToolDetails = { op, phases: effective, storage };
+		if (refused) details.refused = true;
 		if (completedTasks.length > 0) details.completedTasks = completedTasks;
 
 		return {

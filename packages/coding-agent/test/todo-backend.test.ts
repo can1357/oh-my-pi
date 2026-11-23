@@ -2,6 +2,9 @@
  * An extension's todo backend mirrors the main session's todo list: omp commits a change as it
  * always did, then hands the selected backend the whole list.
  */
+import type { AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -13,17 +16,21 @@ import {
 	testSetExtensionHandlerTimeoutMs,
 	testSetSessionShutdownHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import type { ExtensionFactory, TodoBackendDefinition } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type {
+	ExtensionFactory,
+	TodoBackendChange,
+	TodoBackendDefinition,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { type CreateAgentSessionOptions, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgTodoBackend } from "@oh-my-pi/pi-coding-agent/tools/settings";
-import { USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools/todo";
+import { TodoTool, USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import * as themeModule from "@oh-my-pi/pi-tui/theme";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { TodoPhase, TodoToolDetails } from "@oh-my-pi/pi-tui/tools/todo";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
@@ -36,13 +43,20 @@ interface Tracker {
 	entered(): Promise<void>;
 	/** Thrown by `replace` after `hold`. */
 	error?: Error;
+	/** The changes `apply` was asked about; only a tracker made with `withApply` has one. */
+	asked: TodoBackendChange[];
+	/** Awaited by `apply` once it is recorded. */
+	applyHold?: Promise<void>;
+	/** Thrown by `apply` after `applyHold`. */
+	refusal?: Error;
 	extension: ExtensionFactory;
 }
 
-function tracker(id = "tracker"): Tracker {
+function tracker(id = "tracker", withApply = false): Tracker {
 	const waiting: Array<() => void> = [];
 	const self: Tracker = {
 		calls: [],
+		asked: [],
 		entered() {
 			const { promise, resolve } = Promise.withResolvers<void>();
 			waiting.push(resolve);
@@ -51,6 +65,14 @@ function tracker(id = "tracker"): Tracker {
 		extension: pi => {
 			pi.registerTodoBackend({
 				id,
+				apply: withApply
+					? async change => {
+							self.asked.push(change);
+							for (const resolve of waiting.splice(0)) resolve();
+							await self.applyHold;
+							if (self.refusal) throw self.refusal;
+						}
+					: undefined,
 				async replace(phases, ctx) {
 					self.calls.push({ phases, sessionId: ctx.sessionManager.getSessionId() });
 					for (const resolve of waiting.splice(0)) resolve();
@@ -595,7 +617,7 @@ describe("todo backend", () => {
 		expect(called).toEqual(["first", "second"]);
 	});
 
-	it("native, a malformed id and a missing replace are refused; a second registration replaces the extension's first", async () => {
+	it("native, a malformed id, a missing replace and a non-function apply are refused; a second registration replaces the extension's first", async () => {
 		const refused: string[] = [];
 		const called: string[] = [];
 		const attempt = (name: string, register: () => void) => {
@@ -612,6 +634,8 @@ describe("todo backend", () => {
 					attempt("two words", () => pi.registerTodoBackend({ id: "two words", replace() {} }));
 					// @ts-expect-error a JavaScript extension can pass anything
 					attempt("no replace", () => pi.registerTodoBackend({ id: "no-replace" }));
+					// @ts-expect-error a JavaScript extension can pass anything
+					attempt("apply", () => pi.registerTodoBackend({ id: "bad-apply", replace() {}, apply: "yes" }));
 					pi.registerTodoBackend({ id: "twice", replace: () => void called.push("first") });
 					pi.registerTodoBackend({ id: "twice", replace: () => void called.push("second") });
 				},
@@ -622,7 +646,196 @@ describe("todo backend", () => {
 		session.commitTodoPhases(list("a"));
 		await settled(session);
 
-		expect(refused).toEqual(["native", "two words", "no replace"]);
+		expect(refused).toEqual(["native", "two words", "no replace", "apply"]);
 		expect(called).toEqual(["second"]);
+	});
+
+	describe("apply", () => {
+		const contents = (session: AgentSession): string[] =>
+			session.getTodoPhases().flatMap(phase => phase.tasks.map(task => task.content));
+		const textOf = (result: AgentToolResult<TodoToolDetails>): string =>
+			result.content.flatMap(part => (part.type === "text" ? [part.text] : [])).join("\n");
+		const call = (
+			session: AgentSession,
+			params: { op: string; items: string[] },
+			signal?: AbortSignal,
+			context?: AgentToolContext,
+		): Promise<AgentToolResult<TodoToolDetails>> => {
+			const tool = session.getToolByName("todo");
+			if (!tool) throw new Error("todo tool is not active");
+			return tool.execute("call", params, signal, undefined, context);
+		};
+
+		it("an accepted change commits once and is not sent to the backend again", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+
+			const result = await call(session, { op: "init", items: ["a"] });
+			await settled(session);
+
+			expect(result.isError).not.toBe(true);
+			expect(backend.asked).toEqual([{ op: "init", previous: [], next: session.getTodoPhases() }]);
+			expect(contents(session)).toEqual(["a"]);
+			expect(backend.calls).toEqual([]);
+		});
+
+		it("a refusal fails the call on one clean line, keeps the list, and is no extension error", async () => {
+			const backend = tracker("tracker", true);
+			const { session, errors } = await open([backend.extension], "tracker");
+			await call(session, { op: "init", items: ["a"] });
+			await settled(session);
+
+			backend.refusal = new Error("a needs\nevidence\x1b[2J");
+			const result = await call(session, { op: "init", items: ["b"] });
+			await settled(session);
+
+			expect(result.isError).toBe(true);
+			expect(result.details?.refused).toBe(true);
+			expect(textOf(result)).toContain('Todo backend "tracker" did not accept this change: a needs evidence');
+			expect(textOf(result)).not.toContain("\x1b");
+			expect(contents(session)).toEqual(["a"]);
+			expect(errors).toEqual([]);
+			expect(tasksOf(backend)).toEqual([["a"]]);
+		});
+
+		it.each([
+			"times out",
+			"answers after the timeout",
+			"finds the list changed",
+			"finds the session changed",
+			"is aborted",
+		])("a change whose backend %s fails the call and sends one full replace", async scenario => {
+			const backend = tracker("tracker", true);
+			const { session, errors } = await open([backend.extension], "tracker");
+			const gate = Promise.withResolvers<void>();
+			let sentBeforeAnswer = -1;
+			backend.applyHold = gate.promise.then(() => {
+				sentBeforeAnswer = backend.calls.length;
+			});
+			const abort = new AbortController();
+			const late = scenario === "answers after the timeout";
+			// The handler budget is a real timer inside the runner.
+			testSetExtensionHandlerTimeoutMs(late || scenario === "times out" ? 40 : 5_000);
+
+			const asked = backend.entered();
+			const result = call(session, { op: "init", items: ["a"] }, abort.signal);
+			await asked;
+			if (scenario === "finds the list changed") session.commitTodoPhases(list("x"));
+			if (scenario === "finds the session changed") await session.newSession();
+			if (scenario === "is aborted") abort.abort();
+			await settled(session);
+			const before = backend.calls.length;
+			const answersMeanwhile = !late && scenario !== "times out";
+			if (answersMeanwhile) gate.resolve();
+			const outcome = await result.catch(() => undefined);
+			// A backend that times out never answers; a late one answers after omp gave up.
+			if (late) {
+				// Real time on purpose: the runner's resend wait is a real timer, and the answer must land
+				// inside it, after the queued resend had its chance to run.
+				await Bun.sleep(15);
+				gate.resolve();
+			}
+			await settled(session);
+
+			// The replace lands after the late write, not before it.
+			if (late) expect(sentBeforeAnswer).toBe(before);
+			if (scenario !== "is aborted") expect(outcome?.isError).toBe(true);
+			if (late || scenario === "times out")
+				expect(textOf(outcome!)).toContain("did not answer within 40 ms; nothing was saved.");
+			expect(contents(session)).toEqual(scenario === "finds the list changed" ? ["x"] : []);
+			expect(backend.calls.length - before).toBe(1);
+			expect(backend.calls.at(-1)?.phases).toEqual(session.getTodoPhases());
+			expect(errors.length).toBe(scenario === "times out" || scenario === "answers after the timeout" ? 1 : 0);
+		});
+
+		it("native and a backend without apply commit before the call's first await", async () => {
+			const plain = tracker();
+			// The registered tool sits behind wrappers that defer its first step.
+			const direct = (session: AgentSession) =>
+				new TodoTool({
+					cwd: dir.path(),
+					hasUI: false,
+					getSessionFile: () => null,
+					getSessionSpawns: () => "*",
+					settings: session.settings,
+					getTodoPhases: () => session.getTodoPhases(),
+					setTodoPhases: phases => session.setTodoPhases(phases),
+					applyTodoChange: (change, commit, signal) => session.applyTodoChange(change, commit, signal),
+				});
+			for (const [extensions, backend] of [
+				[[plain.extension], "tracker"],
+				[[], undefined],
+			] as const) {
+				const { session } = await open([...extensions], backend);
+				const result = direct(session).execute("call", { op: "init", items: ["a"] });
+				expect(contents(session)).toEqual(["a"]);
+				await result;
+			}
+		});
+
+		it("a subagent's call and a programmatic call ask no backend", async () => {
+			const backend = tracker("tracker", true);
+			const sub = await open([backend.extension], "tracker", { parentTaskPrefix: "0-Task" });
+			const main = await open([backend.extension], "tracker");
+			const context: AgentToolContext = {
+				sessionManager: main.session.sessionManager,
+				modelRegistry: main.session.modelRegistry,
+				model: undefined,
+				isIdle: () => true,
+				hasQueuedMessages: () => false,
+				abort: () => {},
+				programmatic: true,
+			};
+
+			await call(sub.session, { op: "init", items: ["a"] });
+			await call(main.session, { op: "init", items: ["b"] }, undefined, context);
+
+			expect([contents(sub.session), contents(main.session), backend.asked]).toEqual([["a"], ["b"], []]);
+		});
+
+		it("a refused todo call that follows a bash call in one message runs after bash finished, and leaves no retry reminder", async () => {
+			let bashDone = false;
+			let bashDoneWhenAsked: boolean | undefined;
+			const { session } = await open(
+				[
+					pi =>
+						pi.registerTodoBackend({
+							id: "veto",
+							replace() {},
+							apply() {
+								bashDoneWhenAsked = bashDone;
+								throw new Error("not now");
+							},
+						}),
+				],
+				"veto",
+				{ model: getBundledModel("anthropic", "claude-sonnet-4-5"), toolNames: ["read", "todo", "bash"] },
+			);
+			session.modelRegistry.authStorage.keys.setRuntime("anthropic", "test-key");
+			session.subscribe(event => {
+				if (event.type === "tool_execution_end" && event.toolName === "bash") bashDone = true;
+			});
+			const response: MockResponse = {
+				content: [
+					{ type: "toolCall", id: "b", name: "bash", arguments: { command: "sleep 0.2 && echo done" } },
+					{ type: "toolCall", id: "t", name: "todo", arguments: { op: "init", items: ["a"] } },
+				],
+			};
+			session.agent.streamFn = createMockModel({
+				responses: [response, { content: ["ok"] }, { content: ["ok"] }],
+			}).stream;
+
+			await session.prompt("go");
+			await session.prompt("next");
+
+			const todoResult = session.messages.find(
+				message => message.role === "toolResult" && message.toolName === "todo",
+			);
+			expect(bashDoneWhenAsked).toBe(true);
+			expect(todoResult).toMatchObject({ isError: true, details: { refused: true } });
+			expect(session.messages.filter(m => m.role === "custom" && m.customType === "todo-error-reminder")).toEqual(
+				[],
+			);
+		});
 	});
 });
