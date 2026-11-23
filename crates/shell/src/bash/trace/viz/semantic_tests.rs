@@ -341,6 +341,23 @@ fn embedded_documents_are_physical_rows_and_unwrap_restores_delimiters() {
 }
 
 #[test]
+fn only_multi_line_embedded_programs_move_below_their_command() {
+	let long =
+		r"/^pub struct Session \{/{f=1;next} f&&/^\}/{f=0} f&&/^\s+[a-z_]+:/{n++} END{print n}";
+	let one_line = text(
+		&Fixture::new(&format!("awk '{long}' session.rs"))
+			.present(&[], &Options::default())
+			.rows,
+	);
+	assert_eq!(one_line, format!("awk ‹{long}› session.rs"));
+
+	let p = Fixture::new("awk '\nBEGIN { n = 0 }\n{ n++ }\nEND { print n }' f")
+		.present(&[], &Options::default());
+	let multi = text(&p.rows);
+	assert_eq!(multi, "awk ⟦awk ↓⟧ f\n  BEGIN { n = 0 }\n  { n++ }\n  END { print n }");
+}
+
+#[test]
 fn continuation_rows_do_not_copy_the_command_detail() {
 	let mut script = String::from(": \"\n");
 	for i in 1..=50 {
