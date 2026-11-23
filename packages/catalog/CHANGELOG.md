@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Fixed Bedrock Grok 4.6 and 4.7 requests failing with HTTP 400 on `temperature`, which left session titles untitled ([#13730](https://github.com/can1357/oh-my-pi/issues/13730)) ([#19963](https://github.com/can1357/oh-my-pi/pull/19963) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed requests to Bedrock's Kimi K3.1 Pro Highspeed profiles failing with "The task request was rejected by the target"; requests now ask for 131,072 output tokens instead of the full context window ([#20240](https://github.com/can1357/oh-my-pi/pull/20240) by [@alblez](https://github.com/alblez))
 - Added OpenCode's free `jev-1.13-free` judge to OpenCode Go; the `judge` role now prefers it on OpenCode Go and Zen logins over OpenRouter's paid Jev and chat models, falling back to Zen's `jev-1.14`
 
@@ -65,7 +66,6 @@
 
 ### Fixed
 
-- Fixed Bedrock Grok 4.6 and 4.7 requests failing with HTTP 400 on `temperature`, which left session titles untitled ([#13730](https://github.com/can1357/oh-my-pi/issues/13730)) ([#19963](https://github.com/can1357/oh-my-pi/pull/19963) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed Vercel AI Gateway model refreshes so public models remain discoverable when a stored API key has expired.
 - Fixed OpenRouter models that require reasoning but do not advertise effort levels; requests that disable thinking now use the lowest supported reasoning effort instead of failing.
 - Fixed Gemini 4 models (Argon, Carbon, Hydrogen, and Neon) failing with empty malformed responses when messages arrived immediately after tool results.
