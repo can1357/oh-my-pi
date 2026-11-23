@@ -10,6 +10,7 @@ import * as path from "node:path";
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
+import { parseOtariCredential } from "@oh-my-pi/pi-catalog/wire/otari";
 import {
 	getAgentDbPath,
 	getDbBusyTimeoutMs,
@@ -254,6 +255,11 @@ export function matchesReplacementCredential(
 		if (provider === "alibaba-token-plan") {
 			const existingToken = parseAlibabaTokenPlanCredential(existing.key)?.token;
 			const incomingToken = parseAlibabaTokenPlanCredential(incoming.key)?.token;
+			return existingToken !== undefined && existingToken === incomingToken;
+		}
+		if (provider === "otari") {
+			const existingToken = parseOtariCredential(existing.key)?.token;
+			const incomingToken = parseOtariCredential(incoming.key)?.token;
 			return existingToken !== undefined && existingToken === incomingToken;
 		}
 		if (provider === "cloudflare-ai-gateway" || provider === "cloudflare-workers-ai") {

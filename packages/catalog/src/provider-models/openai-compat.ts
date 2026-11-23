@@ -46,6 +46,7 @@ import {
 } from "../types";
 import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
+import { parseOtariCredential } from "../wire/otari";
 import { normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
 import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../wire/cloudflare-ai-gateway";
@@ -8525,8 +8526,11 @@ export interface OtariModelManagerConfig {
  * models; metadata-less non-chat rows fall to `exclude-models provider="otari"`.
  */
 export function otariModelManagerOptions(config?: OtariModelManagerConfig): ModelManagerOptions<"openai-completions"> {
-	const apiKey = config?.apiKey;
-	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("otari")!;
+	const credential = config?.apiKey ? parseOtariCredential(config.apiKey) : undefined;
+	const apiKey = credential?.token;
+	// A key only authenticates in the region it was issued in, so the endpoint
+	// chosen at login wins over every other source.
+	const baseUrl = credential?.baseUrl ?? config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("otari")!;
 	return {
 		providerId: "otari",
 		cacheProviderId: resolveModelCacheProviderId("otari", { apiKey, baseUrl }),

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/login otari` asks for the region (US, EU, or a custom self-hosted API root) and stores a non-US endpoint with the key, so EU workspaces no longer need `OTARI_BASE_URL` exported for login, discovery, and requests
+
 ### Fixed
 
 - GitHub Copilot Gemini models no longer fail every request with `400 invalid request body` when an MCP tool schema declares a `type` array (e.g. `["string", "null"]`); tool schemas are rewritten into Gemini's schema dialect ([#20198](https://github.com/can1357/oh-my-pi/issues/20198))
