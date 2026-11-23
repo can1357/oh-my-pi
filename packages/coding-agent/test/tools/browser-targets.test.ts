@@ -11,6 +11,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
 import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
 import * as registry from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import { type TabSession } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import * as tabSupervisor from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { isRecord } from "@oh-my-pi/pi-utils";
@@ -405,9 +406,7 @@ describe("browser targets with a relay per Chrome profile", () => {
 			browser: { kind: { kind: "relay" as const, cdpUrl: relays.older } },
 			kindTag: "relay" as const,
 		};
-		const tabs = spyOn(tabSupervisor, "getTab").mockReturnValue(
-			adopted as NonNullable<ReturnType<typeof tabSupervisor.getTab>>,
-		);
+		const tabs = spyOn(tabSupervisor, "getTab").mockReturnValue(adopted as TabSession);
 		const chosen: string[] = [];
 		const acquire = spyOn(registry, "acquireBrowser").mockImplementation(async kind => {
 			chosen.push(kind.kind === "relay" ? kind.cdpUrl : kind.kind);
