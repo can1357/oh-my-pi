@@ -643,7 +643,8 @@ export interface StreamOptions {
 	 * prefix. Providers that keep per-conversation request controls (OpenAI
 	 * `configuration_update` effort baselines) plan the request against a copy
 	 * of that session's controls, never changing the parent's state; the Codex
-	 * backend also routes it with the parent's cache affinity (session headers).
+	 * backend and OpenCode (`x-opencode-session`) also route it with the
+	 * parent's cache affinity (session headers).
 	 */
 	parentSessionId?: string;
 	/**
