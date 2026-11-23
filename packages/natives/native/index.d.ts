@@ -1049,6 +1049,8 @@ export declare class VcsGitRepo {
   stageHunks(selections: Array<VcsHunkSelection>, rawDiff?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
   /** Create commit. */
   commitCreate(message: string, options: VcsCommitOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Publish a private-index commit after preparing the shared index. */
+  commitReconciled(message: string, options: VcsCommitOptions, selection: string, signal?: unknown | undefined | null): Promise<VcsReconciledCommit>
   /**
    * Write a commit object for `tree` on `parents` without moving any ref or
    * touching the index/worktree (`git commit-tree`).
@@ -4894,6 +4896,14 @@ export interface VcsPushOptions {
   remote?: string
   refspec?: string
   forceWithLease?: boolean
+}
+
+/** Published private-index commit and any shared-index entries left staged. */
+export interface VcsReconciledCommit {
+  /** Published commit's object ID. */
+  sha: string
+  /** Staged changes left in the shared index or publication warnings. */
+  indexNotes: Array<string>
 }
 
 /** Restore options. */
