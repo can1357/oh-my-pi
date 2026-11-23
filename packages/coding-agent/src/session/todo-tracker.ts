@@ -1,14 +1,17 @@
 import type { Agent, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Message, Model, TextContent, ToolChoice } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Message, Model, TextContent, ToolChoice, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { isRecord, logger, prompt, stringProperty } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
+import { resolveMCPToolAlias } from "../mcp/tool-bridge";
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
+import { resolveToolTier } from "../tools/approval";
 import { toolWireName } from "../tools/builtin-names";
 import { getLatestTodoPhasesFromEntries, isTodoPhase } from "../tools/todo";
 import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
+import { resolveToolWireName } from "../utils/tool-wire-name";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
 
@@ -37,6 +40,28 @@ const MUTATING_TOOLS: Record<string, true> = {
 	edit: true,
 	write: true,
 	ast_edit: true,
+};
+/**
+ * Always-read-only built-ins whose approval tier can still be `"exec"` for special
+ * paths (e.g. internal URLs/PDFs) or that coordinate without completing work.
+ */
+const READ_ONLY_TOOLS: Record<string, true> = {
+	read: true,
+	grep: true,
+	glob: true,
+	find: true,
+	ast_grep: true,
+	web_search: true,
+	security_scan: true,
+	ask: true,
+	think: true,
+	yield: true,
+	goal: true,
+	recall: true,
+	reflect: true,
+	checkpoint: true,
+	vibe_wait: true,
+	vibe_list: true,
 };
 const MID_RUN_NUDGE_MESSAGE_TYPE = "mid-run-todo-nudge";
 /** Message type of the hidden first-turn reminder {@link TodoTracker.createEagerTodoPrelude} builds. */
@@ -126,9 +151,11 @@ export class TodoTracker {
 	/** Replaces todo phases with a defensive clone. */
 	setPhases(phases: TodoPhase[]): void {
 		this.#phases = this.#clonePhases(phases);
-		// Every state write lands here — the native tool, a Cursor sync, or a
-		// bridged call — so the nudge budget re-arms on the progress it
-		// rations. Views, failed batches, and unchanged reads never arrive.
+		// Every state write lands here — the native tool, `/todo`, RPC `set_todos`,
+		// a Cursor sync, or a bridged call — so both the mutation window and nudge
+		// budget re-arm on the progress they ration. Views, failed batches, and
+		// unchanged reads never arrive.
+		this.#mutationsSinceLastTouch = 0;
 		this.#midRunNudgeCount = 0;
 		this.#host.phasesChanged?.();
 	}
@@ -152,13 +179,36 @@ export class TodoTracker {
 	}
 
 	/** Records a completed tool result before asynchronous event processing begins. */
-	onToolResult(toolName: string, isError: boolean): void {
-		if (toolName === "todo") {
-			this.#mutationsSinceLastTouch = 0;
-		} else if (!isError && MUTATING_TOOLS[toolName]) {
-			this.#mutationsSinceLastTouch++;
+	onToolResult(message: Pick<ToolResultMessage, "toolName" | "toolCallId" | "isError" | "details">): void {
+		const registry = this.#host.toolRegistry();
+		const tool =
+			resolveToolWireName(registry, message.toolName) ??
+			resolveMCPToolAlias(message.toolName, candidate => registry.get(candidate));
+		const canonicalName = tool?.name ?? message.toolName;
+
+		if (canonicalName === "todo") {
+			const op =
+				(isRecord(message.details) ? stringProperty(message.details, "op") : undefined) ??
+				this.#findToolCallOp(message.toolCallId);
+			// Read-only views and errored attempts do not reconcile progress.
+			if (!message.isError && op !== "view") {
+				this.#mutationsSinceLastTouch = 0;
+			}
+		} else if (canonicalName === "task") {
+			this.#mutationsSinceLastTouch += countCompletedTaskResults(message.details, message.isError);
+		} else if (!message.isError) {
+			this.#mutationsSinceLastTouch += this.#progressDeltaForTool(canonicalName, tool, message);
 		}
 		this.#reminderAwaitingProgress = false;
+	}
+
+	/** Records completed background jobs delivered asynchronously without an explicit `wait`. */
+	onAsyncResultMessage(details: unknown): void {
+		const completed = countCompletedJobs(details);
+		if (completed > 0) {
+			this.#mutationsSinceLastTouch += completed;
+			this.#reminderAwaitingProgress = false;
+		}
 	}
 
 	/** Detects whether a successful todo result came from an init operation. */
@@ -167,14 +217,7 @@ export class TodoTracker {
 		if (!Array.isArray(phases) || !phases.every(isTodoPhase)) return false;
 		const detailOp = stringProperty(details, "op");
 		if (detailOp) return detailOp === "init";
-		if (!toolCallId) return false;
-		for (let index = this.#host.agent.state.messages.length - 1; index >= 0; index--) {
-			const message = this.#host.agent.state.messages[index];
-			if (!message) continue;
-			const op = toolCallOpFromMessage(message, toolCallId);
-			if (op) return op === "init";
-		}
-		return false;
+		return this.#findToolCallOp(toolCallId) === "init";
 	}
 
 	/** Builds the first-turn eager todo prelude and optional forced tool choice. */
@@ -392,6 +435,57 @@ export class TodoTracker {
 		};
 	}
 
+	#progressDeltaForTool(
+		canonicalName: string,
+		tool: AgentTool | undefined,
+		message: Pick<ToolResultMessage, "toolCallId" | "details">,
+	): number {
+		if (canonicalName === "wait") {
+			return countCompletedJobs(message.details);
+		}
+		if (MUTATING_TOOLS[canonicalName]) {
+			// Backgrounded `bash`/`eval` jobs are counted once when they settle via `wait` or `async-result`.
+			return isBackgroundStart(message.details) ? 0 : 1;
+		}
+		if (READ_ONLY_TOOLS[canonicalName]) {
+			return 0;
+		}
+		if (!tool) return 0;
+		if ("mcpReadOnlyHint" in tool && (tool as { mcpReadOnlyHint?: unknown }).mcpReadOnlyHint === true) {
+			return 0;
+		}
+		if (typeof tool.approval === "function") {
+			const args = this.#findToolCallArgs(message.toolCallId);
+			if (args === undefined) return 0;
+			try {
+				return resolveToolTier(tool, args) === "read" ? 0 : 1;
+			} catch {
+				return 0;
+			}
+		}
+		try {
+			return resolveToolTier(tool, undefined) === "read" ? 0 : 1;
+		} catch {
+			return 0;
+		}
+	}
+
+	#findToolCallOp(toolCallId: string | undefined): string | undefined {
+		const args = this.#findToolCallArgs(toolCallId);
+		return args ? stringProperty(args, "op") : undefined;
+	}
+
+	#findToolCallArgs(toolCallId: string | undefined): Record<string, unknown> | undefined {
+		if (!toolCallId) return undefined;
+		for (let index = this.#host.agent.state.messages.length - 1; index >= 0; index--) {
+			const message = this.#host.agent.state.messages[index];
+			if (!message) continue;
+			const args = toolCallArgsFromMessage(message, toolCallId);
+			if (args !== undefined) return args;
+		}
+		return undefined;
+	}
+
 	#clonePhases(phases: TodoPhase[]): TodoPhase[] {
 		return phases.map(phase => ({
 			name: phase.name,
@@ -400,13 +494,43 @@ export class TodoTracker {
 	}
 }
 
-function toolCallOpFromMessage(message: AgentMessage, toolCallId: string): string | undefined {
+function toolCallArgsFromMessage(message: AgentMessage, toolCallId: string): Record<string, unknown> | undefined {
 	if (message.role !== "assistant" || !Array.isArray(message.content)) return undefined;
 	for (const block of message.content) {
 		if (!isRecord(block) || block.type !== "toolCall" || block.id !== toolCallId) continue;
-		return isRecord(block.arguments) ? stringProperty(block.arguments, "op") : undefined;
+		return isRecord(block.arguments) ? block.arguments : undefined;
 	}
 	return undefined;
+}
+
+function isBackgroundStart(details: unknown): boolean {
+	if (!isRecord(details) || !isRecord(details.async)) return false;
+	return details.async.state === "running";
+}
+
+function countCompletedJobs(details: unknown): number {
+	if (!isRecord(details) || !Array.isArray(details.jobs)) return 0;
+	let completed = 0;
+	for (const job of details.jobs) {
+		if (isRecord(job) && job.status === "completed") completed++;
+	}
+	return completed;
+}
+
+function countCompletedTaskResults(details: unknown, isError: boolean): number {
+	const background = isBackgroundStart(details);
+	if (isRecord(details) && Array.isArray(details.results)) {
+		let completed = 0;
+		for (const result of details.results) {
+			if (isRecord(result) && result.exitCode === 0 && !result.error && !result.aborted) {
+				completed++;
+			}
+		}
+		return completed;
+	}
+	// Pure background launches settle through `wait` or `async-result`, and errored
+	// details-less calls never count; synchronous completions count as one unit of progress.
+	return background || isError ? 0 : 1;
 }
 
 function assistantText(message: AssistantMessage): string {

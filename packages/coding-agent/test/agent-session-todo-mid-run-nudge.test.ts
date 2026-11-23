@@ -5,7 +5,10 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { createMCPToolName } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
+import { ASYNC_RESULT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { Type } from "@sinclair/typebox";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { cfgTodoMidRunNudges } from "@oh-my-pi/pi-coding-agent/tools/settings";
@@ -18,13 +21,16 @@ import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
  * gentle MODEL-ONLY hint — deliberately separate from the user-visible
  * stop-time reminder ladder. The contract this defends:
  *
- *   1. Only SUCCESSFUL MUTATING tool results (bash/eval/edit/write/ast_edit)
- *      tick the counter. Read-only exploration (grep/read/glob/lsp) and
- *      errored results never do.
+ *   1. Successful mutating built-ins (bash/eval/edit/write/ast_edit, excluding
+ *      background launches), completed delegated work (`task`, `wait`, and
+ *      `async-result` custom messages), and non-read-only extension/MCP tools
+ *      tick the counter. Read-only exploration, read-only extension/MCP tools,
+ *      background launches, and errored results never do.
  *   2. At {@link MID_RUN_TODO_NUDGE_MUTATION_THRESHOLD} mutations without a
  *      `todo` call, the aside provider injects a hidden custom message
  *      (`display: false`) — NO `todo_reminder` event, nothing renders.
- *   3. A `todo` tool result resets the counter.
+ *   3. A state-writing `todo` tool result (or direct `setTodoPhases`) resets
+ *      the counter; read-only `todo` views and errored `todo` calls do not.
  *   4. `todo.midRunNudges` shapes the budget between state-writing `todo`
  *      results (`view` reads and errored attempts do not re-arm it; a new
  *      prompt cycle re-arms it unconditionally):
@@ -60,9 +66,8 @@ describe("AgentSession mid-run todo reconciliation nudge", () => {
 	const BACKOFF_DOUBLINGS = 4; // mirrors MID_RUN_NUDGE_BACKOFF_DOUBLINGS
 	const NUDGE_TYPE = "mid-run-todo-nudge"; // mirrors MID_RUN_TODO_NUDGE_MESSAGE_TYPE
 
-	function toolUseAssistant(toolName: string): AssistantMessage {
-		const id = `call_${toolName}_${Date.now()}_${Math.random()}`;
-		const toolCall: ToolCall = { type: "toolCall", id, name: toolName, arguments: {} };
+	function toolUseAssistant(toolName: string, id: string, args: Record<string, unknown> = {}): AssistantMessage {
+		const toolCall: ToolCall = { type: "toolCall", id, name: toolName, arguments: args };
 		return {
 			role: "assistant",
 			content: [toolCall],
@@ -108,9 +113,16 @@ describe("AgentSession mid-run todo reconciliation nudge", () => {
 	}
 
 	/** Production-shaped tool round trip: assistant toolCall turn + toolResult. */
-	function emitToolResult(toolName: string, opts?: { isError?: boolean; details?: unknown }): void {
+	function emitToolResult(
+		toolName: string,
+		opts?: { isError?: boolean; details?: unknown; args?: Record<string, unknown> },
+	): void {
 		const toolCallId = `call_${toolName}_${Date.now()}_${Math.random()}`;
-		session.agent.emitExternalEvent({ type: "message_end", message: toolUseAssistant(toolName) });
+		const assistantMessage = toolUseAssistant(toolName, toolCallId, opts?.args);
+		if (opts?.args !== undefined) {
+			session.agent.appendMessage(assistantMessage);
+		}
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
 		const content: TextContent[] = [{ type: "text", text: "ok" }];
 		session.agent.emitExternalEvent({
 			type: "message_end",
@@ -126,9 +138,21 @@ describe("AgentSession mid-run todo reconciliation nudge", () => {
 		});
 	}
 
-	async function drainNudges(): Promise<CustomMessage[]> {
+	function emitAsyncResult(jobs: Array<{ jobId: string; status: string }>): void {
+		const message: CustomMessage = {
+			role: "custom",
+			customType: ASYNC_RESULT_MESSAGE_TYPE,
+			content: "Async jobs settled",
+			display: true,
+			details: { jobs },
+			timestamp: Date.now(),
+		};
+		session.agent.emitExternalEvent({ type: "message_end", message });
+	}
+
+	async function drainNudges(boundary: AsideBoundary = "work"): Promise<CustomMessage[]> {
 		if (!asideProvider) throw new Error("aside provider was never captured");
-		const thunks = await asideProvider("work");
+		const thunks = await asideProvider(boundary);
 		const out: CustomMessage[] = [];
 		for (const entry of thunks) {
 			const message = typeof entry === "function" ? entry() : entry;
@@ -442,5 +466,257 @@ describe("AgentSession mid-run todo reconciliation nudge", () => {
 		emitToolResult("edit");
 		expect(await drainNudges()).toEqual([]);
 		expect(reminderEvents.length).toBe(1);
+	});
+
+	describe("delegated jobs, extension/MCP tools, read-only todo views, and boundaries", () => {
+		function makeStubTool(name: string, extra?: Partial<AgentTool> & { mcpReadOnlyHint?: boolean }): AgentTool {
+			return {
+				name,
+				label: name,
+				description: `stub ${name}`,
+				parameters: Type.Object({}),
+				execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+				...extra,
+			} as AgentTool;
+		}
+
+		async function registerTools(tools: AgentTool[]): Promise<void> {
+			const registry = new Map<string, AgentTool>(session.agent.state.tools.map(t => [t.name, t]));
+			await session.dispose();
+			for (const tool of tools) {
+				registry.set(tool.name, tool);
+			}
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected built-in anthropic model to exist");
+			const agent = new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["Test"],
+					tools: [...registry.values()],
+					messages: [],
+				},
+			});
+			asideProvider = undefined;
+			const originalSet = agent.setAsideMessageProvider.bind(agent);
+			agent.setAsideMessageProvider = (fn): void => {
+				if (fn !== undefined && asideProvider === undefined) asideProvider = fn;
+				originalSet(fn);
+			};
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings,
+				modelRegistry: sharedModelRegistry,
+				toolRegistry: registry,
+			});
+			reminderEvents = [];
+			session.subscribe((event: AgentSessionEvent) => {
+				if (event.type === "todo_reminder") reminderEvents.push(event);
+			});
+			session.setTodoPhases([
+				{
+					name: "Refactor pass",
+					tasks: [
+						{ content: "Sweep call sites", status: "in_progress" },
+						{ content: "Update tests", status: "pending" },
+						{ content: "Polish docs", status: "pending" },
+					],
+				},
+			]);
+		}
+
+		it("counts completed jobs delivered via `wait`, ignoring failed/cancelled/running jobs", async () => {
+			// Timeout / empty wait never ticks.
+			for (let i = 0; i < THRESHOLD; i++) {
+				emitToolResult("wait", { details: { op: "wait", jobs: [] } });
+			}
+			expect(await drainNudges()).toEqual([]);
+
+			// Only status === "completed" counts (+1 per batch here).
+			for (let i = 0; i < THRESHOLD - 1; i++) {
+				emitToolResult("wait", {
+					details: {
+						op: "wait",
+						jobs: [
+							{ id: `ok-${i}`, status: "completed" },
+							{ id: `fail-${i}`, status: "failed" },
+							{ id: `cancel-${i}`, status: "cancelled" },
+							{ id: `run-${i}`, status: "running" },
+						],
+					},
+				});
+			}
+			expect(await drainNudges()).toEqual([]);
+
+			emitToolResult("wait", {
+				details: { op: "wait", jobs: [{ id: "final", status: "completed" }] },
+			});
+			expect((await drainNudges()).length).toBe(1);
+		});
+
+		it("does not double-count background `task`, `bash`, or `eval` launches; counts completions on `wait` or `async-result`", async () => {
+			for (let i = 0; i < THRESHOLD; i++) {
+				emitToolResult("task", {
+					details: { results: [], async: { state: "running", jobId: `t-${i}`, type: "task" } },
+				});
+				emitToolResult("bash", {
+					details: { async: { state: "running", jobId: `b-${i}`, type: "bash" } },
+				});
+				emitToolResult("eval", {
+					details: { async: { state: "running", jobId: `e-${i}`, type: "eval" } },
+				});
+			}
+			expect(await drainNudges()).toEqual([]);
+
+			// Failed/cancelled async-result batches never tick.
+			emitAsyncResult([
+				{ jobId: "fail-1", status: "failed" },
+				{ jobId: "cancel-1", status: "cancelled" },
+			]);
+			expect(await drainNudges()).toEqual([]);
+
+			// Completed jobs in async-result tick per completed job.
+			emitAsyncResult(Array.from({ length: THRESHOLD - 1 }, (_, i) => ({ jobId: `j-${i}`, status: "completed" })));
+			expect(await drainNudges()).toEqual([]);
+
+			emitAsyncResult([{ jobId: "j-last", status: "completed" }]);
+			expect((await drainNudges()).length).toBe(1);
+		});
+
+		it("counts completed synchronous `task` results (including partially failed batches and mixed sync+async) and skips failed/aborted ones", async () => {
+			// Details-less errored task never ticks.
+			emitToolResult("task", { isError: true });
+
+			// Partially failed synchronous batch (`isError: true` with 1 succeeded sibling) counts +1.
+			emitToolResult("task", {
+				isError: true,
+				details: {
+					results: [{ exitCode: 0 }, { exitCode: 1, error: "sibling threw" }],
+				},
+			});
+
+			// Mixed sync result alongside a still-running async handle counts the completed sync result (+1).
+			emitToolResult("task", {
+				details: {
+					results: [{ exitCode: 0 }],
+					async: { state: "running", jobId: "bg-1", type: "task" },
+				},
+			});
+
+			for (let i = 0; i < THRESHOLD - 3; i++) {
+				emitToolResult("task", {
+					details: {
+						results: [
+							{ exitCode: 0 },
+							{ exitCode: 1 },
+							{ exitCode: 0, error: "failed" },
+							{ exitCode: 0, aborted: true },
+						],
+					},
+				});
+			}
+			expect(await drainNudges()).toEqual([]);
+
+			// Details-less synchronous task completion counts as +1 and crosses threshold.
+			emitToolResult("task");
+			expect((await drainNudges()).length).toBe(1);
+		});
+
+		it("counts non-read-only extension and MCP tools while skipping read-only extension/MCP and built-in read tools", async () => {
+			await registerTools([
+				makeStubTool("ctx_execute"), // omitted approval defaults to exec tier
+				makeStubTool("ctx_search_ro", { approval: "read" }),
+				makeStubTool("mcp__docs__lookup", { approval: "write", mcpReadOnlyHint: true }),
+				makeStubTool("mcp__db__write_row", { approval: "write", mcpReadOnlyHint: false }),
+				makeStubTool(createMCPToolName("my-db", "write-row"), { approval: "write", mcpReadOnlyHint: false }),
+				makeStubTool(createMCPToolName("my-docs", "search-ref"), { approval: "write", mcpReadOnlyHint: true }),
+				makeStubTool("custom_exec_alias", { customWireName: "aliased_exec_tool" }),
+				makeStubTool("lsp", {
+					approval: (args: unknown) =>
+						typeof args === "object" && args !== null && (args as { action?: string }).action === "rename"
+							? "write"
+							: "read",
+				}),
+				makeStubTool("security_scan", { approval: "exec" }),
+			]);
+
+			// Read-only extension, MCP readOnlyHint, read-mode dynamic tool, and READ_ONLY_TOOLS built-ins never tick.
+			for (let i = 0; i < THRESHOLD; i++) {
+				emitToolResult("ctx_search_ro");
+				emitToolResult("mcp__docs__lookup");
+				emitToolResult("mcp__my-docs__search-ref");
+				emitToolResult("lsp", { args: { action: "hover" } });
+				emitToolResult("security_scan");
+			}
+			expect(await drainNudges()).toEqual([]);
+
+			// Mix of non-read-only extension, aliased wire name, mutating MCP (direct + alias), and write-mode dynamic tool hits threshold.
+			for (let i = 0; i < THRESHOLD - 4; i++) emitToolResult("ctx_execute");
+			emitToolResult("aliased_exec_tool");
+			emitToolResult("mcp__db__write_row");
+			emitToolResult("mcp__my-db__write-row");
+			expect(await drainNudges()).toEqual([]);
+
+			emitToolResult("lsp", { args: { action: "rename" } });
+			expect((await drainNudges()).length).toBe(1);
+		});
+
+		it("keeps read-only `todo` views and errored `todo` calls from wiping the mutation counter", async () => {
+			for (let i = 0; i < THRESHOLD - 1; i++) emitToolResult("edit");
+
+			// View via details.op
+			emitToolResult("todo", { details: { op: "view", phases: [] } });
+			// View via assistant toolCall arguments when a plugin strips details
+			emitToolResult("todo", { args: { op: "view" }, details: {} });
+			// Errored todo write attempt
+			emitToolResult("todo", { isError: true, details: { op: "done" } });
+
+			// One more edit crosses the threshold because none of the above wiped the counter.
+			emitToolResult("edit");
+			expect((await drainNudges()).length).toBe(1);
+		});
+
+		it("recognizes wire-aliased `todo` tools for both read-only views and state writes", async () => {
+			await registerTools([makeStubTool("todo", { customWireName: "todo_write", approval: "read" })]);
+
+			for (let i = 0; i < THRESHOLD - 1; i++) emitToolResult("edit");
+			emitToolResult("todo_write", { args: { op: "view" }, details: {} });
+			emitToolResult("edit");
+			expect((await drainNudges()).length).toBe(1);
+
+			// A state-writing call via the wire alias resets the counter.
+			for (let i = 0; i < THRESHOLD - 1; i++) emitToolResult("edit");
+			emitToolResult("todo_write", { details: { op: "done" } });
+			for (let i = 0; i < THRESHOLD - 1; i++) emitToolResult("edit");
+			expect(await drainNudges()).toEqual([]);
+		});
+
+		it("resets the mutation counter on direct `setTodoPhases` updates", async () => {
+			for (let i = 0; i < THRESHOLD - 1; i++) emitToolResult("edit");
+			session.setTodoPhases([
+				{
+					name: "Refactor pass",
+					tasks: [
+						{ content: "Sweep call sites", status: "completed" },
+						{ content: "Update tests", status: "in_progress" },
+					],
+				},
+			]);
+
+			for (let i = 0; i < THRESHOLD - 1; i++) emitToolResult("edit");
+			expect(await drainNudges()).toEqual([]);
+
+			emitToolResult("edit");
+			expect((await drainNudges()).length).toBe(1);
+		});
+
+		it("gates mid-run nudges to the `work` boundary and never injects on `stop`", async () => {
+			emitAsyncResult(Array.from({ length: THRESHOLD }, (_, i) => ({ jobId: `done-${i}`, status: "completed" })));
+
+			// Stop-time replies (e.g. asking the user a question) must go through checkCompletion(), not mid-run nudge.
+			expect(await drainNudges("stop")).toEqual([]);
+			// The pending nudge still fires on the mid-work boundary.
+			expect((await drainNudges("work")).length).toBe(1);
+		});
 	});
 });
