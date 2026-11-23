@@ -65,7 +65,6 @@ async fn exit_classification_boundary_cleanup_is_not_ordinary_input() {
 	}
 }
 
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn exit_classification_segmented_continuation_uses_function_status() {
 	let _guard = shell_test_lock().lock().await;
@@ -102,6 +101,59 @@ async fn exit_classification_segmented_continuation_uses_function_status() {
 				}
 			}
 		}
+	}
+}
+
+/// The abort-freeze carries the frame's *own* alias table (not the root's)
+/// and its grammar options — both can differ from root state, and the
+/// suppression wrapper submitted for a conditional tail must be parsed as
+/// `{ … } && :` before it can hide the tail.
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_abort_freeze_carries_frame_parse_context() {
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("minimizer directory");
+	for segmented in [false, true] {
+		let shell = Shell::new(segmented.then(|| ShellOptions {
+			minimizer: Some(printf_minimizer(&root.path().join("minimizer.toml"), None)),
+			..Default::default()
+		}));
+		// The frame-local alias `zz='# empty'` hides `zz; printf never` in
+		// both modes. The setup leaves the *root* alias absent: a probe
+		// reading the root table would find the tail owed where the frame's
+		// table hides it.
+		let setup = "shopt -s expand_aliases; f() { alias zz='# empty'; }; f";
+		assert_eq!(run_case(&shell, setup).await.0.exit_code, Some(0), "valid fixture");
+		let result = run_case(&shell, "f; zz; printf never").await.0;
+		assert_eq!(result.exit_code, Some(0), "abort status travels through the frame");
+		assert!(
+			!result.ended_by_exit,
+			"segmented={segmented}: the frame's alias table hides the tail"
+		);
+		// The alias table is shell-global state: an alias installed inside a
+		// function persists after it returns (bash semantics). What must not
+		// happen is the *abort's frozen table* winning over the live one.
+		let alias = run_case(&shell, "shopt -s expand_aliases; zz; printf still-here")
+			.await
+			.0;
+		assert_eq!(alias.exit_code, Some(0), "the live alias table survives the abort");
+		// Features: `set -o posix` inside the frame forbids the `function f
+		// {}` syntax; if the frozen features did not carry that bit, the
+		// same probe would parse the tail differently depending on the mode.
+		let setup = "f() { set -o posix; }; f";
+		assert_eq!(run_case(&shell, setup).await.0.exit_code, Some(0), "valid fixture");
+		let result = run_case(&shell, "f; printf never").await.0;
+		assert_eq!(result.exit_code, Some(0));
+		assert!(!result.ended_by_exit, "frozen features follow the aborted frame");
+		// Suppressed conditional tail: `{ echo never; } && :`. Both paths
+		// judge the submitted bytes and find no command: a raw `echo never`
+		// probe would falsely report cut-short where the submitted wrapper
+		// parses to nothing.
+		let result = run_case(&shell, "exit 1 && printf never").await.0;
+		assert_eq!(result.exit_code, Some(1));
+		assert!(
+			!result.ended_by_exit,
+			"the probe judges the suppressed bytes the run would submit (segmented={segmented})"
+		);
 	}
 }
 
