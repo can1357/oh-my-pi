@@ -149,9 +149,11 @@ pub(crate) fn status_with_fresh_index<'repo>(
 
 /// Open options for repositories the agent operates on.
 ///
-/// - Environment: deny `GIT_*` location/object overrides — operations bind to
-///   the discovered repository, mirroring the env-stripping the subprocess
-///   wrapper performed. Home/XDG stay allowed so user config resolves.
+/// - Environment: `GIT_*` variables are allowed, as `git` allows them. gix reads
+///   `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_NOSYSTEM` under
+///   `git_prefix`; with it denied the commit helper ignored the identity and
+///   hooks that the user's global config names (#19819). Object database
+///   overrides stay denied. Home/XDG stay allowed so user config resolves.
 /// - Config: user/system/git config allowed (identity, diff drivers), without
 ///   ever executing the git binary for its install-prefix config.
 /// - Trust: full. This is a local dev tool operating on the user's own
@@ -166,7 +168,7 @@ fn open_options() -> Options {
 				http_transport:  Permission::Deny,
 				identity:        Permission::Allow,
 				objects:         Permission::Deny,
-				git_prefix:      Permission::Deny,
+				git_prefix:      Permission::Allow,
 				ssh_prefix:      Permission::Deny,
 			},
 			config:     permissions::Config::all(),
