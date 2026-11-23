@@ -11,7 +11,7 @@
 ### Changed
 
 - Empty-stop recovery now logs each scheduled retry with the model, provider and stop metadata, so a model that keeps returning nothing is visible in the session log instead of reading as an unexpected user message ([#20122](https://github.com/can1357/oh-my-pi/pull/20122) by [@FnSGit](https://github.com/FnSGit))
-- The omp daemon no longer loads the model catalog, the AI provider code or most of the TUI; in npm installs it uses about 24 MB less resident memory (about 150 MB less when omp runs from source)
+- The omp daemon no longer loads the model catalog, the AI provider code or most of the TUI; in npm installs it uses about 24 MB less resident memory (about 150 MB less when omp runs from source) ([#20224](https://github.com/can1357/oh-my-pi/pull/20224) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 ### Fixed
 
@@ -75,7 +75,7 @@
 
 ### Removed
 
-- Removed `fileToUri`, `uriToFile` and `EquivalentUriMap` from `@oh-my-pi/pi-coding-agent/lsp/utils`; they are exported from `@oh-my-pi/pi-coding-agent/lsp/uri`
+- Removed `fileToUri`, `uriToFile` and `EquivalentUriMap` from `@oh-my-pi/pi-coding-agent/lsp/utils`; they are exported from `@oh-my-pi/pi-coding-agent/lsp/uri` ([#20224](https://github.com/can1357/oh-my-pi/pull/20224) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 ## [19.1.0] - 2026-11-21
 
