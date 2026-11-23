@@ -947,6 +947,14 @@ export interface CreateAgentSessionOptions {
 	 * and ambient custom tools remain disabled. Default: false.
 	 */
 	allowRestrictedCustomTools?: boolean;
+	/**
+	 * Permit tools registered by caller-prepared extensions
+	 * ({@link preloadedPreparedExtensions}) inside a restricted session instead of
+	 * dropping them. Like {@link allowRestrictedCustomTools}, admission is opt-in
+	 * per session and tools must still be named in {@link toolNames} to become
+	 * active. Default: false.
+	 */
+	allowRestrictedExtensionTools?: boolean;
 
 	/** Output schema for structured completion (subagents). */
 	outputSchema?: unknown;
@@ -4009,7 +4017,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// stay unwrapped. The extension runner exposes it to re-registered tools via createContext.
 		const nativeToolsByName = new Map<string, Tool>(toolSession.toolCommands?.tools ?? undefined);
 
-		const registeredTools = restrictToolNames ? [] : extensionRunner.getAllRegisteredTools();
+		const registeredTools =
+			restrictToolNames && options.allowRestrictedExtensionTools !== true
+				? []
+				: extensionRunner.getAllRegisteredTools();
 		const initialRegisteredTools = new WeakSet(registeredTools);
 		// Manager-owned proxies register like SDK custom tools but are classified
 		// as manager tools via their origins. An explicitly supplied custom tool
@@ -5819,7 +5830,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			scheduledToolRegistrations.set(registered, activation);
 			return activation;
 		};
-		if (!restrictToolNames) {
+		if (!restrictToolNames || options.allowRestrictedExtensionTools === true) {
 			const unsubscribeToolRegistrations = extensionRunner.onToolRegistered(scheduleToolRegistration);
 			disposeCallbacks.add(unsubscribeToolRegistrations);
 

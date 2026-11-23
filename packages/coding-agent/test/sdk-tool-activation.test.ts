@@ -200,6 +200,26 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("permits an unnamed default-active extension tool into the registry but not the active set when the opt-in is set", async () => {
+		const tempDir = makeTempDir();
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["read"],
+			allowRestrictedExtensionTools: true,
+			extensions: [toolActivationExtension],
+		});
+
+		try {
+			// Admitted to the registry, but an unnamed default-active tool is not
+			// granted: only explicitly named tools become active in restricted sessions.
+			expect(session.getAllToolNames()).toContain("default_active_tool");
+			expect(session.getActiveToolNames()).not.toContain("default_active_tool");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("keeps discoverable tools top-level when an explicit tool list omits bash", async () => {
 		const tempDir = makeTempDir();
 
@@ -2180,6 +2200,33 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getActiveToolNames()).toEqual(["read", "sdk_custom_tool"]);
 		} finally {
 			await session.dispose();
+		}
+	});
+
+	it("permits only explicitly named extension tools when a restricted caller opts in", async () => {
+		const parentDir = makeTempDir();
+		const { session: parent } = await createAgentSession({
+			...baseOptions(parentDir),
+			extensions: [toolActivationExtension],
+			toolNames: ["read"],
+		});
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			preloadedPreparedExtensions: parent.preparedExtensions,
+			toolNames: ["read", "default_active_tool"],
+			restrictToolNames: true,
+			allowRestrictedExtensionTools: true,
+		});
+
+		try {
+			// The opted-in extension tool is admitted and active; the defaultInactive
+			// sibling registers but stays inactive.
+			expect(session.getActiveToolNames()).toEqual(["read", "default_active_tool"]);
+			expect(session.getToolByName("default_inactive_tool")).toBeDefined();
+		} finally {
+			await session.dispose();
+			await parent.dispose();
 		}
 	});
 
