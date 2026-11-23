@@ -900,7 +900,9 @@ impl Driver {
 			reset_errexit,
 		} = options;
 		if reset_errexit {
-			self.shell.set_root_option(&mut self.store, OptId::Errexit, false);
+			self
+				.shell
+				.set_root_option(&mut self.store, OptId::Errexit, false);
 		}
 		self.host.set_speech(speech);
 		self.host.set_pipe_tap(pipe_tap);
