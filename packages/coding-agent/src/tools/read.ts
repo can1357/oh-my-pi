@@ -1310,8 +1310,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly loadMode = "essential";
 	/** Rendered per access so the hashline guidance follows a live `edit.mode` change. */
 	get description(): string {
+		const displayMode = resolveFileDisplayMode(this.session);
 		return prompt.render(readDescription, {
-			IS_HL_MODE: resolveFileDisplayMode(this.session).hashLines,
+			IS_HL_MODE: displayMode.hashLines,
+			HAS_LINE_NUMBERS: displayMode.lineNumbers,
 			BINARY_VIEWS: cfgDisasmBackend.get(this.session.settings) !== undefined,
 		});
 	}
