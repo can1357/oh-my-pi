@@ -856,6 +856,23 @@ describe("openai-completions wire-quirk compat detection", () => {
 		);
 	});
 
+	it("splits multi-call assistant turns only for Llama 3 models", () => {
+		// vLLM's Llama 3 chat templates reject an assistant message with several tool
+		// calls; Llama 4's template takes parallel calls.
+		expect(resolveModelPolicy(openrouterSpec({ id: "meta-llama/llama-3.1-8b-instruct" })).compat.splitToolCalls).toBe(
+			true,
+		);
+		expect(
+			resolveModelPolicy(
+				completionsSpec({ provider: "custom", id: "llama3.3:70b", baseUrl: "http://localhost:8000/v1" }),
+			).compat.splitToolCalls,
+		).toBe(true);
+		expect(resolveModelPolicy(openrouterSpec({ id: "meta-llama/llama-4-maverick" })).compat.splitToolCalls).toBe(
+			false,
+		);
+		expect(resolveModelPolicy(openrouterSpec({ id: "google/gemma-3-12b-it" })).compat.splitToolCalls).toBe(false);
+	});
+
 	it("flags cumulative reasoning deltas for MiniMax provider or id", () => {
 		expect(resolveModelPolicy(completionsSpec({ provider: "minimax" })).compat.reasoningDeltasMayBeCumulative).toBe(
 			true,

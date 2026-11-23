@@ -240,6 +240,27 @@ impl OpenFile {
 			Self::Stream(_) => false,
 		}
 	}
+
+	/// The terminal window behind the open file as `(columns, rows)`, when it
+	/// is a terminal that reports one (`TIOCGWINSZ`). Either value may be 0
+	/// when the terminal leaves it unset; `None` off unix.
+	pub fn window_size(&self) -> Option<(u16, u16)> {
+		#[cfg(unix)]
+		{
+			use std::os::fd::AsRawFd as _;
+
+			let fd = self.try_borrow_as_fd().ok()?;
+			let mut size = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+			// SAFETY: `size` is writable for the duration of the ioctl, and `fd`
+			// stays borrowed from `self` until it returns.
+			(unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCGWINSZ, &mut size) } == 0)
+				.then_some((size.ws_col, size.ws_row))
+		}
+		#[cfg(not(unix))]
+		{
+			None
+		}
+	}
 }
 
 impl From<std::fs::File> for OpenFile {
