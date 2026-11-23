@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Zellij's own dark or light report now sets the detected appearance, so a light Zellij theme over a dark host background is no longer detected as dark ([#20132](https://github.com/can1357/oh-my-pi/issues/20132), [#20207](https://github.com/can1357/oh-my-pi/pull/20207) by [@JamieJ5926](https://github.com/JamieJ5926)).
 - `prewalkWouldBeNoop` no longer skips a handoff when only the model's upstream pin changes ([#19664](https://github.com/can1357/oh-my-pi/pull/19664) by [@taibenvenuti](https://github.com/taibenvenuti)).
 - Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
 - Fixed `<svg>` pictures blinking in ask forms whose questions overflow the panel ([#20017](https://github.com/can1357/oh-my-pi/pull/20017) by [@jaredlyon](https://github.com/jaredlyon))
