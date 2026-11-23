@@ -27,7 +27,7 @@ use super::{
 	expand::arith_value,
 	probe::{absolute, dev_fd},
 	proc::{
-		AssignValue, DeferPhase, Deferral, FrameKind, Probe, ProbeResult, Saved, Slot,
+		AssignValue, BangStage, DeferPhase, Deferral, FrameKind, Probe, ProbeResult, Saved, Slot,
 		Stage, Vproc,
 	},
 	state::{self, Level},

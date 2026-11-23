@@ -639,8 +639,7 @@ impl crate::bash::Host for PiHost {
 		if cfg!(windows) && crate::cmd_dialect::shadows_windows_program(name) {
 			return false;
 		}
-		matches!(resolved, Resolved::Native(_) | Resolved::Tool(_))
-			&& PROGRAMS.contains(&name.as_bytes())
+		matches!(resolved, Resolved::Native(_) | Resolved::Tool(_)) && PROGRAMS.contains(&name.as_bytes())
 	}
 
 	/// The run's session commands ([`crate::commands`]) come before shell
