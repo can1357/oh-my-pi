@@ -144,7 +144,7 @@ describe("todo backend", () => {
 		sessions.push(session);
 		const errors: string[] = [];
 		session.extensionRunner?.onError(error => {
-			if (error.event === "todo_backend") errors.push(error.error);
+			if (error.event.startsWith("todo_backend")) errors.push(error.error);
 		});
 		if (start !== false) await session.extensionRunner?.emit({ type: "session_start" });
 		return { session, errors };
@@ -657,7 +657,7 @@ describe("todo backend", () => {
 			result.content.flatMap(part => (part.type === "text" ? [part.text] : [])).join("\n");
 		const call = (
 			session: AgentSession,
-			params: { op: string; items: string[] },
+			params: { op: string; items: string[]; phase?: string },
 			signal?: AbortSignal,
 			context?: AgentToolContext,
 		): Promise<AgentToolResult<TodoToolDetails>> => {
@@ -666,7 +666,7 @@ describe("todo backend", () => {
 			return tool.execute("call", params, signal, undefined, context);
 		};
 
-		it("an accepted change commits once and is not sent to the backend again", async () => {
+		it("an accepted change commits once and is not sent to the backend again, even when the backend holds a list", async () => {
 			const backend = tracker("tracker", true);
 			const { session } = await open([backend.extension], "tracker");
 
@@ -677,6 +677,16 @@ describe("todo backend", () => {
 			expect(backend.asked).toEqual([{ op: "init", previous: [], next: session.getTodoPhases() }]);
 			expect(contents(session)).toEqual(["a"]);
 			expect(backend.calls).toEqual([]);
+
+			// A list the backend took through `replace` is held too: the next accepted change adds no replace.
+			session.commitTodoPhases(list("a"));
+			await settled(session);
+			await call(session, { op: "append", phase: "Work", items: ["b"] });
+			await settled(session);
+
+			expect(contents(session)).toEqual(["a", "b"]);
+			expect(backend.asked).toHaveLength(2);
+			expect(tasksOf(backend)).toEqual([["a"]]);
 		});
 
 		it("a refusal fails the call on one clean line, keeps the list, and is no extension error", async () => {
@@ -688,23 +698,30 @@ describe("todo backend", () => {
 			backend.refusal = new Error("a needs\nevidence\x1b[2J");
 			const result = await call(session, { op: "init", items: ["b"] });
 			await settled(session);
+			backend.refusal = new Error("");
+			const empty = await call(session, { op: "init", items: ["c"] });
+			await settled(session);
 
 			expect(result.isError).toBe(true);
 			expect(result.details?.refused).toBe(true);
 			expect(textOf(result)).toContain('Todo backend "tracker" did not accept this change: a needs evidence');
+			// The current list follows the reason, so the model sees what is still saved.
+			expect(textOf(result).split("a needs evidence")[1]).toContain("a");
 			expect(textOf(result)).not.toContain("\x1b");
+			expect(empty.isError).toBe(true);
+			expect(textOf(empty)).toContain("no reason given");
 			expect(contents(session)).toEqual(["a"]);
 			expect(errors).toEqual([]);
-			expect(tasksOf(backend)).toEqual([["a"]]);
+			expect(tasksOf(backend)).toEqual([["a"], ["a"]]);
 		});
 
 		it.each([
-			"times out",
-			"answers after the timeout",
-			"finds the list changed",
-			"finds the session changed",
-			"is aborted",
-		])("a change whose backend %s fails the call and sends one full replace", async scenario => {
+			["times out", "did not answer"],
+			["answers after the timeout", "did not answer"],
+			["finds the list changed", "list changed"],
+			["finds the session changed", "session changed"],
+			["is aborted", "aborted"],
+		])("a change whose backend %s fails the call and sends one full replace", async (scenario, cause) => {
 			const backend = tracker("tracker", true);
 			const { session, errors } = await open([backend.extension], "tracker");
 			const gate = Promise.withResolvers<void>();
@@ -739,9 +756,10 @@ describe("todo backend", () => {
 
 			// The replace lands after the late write, not before it.
 			if (late) expect(sentBeforeAnswer).toBe(before);
-			if (scenario !== "is aborted") expect(outcome?.isError).toBe(true);
-			if (late || scenario === "times out")
-				expect(textOf(outcome!)).toContain("did not answer within 40 ms; nothing was saved.");
+			if (!outcome) throw new Error("the call threw instead of returning a result");
+			expect(outcome.isError).toBe(true);
+			expect(textOf(outcome)).toContain("nothing was saved");
+			expect(textOf(outcome)).toContain(cause);
 			expect(contents(session)).toEqual(scenario === "finds the list changed" ? ["x"] : []);
 			expect(backend.calls.length - before).toBe(1);
 			expect(backend.calls.at(-1)?.phases).toEqual(session.getTodoPhases());
@@ -750,9 +768,13 @@ describe("todo backend", () => {
 
 		it("native and a backend without apply commit before the call's first await", async () => {
 			const plain = tracker();
-			// The registered tool sits behind wrappers that defer its first step.
-			const direct = (session: AgentSession) =>
-				new TodoTool({
+			for (const [extensions, backend] of [
+				[[plain.extension], "tracker"],
+				[[], undefined],
+			] as const) {
+				const { session } = await open([...extensions], backend);
+				// The registered tool sits behind wrappers that defer its first step.
+				const result = new TodoTool({
 					cwd: dir.path(),
 					hasUI: false,
 					getSessionFile: () => null,
@@ -761,13 +783,7 @@ describe("todo backend", () => {
 					getTodoPhases: () => session.getTodoPhases(),
 					setTodoPhases: phases => session.setTodoPhases(phases),
 					applyTodoChange: (change, commit, signal) => session.applyTodoChange(change, commit, signal),
-				});
-			for (const [extensions, backend] of [
-				[[plain.extension], "tracker"],
-				[[], undefined],
-			] as const) {
-				const { session } = await open([...extensions], backend);
-				const result = direct(session).execute("call", { op: "init", items: ["a"] });
+				}).execute("call", { op: "init", items: ["a"] });
 				expect(contents(session)).toEqual(["a"]);
 				await result;
 			}
@@ -791,6 +807,52 @@ describe("todo backend", () => {
 			await call(main.session, { op: "init", items: ["b"] }, undefined, context);
 
 			expect([contents(sub.session), contents(main.session), backend.asked]).toEqual([["a"], ["b"], []]);
+		});
+
+		it("an accept while a replace of the older list finishes still gets the committed list sent", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+			const replaceGate = Promise.withResolvers<void>();
+			const applyGate = Promise.withResolvers<void>();
+			backend.hold = replaceGate.promise;
+			backend.applyHold = applyGate.promise;
+			const replaceEntered = backend.entered();
+			session.commitTodoPhases(list("a"));
+			await replaceEntered;
+			const applyEntered = backend.entered();
+			const result = call(session, { op: "append", phase: "Work", items: ["b"] });
+			await applyEntered;
+
+			// The older replace lands during the apply, so the backend holds `a`, not the list the accept commits.
+			replaceGate.resolve();
+			await settled(session);
+			applyGate.resolve();
+			await result;
+			await settled(session);
+
+			expect(contents(session)).toEqual(["a", "b"]);
+			expect(tasksOf(backend).at(-1)).toEqual(["a", "b"]);
+		});
+
+		it("a todo call made while the session closes fails unasked and keeps the list", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+			const gate = Promise.withResolvers<void>();
+			backend.hold = gate.promise;
+			const entered = backend.entered();
+			session.commitTodoPhases(list("a"));
+			await entered;
+
+			// The held replace keeps the close waiting; the harness disposes again afterwards, which is a no-op.
+			const disposing = session.dispose();
+			const result = await call(session, { op: "append", phase: "Work", items: ["b"] });
+			gate.resolve();
+			await disposing;
+
+			expect(result.isError).toBe(true);
+			expect(textOf(result)).toContain("nothing was saved");
+			expect(contents(session)).toEqual(["a"]);
+			expect(backend.asked).toEqual([]);
 		});
 
 		it("a refused todo call that follows a bash call in one message runs after bash finished, and leaves no retry reminder", async () => {
@@ -817,6 +879,7 @@ describe("todo backend", () => {
 			});
 			const response: MockResponse = {
 				content: [
+					// Real time: the bash call must still be running when an unscheduled todo call would be asked.
 					{ type: "toolCall", id: "b", name: "bash", arguments: { command: "sleep 0.2 && echo done" } },
 					{ type: "toolCall", id: "t", name: "todo", arguments: { op: "init", items: ["a"] } },
 				],

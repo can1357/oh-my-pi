@@ -611,6 +611,16 @@ export type TodoApplyResult =
 	/** Nothing committed for another reason: timeout, list or session changed, abort, closing. */
 	| { kind: "stale"; message: string };
 
+/** The shape of `ToolSession.applyTodoChange`: see {@link ExtensionRunner.applyTodoBackend}. */
+export type TodoChangeApplier = (
+	change: TodoBackendChange,
+	commit: () => void,
+	signal?: AbortSignal,
+) => TodoApplyResult | Promise<TodoApplyResult>;
+
+const abortedMessage = (backend: string): string =>
+	`The call was aborted while todo backend "${sanitizeDisplayLine(backend)}" decided; nothing was saved.`;
+
 /** One `todo` call put to its backend; see {@link ExtensionRunner.applyTodoBackend}. */
 export interface TodoApplyRequest {
 	backend: string;
@@ -621,6 +631,8 @@ export interface TodoApplyRequest {
 	commit(): void;
 	/** Queues the whole current list for whichever backend is selected then. */
 	resend(): void;
+	/** The session has begun disposing, possibly before {@link ExtensionRunner.closeTodoBackend} ran. */
+	closing?: boolean;
 	signal?: AbortSignal;
 }
 
@@ -1819,9 +1831,10 @@ export class ExtensionRunner {
 	 * list as it is and queues one full `replace`, behind the apply's own settlement.
 	 */
 	applyTodoBackend(request: TodoApplyRequest): TodoApplyResult | Promise<TodoApplyResult> {
-		const owner =
-			this.#todoClosed || !this.#sessionStartEvent ? undefined : this.getTodoBackends().get(request.backend);
+		const owner = this.#sessionStartEvent ? this.getTodoBackends().get(request.backend) : undefined;
 		if (!owner?.definition.apply) return { kind: "native" };
+		// Closing: a backend that decides still decides, so the call fails; the list is not resent.
+		if (this.#todoClosed || request.closing) return { kind: "stale", message: abortedMessage(request.backend) };
 		return this.#askTodoBackend(owner.extension, owner.definition, request);
 	}
 
@@ -1831,40 +1844,44 @@ export class ExtensionRunner {
 		{ backend, change, current, commit, resend, signal }: TodoApplyRequest,
 	): Promise<TodoApplyResult> {
 		const sessionId = this.sessionManager.getSessionId();
+		// A replace still running now may finish during the apply and set this; the backend then holds that list, not ours.
+		const sentBefore = this.#todoSent;
 		const timeoutMs = Math.min(TODO_APPLY_TIMEOUT_MS, extensionHandlerTimeoutMs);
 		const answered = Promise.withResolvers<void>();
 		let asked = false;
 		const verdict = await this.#runHandlerWithTimeout<
-			{ type: "todo_backend"; change: TodoBackendChange },
-			{ accepted: true } | { refusal: string } | { failure: string } | { timeout: true }
+			{ type: "todo_backend_apply"; change: TodoBackendChange },
+			| { kind: "accepted" }
+			| { kind: "refused"; message: string }
+			| { kind: "failed"; message: string }
+			| { kind: "timeout" }
 		>(
 			async (event, ctx) => {
 				asked = true;
 				try {
 					await definition.apply?.(event.change, ctx);
-					return { accepted: true };
+					return { kind: "accepted" };
 				} catch (error) {
-					return { refusal: error instanceof Error ? error.message : String(error) };
+					return { kind: "refused", message: error instanceof Error ? error.message : String(error) };
 				} finally {
 					answered.resolve();
 				}
 			},
-			{ type: "todo_backend", change: structuredClone(change) },
+			{ type: "todo_backend_apply", change: structuredClone(change) },
 			this.createContext(),
 			extension,
 			timeoutMs,
-			(kind, failure) => (kind === "timeout" ? { timeout: true } : { failure }),
+			(kind, failure) => (kind === "timeout" ? { kind: "timeout" } : { kind: "failed", message: failure }),
 			signal ? AbortSignal.any([signal, this.#todoGivenUp.signal]) : this.#todoGivenUp.signal,
 		);
 		if (!asked) answered.resolve();
 		// Everything from here to `commit` is synchronous: nothing lands between the checks and it.
-		const live =
-			!this.#todoClosed &&
-			!signal?.aborted &&
-			this.sessionManager.getSessionId() === sessionId &&
-			Bun.deepEquals(current(), change.previous);
-		if (verdict && "accepted" in verdict && live) {
-			const held = this.#holds(extension, definition, { backend, sessionId, phases: change.previous });
+		const sameSession = this.sessionManager.getSessionId() === sessionId;
+		const live = !this.#todoClosed && !signal?.aborted && sameSession && Bun.deepEquals(current(), change.previous);
+		if (verdict?.kind === "accepted" && live) {
+			const held =
+				this.#todoSent === sentBefore &&
+				this.#holds(extension, definition, { backend, sessionId, phases: change.previous });
 			commit();
 			// Read back: the session may normalize what it commits.
 			if (held) this.#todoSent = { list: { backend, sessionId, phases: current() }, extension, definition };
@@ -1872,20 +1889,26 @@ export class ExtensionRunner {
 		}
 		const id = sanitizeDisplayLine(backend);
 		const nothingSaved = "; nothing was saved.";
+		let refused = false;
 		let message: string;
-		if (verdict && "refusal" in verdict) {
-			message = `Todo backend "${id}" did not accept this change: ${sanitizeDisplayLine(verdict.refusal) || "no reason given"}`;
-		} else if (verdict && "timeout" in verdict) {
-			message = `Todo backend "${id}" did not answer within ${timeoutMs} ms${nothingSaved}`;
-		} else if (verdict && "failure" in verdict) {
-			message = `Todo backend "${id}" failed: ${sanitizeDisplayLine(verdict.failure) || "no reason given"}${nothingSaved}`;
-		} else if (!verdict || signal?.aborted || this.#todoClosed) {
-			message = `The call was aborted while todo backend "${id}" decided${nothingSaved}`;
-		} else {
-			message = `The todo list changed while todo backend "${id}" decided${nothingSaved}`;
+		switch (verdict?.kind) {
+			case "refused":
+				refused = true;
+				message = `Todo backend "${id}" did not accept this change: ${sanitizeDisplayLine(verdict.message) || "no reason given"}`;
+				break;
+			case "timeout":
+				message = `Todo backend "${id}" did not answer within ${timeoutMs} ms${nothingSaved}`;
+				break;
+			case "failed":
+				message = `Todo backend "${id}" failed: ${sanitizeDisplayLine(verdict.message) || "no reason given"}${nothingSaved}`;
+				break;
+			default:
+				if (!verdict || signal?.aborted || this.#todoClosed) message = abortedMessage(backend);
+				else if (!sameSession) message = `The session changed while todo backend "${id}" decided${nothingSaved}`;
+				else message = `The todo list changed while todo backend "${id}" decided${nothingSaved}`;
 		}
 		this.#resendStaleTodoList(answered.promise, resend);
-		return verdict && "refusal" in verdict ? { kind: "refused", message } : { kind: "stale", message };
+		return refused ? { kind: "refused", message } : { kind: "stale", message };
 	}
 
 	/**
@@ -2260,7 +2283,9 @@ export class ExtensionRunner {
 							const handlerContext = createHandlerContext(
 								ctx,
 								handlerSignal,
-								event.type === "tool_call" || "change" in event || SESSION_BEFORE_EVENTS[event.type] === true
+								event.type === "tool_call" ||
+									event.type === "todo_backend_apply" ||
+									SESSION_BEFORE_EVENTS[event.type] === true
 									? budget
 									: undefined,
 							);
