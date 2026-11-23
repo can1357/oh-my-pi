@@ -50,7 +50,7 @@
 ### Fixed
 
 - Selective commits now leave HEAD and staging unchanged if the shared index stays locked. Retry once the lock is released ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
-- `--offline` (`models.offline`) now also keeps image descriptions for text-only models, `read` image questions, skill and MCP routing hints, job widgets and eval `completion()` on the active model's provider; each could pick a model from any provider before.
+- `--offline` (`models.offline`) now also keeps image descriptions for text-only models, `read` image questions, skill and MCP routing hints, job widgets and eval `completion()` on the active model's provider; each could pick a model from any provider before ([#20268](https://github.com/can1357/oh-my-pi/pull/20268) by [@Dangerboi](https://github.com/Dangerboi))
 
 ## [19.1.1] - 2026-11-23
 
