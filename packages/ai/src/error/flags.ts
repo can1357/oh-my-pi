@@ -1,3 +1,4 @@
+import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
 import type { Api, AssistantMessage, Usage } from "../types";
 import { AwsCredentialsError } from "./aws";
@@ -961,7 +962,6 @@ function isAnthropicModelNotFoundError(error: unknown, provider: string, modelId
 }
 
 const AGY_UNKNOWN_MODEL = /^Unknown model ID: (\S+)$/;
-const AGY_EFFORT_SUFFIX = /^-(?:minimal|low|medium|high|xhigh|max)$/;
 
 /**
  * Model id from agy's ACP `session/set_config_option` rejection. agy builds
@@ -988,7 +988,7 @@ function isAntigravityCliUnknownModelError(error: unknown, provider: string, mod
 	const denied = antigravityCliUnknownModelId(error);
 	if (denied === undefined || !denied.startsWith(modelId)) return false;
 	const suffix = denied.slice(modelId.length);
-	return suffix === "" || AGY_EFFORT_SUFFIX.test(suffix);
+	return suffix === "" || THINKING_EFFORTS.some(effort => suffix === `-${effort}`);
 }
 
 /** Whether Cursor returned a non-retryable plan entitlement denial for this account. */
@@ -1010,8 +1010,9 @@ function isCursorPlanAccountPolicyError(error: unknown, provider: string, depth 
 /**
  * Flags for a rejection that denies this credential only the requested model
  * (Codex ChatGPT-account entitlement, Cursor plan, Anthropic model-not-found
- * 404), or 0. A denial that names a model must match `provider` and the
- * requested `modelId`, so provider-controlled text cannot block another model.
+ * 404, agy `Unknown model ID`), or 0. A denial that names a model must match
+ * `provider` and the requested `modelId`, so provider-controlled text cannot
+ * block another model.
  */
 export function modelEntitlementDenialKinds(error: unknown, provider: string, modelId: string | undefined): number {
 	if (isCodexChatGPTAccountPolicyError(error, provider, modelId) || isCursorPlanAccountPolicyError(error, provider)) {
