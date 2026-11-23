@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { SessionNotification } from "@oh-my-pi/pi-utils/acp";
+import * as AIError from "../src/error";
 import { AgyHost } from "../src/providers/antigravity-cli/host";
 import type { AgyConnection, AgyScheduler, AgySpawnedProcess } from "../src/providers/antigravity-cli/process";
 import { SharedAgyPool } from "../src/providers/antigravity-cli/shared-pool";
@@ -97,10 +98,7 @@ async function runStep(
 			writer,
 		);
 	} catch (error) {
-		writer.fail(
-			options.signal?.aborted ? "aborted" : "error",
-			error instanceof Error ? error.message : String(error),
-		);
+		writer.fail(await AIError.finalize(error, { signal: options.signal }));
 	}
 	return writer.output;
 }
@@ -735,11 +733,8 @@ describe.skipIf(process.platform === "win32")("SharedAgyPool + AgyHost subproces
 					{ signal: abortController.signal },
 					cancelledWriter,
 				)
-				.catch(error => {
-					cancelledWriter.fail(
-						abortController.signal.aborted ? "aborted" : "error",
-						error instanceof Error ? error.message : String(error),
-					);
+				.catch(async error => {
+					cancelledWriter.fail(await AIError.finalize(error, { signal: abortController.signal }));
 				})
 				.then(() => cancelledWriter.output),
 			runStep(hostSurvivor, [{ role: "user", content: "wait-sibling-cancel:cancel1:beta", timestamp: 0 }]),
