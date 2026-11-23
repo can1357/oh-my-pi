@@ -1,4 +1,5 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { MCPErrorCode } from "./protocol";
 import type { JsonRpcError } from "./types";
 
 /** MCP transport used by a failed operation. */
@@ -206,13 +207,32 @@ export function createMCPJsonRpcError(
 		transport,
 		stage: "protocol",
 		failure: "json_rpc",
-		message: `MCP error ${error.code}: ${error.message}`,
+		message:
+			error.code === MCPErrorCode.MissingRequiredClientCapability
+				? missingCapabilityMessage(error)
+				: `MCP error ${error.code}: ${error.message}`,
 		retryable: false,
 		code: error.code,
 		data: serializeData(error.data),
 		traceId: safeTraceId(traceId) ?? findTraceId(error.data),
 		rpc: error,
 	});
+}
+
+/**
+ * The message of a `MissingRequiredClientCapabilityError` (-32021), naming
+ * the capabilities in its `data.requiredCapabilities` and, for elicitation,
+ * where omp can declare it: only where it can show the user a form.
+ */
+function missingCapabilityMessage(error: JsonRpcError): string {
+	const required = isRecord(error.data) ? error.data.requiredCapabilities : undefined;
+	const names = isRecord(required) ? Object.keys(required) : [];
+	const listed = names.length > 0 ? names.map(name => `"${name}"`).join(", ") : "it did not name";
+	const needs = `MCP error ${error.code}: the server needs the client capability ${listed}, which this request did not declare`;
+	if (names.includes("elicitation")) {
+		return `${needs}. The server asks you questions, and omp can answer them only where it can show you a form: the TUI, --mode rpc-ui, or an ACP client with forms.`;
+	}
+	return `${needs}; omp does not offer it.`;
 }
 
 /** Classify an arbitrary transport exception while removing runtime-only advice. */
@@ -301,6 +321,9 @@ function nextStep(error: MCPTransportError): string {
 		case "malformed_response":
 			return "Inspect the MCP server logs for an invalid JSON-RPC response.";
 		case "json_rpc":
+			if (error.rpc?.code === MCPErrorCode.MissingRequiredClientCapability) {
+				return "Retrying here fails the same way; run it from a session that offers the capability.";
+			}
 			return "Address the server-reported MCP error before retrying.";
 		case "http_status":
 			return error.retryable

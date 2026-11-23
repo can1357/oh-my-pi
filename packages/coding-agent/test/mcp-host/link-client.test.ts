@@ -303,6 +303,27 @@ describe("modern MCP client operations", () => {
 		}
 	});
 
+	it("names the capability a -32021 refusal requires and where omp can offer it", async () => {
+		const refusal = async (requiredCapabilities: Record<string, unknown>) => {
+			const connection = await connect();
+			const tunnel = host.tunnel;
+			const calling = rejectionOf(callTool(connection, "delete_branch", { name: "old" }));
+			const first = await tunnel.next("tools/call");
+			tunnel.push({
+				id: first.id,
+				error: { code: -32021, message: "Approval required", data: { requiredCapabilities } },
+			});
+			return String(await calling);
+		};
+
+		const elicitation = await refusal({ elicitation: {} });
+		expect(elicitation).toContain('needs the client capability "elicitation"');
+		expect(elicitation).toContain("--mode rpc-ui");
+		expect(await refusal({ sampling: {} })).toContain(
+			'"sampling", which this request did not declare; omp does not offer it',
+		);
+	});
+
 	it("stops a server that never stops asking for input", async () => {
 		const connection = await connect();
 		const tunnel = host.tunnel;
