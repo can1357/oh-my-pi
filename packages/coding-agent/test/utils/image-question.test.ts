@@ -38,6 +38,7 @@ function makeSession(active: Model<Api>, available: Model<Api>[], settings = Set
 		} as unknown as NonNullable<ToolSession["modelRegistry"]>,
 		getModelString: () => `${active.provider}/${active.id}`,
 		getActiveModelString: () => `${active.provider}/${active.id}`,
+		getActiveModel: () => active,
 	} as unknown as ToolSession;
 }
 
@@ -68,13 +69,15 @@ describe("resolveImageQuestionModel offline mode", () => {
 		expect(`${resolved.model.provider}/${resolved.model.id}`).toBe("myproxy/qwen-vl");
 	});
 
-	it("refuses when only another provider can see images, or the active model is unknown", () => {
+	it("refuses when only another provider can see images, even one listing the active model's id", () => {
 		const settings = Settings.isolated({ "models.offline": true });
 		expect(() => resolveImageQuestionModel(makeSession(textOnly, [textOnly, elsewhere], settings))).toThrow(
 			ToolError,
 		);
-		const unknown = { ...makeProxyModel("retired"), provider: "gone" };
-		expect(() => resolveImageQuestionModel(makeSession(unknown, [textOnly, elsewhere], settings))).toThrow(ToolError);
+		// An aggregator lists the active model under its own provider; its name still matches the active model string.
+		const active = { ...makeProxyModel("claude-v"), provider: "anthropic" };
+		const aggregated = { ...makeProxyModel("anthropic/claude-v"), provider: "openrouter" };
+		expect(() => resolveImageQuestionModel(makeSession(active, [aggregated], settings))).toThrow(ToolError);
 	});
 });
 

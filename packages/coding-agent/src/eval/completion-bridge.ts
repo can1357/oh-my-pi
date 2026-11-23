@@ -372,7 +372,11 @@ function resolveTaggedAgentCandidates(agentName: string, session: ToolSession): 
 	const agent = session.getSessionAgents?.().find(candidate => candidate.name === agentName);
 	const selector = agent?.model?.[0];
 	if (!selector) return [];
-	const resolved = resolveModelOverride([selector], lookup, session.settings);
+	// Offline mode matches the pin exactly: a fuzzy match on the active provider's models could
+	// swap in an aggregator's copy of a model the user tagged on another provider.
+	const resolved = resolveModelOverride([selector], lookup, session.settings, {
+		exactOnly: cfgOffline.get(session.settings),
+	});
 	if (!resolved.model) return [];
 	const reasoning = reasoningForCandidate("default", resolved.model, resolved.thinkingLevel ?? agent?.thinkingLevel);
 	return [{ selector, model: resolved.model, ...reasoning }];

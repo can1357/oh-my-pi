@@ -390,6 +390,25 @@ describe("runEvalCompletion", () => {
 			expect(spy).not.toHaveBeenCalled();
 		});
 
+		it("runs a tagged agent only on its exact pin, not an aggregator's copy of it", async () => {
+			const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+			const aggregated = makeModel("openrouter", "anthropic/claude-sonnet-4");
+			const session = offlineSession({
+				available: [aggregated],
+				activeModel: "openrouter/anthropic/claude-sonnet-4",
+			});
+			session.getActiveModel = () => aggregated;
+			session.getSessionAgents = (): readonly AgentDefinition[] => [
+				{ name: "m1", model: ["anthropic/claude-sonnet-4"] } as AgentDefinition,
+				{ name: "m2", model: ["openrouter/anthropic/claude-sonnet-4"] } as AgentDefinition,
+			];
+
+			await expect(runEvalCompletionAndWait({ prompt: "q", model: "m1" }, { session })).rejects.toThrow(ToolError);
+			expect(spy).not.toHaveBeenCalled();
+			await runEvalCompletionAndWait({ prompt: "q", model: "m2" }, { session });
+			expect(spy).toHaveBeenCalledTimes(1);
+		});
+
 		it("skips fallback chain entries on another provider", async () => {
 			const fallback = makeModel("p", "fallback");
 			const session = offlineSession({ available: [SMOL, DEFAULT, elsewhere, fallback] });

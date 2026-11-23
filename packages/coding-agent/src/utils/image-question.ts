@@ -49,19 +49,16 @@ export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQu
 	}
 
 	const matchPreferences = getModelMatchPreferences(session.settings);
-	const activeModelPattern = session.getActiveModelString?.() ?? session.getModelString?.();
-	const activeProvider = activeModelPattern
-		? resolveModelFromString(expandRoleAlias(activeModelPattern, session.settings), allModels, matchPreferences)
-				?.provider
-		: undefined;
 	const offline = cfgOffline.get(session.settings);
-	const availableModels = offline ? allModels.filter(candidate => candidate.provider === activeProvider) : allModels;
+	const offlineProvider = offline ? session.getActiveModel?.()?.provider : undefined;
+	const availableModels = offline ? allModels.filter(candidate => candidate.provider === offlineProvider) : allModels;
 	const resolvePattern = (pattern: string | undefined): Model<Api> | undefined => {
 		if (!pattern) return undefined;
 		const expanded = expandRoleAlias(pattern, session.settings);
 		return resolveModelFromString(expanded, availableModels, matchPreferences);
 	};
 
+	const activeModelPattern = session.getActiveModelString?.() ?? session.getModelString?.();
 	let model: Model<Api> | undefined;
 	let selectedPattern: string | undefined;
 	for (const pattern of ["@vision", "@default", activeModelPattern]) {
@@ -73,15 +70,16 @@ export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQu
 		}
 	}
 
+	const activeProvider = resolvePattern(activeModelPattern)?.provider;
 	model ??= availableModels.find(
 		candidate => candidate.provider === activeProvider && sendsImageInputOnWire(candidate),
 	);
 	model ??= availableModels.find(candidate => sendsImageInputOnWire(candidate));
 	if (!model && offline) {
 		throw new ToolError(
-			activeProvider
-				? `Offline mode (models.offline) keeps image questions on the active model's provider (${activeProvider}), which has no image-capable model.`
-				: "Offline mode (models.offline) keeps image questions on the active model's provider, and no active model is available.",
+			offlineProvider
+				? `Offline mode (models.offline) keeps image questions on the active model's provider (${offlineProvider}), which has no image-capable model.`
+				: "Offline mode (models.offline) keeps image questions on the active model's provider, and there is no active model.",
 		);
 	}
 	if (!model) {
