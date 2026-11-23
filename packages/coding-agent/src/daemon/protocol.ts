@@ -10,6 +10,7 @@
  * Implementations: `server.ts` (daemon), `client.ts` ({@link DaemonClient}).
  */
 import type { DaemonRestartPolicy, ProcSpec, UnitPolicy, UnitScope, UnitSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
+import { splitInlineFlags } from "@oh-my-pi/pi-utils/regex";
 
 export type { DaemonRestartPolicy, ProcSpec, UnitPolicy, UnitScope, UnitSnapshot };
 
@@ -28,6 +29,16 @@ export const DAEMON_PTY_COLUMNS = 120;
 export const DAEMON_PTY_ROWS = 40;
 /** Readiness and wait regexes match line anchors within accumulated output. */
 export const DAEMON_OUTPUT_PATTERN_FLAGS = "mu";
+
+/**
+ * Compiles a readiness or wait regex. A leading PCRE inline flag group such as `(?i)`, which
+ * JavaScript rejects, becomes the RegExp flags it names when JavaScript has them all (`i`, `m`, `s`).
+ */
+export function compileDaemonOutputPattern(pattern: string): RegExp {
+	const { source, flags } = splitInlineFlags(pattern);
+	return new RegExp(source, Array.from(new Set(DAEMON_OUTPUT_PATTERN_FLAGS + flags)).join(""));
+}
+
 /** How long restored units wait for their clients to reconnect before idle timers resume. */
 export const DAEMON_RESUME_LEASE_GRACE_MS = 15_000;
 /** Env var overriding {@link DAEMON_RESUME_LEASE_GRACE_MS} (milliseconds) in the daemon; for tests. */

@@ -82,6 +82,23 @@ describe.skipIf(process.platform === "win32")("daemon proc units", () => {
 	);
 
 	it(
+		"open accepts a readiness pattern led by a PCRE inline flag group such as (?i), applying it as a RegExp flag",
+		async () => {
+			const { conn, root } = await startDaemon();
+			const opened = await conn.openProc(
+				"web",
+				shProc("echo booting; echo Server READY; exec sleep 30", root, {
+					ready: { log: "(?i)^server ready$", timeoutMs: 5_000 },
+				}),
+			);
+
+			expect(opened.unit.state).toBe("ready");
+			expect(opened.unit.readyMatch).toBe("Server READY");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
 		"open returns a still-starting unit naming the unmet readiness condition when the readiness timeout passes, without killing it",
 		async () => {
 			const { conn, root } = await startDaemon();

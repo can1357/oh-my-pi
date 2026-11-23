@@ -9,7 +9,7 @@ import { compileNotifyPattern } from "../async/notify";
 import { canonicalProjectDir, DaemonTimeoutError, daemonClient } from "../daemon/client";
 import { daemonDir, unitLogDir } from "../daemon/paths";
 import {
-	DAEMON_OUTPUT_PATTERN_FLAGS,
+	compileDaemonOutputPattern,
 	type DaemonClient,
 	type DaemonOp,
 	type DaemonResult,
@@ -334,7 +334,7 @@ export async function startService(
 	if (ready && !ready.log && ready.port === undefined) throw new ToolError("ready requires log or port");
 	if (ready?.log) {
 		try {
-			new RegExp(ready.log, DAEMON_OUTPUT_PATTERN_FLAGS);
+			compileDaemonOutputPattern(ready.log);
 		} catch (error) {
 			throw new ToolError(`Invalid readiness regex: ${error instanceof Error ? error.message : String(error)}`);
 		}
