@@ -109,6 +109,12 @@ interface DefinitionBase {
 	 */
 	protocolDefault?: readonly ProtocolHost[];
 	/**
+	 * Reads the effective value from operator layers only (global, `--config`, runtime, env), the
+	 * same view `operatorValue` uses. Project settings still appear in provenance for the UI but do
+	 * not control dispatch; CLI `config get`/`list` report the operator value when this is set.
+	 */
+	operatorScoped?: true;
+	/**
 	 * Rejects a malformed configured value with a descriptive error. Runs on every load/reload and
 	 * before every write, so a typo fails loudly instead of silently reading as the default.
 	 */

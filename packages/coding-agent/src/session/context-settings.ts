@@ -2,7 +2,7 @@ import {
 	type AgentCompactionThresholdOverride,
 	validateModelCompactionThresholds,
 } from "../config/compaction-threshold";
-import { combine, register, type SettingValueOf } from "../config/registry";
+import { combine, operatorValue, register, type SettingValueOf } from "../config/registry";
 import { COMPACTION_METHOD_CHOICES, DEFAULT_COMPACTION_METHOD_ORDER } from "./compaction-methods";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 
@@ -159,13 +159,14 @@ export const cfgCompactionModel = register({
 	id: "compaction.model",
 	type: "string",
 	default: undefined,
-	condition: "compactionModelNotProject",
+	operatorScoped: true,
 	ui: {
 		tab: "context",
 		group: "Compaction",
 		label: "Compaction Model",
 		description:
 			"Operator-scoped model for summary compaction, as provider/model or @role; a model's own compactionModel wins and empty keeps the existing order",
+		condition: "compactionModelNotProject",
 	},
 });
 
@@ -305,7 +306,15 @@ export const cfgCompactionRemoteEndpoint = register({
 	id: "compaction.remoteEndpoint",
 	type: "string",
 	default: undefined,
+	operatorScoped: true,
 });
+
+/**
+ * `compaction.remoteEndpoint` from operator layers only. The endpoint receives
+ * the selected writer's provider credentials and request headers, so a project
+ * file must not be able to redirect them.
+ */
+export const cfgOperatorCompactionRemoteEndpoint = operatorValue(cfgCompactionRemoteEndpoint);
 
 export const cfgCompactionV2RetainedMessageBudget = register({
 	id: "compaction.v2RetainedMessageBudget",
@@ -409,7 +418,7 @@ export const cfgCompaction = combine({
 	asyncEnabled: cfgCompactionAsyncEnabled,
 	handoffSaveToDisk: cfgCompactionHandoffSaveToDisk,
 	autoContinue: cfgCompactionAutoContinue,
-	remoteEndpoint: cfgCompactionRemoteEndpoint,
+	remoteEndpoint: cfgOperatorCompactionRemoteEndpoint,
 	remoteStreamingV2Enabled: cfgCompactionRemoteStreamingV2Enabled,
 	v2RetainedMessageBudget: cfgCompactionV2RetainedMessageBudget,
 	idleEnabled: cfgCompactionIdleEnabled,

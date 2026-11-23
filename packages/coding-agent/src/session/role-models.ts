@@ -5,7 +5,9 @@ import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/ove
 import {
 	extractExplicitThinkingSelector,
 	getModelMatchPreferences,
+	normalizeModelPatternList,
 	type ResolvedModelRoleValue,
+	resolveExactModelIdentity,
 	resolveExplicitModelRole,
 	resolveModelRoleValue,
 } from "../config/model-resolver";
@@ -68,11 +70,19 @@ export function resolveCompactionConfiguredTarget(currentModel: Model, available
 	return resolveConfiguredModelTarget(currentModel.compactionModel, currentModel, availableModels);
 }
 
+/** Whether a configured role value contains an `@alias` that does not resolve. */
+function hasUnresolvedRoleAlias(value: string, authority: Settings): boolean {
+	for (const pattern of normalizeModelPatternList(value)) {
+		if (pattern.startsWith("@") && !resolveExplicitModelRole(pattern, authority)) return true;
+	}
+	return false;
+}
+
 /**
  * Resolves the operator-level `compaction.model` selector against the caller's
  * available models. The value accepts an exact `provider/model` selector (with
- * an optional thinking suffix) or a `@role` alias; unset, whitespace-only, and
- * bare tokens resolve to undefined.
+ * an optional thinking suffix) or a single `@role` alias; lists, unset,
+ * whitespace-only, and bare tokens resolve to undefined.
  *
  * Project settings are deliberately excluded: repository files are writable by
  * the agent, and this key decides which provider receives compaction summaries.
@@ -82,19 +92,35 @@ export function resolveGlobalCompactionTarget(settings: Settings, availableModel
 	const authority = settings.grantAuthority();
 	const configured = cfgCompactionModel.get(authority)?.trim();
 	if (!configured) return undefined;
-	if (configured.startsWith("@")) {
-		if (!resolveExplicitModelRole(configured, authority)) return undefined;
-		const roleValue = configured === "@default" ? authority.getModelRole("default") : configured;
+	const patterns = normalizeModelPatternList(configured);
+	// A comma list is a fallback chain, not one selected compaction model.
+	// Reject it so a later element cannot fuzzy-match an unintended provider.
+	if (patterns.length !== 1) return undefined;
+	const selector = patterns[0]!;
+	if (selector.startsWith("@")) {
+		const role = resolveExplicitModelRole(selector, authority);
+		if (!role) return undefined;
+		const configuredRoleValue = authority.getModelRole(role);
+		if (configuredRoleValue && hasUnresolvedRoleAlias(configuredRoleValue, authority)) return undefined;
+		// Keep an explicit thinking suffix on `@default:high`; only the bare
+		// `@default` form substitutes the configured default value.
+		const roleValue = selector === "@default" ? configuredRoleValue : selector;
 		if (!roleValue) return undefined;
 		return resolveModelRoleValue(roleValue, availableModels, { settings: authority }).model;
 	}
-	const parsed = parseModelString(configured, {
+	if (selector.indexOf("/") <= 0) return undefined;
+	// A literal qualified id may itself end in a thinking-shaped suffix or carry
+	// an `@upstream` pin; prefer the exact identity before parseModelString
+	// strips a suffix.
+	const exact = resolveExactModelIdentity(selector, { getAvailable: () => availableModels });
+	if (exact) return exact;
+	const parsed = parseModelString(selector, {
 		allowMaxSuffix: true,
 		allowAutoAlias: true,
 		isLiteralModelId: (provider, id) =>
 			provider !== undefined && availableModels.some(model => model.provider === provider && model.id === id),
 	});
-	if (!parsed) return undefined;
+	if (!parsed || parsed.provider === undefined) return undefined;
 	return availableModels.find(model => model.provider === parsed.provider && model.id === parsed.id);
 }
 

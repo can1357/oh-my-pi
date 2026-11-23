@@ -32,6 +32,9 @@ import {
 	DEFAULT_SHAKE_CONFIG,
 	type CompactionSettings as EngineCompactionSettings,
 	effectiveReserveTokens,
+	getCompactionV2PreserveData,
+	getPreservedAnthropicCompactionData,
+	getPreservedOpenAiRemoteCompactionData,
 	invalidateMessageCache,
 	isTranscriptUsageAnchor,
 	NativeCompactionError,
@@ -78,6 +81,7 @@ import * as fs from "node:fs/promises";
 import { writeArtifact } from "./artifacts";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
+import { formatModelStringWithRouting } from "../config/model-resolver";
 import { CHAT_MODEL_ROLE_IDS } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "../extensibility/extensions";
@@ -199,19 +203,42 @@ function canUseLiveProviderNativeCompaction(
 }
 
 /**
+ * Whether preparation reused a provider-native boundary that only a native
+ * writer can read. A portable endpoint/local writer would summarize the
+ * placeholder and lose the history behind the opaque payload.
+ */
+function preparationReusesOpaqueHistory(
+	preparation: CompactionPreparation,
+	liveModel: Model,
+	settings: EngineCompactionSettings,
+): boolean {
+	const preserveData = preparation.previousPreserveData;
+	if (!preserveData) return false;
+	const nativeHistory =
+		getCompactionV2PreserveData(preserveData) ??
+		getPreservedOpenAiRemoteCompactionData(preserveData) ??
+		getPreservedAnthropicCompactionData(preserveData);
+	return nativeHistory !== undefined && remotePreserveReusable(preserveData, liveModel, settings);
+}
+
+/**
  * Whether a `remote` candidate can write a boundary the live session can replay.
  * A non-native candidate falls through to `compaction.remoteEndpoint`. A native
  * candidate must be replay-compatible even when an endpoint is configured,
  * because the native lane runs before the endpoint and commits a provider-bound
  * payload; a mismatch would leave the active model unable to read the summary.
+ *
+ * A portable writer is also unavailable when preparation reused an opaque native
+ * boundary: it cannot see the original messages behind the placeholder.
  */
 function canUseRemoteCompactionCandidate(
 	candidate: Model,
 	liveModel: Model,
 	settings: EngineCompactionSettings,
+	reusesOpaqueHistory = false,
 ): boolean {
 	if (!canUseRemoteCompaction(candidate, settings)) return false;
-	if (!shouldUseProviderNativeCompaction(candidate, settings)) return true;
+	if (!shouldUseProviderNativeCompaction(candidate, settings)) return !reusesOpaqueHistory;
 	return (
 		canUseLiveProviderNativeCompaction(candidate, liveModel, settings) &&
 		canReplayRemoteCompactionFrom(candidate, liveModel)
@@ -1502,7 +1529,20 @@ export class SessionMaintenance {
 			};
 
 			const effectiveSettings = resolveMethodSettings(compactionSettings, selectedMethod);
+			const pathEntries = snapshot?.entries ?? manager.getBranch();
+			const preparation = prepareCompaction(pathEntries, effectiveSettings, activeModel, this.#tokenizer);
+			if (!preparation) {
+				// Check why we can't compact
+				const lastEntry = pathEntries[pathEntries.length - 1];
+				if (lastEntry?.type === "compaction") {
+					throw new ManualCompactionNoOpError("Already compacted");
+				}
+				throw new ManualCompactionNoOpError("Nothing to compact (session too small)");
+			}
+
 			const remoteReader = selectedMethod === "remote" ? options?.readerModel : undefined;
+			const reusesOpaqueHistory =
+				selectedMethod === "remote" && preparationReusesOpaqueHistory(preparation, activeModel, effectiveSettings);
 			const compactionCandidates =
 				selectedMethod === "handoff"
 					? []
@@ -1510,7 +1550,12 @@ export class SessionMaintenance {
 							this.#host.modelRegistry.getAvailable(),
 							selectedMethod === "remote"
 								? candidate =>
-										canUseRemoteCompactionCandidate(candidate, activeModel, effectiveSettings) &&
+										canUseRemoteCompactionCandidate(
+											candidate,
+											activeModel,
+											effectiveSettings,
+											reusesOpaqueHistory,
+										) &&
 										(!remoteReader || canReplayRemoteCompactionFrom(candidate, remoteReader))
 								: undefined,
 						);
@@ -1531,16 +1576,6 @@ export class SessionMaintenance {
 						markCommitted,
 					),
 				);
-			}
-			const pathEntries = snapshot?.entries ?? manager.getBranch();
-			const preparation = prepareCompaction(pathEntries, effectiveSettings, activeModel, this.#tokenizer);
-			if (!preparation) {
-				// Check why we can't compact
-				const lastEntry = pathEntries[pathEntries.length - 1];
-				if (lastEntry?.type === "compaction") {
-					throw new ManualCompactionNoOpError("Already compacted");
-				}
-				throw new ManualCompactionNoOpError("Nothing to compact (session too small)");
 			}
 
 			let hookCompaction: CompactionResult | undefined;
@@ -2759,10 +2794,12 @@ export class SessionMaintenance {
 			// No hookCompaction is passed above, so "fromHook" is unreachable;
 			// the guard just narrows the union.
 			if (compactionPrep.kind === "fromHook") return clear();
+			const reusesOpaqueHistory =
+				method === "remote" && preparationReusesOpaqueHistory(preparation, model, effectiveSettings);
 			const candidates = this.#getCompactionModelCandidates(
 				this.#host.modelRegistry.getAvailable(),
 				method === "remote"
-					? candidate => canUseRemoteCompactionCandidate(candidate, model, effectiveSettings)
+					? candidate => canUseRemoteCompactionCandidate(candidate, model, effectiveSettings, reusesOpaqueHistory)
 					: undefined,
 			);
 			if (candidates.length === 0) return clear();
@@ -4035,14 +4072,16 @@ export class SessionMaintenance {
 		const candidates: Model[] = [];
 		const seen = new Set<string>();
 		const activeProvider = this.#model?.provider;
-		const offline = cfgOffline.get(settings);
+		// A project layer may turn offline on, but it must not turn an operator's
+		// offline policy off and route summaries to another provider.
+		const offline = cfgOffline.get(settings.grantAuthority()) || cfgOffline.get(settings);
 		// Offline mode keeps auxiliary requests on the active provider.
 		const offlineBlocked = (model: Model): boolean =>
 			offline && (!activeProvider || model.provider !== activeProvider);
 
 		const addCandidate = (model: Model | undefined): void => {
 			if (!model || offlineBlocked(model)) return;
-			const key = `${model.provider}/${model.id}`;
+			const key = formatModelStringWithRouting(model);
 			if (seen.has(key)) return;
 			seen.add(key);
 			// `seen` still tracks rejected models so the largest-context fallback
@@ -4070,7 +4109,7 @@ export class SessionMaintenance {
 			// Offline skips other providers' models without consuming the single
 			// largest-context slot; a caller-filter rejection still consumes it.
 			if (offlineBlocked(model)) continue;
-			if (!seen.has(`${model.provider}/${model.id}`)) {
+			if (!seen.has(formatModelStringWithRouting(model))) {
 				addCandidate(model);
 				break;
 			}
@@ -4110,8 +4149,16 @@ export class SessionMaintenance {
 		/** Sees every provider attempt's response, billed or failed, beside the spend journal. */
 		onAttempt?: (message: AssistantMessage) => void,
 	): Promise<CompactionResult> {
-		const candidates =
-			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable());
+		const availableModels = this.#host.modelRegistry.getAvailable();
+		const candidates = precomputedCandidates ?? this.#getCompactionModelCandidates(availableModels);
+		// Only an operator-configured compaction target may fall through to the
+		// next candidate on a 404: a model's own `compactionModel` or
+		// `compaction.model`. Without one, a 404 from the active model must
+		// surface instead of silently sending the history to another provider.
+		const configuredCompactionTargets = [
+			this.#model ? resolveCompactionConfiguredTarget(this.#model, availableModels) : undefined,
+			resolveGlobalCompactionTarget(this.#host.settings, availableModels),
+		].filter((model): model is Model => model !== undefined);
 		const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 		let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
 		let notFoundError: unknown;
@@ -4196,9 +4243,15 @@ export class SessionMaintenance {
 					continue;
 				}
 				// A catalogued model can still be absent at the provider (stale custom
-				// model, revoked route). Treat a definitive 404 as candidate
-				// unavailability so the documented active-model fallback runs.
-				if (AIError.status(error) === 404) {
+				// model, revoked route). Treat a definitive 404 from the configured
+				// override as candidate unavailability so the documented active-model
+				// fallback runs; a 404 from an unconfigured candidate must surface.
+				if (
+					AIError.status(error) === 404 &&
+					configuredCompactionTargets.some(
+						target => candidate.provider === target.provider && candidate.id === target.id,
+					)
+				) {
 					notFoundError = error;
 					continue;
 				}
@@ -6288,10 +6341,15 @@ export class SessionMaintenance {
 				preserveData = { ...compactionPrep.preserveData, ...snapcompactResult.preserveData };
 			} else {
 				const liveModel = this.#model;
+				const reusesOpaqueHistory =
+					method === "remote" &&
+					liveModel !== undefined &&
+					preparationReusesOpaqueHistory(preparation, liveModel, effectiveSettings);
 				const candidates = this.#getCompactionModelCandidates(
 					availableModels,
 					method === "remote" && liveModel
-						? candidate => canUseRemoteCompactionCandidate(candidate, liveModel, effectiveSettings)
+						? candidate =>
+								canUseRemoteCompactionCandidate(candidate, liveModel, effectiveSettings, reusesOpaqueHistory)
 						: undefined,
 				);
 				const retrySettings = cfgRetry.get(this.#host.settings);

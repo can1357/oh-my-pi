@@ -6,11 +6,17 @@ import type { CompactionPreparation, CompactionResult } from "@oh-my-pi/pi-agent
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { getBundledModel, getUpstreamPin } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgOffline } from "@oh-my-pi/pi-coding-agent/config/auxiliary-model-policy";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import {
+	cfgCompaction,
+	cfgCompactionModel,
+	cfgCompactionRemoteEndpoint,
+} from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { resolveGlobalCompactionTarget } from "@oh-my-pi/pi-coding-agent/session/role-models";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -415,6 +421,71 @@ describe("compaction prefers the current session model over modelRoles.default",
 		return { calls: compactSpy.mock.calls.map(([, model]) => modelKey(model)), summary: result.summary };
 	}
 
+	async function compactWithNativeBoundary(
+		currentModel: Model,
+		configuredModel: Model,
+		seedNativeBoundary: boolean,
+	): Promise<string[]> {
+		const sessionManager = SessionManager.inMemory();
+		let lastId = "";
+		for (let i = 0; i < 2; i++) {
+			sessionManager.appendMessage(userMsg(`old question ${i}`));
+			lastId = sessionManager.appendMessage(assistantMsg(`old answer ${i}`));
+		}
+		if (seedNativeBoundary) {
+			const compactionItem = { type: "compaction", encrypted_content: "opaque-native-state" };
+			sessionManager.appendCompaction("native placeholder", "Remote compaction", lastId, 1_000, {
+				method: "remote",
+				preserveData: {
+					openaiRemoteCompaction: {
+						provider: currentModel.provider,
+						replacementHistory: [
+							{ type: "message", role: "user", content: [{ type: "input_text", text: "retained request" }] },
+							compactionItem,
+						],
+						compactionItem,
+					},
+				},
+			});
+		}
+		for (let i = 0; i < 3; i++) {
+			sessionManager.appendMessage(userMsg(`post-compaction question ${i}`));
+			sessionManager.appendMessage(assistantMsg(`post-compaction answer ${i}`));
+		}
+
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		authStorage.keys.setRuntime(currentModel.provider, "test-token");
+		authStorage.keys.setRuntime(configuredModel.provider, "test-token");
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model: currentModel, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.keepRecentTokens": 1,
+				"compaction.methodOrder": ["remote"],
+				"compaction.model": modelKey(configuredModel),
+				"compaction.remoteEndpoint": "https://compactor.invalid/summarize",
+			}),
+			modelRegistry,
+		});
+		session.subscribe(() => {});
+		session.agent.replaceMessages(sessionManager.buildSessionContext().messages);
+
+		const calls: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+			calls.push(modelKey(model));
+			return {
+				summary: "ok",
+				shortSummary: "ok short",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: 1,
+				details: { provider: model.provider },
+			};
+		});
+		await session.compact(undefined, { mode: "remote" });
+		return calls;
+	}
+
 	describe("compaction.model", () => {
 		it("uses the configured global model ahead of the active model", async () => {
 			const currentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -484,10 +555,93 @@ describe("compaction prefers the current session model over modelRoles.default",
 			await Bun.write(path.join(agentDir, "config.yml"), `compaction:\n  model: ${modelKey(globalModel)}\n`);
 			await Bun.write(path.join(cwd, ".omp/config.yml"), `compaction:\n  model: ${modelKey(projectModel)}\n`);
 
-			const settings = await Settings.loadIsolated({ cwd, agentDir });
+			const settings = await Settings.loadReadOnly({ cwd, agentDir });
+			// The project value still merges; dispatch must ignore it.
+			expect(cfgCompactionModel.get(settings)).toBe(modelKey(projectModel));
 			const target = resolveGlobalCompactionTarget(settings, [globalModel, projectModel]);
 
 			expect(target && modelKey(target)).toBe(modelKey(globalModel));
+		});
+
+		it("ignores compaction.model from .claude/settings.json", async () => {
+			const globalModel = getBundledModel("openai", "gpt-5");
+			const projectModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!globalModel || !projectModel) throw new Error("Expected bundled test models to exist");
+			const cwd = path.join(tempDir.path(), "project");
+			const agentDir = path.join(tempDir.path(), "agent");
+			await Bun.write(path.join(agentDir, "config.yml"), `compaction:\n  model: ${modelKey(globalModel)}\n`);
+			await Bun.write(
+				path.join(cwd, ".claude/settings.json"),
+				JSON.stringify({ compaction: { model: modelKey(projectModel) } }),
+			);
+
+			const settings = await Settings.loadReadOnly({ cwd, agentDir });
+			expect(cfgCompactionModel.get(settings)).toBe(modelKey(projectModel));
+			const target = resolveGlobalCompactionTarget(settings, [globalModel, projectModel]);
+
+			expect(target && modelKey(target)).toBe(modelKey(globalModel));
+		});
+
+		it("resolves @default from operator roles only", async () => {
+			const globalModel = getBundledModel("openai", "gpt-5");
+			const projectModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!globalModel || !projectModel) throw new Error("Expected bundled test models to exist");
+			const cwd = path.join(tempDir.path(), "project");
+			const agentDir = path.join(tempDir.path(), "agent");
+			await Bun.write(
+				path.join(agentDir, "config.yml"),
+				`compaction:\n  model: "@default"\nmodelRoles:\n  default: ${modelKey(globalModel)}\n`,
+			);
+			await Bun.write(
+				path.join(cwd, ".claude/settings.json"),
+				JSON.stringify({ modelRoles: { default: modelKey(projectModel) } }),
+			);
+
+			const settings = await Settings.loadReadOnly({ cwd, agentDir });
+			const target = resolveGlobalCompactionTarget(settings, [globalModel, projectModel]);
+
+			expect(target && modelKey(target)).toBe(modelKey(globalModel));
+		});
+
+		it("reads compaction.remoteEndpoint from operator layers only", async () => {
+			const cwd = path.join(tempDir.path(), "project");
+			const agentDir = path.join(tempDir.path(), "agent");
+			const operatorEndpoint = "https://operator.example/summarize";
+			const projectEndpoint = "https://project.example/summarize";
+			await Bun.write(path.join(agentDir, "config.yml"), `compaction:\n  remoteEndpoint: ${operatorEndpoint}\n`);
+			await Bun.write(path.join(cwd, ".omp/config.yml"), `compaction:\n  remoteEndpoint: ${projectEndpoint}\n`);
+
+			const settings = await Settings.loadReadOnly({ cwd, agentDir });
+			expect(cfgCompactionRemoteEndpoint.get(settings)).toBe(projectEndpoint);
+			expect(cfgCompaction.get(settings).remoteEndpoint).toBe(operatorEndpoint);
+		});
+
+		it("keeps an operator offline policy when a project disables it", async () => {
+			const currentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const configuredModel = getBundledModel("openai", "gpt-5");
+			if (!currentModel || !configuredModel) throw new Error("Expected bundled test models to exist");
+			const cwd = path.join(tempDir.path(), "project");
+			const agentDir = path.join(tempDir.path(), "agent");
+			await Bun.write(
+				path.join(agentDir, "config.yml"),
+				[
+					"models:",
+					"  offline: true",
+					"compaction:",
+					`  model: ${modelKey(configuredModel)}`,
+					"  keepRecentTokens: 1",
+					"  methodOrder: [soft]",
+					"",
+				].join("\n"),
+			);
+			await Bun.write(path.join(cwd, ".omp/config.yml"), "models:\n  offline: false\n");
+
+			const settings = await Settings.loadReadOnly({ cwd, agentDir });
+			expect(cfgOffline.get(settings)).toBe(false);
+			expect(cfgOffline.get(settings.grantAuthority())).toBe(true);
+
+			const { calls } = await compactModelCalls(currentModel, settings, [currentModel, configuredModel]);
+			expect(calls[0]).toBe(modelKey(currentModel));
 		});
 
 		it("rejects bare and unresolved selectors instead of fuzzy matching", () => {
@@ -518,6 +672,50 @@ describe("compaction prefers the current session model over modelRoles.default",
 			expect(
 				resolveGlobalCompactionTarget(Settings.isolated({ "compaction.model": "@nonexistent" }), [fuzzyRole]),
 			).toBeUndefined();
+
+			const listSettings = Settings.isolated({ "compaction.model": "@nonexistent,@smol" });
+			listSettings.setModelRole("smol", modelKey(base));
+			expect(resolveGlobalCompactionTarget(listSettings, [base, fuzzyRole])).toBeUndefined();
+
+			const nestedAlias = Settings.isolated({ "compaction.model": "@smol" });
+			nestedAlias.setModelRole("smol", "@nonexistent");
+			expect(resolveGlobalCompactionTarget(nestedAlias, [base, fuzzyRole])).toBeUndefined();
+
+			expect(
+				resolveGlobalCompactionTarget(Settings.isolated({ "compaction.model": "@default,openai" }), [base]),
+			).toBeUndefined();
+		});
+
+		it("prefers a literal model id over a thinking-suffix parse", () => {
+			const base = getBundledModel("openai", "gpt-5");
+			if (!base) throw new Error("Expected bundled test models to exist");
+			const literal = buildModel({ ...base, id: "gpt-5:low", compat: base.compatConfig });
+
+			const target = resolveGlobalCompactionTarget(Settings.isolated({ "compaction.model": "openai/gpt-5:low" }), [
+				base,
+				literal,
+			]);
+
+			expect(target?.id).toBe("gpt-5:low");
+		});
+
+		it("resolves a literal upstream route selector", () => {
+			const base = getBundledModel("openrouter", "openai/gpt-5");
+			if (!base) throw new Error("Expected bundled test model to exist");
+
+			const target = resolveGlobalCompactionTarget(
+				Settings.isolated({ "compaction.model": "openrouter/openai/gpt-5@openai" }),
+				[base],
+			);
+
+			expect(target && modelKey(target)).toBe("openrouter/openai/gpt-5");
+			expect(target && getUpstreamPin(target)).toBe("openai");
+		});
+
+		it("declares the operator-only UI and CLI scope on the setting definitions", () => {
+			expect(cfgCompactionModel.ui?.condition).toBe("compactionModelNotProject");
+			expect(cfgCompactionModel.definition.operatorScoped).toBe(true);
+			expect(cfgCompactionRemoteEndpoint.definition.operatorScoped).toBe(true);
 		});
 
 		it("falls back to the active model when the configured model returns 404", async () => {
@@ -536,7 +734,7 @@ describe("compaction prefers the current session model over modelRoles.default",
 				{
 					onModel: (model, preparation) => {
 						if (model.provider === configuredModel.provider) {
-							throw Object.assign(new Error("model_not_found"), { status: 404 });
+							throw new AIError.ProviderHttpError("model_not_found", 404, { code: "model_not_found" });
 						}
 						return {
 							summary: "fallback",
@@ -551,6 +749,64 @@ describe("compaction prefers the current session model over modelRoles.default",
 
 			expect(calls).toEqual([modelKey(configuredModel), modelKey(currentModel)]);
 			expect(summary).toBe("fallback");
+		});
+
+		it("falls back when the per-model compactionModel returns 404", async () => {
+			const active = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const configuredModel = getBundledModel("openai", "gpt-5");
+			if (!active || !configuredModel) throw new Error("Expected bundled test models to exist");
+			const currentModel = { ...active, compactionModel: modelKey(configuredModel) } satisfies Model;
+
+			const { calls, summary } = await compactModelCalls(
+				currentModel,
+				Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.methodOrder": ["soft"] }),
+				[currentModel, configuredModel],
+				{
+					onModel: (model, preparation) => {
+						if (model.provider === configuredModel.provider) {
+							throw new AIError.ProviderHttpError("model_not_found", 404, { code: "model_not_found" });
+						}
+						return {
+							summary: "fallback",
+							shortSummary: "fallback",
+							firstKeptEntryId: preparation.firstKeptEntryId,
+							tokensBefore: 1,
+							details: { provider: model.provider },
+						};
+					},
+				},
+			);
+
+			expect(calls).toEqual([modelKey(configuredModel), modelKey(currentModel)]);
+			expect(summary).toBe("fallback");
+		});
+
+		it("does not route an unconfigured active-model 404 to another provider", async () => {
+			const currentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallbackModel = getBundledModel("openai", "gpt-5");
+			if (!currentModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+
+			const compacting = compactModelCalls(
+				currentModel,
+				Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.methodOrder": ["soft"] }),
+				[currentModel, fallbackModel],
+				{
+					onModel: (model, preparation) => {
+						if (model.provider === currentModel.provider) {
+							throw new AIError.ProviderHttpError("active model missing", 404, { code: "model_not_found" });
+						}
+						return {
+							summary: "unexpected fallback",
+							shortSummary: "unexpected fallback",
+							firstKeptEntryId: preparation.firstKeptEntryId,
+							tokensBefore: 1,
+							details: { provider: model.provider },
+						};
+					},
+				},
+			);
+
+			await expect(compacting).rejects.toThrow("active model missing");
 		});
 
 		it("keeps a cross-provider global target out of offline mode", async () => {
@@ -572,12 +828,21 @@ describe("compaction prefers the current session model over modelRoles.default",
 			expect(calls[0]).toBe(modelKey(currentModel));
 		});
 
-		it("/compact remote skips a native writer the active model cannot replay when an endpoint is configured", async () => {
-			const currentModel = getBundledModel("openai", "gpt-5");
-			const configuredModel = getBundledModel("anthropic", "claude-opus-4-6");
-			if (!currentModel || !configuredModel) throw new Error("Expected bundled test models to exist");
+		it("/compact remote rejects a same-provider native writer the active model cannot replay", async () => {
+			const readerBase = getBundledModel("anthropic", "claude-opus-4-6");
+			const configuredModel = getBundledModel("openai", "gpt-5");
+			if (!readerBase || !configuredModel) throw new Error("Expected bundled test models to exist");
+			// Same provider, different API. The writer is native OpenAI Responses;
+			// the reader is an Anthropic Messages route that cannot replay it. The
+			// endpoint makes the writer portable only if it is not native; keeping
+			// the native lane tests the replay guard rather than provider identity.
+			const currentModel = {
+				...readerBase,
+				provider: configuredModel.provider,
+				remoteCompaction: { enabled: true, api: "anthropic-messages" as const },
+			} satisfies Model;
 
-			const { calls } = await compactModelCalls(
+			const { calls, summary } = await compactModelCalls(
 				currentModel,
 				Settings.isolated({
 					"compaction.keepRecentTokens": 1,
@@ -589,6 +854,61 @@ describe("compaction prefers the current session model over modelRoles.default",
 			);
 
 			expect(calls[0]).toBe(modelKey(currentModel));
+			expect(summary).toBe("ok");
+			// The compacted summary is the context the next request reads.
+			expect(session.agent.state.messages[0]?.role).toBe("compactionSummary");
+		});
+
+		it("keeps a pinned route and the unpinned route as separate fallbacks", async () => {
+			const currentModel = getBundledModel("openrouter", "openai/gpt-5");
+			if (!currentModel) throw new Error("Expected bundled test models to exist");
+			const settings = Settings.isolated({
+				"compaction.keepRecentTokens": 1,
+				"compaction.methodOrder": ["soft"],
+				"compaction.model": "@smol",
+			});
+			settings.setModelRole("smol", "openrouter/openai/gpt-5@openai");
+			const seen: Array<{ key: string; pin: string | undefined }> = [];
+
+			const { calls } = await compactModelCalls(currentModel, settings, [currentModel], {
+				onModel: (model, preparation) => {
+					seen.push({ key: modelKey(model), pin: getUpstreamPin(model) });
+					if (getUpstreamPin(model) === "openai") {
+						throw new AIError.ProviderHttpError("pinned route missing", 404, { code: "model_not_found" });
+					}
+					return {
+						summary: "unpinned fallback",
+						shortSummary: "unpinned fallback",
+						firstKeptEntryId: preparation.firstKeptEntryId,
+						tokensBefore: 1,
+						details: { provider: model.provider },
+					};
+				},
+			});
+
+			expect(seen).toEqual([
+				{ key: modelKey(currentModel), pin: "openai" },
+				{ key: modelKey(currentModel), pin: undefined },
+			]);
+			expect(calls).toHaveLength(2);
+		});
+
+		it("skips a portable endpoint writer when preparation reused an opaque native boundary", async () => {
+			const currentModel = getBundledModel("openai", "gpt-5");
+			const portableWriter = getBundledModel("google", "gemini-2.5-flash");
+			if (!currentModel || !portableWriter) throw new Error("Expected bundled test models to exist");
+
+			// Control: without native history, the endpoint lane selects the
+			// configured portable writer.
+			const withoutNative = await compactWithNativeBoundary(currentModel, portableWriter, false);
+			expect(withoutNative[0]).toBe(modelKey(portableWriter));
+			await session.dispose();
+			authStorage.close();
+
+			// With a reusable OpenAI native boundary, that writer would summarize
+			// the placeholder instead of the original messages.
+			const withNative = await compactWithNativeBoundary(currentModel, portableWriter, true);
+			expect(withNative[0]).toBe(modelKey(currentModel));
 		});
 	});
 });

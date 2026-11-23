@@ -85,6 +85,43 @@ describe("config CLI schema coverage", () => {
 		expect(parsed.value).toEqual({ default: "claude-opus-4-6" });
 	});
 
+	it("reports operator-scoped settings from operator layers", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const projectDir = TempDir.createSync("@omp-config-cli-operator-");
+		const originalProjectDir = getProjectDir();
+		setProjectDir(projectDir.path());
+		try {
+			await Bun.write(
+				path.join(testAgentDir.path(), "config.yml"),
+				["compaction:", "  model: openai/gpt-5", "  remoteEndpoint: https://operator.example/summarize", ""].join(
+					"\n",
+				),
+			);
+			await Bun.write(
+				path.join(projectDir.path(), ".omp/config.yml"),
+				[
+					"compaction:",
+					"  model: anthropic/claude-sonnet-4-5",
+					"  remoteEndpoint: https://project.example/summarize",
+					"",
+				].join("\n"),
+			);
+			resetSettingsForTest();
+			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+			await runConfigCommand({ action: "get", key: "compaction.model", flags: { json: true } });
+			const modelPayload = JSON.parse(String(logSpy.mock.calls.at(-1)?.[0])) as { value: unknown };
+			expect(modelPayload.value).toBe("openai/gpt-5");
+
+			await runConfigCommand({ action: "get", key: "compaction.remoteEndpoint", flags: { json: true } });
+			const endpointPayload = JSON.parse(String(logSpy.mock.calls.at(-1)?.[0])) as { value: unknown };
+			expect(endpointPayload.value).toBe("https://operator.example/summarize");
+		} finally {
+			setProjectDir(originalProjectDir);
+			await projectDir.remove().catch(() => {});
+		}
+	});
+
 	it("normalizes valid provider in-flight request limits from JSON objects", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 

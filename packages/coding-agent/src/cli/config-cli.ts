@@ -64,6 +64,11 @@ function findSettingDef(path: string): CliSettingDef | undefined {
 	return setting ? toSettingDef(setting) : undefined;
 }
 
+/** Value dispatch uses: operator-scoped settings ignore project layers. */
+function effectiveValue(setting: AnySetting): unknown {
+	return setting.get(setting.definition.operatorScoped ? settings.grantAuthority() : settings);
+}
+
 // =============================================================================
 // Argument Parser
 // =============================================================================
@@ -256,7 +261,7 @@ async function handleList(flags: { json?: boolean }): Promise<void> {
 			// single-value request and is left alone. An unset or cleared ("")
 			// credential keeps its ordinary rendering: masking it would imply one
 			// is configured.
-			const value = def.setting.get(settings);
+			const value = effectiveValue(def.setting);
 			const valueStr = def.setting.isCredential && value ? REDACTED : formatValue(value);
 			const typeStr = getTypeDisplay(def);
 			console.log(`  ${chalk.white(def.path)} = ${valueStr} ${chalk.dim(typeStr)}`);
@@ -313,7 +318,7 @@ function handleGet(key: string | undefined, flags: { json?: boolean }): void {
 		process.exit(1);
 	}
 
-	const value = def.setting.get(settings);
+	const value = effectiveValue(def.setting);
 
 	if (flags.json) {
 		console.log(JSON.stringify({ key: def.path, value, type: def.type, description: def.description }, null, 2));
@@ -349,13 +354,17 @@ async function handleSet(key: string | undefined, value: string | undefined, fla
 	// supplies the effective value, say which instead of echoing its value as if it had been set.
 	const saved = globalValue(def.setting);
 	const shadow = shadowingSource(def.setting);
+	// A project value never controls an operator-scoped setting, so it is not
+	// shadowing the saved global value; env/overlay/runtime still can.
+	const effectiveShadow =
+		def.setting.definition.operatorScoped && shadow?.json.overriddenBy === "project" ? undefined : shadow;
 
 	if (flags.json) {
-		console.log(JSON.stringify({ key: def.path, value: saved, ...shadow?.json }));
+		console.log(JSON.stringify({ key: def.path, value: saved, ...effectiveShadow?.json }));
 		return;
 	}
 	console.log(chalk.green(`${theme.status.success} Set ${def.path} = ${formatValue(saved)}`));
-	if (shadow) console.log(chalk.yellow(`${theme.status.warning} ${shadow.message}`));
+	if (effectiveShadow) console.log(chalk.yellow(`${theme.status.warning} ${effectiveShadow.message}`));
 }
 
 /** Value `setting` holds in the global config layer — what `config set` wrote. */
@@ -427,7 +436,7 @@ async function handleReset(key: string | undefined, flags: { json?: boolean }): 
 	}
 
 	// The effective value may now come from another layer or the environment: never echo a credential.
-	const value = def.setting.get(settings);
+	const value = effectiveValue(def.setting);
 	const redacted = def.setting.isCredential && !!value;
 	if (flags.json) {
 		console.log(JSON.stringify(redacted ? { key: def.path, redacted: true } : { key: def.path, value }));
