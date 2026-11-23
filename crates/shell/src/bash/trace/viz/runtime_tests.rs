@@ -374,7 +374,7 @@ async fn callout_scripts_are_drawn_by_their_command_but_eval_code_gets_a_frame()
 			.filter(|row| {
 				row["id"]
 					.as_str()
-					.is_some_and(|id| id.starts_with("frame-"))
+					.is_some_and(|id| id.starts_with("frame-") && !id.starts_with("frame-end-"))
 			})
 			.count()
 	};
@@ -1174,5 +1174,63 @@ async fn running_command_keeps_the_script_it_runs_active() {
 			rows(&finished).iter().all(|(_, row)| row["active"] != true),
 			"{command:?}: {finished}"
 		);
+	}
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_script_its_command_ran_is_one_frame_under_that_command() {
+	let dir = tempfile::tempdir().unwrap();
+	let file = dir.path().join("script.sh");
+	let body = "x=1\nf() { echo \"$1\"; }\nf a\nf b\n";
+	std::fs::write(&file, body).unwrap();
+	let shell = Shell::new(None);
+	// The engine compiles such a script one command at a time; each is a
+	// unit of its own, none of them in the command text.
+	for (script, runner) in [
+		(format!("bash {} | cat", file.display()), "bash "),
+		(format!(". {}", file.display()), "source("),
+		(format!("s='{body}'; eval \"$s\""), "eval "),
+	] {
+		let trace = run(&shell, &script).await;
+		let live = present(&trace, &Options::default());
+		let shown = rows(&live);
+		let opens = |id: &str| id.starts_with("frame-") && !id.starts_with("frame-end-");
+		let frames: Vec<usize> = (0..shown.len())
+			.filter(|&i| shown[i].1["id"].as_str().is_some_and(opens))
+			.collect();
+		assert_eq!(frames.len(), 1, "{script}: {live}");
+		let frame = frames[0];
+		let (command, command_row) = &shown[frame - 1];
+		assert!(command.starts_with(runner), "{script}: {live}");
+		let depth = shown[frame].1["depth"].as_u64().unwrap();
+		assert_eq!(depth, command_row["depth"].as_u64().unwrap() + 1, "{script}: {live}");
+		let end = frame
+			+ shown[frame..]
+				.iter()
+				.position(|(_, row)| {
+					row["id"]
+						.as_str()
+						.is_some_and(|id| id.starts_with("frame-end-"))
+				})
+				.unwrap();
+		let inside: Vec<&str> = shown[frame + 1..end]
+			.iter()
+			.map(|(text, _)| text.as_str())
+			.collect();
+		assert_eq!(
+			inside,
+			["x = \"1\"", "def f(arg1):", "print(f\"{arg1}\")", "f(\"a\")", "f(\"b\")"],
+			"{script}: {live}"
+		);
+		assert!(
+			shown[frame + 1..end]
+				.iter()
+				.all(|(_, row)| row["depth"].as_u64() >= Some(depth))
+		);
+		assert_eq!(live["output"], "a\nb\n");
+		let stored = StoredVisualization::from_snapshot_json(&trace.snapshot_json()).unwrap();
+		let restored: Value =
+			serde_json::from_str(&stored.presentation_json(&Options::default()).unwrap()).unwrap();
+		assert_eq!(live, restored, "{script}");
 	}
 }

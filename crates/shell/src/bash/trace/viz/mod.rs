@@ -14,7 +14,7 @@ use runtime::{Runtime, SourceUnit, VizSource};
 use serde::Deserialize;
 
 use super::{
-	Inner, Node,
+	Inner, Node, Runner,
 	history::HistoryEvent,
 	syntax::{RootKind, SyntaxTree, UnitSyntax},
 };
@@ -61,6 +61,7 @@ impl VizSource for Inner {
 			projection: unit.projection,
 			nodes:      &unit.nodes,
 			callout:    unit.callout,
+			runner:     unit.runner.map(Into::into),
 		})
 	}
 
@@ -107,6 +108,8 @@ struct StoredUnit {
 	aliases:    Vec<(BString, BString)>,
 	#[serde(default)]
 	callout:    bool,
+	#[serde(default)]
+	runner:     Option<Runner>,
 }
 const fn first_line() -> u32 {
 	1
@@ -300,6 +303,7 @@ impl VizSource for StoredVisualization {
 			projection: unit.projection,
 			nodes:      &unit.nodes,
 			callout:    unit.callout,
+			runner:     unit.runner.map(Into::into),
 		})
 	}
 
