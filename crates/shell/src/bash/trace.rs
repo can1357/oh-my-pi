@@ -213,6 +213,19 @@ pub struct Unit {
 	/// The script a callout (`timeout`, `git`, `xargs`, …) submitted to run
 	/// its operands: host-generated, so the calling command stands for it.
 	pub callout:    bool,
+	/// The command that ran the script this unit was read from (`eval`,
+	/// `.`, a nested shell) when the script is not literal in its command.
+	pub runner:     Option<Runner>,
+}
+
+/// A command of the trace, by unit index and node id: the one that ran a
+/// unit's script ([`Unit::runner`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Runner {
+	/// Index of its unit.
+	pub unit: u32,
+	/// Its node id in that unit.
+	pub node: u32,
 }
 
 impl Serialize for Unit {
@@ -235,6 +248,9 @@ impl Serialize for Unit {
 		}
 		if self.callout {
 			st.serialize_field("callout", &true)?;
+		}
+		if let Some(runner) = &self.runner {
+			st.serialize_field("runner", runner)?;
 		}
 		st.end()
 	}
@@ -299,6 +315,8 @@ struct UnitState {
 	placeholder: bool,
 	/// See [`Unit::callout`].
 	callout:     bool,
+	/// See [`Unit::runner`].
+	runner:      Option<Runner>,
 }
 
 #[derive(Debug)]
@@ -672,6 +690,14 @@ impl Inner {
 					parent
 						.map_or_else(|| Arc::clone(syntax), |parent| Arc::new(syntax.with_parent(parent)))
 				});
+				// A literal script is drawn at its word; only another one by
+				// the command that ran it.
+				let runner = cu.runner.filter(|_| parent.is_none()).and_then(|origin| {
+					Some(Runner {
+						unit: self.unit_index(origin.vpid, origin.span.unit)?,
+						node: origin.node,
+					})
+				});
 				// A fork of a callout's subshell re-announces the callout's
 				// units; a function body they reach keeps its definition's unit.
 				let callout = cu.parent.is_none()
@@ -688,6 +714,7 @@ impl Inner {
 					syntax,
 					root && Some(ev.vpid) == self.root_vpid,
 					callout,
+					runner,
 				);
 			},
 			EventData::Diag { code, message } => {
@@ -847,6 +874,7 @@ impl Inner {
 				kids:        Vec::new(),
 				placeholder: true,
 				callout:     false,
+				runner:      None,
 			});
 			self.by_id.entry(ev.vpid).or_default().insert(key, u as u32);
 			u
@@ -883,6 +911,7 @@ impl Inner {
 		syntax: Option<Arc<syntax::UnitSyntax>>,
 		root: bool,
 		callout: bool,
+		runner: Option<Runner>,
 	) {
 		let mut mapped_nodes = Vec::new();
 		let mut exact_at = None;
@@ -968,6 +997,7 @@ impl Inner {
 				unit.line = line;
 				unit.placeholder = false;
 				unit.callout = callout;
+				unit.runner = runner;
 			}
 			for (i, info) in nodes.iter().enumerate() {
 				match unit.nodes.get_mut(i) {
@@ -1012,8 +1042,9 @@ impl Inner {
 			self.by_id.entry(vpid).or_default().insert(key, u as u32);
 			return;
 		}
+		// A script a command ran is not the command text, whatever it holds.
 		let at = exact_at.or_else(|| {
-			if self.segment.is_none() && root {
+			if self.segment.is_none() && root && runner.is_none() {
 				self.locate(line, source)
 			} else {
 				None
@@ -1036,6 +1067,7 @@ impl Inner {
 			kids: nodes::statement_children(nodes, &parents),
 			placeholder: false,
 			callout,
+			runner,
 		});
 		self
 			.by_id
@@ -1105,6 +1137,7 @@ impl Inner {
 					syntax:     unit.syntax.clone(),
 					projection: unit.projection,
 					callout:    unit.callout,
+					runner:     unit.runner,
 				})
 				.collect(),
 			diags:             self.diags.clone(),
@@ -1176,6 +1209,9 @@ impl Serialize for UnitJson<'_> {
 		}
 		if unit.callout {
 			out.serialize_field("callout", &true)?;
+		}
+		if let Some(runner) = &unit.runner {
+			out.serialize_field("runner", runner)?;
 		}
 		out.end()
 	}

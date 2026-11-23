@@ -20,9 +20,11 @@ import {
 import {
 	fetchLiteLLMRichModels,
 	fetchLmStudioNativeModelMetadata,
+	fetchOpenRouterChatModels,
 	isSelectableLiteLLMModelMode,
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_CONTEXT_WINDOW,
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS,
+	OPENROUTER_BASE_URL,
 	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import {
@@ -509,9 +511,45 @@ export function discoverModelsByProviderType(
 			return discoverProxyModels(providerConfig, ctx);
 		case "litellm":
 			return discoverLiteLLMModels(providerConfig, ctx);
+		case "openrouter":
+			return discoverOpenRouterModels(providerConfig, ctx);
 		case "apple-foundation-models":
 			return discoverAppleFoundationModels(providerConfig);
 	}
+}
+
+/**
+ * Lists OpenRouter's public chat roster for an endpoint that fronts OpenRouter
+ * under its own URL and auth. The roster comes from openrouter.ai without
+ * this provider's credentials; rows serve through the provider's `baseUrl`
+ * (OpenRouter itself when omitted) and `api`, under OpenRouter's wire policy.
+ */
+async function discoverOpenRouterModels(
+	providerConfig: DiscoveryProviderConfig,
+	ctx: DiscoveryContext,
+): Promise<Model<Api>[]> {
+	const specs = await fetchOpenRouterChatModels({
+		fetch: ctx.fetch,
+		timeoutMs: providerConfig.discovery.timeoutMs ?? REMOTE_DISCOVERY_TIMEOUT_MS,
+	});
+	if (!specs) throw new Error(`OpenRouter model list unavailable from ${OPENROUTER_BASE_URL}/models`);
+	const models: Model<Api>[] = [];
+	for (const spec of specs) {
+		const model = skipAmbiguousModel(providerConfig.provider, spec.id, () =>
+			buildDiscoveredModel(
+				{
+					...spec,
+					api: providerConfig.api,
+					provider: providerConfig.provider,
+					baseUrl: providerConfig.baseUrl ?? OPENROUTER_BASE_URL,
+					headers: providerConfig.headers,
+				},
+				"openrouter",
+			),
+		);
+		if (model) models.push(model);
+	}
+	return models;
 }
 
 /**
