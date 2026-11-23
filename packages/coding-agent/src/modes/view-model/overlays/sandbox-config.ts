@@ -177,14 +177,18 @@ function isSandboxSettingId(value: string): value is SandboxSettingId {
 
 const ENTRY_SEGMENT = "entry:";
 
+/** What {@link listEntryId} escapes: `%`, `=`, C0, DEL and C1 controls. */
+const ID_ESCAPED = /[%=\x00-\x1F\x7F-\x9F]/g;
+
 /**
- * A list entry's row id: `<list>:entry:<value>`, with `%` and `=` escaped (`=` separates a menu
- * row's option from its row id) so any string, lone surrogates included, is a valid id. Keyed by
- * value, not position: a reload that removes or reorders entries leaves a selection on its own
- * entry or on nothing, never on a different entry that moved into its slot.
+ * A list entry's row id: `<list>:entry:<value>`, with `%`, `=` (it separates a menu row's option
+ * from its row id) and every control character (tabs, line breaks, ESC: none may reach a native
+ * prefs page, ids included) escaped as `%XX`, so any string, lone surrogates included, is a valid
+ * id. Keyed by value, not position: a reload that removes or reorders entries leaves a selection
+ * on its own entry or on nothing, never on a different entry that moved into its slot.
  */
 export function listEntryId(list: SandboxListId, entry: string): string {
-	return `${list}:${ENTRY_SEGMENT}${entry.replaceAll("%", "%25").replaceAll("=", "%3D")}`;
+	return `${list}:${ENTRY_SEGMENT}${entry.replace(ID_ESCAPED, char => `%${char.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`)}`;
 }
 
 /** The distinct entries of a list in order: the host removes or replaces every copy of a value at once. */
@@ -205,7 +209,9 @@ export function parseListRow(id: string): ListRow | undefined {
 	const rest = id.slice(colon + 1);
 	if (rest === "add" || rest === "new") return { list, kind: rest };
 	if (!rest.startsWith(ENTRY_SEGMENT)) return undefined;
-	const entry = rest.slice(ENTRY_SEGMENT.length).replace(/%(25|3D)/g, escape => (escape === "%25" ? "%" : "="));
+	const entry = rest
+		.slice(ENTRY_SEGMENT.length)
+		.replace(/%([0-9A-F]{2})/g, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)));
 	return { list, kind: "entry", entry };
 }
 

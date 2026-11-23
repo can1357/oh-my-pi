@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
+import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { SandboxResultMeta } from "../../../src/sandbox/types";
 import type { BashToolDetails } from "../../../src/tools/details/bash";
 import type { EvalToolDetails } from "../../../src/tools/details/eval";
@@ -7,6 +8,39 @@ import { type BashArgs, bashPresenter } from "../../../src/ui/tools/bash";
 import { type EvalArgs, evalPresenter } from "../../../src/ui/tools/eval";
 import { SANDBOX_NOTE_ROLE } from "../../../src/ui/tools/sandbox-meta";
 import { type Presented, present, spanText } from "./sandbox-paint";
+
+const OS_NOTICE =
+	"[OS sandbox: Network access to blocked.test was refused by the sandbox's allowlist. Expected behaviour: NEVER retry or work around it.]";
+
+/** Every text a node tree carries (output `text`, note spans), in order. */
+function allText(nodes: readonly UiNode[]): string {
+	const parts: string[] = [];
+	const walk = (node: UiNode): void => {
+		const props = node.props() as { text?: unknown; spans?: readonly { t: string }[] };
+		if (typeof props.text === "string") parts.push(props.text);
+		if (props.spans) parts.push(props.spans.map(span => span.t).join(""));
+		for (const child of node.children()) walk(child);
+	};
+	for (const node of nodes) walk(node);
+	return parts.join("\n");
+}
+
+function bashText(text: string, details: BashToolDetails, isError = false): Presented {
+	return present("bash", bashPresenter, { command: "curl blocked.test" } satisfies BashArgs, {
+		content: [{ type: "text", text }],
+		details,
+		isError,
+	});
+}
+
+function evalText(text: string, details: EvalToolDetails, isError = false): Presented {
+	return present(
+		"eval",
+		evalPresenter,
+		{ cells: [{ language: "python", code: "1" }] },
+		{ content: [{ type: "text", text }], details, isError },
+	);
+}
 
 const SANDBOX: SandboxResultMeta = {
 	backend: "seatbelt",
@@ -162,3 +196,118 @@ describe("eval results run in the sandbox", () => {
 		}
 	});
 });
+
+describe("bash results run in the sandbox: notices and failure", () => {
+	it("strips the trailing OS sandbox notice, so the raw-output footer before it is still found", () => {
+		const text = `filtered\n[raw output: local://13.log]\n\nWall time: 0.08 seconds\n\n${OS_NOTICE}\n\nCommand exited with code 1`;
+		const card = bashText(text, { exitCode: 1, wallTimeMs: 80, wallTimeNoticeEmitted: true, sandbox: SANDBOX }, true);
+		expect(allText(card.body)).toContain("filtered");
+		expect(allText(card.body)).not.toContain("OS sandbox");
+		expect(allText(card.body)).not.toContain("raw output");
+		expect(JSON.stringify(card.view.term)).toContain("local://13.log");
+		const rows = card.rows().join("\n");
+		expect(rows).not.toContain("OS sandbox");
+		expect(rows).not.toContain("raw output:");
+	});
+
+	it("keeps a sandbox-looking last line the command printed itself when the run was not sandboxed", () => {
+		const text = `ok\n${OS_NOTICE}`;
+		expect(allText(bashText(text, {}).body)).toContain("OS sandbox");
+		expect(allText(bashText(text, { sandbox: SANDBOX }).body)).not.toContain("OS sandbox");
+		expect(bashText(text, {}).rows().join("\n")).toContain("OS sandbox");
+		expect(bashText(text, { sandbox: SANDBOX }).rows().join("\n")).not.toContain("OS sandbox");
+	});
+
+	it("names the call's own refused hosts and a network that is off, but time-attributed hosts only when it failed", () => {
+		const meta: SandboxResultMeta = {
+			...SANDBOX,
+			denied: undefined,
+			blockedHosts: ["other.test", "mine.test"],
+			ownBlockedHosts: ["mine.test"],
+			networkOff: true,
+		};
+		const succeeded = bashText("ok", { sandbox: meta });
+		expect(notes(succeeded)).toEqual([
+			"blocked by sandbox: host mine.test",
+			"network is off in the sandbox: this failure likely comes from it",
+		]);
+		expect(notes(bashText("ok", { exitCode: 1, sandbox: meta }, true))).toEqual([
+			"blocked by sandbox: hosts mine.test, other.test",
+			"network is off in the sandbox: this failure likely comes from it",
+		]);
+		const rows = succeeded.rows().join("\n");
+		expect(rows).toContain("blocked by sandbox: host mine.test");
+		expect(rows).not.toContain("other.test");
+	});
+
+	it("decides failure from the exit code, not from the error flag", () => {
+		const meta: SandboxResultMeta = { ...SANDBOX, denied: undefined, blockedHosts: ["other.test"] };
+		// A timeout is an error result without an exit code: it did not fail the command.
+		expect(notes(bashText("ok", { sandbox: meta }, true))).toEqual([]);
+		expect(notes(bashText("ok", { exitCode: 0, sandbox: meta }))).toEqual([]);
+	});
+});
+
+describe("eval results run in the sandbox: notices and failure", () => {
+	it("strips the OS sandbox notice and the exit line from output without per-cell results, as bash does", () => {
+		const card = evalText(
+			`PermissionError\n\n${OS_NOTICE}\n\nCommand exited with code 1`,
+			{ language: "python", sandbox: SANDBOX },
+			true,
+		);
+		const view = allText(card.body);
+		expect(view).toContain("PermissionError");
+		expect(view).not.toContain("OS sandbox");
+		expect(view).not.toContain("Command exited");
+		const rows = card.rows().join("\n");
+		expect(rows).toContain("PermissionError");
+		expect(rows).not.toContain("OS sandbox");
+	});
+
+	it("keeps a sandbox-looking last line the eval printed itself when the run was not sandboxed", () => {
+		const text = `ok\n${OS_NOTICE}`;
+		expect(allText(evalText(text, { language: "python" }).body)).toContain("OS sandbox");
+		expect(allText(evalText(text, { language: "python", sandbox: SANDBOX }).body)).not.toContain("OS sandbox");
+		expect(evalText(text, { language: "python" }).rows().join("\n")).toContain("OS sandbox");
+		expect(evalText(text, { language: "python", sandbox: SANDBOX }).rows().join("\n")).not.toContain("OS sandbox");
+	});
+
+	it("keeps an exit line the program printed itself on a successful eval, and strips it on a failure", () => {
+		const text = "done\nCommand exited with code 1";
+		const details: EvalToolDetails = { language: "python", sandbox: SANDBOX };
+		expect(allText(evalText(text, details, false).body)).toContain("Command exited with code 1");
+		expect(allText(evalText(text, details, true).body)).not.toContain("Command exited");
+		expect(allText(evalText(text, details, true).body)).toContain("done");
+		expect(allText(evalText(text, { ...details, isError: true }, false).body)).not.toContain("Command exited");
+	});
+
+	it("names refused hosts per the call's outcome in a multi-cell run, with one sandboxed marker clipped to the width", () => {
+		const meta: SandboxResultMeta = {
+			...SANDBOX,
+			denied: undefined,
+			blockedHosts: ["other.test"],
+			ownBlockedHosts: ["mine.test"],
+		};
+		const cell = (index: number) => ({
+			index,
+			code: "1",
+			language: "python" as const,
+			output: "ok",
+			status: "complete" as const,
+		});
+		const run = (isError: boolean): Presented => evalCells2({ cells: [cell(0), cell(1)], sandbox: meta }, isError);
+		expect(notes(run(false))).toEqual(["blocked by sandbox: host mine.test"]);
+		expect(notes(run(true))).toEqual(["blocked by sandbox: hosts mine.test, other.test"]);
+		const wide = run(false).rows(100);
+		expect(wide.filter(row => row.includes("sandboxed"))).toHaveLength(1);
+		for (const row of run(false).rows(6, true)) expect(visibleWidth(row)).toBeLessThanOrEqual(6);
+	});
+});
+
+function evalCells2(details: EvalToolDetails, isError: boolean): Presented {
+	return present("eval", evalPresenter, {} as EvalArgs, {
+		content: [{ type: "text", text: "ok" }],
+		details,
+		isError,
+	});
+}

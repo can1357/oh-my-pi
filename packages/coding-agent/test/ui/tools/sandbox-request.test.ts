@@ -41,6 +41,21 @@ describe("sandbox_request tool card", () => {
 		}
 	});
 
+	it("renders streamed or malformed non-string args and details without throwing", () => {
+		const args = {
+			kind: "host",
+			target: { host: "example.com" },
+			intent: 42,
+		} as unknown as SandboxRequestArgs;
+		expect(call(args).view.head?.target).toBe("connect to");
+		expect(() => call(args).rows(80)).not.toThrow();
+		const bad = { status: "instructed", target: 7, instructions: ["a"] } as unknown as SandboxRequestToolDetails;
+		const card = answered(bad, false, args);
+		expect(card.view.head?.badges?.[0]?.text).toBe("instructed");
+		expect(() => card.rows(80)).not.toThrow();
+		expect(texts(card)).toEqual([]);
+	});
+
 	it("names host and exec targets as given, with their verbs", () => {
 		expect(call({ kind: "host", target: "registry.npmjs.org" }).view.head?.target).toBe(
 			"connect to registry.npmjs.org",

@@ -625,6 +625,22 @@ describe("/sandbox sheet in a plain terminal", () => {
 		expect(wide.screen()).toContain("~/project dir");
 	});
 
+	it("keeps tabs, line breaks and escapes of a list entry out of the prefs page, and still maps its row back to the entry", () => {
+		const hostile = "a\tb\n\x1b[31mc=%41\x7f\x85";
+		const s = open({ allowedHosts: [hostile] });
+		// Network page.
+		s.press("tab", "tab");
+		const props = JSON.stringify(s.props());
+		for (const raw of ["\\t", "\\n", "\\u001b"]) expect(props).not.toContain(raw);
+		const id = s
+			.props()
+			.sections.flatMap(section => section.rows)
+			.find(candidate => candidate.id.startsWith("allowedHosts:entry:"))?.id;
+		expect(id).toBe("allowedHosts:entry:a%09b%0A%1B[31mc%3D%2541%7F%85");
+		s.send({ type: "change", item: id!, value: "" });
+		expect(s.calls).toEqual([["remove", "allowedHosts", hostile]]);
+	});
+
 	describe("network modes the host cannot enforce", () => {
 		const missing =
 			'Network mode "allow" needs slirp4netns on this host; missing: slirp4netns. Install it to use it.';

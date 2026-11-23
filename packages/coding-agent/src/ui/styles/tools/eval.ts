@@ -457,8 +457,8 @@ function paintEval(node: UiNode, cx: PaintContext): Block {
 	}
 	const previewLines = Math.min(term.previewLines ?? 10, PREVIEW_WINDOW_ROWS);
 	const notes = callNotes(theme, term);
-	// A contained run: `[sandboxed]`, then its warnings wrapped to the width.
-	if (isSandboxed(props)) notes.push(theme.fg("dim", bracketed(theme, SANDBOX_BADGE_TEXT)));
+	// A contained run: one `⟦sandboxed⟧` marker (clipped to the width), then its warnings wrapped to it.
+	if (isSandboxed(props)) notes.push(truncate(theme.fg("dim", bracketed(theme, SANDBOX_BADGE_TEXT)), width));
 	for (const line of sandboxNoteLines(node, theme)) notes.push(...wrap(line, Math.max(1, width)));
 	if (term.phase === "cells") {
 		const rows: string[] = [];

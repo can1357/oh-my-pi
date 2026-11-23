@@ -19,9 +19,9 @@ export function sandboxBadge(meta: SandboxResultMeta): ToolBadge {
 	return { text: SANDBOX_BADGE_TEXT, tone: "info", title: sandboxBadgeTitle(meta) };
 }
 
-/** The warning notes of a contained run (none when `meta` is absent), keyed `sandbox-<i>`. */
-export function sandboxNoteNodes(meta: SandboxResultMeta | undefined): JSXNode[] {
-	return sandboxNotes(meta).map((note, index) => (
+/** The warning notes of a contained run (none when `meta` is absent), keyed `sandbox-<i>`; `failed`: the call failed (time-attributed hosts count then). */
+export function sandboxNoteNodes(meta: SandboxResultMeta | undefined, failed: boolean): JSXNode[] {
+	return sandboxNotes(meta, failed).map((note, index) => (
 		<text key={`sandbox-${index}`} role={SANDBOX_NOTE_ROLE} spans={[{ t: note, s: "warning" }]} wrap="word" />
 	));
 }

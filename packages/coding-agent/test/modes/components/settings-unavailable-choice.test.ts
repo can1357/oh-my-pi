@@ -9,7 +9,7 @@ import { batch } from "@oh-my-pi/pi-tui";
 import { bubbleEvent, keypathOf, pathTo } from "@oh-my-pi/pi-tui/dispatch";
 import type { TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import type { TspPrefsProps, TspPrefsRow } from "@oh-my-pi/pi-wire";
-import type { SettingsDisplayEntry, SettingsHost } from "../../../src/config/settings-defs";
+import type { SettingsDisplayEntry, SettingsHost, SubmenuOption } from "../../../src/config/settings-defs";
 import { SettingsWindow } from "../../../src/ui/overlays/settings/settings";
 import { findKind, mountOverlay } from "../../helpers/overlay-terminal";
 
@@ -51,11 +51,16 @@ afterEach(() => {
 	for (const term of open.splice(0)) term.dispose();
 });
 
-function harness(columns = 120): Harness {
-	const values = new Map<string, unknown>([[ROW, "deny"]]);
+function harness(
+	columns = 120,
+	entries: SettingsDisplayEntry[] = ENTRIES,
+	runtimeOptions?: ReadonlyMap<string, readonly SubmenuOption[]>,
+	initial: [string, unknown] = [ROW, "deny"],
+): Harness {
+	const values = new Map<string, unknown>([initial]);
 	const changes: [string, unknown][] = [];
 	const settings: SettingsHost = {
-		entries: ENTRIES,
+		entries,
 		get: path => values.get(path),
 		set: (path, value) => void values.set(path, value),
 		unset: path => void values.delete(path),
@@ -65,7 +70,13 @@ function harness(columns = 120): Harness {
 	const term = mountOverlay(
 		() =>
 			SettingsWindow({
-				context: { settings, availableThinkingLevels: [], availableThemes: ["dark"], providers: [] },
+				context: {
+					settings,
+					availableThinkingLevels: [],
+					availableThemes: ["dark"],
+					providers: [],
+					runtimeOptions,
+				},
 				callbacks: { onChange: (path, value) => void changes.push([path, value]), onCancel: () => {} },
 			}),
 		{ columns, rows: 40, focusKind: "__root__" },
@@ -166,5 +177,58 @@ describe("settings menu with unavailable choices", () => {
 		send(term, { type: "change", item: ROW, value: "allowlist" });
 		expect(values.get(ROW)).toBe("deny");
 		expect(props(term).editing).toBeNull();
+	});
+});
+
+describe("settings menu with runtime choices", () => {
+	const RUNTIME_ROW = "todo.backend";
+	const RUNTIME_ENTRIES: SettingsDisplayEntry[] = [
+		{
+			path: RUNTIME_ROW,
+			type: "enum",
+			enumValues: ["native", "ext", "off"],
+			defaultValue: "native",
+			ui: {
+				tab: "tools",
+				group: "Todo",
+				label: "Todo Backend",
+				description: "Where todos live.",
+				options: [{ value: "native", label: "Native" }],
+			},
+		},
+	];
+	// What the host hands in at runtime: the extension's backend, and one it cannot switch to yet.
+	const RUNTIME_OPTIONS: ReadonlyMap<string, readonly SubmenuOption[]> = new Map([
+		[
+			RUNTIME_ROW,
+			[
+				{ value: "native", label: "Native" },
+				{ value: "ext", label: "Ext Backend", description: "line one" },
+				{ value: "off", label: "Off", description: "needs a restart", disabled: true },
+			],
+		],
+	]);
+	const runtimeHarness = () => harness(120, RUNTIME_ENTRIES, RUNTIME_OPTIONS, [RUNTIME_ROW, "native"]);
+
+	it("lists a disabled runtime choice with its reason", () => {
+		const { term } = runtimeHarness();
+		send(term, { type: "action", act: "page", value: "tools", mods: [] });
+		const control = row(term, RUNTIME_ROW).control;
+		if (control.k !== "choice") throw new Error(`control is ${control.k}`);
+		expect(control.options.map(option => [option.value, option.detail])).toEqual([
+			["native", undefined],
+			["ext", "line one"],
+			["off", "needs a restart"],
+		]);
+	});
+
+	it("refuses a native change to a runtime choice the host marked disabled, and takes an enabled one", () => {
+		const { term, values, changes } = runtimeHarness();
+		send(term, { type: "action", act: "page", value: "tools", mods: [] });
+		send(term, { type: "change", item: RUNTIME_ROW, value: "off" });
+		expect(values.get(RUNTIME_ROW)).toBe("native");
+		expect(changes).toEqual([]);
+		send(term, { type: "change", item: RUNTIME_ROW, value: "ext" });
+		expect(changes).toEqual([[RUNTIME_ROW, "ext"]]);
 	});
 });

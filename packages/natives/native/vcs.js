@@ -1,6 +1,7 @@
 import { $ } from "bun";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { pipeline } from "node:stream/promises";
 import { loadNative } from "./loader-state.js";
 
 let native;
@@ -41,7 +42,6 @@ const METADATA_METHODS = new Set([
 	"info",
 	"primaryRoot",
 	"linkedWorktree",
-	"headSync",
 	"prefixOf",
 	"kind",
 	"root",
@@ -49,13 +49,16 @@ const METADATA_METHODS = new Set([
 	"supports",
 	"asJj",
 ]);
+/** Synchronous handle methods that can still read repository state (reftable repos spawn host git): guarded by throwing. */
+const SYNC_GUARDED_METHODS = new Set(["headSync"]);
 
 /**
  * Install `guard` (`undefined` removes it): before every git operation on a repository (each async
- * method of any handle {@link git}, {@link repo} or {@link repoForDisplay} returned, before or after
- * the install, and {@link runPostCheckoutHook}) it is asked about the repository's git entry
- * (`.git`), git dir and common dir; `false` fails the operation with a `Refused` VcsError, like a
- * failed git call.
+ * method and `headSync` of any handle {@link git}, {@link repo} or {@link repoForDisplay} returned,
+ * before or after the install, {@link detachGitDir}, {@link copyGitObjects} and
+ * {@link runPostCheckoutHook}) it is asked about the repository's git entry (`.git`), git dir and
+ * common dir; `false` fails the operation with a `Refused` VcsError, like a failed git call
+ * (`headSync` throws it synchronously).
  */
 export function setRepoGuard(guard) {
 	repoGuard = guard;
@@ -78,6 +81,13 @@ function guarded(handle) {
 				return typeof value === "function" ? value.bind(target) : value;
 			}
 			if (property === "asGit") return () => guarded(target.asGit());
+			if (SYNC_GUARDED_METHODS.has(property)) {
+				return (...args) => {
+					const refused = refusal(info);
+					if (refused) throw refused;
+					return value.apply(target, args);
+				};
+			}
 			return (...args) => {
 				const refused = refusal(info);
 				return refused ? Promise.reject(refused) : value.apply(target, args);
@@ -145,8 +155,15 @@ export function clone(url, target, options = {}, signal) {
 }
 
 /** Sever a copied working tree from shared git metadata. */
-export function detachGitDir(worktreeRoot, sourceCommonDir, signal) {
+export async function detachGitDir(worktreeRoot, sourceCommonDir, signal) {
+	const refused = refusal(gitInfo(worktreeRoot)) ?? refusal(pathInfo(sourceCommonDir));
+	if (refused) throw refused;
 	return api().vcsDetachGitDir(worktreeRoot, sourceCommonDir, signal);
+}
+
+/** Guard input for a bare git directory path (no discovery info exists for it). */
+function pathInfo(gitDir) {
+	return { gitEntryPath: gitDir, gitDir, commonDir: gitDir };
 }
 
 /**
@@ -155,11 +172,32 @@ export function detachGitDir(worktreeRoot, sourceCommonDir, signal) {
  * readers never see a partial file and an interrupted copy leaves only a
  * `tmp_` file that `git gc` prunes. An existing `to` was itself published
  * whole and holds the same content-addressed bytes, so it is kept.
+ * `from` is opened without following a final symlink, so a link swapped in
+ * for an object file never has its target copied; such a file is skipped.
  */
 async function publishGitObjectFile(from, to) {
 	const tmp = path.join(path.dirname(to), `tmp_obj_omp_${crypto.randomUUID()}`);
 	try {
-		await fs.promises.copyFile(from, tmp, fs.constants.COPYFILE_EXCL);
+		let source;
+		try {
+			source = await fs.promises.open(from, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+		} catch (error) {
+			if (error?.code === "ELOOP") return;
+			throw error;
+		}
+		try {
+			const stat = await source.stat();
+			// Without O_NOFOLLOW the open may have followed a link: only an entry that is itself the
+			// opened regular file (same dev/ino as the unfollowed lstat) is copied.
+			const entry = await fs.promises.lstat(from);
+			if (!stat.isFile() || !entry.isFile() || entry.ino !== stat.ino || entry.dev !== stat.dev) return;
+			await pipeline(
+				source.createReadStream({ autoClose: false }),
+				fs.createWriteStream(tmp, { flags: "wx", mode: stat.mode & 0o777 }),
+			);
+		} finally {
+			await source.close();
+		}
 		try {
 			await fs.promises.link(tmp, to);
 		} catch (error) {
@@ -178,19 +216,30 @@ async function publishGitObjectFile(from, to) {
  * Keep objects created in an isolated Git repository reachable after its
  * worktree is removed, without changing the destination's refs or index.
  * Every file is published atomically; a pack is published before its index.
+ * Both repositories are checked by the repo guard first, and symlinked
+ * entries in the isolated object store are skipped, never followed.
  */
 export async function copyGitObjects(isolationRoot, sourceRoot) {
-	const from = path.join(requireGit(isolationRoot).info().commonDir, "objects");
-	const to = path.join(requireGit(sourceRoot).info().commonDir, "objects");
+	const fromInfo = requireGit(isolationRoot).info();
+	const toInfo = requireGit(sourceRoot).info();
+	const refused = refusal(fromInfo) ?? refusal(toInfo);
+	if (refused) throw refused;
+	const from = path.join(fromInfo.commonDir, "objects");
+	const to = path.join(toInfo.commonDir, "objects");
+	if (!(await fs.promises.lstat(from)).isDirectory()) return;
 	for (const entry of await fs.promises.readdir(from, { withFileTypes: true })) {
 		if (!entry.isDirectory() || !/^[0-9a-f]{2}$/.test(entry.name)) continue;
 		await fs.promises.mkdir(path.join(to, entry.name), { recursive: true });
-		for (const name of await fs.promises.readdir(path.join(from, entry.name))) {
-			if (!/^[0-9a-f]{38,62}$/.test(name)) continue;
-			await publishGitObjectFile(path.join(from, entry.name, name), path.join(to, entry.name, name));
+		for (const object of await fs.promises.readdir(path.join(from, entry.name), { withFileTypes: true })) {
+			if (!object.isFile() || !/^[0-9a-f]{38,62}$/.test(object.name)) continue;
+			await publishGitObjectFile(path.join(from, entry.name, object.name), path.join(to, entry.name, object.name));
 		}
 	}
-	const packs = (await fs.promises.readdir(path.join(from, "pack"))).filter(name => name.startsWith("pack-"));
+	const packDir = path.join(from, "pack");
+	if (!(await fs.promises.lstat(packDir)).isDirectory()) return;
+	const packs = (await fs.promises.readdir(packDir, { withFileTypes: true }))
+		.filter(entry => entry.isFile() && entry.name.startsWith("pack-"))
+		.map(entry => entry.name);
 	await fs.promises.mkdir(path.join(to, "pack"), { recursive: true });
 	// The index must only become visible after the pack it describes.
 	for (const name of packs.filter(name => name.endsWith(".pack"))) {

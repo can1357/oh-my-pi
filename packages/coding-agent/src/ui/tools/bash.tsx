@@ -13,6 +13,7 @@ import { replaceTabs } from "@oh-my-pi/pi-tui/text/width";
 import type { ShellVizPresentation } from "@oh-my-pi/pi-wire";
 import type { SandboxResultMeta } from "../../sandbox/types";
 import type { OutputMeta } from "../../tools/output-meta-format";
+import { isSandboxNoticeLine } from "../../tools/details/sandbox";
 import { stripOutputNotice, stripTrailingNotice } from "../../tools/output-meta-format";
 import { resultText } from "./default";
 import type { ToolHead, ToolPresenter, ToolResult, ToolView, ToolViewState } from "./contract";
@@ -239,7 +240,12 @@ function callIntent(args: unknown): string | undefined {
 	return typeof value === "string" ? toolIntentLabel(value).replace(/\s+/g, " ").trim() || undefined : undefined;
 }
 
-/** Output with the LLM-facing notices (background, exit, wall time, artifact, truncation) removed. */
+/** Whether the command ran to a non-zero exit (the details carry an exit code only then), as the tool decides it. */
+function shellFailed(details: BashDetails | undefined): boolean {
+	return details?.exitCode !== undefined && details.exitCode !== 0;
+}
+
+/** Output with the LLM-facing notices (background, exit, sandbox, wall time, artifact, truncation) removed. */
 function stripNotices(raw: string, details: BashDetails | undefined): { text: string; artifactId?: string } {
 	const job = details?.async;
 	let text =
@@ -252,6 +258,9 @@ function stripNotices(raw: string, details: BashDetails | undefined): { text: st
 	text = stripOutputNotice(text, details?.meta);
 	if (details?.exitCode !== undefined)
 		text = stripTrailingNotice(text, `Command exited with code ${details.exitCode}`);
+	// The sandbox notice follows the wall time and precedes the exit line; it hides the raw-output footer until stripped.
+	// Without sandbox meta a trailing `[OS sandbox: …]` line is the command's own output.
+	if (details?.sandbox) text = stripTrailingNotice(text, isSandboxNoticeLine);
 	if (details?.wallTimeMs !== undefined && details.wallTimeNoticeEmitted !== false)
 		text = stripTrailingNotice(text, `Wall time: ${(details.wallTimeMs / 1000).toFixed(2)} seconds`);
 	return stripRawOutputNotice(text);
@@ -539,7 +548,7 @@ export function shellPresenter<TArgs>(config: ShellConfig<TArgs>): ToolPresenter
 						meta={meta ? { ...meta, truncation: showingFull ? undefined : meta.truncation } : undefined}
 					/>
 				</RunBox>,
-				...sandboxNoteNodes(details?.sandbox),
+				...sandboxNoteNodes(details?.sandbox, shellFailed(details)),
 			];
 			const timedOut = details?.timedOut === true;
 			const warning = outputNotices(

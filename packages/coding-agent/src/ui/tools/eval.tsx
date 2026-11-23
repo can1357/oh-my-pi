@@ -24,8 +24,9 @@ import {
 	splitEvalOutput,
 } from "../../tools/details/eval";
 import { splitPathAndSel } from "../../tools/details/read";
+import { isSandboxNoticeLine } from "../../tools/details/sandbox";
 import { formatEvalCodeForDisplay } from "../../tools/eval-format";
-import { type OutputMeta, stripOutputNotice } from "../../tools/output-meta-format";
+import { type OutputMeta, stripOutputNotice, stripTrailingNotice } from "../../tools/output-meta-format";
 import type { ToolHead, ToolPresenter, ToolResult, ToolView, ToolViewState } from "./contract";
 import { resultText } from "./default";
 import { registerToolPresenter } from "./registry";
@@ -257,6 +258,19 @@ function outputNodes(output: string, views: readonly EvalViewEntry[] | undefined
 	});
 }
 
+const EVAL_EXIT_NOTICE = /^Command exited with code -?\d+$/;
+
+/**
+ * Eval output with the LLM-facing notices removed from the end, the reverse of the order the tool writes them:
+ * truncation, the exit line (only on a failed call), then the sandbox notice (only when the result carries sandbox
+ * meta). Otherwise a trailing line is the program's own output.
+ */
+function stripEvalNotices(raw: string, meta: OutputMeta | undefined, failed: boolean, sandboxed: boolean): string {
+	const withoutMeta = stripOutputNotice(raw, meta);
+	const withoutExit = failed ? stripTrailingNotice(withoutMeta, line => EVAL_EXIT_NOTICE.test(line)) : withoutMeta;
+	return (sandboxed ? stripTrailingNotice(withoutExit, isSandboxNoticeLine) : withoutExit).trimEnd();
+}
+
 function cellState(status: EvalCellResult["status"], cancelled: boolean): RunState | undefined {
 	switch (status) {
 		case "pending":
@@ -360,6 +374,7 @@ function resultView(result: ToolResult<EvalToolDetails>, state: ToolViewState, a
 	const details = result.details;
 	const context = state.renderContext as EvalRenderContext | undefined;
 	const cancelled = state.cancelled === true;
+	const failed = result.isError === true || details?.isError === true;
 	const expanded = context?.expanded ?? state.expanded;
 	const previewLines = context?.previewLines ?? DEFAULT_PREVIEW_LINES;
 	const callFacts = {
@@ -432,7 +447,7 @@ function resultView(result: ToolResult<EvalToolDetails>, state: ToolViewState, a
 		});
 		return {
 			head: evalHead(cellResults[0]!.title, languages, cellResults.length, details),
-			body: [...boxes, ...sandboxNoteNodes(details?.sandbox)],
+			body: [...boxes, ...sandboxNoteNodes(details?.sandbox, failed)],
 			preview: "children",
 			term: {
 				look: "eval",
@@ -445,7 +460,7 @@ function resultView(result: ToolResult<EvalToolDetails>, state: ToolViewState, a
 	const calls = argCells(args);
 	const languages = details?.languages ?? (details?.language ? [details.language] : []);
 	const raw = context?.output ?? resultText(result).trimEnd();
-	const output = stripOutputNotice(raw, details?.meta).trimEnd();
+	const output = stripEvalNotices(raw, details?.meta, failed, details?.sandbox !== undefined);
 	const runState: RunState = cancelled
 		? "cancelled"
 		: state.isPartial
@@ -471,7 +486,7 @@ function resultView(result: ToolResult<EvalToolDetails>, state: ToolViewState, a
 		),
 		body: [
 			...runs.map((run, i) => <CellBox cell={run} index={i} total={runs.length} />),
-			...sandboxNoteNodes(details?.sandbox),
+			...sandboxNoteNodes(details?.sandbox, failed),
 		],
 		preview: "children",
 		term: {
