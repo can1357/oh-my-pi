@@ -5,7 +5,7 @@ import { getCustomThemesDir } from "@oh-my-pi/pi-utils/dirs";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import { detectColorMode, isLightSurface, mixThemeColors, resolveThemeColors, resolveVarRefs } from "./color";
 import darkThemeJson from "./dark.json" with { type: "json" };
-import defaultThemes from "./defaults.json" with { type: "json" };
+import defaultThemesAsset from "./defaults.json" with { type: "file" };
 import lightThemeJson from "./light.json" with { type: "json" };
 import type { ColorMode, ThemeBg, ThemeColor, ThemeJson } from "./schema";
 import { normalizeSpinnerFramesOverride, type SymbolPreset } from "./symbols";
@@ -15,14 +15,32 @@ import { Theme } from "./theme-class";
 // Theme Loading
 // ============================================================================
 
-const BUILTIN_THEMES: Record<string, ThemeJson> = {
-	dark: darkThemeJson as ThemeJson,
-	light: lightThemeJson as ThemeJson,
-	...(defaultThemes as Record<string, ThemeJson>),
-};
+let builtinThemes: Record<string, ThemeJson> | undefined;
+
+// `defaults.json` holds ~100 optional themes; reading it on first use keeps it out of
+// the startup module graph, which only needs `dark` or `light` in the common case.
+function loadDefaultThemes(): Record<string, ThemeJson> {
+	const asset: unknown = defaultThemesAsset;
+	if (typeof asset !== "string") return asset as Record<string, ThemeJson>;
+	const resolved = path.isAbsolute(asset) ? asset : path.resolve(import.meta.dir, asset);
+	return JSON.parse(fs.readFileSync(resolved, "utf8")) as Record<string, ThemeJson>;
+}
 
 export function getBuiltinThemes(): Record<string, ThemeJson> {
-	return BUILTIN_THEMES;
+	builtinThemes ??= {
+		dark: darkThemeJson as ThemeJson,
+		light: lightThemeJson as ThemeJson,
+		...loadDefaultThemes(),
+	};
+	return builtinThemes;
+}
+
+/** Return one built-in theme by name; `dark` and `light` never read `defaults.json`. */
+export function getBuiltinTheme(name: string): ThemeJson | undefined {
+	if (name === "dark") return darkThemeJson as ThemeJson;
+	if (name === "light") return lightThemeJson as ThemeJson;
+	const themes = getBuiltinThemes();
+	return Object.hasOwn(themes, name) ? themes[name] : undefined;
 }
 
 export async function getAvailableThemes(): Promise<string[]> {
@@ -107,10 +125,8 @@ function parseThemeJson(name: string, content: string): ThemeJson {
 }
 
 export async function loadThemeJson(name: string): Promise<ThemeJson> {
-	const builtinThemes = getBuiltinThemes();
-	if (name in builtinThemes) {
-		return builtinThemes[name];
-	}
+	const builtin = getBuiltinTheme(name);
+	if (builtin) return builtin;
 	const customThemesDir = getCustomThemesDir();
 	const themePath = path.join(customThemesDir, `${name}.json`);
 	try {
@@ -123,10 +139,8 @@ export async function loadThemeJson(name: string): Promise<ThemeJson> {
 
 /** Load a theme definition synchronously for the first terminal frame. */
 export function loadThemeJsonSync(name: string): ThemeJson {
-	const builtinThemes = getBuiltinThemes();
-	if (name in builtinThemes) {
-		return builtinThemes[name];
-	}
+	const builtin = getBuiltinTheme(name);
+	if (builtin) return builtin;
 	const themePath = path.join(getCustomThemesDir(), `${name}.json`);
 	try {
 		return parseThemeJson(name, fs.readFileSync(themePath, "utf8"));

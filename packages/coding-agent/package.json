@@ -39,6 +39,7 @@
 		"dist/*.node",
 		"dist/*.json-*.zst",
 		"dist/perturbation-pool.json-*.txt",
+		"dist/defaults-*.json",
 		"scripts",
 		"examples",
 		"README.md",

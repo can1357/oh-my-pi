@@ -7,7 +7,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import { isTerminalBackgroundQueryTrusted } from "../terminal-multiplexer";
 import { setActiveSymbolTheme } from "./active-symbols";
 import { ansi256ToHex, isLightSurface, resolveThemeColors, resolveVarRefs } from "./color";
-import { type CreateThemeOptions, getBuiltinThemes, loadTheme, loadThemeJson, loadThemeSync } from "./loader";
+import { type CreateThemeOptions, getBuiltinTheme, loadTheme, loadThemeJson, loadThemeSync } from "./loader";
 import { type ThemeColor, type ThemeJson } from "./schema";
 import type { SymbolPreset } from "./symbols";
 import type { Theme } from "./theme-class";
@@ -835,11 +835,8 @@ export async function getResolvedThemeColors(themeName?: string): Promise<Record
  */
 export function isLightTheme(themeName?: string): boolean {
 	const name = themeName ?? "dark";
-	const builtinThemes = getBuiltinThemes();
-	let themeJson: ThemeJson | undefined;
-	if (name in builtinThemes) {
-		themeJson = builtinThemes[name];
-	} else {
+	let themeJson = getBuiltinTheme(name);
+	if (!themeJson) {
 		try {
 			const customPath = path.join(getCustomThemesDir(), `${name}.json`);
 			const content = fs.readFileSync(customPath, "utf-8");

@@ -83,6 +83,7 @@ async function cleanBundleOutputs(outDir: string): Promise<void> {
 					entry.endsWith(".js.map") ||
 					/\.json-[^/]+\.zst$/.test(entry) ||
 					/^perturbation-pool\.json-[^/]+\.txt$/.test(entry) ||
+					/^defaults-[^/]+\.json$/.test(entry) ||
 					(entry.startsWith("CHANGELOG-") && entry.endsWith(".md")) ||
 					obsoleteHtmlExportAssetPattern.test(entry),
 			)
