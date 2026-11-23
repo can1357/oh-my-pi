@@ -130,6 +130,17 @@ async function gitlinkWorkspace() {
 	return { ...workspace, module, before, after, later };
 }
 
+async function stagedMoveWorkspace() {
+	const workspace = await emptyRepo();
+	const { root } = workspace;
+	const before = "one\ntwo\nthree\n";
+	await Bun.write(path.join(root, "z.txt"), before);
+	await git(root, ["add", "z.txt"]);
+	await git(root, ["commit", "-qm", "base"]);
+	await git(root, ["mv", "z.txt", "a.txt"]);
+	return { ...workspace, before };
+}
+
 /**
  * Shared workspace: the user staged a fix in `b.ts` and added a changelog bullet; agent Main
  * edited `a.ts` and added its own bullet; its subagent ParserFix created `parser.ts`.
@@ -385,6 +396,58 @@ describe("selective commit flow", () => {
 		expect(worktreeBefore).toContain("Fixed the theme flicker");
 		expect(await Bun.file(path.join(root, "CHANGELOG.md")).text()).toContain("- Fixed the theme flicker");
 	});
+
+	it("leaves no staged reversal after committing an edited git mv", async () => {
+		const { root, journal, write } = await stagedMoveWorkspace();
+		const after = "one\ntwo, edited after git mv\nthree\n";
+		await write("Main", undefined, "a.txt", after);
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		draft.take({ path: "**" });
+		const outcome = await commitSelection(draft, { subject: "move and edit" }, { journal, agent: { agent: "Main" } });
+
+		expect(await git(root, ["ls-tree", "--name-only", "HEAD"])).toBe("a.txt\n");
+		expect(await git(root, ["show", "HEAD:a.txt"])).toBe(after);
+		expect(await git(root, ["diff", "HEAD"])).toBe("");
+		expect(await git(root, ["diff", "--cached"])).toBe("");
+		expect(await git(root, ["status", "--short"])).toBe("");
+		expect(outcome.indexNotes).toEqual([]);
+	});
+
+	it.each(["content", "mode", "ambiguous destination"])(
+		"preserves staged %s when committing an edited git mv",
+		async stagedChange => {
+			const { root, journal, write, before } = await stagedMoveWorkspace();
+			if (stagedChange === "content") {
+				await Bun.write(path.join(root, "a.txt"), "one\ntwo\nstaged three\n");
+				await git(root, ["add", "a.txt"]);
+			} else if (stagedChange === "mode") {
+				await git(root, ["update-index", "--chmod=+x", "a.txt"]);
+			} else {
+				await Bun.write(path.join(root, "copy.txt"), before);
+				await git(root, ["add", "copy.txt"]);
+			}
+			const staged = await git(root, ["ls-files", "--stage", "--", "a.txt", "copy.txt"]);
+			const after = "one\ntwo, selected\nthree\n";
+			await write("Main", undefined, "a.txt", after);
+			await journal.flush();
+
+			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+			draft.take({ path: "z.txt" });
+			draft.take({ path: "a.txt" });
+			const outcome = await commitSelection(
+				draft,
+				{ subject: "move and edit" },
+				{ journal, agent: { agent: "Main" } },
+			);
+
+			expect(await git(root, ["ls-tree", "--name-only", "HEAD"])).toBe("a.txt\n");
+			expect(await git(root, ["show", "HEAD:a.txt"])).toBe(after);
+			expect(await git(root, ["ls-files", "--stage", "--", "a.txt", "copy.txt"])).toBe(staged);
+			expect(outcome.indexNotes).toEqual([expect.stringContaining("a.txt: its shared-index entry")]);
+		},
+	);
 
 	it("syncs the shared index once another git process lets go of its lock", async () => {
 		const { root, journal } = await sharedWorkspace();

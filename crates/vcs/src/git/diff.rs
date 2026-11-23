@@ -412,9 +412,8 @@ fn index_changes(
 	Ok(out)
 }
 
-/// gix's tree/index diff does not accept sparse-directory entries; expand only
-/// for this comparison.
-fn expand_sparse_index(
+/// Expand sparse-directory entries for callers of gix's tree/index diff.
+pub(super) fn expand_sparse_index(
 	repo: &gix::Repository,
 	index: &gix::index::File,
 ) -> Result<gix::index::File> {

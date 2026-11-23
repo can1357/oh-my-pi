@@ -154,6 +154,7 @@ impl GitRepo {
 	/// caller holds the returned lock across the HEAD compare-and-swap.
 	pub(super) fn prepare_commit_index(
 		repo: &gix::Repository,
+		old_commit: Option<gix::ObjectId>,
 		selection: &str,
 		hook_patch: &str,
 	) -> Result<(gix::lock::File, Vec<String>)> {
@@ -169,6 +170,7 @@ impl GitRepo {
 		let index = load_index_or_head(repo, "git commit read shared index")?;
 		super::mutate::reject_unmerged_index(&index, "git commit")?;
 		let mut state = index_state_map(&index);
+		clear_selected_rename_preimages(repo, old_commit, &index, &selection, &mut state)?;
 		let mut kept = BTreeSet::new();
 		for patch in selection.iter().chain(&hook_patches) {
 			let paths = [patch.old_path.as_deref(), patch.new_path.as_deref()];
@@ -555,6 +557,103 @@ impl GitRepo {
 		drop_stash(self, &repo, &stash_ref, stash_id, stash_log.as_deref())?;
 		Ok(true)
 	}
+}
+
+struct StagedRename<'a> {
+	destination:        &'a str,
+	additions:          usize,
+	deletions:          usize,
+	source_selected:    bool,
+	destination_staged: bool,
+}
+
+/// Treat a selected creation over an exact staged rename as a creation on
+/// an empty path. A Git index stores no rename links: require a unique
+/// deleted/added pair with the same object and mode, both in the selection.
+fn clear_selected_rename_preimages(
+	repo: &gix::Repository,
+	old_commit: Option<gix::ObjectId>,
+	index: &gix::index::File,
+	selection: &[FilePatch],
+	state: &mut BTreeMap<String, FileEntry>,
+) -> Result<()> {
+	let Some(old_commit) = old_commit else {
+		return Ok(());
+	};
+	let selected_deletions: BTreeSet<_> = selection
+		.iter()
+		.filter(|patch| patch.new_path.is_none())
+		.filter_map(|patch| patch.old_path.as_deref())
+		.filter(|path| !state.contains_key(*path))
+		.map(|path| path.as_bytes().as_bstr())
+		.collect();
+	if selected_deletions.is_empty() {
+		return Ok(());
+	}
+	let mut candidates: BTreeMap<_, _> = selection
+		.iter()
+		.filter(|patch| patch.old_path.is_none())
+		.filter_map(|patch| {
+			let destination = patch.new_path.as_deref()?;
+			let entry = state
+				.get(destination)
+				.filter(|entry| !entry.intent_to_add)?;
+			Some(((entry.id, entry.mode.bits()), StagedRename {
+				destination,
+				additions: 0,
+				deletions: 0,
+				source_selected: false,
+				destination_staged: false,
+			}))
+		})
+		.collect();
+	if candidates.is_empty() {
+		return Ok(());
+	}
+
+	let base = super::mutate::commit_tree(repo, &old_commit)?;
+	let expanded = index
+		.is_sparse()
+		.then(|| super::diff::expand_sparse_index(repo, index))
+		.transpose()?;
+	repo
+		.tree_index_status(
+			&base,
+			expanded.as_ref().unwrap_or(index),
+			None,
+			gix::status::tree_index::TrackRenames::Disabled,
+			|change, _, _| -> Result<_> {
+				use gix::diff::index::ChangeRef;
+				match change {
+					ChangeRef::Addition { location, entry_mode, id, .. } => {
+						if let Some(rename) = candidates.get_mut(&(id.into_owned(), entry_mode.bits())) {
+							rename.additions += 1;
+							rename.destination_staged |=
+								location.as_ref() == rename.destination.as_bytes().as_bstr();
+						}
+					},
+					ChangeRef::Deletion { location, entry_mode, id, .. } => {
+						if let Some(rename) = candidates.get_mut(&(id.into_owned(), entry_mode.bits())) {
+							rename.deletions += 1;
+							rename.source_selected |= selected_deletions.contains(location.as_ref());
+						}
+					},
+					_ => {},
+				}
+				Ok(std::ops::ControlFlow::Continue(()))
+			},
+		)
+		.map_err(|err| Error::backend("git commit compare shared index to HEAD", err))?;
+	for rename in candidates.into_values() {
+		if rename.additions == 1
+			&& rename.deletions == 1
+			&& rename.source_selected
+			&& rename.destination_staged
+		{
+			state.remove(rename.destination);
+		}
+	}
+	Ok(())
 }
 
 /// Join patch parts verbatim, adding one final newline only when absent.

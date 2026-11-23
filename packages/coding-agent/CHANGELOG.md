@@ -68,6 +68,7 @@
 ### Fixed
 
 - Selective commits now leave HEAD and staging unchanged if the shared index stays locked. Retry once the lock is released ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
+- Selective commits that include both sides of a staged `git mv` no longer leave a staged reversal of the committed edit when the rename is unambiguous and carries no other staged changes ([#20298](https://github.com/can1357/oh-my-pi/issues/20298)).
 
 ## [19.1.1] - 2026-11-23
 
