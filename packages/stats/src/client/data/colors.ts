@@ -38,8 +38,14 @@ export function buildModelColorLookup(
 	);
 }
 
-/** Generic form of {@link buildModelColorLookup} for any keyed, weighted series. */
-export function buildColorLookup(items: readonly { key: string; weight: number }[]): Map<string, string> {
+/**
+ * Generic form of {@link buildModelColorLookup} for any keyed, weighted series.
+ * `palette` narrows the hues when some are spoken for on the same chart.
+ */
+export function buildColorLookup(
+	items: readonly { key: string; weight: number }[],
+	palette: readonly string[] = SERIES_COLORS,
+): Map<string, string> {
 	const ranked = [...items].sort((a, b) => b.weight - a.weight || a.key.localeCompare(b.key));
-	return new Map(ranked.map((item, index) => [item.key, SERIES_COLORS[index % SERIES_COLORS.length]]));
+	return new Map(ranked.map((item, index) => [item.key, palette[index % palette.length]]));
 }

@@ -1,7 +1,6 @@
 export { truncate } from "@oh-my-pi/pi-utils";
 
 import * as fs from "node:fs/promises";
-import path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import { formatPathRelativeToCwd, resolveToCwd, specialFileKind } from "../tools/path-utils";
@@ -17,6 +16,7 @@ import type {
 	TextEdit,
 	WorkspaceEdit,
 } from "./types";
+import { uriToFile } from "./uri";
 
 export { detectLanguageId } from "@oh-my-pi/pi-tui/lang-from-path";
 
@@ -25,92 +25,6 @@ export async function readTextFromDisk(filePath: string): Promise<string> {
 	const kind = specialFileKind(await fs.stat(filePath));
 	if (kind) throw new Error(`Cannot open '${filePath}': it is a ${kind}, not a regular file or directory.`);
 	return Bun.file(filePath).text();
-}
-
-// =============================================================================
-// URI Handling (Cross-Platform)
-// =============================================================================
-
-/**
- * Convert a file path to a file:// URI.
- * Uses the URL machinery so special characters (`%`, `#`, `?`, spaces) are
- * percent-encoded; plain concatenation produced URIs that broke round-trips.
- * Handles Windows drive letters correctly.
- */
-export function fileToUri(filePath: string): string {
-	return Bun.pathToFileURL(path.resolve(filePath)).href;
-}
-
-/**
- * Convert a file:// URI to a file path.
- * Tolerates both percent-encoded URIs and lax servers that send raw paths.
- * Handles Windows drive letters correctly.
- */
-export function uriToFile(uri: string): string {
-	if (!uri.startsWith("file://")) {
-		return uri;
-	}
-
-	// A raw `#`/`?` parses *successfully* as fragment/query and silently
-	// truncates the path — it never reaches the catch below. LSP servers do
-	// not use fragments or queries on file URIs (encoded forms are %23/%3F),
-	// so raw occurrences mean a lax server sent an unencoded path.
-	if (uri.includes("#") || uri.includes("?")) {
-		return laxUriToFile(uri);
-	}
-
-	try {
-		return Bun.fileURLToPath(uri);
-	} catch {
-		// Not a well-formed file URL (unencoded characters, stray `%`, host
-		// component). Fall back to a lenient manual conversion.
-		return laxUriToFile(uri);
-	}
-}
-
-function laxUriToFile(uri: string): string {
-	let filePath = uri.slice(7);
-	try {
-		filePath = decodeURIComponent(filePath);
-	} catch {
-		// Invalid percent-encoding — treat as a literal path.
-	}
-
-	// Windows: file:///C:/path → C:/path (strip leading slash before drive letter)
-	if (process.platform === "win32" && filePath.startsWith("/") && /^[A-Za-z]:/.test(filePath.slice(1))) {
-		filePath = filePath.slice(1);
-	}
-
-	return filePath;
-}
-
-/** Map that treats equivalent file URI spellings as the same key. */
-export class EquivalentUriMap<Value> extends Map<string, Value> {
-	#key(uri: string): string {
-		if (!uri.startsWith("file://")) return uri;
-		const filePath = path.normalize(uriToFile(uri));
-		return process.platform === "win32" ? filePath.toLowerCase() : filePath;
-	}
-
-	override delete(uri: string): boolean {
-		const key = this.#key(uri);
-		return super.delete(key);
-	}
-
-	override get(uri: string): Value | undefined {
-		const key = this.#key(uri);
-		return super.get(key);
-	}
-
-	override has(uri: string): boolean {
-		const key = this.#key(uri);
-		return super.has(key);
-	}
-
-	override set(uri: string, value: Value): this {
-		const key = this.#key(uri);
-		return super.set(key, value);
-	}
 }
 
 // =============================================================================
@@ -326,7 +240,7 @@ export function formatWorkspaceEdit(edit: WorkspaceEdit, cwd: string): string[] 
 						break;
 					case "rename":
 						results.push(
-							`RENAME: ${formatPathRelativeToCwd(uriToFile(change.oldUri), cwd)} ${theme.nav.cursor} ${formatPathRelativeToCwd(uriToFile(change.newUri), cwd)}`,
+							`RENAME: ${formatPathRelativeToCwd(uriToFile(change.oldUri), cwd)} ${navArrow()} ${formatPathRelativeToCwd(uriToFile(change.newUri), cwd)}`,
 						);
 						break;
 					case "delete":
@@ -349,7 +263,7 @@ export function formatTextEdit(edit: TextEdit, maxLength = 50): string {
 		edit.newText.length > maxLength
 			? `${edit.newText.slice(0, maxLength).replace(/\n/g, "\\n")}…`
 			: edit.newText.replace(/\n/g, "\\n");
-	return `line ${range} ${theme.nav.cursor} "${preview}"`;
+	return `line ${range} ${navArrow()} "${preview}"`;
 }
 
 // =============================================================================
@@ -461,6 +375,30 @@ export function formatDocumentSymbol(symbol: DocumentSymbol, indent = 0): string
 	return results;
 }
 
+/** The theme's arrow glyph; `theme` is unset outside the TUI (eval, headless runs). */
+function navArrow(): string {
+	return (theme as Theme | undefined)?.nav.cursor ?? "→";
+}
+
+/**
+ * Document symbols whose name contains `query` (case-insensitive), each with its
+ * subtree and, when nested, the path of its containers.
+ */
+export function formatMatchingDocumentSymbols(symbols: DocumentSymbol[], query: string): string[] {
+	const needle = query.trim().toLowerCase();
+	const lines: string[] = [];
+	const visit = (symbol: DocumentSymbol, containers: string[]): void => {
+		if (symbol.name.toLowerCase().includes(needle)) {
+			const [head, ...rest] = formatDocumentSymbol(symbol);
+			lines.push(containers.length > 0 ? `${head} (in ${containers.join(".")})` : head!, ...rest);
+			return;
+		}
+		for (const child of symbol.children ?? []) visit(child, [...containers, symbol.name]);
+	};
+	for (const symbol of symbols) visit(symbol, []);
+	return lines;
+}
+
 /**
  * Format a symbol information (flat format).
  */
@@ -547,11 +485,13 @@ export async function applyCodeAction(
 	}
 
 	let resolvedAction = action;
+	let resolveError: unknown;
 	if (!resolvedAction.edit && dependencies.resolveCodeAction) {
 		try {
 			resolvedAction = await dependencies.resolveCodeAction(resolvedAction);
-		} catch {
-			// Resolve is optional; continue with unresolved action.
+		} catch (error) {
+			// Resolve is optional: an action that already carries a command still applies.
+			resolveError = error;
 		}
 	}
 
@@ -563,6 +503,10 @@ export async function applyCodeAction(
 	}
 
 	if (edits.length === 0 && executedCommands.length === 0) {
+		if (resolveError !== undefined) {
+			const reason = resolveError instanceof Error ? resolveError.message : String(resolveError);
+			throw new Error(`codeAction/resolve failed for "${action.title}": ${reason}`);
+		}
 		return null;
 	}
 
@@ -591,7 +535,43 @@ export async function collectGlobMatches(
 	return { matches, truncated: false };
 }
 
+/**
+ * Files a diagnostics `file` names: a path, a glob, or a `;`-separated list of
+ * either (unless the whole string is itself an existing path).
+ */
 export async function resolveDiagnosticTargets(
+	file: string,
+	cwd: string,
+	maxMatches: number,
+): Promise<{ matches: string[]; truncated: boolean }> {
+	const entries = file
+		.split(";")
+		.map(entry => entry.trim())
+		.filter(entry => entry.length > 0);
+	if (entries.length > 1 && !(await pathExists(resolveToCwd(file, cwd)))) {
+		const matches = new Set<string>();
+		for (const entry of entries) {
+			if (matches.size >= maxMatches) return { matches: [...matches], truncated: true };
+			const resolved = await resolveDiagnosticTarget(entry, cwd, maxMatches - matches.size);
+			for (const match of resolved.matches) matches.add(match);
+			if (resolved.truncated) return { matches: [...matches], truncated: true };
+		}
+		return { matches: [...matches], truncated: false };
+	}
+	return resolveDiagnosticTarget(file, cwd, maxMatches);
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+	try {
+		await fs.stat(filePath);
+		return true;
+	} catch (error) {
+		if (isEnoent(error)) return false;
+		throw error;
+	}
+}
+
+async function resolveDiagnosticTarget(
 	file: string,
 	cwd: string,
 	maxMatches: number,
@@ -684,7 +664,7 @@ function findSymbolMatchIndexes(lineText: string, symbol: string, caseInsensitiv
  * Greedy match on `.+` so `#name#2` parses as symbol=`#name` (TS private field)
  * with occurrence 2. Specs without a trailing `#\d+` are treated as literal.
  */
-function parseSymbolSpec(spec: string): { symbol: string; occurrence: number } {
+export function parseSymbolSpec(spec: string): { symbol: string; occurrence: number } {
 	const match = spec.match(/^(.+)#(\d+)$/);
 	if (!match) return { symbol: spec, occurrence: 1 };
 	const occurrence = Math.max(1, Number.parseInt(match[2], 10));
@@ -719,6 +699,38 @@ export async function resolveSymbolColumn(filePath: string, line: number, symbol
 		}
 		throw error;
 	}
+}
+
+/**
+ * Position of `symbolSpec` (`name` or `name#N`) when no line was given: its Nth
+ * whole-word occurrence in the file, falling back to case-insensitive matches.
+ */
+export async function findSymbolInFile(
+	filePath: string,
+	symbolSpec: string,
+): Promise<{ line: number; character: number }> {
+	const { symbol, occurrence } = parseSymbolSpec(symbolSpec);
+	let fileText: string;
+	try {
+		fileText = await readTextFromDisk(filePath);
+	} catch (error) {
+		if (isEnoent(error)) throw new Error(`File not found: ${filePath}`);
+		throw error;
+	}
+	const lines = fileText.split("\n");
+	for (const caseInsensitive of [false, true]) {
+		let seen = 0;
+		for (let index = 0; index < lines.length; index++) {
+			for (const character of findSymbolMatchIndexes(lines[index]!, symbol, caseInsensitive)) {
+				seen++;
+				if (seen === occurrence) return { line: index + 1, character };
+			}
+		}
+		if (seen > 0) {
+			throw new Error(`Symbol "${symbol}" occurrence ${occurrence} is out of bounds in ${filePath} (found ${seen})`);
+		}
+	}
+	throw new Error(`Symbol "${symbol}" not found in ${filePath}`);
 }
 
 export async function readLocationContext(filePath: string, line: number, contextLines = 1): Promise<string[]> {

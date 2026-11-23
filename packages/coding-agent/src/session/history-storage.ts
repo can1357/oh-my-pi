@@ -10,7 +10,9 @@ import {
 	postmortem,
 	readSalvageableRows,
 } from "@oh-my-pi/pi-utils";
+import { type WordQuery, wordQuery } from "./search-query";
 import { closeSessionIndex, salvageSessionIndex } from "./session-index";
+import { inWindow, type TimeWindow } from "./time-window";
 
 /** A unique prompt with provenance from its most recent submission. */
 export interface HistoryEntry {
@@ -34,6 +36,8 @@ export interface HistoryFilter {
 	cwd?: string;
 	/** Exact session id of the prompt's latest submission. */
 	sessionId?: string;
+	/** Window holding the prompt's latest submission. */
+	window?: TimeWindow;
 }
 
 type HistoryRow = {
@@ -71,9 +75,23 @@ const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
  * `table` qualifies the columns (`"h."`) when the statement joins.
  */
 function historyFilterClause(table: string, first: number): string {
-	const session = first + 1;
-	return `(?${first} IS NULL OR ${table}cwd = ?${first}) AND (?${session} IS NULL OR ${table}session_id = ?${session})`;
+	const [session, since, until] = [first + 1, first + 2, first + 3];
+	return `(?${first} IS NULL OR ${table}cwd = ?${first}) AND (?${session} IS NULL OR ${table}session_id = ?${session}) AND (?${since} IS NULL OR ${table}created_at >= ?${since}) AND (?${until} IS NULL OR ${table}created_at < ?${until})`;
 }
+
+/** Bindings for the parameters {@link historyFilterClause} reads, in order; window bounds become Unix seconds. */
+function historyFilterParams(filter: HistoryFilter): SQLQueryBindings[] {
+	const { since, until } = filter.window ?? {};
+	return [
+		filter.cwd ?? null,
+		filter.sessionId ?? null,
+		since === undefined ? null : since / 1000,
+		until === undefined ? null : until / 1000,
+	];
+}
+
+/** Parameters {@link historyFilterClause} reads. */
+const HISTORY_FILTER_PARAMS = 4;
 
 /**
  * Rows a reader may hand to callers. A damaged page cross-linked into
@@ -84,43 +102,14 @@ function readableRowClause(table: string): string {
 	return `typeof(${table}prompt) = 'text' AND typeof(${table}created_at) = 'integer' AND typeof(${table}use_count) = 'integer'`;
 }
 
-/** A query term's letter and digit runs, as FTS5's unicode61 tokenizer splits stored prompts. */
-function ftsTokens(term: string): string[] {
-	return term.split(/[^\p{L}\p{N}]+/u).filter(token => token.length > 0);
-}
-
-/** `text` case-folded with Latin diacritics removed, as the unicode61 tokenizer indexes it. */
-function ftsFold(text: string): string {
-	return text
-		.toLowerCase()
-		.normalize("NFD")
-		.replace(/(\p{Script=Latin})\p{M}+/gu, "$1")
-		.normalize("NFC");
-}
-
-/** Whether `phrase` occurs as consecutive `tokens`, its last token as a prefix: an FTS5 `"…"*` phrase. */
-function hasPhrasePrefix(tokens: string[], phrase: string[]): boolean {
-	const last = phrase.length - 1;
-	if (last < 0) return false;
-	for (let start = 0; start + last < tokens.length; start++) {
-		if (!tokens[start + last].startsWith(phrase[last])) continue;
-		let index = 0;
-		while (index < last && tokens[start + index] === phrase[index]) index++;
-		if (index === last) return true;
-	}
-	return false;
-}
-
 /**
- * Whether a queued `prompt` answers `terms` as {@link HistoryStorage.search}
- * matches stored rows: every term as an FTS phrase prefix, or every term as a
- * literal substring under LIKE's ASCII-only case folding.
+ * Whether a queued `prompt` answers a query as {@link HistoryStorage.search}
+ * matches stored rows: every term as an FTS phrase prefix (`words`), or every
+ * term as a literal substring under LIKE's ASCII-only case folding.
  */
-function promptMatchesTerms(prompt: string, terms: string[]): boolean {
+function promptMatchesTerms(prompt: string, terms: string[], words: WordQuery): boolean {
 	const likeText = prompt.replace(/[A-Z]+/g, run => run.toLowerCase());
-	if (terms.every(term => likeText.includes(term))) return true;
-	const tokens = ftsTokens(ftsFold(prompt));
-	return terms.every(term => hasPhrasePrefix(tokens, ftsTokens(ftsFold(term))));
+	return terms.every(term => likeText.includes(term)) || words.test(prompt);
 }
 
 // Escape LIKE wildcards so user input is treated as literal text.
@@ -225,10 +214,10 @@ END;
 		}
 		this.#assertRecentWindowReadable();
 		this.#recentStmt = this.#db.prepare(
-			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${readableRowClause("")} AND ${historyFilterClause("", 1)} ORDER BY created_at DESC, id DESC LIMIT ?3`,
+			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${readableRowClause("")} AND ${historyFilterClause("", 1)} ORDER BY created_at DESC, id DESC LIMIT ?${HISTORY_FILTER_PARAMS + 1}`,
 		);
 		this.#searchStmt = this.#db.prepare(
-			`SELECT h.id, h.prompt, h.created_at, h.cwd, h.session_id, h.use_count FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ?1 AND ${readableRowClause("h.")} AND ${historyFilterClause("h.", 2)} ORDER BY h.created_at DESC, h.id DESC LIMIT ?4`,
+			`SELECT h.id, h.prompt, h.created_at, h.cwd, h.session_id, h.use_count FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ?1 AND ${readableRowClause("h.")} AND ${historyFilterClause("h.", 2)} ORDER BY h.created_at DESC, h.id DESC LIMIT ?${HISTORY_FILTER_PARAMS + 2}`,
 		);
 		this.#upsertRowStmt = this.#db.prepare(`
 INSERT INTO history (prompt, created_at, cwd, session_id)
@@ -402,11 +391,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 		try {
 			const queued = this.#queuedEntries();
 			// Each queued prompt can displace its own stored row, so read that many more.
-			const rows = this.#recentStmt.all(
-				filter.cwd ?? null,
-				filter.sessionId ?? null,
-				safeLimit + queued.length,
-			) as HistoryRow[];
+			const rows = this.#recentStmt.all(...historyFilterParams(filter), safeLimit + queued.length) as HistoryRow[];
 			return this.#withQueued(queued, rows, filter, safeLimit);
 		} catch (error) {
 			logger.error("HistoryStorage getRecent failed", { error: String(error) });
@@ -420,28 +405,15 @@ ON CONFLICT(prompt) DO UPDATE SET
 		if (safeLimit === 0) return [];
 
 		const terms = this.#terms(query);
-		if (terms.length === 0) return [];
-		const queued = this.#queuedEntries().filter(entry => promptMatchesTerms(entry.prompt, terms));
+		// Both drop the terms without a letter or digit.
+		const words = wordQuery(query);
+		if (terms.length === 0 || !words) return [];
+		const queued = this.#queuedEntries().filter(entry => promptMatchesTerms(entry.prompt, terms, words));
 		// Each matching queued prompt can displace its own stored row, so read that many more.
 		const fetchLimit = safeLimit + queued.length;
 
-		// 1. FTS5 prefix match (term AND). Each term is one phrase of its letter
-		//    and digit runs, split the way the unicode61 tokenizer indexed the
-		//    stored text, so "git-commit" -> "git commit"*: the runs must be
-		//    adjacent tokens, not two words anywhere in the prompt.
-		const ftsQuery = terms.map(term => `"${ftsTokens(term).join(" ")}"*`).join(" ");
-		let ftsRows: HistoryRow[] = [];
-		try {
-			ftsRows = this.#searchStmt.all(
-				ftsQuery,
-				filter.cwd ?? null,
-				filter.sessionId ?? null,
-				fetchLimit,
-			) as HistoryRow[];
-		} catch (error) {
-			// Malformed FTS expression - fall through to substring path.
-			logger.debug("HistoryStorage FTS query failed, using substring only", { error: String(error) });
-		}
+		// 1. FTS5 prefix match (term AND); a malformed expression leaves only the substring path.
+		const ftsRows = this.#ftsRows(words, fetchLimit, filter);
 
 		// 2. Substring fallback (term-AND LIKE, each term literal). Catches infix
 		//    matches FTS5's prefix-only wildcard cannot reach (e.g. "mit" ->
@@ -468,6 +440,31 @@ ON CONFLICT(prompt) DO UPDATE SET
 
 		const rows = [...rowsById.values()].sort((a, b) => b.created_at - a.created_at || b.id - a.id);
 		return this.#withQueued(queued, rows, filter, safeLimit);
+	}
+
+	/**
+	 * Finds unique prompts holding every query term as words ({@link WordQuery}),
+	 * newest first. Unlike {@link search} it never matches inside a word ("mit"
+	 * misses "commit"), so the full-text index answers it alone instead of a
+	 * scan over every stored prompt.
+	 */
+	searchWords(words: WordQuery, limit: number, filter: HistoryFilter = {}): HistoryEntry[] {
+		const safeLimit = this.#normalizeLimit(limit);
+		if (safeLimit === 0) return [];
+		const queued = this.#queuedEntries().filter(entry => words.test(entry.prompt));
+		// Each matching queued prompt can displace its own stored row, so read that many more.
+		const rows = this.#ftsRows(words, safeLimit + queued.length, filter);
+		return this.#withQueued(queued, rows, filter, safeLimit);
+	}
+
+	/** Stored rows matching `words` in the full-text index, newest first; a failed query yields none. */
+	#ftsRows(words: WordQuery, limit: number, filter: HistoryFilter): HistoryRow[] {
+		try {
+			return this.#searchStmt.all(words.match, ...historyFilterParams(filter), limit) as HistoryRow[];
+		} catch (error) {
+			logger.debug("HistoryStorage FTS query failed", { error: String(error) });
+			return [];
+		}
 	}
 
 	/**
@@ -535,7 +532,8 @@ ON CONFLICT(prompt) DO UPDATE SET
 			// The JS form of historyFilterClause: an omitted field matches every prompt.
 			if (
 				(filter.cwd === undefined || entry.cwd === filter.cwd) &&
-				(filter.sessionId === undefined || entry.sessionId === filter.sessionId)
+				(filter.sessionId === undefined || entry.sessionId === filter.sessionId) &&
+				inWindow(entry.created_at * 1000, filter.window)
 			) {
 				entries.push(entry);
 			}
@@ -745,7 +743,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 	#searchSubstring(terms: string[], limit: number, filter: HistoryFilter): HistoryRow[] {
 		const stmt = this.#getSubstringStmt(terms.length);
 		const params: SQLQueryBindings[] = terms.map(term => `%${escapeLikePattern(term)}%`);
-		params.push(filter.cwd ?? null, filter.sessionId ?? null, limit);
+		params.push(...historyFilterParams(filter), limit);
 		return stmt.all(...params) as HistoryRow[];
 	}
 
@@ -758,7 +756,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 		);
 		const whereClause = [...tokenClauses, historyFilterClause("", tokenCount + 1)].join(" AND ");
 		stmt = this.#db.prepare(
-			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${readableRowClause("")} AND ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ?${tokenCount + 3}`,
+			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${readableRowClause("")} AND ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ?${tokenCount + HISTORY_FILTER_PARAMS + 1}`,
 		);
 		this.#substringStmts.set(tokenCount, stmt);
 		return stmt;

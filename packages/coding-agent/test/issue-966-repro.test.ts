@@ -21,7 +21,7 @@ try {
 	await $\`git add tracked.txt\`.cwd(dir).quiet();
 	await $\`git commit -m baseline\`.cwd(dir).quiet();
 	let repo = vcs.requireGit(dir);
-	// #10130: pi-vcs memoizes a gix index snapshot and only refreshes it when the
+	// #10130: omp-vcs memoizes a gix index snapshot and only refreshes it when the
 	// index mtime is strictly newer than the snapshot's own timestamp. Both of the
 	// stage -> commit pairs below can land inside a single mtime tick on a fresh
 	// tmpdir, so the second read is served the pre-stage index and commitCreate
@@ -80,7 +80,7 @@ try {
 	await fs.rm(dir, { recursive: true, force: true });
 }
 `;
-		const result = await $`bun --eval ${script}`.cwd(packageRoot).quiet().nothrow();
+		const result = await $`${process.execPath} --eval ${script}`.cwd(packageRoot).quiet().nothrow();
 		// `.quiet()` captures the child's output; surface it when the child fails so a
 		// red run names the actual VcsError instead of only "Expected: 0 / Received: 1".
 		if (result.exitCode !== 0) {

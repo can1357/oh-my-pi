@@ -41,6 +41,14 @@ function rejection(): Response {
 	);
 }
 
+function transientFailure(): Response {
+	return Response.json({ error: { message: "too many requests" } }, { status: 429 });
+}
+
+function isCapabilityProbe(body: Record<string, unknown>): boolean {
+	return JSON.stringify(body.messages ?? "").includes("17 times 23");
+}
+
 function chatSuccess(reasoningTokens = 0): Response {
 	const chunks = [
 		{ id: "probe", choices: [{ index: 0, delta: { content: "391" } }] },
@@ -300,5 +308,286 @@ describe("unknown-model thinking negotiation", () => {
 			efforts: [],
 		});
 		expect(requests.at(-1)?.reasoning_effort).toBeUndefined();
+	});
+
+	it("saves a finished alternate format when another format in the batch fails transiently", async () => {
+		await using temp = await TempDir.create("@thinking-probe-");
+		const model = unknownModel("openai-completions");
+		const dbPath = temp.join("models.db");
+		const requests: Record<string, unknown>[] = [];
+		let sawTransient = false;
+		const fetch: FetchImpl = async (_url, init) => {
+			const body = bodyRecord(init);
+			requests.push(body);
+			if (!isCapabilityProbe(body)) return chatSuccess();
+			if (typeof body.reasoning_effort === "string") return rejection();
+			const effort = nested(body, "reasoning").effort;
+			if (typeof effort === "string") return chatSuccess();
+			const kwargs = body.chat_template_kwargs;
+			if (isRecord(kwargs) && kwargs.thinking === true) {
+				if (kwargs.reasoning_effort === "minimal") {
+					sawTransient = true;
+					return transientFailure();
+				}
+				return rejection();
+			}
+			if (body.thinking || body.enable_thinking || body.chat_template_kwargs) return rejection();
+			return chatSuccess();
+		};
+		const result = await streamSimple(model, context, {
+			apiKey: "test",
+			fetch,
+			reasoning: Effort.Max,
+			thinkingCapabilityDbPath: dbPath,
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(sawTransient).toBe(true);
+		expect(readThinkingCapability(model, dbPath)?.format).toBe("openrouter");
+		expect(requests.at(-1)?.reasoning).toEqual({ effort: "max" });
+		expect(requests.at(-1)?.reasoning_effort).toBeUndefined();
+	});
+
+	it("prefers an earlier partly-accepted format over a later finished format without caching", async () => {
+		await using temp = await TempDir.create("@thinking-probe-");
+		const model = unknownModel("openai-completions");
+		const dbPath = temp.join("models.db");
+		const requests: Record<string, unknown>[] = [];
+		let failMediumOnce = true;
+		const fetch: FetchImpl = async (_url, init) => {
+			const body = bodyRecord(init);
+			requests.push(body);
+			if (!isCapabilityProbe(body)) return chatSuccess();
+			if (typeof body.reasoning_effort === "string") return rejection();
+			const effort = nested(body, "reasoning").effort;
+			if (typeof effort === "string") {
+				if (effort === "high") return chatSuccess();
+				if (effort === "medium") {
+					if (failMediumOnce) {
+						failMediumOnce = false;
+						return transientFailure();
+					}
+					return chatSuccess();
+				}
+				return rejection();
+			}
+			if (isRecord(body.thinking)) return chatSuccess();
+			if (body.enable_thinking || body.chat_template_kwargs) return rejection();
+			return chatSuccess();
+		};
+		const first = await streamSimple(model, context, {
+			apiKey: "test",
+			fetch,
+			reasoning: Effort.Max,
+			thinkingCapabilityDbPath: dbPath,
+		}).result();
+		expect(first.stopReason).toBe("stop");
+		expect(failMediumOnce).toBe(false);
+		expect(readThinkingCapability(model, dbPath)).toBeUndefined();
+		expect(requests.at(-1)?.reasoning).toEqual({ effort: "high" });
+		expect(requests.at(-1)?.thinking).toBeUndefined();
+		expect(requests.at(-1)?.reasoning_effort).toBeUndefined();
+
+		const second = await streamSimple(unknownModel("openai-completions"), context, {
+			apiKey: "test",
+			fetch,
+			reasoning: Effort.Medium,
+			thinkingCapabilityDbPath: dbPath,
+		}).result();
+		expect(second.stopReason).toBe("stop");
+		expect(readThinkingCapability(model, dbPath)).toMatchObject({
+			format: "openrouter",
+			efforts: [Effort.Medium, Effort.High],
+		});
+		expect(requests.at(-1)?.reasoning).toEqual({ effort: "medium" });
+		expect(requests.at(-1)?.thinking).toBeUndefined();
+	});
+
+	it("does not cache a later finished format when a preferred format is inconclusive without accepted tiers", async () => {
+		await using temp = await TempDir.create("@thinking-probe-");
+		const model = unknownModel("openai-completions");
+		const dbPath = temp.join("models.db");
+		const requests: Record<string, unknown>[] = [];
+		let failHighOnce = true;
+		const fetch: FetchImpl = async (_url, init) => {
+			const body = bodyRecord(init);
+			requests.push(body);
+			if (!isCapabilityProbe(body)) return chatSuccess();
+			if (typeof body.reasoning_effort === "string") return rejection();
+			const effort = nested(body, "reasoning").effort;
+			if (typeof effort === "string") {
+				if (effort === "high") {
+					if (failHighOnce) {
+						failHighOnce = false;
+						return transientFailure();
+					}
+					return chatSuccess();
+				}
+				return rejection();
+			}
+			if (isRecord(body.thinking)) return chatSuccess();
+			if (body.enable_thinking || body.chat_template_kwargs) return rejection();
+			return chatSuccess();
+		};
+		const first = await streamSimple(model, context, {
+			apiKey: "test",
+			fetch,
+			reasoning: Effort.Max,
+			thinkingCapabilityDbPath: dbPath,
+		}).result();
+		expect(first.stopReason).toBe("stop");
+		expect(failHighOnce).toBe(false);
+		expect(readThinkingCapability(model, dbPath)).toBeUndefined();
+		expect(requests.at(-1)?.thinking).toEqual({ type: "enabled" });
+		expect(requests.at(-1)?.reasoning).toBeUndefined();
+		expect(requests.at(-1)?.reasoning_effort).toBeUndefined();
+
+		const second = await streamSimple(unknownModel("openai-completions"), context, {
+			apiKey: "test",
+			fetch,
+			reasoning: Effort.Max,
+			thinkingCapabilityDbPath: dbPath,
+		}).result();
+		expect(second.stopReason).toBe("stop");
+		expect(readThinkingCapability(model, dbPath)).toMatchObject({
+			format: "openrouter",
+			efforts: [Effort.High],
+		});
+		expect(requests.at(-1)?.reasoning).toEqual({ effort: "high" });
+		expect(requests.at(-1)?.thinking).toBeUndefined();
+	});
+
+	it("uses an accepted effort from an unfinished ladder and does not repeat a rejected format", async () => {
+		await using temp = await TempDir.create("@thinking-probe-");
+		const model = unknownModel("openai-completions");
+		const dbPath = temp.join("models.db");
+		const requests: Record<string, unknown>[] = [];
+		let sawTransient = false;
+		const fetch: FetchImpl = async (_url, init) => {
+			const body = bodyRecord(init);
+			requests.push(body);
+			if (!isCapabilityProbe(body)) return chatSuccess();
+			if (typeof body.reasoning_effort === "string") return rejection();
+			const effort = nested(body, "reasoning").effort;
+			if (typeof effort === "string") {
+				if (effort === "high") return chatSuccess();
+				if (effort === "medium") {
+					sawTransient = true;
+					return transientFailure();
+				}
+				return rejection();
+			}
+			if (body.thinking || body.enable_thinking || body.chat_template_kwargs) return rejection();
+			return chatSuccess();
+		};
+		const result = await streamSimple(model, context, {
+			apiKey: "test",
+			fetch,
+			reasoning: Effort.Max,
+			thinkingCapabilityDbPath: dbPath,
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(sawTransient).toBe(true);
+		expect(readThinkingCapability(model, dbPath)).toBeUndefined();
+		expect(requests.at(-1)?.reasoning).toEqual({ effort: "high" });
+		expect(requests.at(-1)?.reasoning_effort).toBeUndefined();
+	});
+
+	it("skips thinking formats the probe already rejected when a later one did not finish", async () => {
+		await using temp = await TempDir.create("@thinking-probe-");
+		const model = unknownModel("openai-completions");
+		const dbPath = temp.join("models.db");
+		const requests: Record<string, unknown>[] = [];
+		const fetch: FetchImpl = async (_url, init) => {
+			const body = bodyRecord(init);
+			requests.push(body);
+			if (!isCapabilityProbe(body)) return chatSuccess();
+			if (typeof body.reasoning_effort === "string") return rejection();
+			if (typeof nested(body, "reasoning").effort === "string") return rejection();
+			if (isRecord(body.thinking)) return rejection();
+			if (body.enable_thinking || body.chat_template_kwargs) return transientFailure();
+			return chatSuccess();
+		};
+		const result = await streamSimple(model, context, {
+			apiKey: "test",
+			fetch,
+			reasoning: Effort.High,
+			thinkingCapabilityDbPath: dbPath,
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(readThinkingCapability(model, dbPath)).toBeUndefined();
+		expect(requests.at(-1)?.enable_thinking).toBe(true);
+		expect(requests.at(-1)?.thinking).toBeUndefined();
+		expect(requests.at(-1)?.reasoning_effort).toBeUndefined();
+		expect(requests.at(-1)?.reasoning).toBeUndefined();
+	});
+
+	it("does not send an effort the probe already rejected when the rest of that ladder is inconclusive", async () => {
+		await using temp = await TempDir.create("@thinking-probe-");
+		const model = unknownModel("openai-completions");
+		const dbPath = temp.join("models.db");
+		const requests: Record<string, unknown>[] = [];
+		const fetch: FetchImpl = async (_url, init) => {
+			const body = bodyRecord(init);
+			requests.push(body);
+			if (!isCapabilityProbe(body)) return chatSuccess();
+			if (typeof body.reasoning_effort === "string") return rejection();
+			const effort = nested(body, "reasoning").effort;
+			if (effort === "max") return rejection();
+			if (typeof effort === "string") return transientFailure();
+			if (body.thinking || body.enable_thinking || body.chat_template_kwargs) return transientFailure();
+			return chatSuccess();
+		};
+		const result = await streamSimple(model, context, {
+			apiKey: "test",
+			fetch,
+			reasoning: Effort.Max,
+			thinkingCapabilityDbPath: dbPath,
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(readThinkingCapability(model, dbPath)).toBeUndefined();
+		expect(requests.at(-1)?.reasoning).toEqual({ effort: "xhigh" });
+		expect(requests.at(-1)?.reasoning_effort).toBeUndefined();
+	});
+
+	it("sends a plain request and does not save it when the plain check does not finish and every thinking style is refused", async () => {
+		await using temp = await TempDir.create("@thinking-probe-");
+		const model = unknownModel("openai-completions");
+		const dbPath = temp.join("models.db");
+		const requests: Record<string, unknown>[] = [];
+		let plainProbeFailed = false;
+		const fetch: FetchImpl = async (_url, init) => {
+			const body = bodyRecord(init);
+			requests.push(body);
+			if (!isCapabilityProbe(body)) return chatSuccess();
+			if (
+				body.reasoning_effort ||
+				body.reasoning ||
+				body.thinking ||
+				body.enable_thinking ||
+				body.chat_template_kwargs
+			) {
+				return rejection();
+			}
+			plainProbeFailed = true;
+			return transientFailure();
+		};
+		const result = await streamSimple(model, context, {
+			apiKey: "test",
+			fetch,
+			reasoning: Effort.High,
+			thinkingCapabilityDbPath: dbPath,
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(plainProbeFailed).toBe(true);
+		expect(requests.some(body => typeof body.reasoning_effort === "string")).toBe(true);
+		expect(readThinkingCapability(model, dbPath)).toBeUndefined();
+		const sent = requests.at(-1);
+		if (!sent) throw new Error("Missing real request");
+		expect(isCapabilityProbe(sent)).toBe(false);
+		expect(sent.reasoning_effort).toBeUndefined();
+		expect(sent.reasoning).toBeUndefined();
+		expect(sent.thinking).toBeUndefined();
+		expect(sent.enable_thinking).toBeUndefined();
+		expect(sent.chat_template_kwargs).toBeUndefined();
 	});
 });

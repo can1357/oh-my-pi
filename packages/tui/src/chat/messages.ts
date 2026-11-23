@@ -38,16 +38,20 @@ export const LIVE_DELEGATION_MESSAGE_TYPE = "live-delegation";
 /** Content shape accepted for extension-injected messages. */
 export type CustomMessageContent = string | (TextContent | ImageContent)[];
 
+/** Custom-message fields an extension may set; `role` and `timestamp` are the session's. */
+type CustomMessagePayloadField =
+	| "customType"
+	| "content"
+	| "display"
+	| "details"
+	| "attribution"
+	| "excludeFromContext";
+
 /** Public input accepted by `pi.sendMessage` and `AgentSession.sendCustomMessage`. */
-export type CustomMessagePayload<T = unknown> =
-	| string
-	| Partial<Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">>;
+export type CustomMessagePayload<T = unknown> = string | Partial<Pick<CustomMessage<T>, CustomMessagePayloadField>>;
 
 /** Custom message payload after applying runtime defaults. */
-export type NormalizedCustomMessagePayload<T = unknown> = Pick<
-	CustomMessage<T>,
-	"customType" | "content" | "display" | "details" | "attribution"
->;
+export type NormalizedCustomMessagePayload<T = unknown> = Pick<CustomMessage<T>, CustomMessagePayloadField>;
 
 /** Details persisted on a `/tan` background-dispatch breadcrumb. */
 export interface BackgroundTanDispatchDetails {
@@ -93,15 +97,28 @@ export function isSilentAbort(message: Pick<AssistantMessage, "errorId" | "error
 	return AIError.is(message.errorId, AIError.Flag.SilentAbort) || message.errorMessage === SILENT_ABORT_MARKER;
 }
 
-/** Reason threaded through `AbortController.abort(reason)` when the user aborts
+/** Reason threaded through `AbortController.abort(reason)` when a person aborts
  *  the turn with Esc (see `AgentSession.abort`). The agent keeps it on the
- *  aborted assistant message's `errorMessage` so queued follow-ups/tool-result
+ *  aborted assistant message's `errorMessage` so queued follow-ups and tool
  *  placeholders can distinguish a deliberate interrupt from a bare lifecycle
- *  abort, but interactive renderers suppress this redundant transcript line. */
+ *  abort, but interactive renderers suppress this redundant transcript line.
+ *  Parent kills use {@link AGENT_KILL_LABEL}. */
 export const USER_INTERRUPT_LABEL = "Interrupted by user";
 
+/** Reason passed to `AgentSession.abort` when a parent kills a subagent through
+ *  `proc://<id>/kill`. It interrupts the turn just like
+ *  {@link USER_INTERRUPT_LABEL}, with distinct transcript text. */
+export const AGENT_KILL_LABEL = "Stopped by parent agent";
+
+/** An abort reason that marks a deliberate interrupt by a person or a parent agent. */
+export type InterruptReason = typeof USER_INTERRUPT_LABEL | typeof AGENT_KILL_LABEL;
+
+export function isInterruptReason(reason: unknown): reason is InterruptReason {
+	return reason === USER_INTERRUPT_LABEL || reason === AGENT_KILL_LABEL;
+}
+
 export function isUserInterruptAbort(message: Pick<AssistantMessage, "errorId" | "errorMessage">): boolean {
-	return AIError.is(message.errorId, AIError.Flag.UserInterrupt) || message.errorMessage === USER_INTERRUPT_LABEL;
+	return AIError.is(message.errorId, AIError.Flag.UserInterrupt) || isInterruptReason(message.errorMessage);
 }
 
 export function shouldRenderAbortReason(message: Pick<AssistantMessage, "errorId" | "errorMessage">): boolean {
@@ -154,7 +171,7 @@ function normalizeCustomMessageAttribution(attribution: unknown): MessageAttribu
 
 function isCustomMessagePayloadObject<T>(
 	payload: unknown,
-): payload is Partial<Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">> {
+): payload is Partial<Pick<CustomMessage<T>, CustomMessagePayloadField>> {
 	return payload !== null && typeof payload === "object" && !Array.isArray(payload);
 }
 
@@ -185,6 +202,7 @@ export function normalizeCustomMessagePayload<T = unknown>(
 		display: typeof payload.display === "boolean" ? payload.display : false,
 		details: payload.details,
 		attribution: normalizeCustomMessageAttribution(payload.attribution),
+		...(payload.excludeFromContext === true ? { excludeFromContext: true } : {}),
 	};
 }
 
@@ -234,6 +252,8 @@ export interface CustomMessage<T = unknown> {
 	details?: T;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
+	/** Rendered and saved, never sent to the model (like `!!` bash rows). */
+	excludeFromContext?: boolean;
 	timestamp: number;
 }
 
@@ -310,3 +330,28 @@ export interface AdvisorMessageDetails {
 
 /** Custom message type for supervised process completions. */
 export const LAUNCH_COMPLETION_MESSAGE_TYPE = "launch-completion";
+
+/** Custom message type for output a running background job or service was asked to report (`notify` on `bash`). */
+export const ASYNC_NOTIFY_MESSAGE_TYPE = "async-notify";
+
+/** One background job's or service's share of an `async-notify` message. */
+export interface AsyncNotifyReport {
+	/** The job's id or the service's name, as `proc://` takes it. */
+	id: string;
+	type: "bash" | "service";
+	/** Source of its `notify` regex. */
+	pattern: string;
+	/** Matching output lines, oldest first. */
+	lines: string[];
+	/** Matching lines left out of `lines`. */
+	omitted: number;
+	/** Whether it was still running when the notice was built. */
+	running: boolean;
+	/** It matched too often: this is its last notice. */
+	stopped: boolean;
+}
+
+/** Details payload on the `async-notify` custom message drawn in the transcript. */
+export interface AsyncNotifyDetails {
+	reports: AsyncNotifyReport[];
+}

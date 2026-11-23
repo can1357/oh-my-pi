@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { createMCPTimeout, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "@oh-my-pi/pi-coding-agent/mcp/timeout";
+import {
+	createMCPTimeout,
+	isMCPTimeoutEnabled,
+	resolveMCPRequestDeadline,
+	resolveMCPTimeoutMs,
+} from "@oh-my-pi/pi-coding-agent/mcp/timeout";
 import { logger } from "@oh-my-pi/pi-utils";
 
 const ORIGINAL_TIMEOUT = process.env.OMP_MCP_TIMEOUT_MS;
@@ -65,7 +70,54 @@ describe("MCP timeout configuration", () => {
 	});
 });
 
+describe("MCP per-request timeout", () => {
+	test("gives tool calls a long progress-extended default and keeps configured timeouts hard", () => {
+		delete process.env.OMP_MCP_TIMEOUT_MS;
+		expect(resolveMCPRequestDeadline(undefined, "tools/list")).toEqual({ timeoutMs: 30_000, maxTotalMs: 30_000 });
+		expect(resolveMCPRequestDeadline(undefined, "tools/call", { name: "x", arguments: {} })).toEqual({
+			timeoutMs: 600_000,
+			maxTotalMs: 3_600_000,
+		});
+		expect(resolveMCPRequestDeadline(45_000, "tools/call", { name: "x", arguments: {} })).toEqual({
+			timeoutMs: 45_000,
+			maxTotalMs: 45_000,
+		});
+	});
+
+	test("raises a tool call's deadline to the wait its arguments request", () => {
+		delete process.env.OMP_MCP_TIMEOUT_MS;
+		const call = (args: Record<string, unknown>) =>
+			resolveMCPRequestDeadline(30_000, "tools/call", { arguments: args }).timeoutMs;
+		expect(call({ timeout: 1_500_000 })).toBe(1_530_000);
+		expect(call({ timeoutInSeconds: 120 })).toBe(150_000);
+		expect(call({ wait_seconds: 45 })).toBe(75_000);
+		expect(call({ timeout_ms: 90_000 })).toBe(120_000);
+		expect(call({ timeout: 5 })).toBe(35_000);
+		expect(call({ limit: 999_999 })).toBe(30_000);
+	});
+});
+
 describe("createMCPTimeout abort-source tracking", () => {
+	test("refresh never extends past the hard cap", async () => {
+		const operation = createMCPTimeout(40, undefined, 60);
+		await Bun.sleep(30);
+		operation.refresh();
+		await Bun.sleep(45);
+		expect(operation.timedOut()).toBe(true);
+		operation.clear();
+	});
+
+	test("refresh restarts the deadline", async () => {
+		const operation = createMCPTimeout(40, undefined, 1_000);
+		await Bun.sleep(25);
+		operation.refresh();
+		await Bun.sleep(25);
+		expect(operation.timedOut()).toBe(false);
+		await Bun.sleep(30);
+		expect(operation.timedOut()).toBe(true);
+		operation.clear();
+	});
+
 	test("reports timedOut when the timer fires", async () => {
 		const op = createMCPTimeout(50);
 		try {

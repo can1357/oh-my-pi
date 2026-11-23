@@ -195,6 +195,15 @@ function createOtherInvalidRequestError(): Error {
 	return error;
 }
 
+function createVertexStructuredOutputsPolicyError(message?: string): Error {
+	const error = new Error(
+		message ??
+			"400 FAILED_PRECONDITION: Organization Policy constraint constraints/vertexai.allowedPartnerModelFeatures violated for `projects/123456789012` attempting to use a disallowed feature structured_outputs for Partner model claude-opus-5-5. Please contact your organization administrator to ask for the feature to be allowed.",
+	);
+	(error as Error & { status: number }).status = 400;
+	return error;
+}
+
 function getStrictFlags(params: unknown): boolean[] {
 	const tools = (params as { tools?: Array<{ strict?: unknown }> }).tools ?? [];
 	return tools.map(tool => tool.strict === true);
@@ -1412,6 +1421,7 @@ describe("anthropic stream envelope handling", () => {
 				{ status: 400 },
 			),
 		],
+		["a Vertex org-policy denial of structured outputs", createVertexStructuredOutputsPolicyError()],
 	])("retries without strict tools when the endpoint rejects %s", async (_case, rejection) => {
 		const toolContext: Context = {
 			...context,
@@ -1486,6 +1496,27 @@ describe("anthropic stream envelope handling", () => {
 		expect(countEvents(events, "done")).toBe(0);
 		expect(strictFlags).toEqual([[true]]);
 		expect(anthropicStrictToolsDisabled(providerSessionState)).toBe(false);
+	});
+
+	it("flags only the Vertex org-policy denial of structured_outputs as a strict-tools rejection", () => {
+		expect(AIError.isGrammarError(createVertexStructuredOutputsPolicyError())).toBe(true);
+		// Another partner feature denied by the same org policy says nothing about `strict`.
+		expect(
+			AIError.isGrammarError(
+				createVertexStructuredOutputsPolicyError(
+					"400 FAILED_PRECONDITION: Organization Policy constraint constraints/vertexai.allowedPartnerModelFeatures violated for `projects/123456789012` attempting to use a disallowed feature web_search for Partner model claude-opus-5-5.",
+				),
+			),
+		).toBe(false);
+		// Both words present but not as the denied feature.
+		expect(
+			AIError.isGrammarError(
+				createVertexStructuredOutputsPolicyError(
+					"400 INVALID_ARGUMENT: disallowed characters in tool name; structured_outputs beta header is malformed.",
+				),
+			),
+		).toBe(false);
+		expect(AIError.isGrammarError(createOtherInvalidRequestError())).toBe(false);
 	});
 
 	it("finalizes a tool call with malformed argument JSON as best-effort content instead of erroring", async () => {
@@ -1829,6 +1860,27 @@ describe("anthropic stream envelope handling", () => {
 		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "recovered" }]);
 	});
 
+	it("does not keep an earlier attempt's request id when the retry fails before its stream opens", async () => {
+		let attempt = 0;
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(() => {
+			attempt += 1;
+			// The first attempt opens a stream (request id `req_mock`) that dies before any content, so it is retried.
+			if (attempt === 1) return createMockRequest([createTextSuccessEvents("unused")[0]]) as never;
+			return createRejectedMockRequest(createOtherInvalidRequestError()) as never;
+		});
+
+		const stream = streamAnthropic(model, context, {
+			apiKey: "sk-ant-test",
+			providerRetryWait: async () => {},
+		});
+		const result = await stream.result();
+
+		expect(attempt).toBe(2);
+		expect(result.stopReason).toBe("error");
+		// `req_mock` belongs to the request that was retried, not to the one that failed.
+		expect(result.requestId).toBeUndefined();
+	});
+
 	it("fails the turn instead of finalizing a clean stop when the stream dies mid-generation", async () => {
 		// message_start + content_block_start + text_delta, then the wire goes dead:
 		// no content_block_stop, no message_delta stop_reason, no message_stop.
@@ -1993,6 +2045,8 @@ describe("anthropic stream envelope handling", () => {
 		expect(result.stopDetails).toEqual({ type: "refusal" });
 		expect(result.errorMessage).toContain("Refusal (no details provided)");
 		expect(result.errorMessage).not.toContain("An unknown error occurred");
+		// Support asks for the request id of a refused request, so it must survive on the error turn.
+		expect(result.requestId).toBe("req_mock");
 		expect(countEvents(events, "error")).toBe(1);
 		expect(countEvents(events, "done")).toBe(0);
 	});

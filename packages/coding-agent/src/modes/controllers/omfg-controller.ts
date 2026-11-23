@@ -159,6 +159,7 @@ export class OmfgController {
 			});
 			const { replyText } = await this.ctx.session.runEphemeralTurn({
 				promptText,
+				purpose: "omfg",
 				dedupeReply: false,
 				onTextDelta: delta => {
 					if (this.#isActiveRequest(request)) {
@@ -273,7 +274,9 @@ export class OmfgController {
 				target.level,
 			);
 			this.#registerLive(savedRule);
-			request.component.markSaved(shortenPath(target.filePath));
+			// Dismiss on success; errors keep the panel so the user can read them.
+			this.#closeActiveRequest({ abort: false });
+			this.ctx.showStatus(`Saved TTSR rule to ${shortenPath(target.filePath)}`);
 			return { kind: "saved" };
 		}
 	}

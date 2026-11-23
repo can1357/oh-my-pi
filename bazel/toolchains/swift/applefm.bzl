@@ -1,6 +1,6 @@
 """Repository rule detecting the mac host's Swift toolchain for the Apple Foundation Models bridge.
 
-Runs `crates/pi-natives/src/applefm/build-bridge.sh detect` on the host and
+Runs `crates/natives/src/applefm/build-bridge.sh detect` on the host and
 materializes the result for the mac exec host toolchain (//bazel/toolchains/swift:host)
 the `applefm_bridge` rule resolves; linux exec hosts use the pinned swift.org
 toolchain instead (linux.bzl):
@@ -34,7 +34,7 @@ def _applefm_swift_repository_impl(rctx):
             value = rctx.getenv(name)
             if value:
                 environment[name] = value
-        script = rctx.path(Label("//crates/pi-natives:src/applefm/build-bridge.sh"))
+        script = rctx.path(Label("//crates/natives:src/applefm/build-bridge.sh"))
         result = rctx.execute(["/bin/sh", str(script), "detect"], environment = environment)
         if result.return_code != 0:
             fail(result.stderr.strip())

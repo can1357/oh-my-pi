@@ -6,8 +6,9 @@
  */
 import { type Component, Markdown } from "../index";
 
+import type { MCPProgress } from "./mcp-progress";
 import type { NativeToolHead, NativeToolView, RenderResultOptions } from "./renderer";
-import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { ansi, md, node, span } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
@@ -402,6 +403,23 @@ export interface MCPImageContent {
 	mimeType: string;
 }
 
+/** Base64-encoded audio returned by an MCP tool or prompt. */
+export interface MCPAudioContent {
+	type: "audio";
+	data: string; // base64
+	mimeType: string;
+}
+
+/** Link to a server resource, read separately (`resources/read`). */
+export interface MCPResourceLinkContent {
+	type: "resource_link";
+	uri: string;
+	name?: string;
+	title?: string;
+	description?: string;
+	mimeType?: string;
+}
+
 /** Embedded text or binary resource returned by an MCP tool. */
 export interface MCPResourceContent {
 	type: "resource";
@@ -414,27 +432,12 @@ export interface MCPResourceContent {
 }
 
 /** Supported MCP result content blocks retained in display metadata. */
-export type MCPContent = MCPTextContent | MCPImageContent | MCPResourceContent;
-
-/** Server-reported progress of an in-flight MCP request. */
-export interface MCPProgress {
-	progress: number;
-	total?: number;
-	message?: string;
-}
-
-/**
- * Read MCP progress fields from an untrusted record: `progress` must be a
- * finite number; `total` is kept only when finite and `message` only when a
- * string. Shared by the transports, the Eval bridge, and the status renderer.
- */
-export function parseMCPProgress(value: unknown): MCPProgress | undefined {
-	if (!isRecord(value) || typeof value.progress !== "number" || !Number.isFinite(value.progress)) return undefined;
-	const progress: MCPProgress = { progress: value.progress };
-	if (typeof value.total === "number" && Number.isFinite(value.total)) progress.total = value.total;
-	if (typeof value.message === "string") progress.message = value.message;
-	return progress;
-}
+export type MCPContent =
+	| MCPTextContent
+	| MCPImageContent
+	| MCPAudioContent
+	| MCPResourceContent
+	| MCPResourceLinkContent;
 
 /**
  * One-line display text for MCP progress, at most `maxWidth` cells: the

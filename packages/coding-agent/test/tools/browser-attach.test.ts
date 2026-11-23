@@ -28,6 +28,7 @@ import {
 import {
 	ensureChromiumExecutable,
 	loadPuppeteer,
+	privateTargetId,
 	RENDERER_PRIORITY_ARGS,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import {
@@ -36,7 +37,7 @@ import {
 	normalizeConnectedCdpUrl,
 	releaseBrowser,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
-import { acquireTab, getTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { acquireTab, getTab, listTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import {
 	type Browser,
@@ -183,6 +184,173 @@ async function spawnDisposableExecutable(args: string[] = []): Promise<Disposabl
 	};
 }
 
+interface CdpMessage {
+	id?: number;
+	method?: string;
+	sessionId?: string;
+	params?: {
+		targetId?: string;
+		sessionId?: string;
+		waitingForDebugger?: boolean;
+		targetInfo?: { targetId: string; type: string };
+	};
+	result?: { targetId?: string; targetInfos?: Array<{ targetId: string; type: string }> };
+}
+
+/** A rejection no run owns, as a Puppeteer event handler's would be: run as a tab's code, it ends the tab's worker. */
+const END_WORKER = `
+	const err = new Error("library-internal");
+	err.stack = "Error: library-internal\\n    at #onFileChooser (puppeteer/Page.js:1:1)";
+	Promise.reject(err);
+	await Promise.withResolvers().promise;
+`;
+
+/**
+ * A CDP endpoint in front of real Chromium. `scoped`: it behaves like Lightpanda, so each connection sees only the
+ * pages it created, and its pages close when it disconnects. `failTargetQueries`: `Target.getTargets` and a
+ * `Target.getTargetInfo` for a page fail, as on an endpoint that does not implement them.
+ */
+function startCdpProxy(
+	upstream: string,
+	{ scoped, failTargetQueries = false }: { scoped: boolean; failTargetQueries?: boolean },
+): { url: string; stop(): void } {
+	// Page and tab target id → the connection that created it. Chromium announces a created page's tab and page
+	// targets before answering `Target.createTarget`, so a connection waiting on one claims both.
+	const owners = new Map<string, number>();
+	let nextConnection = 0;
+	// Ids of the proxy's own requests upstream, above any a client sends here.
+	const PROXY_REQUEST_IDS = 1_000_000_000;
+	interface Connection {
+		id: number;
+		upstream: WebSocket;
+		queued: string[] | null;
+		pendingCreates: number;
+		hiddenSessions: Set<string>;
+		ownedRequests: Map<number, string>;
+		nextRequestId: number;
+	}
+	const visible = (conn: Connection, targetId: string, type: string): boolean => {
+		if (!scoped || (type !== "page" && type !== "tab")) return true;
+		const owner = owners.get(targetId);
+		if (owner === undefined && conn.pendingCreates > 0) owners.set(targetId, conn.id);
+		return owners.get(targetId) === conn.id;
+	};
+	const server = Bun.serve<Connection>({
+		port: 0,
+		hostname: "127.0.0.1",
+		fetch(req, srv) {
+			const url = new URL(req.url);
+			if (url.pathname === "/json/version") {
+				return Response.json({ Browser: "Chrome", webSocketDebuggerUrl: `ws://${url.host}/devtools/browser` });
+			}
+			const id = nextConnection++;
+			const data: Connection = {
+				id,
+				upstream: new WebSocket(upstream),
+				queued: [],
+				pendingCreates: 0,
+				hiddenSessions: new Set(),
+				ownedRequests: new Map(),
+				nextRequestId: PROXY_REQUEST_IDS,
+			};
+			if (srv.upgrade(req, { data })) return undefined;
+			return new Response("not found", { status: 404 });
+		},
+		websocket: {
+			open(ws) {
+				const conn = ws.data;
+				conn.upstream.onopen = () => {
+					for (const message of conn.queued ?? []) conn.upstream.send(message);
+					conn.queued = null;
+				};
+				conn.upstream.onclose = () => ws.close();
+				conn.upstream.onmessage = event => {
+					const message = JSON.parse(String(event.data)) as CdpMessage;
+					// Answers to the proxy's own requests below.
+					if (message.id !== undefined && message.id >= PROXY_REQUEST_IDS) return;
+					if (message.sessionId && conn.hiddenSessions.has(message.sessionId)) return;
+					if (scoped && message.id !== undefined && conn.ownedRequests.get(message.id) === "Target.createTarget") {
+						conn.pendingCreates--;
+						if (message.result?.targetId) owners.set(message.result.targetId, conn.id);
+					}
+					if (message.id !== undefined) conn.ownedRequests.delete(message.id);
+					if (message.result?.targetInfos) {
+						message.result.targetInfos = message.result.targetInfos.filter(info =>
+							visible(conn, info.targetId, info.type),
+						);
+					}
+					const info = message.params?.targetInfo;
+					if (info && !visible(conn, info.targetId, info.type)) {
+						const sessionId = message.params?.sessionId;
+						if (message.method === "Target.attachedToTarget" && sessionId) {
+							conn.hiddenSessions.add(sessionId);
+							// Chromium paused the target for this connection's auto-attach, which never learns of it: resume
+							// and let it go, or the other connection's page never navigates.
+							if (message.params?.waitingForDebugger) {
+								conn.upstream.send(
+									JSON.stringify({
+										id: conn.nextRequestId++,
+										method: "Runtime.runIfWaitingForDebugger",
+										sessionId,
+									}),
+								);
+							}
+							conn.upstream.send(
+								JSON.stringify({
+									id: conn.nextRequestId++,
+									method: "Target.detachFromTarget",
+									params: { sessionId },
+								}),
+							);
+						}
+						return;
+					}
+					const targetId = message.params?.targetId;
+					if (targetId && owners.has(targetId) && owners.get(targetId) !== conn.id) return;
+					ws.send(JSON.stringify(message));
+				};
+			},
+			message(ws, raw) {
+				const conn = ws.data;
+				const message = JSON.parse(String(raw)) as CdpMessage;
+				const targetId = message.params?.targetId;
+				if (
+					failTargetQueries &&
+					(message.method === "Target.getTargets" || (message.method === "Target.getTargetInfo" && targetId))
+				) {
+					ws.send(JSON.stringify({ id: message.id, error: { code: -32000, message: "Internal error" } }));
+					return;
+				}
+				if (scoped && targetId && message.method?.startsWith("Target.") && owners.get(targetId) !== conn.id) {
+					ws.send(
+						JSON.stringify({ id: message.id, error: { code: -32602, message: "No target with given id found" } }),
+					);
+					return;
+				}
+				if (message.id !== undefined && message.method) conn.ownedRequests.set(message.id, message.method);
+				if (message.method === "Target.createTarget") conn.pendingCreates++;
+				if (conn.queued) conn.queued.push(String(raw));
+				else conn.upstream.send(String(raw));
+			},
+			close(ws) {
+				const conn = ws.data;
+				// The connection's pages go with it, as Lightpanda's do.
+				for (const [targetId, owner] of owners) {
+					if (owner !== conn.id) continue;
+					if (conn.upstream.readyState === WebSocket.OPEN) {
+						conn.upstream.send(
+							JSON.stringify({ id: conn.nextRequestId++, method: "Target.closeTarget", params: { targetId } }),
+						);
+					}
+					owners.delete(targetId);
+				}
+				conn.upstream.close();
+			},
+		},
+	});
+	return { url: `http://127.0.0.1:${server.port}`, stop: () => server.stop(true) };
+}
+
 describe("pickElectronTarget", () => {
 	beforeAll(async () => {
 		if (!CHROMIUM_AVAILABLE) return;
@@ -219,7 +387,7 @@ describe("pickElectronTarget", () => {
 	});
 
 	test.skipIf(!CHROMIUM_AVAILABLE)(
-		"waits for a real attached Chromium's first page before opening the managed tab",
+		"opens its own page on an attached Chromium that has none, and closes it with the tab",
 		async () => {
 			const exe = await ensureChromiumExecutable();
 			if (!exe) throw new Error("Expected a Chromium executable");
@@ -247,7 +415,6 @@ describe("pickElectronTarget", () => {
 			const name = `page-readiness-${crypto.randomUUID()}`;
 			const controller = new AbortController();
 			let attached: BrowserHandle | undefined;
-			let restoreWait: (() => void) | undefined;
 			try {
 				const cdpUrl = `http://127.0.0.1:${port}`;
 				await waitForCdp(cdpUrl, 15_000);
@@ -255,48 +422,24 @@ describe("pickElectronTarget", () => {
 				if (!("browser" in attached)) throw new Error("Expected a Puppeteer browser");
 				const browser = attached.browser;
 				expect(await browser.pages()).toHaveLength(0);
-				const waiting = Promise.withResolvers<void>();
-				const waitForTarget = browser.waitForTarget.bind(browser);
-				// Observe the real waiter starting, without replacing its CDP behavior.
-				// The first page is then created externally, not by browser.open.
-				const waitSpy = vi.spyOn(browser, "waitForTarget").mockImplementation((predicate, options) => {
-					waiting.resolve();
-					return waitForTarget(predicate, options);
-				});
-				restoreWait = () => waitSpy.mockRestore();
-				const opening = prelude
-					.invoke(
-						{
-							action: "open",
-							name,
-							url: "data:text/html,<title>First attached page</title>",
-							timeout: 15,
-							app: cdpUrl,
-						},
-						{ ...context, signal: controller.signal },
-					)
-					.then(
-						result => ({ result }),
-						(error: unknown) => ({ error }),
-					);
-				await Promise.race([
-					waiting.promise,
-					opening.then(outcome => {
-						if ("error" in outcome) throw outcome.error;
-						throw new Error("Attached open finished before an external page was created");
-					}),
-				]);
-				expect(await browser.pages()).toHaveLength(0);
-				await browser.newPage();
-				const outcome = await opening;
-				if ("error" in outcome) throw outcome.error;
+				// An endpoint with no page yet: the open makes its own instead of waiting for one.
+				await prelude.invoke(
+					{
+						action: "open",
+						name,
+						url: "data:text/html,<title>First attached page</title>",
+						timeout: 15,
+						app: cdpUrl,
+					},
+					{ ...context, signal: controller.signal },
+				);
 				const title = await prelude.invoke({ action: "run", name, code: "return await tab.title();" }, context);
 				expect(title.details).toMatchObject({ value: "First attached page" });
 				await prelude.invoke({ action: "close", name, kill: true }, context);
+				expect(await browser.pages()).toHaveLength(0);
 				expect(await probeCdpStatus(`${cdpUrl}/json/version`, { timeoutMs: 1500 })).toBe(200);
 			} finally {
 				controller.abort();
-				restoreWait?.();
 				await prelude.invoke({ action: "close", name }, context).catch(() => {});
 				if (attached) await releaseBrowser(attached, { kill: false });
 				await gracefulKillTreeOnce(child.pid);
@@ -336,29 +479,6 @@ describe("pickElectronTarget", () => {
 		await expect(pickElectronTarget(browser, { matcher: "PAGE_MISSING" })).rejects.toThrow(
 			'No page target matched "PAGE_MISSING". Available pages:\n- PAGE_AVAILABLE  Example  https://example.com/',
 		);
-	});
-
-	test("prefers the foreground tab when asked to, without disturbing default order", async () => {
-		const background = fakePage({ url: "https://example.com/", title: "Example" });
-		const foreground = fakePage({ url: "https://example.org/", title: "Example Org", visible: true });
-		const browser = {
-			targets: () => [fakeTarget("page", background), fakeTarget("page", foreground)],
-			pages: async () => [],
-		} as unknown as Browser;
-
-		await expect(pickElectronTarget(browser, { preferVisible: true })).resolves.toBe(foreground);
-		await expect(pickElectronTarget(browser)).resolves.toBe(background);
-	});
-
-	test("falls back to the first usable tab when no tab reports itself visible", async () => {
-		const first = fakePage({ url: "https://example.com/", title: "Example" });
-		const second = fakePage({ url: "https://example.org/", title: "Example Org" });
-		const browser = {
-			targets: () => [fakeTarget("page", first), fakeTarget("page", second)],
-			pages: async () => [],
-		} as unknown as Browser;
-
-		await expect(pickElectronTarget(browser, { preferVisible: true })).resolves.toBe(first);
 	});
 
 	test("rejects websocket cdp_url values with an actionable diagnostic", () => {
@@ -770,7 +890,7 @@ describe("pickElectronTarget", () => {
 
 	// Launches real headless Chromium; skipped where Chrome's system libraries are absent.
 	test.skipIf(!CHROMIUM_AVAILABLE)(
-		"navigates a fresh attached tab and releases its handle without closing the target",
+		"opens its own page on a CDP endpoint, and borrows one only through target",
 		async () => {
 			const launched = sharedHeadless;
 			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
@@ -786,14 +906,26 @@ describe("pickElectronTarget", () => {
 			if (!targetPage) throw new Error("Expected the launched browser to expose a page target");
 
 			try {
+				// Without a target the open makes its own page, leaving the endpoint's page alone, and closing closes it.
+				await invokeBrowser({ action: "open", name: tabName, url: requested, app: `http://${endpoint.host}` });
+				opened = true;
+				expect(targetPage.url()).not.toBe(requested);
+				const owned = getTab(tabName)?.targetId;
+				await invokeBrowser({ action: "close", name: tabName });
+				opened = false;
+				expect(launched.browser.targets().some(target => privateTargetId(target) === owned)).toBe(false);
+
+				// `target` borrows the endpoint's page: navigated, then released without closing it.
+				const targetId = privateTargetId(targetPage.target());
+				if (!targetId) throw new Error("Expected the launched page's target id");
 				await invokeBrowser({
 					action: "open",
 					name: tabName,
 					url: requested,
 					app: `http://${endpoint.host}`,
+					target: targetId,
 				});
 				opened = true;
-
 				const closeResult = await invokeBrowser({ action: "close", name: tabName });
 				opened = false;
 				expect(closeResult.content).toEqual([{ type: "text", text: `Released managed tab "${tabName}"` }]);
@@ -801,6 +933,126 @@ describe("pickElectronTarget", () => {
 				expect(targetPage.url()).toBe(requested);
 			} finally {
 				if (opened) await invokeBrowser({ action: "close", name: tabName });
+			}
+		},
+		30_000,
+	);
+
+	// Launches real headless Chromium; skipped where Chrome's system libraries are absent.
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"keeps a tab on a connection-scoped CDP endpoint through tab listing and a worker exit",
+		async () => {
+			const launched = sharedHeadless;
+			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
+			const proxy = startCdpProxy(launched.wsEndpoint, { scoped: true });
+			const session = makeSession();
+			const prelude = createBrowserPrelude(session);
+			const context = { session, toolCallId: "browser-attach-connection-scoped" };
+			const name = `attach-connection-scoped-${process.pid}-${Math.random().toString(36).slice(2)}`;
+			const url = "data:text/html,<title>connection-scoped-page</title>";
+
+			try {
+				await prelude.invoke(
+					{ action: "open", name, url, app: proxy.url, init_scripts: ["window.fromInit = 'yes';"] },
+					context,
+				);
+				await prelude.invoke(
+					{ action: "run", name, code: "await tab.evaluate(() => { window.marker = 1; });" },
+					context,
+				);
+				// The supervisor's own connection cannot see the page, which is not a page that closed.
+				expect(listTabs().map(tab => tab.name)).toContain(name);
+
+				const exit = await rejectionOf(prelude.invoke({ action: "run", name, code: END_WORKER }, context));
+				expect(exit instanceof Error ? exit.message : String(exit)).toContain(
+					"the tab's page closed with it, so omp is opening a new page for the tab on a new worker",
+				);
+				const after = await prelude.invoke(
+					{
+						action: "run",
+						name,
+						code: "return { title: await tab.title(), marker: await tab.evaluate(() => window.marker ?? null), fromInit: await tab.evaluate(() => window.fromInit ?? null) };",
+					},
+					context,
+				);
+				// A new page on the new worker's connection, back on the old page's URL, without its state, and with the
+				// document-start script the tab was opened with.
+				expect(after.details).toMatchObject({
+					value: { title: "connection-scoped-page", marker: null, fromInit: "yes" },
+				});
+			} finally {
+				await prelude.invoke({ action: "close", name }, context).catch(() => undefined);
+				proxy.stop();
+			}
+		},
+		30_000,
+	);
+
+	// Launches real headless Chromium; skipped where Chrome's system libraries are absent.
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"releases a connection-scoped tab whose page closed outside omp instead of re-creating it",
+		async () => {
+			const launched = sharedHeadless;
+			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
+			const proxy = startCdpProxy(launched.wsEndpoint, { scoped: true });
+			const session = makeSession();
+			const prelude = createBrowserPrelude(session);
+			const context = { session, toolCallId: "browser-attach-connection-scoped-closed" };
+			const name = `attach-connection-scoped-closed-${process.pid}-${Math.random().toString(36).slice(2)}`;
+			const url = "data:text/html,<title>connection-scoped-closed</title>";
+
+			try {
+				await prelude.invoke({ action: "open", name, url, app: proxy.url }, context);
+				// Another client closes the page: a connection that sees every target, as omp's never does here.
+				const page = (await launched.browser.pages()).find(candidate => candidate.url() === url);
+				if (!page) throw new Error("Expected the tab's page in the browser");
+				await page.close();
+
+				const error = await rejectionOf(
+					prelude.invoke({ action: "run", name, code: "return await tab.evaluate(() => 1);" }, context),
+				);
+				expect(error instanceof Error ? error.message : String(error)).toContain("page closed outside omp");
+				expect(listTabs().map(tab => tab.name)).not.toContain(name);
+				expect((await launched.browser.pages()).some(candidate => candidate.url() === url)).toBe(false);
+			} finally {
+				await prelude.invoke({ action: "close", name }, context).catch(() => undefined);
+				proxy.stop();
+			}
+		},
+		30_000,
+	);
+
+	// Launches real headless Chromium; skipped where Chrome's system libraries are absent.
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"re-adopts a tab's page when the endpoint cannot list its targets",
+		async () => {
+			const launched = sharedHeadless;
+			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
+			const proxy = startCdpProxy(launched.wsEndpoint, { scoped: false, failTargetQueries: true });
+			const session = makeSession();
+			const prelude = createBrowserPrelude(session);
+			const context = { session, toolCallId: "browser-attach-unlisted-targets" };
+			const name = `attach-unlisted-targets-${process.pid}-${Math.random().toString(36).slice(2)}`;
+
+			try {
+				await prelude.invoke(
+					{ action: "open", name, url: "data:text/html,<title>unlisted-targets</title>", app: proxy.url },
+					context,
+				);
+				await prelude.invoke(
+					{ action: "run", name, code: "await tab.evaluate(() => { window.marker = 1; });" },
+					context,
+				);
+				await rejectionOf(prelude.invoke({ action: "run", name, code: END_WORKER }, context));
+				const after = await prelude.invoke(
+					{ action: "run", name, code: "return await tab.evaluate(() => window.marker ?? null);" },
+					context,
+				);
+				// A probe that failed proves nothing about scoping: the new worker adopted the same page, state intact.
+				expect(after.details).toMatchObject({ value: 1 });
+			} finally {
+				await prelude.invoke({ action: "close", name }, context).catch(() => undefined);
+				proxy.stop();
 			}
 		},
 		30_000,
@@ -814,7 +1066,7 @@ describe("pickElectronTarget", () => {
 			// Page.navigate: under load the timeout could win before Chrome
 			// dispatched any HTTP request, and the request-count assertion read 0.
 			// Abort the navigation via request interception on the exact page
-			// attach adopts instead — the navigation fails deterministically on
+			// the attach borrows instead — the navigation fails deterministically on
 			// its first request, and a wrongly retried worker startup would
 			// navigate again and read 2.
 			const launched = sharedHeadless;
@@ -848,6 +1100,8 @@ describe("pickElectronTarget", () => {
 				// `onRequest` and worker init times out instead.
 				const error = await rejectionOf(
 					acquireTab(tabName, attached, {
+						// The page the interception is on: an open without a target would make its own.
+						target: privateTargetId(targetPage.target()),
 						// Loopback keeps a hypothetical interception miss local and
 						// loud (instant connection refusal, count 0) instead of
 						// wandering into DNS or a proxy.
@@ -1176,9 +1430,9 @@ describe("pickElectronTarget relay path", () => {
 			title: async () => "Cart",
 		} as unknown as Page);
 
-		await expect(
-			pickElectronTarget(makeBrowser([other.target, unreadable.target]), { relayJson, preferVisible: true }),
-		).rejects.toThrow(/selected tab.*not ready/i);
+		await expect(pickElectronTarget(makeBrowser([other.target, unreadable.target]), { relayJson })).rejects.toThrow(
+			/selected tab.*not ready/i,
+		);
 		expect(other.pageSpy).not.toHaveBeenCalled();
 	});
 
@@ -1206,84 +1460,9 @@ describe("pickElectronTarget relay path", () => {
 		const skipped = makeTarget("PAGE_A", skippedPage);
 		const home = makeTarget("PAGE_B", homePage);
 		const browser = makeBrowser([skipped.target, home.target]);
-		expect(await pickElectronTarget(browser, { relayJson, preferVisible: true })).toBe(homePage);
+		expect(await pickElectronTarget(browser, { relayJson })).toBe(homePage);
 		expect(skipped.pageSpy).not.toHaveBeenCalled();
 		expect(await pickElectronTarget(browser, { relayJson, matcher: "Service Worker" })).toBe(skippedPage);
-	});
-
-	it("prefers the visible tab among active tabs in different windows", async () => {
-		relayEntries = [
-			{
-				id: "PAGE_A",
-				type: "page",
-				title: "Window A",
-				url: "https://example.com/a",
-				active: "true",
-				discarded: "false",
-			},
-			{
-				id: "PAGE_B",
-				type: "page",
-				title: "Window B",
-				url: "https://example.com/b",
-				active: "true",
-				discarded: "false",
-			},
-		];
-		const firstPage = {
-			url: () => relayEntries[0]!.url,
-			title: async () => "Window A",
-			evaluate: async () => false,
-		} as unknown as Page;
-		const visiblePage = {
-			url: () => relayEntries[1]!.url,
-			title: async () => "Window B",
-			evaluate: async () => true,
-		} as unknown as Page;
-		const first = makeTarget("PAGE_A", firstPage);
-		const second = makeTarget("PAGE_B", visiblePage);
-		const picked = await pickElectronTarget(makeBrowser([first.target, second.target]), {
-			relayJson,
-			preferVisible: true,
-		});
-		expect(picked).toBe(visiblePage);
-	});
-
-	it("does not choose a hidden window when another active tab is unreadable", async () => {
-		relayEntries = RELAY_ENTRIES.map(entry => (entry.id === "PAGE10" ? { ...entry, active: "true" } : entry));
-		const unreadable = makeTarget("PAGE10", {
-			url: () => {
-				throw new Error("Page frame unavailable");
-			},
-			title: async () => "Docs",
-		} as unknown as Page);
-		const hidden = makeTarget("PAGE11", {
-			url: () => relayEntries[1]!.url,
-			title: async () => "Cart",
-			evaluate: async () => false,
-		} as unknown as Page);
-
-		await expect(
-			pickElectronTarget(makeBrowser([unreadable.target, hidden.target]), { relayJson, preferVisible: true }),
-		).rejects.toThrow(/tab.*not ready/i);
-	});
-
-	it("does not select a hidden page when another connected-browser page is unreadable", async () => {
-		const unreadable = makeTarget("PAGE_A", {
-			url: () => {
-				throw new Error("Page frame unavailable");
-			},
-			title: async () => "Active tab",
-		} as unknown as Page);
-		const hidden = makeTarget("PAGE_B", {
-			url: () => "https://example.com/hidden",
-			title: async () => "Background tab",
-			evaluate: async () => false,
-		} as unknown as Page);
-
-		await expect(
-			pickElectronTarget(makeBrowser([unreadable.target, hidden.target]), { preferVisible: true }),
-		).rejects.toThrow(/tab.*not ready/i);
 	});
 
 	it("does not satisfy a connected-browser matcher from another page when one is unreadable", async () => {
@@ -1305,7 +1484,7 @@ describe("pickElectronTarget relay path", () => {
 		const page = Promise.withResolvers<Page | null>();
 		const { target } = makeTarget("PAGE_CANCEL");
 		Object.assign(target, { page: () => page.promise });
-		const selection = pickElectronTarget(makeBrowser([target]), { preferVisible: true, signal: controller.signal });
+		const selection = pickElectronTarget(makeBrowser([target]), { signal: controller.signal });
 
 		controller.abort(new Error("user cancelled"));
 		page.resolve(null);

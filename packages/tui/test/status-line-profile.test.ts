@@ -72,6 +72,15 @@ describe("status line pi segment profile tag", () => {
 		expect(Bun.stripANSI(rendered.content)).toBe(`${theme.getSpinnerFrames("activity")[0]}-work 1m`);
 	});
 
+	it("shows a question mark instead of the spinner while the turn waits on an ask", () => {
+		vi.spyOn(piUtils, "getActiveProfile").mockReturnValue(undefined);
+		const waiting = renderSegment(
+			"pi",
+			createContext({ now: new Date(0), turnElapsedMs: 125_000, awaitingAnswer: true }),
+		);
+		expect(Bun.stripANSI(waiting.content)).toBe(`${theme.symbol("cmd.question") || "?"} 2m`);
+	});
+
 	it("names the profile in the native status bar", () => {
 		const activeProfile = vi.spyOn(piUtils, "getActiveProfile").mockReturnValue("work");
 		expect(describeSegment("pi", createContext())?.spans.map(part => part.t)).toEqual(["work"]);

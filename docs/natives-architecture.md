@@ -22,7 +22,7 @@
 - `packages/natives/scripts/gen-enums.ts`
 - `packages/natives/scripts/gen-npm-packages.ts`
 - `scripts/bazel-natives.ts`
-- `crates/pi-natives/src/lib.rs` and its modules
+- `crates/natives/src/lib.rs` and its modules
 
 ## Package entrypoints
 
@@ -31,12 +31,12 @@ The package exports five entrypoints:
 | Import                           | Runtime               | Types                   | Load behavior                                                                           |
 | -------------------------------- | --------------------- | ----------------------- | --------------------------------------------------------------------------------------- |
 | `@oh-my-pi/pi-natives`           | `native/index.js`     | `native/index.d.ts`     | Loads the addon immediately, then binds every generated class/function and enum object. |
-| `@oh-my-pi/pi-natives/desktop`   | `native/desktop.js`   | `native/desktop.d.ts`   | Exposes `createDesktopSession(options)` and defers addon loading until it is called.    |
+| `@oh-my-pi/pi-natives/desktop`   | `native/desktop.js`   | `native/desktop.d.ts`   | Exposes `createDesktopSession(options)`, `desktopEscapeStops(key)`, `forgetDesktopEscapeStops(key)`, `closeDesktopEventTaps()`, and `desktopWindowRoster()`; addon loading is deferred until invocation. |
 | `@oh-my-pi/pi-natives/clipboard` | `native/clipboard.js` | `native/clipboard.d.ts` | Exposes lazy `copyToClipboard` and `readImageFromClipboard` wrappers.                   |
 
 The other lazy entrypoints are `@oh-my-pi/pi-natives/path` (`native/path.js` / `path.d.ts`) and `@oh-my-pi/pi-natives/vcs` (`native/vcs.js` / `vcs.d.ts`). The path wrapper loads only for Windows path operations and returns its input unchanged elsewhere. The VCS wrapper memoizes bindings on its first native-backed operation; its error predicates and watch helper can be imported without loading the addon.
 
-There is no `packages/natives/src` wrapper layer. Most root exports bind N-API values directly; `DesktopSession` passes through `desktop-adapter.js`, which adapts older capture/execute/close addons and leaves current classes unchanged. The lazy subpaths defer loading until native functionality is needed.
+There is no `packages/natives/src` wrapper layer. Most root exports bind N-API values directly; `DesktopSession` passes through `desktop-adapter.js`, which returns current classes unchanged and otherwise substitutes an `UnsupportedDesktopSession` class that throws on construction. Outdated-addon errors are therefore deferred until `new DesktopSession()`, without legacy ABI emulation, so non-desktop root imports remain usable. The lazy subpaths defer loading until native functionality is needed.
 
 Current root capabilities include:
 
@@ -87,20 +87,20 @@ Set `PI_DEBUG_STARTUP` to emit synchronous `[startup]` markers to stderr around 
 
 ## Rust module ownership
 
-`crates/pi-natives/src/lib.rs` registers the current modules:
+`crates/natives/src/lib.rs` registers the current modules:
 
 - platform/runtime: `appearance`, `clipboard`, `crash_handler`, `desktop`, `devicecheck`, `file_lock`, `oauth_callback`, `power`, `prof`, `ps`, `pty`, `shell`, `spelling`, `tty_writer`, `vcs`;
 - media/live/model: `applefm`, `audio`, `live`, `predict`, `sixel`, `snapcompact`, `svg`;
 - code/data: `ast`, `block`, `diff`, `edit`, `fd`, `glob`, `grep`, `highlight`, `html`, `keys`, `mermaid`, `pdf`, `summary`, `text`, `tokens`, `utok`, `vectors`, `workspace`;
 - isolation/task support: `iso`, `task`, plus N-API boundary/conversion helpers (`js`, crate-private `utils`, test-only `testing`);
-- language metadata re-exported from `pi_ast::language`.
+- language metadata re-exported from `omp_ast::language`.
 
 Rust `#[napi]` functions, classes, objects, and enums generate the declaration surface. Default snake_case Rust names become camelCase JavaScript names.
 
 ## Ownership boundaries
 
-- **Package/scripts** own binary selection, CPU variants, optional leaf resolution, embedded extraction, Windows staging, desktop ABI adaptation, declarations, and explicit ESM exports.
-- **`pi-natives` and supporting crates** own algorithms, native resources, platform behavior, cancellation, and N-API conversion.
+- **Package/scripts** own binary selection, CPU variants, optional leaf resolution, embedded extraction, Windows staging, desktop ABI validation, declarations, and explicit ESM exports.
+- **`omp-natives` and supporting crates** own algorithms, native resources, platform behavior, cancellation, and N-API conversion.
 - **Consumers** own higher-level tool policy, rendering, artifacts, and user-facing fallbacks not encoded in a primitive.
 
 For the supporting-crate map, see [`native-crates.md`](./native-crates.md). For exact loader diagnostics, see [`natives-addon-loader-runtime.md`](./natives-addon-loader-runtime.md).

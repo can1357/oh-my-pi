@@ -65,7 +65,7 @@ Matching skill → MUST read skill://<name> first.
 {{/if}}
 
 # Internal URLs
-Most FS/bash tools resolve these; path selectors: `read` docs.{{#has tools "read"}} Further sub-paths, queries, limits: xd://read/urls.{{/has}}
+Most FS/bash tools resolve these; path selectors: `read` docs.{{#has tools "read"}} Further sub-paths, queries, limits: help://read/urls.{{/has}}
 {{#each internalUrls}}
 - {{this}}
 {{/each}}
@@ -84,10 +84,11 @@ Most FS/bash tools resolve these; path selectors: `read` docs.{{#has tools "read
 {{/if}}
 {{/if}}
 
-{{#if xdevTools.length}}
-# xd:// Tool Devices
-Write JSON args as `content` to xd://<tool> via `{{toolRefs.write}}`. Invalid args return schema in error → fix/retry.
-{{xdevDocs}}
+{{#if mountedCommands.length}}
+# Tool Commands
+Each listed tool is also a command in `{{toolRefs.bash}}`: run `<tool> <positional> [--flag value]`; `<tool> --help` prints usage derived from its schema.
+Raw JSON arguments object: `-j '<json>'`, `@file`, or `-` (stdin); bad arguments exit 2 with a usage hint.
+{{toolCommandDocs}}
 {{/if}}
 
 {{#has tools "think"}}
@@ -107,11 +108,9 @@ Every turn costs seconds: batch all independent reads/searches/checks into one t
 {{resultShaping}}
 {{/if}}
 - XML tags inject system content; may interrupt/notify inside user messages: MUST treat as system-authored/authoritative. User content is sanitized.
-
-
 # Specialized Tools
 {{#has tools "read"}}- File/directory reads: `{{toolRefs.read}}` (directory lists entries).{{/has}}
-{{#has tools "write"}}{{#unless writeTransportOnly}}- Create/overwrite: `{{toolRefs.write}}`.{{/unless}}{{/has}}
+{{#has tools "write"}}- Create/overwrite: `{{toolRefs.write}}`.{{/has}}
 {{#has tools "lsp"}}
 - Language server available: MUST use `{{toolRefs.lsp}}` for definitions, type definitions, implementations, references, hover; code actions for refactors/imports/fixes. NEVER text-search/edit for code intelligence.
 {{/has}}
@@ -128,11 +127,9 @@ File edits: MUST use `{{toolRefs.edit}}`{{#ifAny (includes tools "bash") (includ
 {{/if}}
 
 {{#if autoQaEnabled}}
-{{#has tools "write"}}
 <critical>
-`{{toolRefs.write}} xd://report_issue`: automated QA. Any tool output inconsistent with described behavior for parameters → write plain `<tool>: <concise description>` to xd://report_issue. False positives fine.
+Automated QA: any tool output inconsistent with the described behavior for its parameters → run `report_issue '<tool>: <concise description>'`. False positives fine.
 </critical>
-{{/has}}
 {{/if}}
 
 # Exploration
@@ -142,10 +139,10 @@ NEVER open guessed files.{{#has tools "find"}} Read `{{toolRefs.find}}` hits onl
 {{#has tools "bash"}}
 # Separate checkouts
 Need a second copy of a folder (risky experiment, another branch, tests or review beside the user's work)? MUST use an ovnfs checkout, not git worktree add, git clone or cp -r, unless the user asks for those:
-- `cd <folder> && {{ovnfs}} new --name <name>` (lowercase a-z0-9._-) prints the checkout's path in about a second: the folder as it is now, uncommitted edits, untracked files and build dirs included. --rev <rev> starts tracked files at a commit or branch instead, without in-flight edits (to verify your patch); ignored build dirs stay.
+- `cd <folder> && {{ovnfs}} new --name <name>` (lowercase a-z0-9._-) prints only the checkout's path, in about a second: the folder as it is now, uncommitted edits, untracked files and build dirs included. --rev <rev> starts tracked files at a commit or branch instead, without in-flight edits (to verify your patch); ignored build dirs stay.
 - Work in the printed path: writes and commits stay in the checkout; git commands that discard changes run there, saving the discards first.
-- Back: `{{ovnfs}} diff <name> [-p]` lists changes; `{{ovnfs}} apply <name> [--dry-run]` merges them into the folder as uncommitted edits, reporting conflicts; `apply <name> --branch <b>` makes the checkout's commits branch b, folder untouched.
-- Done: `{{ovnfs}} rm <name>`; `{{ovnfs}} ls` lists checkouts; more in `{{ovnfs}} --help`.
+- Back: `{{ovnfs}} diff <name> [-p]` lists changes; `{{ovnfs}} apply <name> [--dry-run]` merges them into the folder as uncommitted edits; `{{ovnfs}} land <name>` puts the checkout's commits on the folder's branch, files included. Conflict? `{{ovnfs}} pull <name>` merges the folder's newer files into the checkout: resolve there, then apply or land again.
+- Done: `{{ovnfs}} rm <name>` discards what was not applied or landed; `{{ovnfs}} ls` lists checkouts; more in `{{ovnfs}} help`.
 {{/has}}
 {{/if}}
 

@@ -7,7 +7,7 @@
  * `agent_start` via `ctx.clearPinnedError`. Aborts and normal stops must NOT
  * pin a banner.
  */
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -54,6 +54,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+	setSystemTime();
 	resetSettingsForTest();
 });
 
@@ -259,8 +260,8 @@ describe("EventController error banner", () => {
 			errorMessage: providerError,
 			errorId: message.errorId,
 		} as Extract<AgentSessionEvent, { type: "auto_retry_start" }>);
+		expect(clearPinnedError).toHaveBeenCalled();
 		showPinnedError.mockClear();
-		clearPinnedError.mockClear();
 		showError.mockClear();
 		setErrorPinned.mockClear();
 
@@ -273,7 +274,6 @@ describe("EventController error banner", () => {
 		} as Extract<AgentSessionEvent, { type: "auto_retry_end" }>);
 
 		expect(showPinnedError).not.toHaveBeenCalled();
-		expect(clearPinnedError).toHaveBeenCalledTimes(1);
 		expect(setErrorPinned).toHaveBeenCalledWith(false);
 		expect(showError).toHaveBeenCalledWith(`Retry failed after 1 attempts: ${finalError}`);
 	});
@@ -310,14 +310,15 @@ describe("EventController error banner", () => {
 		expect(setErrorPinned).toHaveBeenCalledWith(false);
 	});
 
-	it("clears retryable thinking-loop banners without restoring the dropped inline error", async () => {
-		const errorMessage = "loop guard stopped repeated reasoning";
+	it("keeps a recovered attempt's error out of the banner and transcript", async () => {
+		const errorMessage = "The socket connection was closed unexpectedly before the response completed";
 		const message = makeAssistantMessage({
+			content: [{ type: "thinking", thinking: "Partial reasoning" }],
 			stopReason: "error",
 			errorMessage,
-			errorId: AIError.create(AIError.Flag.ThinkingLoop),
+			errorId: AIError.create(AIError.Flag.Transient),
 		});
-		const { controller, clearPinnedError, setErrorPinned } = createFixture(message);
+		const { controller, ctx, clearPinnedError, setErrorPinned, streamingComponent } = createFixture(message);
 
 		await controller.handleEvent({ type: "message_end", message } as Extract<
 			AgentSessionEvent,
@@ -326,22 +327,45 @@ describe("EventController error banner", () => {
 		clearPinnedError.mockClear();
 		setErrorPinned.mockClear();
 
+		// The retry row counts its delay down from the wall clock, which runs on between the retry's
+		// start and this render; hold the clock still so the row shows the whole delay on any machine.
+		setSystemTime(Date.now());
 		await controller.handleEvent({
 			type: "auto_retry_start",
 			attempt: 1,
-			maxAttempts: 2,
-			delayMs: 0,
+			maxAttempts: 3,
+			delayMs: 500,
 			errorMessage,
-			errorId: AIError.create(AIError.Flag.ThinkingLoop),
+			errorId: message.errorId,
 		} as Extract<AgentSessionEvent, { type: "auto_retry_start" }>);
 
 		expect(clearPinnedError).toHaveBeenCalledTimes(1);
+		const status = Bun.stripANSI(ctx.retryLoader!.render(200).join("\n"));
+		expect(status).toContain("Retrying (1/3) in 500ms · The socket connection was closed");
+
+		await controller.handleEvent({ type: "agent_start" } as Extract<AgentSessionEvent, { type: "agent_start" }>);
 		expect(setErrorPinned).not.toHaveBeenCalledWith(false);
+
+		const retryRecovery = {
+			kind: "auto-retry",
+			status: "recovered",
+			attempt: 1,
+			recovery: "plain",
+			note: "error; retried",
+		} as const;
 		await controller.handleEvent({
 			type: "auto_retry_end",
 			success: true,
 			attempt: 1,
+			retryErrors: [
+				{ entryId: "entry", persistenceKey: "test-persistence-key", note: "error; retried", retryRecovery },
+			],
 		} as Extract<AgentSessionEvent, { type: "auto_retry_end" }>);
+
+		expect(streamingComponent.applyRetryRecovery).toHaveBeenCalledWith(retryRecovery);
+		const transcript = Bun.stripANSI(streamingComponent.render(120).join("\n"));
+		expect(transcript).not.toContain(errorMessage);
+		expect(transcript).toContain("error; retried");
 	});
 
 	it("does not pin a banner for a normal assistant stop", async () => {

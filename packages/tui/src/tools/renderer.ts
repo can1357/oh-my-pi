@@ -7,6 +7,7 @@ import type { ShellTrace, ShellVizPresentation, TspPreview, TspText, TspTone, Ts
 import type { NativeChild } from "../native/node";
 import type { Component } from "../tui";
 import type { Theme } from "../theme/theme";
+import type { ShellStepView } from "./shell-steps";
 
 /** Display state handed to `renderCall`/`renderResult`. */
 export interface RenderResultOptions {
@@ -23,7 +24,6 @@ export interface RenderResultOptions {
 	argsComplete?: boolean;
 	/**
 	 * True once this specific call has begun executing (`tool_execution_start`).
-	 * Streamed `xd://` previews stay queued until this is set.
 	 */
 	executionStarted?: boolean;
 	/**
@@ -41,12 +41,16 @@ export interface RenderResultOptions {
 	json?: boolean;
 	/** The native host draws a live shell trace (`cx.supports("shell")`). Native describe hooks only. */
 	shell?: boolean;
+	/** The native host shows running agents and jobs in its tray (`cx.feature("tray")`). Native describe hooks only. */
+	tray?: boolean;
 	/** Native semantic presentation, decoded and cached by the tool component. */
 	shellPresentation?: ShellVizPresentation;
 	/** Validated immutable trace associated with shellPresentation. */
 	shellTrace?: ShellTrace;
 	/** Explicit seeks/resets change this epoch; ordinary playback ticks do not. */
 	shellReplayEpoch?: number;
+	/** The output source of the traced command the card shows: a clicked step's, or what flows now. Native describe hooks only. */
+	shellStep?: ShellStepView;
 }
 
 /** Render options for a result, plus the tool-specific context the transcript threads through. */
@@ -147,6 +151,8 @@ export interface NativeToolView {
 	readonly preview?: TspPreview | { readonly tail: number } | "none" | "children";
 	/** Starts expanded whatever the transcript's expand state (the todo checklist); the user can still fold it. */
 	readonly open?: boolean;
+	/** Starts collapsed whatever the transcript's expand state (what the tray already shows); the user can still unfold it. */
+	readonly folded?: boolean;
 	/** Render frameless (`frame:"inline"`): a head line plus a disclosed body. */
 	readonly inline?: boolean;
 	/** Head actions offered on hover (`copy`, `retry`). */

@@ -8,6 +8,7 @@ import { decodeEntities } from "@oh-my-pi/pi-utils/dom/parser";
 import type TurndownService from "@oh-my-pi/pi-utils/turndown";
 
 import type { ModelRegistry } from "../../config/model-registry";
+import { settings as globalSettings, isSettingsInitialized, Settings } from "../../config/settings";
 import type { AgentStorageApi } from "../../session/agent-storage";
 import { ToolAbortError } from "../../tools/tool-errors";
 import { decodeBody } from "../response-body";
@@ -29,6 +30,7 @@ export interface RenderResult {
 /**
  * Site-specific URL renderer: returns `null` for URLs it does not own.
  * `modelRegistry` is the session's, for handlers that read through a model (X via Grok).
+ * `settings` is the session's; direct callers without one resolve via {@link handlerSettings}.
  */
 export type SpecialHandler = (
 	url: string,
@@ -36,12 +38,23 @@ export type SpecialHandler = (
 	signal?: AbortSignal,
 	storage?: AgentStorageApi | null,
 	modelRegistry?: ModelRegistry,
+	settings?: Settings,
 ) => Promise<RenderResult | null>;
+
+/**
+ * Direct-call fallback for {@link SpecialHandler} implementations that read settings:
+ * returns the session's `settings` when supplied, otherwise global settings (if initialized)
+ * or isolated defaults.
+ */
+export function handlerSettings(settings?: Settings): Settings {
+	return settings ?? (isSettingsInitialized() ? globalSettings : Settings.isolated());
+}
 
 /** Network read bound for a fetched body; the only size limit on rendered URL content. */
 export const MAX_BYTES = 50 * 1024 * 1024;
 
-const USER_AGENTS = [
+/** User agents a fetch tries in turn while the site refuses the previous one ({@link BLOCKED_STATUSES}). */
+export const USER_AGENTS = [
 	"curl/8.0",
 	"Mozilla/5.0 (compatible; TextBot/1.0)",
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -52,7 +65,7 @@ const USER_AGENTS = [
  * says: a bare nginx "403 Forbidden" page, SEC's "Undeclared Automated Tool" page or a 429
  * keyed on the agent all serve the page to the next user agent.
  */
-const BLOCKED_STATUSES = new Set([403, 429, 503, 999]);
+export const BLOCKED_STATUSES = new Set([403, 429, 503, 999]);
 
 /** A challenge interstitial carries no content (Reddit's is about 8 KB); a larger page is no wall. */
 const CHALLENGE_PAGE_MAX_CHARS = 64 * 1024;

@@ -28,6 +28,7 @@ interface MCPTransportErrorOptions {
 	code?: string | number;
 	data?: string;
 	traceId?: string;
+	rpc?: JsonRpcError;
 	cause?: unknown;
 }
 
@@ -61,6 +62,13 @@ export class MCPTransportError extends Error {
 	readonly data: string | undefined;
 	/** Safe server trace or request identifier. */
 	readonly traceId: string | undefined;
+	/**
+	 * The server's JSON-RPC error as received, for {@link createMCPJsonRpcError}
+	 * failures. The MCP host forwards it to sessions unchanged: `data` drives
+	 * protocol decisions (`supported` versions, required capabilities) that the
+	 * redacted {@link data} string cannot.
+	 */
+	readonly rpc: JsonRpcError | undefined;
 
 	constructor(options: MCPTransportErrorOptions) {
 		super(
@@ -75,6 +83,7 @@ export class MCPTransportError extends Error {
 		this.code = options.code;
 		this.data = options.data;
 		this.traceId = options.traceId;
+		this.rpc = options.rpc;
 	}
 }
 
@@ -90,6 +99,7 @@ export function nonRetryableMCPTransportError(error: MCPTransportError): MCPTran
 		code: error.code,
 		data: error.data,
 		traceId: error.traceId,
+		rpc: error.rpc,
 		cause: error,
 	});
 }
@@ -201,6 +211,7 @@ export function createMCPJsonRpcError(
 		code: error.code,
 		data: serializeData(error.data),
 		traceId: safeTraceId(traceId) ?? findTraceId(error.data),
+		rpc: error,
 	});
 }
 
@@ -281,7 +292,7 @@ function nextStep(error: MCPTransportError): string {
 		case "connect":
 			return "Check that the MCP server is running and reachable, then retry.";
 		case "timeout":
-			return "Check server health or increase the MCP timeout; the request outcome is unknown.";
+			return "Raise this server's `timeout` (ms) in its MCP config or set OMP_MCP_TIMEOUT_MS; the request outcome is unknown.";
 		case "eof":
 		case "reset":
 			return error.transport === "stdio"

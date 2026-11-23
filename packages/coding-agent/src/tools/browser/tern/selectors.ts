@@ -73,7 +73,8 @@ export function parseTernSelector(selector: string): TernSelector {
 				`Use a puppeteer text selector ("text/Allow all"), an aria selector ("aria/Name"), CSS, or "xpath/...".`,
 		);
 	}
-	if (selector.startsWith("p-")) {
+	// `p-<engine>/` is the legacy prefixed form; any other `p-…` is CSS (PrimeNG's `p-button`, `p-confirmdialog`).
+	if (/^p-[a-z]+\//.test(selector)) {
 		if (!LEGACY_PREFIXES.some(prefix => selector.startsWith(prefix))) {
 			throw new ToolError(
 				`Unsupported selector prefix. Use CSS or puppeteer query handlers (aria/, text/, xpath/, pierce/). Got: ${selector}`,
