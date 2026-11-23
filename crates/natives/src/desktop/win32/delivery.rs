@@ -102,6 +102,30 @@ pub fn is_vcl_class(class: &str) -> bool {
 		.is_some_and(|suffix| !suffix.is_empty())
 }
 
+/// Whether `class` is the system control class `base` or a `WinForms`
+/// subclass of it (`WindowsForms10.<BASE>.app.<suffix>`).
+pub(super) fn is_native_class(class: &str, base: &str) -> bool {
+	const WINFORMS: &str = "WindowsForms10.";
+	class.eq_ignore_ascii_case(base)
+		|| class.split_once(".app.").is_some_and(|(name, suffix)| {
+			name
+				.get(..WINFORMS.len())
+				.is_some_and(|prefix| prefix.eq_ignore_ascii_case(WINFORMS))
+				&& name
+					.get(WINFORMS.len()..)
+					.is_some_and(|name| name.eq_ignore_ascii_case(base))
+				&& !suffix.is_empty()
+		})
+}
+
+/// Whether a system `BUTTON` control with `style` acts the same wherever it
+/// is clicked, so `BM_CLICK` stands for a click on it: push buttons, check
+/// boxes, radio buttons, command links and owner-drawn buttons. Group boxes
+/// take no clicks; split buttons have a separate drop-down region.
+pub(super) const fn button_takes_bm_click(style: u32) -> bool {
+	matches!(style & 0xf, 0x0..=0x6 | 0x9 | 0xb | 0xe | 0xf)
+}
+
 /// Returns the empirical reason that a posted event would be accepted by
 /// Win32 but silently ignored by the target toolkit.
 pub fn would_be_silently_dropped(
@@ -340,6 +364,22 @@ mod tests {
 		assert!(is_vcl_class("SALFRAME"));
 		assert!(!is_vcl_class("SAL"));
 		assert!(!is_vcl_class("XSALFRAME"));
+	}
+
+	#[test]
+	fn native_buttons_take_bm_click_except_group_boxes_and_split_buttons() {
+		assert!(is_native_class("Button", "Button"));
+		assert!(is_native_class("WindowsForms10.BUTTON.app.0.34f5582_r6_ad1", "Button"));
+		assert!(!is_native_class("WindowsForms10.Window.8.app.0.34f5582_r6_ad1", "Button"));
+		// BS_PUSHBUTTON, BS_DEFPUSHBUTTON, BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON,
+		// BS_OWNERDRAW, BS_COMMANDLINK, with unrelated style bits above the type.
+		for style in [0x0, 0x1, 0x3, 0x9, 0xb, 0xe, 0x5001_0000] {
+			assert!(button_takes_bm_click(style), "{style:#x}");
+		}
+		// BS_GROUPBOX, BS_SPLITBUTTON, BS_DEFSPLITBUTTON.
+		for style in [0x7, 0xc, 0xd, 0x5001_0007] {
+			assert!(!button_takes_bm_click(style), "{style:#x}");
+		}
 	}
 
 	fn assert_matrix(target: TargetTraits<'_>, expected: [bool; 6]) {

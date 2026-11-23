@@ -10,6 +10,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 let session: AgentSession | undefined;
@@ -126,6 +127,31 @@ describe("AgentSession title fork", () => {
 		expect(sideCall.options?.promptCacheKey).toBe(mainCall.options?.promptCacheKey ?? mainCall.options?.sessionId);
 		// The fork runs beside the main turn, which finishes on its own.
 		expect(target.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
+
+	it("titles a session a collab peer opens, as the web Inbox's first instruction does", async () => {
+		const main = createMockModel({ responses: [{ content: ["Reading the park tests first."] }] });
+		const side = createMockModel({ handler: { content: [CARD_REPLY] } });
+		const target = await createSession(main, side);
+		const titled = nextTitle(target);
+
+		// As `CollabHost` submits a writable peer's prompt.
+		await target.promptCustomMessage(
+			{
+				customType: COLLAB_PROMPT_MESSAGE_TYPE,
+				content: FIRST_MESSAGE,
+				display: true,
+				details: { from: "web" },
+				attribution: "user",
+			},
+			{ streamingBehavior: "steer", queueChipText: FIRST_MESSAGE },
+		);
+		await titled;
+
+		expect(target.sessionName).toBe("🧪 FLAKY: Fix flaky park tests");
+		expect(target.sessionManager.getEntries().filter(entry => entry.type === "title_change")).toEqual([
+			expect.objectContaining({ title: "🧪 FLAKY: Fix flaky park tests", source: "auto" }),
+		]);
 	});
 
 	it.each<[string, MockResponse, MockResponse]>([

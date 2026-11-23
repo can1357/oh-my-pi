@@ -6,13 +6,15 @@ import { embedTargetUrl, resolveEmbedSource } from "@oh-my-pi/pi-tui/chat/embed-
 
 describe("resolveEmbedSource", () => {
 	let cwd: string;
+	// Windows permits a literal fragment delimiter but not a literal query delimiter in a filename.
+	const delimiterName = process.platform === "win32" ? "what#.html" : "what?.html";
 
 	beforeAll(async () => {
 		cwd = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "embed-target-")));
 		await Bun.write(path.join(cwd, "out/report.html"), "<p>report</p>");
 		await Bun.write(path.join(cwd, "my chart.png"), "");
 		await Bun.write(path.join(cwd, "notes.io/index.html"), "");
-		await Bun.write(path.join(cwd, "what?.html"), "");
+		await Bun.write(path.join(cwd, delimiterName), "");
 	});
 
 	afterAll(async () => {
@@ -23,9 +25,8 @@ describe("resolveEmbedSource", () => {
 		const target = resolveEmbedSource(src, cwd);
 		return target?.kind === "url" ? target.url : target;
 	};
-	const file = (src: string) => {
-		const target = resolveEmbedSource(src, cwd);
-		return target?.kind === "file" ? path.relative(cwd, target.path) + target.suffix : target;
+	const expectFile = (src: string, relativePath: string, suffix = "") => {
+		expect(resolveEmbedSource(src, cwd)).toEqual({ kind: "file", path: path.join(cwd, relativePath), suffix });
 	};
 
 	it("reads a web address written with a missing or broken scheme", () => {
@@ -43,38 +44,44 @@ describe("resolveEmbedSource", () => {
 	});
 
 	it("reads a file written as a bare path or as a file: URL in any spelling", () => {
-		expect(file("out/report.html")).toBe("out/report.html");
-		expect(file("./out/report.html")).toBe("out/report.html");
-		expect(file(path.join(cwd, "out/report.html"))).toBe("out/report.html");
-		expect(file(`file://${cwd}/out/report.html`)).toBe("out/report.html");
-		expect(file(`file:${cwd}/out/report.html`)).toBe("out/report.html");
-		expect(file(`file://localhost${cwd}/out/report.html`)).toBe("out/report.html");
-		expect(file("file:out/report.html")).toBe("out/report.html");
-		expect(file("file://out/report.html")).toBe("out/report.html");
+		const report = path.join(cwd, "out", "report.html");
+		const reportUrl = Bun.pathToFileURL(report);
+		expectFile("out/report.html", "out/report.html");
+		expectFile("./out/report.html", "out/report.html");
+		expectFile(report, "out/report.html");
+		expectFile(reportUrl.href, "out/report.html");
+		expectFile(`file:${reportUrl.pathname}`, "out/report.html");
+		expectFile(`file:${report}`, "out/report.html");
+		expectFile(`file://localhost${reportUrl.pathname}`, "out/report.html");
+		expectFile("file:out/report.html", "out/report.html");
+		expectFile("file://out/report.html", "out/report.html");
 		const home = resolveEmbedSource("~/shot.png", cwd);
 		expect(home).toEqual({ kind: "file", path: path.join(os.homedir(), "shot.png"), suffix: "" });
 	});
 
 	it("drops what was left around the value and reads an encoded name as the file that exists", () => {
-		expect(file(` "out/report.html" `)).toBe("out/report.html");
-		expect(file("<out/report.html>")).toBe("out/report.html");
-		expect(file("my chart.png")).toBe("my chart.png");
-		expect(file("my%20chart.png")).toBe("my chart.png");
+		expectFile(` "out/report.html" `, "out/report.html");
+		expectFile("<out/report.html>", "out/report.html");
+		expectFile("my chart.png", "my chart.png");
+		expectFile("my%20chart.png", "my chart.png");
 	});
 
 	it("keeps a page's query and fragment apart from its file, unless they are the file's name", () => {
-		expect(file("out/report.html?tab=2#top")).toBe("out/report.html?tab=2#top");
-		expect(file("what?.html")).toBe("what?.html");
+		const suffix = "?tab=2#top";
+		expectFile(`out/report.html${suffix}`, "out/report.html", suffix);
 		const target = resolveEmbedSource("out/report.html#top", cwd);
-		expect(target && embedTargetUrl(target)).toBe(`${Bun.pathToFileURL(path.join(cwd, "out/report.html")).href}#top`);
+		const report = path.join(cwd, "out", "report.html");
+		expect(target).toEqual({ kind: "file", path: report, suffix: "#top" });
+		expect(target && embedTargetUrl(target)).toBe(`${Bun.pathToFileURL(report).href}#top`);
+		expectFile(delimiterName, delimiterName);
 	});
 
 	it("lets the disk decide between a domain and a file that look alike", () => {
 		// A directory named like a domain holds the file; the same shape with no file is a site.
-		expect(file("notes.io/index.html")).toBe("notes.io/index.html");
+		expectFile("notes.io/index.html", "notes.io/index.html");
 		expect(url("blog.io/index.html")).toBe("https://blog.io/index.html");
 		// A lone name with a file's extension is a file even before it exists.
-		expect(file("chart.png")).toBe("chart.png");
+		expectFile("chart.png", "chart.png");
 		expect(url("chart.dev")).toBe("https://chart.dev/");
 	});
 
