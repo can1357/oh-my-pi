@@ -247,6 +247,38 @@ describe("Editor vim mode", () => {
 			expect(editor.getExpandedText()).toBe(live);
 		});
 
+		it("editing a prompt k recalled keeps the draft reachable with j, and keeps the edit for the next k", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.addToHistory("previous prompt");
+			editor.setVimMode(true);
+			editor.setText("my long draft");
+			editor.handleInput(ESC);
+			editor.handleInput("k");
+			expect(editor.getText()).toBe("previous prompt");
+			editor.handleInput("x");
+			expect(editor.getText()).toBe("revious prompt");
+			editor.handleInput("j");
+			expect(editor.getText()).toBe("my long draft");
+			// Back up to the recalled prompt: the edit made there is still there, as in zsh.
+			editor.handleInput("k");
+			expect(editor.getText()).toBe("revious prompt");
+		});
+
+		it("a k/j round trip keeps the draft's undo history", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.addToHistory("an older prompt");
+			editor.setVimMode(true);
+			editor.setText("abc");
+			editor.handleInput(ESC);
+			editor.handleInput("x");
+			expect(editor.getText()).toBe("ab");
+			editor.handleInput("k");
+			editor.handleInput("j");
+			expect(editor.getText()).toBe("ab");
+			editor.handleInput("u");
+			expect(editor.getText()).toBe("abc");
+		});
+
 		it("backspace moves left in normal mode rather than deleting", () => {
 			const editor = vimEditor("alfa", { cursorToStart: false });
 			editor.handleInput(ESC);

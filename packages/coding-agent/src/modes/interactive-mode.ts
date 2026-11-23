@@ -6887,8 +6887,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	configureDialogEditor(editor: Editor): void {
 		this.#wireVimClipboard(editor);
 		editor.vimStartMode = cfgTuiVimStartMode.get(settings);
-		// Dialogs have no status line of their own; the cursor shape is what shows the mode.
-		editor.onVimModeChange = mode => this.ui.terminal.setCursorShape?.(mode === "insert" ? "bar" : "block");
+		// Dialogs have no status line of their own; the cursor shape is what shows the mode. Only the
+		// editor holding the keys sets it (an editor built for a form the keys are not in must not);
+		// gaining focus re-announces the mode, so the shape follows focus.
+		editor.onVimModeChange = mode => {
+			if (editor.focused) this.ui.terminal.setCursorShape?.(mode === "insert" ? "bar" : "block");
+		};
 	}
 
 	/**

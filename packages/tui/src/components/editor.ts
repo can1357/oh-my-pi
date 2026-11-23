@@ -698,6 +698,16 @@ interface LocalHistoryEntry {
 	draft?: DraftPayload;
 }
 
+/** The live draft while Vim's `k`/`j` browse prompt history, and where the browsing is. */
+interface VimHistoryStash {
+	text: string;
+	draft: DraftPayload;
+	undo: EditorState[];
+	redo: EditorState[];
+	/** History index the steps last landed on. */
+	at: number;
+}
+
 /** A synchronous replacement immediately before the editor cursor. */
 export interface EditorInlineReplacement {
 	/** UTF-16 code units to remove immediately before the cursor. */
@@ -974,8 +984,10 @@ export class Editor implements Component, Focusable {
 	#vimUnnamed: VimRegister | null = null;
 	/** A `"+`/`"*` clipboard read started when the register was named; settles once the text is stored. */
 	#vimClipboardRead: Promise<void> | null = null;
-	/** The draft `k` stepped away from into history, payloads included; `j` back past the newest prompt restores it. */
-	#vimHistoryDraft: { text: string; draft: DraftPayload } | null = null;
+	/** The draft `k` stepped away from into history and where the steps are; `j` back past the newest prompt restores it. */
+	#vimHistoryDraft: VimHistoryStash | null = null;
+	/** Edits made to prompts `k` recalled, by history index, kept (as zsh keeps them) until the prompt is sent. */
+	readonly #vimHistoryEdits = new Map<number, string>();
 	/** Set by `gj`/`gk` within a key, so the screen column they keep survives it. */
 	#vimScreenMoved = false;
 	/** Bumped by every store into `"+`/`"*`, so a clipboard read started before it cannot overwrite it. */
@@ -3047,29 +3059,51 @@ export class Editor implements Component, Focusable {
 	/**
 	 * `k`/`j` past the first or last line: `count` prompts older or newer, as zsh's vi mode. An older
 	 * prompt opens on its last line and a newer one on its first, so further `k`/`j` walk through it;
-	 * stepping newer past the newest prompt brings back the draft the first `k` left. Like Up in
-	 * Insert mode, `k` off the draft's top first offers the keys to whatever waits above (an ask).
+	 * stepping newer past the newest prompt brings back the draft the first `k` left, payloads and
+	 * undo history included. Like Up in Insert mode, `k` off the draft's top first offers the keys to
+	 * whatever waits above (an ask).
+	 *
+	 * Editing a recalled prompt drops {@link #historyIndex} to -1, as any edit does, but the steps still
+	 * know which prompt it was: as in zsh, the edit is kept for when the steps come back to it, and
+	 * the draft stays reachable until the prompt is sent.
 	 */
 	#stepVimHistory(older: boolean, count: number): void {
-		const start = this.#historyIndex;
-		if (older && start === -1 && this.onUpFromTop?.()) return;
+		let stash = this.#vimHistoryDraft;
+		if (stash === null && older && this.#historyIndex === -1 && this.onUpFromTop?.()) return;
 		const text = this.#state.lines.join("\n");
-		const draft =
-			start === -1 && older ? { text, draft: this.#draftPayload(text, this.captureHistoryState()) } : null;
+		if (stash !== null) {
+			if (text !== (this.#history[stash.at]?.text ?? "")) this.#vimHistoryEdits.set(stash.at, text);
+			this.#historyIndex = stash.at;
+		} else if (this.#historyIndex === -1) {
+			if (!older) return;
+			stash = {
+				text,
+				draft: this.#draftPayload(text, this.captureHistoryState()),
+				undo: this.#undoStack.slice(),
+				redo: this.#redoStack.slice(),
+				at: -1,
+			};
+		}
+		const from = this.#historyIndex;
 		for (let n = 0; n < count; n++) {
 			const index = this.#historyIndex;
 			this.#navigateHistory(older ? -1 : 1);
 			if (this.#historyIndex === index) break;
 		}
-		if (this.#historyIndex === start) return;
-		if (draft !== null) this.#vimHistoryDraft = draft;
-		const left = this.#vimHistoryDraft;
-		if (this.#historyIndex === -1 && left !== null) {
-			// Back to the live draft: its pastes, atoms, and host attachments, not just its text.
-			this.#applyDraftPayload(left.draft);
+		if (this.#historyIndex === from) return;
+		if (stash !== null && this.#historyIndex === -1) {
+			// Back to the live draft: its pastes, atoms, host attachments, and undo history.
+			this.#applyDraftPayload(stash.draft);
 			this.#historyDraftActive = false;
-			this.#setTextInternal(left.text);
+			this.#setTextInternal(stash.text);
+			this.#undoStack.push(...stash.undo);
+			this.#redoStack.push(...stash.redo);
 			this.#vimHistoryDraft = null;
+		} else if (stash !== null) {
+			stash.at = this.#historyIndex;
+			this.#vimHistoryDraft = stash;
+			const edited = this.#vimHistoryEdits.get(stash.at);
+			if (edited !== undefined) this.#setTextInternal(edited);
 		}
 		const line = older ? this.#state.lines.length - 1 : 0;
 		this.#state.cursorLine = line;
@@ -3945,6 +3979,7 @@ export class Editor implements Component, Focusable {
 	setText(text: string, options: { cursor?: "start" | "end" } = {}): void {
 		this.#historyIndex = -1; // Exit history browsing mode
 		this.#vimHistoryDraft = null;
+		this.#vimHistoryEdits.clear();
 		this.#resetKillSequence();
 		this.#setTextInternal(text, options.cursor);
 	}
@@ -4470,6 +4505,7 @@ export class Editor implements Component, Focusable {
 		this.clearPasteState();
 		this.#historyIndex = -1;
 		this.#vimHistoryDraft = null;
+		this.#vimHistoryEdits.clear();
 		this.#scrollOffset = 0;
 		this.#undoStack.length = 0;
 		this.#redoStack.length = 0;
