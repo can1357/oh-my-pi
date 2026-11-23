@@ -61,6 +61,7 @@ import {
 	type ToolCommandState,
 	toolCommandDocsFor,
 	toolCommandEntries,
+	toolCommandHostAvailable,
 } from "../tools/tool-commands";
 import type { EditModeSetting } from "../edit/settings";
 import { resolveEditMode } from "../utils/edit-mode";
@@ -197,6 +198,11 @@ interface SessionToolsOptions {
 	/** Creates the private `think` scratchpad tool for runtime setting changes. */
 	createThinkTool?: () => Promise<AgentTool | null>;
 	builtInToolNames?: Iterable<string>;
+	/**
+	 * Whether a native built-in of this name is still available behind a same-name
+	 * extension override; the command transport needs one to run its commands.
+	 */
+	hasNativeTool?: (name: string) => boolean;
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	/** MCP tool names whose current registry entries came from the manager snapshot. */
 	mcpManagerToolNames?: Iterable<string>;
@@ -439,6 +445,7 @@ export class SessionTools {
 	/** An MCP refresh landed while vibe narrowed the active set; vibe exit activates its manager tools. */
 	#vibeDeferredMcpRefresh = false;
 	#builtInToolNames: Set<string>;
+	#hasNativeTool: SessionToolsOptions["hasNativeTool"];
 	#rpcHostToolNames = new Set<string>();
 	#mcpManagerToolNames = new Set<string>();
 	#extensionMcpTools = new Map<string, AgentTool>();
@@ -588,6 +595,7 @@ export class SessionTools {
 		this.#createVibeTools = options.createVibeTools;
 		this.#createThinkTool = options.createThinkTool;
 		this.#builtInToolNames = new Set(options.builtInToolNames ?? []);
+		this.#hasNativeTool = options.hasNativeTool;
 		this.#mcpManagerToolNames = new Set(options.mcpManagerToolNames ?? []);
 		if (options.mcpManagerToolNames === undefined) {
 			for (const name of this.#toolRegistry.keys()) {
@@ -896,7 +904,9 @@ export class SessionTools {
 
 	/** Tool command state while the active `bash` tool runs the commands; undefined while tools present top-level. */
 	get activeToolCommands(): ToolCommandState | undefined {
-		if (!this.#toolCommands || !this.#builtInToolNames.has("bash")) return undefined;
+		if (!this.#toolCommands || !toolCommandHostAvailable(this.#builtInToolNames, this.#hasNativeTool)) {
+			return undefined;
+		}
 		return this.getActiveToolNames().includes("bash") ? this.#toolCommands : undefined;
 	}
 
@@ -1533,11 +1543,12 @@ export class SessionTools {
 			const tool = this.#toolRegistry.get(name);
 			return tool ? [{ name, tool }] : [];
 		});
-		// Tool commands run inside the built-in `bash` tool: mounting engages only
-		// while it is enabled, and every mountable tool presents top-level otherwise.
+		// Tool commands run inside the `bash` tool: mounting engages only while it
+		// is enabled and a tool that can run them is still there; every mountable
+		// tool presents top-level otherwise.
 		const commandTransportActive =
 			this.#toolCommands !== undefined &&
-			this.#builtInToolNames.has("bash") &&
+			toolCommandHostAvailable(this.#builtInToolNames, this.#hasNativeTool) &&
 			selectedTools.some(({ name }) => name === "bash");
 		const isPresentationPinned = (name: string): boolean =>
 			this.#presentationPinnedToolNames?.has(name) === true || this.#runtimeSelectedToolNames?.has(name) === true;

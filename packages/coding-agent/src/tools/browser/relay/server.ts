@@ -16,7 +16,7 @@
  * user's logged-in browser.
  */
 import { macOSFrontApp } from "@oh-my-pi/pi-natives";
-import { logger, parseFlag } from "@oh-my-pi/pi-utils";
+import { parseFlag } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { RelayBridge } from "./bridge";
 import { extensionIdForPath, installedRelayExtensionStamp } from "./extension-files";
