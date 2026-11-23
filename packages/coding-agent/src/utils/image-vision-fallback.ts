@@ -34,6 +34,7 @@ import { journalCompletion, type ModelUsageLedger } from "../session/model-usage
 import { cfgImagesDescribeForTextModels } from "../session/settings";
 import describeUserPrompt from "../prompts/tools/image-attachment-describe.md" with { type: "text" };
 import describeSystemPrompt from "../prompts/tools/image-attachment-describe-system.md" with { type: "text" };
+import offlineNoVisionTemplate from "../prompts/tools/image-attachment-offline.md" with { type: "text" };
 
 /** Telemetry tag for the oneshot vision-description calls. */
 const ONESHOT_KIND = "image_attachment_describe";
@@ -44,14 +45,6 @@ const NO_VISION_MODEL_NOTE =
 
 const DESCRIPTION_UNAVAILABLE_NOTE =
 	"[Image description unavailable: the vision model returned no usable text. The image was saved for further analysis.]";
-
-/** Note for an offline session whose provider has no vision-capable model. */
-function offlineNoVisionNote(provider: string): string {
-	return (
-		`[Offline mode (models.offline) keeps image descriptions on the active model's provider (${provider}), ` +
-		"which has no vision-capable model, so this image was not described. The image was saved.]"
-	);
-}
 
 /** Registry surface needed to resolve a vision model and authorize requests. */
 export type VisionFallbackRegistry = Pick<ModelRegistry, "getAvailable" | "getApiKey" | "resolver">;
@@ -241,7 +234,7 @@ export async function describeAttachedImagesForTextModel(
 				description =
 					(await describeImage(image, visionModel, deps, telemetry, signal)) ?? DESCRIPTION_UNAVAILABLE_NOTE;
 			} else if (!visionModel && cfgOffline.get(deps.settings)) {
-				description = offlineNoVisionNote(deps.activeModel.provider);
+				description = prompt.render(offlineNoVisionTemplate, { provider: deps.activeModel.provider }).trim();
 			} else {
 				description = NO_VISION_MODEL_NOTE;
 			}

@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { Api, completeSimple, Model } from "@oh-my-pi/pi-ai";
 import type { ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { CostCapError, CostGate } from "@oh-my-pi/pi-coding-agent/session/cost-gate";
@@ -67,11 +68,13 @@ describe("resolveImageQuestionModel offline mode", () => {
 		expect(`${resolved.model.provider}/${resolved.model.id}`).toBe("myproxy/qwen-vl");
 	});
 
-	it("refuses when only another provider can see images", () => {
+	it("refuses when only another provider can see images, or the active model is unknown", () => {
 		const settings = Settings.isolated({ "models.offline": true });
 		expect(() => resolveImageQuestionModel(makeSession(textOnly, [textOnly, elsewhere], settings))).toThrow(
-			"Offline mode (models.offline) keeps image questions on the active model's provider (myproxy)",
+			ToolError,
 		);
+		const unknown = { ...makeProxyModel("retired"), provider: "gone" };
+		expect(() => resolveImageQuestionModel(makeSession(unknown, [textOnly, elsewhere], settings))).toThrow(ToolError);
 	});
 });
 

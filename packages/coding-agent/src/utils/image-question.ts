@@ -79,7 +79,9 @@ export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQu
 	model ??= availableModels.find(candidate => sendsImageInputOnWire(candidate));
 	if (!model && offline) {
 		throw new ToolError(
-			`Offline mode (models.offline) keeps image questions on the active model's provider${activeProvider ? ` (${activeProvider})` : ""}, which has no image-capable model.`,
+			activeProvider
+				? `Offline mode (models.offline) keeps image questions on the active model's provider (${activeProvider}), which has no image-capable model.`
+				: "Offline mode (models.offline) keeps image questions on the active model's provider, and no active model is available.",
 		);
 	}
 	if (!model) {

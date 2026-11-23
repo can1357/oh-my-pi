@@ -30,6 +30,7 @@ import {
 	formatModelString,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
+	type ModelLookupRegistry,
 	resolveModelFromString,
 	resolveModelOverride,
 } from "../config/model-resolver";
@@ -199,21 +200,22 @@ function candidateIdentity(
 
 interface FallbackExpansion {
 	context: RetryFallbackResolutionContext;
-	modelRegistry: ModelRegistry;
+	/** Where fallback selectors resolve; see {@link completionModelLookup}. */
+	lookup: ModelLookupRegistry;
 	settings: Settings | undefined;
 	tier: CompletionTier;
 	disabledProviders: Set<string>;
-	/** The only provider a candidate may use; see {@link offlineProvider}. */
-	allowedProvider: string | null | undefined;
 }
 
 /**
- * The provider offline mode (`models.offline`) keeps completions on: the active
- * model's, `null` without an active model, `undefined` when not offline.
+ * Where completion models resolve: the registry, or with offline mode
+ * (`models.offline`) only the active model provider's models, none without an active model.
  */
-function offlineProvider(session: ToolSession): string | null | undefined {
-	if (!cfgOffline.get(session.settings)) return undefined;
-	return session.getActiveModel?.()?.provider ?? null;
+function completionModelLookup(session: ToolSession, registry: ModelRegistry): ModelLookupRegistry {
+	if (!cfgOffline.get(session.settings)) return registry;
+	const provider = session.getActiveModel?.()?.provider;
+	const models = registry.getAvailable().filter(model => model.provider === provider);
+	return { getAvailable: () => models };
 }
 
 /**
@@ -248,10 +250,9 @@ function appendFallbackCandidates(
 	for (const entry of findRetryFallbackCandidates(deps.context, chainKey, selector, model, {
 		allowMissingPrimary: true,
 	})) {
-		const resolved = resolveModelOverride([entry.raw], deps.modelRegistry, deps.settings);
+		const resolved = resolveModelOverride([entry.raw], deps.lookup, deps.settings);
 		const candidate = resolved.model;
 		if (!candidate || deps.disabledProviders.has(candidate.provider)) continue;
-		if (deps.allowedProvider !== undefined && candidate.provider !== deps.allowedProvider) continue;
 		const reasoning = reasoningForCandidate(deps.tier, candidate, entry.thinkingLevel, parent);
 		const identity = candidateIdentity(candidate, reasoning);
 		if (seen.has(identity)) continue;
@@ -268,10 +269,8 @@ function appendFallbackCandidates(
 function resolveTierCandidates(tier: CompletionTier, session: ToolSession): CompletionCandidate[] {
 	const modelRegistry = session.modelRegistry;
 	if (!modelRegistry) return [];
-	const allowedProvider = offlineProvider(session);
-	const available = modelRegistry
-		.getAvailable()
-		.filter(model => allowedProvider === undefined || model.provider === allowedProvider);
+	const lookup = completionModelLookup(session, modelRegistry);
+	const available = lookup.getAvailable();
 	if (available.length === 0) return [];
 
 	const matchPreferences = getModelMatchPreferences(session.settings);
@@ -324,11 +323,10 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 				getModelRole: (role: string) => session.settings.getModelRole(role),
 				modelLookup: modelRegistry,
 			},
-			modelRegistry,
+			lookup,
 			settings: session.settings,
 			tier,
 			disabledProviders: new Set(cfgDisabledProviders.get(session.settings)),
-			allowedProvider,
 		},
 		primary.selector,
 		primary.model,
@@ -368,15 +366,14 @@ function isCompletionTier(value: string): value is CompletionTier {
 function resolveTaggedAgentCandidates(agentName: string, session: ToolSession): CompletionCandidate[] {
 	const modelRegistry = session.modelRegistry;
 	if (!modelRegistry) return [];
-	const available = modelRegistry.getAvailable();
+	const lookup = completionModelLookup(session, modelRegistry);
+	const available = lookup.getAvailable();
 	if (available.length === 0) return [];
 	const agent = session.getSessionAgents?.().find(candidate => candidate.name === agentName);
 	const selector = agent?.model?.[0];
 	if (!selector) return [];
-	const resolved = resolveModelOverride([selector], modelRegistry, session.settings);
+	const resolved = resolveModelOverride([selector], lookup, session.settings);
 	if (!resolved.model) return [];
-	const allowedProvider = offlineProvider(session);
-	if (allowedProvider !== undefined && resolved.model.provider !== allowedProvider) return [];
 	const reasoning = reasoningForCandidate("default", resolved.model, resolved.thinkingLevel ?? agent?.thinkingLevel);
 	return [{ selector, model: resolved.model, ...reasoning }];
 }
@@ -545,11 +542,9 @@ export async function runEvalCompletion(
 		: resolveTaggedAgentCandidates(requested, options.session);
 	if (candidates.length === 0) {
 		throw new ToolError(
-			offlineProvider(options.session) !== undefined
-				? `completion() found no model for "${requested}" on the active model's provider, and offline mode (models.offline) allows no other.`
-				: tier
-					? `completion() could not resolve a model for the "${tier}" tier. Configure modelRoles.${tier === "default" ? "default" : tier} or ensure a provider is available.`
-					: `completion() could not resolve model "${requested}". Pass a tier ("smol"|"default"|"slow") or the name of a user-tagged model agent ("m<N>").`,
+			tier
+				? `completion() could not resolve a model for the "${tier}" tier. Configure modelRoles.${tier === "default" ? "default" : tier} or ensure a provider is available.`
+				: `completion() could not resolve model "${requested}". Pass a tier ("smol"|"default"|"slow") or the name of a user-tagged model agent ("m<N>").`,
 		);
 	}
 

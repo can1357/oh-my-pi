@@ -219,7 +219,8 @@ describe("describeAttachedImagesForTextModel", () => {
 		);
 
 		expect(stub.calls).toHaveLength(0);
-		expect(blocks[0]!.text).toContain("Offline mode (models.offline)");
+		// The note names the provider offline mode is holding the session to.
+		expect(blocks[0]!.text).toContain("openai");
 		expect(blocks[0]!.text).toMatch(/path="local:\/\/image-/);
 	});
 

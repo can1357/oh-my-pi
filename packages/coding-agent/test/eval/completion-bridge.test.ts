@@ -371,10 +371,22 @@ describe("runEvalCompletion", () => {
 			];
 
 			for (const model of ["smol", "m1"]) {
-				await expect(runEvalCompletionAndWait({ prompt: "q", model }, { session })).rejects.toThrow(
-					`completion() found no model for "${model}" on the active model's provider`,
-				);
+				await expect(runEvalCompletionAndWait({ prompt: "q", model }, { session })).rejects.toThrow(ToolError);
 			}
+			expect(spy).not.toHaveBeenCalled();
+
+			await runEvalCompletionAndWait({ prompt: "q", model: "default" }, { session });
+			expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["default"]);
+		});
+
+		it("sends nothing without an active model", async () => {
+			const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+			const session = offlineSession({});
+			session.getActiveModel = () => undefined;
+
+			await expect(runEvalCompletionAndWait({ prompt: "q", model: "default" }, { session })).rejects.toThrow(
+				ToolError,
+			);
 			expect(spy).not.toHaveBeenCalled();
 		});
 
