@@ -11,13 +11,14 @@ use uiautomation::{
 };
 use windows_sys::Win32::{
 	Foundation::{HWND, POINT},
-	UI::WindowsAndMessaging::{GetDesktopWindow, IsWindow, WindowFromPoint},
+	UI::WindowsAndMessaging::{GA_PARENT, GetAncestor, GetDesktopWindow, IsWindow, WindowFromPoint},
 };
 
 use super::{
 	super::{
 		ax::{AxBounds, AxHandle, AxProps, normalize_role_uia},
 		backend::AxBackend,
+		control,
 		error::{CoreResult, DesktopError},
 		types::DesktopWindow,
 	},
@@ -78,14 +79,25 @@ impl Win32Ax {
 	/// that owns a native window; `None` for the desktop itself.
 	pub(super) fn host_root(&mut self, element: &UIElement) -> Option<HWND> {
 		let walker = self.walker().ok()?;
+		Self::host_root_from(element, &walker, native_window(element))
+	}
+
+	fn host_root_from(
+		element: &UIElement,
+		walker: &uiautomation::UITreeWalker,
+		mut direct: Option<HWND>,
+	) -> Option<HWND> {
 		let mut current = element.clone();
-		for _ in 0..64 {
-			if let Some(hwnd) = native_window(&current) {
+		for depth in 0..64 {
+			if let Some(hwnd) = direct {
 				let root = window::root(hwnd);
 				// SAFETY: GetDesktopWindow has no preconditions.
 				return (root != unsafe { GetDesktopWindow() }).then_some(root);
 			}
 			current = walker.get_parent(&current).ok()?;
+			if depth < 63 {
+				direct = native_window(&current);
+			}
 		}
 		None
 	}
@@ -97,7 +109,11 @@ impl Win32Ax {
 		element: &UIElement,
 		call: impl FnOnce() -> CoreResult<()>,
 	) -> CoreResult<()> {
-		let root = self.host_root(element).ok_or_else(|| {
+		Self::contained_root(self.host_root(element), call)
+	}
+
+	fn contained_root(root: Option<HWND>, call: impl FnOnce() -> CoreResult<()>) -> CoreResult<()> {
+		let root = root.ok_or_else(|| {
 			DesktopError::ax_failed("cannot establish the native window hosting this UIA element")
 		})?;
 		window::ensure_pattern_safe(root)?;
@@ -192,6 +208,53 @@ fn uia_handle(element: UIElement) -> AxHandle {
 fn native_window(element: &UIElement) -> Option<HWND> {
 	let raw: isize = element.get_native_window_handle().ok()?.into();
 	(raw != 0).then(|| with_exposed_provenance_mut(raw as usize))
+}
+
+/// Presses the enabled native button `element` represents through `BM_CLICK`
+/// ([`window::click_button`]) while it stays inside `top`. A `WinForms` check
+/// box draws itself and keeps its state out of `BM_GETCHECK`, so its Toggle
+/// state shows whether the click changed it: unread or unchanged, the click is
+/// reported as unconfirmed (an app may manage the box's state itself and leave
+/// it as it was).
+fn press_button(element: &UIElement, button: HWND, top: HWND) -> CoreResult<()> {
+	if window::native_auto_button(button) {
+		return window::click_button(button, top);
+	}
+	let toggle = match element.get_pattern::<UITogglePattern>() {
+		Ok(toggle) => toggle,
+		Err(error) => {
+			let kind = element.get_control_type().map_err(|error| {
+				DesktopError::input_failed(format!(
+					"the button's control type could not be read ({error}); nothing was clicked"
+				))
+			})?;
+			if kind == ControlType::CheckBox {
+				return Err(DesktopError::input_failed(format!(
+					"the check box's Toggle pattern could not be read ({error}); nothing was clicked"
+				)));
+			}
+			return window::click_button(button, top);
+		},
+	};
+	let before = toggle.get_toggle_state().map_err(|error| {
+		DesktopError::input_failed(format!(
+			"the check box's state could not be read ({error}); nothing was clicked"
+		))
+	})?;
+	window::click_button(button, top)?;
+	match toggle.get_toggle_state() {
+		Ok(after) if after != before => Ok(()),
+		Ok(_) => Err(DesktopError::ax_unconfirmed(
+			"the check box processed its click but its state did not change; the app may manage it \
+			 itself or have refused the click; inspect the target before pressing again",
+		)),
+		// Not `AxUnconfirmed`: naming the target would query the same,
+		// possibly unresponsive, provider again.
+		Err(error) => Err(DesktopError::input_failed(format!(
+			"the check box processed its click and may have changed, but its state could not be read \
+			 afterwards ({error}); inspect the target before pressing again"
+		))),
+	}
 }
 
 /// UI Automation pattern performing a control's position-independent click.
@@ -430,18 +493,54 @@ impl AxBackend for Win32Ax {
 	fn perform(&mut self, handle: &AxHandle, action: &str) -> CoreResult<()> {
 		let element = Self::element(handle)?;
 		let action = action.trim().to_ascii_lowercase();
-		self.contained(element, || match action.as_str() {
+		// Preserve containment's walker-then-HWND query order, retaining even
+		// an absent direct handle so the fallback never queries it twice.
+		let walker = self.walker().ok();
+		let direct = walker.as_ref().and_then(|_| native_window(element));
+		// A native-button candidate's Invoke lookup, made before containment and
+		// reused after it: asking a provider again could reach the Invoke this
+		// route avoids, which takes the foreground.
+		let mut invoke = None;
+		if matches!(action.as_str(), "press" | "invoke")
+			&& let Some((hwnd, button)) =
+				direct.and_then(|hwnd| window::native_button(hwnd).map(|state| (hwnd, state)))
+		{
+			// The top-level window now, before any provider call runs app code.
+			let top = window::root(hwnd);
+			// Only native-button candidates query Invoke before containment.
+			// Other controls keep the containment guard ahead of provider calls.
+			if action == "press"
+				|| invoke
+					.insert(element.get_pattern::<UIInvokePattern>())
+					.is_ok()
+			{
+				return match button {
+					window::NativeButton::Disabled => Err(DesktopError::input_failed(format!(
+						"button {} is disabled, or its window is (behind a dialog, for instance); \
+						 nothing was clicked",
+						hwnd.expose_provenance()
+					))),
+					window::NativeButton::Enabled => press_button(element, hwnd, top),
+				};
+			}
+		}
+		let root = walker.and_then(|walker| Self::host_root_from(element, &walker, direct));
+		Self::contained_root(root, || match action.as_str() {
 			"press" => {
 				if let Some(pattern) = positionless_press(element) {
+					control::dispatching()?;
 					return pattern.run().map_err(ax_error);
 				}
 				if let Ok(pattern) = element.get_pattern::<UIInvokePattern>() {
+					control::dispatching()?;
 					return pattern.invoke().map_err(ax_error);
 				}
 				if let Ok(pattern) = element.get_pattern::<UITogglePattern>() {
+					control::dispatching()?;
 					return pattern.toggle().map_err(ax_error);
 				}
 				if let Ok(pattern) = element.get_pattern::<UISelectionItemPattern>() {
+					control::dispatching()?;
 					return pattern.select().map_err(ax_error);
 				}
 				let pattern = element
@@ -450,32 +549,49 @@ impl AxBackend for Win32Ax {
 				if pattern.get_default_action().map_err(ax_error)?.is_empty() {
 					return Err(DesktopError::ax_failed("UIA element has no default press action"));
 				}
+				control::dispatching()?;
 				pattern.do_default_action().map_err(ax_error)
 			},
-			"invoke" => element
-				.get_pattern::<UIInvokePattern>()
-				.and_then(|pattern| pattern.invoke())
-				.map_err(ax_error),
-			"toggle" => element
-				.get_pattern::<UITogglePattern>()
-				.and_then(|pattern| pattern.toggle())
-				.map_err(ax_error),
-			"expand" => element
-				.get_pattern::<UIExpandCollapsePattern>()
-				.and_then(|pattern| pattern.expand())
-				.map_err(ax_error),
-			"collapse" => element
-				.get_pattern::<UIExpandCollapsePattern>()
-				.and_then(|pattern| pattern.collapse())
-				.map_err(ax_error),
-			"select" => element
-				.get_pattern::<UISelectionItemPattern>()
-				.and_then(|pattern| pattern.select())
-				.map_err(ax_error),
-			"scrollintoview" => element
-				.get_pattern::<UIScrollItemPattern>()
-				.and_then(|pattern| pattern.scroll_into_view())
-				.map_err(ax_error),
+			"invoke" => {
+				let pattern = invoke
+					.unwrap_or_else(|| element.get_pattern::<UIInvokePattern>())
+					.map_err(ax_error)?;
+				control::dispatching()?;
+				pattern.invoke().map_err(ax_error)
+			},
+			"toggle" => {
+				let pattern = element.get_pattern::<UITogglePattern>().map_err(ax_error)?;
+				control::dispatching()?;
+				pattern.toggle().map_err(ax_error)
+			},
+			"expand" => {
+				let pattern = element
+					.get_pattern::<UIExpandCollapsePattern>()
+					.map_err(ax_error)?;
+				control::dispatching()?;
+				pattern.expand().map_err(ax_error)
+			},
+			"collapse" => {
+				let pattern = element
+					.get_pattern::<UIExpandCollapsePattern>()
+					.map_err(ax_error)?;
+				control::dispatching()?;
+				pattern.collapse().map_err(ax_error)
+			},
+			"select" => {
+				let pattern = element
+					.get_pattern::<UISelectionItemPattern>()
+					.map_err(ax_error)?;
+				control::dispatching()?;
+				pattern.select().map_err(ax_error)
+			},
+			"scrollintoview" => {
+				let pattern = element
+					.get_pattern::<UIScrollItemPattern>()
+					.map_err(ax_error)?;
+				control::dispatching()?;
+				pattern.scroll_into_view().map_err(ax_error)
+			},
 			other => {
 				Err(DesktopError::ax_failed(format!("unsupported UI Automation action '{other}'")))
 			},
@@ -488,7 +604,11 @@ impl AxBackend for Win32Ax {
 		let secure = password.unwrap_or(true);
 		let hwnd = native_window(element).map(super::value_write::combo_target);
 		let class = hwnd.map_or_default(window::class_name);
-		match super::value_write::route(&class) {
+		let parent_class = hwnd.map_or_default(|hwnd| {
+			// SAFETY: GetAncestor only queries the native control's true parent.
+			window::class_name(unsafe { GetAncestor(hwnd, GA_PARENT) })
+		});
+		match super::value_write::route(&class, &parent_class) {
 			super::value_write::ValueRoute::Combo => {
 				return super::value_write::set_combo(
 					hwnd.ok_or_else(|| {
@@ -506,6 +626,14 @@ impl AxBackend for Win32Ax {
 					"this combo box cannot notify the app through setValue; select the item via \
 					 press/click instead",
 				));
+			},
+			super::value_write::ValueRoute::Edit => {
+				return super::value_write::set_edit(
+					hwnd.ok_or_else(|| DesktopError::ax_failed("text field has no native window"))?,
+					text,
+					element.is_enabled().map_err(ax_error)?,
+					password,
+				);
 			},
 			super::value_write::ValueRoute::Pattern => self.contained(element, || {
 				element
@@ -610,7 +738,55 @@ impl AxBackend for Win32Ax {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
+	use windows_sys::Win32::UI::{
+		Input::KeyboardAndMouse::EnableWindow,
+		WindowsAndMessaging::{BS_PUSHBUTTON, DestroyWindow},
+	};
+
+	use super::{
+		super::{
+			super::error::ErrorCode,
+			window::tests::{ButtonThread, button, button_parent, click_messages, clicks, record},
+		},
+		*,
+	};
+
+	#[test]
+	fn native_buttons_are_pressed_by_their_click_message_and_never_behind_a_dialog() {
+		let fixture = ButtonThread::new();
+		let (parent_id, pushed_id) = fixture.run(|| {
+			let parent = button_parent();
+			let pushed = button(parent, "BUTTON", BS_PUSHBUTTON as u32);
+			record(pushed);
+			(parent as usize, pushed as usize)
+		});
+		let parent = parent_id as HWND;
+		let pushed = pushed_id as HWND;
+		let mut ax = Win32Ax::new();
+		let element = ax
+			.automation()
+			.unwrap()
+			.element_from_handle(Handle::from(pushed.expose_provenance() as isize))
+			.unwrap();
+		let handle = uia_handle(element);
+
+		// The button's own synchronous click must finish before the action
+		// returns.
+		ax.perform(&handle, "press").unwrap();
+		assert_eq!(fixture.run(|| (clicks(), click_messages())), (1, 1));
+		ax.perform(&handle, "invoke").unwrap();
+		assert_eq!(fixture.run(|| (clicks(), click_messages())), (2, 2));
+
+		// A form behind its modal dialog: refused with nothing sent, never
+		// handed on to UI Automation.
+		// SAFETY: the fixture keeps the window alive.
+		unsafe { EnableWindow(parent, 0) };
+		let error = ax.perform(&handle, "press").unwrap_err();
+		assert!(matches!(error.code, ErrorCode::InputFailed), "{error:?}");
+		assert_eq!(fixture.run(|| (clicks(), click_messages())), (2, 2));
+		// SAFETY: the fixture thread owns the window.
+		fixture.run(move || unsafe { DestroyWindow(parent_id as HWND) });
+	}
 
 	#[test]
 	fn coordinate_click_rejects_controls_with_position_dependent_subregions() {

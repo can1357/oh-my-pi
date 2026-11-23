@@ -32,7 +32,7 @@ import {
 	untilAborted,
 } from "@oh-my-pi/pi-utils";
 import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
-import { cfgDisasmBackend, DISASM_BACKENDS, isExecutableFile } from "../disasm";
+import { cfgDisasmBackend, databaseOwner, isExecutableFile } from "../disasm";
 import { normalizeToLF } from "../edit/normalize";
 import { isRemoteTextWritable, writeRemoteMirror } from "../edit/remote-mirror";
 import { writeResourceBackingFile } from "../internal-urls/filesystem-resource";
@@ -1299,14 +1299,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly loadMode = "essential";
 	/** Rendered per access so the hashline guidance follows a live `edit.mode` change. */
 	get description(): string {
+		const displayMode = resolveFileDisplayMode(this.session);
 		return prompt.render(readDescription, {
-			IS_HL_MODE: resolveFileDisplayMode(this.session).hashLines,
+			IS_HL_MODE: displayMode.hashLines,
+			HAS_LINE_NUMBERS: displayMode.lineNumbers,
 			BINARY_VIEWS: cfgDisasmBackend.get(this.session.settings) !== undefined,
 		});
 	}
 	/**
-	 * `xd://read/sources`: selector reference for the sources the description only names.
-	 * `xd://read/urls`: internal-URL grammar the system prompt's one-line entries leave out.
+	 * `help://read/sources`: selector reference for the sources the description only names.
+	 * `help://read/urls`: internal-URL grammar the system prompt's one-line entries leave out.
 	 */
 	docTopics(): Record<string, string> {
 		return {
@@ -2387,7 +2389,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 
 			const sqlitePath = await resolveSqliteReadPath(this.session, readPath, suffixCache, signal);
-			if (sqlitePath) {
+			// A disassembler database stored as SQLite (Binary Ninja `.bndb`) belongs to its backend:
+			// views take the disassembler route below and a bare read shows database metadata.
+			if (sqlitePath && !databaseOwner(sqlitePath.absolutePath)) {
 				return readSqlite(sqlitePath, signal);
 			}
 			// local:// locates backing files without its URL query;
@@ -2515,6 +2519,27 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				if (!recoveredApprovedPlan && !suffixResolution) {
 					const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal, toolContext);
 					if (delimitedResult) return delimitedResult;
+					// A numeric pair can also be a literal filename plus a selector. Diagnose it only after lookup
+					// failed, and find the base the way a corrected read would: literally, else by unique suffix.
+					if (localTarget.sel && /^\d+$/.test(localTarget.sel)) {
+						const prefix = splitPathAndSel(localReadPath);
+						if (
+							prefix.sel &&
+							/^\d+$/.test(prefix.sel) &&
+							((await probeLiteralPathExists(prefix.path, this.session.cwd)) === "exists" ||
+								(!isRemoteMountPath(absolutePath) &&
+									(await findSuffixMatchCached(this.session, suffixCache, prefix.path, signal)) !== null))
+						) {
+							// `file:10:5` is usually a line and column; a reversed range would only fail again.
+							const range =
+								Number(localTarget.sel) > Number(prefix.sel)
+									? ` or :${prefix.sel}-${localTarget.sel} for a range`
+									: "";
+							throw new ToolError(
+								`Invalid line selector ':${prefix.sel}:${localTarget.sel}'. Use :${prefix.sel} for a single line${range}.`,
+							);
+						}
+					}
 					throw new ToolError(`Path '${localReadPath}' not found`);
 				}
 			} else {
@@ -2597,7 +2622,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			!isRawSelector(parsed) &&
 			parsed.kind !== "image" &&
 			lexicalAbsolutePath === undefined &&
-			(DISASM_BACKENDS.ida.isDatabasePath(absolutePath) || (await isExecutableFile(absolutePath)))
+			(databaseOwner(absolutePath) !== undefined || (await isExecutableFile(absolutePath)))
 		) {
 			const backend = cfgDisasmBackend.get(this.session.settings);
 			return readBinary(this.session, { backend, absolutePath, view: "" }, parsed, signal);

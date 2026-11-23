@@ -71,6 +71,11 @@ export interface ModelPickerCallbacks {
 	 * (clamped to that model) as the session's thinking level. {@link onCancel} follows.
 	 */
 	onKeepThinking?: (level: ConfiguredThinkingLevel) => void;
+	/** Returns the rebuilt `--models` scope after the catalog moved; `undefined` keeps the current one. */
+	onCatalogRefreshed?: () =>
+		| ReadonlyArray<ScopedModelItem>
+		| undefined
+		| Promise<ReadonlyArray<ScopedModelItem> | undefined>;
 	/** The picker was dismissed. */
 	onCancel: () => void;
 }
@@ -142,7 +147,7 @@ const FROZEN_THINKING_STEPS: readonly ConfiguredThinkingLevel[] = [
 const THINKING_KEYS = ["left", "right"];
 
 /** The thinking slider for one model: its steps low to high, the shown step, and why it is frozen. */
-interface ThinkingSlider {
+export interface ThinkingSlider {
 	steps: readonly ConfiguredThinkingLevel[];
 	value: ConfiguredThinkingLevel;
 	disabled?: string;
@@ -171,6 +176,16 @@ function thinkingStep(
 	if (steps.includes(wanted)) return wanted;
 	if (wanted === AUTO_THINKING || wanted === ThinkingLevel.Off) return ThinkingLevel.Off;
 	return clampThinkingLevelForModel(model, wanted) ?? ThinkingLevel.Off;
+}
+
+/**
+ * `model`'s thinking slider showing `level` (clamped to its ladder; unset or inherit as its default level), frozen at
+ * off when it has no effort to pick. The alt+p picker's slider, and RPC's `get_model_picker` rows.
+ */
+export function thinkingSlider(model: Model, level: ConfiguredThinkingLevel | undefined): ThinkingSlider {
+	const { steps, disabled } = thinkingSteps(model);
+	if (disabled) return { steps, value: ThinkingLevel.Off, disabled };
+	return { steps, value: thinkingStep(model, steps, level) };
 }
 
 /** Footer hint for the active mode; keys resolve at render time so theme/keybinding changes apply. */
@@ -304,19 +319,21 @@ export class ModelPickerComponent implements Component {
 		}
 
 		// Re-read only if the catalog moves (startup discovery landing, a
-		// models.yml edit): rebuilding a current catalog on every open blocks
-		// the first paint for seconds. A --models scope is registry-independent.
-		if (this.#scopedModels.length === 0) {
-			this.#registry
-				.refreshIfStale()
-				.then(changed => {
-					if (changed) this.#syncFromRegistryState();
-				})
-				.catch(error => {
-					this.#configError = error instanceof Error ? error.message : String(error);
-				})
-				.finally(() => this.#tui.requestRender());
-		}
+		// models.yml edit, an expired discovery cache): rebuilding a current
+		// catalog on every open blocks the first paint for seconds. The host
+		// re-resolves a --models scope against the moved catalog.
+		this.#registry
+			.refreshIfStale()
+			.then(async changed => {
+				if (!changed) return;
+				const scope = await callbacks.onCatalogRefreshed?.();
+				if (scope) this.#scopedModels = scope;
+				this.#syncFromRegistryState();
+			})
+			.catch(error => {
+				this.#configError = error instanceof Error ? error.message : String(error);
+			})
+			.finally(() => this.#tui.requestRender());
 	}
 
 	invalidate(): void {}
@@ -448,16 +465,14 @@ export class ModelPickerComponent implements Component {
 		if (!levelFor || this.#mode() !== "session" || this.#browser.pickerSelected === null) return undefined;
 		const model = this.#browser.getSelected()?.model;
 		if (!model) return undefined;
-		const { steps, disabled } = thinkingSteps(model);
-		if (disabled) return { steps, value: ThinkingLevel.Off, disabled };
-		return { steps, value: thinkingStep(model, steps, this.#thinking ?? levelFor(model)) };
+		return thinkingSlider(model, this.#thinking ?? levelFor(model));
 	}
 
 	/** The pending level as picking `model` applies it; undefined when untouched or the model has no effort. */
 	#pendingThinking(model: Model): ConfiguredThinkingLevel | undefined {
 		if (this.#thinking === undefined || this.#mode() !== "session") return undefined;
-		const { steps, disabled } = thinkingSteps(model);
-		return disabled ? undefined : thinkingStep(model, steps, this.#thinking);
+		const slider = thinkingSlider(model, this.#thinking);
+		return slider.disabled ? undefined : slider.value;
 	}
 
 	/** Move the pending level one step along the highlighted model's slider, stopping at its ends. */

@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-tui",
-	"version": "19.0.0",
+	"version": "19.1.1",
 	"description": "Terminal User Interface library with differential rendering for efficient text-based applications",
 	"keywords": [
 		"cli",

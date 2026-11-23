@@ -229,6 +229,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "archery"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33ca55ee147b1926dbea904f50fe4902494e97bc742205abbbf10c709e43815f"
+dependencies = [
+ "triomphe",
+]
+
+[[package]]
 name = "argmax"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6118,7 +6127,7 @@ dependencies = [
 
 [[package]]
 name = "omp-ast"
-version = "19.0.0"
+version = "19.1.1"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6160,7 +6169,7 @@ dependencies = [
 
 [[package]]
 name = "omp-builtins"
-version = "19.0.0"
+version = "19.1.1"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6256,14 +6265,14 @@ dependencies = [
 
 [[package]]
 name = "omp-diff"
-version = "19.0.0"
+version = "19.1.1"
 dependencies = [
  "xutf",
 ]
 
 [[package]]
 name = "omp-edit"
-version = "19.0.0"
+version = "19.1.1"
 dependencies = [
  "async-trait",
  "omp-ast",
@@ -6282,7 +6291,7 @@ dependencies = [
 
 [[package]]
 name = "omp-iso"
-version = "19.0.0"
+version = "19.1.1"
 dependencies = [
  "async-trait",
  "libc",
@@ -6295,7 +6304,7 @@ dependencies = [
 
 [[package]]
 name = "omp-natives"
-version = "19.0.0"
+version = "19.1.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6322,6 +6331,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "html-escape",
  "html-to-markdown-rs",
+ "ignore",
  "image",
  "indexmap",
  "libc",
@@ -6368,6 +6378,7 @@ dependencies = [
  "simd-adler32",
  "smallvec",
  "syntect",
+ "tempfile",
  "tiktoken-rs",
  "tinyvec",
  "tokio",
@@ -6390,7 +6401,7 @@ dependencies = [
 
 [[package]]
 name = "omp-predict"
-version = "19.0.0"
+version = "19.1.1"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -6409,7 +6420,7 @@ dependencies = [
 
 [[package]]
 name = "omp-shell"
-version = "19.0.0"
+version = "19.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6431,6 +6442,7 @@ dependencies = [
  "pcre2-sys",
  "postcard",
  "regex",
+ "rpds",
  "serde",
  "serde_json",
  "smallvec",
@@ -6448,7 +6460,7 @@ dependencies = [
 
 [[package]]
 name = "omp-vcs"
-version = "19.0.0"
+version = "19.1.1"
 dependencies = [
  "futures",
  "gix",
@@ -6466,7 +6478,7 @@ dependencies = [
 
 [[package]]
 name = "omp-vfs"
-version = "19.0.0"
+version = "19.1.1"
 dependencies = [
  "async-trait",
  "libc",
@@ -6479,7 +6491,7 @@ dependencies = [
 
 [[package]]
 name = "omp-voice"
-version = "19.0.0"
+version = "19.1.1"
 dependencies = [
  "bytes",
  "flume",
@@ -6493,7 +6505,7 @@ dependencies = [
 
 [[package]]
 name = "omp-xfs"
-version = "19.0.0"
+version = "19.1.1"
 dependencies = [
  "async-trait",
  "flume",
@@ -7653,6 +7665,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "rpds"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e025feb26210bc196b908e72deb063b1b4000754304341cbc168a1e72c857ebc"
+dependencies = [
+ "archery",
+ "serde",
+ "smallvec",
 ]
 
 [[package]]
@@ -9099,6 +9122,12 @@ dependencies = [
  "nom 8.0.0",
  "petgraph",
 ]
+
+[[package]]
+name = "triomphe"
+version = "0.1.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d15f4f5898bcfc5d8a8e45ed30b2f108d710c1a2e5489dbf80e078f707181bc"
 
 [[package]]
 name = "ttf-parser"

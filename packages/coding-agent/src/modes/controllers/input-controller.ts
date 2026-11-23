@@ -29,6 +29,7 @@ import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-messa
 import { extractImagePathFromText } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
+import { HtmlFormDialog } from "@oh-my-pi/pi-tui/html-form/dialog";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
@@ -442,6 +443,17 @@ export class InputController {
 					if (this.ctx.ui.hasOverlay() || this.ctx.ui.getFocused() instanceof HistorySearchComponent) {
 						return undefined;
 					}
+					// Vim Normal mode owns Ctrl-R as redo, in the composer and in a dialog's text box alike;
+					// history search stays on it in Insert mode. Only literal Ctrl-R is the editor's, so a
+					// remapped `app.history.search` key still opens the search from Normal mode.
+					const focused = this.ctx.ui.getFocused();
+					const editor =
+						focused === this.ctx.editor
+							? this.ctx.editor
+							: focused instanceof HookEditorComponent || focused instanceof HtmlFormDialog
+								? focused.activeEditor()
+								: undefined;
+					if (matchesKey(data, "ctrl+r") && editor?.vimEnabled && editor.vimMode === "normal") return undefined;
 					this.ctx.showHistorySearch();
 					return { consume: true };
 				}
@@ -1865,7 +1877,7 @@ export class InputController {
 			// group keeps the shell's job-control view consistent. Long-lived
 			// children that must survive the suspend (Linux/other POSIX MCP stdio
 			// servers via the platform-specific `detached: true` spawn in
-			// `mcp/transports/stdio.ts`, every external the embedded bash engine
+			// `mcp/host/stdio-upstream.ts`, every external the embedded bash engine
 			// runs via `Sessions::Detach` in `crates/shell/src/host.rs`, which
 			// `setsid`s the child in `crates/shell/src/sys/spawn/unix.rs`) are
 			// their own sessions, so pgid=0 does not reach them.

@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
 import {
 	AgyHost,
@@ -19,6 +20,7 @@ import type { McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mc
 import { StepWriter } from "@oh-my-pi/pi-ai/providers/antigravity-cli/step-writer";
 import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ContentBlock, PromptRequest, PromptResponse, SessionConfigOption } from "@oh-my-pi/pi-utils/acp";
 
@@ -174,6 +176,12 @@ class FakeAgy implements AgyTransport {
 		this.options.onUpdate({
 			sessionId: this.currentId,
 			update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
+		});
+	}
+	thought(text: string): void {
+		this.options.onUpdate({
+			sessionId: this.currentId,
+			update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text } },
 		});
 	}
 	call(name = "read", args: Record<string, unknown> = { path: "a.txt" }, id = this.currentId): Promise<McpToolOutput> {
@@ -395,6 +403,80 @@ describe("AgyHost stateful steps", () => {
 		steer.response.resolve({ stopReason: "end_turn" });
 		await next.done;
 		expect(next.writer.output.content).toEqual([{ type: "text", text: "Steered response." }]);
+	});
+
+	it("steers parked MCP images and links mixed and image-only MCP replies to their prompt envelopes", async () => {
+		const state = await parked();
+		state.fake.autoSteer = false;
+		let released = false;
+		void state.output.then(() => {
+			released = true;
+		});
+		const firstImage = { type: "image" as const, data: "c21hbGw=", mimeType: "image/jpeg" };
+		const firstCall = state.first.writer.output.content.find(block => block.type === "toolCall");
+		if (!firstCall || firstCall.type !== "toolCall") throw new Error("Expected first tool call");
+		const firstResult: ToolResultMessage = {
+			...result(state.first.writer.output, "Read image file [image/jpeg]"),
+			content: [{ type: "text", text: "Read image file [image/jpeg]" }, firstImage],
+		};
+		const second = step(state.host, [...state.messages, firstResult]);
+		const imageSteer = await state.fake.prompts.next();
+		expect(released).toBe(false);
+		expect(imageSteer.request.prompt).toEqual([
+			{ type: "text", text: `<tool_result id=${JSON.stringify(firstCall.id)} name="read">` },
+			firstImage,
+			{ type: "text", text: "</tool_result>" },
+		]);
+		state.prompt.response.resolve({ stopReason: "end_turn" });
+		expect(await state.output).toEqual({
+			content: [
+				{ type: "text", text: "Read image file [image/jpeg]" },
+				{
+					type: "text",
+					text: expect.stringContaining(`<tool_result id=${JSON.stringify(firstCall.id)} name="read">`),
+				},
+			],
+			isError: false,
+		});
+		state.fake.text("Checking second image.");
+		const secondOutput = state.fake.call("read", { path: "b.png" });
+		await second.done;
+
+		const secondImage = { type: "image" as const, data: "c2Vjb25k", mimeType: "image/png" };
+		const secondCall = second.writer.output.content.find(block => block.type === "toolCall");
+		if (!secondCall || secondCall.type !== "toolCall") throw new Error("Expected second tool call");
+		const imageOnlyResult: ToolResultMessage = {
+			...result(second.writer.output),
+			content: [secondImage],
+		};
+		const third = step(state.host, [
+			...state.messages,
+			firstResult,
+			second.writer.output,
+			imageOnlyResult,
+			user("compare both"),
+		]);
+		const combinedSteer = await state.fake.prompts.next();
+		imageSteer.response.resolve({ stopReason: "end_turn" });
+		expect(await secondOutput).toEqual({
+			content: [
+				{
+					type: "text",
+					text: expect.stringContaining(`<tool_result id=${JSON.stringify(secondCall.id)} name="read">`),
+				},
+			],
+			isError: false,
+		});
+		expect(combinedSteer.request.prompt).toEqual([
+			{ type: "text", text: `<tool_result id=${JSON.stringify(secondCall.id)} name="read">` },
+			secondImage,
+			{ type: "text", text: "</tool_result>" },
+			{ type: "text", text: "compare both" },
+		]);
+		state.fake.text("Both show benches.");
+		combinedSteer.response.resolve({ stopReason: "end_turn" });
+		await third.done;
+		expect(third.writer.output.content).toEqual([{ type: "text", text: "Both show benches." }]);
 	});
 
 	it("waits for confirmed cancellation before releasing a deadline-held MCP call or sending its late result", async () => {
@@ -848,7 +930,7 @@ describe("AgyHost stateful steps", () => {
 		writer.text("late");
 		writer.thinking("late");
 		writer.usage(999);
-		writer.fail("error", "late failure");
+		writer.fail({ stopReason: "error", message: "late failure", status: 500, id: 500 });
 		expect(JSON.stringify(writer.output)).toBe(snapshot);
 		expect(stream.queue.map(event => event.type)).toEqual([
 			"start",
@@ -871,5 +953,143 @@ describe("AgyHost stateful steps", () => {
 		fake.text("Done.");
 		prompt.response.resolve({ stopReason: "end_turn" });
 		await first.done;
+	});
+});
+
+describe("AgyHost quota retry notices", () => {
+	async function quotaFailure(notify: (fake: FakeAgy, text: string) => void, notice: string) {
+		const state = await fixture();
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		notify(fake, notice);
+		// agy keeps retrying until cancelled; later notices must not reach the transcript either.
+		fake.text("⚠ API error (attempt 2): RESOURCE_EXHAUSTED (code 429): Resource has been exhausted.");
+		const error: unknown = await run.done.then(
+			() => undefined,
+			cause => cause,
+		);
+		return { fake, run, error };
+	}
+
+	for (const [kind, notify] of [
+		["message", (fake: FakeAgy, text: string) => fake.text(text)],
+		["thought", (fake: FakeAgy, text: string) => fake.thought(text)],
+	] as const) {
+		it(`cancels the turn and fails with a 429 when a ${kind} chunk reports quota exhaustion`, async () => {
+			const { fake, run, error } = await quotaFailure(
+				notify,
+				"⚠ API error (attempt 1): RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).",
+			);
+			await fake.cancellations.next();
+			const result = await AIError.finalize(error, { api: model.api, provider: model.provider, model: model.id });
+			expect(result.status).toBe(429);
+			expect(result.message).toContain("RESOURCE_EXHAUSTED (code 429)");
+			expect(AIError.isUsageLimitOutcome(result.status, result.message)).toBe(true);
+			expect(run.writer.output.content).toEqual([]);
+			expect(fake.closed).toBe(true);
+		});
+
+		it(`detects a quota notice split across ${kind} chunks`, async () => {
+			const { fake, run, error } = await quotaFailure((fake, text) => {
+				for (const chunk of text.split("|")) notify(fake, chunk);
+			}, "⚠ API |error (attempt 1): |RESOURCE_|EXHAUSTED (code 429): Resource has been exhausted.");
+			await fake.cancellations.next();
+			const result = await AIError.finalize(error, { api: model.api, provider: model.provider, model: model.id });
+			expect(result.status).toBe(429);
+			expect(result.message).toContain("RESOURCE_EXHAUSTED (code 429)");
+			expect(run.writer.output.content).toEqual([]);
+		});
+	}
+
+	it("streams lines before a split notice and still fails with a 429", async () => {
+		const { fake, run, error } = await quotaFailure((fake, text) => {
+			for (const chunk of text.split("|")) fake.text(chunk);
+		}, "Working on it.\n⚠ API error (attempt 1): |RESOURCE_EXHAUSTED (code 429): quota.");
+		await fake.cancellations.next();
+		const result = await AIError.finalize(error, { api: model.api, provider: model.provider, model: model.id });
+		expect(result.status).toBe(429);
+		expect(run.writer.output.content).toEqual([{ type: "text", text: "Working on it.\n" }]);
+	});
+
+	it("carries agy's reset window as a retry hint for the credential block", async () => {
+		const { error } = await quotaFailure(
+			(fake, text) => fake.text(text),
+			"\n⚠ API error (attempt 1): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 3h40m0s.",
+		);
+		const result = await AIError.finalize(error, { api: model.api, provider: model.provider, model: model.id });
+		expect(extractProviderRetryHint(model.provider, result.message)).toBe((3 * 60 + 40) * 60_000);
+	});
+
+	it("keeps prose about API errors and quota codes as visible text", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("explain the error")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		const prose = [
+			"An API error (attempt 3): RESOURCE_EXHAUSTED means the quota ran out.",
+			"\nRetry when you see code 429.",
+			"\nAPI error (attempt 1): UNAVAILABLE ",
+			"(code 503): try again.",
+			"\nAPI",
+			" errors are rare.",
+		];
+		for (const chunk of prose) fake.text(chunk);
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		expect(run.writer.output.content).toEqual([{ type: "text", text: prose.join("") }]);
+		expect(fake.closed).toBe(false);
+	});
+
+	// agy ≥1.5.14 retries silently and ends the turn with one "⚠ <error>" line once every retry failed.
+	async function finalNotice(chunks: string[]) {
+		const state = await fixture();
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		for (const chunk of chunks) fake.text(chunk);
+		prompt.response.resolve({ stopReason: "end_turn" });
+		const error: unknown = await run.done.then(
+			() => undefined,
+			cause => cause,
+		);
+		return { fake, run, error };
+	}
+
+	for (const [name, chunks, resetMs] of [
+		[
+			"individual",
+			[
+				"\n⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 124h22m23s.\n",
+			],
+			((124 * 60 + 22) * 60 + 23) * 1000,
+		],
+		[
+			"split third-party",
+			[
+				"Looking.\n⚠ Third-party quota reached. Please switch to Gemini models ",
+				"or upgrade your subscription to increase your limits. Resets in 3h22m19s.",
+			],
+			((3 * 60 + 22) * 60 + 19) * 1000,
+		],
+	] as const) {
+		it(`fails with a 429 and agy's reset window when the turn ends on a ${name} quota notice`, async () => {
+			const { error } = await finalNotice([...chunks]);
+			const result = await AIError.finalize(error, { api: model.api, provider: model.provider, model: model.id });
+			expect(result.status).toBe(429);
+			expect(AIError.isUsageLimitOutcome(result.status, result.message)).toBe(true);
+			expect(extractProviderRetryHint(model.provider, result.message)).toBe(resetMs);
+		});
+	}
+
+	it("keeps warning lines as visible text when the turn continues past them", async () => {
+		const chunks = [
+			"⚠ Individual quota reached is what the log says.\n",
+			"\nThe account needs a reset.",
+			"\n⚠ Careful",
+		];
+		const { run, error } = await finalNotice(chunks);
+		expect(error).toBeUndefined();
+		expect(run.writer.output.content).toEqual([{ type: "text", text: chunks.join("") }]);
 	});
 });

@@ -5,8 +5,8 @@ use objc2_core_foundation::{CFArray, CFNumber, CFRetained, CFString, CFType};
 
 use super::{
 	super::input::{
-		EntryFront, attached_under, await_key_window, make_key_in_background, recheck_background,
-		source,
+		EntryFront, KeyPurpose, attached_under, await_key_window, make_key_in_background,
+		recheck_background, source,
 	},
 	FocusedWindow, KeyFocus, MacAx, copy_attribute, copy_attribute_result, copy_bool, copy_element,
 	copy_required_string, copy_string, copy_strings_from_action_names, create_application,
@@ -192,6 +192,11 @@ fn window_menu_context(
 			 support is required",
 		));
 	}
+	// The target may have been minimized since the visible-window lookup.
+	// A menu read would otherwise try to make it key or read a sibling's menu.
+	if copy_bool(root, "AXMinimized") == Some(true) {
+		return Err(crate::desktop::menus::minimized_window(&window.id));
+	}
 	let pid = element_pid(root)?;
 	let app = create_application(pid)?;
 	set_timeout(&app)?;
@@ -249,8 +254,16 @@ fn with_window_menu<T>(
 		let overlay = access == MenuAccess::Read
 			&& read_leaves_focus(key_focus(pid), wid, skylight::window_parent);
 		let prepared = enter_menu_context(access, || {
-			let prepared =
-				make_key_in_background(&*source()?, pid, wid, window, entry_front, overlay, visit)?;
+			let prepared = make_key_in_background(
+				&*source()?,
+				pid,
+				wid,
+				window,
+				entry_front,
+				overlay,
+				KeyPurpose::Menu,
+				visit,
+			)?;
 			// The user may have brought the app forward while its key window
 			// settled.
 			recheck_background(

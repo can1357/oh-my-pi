@@ -32,6 +32,7 @@ import {
 	type OAuthFlowResult,
 } from "../../mcp/oauth-reauth";
 import { connectToServer, disconnectServer, listTools } from "../../mcp/client";
+import type { McpUpstreamStatus } from "../../mcp/host/contract";
 import {
 	addMCPServer,
 	readDisabledServers,
@@ -104,6 +105,10 @@ const MCP_AUTH_MIN_WRAP_WIDTH = 16;
  * and while address bars strip newlines they preserve or percent-encode
  * embedded spaces — an indent would corrupt the URL at every chunk boundary
  * (silently, when the damage lands inside a query value).
+ *
+ * Every chunk is wrapped in the same OSC 8 hyperlink (identical `id=`) to the
+ * full `url`: without it, terminal URL auto-detection treats each row as its
+ * own URL and a click opens a truncated authorize request (#20192).
  */
 function wrapUrlRows(label: string, url: string, width: number): string[] {
 	const indent = " ";
@@ -111,13 +116,23 @@ function wrapUrlRows(label: string, url: string, width: number): string[] {
 	const effective = Math.max(MCP_AUTH_MIN_WRAP_WIDTH, Math.trunc(width));
 	const inlineWidth = indent.length + label.length + 1 + sanitized.length;
 	if (inlineWidth <= effective) {
-		return [`${indent}${theme.fg("muted", `${label} ${sanitized}`)}`];
+		return [`${indent}${theme.fg("muted", `${label} ${urlHyperlinkAlways(url, sanitized)}`)}`];
 	}
 	const rows: string[] = [`${indent}${theme.fg("muted", label)}`];
 	for (let i = 0; i < sanitized.length; i += effective) {
-		rows.push(theme.fg("muted", sanitized.slice(i, i + effective)));
+		rows.push(theme.fg("muted", urlHyperlinkAlways(url, sanitized.slice(i, i + effective))));
 	}
 	return rows;
+}
+
+/** Host-side state of a server for the `/mcp` list: upstream state, pid, and how many sessions share it. */
+function describeServerRuntime(runtime: McpUpstreamStatus | undefined): string {
+	if (!runtime) return "";
+	const parts = [
+		runtime.state === "running" && runtime.pid !== undefined ? `running, pid ${runtime.pid}` : runtime.state,
+	];
+	if (runtime.links > 1) parts.push(`shared by ${runtime.links} sessions`);
+	return parts.join(", ");
 }
 
 /**
@@ -1064,6 +1079,10 @@ export class MCPCommandController {
 			}
 
 			const lines: string[] = [];
+			const runtimeOf = (name: string): string => {
+				const text = describeServerRuntime(this.ctx.mcpManager?.getServerRuntime(name));
+				return text ? theme.fg("dim", ` (${text})`) : "";
+			};
 
 			// Show user-level servers
 			if (userServers.length > 0) {
@@ -1083,7 +1102,8 @@ export class MCPCommandController {
 								: state === "connecting"
 									? theme.fg("muted", " ◌ connecting")
 									: theme.fg("muted", " ○ not connected");
-					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
+					const runtime = state === "inactive" ? "" : runtimeOf(name);
+					lines.push(`  ${theme.fg("accent", name)}${status}${runtime} ${theme.fg("dim", `[${type}]`)}`);
 				}
 				lines.push("");
 			}
@@ -1106,7 +1126,8 @@ export class MCPCommandController {
 								: state === "connecting"
 									? theme.fg("muted", " ◌ connecting")
 									: theme.fg("muted", " ○ not connected");
-					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
+					const runtime = state === "inactive" ? "" : runtimeOf(name);
+					lines.push(`  ${theme.fg("accent", name)}${status}${runtime} ${theme.fg("dim", `[${type}]`)}`);
 				}
 				lines.push("");
 			}
@@ -1123,7 +1144,7 @@ export class MCPCommandController {
 								: state === "connecting"
 									? theme.fg("muted", " ◌ connecting")
 									: theme.fg("muted", " ○ not connected");
-						lines.push(`  ${theme.fg("accent", name)}${status}`);
+						lines.push(`  ${theme.fg("accent", name)}${status}${runtimeOf(name)}`);
 					}
 					lines.push("");
 				}
@@ -1313,7 +1334,8 @@ export class MCPCommandController {
 			}
 
 			// Create temporary connection
-			connection = await connectToServer(name, resolvedConfig, { signal: abortController.signal });
+			// Live: a test answered from the host's store would pass for a server that is down.
+			connection = await connectToServer(name, resolvedConfig, { signal: abortController.signal, live: true });
 
 			// List tools to verify connection
 			const tools = await listTools(connection, { signal: abortController.signal });

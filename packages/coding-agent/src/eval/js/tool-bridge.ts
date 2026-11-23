@@ -10,7 +10,7 @@ import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
 import { committedTodoPhases } from "../../tools/todo";
 import { isReplyWrite, toolResultReplies } from "@oh-my-pi/pi-tui/chat/reply-write";
-import { parseMCPProgress } from "@oh-my-pi/pi-tui/tools/mcp";
+import { parseMCPProgress } from "@oh-my-pi/pi-tui/tools/mcp-progress";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { schemaDeclaresIntentField } from "../../utils/tool-schema";
 import { findEnabledEvalPrelude, invokeEvalPrelude } from "../preludes";
@@ -55,6 +55,7 @@ export type { JsStatusEvent } from "./shared/types";
 
 export interface ToolBridgeOptions {
 	session: ToolSession;
+	parentToolCallId?: string;
 	signal?: AbortSignal;
 	/** The cell's `timeout` in ms, the budget of a prelude call that sets none (`EvalPreludeContext.cellTimeoutMs`). */
 	cellTimeoutMs?: number;
@@ -234,7 +235,7 @@ function waitForSpeculativeClaim<T>(claim: Promise<T>, signal?: AbortSignal): Pr
 }
 
 export function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
-	return withEvalBridgeToolCall(options.session.xdev, () => dispatchSessionTool(name, args, options));
+	return withEvalBridgeToolCall(options.session.toolCommands, () => dispatchSessionTool(name, args, options));
 }
 
 async function dispatchSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
@@ -405,7 +406,7 @@ async function runSessionTool(
 					validatedArgs,
 					options.signal,
 					onUpdate,
-					context && { ...context, programmatic: true },
+					context && { ...context, programmatic: true, parentToolCallId: options.parentToolCallId },
 				);
 			} finally {
 				settled = true;

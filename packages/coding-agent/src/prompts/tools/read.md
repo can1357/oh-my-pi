@@ -9,7 +9,13 @@ Path suffixes:
 - Commas join ranges (:5-16,960-973) or individual lines (:19,59).
 - A single non-raw range also shows 1 line before and 3 after (:50-80 shows 49-83).
 - Non-raw reads (comma lists too) may add the open/close line of a cut block; only :raw stays exact.
-- :raw verbatim without anchors/prefixes; combine :2-4:raw or :raw:2-4 for exactly those lines.
+{{#if IS_HL_MODE}}
+- :raw verbatim without anchors/prefixes (skips folding and the display-width limit); combine :2-4:raw or :raw:2-4 for exactly those lines.
+{{else if HAS_LINE_NUMBERS}}
+- :raw verbatim without line prefixes (skips folding and the display-width limit); combine :2-4:raw or :raw:2-4 for exactly those lines.
+{{else}}
+- :raw verbatim (skips folding and the display-width limit); combine :2-4:raw or :raw:2-4 for exactly those lines.
+{{/if}}
 
 Sources:
 - Bare code: declarations only; re-read ONLY footer-named omissions, NEVER guess `..`/`…`.
@@ -19,5 +25,5 @@ Sources:
 - Directory: complete root; child listings cap at 12 (`… N more`), read child; page via :N-M/:-N.
 - URLs: reader text/markdown, :raw original HTML; bare host:port needs trailing slash.
 - PDF/DOCX/PPTX/XLSX/EPUB: extracted text; notebooks: editable cells; images: decoded inline.
-- Also, with selectors in xd://read/sources (read it before first use):
+- Also, with selectors in help://read/sources (read it before first use):
   - SQLite, archives (ZIP, TAR, 7z, RAR and more), JSON/JSONL by jq filter, executable metadata, video, SVG as image, merge conflicts.

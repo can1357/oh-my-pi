@@ -4,14 +4,19 @@ import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule } from "@oh-my-pi/pi-coding-age
 import { isBacktrackProne, TtsrManager, type TtsrMatchContext } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import { evaluateRegexConditionsSandbox } from "@oh-my-pi/pi-coding-agent/export/ttsr-regex-sandbox";
 
-function rule(name: string, condition: string, provider = "test"): Rule {
+function rule(
+	name: string,
+	condition: string,
+	provider = "test",
+	interruptMode: Rule["interruptMode"] = "never",
+): Rule {
 	return {
 		name,
 		path: `${name}.md`,
 		content: "reminder",
 		condition: [condition],
 		scope: ["text"],
-		interruptMode: "never",
+		interruptMode,
 		_source: { provider, providerName: provider, path: `${name}.md`, level: "project" },
 	};
 }
@@ -126,14 +131,14 @@ describe("TTSR regex sandbox", () => {
 
 	it("keeps checking non-prone conditions on every delta", () => {
 		const manager = new TtsrManager({ enabled: true }, SANDBOX);
-		manager.addRule(rule("forbidden", "FORBIDDEN_\\w+\\("));
+		manager.addRule(rule("forbidden", "FORBIDDEN_\\w+\\(", "test", "always"));
 
 		expect(names(manager.checkDelta("call FORBIDDEN_api(", TEXT))).toEqual(["forbidden"]);
 	});
 
 	it("leaves builtin rules in process, mid-stream", () => {
 		const manager = new TtsrManager({ enabled: true }, SANDBOX);
-		manager.addRule(rule("builtin-quoted", "(['\"])x\\1", BUILTIN_DEFAULTS_PROVIDER_ID));
+		manager.addRule(rule("builtin-quoted", "(['\"])x\\1", BUILTIN_DEFAULTS_PROVIDER_ID, "always"));
 
 		expect(names(manager.checkDelta('say "x"', TEXT))).toEqual(["builtin-quoted"]);
 	});

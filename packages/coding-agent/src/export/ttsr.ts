@@ -23,6 +23,8 @@ import {
 } from "./ttsr-regex-sandbox";
 import type { TtsrSettings } from "./ttsr-settings";
 
+import { countCapturingGroups, type LinearRegExp, type RegexStream } from "@oh-my-pi/pi-utils/regex";
+
 export type TtsrMatchSource = "text" | "thinking" | "tool";
 
 /** Context about the stream content currently being checked against TTSR rules. */
@@ -39,11 +41,19 @@ export interface TtsrMatchContext {
 /** Options for {@link TtsrManager.checkDelta} and {@link TtsrManager.checkSnapshot}. */
 export interface TtsrCheckOptions {
 	/**
-	 * Whether the stream is complete. A non-final check may defer conditions that can match across
-	 * lines until the buffer has grown enough; a final check evaluates every condition against the
+	 * Whether the stream is complete. Conditions without lookarounds or backreferences are exact
+	 * on every check. A non-final check may defer the rest when they can match across lines,
+	 * until the buffer has grown enough; a final check evaluates every condition against the
 	 * whole buffer. Defaults: `false` for `checkDelta`, `true` for `checkSnapshot`.
 	 */
 	final?: boolean;
+	/**
+	 * Evaluate only the rules a non-final check skips. A rule that cannot interrupt the stream's
+	 * source ({@link TtsrManager.interrupts}) reports after the output ends anyway, so it waits for
+	 * the final check. Skips a stream that buffered no text: this settles a stream whose closing
+	 * event never arrived, without interrupting finished output.
+	 */
+	deferredOnly?: boolean;
 }
 
 /** One completed assistant output (reply, reasoning, or one file of a tool call) as rules see it. */
@@ -123,7 +133,7 @@ interface TtsrScope {
 
 interface TtsrEntry {
 	rule: Rule;
-	conditions: RegExp[];
+	conditions: LinearRegExp[];
 	/** Incremental-matching traits of `conditions`, index for index. */
 	conditionTraits: ConditionTraits[];
 	/** ast-grep pattern strings; matched only against edit/write tool snapshots. */
@@ -311,26 +321,6 @@ function readClass(source: string, start: number): { matchesLineBreak: boolean; 
 		if (low.value === ESCAPE_ANY_LINE_BREAK || low.value === 0x0a) includesLineBreak = true;
 	}
 	return { matchesLineBreak: negated !== includesLineBreak, next: index + 1 };
-}
-
-/** Capturing groups in `source`; decides whether `\N` is a backreference or an octal escape. */
-function countCapturingGroups(source: string): number {
-	let count = 0;
-	let inClass = false;
-	for (let index = 0; index < source.length; index++) {
-		const char = source[index];
-		if (char === "\\") {
-			index++;
-		} else if (inClass) {
-			if (char === "]") inClass = false;
-		} else if (char === "[") {
-			inClass = true;
-		} else if (char === "(") {
-			const named = source[index + 2] === "<" && source[index + 3] !== "=" && source[index + 3] !== "!";
-			if (source[index + 1] !== "?" || named) count++;
-		}
-	}
-	return count;
 }
 
 /** Classifies a compiled condition for incremental matching; unmodeled syntax stays opaque. */
@@ -578,16 +568,23 @@ const NO_SANDBOX_MATCH: SandboxVerdict = { matched: false, index: -1, length: 0 
 
 /**
  * One stream's accumulated text and how far each condition has scanned it.
- * Line-local conditions scan only from the start of the line holding the
- * previous end; cross-line conditions scan that region too (a match there is a
- * whole-buffer match) and rescan the whole buffer geometrically, or on a final
- * check. A long region — a line that never ends, like raw tool-argument JSON
- * whose newlines are escaped — is rescanned geometrically too, so a non-final
- * check may report its matches late. Deltas stay in `#parts` until a scan
- * needs the text.
+ *
+ * Each condition runs as a {@link RegexStream} fed every delta, so a check
+ * costs the delta alone. Without lookarounds or backreferences the stream's
+ * answer is exact; otherwise its "no" is final and its "yes" is confirmed by
+ * scanning with the condition itself, paced as follows.
+ *
+ * Scans: line-local conditions scan only from the start of the line
+ * holding the previous end; cross-line conditions scan that region too (a match
+ * there is a whole-buffer match) and rescan the whole buffer geometrically, or
+ * on a final check. A long region — a line that never ends, like raw
+ * tool-argument JSON whose newlines are escaped — is rescanned geometrically
+ * too, so a non-final check may report its matches late. Deltas stay in
+ * `#parts` until a scan needs the text.
  */
 class StreamBuffer {
 	readonly #scans = new Map<RegExp, ConditionScan>();
+	readonly #streams = new Map<LinearRegExp, RegexStream>();
 	readonly excerpts = new Map<string, string | undefined>();
 	#parts: string[] = [];
 	#joined = "";
@@ -611,7 +608,10 @@ class StreamBuffer {
 	}
 
 	append(delta: string): void {
-		if (delta.length > 0) this.#parts.push(delta);
+		if (delta.length > 0) {
+			this.#parts.push(delta);
+			for (const stream of this.#streams.values()) stream.push(delta);
+		}
 		this.#advance(delta);
 	}
 
@@ -619,11 +619,14 @@ class StreamBuffer {
 	replace(snapshot: string): void {
 		const current = this.#text();
 		if (snapshot === current || snapshot.startsWith(current)) {
-			this.#advance(snapshot.slice(current.length));
+			const extension = snapshot.slice(current.length);
+			for (const stream of this.#streams.values()) stream.push(extension);
+			this.#advance(extension);
 			this.#joined = snapshot;
 			return;
 		}
 		this.excerpts.clear();
+		this.#streams.clear();
 		this.#verdicts.clear();
 		for (const scan of this.#scans.values()) {
 			scan.scannedTo = -1;
@@ -639,8 +642,13 @@ class StreamBuffer {
 		this.#joined = snapshot;
 	}
 
-	/** Whether `condition` matches the text; a non-final check may defer whole-buffer rescans. */
-	matches(condition: RegExp, traits: ConditionTraits, final: boolean): boolean {
+	/** Whether `condition` matches the text; a non-final check may defer confirming scans. */
+	matches(condition: LinearRegExp, traits: ConditionTraits, final: boolean): boolean {
+		const stream = this.#stream(condition);
+		if (stream) {
+			if (!stream.matched) return false;
+			if (condition.streamsExactly) return true;
+		}
 		let scan = this.#scans.get(condition);
 		if (!scan) {
 			scan = { scannedTo: -1, lineStart: 0, matched: false, settled: false, fullScannedTo: -1, paceFrom: -1 };
@@ -707,6 +715,18 @@ class StreamBuffer {
 	#settledMatch(condition: RegExp): { index: number; length: number } | undefined {
 		const verdict = this.verdictFor(condition);
 		return verdict?.matched ? { index: verdict.index, length: verdict.length } : undefined;
+	}
+
+	/** The condition's stream over this buffer, fed the text so far when first asked for. */
+	#stream(condition: LinearRegExp): RegexStream | undefined {
+		let stream = this.#streams.get(condition);
+		if (!stream) {
+			stream = condition.stream();
+			if (!stream) return undefined;
+			stream.push(this.#text());
+			this.#streams.set(condition, stream);
+		}
+		return stream;
 	}
 
 	/** Whether a non-final check should rescan the region from the condition's last line start. */
@@ -817,8 +837,8 @@ export class TtsrManager {
 		return this.#messageCount - record.lastInjectedAt >= repeatGap;
 	}
 
-	#compileConditions(rule: Rule): RegExp[] {
-		const compiled: RegExp[] = [];
+	#compileConditions(rule: Rule): LinearRegExp[] {
+		const compiled: LinearRegExp[] = [];
 		for (const pattern of rule.condition ?? []) {
 			try {
 				compiled.push(compileRuleCondition(pattern));
@@ -1106,7 +1126,7 @@ export class TtsrManager {
 		}
 	}
 
-	#conditionMatches(buffer: StreamBuffer, condition: RegExp, traits: ConditionTraits, final: boolean): boolean {
+	#conditionMatches(buffer: StreamBuffer, condition: LinearRegExp, traits: ConditionTraits, final: boolean): boolean {
 		if (this.#quarantined.has(condition)) return false;
 		if (this.#sandboxed.has(condition)) return final && buffer.verdictFor(condition)?.matched === true;
 		return buffer.matches(condition, traits, final);
@@ -1183,9 +1203,12 @@ export class TtsrManager {
 		if (context.source === "thinking" && !this.#canMatchThinking) {
 			return [];
 		}
+		if (options?.deferredOnly && !this.#buffers.has(this.#bufferKey(context))) {
+			return [];
+		}
 		const buffer = this.#streamBuffer(context);
 		buffer.append(delta);
-		return this.#matchBuffer(buffer, context, options?.final ?? false);
+		return this.#matchBuffer(buffer, context, options?.final ?? false, options?.deferredOnly ?? false);
 	}
 
 	/**
@@ -1201,7 +1224,53 @@ export class TtsrManager {
 	checkSnapshot(snapshot: string, context: TtsrMatchContext, options?: TtsrCheckOptions): Rule[] {
 		const buffer = this.#streamBuffer(context);
 		buffer.replace(snapshot);
-		return this.#matchBuffer(buffer, context, options?.final ?? true);
+		return this.#matchBuffer(buffer, context, options?.final ?? true, options?.deferredOnly ?? false);
+	}
+
+	/**
+	 * Whether `rule` interrupts output from `source`: its own `interruptMode` wins over the global
+	 * setting. A rule that does not only reports the match after the output ends.
+	 */
+	interrupts(rule: Rule, source: TtsrMatchSource): boolean {
+		switch (rule.interruptMode ?? this.#settings.interruptMode) {
+			case "always":
+				return true;
+			case "prose-only":
+				return source === "text" || source === "thinking";
+			case "tool-only":
+				return source === "tool";
+			default:
+				return false;
+		}
+	}
+
+	/**
+	 * Whether a non-final check of a `toolName` call's stream can match anything: some regex rule
+	 * that can still trigger interrupts tool calls and is scoped to this tool (path globs aside).
+	 * When none is, the call needs only its final check.
+	 */
+	interruptsToolStream(toolName: string): boolean {
+		if (!this.#settings.enabled) {
+			return false;
+		}
+		const tool = toolName.trim().toLowerCase();
+		for (const entry of this.#rules.values()) {
+			if (
+				entry.question ||
+				entry.conditions.length === 0 ||
+				!this.#canTrigger(entry.rule) ||
+				!this.interrupts(entry.rule, "tool")
+			) {
+				continue;
+			}
+			if (
+				entry.scope.allowAnyTool ||
+				entry.scope.toolScopes.some(scope => !scope.toolName || scope.toolName === tool)
+			) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	#streamBuffer(context: TtsrMatchContext): StreamBuffer {
@@ -1392,41 +1461,75 @@ export class TtsrManager {
 		return claimed;
 	}
 
-	#matchBuffer(buffer: StreamBuffer, context: TtsrMatchContext, final: boolean): Rule[] {
+	#matchBuffer(buffer: StreamBuffer, context: TtsrMatchContext, final: boolean, deferredOnly: boolean): Rule[] {
 		if (!this.#settings.enabled) {
 			return [];
 		}
 		if (final) this.#settleSandboxed(buffer, context);
 		const matches: Rule[] = [];
+		const deferred: TtsrEntry[] = [];
 		for (const [name, entry] of this.#rules) {
 			if (!this.#isEligible(entry, context)) {
 				continue;
 			}
-			if (
-				!entry.conditions.some((condition, index) =>
+			const interrupts = this.interrupts(entry.rule, context.source);
+			if (deferredOnly && interrupts) {
+				continue;
+			}
+			if (!final && !interrupts) {
+				deferred.push(entry);
+			} else if (
+				entry.conditions.some((condition, index) =>
 					this.#conditionMatches(buffer, condition, entry.conditionTraits[index], final),
 				)
 			) {
-				continue;
+				const excerpt = buffer.excerpt(
+					name,
+					entry.conditions,
+					condition => !this.#sandboxed.has(condition) && !this.#quarantined.has(condition),
+				);
+				matches.push(entry.rule);
+				logger.debug("TTSR condition matched", {
+					ruleName: name,
+					conditions: entry.rule.condition,
+					excerpt,
+					source: context.source,
+					toolName: context.toolName,
+					filePaths: context.filePaths,
+				});
 			}
+		}
+		// A non-final match interrupts the stream, so this is the deferred rules' last check:
+		// the interrupt names every rule the discarded output broke.
+		if (matches.length > 0) {
+			for (const entry of deferred) {
+				if (this.#bufferMatches(buffer, entry, context, true)) matches.push(entry.rule);
+			}
+		}
+		return matches;
+	}
 
-			const excerpt = buffer.excerpt(
+	#bufferMatches(buffer: StreamBuffer, entry: TtsrEntry, context: TtsrMatchContext, final: boolean): boolean {
+		const matched = entry.conditions.some((condition, index) =>
+			this.#conditionMatches(buffer, condition, entry.conditionTraits[index], final),
+		);
+		if (!matched) {
+			return false;
+		}
+		const name = entry.rule.name;
+		logger.debug("TTSR condition matched", {
+			ruleName: name,
+			conditions: entry.rule.condition,
+			excerpt: buffer.excerpt(
 				name,
 				entry.conditions,
 				condition => !this.#sandboxed.has(condition) && !this.#quarantined.has(condition),
-			);
-			matches.push(entry.rule);
-			logger.debug("TTSR condition matched", {
-				ruleName: name,
-				conditions: entry.rule.condition,
-				excerpt,
-				source: context.source,
-				toolName: context.toolName,
-				filePaths: context.filePaths,
-			});
-		}
-
-		return matches;
+			),
+			source: context.source,
+			toolName: context.toolName,
+			filePaths: context.filePaths,
+		});
+		return true;
 	}
 
 	/** Text that matched this rule in this stream; AST-only and zero-width matches have no excerpt. */

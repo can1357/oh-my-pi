@@ -1,12 +1,12 @@
 /**
  * Ask Tool - the model asks the user to fill in one HTML `<form>`.
  *
- * Hosts with a form surface (`ui.formDialog`: the interactive TUI, ACP) render
- * the form whole; every other host walks its named fields one prompt at a time
- * through `select`/`input`/`editor`, each prompt titled with the form text
- * around its field and then its question. The model receives the submitted form data
- * as JSON. Outside plan mode a configurable timeout submits the form's
- * preselected values.
+ * Hosts with a form surface (`ui.formDialog`: the interactive TUI, ACP, RPC)
+ * render the form whole; every other host walks its named fields one prompt
+ * at a time through `select`/`input`/`editor`, each prompt
+ * titled with the form text around its field and then its question. The model
+ * receives the submitted form data as JSON. Outside plan mode a configurable
+ * timeout submits the form's preselected values.
  */
 
 import { type as arkType } from "@oh-my-pi/omptype";
@@ -51,6 +51,7 @@ import { askTimeoutMs, cfgAskNotify } from "../modes/settings";
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
 import askHeadlessForkMessage from "../prompts/tools/ask-headless-fork.md" with { type: "text" };
 import askResultTemplate from "../prompts/tools/ask-result.md" with { type: "text" };
+import askSplitRadioGroupsTemplate from "../prompts/tools/ask-split-radio-groups.md" with { type: "text" };
 import { renderAttachmentSourceNotice } from "../session/attachment-source-notice";
 import { cfgSpeechEnabled } from "../tts/settings";
 import { vocalizer } from "../tts/vocalizer";
@@ -116,6 +117,28 @@ function legacyQuestionsHtml(questions: unknown[]): string | undefined {
 		fieldsets.push(`<fieldset><legend>${Bun.escapeHTML(item.question)}</legend>${control}</fieldset>`);
 	}
 	return `<form>${fieldsets.join("")}</form>`;
+}
+
+/**
+ * Fieldsets whose radios each sit in a group of their own — one `name` per
+ * input. HTML submits every checked radio under its own name, so a preselected
+ * option returns next to the user's pick as a second answer to one question.
+ * Separate questions belong in separate fieldsets, so this is an authoring slip.
+ */
+function splitRadioFieldsets(form: HtmlForm): { legend: string; names: string[] }[] {
+	const split: { legend: string; names: string[] }[] = [];
+	for (const section of form.sections) {
+		if (!section.fieldset) continue;
+		const names: string[] = [];
+		for (const block of section.blocks) {
+			if (block.kind !== "field") continue;
+			const field = block.field;
+			if (field.kind !== "choice" || field.multi || field.select) continue;
+			if (field.name && field.options.length === 1) names.push(field.name);
+		}
+		if (names.length > 1) split.push({ legend: spansText(section.title), names });
+	}
+	return split;
 }
 
 // =============================================================================
@@ -503,6 +526,13 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		const named = form.fields.filter(field => field.name);
 		if (named.length === 0) {
 			return { content: [{ type: "text", text: NO_NAMED_CONTROLS_ERROR }], details: { answers: [] } };
+		}
+		const splitRadios = splitRadioFieldsets(form);
+		if (splitRadios.length > 0) {
+			return {
+				content: [{ type: "text", text: prompt.render(askSplitRadioGroupsTemplate, { fieldsets: splitRadios }) }],
+				details: { answers: [] },
+			};
 		}
 
 		const extensionUi = context.ui;
