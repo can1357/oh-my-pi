@@ -236,6 +236,7 @@
 
 ### Fixed
 
+- The /btw history sheet now opens a follow-up at the first row of the newest turn instead of the end of its answer ([#19278](https://github.com/can1357/oh-my-pi/pull/19278) by [@ImAlexBlock](https://github.com/ImAlexBlock))
 - Fixed asynchronous Bash commands switching from the interpreted shell view to the raw command line.
 - Improved transcript rendering when switching to a subagent, resuming a session, or rebuilding a long transcript so the newest messages appear immediately.
 - Fixed Markdown task lists displaying the wrong checkbox state for completed and open items.
