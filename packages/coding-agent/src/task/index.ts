@@ -293,6 +293,9 @@ function validateSpawnParams(
 ): string | undefined {
 	const tasks = params.tasks;
 	if (batchEnabled && tasks !== undefined) {
+		if (typeof tasks === "string") {
+			return '`tasks` must be an array of task items, not a JSON string. Pass a real JSON array, e.g. [{"task":"instructions","solutionSpace":"Open-ended"}].';
+		}
 		if (!Array.isArray(tasks) || tasks.length === 0) {
 			return `Missing \`tasks\`. Provide at least one task item with \`${stepsEnabled ? "steps" : "task"}\`.`;
 		}
