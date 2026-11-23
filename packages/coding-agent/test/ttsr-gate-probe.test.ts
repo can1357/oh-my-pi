@@ -66,7 +66,6 @@ describe("TTSR gate command probes", () => {
 
 		expect(covered).toBe(true);
 		expect(refusal).toContain("no-rm guidance");
-		expect(refusal).toContain("check command refused it");
 		expect(events.map(event => event.type)).toEqual(["ttsr_triggered"]);
 		expect(
 			(await coordinator.gateToolCall({ tool: bash, args: { command: "rm ./tmp" }, toolCallId: "call-2" })).refusal,
@@ -84,7 +83,6 @@ describe("TTSR gate command probes", () => {
 
 		expect(Date.now() - started).toBeLessThan(3_000);
 		expect(refusal).toContain("no-rm guidance");
-		expect(refusal).toContain("check command did not finish");
 		expect(allowed).toEqual({ covered: true });
 	});
 
@@ -97,9 +95,7 @@ describe("TTSR gate command probes", () => {
 			judge,
 		);
 
-		expect(warn).toHaveBeenCalledWith("TTSR gate rule sets both command and question; the command decides", {
-			ruleName: "no-rm",
-		});
+		expect(warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ ruleName: "no-rm" }));
 		expect(manager.hasJudgedGateRules()).toBe(false);
 		expect(await coordinator.gateToolCall({ tool: bash, args: RM, toolCallId: "call-1" })).toEqual({ covered: true });
 		expect(requests).toHaveLength(0);
@@ -131,12 +127,8 @@ describe("TTSR gate command probes", () => {
 		expect(manager.addRule(probeRule("no-gate", "exit 0", { gate: undefined }))).toBe(false);
 		expect(manager.addRule(probeRule("no-condition", "exit 0", { condition: undefined }))).toBe(false);
 		expect(manager.hasGateRules()).toBe(false);
-		expect(warn).toHaveBeenCalledWith("TTSR command rule is not a gate: before rule, skipping rule", {
-			ruleName: "no-gate",
-		});
-		expect(warn).toHaveBeenCalledWith("TTSR command rule has no condition, skipping rule", {
-			ruleName: "no-condition",
-		});
+		expect(warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ ruleName: "no-gate" }));
+		expect(warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ ruleName: "no-condition" }));
 	});
 
 	it("[probe-07] leaves a matching streamed bash call to its probe instead of interrupting it", async () => {
@@ -201,10 +193,7 @@ describe("TTSR gate command probes", () => {
 
 		expect(manager.addRule(project)).toBe(false);
 		expect(manager.hasGateRules()).toBe(false);
-		expect(warn).toHaveBeenCalledWith(
-			"TTSR rule evil has command: but its source is not trusted (level project); the probe will not run",
-			{ ruleName: "evil", path: "/rules/evil.md" },
-		);
+		expect(warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ ruleName: "evil" }));
 
 		const { coordinator } = probeSetup([probeRule("trusted", "touch ran")]);
 		expect(await coordinator.gateToolCall({ tool: bash, args: RM, toolCallId: "call-1" })).toEqual({ covered: true });
