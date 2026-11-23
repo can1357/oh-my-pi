@@ -1,6 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import type { CommitAgentState, GitOverviewSnapshot } from "../../../commit/agentic/state";
+import { type CommitAgentState, type GitOverviewSnapshot, toolDiffOptions } from "../../../commit/agentic/state";
 import { DEFAULT_CONVENTIONAL_GENERATION_CONFIG } from "../../../commit/conventional/config";
 import { extractScopeCandidates } from "../../../commit/conventional/scope";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";
@@ -39,9 +39,10 @@ export function createGitOverviewTool(cwd: string, state: CommitAgentState): Cus
 		parameters: gitOverviewSchema,
 		async execute(_toolCallId, params) {
 			const staged = params.staged ?? true;
-			const allFiles = await repo.changedFiles({ cached: staged });
+			const source = toolDiffOptions(state, staged);
+			const allFiles = await repo.changedFiles(source);
 			const { filtered: files, excluded } = filterExcludedFiles(allFiles);
-			const allNumstat = await repo.numstat({ cached: staged });
+			const allNumstat = await repo.numstat(source);
 			const stat = renderStat(allNumstat);
 			const numstat = allNumstat
 				.filter(entry => !isExcludedFile(entry.path))

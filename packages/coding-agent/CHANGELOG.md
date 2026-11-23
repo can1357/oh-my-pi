@@ -20,6 +20,7 @@
 - Added `tui.vimShowCommand` (on by default): the status line echoes a half-typed Vim command (`15d` before its last `d`), also when **Vim Mode Indicator** is set to hidden ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Added `archive.calls`, `archive.grep`, `archive.stats`, and `archive.messages` to the eval `archive` object: list past tool calls with their results and the reasoning before them, regex-search thinking, replies, arguments, and results, count calls and errors by tool, day, model, version, project, or session, and read a transcript's records whole; `subagents: true` adds the subagent transcripts of the sessions in scope
 - Added `since`/`until` to every `archive` listing: an age like `8d`, an ISO date, or a date-time narrows projects, sessions, search, prompts, recaps, and activity to that window
+- Added `omp commit --amend`: replaces the last commit instead of adding one, with a message regenerated to describe the whole amended commit (its own changes plus what is staged now). Nothing staged rewrites only the message; unstaged changes are never swept in, and the changes are never split. With `--push` it pushes with `--force-with-lease` ([#20314](https://github.com/can1357/oh-my-pi/pull/20314) by [@DanieleSassoli](https://github.com/DanieleSassoli))
 
 ### Changed
 

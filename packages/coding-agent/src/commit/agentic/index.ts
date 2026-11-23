@@ -13,7 +13,8 @@ import { ModelRegistry } from "../../config/model-registry";
 import { Settings } from "../../config/settings";
 import { discoverAuthStorage, discoverContextFiles, loadCliExtensionProviders } from "../../sdk";
 import type { AuthStorage } from "../../session/auth-storage";
-import { abortOnGitFailure, pushOrAbort } from "../execute";
+import { type CommitDiffSource, resolveAmendDiffSource, STAGED_DIFF } from "../diff-source";
+import { abortOnGitFailure, CommitAbortedError, pushOrAbort } from "../execute";
 import { type ExistingChangelogEntries, runCommitAgentSession } from "./agent";
 import { generateFallbackProposal } from "./fallback";
 import { assignLockFilesToPlan } from "./lock-files";
@@ -26,6 +27,8 @@ interface CommitExecutionContext {
 	cwd: string;
 	dryRun: boolean;
 	push: boolean;
+	/** Replace HEAD; a push then uses `--force-with-lease`. */
+	amend: boolean;
 }
 
 export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedFallback: boolean }> {
@@ -53,18 +56,32 @@ async function runAgenticCommitWithAuth(
 	const modelRegistry = new ModelRegistry(authStorage);
 	await modelRegistry.refresh();
 	await loadCliExtensionProviders(modelRegistry, settings, cwd);
-	const stagedFilesPromise = (async () => {
-		let stagedFiles = await repo.changedFiles({ cached: true });
+	const stagedFilesPromise = (async (): Promise<{ files: string[]; amendSource?: CommitDiffSource }> => {
+		if (args.amend) {
+			// Amending folds the index into HEAD: never sweep unrelated worktree changes in.
+			const amendSource = await resolveAmendDiffSource(repo);
+			if (!amendSource) {
+				process.stderr.write("✗ Nothing to amend: the repository has no commits yet.\n");
+				throw new CommitAbortedError();
+			}
+			return { files: await repo.changedFiles(amendSource), amendSource };
+		}
+		let stagedFiles = await repo.changedFiles(STAGED_DIFF);
 		if (stagedFiles.length === 0) {
 			process.stdout.write("No staged changes detected, staging all changes...\n");
 			await repo.stageFiles([]);
-			stagedFiles = await repo.changedFiles({ cached: true });
+			stagedFiles = await repo.changedFiles(STAGED_DIFF);
 		}
-		return stagedFiles;
+		return { files: stagedFiles };
 	})();
 
 	const primaryModelPromise = resolvePrimaryModel(args.model, settings, modelRegistry);
-	const [primaryModelResult, stagedFiles] = await Promise.all([primaryModelPromise, stagedFilesPromise]);
+	const [primaryModelResult, { files: stagedFiles, amendSource }] = await Promise.all([
+		primaryModelPromise,
+		stagedFilesPromise,
+	]);
+	const diffSource = amendSource ?? STAGED_DIFF;
+	const execution: CommitExecutionContext = { cwd, dryRun: args.dryRun, push: args.push, amend: args.amend ?? false };
 	const { model: primaryModel, thinkingLevel: primaryThinkingLevel } = primaryModelResult;
 	process.stdout.write(`  └─ ${primaryModel.name}\n`);
 
@@ -85,11 +102,11 @@ async function runAgenticCommitWithAuth(
 		args.noChangelog ? [] : detectChangelogBoundaries(cwd, stagedFiles),
 		discoverContextFiles(cwd),
 		repo
-			.numstat({ cached: true })
+			.numstat(diffSource)
 			.then(entries =>
 				entries.map(entry => ({ path: entry.path, additions: entry.added ?? 0, deletions: entry.removed ?? 0 })),
 			),
-		repo.diffText({ cached: true }),
+		repo.diffText(diffSource),
 	]);
 	const changelogTargets = changelogBoundaries.map(boundary => boundary.changelogPath);
 	if (!args.noChangelog) {
@@ -118,7 +135,7 @@ async function runAgenticCommitWithAuth(
 	if (forceFallback) {
 		process.stdout.write("● Forcing fallback commit generation...\n");
 		const fallbackProposal = generateFallbackProposal(numstat);
-		await runSingleCommit(fallbackProposal, { cwd, dryRun: args.dryRun, push: args.push });
+		await runSingleCommit(fallbackProposal, execution);
 		return { usedFallback: true };
 	}
 
@@ -135,7 +152,7 @@ async function runAgenticCommitWithAuth(
 			summary: trivialChange.summary,
 			warnings: [],
 		};
-		await runSingleCommit(trivialProposal, { cwd, dryRun: args.dryRun, push: args.push });
+		await runSingleCommit(trivialProposal, execution);
 		return { usedFallback: false };
 	}
 
@@ -164,13 +181,12 @@ async function runAgenticCommitWithAuth(
 			changelogTargets,
 			requireChangelog: !args.noChangelog && changelogTargets.length > 0,
 			diffText: diff,
+			amendDiffSource: amendSource,
 			existingChangelogEntries,
 			onComplete: async commitState => {
 				agentSessionCompleted = true;
 				usedFallback = await completeAgentCommitState(commitState, {
-					cwd,
-					dryRun: args.dryRun,
-					push: args.push,
+					...execution,
 					noChangelog: args.noChangelog,
 					changelogTargets,
 					numstat,
@@ -189,7 +205,7 @@ async function runAgenticCommitWithAuth(
 		}
 		process.stdout.write("● Using fallback commit generation...\n");
 		const fallbackProposal = generateFallbackProposal(numstat);
-		await runSingleCommit(fallbackProposal, { cwd, dryRun: args.dryRun, push: args.push });
+		await runSingleCommit(fallbackProposal, execution);
 		return { usedFallback: true };
 	}
 }
@@ -242,9 +258,7 @@ async function completeAgentCommitState(
 
 	if (commitState.splitProposal) {
 		await runSplitCommit(commitState.splitProposal, {
-			cwd: ctx.cwd,
-			dryRun: ctx.dryRun,
-			push: ctx.push,
+			...ctx,
 			additionalFiles: updatedChangelogFiles,
 		});
 		return usedFallback;
@@ -264,15 +278,15 @@ async function runSingleCommit(proposal: CommitProposal, ctx: CommitExecutionCon
 		process.stdout.write(`${commitMessage}\n`);
 		return;
 	}
-	process.stdout.write("● Creating commit...\n");
+	process.stdout.write(ctx.amend ? "● Amending commit...\n" : "● Creating commit...\n");
 	try {
-		await repo.commitCreate(commitMessage, {});
+		await repo.commitCreate(commitMessage, { amend: ctx.amend });
 	} catch (error) {
 		if (vcs.isVcsError(error)) abortOnGitFailure("Commit failed", error);
 		throw error;
 	}
-	process.stdout.write("Commit created.\n");
-	if (ctx.push) await pushOrAbort(ctx.cwd);
+	process.stdout.write(ctx.amend ? "Commit amended.\n" : "Commit created.\n");
+	if (ctx.push) await pushOrAbort(ctx.cwd, { forceWithLease: ctx.amend });
 }
 
 async function runSplitCommit(

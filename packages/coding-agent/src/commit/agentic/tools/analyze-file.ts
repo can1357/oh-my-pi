@@ -81,6 +81,7 @@ export function createAnalyzeFileTool(options: {
 						file,
 						goal: params.goal,
 						related_files: relatedFiles,
+						amend_diff: amendDiffCommand(options.state, file),
 					});
 					const taskParams: TaskParams = {
 						name: `AnalyzeFile${index + 1}`,
@@ -105,6 +106,13 @@ export function createAnalyzeFileTool(options: {
 			};
 		},
 	};
+}
+
+/** `git diff` covering `file` in the amended commit, or `undefined` when not amending. */
+function amendDiffCommand(state: CommitAgentState, file: string): string | undefined {
+	const source = state.diffSource;
+	if (!source?.base || !source.head) return undefined;
+	return `git diff ${source.base} ${source.head} -- '${file.replaceAll("'", "'\\''")}'`;
 }
 
 function inferFileType(path: string): string {

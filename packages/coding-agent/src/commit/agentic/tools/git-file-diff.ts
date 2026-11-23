@@ -1,6 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import type { CommitAgentState } from "../../../commit/agentic/state";
+import { type CommitAgentState, toolDiffOptions } from "../../../commit/agentic/state";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";
 
 const TARGET_TOKENS = 30000;
@@ -165,7 +165,7 @@ export function createGitFileDiffTool(cwd: string, state: CommitAgentState): Cus
 
 			if (uncachedFiles.length > 0) {
 				for (const file of uncachedFiles) {
-					const diff = await repo.diffText({ cached: staged, files: [file] });
+					const diff = await repo.diffText({ ...toolDiffOptions(state, staged), files: [file] });
 					if (diff) {
 						diffs.set(file, diff);
 						state.diffCache.set(cacheKey(file), diff);
