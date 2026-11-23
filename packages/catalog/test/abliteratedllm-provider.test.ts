@@ -178,10 +178,10 @@ async function chatRequestBody(id: string, effort: Effort): Promise<Record<strin
 }
 
 // Checked against api.abliteratedllm.dev on 2026-11-14: glm-5.3 and kimi-k3
-// accept `reasoning_effort: "max"`, and glm-5.3-flash-abliterated rejects
-// `minimal`, which the provider rule sends as `low`. Since 2026-11-22 the
-// gateway rejects any glm-5.3-cyber-abliterated effort other than `low` and
-// `high` (its `/v1/models` `reasoning_efforts`) with 400.
+// accept `reasoning_effort: "max"`. glm-5.3-flash-abliterated does not list
+// `minimal`, which the provider rule sends as `low`. glm-5.3-cyber-abliterated
+// lists only `low` and `high` (its `/v1/models` `reasoning_efforts`), and the
+// gateway runs any other level at the nearer of the two.
 describe("AbliteratedLLM chat completions requests", () => {
 	test("Qwen 3.8 sends the selected effort as reasoning_effort, not enable_thinking", async () => {
 		for (const effort of [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]) {
@@ -205,7 +205,7 @@ describe("AbliteratedLLM chat completions requests", () => {
 		}
 	});
 
-	test("GLM-5.3 Cyber Abliterated exposes only the levels the gateway accepts", () => {
+	test("GLM-5.3 Cyber Abliterated exposes only the levels the gateway lists", () => {
 		expect(getBundledModel("abliteratedllm", "glm-5.3-cyber-abliterated").thinking).toMatchObject({
 			efforts: [Effort.Low, Effort.High],
 			defaultLevel: Effort.High,
