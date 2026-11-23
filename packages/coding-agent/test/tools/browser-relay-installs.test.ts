@@ -243,6 +243,7 @@ describe("Chrome native host install", () => {
 				"Google/Chrome Canary",
 				"Chromium",
 				"BraveSoftware/Brave-Browser",
+				"net.imput.helium",
 			].map(browser => `Library/Application Support/${browser}/NativeMessagingHosts`),
 		},
 		{
@@ -254,6 +255,7 @@ describe("Chrome native host install", () => {
 				"google-chrome-canary",
 				"chromium",
 				"BraveSoftware/Brave-Browser",
+				"net.imput.helium",
 			].map(browser => `.config/${browser}/NativeMessagingHosts`),
 		},
 		{ platform: "win32", roots: [".omp/browser-relay"] },

@@ -60,6 +60,16 @@ describe("findUnpackedInstalls", () => {
 		await profile("Chromium", "Default", {
 			secure: { extensions: { settings: { [ID]: { location: 4 } } } },
 		});
+		// A fork that keeps its profiles outside Chrome's directories is found in its own.
+		await localState("net.imput.helium", { Default: "Personal" });
+		await profile("net.imput.helium", "Default", {
+			secure: {
+				extensions: {
+					settings: { [ID]: { location: 4, disable_reasons: [] } },
+					ui: { developer_mode: true },
+				},
+			},
+		});
 
 		const found = await findUnpackedInstalls(ID, {
 			platform: "darwin",
@@ -86,6 +96,13 @@ describe("findUnpackedInstalls", () => {
 				loaded: false,
 				enabled: false,
 				developerMode: false,
+			},
+			{
+				browser: "Helium",
+				profile: "Personal",
+				loaded: true,
+				enabled: true,
+				developerMode: true,
 			},
 		]);
 	});

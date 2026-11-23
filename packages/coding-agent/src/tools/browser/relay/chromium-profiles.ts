@@ -83,6 +83,16 @@ const BROWSERS: readonly BrowserDefinition[] = [
 		winInstall: "BraveSoftware\\Brave-Browser",
 		keychain: "Brave Safe Storage",
 	},
+	{
+		name: "Helium",
+		darwin: "net.imput.helium",
+		linux: "net.imput.helium",
+		win32: "imput/Helium/User Data",
+		app: "Helium.app",
+		bundleId: "net.imput.helium",
+		winInstall: "imput\\Helium",
+		keychain: "Helium Storage Key",
+	},
 ];
 
 /** Where to look for browser user data; each defaults to this user's. */
