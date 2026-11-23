@@ -1,60 +1,92 @@
 import { describe, expect, it } from "bun:test";
-import * as fs from "node:fs";
-import { PtySession, reapChild, spawnRaw } from "../native/index.js";
+import { FdStream, PtySession, type PtyRunResult, type RawExit, reapChild, spawnRaw } from "../native/index.js";
 
-// A PTY control loop and a reapChild wait each last as long as their child.
-// On Tokio's bounded blocking pool (8 threads on Windows) a few of them
-// starve every later spawn_blocking task, so each runs on its own named thread.
-const PTY_CONTROL_THREAD = "pi-pty-ctrl";
-const REAP_THREAD = "pi-reap";
-const THREAD_WAIT_MS = 1_000;
+// A PTY control loop and a reapChild wait each last as long as their child. On
+// Windows the addon caps Tokio's blocking pool at NAPI_TOKIO_MAX_BLOCKING_THREADS
+// (8, crates/natives/src/lib.rs); with those waits on that pool, eight live
+// children stop every later PTY or reap from even starting.
+const BLOCKING_POOL_CAP = 8;
+const EXIT_CODE = 7;
+const DEADLINE_MS = 10_000;
+const HOLDER_ARGS = ["-n", "60", "127.0.0.1"];
 
-function threadNames(): string[] {
-	return fs.readdirSync("/proc/self/task").flatMap(tid => {
-		try {
-			return [fs.readFileSync(`/proc/self/task/${tid}/comm`, "utf8").trim()];
-		} catch {
-			return [];
-		}
-	});
+function within<T>(promise: Promise<T>, label: string): Promise<T> {
+	const { promise: timedOut, reject } = Promise.withResolvers<never>();
+	const timer = setTimeout(() => reject(new Error(`${label} did not finish within ${DEADLINE_MS} ms`)), DEADLINE_MS);
+	return Promise.race([promise, timedOut]).finally(() => clearTimeout(timer));
 }
 
-async function waitForThread(name: string): Promise<string[]> {
-	const deadline = Date.now() + THREAD_WAIT_MS;
-	let names = threadNames();
-	while (!names.includes(name) && Date.now() < deadline) {
-		await Bun.sleep(10);
-		names = threadNames();
-	}
-	return names;
+function childEnv(): Record<string, string> {
+	return Object.fromEntries(
+		Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+	);
 }
 
-describe.skipIf(process.platform !== "linux")("dedicated wait threads", () => {
-	it("runs a PTY session's control loop on its own thread", async () => {
-		const session = new PtySession();
-		const run = session.start({ command: "exec sleep 5", timeoutMs: 10_000, cols: 80, rows: 24 });
+describe.skipIf(process.platform !== "win32")("PTY and reapChild waits at the blocking-pool cap", () => {
+	it("finishes a further PTY while eight PTY sessions stay open", async () => {
+		const holders: { session: PtySession; run: Promise<PtyRunResult> }[] = [];
 		try {
-			expect(await waitForThread(PTY_CONTROL_THREAD)).toContain(PTY_CONTROL_THREAD);
-		} finally {
-			session.kill();
-			await run.catch(() => undefined);
-		}
-	});
+			const started: Promise<number>[] = [];
+			for (let i = 0; i < BLOCKING_POOL_CAP; i++) {
+				const session = new PtySession();
+				const { promise, resolve, reject } = Promise.withResolvers<number>();
+				const run = session.startArgv(
+					{ application: "ping.exe", args: HOLDER_ARGS, timeoutMs: 120_000, cols: 80, rows: 24 },
+					undefined,
+					(error, pid) => (error ? reject(error) : resolve(pid)),
+				);
+				run.catch(reject);
+				holders.push({ session, run });
+				started.push(promise);
+			}
+			await within(Promise.all(started), "starting the holder PTYs");
 
-	it("waits for a reaped child on its own thread", async () => {
-		const child = spawnRaw({
-			application: "sleep",
-			args: ["5"],
-			env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
-			cwd: process.cwd(),
-		});
-		for (const fd of [child.stdin, child.stdout, child.stderr]) fs.closeSync(fd);
-		const reaped = reapChild(child.pid);
-		try {
-			expect(await waitForThread(REAP_THREAD)).toContain(REAP_THREAD);
+			const probe = new PtySession().startArgv({
+				application: "cmd.exe",
+				args: ["/c", `exit ${EXIT_CODE}`],
+				timeoutMs: 30_000,
+				cols: 80,
+				rows: 24,
+			});
+			expect((await within(probe, "the further PTY")).exitCode).toBe(EXIT_CODE);
 		} finally {
-			process.kill(child.pid, "SIGKILL");
+			for (const { session } of holders) session.kill();
+			await Promise.allSettled(holders.map(holder => holder.run));
 		}
-		expect(await reaped).toEqual({ exitCode: null, signal: 9 });
-	});
+	}, 60_000);
+
+	it("reaps a further child while eight reapChild waits are pending", async () => {
+		const env = childEnv();
+		const cwd = process.cwd();
+		const handles: number[] = [];
+		const holders: { pid: number; reaped: Promise<RawExit> }[] = [];
+		try {
+			for (let i = 0; i < BLOCKING_POOL_CAP; i++) {
+				const child = spawnRaw({ application: "ping.exe", args: HOLDER_ARGS, env, cwd });
+				handles.push(child.stdin, child.stdout, child.stderr);
+				holders.push({ pid: child.pid, reaped: reapChild(child.pid) });
+			}
+			// Alive long enough for reapChild to open it: once a child has exited and
+			// spawnRaw has dropped its handle, its pid no longer names a process.
+			const probe = spawnRaw({
+				application: "cmd.exe",
+				args: ["/c", `ping -n 2 127.0.0.1 >NUL & exit ${EXIT_CODE}`],
+				env,
+				cwd,
+			});
+			handles.push(probe.stdin, probe.stdout, probe.stderr);
+			expect(await within(reapChild(probe.pid), "reaping the further child")).toEqual({
+				exitCode: EXIT_CODE,
+				signal: null,
+			});
+		} finally {
+			for (const { pid } of holders) {
+				try {
+					process.kill(pid);
+				} catch {}
+			}
+			await Promise.allSettled(holders.map(holder => holder.reaped));
+			for (const handle of handles) new FdStream(handle).close();
+		}
+	}, 60_000);
 });
