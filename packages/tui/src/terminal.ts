@@ -2216,10 +2216,6 @@ export class ProcessTerminal implements Terminal {
 		}
 	}
 
-	/**
-	 * Parse an OSC 11 background color response and compute BT.601 luminance.
-	 * Handles 1-, 2-, 3-, and 4-digit XParseColor hex components.
-	 */
 	#multiplexerOwnsColorScheme(): boolean {
 		return terminalMultiplexerSessions().some(multiplexer => multiplexer.colorSchemeQueryAuthoritative);
 	}
@@ -2238,6 +2234,10 @@ export class ProcessTerminal implements Terminal {
 		}
 	}
 
+	/**
+	 * Parse an OSC 11 background color response and compute BT.601 luminance.
+	 * Handles 1-, 2-, 3-, and 4-digit XParseColor hex components.
+	 */
 	#handleOsc11Response(rHex: string, gHex: string, bHex: string, requestToken?: TerminalAppearanceRequestToken): void {
 		const normalize = (hex: string): number => {
 			const value = parseInt(hex, 16);
