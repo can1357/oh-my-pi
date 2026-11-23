@@ -1,0 +1,37 @@
+// Catalog entry for "abliteratedllm".
+
+provider "abliteratedllm" {
+	default-model "glm-5.3-flash-abliterated"
+	env "ABLITERATEDLLM_API_KEY"
+	dynamic-models-authoritative #true
+	// AbliteratedLLM rows carry their own metadata; same-id rows from other
+	// providers describe different deployments.
+	skip-cross-provider-reference-fills #true
+	// `/v1/models` is public, so catalog generation needs no key.
+	discovery label="AbliteratedLLM" allow-unauthenticated=#true
+
+	// Chat Completions dialect per https://abliteratedllm.dev/docs/chat-completions:
+	// fields the gateway does not list are passed to the model unchanged, so no
+	// `store` is sent, and reasoning rides `reasoning_effort` on every model
+	// (not Qwen's `enable_thinking`, which Qwen 3.8 templates reject when false).
+	// Checked live on 2026-11-14: `low`/`medium`/`high`/`xhigh`/`max` are
+	// accepted on every model (`glm-5.3-cyber-abliterated`, below, runs
+	// `medium`/`xhigh`/`max` as `high`). `glm-5.3-flash-abliterated` does not
+	// list `minimal` (the gateway runs it as `low`), so `minimal` is sent as
+	// `low`. System prompts already ride the `system` role, and both
+	// `max_tokens` and `max_completion_tokens` are accepted.
+	supports-store #false
+	thinking-format "openai"
+	reasoning-effort-map {
+		minimal "low"
+	}
+	// GLM-5.3 Cyber Abliterated always reasons, and its chat template honors only
+	// `low` and `high`. `/v1/models` lists `reasoning_efforts: ["low", "high"]`
+	// for it, and the gateway runs any other level at the nearer of the two, so
+	// its ladder is low/high, defaulting to high.
+	models "glm-5.3-cyber-abliterated" {
+		thinking-default-level "high"
+		thinking-efforts "low" "high"
+		thinking-requires-effort #true
+	}
+}

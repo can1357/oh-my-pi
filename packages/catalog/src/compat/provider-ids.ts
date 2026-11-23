@@ -2,6 +2,7 @@
 
 /** Every chat-model provider with a catalog entry (`default-model` in its provider rules). */
 export type KnownProvider =
+	| "abliteratedllm"
 	| "abliteration"
 	| "aiand"
 	| "aimlapi"

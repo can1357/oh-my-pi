@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added AbliteratedLLM (`abliteratedllm`) with live model discovery from `https://api.abliteratedllm.dev/v1/models` and `/login abliteratedllm` (`ABLITERATEDLLM_API_KEY`) ([#19227](https://github.com/can1357/oh-my-pi/pull/19227) by [@whiteworthy](https://github.com/whiteworthy))
 - Added GLM-5.4 to the Zhipu Coding Plan with image input and 1M context, gave it the low/high/max thinking ladder on every host, and preferred it over GLM-5.3 for the `slow` role
 - Added `fetchOpenRouterChatModels()` and `OPENROUTER_BASE_URL` to `@oh-my-pi/pi-catalog/provider-models/openai-compat` for reading OpenRouter's tool-capable chat roster outside the `openrouter` provider.
 - `toolSchemaFlavor: "google"` rewrites OpenAI-compatible tool schemas into Gemini's dialect; GitHub Copilot Gemini models use it ([#20198](https://github.com/can1357/oh-my-pi/issues/20198))
