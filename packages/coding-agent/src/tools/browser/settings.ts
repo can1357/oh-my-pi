@@ -133,14 +133,14 @@ export const cfgBrowserFreezeOnTurnEnd = register({
 	},
 });
 
-export const cfgBrowserRelayReleaseOnTurnEnd = register({
-	id: "browser.relayReleaseOnTurnEnd",
+export const cfgBrowserRelayReleaseOnRunEnd = register({
+	id: "browser.relayReleaseOnRunEnd",
 	type: "boolean",
 	default: false,
 	ui: {
 		tab: "tools",
 		group: "Grep & Browser",
-		label: "Release Relay Tabs On Turn End",
+		label: "Release Relay Tabs On Run End",
 		description:
 			'When the agent finishes its reply, let go of the idle tabs omp drives in your Chrome through the browser relay, so Chrome stops showing its "started debugging this browser" infobar until the next call. The tabs stay open; the next call reattaches without reloading, but resets tab state set by earlier calls (routes, emulation, init scripts, element ids). Tabs opened with persist:true, and tabs recording, tracing or capturing a HAR, are kept.',
 	},

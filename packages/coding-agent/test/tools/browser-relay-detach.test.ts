@@ -912,7 +912,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 			const ext = await openRelayTab("", false, owner);
 			expect(ext.attached).toBeTrue();
 
-			// What turn settle runs under `browser.relayReleaseOnTurnEnd`.
+			// What a run's end runs under `browser.relayReleaseOnRunEnd`.
 			expect(await tabSupervisor.releaseRelayTabsForOwner(owner)).toBe(1);
 			// The relay detaches the tab once its worker's connection is gone: Chrome's infobar goes.
 			await untilAttached(ext, false);
@@ -922,7 +922,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 			// The next call re-adopts the page as it was (no reload drops `window.mark`) and says what reset.
 			const next = await invoke(readMark);
 			expect(next.value).toBe("kept");
-			expect(next.text).toContain("let go of this tab when the last turn ended");
+			expect(next.text).toContain("let go of this tab when its last run ended");
 			expect(ext.attached).toBeTrue();
 		},
 		60_000,
