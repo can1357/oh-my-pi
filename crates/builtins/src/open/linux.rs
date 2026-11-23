@@ -156,13 +156,20 @@ mod tests {
 
 	/// Regression for `zbus::blocking` panicking inside Tokio contexts
 	/// (including `tokio::task::spawn_blocking` and `Runtime::block_on`) and
-	/// spawning an unbounded `nproc`-worker Tokio runtime when `zbus/tokio` is
+	/// spawning a private `nproc`-worker Tokio runtime when `zbus/tokio` is
 	/// active. Exercises the observable `open` path with a `DBusActivatable=true`
 	/// desktop entry against a live local Unix socket so async `zbus` I/O and
 	/// timeout drivers both run before reporting no session bus.
 	#[test]
 	fn dbus_activatable_open_works_outside_and_inside_tokio_runtimes() {
-		use std::os::unix::net::UnixListener;
+		use std::{
+			os::unix::net::UnixListener,
+			sync::{
+				Arc,
+				atomic::{AtomicBool, Ordering},
+			},
+			time::{Duration, Instant},
+		};
 
 		let dir = tempfile::tempdir().expect("tempdir");
 		let dir = dir.path().canonicalize().expect("canonical tempdir");
@@ -184,15 +191,31 @@ mod tests {
 
 		let sock_path = dir.join("bus.sock");
 		let listener = UnixListener::bind(&sock_path).expect("bind unix socket");
-		let accept_thread = std::thread::spawn(move || {
-			// Accept four connections (plain thread, mt block_on, mt spawn_blocking,
-			// ct block_on) and close each so async zbus performs real socket I/O
-			// and handshake through Tokio's io + time drivers.
-			for _ in 0..4 {
-				let Ok((stream, _)) = listener.accept() else {
-					break;
-				};
-				drop(stream);
+		listener.set_nonblocking(true).expect("nonblocking listener");
+		let done = Arc::new(AtomicBool::new(false));
+		let accept_thread = std::thread::spawn({
+			let done = Arc::clone(&done);
+			move || {
+				// Accept and close each connection (plain thread, mt block_on, mt
+				// spawn_blocking, ct block_on) so async zbus performs real socket I/O
+				// and handshake through Tokio's io + time drivers. Counting instead of
+				// blocking on a fixed number of accepts turns a case that never
+				// connects into an assertion failure rather than a hung join.
+				let deadline = Instant::now() + Duration::from_secs(30);
+				let mut accepted = 0;
+				while !done.load(Ordering::Acquire) && Instant::now() < deadline {
+					match listener.accept() {
+						Ok((stream, _)) => {
+							accepted += 1;
+							drop(stream);
+						},
+						Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+							std::thread::sleep(Duration::from_millis(5));
+						},
+						Err(err) => panic!("accept: {err}"),
+					}
+				}
+				accepted
 			}
 		});
 
@@ -248,7 +271,9 @@ mod tests {
 			.expect("ct runtime");
 		ct.block_on(async { run_case(&dir, &bus_addr, &config_str, &data_str) });
 
-		accept_thread.join().expect("listener accepted all 4 D-Bus attempts");
+		done.store(true, Ordering::Release);
+		let accepted = accept_thread.join().expect("accept thread");
+		assert_eq!(accepted, 4, "every case must reach the bus socket");
 	}
 
 	#[test]
@@ -279,7 +304,7 @@ mod tests {
 }
 
 /// Runs a one-shot async D-Bus operation without invoking `zbus::blocking`
-/// (whose internal `zbus::utils::block_on` creates an unbounded `nproc`-worker
+/// (whose internal `zbus::utils::block_on` creates a private `nproc`-worker
 /// Tokio runtime and panics when called from inside Tokio contexts).
 ///
 /// Reuses the caller's Tokio runtime via `block_in_place` when running inside a
@@ -287,6 +312,10 @@ mod tests {
 /// escapes via a bounded scoped thread only on `CurrentThread` runtimes where
 /// `block_in_place` panics, and uses a local `current_thread` runtime outside
 /// Tokio.
+///
+/// A `MultiThread` caller runtime must have its IO and time drivers enabled
+/// (`enable_all()`): `future` drives zbus's Tokio socket and
+/// `tokio::time::timeout` there, and panics on a runtime built without them.
 fn block_on_bus<F, T>(future: F) -> io::Result<T>
 where
 	F: Future<Output = T> + Send,
@@ -592,27 +621,31 @@ impl<'a> Desktop<'a> {
 
 	/// Hands `target` to the desktop portal, which picks the application.
 	fn portal(&self, target: &Target) -> Result<(), String> {
-		let opened_file = match target {
-			Target::Url(_) => None,
-			Target::File(path) => Some(File::open(path).map_err(|err| err.to_string())?),
+		enum PortalArg<'a> {
+			Url(&'a str),
+			File(File),
+		}
+		let arg = match target {
+			Target::Url(url) => PortalArg::Url(url),
+			Target::File(path) => PortalArg::File(File::open(path).map_err(|err| err.to_string())?),
 		};
 		let bus_address = self.bus_address.as_deref();
 		block_on_bus(async {
 			let bus = connect_bus(bus_address).await?;
 			let options: HashMap<&str, Value<'_>> = HashMap::new();
 			let interface = Some(PORTAL_OPEN_URI);
-			let reply = match (target, opened_file) {
-				(Target::Url(url), _) => {
+			let reply = match arg {
+				PortalArg::Url(url) => {
 					bus.call_method(
 						Some(PORTAL),
 						PORTAL_PATH,
 						interface,
 						"OpenURI",
-						&("", url.as_str(), options),
+						&("", url, options),
 					)
 					.await
 				},
-				(Target::File(_), Some(file)) => {
+				PortalArg::File(file) => {
 					bus.call_method(
 						Some(PORTAL),
 						PORTAL_PATH,
@@ -622,7 +655,6 @@ impl<'a> Desktop<'a> {
 					)
 					.await
 				},
-				(Target::File(_), None) => unreachable!("file target opened above"),
 			};
 			reply.map(drop)
 		})
