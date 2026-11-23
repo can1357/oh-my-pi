@@ -2,6 +2,7 @@ import { Document, type DocumentFragment, Element, Text } from "./core";
 
 /** Closing-tag patterns for raw-text elements, reused across parses (callers reset `lastIndex`). */
 const RAW_TEXT_CLOSE: Record<string, RegExp> = { script: /<\/script\s*>/gi, style: /<\/style\s*>/gi };
+const RCDATA_CLOSE: Record<string, RegExp> = { textarea: /<\/textarea\s*>/gi, title: /<\/title\s*>/gi };
 const DOCTYPE_PATTERN = /<!doctype\b/iy;
 const TAG_NAME_PATTERN = /[^\s/>]+/y;
 const ATTRIBUTE_NAME_PATTERN = /[^\s=/>]+/y;
@@ -363,6 +364,22 @@ export function parseInto(html: string, document: Document, root: Document | Doc
 			const match = closePattern.exec(html);
 			const rawEnd = match?.index ?? html.length;
 			element.appendChild(new Text(html.slice(index, rawEnd), document));
+			index = match ? closePattern.lastIndex : html.length;
+			continue;
+		}
+		// RCDATA elements (textarea, HTML title): tags inside are literal text, entities are decoded.
+		// SVG `<title>` has child elements, and feed documents follow XML rules, so both are excluded.
+		if (
+			!xmlLike &&
+			namespace === HTML_NAMESPACE &&
+			Object.hasOwn(RCDATA_CLOSE, parsed.name) &&
+			!parsed.selfClosing
+		) {
+			const closePattern = RCDATA_CLOSE[parsed.name];
+			closePattern.lastIndex = index;
+			const match = closePattern.exec(html);
+			const end = match?.index ?? html.length;
+			element.appendChild(new Text(decodeEntities(html.slice(index, end)), document));
 			index = match ? closePattern.lastIndex : html.length;
 			continue;
 		}
