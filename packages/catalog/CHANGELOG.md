@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed Bedrock Kimi K3.1 requests that set a temperature (history summaries, skill routing hints) failing with "This model doesn't support the temperature field" ([#20239](https://github.com/can1357/oh-my-pi/issues/20239))
 - Fixed Llama 3.x models failing with "This model only supports single tool-calls at once!" after a turn that called several tools, on hosts serving them through vLLM (such as CoreWeave behind OpenRouter)
 - Devin usage from two organizations under one email is no longer merged into one account ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))
 - Devin's Gemini 4 Neon images are now budgeted at the 1,089 tokens Devin bills per image, measured across sizes, instead of the unverified 1,120-token Gemini estimate ([#19883](https://github.com/can1357/oh-my-pi/pull/19883) by [@will-bogusz](https://github.com/will-bogusz))
