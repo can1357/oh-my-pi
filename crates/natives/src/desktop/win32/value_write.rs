@@ -1,4 +1,7 @@
-use super::super::{ax::text_readback, error::CoreResult};
+use super::{
+	super::{ax::text_readback, error::CoreResult},
+	delivery::is_native_class,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ValueRoute {
@@ -8,28 +11,13 @@ pub(super) enum ValueRoute {
 	Edit,
 }
 
-/// Whether `class` is `base` or a `WinForms` subclass of it
-/// (`WindowsForms10.<BASE>.app.<suffix>`).
-fn is_class(class: &str, base: &str) -> bool {
-	const WINFORMS: &str = "WindowsForms10.";
-	class.eq_ignore_ascii_case(base)
-		|| class.split_once(".app.").is_some_and(|(name, suffix)| {
-			name
-				.get(..WINFORMS.len())
-				.is_some_and(|prefix| prefix.eq_ignore_ascii_case(WINFORMS))
-				&& name
-					.get(WINFORMS.len()..)
-					.is_some_and(|name| name.eq_ignore_ascii_case(base))
-				&& !suffix.is_empty()
-		})
-}
-
 pub(super) fn route(class: &str, parent_class: &str) -> ValueRoute {
-	if is_class(class, "ComboBox") {
+	if is_native_class(class, "ComboBox") {
 		ValueRoute::Combo
 	} else if class.eq_ignore_ascii_case("ComboBoxEx32") {
 		ValueRoute::RefuseCombo
-	} else if is_class(class, "Edit") && !parent_class.eq_ignore_ascii_case("SysIPAddress32") {
+	} else if is_native_class(class, "Edit") && !parent_class.eq_ignore_ascii_case("SysIPAddress32")
+	{
 		ValueRoute::Edit
 	} else {
 		ValueRoute::Pattern
@@ -153,7 +141,7 @@ pub(super) fn combo_target(
 
 /// Why a control's message went unanswered.
 #[cfg(target_os = "windows")]
-enum Unanswered {
+pub(super) enum Unanswered {
 	/// A pointer-bearing message for another thread of this process, refused
 	/// before sending: after a timeout its buffer could outlive the call.
 	OtherThread,
@@ -180,14 +168,14 @@ fn send_message(
 /// How long a message of the current operation may wait for its answer: 3 s,
 /// or what is left of the operation's deadline if that is sooner.
 #[cfg(target_os = "windows")]
-fn operation_wait_ms() -> u32 {
+pub(super) fn operation_wait_ms() -> u32 {
 	super::super::control::time_left().map_or(3000, |left| left.as_millis().min(3000) as u32)
 }
 
 /// Sends `message` and waits up to `wait_ms` for its result (Windows ignores
 /// the wait for a window of the calling thread, which answers at once).
 #[cfg(target_os = "windows")]
-fn send_message_within(
+pub(super) fn send_message_within(
 	target: windows_sys::Win32::Foundation::HWND,
 	message: u32,
 	wparam: usize,

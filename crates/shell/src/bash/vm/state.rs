@@ -199,10 +199,7 @@ impl Var {
 	pub fn index(&self, i: i64) -> Option<&[u8]> {
 		match &self.value {
 			VarValue::Str(s) => (i == 0).then_some(s.as_slice()),
-			VarValue::Indexed(items) => items
-				.binary_search_by_key(&i, |(k, _)| *k)
-				.ok()
-				.map(|p| items[p].1.as_slice()),
+			VarValue::Indexed(items) => items.position(i).ok().map(|p| items[p].1.as_slice()),
 			VarValue::Assoc(items) => {
 				let key = i.to_string();
 				items.get(key.as_bytes()).map(|v| v.as_slice())
@@ -230,10 +227,10 @@ impl Var {
 	/// Set element `i`, converting a scalar to an indexed array.
 	pub fn set_index(&mut self, i: i64, v: BString) {
 		if let VarValue::Str(s) = &self.value {
-			self.value = VarValue::Indexed(vec![(0, s.clone())]);
+			self.value = VarValue::Indexed(vec![(0, s.clone())].into());
 		}
 		if let VarValue::Indexed(items) = &mut self.value {
-			match items.binary_search_by_key(&i, |(k, _)| *k) {
+			match items.position(i) {
 				Ok(p) => items[p].1 = v,
 				Err(p) => items.insert(p, (i, v)),
 			}
@@ -1313,7 +1310,7 @@ impl VarEdit<'_> {
 			Self::Replace(v) => *var = v,
 			Self::Remove(elem) => match (&mut var.value, elem) {
 				(VarValue::Indexed(items), Elem::Index(i)) => {
-					if let Ok(p) = items.binary_search_by_key(&i, |(k, _)| *k) {
+					if let Ok(p) = items.position(i) {
 						items.remove(p);
 					}
 				},
@@ -1326,7 +1323,7 @@ impl VarEdit<'_> {
 					&& var.attrs.contains(Attrs::INVISIBLE)
 					&& matches!(var.value, VarValue::Str(_))
 				{
-					var.value = VarValue::Indexed(Vec::new());
+					var.value = VarValue::Indexed(Default::default());
 				}
 				var.attrs = var.attrs.without(Attrs::INVISIBLE);
 				set_elem(var, elem, value, append);
@@ -1339,7 +1336,6 @@ impl VarEdit<'_> {
 				var.attrs = var.attrs.without(Attrs::INVISIBLE);
 				if let VarValue::Indexed(items) = &mut var.value {
 					let first = items.last().map_or(0, |(i, _)| i + 1);
-					items.reserve(elems.len());
 					items.extend((first..).zip(elems));
 				}
 			},
@@ -1368,20 +1364,18 @@ fn set_elem(var: &mut Var, elem: Option<Elem<'_>>, value: &[u8], append: bool) {
 		(_, Some(elem)) => elem,
 	};
 	if let (VarValue::Str(s), Elem::Index(_)) = (&var.value, elem) {
-		var.value = VarValue::Indexed(vec![(0, s.clone())]);
+		var.value = VarValue::Indexed(vec![(0, s.clone())].into());
 	}
 	match (&mut var.value, elem) {
-		(VarValue::Indexed(items), Elem::Index(i)) => {
-			match items.binary_search_by_key(&i, |(k, _)| *k) {
-				Ok(p) => {
-					let dst = &mut items[p].1;
-					if !append {
-						dst.clear();
-					}
-					dst.extend_from_slice(value);
-				},
-				Err(p) => items.insert(p, (i, BString::from(value))),
-			}
+		(VarValue::Indexed(items), Elem::Index(i)) => match items.position(i) {
+			Ok(p) => {
+				let dst = &mut items[p].1;
+				if !append {
+					dst.clear();
+				}
+				dst.extend_from_slice(value);
+			},
+			Err(p) => items.insert(p, (i, BString::from(value))),
 		},
 		(VarValue::Assoc(items), Elem::Key(k)) => {
 			let dst = items.value_mut(k);
@@ -1734,7 +1728,7 @@ pub fn unset_var(
 			let kept = var.map(|v| {
 				let value = match v.value {
 					VarValue::Str(_) => VarValue::Str(BString::default()),
-					VarValue::Indexed(_) => VarValue::Indexed(Vec::new()),
+					VarValue::Indexed(_) => VarValue::Indexed(Default::default()),
 					VarValue::Assoc(_) => VarValue::Assoc(Default::default()),
 				};
 				Var { attrs: v.attrs.with(Attrs::INVISIBLE), value }
@@ -3575,7 +3569,7 @@ mod tests {
 			Level::Global,
 		);
 		// No element 0: no scalar view, not exported.
-		let arr = Var { attrs: x, value: VarValue::Indexed(vec![(1, "b".into())]) };
+		let arr = Var { attrs: x, value: VarValue::Indexed(vec![(1, "b".into())].into()) };
 		store_var(&mut root, &mut store, &mut vp, b"arr", Some(arr), Level::Global);
 		store_var(&mut root, &mut store, &mut vp, b"gone", Some(Var::scalar("g", x)), Level::Global);
 		// `export foo` without a value: hidden, not listed, at every level.
@@ -3732,13 +3726,19 @@ mod tests {
 			Var::scalar("ab", Attrs::NONE),
 			Var::scalar("", Attrs::INVISIBLE),
 			Var::scalar("7", Attrs::EXPORT),
-			Var { attrs: Attrs::INDEXED, value: VarValue::Indexed(vec![(0, s("x")), (5, s("y"))]) },
-			Var { attrs: Attrs::INDEXED, value: VarValue::Indexed(Vec::new()) },
+			Var {
+				attrs: Attrs::INDEXED,
+				value: VarValue::Indexed(vec![(0, s("x")), (5, s("y"))].into()),
+			},
+			Var { attrs: Attrs::INDEXED, value: VarValue::Indexed(Default::default()) },
 			Var {
 				attrs: Attrs::ASSOC,
 				value: VarValue::Assoc(vec![(s("k"), s("v")), (s("0"), s("z"))].into()),
 			},
-			Var { attrs: Attrs::INVISIBLE.with(Attrs::INDEXED), value: VarValue::Indexed(Vec::new()) },
+			Var {
+				attrs: Attrs::INVISIBLE.with(Attrs::INDEXED),
+				value: VarValue::Indexed(Default::default()),
+			},
 		];
 		let k = BStr::new("k");
 		let n = BStr::new("n");
