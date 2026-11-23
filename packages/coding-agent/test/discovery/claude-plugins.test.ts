@@ -10,7 +10,8 @@ import {
 	parseClaudePluginsRegistry,
 } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/capability/skill";
-import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import { loadSkills, loadSkillPromptBody } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import { loadSlashCommands } from "@oh-my-pi/pi-coding-agent/extensibility/slash-commands";
 import { loadAllExtensions } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/state-manager";
 import { __resetDirsFromEnvForTests, logger, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
@@ -819,5 +820,51 @@ describe("listClaudePluginRoots", () => {
 		const result = await listClaudePluginRoots(tempDir);
 		expect(result.roots).toHaveLength(1);
 		expect(result.roots[0].scope).toBe("user");
+	});
+
+	test("substitutes ${CLAUDE_PLUGIN_ROOT} in plugin skill and command Markdown bodies (#20165)", async () => {
+		// Claude Code resolves the variables anywhere in the Markdown body of
+		// skills, commands and agents when it loads the content. OMP must do the
+		// same so plugins can reference bundled scripts relative to the plugin
+		// install path (the variables are not exported to the bash tool).
+		const pluginPath = path.join(tempDir, "plugins", "var-plugin");
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
+		const registry = {
+			version: 2,
+			plugins: {
+				"var-plugin@test-market": [{ scope: "user", installPath: pluginPath, version: "1.0.0" }],
+			},
+		};
+		await Promise.all([
+			fs.mkdir(path.join(pluginPath, "skills", "var-skill"), { recursive: true }),
+			fs.mkdir(path.join(pluginPath, "commands"), { recursive: true }),
+			fs.mkdir(pluginsDir, { recursive: true }),
+		]);
+		await Promise.all([
+			fs.writeFile(
+				path.join(pluginPath, "skills", "var-skill", "SKILL.md"),
+				'---\nname: var-skill\ndescription: Uses the plugin root.\n---\nRun `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/x.py"`.\n',
+			),
+			fs.writeFile(
+				path.join(pluginPath, "commands", "var-cmd.md"),
+				"Read ${CLAUDE_PLUGIN_ROOT}/shared/notes.md, then run ${OMP_PLUGIN_ROOT}/scripts/y.sh.\n",
+			),
+			fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry)),
+		]);
+
+		const { skills } = await loadSkills({ cwd: tempDir });
+		const skill = skills.find(s => s.name === "var-skill");
+		expect(skill).toBeDefined();
+		expect(skill?.pluginRoot).toBe(pluginPath);
+
+		// `/skill:` expansion reads the body from disk (`loadSkillPromptBody`);
+		// the substitution must happen there too, not only at discovery time.
+		const body = await loadSkillPromptBody(skill!);
+		expect(body).toBe(`Run \`python3 "${pluginPath}/scripts/x.py"\`.`);
+
+		const commands = await loadSlashCommands({ cwd: tempDir });
+		const cmd = commands.find(c => c.name === "var-plugin:var-cmd");
+		expect(cmd).toBeDefined();
+		expect(cmd?.content).toBe(`Read ${pluginPath}/shared/notes.md, then run ${pluginPath}/scripts/y.sh.\n`);
 	});
 });
