@@ -589,6 +589,72 @@ async function captureDirectResponsesRequest(
 	return body;
 }
 
+describe("OpenRouter Responses DSML healing", () => {
+	function createTextSseResponse(deltas: readonly string[]): Response {
+		const text = deltas.join("");
+		const events = [
+			{
+				type: "response.output_item.added",
+				output_index: 0,
+				item: { type: "message", id: "msg_1", role: "assistant", content: [] },
+			},
+			{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
+			...deltas.map(delta => ({ type: "response.output_text.delta", delta })),
+			{
+				type: "response.output_item.done",
+				output_index: 0,
+				item: { type: "message", id: "msg_1", role: "assistant", content: [{ type: "output_text", text }] },
+			},
+			{
+				type: "response.completed",
+				response: {
+					status: "completed",
+					usage: {
+						input_tokens: 1,
+						output_tokens: 1,
+						total_tokens: 2,
+						input_tokens_details: { cached_tokens: 0 },
+					},
+				},
+			},
+		];
+		return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+	}
+
+	it("turns a DeepSeek tool call written as DSML text into a live structured call", async () => {
+		const model = buildOpenRouterModel({ id: "deepseek/deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" });
+		// The envelope arrives split mid-tag, as streamed deltas do.
+		const fetchMock: FetchImpl = vi.fn(async () =>
+			createTextSseResponse([
+				"Checking the build.\n<｜DSML｜tool_",
+				'calls>\n<｜DSML｜invoke name="bash">\n<｜DSML｜parameter name="command" string="true">ls -la</｜DSML｜par',
+				"ameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+			]),
+		);
+
+		const events: string[] = [];
+		let message: AssistantMessage | undefined;
+		for await (const event of streamSimple(model, context, { apiKey: "test-key", fetch: fetchMock })) {
+			events.push(event.type);
+			if (event.type === "done") message = event.message;
+			if (event.type === "error") throw new Error(event.error.errorMessage);
+		}
+		if (!message) throw new Error("Expected completed OpenRouter response");
+
+		expect(message.stopReason).toBe("toolUse");
+		expect(message.content).toEqual([
+			expect.objectContaining({ type: "text", text: "Checking the build.\n" }),
+			expect.objectContaining({ type: "toolCall", name: "bash", arguments: { command: "ls -la" } }),
+		]);
+		// Streamed live, ahead of the turn's end, so the call can dispatch like a native one.
+		expect(events.indexOf("toolcall_end")).toBeGreaterThan(-1);
+		expect(events.indexOf("toolcall_end")).toBeLessThan(events.indexOf("done"));
+	});
+});
+
 describe("Responses direct-provider max-token defaults", () => {
 	// `streamOpenAIResponses` is public; callers may bypass `streamSimple` (which
 	// pre-fills `options.maxTokens` from the model cap). After centralizing the

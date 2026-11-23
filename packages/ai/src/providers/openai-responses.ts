@@ -39,6 +39,7 @@ import {
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
+import { wrapLeakedThinkingStream } from "../utils/leaked-thinking-stream";
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { getProxyForUrl } from "../utils/proxy";
@@ -1639,7 +1640,7 @@ const streamOpenAIResponsesOnce = (
  */
 export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (model, context, options) => {
 	const attemptContext: ResponsesAttemptContext = { mode: undefined, dropEncryptedReasoning: false };
-	return withReplaySafeStreamRetry(
+	const stream = withReplaySafeStreamRetry(
 		model,
 		context,
 		options,
@@ -1647,6 +1648,11 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (model,
 			streamOpenAIResponsesOnce(attemptModel, attemptContextMessages, attemptOptions, attemptContext),
 		{ retryEmptyCompletion: () => attemptContext.mode === "sse" },
 	);
+	// DeepSeek writes tool calls as DSML text on Responses hosts too (OpenRouter);
+	// heal them live like the chat-completions route does.
+	return model.compat.streamMarkupHealingPattern === "dsml"
+		? wrapLeakedThinkingStream(stream, { dsmlToolCalls: true })
+		: stream;
 };
 
 function isResponsesPromptCacheableContentBlock(block: unknown): block is ResponseInputContent {

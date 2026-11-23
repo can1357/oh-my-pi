@@ -215,7 +215,8 @@ export class StreamMarkupHealing {
 	}
 }
 
-function generateHealedToolCallId(): string {
+/** Id for a tool call healed out of leaked text; shaped like the OpenAI-compatible ids hosts assign. */
+export function generateHealedToolCallId(): string {
 	return `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
 }
 
