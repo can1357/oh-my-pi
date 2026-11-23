@@ -558,6 +558,7 @@ pub struct ProviderPicker {
 	providers: Vec<ProviderRow>,
 	mode:      ProviderMode,
 	query:     Str,
+	selected:  usize,
 	list_rows: u16,
 	ui:        Ui,
 	ctx:       UiContext,
@@ -572,6 +573,7 @@ impl ProviderPicker {
 			providers,
 			mode,
 			query: Str::default(),
+			selected: 0,
 			list_rows: LOGOUT_SELECTOR_MAX_VISIBLE as u16,
 			ui: Ui::from_root(dom! { <col/> }, 80, ctx.clone()),
 			ctx: ctx.clone(),
@@ -590,18 +592,22 @@ impl ProviderPicker {
 	fn route(&mut self, event: UiEvent) -> PanelEvent {
 		match event {
 			UiEvent::Cancel => PanelEvent::Close,
-			UiEvent::Changed { id, value } if id.as_str() == LIST_ID => value
-				.as_str()
-				.parse::<usize>()
-				.ok()
-				.and_then(|index| self.providers.get(index))
-				.map_or(PanelEvent::Consumed, |provider| {
-					let verb = match self.mode {
-						ProviderMode::Login => "login",
-						ProviderMode::Logout => "logout",
-					};
-					PanelEvent::Finish(sf!("{verb} {}", provider.id))
-				}),
+			UiEvent::Changed { id, value } if id.as_str() == LIST_ID => {
+				if let Ok(index) = value.as_str().parse::<usize>() {
+					self.selected = index;
+				}
+				let index = self.selected.min(self.providers.len().saturating_sub(1));
+				self
+					.providers
+					.get(index)
+					.map_or(PanelEvent::Consumed, |provider| {
+						let verb = match self.mode {
+							ProviderMode::Login => "login",
+							ProviderMode::Logout => "logout",
+						};
+						PanelEvent::Finish(sf!("{verb} {}", provider.id))
+					})
+			},
 			UiEvent::Filtered { id, query, .. } if id.as_str() == LIST_ID => {
 				self.query = query;
 				PanelEvent::Consumed
@@ -682,6 +688,37 @@ impl Panel for ProviderPicker {
 		}
 		if self.providers.is_empty() && matches!(key, Key::Esc | Key::Enter | Key::Char('q')) {
 			return PanelEvent::Close;
+		}
+		// Enter on the currently selected provider — the `<select>` fires
+		// `Changed` only when the selection is committed (Enter), not on
+		// navigation (Up/Down). So we track `selected` ourselves.
+		if key == Key::Enter {
+			if let Some(provider) = self.providers.get(self.selected) {
+				let verb = match self.mode {
+					ProviderMode::Login => "login",
+					ProviderMode::Logout => "logout",
+				};
+				return PanelEvent::Finish(sf!("{verb} {}", provider.id));
+			}
+		}
+		// Track navigation keys so Enter uses the current highlight.
+		match key {
+			Key::Up => {
+				self.selected = self.selected.saturating_sub(1);
+			},
+			Key::Down => {
+				self.selected = (self.selected + 1).min(self.providers.len().saturating_sub(1));
+			},
+			Key::PageUp => {
+				self.selected = self
+					.selected
+					.saturating_sub(LOGOUT_SELECTOR_MAX_VISIBLE as usize);
+			},
+			Key::PageDown => {
+				self.selected = (self.selected + LOGOUT_SELECTOR_MAX_VISIBLE as usize)
+					.min(self.providers.len().saturating_sub(1));
+			},
+			_ => {},
 		}
 		let event = self.ui.handle_key(key);
 		self.route(event)
