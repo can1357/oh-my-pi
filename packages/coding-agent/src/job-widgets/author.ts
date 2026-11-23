@@ -10,7 +10,7 @@ import { formatBytes, prompt, truncate } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleChain } from "../config/model-resolver";
-import { getRoleInfo, roleCandidatePool } from "../config/model-roles";
+import { providerRoleCandidatePool, roleCandidatePool } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
 import systemPrompt from "../prompts/system/job-widget-system.md" with { type: "text" };
@@ -221,13 +221,9 @@ export async function completeWidgetRequest(
 	if (!cfgOffline.get(settings)) {
 		pool = roleCandidatePool("widget", settings, modelRegistry);
 	} else {
-		// Offline mode reads only the session provider's catalog, filtered as `roleCandidatePool` filters.
+		// Offline mode reads only the session provider's catalog, and none without one.
 		const provider = options.getSessionProvider?.();
-		if (provider) {
-			pool = modelRegistry
-				.getAvailableForProviders(new Set([provider]), "all")
-				.filter(getRoleInfo("widget", settings).accepts);
-		}
+		if (provider) pool = providerRoleCandidatePool("widget", settings, modelRegistry, provider);
 	}
 	for (const { model } of resolveRoleChain("widget", settings, pool)) {
 		if (!(await modelRegistry.getApiKey(model, sessionId, { signal }))) continue;

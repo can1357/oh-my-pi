@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { Api, completeSimple, Model } from "@oh-my-pi/pi-ai";
 import type { ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { cfgOffline } from "@oh-my-pi/pi-coding-agent/config/auxiliary-model-policy";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { CostCapError, CostGate } from "@oh-my-pi/pi-coding-agent/session/cost-gate";
@@ -33,7 +34,10 @@ function makeSession(active: Model<Api>, available: Model<Api>[], settings = Set
 	return {
 		settings,
 		modelRegistry: {
-			getAvailable: () => available,
+			getAvailable: () => {
+				if (cfgOffline.get(settings)) throw new Error("Offline mode read every provider's catalog");
+				return available;
+			},
 			getAvailableForProviders: (providers: ReadonlySet<string>) =>
 				available.filter(model => providers.has(model.provider)),
 		} as unknown as NonNullable<ToolSession["modelRegistry"]>,

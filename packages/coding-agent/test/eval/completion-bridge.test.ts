@@ -116,7 +116,10 @@ function makeSession(opts: SessionOptions = {}): ToolSession {
 	}
 	const available = opts.available ?? [SMOL, DEFAULT, SLOW];
 	const modelRegistry = {
-		getAvailable: () => available,
+		getAvailable: () => {
+			if (cfgOffline.get(settings)) throw new Error("Offline mode read every provider's catalog");
+			return available;
+		},
 		getAvailableForProviders: (providers: ReadonlySet<string>) =>
 			available.filter(model => providers.has(model.provider)),
 		find: (provider: string, id: string) => available.find(model => model.provider === provider && model.id === id),

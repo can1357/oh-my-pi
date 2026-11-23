@@ -51,7 +51,10 @@ function setup(backupReply: AssistantMessage) {
 		"retry.fallbackChains": { widget: ["llama.cpp/widget-backup"] },
 	});
 	const modelRegistry = {
-		getAvailable: () => [primary, backup],
+		getAvailable: () => {
+			if (cfgOffline.get(settings)) throw new Error("Offline mode read every provider's catalog");
+			return [primary, backup];
+		},
 		getAvailableForProviders: (providers: ReadonlySet<string>) =>
 			[primary, backup].filter(model => providers.has(model.provider)),
 		getApiKey: async () => "test-key",

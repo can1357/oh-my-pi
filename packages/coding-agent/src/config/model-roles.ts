@@ -11,6 +11,7 @@ import {
 	type ModelRole,
 } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import { isValidThemeColor } from "@oh-my-pi/pi-tui/theme";
+import type { ModelRegistry } from "./model-registry";
 import type { Settings } from "./settings";
 
 import { cfgCycleOrder, cfgModelTags } from "./model-settings";
@@ -104,6 +105,16 @@ function isModelRole(role: string): role is ModelRole {
 /** Available models eligible for a role, including keyless runner models. */
 export function roleCandidatePool(role: string, settings: Settings, registry: ModelBrowserRegistry): Model[] {
 	return registry.getAvailable("all").filter(getRoleInfo(role, settings).accepts);
+}
+
+/** {@link roleCandidatePool} over one provider's catalog, without reading the others. */
+export function providerRoleCandidatePool(
+	role: string,
+	settings: Settings,
+	registry: Pick<ModelRegistry, "getAvailableForProviders">,
+	provider: string,
+): Model[] {
+	return registry.getAvailableForProviders(new Set([provider]), "all").filter(getRoleInfo(role, settings).accepts);
 }
 
 /**

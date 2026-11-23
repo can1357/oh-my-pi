@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { Api, AssistantMessage, completeSimple, Model } from "@oh-my-pi/pi-ai";
 import type { ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { cfgOffline } from "@oh-my-pi/pi-coding-agent/config/auxiliary-model-policy";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	type DescribeAttachedImagesDeps,
@@ -69,10 +70,13 @@ function makeDeps(
 	completeImpl: typeof completeSimple,
 	apiKey: string | undefined = "test-key",
 ): DescribeAttachedImagesDeps {
-	return {
+	const deps: DescribeAttachedImagesDeps = {
 		activeModel: textModel,
 		modelRegistry: {
-			getAvailable: () => available,
+			getAvailable: () => {
+				if (cfgOffline.get(deps.settings)) throw new Error("Offline mode read every provider's catalog");
+				return available;
+			},
 			getAvailableForProviders: (providers: ReadonlySet<string>) =>
 				available.filter(model => providers.has(model.provider)),
 			getApiKey: async () => apiKey,
@@ -83,6 +87,7 @@ function makeDeps(
 		activeModelString: `${textModel.provider}/${textModel.id}`,
 		completeImpl,
 	};
+	return deps;
 }
 
 describe("describeAttachedImagesForTextModel", () => {
