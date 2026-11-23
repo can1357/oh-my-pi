@@ -197,7 +197,7 @@ The guard's full state — dedupe history and per-update gate — clears on ever
 
 ## Catch-up with `advisor.syncBacklog`
 
-Catch-up policy controls how long the primary waits for each scheduled advisor, not how often that advisor reviews. Each `WATCHDOG.yml` entry may set `syncBacklog`; omission inherits the current global `advisor.syncBacklog` setting.
+Catch-up policy controls how long the primary waits for each advisor's running reviews, not how often that advisor reviews. Each `WATCHDOG.yml` entry may set `syncBacklog`; omission inherits the current global `advisor.syncBacklog` setting.
 
 Allowed values:
 
@@ -205,13 +205,13 @@ Allowed values:
 - `1`
 - `3`
 - `5`
-- `strict` — wait until scheduled advisor reviews finish; no wall-clock timeout, but aborts and advisor failures still release the primary
+- `strict` — wait until the advisor's running reviews finish; no wall-clock timeout, but aborts and advisor failures still release the primary
 
 On primary turn end:
 
 1. every advisor captures the primary delta; an advisor whose review is scheduled queues it together with any updates its cadence held since its last review
 2. the advisor drain loop starts or continues in the background
-3. each scheduled advisor resolves its own override or the global policy; unless it is `off`, the primary waits while that advisor's backlog is at or above its threshold. A numeric threshold waits only at the run's final boundary, not between tool-loop steps; `strict` waits at every boundary
+3. each advisor resolves its own override or the global policy; unless it is `off`, the primary waits while that advisor's backlog is at or above its threshold. A numeric threshold waits only at the run's final boundary, not between tool-loop steps, and there it covers every review still running; `strict` waits at every boundary for the reviews scheduled there, and at the final boundary for every review still running
 4. bounded values cap the wait at 30 seconds; `strict` waits without a wall-clock cap
 5. if the advisor catches up below the threshold, the primary continues immediately
 6. abort, failure, quota pause, session-transition pause, or disposal releases waiters; paused transitions also reject new waits
