@@ -52,6 +52,17 @@ describe("startPowerAssertion", () => {
 		expect(debug).toHaveBeenCalledTimes(0);
 	});
 
+	it("warns once and stops retrying when login1 does not answer in time", () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const hung = vi.fn(() => {
+			throw new Error("PowerBackendUnresponsive: login1 Inhibit failed: I/O error: timed out");
+		});
+		expect(startPowerAssertion(options, hung)).toBeUndefined();
+		expect(startPowerAssertion(options, hung)).toBeUndefined();
+		expect(hung).toHaveBeenCalledTimes(1);
+		expect(warn).toHaveBeenCalledTimes(1);
+	});
+
 	it("still warns on other failures", () => {
 		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const debug = vi.spyOn(logger, "debug").mockImplementation(() => {});

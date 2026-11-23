@@ -1009,7 +1009,10 @@ async fn errexit_and_cd_last_one_segmented_command() {
 	let start = root.path().to_string_lossy().into_owned();
 	let run = async |command: String| {
 		let options = ShellRunOptions { command, cwd: Some(start.clone()), ..Default::default() };
-		shell.run(options, None, CancelToken::default()).await.expect("run")
+		shell
+			.run(options, None, CancelToken::default())
+			.await
+			.expect("run")
 	};
 	let repeated = format!("printf '{}'", "hello\\n".repeat(200));
 

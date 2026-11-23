@@ -189,14 +189,26 @@ pub(crate) mod platform {
 
 #[cfg(target_os = "linux")]
 mod platform {
+	use std::time::Duration;
+
 	use log::debug;
 	use napi::{Error, Result};
 	use parking_lot::Mutex;
-	use zbus::{blocking::Connection, zvariant::OwnedFd};
+	use zbus::{
+		blocking::{Connection, connection::Builder},
+		zvariant::OwnedFd,
+	};
 
 	/// Message prefix marking "no platform backend present". Mirrored by
 	/// `POWER_BACKEND_UNAVAILABLE_CODE` in `packages/coding-agent`.
 	const POWER_BACKEND_UNAVAILABLE_CODE: &str = "PowerBackendUnavailable";
+	/// Message prefix marking "login1 did not answer in time". Mirrored by
+	/// `POWER_BACKEND_UNRESPONSIVE_CODE` in `packages/coding-agent`.
+	const POWER_BACKEND_UNRESPONSIVE_CODE: &str = "PowerBackendUnresponsive";
+	/// Upper bound on every D-Bus call. Acquisition runs synchronously on the
+	/// JavaScript thread, so a hung service (e.g. a `systemd-logind` stuck in
+	/// uninterruptible sleep) would otherwise freeze prompt dispatch forever.
+	const DBUS_CALL_TIMEOUT: Duration = Duration::from_secs(2);
 	const LOGIN1_DESTINATION: &str = "org.freedesktop.login1";
 	const LOGIN1_PATH: &str = "/org/freedesktop/login1";
 	const LOGIN1_MANAGER: &str = "org.freedesktop.login1.Manager";
@@ -256,23 +268,10 @@ mod platform {
 			// drop a fresh connection on every acquisition.
 			let connection = match &mut *system_bus {
 				Some(connection) => connection,
-				slot => slot.insert(Connection::system().map_err(|error| {
-					// An absent bus socket means this host has no D-Bus at all
-					// (headless container). Tag it with a stable code so callers
-					// can tell "no backend" apart from a bus that exists but
-					// refuses or rejects us, which stays a plain failure.
-					let absent = matches!(
-						&error,
-						zbus::Error::Connection(source, _) | zbus::Error::InputOutput(source)
-							if source.kind() == std::io::ErrorKind::NotFound
-					);
-					let code = if absent {
-						format!("{POWER_BACKEND_UNAVAILABLE_CODE}: ")
-					} else {
-						String::new()
-					};
-					Error::from_reason(format!("{code}Unable to connect to the system bus: {error}"))
-				})?),
+				slot => slot.insert(
+					connect(Builder::system())
+						.map_err(|error| failure("Unable to connect to the system bus", &error))?,
+				),
 			};
 			let reply = match connection.call_method(
 				Some(LOGIN1_DESTINATION),
@@ -284,7 +283,7 @@ mod platform {
 				Ok(reply) => reply,
 				Err(error) => {
 					*system_bus = None;
-					return Err(Error::from_reason(format!("login1 Inhibit failed: {error}")));
+					return Err(failure("login1 Inhibit failed", &error));
 				},
 			};
 			reply.body().deserialize::<OwnedFd>().map_err(|error| {
@@ -296,9 +295,10 @@ mod platform {
 			let mut session_bus = SESSION_BUS.lock();
 			let connection = match &mut *session_bus {
 				Some(connection) => connection,
-				slot => slot.insert(Connection::session().map_err(|error| {
-					Error::from_reason(format!("Unable to connect to the session bus: {error}"))
-				})?),
+				slot => slot.insert(
+					connect(Builder::session())
+						.map_err(|error| failure("Unable to connect to the session bus", &error))?,
+				),
 			};
 			let reply = match connection.call_method(
 				Some(SCREENSAVER_DESTINATION),
@@ -347,6 +347,100 @@ mod platform {
 	impl Drop for AssertionInner {
 		fn drop(&mut self) {
 			self.stop();
+		}
+	}
+
+	/// Open a bus connection whose method calls fail after
+	/// [`DBUS_CALL_TIMEOUT`].
+	fn connect(builder: zbus::Result<Builder<'_>>) -> zbus::Result<Connection> {
+		builder?.method_timeout(DBUS_CALL_TIMEOUT).build()
+	}
+
+	/// Map a zbus failure to a napi error, prefixed with a stable code where
+	/// the coding agent treats the failure class specially: an absent bus
+	/// socket means this host has no D-Bus at all (headless container), and a
+	/// timeout means the service is hung. A bus that exists but refuses or
+	/// rejects us stays a plain failure.
+	fn failure(context: &str, error: &zbus::Error) -> Error {
+		let kind = match error {
+			zbus::Error::Connection(source, _) | zbus::Error::InputOutput(source) => source.kind(),
+			_ => return Error::from_reason(format!("{context}: {error}")),
+		};
+		let code = match kind {
+			std::io::ErrorKind::NotFound => POWER_BACKEND_UNAVAILABLE_CODE,
+			std::io::ErrorKind::TimedOut => POWER_BACKEND_UNRESPONSIVE_CODE,
+			_ => return Error::from_reason(format!("{context}: {error}")),
+		};
+		Error::from_reason(format!("{code}: {context}: {error}"))
+	}
+
+	#[cfg(test)]
+	mod tests {
+		use std::{
+			os::{
+				linux::net::SocketAddrExt,
+				unix::net::{SocketAddr, UnixListener},
+			},
+			sync::mpsc,
+			thread,
+		};
+
+		use futures::StreamExt;
+		use zbus::{Guid, MessageStream, connection::Builder as AsyncBuilder};
+
+		use super::*;
+
+		/// Serve a bus that answers `Hello` and swallows every other call, like
+		/// a `systemd-logind` stuck in uninterruptible sleep. Returns its
+		/// D-Bus address.
+		fn hung_bus() -> String {
+			let name = format!("omp-power-hung-bus-{}", std::process::id());
+			let listener =
+				UnixListener::bind_addr(&SocketAddr::from_abstract_name(&name).unwrap()).unwrap();
+			thread::spawn(move || {
+				let (stream, _) = listener.accept().unwrap();
+				stream.set_nonblocking(true).unwrap();
+				let rt = tokio::runtime::Builder::new_current_thread()
+					.enable_all()
+					.build()
+					.unwrap();
+				rt.block_on(async move {
+					let stream = tokio::net::UnixStream::from_std(stream).unwrap();
+					let server = AsyncBuilder::unix_stream(stream)
+						.server(Guid::generate())
+						.unwrap()
+						.p2p()
+						.build()
+						.await
+						.unwrap();
+					let mut messages = MessageStream::from(&server);
+					while let Some(Ok(message)) = messages.next().await {
+						let header = message.header();
+						if header.member().is_some_and(|member| member == "Hello") {
+							server.reply(&header, &":1.1").await.unwrap();
+						}
+					}
+				});
+			});
+			format!("unix:abstract={name}")
+		}
+
+		#[test]
+		fn an_unanswered_login1_inhibit_fails_as_unresponsive_and_drops_the_bus() {
+			*SYSTEM_BUS.lock() = Some(connect(Builder::address(hung_bus().as_str())).unwrap());
+			let (sender, receiver) = mpsc::channel();
+			thread::spawn(move || {
+				let result = AssertionInner::start(Some("idle"), false, "test");
+				sender
+					.send(result.map(drop).map_err(|error| error.reason))
+					.unwrap();
+			});
+			let result = receiver
+				.recv_timeout(DBUS_CALL_TIMEOUT * 5)
+				.expect("login1 Inhibit blocked past the call timeout");
+			let reason = result.expect_err("a swallowed Inhibit cannot yield an inhibitor");
+			assert!(reason.starts_with("PowerBackendUnresponsive: login1 Inhibit failed"), "{reason}");
+			assert!(SYSTEM_BUS.lock().is_none(), "the hung system bus stays cached");
 		}
 	}
 }

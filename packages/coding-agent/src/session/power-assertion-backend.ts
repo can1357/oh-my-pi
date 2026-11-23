@@ -14,12 +14,21 @@ export interface PowerAssertionHandle {
  */
 const POWER_BACKEND_UNAVAILABLE_CODE = "PowerBackendUnavailable:";
 
-/** Set once the backend is known absent; the socket does not appear mid-process, so stop retrying. */
+/**
+ * Code prefix `PowerAssertion.start` puts on its error message on Linux when a
+ * D-Bus call (login1 `Inhibit`) times out: the service is hung, typically for
+ * the rest of the process, and every retry would stall the caller for the full
+ * native call timeout.
+ */
+const POWER_BACKEND_UNRESPONSIVE_CODE = "PowerBackendUnresponsive:";
+
+/** Set once the backend is known absent or hung; both are treated as permanent, so stop retrying. */
 let powerBackendUnavailable = false;
 
 /**
  * Start a power assertion. A missing platform backend (headless container with
- * no D-Bus) is logged at debug once and never retried; any other failure still warns.
+ * no D-Bus) is logged at debug once and never retried; a hung backend warns once
+ * and is never retried; any other failure still warns.
  */
 export function startPowerAssertion(
 	options: PowerAssertionOptions,
@@ -33,6 +42,11 @@ export function startPowerAssertion(
 		if (message.startsWith(POWER_BACKEND_UNAVAILABLE_CODE)) {
 			powerBackendUnavailable = true;
 			logger.debug("Power assertion backend unavailable; sleep prevention disabled", { error: message });
+			return undefined;
+		}
+		if (message.startsWith(POWER_BACKEND_UNRESPONSIVE_CODE)) {
+			powerBackendUnavailable = true;
+			logger.warn("Power assertion backend unresponsive; sleep prevention disabled", { error: message });
 			return undefined;
 		}
 		logger.warn("Failed to acquire power assertion", { error: String(error) });
