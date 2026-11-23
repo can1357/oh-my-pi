@@ -1,9 +1,9 @@
 /**
  * Tool hooks of the Spotlight experiment: `read`, `bash` and `eval` pass their model-facing text through shaping
- * themselves, and every other tool's result passes through it when the agent's call returns
- * ({@link shapeCalledTool}, from the tool wrapper); each journals one `spotlight:shape` entry per result. Only the
- * tools `spotlight.experiment.tools` names are shaped and journaled. Shaping never fails a tool call: any error keeps
- * the unshaped text.
+ * themselves, and every other tool's non-error result passes through it when the agent's call returns
+ * ({@link shapeCalledTool}, from the tool wrapper); each journals one `spotlight:shape` entry per result. Other tools'
+ * error results pass through unshaped and are not journaled. Only the tools `spotlight.experiment.tools` names are
+ * shaped and journaled. Shaping never fails a tool call: any error keeps the unshaped text.
  *
  * A random share of the results shaping would cut is held out (`spotlight.experiment.holdout`): the model gets the
  * plain result for the call, and the trace (`holdout: true`) records the would-be cut. Of the rest, a random share
@@ -499,11 +499,14 @@ export type CalledToolShaper = (call: CalledToolResult) => Promise<AgentToolResu
  * result's text blocks are shaped as command output, the source being the tool's name and arguments
  * ({@link callSummary}); images and other blocks stay. What `plain` shows is the wrapper's result, spill and notices
  * included. A result the wrapper spilled is shaped whole from the tool's own text, up to
- * {@link SPOTLIGHT_FULL_OUTPUT_MAX_BYTES}, and a cut of it no longer carries the spill's truncation. A result whose
- * details are not an object, or already carry a trace, is returned as is. Each call is shaped at most once.
+ * {@link SPOTLIGHT_FULL_OUTPUT_MAX_BYTES}, and a cut of it no longer carries the spill's truncation. An error result,
+ * a result whose details are not an object, or one that already carries a trace is returned as is. Each call is
+ * shaped at most once.
  */
 export async function shapeCalledTool(session: ToolSession, call: CalledToolResult): Promise<AgentToolResult> {
 	const { tool, toolCallId, own, result } = call;
+	// Thrown tool errors already bypass this hook in wrappedExecute; keep returned error results verbatim too (still spill-capped).
+	if (result.isError === true) return result;
 	const experiment = shapingExperiment(session);
 	if (!experiment) return result;
 	if (shapesItself(tool) || !experiment.shapesTool(tool)) return result;
