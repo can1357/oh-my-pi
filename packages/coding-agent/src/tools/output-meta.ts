@@ -392,7 +392,7 @@ export class OutputMetaBuilder {
 	 * `artifactElidedBytes` marks an artifact the size cap cut to a head/tail sample.
 	 * `recovery.lines` (first to last cut line) lets the notice name the
 	 * `<selectorBase>:raw:<first>-<last>` read that returns those lines whole;
-	 * the base defaults to `artifact://<artifactId>`.
+	 * the base defaults to `local://<artifactId>.log`.
 	 */
 	columnTruncated(
 		maxColumn: number,
@@ -431,7 +431,7 @@ export class OutputMetaBuilder {
 		return this;
 	}
 
-	/** Add internal URL source info (skill://, agent://, artifact://). */
+	/** Add internal URL source info (skill://, agent://, local://). */
 	sourceInternal(value: string): this {
 		this.#meta.source = { type: "internal", value };
 		return this;
@@ -528,11 +528,11 @@ export function resolveOutputSinkHeadBytes(s: Settings | undefined): number {
  * Slack on top of the configured spill threshold before the final-defense
  * inline byte cap fires. The OutputSink already bounds inline bodies to the
  * threshold; only notice slop (wall time, exit code, elision marker,
- * `[raw output: artifact://N]` footer) rides above it. The slack keeps the
+ * `[raw output: local://N.log]` footer) rides above it. The slack keeps the
  * cap a genuine last resort for paths that bypass the sink (e.g. ACP
  * client-bridge terminals) instead of re-truncating — and re-saving — every
- * sink-elided result (the double-artifact `Artifact: N+1` vs `artifact://N`
- * mismatch).
+ * sink-elided result (a second spill `N+1` while the footer still names
+ * `local://N.log`).
  */
 const INLINE_CAP_SLACK_BYTES = 2 * 1024;
 
@@ -624,13 +624,13 @@ async function spillLargeResultToArtifact(
 	// RPC-host); a save failure must never convert a successful call into an
 	// error, nor re-expose the full (possibly context-blowing) output. Mirror
 	// `enforceInlineByteCap`: always truncate past the threshold, and only
-	// attach the `artifact://` recovery link when the save actually succeeded.
+	// attach the `local://N.log` recovery link when the save actually succeeded.
 	let artifactId: string | undefined;
 	// A failed stream capture only left a preview here. Saving that preview
 	// would invent a misleading full-output recovery link, not recover the log.
 	if (!existingMeta?.artifactError) {
 		try {
-			artifactId = await sessionManager.saveArtifact(fullText, toolName);
+			artifactId = await sessionManager.saveArtifact(fullText);
 		} catch (error) {
 			logger.warn("Failed to spill large tool result to artifact", {
 				tool: toolName,
@@ -782,6 +782,9 @@ async function wrappedExecute(
 	let result: AgentToolResult;
 	try {
 		own = await originalExecute.call(this, toolCallId, params, signal, onUpdate, context);
+		// A program parses the result: elision markers and notices would corrupt its payload, so it
+		// gets the tool's own result with truncation left structured in `details.meta`.
+		if (context?.programmatic) return own;
 
 		// Spill large results to artifact, truncate to tail
 		result = await spillLargeResultToArtifact(own, this.name, context);
@@ -815,7 +818,7 @@ async function wrappedExecute(
 
 /**
  * Whether call `toolCallId` of `tool` is one the agent made: the loop's batch lists it under this tool's name. Calls
- * dispatched under another tool's call (an `xd://` device behind `write`) or outside the loop (eval's tool bridge, an
+ * dispatched under another tool's call (a tool command inside `bash`) or outside the loop (eval's tool bridge, an
  * advisor) are not.
  */
 function isAgentCall(tool: AgentTool, toolCallId: string, context: AgentToolContext): boolean {

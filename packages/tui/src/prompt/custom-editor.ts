@@ -20,7 +20,12 @@ import { compact, keyed, node, row, span } from "../native/describe";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
 import type { ComposerFacts, ComposerFactsSource } from "../status-line/types";
 import { allowsModelMentions, allowsSkillTokens, SKILL_TOKEN_RE } from "./skill-tokens";
-import { expandModelMentionTags, MODEL_MENTION_RE, modelMentionToken } from "./model-mention-syntax";
+import {
+	expandModelMentionTags,
+	MODEL_MENTION_RE,
+	modelMentionToken,
+	resolveModelMentionToken,
+} from "./model-mention-syntax";
 import { isVideoPath } from "./video";
 import {
 	attachmentSgr,
@@ -49,16 +54,22 @@ import { isQueuedMessageList, parseQueueShorthand, QUEUE_LIST_MARKER_RE } from "
 import { type WordCompletionMethod, WordCompletionProvider } from "./word-completion";
 import { fgOrPlain, theme } from "../theme/theme";
 
-/** A shell-mode draft's sigil (`!`, `!!`, `$`, `$$`) with its surrounding blanks; the mode chip stands in for it natively. */
-const SHELL_SIGIL_RE = /^\s*(?:!!?|\$\$?)[ \t]?/;
+/** A mode draft's sigil (`!`, `!!`, `$`, `$$`, `?`) with its surrounding blanks; the mode chip stands in for it natively. */
+const SHELL_SIGIL_RE = /^\s*(?:!!?|\$\$?|\?)[ \t]?/;
 
 /** The untitled session's TSP placeholder; the rotating ANSI hints (thinking effort, …) move into control tooltips. */
 const NATIVE_COMPOSER_PLACEHOLDER = "What are we cooking?";
+/** The TSP placeholder while an ask waits above the composer. */
+const ASK_PLACEHOLDER = "Answer above, or type here to skip the questions";
 
 /** Live composer state the TSP layout shows; the interactive host wires {@link CustomEditor.composerState}. */
 export interface ComposerNativeState {
-	/** The draft runs as a shell command (`!`, `!!`) or Python (`$`, `$$`); `excluded` keeps it from the model. */
-	readonly shell?: { readonly kind: "bash" | "python"; readonly excluded: boolean };
+	/**
+	 * The draft runs as a shell command (`!`, `!!`), Python (`$`, `$$`) or a `/btw` side question (`?`);
+	 * `excluded` keeps it from the model. Role `omp.editor.<kind>`, except btw's `omp.editor.btw-ask`
+	 * (`omp.editor.btw` is the focused note's).
+	 */
+	readonly shell?: { readonly kind: "bash" | "python" | "btw"; readonly excluded: boolean };
 	/** Thinking effort word (`high`, `off`, `auto`); undefined when the model has no thinking. */
 	readonly thinking?: string;
 	/** The thinking level draws as the model chip's icon instead of its own chip (where the terminal has `effort`). */
@@ -73,6 +84,12 @@ export interface ComposerNativeState {
 	readonly viewing?: readonly string[];
 	/** Drafts go to the `/btw` note the user clicked, as its follow-ups: role `omp.editor.btw`, a `btw` chip. */
 	readonly btw?: boolean;
+	/**
+	 * An ask waits inline above the composer (Tern). `pending`: the placeholder says typing here skips it, and
+	 * the composer folds to its compact row while the keys are away from it. `skip`: sending the draft skips
+	 * the ask, so a `skips ask` chip leads the input and send reads Skip & send.
+	 */
+	readonly ask?: "pending" | "skip";
 	/** The session's title, quoted in italics as the TSP placeholder; undefined until it has one. */
 	readonly title?: string;
 }
@@ -645,6 +662,7 @@ export class CustomEditor extends Editor {
 				),
 				selector => this.#mentionChipFor(selector),
 				register,
+				selector => this.resolveModelMention(selector) !== undefined,
 			),
 		);
 		this.#syncComposerTokenPattern();
@@ -725,9 +743,19 @@ export class CustomEditor extends Editor {
 					const start = match.index + match[1].length;
 					const end = match.index + match[0].length;
 					if (end === line.length && i === lines.length - 1) break;
-					const chip = this.#mentionChipFor(selector);
-					if (chip === undefined) continue;
-					this.collapseToAtom(i, start, end, chip.label, modelMentionToken(chip.selector));
+					const mention = resolveModelMentionToken(
+						selector,
+						candidate => this.#mentionChipFor(candidate),
+						candidate => this.resolveModelMention(candidate) !== undefined,
+					);
+					if (!mention) continue;
+					this.collapseToAtom(
+						i,
+						start,
+						end - mention.suffix.length,
+						mention.value.label,
+						modelMentionToken(mention.value.selector),
+					);
 					collapsed = true;
 					anyCollapsed = true;
 					break;
@@ -1115,6 +1143,16 @@ export class CustomEditor extends Editor {
 			!dictationHoldsDraft(this.composerState().dictation)
 		);
 	}
+	/** Rows: while it returns true the composer draws faint, its keys with an ask above it. */
+	faint?: () => boolean;
+
+	override render(width: number): readonly string[] {
+		const lines = super.render(width);
+		if (!this.faint?.()) return lines;
+		// Faint every cell: re-applied after each reset the rows carry, so styled runs stay faint too.
+		return lines.map(line => `\x1b[2m${line.replace(/\x1b\[(?:0|22)?m/g, reset => `${reset}\x1b[2m`)}\x1b[22m`);
+	}
+
 	/** The quoted-title placeholder, kept while the title stands so the editor node stays reused. */
 	#titlePlaceholder: { title: string; text: TspText } | undefined;
 	/**
@@ -1122,8 +1160,9 @@ export class CustomEditor extends Editor {
 	 * it: the placeholder names it; else the session's title, quoted in italics.
 	 */
 	override describePlaceholder = (): TspText => {
-		const { viewing, title, btw } = this.composerState();
+		const { viewing, title, btw, ask } = this.composerState();
 		if (btw) return "Ask about this…";
+		if (ask) return ASK_PLACEHOLDER;
 		const agent = viewing?.at(-1);
 		if (agent !== undefined) return `Message ${agent}`;
 		if (!title) return NATIVE_COMPOSER_PLACEHOLDER;
@@ -1132,8 +1171,11 @@ export class CustomEditor extends Editor {
 		}
 		return this.#titlePlaceholder.text;
 	};
-	/** A shell-mode draft highlights as its language. */
-	override describeLanguage = (): string | undefined => this.composerState().shell?.kind;
+	/** A shell-mode draft highlights as its language; a btw draft is prose. */
+	override describeLanguage = (): string | undefined => {
+		const kind = this.composerState().shell?.kind;
+		return kind === "btw" ? undefined : kind;
+	};
 	/** Host-owned live state for the TSP composer (shell mode, effort chip, send/stop). */
 	composerState: () => ComposerNativeState = () => IDLE_COMPOSER;
 	/** The attachment band, described inside the composer on a TSP terminal (ANSI renders it above). */
@@ -1154,7 +1196,7 @@ export class CustomEditor extends Editor {
 		| undefined;
 
 	/**
-	 * The TSP composer: role `omp.editor[.bash|.python|.btw]` (tone `pending` while
+	 * The TSP composer: role `omp.editor[.bash|.python|.btw-ask|.btw]` (tone `pending` while
 	 * a turn runs) over the context hairline, the viewing header while a
 	 * subagent is focused, the attachment chips, a `line` row of the
 	 * shell-mode (or `btw`) chip and the input, and the `bar`: model chip, effort chip
@@ -1172,6 +1214,8 @@ export class CustomEditor extends Editor {
 		const thinkingKey = this.#actionKeys.get("app.thinking.cycle")?.[0];
 		const modelKey = this.#actionKeys.get("app.model.selectTemporary")?.[0];
 		const interruptKey = this.#actionKeys.get("app.interrupt")?.[0] ?? "escape";
+		// The keys away at an ask above: the composer folds until a click or a key brings them back.
+		const folded = state.ask !== undefined && !this.focused;
 		const key = [
 			shell?.kind,
 			shell?.excluded,
@@ -1183,6 +1227,8 @@ export class CustomEditor extends Editor {
 			interruptKey,
 			state.viewing?.join("\u0001"),
 			state.btw,
+			state.ask,
+			folded,
 			effortGlyph,
 			state.thinkingInModel,
 		].join("\0");
@@ -1234,8 +1280,13 @@ export class CustomEditor extends Editor {
 			"line",
 		);
 		const layout: NativeEditorLayout = {
-			role: shell ? `omp.editor.${shell.kind}` : state.btw ? "omp.editor.btw" : "omp.editor",
+			role: shell
+				? `omp.editor.${shell.kind === "btw" ? "btw-ask" : shell.kind}`
+				: state.btw
+					? "omp.editor.btw"
+					: "omp.editor",
 			tone: state.running ? "pending" : undefined,
+			...(folded ? { folded: true } : {}),
 			children: compact([facts?.context, controls.focus, chips, line, bar]),
 			caret: "line/input",
 		};
@@ -1423,47 +1474,74 @@ export class CustomEditor extends Editor {
 						"dictation",
 					);
 		const dictating = dictationHoldsDraft(state.dictation);
-		const submit = state.running
-			? node(
-					"text",
-					{
-						role: "omp.composer.stop",
-						text: "Stop",
-						tone: "error",
-						title: `Stop  ${formatTooltipKey(interruptKey)}`,
-						actions: { click: "interrupt" },
-					},
-					undefined,
-					"stop",
-				)
-			: node(
-					"kbd",
-					{
-						role: "omp.composer.send",
-						keys: ["enter"],
-						title: dictating ? "Finish dictation before sending" : `Send  ${formatTooltipKey("enter")}`,
-						tone: dictating ? "muted" : undefined,
-						actions: dictating ? undefined : { click: "submit" },
-					},
-					undefined,
-					"send",
-				);
+		const submit =
+			state.ask === "skip"
+				? node(
+						"text",
+						{
+							role: "omp.composer.skip",
+							text: "Skip & send",
+							tone: "warning",
+							title: `Send this message instead of answering the questions  ${formatTooltipKey("enter")}`,
+							actions: { click: "submit" },
+						},
+						undefined,
+						"skip",
+					)
+				: state.running
+					? node(
+							"text",
+							{
+								role: "omp.composer.stop",
+								text: "Stop",
+								tone: "error",
+								title: `Stop  ${formatTooltipKey(interruptKey)}`,
+								actions: { click: "interrupt" },
+							},
+							undefined,
+							"stop",
+						)
+					: node(
+							"kbd",
+							{
+								role: "omp.composer.send",
+								keys: ["enter"],
+								title: dictating ? "Finish dictation before sending" : `Send  ${formatTooltipKey("enter")}`,
+								tone: dictating ? "muted" : undefined,
+								actions: dictating ? undefined : { click: "submit" },
+							},
+							undefined,
+							"send",
+						);
 		if (!shell) {
-			const mode = state.btw ? this.#describeBtwChip(interruptKey) : undefined;
+			const mode = state.btw
+				? this.#describeBtwChip(interruptKey)
+				: state.ask === "skip"
+					? keyed(
+							row([node("text", { spans: [span("skips ask", "warning")], wrap: "none" }, undefined, "label")], {
+								role: "omp.composer.mode",
+								tone: "warning",
+								gap: "xs",
+								align: "center",
+								title: "Sending this message skips the questions above",
+							}),
+							"mode",
+						)
+					: undefined;
 			return { focus, mode, model, effort, dictation, submit };
 		}
-		const runs = shell.kind === "bash" ? "Runs in your shell" : "Runs in Python";
+		const runs =
+			shell.kind === "bash"
+				? "Runs in your shell"
+				: shell.kind === "python"
+					? "Runs in Python"
+					: "Asks a /btw side question";
 		const mode = keyed(
 			row(
 				compact([
 					shell.excluded &&
 						node("icon", { name: "eye-off", title: "Not sent to the model" }, undefined, "excluded"),
-					node(
-						"text",
-						{ spans: [span(shell.kind, shell.kind === "bash" ? "bashMode" : "pythonMode")], wrap: "none" },
-						undefined,
-						"label",
-					),
+					node("text", { spans: [span(shell.kind, `${shell.kind}Mode`)], wrap: "none" }, undefined, "label"),
 				]),
 				{
 					role: "omp.composer.mode",
@@ -2003,8 +2081,11 @@ export class CustomEditor extends Editor {
 
 	/** Promote a newly formed bare `->` / `=>` prefix to a reserved header line by opening the
 	 *  queue body beneath it. `hadBareQueuePrefix` is the pre-edit state: a prompt that was
-	 *  already just the prefix is left alone so the user can keep editing it. */
+	 *  already just the prefix is left alone so the user can keep editing it. Natively drawn
+	 *  (Tern), the prefix stays as dimmed text rather than a `Queueing` label, so the body
+	 *  goes on the same line and nothing is opened. */
 	#normalizeQueuePrefix(hadBareQueuePrefix: boolean): void {
+		if (isNativeRendering()) return;
 		if (hadBareQueuePrefix || !(this.textEquals("->") || this.textEquals("=>"))) return;
 		const cursor = this.getCursor();
 		if (cursor.line === 0 && cursor.col === 2) {

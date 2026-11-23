@@ -91,7 +91,7 @@ const editor = new CustomEditor({});
 editor.imageLinks = ${JSON.stringify(imageLinks)};
 process.stdout.write(editor.decorateText(${JSON.stringify(text)}));
 `;
-	const child = await $`bun -e ${script}`.quiet().nothrow();
+	const child = await $`${process.execPath} -e ${script}`.quiet().nothrow();
 	const stdout = child.stdout.toString();
 	const stderr = child.stderr.toString();
 	if (child.exitCode !== 0) throw new Error(stderr || stdout || `decorate subprocess exited with ${child.exitCode}`);
@@ -434,6 +434,37 @@ describe("CustomEditor bracketed path paste", () => {
 			expect(editor.getText()).toBe("use ");
 		});
 
+		it("keeps a comma in a submitted mention and outside restored chips", () => {
+			const editor = makeModelEditor();
+			for (const ch of "use ^a/x,") editor.handleInput(ch);
+			expect(editor.getText()).toBe("use ^a/x,");
+			expect(editor.getExpandedText()).toBe("use ^a/x,");
+
+			let submitted: string | undefined;
+			editor.onSubmit = text => {
+				submitted = text;
+			};
+			editor.handleInput("\r");
+			expect(submitted).toBe("use ^a/x,");
+
+			editor.setCollapsedText("use ^c/z, then ^a/x.");
+			expect(editor.getText()).toBe(`use ${modelMentionChipLabel("Zed")}, then ${modelMentionChipLabel("X One")}.`);
+			expect(editor.getExpandedText()).toBe("use ^c/z, then ^a/x.");
+		});
+
+		it("waits for whitespace before collapsing a model id containing a comma", () => {
+			const editor = makeModelEditor();
+			editor.resolveModelMention = selector =>
+				selector === "a/x,foo"
+					? { label: modelMentionChipLabel("Comma Model"), selector }
+					: selector === "a/x"
+						? { label: modelMentionChipLabel("X One"), selector }
+						: undefined;
+			for (const ch of "use ^a/x,foo ") editor.handleInput(ch);
+			expect(editor.getText()).toBe(`use ${modelMentionChipLabel("Comma Model")} `);
+			expect(editor.getExpandedText()).toBe("use ^a/x,foo ");
+		});
+
 		it("leaves unknown selectors literal", () => {
 			const editor = makeModelEditor();
 			for (const ch of "use ^nope/z ") editor.handleInput(ch);
@@ -465,6 +496,15 @@ describe("CustomEditor bracketed path paste", () => {
 			};
 			editor.handleInput("\r");
 			expect(submitted).toBe("^a/x then ^b/y");
+		});
+
+		it("keeps a colliding exact selector with trailing punctuation literal", () => {
+			const editor = makeModelEditor();
+			editor.resolveModelMention = selector =>
+				selector === "a/x" || selector === "a/x," ? { label: modelMentionChipLabel("X One"), selector } : undefined;
+			for (const ch of "^a/x then ^a/x, ") editor.handleInput(ch);
+			expect(editor.getText()).toBe(`${modelMentionChipLabel("X One")} then ^a/x, `);
+			expect(editor.getExpandedText()).toBe("^a/x then ^a/x, ");
 		});
 
 		it("keeps local execution literal while allowing mentions in slash prompts and shell interpolation text", () => {

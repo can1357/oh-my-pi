@@ -525,6 +525,26 @@ describe("InteractiveMode goal mode integration", () => {
 		await waiter.inputPromise;
 	});
 
+	it("holds goal continuations while the run is paused awaiting background work", async () => {
+		// A turn that yields on background subagents/jobs pauses the open run
+		// (`agent_pause`): nothing streams, yet the result the goal needs has not
+		// arrived. The continuation belongs after the run's terminal `agent_end`.
+		await harness.mode.handleGoalModeCommand("Ship the release");
+
+		vi.useFakeTimers();
+		const waiter = await armInputWaiter(harness.mode);
+		Object.defineProperty(harness.session, "isRunActive", { configurable: true, get: () => true });
+
+		vi.advanceTimersByTime(800);
+		await waitForMicrotasks();
+
+		expect(waiter.getResolvedInput()).toBeUndefined();
+
+		Reflect.deleteProperty(harness.session, "isRunActive");
+		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "cleanup" }));
+		await waiter.inputPromise;
+	});
+
 	it("stops repeated goal continuations when identical tool evidence adds no new signal", async () => {
 		vi.spyOn(vcs, "repo").mockReturnValue(null);
 		vi.spyOn(vcs, "git").mockReturnValue(null);
@@ -747,4 +767,57 @@ describe("InteractiveMode goal mode integration", () => {
 		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "next turn" }));
 		await nextTurn;
 	});
+	const lateToolExitCases: Array<{
+		name: string;
+		exit: (mode: InteractiveMode, session: AgentSession, toolSession: ToolSession) => Promise<void>;
+	}> = [
+		{
+			name: "completing the goal",
+			exit: async (mode, session, toolSession) => {
+				const goalTool = (await createTools(toolSession, session.getActiveToolNames())).find(
+					tool => tool.name === "goal",
+				);
+				if (!goalTool) throw new Error("expected goal tool to be active");
+				await goalTool.execute("call-1", { op: "complete" });
+				const nextTurn = mode.getUserInput();
+				// getUserInput awaits the completion exit before arming onInputCallback.
+				for (let i = 0; i < 100 && session.getGoalModeState() !== undefined; i++) await waitForMicrotasks();
+				mode.onInputCallback?.(mode.startPendingSubmission({ text: "next turn" }));
+				await nextTurn;
+			},
+		},
+		{
+			name: "pausing the goal",
+			exit: async mode => {
+				vi.spyOn(mode, "showHookSelector").mockResolvedValue("Pause");
+				await mode.handleGoalModeCommand();
+			},
+		},
+		{
+			name: "dropping the goal",
+			exit: async mode => {
+				vi.spyOn(mode, "showHookSelector").mockResolvedValue("Drop");
+				vi.spyOn(mode, "showHookConfirm").mockResolvedValue(true);
+				await mode.handleGoalModeCommand();
+			},
+		},
+	];
+
+	for (const testCase of lateToolExitCases) {
+		it(`keeps a tool enabled after it registers when ${testCase.name}`, async () => {
+			await harness.mode.handleGoalModeCommand("Ship the release");
+			expect(await toolNamesFor(harness)).not.toContain("todo");
+
+			// A deferred extension registers and enables its tool after goal entry.
+			await harness.session.setActiveToolsByName([...harness.session.getEnabledToolNames(), "todo"]);
+			expect(await toolNamesFor(harness)).toContain("todo");
+			expect(await toolNamesFor(harness)).toContain("goal");
+
+			await testCase.exit(harness.mode, harness.session, harness.toolSession);
+
+			// Only `goal` goes away; the late tool stays enabled and dispatchable.
+			expect(await toolNamesFor(harness)).toContain("todo");
+			expect(await toolNamesFor(harness)).not.toContain("goal");
+		});
+	}
 });

@@ -160,6 +160,45 @@ export function resolveCliEntryCmd(): string[] {
 	return [executable, path.resolve(import.meta.dir, "..", "cli.ts")];
 }
 
+/**
+ * Resolve the command for `/restart` to re-exec the build the launcher on PATH
+ * now names. A compiled binary's `process.execPath` is the realpath of the
+ * image that started this process; with versioned installs (Homebrew kegs) an
+ * upgrade repoints the launcher while the old keg stays installed, so
+ * re-execing `process.execPath` would bring the open session back on the old
+ * version (issue #19454). Re-exec the launcher this process was started
+ * through when it now points at a different executable: `argv0` itself when
+ * it is a full path, else its PATH lookup. Never a different `omp` on PATH: a
+ * build started by path restarts as itself. On Windows a bare `argv0` names no
+ * launcher: `cmd.exe` runs a copy in the current directory before PATH and
+ * still passes the bare name, while PowerShell passes the full path. Keep the
+ * unchanged entry command otherwise, and leave workers on
+ * {@link resolveExecutablePath} so they stay pinned to the parent build
+ * (issues #16262, #19259).
+ */
+export function resolveRestartCmd(): string[] {
+	if (!isCompiledBinary()) return resolveCliEntryCmd();
+	const executable = resolveExecutablePath();
+	const running = stripWindowsExtendedLengthPathPrefix(process.execPath);
+	const argv0 = stripWindowsExtendedLengthPathPrefix(process.argv0);
+	const isPath = argv0.includes("/") || argv0.includes("\\") || argv0.includes(":");
+	const launcher = isPath
+		? isFullyQualifiedPath(argv0)
+			? argv0
+			: null
+		: process.platform === "win32"
+			? null
+			: $which(argv0, { requireAbsolutePaths: true, cache: WhichCachePolicy.Bypass });
+	if (!launcher || !isExecutable(launcher)) return [executable];
+	let sameBuild: boolean;
+	try {
+		sameBuild = fs.realpathSync(launcher) === fs.realpathSync(running);
+	} catch {
+		sameBuild = path.resolve(launcher) === path.resolve(running);
+	}
+	return sameBuild ? [executable] : [launcher];
+}
+
 /** Whether the file at `process.execPath` is no longer the image this process runs (replaced or unlinked). */
 function runningImageReplaced(): boolean {
 	try {
@@ -245,7 +284,7 @@ export function nativeLibraryPathOverlay(
 
 /**
  * Env for an ONNX inference worker: the parent env plus the native library
- * path. Only these workers get it — the daemon broker spawns user PTY sessions
+ * path. Only these workers get it — the daemon spawns user PTY sessions
  * and eval kernels through {@link workerEnvFromParent}, and rewriting the
  * loader search path of arbitrary user commands risks a `GLIBCXX` mismatch.
  */

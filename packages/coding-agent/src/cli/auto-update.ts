@@ -39,11 +39,12 @@ import {
 	VERSION,
 } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
-import { spawnDetached } from "../subprocess/shared-worker";
+import { spawnDetached } from "../subprocess/detached";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
 import {
 	canSelfUpdate,
 	runUpdateCommand,
+	syncRelayAfterVerifiedUpdate,
 	type UpdateOutcome,
 	type UpdateProgress,
 	verifyInstalledVersion,
@@ -326,7 +327,12 @@ async function settle(outcome: UpdateOutcome): Promise<StateUpdate> {
 			return { phase: "failed", error: outcome.reason };
 		case "installed": {
 			const { actual, path: launcher } = await verifyInstalledVersion(outcome.version);
-			if (actual !== undefined && compareVersions(actual, VERSION) > 0) return { phase: "done", version: actual };
+			if (actual !== undefined && compareVersions(actual, VERSION) > 0) {
+				// The installer already synced an exact verification. The worker also
+				// accepts a different newer version (e.g. a concurrent package update).
+				if (actual !== outcome.version) await syncRelayAfterVerifiedUpdate(launcher);
+				return { phase: "done", version: actual };
+			}
 			return {
 				phase: "failed",
 				version: outcome.version,

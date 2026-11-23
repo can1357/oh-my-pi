@@ -112,14 +112,34 @@ export class AuthBrokerRefresher {
 			await this.#storage.oauth.refresh(id);
 		} catch (error) {
 			const errorMsg = String(error);
-			if (isDefinitiveOAuthFailure(errorMsg)) {
+			if (isDefinitiveOAuthFailure(error)) {
 				// AuthStorage.oauth.refresh already CAS-disabled the row
 				// (unless a peer/login rotated it first, in which case the live
 				// credential is intentionally kept). Nothing to do here but record it.
 				logger.warn("auth-broker refresh failed definitively", { id, error: errorMsg });
+				return;
+			}
+			// A peer may have rotated or removed the row while this refresh ran, so
+			// judge the lapse by the row as stored now, not as the sweep read it.
+			const expires = await this.#activeExpiry(id).catch(() => undefined);
+			if (expires !== undefined && expires <= this.#now() + this.#refreshIntervalMs) {
+				// The next sweep comes after the access token lapses, so requests
+				// served with this login fail from then until a refresh succeeds.
+				logger.warn("auth-broker refresh failed (transient); access token expires before the next retry", {
+					id,
+					expiresAt: new Date(expires).toISOString(),
+					error: errorMsg,
+				});
 			} else {
 				logger.debug("auth-broker refresh failed (transient)", { id, error: errorMsg });
 			}
 		}
+	}
+
+	/** Access-token expiry of active OAuth row `id` as stored now; `undefined` once the row is inactive. */
+	async #activeExpiry(id: number): Promise<number | undefined> {
+		await this.#storage.credentials.reload();
+		const credential = this.#storage.credentials.snapshot().credentials.find(entry => entry.id === id)?.credential;
+		return credential?.type === "oauth" && Number.isFinite(credential.expires) ? credential.expires : undefined;
 	}
 }

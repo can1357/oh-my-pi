@@ -233,6 +233,8 @@ describe("openai-completions compatibility", () => {
 			rejectRootObjectUnion: false,
 			retryWithoutStrictOnGrammarError: false,
 			supportsPromptCacheKey: false,
+			foldUserAfterToolResult: false,
+			splitToolCalls: false,
 		} satisfies ResolvedOpenAICompat;
 		const assistantMessage: AssistantMessage = {
 			role: "assistant",
@@ -2462,7 +2464,7 @@ describe("anthropic cache control for OpenAI-compatible chat completions", () =>
 	});
 
 	it("preserves OpenRouter Anthropic cache_control detection", async () => {
-		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4") as Model<"openai-completions">;
+		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4.6") as Model<"openai-completions">;
 		const payload = await captureOpenAICompletionsPayload(model, cacheContext());
 		const content = getLastPayloadContent(payload);
 		const textPart = getLastTextPart(content);
@@ -2471,7 +2473,7 @@ describe("anthropic cache control for OpenAI-compatible chat completions", () =>
 	});
 
 	it("anchors Anthropic cache_control on the trailing tool result during a tool loop", async () => {
-		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4") as Model<"openai-completions">;
+		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4.6") as Model<"openai-completions">;
 		const assistantMessage: AssistantMessage = {
 			role: "assistant",
 			content: [
@@ -2528,7 +2530,7 @@ describe("anthropic cache control for OpenAI-compatible chat completions", () =>
 });
 describe("openrouterVariant request integration", () => {
 	it("appends the configured variant suffix to params.model for OpenRouter requests", async () => {
-		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4") as Model<"openai-completions">;
+		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4.6") as Model<"openai-completions">;
 		const { promise, resolve } = Promise.withResolvers<unknown>();
 		const fetchMock = createMockFetch(["[DONE]"]);
 		streamOpenAICompletions(model, baseContext(), {
@@ -2543,7 +2545,7 @@ describe("openrouterVariant request integration", () => {
 	});
 
 	it("does not override an explicit variant in the model id", async () => {
-		const base = getBundledModel("openrouter", "anthropic/claude-sonnet-4") as Model<"openai-completions">;
+		const base = getBundledModel("openrouter", "anthropic/claude-sonnet-4.6") as Model<"openai-completions">;
 		const model: Model<"openai-completions"> = buildModel({
 			...base,
 			id: `${base.id}:online`,

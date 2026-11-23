@@ -18,13 +18,14 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
-import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { $env, isRecord, logger, Snowflake, toError } from "@oh-my-pi/pi-utils";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
 	type ExtensionAskDialogQuestion,
 	type ExtensionAskDialogResult,
 	type ExtensionAskDialogSubmitResult,
+	type ExtensionFormDialogResult,
 	type ExtensionUIContext,
 	type ExtensionUIDialogOptions,
 	type ExtensionUISelectItem,
@@ -41,6 +42,16 @@ import {
 	type SkillRediscoverySource,
 } from "../../extensibility/skills";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
+import {
+	choiceValue,
+	defaultFormData,
+	fieldError,
+	type HtmlFormData,
+	type HtmlFormValue,
+	isArrayChoice,
+	textValue,
+} from "@oh-my-pi/pi-tui/html-form/data";
+import { type ChoiceField, type HtmlForm, parseHtmlForm, type TextField } from "@oh-my-pi/pi-tui/html-form/parse";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import {
 	type WordCompletionEngine,
@@ -51,6 +62,7 @@ import {
 import { requestTextPrediction, textPredictionBackend } from "../../predict/client";
 import { type AgentSession, type NavigateTreeResult, SessionBusyError } from "../../session/agent-session";
 import type { AgentSessionHandle } from "../../session/agent-session-handle";
+import { disposeLocalMcpHost } from "../../mcp/host/local";
 import type { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
@@ -80,6 +92,7 @@ import { claimRpcInput, readRpcInputFrames } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { RpcBtwController } from "./rpc-btw";
 import { RpcGoalController } from "./rpc-goal";
+import { DEFAULT_MODEL_PICKER_LIMIT, RpcModelPicker } from "./rpc-model-picker";
 import { RpcDictationBridge, type RpcDictationControllerFactory } from "./rpc-dictation";
 import { RpcLiveBridge, type RpcLiveSessionFactory } from "./rpc-live";
 import { RpcOutputWriter } from "./rpc-output";
@@ -424,7 +437,7 @@ export function dispatchRpcControlFrame(parsed: unknown, deps: RpcInputFrameDeps
 
 /**
  * Commands that skip the serial queue entirely; see {@link dispatchRpcInputFrame}.
- * (`prompt` and `steer_subagent` are also backgrounded there, but start through
+ * (`prompt`, `steer_subagent`, and `handoff` also run in the background, but start through
  * the serial tail.) `btw_cancel` is synchronous and must overtake a `btw` still
  * starting or a long serial command; `abort_branch_summary` likewise overtakes
  * the `navigate_tree` whose summary it stops.
@@ -442,7 +455,7 @@ const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>([
 /**
  * Dispatch a single parsed frame from the RPC input stream.
  *
- * `bash`, `predict_word`, `prompt` and `steer_subagent` are dispatched in the
+ * `bash`, `predict_word`, `prompt`, `steer_subagent`, and `handoff` are dispatched in the
  * background so the caller can keep reading subsequent frames while one is
  * still settling: a `bash` command can run for a long time, and a `prompt`
  * command's response is held until the message is admitted, which can span
@@ -455,12 +468,14 @@ const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>([
  * backgrounded too, so a cold prediction engine never stalls the command queue
  * behind a keystroke. `live_start`, `live_connect` and `dictation_start` respond only once
  * connected or recording, so they are backgrounded and their stop commands can cancel them.
+ * `handoff` leaves the queue free for steering and `abort` while its compaction is preparing.
+ * `resume` and `abort_and_deliver_queue` wait behind earlier user input, so they run in the background like `prompt`.
  * Response correlation is preserved via each command's `id`; ordering across
  * concurrent commands is not guaranteed and clients MUST match on `id`.
  *
  * @returns `undefined` when the frame was routed to a side-channel handler
  *   (extension UI response, host tool/URI frames) or dispatched in the
- *   background (`bash`, `predict_word`, `live_start`, `live_connect`, `dictation_start`, `prompt`, `steer`, `follow_up`, `steer_subagent`). Otherwise a promise that
+ *   background. Otherwise a promise that
  *   resolves once the response for the command has been emitted via `output`.
  *   Errors from `handleCommand` on a command dispatched inline propagate; the
  *   caller is expected to wrap them.
@@ -487,9 +502,12 @@ export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps):
 		BACKGROUND_COMMANDS.has(command.type) ||
 		command.type === "prompt" ||
 		command.type === "steer" ||
+		command.type === "resume" ||
+		command.type === "abort_and_deliver_queue" ||
 		command.type === "dictation_start" ||
 		command.type === "follow_up" ||
-		command.type === "steer_subagent"
+		command.type === "steer_subagent" ||
+		command.type === "handoff"
 	) {
 		const task = (async () => {
 			try {
@@ -513,6 +531,8 @@ const USER_INPUT_TYPES: Record<string, true> = {
 	steer: true,
 	follow_up: true,
 	abort_and_prompt: true,
+	abort_and_deliver_queue: true,
+	resume: true,
 };
 
 const SESSION_CHANGE_TYPES: Record<string, true> = {
@@ -577,7 +597,7 @@ export class RpcUserInputGate {
 	}
 }
 
-/** Starts prompts, steers, follow-ups and `steer_subagent` after earlier ordinary commands, without
+/** Starts prompts, steers, follow-ups, `steer_subagent` and `handoff` after earlier ordinary commands, without
  * awaiting admission. Control frames, `bash` and `predict_word` dispatch immediately (see
  * dispatchRpcInputFrame). `acceptInput` runs synchronously in {@link dispatch}, before the
  * handler is queued, so an abort can invalidate a frame that has not started yet. */
@@ -605,8 +625,8 @@ export class RpcInputDispatcher {
 			const command = parsed as RpcCommand;
 			this.#acceptInput?.(command);
 			// Bash and predict_word retain their immediate side channel. Prompts,
-			// steers, follow-ups and steer_subagent start through the serial tail, but
-			// dispatchRpcInputFrame backgrounds their admission.
+			// steers, follow-ups, steer_subagent and handoff start through the serial tail,
+			// but dispatchRpcInputFrame doesn't await their responses.
 			if (BACKGROUND_COMMANDS.has(command.type)) {
 				dispatchRpcInputFrame(command, this.#deps);
 				return;
@@ -707,7 +727,7 @@ export class RpcShutdownCoordinator {
 	}
 }
 
-/** UTF-8 JSON size of `value`, as compared against `RpcFrameEncoder.maxResponseBytes`. */
+/** UTF-8 JSON size of `value`, as compared against `RpcFrameEncoder.maxIntactFrameBytes`. */
 function encodedBytes(value: unknown): number {
 	return Buffer.byteLength(JSON.stringify(value));
 }
@@ -954,7 +974,7 @@ export async function openRpcSession(
 	}
 	// A resumed session is bound to the model by the switch; an already-open or
 	// fresh one selects it as `set_model` would.
-	if (!cancelled && model && !modelsAreEqual(session.model, model)) await session.setModel(model);
+	if (!cancelled && model && !routedModelsAreEqual(session.model, model)) await session.setModel(model);
 	return {
 		cancelled,
 		resumed: !cancelled && latest !== null,
@@ -1195,6 +1215,170 @@ export async function requestRpcAskDialog(
 	return timedOut ? timedOutAskDialogResult(questions) : result;
 }
 
+/**
+ * Value a choice field's submitted entry gives: each string must be one of the
+ * field's enabled option values, except one free-text entry when the field
+ * offers "Other". Checkbox groups and multi-selects take an array; every other
+ * choice takes one string.
+ */
+function parseFormChoice(field: ChoiceField, value: unknown): HtmlFormValue | undefined {
+	const label = JSON.stringify(field.name);
+	// An omitted field means nothing checked: an empty array for array choices, as `choiceValue` gives everywhere else.
+	if (value === undefined) return choiceValue(field, new Set());
+	const array = isArrayChoice(field);
+	const shape = array ? "an array of strings" : "one string, not an array";
+	if (array !== Array.isArray(value)) throw new Error(`Form field ${label} must carry ${shape}`);
+	const entries: unknown[] = array ? (value as unknown[]) : [value];
+
+	// Map each entry to an option index, keeping at most one unmatched entry as the "Other" text.
+	const checked = new Set<number>();
+	let other: string | undefined;
+	for (const entry of entries) {
+		if (typeof entry !== "string") throw new Error(`Form field ${label} must carry ${shape}`);
+		// Prefer an enabled option, so a disabled duplicate of the same value earlier in the group cannot shadow it.
+		const enabled = field.options.findIndex(option => !option.disabled && option.value === entry);
+		const index = enabled >= 0 ? enabled : field.options.findIndex(option => option.value === entry);
+		if (index >= 0 && field.options[index]!.disabled) {
+			throw new Error(`Form field ${label} carries disabled option ${JSON.stringify(entry)}`);
+		}
+		if (index >= 0 && !checked.has(index)) {
+			checked.add(index);
+		} else if (index < 0 && field.other && other === undefined) {
+			other = entry;
+		} else {
+			throw new Error(`Form field ${label} carries unexpected value ${JSON.stringify(entry)}`);
+		}
+	}
+	return choiceValue(field, checked, other);
+}
+
+/**
+ * Keeps valid selections, treating an echoed same-name hidden value as no selection when it cannot be the answer.
+ * A host submitting like a browser sends the hidden value inside an array choice's entries too: there it is dropped
+ * up front when no option carries it (it would otherwise pose as the "Other" text), else only when keeping it fails.
+ */
+function parseChoiceOrHiddenFallback(
+	field: ChoiceField,
+	value: unknown,
+	hiddenValue: string | undefined,
+): HtmlFormValue | undefined {
+	if (hiddenValue === undefined) return parseFormChoice(field, value);
+	const echo = Array.isArray(value) ? value.indexOf(hiddenValue) : value === hiddenValue ? 0 : -1;
+	if (echo < 0) return parseFormChoice(field, value);
+	const withoutEcho = Array.isArray(value) ? value.toSpliced(echo, 1) : undefined;
+	if (Array.isArray(value) && !field.options.some(option => option.value === hiddenValue)) {
+		return parseFormChoice(field, withoutEcho);
+	}
+	try {
+		return parseFormChoice(field, value);
+	} catch {
+		return parseFormChoice(field, withoutEcho);
+	}
+}
+
+/** Value a text field's submitted entry gives: a string, or a number for `number`/`range` inputs; absent counts as empty. */
+function parseFormText(field: TextField, value: unknown): HtmlFormValue {
+	if (value === undefined) return textValue(field, "");
+	const numeric = field.type === "number" || field.type === "range";
+	if (typeof value === "string" || (numeric && typeof value === "number" && Number.isFinite(value))) {
+		return textValue(field, String(value));
+	}
+	throw new Error(`Form field ${JSON.stringify(field.name)} must carry a string${numeric ? " or a number" : ""}`);
+}
+
+/** Validates submitted `form` data against the parsed form; any mismatch throws instead of guessing. */
+function parseFormDialogResponse(
+	response: RpcExtensionUIResponse,
+	form: HtmlForm,
+	dialogOptions: ExtensionUIDialogOptions,
+): ExtensionFormDialogResult | undefined {
+	if ("cancelled" in response && response.cancelled) {
+		if (response.timedOut) dialogOptions.onTimeout?.();
+		return undefined;
+	}
+	const submitted: unknown = "data" in response ? response.data : undefined;
+	if (!isRecord(submitted)) throw new Error("Form dialog response must carry a data object");
+
+	// Reject names the form does not have; hidden inputs may be echoed but keep the form's own values.
+	const named = form.fields.filter(field => field.name);
+	const names = new Set([...named.map(field => field.name), ...form.hidden.map(([name]) => name)]);
+	for (const name of Object.keys(submitted)) {
+		if (!names.has(name)) throw new Error(`Form dialog data carries unknown field ${JSON.stringify(name)}`);
+	}
+
+	// One entry answers every field of its name, as in HTML form data. Each field that can carry the entry takes it;
+	// a same-name field of another shape (a radio group beside a checkbox group, a group without "Other" beside a
+	// text input) counts as unanswered, as it would in the TUI where the last field wins. At least one field must
+	// carry the entry, and every field must pass the rules the form dialogs apply on submit.
+	// A null prototype keeps a control named `__proto__` an ordinary key instead of hitting the inherited setter.
+	const data: HtmlFormData = Object.assign(Object.create(null), Object.fromEntries(form.hidden));
+	const hidden = new Map(form.hidden);
+	const byName = Map.groupBy(named, field => field.name!);
+	for (const [name, fields] of byName) {
+		const entry = Object.hasOwn(submitted, name) ? submitted[name] : undefined;
+		const hiddenValue = hidden.get(name);
+		let mismatch: unknown;
+		const values = fields.map(field => {
+			try {
+				const value =
+					field.kind === "choice"
+						? parseChoiceOrHiddenFallback(field, entry, hiddenValue)
+						: parseFormText(field, entry);
+				return { field, value, carried: true };
+			} catch (error) {
+				// Only a field sharing its name may decline the entry; a lone field's mismatch fails the answer.
+				if (fields.length === 1) throw error;
+				mismatch ??= error;
+				const value = field.kind === "choice" ? parseFormChoice(field, undefined) : parseFormText(field, undefined);
+				return { field, value, carried: false };
+			}
+		});
+		if (!values.some(({ carried }) => carried)) throw mismatch;
+		for (const { field, value, carried } of values) {
+			const problem = fieldError(field, value);
+			if (problem) throw new Error(`Form field ${JSON.stringify(name)}: ${problem}`);
+			if (carried && value !== undefined) data[name] = value;
+		}
+	}
+	return { data };
+}
+
+/**
+ * Sends an `ask` tool's HTML form as one RPC `form` dialog; a timeout submits the form's defaults.
+ * Fails without sending when the frame exceeds `maxFrameBytes`, the largest frame the negotiated protocol delivers intact.
+ */
+export async function requestRpcFormDialog(
+	pendingRequests: Map<string, PendingExtensionRequest>,
+	output: RpcOutput,
+	maxFrameBytes: number,
+	html: string,
+	dialogOptions?: ExtensionUIDialogOptions,
+): Promise<ExtensionFormDialogResult | undefined> {
+	// Protocol v1 shrinks an oversized frame and cuts the HTML, so the host could not answer the controls past the cut.
+	const request = { method: "form", html, timeout: dialogOptions?.timeout };
+	// A throwaway id measures the frame: Snowflake ids are always 16 characters, so it encodes to the real id's length.
+	const bytes = encodedBytes({ type: "extension_ui_request", id: Snowflake.next(), ...request });
+	if (bytes > maxFrameBytes) {
+		throw new Error(
+			`Form is too large for the RPC host (${bytes} bytes, limit ${maxFrameBytes}); use fewer or smaller images, or split the form`,
+		);
+	}
+
+	const form = parseHtmlForm(html);
+	let timedOut = false;
+	const opts: ExtensionUIDialogOptions = {
+		...dialogOptions,
+		onTimeout: () => {
+			timedOut = true;
+			dialogOptions?.onTimeout?.();
+		},
+	};
+	const result = await requestRpcDialog(pendingRequests, output, opts, undefined, request, response =>
+		parseFormDialogResponse(response, form, opts),
+	);
+	return timedOut ? { data: defaultFormData(form), timedOut: true } : result;
+}
+
 export function requestRpcEditor(
 	pendingRequests: Map<string, PendingExtensionRequest>,
 	output: RpcOutput,
@@ -1391,6 +1575,7 @@ export interface RpcModeOptions {
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
  */
 export async function runRpcMode(session: AgentSession, options: RpcModeOptions = {}): Promise<never> {
+	const modelPicker = new RpcModelPicker(session);
 	const {
 		setToolUIContext,
 		headless = false,
@@ -1417,7 +1602,10 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const outputWriter = new RpcOutputWriter(stdout, failure => {
 		logger.error("RPC output delivery failed", { error: String(failure) });
 		dictationBridge?.dispose();
-		void session.dispose().finally(() => process.exit(1));
+		void session
+			.dispose()
+			.finally(() => disposeLocalMcpHost())
+			.finally(() => process.exit(1));
 	});
 	outputWriter.write(
 		frameEncoder.encodeFrames({
@@ -1520,7 +1708,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	 */
 	class RpcExtensionUIContext implements ExtensionUIContext {
 		readonly supportsEditor = true;
-		/** Set by `set_ask_dialog`; hosts that never opt in keep the select/editor ask fallback. */
+		/** Set by `set_ask_dialog`; extension ask dialogs use select/editor until the host opts in. */
 		askDialogEnabled = false;
 
 		constructor(
@@ -1532,6 +1720,17 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			if (!this.askDialogEnabled) return undefined;
 			return (questions, dialogOptions) =>
 				requestRpcAskDialog(this.pendingRequests, this.output, questions, dialogOptions);
+		}
+
+		get formDialog(): ExtensionUIContext["formDialog"] {
+			return (html, dialogOptions) =>
+				requestRpcFormDialog(
+					this.pendingRequests,
+					this.output,
+					frameEncoder.maxIntactFrameBytes,
+					html,
+					dialogOptions,
+				);
 		}
 
 		select(
@@ -1732,8 +1931,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		output(error(id, command, promptError.message));
 
 	// Read stdin from now on: `session_start` may be waiting on a dialog only the client can answer. Until the
-	// command loop below exists, a dialog answer and the ask-dialog opt-in are handled at once and every other
-	// frame is held, in arrival order, for that loop.
+	// command loop below exists, a dialog answer and the ask-dialog opt-in are handled at once and every
+	// other frame is held, in arrival order, for that loop.
 	let heldFrames: unknown[] | undefined = [];
 	const receiveFrame = (parsed: unknown): void => {
 		if (!heldFrames) {
@@ -1842,8 +2041,12 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			dictationBridge.dispose();
 			await liveBridge.stop();
 			await session.dispose();
+			// Releasing the session's leases starts private unit shutdown, but
+			// process.exit() cannot await the host's registered exit callback.
+			await disposeLocalMcpHost();
 		} catch (error) {
 			if (!persistenceFailure || error !== persistenceFailure) throw error;
+			await disposeLocalMcpHost();
 			// The notice frame this failure queued must reach the client before the
 			// process ends (review 3983906393).
 			await outputWriter.close();
@@ -2074,7 +2277,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				return fitRemoveQueuedMessageResponse(
 					id,
 					session.takeQueuedMessage(command.message, command.queue),
-					frameEncoder.maxResponseBytes,
+					frameEncoder.maxIntactFrameBytes,
 				);
 			}
 
@@ -2100,7 +2303,33 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				goalController.stopForHostAbort();
 				abortBuiltinCommands("RPC command aborted by host");
 				await session.abort({ reason: USER_INTERRUPT_LABEL });
-				return fitAbortAndRestoreQueueResponse(id, restored, frameEncoder.maxResponseBytes);
+				return fitAbortAndRestoreQueueResponse(id, restored, frameEncoder.maxIntactFrameBytes);
+			}
+
+			case "abort_and_deliver_queue": {
+				// The TUI's empty Enter. Ordered behind earlier input, so a message sent just
+				// before is queued by the time this runs and is the one the continuation takes.
+				const aborted = await inputGate.enqueue(async () => {
+					if (!inputGate.isCurrent(command) || !session.isStreaming || !session.hasInterruptibleInput) {
+						return false;
+					}
+					await session.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true });
+					return true;
+				});
+				return success(id, "abort_and_deliver_queue", { aborted });
+			}
+
+			case "resume": {
+				// The TUI's `.`/`c`, ordered behind earlier input like abort_and_deliver_queue.
+				// Answer once the continuation is under way; a failure after that is a late error.
+				await inputGate.enqueue(async () => {
+					if (!inputGate.isCurrent(command) || shutdownState.requested) return;
+					const admitted = Promise.withResolvers<void>();
+					const resuming = session.resume({ onAdmitted: admitted.resolve });
+					await Promise.race([resuming, admitted.promise]);
+					resuming.catch(onPromptError(id, "resume"));
+				});
+				return success(id, "resume");
 			}
 
 			case "abort_and_prompt": {
@@ -2264,6 +2493,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				const state: RpcSessionState = {
 					model: session.model,
 					thinkingLevel: session.thinkingLevel,
+					configuredThinkingLevel: session.configuredThinkingLevel(),
+					thinkingLevels: session.getAvailableEffortSelectors(),
 					isStreaming: session.isStreaming,
 					isCompacting: session.isCompacting,
 					steeringMode: session.steeringMode,
@@ -2529,7 +2760,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				if (!model) {
 					return error(id, "set_model", `Model not found: ${command.provider}/${command.modelId}`);
 				}
-				await session.setModel(model);
+				await session.setModel(model, command.role);
+				if (command.thinkingLevel !== undefined) session.setThinkingLevel(command.thinkingLevel);
 				return success(id, "set_model", model);
 			}
 
@@ -2545,6 +2777,15 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				await session.modelRegistry.awaitBackgroundRefresh();
 				const models = session.getAvailableModels();
 				return success(id, "get_available_models", { models });
+			}
+
+			case "get_model_picker": {
+				const limit = command.limit ?? DEFAULT_MODEL_PICKER_LIMIT;
+				if (!Number.isInteger(limit) || limit < 1) {
+					return error(id, "get_model_picker", "`limit` must be a positive integer.");
+				}
+				await session.modelRegistry.awaitBackgroundRefresh();
+				return success(id, "get_model_picker", modelPicker.query(command.query ?? "", limit));
 			}
 
 			// =================================================================
@@ -2698,14 +2939,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			}
 
 			case "handoff": {
-				// Resetting the agent mid-stream lets the live turn keep emitting into a
-				// session that handoff has already torn down. Refuse while a prompt is in
-				// flight (mirrors the TUI /handoff guard).
-				if (session.isStreaming) {
-					return error(id, "handoff", "Cannot hand off while a response is in progress");
-				}
-				const result = await session.handoff(command.customInstructions);
-				return success(id, "handoff", result ? { savedPath: result.savedPath } : null);
+				await session.compact(command.customInstructions, { mode: "handoff" });
+				return success(id, "handoff", {});
 			}
 
 			// =================================================================
@@ -2769,6 +3004,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				// Track whether onAuth has fired. Providers that require interactive
 				// input before a browser URL cannot be satisfied headlessly; after
 				// onAuth, prompt input is the pasted OAuth code/redirect URL path.
+				// The login-warning acceptance is the exception: a plain yes/no the host can show.
 				let authEmitted = false;
 				try {
 					await session.modelRegistry.authStorage.oauth.login(command.providerId, {
@@ -2793,7 +3029,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 										"which is not supported in RPC mode. Use the terminal UI to log in.",
 								);
 							}
-							if (!authEmitted) {
+							if (!authEmitted && !prompt.riskAcknowledgement) {
 								// onPrompt called before any auth URL — provider requires
 								// interactive input that cannot be satisfied headlessly.
 								return Promise.reject(
@@ -2968,6 +3204,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	// A backgrounded builtin (e.g. a /mcp reauth browser wait) must not park
 	// the drain: tear it down now that the client is gone.
 	abortBuiltinCommands("RPC client disconnected");
+	if (session.isBackgroundCompacting) session.abortCompaction("RPC client disconnected");
 	await shutdownCoordinator.drain();
 	subagentRegistry?.dispose();
 	// Dispose the main session before exiting so the browser reaper and other

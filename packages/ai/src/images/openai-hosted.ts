@@ -83,10 +83,7 @@ async function headers(
 		applyCodexResidencyHeader(result, key);
 		result.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
 		result.set("User-Agent", USER_AGENT);
-		if (sessionId) {
-			result.set(OPENAI_HEADERS.CONVERSATION_ID, sessionId);
-			result.set(OPENAI_HEADERS.SESSION_ID, sessionId);
-		}
+		if (sessionId) result.set(OPENAI_HEADERS.SESSION_ID, sessionId);
 	}
 	return result;
 }

@@ -64,7 +64,7 @@ describe("AgentSession todo-error reminder", () => {
 			"compaction.enabled": false,
 			"retry.enabled": false,
 			"todo.reminders": false,
-			"tools.xdev": false,
+			"tools.commands": false,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 		const todo = new TodoTool({
