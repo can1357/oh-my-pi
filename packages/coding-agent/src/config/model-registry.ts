@@ -51,8 +51,10 @@ import {
 	modelsDevCatalogFallback,
 	openaiCodexModelManagerOptions,
 	PROVIDER_DESCRIPTORS,
+	piNativeModelManagerOptions,
 	resolveModelCacheProviderId,
 	resolveOllamaModelCacheProviderId,
+	resolvePiNativeModelCacheProviderId,
 } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { withThinkingCapability } from "@oh-my-pi/pi-catalog/thinking-capability";
@@ -1946,11 +1948,25 @@ export class ModelRegistry {
 	 * credential in; those load only through their model manager.
 	 */
 	#resolveStartupModelCacheProviderId(providerId: string): string {
+		const gateway = this.#piNativeGateway(providerId);
+		if (gateway) return resolvePiNativeModelCacheProviderId(providerId, gateway);
 		const baseUrl =
 			this.#runtimeProviderOverrides.get(providerId)?.baseUrl ??
 			this.#providerOverrides.get(providerId)?.baseUrl ??
 			(this.#hasFullSnapshot ? this.getProviderBaseUrl(providerId) : undefined);
 		return resolveModelCacheProviderId(providerId, { baseUrl });
+	}
+
+	/**
+	 * The auth gateway `providerId` rides under `transport: "pi-native"`, with its
+	 * configured (unresolved) bearer; undefined for a provider called directly.
+	 */
+	#piNativeGateway(providerId: string): { baseUrl: string; apiKey?: string } | undefined {
+		const runtime = this.#runtimeProviderOverrides.get(providerId);
+		const config = this.#providerOverrides.get(providerId);
+		if ((runtime?.transport ?? config?.transport) !== "pi-native") return undefined;
+		const baseUrl = runtime?.baseUrl ?? config?.baseUrl;
+		return baseUrl ? { baseUrl, apiKey: runtime?.apiKey ?? config?.apiKey } : undefined;
 	}
 
 	#loadCachedStandardProviderModels(providerIds: readonly string[]): {
@@ -2130,7 +2146,8 @@ export class ModelRegistry {
 				const models = loaded.modelsByProvider.get(providerId) ?? [];
 				if (
 					providersWithAuthoritativeProjectCatalog(models).has(providerId) ||
-					AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS.has(providerId)
+					AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS.has(providerId) ||
+					this.#piNativeGateway(providerId) !== undefined
 				) {
 					this.#cachedAuthoritativeProviders.add(providerId);
 				}
@@ -3277,6 +3294,27 @@ export class ModelRegistry {
 			options.push(this.#withRuntimeDiscovery(descriptor.createOptions(key, specialKeys[i]), key));
 		}
 
+		// A pi-native provider's roster is its gateway's: the gateway lists what it
+		// routes, including models it discovered that this install does not bundle.
+		for (const providerId of new Set([...this.#providerOverrides.keys(), ...this.#runtimeProviderOverrides.keys()])) {
+			const gateway = this.#piNativeGateway(providerId);
+			if (!gateway || disabledProviders.has(providerId) || configuredDiscoveryProviders.has(providerId)) continue;
+			if ((providerFilter && !providerFilter.has(providerId)) || this.#runtimeModelManagers.has(providerId))
+				continue;
+			const cacheProviderId = resolvePiNativeModelCacheProviderId(providerId, gateway);
+			// The same bearer the provider's pi-native streams carry.
+			const apiKey = await this.#resolveBuiltInDiscoveryApiKey(providerId, strategy, cacheProviderId, true);
+			options.push(
+				piNativeModelManagerOptions({
+					providerId,
+					baseUrl: gateway.baseUrl,
+					apiKey: isAuthenticated(apiKey) ? apiKey : undefined,
+					cacheProviderId,
+					fetch: this.#fetch,
+				}),
+			);
+		}
+
 		// Catalog-only providers have no endpoint manager. Give their bundled
 		// slices the same shared remote layer without requiring credentials.
 		const bundledProviderIds: Record<string, true> = Object.create(null);
@@ -3284,9 +3322,7 @@ export class ModelRegistry {
 		for (const providerId of MODELS_DEV_CATALOG_PROVIDER_IDS) {
 			if (BUILT_IN_MODEL_MANAGER_PROVIDER_IDS[providerId] === true) continue;
 			if (bundledProviderIds[providerId] !== true) continue;
-			if (disabledProviders.has(providerId) || configuredDiscoveryProviders.has(providerId)) continue;
-			if (providerFilter && !providerFilter.has(providerId)) continue;
-			if (this.#runtimeModelManagers.has(providerId)) continue;
+			if (!discoverable(providerId) || this.#runtimeModelManagers.has(providerId)) continue;
 			const modelsDev = modelsDevCatalogFallback(providerId, this.#fetch);
 			if (!modelsDev) continue;
 			options.push({
