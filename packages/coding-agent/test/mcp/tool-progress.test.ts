@@ -13,7 +13,8 @@ import type {
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
-import type { MCPProgress, MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
+import type { MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
+import type { MCPProgress } from "@oh-my-pi/pi-tui/tools/mcp-progress";
 
 const definition = { name: "progress_tool", inputSchema: { type: "object" as const } };
 const result: MCPToolCallResult = {
