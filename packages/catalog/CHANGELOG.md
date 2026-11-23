@@ -4,6 +4,7 @@
 
 ### Added
 
+- Z.AI (`zai`) now lists the models your GLM Coding Plan key can use, so newly released GLM models such as GLM-5.4 show up without waiting for a catalog update
 - `getUpstreamPin()` and `routedModelsAreEqual()` in `@oh-my-pi/pi-catalog/models` tell apart an aggregator model pinned to different upstream providers ([#19664](https://github.com/can1357/oh-my-pi/pull/19664) by [@taibenvenuti](https://github.com/taibenvenuti))
 
 ### Fixed
