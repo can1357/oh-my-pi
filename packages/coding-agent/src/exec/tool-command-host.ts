@@ -118,6 +118,7 @@ export function createToolCommandHandler(options: {
 							}
 						: undefined,
 					context,
+					{ shellCwd: request.cwd, sessionCwd: session.cwd },
 				);
 				dispatch = outcome.dispatch;
 				throwIfAborted(signal);

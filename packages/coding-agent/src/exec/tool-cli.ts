@@ -696,6 +696,8 @@ export async function parseToolArgs(
 	const output = createJsonObject();
 	const overrides = createJsonObject();
 	let optionsEnded = false;
+	/** Last bound repeatable flag; bare words fill its array until the next flag. */
+	let arrayLeaf: SchemaLeaf | undefined;
 	for (let index = 0; index < argv.length; index += 1) {
 		const argument = argv[index]!;
 		if (optionsEnded) {
@@ -704,11 +706,13 @@ export async function parseToolArgs(
 		}
 		if (argument === "--") {
 			optionsEnded = true;
+			arrayLeaf = undefined;
 			continue;
 		}
 		if (argument === "-" || (argument.startsWith("@") && argument.length > 1)) {
 			const source = await readArgumentSource(argument, options);
 			bindSource(leaves, output, overrides, source!.text, source!.origin);
+			arrayLeaf = undefined;
 			continue;
 		}
 		if (argument === "-j" || argument === "--json" || argument.startsWith("--json=")) {
@@ -725,16 +729,22 @@ export async function parseToolArgs(
 			}
 			if (!isObject(parsed)) throw new ToolCliUsageError("`--json` must be a JSON object");
 			deepMerge(output, parsed);
+			arrayLeaf = undefined;
 			continue;
 		}
 		if (!argument.startsWith("--")) {
 			if (argument.startsWith("-")) throw new ToolCliUsageError(`unknown flag \`${argument}\``);
-			bindLiteral(leaves, output, overrides, argument, argument);
+			if (arrayLeaf) {
+				insertValue(overrides, arrayLeaf.path, coerce(arrayLeaf, argument, argument), true);
+			} else {
+				bindLiteral(leaves, output, overrides, argument, argument);
+			}
 			continue;
 		}
 		const equals = argument.indexOf("=");
 		let rawFlag = argument.slice(2, equals < 0 ? undefined : equals);
 		const inline = equals < 0 ? undefined : argument.slice(equals + 1);
+		arrayLeaf = undefined;
 		let leaf = leaves.find(candidate => flagName(candidate.path) === rawFlag);
 		let negative = false;
 		if (!leaf && rawFlag.startsWith("no-")) {
@@ -761,6 +771,7 @@ export async function parseToolArgs(
 			coerce(leaf, source ? stripOneNewline(source.text) : raw, argument),
 			leaf.repeatable,
 		);
+		arrayLeaf = leaf.repeatable ? leaf : undefined;
 	}
 	for (const leaf of leaves) {
 		const value = valueAt(overrides, leaf.path);

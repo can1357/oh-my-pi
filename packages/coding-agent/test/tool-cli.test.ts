@@ -58,6 +58,20 @@ function createRunnerHost(): { host: ToolCliHost; calls: Record<string, unknown>
 }
 
 describe("schema-derived tool command argument binding", () => {
+	it("fills a repeatable flag's array from space-separated values until the next flag", async () => {
+		expect(await parse(["safe", "--tags", "one", "two", "--settings.label", "fixture"])).toEqual({
+			mode: "safe",
+			tags: ["one", "two"],
+			settings: { label: "fixture" },
+		});
+		expect(await parse(["safe", "--tags=one", "two", "--settings.label", "fixture"])).toEqual({
+			mode: "safe",
+			tags: ["one", "two"],
+			settings: { label: "fixture" },
+		});
+		await expect(parse(["safe", "--tags", "one", "two", "three"])).rejects.toBeInstanceOf(ToolCliUsageError);
+	});
+
 	it("binds required scalar positionals, flags, booleans, arrays, and dotted keys", async () => {
 		expect(
 			await parse([

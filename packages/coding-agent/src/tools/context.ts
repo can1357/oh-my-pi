@@ -18,6 +18,8 @@ declare module "@oh-my-pi/pi-agent-core" {
 		acpApprovedArgs?: unknown;
 		/** Reports the approval tier resolved after an extension rewrites a tool command's input, so dispatch metadata describes the input that ran. */
 		toolCommandTierResolved?(tier: "read" | "write" | "exec"): void;
+		/** The embedded shell's cwd at a tool command's invocation time, when dispatched through the bash transport. */
+		shellCwd?: string;
 		/** Set only after an interactive prompt approves provider computer safety checks. */
 		providerSafetyApproved?: boolean;
 		/** Set by the Cursor exec bridge, whose read frames compose `:raw` only to

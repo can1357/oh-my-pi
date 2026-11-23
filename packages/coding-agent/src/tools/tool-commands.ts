@@ -20,6 +20,7 @@
  * tools can be inlined into the system prompt within a byte budget; the rest
  * appear as one-line catalog entries with `<tool> --help` on demand.
  */
+import * as path from "node:path";
 import {
 	type AgentToolContext,
 	type AgentToolResult,
@@ -427,10 +428,20 @@ export async function dispatchToolCommand(
 	signal?: AbortSignal,
 	onUpdate?: AgentToolUpdateCallback<ToolCommandDispatch>,
 	context?: AgentToolContext,
+	paths?: { shellCwd: string; sessionCwd: string },
 ): Promise<{ result: AgentToolResult<unknown>; dispatch: ToolCommandDispatch }> {
 	let dispatch: ToolCommandDispatch = { tool: name, mode: "execute", exitCode: 1 };
 	try {
 		const canonical = resolveRequiredToolCommand(state, name);
+		if (paths) {
+			const shellDir = path.resolve(paths.shellCwd);
+			const sessionDir = path.resolve(paths.sessionCwd);
+			if (shellDir !== sessionDir) {
+				throw new ToolError(
+					`\`${canonical.name}\` was invoked from shell cwd \`${paths.shellCwd}\`, but session tools resolve paths against the session cwd \`${paths.sessionCwd}\`. Run it from the session cwd, cd back first, or pass absolute paths.`,
+				);
+			}
+		}
 		if (isEvalBridgeToolCall(state) && !isEvalBridgeToolCallable(canonical)) {
 			throw new ToolError(
 				`\`${canonical.name}\` cannot run through the eval bridge; call the direct \`${canonical.name}\` tool.`,
@@ -466,6 +477,8 @@ export async function dispatchToolCommand(
 		const executionContext = context
 			? {
 					...context,
+					/** The embedded shell's cwd at invocation time, for cwd-aware tools. */
+					shellCwd: paths?.shellCwd,
 					toolCommandTierResolved: (effectiveTier: ToolTier) => {
 						dispatch = { ...dispatch, tier: effectiveTier };
 					},
