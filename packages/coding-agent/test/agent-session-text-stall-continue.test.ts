@@ -79,4 +79,43 @@ describe("AgentSession text-only stream stall", () => {
 		expect(last.stopReason).toBe("stop");
 		expect(last.content).toContainEqual({ type: "text", text: "er, and the second half." });
 	});
+
+	it("honours providers.streamStallContinueMaxRetries", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+
+		const stall = {
+			content: ["committed text"],
+			stopReason: "error" as const,
+			errorMessage: "Anthropic stream stalled while waiting for the next event",
+		};
+		const mock = createMockModel({
+			responses: [stall, stall, { content: ["never reached"], stopReason: "stop" }],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"retry.enabled": true,
+				"retry.maxRetries": 0,
+				"providers.streamStallContinueMaxRetries": 1,
+			}),
+			modelRegistry,
+		});
+		session.subscribe(() => {});
+
+		await session.prompt("explain it");
+		await session.waitForIdle();
+
+		// one configured auto-continue, then the cap surfaces the stall instead of a third call
+		expect(mock.calls.length).toBe(2);
+		const last = session.agent.state.messages.at(-1) as AssistantMessage;
+		expect(last.stopReason).toBe("error");
+	});
 });

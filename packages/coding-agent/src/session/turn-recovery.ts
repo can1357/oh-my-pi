@@ -93,6 +93,7 @@ import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-
 import {
 	cfgFeaturesUnexpectedStopDetection,
 	cfgModelLoopGuardEnabled,
+	cfgProvidersStreamStallContinueMaxRetries,
 	cfgRetry,
 	cfgRetryEnabled,
 	cfgRetryModelFallback,
@@ -110,7 +111,6 @@ const UNEXPECTED_STOP_MAX_RETRIES = 3;
 const UNEXPECTED_STOP_TIMEOUT_MS = 15_000;
 const EMPTY_STOP_MAX_RETRIES = 3;
 const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
-const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
 const GENERIC_ABORT_MAX_RETRIES = 2;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 /** Bounds best-effort usage-limit bookkeeping so a stalled report or sibling probe cannot hold the terminal agent_end event. */
@@ -789,8 +789,9 @@ export class TurnRecovery {
 		}
 		if (!hasText) return false;
 
+		const maxRetries = cfgProvidersStreamStallContinueMaxRetries.get(this.#host.settings);
 		this.#streamStallContinueCount++;
-		if (this.#streamStallContinueCount > STREAM_STALL_CONTINUE_MAX_RETRIES) {
+		if (this.#streamStallContinueCount > maxRetries) {
 			logger.warn("Stream kept stalling after committed text past retry cap", {
 				attempts: this.#streamStallContinueCount - 1,
 				model: message.model,
@@ -813,7 +814,7 @@ export class TurnRecovery {
 					type: "text",
 					text: prompt.render(streamStallContinueTemplate, {
 						retryCount: this.#streamStallContinueCount,
-						maxRetries: STREAM_STALL_CONTINUE_MAX_RETRIES,
+						maxRetries,
 					}),
 				},
 			],
