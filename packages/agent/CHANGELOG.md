@@ -2,11 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `AgentLoop` soft tool-choice requirements refusing a batch without naming the other tool calls that caused the refusal ([#18859](https://github.com/can1357/oh-my-pi/issues/18859), [#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [19.1.1] - 2026-11-23
 
 ### Fixed
 
-- Fixed `AgentLoop` soft tool-choice requirements refusing a batch without naming the other tool calls that caused the refusal ([#18859](https://github.com/can1357/oh-my-pi/issues/18859), [#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Prevented oversized handoffs from reaching the provider by detecting when prepared context exceeds the target model’s context window.
 - Preserved provider error status, error identifiers, retry classification, and cancellation markers on failed or cancelled assistant turns.
 - Fixed speculative tool calls hanging when discarded or aborted before execution completed.
