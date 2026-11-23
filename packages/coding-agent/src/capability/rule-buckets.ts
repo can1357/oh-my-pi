@@ -66,12 +66,13 @@ export function bucketRules(
 	const alwaysApplyRules: Rule[] = [];
 
 	for (const rule of includedRules) {
-		// A gate goes to the manager even without a question, so it is refused with a warning, not dropped silently.
+		// A gate or command goes to the manager even when malformed, so it is refused with a warning, not dropped silently.
 		const hasTtsrCondition =
 			(rule.condition && rule.condition.length > 0) ||
 			(rule.astCondition && rule.astCondition.length > 0) ||
 			rule.question !== undefined ||
-			rule.gate !== undefined;
+			rule.gate !== undefined ||
+			rule.command !== undefined;
 		const isTtsrRule = hasTtsrCondition ? (replacedTtsrNames?.has(rule.name) ?? ttsrManager.addRule(rule)) : false;
 		if (isTtsrRule) continue;
 		if (rule.alwaysApply === true) {

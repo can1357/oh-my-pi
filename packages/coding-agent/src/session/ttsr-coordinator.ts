@@ -14,11 +14,13 @@ import {
 	createToolScopedAbortReason,
 } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Judge, ToolCall } from "@oh-my-pi/pi-ai";
-import { isRecord, logger, prompt, relativePathWithinRoot, untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, ptree, relativePathWithinRoot, untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
 import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule } from "../capability/rule";
 import type { Settings } from "../config/settings";
 import type { ToolGuardCall } from "../extensibility/extensions/runner";
 import {
+	type GateCandidate,
+	type JudgedCandidate,
 	JUDGED_RULE_THRESHOLD,
 	judgeRuleProbabilities,
 	judgeRules,
@@ -66,6 +68,46 @@ interface TtsrContinueOptions {
 
 /** What a gate judges of one call: its tool, arguments and id, and the name the model called it by. */
 export type GatedCall = Pick<ToolGuardCall, "toolCallId" | "tool" | "args" | "name">;
+
+type ProbeVerdict = "allow" | "refuse" | "failed";
+
+async function runGateProbe(
+	rule: Rule,
+	command: string,
+	call: ToolCall,
+	cwd: string,
+	signal: AbortSignal,
+): Promise<ProbeVerdict> {
+	const input = JSON.stringify({ tool: call.name, toolCallId: call.id, arguments: call.arguments });
+	try {
+		const result = await ptree.exec(["/bin/sh", "-c", command], {
+			cwd,
+			input,
+			signal,
+			allowNonZero: true,
+			allowAbort: true,
+			detached: true,
+			subreaper: process.platform === "linux",
+		});
+		if (result.exitError?.aborted) {
+			logger.warn("TTSR gate probe did not finish; onJudgeError decides", { rule: rule.name });
+			return "failed";
+		}
+		if (result.exitCode === 0) return "allow";
+		logger.debug("TTSR gate probe refused the call", {
+			rule: rule.name,
+			exitCode: result.exitCode,
+			stderr: result.stderr.slice(-2_000),
+		});
+		return "refuse";
+	} catch (error) {
+		logger.warn("TTSR gate probe failed to run; onJudgeError decides", {
+			rule: rule.name,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return "failed";
+	}
+}
 
 /** Capabilities the TTSR coordinator borrows from its owning session. */
 export interface TtsrCoordinatorHost {
@@ -670,9 +712,10 @@ export class TtsrCoordinator {
 	 * result, or none to run it, and whether any gate rule covered the call at all. The call keeps the
 	 * name the model called the tool by, which rule scopes name; a call without one (bridged from an
 	 * eval cell, which reaches a tool by either name) matches scopes naming the tool or its wire name.
-	 * When the judge is off, fails, outlasts `ttsr.gateTimeoutMs`, answers no probability in 0..1 or
-	 * can read only part of the call, each rule's `onJudgeError` decides. Rejects when `signal` aborts
-	 * the gate at any point: an aborted call is neither refused nor run.
+	 * A rule with a `command` is probed by running it instead of asking the judge, once per call. When
+	 * the judge or a probe is off, fails, outlasts `ttsr.gateTimeoutMs`, answers no probability in 0..1
+	 * or (judge) can read only part of the call, each rule's `onJudgeError` decides. Rejects when
+	 * `signal` aborts the gate at any point: an aborted call is neither refused nor run.
 	 */
 	async gateToolCall(call: GatedCall, signal?: AbortSignal): Promise<GateVerdict> {
 		const manager = this.#manager;
@@ -690,10 +733,11 @@ export class TtsrCoordinator {
 		// No name from the model: a bridged call matches scopes under its wire name too.
 		const wireName = call.name === undefined ? call.tool.customWireName?.toLowerCase() : undefined;
 		const toolAliases = wireName ? [wireName] : undefined;
+		const probes = new Map<Rule, Promise<ProbeVerdict>>();
 		const verdicts = await Promise.all(
 			this.#inspector
 				.gateOutputs(toolCall)
-				.map(output => this.#gateOutput(manager, output, signal, deadline, toolAliases)),
+				.map(output => this.#gateOutput(manager, toolCall, output, probes, signal, deadline, toolAliases)),
 		);
 		// Prefiltering or a judge-less rule settles without waiting on the signal: an abort in
 		// between still rejects.
@@ -701,7 +745,7 @@ export class TtsrCoordinator {
 		const covered = verdicts.some(verdict => verdict !== undefined);
 		const refused = verdicts.find(verdict => verdict?.rule !== undefined);
 		if (!refused?.rule) return { covered };
-		const { rule, output, unjudged, truncated } = refused;
+		const { rule, output, unjudged, truncated, probed } = refused;
 		this.#host.emitSessionEvent({ type: "ttsr_triggered", rules: [rule] }).catch(() => {});
 		return {
 			covered,
@@ -712,32 +756,51 @@ export class TtsrCoordinator {
 				content: rule.content,
 				unjudged,
 				truncated,
+				probed,
 			}),
 		};
 	}
 
 	/**
 	 * Undefined when no gate rule covers `output`; else the first gate rule, in rule order, that refuses
-	 * it (`unjudged` when the judge gave no answer, `truncated` when it read only a prefix of `output`),
-	 * or no rule when every one allows it. Tool scopes also match `toolAliases`.
+	 * it (`unjudged` when the judge or probe gave no answer, `truncated` when the judge read only a
+	 * prefix of `output`, `probed` when the rule's `command` decided), or no rule when every one allows
+	 * it. Tool scopes also match `toolAliases`.
 	 */
 	async #gateOutput(
 		manager: TtsrManager,
+		call: ToolCall,
 		output: TtsrOutput,
+		probes: Map<Rule, Promise<ProbeVerdict>>,
 		signal: AbortSignal | undefined,
 		deadline: AbortSignal,
 		toolAliases: readonly string[] | undefined,
-	): Promise<{ output: TtsrOutput; rule?: Rule; unjudged?: boolean; truncated?: boolean } | undefined> {
+	): Promise<
+		{ output: TtsrOutput; rule?: Rule; unjudged?: boolean; truncated?: boolean; probed?: boolean } | undefined
+	> {
 		const candidates = await untilAborted(signal, () =>
 			manager.gateCandidates(output.content, output.context, toolAliases),
 		);
 		if (candidates.length === 0) return undefined;
-		const judge = this.#host.ruleJudge();
+		const asked = candidates.filter((candidate): candidate is JudgedCandidate => !("command" in candidate));
+		const probeOf = (candidate: GateCandidate): Promise<ProbeVerdict> | undefined => {
+			if (!("command" in candidate)) return undefined;
+			let probe = probes.get(candidate.rule);
+			if (!probe) {
+				const cwd = this.#host.sessionManager.getCwd();
+				probe = runGateProbe(candidate.rule, candidate.command, call, cwd, deadline);
+				probes.set(candidate.rule, probe);
+			}
+			return probe;
+		};
+		// Started before the judge is asked, so both share the deadline.
+		const probeVerdicts = candidates.map(probeOf);
+		const judge = asked.length > 0 ? this.#host.ruleJudge() : undefined;
 		let judged: RuleProbabilities | undefined;
 		if (judge) {
 			try {
 				judged = await untilAborted(deadline, () =>
-					judgeRuleProbabilities(judge, output, candidates, { signal: deadline }),
+					judgeRuleProbabilities(judge, output, asked, { signal: deadline }),
 				);
 			} catch (error) {
 				// A call the user aborted says nothing about the judge.
@@ -749,8 +812,18 @@ export class TtsrCoordinator {
 			}
 		}
 		const truncated = judged?.truncated === true;
+		let askedIndex = 0;
 		for (const [index, { rule }] of candidates.entries()) {
-			const probability = judged?.probabilities[index];
+			const probe = probeVerdicts[index];
+			if (probe) {
+				const verdict = await probe;
+				if (verdict === "refuse") return { rule, output, unjudged: false, probed: true };
+				if (verdict === "failed" && rule.onJudgeError === "block") {
+					return { rule, output, unjudged: true, probed: true };
+				}
+				continue;
+			}
+			const probability = judged?.probabilities[askedIndex++];
 			// A probability outside 0..1 is no answer.
 			const answered = probability !== undefined && probability >= 0 && probability <= 1;
 			// A yes about the part the judge read refuses; a no covers only that part.

@@ -69,6 +69,7 @@ export function setup(rules: Rule[], judge: Judge | undefined, settings = {} as 
 	return {
 		coordinator: new TtsrCoordinator(host, manager),
 		manager,
+		host,
 		abort,
 		warnings,
 		events,

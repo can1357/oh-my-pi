@@ -364,6 +364,27 @@ Never delete files outside the working directory; ask the user first.
 - Only that timeout is operator-only. `ttsr.enabled`, `ttsr.judge`, `ttsr.disabledRules` and the judge model come from merged settings, so a project layer can still turn a gate or its judge off.
 - When the judge is off, fails, times out, returns no number or one outside 0..1, or could read only a prefix of the output, each candidate's `onJudgeError` decides: `allow` (default) logs a warning and runs the call, `block` refuses it. A session whose gate rules have no judge logs a warning at startup.
 
+### Command probes (`command`)
+
+A gate rule can run a shell command instead of asking the judge:
+
+```yaml
+---
+condition: rm\s
+command: ./scripts/check-rm.sh
+gate: before
+onJudgeError: block
+scope: tool:bash
+---
+Never delete files outside the working directory; ask the user first.
+```
+
+- The rule needs `gate: before` and a `condition` or `astCondition` prefilter; without either, loading logs a warning and does not register the rule, so a probe never runs on every call. With both `command` and `question`, loading warns and the `command` decides; the judge is not asked.
+- `TtsrCoordinator.gateToolCall()` runs the probe at the same point as the judge (after approval, inside the tool guard), once per call however many of the call's outputs the rule covers, alongside any judged gates. It is spawned with `ptree.exec` as `/bin/sh -c <command>` in the session cwd, with the session's environment.
+- Contract: stdin carries one JSON object, `{"tool": "<name the model called the tool by>", "toolCallId": "<id>", "arguments": { ... }}`, the arguments that will run. Exit 0 runs the call; any other exit refuses it with the rule body (`ttsr-gate-refused.md`). Stdout is ignored; stderr is logged at debug level.
+- The probe shares the gate's `ttsr.gateTimeoutMs` deadline and the call's abort signal; its process tree is killed when either fires. A probe that times out or fails to start is decided by `onJudgeError` (`allow` by default), like an unanswered judge.
+- The agent never authors the probe: it runs with the user's privileges on every matching call, including calls the user approved. Keep it read-only; any side effect it has is the rule author's.
+
 ### Refusal
 
 - The refusal is rendered with `ttsr-gate-refused.md` (rule name, path, the refused call, and the rule body) and thrown by the wrapper, so the call ends as a tool error without running.

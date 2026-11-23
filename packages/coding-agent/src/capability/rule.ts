@@ -34,8 +34,10 @@ export interface RuleFrontmatter {
 	astCondition?: string | string[];
 	/** Natural-language yes/no question a judge model answers on each completed in-scope output. */
 	question?: string;
-	/** `before`: judge `question` against each in-scope tool call before it runs, refusing a yes. */
+	/** `before`: judge each in-scope tool call before it runs (by `question` or `command`), refusing a yes. */
 	gate?: string;
+	/** Shell command a `gate: before` rule runs instead of asking `question`: exit 0 allows the call. */
+	command?: string;
 	/** For a gate the judge cannot answer: `allow` (default) runs the call, `block` refuses it. */
 	onJudgeError?: string;
 	/** New key for TTSR stream scope. */
@@ -80,7 +82,12 @@ export interface Rule {
 	 * call instead of warning after it.
 	 */
 	gate?: "before";
-	/** What a gate does when the judge cannot answer (off, failing, timed out); default `allow`. */
+	/**
+	 * Probe for a `gate: before` rule, run instead of the judge: a `/bin/sh -c` command fed the call as
+	 * JSON on stdin. Exit 0 allows the call; any other exit refuses it. Wins over `question`.
+	 */
+	command?: string;
+	/** What a gate does when the judge or probe cannot answer (off, failing, timed out); default `allow`. */
 	onJudgeError?: "block" | "allow";
 	/** Optional stream scope tokens (for example: text, thinking, tool:edit(*.ts)). */
 	scope?: string[];
@@ -264,8 +271,8 @@ function isLikelyFileGlob(value: string): boolean {
 }
 
 /**
- * Parse the TTSR trigger fields (`condition`, `astCondition`, `question`, `gate`, `onJudgeError`) and `scope`
- * from rule frontmatter.
+ * Parse the TTSR trigger fields (`condition`, `astCondition`, `question`, `gate`, `command`, `onJudgeError`)
+ * and `scope` from rule frontmatter.
  *
  * - `condition` accepts string or string[]
  * - `scope` accepts string or string[]
@@ -273,12 +280,12 @@ function isLikelyFileGlob(value: string): boolean {
  * - condition tokens that look like file globs become scope shorthands:
  *   `*.rs` => `tool:edit(*.rs)`, `tool:write(*.rs)` and a catch-all condition `.*`
  * - `astCondition` holds ast-grep patterns and is kept verbatim (no glob inference)
- * - `question` accepts a single non-empty string
+ * - `question` and `command` each accept a single non-empty string
  * - `gate` accepts only `before`; `onJudgeError` accepts `block` or `allow`. Other values warn and are ignored.
  */
 export function parseRuleConditionAndScope(
 	frontmatter: RuleFrontmatter,
-): Pick<Rule, "condition" | "astCondition" | "question" | "gate" | "onJudgeError" | "scope"> {
+): Pick<Rule, "condition" | "astCondition" | "question" | "gate" | "command" | "onJudgeError" | "scope"> {
 	const rawCondition = frontmatter.condition ?? frontmatter.ttsr_trigger ?? frontmatter.ttsrTrigger;
 	const parsedCondition = normalizeRuleField(rawCondition);
 	const astCondition = normalizeRuleField(frontmatter.astCondition);
@@ -306,6 +313,7 @@ export function parseRuleConditionAndScope(
 		astCondition,
 		question: typeof frontmatter.question === "string" ? frontmatter.question.trim() || undefined : undefined,
 		gate: parseRuleEnum("gate", frontmatter.gate, ["before"]),
+		command: typeof frontmatter.command === "string" ? frontmatter.command.trim() || undefined : undefined,
 		onJudgeError: parseRuleEnum("onJudgeError", frontmatter.onJudgeError, ["block", "allow"]),
 		scope: scope.length > 0 ? Array.from(new Set(scope)) : undefined,
 	};

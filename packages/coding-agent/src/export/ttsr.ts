@@ -8,8 +8,8 @@
  * Judged rules (`question`) never match mid-stream: the session asks the judge
  * model about each completed output ({@link TtsrManager.judgedCandidates}) and
  * delivers a yes as a non-interrupting warning. Gate rules (`gate: before`) are
- * judged on each tool call before it runs ({@link TtsrManager.gateCandidates});
- * a yes refuses the call.
+ * judged, or probed by their `command`, on each tool call before it runs
+ * ({@link TtsrManager.gateCandidates}); a yes refuses the call.
  */
 import * as path from "node:path";
 import type { Judge, JudgeOptions, NoulQuestion } from "@oh-my-pi/pi-ai";
@@ -64,6 +64,9 @@ export interface JudgedCandidate {
 	rule: Rule;
 	question: string;
 }
+
+/** A gate rule eligible for one tool call: asked its `question`, or probed by its `command`. */
+export type GateCandidate = JudgedCandidate | { rule: Rule; command: string };
 
 /** Yes-probability at or above which a judged rule counts as violated. */
 export const JUDGED_RULE_THRESHOLD = 0.7;
@@ -157,6 +160,8 @@ interface TtsrEntry {
 	question?: string;
 	/** `gate: before`: `question` is judged on each in-scope tool call before it runs, never after output. */
 	gate: boolean;
+	/** `gate: before` probe run instead of judging `question`; set only on gates with a condition. */
+	command?: string;
 	scope: TtsrScope;
 	globalPathGlobs?: Bun.Glob[];
 }
@@ -611,6 +616,7 @@ export class TtsrManager {
 	#canMatchThinking = false;
 	#hasJudgedRules = false;
 	#hasGateRules = false;
+	#hasJudgedGateRules = false;
 
 	constructor(settings?: TtsrSettingsSource) {
 		if (typeof settings === "function") {
@@ -848,10 +854,26 @@ export class TtsrManager {
 
 		const conditions = this.#compileConditions(rule);
 		const astConditions = (rule.astCondition ?? []).map(pattern => pattern.trim()).filter(p => p.length > 0);
-		const question = rule.question?.trim() || undefined;
+		let question = rule.question?.trim() || undefined;
+		const command = rule.command?.trim() || undefined;
 		const gate = rule.gate === "before";
-		if (gate && !question) {
-			logger.warn("TTSR gate rule has no question, skipping rule", { ruleName: rule.name });
+		if (command) {
+			if (!gate) {
+				logger.warn("TTSR command rule is not a gate: before rule, skipping rule", { ruleName: rule.name });
+				return false;
+			}
+			if (conditions.length === 0 && astConditions.length === 0) {
+				logger.warn("TTSR command rule has no condition, skipping rule", { ruleName: rule.name });
+				return false;
+			}
+			if (question) {
+				logger.warn("TTSR gate rule sets both command and question; the command decides", {
+					ruleName: rule.name,
+				});
+				question = undefined;
+			}
+		} else if (gate && !question) {
+			logger.warn("TTSR gate rule has no question or command, skipping rule", { ruleName: rule.name });
 			return false;
 		}
 		if (conditions.length === 0 && astConditions.length === 0 && !question) {
@@ -889,11 +911,13 @@ export class TtsrManager {
 			astConditions,
 			question,
 			gate,
+			command,
 			scope,
 			globalPathGlobs,
 		});
 		if (gate) {
 			this.#hasGateRules = true;
+			if (question) this.#hasJudgedGateRules = true;
 		} else if (question) {
 			this.#hasJudgedRules = true;
 		} else {
@@ -1114,6 +1138,11 @@ export class TtsrManager {
 		return this.#settings.enabled && this.#hasGateRules;
 	}
 
+	/** True when any registered gate rule asks the judge (`question`) rather than running a `command`. */
+	hasJudgedGateRules(): boolean {
+		return this.#settings.enabled && this.#hasJudgedGateRules;
+	}
+
 	/**
 	 * Judged rules to ask about one completed output: in scope, inside the rule's
 	 * path globs, past the repeat gate, and — when the rule also declares
@@ -1141,31 +1170,32 @@ export class TtsrManager {
 	}
 
 	/**
-	 * Gate rules to ask about one tool call before it runs: in scope, inside the
-	 * rule's path globs, and past the `condition`/`astCondition` prefilter. No
-	 * repeat gate: a refused call retried unchanged is judged again. Tool scopes
-	 * match `context.toolName` or any of `toolAliases` (lowercase).
+	 * Gate rules to ask about, or probe, one tool call before it runs: in scope,
+	 * inside the rule's path globs, and past the `condition`/`astCondition`
+	 * prefilter. No repeat gate: a refused call retried unchanged is gated again.
+	 * Tool scopes match `context.toolName` or any of `toolAliases` (lowercase).
 	 */
 	async gateCandidates(
 		content: string,
 		context: TtsrMatchContext,
 		toolAliases?: readonly string[],
-	): Promise<JudgedCandidate[]> {
+	): Promise<GateCandidate[]> {
 		if (!this.hasGateRules()) {
 			return [];
 		}
-		const candidates: JudgedCandidate[] = [];
+		const candidates: GateCandidate[] = [];
 		for (const entry of this.#rules.values()) {
 			if (
 				!entry.gate ||
-				!entry.question ||
+				(!entry.question && !entry.command) ||
 				!this.#matchesScope(entry, context, toolAliases) ||
 				!this.#matchesGlobalPaths(entry, context) ||
 				!(await this.#passesPrefilter(entry, content, context))
 			) {
 				continue;
 			}
-			candidates.push({ rule: entry.rule, question: entry.question });
+			if (entry.command) candidates.push({ rule: entry.rule, command: entry.command });
+			else if (entry.question) candidates.push({ rule: entry.rule, question: entry.question });
 		}
 		return candidates;
 	}
@@ -1355,6 +1385,7 @@ export class TtsrManager {
 		this.#canMatchThinking = replacement.#canMatchThinking;
 		this.#hasJudgedRules = replacement.#hasJudgedRules;
 		this.#hasGateRules = replacement.#hasGateRules;
+		this.#hasJudgedGateRules = replacement.#hasJudgedGateRules;
 		this.resetBuffer();
 
 		if (!this.#settings.enabled) return registered;

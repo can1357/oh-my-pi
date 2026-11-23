@@ -2829,7 +2829,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			sessionGeneration: () => this.#sessionGeneration,
 		};
 		this.#ttsr = new TtsrCoordinator(ttsrHost, config.ttsrManager);
-		if (config.ttsrManager?.hasGateRules() && !this.ruleJudge()) {
+		if (config.ttsrManager?.hasJudgedGateRules() && !this.ruleJudge()) {
 			logger.warn("TTSR gate rules have no judge (ttsr.judge); each rule's onJudgeError decides its calls");
 		}
 		this.#extensionRunner?.setToolCallPreflight?.({

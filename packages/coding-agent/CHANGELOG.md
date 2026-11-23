@@ -8,6 +8,7 @@
 - Added an opt-in tool guard (`tools.guard.enabled`) that asks the judge model about risky tool calls and refuses those the user did not ask for ([#19292](https://github.com/can1357/oh-my-pi/pull/19292) by [@Xytronix](https://github.com/Xytronix))
 - On Linux the tool guard also refuses heavy work started while the host is strained ([#19292](https://github.com/can1357/oh-my-pi/pull/19292) by [@Xytronix](https://github.com/Xytronix))
 - Added pre-execution TTSR gate rules: a `question` rule with `gate: before` is judged on each in-scope tool call before it runs and a yes refuses it; `onJudgeError` covers judge failures, and judged-rule requests count toward the cost cap ([#19670](https://github.com/can1357/oh-my-pi/pull/19670) by [@Xytronix](https://github.com/Xytronix))
+- TTSR gate rules accept `command:` in place of `question:`: the command runs before each matching tool call with the call as JSON on stdin, exit 0 runs the call and any other exit refuses it, within `ttsr.gateTimeoutMs`; it needs `gate: before` and a `condition`, and wins over `question` ([@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 

@@ -108,6 +108,21 @@ describe("rule gate frontmatter", () => {
 		expect(manager.hasGateRules()).toBe(false);
 		expect(manager.hasJudgedRules()).toBe(true);
 	});
+
+	test("a gate rule file with command: registers as a probe gate that needs no judge", () => {
+		const rule = buildRuleFromMarkdown(
+			"no-rm.md",
+			"---\ncondition: rm\ncommand: '  ./check.sh --strict  '\ngate: before\n---\nNever delete files.",
+			"no-rm.md",
+			createSourceMeta("test", "no-rm.md", "project"),
+		);
+		const manager = new TtsrManager({});
+
+		expect(rule).toMatchObject({ gate: "before", command: "./check.sh --strict" });
+		expect(manager.addRule(rule)).toBe(true);
+		expect(manager.hasGateRules()).toBe(true);
+		expect(manager.hasJudgedGateRules()).toBe(false);
+	});
 });
 
 describe("loadFilesFromDir recursion", () => {
