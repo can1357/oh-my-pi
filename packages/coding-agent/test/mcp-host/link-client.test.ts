@@ -9,7 +9,8 @@ import {
 	subscribeToResources,
 	unsubscribeFromResources,
 } from "@oh-my-pi/pi-coding-agent/mcp/client";
-import { MCPMeta } from "@oh-my-pi/pi-coding-agent/mcp/protocol";
+import { type MCPElicitRequest, MCPMeta } from "@oh-my-pi/pi-coding-agent/mcp/protocol";
+import type { MCPElicitHandler } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { rejectionOf } from "../helpers/rejection";
 import { FakeHost, type FakeTunnel, type Message, metaOf, paramsOf, settled } from "./link-fake-host";
 
@@ -191,6 +192,78 @@ describe("modern MCP client operations", () => {
 
 		expect(error).toBeInstanceOf(Error);
 		expect(String(error)).toContain('unsupported input "elicitation/create"');
+		expect(tunnel.sent.filter(message => message.method === "tools/call")).toHaveLength(1);
+		// Without a way to ask the user the call declares no elicitation, so the server was not allowed to ask.
+		expect(metaOf(first)[MCPMeta.clientCapabilities]).toEqual({ roots: {} });
+	});
+
+	it("declares form elicitation on a call that can ask the user and retries with their answer", async () => {
+		const connection = await connect();
+		const tunnel = host.tunnel;
+		const asked: MCPElicitRequest[] = [];
+		const elicit: MCPElicitHandler = async (_server, request) => {
+			asked.push(request);
+			return { action: "accept", content: { approve: true } };
+		};
+
+		const calling = callTool(connection, "delete_branch", { name: "old" }, { elicit });
+		const first = await tunnel.next("tools/call");
+		const schema: MCPElicitRequest["requestedSchema"] = {
+			type: "object",
+			properties: { approve: { type: "boolean" } },
+			required: ["approve"],
+		};
+		tunnel.push({
+			id: first.id,
+			result: {
+				resultType: "input_required",
+				inputRequests: {
+					confirm: { method: "elicitation/create", params: { message: "Delete it?", requestedSchema: schema } },
+				},
+				requestState: "pending-delete",
+			},
+		});
+		const retry = await tunnel.next("tools/call");
+		tunnel.push({ id: retry.id, result: { resultType: "complete", content: [{ type: "text", text: "deleted" }] } });
+		await calling;
+
+		expect(metaOf(first)[MCPMeta.clientCapabilities]).toEqual({ roots: {}, elicitation: { form: {} } });
+		expect(asked).toEqual([{ mode: "form", message: "Delete it?", requestedSchema: schema }]);
+		expect(paramsOf(retry)).toMatchObject({
+			name: "delete_branch",
+			arguments: { name: "old" },
+			inputResponses: { confirm: { action: "accept", content: { approve: true } } },
+			requestState: "pending-delete",
+		});
+		expect(metaOf(retry)[MCPMeta.clientCapabilities]).toEqual({ roots: {}, elicitation: { form: {} } });
+	});
+
+	it("refuses a URL-mode elicitation, which it never declares", async () => {
+		const connection = await connect();
+		const tunnel = host.tunnel;
+		let asked = false;
+		const elicit: MCPElicitHandler = async () => {
+			asked = true;
+			return { action: "cancel" };
+		};
+
+		const calling = rejectionOf(callTool(connection, "login", {}, { elicit }));
+		const first = await tunnel.next("tools/call");
+		tunnel.push({
+			id: first.id,
+			result: {
+				resultType: "input_required",
+				inputRequests: {
+					auth: {
+						method: "elicitation/create",
+						params: { mode: "url", message: "Sign in", url: "https://idp.example.test", elicitationId: "e1" },
+					},
+				},
+			},
+		});
+
+		expect(String(await calling)).toContain('elicitation on tools/call in undeclared mode "url"');
+		expect(asked).toBe(false);
 		expect(tunnel.sent.filter(message => message.method === "tools/call")).toHaveLength(1);
 	});
 

@@ -1,6 +1,6 @@
 import { untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
 import { MCPManager, type MCPManagerApi } from "../mcp/manager";
-import type { MCPResourceReadResult } from "../mcp/types";
+import type { MCPElicitHandler, MCPResourceReadResult } from "../mcp/types";
 import mcpDoc from "../prompts/internal-urls/mcp.md" with { type: "text" };
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, SchemeSpec } from "./types";
 
@@ -13,6 +13,8 @@ export interface McpResourceReadOptions {
 	 */
 	waitMs?: number;
 	signal?: AbortSignal;
+	/** Puts the server's elicitations to the user; without it the read declares none. */
+	elicit?: MCPElicitHandler;
 }
 
 function getUriTemplateMatchScore(
@@ -136,7 +138,7 @@ export async function readMcpResource(
 	url: InternalUrl,
 	options?: McpResourceReadOptions,
 ): Promise<InternalResource<string | Buffer> | undefined> {
-	const { exact = false, waitMs, signal } = options ?? {};
+	const { exact = false, waitMs, signal, elicit } = options ?? {};
 	const uri = extractResourceUri(url);
 	let targetServer = resolveTargetServer(mcpManager, uri, exact);
 	if (!targetServer) {
@@ -155,7 +157,7 @@ export async function readMcpResource(
 
 	let result: MCPResourceReadResult | undefined;
 	try {
-		result = await mcpManager.readServerResource(targetServer, uri, { signal });
+		result = await mcpManager.readServerResource(targetServer, uri, { signal, elicit });
 	} catch (error) {
 		if (signal?.aborted) throw error;
 		const message = error instanceof Error ? error.message : String(error);
@@ -230,7 +232,7 @@ export class McpProtocolHandler implements ProtocolHandler {
 		if (!mcpManager) {
 			throw new Error("No MCP manager available. MCP servers may not be configured.");
 		}
-		const resource = await readMcpResource(mcpManager, url, { signal: context?.signal });
+		const resource = await readMcpResource(mcpManager, url, { signal: context?.signal, elicit: context?.elicit });
 		if (resource) return resource;
 		throw new McpResourceNotFoundError(
 			`No MCP server has resource "${extractResourceUri(url)}".\n\nAvailable resources:\n${formatAvailableResources(mcpManager)}`,

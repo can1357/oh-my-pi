@@ -177,6 +177,7 @@ import {
 	shouldFilterBrowserMCPForPrelude,
 } from "./mcp";
 import { parseMCPToolName } from "@oh-my-pi/pi-tui/tools/mcp";
+import { elicitHandler } from "./mcp/elicitation";
 import { isEvalNamespaceTool, MCPEvalNamespaceCatalog } from "./mcp/eval-namespaces";
 import { mapPromptArguments } from "./mcp/prompt-args";
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
@@ -1774,9 +1775,12 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
 				command: {
 					name: commandName,
 					description: prompt.description ?? `MCP prompt from ${serverName}`,
-					async execute(args: string[]) {
+					async execute(args, ctx) {
 						const promptArgs = mapPromptArguments(prompt.arguments, args);
-						const result = await manager.executePrompt(serverName, prompt.name, promptArgs);
+						// The server may ask the user while it builds the prompt.
+						const result = await manager.executePrompt(serverName, prompt.name, promptArgs, {
+							elicit: elicitHandler(ctx),
+						});
 						if (!result) return "";
 						const parts: string[] = [];
 						for (const msg of result.messages) {

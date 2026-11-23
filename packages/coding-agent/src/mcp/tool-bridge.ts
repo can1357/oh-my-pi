@@ -5,7 +5,7 @@ import type { MCPProgress } from "@oh-my-pi/pi-tui/tools/mcp-progress";
  *
  * Converts MCP tool definitions to CustomTool format for the agent.
  */
-import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolContext, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import { normalizeSchemaForMCP } from "@oh-my-pi/pi-ai/utils/schema";
 import { isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
@@ -23,10 +23,12 @@ import { formatApprovalArguments } from "../tools/approval";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
 import { callTool } from "./client";
+import { elicitHandler } from "./elicitation";
 import { formatMCPToolFailure, MCPTransportError } from "./errors";
 import { describeMCPCall, describeMCPResult, renderMCPCall, renderMCPResult } from "@oh-my-pi/pi-tui/tools/mcp";
 import type {
 	MCPAuthChallenge,
+	MCPInputRequestOptions,
 	MCPRequestOptions,
 	MCPServerConnection,
 	MCPToolCallParams,
@@ -478,10 +480,10 @@ async function callToolWithAuthRetry(
 	toolName: string,
 	args: MCPToolArgs,
 	reconnect: MCPReconnect | undefined,
-	signal?: AbortSignal,
-	onProgress?: MCPRequestOptions["onProgress"],
+	options: MCPInputRequestOptions,
 ): Promise<MCPToolCallAttempt> {
-	const result = await callTool(connection, toolName, args, { signal, onProgress });
+	const signal = options.signal;
+	const result = await callTool(connection, toolName, args, options);
 	const authChallenge = getMcpAuthChallenge(result);
 	if (!authChallenge || !reconnect) return { connection, result };
 
@@ -497,7 +499,7 @@ async function callToolWithAuthRetry(
 	try {
 		return {
 			connection: newConnection,
-			result: await callTool(newConnection, toolName, args, { signal, onProgress }),
+			result: await callTool(newConnection, toolName, args, options),
 		};
 	} catch (error) {
 		rethrowIfAborted(error, signal);
@@ -862,7 +864,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		toolCallId: string,
 		params: unknown,
 		onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
-		ctx: CustomToolContext,
+		ctx: AgentToolContext,
 		signal?: AbortSignal,
 	): Promise<CustomToolResult<MCPToolDetails>> {
 		const settle = this.observeCall?.(toolCallId);
@@ -876,25 +878,23 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	async #call(
 		params: unknown,
 		onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
-		_ctx: CustomToolContext,
+		ctx: AgentToolContext,
 		signal?: AbortSignal,
 	): Promise<CustomToolResult<MCPToolDetails>> {
 		throwIfAborted(signal);
-		const args = await prepareOutboundArgs(params, this.tool.inputSchema, _ctx);
+		const args = await prepareOutboundArgs(params, this.tool.inputSchema, ctx);
 		const provider = this.connection._source?.provider;
 		const providerName = this.connection._source?.providerName;
 		const progress = progressUpdater(onUpdate, this.connection.name, this.tool.name, provider, providerName);
-		const onProgress = progress?.onProgress;
+		// The server may ask the user mid-call only when this call's context can reach one.
+		const options: MCPInputRequestOptions = {
+			signal,
+			onProgress: progress?.onProgress,
+			elicit: elicitHandler(ctx),
+		};
 
 		try {
-			const attempt = await callToolWithAuthRetry(
-				this.connection,
-				this.tool.name,
-				args,
-				this.reconnect,
-				signal,
-				onProgress,
-			);
+			const attempt = await callToolWithAuthRetry(this.connection, this.tool.name, args, this.reconnect, options);
 			if (attempt.error !== undefined) {
 				return buildErrorResult(attempt.error, this.connection.name, this.tool.name, provider, providerName);
 			}
@@ -926,7 +926,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 					const retryProvider = newConn._source?.provider ?? provider;
 					const retryProviderName = newConn._source?.providerName ?? providerName;
 					try {
-						const result = await callTool(newConn, this.tool.name, args, { signal, onProgress });
+						const result = await callTool(newConn, this.tool.name, args, options);
 						return buildResult(result, newConn.name, this.tool.name, retryProvider, retryProviderName);
 					} catch (retryError) {
 						rethrowIfAborted(retryError, signal);

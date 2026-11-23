@@ -20,6 +20,7 @@ import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
 import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { LocalProtocolOptions } from "./local-protocol";
+import type { MCPElicitHandler } from "../mcp/types";
 import type { SessionEntry } from "../session/session-entries";
 import type { ToolSession } from "../tools";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
@@ -303,6 +304,12 @@ export interface ResolveContext {
 	settings?: Settings;
 	/** Caller's abort signal. */
 	signal?: AbortSignal;
+	/**
+	 * Puts an MCP server's elicitation to the user while `mcp://` reads the
+	 * resource. Only a caller that can show the user a form sets it; without it
+	 * the read declares no elicitation.
+	 */
+	elicit?: MCPElicitHandler;
 	/**
 	 * Whether experimental context-management resources are enabled for this
 	 * caller. This is passed explicitly so resource resolution cannot infer a

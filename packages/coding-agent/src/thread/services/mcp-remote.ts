@@ -8,7 +8,7 @@ import type { TSchema } from "@oh-my-pi/pi-ai";
 import type { MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
 import type { CustomTool } from "../../extensibility/custom-tools/types";
 import type { MCPManagerApi, MCPToolScope } from "../../mcp/manager";
-import type { MCPRequestOptions, MCPResource, MCPResourceReadResult, MCPResourceTemplate } from "../../mcp/types";
+import type { MCPInputRequestOptions, MCPResource, MCPResourceReadResult, MCPResourceTemplate } from "../../mcp/types";
 import type { RemoteObject, RpcMethod } from "../rpc";
 
 /** Remote-object kind of a main-thread `MCPManager`. */
@@ -43,7 +43,7 @@ export type McpManagerProtocol = {
 	ensureServerResources: RpcMethod<[name: string], void>;
 	waitForPendingConnections: RpcMethod<[], void>;
 	readServerResource: RpcMethod<
-		[name: string, uri: string, options: MCPRequestOptions | undefined],
+		[name: string, uri: string, options: MCPInputRequestOptions | undefined],
 		MCPResourceReadResult | undefined
 	>;
 	serverInstructions: RpcMethod<[], Map<string, string>>;
@@ -107,7 +107,7 @@ export class RemoteMCPManager implements MCPManagerApi {
 	readServerResource(
 		name: string,
 		uri: string,
-		options?: MCPRequestOptions,
+		options?: MCPInputRequestOptions,
 	): Promise<MCPResourceReadResult | undefined> {
 		return this.#remote.call("readServerResource", name, uri, options);
 	}
