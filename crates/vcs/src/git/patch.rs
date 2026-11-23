@@ -170,6 +170,9 @@ impl GitRepo {
 		let index = load_index_or_head(repo, "git commit read shared index")?;
 		super::mutate::reject_unmerged_index(&index, "git commit")?;
 		let mut state = index_state_map(&index);
+		// The locked index as read, untouched by this loop: rename evidence must
+		// come from it, not from entries this selection already applied.
+		let original = state.clone();
 		let mut kept = BTreeSet::new();
 		// Read only for a moved path: the parent commit holds the blob a
 		// staged `git mv` left under the new path.
@@ -205,14 +208,21 @@ impl GitRepo {
 			}
 			// A staged `git mv` of a selected path fails both tests: the
 			// forward patch sees the entry already at the new path, the
-			// reverse does not find the edited content there. When the entry
-			// holds only the staged rename — the parent commit's blob of a
-			// path this selection deletes, with that path absent from the
+			// reverse does not find the edited content there. When the
+			// original locked index holds only the staged rename — the new
+			// path carrying the parent commit's blob of a path this
+			// selection deletes, with that deleted path absent from the
 			// index — the commit includes that rename, so adopting the
-			// committed blob loses no one else's staged work (issue #20298).
-			if let Some(new_path) = patch.new_path.as_deref()
+			// committed blob loses no one else's staged work. Any other
+			// shape, including a same-path conflict or an independently
+			// staged addition whose evidence does not line up, keeps the
+			// entry as it is (issue #20298).
+			let is_same_path_conflict = patch.old_path.is_some() && patch.old_path == patch.new_path;
+			if !is_same_path_conflict
+				&& let Some(new_path) = patch.new_path.as_deref()
 				&& let Some(parent) = parent_commit
-				&& let Some(staged) = state.get(new_path).cloned()
+				&& let Some(staged) = original.get(new_path)
+				&& state.get(new_path) == Some(staged)
 			{
 				if parent_tree.is_none() {
 					let tree = super::mutate::commit_tree(repo, &parent)?;
@@ -221,14 +231,14 @@ impl GitRepo {
 				let old_tree = parent_tree.as_ref().expect("parent tree loaded");
 				let own_old = patch.old_path.as_deref();
 				let is_staged_rename = |path: &str| {
-					state.get(path).is_none()
+					!original.contains_key(path)
 						&& old_tree
 							.get(path)
 							.is_some_and(|base| base.id == staged.id && base.mode == staged.mode)
 				};
 				// The moved path comes from the patch's own rename side or
 				// from a separate deletion patch the per-path selection emits.
-				let renamed = own_old.is_some_and(&is_staged_rename)
+				let renamed = own_old.is_some_and(is_staged_rename)
 					|| (own_old.is_none()
 						&& selection
 							.iter()

@@ -14,6 +14,7 @@
 
 - In a compiled omp with no `bun` on PATH, `bun` in a JS eval cell now reports that bun is not installed instead of starting a headless omp ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
+- A selective commit of a file moved with `git mv` and edited afterwards no longer leaves the moved path staged with the pre-edit content: the shared index now matches HEAD after the commit, so the next `git rebase` does not stop on it ([#20298](https://github.com/can1357/oh-my-pi/issues/20298))
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes
