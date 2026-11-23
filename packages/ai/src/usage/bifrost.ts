@@ -133,7 +133,7 @@ function rateLimits(idPrefix: string, label: string, scope: UsageScope, rateLimi
 /**
  * Key-wide limits are `shared`; a provider config's limits carry its Bifrost
  * provider as `scope.tier`; a model config's carry `scope.modelId` (prefixed
- * with its provider when it names one).
+ * once with its provider when it names one).
  */
 function quotaLimits(provider: Provider, body: Record<string, unknown>): UsageLimit[] {
 	const keyScope: UsageScope = { provider, shared: true };
@@ -153,7 +153,9 @@ function quotaLimits(provider: Provider, body: Record<string, unknown>): UsageLi
 	}
 	const modelLimits = (route: string | undefined, model: Record<string, unknown>): UsageLimit[] => {
 		if (typeof model.model_name !== "string" || !model.model_name) return [];
-		const modelId = route ? `${route}/${model.model_name}` : model.model_name;
+		// Bifrost matches a config's model with its own provider prefix stripped.
+		const modelId =
+			!route || model.model_name.startsWith(`${route}/`) ? model.model_name : `${route}/${model.model_name}`;
 		const scope: UsageScope = { provider, modelId, ...(route ? { tier: route } : {}) };
 		return [
 			...budgetLimits(`${provider}:model:${modelId}`, modelId, scope, model.budgets),

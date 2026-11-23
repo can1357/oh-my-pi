@@ -114,6 +114,24 @@ describe("bifrostUsageProvider", () => {
 		expect(scopedIds(report).sort()).toEqual(["bifrost:key:budget:key-monthly", "bifrost:key:rate:tokens"]);
 	});
 
+	it("prefixes a model config's provider once, keeping a nested model slug", async () => {
+		const { report } = await probe({
+			[QUOTA]: quota({
+				provider_configs: [
+					{
+						provider: "openrouter",
+						model_budgets: [{ model_name: "google/gemini-x", budgets: [budget("nested", 1, 2)] }],
+					},
+				],
+				model_configs: [{ provider: "openai", model_name: "openai/gpt-4o", budgets: [budget("qualified", 3, 3)] }],
+			}),
+		});
+		expect(scopedIds(report, "openai/gpt-4o")).toEqual(["bifrost:model:openai/gpt-4o:budget:qualified"]);
+		expect(scopedIds(report, "openrouter/google/gemini-x")).toEqual([
+			"bifrost:model:openrouter/google/gemini-x:budget:nested",
+		]);
+	});
+
 	it("retries the origin when an integration route has no quota endpoint", async () => {
 		const { report, requests } = await probe(
 			{ [QUOTA]: quota({ is_active: false }) },
