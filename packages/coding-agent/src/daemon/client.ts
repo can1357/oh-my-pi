@@ -178,15 +178,16 @@ function dial(): Promise<IpcConnection> {
 }
 
 /**
- * Start the shared daemon detached. It outlives this process and serves every
- * project, so it never inherits this process's cwd: on Windows a running
- * process's cwd cannot be removed or renamed. Only the no-host fallback pins a
- * cwd, because its entry path is relative to it.
+ * Start the shared daemon detached, in its runtime dir (created by
+ * {@link readOrCreateToken} before any spawn). It outlives this process and
+ * serves every project, so it never inherits this process's cwd: on Windows a
+ * running process's cwd cannot be removed or renamed. Only the no-host
+ * fallback pins a cwd, because its entry path is relative to it.
  */
 function spawnDaemon(): void {
 	const spawn = resolveWorkerSpawnCmd(DAEMON_WORKER_ARG);
 	const child = Bun.spawn(spawn.cmd, {
-		cwd: spawn.cwd ?? os.homedir(),
+		cwd: spawn.cwd ?? daemonDir(),
 		env: workerEnvFromParent(),
 		stdin: "ignore",
 		stdout: "ignore",

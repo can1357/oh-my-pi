@@ -127,7 +127,7 @@ describe("daemon client", () => {
 			if (answer.pid !== undefined) harness.track(answer.pid);
 			expect(answer.error).toBeUndefined();
 			const daemonCwd = await Bun.file(path.join(harness.dir, "daemon-cwd")).text();
-			expect(await fs.realpath(daemonCwd)).toBe(await fs.realpath(os.homedir()));
+			expect(await fs.realpath(daemonCwd)).toBe(await fs.realpath(harness.dir));
 		} finally {
 			await fs.rm(project, { recursive: true, force: true });
 		}
