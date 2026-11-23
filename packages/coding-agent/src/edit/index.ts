@@ -603,7 +603,7 @@ export class EditTool implements AgentTool<TInput> {
 				{ lspBatchId: batch?.id, lspFlush: batch?.flush ?? false },
 				async (_error, request) => {
 					if (rawSnapshot !== undefined && (await Bun.file(request.path).text()) !== rawSnapshot) {
-						throw new ToolError("The file changed after the numbered snapshot was read; re-read and retry.", {
+						throw new ToolError("The file changed while the edit was being prepared; re-read and retry.", {
 							path: request.path,
 						});
 					}
