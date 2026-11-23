@@ -3256,9 +3256,25 @@ export class InputController {
 				child.setExpanded(expanded);
 			}
 		}
-		// Toggling expansion mutates every live block; blocks already committed to
-		// terminal history stay at their committed presentation.
-		this.ctx.ui.requestRender(true);
+		// Rows already retired to terminal scrollback cannot be repainted by a
+		// viewport render. Only pay for a full transcript replay when an expandable
+		// block has committed rows; a plain O(viewport) repaint handles the rest
+		// (see the double-Esc note above on PTY backpressure).
+		if (this.#hasCommittedExpandableBlock()) {
+			this.ctx.ui.resetDisplay();
+		} else {
+			this.ctx.ui.requestRender(true);
+		}
+	}
+
+	/** Whether an expandable block has rows in immutable terminal scrollback. */
+	#hasCommittedExpandableBlock(): boolean {
+		const states = this.ctx.chatContainer.blockStates();
+		const children = this.ctx.chatContainer.children;
+		for (let index = 0; index < states.length; index++) {
+			if (states[index] === "committed" && isExpandable(children[index])) return true;
+		}
+		return false;
 	}
 
 	toggleThinkingBlockVisibility(): void {

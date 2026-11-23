@@ -6,17 +6,18 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { cfgDisplayHideToolActivity } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 describe("InputController tool output expansion", () => {
-	it("expands children and forces a full repaint so every live block re-renders", () => {
+	it("repaints the viewport without a replay when no tool rows are committed", () => {
 		const expandable = { setExpanded: vi.fn() };
 		const inert = { render: vi.fn(() => []) };
 		const pendingShell = { setExpanded: vi.fn() };
 		const requestRender = vi.fn();
+		const resetDisplay = vi.fn();
 		const showStatus = vi.fn();
 		const ctx = {
 			toolOutputExpanded: false,
-			chatContainer: { children: [expandable, inert] },
+			chatContainer: { children: [expandable, inert], blockStates: () => ["active", "settled"] },
 			pendingShellContainer: { children: [pendingShell] },
-			ui: { requestRender },
+			ui: { requestRender, resetDisplay },
 			showStatus,
 		} as unknown as InteractiveModeContext;
 
@@ -25,11 +26,53 @@ describe("InputController tool output expansion", () => {
 		expect(ctx.toolOutputExpanded).toBe(true);
 		expect(expandable.setExpanded).toHaveBeenCalledWith(true);
 		expect(pendingShell.setExpanded).toHaveBeenCalledWith(true);
-		// Expansion mutates every live block; the forced repaint re-renders them
-		// at their new heights in the same frame.
 		expect(requestRender).toHaveBeenCalledTimes(1);
 		expect(requestRender).toHaveBeenCalledWith(true);
+		expect(resetDisplay).not.toHaveBeenCalled();
 		expect(showStatus).toHaveBeenCalledWith("Tool output expansion: enabled");
+	});
+
+	it("replays the transcript only when a committed tool row changes", () => {
+		const committedTool = { setExpanded: vi.fn() };
+		const committedText = { render: vi.fn(() => []) };
+		const requestRender = vi.fn();
+		const resetDisplay = vi.fn();
+		const showStatus = vi.fn();
+		const ctx = {
+			toolOutputExpanded: true,
+			chatContainer: {
+				children: [committedTool, committedText],
+				blockStates: () => ["committed", "committed"] as const,
+			},
+			pendingShellContainer: { children: [] },
+			ui: { requestRender, resetDisplay },
+			showStatus,
+		} as unknown as InteractiveModeContext;
+
+		new InputController(ctx).toggleToolOutputExpansion();
+
+		expect(committedTool.setExpanded).toHaveBeenCalledWith(false);
+		expect(resetDisplay).toHaveBeenCalledTimes(1);
+		expect(requestRender).not.toHaveBeenCalled();
+	});
+
+	it("does not replay when committed rows expansion cannot change", () => {
+		const inert = { render: vi.fn(() => []) };
+		const requestRender = vi.fn();
+		const resetDisplay = vi.fn();
+		const showStatus = vi.fn();
+		const ctx = {
+			toolOutputExpanded: false,
+			chatContainer: { children: [inert], blockStates: () => ["committed"] as const },
+			pendingShellContainer: { children: [] },
+			ui: { requestRender, resetDisplay },
+			showStatus,
+		} as unknown as InteractiveModeContext;
+
+		new InputController(ctx).toggleToolOutputExpansion();
+
+		expect(requestRender).toHaveBeenCalledWith(true);
+		expect(resetDisplay).not.toHaveBeenCalled();
 	});
 
 	it("does not expand hidden tool activity and explains why", () => {
