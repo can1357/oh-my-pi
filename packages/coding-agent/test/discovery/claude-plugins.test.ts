@@ -822,6 +822,7 @@ describe("listClaudePluginRoots", () => {
 		expect(result.roots[0].scope).toBe("user");
 	});
 
+	// oxlint-disable-next-line no-template-curly-in-string -- literal plugin variable under test
 	test("substitutes ${CLAUDE_PLUGIN_ROOT} in plugin skill and command Markdown bodies (#20165)", async () => {
 		// Claude Code resolves the variables anywhere in the Markdown body of
 		// skills, commands and agents when it loads the content. OMP must do the
@@ -843,10 +844,12 @@ describe("listClaudePluginRoots", () => {
 		await Promise.all([
 			fs.writeFile(
 				path.join(pluginPath, "skills", "var-skill", "SKILL.md"),
+				// oxlint-disable-next-line no-template-curly-in-string -- literal plugin variable under test
 				'---\nname: var-skill\ndescription: Uses the plugin root.\n---\nRun `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/x.py"`.\n',
 			),
 			fs.writeFile(
 				path.join(pluginPath, "commands", "var-cmd.md"),
+				// oxlint-disable-next-line no-template-curly-in-string -- literal plugin variable under test
 				"Read ${CLAUDE_PLUGIN_ROOT}/shared/notes.md, then run ${OMP_PLUGIN_ROOT}/scripts/y.sh.\n",
 			),
 			fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry)),
