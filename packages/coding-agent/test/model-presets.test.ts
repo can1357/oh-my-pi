@@ -314,7 +314,10 @@ describe("model presets", () => {
 
 		const result = await applyModelPreset(settings, session, "reroute");
 
-		expect(result).toEqual({ kind: "unavailable", reason: `default model \`${SONNET}\` is not available` });
+		expect(result).toEqual({
+			kind: "unavailable",
+			reason: `default model \`${SONNET}\` is not available (default set by project config)`,
+		});
 		expect(settings.getGlobalModelRole("default")).toBeUndefined();
 		expect(settings.getModelRole("slow")).toBe(SONNET);
 	});

@@ -2211,8 +2211,11 @@ export class Settings {
 		}
 	}
 
-	/** Preview a role replacement with the same layer precedence and no saves or notifications. */
-	previewModelRoles(modelRoles: ReadOnlyDict<string>): ReadOnlyDict<string> {
+	/**
+	 * Detached in-memory copy with {@link replaceModelRoles} applied: same layer precedence, no saves,
+	 * no notifications. Read its roles and their provenance; never write through it.
+	 */
+	previewModelRoles(modelRoles: ReadOnlyDict<string>): Settings {
 		const preview = new Settings({ inMemory: true, cwd: this.#cwd, agentDir: this.#agentDir }, { projection: true });
 		preview.#parent = this.#parent;
 		// The role mutators replace their layer's modelRoles map instead of editing it in place.
@@ -2223,7 +2226,7 @@ export class Settings {
 		preview.#savedRuntimeModelRoleOverrides = new Map(this.#savedRuntimeModelRoleOverrides);
 		preview.#remerge();
 		preview.replaceModelRoles(modelRoles);
-		return preview.getModelRoles();
+		return preview;
 	}
 
 	/**

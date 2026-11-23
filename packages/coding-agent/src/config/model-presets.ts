@@ -325,10 +325,8 @@ async function applyModelPresetLocked(
 	const lookup = getModelPreset(settings, name);
 	if (lookup.kind !== "found") return lookup;
 	const { preset } = lookup;
-	const effectiveRoles = settings.previewModelRoles(preset.modelRoles);
-	const roleLookup: ModelRoleLookup = {
-		getModelRole: role => (Object.hasOwn(effectiveRoles, role) ? effectiveRoles[role] : undefined),
-	};
+	const prospective = settings.previewModelRoles(preset.modelRoles);
+	const roleLookup: ModelRoleLookup = prospective;
 	const candidates = roleModelCandidates(session, roleLookup);
 	const options = { settings, roleLookup };
 	const presetDefault = Object.hasOwn(preset.modelRoles, "default") ? preset.modelRoles.default : undefined;
@@ -338,7 +336,14 @@ async function applyModelPresetLocked(
 		if (typeof result === "string") return { kind: "unavailable", reason: result };
 	}
 	const live = resolvePresetDefault(session, candidates, preset, effectiveDefault, options);
-	if (typeof live === "string") return { kind: "unavailable", reason: live };
+	if (typeof live === "string") {
+		// When another layer will still decide `default`, name it: the user never chose that model in the preset.
+		const reason =
+			effectiveDefault !== undefined && effectiveDefault !== presetDefault
+				? `${live} (default set by ${SOURCE_LABELS[prospective.getModelRoleProvenance("default")]})`
+				: live;
+		return { kind: "unavailable", reason };
+	}
 
 	settings.replaceModelRoles(preset.modelRoles);
 	if (preset.defaultThinkingLevel !== undefined) {

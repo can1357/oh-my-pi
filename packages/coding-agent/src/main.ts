@@ -202,7 +202,7 @@ import {
 	cfgSessionWarnCost,
 	cfgSessionWorktreeScope,
 } from "./session/settings";
-import { cfgDisabledProviders, cfgEnabledModels, cfgModelProviderOrder } from "./config/model-settings";
+import { cfgDisabledProviders, cfgEnabledModels, cfgModelProviderOrder, cfgModelRoles } from "./config/model-settings";
 import { cfgTaskAgentIdleTtlMs } from "./task/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
@@ -1230,11 +1230,13 @@ const cfgScopedModelInputs = combine({
 	enabledModels: cfgEnabledModels,
 	disabledProviders: cfgDisabledProviders,
 	modelProviderOrder: cfgModelProviderOrder,
+	// Role aliases in `enabledModels` (`@slow`) resolve through the current roles.
+	modelRoles: cfgModelRoles,
 });
 
 /**
  * Keep the Ctrl+P / scoped `/models` list in step with live settings: an
- * `enabledModels` or provider-order edit re-resolves a settings-derived scope
+ * `enabledModels`, provider-order or model-role edit re-resolves a settings-derived scope
  * (an explicit `--models` scope stays pinned), and a `disabledProviders` edit re-resolves
  * after the catalog rebuild so re-enabled providers rejoin (disabled ones are
  * already filtered from `session.scopedModels` at read time).
