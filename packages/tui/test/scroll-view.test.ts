@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { ScrollView } from "@oh-my-pi/pi-tui/components/scroll-view";
+import { VirtualTerminal } from "./virtual-terminal";
 import { Ellipsis, visibleWidth } from "@oh-my-pi/pi-tui/utils";
 
 const theme = {
@@ -133,5 +134,26 @@ describe("ScrollView", () => {
 		expect(view.handleScrollKey("\x1b[1;2A")).toBe(true); // shift+up
 		expect(view.getScrollOffset()).toBe(1);
 		expect(view.handleScrollKey("x")).toBe(false);
+	});
+
+	it("keeps a tinted row's background when scrolling into an ellipsis-truncated row", () => {
+		const width = 20;
+		const bg = "\x1b[48;2;29;33;41m";
+		const bgEnd = "\x1b[49m";
+		const fits = `${bg}${"A".repeat(width)}${bgEnd}`;
+		const overflows = `${bg}${"B".repeat(width + 6)}${bgEnd}`;
+		const view = new ScrollView([fits, overflows], { height: 1, scrollbar: "never" });
+		const backgroundValues = (): number[] => {
+			const terminal = new VirtualTerminal(width, 1);
+			terminal.write(`${view.render(width)[0]}\x1b[0m`);
+			return terminal.getViewportRowBackgroundValues(0);
+		};
+
+		const before = backgroundValues();
+		expect(new Set(before).size).toBe(1);
+		expect(before[0]).not.toBe(0);
+
+		view.scroll(1);
+		expect(backgroundValues()).toEqual(before);
 	});
 });

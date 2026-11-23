@@ -242,20 +242,46 @@ provider "devin" {
 			}
 		}
 	}
-	// residue: GPT-5.4 through 5.6 tiers cover only the standard lanes; the
-	// Fast (`-priority`) lanes and GPT-5.4 mini share their class rank.
+	// residue: GPT-5.4 and 5.5 tiers cover only the standard lanes, GPT-5.6
+	// Terra and Luna tiers also the Fast (`-priority`) lanes; GPT-5.4 mini
+	// and the 5.4 and 5.5 Fast lanes share their class rank.
 	models "gpt-5-4" "gpt-5-4-none" "gpt-5-4-low" "gpt-5-4-medium" "gpt-5-4-high" "gpt-5-4-xhigh" \
 		"gpt-5-5" "gpt-5-5-none" "gpt-5-5-low" "gpt-5-5-medium" "gpt-5-5-high" "gpt-5-5-xhigh" \
-		"gpt-5-6-sol" "gpt-5-6-sol-none" "gpt-5-6-sol-low" "gpt-5-6-sol-medium" "gpt-5-6-sol-high" \
-		"gpt-5-6-sol-xhigh" "gpt-5-6-sol-max" \
 		"gpt-5-6-terra" "gpt-5-6-terra-none" "gpt-5-6-terra-low" "gpt-5-6-terra-medium" "gpt-5-6-terra-high" \
 		"gpt-5-6-terra-xhigh" "gpt-5-6-terra-max" \
+		"gpt-5-6-terra-fast" "gpt-5-6-terra-none-priority" "gpt-5-6-terra-low-priority" \
+		"gpt-5-6-terra-medium-priority" "gpt-5-6-terra-high-priority" "gpt-5-6-terra-xhigh-priority" \
+		"gpt-5-6-terra-max-priority" \
 		"gpt-5-6-luna" "gpt-5-6-luna-none" "gpt-5-6-luna-low" "gpt-5-6-luna-medium" "gpt-5-6-luna-high" \
-		"gpt-5-6-luna-xhigh" "gpt-5-6-luna-max" {
+		"gpt-5-6-luna-xhigh" "gpt-5-6-luna-max" \
+		"gpt-5-6-luna-fast" "gpt-5-6-luna-none-priority" "gpt-5-6-luna-low-priority" "gpt-5-6-luna-medium-priority" \
+		"gpt-5-6-luna-high-priority" "gpt-5-6-luna-xhigh-priority" "gpt-5-6-luna-max-priority" {
 		long-context-cost {
 			input-threshold 272000
 			multiplier 2.0
 			output-multiplier 1.5
+		}
+	}
+	// residue: GPT-5.6 Sol's published tiers are fixed rates that do not
+	// follow its standard-context price, so they are not derived from the lane.
+	models "gpt-5-6-sol" "gpt-5-6-sol-none" "gpt-5-6-sol-low" "gpt-5-6-sol-medium" "gpt-5-6-sol-high" \
+		"gpt-5-6-sol-xhigh" "gpt-5-6-sol-max" {
+		long-context-cost {
+			input-threshold 272000
+			input 8.0
+			output 30.0
+			cache-read 0.8
+			cache-write 10.0
+		}
+	}
+	models "gpt-5-6-sol-fast" "gpt-5-6-sol-none-priority" "gpt-5-6-sol-low-priority" "gpt-5-6-sol-medium-priority" \
+		"gpt-5-6-sol-high-priority" "gpt-5-6-sol-xhigh-priority" "gpt-5-6-sol-max-priority" {
+		long-context-cost {
+			input-threshold 272000
+			input 16.0
+			output 60.0
+			cache-read 1.6
+			cache-write 20.0
 		}
 	}
 	class "gemini" {
@@ -278,13 +304,19 @@ provider "devin" {
 	}
 	// Devin bills Gemini images at a fixed ~1,089 tokens from 512 px to 4,096 px
 	// (Google's fixed `media_resolution` budget passed through), under the
-	// lineage's unverified 1,120. verified: billing matched across 8 sizes on
-	// Gemini 3.7 Flash and 4 Carbon; 3.5/3.8 Flash and 4 Hydrogen/Argon billed
-	// 1,089-1,091 in a single two-point check and stay on the lineage rule until
-	// measured.
+	// lineage's unverified 1,120. verified: billing matched across 8 sizes, and
+	// real frames billed 1,089-1,091 each, on Gemini 3.5, 3.7 and 3.8 Flash and
+	// 4 Carbon, Neon, Hydrogen and Argon. 3.6 Flash is not measured.
 	class "gemini" {
 		family "flash" {
-			revision ">=3.7 <3.8" {
+			revision ">=3.5 <3.6" {
+				image-tokenization {
+					regime "fixed"
+					verified #true
+					tokens 1089
+				}
+			}
+			revision ">=3.7 <3.9" {
 				image-tokenization {
 					regime "fixed"
 					verified #true
@@ -293,9 +325,14 @@ provider "devin" {
 			}
 		}
 	}
-	// residue: Carbon shares its class rank with Argon and Hydrogen and has no
-	// family; the list names the logical id plus its raw effort uids.
-	models "gemini-4-carbon" "gemini-4-carbon-low" "gemini-4-carbon-medium" "gemini-4-carbon-high" {
+	// residue: Gemini 4 Carbon, Neon, Hydrogen and Argon have no family, and a
+	// bare class revision rank would also verify later Gemini 4 lines nobody
+	// measured; the list names each logical id plus its raw effort uids.
+	models "gemini-4-carbon" "gemini-4-carbon-low" "gemini-4-carbon-medium" "gemini-4-carbon-high" \
+		"gemini-4-neon" "gemini-4-neon-low" "gemini-4-neon-medium" "gemini-4-neon-high" "gemini-4-neon-xhigh" \
+		"gemini-4-hydrogen" "gemini-4-hydrogen-low" "gemini-4-hydrogen-medium" "gemini-4-hydrogen-high" \
+		"gemini-4-hydrogen-xhigh" \
+		"gemini-4-argon" "gemini-4-argon-low" "gemini-4-argon-medium" "gemini-4-argon-high" {
 		image-tokenization {
 			regime "fixed"
 			verified #true

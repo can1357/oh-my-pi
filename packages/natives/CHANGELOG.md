@@ -2,6 +2,52 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Windows captures and accessibility trees of a fully covered Chromium or Electron window passing as current when the cover is a popup, tool or click-through window, under which a paused page can stay paused; they now report `covered` there too ([#19849](https://github.com/can1357/oh-my-pi/pull/19849) by [@will-bogusz](https://github.com/will-bogusz))
+### Added
+
+- Added `commitReconciled()` to publish private-index commits without leaving staged reversals when the shared index is locked ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
+
+## [19.1.1] - 2026-11-23
+
+### Fixed
+
+- Fixed `grep()`, `glob()`, `fuzzyFind()`, `astGrep()`, `astEdit()`, and recursive shell search commands occasionally hanging on machines with many CPUs.
+- Fixed cancellation and timeout races in native search, file-matching, fuzzy-search, AST, and editing operations that could cause crashes or use-after-free errors.
+- Fixed `grep()` with a match limit reporting incomplete results instead of rejecting when its directory walk failed.
+- Fixed `@oh-my-pi/pi-natives` failing to load when installed from Bun's cache or when standalone binaries had extracted native addons from another build.
+- Fixed Linux Wayland accessibility and automation support for GTK dialogs, control values, and selected rows, list items, and tabs.
+- Fixed Linux PTY output occasionally including an extra blank line after a command exits.
+- Fixed keypad navigation keys being dropped when NumLock is off under the kitty keyboard protocol.
+- Fixed Wayland screenshots incorrectly timing out while waiting for the screen-share picker.
+- Improved Windows accessibility action reliability by reporting uncertain dispatches accurately and preventing actions from being sent after their reply wait has expired.
+- Fixed Windows automation of classic Win32 and WinForms buttons and checkboxes incorrectly activating the application or reporting success without performing the click.
+- Fixed macOS computer-control takeover restoration so the previously active window is restored correctly after automation ends, with failures reported when restoration cannot be confirmed.
+- Fixed macOS background keyboard and scroll events, including events sent through iPhone Mirroring, being lost or unexpectedly activating another window.
+- Fixed X11 typing of non-Latin and other characters outside the active keyboard layout.
+- Binary patches now refuse to apply when the target file does not match the version the patch was created from, preventing accidental replacement of changed files.
+- On Windows, aborting or timing out an in-process utility blocked on an open empty stdin pipe now terminates it without waiting for the pipe writer.
+
+### Removed
+
+- Removed the startup warning shown when a source checkout loads a native addon from another release; incompatible addons still produce an actionable error when a required symbol is unavailable.
+
+## [19.1.0] - 2026-11-21
+
+### Added
+
+- Added host-provided session commands to `Shell.run` (`commands`) and `shellReservedCommandNames()`
+
+### Fixed
+
+- Fixed grouped `sed` scripts such as `1{h;d};2{G}` being rejected when no semicolon precedes a closing brace.
+- Fixed the native addon failing to load when `HOME`, `PI_NATIVES_DIR`, or the installation path contains `?`.
+- `commitCreate()` now reports a `HeadMoved` error when `HEAD` changes after the expected-HEAD check, including changes made by a `commit-msg` hook.
+- Fixed macOS window reads for minimized windows so the requested window remains inspectable without being restored or replaced by a sibling window; unavailable menus and commands now report `WindowUnavailable`.
+- Fixed Windows captures and accessibility trees incorrectly reporting fully covered Chromium and Electron windows as current; they now report `covered` when those applications stop drawing while covered.
+- Fixed Windows `computer` `setValue` bringing classic Win32 and WinForms text-box windows to the foreground and directing subsequent keyboard input into them.
+
 ## [19.0.1] - 2026-11-19
 
 ### Fixed

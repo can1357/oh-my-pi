@@ -20,9 +20,11 @@ import {
 import {
 	fetchLiteLLMRichModels,
 	fetchLmStudioNativeModelMetadata,
+	fetchOpenRouterChatModels,
 	isSelectableLiteLLMModelMode,
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_CONTEXT_WINDOW,
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS,
+	OPENROUTER_BASE_URL,
 	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import {
@@ -509,9 +511,45 @@ export function discoverModelsByProviderType(
 			return discoverProxyModels(providerConfig, ctx);
 		case "litellm":
 			return discoverLiteLLMModels(providerConfig, ctx);
+		case "openrouter":
+			return discoverOpenRouterModels(providerConfig, ctx);
 		case "apple-foundation-models":
 			return discoverAppleFoundationModels(providerConfig);
 	}
+}
+
+/**
+ * Lists OpenRouter's public chat roster for an endpoint that fronts OpenRouter
+ * under its own URL and auth. The roster comes from openrouter.ai without
+ * this provider's credentials; rows serve through the provider's `baseUrl`
+ * (OpenRouter itself when omitted) and `api`, under OpenRouter's wire policy.
+ */
+async function discoverOpenRouterModels(
+	providerConfig: DiscoveryProviderConfig,
+	ctx: DiscoveryContext,
+): Promise<Model<Api>[]> {
+	const specs = await fetchOpenRouterChatModels({
+		fetch: ctx.fetch,
+		timeoutMs: providerConfig.discovery.timeoutMs ?? REMOTE_DISCOVERY_TIMEOUT_MS,
+	});
+	if (!specs) throw new Error(`OpenRouter model list unavailable from ${OPENROUTER_BASE_URL}/models`);
+	const models: Model<Api>[] = [];
+	for (const spec of specs) {
+		const model = skipAmbiguousModel(providerConfig.provider, spec.id, () =>
+			buildDiscoveredModel(
+				{
+					...spec,
+					api: providerConfig.api,
+					provider: providerConfig.provider,
+					baseUrl: providerConfig.baseUrl ?? OPENROUTER_BASE_URL,
+					headers: providerConfig.headers,
+				},
+				"openrouter",
+			),
+		);
+		if (model) models.push(model);
+	}
+	return models;
 }
 
 /**
@@ -921,15 +959,23 @@ function extractOpenAIModelsListInputCapabilities(item: {
 
 /**
  * Map an explicit non-chat output modality onto the runner kind and API that
- * serves it. Only endpoint-unambiguous tasks are routed: a row whose sole
- * output is `embeddings` or an image answers through the `/embeddings` and
- * `/images/generations` surfaces of the same OpenAI-compatible root the
- * provider already serves its model list from.
+ * serves it, on the same OpenAI-compatible root the provider already serves
+ * its model list from. Only a sole output that names its task is routed:
+ * `embeddings` (`/embeddings`), `image` (`/images/generations`), and
+ * OpenRouter's `speech` (`/audio/speech`) and `transcription`
+ * (`/audio/transcriptions`). Outputs come from the row's arrays or
+ * OpenRouter's `architecture.modality` summary (`text->speech`).
  *
- * Anything else stays chat. Rows that also emit `text` are ordinary (multimodal)
- * chat models, and an `audio` or `video` output alone cannot distinguish a TTS
- * SKU from a music generator, or a chat response from a video-job API — those
- * need explicit task metadata this list shape does not carry.
+ * Anything else stays chat. Rows that also emit `text` are ordinary
+ * (multimodal) chat models, and an `audio` or `video` output alone cannot
+ * distinguish a TTS SKU from a music generator, or a chat response from a
+ * video-job API: Poe lists TTS voices, music generators and `gpt-audio` alike
+ * as `text->audio` and serves them all on `/chat/completions`. Text from audio
+ * input reads the same for a transcriber and an audio-understanding chat model.
+ * OpenRouter's `decisions` output is left alone too: it names a task but not
+ * the wire (OpenRouter's own `/decisions` takes the System One body, OpenAI's
+ * Decisions API another). A row that declares nothing keeps the provider's
+ * chat API.
  */
 function extractOpenAIModelsListOutputTask(item: {
 	output?: unknown;
@@ -937,15 +983,25 @@ function extractOpenAIModelsListOutputTask(item: {
 	architecture?: unknown;
 }): { kind: KindApiKind; api: Api } | undefined {
 	const architecture = isRecord(item.architecture) ? item.architecture : undefined;
-	const modalities = collectModalities([item.output, item.output_modalities, architecture?.output_modalities]);
-	if (modalities.size !== 1) return undefined;
-	const [modality] = modalities;
+	const summary = typeof architecture?.modality === "string" ? architecture.modality.split("->") : [];
+	const output = collectModalities([
+		item.output,
+		item.output_modalities,
+		architecture?.output_modalities,
+		summary.length === 2 ? summary[1].split("+") : undefined,
+	]);
+	if (output.size !== 1) return undefined;
+	const [modality] = output;
 	switch (modality) {
 		case "embedding":
 		case "embeddings":
 			return { kind: "embedding", api: "openai-embeddings" };
 		case "image":
 			return { kind: "image", api: "openai-images" };
+		case "speech":
+			return { kind: "tts", api: "openai-speech" };
+		case "transcription":
+			return { kind: "stt", api: "openai-transcriptions" };
 		default:
 			return undefined;
 	}
@@ -1316,8 +1372,8 @@ export async function discoverOpenAIModelsList(
 				input,
 				supportsTools: false,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				// Embeddings and judges cap their input by context; image jobs
-				// carry no token window. None produces output tokens.
+				// Embeddings, judges, speech and transcription cap their input by
+				// context; image jobs carry no token window. None produces output tokens.
 				contextWindow: task.kind === "image" ? null : reportedContextWindow,
 				maxTokens: null,
 				headers: baseHeaders,

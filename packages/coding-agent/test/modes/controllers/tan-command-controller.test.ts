@@ -81,7 +81,7 @@ function createCloneStub(overrides?: {
 		setTodoPhases: vi.fn(),
 		getActiveToolNames: vi.fn(() => overrides?.activeToolNames ?? ["read", "bash"]),
 		getEnabledToolNames: vi.fn(() => overrides?.enabledToolNames ?? overrides?.activeToolNames ?? ["read", "bash"]),
-		getMountedXdevToolNames: vi.fn(() => overrides?.mountedToolNames ?? []),
+		getMountedToolCommandNames: vi.fn(() => overrides?.mountedToolNames ?? []),
 		setActiveToolPresentation: vi.fn(async () => {}),
 		subscribe: vi.fn((l: (event: TanSessionEvent) => void) => {
 			listener = l;
@@ -149,7 +149,7 @@ function createContext(overrides?: {
 		systemPrompt: ["system prompt"],
 		getActiveToolNames: vi.fn(() => overrides?.activeToolNames ?? ["read", "bash"]),
 		getEnabledToolNames: vi.fn(() => overrides?.enabledToolNames ?? overrides?.activeToolNames ?? ["read", "bash"]),
-		getMountedXdevToolNames: vi.fn(() => []),
+		getMountedToolCommandNames: vi.fn(() => []),
 		modelRegistry: { authStorage: { marker: "auth" } },
 		preparedExtensions: overrides?.preparedExtensions,
 		effectiveExtensionRoots: overrides?.effectiveExtensionRoots,
@@ -175,6 +175,7 @@ function createContext(overrides?: {
 		flush: vi.fn(async () => {}),
 	} as unknown as InteractiveModeContext["sessionManager"];
 	const cloneManager = {
+		getSessionId: vi.fn(() => "tan-clone-session"),
 		getSessionFile: vi.fn(() => cloneFile),
 		appendCustomEntry: vi.fn(),
 	} as unknown as SessionManager;
@@ -687,7 +688,7 @@ describe("TanCommandController", () => {
 		expect(unregister).not.toHaveBeenCalled();
 	});
 
-	it("copies and persists the full enabled tool set and its xd:// devices", async () => {
+	it("copies and persists the full enabled tool set and its mounted tool commands", async () => {
 		const enabledToolNames = ["eval", "read", "bash", "ast_grep"];
 		const harness = createContext({ activeToolNames: ["eval"], enabledToolNames });
 		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);

@@ -22,12 +22,18 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 const MINIMAX_CN_TOKEN_PLAN_429 =
 	'{"type":"error","error":{"type":"rate_limit_error","message":"当前已达到 Token Plan 用量上限。为避免调用中断，请升级 Token Plan 套餐，或购买积分补充用量并开启积分自动消耗。 (2067)"}}';
 
-function googleRpc429(reason: string, retryDelay?: string, message = "Resource exhausted"): string {
-	const details: Array<Record<string, string>> = [
+function googleRpc429(
+	reason: string,
+	retryDelay?: string,
+	message = "Resource exhausted",
+	quotaResetDelay?: string,
+): string {
+	const details: Array<Record<string, unknown>> = [
 		{
 			"@type": "type.googleapis.com/google.rpc.ErrorInfo",
 			reason,
 			domain: "cloudcode-pa.googleapis.com",
+			...(quotaResetDelay === undefined ? {} : { metadata: { quotaResetDelay } }),
 		},
 	];
 	if (retryDelay) {
@@ -355,10 +361,18 @@ describe("parseRateLimitReason", () => {
 		expect(isUsageLimitOutcome(429, body)).toBe(true);
 	});
 
-	it("preserves structured INSUFFICIENT_G1_CREDITS_BALANCE while rotating credentials", () => {
+	it("classifies a headerless 30-minute CCA quotaResetDelay as rotatable, not billing", () => {
+		const body = googleRpc429("RATE_LIMIT_EXCEEDED", undefined, "Resets in 2s.", "30m");
+		expect(parseRateLimitReason(body)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, body)).toBe(true);
+		expect(isBillingCapUsageLimit(429, body)).toBe(false);
+	});
+
+	it("treats structured INSUFFICIENT_G1_CREDITS_BALANCE as a rotatable billing cap", () => {
 		const body = googleRpc429("INSUFFICIENT_G1_CREDITS_BALANCE", undefined, "Credit balance is unavailable");
 		expect(parseRateLimitReason(body)).toBe("INSUFFICIENT_G1_CREDITS_BALANCE");
 		expect(isUsageLimitOutcome(429, body)).toBe(true);
+		expect(isBillingCapUsageLimit(429, body)).toBe(true);
 		expect(isUsageLimit(Object.assign(new Error(body), { status: 429 }))).toBe(true);
 	});
 
@@ -1019,6 +1033,15 @@ describe("isUsageLimitOutcome", () => {
 		expect(isUsageLimit(new ProviderHttpError("A subscription is required for this endpoint", 402))).toBe(false);
 	});
 
+	it("treats a muse 402 billing-verification failure as a usage limit but the same body on 400 as a bad request", () => {
+		const body =
+			"Billing verification failed. Billing Issue. To use this API key, your team needs to resolve a billing issue first. (type=billing_error param=billing_not_configured)";
+		expect(isUsageLimitOutcome(402, `402 ${body}`)).toBe(true);
+		expect(isUsageLimit(new ProviderHttpError(body, 402))).toBe(true);
+		expect(isUsageLimitOutcome(400, `400 ${body}`)).toBe(false);
+		expect(isUsageLimit(new ProviderHttpError(body, 400))).toBe(false);
+	});
+
 	it("does not rotate on auth/invalid-request statuses with unrelated bodies", () => {
 		expect(isUsageLimitOutcome(401, "Invalid API key")).toBe(false);
 		expect(isUsageLimitOutcome(400, "invalid_request_error: model unsupported")).toBe(false);
@@ -1146,8 +1169,32 @@ describe("is402BillingCapBody", () => {
 		expect(is402BillingCapBody("concurrent requests limit reached")).toBe(true);
 	});
 
+	it("recognizes structured billing fields even without billing prose", () => {
+		for (const body of [
+			"402 Request rejected (type=billing_error param=billing_not_configured)",
+			"402 Request rejected (code=billing_not_configured)",
+			'{"error":{"message":"Request rejected","type":"billing_error"}}',
+			'{"error":{"message":"Request rejected","code":"billing_not_configured"}}',
+		]) {
+			expect(is402BillingCapBody(body)).toBe(true);
+			expect(isUsageLimitOutcome(402, body)).toBe(true);
+		}
+		for (const code of ["billing_error", "billing_not_configured"]) {
+			expect(isUsageLimit(new ProviderHttpError("Request rejected", 402, { code }))).toBe(true);
+			expect(isUsageLimit(new ProviderHttpError("Request rejected", 400, { code }))).toBe(false);
+		}
+	});
+
+	it("does not rotate subscription-required responses mentioning unchanged credits", () => {
+		const body = "A subscription is required for this endpoint; your credits are unchanged";
+		expect(isUsageLimitOutcome(402, body)).toBe(false);
+		expect(isUsageLimit(new ProviderHttpError(body, 402))).toBe(false);
+	});
+
 	it("returns false for non-quota informative bodies", () => {
 		expect(is402BillingCapBody("A subscription is required for this endpoint")).toBe(false);
 		expect(is402BillingCapBody("Rate limit exceeded, too many requests")).toBe(false);
+		expect(is402BillingCapBody("A subscription is required; see the billing page")).toBe(false);
+		expect(is402BillingCapBody("Request rejected (type=billing_error_other)")).toBe(false);
 	});
 });

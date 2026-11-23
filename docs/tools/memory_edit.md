@@ -13,7 +13,7 @@
 - Tool metadata: `approval = "read"`, `strict = true`, `loadMode = "discoverable"`, even though successful calls mutate local memory.
 - Registration requires `memory.backend = "mnemopi"`, or `"supermemory"` with an API key, an accepted base URL and no invalid `SUPERMEMORY_NAMESPACE` (`isSupermemoryConfigured(...)`, the same gate as `recall`/`retain`); the tool is absent for `"off"`, `"local"`, `"hindsight"`, and an unconfigured Supermemory.
 - In an unrestricted session with an explicit tool list, registration auto-includes `memory_edit` for Mnemopi and Supermemory. Restricted lists are not widened.
-- In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://memory_edit`; an explicitly requested tool remains top-level.
+- In an ordinary `tools.commands` session with `bash` active, discoverable built-ins are presented as tool commands (`memory_edit --help`, `memory_edit <args>` in `bash`); an explicitly requested tool remains top-level.
 - Mnemopi execution is synchronous and single-shot. Supermemory `forget`/`invalidate` is one HTTP request and `update` is two (add, then forget); `forget`/`invalidate` honour the tool call's abort signal, and an `update` whose corrected document was stored always completes its forget.
 
 ## Inputs

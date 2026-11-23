@@ -83,7 +83,7 @@ import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type { CodeReviewAnnotation, TextReviewAnnotation } from "@oh-my-pi/pi-tui/overlays/annotation-types";
 export type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
-import type { ModelRegistry } from "../../config/model-registry";
+import type { ModelRegistry, ProviderConfigInput } from "../../config/model-registry";
 import type { EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
@@ -105,6 +105,7 @@ import type { BashToolInput, GlobToolInput, GrepToolInput, ReadToolInput, WriteT
 import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
 import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { ApprovalMode } from "../../tools/approval";
 import type { BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
@@ -1560,9 +1561,14 @@ export interface ModeChangedEvent {
 	state: SessionModeState;
 }
 
-interface ToolCallEventBase {
-	type: "tool_call";
+interface ToolEventIdentity {
 	toolCallId: string;
+	/** ID of the eval or kernel-defined tool invocation that dispatched this call. Absent for direct calls. */
+	parentToolCallId?: string;
+}
+
+interface ToolCallEventBase extends ToolEventIdentity {
+	type: "tool_call";
 }
 
 export interface BashToolCallEvent extends ToolCallEventBase {
@@ -1610,9 +1616,8 @@ export type ToolCallEvent =
 	| GlobToolCallEvent
 	| CustomToolCallEvent;
 
-interface ToolResultEventBase {
+interface ToolResultEventBase extends ToolEventIdentity {
 	type: "tool_result";
-	toolCallId: string;
 	input: Record<string, unknown>;
 	content: (TextContent | ImageContent)[];
 	isError: boolean;
@@ -1835,6 +1840,33 @@ export interface RegisteredCommand {
 	description?: string;
 	getArgumentCompletions?: (argumentPrefix: string) => AutocompleteItem[] | null;
 	handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+}
+
+/**
+ * A todo backend registered with `pi.registerTodoBackend()`. omp keeps the todo list; the backend
+ * the `todo.backend` setting selects is told about every change to it.
+ */
+export interface TodoBackendDefinition {
+	/** `todo.backend` value that selects this backend: letters, digits, `.`, `_` and `-`. `native` is reserved. */
+	id: string;
+	/** Name shown for the backend in Settings; the id when omitted. */
+	label?: string;
+	/** One line shown beside the label in Settings. */
+	description?: string;
+	/**
+	 * Called in the main session with the whole todo list after omp committed a change to it:
+	 * a `todo` call, a `/todo` edit, RPC `set_todos`, `/new`, or a resume, rewind, branch, fork or
+	 * move to another session file that left another list or session id. An empty list is sent
+	 * only once omp has called a todo backend for this session; `/new`, a resume, a branch and a
+	 * fork carry that over. Tasks carry `content` and `status` only.
+	 * A backend the user picks in Settings is sent the current list then, without a change.
+	 * One call runs at a time, and lists that change meanwhile collapse into the newest. A throw,
+	 * or no answer within the extension handler timeout, is reported as an extension error and
+	 * leaves omp's list as it is; the next change sends the whole list again, even while a call
+	 * omp gave up on is still running. A call still running when the session is disposed is given
+	 * up after the `session_shutdown` handler timeout, without an error.
+	 */
+	replace(phases: TodoPhase[], ctx: ExtensionContext): void | Promise<void>;
 }
 
 // ============================================================================
@@ -2145,6 +2177,14 @@ export interface ExtensionAPI {
 	 */
 	registerComposerShape(definition: ComposerShapeDefinition): void;
 
+	/**
+	 * Register a todo backend the user can select with the `todo.backend` setting. Throws for a
+	 * malformed id, for `native` and for a missing `replace`; an id this extension registered
+	 * before gets the new definition. When several extensions register an id, the first one loaded
+	 * keeps it; once that id is selected, the others are reported as extension errors.
+	 */
+	registerTodoBackend(definition: TodoBackendDefinition): void;
+
 	// =========================================================================
 	// Actions
 	// =========================================================================
@@ -2231,6 +2271,14 @@ export interface ExtensionAPI {
 	 * If `models` is provided: replaces all existing models for this provider.
 	 * If only `baseUrl` is provided: overrides the URL for existing models.
 	 * If `streamSimple` is provided: registers a custom API stream handler.
+	 * If `stream`/`generateImage`/`webSearch`/`rules` are provided: takes over those parts of the provider.
+	 *
+	 * @example
+	 * // Own an existing provider's wire requests and flip a KDL rule for its models
+	 * pi.registerProvider("google-generative-ai", {
+	 *   stream: myGeminiStream,
+	 *   rules: { "prompt-perturbation": true },
+	 * });
 	 *
 	 * @example
 	 * // Register a new provider with custom models and streaming
@@ -2276,8 +2324,18 @@ export interface ExtensionAPI {
 // Provider Registration Types
 // ============================================================================
 
-/** Configuration for registering a provider via pi.registerProvider(). */
-export interface ProviderConfig {
+/**
+ * Configuration for registering a provider via pi.registerProvider().
+ *
+ * `stream`, `generateImage`, `webSearch`, `discoverModels`, and `rules` take
+ * over a built-in provider without redefining its models: they replace its
+ * request adapter, image generation, grounded web search request, and roster
+ * fetch, and set KDL rule directives for its models. Removed again when the extension unloads.
+ */
+export interface ProviderConfig extends Pick<
+	ProviderConfigInput,
+	"stream" | "generateImage" | "webSearch" | "discoverModels" | "rules"
+> {
 	/** Base URL for the API endpoint. Required when defining models. */
 	baseUrl?: string;
 	/**
@@ -2350,6 +2408,8 @@ export interface ProviderModelConfig {
 	premiumMultiplier?: number;
 	/** Maximum context window size in tokens. */
 	contextWindow: number;
+	/** Optional larger window selected by the extended-context policy. */
+	maxContextWindow?: number;
 	/** Maximum output tokens. */
 	maxTokens: number;
 	/** WebSocket preference within catalog policy; explicit false disables transport selection. */
@@ -2533,6 +2593,8 @@ export interface Extension {
 	fileDeleteFallbackHandlers: FileDeleteFallbackHandler[];
 	messageRenderers: Map<string, MessageRenderer>;
 	composerShapes: Map<string, ComposerShapeDefinition>;
+	/** Backends registered with `registerTodoBackend`, by id; absent until the first one. */
+	todoBackends?: Map<string, TodoBackendDefinition>;
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;

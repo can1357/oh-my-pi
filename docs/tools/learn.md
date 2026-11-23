@@ -12,7 +12,7 @@
 
 ## Registration / Visibility
 
-- `loadMode = "essential"` and `strict = true`, so the tool remains top-level rather than mounting under `xd://`.
+- `loadMode = "essential"` and `strict = true`, so the tool remains top-level rather than becoming a tool command.
 - Approval is dynamic: a call containing `skill` or `scope: "global"`, or any call while `memory.backend = "local"`, has `approval = "write"`; any other memory-only Hindsight/Mnemopi call has `approval = "read"`.
 - Registration requires `autolearn.enabled = true` (default `false`) and `memory.backend` equal to `"hindsight"`, `"mnemopi"`, `"supermemory"`, or `"local"`. Hindsight and Supermemory additionally require a configured backend (`isHindsightConfigured(...)` / `isSupermemoryConfigured(...)`); Supermemory stores the lesson as one document in the session namespace.
 - Enabled top-level sessions auto-include `learn` in an ordinary explicit tool list. Subagents do not discover or auto-receive it, but may use it when their requested-tools/frontmatter list explicitly includes it.

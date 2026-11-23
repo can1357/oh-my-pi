@@ -2,12 +2,16 @@ import { BashInteractiveOverlayComponent } from "@oh-my-pi/pi-tui/tools/bash-int
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
+import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { loadXtermTerminal } from "@oh-my-pi/pi-tui/tools/terminal-output";
 import { Settings } from "../config/settings";
 import { buildNonInteractiveEnv } from "../exec/non-interactive-env";
-import { OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { cfgPtyNotify } from "../modes/settings";
+import { type ArtifactAllocator, OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { StreamNewlineNormalizer } from "../utils/stream-newlines";
+import { holdBlockedStatus } from "../utils/run-status";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
+import { appendImageLinks } from "../utils/image-temp";
 import { resolveOutputMaxColumns, resolveOutputSinkArtifactMaxBytes, resolveOutputSinkHeadBytes } from "./output-meta";
 
 export interface BashInteractiveResult extends OutputSummary {
@@ -38,6 +42,91 @@ function terminalEnv(exports: Record<string, string>): Record<string, string> {
 	return env;
 }
 
+/** How often a running console is checked for a program waiting on keys. */
+const INPUT_POLL_MS = 250;
+/** Checks in a row a program must wait before it counts: a TUI turns echo off briefly to query the terminal. */
+const INPUT_WAIT_POLLS = 2;
+/**
+ * Where the OS cannot tell an echoing line prompt from a busy program (macOS),
+ * output silent this long with the cursor after text counts as a prompt.
+ */
+const PROMPT_QUIET_MS = 2000;
+/** Keys sent this recently mean the user is at the console: a new wait sends no notification. */
+const USER_PRESENT_MS = 10_000;
+
+/**
+ * Watches whether a console's program waits on the user's keys. While it does,
+ * the run shows as blocked on the user (title `!`, OSC 7501 `blocked`); each new
+ * wait also sends a terminal notification unless `pty.notify` is off or the user
+ * typed into the console within {@link USER_PRESENT_MS}.
+ */
+class InputWaitWatch {
+	readonly #command: string;
+	readonly #settings: Settings;
+	readonly #session: PtySession;
+	readonly #screen: BashInteractiveOverlayComponent;
+	readonly #timer: NodeJS.Timeout;
+	#lastOutput = Date.now();
+	#lastInput = 0;
+	#streak = 0;
+	#release: (() => void) | undefined;
+
+	constructor(command: string, settings: Settings, session: PtySession, screen: BashInteractiveOverlayComponent) {
+		this.#command = command;
+		this.#settings = settings;
+		this.#session = session;
+		this.#screen = screen;
+		this.#timer = setInterval(() => this.#poll(), INPUT_POLL_MS);
+	}
+
+	/** Records program output, which restarts the silence the prompt fallback waits for. */
+	output(): void {
+		this.#lastOutput = Date.now();
+	}
+
+	/** Records keys the user sent to the program. */
+	input(): void {
+		this.#lastInput = Date.now();
+	}
+
+	/** Stops watching and drops the blocked status. */
+	stop(): void {
+		clearInterval(this.#timer);
+		this.#unblock();
+	}
+
+	#waits(): boolean {
+		const known = this.#session.awaitsInput();
+		if (known !== null) return known;
+		return Date.now() - this.#lastOutput >= PROMPT_QUIET_MS && this.#screen.cursorAfterText();
+	}
+
+	#poll(): void {
+		if (!this.#waits()) {
+			this.#streak = 0;
+			this.#unblock();
+			return;
+		}
+		this.#streak += 1;
+		if (this.#release || this.#streak < INPUT_WAIT_POLLS) return;
+		this.#release = holdBlockedStatus({ state: "blocked", kind: "question", msg: `Console: ${this.#command}` });
+		if (Date.now() - this.#lastInput < USER_PRESENT_MS) return;
+		if (cfgPtyNotify.get(this.#settings) === "off") return;
+		TERMINAL.sendNotification({
+			title: "omp",
+			body: "Console waiting for input",
+			type: "console",
+			urgency: "normal",
+			actions: "focus",
+		});
+	}
+
+	#unblock(): void {
+		this.#release?.();
+		this.#release = undefined;
+	}
+}
+
 /**
  * Run `application` with `args` on a pseudo-terminal the user drives through
  * an overlay; `command` is what the overlay shows it as.
@@ -53,8 +142,7 @@ export async function runInteractiveBashPty(
 		signal?: AbortSignal;
 		/** The session shell's exports the program starts from. */
 		env: Record<string, string>;
-		artifactPath?: string;
-		artifactId?: string;
+		allocateArtifact?: ArtifactAllocator;
 		/** Called with the program's pid once the terminal spawned it. */
 		onStart?: (pid: number) => void;
 	},
@@ -65,12 +153,12 @@ export async function runInteractiveBashPty(
 	const graphics = new TerminalGraphicsDecoder();
 	const newlines = new StreamNewlineNormalizer();
 	const sink = new OutputSink({
-		artifactPath: options.artifactPath,
-		artifactId: options.artifactId,
+		allocateArtifact: options.allocateArtifact,
 		headBytes: resolveOutputSinkHeadBytes(settings),
 		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),
 	});
+	let watch: InputWaitWatch | undefined;
 	try {
 		const result = await ui.custom<BashInteractiveResult>(
 			(tui, uiTheme, _keybindings, done) => {
@@ -86,6 +174,7 @@ export async function runInteractiveBashPty(
 				const finalize = (run: PtyRunResult) => {
 					if (finished) return;
 					finished = true;
+					watch?.stop();
 					component.setComplete({ exitCode: run.exitCode, cancelled: run.cancelled, timedOut: run.timedOut });
 					tui.requestRender();
 					void (async () => {
@@ -93,19 +182,24 @@ export async function runInteractiveBashPty(
 						const tail = graphics.finish();
 						if (tail) sink.push(tail);
 						const [summary, images] = await Promise.all([sink.dump(), graphics.images()]);
+						const output = await appendImageLinks(summary.output, images);
 						done({
 							exitCode: run.exitCode,
 							cancelled: run.cancelled,
 							timedOut: run.timedOut,
 							...summary,
+							output,
 							...(images.length > 0 ? { images } : {}),
 						});
 					})();
 				};
 				const cols = Math.max(20, tui.terminal.columns - 2);
 				const rows = Math.max(5, tui.terminal.rows - 4);
+				const inputWatch = new InputWaitWatch(options.command, settings, session, component);
+				watch = inputWatch;
 				component.setHandlers(
 					data => {
+						inputWatch.input();
 						try {
 							session.write(data);
 						} catch {
@@ -141,6 +235,7 @@ export async function runInteractiveBashPty(
 						},
 						(err, chunk) => {
 							if (finished || err || !chunk) return;
+							inputWatch.output();
 							component.appendOutput(chunk);
 							const clean = graphics.push(chunk);
 							if (clean) sink.push(newlines.push(clean));
@@ -161,6 +256,7 @@ export async function runInteractiveBashPty(
 		);
 		return result;
 	} finally {
+		watch?.stop();
 		await sink.dispose();
 	}
 }

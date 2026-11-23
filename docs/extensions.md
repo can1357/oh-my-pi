@@ -39,7 +39,7 @@ Import host values from the package root, `@oh-my-pi/pi-coding-agent`. Deeper pa
 
 - `formTheme`, `editorKey`, `editorKeys` and `formatKeyHint` for settings dialogs and key hints
 - `styledSpans` and `compactText` to turn ANSI-styled text into `TspText`, such as a transcript presenter's `{ compact: { label, rows } }`, and `rowsText` to wrap pre-rendered rows in one native text node; `styleSpans`, `plainText`, `plainLine`, `spansLine` and `styledBackground` cover the other conversions between ANSI text and spans
-- `parseXdUrl` to read the device name from an `xd://` URL, plus `parseXdTopicUrl`, `stripXdUrlPrefix`, `couldBecomeXdUrl` and `XD_URL_PREFIX`
+- `toolCommandCallName` to read the command word a `bash` call invokes, and `toolCommandDispatches` for the dispatch records on a bash result
 - `unwrapHashlineHeaderPath` to turn a `[path#TAG]` write/edit target into its plain path
 - `cfgExtensionTranscriptPresenters`, the handle of the `extensionRenderers.transcriptPresenters` setting
 
@@ -136,6 +136,7 @@ Core methods:
 - `getServiceTiers`, `setServiceTier`
 - `registerProvider`, `unregisterProvider`
 - `registerFileWriteFallback`, `registerFileDeleteFallback`
+- `registerTodoBackend`
 - `events` (shared event bus)
 
 `ExtensionAPI` methods retain their extension binding when destructured or passed as callbacks.
@@ -235,6 +236,26 @@ usage provider's `cacheVersion`, normalized base URL, and credential identity. W
 distinct from the built-in one so processes without the extension (older sessions,
 `--no-extensions` runs, SDK scripts) never serve their reports to yours, or yours to them.
 
+#### Taking over a built-in provider
+
+Four fields let an extension replace parts of an existing provider without redefining its models. The models keep their `api`, so option mapping, credentials, and catalog policy behave as before:
+
+- `stream(model, context, options)`: handles every request to the provider's models instead of the built-in adapter for their api. `options` are already mapped for that api (for example `GoogleGeminiCliOptions`) and carry the provider's key.
+- `generateImage(model, request, options)`: handles image generation for the provider's image models.
+- `webSearch(params)`: runs the grounded search request for the provider's models. Availability checks and labels still come from the model's grounding backend.
+- `discoverModels({ accounts, baseUrl, fetch })`: fetches the provider's model list in place of its built-in discovery request. It runs once with all signed-in accounts (a configured key counts as one account). Return `null` to keep the cached catalog. The built-in discovery still caches the rows, merges them, and applies policy.
+- `rules`: KDL rule directives for every model of the provider, keyed by directive name, as a `provider "<id>" { … }` block would set them (`{ "prompt-perturbation": true }`). Unknown directives and invalid values fail `registerProvider`. A runtime rule wins ties with a bundled rule but still loses to a more specific one, such as a model-scoped rule.
+
+```ts
+pi.registerProvider("google-generative-ai", {
+	stream: myGeminiStream,
+	generateImage: myImageGenerator,
+	rules: { "prompt-perturbation": true },
+});
+```
+
+These overrides last only while the registration is active. Unregistering the provider or unloading the extension restores the built-in behavior. Subagents in worker threads run these hooks on the main thread. Thread-local stream state, such as `providerSessionState`, stays in the worker.
+
 Extension-registered providers (`registerProvider`) can supply `fetchDynamicModels` for runtime model discovery; these fetches are hard-bounded to a 15-second timeout (`RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS` in `model-provider-discovery.ts`) so a hung endpoint cannot stall discovery.
 
 A provider's `apiKey` (a literal key or an environment variable name) normally overrides any stored OAuth or `/login` credential for that provider. When the registration also supplies `oauth`, `apiKey` becomes a fallback instead: the key the user saved with `/login` wins, and `apiKey` is used only when no stored login credential exists. This keeps an unset env-var name from being sent as the literal key. Registering a built-in provider id with both `oauth` and a gateway `apiKey` therefore lets a stored upstream credential take precedence over the gateway key.
@@ -311,6 +332,32 @@ Also exposed:
 - `pi.zod` (Zod-compatible builder backed by omptype)
 - `pi.typebox` (legacy TypeBox-compatible shim)
 - `pi.pi` (package exports)
+
+### Todo backends (`registerTodoBackend`)
+
+A todo backend copies the session's todo list into an external store: a task tracker, a file, a dashboard. omp keeps the list and its own `todo` tool, HUD, `/todo` and reminders. The backend the `todo.backend` setting names (default `native`: none) is handed the whole list after every change.
+
+```ts
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+
+export default function (pi: ExtensionAPI) {
+	pi.registerTodoBackend({
+		id: "my-tracker",
+		label: "My tracker",
+		description: "Mirrors the todo list into my tracker",
+		async replace(phases, ctx) {
+			await tracker.sync(ctx.sessionManager.getSessionId(), phases);
+		},
+	});
+}
+```
+
+- **What.** The whole list after every committed change to the main session's list, never an operation; tasks carry `content` and `status` only. While a call runs, later lists collapse into the newest. Two calls are skipped: an unchanged list for the backend that just took it, and an empty list while omp has not called a backend yet (`/new` does not start that over).
+- **Sessions.** Key your store by `ctx.sessionManager.getSessionId()`, read before the first `await`. After `/new` the id is new and the empty list follows under it. Calls are not ordered against `session_*` events, and there is no per-session instance: release state on `session_shutdown`.
+- **Failure.** A backend cannot refuse a change and gets no abort signal. A throw, or no answer within the extension handler timeout, is reported as an extension error; omp's list stays as committed and the next change sends the whole list again. After a timeout that next call can start while the old one still runs: a late write must not overwrite a newer list. On exit omp waits for a call still running for as long as a `session_shutdown` handler may take.
+- **Selection.** `todo.backend` holds a registered `id` (letters, digits, `.`, `_`, `-`; `native` is reserved). When several extensions register the selected id, the first one loaded keeps it and the others are reported as extension errors. A selected id no enabled extension registers is reported once as an extension error (again if it is selected again after another id), and todos work as with `native`. A backend selected mid-session gets the list with the next change, or at once when picked in `/settings`.
+- **Scope.** Main session only: subagents and `/tan` clones are not mirrored.
+- **Settings.** `/settings` → Tools → Todos → "Todo Backend" lists `Native` and every backend an enabled extension registers, with its `label` (the `id` when omitted) and `description`. Both are optional; a blank one throws at registration.
 
 ### Runtime setting overrides
 
@@ -666,6 +713,8 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 - `tool_execution_start` / `tool_execution_update` / `tool_execution_end` (observability)
 - `tool_approval_requested` / `tool_approval_resolved` (observability; emitted by `wrapper.ts` only when a tool requires approval and an approval handler is registered)
 
+`tool_call` and `tool_result` identify the call with `toolCallId`. When a JS or Python eval cell or kernel-defined tool calls a session tool, both events also carry `parentToolCallId`: the ID of the invocation that made the nested call, not the ID of the eval that defined the tool. Direct calls omit this field.
+
 `tool_result` is middleware-style: handlers run in extension order and each sees prior modifications. Distinct non-blank `additionalContext` from every handler is preserved in registration order (repeats, compared ignoring surrounding whitespace, are dropped) and delivered before that call's `tool_call` context.
 
 ### Plan review lifecycle
@@ -778,8 +827,7 @@ discarded.
 
 Registered tools can add context during execution through
 `ctx.addAdditionalContext?.("...")`. Context a tool adds itself is kept even when the tool then
-returns an error. Within one call, the tool's own context (including tools reached through nested
-`xd://` dispatch) comes before `tool_call` handler context.
+returns an error. Within one call, the tool's own context (including tools run as commands inside a nested `bash` call) comes before `tool_call` handler context.
 Calls Cursor executes on its exec channel deliver context after their buffered results, on the next
 provider request.
 

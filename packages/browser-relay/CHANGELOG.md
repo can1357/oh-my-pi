@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Closing relay tabs no longer leaves a saved "omp" tab group in Chrome's bookmarks bar after every session ([#20211](https://github.com/can1357/oh-my-pi/issues/20211))
+
+## [19.1.1] - 2026-11-23
+
+### Fixed
+
+- The side panel’s Connection settings now show the browser’s specific reason when it refuses the native host (for example, because native messaging is blocked by enterprise policy), instead of incorrectly suggesting that the host may be missing.
+
+## [19.1.0] - 2026-11-21
+
+### Breaking Changes
+
+- The omp extension now uses a pinned Chrome extension ID and connects to the browser relay through its native host. Reinstall the extension using Chrome’s “Load unpacked” flow; the relay port and token options have been removed.
+
+### Added
+
+- Added an omp Chrome side panel with session model selection, role shortcuts, thinking controls, input shortcuts, message queuing, and run interruption controls.
+- Added browser interaction features including page overlays, image and element picking, Teach, scheduled shortcuts, and GIF export.
+
+### Changed
+
+- The Chrome side panel shows brief labels for tool steps with structured intents.
+- The extension now keeps registered installations up to date across omp upgrades and reloads when idle.
+- Browser relay ports are assigned automatically and discovered locally by terminal clients, while sidebar chats continue using their existing connection.
+- Side panel sessions now control the connected Chrome browser directly instead of opening a separate headless browser.
+
+### Fixed
+
+- Improved relay recovery so Chrome reconnects automatically when the native host is unavailable or a stale connection drops.
+
 ## [19.0.1] - 2026-11-19
 
 ### Fixed

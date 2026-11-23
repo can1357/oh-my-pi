@@ -23,6 +23,7 @@ import {
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -33,6 +34,7 @@ import {
 	agentLoopContinue,
 	createSyntheticToolResultMessage,
 	lastContextMessage,
+	type NormalizeToolsOptions,
 	normalizeMessagesForProvider,
 	normalizeTools,
 	resolveOwnedDialectFromEnv,
@@ -269,15 +271,15 @@ export interface AgentOptions {
 
 	/**
 	 * Resolve a tool call whose name matched no advertised tool. Lets hosts
-	 * route calls to tools exposed through side transports (e.g. `xd://`
-	 * device mounts) instead of failing with "Tool not found".
+	 * route calls to tools reached through a side transport (e.g. mounted
+	 * tool commands run through `bash`) instead of failing with "Tool not found".
 	 */
 	resolveFallbackTool?: (name: string, advertised: readonly AgentTool<any>[]) => AgentTool<any> | undefined;
 
 	/**
 	 * Names routable by {@link resolveFallbackTool} that the advertised set
-	 * omits (e.g. `xd://` device mounts), used only to suggest a target when a
-	 * call misses.
+	 * omits (e.g. mounted tool commands run through `bash`), used only to
+	 * suggest a target when a call misses.
 	 */
 	suggestFallbackToolNames?: () => Iterable<string>;
 
@@ -432,6 +434,7 @@ export class Agent {
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	#transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 	#sentToolDefinitions = new SentToolDefinitions();
+	#standbyTools: AgentTool[] = [];
 	#steeringQueue: AgentMessage[] = [];
 	#followUpQueue: AgentMessage[] = [];
 	#queuedMessageClaims: Partial<Record<QueuedMessageQueue, QueuedMessageClaim>> = {};
@@ -986,19 +989,19 @@ export class Agent {
 		if (!model) throw new Error("No active model on agent");
 		const ownedDialect = this.#ownedDialect(model);
 		const messages = normalizeMessagesForProvider(llmMessages, model);
-		const tools = ownedDialect
-			? []
-			: (normalizeTools(this.#toolsForModel(model), {
-					injectIntent: this.#intentTracing,
-					intentDescription: this.#intentDescription,
-					pruneDescriptions: this.#pruneToolDescriptions,
-				}) ?? []);
+		const toolOptions: NormalizeToolsOptions = {
+			injectIntent: this.#intentTracing,
+			intentDescription: this.#intentDescription,
+			pruneDescriptions: this.#pruneToolDescriptions,
+		};
+		const tools = ownedDialect ? [] : (normalizeTools(this.#toolsForModel(model), toolOptions) ?? []);
+		const standby = ownedDialect ? undefined : normalizeTools(this.#standbyTools, toolOptions);
 		let context: Context = { systemPrompt, messages, tools };
 		// Side requests reuse the main loop's sent definitions without recording their own; attached before the
 		// transform too, so a request-size clamp in it measures them.
-		context = this.#sentToolDefinitions.withInactiveTools(context);
+		context = this.#sentToolDefinitions.withInactiveTools(context, standby);
 		if (this.#transformProviderContext) context = await this.#transformProviderContext(context, model);
-		context = this.#sentToolDefinitions.withInactiveTools(context);
+		context = this.#sentToolDefinitions.withInactiveTools(context, context.inactiveTools);
 		return context;
 	}
 
@@ -1365,6 +1368,11 @@ export class Agent {
 
 	setTools(t: AgentTool<any>[]) {
 		this.#state.tools = t;
+	}
+
+	/** Set the inactive tools that may become active later ({@link AgentContext.standbyTools}). */
+	setStandbyTools(tools: AgentTool[]) {
+		this.#standbyTools = tools;
 	}
 
 	replaceMessages(ms: AgentMessage[]) {
@@ -1928,6 +1936,7 @@ export class Agent {
 			systemPrompt: this.#state.systemPrompt,
 			messages: this.#state.messages.slice(),
 			tools: this.#state.tools,
+			standbyTools: this.#standbyTools,
 		};
 
 		// Installed unconditionally. Both `cursorExecHandlers` and
@@ -2018,6 +2027,7 @@ export class Agent {
 			return refreshToolChoiceForActiveTools(options?.toolChoice, this.#state.tools);
 		};
 
+		let requestModel: Model | undefined;
 		const config: AgentLoopConfig = {
 			model,
 			reasoning,
@@ -2058,6 +2068,7 @@ export class Agent {
 				context.systemPrompt = this.#state.systemPrompt;
 				this.#onModelCallSystemPrompt?.(context.systemPrompt);
 				context.tools = this.#toolsForModel(this.#state.model ?? model);
+				context.standbyTools = this.#standbyTools;
 			},
 			beforeModelCall:
 				this.#beforeModelCall || this.#additionalBeforeModelCalls.size > 0
@@ -2095,6 +2106,9 @@ export class Agent {
 			onAssistantMessageEvent: this.#onAssistantMessageEvent,
 			onHarmonyLeak: this.#onHarmonyLeak,
 			onTurnEnd: (messages, signal, context) => this.#onTurnEnd?.(messages, signal, context),
+			onTurnEndEmitted: () => {
+				requestModel = undefined;
+			},
 			onPauseChange: paused => {
 				if (this.#isPaused === paused) return;
 				this.#isPaused = paused;
@@ -2105,7 +2119,10 @@ export class Agent {
 			onToolChoiceRejected: () => {
 				if (claimedToolChoice !== undefined) this.#deferredToolChoice = claimedToolChoice;
 			},
-			getModel: () => this.#state.model ?? model,
+			getModel: () => {
+				requestModel = this.#state.model ?? model;
+				return requestModel;
+			},
 			getReasoning: () => this.#state.thinkingLevel,
 			getDisableReasoning: () => this.#state.disableReasoning,
 			getServiceTier: this.#serviceTierResolver,
@@ -2235,6 +2252,13 @@ export class Agent {
 				: err instanceof Error
 					? err.message
 					: String(err);
+			const errorModel = requestModel ?? this.#state.model ?? model;
+			const errorStatus = stoppedForAbort ? undefined : AIError.status(err);
+			const errorId = stoppedForAbort
+				? errorMessage === "Request was aborted"
+					? AIError.create(AIError.Flag.Abort)
+					: AIError.classify(loopSignal.reason) || undefined
+				: AIError.classify(err, errorModel.api) || undefined;
 			const shouldEmitVisibleError = !stoppedForAbort;
 			const assistantPartial = partial?.role === "assistant" ? partial : undefined;
 			const hadAssistantStart = assistantPartial !== undefined;
@@ -2262,13 +2286,15 @@ export class Agent {
 							),
 							stopReason: "error",
 							errorMessage,
+							errorStatus,
+							errorId,
 						}
 					: {
 							role: "assistant",
 							content: [{ type: "text", text: "" }],
-							api: model.api,
-							provider: model.provider,
-							model: model.id,
+							api: errorModel.api,
+							provider: errorModel.provider,
+							model: errorModel.id,
 							usage: {
 								input: 0,
 								output: 0,
@@ -2279,6 +2305,8 @@ export class Agent {
 							},
 							stopReason: stoppedForAbort ? "aborted" : "error",
 							errorMessage,
+							errorStatus,
+							errorId,
 							timestamp: Date.now(),
 						};
 

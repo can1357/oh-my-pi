@@ -10,7 +10,7 @@ use std::{
 	rc::Rc,
 	sync::{
 		Arc, LazyLock, Weak,
-		atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+		atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
 	},
 	thread,
 	time::{Duration, Instant},
@@ -33,8 +33,8 @@ mod macos;
 mod windows;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::{
-	MONITORED_TYPES, POINTER_PRESS_TYPES, SYNTHETIC_EVENT_TAG, add_live_tap, invalidate_live_tap,
-	is_pointer_press, monitor_seen, uptime_ns,
+	FUNCTION_KEYS, MONITORED_TYPES, POINTER_PRESS_TYPES, SYNTHETIC_EVENT_TAG, add_live_tap,
+	invalidate_live_tap, is_pointer_press, monitor_seen, uptime_ns,
 };
 
 /// Time left before the run's deadline for a refusal to reach the caller.
@@ -96,6 +96,7 @@ impl CancellationSource {
 			source:     self.clone(),
 			generation: self.0.generation.load(Ordering::Acquire),
 			reply_by:   None,
+			dispatch:   None,
 		}
 	}
 
@@ -177,12 +178,40 @@ impl EmergencyStop {
 	}
 }
 
+const DISPATCH_IDLE: u8 = 0;
+const DISPATCH_SENT: u8 = 1;
+const DISPATCH_ABANDONED: u8 = 2;
+
+#[derive(Clone)]
+pub(crate) struct DispatchFence(Arc<AtomicU8>);
+
+impl DispatchFence {
+	/// Closes an idle fence; true means expiry cannot suppress the action.
+	pub(crate) fn abandon_reply(&self) -> bool {
+		self.0.compare_exchange(
+			DISPATCH_IDLE,
+			DISPATCH_ABANDONED,
+			Ordering::AcqRel,
+			Ordering::Acquire,
+		) == Err(DISPATCH_SENT)
+	}
+}
+
+/// The `Timeout` of a fenced request whose caller stopped waiting before it
+/// dispatched: both sides of the fence report this one outcome.
+pub(crate) fn abandoned_before_dispatch() -> DesktopError {
+	DesktopError::timeout(
+		"desktop caller stopped waiting before dispatch; nothing was sent and nothing will be",
+	)
+}
+
 #[derive(Clone)]
 pub(crate) struct OperationToken {
 	source:     CancellationSource,
 	generation: u64,
 	/// When the caller stops waiting for this request's reply.
 	reply_by:   Option<Instant>,
+	dispatch:   Option<DispatchFence>,
 }
 
 impl OperationToken {
@@ -199,6 +228,27 @@ impl OperationToken {
 	/// This token for a request whose caller waits for its reply until `at`.
 	pub(crate) fn replying_by(self, at: Instant) -> Self {
 		Self { reply_by: Some(at), ..self }
+	}
+
+	/// Arms only requests whose mutation route participates in dispatch fencing.
+	pub(crate) fn fence_dispatch(&mut self) {
+		self.dispatch = Some(DispatchFence(Arc::new(AtomicU8::new(DISPATCH_IDLE))));
+	}
+
+	pub(crate) fn dispatch_fence(&self) -> Option<DispatchFence> {
+		self.dispatch.clone()
+	}
+
+	/// When the caller stops waiting for a fenced reply: early enough before the
+	/// run's end to leave its result a reserve for reaching JS before the run's
+	/// abort, which it does not guarantee.
+	pub(crate) fn reply_wait_deadline(&self, reply_by: Instant) -> Instant {
+		if self.dispatch.is_none() {
+			return reply_by;
+		}
+		self.source.0.deadline.lock().map_or(reply_by, |run_by| {
+			reply_by.min(run_by.checked_sub(DEADLINE_MARGIN / 2).unwrap_or(run_by))
+		})
 	}
 
 	pub(crate) fn enter(&self) -> OperationScope {
@@ -331,6 +381,38 @@ pub(crate) fn check() -> CoreResult<()> {
 		return Ok(());
 	}
 	CURRENT.with_borrow(|token| token.as_ref().map_or(Ok(()), OperationToken::check))
+}
+
+/// Crosses the boundary after which reply expiry cannot suppress a mutation.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn dispatching() -> CoreResult<()> {
+	CURRENT.with_borrow(|token| {
+		let Some(dispatch) = token.as_ref().and_then(|token| token.dispatch.as_ref()) else {
+			return Ok(());
+		};
+		match dispatch.0.compare_exchange(
+			DISPATCH_IDLE,
+			DISPATCH_SENT,
+			Ordering::AcqRel,
+			Ordering::Acquire,
+		) {
+			Ok(_) | Err(DISPATCH_SENT) => Ok(()),
+			Err(_) => Err(abandoned_before_dispatch()),
+		}
+	})
+}
+
+/// Time the current operation has left before it must answer, less
+/// [`DEADLINE_MARGIN`] for the reply; `None` when it has no deadline.
+#[cfg(target_os = "windows")]
+pub(crate) fn time_left() -> Option<Duration> {
+	CURRENT
+		.with_borrow(|token| token.as_ref().and_then(OperationToken::deadline))
+		.map(|deadline| {
+			deadline
+				.saturating_duration_since(Instant::now())
+				.saturating_sub(DEADLINE_MARGIN)
+		})
 }
 
 /// [`check`] for a step that would send new input from inside [`cleanup`],
@@ -1283,6 +1365,36 @@ pub(crate) fn alone(test: &str) -> bool {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn dispatch_fence_tracks_each_request_independently() {
+		dispatching().unwrap();
+		let source = CancellationSource::default();
+		let plain = source.token();
+		let _plain_scope = plain.enter();
+		dispatching().unwrap();
+		assert!(plain.dispatch_fence().is_none());
+		let mut outer = source.token().replying_by(Instant::now());
+		assert!(outer.dispatch_fence().is_none());
+		outer.fence_dispatch();
+		let _outer_scope = outer.enter();
+		dispatching().unwrap();
+		{
+			let mut inner = source.token();
+			inner.fence_dispatch();
+			let fence = inner.dispatch_fence().unwrap();
+			assert!(!fence.abandon_reply());
+			assert!(!fence.abandon_reply());
+			let _inner_scope = inner.enter();
+			assert_eq!(dispatching().unwrap_err().code, ErrorCode::Timeout);
+		}
+		dispatching().unwrap();
+		assert!(outer.dispatch_fence().unwrap().abandon_reply());
+		// A reply wait ending before the run's reserve is kept as is.
+		let reply_by = Instant::now();
+		source.set_deadline(Some(reply_by + Duration::from_secs(10)));
+		assert_eq!(outer.reply_wait_deadline(reply_by), reply_by);
+	}
 
 	/// Removes this process's private kernel lock (see `KernelLease::path`).
 	fn remove_test_lock() {

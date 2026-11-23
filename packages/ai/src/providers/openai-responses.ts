@@ -1291,28 +1291,50 @@ const streamOpenAIResponsesOnce = (
 					}
 
 					// OpenRouter's Responses translation can hide a native failure behind
-					// "completed". Consult metadata only for truly empty stops, never
-					// for replayable reasoning or provider-hosted tool progress.
+					// "completed". Consult metadata only for stops with no progress the
+					// caller could act on: no visible output, no provider-hosted tool
+					// items, and (when a reasoning item is present) no billed reasoning
+					// tokens. An encrypted reasoning item with neither reasoning text
+					// nor reasoning tokens is not replayable progress and must not
+					// suppress the probe.
+					// Gate on the cheap flags first so ordinary non-OpenRouter
+					// completions never run the output scans below.
 					if (
 						model.compat.isOpenRouterHost &&
 						output.stopReason === "stop" &&
-						output.content.length === 0 &&
-						nativeOutputItems.length === 0 &&
 						!output.stopDetails &&
 						output.responseId
 					) {
-						const nativeError = await readOpenRouterGenerationError({
-							baseUrl: resolvedBaseUrl,
-							headers,
-							responseId: output.responseId,
-							outputTokens: output.usage.output,
-							reasoningTokens: output.usage.reasoningTokens,
-							fetch: options?.fetch,
-							signal: requestSignal,
-						});
-						if (abortTracker.wasCallerAbort()) throw new AIError.AbortError();
-						if (nativeError) {
-							throw new AIError.ProviderResponseError(nativeError, { provider: model.provider, kind: "output" });
+						const hasVisibleOutput = output.content.some(block =>
+							block.type === "thinking" ? false : block.type === "text" ? block.text.trim().length > 0 : true,
+						);
+						const hasNonReasoningOutputItem = nativeOutputItems.some(
+							item => item.type !== "reasoning" && item.type !== "thinking",
+						);
+						const hasReasoningOutputItem = nativeOutputItems.some(
+							item => item.type === "reasoning" || item.type === "thinking",
+						);
+						if (
+							!hasVisibleOutput &&
+							!hasNonReasoningOutputItem &&
+							(!hasReasoningOutputItem || (output.usage.reasoningTokens ?? 0) === 0)
+						) {
+							const nativeError = await readOpenRouterGenerationError({
+								baseUrl: resolvedBaseUrl,
+								headers,
+								responseId: output.responseId,
+								outputTokens: output.usage.output,
+								reasoningTokens: output.usage.reasoningTokens,
+								fetch: options?.fetch,
+								signal: requestSignal,
+							});
+							if (abortTracker.wasCallerAbort()) throw new AIError.AbortError();
+							if (nativeError) {
+								throw new AIError.ProviderResponseError(nativeError, {
+									provider: model.provider,
+									kind: "output",
+								});
+							}
 						}
 					}
 
@@ -1874,10 +1896,11 @@ export function buildParams(
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
 	let systemInstructions: string | undefined;
 	if (systemPrompts.length > 0) {
-		const needsDeveloperRole = policy.messages.systemRole === "developer";
-		if (needsDeveloperRole) {
+		if (policy.messages.systemRole === "developer" || model.compat.uncachedInstructions) {
 			// Reasoning models on known OpenAI-compatible endpoints require the
-			// `developer` role. Send all system prompts inline in `input`.
+			// `developer` role, and models that never prompt-cache top-level
+			// `instructions` (GPT-6.2) need it on every host, proxies included.
+			// Send all system prompts inline in `input`.
 			messages.unshift(
 				...systemPrompts.map(systemPrompt => ({ role: "developer" as const, content: systemPrompt })),
 			);

@@ -36,7 +36,6 @@ interface FakeSessionDeps {
 	cwd?: string;
 	entries?: Array<{ role: "user" | "assistant"; text: string }>;
 	settings?: Settings;
-	xdevEntries?: Array<{ name: string; summary: string }>;
 }
 
 // Primary states resolve their retain outbox under the agent dir.
@@ -100,7 +99,6 @@ function makeFakeSession(deps: FakeSessionDeps) {
 		emitNotice: () => {},
 		settleMemoryBackend: async () => {},
 		getHindsightSessionState: () => hindsightState,
-		getXdevToolEntries: () => deps.xdevEntries ?? [],
 		setHindsightSessionState(state: HindsightSessionState | undefined) {
 			const previous = hindsightState;
 			hindsightState = state;
@@ -421,28 +419,6 @@ describe("hindsightBackend first-turn injection", () => {
 		const block = await pending;
 		expect(block).toBeUndefined();
 		expect(session.getHindsightSessionState()?.hasRecalledForFirstTurn).toBe(false);
-	});
-
-	it("names memory tools by their xd:// URL only when they are mounted as devices", async () => {
-		const settings = Settings.isolated({
-			"memory.backend": "hindsight",
-			"hindsight.apiUrl": "http://localhost:8888",
-		});
-		const session = makeFakeSession({
-			sessionId: "s-xd",
-			xdevEntries: [{ name: "recall", summary: "Search memory" }],
-		});
-		await hindsightBackend.start({
-			session: session as never,
-			settings,
-			modelRegistry: {} as never,
-			agentDir: "/tmp",
-			taskDepth: 0,
-		});
-
-		const prompt = await hindsightBackend.buildDeveloperInstructions("/tmp", "/tmp", settings, session as never);
-		expect(prompt).toContain("Use `xd://recall` proactively");
-		expect(prompt).toContain("Use `retain` to store");
 	});
 
 	it("places the <mental_models> block above the <memories> recall block in developer instructions", async () => {

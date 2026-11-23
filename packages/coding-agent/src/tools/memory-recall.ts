@@ -4,7 +4,6 @@ import { logger, prompt, sanitizeText, untilAborted, toError } from "@oh-my-pi/p
 import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config";
 import { formatCurrentTime, formatMemories } from "../hindsight/content";
 import recallDescription from "../prompts/tools/recall.md" with { type: "text" };
-import { sessionMemoryToolRefs } from "../memory-backend/tool-names";
 import type { ToolSession } from ".";
 
 import { isSupermemoryConfigured, loadSupermemoryConfig } from "../supermemory/config";
@@ -23,7 +22,6 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 	readonly label = "Recall";
 	get description(): string {
 		return prompt.render(recallDescription, {
-			toolRefs: sessionMemoryToolRefs(this.session),
 			supermemory: cfgMemoryBackend.get(this.session.settings) === "supermemory",
 		});
 	}

@@ -246,7 +246,7 @@ describe("SessionAnonymizer", () => {
 		});
 	});
 
-	test("keeps a session_init's mounted-device list beside its tool list", () => {
+	test("keeps a session_init's mounted tool-command list beside its tool list", () => {
 		const anonymizer = new SessionAnonymizer();
 		const result = anonymizer.entry({
 			type: "session_init",

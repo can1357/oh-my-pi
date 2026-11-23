@@ -34,11 +34,11 @@ use super::{
 };
 use crate::bash::{
 	diag::Diag,
-	event::{EventData, RedirInfo, RedirKind, WaitKey},
+	event::{EventData, NodeKind, NodeRef, RedirInfo, RedirKind, WaitKey},
 	fd::{FdOrigin, FdRef},
 	fs::{File, FileKind, FsOp, FsPoll, OpenFlags, SeekFrom, StatKind},
-	host::{ChildRedir, OsHandle},
-	ids::Dialect,
+	host::{ChildRedir, OsHandle, TapSite},
+	ids::{AstNodeId, Dialect},
 	ir::{RedirFdIr, RedirIr, RedirTargetIr, SpawnKind, Unit},
 	mem::MemBuf,
 	store::{OptId, VarValue},
@@ -174,6 +174,7 @@ pub fn apply(
 		progress.done += 1;
 		progress.target = None;
 		sc.logs[Slot::Redirs as usize].clear();
+		tap_file(vp, cx, unit, r, &target);
 		if k.mask.contains(crate::bash::event::EventKind::Redirect) {
 			let fd = match r.fd {
 				RedirFdIr::Num(n) => n as i32,
@@ -185,6 +186,62 @@ pub fn apply(
 			});
 		}
 	}
+}
+
+/// Tell the host's pipe tap ([`crate::bash::PipeTap::file`]) of the regular
+/// file output redirection `r` just installed on its fd.
+fn tap_file(vp: &Vproc, cx: &mut Cx<'_>, unit: &Unit, r: &RedirIr, target: &BString) {
+	if !matches!(
+		r.op,
+		RedirKind::Out
+			| RedirKind::Append
+			| RedirKind::Clobber
+			| RedirKind::OutErr
+			| RedirKind::AppendErr
+	) {
+		return;
+	}
+	let fd = match r.fd {
+		RedirFdIr::Num(n) => n as i32,
+		RedirFdIr::Var(_) => return,
+		RedirFdIr::Default => default_fd(r.op),
+	};
+	if vp.fds.get(fd).and_then(FdRef::kind) != Some(FileKind::Regular) {
+		return;
+	}
+	let Some(tap) = cx.host.pipe_tap() else {
+		return;
+	};
+	let path = absolute(&vp.cwd, target);
+	let node = command_node(unit, word_of(r));
+	let text = node
+		.and_then(|n| unit.nodes.get(n as usize))
+		.and_then(|n| unit.source.get(n.lo as usize..n.hi as usize))
+		.unwrap_or_default();
+	let site = TapSite {
+		vpid: vp.vpid,
+		node: node.map(|node| NodeRef { unit: unit.id, node: AstNodeId(node) }),
+		text: BStr::new(text),
+	};
+	tap.file(site, BStr::new(&path));
+}
+
+/// Node of the command redirection target word `w` belongs to: the smallest
+/// statement around the word.
+fn command_node(unit: &Unit, w: usize) -> Option<u32> {
+	let word = unit
+		.words
+		.get(w)
+		.and_then(|w| unit.nodes.get(w.node as usize))?;
+	unit
+		.nodes
+		.iter()
+		.enumerate()
+		.filter(|(_, n)| {
+			!matches!(n.kind, NodeKind::Word | NodeKind::Assign) && n.lo <= word.lo && word.hi <= n.hi
+		})
+		.min_by_key(|(_, n)| n.hi - n.lo)
+		.map(|(id, _)| id as u32)
 }
 
 const fn word_of(r: &RedirIr) -> usize {

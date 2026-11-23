@@ -182,9 +182,11 @@ describe("/mcp auth commands", () => {
 			expect.objectContaining({ url: EXPANDED_SERVER_URL }),
 			expect.objectContaining({ oauth: false }),
 		);
+		// A live probe: the host's store must not answer for a server that now wants authorization.
 		expect(connectToServer).toHaveBeenCalledWith(
 			expect.any(String),
 			expect.objectContaining({ url: EXPANDED_SERVER_URL }),
+			{ live: true },
 		);
 		expect(authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
 			type: "oauth",

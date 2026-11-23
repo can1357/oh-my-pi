@@ -341,8 +341,10 @@ export async function reconnectMcpManagerServer(
 	if (!managerConfig) return undefined;
 	const pending = manager.updateServerConfig(name, clearMcpClientAuthSurface(managerConfig));
 	if (pending) await pending;
-	await manager.reconnectServer(name, { manual: true });
-	return manager.getConnectionStatus(name);
+	const connection = await manager.reconnectServer(name, { manual: true });
+	const state = manager.getConnectionStatus(name);
+	// The attempt's own outcome decides: a link that is attached again says nothing about a reconnect that failed.
+	return connection || state !== "connected" ? state : "disconnected";
 }
 
 /**
@@ -363,7 +365,8 @@ export async function probeMcpConnection(
 		resolvedConfig = await tempManager.prepareConfig(config, { oauth: options.oauth });
 	}
 
-	const connection = await connectToServer(`mcp_probe_${Date.now()}`, resolvedConfig);
+	// Live: a stored discovery would answer for a server that now refuses, or hide the challenge an anonymous probe is after.
+	const connection = await connectToServer(`mcp_probe_${Date.now()}`, resolvedConfig, { live: true });
 	await disconnectServer(connection);
 }
 
@@ -610,6 +613,7 @@ export async function runMcpOAuthFlow(opts: McpOAuthFlowRunOptions): Promise<OAu
 			clientSecret: flow.registeredClientSecret ?? resolvedClientSecret,
 			resource: flow.resource,
 			authorizationUrl: flow.authorizationUrl,
+			scope: flow.grantedScope,
 		};
 
 		await opts.authStorage.credentials.set(credentialId, oauthCredential);

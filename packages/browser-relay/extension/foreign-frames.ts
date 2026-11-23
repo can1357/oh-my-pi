@@ -1,4 +1,4 @@
-/// <reference path="./chrome.d.ts" />
+/// <reference types="chrome" />
 /**
  * While any frame of a tab, cross-site ones included, shows another extension's page, Chrome refuses this
  * extension's debugger there: `attach` and every `sendCommand` fail with "Cannot access a chrome-extension:// URL
@@ -16,11 +16,27 @@ const RETRY_DELAYS_MS = [50, 100, 200, 400];
 /** The sweep in flight per tab, which the refused commands of one burst share. */
 const sweeps = new Map<number, Promise<number>>();
 
-// Page globals of the function injected below, which runs in the tab's frames, not in this worker.
-declare const document: ChromePageRoot & {
-	createTreeWalker(root: ChromePageRoot, whatToShow: number): { nextNode(): ChromePageElement | null };
-};
-declare const NodeFilter: { readonly SHOW_ELEMENT: number };
+// The page as the function injected below sees it. Declared here rather than taken from the DOM lib: omp's own tests
+// load this module into a program without it.
+/** An element the injected sweep walks. */
+interface PageElement {
+	readonly tagName: string;
+	getAttribute(name: string): string | null;
+	setAttribute(name: string, value: string): void;
+	readonly style: { setProperty(name: string, value: string, priority?: string): void };
+}
+/** A document or shadow root the injected sweep walks. */
+interface PageRoot {
+	readonly nodeType: number;
+}
+/** The page's `document`, for walking its elements. */
+interface PageDocument extends PageRoot {
+	createTreeWalker(root: PageRoot, whatToShow: number): { nextNode(): PageElement | null };
+}
+/** `chrome.dom` as a content script sees it: reaches shadow roots another extension created closed. */
+interface PageDom {
+	openOrClosedShadowRoot(element: PageElement): PageRoot | null;
+}
 
 /** Run a `chrome.debugger` request on `tabId`, emptying other extensions' frames whenever Chrome refuses it for one. */
 export async function pastForeignFrames<T>(tabId: number, request: () => Promise<T>): Promise<T> {
@@ -54,6 +70,7 @@ function sweep(tabId: number): Promise<number> {
 /** Receives the frames each sweep emptied; the relay tells the agent driving the tab what was hidden. */
 let reportHidden: (tabId: number, frames: HiddenFrame[]) => void = () => {};
 
+/** Route the frames each sweep emptied to `report` (the relay's `framesHidden` message). */
 export function onForeignFramesHidden(report: (tabId: number, frames: HiddenFrame[]) => void): void {
 	reportHidden = report;
 }
@@ -136,7 +153,7 @@ async function reportEmptied(tabId: number, srcsByFrame: Map<number, string[]>):
  * emptied now are reported (`onForeignFramesHidden`).
  */
 async function neutralizeForeignFrames(tabId: number): Promise<number> {
-	let results: Array<ChromeInjectionResult<{ found: number; emptied: string[] }>>;
+	let results: Array<chrome.scripting.InjectionResult<{ found: number; emptied: string[] }>>;
 	try {
 		results = await chrome.scripting.executeScript({
 			target: { tabId, allFrames: true },
@@ -144,8 +161,14 @@ async function neutralizeForeignFrames(tabId: number): Promise<number> {
 			args: [chrome.runtime.id],
 			func: (self: string) => {
 				const swept = { found: 0, emptied: [] as string[] };
-				const visit = (root: ChromePageRoot) => {
-					const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+				// Runs in the tab's frames: these are the page's globals. Read by a widened key, since the DOM lib's
+				// `Document` (absent from some programs that load this module) is wider than the walk needs.
+				const documentKey: string = "document";
+				const page: PageDocument = Reflect.get(globalThis, documentKey);
+				const dom: PageDom = chrome.dom;
+				const visit = (root: PageRoot) => {
+					// `NodeFilter.SHOW_ELEMENT`; the function is serialized, so it can't close over a module constant.
+					const walker = page.createTreeWalker(root, 1);
 					for (let element = walker.nextNode(); element; element = walker.nextNode()) {
 						const tag = element.tagName.toUpperCase();
 						if (tag === "IFRAME" || tag === "FRAME") {
@@ -164,11 +187,18 @@ async function neutralizeForeignFrames(tabId: number): Promise<number> {
 								swept.found++;
 							}
 						}
-						const shadow = chrome.dom.openOrClosedShadowRoot(element);
+						// It takes HTML elements only and throws for others (SVG, MathML), which would abort the whole
+						// sweep and lose what it emptied so far; those have no shadow root anyway.
+						let shadow: PageRoot | null = null;
+						try {
+							shadow = dom.openOrClosedShadowRoot(element);
+						} catch {
+							// Not an HTML element.
+						}
 						if (shadow) visit(shadow);
 					}
 				};
-				visit(document);
+				visit(page);
 				return swept;
 			},
 		});

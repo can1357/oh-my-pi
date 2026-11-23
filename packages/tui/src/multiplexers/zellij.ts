@@ -21,4 +21,6 @@ export const zellijMultiplexer = {
 	// Zellij currently breaks OSC 11 passthrough on macOS, so terminal-derived
 	// appearance cannot be trusted there.
 	backgroundQueryBrokenOn: ["darwin"],
+	backgroundReplyMayFollowDa1: true,
+	colorSchemeQueryAuthoritative: true,
 } as const satisfies TerminalMultiplexerModule;

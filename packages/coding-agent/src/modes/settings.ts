@@ -393,19 +393,6 @@ export const cfgTuiResizeScrollback = register({
 	},
 });
 
-export const cfgTuiCompleteScrollback = register({
-	id: "tui.completeScrollback",
-	type: "boolean",
-	default: false,
-	ui: {
-		tab: "appearance",
-		group: "Display",
-		label: "Complete Scrollback",
-		description:
-			"Send transcript rows pushed off screen by a growing HUD or dialog straight to scrollback; when it shrinks, blank rows sit between the transcript and the input until new output fills them",
-	},
-});
-
 export const cfgTerminalShowProgress = register({
 	id: "terminal.showProgress",
 	type: "boolean",
@@ -997,7 +984,57 @@ export const cfgTuiVimModeDisplay = register({
 		options: [
 			{ value: "text", label: "Text", description: "Full mode name — NORMAL, INSERT, VISUAL, V-LINE, REPLACE" },
 			{ value: "icon", label: "Icon", description: "Single compact glyph per mode" },
-			{ value: "none", label: "Hidden", description: "Do not show the mode in the status line" },
+			{
+				value: "none",
+				label: "Hidden",
+				description: "Do not show the mode; a command being typed still shows with Vim Show Command",
+			},
+		],
+	},
+});
+
+export const cfgTuiVimShowCommand = register({
+	id: "tui.vimShowCommand",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Vim Show Command",
+		description:
+			"Show the command being typed in the status line, like Vim's showcmd: 15d before its last d. Shows even when the mode indicator is hidden",
+		condition: "vimModeEnabled",
+	},
+});
+
+export const cfgTuiVimYankToClipboard = register({
+	id: "tui.vimYankToClipboard",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Vim Yanks Copy to Clipboard",
+		description:
+			'Every Vim yank also copies to the system clipboard, as in Vim with clipboard=unnamed. Off: only "+y and "*y do',
+		condition: "vimModeEnabled",
+	},
+});
+
+export const cfgTuiVimStartMode = register({
+	id: "tui.vimStartMode",
+	type: "enum",
+	values: ["insert", "normal"] as const,
+	default: "insert",
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Vim Start Mode",
+		description: "Mode each new prompt starts in: at startup, after each message you send, and in dialog text boxes",
+		condition: "vimModeEnabled",
+		options: [
+			{ value: "insert", label: "Insert", description: "Type right away; Escape for Normal mode" },
+			{ value: "normal", label: "Normal", description: "Start on Vim commands; i, a, o and the like to type" },
 		],
 	},
 });
@@ -1480,6 +1517,19 @@ export const cfgAskNotify = register({
 		group: "Notifications",
 		label: "Ask Notification",
 		description: "Notify when the ask tool is waiting for input",
+	},
+});
+
+export const cfgPtyNotify = register({
+	id: "pty.notify",
+	type: "enum",
+	values: ["on", "off"] as const,
+	default: "on",
+	ui: {
+		tab: "interaction",
+		group: "Notifications",
+		label: "Console Notification",
+		description: "Notify when an interactive console (bash `pty`) is waiting on you",
 	},
 });
 

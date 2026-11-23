@@ -28,7 +28,7 @@
 - Tool metadata: `strict = true`, `loadMode = "discoverable"`. Approval is dynamic: a call with any `scope: "global"` item has `approval = "write"`, because the write reaches every project's recall; otherwise `approval = "read"`, even though successful calls enqueue or perform memory writes.
 - The tool is registered only for `memory.backend = "hindsight"`, `"mnemopi"`, or `"supermemory"`; it is absent for `"off"` and `"local"`. Hindsight additionally requires a non-empty configured API URL (`isHindsightConfigured(loadHindsightConfig(...))`); Supermemory requires an API key, an accepted base URL and no invalid `SUPERMEMORY_NAMESPACE` (`isSupermemoryConfigured(loadSupermemoryConfig(...))`).
 - In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set for either supported backend. Restricted lists are not widened.
-- In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://retain`; an explicitly requested tool remains top-level.
+- In an ordinary `tools.commands` session with `bash` active, discoverable built-ins are presented as tool commands (`retain --help`, `retain <args>` in `bash`); an explicitly requested tool remains top-level.
 - Execution returns one final result and has no progress callback or cancellation parameter.
 
 ## Inputs

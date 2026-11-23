@@ -3,13 +3,15 @@
  * directory — task agents, project extensions, custom tools, and project MCP servers —
  * so the session sees the destination project's set, and moving back restores the source's.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { closeExtensionParseCacheForTests } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
+import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
@@ -23,6 +25,7 @@ import {
 	setAgentDir,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
+import { IsolatedDaemon } from "./fixtures/daemon-harness";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 /** Newline-delimited JSON-RPC MCP server exposing one `<server>_probe` tool. */
@@ -95,38 +98,44 @@ function writeProject(root: string, label: string, mcpServerScript: string): voi
 	);
 }
 
-/**
- * `/move` reconnects MCP servers in the background (turns wait for them, bounded) and exposes no
- * completion signal, so the test polls the live registry while real stdio servers handshake.
- */
-async function until(condition: () => boolean, what: string): Promise<void> {
-	const deadline = Date.now() + 10_000;
-	while (!condition()) {
-		if (Date.now() > deadline) throw new Error(`Timed out waiting for ${what}`);
-		await Bun.sleep(20);
-	}
-}
-
 describe("/move re-scopes project-discovered capabilities", () => {
 	const tempDirs: string[] = [];
 	const originalProjectDir = getProjectDir();
 	const originalAgentDir = getAgentDir();
+	let daemon: IsolatedDaemon | undefined;
 
-	afterEach(() => {
-		setProjectDir(originalProjectDir);
-		setAgentDir(originalAgentDir);
-		AgentStorage.close();
-		for (const tempDir of tempDirs.splice(0)) removeSyncWithRetries(tempDir);
-	});
+	// dispose() waits up to 10 s for the daemon to exit; without --timeout, Bun gives a hook only 5 s.
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		try {
+			await daemon?.dispose();
+		} finally {
+			daemon = undefined;
+			setProjectDir(originalProjectDir);
+			setAgentDir(originalAgentDir);
+			AgentStorage.close();
+			// Extensions loaded under the test home opened its parse cache there.
+			closeExtensionParseCacheForTests();
+			for (const tempDir of tempDirs.splice(0)) removeSyncWithRetries(tempDir);
+		}
+	}, 15_000);
 
 	it("swaps agents, extensions, custom tools, and MCP servers to the destination and back", async () => {
 		const tempDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-move-project-scope-")));
 		tempDirs.push(tempDir);
 		const cwdA = path.join(tempDir, "alpha");
 		const cwdB = path.join(tempDir, "beta");
+		// MCP discovery also reads the machine's own config under the home directory (the plugins
+		// installed in ~/.omp/plugins, among others): a test-local home keeps their servers out.
+		// Set it before setAgentDir, which reads the home for omp's other paths (its caches, among others).
+		const home = path.join(tempDir, "home");
+		fs.mkdirSync(home);
+		spyOn(os, "homedir").mockReturnValue(home);
 		const agentDir = path.join(tempDir, "agent");
 		fs.mkdirSync(agentDir, { recursive: true });
 		setAgentDir(agentDir);
+		// Shared MCP servers run in an omp daemon: a daemon of the test's own keeps the user's daemon out.
+		daemon = await IsolatedDaemon.create();
 		const mcpServerScript = path.join(tempDir, "mcp-server.js");
 		fs.writeFileSync(mcpServerScript, MCP_SERVER_SOURCE);
 		writeProject(cwdA, "alpha", mcpServerScript);
@@ -137,8 +146,9 @@ describe("/move re-scopes project-discovered capabilities", () => {
 		const settings = await Settings.loadIsolated({ cwd: cwdA, agentDir });
 		const sessionManager = SessionManager.create(cwdA, SessionManager.getDefaultSessionDir(cwdA, agentDir));
 		let session: AgentSession | undefined;
+		let mcpManager: MCPManager | undefined;
 		try {
-			({ session } = await createAgentSession({
+			({ session, mcpManager } = await createAgentSession({
 				cwd: cwdA,
 				agentDir,
 				sessionManager,
@@ -156,10 +166,18 @@ describe("/move re-scopes project-discovered capabilities", () => {
 				rules: [],
 			}));
 			const live = session;
+			const manager = mcpManager!;
 			const tools = () => live.getAllToolNames();
 			const hasMcpProbe = (label: string) => tools().some(name => name.endsWith(`${label}_probe`));
 			const taskDescription = () => live.getToolByName("task")?.description ?? "";
+			// MCP servers connect in the background, after the startup window and after `/move`'s reload,
+			// so the test waits for those connects themselves, with no deadline of its own: its verdict is
+			// what connected, not whether a loaded machine started a server within some time.
+			const reloads = spyOn(live, "reloadMCPServers");
+			// The MCP wait comes back in an object (an async function adopts a returned promise): the checks of
+			// what `/move` completes itself run as soon as it returns, and only the MCP checks wait.
 			const move = async (target: string, from: string) => {
+				const before = reloads.mock.results.length;
 				const output: string[] = [];
 				await executeAcpBuiltinSlashCommand(`/move ${target}`, {
 					session: live,
@@ -172,14 +190,23 @@ describe("/move re-scopes project-discovered capabilities", () => {
 					refreshCommands: () => {},
 					reloadPlugins: async () => {},
 				});
+				// The MCP reload this move started. A reload that threw fails the test with its own error.
+				const reload = reloads.mock.results[before];
+				if (reload?.type === "throw") throw reload.value;
 				expect(output.join("\n")).toContain("Moved to ");
+				// `/move` starts one MCP reload; its servers may still be connecting when `/move` returns.
+				expect(reloads).toHaveBeenCalledTimes(before + 1);
+				if (reload?.type !== "return") throw new Error("/move returned before its MCP reload did");
+				return { mcpSettled: reload.value.then(() => manager.waitForStartup(0)) };
 			};
 
 			expect(tools()).toEqual(expect.arrayContaining(["alpha_ext_tool", "alpha_custom_tool"]));
+			// A server that could not connect fails here with its own error.
+			expect((await manager.waitForStartup(0)).failed).toEqual([]);
 			expect(hasMcpProbe("alpha")).toBe(true);
 			expect(taskDescription()).toContain("alpha-agent");
 
-			await move(cwdB, cwdA);
+			const toBeta = await move(cwdB, cwdA);
 
 			expect(sessionManager.getCwd()).toBe(cwdB);
 			expect(tools()).toEqual(expect.arrayContaining(["beta_ext_tool", "beta_custom_tool"]));
@@ -191,15 +218,19 @@ describe("/move re-scopes project-discovered capabilities", () => {
 			expect(customResult.content).toEqual([{ type: "text", text: cwdB }]);
 			expect(taskDescription()).toContain("beta-agent");
 			expect(taskDescription()).not.toContain("alpha-agent");
-			await until(() => hasMcpProbe("beta") && !hasMcpProbe("alpha"), "beta MCP tools to replace alpha's");
+			expect((await toBeta.mcpSettled).failed).toEqual([]);
+			expect(hasMcpProbe("beta")).toBe(true);
+			expect(hasMcpProbe("alpha")).toBe(false);
 
-			await move(cwdA, cwdB);
+			const toAlpha = await move(cwdA, cwdB);
 
 			expect(tools()).toEqual(expect.arrayContaining(["alpha_ext_tool", "alpha_custom_tool"]));
 			expect(tools()).not.toContain("beta_ext_tool");
 			expect(tools()).not.toContain("beta_custom_tool");
 			expect(taskDescription()).toContain("alpha-agent");
-			await until(() => hasMcpProbe("alpha") && !hasMcpProbe("beta"), "alpha MCP tools to return");
+			expect((await toAlpha.mcpSettled).failed).toEqual([]);
+			expect(hasMcpProbe("alpha")).toBe(true);
+			expect(hasMcpProbe("beta")).toBe(false);
 		} finally {
 			await session?.dispose();
 			authStorage.close();
