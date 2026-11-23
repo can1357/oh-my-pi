@@ -28,7 +28,7 @@ import {
 import { addKeyAliases, canonicalKeyId, type KeyId, type Keybinding } from "@oh-my-pi/pi-tui";
 import { KEYBINDINGS, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appApproveKeys, appFollowUpKeys } from "@oh-my-pi/pi-tui/keybinding-matchers";
-import { logger } from "@oh-my-pi/pi-utils";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import { refreshShellConfigCache } from "@oh-my-pi/pi-utils/procmgr";
 import { MAIN_AGENT_RULE_NAME } from "../../capability/rule";
 import type { ModelRegistry } from "../../config/model-registry";
@@ -843,6 +843,18 @@ export class ExtensionRunner {
 	/** Guidance a same-name replacement inherits from the native `name` tool it can delegate to. */
 	getNativeDelegationGuidance(name: string): string {
 		return this.#nativeToolResolver?.(name)?.tool.delegationGuidance ?? "";
+	}
+
+	/**
+	 * Whether the native built-in of `name` must run this call itself rather than the same-name
+	 * extension replacement: a `bash` line made only of session tool commands, which only the
+	 * native transport host can dispatch (see {@link AgentTool.servesToolCommandLine}). False for
+	 * every other call and whenever no native built-in of `name` exists.
+	 */
+	servesToolCommandLine(name: string, params: unknown): boolean {
+		const command = isRecord(params) ? params.command : undefined;
+		if (typeof command !== "string") return false;
+		return this.#nativeToolResolver?.(name)?.tool.servesToolCommandLine?.(command) === true;
 	}
 
 	/**
