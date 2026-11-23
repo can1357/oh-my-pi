@@ -193,6 +193,14 @@ export const stateDefs = {
 			"The command ended in another directory than it started in; the next command starts in its own cwd.",
 		),
 		"errexit?": doc("boolean", "The command ended with `set -e` on; the next command starts with it off."),
+		"endedByExit?": doc(
+			"boolean",
+			"Whether `exit` or an armed `set -e` left ordinary command input unrun. Shell cleanup can still run. An `exit` with no remaining work is not reported.",
+		),
+		"ephemeralShell?": doc(
+			"boolean",
+			"Whether the run's state was not retained in the session's persistent shell after cleanup. A fork adopted into a retained session is not ephemeral; an unadopted fork or a released shell is.",
+		),
 		"images?": "ImageContent[]",
 		"trace?": doc(
 			JSON_OBJECT,

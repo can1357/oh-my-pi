@@ -3221,6 +3221,12 @@ pub struct BashResult {
 	/// The command ended with `set -e` on; the next command starts with it off.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub errexit: Option<bool>,
+	/// Whether `exit` or an armed `set -e` left ordinary command input unrun. Shell cleanup can still run. An `exit` with no remaining work is not reported.
+	#[serde(rename = "endedByExit", default, skip_serializing_if = "Option::is_none")]
+	pub ended_by_exit: Option<bool>,
+	/// Whether the run's state was not retained in the session's persistent shell after cleanup. A fork adopted into a retained session is not ephemeral; an unadopted fork or a released shell is.
+	#[serde(rename = "ephemeralShell", default, skip_serializing_if = "Option::is_none")]
+	pub ephemeral_shell: Option<bool>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub images: Option<Vec<ImageContent>>,
 	/// The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.

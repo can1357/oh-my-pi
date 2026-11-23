@@ -2,7 +2,7 @@
 //! per-op semantics, and frame control (calls, returns, unwinding).
 
 use std::{
-	collections::HashMap,
+	collections::{HashMap, HashSet},
 	fmt::NumBuffer,
 	sync::Arc,
 	task::{Context, Poll},
@@ -16,8 +16,8 @@ use super::{
 	is_ident, probe,
 	proc::{
 		AssignValue, Atom, Bang, BangStage, Coproc, Depths, Frame, FrameKind, InlineStage, LastBg,
-		LoopKind, LoopRec, ParseSnapshot, PendingSub, PendingWrite, Probe, ProbeResult, Run, Saved,
-		Scratch, ScriptKind, Slot, TryEnd, Vproc,
+		LocaleBindings, LoopKind, LoopRec, ParseSnapshot, PendingSub, PendingWrite, Probe,
+		ProbeResult, Run, Saved, Scratch, ScriptKind, Slot, TryEnd, Vproc,
 	},
 	redir,
 	state::{self, Level, Root, Scope, Var, VarMap},
@@ -34,9 +34,21 @@ use crate::bash::{
 	mem::{self, Capture},
 	pattern::PatOpts,
 	store::{Attrs, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, TrapKey},
-	syntax::{CompleteCommand, Features, ParseError, ParseErrorKind, Parser, Pos, Resume},
+	syntax::{
+		AliasLookup, CompleteCommand, Features, ParseError, ParseErrorKind, Parser, Pos, Resume,
+	},
 	zshopt::ZshOpt,
 };
+
+/// Why the shell terminated a run. Transient attribution, not image or wire
+/// state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExitCause {
+	Exit,
+	ExecReplace,
+	PosixFatal,
+	FatalSignal,
+}
 
 /// Result of one op.
 pub enum Flow {
@@ -58,7 +70,10 @@ pub enum Flow {
 		cont: bool,
 	},
 	/// `exit n` (also a fatal expansion error).
-	Exit(i32),
+	Exit {
+		status: i32,
+		cause:  ExitCause,
+	},
 	/// An expansion or arithmetic error: abandon the current top-level command.
 	Discard(i32),
 }
@@ -415,7 +430,8 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 						unwind(&mut k.root, cx.store, vp, i);
 					}
 				} else if vp.parent.is_some() && in_function_scope(k, cx, vp) {
-					exit_shell(k, vp, cx, status);
+					let unrun = top_frame(vp).pc + 1;
+					exit_shell(k, vp, cx, status, TopCut::At(unrun), None);
 				} else {
 					let line = line_of(vp, op.node);
 					let diag =
@@ -429,8 +445,19 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				zsh_break(k, vp, cx, n, cont);
 			},
 			Flow::Break { n, cont } => break_loops(k, vp, cx, n, cont, op),
-			Flow::Exit(status) if unit.mode.dialect() == Dialect::Zsh => zsh_exit(k, vp, cx, status),
-			Flow::Exit(status) => exit_shell(k, vp, cx, status),
+			Flow::Exit { status, cause } if unit.mode.dialect() == Dialect::Zsh => {
+				let unrun = top_frame(vp).pc + 1;
+				let cleanup_runs = vp
+					.frames
+					.iter()
+					.any(|f| matches!(f.kind, FrameKind::Function { .. }));
+				capture_exit_report(k, vp, cx, status, TopCut::At(unrun), cause, cleanup_runs);
+				zsh_exit(k, vp, cx, status);
+			},
+			Flow::Exit { status, cause } => {
+				let unrun = top_frame(vp).pc + 1;
+				exit_shell(k, vp, cx, status, TopCut::At(unrun), cause);
+			},
 			Flow::Discard(status) if unit.mode.dialect() == Dialect::Zsh => {
 				zsh_discard(k, vp, cx, status);
 			},
@@ -459,9 +486,17 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			finish_cancel(&mut k.root, cx.store, vp, cancellation.expect("checked"));
 			continue;
 		}
-		let errexit = errexit_failed
-			&& (errexit_on(k, cx, vp)
-				|| (unit.mode.dialect() == Dialect::Zsh && zsh_errreturn_exits(k, cx, vp)));
+		let armed_errexit = errexit_failed && errexit_on(k, cx, vp);
+		let errexit = armed_errexit
+			|| (errexit_failed
+				&& unit.mode.dialect() == Dialect::Zsh
+				&& zsh_errreturn_exits(k, cx, vp));
+		if armed_errexit {
+			// The failure committed the run to exit. Capture its continuation
+			// before ERR cleanup can end the run through a different transfer.
+			let unrun = top_frame(vp).pc;
+			capture_exit_report(k, vp, cx, vp.status, TopCut::At(unrun), ExitCause::Exit, false);
+		}
 		if failed_command && start_trap(k, vp, cx, TrapKey::Err) {
 			set_trap_line(vp, err_line);
 			for frame in &mut vp.frames[..fi.saturating_add(1)] {
@@ -469,10 +504,17 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			}
 			if errexit {
 				mark_trap_exit(vp);
+				if !armed_errexit {
+					// ERR_RETURN has already committed the run to end, even
+					// if its trap later invokes `exit` during cleanup.
+					capture_exit_report(k, vp, cx, vp.status, TopCut::At(0), None, false);
+				}
 			}
 		} else if errexit {
 			let status = vp.status;
-			exit_shell(k, vp, cx, status);
+			// `pc` advanced past the failed op already: its continuation is here.
+			let unrun = top_frame(vp).pc;
+			exit_shell(k, vp, cx, status, TopCut::At(unrun), armed_errexit.then_some(ExitCause::Exit));
 		} else if errreturn_failed && unit.mode.dialect() == Dialect::Zsh && zsh_errreturn(k, cx, vp)
 		{
 			// zsh `ERR_RETURN`: a failed command returns from the function
@@ -508,11 +550,19 @@ fn zsh_return_flow(
 	if status != 0 && !ignore_errexit && errexit_on(k, cx, vp) {
 		// zsh `execlist` after `return N` (N ≠ 0) under `errexit`: the ZERR
 		// trap runs inside the function, then the shell exits.
+		// Capture before starting either trap carrier: the return has already
+		// abandoned its suffix, even when the trap subsequently exits itself.
+		let top = if target.is_some() {
+			TopCut::ReturnUnwind(status)
+		} else {
+			TopCut::At(top_frame(vp).pc + 1)
+		};
+		capture_exit_report(k, vp, cx, status, top, ExitCause::Exit, false);
 		if start_trap(k, vp, cx, TrapKey::Err) {
 			set_trap_line(vp, line_of(vp, op.node));
 			mark_trap_exit(vp);
 		} else {
-			exit_shell(k, vp, cx, status);
+			exit_shell(k, vp, cx, status, top, ExitCause::Exit);
 		}
 	} else if run_always(k, vp, cx, target.unwrap_or(0), TryEnd::Return(status)) {
 		// The always-list runs first; it resumes the return.
@@ -543,8 +593,9 @@ fn zsh_return_flow(
 		}
 	} else {
 		// zsh `bin_break`: `return` outside a function or `.` file leaves
-		// a non-interactive shell (`zexit`).
-		exit_shell(k, vp, cx, status);
+		// a non-interactive shell (`zexit`), without explicit exit/errexit.
+		let unrun = top_frame(vp).pc + 1;
+		exit_shell(k, vp, cx, status, TopCut::At(unrun), None);
 	}
 }
 
@@ -602,6 +653,737 @@ fn starts_command(unit: &Unit, op: Op) -> bool {
 	}
 }
 
+/// Inspect unread input with the execution parser, including its pending
+/// replacement bytes and active-alias guard. Parse errors are still submitted
+/// input; only a stream with no complete command or error is empty.
+pub(super) fn script_has_command(
+	src: &[u8],
+	feat: Features,
+	aliases: Option<&dyn AliasLookup>,
+	resume: &Resume,
+) -> bool {
+	// Trivia can span the pending/source boundary without a word for the
+	// parser to classify. Keep that byte stream continuous before consulting
+	// the parser's token-level alias machinery.
+	let mut bytes = resume
+		.pending
+		.iter()
+		.copied()
+		.chain(src[resume.pos.offset as usize..].iter().copied())
+		.peekable();
+	let mut comment = false;
+	let mut input = false;
+	while let Some(byte) = bytes.next() {
+		if comment {
+			comment = byte != b'\n';
+			continue;
+		}
+		match byte {
+			b'#'
+				if !feat.contains(Features::ZSH)
+					|| feat.contains(Features::ZSH_INTERACTIVE_COMMENTS) =>
+			{
+				comment = true;
+			},
+			b' ' | 0x09 | b'\n' => {},
+			b'\\' if bytes.peek() == Some(&b'\n') => {
+				bytes.next();
+			},
+			_ => {
+				input = true;
+				break;
+			},
+		}
+	}
+	if !input {
+		return false;
+	}
+	let aliases = aliases.unwrap_or(crate::bash::syntax::NO_ALIASES);
+	Parser::new(src, feat, aliases)
+		.with_resume(resume)
+		.next_command()
+		.is_some()
+}
+
+/// Tri-state continuation status for the unrun-input walk. Branches test
+/// whether it is zero; `!` flips it; `SetStatus` re-derives it; `LoopExit`
+/// restores the loop record's saved status. `Unknown` marks a value the
+/// static walk cannot pin down, so both branch directions of a conditional
+/// jump stay reachable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum WalkStatus {
+	Zero,
+	NonZero,
+	Unknown,
+}
+
+impl WalkStatus {
+	const fn of(status: i32) -> Self {
+		if status == 0 {
+			Self::Zero
+		} else {
+			Self::NonZero
+		}
+	}
+
+	const fn negate(self) -> Self {
+		match self {
+			Self::Zero => Self::NonZero,
+			Self::NonZero => Self::Zero,
+			Self::Unknown => Self::Unknown,
+		}
+	}
+}
+
+/// What a frame's continuation does without the interruption: either it
+/// runs another command, or leaves outgoing status/transfer paths to resume
+/// in its caller. Keep the paths separate when their control transfers differ.
+#[derive(Debug)]
+enum FrameExit {
+	RunsInput,
+	Exits(Vec<WalkEnd>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum WalkTransfer {
+	Error,
+	Return(i32),
+	Break { n: u32, cont: bool },
+	Exit(i32),
+}
+
+impl From<TryEnd> for WalkTransfer {
+	fn from(end: TryEnd) -> Self {
+		match end {
+			TryEnd::Error => Self::Error,
+			TryEnd::Return(n) => Self::Return(n),
+			TryEnd::Break { n, cont } => Self::Break { n, cont },
+			TryEnd::Exit(n) => Self::Exit(n),
+		}
+	}
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct WalkEnd {
+	status:   WalkStatus,
+	transfer: Option<WalkTransfer>,
+}
+
+/// The walk mirrors record lifetime, not loop execution. `cleanup` is
+/// `Some(interrupted)` for a try record, and `None` for a loop. `end` is
+/// respectively after `AlwaysEnd` or at `LoopExit`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct WalkRecord {
+	status:  WalkStatus,
+	end:     u32,
+	cleanup: Option<bool>,
+	always:  bool,
+	start:   u32,
+	pending: Option<WalkTransfer>,
+}
+
+/// Resume the transfer saved by an always-list, not its abandoned suffix.
+/// Like `run_always`/`zsh_break`, unwind records until cleanup or the target
+/// loop is reached. A continue's next iteration is old input, so use the
+/// same structural loop exit as `LoopBack`.
+fn walk_transfer(
+	loops: &mut Vec<WalkRecord>,
+	mut end: WalkTransfer,
+	status: WalkStatus,
+) -> Result<u32, WalkTransfer> {
+	while let Some(mut rec) = loops.pop() {
+		if let Some(cleaned) = rec.cleanup {
+			if !rec.always && !cleaned {
+				rec.pending = Some(end);
+				let start = rec.start;
+				loops.push(rec);
+				return Ok(start);
+			}
+		} else if let WalkTransfer::Break { n, cont } = end {
+			if n <= 1 {
+				rec.status = status;
+				let target = rec.end;
+				loops.push(rec);
+				return Ok(target);
+			}
+			end = WalkTransfer::Break { n: n - 1, cont };
+		}
+	}
+	Err(end)
+}
+
+/// Walk the submitted continuation, preserving branch statuses but treating
+/// iteration edges as structural loop exits. Re-running a loop head/body
+/// would count old input; proving that a loop cannot terminate would hide
+/// submitted suffixes and make newline-parsed scripts behave differently.
+/// Interrupted always-lists are mandatory cleanup, not unrun input.
+fn frame_continuation(
+	unit: &Unit,
+	from: usize,
+	status: WalkStatus,
+	runtime_loops: &[LoopRec],
+	cleanup_runs: bool,
+	transfer: Option<WalkTransfer>,
+) -> FrameExit {
+	let ops = &unit.ops;
+	// Keep the complete record stack in the key: equal top records can
+	// hide different outer snapshots and cleanup ownership.
+	let mut visited = HashSet::new();
+	let seed: Vec<WalkRecord> = runtime_loops
+		.iter()
+		.map(|rec| {
+			let (cleanup, always, pending) = match rec.kind {
+				LoopKind::Try { always, pending } => {
+					(Some(cleanup_runs), always, pending.map(Into::into))
+				},
+				_ => (None, false, None),
+			};
+			WalkRecord {
+				status: WalkStatus::of(rec.status),
+				end: if cleanup.is_some() {
+					rec.cont
+				} else {
+					rec.exit
+				},
+				cleanup,
+				always,
+				start: rec.exit,
+				pending,
+			}
+		})
+		.collect();
+	let mut stack = vec![(from as u32, status, seed, transfer)];
+	let mut outcomes = Vec::new();
+	while let Some((mut index, status, mut loops, transfer)) = stack.pop() {
+		if let Some(end) = transfer {
+			match walk_transfer(&mut loops, end, status) {
+				Ok(target) => index = target,
+				Err(end) => {
+					outcomes.push(WalkEnd { status, transfer: Some(end) });
+					continue;
+				},
+			}
+		}
+		let i = index as usize;
+		if i >= ops.len() {
+			outcomes.push(WalkEnd { status, transfer: None });
+			continue;
+		}
+		if !visited.insert((index, status, loops.clone())) {
+			continue;
+		}
+		let op = ops[i];
+		// A terminator ends this frame's continuation: the path exits the
+		// unit with the status it carries (a function returning to its
+		// caller, or a script reaching its end).
+		if matches!(op.code, Opcode::End | Opcode::SubExit | Opcode::Abort) {
+			outcomes.push(WalkEnd { status, transfer: None });
+			continue;
+		}
+		// Mandatory cleanup already executed on the exit path is not
+		// unrun input, but its saved control transfer still resumes.
+		if op.code == Opcode::AlwaysEnter
+			&& let Some(top) = loops.last_mut()
+		{
+			top.status = status;
+			top.always = true;
+			if top.cleanup == Some(true) {
+				let rec = loops.pop().expect("checked above");
+				stack.push((rec.end, status, loops, rec.pending));
+				continue;
+			}
+		}
+		if op.code == Opcode::AlwaysEnd && loops.last().is_some_and(|rec| rec.cleanup.is_some()) {
+			let rec = loops.pop().expect("checked above");
+			let status = match rec.pending {
+				Some(WalkTransfer::Return(n) | WalkTransfer::Exit(n)) => WalkStatus::of(n),
+				Some(WalkTransfer::Error) if rec.status == WalkStatus::Zero => WalkStatus::NonZero,
+				_ => rec.status,
+			};
+			stack.push((index + 1, status, loops, rec.pending));
+			continue;
+		}
+		// A not-yet-started compound or spawn is submitted work too;
+		// do not scan a spawn's child descriptors as parent bytecode.
+		if starts_command(unit, op)
+			|| matches!(op.code, Opcode::Enter | Opcode::Spawn | Opcode::FuncDef | Opcode::CallAnon)
+		{
+			return FrameExit::RunsInput;
+		}
+		let status = match op.code {
+			Opcode::Not => status.negate(),
+			Opcode::SetStatus => WalkStatus::of(op.a as i32),
+			Opcode::Arith | Opcode::CondTest => WalkStatus::Unknown,
+			Opcode::LoopExit => loops.pop().map_or(WalkStatus::Zero, |r| r.status),
+			_ => status,
+		};
+		// Complete only the interrupted iteration, preserving its body
+		// status; never replay a loop head/body to predict termination.
+		if matches!(op.code, Opcode::LoopNote | Opcode::LoopBack)
+			&& let Some(top) = loops.last_mut()
+		{
+			top.status = status;
+			stack.push((top.end, status, loops, None));
+			continue;
+		}
+		match op.code {
+			Opcode::LoopEnter | Opcode::ForIn | Opcode::Repeat => {
+				let end = if op.code == Opcode::LoopEnter {
+					op.a
+				} else {
+					ops.get(i + 1).map_or(index + 1, |next| next.a)
+				};
+				loops.push(WalkRecord {
+					status: WalkStatus::Zero,
+					end,
+					cleanup: None,
+					always: false,
+					start: 0,
+					pending: None,
+				});
+			},
+			Opcode::TryEnter => {
+				loops.push(WalkRecord {
+					status:  WalkStatus::Zero,
+					end:     op.b,
+					cleanup: Some(false),
+					always:  false,
+					start:   op.a,
+					pending: None,
+				});
+			},
+			_ => {},
+		}
+		let branch_zero = match status {
+			WalkStatus::Zero => Some(true),
+			WalkStatus::NonZero => Some(false),
+			WalkStatus::Unknown => None,
+		};
+		let repeats_body = |target: u32| {
+			ops.get(target as usize)
+				.is_some_and(|op| op.code == Opcode::LoopExit)
+				&& runtime_loops
+					.iter()
+					.any(|rec| rec.exit == target && rec.iterations > 0)
+		};
+		let (target, falls_through) = match op.code {
+			Opcode::Jmp if op.a < index => (Some(loops.last().map_or(index + 1, |r| r.end)), false),
+			Opcode::Jmp => (Some(op.a), false),
+			Opcode::BrOk | Opcode::BrFail | Opcode::ForNext if repeats_body(op.a) => {
+				(Some(op.a), false)
+			},
+			Opcode::BrOk => match branch_zero {
+				Some(true) => (Some(op.a), false),
+				Some(false) => (None, true),
+				None => (Some(op.a), true),
+			},
+			Opcode::BrFail => match branch_zero {
+				Some(true) => (None, true),
+				Some(false) => (Some(op.a), false),
+				None => (Some(op.a), true),
+			},
+			Opcode::ForNext => (Some(op.a), true),
+			Opcode::CaseArm | Opcode::Redir => (Some(op.b), true),
+			_ => (None, true),
+		};
+		if let Some(target) = target {
+			stack.push((target, status, loops.clone(), None));
+		}
+		if falls_through {
+			stack.push((index + 1, status, loops, None));
+		}
+	}
+	FrameExit::Exits(outcomes)
+}
+
+/// The top frame's resume point for the exit walk: at an op index, or past
+/// a `return` that already committed the frame to unwind — the walk then
+/// enters as the return transfer at the frame's boundary, never inside its
+/// abandoned suffix, and resumes in the caller.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum TopCut {
+	At(u32),
+	ReturnUnwind(i32),
+}
+
+/// One frame of an exiting root as the attribution walk reads it: frozen
+/// at `exit` ([`CutShortInput::of`]) so the verdict can be judged later,
+/// once the run's still-settling pipeline children have had their window.
+struct CutFrame {
+	/// Code being run; `None` for a script frame between commands.
+	unit:      Option<Arc<Unit>>,
+	pc:        u32,
+	kind:      FrameSnap,
+	loops:     Vec<LoopRec>,
+	/// The frame's scratch runs an unfinished expansion ([`PendingSub`]
+	/// `NoFork`/`Here`/`Math`).
+	expanding: bool,
+	/// Pipeline children of the op at `pc` ([`Scratch::children`]).
+	children:  Vec<(Vpid, Option<i32>)>,
+}
+
+/// The frame kinds the walk's rules name. `Subshell` and `Job` frames match
+/// no rule of their own (every arm that names a kind skips them), so they
+/// share [`FrameSnap::Other`].
+enum FrameSnap {
+	/// A script frame and the parser continuation execution would read.
+	Script {
+		what:   ScriptKind,
+		tail:   Box<[u8]>,
+		resume: Resume,
+	},
+	Function,
+	NoFork,
+	Stage,
+	Other,
+}
+
+/// The attribution walk's whole input, frozen at the root's `exit`: its
+/// frames, the options and aliases they parse under, and where the abort
+/// cut the top one. Judging is deferred ([`Self::walk`]) until the run's
+/// still-settling pipeline children have had their bounded window to end:
+/// their eventual statuses decide whether a conditional suffix would have
+/// run, so a verdict read at `exit` itself would guess at them.
+pub struct CutShortInput {
+	frames:       Vec<CutFrame>,
+	top:          TopCut,
+	status:       i32,
+	cleanup_runs: bool,
+	options:      Vec<super::exit_options::WalkOptions>,
+}
+
+impl CutShortInput {
+	/// Freeze the walk's input from `vp`'s live frames, before `exit`'s
+	/// cleanup unwinds them.
+	fn of(
+		vp: &Vproc,
+		top: TopCut,
+		status: i32,
+		cleanup_runs: bool,
+		options: Vec<super::exit_options::WalkOptions>,
+	) -> Self {
+		Self {
+			frames: vp
+				.frames
+				.iter()
+				.map(|frame| CutFrame {
+					unit:      frame.unit.clone(),
+					pc:        frame.pc,
+					kind:      match &frame.kind {
+						FrameKind::Script { src, pos, aux, what, .. } => FrameSnap::Script {
+							what:   *what,
+							tail:   src[pos.0 as usize..].into(),
+							resume: Resume {
+								pos:     Pos { offset: 0, line: pos.1 },
+								pending: aux
+									.as_deref()
+									.and_then(|a| a.pending.as_ref())
+									.map_or_default(|p| p.0.to_vec()),
+								active:  aux
+									.as_deref()
+									.and_then(|a| a.pending.as_ref())
+									.map_or_default(|p| p.1.iter().map(|a| a.to_vec()).collect()),
+							},
+						},
+						FrameKind::Function { .. } => FrameSnap::Function,
+						FrameKind::NoFork => FrameSnap::NoFork,
+						FrameKind::Stage => FrameSnap::Stage,
+						FrameKind::Subshell | FrameKind::Job { .. } => FrameSnap::Other,
+					},
+					loops:     frame.loops.clone(),
+					expanding: frame.scratch.as_ref().is_some_and(|sc| {
+						matches!(
+							sc.sub,
+							Some(
+								PendingSub::NoFork { .. }
+									| PendingSub::Here { .. }
+									| PendingSub::Math { .. }
+							)
+						)
+					}),
+					children:  frame
+						.scratch
+						.as_ref()
+						.map_or(Vec::new(), |sc| sc.children.clone()),
+				})
+				.collect(),
+			top,
+			status,
+			cleanup_runs,
+			options,
+		}
+	}
+
+	/// The parse context the attribution walk froze for the run's root
+	/// frame: the grammar and alias table the input after the abort still
+	/// parses under ([`walk_cut_short`]'s tail check). A probe of text the
+	/// abort never reached — text that would have joined this run's
+	/// stream — must parse under this table, not the live one: the abort's
+	/// EXIT cleanup runs after the freeze and may have rewritten it.
+	pub fn root_parse(&self) -> Option<&Arc<ParseSnapshot>> {
+		// `options` runs parallel to `frames`, root first: the run's own
+		// script frame is the parser a counterfactual continuation — and
+		// any segment a chain runner would submit next — parses under.
+		self.options.first()?.parse.as_ref()
+	}
+
+	/// The locale bindings frozen with [`Self::root_parse`]: `LC_ALL`,
+	/// `LC_CTYPE` and `LANG` as the shell's global scope bound them at the
+	/// freeze, a nameref's target included; `None` when no parse was frozen,
+	/// or the store could not be read at the freeze. A probe under an
+	/// environment for the next run restores them first and lets the shell
+	/// resolve the charset, as that run would, and does not judge without
+	/// them.
+	pub fn root_locale(&self) -> Option<&Arc<LocaleBindings>> {
+		self
+			.options
+			.first()
+			.filter(|o| o.parse.is_some())
+			.and_then(|o| o.locale.as_ref())
+	}
+
+	/// The pipeline children whose status the verdict still waits on: of
+	/// the frames that would merge them (the op at their `pc` is a `Spawn`
+	/// and `pipefail` is on for them), those with no status yet.
+	pub fn pending_children(&self) -> Vec<Vpid> {
+		self
+			.pending_child_frames()
+			.into_iter()
+			.flat_map(|(_, vpids)| vpids)
+			.collect()
+	}
+
+	/// [`CutShortInput::pending_children`] grouped by the frame that would
+	/// merge them, dropping frames with nothing unresolved: one frame's
+	/// unresolved children share a single effective unknown — whether any
+	/// of them failed — which is what a relevance probe can stand in for.
+	pub fn pending_child_frames(&self) -> Vec<(usize, Vec<Vpid>)> {
+		let mut pending = Vec::new();
+		for (index, frame) in self.frames.iter().enumerate() {
+			if !self.options.get(index).is_some_and(|o| o.pipefail) {
+				continue;
+			}
+			if let Some(unit) = frame.unit.as_ref()
+				&& unit
+					.ops
+					.get(frame.pc as usize)
+					.is_some_and(|op| op.code == Opcode::Spawn)
+			{
+				let unresolved: Vec<Vpid> = frame
+					.children
+					.iter()
+					.filter_map(|&(vpid, saved)| saved.is_none().then_some(vpid))
+					.collect();
+				if !unresolved.is_empty() {
+					pending.push((index, unresolved));
+				}
+			}
+		}
+		pending
+	}
+
+	/// The frozen walk's verdict over `self`, with `child_status` read now
+	/// ([`walk_cut_short`]).
+	pub fn walk(&self, child_status: impl FnMut(Vpid) -> Option<i32>) -> bool {
+		walk_cut_short(self, child_status)
+	}
+}
+
+/// Whether `exit`/`set -e` fired with commands still left to run: any frame
+/// (its own continuation first, then whatever resumes below it) has a
+/// command-starting op still ahead of it, or — for a script frame, which
+/// parses its source one command at a time — unparsed source that holds
+/// another command. `TopCut::At` carries the op index of the top frame's
+/// first unrun op: callers whose `pc` still sits on the op that triggered
+/// the exit pass `pc + 1`; callers running after the dispatch loop advanced
+/// `pc` (the errexit check) pass `pc`. Lower frames resume after the call op
+/// that led here, so their scan starts at `pc + 1`. A trailing `exit` at
+/// the end of the script's input has nothing ahead and ended the run
+/// exactly where the script's end would have; loops stay in their frame,
+/// so a loop whose body holds the `exit` reports unrun input only when a
+/// command follows the loop (the loop-back jump is not a command start).
+pub fn walk_cut_short(
+	input: &CutShortInput,
+	mut child_status: impl FnMut(Vpid) -> Option<i32>,
+) -> bool {
+	// At the run boundary the original script frame is already gone. An
+	// exit here may replace the status, but abandons only cleanup input.
+	// A trap above an active frame is not this boundary; its interrupted
+	// caller may still have ordinary work. Keep the capture for a chain's
+	// independent check of subsequent physical segments.
+	if matches!(
+		input.frames.first().map(|frame| &frame.kind),
+		Some(FrameSnap::Script { what: ScriptKind::Trap { key: TrapKey::Exit, .. }, .. })
+	) {
+		return false;
+	}
+	let (top_from, initial) = match input.top {
+		TopCut::At(from) => {
+			(from, WalkEnd { status: WalkStatus::of(input.status), transfer: None })
+		},
+		TopCut::ReturnUnwind(ret) => (0, WalkEnd {
+			status:   WalkStatus::of(input.status),
+			transfer: Some(WalkTransfer::Return(ret)),
+		}),
+	};
+	let mut states = vec![(input.frames.len(), initial, false)];
+	let mut visited = HashSet::new();
+	while let Some((count, mut end, resume_at_pc)) = states.pop() {
+		if !visited.insert((count, end, resume_at_pc)) {
+			continue;
+		}
+		let Some(index) = count.checked_sub(1) else {
+			continue;
+		};
+		let frame = &input.frames[index];
+		let current_options =
+			input
+				.options
+				.get(index)
+				.cloned()
+				.unwrap_or(super::exit_options::WalkOptions {
+					pipefail:        false,
+					localloops:      false,
+					continueonerror: false,
+					parse:           None,
+					locale:          None,
+				});
+		let outcomes = if let Some(unit) = frame.unit.as_ref() {
+			let expanding = end.transfer.is_none() && frame.expanding;
+			// An interrupted expansion still owns unfinished work; only a
+			// loop header belongs to the structural iteration machinery.
+			if expanding
+				&& unit.ops.get(frame.pc as usize).is_some_and(|op| {
+					op.code != Opcode::Arith
+						|| unit
+							.nodes
+							.get(op.node as usize)
+							.is_none_or(|n| n.kind != NodeKind::ArithFor)
+				}) {
+				return true;
+			}
+			let from = if index + 1 == input.frames.len() {
+				top_from as usize
+			} else if resume_at_pc || expanding {
+				frame.pc as usize
+			} else if let Some(op) = unit.ops.get(frame.pc as usize)
+				&& op.code == Opcode::Spawn
+			{
+				if end.transfer.is_none()
+					&& current_options.pipefail
+					&& end.status != WalkStatus::NonZero
+				{
+					for &(vpid, saved) in &frame.children {
+						let prior = saved
+							.or_else(|| child_status(vpid))
+							.map_or(WalkStatus::Unknown, WalkStatus::of);
+						end.status = match (end.status, prior) {
+							(WalkStatus::NonZero, _) | (_, WalkStatus::NonZero) => WalkStatus::NonZero,
+							(WalkStatus::Zero, WalkStatus::Zero) => WalkStatus::Zero,
+							_ => WalkStatus::Unknown,
+						};
+					}
+				}
+				unit.spawns[op.a as usize].end as usize
+			} else {
+				frame.pc as usize + 1
+			};
+			match frame_continuation(
+				unit,
+				from,
+				end.status,
+				&frame.loops,
+				input.cleanup_runs,
+				end.transfer,
+			) {
+				FrameExit::RunsInput => return true,
+				FrameExit::Exits(outcomes) => outcomes,
+			}
+		} else {
+			vec![end]
+		};
+		for mut end in outcomes {
+			// Check incremental source only on paths that would read it.
+			// A return/error already committed this frame to unwind.
+			let reads_source = end.transfer.is_none()
+				|| (end.transfer == Some(WalkTransfer::Error)
+					&& current_options.continueonerror
+					&& matches!(frame.kind, FrameSnap::Script { what: ScriptKind::Run, .. }));
+			if reads_source
+				&& let FrameSnap::Script { tail, resume, .. } = &frame.kind
+				&& let Some(parse) = current_options.parse.as_deref()
+				&& script_has_command(
+					tail,
+					Features::from_bits(parse.features),
+					parse.aliases.as_ref().map(|a| a as &dyn AliasLookup),
+					resume,
+				) {
+				return true;
+			}
+			match end.transfer {
+				Some(WalkTransfer::Return(_))
+					if matches!(
+						frame.kind,
+						FrameSnap::Function
+							| FrameSnap::NoFork
+							| FrameSnap::Script { what: ScriptKind::Source, .. }
+					) =>
+				{
+					end.transfer = None;
+				},
+				Some(WalkTransfer::Error)
+					if matches!(frame.kind, FrameSnap::Script {
+						what: ScriptKind::Eval
+							| ScriptKind::Source
+							| ScriptKind::Trap { .. }
+							| ScriptKind::Code(_)
+							| ScriptKind::Hook,
+						..
+					}) =>
+				{
+					end.transfer = None;
+				},
+				Some(WalkTransfer::Break { .. }) => {
+					let function = matches!(frame.kind, FrameSnap::Function);
+					if function
+						&& index
+							.checked_sub(1)
+							.and_then(|i| input.options.get(i))
+							.is_some_and(|o| o.localloops)
+					{
+						end.transfer = None;
+					} else if !function
+						&& !matches!(
+							frame.kind,
+							FrameSnap::NoFork
+								| FrameSnap::Stage
+								| FrameSnap::Script { what: ScriptKind::Eval, .. }
+						) {
+						continue;
+					}
+				},
+				Some(WalkTransfer::Exit(_)) => continue,
+				_ => {},
+			}
+			let resume_at_pc = matches!(frame.kind, FrameSnap::Script {
+				what: ScriptKind::Trap { key: TrapKey::Debug | TrapKey::Err | TrapKey::Signal(_), .. },
+				..
+			});
+			let mut next = index;
+			if let FrameSnap::Script {
+				what: ScriptKind::Trap { status: kept, return_target, .. },
+				..
+			} = &frame.kind
+			{
+				end.status = WalkStatus::of(*kept);
+				next = next.min(return_target.unwrap_or(next));
+			}
+			states.push((next, end, resume_at_pc));
+		}
+	}
+	false
+}
+
 /// Whether `vp` runs in a function scope (a store failure reads as no and
 /// is kept).
 fn in_function_scope(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
@@ -622,11 +1404,67 @@ fn errexit_on(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 	}
 }
 
-/// Leave the shell with `status` (`exit`, `set -e`): unwind every frame;
-/// a subshell runs its EXIT trap here, the root at the run boundary. An
-/// `exit` inside a function runs the root's trap first, above the
-/// function's frames: bash's trap sees its `FUNCNAME` and locals.
-pub(super) fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
+/// Capture attribution only: actual termination remains `exit_shell`'s job.
+/// Deferred zsh cleanup retains its existing serialized control carriers.
+pub(super) fn capture_exit_report(
+	k: &mut Kernel,
+	vp: &Vproc,
+	cx: &mut Cx<'_>,
+	status: i32,
+	top: TopCut,
+	cause: impl Into<Option<ExitCause>>,
+	cleanup_runs: bool,
+) {
+	let cause = cause.into();
+	if vp.parent.is_none()
+		&& let Some(run) = vp.runs.front()
+		&& k.exit_report.is_none_or(|(id, _)| id != run.id)
+	{
+		k.exit_report = Some((run.id, cause));
+		// The verdict waits for the run's pipeline children to settle
+		// ([`Shell::ended_by_exit_cut_short`]): freeze the walk's input
+		// now, before cleanup unwinds the frames it reads. A boundary
+		// cleanup exit judges the successor under the table and locale the
+		// input ended with, frozen when its trap started — not the ones the
+		// trap has since rewritten.
+		// Attribution is optional: a store read needed only by the walk
+		// must not fail the run, suppress cleanup, or abort other vprocs.
+		let frozen = k
+			.boundary_cleanup
+			.as_ref()
+			.filter(|(id, ..)| *id == run.id)
+			.and_then(|(_, _, frozen)| frozen.as_ref())
+			.map(|frozen| (frozen.locale.clone(), frozen.parse.clone()));
+		k.pending_cut_short = if cause == Some(ExitCause::Exit) {
+			super::exit_options::by_frame(k, vp, cx)
+				.ok()
+				.map(|mut options| {
+					if let (Some((locale, parse)), Some(root)) = (frozen, options.first_mut()) {
+						root.locale = locale;
+						if let Some(parse) = parse {
+							root.parse = Some(parse);
+						}
+					}
+					(run.id, CutShortInput::of(vp, top, status, cleanup_runs, options))
+				})
+		} else {
+			None
+		};
+	}
+}
+
+/// Leave the shell with `status`: unwind frames and run existing EXIT cleanup.
+/// `top` is the top frame's resume point for the attribution walk
+/// ([`TopCut`]): `pc + 1` at a terminating op, or `pc` after dispatch
+/// advances.
+pub(super) fn exit_shell(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	status: i32,
+	top: TopCut,
+	cause: impl Into<Option<ExitCause>>,
+) {
 	// zsh `zexit` while its hooks run: the hook calls end, the status is the
 	// new one.
 	if vp.zsh.is_some()
@@ -644,6 +1482,7 @@ pub(super) fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status
 		&& let Some(run) = vp.runs.front()
 	{
 		k.exited = Some(run.id);
+		capture_exit_report(k, vp, cx, status, top, cause, false);
 	}
 	if !in_exit_trap
 		&& vp
@@ -708,7 +1547,32 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 	};
 	if run.started && !run.exit_trap_started {
 		run.exit_trap_started = true;
-		if start_trap(k, vp, cx, TrapKey::Exit) {
+		// The input has ended: whatever an EXIT trap does now is cleanup, not
+		// the command the caller ran. Keep the status the input produced so a
+		// cleanup `exit` cannot reschedule the caller's next leg.
+		let (id, status, root) = (run.id, vp.status, vp.parent.is_none());
+		// Taken at the one point between the trap's lookup and its frame,
+		// while the input's view is still the shell's own: the trap's frame
+		// brings a scope (`BASH_TRAPSIG`) and a mode of its own, which
+		// `by_frame` would read instead. The trap is looked up once, and
+		// this read is made only when it starts: a run without an EXIT
+		// trap goes without either. The trap's body has not run yet, so
+		// this is the grammar, alias table and locale the input ended
+		// under, which a successor would have parsed under — not the ones
+		// the trap goes on to rewrite.
+		let mut frozen = None;
+		if start_trap_with(k, vp, cx, TrapKey::Exit, |k, vp, cx| {
+			if root {
+				frozen = super::exit_options::by_frame(k, vp, cx)
+					.ok()
+					.and_then(|options| options.into_iter().next());
+			}
+		}) {
+			// The record is the root's alone; a child run's own EXIT trap
+			// still runs before the run completes.
+			if root {
+				k.boundary_cleanup = Some((id, status, frozen));
+			}
 			return true;
 		}
 	}
@@ -733,6 +1597,16 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 		return false;
 	}
 	run.started = true;
+	// The exit report describes one run's own end; one left over never
+	// applies to the next run (its scope ended without `exit_shell`). Only
+	// a root vproc's boundary may discard it: a child run started during a
+	// root run's EXIT cleanup (the timeout tool's trap child) must not
+	// clear the report that cleanup is still holding.
+	if vp.parent.is_none() {
+		k.exit_report = None;
+		k.pending_cut_short = None;
+		k.boundary_cleanup = None;
+	}
 	if run.explicit_mode {
 		run.restore_mode = Some(vp.mode);
 		let mode = run.mode;
@@ -1161,7 +2035,16 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		} else if let Some(status) = status
 			&& exit
 		{
-			exit_shell(k, vp, cx, status);
+			// The trap frame that ran `exit` is popped; the interrupted
+			// frame's `pc` is its first unrun op.
+			exit_shell(
+				k,
+				vp,
+				cx,
+				status,
+				TopCut::At(vp.frames.last().map_or(0, |f| f.pc)),
+				ExitCause::Exit,
+			);
 		} else if func_trap && trap_status != 0 && vp.mode.dialect() == Dialect::Zsh {
 			// zsh `dotrapargs`: a function trap returning non-zero forces
 			// a return from the interrupted code, with the error flag set.
@@ -2235,7 +3118,7 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 				&& let Some(status) = exit_trap_status(vp)
 				&& !errexit_on(k, cx, vp)
 			{
-				return Flow::Exit(status);
+				return Flow::Exit { status, cause: ExitCause::PosixFatal };
 			}
 			// bash exits 127 from a `-c` string (`run_one_command`), 1 from a
 			// script and from a subshell (`execute_in_subshell` keeps the
@@ -2247,7 +3130,7 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 					state::record(cx.store, vp, Key::Misc(MiscKey::RunOrigin)),
 					Ok(Some(Record::Misc(origin))) if origin.as_slice() == b"c"
 				);
-			Flow::Exit(if command { 127 } else { 1 })
+			Flow::Exit { status: if command { 127 } else { 1 }, cause: ExitCause::PosixFatal }
 		},
 		Stop::Store(err) => {
 			k.fail(err);
@@ -3183,7 +4066,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 				// POSIX interpretation 383: fatal in a non-interactive shell.
 				let msg = format!("`{}': is a special builtin", f.name).into();
 				k.diag(cx, vp, line, Diag::Usage { msg });
-				return Flow::Exit(2);
+				return Flow::Exit { status: 2, cause: ExitCause::PosixFatal };
 			}
 			// zsh: defining `TRAPNAL` sets the trap (`localtraps` saves the
 			// old one).
@@ -3725,7 +4608,7 @@ fn for_in(
 		if state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false) {
 			// Fatal to a posix shell.
 			clear_scratch(&mut k.root, cx.store, vp);
-			return Flow::Exit(1);
+			return Flow::Exit { status: 1, cause: ExitCause::PosixFatal };
 		}
 		items.clear();
 		1
@@ -3799,7 +4682,7 @@ fn for_next(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 		k.diag(cx, vp, line, d);
 		// An assignment error ends a posix shell.
 		if state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false) {
-			return Flow::Exit(1);
+			return Flow::Exit { status: 1, cause: ExitCause::PosixFatal };
 		}
 		if let Some(rec) = top_frame(vp).loops.last_mut() {
 			rec.status = 1;
@@ -4746,6 +5629,22 @@ fn zsh_debug_done(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) {
 
 /// Run a configured trap in the interrupted shell, without re-entering it.
 pub fn start_trap(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, key: TrapKey) -> bool {
+	start_trap_with(k, vp, cx, key, |_, _, _| {})
+}
+
+/// [`start_trap`], calling `before` once the trap is found to run and
+/// right before its frame is pushed: the one point at which the shell's
+/// view is still the interrupted code's own, which a root run's EXIT
+/// cleanup freezes there ([`run_boundary`]). The trap is looked up once:
+/// a second lookup could fail where this one did not, or the other way
+/// round, and start the trap without the freeze or keep it from starting.
+pub(super) fn start_trap_with(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	key: TrapKey,
+	before: impl FnOnce(&mut Kernel, &mut Vproc, &mut Cx<'_>),
+) -> bool {
 	// A subshell lists its parent's EXIT trap but runs only its own.
 	if key == TrapKey::Exit && vp.parent.is_some() && !vp.own_traps.has(key) {
 		return false;
@@ -4806,13 +5705,16 @@ pub fn start_trap(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, key: TrapKey)
 	let (action, trap_mode) = match state::record(cx.store, vp, Key::Trap(key)) {
 		Ok(Some(Record::Trap { action, mode })) if !action.is_empty() => (action.clone(), *mode),
 		// zsh: a `TRAPNAL` function is the trap (zsh `ZSIG_FUNC`).
-		Ok(None) if vp.mode.dialect() == Dialect::Zsh => return start_func_trap(k, vp, cx, key),
+		Ok(None) if vp.mode.dialect() == Dialect::Zsh => {
+			return start_func_trap(k, vp, cx, key, before);
+		},
 		Ok(_) => return false,
 		Err(err) => {
 			k.fail(err);
 			return false;
 		},
 	};
+	before(k, vp, cx);
 	let started = push_trap(k, vp, cx, key, &action, trap_mode);
 	if started && key == TrapKey::Exit && vp.parent.is_none() && !vp.runs.is_empty() {
 		// A root run is a shell invocation: consume its EXIT trap when it
@@ -5208,7 +6110,7 @@ fn always_end(vp: &mut Vproc) -> Flow {
 		Some(TryEnd::Error) => Flow::Discard(if rec.status == 0 { 1 } else { rec.status }),
 		Some(TryEnd::Return(n)) => Flow::Return(n),
 		Some(TryEnd::Break { n, cont }) => Flow::Break { n, cont },
-		Some(TryEnd::Exit(n)) => Flow::Exit(n),
+		Some(TryEnd::Exit(n)) => Flow::Exit { status: n, cause: ExitCause::Exit },
 	}
 }
 
@@ -5272,7 +6174,8 @@ pub fn zsh_return(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) 
 	if let Some(i) = target {
 		zsh_leave(k, vp, cx, i);
 	} else {
-		exit_shell(k, vp, cx, status);
+		let unrun = top_frame(vp).pc + 1;
+		exit_shell(k, vp, cx, status, TopCut::At(unrun), None);
 	}
 }
 
@@ -5444,7 +6347,10 @@ fn zsh_exit(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		{
 			z.exit_from_function = true;
 		}
-		exit_shell(k, vp, cx, status);
+		{
+			let unrun = top_frame(vp).pc + 1;
+			exit_shell(k, vp, cx, status, TopCut::At(unrun), ExitCause::Exit);
+		}
 		return;
 	}
 	let level = vp
@@ -5536,7 +6442,8 @@ fn zsh_discard(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		vp.status = status;
 	} else {
 		unwind(&mut k.root, cx.store, vp, 0);
-		exit_shell(k, vp, cx, status);
+		// Every frame is gone: nothing is left to scan.
+		exit_shell(k, vp, cx, status, TopCut::At(0), ExitCause::PosixFatal);
 	}
 }
 
@@ -5607,9 +6514,16 @@ pub fn set_try_block_error(vp: &mut Vproc, value: i64) -> bool {
 }
 
 /// Start zsh's function trap for `key` (`TRAPINT`, `TRAPZERR`, `TRAPEXIT`,
-/// …: zsh `ZSIG_FUNC`), if that function is defined.
+/// …: zsh `ZSIG_FUNC`), if that function is defined; `before` runs once it
+/// is, right before the trap's frame ([`start_trap_with`]).
 #[inline(never)]
-fn start_func_trap(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, key: TrapKey) -> bool {
+fn start_func_trap(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	key: TrapKey,
+	before: impl FnOnce(&mut Kernel, &mut Vproc, &mut Cx<'_>),
+) -> bool {
 	let Some(name) = builtins::trap::func_name(key) else {
 		return false;
 	};
@@ -5621,6 +6535,7 @@ fn start_func_trap(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, key: TrapKey
 			return false;
 		},
 	};
+	before(k, vp, cx);
 	run_func_trap(k, vp, cx, key, name, rec)
 }
 
@@ -5649,7 +6564,726 @@ fn run_func_trap(
 
 #[cfg(test)]
 mod tests {
-	use super::{BASH_TIMEFORMAT, POSIX_TIMEFORMAT, time_report};
+	use super::*;
+	use crate::bash::fd::FdTable;
+
+	/// Live-frame entry the unit tests use: freeze [`CutShortInput::of`]
+	/// from the constructed `vp` and judge it at once.
+	fn exit_cut_short(
+		vp: &Vproc,
+		top: TopCut,
+		status: i32,
+		cleanup_runs: bool,
+		child_status: impl FnMut(Vpid) -> Option<i32>,
+	) -> bool {
+		CutShortInput::of(vp, top, status, cleanup_runs, Vec::new()).walk(child_status)
+	}
+
+	#[test]
+	fn exit_classification_store_fault_does_not_interrupt_execution() {
+		use crate::{
+			bash::{
+				Budget, Engine, EngineConfig, MemStore, Script, Shell, ShellInit, Step,
+				store::{BlobSlot, Change, Table},
+			},
+			testkit::FakeHost,
+		};
+
+		#[derive(Default)]
+		struct Store {
+			inner:              MemStore,
+			reject_attribution: bool,
+			reject_child:       Option<Vpid>,
+			failed_reads:       usize,
+		}
+
+		impl StateStore for Store {
+			fn get(&mut self, key: Key<'_>) -> Result<Option<&Record>, StoreError> {
+				// The Bash parser does not read the zsh-only aliases option;
+				// the attribution snapshot reads it to model restored modes.
+				if (self.reject_attribution && matches!(key, Key::ZshOpt(ZshOpt::Aliases)))
+					|| matches!(key, Key::Proc(child) if self.reject_child == Some(child))
+				{
+					self.failed_reads += 1;
+					return Err(StoreError::Backend(
+						std::io::Error::other("attribution read failed").into(),
+					));
+				}
+				self.inner.get(key)
+			}
+
+			fn scan(
+				&mut self,
+				table: Table,
+				f: &mut dyn FnMut(Key<'_>, &Record),
+			) -> Result<(), StoreError> {
+				self.inner.scan(table, f)
+			}
+
+			fn apply(&mut self, change: Change<'_>) -> Result<(), StoreError> {
+				self.inner.apply(change)
+			}
+
+			fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {
+				self.inner.put_blob(slot, bytes)
+			}
+
+			fn get_blob(&mut self, slot: BlobSlot) -> Result<Option<Vec<u8>>, StoreError> {
+				self.inner.get_blob(slot)
+			}
+
+			fn del_blob(&mut self, slot: BlobSlot) -> Result<(), StoreError> {
+				self.inner.del_blob(slot)
+			}
+
+			fn epoch(&self) -> u64 {
+				self.inner.epoch()
+			}
+		}
+
+		for fail in [false, true] {
+			let mut store = Store::default();
+			let mut host = FakeHost::new();
+			let engine = Engine::new(EngineConfig::default());
+			let mut shell = Shell::create(
+				&engine,
+				&mut Cx { host: &mut host, store: &mut store },
+				ShellInit::default(),
+			)
+			.unwrap();
+			store.reject_attribution = fail;
+			let run = shell
+				.submit(Script::command(b"trap 'CLEANED=yes' EXIT; exit 7; MARKER=bad".as_slice()));
+			let status = (0..20).find_map(|_| {
+				match shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default()) {
+					Step::Done { run: done, status } if done == run => Some(status),
+					_ => None,
+				}
+			});
+			assert_eq!(status, Some(7));
+			assert_eq!(shell.exit_cause(run), Some(ExitCause::Exit));
+			assert_eq!(shell.ended_by_exit_cut_short(&mut store, run), !fail);
+			assert_eq!(store.failed_reads > 0, fail);
+			let cleaned = store.inner.get(Key::Var(BStr::new(b"CLEANED"))).unwrap();
+			assert!(matches!(cleaned, Some(Record::Var(v)) if v.as_scalar() == Some(b"yes")));
+			assert!(
+				store
+					.inner
+					.get(Key::Var(BStr::new(b"MARKER")))
+					.unwrap()
+					.is_none()
+			);
+		}
+
+		// The delayed reads are attribution-only as well. A backend error is
+		// not the same as an unresolved child and must not poison the kernel's
+		// next turn. Seed the status after a real lastpipe capture so the cases
+		// do not depend on which vproc gets scheduled first.
+		for (suffix, on_success) in [("&& :", true), ("|| :", false)] {
+			for child_status in [None, Some(0), Some(1)] {
+				for (check_pending, fail) in [(true, false), (true, true), (false, true)] {
+					let mut store = Store::default();
+					let mut host = FakeHost::new();
+					let engine = Engine::new(EngineConfig::default());
+					let mut cx = Cx { host: &mut host, store: &mut store };
+					let mut shell = Shell::create(&engine, &mut cx, ShellInit::default()).unwrap();
+					let command = format!(
+						"set -o pipefail; shopt -s lastpipe; while :; do :; done | exit 0 {suffix}"
+					);
+					let run = shell.submit(Script::command(command.as_bytes()));
+					let status = (0..20).find_map(|_| match shell.step(&mut cx, Budget::default()) {
+						Step::Done { run: done, status } if done == run => Some(status),
+						_ => None,
+					});
+					assert_eq!(status, Some(0));
+					let children = shell
+						.k
+						.pending_cut_short
+						.as_ref()
+						.unwrap()
+						.1
+						.pending_children();
+					let [child] = children.as_slice() else {
+						panic!("expected one pending pipeline sibling: {children:?}");
+					};
+					if let Some(status) = child_status {
+						store
+							.inner
+							.apply(Change::Put(Key::Proc(*child), Record::Proc {
+								parent: Some(Vpid(1)),
+								status: Some(status),
+							}))
+							.unwrap();
+					}
+					store.reject_child = fail.then_some(*child);
+					let pending = child_status.is_none();
+					let cut_short = child_status.is_none_or(|s| (s == 0) == on_success);
+					if check_pending {
+						assert_eq!(shell.exit_children_pending(&mut store, run), !fail && pending);
+						assert_eq!(store.failed_reads > 0, fail);
+						assert!(!shell.k.root.has_fault());
+						// The settle window is owed only while the unresolved
+						// sibling can still change the verdict — with `exit 0`
+						// and a conditional suffix it can, so pending hinges;
+						// a resolved sibling never delays the verdict.
+						assert_eq!(
+							shell.exit_verdict_hinges_on_children(&mut store, run),
+							!fail && pending,
+							"hinge probe: {suffix}, {child_status:?}"
+						);
+						if fail {
+							store.reject_child = None;
+							assert_eq!(
+								shell.exit_children_pending(&mut store, run),
+								pending,
+								"pending probe must recover: {suffix}, {child_status:?}"
+							);
+							assert_eq!(
+								shell.exit_verdict_hinges_on_children(&mut store, run),
+								pending,
+								"hinge probe must recover: {suffix}, {child_status:?}"
+							);
+							store.reject_child = Some(*child);
+						}
+					}
+					let previous_failures = store.failed_reads;
+					assert_eq!(
+						shell.ended_by_exit_cut_short(&mut store, run),
+						!fail && cut_short,
+						"{suffix}: {child_status:?}, fail={fail}"
+					);
+					assert_eq!(store.failed_reads > previous_failures, fail);
+					assert!(!shell.k.root.has_fault());
+					if fail {
+						store.reject_child = None;
+						assert_eq!(
+							shell.ended_by_exit_cut_short(&mut store, run),
+							cut_short,
+							"verdict probe must recover: {suffix}, {child_status:?}"
+						);
+						assert!(!shell.k.root.has_fault());
+					}
+				}
+			}
+		}
+
+		// A pipefail merge already fixed by a non-zero exit cannot be
+		// changed by a still-unresolved sibling: for every suffix shape the
+		// verdict is settled, so the attribution owes no settle window even
+		// while the child is pending — the wait that turned a completed
+		// exit into a caller timeout.
+		for (suffix, cut) in [("", false), ("&& :", false), ("|| :", true), ("; :", true)] {
+			let mut store = Store::default();
+			let mut host = FakeHost::new();
+			let engine = Engine::new(EngineConfig::default());
+			let mut cx = Cx { host: &mut host, store: &mut store };
+			let mut shell = Shell::create(&engine, &mut cx, ShellInit::default()).unwrap();
+			let command =
+				format!("set -o pipefail; shopt -s lastpipe; while :; do :; done | exit 7 {suffix}");
+			let run = shell.submit(Script::command(command.as_bytes()));
+			let status = (0..20).find_map(|_| match shell.step(&mut cx, Budget::default()) {
+				Step::Done { run: done, status } if done == run => Some(status),
+				_ => None,
+			});
+			assert_eq!(status, Some(7), "suffix {suffix:?}");
+			assert!(shell.exit_children_pending(&mut store, run), "sibling still pending: {suffix:?}");
+			assert!(
+				!shell.exit_verdict_hinges_on_children(&mut store, run),
+				"verdict cannot change: {suffix:?}"
+			);
+			assert_eq!(shell.ended_by_exit_cut_short(&mut store, run), cut, "suffix {suffix:?}");
+		}
+	}
+
+	#[test]
+	fn exit_classification_boundary_status_outlives_a_failed_freeze() {
+		use crate::{
+			bash::{
+				Budget, Engine, EngineConfig, MemStore, Script, Shell, ShellInit, Step,
+				store::{BlobSlot, Change, Table},
+			},
+			testkit::FakeHost,
+		};
+
+		/// The real store, minus the reads only the attribution makes.
+		#[derive(Default)]
+		struct Store {
+			inner:        MemStore,
+			fail_options: bool,
+		}
+
+		impl StateStore for Store {
+			fn get(&mut self, key: Key<'_>) -> Result<Option<&Record>, StoreError> {
+				// The Bash parser does not read the zsh-only aliases option;
+				// the freeze reads it to model restored modes.
+				if self.fail_options && matches!(key, Key::ZshOpt(ZshOpt::Aliases)) {
+					return Err(StoreError::Backend(
+						std::io::Error::other("attribution read failed").into(),
+					));
+				}
+				self.inner.get(key)
+			}
+
+			fn scan(
+				&mut self,
+				table: Table,
+				f: &mut dyn FnMut(Key<'_>, &Record),
+			) -> Result<(), StoreError> {
+				self.inner.scan(table, f)
+			}
+
+			fn apply(&mut self, change: Change<'_>) -> Result<(), StoreError> {
+				self.inner.apply(change)
+			}
+
+			fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {
+				self.inner.put_blob(slot, bytes)
+			}
+
+			fn get_blob(&mut self, slot: BlobSlot) -> Result<Option<Vec<u8>>, StoreError> {
+				self.inner.get_blob(slot)
+			}
+
+			fn del_blob(&mut self, slot: BlobSlot) -> Result<(), StoreError> {
+				self.inner.del_blob(slot)
+			}
+
+			fn epoch(&self) -> u64 {
+				self.inner.epoch()
+			}
+		}
+
+		// The input ends on its own (no `exit` in it) with an EXIT trap set:
+		// the status a chain runner judges its successor by is the input's,
+		// and the parse context frozen beside it is an optional read.
+		for fail in [false, true] {
+			let mut store = Store { fail_options: fail, ..Store::default() };
+			let mut host = FakeHost::new();
+			let engine = Engine::new(EngineConfig::default());
+			let mut cx = Cx { host: &mut host, store: &mut store };
+			let mut shell = Shell::create(&engine, &mut cx, ShellInit::default()).unwrap();
+			let run = shell.submit(Script::command(b"trap 'true' EXIT; false".as_slice()));
+			let status = (0..20).find_map(|_| match shell.step(&mut cx, Budget::default()) {
+				Step::Done { run: done, status } if done == run => Some(status),
+				_ => None,
+			});
+			assert_eq!(status, Some(1));
+			// The status is kept whatever the store did.
+			assert_eq!(shell.cleanup_chain_status(run), Some(1));
+			// The freeze is the part that is optional: present on a readable
+			// store, absent (not a wrong one) on a failed read.
+			assert_eq!(
+				shell
+					.k
+					.boundary_cleanup
+					.as_ref()
+					.is_some_and(|(_, _, frozen)| frozen.is_none()),
+				fail
+			);
+		}
+	}
+
+	#[test]
+	fn exit_classification_boundary_freeze_shares_the_trap_lookup() {
+		use std::cell::Cell;
+
+		use crate::{
+			bash::{
+				Budget, Engine, EngineConfig, MemStore, Script, Shell, ShellInit, Step,
+				store::{BlobSlot, Change, Table, TrapKey},
+			},
+			testkit::FakeHost,
+		};
+
+		/// The real store, failing the `n`-th lookup that finds the EXIT trap
+		/// set: the lookups a trap start makes, not the one the `trap`
+		/// builtin makes before it has set anything.
+		#[derive(Default)]
+		struct Store {
+			inner:    MemStore,
+			found:    Cell<usize>,
+			fail_nth: Cell<Option<usize>>,
+		}
+
+		impl StateStore for Store {
+			fn get(&mut self, key: Key<'_>) -> Result<Option<&Record>, StoreError> {
+				if matches!(key, Key::Trap(TrapKey::Exit))
+					&& matches!(
+						self.inner.get(key),
+						Ok(Some(Record::Trap { action, .. })) if !action.is_empty()
+					) {
+					let nth = self.found.get() + 1;
+					self.found.set(nth);
+					if self.fail_nth.get() == Some(nth) {
+						return Err(StoreError::Backend(
+							std::io::Error::other("trap lookup failed").into(),
+						));
+					}
+				}
+				self.inner.get(key)
+			}
+
+			fn scan(
+				&mut self,
+				table: Table,
+				f: &mut dyn FnMut(Key<'_>, &Record),
+			) -> Result<(), StoreError> {
+				self.inner.scan(table, f)
+			}
+
+			fn apply(&mut self, change: Change<'_>) -> Result<(), StoreError> {
+				self.inner.apply(change)
+			}
+
+			fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {
+				self.inner.put_blob(slot, bytes)
+			}
+
+			fn get_blob(&mut self, slot: BlobSlot) -> Result<Option<Vec<u8>>, StoreError> {
+				self.inner.get_blob(slot)
+			}
+
+			fn del_blob(&mut self, slot: BlobSlot) -> Result<(), StoreError> {
+				self.inner.del_blob(slot)
+			}
+
+			fn epoch(&self) -> u64 {
+				self.inner.epoch()
+			}
+		}
+
+		/// `(chain status kept, parse frozen)` of a root run over
+		/// `trap 'true' EXIT; false`, the `fail_nth`-th trap lookup failing.
+		fn cleanup(host: &mut FakeHost, fail_nth: Option<usize>) -> (Option<i32>, bool) {
+			let mut store = Store { fail_nth: Cell::new(fail_nth), ..Store::default() };
+			let engine = Engine::new(EngineConfig::default());
+			let mut cx = Cx { host, store: &mut store };
+			let mut shell = Shell::create(&engine, &mut cx, ShellInit::default()).unwrap();
+			let run = shell.submit(Script::command(b"trap 'true' EXIT; false".as_slice()));
+			let _ = (0..20).find_map(|_| match shell.step(&mut cx, Budget::default()) {
+				Step::Done { run: done, .. } if done == run => Some(()),
+				_ => None,
+			});
+			let frozen = shell
+				.k
+				.boundary_cleanup
+				.as_ref()
+				.is_some_and(|(_, _, frozen)| frozen.is_some());
+			(shell.cleanup_chain_status(run), frozen)
+		}
+
+		// One lookup decides both whether the trap starts and what is frozen
+		// before it. It fails: no cleanup starts, so nothing is reported for
+		// the input's status — where a guard's lookup failing and the start's
+		// succeeding started the trap with no freeze (the trap's own view
+		// then stood in for the input's).
+		let (status, frozen) = cleanup(&mut FakeHost::new(), Some(1));
+		assert_eq!(status, None, "a failed lookup starts no cleanup");
+		assert!(!frozen);
+		// No second lookup exists to fail: the trap starts with its freeze —
+		// where the guard's lookup succeeding and the start's failing kept
+		// the trap from running at all.
+		let (status, frozen) = cleanup(&mut FakeHost::new(), Some(2));
+		assert_eq!(status, Some(1));
+		assert!(frozen, "the trap that starts is frozen before its frame");
+	}
+
+	#[test]
+	fn exit_classification_frozen_stdin_is_the_input_run_origin() {
+		use crate::{
+			bash::{
+				Budget, Engine, EngineConfig, MemStore, Script, Shell, ShellInit, Step, ids::ModeId,
+				syntax::Features,
+			},
+			testkit::FakeHost,
+		};
+
+		// An interactive zsh reading a command string: `#` is a comment in
+		// that string (what the shell reads differently is standard input,
+		// without `interactivecomments`), and the view frozen before its
+		// EXIT trap parses the unread tail under the input's own rule — not
+		// under the interactivity alone.
+		let mut host = FakeHost::new();
+		let mut store = MemStore::default();
+		let mut cx = Cx { host: &mut host, store: &mut store };
+		let engine = Engine::new(EngineConfig::default());
+		let init = ShellInit { mode: ModeId::Zsh, interactive: true, ..ShellInit::default() };
+		let mut shell = Shell::create(&engine, &mut cx, init).unwrap();
+		let run = shell.submit(Script::command(b"trap 'true' EXIT; false".as_slice()));
+		let status = (0..20).find_map(|_| match shell.step(&mut cx, Budget::default()) {
+			Step::Done { run: done, status } if done == run => Some(status),
+			_ => None,
+		});
+		assert_eq!(status, Some(1));
+		assert_eq!(shell.cleanup_chain_status(run), Some(1), "the trap started");
+		let frozen = shell
+			.k
+			.boundary_cleanup
+			.as_ref()
+			.and_then(|(_, _, frozen)| frozen.as_ref())
+			.and_then(|frozen| frozen.parse.clone())
+			.expect("frozen before the trap");
+		let features = Features::from_bits(frozen.features);
+		assert!(features.contains(Features::ZSH_INTERACTIVE_COMMENTS), "{features:?}");
+	}
+
+	#[test]
+	fn exit_classification_child_exit_trap_runs_before_its_run_completes() {
+		use crate::{
+			bash::{Budget, Engine, EngineConfig, MemStore, Script, Shell, ShellInit, Step, VprocSel},
+			testkit::FakeHost,
+		};
+
+		// A child run's own EXIT trap is cleanup too, and it still runs before
+		// the run completes: the root-only part of the boundary is the record
+		// kept for the report, not the return that lets the trap's frame run.
+		let mut host = FakeHost::new();
+		let mut store = MemStore::default();
+		let mut cx = Cx { host: &mut host, store: &mut store };
+		let engine = Engine::new(EngineConfig::default());
+		let mut shell = Shell::create(&engine, &mut cx, ShellInit::default()).unwrap();
+		let script = Script {
+			vproc: VprocSel::NewSubshell,
+			..Script::command(b"trap 'printf cleanup; exit 7' EXIT; :".as_slice())
+		};
+		let run = shell.submit(script);
+		let mut done = None;
+		for _ in 0..40 {
+			if let Step::Done { run: finished, status } = shell.step(&mut cx, Budget::default())
+				&& finished == run
+			{
+				done = Some(status);
+				break;
+			}
+		}
+		let status = done.expect("the child run completes");
+		drop(cx);
+		let output = String::from_utf8_lossy(&host.stdout.bytes()).into_owned();
+		assert_eq!(output, "cleanup", "the trap ran before the run completed");
+		assert_eq!(status, 7);
+	}
+
+	#[test]
+	fn exit_classification_only_counts_frames_with_still_pending_children() {
+		use crate::{
+			bash::{
+				Budget, Engine, EngineConfig, MemStore, Script, Shell, ShellInit, Step, store::Change,
+			},
+			testkit::FakeHost,
+		};
+
+		// Both lastpipe stages capture a live sibling. Once one sibling has
+		// exited, only the other frame can still affect the verdict. A known
+		// failure makes the remaining sibling irrelevant to either operator.
+		for (first, second, hinges) in [
+			(None, None, true),
+			(Some(0), None, true),
+			(None, Some(0), true),
+			(Some(1), None, false),
+			(None, Some(1), false),
+			(Some(0), Some(0), false),
+			(Some(0), Some(1), false),
+			(Some(1), Some(0), false),
+			(Some(1), Some(1), false),
+		] {
+			for op in ["&&", "||"] {
+				let mut store = MemStore::default();
+				let mut host = FakeHost::new();
+				let engine = Engine::new(EngineConfig::default());
+				let mut cx = Cx { host: &mut host, store: &mut store };
+				let mut shell = Shell::create(&engine, &mut cx, ShellInit::default()).unwrap();
+				let command = format!(
+					"set -o pipefail; shopt -s lastpipe; while :; do :; done | {{ while :; do :; done \
+					 | exit 0; }} {op} :"
+				);
+				let run = shell.submit(Script::command(command.as_bytes()));
+				let status = (0..20).find_map(|_| match shell.step(&mut cx, Budget::default()) {
+					Step::Done { run: done, status } if done == run => Some(status),
+					_ => None,
+				});
+				assert_eq!(status, Some(0));
+				let frames = shell
+					.k
+					.pending_cut_short
+					.as_ref()
+					.unwrap()
+					.1
+					.pending_child_frames();
+				let [(_, outer), (_, inner)] = frames.as_slice() else {
+					panic!("expected two pending pipeline frames: {frames:?}");
+				};
+				for (children, status) in [(outer, first), (inner, second)] {
+					let [child] = children.as_slice() else {
+						panic!("expected one sibling")
+					};
+					if let Some(status) = status {
+						cx.store
+							.apply(Change::Put(Key::Proc(*child), Record::Proc {
+								parent: Some(Vpid(1)),
+								status: Some(status),
+							}))
+							.unwrap();
+					}
+				}
+				assert_eq!(
+					shell.exit_children_pending(cx.store, run),
+					first.is_none() || second.is_none()
+				);
+				assert_eq!(
+					shell.exit_verdict_hinges_on_children(cx.store, run),
+					hinges,
+					"{first:?}, {second:?}, {op}"
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn exit_classification_parked_expansions_resume_parent_command() {
+		// NoFork/Here/Math leave their owning operation unfinished, whether
+		// a simple command or an already-entered compound. Ordinary calls
+		// resume after it; forked substitutions own no frames in this vproc.
+		// zsh math calls use ordinary function frames, not a special kind.
+		for operation in
+			["Exec", "CondTest", "Arith", "CaseWord", "Redir b=1", "ForIn", "Repeat", "CallAnon"]
+		{
+			for (pending, expected) in [
+				(None, false),
+				(Some(PendingSub::Fork { vpid: Vpid(2), capture: Capture::default() }), false),
+				(Some(PendingSub::NoFork { capture: Capture::default(), value: false }), true),
+				(Some(PendingSub::NoFork { capture: Capture::default(), value: true }), true),
+				(Some(PendingSub::Here { status: 0 }), true),
+				(Some(PendingSub::Math { status: 1, slot: Slot::Words }), true),
+			] {
+				let mut vp =
+					Vproc::new(Vpid(1), None, FdTable::default(), BString::from("/"), None, false);
+				let unit = Arc::new(ir::asm::asm(&format!("0 {operation}\n1 End")).unwrap());
+				let mut parent = Frame::new(Some(Arc::clone(&unit)), 0, FrameKind::Subshell);
+				parent.scratch = Some(Box::new(Scratch { sub: pending, ..Default::default() }));
+				vp.frames.push(parent);
+				vp.frames
+					.push(Frame::new(Some(unit), 0, FrameKind::Function {
+						name:     BString::from("callee"),
+						zsh:      true,
+						autoload: false,
+					}));
+				assert_eq!(
+					exit_cut_short(&vp, TopCut::At(1), 0, false, |_| None),
+					expected,
+					"{operation}"
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn exit_classification_alias_and_source_trivia_share_lexer_state() {
+		for (features, expected) in [
+			(Features::NONE, false),
+			(Features::ZSH, true),
+			(Features::ZSH | Features::ZSH_INTERACTIVE_COMMENTS, false),
+		] {
+			assert_eq!(script_has_command(b"#word", features, None, &Resume::default()), expected);
+			assert!(script_has_command(b"#word\n:", features, None, &Resume::default()));
+		}
+		// The lexer reads pending alias bytes before source bytes. A
+		// comment/escaped newline may start in one and finish in the other.
+		for (alias, source, expected) in [
+			("# comment", "printf hidden", false),
+			("# comment", "\nprintf unrun", true),
+			("\\", "\n", false),
+			("\\", "\nprintf unrun", true),
+			(" ", "# comment", false),
+			("\\#literal", "", true),
+		] {
+			assert_eq!(
+				script_has_command(source.as_bytes(), Features::NONE, None, &Resume {
+					pending: alias.as_bytes().to_vec(),
+					..Resume::default()
+				}),
+				expected,
+				"alias={alias:?}, source={source:?}"
+			);
+		}
+	}
+
+	#[test]
+	fn exit_classification_trap_carriers_restore_status_with_or_without_a_unit() {
+		// push_trap/next_command restore the saved status on both text and
+		// unit-less function carriers. The victim resumes in place for
+		// DEBUG/ERR/signals, after its completed op for RETURN/EXIT.
+		for key in [
+			TrapKey::Debug,
+			TrapKey::Err,
+			TrapKey::Signal(crate::bash::Signal::Usr1),
+			TrapKey::Return,
+			TrapKey::Exit,
+		] {
+			for kept in [0, 1] {
+				for text in [false, true] {
+					let mut vp =
+						Vproc::new(Vpid(1), None, FdTable::default(), BString::from("/"), None, false);
+					let unit =
+						Arc::new(ir::asm::asm("0 Nop\n1 BrOk a=3\n2 Jmp a=4\n3 Exec\n4 End").unwrap());
+					let in_place = matches!(key, TrapKey::Debug | TrapKey::Err | TrapKey::Signal(_));
+					vp.frames
+						.push(Frame::new(Some(unit), u32::from(in_place), FrameKind::Subshell));
+					let action = Arc::new(ir::asm::asm("0 Exec\n1 End").unwrap());
+					let carrier = FrameKind::script(b"", Pos { offset: 0, line: 1 }, ScriptKind::Trap {
+						key,
+						status: kept,
+						cancel: None,
+						return_target: None,
+						exit: false,
+					});
+					vp.frames
+						.push(Frame::new(text.then(|| Arc::clone(&action)), 0, carrier));
+					if !text {
+						vp.frames
+							.push(Frame::new(Some(action), 0, FrameKind::Function {
+								name:     BString::from("trap"),
+								zsh:      true,
+								autoload: false,
+							}));
+					}
+					assert_eq!(
+						exit_cut_short(&vp, TopCut::At(1), 1 - kept, true, |_| None),
+						kept == 0,
+						"{key:?}, kept={kept}, text={text}"
+					);
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn exit_classification_loop_and_try_records_have_balanced_lifetimes() {
+		// These empty IR regions do no command work: ForIn/Repeat seed 0,
+		// LoopExit pops that record, and the interrupted outer try's
+		// cleanup snapshots/restores it before its caller's branch.
+		for enter in ["ForIn", "Repeat", "LoopEnter a=5"] {
+			let unit = ir::asm::asm(&format!(
+				"0 Nop\n1 {enter}\n2 ForNext a=5\n3 SetStatus a=0\n4 LoopBack a=2\n5 LoopExit\n6 \
+				 AlwaysEnter\n7 AlwaysEnd\n8 End"
+			))
+			.unwrap();
+			let runtime = [LoopRec {
+				kind:       LoopKind::Try { always: false, pending: None },
+				status:     1,
+				iterations: 0,
+				exit:       6,
+				cont:       8,
+				depth:      Depths::default(),
+			}];
+			assert!(
+				matches!(
+					frame_continuation(&unit, 1, WalkStatus::NonZero, &runtime, true, None),
+					FrameExit::Exits(out) if !out.is_empty() && out.iter().all(|end| end.status == WalkStatus::Zero && end.transfer.is_none())
+				),
+				"{enter}"
+			);
+		}
+	}
 
 	// Golden: bash 5.3.20 `time -p` and the default format.
 	#[test]

@@ -4440,6 +4440,12 @@ export interface ShellRunResult {
    * with it off.
    */
   errexit: boolean
+  /**
+   * Whether `exit` or an armed `set -e` cut the run short with ordinary
+   * commands still left to run. Cleanup such as an `EXIT` trap can still
+   * run. A trailing `exit` that leaves no remaining work is not reported.
+   */
+  endedByExit: boolean
 }
 
 /** The application's speech synthesizer, injected into a shell run. */

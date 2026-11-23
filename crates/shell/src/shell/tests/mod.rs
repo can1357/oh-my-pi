@@ -15,6 +15,12 @@ use crate::proctree;
 mod builtins;
 mod direnv;
 mod env_cwd;
+#[cfg(unix)]
+mod exit_alias_parity;
+mod exit_classification;
+mod exit_continuations;
+mod exit_final_gate;
+mod exit_review_matrix;
 mod process_control;
 mod redirections;
 mod session;

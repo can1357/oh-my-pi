@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
+import { messageDefs, modelDefs } from "../src/modes/rpc/wire/content";
+import { stateDefs } from "../src/modes/rpc/wire/state";
 import {
 	encodeRpcFrame,
 	MAX_RPC_FRAME_BYTES,
@@ -20,6 +23,48 @@ function oversizedMessageHistory(prefix: string) {
 }
 
 describe("RPC frame encoding", () => {
+	// Transport preserves all JSON values. The wire type that generates the
+	// client decoders accepts absent/false/true, but rejects non-booleans.
+	it("preserves optional bash attribution through framing and validates its schema types", () => {
+		const bash = type.scope({ ...messageDefs, ...modelDefs, ...stateDefs }).export().BashResult;
+		const base = {
+			output: "",
+			exitCode: 0,
+			cancelled: false,
+			truncated: false,
+			totalLines: 0,
+			totalBytes: 0,
+			outputLines: 0,
+			outputBytes: 0,
+		};
+		for (const [fields, valid] of [
+			[{}, true],
+			[{ endedByExit: false }, true],
+			[{ endedByExit: true }, true],
+			[{ ephemeralShell: false }, true],
+			[{ ephemeralShell: true }, true],
+			[{ movedCwd: true, errexit: false, endedByExit: true, ephemeralShell: false }, true],
+			[{ movedCwd: false, errexit: true, endedByExit: false, ephemeralShell: true }, true],
+			[{ movedCwd: 1 }, false],
+			[{ errexit: "true" }, false],
+			[{ endedByExit: "true", ephemeralShell: false }, false],
+			[{ endedByExit: true, ephemeralShell: 1 }, false],
+		] as const) {
+			const frame = { type: "response", command: "bash", success: true, data: { ...base, ...fields } };
+			for (const version of [1, 2] as const) {
+				const encoder = new RpcFrameEncoder();
+				encoder.setProtocolVersion(version);
+				const decoder = new RpcFrameDecoder();
+				const decoded = decoder.push(JSON.parse(encoder.encode(frame))) as typeof frame;
+				expect(decoded).toEqual(frame);
+				for (const flag of ["movedCwd", "errexit", "endedByExit", "ephemeralShell"] as const) {
+					expect(Object.hasOwn(decoded.data, flag)).toBe(Object.hasOwn(fields, flag));
+				}
+				expect(bash.allows(decoded.data)).toBe(valid);
+			}
+		}
+	});
+
 	it("preserves fitting frames and serializes stateful message frames once", () => {
 		const frame = { id: "request-1", type: "response", command: "get_state", success: true, data: { ok: true } };
 		expect(encodeRpcFrame(frame)).toBe(`${JSON.stringify(frame)}\n`);

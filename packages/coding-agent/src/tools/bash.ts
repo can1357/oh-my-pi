@@ -67,8 +67,12 @@ import { resolveEvalBackends } from "./eval-backends";
 import { invalidateGithubCacheForBashCommand, invalidateGithubCacheForBashResult } from "./gh-cache-invalidation";
 import { serviceLogs, startService, type ServiceReady } from "../launch/services";
 import { isFindEnabled } from "./jfind";
-import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import {
+	formatArtifactErrorNotice,
+	formatOutputNotice,
+	formatRawOutputNotice,
+	stripRawOutputArtifactNotice,
+} from "@oh-my-pi/pi-tui/tools/output-meta";
 import { outputMeta, resolveInlineByteCapBudget } from "./output-meta";
 import { resolveShellDirectory, resolveToCwd } from "./path-utils";
 import {
@@ -620,6 +624,10 @@ const FORK_STATE_LOST_NOTICE = "Ran in a copy of the busy session shell; changes
 /** Shown when such a call left background jobs running: they stay in the copy. */
 const FORK_JOBS_NOTICE =
 	"Background jobs started here run in a copy of the busy session shell; later calls' jobs, wait and %N won't see them.";
+
+/** Shown when `exit` or an armed `set -e` ended the run before its input was exhausted. */
+const ENDED_BY_EXIT_NOTICE =
+	"Stopped by `exit` or an armed `set -e` before the command finished: the rest of this call did not run, apart from shell cleanup such as an `EXIT` trap.";
 
 /**
  * Names what a command changed in the session shell that the next call starts without: a `cd`
@@ -1314,9 +1322,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const notices: string[] = [];
 		const wallTimeMs = options.wallTimeMs;
 		const wallTimeNoticeEmitted = wallTimeMs !== undefined && wallTimeMs >= WALL_TIME_NOTICE_MIN_MS;
-		if (wallTimeNoticeEmitted) {
-			notices.push(formatWallTimeNotice(wallTimeMs));
-		}
 		if (options.notices) {
 			for (const notice of options.notices) {
 				if (notice) notices.push(notice);
@@ -1327,6 +1332,18 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const fork = "fork" in result ? result.fork : undefined;
 		if (fork && !fork.carried) notices.push(FORK_STATE_LOST_NOTICE);
 		if (fork?.jobs) notices.push(FORK_JOBS_NOTICE);
+		if ("endedByExit" in result && result.endedByExit) {
+			notices.push(ENDED_BY_EXIT_NOTICE);
+			const minimized = "minimized" in result ? result.minimized : undefined;
+			const raw = minimized && stripRawOutputArtifactNotice(outputLines[0]);
+			if (raw?.artifactId && raw.artifactId === minimized?.artifactId) {
+				// The shell renderers peel trailing metadata in reverse order.
+				// Keep the raw-output footer ahead of the wall time and exit code.
+				outputLines[0] = [raw.text, "", ...notices, formatRawOutputNotice(raw.artifactId)].join("\n");
+				notices.length = 0;
+			}
+		}
+		if (wallTimeNoticeEmitted) notices.unshift(formatWallTimeNotice(wallTimeMs));
 		if (notices.length > 0) outputLines.push("", ...notices);
 		// Shaped output already leads with its exit status.
 		if (failedExit && !shaped?.text?.startsWith("[exit code ")) outputLines.push("", formatExitCodeNotice(exitCode));
@@ -1354,6 +1371,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (failedExit) {
 			details.exitCode = exitCode;
 		}
+		if ("endedByExit" in result) details.endedByExit = result.endedByExit;
+		if ("ephemeralShell" in result) details.ephemeralShell = result.ephemeralShell;
 		if (options.replies?.length) details.replies = [...options.replies];
 		if (options.toolCommands?.length) details.toolCommands = [...options.toolCommands];
 		if (shaped?.spotlight) details.spotlight = shaped.spotlight;

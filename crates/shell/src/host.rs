@@ -542,6 +542,11 @@ impl PiHost {
 		self.tools.commands.set(commands);
 	}
 
+	/// The session commands installed now ([`Self::set_commands`]).
+	pub(crate) fn commands(&self) -> Option<SessionCommands> {
+		self.tools.commands.get()
+	}
+
 	/// The standard streams the shell's fds 0, 1 and 2 forward to.
 	pub const fn streams(&self) -> &StdStreams {
 		&self.launcher.streams

@@ -795,13 +795,13 @@ fn root_binding_below(
 	// The innermost function scope, read once a private binding needs it.
 	let mut func = FuncScope::Unread;
 	for depth in (SCOPE_BITS..top).rev() {
-		if root_binds(root, store, name, depth, hide_private, &mut func)? {
+		if root_binds(root, store, name, depth, top, hide_private, &mut func)? {
 			return Ok(Some(depth));
 		}
 	}
 	let mut bits = root.locals & below(top);
 	while let Some(depth) = bits.checked_ilog2() {
-		if root_binds(root, store, name, depth, hide_private, &mut func)? {
+		if root_binds(root, store, name, depth, top, hide_private, &mut func)? {
 			return Ok(Some(depth));
 		}
 		bits &= !(1 << depth);
@@ -814,19 +814,20 @@ fn root_binding_below(
 enum FuncScope {
 	/// Not read yet.
 	Unread,
-	/// [`root_func_scope`]'s answer.
+	/// [`root_func_scope_below`]'s answer.
 	Read(Option<u32>),
 }
 
 /// Whether root scope `depth` binds `name` for [`root_binding_below`]:
 /// with `hide_private`, a zsh private parameter there counts only when no
-/// function scope lies above it. `func` caches the innermost function
-/// scope.
+/// surviving function scope lies above it. `func` caches the innermost
+/// function below `top`, not the innermost function at the live depth.
 fn root_binds(
 	root: &Root,
 	store: &mut dyn StateStore,
 	name: &[u8],
 	depth: u32,
+	top: u32,
 	hide_private: bool,
 	func: &mut FuncScope,
 ) -> Result<bool, StoreError> {
@@ -841,7 +842,7 @@ fn root_binds(
 	let innermost = match *func {
 		FuncScope::Read(f) => f,
 		FuncScope::Unread => {
-			let f = root_func_scope(root, store)?;
+			let f = root_func_scope_below(root, store, top)?;
 			*func = FuncScope::Read(f);
 			f
 		},
@@ -865,16 +866,26 @@ const fn private_hidden(at: usize, innermost: Option<usize>) -> bool {
 /// dynamic lookup: a zsh private parameter hidden from the running
 /// function ([`private_hidden`]) is skipped.
 fn vec_binding(vp: &Vproc, name: &[u8]) -> Option<usize> {
-	vp.scopes.iter().enumerate().rev().find_map(|(i, s)| {
-		let entry = s.vars.get(name)?;
-		let private = entry
-			.as_ref()
-			.is_some_and(|v| v.attrs.contains(Attrs::ZSH_PRIVATE));
-		if private && vp.scopes[i + 1..].iter().any(|s| s.func.is_some()) {
-			return None;
-		}
-		Some(i)
-	})
+	vec_binding_upto(vp, name, usize::MAX)
+}
+
+/// [`vec_binding`] restricted to the outermost `upto` scopes.
+fn vec_binding_upto(vp: &Vproc, name: &[u8], upto: usize) -> Option<usize> {
+	let bound = vp.scopes.len().min(upto);
+	vp.scopes[..bound]
+		.iter()
+		.enumerate()
+		.rev()
+		.find_map(|(i, s)| {
+			let entry = s.vars.get(name)?;
+			let private = entry
+				.as_ref()
+				.is_some_and(|v| v.attrs.contains(Attrs::ZSH_PRIVATE));
+			if private && vp.scopes[i + 1..bound].iter().any(|s| s.func.is_some()) {
+				return None;
+			}
+			Some(i)
+		})
 }
 
 /// Whether the innermost scope binding `name`, with no zsh/param/private
@@ -912,12 +923,21 @@ pub fn innermost_private(
 
 /// The innermost root function scope.
 fn root_func_scope(root: &Root, store: &mut dyn StateStore) -> Result<Option<u32>, StoreError> {
-	for depth in (SCOPE_BITS..root.depth).rev() {
+	root_func_scope_below(root, store, root.depth)
+}
+
+/// The innermost function among the outermost `top` materialized root scopes.
+fn root_func_scope_below(
+	root: &Root,
+	store: &mut dyn StateStore,
+	top: u32,
+) -> Result<Option<u32>, StoreError> {
+	for depth in (SCOPE_BITS..top).rev() {
 		if root_scope(store, depth)?.0.is_some() {
 			return Ok(Some(depth));
 		}
 	}
-	Ok(top_bit(root.funcs, root.depth))
+	Ok(top_bit(root.funcs, top))
 }
 
 /// The innermost root scope holding positional parameters.
@@ -962,10 +982,28 @@ fn bound_at(
 	vp: &Vproc,
 	name: &[u8],
 ) -> Result<At, StoreError> {
+	bound_at_upto(root, store, vp, name, usize::MAX)
+}
+
+/// [`bound_at`] for a caller frame of the attribution walk: the innermost
+/// scope binding `name` among the outermost `upto` scopes of `vp` only, the
+/// scopes the frames it called created discarded (see [`lookup_upto`]).
+/// `usize::MAX` is every scope, the [`bound_at`] case.
+fn bound_at_upto(
+	root: &Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+	name: &[u8],
+	upto: usize,
+) -> Result<At, StoreError> {
 	if vp.image.is_none() {
-		return Ok(root_binding(root, store, name)?.map_or(At::Global, |d| At::Scope(In::Store(d))));
+		// A lazy scope binds nothing: `root_binding_below` clamps to the
+		// materialized `depth` on its own.
+		let top = u32::try_from(upto).unwrap_or(u32::MAX);
+		return Ok(root_binding_below(root, store, name, top, true)?
+			.map_or(At::Global, |d| At::Scope(In::Store(d))));
 	}
-	Ok(vec_binding(vp, name).map_or(At::Global, |i| At::Scope(In::Vec(i))))
+	Ok(vec_binding_upto(vp, name, upto).map_or(At::Global, |i| At::Scope(In::Vec(i))))
 }
 
 /// The global state a child forked from `vp` starts with, and its locale
@@ -1079,7 +1117,7 @@ pub enum Deref {
 }
 
 /// Longest nameref chain followed before it counts as circular.
-const MAX_DEREF: usize = 64;
+pub(super) const MAX_DEREF: usize = 64;
 
 /// Follow the name references starting at `name`: each nameref with a
 /// value names the next variable; a value with a subscript ends the chain
@@ -1093,12 +1131,27 @@ pub fn deref(
 	vp: &Vproc,
 	name: &[u8],
 ) -> Result<Deref, StoreError> {
+	deref_upto(root, store, vp, name, usize::MAX)
+}
+
+/// [`deref`] under the outermost `upto` scopes of `vp` only (see
+/// [`lookup_upto`]): each hop reads through [`lookup_declared_upto`].
+///
+/// # Errors
+/// [`StoreError`] when a variable cannot be read.
+fn deref_upto(
+	root: &Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+	name: &[u8],
+	upto: usize,
+) -> Result<Deref, StoreError> {
 	if !may_be_nameref(root, vp) {
 		return Ok(Deref::Plain);
 	}
 	let mut cur = BString::from(name);
 	for hop in 0..MAX_DEREF {
-		let Some(target) = lookup_declared(root, store, vp, &cur)?
+		let Some(target) = lookup_declared_upto(root, store, vp, &cur, upto)?
 			.filter(|v| v.attrs.contains(Attrs::NAMEREF) && !v.attrs.contains(Attrs::INVISIBLE))
 			.and_then(Var::as_scalar)
 			.filter(|t| !t.is_empty())
@@ -1145,22 +1198,49 @@ pub fn lookup<'a>(
 	vp: &'a Vproc,
 	name: &[u8],
 ) -> Result<Option<&'a Var>, StoreError> {
+	lookup_scopes(root, store, vp, name, usize::MAX)
+}
+
+/// [`lookup`] as a caller frame of the attribution walk sees it: only the
+/// outermost `upto` scopes of `vp` alive, the ones the frames it called
+/// created discarded — a read-only counterfactual; the caller never pops a
+/// scope itself. Name references bound in a surviving scope resolve through
+/// the same bound view.
+///
+/// # Errors
+/// [`StoreError`] when a variable cannot be read.
+pub fn lookup_upto<'a>(
+	root: &Root,
+	store: &'a mut dyn StateStore,
+	vp: &'a Vproc,
+	name: &[u8],
+	upto: usize,
+) -> Result<Option<&'a Var>, StoreError> {
+	lookup_scopes(root, store, vp, name, upto)
+}
+
+fn lookup_scopes<'a>(
+	root: &Root,
+	store: &'a mut dyn StateStore,
+	vp: &'a Vproc,
+	name: &[u8],
+	upto: usize,
+) -> Result<Option<&'a Var>, StoreError> {
 	// The common case, a variable that is no nameref (every expansion reads
 	// through here): one walk, one read when the root holds no nameref,
 	// else the binding read once more to return it (a borrow returned on
 	// one path only cannot be held across the other).
-	let at = bound_at(root, store, vp, name)?;
+	let at = bound_at_upto(root, store, vp, name, upto)?;
 	if !may_be_nameref(root, vp)
 		|| !var_at(store, vp, name, at)?.is_some_and(|v| v.attrs.contains(Attrs::NAMEREF))
 	{
 		return Ok(var_at(store, vp, name, at)?.filter(|v| !v.attrs.contains(Attrs::INVISIBLE)));
 	}
-	match deref(root, store, vp, name)? {
-		Deref::Plain => {
-			Ok(lookup_declared(root, store, vp, name)?.filter(|v| !v.attrs.contains(Attrs::INVISIBLE)))
-		},
+	match deref_upto(root, store, vp, name, upto)? {
+		Deref::Plain => Ok(lookup_declared_upto(root, store, vp, name, upto)?
+			.filter(|v| !v.attrs.contains(Attrs::INVISIBLE))),
 		Deref::To { name: target, index: None } => {
-			Ok(lookup_declared(root, store, vp, &target)?
+			Ok(lookup_declared_upto(root, store, vp, &target, upto)?
 				.filter(|v| !v.attrs.contains(Attrs::INVISIBLE)))
 		},
 		Deref::To { index: Some(_), .. } | Deref::Circular => Ok(None),
@@ -1180,6 +1260,24 @@ pub fn lookup_declared<'a>(
 	name: &[u8],
 ) -> Result<Option<&'a Var>, StoreError> {
 	let at = bound_at(root, store, vp, name)?;
+	var_at(store, vp, name, at)
+}
+
+/// [`lookup_declared`] under the outermost `upto` scopes of `vp` only (see
+/// [`lookup_upto`]): no name references followed, declared-but-unset
+/// variables returned with their attributes.
+///
+/// # Errors
+/// [`StoreError`] when a variable cannot be read.
+#[inline]
+pub fn lookup_declared_upto<'a>(
+	root: &Root,
+	store: &'a mut dyn StateStore,
+	vp: &'a Vproc,
+	name: &[u8],
+	upto: usize,
+) -> Result<Option<&'a Var>, StoreError> {
+	let at = bound_at_upto(root, store, vp, name, upto)?;
 	var_at(store, vp, name, at)
 }
 
@@ -1209,11 +1307,12 @@ pub fn lookup_declared_scoped<'a>(
 /// `names` (each `LANG` or `LC_*`) as `vp` sees them: equal tokens mean
 /// equal values. `None` when one of them is bound in `vp`'s scopes (a
 /// temporary `LC_ALL=C cmd`, a `local LANG`) or a forked vproc assigned
-/// one (`Vproc::locale_gen`): the caller reads them then. The token is the
-/// root's count of locale-variable writes ([`Root::set_var`], [`edit_var`])
-/// and store invalidations, so a root write or an out-of-band store change
-/// of any locale variable changes it; a forked vproc keeps the count of
-/// its fork, its values being the root's then.
+/// one (`Vproc::locale_gen`), or when a global locale variable is a name
+/// reference. Its target can change without any locale-variable write.
+/// Otherwise the token is the root's count of locale-variable writes
+/// ([`Root::set_var`], [`edit_var`]) and store invalidations, so a root write
+/// or an out-of-band store change of any locale variable changes it; a forked
+/// vproc keeps the count of its fork, its values being the root's then.
 pub fn locale_token(
 	root: &Root,
 	store: &mut dyn StateStore,
@@ -1221,19 +1320,23 @@ pub fn locale_token(
 	names: &[&[u8]],
 ) -> Option<u64> {
 	debug_assert!(names.iter().all(|n| is_locale_name(n)), "not a locale variable");
-	let bound = |vars: &VarMap| names.iter().any(|n| vars.contains_key(*n));
-	if vp.image.is_some() {
-		return if vp.scopes.iter().any(|s| bound(&s.vars)) {
-			None
-		} else {
-			vp.locale_gen
-		};
+	let has_nameref = |var: Option<&Var>| var.is_some_and(|v| v.attrs.contains(Attrs::NAMEREF));
+	if let Some(image) = &vp.image {
+		let token = vp.locale_gen?;
+		return (!names.iter().any(|name| {
+			has_nameref(image.var(name)) || vp.scopes.iter().any(|s| s.vars.contains_key(*name))
+		}))
+		.then_some(token);
 	}
-	// A failed read counts as bound: the caller then reads the values.
-	let in_vp = names
-		.iter()
-		.any(|n| !matches!(root_binding(root, store, n), Ok(None)));
-	(!in_vp).then_some(root.locale_gen)
+	for name in names {
+		// An unsuccessful read must not validate a cached value.
+		if !matches!(root_binding(root, store, name), Ok(None))
+			|| (root.namerefs && !matches!(global(store, name), Ok(var) if !has_nameref(var)))
+		{
+			return None;
+		}
+	}
+	Some(root.locale_gen)
 }
 
 /// The variable [`store_var`] at `level` would replace, borrowed;
@@ -3467,6 +3570,134 @@ mod tests {
 			Level::Global,
 		);
 		assert_eq!(get(&root, &mut store, &vp, "c"), None);
+	}
+
+	#[test]
+	fn lookup_upto_private_locale_uses_the_surviving_function() {
+		use crate::bash::vm::locale::{Charset, charset_upto};
+		for forked in [false, true] {
+			let (mut store, mut root, mut vp) = shell();
+			store_var(
+				&mut root,
+				&mut store,
+				&mut vp,
+				b"LANG",
+				Some(Var::scalar("C.UTF-8", Attrs::NONE)),
+				Level::Global,
+			);
+			if forked {
+				vp = subshell(&root, &mut store, &vp);
+			}
+			push_scope(&mut root, &mut store, &mut vp, func_scope_named("caller"));
+			store_var(
+				&mut root,
+				&mut store,
+				&mut vp,
+				b"LC_ALL",
+				Some(Var::scalar("zh_TW.Big5", Attrs::ZSH_PRIVATE)),
+				Level::Local,
+			);
+			push_scope(&mut root, &mut store, &mut vp, func_scope_named("callee"));
+			for (upto, expected) in [
+				(0, Charset::Utf8),
+				(1, Charset::Encoding(encoding_rs::BIG5)),
+				(2, Charset::Utf8),
+				(usize::MAX, Charset::Utf8),
+			] {
+				assert_eq!(
+					charset_upto(&root, &mut store, &vp, upto).unwrap(),
+					expected,
+					"forked={forked}, upto={upto}"
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn charset_upto_reads_the_caller_frame_not_the_exiting_one() {
+		use crate::bash::vm::locale::{Charset, charset_root, charset_upto};
+		let (mut store, mut root, mut vp) = shell();
+		// An empty `LC_ALL` shadows nothing: `LC_CTYPE` decides.
+		store_var(
+			&mut root,
+			&mut store,
+			&mut vp,
+			b"LC_ALL",
+			Some(Var::scalar("", Attrs::NONE)),
+			Level::Global,
+		);
+		store_var(
+			&mut root,
+			&mut store,
+			&mut vp,
+			b"LC_CTYPE",
+			Some(Var::scalar("C", Attrs::NONE)),
+			Level::Global,
+		);
+		assert_eq!(charset_root(&mut root, &mut store, &vp).unwrap(), Charset::Bytes);
+		// The exiting function's `local LC_ALL=zh_TW.Big5`: the live view is
+		// Big5, the caller's counterfactual (that scope discarded) is bytes.
+		push_scope(&mut root, &mut store, &mut vp, func_scope_named("f"));
+		store_var(
+			&mut root,
+			&mut store,
+			&mut vp,
+			b"LC_ALL",
+			Some(Var::scalar("zh_TW.Big5", Attrs::NONE)),
+			Level::Local,
+		);
+		assert_eq!(
+			charset_root(&mut root, &mut store, &vp).unwrap(),
+			Charset::Encoding(encoding_rs::BIG5)
+		);
+		assert_eq!(charset_upto(&mut root, &mut store, &vp, 0).unwrap(), Charset::Bytes);
+		assert_eq!(
+			charset_upto(&mut root, &mut store, &vp, 1).unwrap(),
+			Charset::Encoding(encoding_rs::BIG5)
+		);
+	}
+
+	#[test]
+	fn lookup_upto_resolves_name_references_through_the_bound() {
+		let (mut store, mut root, mut vp) = shell();
+		store_var(
+			&mut root,
+			&mut store,
+			&mut vp,
+			b"LANG",
+			Some(Var::scalar("ja_JP.Shift_JIS", Attrs::NONE)),
+			Level::Global,
+		);
+		// `g` holds `local -n N=LANG`; the function it called, `f`, holds
+		// `local LANG=C`.
+		push_scope(&mut root, &mut store, &mut vp, func_scope_named("g"));
+		store_var(
+			&mut root,
+			&mut store,
+			&mut vp,
+			b"N",
+			Some(Var::scalar("LANG", Attrs::NAMEREF)),
+			Level::Local,
+		);
+		push_scope(&mut root, &mut store, &mut vp, func_scope_named("f"));
+		store_var(
+			&mut root,
+			&mut store,
+			&mut vp,
+			b"LANG",
+			Some(Var::scalar("C", Attrs::NONE)),
+			Level::Local,
+		);
+		let mut value = |upto: usize| {
+			lookup_upto(&root, &mut store, &vp, b"N", upto)
+				.unwrap()
+				.and_then(Var::as_scalar)
+				.map(<[u8]>::to_vec)
+		};
+		// The live view resolves the reference to `f`'s shadowing `LANG`…
+		assert_eq!(value(2), Some(b"C".to_vec()));
+		// …`g`'s continuation (`f` unwound) to the global one.
+		assert_eq!(value(1), Some(b"ja_JP.Shift_JIS".to_vec()));
 	}
 
 	#[test]

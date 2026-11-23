@@ -78,9 +78,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
 	bash::{
-		Budget, CallId, Cx, Engine, EngineConfig, EventMask, EventSink, Fs, ImageDiff, MemStore,
-		PipeTap, Profile, RestoreError, RestoreOpts, RunId, Script, Shell, ShellError, ShellInit,
-		Signal, StateStore, Step, ToolCall, UnitId, VprocSel,
+		Budget, CallId, Cx, Engine, EngineConfig, EventMask, EventSink, Fs, ImageDiff,
+		LocaleBindings, MemStore, ParseSnapshot, PipeTap, Profile, RestoreError, RestoreOpts, RunId,
+		Script, Shell, ShellError, ShellInit, Signal, StateStore, Step, ToolCall, UnitId, VprocSel,
 		store::{BlobSlot, Key, MiscKey, OptId, Record, Table},
 	},
 	commands::SessionCommands,
@@ -101,6 +101,11 @@ const SETTLE_STEPS: u32 = 4;
 /// Longest suspension of the driver: every wake it waits for is delivered by
 /// a waker, so this only bounds the cost of a lost one.
 const MAX_PARK: Duration = Duration::from_secs(1);
+
+/// How long an exited run's still-settling pipeline children may hold its
+/// cut-short verdict: their statuses decide it, so they get this window to
+/// end on their own before it turns conservative.
+const EXIT_SETTLE_CAP: Duration = Duration::from_millis(100);
 
 /// Configuration of a new [`Session`].
 pub struct SessionConfig {
@@ -227,16 +232,40 @@ pub struct RunStdio {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunOutcome {
 	/// Exit status, bash semantics (127 not found, 128 + n for a signal).
-	pub status:    i32,
+	pub status:       i32,
 	/// The run was stopped by its cancellation token.
-	pub cancelled: bool,
+	pub cancelled:    bool,
 	/// `exit` or `set -e` ended the command (rather than its end): a caller
 	/// running one command as several runs stops here, as bash would have.
-	pub exited:    bool,
+	pub exited:       bool,
+	/// In-process attribution; never serialized into a shell image or native
+	/// result.
+	pub exit_cause:   Option<crate::bash::ExitCause>,
+	/// Of such an abort, whether commands were still left to run: a trailing
+	/// `exit` at the end of the input ends the command exactly where its end
+	/// would have, and is not reported as cutting it short.
+	pub cut_short:    bool,
+	/// The parse context frozen at the run's `exit`-family abort — `None`
+	/// when the run took no exit freeze. A caller judging text the abort
+	/// never reached by the parser's view
+	/// ([`Session::source_holds_command`]) passes it back, so the probe
+	/// classifies under the abort-time grammar and alias table, not the
+	/// live one the abort's EXIT cleanup may since have changed.
+	pub exit_parse:   Option<Arc<ParseSnapshot>>,
+	/// The `LC_ALL`/`LC_CTYPE`/`LANG` bindings frozen with `exit_parse`,
+	/// as the shell's global scope bound them (a nameref's target
+	/// followed): the base a probe restores before the next run's
+	/// environment, so the charset is resolved as that run resolves it.
+	/// In-process only.
+	pub exit_locale:  Option<Arc<LocaleBindings>>,
 	/// The shell's working directory after the command.
-	pub cwd:       BString,
+	pub cwd:          BString,
 	/// `errexit` was on when the command ended.
-	pub errexit:   bool,
+	pub errexit:      bool,
+	/// The status the run's own input produced when an `exit` in its
+	/// boundary cleanup replaced it: chaining decides by that status, since
+	/// bash would not have run the cleanup there yet.
+	pub chain_status: Option<i32>,
 }
 
 /// Failure of a [`Session`] call.
@@ -696,6 +725,54 @@ impl Session {
 		self.run_with(RunOptions::new(command), stdio, cancel).await
 	}
 
+	/// Whether `source` still holds a command for the parser that would
+	/// read it: the grammar features and aliases in effect now, parsed with
+	/// `commands` — the session commands of the runs that would read
+	/// it. Each of their names preempts the alias of that name.
+	/// Parse-only, nothing runs ([`Shell::source_holds_command`]).
+	/// Used to judge text a run cut short never reached, the same
+	/// predicate the cut-short walk applies to unread input.
+	///
+	/// # Errors
+	///
+	/// [`SessionError::Closed`] when the session is closed.
+	pub async fn source_holds_command(
+		&self,
+		source: &[u8],
+		commands: Option<SessionCommands>,
+	) -> Result<bool, SessionError> {
+		self
+			.source_holds_command_with_env(source, commands, Vec::new(), None, None)
+			.await
+	}
+
+	pub(crate) async fn source_holds_command_with_env(
+		&self,
+		source: &[u8],
+		commands: Option<SessionCommands>,
+		env: Vec<(BString, BString)>,
+		parse: Option<Arc<ParseSnapshot>>,
+		locale: Option<Arc<LocaleBindings>>,
+	) -> Result<bool, SessionError> {
+		let jobs = self.jobs.as_ref().ok_or(SessionError::Closed)?;
+		let (reply_tx, reply_rx) = flume::bounded(1);
+		jobs
+			.send(Request::HoldsCommand {
+				source: source.to_vec(),
+				commands,
+				env,
+				parse,
+				locale,
+				reply: reply_tx,
+			})
+			.map_err(|_| SessionError::Closed)?;
+		self.waker.wake_by_ref();
+		reply_rx
+			.recv_async()
+			.await
+			.map_err(|_| SessionError::Closed)
+	}
+
 	/// Run one command to completion and report how it ended.
 	///
 	/// When `cancel` fires the run is stopped (`TERM`, then `KILL` after
@@ -828,6 +905,18 @@ enum Request {
 	Run(Job),
 	/// Count the background jobs running an external.
 	LiveJobs(flume::Sender<usize>),
+	/// Parse-only probe: does this source still hold a command, under the
+	/// session commands and environment of the run that would read it —
+	/// and, when `parse` carries an abort's frozen context, under that
+	/// abort-time grammar instead of the live one?
+	HoldsCommand {
+		source:   Vec<u8>,
+		commands: Option<SessionCommands>,
+		env:      Vec<(BString, BString)>,
+		parse:    Option<Arc<ParseSnapshot>>,
+		locale:   Option<Arc<LocaleBindings>>,
+		reply:    flume::Sender<bool>,
+	},
 }
 
 /// One command for the driver.
@@ -863,6 +952,25 @@ impl Driver {
 				Ok(Request::Run(job)) => self.run(job).await,
 				Ok(Request::LiveJobs(reply)) => {
 					let _ = reply.send(self.shell.live_external_jobs(&mut self.store));
+				},
+				Ok(Request::HoldsCommand { source, commands, env, parse, locale, reply }) => {
+					// Between runs the host's command slot is clear — the last
+					// run's cleanup emptied it — but the parser must see the
+					// commands the next run of this source would install: each
+					// of their names preempts the alias of that name. Probe
+					// under them, then put the slot back as it was.
+					let between_runs = self.host.commands();
+					self.host.set_commands(commands);
+					let holds = self.shell.source_holds_command_with_env(
+						&mut self.host,
+						&mut self.store,
+						&source,
+						env,
+						parse.as_deref(),
+						locale.as_deref(),
+					);
+					self.host.set_commands(between_runs);
+					let _ = reply.send(holds);
 				},
 				Err(flume::TryRecvError::Disconnected) => break,
 				Err(flume::TryRecvError::Empty) => self.idle_turn().await,
@@ -970,6 +1078,10 @@ impl Driver {
 			}
 		}
 		let exited = self.shell.ended_by_exit(run);
+		let exit_cause = self.shell.exit_cause(run);
+		let cut_short = self.settled_cut_short(run).await;
+		let exit_parse = self.shell.exit_parse_snapshot(run);
+		let exit_locale = self.shell.exit_locale_snapshot(run);
 		self.settle().await;
 		self.children.set_active(false);
 		self.host.streams().clear();
@@ -983,7 +1095,93 @@ impl Driver {
 		let cwd = store_cwd(&self.store);
 		let errexit = self.shell.root_option(&mut self.store, OptId::Errexit);
 		// The caller may have stopped waiting (dropped future).
-		let _ = reply.send(RunOutcome { status, cancelled: applied > 0, exited, cwd, errexit });
+		let _ = reply.send(RunOutcome {
+			status,
+			cancelled: applied > 0,
+			exited,
+			exit_cause,
+			cut_short,
+			exit_parse,
+			exit_locale,
+			cwd,
+			errexit,
+			chain_status: self.shell.cleanup_chain_status(run),
+		});
+	}
+
+	/// The run's cut-short verdict, judged after its still-settling
+	/// pipeline children had a bounded window to end
+	/// ([`Driver::settle_exit_window`]) — but only while an unresolved
+	/// child's eventual status can still change the verdict
+	/// ([`Shell::exit_verdict_hinges_on_children`]); a sibling the answer
+	/// cannot depend on never delays it.
+	async fn settled_cut_short(&mut self, run: RunId) -> bool {
+		if !self.shell.ended_by_exit(run) {
+			return false;
+		}
+		if self
+			.shell
+			.exit_verdict_hinges_on_children(&mut self.store, run)
+		{
+			self.settle_exit_window(run, EXIT_SETTLE_CAP).await;
+		}
+		self.shell.ended_by_exit_cut_short(&mut self.store, run)
+	}
+
+	/// Give the exited run's verdict-relevant in-flight pipeline children a
+	/// bounded window to end on their own: step — their reaps land in the
+	/// engine's own turn — and park until one wakes it, stopping at the cap
+	/// or as soon as the verdict can no longer change. A child that outlives
+	/// the window keeps its unresolved status, and the verdict stays
+	/// conservative.
+	async fn settle_exit_window(&mut self, run: RunId, cap: Duration) {
+		let deadline = tokio::time::Instant::now() + cap;
+		loop {
+			// Runnable background work must not evade the deadline or monopolize
+			// the current-thread runtime while the sibling waits on that runtime.
+			if tokio::time::Instant::now() >= deadline {
+				return;
+			}
+			self.poll_tools();
+			match self.step(Budget::default()) {
+				Step::Done { run: done, status } => self.on_done(done, status),
+				Step::Call { id, call } => self.on_call(id, call),
+				Step::Yield | Step::SuspendReady => {},
+				Step::Blocked | Step::Paused => {
+					if !self
+						.shell
+						.exit_verdict_hinges_on_children(&mut self.store, run)
+					{
+						return;
+					}
+					let now = tokio::time::Instant::now();
+					if now >= deadline {
+						return;
+					}
+					let host_now = crate::bash::Host::now_ns(&self.host);
+					let tool_wait = self.tools.next_deadline().map_or(MAX_PARK, |at| {
+						Duration::from_nanos(at.saturating_sub(host_now)).min(MAX_PARK)
+					});
+					let limit = (deadline - now).min(tool_wait);
+					let ctl = self.shell.control();
+					let bell = Arc::clone(&self.bell);
+					tokio::select! {
+						biased;
+						() = poll_fn(|cx| ctl.poll_runnable(cx)) => {},
+						() = bell.0.notified() => {},
+						() = tokio::time::sleep(limit) => {},
+					}
+				},
+				Step::Idle => return,
+			}
+			if !self
+				.shell
+				.exit_verdict_hinges_on_children(&mut self.store, run)
+			{
+				return;
+			}
+			tokio::task::yield_now().await;
+		}
 	}
 
 	/// Let the background work a command started reach its first wait (an
@@ -1997,6 +2195,81 @@ mod tests {
 		assert!(sh(&mut s, "exit 0").await.outcome.exited);
 		assert!(sh(&mut s, "set -e; false; echo no").await.outcome.exited);
 		assert!(!sh(&mut s, "set +e; (exit 4)").await.outcome.exited);
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn exit_cut_short_skips_trailing_exit_and_counts_unrun_input() {
+		async fn outcome(s: &mut Session, cmd: &str) -> RunOutcome {
+			sh(s, cmd).await.outcome
+		}
+		let mut s = session();
+		// A trailing `exit` ends the run where the input's end would have:
+		// nothing was cut short.
+		assert!(!outcome(&mut s, "exit 0").await.cut_short);
+		assert!(!outcome(&mut s, "true; exit 0").await.cut_short);
+		assert!(!outcome(&mut s, "f() { exit 1; }; f").await.cut_short);
+		assert!(
+			!outcome(&mut s, "while true; do exit 1; done")
+				.await
+				.cut_short
+		);
+		assert!(!outcome(&mut s, "set -e; false").await.cut_short);
+		// Commands after the abort did not run.
+		assert!(outcome(&mut s, "exit 0; echo no").await.cut_short);
+		assert!(
+			outcome(&mut s, "f() { exit 1; }; f; echo no")
+				.await
+				.cut_short
+		);
+		assert!(
+			outcome(&mut s, "while true; do exit 1; done; echo no")
+				.await
+				.cut_short
+		);
+		assert!(
+			outcome(&mut s, "if true; then exit 1; fi; echo no")
+				.await
+				.cut_short
+		);
+		assert!(outcome(&mut s, "set -e; false; echo no").await.cut_short);
+		// `exited` still names every exit/errexit end, trailing or not.
+		assert!(outcome(&mut s, "exit 0").await.exited);
+		assert!(outcome(&mut s, "exit 0; echo no").await.exited);
+		assert!(!outcome(&mut s, "false").await.cut_short);
+	}
+
+	#[tokio::test(flavor = "current_thread")]
+	async fn exit_settle_window_is_bounded_and_cooperative_with_busy_background_work() {
+		for busy in [false, true] {
+			let mut s = session();
+			if busy {
+				s.run("while :; do :; done &", RunStdio::default(), CancellationToken::new())
+					.await
+					.unwrap();
+			}
+			let started = Instant::now();
+			let outcome = s
+				.run(
+					"set -o pipefail; shopt -s lastpipe; /bin/sleep 0.6 | exit 0 || :",
+					RunStdio::default(),
+					CancellationToken::new(),
+				)
+				.await
+				.unwrap();
+			assert!(outcome.cut_short, "unresolved sibling must remain conservative");
+			assert!(
+				started.elapsed() < Duration::from_millis(400),
+				"busy={busy}: {:?}",
+				started.elapsed()
+			);
+			assert_eq!(
+				s.run("set +o pipefail; :", RunStdio::default(), CancellationToken::new())
+					.await
+					.unwrap()
+					.status,
+				0
+			);
+		}
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

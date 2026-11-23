@@ -111,6 +111,10 @@ export interface BashToolDetails {
 	cwd?: string;
 	/** `;` when the hoisted leading cd was `cd <dir>;`, so the card redraws it as written; absent means `&&`. */
 	cdSeparator?: ";";
+	/** Whether `exit` or an armed `set -e` left ordinary command input unrun. */
+	endedByExit?: boolean;
+	/** Whether the run's state was not retained in the session's persistent shell after cleanup. */
+	ephemeralShell?: boolean;
 	/** Tool command invocations of this run, in invocation order. */
 	toolCommands?: ToolCommandRenderDispatch[];
 	/** What the session's Spotlight shaping did to the output. */

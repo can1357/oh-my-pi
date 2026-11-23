@@ -563,6 +563,10 @@ export interface BashResult {
 	movedCwd?: boolean;
 	/** The command ended with `set -e` on; the next command starts with it off. */
 	errexit?: boolean;
+	/** Whether `exit` or an armed `set -e` left ordinary command input unrun. Shell cleanup can still run. An `exit` with no remaining work is not reported. */
+	endedByExit?: boolean;
+	/** Whether the run's state was not retained in the session's persistent shell after cleanup. A fork adopted into a retained session is not ephemeral; an unadopted fork or a released shell is. */
+	ephemeralShell?: boolean;
 	images?: ImageContent[];
 	/** The embedded shell's final `ShellTrace` of the run; only when the caller asked for one. */
 	trace?: Record<string, unknown>;

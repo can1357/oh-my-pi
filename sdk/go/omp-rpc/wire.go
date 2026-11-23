@@ -2650,8 +2650,12 @@ type BashResult struct {
 	// The command ended in another directory than it started in; the next command starts in its own cwd.
 	MovedCwd *bool `json:"movedCwd,omitempty"`
 	// The command ended with `set -e` on; the next command starts with it off.
-	Errexit *bool          `json:"errexit,omitempty"`
-	Images  []ImageContent `json:"images,omitempty"`
+	Errexit *bool `json:"errexit,omitempty"`
+	// Whether `exit` or an armed `set -e` left ordinary command input unrun. Shell cleanup can still run. An `exit` with no remaining work is not reported.
+	EndedByExit *bool `json:"endedByExit,omitempty"`
+	// Whether the run's state was not retained in the session's persistent shell after cleanup. A fork adopted into a retained session is not ephemeral; an unadopted fork or a released shell is.
+	EphemeralShell *bool          `json:"ephemeralShell,omitempty"`
+	Images         []ImageContent `json:"images,omitempty"`
 	// The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.
 	Trace map[string]json.RawMessage `json:"trace,omitempty"`
 	// Set when the command overlapped another one on the session's persistent shell and ran in a fork of it.
@@ -2687,6 +2691,8 @@ func (v *BashResult) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("workingDir", &out.WorkingDir)
 	d.optional("movedCwd", &out.MovedCwd)
 	d.optional("errexit", &out.Errexit)
+	d.optional("endedByExit", &out.EndedByExit)
+	d.optional("ephemeralShell", &out.EphemeralShell)
 	d.optional("images", &out.Images)
 	d.optional("trace", &out.Trace)
 	d.optional("fork", &out.Fork)

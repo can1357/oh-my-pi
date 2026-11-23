@@ -1009,17 +1009,382 @@ async fn errexit_and_cd_last_one_segmented_command() {
 	let start = root.path().to_string_lossy().into_owned();
 	let run = async |command: String| {
 		let options = ShellRunOptions { command, cwd: Some(start.clone()), ..Default::default() };
-		shell.run(options, None, CancelToken::default()).await.expect("run")
+		shell
+			.run(options, None, CancelToken::default())
+			.await
+			.expect("run")
 	};
 	let repeated = format!("printf '{}'", "hello\\n".repeat(200));
 
 	let left = run(format!("{repeated}; set -e; cd /; false; {repeated}")).await;
 	let filter = left.minimized.as_ref().map(|m| m.filter.as_str());
 	assert_eq!(filter, Some("chain"), "the command must run segment by segment");
-	assert_eq!((left.exit_code, left.moved_cwd, left.errexit), (Some(1), true, true));
+	assert_eq!(
+		(left.exit_code, left.moved_cwd, left.errexit, left.ended_by_exit),
+		(Some(1), true, true, true)
+	);
 
 	let fresh = run(format!("{repeated}; false; {repeated}")).await;
-	assert_eq!((fresh.exit_code, fresh.moved_cwd, fresh.errexit), (Some(0), false, false));
+	assert_eq!(
+		(fresh.exit_code, fresh.moved_cwd, fresh.errexit, fresh.ended_by_exit),
+		(Some(0), false, false, false)
+	);
+}
+
+/// A run cut short by `exit` or errexit says so in its result, so a caller
+/// can tell "the last statement failed" from "the rest of the call never
+/// ran" (#18879).
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_and_errexit_report_ended_by_exit() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(None);
+	let run = async |command: &str| {
+		shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run")
+	};
+
+	assert!(!run("true").await.ended_by_exit);
+	assert!(!run("false").await.ended_by_exit, "a failing last statement is not an abort");
+	let aborted = run("set -e; PI_ARMED=1; false; echo never").await;
+	assert_eq!(aborted.exit_code, Some(1));
+	assert!(aborted.ended_by_exit, "errexit hid the statements after the failing one");
+	let followup = run("false; test \"$PI_ARMED\" = 1").await;
+	assert_eq!(followup.exit_code, Some(0), "the variable persists but errexit resets");
+	assert!(!followup.ended_by_exit);
+	assert!(!run("exit 3").await.ended_by_exit, "a trailing exit ends nothing early");
+	assert!(
+		run("exit 0; echo never").await.ended_by_exit,
+		"statements after an explicit exit never ran"
+	);
+	assert!(
+		!run("true; exit 0").await.ended_by_exit,
+		"a trailing exit is not reported as cutting the run short"
+	);
+	assert!(
+		!run("set -e; false").await.ended_by_exit,
+		"errexit on the last statement hides nothing"
+	);
+}
+
+/// A fatal inside a nested scope — an `exec` replacement or a POSIX-fatal
+/// error in a subshell or command substitution — ends only that scope: the
+/// flag it sets must not survive to suppress the report of a later, real
+/// abort (#18899).
+#[tokio::test(flavor = "multi_thread")]
+async fn nested_scope_fatal_does_not_hide_a_later_abort() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(None);
+	let run = async |command: &str| {
+		shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run")
+	};
+	let abort = "set -e; false; echo never";
+
+	// An `exec` replacement inside a subshell ends the subshell only.
+	assert_eq!(run("(exec /bin/true); true").await.exit_code, Some(0));
+	let aborted = run(abort).await;
+	assert_eq!(aborted.exit_code, Some(1));
+	assert!(aborted.ended_by_exit, "a subshell `exec` hid the later abort");
+
+	// A POSIX-fatal error inside a subshell, likewise.
+	assert_eq!(
+		run("set -o posix; (for 1 in a; do :; done); set +o posix; true")
+			.await
+			.exit_code,
+		Some(0)
+	);
+	let aborted = run(abort).await;
+	assert_eq!(aborted.exit_code, Some(1));
+	assert!(aborted.ended_by_exit, "a subshell POSIX-fatal hid the later abort");
+
+	// An `exec` inside a command substitution, likewise.
+	assert_eq!(run("PI_CS_OUT=$(exec /bin/true); true").await.exit_code, Some(0));
+	let aborted = run(abort).await;
+	assert_eq!(aborted.exit_code, Some(1));
+	assert!(aborted.ended_by_exit, "a command-substitution `exec` hid the later abort");
+
+	// A forked subshell running an exit-trapped function, likewise.
+	assert_eq!(
+		run("pi_nested_fn() { trap 'true' EXIT; }; ( pi_nested_fn ); true")
+			.await
+			.exit_code,
+		Some(0)
+	);
+	let aborted = run(abort).await;
+	assert_eq!(aborted.exit_code, Some(1));
+	assert!(aborted.ended_by_exit, "a trapped fork hid the later abort");
+
+	// Within one input, a subshell's `exec` leaves a later explicit exit
+	// still reported as cutting the run short.
+	let aborted = run("(exec /bin/true); exit 0; echo never").await;
+	assert!(aborted.ended_by_exit, "a subshell `exec` hid an exit in the same input");
+}
+
+/// The cut-short signal survives the incremental script path (newline-
+/// separated commands each parse as their own unit), follows reachable
+/// control flow only (an `else` arm the taken branch jumps around never
+/// counted as unrun input), and counts a pending function definition.
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_cut_short_multiline_reachability_and_definitions() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(None);
+	let run = async |command: &str| {
+		shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run")
+	};
+
+	let multiline = run("set -e\nfalse\necho never").await;
+	assert_eq!(multiline.exit_code, Some(1));
+	assert!(multiline.ended_by_exit, "errexit hid the rest of the script");
+	assert!(run("exit 0\necho never").await.ended_by_exit, "an exit hid the rest of the script");
+	assert!(
+		!run("echo hi\nexit 0").await.ended_by_exit,
+		"a trailing exit on its own line ends nothing early"
+	);
+	assert!(
+		!run("if true; then exit 0; else echo unreachable; fi")
+			.await
+			.ended_by_exit,
+		"the else arm the taken branch jumps around never ran either way"
+	);
+	assert!(
+		run("if true; then exit 0; fi; echo after")
+			.await
+			.ended_by_exit,
+		"the command after the whole if really was hidden"
+	);
+	assert!(
+		run("while true; do exit 0; done; echo after")
+			.await
+			.ended_by_exit,
+		"the command after the whole loop really was hidden"
+	);
+	assert!(
+		run("exit 0; f() { :; }").await.ended_by_exit,
+		"a pending function definition never ran"
+	);
+}
+
+/// An EXIT trap must not flip a trailing exit into a cut-short one: the
+/// trap-pop re-entry into `exit_shell` sees a `pc` that still points at the
+/// already-executed `exit`, so the first, correct computation stands.
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_trap_keeps_trailing_exit_uncut() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(None);
+	let run = async |command: &str| {
+		shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run")
+	};
+
+	assert!(
+		!run("trap ':' EXIT; f() { exit 0; }; f").await.ended_by_exit,
+		"a trailing exit inside a function stays unreported across its EXIT trap"
+	);
+	assert!(
+		run("trap ':' EXIT; f() { exit 0; }; f; echo after")
+			.await
+			.ended_by_exit,
+		"input after the call really was hidden"
+	);
+}
+
+/// In a segmented chain, `exit` on the last segment that would run ends the
+/// command where it would have ended anyway, so only an abort that hides
+/// later segments is reported.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn segmented_exit_reports_ended_by_exit_only_with_later_segments() {
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("chain directory");
+	let minimizer = printf_minimizer(&root.path().join("minimizer.toml"), None);
+	let shell = Shell::new(Some(ShellOptions { minimizer: Some(minimizer), ..Default::default() }));
+	let run = async |command: &str| {
+		shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run")
+	};
+
+	assert!(!run("printf hello").await.ended_by_exit);
+	let cut = run("exit 1; printf hello").await;
+	assert_eq!(cut.exit_code, Some(1));
+	assert!(cut.ended_by_exit, "the printf segment after exit never ran");
+	assert!(
+		!run("printf hello; exit 0").await.ended_by_exit,
+		"exit on the last segment ends nothing early"
+	);
+}
+
+/// Matrix: the segmented chain must judge the segments an `exit` hides by
+/// the session's parser, not by their raw text — an alias can expand a
+/// segment's command to a comment, and the unsegmented path already treats
+/// such a tail as empty
+/// (`exit_classification_alias_expanded_unread_source_scan`). Segmented and
+/// unsegmented runs of the same input must agree.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn segmented_alias_tail_matches_plain_unread_source_scan() {
+	let _guard = shell_test_lock().lock().await;
+	for (name, alias, expected) in
+		[("comment-alias", "'# none'", false), ("command-alias", "'printf called'", true)]
+	{
+		let root = tempfile::tempdir().expect("alias chain directory");
+		let minimizer = printf_minimizer(&root.path().join("minimizer.toml"), None);
+		let shell =
+			Shell::new(Some(ShellOptions { minimizer: Some(minimizer), ..Default::default() }));
+		let run = async |shell: &Shell, command: &str| {
+			shell
+				.run(
+					ShellRunOptions { command: command.into(), ..Default::default() },
+					None,
+					CancelToken::default(),
+				)
+				.await
+				.expect("run")
+		};
+		run(&shell, "shopt -s expand_aliases").await;
+		run(&shell, &format!("alias git={alias}")).await;
+		let cut = run(&shell, "exit 0; git log -1 --oneline").await;
+		assert_eq!(cut.exit_code, Some(0), "{name}");
+		assert_eq!(
+			cut.ended_by_exit, expected,
+			"{name}: the hidden tail segment must be judged by the session's parser"
+		);
+
+		// The same session state through the unsegmented path must agree.
+		let plain = Shell::new(None);
+		run(&plain, "shopt -s expand_aliases").await;
+		run(&plain, &format!("alias git={alias}")).await;
+		let plain_cut = run(&plain, "exit 0; git log -1 --oneline").await;
+		assert_eq!(plain_cut.ended_by_exit, expected, "{name}: unsegmented parity");
+	}
+}
+
+/// A deadline that lands while the session is only attributing a completed
+/// `exit` keeps the completed status
+/// (`completed_exit_keeps_its_status_when_the_timeout_lands_in_attribution`);
+/// the cancel latch it leaves behind must not reach into the segmented
+/// chain's classification either. The `exit` fired in milliseconds inside
+/// `f`'s lastpipe leg while the `/bin/sleep` sibling settles, so the 50 ms
+/// deadline arrives after the exit was already recorded — the `printf
+/// tail` segment the exit hid must still be reported as unrun.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn segmented_exit_settle_window_keeps_ended_by_exit_under_late_deadline() {
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("deadline chain directory");
+	let minimizer = printf_minimizer(&root.path().join("minimizer.toml"), None);
+	let shell = Shell::new(Some(ShellOptions { minimizer: Some(minimizer), ..Default::default() }));
+	let run = async |command: &str| {
+		shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run")
+	};
+	run("set -o pipefail; shopt -s lastpipe").await;
+	run("f() { /bin/sleep 0.3 | exit 0; }").await;
+	let cut = shell
+		.run(
+			ShellRunOptions { command: "f; printf tail".into(), ..Default::default() },
+			None,
+			CancelToken::new(Some(50)),
+		)
+		.await
+		.expect("run");
+	assert_eq!(cut.exit_code, Some(0), "the carrier keeps the completed status");
+	assert!(!cut.timed_out, "the exit finished before the deadline");
+	assert!(!cut.cancelled, "nothing the cancel could still cut was in flight");
+	assert!(
+		cut.ended_by_exit,
+		"a deadline that lands after the exit was recorded must not veto the ended-by-exit notice \
+		 for the hidden printf segment"
+	);
+}
+
+/// Bounded matrix for the segmented chain's stop classification
+/// (`ChainStopFacts::classify`): every input shape the stop branch can see,
+/// with the reviewer-probed scenarios as named rows — an exit-established
+/// stop keeps its notice no matter what a late cancel latch says, a cancel
+/// only counts while the chain still owed work, and comment-only alias
+/// tails are not owed commands.
+#[test]
+fn segmented_chain_stop_classification_matrix() {
+	use crate::bash::ExitCause;
+	for (
+		name,
+		exited,
+		cause,
+		cut_short,
+		cancelled_before_submit,
+		owed_command,
+		expected_notice,
+		expected_cancel_cut,
+	) in [
+		// Explicit `exit` that hid input inside its own segment.
+		("exit-cut-short", true, Some(ExitCause::Exit), true, false, false, true, false),
+		// `exit` whose hidden input is a later real segment.
+		("exit-owed-command", true, Some(ExitCause::Exit), false, true, true, true, false),
+		// `exit` whose later segment expands to a comment: nothing owed.
+		("exit-owed-comment-only", true, Some(ExitCause::Exit), false, true, false, false, false),
+		// A trailing `exit` at the input's end.
+		("exit-trailing", true, Some(ExitCause::Exit), false, false, false, false, false),
+		// Errexit aborts carry the same cause as `exit`.
+		("errexit-cut-short", true, Some(ExitCause::Exit), true, false, false, true, false),
+		// Fatal stops end the run without the exit/errexit notice.
+		("exec-replace", true, Some(ExitCause::ExecReplace), true, true, true, false, false),
+		("posix-fatal", true, Some(ExitCause::PosixFatal), true, true, true, false, false),
+		("fatal-signal", true, Some(ExitCause::FatalSignal), true, true, true, false, false),
+		("no-cause", true, None, true, true, true, false, false),
+		// A cancel that cut a chain with work still owed.
+		("cancel-cut-owed-work", false, None, false, true, true, false, true),
+		// A completed final segment keeps its ordinary status: a signal
+		// arriving after the run ended must not make it a cancellation.
+		("completed-run-stays-itself", false, None, false, false, false, false, false),
+	] {
+		let (notice, cancel_cut) = ChainStopFacts {
+			exited,
+			exit_cause: cause,
+			cut_short,
+			cancelled_before_submit,
+			owed_command,
+		}
+		.classify();
+		assert_eq!(notice, expected_notice, "{name}: ended_by_exit");
+		assert_eq!(cancel_cut, expected_cancel_cut, "{name}: cancel_cut");
+	}
 }
 
 /// An EXIT trap belongs to one run, while signal traps persist in the session.
@@ -2326,6 +2691,26 @@ async fn execute_shell_streams_separates_stdout_and_stderr() {
 	assert_eq!(stderr, b"err\n");
 }
 
+/// A trailing `exit` ends the run exactly where its end would have, on the
+/// raw-stream path too: only an abort with input left reports
+/// `ended_by_exit`.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn execute_shell_streams_trailing_exit_is_not_cut_short() {
+	for (command, expected) in [("exit 3", false), ("exit 3; echo never", true)] {
+		let (stdout_tx, stdout_rx) = flume::unbounded::<Bytes>();
+		let options = ShellExecuteOptions { command: command.to_string(), ..Default::default() };
+		let streams = StreamSinks { stdout: Some(stdout_tx), stderr: None };
+		let result = execute_shell_streams(options, streams, CancelToken::default())
+			.await
+			.expect("execute should succeed");
+		assert_eq!(result.exit_code, Some(3));
+		assert!(!result.cancelled);
+		assert_eq!(result.ended_by_exit, expected, "{command}");
+		assert!(stdout_rx.try_iter().next().is_none(), "the suffix must not execute");
+	}
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_shell_streams_works_when_sinks_are_none() {
@@ -2338,6 +2723,81 @@ async fn execute_shell_streams_works_when_sinks_are_none() {
 		.await
 		.expect("execute should succeed");
 	assert_eq!(result.exit_code, Some(0));
+}
+
+/// `exit` in a `lastpipe` pipeline is done in milliseconds while its sibling
+/// `/bin/sleep` outlives the caller's deadline: the deadline lands while the
+/// session is only attributing the exit. The attribution wait must not
+/// replace the completed command's status with a timeout it did not have —
+/// and under pipefail the sibling cannot change the verdict anyway (`exit 7`
+/// already fixes the pipeline status for every suffix shape), so no settle
+/// window is owed at all.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn completed_exit_keeps_its_status_when_the_timeout_lands_in_attribution() {
+	for suffix in ["", "&& :", "|| :", "; :"] {
+		let command = format!("set -o pipefail; shopt -s lastpipe; /bin/sleep 0.3 | exit 7 {suffix}");
+		let options = ShellExecuteOptions { command: command.clone(), ..Default::default() };
+		let result = execute_shell(options, None, CancelToken::new(Some(50)))
+			.await
+			.expect("execute should succeed");
+		assert_eq!(result.exit_code, Some(7), "suffix {suffix:?}");
+		assert!(!result.timed_out, "suffix {suffix:?}");
+		assert!(!result.cancelled, "suffix {suffix:?}");
+		// The verdict itself is settled — `exit 7` fixes the pipeline status,
+		// so whether the suffix would have run does not depend on the sleep.
+		assert_eq!(result.ended_by_exit, matches!(suffix, "|| :" | "; :"), "suffix {suffix:?}");
+	}
+}
+
+/// The same probe on the raw-stream path the process-stream callers use.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn completed_exit_keeps_its_status_when_the_timeout_lands_in_attribution_streams() {
+	let options = ShellExecuteOptions {
+		command: "set -o pipefail; shopt -s lastpipe; /bin/sleep 0.3 | exit 7".to_string(),
+		..Default::default()
+	};
+	let result = execute_shell_streams(options, StreamSinks::default(), CancelToken::new(Some(50)))
+		.await
+		.expect("execute should succeed");
+	assert_eq!(result.exit_code, Some(7));
+	assert!(!result.timed_out);
+	assert!(!result.cancelled);
+}
+
+/// A sibling whose status genuinely decides the verdict keeps its settle
+/// window — here `exit 0` leaves the pipeline status to `/bin/sleep`, which
+/// decides whether `echo` would have run. The window can outlive the
+/// caller's deadline; the completed `exit 0` status must still be reported.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn attribution_settle_window_still_reports_the_completed_status() {
+	let options = ShellExecuteOptions {
+		command: "set -o pipefail; shopt -s lastpipe; /bin/sleep 0.3 | exit 0 && echo ran"
+			.to_string(),
+		..Default::default()
+	};
+	let result = execute_shell(options, None, CancelToken::new(Some(50)))
+		.await
+		.expect("execute should succeed");
+	assert_eq!(result.exit_code, Some(0));
+	assert!(!result.timed_out);
+	assert!(!result.cancelled);
+}
+
+/// The completed-status delivery must not swallow real timeouts: a command
+/// still running when the deadline fires reports the timeout as before.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn still_running_command_keeps_reporting_the_timeout() {
+	let options = ShellExecuteOptions { command: "/bin/sleep 5".to_string(), ..Default::default() };
+	let result = execute_shell(options, None, CancelToken::new(Some(50)))
+		.await
+		.expect("execute should succeed");
+	assert_eq!(result.exit_code, None);
+	assert!(result.timed_out);
+	assert!(!result.cancelled);
 }
 
 /// The shell expands `$env:NAME` against the `env` shell variable by default,
@@ -2656,6 +3116,116 @@ async fn pipe_tap_forwards_every_byte_and_counts_them() {
 	assert_eq!(read.data.len(), written.min(1 << 20));
 	assert!(read.data.ends_with(format!("\n{LAST}\n").as_bytes()));
 	assert!(!read.open);
+}
+
+/// A run's cut-short value belongs to that run alone: a later run that ends
+/// naturally — whose EXIT trap's `exit` is its first exit — must not inherit
+/// the earlier run's `true`.
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_cut_short_does_not_leak_into_a_later_run() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(None);
+	let run = async |command: &str| {
+		shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run")
+	};
+
+	let first = run("exit 0; echo never").await;
+	assert!(first.ended_by_exit, "the first run really was cut short");
+	let natural = run("trap 'exit 0' EXIT; echo done").await;
+	assert_eq!(natural.exit_code, Some(0));
+	assert!(
+		!natural.ended_by_exit,
+		"the later run finished its script; the EXIT trap's exit cut nothing short"
+	);
+	let again = run("exit 0; echo never").await;
+	assert!(again.ended_by_exit, "the report still fires after the natural end");
+}
+
+/// `exec` replaces the shell (and a POSIX-fatal error ends it the same way):
+/// the run stops — nothing after it runs — but the cause is not `exit` or
+/// `set -e`, so no abort is reported.
+#[tokio::test(flavor = "multi_thread")]
+async fn exec_replacement_and_posix_fatal_are_not_an_exit_abort() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(None);
+	let run = async |command: &str| {
+		shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run")
+	};
+
+	let replaced = run("exec /usr/bin/false; echo never").await;
+	assert_eq!(replaced.exit_code, Some(1));
+	assert!(
+		!replaced.ended_by_exit,
+		"`exec` stopped the run, but not through an exit/errexit abort"
+	);
+	let missing = run("exec /bin/definitely-missing; echo never").await;
+	assert!(!missing.ended_by_exit, "a failed `exec` ends the shell the same way");
+	let fatal = run("set -o posix; set() { :; }; echo never").await;
+	assert_eq!(fatal.exit_code, Some(2));
+	assert!(!fatal.ended_by_exit, "a POSIX-fatal error is not an exit/errexit abort either");
+}
+
+/// A zsh anonymous-function call after the exit is pending input too.
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_cut_short_counts_zsh_anonymous_calls() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(None);
+	let run = async |command: &str| {
+		shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run")
+	};
+
+	run("emulate zsh").await;
+	let anon = run("exit 0; () { echo never; }").await;
+	assert!(anon.ended_by_exit, "the anonymous call after the exit never ran");
+	let trailing = run("() { echo ran; }; exit 0").await;
+	assert_eq!(trailing.exit_code, Some(0));
+	assert!(!trailing.ended_by_exit, "a trailing exit ends nothing early");
+}
+
+/// Process-stream runs preserve the same abort attribution as captured runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn process_shell_exit_attribution_distinguishes_cause_and_unrun_input() {
+	let _guard = shell_test_lock().lock().await;
+	for (command, ended_by_exit) in [
+		("exit 0", false),
+		("exit 0; :", true),
+		("set -e; false", false),
+		("set -e; false; :", true),
+		("false; :", false),
+		("exec /usr/bin/false; :", false),
+	] {
+		let shell = Shell::for_process(ShellOptions::default());
+		let result = shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("process shell run");
+		assert_eq!(result.ended_by_exit, ended_by_exit, "{command}");
+	}
 }
 
 /// A command whose output is redirected prints nothing: its file is a stream,

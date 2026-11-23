@@ -224,17 +224,22 @@ pub struct MinimizerResult {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ShellRunResult {
-	pub exit_code:   Option<i32>,
-	pub cancelled:   bool,
-	pub timed_out:   bool,
-	pub minimized:   Option<MinimizerResult>,
-	pub working_dir: Option<String>,
+	pub exit_code:     Option<i32>,
+	pub cancelled:     bool,
+	pub timed_out:     bool,
+	pub minimized:     Option<MinimizerResult>,
+	pub working_dir:   Option<String>,
 	/// The command ended in another directory than it started in (a `cd` in
 	/// it); a later command that passes `cwd` starts there instead.
-	pub moved_cwd:   bool,
+	pub moved_cwd:     bool,
 	/// The command ended with `errexit` on; the next command starts with it
 	/// off.
-	pub errexit:     bool,
+	pub errexit:       bool,
+	/// `exit` or an armed `set -e` left ordinary command input unrun. Shell
+	/// cleanup can still run. A trailing `exit` that leaves no remaining work
+	/// is not reported.
+	#[serde(default)]
+	pub ended_by_exit: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -562,11 +567,17 @@ const CANCEL_READER_GRACE: Duration = Duration::from_millis(1250);
 
 /// What a run reports when it ends normally.
 struct CommandResult {
-	status:      i32,
-	minimized:   Option<MinimizerResult>,
-	working_dir: String,
-	moved_cwd:   bool,
-	errexit:     bool,
+	status:        i32,
+	minimized:     Option<MinimizerResult>,
+	working_dir:   String,
+	moved_cwd:     bool,
+	errexit:       bool,
+	ended_by_exit: bool,
+	/// A cancel interrupted the command itself; false when the command had
+	/// already ended on its own and only attribution or output draining was
+	/// still running — that completed status must survive a caller that
+	/// stopped waiting.
+	cancelled:     bool,
 }
 
 impl CommandResult {
@@ -577,6 +588,8 @@ impl CommandResult {
 		started_in: &[u8],
 		status: i32,
 		minimized: Option<MinimizerResult>,
+		ended_by_exit: bool,
+		cancelled: bool,
 	) -> Self {
 		Self {
 			status,
@@ -584,18 +597,21 @@ impl CommandResult {
 			working_dir: session.cwd.to_str_lossy().into_owned(),
 			moved_cwd: session.cwd != started_in,
 			errexit: session.errexit,
+			ended_by_exit,
+			cancelled,
 		}
 	}
 
 	fn into_run_result(self) -> ShellRunResult {
 		ShellRunResult {
-			exit_code:   Some(self.status),
-			cancelled:   false,
-			timed_out:   false,
-			minimized:   self.minimized,
-			working_dir: Some(self.working_dir),
-			moved_cwd:   self.moved_cwd,
-			errexit:     self.errexit,
+			exit_code:     Some(self.status),
+			cancelled:     self.cancelled,
+			timed_out:     false,
+			minimized:     self.minimized,
+			working_dir:   Some(self.working_dir),
+			moved_cwd:     self.moved_cwd,
+			errexit:       self.errexit,
+			ended_by_exit: self.ended_by_exit,
 		}
 	}
 }
@@ -603,13 +619,14 @@ impl CommandResult {
 /// The result of a run cancelled by `reason`.
 const fn cancelled_result(reason: AbortReason) -> ShellRunResult {
 	ShellRunResult {
-		exit_code:   None,
-		cancelled:   matches!(reason, AbortReason::Signal),
-		timed_out:   matches!(reason, AbortReason::Timeout),
-		minimized:   None,
-		working_dir: None,
-		moved_cwd:   false,
-		errexit:     false,
+		exit_code:     None,
+		cancelled:     matches!(reason, AbortReason::Signal),
+		timed_out:     matches!(reason, AbortReason::Timeout),
+		minimized:     None,
+		working_dir:   None,
+		moved_cwd:     false,
+		errexit:       false,
+		ended_by_exit: false,
 	}
 }
 
@@ -654,21 +671,37 @@ async fn run_shell_session(
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
 			let graceful = time::timeout(CANCEL_RUN_GRACE, &mut run_task).await;
+			// The task finished — whatever it returned, its JoinHandle must
+			// not be awaited again.
+			let completed = graceful.is_ok();
 			// A run that wound down by itself leaves the session usable, with
 			// the background jobs earlier commands left running (a cancel
 			// spares them). One that had to be dropped, or that failed, leaves
 			// the session in an unknown state: end it.
-			let usable = matches!(graceful, Ok(Ok(Ok(_))));
-			if graceful.is_err() {
+			let wound_down = matches!(&graceful, Ok(Ok(Ok(_))));
+			// The command may have ended on its own before the caller stopped
+			// waiting — the deadline hit while the session was only
+			// attributing an exit or draining output. That completed status is
+			// the run's result; a cancel that landed afterwards must not
+			// replace it with a timeout or cancellation the command did not
+			// have. Only a run the cancel actually interrupted (its outcome
+			// reports cancelled) falls through to the cancelled result.
+			if let Ok(Ok(Ok(cmd))) = graceful
+				&& !cmd.cancelled
+			{
+				abort_state.clear().await;
+				return Ok(cmd.into_run_result());
+			}
+			if !completed {
 				// Dropping the run stops the command with `KILL`.
 				run_task.abort();
 				let _ = run_task.await;
 			}
 			abort_state.clear().await;
-			// Use try_lock to avoid deadlocking if another task holds the session.
-			// If we can't acquire the lock, the session will be cleaned up when the
-			// holding task finishes.
-			if !usable && let Ok(mut guard) = session.try_lock() {
+			// Use try-lock to avoid deadlocking if another task holds the session.
+			// If we can't acquire the lock, the session will be cleaned up when
+			// the holding task finishes.
+			if !wound_down && let Ok(mut guard) = session.try_lock() {
 				*guard = None;
 				*active.lock() = None;
 			}
@@ -680,8 +713,10 @@ async fn run_shell_session(
 	abort_state.clear().await;
 
 	// `exit`, errexit, or a stray top-level `return`/`break` ends this command,
-	// not the session: the next run keeps the variables, functions, and options
-	// built so far. Only a failed run leaves the shell in an unknown state.
+	// not the session: the next run keeps the variables and functions built so
+	// far, and any option still in effect at the unwind — one scoped to a
+	// returned function call, or disarmed by an EXIT trap, does not survive.
+	// Only a failed run leaves the shell in an unknown state.
 	if res.is_err() {
 		*session.lock().await = None;
 		*active.lock() = None;
@@ -710,7 +745,20 @@ async fn run_shell_oneshot(
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
 			let graceful = time::timeout(CANCEL_RUN_GRACE, &mut task).await;
-			if graceful.is_err() {
+			let wound_down = graceful.is_ok();
+			// The command may have ended on its own before the caller stopped
+			// waiting — the deadline hit while the run was only attributing
+			// an exit or draining output. That completed status is the run's
+			// result; a cancel that landed afterwards must not replace it
+			// with a timeout the command did not have. Only a run the cancel
+			// actually interrupted (its outcome reports cancelled) falls
+			// through to the cancelled result.
+			if let Ok(Ok(Ok(cmd))) = graceful
+				&& !cmd.cancelled
+			{
+				return Ok(cmd.into_run_result());
+			}
+			if !wound_down {
 				task.abort();
 				let _ = task.await;
 			}
@@ -743,7 +791,20 @@ async fn run_shell_oneshot_streams(
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
 			let graceful = time::timeout(CANCEL_RUN_GRACE, &mut task).await;
-			if graceful.is_err() {
+			let wound_down = graceful.is_ok();
+			// The command may have ended on its own before the caller stopped
+			// waiting — the deadline hit while the run was only attributing
+			// an exit or draining output. That completed status is the run's
+			// result; a cancel that landed afterwards must not replace it
+			// with a timeout the command did not have. Only a run the cancel
+			// actually interrupted (its outcome reports cancelled) falls
+			// through to the cancelled result.
+			if let Ok(Ok(Ok(cmd))) = graceful
+				&& !cmd.cancelled
+			{
+				return Ok(cmd.into_run_result());
+			}
+			if !wound_down {
 				task.abort();
 				let _ = task.await;
 			}
@@ -1128,7 +1189,14 @@ async fn run_process_command(
 			report_close_failure(&mut stderr, &err, &mut result);
 		}
 		let outcome = result.map_err(|err| Error::msg(format!("Shell execution failed: {err}")))?;
-		Ok(CommandResult::ended(session, &started_in, outcome.status, None))
+		Ok(CommandResult::ended(
+			session,
+			&started_in,
+			outcome.status,
+			None,
+			outcome.exited && outcome.cut_short,
+			outcome.cancelled,
+		))
 	}
 	.await;
 	restore_session_filesystem(session);
@@ -1434,7 +1502,7 @@ async fn run_shell_command_in_filesystem(
 		minimizer::engine::MinimizerMode::None
 	};
 
-	let (status, minimized) = match minimizer_mode {
+	let (status, minimized, ended_by_exit, cancelled) = match minimizer_mode {
 		minimizer::engine::MinimizerMode::SegmentedChain => {
 			run_shell_command_segmented_chain(session, &scope, cwd, on_chunk).await?
 		},
@@ -1443,7 +1511,7 @@ async fn run_shell_command_in_filesystem(
 		},
 	};
 
-	Ok(CommandResult::ended(session, &started_in, status, minimized))
+	Ok(CommandResult::ended(session, &started_in, status, minimized, ended_by_exit, cancelled))
 }
 
 async fn run_shell_command_single(
@@ -1452,7 +1520,7 @@ async fn run_shell_command_single(
 	cwd: Option<BString>,
 	on_chunk: Option<Sender<String>>,
 	minimizer_mode: minimizer::engine::MinimizerMode,
-) -> Result<(i32, Option<MinimizerResult>)> {
+) -> Result<(i32, Option<MinimizerResult>, bool, bool)> {
 	debug_assert!(!matches!(minimizer_mode, minimizer::engine::MinimizerMode::SegmentedChain));
 	let options = scope.options;
 
@@ -1478,6 +1546,12 @@ async fn run_shell_command_single(
 	)
 	.await?;
 	let status = command_run.outcome.status;
+	// `exit`/`set -e` cutting the script short is reported so callers can
+	// distinguish "the last statement failed" from "the rest never ran".
+	// A trailing `exit` at the end of the input ends the command exactly
+	// where its end would have; it is not a cut-short run.
+	let ended_by_exit = command_run.outcome.exited && command_run.outcome.cut_short;
+	let cancelled = command_run.outcome.cancelled;
 
 	let mut minimized_out = None;
 	if let Some(buffered) = command_run.buffered
@@ -1521,7 +1595,7 @@ async fn run_shell_command_single(
 		}
 	}
 
-	Ok((status, minimized_out))
+	Ok((status, minimized_out, ended_by_exit, cancelled))
 }
 
 /// The source of a chain segment whose failure must not trip `set -e`: the
@@ -1532,12 +1606,56 @@ fn errexit_suppressed(command: &str) -> String {
 	format!("{{ {command}\n}} && :")
 }
 
+const fn chain_segment_is_runnable(
+	segment: &minimizer::plan::ChainSegment,
+	previous_succeeded: bool,
+) -> bool {
+	!segment.run_if_previous_succeeded || previous_succeeded
+}
+
+/// What the stop branch knows about the segment run that stopped the chain.
+#[derive(Clone, Copy)]
+struct ChainStopFacts {
+	/// The run recorded an `exit`/errexit unwind.
+	exited:                  bool,
+	/// The recorded unwind cause, when any.
+	exit_cause:              Option<crate::bash::ExitCause>,
+	/// The segment's own continuation walk saw input left unrun.
+	cut_short:               bool,
+	/// Cancellation prevented the submission of a runnable segment.
+	cancelled_before_submit: bool,
+	/// One owed segment still holds a command under the session's parser.
+	owed_command:            bool,
+}
+
+impl ChainStopFacts {
+	/// How a segmented chain classifies its stop after one segment's run:
+	/// `ended_by_exit` reports an `exit`-family abort that hid input — the
+	/// segment's own continuation walk (`cut_short`) or a later
+	/// parse-visible segment still owed a command — while a cancel that
+	/// stopped the chain (`cancel_cut`) only counts while such work was
+	/// still owed, so a completed run keeps its ordinary status instead of
+	/// becoming a cancellation. The point-in-time cancel latch is
+	/// deliberately not an input: a cancel the run never applied cannot
+	/// reclassify a stop the script's own semantics already decided,
+	/// matching the single-command path, which reads only the run's own
+	/// outcome.
+	fn classify(self) -> (bool, bool) {
+		(
+			self.exited
+				&& self.exit_cause == Some(crate::bash::ExitCause::Exit)
+				&& (self.cut_short || self.owed_command),
+			!self.exited && self.cancelled_before_submit,
+		)
+	}
+}
+
 async fn run_shell_command_segmented_chain(
 	session: &mut ShellSessionCore,
 	scope: &CommandScope<'_>,
 	cwd: Option<BString>,
 	on_chunk: Option<Sender<String>>,
-) -> Result<(i32, Option<MinimizerResult>)> {
+) -> Result<(i32, Option<MinimizerResult>, bool, bool)> {
 	let options = scope.options;
 	let unsegmented = minimizer::engine::MinimizerMode::None;
 	let Some(config) = options.minimizer.as_ref() else {
@@ -1560,9 +1678,12 @@ async fn run_shell_command_segmented_chain(
 	let mut aggregate = Some(ChainCapture::new());
 	let mut previous_succeeded = true;
 	let mut last_status = None;
+	let mut ended_by_exit = false;
+	let mut cancelled = false;
 	let max_capture_bytes = config.max_capture_bytes as usize;
-	for segment in segments {
-		if segment.run_if_previous_succeeded && !previous_succeeded {
+	let mut segments = segments.into_iter();
+	while let Some(segment) = segments.next() {
+		if !chain_segment_is_runnable(&segment, previous_succeeded) {
 			continue;
 		}
 
@@ -1598,7 +1719,12 @@ async fn run_shell_command_segmented_chain(
 		.await?;
 
 		let exit = command_run.outcome.status;
+		// A cleanup `exit` ends the chain like any other exit-family stop.
+		// Its reported status is the trap's, so the leg decision it would
+		// have had comes from the status the segment's input produced.
+		let input_succeeded = command_run.outcome.chain_status.unwrap_or(exit) == 0;
 		previous_succeeded = exit == 0;
+		cancelled |= command_run.outcome.cancelled;
 
 		if let Some(buffered) = command_run.buffered {
 			if buffered.exceeded {
@@ -1632,6 +1758,80 @@ async fn run_shell_command_segmented_chain(
 		let keep_running = !command_run.outcome.exited && !scope.cancel.is_cancelled();
 		last_status = Some(exit);
 		if !keep_running {
+			let outcome = &command_run.outcome;
+			let probe_tail = if outcome.exited {
+				outcome.exit_cause == Some(crate::bash::ExitCause::Exit) && !outcome.cut_short
+			} else {
+				!outcome.cancelled
+			};
+			let mut owed_command = false;
+			if probe_tail {
+				// The `&& :` wrapper already models conditional continuation after
+				// an exit unwind. For a cancel after completion, scheduling uses
+				// the segment's actual status instead. In both cases the parser,
+				// not mere presence in the plan, decides whether there is work.
+				// An exit probe classifies under the parse context frozen at the
+				// abort (`exit_parse`): the abort's EXIT cleanup runs after that
+				// freeze and may rewrite the alias table, and the unsegmented
+				// walk judges its tail under the frozen one — the single-command
+				// path and this probe must not read different parser state. A
+				// cancel probe has no freeze and keeps the live table.
+				let parse = outcome.exit_parse.clone();
+				let locale = outcome.exit_locale.clone();
+				let commands = scope.options.commands.as_ref().map(RunLease::commands);
+				// A boundary cleanup exit reports the trap's status, not the
+				// command's, so a conditional successor is judged by the
+				// status the segment's input produced. Any other abort leaves
+				// no leg decision to judge: the run stopped mid-input.
+				let leg_succeeded = match outcome.chain_status {
+					Some(_) => input_succeeded,
+					None => !outcome.exited && previous_succeeded,
+				};
+				for pending in
+					segments.filter(|pending| chain_segment_is_runnable(pending, leg_succeeded))
+				{
+					// Judge the bytes submission would use: a suppressed
+					// segment runs as `{ … } && :`, and that wrapper is part
+					// of the input — a bare tail that parses away (an alias
+					// expanding to a comment) can still be a syntax error
+					// once wrapped, which is submitted input the stop hid.
+					let source = if pending.suppress_errexit {
+						errexit_suppressed(&pending.command)
+					} else {
+						pending.command.clone()
+					};
+					if session
+						.session
+						.source_holds_command_with_env(
+							source.as_bytes(),
+							commands.clone(),
+							scope.env.clone(),
+							parse.clone(),
+							locale.clone(),
+						)
+						.await
+						.unwrap_or(true)
+					{
+						owed_command = true;
+						break;
+					}
+				}
+			}
+			// A stop the script's own semantics already decided keeps its
+			// classification: the run-level outcome is authoritative, and a
+			// cancel token that latched after the run's own cancel window
+			// (a deadline during attribution or output drain, a post-run
+			// signal) never reached the engine and cannot have caused it.
+			let (exit_notice, cancel_cut) = ChainStopFacts {
+				exited: outcome.exited,
+				exit_cause: outcome.exit_cause,
+				cut_short: outcome.cut_short,
+				cancelled_before_submit: !outcome.exited && owed_command,
+				owed_command,
+			}
+			.classify();
+			ended_by_exit = exit_notice;
+			cancelled |= cancel_cut;
 			break;
 		}
 	}
@@ -1668,7 +1868,7 @@ async fn run_shell_command_segmented_chain(
 	// not minimized — `minimized_out` stays `None`, matching the whole-command
 	// path and `apply_shell_minimizer`.
 
-	Ok((status, minimized_out))
+	Ok((status, minimized_out, ended_by_exit, cancelled))
 }
 
 /// Run `command` once on the session, its stdout and stderr merged into one
@@ -1949,7 +2149,14 @@ async fn run_shell_command_streams_in_filesystem(
 	let _ = cancel_bridge.await;
 
 	let outcome = result.map_err(|err| Error::msg(format!("Shell execution failed: {err}")))?;
-	Ok(CommandResult::ended(session, &started_in, outcome.status, None))
+	Ok(CommandResult::ended(
+		session,
+		&started_in,
+		outcome.status,
+		None,
+		outcome.exited && outcome.cut_short,
+		outcome.cancelled,
+	))
 }
 
 async fn read_output_bytes(

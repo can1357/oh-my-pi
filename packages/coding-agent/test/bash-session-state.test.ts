@@ -1,18 +1,20 @@
 /**
  * The bash tool's persistent shell: state set by one call (variables,
- * functions, options) is visible to the next call through the default
+ * functions, and options other than errexit) is visible to the next call through the default
  * auto-background path, including after a call moved to the background and
  * after a call that exited non-zero. That `exit` and errexit keep the native
  * session is pinned in `crates/shell` (`exit_and_errexit_keep_session_state`):
  * pull-request CI runs these tests against main's native addon.
  */
-import { afterEach, beforeEach, expect, it } from "bun:test";
+import { afterEach, beforeEach, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AsyncJobManager } from "../src/async";
 import { Settings } from "../src/config/settings";
-import { releaseShellSessions } from "../src/exec/bash-executor";
+import { executeBash, releaseShellSessions, __test } from "../src/exec/bash-executor";
+import { Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
+import { OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../src/tools";
 import { BashTool } from "../src/tools/bash";
 
@@ -47,7 +49,7 @@ function bashTool(settings: Record<string, unknown> = {}, overrides: Partial<Too
 async function run(tool: BashTool, command: string) {
 	const result = await tool.execute("bash-session-state", { command });
 	const text = result.content.find(block => block.type === "text")?.text ?? "";
-	return { text, async: result.details?.async };
+	return { text, async: result.details?.async, details: result.details };
 }
 
 it.each([
@@ -164,4 +166,247 @@ it.skipIf(process.platform === "win32")(
 		}
 	},
 	10_000,
+);
+
+// The notice assertions below inject their native result through the
+// `__test.run` seam, so they run the same on every addon version
+// (pull-request CI tests against main's prebuilt addon, which predates the
+// flag). The flag itself is pinned in `crates/shell`
+// (`exit_and_errexit_report_ended_by_exit`); a source-built addon is
+// additionally checked end-to-end by the native-backed test below.
+
+function nativeResult(overrides: Record<string, unknown> = {}) {
+	return {
+		exitCode: 0,
+		cancelled: false,
+		timedOut: false,
+		minimized: undefined,
+		workingDir: undefined,
+		movedCwd: false,
+		errexit: false,
+		endedByExit: false,
+		...overrides,
+	};
+}
+
+it("says so when exit or an armed set -e ends the call before its remaining statements run", async () => {
+	__test.run = async (_shell, request) => {
+		expect(request.command).toBeString();
+		if (request.command.includes("echo never-ran")) return nativeResult({ endedByExit: true });
+		if (request.command === "false") return nativeResult({ exitCode: 1 });
+		return nativeResult();
+	};
+	try {
+		const tool = bashTool();
+		const aborted = await run(tool, "false; echo never-ran");
+		expect(aborted.text).toContain("Stopped by `exit` or an armed `set -e`");
+		expect(aborted.text).toContain("the rest of this call did not run");
+		expect(aborted.details?.endedByExit).toBe(true);
+		expect(aborted.details?.ephemeralShell).toBe(false);
+
+		const failed = await run(tool, "false");
+		expect(failed.text).toContain("Command exited with code 1");
+		expect(failed.text).not.toContain("Stopped by `exit`");
+	} finally {
+		__test.run = undefined;
+	}
+});
+
+it("does not promise options persist when an aborted fork's state is not adopted", async () => {
+	const firstRunStarted = Promise.withResolvers<void>();
+	let finishFirst!: (result: ShellRunResult) => void;
+	__test.run = (_shell, request) => {
+		if (request.command.includes("BLOCK-FIRST-CALL")) {
+			const first = Promise.withResolvers<ShellRunResult>();
+			finishFirst = first.resolve;
+			firstRunStarted.resolve();
+			return first.promise;
+		}
+		return Promise.resolve(nativeResult({ endedByExit: true }));
+	};
+	try {
+		const tool = bashTool();
+		const first = run(tool, "echo BLOCK-FIRST-CALL");
+		await firstRunStarted.promise;
+		// This cold owner has no published state yet, so the overlapping
+		// fork's state cannot be adopted back into it.
+		const aborted = await run(tool, "set -e; false; echo never-ran");
+		expect(aborted.text).toContain("Ran in a copy of the busy session shell");
+		expect(aborted.text).toContain("Stopped by `exit` or an armed `set -e`");
+		expect(aborted.text).toContain("the rest of this call did not run");
+		expect(aborted.text).not.toContain("stay with the session");
+		expect(aborted.details?.endedByExit).toBe(true);
+		expect(aborted.details?.ephemeralShell).toBe(true);
+		finishFirst(nativeResult());
+		await first;
+	} finally {
+		__test.run = undefined;
+	}
+});
+
+it("classifies a per-job `:async:` shell as ephemeral", async () => {
+	__test.run = () => Promise.resolve(nativeResult({ endedByExit: true }));
+	try {
+		// A background job runs in a per-job shell the executor drops when
+		// the call settles, so its options cannot reach a later call: the
+		// result must not claim a persistent session.
+		const result = await executeBash("set -e; false; echo never-ran", {
+			minimize: false,
+			sessionKey: "probe-session:async:job-1",
+		});
+		expect(result.endedByExit).toBe(true);
+		expect(result.ephemeralShell).toBe(true);
+	} finally {
+		__test.run = undefined;
+	}
+});
+
+it("classifies a session-left owner shell as ephemeral", async () => {
+	__test.run = () => Promise.resolve(nativeResult({ endedByExit: true }));
+	try {
+		// The call owned the persistent session, but its agent session was
+		// switched or left while the call ran: the executor drops that
+		// shell when the call settles, so its options cannot reach a later
+		// call either.
+		const result = await executeBash("set -e; false; echo never-ran", {
+			minimize: false,
+			sessionKey: "probe-session-left",
+			isSessionCurrent: () => false,
+		});
+		expect(result.endedByExit).toBe(true);
+		expect(result.ephemeralShell).toBe(true);
+	} finally {
+		__test.run = undefined;
+	}
+});
+
+it.each(["keep", "leave", "release"] as const)(
+	"classifies actual shell retention when the session changes during output cleanup (%s)",
+	async transition => {
+		let current = true;
+		let firstShell: Shell | undefined;
+		let lastShell: Shell | undefined;
+		__test.run = shell => {
+			firstShell ??= shell;
+			lastShell = shell;
+			return Promise.resolve(nativeResult({ endedByExit: true }));
+		};
+		const dispose = OutputSink.prototype.dispose;
+		const spy = vi.spyOn(OutputSink.prototype, "dispose").mockImplementation(async function (this: OutputSink) {
+			// Native completion is not the end of the call: output disposal
+			// still yields before the persistent-shell release decision.
+			if (transition === "leave") current = false;
+			if (transition === "release") releaseShellSessions(cwd);
+			await dispose.call(this);
+		});
+		try {
+			const result = await executeBash("exit 0; printf never", {
+				minimize: false,
+				sessionKey: cwd,
+				isSessionCurrent: () => current,
+			});
+			spy.mockRestore();
+			await executeBash("true", { minimize: false, sessionKey: cwd });
+			// Pin actual retention, not merely the callback's return value.
+			expect(lastShell === firstShell).toBe(transition === "keep");
+			expect(result.endedByExit).toBe(true);
+			expect(result.ephemeralShell).toBe(transition !== "keep");
+		} finally {
+			spy.mockRestore();
+			__test.run = undefined;
+		}
+	},
+);
+
+// Matrix: cold/warm owner (adoption rejected/accepted), retained/released
+// destination, and explicit exit/errexit. State is changed by the real native
+// shell; only the new flag is supplied for older addons.
+it.each([false, true])("attributes overlapping fork state by adoption and retention (warm: %s)", async warm => {
+	for (const retained of [false, true]) {
+		for (const explicit of [false, true]) {
+			const options = { sessionKey: cwd, minimize: false };
+			releaseShellSessions(cwd);
+			if (warm) await executeBash("true", options);
+			const started = Promise.withResolvers<void>();
+			const finishOwner = Promise.withResolvers<ShellRunResult>();
+			let disposeFork = false;
+			__test.run = async (shell, request, onChunk) => {
+				if (request.command === "# hold owner") {
+					started.resolve();
+					return finishOwner.promise;
+				}
+				const result = await shell.run(request, onChunk);
+				disposeFork = true;
+				return { ...result, endedByExit: true };
+			};
+			const dispose = OutputSink.prototype.dispose;
+			const spy = vi.spyOn(OutputSink.prototype, "dispose").mockImplementation(async function (this: OutputSink) {
+				if (disposeFork && !retained) releaseShellSessions(cwd);
+				await dispose.call(this);
+			});
+			const owner = executeBash("# hold owner", options);
+			try {
+				await started.promise;
+				const interruption = explicit ? "exit 3" : "false";
+				const result = await executeBash(`PI_REVIEW_FORK=kept; set -e; ${interruption}; printf never`, options);
+				expect(result.exitCode).toBe(explicit ? 3 : 1);
+				expect(result.output).toBe("");
+				expect(result.fork?.carried).toBe(warm);
+				expect(result.endedByExit).toBe(true);
+				expect(result.ephemeralShell).toBe(!(warm && retained));
+			} finally {
+				spy.mockRestore();
+				__test.run = undefined;
+				finishOwner.resolve(nativeResult());
+				await owner;
+			}
+			const state = await executeBash('printf "%s" "$PI_REVIEW_FORK"', options);
+			expect(state.output).toBe(warm && retained ? "kept" : "");
+		}
+	}
+});
+
+// Probe the raw native result shape on a natural end, not the behavior being tested.
+const hasNativeExitFlag = Object.hasOwn(await new Shell().run({ command: "true" }), "endedByExit");
+
+it.skipIf(!Bun.env.OMP_REQUIRE_EXIT_FLAG)("source-built addon exposes exit attribution", () => {
+	expect(hasNativeExitFlag).toBe(true);
+});
+
+it.skipIf(process.platform === "win32" || !hasNativeExitFlag)(
+	"reports a cut-short exit end-to-end when the loaded addon carries the flag",
+	async () => {
+		const probe = await executeBash("exit 3; echo never", { minimize: false });
+		expect(probe.endedByExit).toBe(true);
+
+		const tool = bashTool();
+		// Put cd inside the shell run; a leading cd is resolved as the call's starting cwd.
+		const aborted = await run(tool, "set -eu; cd /; PI_STATE_VAR=kept; false; echo never-ran");
+		expect(aborted.text).toContain("Stopped by `exit` or an armed `set -e`");
+		expect(aborted.text).toContain("the rest of this call did not run");
+
+		expect(aborted.text).not.toContain("never-ran");
+		expect(aborted.text).toContain("Command exited with code 1");
+		expect(aborted.text).toContain(`cwd → ${cwd}`);
+		expect(aborted.text).toContain("set -e off");
+
+		const fresh = await run(tool, 'false; printf "%s:%s:%s" "$PI_STATE_VAR" "$PWD" "$-"');
+		const prefix = `kept:${cwd}:`;
+		expect(fresh.text.startsWith(prefix)).toBe(true);
+		const flags = fresh.text.slice(prefix.length);
+		expect(flags).toContain("u");
+		expect(flags).not.toContain("e");
+		expect(fresh.text).not.toContain("Stopped by `exit`");
+
+		const exited = await run(tool, "exit 3; echo never-ran");
+		expect(exited.text).toContain("Stopped by `exit` or an armed `set -e`");
+
+		// A trailing exit ends the call exactly where its input ends: no notice.
+		const trailing = await run(tool, "exit 0");
+		expect(trailing.text).not.toContain("Stopped by `exit`");
+
+		const failed = await run(tool, "false");
+		expect(failed.text).toContain("Command exited with code 1");
+		expect(failed.text).not.toContain("Stopped by `exit`");
+	},
 );

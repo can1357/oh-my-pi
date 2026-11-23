@@ -13,6 +13,8 @@ mod callstack;
 mod command;
 mod control;
 mod exec;
+mod exit_options;
+pub use exec::ExitCause;
 mod expand;
 mod fdprobe;
 mod frames;
@@ -50,7 +52,7 @@ pub use self::{
 	control::{ControlHandle, IoPoll, WakeToken},
 	frames::FRAMES_VERSION,
 	pattern::Cache as PatternCache,
-	proc::{Run, Vproc, vproc_layout},
+	proc::{LocaleBindings, ParseSnapshot, Run, Vproc, vproc_layout},
 	text::TextKind,
 	zsh::zpattern::Cache as ZshPatternCache,
 };
@@ -73,6 +75,7 @@ use crate::bash::{
 	ir::{self, Unit},
 	signal::{DefaultAction, SigTarget, Signal},
 	store::{Attrs, Change, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, VarValue},
+	syntax::{AliasLookup, Features, Resume},
 };
 
 /// Ops a vproc runs per scheduler turn.
@@ -518,6 +521,26 @@ pub struct Kernel {
 	/// The last root run that `exit` or `set -e` ended
 	/// ([`Shell::ended_by_exit`]); not imaged.
 	pub exited:             Option<RunId>,
+	/// Of that run, the attribution walk's frozen input, to judge once its
+	/// still-settling pipeline children have had their window — commands
+	/// were still left to run, as opposed to a trailing `exit` at the end
+	/// of its input, which ended it exactly where it would have ended
+	/// anyway; meaningful only together with [`Kernel::exited`]. Not
+	/// imaged; never drives execution.
+	pub pending_cut_short:  Option<(RunId, exec::CutShortInput)>,
+	/// First attribution captured for a root run, before cleanup unwinds
+	/// its frames. `None` as a cause records a non-exit control transfer.
+	/// Not imaged; never drives execution.
+	pub exit_report:        Option<(RunId, Option<exec::ExitCause>)>,
+	/// The root run whose input had already ended when its own EXIT trap
+	/// started: the status the input produced, kept whatever the store did,
+	/// and the shell's top-level parse context — grammar, alias table and
+	/// locale bindings — frozen before the trap's frame was pushed
+	/// (`None` when the store could not be read). An `exit` raised from
+	/// that cleanup ends the shell but not the run's command, so a
+	/// segmented chain judges the successor by that status and under that
+	/// context, not the trap's. Not imaged.
+	pub boundary_cleanup:   Option<(RunId, i32, Option<exit_options::WalkOptions>)>,
 	/// Signal deaths of external programs replacing a submitted run, pending
 	/// its completion report; callouts do not survive frame restoration.
 	pub exec_signals:       HashMap<RunId, i32>,
@@ -645,6 +668,9 @@ impl Kernel {
 			callout_labels: Vec::new(),
 			prior_jobs: Vec::new(),
 			exited: None,
+			pending_cut_short: None,
+			exit_report: None,
+			boundary_cleanup: None,
 			exec_signals: HashMap::new(),
 			reported_signal: None,
 			bangs: Vec::new(),
@@ -823,16 +849,26 @@ impl Kernel {
 	/// collected). A store failure reads as unknown (and is kept for the
 	/// next turn).
 	pub fn proc_state(&mut self, store: &mut dyn StateStore, vpid: Vpid) -> Option<ProcState> {
-		match store.get(Key::Proc(vpid)) {
-			Ok(Some(Record::Proc { status, .. })) => {
-				Some(status.map_or(ProcState::Running, ProcState::Exited))
-			},
-			Ok(_) => None,
+		match Self::read_proc_state(store, vpid) {
+			Ok(state) => state,
 			Err(err) => {
 				self.root.fail(err);
 				None
 			},
 		}
+	}
+
+	/// Read a process record without attaching a fault to the live kernel.
+	fn read_proc_state(
+		store: &mut dyn StateStore,
+		vpid: Vpid,
+	) -> Result<Option<ProcState>, StoreError> {
+		Ok(match store.get(Key::Proc(vpid))? {
+			Some(Record::Proc { status, .. }) => {
+				Some(status.map_or(ProcState::Running, ProcState::Exited))
+			},
+			_ => None,
+		})
 	}
 
 	/// Whether `vp` started child vproc `vpid` (its record names `vp` as
@@ -2335,7 +2371,15 @@ impl Shell {
 		}
 		p.blocked = None;
 		p.stopped = false;
-		exec::exit_shell(&mut self.k, p, cx, status);
+		let top_unrun = p.frames.last().map_or(0, |frame| frame.pc);
+		exec::exit_shell(
+			&mut self.k,
+			p,
+			cx,
+			status,
+			exec::TopCut::At(top_unrun),
+			exec::ExitCause::FatalSignal,
+		);
 		true
 	}
 
@@ -2679,6 +2723,302 @@ impl Shell {
 	/// ask right after its [`Step::Done`].
 	pub fn ended_by_exit(&self, run: RunId) -> bool {
 		self.k.exited == Some(run)
+	}
+
+	/// Whether that `exit`/`set -e` abort also left commands unrun: a
+	/// trailing `exit` at the end of the script's input ends the run where
+	/// it would have ended anyway, so nothing was cut short. The verdict
+	/// reads the pipeline children's statuses as they stand NOW — the
+	/// session gives them a window to settle first
+	/// ([`Shell::exit_children_pending`]); one still unresolved keeps the
+	/// conservative unrun verdict. Meaningful only when
+	/// [`Shell::ended_by_exit`] returns true for the same run; ask right
+	/// after its [`Step::Done`]. A backend error invalidates this probe,
+	/// but leaves the capture available for a retry.
+	pub fn ended_by_exit_cut_short(&mut self, store: &mut dyn StateStore, run: RunId) -> bool {
+		let Some(cut) = self.cut_short_input(run) else {
+			return false;
+		};
+		let mut read_failed = false;
+		let verdict = cut.walk(|vpid| {
+			let Ok(state) = Kernel::read_proc_state(store, vpid) else {
+				read_failed = true;
+				return None;
+			};
+			state.and_then(ProcState::exited)
+		});
+		verdict && !read_failed
+	}
+
+	/// The parse context frozen at the run's `exit`-family abort for its
+	/// root script frame: the grammar and alias table the attribution walk
+	/// judges the unrun input under ([`Shell::ended_by_exit_cut_short`]).
+	/// `None` when the run took no exit freeze. A caller probing text the
+	/// abort never reached ([`Shell::source_holds_command`]) passes this
+	/// along, so the probe classifies under the abort-time table, not the
+	/// live one the abort's EXIT cleanup may since have rewritten.
+	pub fn exit_parse_snapshot(&mut self, run: RunId) -> Option<Arc<ParseSnapshot>> {
+		self.cut_short_input(run)?.root_parse().cloned()
+	}
+
+	/// The locale bindings frozen with [`Self::exit_parse_snapshot`]:
+	/// `LC_ALL`, `LC_CTYPE` and `LANG` as the shell's global scope bound
+	/// them at the freeze, a nameref's target followed through its chain.
+	/// `None` when the run took no exit freeze, or the freeze could not
+	/// read the store: a probe under an environment then does not judge
+	/// ([`Shell::source_holds_command_with_env`]). With the bindings, it
+	/// restores them into its copy of the store before that environment,
+	/// so the charset is resolved over what the freeze saw, not over what
+	/// an exit's cleanup changed after it.
+	pub fn exit_locale_snapshot(&mut self, run: RunId) -> Option<Arc<LocaleBindings>> {
+		self.cut_short_input(run)?.root_locale().cloned()
+	}
+
+	/// Whether `source` still holds a command for the parser that would read
+	/// it: the grammar features and aliases in effect for the root shell
+	/// now — or, when `parse` carries the context an `exit`-family abort
+	/// froze ([`Shell::exit_parse_snapshot`]), that abort-time table — the
+	/// same predicate [`Shell::ended_by_exit_cut_short`] applies to a
+	/// script frame's unread input. Parse-only — nothing executes — so a
+	/// chain runner can judge text it never ran by the parser's view (an
+	/// alias can expand a command to a comment). A backend read error
+	/// conservatively answers `true`: a probe failure must not silence the
+	/// cut-short notice.
+	///
+	/// A frozen context keeps the grammar and alias table the input ended
+	/// with, which the abort's EXIT cleanup runs after and may rewrite,
+	/// charset included: the unread tail is read under the locale it ended
+	/// with, so a cleanup that switches the locale does not change the
+	/// verdict. [`Shell::source_holds_command_with_env`] re-reads only the
+	/// charset, over the locale bindings the freeze saw with the
+	/// environment the next run installs applied.
+	pub fn source_holds_command(
+		&mut self,
+		cx: &mut Cx<'_>,
+		source: &[u8],
+		parse: Option<&ParseSnapshot>,
+	) -> bool {
+		let Some(parse) = parse else {
+			return self.live_source_holds_command(cx, source);
+		};
+		// Frozen at the abort, before its EXIT cleanup could run: no state
+		// read here, so no failure path either.
+		Self::holds_command(source, Features::from_bits(parse.features), parse.aliases.as_ref())
+	}
+
+	/// The grammar and alias table the store carries.
+	fn live_source_holds_command(&mut self, cx: &mut Cx<'_>, source: &[u8]) -> bool {
+		// Do not use or change the live root's caches or fault slot: the
+		// store can be a probe-only view with the next run's env overlaid.
+		let Ok(root) = Root::load(cx.store) else {
+			return true;
+		};
+		let live = std::mem::replace(&mut self.k.root, root);
+		let probed = exec::features(&mut self.k, cx.store, &self.procs[0]).and_then(|feat| {
+			builtins::alias_table(&mut self.k, cx, &self.procs[0]).map(|aliases| (feat, aliases))
+		});
+		let failed = self.k.root.has_fault();
+		self.k.root = live;
+		failed
+			|| probed
+				.map_or(true, |(feat, aliases)| Self::holds_command(source, feat, aliases.as_ref()))
+	}
+
+	/// The grammar the store carries, read like
+	/// [`Self::live_source_holds_command`] without the live root; `None`
+	/// when the store fails.
+	fn probe_features(&mut self, cx: &mut Cx<'_>) -> Option<Features> {
+		let root = Root::load(cx.store).ok()?;
+		let live = std::mem::replace(&mut self.k.root, root);
+		let probed = exec::features(&mut self.k, cx.store, &self.procs[0]);
+		let failed = self.k.root.has_fault();
+		self.k.root = live;
+		(!failed).then_some(probed).and_then(|probed| probed.ok())
+	}
+
+	/// Whether `source` holds a command under a grammar and an alias table.
+	fn holds_command(
+		source: &[u8],
+		features: Features,
+		aliases: Option<&builtins::Aliases>,
+	) -> bool {
+		exec::script_has_command(
+			source,
+			features,
+			aliases.map(|a| a as &dyn AliasLookup),
+			&Resume::default(),
+		)
+	}
+
+	/// Inspect a segment under the environment its physical run would install.
+	/// Under a frozen context the locale bindings frozen with it are
+	/// restored into the probe's store ahead of that environment, so the
+	/// charset is resolved over what the freeze saw.
+	pub(crate) fn source_holds_command_with_env(
+		&mut self,
+		host: &mut dyn Host,
+		store: &mut crate::bash::MemStore,
+		source: &[u8],
+		env: Vec<(BString, BString)>,
+		parse: Option<&ParseSnapshot>,
+		locale: Option<&LocaleBindings>,
+	) -> bool {
+		if env.is_empty() {
+			return self.source_holds_command(&mut Cx { host, store }, source, parse);
+		}
+		// A frozen context whose locale the freeze could not read is not
+		// judged under an overlay: a store error must not silence the
+		// notice.
+		if parse.is_some() && locale.is_none() {
+			return true;
+		}
+		let mut probe = store.clone();
+		// The locale bindings the freeze saw ([`Self::exit_locale_snapshot`]),
+		// restored ahead of the overlay: the next run installs the
+		// overlay's variables over them, not over what the exit's cleanup
+		// changed after. They are the global bindings as the freeze read
+		// them, so a nameref chain resolves as that run would resolve it.
+		if let Some(locale) = locale {
+			for (name, var) in locale {
+				let key = Key::Var(BStr::new(name));
+				if let Some(var) = var {
+					if probe
+						.put_out_of_band(key, Record::Var(var.clone()))
+						.is_err()
+					{
+						return true;
+					}
+				} else {
+					probe.del_out_of_band(key);
+				}
+			}
+		}
+		for (name, value) in env {
+			if is_ident(&name)
+				&& probe
+					.put_out_of_band(
+						Key::Var(BStr::new(&name)),
+						Record::Var(Var::scalar(value, Attrs::EXPORT)),
+					)
+					.is_err()
+			{
+				return true;
+			}
+		}
+		let Some(parse) = parse else {
+			return self.source_holds_command(&mut Cx { host, store: &mut probe }, source, None);
+		};
+		// The next run installs these variables, so its charset is the one
+		// the shell resolves them to, references included; the switches and
+		// the alias table stay the frozen ones. A store the probe cannot
+		// read keeps the frozen charset.
+		let frozen = Features::from_bits(parse.features);
+		let charset =
+			Features::DOUBLE_BYTE.bits() | Features::GB18030.bits() | Features::SHIFT_JIS.bits();
+		let features = match self.probe_features(&mut Cx { host, store: &mut probe }) {
+			Some(live) => Features::from_bits((frozen.bits() & !charset) | (live.bits() & charset)),
+			None => frozen,
+		};
+		Self::holds_command(source, features, parse.aliases.as_ref())
+	}
+
+	/// Whether the run's cut-short verdict still waits on a pipeline child
+	/// that has not ended: the window before
+	/// [`Shell::ended_by_exit_cut_short`] is only worth giving while it
+	/// returns true. A backend error ends this probe without discarding the
+	/// capture.
+	pub fn exit_children_pending(&mut self, store: &mut dyn StateStore, run: RunId) -> bool {
+		let Some(cut) = self.cut_short_input(run) else {
+			return false;
+		};
+		let mut pending = false;
+		for vpid in cut.pending_children() {
+			let Ok(state) = Kernel::read_proc_state(store, vpid) else {
+				return false;
+			};
+			pending |= state.and_then(ProcState::exited).is_none();
+		}
+		pending
+	}
+
+	/// Whether an unresolved pipeline child can still change the cut-short
+	/// verdict: [`Shell::exit_children_pending`] pending is not enough — a
+	/// sibling whose status the answer cannot depend on (a pipefail merge
+	/// already fixed by a non-zero exit, a continuation that runs whatever
+	/// the pipeline reported) must not delay it. Judged on the frozen
+	/// capture by walking it twice with the unresolved children assumed to
+	/// succeed, then to fail: the verdict is settled exactly when the two
+	/// agree. Sound while one frame holds the unresolved children — that
+	/// frame's merged status has exactly the two reachable outcomes the
+	/// probe tries, every other status being decided already. With
+	/// unresolved children in more than one frame the probe stays
+	/// conservative (the settle window is bounded regardless). A backend
+	/// error ends this probe without discarding the capture, like
+	/// [`Shell::exit_children_pending`].
+	pub fn exit_verdict_hinges_on_children(
+		&mut self,
+		store: &mut dyn StateStore,
+		run: RunId,
+	) -> bool {
+		let Some(cut) = self.cut_short_input(run) else {
+			return false;
+		};
+		let mut frames = 0usize;
+		let mut statuses = HashMap::new();
+		for (_, vpids) in cut.pending_child_frames() {
+			let mut unresolved = false;
+			for vpid in vpids {
+				let Ok(state) = Kernel::read_proc_state(store, vpid) else {
+					return false;
+				};
+				let status = state.and_then(ProcState::exited);
+				unresolved |= status.is_none();
+				statuses.insert(vpid, status);
+			}
+			// This frame may have been pending at capture but settled since.
+			frames += usize::from(unresolved);
+		}
+		match frames {
+			0 => false,
+			1 => {
+				// Both hypotheses see the same observed statuses.
+				let verdict = |hypothesis| {
+					cut.walk(|vpid| Some(statuses.get(&vpid).copied().flatten().unwrap_or(hypothesis)))
+				};
+				verdict(0) != verdict(1)
+			},
+			_ => true,
+		}
+	}
+
+	/// Both delayed probes borrow the same capture so neither consumes it on
+	/// a failed read. Only the owning root run can use it.
+	fn cut_short_input(&self, run: RunId) -> Option<&exec::CutShortInput> {
+		let (id, cut) = self.k.pending_cut_short.as_ref()?;
+		(*id == run && self.k.exited == Some(run)).then_some(cut)
+	}
+
+	/// Of root run `run`, the status its input produced when a cleanup
+	/// `exit` at the run's own boundary replaced it: such an exit ends the
+	/// shell but must not reschedule a segmented chain's next leg, which
+	/// bash would have scheduled from the command's own status. `None`
+	/// when the run took no boundary cleanup exit.
+	pub fn cleanup_chain_status(&self, run: RunId) -> Option<i32> {
+		self
+			.k
+			.boundary_cleanup
+			.as_ref()
+			.filter(|(id, ..)| *id == run)
+			.map(|(_, status, _)| *status)
+	}
+
+	/// The first termination cause of `run`, excluding cleanup re-entries.
+	pub fn exit_cause(&self, run: RunId) -> Option<exec::ExitCause> {
+		self
+			.k
+			.exit_report
+			.filter(|(id, _)| *id == run)
+			.and_then(|(_, cause)| cause)
 	}
 
 	/// The signal that killed an external replacing `run`, if any. Ask

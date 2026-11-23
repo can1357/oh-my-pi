@@ -958,7 +958,14 @@ exit 64
 		controller.abort();
 		await promise;
 
-		nativeResult.resolve({ exitCode: undefined, cancelled: true, timedOut: false, movedCwd: false, errexit: false });
+		nativeResult.resolve({
+			exitCode: undefined,
+			cancelled: true,
+			timedOut: false,
+			movedCwd: false,
+			errexit: false,
+			endedByExit: false,
+		});
 		await Bun.sleep(0);
 		vi.restoreAllMocks();
 
@@ -1176,8 +1183,22 @@ exit 64
 		expect(result.cancelled).toBe(true);
 		expect(abortSpy).toHaveBeenCalledTimes(1);
 
-		isolatedResult.resolve({ exitCode: undefined, cancelled: true, timedOut: true, movedCwd: false, errexit: false });
-		ownerResult.resolve({ exitCode: 0, cancelled: false, timedOut: false, movedCwd: false, errexit: false });
+		isolatedResult.resolve({
+			exitCode: undefined,
+			cancelled: true,
+			timedOut: true,
+			movedCwd: false,
+			errexit: false,
+			endedByExit: false,
+		});
+		ownerResult.resolve({
+			exitCode: 0,
+			cancelled: false,
+			timedOut: false,
+			movedCwd: false,
+			errexit: false,
+			endedByExit: false,
+		});
 		await owner;
 	});
 
@@ -1655,6 +1676,7 @@ exit 64
 					timedOut: true,
 					movedCwd: false,
 					errexit: false,
+					endedByExit: false,
 				});
 			}, 20);
 			return nativeResult.promise;

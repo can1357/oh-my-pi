@@ -309,6 +309,16 @@ pub fn exec(
 							s.stage = Stage::Finish;
 							if fatal {
 								s.control = Some(Transfer::Exit(1));
+								let unrun = vp.frames.last().map_or(0, |f| f.pc + 1);
+								exec::capture_exit_report(
+									k,
+									vp,
+									cx,
+									1,
+									exec::TopCut::At(unrun),
+									exec::ExitCause::PosixFatal,
+									false,
+								);
 							}
 							// The message goes to stderr as the redirections so far
 							// left it (`2>&1 >&bad`), before they are undone.
@@ -468,7 +478,7 @@ fn assignment_statement(
 			if state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
 				.unwrap_or(false)
 			{
-				return Some(Flow::Exit(1));
+				return Some(Flow::Exit { status: 1, cause: exec::ExitCause::PosixFatal });
 			}
 			return Some(Flow::Discard(1));
 		}
@@ -915,7 +925,7 @@ fn expand(
 				if state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
 					.unwrap_or(false)
 				{
-					return Some(Flow::Exit(1));
+					return Some(Flow::Exit { status: 1, cause: exec::ExitCause::PosixFatal });
 				}
 				return Some(Flow::Discard(1));
 			}
@@ -1015,7 +1025,7 @@ fn expand(
 					.unwrap_or(false)
 				{
 					if IntrinsicId::from_name(&st(vp).argv[0]).is_some_and(is_special) {
-						return Some(Flow::Exit(1));
+						return Some(Flow::Exit { status: 1, cause: exec::ExitCause::PosixFatal });
 					}
 					let s = st(vp);
 					s.status = 1;
@@ -1081,7 +1091,7 @@ fn expand(
 				if state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
 					.unwrap_or(false)
 				{
-					return Some(Flow::Exit(1));
+					return Some(Flow::Exit { status: 1, cause: exec::ExitCause::PosixFatal });
 				}
 				return Some(Flow::Discard(1));
 			}
@@ -3675,7 +3685,7 @@ pub fn call_anon(
 		exec::clear_scratch(&mut k.root, cx.store, vp);
 		vp.status = status;
 		if let Some(pending) = exec::zsh_exit_pending(vp) {
-			return Flow::Exit(pending);
+			return Flow::Exit { status: pending, cause: exec::ExitCause::Exit };
 		}
 		if status != 0 {
 			print_exit_value(k, vp, cx, status);
@@ -4024,6 +4034,11 @@ fn settle_builtin(
 	chunks: Vec<Chunk>,
 	fatal: bool,
 ) -> Option<Flow> {
+	// Only the actual exit/logout transfer is an explicit exit. Other
+	// builtin exits (bad break arguments, curses initialization, or the
+	// POSIX conversions below) are fatal errors, even for `exit` itself.
+	let explicit_exit = matches!(outcome.control, Control::Exit)
+		&& matches!(id, IntrinsicId::Exit | IntrinsicId::Logout);
 	// A special builtin's usage error ends a posix shell.
 	if fatal
 		&& outcome.status != 0
@@ -4049,6 +4064,18 @@ fn settle_builtin(
 			outcome.status = 1;
 			outcome.control = Control::Exit;
 		}
+	}
+	if matches!(outcome.control, Control::Exit) && !explicit_exit {
+		let unrun = vp.frames.last().map_or(0, |f| f.pc + 1);
+		exec::capture_exit_report(
+			k,
+			vp,
+			cx,
+			outcome.status,
+			exec::TopCut::At(unrun),
+			exec::ExitCause::PosixFatal,
+			false,
+		);
 	}
 	for c in chunks {
 		let (fd, bytes) = match c {
@@ -4676,7 +4703,10 @@ fn output(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> Option<
 						// The virtual SIGPIPE ends this shell silently, as it ends
 						// a bash pipeline child.
 						let platform = k.engine.config().platform;
-						return Some(Flow::Exit(crate::bash::signal::Signal::Pipe.exit_status(platform)));
+						return Some(Flow::Exit {
+							status: crate::bash::signal::Signal::Pipe.exit_status(platform),
+							cause:  exec::ExitCause::FatalSignal,
+						});
 					}
 					if vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 						zsh_write_error(k, vp, cx, line, fd, &err);
@@ -4789,7 +4819,13 @@ fn finish(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Flow {
 		None => Flow::Next,
 		Some(Transfer::Return(n)) => Flow::Return(n),
 		Some(Transfer::Break { n, cont }) => Flow::Break { n, cont },
-		Some(Transfer::Exit(n)) => Flow::Exit(n),
+		Some(Transfer::Exit(n)) => Flow::Exit { status: n, cause: exec::ExitCause::Exit },
+		Some(Transfer::Exec) => {
+			// The shell was replaced (a failed `exec` ends it just the
+			// same): the run stops here, but not through the `exit`/errexit
+			// abort the cut-short report names.
+			Flow::Exit { status, cause: exec::ExitCause::ExecReplace }
+		},
 		Some(Transfer::DiscardAll(n)) => {
 			let command = matches!(
 				state::record(cx.store, vp, Key::Misc(MiscKey::RunOrigin)),
@@ -4810,7 +4846,6 @@ fn finish(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Flow {
 				Flow::Discard(n)
 			}
 		},
-		Some(Transfer::Exec) => Flow::Exit(status),
 	}
 }
 

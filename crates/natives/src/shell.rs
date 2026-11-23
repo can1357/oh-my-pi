@@ -522,27 +522,32 @@ pub struct ShellRunResult {
 	/// original buffer + telemetry so the session layer can persist it as
 	/// a spill and splice the spill's URL into the minimized text shown to
 	/// the agent. `None` when nothing was rewritten.
-	pub minimized:   Option<MinimizerResult>,
+	pub minimized:     Option<MinimizerResult>,
 	/// Shell working directory after command completion.
-	pub working_dir: Option<String>,
+	pub working_dir:   Option<String>,
 	/// The command ended in another directory than it started in (a `cd` in
 	/// it); a later run that passes `cwd` starts there instead.
-	pub moved_cwd:   bool,
+	pub moved_cwd:     bool,
 	/// The command ended with `errexit` (`set -e`) on; the next run starts
 	/// with it off.
-	pub errexit:     bool,
+	pub errexit:       bool,
+	/// Whether `exit` or an armed `set -e` cut the run short with ordinary
+	/// commands still left to run. Cleanup such as an `EXIT` trap can still
+	/// run. A trailing `exit` that leaves no remaining work is not reported.
+	pub ended_by_exit: bool,
 }
 
 impl From<CoreShellRunResult> for ShellRunResult {
 	fn from(value: CoreShellRunResult) -> Self {
 		Self {
-			exit_code:   value.exit_code,
-			cancelled:   value.cancelled,
-			timed_out:   value.timed_out,
-			minimized:   value.minimized.map(Into::into),
-			working_dir: value.working_dir,
-			moved_cwd:   value.moved_cwd,
-			errexit:     value.errexit,
+			exit_code:     value.exit_code,
+			cancelled:     value.cancelled,
+			timed_out:     value.timed_out,
+			minimized:     value.minimized.map(Into::into),
+			working_dir:   value.working_dir,
+			moved_cwd:     value.moved_cwd,
+			errexit:       value.errexit,
+			ended_by_exit: value.ended_by_exit,
 		}
 	}
 }
@@ -992,13 +997,14 @@ mod tests {
 			.expect("pump should be connected");
 		drop(tx);
 		let result = Ok(ShellRunResult {
-			exit_code:   Some(0),
-			cancelled:   false,
-			timed_out:   false,
-			minimized:   None,
-			working_dir: None,
-			moved_cwd:   false,
-			errexit:     false,
+			exit_code:     Some(0),
+			cancelled:     false,
+			timed_out:     false,
+			minimized:     None,
+			working_dir:   None,
+			moved_cwd:     false,
+			errexit:       false,
+			ended_by_exit: false,
 		});
 
 		time::timeout(
@@ -1030,13 +1036,14 @@ mod tests {
 		));
 		drop(tx);
 		let result = Ok(ShellRunResult {
-			exit_code:   None,
-			cancelled:   false,
-			timed_out:   true,
-			minimized:   None,
-			working_dir: None,
-			moved_cwd:   false,
-			errexit:     false,
+			exit_code:     None,
+			cancelled:     false,
+			timed_out:     true,
+			minimized:     None,
+			working_dir:   None,
+			moved_cwd:     false,
+			errexit:       false,
+			ended_by_exit: false,
 		});
 		let started = time::Instant::now();
 		time::timeout(

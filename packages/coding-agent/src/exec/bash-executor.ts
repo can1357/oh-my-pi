@@ -46,6 +46,20 @@ import {
 	type ShellMinimizerSettings,
 } from "./settings";
 
+/**
+ * Test-only seam: replaces the native `Shell.run` call so result-shaping
+ * behavior (notices, exit handling) can be asserted against a fixed native
+ * result no matter which addon version is loaded. Production code never
+ * sets it.
+ */
+export const __test: {
+	run?: (
+		shell: Shell,
+		request: Parameters<Shell["run"]>[0],
+		onChunk: Parameters<Shell["run"]>[1],
+	) => Promise<ShellRunResult>;
+} = {};
+
 export interface BashExecutorOptions {
 	cwd?: string;
 	/** Milliseconds before aborting the command; 0 disables the executor deadline. */
@@ -159,6 +173,19 @@ export interface BashResult extends OutputSummary {
 	movedCwd?: boolean;
 	/** The command ended with `set -e` on; the next command starts with it off. */
 	errexit?: boolean;
+	/**
+	 * True when `exit` or an armed `set -e` cut the run short with commands
+	 * still left to run. Shell cleanup can still run; a trailing `exit`
+	 * with no remaining work is not reported. Only set by the
+	 * embedded-shell path; PTY runs never set it.
+	 */
+	endedByExit?: boolean;
+	/**
+	 * True when the run's state was not retained in the session's persistent
+	 * shell after cleanup. A fork adopted into a retained session is not
+	 * ephemeral; an unadopted fork or a released shell is.
+	 */
+	ephemeralShell?: boolean;
 	/** Terminal graphics extracted from raw stdout before sanitization or truncation. */
 	images?: ImageContent[];
 	/**
@@ -965,6 +992,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	}
 
 	let resetSession = false;
+	let completedResult: BashResult | undefined;
 	// Set when the command returns before its native run settled.
 	let unsettled: { run: Promise<ShellRunResult>; cleanup: Promise<void> } | undefined;
 	const runTrace = options?.onTrace ? new RunTrace(finalCommand) : undefined;
@@ -980,25 +1008,26 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	};
 
 	try {
-		const runPromise = executionShell.run(
-			{
-				command: finalCommand,
-				cwd: commandCwd,
-				env: commandEnv,
-				timeoutMs: nativeTimeoutMs,
-				signal: runAbortController.signal,
-				filesystem: options?.filesystem,
-				speech: options?.speech,
-				commands: options?.commands,
-				streams: options?.streams,
-				trace: runTrace,
-			},
-			(err, chunk) => {
-				if (!err) {
-					enqueueChunk(chunk);
-				}
-			},
-		);
+		const runRequest = {
+			command: finalCommand,
+			cwd: commandCwd,
+			env: commandEnv,
+			timeoutMs: nativeTimeoutMs,
+			signal: runAbortController.signal,
+			filesystem: options?.filesystem,
+			speech: options?.speech,
+			commands: options?.commands,
+			streams: options?.streams,
+			trace: runTrace,
+		};
+		const onRunChunk = (err: unknown, chunk: string) => {
+			if (!err) {
+				enqueueChunk(chunk);
+			}
+		};
+		const runPromise = __test.run
+			? __test.run(executionShell, runRequest, onRunChunk)
+			: executionShell.run(runRequest, onRunChunk);
 		options?.onStart?.(() => executionShell.pids());
 
 		const winner = await Promise.race<
@@ -1104,18 +1133,19 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			}
 		}
 
-		// Normal completion
-		return {
+		completedResult = {
 			exitCode: winner.result.exitCode,
 			cancelled: false,
 			workingDir: winner.result.workingDir,
 			...(winner.result.movedCwd ? { movedCwd: true } : {}),
 			...(winner.result.errexit ? { errexit: true } : {}),
+			endedByExit: winner.result.endedByExit === true,
 			...(minimizedMeta ? { minimized: minimizedMeta } : {}),
 			...settleTrace(),
 			...(await settleFork()),
 			...(await dump()),
 		};
+		return completedResult;
 	} catch (err) {
 		resetSession = true;
 		throw err;
@@ -1135,6 +1165,13 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			} else {
 				await releasePersistentShell(release, { reset: resetSession });
 			}
+		}
+		if (completedResult) {
+			// Finalize attribution after output cleanup and shell release:
+			// either can yield while the owning session is left or released.
+			// Inspect actual retention rather than predicting that decision.
+			const stateShell = shellSession ?? (completedResult.fork?.carried ? busyShell : undefined);
+			completedResult.ephemeralShell = stateShell === undefined || shellSessions.get(sessionKey) !== stateShell;
 		}
 	}
 }

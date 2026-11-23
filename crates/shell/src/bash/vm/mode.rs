@@ -179,11 +179,7 @@ fn zsh_features(
 			& (Features::DOUBLE_BYTE.bits() | Features::GB18030.bits() | Features::SHIFT_JIS.bits()),
 	);
 	let mut f = charset | Features::ZSH;
-	for (opt, on, bit) in FEATURE_OPTS {
-		if state::zsh_option(root, store, vp, opt)? == on {
-			f = f | bit;
-		}
-	}
+	f = feature_options(f, |opt| state::zsh_option(root, store, vp, opt))?;
 	// zsh `itype_end(…, IIDENT, …)`: `MULTIBYTE` in a UTF-8 locale without
 	// `POSIX_IDENTIFIERS` lets identifiers hold non-ASCII alphanumerics.
 	if state::zsh_option(root, store, vp, ZshOpt::Multibyte)?
@@ -200,6 +196,80 @@ fn zsh_features(
 		f = f | Features::ZSH_INTERACTIVE_COMMENTS;
 	}
 	Ok(f)
+}
+
+/// Apply the same grammar switches to live and counterfactually restored
+/// options.
+fn feature_options(
+	mut f: Features,
+	mut get: impl FnMut(ZshOpt) -> Result<bool, StoreError>,
+) -> Result<Features, StoreError> {
+	for (opt, on, bit) in FEATURE_OPTS {
+		f = Features::from_bits(f.bits() & !bit.bits());
+		if get(opt)? == on {
+			f = f | bit;
+		}
+	}
+	Ok(f)
+}
+
+/// Grammar of a restored frame; charset flags are supplied by its caller.
+pub(super) fn restored_features(
+	mode: ModeId,
+	base: Features,
+	opts: &ZshOpts,
+	utf8: bool,
+	stdin: bool,
+) -> Result<Features, StoreError> {
+	if mode.dialect() == Dialect::Bash {
+		return Ok(base);
+	}
+	let charset = Features::from_bits(
+		base.bits()
+			& (Features::DOUBLE_BYTE.bits() | Features::GB18030.bits() | Features::SHIFT_JIS.bits()),
+	);
+	let mut f = feature_options(charset | Features::ZSH, |opt| Ok(opts.get(opt)))?;
+	if opts.get(ZshOpt::Multibyte) && !opts.get(ZshOpt::Posixidentifiers) && utf8 {
+		f = f | Features::ZSH_WIDE_IDENT;
+	}
+	if !stdin || !opts.get(ZshOpt::Interactive) || opts.get(ZshOpt::Interactivecomments) {
+		f = f | Features::ZSH_INTERACTIVE_COMMENTS;
+	}
+	Ok(f)
+}
+
+/// Read-only counterpart of the option/mode part of `leave_call`.
+pub(super) fn restored_call_options(
+	mode: &mut ModeId,
+	opts: &mut ZshOpts,
+	saved: &ZshScope,
+	zsh_body: bool,
+) {
+	if saved.restore_sticky || (zsh_body && opts.get(ZshOpt::Localoptions)) {
+		let mut want = saved.opts;
+		if !saved.restore_sticky {
+			for opt in [ZshOpt::Privileged, ZshOpt::Restricted] {
+				want.set(opt, opts.get(opt));
+			}
+		}
+		*opts = want;
+		*mode = saved.mode;
+	} else {
+		if zsh_body {
+			for opt in [
+				ZshOpt::Xtrace,
+				ZshOpt::Printexitvalue,
+				ZshOpt::Localoptions,
+				ZshOpt::Localloops,
+				ZshOpt::Warnnestedvar,
+			] {
+				opts.set(opt, saved.opts.get(opt));
+			}
+		}
+		if mode.dialect() != saved.mode.dialect() {
+			*mode = saved.mode;
+		}
+	}
 }
 
 /// The zsh options that change how code parses, with the value that sets
