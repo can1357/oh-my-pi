@@ -6243,7 +6243,9 @@ dependencies = [
  "rustix 1.1.5",
  "self_cell",
  "serde",
+ "serde-saphyr",
  "serde_json",
+ "serde_yaml",
  "sha1",
  "sha2 0.10.9",
  "smallvec",
@@ -7919,6 +7921,19 @@ checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde-saphyr"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d43fb82d550b07e6f929a58d7d0935182602f48ddead875f5ee313c41c8f07fe"
+dependencies = [
+ "base64 0.23.1",
+ "nohash-hasher",
+ "num-traits",
+ "serde_core",
+ "zmij",
 ]
 
 [[package]]
