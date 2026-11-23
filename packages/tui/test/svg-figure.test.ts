@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { SvgFigure } from "@oh-my-pi/pi-tui/chat/svg-figure";
+import { measureRender } from "@oh-my-pi/pi-tui/components/image";
 import { Markdown } from "@oh-my-pi/pi-tui/components/markdown";
 import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
 import {
@@ -147,6 +148,23 @@ describe("SvgFigure", () => {
 		const shown = placement(svg, 80);
 		expect(shown.columns).toBe(78);
 		expect(shown.box).toBe(shown.raster);
+	});
+
+	// Regression: an ask form measures its column at full width, then draws it a scrollbar
+	// column narrower. Each pass re-rasterized for its own width, so every landed raster
+	// scheduled the other: a new terminal image every frame, which herdr on macOS showed blinking.
+	it("keeps the raster its draws sized while a measuring pass tries another width", async () => {
+		const { figure: svg, landed } = figure();
+		const raster = landed();
+		svg.render(80);
+		await raster;
+		const drawn = placement(svg, 80);
+		for (let frame = 0; frame < 3; frame++) {
+			measureRender(() => svg.render(81));
+			svg.render(80);
+			expect(svg.debugState().rasterizing).toBe(false);
+		}
+		expect(placement(svg, 80)).toEqual(drawn);
 	});
 
 	it("fits a caller's row ceiling, refitting the shown image before its redraw lands", async () => {

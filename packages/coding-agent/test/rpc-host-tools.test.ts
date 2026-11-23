@@ -208,7 +208,7 @@ function handle(frame) {
 		);
 
 		const client = new RpcClient({
-			cliPath: scriptPath,
+			command: [process.execPath, scriptPath],
 			customTools: [
 				defineRpcClientTool<{ message: string }>({
 					name: "echo_host",
@@ -281,7 +281,7 @@ function handle(frame) {
 		);
 
 		const client = new RpcClient({
-			cliPath: scriptPath,
+			command: [process.execPath, scriptPath],
 			customTools: [
 				defineRpcClientTool({
 					name: "host_read",
