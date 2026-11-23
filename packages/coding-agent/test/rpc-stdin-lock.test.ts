@@ -7,7 +7,7 @@ async function expectRpcOwnsStdin(): Promise<void> {
 	const extensionPath = path.join(import.meta.dir, "fixtures", "locked-stdin-reader.ts");
 	const child = Bun.spawn(
 		[
-			"bun",
+			process.execPath,
 			cliPath,
 			"--extension",
 			extensionPath,

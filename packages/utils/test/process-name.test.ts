@@ -22,7 +22,7 @@ describe("setProcessName", () => {
 			`process.stdout.write(JSON.stringify({ comm, title: process.title }));`,
 		].join("\n");
 
-		const result = await Bun.$`bun -e ${probe}`.quiet();
+		const result = await Bun.$`${process.execPath} -e ${probe}`.quiet();
 		expect(result.exitCode).toBe(0);
 		const report = JSON.parse(result.stdout.toString()) as { comm: string; title: string };
 		// TASK_COMM_LEN caps comm at 15 chars; "omp-probe" fits whole.

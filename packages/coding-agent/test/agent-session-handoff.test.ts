@@ -1503,6 +1503,66 @@ describe("AgentSession handoff", () => {
 		expect(compaction.summary).toContain(handoffText);
 	});
 
+	it("falls through to soft after an oversized cross-provider handoff without sending it", async () => {
+		let sideStreamCalls = 0;
+		const sideStreamFn: StreamFn = () => {
+			sideStreamCalls++;
+			throw new Error("sideStreamFn should not be called for oversized handoff");
+		};
+		await session.dispose();
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		sessionManager = await SessionManager.open(sessionFile, tempDir.path());
+		session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					// Room for the base request, not for the oversized history below.
+					model: { ...model, contextWindow: 16_384, maxTokens: 128 },
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+				convertToLlm: compactionModule.defaultConvertToLlm,
+			}),
+			sessionManager,
+			settings: session.settings,
+			modelRegistry,
+			obfuscator,
+			sideStreamFn,
+		});
+		events = [];
+		session.subscribe(event => {
+			events.push(event);
+		});
+
+		cfgCompactionMethodOrder.set(session.settings, ["handoff", "soft"]);
+		cfgContextPromotionEnabled.set(session.settings, false);
+		sessionManager.appendMessage({
+			role: "user",
+			content: "unreadable native history ".repeat(6000),
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "## Goal\nContinue with the original request",
+			shortSummary: undefined,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+
+		await session.runIdleCompaction();
+
+		expect(sideStreamCalls).toBe(0);
+		expect(compactSpy).toHaveBeenCalled();
+		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "idle", action: "handoff" });
+		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "idle", action: "context-full" });
+		expect(sessionManager.getBranch().findLast(entry => entry.type === "compaction")).toMatchObject({
+			type: "compaction",
+			method: "soft",
+		});
+	});
+
 	it("falls back from malformed auto-handoff to soft compaction", async () => {
 		cfgCompactionMethodOrder.set(session.settings, ["handoff", "soft"]);
 		cfgCompactionHandoffSaveToDisk.set(session.settings, true);
