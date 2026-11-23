@@ -701,8 +701,16 @@ describe("todo backend", () => {
 			await settled(session);
 
 			backend.refusal = new Error("a needs\nevidence\x1b[2J");
-			const result = await call(session, { op: "init", items: ["b"] });
-			await settled(session);
+			const gate = Promise.withResolvers<void>();
+			backend.applyHold = gate.promise;
+			const asked = backend.entered();
+			const pending = call(session, { op: "init", items: ["b"] });
+			await asked;
+			// The resend runs outside the replace queue, once the refusal has settled.
+			const resent = backend.entered();
+			gate.resolve();
+			const result = await pending;
+			await resent;
 
 			expect(result.isError).toBe(true);
 			expect(result.details?.refused).toBe(true);
