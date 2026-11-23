@@ -646,6 +646,23 @@ describe("selective commit flow", () => {
 		expect(() => draft.take({ path: "**" })).not.toThrow();
 	});
 
+	it("refuses a bare take of an exact path whose name has glob characters", async () => {
+		// `[id].txt` names one file exactly; it is not a glob, so the bare take must refuse as it does for `a.txt`.
+		const original = Array.from({ length: 10 }, (_, i) => `line ${i + 1}\n`).join("");
+		const { root, journal, write } = await emptyRepo();
+		await Bun.write(path.join(root, "[id].txt"), original);
+		await git(root, ["add", "[id].txt"]);
+		await git(root, ["commit", "-qm", "seed"]);
+		await Bun.write(path.join(root, "[id].txt"), original.replace("line 1\n", "other session\n"));
+		await write("Main", undefined, "[id].txt", original.replace("line 1\n", "other session\n").replace("line 10\n", "main session\n"));
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(() => draft.take({ path: "[id].txt" })).toThrow(
+			/\[id\]\.txt: take\(\) without units would add lines that are not yours: .*pre-existing/,
+		);
+	});
+
 	it("refuses a bare take of a path that would add lines of an agent outside the scope", async () => {
 		const original = Array.from({ length: 10 }, (_, i) => `line ${i + 1}\n`).join("");
 		const { root, journal, write } = await emptyRepo();

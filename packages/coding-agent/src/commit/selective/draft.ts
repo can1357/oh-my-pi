@@ -747,7 +747,7 @@ export class Draft {
 		// Plan every file before changing any: a unit missing from one file rejects the whole request.
 		const plans = files.map(file => ({ file, ops: this.#targetOps(file, target.units, pattern) }));
 		// A bare path selects every unit of the file, so refuse when that adds lines of no agent in scope.
-		if (take && target.path !== undefined && !target.units?.length && pattern === undefined && !/[*?[{]/.test(target.path)) {
+		if (take && target.path !== undefined && !target.units?.length && pattern === undefined && !this.#isGlob(target.path)) {
 			for (const { file, ops } of plans) {
 				if (ops === "whole") continue;
 				const foreign = this.#foreignUnits(file);
@@ -840,11 +840,16 @@ export class Draft {
 		return matched;
 	}
 
+	/** A path argument is a glob unless it names one changed file exactly. */
+	#isGlob(target: string): boolean {
+		return /[*?[{]/.test(target) && !this.#files.some(file => file.path === target);
+	}
+
 	/** Resolve an exact path, glob, or unique path suffix. Only ambiguous suffixes throw. */
 	#resolve(target: string): FileChange[] {
 		const exact = this.#files.find(file => file.path === target);
 		if (exact) return [exact];
-		if (/[*?[{]/.test(target)) {
+		if (this.#isGlob(target)) {
 			const glob = new Bun.Glob(target);
 			return this.#files.filter(file => glob.match(file.path));
 		}
