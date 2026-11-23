@@ -2514,24 +2514,21 @@ export class TurnRecovery {
 				if (!this.#host.contextFitsModel(candidate, options?.preserveFailedTurn ? undefined : failedMessage)) {
 					continue;
 				}
-				// A fetched usage report can prove a candidate exhausted before the
-				// switch sends it a request (e.g. a static gateway key out of quota).
-				// Inside its reserve it is skipped only under usage-aware fallback.
-				try {
-					const candidateHealth = await this.#host.modelRegistry.authStorage.health.model(candidate.provider, {
-						modelId: candidate.id,
-						sessionId: this.#host.sessionId(),
-						baseUrl: candidate.baseUrl,
-						reserveFraction: cfgRetryUsageReservePct.get(this.#host.settings) / 100,
-					});
-					if (
-						candidateHealth.state === "depleted" ||
-						(candidateHealth.state === "reserve" && cfgRetryUsageAwareFallback.get(this.#host.settings))
-					) {
-						continue;
+				// Under usage-aware fallback a fetched usage report can prove a candidate
+				// exhausted or inside its reserve before the switch sends it a request
+				// (e.g. a static gateway key out of quota).
+				if (cfgRetryUsageAwareFallback.get(this.#host.settings)) {
+					try {
+						const candidateHealth = await this.#host.modelRegistry.authStorage.health.model(candidate.provider, {
+							modelId: candidate.id,
+							sessionId: this.#host.sessionId(),
+							baseUrl: candidate.baseUrl,
+							reserveFraction: cfgRetryUsageReservePct.get(this.#host.settings) / 100,
+						});
+						if (candidateHealth.state === "depleted" || candidateHealth.state === "reserve") continue;
+					} catch {
+						// Unknown usage fails open for an otherwise valid fallback.
 					}
-				} catch {
-					// Unknown usage fails open for an otherwise valid fallback.
 				}
 				// A session restricted to an OAuth account pool throws for a provider
 				// none of its pooled accounts can serve; that candidate is unavailable,

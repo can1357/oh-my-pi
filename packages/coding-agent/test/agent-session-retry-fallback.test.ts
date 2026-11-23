@@ -459,7 +459,7 @@ describe("AgentSession retry fallback", () => {
 		]);
 	});
 
-	it("walks past a chain entry whose fetched usage reports it depleted after a request fails", async () => {
+	it("walks past a chain entry whose usage reports it depleted under usage-aware fallback", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const depletedModel = getBundledModel("openai", "gpt-4o-mini");
 		const fallbackModel = getBundledModel("openai", "gpt-4o");
@@ -490,6 +490,7 @@ describe("AgentSession retry fallback", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
+			"retry.usageAwareFallback": true,
 			"retry.fallbackChains": { default: [depletedSelector, fallbackSelector] },
 		});
 		settings.setModelRole("default", primarySelector);
@@ -501,6 +502,46 @@ describe("AgentSession retry fallback", () => {
 		expect(fetched).toContain(depletedModel.id);
 		expect(requestedModels).toEqual([primarySelector, fallbackSelector]);
 		expect(session.model?.id).toBe(fallbackModel.id);
+	});
+
+	it("walks a fallback chain without probing usage when usage-aware fallback is off", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const firstModel = getBundledModel("openai", "gpt-4o-mini");
+		const secondModel = getBundledModel("openai", "gpt-4o");
+		if (!primaryModel || !firstModel || !secondModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const firstSelector = `${firstModel.provider}/${firstModel.id}`;
+
+		const usageHealth = vi
+			.spyOn(modelRegistry.authStorage.health, "model")
+			.mockResolvedValue({ state: "depleted", accounts: [] });
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (model.id === primaryModel.id) mock.push({ throw: "overloaded_error: provider returned error 503" });
+				else mock.push({ content: ["Recovered"] });
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": { default: [firstSelector, `${secondModel.provider}/${secondModel.id}`] },
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+
+		await session.prompt("Recover on the first chain entry");
+		await session.waitForIdle();
+
+		expect(usageHealth).not.toHaveBeenCalled();
+		expect(requestedModels).toEqual([primarySelector, firstSelector]);
 	});
 
 	it("walks the fallback chain when the primary provider has no credential, then restores it once one returns", async () => {
