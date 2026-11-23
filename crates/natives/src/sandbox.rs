@@ -871,13 +871,11 @@ impl SandboxProcess {
 		});
 		task::future(env, "sandbox.spawn", async move {
 			let request = request.map_err(Error::from_reason)?;
-			let process = tokio::task::spawn_blocking(move || {
-				v1::spawn(request, SpawnOptions { telemetry: TELEMETRY_OFF })
-			})
-			.await
-			.map_err(|err| Error::from_reason(format!("sandbox spawn task failed: {err}")))?
-			.map_err(|err| mxc_error(&err))?;
-			Ok(Self::start(process, on_stdout, on_stderr))
+			let spawned = spawn_contained(request)?
+				.await
+				.map_err(|_| Error::from_reason("sandbox spawn thread stopped"))?
+				.map_err(|err| mxc_error(&err))?;
+			Ok(Self::start(spawned, on_stdout, on_stderr))
 		})
 	}
 
@@ -950,25 +948,71 @@ impl SandboxProcess {
 	}
 }
 
+/// What the spawning thread hands back once the process runs: the shared
+/// handle plus the stdio ends the caller wires up.
+struct Spawned {
+	inner:    Arc<Inner>,
+	stdout:   Option<Box<dyn Read + Send>>,
+	stderr:   Option<Box<dyn Read + Send>>,
+	stdin:    Option<Box<dyn Write + Send>>,
+	stdin_rx: flume::Receiver<StdinOp>,
+}
+
+/// Spawn on a dedicated thread that then watches the process until it is
+/// reaped. MXC's bubblewrap backend runs `bwrap --die-with-parent`
+/// (`PR_SET_PDEATHSIG` fires when the *forking thread* exits), so the thread
+/// that calls `v1::spawn` must live exactly as long as the child; a Tokio
+/// blocking-pool thread is retired after its idle keep-alive and would kill
+/// the sandbox.
+fn spawn_contained(
+	request: ContainerRequest,
+) -> Result<oneshot::Receiver<std::result::Result<Spawned, v1::Error>>> {
+	let (tx, rx) = oneshot::channel();
+	thread::Builder::new()
+		.name("sandbox-proc".to_owned())
+		.spawn(move || {
+			let mut process = match v1::spawn(request, SpawnOptions { telemetry: TELEMETRY_OFF }) {
+				Ok(process) => process,
+				Err(err) => {
+					let _ = tx.send(Err(err));
+					return;
+				},
+			};
+			let pid = process.id();
+			let stdout = process.take_stdout();
+			let stderr = process.take_stderr();
+			let stdin = process.take_stdin();
+			let (stdin_tx, stdin_rx) = flume::unbounded();
+			let (exit, _) = watch::channel(None);
+			let inner = Arc::new(Inner {
+				pid,
+				process: Mutex::new(Some(process)),
+				exit,
+				stdin: Mutex::new(Some(stdin_tx)),
+			});
+			let handed = Spawned { inner: Arc::clone(&inner), stdout, stderr, stdin, stdin_rx };
+			if tx.send(Ok(handed)).is_err() {
+				// The caller is gone and nobody can kill the process: end it
+				// rather than leak it, then reap it below.
+				if let Some(process) = inner.process.lock().as_mut() {
+					let _ = process.kill();
+				}
+			}
+			watch_exit(&inner);
+		})
+		.map_err(|err| Error::from_reason(format!("Failed to start sandbox spawn thread: {err}")))?;
+	Ok(rx)
+}
+
 impl SandboxProcess {
-	/// Wire up stdio forwarding, the stdin writer and the exit watcher. Must run
-	/// inside the napi Tokio runtime (the output pumps are Tokio tasks).
-	fn start(mut process: MxcProcess, on_stdout: ChunkCallback, on_stderr: ChunkCallback) -> Self {
-		let pid = process.id();
-		forward_output(process.take_stdout(), on_stdout);
-		forward_output(process.take_stderr(), on_stderr);
-		let stdin = process.take_stdin();
-		let (stdin_tx, stdin_rx) = flume::unbounded();
+	/// Wire up stdio forwarding and the stdin writer; the spawning thread
+	/// already runs the exit watcher. Must run inside the napi Tokio runtime
+	/// (the output pumps are Tokio tasks).
+	fn start(spawned: Spawned, on_stdout: ChunkCallback, on_stderr: ChunkCallback) -> Self {
+		let Spawned { inner, stdout, stderr, stdin, stdin_rx } = spawned;
+		forward_output(stdout, on_stdout);
+		forward_output(stderr, on_stderr);
 		thread::spawn(move || write_stdin(stdin, &stdin_rx));
-		let (exit, _) = watch::channel(None);
-		let inner = Arc::new(Inner {
-			pid,
-			process: Mutex::new(Some(process)),
-			exit,
-			stdin: Mutex::new(Some(stdin_tx)),
-		});
-		let watched = Arc::clone(&inner);
-		thread::spawn(move || watch_exit(&watched));
 		Self { inner }
 	}
 }

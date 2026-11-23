@@ -190,6 +190,15 @@ describe.skipIf(posixUnsupported)("SandboxProcess", () => {
 		child.kill();
 	});
 
+	// bwrap runs with --die-with-parent (PR_SET_PDEATHSIG, tied to the forking
+	// thread). A spawning thread retired after Tokio's 10 s blocking-pool
+	// keep-alive used to SIGKILL the whole sandbox.
+	test("a contained process outlives the 10 s blocking-pool keep-alive", async () => {
+		const result = await run(["/bin/sh", "-c", "sleep 12; echo survived"], policy());
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout).toBe("survived\n");
+	}, 30_000);
+
 	test("argv with spaces, quotes and $ reaches the child byte-exact", async () => {
 		const args = ["a b", "it's", '"double"', "$HOME", "`id`", "$(id)", "", "back\\slash", "ünï"];
 		const result = await run(["/usr/bin/printf", "[%s]\\n", ...args], policy());
