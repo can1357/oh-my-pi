@@ -1,6 +1,7 @@
 import type { Provider } from "../types";
 import type { CredentialRankingStrategy, UsageProvider } from "../usage";
 import { alibabaTokenPlanRankingStrategy, alibabaTokenPlanUsageProvider } from "./alibaba-token-plan";
+import { bifrostRankingStrategy, bifrostUsageProvider } from "./bifrost";
 import { charmHyperUsageProvider } from "./charm-hyper";
 import { claudeRankingStrategy, claudeUsageProvider } from "./claude";
 import { clinePassUsageProvider } from "./cline-pass";
@@ -49,6 +50,7 @@ export const DEFAULT_USAGE_PROVIDERS: readonly UsageProvider[] = [
 	charmHyperUsageProvider,
 	commandCodeUsageProvider,
 	kiroUsageProvider,
+	bifrostUsageProvider,
 ];
 
 const DEFAULT_USAGE_PROVIDER_MAP = new Map<Provider, UsageProvider>(
@@ -74,6 +76,7 @@ const DEFAULT_RANKING_STRATEGIES = new Map<Provider, CredentialRankingStrategy>(
 	["commandcode", commandCodeRankingStrategy],
 	["kiro", kiroRankingStrategy],
 	["devin", devinRankingStrategy],
+	["bifrost", bifrostRankingStrategy],
 ]);
 
 /** Built-in ranking strategy for `provider`. */

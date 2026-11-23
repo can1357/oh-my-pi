@@ -461,8 +461,12 @@ export interface UsageLimitMarkResult {
 /** Combined model availability state across stored accounts. */
 export type ModelUsageHealthState = "healthy" | "reserve" | "depleted" | "unknown";
 
-/** Usage health of one stored credential for a model. */
+/** {@link ModelUsageAccountHealth.credentialId} of a static runtime/config/env key, which has no stored row. */
+export const STATIC_KEY_CREDENTIAL_ID = -1;
+
+/** Usage health of one credential for a model. */
 export interface ModelUsageAccountHealth {
+	/** Stored row id, or {@link STATIC_KEY_CREDENTIAL_ID} for a static key. */
 	credentialId: number;
 	credentialType: AuthCredential["type"];
 	/** True when this credential is currently sticky for options.sessionId. */
