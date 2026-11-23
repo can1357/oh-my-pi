@@ -6336,6 +6336,7 @@ dependencies = [
  "ignore",
  "image",
  "indexmap",
+ "jiff",
  "libc",
  "libm",
  "log",
