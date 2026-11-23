@@ -229,4 +229,16 @@ describe("Bifrost model usage health for a config key", () => {
 		const reports = await storage.usage.reports({ provider: "bifrost", baseUrlResolver: () => options.baseUrl });
 		expect(reports?.map(report => report.limits)).toEqual([[]]);
 	});
+
+	it("reads a failed refresh after an inactive report as unknown", async () => {
+		const start = Date.now();
+		const now = vi.spyOn(Date, "now").mockReturnValue(start);
+		const routes: Routes = { [QUOTA]: quota({ is_active: false }) };
+		const storage = configKeyStorage(routes);
+		expect((await storage.health.model("bifrost", { ...options, modelId: "openai/gpt-5" })).state).toBe("depleted");
+
+		routes[QUOTA] = new Response(null, { status: 503 });
+		now.mockReturnValue(start + 10 * 60_000);
+		expect((await storage.health.model("bifrost", { ...options, modelId: "openai/gpt-5" })).state).toBe("unknown");
+	});
 });

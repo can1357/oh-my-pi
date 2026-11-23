@@ -776,7 +776,13 @@ export class UsageService implements UsageApi {
 	async report(
 		provider: Provider,
 		credential: AuthCredential,
-		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
+		options?: {
+			baseUrl?: string;
+			timeoutMs?: number;
+			signal?: AbortSignal;
+			/** Whether a failed refresh may answer with the previous successful report. Defaults to true. */
+			retainLastGoodOnFailure?: boolean;
+		},
 	): Promise<UsageReport | null> {
 		// A paused provider is never probed, not even through the broker's per-credential hook.
 		if (providerPauseReason(provider) !== undefined) return null;
@@ -802,9 +808,14 @@ export class UsageService implements UsageApi {
 			if (!resolvedApiKey) return null;
 			usageCredential.apiKey = resolvedApiKey;
 		}
-		return this.#fetchUsageCached(usageRequest(provider, usageCredential, options?.baseUrl), {
+		const request = usageRequest(provider, usageCredential, options?.baseUrl);
+		const report = await this.#fetchUsageCached(request, {
 			timeoutMs: options?.timeoutMs ?? this.requestTimeoutMs,
 		});
+		if (!report || options?.retainLastGoodOnFailure !== false) return report;
+		// The cache serves the last good report until a failed refresh's cooldown ends.
+		const failure = this.#deps.cache.getStale<null>(this.#deps.cache.failureKey(this.#deps.cache.reportKey(request)));
+		return failure && failure.expiresAt > Date.now() ? null : report;
 	}
 
 	/**

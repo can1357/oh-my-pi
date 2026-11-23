@@ -221,7 +221,8 @@ export class CredentialHealth implements HealthApi {
 	/**
 	 * Health of the static key inference sends, read through a usage adapter
 	 * that reports on that exact key. No pool row backs it, so no block,
-	 * affinity, or per-credential policy applies: its own report decides.
+	 * affinity, or per-credential policy applies: its own report decides. A
+	 * failed refresh reads as unknown instead of replaying the previous report.
 	 */
 	async #requestKeyHealth(
 		provider: Provider,
@@ -237,7 +238,12 @@ export class CredentialHealth implements HealthApi {
 				this.#deps.usage.report(
 					provider,
 					{ type: "api_key", key: apiKey },
-					{ baseUrl: options.baseUrl, timeoutMs: this.#deps.usage.requestTimeoutMs, signal: options.signal },
+					{
+						baseUrl: options.baseUrl,
+						timeoutMs: this.#deps.usage.requestTimeoutMs,
+						signal: options.signal,
+						retainLastGoodOnFailure: false,
+					},
 				),
 				options.signal,
 				"usage fetch aborted",
