@@ -321,6 +321,11 @@ export interface AgentSessionConfig {
 	createVibeTools?: () => AgentTool[];
 	/** Names whose current registry entry is the built-in implementation. */
 	builtInToolNames?: Iterable<string>;
+	/**
+	 * Whether a native built-in of this name survives behind a same-name
+	 * extension override; the tool-command transport needs one to run commands.
+	 */
+	hasNativeTool?: (name: string) => boolean;
 	/** MCP names whose initial registry entries came from the manager snapshot. */
 	mcpManagerToolNames?: Iterable<string>;
 	/** Reconcile browser MCP connections after browser prelude availability changes. */

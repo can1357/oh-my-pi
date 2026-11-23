@@ -603,7 +603,7 @@ export class EditTool implements AgentTool<TInput> {
 				{ lspBatchId: batch?.id, lspFlush: batch?.flush ?? false },
 				async (_error, request) => {
 					if (rawSnapshot !== undefined && (await Bun.file(request.path).text()) !== rawSnapshot) {
-						throw new ToolError("The file changed after the numbered snapshot was read; re-read and retry.", {
+						throw new ToolError("The file changed while the edit was being prepared; re-read and retry.", {
 							path: request.path,
 						});
 					}
@@ -902,7 +902,9 @@ export class EditTool implements AgentTool<TInput> {
 		if (preWriteBytes !== undefined) {
 			// Fail when a content-changing write left disk at the pre-image. Compare
 			// post vs pre first (native memcmp, usually a length mismatch) so the
-			// requested content is only encoded when disk really is unchanged.
+			// expected final content is only encoded when disk really is unchanged.
+			// A formatter may restore the pre-image even though the request changed it.
+			const expectedContent = diagnostics.formatted ? diagnostics.finalContent : request.content;
 			let postWriteBytes: Uint8Array | undefined;
 			try {
 				postWriteBytes = await Bun.file(request.path).bytes();
@@ -912,8 +914,8 @@ export class EditTool implements AgentTool<TInput> {
 			if (
 				postWriteBytes !== undefined &&
 				bytesEqual(postWriteBytes, preWriteBytes) &&
-				(Buffer.byteLength(request.content, "utf8") !== preWriteBytes.byteLength ||
-					!bytesEqual(Buffer.from(request.content, "utf8"), preWriteBytes))
+				(Buffer.byteLength(expectedContent, "utf8") !== preWriteBytes.byteLength ||
+					!bytesEqual(Buffer.from(expectedContent, "utf8"), preWriteBytes))
 			) {
 				throw new ToolError(
 					`edit appeared successful but file content did not change on disk: ${request.displayPath}`,

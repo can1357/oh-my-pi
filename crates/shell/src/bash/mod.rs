@@ -46,6 +46,7 @@ pub mod fs;
 mod host;
 mod ids;
 mod image;
+mod indexed_array;
 pub mod invocation;
 pub mod ir;
 mod mem;

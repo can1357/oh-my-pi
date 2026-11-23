@@ -64,7 +64,7 @@ describe("openai-codex tool schemas", () => {
 			type: "function",
 			name: "list_outgoing_messages",
 			description: "List outgoing messages",
-			parameters: { type: "object", properties: {} },
+			parameters: { type: "object", properties: {}, additionalProperties: true },
 		});
 	});
 	it("strips MCP regex lookaround patterns from function parameters", () => {
@@ -127,6 +127,34 @@ describe("openai-codex tool schemas", () => {
 				},
 				additionalProperties: false,
 				properties: {},
+			},
+		});
+	});
+	it("strips MCP regex patterns with a nested character class from function parameters (#20137)", () => {
+		const tools: Tool[] = [
+			{
+				name: "mcp__webflow_data_optimize_tool",
+				description: "Optimize Webflow data",
+				parameters: {
+					type: "object",
+					properties: {
+						query: { type: "string", pattern: "^[^[\\]]*$" },
+					},
+				},
+			},
+		];
+
+		const converted = convertOpenAICodexResponsesTools(tools, createCodexModel("gpt-5.5"));
+
+		expect(converted[0]).toEqual({
+			type: "function",
+			name: "mcp__webflow_data_optimize_tool",
+			description: "Optimize Webflow data",
+			parameters: {
+				type: "object",
+				properties: {
+					query: { type: "string" },
+				},
 			},
 		});
 	});

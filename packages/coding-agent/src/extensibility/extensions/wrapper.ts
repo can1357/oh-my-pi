@@ -120,6 +120,20 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 		onUpdate?: AgentToolUpdateCallback<any>,
 		context?: AgentToolContext,
 	) {
+		// A `bash` line made only of session tool commands is transport traffic, not shell work:
+		// only the native host dispatches those commands, and it dispatches exactly the tools a
+		// top-level call would have run. Hand it back to the native tool so mounted tools keep
+		// working behind a replacement that never delegates (a remote or sandboxed shell), which
+		// otherwise receives command words it cannot execute (#18339). The replacement's approval
+		// gate and `tool_call` handlers already ran in ExtensionToolWrapper, so it can still block
+		// or revise the call; every other command line is executed by it below.
+		if (this.runner.servesToolCommandLine(this.registeredTool.definition.name, params)) {
+			return await this.runner.invokeNativeTool(this.registeredTool.definition.name, params, {
+				signal,
+				onUpdate,
+				callerContext: context,
+			});
+		}
 		// Bind the extension context to this tool's own name so `ctx.invokeTool` delegates to the
 		// native built-in of the same name (present only when this tool re-registers a built-in). The
 		// wrapper's own context, abort signal, and progress callback are inherited by the delegated
