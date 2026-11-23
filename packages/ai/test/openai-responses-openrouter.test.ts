@@ -497,6 +497,108 @@ describe("OpenRouter Responses request shape", () => {
 		expect(bodies[1]?.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "continue" }] }]);
 	});
 
+	it("replays Gemini thought signatures with the id and format OpenRouter binds them by", async () => {
+		// OpenRouter returns a Gemini thought signature as an encrypted reasoning
+		// item keyed by its function call's `call_id`. Replayed without `id` and
+		// `format`, OpenRouter drops the blob unseen and Gemini stops thinking
+		// a few steps into a tool loop.
+		const signatureItem = {
+			type: "reasoning",
+			id: "call_g1",
+			status: "completed",
+			summary: [],
+			encrypted_content: "gemini-thought-signature",
+			format: "google-gemini-v1",
+		};
+		const callItem = {
+			type: "function_call",
+			id: "fc_tmp_1",
+			call_id: "call_g1",
+			name: "read",
+			arguments: '{"path":"a.ts"}',
+			status: "completed",
+		};
+		const events = [
+			{
+				type: "response.output_item.added",
+				output_index: 0,
+				item: { ...signatureItem, encrypted_content: undefined },
+			},
+			{ type: "response.output_item.done", output_index: 0, item: signatureItem },
+			{ type: "response.output_item.added", output_index: 1, item: { ...callItem, arguments: "" } },
+			{ type: "response.output_item.done", output_index: 1, item: callItem },
+			{
+				type: "response.completed",
+				response: {
+					status: "completed",
+					usage: {
+						input_tokens: 1,
+						output_tokens: 2,
+						total_tokens: 3,
+						input_tokens_details: { cached_tokens: 0 },
+					},
+				},
+			},
+		];
+		const bodies: Record<string, unknown>[] = [];
+		const responses = [
+			new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			}),
+			createSseResponse(),
+		];
+		const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+			bodies.push(typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {});
+			return responses[bodies.length - 1]!;
+		}) as FetchImpl;
+		const model = buildOpenRouterModel({
+			id: "google/gemini-4-neon",
+			reasoning: true,
+		}) as unknown as Model<"openai-responses">;
+
+		let firstMessage: AssistantMessage | undefined;
+		for await (const event of streamOpenAIResponses(model, context, { apiKey: "test-key", fetch: fetchMock })) {
+			if (event.type === "done") firstMessage = event.message;
+			if (event.type === "error") throw event.error;
+		}
+		const toolCall = firstMessage?.content.find(block => block.type === "toolCall");
+		if (!firstMessage || toolCall?.type !== "toolCall") throw new Error("Expected a streamed tool call");
+
+		const followup: Context = {
+			messages: [
+				...context.messages,
+				firstMessage,
+				{
+					role: "toolResult",
+					toolCallId: toolCall.id,
+					toolName: "read",
+					content: [{ type: "text", text: "export {}" }],
+					isError: false,
+					timestamp: 2,
+				},
+			],
+		};
+		for await (const event of streamOpenAIResponses(model, followup, { apiKey: "test-key", fetch: fetchMock })) {
+			if (event.type === "done") break;
+			if (event.type === "error") throw event.error;
+		}
+
+		const input = bodies[1]?.input as Array<Record<string, unknown>>;
+		expect(input.filter(item => item.type === "reasoning")).toEqual([
+			{
+				type: "reasoning",
+				id: "call_g1",
+				summary: [],
+				encrypted_content: "gemini-thought-signature",
+				format: "google-gemini-v1",
+			},
+		]);
+		expect(input.findIndex(item => item.type === "reasoning")).toBeLessThan(
+			input.findIndex(item => item.type === "function_call"),
+		);
+	});
+
 	it("replays foreign tool-call history without a fabricated reasoning id", async () => {
 		// Meta (via OpenRouter Responses) validates reasoning ids against its own
 		// store and rejects a minted `rs_…` with "Referenced reasoning item … was
