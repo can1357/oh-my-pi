@@ -2394,6 +2394,25 @@ describe("explicit thinking ladders", () => {
 			}).thinking?.effortBudgets,
 		).toEqual({ high: 1234 });
 	});
+
+	it("filters declared effort budgets to declared efforts", () => {
+		const spec: ModelSpec<"openai-completions"> = {
+			id: "gemini-2.5-pro",
+			name: "Gemini 2.5 Pro",
+			provider: "litellm",
+			api: "openai-completions",
+			baseUrl: "https://litellm.example/v1",
+			reasoning: true,
+			input: ["text"],
+			contextWindow: 1000000,
+			maxTokens: 65536,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: { reasoningEffortMapAuthoritative: true },
+			thinking: { mode: "budget", efforts: [Effort.Low], effortBudgets: { low: 1000, high: 2000 } },
+		};
+		const budgets = resolveModelPolicy(spec).thinking?.effortBudgets;
+		expect(budgets).toEqual({ low: 1000 });
+	});
 });
 
 describe("Gemini 4 long decodes", () => {

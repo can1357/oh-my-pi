@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- LiteLLM rich discovery now honors a deployment's `model_info.reasoning_effort_levels` and explicit `supports_reasoning` verdict instead of always taking the bundled catalog ladder; declared ladders are intersected across management endpoints, a declared `none` state is preserved, disjoint declarations publish no ladder, and the scoped cache namespace moved to `litellm:scoped-v2` ([#11353](https://github.com/can1357/oh-my-pi/issues/11353))
+
 ## [19.1.1] - 2026-11-23
 
 ### Added
