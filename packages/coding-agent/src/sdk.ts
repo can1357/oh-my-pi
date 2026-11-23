@@ -353,6 +353,7 @@ import {
 	WriteTool,
 	warmupLspServers,
 	toolCommandEntries,
+	toolCommandHostAvailable,
 } from "./tools";
 import {
 	createModelJobCaptionWriter,
@@ -1821,6 +1822,7 @@ const CAPTURE_ADVERTISED_KEYS = [
 /** `AgentTool` keys that run code or let a call reach an effect; a refused copy has none of them. */
 const CAPTURE_DROPPED_KEYS = [
 	"execute",
+	"servesToolCommandLine",
 	"openArgStream",
 	"docTopics",
 	"concurrency",
@@ -4215,14 +4217,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 
 		// `tools.commands` flips allocate or release the tool command state createTools
-		// builds over the canonical map; the session re-partitions on its next apply. Like
-		// createTools, mounting needs the built-in `bash` tool that runs the commands.
+		// builds over the canonical map; the session re-partitions on its next apply. Mounting
+		// needs a native `bash` to run the commands, in the registry slot or behind a same-name
+		// extension override.
+		const commandHostAvailable = (): boolean =>
+			toolCommandHostAvailable(builtInRegistryToolNames, name => extensionRunner.hasNativeTool(name));
 		const syncToolCommandState = (): void => {
 			const wanted =
-				!restrictToolNames &&
-				cfgToolsCommands.get(settings) &&
-				toolRegistry.has("bash") &&
-				builtInRegistryToolNames.has("bash");
+				!restrictToolNames && cfgToolsCommands.get(settings) && toolRegistry.has("bash") && commandHostAvailable();
 			if (wanted === (toolSession.toolCommands !== undefined)) return;
 			if (wanted) {
 				toolSession.toolCommands = createToolCommandState(toolSession, toolRegistry, builtInRegistryToolNames);
@@ -4821,12 +4823,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		// Partition the initial enabled set for the command transport. Tool instances
 		// remain in the canonical map; only presentation names move between layers.
-		// Tools run as commands inside the built-in `bash` tool, so mounting engages
-		// only when `bash` starts enabled.
+		// Tools run as commands inside the `bash` tool, so mounting engages only
+		// when `bash` starts enabled and a tool that can run them is still there.
 		const commandTransportActive =
-			toolSession.toolCommands !== undefined &&
-			builtInRegistryToolNames.has("bash") &&
-			initialToolNames.includes("bash");
+			toolSession.toolCommands !== undefined && commandHostAvailable() && initialToolNames.includes("bash");
 		if (toolSession.toolCommands) {
 			const topLevelToolNames: string[] = [];
 			const mountedNames: string[] = [];
@@ -5553,6 +5553,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					? () => createVibeTools(toolSession)
 					: undefined,
 			builtInToolNames: builtInRegistryToolNames,
+			hasNativeTool: name => extensionRunner.hasNativeTool(name),
 			mcpManagerToolNames: initialMcpManagerToolNames,
 			transformContext,
 			transformProviderContext,
@@ -5757,7 +5758,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					const shouldMount =
 						!explicitlyRequested &&
 						toolSession.toolCommands !== undefined &&
-						builtInRegistryToolNames.has("bash") &&
+						commandHostAvailable() &&
 						enabled.includes("bash") &&
 						isMountableAsToolCommand(liveTool);
 					const nextMounted = shouldMount
