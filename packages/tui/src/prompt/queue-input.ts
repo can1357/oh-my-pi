@@ -24,16 +24,16 @@ export function parseQueueShorthand(text: string): string | undefined {
 }
 
 /**
- * Render messages as `->` / `=>` shorthand that {@link parseQueueShorthand} and {@link splitQueuedMessages} read back as the same messages.
- * A lone message that is already a sequential list is returned verbatim, since no shorthand form of it survives the read-back.
+ * Render messages as `->` / `=>` shorthand that {@link parseQueueShorthand} and {@link splitQueuedMessages}
+ * read back as the same *number* of messages. The enumerated form indents continuation lines, and the
+ * reader keeps that indent, so a caller that needs the exact text back (a queue restore) carries the
+ * messages alongside the draft instead of re-parsing it.
  */
 export function formatQueueShorthand(messages: readonly string[]): string {
-	if (messages.length === 1) {
-		const message = messages[0] ?? "";
-		// Prefixing a message that is itself a sequential list would read back as
-		// several messages with their markers eaten, so hand it back unprefixed.
-		return isQueuedMessageList(message) ? message : `=> ${message}`;
-	}
+	// A lone message that is itself a sequential list cannot take the bare `=> <message>` form:
+	// it would read back as its own items with the markers eaten (#19567). The enumerated form
+	// nests it under a single item instead, which reads back as one message.
+	if (messages.length === 1 && !isQueuedMessageList(messages[0] ?? "")) return `=> ${messages[0] ?? ""}`;
 	return `=>\n${messages.map((message, index) => `${index + 1}. ${message.replaceAll("\n", "\n   ")}`).join("\n")}`;
 }
 

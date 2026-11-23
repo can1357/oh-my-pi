@@ -4,12 +4,8 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { cfgBareExitOnEmptySession, cfgBareSlashCommands } from "@oh-my-pi/pi-coding-agent/modes/settings";
-import {
-	formatQueueShorthand,
-	isQueuedMessageList,
-	parseQueueShorthand,
-	splitQueuedMessages,
-} from "@oh-my-pi/pi-tui/prompt/queue-input";
+import { isQueuedMessageList, parseQueueShorthand, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
+import type { DequeuedMessage } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
 // Drives the real editor submit handler through the builtin slash dispatch
@@ -53,6 +49,9 @@ function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 	// submission until its canonical user `message_start` lands.
 	const locallySubmittedUserSignatures = new Set<string>();
 	const sessionManager = { sessionId: "session-a", getSessionId: () => sessionManager.sessionId };
+	// The viewed session's follow-up queue, oldest first; Alt+Up pops its tail back into the editor.
+	const queued: DequeuedMessage[] = [];
+	const viewSession = { popLastQueuedMessage: () => queued.pop() };
 	const ctx = {
 		editor,
 		sessionManager,
@@ -68,6 +67,7 @@ function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 			steer,
 			prompt,
 		},
+		viewSession,
 		focusedAgentId: undefined,
 		collabGuest: undefined,
 		shutdown,
@@ -100,6 +100,7 @@ function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 	return {
 		ctx,
 		editor,
+		queued,
 		addToHistory,
 		followUp,
 		steer,
@@ -519,29 +520,51 @@ describe("yield queue list parsing", () => {
 	});
 });
 
-describe("queue shorthand round trip", () => {
-	// Mirrors the submit path: a draft that still carries the `->` / `=>` prefix
-	// is split into queue entries, anything else is one prompt.
-	function decodeDraft(draft: string): string[] {
-		const body = parseQueueShorthand(draft);
-		return body === undefined ? [draft] : splitQueuedMessages(body);
-	}
+describe("restoring a queued message to the editor (#19567)", () => {
+	it("re-queues a restored list-shaped message as one follow-up instead of steering it in", async () => {
+		const { ctx, editor, queued, followUp, prompt, steer, showStatus } = makeCtx(true);
+		const controller = controllerFor(ctx);
+		queued.push({ text: "1. a\n2. b", queue: "followUp" });
 
-	it("hands a single message back as one message, including when it is itself a list", () => {
-		// A restored draft shaped like a list used to come back as `=> 1. a\n2. b`,
-		// which the next submit split into two turns with the markers eaten.
-		for (const message of ["check the build", "1. a\n2. b", "1. a\n2. b\n3.", "- a\n- b"]) {
-			expect(decodeDraft(formatQueueShorthand([message]))).toEqual([message]);
-		}
+		// Alt+Up, then Enter — the real editor clears its text before calling onSubmit.
+		controller.handleDequeue();
+		const restored = editor.getText();
+		editor.setText("");
+		await editor.onSubmit?.(restored);
+
+		// The draft keeps the `=>` marker, so Enter queues it behind the turn...
+		expect(parseQueueShorthand(restored)).not.toBeUndefined();
+		// ...as the one message it was, not as the two items its own list markers spell.
+		expect(followUp.mock.calls.map(call => call[0])).toEqual(["1. a\n2. b"]);
+		expect(prompt).not.toHaveBeenCalled();
+		expect(steer).not.toHaveBeenCalled();
+		expect(showStatus).toHaveBeenCalledWith("Queued message for when the agent yields");
 	});
 
-	it("keeps the queue prefix for a single message that is not an enumerated list", () => {
-		expect(formatQueueShorthand(["- a\n- b"])).toBe("=> - a\n- b");
+	it("keeps a restored message and the queue draft it merges into separate, text intact", async () => {
+		const { ctx, editor, queued, followUp } = makeCtx(true);
+		const controller = controllerFor(ctx);
+		editor.setText("=> second");
+		queued.push({ text: "1. a\n2. b", queue: "followUp" });
+
+		controller.handleDequeue();
+		const restored = editor.getText();
+		editor.setText("");
+		await editor.onSubmit?.(restored);
+
+		expect(followUp.mock.calls.map(call => call[0])).toEqual(["1. a\n2. b", "second"]);
 	});
 
-	it("round-trips a multi-message queue through the enumerated form", () => {
-		const messages = ["first", "second", "third"];
-		expect(formatQueueShorthand(messages)).toBe("=>\n1. first\n2. second\n3. third");
-		expect(decodeDraft(formatQueueShorthand(messages))).toEqual(messages);
+	it("parses an edited restored draft as typed", async () => {
+		const { ctx, editor, queued, followUp } = makeCtx(true);
+		const controller = controllerFor(ctx);
+		queued.push({ text: "1. a\n2. b", queue: "followUp" });
+
+		controller.handleDequeue();
+		editor.setText("");
+		// The user rewrote the draft into a two-item queue before pressing Enter.
+		await editor.onSubmit?.("=>\n1. a\n2. b");
+
+		expect(followUp.mock.calls.map(call => call[0])).toEqual(["a", "b"]);
 	});
 });
