@@ -595,6 +595,7 @@ export interface OAuthAccessFailure {
 	accountId?: string;
 	email?: string;
 	projectId?: string;
+	userTier?: string;
 	enterpriseUrl?: string;
 	apiEndpoint?: string;
 	/** Organization/workspace the credential is scoped to (Anthropic/ChatGPT multi-subscription). */
