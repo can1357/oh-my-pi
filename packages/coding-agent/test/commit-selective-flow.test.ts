@@ -402,6 +402,54 @@ describe("selective commit flow", () => {
 		expect((await git(root, ["diff", "--cached", "--name-only"])).trim()).toBe("b.ts");
 	});
 
+	it("does not advance HEAD or stage a reversal when the shared index stays locked", async () => {
+		const { root, journal, write } = await emptyRepo();
+		await Bun.write(path.join(root, "agent.txt"), "before\n");
+		await Bun.write(path.join(root, "other.txt"), "before\n");
+		await Bun.write(path.join(root, "delete.txt"), "delete me\n");
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-qm", "seed"]);
+		const head = await git(root, ["rev-parse", "HEAD"]);
+		await Bun.write(path.join(root, "other.txt"), "staged by someone else\n");
+		await git(root, ["add", "other.txt"]);
+		const staged = await git(root, ["diff", "--cached"]);
+		await write("Main", undefined, "agent.txt", "after\n");
+		const deleted = path.join(root, "delete.txt");
+		await fs.rm(deleted);
+		journal.recordChange({ agent: "Main", tool: "edit", path: deleted, before: "delete me\n", after: null });
+		await journal.flush();
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+
+		const lock = path.join(root, ".git", "index.lock");
+		await Bun.write(lock, "");
+		try {
+			const result = await commitSelection(
+				draft,
+				{ subject: "fix: locked" },
+				{ journal, agent: { agent: "Main" } },
+			).catch((error: unknown) => error);
+			expect(await git(root, ["diff", "--cached"])).toBe(staged);
+			expect(await git(root, ["rev-parse", "HEAD"])).toBe(head);
+			expect(await Bun.file(lock).exists()).toBe(true);
+			expect(result).toBeInstanceOf(Error);
+			expect(String(result)).toContain("shared index");
+		} finally {
+			await fs.rm(lock);
+		}
+		const fresh = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(fresh.staged).toEqual(["other.txt"]);
+		expect(
+			fresh
+				.selection()
+				.map(change => change.path)
+				.sort(),
+		).toEqual(["agent.txt", "delete.txt"]);
+		await commitSelection(fresh, { subject: "fix: retry" }, { journal, agent: { agent: "Main" } });
+		expect(await git(root, ["ls-tree", "--name-only", "HEAD"])).toBe("agent.txt\nother.txt\n");
+		expect(await git(root, ["show", "HEAD:agent.txt"])).toBe("after\n");
+		expect(await git(root, ["diff", "--cached"])).toBe(staged);
+	}, 60_000);
+
 	it.skipIf(process.platform === "win32")(
 		"runs hooks without reporting sparse-checkout paths as unstaged deletions",
 		async () => {
@@ -433,6 +481,7 @@ describe("selective commit flow", () => {
 					"set -e",
 					'[ -z "$(git diff --name-only)" ]',
 					"git add kept/inside",
+					"git sparse-checkout reapply --sparse-index",
 					'git ls-files --sparse > "$GIT_DIR/omp-hook-sparse.txt"',
 				].join("\n") + "\n",
 			);
