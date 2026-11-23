@@ -4,12 +4,28 @@
 
 ### Added
 
-- Added `AGENT_KILL_LABEL`, `InterruptReason` and `isInterruptReason` so hosts can tell a parent agent's kill apart from a user interrupt ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
 - Added native judge route editing to the model hub's Judge role: `Ctrl+R` declares the highlighted model's judgment protocol and endpoint root with a live request-URL preview (the protocol is preselected and the root prefilled from the model, the catalog or the provider's chat root), `Ctrl+N` adds an uncataloged native judge (optionally storing its API key), `Ctrl+T` tests the drafted route through the host's `onTestNativeRoute` and shows the outcome, and the status line says whether a Judge model judges natively, through prompts, or has an invalid native route, which also blocks picking it ([#19055](https://github.com/can1357/oh-my-pi/pull/19055) by [@Xytronix](https://github.com/Xytronix))
+
+## [19.1.1] - 2026-11-23
+
+### Added
+
+- Added host-provided runtime choices for settings menus through `SettingsRuntimeContext.runtimeOptions`, while preserving built-in choices for thinking levels, themes, and composer shapes.
+- Added interrupt metadata so hosts can distinguish a parent-agent termination from a user-initiated interrupt.
 
 ### Fixed
 
-- Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
+- Fixed handoffs being skipped when only the model’s upstream pin changes.
+- Fixed the `/usage` activity calendar retaining its history when a refresh fails, while indicating that the data is not synced.
+- Fixed SVG images blinking in ask forms when questions extend beyond the panel.
+- Fixed the active-turn status line so elapsed time updates smoothly at tenths of a second.
+- Fixed assigning a model to a role when pressing Enter again on the selected model, which could incorrectly remove the role.
+- Updated the quick model picker (`Alt+P`) to include models added to the catalog after a session began, even when the session is restricted by `--models` or `enabledModels`.
+- Fixed images and other path-based files appearing as unavailable in Tern when the TUI and Tern run on different machines or in local sessions without Tern’s shared file directory.
+
+### Removed
+
+- Removed `OmfgPanelComponent.markSaved` and the `saved` panel state; the `/omfg` panel now closes after a rule is saved.
 
 ## [19.1.0] - 2026-11-21
 

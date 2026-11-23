@@ -55,9 +55,11 @@ pub use error::{
 	cancelled, crosses_devices, invalid_argument, is_a_directory, is_cancelled, no_provider,
 	not_a_directory, permission_denied, read_only_filesystem, unsupported,
 };
-pub use file::{File, FileHandle};
+#[cfg(windows)]
+pub use file::wait_pipe_readable;
+pub use file::{File, FileHandle, POLL_SLICE};
 #[cfg(unix)]
-pub use file::{POLL_SLICE, fd_reads_can_block, readable_within, reads_can_block, wait_readable};
+pub use file::{fd_reads_can_block, readable_within, reads_can_block, wait_readable};
 pub use fs::{BlockingFs, Fs};
 pub use metadata::Metadata;
 pub use options::{

@@ -587,6 +587,12 @@ export class ModelHubComponent implements Component {
 	/** Why the last Judge pick was refused, or what a closed form left unfinished; cleared by the next action. */
 	#judgeNotice: string | undefined;
 	/**
+	 * The role the last successful hub assign wrote, and the row it was made on. The
+	 * row's chip now reads as assigned, so Enter there would toggle the role off; a
+	 * repeat Enter must not. Cleared when the cursor moves to another row or the view changes.
+	 */
+	#committed: { selector: string; role: string; scope: ModelRoleSelectionScope | undefined } | null = null;
+	/**
 	 * Last preset ctrl+←/→ tried in this hub, with the settings revision after the
 	 * attempt; steps from it while nothing matches the setup or nothing changed since.
 	 */
@@ -673,8 +679,9 @@ export class ModelHubComponent implements Component {
 		this.#browser.onActivate = item => this.#activateItem(item);
 		this.#browser.onCancel = () => this.#callbacks.onCancel();
 		this.#browser.onQueryChange = query => this.#onQueryChanged(query);
-		this.#browser.onSelectionChange = () => {
+		this.#browser.onSelectionChange = item => {
 			this.#judgeNotice = undefined;
+			if (item?.selector !== this.#committed?.selector) this.#committed = null;
 		};
 
 		// Hydrate synchronously from the current registry snapshot so the first
@@ -978,6 +985,7 @@ export class ModelHubComponent implements Component {
 	#setActiveEntry(id: string): void {
 		if (!this.#entries.some(entry => entry.id === id)) return;
 		this.#activeEntryId = id;
+		this.#committed = null;
 		this.#sidebarFollowActive = true;
 		this.#applyScope();
 		const entry = this.#activeEntry();
@@ -1929,6 +1937,7 @@ export class ModelHubComponent implements Component {
 		if (!supported.includes(level)) level = ThinkingLevel.Inherit;
 		const result = this.#callbacks.onAssign(item.model, role, level, item.selector, scope);
 		this.#finishAssignment(result, () => {
+			this.#committed = { selector: item.selector, role, scope };
 			this.#refreshAfterMutation();
 			if (supported.length === 0) {
 				if (returnToRoles) {
@@ -2233,8 +2242,15 @@ export class ModelHubComponent implements Component {
 					this.#assignRole(strip.item, chip.role, false, chip.scope);
 				}
 				return;
-			case "unassign":
-				if (chip.role) {
+			case "unassign": {
+				const committed = this.#committed;
+				// A repeat Enter on the row just committed is not a toggle back; moving the cursor re-arms it.
+				const repeatOfCommit =
+					committed !== null &&
+					committed.selector === strip.item.selector &&
+					committed.role === chip.role &&
+					committed.scope === chip.scope;
+				if (chip.role && !repeatOfCommit) {
 					if (this.#settings.modelRoleStorage === "project") {
 						this.#callbacks.onUnassign(chip.role, chip.scope);
 					} else {
@@ -2244,6 +2260,7 @@ export class ModelHubComponent implements Component {
 				}
 				this.#closeStrip();
 				return;
+			}
 			case "fallback":
 				this.#appendFallback(strip.item, "default");
 				this.#closeStrip();
@@ -2780,7 +2797,12 @@ export class ModelHubComponent implements Component {
 			if (strip.purpose === "compaction") strip.error = undefined;
 			return;
 		}
-		if (moveStripSelection(strip, data)) return;
+		const prevIndex = strip.index;
+		if (moveStripSelection(strip, data)) {
+			// Navigating within the strip re-arms the committed-row repeat guard.
+			if (strip.index !== prevIndex) this.#committed = null;
+			return;
+		}
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
 			this.#activateStripChip();
 			return;
@@ -2991,6 +3013,8 @@ export class ModelHubComponent implements Component {
 		if (footerColumn !== undefined && this.#strip) {
 			const strip = this.#strip;
 			if (event.leftClick && strip.kind !== "name" && this.#frame.selectChipAt(strip, footerColumn)) {
+				// A pointer activation is deliberate: it re-arms the committed-row repeat guard.
+				this.#committed = null;
 				this.#activateStripChip();
 			}
 			return true;
@@ -3757,6 +3781,7 @@ export class ModelHubComponent implements Component {
 					const index = Number(event.item);
 					if (!strip || strip.kind === "name" || !Number.isInteger(index) || !strip.chips[index]) return;
 					strip.index = index;
+					this.#committed = null;
 					this.#activateStripChip();
 					break;
 				}
@@ -4735,10 +4760,12 @@ export class ModelHubComponent implements Component {
 				const index = Number(value);
 				if (!strip || strip.kind === "name" || !Number.isInteger(index) || !strip.chips[index]) return;
 				strip.index = index;
+				this.#committed = null;
 				this.#activateStripChip();
 				return;
 			}
 			case "stripApply":
+				this.#committed = null;
 				this.#activateStripChip();
 				return;
 			case "roleName":
