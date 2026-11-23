@@ -241,4 +241,24 @@ describe("Bifrost model usage health for a config key", () => {
 		now.mockReturnValue(start + 10 * 60_000);
 		expect((await storage.health.model("bifrost", { ...options, modelId: "openai/gpt-5" })).state).toBe("unknown");
 	});
+
+	it("ignores a full counter whose window has elapsed", async () => {
+		const storage = configKeyStorage({
+			[QUOTA]: quota({
+				rate_limit: {
+					token_max_limit: 1000,
+					token_current_usage: 100,
+					token_reset_duration: "1h",
+					token_last_reset: new Date(Date.now() - 60_000).toISOString(),
+					request_max_limit: 10,
+					request_current_usage: 10,
+					request_reset_duration: "1h",
+					request_last_reset: new Date(Date.now() - 3_601_000).toISOString(),
+				},
+			}),
+		});
+		const health = await storage.health.model("bifrost", { ...options, modelId: "openai/gpt-5" });
+		expect(health.state).toBe("healthy");
+		expect(health.accounts[0]?.remainingFraction).toBeCloseTo(0.9);
+	});
 });

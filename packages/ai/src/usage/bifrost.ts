@@ -250,7 +250,11 @@ async function fetchBifrostUsage(params: UsageFetchParams, ctx: UsageFetchContex
 		return null;
 	}
 	if (!isRecord(body)) return null;
-	const limits = quotaLimits(params.provider, body);
+	const fetchedAt = Date.now();
+	// Bifrost admits requests once a window has elapsed, before it resets the counter.
+	const limits = quotaLimits(params.provider, body).filter(
+		limit => limit.window?.resetsAt === undefined || limit.window.resetsAt > fetchedAt,
+	);
 
 	const configs = Array.isArray(body.provider_configs) ? body.provider_configs : [];
 	const accountId = configs
@@ -259,7 +263,7 @@ async function fetchBifrostUsage(params: UsageFetchParams, ctx: UsageFetchContex
 	const keyName = typeof body.virtual_key_name === "string" ? body.virtual_key_name : undefined;
 	return {
 		provider: params.provider,
-		fetchedAt: Date.now(),
+		fetchedAt,
 		limits,
 		metadata: { endpoint, ...(accountId ? { accountId } : {}), ...(keyName ? { keyName } : {}) },
 	};
