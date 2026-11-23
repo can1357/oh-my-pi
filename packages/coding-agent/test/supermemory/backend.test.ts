@@ -7,7 +7,11 @@ import {
 import { prepareRetentionTranscript } from "@oh-my-pi/pi-coding-agent/hindsight/content";
 import { extractMessages } from "@oh-my-pi/pi-coding-agent/hindsight/transcript";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import {
+	type SessionEntry,
+	type SessionHeader,
+	TAN_FORK_BOUNDARY_CUSTOM_TYPE,
+} from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { AgentSessionEventListener } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { supermemoryBackend } from "@oh-my-pi/pi-coding-agent/supermemory/backend";
 import {
@@ -28,29 +32,46 @@ let temp: TempDir;
 function makeSession(options: { settings?: Record<string, unknown>; cwd?: string } = {}) {
 	const listeners = new Set<AgentSessionEventListener>();
 	const entries: SessionEntry[] = [];
+	/** Active path after {@link session.navigate}; until then every entry is on it. */
+	let branch: SessionEntry[] | undefined;
 	const notices: string[] = [];
 	let state: SupermemorySessionState | undefined;
 	const cwd = options.cwd ?? "/tmp";
+	/** Appends `entry` at the leaf, as the session manager does. */
+	const append = (entry: Record<string, unknown>) => {
+		const recorded = { ...entry, parentId: (branch ?? entries).at(-1)?.id ?? null } as unknown as SessionEntry;
+		entries.push(recorded);
+		branch?.push(recorded);
+	};
 	const session = {
 		sessionId: "s1",
 		transcriptId: "t1",
 		settings: Settings.isolated({ ...CONFIGURED, ...options.settings }),
+		header: undefined as SessionHeader | undefined,
 		sessionManager: {
 			getEntries: () => entries,
-			getBranch: () => entries,
+			getBranch: () => [...(branch ?? entries)],
+			getHeader: () => session.header ?? null,
 			appendCustomEntry: (customType: string, data: unknown) => {
-				entries.push({
-					type: "custom",
-					customType,
-					data,
-					id: `c${entries.length}`,
-					parentId: null,
-					timestamp: "",
-				} as never);
+				append({ type: "custom", customType, data, id: `c${entries.length}`, timestamp: "" });
 				return "";
 			},
 			getCwd: () => cwd,
 			getSessionId: () => session.transcriptId,
+		},
+		/** `/tree` to entry `id` on the active path: later entries append after it. */
+		navigate(id: string) {
+			const path = branch ?? entries;
+			branch = path.slice(0, path.findIndex(entry => entry.id === id) + 1);
+		},
+		/** A `.`/`c` continuation: an assistant answer without a user turn. */
+		addAnswer(text: string) {
+			append({
+				type: "message",
+				id: `a${entries.length}`,
+				timestamp: new Date(0).toISOString(),
+				message: { role: "assistant", content: [{ type: "text", text }], stopReason: "stop", timestamp: 0 },
+			});
 		},
 		subscribe(listener: AgentSessionEventListener) {
 			listeners.add(listener);
@@ -67,20 +88,18 @@ function makeSession(options: { settings?: Record<string, unknown>; cwd?: string
 		},
 		addTurn(text: string) {
 			const at = new Date(0).toISOString();
-			entries.push({
+			append({
 				type: "message",
 				id: `u${entries.length}`,
-				parentId: null,
 				timestamp: at,
 				message: { role: "user", content: text, timestamp: 0 },
-			} as never);
-			entries.push({
+			});
+			append({
 				type: "message",
 				id: `a${entries.length}`,
-				parentId: null,
 				timestamp: at,
 				message: { role: "assistant", content: [{ type: "text", text: `reply to ${text}` }], timestamp: 0 },
-			} as never);
+			});
 		},
 		/** Dispatches `agent_end` without waiting for the retention it starts. */
 		emitEnd() {
@@ -739,6 +758,133 @@ describe("supermemoryBackend", () => {
 		expect(docs).toHaveLength(2);
 		expect(docs[1]?.id).toBe(docs[0]?.id);
 		expect(docs[1]?.content).toContain("continued");
+	});
+
+	it("never uploads turns exchanged while Supermemory was switched off", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		await session.endTurn();
+		// `memory.backend` → off: SessionMemory detaches and disposes the state; turns go on without it.
+		await session.setSupermemorySessionState(undefined)?.dispose();
+		session.addTurn("off-period");
+		session.addAnswer("off-period continuation");
+		await start(session);
+		session.addTurn("three");
+		await session.endTurn();
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "");
+		expect(contents).toHaveLength(2);
+		expect(contents[1]).toContain("three");
+		expect(contents.join("\n")).not.toContain("off-period");
+	});
+
+	it("a replacement state's window upload waits for the previous state's upload still in flight", async () => {
+		const first = Promise.withResolvers<{ id: string; status: string }>();
+		const sent = Promise.withResolvers<void>();
+		const create = vi.spyOn(SupermemoryClient.prototype, "addDocument").mockImplementation(() => {
+			if (create.mock.calls.length > 1) return Promise.resolve({ id: "d", status: "queued" });
+			sent.resolve();
+			return first.promise;
+		});
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		session.emitEnd();
+		await sent.promise;
+		// A `supermemory.*` edit replaces the state while the old one's upload is still pending.
+		const disposing = session.setSupermemorySessionState(undefined)?.dispose();
+		await start(session);
+		session.addAnswer("continued");
+		session.emitEnd();
+		// One macrotask turn lets an unserialized upload start while the old one is still pending.
+		await Bun.sleep(0);
+		expect(create).toHaveBeenCalledTimes(1);
+		first.resolve({ id: "d", status: "queued" });
+		await disposing;
+		await session.getSupermemorySessionState()?.flush();
+		const docs = create.mock.calls.map(call => call[1]);
+		expect(docs).toHaveLength(2);
+		expect(docs[1]?.id).toBe(docs[0]?.id);
+		expect(docs[1]?.content).toContain("continued");
+	});
+
+	it("retries a failed continuation re-send under the first window's id before sending the next window", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		await session.endTurn();
+		session.addAnswer("continued answer");
+		create.mockRejectedValueOnce(new SupermemoryHttpError(503));
+		await session.endTurn();
+		session.addTurn("two");
+		await session.endTurn();
+		const docs = create.mock.calls.map(call => call[1]);
+		expect(docs).toHaveLength(4);
+		expect(docs[2]?.id).toBe(docs[0]?.id);
+		expect(docs[2]?.content).toContain("continued answer");
+		expect(docs[3]?.id).not.toBe(docs[0]?.id);
+		expect(docs[3]?.content).toContain("reply to two");
+	});
+
+	it("a continuation on a branch back at turn one updates window one with turn one's prompt", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		await session.endTurn();
+		session.addTurn("two");
+		await session.endTurn();
+		// `/tree` back to turn one's answer, then `.`/`c`.
+		const answerOne = session.sessionManager
+			.getEntries()
+			.find(entry => entry.type === "message" && JSON.stringify(entry).includes("reply to one"));
+		session.navigate(answerOne!.id);
+		session.addAnswer("branch answer");
+		await session.endTurn();
+		const docs = create.mock.calls.map(call => call[1]);
+		expect(docs).toHaveLength(3);
+		expect(docs[2]?.id).toBe(docs[0]?.id);
+		expect(docs[2]?.content).toContain("one");
+		expect(docs[2]?.content).toContain("branch answer");
+		expect(docs[2]?.content).not.toContain("two");
+		await session.endTurn();
+		expect(create).toHaveBeenCalledTimes(3);
+	});
+
+	it("a /tan fork uploads only its own turns, ignoring the inherited transcript and cursors", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 3 } });
+		session.header = { type: "session", id: "fork", parentSession: "parent.jsonl" } as SessionHeader;
+		session.addTurn("inherited-one");
+		session.addTurn("inherited-two");
+		session.sessionManager.appendCustomEntry("supermemory_retention", {
+			version: 1,
+			scope: "other",
+			transcriptId: "parent-transcript",
+			turn: 1,
+			messages: 2,
+			windowStart: 0,
+		});
+		session.sessionManager.appendCustomEntry(TAN_FORK_BOUNDARY_CUSTOM_TYPE, "fork");
+		await start(session);
+		for (const turn of ["fork-one", "fork-two", "fork-three"]) {
+			session.addTurn(turn);
+			await session.endTurn();
+		}
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "");
+		expect(contents).toHaveLength(1);
+		expect(contents[0]).toContain("fork-three");
+		expect(contents[0]).not.toContain("inherited");
 	});
 
 	it("redacts a long window before cutting it, so a cut after a secret's prefix leaks no suffix", async () => {

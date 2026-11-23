@@ -2,7 +2,7 @@ import * as path from "node:path";
 import { escapeXmlText, logger, prompt, sanitizeText, truncate } from "@oh-my-pi/pi-utils";
 import { redactMemorySecrets } from "../memory-backend/redact";
 import { type HindsightMessage, prepareRetentionTranscript } from "../hindsight/content";
-import { countUserTurns, extractMessages, retentionStart } from "../hindsight/transcript";
+import { countUserTurns, extractMessages, retentionStart, userTurnEntryIds } from "../hindsight/transcript";
 import {
 	cleanOutboxText,
 	MemoryOutbox,
@@ -72,7 +72,12 @@ interface RetentionCursorData {
 	messages: number;
 	/** First user turn of the last retained window, so a continuation re-sends that window's document id under any cadence. */
 	windowStart: number;
+	/** Written when automatic retention stopped (dispose): user turns the branch held then. Turns added later were exchanged while it was off. */
+	stoppedAt?: number;
 }
+
+/** Window uploads of each session, chained so a replacement state never overtakes its predecessor's upload. */
+const retentionTails = new WeakMap<AgentSession, Promise<void>>();
 
 /** Transcript messages captured for one retention job, with the identity they belong to. */
 interface SettledHistory {
@@ -81,6 +86,10 @@ interface SettledHistory {
 	openTail: boolean;
 	generation: number;
 	transcriptId: string;
+	/** Entry id of each user turn, keying its window's document. */
+	userIds: string[];
+	/** Leaf of the branch the messages were read from; a job never records a cursor once the session left it. */
+	leaf: string | undefined;
 }
 
 /** A request through a state that was disposed (e.g. a subagent's alias after a settings change). */
@@ -114,7 +123,8 @@ function isRetentionCursor(data: unknown): data is RetentionCursorData {
 		"messages" in data &&
 		Number.isSafeInteger(data.messages) &&
 		"windowStart" in data &&
-		Number.isSafeInteger(data.windowStart)
+		Number.isSafeInteger(data.windowStart) &&
+		(!("stoppedAt" in data) || Number.isSafeInteger(data.stoppedAt))
 	);
 }
 
@@ -210,14 +220,15 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	readonly #writes = new Set<Promise<unknown>>();
 	/** Config, client and outbox of a primary state; an alias has none. */
 	readonly #own: SupermemoryOwnResources | undefined;
-	#retention: Promise<void> = Promise.resolve();
 	/** Set once {@link dispose} returns; retention queued behind a slow upload must not run against the session's next transcript. */
 	#disposed = false;
 	#recallGeneration = 0;
-	/** Bumped when the transcript changes identity; stale retention never advances {@link lastRetainedTurn}. */
+	/** Bumped when the transcript changes identity or the branch moves; stale retention never advances {@link lastRetainedTurn}. */
 	#transcriptGeneration = 0;
-	/** Whether this transcript already holds a retention cursor for {@link #scope}. */
+	/** Whether the active branch already holds a retention cursor for {@link #scope}. */
 	#hasCursor = false;
+	/** An entry of the branch the in-memory cursor describes; a branch without it is another one (see {@link #followBranch}). */
+	#anchor: string | undefined;
 	#unsubscribe?: () => void;
 
 	constructor(options: SupermemorySessionStateOptions | SupermemoryAliasOptions) {
@@ -280,34 +291,27 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	}
 
 	/**
-	 * Resumes automatic retention at this transcript's latest retention cursor, so a window that
+	 * Resumes automatic retention at the active branch's latest retention cursor, so a window that
 	 * failed or was cut by the dispose timeout is retried; its document id makes the retry add to the
-	 * same document. A transcript without a cursor predates them: its complete windows are assumed
+	 * same document. A branch without a cursor predates them: its complete windows are assumed
 	 * retained and retention starts at the open window, so resuming an old session never bulk-uploads
 	 * it. An open window keeps its start-based document id, so completing it later re-sends a superset
 	 * into that document. A latest cursor from another scope (namespace, account or server switch)
-	 * means every turn so far belongs to that scope: retention here starts at the current turn.
+	 * means every turn so far belongs to that scope, and turns added after a stop cursor were
+	 * exchanged while retention was off: either way retention here starts at the current turn.
 	 */
 	#resumeRetention(): void {
-		const scope = this.#scope();
-		const cursor = this.session.sessionManager
-			.getEntries()
-			.findLast(
-				entry =>
-					entry.type === "custom" &&
-					entry.customType === RETENTION_CURSOR_ENTRY_TYPE &&
-					isRetentionCursor(entry.data) &&
-					entry.data.transcriptId === this.transcriptId,
-			);
-		const data = cursor?.type === "custom" && isRetentionCursor(cursor.data) ? cursor.data : undefined;
+		const [path, start] = this.#retainedEntries();
+		this.#anchor = path.at(-1)?.id;
+		const data = this.#pathCursor(path, start);
 		this.#hasCursor = data !== undefined;
-		if (data?.scope === scope) {
+		const turns = countUserTurns(path, start);
+		if (data?.scope === this.#scope() && !(data.stoppedAt !== undefined && turns > data.stoppedAt)) {
 			this.lastRetainedTurn = data.turn;
 			this.#retainedMessages = data.messages;
 			this.#windowStart = data.windowStart;
 			return;
 		}
-		const turns = countUserTurns(...this.#retainedEntries());
 		if (data) {
 			this.lastRetainedTurn = turns;
 			this.#retainedMessages = 0;
@@ -319,6 +323,37 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		this.lastRetainedTurn = Math.floor(turns / every) * every;
 		this.#retainedMessages = 0;
 		this.#windowStart = this.lastRetainedTurn;
+	}
+
+	/**
+	 * Latest cursor of this transcript whose retained turns all lie on `path`: one appended at an
+	 * entry of `path` past its retention start. A cursor appended at a deeper entry wins; a `/tree`
+	 * move back to an earlier answer leaves later cursors off the path.
+	 */
+	#pathCursor(path: readonly SessionEntry[], start: number): RetentionCursorData | undefined {
+		const depth = new Map(path.map((entry, index) => [entry.id, index]));
+		let best: RetentionCursorData | undefined;
+		let bestDepth = -Infinity;
+		for (const entry of this.session.sessionManager.getEntries()) {
+			if (entry.type !== "custom" || entry.customType !== RETENTION_CURSOR_ENTRY_TYPE) continue;
+			if (!isRetentionCursor(entry.data) || entry.data.transcriptId !== this.transcriptId) continue;
+			const at = entry.parentId === null ? -1 : depth.get(entry.parentId);
+			if (at === undefined || at < start - 1 || at < bestDepth) continue;
+			best = entry.data;
+			bestDepth = at;
+		}
+		return best;
+	}
+
+	/** After a `/tree` move off the branch the in-memory cursor describes, re-derives it from the active one; jobs queued for the old branch go stale. */
+	#followBranch(): void {
+		const path = this.session.sessionManager.getBranch();
+		if (this.#anchor !== undefined && !path.some(entry => entry.id === this.#anchor)) {
+			this.#transcriptGeneration++;
+			this.#resumeRetention();
+			return;
+		}
+		this.#anchor = path.at(-1)?.id;
 	}
 
 	resetConversationTracking(): void {
@@ -334,12 +369,10 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		this.#unsubscribe = undefined;
 		if (!this.automatic) return;
 		this.#unsubscribe = this.session.subscribe(event => {
-			if (
-				(event.type === "agent_start" || event.type === "agent_pause" || event.type === "agent_end") &&
-				this.#config.autoRetain &&
-				!this.#hasCursor
-			) {
-				// Record where retention starts before any upload: a transcript without a cursor reads as
+			if (event.type !== "agent_start" && event.type !== "agent_pause" && event.type !== "agent_end") return;
+			this.#followBranch();
+			if (this.#config.autoRetain && !this.#hasCursor) {
+				// Record where retention starts before any upload: a branch without a cursor reads as
 				// pre-cursor on resume, which skips every turn it already holds.
 				this.#appendCursor(this.lastRetainedTurn, this.#retainedMessages, this.#windowStart);
 			}
@@ -616,6 +649,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	/** `/memory enqueue`: retain every due window, then the unretained tail. */
 	async forceRetainCurrentSession(): Promise<void> {
 		await this.#enqueueRetention(async () => {
+			this.#followBranch();
 			const history = this.#settledHistory();
 			await this.#retainDue(history);
 			const { messages } = history;
@@ -629,35 +663,25 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		});
 	}
 
-	/** The transcript's entries and where retention starts: a `/tan` fork skips the transcript it copied. */
+	/** The active branch's entries and where retention starts: a `/tan` fork skips the transcript it copied. */
 	#retainedEntries(): [SessionEntry[], number] {
 		const manager = this.session.sessionManager;
-		const entries = manager.getEntries();
+		const entries = manager.getBranch();
 		return [entries, retentionStart(entries, manager.getHeader?.())];
 	}
 
-	/** The transcript as it stands now, bound to its identity so a later `/new` or reset discards it. */
+	/** The active branch as it stands now, bound to its identity so a later `/new`, reset or `/tree` move discards it. */
 	#settledHistory(): SettledHistory {
-		const messages = extractMessages(...this.#retainedEntries());
+		const [entries, start] = this.#retainedEntries();
+		const messages = extractMessages(entries, start);
 		return {
 			messages,
-			openTail: messages.at(-1)?.role === "user" || this.#lastTurnUnfinished(),
+			openTail: messages.at(-1)?.role === "user" || lastTurnUnfinished(entries),
 			generation: this.#transcriptGeneration,
 			transcriptId: this.transcriptId,
+			userIds: userTurnEntryIds(entries, start),
+			leaf: entries.at(-1)?.id,
 		};
-	}
-
-	#lastTurnUnfinished(): boolean {
-		const entries = this.session.sessionManager.getEntries();
-		for (let index = entries.length - 1; index >= 0; index--) {
-			const entry = entries[index];
-			if (entry.type !== "message") continue;
-			if (entry.message.role === "user") return false;
-			if (entry.message.role === "assistant") {
-				return entry.message.stopReason === "aborted" || entry.message.stopReason === "error";
-			}
-		}
-		return false;
 	}
 
 	/** Every complete `retainEveryNTurns` window of `history` not stored yet, oldest first. */
@@ -673,7 +697,12 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		// job's wake after a yielded pause), possibly followed by newer user turns: re-send it under its
 		// document id first, so that text is not left out of every window.
 		const closedEnd = userStarts[this.lastRetainedTurn] ?? (history.openTail ? 0 : messages.length);
-		if (this.lastRetainedTurn > this.#windowStart && closedEnd > this.#retainedMessages) {
+		// A cursor past the branch's turns belongs to turns this branch no longer holds: nothing to re-send.
+		if (
+			this.lastRetainedTurn > this.#windowStart &&
+			this.lastRetainedTurn <= userStarts.length &&
+			closedEnd > this.#retainedMessages
+		) {
 			if (!(await this.#retainWindow(messages, userStarts, this.#windowStart, this.lastRetainedTurn, history))) {
 				return;
 			}
@@ -692,12 +721,10 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		endTurn: number,
 		identity: Omit<SettledHistory, "messages">,
 	): Promise<boolean> {
-		// A late reply, or a job queued before `/new` or a reset, must not record its window
-		// against the session's next transcript.
-		const { generation, transcriptId } = identity;
-		if (this.#disposed || generation !== this.#transcriptGeneration || transcriptId !== this.transcriptId) {
-			return false;
-		}
+		// A late reply, or a job queued before `/new`, a reset or a `/tree` move, must not record its
+		// window against another transcript or branch.
+		const startId = identity.userIds[startTurn];
+		if (startId === undefined || this.#isStale(identity)) return false;
 		const window = messages.slice(userStarts[startTurn], userStarts[endTurn] ?? messages.length);
 		const { transcript: raw } = prepareRetentionTranscript(window, true, { includeTimestamps: true });
 		// Redact the whole window before cutting it: a cut right after a secret's prefix (`ghp_`) would
@@ -719,7 +746,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 						turnEnd: endTurn,
 						...(omittedChars > 0 ? { transcriptTruncated: true, omittedChars } : {}),
 					},
-					this.#windowDocumentId(startTurn),
+					this.#windowDocumentId(startId),
 				);
 			} catch (error) {
 				if (writeFailure(error) !== "rejected") {
@@ -736,9 +763,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 				);
 			}
 		}
-		if (this.#disposed || generation !== this.#transcriptGeneration || transcriptId !== this.transcriptId) {
-			return false;
-		}
+		if (this.#isStale(identity)) return false;
 		// A `/memory enqueue` tail is an open window: it stays the next window's start, so a later
 		// enqueue or the completed window re-sends a superset into the same document.
 		// Re-sending an already retained window (`endTurn === lastRetainedTurn`) refreshes its cursor whatever its size.
@@ -750,7 +775,17 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		return true;
 	}
 
-	#appendCursor(turn: number, messages: number, windowStart: number): void {
+	/** The job's transcript, generation or branch is gone, or this state was disposed. */
+	#isStale({ generation, transcriptId, leaf }: Omit<SettledHistory, "messages">): boolean {
+		return (
+			this.#disposed ||
+			generation !== this.#transcriptGeneration ||
+			transcriptId !== this.transcriptId ||
+			(leaf !== undefined && !this.session.sessionManager.getBranch().some(entry => entry.id === leaf))
+		);
+	}
+
+	#appendCursor(turn: number, messages: number, windowStart: number, stoppedAt?: number): void {
 		this.session.sessionManager.appendCustomEntry(RETENTION_CURSOR_ENTRY_TYPE, {
 			version: 1,
 			scope: this.#scope(),
@@ -758,28 +793,33 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			turn,
 			messages,
 			windowStart,
+			...(stoppedAt === undefined ? {} : { stoppedAt }),
 		} satisfies RetentionCursorData);
 		this.#hasCursor = true;
 	}
 
 	/**
-	 * Supermemory adds content sent under the same document `id` to that document. Keying on the
-	 * window's first turn lets a retry or resume extend the same window's document while later
-	 * windows never touch earlier ones.
+	 * Content sent under an existing document `id` updates that document. Keying on the entry of the window's
+	 * first user turn lets a retry, resume or continuation update the same window's document, while
+	 * later windows and windows of other branches never touch it.
 	 */
-	#windowDocumentId(startTurn: number): string {
+	#windowDocumentId(startEntryId: string): string {
 		const digest = new Bun.CryptoHasher("sha256")
-			.update(`${this.transcriptId}\u0000${this.namespace}\u0000${startTurn}`)
+			.update(`${this.transcriptId}\u0000${this.namespace}\u0000${startEntryId}`)
 			.digest("hex");
 		return `omp-${digest}`;
 	}
 
-	/** Serializes retention so concurrent `agent_end`s never write the same window twice. */
+	/**
+	 * Serializes retention per session, across states: concurrent `agent_end`s never write the same
+	 * window twice, and a state replaced by a settings change while its upload is still in flight
+	 * never has that upload land after (and overwrite) its successor's re-send of the same document.
+	 */
 	#enqueueRetention(work: () => Promise<void>): Promise<void> {
-		const run = this.#retention.then(work).catch(error => {
+		const run = (retentionTails.get(this.session) ?? Promise.resolve()).then(work).catch(error => {
 			logger.warn("Supermemory: retention failed", { error: String(error) });
 		});
-		this.#retention = run;
+		retentionTails.set(this.session, run);
 		return this.#track(run);
 	}
 
@@ -810,26 +850,60 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		this.#unsubscribe = undefined;
 		const own = this.#own;
 		if (!own) return;
-		if (this.#writes.size === 0 && !own.outbox.flushing) {
-			this.#disposed = true;
-			own.outbox.dispose();
+		if (this.#writes.size > 0 || own.outbox.flushing) {
+			// Joins a running delivery (a retry timer's included) rather than starting a second one.
+			void this.drainOutbox();
+			const { promise, resolve } = Promise.withResolvers<void>();
+			const timer = setTimeout(resolve, DISPOSE_FLUSH_TIMEOUT_MS);
+			try {
+				await Promise.race([this.flush(), promise]);
+			} finally {
+				clearTimeout(timer);
+			}
+		}
+		this.#disposed = true;
+		own.outbox.dispose();
+		this.#recordStop();
+	}
+
+	/**
+	 * Records where automatic retention stopped (after {@link #disposed}, so no late job's cursor
+	 * follows it): the next state on this branch skips turns exchanged in between (see
+	 * {@link #resumeRetention}) and otherwise resumes, retrying a window cut off here.
+	 */
+	#recordStop(): void {
+		if (!this.automatic || !this.#config.autoRetain) return;
+		this.#followBranch();
+		const [path, start] = this.#retainedEntries();
+		const stoppedAt = countUserTurns(path, start);
+		const last = this.#pathCursor(path, start);
+		if (
+			last?.stoppedAt === stoppedAt &&
+			last.scope === this.#scope() &&
+			last.turn === this.lastRetainedTurn &&
+			last.messages === this.#retainedMessages &&
+			last.windowStart === this.#windowStart
+		) {
 			return;
 		}
-		// Joins a running delivery (a retry timer's included) rather than starting a second one.
-		void this.drainOutbox();
-		const { promise, resolve } = Promise.withResolvers<void>();
-		const timer = setTimeout(resolve, DISPOSE_FLUSH_TIMEOUT_MS);
-		try {
-			await Promise.race([this.flush(), promise]);
-		} finally {
-			clearTimeout(timer);
-			this.#disposed = true;
-			own.outbox.dispose();
-		}
+		this.#appendCursor(this.lastRetainedTurn, this.#retainedMessages, this.#windowStart, stoppedAt);
 	}
 }
 
 /** Message index of each user turn. */
 function userTurnStarts(messages: HindsightMessage[]): number[] {
 	return messages.flatMap((message, index) => (message.role === "user" ? [index] : []));
+}
+
+/** Whether the branch's last answered turn was cut short (aborted or errored), so it stays open. */
+function lastTurnUnfinished(entries: readonly SessionEntry[]): boolean {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (entry.type !== "message") continue;
+		if (entry.message.role === "user") return false;
+		if (entry.message.role === "assistant") {
+			return entry.message.stopReason === "aborted" || entry.message.stopReason === "error";
+		}
+	}
+	return false;
 }

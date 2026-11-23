@@ -66,11 +66,20 @@ export function extractMessages(entries: readonly SessionEntry[], start = 0): Hi
 export function countUserTurns(entries: readonly SessionEntry[], start = 0): number {
 	let count = 0;
 	for (let i = start; i < entries.length; i++) {
-		const entry = entries[i]!;
-		if (entry.type !== "message" || entry.message.role !== "user") continue;
-		if (hasSubstantiveContent(extractUserText(entry.message))) count++;
+		if (isUserTurn(entries[i]!)) count++;
 	}
 	return count;
+}
+
+/** Entry ids of the user turns {@link countUserTurns} counts, in order. */
+export function userTurnEntryIds(entries: readonly SessionEntry[], start = 0): string[] {
+	return entries.slice(start).flatMap(entry => (isUserTurn(entry) ? [entry.id] : []));
+}
+
+function isUserTurn(entry: SessionEntry): boolean {
+	return (
+		entry.type === "message" && entry.message.role === "user" && hasSubstantiveContent(extractUserText(entry.message))
+	);
 }
 
 function extractUserText(msg: { content: unknown }): string {
