@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added the opt-in `tree` status segment: after a rewind or on a branch it shows where the session sits in its tree (`2/3 · 3 ahead`); the terminal names `/tree` beside it, and clicking it in Tern opens `/tree`
 - Added a `column` builtin to the shell with util-linux's options, so `column -t -N a,b,c` (and `-R`, `-H`, `-O`, `-J`, `-T`, `-W`, trees) works on macOS, whose BSD `column` rejected them
 - Added `pi.registerTodoBackend()` and the `todo.backend` setting: an extension can mirror the main session's todo list into an external store, which gets the whole list after every change ([#19890](https://github.com/can1357/oh-my-pi/pull/19890) by [@Dangerboi](https://github.com/Dangerboi))
 - Added the "Todo Backend" choice to `/settings` → Tools → Todos, listing each registered todo backend with its optional `label` and `description`; a backend picked there gets the current list at once ([#19925](https://github.com/can1357/oh-my-pi/pull/19925) by [@Dangerboi](https://github.com/Dangerboi))
