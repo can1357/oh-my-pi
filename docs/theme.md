@@ -9,7 +9,7 @@ The theme system drives:
 - foreground/background color tokens used across the TUI
 - markdown styling adapters (`getMarkdownTheme()`)
 - selector/editor/settings list adapters (`getSelectListTheme()`, `getEditorTheme()`, `getSettingsListTheme()`)
-- symbol preset + symbol overrides (`unicode`, `nerd`, `ascii`)
+- symbol preset + symbol overrides (`unicode`, `unicode-noemoji`, `nerd`, `ascii`)
 - syntax highlighting colors used by native highlighter (`@oh-my-pi/pi-natives`)
 - status line segment colors
 - agent name colors in the agent hub, agent tree and Task tool rows
@@ -27,7 +27,7 @@ Top-level fields:
 - `vars` (optional; reusable color variables)
 - `export` (optional; HTML export colors)
 - `symbols` (optional)
-   - `preset` (optional: `unicode | nerd | ascii`)
+   - `preset` (optional: `unicode | unicode-noemoji | nerd | ascii`)
    - `overrides` (optional: key/value overrides for `SymbolKey`)
 
 Color values accept:
@@ -100,7 +100,8 @@ Describes the terminal the theme was made for, for hosts that paint the terminal
 
 ### `symbols` section (optional)
 
-- `symbols.preset` sets a theme-level default symbol set.
+- `symbols.preset` sets a theme-level default symbol set. The four presets are `unicode`, `unicode-noemoji`, `nerd`, and `ascii`.
+   - `unicode-noemoji` keeps every BMP text-presentation symbol (box drawing, trees, braille spinners, arrows, and marks like `✔` `⚠` `⏸`, which take the terminal's foreground color) and replaces every glyph that can render as color emoji (default emoji presentation and supplementary pictographs such as `🗑` `🖥` `🗺`, which emoji fonts colorize even in text presentation) with its ASCII counterpart. Rows of icons fall back together: when one settings tab icon needs its ASCII label, every tab uses one (`[A]`, `[M]`, `[I]`, …) so a lone monochrome glyph does not sit beside them. The slash-command palette shows no icon column.
 - `symbols.overrides` can override individual `SymbolKey` values.
 - `symbols.spinnerFrames` overrides the loading spinner frames. Accepts either a flat `string[]` (applied to both spinner types) or an object `{ "status"?: string[], "activity"?: string[] }` to override each type independently. Any type not specified falls back to the symbol preset's default frames. `status` drives the ~12.5fps spinner used by loaders and tool-execution indicators; `activity` drives the ~30fps spinner used by markdown progress bars and similar high-frequency UI.
 
@@ -110,7 +111,7 @@ Runtime precedence:
 2. theme JSON `symbols.preset`
 3. fallback `"unicode"`
 
-In interactive mode, a successful Glyph Protocol handshake upgrades a Unicode preset whose setting provenance is `default` to Nerd Font icons without changing the saved setting. An explicitly configured preset, including `unicode`, is not upgraded. A live Tern native surface forces the Nerd preset process-locally and restores the user's preset when it closes.
+In interactive mode, a successful Glyph Protocol handshake upgrades a Unicode preset whose setting provenance is `default` to Nerd Font icons without changing the saved setting. An explicitly configured preset, including `unicode`, is not upgraded. A live Tern native surface forces the Nerd preset process-locally and restores the user's preset when it closes; an explicit `unicode-noemoji` setting wins over that forced preset, keeping its glyphs and collapsed slash-command icon column.
 
 Invalid override keys are ignored and logged (`logger.debug`).
 
@@ -374,7 +375,7 @@ Use this workflow:
    - status line readability
    - thinking level border changes
    - bash/python mode border colors
-5. Validate both symbol presets if your theme depends on glyph width/appearance.
+5. Validate every symbol preset if your theme depends on glyph width/appearance.
 
 ## Real constraints and caveats
 

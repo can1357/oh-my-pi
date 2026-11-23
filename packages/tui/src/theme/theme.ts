@@ -137,7 +137,8 @@ export interface ThemeChangeEvent {
 
 var currentSymbolPresetOverride: SymbolPreset | undefined;
 // Process-local preset forced while a Tern Surface Protocol surface is live;
-// wins over the user's preset and is never persisted.
+// wins over the user's preset unless that preset is the explicit no-emoji
+// opt-out, and is never persisted.
 var nativeSymbolPreset: SymbolPreset | undefined;
 var currentColorBlindMode: boolean = false;
 var themeWatcher: fs.FSWatcher | undefined;
@@ -151,8 +152,14 @@ var themeLoadRequestId: number = 0;
 let themeEpoch = 0;
 
 function getCurrentThemeOptions(): CreateThemeOptions {
+	// `unicode-noemoji` is an explicit opt-out of color emoji and of the
+	// slash-command icon column; the TSP `nerd` override must not undo it.
+	const symbolPresetOverride =
+		currentSymbolPresetOverride === "unicode-noemoji"
+			? currentSymbolPresetOverride
+			: (nativeSymbolPreset ?? currentSymbolPresetOverride);
 	return {
-		symbolPresetOverride: nativeSymbolPreset ?? currentSymbolPresetOverride,
+		symbolPresetOverride,
 		colorBlindMode: currentColorBlindMode,
 	};
 }
@@ -363,8 +370,10 @@ export function getSymbolPresetOverride(): SymbolPreset | undefined {
 /**
  * Force `preset` while a Tern Surface Protocol surface is live (the terminal's
  * font carries every Nerd Font glyph, so icons need no Glyph Protocol
- * registration); `undefined` restores the user's preset. Process-local and
- * never persisted. Rebuilds the active theme synchronously so the next frame
+ * registration); `undefined` restores the user's preset. The explicit
+ * `unicode-noemoji` choice wins over `nerd`, so a TSP surface cannot restore
+ * emoji or the slash-command icon column behind the user's back. Process-local
+ * and never persisted. Rebuilds the active theme synchronously so the next frame
  * already uses it, and notifies theme listeners like a preset change. Returns
  * whether the active theme was rebuilt (callers invalidate render caches).
  */

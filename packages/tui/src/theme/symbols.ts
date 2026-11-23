@@ -2,7 +2,10 @@
 // Symbol Presets
 // ============================================================================
 
-export type SymbolPreset = "unicode" | "nerd" | "ascii";
+/** Every symbol preset, in settings order: the source for {@link SymbolPreset} and the predicates below. */
+export const SYMBOL_PRESET_IDS = ["unicode", "unicode-noemoji", "nerd", "ascii"] as const;
+
+export type SymbolPreset = (typeof SYMBOL_PRESET_IDS)[number];
 
 /**
  * All available symbol keys organized by category.
@@ -1514,19 +1517,64 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"key.right": "Right",
 };
 
+/**
+ * Unicode symbols with every glyph that can render as color emoji swapped for
+ * its ASCII counterpart: default emoji presentation, and supplementary
+ * pictographs (U+1F000+, e.g. 🗑 🖥 🗺), which emoji fonts colorize even in
+ * text presentation. BMP marks and pictographs keep their unicode form:
+ * arrows, ✔, ⚠, ⏸ and friends take the terminal's foreground color and read
+ * as geometry next to the rest of the unicode set.
+ */
+const EMOJI = /\p{Emoji_Presentation}/u;
+const PICTOGRAPH = /\p{Extended_Pictographic}/u;
+
+function rendersInColor(value: string): boolean {
+	if (EMOJI.test(value)) return true;
+	for (const ch of value) {
+		const cp = ch.codePointAt(0);
+		if (cp !== undefined && cp >= 0x1f000 && PICTOGRAPH.test(ch)) return true;
+	}
+	return false;
+}
+
+const UNICODE_NOEMOJI_SYMBOLS = Object.fromEntries(
+	(Object.keys(UNICODE_SYMBOLS) as SymbolKey[]).map(key => [
+		key,
+		rendersInColor(UNICODE_SYMBOLS[key]) ? ASCII_SYMBOLS[key] : UNICODE_SYMBOLS[key],
+	]),
+) as SymbolMap;
+
+/**
+ * Icon rows read as one unit: when any member falls back to its ASCII label,
+ * the whole row does. The row is derived from the `tab.*` keys themselves, so
+ * icons a future tab declares are covered automatically.
+ */
+const NOEMOJI_ICON_ROWS: readonly (readonly SymbolKey[])[] = [
+	(Object.keys(UNICODE_SYMBOLS) as SymbolKey[]).filter(key => key.startsWith("tab.")),
+];
+
+for (const row of NOEMOJI_ICON_ROWS) {
+	if (!row.some(key => UNICODE_NOEMOJI_SYMBOLS[key] !== UNICODE_SYMBOLS[key])) continue;
+	for (const key of row) UNICODE_NOEMOJI_SYMBOLS[key] = ASCII_SYMBOLS[key];
+}
+
 export const SYMBOL_PRESETS: Record<SymbolPreset, SymbolMap> = {
 	unicode: UNICODE_SYMBOLS,
+	"unicode-noemoji": UNICODE_NOEMOJI_SYMBOLS,
 	nerd: NERD_SYMBOLS,
 	ascii: ASCII_SYMBOLS,
 };
 
 export type SpinnerType = "status" | "activity";
 
+const UNICODE_SPINNER_FRAMES: Record<SpinnerType, string[]> = {
+	status: ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"],
+	activity: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+};
+
 export const SPINNER_FRAMES: Record<SymbolPreset, Record<SpinnerType, string[]>> = {
-	unicode: {
-		status: ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"],
-		activity: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
-	},
+	unicode: UNICODE_SPINNER_FRAMES,
+	"unicode-noemoji": UNICODE_SPINNER_FRAMES,
 	nerd: {
 		status: ["󱑖", "󱑋", "󱑌", "󱑍", "󱑎", "󱑏", "󱑐", "󱑑", "󱑒", "󱑓", "󱑔", "󱑕"],
 		activity: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
@@ -1561,12 +1609,12 @@ export function normalizeSpinnerFramesOverride(
  * Get available symbol presets.
  */
 export function getAvailableSymbolPresets(): SymbolPreset[] {
-	return ["unicode", "nerd", "ascii"];
+	return [...SYMBOL_PRESET_IDS];
 }
 
 /**
  * Check if a string is a valid symbol preset.
  */
 export function isValidSymbolPreset(preset: string): preset is SymbolPreset {
-	return preset === "unicode" || preset === "nerd" || preset === "ascii";
+	return (SYMBOL_PRESET_IDS as readonly string[]).includes(preset);
 }

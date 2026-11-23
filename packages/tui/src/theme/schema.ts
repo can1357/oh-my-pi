@@ -83,7 +83,7 @@ export interface ThemeJson {
 		ansi?: ColorValue[];
 	};
 	symbols?: {
-		preset?: "unicode" | "nerd" | "ascii";
+		preset?: "unicode" | "unicode-noemoji" | "nerd" | "ascii";
 		overrides?: Record<string, string>;
 		spinnerFrames?: SpinnerFramesOverride;
 	};
