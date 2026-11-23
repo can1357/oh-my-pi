@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Selective commits now leave HEAD and staging unchanged if the shared index stays locked. Retry once the lock is released ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
+
 ## [19.1.1] - 2026-11-23
 
 ### Breaking Changes
