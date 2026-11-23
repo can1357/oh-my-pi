@@ -495,11 +495,17 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", primarySelector);
 		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		const hops: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") hops.push(`${event.from} -> ${event.to}`);
+		});
 
 		await session.prompt("Recover past the entry its usage reports exhausted");
 		await session.waitForIdle();
 
 		expect(fetched).toContain(depletedModel.id);
+		// The walk itself skips the depleted entry: its only hop lands on the next one.
+		expect(hops).toEqual([`${primarySelector} -> ${fallbackSelector}`]);
 		expect(requestedModels).toEqual([primarySelector, fallbackSelector]);
 		expect(session.model?.id).toBe(fallbackModel.id);
 	});
