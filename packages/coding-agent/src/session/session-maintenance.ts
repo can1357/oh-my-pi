@@ -5997,9 +5997,13 @@ export class SessionMaintenance {
 					return COMPACTION_CHECK_NONE;
 				}
 				if (!handoffDocument) {
+					// Without a notice the user only sees the *next* method's warning and
+					// reads the handoff as skipped rather than tried and empty (#19603).
+					const handoffBlocker = "Auto-handoff returned no document; trying the next preferred compaction method.";
 					logger.warn("Auto-handoff returned no document; trying next preferred compaction method", {
 						reason,
 					});
+					this.#host.emitNotice("warning", handoffBlocker, "compaction");
 					await this.#emitLifecycleEvent(
 						{
 							type: "auto_compaction_end",
@@ -6007,7 +6011,7 @@ export class SessionMaintenance {
 							result: undefined,
 							aborted: false,
 							willRetry: false,
-							errorMessage: "Auto-handoff returned no document; trying the next preferred compaction method.",
+							errorMessage: handoffBlocker,
 						},
 						options.detachPostCommit === true,
 					);

@@ -52,6 +52,8 @@ describe("auto-compaction fallback after a failed shake", () => {
 	let startedActions: string[];
 	let handoffCalls: number;
 	let shakeCalls: number;
+	/** `warning` notices the pass surfaced to the user, in order. */
+	let warningNotices: string[];
 
 	function createMaintenance(
 		options: { handoffDocument?: string; methodOrder?: CompactionMethod[] } = {},
@@ -94,7 +96,9 @@ describe("auto-compaction fallback after a failed shake", () => {
 			emitSessionEvent: async (event: { type: string; action?: string }) => {
 				if (event.type === "auto_compaction_start" && event.action) startedActions.push(event.action);
 			},
-			emitNotice: () => {},
+			emitNotice: (level: "info" | "warning" | "error", message: string) => {
+				if (level === "warning") warningNotices.push(message);
+			},
 			scheduleAgentContinue: () => {},
 			scheduleCompactionContinuation: () => false,
 			persistTurnMessagesForMidRunCompaction: async () => false,
@@ -159,6 +163,7 @@ describe("auto-compaction fallback after a failed shake", () => {
 		startedActions = [];
 		handoffCalls = 0;
 		shakeCalls = 0;
+		warningNotices = [];
 		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
 			summary: "soft summary",
 			shortSummary: undefined,
@@ -172,19 +177,21 @@ describe("auto-compaction fallback after a failed shake", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("walks the default order once and does not retry the handoff that already failed", async () => {
-		// #19603 reported the sequence handoff -> shake -> soft as "shake skipped my
-		// configured handoff". The pass scans the configured order from the top, so
-		// shake is only ever reached after handoff ran: the method a failed shake
-		// skips is the one that already failed, never an untried preference. A
-		// regression that re-entered the order from index 0 would call handoff twice
-		// — the user would pay for a second handoff side request per fallback.
+	it("warns that the auto-handoff produced no document before falling through to shake", async () => {
+		// #19603: only shake's fallback warning reached the user, so a handoff that
+		// ran and returned nothing looked like a preference the order had skipped.
+		// The pass scans the configured order from the top, so shake is reached only
+		// after handoff failed; the user must be told that, and the failed handoff
+		// must not be charged a second side request on the way to the soft summary.
 		maintenance = createMaintenance({ handoffDocument: undefined });
 
 		await maintenance.runAutoCompaction("threshold", false, {
 			triggerContextTokens: TRIGGER_TOKENS,
 		});
 
+		expect(warningNotices).toContain(
+			"Auto-handoff returned no document; trying the next preferred compaction method.",
+		);
 		expect(startedActions).toEqual(["handoff", "shake", "context-full"]);
 		expect(handoffCalls).toBe(1);
 		expect(shakeCalls).toBe(1);
