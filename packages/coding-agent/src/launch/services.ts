@@ -6,7 +6,7 @@ import { formatDuration, replaceTabs } from "@oh-my-pi/pi-tui/render/render-util
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { compileNotifyPattern } from "../async/notify";
-import { canonicalProjectDir, DaemonTimeoutError, daemonClient } from "../daemon/client";
+import { canonicalProjectDir, DaemonTimeoutError, daemonClient, probeDaemon } from "../daemon/client";
 import { daemonDir, unitLogDir } from "../daemon/paths";
 import {
 	DAEMON_OUTPUT_PATTERN_FLAGS,
@@ -198,6 +198,74 @@ function subscribe(session: ToolSession, client: DaemonClient): void {
 	// queued in the daemon for replay when that session id re-subscribes. Its services' `notify`
 	// matches are not kept: they reach it again once it does.
 	session.registerSessionChangeCallback?.(detach);
+}
+
+/**
+ * Retake the leases of this session's named services that outlived its previous process: an
+ * in-place `/restart` resumes the same session id in a new process, whose connection holds no lease.
+ * The daemon keeps a unit whose lease holder disconnected only for its reconnect grace, then its
+ * idle policy stops it, so the resumed session must claim them back. Never starts a daemon; a
+ * service nobody claims (a normal exit, a restart that never comes back) still stops as before.
+ */
+export async function reclaimServices(session: ToolSession): Promise<void> {
+	const owner = serviceOwner(session);
+	if (!owner || !cfgLaunchEnabled.get(session.settings)) return;
+	let disposed = false;
+	const unregister = session.registerDisposeCallback?.(() => {
+		disposed = true;
+	});
+	try {
+		const probe = await probeDaemon();
+		if (!probe) return;
+		let orphaned: UnitSnapshot[];
+		try {
+			// Every scope: a service keeps the project it started in after the session `/move`s.
+			const { units } = await probe.request({ op: "list", kind: SERVICE_KIND });
+			orphaned = units.filter(
+				unit => unit.owner === owner && unit.policy.hold === "leases" && !TERMINAL_STATES[unit.state],
+			);
+		} finally {
+			probe.close();
+		}
+		if (orphaned.length === 0 || disposed) return;
+		const client = await daemonClient();
+		await Promise.all(orphaned.map(unit => reclaimService(session, client, owner, unit, () => disposed)));
+	} finally {
+		unregister?.();
+	}
+}
+
+async function reclaimService(
+	session: ToolSession,
+	client: DaemonClient,
+	owner: string,
+	unit: UnitSnapshot,
+	disposed: () => boolean,
+): Promise<void> {
+	try {
+		if (disposed()) return;
+		const { unit: claimed, lease } = await client.request({
+			op: "open",
+			kind: SERVICE_KIND,
+			scope: unit.scope,
+			key: unit.key,
+			owner,
+			awaitReady: false,
+		});
+		// `open` adopts whatever runs under the name now: never hold another session's
+		// replacement, nor anything for a session disposed meanwhile.
+		if (claimed.id !== unit.id || claimed.owner !== owner || disposed()) {
+			if (lease !== undefined) await client.request({ op: "release", lease });
+			return;
+		}
+		subscribe(session, client);
+		track(session, claimed);
+	} catch (error) {
+		logger.warn("Failed to reclaim a service after a restart", {
+			service: unit.key,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 }
 
 async function request<O extends DaemonOp>(

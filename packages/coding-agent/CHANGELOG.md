@@ -10,6 +10,7 @@
 
 - `!command` values in `models.yml` (`apiKey`, `headers`) can now read variables defined in `~/.env` or `~/.omp/agent/.env` on macOS and Windows; previously the command saw an empty value.
 - The bash tool's visualization now draws a script run by `bash file.sh`, `source`, or `eval "$var"` as one block under the command that ran it, instead of repeating a “built at runtime” header above every line of the script.
+- Fixed named bash services being killed by `/restart`: the resumed session now reclaims its named services from the daemon, so they keep running across the in-place restart; a normal exit, an explicit stop, or a restart that never comes back still stops them ([#16515](https://github.com/can1357/oh-my-pi/pull/16515) by [@Komzpa](https://github.com/Komzpa))
 
 ## [19.1.1] - 2026-11-23
 
