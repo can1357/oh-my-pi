@@ -111,6 +111,11 @@ export async function loadBabelParser(): Promise<typeof BabelParser> {
 	return babelParser;
 }
 
+/** Return `@babel/parser` if a prior async path already loaded it. */
+export function getLoadedBabelParser(): typeof BabelParser | undefined {
+	return babelParser;
+}
+
 type ParsedProgram = {
 	program: { body: ReadonlyArray<BabelProgramNode>; directives?: ReadonlyArray<{ start: number; end: number }> };
 };
