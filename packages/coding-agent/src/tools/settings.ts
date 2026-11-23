@@ -349,6 +349,9 @@ export const cfgToolsApprovalMode = register({
 	},
 });
 
+// ACP sessions: allow rules never skip the client's permission prompt (set by `--acp-ask-all`).
+export const cfgToolsAcpAskAll = register({ id: "tools.acpAskAll", type: "boolean", default: false });
+
 // Folders where every action asks, in every approval mode and whatever was remembered.
 export const cfgToolsRestrictedFolders = register({
 	id: "tools.restrictedFolders",

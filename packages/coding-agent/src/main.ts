@@ -162,7 +162,7 @@ import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "./plan-mode/settings";
 import { cfgAdvisorEnabled } from "./advisor/settings";
 import { syncRelayInstallsOnStartup } from "./tools/browser/relay/installs";
 import { claimTerminal } from "./tools/browser/terminal-owner";
-import { cfgAsyncPrintWake, cfgLaunchPersist, cfgToolsApprovalMode } from "./tools/settings";
+import { cfgAsyncPrintWake, cfgLaunchPersist, cfgToolsAcpAskAll, cfgToolsApprovalMode } from "./tools/settings";
 import {
 	cfgAutocompleteMaxVisible,
 	cfgAutoResume,
@@ -1734,7 +1734,8 @@ export async function buildSessionOptions(
 			parsed.systemPromptTemplate !== undefined ||
 			parsed.appendSystemPrompt !== undefined ||
 			parsed.tools !== undefined ||
-			parsed.noTools === true;
+			parsed.noTools === true ||
+			parsed.strictTools === true;
 		if (!forkCacheShapeChanged && header?.providerPromptCacheKey) {
 			options.providerPromptCacheKey = header.providerPromptCacheKey;
 			options.providerPromptCacheKeySource = "fork";
@@ -1906,6 +1907,7 @@ export async function buildSessionOptions(
 	} else if (parsed.tools) {
 		options.toolNames = parsed.tools;
 	}
+	if (parsed.strictTools) options.restrictToolNames = true;
 
 	if (parsed.noLsp) {
 		options.enableLsp = false;
@@ -2147,6 +2149,7 @@ export async function runRootCommand(
 			// setup-time checks (e.g. #wrapToolForAcpPermission) also see the yolo intent.
 			cfgToolsApprovalMode.override(settingsInstance, "yolo");
 		}
+		if (parsedArgs.acpAskAll) cfgToolsAcpAskAll.override(settingsInstance, true);
 		// Runtime overrides (not persisted): the session's cost gate reads its thresholds from settings.
 		if (parsedArgs.warnCost !== undefined) cfgSessionWarnCost.override(settingsInstance, parsedArgs.warnCost);
 		if (parsedArgs.maxCost !== undefined) cfgSessionMaxCost.override(settingsInstance, parsedArgs.maxCost);

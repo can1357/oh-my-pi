@@ -343,6 +343,39 @@ it("explicit yolo still gates tools whose per-tool policy requires a prompt", as
 	expect(bashTool.executeCalls).toBe(1);
 });
 
+it("tools.acpAskAll asks the client even when yolo, a user policy, or a pattern allows the call", async () => {
+	const settingsOverrides = {
+		"tools.approvalMode": "yolo",
+		"tools.approval": { bash: "allow", delete: "allow" },
+		"bash.patterns": [{ match: "gh *", approval: "allow" }],
+		"tools.acpAskAll": true,
+	};
+	const settings = Settings.isolated(settingsOverrides);
+	const bridge = makeBridge({ outcome: "selected", optionId: "reject_once", kind: "reject_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	const bashTool = makeFakeTool("bash");
+	bashTool.approval = new BashTool({ ...makeToolSession(bridge), settings }).approval;
+	const wrappedBash = new ExtensionToolWrapper(bashTool, noUiRunner()) as unknown as AgentTool;
+	const deleteTool = makeFakeTool("delete");
+	session = await createSession([wrappedBash, deleteTool], bridge, settingsOverrides);
+	await session.setActiveToolsByName(["bash", "delete"]);
+	const [gatedBash, gatedDelete] = ["bash", "delete"].map(name =>
+		session!.agent.state.tools.find(tool => tool.name === name)!,
+	);
+	const ctx = { settings } as never;
+
+	await expect(
+		gatedBash.execute("call-1", { command: "gh pr merge 1" }, undefined, undefined as never, ctx),
+	).rejects.toThrow(/rejected by user/);
+	await expect(gatedDelete.execute("call-2", { path: "a.txt" }, undefined, undefined as never, ctx)).rejects.toThrow(
+		/rejected by user/,
+	);
+
+	expect(permissionSpy).toHaveBeenCalledTimes(2);
+	expect(bashTool.executeCalls).toBe(0);
+	expect(deleteTool.executeCalls).toBe(0);
+});
+
 it("rejects intercepted bash command before invoking ACP requestPermission", async () => {
 	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
 	const permissionSpy = spyOn(bridge, "requestPermission");

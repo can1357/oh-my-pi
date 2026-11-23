@@ -92,6 +92,7 @@ import {
 } from "./settings";
 import { cfgStartupQuiet } from "../modes/settings";
 import {
+	cfgToolsAcpAskAll,
 	cfgToolsApproval,
 	cfgToolsApprovalMode,
 	cfgToolsCommandDocs,
@@ -1237,6 +1238,8 @@ export class SessionTools {
 	 * and critical overrides. The schema's implicit yolo default retains ACP's
 	 * client permission gate for unmatched bash commands; explicitly selecting
 	 * yolo opts out. Other tools keep their existing ACP gate behavior.
+	 * `tools.acpAskAll` (`--acp-ask-all`) makes every gated call ask the client:
+	 * neither explicit yolo nor an allow policy or pattern skips the prompt.
 	 */
 	#wrapToolForAcpPermission<T extends AgentTool>(tool: T): T {
 		const bridge = this.#host.clientBridge();
@@ -1245,7 +1248,8 @@ export class SessionTools {
 		if (PERMISSION_REQUIRED_TOOLS[tool.name] !== true) return tool;
 		// Default-config ACP sessions still ask for executable calls even though
 		// the schema defaults to yolo; explicit yolo is an intentional opt-in.
-		if (tool.name !== "bash" && this.#isExplicitAutoApproveMode()) {
+		const askAll = cfgToolsAcpAskAll.get(this.#host.settings);
+		if (tool.name !== "bash" && !askAll && this.#isExplicitAutoApproveMode()) {
 			const userPolicies: Record<string, unknown> = cfgToolsApproval.get(this.#host.settings);
 			const toolPolicy = userPolicies[tool.name];
 			if (!toolPolicy || toolPolicy === "allow") return tool;
@@ -1280,7 +1284,7 @@ export class SessionTools {
 							ctx,
 						);
 						if (resolved.policy === "deny") throw denyError(resolved, target.name);
-						if (resolved.policy === "allow") {
+						if (resolved.policy === "allow" && !askAll) {
 							return await target.execute(toolCallId, args as never, signal, onUpdate, ctx as never);
 						}
 						// A prompt forced by a critical command or an explicit pattern
