@@ -7,6 +7,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgCycleOrder } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
@@ -458,7 +459,9 @@ describe("InteractiveMode plan review rendering", () => {
 		if (!slow || !def) throw new Error("Expected sonnet + opus to exist in registry");
 
 		session.settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
-		session.settings.setModelRole("slow", "anthropic/claude-opus-4-5");
+		session.settings.setModelRole("pre-plan", "anthropic/claude-opus-4-5");
+		cfgCycleOrder.set(session.settings, ["pre-plan", "default", "slow"]);
+		session.settings.setModelRole("slow", "anthropic/claude-sonnet-4-5");
 		session.settings.setModelRole("plan", "anthropic/claude-sonnet-4-5");
 
 		const planFilePath = "local://PLAN.md";
@@ -476,10 +479,7 @@ describe("InteractiveMode plan review rendering", () => {
 		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 		let answered: boolean | undefined;
 		const recorder = planReviewRecorder("remote", (event, ctx) => {
-			answered = ctx.resolvePlanReview(event.reviewId, "keep", { role: "slow" });
-			const overlay = mode.ui.getFocused() as PlanReviewOverlay;
-			overlay.handleInput("\x1b[C");
-			overlay.handleInput("\x1b[D");
+			answered = ctx.resolvePlanReview(event.reviewId, "keep", { role: "pre-plan" });
 		});
 		await loadExtensions(recorder.extension);
 
@@ -491,11 +491,54 @@ describe("InteractiveMode plan review rendering", () => {
 		);
 		expect(answered).toBe(true);
 		expect(requested?.tiers).toEqual([
-			{ role: "default", provider: "anthropic", model: def.id },
-			{ role: "slow", provider: "anthropic", model: slow.id },
+			{ target: "pre-plan", provider: "anthropic", model: def.id },
+			{ target: "role", role: "pre-plan", provider: "anthropic", model: slow.id },
+			{ target: "role", role: "default", provider: "anthropic", model: def.id },
+			{ target: "role", role: "slow", provider: "anthropic", model: def.id },
 		]);
 		expect(resolved).toMatchObject({ reviewId: requested?.reviewId, choice: "keep", by: "extension" });
 		expect(session.model?.id).toBe(slow.id);
+	});
+	it("defaults review approval to the pre-plan model and thinking level, distinct from a matching role", async () => {
+		const def = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!def) throw new Error("Expected sonnet to exist in registry");
+		session.setThinkingLevel(ThinkingLevel.High);
+		session.settings.setModelRole("default", "anthropic/claude-sonnet-4-5:xhigh");
+		session.settings.setModelRole("plan", "anthropic/claude-sonnet-4-5:xhigh");
+
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nRun this on the original target.");
+		await mode.handlePlanModeCommand();
+		vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+
+		const { promise: requestedPromise, resolve: resolveRequested } =
+			Promise.withResolvers<PlanReviewRequestedEvent>();
+		const recorder = planReviewRecorder("pre-plan-default", event => resolveRequested(event));
+		await loadExtensions(recorder.extension);
+		const approval = mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		const requested = await requestedPromise;
+		expect(requested.tiers?.slice(0, 2)).toEqual([
+			{ target: "pre-plan", provider: "anthropic", model: def.id, thinkingLevel: ThinkingLevel.High },
+			{
+				target: "role",
+				role: "default",
+				provider: "anthropic",
+				model: def.id,
+				thinkingLevel: ThinkingLevel.XHigh,
+			},
+		]);
+		const answered = mode.resolvePlanReview(requested.reviewId, "keep");
+		expect(answered).toBe(true);
+		await approval;
+		await recorder.resolved;
+
+		expect(session.model?.id).toBe(def.id);
+		expect(session.configuredThinkingLevel()).toBe(ThinkingLevel.High);
 	});
 
 	it("refuses a remote approval naming no selectable tier and keeps the review open", async () => {
@@ -1518,32 +1561,84 @@ describe("InteractiveMode plan review rendering", () => {
 		return planFilePath;
 	}
 
-	it("re-measures keep-context approval as the slider moves between context tiers", async () => {
+	it("re-measures keep-context approval across pre-plan and role targets", async () => {
 		const planFilePath = await openTieredPlanReview();
+		let prePlanKeepLabel: string | undefined;
+		let prePlanKeepDisabled: boolean | undefined;
+		let keepLabelOnDefault: string | undefined;
 		let keptOnDefault: boolean | undefined;
 		let keepLabelOnSlow: string | undefined;
-		let keptBackOnDefault: boolean | undefined;
 		vi.spyOn(mode.ui, "showOverlay").mockImplementation(component => {
 			const overlay = component as PlanReviewOverlay;
+			prePlanKeepLabel = mode.getPendingPlanReview()?.options.find(option => option.id === "keep")?.label;
+			prePlanKeepDisabled = mode.getPendingPlanReview()?.options.find(option => option.id === "keep")?.disabled;
+			overlay.handleInput("\x1b[C");
+			keepLabelOnDefault = mode.getPendingPlanReview()?.options.find(option => option.id === "keep")?.label;
 			keptOnDefault = overlay.selectOption("keep");
 			overlay.handleInput("\x1b[C");
 			keepLabelOnSlow = mode.getPendingPlanReview()?.options.find(option => option.id === "keep")?.label;
-			overlay.handleInput("\x1b[D");
-			keptBackOnDefault = overlay.selectOption("keep");
-			overlay.handleInput("\x1b[C");
 			overlay.selectOption("keep");
 			return { hide: vi.fn() } as never;
 		});
 
 		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
 
+		expect(prePlanKeepLabel).toBe(
+			`Approve and keep context (~${compactNumber(300_000)} / ${compactNumber(200_000)})`,
+		);
+		expect(prePlanKeepDisabled).toBe(true);
+		expect(keepLabelOnDefault).toBe(
+			`Approve and keep context (~${compactNumber(300_000)} / ${compactNumber(200_000)})`,
+		);
 		expect(keptOnDefault).toBe(false);
 		expect(keepLabelOnSlow).toBe(
 			`Approve and keep context (~${compactNumber(300_000)} / ${compactNumber(1_000_000)})`,
 		);
-		expect(keptBackOnDefault).toBe(false);
 		expect(session.model?.id).toBe("claude-opus-4-6");
 		expect(session.getPlanModeState()?.enabled).not.toBe(true);
+	});
+
+	it("measures the initial keep row against the displayed role when no target or default exists", async () => {
+		const slow = session.modelRegistry.find("anthropic", "claude-opus-4-6");
+		const smol = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!slow || !smol) throw new Error("Expected opus-4-6 and sonnet-4-5");
+		// Two roles with different windows, no plan role (no saved target) and no default.
+		session.settings.setModelRole("slow", "anthropic/claude-opus-4-6");
+		session.settings.setModelRole("smol", "anthropic/claude-sonnet-4-5");
+		cfgCycleOrder.set(session.settings, ["slow", "smol"]);
+		const planFilePath = "local://PLAN.md";
+		await Bun.write(
+			resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			}),
+			"# Plan\n\nMeasure the first role.",
+		);
+		await mode.handlePlanModeCommand();
+		const tokens = 300_000;
+		vi.spyOn(session, "getContextUsage").mockImplementation(options => {
+			const contextWindow = options?.contextWindow ?? 0;
+			return { tokens, contextWindow, percent: (tokens / contextWindow) * 100 };
+		});
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		let keepMeta: string | undefined;
+		let shownIndex: number | undefined;
+		let shownLabels: string[] = [];
+		vi.spyOn(mode, "showPlanReview").mockImplementation(
+			async (_planContent, _title, choices, _dialogOptions, extra?: { slider?: HookSelectorSlider }) => {
+				keepMeta = choices.find(choice => choice.id === "keep")?.meta;
+				shownIndex = extra?.slider?.index;
+				shownLabels = extra?.slider?.segments.map(segment => segment.label) ?? [];
+				return "keep";
+			},
+		);
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+
+		// The slider starts at the normalized index 0 (slow, 1m), not the live model.
+		expect(shownLabels).toEqual(["slow", "smol"]);
+		expect(shownIndex).toBe(0);
+		expect(keepMeta).toBe(`~${compactNumber(300_000)} / ${compactNumber(1_000_000)}`);
 	});
 
 	it("judges a remote keep-context approval against the tier it names", async () => {
@@ -1921,6 +2016,8 @@ describe("InteractiveMode plan review rendering", () => {
 		// record a previous-model state for #exitPlanMode to restore. slow differs,
 		// so an early application would be clobbered by that restore.
 		session.settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
+		session.settings.setModelRole("pre-plan", "anthropic/claude-opus-4-5");
+		cfgCycleOrder.set(session.settings, ["pre-plan", "default", "slow"]);
 		session.settings.setModelRole("slow", "anthropic/claude-opus-4-5");
 		session.settings.setModelRole("plan", "anthropic/claude-sonnet-4-5");
 
@@ -1960,7 +2057,7 @@ describe("InteractiveMode plan review rendering", () => {
 			title: "PLAN",
 		});
 
-		expect(observedSegments).toEqual(["default", "slow"]);
+		expect(observedSegments).toEqual(["pre-plan", "pre-plan (role)", "default", "slow"]);
 		// The load-bearing assertion: the approved plan executes on the operator's
 		// selected tier, not the restored default.
 		expect(session.model?.id).toBe(slow.id);
@@ -2098,17 +2195,14 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
 	});
 
-	it("falls back to the pre-plan model when only plan is configured and the slider is hidden", async () => {
+	it("defaults the lone configured plan role review to the pre-plan target", async () => {
 		const sonnet = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		const opus = session.modelRegistry.find("anthropic", "claude-opus-4-5");
 		if (!sonnet || !opus) throw new Error("Expected sonnet + opus to exist in registry");
 		expect(session.model?.id).toBe(sonnet.id);
 
-		// Only the plan role is configured. getRoleModelCycle synthesizes a
-		// singleton `default` entry from the active plan model (opus), so the
-		// slider is hidden — the operator made no selection and approval must
-		// fall through to the pre-plan sonnet restore instead of pinning the
-		// lone plan tier.
+		// A plan-only configuration must not expose the cycle's synthetic default
+		// on the active plan model as if it were a configured execution role.
 		session.settings.setModelRole("plan", "anthropic/claude-opus-4-5");
 
 		const planFilePath = "local://PLAN.md";
@@ -2116,7 +2210,7 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nNo slider, restore default.");
+		await Bun.write(resolvedPlanPath, "# Plan\n\nKeep the original target.");
 
 		await mode.handlePlanModeCommand();
 		expect(session.model?.id).toBe(opus.id);
