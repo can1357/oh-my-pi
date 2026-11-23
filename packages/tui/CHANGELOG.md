@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the cursor drifting left while typing Korean in Paradev terminals ([#20246](https://github.com/can1357/oh-my-pi/pull/20246) by [@HuitaePark](https://github.com/HuitaePark))
+
 ## [19.1.1] - 2026-11-23
 
 ### Added
