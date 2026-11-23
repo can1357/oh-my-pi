@@ -23,6 +23,10 @@
 - Fixed a standalone binary loading the native addon a previous build of the same version extracted, instead of its own, when both addons happened to be the same size: each build now extracts its addon to its own directory named by the addon's content hash ([#19346](https://github.com/can1357/oh-my-pi/pull/19346) by [@HeyItsGilbert](https://github.com/HeyItsGilbert))
 - Fixed the macOS `computer` tool's background taps and scrolls on iPhone Mirroring being dropped after a takeover tap had activated its window ([#17756](https://github.com/can1357/oh-my-pi/pull/17756) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Removed
+
+- Removed the `[omp-natives] … but this checkout is @…` warning a source checkout printed at startup when its native addon came from another release; calling a symbol the old addon lacks still fails with an error naming the addon and `bun run build:native`
+
 ## [19.1.0] - 2026-11-21
 
 ### Added
