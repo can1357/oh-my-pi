@@ -156,7 +156,7 @@ it("retains only new /tan turns in a separate Hindsight document", async () => {
 	const documents = new Map<string, string>();
 	const parentRetained = Promise.withResolvers<void>();
 	const forkRetained = Promise.withResolvers<void>();
-	vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+	const captureRetain = async (input: string | URL | Request, init?: RequestInit | BunFetchRequestInit) => {
 		const url = String(input);
 		if (!url.startsWith(`${apiUrl}/`)) throw new Error(`Unexpected request: ${url}`);
 		if (url.endsWith("/memories") && init?.method === "POST") {
@@ -167,7 +167,9 @@ it("retains only new /tan turns in a separate Hindsight document", async () => {
 			}
 		}
 		return Response.json({});
-	});
+	};
+	const fetchMock = Object.assign(captureRetain, { preconnect: globalThis.fetch.preconnect });
+	vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
 	let reply = "The parent deploy host is alpha-7.";
 	const mock = createMockModel({ handler: () => ({ content: [{ type: "text", text: reply }] }) });
 	const realStreamFactory = settingsStream.createSettingsAwareStreamFn;
