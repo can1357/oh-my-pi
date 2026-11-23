@@ -292,29 +292,25 @@ const statusSegment: StatusLineSegment = {
 	},
 };
 
-/** Display name of the active model (`Claude ` prefix dropped), or the id of the fallback serving as it. */
-function modelDisplayName(ctx: SegmentContext, fallbackId: string | undefined): string {
+/** Display name of the active model (`Claude ` prefix dropped). */
+function modelDisplayName(ctx: SegmentContext): string {
 	const state = ctx.session.state;
-	const modelName = fallbackId ?? (state.model?.name || state.model?.id || "no-model");
+	const modelName = state.model?.name || state.model?.id || "no-model";
 	return modelName.startsWith("Claude ") ? modelName.slice(7) : modelName;
 }
 
 /**
- * Id (provider dropped) of the current model when retry fallback routing
- * reached it, or undefined. Attribution moves only once a model answers, so
- * after a `/model` switch it still names the fallback that last served; it
- * counts only while it names the current model.
+ * Whether a retry fallback serves as the displayed model. Attribution moves only
+ * once a model settles a turn, so after `/model` or a primary restore it still
+ * names the fallback while `state.model` is already the newly selected model.
  */
-function fallbackServingModelId(ctx: SegmentContext): string | undefined {
+function displayedModelIsServingFallback(ctx: SegmentContext): boolean {
 	const serving = ctx.session.servingModel;
 	const model = ctx.session.state.model;
-	if (!serving?.isFallback || !model) return undefined;
-	const identity =
-		serving.modelIdentity ?? splitThinkingSuffix(serving.selector, -1, MAX_THINKING_SUFFIX_OPTIONS).base;
-	// Routed identity: `provider/id`, plus `@upstream` for a pinned aggregator route.
-	const pin = getUpstreamPin(model);
-	const current = `${model.provider}/${model.id}${pin ? `@${pin}` : ""}`;
-	return identity === current ? identity.slice(identity.indexOf("/") + 1) : undefined;
+	if (!serving?.isFallback || !model) return false;
+	const upstream = getUpstreamPin(model);
+	const identity = upstream ? `${model.provider}/${model.id}@${upstream}` : `${model.provider}/${model.id}`;
+	return splitThinkingSuffix(serving.selector, -1, MAX_THINKING_SUFFIX_OPTIONS).base === identity;
 }
 
 /**
@@ -378,8 +374,7 @@ function modelAdvisorBadge(ctx: SegmentContext): { icon: string; color: ThemeCol
 const modelSegment: StatusLineSegment = {
 	id: "model",
 	render(ctx) {
-		const fallbackId = fallbackServingModelId(ctx);
-		const modelName = modelDisplayName(ctx, fallbackId);
+		const modelName = modelDisplayName(ctx);
 		const thinkingDisplay = modelThinkingDisplay(ctx);
 
 		// Compact mode swaps the model icon for the thinking-level glyph and drops
@@ -411,7 +406,7 @@ const modelSegment: StatusLineSegment = {
 		}
 
 		// A retry fallback serving in place of the configured model, as the agent hub's `fallback →`.
-		if (fallbackId) content += theme.fg("warning", `${theme.sep.dot}fallback`);
+		if (displayedModelIsServingFallback(ctx)) content += theme.fg("warning", `${theme.sep.dot}fallback`);
 
 		// Anthropic usage-limit stage (wrap-up allowance or low priority): a
 		// warning-colored badge so past-the-limit service is never mistaken for normal.
@@ -423,17 +418,17 @@ const modelSegment: StatusLineSegment = {
 		// Name, then the thinking level as a word in its level colour after a
 		// quiet separator; the terminal draws the model icon.
 		const token = accentToken(ctx, "statusLineModel");
-		const fallbackId = fallbackServingModelId(ctx);
-		const spans: TspSpan[] = [span(modelDisplayName(ctx, fallbackId), token)];
+		const spans: TspSpan[] = [span(modelDisplayName(ctx), token)];
 		const advisor = modelAdvisorBadge(ctx);
 		if (advisor) spans.push(span(` ${advisor.icon}`, advisor.color));
 		if (ctx.session.isFastModeActive() && theme.icon.fast) spans.push(span(` ${theme.icon.fast}`, token));
 		const level = ctx.options.model?.showThinkingLevel === false ? undefined : thinkingLevelWord(ctx.session);
 		if (level !== undefined) spans.push(span(" · ", "dim"), span(level, thinkingLevelToken(level)));
-		if (fallbackId) spans.push(span(`${theme.sep.dot}fallback`, "warning"));
+		const fallback = displayedModelIsServingFallback(ctx);
+		if (fallback) spans.push(span(`${theme.sep.dot}fallback`, "warning"));
 		const slowModeLabel = ctx.session.getAnthropicSlowModeLabel?.();
 		if (slowModeLabel) spans.push(span(`${theme.sep.dot}${slowModeLabel}`, "warning"));
-		return segView(spans, "model", slowModeLabel || fallbackId ? "warning" : undefined);
+		return segView(spans, "model", slowModeLabel || fallback ? "warning" : undefined);
 	},
 };
 

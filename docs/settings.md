@@ -974,7 +974,7 @@ The `path` segment abbreviates the home directory to `~`. On Windows, shared pat
 
 The `pi` segment tags the brand with the active named profile (`π-work`; see [Profiles](config-usage.md#profiles)). Set `statusLine.segmentOptions.pi.showProfile: false` to hide the tag.
 
-The `model` segment shows the configured model until a retry fallback serves turns in its place; while that fallback stays the session's model it shows the fallback's model id with a warning-colored `fallback` marker, as the agent hub does. Switching models or thinking levels shows the new choice at once.
+The `model` segment shows the model serving the session; while a retry fallback serves in place of the configured model, it adds a warning-colored `fallback` marker, as the agent hub does.
 
 The `cost` segment shows recorded session costs. For an active provider/model with scheduled pricing, it appends `↑` during peak hours or `↓` off-peak, refreshing at boundaries even while idle. The arrow reflects the current tariff, not past spending; flat-price models and explicit cost overrides have no arrow. See [usage costs and time-based pricing](models.md#usage-costs-and-time-based-pricing) for the UTC schedule and estimation semantics.
 

@@ -2,9 +2,9 @@
 
 ## [Unreleased]
 
-### Fixed
+### Added
 
-- Fixed the status line `model` segment showing the configured model while a retry fallback serves the session; it now shows the serving fallback with a warning-colored `fallback` marker until you pick another model.
+- Added a warning-colored `fallback` marker to the status line `model` segment while a retry fallback serves the session, read from the new optional `StatusLineSession.servingModel` ([#20260](https://github.com/can1357/oh-my-pi/pull/20260) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.1.1] - 2026-11-23
 
