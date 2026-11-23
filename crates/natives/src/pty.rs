@@ -352,15 +352,20 @@ impl PtySession {
 	) -> Result<PromiseRaw<'env, PtyRunResult>> {
 		#[cfg(unix)]
 		{
-			let (fd, pid) = {
-				let mut handles = self.handles.lock();
-				let Some(fd) = handles.pending.take() else {
+			let pid = {
+				let handles = self.handles.lock();
+				if handles.pending.is_none() {
 					return Err(Error::from_reason("PtySession.resume: no adopted PTY to resume"));
-				};
-				(fd, handles.pid.unwrap_or(0))
+				}
+				handles.pid.unwrap_or(0)
 			};
 			let handles = Arc::clone(&self.handles);
 			self.launch(env, "pty.resume", None, None, move |tx, rx, ct| {
+				// Taken on the control thread: if that thread cannot start, the
+				// adopted master stays pending and `master_fd`/`pid` stay accurate.
+				let Some(fd) = handles.lock().pending.take() else {
+					return Err(Error::from_reason("PtySession.resume: no adopted PTY to resume"));
+				};
 				run_adopted_sync(fd, pid, Some(on_chunk), tx, rx, ct, &handles)
 			})
 		}
