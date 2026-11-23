@@ -178,6 +178,37 @@ describe("OmfgController", () => {
 		expect(await Bun.file(path.join(harness.projectDir, ".omp", "rules", "ts-no-any.md")).exists()).toBe(false);
 	});
 
+	it("dismisses the panel and reports the saved path once the rule is registered", async () => {
+		const runEphemeralTurn = vi.fn<RunEphemeralTurn>(async () => ({
+			replyText: JSON.stringify({
+				name: "ts-no-any",
+				description: "No any in TS edits",
+				condition: ": any",
+				scope: ["tool:edit(*.ts)", "tool:write(*.ts)"],
+				body: "Use `unknown` instead.",
+			}),
+			assistantMessage: createAssistantMessage([{ type: "text", text: "done" }]),
+		}));
+		const harness = await createHarness({
+			runEphemeralTurn,
+			messages: createMatchingMessages(),
+			selectorChoice: PROJECT_OPTION,
+		});
+		const registered = Promise.withResolvers<void>();
+		harness.ttsrAddRule.mockImplementation(() => {
+			registered.resolve();
+			return true;
+		});
+		const controller = new OmfgController(harness.ctx);
+
+		await controller.start("stop using any");
+		await registered.promise;
+
+		expect(harness.container.children).toHaveLength(0);
+		expect(controller.hasActiveRequest()).toBe(false);
+		expect(harness.ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("ts-no-any.md"));
+	});
+
 	it("invalidates the discovery cache after saving so rediscovery observes the new rule", async () => {
 		clearCache();
 		const runEphemeralTurn = vi.fn<RunEphemeralTurn>(async () => ({

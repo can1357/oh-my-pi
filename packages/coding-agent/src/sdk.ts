@@ -353,6 +353,7 @@ import {
 	WriteTool,
 	warmupLspServers,
 	toolCommandEntries,
+	toolCommandHostAvailable,
 } from "./tools";
 import {
 	createModelJobCaptionWriter,
@@ -404,6 +405,7 @@ import {
 	cfgToolsCommandDocs,
 	cfgToolsCommandInline,
 	cfgSessionToolGates,
+	cfgTodoBackend,
 } from "./tools/settings";
 import { cfgToolsFormat } from "./session/context-settings";
 import { cfgAutolearnEnabled } from "./autolearn/settings";
@@ -642,7 +644,7 @@ export interface CreateAgentSessionOptions {
 
 	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
 	authStorage?: AuthStorage;
-	/** Model registry. Default: discoverModels(authStorage, agentDir) */
+	/** Model registry. Default: constructed from <agentDir>/models.yml */
 	modelRegistry?: ModelRegistry;
 	/**
 	 * Request credential resolver. Defaults to the model registry's normal
@@ -954,6 +956,11 @@ export interface CreateAgentSessionOptions {
 	bindProcessState?: boolean;
 	/** Task recursion depth (for subagent sessions). Default: 0 */
 	taskDepth?: number;
+	/**
+	 * Mark the session as a `/tan` fork: an idle wait then steers the fork to
+	 * wait again while its assignment is blocked.
+	 */
+	tanFork?: boolean;
 	/** Parent Hindsight state to alias for subagent memory tools. */
 	parentHindsightSessionState?: HindsightSessionStateApi;
 	/** Parent Mnemopi state: subagents alias it; a top-level fork (`/tan`) inherits its delivered recall. */
@@ -1282,7 +1289,7 @@ export async function loadSessionExtensions(
 	const storage = settings.getStorage();
 	const { eager, deferred } =
 		loadOptions.deferStartupSafe && storage
-			? await partitionStartupExtensions(storage, paths, cwd)
+			? await partitionStartupExtensions(storage, paths, cwd, cfgTodoBackend.get(settings))
 			: { eager: paths, deferred: [] };
 	const result = await logger.time("loadExtensions", loadExtensions, eager, cwd, eventBus);
 	if (storage) await recordStartupVerdicts(storage, result.extensions);
@@ -1815,6 +1822,7 @@ const CAPTURE_ADVERTISED_KEYS = [
 /** `AgentTool` keys that run code or let a call reach an effect; a refused copy has none of them. */
 const CAPTURE_DROPPED_KEYS = [
 	"execute",
+	"servesToolCommandLine",
 	"openArgStream",
 	"docTopics",
 	"concurrency",
@@ -2011,10 +2019,11 @@ export function createAutoLearnCaptureRunner(
  * const { session } = await createAgentSession();
  *
  * // With explicit model
- * import { getModel } from '@oh-my-pi/pi-ai';
+ * import { ThinkingLevel } from '@oh-my-pi/pi-agent-core';
+ * import { getBundledModel } from '@oh-my-pi/pi-catalog/models';
  * const { session } = await createAgentSession({
- *   model: getModel('anthropic', 'claude-opus-4-5'),
- *   thinkingLevel: 'high',
+ *   model: getBundledModel('anthropic', 'claude-opus-4-5'),
+ *   thinkingLevel: ThinkingLevel.High,
  * });
  *
  * // Continue previous session
@@ -2752,6 +2761,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return prewalk !== undefined || deferredPrewalk !== undefined;
 			},
 			taskDepth: options.taskDepth ?? 0,
+			tanFork: options.tanFork === true,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			sessionManager,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
@@ -4207,14 +4217,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 
 		// `tools.commands` flips allocate or release the tool command state createTools
-		// builds over the canonical map; the session re-partitions on its next apply. Like
-		// createTools, mounting needs the built-in `bash` tool that runs the commands.
+		// builds over the canonical map; the session re-partitions on its next apply. Mounting
+		// needs a native `bash` to run the commands, in the registry slot or behind a same-name
+		// extension override.
+		const commandHostAvailable = (): boolean =>
+			toolCommandHostAvailable(builtInRegistryToolNames, name => extensionRunner.hasNativeTool(name));
 		const syncToolCommandState = (): void => {
 			const wanted =
-				!restrictToolNames &&
-				cfgToolsCommands.get(settings) &&
-				toolRegistry.has("bash") &&
-				builtInRegistryToolNames.has("bash");
+				!restrictToolNames && cfgToolsCommands.get(settings) && toolRegistry.has("bash") && commandHostAvailable();
 			if (wanted === (toolSession.toolCommands !== undefined)) return;
 			if (wanted) {
 				toolSession.toolCommands = createToolCommandState(toolSession, toolRegistry, builtInRegistryToolNames);
@@ -4813,12 +4823,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		// Partition the initial enabled set for the command transport. Tool instances
 		// remain in the canonical map; only presentation names move between layers.
-		// Tools run as commands inside the built-in `bash` tool, so mounting engages
-		// only when `bash` starts enabled.
+		// Tools run as commands inside the `bash` tool, so mounting engages only
+		// when `bash` starts enabled and a tool that can run them is still there.
 		const commandTransportActive =
-			toolSession.toolCommands !== undefined &&
-			builtInRegistryToolNames.has("bash") &&
-			initialToolNames.includes("bash");
+			toolSession.toolCommands !== undefined && commandHostAvailable() && initialToolNames.includes("bash");
 		if (toolSession.toolCommands) {
 			const topLevelToolNames: string[] = [];
 			const mountedNames: string[] = [];
@@ -5281,7 +5289,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			agent.replaceMessages(restored.messages);
 			// Only an explicit role alias re-owns a resumed branch; any other explicit model
 			// (subagent revival, SDK callers) keeps the role its history recorded.
-			if (model && options.modelRole) recordInitialModelChange(`${model.provider}/${model.id}`);
+			if (model && options.modelRole) recordInitialModelChange(formatModelStringWithRouting(model));
 			if (persistInitialServiceTier) {
 				sessionManager.appendServiceTierChange(
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
@@ -5289,7 +5297,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		} else {
 			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
-			if (model) recordInitialModelChange(`${model.provider}/${model.id}`);
+			if (model) recordInitialModelChange(formatModelStringWithRouting(model));
 			if (!autoThinking) {
 				// Do not write the `auto` selector before the first turn resolves; auto
 				// classification persists its concrete effort once a real user turn runs.
@@ -5545,6 +5553,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					? () => createVibeTools(toolSession)
 					: undefined,
 			builtInToolNames: builtInRegistryToolNames,
+			hasNativeTool: name => extensionRunner.hasNativeTool(name),
 			mcpManagerToolNames: initialMcpManagerToolNames,
 			transformContext,
 			transformProviderContext,
@@ -5751,7 +5760,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					const shouldMount =
 						!explicitlyRequested &&
 						toolSession.toolCommands !== undefined &&
-						builtInRegistryToolNames.has("bash") &&
+						commandHostAvailable() &&
 						enabled.includes("bash") &&
 						isMountableAsToolCommand(liveTool);
 					const nextMounted = shouldMount
