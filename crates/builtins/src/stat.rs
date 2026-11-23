@@ -2218,7 +2218,8 @@ mod tests {
 		);
 	}
 
-	/// `-x` shows the setuid/setgid/sticky digit in its octal mode.
+	/// `-x` shows the setuid/setgid/sticky digit in its octal mode, spelled as
+	/// macOS spells it: Apple's `%0Mp%03OA` prints that digit twice (`44755`).
 	#[test]
 	fn bsd_verbose_mode_includes_special_bits() {
 		let (_dir, root) = bsd_fixture();
@@ -2227,7 +2228,7 @@ mod tests {
 		let (code, stdout, stderr) = run_in(root, vec!["-x", "data.bin"]);
 		assert_eq!((code, stderr.as_str()), (0, ""));
 		let mode = stdout.lines().nth(2).unwrap();
-		assert!(mode.starts_with("  Mode: (4755/-rwsr-xr-x)  "), "got: {mode:?}");
+		assert!(mode.starts_with("  Mode: (44755/-rwsr-xr-x)  "), "got: {mode:?}");
 	}
 
 	#[test]
