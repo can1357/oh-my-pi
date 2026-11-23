@@ -4,10 +4,11 @@ import { classifyModel } from "../compat/taxonomy";
 import { getBundledModels } from "../models";
 import type { FetchImpl, ModelSpec } from "../types";
 import { discoveryFetch, parseServiceTierIds } from "../utils";
-import { CODEX_BASE_URL, OPENAI_HEADER_VALUES, OPENAI_HEADERS } from "../wire/codex";
+import { CODEX_BASE_URL, isOfficialCodexApiUrl, OPENAI_HEADER_VALUES, OPENAI_HEADERS } from "../wire/codex";
 import { getCodexClientVersion } from "../wire/codex-version";
 
-const DEFAULT_MODEL_LIST_PATHS = ["/codex/models", "/models"] as const;
+const OFFICIAL_MODEL_LIST_PATHS = ["/codex/models"] as const;
+const CUSTOM_MODEL_LIST_PATHS = ["/codex/models", "/models"] as const;
 const DEFAULT_CONTEXT_WINDOW = 272_000;
 const DEFAULT_MAX_TOKENS = 128_000;
 /**
@@ -97,7 +98,7 @@ export interface CodexModelDiscoveryOptions {
 	baseUrl?: string;
 	/** Optional client version attached as `client_version` query parameter. */
 	clientVersion?: string;
-	/** Optional endpoint path candidates. Defaults to `/codex/models`, then `/models`. */
+	/** Optional endpoint path candidates. Defaults to `/codex/models` on the official ChatGPT backend, or `/codex/models` then `/models` for custom base URLs. */
 	paths?: readonly string[];
 	/** Additional headers merged on top of required Codex headers. */
 	headers?: Record<string, string>;
@@ -130,12 +131,15 @@ export interface CodexModelDiscoveryResult {
 export async function fetchCodexModels(options: CodexModelDiscoveryOptions): Promise<CodexModelDiscoveryResult | null> {
 	const fetchFn = discoveryFetch(options.fetchFn);
 	const baseUrl = normalizeBaseUrl(options.baseUrl);
-	const paths = normalizePaths(options.paths);
+	const paths = normalizePaths(options.paths, baseUrl);
 	const clientVersion = normalizeClientVersion(options.clientVersion) ?? getCodexClientVersion();
 	const headers = buildCodexHeaders(options, clientVersion);
 
 	let sawSuccessfulResponse = false;
 	for (const path of paths) {
+		if (options.signal?.aborted) {
+			return null;
+		}
 		const requestUrl = buildModelsUrl(baseUrl, path, clientVersion);
 		let response: Response;
 		try {
@@ -145,6 +149,9 @@ export async function fetchCodexModels(options: CodexModelDiscoveryOptions): Pro
 				signal: options.signal,
 			});
 		} catch {
+			if (options.signal?.aborted) {
+				return null;
+			}
 			continue;
 		}
 
@@ -159,6 +166,9 @@ export async function fetchCodexModels(options: CodexModelDiscoveryOptions): Pro
 		try {
 			payload = await response.json();
 		} catch {
+			if (options.signal?.aborted) {
+				return null;
+			}
 			continue;
 		}
 
@@ -181,15 +191,19 @@ function normalizeBaseUrl(baseUrl: string | undefined): string {
 	return raw.replace(/\/+$/, "");
 }
 
-function normalizePaths(paths: readonly string[] | undefined): string[] {
+function normalizePaths(paths: readonly string[] | undefined, baseUrl: string): string[] {
+	// The official ChatGPT `/models` route returns the ChatGPT Web roster (`-wm`,
+	// `research`, alpha gates) rather than Codex SKUs; caching it as authoritative
+	// hides new plain Codex models whenever `/codex/models` transiently fails.
+	const defaultPaths = isOfficialCodexApiUrl(baseUrl) ? OFFICIAL_MODEL_LIST_PATHS : CUSTOM_MODEL_LIST_PATHS;
 	if (!paths || paths.length === 0) {
-		return [...DEFAULT_MODEL_LIST_PATHS];
+		return [...defaultPaths];
 	}
 	const normalized = paths
 		.map(path => path.trim())
 		.filter(path => path.length > 0)
 		.map(path => (path.startsWith("/") ? path : `/${path}`));
-	return normalized.length > 0 ? normalized : [...DEFAULT_MODEL_LIST_PATHS];
+	return normalized.length > 0 ? normalized : [...defaultPaths];
 }
 
 function buildModelsUrl(baseUrl: string, path: string, clientVersion: string | undefined): string {
