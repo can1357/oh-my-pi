@@ -448,6 +448,7 @@ export class HtmlFormDialog implements Component, Focusable {
 	#noteEditor: OpenNote | undefined;
 	#savedNoteEditor: Editor | undefined;
 	#useTerminalCursor = false;
+	#disposed = false;
 	/** The Other answer's text of each group that offers one. */
 	readonly #others = new Map<ChoiceField, Input>();
 	/** Each radio group's Other text as last seen, to notice typing from keys or the terminal. */
@@ -828,6 +829,7 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	dispose(): void {
+		this.#disposed = true;
 		this.#noteEditor?.pastes.clear();
 		this.#noteEditor = undefined;
 		this.#stopCountdown();
@@ -1219,19 +1221,19 @@ export class HtmlFormDialog implements Component, Focusable {
 		this.#changed();
 	}
 
-	// ── Pasted images ────────────────────────────────────────────────────────
+	// ── Pasting ──────────────────────────────────────────────────────────────
 
 	/** Whether the form takes a new image paste now: a note is open and the form is shown. */
 	get acceptsImages(): boolean {
 		return !!this.#options.acceptImages && this.#noteEditor !== undefined && !this.#hidden;
 	}
 
-	/**
-	 * Defined only while {@link acceptsImages}. A host routes Ctrl+V and pastes to any focused component that
-	 * has `pasteText`, so with no note open the form must behave as a plain dialog.
-	 */
+	/** Text goes to the active text control or an image-capable note; only the latter takes images. */
 	get pasteText(): ((text: string) => void) | undefined {
-		return this.acceptsImages ? text => this.#pasteText(text) : undefined;
+		if (!this.acceptsImages && !this.#pasteTarget()) return undefined;
+		return text => {
+			this.#pasteText(text);
+		};
 	}
 
 	/**
@@ -1245,14 +1247,45 @@ export class HtmlFormDialog implements Component, Focusable {
 		return formatVisionMarker("image", note.images.length, dims);
 	}
 
-	/** Ordered delivery into the open note; refuses when {@link acceptsImages} is false. */
+	/** Reserve delivery to the open note or the text field that started the paste. */
 	beginPaste(): (text: string | undefined) => boolean {
-		return this.acceptsImages ? this.#noteEditor!.pastes.begin() : () => false;
+		if (this.acceptsImages) return this.#noteEditor!.pastes.begin();
+		const target = this.#pasteTarget();
+		if (!target) return () => false;
+		let settled = false;
+		return text => {
+			if (settled) return false;
+			settled = true;
+			return text !== undefined && this.#pasteText(text, target);
+		};
 	}
 
-	#pasteText(text: string): void {
-		const note = this.#noteEditor;
-		if (note && text) this.#notePaste(note, text);
+	#pasteTarget(): Extract<Stop, { kind: "text" | "other" }> | undefined {
+		if (this.#hidden || this.#disposed) return undefined;
+		const stop = this.#stops[this.#focus];
+		return stop?.kind === "text" || stop?.kind === "other" ? stop : undefined;
+	}
+
+	#pasteText(text: string, target = this.#pasteTarget()): boolean {
+		if (!text || this.#hidden || this.#disposed) return false;
+		if (!target) {
+			const note = this.#noteEditor;
+			if (!note) return false;
+			this.#notePaste(note, text);
+			return true;
+		}
+		const control =
+			target.kind === "other"
+				? this.#others.get(target.field)
+				: (this.#editors.get(target.field) ?? this.#inputs.get(target.field));
+		if (!control) return false;
+		const before = control instanceof Editor ? control.getText() : control.getValue();
+		control.pasteText(text);
+		const after = control instanceof Editor ? control.getText() : control.getValue();
+		if (after !== before) this.#errors.delete(target.field);
+		this.#resetCountdown();
+		this.#changed();
+		return true;
 	}
 
 	#noteFromPointer(key: string): void {
