@@ -1742,20 +1742,13 @@ describe("antigravity discovery collapsing", () => {
 			);
 		});
 
-		it("targets AICODE_ENDPOINT_URL when no endpoint is passed", async () => {
+		it("targets the Antigravity endpoints when none is passed, whatever AICODE_ENDPOINT_URL says", async () => {
 			const { requests, fetcher } = recordingFetcher();
-			await withEnv({ AICODE_ENDPOINT_URL: "https://aicode.test/" }, async () => {
-				await fetchAntigravityDiscoveryModels({ token: "t", userAgent: "test", fetcher });
-				await fetchAntigravityDiscoveryModels({
-					token: "t",
-					endpoint: "https://cca.test",
-					userAgent: "test",
-					fetcher,
-				});
-			});
+			await withEnv({ AICODE_ENDPOINT_URL: "https://aicode.test/" }, () =>
+				fetchAntigravityDiscoveryModels({ token: "t", userAgent: "test", fetcher }),
+			);
 			expect(requests.map(request => request.url)).toEqual([
-				"https://aicode.test/v1internal:fetchAvailableModels",
-				"https://cca.test/v1internal:fetchAvailableModels",
+				`${ANTIGRAVITY_PRIMARY_ENDPOINT}/v1internal:fetchAvailableModels`,
 			]);
 		});
 

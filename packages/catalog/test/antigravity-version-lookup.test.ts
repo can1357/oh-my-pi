@@ -111,26 +111,13 @@ describe("getAntigravityUserAgent", () => {
 		}
 	});
 
-	it("falls back to the 2.34.0 hub release", () => {
+	it("falls back to the 2.34.0 hub release in the captured header shape", () => {
+		// No env knob grows the header past the captured native segments.
+		process.env.PI_AI_ANTIGRAVITY_AUTH_METHOD = "gateway";
+		process.env.PI_AI_ANTIGRAVITY_PURPOSE = "test-purpose";
 		expect(DEFAULT_ANTIGRAVITY_VERSION).toBe("2.34.0");
 		expect(getAntigravityUserAgent()).toBe(
 			"antigravity/hub/2.34.0 (aidev_client; os_type=linux; arch=amd64; cl=1005016104)",
 		);
-	});
-
-	it("appends auth_method and purpose only when their env overrides are set", () => {
-		expect(getAntigravityUserAgent()).not.toContain("auth_method=");
-		expect(getAntigravityUserAgent()).not.toContain("purpose=");
-
-		process.env.PI_AI_ANTIGRAVITY_AUTH_METHOD = "gateway";
-		expect(getAntigravityUserAgent()).toBe(
-			"antigravity/hub/2.34.0 (aidev_client; os_type=linux; arch=amd64; cl=1005016104; auth_method=gateway)",
-		);
-
-		process.env.PI_AI_ANTIGRAVITY_PURPOSE = "test-purpose";
-		expect(getAntigravityUserAgent()).toEndWith("; auth_method=gateway; purpose=test-purpose)");
-
-		delete process.env.PI_AI_ANTIGRAVITY_AUTH_METHOD;
-		expect(getAntigravityUserAgent()).toEndWith("; cl=1005016104; purpose=test-purpose)");
 	});
 });

@@ -1346,14 +1346,9 @@ const ANTIGRAVITY_FREE_TIER_ID = "free-tier";
  * value is `GOOGLE_ONE_AI`; when the native client sets it, and which tiers
  * it applies to, is unverified. omp sends it only for an account whose
  * reported tier is known and not `free-tier` (a Google One AI plan is a paid
- * tier), or exactly the values PI_AI_ANTIGRAVITY_CREDIT_TYPES lists
- * (comma-separated); a free or unknown tier sends nothing.
+ * tier); a free or unknown tier sends nothing.
  */
 function getAntigravityEnabledCreditTypes(userTier: string | undefined): string[] | undefined {
-	const override = process.env.PI_AI_ANTIGRAVITY_CREDIT_TYPES?.split(",")
-		.map(value => value.trim())
-		.filter(value => value.length > 0);
-	if (override && override.length > 0) return override;
 	return userTier && userTier !== ANTIGRAVITY_FREE_TIER_ID ? ["GOOGLE_ONE_AI"] : undefined;
 }
 

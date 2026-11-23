@@ -346,14 +346,10 @@ An invalid `KIRO_API_REGION` is an error rather than a silent fallback. `/login 
 | `PI_AI_ANTIGRAVITY_CL`      | Overrides Antigravity hub user-agent build changelist (`1005016104` if unset)                                                                     |
 | `PI_AI_ANTIGRAVITY_OS`      | Overrides Antigravity hub user-agent os_type (unset: the native build for the host OS, `darwin`, `linux` or `windows`; other OSes report `linux`) |
 | `PI_AI_ANTIGRAVITY_ARCH`    | Overrides Antigravity hub user-agent arch (unset: that build's arch, `arm64` on macOS, `amd64` on Linux and Windows)                              |
-| `PI_AI_ANTIGRAVITY_AUTH_METHOD` | Appends `; auth_method=<value>` to the Antigravity hub user agent; unset sends nothing (the OAuth value is unverified)                         |
-| `PI_AI_ANTIGRAVITY_PURPOSE` | Appends `; purpose=<value>` to the Antigravity hub user agent; unset sends nothing (value unverified)                                              |
 | `PI_AI_ANTIGRAVITY_USER_TIER` | Tier sent as `entitlement.userTier` in Antigravity model discovery when the account's own tier is unknown; falls back to the native `AICODE_USER_TIER` |
 | `PI_AI_ANTIGRAVITY_LOCATION` | Location sent in Antigravity model discovery; falls back to the native `GOOGLE_CLOUD_LOCATION`, then `GOOGLE_CLOUD_REGION`; unset everywhere omits it |
-| `PI_AI_ANTIGRAVITY_CREDIT_TYPES` | Comma-separated `enabledCreditTypes` for Antigravity requests; unset sends `GOOGLE_ONE_AI` only for an account whose reported tier is known and not `free-tier` |
 | `ANTIGRAVITY_PROJECT_ID`    | Native Antigravity override: replaces the stored Cloud Code Assist project on every chat request, model discovery, and the usage model-list fallback |
 | `ANTIGRAVITY_TRAJECTORY_ID` | Native Antigravity override: a UUID used as the trajectory id of every new conversation (it links every account it is used with); other values are ignored |
-| `AICODE_ENDPOINT_URL`       | Native Antigravity override: model-discovery endpoint when discovery is handed no endpoint; a provider `baseUrl` (configured or from the catalog) wins |
 
 ### Prompt perturbation
 

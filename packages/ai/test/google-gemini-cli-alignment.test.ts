@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import {
 	buildRequest,
 	parseGeminiCliCredentials,
@@ -422,12 +422,6 @@ describe("Google Gemini CLI alignment", () => {
 	});
 
 	describe("Antigravity enabledCreditTypes", () => {
-		const saved = process.env.PI_AI_ANTIGRAVITY_CREDIT_TYPES;
-		afterEach(() => {
-			if (saved === undefined) delete process.env.PI_AI_ANTIGRAVITY_CREDIT_TYPES;
-			else process.env.PI_AI_ANTIGRAVITY_CREDIT_TYPES = saved;
-		});
-
 		function creditTypes(userTier: string | undefined) {
 			return buildRequest(
 				createModel("google-antigravity"),
@@ -441,17 +435,10 @@ describe("Google Gemini CLI alignment", () => {
 		}
 
 		it("sends GOOGLE_ONE_AI only for a known non-free tier", () => {
-			delete process.env.PI_AI_ANTIGRAVITY_CREDIT_TYPES;
 			expect(creditTypes(undefined)).toBeUndefined();
 			expect(creditTypes("")).toBeUndefined();
 			expect(creditTypes("free-tier")).toBeUndefined();
 			expect(creditTypes("standard-tier")).toEqual(["GOOGLE_ONE_AI"]);
-		});
-
-		it("sends exactly the env-listed credit types for any tier", () => {
-			process.env.PI_AI_ANTIGRAVITY_CREDIT_TYPES = "GOOGLE_ONE_AI, OTHER_CREDIT";
-			expect(creditTypes(undefined)).toEqual(["GOOGLE_ONE_AI", "OTHER_CREDIT"]);
-			expect(creditTypes("free-tier")).toEqual(["GOOGLE_ONE_AI", "OTHER_CREDIT"]);
 		});
 	});
 
@@ -676,15 +663,14 @@ describe("Google Gemini CLI alignment", () => {
 			expect(headers.get("X-Aicode-Trajectory-Id")).toBe(labels.trajectory_id!);
 		});
 
-		it("carries the credential's tier into enabledCreditTypes", async () => {
+		it("does not let PI_AI_ANTIGRAVITY_CREDIT_TYPES opt a request into credits", async () => {
 			const { captured, fetchMock } = captureGenerateRequests();
-			await withEnv({ PI_AI_ANTIGRAVITY_CREDIT_TYPES: undefined }, async () => {
+			await withEnv({ PI_AI_ANTIGRAVITY_CREDIT_TYPES: "GOOGLE_ONE_AI" }, async () => {
+				await send("google-antigravity", fetchMock);
 				await send("google-antigravity", fetchMock, { userTier: "free-tier" });
-				await send("google-antigravity", fetchMock, { userTier: "standard-tier" });
 			});
 
-			expect(captured[0]!.body.enabledCreditTypes).toBeUndefined();
-			expect(captured[1]!.body.enabledCreditTypes).toEqual(["GOOGLE_ONE_AI"]);
+			expect(captured.map(request => request.body.enabledCreditTypes)).toEqual([undefined, undefined]);
 		});
 
 		it("lets ANTIGRAVITY_PROJECT_ID override the credential's project per request", async () => {

@@ -165,10 +165,7 @@ const AntigravityDiscoveryApiResponseSchema = type({
 export interface FetchAntigravityDiscoveryModelsOptions {
 	/** OAuth access token used as `Authorization: Bearer <token>`. */
 	token: string;
-	/**
-	 * Optional endpoint override. Defaults to `AICODE_ENDPOINT_URL` (the native
-	 * client's endpoint override), then the Antigravity fallback endpoints.
-	 */
+	/** Optional endpoint override. Defaults to Antigravity fallback endpoints. */
 	endpoint?: string;
 	/**
 	 * Cloud Code Assist project the account is onboarded to, sent as the body's
@@ -354,9 +351,8 @@ async function fetchAntigravityDiscoveryResponse(
 	}
 
 	const fetcher = discoveryFetch(options.fetcher);
-	const configuredEndpoint = options.endpoint || process.env.AICODE_ENDPOINT_URL;
-	const endpoints = configuredEndpoint
-		? [trimTrailingSlashes(configuredEndpoint)]
+	const endpoints = options.endpoint
+		? [trimTrailingSlashes(options.endpoint)]
 		: DEFAULT_ANTIGRAVITY_DISCOVERY_ENDPOINTS.map(trimTrailingSlashes);
 	const body = JSON.stringify(buildAntigravityFetchModelsBody(options));
 
