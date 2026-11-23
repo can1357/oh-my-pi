@@ -133,7 +133,7 @@ describe("uncaught JavaScript cell errors", () => {
 		const stack = `Error: x\n    at asset (/opt/omp/lib.ts:1:2)\n    at host (${ERROR_TEXT}:1:2)`;
 		const script = `import { formatCellError } from ${JSON.stringify(ERROR_TEXT)};
 console.log(formatCellError(${JSON.stringify(stack)}, { filename: "js-cell-1.js", cwd: "/tmp" }));`;
-		const child = Bun.spawn(["bun", "-e", script], {
+		const child = Bun.spawn([process.execPath, "-e", script], {
 			env: { ...process.env, PI_PACKAGE_DIR: "/opt/omp" },
 			stdout: "pipe",
 			stderr: "pipe",

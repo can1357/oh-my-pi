@@ -161,13 +161,13 @@ describe("cursor API-equivalent pricing", () => {
 		}
 	});
 
-	it("models the GPT-5.6 272K 2x-input long tier", () => {
+	it("models the GPT-5.6 272K long tier: 2x input and cache, 1.5x output", () => {
 		const sol = buildModel(spec("gpt-5.6-sol"));
 		expect(sol.cost).toMatchObject({ input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 });
 		expect(sol.cost.longContext).toEqual({
 			inputThreshold: 272_000,
 			input: 8,
-			output: 20,
+			output: 30,
 			cacheRead: 0.8,
 			cacheWrite: 10,
 		});
