@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed custom providers that register the OpenRouter roster failing at startup because `typesafe/jev-router` was classified as a judge model instead of chat ([#15244](https://github.com/can1357/oh-my-pi/issues/15244)) ([#19953](https://github.com/can1357/oh-my-pi/pull/19953) by [@JamieJ5926](https://github.com/JamieJ5926))
+- Fixed custom providers that register the OpenRouter roster failing at startup because `typesafe/jev-router` was classified as a judge model instead of chat ([#15244](https://github.com/can1357/oh-my-pi/issues/15244), [#19953](https://github.com/can1357/oh-my-pi/pull/19953) by [@JamieJ5926](https://github.com/JamieJ5926))
 
 
 ## [19.1.1] - 2026-11-23
