@@ -54,6 +54,7 @@
 
 ### Fixed
 
+- Fixed Ctrl+[ not leaving Vim Insert, Replace or Visual mode, or cancelling a pending operator, under the Kitty keyboard protocol or modifyOtherKeys; inside the Vim modes it now does what Escape does ([#19547](https://github.com/can1357/oh-my-pi/issues/19547), [#20209](https://github.com/can1357/oh-my-pi/pull/20209) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed handoffs being skipped when only the model’s upstream pin changes.
 - Fixed the `/usage` activity calendar retaining its history when a refresh fails, while indicating that the data is not synced.
 - Fixed SVG images blinking in ask forms when questions extend beyond the panel.
