@@ -1,3 +1,4 @@
+import { asGlobalFetch } from "./helpers/fetch-mock";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
@@ -19,6 +20,7 @@ import {
 	cfgCompaction,
 	cfgCompactionAsyncEnabled,
 	cfgCompactionMethodOrder,
+	cfgCompactionRemoteEndpoint,
 } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 
 const CONTEXT_WINDOW = 100_000;
@@ -1045,6 +1047,74 @@ describe("async speculative compaction", () => {
 		expect(maintenance.speculationState).toBe("running");
 		await maintenance.speculationCompletion();
 		expect(compactSpy).toHaveBeenCalledTimes(2);
+	});
+
+	const REMOTE_ENDPOINT = "https://compaction.example.test/openai/v1/chat/completions";
+
+	/** Answers every request to the remote endpoint with `status`; returns the count of those requests. */
+	function stubRemoteEndpoint(status: number): () => number {
+		// Speculation passes no fetch override, so requestRemoteCompaction uses the global fetch.
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(input => {
+				if (String(input) !== REMOTE_ENDPOINT) throw new Error(`Unexpected request to ${String(input)}`);
+				return new Response(JSON.stringify({ error: { message: "rejected" } }), {
+					status,
+					headers: { "content-type": "application/json" },
+				});
+			}),
+		);
+		return () => fetchSpy.mock.calls.filter(([input]) => String(input) === REMOTE_ENDPOINT).length;
+	}
+
+	function useRemoteEndpoint(generateHandoffDocument: SessionMaintenanceHost["generateHandoffDocument"]): void {
+		maintenance = createMaintenance({ methodOrder: ["remote", "handoff"], generateHandoffDocument });
+		cfgCompactionRemoteEndpoint.override(maintenanceSettings, REMOTE_ENDPOINT);
+		// End on a turn start: a split turn summarizes its prefix through the side stream, which this host rejects.
+		sessionManager.appendMessage(userMessage("Continue the task."));
+	}
+
+	it.each([404, 400, 403])(
+		"drops the remote method for the cycle after the endpoint rejects it with %d",
+		async status => {
+			const generateHandoffDocument = vi.fn(async () => "## Goal\nContinue from the handoff.\n");
+			useRemoteEndpoint(generateHandoffDocument);
+			const endpointCalls = stubRemoteEndpoint(status);
+
+			expect(maintenance.deferThresholdCompactionToSpeculation(THRESHOLD + 1_000, CONTEXT_WINDOW)).toBe(true);
+			await maintenance.speculationCompletion();
+			const rejected = endpointCalls();
+			expect(rejected).toBeGreaterThan(0);
+			expect(maintenance.speculationState).toBe("idle");
+
+			// The next deferral speculates the next configured method instead of re-sending the request.
+			expect(maintenance.deferThresholdCompactionToSpeculation(THRESHOLD + 2_000, CONTEXT_WINDOW)).toBe(true);
+			await maintenance.speculationCompletion();
+			expect(endpointCalls()).toBe(rejected);
+			expect(generateHandoffDocument).toHaveBeenCalledTimes(1);
+			expect(maintenance.speculationState).toBe("armed");
+
+			// The threshold pass commits the handoff without trying the endpoint again.
+			await maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD + 2_000 });
+			const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+			expect(entry?.type === "compaction" ? entry.summary : undefined).toContain("Continue from the handoff.");
+			expect(endpointCalls()).toBe(rejected);
+		},
+	);
+
+	it("keeps the remote method after a retriable endpoint rejection", async () => {
+		const generateHandoffDocument = vi.fn(async () => "## Goal\nContinue from the handoff.\n");
+		useRemoteEndpoint(generateHandoffDocument);
+		const endpointCalls = stubRemoteEndpoint(429);
+
+		expect(maintenance.deferThresholdCompactionToSpeculation(THRESHOLD + 1_000, CONTEXT_WINDOW)).toBe(true);
+		await maintenance.speculationCompletion();
+		expect(endpointCalls()).toBe(1);
+
+		// A rate limit clears with time, so the next deferral sends the remote request again.
+		expect(maintenance.deferThresholdCompactionToSpeculation(THRESHOLD + 2_000, CONTEXT_WINDOW)).toBe(true);
+		await maintenance.speculationCompletion();
+		expect(endpointCalls()).toBe(2);
+		expect(generateHandoffDocument).not.toHaveBeenCalled();
 	});
 
 	it("discards an armed summary when post-snapshot branch growth prevents recovery headroom", async () => {

@@ -9,6 +9,15 @@ const HERDR_PANE_ID_PATTERN = /^[0-9A-Za-z:_-]{1,64}$/u;
  */
 const HERDR_USAGE_TOKENS: Record<string, true> = { help: true, "--help": true, "-h": true };
 
+/**
+ * Whether this process runs in a Herdr desktop terminal (herdr-core). Herdr
+ * desktop sets `HC_TERMINAL_ID`, not the older multiplexer's `HERDR_*` pane
+ * identity, and keeps the pty size in step with what it shows.
+ */
+export function isInsideHerdrDesktopTerminal(env: NodeJS.ProcessEnv = Bun.env): boolean {
+	return Boolean(env.HC_TERMINAL_ID);
+}
+
 export const herdrMultiplexer = {
 	id: "herdr",
 	precedence: "session",

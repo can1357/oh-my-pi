@@ -699,7 +699,7 @@ describe("InteractiveMode tray", () => {
 		const registry = AgentRegistry.global();
 		const cx = context(true);
 		const working = [new Text("Working", 0, 0)];
-		// No items: no row.
+		// No items: no seat, so the empty line carries no activity role.
 		expect(
 			mode.describeStatusHud([], cx).p && Reflect.get(mode.describeStatusHud([], cx).p!, "role"),
 		).toBeUndefined();

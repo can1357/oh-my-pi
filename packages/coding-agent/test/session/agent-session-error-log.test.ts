@@ -1,6 +1,6 @@
 /**
  * Contract: a turn ending in a provider error surfaces one warn-level log
- * carrying `provider`/`model`/`errorMessage`/`errorStatus`/`errorId`, so
+ * carrying `provider`/`model`/`errorMessage`/`errorStatus`/`errorId`/`requestId`, so
  * recurring provider stream failures are diagnosable from the main log alone
  * (issue #6177). Non-error stops must not emit it.
  */
@@ -38,6 +38,7 @@ describe("logProviderTurnError", () => {
 				errorMessage: "stream stall: idle watchdog fired",
 				errorStatus: 500,
 				errorId: 42,
+				requestId: "req_011Cabc",
 			}),
 		);
 
@@ -49,6 +50,7 @@ describe("logProviderTurnError", () => {
 			errorMessage: "stream stall: idle watchdog fired",
 			errorStatus: 500,
 			errorId: 42,
+			requestId: "req_011Cabc",
 		});
 	});
 
