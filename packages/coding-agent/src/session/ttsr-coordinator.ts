@@ -76,12 +76,16 @@ async function runGateProbe(
 	command: string,
 	call: ToolCall,
 	cwd: string,
+	settings: Settings,
 	signal: AbortSignal,
 ): Promise<ProbeVerdict> {
 	const input = JSON.stringify({ tool: call.name, toolCallId: call.id, arguments: call.arguments });
 	try {
-		const result = await ptree.exec(["/bin/sh", "-c", command], {
+		// Operator layers only, like the gate's wait: a project cannot pick the shell that runs the probe.
+		const { shell, args, env } = (settings.grantAuthority?.() ?? settings).getShellConfig();
+		const result = await ptree.exec([shell, ...args, command], {
 			cwd,
+			env,
 			input,
 			signal,
 			allowNonZero: true,
@@ -788,7 +792,7 @@ export class TtsrCoordinator {
 			let probe = probes.get(candidate.rule);
 			if (!probe) {
 				const cwd = this.#host.sessionManager.getCwd();
-				probe = runGateProbe(candidate.rule, candidate.command, call, cwd, deadline);
+				probe = runGateProbe(candidate.rule, candidate.command, call, cwd, this.#host.settings, deadline);
 				probes.set(candidate.rule, probe);
 			}
 			return probe;

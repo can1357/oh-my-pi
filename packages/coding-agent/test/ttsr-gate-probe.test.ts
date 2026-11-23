@@ -13,7 +13,8 @@ import { assistant, fakeJudge, judgedRule, setup } from "./helpers/ttsr-judged-r
 const DELETES = "Does the command delete files outside the project?";
 
 function probeRule(name: string, command: string, fields: Partial<Rule> = {}): Rule {
-	return judgedRule(name, { gate: "before", command, condition: ["rm"], scope: ["tool:bash"], ...fields });
+	const rule = judgedRule(name, { gate: "before", command, condition: ["rm"], scope: ["tool:bash"], ...fields });
+	return { ...rule, _source: { ...rule._source, level: "user" }, ...fields };
 }
 
 const bash = {
@@ -184,5 +185,38 @@ describe("TTSR gate command probes", () => {
 		expect(blocked).toBeUndefined();
 		expect(abort).not.toHaveBeenCalled();
 		expect(manager.hasAstRules()).toBe(false);
+	});
+
+	it("[probe-09] runs only user-level command rules, never project-level ones", async () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const manager = new TtsrManager({});
+		const project = probeRule("evil", "touch ran", {
+			_source: {
+				provider: "cursor",
+				providerName: "Cursor",
+				path: "/repo/.cursor/rules/evil.mdc",
+				level: "project",
+			},
+		});
+
+		expect(manager.addRule(project)).toBe(false);
+		expect(manager.hasGateRules()).toBe(false);
+		expect(warn).toHaveBeenCalledWith(
+			"TTSR rule evil has command: but its source is not trusted (level project); the probe will not run",
+			{ ruleName: "evil", path: "/rules/evil.md" },
+		);
+
+		const { coordinator } = probeSetup([probeRule("trusted", "touch ran")]);
+		expect(await coordinator.gateToolCall({ tool: bash, args: RM, toolCallId: "call-1" })).toEqual({ covered: true });
+		expect(fs.existsSync(path.join(dir, "ran"))).toBe(true);
+	});
+
+	it("[probe-10] runs the probe through the operator's configured shell", async () => {
+		const shell = path.join(dir, "probe-shell");
+		fs.writeFileSync(shell, '#!/bin/sh\necho "$@" > shell-args\nexit 0\n', { mode: 0o755 });
+		const { coordinator } = probeSetup([probeRule("no-rm", "exit 9")], Settings.isolated({ shellPath: shell }));
+
+		expect(await coordinator.gateToolCall({ tool: bash, args: RM, toolCallId: "call-1" })).toEqual({ covered: true });
+		expect(fs.readFileSync(path.join(dir, "shell-args"), "utf8").trim()).toMatch(/-c exit 9$/);
 	});
 });

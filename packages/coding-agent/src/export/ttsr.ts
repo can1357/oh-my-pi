@@ -862,6 +862,15 @@ export class TtsrManager {
 				logger.warn("TTSR command rule is not a gate: before rule, skipping rule", { ruleName: rule.name });
 				return false;
 			}
+			// A project-level rule ships with the checkout: running its command would execute
+			// repository-supplied code with the user's privileges, unprompted.
+			if (rule._source?.level === "project") {
+				logger.warn(
+					`TTSR rule ${rule.name} has command: but its source is not trusted (level project); the probe will not run`,
+					{ ruleName: rule.name, path: rule.path },
+				);
+				return false;
+			}
 			if (conditions.length === 0 && astConditions.length === 0) {
 				logger.warn("TTSR command rule has no condition, skipping rule", { ruleName: rule.name });
 				return false;

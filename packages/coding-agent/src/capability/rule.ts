@@ -83,8 +83,9 @@ export interface Rule {
 	 */
 	gate?: "before";
 	/**
-	 * Probe for a `gate: before` rule, run instead of the judge: a `/bin/sh -c` command fed the call as
-	 * JSON on stdin. Exit 0 allows the call; any other exit refuses it. Wins over `question`.
+	 * Probe for a `gate: before` rule, run instead of the judge through the user's shell, fed the call as
+	 * JSON on stdin. Exit 0 allows the call; any other exit refuses it. Wins over `question`. Honored
+	 * only on user-level rules: a project-level rule with `command` is not registered.
 	 */
 	command?: string;
 	/** What a gate does when the judge or probe cannot answer (off, failing, timed out); default `allow`. */
