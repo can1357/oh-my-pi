@@ -3469,6 +3469,19 @@ function openCodeModelManagerOptions(
 					mapModel: (entry, defaults) => {
 						const reference = references.get(defaults.id);
 						const name = toModelName(entry.name, reference?.name ?? defaults.name);
+						// Decision models answer only on System One and reject chat
+						// completions. Seeded rows replace these with authored prices.
+						if (entry.type === "decision") {
+							return {
+								...defaults,
+								name,
+								api: "typesafe",
+								baseUrl: basePath,
+								kind: "judge",
+								reasoning: false,
+								supportsTools: false,
+							};
+						}
 						// Pins and bundled routing hints win over the metadata-only
 						// stencil fallback; the fallback never selects a transport.
 						const api = resolveApi(defaults.id, defaults.api);
@@ -3514,7 +3527,11 @@ function openCodeModelManagerOptions(
 					fetch: config?.fetch,
 				});
 				if (!discovered) return null;
-				const seeds = seedModels(providerId).map(seed => ({ ...seed, baseUrl: basePath }));
+				// Seeds on this gateway follow a configured base URL; Go's Jev
+				// row lives on the Console System One endpoint and keeps it.
+				const seeds = seedModels(providerId).map(seed =>
+					seed.baseUrl === defaultBasePath ? { ...seed, baseUrl: basePath } : seed,
+				);
 				const seedIds = new Set(seeds.map(seed => seed.id));
 				return [...discovered.filter(model => !seedIds.has(model.id)), ...seeds];
 			},
