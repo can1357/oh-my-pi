@@ -343,7 +343,6 @@ const innerCredentialsSchema = type({
 	"token?": optionalCredentialString,
 	"projectId?": optionalCredentialString,
 	"project_id?": optionalCredentialString,
-	"userTier?": optionalCredentialString,
 	"refreshToken?": optionalCredentialString,
 	"refresh?": optionalCredentialString,
 	"email?": optionalCredentialString,
@@ -360,8 +359,6 @@ const geminiCliCredentialsSchema = type("unknown").pipe(raw => {
 interface ParsedGeminiCliCredentials {
 	accessToken: string;
 	projectId: string;
-	/** Provider-reported tier id (Antigravity `currentTier.id`); see `OAuthCredentials.userTier`. */
-	userTier?: string;
 	refreshToken?: string;
 	expiresAt?: number;
 	email?: string;
@@ -400,12 +397,10 @@ export function parseGeminiCliCredentials(apiKeyRaw: string): ParsedGeminiCliCre
 	const expiresAt = normalizeExpiryMs(parsed.expiresAt ?? parsed.expires);
 	const email = parsed.email && parsed.email.length > 0 ? parsed.email : undefined;
 	const accountId = parsed.accountId && parsed.accountId.length > 0 ? parsed.accountId : undefined;
-	const userTier = parsed.userTier && parsed.userTier.length > 0 ? parsed.userTier : undefined;
 
 	return {
 		accessToken: parsed.token,
 		projectId,
-		userTier,
 		refreshToken,
 		expiresAt,
 		email,
@@ -456,7 +451,6 @@ interface CloudCodeAssistRequest {
 	userAgent?: string;
 	requestId?: string;
 	userPromptId?: string;
-	enabledCreditTypes?: string[];
 }
 
 interface CloudCodeAssistResponseChunk {
@@ -615,15 +609,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						projectId: parsedCredentials.projectId,
 					})
 				: undefined;
-			let requestBody = buildRequest(
-				model,
-				requestContext,
-				projectId,
-				options,
-				isAntigravity,
-				accountKey,
-				parsedCredentials.userTier,
-			);
+			let requestBody = buildRequest(model, requestContext, projectId, options, isAntigravity, accountKey);
 			const replacementPayload = await options?.onPayload?.(requestBody, model);
 			if (replacementPayload !== undefined) {
 				requestBody = replacementPayload as typeof requestBody;
@@ -1337,21 +1323,6 @@ function buildAntigravityRequestEnvelope(
 	return { sessionId, requestId, labels, userPromptId: labels.request_id };
 }
 
-/** Free tier id `loadCodeAssist` reports (`currentTier.id`). */
-const ANTIGRAVITY_FREE_TIER_ID = "free-tier";
-
-/**
- * Top-level `enabledCreditTypes` for an Antigravity envelope. The 2.34.0
- * envelope proto gained the repeated enum `enabled_credit_types`, whose only
- * value is `GOOGLE_ONE_AI`; when the native client sets it, and which tiers
- * it applies to, is unverified. omp sends it only for an account whose
- * reported tier is known and not `free-tier` (a Google One AI plan is a paid
- * tier); a free or unknown tier sends nothing.
- */
-function getAntigravityEnabledCreditTypes(userTier: string | undefined): string[] | undefined {
-	return userTier && userTier !== ANTIGRAVITY_FREE_TIER_ID ? ["GOOGLE_ONE_AI"] : undefined;
-}
-
 export function buildRequest(
 	model: Model<"google-gemini-cli">,
 	context: Context,
@@ -1360,8 +1331,6 @@ export function buildRequest(
 	isAntigravity = false,
 	/** Serving credential's account key; selects its discovered Antigravity request constants. */
 	accountKey?: string,
-	/** Serving credential's reported tier id; gates Antigravity `enabledCreditTypes`. */
-	userTier?: string,
 ): CloudCodeAssistRequest {
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
 	const contents = convertMessages(model, context);
@@ -1514,7 +1483,6 @@ export function buildRequest(
 			request.generationConfig = generationConfig;
 		}
 		request.sessionId = envelope.sessionId;
-		const enabledCreditTypes = getAntigravityEnabledCreditTypes(userTier);
 		return {
 			project: projectId,
 			requestId: envelope.requestId,
@@ -1522,7 +1490,6 @@ export function buildRequest(
 			model: wireModelId,
 			userAgent: "antigravity",
 			userPromptId: envelope.userPromptId,
-			...(enabledCreditTypes ? { enabledCreditTypes } : {}),
 		};
 	}
 

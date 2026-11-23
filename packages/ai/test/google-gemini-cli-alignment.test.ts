@@ -88,7 +88,6 @@ describe("Google Gemini CLI alignment", () => {
 				refresh: "refresh-token",
 				expires: expiresAt,
 				projectId: "proj-123",
-				userTier: "standard-tier",
 				email: "dev@example.com",
 				accountId: "acct-1",
 			},
@@ -98,7 +97,6 @@ describe("Google Gemini CLI alignment", () => {
 		const payload = JSON.parse(result!.apiKey) as {
 			token?: string;
 			projectId?: string;
-			userTier?: string;
 			refreshToken?: string;
 			expiresAt?: number;
 			email?: string;
@@ -106,7 +104,6 @@ describe("Google Gemini CLI alignment", () => {
 		};
 		expect(payload.token).toBe("access-token");
 		expect(payload.projectId).toBe("proj-123");
-		expect(payload.userTier).toBe("standard-tier");
 		expect(payload.refreshToken).toBe("refresh-token");
 		expect(payload.expiresAt).toBe(expiresAt);
 		expect(payload.email).toBe("dev@example.com");
@@ -143,7 +140,6 @@ describe("Google Gemini CLI alignment", () => {
 			JSON.stringify({
 				token: "enriched-token",
 				projectId: "proj-enriched",
-				userTier: "standard-tier",
 				refreshToken: "refresh-token",
 				expiresAt: 1_737_000_000_000,
 				email: "dev@example.com",
@@ -152,14 +148,10 @@ describe("Google Gemini CLI alignment", () => {
 		expect(enriched).toEqual({
 			accessToken: "enriched-token",
 			projectId: "proj-enriched",
-			userTier: "standard-tier",
 			refreshToken: "refresh-token",
 			expiresAt: 1_737_000_000_000,
 			email: "dev@example.com",
 		});
-		expect(parseGeminiCliCredentials(JSON.stringify({ token: "t", projectId: "p", userTier: "" })).userTier).toBe(
-			undefined,
-		);
 	});
 
 	it("keeps projectId alias precedence and tolerates a mistyped projectId", () => {
@@ -185,13 +177,12 @@ describe("Google Gemini CLI alignment", () => {
 
 	it("omits antigravity-only metadata in non-antigravity request payloads", () => {
 		const model = createModel("custom-cca");
-		const payload = buildRequest(model, createContext(), "proj-123", {}, false, undefined, "standard-tier") as {
+		const payload = buildRequest(model, createContext(), "proj-123", {}, false) as {
 			request: { sessionId?: string };
 			requestType?: string;
 			userAgent?: string;
 			requestId?: string;
 			userPromptId?: string;
-			enabledCreditTypes?: string[];
 		};
 
 		expect(payload.request.sessionId).toBeUndefined();
@@ -199,7 +190,6 @@ describe("Google Gemini CLI alignment", () => {
 		expect(payload.userAgent).toBeUndefined();
 		expect(payload.requestId).toBeUndefined();
 		expect(payload.userPromptId).toBeUndefined();
-		expect(payload.enabledCreditTypes).toBeUndefined();
 	});
 	it("keeps every system prompt block in systemInstruction instead of conversation contents", () => {
 		const model = createModel("custom-cca");
@@ -419,27 +409,6 @@ describe("Google Gemini CLI alignment", () => {
 		const model = createModel("google-antigravity");
 		const payload = buildRequest(model, createContext(), "proj-123", {}, true);
 		expect(payload !== null && typeof payload === "object" && "requestType" in payload).toBe(false);
-	});
-
-	describe("Antigravity enabledCreditTypes", () => {
-		function creditTypes(userTier: string | undefined) {
-			return buildRequest(
-				createModel("google-antigravity"),
-				createContext(),
-				"proj-123",
-				{},
-				true,
-				undefined,
-				userTier,
-			).enabledCreditTypes;
-		}
-
-		it("sends GOOGLE_ONE_AI only for a known non-free tier", () => {
-			expect(creditTypes(undefined)).toBeUndefined();
-			expect(creditTypes("")).toBeUndefined();
-			expect(creditTypes("free-tier")).toBeUndefined();
-			expect(creditTypes("standard-tier")).toEqual(["GOOGLE_ONE_AI"]);
-		});
 	});
 
 	it("stamps the antigravity wire profile (maxOutputTokens + model_enum) by routed wire id", () => {
@@ -669,6 +638,15 @@ describe("Google Gemini CLI alignment", () => {
 				await send("google-antigravity", fetchMock);
 				await send("google-antigravity", fetchMock, { userTier: "free-tier" });
 			});
+
+			expect(captured.map(request => request.body.enabledCreditTypes)).toEqual([undefined, undefined]);
+		});
+
+		it("does not opt a paid Cloud Code Assist tier into Google One AI credits", async () => {
+			const { captured, fetchMock } = captureGenerateRequests();
+			// Code Assist Standard and legacy tiers are not Google One plans.
+			await send("google-antigravity", fetchMock, { userTier: "standard-tier" });
+			await send("google-antigravity", fetchMock, { userTier: "legacy-tier" });
 
 			expect(captured.map(request => request.body.enabledCreditTypes)).toEqual([undefined, undefined]);
 		});
