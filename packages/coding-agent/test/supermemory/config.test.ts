@@ -151,11 +151,16 @@ describe("resolveSupermemoryNamespace", () => {
 		dir = TempDir.createSync("@supermemory-tag-");
 		const repo = path.join(dir.path(), "secret-project");
 		await fs.mkdir(path.join(repo, "nested"), { recursive: true });
-		await $`git init -q && git -c core.hooksPath=/dev/null -c user.email=t@t -c user.name=t commit -q --allow-empty -m init`
-			.cwd(repo)
-			.quiet();
+		// The on-disk shape of a repository with a linked worktree, which `vcs.repo` reads without running git.
+		const commonDir = path.join(repo, ".git");
 		const worktree = path.join(dir.path(), "wt");
-		await $`git -c core.hooksPath=/dev/null worktree add -q ${worktree}`.cwd(repo).quiet();
+		const gitDir = path.join(commonDir, "worktrees", "wt");
+		await fs.mkdir(gitDir, { recursive: true });
+		await fs.mkdir(worktree);
+		await Bun.write(path.join(commonDir, "HEAD"), "ref: refs/heads/main\n");
+		await Bun.write(path.join(gitDir, "HEAD"), "ref: refs/heads/wt\n");
+		await Bun.write(path.join(gitDir, "commondir"), "../..\n");
+		await Bun.write(path.join(worktree, ".git"), `gitdir: ${gitDir}\n`);
 
 		const perProject = { namespace: undefined, scoping: "per-project" } as const;
 		const tag = resolveSupermemoryNamespace(repo, perProject);

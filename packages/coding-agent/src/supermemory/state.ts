@@ -381,12 +381,14 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	/**
 	 * Persists one tool call's items, all or none, before resolving, then starts delivering
 	 * them. A retried call has the same event ids, so it neither queues nor uploads twice.
-	 * The delivery is tracked (it joins the queue's own flush), so {@link flush} and dispose wait for it.
+	 * Publication and the delivery after it are tracked before anything is awaited, so
+	 * {@link flush} and dispose wait for a retain that is still writing its event.
 	 */
 	async enqueueRetain(toolCallId: string, items: SupermemoryRetainInput[]): Promise<void> {
 		if (this.aliasOf) return this.aliasOf.enqueueRetain(toolCallId, items);
-		await this.#local().outbox.enqueue(toolCallId, items);
-		void this.drainOutbox();
+		const published = this.#local().outbox.enqueue(toolCallId, items);
+		void this.#track(published.then(() => this.drainOutbox()));
+		await published;
 	}
 
 	/** Delivers this destination's outbox, including events earlier processes left; tracked so {@link flush} awaits it. */

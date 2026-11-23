@@ -8,7 +8,7 @@ import {
 	wrapTextWithAnsi as nativeWrapTextWithAnsi,
 	type SliceResult,
 } from "@oh-my-pi/pi-natives";
-import { DEFAULT_TAB_WIDTH } from "@oh-my-pi/pi-utils";
+import { DEFAULT_TAB_WIDTH, sanitizeText } from "@oh-my-pi/pi-utils";
 
 export { Ellipsis } from "@oh-my-pi/pi-natives";
 
@@ -291,6 +291,11 @@ export function replaceTabs(text: string): string {
 /** Tabs expanded and line breaks collapsed to spaces, for text confined to one rendered row. */
 export function singleLine(text: string): string {
 	return replaceTabs(text).replace(/[\r\n]+/g, " ");
+}
+
+/** Untrusted text for one rendered row: ANSI escapes and control characters stripped, then {@link singleLine}. */
+export function sanitizeLine(text: string): string {
+	return singleLine(sanitizeText(text));
 }
 
 /** A non-negative integer cell width; non-finite input becomes `fallback`. */

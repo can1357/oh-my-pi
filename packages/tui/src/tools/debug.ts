@@ -12,8 +12,7 @@ import {
 	truncateToWidth,
 	clipCollapsed,
 } from "../render/render-utils";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { singleLine } from "../utils";
+import { sanitizeLine } from "../utils";
 import type { NativeToolView, RenderResultOptions, ToolRenderer, ToolRenderResult } from "./renderer";
 import { ansi, kv } from "../native/describe";
 import type { NativeChild } from "../native/node";
@@ -90,17 +89,6 @@ export function formatSessionSnapshot(snapshot: DebugSessionSnapshot): string[] 
 	return lines;
 }
 
-/**
- * Model-authored arg text is untrusted: strip ANSI escapes and control
- * characters, then hand the value to the shared single-line projection
- * (`singleLine`: tab expansion + line-break collapse) before it lands in a
- * card row or native head (same treatment as every sibling renderer, e.g.
- * `replaceTabs` in bash.ts).
- */
-function sanitizeDebugArg(value: string): string {
-	return singleLine(sanitizeText(value));
-}
-
 /** Highest-precedence identifying arg for a debug call head; mirrors the summary field order. */
 function debugCallTarget(args: DebugRenderArgs): string | undefined {
 	return (
@@ -118,17 +106,17 @@ function debugCallTarget(args: DebugRenderArgs): string | undefined {
 }
 
 function summarizeDebugCall(args: DebugRenderArgs): string {
-	const action = args.action ? sanitizeDebugArg(args.action.replaceAll("_", " ")) : "request";
+	const action = args.action ? sanitizeLine(args.action.replaceAll("_", " ")) : "request";
 	const target = debugCallTarget(args);
-	return target ? `${action} ${truncateToWidth(sanitizeDebugArg(target), TRUNCATE_LENGTHS.TITLE)}` : action;
+	return target ? `${action} ${truncateToWidth(sanitizeLine(target), TRUNCATE_LENGTHS.TITLE)}` : action;
 }
 
 /** Untruncated `[action, target]` for native heads; mirrors {@link summarizeDebugCall}'s field precedence. */
 function debugCallParts(args: DebugRenderArgs | undefined, fallbackAction: string): [string, string | undefined] {
-	const action = sanitizeDebugArg((args?.action ?? fallbackAction).replaceAll("_", " "));
+	const action = sanitizeLine((args?.action ?? fallbackAction).replaceAll("_", " "));
 	if (!args) return [action, undefined];
 	const target = debugCallTarget(args);
-	return [action, target === undefined ? undefined : sanitizeDebugArg(target)];
+	return [action, target === undefined ? undefined : sanitizeLine(target)];
 }
 
 function describeDebugResult(
@@ -190,7 +178,7 @@ export const debugToolRenderer = {
 		args?: DebugRenderArgs,
 	): Component {
 		return framedToolCard(theme, () => {
-			const action = sanitizeDebugArg((args?.action ?? result.details?.action ?? "debug").replaceAll("_", " "));
+			const action = sanitizeLine((args?.action ?? result.details?.action ?? "debug").replaceAll("_", " "));
 			const success = !options.isPartial && !result.isError;
 			const statusIcon = success
 				? theme.styledSymbol("tool.debug", "accent")

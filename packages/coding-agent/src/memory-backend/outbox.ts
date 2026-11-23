@@ -381,12 +381,12 @@ export class MemoryOutboxQueue<E extends MemoryOutboxEvent, I> {
 		}
 	}
 
+	/** Delivers pending events; a closed queue starts none (they stay on disk for the next process). */
 	async flush(): Promise<void> {
 		if (this.#timer) {
 			clearTimeout(this.#timer);
 			this.#timer = undefined;
 		}
-
 		if (this.#flushing) {
 			// Coalesce: wait for the in-flight drain, then drain anything that
 			// landed after it started so we don't strand items.
@@ -394,6 +394,7 @@ export class MemoryOutboxQueue<E extends MemoryOutboxEvent, I> {
 			if (this.#pending > 0) await this.flush();
 			return;
 		}
+		if (this.#closed) return;
 
 		this.#pending = 0;
 		this.#flushing = this.#drain();

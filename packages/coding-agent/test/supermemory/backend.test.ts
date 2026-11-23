@@ -1,4 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import {
+	MemoryOutbox,
+	type MemoryOutboxEvent,
+	MemoryOutboxQueue,
+} from "@oh-my-pi/pi-coding-agent/memory-backend/outbox";
 import { prepareRetentionTranscript } from "@oh-my-pi/pi-coding-agent/hindsight/content";
 import { extractMessages } from "@oh-my-pi/pi-coding-agent/hindsight/transcript";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -571,6 +576,75 @@ describe("supermemoryBackend", () => {
 		reply.resolve({ id: "d", status: "queued" });
 		await disposing;
 		expect(disposed).toBe(true);
+	});
+
+	it("/memory clear and dispose wait for a retain still publishing its event; nothing is sent after dispose", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession();
+		await start(session);
+		const state = session.getSupermemorySessionState();
+		// Settle the start-up outbox drain so the retain is the only pending write.
+		await state?.flush();
+		const publication = Promise.withResolvers<void>();
+		const publish = MemoryOutbox.prototype.enqueue;
+		vi.spyOn(MemoryOutbox.prototype, "enqueue").mockImplementation(
+			async function (this: MemoryOutbox<MemoryOutboxEvent>, events) {
+				await publication.promise;
+				return publish.call(this, events);
+			},
+		);
+		// A background subagent's retain, still writing its event to disk.
+		const retaining = state?.enqueueRetain("call-1", [{ content: "queued fact", source: "t" }]);
+		let flushed = false;
+		const flushing = state?.flush().then(() => {
+			flushed = true;
+		});
+		let sentAtDispose: number | undefined;
+		const disposing = state?.dispose().then(() => {
+			sentAtDispose = create.mock.calls.length;
+		});
+		// One macrotask turn lets an unblocked flush or dispose settle while the publication is pending.
+		await Bun.sleep(0);
+		expect(flushed).toBe(false);
+		expect(sentAtDispose).toBeUndefined();
+		publication.resolve();
+		await Promise.all([retaining, flushing, disposing]);
+		expect(sentAtDispose).toBe(1);
+		await state?.flush();
+		expect(create).toHaveBeenCalledTimes(1);
+	});
+
+	it("a closed outbox queue starts no delivery when a publication finishes after dispose", async () => {
+		const publication = Promise.withResolvers<void>();
+		vi.spyOn(MemoryOutbox.prototype, "enqueue").mockImplementation(async () => {
+			await publication.promise;
+			return 1;
+		});
+		const drain = vi.spyOn(MemoryOutbox.prototype, "drain");
+		const queue = new MemoryOutboxQueue<MemoryOutboxEvent, string>({
+			label: "Test",
+			destination: "test",
+			createOutbox: () =>
+				new MemoryOutbox({
+					root: temp.path(),
+					apiUrl: "http://127.0.0.1:1",
+					container: "test",
+					label: "Test",
+					isEvent: () => true,
+					send: async () => "accepted",
+				}),
+			toEvents: (toolCallId, items) => items.map(item => ({ version: 1, id: `${toolCallId}-${item}` })),
+			notice: () => {},
+			flushBatchSize: 1,
+		});
+		const enqueued = queue.enqueue("call-1", ["fact"]);
+		queue.dispose();
+		publication.resolve();
+		await enqueued;
+		await queue.flush();
+		expect(drain).not.toHaveBeenCalled();
 	});
 
 	it("re-sends the last window when a manual continuation adds an answer without a new user turn", async () => {

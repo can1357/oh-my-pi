@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDir, isEnoent, sanitizeText, withLoopPhase } from "@oh-my-pi/pi-utils";
-import { replaceTabs, singleLine } from "@oh-my-pi/pi-tui/utils";
+import { replaceTabs, sanitizeLine } from "@oh-my-pi/pi-tui/utils";
 import { getMemoryRoot } from "../memories";
 import { getMnemopiSessionState, type MnemopiScopedMemoryHit, type MnemopiSessionStateApi } from "../mnemopi/state";
 import memoryDoc from "../prompts/internal-urls/memory.md" with { type: "text" };
@@ -330,14 +330,9 @@ function renderMnemopiMemory(url: InternalUrl, hit: MnemopiScopedMemoryHit): Int
 	});
 }
 
-/** One line of server text: terminal controls stripped, line breaks collapsed. */
-function serverLine(text: string): string {
-	return singleLine(sanitizeText(text));
-}
-
 function relatedSection(title: string, items: readonly SupermemoryRelatedMemory[]): string {
 	if (items.length === 0) return "";
-	return `\n\n## ${title}\n${items.map(item => `- ${serverLine(item.memory)} (id: ${serverLine(item.id)})`).join("\n")}`;
+	return `\n\n## ${title}\n${items.map(item => `- ${sanitizeLine(item.memory)} (id: ${sanitizeLine(item.id)})`).join("\n")}`;
 }
 
 /**
@@ -350,22 +345,22 @@ function renderSupermemoryMemory(url: InternalUrl, namespace: string, memory: Su
 		Object.keys(memory.metadata).length > 0 ? `metadata: ${sanitizeText(JSON.stringify(memory.metadata))}\n` : "";
 	const header =
 		"---\n" +
-		`id: ${serverLine(memory.id)}\n` +
+		`id: ${sanitizeLine(memory.id)}\n` +
 		`namespace: ${namespace}\n` +
 		(memory.version !== undefined ? `version: ${memory.version}\n` : "") +
 		`isStatic: ${memory.isStatic}\n` +
 		`isInference: ${memory.isInference}\n` +
 		`isLatest: ${memory.isLatest}\n` +
 		`isForgotten: ${memory.isForgotten}\n` +
-		(memory.createdAt ? `createdAt: ${serverLine(memory.createdAt)}\n` : "") +
-		(memory.updatedAt ? `updatedAt: ${serverLine(memory.updatedAt)}\n` : "") +
+		(memory.createdAt ? `createdAt: ${sanitizeLine(memory.createdAt)}\n` : "") +
+		(memory.updatedAt ? `updatedAt: ${sanitizeLine(memory.updatedAt)}\n` : "") +
 		meta +
 		"---\n\n";
 	const { document } = memory;
 	const source = document
-		? `\n\n## Source document\n- id: ${serverLine(document.id)}` +
-			(document.title ? `\n- title: ${serverLine(document.title)}` : "") +
-			(document.summary ? `\n- summary: ${serverLine(document.summary)}` : "")
+		? `\n\n## Source document\n- id: ${sanitizeLine(document.id)}` +
+			(document.title ? `\n- title: ${sanitizeLine(document.title)}` : "") +
+			(document.summary ? `\n- summary: ${sanitizeLine(document.summary)}` : "")
 		: "";
 	const content = replaceTabs(
 		header +
