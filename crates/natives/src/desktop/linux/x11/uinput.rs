@@ -117,6 +117,17 @@ impl UInputDevice {
 	/// Press or release the key at X keycode `keycode`. A release always goes
 	/// out: a cancel stops only the next press.
 	pub(super) fn key(&mut self, keycode: u8, press: bool) -> CoreResult<()> {
+		self.key_written(keycode, press, || {})
+	}
+
+	/// [`Self::key`], running `written` once the key event is written, before
+	/// its sync report can fail.
+	pub(super) fn key_written(
+		&mut self,
+		keycode: u8,
+		press: bool,
+		written: impl FnOnce(),
+	) -> CoreResult<()> {
 		if press {
 			control::check()?;
 		}
@@ -124,6 +135,7 @@ impl UInputDevice {
 			DesktopError::input_failed(format!("X keycode {keycode} has no evdev counterpart"))
 		})?;
 		self.emit(EV_KEY, code, i32::from(press))?;
+		written();
 		self.sync()
 	}
 
@@ -277,6 +289,8 @@ fn ioctl_ptr(fd: libc::c_int, request: libc::Ioctl, setup: &UInputSetup) -> Core
 
 #[cfg(test)]
 mod tests {
+	use std::os::fd::FromRawFd as _;
+
 	use super::*;
 	use crate::desktop::error::ErrorCode;
 
@@ -287,12 +301,31 @@ mod tests {
 		let source = control::CancellationSource::default();
 		let token = source.token();
 		source.cancel();
+		let mut written = 0;
 		control::with_token_for_test(&token, || {
-			assert_eq!(device.key(38, true).unwrap_err().code, ErrorCode::Cancelled);
+			let cancelled = device.key_written(38, true, || written += 1);
+			assert_eq!(cancelled.unwrap_err().code, ErrorCode::Cancelled);
 			assert_eq!(device.button(1, true).unwrap_err().code, ErrorCode::Cancelled);
 			// The chord's last press is out: its releases still go.
 			device.key(38, false).unwrap();
 			device.button(1, false).unwrap();
 		});
+		assert_eq!(written, 0, "a press cancelled before its write was counted");
+
+		// A pipe with room for the key event but not for its sync report.
+		let mut fds = [0; 2];
+		// SAFETY: `fds` has room for the two descriptors `pipe2` writes.
+		assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK) }, 0);
+		// SAFETY: `pipe2` returned both descriptors, owned from here on.
+		let (_reader, mut file) = unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) };
+		// SAFETY: `F_GETPIPE_SZ` only reads the pipe's capacity.
+		let capacity = unsafe { libc::fcntl(fds[1], libc::F_GETPIPE_SZ) };
+		let room = std::mem::size_of::<InputEvent>();
+		file
+			.write_all(&vec![0; usize::try_from(capacity).unwrap() - room])
+			.unwrap();
+		let mut device = UInputDevice { file, created: false };
+		assert!(device.key_written(38, true, || written += 1).is_err());
+		assert_eq!(written, 1, "a press written before its sync report failed was not counted");
 	}
 }

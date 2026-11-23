@@ -13,6 +13,7 @@
  *   GET  /v1/usage                         → aggregated provider usage (5-min per-credential cache via AuthStorage)
  *   GET  /v1/credentials/check             → per-credential auth probe (diagnose 401s in a multi-account pool)
  *   GET  /v1/models                        → list known models from the registry
+ *   GET  /v1/pi/models                     → the same catalog as pi-native model specs (pi-native clients' rosters)
  *   POST /v1/chat/completions              → OpenAI chat-completions in/out
  *   POST /v1/messages                      → Anthropic messages in/out
  *   POST /v1/responses                     → OpenAI Responses in/out
@@ -30,6 +31,7 @@
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import { type PiNativeModelsResponse, toPiNativeModelSpec } from "@oh-my-pi/pi-catalog/discovery/pi-native";
 import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyGatewayError } from "../error/gateway";
@@ -812,15 +814,22 @@ interface ModelListRow {
 	supports_tools?: boolean;
 }
 
-function handleModelsList(opts: AuthGatewayRouteOptions): Response {
+/** Every served model once, keyed by `provider/id`; the first listing of a key wins. */
+function* uniqueListedModels(opts: AuthGatewayRouteOptions): Generator<Model<Api>> {
 	const seen = new Set<string>();
-	const data: ModelListRow[] = [];
 	for (const model of opts.listModels?.() ?? []) {
 		const id = `${model.provider}/${model.id}`;
 		if (seen.has(id)) continue;
 		seen.add(id);
+		yield model;
+	}
+}
+
+function handleModelsList(opts: AuthGatewayRouteOptions): Response {
+	const data: ModelListRow[] = [];
+	for (const model of uniqueListedModels(opts)) {
 		const row: ModelListRow = {
-			id,
+			id: `${model.provider}/${model.id}`,
 			object: "model",
 			owned_by: model.provider,
 			api: model.api,
@@ -834,6 +843,12 @@ function handleModelsList(opts: AuthGatewayRouteOptions): Response {
 		data.push(row);
 	}
 	return json(200, { object: "list", data });
+}
+
+/** `GET /v1/pi/models`: the `/v1/models` catalog as specs, from which pi-native clients build their rosters. */
+function handlePiNativeModelsList(opts: AuthGatewayRouteOptions): Response {
+	const body: PiNativeModelsResponse = { models: [...uniqueListedModels(opts)].map(toPiNativeModelSpec) };
+	return json(200, body);
 }
 
 /** `GET /v1/videos/:id` (poll) and `GET /v1/videos/:id/content` (download); group 1 = id, group 2 = `/content`. */
@@ -856,6 +871,7 @@ const LOGGABLE_PATHS: Record<string, true> = {
 	"/v1/rerank": true,
 	"/v1/videos": true,
 	"/v1/models": true,
+	"/v1/pi/models": true,
 };
 
 /** Only static routes reach logs verbatim; dynamic or unknown paths may carry caller-supplied secrets. */
@@ -993,6 +1009,9 @@ export function createAuthGatewayRouter(hostOpts: AuthGatewayRouteOptions): Auth
 			// Model catalog.
 			if (req.method === "GET" && pathname === "/v1/models") {
 				return handleModelsList(opts);
+			}
+			if (req.method === "GET" && pathname === "/v1/pi/models") {
+				return handlePiNativeModelsList(opts);
 			}
 
 			// Route-table miss: no format module to defer to, so we emit a

@@ -394,6 +394,69 @@ describe("title generator", () => {
 		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
 	});
 
+	it.each(["<title>none</title>", "<title/>", '<title>"None."</title>'])(
+		"stops before the next paid model when the first model declines with %s",
+		async reply => {
+			const primary = getModelOrThrow("claude-haiku-4-5");
+			const fallback = getModelOrThrow("claude-sonnet-4-5");
+			const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockImplementation(
+				async model =>
+					({
+						stopReason: "stop",
+						content: [
+							{ type: "text", text: model.id === primary.id ? reply : "<title>Unwanted fallback title</title>" },
+						],
+					}) as never,
+			);
+			const settings = Settings.isolated({
+				modelRoles: { tiny: `${primary.provider}/${primary.id}`, smol: `${fallback.provider}/${fallback.id}` },
+				"retry.modelFallback": true,
+				"retry.fallbackChains": {
+					[`${primary.provider}/${primary.id}`]: [`${fallback.provider}/${fallback.id}`],
+				},
+			});
+
+			const title = await generateSessionTitle(
+				"I have a quick question for you",
+				createRegistry(primary, [primary, fallback]),
+				settings,
+			);
+
+			expect(title).toBeNull();
+			expect(completeSimpleMock.mock.calls.map(call => call[0].id)).toEqual([primary.id]);
+		},
+	);
+
+	it.each([
+		["an empty reply", []],
+		["a reply cut off after an opening <title>", [{ type: "text", text: "<title>" }]],
+	])("tries the next title model after %s", async (_shape, primaryContent) => {
+		const primary = getModelOrThrow("claude-haiku-4-5");
+		const fallback = getModelOrThrow("claude-sonnet-4-5");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockImplementation(
+			async model =>
+				({
+					stopReason: "stop",
+					content:
+						model.id === primary.id
+							? primaryContent
+							: [{ type: "text", text: "<title>Fix resolver errors</title>" }],
+				}) as never,
+		);
+		const settings = Settings.isolated({
+			modelRoles: { tiny: `${primary.provider}/${primary.id}`, smol: `${fallback.provider}/${fallback.id}` },
+		});
+
+		const title = await generateSessionTitle(
+			"Investigate resolver errors",
+			createRegistry(primary, [primary, fallback]),
+			settings,
+		);
+
+		expect(title).toBe("Fix resolver errors");
+		expect(completeSimpleMock.mock.calls.map(call => call[0].id)).toEqual([primary.id, fallback.id]);
+	});
+
 	it("logs and returns null when title credentials are missing", async () => {
 		const model = getModelOrThrow("claude-sonnet-4-5");
 		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
