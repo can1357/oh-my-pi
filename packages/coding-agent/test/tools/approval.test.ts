@@ -893,6 +893,7 @@ describe("tool-owned dynamic approval declarations", () => {
 			"git -c alias.x='!touch /tmp/pwn; printf ok' x",
 			"git -ec alias.x='!touch /tmp/pwn; printf ok' x",
 			"git add -A && git -c alias.x='!touch /tmp/pwn; printf ok' x",
+			"git -\\\nc alias.x='!touch /tmp/pwn; printf ok' x",
 		]) {
 			expect(bashApproval(command, permissiveGitOverrides)).toBe("exec");
 		}
