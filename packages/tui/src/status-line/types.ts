@@ -2,7 +2,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import type { SessionState, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { NativeNode, NativeUiEvent } from "../native/node";
 import type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "./schema";
-import type { ActiveRepoContext, PromptCacheStatus, StatusLineSession } from "./host";
+import type { ActiveRepoContext, PromptCacheStatus, SessionTreePosition, StatusLineSession } from "./host";
 import type { LoopConditionConfig, LoopLimitRuntime } from "./loop";
 
 export type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle };
@@ -155,6 +155,11 @@ export interface SegmentContext {
 	/** Blink phase for the running-speculation pulse; toggled by the component's timer. */
 	speculationBlinkOn: boolean;
 	subagentCount: number;
+	/**
+	 * The main session's place in its tree when off the tip of a single line;
+	 * undefined otherwise, and while a subagent is focused (`/tree` acts on the main session).
+	 */
+	treePosition?: SessionTreePosition;
 	/**
 	 * Spend of every subagent under the main session (descendants included),
 	 * from the Agent Hub projection; 0 while a subagent is focused or unknown.

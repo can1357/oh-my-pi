@@ -4015,6 +4015,21 @@ export class Settings {
 		}
 		delete raw["computer.backend"];
 
+		// computer.backgroundFallback became computer.takeover, which added the
+		// opt-in `foreground` and `always` modes. `refuse` carries over; the old
+		// `takeover` is the default `fallback`, so it is dropped.
+		const computerSettings = isRecord(raw.computer) ? raw.computer : undefined;
+		const fallback = computerSettings?.backgroundFallback ?? raw["computer.backgroundFallback"];
+		if (fallback === "refuse" && computerSettings?.takeover === undefined && raw["computer.takeover"] === undefined) {
+			if (computerSettings) computerSettings.takeover = "refuse";
+			else raw.computer = { takeover: "refuse" };
+		}
+		if (computerSettings) {
+			delete computerSettings.backgroundFallback;
+			if (Object.keys(computerSettings).length === 0) delete raw.computer;
+		}
+		delete raw["computer.backgroundFallback"];
+
 		delete raw["hindsight.mentalModelRefreshIntervalMs"];
 
 		return raw;
