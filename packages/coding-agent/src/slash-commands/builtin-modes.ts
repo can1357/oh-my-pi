@@ -89,8 +89,16 @@ const FAST_USAGE = "Usage: /fast [on|ultra|off|status]";
 function runFastCommand(arg: string, session: AgentSession): string | undefined {
 	switch (arg) {
 		case "":
-		case "toggle":
-			return `Fast mode ${session.toggleFastMode() ? "enabled" : "disabled"}.`;
+		case "toggle": {
+			// toggleFastMode() cannot distinguish "toggled off" from "refused":
+			// route through setFastMode so a tier-less model reports
+			// unavailability instead of claiming success.
+			if (session.isFastModeEnabled()) {
+				session.setFastMode(false);
+				return "Fast mode disabled.";
+			}
+			return session.setFastMode(true) ? "Fast mode enabled." : "Fast mode is unavailable for the current model.";
+		}
 		case "on":
 			return session.setFastMode(true) ? "Fast mode enabled." : "Fast mode is unavailable for the current model.";
 		case "ultra":
