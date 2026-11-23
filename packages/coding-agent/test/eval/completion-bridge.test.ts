@@ -7,6 +7,7 @@ import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import type { ModelRegistry } from "../../src/config/model-registry";
+import { cfgOffline } from "../../src/config/auxiliary-model-policy";
 import { Settings } from "../../src/config/settings";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../../src/eval/bridge-timeout";
 import {
@@ -349,6 +350,46 @@ describe("runEvalCompletion", () => {
 		expect(result).toEqual({
 			text: "fallback answer",
 			details: { model: "p/fallback", tier: "smol", structured: false },
+		});
+	});
+
+	describe("offline mode", () => {
+		const elsewhere = makeModel("q", "q-mini");
+
+		function offlineSession(opts: SessionOptions): ToolSession {
+			const session = makeSession(opts);
+			cfgOffline.set(session.settings, true);
+			session.getActiveModel = () => DEFAULT;
+			return session;
+		}
+
+		it("refuses a tier or tagged agent that resolves only on another provider", async () => {
+			const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+			const session = offlineSession({ available: [SMOL, DEFAULT, elsewhere], roles: { smol: "q/q-mini" } });
+			session.getSessionAgents = (): readonly AgentDefinition[] => [
+				{ name: "m1", model: ["q/q-mini"] } as AgentDefinition,
+			];
+
+			for (const model of ["smol", "m1"]) {
+				await expect(runEvalCompletionAndWait({ prompt: "q", model }, { session })).rejects.toThrow(
+					`completion() found no model for "${model}" on the active model's provider`,
+				);
+			}
+			expect(spy).not.toHaveBeenCalled();
+		});
+
+		it("skips fallback chain entries on another provider", async () => {
+			const fallback = makeModel("p", "fallback");
+			const session = offlineSession({ available: [SMOL, DEFAULT, elsewhere, fallback] });
+			cfgRetryFallbackChains.set(session.settings, { smol: ["q/q-mini", "p/fallback"] });
+			const spy = vi
+				.spyOn(ai, "completeSimple")
+				.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "quota exhausted" }))
+				.mockResolvedValueOnce(assistant({ text: "fallback answer" }));
+
+			await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+			expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "fallback"]);
 		});
 	});
 

@@ -3,6 +3,7 @@ import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { type Api, type AssistantMessage, completeSimple, type Model, type Usage } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import {
 	expandRoleAlias,
 	extractExplicitThinkingSelector,
@@ -32,26 +33,35 @@ export interface ImageQuestionResult {
 	usage: Usage;
 }
 
-/** Resolve the vision model used by `read <image>?q=<question>`. */
+/**
+ * Resolve the vision model used by `read <image>?q=<question>`. Offline mode
+ * (`models.offline`) keeps every candidate on the active model's provider.
+ */
 export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQuestionModel {
 	const modelRegistry = session.modelRegistry;
 	if (!modelRegistry) {
 		throw new ToolError("Model registry is unavailable for image questions.");
 	}
 
-	const availableModels = modelRegistry.getAvailable();
-	if (availableModels.length === 0) {
+	const allModels = modelRegistry.getAvailable();
+	if (allModels.length === 0) {
 		throw new ToolError("No models available for image questions.");
 	}
 
 	const matchPreferences = getModelMatchPreferences(session.settings);
+	const activeModelPattern = session.getActiveModelString?.() ?? session.getModelString?.();
+	const activeProvider = activeModelPattern
+		? resolveModelFromString(expandRoleAlias(activeModelPattern, session.settings), allModels, matchPreferences)
+				?.provider
+		: undefined;
+	const offline = cfgOffline.get(session.settings);
+	const availableModels = offline ? allModels.filter(candidate => candidate.provider === activeProvider) : allModels;
 	const resolvePattern = (pattern: string | undefined): Model<Api> | undefined => {
 		if (!pattern) return undefined;
 		const expanded = expandRoleAlias(pattern, session.settings);
 		return resolveModelFromString(expanded, availableModels, matchPreferences);
 	};
 
-	const activeModelPattern = session.getActiveModelString?.() ?? session.getModelString?.();
 	let model: Model<Api> | undefined;
 	let selectedPattern: string | undefined;
 	for (const pattern of ["@vision", "@default", activeModelPattern]) {
@@ -63,11 +73,15 @@ export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQu
 		}
 	}
 
-	const activeProvider = resolvePattern(activeModelPattern)?.provider;
 	model ??= availableModels.find(
 		candidate => candidate.provider === activeProvider && sendsImageInputOnWire(candidate),
 	);
 	model ??= availableModels.find(candidate => sendsImageInputOnWire(candidate));
+	if (!model && offline) {
+		throw new ToolError(
+			`Offline mode (models.offline) keeps image questions on the active model's provider${activeProvider ? ` (${activeProvider})` : ""}, which has no image-capable model.`,
+		);
+	}
 	if (!model) {
 		const textOnly = resolvePattern("@vision") ?? resolvePattern("@default") ?? resolvePattern(activeModelPattern);
 		if (!textOnly) throw new ToolError("Unable to resolve a model for image questions.");

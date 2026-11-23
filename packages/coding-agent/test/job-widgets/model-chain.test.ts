@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as ai from "@oh-my-pi/pi-ai";
 import type { Api, AssistantMessage, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { cfgOffline } from "@oh-my-pi/pi-coding-agent/config/auxiliary-model-policy";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createModelJobWidgetAuthor } from "@oh-my-pi/pi-coding-agent/job-widgets/author";
@@ -100,6 +101,23 @@ describe("job widget model chain", () => {
 		);
 		expect(error).toBeInstanceOf(Error);
 		expect((error as Error).message).toBe("backup route down");
+		expect(sent).toEqual([primary.id, backup.id]);
+	});
+
+	it("offline mode writes nothing unless the chain is on the session model's provider", async () => {
+		const { options, sent } = setup(answered('{"rules":[]}'));
+		cfgOffline.set(options.settings, true);
+		let sessionProvider: string | undefined = "anthropic";
+		const author = createModelJobWidgetAuthor({ ...options, getSessionProvider: () => sessionProvider });
+		const request = { jobId: "job-1", brief: { kind: "bash" as const, command: "make" }, sources: [] };
+
+		expect(await author(request, new AbortController().signal)).toBeUndefined();
+		sessionProvider = undefined;
+		expect(await author(request, new AbortController().signal)).toBeUndefined();
+		expect(sent).toEqual([]);
+
+		sessionProvider = "llama.cpp";
+		expect(await author(request, new AbortController().signal)).toEqual({ rules: [] });
 		expect(sent).toEqual([primary.id, backup.id]);
 	});
 });

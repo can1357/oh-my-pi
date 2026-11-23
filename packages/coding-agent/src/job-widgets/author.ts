@@ -7,6 +7,7 @@ import { type AgentTelemetryConfig, instrumentedCompleteSimple, resolveTelemetry
 import type { AssistantMessage, Tool, ToolChoice, UserMessage } from "@oh-my-pi/pi-ai";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { formatBytes, prompt, truncate } from "@oh-my-pi/pi-utils";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleChain } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
@@ -169,6 +170,8 @@ export interface ModelJobWidgetAuthorOptions {
 	onUsage?: (message: AssistantMessage, prompt: string) => void;
 	/** The session tree's current cost gate: refuses the request at the cap and adds its cost. */
 	costGate?: () => CostGateApi | undefined;
+	/** Provider of the session's active model; offline mode (`models.offline`) sends requests only there. */
+	getSessionProvider?: () => string | undefined;
 }
 
 /** One `widget`-role request, sent unchanged to each candidate {@link completeWidgetRequest} tries. */
@@ -189,7 +192,8 @@ export interface WidgetRequest {
  * primary (configured, or resolved like `smol`), then
  * `retry.fallbackChains.widget`, else the built-in `smol` defaults. Stops at
  * the first reply that is not an error. Every attempt passes the cost gate and
- * reaches `onUsage`.
+ * reaches `onUsage`. Offline mode (`models.offline`) keeps the chain on
+ * `getSessionProvider`'s provider, and tries none without one.
  *
  * Resolves `undefined` when no candidate has a credential. Throws
  * `CostCapError` at the cost cap, an error on an aborted reply, and the last
@@ -213,7 +217,11 @@ export async function completeWidgetRequest(
 	// never repeats, so a cache breakpoint on it would only bill a cache write.
 	markPerCallContextMessage(message);
 	const context = { systemPrompt: [request.systemPrompt], messages: [message], tools: request.tools };
-	for (const { model } of resolveRoleChain("widget", settings, roleCandidatePool("widget", settings, modelRegistry))) {
+	const pool = roleCandidatePool("widget", settings, modelRegistry);
+	const offline = cfgOffline.get(settings);
+	const sessionProvider = offline ? options.getSessionProvider?.() : undefined;
+	const allowed = offline ? pool.filter(model => model.provider === sessionProvider) : pool;
+	for (const { model } of resolveRoleChain("widget", settings, allowed)) {
 		if (!(await modelRegistry.getApiKey(model, sessionId, { signal }))) continue;
 		costGate?.admit();
 		const response = await instrumentedCompleteSimple(

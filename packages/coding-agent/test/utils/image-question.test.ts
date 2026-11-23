@@ -29,9 +29,9 @@ function makeProxyModel(id: string, compat?: ModelSpec["compat"]): Model<Api> {
 	} as ModelSpec);
 }
 
-function makeSession(active: Model<Api>, available: Model<Api>[]): ToolSession {
+function makeSession(active: Model<Api>, available: Model<Api>[], settings = Settings.isolated()): ToolSession {
 	return {
-		settings: Settings.isolated(),
+		settings,
 		modelRegistry: {
 			getAvailable: () => available,
 		} as unknown as NonNullable<ToolSession["modelRegistry"]>,
@@ -52,6 +52,25 @@ describe("resolveImageQuestionModel wire truth (#9697)", () => {
 		const stripped = makeProxyModel("deepseek-v4-flash", { stripImageInput: true });
 		expect(() => resolveImageQuestionModel(makeSession(stripped, [stripped]))).toThrow(
 			"Resolved model myproxy/deepseek-v4-flash does not support image input.",
+		);
+	});
+});
+
+describe("resolveImageQuestionModel offline mode", () => {
+	const textOnly = makeProxyModel("deepseek-v4-flash", { stripImageInput: true });
+	const elsewhere = { ...makeProxyModel("elsewhere-vl"), provider: "elsewhere" };
+
+	it("keeps the question on the active model's provider, over the vision role", () => {
+		const sameProvider = makeProxyModel("qwen-vl");
+		const settings = Settings.isolated({ "models.offline": true, modelRoles: { vision: "elsewhere/elsewhere-vl" } });
+		const resolved = resolveImageQuestionModel(makeSession(textOnly, [textOnly, elsewhere, sameProvider], settings));
+		expect(`${resolved.model.provider}/${resolved.model.id}`).toBe("myproxy/qwen-vl");
+	});
+
+	it("refuses when only another provider can see images", () => {
+		const settings = Settings.isolated({ "models.offline": true });
+		expect(() => resolveImageQuestionModel(makeSession(textOnly, [textOnly, elsewhere], settings))).toThrow(
+			"Offline mode (models.offline) keeps image questions on the active model's provider (myproxy)",
 		);
 	});
 });

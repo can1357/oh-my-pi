@@ -14,6 +14,7 @@ import {
 	prompt,
 	toError,
 } from "@oh-my-pi/pi-utils";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	resolveConfiguredModelPatterns,
@@ -55,8 +56,10 @@ class SkillDescriptionLengthError extends Error {}
 /**
  * Resolve the fast role for each background request the way `/models` shows it — configured `smol`,
  * the inherited `default` when `smol` is unset, then the built-in chain — before a configured `tiny`.
- * Never uses the session's foreground model. `getCostGate` returns the session tree's gate per request,
- * following it across new sessions and switches; each provider attempt is admitted and metered there.
+ * Never uses the session's foreground model. Offline mode (`models.offline`) keeps every request on
+ * `getSessionProvider`'s provider and sends none without one. `getCostGate` returns the session tree's
+ * gate per request, following it across new sessions and switches; each provider attempt is admitted
+ * and metered there.
  * `usageLedger` is the session whose prompt asked for the compression; each attempt is journaled there,
  * under `purpose` (default `skill-description`); `oneshotKind` (default `skill_description`) tags telemetry.
  */
@@ -67,12 +70,16 @@ export function createSkillDescriptionCompressor(
 		sessionId?: string;
 		getTelemetry?: () => AgentTelemetry | undefined;
 		getCostGate?: () => CostGateApi | undefined;
+		getSessionProvider?: () => string | undefined;
 		usageLedger?: Partial<ModelUsageLedger>;
 		purpose?: string;
 		oneshotKind?: string;
 	} = {},
 ): SkillDescriptionCompressor {
 	const select = (): Model<Api> | undefined => {
+		const offline = cfgOffline.get(settings);
+		const sessionProvider = offline ? options.getSessionProvider?.() : undefined;
+		if (offline && !sessionProvider) return undefined;
 		// The first exact provider/id match wins before every other matching phase.
 		// Resolve only that provider when possible: rendering uncached skill hints
 		// must not expand unrelated account catalogs for every background request.
@@ -90,10 +97,11 @@ export function createSkillDescriptionCompressor(
 			if (provider && id) {
 				const scoped = registry.getAvailableForProviders(new Set([provider]));
 				const exact = resolveProviderModelReference(provider, id, scoped);
-				if (exact) return exact;
+				if (exact && (!offline || exact.provider === sessionProvider)) return exact;
 			}
 		}
-		const available = registry.getAvailable();
+		const all = registry.getAvailable();
+		const available = offline ? all.filter(model => model.provider === sessionProvider) : all;
 		return (
 			resolveRoleChain("smol", settings, available)[0]?.model ??
 			resolveRoleSelection(["tiny"], settings, available)?.model

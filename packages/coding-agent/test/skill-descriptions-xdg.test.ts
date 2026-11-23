@@ -6,6 +6,7 @@ import * as path from "node:path";
 import * as agentCore from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { __resetProfileSnapshotForTests, getAgentDir, Snowflake, setAgentDir } from "@oh-my-pi/pi-utils";
+import { cfgOffline } from "../src/config/auxiliary-model-policy";
 import { ModelRegistry } from "../src/config/model-registry";
 import { resolveRoleChain, resolveRoleSelection } from "../src/config/model-resolver";
 import { cfgDisabledProviders } from "../src/config/model-settings";
@@ -652,6 +653,38 @@ describe("skill description compressor model selection", () => {
 		expect(
 			fixture({ default: "anthropic/claude-opus-4-5", smol: "anthropic/claude-haiku-4-5" }).compressor.modelKey(),
 		).toBe("anthropic/claude-haiku-4-5");
+	});
+
+	it("keeps offline requests on the session model's provider, and sends none without one", () => {
+		const { registry, settings } = fixture({ smol: "skill-offline/probe" });
+		registry.registerProvider("skill-offline", {
+			baseUrl: "https://example.invalid/v1",
+			api: "openai-completions",
+			apiKey: "test-key",
+			models: [
+				{
+					id: "probe",
+					name: "Probe",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 8192,
+					maxTokens: 1024,
+				},
+			],
+		});
+		let sessionProvider: string | undefined = "anthropic";
+		const compressor = createSkillDescriptionCompressor(registry, settings, {
+			getSessionProvider: () => sessionProvider,
+		});
+		expect(compressor.modelKey()).toBe("skill-offline/probe");
+
+		cfgOffline.set(settings, true);
+		expect(compressor.modelKey()).toStartWith("anthropic/");
+		sessionProvider = "skill-offline";
+		expect(compressor.modelKey()).toBe("skill-offline/probe");
+		sessionProvider = undefined;
+		expect(compressor.modelKey()).toBeUndefined();
 	});
 });
 

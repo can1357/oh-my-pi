@@ -22,6 +22,7 @@ import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
 
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	expandRoleAlias,
@@ -202,6 +203,17 @@ interface FallbackExpansion {
 	settings: Settings | undefined;
 	tier: CompletionTier;
 	disabledProviders: Set<string>;
+	/** The only provider a candidate may use; see {@link offlineProvider}. */
+	allowedProvider: string | null | undefined;
+}
+
+/**
+ * The provider offline mode (`models.offline`) keeps completions on: the active
+ * model's, `null` without an active model, `undefined` when not offline.
+ */
+function offlineProvider(session: ToolSession): string | null | undefined {
+	if (!cfgOffline.get(session.settings)) return undefined;
+	return session.getActiveModel?.()?.provider ?? null;
 }
 
 /**
@@ -239,6 +251,7 @@ function appendFallbackCandidates(
 		const resolved = resolveModelOverride([entry.raw], deps.modelRegistry, deps.settings);
 		const candidate = resolved.model;
 		if (!candidate || deps.disabledProviders.has(candidate.provider)) continue;
+		if (deps.allowedProvider !== undefined && candidate.provider !== deps.allowedProvider) continue;
 		const reasoning = reasoningForCandidate(deps.tier, candidate, entry.thinkingLevel, parent);
 		const identity = candidateIdentity(candidate, reasoning);
 		if (seen.has(identity)) continue;
@@ -255,7 +268,10 @@ function appendFallbackCandidates(
 function resolveTierCandidates(tier: CompletionTier, session: ToolSession): CompletionCandidate[] {
 	const modelRegistry = session.modelRegistry;
 	if (!modelRegistry) return [];
-	const available = modelRegistry.getAvailable();
+	const allowedProvider = offlineProvider(session);
+	const available = modelRegistry
+		.getAvailable()
+		.filter(model => allowedProvider === undefined || model.provider === allowedProvider);
 	if (available.length === 0) return [];
 
 	const matchPreferences = getModelMatchPreferences(session.settings);
@@ -312,6 +328,7 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 			settings: session.settings,
 			tier,
 			disabledProviders: new Set(cfgDisabledProviders.get(session.settings)),
+			allowedProvider,
 		},
 		primary.selector,
 		primary.model,
@@ -358,6 +375,8 @@ function resolveTaggedAgentCandidates(agentName: string, session: ToolSession): 
 	if (!selector) return [];
 	const resolved = resolveModelOverride([selector], modelRegistry, session.settings);
 	if (!resolved.model) return [];
+	const allowedProvider = offlineProvider(session);
+	if (allowedProvider !== undefined && resolved.model.provider !== allowedProvider) return [];
 	const reasoning = reasoningForCandidate("default", resolved.model, resolved.thinkingLevel ?? agent?.thinkingLevel);
 	return [{ selector, model: resolved.model, ...reasoning }];
 }
@@ -526,9 +545,11 @@ export async function runEvalCompletion(
 		: resolveTaggedAgentCandidates(requested, options.session);
 	if (candidates.length === 0) {
 		throw new ToolError(
-			tier
-				? `completion() could not resolve a model for the "${tier}" tier. Configure modelRoles.${tier === "default" ? "default" : tier} or ensure a provider is available.`
-				: `completion() could not resolve model "${requested}". Pass a tier ("smol"|"default"|"slow") or the name of a user-tagged model agent ("m<N>").`,
+			offlineProvider(options.session) !== undefined
+				? `completion() found no model for "${requested}" on the active model's provider, and offline mode (models.offline) allows no other.`
+				: tier
+					? `completion() could not resolve a model for the "${tier}" tier. Configure modelRoles.${tier === "default" ? "default" : tier} or ensure a provider is available.`
+					: `completion() could not resolve model "${requested}". Pass a tier ("smol"|"default"|"slow") or the name of a user-tagged model agent ("m<N>").`,
 		);
 	}
 

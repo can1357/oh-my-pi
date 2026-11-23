@@ -23,6 +23,7 @@ import type { Api, completeSimple, ImageContent, Model, TextContent } from "@oh-
 import { getEffectiveTokenCost, getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
 import { logger, prompt, toError } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { expandRoleAlias, getModelMatchPreferences, resolveModelFromString } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -43,6 +44,14 @@ const NO_VISION_MODEL_NOTE =
 
 const DESCRIPTION_UNAVAILABLE_NOTE =
 	"[Image description unavailable: the vision model returned no usable text. The image was saved for further analysis.]";
+
+/** Note for an offline session whose provider has no vision-capable model. */
+function offlineNoVisionNote(provider: string): string {
+	return (
+		`[Offline mode (models.offline) keeps image descriptions on the active model's provider (${provider}), ` +
+		"which has no vision-capable model, so this image was not described. The image was saved.]"
+	);
+}
 
 /** Registry surface needed to resolve a vision model and authorize requests. */
 export type VisionFallbackRegistry = Pick<ModelRegistry, "getAvailable" | "getApiKey" | "resolver">;
@@ -121,9 +130,13 @@ function formatImageBlock(localUrl: string, description: string): string {
 /**
  * Resolve a vision-capable model, honoring explicit roles and the active model
  * before choosing the least expensive priced vision model as a last resort.
+ * Offline mode (`models.offline`) keeps every candidate on the active model's provider.
  */
 function resolveVisionModel(deps: DescribeAttachedImagesDeps): Model<Api> | undefined {
-	const available = deps.modelRegistry.getAvailable();
+	const all = deps.modelRegistry.getAvailable();
+	const available = cfgOffline.get(deps.settings)
+		? all.filter(model => model.provider === deps.activeModel.provider)
+		: all;
 	if (available.length === 0) return undefined;
 	const preferences = getModelMatchPreferences(deps.settings);
 	const resolvePattern = (pattern: string | undefined): Model<Api> | undefined => {
@@ -227,6 +240,8 @@ export async function describeAttachedImagesForTextModel(
 			if (canDescribe && visionModel) {
 				description =
 					(await describeImage(image, visionModel, deps, telemetry, signal)) ?? DESCRIPTION_UNAVAILABLE_NOTE;
+			} else if (!visionModel && cfgOffline.get(deps.settings)) {
+				description = offlineNoVisionNote(deps.activeModel.provider);
 			} else {
 				description = NO_VISION_MODEL_NOTE;
 			}

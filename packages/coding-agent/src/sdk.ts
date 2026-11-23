@@ -2631,6 +2631,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			sessionId: () => sessionManager.getSessionId(),
 			costGate: currentCostGate,
 			telemetry: () => agent?.telemetry,
+			getSessionProvider: () => (agent?.state.model ?? model)?.provider,
 			obfuscate: () => (obfuscator?.hasSecrets() ? text => obfuscator?.obfuscate(text) ?? text : undefined),
 		};
 		asyncJobManager.widgets = new JobWidgets({
@@ -4394,6 +4395,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				: openSessionSkillDescriptionStore(agentDir);
 		const hintCompressorOptions = {
 			getCostGate: currentCostGate,
+			getSessionProvider: () => (agent?.state.model ?? model)?.provider,
 			usageLedger: sessionManager,
 			getTelemetry: () =>
 				agent
