@@ -4,6 +4,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import type { DesktopCapabilities } from "@oh-my-pi/pi-natives";
 import { once } from "@oh-my-pi/pi-utils";
+import * as prompt from "@oh-my-pi/pi-utils/prompt";
 import { callSessionTool } from "../eval/js/tool-bridge";
 import type { EvalPreludeContext, HostEvalPreludeDefinition } from "../eval/preludes";
 import computerUsePrompt from "../prompts/system/computer-use.md" with { type: "text" };
@@ -12,6 +13,7 @@ import { type ComputerCallStep, isReadOnlyComputerCall, renderComputerCall } fro
 import {
 	type ComputerScreenshot,
 	type ComputerSessionSnapshot,
+	modelChoosesTakeover,
 	type RunErrorPayload,
 	screenStateNotice,
 	secureInputNotice,
@@ -29,7 +31,7 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { clampTimeout } from "./tool-timeouts";
 
 import {
-	cfgComputerBackgroundFallback,
+	cfgComputerTakeover,
 	cfgComputerDisplay,
 	cfgComputerEnabled,
 	cfgComputerMaxHeight,
@@ -130,6 +132,24 @@ export function computerApproval(args: unknown): ToolApprovalDecision {
 	return args.action === "run" && "read_only" in args && args.read_only === true ? "read" : "exec";
 }
 
+/**
+ * Computer prompts rendered for who decides takeover: the model, under the default `computer.takeover` modes, or
+ * omp, under `foreground` and `always`. Each template has those two variants, rendered once.
+ */
+const modelTakeoverRenders = new Map<string, string>();
+const ompTakeoverRenders = new Map<string, string>();
+
+function renderComputerPrompt(template: string, mode: ComputerSessionSnapshot["takeover"]): string {
+	const ompTakeover = !modelChoosesTakeover(mode);
+	const renders = ompTakeover ? ompTakeoverRenders : modelTakeoverRenders;
+	let rendered = renders.get(template);
+	if (rendered === undefined) {
+		rendered = prompt.render(template, { ompTakeover });
+		renders.set(template, rendered);
+	}
+	return rendered;
+}
+
 /** Create the enabled-only computer host prelude for one tool session. */
 export function createComputerPrelude(
 	session: ToolSession,
@@ -148,12 +168,17 @@ export function createComputerPrelude(
 
 	return {
 		name: "computer",
-		documentation: computerPreludeAssets.documentation,
+		// Read when the prompt is built, so a changed computer.takeover re-announces the prelude with the new text.
+		get documentation() {
+			return renderComputerPrompt(computerPreludeAssets.documentation, cfgComputerTakeover.get(session.settings));
+		},
 		inlineDocumentation: true,
 		javascript: computerPreludeAssets.javascript,
 		python: computerPreludeAssets.python,
 		exports: ["computer"],
-		guidance: computerUsePrompt,
+		get guidance() {
+			return renderComputerPrompt(computerUsePrompt, cfgComputerTakeover.get(session.settings));
+		},
 		approval: computerApproval,
 		enabled: () => cfgComputerEnabled.get(session.settings) === true,
 		invoke: async (parameters, context) => {
@@ -252,7 +277,7 @@ function buildComputerSnapshot(session: ToolSession, readOnly: boolean): Compute
 			: configuredMaxHeight,
 		display: cfgComputerDisplay.get(session.settings),
 		readOnly,
-		backgroundFallback: cfgComputerBackgroundFallback.get(session.settings),
+		takeover: cfgComputerTakeover.get(session.settings),
 		displayTurn: computerTurnInFlight(session.getEvalKernelOwnerId?.() ?? undefined),
 	};
 }

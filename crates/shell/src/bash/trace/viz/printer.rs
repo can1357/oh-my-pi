@@ -260,8 +260,10 @@ pub fn render(source: &impl VizSource, runtime: &Runtime<'_>, options: &Options)
 			children: HashSet::new(),
 		};
 		p.root_units();
-		// Dynamic units with no proven outer origin remain explicitly
-		// unlocated; a callout's script is drawn by its calling command.
+		// What no drawn command stands for stays explicitly unlocated: a
+		// script whose command was not drawn, or one no command ran (a trap
+		// action). A callout's script is drawn by its calling command.
+		let mut framed = HashSet::new();
 		for index in 0..source.unit_count() {
 			let Some(unit) = source.unit(index) else {
 				continue;
@@ -269,23 +271,18 @@ pub fn render(source: &impl VizSource, runtime: &Runtime<'_>, options: &Options)
 			if unit.at.is_some()
 				|| unit.callout
 				|| p.children.contains(&unit.index)
-				|| unit.syntax.and_then(|s| s.parent.as_ref()).is_some()
+				|| unit.syntax.is_none_or(|s| s.parent.is_some())
 			{
 				continue;
 			}
-			if let Some(syntax) = unit.syntax {
-				let context = Context {
-					unit:     unit.index,
-					source:   0,
-					bytes:    unit.source.as_ref(),
-					map:      source_map(source, &unit),
-					untraced: None,
-					runner:   None,
-					origin:   None,
-					analysis: &analysis,
-				};
-				p.frame(unit.index, 0, "built at runtime · not in the command text", None, None);
-				p.tree(&syntax.tree, &context, 1);
+			if let Some(runner) = unit.runner
+				&& let Some(units) = analysis.scripts.get(&runner)
+			{
+				if framed.insert(runner) {
+					p.script(units, 0, None);
+				}
+			} else {
+				p.script(&[unit.index], 0, None);
 			}
 		}
 		p.rows
@@ -1426,7 +1423,7 @@ impl<S: VizSource> Printer<'_, S> {
 					out.push(seg);
 				} else if self.options.layers.unwrap {
 					if let (Some(language), Some(value)) = (language, literal(w)) {
-						if value.contains('\n') || value.len() > 64 {
+						if moves_below(&value) {
 							let mut seg = self.segment(
 								c,
 								w.id(),
@@ -2200,6 +2197,37 @@ impl<S: VizSource> Printer<'_, S> {
 		self.serial += 1;
 	}
 
+	/// The units of a script not in the command text in one frame: what a
+	/// command ran ([`Analysis::scripts`]), drawn under it when `range` is
+	/// its span.
+	fn script(&mut self, units: &[u32], depth: u32, range: Option<[u32; 2]>) {
+		let Some(&first) = units.first() else {
+			return;
+		};
+		self.frame(first, depth, "read at runtime · not in the command text", range, None);
+		for &index in units {
+			self.children.insert(index);
+			let Some(unit) = self.source.unit(index as usize) else {
+				continue;
+			};
+			let Some(syntax) = unit.syntax else {
+				continue;
+			};
+			let context = Context {
+				unit:     unit.index,
+				source:   0,
+				bytes:    unit.source.as_ref(),
+				map:      source_map(self.source, &unit),
+				untraced: None,
+				runner:   None,
+				origin:   None,
+				analysis: self.analysis,
+			};
+			self.tree(&syntax.tree, &context, depth);
+		}
+		self.close_frame(first, depth, range, None);
+	}
+
 	fn nested(
 		&self,
 		cmd: Command<'_>,
@@ -2314,16 +2342,19 @@ impl<S: VizSource> Printer<'_, S> {
 				if self.options.layers.unwrap
 					&& let (Some(language), Some(value)) =
 						(embedded::argument_language(&words, i), literal(w))
-					&& (value.contains('\n') || value.len() > 64)
+					&& moves_below(&value)
 				{
+					// The line's chip names the language; the program's rows follow
+					// it directly, without the newlines that usually open and close
+					// it.
 					self.document(
-						&value,
+						value.trim_matches('\n'),
 						language,
 						c,
 						w.id(),
 						Some(w.span()),
 						depth + 1,
-						Some("inline argument"),
+						None,
 					);
 				}
 			}
@@ -2364,6 +2395,11 @@ impl<S: VizSource> Printer<'_, S> {
 					self.document(&original, "text", c, cmd.id(), span, depth + 1, None);
 				}
 			}
+		}
+		if c.source == 0
+			&& let Some(units) = self.analysis.scripts.get(&c.key(cmd.id()))
+		{
+			self.script(units, depth + 1, c.map.range(cmd.span()));
 		}
 	}
 
@@ -3379,6 +3415,12 @@ fn is_simple(c: Command<'_>, name: &str, arg: Option<&str>) -> bool {
 			Some(a) => words.len() == 2 && words.get(1).and_then(literal).as_deref() == Some(a),
 			None => words.len() > 1,
 		}
+}
+/// Whether an embedded-language argument is drawn below its command as a
+/// document, leaving a `⟦lang ↓⟧` chip in the line. Only multi-line programs
+/// move: a one-liner, however long, stays highlighted where it is read.
+fn moves_below(value: &str) -> bool {
+	value.contains('\n')
 }
 fn timeout_duration(value: &str) -> bool {
 	let digits = value.bytes().take_while(u8::is_ascii_digit).count();

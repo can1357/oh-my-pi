@@ -843,7 +843,7 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 			};
 		}
 		const truncated = withLoopPhase("mnemopi.recall", () => {
-			const history = extractMessages(this.session.sessionManager);
+			const history = extractMessages(this.session.sessionManager.getEntries());
 			const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
 			const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
 			return truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);
@@ -889,11 +889,11 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 		const userTurns = withLoopPhase("mnemopi.retain", () => {
 			this.#restoreRetainedTurnCursor();
 			// Cheap gate first: most agent_end events are not retain turns, so skip text extraction.
-			return countUserTurns(this.session.sessionManager);
+			return countUserTurns(this.session.sessionManager.getEntries());
 		});
 		if (userTurns - this.lastRetainedTurn < this.config.retainEveryNTurns) return;
 		const messages = withLoopPhase("mnemopi.retain", () => {
-			const flat = extractMessages(this.session.sessionManager);
+			const flat = extractMessages(this.session.sessionManager.getEntries());
 			return sliceUnretainedMessages(flat, this.lastRetainedTurn);
 		});
 		await this.retainMessages(messages, `${this.sessionId}-${Date.now()}`, {
@@ -904,7 +904,7 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 
 	async forceRetainCurrentSession(options: { extract?: boolean } = {}): Promise<void> {
 		if (this.aliasOf) return;
-		const flat = withLoopPhase("mnemopi.retain", () => extractMessages(this.session.sessionManager));
+		const flat = withLoopPhase("mnemopi.retain", () => extractMessages(this.session.sessionManager.getEntries()));
 		const userTurns = withLoopPhase("mnemopi.retain", () => {
 			this.#restoreRetainedTurnCursor();
 			return flat.filter(message => message.role === "user").length;
@@ -1008,7 +1008,9 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 		let context = persisted?.text;
 		let record: PersistedRecall | undefined;
 		if (persisted === undefined) {
-			const messages = withLoopPhase("mnemopi.recall", () => extractMessages(this.session.sessionManager));
+			const messages = withLoopPhase("mnemopi.recall", () =>
+				extractMessages(this.session.sessionManager.getEntries()),
+			);
 			const lastUser = messages.findLast(message => message.role === "user");
 			if (!lastUser) return;
 			const truncated = withLoopPhase("mnemopi.recall", () => {
