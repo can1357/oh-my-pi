@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `commitReconciled()` to publish private-index commits without leaving staged reversals when the shared index is locked ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
+
 ## [19.1.1] - 2026-11-23
 
 ### Fixed

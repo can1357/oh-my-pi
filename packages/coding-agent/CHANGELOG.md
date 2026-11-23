@@ -5,6 +5,22 @@
 ### Fixed
 
 - Fixed `!`/`!!` commands that probe the terminal, such as `gh api`, waiting about 5 seconds for a reply that never came ([#10214](https://github.com/can1357/oh-my-pi/issues/10214), [#19946](https://github.com/can1357/oh-my-pi/pull/19946) by [@JamieJ5926](https://github.com/JamieJ5926))
+### Added
+
+- Added `discovery.type: openrouter` for `models.yml` providers that front OpenRouter under their own URL and key: their model list now comes from OpenRouter's public catalog, and requests follow OpenRouter's request format.
+
+### Changed
+
+- The bash tool's visualization keeps a one-line awk, jq, regex or other embedded program highlighted where it appears in the command; only multi-line programs move below it behind a `⟦awk ↓⟧`-style chip.
+
+### Fixed
+
+- `!command` values in `models.yml` (`apiKey`, `headers`) can now read variables defined in `~/.env` or `~/.omp/agent/.env` on macOS and Windows; previously the command saw an empty value.
+- The bash tool's visualization now draws a script run by `bash file.sh`, `source`, or `eval "$var"` as one block under the command that ran it, instead of repeating a “built at runtime” header above every line of the script.
+- Hindsight now retains only the turns added by a `/tan` fork, not the parent transcript it inherited for context ([#20259](https://github.com/can1357/oh-my-pi/issues/20259)).
+### Fixed
+
+- Selective commits now leave HEAD and staging unchanged if the shared index stays locked. Retry once the lock is released ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
 
 ## [19.1.1] - 2026-11-23
 
