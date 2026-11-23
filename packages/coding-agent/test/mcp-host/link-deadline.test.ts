@@ -233,6 +233,46 @@ describe("HostLink request deadlines and cancellation", () => {
 		expect(host.tunnels).toHaveLength(1);
 	});
 
+	it("ends the wait for a rejected era's re-probe with the caller's signal or deadline, and still moves the link", async () => {
+		vi.useFakeTimers();
+		const link = await connected(150);
+		let closes = 0;
+		link.onClose = () => {
+			closes++;
+		};
+		const verdict = Promise.withResolvers<void>();
+		host.resolveGate = verdict.promise;
+		host.era = "legacy";
+		const rejection = {
+			code: -32022,
+			message: "Unsupported protocol version",
+			data: { supported: ["2025-11-25"] },
+		};
+		const caller = new AbortController();
+
+		const cancelled = rejectionOf(link.request("tools/call", { name: "a" }, { signal: caller.signal }));
+		const late = rejectionOf(link.request("tools/list"));
+		host.tunnel.push({ id: sent("tools/call").id, error: rejection });
+		host.tunnel.push({ id: sent("tools/list").id, error: rejection });
+		await settled();
+		caller.abort(new Error("cancelled while re-probing"));
+		expect(await cancelled).toEqual(new Error("cancelled while re-probing"));
+		// A deadline that passes meanwhile leaves the server's own answer standing.
+		vi.advanceTimersByTime(150);
+		expect(await late).toMatchObject({ rpc: rejection });
+
+		// One re-probe served both, and neither caller leaving keeps the link on the rejected era.
+		vi.useRealTimers();
+		verdict.resolve();
+		const second = await host.attached(2);
+		expect(second.request.era).toBe("legacy");
+		expect(host.resolved).toHaveLength(2);
+		const after = link.request("tools/list");
+		second.push({ id: (await second.next("tools/list")).id, result: { tools: [] } });
+		expect(await after).toEqual({ tools: [] });
+		expect(closes).toBe(0);
+	});
+
 	it("holds a configured timeout as a hard cap however much progress arrives, and routes none after it", async () => {
 		vi.useFakeTimers();
 		const link = await connected(1_000);

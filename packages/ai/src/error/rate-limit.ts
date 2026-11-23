@@ -523,7 +523,7 @@ const USAGE_LIMIT_PATTERN =
  * HTTP 402 Payment Required represents an account-billing cap (xAI
  * Grok Build "usage balance exhausted", DeepSeek "Insufficient Balance",
  * OpenCode Go "Insufficient account funds", OpenRouter credit exhaustion)
- * when opaque, payment/deactivation/balance/funds-worded, or
+ * when opaque, payment/deactivation/balance/funds/billing-error-worded, or
  * QUOTA_EXHAUSTED/CONCURRENT_LIMIT. Informative non-quota 402s (e.g.
  * endpoint subscription requirements) remain non-usage-limits. Always combine
  * with {@link isUsageLimitOutcome} when a message is available.
@@ -532,10 +532,24 @@ export function isUsageLimitStatus(status: number | undefined): boolean {
 	return status === 429 || status === 402;
 }
 const STATUS_402_QUOTA_PATTERN =
-	/\b(?:payment(?:\s+is)?[-_.\s]*required|deactivated_workspace|insufficient.?(?:balance|account.?funds))\b/i;
+	/\b(?:payment(?:\s+is)?[-_.\s]*required|deactivated_workspace|insufficient.?(?:balance|credits?|account.?funds)|requires?\s+more\s+credits|billing[-_.\s]*(?:verification|error|issue)|can only afford)\b/i;
+
+// Machine fields survive provider parsing even when the human detail is generic.
+const BILLING_ERROR_CODE_PATTERN = /^billing_(?:error|not_configured)$/i;
+const BILLING_ERROR_FIELD_PATTERN = /\b(?:type|code|param)=billing_(?:error|not_configured)(?=[\s)]|$)/i;
 
 export function is402BillingCapBody(message: string | undefined): boolean {
 	if (message === undefined || isOpaqueStatusBody(message)) return true;
+	if (BILLING_ERROR_CODE_PATTERN.test(message) || BILLING_ERROR_FIELD_PATTERN.test(message)) return true;
+	const body = parseJsonBody(message);
+	const error = asRecord(body?.error) ?? body;
+	if (
+		[error?.type, error?.code, error?.param].some(
+			value => typeof value === "string" && BILLING_ERROR_CODE_PATTERN.test(value),
+		)
+	) {
+		return true;
+	}
 	if (STATUS_402_QUOTA_PATTERN.test(message)) return true;
 	const reason = parseRateLimitReason(message);
 	return isQuotaExhaustedReason(reason) || reason === "CONCURRENT_LIMIT";

@@ -2,15 +2,15 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ptree, Snowflake } from "@oh-my-pi/pi-utils";
-import { settings } from "../../config/settings";
+import type { ModelRegistry } from "../../config/model-registry";
+import type { Settings } from "../../config/settings";
 import type { AgentStorageApi } from "../../session/agent-storage";
+import { cfgProvidersFetch } from "../../session/settings";
 import { throwIfAborted } from "../../tools/tool-errors";
 import { ensureTool } from "../../utils/tools-manager";
 import { extractWithParallel, findParallelApiKey, getParallelExtractContent } from "../parallel";
 import type { RenderResult, SpecialHandler } from "./types";
-import { buildResult, formatMediaDuration, formatNumber } from "./types";
-
-import { cfgProvidersFetch } from "../../session/settings";
+import { buildResult, formatMediaDuration, formatNumber, handlerSettings } from "./types";
 
 interface YouTubeUrl {
 	videoId: string;
@@ -105,6 +105,8 @@ export const handleYouTube: SpecialHandler = async (
 	timeout: number,
 	userSignal?: AbortSignal,
 	storage?: AgentStorageApi | null,
+	_modelRegistry?: ModelRegistry,
+	sessionSettings?: Settings,
 ): Promise<RenderResult | null> => {
 	throwIfAborted(userSignal);
 	const yt = parseYouTubeUrl(url);
@@ -116,7 +118,7 @@ export const handleYouTube: SpecialHandler = async (
 	const videoUrl = `https://www.youtube.com/watch?v=${yt.videoId}`;
 
 	// Prefer Parallel extract when it sits in the reader chain and creds exist
-	const fetchPreference = cfgProvidersFetch.get(settings);
+	const fetchPreference = cfgProvidersFetch.get(handlerSettings(sessionSettings));
 	if ((fetchPreference === "auto" || fetchPreference === "parallel") && findParallelApiKey(storage)) {
 		try {
 			const parallelResult = await extractWithParallel(

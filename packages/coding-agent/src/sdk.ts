@@ -404,6 +404,7 @@ import {
 	cfgToolsCommandDocs,
 	cfgToolsCommandInline,
 	cfgSessionToolGates,
+	cfgTodoBackend,
 } from "./tools/settings";
 import { cfgToolsFormat } from "./session/context-settings";
 import { cfgAutolearnEnabled } from "./autolearn/settings";
@@ -642,7 +643,7 @@ export interface CreateAgentSessionOptions {
 
 	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
 	authStorage?: AuthStorage;
-	/** Model registry. Default: discoverModels(authStorage, agentDir) */
+	/** Model registry. Default: constructed from <agentDir>/models.yml */
 	modelRegistry?: ModelRegistry;
 	/**
 	 * Request credential resolver. Defaults to the model registry's normal
@@ -954,6 +955,11 @@ export interface CreateAgentSessionOptions {
 	bindProcessState?: boolean;
 	/** Task recursion depth (for subagent sessions). Default: 0 */
 	taskDepth?: number;
+	/**
+	 * Mark the session as a `/tan` fork: an idle wait then steers the fork to
+	 * wait again while its assignment is blocked.
+	 */
+	tanFork?: boolean;
 	/** Parent Hindsight state to alias for subagent memory tools. */
 	parentHindsightSessionState?: HindsightSessionStateApi;
 	/** Parent Mnemopi state: subagents alias it; a top-level fork (`/tan`) inherits its delivered recall. */
@@ -1282,7 +1288,7 @@ export async function loadSessionExtensions(
 	const storage = settings.getStorage();
 	const { eager, deferred } =
 		loadOptions.deferStartupSafe && storage
-			? await partitionStartupExtensions(storage, paths, cwd)
+			? await partitionStartupExtensions(storage, paths, cwd, cfgTodoBackend.get(settings))
 			: { eager: paths, deferred: [] };
 	const result = await logger.time("loadExtensions", loadExtensions, eager, cwd, eventBus);
 	if (storage) await recordStartupVerdicts(storage, result.extensions);
@@ -2011,10 +2017,11 @@ export function createAutoLearnCaptureRunner(
  * const { session } = await createAgentSession();
  *
  * // With explicit model
- * import { getModel } from '@oh-my-pi/pi-ai';
+ * import { ThinkingLevel } from '@oh-my-pi/pi-agent-core';
+ * import { getBundledModel } from '@oh-my-pi/pi-catalog/models';
  * const { session } = await createAgentSession({
- *   model: getModel('anthropic', 'claude-opus-4-5'),
- *   thinkingLevel: 'high',
+ *   model: getBundledModel('anthropic', 'claude-opus-4-5'),
+ *   thinkingLevel: ThinkingLevel.High,
  * });
  *
  * // Continue previous session
@@ -2752,6 +2759,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return prewalk !== undefined || deferredPrewalk !== undefined;
 			},
 			taskDepth: options.taskDepth ?? 0,
+			tanFork: options.tanFork === true,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			sessionManager,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
@@ -5281,7 +5289,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			agent.replaceMessages(restored.messages);
 			// Only an explicit role alias re-owns a resumed branch; any other explicit model
 			// (subagent revival, SDK callers) keeps the role its history recorded.
-			if (model && options.modelRole) recordInitialModelChange(`${model.provider}/${model.id}`);
+			if (model && options.modelRole) recordInitialModelChange(formatModelStringWithRouting(model));
 			if (persistInitialServiceTier) {
 				sessionManager.appendServiceTierChange(
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
@@ -5289,7 +5297,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		} else {
 			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
-			if (model) recordInitialModelChange(`${model.provider}/${model.id}`);
+			if (model) recordInitialModelChange(formatModelStringWithRouting(model));
 			if (!autoThinking) {
 				// Do not write the `auto` selector before the first turn resolves; auto
 				// classification persists its concrete effort once a real user turn runs.
