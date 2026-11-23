@@ -20,7 +20,7 @@ import { errorMessage, isRecord } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
 import { cfgDefaultThinkingLevel } from "../session/settings";
 import { pickDefaultAvailableModel, resolveModelRoleValue, scopeAllowList } from "./model-resolver";
-import { cfgModelPresets, cfgModelRoles, type ModelPreset } from "./model-settings";
+import { cfgModelPresets, type ModelPreset } from "./model-settings";
 import type { Settings, SettingProvenance } from "./settings";
 
 /** Preset names: a letter, then letters, digits, `-` or `_` (the model hub's role-name rule). */
@@ -70,25 +70,44 @@ export function getModelPreset(settings: Settings, name: string): PresetLookup {
  * Preset `name` for this process only. `--preset` seeds the runtime
  * `modelRoles` and `defaultThinkingLevel` before a session resolves its models,
  * writes nothing to config, and leaves the per-role flags to layer on top.
- * The roles replace the whole record, as a switch does.
+ * The roles replace the whole record, as a switch does. A preset a project
+ * config owns routes the run but is marked untrusted, so its roles never
+ * widen the operator's model grants.
  */
 export function applyModelPresetOverrides(
 	settings: Settings,
 	name: string,
-): { kind: "applied" } | { kind: "missing" } | { kind: "invalid"; reason: string } {
-	const lookup = getModelPreset(settings, name);
-	if (lookup.kind !== "found") return lookup;
+): { kind: "applied"; defaultThinkingLevel: ModelPreset["defaultThinkingLevel"] } | PresetLookup {
+	const owned = settings.getOwnedModelPreset(name);
+	if (!owned) return { kind: "missing" };
+	const preset = parseModelPreset(owned.entry);
+	if (typeof preset === "string") return { kind: "invalid", reason: preset };
 	// `null` tombstones hide roles from lower layers. The preset's record wins whole.
 	const roles: Record<string, string | null> = {};
 	for (const role of Object.keys(settings.getModelRoles())) {
-		if (!Object.hasOwn(lookup.preset.modelRoles, role)) roles[role] = null;
+		if (!Object.hasOwn(preset.modelRoles, role)) roles[role] = null;
 	}
-	Object.assign(roles, lookup.preset.modelRoles);
-	cfgModelRoles.override(settings, roles as Record<string, string>);
-	if (lookup.preset.defaultThinkingLevel !== undefined) {
-		cfgDefaultThinkingLevel.override(settings, lookup.preset.defaultThinkingLevel);
+	Object.assign(roles, preset.modelRoles);
+	settings.overrideModelRolesWhole(roles, { untrusted: owned.source === "project" });
+	if (preset.defaultThinkingLevel !== undefined) {
+		cfgDefaultThinkingLevel.override(settings, preset.defaultThinkingLevel);
 	}
-	return { kind: "applied" };
+	return { kind: "applied", defaultThinkingLevel: preset.defaultThinkingLevel };
+}
+
+/**
+ * Launch-side seeding for `--preset`: the preset's `defaultThinkingLevel`
+ * outranks the model's own default, matching `/modelpreset switch`, but an
+ * explicit `--thinking` or selector level still wins, and a restored session
+ * keeps the effort it saved.
+ */
+export function applyPresetLaunchThinkingLevel(
+	session: Pick<AgentSession, "setThinkingLevel">,
+	presetLevel: ConfiguredThinkingLevel | undefined,
+	explicitLevel: ConfiguredThinkingLevel | undefined,
+): void {
+	if (presetLevel === undefined || explicitLevel !== undefined || presetLevel === ThinkingLevel.Inherit) return;
+	session.setThinkingLevel(presetLevel);
 }
 
 /** Saved preset names, sorted; names a `--config`/runtime `null` tombstone hides are left out. */

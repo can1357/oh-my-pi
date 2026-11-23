@@ -52,7 +52,8 @@ import { getLatestRelease, isSourceCheckout } from "./cli/update-cli";
 import { findConfigFile } from "./config";
 import { cfgNoJudge, cfgNoSpotlight, cfgOffline } from "./config/auxiliary-model-policy";
 import { ModelRegistry } from "./config/model-registry";
-import { applyModelPresetOverrides } from "./config/model-presets";
+import { applyModelPresetOverrides, applyPresetLaunchThinkingLevel } from "./config/model-presets";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { formatModelSelectorValue } from "./config/model-selector";
 import {
 	disabledProviderIds,
@@ -2225,16 +2226,21 @@ export async function runRootCommand(
 
 		// Apply --preset first. A later --smol/--slow/--plan flag overrides the
 		// preset's value for that role (ephemeral).
+		let presetThinkingLevel: ConfiguredThinkingLevel | undefined;
 		if (parsedArgs.preset !== undefined) {
 			const presetResult = applyModelPresetOverrides(settingsInstance, parsedArgs.preset);
 			if (presetResult.kind !== "applied") {
-				const message =
+				const rawMessage =
 					presetResult.kind === "missing"
 						? `Model preset not found: ${parsedArgs.preset}`
 						: `Model preset "${parsedArgs.preset}" is malformed: ${presetResult.reason}`;
-				process.stderr.write(`${chalk.red(message)}\n`);
+				// Both the flag value and a malformed project-config role key reach this
+				// line verbatim, so strip terminal controls and stray whitespace before it
+				// reaches the terminal.
+				process.stderr.write(`${chalk.red(sanitizeDisplayWarnings([rawMessage])[0] ?? rawMessage)}\n`);
 				process.exit(1);
 			}
+			presetThinkingLevel = presetResult.defaultThinkingLevel;
 		}
 
 		// Apply model role overrides from CLI args or env vars (ephemeral, not persisted)
@@ -2876,6 +2882,13 @@ export async function runRootCommand(
 			if (isInteractive)
 				session.addDisposer(bindAgentMesh(sessionOptions.cwd ?? getProjectDir(), settingsInstance, session));
 			if (!isInteractive) session.validateRetryFallbackChains();
+			// The preset's thinking level seeds the session the way `/modelpreset switch`
+			// applies it, past the model's own default. An explicit `--thinking` or selector
+			// level already set `sessionOptions.thinkingLevel`, and a resumed or imported
+			// session keeps the effort it saved, so seed only a fresh session.
+			if (presetThinkingLevel !== undefined && !explicitSessionSelection) {
+				applyPresetLaunchThinkingLevel(session, presetThinkingLevel, sessionOptions.thinkingLevel);
+			}
 
 			const sessionToolNames = session.getAllToolNames();
 			try {
