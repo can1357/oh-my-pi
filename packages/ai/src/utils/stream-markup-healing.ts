@@ -25,6 +25,24 @@ export interface HealedToolCall {
 
 export type StreamMarkupHealingPattern = "kimi" | "dsml" | "qwen" | "thinking";
 
+/**
+ * Scanner for `pattern`'s leaked tool-call grammar (Kimi section tokens, DeepSeek
+ * DSML envelope, Qwen XML); `undefined` for `thinking`, which heals reasoning
+ * only. Shared by {@link StreamMarkupHealing} and `wrapLeakedThinkingStream`.
+ */
+export function createToolCallHealingScanner(pattern: StreamMarkupHealingPattern): InbandScanner | undefined {
+	switch (pattern) {
+		case "kimi":
+			return createInbandScanner("kimi");
+		case "dsml":
+			return createInbandScanner("xml", { xmlTagset: "dsml" });
+		case "qwen":
+			return new QwenXmlInbandScanner();
+		case "thinking":
+			return undefined;
+	}
+}
+
 export interface StreamMarkupHealingOptions {
 	readonly pattern: StreamMarkupHealingPattern;
 }
@@ -59,14 +77,7 @@ export class StreamMarkupHealing {
 
 	constructor(options: StreamMarkupHealingOptions) {
 		this.#pattern = options.pattern;
-		this.#toolScanner =
-			options.pattern === "kimi"
-				? createInbandScanner("kimi")
-				: options.pattern === "dsml"
-					? createInbandScanner("xml", { xmlTagset: "dsml" })
-					: options.pattern === "qwen"
-						? new QwenXmlInbandScanner()
-						: undefined;
+		this.#toolScanner = createToolCallHealingScanner(options.pattern);
 	}
 
 	get pattern(): StreamMarkupHealingPattern {

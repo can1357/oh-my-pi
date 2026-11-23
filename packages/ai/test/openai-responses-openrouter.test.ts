@@ -589,7 +589,7 @@ async function captureDirectResponsesRequest(
 	return body;
 }
 
-describe("OpenRouter Responses DSML healing", () => {
+describe("OpenRouter Responses leaked tool-call healing", () => {
 	function createTextSseResponse(deltas: readonly string[]): Response {
 		const text = deltas.join("");
 		const events = [
@@ -624,35 +624,66 @@ describe("OpenRouter Responses DSML healing", () => {
 		});
 	}
 
-	it("turns a DeepSeek tool call written as DSML text into a live structured call", async () => {
-		const model = buildOpenRouterModel({ id: "deepseek/deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" });
-		// The envelope arrives split mid-tag, as streamed deltas do.
-		const fetchMock: FetchImpl = vi.fn(async () =>
-			createTextSseResponse([
+	// Each grammar's call arrives split mid-token, as streamed deltas do.
+	it.each([
+		{
+			grammar: "DeepSeek DSML",
+			model: () => buildOpenRouterModel({ id: "deepseek/deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" }),
+			deltas: [
 				"Checking the build.\n<｜DSML｜tool_",
 				'calls>\n<｜DSML｜invoke name="bash">\n<｜DSML｜parameter name="command" string="true">ls -la</｜DSML｜par',
 				"ameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
-			]),
-		);
+			],
+			text: "Checking the build.\n",
+			call: { name: "bash", arguments: { command: "ls -la" } },
+		},
+		{
+			grammar: "Kimi section tokens",
+			model: () => buildOpenRouterModel({ id: "moonshotai/kimi-k2", name: "Kimi K2" }),
+			deltas: [
+				"I'll read it. <|tool_calls_section_begin|><|tool_call_be",
+				'gin|>functions.read:0<|tool_call_argument_begin|>{"path":"src/in',
+				'dex.ts"}<|tool_call_end|><|tool_calls_section_end|>',
+			],
+			text: "I'll read it. ",
+			call: { name: "read", arguments: { path: "src/index.ts" } },
+		},
+		{
+			grammar: "Qwen XML",
+			model: () =>
+				buildOpenRouterModel(
+					{ id: "qwen/qwen3-coder", name: "Qwen3 Coder" },
+					{ streamMarkupHealingPattern: "qwen" },
+				),
+			deltas: ["Reading.\n<tool_ca", 'lls>\n<read path="/etc/host', 'name" />\n</tool_calls>'],
+			text: "Reading.\n",
+			call: { name: "read", arguments: { path: "/etc/hostname" } },
+		},
+	])(
+		"turns a $grammar tool call written as text into a live structured call",
+		async ({ model: buildModelUnderTest, deltas, text, call }) => {
+			const model = buildModelUnderTest();
+			const fetchMock: FetchImpl = vi.fn(async () => createTextSseResponse(deltas));
 
-		const events: string[] = [];
-		let message: AssistantMessage | undefined;
-		for await (const event of streamSimple(model, context, { apiKey: "test-key", fetch: fetchMock })) {
-			events.push(event.type);
-			if (event.type === "done") message = event.message;
-			if (event.type === "error") throw new Error(event.error.errorMessage);
-		}
-		if (!message) throw new Error("Expected completed OpenRouter response");
+			const events: string[] = [];
+			let message: AssistantMessage | undefined;
+			for await (const event of streamSimple(model, context, { apiKey: "test-key", fetch: fetchMock })) {
+				events.push(event.type);
+				if (event.type === "done") message = event.message;
+				if (event.type === "error") throw new Error(event.error.errorMessage);
+			}
+			if (!message) throw new Error("Expected completed OpenRouter response");
 
-		expect(message.stopReason).toBe("toolUse");
-		expect(message.content).toEqual([
-			expect.objectContaining({ type: "text", text: "Checking the build.\n" }),
-			expect.objectContaining({ type: "toolCall", name: "bash", arguments: { command: "ls -la" } }),
-		]);
-		// Streamed live, ahead of the turn's end, so the call can dispatch like a native one.
-		expect(events.indexOf("toolcall_end")).toBeGreaterThan(-1);
-		expect(events.indexOf("toolcall_end")).toBeLessThan(events.indexOf("done"));
-	});
+			expect(message.stopReason).toBe("toolUse");
+			expect(message.content).toEqual([
+				expect.objectContaining({ type: "text", text }),
+				expect.objectContaining({ type: "toolCall", ...call }),
+			]);
+			// Streamed live, ahead of the turn's end, so the call can dispatch like a native one.
+			expect(events.indexOf("toolcall_end")).toBeGreaterThan(-1);
+			expect(events.indexOf("toolcall_end")).toBeLessThan(events.indexOf("done"));
+		},
+	);
 });
 
 describe("Responses direct-provider max-token defaults", () => {

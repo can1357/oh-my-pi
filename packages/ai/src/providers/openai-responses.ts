@@ -1648,10 +1648,11 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (model,
 			streamOpenAIResponsesOnce(attemptModel, attemptContextMessages, attemptOptions, attemptContext),
 		{ retryEmptyCompletion: () => attemptContext.mode === "sse" },
 	);
-	// DeepSeek writes tool calls as DSML text on Responses hosts too (OpenRouter);
-	// heal them live like the chat-completions route does.
-	return model.compat.streamMarkupHealingPattern === "dsml"
-		? wrapLeakedThinkingStream(stream, { dsmlToolCalls: true })
+	// Kimi, DeepSeek and Qwen write tool calls as text on Responses hosts too
+	// (OpenRouter); heal them live like the chat-completions route does.
+	const toolCallPattern = model.compat.streamMarkupHealingPattern;
+	return toolCallPattern && toolCallPattern !== "thinking"
+		? wrapLeakedThinkingStream(stream, { toolCallPattern })
 		: stream;
 };
 

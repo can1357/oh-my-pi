@@ -28,12 +28,12 @@
  *
  * Modeled on {@link wrapInbandToolStream} / `InbandStreamProjector` in
  * `../dialect/owned-stream.ts`. Native tool-call events are forwarded verbatim;
- * with {@link LeakedMarkupOptions.dsmlToolCalls} the visible text also runs
- * through DeepSeek's DSML grammar, so a call the model wrote as text becomes a
- * structured call live, for providers without a DSML healer of their own.
+ * with {@link LeakedMarkupOptions.toolCallPattern} the visible text also runs
+ * through that model family's tool-call grammar (Kimi, DeepSeek DSML, Qwen XML),
+ * so a call the model wrote as text becomes a structured call live, for
+ * providers without such a healer of their own.
  */
 
-import { createInbandScanner } from "../dialect/factory";
 import { ThinkingInbandScanner } from "../dialect/thinking";
 import type { InbandScanEvent, InbandScanner } from "../dialect/types";
 import { isAnthropicServerToolHistoryBlock } from "../providers/anthropic-wire";
@@ -54,12 +54,16 @@ import {
 	setStreamingPartialJson,
 } from "./block-symbols";
 import { AssistantMessageEventStream } from "./event-stream";
-import { generateHealedToolCallId } from "./stream-markup-healing";
+import {
+	createToolCallHealingScanner,
+	generateHealedToolCallId,
+	type StreamMarkupHealingPattern,
+} from "./stream-markup-healing";
 
 /** Extra grammars {@link wrapLeakedThinkingStream} heals out of the visible text. */
 export interface LeakedMarkupOptions {
-	/** Turn DeepSeek DSML tool calls written as text into structured calls. */
-	readonly dsmlToolCalls?: boolean;
+	/** Tool-call grammar whose calls written as text become structured calls; `thinking` adds none. */
+	readonly toolCallPattern?: StreamMarkupHealingPattern;
 }
 
 /** A natural `stop` becomes `toolUse` once a healed call joins the turn; any other finish stands. */
@@ -207,7 +211,7 @@ type AnchoredContent = { block: ProjectedContent; sourceIndex: number; order: nu
 class LeakedThinkingProjector {
 	readonly #out: AssistantMessageEventStream;
 	readonly #healer = new ThinkingInbandScanner({ impliedOpen: true });
-	/** DSML tool-call grammar run ahead of {@link #healer}; its text is then healed for reasoning. */
+	/** Tool-call grammar run ahead of {@link #healer}; its text is then healed for reasoning. */
 	readonly #toolScanner: InbandScanner | undefined;
 	#healedToolCall = false;
 	#partial: AssistantMessage;
@@ -232,7 +236,7 @@ class LeakedThinkingProjector {
 
 	constructor(out: AssistantMessageEventStream, seed: AssistantMessage, options: LeakedMarkupOptions) {
 		this.#out = out;
-		this.#toolScanner = options.dsmlToolCalls ? createInbandScanner("xml", { xmlTagset: "dsml" }) : undefined;
+		this.#toolScanner = options.toolCallPattern && createToolCallHealingScanner(options.toolCallPattern);
 		this.#partial = { ...seed, content: [] };
 		this.#out.push({ type: "start", partial: this.#partial });
 	}
