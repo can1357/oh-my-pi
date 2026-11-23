@@ -64,9 +64,11 @@ interface StreamRetryOptions {
 }
 
 /**
- * Error messages whose HTTP status the transport already retried for its whole
- * budget. Replaying them would multiply that budget, so the provider marks them.
- * In-band errors inside a 200 stream are not marked and keep their one replay.
+ * Error messages whose transient HTTP status (408, 429, 5xx) the transport
+ * owned: it either spent its retry budget on it or declined to retry it
+ * (`x-should-retry: false`, a zero-limit 429). A replay would multiply or
+ * override that decision, so the provider marks them. In-band errors inside a
+ * 200 stream are not marked and keep their one replay.
  */
 export const transportExhaustedMessages = new WeakSet<AssistantMessage>();
 

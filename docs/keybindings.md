@@ -169,7 +169,7 @@ A text object follows an operator (`diw`) or extends a Visual selection (`viw`).
 
 ### Visual mode
 
-`v` starts a character-wise selection and `V` a line-wise one; motions move the free end, and `$` extends through the line break. `y` copies the selection to the register, so `p` puts it back (and to the system clipboard, see [Registers](#registers)), `d` deletes it, and `c` deletes it and drops into Insert mode. `x` deletes like `d`, `s` changes like `c`, `r` + char replaces every character, `u` / `U` / `~` lower / upper / toggle its case, and `J` / `gJ` join its lines. `X`, `D`, `Y`, `C`, `S`, and `R` act on every line the selection touches, even a character-wise one. `p` and `P` replace the selection with the register (`p` then keeps the replaced text in the register; `P` leaves the register alone). `o` jumps to the other end of the selection. `Escape` cancels.
+`v` starts a character-wise selection and `V` a line-wise one; motions move the free end, and `$` extends through the line break. `y` copies the selection to the register, so `p` puts it back (the system clipboard only with `"+` or `tui.vimYankToClipboard`, see [Registers](#registers)), `d` deletes it, and `c` deletes it and drops into Insert mode. `x` deletes like `d`, `s` changes like `c`, `r` + char replaces every character, `u` / `U` / `~` lower / upper / toggle its case, and `J` / `gJ` join its lines. `X`, `D`, `Y`, `C`, `S`, and `R` act on every line the selection touches, even a character-wise one. `p` and `P` replace the selection with the register (`p` then keeps the replaced text in the register; `P` leaves the register alone). `o` jumps to the other end of the selection. `Escape` cancels.
 
 ### Registers
 
