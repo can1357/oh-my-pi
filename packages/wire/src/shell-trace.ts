@@ -122,6 +122,8 @@ export interface ShellTraceUnit {
 	projection?: number;
 	/** Script a callout (`timeout`, `git`, `xargs`, …) ran for its operands; its calling command stands for it. */
 	callout?: boolean;
+	/** Command (unit index, node id) that ran this unit's script when the script is not literal in it: `eval "$x"`, `.`, a nested shell's file. */
+	runner?: { unit: number; node: number };
 	nodes: ShellTraceNode[];
 }
 

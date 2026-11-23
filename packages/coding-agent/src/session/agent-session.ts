@@ -2804,6 +2804,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			createVibeTools: config.createVibeTools,
 			createThinkTool: config.createThinkTool,
 			builtInToolNames: config.builtInToolNames,
+			hasNativeTool: config.hasNativeTool,
 			mcpManagerToolNames: config.mcpManagerToolNames,
 			presentationPinnedToolNames: config.presentationPinnedToolNames,
 			ensureGoalRegistered: config.ensureGoalRegistered,

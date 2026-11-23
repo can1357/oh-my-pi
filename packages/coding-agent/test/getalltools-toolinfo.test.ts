@@ -9,7 +9,9 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 function createTool(name: string): AgentTool {
 	return {
@@ -218,4 +220,41 @@ describe("AgentSession.getAllToolInfos", () => {
 			tempDir.removeSync();
 		}
 	});
+
+	// Special tools register after the factory built-ins; with tool commands on,
+	// the session's built-in set came from createTools and used to omit them.
+	for (const commands of [true, false]) {
+		it(`reports host special tools as builtin with tools.commands=${commands}`, async () => {
+			const tempDir = TempDir.createSync("@getalltools-special-");
+			const authStorage = createInMemoryAuthStorage();
+			const { session } = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
+				settings: Settings.isolated({ "tools.commands": commands }),
+				sessionManager: SessionManager.inMemory(tempDir.path()),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				rules: [],
+				preloadedCustomToolPaths: [],
+			});
+			try {
+				const byName = new Map(session.getAllToolInfos().map(t => [t.name, t.sourceInfo]));
+				for (const name of ["propose", "resolve", "reject"]) {
+					expect(byName.get(name)).toMatchObject({ source: "builtin", path: `<builtin:${name}>` });
+				}
+			} finally {
+				await session.dispose();
+				authStorage.close();
+				tempDir.removeSync();
+			}
+		}, 60_000);
+	}
 });

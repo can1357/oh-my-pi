@@ -380,16 +380,18 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 			outputLines.push(...matchOutput.model);
 			displayLines.push(...matchOutput.display);
 
+			const nextSkip = result.limitReached ? skip + result.matches.length : undefined;
 			const details: AstGrepToolDetails = {
 				...baseDetails,
+				...(nextSkip === undefined ? {} : { nextSkip }),
 				fileMatches: fileList.map(filePath => ({
 					path: filePath,
 					count: fileMatchCounts.get(filePath) ?? 0,
 				})),
 				displayContent: displayLines.join("\n"),
 			};
-			if (result.limitReached) {
-				outputLines.push("", "Result limit reached; narrow path or use skip to page through results.");
+			if (nextSkip !== undefined) {
+				outputLines.push("", `Result limit reached; narrow path or use skip=${nextSkip} for the next page.`);
 			}
 			if (cappedParseErrors.length) {
 				outputLines.push("", ...formatParseErrors(cappedParseErrors, parseErrorsTotal));

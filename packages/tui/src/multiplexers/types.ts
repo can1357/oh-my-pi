@@ -99,6 +99,11 @@ export interface TerminalMultiplexerModule<Id extends string = string> {
 	readonly backgroundQueryBrokenOn?: readonly NodeJS.Platform[];
 	/** OSC 11 may arrive after DA1 because the query is forwarded while DA1 is answered locally. */
 	readonly backgroundReplyMayFollowDa1?: boolean;
+	/**
+	 * The multiplexer answers CSI ?996n with its own light/dark mode (CSI ?997;Pn n) while it
+	 * forwards OSC 11 to the host, so that mode outranks the host background's luminance.
+	 */
+	readonly colorSchemeQueryAuthoritative?: boolean;
 	/** Present when OSC 11 replies come from a cache an explicit refresh must update first. */
 	readonly backgroundColorCache?: TerminalMultiplexerBackgroundColorCache;
 	/** Expands REP into identical styled cells, so destructive replays REP-encode their padding. */
