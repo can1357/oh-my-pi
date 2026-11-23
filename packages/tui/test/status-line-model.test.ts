@@ -197,41 +197,27 @@ describe("status line model segment retry fallback", () => {
 		};
 	}
 
-	it("shows the serving fallback model, its level, and a warning marker", () => {
-		const ctx = createFallbackContext({
-			selector: "zai/glm-5:medium",
-			modelIdentity: "zai/glm-5",
-			thinkingLevel: ThinkingLevel.Medium,
-			isFallback: true,
-		});
+	it("marks a retry fallback serving the session after the model's own name", () => {
+		const ctx = createFallbackContext({ selector: "anthropic/claude-opus-4-5:high", isFallback: true });
 		const rendered = renderSegment("model", ctx).content;
-		expect(Bun.stripANSI(rendered)).toBe(`${modelPrefix}glm-5${dot}${theme.thinking.medium}${dot}fallback`);
+		expect(Bun.stripANSI(rendered)).toBe(`${modelPrefix}Opus 4.5${dot}${theme.thinking.high}${dot}fallback`);
 		expect(rendered).toContain(theme.fg("warning", `${dot}fallback`));
+		expect(rendered).not.toContain("claude-opus-4-5");
 		const view = describeSegment("model", ctx);
-		expect(view?.spans.map(s => s.t).join("")).toBe(`glm-5 · medium${dot}fallback`);
+		expect(view?.spans.map(s => s.t).join("")).toBe(`Opus 4.5 · high${dot}fallback`);
 		expect(view?.spans.at(-1)).toEqual({ t: `${dot}fallback`, s: "warning" });
 		expect(view?.tone).toBe("warning");
 	});
 
-	it("derives the fallback id from the selector when no identity was recorded", () => {
-		const ctx = createFallbackContext({ selector: "openrouter/z-ai/glm-4.7:high", isFallback: true });
-		expect(describeSegment("model", ctx)?.spans[0]?.t).toBe("z-ai/glm-4.7");
-	});
-
-	it("keeps the requested model while the configured model serves", () => {
-		const ctx = createFallbackContext({
-			selector: "anthropic/claude-opus-4-5:high",
-			modelIdentity: "anthropic/claude-opus-4-5",
-			thinkingLevel: ThinkingLevel.High,
-			isFallback: false,
-		});
+	it("adds no marker while the configured model serves", () => {
+		const ctx = createFallbackContext({ selector: "anthropic/claude-opus-4-5:high", isFallback: false });
 		expect(Bun.stripANSI(renderSegment("model", ctx).content)).toBe(
 			`${modelPrefix}Opus 4.5${dot}${theme.thinking.high}`,
 		);
 		expect(describeSegment("model", ctx)?.tone).toBeUndefined();
 	});
 
-	it("renders the requested model when the session reports no serving model", () => {
+	it("adds no marker when the session reports no serving model", () => {
 		const ctx = createFallbackContext();
 		expect(Bun.stripANSI(renderSegment("model", ctx).content)).toBe(
 			`${modelPrefix}Opus 4.5${dot}${theme.thinking.high}`,
