@@ -44,6 +44,7 @@ omp-builtins.workspace = true
 omp-vcs.workspace = true
 omp-vfs.workspace = true
 postcard.workspace = true
+rpds.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
