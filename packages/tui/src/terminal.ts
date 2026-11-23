@@ -43,6 +43,17 @@ import { Win32InputModeDecoder, Win32PasteMarkerNormalizer } from "./windows-inp
 
 export { writeTerminalSequence, writeThroughActiveTerminal } from "./active-terminal";
 
+/**
+ * Opener of the agent-view attach marker (`ESC _ omp-attach ; <payload> ESC \`)
+ * an attach client writes into a hosted session's PTY input. ProcessTerminal
+ * consumes it before application routing and hands the payload to
+ * {@link Terminal.onAttachMarker}.
+ */
+export const OMP_ATTACH_APC_PREFIX = "\x1b_omp-attach;";
+const APC_TERMINATOR = "\x1b\\";
+/** Bound for a buffered attach marker; its payload is a token plus a base64 JSON object. */
+const MAX_ATTACH_MARKER_BYTES = 16 * 1024;
+
 const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
@@ -672,6 +683,15 @@ export interface Terminal {
 	 * Terminals built against older pi-tui versions keep working.
 	 */
 	onTspHello?(callback: TspHelloHandler): void;
+	/**
+	 * Receive the payload of every agent-view attach marker
+	 * ({@link OMP_ATTACH_APC_PREFIX}) read from stdin. The handler survives
+	 * stop()/start(); it runs inside input dispatch, so a handler that restarts
+	 * the terminal must defer that work. The latest marker read before anyone
+	 * subscribed is handed to the first subscriber. Returns the unsubscribe function.
+	 * Optional so custom Terminals built against older pi-tui versions keep working.
+	 */
+	onAttachMarker?(callback: (payload: string) => void): () => void;
 	/** True while the `hello` probe awaits its reply or DA1 sentinel. */
 	readonly tspProbePending?: boolean;
 	/**
@@ -914,6 +934,10 @@ export class ProcessTerminal implements Terminal {
 	/** This tmux pane's APC titles are off for TSP and must be restored. */
 	#tspTmuxPaneGated = false;
 	#tspReplyBuffer = "";
+	#attachMarkerBuffer = "";
+	#attachMarkerHandler: ((payload: string) => void) | undefined;
+	/** Latest attach marker that arrived before anyone subscribed; handed to the first subscriber. */
+	#pendingAttachPayload: string | undefined;
 	#privateCsiResponseBuffer = "";
 	#da1SentinelOwners: Da1SentinelOwner[] = [];
 	/** Resolved DECRQM support per private mode (mode → supported). */
@@ -1071,6 +1095,16 @@ export class ProcessTerminal implements Terminal {
 	onTspHello(callback: TspHelloHandler): void {
 		this.#tspCallbacks.push(callback);
 		if (this.#tspResult !== undefined) callback(this.#tspResult);
+	}
+
+	onAttachMarker(callback: (payload: string) => void): () => void {
+		this.#attachMarkerHandler = callback;
+		const pending = this.#pendingAttachPayload;
+		this.#pendingAttachPayload = undefined;
+		if (pending !== undefined) callback(pending);
+		return () => {
+			if (this.#attachMarkerHandler === callback) this.#attachMarkerHandler = undefined;
+		};
 	}
 
 	get tspProbePending(): boolean {
@@ -1392,6 +1426,7 @@ export class ProcessTerminal implements Terminal {
 				this.#programStatusReplyBuffer = "";
 				this.#glyphProtocolReplyBuffer = "";
 				this.#tspReplyBuffer = "";
+				this.#attachMarkerBuffer = "";
 				for (const key of win32Keys) this.#stdinSequenceHandler?.(key);
 				if (decoder.hasPendingSequence) {
 					this.#win32PendingFlushTimer = setTimeout(
@@ -1845,6 +1880,31 @@ export class ProcessTerminal implements Terminal {
 					return;
 				}
 			}
+
+			// Agent-view attach marker, then every other complete APC. An APC is
+			// terminal/host control data, never typing: an unknown one (a kitty
+			// graphics acknowledgement) is dropped instead of reaching the composer.
+			// A bare `\x1b_` is legacy Alt+_ and an unterminated `\x1b_…` a chord
+			// batched with keys, so only complete APCs (and the attach opener) stop here.
+			// Another escape interrupts a torn marker; it may open a fresh one.
+			if (this.#attachMarkerBuffer && sequence.startsWith("\x1b") && sequence !== APC_TERMINATOR) {
+				this.#attachMarkerBuffer = "";
+			}
+			if (this.#attachMarkerBuffer || sequence.startsWith(OMP_ATTACH_APC_PREFIX)) {
+				this.#attachMarkerBuffer += sequence;
+				if (this.#attachMarkerBuffer.length > MAX_ATTACH_MARKER_BYTES) {
+					this.#attachMarkerBuffer = "";
+					return;
+				}
+				if (!this.#attachMarkerBuffer.endsWith(APC_TERMINATOR)) return;
+				const marker = this.#attachMarkerBuffer;
+				this.#attachMarkerBuffer = "";
+				const payload = marker.slice(OMP_ATTACH_APC_PREFIX.length, marker.length - APC_TERMINATOR.length);
+				if (this.#attachMarkerHandler) this.#attachMarkerHandler(payload);
+				else this.#pendingAttachPayload = payload;
+				return;
+			}
+			if (sequence.length > 4 && sequence.startsWith("\x1b_") && sequence.endsWith(APC_TERMINATOR)) return;
 
 			// Mode 2031 change notification: re-query OSC 11 with 100ms debounce
 			// (Neovim convention — coalesces rapid notifications during transitions)
@@ -2654,6 +2714,7 @@ export class ProcessTerminal implements Terminal {
 		this.#tspResult = undefined;
 		this.#tspReplyBuffer = "";
 		this.#tspCallbacks = [];
+		this.#attachMarkerBuffer = "";
 		this.#privateCsiResponseBuffer = "";
 		this.#inBandResizeBuffer = "";
 		this.#clearCsiIntroducer();

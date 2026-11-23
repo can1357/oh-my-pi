@@ -140,6 +140,10 @@ class StubDaemon implements DaemonClient {
 		this.leases.delete(lease);
 	}
 
+	async resize(): Promise<void> {
+		throw new Error("stub daemon does not resize");
+	}
+
 	/** A daemon restart: every lease is gone, then reconnect sinks fire. */
 	restart(): void {
 		this.leases.clear();

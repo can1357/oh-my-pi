@@ -92,6 +92,9 @@ pub struct PtyArgvStartOptions<'env> {
 	pub cols:        Option<u16>,
 	/// PTY row count.
 	pub rows:        Option<u16>,
+	/// Start the child from an empty environment instead of this process's:
+	/// `env` becomes the complete environment.
+	pub clear_env:   Option<bool>,
 }
 
 /// Result of a PTY command run.
@@ -113,11 +116,13 @@ enum PtyCommand {
 
 #[derive(Clone)]
 struct PtyRunConfig {
-	command: PtyCommand,
-	cwd:     Option<String>,
-	env:     Option<HashMap<String, String>>,
-	cols:    u16,
-	rows:    u16,
+	command:   PtyCommand,
+	cwd:       Option<String>,
+	env:       Option<HashMap<String, String>>,
+	/// Start from an empty environment; `env` is then the whole of it.
+	clear_env: bool,
+	cols:      u16,
+	rows:      u16,
 }
 
 enum ReaderEvent {
@@ -303,11 +308,12 @@ impl PtySession {
 	) -> Result<PromiseRaw<'env, PtyRunResult>> {
 		let dimensions = PtyDimensions::new(options.cols.unwrap_or(120), options.rows.unwrap_or(40));
 		let run_config = PtyRunConfig {
-			command: PtyCommand::Shell { command: options.command, shell: options.shell },
-			cwd:     options.cwd,
-			env:     options.env,
-			cols:    dimensions.cols,
-			rows:    dimensions.rows,
+			command:   PtyCommand::Shell { command: options.command, shell: options.shell },
+			cwd:       options.cwd,
+			env:       options.env,
+			clear_env: false,
+			cols:      dimensions.cols,
+			rows:      dimensions.rows,
 		};
 		let handles = Arc::clone(&self.handles);
 		self.launch(env, "pty.start", options.timeout_ms, options.signal, move |tx, rx, ct| {
@@ -329,11 +335,15 @@ impl PtySession {
 	) -> Result<PromiseRaw<'env, PtyRunResult>> {
 		let dimensions = PtyDimensions::new(options.cols.unwrap_or(120), options.rows.unwrap_or(40));
 		let run_config = PtyRunConfig {
-			command: PtyCommand::Argv { application: options.application, args: options.args },
-			cwd:     options.cwd,
-			env:     options.env,
-			cols:    dimensions.cols,
-			rows:    dimensions.rows,
+			command:   PtyCommand::Argv {
+				application: options.application,
+				args:        options.args,
+			},
+			cwd:       options.cwd,
+			env:       options.env,
+			clear_env: options.clear_env.unwrap_or(false),
+			cols:      dimensions.cols,
+			rows:      dimensions.rows,
 		};
 		let handles = Arc::clone(&self.handles);
 		self.launch(env, "pty.start", options.timeout_ms, options.signal, move |tx, rx, ct| {
@@ -1015,12 +1025,16 @@ fn run_pty_sync(
 	if let Some(cwd) = config.cwd.as_ref() {
 		cmd.cwd(cwd);
 	}
-	// `CommandBuilder` starts from this process's environment, so drop
-	// repo-location overrides before the explicit env below is applied: the
-	// terminal's `git` rediscovers the repository from `cwd`, while a
-	// caller-supplied value still wins.
-	for name in omp_shell::shell::GIT_REPO_LOCATION_ENV_VARS {
-		cmd.env_remove(name);
+	if config.clear_env {
+		cmd.env_clear();
+	} else {
+		// `CommandBuilder` starts from this process's environment, so drop
+		// repo-location overrides before the explicit env below is applied: the
+		// terminal's `git` rediscovers the repository from `cwd`, while a
+		// caller-supplied value still wins.
+		for name in omp_shell::shell::GIT_REPO_LOCATION_ENV_VARS {
+			cmd.env_remove(name);
+		}
 	}
 	if let Some(env) = config.env.as_ref() {
 		for (key, value) in env {
@@ -1655,14 +1669,15 @@ mod input_wait_tests {
 		let handles = Arc::new(Mutex::new(PtyHandles::default()));
 		let (tx, rx) = flume::unbounded();
 		let config = PtyRunConfig {
-			command: PtyCommand::Argv {
+			command:   PtyCommand::Argv {
 				application: "/bin/sh".to_string(),
 				args:        vec!["-c".to_string(), script.to_string()],
 			},
-			cwd:     None,
-			env:     None,
-			cols:    80,
-			rows:    24,
+			cwd:       None,
+			env:       None,
+			clear_env: false,
+			cols:      80,
+			rows:      24,
 		};
 		let run = {
 			let handles = Arc::clone(&handles);
@@ -1810,14 +1825,15 @@ mod zombie_repro_tests {
 			let (tx, rx) = flume::unbounded();
 			let ct = task::CancelToken::new(Some(1), None);
 			let config = PtyRunConfig {
-				command: PtyCommand::Argv {
+				command:   PtyCommand::Argv {
 					application: STORM_CHILD_COMM.to_string(),
 					args:        vec!["5".to_string()],
 				},
-				cwd:     None,
-				env:     None,
-				cols:    80,
-				rows:    24,
+				cwd:       None,
+				env:       None,
+				clear_env: false,
+				cols:      80,
+				rows:      24,
 			};
 			// Pre-spawn heartbeats bail with `Err`, so `Ok` means this iteration
 			// reached the post-spawn cancellation path.

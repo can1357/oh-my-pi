@@ -61,6 +61,12 @@ const MAX_TERMINAL_UNITS_PER_SCOPE = 10;
 const DETACHED_POLL_MS = 250;
 /** How often an unleased unit that reports in-flight work is re-checked for idleness. */
 const BUSY_RECHECK_MS = 1_000;
+/** A viewer's transport stops accepting more at 1 MiB unwritten (`IpcConnection.send`). */
+const TUNNEL_HIGH_WATER_BYTES = 1024 * 1024;
+/** Unwritten bytes after which a viewer is dropped instead of buffering output for it without bound. */
+const SLOW_VIEWER_BYTES = 4 * 1024 * 1024;
+/** Largest PTY dimension the natives accept. */
+const MAX_PTY_DIMENSION = 0xffff;
 /** Store meta key: fds the previous image kept across its re-exec, claimed by restored units or closed. */
 const INHERITED_FDS_META = "inherited_fds";
 const LOG_FILE = "output.log";
@@ -86,6 +92,12 @@ export interface UnitConnection {
 	readonly client: ModuleClient;
 	readonly closed: boolean;
 	send(event: DaemonEvent): void;
+}
+
+/** A tunnel from a client connection; a `proc` unit can drop it without flushing. */
+export interface ViewerTunnel extends ModuleTunnel {
+	/** Immediate close: queued output is dropped; the close handler follows. */
+	destroy(): void;
 }
 
 export interface UnitTableOptions {
@@ -152,10 +164,17 @@ interface UnitEntry {
 	pendingCompletions: DaemonCompletionEvent[];
 	/** Re-checked on every state change or output. */
 	waiters: Set<() => void>;
-	tunnels: Set<ModuleTunnel>;
+	/** Attached tunnels with their unwritten-output accounting. */
+	tunnels: Map<ViewerTunnel, TunnelBacklog>;
 	/** Resolves when the unit is ready (or failed to be). */
 	ready: Promise<void>;
 	childFds?: StoredChildFds;
+}
+
+/** Output queued on a tunnel past its transport's high-water mark, while it drains. */
+interface TunnelBacklog {
+	bytes: number;
+	draining: boolean;
 }
 
 interface LogRead {
@@ -166,6 +185,10 @@ interface LogRead {
 
 function isTerminal(state: UnitSnapshot["state"]): boolean {
 	return state === "exited" || state === "failed";
+}
+
+function isPtyDimension(value: unknown): value is number {
+	return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= MAX_PTY_DIMENSION;
 }
 
 function isSettled(state: UnitSnapshot["state"]): boolean {
@@ -823,7 +846,7 @@ export class UnitTable {
 	}
 
 	/** Hand an attached tunnel to the unit. */
-	async attach(ref: UnitRef, channel: string | undefined, tunnel: ModuleTunnel): Promise<void> {
+	async attach(ref: UnitRef, channel: string | undefined, tunnel: ViewerTunnel): Promise<void> {
 		const entry = this.#resolve(ref);
 		entry.lastUsed = Date.now();
 		const unit = entry.moduleRuntime?.unit;
@@ -833,16 +856,73 @@ export class UnitTable {
 		}
 		const runtime = entry.procRuntime;
 		if (!runtime) throw new Error(`Unit ${entry.snapshot.key} does not accept tunnels`);
-		entry.tunnels.add(tunnel);
+		// Newest viewer wins: the old one leaves the fan-out and input set before the new one joins.
+		if (entry.proc?.exclusiveAttach) {
+			for (const previous of entry.tunnels.keys()) this.#dropTunnel(entry, previous);
+		}
+		entry.tunnels.set(tunnel, { bytes: 0, draining: false });
+		// One streaming decoder per tunnel: a multi-byte character split across chunks stays intact.
+		const decoder = new TextDecoder();
 		tunnel.start(
 			chunk => {
-				if (runtime.pty) runtime.pty.write(new TextDecoder().decode(chunk));
-				else runtime.child?.write(chunk);
+				if (!entry.tunnels.has(tunnel)) return;
+				if (runtime.pty) {
+					const text = decoder.decode(chunk, { stream: true });
+					if (text) runtime.pty.write(text);
+				} else runtime.child?.write(chunk);
 			},
 			() => {
 				entry.tunnels.delete(tunnel);
 			},
 		);
+	}
+
+	/** Resize a PTY unit's terminal; the size is kept for its relaunches. */
+	resize(connection: UnitConnection, operation: Op<"resize">): DaemonResults["resize"] {
+		const entry = this.#resolve(operation.unit);
+		const { cols, rows } = operation;
+		if (!isPtyDimension(cols) || !isPtyDimension(rows)) {
+			throw new Error(`Invalid PTY size ${String(cols)}x${String(rows)}`);
+		}
+		const pty = entry.procRuntime?.pty;
+		if (!entry.proc?.pty || !pty) throw new Error(`Unit ${entry.snapshot.key} has no PTY`);
+		if (isTerminal(entry.snapshot.state)) throw new Error(`Unit ${entry.snapshot.key} is ${entry.snapshot.state}`);
+		if (entry.proc.exclusiveAttach) {
+			const viewer = entry.tunnels.keys().next().value;
+			if (viewer && viewer.client.pid !== connection.client.pid) {
+				throw new Error(`Unit ${entry.snapshot.key} is attached to another viewer`);
+			}
+		}
+		pty.resize(cols, rows);
+		entry.proc.cols = cols;
+		entry.proc.rows = rows;
+		this.#persist(entry);
+		return { unit: copySnapshot(entry.snapshot) };
+	}
+
+	/** Detach a viewer at once: queued output is discarded, and its later input never reaches the unit. */
+	#dropTunnel(entry: UnitEntry, tunnel: ViewerTunnel): void {
+		entry.tunnels.delete(tunnel);
+		tunnel.destroy();
+	}
+
+	/** Send unit output to every viewer; one that falls too far behind is dropped so it never stalls the unit. */
+	#fanOut(entry: UnitEntry, data: string | Uint8Array): void {
+		for (const [tunnel, backlog] of entry.tunnels) {
+			if (tunnel.send(data) && !backlog.draining) continue;
+			backlog.bytes += typeof data === "string" ? Buffer.byteLength(data) : data.byteLength;
+			if (TUNNEL_HIGH_WATER_BYTES + backlog.bytes > SLOW_VIEWER_BYTES) {
+				logger.warn("Dropping a slow unit viewer", { id: entry.snapshot.id, pid: tunnel.client.pid });
+				this.#dropTunnel(entry, tunnel);
+				continue;
+			}
+			if (backlog.draining) continue;
+			backlog.draining = true;
+			void tunnel.drained().then(() => {
+				backlog.bytes = 0;
+				backlog.draining = false;
+			});
+		}
 	}
 
 	register(connection: UnitConnection, operation: Op<"register">): DaemonResults["register"] {
@@ -1241,7 +1321,7 @@ export class UnitTable {
 			completion: { capable: false },
 			pendingCompletions: [],
 			waiters: new Set(),
-			tunnels: new Set(),
+			tunnels: new Map(),
 			ready: Promise.resolve(),
 		};
 	}
@@ -1342,7 +1422,7 @@ export class UnitTable {
 		entry.snapshot.idleAt = undefined;
 		clearTimeout(entry.idleTimer);
 		entry.idleTimer = undefined;
-		for (const tunnel of entry.tunnels) tunnel.close();
+		for (const tunnel of entry.tunnels.keys()) tunnel.close();
 		this.#wake(entry);
 		this.#removeEntry(entry);
 		this.#onLivenessChange();
@@ -1645,12 +1725,21 @@ export class UnitTable {
 		// position or device attributes would block on the reply. Answer those queries
 		// from the output stream. On Windows ConPTY's INHERIT_CURSOR handshake is answered
 		// by the PTY layer (crates/natives/src/pty.rs), so it must not be answered twice.
-		const responder = new TerminalQueryResponder({ hostCursorHandshake: process.platform === "win32" });
+		// An attached viewer's terminal answers for itself, so the responder stays silent
+		// then and restarts clean whenever viewers come or go.
+		const newResponder = () => new TerminalQueryResponder({ hostCursorHandshake: process.platform === "win32" });
+		let responder = newResponder();
+		let viewed = false;
 		return (error, chunk) => {
 			if (launch !== runtime.launch) return;
 			if (error) runtime.log?.append(`PTY output error: ${error.message}\n`);
 			if (!chunk) return;
-			const reply = responder.feed(chunk);
+			const viewing = entry.tunnels.size > 0;
+			if (viewing !== viewed) {
+				viewed = viewing;
+				responder = newResponder();
+			}
+			const reply = viewing ? "" : responder.feed(chunk);
 			if (reply) {
 				try {
 					session.write(reply);
@@ -1658,7 +1747,7 @@ export class UnitTable {
 					// The PTY may exit between its final output and the reply.
 				}
 			}
-			for (const tunnel of entry.tunnels) tunnel.send(chunk);
+			this.#fanOut(entry, chunk);
 			this.#onOutput(entry, launch, chunk);
 		};
 	}
@@ -1682,8 +1771,9 @@ export class UnitTable {
 				args: proc.args,
 				cwd: proc.cwd,
 				env: { TERM: "xterm-256color", ...proc.env },
-				cols: DAEMON_PTY_COLUMNS,
-				rows: DAEMON_PTY_ROWS,
+				clearEnv: proc.clearEnv,
+				cols: proc.cols ?? DAEMON_PTY_COLUMNS,
+				rows: proc.rows ?? DAEMON_PTY_ROWS,
 			},
 			this.#ptyHandlers(entry, launch, session),
 			(error, pid) => {
@@ -1711,7 +1801,7 @@ export class UnitTable {
 		const stderrDecoder = new TextDecoder();
 		const forward = (decoder: TextDecoder) => (chunk: Uint8Array) => {
 			if (launch !== runtime.launch) return;
-			for (const tunnel of entry.tunnels) tunnel.send(chunk);
+			this.#fanOut(entry, chunk);
 			this.#onOutput(entry, launch, decoder.decode(chunk, { stream: true }));
 		};
 		child.onStdout(forward(stdoutDecoder));
@@ -1816,7 +1906,7 @@ export class UnitTable {
 			if (launch !== runtime.launch) return;
 			entry.outputOffset = size;
 			entry.snapshot.outputBytes = size;
-			for (const tunnel of entry.tunnels) tunnel.send(raw);
+			this.#fanOut(entry, raw);
 			if (report) this.#trackOutput(entry, launch, sanitizeText(raw));
 			else runtime.readinessBuffer = (runtime.readinessBuffer + sanitizeText(raw)).slice(-READINESS_BUFFER_CHARS);
 		});
@@ -1980,7 +2070,7 @@ export class UnitTable {
 			return;
 		}
 		snapshot.state = failed && !runtime.stopRequested ? "failed" : "exited";
-		for (const tunnel of entry.tunnels) tunnel.close();
+		for (const tunnel of entry.tunnels.keys()) tunnel.close();
 		runtime.terminalSettled = this.#publishTerminal(entry);
 		await runtime.terminalSettled;
 	}

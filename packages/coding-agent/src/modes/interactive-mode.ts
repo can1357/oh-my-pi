@@ -60,7 +60,6 @@ import type { JobWidgetRegistry } from "../job-widgets/types";
 import { sameItems } from "@oh-my-pi/pi-tui/native/memo";
 import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
 import type { WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
-import { formatDoubleTap } from "@oh-my-pi/pi-tui/key-hint-format";
 import { thinkingLevelWord } from "@oh-my-pi/pi-tui/status-line/segments";
 import {
 	type TspChecklistItem,
@@ -269,6 +268,19 @@ import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { openPath } from "../utils/open";
 import { resumeCommand } from "../utils/resume-command";
+import { writeTerminalSequence } from "@oh-my-pi/pi-tui/terminal";
+import { BackgroundHandoff, type HandoffHost } from "../agents-view/handoff";
+import {
+	applyViewerIdentity,
+	hostedAttachToken,
+	hostedInstanceKey,
+	hostedRestartEnv,
+	initHostedInstance,
+	leftArrowBackgrounds,
+} from "../agents-view/host";
+import { encodeDetachMarker, parseAttachPayload } from "../agents-view/markers";
+import { listAgentSessions } from "../agents-view/status";
+import { runAgentsView } from "../cli/agents-view-cli";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-tui/theme/session-color";
 import { messageHasDisplayableThinking } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import type { TokenRateMeter } from "../utils/token-rate";
@@ -573,6 +585,10 @@ const cfgLiveUiSettings = combine({
 type LiveUiSettings = SettingValueOf<typeof cfgLiveUiSettings>;
 
 const STILL_CLOSING_DELAY_MS = 3_000;
+/** How long the `← agents` composer hint shows after startup or a reattach. */
+const BACKGROUND_HINT_MS = 10_000;
+/** How often the composer re-reads how many background sessions wait for input. */
+const BACKGROUND_WAITING_POLL_MS = 10_000;
 const JUDGMENT_BATCH_PROGRESS_RETAIN_MS = 1_000;
 /** Startup emits several status-bar changes within a second; persist only the settled one. */
 const COMPOSER_STATUS_PERSIST_DELAY_MS = 1_000;
@@ -1731,7 +1747,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				icon: "users",
 				tone: "accent",
 				noun: "agent",
-				shortcut: formatDoubleTap("left"),
+				shortcut: appKey(this.keybindings, "app.agents.hub"),
 				act: "agents.open",
 			},
 		);
@@ -1898,6 +1914,21 @@ export class InteractiveMode implements InteractiveModeContext {
 	lastLeftTapTime = 0;
 	shutdownRequested = false;
 	#isShuttingDown = false;
+	/** Verified hosted-unit key when this process runs in a daemon PTY (agent view); see `agents-view/host.ts`. */
+	#hostedKey: string | undefined;
+	/** Unsubscribes the appearance-report listener of {@link #subscribeTerminalReports}. */
+	#unsubscribeAppearanceReport: (() => void) | undefined;
+	#attachMarkerUnsubscribe: (() => void) | undefined;
+	/** A hosted detach is scheduled; see {@link #detachHostedViewer}. */
+	#hostedDetachPending = false;
+	#hostedSuspendUnsubscribe: (() => void) | undefined;
+	#backgroundHandoff: BackgroundHandoff | undefined;
+	/** The `← agents` composer hint shows until this time. */
+	#backgroundHintUntil = 0;
+	#backgroundHintTimer: NodeJS.Timeout | undefined;
+	/** Other background sessions waiting for input, from the agent status directory. */
+	#backgroundWaiting = 0;
+	#backgroundWaitingTimer: NodeJS.Timeout | undefined;
 	/**
 	 * Cancellation scope of the current `shutdown()`/`restart()` close attempt.
 	 * Every prompt the close shows before teardown (the extension
@@ -2684,6 +2715,9 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async init(options: InteractiveModeInitOptions = {}): Promise<void> {
 		if (this.isInitialized) return;
+		// Reads (and removes from the environment) the hosted-unit variables right away;
+		// the daemon check resolves while init proceeds.
+		const hostedInstance = initHostedInstance();
 		this.#idleMaintenanceActivity.scheduledTurn = target =>
 			target === this.session &&
 			(this.#goalContinuationTimer !== undefined ||
@@ -2974,6 +3008,24 @@ export class InteractiveMode implements InteractiveModeContext {
 			}),
 		);
 		this.#syncEditorMaxHeight();
+		this.#hostedKey = await hostedInstance;
+		if (this.#hostedKey) {
+			this.#attachMarkerUnsubscribe = this.ui.terminal.onAttachMarker?.(payload =>
+				this.#handleViewerAttach(payload),
+			);
+			// A hosted session must never SIGSTOP itself inside the daemon PTY. The suspend key
+			// detaches instead, ahead of the focused component, so it also works while a
+			// dialog owns the keyboard and ← cannot reach the composer.
+			this.#hostedSuspendUnsubscribe = this.ui.addInputListener(
+				data => {
+					if (!this.keybindings.matches(data, "app.suspend")) return undefined;
+					this.#detachHostedViewer();
+					return { consume: true };
+				},
+				{ prepend: true },
+			);
+		}
+		this.#startBackgroundHints();
 		this.isInitialized = true;
 		// The startup composer is already visible. Commit the complete runtime
 		// tree before session_start hooks/reconciliation continue; renderNow keeps
@@ -3197,57 +3249,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 		// The preset may have switched before this listener existed.
 		this.#refreshSlashCommandIcons();
-		// A confirmed Glyph Protocol handshake means omp's own icons render in
-		// this terminal without a Nerd Font, so the unconfigured `unicode` preset
-		// is upgraded to `nerd` for this session. The persisted setting is left
-		// alone: it travels to terminals (ssh, tmux) where the upgrade would
-		// show tofu. Explicit preset choices are never touched.
-		this.ui.terminal.onGlyphProtocolReport?.(supported => {
-			if (!supported || cfgSymbolPreset.provenance(settings) !== "default" || theme.getSymbolPreset() !== "unicode")
-				return;
-			void setSymbolPreset("nerd").then(() => {
-				this.statusLine.invalidate();
-				this.ui.invalidate();
-				this.ui.requestRender();
-			});
-		});
-
-		// Subscribe to terminal dark/light appearance changes.
-		// The terminal queries background color via OSC 11 at startup and on
-		// Mode 2031 notifications, computing luminance to detect dark/light.
-		const unsubscribeAppearanceReport = this.ui.terminal.onAppearanceReport?.((_mode, requestToken) => {
-			const request = this.#appearanceRefreshRequest;
-			if (request === undefined || requestToken !== request.token) return;
-			// ProcessTerminal dispatches report callbacks first, then synchronously
-			// dispatches onAppearanceChange when the reported appearance changed.
-			// That change callback consumes the request below before this microtask
-			// runs; an unchanged matching report has no change callback, so it
-			// consumes the one-shot here. Comparing the captured request prevents a
-			// newer Ctrl+L request from being cleared by this report's microtask.
-			queueMicrotask(() => {
-				if (this.#appearanceRefreshRequest === request) {
-					this.#appearanceRefreshRequest = undefined;
-				}
-			});
-		});
-		if (unsubscribeAppearanceReport) {
-			this.#eventBusUnsubscribers.push(unsubscribeAppearanceReport);
-		}
-		this.ui.terminal.onAppearanceChange((mode, requestToken) => {
-			const request = this.#appearanceRefreshRequest;
-			const appearanceRefreshWasRequested =
-				request !== undefined &&
-				Date.now() <= request.deadline &&
-				(requestToken === request.token || requestToken === undefined);
-			if (request !== undefined && requestToken === request.token) {
-				this.#appearanceRefreshRequest = undefined;
-			}
-			// Ctrl+L already replays immediately below. If either its asynchronous
-			// OSC 11 response or an automatic query ahead of it reveals a theme
-			// change, commit that change so theme loading performs a second full
-			// replay with the newly detected palette.
-			onTerminalAppearanceChange(mode, appearanceRefreshWasRequested ? {} : undefined);
-		});
+		this.#subscribeTerminalReports();
 
 		// Tern kept the typing of a startup and draws it in the composer; plain
 		// typing that reached omp already went into the draft. The first other
@@ -5153,6 +5155,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			runningAgents: this.#runningSubagentCount,
 			focusedOnAgent: this.focusedAgentId !== undefined,
 			conversationStarted: this.viewSession.messages.length > 0,
+			leftArrowBackground: leftArrowBackgrounds(this.settings),
+			backgroundHintActive: Date.now() < this.#backgroundHintUntil,
+			backgroundWaiting: this.#backgroundWaiting,
 			keybindings: this.keybindings,
 			uses: id => hintUsage.get(id),
 		});
@@ -8432,6 +8437,16 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	stop(): void {
 		this.#closeAttempt?.abort();
+		this.#attachMarkerUnsubscribe?.();
+		this.#attachMarkerUnsubscribe = undefined;
+		this.#hostedSuspendUnsubscribe?.();
+		this.#hostedSuspendUnsubscribe = undefined;
+		this.#unsubscribeAppearanceReport?.();
+		this.#unsubscribeAppearanceReport = undefined;
+		clearTimeout(this.#backgroundHintTimer);
+		this.#backgroundHintTimer = undefined;
+		clearInterval(this.#backgroundWaitingTimer);
+		this.#backgroundWaitingTimer = undefined;
 		this.syncIdleMaintenanceView(null);
 		this.#hidePlanReview();
 		this.#appearanceRefreshRequest = undefined;
@@ -8662,22 +8677,24 @@ export class InteractiveMode implements InteractiveModeContext {
 			),
 		];
 		if (activeProfile) cmd.push("--profile", activeProfile);
+		// A hosted session stays hosted across the relaunch, but its replacement mints a new
+		// attach token: send the viewer back to the Agent View with this process's marker
+		// (after the teardown bytes) so it can reattach under the new one.
+		const restartEnv = hostedRestartEnv(process.env, hostedInstanceKey());
+		const attachToken = hostedAttachToken();
+		if (attachToken) writeTerminalSequence(encodeDetachMarker(attachToken));
 		await postmortem.cleanup();
 		await postmortem.drainStdout();
 		if (process.platform !== "win32") {
 			try {
-				const env: Record<string, string> = {};
-				for (const key in process.env) {
-					const value = process.env[key];
-					if (value !== undefined) env[key] = value;
-				}
-				execReplace(cmd[0], cmd, env, []); // never returns on success
+				execReplace(cmd[0], cmd, restartEnv, []); // never returns on success
 			} catch (err) {
 				process.stderr.write(`${chalk.red(`Restart exec failed: ${err instanceof Error ? err.message : err}`)}\n`);
 			}
 		}
 		try {
 			const child = Bun.spawn(cmd, {
+				env: restartEnv,
 				stdin: "inherit",
 				stdout: "inherit",
 				stderr: "inherit",
@@ -9822,6 +9839,196 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (this.#tray.focus() || cfgDisplayPinnedAgents.get(settings) !== "off") return;
 		}
 		this.#selectorController.showAgentHub(this.#observerRegistry, options);
+	}
+
+	backgroundSession(): void {
+		if (this.#hostedKey) {
+			this.#detachHostedViewer();
+			return;
+		}
+		if (this.collabGuest) {
+			this.showStatus("Backgrounding is host-only during a collab session");
+			return;
+		}
+		this.#backgroundHandoff ??= new BackgroundHandoff(this.#createHandoffHost());
+		void this.#backgroundHandoff.trigger();
+	}
+
+	#createHandoffHost(): HandoffHost {
+		return {
+			getSession: () => this.session,
+			composerText: () => this.editor.getText(),
+			showStatus: message => this.showStatus(message),
+			showWarning: message => this.showWarning(message),
+			confirm: (title, message) => this.showHookConfirm(title, message),
+			beginClose: () => {
+				if (this.#isShuttingDown) return false;
+				this.#beginClose();
+				this.showStatus("Backgrounding session…");
+				return true;
+			},
+			abandonClose: () => this.#abandonClose(),
+			teardown: async () => {
+				try {
+					await this.#teardown();
+					return true;
+				} catch (error) {
+					this.#handleTeardownError("close", error);
+					return false;
+				}
+			},
+			runAgentsView: key => runAgentsView({ select: key, returnTo: key }),
+			quit: code => this.#quitHostOwned(code),
+			reportFailure: async (message, sessionId) => {
+				process.stderr.write(`${chalk.red(message)}\n`);
+				if (sessionId) {
+					process.stderr.write(
+						`${chalk.dim("Resume this session with")}\n${chalk.dim(resumeCommand(sessionId))}\n`,
+					);
+				}
+				await this.#quitHostOwned(1);
+			},
+		};
+	}
+
+	/**
+	 * Subscribe this mode to the terminal's reports (glyph protocol, appearance).
+	 * `ProcessTerminal.stop()` drops report subscribers, so a terminal restart that
+	 * outlives this mode (a hosted attach or detach) subscribes again.
+	 */
+	#subscribeTerminalReports(): void {
+		// A confirmed Glyph Protocol handshake means omp's own icons render in
+		// this terminal without a Nerd Font, so the unconfigured `unicode` preset
+		// is upgraded to `nerd` for this session. The persisted setting is left
+		// alone: it travels to terminals (ssh, tmux) where the upgrade would
+		// show tofu. Explicit preset choices are never touched.
+		this.ui.terminal.onGlyphProtocolReport?.(supported => {
+			if (!supported || cfgSymbolPreset.provenance(settings) !== "default" || theme.getSymbolPreset() !== "unicode")
+				return;
+			void setSymbolPreset("nerd").then(() => {
+				this.statusLine.invalidate();
+				this.ui.invalidate();
+				this.ui.requestRender();
+			});
+		});
+
+		// Subscribe to terminal dark/light appearance changes.
+		// The terminal queries background color via OSC 11 at startup and on
+		// Mode 2031 notifications, computing luminance to detect dark/light.
+		this.#unsubscribeAppearanceReport?.();
+		const unsubscribeAppearanceReport = this.ui.terminal.onAppearanceReport?.((_mode, requestToken) => {
+			const request = this.#appearanceRefreshRequest;
+			if (request === undefined || requestToken !== request.token) return;
+			// ProcessTerminal dispatches report callbacks first, then synchronously
+			// dispatches onAppearanceChange when the reported appearance changed.
+			// That change callback consumes the request below before this microtask
+			// runs; an unchanged matching report has no change callback, so it
+			// consumes the one-shot here. Comparing the captured request prevents a
+			// newer Ctrl+L request from being cleared by this report's microtask.
+			queueMicrotask(() => {
+				if (this.#appearanceRefreshRequest === request) {
+					this.#appearanceRefreshRequest = undefined;
+				}
+			});
+		});
+		this.#unsubscribeAppearanceReport = unsubscribeAppearanceReport || undefined;
+		this.ui.terminal.onAppearanceChange((mode, requestToken) => {
+			const request = this.#appearanceRefreshRequest;
+			const appearanceRefreshWasRequested =
+				request !== undefined &&
+				Date.now() <= request.deadline &&
+				(requestToken === request.token || requestToken === undefined);
+			if (request !== undefined && requestToken === request.token) {
+				this.#appearanceRefreshRequest = undefined;
+			}
+			// Ctrl+L already replays immediately below. If either its asynchronous
+			// OSC 11 response or an automatic query ahead of it reveals a theme
+			// change, commit that change so theme loading performs a second full
+			// replay with the newly detected palette.
+			onTerminalAppearanceChange(mode, appearanceRefreshWasRequested ? {} : undefined);
+		});
+	}
+
+	/** Run a fresh terminal lifecycle (probes, keyboard/paste/mouse negotiation) against whoever views the PTY now. */
+	#restartHostedTerminal(): void {
+		this.ui.stop();
+		this.ui.start();
+		this.#subscribeTerminalReports();
+	}
+
+	/**
+	 * Hosted ←: hand the viewer's terminal back (the stop's teardown sequences reach it
+	 * through the tunnel), tell the attach client with the detach marker, then start the
+	 * TUI again at once. The client drops every byte after the marker and stops sending
+	 * input when it sees it, so the restart's probes simply go unanswered (the next
+	 * attach probes again); the TUI is never left stopped, so its input layer is always
+	 * there for the next attach marker. Deferred: the key arrives inside input dispatch.
+	 */
+	#detachHostedViewer(): void {
+		const token = hostedAttachToken();
+		if (!token || this.#hostedDetachPending) return;
+		this.#hostedDetachPending = true;
+		setImmediate(() => {
+			this.#hostedDetachPending = false;
+			if (!this.isInitialized) return;
+			this.ui.stop();
+			writeTerminalSequence(encodeDetachMarker(token));
+			this.ui.start();
+			this.#subscribeTerminalReports();
+			this.ui.requestRender(true);
+		});
+	}
+
+	/**
+	 * A viewer attached: adopt its terminal identity, then run a fresh terminal
+	 * lifecycle against it and repaint the whole history. Markers without this
+	 * process's attach token (pasted or printed bytes) are ignored. Deferred: the
+	 * marker arrives inside terminal input dispatch.
+	 */
+	#handleViewerAttach(payload: string): void {
+		const token = hostedAttachToken();
+		const viewer = token ? parseAttachPayload(payload, token) : undefined;
+		if (!viewer) return;
+		setImmediate(() => {
+			if (!this.isInitialized) return;
+			applyViewerIdentity(viewer);
+			this.#restartHostedTerminal();
+			this.#showBackgroundHint();
+			this.ui.requestRender(true, { clearScrollback: true });
+		});
+	}
+
+	/**
+	 * Advertise ← for a while, and poll how many other background sessions wait for
+	 * input. Only where ← backgrounds; other sessions pay no polling cost.
+	 */
+	#startBackgroundHints(): void {
+		if (!leftArrowBackgrounds(this.settings)) return;
+		this.#showBackgroundHint();
+		const poll = async (): Promise<void> => {
+			try {
+				const rows = await listAgentSessions();
+				const waiting = rows.filter(row => row.status === "waiting" && row.pid !== process.pid).length;
+				if (waiting === this.#backgroundWaiting) return;
+				this.#backgroundWaiting = waiting;
+				this.ui.requestRender();
+			} catch (error) {
+				logger.debug("Agent status poll failed", { error: String(error) });
+			}
+		};
+		void poll();
+		this.#backgroundWaitingTimer = setInterval(() => void poll(), BACKGROUND_WAITING_POLL_MS);
+		this.#backgroundWaitingTimer.unref?.();
+	}
+
+	#showBackgroundHint(): void {
+		this.#backgroundHintUntil = Date.now() + BACKGROUND_HINT_MS;
+		clearTimeout(this.#backgroundHintTimer);
+		this.#backgroundHintTimer = setTimeout(() => {
+			this.#backgroundHintTimer = undefined;
+			this.ui.requestRender();
+		}, BACKGROUND_HINT_MS);
+		this.#backgroundHintTimer.unref?.();
 	}
 
 	resetObserverRegistry(): void {

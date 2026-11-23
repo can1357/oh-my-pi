@@ -3278,6 +3278,11 @@ export class SessionManager {
 		return this.#sessionFile;
 	}
 
+	/** Whether this manager writes the session to storage at all (false for `--no-session`). */
+	isPersistent(): boolean {
+		return this.#persist;
+	}
+
 	/**
 	 * Whether the current session has actually been materialized to durable
 	 * storage (the JSONL exists on disk / in the active storage backend).

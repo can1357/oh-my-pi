@@ -4,7 +4,10 @@ export const acpHelp = {
 	description: "Run omp as an ACP (Agent Client Protocol) server over stdio",
 } satisfies CommandMetadata;
 
-export const agentsHelp = { description: "Manage bundled task agents" } satisfies CommandMetadata;
+export const agentsHelp = {
+	description:
+		"Agent View: live omp sessions on this machine (needs input, working, idle); attach, stop, or start background sessions. `unpack` exports bundled task agents",
+} satisfies CommandMetadata;
 
 export const anonymizeHelp = {
 	description:

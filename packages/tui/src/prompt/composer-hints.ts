@@ -14,7 +14,7 @@ import { formatDoubleTap, formatKeyHint, type KeybindingsManager } from "../app-
 import { theme } from "../theme/theme";
 
 /** Stable hint ids; persisted as usage-counter keys, so never rename one. */
-export type ComposerHintId = "agents" | "effort";
+export type ComposerHintId = "agents" | "effort" | "background" | "background-waiting";
 
 /** Live state that hint conditions read. Built by the host on every render of the empty composer. */
 export interface ComposerHintContext {
@@ -24,6 +24,12 @@ export interface ComposerHintContext {
 	focusedOnAgent: boolean;
 	/** The viewed session already has messages. */
 	conversationStarted: boolean;
+	/** A single ← on the empty composer backgrounds the session (so ←← no longer opens the hub). */
+	leftArrowBackground: boolean;
+	/** The ← background gesture is being advertised (shortly after startup). */
+	backgroundHintActive: boolean;
+	/** Other background sessions waiting for input. */
+	backgroundWaiting: number;
 	keybindings: KeybindingsManager;
 	/** Times the user has performed the gesture a hint teaches. */
 	uses(id: ComposerHintId): number;
@@ -41,14 +47,37 @@ export interface ComposerHint {
 /** Registered hints, highest priority first. */
 export const COMPOSER_HINTS: readonly ComposerHint[] = [
 	{
-		// Matches the ←← gesture in the input controller, which opens the agent hub
-		// from the main session (in a focused view it hops to the parent instead).
+		// Never retires: it reports live state, not a gesture to learn.
+		id: "background-waiting",
+		learnedAfter: Number.POSITIVE_INFINITY,
+		resolve: ctx => {
+			if (ctx.backgroundWaiting === 0 || ctx.focusedOnAgent) return undefined;
+			return { key: formatKeyHint("left"), label: `${ctx.backgroundWaiting} waiting` };
+		},
+	},
+	{
+		// Matches the single ← gesture in the input controller, which backgrounds the
+		// session into the agent view.
+		id: "background",
+		learnedAfter: 3,
+		resolve: ctx => {
+			if (!ctx.backgroundHintActive || ctx.focusedOnAgent) return undefined;
+			return { key: formatKeyHint("left"), label: "agents" };
+		},
+	},
+	{
+		// The ←← gesture in the input controller, which opens the agent hub from the
+		// main session (in a focused view it hops to the parent instead). Where a
+		// single ← backgrounds the session, the `app.agents.hub` key instead.
 		id: "agents",
 		learnedAfter: 3,
 		resolve: ctx => {
 			if (ctx.runningAgents === 0 || ctx.focusedOnAgent) return undefined;
+			const hubKey = ctx.keybindings.getKeys("app.agents.hub")[0];
+			const key = ctx.leftArrowBackground ? hubKey && formatKeyHint(hubKey) : formatDoubleTap("left");
+			if (!key) return undefined;
 			return {
-				key: formatDoubleTap("left"),
+				key,
 				label: `to see ${ctx.runningAgents} running ${ctx.runningAgents === 1 ? "agent" : "agents"}`,
 			};
 		},

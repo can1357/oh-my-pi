@@ -12,7 +12,7 @@
 import { writeTerminalSequence } from "@oh-my-pi/pi-tui";
 import { setPromptZonesEnabled } from "@oh-my-pi/pi-tui/chat/user-message";
 import { truncateLineBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { APP_NAME, isTerminalHeadless, sanitizeText } from "@oh-my-pi/pi-utils";
+import { APP_NAME, isTerminalHeadless, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { setTerminalTitleState, type TerminalTitleState } from "./title-generator";
 
 /** What a blocked run waits on: an approval (`permission`) or an answer (`question`). */
@@ -155,11 +155,42 @@ export function holdBlockedStatus(status: BlockedStatus): () => void {
 	const hold = { ...status };
 	runtime.dialogs.push(hold);
 	publish();
+	notifyBlockedListeners();
 	return () => {
 		const index = runtime.dialogs.indexOf(hold);
 		if (index === -1) return;
 		runtime.dialogs.splice(index, 1);
 		publish();
+		notifyBlockedListeners();
+	};
+}
+
+/** {@link subscribeBlockedStatus} listeners. */
+const blockedListeners = new Set<() => void>();
+
+function notifyBlockedListeners(): void {
+	for (const listener of blockedListeners) {
+		try {
+			listener();
+		} catch (error) {
+			logger.warn("Blocked status listener failed", { error: String(error) });
+		}
+	}
+}
+
+/** The newest dialog presented and waiting on the user (timed ones included), or undefined when none is open. */
+export function currentBlockedStatus(): BlockedStatus | undefined {
+	return runtime.dialogs.at(-1);
+}
+
+/**
+ * Observe dialogs opening and closing, independent of whether any terminal
+ * surface reports them; read {@link currentBlockedStatus} in the listener.
+ */
+export function subscribeBlockedStatus(listener: () => void): () => void {
+	blockedListeners.add(listener);
+	return () => {
+		blockedListeners.delete(listener);
 	};
 }
 
@@ -201,7 +232,9 @@ export function resendProgramStatus(): void {
  */
 export function initProgramStatus(options?: { startupRun?: boolean }): void {
 	runtime.disposed = false;
+	const hadDialogs = runtime.dialogs.length > 0;
 	runtime.dialogs.length = 0;
+	if (hadDialogs) notifyBlockedListeners();
 	runtime.startup = undefined;
 	runtime.supported = false;
 	if (options?.startupRun) {

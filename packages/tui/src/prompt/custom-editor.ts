@@ -1862,9 +1862,9 @@ export class CustomEditor extends Editor {
 		}
 		this.#spaceHoldSnapshot = undefined;
 
-		// Left-arrow on an empty editor: surface for the agent-hub double-tap
-		// gesture. Plain "left" only — modified arrows and any in-text cursor
-		// movement fall through to normal handling.
+		// Left-arrow on an empty editor: surface for the background gesture (main
+		// session) and the return-to-main double-tap (focused subagent view). Plain
+		// "left" only — modified arrows and any in-text cursor movement fall through.
 		if (canonical === "left" && this.onLeftAtStart && this.getText().trim() === "") {
 			this.onLeftAtStart();
 			return;

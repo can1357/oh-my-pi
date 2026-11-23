@@ -51,6 +51,7 @@ function hostDaemon(endpoint: string): DaemonClient {
 		open: unused,
 		release: unused,
 		call: unused,
+		resize: unused,
 		async attach(unit: UnitRef): Promise<DaemonTunnel> {
 			if (typeof unit === "string") throw new Error("dsm attaches by (kind, scope, key)");
 			const connection = await IpcConnection.connect(endpoint, { framing: "raw" });
