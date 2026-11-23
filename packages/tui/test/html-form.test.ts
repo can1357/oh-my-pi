@@ -658,6 +658,87 @@ describe("html form", () => {
 		});
 	});
 
+	describe("text paste", () => {
+		it("pastes into a single-line answer without submitting", () => {
+			const { form, onSubmit } = dialog(`<form><label>Answer <input name="answer"></label></form>`);
+			expect(form.pasteText).toBeDefined();
+			form.pasteText?.("hello");
+			expect(form.data()).toEqual({ answer: "hello" });
+			expect(onSubmit).not.toHaveBeenCalled();
+			form.dispose();
+		});
+
+		it("preserves newlines in a textarea", () => {
+			const { form } = dialog(`<form><label>Notes <textarea name="notes"></textarea></label></form>`);
+			form.pasteText?.("line1\nline2");
+			expect(form.data()).toEqual({ notes: "line1\nline2" });
+			form.dispose();
+		});
+
+		it("uses pasted Other text instead of the preselected radio answer", () => {
+			const { form } = dialog(DB_FORM);
+			form.handleInput(DOWN);
+			form.handleInput(DOWN);
+			form.pasteText?.("duckdb");
+			expect(form.data()).toMatchObject({ db: "duckdb" });
+			form.dispose();
+		});
+
+		it("delivers a reserved paste once to the original field after Tab", () => {
+			const { form } = dialog(`<form><label>A <input name="a"></label><label>B <input name="b"></label></form>`);
+			const settle = form.beginPaste();
+			form.handleInput(TAB);
+			settle("clip");
+			settle("again");
+			expect(form.data()).toEqual({ a: "clip", b: "" });
+			form.dispose();
+		});
+
+		it("saves pasted text in an open option note", () => {
+			const { form } = dialog(DB_FORM, { acceptImages: true });
+			form.handleInput("n");
+			form.pasteText?.("why sqlite");
+			form.handleInput(ENTER);
+			expect(form.optionNotes()).toMatchObject([{ text: "why sqlite" }]);
+			form.dispose();
+		});
+
+		it("holds a one-field submit until the reserved paste arrives", () => {
+			const { form, onSubmit } = dialog(`<form><label>Answer <input name="answer"></label></form>`);
+			const settle = form.beginPaste();
+			form.handleInput(ENTER);
+			expect(onSubmit).not.toHaveBeenCalled();
+
+			expect(settle("clipboard")).toBe(true);
+			expect(onSubmit).toHaveBeenCalledWith({ answer: "clipboard" }, []);
+			form.dispose();
+		});
+
+		it("cancels the held submit when the reserved paste fails", () => {
+			const { form, onSubmit } = dialog(`<form><label>Answer <input name="answer"></label></form>`);
+			const settle = form.beginPaste();
+			form.handleInput(ENTER);
+			expect(settle(undefined)).toBe(false);
+			expect(onSubmit).not.toHaveBeenCalled();
+
+			form.handleInput(ENTER);
+			expect(onSubmit).toHaveBeenCalledWith({ answer: "" }, []);
+			form.dispose();
+		});
+
+		it("delivers a text paste reserved before hiding, while refusing new ones", () => {
+			const { form } = dialog(`<form><label>A <input name="a"></label></form>`);
+			const settle = form.beginPaste();
+			form.handleInput("\x1bh");
+			expect(form.pasteText).toBeUndefined();
+
+			expect(settle("clipboard")).toBe(true);
+			expect(form.data()).toEqual({ a: "clipboard" });
+			expect(form.beginPaste()("later")).toBe(false);
+			form.dispose();
+		});
+	});
+
 	describe("parsing", () => {
 		it("joins radios split across a decision table into one field labeled by column headers", () => {
 			const form = parseHtmlForm(`<form><table>

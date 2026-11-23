@@ -1839,10 +1839,11 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 	});
 });
 
-describe("InputController image paste into an ask form note", () => {
+describe("InputController paste into an ask form", () => {
 	const FORM = `<form><fieldset><legend>Database</legend>
 <label><input type="radio" name="db" value="sqlite" checked> SQLite</label><br>
 <label><input type="radio" name="db" value="pg"> Postgres</label></fieldset></form>`;
+	const TEXT_FORM = `<form><label>Answer <input name="answer"></label></form>`;
 
 	let settingsState: SettingsTestState | undefined;
 	let tempDir: TempDir;
@@ -1889,7 +1890,14 @@ describe("InputController image paste into an ask form note", () => {
 	];
 
 	/** An opted-in form focused in front of the main editor, with the controller's paste listeners installed. */
-	async function mountForm() {
+	async function mountForm(
+		options: {
+			html?: string;
+			image?: { data: Uint8Array; mimeType: string } | null;
+			text?: string;
+			onSubmit?: ConstructorParameters<typeof HtmlFormDialog>[1]["onSubmit"];
+		} = {},
+	) {
 		const context = await createContext();
 		Object.assign(context.ctx, {
 			sessionManager: {
@@ -1901,18 +1909,18 @@ describe("InputController image paste into an ask form note", () => {
 		const pngPath = tempDir.join("shot.png");
 		await Bun.write(pngPath, Buffer.from(TINY_PNG, "base64"));
 		const controller = new InputController(context.ctx, {
-			readImage: async () => ({
-				data: Buffer.from(TINY_PNG, "base64"),
-				mimeType: "image/png",
-			}),
-			readText: async () => "",
+			readImage: async () =>
+				options.image === undefined
+					? { data: Buffer.from(TINY_PNG, "base64"), mimeType: "image/png" }
+					: options.image,
+			readText: async () => options.text ?? "",
 			readMacFileUrls: async () => [],
 		});
-		const form = new HtmlFormDialog(parseHtmlForm(FORM), {
+		const form = new HtmlFormDialog(parseHtmlForm(options.html ?? FORM), {
 			acceptImages: true,
 			onPasteImage: () => controller.handleImagePaste(),
 			onPasteImagePath: path => controller.handleImagePathPaste(path),
-			onSubmit: vi.fn(),
+			onSubmit: options.onSubmit ?? vi.fn(),
 			onCancel: vi.fn(),
 		});
 		form.focused = true;
@@ -1940,6 +1948,52 @@ describe("InputController image paste into an ask form note", () => {
 		expect(note?.text).toMatch(/^why sqlite\s*\[Image #1, \d+x\d+\]$/);
 		expect(context.editor.pendingImages).toHaveLength(0);
 		expect(context.editor.getText()).toBe("");
+		form.dispose();
+	});
+
+	it("pastes clipboard text with Ctrl+V into the focused field", async () => {
+		const { context, form, listeners } = await mountForm({ html: TEXT_FORM, image: null, text: "from clipboard" });
+		const delivered = Promise.withResolvers<void>();
+		context.spies.requestRender.mockImplementation(() => delivered.resolve());
+
+		expect(dispatchInput(listeners, "\x16")).toEqual({ consume: true });
+		await delivered.promise;
+
+		expect(form.data()).toEqual({ answer: "from clipboard" });
+		expect(context.editor.getText()).toBe("");
+		form.dispose();
+	});
+
+	it("holds Ctrl+V followed by Enter until the clipboard text arrives", async () => {
+		const submitted = Promise.withResolvers<unknown>();
+		const { context, form, listeners } = await mountForm({
+			html: TEXT_FORM,
+			image: null,
+			text: "from clipboard",
+			onSubmit: data => submitted.resolve(data),
+		});
+
+		dispatchInput(listeners, "\x16");
+		form.handleInput("\r");
+
+		expect(await submitted.promise).toEqual({ answer: "from clipboard" });
+		expect(context.editor.getText()).toBe("");
+		form.dispose();
+	});
+
+	it("refuses a Ctrl+V image while no note is open", async () => {
+		const { context, form, listeners } = await mountForm({ html: TEXT_FORM });
+		const showStatus = context.ctx.showStatus as unknown as Mock<(message: string) => void>;
+		const settled = Promise.withResolvers<void>();
+		showStatus.mockImplementation(() => settled.resolve());
+		context.spies.requestRender.mockImplementation(() => settled.resolve());
+
+		expect(dispatchInput(listeners, "\x16")).toEqual({ consume: true });
+		await settled.promise;
+
+		expect(showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");
+		expect(context.editor.pendingImages).toHaveLength(0);
+		expect(form.data()).toEqual({ answer: "" });
 		form.dispose();
 	});
 
