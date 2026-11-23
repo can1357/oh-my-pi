@@ -630,23 +630,17 @@ function elicitFieldOf(value: unknown): MCPElicitFieldSchema | undefined {
 	const text = (key: string) => (typeof value[key] === "string" ? value[key] : undefined);
 	const count = (key: string) =>
 		typeof value[key] === "number" && Number.isFinite(value[key]) ? value[key] : undefined;
-	const strings = (list: unknown) => (isStringArray(list) ? list : undefined);
-	/** `field`, unless a key the server sent did not survive rebuilding it: a value of the wrong type. */
-	const intact = <F extends MCPElicitFieldSchema>(field: F): F | undefined =>
-		Object.entries(field).every(([key, rebuilt]) => rebuilt !== undefined || value[key] === undefined)
-			? field
-			: undefined;
 	const common = { title: text("title"), description: text("description") };
 	switch (value.type) {
 		case "boolean":
-			return intact({
+			return intact(value, {
 				type: "boolean",
 				...common,
 				default: typeof value.default === "boolean" ? value.default : undefined,
 			});
 		case "number":
 		case "integer":
-			return intact({
+			return intact(value, {
 				type: value.type,
 				...common,
 				minimum: count("minimum"),
@@ -654,32 +648,44 @@ function elicitFieldOf(value: unknown): MCPElicitFieldSchema | undefined {
 				default: count("default"),
 			});
 		case "string":
-			return intact({
+			return intact(value, {
 				type: "string",
 				...common,
 				minLength: count("minLength"),
 				maxLength: count("maxLength"),
 				format: ELICIT_FORMATS.find(known => known === value.format),
 				default: text("default"),
-				enum: strings(value.enum),
+				enum: stringsOf(value.enum),
 				oneOf: choicesOf(value.oneOf),
 			});
 		case "array": {
 			if (!isRecord(value.items)) return undefined;
-			const items = { enum: strings(value.items.enum), anyOf: choicesOf(value.items.anyOf) };
-			if (items.enum === undefined && items.anyOf === undefined) return undefined;
-			return intact({
+			const items = intact(value.items, { enum: stringsOf(value.items.enum), anyOf: choicesOf(value.items.anyOf) });
+			if (!items || (items.enum === undefined && items.anyOf === undefined)) return undefined;
+			return intact(value, {
 				type: "array",
 				...common,
 				minItems: count("minItems"),
 				maxItems: count("maxItems"),
 				items,
-				default: strings(value.default),
+				default: stringsOf(value.default),
 			});
 		}
 		default:
 			return undefined;
 	}
+}
+
+/** `rebuilt`, unless a key `source` sent did not survive rebuilding: a value of the wrong type. */
+function intact<F extends object>(source: Record<string, unknown>, rebuilt: F): F | undefined {
+	for (const [key, value] of Object.entries(rebuilt)) {
+		if (value === undefined && source[key] !== undefined) return undefined;
+	}
+	return rebuilt;
+}
+
+function stringsOf(value: unknown): string[] | undefined {
+	return isStringArray(value) ? value : undefined;
 }
 
 const ELICIT_FORMATS = ["email", "uri", "date", "date-time"] as const;

@@ -165,6 +165,8 @@ interface PeerRecord {
 
 /** One upstream fetch shared by every link that asked for the same cacheable result. */
 interface Flight {
+	/** Its entry in the in-flight lookup. */
+	id: string;
 	method: string;
 	/** Params key of the request, see `cacheParamsKey`. */
 	key: string;
@@ -931,7 +933,7 @@ export class McpEndpoint implements ModuleUnit {
 			});
 		// Waiters observe the outcome through `#join`; a flight abandoned by all of them rejects unobserved.
 		promise.catch(() => {});
-		const flight: Flight = { method, key, superseded: false, promise, controller, waiters: 0, progress };
+		const flight: Flight = { id, method, key, superseded: false, promise, controller, waiters: 0, progress };
 		this.#flights.set(id, flight);
 		return flight;
 	}
@@ -953,8 +955,7 @@ export class McpEndpoint implements ModuleUnit {
 		} finally {
 			if (onProgress) flight.progress.delete(onProgress);
 			if (--flight.waiters === 0) {
-				const id = `${flight.method}\n${flight.key}`;
-				if (this.#flights.get(id) === flight) this.#flights.delete(id);
+				if (this.#flights.get(flight.id) === flight) this.#flights.delete(flight.id);
 				flight.controller.abort(new Error("MCP request abandoned"));
 			}
 		}

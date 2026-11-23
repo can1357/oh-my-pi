@@ -272,6 +272,7 @@ describe("modern MCP client operations", () => {
 		const malformed: Record<string, unknown>[] = [
 			{ broken: null },
 			{ picks: { type: "array" } },
+			{ tags: { type: "array", items: { enum: ["a"], anyOf: [{ title: "no const" }] } } },
 			{ count: { type: "integer", minimum: '1" onfocus="x' } },
 		];
 		for (const properties of malformed) {

@@ -24,7 +24,7 @@ import type {
 } from "./protocol";
 import type { MCPElicitHandler } from "./types";
 
-/** Placeholder label of the empty choice an optional select starts on. */
+/** Label of a select's empty choice: no answer yet, or none for an optional field. */
 const NO_ANSWER_LABEL = "—";
 
 /** Choices offered once the user closes the form without submitting it. */
@@ -86,6 +86,8 @@ async function elicitFromUser(
 					},
 				}),
 			);
+			// A host that timed the form out reports its untouched values: nobody answered.
+			if (submitted?.timedOut) return { action: "cancel" };
 			if (!submitted) {
 				if (explicit) return { action: explicit };
 				const title = `You closed the form from ${serverName}. What should it hear?`;
@@ -123,7 +125,9 @@ function elicitationFormHtml(
 	const parts = ["<form>", `<p><strong>${esc(serverName)}</strong> asks:</p>`, paragraph(request.message)];
 	if (problem) parts.push(`<p><strong>Please fix:</strong> ${esc(problem)}</p>`);
 	for (const name of Object.keys(properties)) {
-		const shown = draft && Object.hasOwn(draft, name) ? draft[name] : undefined;
+		// Once the user submitted, a field missing from the draft was left empty (hosts may omit empty fields):
+		// it stays empty instead of falling back to the schema default.
+		const shown = draft ? (Object.hasOwn(draft, name) ? draft[name] : "") : undefined;
 		parts.push(fieldHtml(name, properties[name], required.includes(name), shown));
 	}
 	parts.push("</form>");
@@ -185,13 +189,17 @@ function submissionError(
 	draft: HtmlFormData,
 	content: Record<string, MCPElicitValue>,
 ): string | undefined {
-	const { properties } = request.requestedSchema;
+	const { properties, required = [] } = request.requestedSchema;
 	for (const field of parseHtmlForm(html).fields) {
 		const name = field.name;
 		if (!name || !Object.hasOwn(properties, name)) continue;
 		const schema = properties[name];
+		// A select's empty choice passes the form's `required`; the typed answer is what must be there.
+		const missing = required.includes(name) && content[name] === undefined ? "Required" : undefined;
 		const problem =
-			fieldError(field, Object.hasOwn(draft, name) ? draft[name] : undefined) ?? schemaError(schema, content[name]);
+			fieldError(field, Object.hasOwn(draft, name) ? draft[name] : undefined) ??
+			missing ??
+			schemaError(schema, content[name]);
 		if (problem) return `${schema.title ?? name}: ${problem}`;
 	}
 	return undefined;
@@ -261,14 +269,12 @@ function controlHtml(
 	const requiredAttr = required ? " required" : "";
 	switch (schema.type) {
 		case "boolean": {
-			// A required yes/no without a default opens on "No": submitting untouched never approves anything.
-			const fallback = schema.default === undefined ? (required ? "false" : undefined) : String(schema.default);
-			const chosen = shown === undefined ? fallback : String(shown);
+			const chosen = shown === undefined ? schema.default?.toString() : String(shown);
 			const options: Choice[] = [
 				{ value: "true", label: "Yes" },
 				{ value: "false", label: "No" },
 			];
-			return selectHtml(nameAttr, requiredAttr, options, chosen ? [chosen] : [], !required);
+			return selectHtml(nameAttr, requiredAttr, options, chosen, !required);
 		}
 		case "array": {
 			const chosen = shown === undefined ? (schema.default ?? []) : Array.isArray(shown) ? shown : [String(shown)];
@@ -291,7 +297,7 @@ function controlHtml(
 		case "string": {
 			const value = shown === undefined ? schema.default : String(shown);
 			const options = choices(schema.oneOf, schema.enum);
-			if (options.length > 0) return selectHtml(nameAttr, requiredAttr, options, value ? [value] : [], !required);
+			if (options.length > 0) return selectHtml(nameAttr, requiredAttr, options, value, !required);
 			return `<input ${[nameAttr, ...textAttrs(schema, value)].join(" ")}${requiredAttr}>`;
 		}
 	}
@@ -332,16 +338,22 @@ function choices(titled: { const: string; title?: string }[] | undefined, values
 	return (values ?? []).map(value => ({ value, label: value }));
 }
 
-/** A single select. An optional one starts on an empty choice unless something is chosen. */
+/**
+ * A single select. It starts on an empty choice unless one of its options is
+ * chosen: a select without a marked option falls on its first, and submitting
+ * untouched must never pick a server's choice (an approval) for the user.
+ * An optional select keeps the empty choice so its answer can be withdrawn.
+ */
 function selectHtml(
 	nameAttr: string,
 	requiredAttr: string,
 	options: Choice[],
-	chosen: string[],
+	chosen: string | undefined,
 	optional: boolean,
 ): string {
-	const rows = options.map(option => optionHtml(option, chosen.includes(option.value)));
-	if (optional) rows.unshift(optionHtml({ value: "", label: NO_ANSWER_LABEL }, chosen.length === 0));
+	const rows = options.map(option => optionHtml(option, option.value === chosen));
+	const picked = options.some(option => option.value === chosen);
+	if (optional || !picked) rows.unshift(optionHtml({ value: "", label: NO_ANSWER_LABEL }, !picked));
 	return `<select ${nameAttr}${requiredAttr}>${rows.join("")}</select>`;
 }
 

@@ -103,16 +103,44 @@ describe("MCP elicitation through the session UI", () => {
 				regions: ["us", "ap"],
 			},
 		});
-		// Choices are selects offering exactly the schema's values: the user cannot type an answer it does not allow.
+		// Choices are selects offering exactly the schema's values after an empty "no answer yet" one:
+		// the user cannot type an answer the schema does not allow.
 		const env = parseHtmlForm(seen.html ?? "").fields.find(field => field.name === "env") as ChoiceField;
 		expect(env.other).toBe(false);
-		expect(env.options.map(option => option.value)).toEqual(["stg", "prod"]);
+		expect(env.options.map(option => option.value)).toEqual(["", "stg", "prod"]);
 	});
 
-	it("opens a required yes/no on No, so submitting the form untouched approves nothing", async () => {
-		const result = await handlerFor(context({ formDialog: submitting({}) }))(APPROVAL, undefined);
+	it("makes the user pick a required choice without a default: submitting untouched answers nothing", async () => {
+		const request: MCPElicitRequest = {
+			message: "Deploy?",
+			requestedSchema: {
+				type: "object",
+				properties: { approve: { type: "boolean" }, env: { type: "string", enum: ["prod", "stg"] } },
+				required: ["approve", "env"],
+			},
+		};
+		const forms: string[] = [];
+		const formDialog: FormDialog = async html => {
+			forms.push(html);
+			const data = defaultFormData(parseHtmlForm(html));
+			return { data: forms.length === 1 ? data : { ...data, approve: "false", env: "stg" } };
+		};
 
-		expect(result).toEqual({ action: "accept", content: { approve: false } });
+		const result = await handlerFor(context({ formDialog }))(request, undefined);
+
+		expect(forms).toHaveLength(2);
+		expect(forms[1]).toContain("Please fix:");
+		expect(result).toEqual({ action: "accept", content: { approve: false, env: "stg" } });
+	});
+
+	it("sends cancel, not the form's defaults, when the host times the form out", async () => {
+		const request: MCPElicitRequest = {
+			message: "Deploy to production?",
+			requestedSchema: { type: "object", properties: { approve: { type: "boolean", default: true } } },
+		};
+		const formDialog: FormDialog = async html => ({ data: defaultFormData(parseHtmlForm(html)), timedOut: true });
+
+		expect(await handlerFor(context({ formDialog }))(request, undefined)).toEqual({ action: "cancel" });
 	});
 
 	it("asks a user who closed the form whether to decline or cancel, and reopens it on Back", async () => {
@@ -120,8 +148,8 @@ describe("MCP elicitation through the session UI", () => {
 			const forms: string[] = [];
 			const formDialog: FormDialog = async html => {
 				forms.push(html);
-				// The form is closed the first time and submitted untouched after going back.
-				return forms.length === 1 ? undefined : { data: defaultFormData(parseHtmlForm(html)) };
+				// The form is closed the first time and answered after going back.
+				return forms.length === 1 ? undefined : { data: { approve: "false" } };
 			};
 			const select = async () => picks.shift();
 			const result = await handlerFor(context({ formDialog, select }))(APPROVAL, undefined);
@@ -155,8 +183,12 @@ describe("MCP elicitation through the session UI", () => {
 		const formDialog: FormDialog = async html => {
 			forms.push(html);
 			const data = defaultFormData(parseHtmlForm(html));
-			// First one region, which the form cannot reject, with the prefilled note cleared; then a second region.
-			if (forms.length === 1) return { data: { ...data, owner: "ops", note: "", regions: ["eu"] } };
+			// First one region, which the form cannot reject, with the prefilled note cleared (left out, as ACP
+			// clients send an empty optional field); then a second region.
+			if (forms.length === 1) {
+				const { note: _cleared, ...rest } = data;
+				return { data: { ...rest, owner: "ops", regions: ["eu"] } };
+			}
 			return { data: { ...data, regions: [...(data.regions as string[]), "ap"] } };
 		};
 
@@ -261,6 +293,5 @@ describe("MCP elicitation through the session UI", () => {
 
 		expect(elicitHandler(context({ formDialog }, { hasUI: false }))).toBeUndefined();
 		expect(elicitHandler(context({ select: async () => undefined }))).toBeUndefined();
-		expect(elicitHandler(undefined)).toBeUndefined();
 	});
 });
