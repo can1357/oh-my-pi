@@ -213,7 +213,7 @@ async function getQuota(
 
 /**
  * Reads the calling virtual key's budgets and rate limits. A base URL behind
- * an integration route (`…/typesafe`) retries the origin when its own root
+ * an integration route (`…/openai`) retries the origin when its own root
  * has no quota route. A 401 or 403 (expired key) rejects so the cached report
  * is discarded; a key with no configured limits reports nothing.
  */

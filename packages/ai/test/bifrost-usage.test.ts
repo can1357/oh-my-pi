@@ -70,7 +70,7 @@ describe("bifrostUsageProvider", () => {
 				},
 				provider_configs: [
 					{
-						provider: "Chinese Router",
+						provider: "openrouter",
 						virtual_key_id: "vk-1",
 						budgets: [budget("route", 5, 5)],
 						model_budgets: [{ model_name: "glm-5", budgets: [budget("route-model", 1, 10)] }],
@@ -96,14 +96,14 @@ describe("bifrostUsageProvider", () => {
 		});
 		// A null maximum is unlimited.
 		expect(byId.has("bifrost:key:rate:requests")).toBe(false);
-		expect(byId.get("bifrost:provider:Chinese Router:budget:route")?.status).toBe("exhausted");
+		expect(byId.get("bifrost:provider:openrouter:budget:route")?.status).toBe("exhausted");
 		expect(report?.metadata).toEqual({ endpoint: "https://gw.example", accountId: "vk-1", keyName: "OMP" });
 
-		expect(scopedIds(report, "Chinese Router/glm-5").sort()).toEqual([
+		expect(scopedIds(report, "openrouter/glm-5").sort()).toEqual([
 			"bifrost:key:budget:key-monthly",
 			"bifrost:key:rate:tokens",
-			"bifrost:model:Chinese Router/glm-5:budget:route-model",
-			"bifrost:provider:Chinese Router:budget:route",
+			"bifrost:model:openrouter/glm-5:budget:route-model",
+			"bifrost:provider:openrouter:budget:route",
 		]);
 		expect(scopedIds(report, "openai/gpt-5").sort()).toEqual([
 			"bifrost:key:budget:key-monthly",
@@ -117,10 +117,10 @@ describe("bifrostUsageProvider", () => {
 	it("retries the origin when an integration route has no quota endpoint", async () => {
 		const { report, requests } = await probe(
 			{ [QUOTA]: quota({ is_active: false }) },
-			{ baseUrl: "https://gw.example/typesafe" },
+			{ baseUrl: "https://gw.example/openai" },
 		);
 		expect(requests.map(request => request.url)).toEqual([
-			"https://gw.example/typesafe/api/governance/virtual-keys/quota",
+			"https://gw.example/openai/api/governance/virtual-keys/quota",
 			QUOTA,
 		]);
 		expect(report?.limits.map(limit => [limit.id, limit.status])).toEqual([["bifrost:key:active", "exhausted"]]);
@@ -168,7 +168,7 @@ describe("Bifrost model usage health for a config key", () => {
 			configValueResolver: async value => value,
 			usageFetch: routedFetch({
 				[QUOTA]: quota({
-					provider_configs: [{ provider: "Chinese Router", budgets: [budget("route", 5, 5)] }],
+					provider_configs: [{ provider: "openrouter", budgets: [budget("route", 5, 5)] }],
 					budgets: [budget("key", 1, 10)],
 				}),
 			}) as unknown as typeof fetch,
@@ -177,7 +177,7 @@ describe("Bifrost model usage health for a config key", () => {
 		storage.keys.setConfig("bifrost", "sk-bf-test");
 		const options = { baseUrl: "https://gw.example/v1", reserveFraction: 0.05 };
 
-		const depleted = await storage.health.model("bifrost", { ...options, modelId: "Chinese Router/glm-5" });
+		const depleted = await storage.health.model("bifrost", { ...options, modelId: "openrouter/glm-5" });
 		expect(depleted.state).toBe("depleted");
 		expect(depleted.accounts).toEqual([
 			{
