@@ -14,6 +14,8 @@
 - Z.AI (`zai`) now discovers the models available to your GLM Coding Plan key, so newly released GLM models appear without waiting for a catalog update.
 - Added `getUpstreamPin()` and `routedModelsAreEqual()` to `@oh-my-pi/pi-catalog/models` for distinguishing aggregator models routed to different upstream providers.
 - Added `@oh-my-pi/pi-catalog/discovery/pi-native` and `piNativeModelManagerOptions()` for reading a provider's model roster from an auth gateway's `GET /v1/pi/models`.
+- `toolSchemaFlavor: "google"` rewrites OpenAI-compatible tool schemas into Gemini's dialect; GitHub Copilot Gemini models use it ([#20198](https://github.com/can1357/oh-my-pi/issues/20198))
+- `getUpstreamPin()` and `routedModelsAreEqual()` in `@oh-my-pi/pi-catalog/models` tell apart an aggregator model pinned to different upstream providers ([#19664](https://github.com/can1357/oh-my-pi/pull/19664) by [@taibenvenuti](https://github.com/taibenvenuti))
 
 ### Fixed
 
