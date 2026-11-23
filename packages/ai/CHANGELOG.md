@@ -4,9 +4,9 @@
 
 ### Added
 
-- Google Antigravity login now records the account's reported tier (`OAuthCredentials.userTier`, from `loadCodeAssist` `currentTier.id`) and keeps it across refreshes; the usage model-list fallback sends it as `entitlement.userTier`
-- Google Antigravity requests now carry the native client's prompt and trajectory identity: a top-level `userPromptId` with a matching `X-Aicode-Prompt-Id` header and an `X-Aicode-Trajectory-Id` header
-- Google Antigravity honors the native `ANTIGRAVITY_PROJECT_ID` (per request) and `ANTIGRAVITY_TRAJECTORY_ID` (UUID only) overrides
+- Google Antigravity login now remembers the account's tier across token refreshes, and usage lookups send it
+- Google Antigravity requests now send the native client's prompt and trajectory ids
+- Google Antigravity honors the native `ANTIGRAVITY_PROJECT_ID` and `ANTIGRAVITY_TRAJECTORY_ID` overrides
 - Added `AssistantMessage.requestId`, set from Anthropic's `request-id` response header, so a refused or failed turn keeps the id that Anthropic support asks for ([#19383](https://github.com/can1357/oh-my-pi/pull/19383) by [@nnnnoel](https://github.com/nnnnoel))
 
 ### Fixed
