@@ -173,11 +173,11 @@ import type {
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeResult,
 	SessionStopEventResult,
+	TodoApplyResult,
 	TodoBackendChange,
 	ToolInfo,
 	TreePreparation,
 } from "../extensibility/extensions";
-import type { TodoApplyResult } from "../extensibility/extensions/runner";
 import { emitSessionShutdownEvent, TOP_LEVEL_AGENT, UNAVAILABLE_ANNOTATIONS } from "../extensibility/extensions";
 import { extensionEventFromSessionEvent } from "../extensibility/extensions/lifecycle-mirror";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";

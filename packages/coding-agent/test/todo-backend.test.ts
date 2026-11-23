@@ -18,10 +18,12 @@ import {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type {
 	ExtensionFactory,
+	ExtensionUIContext,
 	TodoBackendChange,
 	TodoBackendDefinition,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
+import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { type CreateAgentSessionOptions, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -666,7 +668,7 @@ describe("todo backend", () => {
 			return tool.execute("call", params, signal, undefined, context);
 		};
 
-		it("an accepted change commits once and is not sent to the backend again, even when the backend holds a list", async () => {
+		it("an accepted change commits and the backend then gets exactly one replace, of the committed list", async () => {
 			const backend = tracker("tracker", true);
 			const { session } = await open([backend.extension], "tracker");
 
@@ -676,17 +678,19 @@ describe("todo backend", () => {
 			expect(result.isError).not.toBe(true);
 			expect(backend.asked).toEqual([{ op: "init", previous: [], next: session.getTodoPhases() }]);
 			expect(contents(session)).toEqual(["a"]);
-			expect(backend.calls).toEqual([]);
+			expect(backend.calls.map(entry => entry.phases)).toEqual([session.getTodoPhases()]);
+		});
 
-			// A list the backend took through `replace` is held too: the next accepted change adds no replace.
+		it("an accepted change gets its replace even when the backend already took the previous list", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
 			session.commitTodoPhases(list("a"));
 			await settled(session);
+
 			await call(session, { op: "append", phase: "Work", items: ["b"] });
 			await settled(session);
 
-			expect(contents(session)).toEqual(["a", "b"]);
-			expect(backend.asked).toHaveLength(2);
-			expect(tasksOf(backend)).toEqual([["a"]]);
+			expect(tasksOf(backend)).toEqual([["a"], ["a", "b"]]);
 		});
 
 		it("a refusal fails the call on one clean line, keeps the list, and is no extension error", async () => {
@@ -698,21 +702,29 @@ describe("todo backend", () => {
 			backend.refusal = new Error("a needs\nevidence\x1b[2J");
 			const result = await call(session, { op: "init", items: ["b"] });
 			await settled(session);
-			backend.refusal = new Error("");
-			const empty = await call(session, { op: "init", items: ["c"] });
-			await settled(session);
 
 			expect(result.isError).toBe(true);
 			expect(result.details?.refused).toBe(true);
 			expect(textOf(result)).toContain('Todo backend "tracker" did not accept this change: a needs evidence');
 			// The current list follows the reason, so the model sees what is still saved.
-			expect(textOf(result).split("a needs evidence")[1]).toContain("a");
+			expect(textOf(result).split("a needs evidence")[1]).toContain("- a [");
 			expect(textOf(result)).not.toContain("\x1b");
-			expect(empty.isError).toBe(true);
-			expect(textOf(empty)).toContain("no reason given");
 			expect(contents(session)).toEqual(["a"]);
 			expect(errors).toEqual([]);
 			expect(tasksOf(backend)).toEqual([["a"], ["a"]]);
+		});
+
+		it("a refusal with no reason still fails the call and says so", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+			backend.refusal = new Error("");
+
+			const result = await call(session, { op: "init", items: ["a"] });
+			await settled(session);
+
+			expect(result.isError).toBe(true);
+			expect(textOf(result)).toContain("no reason given");
+			expect(contents(session)).toEqual([]);
 		});
 
 		it.each([
@@ -809,31 +821,6 @@ describe("todo backend", () => {
 			expect([contents(sub.session), contents(main.session), backend.asked]).toEqual([["a"], ["b"], []]);
 		});
 
-		it("an accept while a replace of the older list finishes still gets the committed list sent", async () => {
-			const backend = tracker("tracker", true);
-			const { session } = await open([backend.extension], "tracker");
-			const replaceGate = Promise.withResolvers<void>();
-			const applyGate = Promise.withResolvers<void>();
-			backend.hold = replaceGate.promise;
-			backend.applyHold = applyGate.promise;
-			const replaceEntered = backend.entered();
-			session.commitTodoPhases(list("a"));
-			await replaceEntered;
-			const applyEntered = backend.entered();
-			const result = call(session, { op: "append", phase: "Work", items: ["b"] });
-			await applyEntered;
-
-			// The older replace lands during the apply, so the backend holds `a`, not the list the accept commits.
-			replaceGate.resolve();
-			await settled(session);
-			applyGate.resolve();
-			await result;
-			await settled(session);
-
-			expect(contents(session)).toEqual(["a", "b"]);
-			expect(tasksOf(backend).at(-1)).toEqual(["a", "b"]);
-		});
-
 		it("a todo call made while the session closes fails unasked and keeps the list", async () => {
 			const backend = tracker("tracker", true);
 			const { session } = await open([backend.extension], "tracker");
@@ -850,23 +837,24 @@ describe("todo backend", () => {
 			await disposing;
 
 			expect(result.isError).toBe(true);
-			expect(textOf(result)).toContain("nothing was saved");
+			expect(textOf(result)).toContain("was not asked");
 			expect(contents(session)).toEqual(["a"]);
 			expect(backend.asked).toEqual([]);
 		});
 
-		it("a refused todo call that follows a bash call in one message runs after bash finished, and leaves no retry reminder", async () => {
+		it("a refused todo call that follows bash and an accepted one in a message sees the committed list, and leaves no retry reminder", async () => {
 			let bashDone = false;
-			let bashDoneWhenAsked: boolean | undefined;
+			const asked: Array<{ op: string; bashDone: boolean; previous: TodoPhase[] }> = [];
 			const { session } = await open(
 				[
 					pi =>
 						pi.registerTodoBackend({
 							id: "veto",
 							replace() {},
-							apply() {
-								bashDoneWhenAsked = bashDone;
-								throw new Error("not now");
+							apply(change) {
+								asked.push({ op: change.op, bashDone, previous: change.previous });
+								if (change.op === "drop") throw new Error("not now");
+								if (change.op === "done" && !bashDone) throw new Error("bash still running");
 							},
 						}),
 				],
@@ -877,28 +865,73 @@ describe("todo backend", () => {
 			session.subscribe(event => {
 				if (event.type === "tool_execution_end" && event.toolName === "bash") bashDone = true;
 			});
-			const response: MockResponse = {
-				content: [
-					// Real time: the bash call must still be running when an unscheduled todo call would be asked.
-					{ type: "toolCall", id: "b", name: "bash", arguments: { command: "sleep 0.2 && echo done" } },
-					{ type: "toolCall", id: "t", name: "todo", arguments: { op: "init", items: ["a"] } },
-				],
-			};
+			const todoCall = (
+				id: string,
+				args: { op: string; items?: string[]; task?: string },
+			): NonNullable<MockResponse["content"]>[number] => ({ type: "toolCall", id, name: "todo", arguments: args });
 			session.agent.streamFn = createMockModel({
-				responses: [response, { content: ["ok"] }, { content: ["ok"] }],
+				responses: [
+					{ content: [todoCall("i", { op: "init", items: ["x", "y"] })] },
+					{ content: ["ok"] },
+					{
+						content: [
+							// Real time: the bash call must still be running when an unscheduled todo call would be asked.
+							{ type: "toolCall", id: "b", name: "bash", arguments: { command: "sleep 0.2 && echo done" } },
+							todoCall("d", { op: "done", task: "x" }),
+							todoCall("r", { op: "drop", task: "y" }),
+						],
+					},
+					{ content: ["ok"] },
+				],
 			}).stream;
 
 			await session.prompt("go");
 			await session.prompt("next");
 
-			const todoResult = session.messages.find(
-				message => message.role === "toolResult" && message.toolName === "todo",
-			);
-			expect(bashDoneWhenAsked).toBe(true);
-			expect(todoResult).toMatchObject({ isError: true, details: { refused: true } });
+			const dropAsked = asked.find(entry => entry.op === "drop");
+			const dropResult = session.messages.find(m => m.role === "toolResult" && m.toolCallId === "r");
+			expect(asked.find(entry => entry.op === "done")?.bashDone).toBe(true);
+			expect(session.getTodoPhases()[0].tasks.map(task => task.status)).toContain("completed");
+			expect(dropAsked?.previous[0].tasks.find(task => task.content === "x")?.status).toBe("completed");
+			expect(dropResult).toMatchObject({ isError: true, details: { refused: true } });
 			expect(session.messages.filter(m => m.role === "custom" && m.customType === "todo-error-reminder")).toEqual(
 				[],
 			);
+		});
+
+		it("time spent in a dialog the backend opens does not count against the apply timeout", async () => {
+			const { session } = await open(
+				[
+					pi =>
+						pi.registerTodoBackend({
+							id: "ask",
+							replace() {},
+							async apply(_change, ctx) {
+								await ctx.ui.confirm("Allow?", "todo change");
+							},
+						}),
+				],
+				"ask",
+				{ start: false },
+			);
+			const runner = session.extensionRunner;
+			if (!runner) throw new Error("session has no extension runner");
+			// The handler budget pauses around dialogs only when the session has a UI.
+			// A real delay: the runner's handler budget is a real timer, and the dialog must outlast it.
+			const confirm: ExtensionUIContext["confirm"] = async () => (await Bun.sleep(120), true);
+			const ui: ExtensionUIContext = { ...runner.getUIContext(), confirm };
+			await initializeExtensions(session, {
+				reportSendError: () => {},
+				reportRuntimeError: () => {},
+				mode: "tui",
+				uiContext: ui,
+			});
+			testSetExtensionHandlerTimeoutMs(40);
+
+			const result = await call(session, { op: "init", items: ["a"] });
+
+			expect(result.isError).not.toBe(true);
+			expect(contents(session)).toEqual(["a"]);
 		});
 	});
 });

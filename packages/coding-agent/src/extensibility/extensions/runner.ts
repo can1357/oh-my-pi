@@ -618,8 +618,7 @@ export type TodoChangeApplier = (
 	signal?: AbortSignal,
 ) => TodoApplyResult | Promise<TodoApplyResult>;
 
-const abortedMessage = (backend: string): string =>
-	`The call was aborted while todo backend "${sanitizeDisplayLine(backend)}" decided; nothing was saved.`;
+const NOTHING_SAVED = "; nothing was saved.";
 
 /** One `todo` call put to its backend; see {@link ExtensionRunner.applyTodoBackend}. */
 export interface TodoApplyRequest {
@@ -1823,18 +1822,24 @@ export class ExtensionRunner {
 	}
 
 	/**
-	 * Ask the backend `todo.backend` selects (`request.backend`) to accept a `todo` call's change.
-	 * Returns `native` at once, before any await, when no backend decides: it has no `apply`, is
-	 * not registered, or `session_start` has not gone out. Otherwise `request.commit` runs in the
-	 * same synchronous step that checks the answer, omp's list, the session id and the abort
-	 * signal. `apply` is not queued behind `replace` calls. Any outcome but a commit leaves omp's
-	 * list as it is and queues one full `replace`, behind the apply's own settlement.
+	 * Ask the backend `todo.backend` selects (`request.backend`) to accept a `todo` call's change;
+	 * `apply` only checks. Returns `native` at once, before any await, when no backend decides: it
+	 * has no `apply`, is not registered, or `session_start` has not gone out. Otherwise
+	 * `request.commit` runs in the same synchronous step that checks the answer, omp's list, the
+	 * session id and the abort signal, and an accepted change then reaches `replace` like any other
+	 * commit. `apply` is not queued behind `replace` calls. Any other outcome leaves omp's list as
+	 * it is and queues one full `replace` behind the apply's own settlement, waiting at most the
+	 * handler timeout. While the session is closing the call fails and nothing is resent.
 	 */
 	applyTodoBackend(request: TodoApplyRequest): TodoApplyResult | Promise<TodoApplyResult> {
 		const owner = this.#sessionStartEvent ? this.getTodoBackends().get(request.backend) : undefined;
 		if (!owner?.definition.apply) return { kind: "native" };
 		// Closing: a backend that decides still decides, so the call fails; the list is not resent.
-		if (this.#todoClosed || request.closing) return { kind: "stale", message: abortedMessage(request.backend) };
+		if (this.#todoClosed || request.closing)
+			return {
+				kind: "stale",
+				message: `The session is closing; todo backend "${sanitizeDisplayLine(request.backend)}" was not asked${NOTHING_SAVED}`,
+			};
 		return this.#askTodoBackend(owner.extension, owner.definition, request);
 	}
 
@@ -1844,8 +1849,6 @@ export class ExtensionRunner {
 		{ backend, change, current, commit, resend, signal }: TodoApplyRequest,
 	): Promise<TodoApplyResult> {
 		const sessionId = this.sessionManager.getSessionId();
-		// A replace still running now may finish during the apply and set this; the backend then holds that list, not ours.
-		const sentBefore = this.#todoSent;
 		const timeoutMs = Math.min(TODO_APPLY_TIMEOUT_MS, extensionHandlerTimeoutMs);
 		const answered = Promise.withResolvers<void>();
 		let asked = false;
@@ -1879,16 +1882,10 @@ export class ExtensionRunner {
 		const sameSession = this.sessionManager.getSessionId() === sessionId;
 		const live = !this.#todoClosed && !signal?.aborted && sameSession && Bun.deepEquals(current(), change.previous);
 		if (verdict?.kind === "accepted" && live) {
-			const held =
-				this.#todoSent === sentBefore &&
-				this.#holds(extension, definition, { backend, sessionId, phases: change.previous });
 			commit();
-			// Read back: the session may normalize what it commits.
-			if (held) this.#todoSent = { list: { backend, sessionId, phases: current() }, extension, definition };
 			return { kind: "committed" };
 		}
 		const id = sanitizeDisplayLine(backend);
-		const nothingSaved = "; nothing was saved.";
 		let refused = false;
 		let message: string;
 		switch (verdict?.kind) {
@@ -1897,15 +1894,16 @@ export class ExtensionRunner {
 				message = `Todo backend "${id}" did not accept this change: ${sanitizeDisplayLine(verdict.message) || "no reason given"}`;
 				break;
 			case "timeout":
-				message = `Todo backend "${id}" did not answer within ${timeoutMs} ms${nothingSaved}`;
+				message = `Todo backend "${id}" did not answer within ${timeoutMs} ms${NOTHING_SAVED}`;
 				break;
 			case "failed":
-				message = `Todo backend "${id}" failed: ${sanitizeDisplayLine(verdict.message) || "no reason given"}${nothingSaved}`;
+				message = `Todo backend "${id}" failed: ${sanitizeDisplayLine(verdict.message) || "no reason given"}${NOTHING_SAVED}`;
 				break;
 			default:
-				if (!verdict || signal?.aborted || this.#todoClosed) message = abortedMessage(backend);
-				else if (!sameSession) message = `The session changed while todo backend "${id}" decided${nothingSaved}`;
-				else message = `The todo list changed while todo backend "${id}" decided${nothingSaved}`;
+				if (!verdict || signal?.aborted || this.#todoClosed)
+					message = `The call was aborted while todo backend "${id}" decided${NOTHING_SAVED}`;
+				else if (!sameSession) message = `The session changed while todo backend "${id}" decided${NOTHING_SAVED}`;
+				else message = `The todo list changed while todo backend "${id}" decided${NOTHING_SAVED}`;
 		}
 		this.#resendStaleTodoList(answered.promise, resend);
 		return refused ? { kind: "refused", message } : { kind: "stale", message };
@@ -1927,15 +1925,6 @@ export class ExtensionRunner {
 				resend();
 			})
 			.catch((error: unknown) => logger.warn("Todo backend call failed", { error: String(error) }));
-	}
-
-	/** Whether `extension`'s `definition` is known to hold `list`: it took it last, or both are empty before any call. */
-	#holds(extension: Extension, definition: TodoBackendDefinition, list: TodoBackendList): boolean {
-		if (this.#todoStale) return false;
-		const sent = this.#todoSent;
-		return sent === "none"
-			? list.phases.length === 0
-			: sent?.extension === extension && sent.definition === definition && Bun.deepEquals(sent.list, list);
 	}
 
 	#queueTodoBackendCall(): void {
@@ -1966,7 +1955,14 @@ export class ExtensionRunner {
 		this.#reportedTodoBackend = undefined;
 		const { extension, definition } = owner;
 		this.#reportShadowedTodoBackends(pending.backend, extension);
-		if (this.#holds(extension, definition, pending)) return;
+		const sent = this.#todoSent;
+		if (
+			!this.#todoStale &&
+			(sent === "none"
+				? pending.phases.length === 0
+				: sent?.extension === extension && sent.definition === definition && Bun.deepEquals(sent.list, pending))
+		)
+			return;
 		this.#todoStale = false;
 		this.#todoSent = undefined;
 		const taken = await this.#runHandlerWithTimeout(

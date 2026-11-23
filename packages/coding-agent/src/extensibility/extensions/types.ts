@@ -1869,7 +1869,6 @@ export interface TodoBackendDefinition {
 	 * only once omp has called a todo backend for this session; `/new`, a resume, a branch and a
 	 * fork carry that over. Tasks carry `content` and `status` only.
 	 * A backend the user picks in Settings is sent the current list then, without a change.
-	 * A change the backend accepted through `apply` while it held the previous list is not sent again.
 	 * One call runs at a time, and lists that change meanwhile collapse into the newest. A throw,
 	 * or no answer within the extension handler timeout, is reported as an extension error and
 	 * leaves omp's list as it is; the next change sends the whole list again, even while a call
@@ -1880,11 +1879,13 @@ export interface TodoBackendDefinition {
 	/**
 	 * Optional veto, asked before a `todo` tool call made by the model in the main session commits:
 	 * throw to refuse. omp commits `next` only if this resolves within `min(10s, the extension
-	 * handler timeout)` and omp's list is still `previous` (same session, call not aborted); a
-	 * `replace` of `next` is then skipped when the backend held `previous`. A refusal, a timeout, a
-	 * late answer or a list that changed meanwhile fails the call with omp's list unchanged, and the
-	 * backend is sent omp's whole list once. Changes that do not come from the model's `todo` call
-	 * (`/todo`, RPC `set_todos`, eval, resets, subagents) are not asked: they reach `replace`.
+	 * handler timeout)` and omp's list is still `previous` (same session, call not aborted). Check
+	 * only, do not write: a committed change then reaches `replace` like any other commit, which
+	 * corrects a backend that wrote here. A refusal, a timeout, a late answer or a list that
+	 * changed meanwhile fails the call with omp's list unchanged, and the backend is sent omp's
+	 * whole list once. While the session is closing the call fails and nothing is resent. Changes
+	 * that do not come from the model's `todo` call (`/todo`, RPC `set_todos`, eval, resets,
+	 * subagents) are not asked: they reach `replace`.
 	 */
 	apply?(change: TodoBackendChange, ctx: ExtensionContext): void | Promise<void>;
 }
