@@ -198,8 +198,9 @@ export function wrapShellLineForClientTerminal(
 // Scan complete operands so a protected target can follow ordinary paths, but
 // never borrow an operand from a later shell command.
 const RM_WORD = /(?!#)(?:[^\s;&|()<>"'`\\]|\\[^\n]|"[^"\\]*(?:\\.[^"\\]*)*"|'[^']*')+/u;
+// Include individual home roots and the macOS backing paths for /etc and /var.
 const RM_PROTECTED_TARGET =
-	/(?:\/+(?:\.\/+)*(?:(?:bin|boot|dev|etc|home|lib(?:32|64|x32)?|proc|root|sbin|sys|usr|var|Library|System|Users)(?:\/+\.)*(?:\/+\*?)?|[.*])?|(?:~|\$(?:HOME|\{HOME\}))(?:\/+\.)*(?:\/+\*?)?)/u;
+	/(?:\/+(?:\.\/+)*(?:(?:Applications|bin|boot|dev|etc|lib(?:32|64|x32)?|opt|proc|root|sbin|sys|usr|var|Library|System|(?:home|Users)(?:\/+[^/\s;&|()<>"'`\\]+)?|private(?:\/+(?:etc|var))?)(?:\/+\.)*(?:\/+\*?)?|[.*])?|(?:~|\$(?:HOME|\{HOME\}))(?:\/+\.)*(?:\/+\*?)?)/u;
 const CRITICAL_RM_PATTERN = new RegExp(
 	String.raw`\brm[ \t]+(?:-[^\s;&|()<>"'\x60]+[ \t]+)*(?:-[a-z]*[rf][a-z]*|--recursive|--force)[ \t]+` +
 		String.raw`(?:${RM_WORD.source}[ \t]+)*?(["']?)${RM_PROTECTED_TARGET.source}\1(?=["'\x60]?(?:[\s;&|()<>]|$))`,

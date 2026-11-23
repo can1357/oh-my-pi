@@ -23,7 +23,7 @@
 
 ### Fixed
 
-- Fixed routine absolute-path `rm -f` and `rm -r` commands ignoring the bash allow policy; destructive root targets still require approval ([#20241](https://github.com/can1357/oh-my-pi/issues/20241)).
+- Fixed routine absolute-path `rm -f` and `rm -r` commands ignoring the bash allow policy in `write` mode; home directories and protected system roots still require approval ([#20241](https://github.com/can1357/oh-my-pi/issues/20241)).
 - Improved Magic Edit so it can search and read the current draft, retry failed replacements without losing successful edits, validate syntax before writing, and support models that emit tool calls as text.
 - Fixed shell tool command handling when `bash` is replaced by an extension, including support for tool-only command lines with remote or sandboxed shells.
 - Fixed browser scrolling validation and documentation so invalid object forms explain the correct pixel-delta signature and equivalent call.
