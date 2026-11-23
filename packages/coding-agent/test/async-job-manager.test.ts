@@ -3,6 +3,8 @@ import { scheduler } from "node:timers/promises";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { AsyncJobError, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { buildAsyncResultBatchMessage } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
+import { YieldQueue } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
+import { logger } from "@oh-my-pi/pi-utils";
 
 async function waitForJobEviction(manager: AsyncJobManager, jobId: string): Promise<void> {
 	const deadline = Date.now() + 2_000;
@@ -28,6 +30,8 @@ function mockPositiveSleepsImmediate() {
 		return realSleep(duration ?? 0);
 	});
 }
+
+const STALE_ASYNC_RESULT = "Yield queue entry became stale: async-result";
 
 describe("AsyncJobManager", () => {
 	afterEach(() => {
@@ -1041,6 +1045,78 @@ describe("AsyncJobManager", () => {
 		manager.unwatchJobs([id]);
 		await manager.drainDeliveries({ timeoutMs: 500 });
 		expect(delivered).toEqual(["received=kestrel42"]);
+	});
+
+	test("logs a push a wait superseded at debug level and does not requeue it", async () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const debug = vi.spyOn(logger, "debug").mockImplementation(() => {});
+		const manager = new AsyncJobManager({});
+		const queue = new YieldQueue({
+			isStreaming: () => true,
+			injectIdle: async () => {},
+			scheduleIdleFlush: () => {},
+		});
+		queue.register<{ jobId: string }>("async-result", {
+			isStale: entry => manager.isDeliverySuppressed(entry.jobId),
+			build: () => null,
+		});
+		manager.registerDeliverySink("Main", jobId => queue.enqueueWithReceipt("async-result", { jobId }));
+		const id = manager.register("bash", "finished", async () => "done", { ownerId: "Main" });
+		await manager.getJob(id)?.promise;
+		await waitForCondition(() => queue.has("async-result"));
+
+		manager.watchJobs([id]);
+		await queue.flush("idle");
+		await waitForCondition(() =>
+			debug.mock.calls.some(([message]) => message === "Async job completion delivery superseded"),
+		);
+
+		expect(debug).toHaveBeenCalledWith("Async job completion delivery superseded", {
+			jobId: id,
+			error: STALE_ASYNC_RESULT,
+		});
+		expect(warn).not.toHaveBeenCalledWith("Async job completion delivery failed", expect.anything());
+		expect(manager.isDeliveryPending(id)).toBe(false);
+	});
+
+	test("still warns when a watched job's delivery fails for another reason", async () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		vi.spyOn(logger, "debug").mockImplementation(() => {});
+		const manager = new AsyncJobManager({});
+		manager.registerDeliverySink("Main", jobId => {
+			manager.watchJobs([jobId]);
+			throw new Error("sink exploded");
+		});
+		const id = manager.register("bash", "finished", async () => "done", { ownerId: "Main" });
+
+		await waitForCondition(() =>
+			warn.mock.calls.some(([message]) => message === "Async job completion delivery failed"),
+		);
+		const payload = warn.mock.calls.find(([message]) => message === "Async job completion delivery failed")?.[1];
+
+		expect(payload).toMatchObject({ jobId: id, attempt: 1, error: "sink exploded" });
+		expect(payload?.nextRetryAt).toBeUndefined();
+		expect(manager.isDeliveryPending(id)).toBe(false);
+	});
+
+	test("still warns when an evicted job's delivery goes stale", async () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		vi.spyOn(logger, "debug").mockImplementation(() => {});
+		const manager = new AsyncJobManager({});
+		manager.registerDeliverySink("Main", () => {
+			manager.evictCompletedJobs();
+			throw new Error(STALE_ASYNC_RESULT);
+		});
+		const id = manager.register("bash", "finished", async () => "done", { ownerId: "Main" });
+
+		await waitForCondition(() =>
+			warn.mock.calls.some(([message]) => message === "Async job completion delivery failed"),
+		);
+		const payload = warn.mock.calls.find(([message]) => message === "Async job completion delivery failed")?.[1];
+
+		expect(payload).toMatchObject({ jobId: id, attempt: 1, error: STALE_ASYNC_RESULT });
+		expect(payload?.nextRetryAt).toBeUndefined();
+		expect(manager.getJob(id)).toBeUndefined();
 	});
 
 	test("dead-letters an owned delivery when its owner has no live sink", async () => {
