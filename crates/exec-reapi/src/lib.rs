@@ -17,7 +17,7 @@ pub mod status;
 pub mod tree;
 
 /// The execution backend and its profile-driven configuration.
-pub use execute::{Config as ExecuteConfig, ReapiBackend, Toolchain};
+pub use execute::{Config as ExecuteConfig, ReapiBackend, ReapiRun, Toolchain};
 
 /// Generated bindings for the vendored protos.
 ///

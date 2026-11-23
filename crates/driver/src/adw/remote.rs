@@ -166,7 +166,8 @@ impl ProductionAdwHost {
 		let (profile, cache) = settings.resolved_profile()?;
 		let config = settings.config(&pins, profile, cache, credential);
 		let materialize_client = environment.clone();
-		let backend = settings.connect_config(environment, config).await?;
+		let composed = settings.connect_config(environment, config).await?;
+		let backend = composed.into_reapi()?;
 		let mut run = backend.start(request).await.map_err(RemoteError::Execute)?;
 		let mut queue_span: Option<tracing::Span> = Some(tracing::info_span!("omp.exec.queue"));
 		let mut run_span: Option<tracing::Span> = None;

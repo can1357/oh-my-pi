@@ -25,7 +25,6 @@ use omp_dom::{Handle, PropId, PropKey, Value};
 use omp_env::EnvClient;
 use omp_envd::fetch_host::NETWORK_APPROVAL_KIND;
 use omp_exec::{BuildCommand, ExecutionBackend, ExecutionId, Intent, JUST, Platform, RepoPins};
-use omp_exec_reapi::ReapiBackend;
 use omp_session::Session;
 use omp_tool::{CallOutcome, Claims, Precedence, Presentation, Registry, RegistryError, ToolSpec};
 use omp_tools::remote_build::{Fault, NAME, Params, Payload};
@@ -33,7 +32,8 @@ use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
 
 use crate::exec_composer::{
-	DestinationIdentity, EnvironmentInputs, ExecutionSettings, PreparedExecution, RemoteError,
+	ComposedBackend, DestinationIdentity, EnvironmentInputs, ExecutionSettings, PreparedExecution,
+	RemoteError,
 };
 
 omp_con::var! {
@@ -123,7 +123,7 @@ impl EnvironmentHost {
 }
 
 impl RemoteBuildHost for EnvironmentHost {
-	type Backend = ReapiBackend<EnvironmentInputs>;
+	type Backend = ComposedBackend;
 
 	fn prepare<'a>(
 		&'a self,

@@ -52,13 +52,17 @@ class DeviceSourceTests(unittest.TestCase):
         """Verify poll device calls client.poll_run()."""
         self.assertIn("client.poll_run", self.devices_source)
 
+    def test_get_log_calls_client(self) -> None:
+        """Verify get_log device calls client.get_log()."""
+        self.assertIn("client.get_log", self.devices_source)
+
     def test_cancel_calls_client(self) -> None:
         """Verify cancel device calls client.cancel_run()."""
         self.assertIn("client.cancel_run", self.devices_source)
 
-    def test_all_four_operations_exist(self) -> None:
-        """Verify all four delegate operations are defined."""
-        for name in ("describe", "start", "poll", "cancel"):
+    def test_all_five_operations_exist(self) -> None:
+        """Verify all five delegate operations are defined."""
+        for name in ("describe", "start", "poll", "get_log", "cancel"):
             self.assertIsNotNone(
                 self._find_async_func(name),
                 f"Operation {name} should be defined",
@@ -71,10 +75,10 @@ class DeviceSourceTests(unittest.TestCase):
             "mount_exec_leaves hook should be defined",
         )
 
-    def test_leaves_tuple_has_four_entries(self) -> None:
-        """Verify _LEAVES contains exactly four MountSpec entries."""
+    def test_leaves_tuple_has_five_entries(self) -> None:
+        """Verify _LEAVES contains exactly five MountSpec entries."""
         count = self.devices_source.count("MountSpec(")
-        self.assertEqual(count, 4, "_LEAVES should have exactly 4 MountSpec entries")
+        self.assertEqual(count, 5, "_LEAVES should have exactly 5 MountSpec entries")
 
 
 class ClientSourceTests(unittest.TestCase):
@@ -84,9 +88,9 @@ class ClientSourceTests(unittest.TestCase):
         self.source = CLIENT_PY.read_text(encoding="utf-8")
         self.tree = ast.parse(self.source, filename=str(CLIENT_PY))
 
-    def _find_func(self, name: str) -> ast.FunctionDef | None:
+    def _find_func(self, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
         for node in ast.walk(self.tree):
-            if isinstance(node, ast.FunctionDef) and node.name == name:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
                 return node
         return None
 
@@ -99,12 +103,20 @@ class ClientSourceTests(unittest.TestCase):
     def test_poll_run_exists(self) -> None:
         self.assertIsNotNone(self._find_func("poll_run"))
 
+    def test_get_log_exists(self) -> None:
+        """Verify get_log function exists for log fetching."""
+        self.assertIsNotNone(self._find_func("get_log"))
+
     def test_cancel_run_exists(self) -> None:
         self.assertIsNotNone(self._find_func("cancel_run"))
 
-    def test_uses_urllib(self) -> None:
-        """Verify client uses urllib.request for HTTP calls."""
-        self.assertIn("urllib.request", self.source)
+    def test_uses_omp_env_http_post(self) -> None:
+        """Verify client uses omp.env.http_post for HTTP calls (all endpoints are POST)."""
+        self.assertIn("omp.env.http_post", self.source)
+
+    def test_no_omp_env_http_get(self) -> None:
+        """Verify client does not use omp.env.http_get (all endpoints are POST)."""
+        self.assertNotIn("omp.env.http_get", self.source)
 
     def test_uses_buildbuddy_api_key_header(self) -> None:
         """Verify client uses x-buildbuddy-api-key header."""
@@ -117,6 +129,16 @@ class ClientSourceTests(unittest.TestCase):
     def test_has_base_url_function(self) -> None:
         """Verify _base_url function exists for endpoint conversion."""
         self.assertIsNotNone(self._find_func("_base_url"))
+
+    def test_cancel_returns_unsupported(self) -> None:
+        """Verify cancel_run returns unsupported outcome (REST has no cancel)."""
+        self.assertIn("unsupported", self.source)
+
+    def test_uses_correct_endpoints(self) -> None:
+        """Verify client uses correct BuildBuddy API endpoint names."""
+        self.assertIn('"Run"', self.source)
+        self.assertIn('"GetInvocation"', self.source)
+        self.assertIn('"GetLog"', self.source)
 
 
 if __name__ == "__main__":

@@ -33,6 +33,7 @@ pub mod session_bridge;
 pub mod session_wire;
 pub use session_wire::SessionWire;
 pub mod delegated_acp;
+pub mod delegated_backend;
 pub mod delegated_host;
 pub mod delegated_policy;
 pub mod delegated_resolver;

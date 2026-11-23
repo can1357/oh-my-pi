@@ -34,7 +34,12 @@ use omp_proto::{
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
-use crate::{bridges::CommandCredentials, cfg::CfgFiles, workspace_trust::evaluate_workspace};
+use crate::{
+	bridges::CommandCredentials,
+	cfg::CfgFiles,
+	delegated_backend::{DelegatedBackend, DelegatedRun},
+	workspace_trust::evaluate_workspace,
+};
 
 omp_con::var! {
 	/// Remote REAPI address. Empty disables remote execution.
@@ -375,6 +380,130 @@ pub struct PreparedExecution {
 
 const BACKEND_NAME: &str = "remote";
 const INSTANCE: &str = "";
+/// Profile name that selects the delegated (extension-based) backend.
+const DELEGATED_PROFILE: &str = "buildbuddy";
+
+/// A backend connected to either REAPI or a delegated extension.
+///
+/// The profile name from [`SV_EXEC_REMOTE_PROFILE`] determines which variant
+/// is created. When the profile is `"buildbuddy"`, the delegated backend
+/// using extension device operations is used. Otherwise the REAPI backend
+/// is used.
+pub enum ComposedBackend {
+	/// Standard REAPI gRPC backend.
+	Reapi(ReapiBackend<EnvironmentInputs>),
+	/// Delegated backend using extension device operations.
+	Delegated(DelegatedBackend),
+}
+
+/// A run produced by ComposedBackend.
+pub enum ComposedRun {
+	Reapi(omp_exec_reapi::ReapiRun<EnvironmentInputs>),
+	Delegated(DelegatedRun),
+}
+
+impl Clone for ComposedBackend {
+	fn clone(&self) -> Self {
+		match self {
+			Self::Reapi(b) => Self::Reapi(b.clone()),
+			Self::Delegated(b) => Self::Delegated(b.clone()),
+		}
+	}
+}
+
+impl ComposedBackend {
+	/// Returns the inner REAPI backend, or an error if this is a delegated
+	/// backend.
+	///
+	/// Used by ADW remote phase which needs CAS blob downloads (REAPI-only
+	/// feature).
+	pub fn into_reapi(self) -> Result<ReapiBackend<EnvironmentInputs>, RemoteError> {
+		match self {
+			Self::Reapi(b) => Ok(b),
+			Self::Delegated(_) => Err(RemoteError::MissingConfiguration),
+		}
+	}
+}
+
+impl omp_exec::ExecutionBackend for ComposedBackend {
+	type Run = ComposedRun;
+
+	fn id(&self) -> &BackendId<str> {
+		use omp_exec::ExecutionBackend as _;
+		match self {
+			Self::Reapi(b) => b.id(),
+			Self::Delegated(b) => b.id(),
+		}
+	}
+
+	fn capabilities(&self) -> &omp_exec::BackendCapabilities {
+		use omp_exec::ExecutionBackend as _;
+		match self {
+			Self::Reapi(b) => b.capabilities(),
+			Self::Delegated(b) => b.capabilities(),
+		}
+	}
+
+	fn start(
+		&self,
+		request: ExecutionRequest,
+	) -> impl Future<Output = Result<Self::Run, ExecutionError>> + Send + '_ {
+		use omp_exec::ExecutionBackend as _;
+		let backend = self.clone();
+		async move {
+			match backend {
+				ComposedBackend::Reapi(b) => b.start(request).await.map(ComposedRun::Reapi),
+				ComposedBackend::Delegated(b) => b.start(request).await.map(ComposedRun::Delegated),
+			}
+		}
+	}
+
+	fn reattach(
+		&self,
+		handle: ReattachHandle,
+		context: omp_exec::ReattachContext,
+	) -> impl Future<Output = Result<Self::Run, ExecutionError>> + Send + '_ {
+		use omp_exec::ExecutionBackend as _;
+		let backend = self.clone();
+		async move {
+			match backend {
+				ComposedBackend::Reapi(b) => b.reattach(handle, context).await.map(ComposedRun::Reapi),
+				ComposedBackend::Delegated(b) => b
+					.reattach(handle, context)
+					.await
+					.map(ComposedRun::Delegated),
+			}
+		}
+	}
+}
+
+type BoxFut<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+impl omp_exec::ExecutionRun for ComposedRun {
+	fn next_event(&mut self) -> BoxFut<'_, Option<omp_exec::ExecutionEvent>> {
+		use omp_exec::ExecutionRun as _;
+		match self {
+			Self::Reapi(r) => Box::pin(async move { r.next_event().await }),
+			Self::Delegated(r) => Box::pin(async move { r.next_event().await }),
+		}
+	}
+
+	fn cancel(&self) -> BoxFut<'_, omp_exec::CancelOutcome> {
+		use omp_exec::ExecutionRun as _;
+		match self {
+			Self::Reapi(r) => Box::pin(async move { r.cancel().await }),
+			Self::Delegated(r) => Box::pin(async move { r.cancel().await }),
+		}
+	}
+
+	fn detach(self) -> ReattachHandle {
+		use omp_exec::ExecutionRun as _;
+		match self {
+			Self::Reapi(r) => r.detach(),
+			Self::Delegated(r) => r.detach(),
+		}
+	}
+}
 
 /// Parses comma-separated `k=v` platform properties into a deterministic map.
 fn parse_fixed_properties(value: &str) -> Result<BTreeMap<Str, Str>, RemoteError> {
@@ -640,7 +769,12 @@ impl ExecutionSettings {
 		environment: EnvClient,
 		pins: &RepoPins,
 		credential: Credential,
-	) -> Result<ReapiBackend<EnvironmentInputs>, RemoteError> {
+	) -> Result<ComposedBackend, RemoteError> {
+		// Check if the profile indicates a delegated backend
+		if self.profile_name() == DELEGATED_PROFILE {
+			let backend = DelegatedBackend::new(environment, BackendId::new_static(BACKEND_NAME));
+			return Ok(ComposedBackend::Delegated(backend));
+		}
 		let (profile, cache) = self.resolved_profile()?;
 		self
 			.connect_config(environment, self.config(pins, profile, cache, credential))
@@ -651,10 +785,12 @@ impl ExecutionSettings {
 		&self,
 		environment: EnvClient,
 		config: ExecuteConfig,
-	) -> Result<ReapiBackend<EnvironmentInputs>, RemoteError> {
-		ReapiBackend::connect(self.endpoint.clone(), config, EnvironmentInputs(environment))
-			.await
-			.map_err(RemoteError::Execute)
+	) -> Result<ComposedBackend, RemoteError> {
+		let backend =
+			ReapiBackend::connect(self.endpoint.clone(), config, EnvironmentInputs(environment))
+				.await
+				.map_err(RemoteError::Execute)?;
+		Ok(ComposedBackend::Reapi(backend))
 	}
 }
 

@@ -1,7 +1,8 @@
 """Dyn ``exec/*`` device mounts for BuildBuddy remote execution.
 
-Declares one dynamic parent with ``omp.devices.parent`` and mounts the four
-delegate operations (describe, start, poll, cancel) at ``extension_activate``.
+Declares one dynamic parent with ``omp.devices.parent`` and mounts five
+delegate operations (describe, start, poll, get_log, cancel) at
+``extension_activate``.
 
 These operations follow the delegate contract from
 ``docs/research/exec-out-of-core.md`` (Shape C1):
@@ -11,12 +12,15 @@ These operations follow the delegate contract from
 | describe | BackendCapabilities | Yes |
 | start(request, inputs) | Opaque operation identity | No |
 | poll(operation, cursor) | State, output page, next cursor | Yes |
+| get_log(operation, cursor) | Log output, next cursor | Yes |
 | cancel(operation) | CancelOutcome | Yes |
 
 Each device calls the corresponding function in ``client.py``, which uses
-``urllib.request`` to call BuildBuddy's Run API REST endpoints. The API key
-is read from the macOS Keychain (service ``buildbuddy-omp2-trial``) or the
-``BUILDBUDDY_API_KEY`` environment variable.
+``omp.env.http_post`` to call BuildBuddy's Run API REST endpoints. All
+endpoints are POST-based JSON calls routed through the sandbox's HTTP egress
+broker, so the extension respects ``sv_sandbox_allow_domains``. The API key
+is read from the operator credential convar via ``omp.credential`` at call
+time.
 """
 
 from __future__ import annotations
@@ -53,7 +57,7 @@ async def start(args: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(request, dict):
         raise errors.BuildBuddyUnavailable("start", "args.request must be an object")
     try:
-        return client.start_run(request)
+        return await client.start_run(request)
     except errors.BuildBuddyUnavailable:
         raise
     except Exception as exc:
@@ -67,20 +71,34 @@ async def poll(args: dict[str, Any]) -> dict[str, Any]:
         raise errors.BuildBuddyUnavailable("poll", "args.operation is required")
     cursor = args.get("cursor")
     try:
-        return client.poll_run(str(operation), cursor=str(cursor) if cursor else None)
+        return await client.poll_run(str(operation), cursor=str(cursor) if cursor else None)
     except errors.BuildBuddyUnavailable:
         raise
     except Exception as exc:
         raise errors.BuildBuddyUnavailable("poll", str(exc)) from exc
 
 
+async def get_log(args: dict[str, Any]) -> dict[str, Any]:
+    """Fetch logs for a BuildBuddy execution."""
+    operation = args.get("operation", "")
+    if not operation:
+        raise errors.BuildBuddyUnavailable("get_log", "args.operation is required")
+    cursor = args.get("cursor")
+    try:
+        return await client.get_log(str(operation), cursor=str(cursor) if cursor else None)
+    except errors.BuildBuddyUnavailable:
+        raise
+    except Exception as exc:
+        raise errors.BuildBuddyUnavailable("get_log", str(exc)) from exc
+
+
 async def cancel(args: dict[str, Any]) -> dict[str, Any]:
-    """Cancel a BuildBuddy execution."""
+    """Cancel a BuildBuddy execution (returns Unsupported via REST API)."""
     operation = args.get("operation", "")
     if not operation:
         raise errors.BuildBuddyUnavailable("cancel", "args.operation is required")
     try:
-        return client.cancel_run(str(operation))
+        return await client.cancel_run(str(operation))
     except errors.BuildBuddyUnavailable:
         raise
     except Exception as exc:
@@ -104,18 +122,24 @@ _LEAVES: tuple[MountSpec, ...] = (
         subpath="poll",
         body=poll,
         schema=_ARGS_SCHEMA,
-        summary="Poll a BuildBuddy execution's status and output",
+        summary="Poll a BuildBuddy execution's status",
+    ),
+    MountSpec(
+        subpath="get_log",
+        body=get_log,
+        schema=_ARGS_SCHEMA,
+        summary="Fetch logs for a BuildBuddy execution",
     ),
     MountSpec(
         subpath="cancel",
         body=cancel,
         schema=_ARGS_SCHEMA,
-        summary="Cancel a BuildBuddy execution",
+        summary="Cancel a BuildBuddy execution (REST returns Unsupported)",
     ),
 )
 
 
 @omp.hook("extension_activate")
 async def mount_exec_leaves(_event: object) -> None:
-    """Mount the four delegate operations into the host dynamic device catalog."""
+    """Mount the five delegate operations into the host dynamic device catalog."""
     await EXEC_PARENT.mount_many(*_LEAVES)

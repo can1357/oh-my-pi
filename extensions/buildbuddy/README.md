@@ -53,8 +53,10 @@ REAPI client handles the gRPC communication.
 ## Status
 
 - **Profile data:** Complete — available via `omp_buildbuddy.profile`
-- **Delegate operations:** Stubs — raise `BuildBuddyUnavailable` until
-  `DelegatedBackend` adapter is built (ADR 0040 Dimension 3)
+- **Delegate operations:** Implemented — Run API HTTP client (`client.py`) calls
+  BuildBuddy's REST endpoints (`describe`, `start`, `poll`, `cancel`). The
+  `DelegatedBackend` adapter (ADR 0040 Dimension 3) is not yet built, so these
+  operations are not wired to production.
 
 ## Testing
 
