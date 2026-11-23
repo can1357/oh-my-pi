@@ -195,19 +195,27 @@ export function wrapShellLineForClientTerminal(
 	return { command: shellConfig.shell, args: [...shellConfig.args, finalLine] };
 }
 
+// Scan complete operands so a protected target can follow ordinary paths, but
+// never borrow an operand from a later shell command.
+const RM_WORD = /(?!#)(?:[^\s;&|()<>"'`\\]|\\[^\n]|"[^"\\]*(?:\\.[^"\\]*)*"|'[^']*')+/u;
+const RM_PROTECTED_TARGET =
+	/(?:\/+(?:\.\/+)*(?:(?:bin|boot|dev|etc|home|lib(?:32|64|x32)?|proc|root|sbin|sys|usr|var|Library|System|Users)(?:\/+\.)*(?:\/+\*?)?|[.*])?|(?:~|\$(?:HOME|\{HOME\}))(?:\/+\.)*(?:\/+\*?)?)/u;
+const CRITICAL_RM_PATTERN = new RegExp(
+	String.raw`\brm[ \t]+(?:-[^\s;&|()<>"'\x60]+[ \t]+)*(?:-[a-z]*[rf][a-z]*|--recursive|--force)[ \t]+` +
+		String.raw`(?:${RM_WORD.source}[ \t]+)*?(["']?)${RM_PROTECTED_TARGET.source}\1(?=["'\x60]?(?:[\s;&|()<>]|$))`,
+	"iu",
+);
+
 /**
  * Bash patterns flagged as safety critical for approval policy.
  *
- * Kept intentionally tight — the cost of a false negative is data loss or a compromised host,
- * while false positives remain actionable through user policy control.
+ * Kept intentionally tight: outside yolo, built-in critical patterns force a
+ * prompt even when the user allows bash.
  * New patterns should target shapes that are virtually never legitimate in automation.
  */
 export const CRITICAL_BASH_PATTERNS = [
-	// Recursive destruction.
-	// Options may sit on either side of the recursive/force flag, so only that flag is pinned and
-	// any other options are skipped: `rm -rf /`, `rm -rf -- /`, `rm --recursive --force /`,
-	// `rm -rf -v /`, `rm -v -rf /`. An absolute target is still required.
-	/\brm\s+(?:-\S+\s+)*(?:-[a-z]*[rRfF][a-z]*|--recursive|--force)\s+(?:-\S+\s+)*\//i,
+	// Recursive/forced removal of the filesystem, system-directory, or home roots.
+	CRITICAL_RM_PATTERN,
 	// `--no-preserve-root` defeats coreutils' own refusal to recurse on `/`, so it is critical
 	// wherever it appears — including forms this list would otherwise reach only via the target.
 	/\brm\s+(?:-\S+\s+)*--no-preserve-root\b/i,
