@@ -34,6 +34,7 @@
 
 ### Fixed
 
+- Fixed prompts hanging at `Working...` on Linux when `systemd-logind` does not answer the sleep inhibitor call; sleep prevention now gives up after 2 seconds, logs a warning, and is not retried for the rest of the process ([#20307](https://github.com/can1357/oh-my-pi/issues/20307))
 - Tern no longer loses the tray's dots when the working line above the composer comes and goes: the line stays one row instead of turning into an empty column while idle
 - In the bash tool on macOS, `ls -lT` shows full timestamps instead of failing with `invalid tab size`, `uptime` prints macOS's format, and `chmod +a` and the other ACL forms run `/bin/chmod`.
 - The bash tool's `top -l` now reports load averages, user/sys/idle CPU and usernames, and `ps` shows start and elapsed times for other users' processes such as pid 1.
