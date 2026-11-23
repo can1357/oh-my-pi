@@ -14,6 +14,7 @@
 
 - In a compiled omp with no `bun` on PATH, `bun` in a JS eval cell now reports that bun is not installed instead of starting a headless omp ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
+- The bash tool's `read` and other tool commands no longer refuse invocations whose arguments carry no relative path syntax (absolute paths, flags, bare values) when the shell cwd differs from the session cwd; only relative path arguments are refused
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes

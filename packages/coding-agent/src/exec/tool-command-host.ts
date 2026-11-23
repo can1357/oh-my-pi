@@ -1,7 +1,7 @@
 import type { AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import type { ShellCommandRequest, ShellCommandResult } from "@oh-my-pi/pi-natives";
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import type { Tool, ToolSession } from "../tools";
 import { InternalUrlRouter } from "../internal-urls";
 import { specialToolCommands } from "../tools/resolve";
@@ -55,9 +55,37 @@ function appendLine(output: string, text: string): string {
 async function shellCwdMismatch(shellCwd: string, sessionCwd: string): Promise<boolean> {
 	const router = InternalUrlRouter.instance();
 	if (router.canHandle(shellCwd) || router.canHandle(sessionCwd)) return false;
-	const realpath = (directory: string): Promise<string> => fs.promises.realpath(directory).catch(() => directory);
+	const realpath = (directory: string): Promise<string> => fs.realpath(directory).catch(() => directory);
 	const [shell, session] = await Promise.all([realpath(shellCwd), realpath(sessionCwd)]);
 	return shell !== session;
+}
+
+/**
+ * Whether an argv token can resolve against a working directory. Flags and
+ * bare values never carry path syntax; only path-shaped tokens matter.
+ */
+function tokenMayResolveAgainstCwd(token: string): boolean {
+	if (token === "-") return false;
+	if (token.startsWith("@")) {
+		const target = token.slice(1);
+		return target !== "" && !target.startsWith("/") && !target.includes("://");
+	}
+	if (token.startsWith("-")) {
+		const eq = token.indexOf("=");
+		return eq !== -1 && tokenMayResolveAgainstCwd(token.slice(eq + 1));
+	}
+	if (token.startsWith("/") || token.includes("://")) return false;
+	return token.includes("/") || token === "." || token === "..";
+}
+
+/**
+ * Whether an invocation's arguments are independent of the working directory:
+ * no token carries path syntax that could resolve against the session root.
+ * Absolute paths, flags, bare values and URLs pass; relative paths, and `@`
+ * argument sources with relative paths, do not.
+ */
+function argvIsCwdIndependent(argv: readonly string[]): boolean {
+	return argv.every(token => !tokenMayResolveAgainstCwd(token));
 }
 
 /** Refusal for a tool command invoked after `cd`, which would otherwise resolve against the session root. */
@@ -128,10 +156,11 @@ export function createToolCommandHandler(options: {
 		const dispatchState = special ? specialCommandState(state, special) : state;
 
 		// A tool command after `cd` must never silently resolve relative
-		// arguments against the session root (issue #20271). `--help` is
-		// cwd-independent and stays answerable.
+		// arguments against the session root (issue #20271). `--help` and
+		// invocations whose argv carries no relative path syntax are
+		// cwd-independent and stay answerable.
 		const isHelpOnly = request.argv.length === 1 && (request.argv[0] === "-h" || request.argv[0] === "--help");
-		if (!isHelpOnly && (await shellCwdMismatch(request.cwd, session.cwd))) {
+		if (!isHelpOnly && !argvIsCwdIndependent(request.argv) && (await shellCwdMismatch(request.cwd, session.cwd))) {
 			const refused = cwdMismatchResult(name, request.cwd, session.cwd);
 			onDispatch?.({ ...fallback, exitCode: refused.exitCode }, index);
 			return refused;

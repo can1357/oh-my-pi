@@ -4,7 +4,9 @@
  * stderr and an exit code, and the dispatch records it reports.
  */
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
+import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
@@ -258,5 +260,61 @@ describe("createToolCommandHandler", () => {
 		expect(reply.exitCode).toBe(1);
 		expect(reply.stderr).not.toBe("");
 		expect(dispatches).toEqual([expect.objectContaining({ tool: "propose", exitCode: 1 })]);
+	});
+});
+
+describe("createToolCommandHandler cwd guard", () => {
+	it("refuses an invocation with relative path arguments after cd, without executing", async () => {
+		const executed: unknown[] = [];
+		const handler = createToolCommandHandler({ session: commandSession([fakeTool(executed)]), toolCallId: "call" });
+
+		const reply = await handler({ name: "fake", argv: ["--flag", "./notes.txt"], cwd: os.homedir(), stdin: "" });
+
+		expect(reply.exitCode).toBe(2);
+		expect(reply.stderr).toContain("refusing to run");
+		expect(executed).toEqual([]);
+	});
+
+	it("runs an invocation with absolute path arguments after cd", async () => {
+		const executed: unknown[] = [];
+		const handler = createToolCommandHandler({ session: commandSession([fakeTool(executed)]), toolCallId: "call" });
+
+		const reply = await handler({ name: "fake", argv: ["--flag", "/tmp/notes.txt"], cwd: os.homedir(), stdin: "" });
+
+		expect(reply.exitCode).toBe(0);
+		expect(reply.stdout).toBe("fake:/tmp/notes.txt\n");
+		expect(executed).toEqual([{ flag: "/tmp/notes.txt" }]);
+	});
+
+	it("runs an invocation with no path-shaped arguments after cd", async () => {
+		const executed: unknown[] = [];
+		const handler = createToolCommandHandler({ session: commandSession([fakeTool(executed)]), toolCallId: "call" });
+
+		const reply = await handler({ name: "fake", argv: ["--flag", "hello"], cwd: os.homedir(), stdin: "" });
+
+		expect(reply.exitCode).toBe(0);
+		expect(reply.stdout).toBe("fake:hello\n");
+		expect(executed).toEqual([{ flag: "hello" }]);
+	});
+
+	it("refuses a relative @ argument source after cd, but runs an absolute one", async () => {
+		const executed: unknown[] = [];
+		const handler = createToolCommandHandler({ session: commandSession([fakeTool(executed)]), toolCallId: "call" });
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cwd-guard-"));
+		const source = path.join(dir, "input.txt");
+		await fs.writeFile(source, "hello from source\n");
+
+		const refused = await handler({
+			name: "fake",
+			argv: ["--flag", "@data/input.txt"],
+			cwd: os.homedir(),
+			stdin: "",
+		});
+		expect(refused.exitCode).toBe(2);
+		expect(executed).toEqual([]);
+
+		const allowed = await handler({ name: "fake", argv: ["--flag", `@${source}`], cwd: os.homedir(), stdin: "" });
+		expect(allowed.exitCode).toBe(0);
+		expect(allowed.stdout).toBe(`fake:hello from source\n`);
 	});
 });
