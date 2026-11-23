@@ -142,6 +142,7 @@ import {
 	cfgTreeFilterMode,
 } from "../settings";
 import { cfgTaskAgentModelOverrides } from "../../task/settings";
+import { TASK_AGENT_NAME } from "../../task/agents";
 
 /** First-use boundary for provider auth catalog and dialog components. */
 async function loadProviderAuthUi() {
@@ -187,7 +188,49 @@ export class SelectorController {
 	 */
 	#openMenus = new Map<MenuKind, OpenMenu>();
 
-	constructor(private ctx: InteractiveModeContext) {}
+	/**
+	 * Session-only task-model picks by session id. The pick lives here, keyed by
+	 * the session that made it, and is read by the spawn path through the
+	 * resolver the session registers — never through the shared settings override
+	 * layer, which every session sharing the root Settings instance reads. A pick
+	 * recorded for one session is therefore invisible to a concurrent session.
+	 */
+	#sessionTaskPicks = new Map<string, string>();
+
+	constructor(private ctx: InteractiveModeContext) {
+		this.ctx.session.registerSessionTaskModelResolver((agentName, sessionId) =>
+			agentName === TASK_AGENT_NAME && sessionId !== null ? this.#sessionTaskPicks.get(sessionId) : undefined,
+		);
+	}
+
+	/**
+	 * Reconcile a persisted agent-model assignment: when `/agents` persists an
+	 * agent's model, any session-scoped pick for that agent is dropped so the
+	 * saved entry wins on the next spawn, not a stale `Alt+P` pick. Wired to the
+	 * Agent Hub's persist callback.
+	 */
+	reconcilePersistedAgentModel(agentName: string): void {
+		if (agentName !== TASK_AGENT_NAME) return;
+		const sessionId = this.ctx.session.sessionManager.getSessionId();
+		if (sessionId !== null) this.#sessionTaskPicks.delete(sessionId);
+	}
+
+	/**
+	 * Confirm a process-wide write to the global default-role layer. `modelRoles.default`
+	 * lives on the shared root settings, so assigning or clearing it re-resolves the live
+	 * session, every other session, and every future subagent — not just the session being
+	 * viewed. Names that blast radius and returns false when the user declines.
+	 */
+	async #confirmGlobalDefaultRole(action: "assign" | "clear", picked: string | undefined): Promise<boolean> {
+		const title = action === "assign" ? "Set global default model" : "Clear global default model";
+		const verb = action === "assign" ? `Assigning ${picked}` : "Clearing the global default";
+		return this.ctx.showHookConfirm(
+			title,
+			`${verb} persists modelRoles.default on the shared settings: the live session, every other ` +
+				"session, and every future subagent resolve to it. This change is process-wide, not scoped to one session.",
+		);
+	}
+
 	/**
 	 * Mount a primary fullscreen menu through the one polished modal path shared
 	 * by Settings, Model Hub, and Agent Hub.
@@ -709,6 +752,7 @@ export class SelectorController {
 					activeModelPattern,
 					defaultModelPattern,
 					model => this.ctx.session.effectiveServiceTier(model),
+					(agentName: string) => this.reconcilePersistedAgentModel(agentName),
 				),
 				{ onCancel: () => done() },
 			);
@@ -839,7 +883,9 @@ export class SelectorController {
 		const currentSelector = current ? `${current.provider}/${current.id}` : undefined;
 		// Preselect the effective Task model in task mode: the configured override,
 		// else the session model (the bundled task agent inherits it by default).
-		const taskOverride = cfgTaskAgentModelOverrides.get(this.ctx.settings).task;
+		const sessionId = this.ctx.session.sessionManager.getSessionId();
+		const sessionPick = sessionId === null ? undefined : this.#sessionTaskPicks.get(sessionId);
+		const taskOverride = sessionPick ?? cfgTaskAgentModelOverrides.get(this.ctx.settings).task;
 		const taskSelector = (Array.isArray(taskOverride) ? taskOverride[0] : taskOverride) ?? currentSelector;
 		const menu = this.#claimMenu(menuKind);
 		const done = () => {
@@ -919,12 +965,12 @@ export class SelectorController {
 				},
 				onPickTask: (_model, selector) => {
 					if (!isCurrent()) return;
-					// Session-only: layer the Task override onto the runtime settings
-					// layer so it is never persisted, mirroring the session-model pick.
-					cfgTaskAgentModelOverrides.override(this.ctx.settings, {
-						...cfgTaskAgentModelOverrides.get(this.ctx.settings),
-						task: selector,
-					});
+					// Session-only: record the pick against the session being viewed.
+					// The spawn path reads it through the resolver the session
+					// registers, keyed by the requesting session id, so a concurrent
+					// session sharing the root Settings never sees it.
+					const sessionId = this.ctx.session.sessionManager.getSessionId();
+					if (sessionId !== null) this.#sessionTaskPicks.set(sessionId, selector);
 					this.ctx.showStatus(`Task subagent model (session-only): ${selector}. Use /agents to persist.`);
 					done();
 				},
@@ -1002,6 +1048,12 @@ export class SelectorController {
 					const defaultStatusLabel = configuredStorage === "project" ? `${scopeLabel}default` : "Default";
 					try {
 						if (role === "default") {
+							// A global default-role write is process-wide: the shared root settings
+							// re-resolve every session and every future subagent. Confirm before
+							// persisting it; a declined confirm leaves settings untouched.
+							if (targetScope === "global" && !(await this.#confirmGlobalDefaultRole("assign", selectorValue))) {
+								return false;
+							}
 							// `auto` on the default role configures the active session. Other roles
 							// persist an explicit `:auto` suffix and must not mutate the current model.
 							const isAuto = thinkingLevel === AUTO_THINKING;
@@ -1087,6 +1139,17 @@ export class SelectorController {
 					try {
 						const previousEffectiveRoleValue =
 							role === "default" ? this.ctx.settings.getModelRole("default") : undefined;
+						// Clearing the global default is process-wide: every session and every
+						// future subagent re-resolve. Confirm before writing; a declined confirm
+						// leaves settings untouched (onUnassign returns void, so the hub refreshes
+						// the unchanged role).
+						if (
+							role === "default" &&
+							targetScope === "global" &&
+							!(await this.#confirmGlobalDefaultRole("clear", previousEffectiveRoleValue))
+						) {
+							return;
+						}
 						if (targetScope === "project") {
 							this.ctx.settings.clearProjectModelRole(role);
 						} else {

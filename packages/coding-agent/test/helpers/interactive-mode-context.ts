@@ -138,6 +138,8 @@ export function createSessionStub(
 		waitForRunEnd: async () => {},
 		getAsyncJobSnapshot: () => null,
 		subscribe: vi.fn(() => () => {}),
+		registerSessionChangeCallback: vi.fn(() => () => {}),
+		registerSessionTaskModelResolver: vi.fn(() => () => {}),
 	} satisfies SessionOverrides;
 	if (overrides) layer(stub, overrides);
 	return stub as unknown as AgentSession;
@@ -296,6 +298,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		clearPinnedError: vi.fn(),
 		showHookInput: vi.fn(async () => undefined),
 		showHookSelector: vi.fn(async () => undefined),
+		showHookConfirm: vi.fn(async () => true),
 		addMessageToChat: vi.fn(() => []),
 		rebuildChatFromMessages: vi.fn(),
 		renderInitialMessages: vi.fn(async () => {}),

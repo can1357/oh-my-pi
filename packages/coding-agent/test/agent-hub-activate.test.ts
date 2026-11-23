@@ -626,7 +626,11 @@ describe("Agent hub Enter activation", () => {
 				focusedIds.push(id);
 				focusResolved.resolve();
 			},
-			session: { getToolByName: () => undefined, extensionRunner: undefined },
+			session: {
+				getToolByName: () => undefined,
+				extensionRunner: undefined,
+				registerSessionTaskModelResolver: () => () => {},
+			},
 			sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => null },
 			hideThinkingBlock: false,
 		};
@@ -683,7 +687,11 @@ describe("Agent hub double-← gating", () => {
 			},
 			collabGuest: { agentRegistry: agents, hubRemote: undefined },
 			focusAgentSession: async () => {},
-			session: { getToolByName: () => undefined, extensionRunner: undefined },
+			session: {
+				getToolByName: () => undefined,
+				extensionRunner: undefined,
+				registerSessionTaskModelResolver: () => () => {},
+			},
 			sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => sessionFile },
 			hideThinkingBlock: false,
 		};

@@ -1185,6 +1185,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#settleCallbackFlushes = 0;
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
 	#sessionChangeCallbacks = new Set<() => void>();
+	/**
+	 * Resolves a session-scoped model pick for one agent, keyed by the requesting
+	 * session id. Registered by the UI controller that owns the picks; the spawn
+	 * path reads it through `ToolSession.getSessionTaskModel`. Absent when no
+	 * session-scoped pick mechanism is wired.
+	 */
+	#sessionTaskModelResolver:
+		| ((agentName: string, sessionId: string | null) => string | string[] | undefined)
+		| undefined;
 	#observedSessionId: string | undefined;
 
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
@@ -6857,6 +6866,27 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	registerSessionChangeCallback(callback: () => void): () => void {
 		this.#sessionChangeCallbacks.add(callback);
 		return () => this.#sessionChangeCallbacks.delete(callback);
+	}
+
+	/**
+	 * Register the resolver for session-scoped model picks. The resolver is
+	 * keyed by the requesting session id, so a pick recorded for one session is
+	 * never read by another session sharing the same root Settings instance. The
+	 * spawn path reads it through `ToolSession.getSessionTaskModel`. Returns the
+	 * unregister callback.
+	 */
+	registerSessionTaskModelResolver(
+		resolver: (agentName: string, sessionId: string | null) => string | string[] | undefined,
+	): () => void {
+		this.#sessionTaskModelResolver = resolver;
+		return () => {
+			if (this.#sessionTaskModelResolver === resolver) this.#sessionTaskModelResolver = undefined;
+		};
+	}
+
+	/** The session-scoped pick for one agent, keyed by the requesting session id. */
+	getSessionTaskModel(agentName: string, sessionId: string | null): string | string[] | undefined {
+		return this.#sessionTaskModelResolver?.(agentName, sessionId);
 	}
 
 	subscribeCommandMetadataChanged(listener: CommandMetadataChangedListener): () => void {

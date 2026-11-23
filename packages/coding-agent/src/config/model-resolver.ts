@@ -1265,17 +1265,6 @@ export function resolveExplicitModelRole(
 	return undefined;
 }
 
-function isSessionInheritedAgentPattern(value: string): boolean {
-	return (
-		value === DEFAULT_MODEL_ROLE ||
-		value === formatModelRoleAlias(DEFAULT_MODEL_ROLE) ||
-		value === DEFAULT_MODEL_ROLE_ALIAS ||
-		value === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}${DEFAULT_MODEL_ROLE}` ||
-		value === formatModelRoleAlias("task") ||
-		value === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`
-	);
-}
-
 function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
 	return role === "smol" || role === "slow";
 }
@@ -1470,22 +1459,23 @@ function resolveEffectiveAgentModelSelection(
 		return { source: settingsOverride, patterns: overridePatterns };
 	}
 
-	const normalizedAgentPatterns = normalizeModelPatternList(agentModel);
 	const configuredAgentPatterns = resolveConfiguredModelPatterns(agentModel, settings);
-	const singleAgentPattern = normalizedAgentPatterns.length === 1 ? normalizedAgentPatterns[0] : undefined;
-	const agentInheritsSessionModel = singleAgentPattern ? isSessionInheritedAgentPattern(singleAgentPattern) : false;
+	// A binding that expands to a configured role value or built-in priority chain wins
+	// verbatim for every agent, including `@default`, `@smol`, and `@slow`.
 	if (configuredAgentPatterns.length > 0) {
-		if (
-			singleAgentPattern === formatModelRoleAlias("task") ||
-			singleAgentPattern === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`
-		) {
-			return { source: agentModel, patterns: configuredAgentPatterns };
-		}
-		if (!agentInheritsSessionModel) return { source: agentModel, patterns: configuredAgentPatterns };
+		return { source: agentModel, patterns: configuredAgentPatterns };
 	}
 
-	const fallback =
-		activeModelPattern?.trim() || fallbackModelPattern?.trim() || settings?.getModelRole("default")?.trim() || "";
+	// Only `@task` and unbound agents reach this fallback. `@task` inherits the live
+	// session model by design; an unbound agent prefers the configured default ahead of
+	// the session model, so a switched main model never overrides the configured default.
+	const normalizedAgentPatterns = normalizeModelPatternList(agentModel);
+	const singleAgentPattern = normalizedAgentPatterns.length === 1 ? normalizedAgentPatterns[0] : undefined;
+	const configuredDefault = settings?.getModelRole("default")?.trim();
+	const taskInheritsSessionModel = resolveExplicitModelRole(singleAgentPattern) === "task";
+	const fallback = taskInheritsSessionModel
+		? activeModelPattern?.trim() || fallbackModelPattern?.trim() || configuredDefault || ""
+		: configuredDefault || activeModelPattern?.trim() || fallbackModelPattern?.trim() || "";
 	return { patterns: resolveConfiguredModelPatterns(fallback, settings) };
 }
 
