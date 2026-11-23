@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Fixed Tern Plan Review annotations being dropped before they reached omp, so saved comments now enable Refine ([#20250](https://github.com/can1357/oh-my-pi/pull/20250) by [@ash-miku](https://github.com/ash-miku))
-- Fixed the cursor drifting left while typing Korean in Paradev terminals ([#20246](https://github.com/can1357/oh-my-pi/pull/20246) by [@HuitaePark](https://github.com/HuitaePark))
 ### Added
 
 - Added Vim `W`, `B`, and `E` motions for navigating whitespace-delimited WORDs ([#13099](https://github.com/can1357/oh-my-pi/pull/13099) by [@Scott-Simmons](https://github.com/Scott-Simmons)).
@@ -29,6 +25,15 @@
 
 ### Fixed
 
+- Fixed Tern Plan Review annotations being dropped before they reached omp, so saved comments now enable Refine ([#20250](https://github.com/can1357/oh-my-pi/pull/20250) by [@ash-miku](https://github.com/ash-miku))
+- Fixed Ctrl+[ not leaving Vim Insert, Replace or Visual mode, or cancelling a pending operator, under the Kitty keyboard protocol or modifyOtherKeys; inside the Vim modes it now does what Escape does ([#19547](https://github.com/can1357/oh-my-pi/issues/19547), [#20209](https://github.com/can1357/oh-my-pi/pull/20209) by [@JamieJ5926](https://github.com/JamieJ5926))
+- Truncated `ast_grep` results show the exact next offset (`use skip=N for the next page`) in the result view and the native view; results recorded without it keep the generic hint ([#20203](https://github.com/can1357/oh-my-pi/pull/20203) by [@MikeeI](https://github.com/MikeeI))
+- Fixed the dot between extension statuses in the status bar drawing in the accent colour instead of the dim separator colour ([#15740](https://github.com/can1357/oh-my-pi/issues/15740), [#20218](https://github.com/can1357/oh-my-pi/pull/20218) by [@JamieJ5926](https://github.com/JamieJ5926))
+- Fixed the cursor drifting left while typing Korean in Paradev terminals ([#20246](https://github.com/can1357/oh-my-pi/pull/20246) by [@HuitaePark](https://github.com/HuitaePark))
+- Fixed the TUI in a Herdr desktop terminal staying at the smaller size Herdr reported for a peek, drawing in the top part of the pane over stale rows until the window was resized ([#20222](https://github.com/can1357/oh-my-pi/pull/20222) by [@bbelchak](https://github.com/bbelchak))
+- Zellij's own dark or light report now sets the detected appearance, so a light Zellij theme over a dark host background is no longer detected as dark ([#20132](https://github.com/can1357/oh-my-pi/issues/20132), [#20207](https://github.com/can1357/oh-my-pi/pull/20207) by [@JamieJ5926](https://github.com/JamieJ5926)).
+- Fixed Ctrl+V doing nothing in an `ask` form's text inputs, textareas, and Other answers. Clipboard images still require an open option note ([#20217](https://github.com/can1357/oh-my-pi/pull/20217) by [@SuperUserA](https://github.com/SuperUserA))
+- `repairTaskParams()` now promotes a JSON-string `tasks` payload to an array and repairs item prose, so a string-encoded batch call reaches validation intact.
 - Fixed Vim `.` not retyping the inserted text when the keys arrived in one burst (e.g. `ccfoo` typed quickly) ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Fixed Vim `w`, `b`, and `e` stopping at the end of the line; they now cross lines like Vim's, and `dw`, `d}`, and `2D` follow Vim's rules for multi-line and end-of-line spans ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Fixed Vim `gg`, `G`, `dd`, and linewise puts landing in column 0 instead of the first non-blank; `dk` on the first line no longer deletes it; `D`/`C` no longer leave `j`/`k` stuck at line end ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
@@ -36,9 +41,12 @@
 - Fixed Vim `cc`, `cj`, and other linewise changes keeping the start of the line when the cursor was mid-line, and storing the old text so `p` spliced it into a line instead of putting it back as whole lines ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Fixed Vim `di(`, `ci{`, and other bracket objects doing nothing when the cursor is before the brackets; like Vim 9.2 they now use the next pair ahead ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 
+### Removed
+
+- Removed `MCPProgress` and `parseMCPProgress` from `@oh-my-pi/pi-tui/tools/mcp`; they are exported from `@oh-my-pi/pi-tui/tools/mcp-progress` ([#20224](https://github.com/can1357/oh-my-pi/pull/20224) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+
 ## [19.1.1] - 2026-11-23
 
-- `repairTaskParams()` now promotes a JSON-string `tasks` payload to an array and repairs item prose, so a string-encoded batch call reaches validation intact.
 ### Added
 
 - Added host-provided runtime choices for settings menus through `SettingsRuntimeContext.runtimeOptions`, while preserving built-in choices for thinking levels, themes, and composer shapes.
@@ -53,25 +61,10 @@
 - Fixed assigning a model to a role when pressing Enter again on the selected model, which could incorrectly remove the role.
 - Updated the quick model picker (`Alt+P`) to include models added to the catalog after a session began, even when the session is restricted by `--models` or `enabledModels`.
 - Fixed images and other path-based files appearing as unavailable in Tern when the TUI and Tern run on different machines or in local sessions without Tern’s shared file directory.
-- Truncated `ast_grep` results show the exact next offset (`use skip=N for the next page`) in the result view and the native view; results recorded without it keep the generic hint ([#20203](https://github.com/can1357/oh-my-pi/pull/20203) by [@MikeeI](https://github.com/MikeeI))
-- Fixed the dot between extension statuses in the status bar drawing in the accent colour instead of the dim separator colour ([#15740](https://github.com/can1357/oh-my-pi/issues/15740), [#20218](https://github.com/can1357/oh-my-pi/pull/20218) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed the TUI in a Herdr desktop terminal staying at the smaller size Herdr reported for a peek, drawing in the top part of the pane over stale rows until the window was resized ([#20222](https://github.com/can1357/oh-my-pi/pull/20222) by [@bbelchak](https://github.com/bbelchak))
-- Zellij's own dark or light report now sets the detected appearance, so a light Zellij theme over a dark host background is no longer detected as dark ([#20132](https://github.com/can1357/oh-my-pi/issues/20132), [#20207](https://github.com/can1357/oh-my-pi/pull/20207) by [@JamieJ5926](https://github.com/JamieJ5926)).
-- Fixed Ctrl+V doing nothing in an `ask` form's text inputs, textareas, and Other answers. Clipboard images still require an open option note ([#20217](https://github.com/can1357/oh-my-pi/pull/20217) by [@SuperUserA](https://github.com/SuperUserA))
-- `prewalkWouldBeNoop` no longer skips a handoff when only the model's upstream pin changes ([#19664](https://github.com/can1357/oh-my-pi/pull/19664) by [@taibenvenuti](https://github.com/taibenvenuti)).
-- Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
-- Fixed `<svg>` pictures blinking in ask forms whose questions overflow the panel ([#20017](https://github.com/can1357/oh-my-pi/pull/20017) by [@jaredlyon](https://github.com/jaredlyon))
-- Fixed the status line's `time_spent` readout freezing within a wall-clock second while a turn is active; the displayed tenths now advance at their own visible granularity ([#20064](https://github.com/can1357/oh-my-pi/pull/20064) by [@jchanghong023](https://github.com/jchanghong023))
-- Fixed Enter pressed again on a model row just assigned to a role removing that role and falling back to the default role's model ([#12310](https://github.com/can1357/oh-my-pi/issues/12310), [#19986](https://github.com/can1357/oh-my-pi/pull/19986) by [@JamieJ5926](https://github.com/JamieJ5926))
-- The quick model picker (alt+p) in a session limited by `--models` or `enabledModels` now lists models the catalog gained since the session started, as the unlimited picker does ([#19878](https://github.com/can1357/oh-my-pi/pull/19878) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed Tern showing "Not found" for `read` images and other files shown by path when omp runs on another machine than Tern (e.g. over ssh); omp names files by path only when `TERN_BLOB_DIR` is set (Tern exports it into its local panes) and otherwise uploads images, so a local session without it, such as a tmux server started outside Tern, also uploads ([#20103](https://github.com/can1357/oh-my-pi/issues/20103))
-- Fixed Ctrl+[ not leaving Vim Insert, Replace or Visual mode, or cancelling a pending operator, under the Kitty keyboard protocol or modifyOtherKeys; inside the Vim modes it now does what Escape does ([#19547](https://github.com/can1357/oh-my-pi/issues/19547), [#20209](https://github.com/can1357/oh-my-pi/pull/20209) by [@JamieJ5926](https://github.com/JamieJ5926))
 
 ### Removed
 
 - Removed `OmfgPanelComponent.markSaved` and the `saved` panel state; the `/omfg` panel now closes after a rule is saved.
-- Removed `OmfgPanelComponent.markSaved` and the `"saved"` member of `OmfgPanelState`; the panel now closes once a `/omfg` rule is saved ([#20069](https://github.com/can1357/oh-my-pi/pull/20069) by [@suiso11](https://github.com/suiso11))
-- Removed `MCPProgress` and `parseMCPProgress` from `@oh-my-pi/pi-tui/tools/mcp`; they are exported from `@oh-my-pi/pi-tui/tools/mcp-progress` ([#20224](https://github.com/can1357/oh-my-pi/pull/20224) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 ## [19.1.0] - 2026-11-21
 

@@ -6,6 +6,11 @@
 
 - Added GLM-5.4 to the Zhipu Coding Plan with image input and 1M context, gave it the low/high/max thinking ladder on every host, and preferred it over GLM-5.3 for the `slow` role
 - Added `fetchOpenRouterChatModels()` and `OPENROUTER_BASE_URL` to `@oh-my-pi/pi-catalog/provider-models/openai-compat` for reading OpenRouter's tool-capable chat roster outside the `openrouter` provider.
+- `toolSchemaFlavor: "google"` rewrites OpenAI-compatible tool schemas into Gemini's dialect; GitHub Copilot Gemini models use it ([#20198](https://github.com/can1357/oh-my-pi/issues/20198))
+
+### Fixed
+
+- Fixed requests to Bedrock's Kimi K3.1 Pro Highspeed profiles failing with "The task request was rejected by the target"; requests now ask for 131,072 output tokens instead of the full context window ([#20240](https://github.com/can1357/oh-my-pi/pull/20240) by [@alblez](https://github.com/alblez))
 
 ## [19.1.1] - 2026-11-23
 
@@ -14,24 +19,9 @@
 - Z.AI (`zai`) now discovers the models available to your GLM Coding Plan key, so newly released GLM models appear without waiting for a catalog update.
 - Added `getUpstreamPin()` and `routedModelsAreEqual()` to `@oh-my-pi/pi-catalog/models` for distinguishing aggregator models routed to different upstream providers.
 - Added `@oh-my-pi/pi-catalog/discovery/pi-native` and `piNativeModelManagerOptions()` for reading a provider's model roster from an auth gateway's `GET /v1/pi/models`.
-- `toolSchemaFlavor: "google"` rewrites OpenAI-compatible tool schemas into Gemini's dialect; GitHub Copilot Gemini models use it ([#20198](https://github.com/can1357/oh-my-pi/issues/20198))
-- `getUpstreamPin()` and `routedModelsAreEqual()` in `@oh-my-pi/pi-catalog/models` tell apart an aggregator model pinned to different upstream providers ([#19664](https://github.com/can1357/oh-my-pi/pull/19664) by [@taibenvenuti](https://github.com/taibenvenuti))
 
 ### Fixed
 
-- Fixed Llama 3.x models failing with "This model only supports single tool-calls at once!" after a turn that called several tools, on hosts serving them through vLLM (such as CoreWeave behind OpenRouter)
-- Devin usage from two organizations under one email is no longer merged into one account ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))
-- Devin's Gemini 4 Neon images are now budgeted at the 1,089 tokens Devin bills per image, measured across sizes, instead of the unverified 1,120-token Gemini estimate ([#19883](https://github.com/can1357/oh-my-pi/pull/19883) by [@will-bogusz](https://github.com/will-bogusz))
-- Devin's Gemini 4 Hydrogen and Argon and Gemini 3.5 and 3.8 Flash images are now budgeted at the 1,089 tokens Devin bills per image, measured across sizes, instead of the unverified 1,120-token Gemini estimate ([#20038](https://github.com/can1357/oh-my-pi/pull/20038) by [@will-bogusz](https://github.com/will-bogusz))
-- Devin's GPT-5.6 Sol, Terra and Luna Fast lanes are now costed at Devin's published long-context rates above 272K input tokens and, with Extended Context off, capped at 272K like the standard lanes ([#20094](https://github.com/can1357/oh-my-pi/pull/20094) by [@will-bogusz](https://github.com/will-bogusz))
-- Devin's GPT-5.6 Sol is costed above 272K input tokens at Devin's published $8 / $30 rate instead of $10 / $45 derived from its new standard-context price ([#20094](https://github.com/can1357/oh-my-pi/pull/20094) by [@will-bogusz](https://github.com/will-bogusz))
-- Cursor's GPT-5.6 Sol, Terra and Luna (standard and Fast) now price output above 272K input tokens at 1.5x the base rate, as each model's Cursor docs page publishes, instead of the base rate ([#20093](https://github.com/can1357/oh-my-pi/pull/20093) by [@will-bogusz](https://github.com/will-bogusz))
-- Turning thinking off on GPT-6.1 Terra now sends reasoning effort `none`, which the model supports, instead of falling back to `low` ([#20144](https://github.com/can1357/oh-my-pi/pull/20144) by [@Komzpa](https://github.com/Komzpa))
-- Fixed GPT-6.2 and later OpenAI Responses models lacking thinking prefix-binding, so sessions pruned already-sent tool results and the API dropped later reasoning items ([#19721](https://github.com/can1357/oh-my-pi/issues/19721), [#19988](https://github.com/can1357/oh-my-pi/pull/19988) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed Bedrock's Kimi K3.1 Pro Highspeed profiles missing the `xhigh` and `max` reasoning efforts, offering an unsupported `minimal`, and sending token budgets instead of effort controls ([#19998](https://github.com/can1357/oh-my-pi/pull/19998) by [@alblez](https://github.com/alblez))
-- Fixed GitHub Copilot listing bundled models the account's `/models` roster omits, and models Copilot disables for the account, including after a restart ([#14832](https://github.com/can1357/oh-my-pi/issues/14832), [#19984](https://github.com/can1357/oh-my-pi/pull/19984) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed Codex models discovered before they are bundled for `openai-codex` showing Codex's slug-style name, e.g. `GPT-6.2-Sol` instead of `GPT-6.2 Sol` ([#20167](https://github.com/can1357/oh-my-pi/issues/20167))
-- Fixed requests to Bedrock's Kimi K3.1 Pro Highspeed profiles failing with "The task request was rejected by the target"; requests now ask for 131,072 output tokens instead of the full context window ([#20240](https://github.com/can1357/oh-my-pi/pull/20240) by [@alblez](https://github.com/alblez))
 - Fixed Llama 3.x models failing after turns that invoked multiple tools when served through vLLM-based hosts, including CoreWeave through OpenRouter.
 - Devin usage is now kept separate for organizations that share the same email address.
 - Updated Devin image token accounting to match Devin’s published 1,089-token charge per image across supported Gemini image models.
