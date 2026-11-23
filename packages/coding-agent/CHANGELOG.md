@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The `omp compress` prompt no longer cites RFC 2119 by number, as a precaution: Google Antigravity rejects that citation followed by the six standard requirement words with a bare `429 RESOURCE_EXHAUSTED` ([#19910](https://github.com/can1357/oh-my-pi/pull/19910) by [@Xytronix](https://github.com/Xytronix))
+
 ## [19.1.1] - 2026-11-23
 
 ### Breaking Changes
@@ -23,10 +27,6 @@
 - The quick model picker refreshes stale provider catalogs in the background, so long-running sessions can discover newly available models.
 - On Linux, language-server file watching now adapts to the inotify watch limit so large workspaces are less likely to interfere with other file watchers and system services.
 - The `eval` tool now documents its default 30-second cell deadline in its prompt and timeout parameter.
-
-### Changed
-
-- The `omp compress` prompt no longer cites RFC 2119 by number, as a precaution: Google Antigravity rejects that citation followed by the six standard requirement words with a bare `429 RESOURCE_EXHAUSTED` ([#19910](https://github.com/can1357/oh-my-pi/pull/19910) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 
