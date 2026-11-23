@@ -322,6 +322,19 @@ describe("resolveActiveProjectRegistryPath", () => {
 		expect(await resolveOrDefaultProjectRegistryPath(project)).toBeUndefined();
 	});
 
+	it("defaults a fresh directory's project registry to .omp with a relocated user root", async () => {
+		const cwd = path.join(tmpDir, "fresh");
+		fs.mkdirSync(cwd, { recursive: true });
+		restoreEnvValue("PI_CONFIG_DIR", path.join(".config", "omp"));
+		vi.spyOn(os, "tmpdir").mockReturnValue(tmpDir);
+		vi.spyOn(os, "homedir").mockReturnValue(path.join(tmpDir, "isolated-home"));
+
+		expect(await resolveActiveProjectRegistryPath(cwd)).toBeNull();
+		expect(await resolveOrDefaultProjectRegistryPath(cwd)).toBe(
+			path.join(cwd, ".omp", "plugins", "installed_plugins.json"),
+		);
+	});
+
 	it("keeps a custom-home plugin in user scope during discovery", async () => {
 		const home = path.join(tmpDir, "sdk-home");
 		const cwd = path.join(home, "work");
