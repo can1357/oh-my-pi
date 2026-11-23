@@ -17,7 +17,7 @@ import {
 	type HostStatus,
 	parseHostRequest,
 } from "../../src/disasm/protocol";
-import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
+import { disposeAllVmContexts, resetVmContext } from "../../src/eval/js/context-manager";
 import { executeJs } from "../../src/eval/js/executor";
 import { invokeEvalPrelude } from "../../src/eval/preludes";
 import { disposeAllKernelSessions, executePython } from "../../src/eval/py/executor";
@@ -510,6 +510,9 @@ describe("dsm in real eval runtimes", () => {
 							`Path(${JSON.stringify(reportPath)}).write_text(json.dumps(result), encoding="utf-8")`,
 						].join("\n");
 			const sessionId = `dsm-${language}-${crypto.randomUUID()}`;
+			// afterEach removes the fixture directory before afterAll disposes the
+			// VM contexts; stop this session's worker first so it releases the dir.
+			if (language === "js") cleanups.unshift(() => resetVmContext(sessionId));
 			const result =
 				language === "js"
 					? await executeJs(code, { cwd: f.dir, sessionId, session: f.session })

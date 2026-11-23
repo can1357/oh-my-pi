@@ -114,7 +114,7 @@ export function canUseRemoteCompaction(model: Model | null | undefined, settings
  * local (snapcompact/shake) — local methods are effectively instant, so there
  * is nothing to speculate. Shared by the maintenance loop's speculation gate
  * and the status line's annotated context gauge (speculation marker).
- * `skipRemote` passes over native compaction, e.g. after it failed for good.
+ * `skipRemote` passes over the remote method, e.g. after it failed for good.
  */
 export function resolveSpeculationMethod(
 	model: Model | null | undefined,
