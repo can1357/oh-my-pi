@@ -424,7 +424,7 @@ pub struct Kernel {
 	pub announced:          HashSet<(Vpid, UnitId, Option<crate::bash::event::SourceOrigin>)>,
 	/// Observed script origins by actual activation depth. Empty without
 	/// tracing.
-	pub trace_sources:      HashMap<Vpid, HashMap<usize, crate::bash::event::SourceOrigin>>,
+	pub trace_sources:      HashMap<Vpid, HashMap<usize, exec::ScriptSource>>,
 	/// Origin of each currently executing source-context unit in its actual
 	/// vproc.
 	pub trace_unit_origins: HashMap<Vpid, Arc<HashMap<UnitId, crate::bash::event::SourceOrigin>>>,
