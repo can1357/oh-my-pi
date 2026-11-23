@@ -36,4 +36,16 @@ describe("stripTerminalSequences", () => {
 		const input = `${ESC}[1mbold ${ESC}]8;;https://pi.dev${BEL}link${ESC}]8;;${BEL}${ESC}[0m ${ESC}_pi:c${BEL}plain`;
 		expect(stripTerminalSequences(input)).toBe("bold link plain");
 	});
+
+	it("preserves plain text, lone ESC, and unterminated sequences while still stripping later valid ones", () => {
+		expect(stripTerminalSequences("plain text")).toBe("plain text");
+		expect(stripTerminalSequences(`trailing ${ESC}`)).toBe(`trailing ${ESC}`);
+		expect(stripTerminalSequences(`a${ESC}xb`)).toBe(`a${ESC}xb`);
+		expect(stripTerminalSequences(`unterminated ${ESC}[31;42`)).toBe(`unterminated ${ESC}[31;42`);
+		expect(stripTerminalSequences(`unterminated ${ESC}]8;;https://pi.dev`)).toBe(
+			`unterminated ${ESC}]8;;https://pi.dev`,
+		);
+		expect(stripTerminalSequences(`${ESC}]unterminated${ESC}[31mred${ESC}[0m`)).toBe(`${ESC}]unterminatedred`);
+		expect(stripTerminalSequences(`${ESC}[unfinished${ESC}_pi:c${ST}ok`)).toBe(`${ESC}[unfinishedok`);
+	});
 });

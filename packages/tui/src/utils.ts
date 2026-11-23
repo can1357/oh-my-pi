@@ -499,66 +499,69 @@ export function visibleWidth(str: string): number {
 
 /** Remove ANSI, OSC, and APC control sequences while preserving visible text. */
 export function stripTerminalSequences(str: string): string {
-	if (!str.includes("\x1b")) return str;
+	let esc = str.indexOf("\x1b");
+	if (esc === -1) return str;
+
+	const len = str.length;
 	let result = "";
-	let i = 0;
-	while (i < str.length) {
-		const ansi = extractAnsiCode(str, i);
-		if (ansi) {
-			i += ansi.length;
-			continue;
+	let copyStart = 0;
+	let noCsiEnd = false;
+	let noOscApcEnd = false;
+
+	while (esc !== -1) {
+		const next = esc + 1 < len ? str.charCodeAt(esc + 1) : -1;
+		let seqLen = 0;
+
+		if (next === 0x5b /* '[' */) {
+			if (!noCsiEnd) {
+				let j = esc + 2;
+				while (j < len) {
+					const c = str.charCodeAt(j);
+					if (
+						c === 0x6d /* 'm' */ ||
+						c === 0x47 /* 'G' */ ||
+						c === 0x4b /* 'K' */ ||
+						c === 0x48 /* 'H' */ ||
+						c === 0x4a /* 'J' */
+					) {
+						seqLen = j + 1 - esc;
+						break;
+					}
+					j++;
+				}
+				if (seqLen === 0) noCsiEnd = true;
+			}
+		} else if (next === 0x5d /* ']' */ || next === 0x5f /* '_' */) {
+			if (!noOscApcEnd) {
+				let j = esc + 2;
+				while (j < len) {
+					const c = str.charCodeAt(j);
+					if (c === 0x07) {
+						seqLen = j + 1 - esc;
+						break;
+					}
+					if (c === 0x1b && j + 1 < len && str.charCodeAt(j + 1) === 0x5c /* '\\' */) {
+						seqLen = j + 2 - esc;
+						break;
+					}
+					j++;
+				}
+				if (seqLen === 0) noOscApcEnd = true;
+			}
 		}
-		result += str[i];
-		i++;
+
+		if (seqLen > 0) {
+			if (esc > copyStart) result += str.slice(copyStart, esc);
+			copyStart = esc + seqLen;
+			esc = str.indexOf("\x1b", copyStart);
+		} else {
+			esc = str.indexOf("\x1b", esc + 1);
+		}
 	}
+
+	if (copyStart === 0) return str;
+	if (copyStart < len) result += str.slice(copyStart);
 	return result;
-}
-
-/**
- * Extract ANSI escape sequences from a string at the given position.
- * Copied verbatim from pi-mono `packages/tui/src/utils.ts` alongside
- * `stripTerminalSequences` so both behave identically to upstream pi. Kept
- * module-private: it was removed from the public API in 9.6.2 and this port
- * does not reintroduce that export.
- */
-function extractAnsiCode(str: string, pos: number): { code: string; length: number } | null {
-	if (pos >= str.length || str[pos] !== "\x1b") return null;
-
-	const next = str[pos + 1];
-
-	// CSI sequence: ESC [ ... m/G/K/H/J
-	if (next === "[") {
-		let j = pos + 2;
-		while (j < str.length && !/[mGKHJ]/.test(str[j]!)) j++;
-		if (j < str.length) return { code: str.substring(pos, j + 1), length: j + 1 - pos };
-		return null;
-	}
-
-	// OSC sequence: ESC ] ... BEL or ESC ] ... ST (ESC \)
-	// Used for hyperlinks (OSC 8), window titles, etc.
-	if (next === "]") {
-		let j = pos + 2;
-		while (j < str.length) {
-			if (str[j] === "\x07") return { code: str.substring(pos, j + 1), length: j + 1 - pos };
-			if (str[j] === "\x1b" && str[j + 1] === "\\") return { code: str.substring(pos, j + 2), length: j + 2 - pos };
-			j++;
-		}
-		return null;
-	}
-
-	// APC sequence: ESC _ ... BEL or ESC _ ... ST (ESC \)
-	// Used for cursor marker and application-specific commands
-	if (next === "_") {
-		let j = pos + 2;
-		while (j < str.length) {
-			if (str[j] === "\x07") return { code: str.substring(pos, j + 1), length: j + 1 - pos };
-			if (str[j] === "\x1b" && str[j + 1] === "\\") return { code: str.substring(pos, j + 2), length: j + 2 - pos };
-			j++;
-		}
-		return null;
-	}
-
-	return null;
 }
 
 /**
