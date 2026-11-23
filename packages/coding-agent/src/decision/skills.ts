@@ -220,8 +220,8 @@ export async function selectSkills(input: SkillSelectionInput, deps: DecisionJud
 		actsOnSystem: QUESTIONS.actsOnSystem,
 		procedureUseful: QUESTIONS.procedureUseful,
 	};
-	candidates.forEach((_, index) => {
-		broadQuestions[`r${index}`] = renderQuestion(QUESTIONS.relevance, { index });
+	candidates.forEach((skill, index) => {
+		broadQuestions[`r${index}`] = renderQuestion(QUESTIONS.relevance, { index, name: skill.name });
 	});
 	const broad = await askDecisionJudge(
 		"decision-skills",

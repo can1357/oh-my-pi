@@ -11,6 +11,7 @@ import { agentMesh } from "../irc/mesh";
 import { parsePeerAddress } from "../irc/mesh-protocol";
 import waitDescription from "../prompts/tools/wait.md" with { type: "text" };
 import waitIdleTemplate from "../prompts/tools/wait-idle.md" with { type: "text" };
+import waitIdleForkTemplate from "../prompts/tools/wait-idle-fork.md" with { type: "text" };
 import type { ToolSession } from ".";
 import type { AsyncJob, AsyncJobManagerApi } from "../async/job-manager";
 import { buildJobResult, describeEvictedJob, settledJobIds, snapshotJobs, undeliveredJobs } from "../async/job-control";
@@ -321,9 +322,12 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	#idle: IdleStreak | undefined;
 	/** The top-level interactive session: every result and message starts its next turn, so it ends its turn instead of waiting. */
 	readonly #endTurn: boolean;
+	/** A `/tan` fork runs one assignment: an idle wait keeps waiting while that assignment is blocked. */
+	readonly #tanFork: boolean;
 
 	constructor(private readonly session: ToolSession) {
 		this.#endTurn = session.tuiTranscript === true;
+		this.#tanFork = session.tanFork === true;
 		this.description = prompt.render(waitDescription, {
 			endTurn: this.#endTurn,
 			subagent: (session.taskDepth ?? 0) > 0,
@@ -667,7 +671,9 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		this.#idle = { endedAt: Date.now(), waitedMs };
 		// One idle wait is patience; a second back-to-back is a loop.
 		if (!streak) return result;
-		const notice = prompt.render(waitIdleTemplate, { waited: formatDuration(waitedMs) });
+		const notice = prompt.render(this.#tanFork ? waitIdleForkTemplate : waitIdleTemplate, {
+			waited: formatDuration(waitedMs),
+		});
 		return { ...result, content: [...result.content, { type: "text", text: notice }] };
 	}
 }

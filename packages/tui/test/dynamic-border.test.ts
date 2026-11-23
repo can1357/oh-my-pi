@@ -28,7 +28,7 @@ describe("DynamicBorder", () => {
 			].join("\n");
 			const file = path.join(dir, "uninitialized-theme.ts");
 			await Bun.write(file, script);
-			const proc = Bun.spawn(["bun", file], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+			const proc = Bun.spawn([process.execPath, file], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
 			const [exitCode, stderr] = await Promise.all([
 				proc.exited,
 				new Response(proc.stderr as ReadableStream<Uint8Array>).text(),

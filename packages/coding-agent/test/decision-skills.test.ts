@@ -142,6 +142,25 @@ describe("selectSkills", () => {
 		expect(JSON.stringify(bodies[1]!.state)).toContain("Procedure body for postgres-migrations.");
 	});
 
+	it("names each candidate in its own relevance question, not only by its list position", async () => {
+		const bodies = serveJudge({ relevance: {}, fit: {}, gate: 0.1 });
+		await selectSkills(
+			{
+				skills,
+				request: "add a postgres migration and check the terraform plan",
+				backend: "judge",
+				deadline: deadline(),
+			},
+			judgeDeps(),
+		);
+		const names = bodies[0]!.state.candidates.map(candidate => candidate.name);
+		expect(names.length).toBeGreaterThan(1);
+		for (const [index, name] of names.entries()) {
+			const question = JSON.stringify(bodies[0]!.questions[`r${index}`]);
+			expect(names.filter(other => question.includes(other))).toEqual([name]);
+		}
+	});
+
 	it("selects nothing when the request does not call for a procedure", async () => {
 		serveJudge({ relevance: { "postgres-migrations": 0.95 }, fit: { "postgres-migrations": 0.95 }, gate: 0.1 });
 		const selection = await selectSkills(
