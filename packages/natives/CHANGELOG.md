@@ -2,30 +2,29 @@
 
 ## [Unreleased]
 
+## [19.1.1] - 2026-11-23
+
 ### Fixed
 
-- Fixed `grep()` with a match limit resolving with a short result when its directory walk panicked; it now rejects with the panic ([#20013](https://github.com/can1357/oh-my-pi/pull/20013) by [@sjawhar](https://github.com/sjawhar))
-- Fixed a use-after-free in `grep()`, `glob()`, `fuzzyFind()`, `astGrep()` and `astEdit()` when a timeout or an abort cancelled them just after they started ([#20014](https://github.com/can1357/oh-my-pi/pull/20014) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the `computer` tool on Linux Wayland leaving GTK 3 message dialogs (OK/Cancel and Yes/No boxes) out of `windows()`, so their buttons could not be found or pressed ([#19884](https://github.com/can1357/oh-my-pi/pull/19884) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed `PtySession` output on Linux sometimes ending with an extra blank line after the command exited
-- Fixed the `computer` tool on Linux showing no value for sliders, scroll bars and progress bars and never marking a selected row, list item or tab `(selected)`, so a script could not read where a control stood or which row was chosen ([#20110](https://github.com/can1357/oh-my-pi/pull/20110) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed NumLock-off keypad navigation keys (arrows, Home, End, Page Up, Page Down, Insert, Delete, and Clear) being dropped under the kitty keyboard protocol ([#20087](https://github.com/can1357/oh-my-pi/pull/20087) by [@fsoikin](https://github.com/fsoikin))
-- Fixed `grep()`, `glob()`, `fuzzyFind()`, `astGrep()`, `astEdit()` and the shell's `grep -r`, `rg` and `fd` sometimes never returning on machines with many CPUs ([#20022](https://github.com/can1357/oh-my-pi/pull/20022) by [@sjawhar](https://github.com/sjawhar))
-- Fixed `@oh-my-pi/pi-natives` failing with "Failed to load pi_natives native addon" when it runs from bun's install cache: the platform package beside it is now used ([#8901](https://github.com/can1357/oh-my-pi/issues/8901), [#19983](https://github.com/can1357/oh-my-pi/pull/19983) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed macOS `computer` background keys, typing and held keys into a window that is already its application's key window bringing that window in front of yours for a moment: they no longer send the press that made it key ([#19702](https://github.com/can1357/oh-my-pi/pull/19702) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed Wayland screenshots each failing after 30 s while the screen-share picker waited for the user: the call now waits for the picker until its deadline, as input waits for the RemoteDesktop dialog, and ends with a `Timeout` naming the picker if nobody answers ([#19616](https://github.com/can1357/oh-my-pi/pull/19616) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed Windows AX `press()` (no chord) and `perform()` calls without a menu path reporting `Timeout` instead of `AxUnconfirmed` when dispatch may have begun but the provider did not reply before the native reply wait ended, and prevented those calls from dispatching after that wait ended without dispatch ([#19871](https://github.com/can1357/oh-my-pi/pull/19871) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed Windows `computer` `press()` on a classic button or check box (Win32 and WinForms) bringing its app in front of yours, and `click()` on one reporting success without clicking it ([#19889](https://github.com/can1357/oh-my-pi/pull/19889) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed a macOS `computer` takeover that ended while another program was typing for you (a remote-control, text-expansion or automation tool posting keystrokes) putting your app back in front with no key window: its window looked inactive and web pages saw a blur until you clicked or switched apps. The window you were typing in is now made key again unless you clicked, used a shortcut the takeover read, focused another of your app's windows, or have ⌘ or ⌃ down at that moment, or another app is in front; if the window then does not report itself key within 400 ms, the call fails saying restoration failed instead of reporting success ([#19504](https://github.com/can1357/oh-my-pi/pull/19504) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed X11 typing of characters outside the keyboard layout, including non-Latin text, failing with "X11 keymap has no keycode for keysym ...". They are typed through spare keycodes, restored when the session closes; a text with more distinct such characters than the layout has spare keycodes is refused before any key, and chords and holds of them still refuse ([#19519](https://github.com/can1357/oh-my-pi/pull/19519) by [@will-bogusz](https://github.com/will-bogusz))
-- Applying a binary patch now refuses when the file's current contents are not the version the patch was built from, instead of replacing them ([#19392](https://github.com/can1357/oh-my-pi/pull/19392) by [@eggpeat](https://github.com/eggpeat))
-- On Windows, an abort or `timeout` now ends an in-process utility such as `cat` that is blocked reading an open, empty stdin pipe, instead of waiting until a writer closes it ([#19338](https://github.com/can1357/oh-my-pi/pull/19338) by [@jchanghong023](https://github.com/jchanghong023))
-- Fixed a standalone binary loading the native addon a previous build of the same version extracted, instead of its own, when both addons happened to be the same size: each build now extracts its addon to its own directory named by the addon's content hash ([#19346](https://github.com/can1357/oh-my-pi/pull/19346) by [@HeyItsGilbert](https://github.com/HeyItsGilbert))
-- Fixed the macOS `computer` tool's background taps and scrolls on iPhone Mirroring being dropped after a takeover tap had activated its window ([#17756](https://github.com/can1357/oh-my-pi/pull/17756) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `grep()`, `glob()`, `fuzzyFind()`, `astGrep()`, `astEdit()`, and recursive shell search commands occasionally hanging on machines with many CPUs.
+- Fixed cancellation and timeout races in native search, file-matching, fuzzy-search, AST, and editing operations that could cause crashes or use-after-free errors.
+- Fixed `grep()` with a match limit reporting incomplete results instead of rejecting when its directory walk failed.
+- Fixed `@oh-my-pi/pi-natives` failing to load when installed from Bun's cache or when standalone binaries had extracted native addons from another build.
+- Fixed Linux Wayland accessibility and automation support for GTK dialogs, control values, and selected rows, list items, and tabs.
+- Fixed Linux PTY output occasionally including an extra blank line after a command exits.
+- Fixed keypad navigation keys being dropped when NumLock is off under the kitty keyboard protocol.
+- Fixed Wayland screenshots incorrectly timing out while waiting for the screen-share picker.
+- Improved Windows accessibility action reliability by reporting uncertain dispatches accurately and preventing actions from being sent after their reply wait has expired.
+- Fixed Windows automation of classic Win32 and WinForms buttons and checkboxes incorrectly activating the application or reporting success without performing the click.
+- Fixed macOS computer-control takeover restoration so the previously active window is restored correctly after automation ends, with failures reported when restoration cannot be confirmed.
+- Fixed macOS background keyboard and scroll events, including events sent through iPhone Mirroring, being lost or unexpectedly activating another window.
+- Fixed X11 typing of non-Latin and other characters outside the active keyboard layout.
+- Binary patches now refuse to apply when the target file does not match the version the patch was created from, preventing accidental replacement of changed files.
+- On Windows, aborting or timing out an in-process utility blocked on an open empty stdin pipe now terminates it without waiting for the pipe writer.
 
 ### Removed
 
-- Removed the `[omp-natives] … but this checkout is @…` warning a source checkout printed at startup when its native addon came from another release; calling a symbol the old addon lacks still fails with an error naming the addon and `bun run build:native`
+- Removed the startup warning shown when a source checkout loads a native addon from another release; incompatible addons still produce an actionable error when a required symbol is unavailable.
 
 ## [19.1.0] - 2026-11-21
 
