@@ -50,7 +50,7 @@
 ### Fixed
 
 - Selective commits now leave HEAD and staging unchanged if the shared index stays locked. Retry once the lock is released ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
-- Fallback chains no longer switch to an entry whose usage shows it exhausted after a request fails
+- Fallback chains no longer switch to an entry whose usage shows it exhausted after a request fails ([#20287](https://github.com/can1357/oh-my-pi/pull/20287) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.1.1] - 2026-11-23
 

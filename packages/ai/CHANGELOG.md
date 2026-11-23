@@ -4,11 +4,11 @@
 
 ### Added
 
-- Added Bifrost virtual-key budget and rate-limit usage reporting
+- Added Bifrost virtual-key budget and rate-limit usage reporting ([#20287](https://github.com/can1357/oh-my-pi/pull/20287) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 
-- Usage-aware fallback now sees when a config- or env-keyed Bifrost or LiteLLM gateway key is out of quota
+- Usage-aware fallback now sees when a config- or env-keyed Bifrost or LiteLLM gateway key is out of quota ([#20287](https://github.com/can1357/oh-my-pi/pull/20287) by [@Xytronix](https://github.com/Xytronix))
 - GitHub Copilot Gemini models no longer fail every request with `400 invalid request body` when an MCP tool schema declares a `type` array (e.g. `["string", "null"]`); tool schemas are rewritten into Gemini's schema dialect ([#20198](https://github.com/can1357/oh-my-pi/issues/20198))
 - An openai-completions stream that gets HTTP 500 back sends six requests, not twelve: the provider-error replay no longer re-runs a status the transport already retried ([#19729](https://github.com/can1357/oh-my-pi/issues/19729), [#20215](https://github.com/can1357/oh-my-pi/pull/20215) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed `omp usage` showing no data for Synthetic’s weekly-only plans; it now shows weekly credit usage and the next regeneration tick ([#20251](https://github.com/can1357/oh-my-pi/pull/20251) by [@dagurval](https://github.com/dagurval))
