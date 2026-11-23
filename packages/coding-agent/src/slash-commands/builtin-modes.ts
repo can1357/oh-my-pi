@@ -99,8 +99,7 @@ function runFastCommand(arg: string, session: AgentSession): string | undefined 
 				? "Ultrafast mode enabled."
 				: "Ultrafast is unavailable for the current model.";
 		case "off":
-			session.setFastMode(false);
-			return "Fast mode disabled.";
+			return session.setFastMode(false) ? "Fast mode disabled." : "Fast mode is unavailable for the current model.";
 		case "status":
 			return `Fast mode is ${formatFastModeStatus(session)}.`;
 		default:
