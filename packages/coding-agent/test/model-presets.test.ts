@@ -16,6 +16,7 @@ import {
 	saveModelPreset,
 } from "@oh-my-pi/pi-coding-agent/config/model-presets";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { formatModelStringWithRouting } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { cfgModelPresets } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -46,6 +47,7 @@ describe("model presets", () => {
 		fixtureDir = TempDir.createSync("@pi-model-presets-fixture-");
 		authStorage = await AuthStorage.create(path.join(fixtureDir.path(), "auth.db"));
 		authStorage.keys.setRuntime("anthropic", "test-key");
+		authStorage.keys.setRuntime("openrouter", "test-key");
 		modelRegistry = new ModelRegistry(authStorage, path.join(fixtureDir.path(), "models.yml"));
 	});
 
@@ -212,6 +214,26 @@ describe("model presets", () => {
 		expect(result.kind).toBe("unavailable");
 		expect(settings.getModelRole("default")).toBe(SONNET);
 		expect(session.model?.id).toBe("claude-sonnet-4-5");
+	});
+
+	const cerebras = "openrouter/z-ai/glm-4.7@cerebras";
+	const sambanova = "openrouter/z-ai/glm-4.7@sambanova";
+
+	it("rejects a preset pinned to an upstream outside enabledModels", async () => {
+		const settings = Settings.isolated({ enabledModels: [cerebras] });
+		settings.setModelRole("default", cerebras);
+		cfgModelPresets.setEntry(settings, "sambanova", { modelRoles: { default: sambanova } });
+		const session = createSession(settings);
+		const available = session.getAvailableModels();
+		expect(available.map(formatModelStringWithRouting)).toEqual([cerebras]);
+		await session.setModel(available[0]!);
+
+		const result = await applyModelPreset(settings, session, "sambanova");
+
+		expect(result.kind).toBe("unavailable");
+		expect(settings.getModelRole("default")).toBe(cerebras);
+		expect(session.model && formatModelStringWithRouting(session.model)).toBe(cerebras);
+		expect(session.getAvailableModels().map(formatModelStringWithRouting)).toEqual([cerebras]);
 	});
 
 	it("reports a failed live switch instead of success", async () => {

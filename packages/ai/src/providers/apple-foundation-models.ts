@@ -90,8 +90,18 @@ type BridgeEvent =
 	| { type: "text" | "reasoning"; text: string }
 	| { type: "toolCall"; callId: string; name: string; arguments?: string }
 	| { type: "usage"; input: number; cachedInput: number; output: number; reasoning: number }
+	| { type: "finish"; reason: string }
 	| { type: "done" }
 	| { type: "error"; code: string; message: string };
+
+/** Stop reasons the model itself reports; tool use is derived from the turn's content. */
+type FinishReason = "stop" | "length";
+
+/** `Transcript.FinishReason` case names; other cases fall back to the usage heuristic. */
+const FINISH_REASONS: Record<string, FinishReason> = {
+	contentCompleted: "stop",
+	maximumResponseTokensExceeded: "length",
+};
 
 /** Bridge error codes for safety-filter outcomes, which are terminal. */
 const CONTENT_BLOCKED_CODES: Record<string, true> = { guardrail_violation: true, refusal: true };
@@ -271,6 +281,7 @@ export const streamAppleFoundationModels: StreamFunction<"apple-foundation-model
 		let textIndex: number | undefined;
 		let thinkingIndex: number | undefined;
 		const toolIndices = new Map<string, number>();
+		let finishReason: FinishReason | undefined;
 		const endText = () => {
 			const block = textIndex === undefined ? undefined : output.content[textIndex];
 			if (block?.type === "text") {
@@ -360,6 +371,9 @@ export const streamAppleFoundationModels: StreamFunction<"apple-foundation-model
 						output.usage.output = event.output;
 						output.usage.totalTokens = event.input + event.output;
 						break;
+					case "finish":
+						finishReason = FINISH_REASONS[event.reason];
+						break;
 					case "error":
 						throw new AIError.ProviderResponseError(`${event.message} (${event.code})`, {
 							provider: model.provider,
@@ -383,9 +397,8 @@ export const streamAppleFoundationModels: StreamFunction<"apple-foundation-model
 			output.stopReason =
 				toolIndices.size > 0
 					? "toolUse"
-					: options.maxTokens !== undefined && output.usage.output >= options.maxTokens
-						? "length"
-						: "stop";
+					: (finishReason ??
+						(options.maxTokens !== undefined && output.usage.output >= options.maxTokens ? "length" : "stop"));
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "done", reason: output.stopReason, message: output });

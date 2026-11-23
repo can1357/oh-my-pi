@@ -1051,34 +1051,43 @@ fn run_pty_sync(
 	// kills, and whose waiter thread reaps, correctly.
 
 	let master = pair.master;
-	#[cfg_attr(not(windows), allow(unused_mut, reason = "only ConPTY needs the startup reply"))]
-	let mut writer = master
-		.take_writer()
-		.map_err(|err| Error::from_reason(format!("Failed to create PTY writer: {err}")))?;
-	// ConPTY sends ESC[6n (cursor position query) and blocks until we reply.
-	// Reply with cursor at 1,1 so it unblocks the child spawn.
-	// Only needed on Windows; on Unix/macOS this would corrupt stdin.
-	#[cfg(windows)]
-	{
-		let _ = writer.write_all(b"\x1b[1;1R");
-		let _ = writer.flush();
-	}
+	// Unix: plain dups of the master fd. portable-pty's writer writes `\n` and
+	// VEOF to the terminal when dropped; at teardown the child is gone, so the
+	// line discipline echoes that newline back into the output as a stray
+	// blank line.
 	#[cfg(unix)]
-	let reader = {
+	let (reader, writer): (PtyReader, Box<dyn Write + Send>) = {
 		let fd = master
 			.as_raw_fd()
-			.ok_or_else(|| Error::from_reason("Failed to create PTY reader: no master fd"))?;
-		// SAFETY: `master` owns `fd` and outlives this borrow; the dup (made
-		// CLOEXEC, like portable-pty's own reader clone) is owned separately.
-		unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) }
-			.try_clone_to_owned()
-			.map(std::fs::File::from)
-			.map_err(|err| Error::from_reason(format!("Failed to create PTY reader: {err}")))?
+			.ok_or_else(|| Error::from_reason("Failed to open PTY: no master fd"))?;
+		let clone = |what: &str| {
+			// SAFETY: `master` owns `fd` and outlives this borrow; the dup (made
+			// CLOEXEC, like portable-pty's own clones) is owned separately.
+			unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) }
+				.try_clone_to_owned()
+				.map(std::fs::File::from)
+				.map_err(|err| Error::from_reason(format!("Failed to create PTY {what}: {err}")))
+		};
+		(clone("reader")?, Box::new(clone("writer")?))
 	};
 	#[cfg(not(unix))]
-	let reader = master
-		.try_clone_reader()
-		.map_err(|err| Error::from_reason(format!("Failed to create PTY reader: {err}")))?;
+	let (reader, writer) = {
+		#[cfg_attr(not(windows), allow(unused_mut, reason = "only ConPTY needs the startup reply"))]
+		let mut writer = master
+			.take_writer()
+			.map_err(|err| Error::from_reason(format!("Failed to create PTY writer: {err}")))?;
+		// ConPTY sends ESC[6n (cursor position query) and blocks until we reply.
+		// Reply with cursor at 1,1 so it unblocks the child spawn.
+		#[cfg(windows)]
+		{
+			let _ = writer.write_all(b"\x1b[1;1R");
+			let _ = writer.flush();
+		}
+		let reader = master
+			.try_clone_reader()
+			.map_err(|err| Error::from_reason(format!("Failed to create PTY reader: {err}")))?;
+		(reader, writer)
+	};
 	let io = PtyIo {
 		master: PtyMaster::Portable(master),
 		reader,

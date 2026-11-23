@@ -218,29 +218,18 @@ const fn is_pointer_release(kind: u32) -> bool {
 
 /// F1-F20, home of Mission Control, Launchpad, Show Desktop and the
 /// Control-F keyboard-focus shortcuts (menu bar, Dock, status menus).
+pub(crate) const FUNCTION_KEYS: [u16; 20] =
+	[122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 64, 79, 80, 90];
+
 const fn function_key(key: i64) -> bool {
-	matches!(
-		key,
-		122 | 120
-			| 99
-			| 118
-			| 96
-			| 97
-			| 98
-			| 100
-			| 101
-			| 109
-			| 103
-			| 111
-			| 105
-			| 107
-			| 113
-			| 106
-			| 64
-			| 79
-			| 80
-			| 90
-	)
+	let mut i = 0;
+	while i < FUNCTION_KEYS.len() {
+		if FUNCTION_KEYS[i] as i64 == key {
+			return true;
+		}
+		i += 1;
+	}
+	false
 }
 
 /// The arrows and the Help, Home, End, Page Up, Page Down and Forward Delete
