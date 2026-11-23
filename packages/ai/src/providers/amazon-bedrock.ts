@@ -1109,6 +1109,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			const result = await AIError.finalize(error, { api: model.api, signal: options.signal, rawRequestDump });
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
+			output.errorCode = result.code;
 			output.errorId = result.id;
 			output.errorMessage = result.message + diagnostics;
 			output.duration = performance.now() - startTime;

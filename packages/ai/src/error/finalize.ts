@@ -2,6 +2,7 @@ import type { Api } from "../types";
 import { callerAbortReason } from "./abort";
 import type { AbortSourceTracker } from "../utils/abort";
 import type { CapturedHttpErrorResponse, RawHttpRequestDump } from "../utils/http-inspector";
+import { ProviderHttpError } from "./classes";
 import { classify, classifyMessage, status } from "./flags";
 import { formatMessage } from "./format";
 
@@ -33,6 +34,26 @@ export interface FinalizeResult {
 	stopReason: "aborted" | "error";
 	/** User-facing message: a local abort reason, else the caller's abort reason, else from {@link formatMessage}. */
 	message: string;
+	/** Provider error code from the failure or captured response body, when available. */
+	code?: string;
+}
+
+/**
+ * Provider-supplied machine-readable code. Prefer the captured body because a
+ * transport wrapper may carry only the generic envelope type.
+ */
+function providerErrorCode(error: unknown, captured: CapturedHttpErrorResponse | undefined): string | undefined {
+	const body = captured?.bodyJson;
+	if (body !== null && typeof body === "object") {
+		const record = body as Record<string, unknown>;
+		const nested = record.error;
+		const detail = nested !== null && typeof nested === "object" ? (nested as Record<string, unknown>) : record;
+		const code = detail.code;
+		if (typeof code === "string" && code.length > 0) return code;
+		const type = detail.type;
+		if (typeof type === "string" && type.length > 0) return type;
+	}
+	return error instanceof ProviderHttpError ? error.code : undefined;
 }
 
 /**
@@ -81,5 +102,6 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 		status: currentStatus,
 		stopReason: aborted ? "aborted" : "error",
 		message,
+		code: providerErrorCode(error, opts.capturedErrorResponse),
 	};
 }

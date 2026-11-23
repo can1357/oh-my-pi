@@ -734,9 +734,23 @@ describe("compaction prefers the current session model over modelRoles.default",
 				}),
 				[currentModel, configuredModel],
 				{
-					onModel: (model, preparation) => {
+					onModel: async (model, preparation) => {
 						if (model.provider === configuredModel.provider) {
-							throw new AIError.ProviderHttpError("model_not_found", 404, { code: "model_not_found" });
+							const failure = await AIError.finalize(new Error("The model does not exist"), {
+								capturedErrorResponse: {
+									status: 404,
+									bodyJson: {
+										error: {
+											message: "The model does not exist",
+											type: "invalid_request_error",
+											code: "model_not_found",
+										},
+									},
+								},
+							});
+							throw new AIError.ProviderHttpError(failure.message, failure.status ?? 404, {
+								code: failure.code,
+							});
 						}
 						return {
 							summary: "fallback",
@@ -1002,9 +1016,17 @@ describe("compaction prefers the current session model over modelRoles.default",
 				}),
 				[currentModel, configuredModel],
 				{
-					onModel: (model, preparation) => {
+					onModel: async (model, preparation) => {
 						if (model.provider === configuredModel.provider) {
-							throw new AIError.ProviderHttpError("not found", 404);
+							const failure = await AIError.finalize(new Error("Not Found"), {
+								capturedErrorResponse: {
+									status: 404,
+									bodyJson: { error: { message: "Not Found" } },
+								},
+							});
+							throw new AIError.ProviderHttpError(failure.message, failure.status ?? 404, {
+								code: failure.code,
+							});
 						}
 						return {
 							summary: "unexpected fallback",
@@ -1017,7 +1039,7 @@ describe("compaction prefers the current session model over modelRoles.default",
 				},
 			);
 
-			await expect(compacting).rejects.toThrow("not found");
+			await expect(compacting).rejects.toThrow("Not Found");
 		});
 
 		it("skips a portable endpoint writer when preparation reused an opaque native boundary", async () => {

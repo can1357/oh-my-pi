@@ -125,6 +125,7 @@ export class StepWriter {
 		this.output.stopReason = result.stopReason;
 		this.output.errorMessage = result.message;
 		this.output.errorStatus = result.status;
+		this.output.errorCode = result.code;
 		this.output.errorId = result.id;
 		this.#stream.push({ type: "error", reason: result.stopReason, error: this.output });
 	}

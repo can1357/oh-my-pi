@@ -159,6 +159,35 @@ describe("AIError.finalize", () => {
 		expect(AIError.is(result.id, AIError.Flag.Transient)).toBe(true);
 	});
 
+	it("preserves a captured provider error code", async () => {
+		const result = await AIError.finalize(new Error("The model does not exist"), {
+			capturedErrorResponse: {
+				status: 404,
+				bodyJson: {
+					error: { message: "The model does not exist", type: "invalid_request_error", code: "model_not_found" },
+				},
+			},
+		});
+		expect(result.status).toBe(404);
+		expect(result.code).toBe("model_not_found");
+	});
+
+	it("does not invent a provider code for a plain 404", async () => {
+		const result = await AIError.finalize(new Error("Not Found"), {
+			capturedErrorResponse: { status: 404, bodyJson: { error: { message: "Not Found" } } },
+		});
+		expect(result.status).toBe(404);
+		expect(result.code).toBeUndefined();
+	});
+
+	it("preserves a ProviderHttpError code", async () => {
+		const result = await AIError.finalize(
+			new AIError.ProviderHttpError("The model does not exist", 404, { code: "model_not_found" }),
+			{},
+		);
+		expect(result.code).toBe("model_not_found");
+	});
+
 	it("applies a captured terminal 4xx before classifying a truncation error", async () => {
 		const result = await AIError.finalize(new Error("unexpected EOF"), {
 			capturedErrorResponse: { status: 400 },

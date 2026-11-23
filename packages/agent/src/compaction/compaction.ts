@@ -689,7 +689,7 @@ function createSummarizationError(prefix: string, response: AssistantMessage): E
 	const text = `${prefix}: ${response.errorMessage || "Unknown error"}`;
 	return response.errorStatus === undefined
 		? new Error(text)
-		: new AIError.ProviderHttpError(text, response.errorStatus);
+		: new AIError.ProviderHttpError(text, response.errorStatus, { code: response.errorCode });
 }
 
 function shouldRetryHandoffWithAutoToolChoice(response: AssistantMessage): boolean {

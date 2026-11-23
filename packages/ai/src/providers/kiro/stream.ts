@@ -518,6 +518,7 @@ export function streamKiro(model: Model, context: Context, options: KiroOptions 
 			attempt.output.stopReason = result.stopReason;
 			attempt.output.errorMessage = result.message;
 			attempt.output.errorStatus = result.status;
+			attempt.output.errorCode = result.code;
 			attempt.output.errorId = result.id;
 			attempt.output.duration = performance.now() - startTime;
 			if (attempt.firstOutputTime !== undefined) attempt.output.ttft = attempt.firstOutputTime - startTime;

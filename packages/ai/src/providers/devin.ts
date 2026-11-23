@@ -542,6 +542,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal });
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
+			output.errorCode = result.code;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
 			output.duration = performance.now() - startTime;

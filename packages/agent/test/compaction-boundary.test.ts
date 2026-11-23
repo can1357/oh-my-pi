@@ -6,7 +6,8 @@ import {
 	generateSummary,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import * as snapcompact from "@oh-my-pi/snapcompact";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 function getModel(): Model {
@@ -16,6 +17,51 @@ function getModel(): Model {
 }
 
 describe("compaction summary boundaries", () => {
+	test("preserves the provider error code from a failed summarization", async () => {
+		const model = getModel();
+		const failed: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "error",
+			errorStatus: 404,
+			errorCode: "model_not_found",
+			errorMessage: "The model does not exist",
+			timestamp: 1,
+		};
+		const error = await compact(
+			{
+				firstKeptEntryId: "kept",
+				messagesToSummarize: [{ role: "user", content: "history", timestamp: 1 }],
+				turnPrefixMessages: [],
+				recentMessages: [{ role: "user", content: "recent", timestamp: 2 }],
+				isSplitTurn: false,
+				tokensBefore: 20_000,
+				fileOps: snapcompact.createFileOps(),
+				settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteEnabled: false },
+			},
+			model,
+			"test-key",
+			undefined,
+			undefined,
+			{ completeImpl: async () => failed },
+		).catch(error => error);
+
+		expect(error).toBeInstanceOf(AIError.ProviderHttpError);
+		expect((error as AIError.ProviderHttpError).status).toBe(404);
+		expect((error as AIError.ProviderHttpError).code).toBe("model_not_found");
+	});
+
 	test("keeps adversarial history and prior summaries inside harness-owned tags", async () => {
 		let requestBody: Record<string, unknown> | undefined;
 		await generateSummary(

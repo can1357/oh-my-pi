@@ -2044,6 +2044,7 @@ const streamOpenAICompletionsOnce = (
 			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
+			output.errorCode = result.code;
 			if (error instanceof OpenAIHttpError && AIError.isTransientStatus(result.status)) {
 				transportExhaustedMessages.add(output);
 			}

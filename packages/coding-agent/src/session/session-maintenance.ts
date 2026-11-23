@@ -257,7 +257,7 @@ function isConfiguredCompactionTargetUnavailable(
 	configuredTargets: readonly Model[],
 ): error is AIError.ProviderHttpError {
 	if (!(error instanceof AIError.ProviderHttpError) || error.status !== 404) return false;
-	if (error.code === undefined || !COMPACTION_TARGET_UNAVAILABLE_CODES[error.code]) return false;
+	if (error.code === undefined || !Object.hasOwn(COMPACTION_TARGET_UNAVAILABLE_CODES, error.code)) return false;
 	const route = formatModelStringWithRouting(candidate);
 	return configuredTargets.some(target => formatModelStringWithRouting(target) === route);
 }
