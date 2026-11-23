@@ -16,7 +16,9 @@ interface BrowserDefinition {
 	/** macOS bundle name and id. */
 	app?: string;
 	bundleId?: string;
-	/** Windows install path relative to a Program Files root. */
+	/** Linux executable name, when it differs from the user data directory name. */
+	linuxBin?: string;
+	/** Windows install path relative to a Program Files root, or to `%LOCALAPPDATA%` for a per-user install. */
 	winInstall?: string;
 	keychain: string;
 }
@@ -90,6 +92,7 @@ const BROWSERS: readonly BrowserDefinition[] = [
 		win32: "imput/Helium/User Data",
 		app: "Helium.app",
 		bundleId: "net.imput.helium",
+		linuxBin: "helium",
 		winInstall: "imput\\Helium",
 		keychain: "Helium Storage Key",
 	},
@@ -111,6 +114,14 @@ export interface ChromiumUserData {
 	dir: string;
 }
 
+/** Windows `%LOCALAPPDATA%`, which holds per-user browser data and per-user browser installs. */
+function localAppDataDir(options: ChromiumLocations, home: string): string {
+	return (
+		options.localAppData ??
+		((options.home === undefined ? process.env.LOCALAPPDATA : undefined) || path.join(home, "AppData", "Local"))
+	);
+}
+
 /** The user data directory of every supported browser on this platform, whether or not it is installed. */
 export function chromiumUserDataDirs(options: ChromiumLocations = {}): ChromiumUserData[] {
 	const platform = options.platform ?? process.platform;
@@ -129,10 +140,7 @@ export function chromiumUserDataDirs(options: ChromiumLocations = {}): ChromiumU
 			key = "linux";
 			break;
 		case "win32":
-			base =
-				options.localAppData ??
-				((options.home === undefined ? process.env.LOCALAPPDATA : undefined) ||
-					path.join(home, "AppData", "Local"));
+			base = localAppDataDir(options, home);
 			key = "win32";
 			break;
 		default:
@@ -232,7 +240,11 @@ export interface ChromiumBrowser {
 }
 
 /** Resolves the browser executable on this platform, or undefined when it is not installed. */
-async function browserExecutable(browser: BrowserDefinition, platform: NodeJS.Platform): Promise<string | undefined> {
+async function browserExecutable(
+	browser: BrowserDefinition,
+	platform: NodeJS.Platform,
+	localAppData: string,
+): Promise<string | undefined> {
 	if (platform === "darwin" && browser.app) {
 		const name = browser.app.replace(/\.app$/, "");
 		for (const root of [path.join(os.homedir(), "Applications"), "/Applications"]) {
@@ -245,19 +257,21 @@ async function browserExecutable(browser: BrowserDefinition, platform: NodeJS.Pl
 		for (const root of [
 			process.env.ProgramFiles ?? "C:\\Program Files",
 			process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)",
+			localAppData,
 		]) {
 			const candidate = path.join(root, browser.winInstall, "Application", "chrome.exe");
 			if (await Bun.file(candidate).exists()) return candidate;
 		}
 		return undefined;
 	}
-	if (platform === "linux") return Bun.which(browser.linux) ?? undefined;
+	if (platform === "linux") return Bun.which(browser.linuxBin ?? browser.linux) ?? undefined;
 	return undefined;
 }
 
 /** Every supported browser that is installed and has a profile root, de-duplicated by user data directory. */
 export async function installedChromiumBrowsers(options: ChromiumLocations = {}): Promise<ChromiumBrowser[]> {
 	const platform = options.platform ?? process.platform;
+	const localAppData = localAppDataDir(options, options.home ?? os.homedir());
 	const seen = new Set<string>();
 	const installed: ChromiumBrowser[] = [];
 	for (const { browser, dir } of chromiumUserDataDirs(options)) {
@@ -265,7 +279,7 @@ export async function installedChromiumBrowsers(options: ChromiumLocations = {})
 		if (seen.has(key)) continue;
 		seen.add(key);
 		const definition = BROWSERS.find(entry => entry.name === browser)!;
-		const executable = await browserExecutable(definition, platform);
+		const executable = await browserExecutable(definition, platform, localAppData);
 		if (!executable) continue;
 		if (!(await Bun.file(path.join(dir, "Local State")).exists())) continue;
 		installed.push({

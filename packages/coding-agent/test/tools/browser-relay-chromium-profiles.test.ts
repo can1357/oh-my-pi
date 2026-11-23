@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { findUnpackedInstalls } from "../../src/tools/browser/relay/chromium-profiles";
+import { findUnpackedInstalls, installedChromiumBrowsers } from "../../src/tools/browser/relay/chromium-profiles";
 
 const ID = "abcdefghijklmnopabcdefghijklmnop";
 
@@ -11,6 +12,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	await home.remove();
 });
 
@@ -105,5 +107,27 @@ describe("findUnpackedInstalls", () => {
 				developerMode: true,
 			},
 		]);
+	});
+});
+
+describe("installedChromiumBrowsers", () => {
+	it("finds a Linux browser by its executable name, not by its profile directory name", async () => {
+		await Bun.write(home.join(".config/net.imput.helium/Local State"), "{}");
+		vi.spyOn(Bun, "which").mockImplementation(command => (command === "helium" ? "/opt/helium/helium" : null));
+
+		const installed = await installedChromiumBrowsers({ platform: "linux", home: home.path() });
+		expect(installed.map(browser => [browser.name, browser.dir, browser.executable])).toEqual([
+			["Helium", home.join(".config/net.imput.helium"), "/opt/helium/helium"],
+		]);
+	});
+
+	it("finds a Windows browser that is installed for the current user only", async () => {
+		const localAppData = home.join("AppData/Local");
+		await Bun.write(path.join(localAppData, "imput", "Helium", "User Data", "Local State"), "{}");
+		const executable = path.join(localAppData, "imput\\Helium", "Application", "chrome.exe");
+		await Bun.write(executable, "");
+
+		const installed = await installedChromiumBrowsers({ platform: "win32", localAppData });
+		expect(installed.map(browser => [browser.name, browser.executable])).toEqual([["Helium", executable]]);
 	});
 });
