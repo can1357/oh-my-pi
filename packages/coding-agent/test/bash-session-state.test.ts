@@ -49,7 +49,7 @@ function bashTool(settings: Record<string, unknown> = {}, overrides: Partial<Too
 async function run(tool: BashTool, command: string) {
 	const result = await tool.execute("bash-session-state", { command });
 	const text = result.content.find(block => block.type === "text")?.text ?? "";
-	return { text, async: result.details?.async };
+	return { text, async: result.details?.async, details: result.details };
 }
 
 it.each([
@@ -201,6 +201,8 @@ it("says so when exit or an armed set -e ends the call before its remaining stat
 		const aborted = await run(tool, "false; echo never-ran");
 		expect(aborted.text).toContain("Stopped by `exit` or an armed `set -e`");
 		expect(aborted.text).toContain("the rest of this call did not run");
+		expect(aborted.details?.endedByExit).toBe(true);
+		expect(aborted.details?.ephemeralShell).toBe(false);
 
 		const failed = await run(tool, "false");
 		expect(failed.text).toContain("Command exited with code 1");
@@ -233,6 +235,8 @@ it("does not promise options persist when an aborted fork's state is not adopted
 		expect(aborted.text).toContain("Stopped by `exit` or an armed `set -e`");
 		expect(aborted.text).toContain("the rest of this call did not run");
 		expect(aborted.text).not.toContain("stay with the session");
+		expect(aborted.details?.endedByExit).toBe(true);
+		expect(aborted.details?.ephemeralShell).toBe(true);
 		finishFirst(nativeResult());
 		await first;
 	} finally {

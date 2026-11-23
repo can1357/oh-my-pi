@@ -1371,6 +1371,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (failedExit) {
 			details.exitCode = exitCode;
 		}
+		if ("endedByExit" in result) details.endedByExit = result.endedByExit;
+		if ("ephemeralShell" in result) details.ephemeralShell = result.ephemeralShell;
 		if (options.replies?.length) details.replies = [...options.replies];
 		if (options.toolCommands?.length) details.toolCommands = [...options.toolCommands];
 		if (shaped?.spotlight) details.spotlight = shaped.spotlight;
