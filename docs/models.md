@@ -322,7 +322,7 @@ Loading models.yml checks a `modelOverrides` `kind` only against an api the file
 ### Allowed auth/discovery values
 
 - `auth`: `apiKey` (default), `none`, or `oauth`. `none` and `oauth` waive the custom-provider `apiKey` requirement, but `oauth` does not create credentials or register a login flow. It forces OAuth-style request shaping; a usable credential must come from stored auth, environment, or a configured key. Custom `anthropic-messages` models also use OAuth-style shaping when `auth` is omitted; set `auth: apiKey` for plain API-key shaping.
-- `discovery.type`: `ollama`, `llama.cpp`, `lm-studio`, `openai-models-list`, `proxy`, `litellm`, or `apple-foundation-models`. Apple's transport is registered implicitly on supported Macs; `apple-foundation-models` is not an allowed `api` value in this YAML schema.
+- `discovery.type`: `ollama`, `llama.cpp`, `lm-studio`, `openai-models-list`, `proxy`, `litellm`, `openrouter`, or `apple-foundation-models`. Apple's transport is registered implicitly on supported Macs; `apple-foundation-models` is not an allowed `api` value in this YAML schema.
 - `discovery.injectV1`: optional boolean, default `true`, for `openai-models-list`. Set `false` to fetch the model list from `{baseUrl}/models` without injecting `/v1` — for gateways that root their OpenAI-compatible surface at a versioned path (e.g. `https://api.opper.ai/v3/compat`) where the forced `/v1/models` returns a different, smaller model list. Query strings in `baseUrl` are ignored, matching the default mode.
 - `discovery.advertisedReasoning`: optional boolean, default `true`, for `openai-models-list`, `lm-studio`, and `proxy`. Discovery reads what a `/v1/models` row states about its own reasoning surface (`supported_reasoning_levels` / `default_reasoning_level` / `reasoning`, top-level or under `metadata`) and lets it outrank the bundled-reference guess, so a gateway that dispatches with its own catalog offers exactly the tiers its route accepts. A row that lists `none` gets `reasoningDisableMode: none-effort`, so a thinking-off request sends the off-switch instead of being clamped to the lowest tier. An advertised ladder also pins `defaultLevel` inside itself, so catalog policy cannot inject a tier the row omits. A row reporting `reasoning: false` overrides a reasoning-enabled reference for that id. Set the flag to `false` when an endpoint advertises levels its route rejects: discovery then builds each model's thinking surface from the bundled reference alone. A row that says nothing about reasoning is unaffected either way. Explicit `modelOverrides.<id>.thinking` and `compat.supportsReasoningEffort` still win over both. `litellm` does not accept the flag: its authoritative reasoning metadata comes from `/model_group/info`, so the setting would only apply to its `/v1/models` fallback.
 - `transport`: `pi-native` only. When set, every model under that provider is sent to an `omp auth-gateway` compatible `baseUrl` via `POST /v1/pi/stream`; `apiKey` is the gateway bearer. The provider's model list is the gateway's: omp reads it from `GET /v1/pi/models`, so models the gateway discovered at runtime are selectable and models it cannot route disappear. A gateway without that route leaves the provider on the bundled list.
@@ -611,6 +611,27 @@ If every metadata route is unavailable, discovery falls back to the OpenAI-compa
 ### Bifrost provider discovery
 
 When `bifrost` has a credential (`BIFROST_API_KEY` or stored `/login bifrost` auth), runtime discovery reads the gateway's `GET /models` roster from the provider `baseUrl` / `models.yml` config, otherwise `BIFROST_BASE_URL`, otherwise `http://localhost:8080/v1`. Model ids keep Bifrost's `<bifrost-provider>/<model>` form. Chat models use `openai-completions`; decision models become `openai-decisions` judges on `POST {baseUrl}/decisions`. The roster is authoritative and cached per key and base URL. Row mapping, decision-model detection, and judge retry guidance are in [Bifrost](provider-quirks.md#bifrost-bifrost).
+
+### OpenRouter-fronting discovery
+
+`discovery.type: openrouter` is for endpoints that serve OpenRouter's API under their own URL and
+auth. Discovery reads OpenRouter's public
+`https://openrouter.ai/api/v1/models` roster without credentials: the provider's `apiKey` and
+`headers` never reach openrouter.ai. Tool-capable rows keep OpenRouter's context and output limits,
+input modalities, reasoning ladders, and prices; the prices are OpenRouter's list prices, not the
+fronting host's billing. Requests go to the provider's `baseUrl` (OpenRouter itself when omitted)
+with its `api` and credentials, under OpenRouter's provider rules, so thinking is sent as
+`reasoning: { effort }`.
+
+```yaml
+providers:
+   my-gateway:
+      baseUrl: https://gateway.example.com/openrouter/v1
+      api: openai-completions
+      apiKey: GATEWAY_API_KEY
+      discovery:
+         type: openrouter
+```
 
 ### Generic OpenAI-compatible discovery
 
