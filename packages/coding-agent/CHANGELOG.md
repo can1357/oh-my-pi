@@ -42,6 +42,7 @@
 - Fixed the batch `task` tool rejecting a JSON-string `tasks` payload with a misleading "Missing `tasks`" error; promoted payloads now also have their double-encoded item prose repaired ([#20190](https://github.com/can1357/oh-my-pi/pull/20190) by [@arfoux](https://github.com/arfoux))
 - Claude Code plugin skills, commands and agents now resolve `${CLAUDE_PLUGIN_ROOT}` / `${OMP_PLUGIN_ROOT}` in their Markdown bodies, so plugins that point at bundled scripts work ([#20165](https://github.com/can1357/oh-my-pi/issues/20165), [#20186](https://github.com/can1357/oh-my-pi/pull/20186) by [@koeria](https://github.com/koeria))
 - `omp -e <path>` keeps the instant first frame, so a slow terminal reply no longer switches the keyboard protocol after keys were typed ([#20158](https://github.com/can1357/oh-my-pi/issues/20158), [#20193](https://github.com/can1357/oh-my-pi/pull/20193) by [@koeria](https://github.com/koeria))
+- A daemon unit is no longer pinned when its client disconnects while the unit is still being created: the lease taken after the disconnect is dropped as on any lost connection, after the reconnect grace ([#20263](https://github.com/can1357/oh-my-pi/pull/20263) by [@yaacovcorcos](https://github.com/yaacovcorcos))
 
 ### Removed
 
