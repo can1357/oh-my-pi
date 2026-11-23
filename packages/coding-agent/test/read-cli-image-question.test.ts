@@ -17,8 +17,8 @@ const PNG_1X1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8B
 
 // Custom vision provider with a real (dummy) inline key so it counts as
 // available; its baseUrl points at a dead local port, so the completion attempt
-// fails fast with a connection error — never the registry guard, and never a
-// real network call.
+// gets no answer and ends at the image question's timeout (3 s, set below) —
+// never the registry guard, and never a real network call.
 const MODELS_YML = `providers:
   testvision:
     api: openai-completions
@@ -69,7 +69,7 @@ describe("omp read <image>?q=", () => {
 				`import { runReadCommand } from ${JSON.stringify(READ_CLI_URL)};\nawait runReadCommand({ path: process.argv[2] });\n`,
 			);
 			try {
-				const child = Bun.spawn(["bun", runnerPath, `${pngPath}?q=describe this image`], {
+				const child = Bun.spawn([process.execPath, runnerPath, `${pngPath}?q=describe this image`], {
 					cwd: project,
 					env: {
 						...process.env,
@@ -87,8 +87,11 @@ describe("omp read <image>?q=", () => {
 				]);
 				const output = `${stdout}\n${stderr}`;
 				// The command fails (dead endpoint) but must get past the registry
-				// guard AND model resolution to an actual completion attempt.
+				// guard AND model resolution to an actual completion attempt: the
+				// attempt's own timeout message shows it got there. Without that, a
+				// child that never started would pass the two checks below too.
 				expect(exitCode).not.toBe(0);
+				expect(output).toContain("Image question timed out after 3s.");
 				expect(output).not.toContain("Model registry is unavailable for image questions.");
 				expect(output).not.toContain("No models available for image questions.");
 			} finally {

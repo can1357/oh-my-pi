@@ -284,6 +284,15 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 		return this.#remote.callSync("publishCompleted", type, label, result, options);
 	}
 
+	publishFailed(
+		type: AsyncJobType,
+		label: string,
+		errorText: string,
+		options: { id?: string; ownerId?: string; agentId?: string },
+	): string {
+		return this.#remote.callSync("publishFailed", type, label, errorText, options);
+	}
+
 	cancel(id: string, filter?: AsyncJobFilter): boolean {
 		return this.#remote.callSync("cancel", id, filter);
 	}
