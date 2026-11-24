@@ -1,9 +1,10 @@
 /**
- * Contract: the `.`/`c` continue shortcut (`AgentSession.resume`) re-runs a
- * prompt the model has not answered yet without adding any message, injects
+ * Contract: the `.`/`c` continue shortcut (`AgentSession.resume`) and `/continue`
+ * share one idle path — replay an Esc-interrupted assistant tail as prefill,
+ * re-run a prompt the model has not answered without adding a message, inject
  * the hidden manual-continue directive after an answered turn (typed or
- * `/skill:` prompt or compacted history), and refuses to continue an empty
- * conversation.
+ * `/skill:` prompt or compacted history), and send a bare turn when there is
+ * nothing to continue from.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
@@ -123,7 +124,7 @@ describe("AgentSession.resume", () => {
 		expect(observed).toEqual([["do the thing"]]);
 	});
 
-	it("returns an uncredentialed prompt for retry and refuses context-free resume", async () => {
+	it("returns an uncredentialed prompt for retry and asks a bare turn for a context-free resume", async () => {
 		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 		const getApiKey = spyOn(registry, "getApiKey").mockResolvedValue(undefined);
 		try {
@@ -133,7 +134,9 @@ describe("AgentSession.resume", () => {
 
 			await expect(session.prompt("finish this request")).rejects.toThrow("No API key found for anthropic");
 			expect(dropped).toEqual(["finish this request"]);
-			await expect(session.resume()).rejects.toThrow("Nothing to resume");
+			// Nothing to continue from, so the resume dispatches a bare turn — which
+			// fails on the missing credential before any message is recorded.
+			await expect(session.resume()).rejects.toThrow("No API key found for anthropic");
 			expect(mock.calls).toHaveLength(0);
 			expect(session.agent.state.messages).toEqual([]);
 			getApiKey.mockResolvedValue("test-key");
@@ -146,6 +149,19 @@ describe("AgentSession.resume", () => {
 		} finally {
 			getApiKey.mockRestore();
 		}
+	});
+
+	it("starts a bare turn when there is no conversation to continue", async () => {
+		const { session, mock } = createSession([{ content: ["ready"] }]);
+
+		await session.resume();
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(1);
+		// The empty submission carries no user turn; the model answers from the
+		// system prompt alone.
+		expect(session.agent.state.messages.some(message => message.role === "user")).toBe(false);
+		expect(session.agent.state.messages.filter(message => message.role === "assistant")).toHaveLength(1);
 	});
 
 	it("injects the continue directive after an answered turn", async () => {

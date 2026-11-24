@@ -738,13 +738,16 @@ export function unpairedToolCallTail(messages: readonly AgentMessage[]): Assista
 
 /**
  * Continue an agent loop from the current context without adding a new message.
- * Used for retries - context already has user message or tool results.
+ * Used for retries, queued-message resumption, and resuming an interrupted turn.
  *
  * **Important:** The last message in context must convert to a `user` or `toolResult` message
- * via `convertToLlm` — except for an assistant tail with unpaired runnable
- * tool calls (see {@link unpairedToolCallTail}), which resumes by executing
- * those calls first. Any other assistant tail is rejected here; other invalid
- * tails cannot be validated since `convertToLlm` is only called once per turn.
+ * via `convertToLlm`. Two assistant tails are the exception: one with unpaired
+ * runnable tool calls (see {@link unpairedToolCallTail}), which resumes by
+ * executing those calls first, and one with `stopReason: "aborted"` (a
+ * user-interrupted partial turn), which is replayed as assistant prefill so the
+ * model continues where the stream was cut off. Any other assistant tail is
+ * rejected here; other invalid tails cannot be validated since `convertToLlm`
+ * is only called once per turn.
  */
 export function agentLoopContinue(
 	context: AgentContext,
@@ -756,7 +759,8 @@ export function agentLoopContinue(
 		throw new Error("Cannot continue: no messages in context");
 	}
 
-	if (context.messages[context.messages.length - 1].role === "assistant" && !unpairedToolCallTail(context.messages)) {
+	const tail = context.messages[context.messages.length - 1];
+	if (tail?.role === "assistant" && tail.stopReason !== "aborted" && !unpairedToolCallTail(context.messages)) {
 		throw new Error("Cannot continue from message role: assistant");
 	}
 

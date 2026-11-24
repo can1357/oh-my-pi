@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- `Agent.continue()` and `agentLoopContinue()` now accept a trailing assistant message with `stopReason: "aborted"`, replaying it as prefill so an interrupted turn can resume without a new user message.
 
 ### Added
 

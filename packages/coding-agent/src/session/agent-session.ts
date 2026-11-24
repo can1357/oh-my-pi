@@ -441,6 +441,7 @@ import {
 	demoteInterruptedThinking,
 	didSessionMessagesChange,
 	type FileMentionMessage,
+	findResumableAbortedAssistant,
 	type HookMessage,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	type InterruptedThinkingDetails,
@@ -9197,20 +9198,36 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * before returning.
 	 */
 	async #resumeIdle(onAdmitted?: () => void): Promise<void> {
+		// An interrupt before any output did not answer its prompt: re-running it is
+		// the whole continuation, and replaying the empty assistant placeholder as
+		// prefill would ask for nothing.
 		const prompt = this.#recovery.prepareResume();
-		if (!prompt) {
-			// A handoff or full compaction can leave only the summary: it carries the
-			// summarized requests, so it is a conversation the directive can resume.
-			const resumable = this.agent.state.messages.some(
-				message =>
-					isUserAuthoredMessage(message) ||
-					message.role === "compactionSummary" ||
-					message.role === "branchSummary",
-			);
-			if (!resumable) {
-				throw new Error("Nothing to resume");
-			}
-			await this.prompt(manualContinuePrompt, {
+		if (prompt) {
+			this.#noteUserTurn();
+			this.#todo.resetCycle();
+			this.#resetPromptMaintenanceState();
+			this.#scheduleAgentContinue({ source: "manual-continue", turnRecords: [prompt] });
+			return;
+		}
+		// An Esc-interrupted assistant that did stream is replayed as prefill, exactly
+		// as `/continue` does. Before this, the `.`/`c` shortcut answered even a
+		// partial assistant turn with a fresh continue directive, so the two entry
+		// points to "keep going" behaved differently.
+		if (this.continueInterrupted()) {
+			onAdmitted?.();
+			return;
+		}
+		// A handoff or full compaction can leave only the summary: it carries the
+		// summarized requests, so it is a conversation the directive can resume.
+		const resumable = this.agent.state.messages.some(
+			message =>
+				isUserAuthoredMessage(message) || message.role === "compactionSummary" || message.role === "branchSummary",
+		);
+		if (!resumable) {
+			// Nothing to replay and nothing to continue from: `/continue` has always
+			// answered this with a bare turn, so the shortcut sends the same empty
+			// prompt instead of failing with "Nothing to resume".
+			await this.prompt("", {
 				synthetic: true,
 				userInitiated: true,
 				expandPromptTemplates: false,
@@ -9218,10 +9235,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			});
 			return;
 		}
-		this.#noteUserTurn();
-		this.#todo.resetCycle();
-		this.#resetPromptMaintenanceState();
-		this.#scheduleAgentContinue({ source: "manual-continue", turnRecords: [prompt] });
+		await this.prompt(manualContinuePrompt, {
+			synthetic: true,
+			userInitiated: true,
+			expandPromptTemplates: false,
+			onPromptAdmitted: onAdmitted,
+		});
 	}
 
 	/**
@@ -14099,6 +14118,34 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			restoreTerminatedBashJobs(branch, this.#asyncJobManager, this.getAgentId());
 		}
 		return restored;
+	}
+
+	/**
+	 * Resume a user-interrupted (aborted) assistant turn without appending any
+	 * user-visible message. Returns false when there is no aborted assistant
+	 * tail to resume or the session is busy.
+	 */
+	continueInterrupted(): boolean {
+		if (this.isStreaming || this.isCompacting || this.#recovery.isRetrying) return false;
+		const messages = this.agent.state.messages;
+		const tail = findResumableAbortedAssistant(messages);
+		if (!tail) return false;
+		// `findResumableAbortedAssistant` walks back over the sanctioned trailing
+		// continuity records the session appends after an Esc abort (the hidden
+		// `interrupted-thinking` note and synthetic tool-result placeholders).
+		// `Agent.continue()` only enters its assistant-prefill branch when the
+		// aborted assistant is the literal last message, so drop those records
+		// here — otherwise the provider request tail would be the continuity note
+		// / failed tool result instead of the partial assistant the user is
+		// actually resuming. Preserve tool-result placeholders when the assistant
+		// tail is itself a tool call: removing them would leave a dangling
+		// tool_call the provider rejects.
+		const tailIndex = messages.indexOf(tail);
+		if (tailIndex < messages.length - 1 && tail.content[tail.content.length - 1]?.type !== "toolCall") {
+			this.agent.replaceMessages(messages.slice(0, tailIndex + 1));
+		}
+		this.#scheduleAgentContinue({ source: "continue-interrupted" });
+		return true;
 	}
 
 	// =========================================================================
