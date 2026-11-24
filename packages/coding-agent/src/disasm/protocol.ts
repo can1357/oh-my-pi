@@ -6,7 +6,7 @@
  * omp processes speak NDJSON {@link HostRequest}s to it over an attached daemon tunnel.
  */
 import { type } from "@oh-my-pi/omptype";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 import { DISASM_BACKEND_IDS, type DisasmBackendId } from "./backend";
 
 /** Daemon unit kind and module name. */

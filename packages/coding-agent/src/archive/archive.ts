@@ -17,8 +17,8 @@
  * records live in `activity.ts`.
  */
 import * as path from "node:path";
-import { previewLine, shortenPath, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { previewLine, shortenPath, TRUNCATE_LENGTHS } from "../utils/render-utils";
+import { ToolError } from "../tools/tool-errors";
 import { formatAge, formatCount, logger } from "@oh-my-pi/pi-utils";
 import { type HistoryEntry, HistoryStorage } from "../session/history-storage";
 import { type WordQuery, wordQuery } from "../session/search-query";

@@ -1,11 +1,10 @@
-import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import {
 	buildTrayItems,
-	describeTrayCard,
 	runsInlineAgent,
-	Tray,
+	TrayFeed,
 	type TrayHost,
 	type TrayInput,
 	type TrayMain,
@@ -13,12 +12,15 @@ import {
 	TrayMemory,
 	trayAgentDetail,
 } from "@oh-my-pi/pi-coding-agent/modes/tray";
-import type { NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
-import type { AgentRecordLike } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
-import type { ObservableSession } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
-import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentRecordLike } from "@oh-my-pi/pi-coding-agent/registry/agent-hub-types";
+import type { ObservableSession } from "@oh-my-pi/pi-coding-agent/task/session-observer-registry";
+import type { AgentProgress } from "@oh-my-pi/pi-coding-agent/task/task-details";
+import type { JobWidgetView } from "@oh-my-pi/pi-coding-agent/tools/details/job-widget";
+import { createRoot, resolveChildren } from "@oh-my-pi/pi-tui";
+import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
+import { Tray, type TrayAgentItem, TrayModel } from "../src/ui/dock";
 
 function progress(id: string, overrides: Partial<AgentProgress> = {}): AgentProgress {
 	return {
@@ -144,21 +146,38 @@ function cards(f: Fixture, memory = new TrayMemory()): string[] {
 	return buildTrayItems(input(f), memory).items.map(item => `${item.item}:${item.ref}:${item.status}`);
 }
 
+/** A described native node. */
+interface NativeNode {
+	readonly k: string;
+	readonly key?: string;
+	readonly p?: Readonly<Record<string, unknown>>;
+	readonly c?: readonly NativeNode[];
+}
+
 function children(node: NativeNode | undefined): NativeNode[] {
-	return (node?.c ?? []).filter((child): child is NativeNode => "k" in child);
+	return [...(node?.c ?? [])];
 }
 
 function role(node: NativeNode | undefined): unknown {
-	return node?.p ? Reflect.get(node.p, "role") : undefined;
+	return node?.p?.role;
 }
 
-const action = (act: string, value: string): NativeUiEvent => ({ type: "action", key: "", act, value, mods: [] });
+const env = staticEnvironment(loadThemeSync("dark"));
+
+/** The tray node the dock describes for `model` now. */
+function describeTray(model: TrayModel): NativeNode {
+	return createRoot(dispose => {
+		try {
+			const [root] = resolveChildren(Tray({ model, now: () => 60_000 }))();
+			if (!root) throw new Error("built nothing");
+			return describeTree(root, env) as NativeNode;
+		} finally {
+			dispose();
+		}
+	});
+}
 
 describe("tray items", () => {
-	beforeAll(async () => {
-		await initTheme();
-	});
-
 	it("gives cards to live agents and to settled ones until their job's result is consumed, and folds the rest into the done card", () => {
 		const f = fixture();
 		f.sessions.push(
@@ -178,7 +197,14 @@ describe("tray items", () => {
 			ref("Woken", "running"),
 		);
 		f.agentJobs.set("Unread", job("Unread", { type: "task", agentId: "Unread", status: "completed" }));
-		f.agentJobs.set("Delivered", job("Delivered", { type: "task", agentId: "Delivered", status: "completed" }));
+		f.agentJobs.set(
+			"Delivered",
+			job("Delivered", {
+				type: "task",
+				agentId: "Delivered",
+				status: "completed",
+			}),
+		);
 		f.consumed.add("Delivered");
 
 		const items = buildTrayItems(input(f), new TrayMemory()).items;
@@ -190,15 +216,24 @@ describe("tray items", () => {
 			"done:done:done",
 		]);
 		// Agents stand in spawn order; the done card lists its agents newest first.
-		expect(items.at(-1)).toMatchObject({ count: 2, names: "Delivered, Inline" });
+		expect(items.at(-1)).toMatchObject({
+			count: 2,
+			names: "Delivered, Inline",
+		});
 	});
 
 	it("keeps every card in its place: agents in spawn order, then jobs by start, the done card last", () => {
 		const f = fixture();
 		const memory = new TrayMemory();
 		f.sessions.push(
-			observed("Late", "active", { currentTool: "read", currentToolStartMs: 41_000 }),
-			observed("Early", "active", { currentTool: "read", currentToolStartMs: 40_000 }),
+			observed("Late", "active", {
+				currentTool: "read",
+				currentToolStartMs: 41_000,
+			}),
+			observed("Early", "active", {
+				currentTool: "read",
+				currentToolStartMs: 40_000,
+			}),
 		);
 		f.refs.push(ref("Late", "running", 200), ref("Early", "running", 100), ref("Old", "idle", 50));
 		f.jobs.push(job("bg_1", { startTime: 10 }));
@@ -210,7 +245,10 @@ describe("tray items", () => {
 		]);
 
 		// The earlier agent acts later, and its registry entry moves on: it stays where it is.
-		f.sessions[1] = observed("Early", "active", { currentTool: "grep", currentToolStartMs: 90_000 });
+		f.sessions[1] = observed("Early", "active", {
+			currentTool: "grep",
+			currentToolStartMs: 90_000,
+		});
 		f.refs[1] = { ...ref("Early", "running", 100), lastActivity: 90_000 };
 		expect(cards(f, memory)).toEqual([
 			"agent:Early:running",
@@ -301,7 +339,11 @@ describe("tray items", () => {
 		f.sessions.push({ ...observed("Scout", "completed"), lastUpdate: 90_000 });
 		f.refs.push(ref("Scout", "idle", 5));
 		f.agentJobs.set("Scout", job("Scout", { type: "task", agentId: "Scout", status: "completed" }));
-		f.jobs[0] = job("bg_1", { status: "completed", endTime: 95_000, resultText: "ok" });
+		f.jobs[0] = job("bg_1", {
+			status: "completed",
+			endTime: 95_000,
+			resultText: "ok",
+		});
 		f.consumed.add("bg_1");
 		expect(cards(f, memory)).toEqual(["agent:Old:done", "agent:Scout:done"]);
 		expect(quiet()).toBe(true);
@@ -327,15 +369,26 @@ describe("tray items", () => {
 				recentOutput: ["**Checker:** `✓ wrapper passes` (exit 0)"],
 			}),
 		});
-		f.refs.push({ ...ref("Fresh", "idle", 30), sessionFile: "/tmp/Fresh.jsonl" });
+		f.refs.push({
+			...ref("Fresh", "idle", 30),
+			sessionFile: "/tmp/Fresh.jsonl",
+		});
 		f.agentJobs.set("Fresh", job("Fresh", { type: "task", agentId: "Fresh", status: "completed" }));
 		f.consumed.add("Fresh");
 		// Failed, its result delivered: red, yet the tray stays quiet.
 		f.sessions.push(observed("Broke", "failed"));
-		f.refs.push({ ...ref("Broke", "idle", 20), sessionFile: "/tmp/Broke.jsonl" });
+		f.refs.push({
+			...ref("Broke", "idle", 20),
+			sessionFile: "/tmp/Broke.jsonl",
+		});
 		f.agentJobs.set(
 			"Broke",
-			job("Broke", { type: "task", agentId: "Broke", status: "failed", errorText: "boom\nstack" }),
+			job("Broke", {
+				type: "task",
+				agentId: "Broke",
+				status: "failed",
+				errorText: "boom\nstack",
+			}),
 		);
 		f.consumed.add("Broke");
 		// Restored from disk: no observer session, only the registry's saved history.
@@ -343,7 +396,16 @@ describe("tray items", () => {
 			...ref("Restored", "parked", 10),
 			sessionFile: "/tmp/Restored.jsonl",
 			activity: "```\n- **`NOTES.md`:** it now records the run\n```",
-			history: { agent: "m2", metrics: { tokens: 0, requests: 0, tools: 4, cost: 0, durationMs: 95_000 } },
+			history: {
+				agent: "m2",
+				metrics: {
+					tokens: 0,
+					requests: 0,
+					tools: 4,
+					cost: 0,
+					durationMs: 95_000,
+				},
+			},
 		});
 
 		const build = buildTrayItems(input(f), new TrayMemory());
@@ -377,14 +439,19 @@ describe("tray items", () => {
 			// No task, no calls recorded: a closer look would repeat the card.
 			look: false,
 		});
-		const card = describeTrayCard(restored!, 0);
+		const model = new TrayModel();
+		model.items.set([restored as TrayAgentItem]);
+		const card = children(describeTray(model))[0];
 		expect(children(children(card)[0]).map(role)).toEqual([
 			"omp.tray.dot",
 			"omp.tray.name",
 			"omp.tray.time",
 			"omp.tray.tools",
 		]);
-		expect(children(children(card)[0])[2]!.p).toMatchObject({ age: 95_000, stopped: 95_000 });
+		expect(children(children(card)[0])[2]!.p).toMatchObject({
+			age: 95_000,
+			stopped: 95_000,
+		});
 	});
 
 	it("shows the newest 48 finished agents as cards in a quiet tray, the done card standing for the earlier ones", () => {
@@ -397,7 +464,11 @@ describe("tray items", () => {
 		expect(items.slice(0, 2).map(item => item.ref)).toEqual(["Agent12", "Agent13"]);
 		expect(items.at(-2)?.ref).toBe("Agent59");
 		const done = items.at(-1)!;
-		expect(done).toMatchObject({ item: "done", name: "12 more done", count: 12 });
+		expect(done).toMatchObject({
+			item: "done",
+			name: "12 more done",
+			count: 12,
+		});
 		expect(done.item === "done" && done.entries.map(entry => entry.id)).toEqual(
 			Array.from({ length: 12 }, (_, i) => `Agent${11 - i}`),
 		);
@@ -420,7 +491,12 @@ describe("tray items", () => {
 	it("titles an agent's card with its id, keeping its type for the closer look and the aria", () => {
 		const f = fixture();
 		f.sessions.push(
-			observed("ScanAuth", "active", { agent: "m2", toolCount: 6, contextTokens: 22_000, contextWindow: 100_000 }),
+			observed("ScanAuth", "active", {
+				agent: "m2",
+				toolCount: 6,
+				contextTokens: 22_000,
+				contextWindow: 100_000,
+			}),
 		);
 		// The registry's display name for a task subagent is its agent type.
 		f.refs.push({ ...ref("ScanAuth", "running"), displayName: "m2" }, { ...ref("Old", "idle"), displayName: "m2" });
@@ -439,8 +515,18 @@ describe("tray items", () => {
 	it("follows a running agent's stream between calls: the call it writes, its newest line, its reasoning", () => {
 		const f = fixture();
 		f.refs.push(ref("Scout", "running"));
-		const last = { tool: "edit", args: "src/norm.py", argsKey: "path", endMs: 30_000 };
-		const writing = { kind: "call", tool: "write", args: "tests/test_norm.py", argsKey: "path" } as const;
+		const last = {
+			tool: "edit",
+			args: "src/norm.py",
+			argsKey: "path",
+			endMs: 30_000,
+		};
+		const writing = {
+			kind: "call",
+			tool: "write",
+			args: "tests/test_norm.py",
+			argsKey: "path",
+		} as const;
 		const doing = (overrides: Partial<AgentProgress>): [string, string] => {
 			f.sessions.splice(0, 1, observed("Scout", "active", { recentTools: [last], ...overrides }));
 			const card = buildTrayItems(input(f), new TrayMemory()).items[0];
@@ -448,28 +534,53 @@ describe("tray items", () => {
 		};
 		expect(doing({})).toEqual(["edit", "src/norm.py"]);
 		expect(doing({ streaming: writing })).toEqual(["write", "tests/test_norm.py"]);
-		expect(doing({ streaming: { ...writing, intent: "Writing the norm test: Cover the zero vector" } })).toEqual([
-			"write",
-			"Writing the norm test",
-		]);
-		expect(doing({ currentTool: "bash", currentToolArgs: "[ -f norm.ts ]: echo found" })).toEqual([
-			"bash",
-			"[ -f norm.ts ]: echo found",
-		]);
 		expect(
-			doing({ streaming: { kind: "text" }, recentOutput: ["**Next**, the norm test", "Fixed the edit"] }),
+			doing({
+				streaming: {
+					...writing,
+					intent: "Writing the norm test: Cover the zero vector",
+				},
+			}),
+		).toEqual(["write", "Writing the norm test"]);
+		expect(
+			doing({
+				currentTool: "bash",
+				currentToolArgs: "[ -f norm.ts ]: echo found",
+			}),
+		).toEqual(["bash", "[ -f norm.ts ]: echo found"]);
+		expect(
+			doing({
+				streaming: { kind: "text" },
+				recentOutput: ["**Next**, the norm test", "Fixed the edit"],
+			}),
 		).toEqual(["", "Next, the norm test"]);
 		expect(doing({ streaming: { kind: "thinking" } })).toEqual(["", "Thinking"]);
 		// A call that runs outranks what streams beside it.
 		expect(
-			doing({ currentTool: "bash", currentToolArgs: "bun test", currentToolArgsKey: "command", streaming: writing }),
+			doing({
+				currentTool: "bash",
+				currentToolArgs: "bun test",
+				currentToolArgsKey: "command",
+				streaming: writing,
+			}),
 		).toEqual(["bash", "bun test"]);
 		// The closer look ends with the call being written, as the card says.
 		expect(
-			trayAgentDetail(observed("Scout", "active", { recentTools: [last], streaming: writing }), 60_000).tail,
+			trayAgentDetail(
+				observed("Scout", "active", {
+					recentTools: [last],
+					streaming: writing,
+				}),
+				60_000,
+			).tail,
 		).toEqual([
 			{ tool: "edit", text: "src/norm.py", state: "ok", age: undefined },
-			{ tool: "write", text: "tests/test_norm.py", state: "run", age: undefined },
+			{
+				tool: "write",
+				text: "tests/test_norm.py",
+				state: "run",
+				age: undefined,
+			},
 		]);
 	});
 
@@ -488,10 +599,11 @@ describe("tray items", () => {
 			ref("Between", "running", 2),
 			ref("Revived", "running", 3),
 		);
-		const faces = buildTrayItems(input(f), new TrayMemory()).items.map(item => {
-			const props = describeTrayCard(item, 0).p ?? {};
-			return [Reflect.get(props, "ref"), Reflect.get(props, "status"), Reflect.get(props, "waiting")];
-		});
+		const faces = buildTrayItems(input(f), new TrayMemory()).items.map(item => [
+			item.ref,
+			item.status,
+			item.item === "agent" && item.waiting ? true : undefined,
+		]);
 		expect(faces).toEqual([
 			["Waiter", "running", true],
 			["Worker", "running", undefined],
@@ -506,7 +618,10 @@ describe("tray items", () => {
 			model: { id: "gpt-5.5", thinking: true },
 			thinkingLevel: "low",
 		} as unknown as AgentRecordLike["session"];
-		const ran = { resolvedModel: "anthropic/claude-opus-4-5", resolvedThinkingLevel: ThinkingLevel.High };
+		const ran = {
+			resolvedModel: "anthropic/claude-opus-4-5",
+			resolvedThinkingLevel: ThinkingLevel.High,
+		};
 		f.sessions.push(observed("Running", "active", ran), observed("Settled", "completed", ran));
 		f.refs.push(
 			{ ...ref("Running", "running"), session: switched },
@@ -541,19 +656,31 @@ describe("tray items", () => {
 			const item = buildTrayItems(input(f, now), memory).items.find(candidate => candidate.ref === "Scout");
 			return item?.item === "agent" ? item.acted : undefined;
 		};
-		f.sessions.push(observed("Scout", "active", { currentTool: "read", currentToolStartMs: 41_000 }));
+		f.sessions.push(
+			observed("Scout", "active", {
+				currentTool: "read",
+				currentToolStartMs: 41_000,
+			}),
+		);
 		f.refs.push(ref("Scout", "running"));
 		expect(acted(60_000)).toBe(41_000);
 
 		// Progress that starts no call (more tokens, a newer frame) leaves it.
 		f.sessions[0] = {
-			...observed("Scout", "active", { currentTool: "read", currentToolStartMs: 41_000, tokens: 9_000 }),
+			...observed("Scout", "active", {
+				currentTool: "read",
+				currentToolStartMs: 41_000,
+				tokens: 9_000,
+			}),
 			lastUpdate: 70_000,
 			progressAt: 70_000,
 		};
 		expect(acted(70_000)).toBe(41_000);
 
-		f.sessions[0] = observed("Scout", "active", { currentTool: "grep", currentToolStartMs: 45_000 });
+		f.sessions[0] = observed("Scout", "active", {
+			currentTool: "grep",
+			currentToolStartMs: 45_000,
+		});
 		expect(acted(80_000)).toBe(45_000);
 
 		// It settles: `acted` is the moment it did; its job's result still waits, so it keeps its card
@@ -567,11 +694,28 @@ describe("tray items", () => {
 	});
 });
 
-describe("Tray", () => {
-	beforeAll(async () => {
-		await initTheme();
-	});
+/** A tray fed from `host`: its feed, model, actions as the dock sends them, and its described node (refreshed). */
+function feedTray(host: TrayHost) {
+	const model = new TrayModel();
+	const feed = new TrayFeed(host, model);
+	feeds.push(feed);
+	return {
+		feed,
+		model,
+		act: (act: string, ref: string) => model.onAction?.(act, ref),
+		describe: (): NativeNode => {
+			feed.refresh();
+			return describeTray(model);
+		},
+	};
+}
 
+const feeds: TrayFeed[] = [];
+afterEach(() => {
+	for (const feed of feeds.splice(0)) feed.dispose();
+});
+
+describe("TrayFeed", () => {
 	function setup(f: Fixture) {
 		const host = {
 			input: () => input(f),
@@ -580,24 +724,28 @@ describe("Tray", () => {
 			showJobsSheet: vi.fn(),
 			stopAgent: vi.fn(),
 			cancelJob: vi.fn(),
-			requestRender: vi.fn(),
 		} satisfies TrayHost;
-		const tray = new Tray(host);
-		tray.setOnHost(true);
-		return { host, tray };
+		return { host, tray: feedTray(host) };
 	}
 
 	function seeded(): Fixture {
 		const f = fixture();
 		f.sessions.push(
-			observed("Scout", "active", { currentTool: "read", currentToolStartMs: 41_000 }),
+			observed("Scout", "active", {
+				currentTool: "read",
+				currentToolStartMs: 41_000,
+			}),
 			observed("Review", "completed"),
 		);
 		f.refs.push(ref("Scout", "running"), ref("Review", "idle"), ref("Old", "idle"));
 		f.agentJobs.set("Review", job("Review", { type: "task", agentId: "Review", status: "completed" }));
 		f.jobs.push(
 			job("bg_1", { progressText: "one\ntwo" }),
-			job("bg_2", { status: "completed", endTime: 3_000, resultText: "one\ntwo\nok" }),
+			job("bg_2", {
+				status: "completed",
+				endTime: 3_000,
+				resultText: "one\ntwo\nok",
+			}),
 		);
 		return f;
 	}
@@ -611,35 +759,35 @@ describe("Tray", () => {
 		const { host, tray } = setup(seeded());
 		tray.describe();
 
-		tray.handleNativeEvent(action("tray.peek", "Scout"));
+		tray.act("tray.peek", "Scout");
 		expect(tray.describe().p).toMatchObject({ peek: "Scout" });
-		tray.handleNativeEvent(action("tray.open", "Scout"));
+		tray.act("tray.open", "Scout");
 		expect(host.focusAgent).toHaveBeenCalledWith("Scout");
 		// Opening clears the closer look.
 		expect(tray.describe().p && Reflect.get(tray.describe().p!, "peek")).toBeUndefined();
-		tray.handleNativeEvent(action("tray.open", "bg_1"));
+		tray.act("tray.open", "bg_1");
 		// The sheet opens on that job.
 		expect(host.showJobsSheet).toHaveBeenCalledWith("bg_1");
-		tray.handleNativeEvent(action("tray.peek", "done"));
-		tray.handleNativeEvent(action("tray.open", "done"));
+		tray.act("tray.peek", "done");
+		tray.act("tray.open", "done");
 		// The closer look stays: the done card is opened row by row.
 		expect(tray.describe().p).toMatchObject({ peek: "done" });
-		tray.handleNativeEvent(action("tray.peek", ""));
+		tray.act("tray.peek", "");
 
-		tray.handleNativeEvent(action("tray.stop", "Scout"));
+		tray.act("tray.stop", "Scout");
 		expect(host.stopAgent).toHaveBeenCalledWith("Scout");
-		tray.handleNativeEvent(action("tray.stop", "bg_1"));
+		tray.act("tray.stop", "bg_1");
 		expect(host.cancelJob).toHaveBeenCalledWith("bg_1");
 		// A settled item has nothing to stop.
-		tray.handleNativeEvent(action("tray.stop", "bg_2"));
+		tray.act("tray.stop", "bg_2");
 		expect(host.cancelJob).toHaveBeenCalledTimes(1);
 
 		// Dismissing a settled agent folds it into the done card; a settled job's card goes.
 		expect(refs(tray.describe())).toEqual(["Scout", "Review", "bg_1", "bg_2", "done"]);
-		tray.handleNativeEvent(action("tray.dismiss", "Review"));
-		tray.handleNativeEvent(action("tray.dismiss", "bg_2"));
+		tray.act("tray.dismiss", "Review");
+		tray.act("tray.dismiss", "bg_2");
 		// A live card cannot be dismissed.
-		tray.handleNativeEvent(action("tray.dismiss", "bg_1"));
+		tray.act("tray.dismiss", "bg_1");
 		const after = tray.describe();
 		expect(refs(after)).toEqual(["Scout", "bg_1", "done"]);
 		expect(JSON.stringify(children(after).find(node => node.p && Reflect.get(node.p, "ref") === "done"))).toContain(
@@ -649,9 +797,9 @@ describe("Tray", () => {
 		const calls = (): number[] =>
 			[host.focusAgent, host.showJobsSheet, host.stopAgent, host.cancelJob].map(fn => fn.mock.calls.length);
 		const before = calls();
-		tray.handleNativeEvent(action("agents.open", ""));
+		tray.act("agents.open", "");
 		expect(calls()).toEqual(before);
-		tray.handleNativeEvent(action("jobs.open", ""));
+		tray.act("jobs.open", "");
 		expect(host.showJobsSheet).toHaveBeenCalledTimes(2);
 	});
 
@@ -659,64 +807,65 @@ describe("Tray", () => {
 		const f = seeded();
 		const { tray } = setup(f);
 		tray.describe();
-		tray.handleNativeEvent(action("tray.peek", "nobody"));
+		tray.act("tray.peek", "nobody");
 		expect(children(tray.describe()).some(node => role(node) === "omp.tray.peek")).toBe(false);
 
-		tray.handleNativeEvent(action("tray.peek", "bg_2"));
+		tray.act("tray.peek", "bg_2");
 		const look = children(tray.describe()).at(-1);
 		expect(look?.p).toMatchObject({ role: "omp.tray.peek", ref: "bg_2" });
 		expect(JSON.stringify(look)).toContain('"tray.dismiss=bg_2"');
 
 		f.consumed.add("bg_2");
-		tray.refresh();
 		const root = tray.describe();
 		expect(children(root).some(node => role(node) === "omp.tray.peek")).toBe(false);
 		expect(root.p && Reflect.get(root.p, "peek")).toBeUndefined();
 	});
 
-	it("captions the idle status row while the tray shows cards, and stays silent without them", () => {
+	it("captions the status row while the tray shows cards, and stays silent without them", () => {
 		const f = fixture();
 		f.jobs.push(job("bg_1"), job("bg_2", { status: "failed", endTime: 2_000, errorText: "boom" }));
 		const { tray } = setup(f);
-		expect(tray.caption(true)?.p).toEqual({
-			role: "omp.tray.caption",
-			text: "1 job in the background",
-			wrap: "none",
-			truncate: "end",
-		});
-		expect(tray.caption(false)).toBeUndefined();
+		tray.feed.refresh();
+		expect(tray.feed.caption()).toBe("1 job in the background");
 		// A failure alone is still worth the row.
 		f.jobs.splice(0, 1);
-		expect(tray.caption(true)?.p).toMatchObject({ text: "1 job finished" });
+		tray.feed.refresh();
+		expect(tray.feed.caption()).toBe("1 job finished");
 		// Only finished work: the tray is quiet, and a caption over it would announce nothing.
-		f.jobs[0] = job("bg_2", { status: "completed", endTime: 2_000, resultText: "ok" });
-		expect(tray.caption(true)).toBeUndefined();
-		expect(tray.describe().p).toMatchObject({ role: "omp.tray", quiet: true, main: "working" });
+		f.jobs[0] = job("bg_2", {
+			status: "completed",
+			endTime: 2_000,
+			resultText: "ok",
+		});
+		expect(tray.describe().p).toMatchObject({
+			role: "omp.tray",
+			quiet: true,
+			main: "working",
+		});
+		expect(tray.feed.caption()).toBeUndefined();
 		f.jobs.splice(0, 1);
-		expect(tray.caption(true)).toBeUndefined();
+		tray.feed.refresh();
+		expect(tray.feed.caption()).toBeUndefined();
 	});
 
-	it("describes nothing in the header off a tray host, and focuses the tray only while it shows cards", () => {
+	it("focuses the tray only while it shows cards", () => {
 		const f = fixture();
-		const { host, tray } = setup(f);
+		const { tray } = setup(f);
 		tray.describe();
-		expect(tray.focus()).toBe(false);
+		expect(tray.model.focusTray()).toBe(false);
 		f.jobs.push(job("bg_1"));
-		tray.refresh();
-		expect(tray.focus()).toBe(true);
+		tray.feed.refresh();
+		expect(tray.model.focusTray()).toBe(true);
 		expect(tray.describe().p).toMatchObject({ focus: 1 });
-		expect(host.requestRender).toHaveBeenCalled();
-
-		tray.setOnHost(false);
-		expect(tray.caption(true)).toBeUndefined();
-		expect(tray.focus()).toBe(false);
 	});
 
 	it("looks closer at, opens and dismisses a finished agent's own card in a quiet tray", () => {
 		const f = fixture();
 		// Finished in this run, with calls to list.
 		f.sessions.push(
-			observed("Openable", "completed", { recentTools: [{ tool: "read", args: "a.ts", endMs: 1_000 }] }),
+			observed("Openable", "completed", {
+				recentTools: [{ tool: "read", args: "a.ts", endMs: 1_000 }],
+			}),
 		);
 		f.refs.push(
 			{ ...ref("Openable", "idle", 2), sessionFile: "/tmp/Openable.jsonl" },
@@ -726,7 +875,7 @@ describe("Tray", () => {
 		const { host, tray } = setup(f);
 		expect(refs(tray.describe())).toEqual(["Advisor", "Openable"]);
 
-		tray.handleNativeEvent(action("tray.peek", "Openable"));
+		tray.act("tray.peek", "Openable");
 		const look = children(tray.describe()).at(-1)!;
 		expect(look.p).toMatchObject({ role: "omp.tray.peek", ref: "Openable" });
 		expect(
@@ -734,22 +883,22 @@ describe("Tray", () => {
 				.filter(node => node.k === "button")
 				.map(node => node.p && Reflect.get(node.p, "actions")),
 		).toEqual([{ click: "tray.open=Openable" }, { click: "tray.dismiss=Openable" }, { click: "tray.peek=" }]);
-		tray.handleNativeEvent(action("tray.open", "Openable"));
+		tray.act("tray.open", "Openable");
 		expect(host.focusAgent).toHaveBeenCalledWith("Openable");
 
 		// One nothing can open, with nothing more to show than its card: no closer look, no Open.
-		tray.handleNativeEvent(action("tray.peek", "Openable"));
+		tray.act("tray.peek", "Openable");
 		const advisor = children(tray.describe()).find(node => node.p && Reflect.get(node.p, "ref") === "Advisor")!;
 		expect(advisor.p).toMatchObject({ look: false });
-		tray.handleNativeEvent(action("tray.peek", "Advisor"));
+		tray.act("tray.peek", "Advisor");
 		// The open closer look stays where it was.
 		expect(tray.describe().p).toMatchObject({ peek: "Openable" });
-		tray.handleNativeEvent(action("tray.open", "Advisor"));
+		tray.act("tray.open", "Advisor");
 		expect(host.focusAgent).toHaveBeenCalledTimes(1);
 
 		// Dismissed without a closer look ever opened on it: its card goes, the done card keeps it reachable.
-		tray.handleNativeEvent(action("tray.peek", ""));
-		tray.handleNativeEvent(action("tray.dismiss", "Advisor"));
+		tray.act("tray.peek", "");
+		tray.act("tray.dismiss", "Advisor");
 		const after = tray.describe();
 		expect(refs(after)).toEqual(["Openable", "done"]);
 		expect(JSON.stringify(children(after).find(node => node.p && Reflect.get(node.p, "ref") === "done"))).toContain(
@@ -760,7 +909,12 @@ describe("Tray", () => {
 	it("marks the cards whose closer look would add nothing, and ignores a look at them", () => {
 		const f = fixture();
 		// A running agent with its task and a call to list: a closer look worth having.
-		f.sessions.push(observed("Scout", "active", { currentTool: "read", currentToolArgs: "a.ts" }));
+		f.sessions.push(
+			observed("Scout", "active", {
+				currentTool: "read",
+				currentToolArgs: "a.ts",
+			}),
+		);
 		f.refs.push(
 			{ ...ref("Scout", "running"), sessionFile: "/tmp/Scout.jsonl" },
 			// Woken by a message: running in the registry, nothing recorded to list.
@@ -788,14 +942,14 @@ describe("Tray", () => {
 			bg_2: false,
 			bg_3: undefined,
 		});
-		tray.handleNativeEvent(action("tray.peek", "bg_2"));
+		tray.act("tray.peek", "bg_2");
 		expect(children(tray.describe()).some(node => role(node) === "omp.tray.peek")).toBe(false);
 		// Its menu works without a closer look.
-		tray.handleNativeEvent(action("tray.stop", "bg_2"));
+		tray.act("tray.stop", "bg_2");
 		expect(host.cancelJob).toHaveBeenCalledWith("bg_2");
-		tray.handleNativeEvent(action("tray.stop", "Woken"));
+		tray.act("tray.stop", "Woken");
 		expect(host.stopAgent).toHaveBeenCalledWith("Woken");
-		tray.handleNativeEvent(action("tray.peek", "Scout"));
+		tray.act("tray.peek", "Scout");
 		expect(tray.describe().p).toMatchObject({ peek: "Scout" });
 	});
 
@@ -806,7 +960,10 @@ describe("Tray", () => {
 		for (let i = 0; i < 53; i++) f.refs.push(ref(`Old${i}`, "idle", i));
 		// Finished in this run: the observer knows how it went and what it last said.
 		// Its session was switched to another model after the run; the list names the one it ran on.
-		const switched = { model: { id: "gpt-5.5", thinking: true }, thinkingLevel: "low" };
+		const switched = {
+			model: { id: "gpt-5.5", thinking: true },
+			thinkingLevel: "low",
+		};
 		f.refs.push({
 			...ref("Fresh", "idle", 100),
 			sessionFile: "/tmp/fresh.jsonl",
@@ -827,12 +984,14 @@ describe("Tray", () => {
 			...ref("Restored", "aborted", 99),
 			sessionFile: "/tmp/restored.jsonl",
 			activity: "Fixed the lexer\nand more",
-			history: { metrics: { tokens: 0, requests: 0, tools: 4, cost: 0, durationMs: 0 } },
+			history: {
+				metrics: { tokens: 0, requests: 0, tools: 4, cost: 0, durationMs: 0 },
+			},
 		});
 		f.unopenable.add("Old52");
 		const { host, tray } = setup(f);
 		tray.describe();
-		tray.handleNativeEvent(action("tray.peek", "done"));
+		tray.act("tray.peek", "done");
 		const look = children(tray.describe()).at(-1)!;
 		expect(look.p).toMatchObject({ role: "omp.tray.peek", ref: "done" });
 		// Only the close button: the rows open agents, nothing opens the done card.
@@ -848,7 +1007,10 @@ describe("Tray", () => {
 		const rows = children(list);
 		expect(rows).toHaveLength(51);
 		expect(rows.slice(0, 3).map(row => row.p && Reflect.get(row.p, "ref"))).toEqual(["Fresh", "Restored", "Old52"]);
-		expect(rows.at(-1)!.p).toMatchObject({ role: "omp.tray.done.more", text: "+5 earlier" });
+		expect(rows.at(-1)!.p).toMatchObject({
+			role: "omp.tray.done.more",
+			text: "+5 earlier",
+		});
 
 		const [fresh, restored, old] = rows;
 		expect(fresh!.p).toMatchObject({
@@ -871,13 +1033,15 @@ describe("Tray", () => {
 		// Unknown numbers are left out rather than printed as zeros.
 		expect(children(restored).map(role)).toEqual(["omp.tray.dot", "omp.tray.name", "omp.tray.meta", "omp.tray.line"]);
 		expect(JSON.stringify(children(restored)[2]!.p)).toContain('"4 tools"');
-		expect(children(restored)[0]!.p).toMatchObject({ spans: [{ t: "●", s: "muted" }] });
+		expect(children(restored)[0]!.p).toMatchObject({
+			spans: [{ t: "●", s: "muted" }],
+		});
 		// A row nothing can open sends no click.
 		expect(old!.p && Reflect.get(old!.p, "actions")).toBeUndefined();
 
-		tray.handleNativeEvent(action("tray.open", "Old52"));
+		tray.act("tray.open", "Old52");
 		expect(host.focusAgent).not.toHaveBeenCalled();
-		tray.handleNativeEvent(action("tray.open", "Restored"));
+		tray.act("tray.open", "Restored");
 		expect(host.focusAgent).toHaveBeenCalledWith("Restored");
 		expect(tray.describe().p && Reflect.get(tray.describe().p!, "peek")).toBeUndefined();
 	});
@@ -887,15 +1051,17 @@ describe("Tray", () => {
 		const { tray } = setup(f);
 		expect(tray.describe().p).toEqual({ role: "omp.tray", hidden: true });
 		f.main = "waiting";
-		expect(tray.mainChanged()).toBe(false);
+		expect(tray.feed.syncMain()).toBe(false);
 
 		f.jobs.push(job("bg_1"));
-		tray.refresh();
-		expect(tray.describe().p).toMatchObject({ role: "omp.tray", main: "waiting" });
+		expect(tray.describe().p).toMatchObject({
+			role: "omp.tray",
+			main: "waiting",
+		});
 		f.main = "idle";
-		expect(tray.mainChanged()).toBe(true);
+		expect(tray.feed.syncMain()).toBe(true);
 		expect(tray.describe().p).toMatchObject({ main: "idle" });
-		expect(tray.mainChanged()).toBe(false);
+		expect(tray.feed.syncMain()).toBe(false);
 	});
 });
 
@@ -905,7 +1071,10 @@ describe("TrayMainActivity", () => {
 		toolCallId,
 		toolName,
 	});
-	const end = (toolCallId: string) => ({ type: "tool_execution_end" as const, toolCallId });
+	const end = (toolCallId: string) => ({
+		type: "tool_execution_end" as const,
+		toolCallId,
+	});
 	const none = (): boolean => false;
 
 	it("stays waiting after a wait returns, while the model thinks and writes, until another call starts or it yields", () => {
@@ -946,15 +1115,13 @@ describe("TrayMainActivity", () => {
 			showJobsSheet: vi.fn(),
 			stopAgent: vi.fn(),
 			cancelJob: vi.fn(),
-			requestRender: vi.fn(),
 		} satisfies TrayHost;
-		const tray = new Tray(host);
-		tray.setOnHost(true);
+		const tray = feedTray(host);
 		main.handle(start("call-1", "wait"), true, none);
 		expect(tray.describe().p).toMatchObject({ main: "waiting" });
 		for (const event of [end("call-1"), start("call-2", "wait"), end("call-2"), start("call-3", "vibe_wait")]) {
 			main.handle(event, true, none);
-			expect(tray.mainChanged()).toBe(false);
+			expect(tray.feed.syncMain()).toBe(false);
 		}
 		expect(tray.describe().p).toMatchObject({ main: "waiting" });
 	});
@@ -999,9 +1166,17 @@ describe("TrayMainActivity", () => {
 		const state = () => main.state(inline);
 		expect(state()).toBe("working");
 		// A background spawn of the same call blocks nothing.
-		sessions.push({ ...observed("Bg", "active"), parentToolCallId: "call-1", detached: true });
+		sessions.push({
+			...observed("Bg", "active"),
+			parentToolCallId: "call-1",
+			detached: true,
+		});
 		expect(state()).toBe("working");
-		sessions.push({ ...observed("Inline", "active"), parentToolCallId: "call-1", detached: false });
+		sessions.push({
+			...observed("Inline", "active"),
+			parentToolCallId: "call-1",
+			detached: false,
+		});
 		expect(state()).toBe("waiting");
 		// It returns while running its agent inline: still waiting until something else starts.
 		main.handle(end("call-1"), true, inline);

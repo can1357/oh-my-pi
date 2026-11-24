@@ -1,144 +1,108 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import { getKeybindings, type KeybindingsManager as TuiKeybindingsManager, setKeybindings } from "@oh-my-pi/pi-tui";
-import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import { SessionSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-selector";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
-
-let previous: TuiKeybindingsManager;
+import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import type { SessionSelectorEntry } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/session-selector";
+import { initTheme } from "../../../src/ui/theme/service";
+import { type MountedSessionSelector, mountSessionSelector, sessionEntry } from "../../helpers/session-selector";
 
 beforeAll(() => {
 	initTheme();
 });
 
-// The app installs its keymap before any picker opens; delete runs through `app.session.delete`.
-beforeEach(() => {
-	previous = getKeybindings();
-	setKeybindings(KeybindingsManager.inMemory());
-});
-
 afterEach(() => {
-	setKeybindings(previous);
 	vi.restoreAllMocks();
 });
 
-function createSession(id: string, title: string): SessionInfo {
-	return {
-		path: `/tmp/${id}.jsonl`,
-		id,
-		cwd: "/tmp",
-		title,
-		created: new Date("2024-01-01T00:00:00Z"),
-		modified: new Date("2024-01-02T00:00:00Z"),
-		messageCount: 1,
-		size: 0,
-		firstMessage: `${title} first message`,
-		allMessagesText: `${title} first message`,
-	};
+/** Resolves once every delete the picker asked for has settled (its reaction runs first). */
+async function deletes(onDelete: { mock: { results: { value: unknown }[] } }): Promise<void> {
+	await Promise.allSettled(onDelete.mock.results.map(result => result.value));
 }
 
-function createSelector(onDelete: (session: SessionInfo) => Promise<boolean>): SessionSelectorComponent<SessionInfo> {
-	return new SessionSelectorComponent(
-		[createSession("session-a", "Alpha"), createSession("session-b", "Beta")],
-		() => {},
-		() => {},
-		() => {},
-		{ onDelete },
-	);
+function mount(onDelete: (session: SessionSelectorEntry) => Promise<boolean>): MountedSessionSelector {
+	return mountSessionSelector({
+		sessions: [
+			sessionEntry("session-a", "Alpha", "2024-01-03T00:00:00Z"),
+			sessionEntry("session-b", "Beta", "2024-01-02T00:00:00Z"),
+		],
+		onDelete,
+	});
 }
 
-function renderText(selector: SessionSelectorComponent<SessionInfo>): string {
-	return selector.render(120).join("\n");
-}
-
-describe("SessionSelectorComponent delete confirmation", () => {
+describe("session picker delete confirmation", () => {
 	it("keeps the session visible and shows the error when delete fails after confirmation", async () => {
 		const onDelete = vi.fn(async () => {
 			throw new Error("disk failed");
 		});
-		const selector = createSelector(onDelete);
+		const picker = mount(onDelete);
 
-		selector.handleInput("\x1b[3~");
-		expect(renderText(selector)).toContain("Delete session?");
-		expect(renderText(selector)).toContain("Alpha");
+		picker.press("delete");
+		expect(picker.screen()).toContain("Delete “Alpha”?");
 
-		selector.handleInput("\n");
-		await Bun.sleep(0);
+		picker.press("enter");
+		await deletes(onDelete);
 
-		const rendered = renderText(selector);
+		const screen = picker.screen();
 		expect(onDelete).toHaveBeenCalledTimes(1);
-		expect(rendered).toContain("Error: disk failed");
-		expect(rendered).toContain("Alpha");
-		expect(rendered).toContain("Beta");
-		expect(rendered).not.toContain("Delete session?");
+		expect(screen).toContain("Error: disk failed");
+		expect(screen).toContain("Alpha");
+		expect(screen).toContain("Beta");
+		expect(screen).not.toContain("Delete “Alpha”?");
 	});
 
 	it("keeps the session visible when delete is canceled upstream", async () => {
 		const onDelete = vi.fn(async () => false);
-		const selector = createSelector(onDelete);
+		const picker = mount(onDelete);
 
-		selector.handleInput("\x1b[3~");
-		selector.handleInput("\n");
-		await Bun.sleep(0);
+		picker.press("delete", "enter");
+		await deletes(onDelete);
 
-		const rendered = renderText(selector);
+		const screen = picker.screen();
 		expect(onDelete).toHaveBeenCalledTimes(1);
-		expect(rendered).toContain("Alpha");
-		expect(rendered).toContain("Beta");
-		expect(rendered).not.toContain("Error:");
+		expect(screen).toContain("Alpha");
+		expect(screen).toContain("Beta");
+		expect(screen).not.toContain("Error:");
 	});
 
 	it("removes the session row after a successful delete", async () => {
 		const onDelete = vi.fn(async () => true);
-		const selector = createSelector(onDelete);
+		const picker = mount(onDelete);
 
-		selector.handleInput("\x1b[3~");
-		selector.handleInput("\n");
-		await Bun.sleep(0);
+		picker.press("delete", "enter");
+		await deletes(onDelete);
 
-		const rendered = renderText(selector);
+		const screen = picker.screen();
 		expect(onDelete).toHaveBeenCalledTimes(1);
-		expect(rendered).not.toContain("Alpha");
-		expect(rendered).toContain("Beta");
+		expect(screen).not.toContain("Alpha");
+		expect(screen).toContain("Beta");
 	});
 
-	it("Backspace on an empty search query triggers delete confirmation (macOS Fn+Backspace sends \\x7f)", async () => {
+	it("Backspace on an empty search query asks to delete the session (macOS Fn+Backspace)", async () => {
 		const onDelete = vi.fn(async () => true);
-		const selector = createSelector(onDelete);
+		const picker = mount(onDelete);
 
-		// No search query typed yet — Backspace should mean "delete session",
-		// not "edit the (empty) search box".
-		selector.handleInput("\x7f");
-		expect(renderText(selector)).toContain("Delete session?");
-		expect(renderText(selector)).toContain("Alpha");
+		picker.press("backspace");
+		expect(picker.screen()).toContain("Delete “Alpha”?");
 
-		// Confirm.
-		selector.handleInput("\n");
-		await Bun.sleep(0);
+		picker.press("enter");
+		await deletes(onDelete);
 
 		expect(onDelete).toHaveBeenCalledTimes(1);
-		expect(renderText(selector)).not.toContain("Alpha");
-		expect(renderText(selector)).toContain("Beta");
+		expect(picker.screen()).not.toContain("Alpha");
+		expect(picker.screen()).toContain("Beta");
 	});
 
 	it("Backspace with a non-empty search query edits the query, not the session", async () => {
 		const onDelete = vi.fn(async () => true);
-		const selector = createSelector(onDelete);
+		const picker = mount(onDelete);
 
-		// Type a query, then Backspace — must delete a query char, NOT a session.
-		selector.handleInput("alpha");
-		const beforeBackspace = renderText(selector);
-		expect(beforeBackspace).toContain("alpha");
+		picker.press(..."alpha");
+		expect(picker.screen()).toContain("alpha");
 
-		selector.handleInput("\x7f");
-		await Bun.sleep(0);
+		picker.press("backspace");
+		await deletes(onDelete);
 
-		const afterBackspace = renderText(selector);
-		// Deletion did not fire.
+		const screen = picker.screen();
 		expect(onDelete).not.toHaveBeenCalled();
-		expect(afterBackspace).not.toContain("Delete session?");
-		// The query was actually edited: "alpha" lost its trailing "a".
-		expect(afterBackspace).toContain("alph");
-		expect(afterBackspace).not.toContain("alpha");
+		expect(screen).not.toContain("Delete “");
+		expect(screen).toContain("alph");
+		expect(screen).not.toContain("alpha");
 	});
 });

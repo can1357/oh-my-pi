@@ -9,7 +9,7 @@ import {
 	retainCachedGeneration,
 	resolveGithubCacheAuthKey,
 } from "./github-cache";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 
 export const PR_DIFF_FILES_PAGE_SIZE = 100;
 export const PR_DIFF_FILES_MAX = 3000;

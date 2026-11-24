@@ -2,8 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Model, ServiceTier } from "@oh-my-pi/pi-ai";
-import type { AgentsHubDeps } from "@oh-my-pi/pi-tui/overlays/agents-hub";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { shortenPath } from "../utils/render-utils";
 import { isEnoent, prompt } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -24,7 +23,6 @@ import { refreshAgentDiscovery } from "../task";
 import { discoverAgents } from "../task/discovery";
 import { resolveAgentPrewalkDefault } from "../task/prewalk";
 import { createModelBrowserSource } from "./model-browser-source";
-
 import {
 	cfgTaskAgentAdvisor,
 	cfgTaskAgentModelOverrides,
@@ -32,6 +30,7 @@ import {
 	cfgTaskDisabledAgents,
 	cfgTaskPrewalk,
 } from "../task/settings";
+import type { AgentsHubDeps } from "../ui/overlays/pickers/agents-hub";
 
 function extractAssistantText(messages: AgentMessage[]): string | null {
 	for (let i = messages.length - 1; i >= 0; i--) {

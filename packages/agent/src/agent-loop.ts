@@ -2403,16 +2403,7 @@ async function streamAssistantResponse(
 							}
 						}
 						finalMessage = snapshotAssistantMessage(finalMessage);
-						// Unhealed DSML markup must not reach history, including reasoning
-						// and turns with a valid structured call. Only a failed text-only
-						// call needs the recovery nudge.
-						if (dsmlLeakRecoveryEnabled) {
-							const hasToolCall = finalMessage.content.some(block => block.type === "toolCall");
-							const removed = removeDsmlToolMarkupLeak(finalMessage);
-							if (removed && finalMessage.stopReason === "stop" && !hasToolCall) {
-								dsmlLeakMessages.add(finalMessage);
-							}
-						}
+						if (dsmlLeakRecoveryEnabled && removeDsmlLeak(finalMessage)) dsmlLeakMessages.add(finalMessage);
 						// Expand inline macros (and any other registered rewrite) on the
 						// finalized message before it reaches the context, the UI, or tool
 						// dispatch — so a single mutation is the source of truth for all three.
@@ -2695,10 +2686,12 @@ async function streamAssistantResponse(
 						throw new HarmonyLeakInterruption(detection, removed, recovered);
 					}
 				}
+				const dsmlLeakNudge = dsmlLeakRecoveryEnabled && removeDsmlLeak(trailing);
 				if (config.transformAssistantMessage) {
 					await config.transformAssistantMessage(trailing, requestSignal);
 				}
 				trailing = snapshotAssistantMessage(trailing);
+				if (dsmlLeakNudge) dsmlLeakMessages.add(trailing);
 				const finalToolCallsCanDispatch =
 					!requestSignal?.aborted &&
 					(canDispatchFinalToolCalls?.(trailing) ??
@@ -2962,6 +2955,16 @@ interface PreparedToolCall {
 
 /** Committed assistant messages whose unhealed DSML tool-call markup was stripped; the loop answers them with a failure nudge. */
 const dsmlLeakMessages = new WeakSet<AssistantMessage>();
+
+/**
+ * Strip unhealed DSML markup from a finalized turn before anything dispatches
+ * or commits it: text, reasoning, and tool-call arguments. Returns whether the
+ * turn was a failed text-only call that needs the recovery nudge.
+ */
+function removeDsmlLeak(message: AssistantMessage): boolean {
+	const hasToolCall = message.content.some(block => block.type === "toolCall");
+	return removeDsmlToolMarkupLeak(message) && message.stopReason === "stop" && !hasToolCall;
+}
 
 /**
  * Prepare results computed in the stream-done branch (before `message_start`/

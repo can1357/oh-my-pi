@@ -145,6 +145,7 @@ export const readTextFromClipboard = nativeBindings.readTextFromClipboard ?? mis
 export const reapChild = nativeBindings.reapChild ?? missingNativeExport("reapChild");
 export const renderMermaidAscii = nativeBindings.renderMermaidAscii ?? missingNativeExport("renderMermaidAscii");
 export const renderSnapcompactPng = nativeBindings.renderSnapcompactPng ?? missingNativeExport("renderSnapcompactPng");
+export const repairHeredocContinuations = nativeBindings.repairHeredocContinuations ?? missingNativeExport("repairHeredocContinuations");
 export const restoreConsoleInputMode = nativeBindings.restoreConsoleInputMode ?? missingNativeExport("restoreConsoleInputMode");
 export const runShellMain = nativeBindings.runShellMain ?? missingNativeExport("runShellMain");
 export const search = nativeBindings.search ?? missingNativeExport("search");

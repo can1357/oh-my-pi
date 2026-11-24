@@ -162,7 +162,7 @@ The session bootstrap bridge converts custom tools to extension `ToolDefinition`
 
 Tool definitions may also declare `strict`, `hidden`, `loadMode`, `deferrable`, `readsSkillUris`, `mcpServerName`, `mcpToolName`, `legacyName`, and `approval`. When `loadMode` is omitted, custom tool names default to `"discoverable"` except for the canonical essential built-in names (`read`, `write`, `bash`, `edit`, `glob`, `find`, `eval`, `task`, `wait`, `learn`, `manage_skill`, `context_notes`, and `new_context`), which default to `"essential"` so wrappers or re-registrations do not demote them. An explicit `loadMode` always wins; use `"essential"` to keep any other tool top-level.
 
-Although the public `CustomTool` type also declares `formatApprovalDetails`, `describeCall`, and `describeResult`, the SDK/discovery conversion does not propagate those callbacks into the registered definition. Direct `CustomToolAdapter` consumers retain them.
+Although the public `CustomTool` type also declares `formatApprovalDetails`, the SDK/discovery conversion does not propagate that callback into the registered definition. Direct `CustomToolAdapter` consumers retain it.
 
 ## How tools are exposed to the model
 
@@ -180,15 +180,18 @@ Optional rendering hooks:
 - `renderCall(args, options, theme)`
 - `renderResult(result, options, theme)`
 
+Each returns pi-tui nodes (JSX from `@oh-my-pi/pi-tui`), a rows object `{ render(width): string[] }`, or `undefined`; see [extension rendering](./extensions.md#migrating-from-pi-tui). The `theme` is pi-tui's theme plus `bold`, `italic`, `underline`, `strikethrough` and `inverse`.
+
 The normal SDK and filesystem-discovery paths wrap custom tools as extensions. On those paths, `renderResult` receives only the three arguments above; the bridge does not forward the original tool arguments. The public `CustomTool` type retains an optional fourth `args` parameter for direct `CustomToolAdapter` consumers.
 
 On extension-adapter paths, `renderCall`'s `options` argument additionally answers the `Theme` API, allowing upstream pi renderers to use their second argument for styling. The third argument remains the theme, not upstream pi's context object.
 
-Runtime behavior in TUI:
+Runtime behavior in the interactive UI:
 
-- If hooks exist, tool output is rendered inside a `Box` container.
+- If hooks exist, their output is drawn inside the padded custom-tool box, call first, then result.
+- Nodes are drawn by the terminal and by Tern. Rows objects are drawn by the terminal only; Tern shows the generic tool card for them.
 - `renderResult` receives `{ expanded, isPartial, spinnerFrame? }` as its `options` argument.
-- Renderer errors are caught and logged; UI falls back to default text rendering.
+- A hook that throws, or returns something that is neither nodes nor rows, is reported; when nothing else drew, the generic tool card shows. Rows that throw while painting draw one error row.
 
 ## Session/state handling
 

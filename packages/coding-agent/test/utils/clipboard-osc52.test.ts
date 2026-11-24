@@ -32,7 +32,7 @@ describe("copyToClipboard OSC 52 routing", () => {
 	});
 
 	it("writes OSC 52 through the active terminal, never straight to stdout", async () => {
-		harness = startActiveTerminal();
+		harness = await startActiveTerminal();
 
 		await copyToClipboard("probe");
 
@@ -41,7 +41,7 @@ describe("copyToClipboard OSC 52 routing", () => {
 	});
 
 	it("writes OSC 52 straight to stdout once the terminal has stopped", async () => {
-		harness = startActiveTerminal();
+		harness = await startActiveTerminal();
 		harness.stop();
 
 		await copyToClipboard("probe");
