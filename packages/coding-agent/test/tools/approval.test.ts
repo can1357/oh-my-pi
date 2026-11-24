@@ -502,6 +502,52 @@ describe("tool-owned dynamic approval declarations", () => {
 		},
 	);
 
+	it("does not judge a git commit trailer as text: git runs a trailer's command as a shell line", () => {
+		expect(bashApproval("git commit --trailer 'k=rm -rf /' -m m")).toEqual({
+			tier: "exec",
+			override: true,
+			reason: "Critical pattern detected",
+		});
+		expect(bashApproval("git commit -m 'drop the rm -rf / rule'")).toBe("exec");
+	});
+
+	it("does not flatten the arguments of an unrelated command into an rm line", () => {
+		expect(bashApproval("rg 'rm -rf' /tmp/docs")).toBe("exec");
+		expect(bashApproval("rg 'rm -rf /' docs")).toEqual({
+			tier: "exec",
+			override: true,
+			reason: "Critical pattern detected",
+		});
+	});
+
+	it("reads the word after -- as an operand, not as an option", () => {
+		expect(bashApproval("rm -- '--no-preserve-root'")).toBe("exec");
+		expect(bashApproval("rm -rf -- /")).toEqual({
+			tier: "exec",
+			override: true,
+			reason: "Critical pattern detected",
+		});
+	});
+
+	it.each([
+		"rm -rf /",
+		"rm -fr /tmp/x",
+		"bash -c 'rm -rf /'",
+		'sh -c "rm -rf /"',
+		"echo x | rm -rf /",
+		"cd /tmp && rm -rf /",
+		"echo $(rm -rf /)",
+		'eval "rm -rf /"',
+		'"sudo" rm x',
+		"rm -rf -- -- /",
+	])("keeps refusing a real delete: %s", command => {
+		expect(bashApproval(command)).toEqual({
+			tier: "exec",
+			override: true,
+			reason: "Critical pattern detected",
+		});
+	});
+
 	it("does not flag benign bash commands", () => {
 		for (const command of [
 			"rm file.txt",
