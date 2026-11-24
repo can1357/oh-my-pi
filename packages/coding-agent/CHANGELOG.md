@@ -51,6 +51,7 @@
 
 ### Fixed
 
+- A resumed or refocused chat shows the real output of tool calls that ran before a Cursor turn was cut short, instead of the turn's error ([#20356](https://github.com/can1357/oh-my-pi/pull/20356) by [@morali](https://github.com/morali))
 - Fixed context token accounting to reflect changes in system prompt sources
 - Cmd+A selects the full draft even when Tern forwards the keystroke; typing or pasting replaces the selection. Click the model name or chevron in Tern, or press Alt+P, to open the searchable `/switch` sheet without losing the draft.
 - Native composer status controls become clickable when the live session can handle them. The effort ring changes effort independently of the model name.
