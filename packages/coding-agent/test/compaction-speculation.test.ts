@@ -7,11 +7,14 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { type CompactionMethod, resolveSpeculationMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
 import { hindsightBackend } from "@oh-my-pi/pi-coding-agent/hindsight/backend";
 import * as snapcompactModule from "@oh-my-pi/snapcompact";
@@ -83,7 +86,7 @@ describe("async speculative compaction", () => {
 			buildLiveProviderContext?: (summarized: AgentMessage[], retained: AgentMessage[]) => Promise<Context>;
 			persistTurnMessagesForMidRunCompaction?: () => Promise<boolean>;
 			generateHandoffDocument?: SessionMaintenanceHost["generateHandoffDocument"];
-			extensionRunner?: Pick<NonNullable<SessionMaintenanceHost["extensionRunner"]>, "hasHandlers" | "emit">;
+			extensionRunner?: Pick<NonNullable<SessionMaintenanceHost["extensionRunner"]>, "hasHandlers">;
 		} = {},
 	): SessionMaintenance {
 		agent = new Agent({
@@ -751,6 +754,26 @@ describe("async speculative compaction", () => {
 		let handoffMessages: readonly AgentMessage[] | undefined;
 		const hookEntered = Promise.withResolvers<void>();
 		const releaseHook = Promise.withResolvers<void>();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session.compacting", async () => {
+					hookEntered.resolve();
+					await releaseHook.promise;
+					return undefined;
+				});
+			},
+			process.cwd(),
+			new EventBus(),
+			new ExtensionRuntime(),
+			"compacting-snapshot",
+		);
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			new ExtensionRuntime(),
+			process.cwd(),
+			sessionManager,
+			modelRegistry,
+		);
 		maintenance = createMaintenance({
 			methodOrder: ["handoff"],
 			persistTurnMessagesForMidRunCompaction: async () => true,
@@ -758,15 +781,7 @@ describe("async speculative compaction", () => {
 				handoffMessages = options.messages;
 				return "## Goal\nFinish once the tool returns.\n";
 			},
-			extensionRunner: {
-				hasHandlers: event => event === "session.compacting",
-				emit: async event => {
-					if (event.type !== "session.compacting") return undefined;
-					hookEntered.resolve();
-					await releaseHook.promise;
-					return undefined;
-				},
-			},
+			extensionRunner,
 		});
 		agent.replaceMessages([...sessionManager.buildSessionContext().messages, pending]);
 
@@ -1245,16 +1260,26 @@ describe("async speculative compaction", () => {
 
 	it("commits an armed handoff with the preserveData the session.compacting hook returned", async () => {
 		const generateHandoffDocument = vi.fn(async () => "handoff plan");
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session.compacting", async () => ({ preserveData: { hookKey: "hook value" } }));
+			},
+			process.cwd(),
+			new EventBus(),
+			new ExtensionRuntime(),
+			"compacting-handoff-preserve",
+		);
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			new ExtensionRuntime(),
+			process.cwd(),
+			sessionManager,
+			modelRegistry,
+		);
 		maintenance = createMaintenance({
 			methodOrder: ["handoff"],
 			generateHandoffDocument,
-			extensionRunner: {
-				hasHandlers: event => event === "session.compacting",
-				emit: async event => {
-					if (event.type !== "session.compacting") return undefined;
-					return { preserveData: { hookKey: "hook value" } };
-				},
-			},
+			extensionRunner,
 		});
 
 		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
