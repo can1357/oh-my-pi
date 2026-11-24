@@ -491,11 +491,11 @@ describe("/fork inside Tern", () => {
 		expect(ctx.showWarning).not.toHaveBeenCalled();
 	});
 
-	it("opens /fork window as a Tern pane when no multiplexer is detected", async () => {
-		const { tern, environment } = await startTern(() => ({ ok: { block: 9 } }));
+	it("opens /fork window as a Tern tab when no multiplexer is detected", async () => {
+		const { tern, environment } = await startTern(() => ({ ok: { block: 9, tab: 4 } }));
 		const { controller, ctx, session, launchTerminal } = createContext({ environment });
 		await controller.handleForkCommand("window");
-		expect(tern.forks).toEqual([{ id: 1, op: { block: 5 } }]);
+		expect(tern.forks).toEqual([{ id: 1, op: { block: 5, tab: true } }]);
 		expect(launchTerminal).not.toHaveBeenCalled();
 		expect(session.fork).not.toHaveBeenCalled();
 		expect(ctx.showError).not.toHaveBeenCalled();
