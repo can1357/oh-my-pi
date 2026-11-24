@@ -1,5 +1,5 @@
 /**
- * agy 1.5.9's native consumer credential format (cli/backend/auth token storage).
+ * agy's native consumer credential format.
  * Only host-owned --gemini-dir directories are read/written here. The encrypted
  * omp credential store remains the durable owner of exported OAuth grants.
  */
@@ -144,13 +144,10 @@ export function agyCredentialVersion(apiKey: string): string {
 
 /**
  * Apply ONLY to agy's subprocess, never omp or host-executed tools.
- * agy has no file-storage flag. Its native sshDetector checks SSH_TTY for a
- * nonempty value (it does not open the path), selecting file-only storage for
- * the process lifetime. This explicit headless marker prevents both reads and
- * writes of the user's global keychain, including during login and refresh.
+ * Force private file storage: agy 1.5.16 can use the global keychain even over SSH.
  */
 export function agyCredentialEnv(): Record<string, string> {
-	return { SSH_TTY: "omp-agy-file-auth" };
+	return { AGY_CLI_FORCE_FILE_TOKEN_STORAGE: "1" };
 }
 
 /**

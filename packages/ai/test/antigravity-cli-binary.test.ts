@@ -32,8 +32,8 @@ async function release(
 async function trickle(gapMs: number, silentAfter = Infinity): Promise<{ fetch: FetchImpl; silent: Promise<void> }> {
 	const payload = await new Bun.Archive({ antigravity: "slow executable" }, { compress: "gzip" }).bytes();
 	const manifest = {
-		version: "1.5.9",
-		url: "https://storage.googleapis.com/antigravity-public/1.5.9/cli.tar.gz",
+		version: "1.5.16",
+		url: "https://storage.googleapis.com/antigravity-public/1.5.16/cli.tar.gz",
 		sha512: new Bun.CryptoHasher("sha512").update(payload).digest("hex"),
 	};
 	const silent = Promise.withResolvers<void>();
@@ -72,7 +72,7 @@ afterEach(() => {
 it("concurrent first-use requests install one verified executable without running the profile installer", async () => {
 	using temp = TempDir.createSync("@omp-agy-download-");
 	const directory = temp.join("bin");
-	const remote = await release("1.5.9", "downloaded executable bytes");
+	const remote = await release("1.5.16", "downloaded executable bytes");
 	const paths = await Promise.all([
 		ensureAgyInstalled(directory, remote.fetch),
 		ensureAgyInstalled(directory, remote.fetch),
@@ -87,19 +87,32 @@ it("concurrent first-use requests install one verified executable without runnin
 it("a corrupt update preserves the previous binary and a subsequent valid release replaces only the current pointer", async () => {
 	using temp = TempDir.createSync("@omp-agy-upgrade-");
 	const directory = temp.join("bin");
-	const initial = await release("1.5.9", "version one");
+	const initial = await release("1.5.16", "version one");
 	const original = await ensureAgyInstalled(directory, initial.fetch);
-	await Bun.write(path.join(directory, "install.json"), JSON.stringify({ version: "1.5.9", checkedAt: 0 }));
+	await Bun.write(path.join(directory, "install.json"), JSON.stringify({ version: "1.5.16", checkedAt: 0 }));
 	const corrupt = await release("1.6.0", "version two", "0".repeat(128));
 	await expect(updateAgyBinary(directory, corrupt.fetch)).rejects.toThrow("SHA-512");
 	expect(await Bun.file(original).text()).toBe("version one");
-	expect((await Bun.file(path.join(directory, "install.json")).json()).version).toBe("1.5.9");
+	expect((await Bun.file(path.join(directory, "install.json")).json()).version).toBe("1.5.16");
 	const valid = await release("1.6.0", "version two");
 	const upgraded = await updateAgyBinary(directory, valid.fetch);
 	expect(upgraded).not.toBe(original);
 	expect(await Bun.file(upgraded).text()).toBe("version two");
 	expect(await Bun.file(original).text()).toBe("version one");
 	expect(await ensureAgyInstalled(directory, valid.fetch)).toBe(upgraded);
+});
+
+it("rejects a cached or published release that cannot force file storage", async () => {
+	using temp = TempDir.createSync("@omp-agy-minimum-version-");
+	const directory = temp.join("bin");
+	const executable = process.platform === "win32" ? "agy.exe" : "agy";
+	await Bun.write(path.join(directory, "1.5.15", executable), "old executable");
+	await Bun.write(path.join(directory, "install.json"), JSON.stringify({ version: "1.5.15", checkedAt: Date.now() }));
+	const stale = await release("1.5.15", "old remote executable");
+	await expect(ensureAgyInstalled(directory, stale.fetch)).rejects.toThrow("1.5.16 or newer");
+	const supported = await release("1.5.16", "supported executable");
+	const installed = await ensureAgyInstalled(directory, supported.fetch);
+	expect(await Bun.file(installed).text()).toBe("supported executable");
 });
 
 it("a slow release that keeps sending installs even when the whole download outlasts the stall window", async () => {

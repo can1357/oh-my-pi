@@ -10,6 +10,7 @@
 - An openai-completions stream that gets HTTP 500 back sends six requests, not twelve: the provider-error replay no longer re-runs a status the transport already retried ([#19729](https://github.com/can1357/oh-my-pi/issues/19729), [#20215](https://github.com/can1357/oh-my-pi/pull/20215) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed `omp usage` showing no data for Synthetic’s weekly-only plans; it now shows weekly credit usage and the next regeneration tick ([#20251](https://github.com/can1357/oh-my-pi/pull/20251) by [@dagurval](https://github.com/dagurval))
 - Fixed `antigravity-cli` quota exhaustion on agy 1.5.14+ being recorded as a normal reply instead of a rate limit, so exhausted accounts now rotate to healthy ones and honor the reported reset time ([#20247](https://github.com/can1357/oh-my-pi/issues/20247))
+- Fixed `antigravity-cli` login using the global macOS Keychain instead of omp's private credential file; login and inference now require agy 1.5.16 or newer ([#20363](https://github.com/can1357/oh-my-pi/issues/20363))
 - Gemini models on OpenRouter keep thinking throughout long tool loops instead of going silent after the first few steps; replayed reasoning now keeps the `id` and `format` OpenRouter needs to return Gemini's thought signatures
 
 ## [19.1.1] - 2026-11-23

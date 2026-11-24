@@ -6,7 +6,6 @@ import { isFileLockHeld } from "@oh-my-pi/pi-utils";
 import { isDefinitiveOAuthFailure } from "../src/error";
 import {
 	AGY_OAUTH_CLIENT_ID,
-	agyCredentialEnv,
 	agyCredentialKey,
 	agyCredentialVersion,
 	exportAgyCredentials,
@@ -202,12 +201,9 @@ describe("Antigravity CLI credential ownership", () => {
 		expect(parseAgyApiKey(result!.apiKey)).toEqual({ ...grant, refresh: "__remote__" });
 	});
 
-	it("never stages the broker's refresh sentinel or mutates the parent environment", async () => {
+	it("never stages the broker's refresh sentinel", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agy-broker-"));
 		directories.push(directory);
-		const before = process.env.SSH_TTY;
-		expect(agyCredentialEnv()).toEqual({ SSH_TTY: "omp-agy-file-auth" });
-		expect(process.env.SSH_TTY).toBe(before);
 		await stageAgyCredentials(JSON.stringify({ ...JSON.parse(apiKey), refreshToken: "__remote__" }), directory);
 		const contents = await fs.readFile(path.join(directory, "antigravity-cli", "antigravity-oauth-token"), "utf8");
 		expect(contents).not.toContain("__remote__");
@@ -259,9 +255,13 @@ describe("Antigravity CLI login handoff", () => {
 				`#!${process.execPath}
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-if (process.env.SSH_TTY !== "omp-agy-file-auth") process.exit(9);
 const args = process.argv.slice(2);
-const appData = args[args.indexOf("--app-data-dir") + 1];
+if (args[0] === "--version") {
+	process.stdout.write(process.env.FIXTURE_MODE === "old-version" ? "1.5.15\\n" : "1.5.16\\n");
+	process.exit(0);
+}
+const appFlag = args.indexOf("--app-data-dir");
+const appData = path.join(args[args.indexOf("--gemini-dir") + 1], appFlag < 0 ? "antigravity-cli" : args[appFlag + 1]);
 process.stdout.write("https://accounts.google.com/o/oauth2/v2/auth?client_id=${AGY_OAUTH_CLIENT_ID}&state=fixture\\n");
 const code = (await Bun.stdin.text()).trim();
 if (code !== "fixture-code") process.exit(8);
@@ -269,6 +269,8 @@ if (process.env.FIXTURE_MODE === "failure") {
 	process.stderr.write("secret-native-error-payload");
 	process.exit(1);
 }
+// With no private storage selected, agy can exit successfully without a local grant.
+if (process.env.AGY_CLI_FORCE_FILE_TOKEN_STORAGE !== "1") process.exit(0);
 await fs.mkdir(appData, {recursive: true, mode: 0o700});
 await fs.writeFile(path.join(appData, "antigravity-oauth-token"), JSON.stringify({
 	token: ${JSON.stringify(stored.token)}, auth_method: "consumer", id_token_email: "account@example.test"
@@ -277,7 +279,7 @@ await fs.writeFile(path.join(appData, "antigravity-oauth-token"), JSON.stringify
 				{ mode: 0o700 },
 			);
 			const moduleUrl = new URL("../src/registry/oauth/antigravity-cli.ts", import.meta.url).href;
-			for (const mode of ["success", "failure", "cancel"]) {
+			for (const mode of ["success", "failure", "cancel", "old-version"]) {
 				const runner = `
 import { loginAntigravityCli } from ${JSON.stringify(moduleUrl)};
 const controller = new AbortController();
@@ -303,6 +305,7 @@ try {
 						PI_CONFIG_DIR: ".omp-fixture",
 						PI_CODING_AGENT_DIR: path.join(root, "agent"),
 						PI_AGY_PATH: executable,
+						AGY_CLI_FORCE_FILE_TOKEN_STORAGE: "0",
 						FIXTURE_MODE: mode,
 					},
 					stdout: "pipe",
@@ -316,6 +319,7 @@ try {
 					expect(text + stderr).not.toContain("fixture-refresh");
 					const result = JSON.parse(text);
 					if (mode === "success") expect(result).toEqual({ realGrant: true, identity: true });
+					else if (mode === "old-version") expect(result.error).toContain("1.5.16 or newer");
 					else expect(result.error).toContain(mode === "cancel" ? "cancelled" : "sign-in failed");
 				} finally {
 					child.kill("SIGKILL");

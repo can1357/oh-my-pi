@@ -5,6 +5,8 @@ import { $env, formatBytes, getAntigravityCliDir, isEnoent, logger, withFileLock
 import type { FetchImpl } from "../../types";
 
 const MANIFEST_BASE_URL = "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests";
+const MIN_AGY_VERSION = "1.5.16";
+const FILE_STORAGE_REQUIRED = `Antigravity CLI ${MIN_AGY_VERSION} or newer is required for isolated credential storage`;
 const UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 /** Releases run to hundreds of MB, so only silence aborts a download; a total deadline would exclude slow links. */
 const DOWNLOAD_STALL_MS = 60_000;
@@ -29,7 +31,19 @@ export function agyGeminiDir(): string {
 /** Resolves an existing override or installs agy; subsequent calls check for updates at most daily. */
 export async function resolveAgyBinary(fetchImpl: FetchImpl = fetch): Promise<string> {
 	const override = $env.PI_AGY_PATH;
-	if (override) return override;
+	if (override) {
+		const child = Bun.spawn([override, "--version"], {
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "ignore",
+			env: { ...Bun.env, AGY_CLI_DISABLE_AUTO_UPDATE: "1" },
+			timeout: 5_000,
+			maxBuffer: 1024,
+		});
+		const [version, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+		if (code !== 0 || !supportsFileStorage(version.trim())) throw new Error(FILE_STORAGE_REQUIRED);
+		return override;
+	}
 	return ensureAgyInstalled(path.join(getAntigravityCliDir(), "bin"), fetchImpl);
 }
 
@@ -75,6 +89,10 @@ function releasePath(directory: string, version: string): string {
 	return path.join(directory, version, process.platform === "win32" ? "agy.exe" : "agy");
 }
 
+function supportsFileStorage(version: string): boolean {
+	return Bun.semver.satisfies(version, `>=${MIN_AGY_VERSION}`);
+}
+
 /** Refreshes an expired installation check, coalescing callers and retaining old releases on failure. */
 export function updateAgyBinary(directory: string, fetchImpl: FetchImpl = fetch): Promise<string> {
 	const running = operations.get(directory);
@@ -101,6 +119,7 @@ async function install(directory: string, fetchImpl: FetchImpl): Promise<string>
 			if (!response.ok) throw new Error(`Antigravity CLI manifest request failed: HTTP ${response.status}`);
 			const value: unknown = await response.json();
 			if (!isManifest(value)) throw new Error("Malformed Antigravity CLI release manifest");
+			if (!supportsFileStorage(value.version)) throw new Error(FILE_STORAGE_REQUIRED);
 			const url = new URL(value.url);
 			if (url.protocol !== "https:" || url.hostname !== "storage.googleapis.com") {
 				throw new Error("Antigravity CLI manifest did not reference Google's HTTPS release storage");
@@ -178,6 +197,7 @@ async function readRecord(directory: string): Promise<InstallRecord | undefined>
 			"version" in value &&
 			typeof value.version === "string" &&
 			/^[0-9][a-zA-Z0-9._-]*$/.test(value.version) &&
+			supportsFileStorage(value.version) &&
 			"checkedAt" in value &&
 			typeof value.checkedAt === "number"
 		) {
