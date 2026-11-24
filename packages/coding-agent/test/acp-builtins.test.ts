@@ -392,6 +392,36 @@ describe("ACP builtin slash commands", () => {
 		}
 	});
 
+	it("/usage resume clears a global pause that a --config overlay hides", async () => {
+		const { output, runtime, authStorage } = await createPauseRuntime();
+		using tempDir = TempDir.createSync("@pi-usage-resume-overlay-");
+		try {
+			const agentDir = tempDir.join("agent");
+			const overlay = tempDir.join("overlay.yml");
+			await Bun.write(
+				path.join(agentDir, "config.yml"),
+				[
+					"auth:",
+					"  accountPolicies:",
+					"    - provider: anthropic",
+					"      account: { email: b@example.com, orgId: org-b }",
+					"      paused: true",
+					"",
+				].join("\n"),
+			);
+			await Bun.write(overlay, "auth:\n  accountPolicies: []\n");
+			runtime.settings = await Settings.loadIsolated({ cwd: tempDir.path(), agentDir, configFiles: [overlay] });
+
+			await executeAcpBuiltinSlashCommand("/usage resume b@example.com", runtime);
+
+			expect(output[0]).toMatch(/^Resumed .+ in config\.yml\.\nA --config \/ PI_CONFIG_FILES file sets its own/);
+			const saved = await Settings.loadIsolated({ cwd: tempDir.path(), agentDir });
+			expect(cfgAuthAccountPolicies.get(saved)).toEqual([]);
+		} finally {
+			authStorage.close();
+		}
+	});
+
 	it("/usage pause reports an unmatched account number without changing policies", async () => {
 		const { output, runtime, authStorage } = await createPauseRuntime();
 		try {

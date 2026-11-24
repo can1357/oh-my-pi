@@ -4,7 +4,7 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { SessionPinAccount } from "../../modes/view-model/overlays/session-account-selector";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { cfgAuthAccountPolicies } from "../../config/model-settings";
-import { getByPath, type Settings } from "../../config/settings";
+import { getByPath, type SettingProvenance, type Settings } from "../../config/settings";
 import type { AgentSession } from "../../session/agent-session";
 import { cfgRetryUsageReservePct } from "../../session/settings";
 import { errorMessage } from "./parse";
@@ -24,6 +24,14 @@ function policyNamesAccount(entry: unknown, provider: string, account: SessionPi
 		entry.provider === provider &&
 		isRecord(entry.account) &&
 		matchesAuthAccountSelector(entry.account as AuthAccountSelector, account)
+	);
+}
+
+/** Whether a raw `auth.accountPolicies` list pauses `account` of `provider`. */
+function pausesAccount(policies: unknown, provider: string, account: SessionPinAccount): boolean {
+	return (
+		Array.isArray(policies) &&
+		policies.some(entry => policyNamesAccount(entry, provider, account) && entry.paused === true)
 	);
 }
 
@@ -54,16 +62,22 @@ function accountSelector(
 	return namesOne(selector) ? selector : undefined;
 }
 
-function overrideNote(settings: Settings): string | undefined {
-	const provenance = cfgAuthAccountPolicies.provenance(settings);
-	if (provenance === "global" || provenance === "default") return undefined;
+/** Why the command's config.yml edit does not decide for this window, for a list `provenance` replaces. */
+function overrideNote(provenance: SettingProvenance): string {
 	if (provenance === "project") {
-		return "Project settings override auth.accountPolicies here, so this change does not apply in this project until you edit them.";
+		return "Project settings (.omp/config.yml) set their own auth.accountPolicies, which replace config.yml's here, so this change does not apply in this project.";
 	}
 	if (provenance === "overlay") {
-		return "A --config / PI_CONFIG_FILES overlay overrides auth.accountPolicies in this process.";
+		return "A --config / PI_CONFIG_FILES file sets its own auth.accountPolicies, which replace config.yml's in this process, so this change does not apply here.";
 	}
-	return "Another settings source overrides auth.accountPolicies in this process.";
+	return "Another settings source sets auth.accountPolicies for this process, so this change does not apply here.";
+}
+
+/** The settings layer `provenance` names, as it reads inside a sentence. */
+function pausedBySource(provenance: SettingProvenance): string {
+	if (provenance === "project") return "project settings (.omp/config.yml)";
+	if (provenance === "overlay") return "a --config / PI_CONFIG_FILES file";
+	return "another settings source";
 }
 
 /**
@@ -71,6 +85,10 @@ function overrideNote(settings: Settings): string | undefined {
  * every credential read, or bring it back, by setting `paused` on its
  * `auth.accountPolicies` entry in the global config. The login stays stored; the
  * settings sync applies the change to this and every other running process.
+ *
+ * `paused` layers like every other field of the list: a project or `--config`
+ * list replaces config.yml's, pauses included. The command edits config.yml, so it
+ * decides from that file's list; the effective list only explains the result.
  */
 export async function handleUsagePauseCommand(
 	verb: "pause" | "resume",
@@ -113,18 +131,18 @@ export async function handleUsagePauseCommand(
 	];
 	// Visible and paused rows together are every stored account, but which of them is paused is
 	// judged from the settings just read: this process's credential view follows them a moment later.
-	const effectivePolicies: readonly unknown[] = cfgAuthAccountPolicies.get(settings);
+	const effectivePolicies = cfgAuthAccountPolicies.get(settings);
 	const pausedIds = new Set(
 		accounts
-			.filter(candidate =>
-				effectivePolicies.some(entry => policyNamesAccount(entry, provider, candidate) && entry.paused === true),
-			)
+			.filter(candidate => pausesAccount(effectivePolicies, provider, candidate))
 			.map(candidate => candidate.credentialId),
 	);
 	if (accounts.length === 0) {
 		await output(`No stored OAuth accounts for ${providerName}. Use /login to add one.`);
 		return;
 	}
+	const provenance = cfgAuthAccountPolicies.provenance(settings);
+	const overridden = provenance !== "global" && provenance !== "default";
 
 	if (!selector) {
 		const lines = [`OAuth accounts for ${providerName}:`];
@@ -133,6 +151,7 @@ export async function handleUsagePauseCommand(
 			lines.push(`${account.position + 1}. ${account.label}${marker}`);
 		}
 		lines.push("", "Pause one with `/usage pause <number|email>`; resume with `/usage resume <number|email>`.");
+		if (overridden) lines.push(overrideNote(provenance));
 		await output(lines.join("\n"));
 		return;
 	}
@@ -151,15 +170,6 @@ export async function handleUsagePauseCommand(
 		return;
 	}
 	const account = matches[0]!;
-	const isPaused = pausedIds.has(account.credentialId);
-	if (verb === "pause" && isPaused) {
-		await output(`${account.label} is already paused.`);
-		return;
-	}
-	if (verb === "resume" && !isPaused) {
-		await output(`${account.label} is not paused.`);
-		return;
-	}
 
 	// Edit the global layer only; `getGlobalSettings()` returns a deep clone, so entries are edited in place.
 	const current = getByPath(settings.getGlobalSettings(), cfgAuthAccountPolicies.segments);
@@ -169,6 +179,22 @@ export async function handleUsagePauseCommand(
 	}
 	let next: unknown[] = current ?? [];
 	const named = next.filter(entry => policyNamesAccount(entry, provider, account));
+	const globallyPaused = named.some(entry => entry.paused === true);
+	const effectivelyPaused = pausedIds.has(account.credentialId);
+	if (verb === "pause" && globallyPaused) {
+		const lines = [`${account.label} is already paused in config.yml.`];
+		if (overridden) lines.push(overrideNote(provenance));
+		await output(lines.join("\n"));
+		return;
+	}
+	if (verb === "resume" && !globallyPaused) {
+		await output(
+			effectivelyPaused
+				? `${account.label} is paused by ${pausedBySource(provenance)}; remove \`paused\` there to resume it.`
+				: `${account.label} is not paused.`,
+		);
+		return;
+	}
 
 	if (verb === "pause") {
 		const existing = named[0];
@@ -186,14 +212,6 @@ export async function handleUsagePauseCommand(
 		}
 	} else {
 		const pausing = named.filter(entry => entry.paused === true);
-		if (pausing.length === 0) {
-			const source =
-				cfgAuthAccountPolicies.provenance(settings) === "project"
-					? "project settings (.omp/config.yml)"
-					: "another settings source";
-			await output(`${account.label} is paused by ${source}; remove \`paused\` there to resume it.`);
-			return;
-		}
 		for (const entry of pausing) delete entry.paused;
 		// An entry left naming only its account existed just to pause it.
 		const emptied = new Set<unknown>(
@@ -222,9 +240,7 @@ export async function handleUsagePauseCommand(
 	}
 	// A save that lost a race with another writer keeps the file's version; report what was committed.
 	const committed = getByPath(settings.getGlobalSettings(), cfgAuthAccountPolicies.segments);
-	const committedPaused =
-		Array.isArray(committed) &&
-		committed.some(entry => policyNamesAccount(entry, provider, account) && entry.paused === true);
+	const committedPaused = pausesAccount(committed, provider, account);
 	if (committedPaused !== (verb === "pause")) {
 		await output(`Could not ${verb} ${account.label}: config.yml changed while saving; run the command again.`);
 		return;
@@ -233,20 +249,34 @@ export async function handleUsagePauseCommand(
 	// Name the account so the command resolves it later from any model: provider-qualified when it
 	// is not the current model's provider, and by a selector no sibling shares.
 	const resumeTarget = `${provider === session.model?.provider ? "" : `${provider}/`}${resumeSelector(account, accounts)}`;
+	// Describe the layers as they are after the save: another settings source may have changed them meanwhile.
+	const savedProvenance = cfgAuthAccountPolicies.provenance(settings);
+	const savedOverridden = savedProvenance !== "global" && savedProvenance !== "default";
+	const savedPolicies = cfgAuthAccountPolicies.get(settings);
+	const stillPaused = pausesAccount(savedPolicies, provider, account);
 
 	const lines: string[] = [];
 	if (verb === "pause") {
-		const othersVisible = accounts.some(
-			other => other.credentialId !== account.credentialId && !pausedIds.has(other.credentialId),
-		);
-		lines.push(
-			`Paused ${account.label} for ${providerName}: OMP will not use it until /usage resume ${resumeTarget}.` +
-				(othersVisible ? "" : ` No other ${providerName} account is available now.`),
-		);
-	} else {
+		if (savedOverridden) {
+			lines.push(`Paused ${account.label} for ${providerName} in config.yml.`, overrideNote(savedProvenance));
+		} else {
+			const othersVisible = accounts.some(
+				other => other.credentialId !== account.credentialId && !pausesAccount(savedPolicies, provider, other),
+			);
+			lines.push(
+				`Paused ${account.label} for ${providerName}: OMP will not use it until /usage resume ${resumeTarget}.` +
+					(othersVisible ? "" : ` No other ${providerName} account is available now.`),
+			);
+		}
+	} else if (!savedOverridden) {
 		lines.push(`Resumed ${account.label} for ${providerName}.`);
+	} else {
+		lines.push(
+			`Resumed ${account.label} for ${providerName} in config.yml.`,
+			stillPaused
+				? `It stays paused here: ${pausedBySource(savedProvenance)} also pauses it; remove \`paused\` there too.`
+				: overrideNote(savedProvenance),
+		);
 	}
-	const note = overrideNote(settings);
-	if (note) lines.push(note);
 	await output(lines.join("\n"));
 }
