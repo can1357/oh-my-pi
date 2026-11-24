@@ -238,19 +238,22 @@ const TEXT_ONLY_COMMANDS = new Set([
 	"wc",
 ]);
 
-/** `git` subcommands that never run an argument as a command line. */
-const TEXT_ONLY_GIT_SUBCOMMANDS = new Set(["add", "blame", "commit", "diff", "log", "show", "status"]);
+/** `git` subcommands that never run an argument as a command line; `commit` is judged in isJudgedSimpleCommand. */
+const TEXT_ONLY_GIT_SUBCOMMANDS = new Set(["add", "blame", "diff", "log", "show", "status"]);
 
 /**
  * Whether one simple command is a critical rm: its command word is rm, and it either passes
  * `--no-preserve-root` among its options, or takes a recursive or force flag before an operand that
- * is an absolute path. Options are read as rm reads them, and an operand after the first is not judged.
+ * is an absolute path. Options are read as rm reads them, and an operand after the first is not judged,
+ * except after `--`, where any operand may be the target.
  */
 function isCriticalRmCall(words: readonly string[]): boolean {
 	const [name, ...args] = words;
 	if (name === undefined || name.toLowerCase() !== "rm") return false;
 	let recursiveOrForce = false;
-	for (const word of args) {
+	for (const [index, word] of args.entries()) {
+		// After `--` every word is an operand: `rm -rf -- -- /` deletes `/`, so the first one is not the only target.
+		if (word === "--") return recursiveOrForce && args.slice(index + 1).some(operand => operand.startsWith("/"));
 		if (word.length < 2 || !word.startsWith("-")) return recursiveOrForce && word.startsWith("/");
 		if (word === "--no-preserve-root") return true;
 		if (/^(?:-[a-z]*[rf][a-z]*|--recursive|--force)$/i.test(word)) recursiveOrForce = true;
@@ -259,19 +262,42 @@ function isCriticalRmCall(words: readonly string[]): boolean {
 }
 
 /**
+ * A word a critical rm pattern can start at: an rm or a sudo that ends the word, so `"/bin/rm"` and `$'rm'`
+ * count, while an argument that only ends in rm after a space, such as `x rm`, does not.
+ */
+const RM_RUN_WORD = /(?:^|[^\w\s])(?:rm|sudo)$/i;
+
+/**
  * Whether a bash command runs a critical rm. When every simple command is judged from its words (see
  * isJudgedSimpleCommand), the rm calls are read from those words, so text quoted inside a grep pattern
  * or a commit message is not a delete. Otherwise the line may run its text, so the rm text patterns are
- * matched on the raw command and on each simple command's quote-removed words: a shell, an interpreter,
- * sudo, xargs, an assignment whose value is run, or a pipe into one of them.
+ * matched on the raw command and on each simple command's quote-removed words: each word alone, and, from
+ * each word that ends in rm or sudo (see RM_RUN_WORD) to the end of its simple command, those words joined.
+ * A shell, an interpreter, sudo, xargs, an assignment whose value is run, or a pipe into one of them can run
+ * that text. Words before an rm or sudo are not joined in, so `rg 'rm -rf' /tmp/docs` is not an rm.
  */
 function isCriticalRemoval(command: string): boolean {
 	const simple = tokenizeShellSegments(command);
 	if (!UNREAD_BASH_SYNTAX.test(command) && simple.every(isJudgedSimpleCommand)) return simple.some(isCriticalRmCall);
 	return (
 		CRITICAL_RM_TEXT_PATTERNS.some(pattern => pattern.test(command)) ||
-		simple.some(words => CRITICAL_RM_TEXT_PATTERNS.some(pattern => pattern.test(words.join(" "))))
+		simple.some(words =>
+			words.some((word, index) =>
+				CRITICAL_RM_TEXT_PATTERNS.some(pattern =>
+					pattern.test(RM_RUN_WORD.test(word) ? words.slice(index).join(" ") : word),
+				),
+			),
+		)
 	);
+}
+
+/**
+ * Whether a git argument is `--trailer`, an unambiguous prefix of it (`--tr` runs the trailer command too), or
+ * `--trailer=value`. git commit runs the command configured as trailer.<key>.command on each trailer value.
+ */
+function isTrailerOption(word: string): boolean {
+	const [option = ""] = word.split("=", 1);
+	return option.length > 2 && "--trailer".startsWith(option);
 }
 
 /**
@@ -286,7 +312,8 @@ function isJudgedSimpleCommand(words: readonly string[]): boolean {
 	return (
 		name.toLowerCase() === "rm" ||
 		TEXT_ONLY_COMMANDS.has(name) ||
-		(name === "git" && TEXT_ONLY_GIT_SUBCOMMANDS.has(subcommand))
+		(name === "git" &&
+			(TEXT_ONLY_GIT_SUBCOMMANDS.has(subcommand) || (subcommand === "commit" && !words.some(isTrailerOption))))
 	);
 }
 
