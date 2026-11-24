@@ -83,7 +83,7 @@ describe("async speculative compaction", () => {
 			buildLiveProviderContext?: (summarized: AgentMessage[], retained: AgentMessage[]) => Promise<Context>;
 			persistTurnMessagesForMidRunCompaction?: () => Promise<boolean>;
 			generateHandoffDocument?: SessionMaintenanceHost["generateHandoffDocument"];
-			extensionRunner?: Pick<NonNullable<SessionMaintenanceHost["extensionRunner"]>, "hasHandlers">;
+			extensionRunner?: Pick<NonNullable<SessionMaintenanceHost["extensionRunner"]>, "hasHandlers" | "emit">;
 		} = {},
 	): SessionMaintenance {
 		agent = new Agent({
@@ -744,6 +744,49 @@ describe("async speculative compaction", () => {
 		const roles = sessionManager.buildSessionContext().messages.map(message => message.role);
 		expect(roles[0]).toBe("compactionSummary");
 		expect(roles.slice(-2)).toEqual(["assistant", "toolResult"]);
+	});
+
+	it("hands the handoff the pre-hook snapshot when a tool result lands during session.compacting", async () => {
+		const pending = appendPendingToolCall();
+		let handoffMessages: readonly AgentMessage[] | undefined;
+		const hookEntered = Promise.withResolvers<void>();
+		const releaseHook = Promise.withResolvers<void>();
+		maintenance = createMaintenance({
+			methodOrder: ["handoff"],
+			persistTurnMessagesForMidRunCompaction: async () => true,
+			generateHandoffDocument: async (_instructions, options) => {
+				handoffMessages = options.messages;
+				return "## Goal\nFinish once the tool returns.\n";
+			},
+			extensionRunner: {
+				hasHandlers: event => event === "session.compacting",
+				emit: async event => {
+					if (event.type !== "session.compacting") return undefined;
+					hookEntered.resolve();
+					await releaseHook.promise;
+					return undefined;
+				},
+			},
+		});
+		agent.replaceMessages([...sessionManager.buildSessionContext().messages, pending]);
+
+		const started = maintenance.startBridgeCompaction();
+		await hookEntered.promise;
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "wait",
+			content: [{ type: "text", text: "done" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		sessionManager.appendMessage(result);
+		agent.state.messages.push(result);
+		releaseHook.resolve();
+		await started;
+
+		expect(handoffMessages?.map(message => message.role)).toEqual(["user", "assistant", "user"]);
+		expect(handoffMessages?.some(message => message.role === "toolResult")).toBe(false);
 	});
 
 	it("reports whether a failed bridge reached the provider, and offers none without a bridge-capable method", async () => {
