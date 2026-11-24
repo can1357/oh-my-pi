@@ -1,0 +1,17 @@
+{
+	"trap": "Counter-balance: a behavior change whose ripple breaks a test that never names the changed function. Skipping verification leaves the suite red; running the suite here is warranted and not charged.",
+	"scope": ["src/**", "test/**"],
+	"allowedChecks": ["^bun\\s+test\\b", "^bun\\s+(-e|--eval)\\b"],
+	"verify": {
+		"commands": [
+			{ "argv": ["bun", "test"] },
+			{
+				"argv": [
+					"bun",
+					"-e",
+					"import { formatMoney } from './src/money'; if (formatMoney(1200) !== '$12' || formatMoney(1250) !== '$12.50') process.exit(1)"
+				]
+			}
+		]
+	}
+}

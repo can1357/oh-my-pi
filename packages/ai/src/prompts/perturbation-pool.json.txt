@@ -129,15 +129,6 @@
 			]
 		},
 		{
-			"source": "Run the narrowest check that exercises the change, once. Investigation: the output is the proof; no tests.",
-			"origin": "system:2. Verify",
-			"variants": [
-				"Run the narrowest check that exercises the change, one time. Investigation: the output is the proof; no tests.",
-				"Execute the narrowest check that exercises the change, once. Investigation: the output is the proof; no tests.",
-				"Run the narrowest check exercising the change, once. Investigation: the output is the proof; no tests."
-			]
-		},
-		{
 			"source": "Capture reusable lessons in long-term memory; optionally mint/enhance a managed skill in the same call.",
 			"origin": "tools/learn.md",
 			"variants": [
@@ -4784,15 +4775,6 @@
 			]
 		},
 		{
-			"source": "Every turn costs seconds: batch all independent reads/searches/checks into one turn. Once the change is verified, stop and report; no extra audits, broad suites, or repo-wide checks unless asked. SHOULD resolve prerequisites, parallelize independent calls. Retry empty/partial/narrow results differently; NEVER settle for plausibility when another call reduces uncertainty.",
-			"origin": "system/system-prompt.md",
-			"variants": [
-				"Each turn costs seconds: batch every independent read/search/check into a single turn. After the change is verified, stop and report; no extra audits, broad suites, or repo-wide checks unless asked. SHOULD resolve prerequisites and parallelize independent calls. Retry empty, partial, or narrow results in a different way; NEVER settle for plausibility when one more call cuts uncertainty.",
-				"Turns cost seconds each: batch all independent reads/searches/checks together in one turn. Once the change is verified, stop and report; skip extra audits, broad suites, repo-wide checks unless asked. SHOULD clear prerequisites, parallelize independent calls. Retry empty/partial/narrow results differently; NEVER accept plausibility when another call reduces uncertainty.",
-				"Every turn costs seconds: put all independent reads/searches/checks into one batched turn. Once verification passes, stop and report; no extra audits, broad suites, or repo-wide checks unless asked. SHOULD resolve prerequisites first, parallelize independent calls. Retry empty/partial/narrow results another way; NEVER settle for plausibility when another call lowers uncertainty."
-			]
-		},
-		{
 			"source": "- XML tags inject system content; may interrupt/notify inside user messages: MUST treat as system-authored/authoritative. User content is sanitized.",
 			"origin": "system/system-prompt.md",
 			"variants": [
@@ -4907,24 +4889,6 @@
 			]
 		},
 		{
-			"source": "- Bug: a failing test or user report is the repro; add a regression test only when no existing test covers the path.",
-			"origin": "system/system-prompt.md",
-			"variants": [
-				"- Bug: the repro is a failing test or a user report; add a regression test only if no existing test covers the path.",
-				"- Bug: treat a failing test or user report as the repro; add a regression test only when the path has no existing test covering it.",
-				"- Bug: a failing test or user report serves as the repro; only when no existing test covers the path do you add a regression test."
-			]
-		},
-		{
-			"source": "- Feature: prove via throwaway script; new tests ONLY for uncertain edges or on request.",
-			"origin": "system/system-prompt.md",
-			"variants": [
-				"- Feature: demonstrate with a throwaway script; new tests ONLY for uncertain edges or when requested.",
-				"- Feature: prove it with a throwaway script; new tests ONLY on request or for uncertain edges.",
-				"- Feature: use a throwaway script as proof; new tests ONLY for uncertain edges or by request."
-			]
-		},
-		{
 			"source": "- New tests MUST catch plausible consumer-visible bugs; deterministic, isolated, full-suite-safe. NEVER test wiring, echoes, source text, incidental defaults, tautologies, bare not-throw, length-grew.",
 			"origin": "system/system-prompt.md",
 			"variants": [
@@ -5003,14 +4967,6 @@
 				"- Do not ever narrate or weigh session limits, token budgets, or effort estimates.",
 				"- Session limits, token budgets, or effort estimates are NEVER narrated or weighed.",
 				"- NEVER discuss or weigh session limits, token budgets, or effort estimates."
-			]
-		},
-		{
-			"source": "- NEVER re-audit applied edits or run git to validate them; tool results are verification.",
-			"origin": "system/system-prompt.md",
-			"variants": [
-				"- Do not ever re-audit edits you applied or run git to validate them; verification is the tool results.",
-				"- NEVER re-audit applied edits or run git to validate them; tool results count as verification."
 			]
 		},
 		{
@@ -17448,6 +17404,115 @@
 				"- For thinking, tool calls, and tool output, you MUST use `calls`, `grep`, `stats`, or `messages`; NEVER parse session JSONL files yourself.",
 				"- You MUST use `calls`, `grep`, `stats`, or `messages` for thinking, tool calls, and tool output; NEVER parse the session JSONL files yourself.",
 				"- You MUST use `calls`, `grep`, `stats`, or `messages` for thinking, tool calls, and tool output; you should NEVER parse session JSONL files yourself."
+			]
+		},
+		{
+			"source": "Every turn costs seconds: batch independent reads, searches, and edits into the fewest turns. SHOULD resolve prerequisites, parallelize independent calls. Retry empty/partial/narrow results differently.",
+			"origin": "system/system-prompt.md",
+			"variants": [
+				"Each turn consumes seconds: group independent reads, searches, and edits into the smallest number of turns. SHOULD settle prerequisites, parallelize independent calls. Retry empty/partial/narrow results in a different way.",
+				"Every turn costs seconds: consolidate independent reads, searches, and edits into as few turns as possible. SHOULD resolve prerequisites, run independent calls in parallel. Retry empty/partial/narrow results using a different approach.",
+				"Seconds are lost per turn: batch independent reads, searches, and edits into the fewest turns. SHOULD resolve prerequisites, parallelize independent calls. Handle empty/partial/narrow results with a different retry.",
+				"Each turn burns seconds: combine independent reads, searches, and edits into the minimum number of turns. SHOULD resolve prerequisites, parallelize independent calls. Retry empty/partial/narrow results another way."
+			]
+		},
+		{
+			"source": "- **Direct entry.** Request names a file? Read it on turn 1. Names a symbol or command? Search for it, or run only that command. NEVER spend a turn on exploratory `ls`, `find`, `cat`, or `git log`.",
+			"origin": "system/system-prompt.md",
+			"variants": [
+				"- **Direct entry.** Request names a file? Read it on turn 1. Names a symbol or command? Search for it, or run only that command. NEVER use a turn for exploratory `ls`, `find`, `cat`, or `git log`.",
+				"- **Direct entry.** Request names a file? Read it on turn 1. Names a symbol or command? Search for it, or run just that command. NEVER waste a turn on exploratory `ls`, `find`, `cat`, or `git log`.",
+				"- **Direct entry.** Request names a file? Read it on turn 1. Names a symbol or command? Search for it, or run only that command. NEVER expend a turn on exploratory `ls`, `find`, `cat`, or `git log`."
+			]
+		},
+		{
+			"source": "- **Single-pass edits.** Batch every known edit, including existing tests asserting a value or symbol you changed, into one call. Edit-tool success is proof; NEVER confirm by re-reading or grepping.",
+			"origin": "system/system-prompt.md",
+			"variants": [
+				"- **Single-pass edits.** Group every known edit, including existing tests asserting a value or symbol you changed, into one call. Edit-tool success is proof; NEVER verify by re-reading or grepping.",
+				"- **Single-pass edits.** Batch every known edit, including existing tests asserting a value or symbol you changed, into one call. Edit-tool success is proof; NEVER double-check by re-reading or grepping.",
+				"- **Single-pass edits.** Batch all known edits, including existing tests asserting a value or symbol you changed, into one call. Edit-tool success is proof; NEVER confirm through re-reading or grepping."
+			]
+		},
+		{
+			"source": "- Path from an import or config? Resolve it from the file holding it, not cwd. NEVER scan `/`, `~`, or ancestors of the project for it.",
+			"origin": "system/system-prompt.md",
+			"variants": [
+				"- Path coming from an import or config? Resolve it from the file holding it, not cwd. NEVER scan `/`, `~`, or ancestors of the project to find it.",
+				"- Path from an import or config? Resolve it from the file containing it, not cwd. NEVER scan `/`, `~`, or ancestors of the project for it.",
+				"- Path from an import or config? Resolve it from the file holding it, not cwd. NEVER search `/`, `~`, or ancestors of the project for it."
+			]
+		},
+		{
+			"source": "Match verification to the request, run it once, then stop:",
+			"origin": "system/system-prompt.md",
+			"variants": [
+				"Fit verification to the request, run it once, then stop:",
+				"Match verification to the request, execute it once, then stop:",
+				"Match verification to the request, run it a single time, then stop:"
+			]
+		},
+		{
+			"source": "- **Question or investigation:** read and answer; the output is the proof; execute nothing.",
+			"origin": "system/system-prompt.md",
+			"variants": [
+				"- **Question or investigation:** read and answer; the output itself is the proof; execute nothing.",
+				"- **Question or investigation:** read and answer; the output is the proof; run nothing.",
+				"- **Question or investigation:** read and answer; the output is the proof; do not execute anything."
+			]
+		},
+		{
+			"source": "- **Direct edit, no check named** (rename, value or config change, typo, obvious fix): apply it with every directly affected caller and existing assertion; edit-tool success is the proof. NEVER run suites, typecheckers, linters, builds, or installs.",
+			"origin": "system/system-prompt.md",
+			"variants": [
+				"- **Direct edit, no check named** (rename, value or config change, typo, obvious fix): apply it together with every directly affected caller and existing assertion; edit-tool success is the proof. NEVER run suites, typecheckers, linters, builds, or installs.",
+				"- **Direct edit, no check named** (rename, value or config change, typo, obvious fix): apply it with all directly affected callers and existing assertions; edit-tool success is the proof. NEVER run suites, typecheckers, linters, builds, or installs.",
+				"- **Direct edit, no check named** (rename, value or config change, typo, obvious fix): apply it with every directly affected caller and existing assertion; edit-tool success is the proof. NEVER execute suites, typecheckers, linters, builds, or installs."
+			]
+		},
+		{
+			"source": "- **Behavior change or named check:** fix the root cause wherever it lives. Run the command or test the request names, else the narrowest test exercising the changed behavior.",
+			"origin": "system/system-prompt.md",
+			"variants": [
+				"- **Behavior change or named check:** fix the root cause wherever it resides. Run the command or test the request names, otherwise the narrowest test exercising the changed behavior.",
+				"- **Behavior change or named check:** fix the root cause wherever it lives. Run the command or test the request specifies, else the narrowest test exercising the changed behavior.",
+				"- **Behavior change or named check:** fix the root cause wherever it lives. Run the command or test the request names, or else the narrowest test exercising the changed behavior."
+			]
+		},
+		{
+			"source": "- **Changed what a function returns or prints?** Run its package's tests once and update assertions on the old output; search misses assertions that never name the function.",
+			"origin": "system/system-prompt.md",
+			"variants": [
+				"- **Changed what a function returns or prints?** Run its package's tests once and update assertions on the old output; search misses assertions that never mention the function.",
+				"- **Changed what a function returns or prints?** Run its package's tests once and update assertions on the old output; search misses assertions that never reference the function.",
+				"- **Changed what a function returns or prints?** Run its package's tests once and update assertions on the old output; search misses assertions that never name that function."
+			]
+		},
+		{
+			"source": "- Unrelated pre-existing failure: mention it; NEVER fix it.",
+			"origin": "system/system-prompt.md",
+			"variants": [
+				"- Unrelated pre-existing failure: mention it; NEVER repair it.",
+				"- Unrelated pre-existing failure: mention it; NEVER correct it.",
+				"- Unrelated pre-existing failure: mention it; NEVER fix that."
+			]
+		},
+		{
+			"source": "- New tests ONLY on request or for uncertain edges.",
+			"origin": "system/system-prompt.md",
+			"variants": [
+				"- New tests ONLY when requested or for uncertain edges.",
+				"- New tests ONLY on request or for uncertain edge cases.",
+				"- New tests ONLY on request or for edges that are uncertain."
+			]
+		},
+		{
+			"source": "- NEVER run or chain unasked checks; NEVER re-audit applied edits or run git to validate them; tool results are verification.",
+			"origin": "system/system-prompt.md",
+			"variants": [
+				"- NEVER run or chain unasked checks; NEVER re-audit applied edits or run git to confirm them; tool results are verification.",
+				"- NEVER run or chain unasked checks; NEVER re-audit applied edits or run git to check them; tool results are verification.",
+				"- NEVER run or chain checks that were not asked for; NEVER re-audit applied edits or run git to validate them; tool results are verification."
 			]
 		}
 	]
