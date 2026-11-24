@@ -2810,6 +2810,26 @@ mod tests {
 		assert!(policy.check_write(Path::new("/dev/null")).is_ok());
 	}
 
+	#[cfg(unix)]
+	#[test]
+	fn default_policy_denies_device_write_other_than_dev_null() {
+		let workspace = tempfile::tempdir().expect("workspace");
+		let policy =
+			policy_parts(&workspace_settings(), workspace.path(), WriteMode::Scoped, None, None)
+				.expect("policy")
+				.file_policy;
+		assert!(policy.check_write(Path::new("/dev/zero")).is_err());
+		assert!(
+			policy
+				.open(Path::new("/dev/zero"), OpenRequest {
+					access:      PathAccess::Truncate,
+					create_mode: 0o666,
+				})
+				.is_err()
+		);
+		assert!(policy.check_write(Path::new("/dev/null")).is_ok());
+	}
+
 	#[test]
 	fn denied_carve_out_also_protects_its_strict_ancestors() {
 		let workspace = tempfile::tempdir().expect("workspace");
