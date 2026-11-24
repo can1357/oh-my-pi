@@ -23,6 +23,7 @@ import {
 	createFilePicker,
 	expectedFiles,
 	filesAreOpenable,
+	inputListsNames,
 	openUploadSources,
 	pickedFiles,
 	readsOwnPaths,
@@ -1818,11 +1819,37 @@ async function pickOwnFiles(
 		signal,
 	);
 	try {
-		if (!(await untilAborted(signal, () => files.evaluate(filesAreOpenable, expectedFiles(sources))))) return null;
+		if (!(await untilAborted(signal, () => files.evaluate(filesAreOpenable, expectedFiles(sources))))) {
+			await files.dispose().catch(() => undefined);
+			return null;
+		}
 		return files;
 	} catch (error) {
 		await files.dispose().catch(() => undefined);
 		throw error;
+	}
+}
+
+/**
+ * Whether the input already lists files named as `sources`, in order, so that handing it the same paths again would
+ * change nothing Chrome can see.
+ */
+async function listsSources(
+	realm: Realm,
+	input: ElementHandle,
+	sources: readonly UploadSource[],
+	signal: AbortSignal | undefined,
+): Promise<boolean> {
+	const target = await untilAborted(signal, () => realm.adoptHandle(input));
+	try {
+		return await untilAborted(signal, () =>
+			target.evaluate(
+				inputListsNames,
+				sources.map(source => source.info.name),
+			),
+		);
+	} finally {
+		await target.dispose().catch(() => undefined);
 	}
 }
 
@@ -1839,15 +1866,15 @@ async function deliverToInput(
 	filling?: () => void,
 ): Promise<void> {
 	if (route === "paths") {
-		// Chrome expands a folder for a `webkitdirectory` input only on the front tab, as when a person picks one; a
-		// tab omp opened in the background is brought forward for this upload alone.
-		if (sources.some(source => source.directory)) {
-			await untilAborted(signal, () => input.frame.page().bringToFront());
-		}
-		// A detached picker proves the browser opens the files where they lie before the real input is touched; a staged
-		// copy stands in for a file it cannot, such as one in a folder a sandboxed browser does not see.
+		// Away from macOS the browser reads the files where they lie, once a detached picker has shown that it opens
+		// them; a staged copy stands in for a file it cannot, such as one in a folder a sandboxed browser does not see.
+		// Chrome fires `cancel`, not `input` and `change`, for a selection whose paths it already holds, so an upload
+		// of the same files to the same input takes fresh copies under new paths instead.
+		const realm = input.frame.isolatedRealm();
+		const inPlace = readsOwnPaths(sources);
+		const again = inPlace && (await listsSources(realm, input, sources, signal));
 		const own = sources.map(source => source.path);
-		const opened = readsOwnPaths(sources) ? await pickOwnFiles(input.frame.isolatedRealm(), sources, signal) : null;
+		const opened = inPlace && !again ? await pickOwnFiles(realm, sources, signal) : null;
 		if (opened) {
 			await opened.dispose().catch(() => undefined);
 			await untilAborted(signal, () => {
@@ -1856,7 +1883,12 @@ async function deliverToInput(
 			});
 			return;
 		}
-		const staged = await staging.stage(sources, signal);
+		const staged = await staging.stage(sources, signal, { fresh: again });
+		// Chrome expands a folder for a `webkitdirectory` input only on the front tab, as when a person picks one; a
+		// tab omp opened in the background is brought forward for this upload alone, once its copies exist.
+		if (sources.some(source => source.directory)) {
+			await untilAborted(signal, () => input.frame.page().bringToFront());
+		}
 		await untilAborted(signal, () => {
 			filling?.();
 			return setFileInputPaths(input, staged);

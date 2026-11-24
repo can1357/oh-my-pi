@@ -153,6 +153,7 @@ export function pickedFiles(picker: PagePicker): unknown[] {
 interface PageFile {
 	readonly name: string;
 	readonly size: number;
+	arrayBuffer(): Promise<ArrayBuffer>;
 	slice(start: number, end: number): { arrayBuffer(): Promise<ArrayBuffer> };
 }
 
@@ -167,7 +168,8 @@ export function expectedFiles(sources: readonly UploadSource[]): UploadExpectati
 /**
  * Page function (self-contained; serialisable via `.toString()`): whether `files` are `expected`, as many, each with
  * its name and size, and each one the browser can open. Chrome lists a path it cannot read with the right size and a
- * missing path as an empty file, failing only once the page reads, so the last byte of each file is read here.
+ * missing path as an empty file, failing only once the page reads, so a read is tried here: the last byte of a file, or
+ * all of an empty one, whose zero-length slice would resolve without touching it.
  */
 export async function filesAreOpenable(files: unknown[], expected: UploadExpectation[]): Promise<boolean> {
 	if (files.length !== expected.length) return false;
@@ -176,9 +178,8 @@ export async function filesAreOpenable(files: unknown[], expected: UploadExpecta
 			const picked = file as PageFile; // a `File` the browser listed
 			const [name, size] = expected[index]!;
 			if (picked.name !== name || picked.size !== size) return false;
-			if (size === 0) return true;
 			try {
-				await picked.slice(size - 1, size).arrayBuffer();
+				await (size === 0 ? picked.arrayBuffer() : picked.slice(size - 1, size).arrayBuffer());
 				return true;
 			} catch {
 				return false;
@@ -186,6 +187,21 @@ export async function filesAreOpenable(files: unknown[], expected: UploadExpecta
 		}),
 	);
 	return opened.every(Boolean);
+}
+
+/** A file input's page side; this package type-checks without the DOM lib. */
+interface PageFileInput {
+	readonly files: ArrayLike<{ readonly name: string }> | null;
+}
+
+/**
+ * Page function (self-contained; serialisable via `.toString()`): whether a file input already lists files named as
+ * `names`, in order.
+ */
+export function inputListsNames(input: unknown, names: string[]): boolean {
+	const held: PageFileInput = input as PageFileInput; // the file input
+	const listed = Array.from(held.files ?? []);
+	return listed.length === names.length && listed.every((file, index) => file.name === names[index]);
 }
 
 /**
@@ -317,9 +333,14 @@ export class UploadStaging {
 
 	/**
 	 * Copy files or folders into the staging directory, keeping names and mtimes, and return the copies' paths. Links
-	 * are followed: a copy that pointed back at the original would send the browser to it again.
+	 * are followed: a copy that pointed back at the original would send the browser to it again. With `fresh` an
+	 * unchanged file is copied again under a new path rather than reusing its copy.
 	 */
-	async stage(sources: UploadSource[], signal?: AbortSignal): Promise<string[]> {
+	async stage(
+		sources: UploadSource[],
+		signal?: AbortSignal,
+		{ fresh = false }: { fresh?: boolean } = {},
+	): Promise<string[]> {
 		const directory = await this.#ensureDirectory();
 		const staged: string[] = [];
 		let reusedAny = false;
@@ -327,7 +348,7 @@ export class UploadStaging {
 			throwIfAborted(signal);
 			// A folder's own revision misses changes deeper in it, so only files are reused.
 			const key = source.directory ? undefined : `${source.path}\0${source.revision}`;
-			const reused = key === undefined ? undefined : this.#copies.get(key);
+			const reused = key === undefined || fresh ? undefined : this.#copies.get(key);
 			if (reused) {
 				reusedAny = true;
 				staged.push(reused);
