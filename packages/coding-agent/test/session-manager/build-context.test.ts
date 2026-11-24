@@ -475,6 +475,55 @@ describe("buildSessionContext", () => {
 			]);
 		});
 
+		it("keeps the rebuilt context before a notebook write identical, so resume keeps the cached prefix", () => {
+			const writeCall = msg("2", "1", "assistant", "saving notes");
+			if (writeCall.message.role !== "assistant") throw new Error("Expected assistant");
+			writeCall.message.content.push({
+				type: "toolCall",
+				id: "n1",
+				name: "context_notes",
+				arguments: { text: "v1" },
+			});
+			writeCall.message.stopReason = "toolUse";
+			const notes: SessionEntry = {
+				type: "custom",
+				customType: "experimental_context_notes",
+				data: { version: 1, text: "v1" },
+				id: "3",
+				parentId: "2",
+				timestamp: "2025-01-01T00:00:00Z",
+			};
+			const writeResult = (parentId: string): SessionMessageEntry => ({
+				type: "message",
+				id: "4",
+				parentId,
+				timestamp: "2025-01-01T00:00:00Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "n1",
+					toolName: "context_notes",
+					content: [{ type: "text", text: "Context notes saved." }],
+					isError: false,
+					timestamp: 1,
+				},
+			});
+			const start = msg("1", null, "user", "start");
+			const reply = msg("5", "4", "assistant", "done");
+			const next = msg("6", "5", "user", "continue");
+			// The live window after the write holds the tool call and its result, never the notebook.
+			const live = buildSessionContext([start, writeCall, writeResult("2"), reply, next]);
+			const resumed = buildSessionContext([start, writeCall, notes, writeResult("3"), reply, next]);
+			expect(resumed.messages.slice(0, 3)).toEqual(live.messages.slice(0, 3));
+			expect(resumed.messages.map(message => message.role)).toEqual([
+				"user",
+				"assistant",
+				"toolResult",
+				"custom",
+				"assistant",
+				"user",
+			]);
+		});
+
 		it("predates native rewrite markers before the retained tail; summaries keep commit timestamps", () => {
 			// A rewrite marker newer than the tail strips the tail's bound
 			// thinking on the next request; native replay must not do that. The

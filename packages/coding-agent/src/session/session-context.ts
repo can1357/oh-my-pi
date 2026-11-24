@@ -475,7 +475,14 @@ export function buildSessionContext(
 		}
 	}
 
+	// The notebook is injected where its own journal entry sits among the emitted messages,
+	// not at index 0: a later notebook write then leaves every earlier message byte-identical,
+	// so the provider's cached prefix survives a resume.
+	const notes = options?.transcript ? undefined : getContextNotes(path);
+	let notesAt: number | undefined;
+
 	const appendMessage = (entry: SessionEntry) => {
+		if (notes && entry.id === notes.entryId) notesAt = messages.length;
 		handleEntryResetTracking(entry);
 		if (entry.type === "message") {
 			if (
@@ -724,10 +731,9 @@ export function buildSessionContext(
 		}
 	}
 
-	if (!options?.transcript) {
-		const notes = getContextNotes(path);
+	if (notes) {
 		const renderedNotes = renderContextNotes(path);
-		if (notes && renderedNotes.length > 0) {
+		if (renderedNotes.length > 0) {
 			const sourceEntry = path.find(entry => entry.id === notes.entryId);
 			if (sourceEntry) {
 				// A native Anthropic compaction block must open the request, and the
@@ -740,8 +746,10 @@ export function buildSessionContext(
 				if (head?.role === "compactionSummary" && head.providerPayload?.type === "anthropicCompaction") {
 					insertAt = 1;
 					if (messages[insertAt]?.role === "assistant") insertAt++;
-					while (messages[insertAt]?.role === "toolResult") insertAt++;
 				}
+				if (notesAt !== undefined && notesAt > insertAt) insertAt = notesAt;
+				// Never split an assistant turn from its tool results.
+				while (messages[insertAt]?.role === "toolResult") insertAt++;
 				messages.splice(
 					insertAt,
 					0,
