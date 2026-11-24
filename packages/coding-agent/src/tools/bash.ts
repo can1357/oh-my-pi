@@ -2464,10 +2464,15 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					});
 				}
 
-				// Map exit status: null exitCode with a signal → treat as signal kill (137).
+				// Map exit status: null exitCode with a signal → 128 + the signal's number (shell convention).
+				// An unknown name keeps the 128 base, so the kill never reads as success.
 				const rawExitCode = exitStatus.exitCode;
 				const exitCode: number | undefined =
-					rawExitCode != null ? rawExitCode : exitStatus.signal ? 137 : undefined;
+					rawExitCode != null
+						? rawExitCode
+						: exitStatus.signal
+							? 128 + (os.constants.signals[exitStatus.signal as NodeJS.Signals] ?? 0)
+							: undefined;
 
 				const decoded = await bridgeGraphics.finish(finalOutput.output);
 				const outputText = await appendImageLinks(decoded.text, decoded.images);
