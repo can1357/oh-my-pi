@@ -2,9 +2,9 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { classifyTerminalMultiplexer, type TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { classifyMultiplexer, type MultiplexerId } from "@oh-my-pi/pi-tui/driver/mux/detect";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
+import { initTheme } from "../../../src/ui/theme/service";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { extractProfileFlags } from "@oh-my-pi/pi-coding-agent/cli/profile-bootstrap";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
@@ -40,7 +40,7 @@ function createContext(
 		sessionFile?: string;
 		persisted?: boolean;
 		environment?: () => NodeJS.ProcessEnv;
-		classifyTerminalMultiplexer?: typeof classifyTerminalMultiplexer;
+		classifyMultiplexer?: (env: NodeJS.ProcessEnv) => MultiplexerId | null;
 		activeProfile?: string | null;
 		activeModel?: { provider: string; id: string };
 		agentDir?: string;
@@ -88,10 +88,8 @@ function createContext(
 			getAgentDir: () => options.agentDir ?? "/user/agent",
 			getConfigFiles: () => options.configFiles ?? [],
 		},
-		loadingAnimation: undefined,
-		statusContainer: { disposeChildren: vi.fn() },
-		statusLine: { invalidate: vi.fn() },
-		ui: { requestRender: vi.fn() },
+		clearWorking: vi.fn(() => false),
+		statusLine: { refresh: vi.fn() },
 		present: vi.fn(),
 		showStatus: vi.fn(),
 		showWarning: vi.fn(),
@@ -99,7 +97,7 @@ function createContext(
 		showHookConfirm,
 	} as unknown as InteractiveModeContext;
 	const controller = new CommandController(ctx, {
-		classifyTerminalMultiplexer: options.classifyTerminalMultiplexer ?? classifyTerminalMultiplexer,
+		classifyMultiplexer: options.classifyMultiplexer ?? classifyMultiplexer,
 		environment: options.environment ?? (() => ({ TMUX: "server,1,0", TMUX_PANE: "%1" })),
 		launchTerminal,
 		resolveCliEntryCmd: () => ["omp-entry"],
@@ -112,7 +110,7 @@ function createContext(
 
 function findPosixShellPlacement(): { multiplexer: TerminalLaunchMultiplexer; placement: TerminalLaunchPlacement } {
 	for (const [multiplexer, capabilities] of Object.entries(terminalLaunchCapabilities) as Array<
-		[TerminalMultiplexer, (typeof terminalLaunchCapabilities)[TerminalMultiplexer]]
+		[MultiplexerId, (typeof terminalLaunchCapabilities)[MultiplexerId]]
 	>) {
 		if (!capabilities.supported) continue;
 		for (const placement of ["pane", "window"] as const) {
@@ -131,11 +129,11 @@ describe("/fork terminal placement", () => {
 	it("preflights unavailable launch capabilities before busy or persistence checks", async () => {
 		const unsupported = Object.entries(terminalLaunchCapabilities).find(
 			([, capabilities]) => !capabilities.supported,
-		)?.[0] as TerminalMultiplexer | undefined;
+		)?.[0] as MultiplexerId | undefined;
 		if (!unsupported) throw new Error("expected an unsupported multiplexer");
 		for (const multiplexer of [null, unsupported]) {
 			const { controller, ctx, launchTerminal, flush } = createContext({
-				classifyTerminalMultiplexer: () => multiplexer,
+				classifyMultiplexer: () => multiplexer,
 				streaming: true,
 				persisted: false,
 			});
@@ -149,7 +147,7 @@ describe("/fork terminal placement", () => {
 
 	it("requires POSIX shell confirmation before flushing a placement that declares it", async () => {
 		const { controller, ctx, flush, launchTerminal } = createContext({
-			classifyTerminalMultiplexer: () => POSIX_SHELL_PLACEMENT.multiplexer,
+			classifyMultiplexer: () => POSIX_SHELL_PLACEMENT.multiplexer,
 		});
 		await controller.handleForkCommand(POSIX_SHELL_PLACEMENT.placement);
 		expect(ctx.showHookConfirm).toHaveBeenCalledTimes(1);
@@ -159,7 +157,7 @@ describe("/fork terminal placement", () => {
 
 	it("launches a placement with POSIX shell requirements after confirmation", async () => {
 		const { controller, flush, launchTerminal, showHookConfirm } = createContext({
-			classifyTerminalMultiplexer: () => POSIX_SHELL_PLACEMENT.multiplexer,
+			classifyMultiplexer: () => POSIX_SHELL_PLACEMENT.multiplexer,
 			confirmed: true,
 		});
 		await controller.handleForkCommand(POSIX_SHELL_PLACEMENT.placement);
@@ -454,7 +452,7 @@ describe("/fork inside Tern", () => {
 	let daemon: FakeDaemon | undefined;
 
 	beforeAll(async () => {
-		await initTheme(false);
+		initTheme();
 	});
 
 	beforeEach(() => {

@@ -11,7 +11,7 @@ import {
 } from "../config/model-resolver";
 import { CHAT_MODEL_ROLE_IDS } from "../config/model-roles";
 import type { Settings } from "../config/settings";
-import { concreteThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { concreteThinkingLevel } from "../thinking/levels";
 
 export interface ResolvedCommitModel {
 	model: Model<Api>;

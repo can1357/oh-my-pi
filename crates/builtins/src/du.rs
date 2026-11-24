@@ -432,6 +432,24 @@ impl DirFrame {
 	}
 }
 
+#[cfg(target_os = "macos")]
+fn is_dataless_directory(_path: &Path, metadata: &Metadata) -> bool {
+	use std::os::darwin::fs::MetadataExt;
+
+	// SF_DATALESS in sys/stat.h is not exposed by the libc crate.
+	const SF_DATALESS: u32 = 0x4000_0000;
+	#[cfg(test)]
+	if TEST_DATALESS_PATH.with(|path| path.borrow().as_deref() == Some(_path)) {
+		return true;
+	}
+	metadata.native().is_some_and(|metadata| metadata.st_flags() & SF_DATALESS != 0)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+	static TEST_DATALESS_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 /// How [`Walker::enter`] left an entry.
 enum Entered {
 	/// Finished, with what it adds to its parent if anything.
@@ -566,6 +584,16 @@ impl Walker<'_> {
 		}
 		let is_dir = meta.is_dir();
 		if excluded || (cfg.one_fs && level > 0 && meta.dev() != self.root_dev) {
+			return Entered::Leaf(None);
+		}
+
+		// Apple's du prevents materialization and reports EDEADLK without
+		// counting the directory. Don't change the embedded process's policy
+		// or attempt to enumerate the placeholder.
+		#[cfg(target_os = "macos")]
+		if is_dir && is_dataless_directory(path, &meta) {
+			let error = io::Error::from_raw_os_error(libc::EDEADLK);
+			self.error(format_args!("{}: {}", String::from_utf8_lossy(display), strip_errno(&error)));
 			return Entered::Leaf(None);
 		}
 		let id = meta.file_id();
@@ -1133,6 +1161,26 @@ mod tests {
 	fn du(cwd: &Path, args: &[&str]) -> (i32, String, String) {
 		let (code, out, err) = du_env(cwd, args, &[], "");
 		(code, String::from_utf8_lossy_owned(out), err)
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn dataless_directory_is_reported_and_not_counted() {
+		let dir = tempfile::tempdir().unwrap();
+		let root = dir.path().canonicalize().unwrap();
+		let placeholder = root.join("tree/project placeholder");
+		fs::create_dir_all(&placeholder).unwrap();
+		fs::write(placeholder.join("unavailable"), "data").unwrap();
+		fs::write(root.join("tree/visible"), "data").unwrap();
+
+		TEST_DATALESS_PATH.set(Some(placeholder));
+		let (code, out, err) = du(&root, &["--inodes", "-a", "tree", "tree/project placeholder"]);
+		TEST_DATALESS_PATH.set(None);
+
+		assert_eq!(code, 1);
+		assert_eq!(out, "1\ttree/visible\n2\ttree\n");
+		let diagnostic = "du: tree/project placeholder: Resource deadlock avoided\n";
+		assert_eq!(err, diagnostic.repeat(2));
 	}
 
 	/// The fixture tree: nested dirs, a 300 KiB file, a 50 MiB sparse file,

@@ -1,177 +1,61 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { stripVTControlCharacters } from "node:util";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { StatusLineComponent, type StatusLineSettings } from "@oh-my-pi/pi-tui/status-line";
-import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
-import { STATUS_LINE_PRESETS } from "@oh-my-pi/pi-tui/status-line/presets";
-import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
-import { visibleWidth } from "@oh-my-pi/pi-tui";
+/**
+ * Status-line settings and the live state the bar shows beside them: how a
+ * preset and the user's options combine, the facts the app pushes (badges,
+ * tree cost, modes, extension statuses), and that git is only probed while
+ * git integration is on and a git-backed segment is visible.
+ */
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgGitEnabled } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { STATUS_LINE_PRESETS } from "@oh-my-pi/pi-coding-agent/modes/view-model/status-line/presets";
+import type { StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/view-model/status-line/types";
+import { effectiveStatusSettings } from "@oh-my-pi/pi-coding-agent/ui/status/segments";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { removeSyncWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
-import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
-import { StatusLineTestComponents } from "./helpers/status-line";
+import { disposeStatusLines, flushStatus, lineText, statusLine, statusSession } from "./helpers/session-status-line";
 
-import {
-	cfgGitEnabled,
-	cfgStatusLineLeftSegments,
-	cfgStatusLinePreset,
-	cfgStatusLineRightSegments,
-} from "@oh-my-pi/pi-coding-agent/modes/settings";
+beforeAll(async () => {
+	resetSettingsForTest();
+	await Settings.init({ inMemory: true });
+});
 
-let settingsState: SettingsTestState | undefined;
-let projectDir = "";
-const statusLines = new StatusLineTestComponents();
-
-beforeEach(async () => {
-	settingsState = beginSettingsTest();
-	projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-status-line-settings-cache-"));
-	setProjectDir(projectDir);
-	await Settings.init({ inMemory: true, cwd: projectDir });
-	await initTheme();
+afterAll(() => {
+	resetSettingsForTest();
 });
 
 afterEach(() => {
-	statusLines.dispose();
-	restoreSettingsTestState(settingsState);
-	settingsState = undefined;
-	if (projectDir) {
-		removeSyncWithRetries(projectDir);
-	}
-	projectDir = "";
+	disposeStatusLines();
+	cfgGitEnabled.clearOverride(Settings.instance);
 });
 
-function makeSession(sessionName = "Cache Session") {
-	const messages: unknown[] = [];
-	const model = { id: "test-model", name: "Test Model", contextWindow: 100_000 };
-	return {
-		state: { messages, model },
-		messages,
-		model,
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		settings: { get: () => false },
-		modelRegistry: { isUsingSubscription: () => false },
-		sessionManager: {
-			getSessionName: () => sessionName,
-			getUsageStatistics: () => ({
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-		getContextUsage: () => undefined,
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0];
+function makeLine(settings: Partial<StatusLineSettings>) {
+	const model = {
+		id: "test-model",
+		name: "Test Model",
+		provider: "test",
+		contextWindow: 100_000,
+		input: ["text"],
+	};
+	return statusLine(
+		statusSession({
+			model,
+			state: { messages: [], model },
+			sessionManager: { getSessionName: () => "Cache Session" },
+		}),
+		settings,
+	);
 }
 
-function makeComponent(statusLineSettings: StatusLineSettings): StatusLineComponent {
-	const component = statusLines.track(new StatusLineComponent(makeSession(), statusLineHost));
-	component.updateSettings(statusLineSettings);
-	return component;
-}
-
-describe("StatusLineComponent effective settings cache", () => {
-	it("skips the entire segment pipeline until a visible input invalidates it", () => {
-		const session = makeSession();
-		let snapshotCalls = 0;
-		const getSnapshot = session.getAsyncJobSnapshot.bind(session);
-		session.getAsyncJobSnapshot = () => {
-			snapshotCalls++;
-			return getSnapshot();
-		};
-		const component = statusLines.track(new StatusLineComponent(session, statusLineHost));
-		component.updateSettings({
-			preset: "custom",
-			leftSegments: ["model", "mode"],
-			rightSegments: ["session_name"],
-			sessionAccent: false,
-		});
-
-		const first = component.getTopBorder(120);
-		const second = component.getTopBorder(120);
-		expect(second).toEqual(first);
-		expect(snapshotCalls).toBe(1);
-
-		component.invalidate();
-		component.getTopBorder(120);
-		expect(snapshotCalls).toBe(2);
-
-		component.setPlanModeStatus({ enabled: true, paused: false });
-		const withPlan = stripVTControlCharacters(component.getTopBorder(120).content);
-		expect(withPlan).toContain("Plan");
-		expect(snapshotCalls).toBe(3);
-
-		const mutableModel = session.state.model as { name: string };
-		mutableModel.name = "Renamed Model";
-		const withModel = stripVTControlCharacters(component.getTopBorder(120).content);
-		expect(withModel).toContain("Renamed Model");
-		expect(snapshotCalls).toBe(4);
-
-		const mutableMessages = session.messages as unknown[];
-		mutableMessages.push({ role: "user", content: "new tail" });
-		component.getTopBorder(120);
-		expect(snapshotCalls).toBe(5);
-	});
-
-	it("invalidates on updateSettings and reflects hook visibility changes", () => {
-		const component = makeComponent({
-			preset: "custom",
-			leftSegments: ["pi"],
-			rightSegments: [],
-			separator: "none",
-			showHookStatus: false,
-		});
-		const firstEffective = component.getEffectiveSettingsForTest();
-		component.setHookStatus("lint", "lint running");
-		expect(component.render(80)).toEqual([]);
-
-		component.updateSettings({
-			preset: "custom",
-			leftSegments: ["session_name"],
-			rightSegments: [],
-			separator: "slash",
-			showHookStatus: true,
-			sessionAccent: false,
-			segmentOptions: { path: { maxLength: 12 } },
-		});
-
-		const secondEffective = component.getEffectiveSettingsForTest();
-		expect(secondEffective).not.toBe(firstEffective);
-		expect(secondEffective.separator).toBe("slash");
-		expect(secondEffective.sessionAccent).toBe(false);
-		expect(secondEffective.segmentOptions.path?.maxLength).toBe(12);
-		expect(stripVTControlCharacters(component.getTopBorder(80).content)).toContain("Cache Session");
-		expect(component.render(80)).toEqual(["lint running"]);
-	});
-
+describe("effective status-line settings", () => {
 	it("preserves preset option siblings while user segment options win", () => {
-		const component = makeComponent({
+		const effective = effectiveStatusSettings({
 			preset: "default",
-			segmentOptions: {
-				path: { maxLength: 7 },
-				git: { showUntracked: false },
-			},
+			segmentOptions: { path: { maxLength: 7 }, git: { showUntracked: false } },
 		});
-
-		const effective = component.getEffectiveSettingsForTest();
-		expect(effective.segmentOptions.path).toEqual({ abbreviate: true, maxLength: 7, stripWorkPrefix: true });
+		expect(effective.segmentOptions.path).toEqual({
+			abbreviate: true,
+			maxLength: 7,
+			stripWorkPrefix: true,
+		});
 		expect(effective.segmentOptions.git?.showBranch).toBe(true);
 		expect(effective.segmentOptions.git?.showStaged).toBe(true);
 		expect(effective.segmentOptions.git?.showUnstaged).toBe(true);
@@ -179,83 +63,83 @@ describe("StatusLineComponent effective settings cache", () => {
 	});
 
 	it("uses custom segment arrays only for the custom preset", () => {
-		const defaultComponent = makeComponent({ preset: "default", leftSegments: ["session_name"], rightSegments: [] });
-		expect(defaultComponent.getEffectiveSettingsForTest().leftSegments).toEqual(
-			STATUS_LINE_PRESETS.default.leftSegments,
-		);
-
-		const customComponent = makeComponent({ preset: "custom", leftSegments: [], rightSegments: [] });
-		expect(customComponent.getEffectiveSettingsForTest().leftSegments).toEqual([]);
-		expect(customComponent.getEffectiveSettingsForTest().rightSegments).toEqual([]);
-		expect(customComponent.getTopBorder(120)).toEqual({ content: "", width: 0, revision: 0 });
+		expect(
+			effectiveStatusSettings({
+				preset: "default",
+				leftSegments: ["session_name"],
+			}).leftSegments,
+		).toEqual(STATUS_LINE_PRESETS.default.leftSegments);
+		const custom = effectiveStatusSettings({
+			preset: "custom",
+			leftSegments: [],
+			rightSegments: [],
+		});
+		expect(custom.leftSegments).toEqual([]);
+		expect(custom.rightSegments).toEqual([]);
 	});
 
-	it("renders custom preset defaults when segment arrays are unconfigured", () => {
-		cfgStatusLinePreset.override(Settings.instance, "custom");
-		const component = makeComponent({
-			preset: cfgStatusLinePreset.get(Settings.instance),
-			leftSegments: cfgStatusLineLeftSegments.get(Settings.instance),
-			rightSegments: cfgStatusLineRightSegments.get(Settings.instance),
-			sessionAccent: false,
-		});
-
-		const effective = component.getEffectiveSettingsForTest();
+	it("falls back to the custom preset's segments when the arrays are unconfigured", () => {
+		const effective = effectiveStatusSettings({ preset: "custom" });
 		expect(effective.leftSegments).toEqual(STATUS_LINE_PRESETS.custom.leftSegments);
 		expect(effective.rightSegments).toEqual(STATUS_LINE_PRESETS.custom.rightSegments);
 
-		const content = stripVTControlCharacters(component.getTopBorder(120).content);
-		expect(content).toContain("Test Model");
-		expect(content).toContain("Cache Session");
+		const text = lineText(makeLine({ preset: "custom", sessionAccent: false }), 120);
+		expect(text).toContain("Test Model");
+		expect(text).toContain("Cache Session");
 	});
 
-	it("reports badge changes but ignores reordered IDs when custom segments omit subagents", () => {
-		const component = makeComponent({ preset: "custom", leftSegments: [], rightSegments: [] });
+	it("does not mutate shared preset segment options", () => {
+		const before = structuredClone(STATUS_LINE_PRESETS.default.segmentOptions);
+		const line = makeLine({
+			preset: "default",
+			sessionAccent: false,
+			segmentOptions: { path: { maxLength: 3 } },
+		});
+		lineText(line, 12);
+		lineText(line, 200);
+		expect(STATUS_LINE_PRESETS.default.segmentOptions).toEqual(before);
+	});
+});
 
-		expect(component.setRunningSubagents([])).toBe(false);
-		expect(component.setRunningSubagents(["sub-1", "sub-2"])).toBe(true);
-
-		const border = component.getTopBorder(120);
-		const content = stripVTControlCharacters(border.content);
-		expect(content).toContain(`${theme.icon.agents} 2`);
-		expect(content).not.toContain("agents");
-		expect(component.setRunningSubagents(["sub-2", "sub-1"])).toBe(false);
-		expect(component.getTopBorder(120)).toEqual(border);
-		expect(component.setRunningSubagents(["sub-2"])).toBe(true);
-		expect(stripVTControlCharacters(component.getTopBorder(120).content)).toContain(`${theme.icon.agents} 1`);
+describe("status-line live state", () => {
+	it("reports running-subagent changes by count, ignoring reordered ids", () => {
+		const line = makeLine({
+			preset: "custom",
+			leftSegments: [],
+			rightSegments: [],
+		});
+		expect(line.setRunningSubagents([])).toBe(false);
+		expect(line.setRunningSubagents(["sub-1", "sub-2"])).toBe(true);
+		expect(line.facts().subagents).toBe(2);
+		expect(line.setRunningSubagents(["sub-2", "sub-1"])).toBe(false);
+		expect(line.setRunningSubagents(["sub-2"])).toBe(true);
+		expect(line.facts().subagents).toBe(1);
 	});
 
-	it("reports normalized tree-cost changes for repaint scheduling", () => {
-		const component = makeComponent({ preset: "custom", leftSegments: ["cost"], rightSegments: [] });
-		expect(component.setSubagentTreeCost(0)).toBe(false);
-		expect(component.setSubagentTreeCost(0.5)).toBe(true);
-		const border = component.getTopBorder(120);
-		expect(stripVTControlCharacters(border.content)).toContain("(+0.50)");
-
-		expect(component.setSubagentTreeCost(0.5)).toBe(false);
-		expect(component.getTopBorder(120)).toEqual(border);
-		expect(component.setSubagentTreeCost(-1)).toBe(true);
-		expect(stripVTControlCharacters(component.getTopBorder(120).content)).not.toContain("(+0.50)");
-		expect(component.setSubagentTreeCost(Number.NaN)).toBe(false);
+	it("adds the subagent tree's cost to the cost segment", () => {
+		const line = makeLine({
+			preset: "custom",
+			leftSegments: ["cost"],
+			rightSegments: [],
+		});
+		expect(lineText(line)).not.toContain("(+0.50)");
+		line.setModes({ subagentTreeCost: 0.5 });
+		expect(lineText(line)).toContain("(+0.50)");
 	});
 
-	it("keeps plan and hook state dynamic without settings invalidation", () => {
-		const component = makeComponent({ preset: "custom", leftSegments: ["mode"], rightSegments: [] });
-		const effective = component.getEffectiveSettingsForTest();
-		expect(component.getTopBorder(80).content).toBe("");
-
-		component.setPlanModeStatus({ enabled: true, paused: false });
-		expect(stripVTControlCharacters(component.getTopBorder(80).content)).toContain("Plan");
-		expect(component.getEffectiveSettingsForTest()).toBe(effective);
-
-		component.setHookStatus("hook", "hook running");
-		expect(component.render(80)).toEqual(["hook running"]);
-		component.setHookStatus("hook", "hook done");
-		expect(component.render(80)).toEqual(["hook done"]);
-		expect(component.getEffectiveSettingsForTest()).toBe(effective);
+	it("shows plan mode as soon as it is set", () => {
+		const line = makeLine({
+			preset: "custom",
+			leftSegments: ["mode"],
+			rightSegments: [],
+		});
+		expect(lineText(line)).not.toContain("Plan");
+		line.setModes({ plan: { enabled: true, paused: false } });
+		expect(lineText(line)).toContain("Plan");
 	});
 
-	it("renders arbitrary extension statuses in deterministic segment order", () => {
-		const component = makeComponent({
+	it("lists extension statuses in key order without their hyperlinks, and drops cleared ones", () => {
+		const line = makeLine({
 			preset: "custom",
 			leftSegments: ["pi", "status", "model"],
 			rightSegments: [],
@@ -264,183 +148,67 @@ describe("StatusLineComponent effective settings cache", () => {
 			sessionAccent: false,
 			segmentOptions: { model: { showThinkingLevel: false } },
 		});
+		line.setHookStatus("z-tests", "Tests passing");
+		line.setHookStatus("a-indexer", "\x1b]8;;https://example.com\x07Indexer ready\x1b]8;;\x07");
 
-		component.setHookStatus("z-tests", "Tests passing");
-		component.setHookStatus("a-indexer", "\x1b]8;;https://example.com\x07Indexer ready\x1b]8;;\x07");
+		expect(line.facts().hooks.map(hook => Bun.stripANSI(hook))).toEqual(["Indexer ready", "Tests passing"]);
+		const text = lineText(line, 120);
+		expect(text).not.toContain("https://example.com");
+		expect(text.indexOf("Indexer ready")).toBeGreaterThanOrEqual(0);
+		expect(text.indexOf("Indexer ready")).toBeLessThan(text.indexOf("Tests passing"));
+		expect(text.indexOf("Tests passing")).toBeLessThan(text.indexOf("Test Model"));
 
-		const border = component.getTopBorder(120).content;
-		const content = stripVTControlCharacters(border);
-		expect(border).not.toContain("https://example.com");
-		expect(content.indexOf("Indexer ready")).toBeGreaterThanOrEqual(0);
-		expect(content.indexOf("Indexer ready")).toBeLessThan(content.indexOf("Tests passing"));
-		expect(content.indexOf("Tests passing")).toBeLessThan(content.indexOf("Test Model"));
-		expect(component.render(120)).toEqual([]);
-		expect(visibleWidth(component.getTopBorder(24).content)).toBeLessThanOrEqual(24);
-
-		component.setHookStatus("a-indexer", undefined);
-		component.setHookStatus("z-tests", undefined);
-		const cleared = stripVTControlCharacters(component.getTopBorder(120).content);
+		line.setHookStatus("a-indexer", undefined);
+		line.setHookStatus("z-tests", undefined);
+		const cleared = lineText(line, 120);
 		expect(cleared).not.toContain("Indexer ready");
 		expect(cleared).not.toContain("Tests passing");
 	});
 
-	it("keeps an extension's colour in the status segment without disturbing the bar", () => {
-		const settings: StatusLineSettings = {
-			preset: "custom",
-			leftSegments: ["pi", "status", "model"],
-			rightSegments: [],
-			separator: "powerline-thin",
-			showHookStatus: false,
-			sessionAccent: false,
-			segmentOptions: { model: { showThinkingLevel: false } },
-		};
-		const plainBar = makeComponent(settings);
-		plainBar.setHookStatus("build", "building");
-		const styledBar = makeComponent(settings);
-		styledBar.setHookStatus("build", "\x1b[33;41mbuilding\x1b[0m");
-
-		const plain = plainBar.getTopBorder(120).content;
-		const styled = styledBar.getTopBorder(120).content;
-		expect(plain).toContain(`${theme.getFgAnsi("accent")}building`);
-		expect(styled).toContain("\x1b[33mbuilding\x1b[39m");
-		expect(styled).not.toContain("\x1b[41m");
-		// A full reset inside the segment would wipe the bar's background for what follows.
-		expect(styled.split("\x1b[0m").length).toBe(plain.split("\x1b[0m").length);
-		expect(stripVTControlCharacters(styled)).toBe(stripVTControlCharacters(plain));
-		expect(visibleWidth(styledBar.getTopBorder(24).content)).toBeLessThanOrEqual(24);
-	});
-
-	it("keeps the focus-proxy faint on everything after a bold status", () => {
-		const component = makeComponent({
-			preset: "custom",
-			leftSegments: ["status", "model"],
-			rightSegments: [],
-			separator: "powerline-thin",
-			showHookStatus: false,
-			sessionAccent: false,
-			segmentOptions: { model: { showThinkingLevel: false } },
-		});
-		component.setSession(makeSession(), "worker");
-		component.setHookStatus("a", "\x1b[1mbold\x1b[0m");
-		component.setHookStatus("b", "plain");
-
-		const content = component.getTopBorder(120).content;
-		const faintBefore = (needle: string): boolean => {
-			let faint = false;
-			for (const [, params] of content.slice(0, content.indexOf(needle)).matchAll(/\x1b\[([0-9;]*)m/g)) {
-				const codes = params === "" ? ["0"] : params.split(";");
-				for (let i = 0; i < codes.length; i++) {
-					const code = codes[i];
-					// Skip the arguments of 256-colour and truecolor selectors; their numbers are not SGR codes.
-					if (code === "38" || code === "48") i += codes[i + 1] === "5" ? 2 : 4;
-					else if (code === "2") faint = true;
-					else if (code === "22" || code === "0") faint = false;
-				}
-			}
-			return faint;
-		};
-		expect(faintBefore("plain")).toBe(true);
-		expect(faintBefore("Test Model")).toBe(true);
-	});
-
-	it("does not mutate shared preset segment options during narrow renders", () => {
-		const before = { ...STATUS_LINE_PRESETS.default.segmentOptions?.path };
-		const component = makeComponent({ preset: "default", sessionAccent: false });
-
-		component.getTopBorder(12);
-		component.getTopBorder(200);
-
-		expect(STATUS_LINE_PRESETS.default.segmentOptions?.path).toEqual(before);
-		expect(component.getEffectiveSettingsForTest().segmentOptions.path).toEqual(before);
-	});
 	it("skips git probes when git integration is disabled", async () => {
-		const headSpy = spyOn(vcs, "gitInfo");
-		const statusSpy = spyOn(vcs, "watch");
 		const repoSpy = spyOn(vcs, "repo");
+		const displaySpy = spyOn(vcs, "repoForDisplay");
+		const watchSpy = spyOn(vcs, "watch");
 		try {
 			cfgGitEnabled.override(Settings.instance, false);
-			const component = makeComponent({
-				preset: "custom",
-				leftSegments: ["git", "pr"],
-				rightSegments: [],
-				sessionAccent: false,
-			});
-
-			component.watchBranch(() => {
-				throw new Error("git watcher should not fire while git integration is disabled");
-			});
-			component.getTopBorder(100);
-			await Promise.resolve();
-
+			lineText(
+				makeLine({
+					preset: "custom",
+					leftSegments: ["git", "pr"],
+					rightSegments: [],
+				}),
+			);
+			await flushStatus();
 			expect(repoSpy).not.toHaveBeenCalled();
-			expect(headSpy).not.toHaveBeenCalled();
-			expect(statusSpy).not.toHaveBeenCalled();
+			expect(displaySpy).not.toHaveBeenCalled();
+			expect(watchSpy).not.toHaveBeenCalled();
 		} finally {
 			repoSpy.mockRestore();
-			statusSpy.mockRestore();
-			headSpy.mockRestore();
+			displaySpy.mockRestore();
+			watchSpy.mockRestore();
 		}
 	});
 
 	it("skips git probes when no git-backed segment is visible", async () => {
-		const headSpy = spyOn(vcs, "gitInfo");
-		const statusSpy = spyOn(vcs, "watch");
 		const repoSpy = spyOn(vcs, "repo");
+		const displaySpy = spyOn(vcs, "repoForDisplay");
+		const watchSpy = spyOn(vcs, "watch");
 		try {
-			const component = makeComponent({
-				preset: "custom",
-				leftSegments: ["pi"],
-				rightSegments: ["session_name"],
-				sessionAccent: false,
-			});
-
-			component.watchBranch(() => {
-				throw new Error("git watcher should not fire when no git-backed segment is visible");
-			});
-			component.getTopBorder(100);
-			await Promise.resolve();
-
+			lineText(
+				makeLine({
+					preset: "custom",
+					leftSegments: ["pi"],
+					rightSegments: ["session_name"],
+				}),
+			);
+			await flushStatus();
 			expect(repoSpy).not.toHaveBeenCalled();
-			expect(headSpy).not.toHaveBeenCalled();
-			expect(statusSpy).not.toHaveBeenCalled();
+			expect(displaySpy).not.toHaveBeenCalled();
+			expect(watchSpy).not.toHaveBeenCalled();
 		} finally {
 			repoSpy.mockRestore();
-			statusSpy.mockRestore();
-			headSpy.mockRestore();
+			displaySpy.mockRestore();
+			watchSpy.mockRestore();
 		}
-	});
-});
-
-describe("StatusLineComponent hook statuses", () => {
-	it("renders every keyed status on a deterministic line", () => {
-		const component = makeComponent({ showHookStatus: true });
-		component.setHookStatus("project-time", "$0.04 (dev)");
-		component.setHookStatus("ponytail", "Ponytail");
-
-		expect(component.render(8)).toEqual(["Ponytail", "$0.04 (…"]);
-	});
-
-	it("keeps SGR styling from extension statuses", () => {
-		const component = makeComponent({ showHookStatus: true });
-		component.setHookStatus("demo", "\x1b[32mgreen\x1b[39m \x1b[31mred\x1b[39m");
-
-		expect(component.render(80)).toEqual(["\x1b[32mgreen\x1b[39m \x1b[31mred\x1b[39m\x1b[0m"]);
-	});
-
-	it("truncates styled statuses without bleeding style", () => {
-		const component = makeComponent({ showHookStatus: true });
-		component.setHookStatus("demo", "\x1b[32mgreen\x1b[39m \x1b[31mred\x1b[39m");
-
-		const [line] = component.render(6);
-		expect(visibleWidth(line)).toBeLessThanOrEqual(6);
-		expect(stripVTControlCharacters(line)).toBe("green…");
-		expect(line.endsWith("\x1b[0m…")).toBe(true);
-	});
-
-	it("strips OSC links from styled statuses under the bar", () => {
-		const component = makeComponent({ showHookStatus: true });
-		component.setHookStatus("link", "\x1b[1m\x1b]8;;https://example.com\x07docs\x1b]8;;\x07\x1b[22m");
-
-		expect(component.render(80)).toEqual(["\x1b[1mdocs\x1b[22m\x1b[0m"]);
 	});
 });
