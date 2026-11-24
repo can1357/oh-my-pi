@@ -532,16 +532,16 @@ export async function runCli(argv: string[]): Promise<void> {
 	// Declare this module as the worker-host entry now that the active profile
 	// is resolved. The worker-host module is side-effect-free; importing
 	// `@oh-my-pi/pi-utils/env` here would snapshot the wrong agent `.env`.
-	// Gated on `isProcessEntry` (the real CLI process entry) or on a worker selector. A worker
-	// thread or subprocess the host started with a selector can spawn worker threads itself
-	// (stats activity spawns the stats sync worker). Undeclared, that spawn falls back to a `.ts`
-	// file beside the bundle, which npm installs do not ship (#20377). Module state is per thread,
-	// so declaring in a worker does not reach the main thread. Importers (`runCli` in profile-CLI
-	// tests, SDK embedding) run neither branch and stay undeclared, so `workerHostEntry()` is not
-	// poisoned for the whole test process.
+	// Gated on `isProcessEntry` (the real CLI process entry), or on a worker thread the host started
+	// with a worker selector: such a thread spawns its own worker threads (stats activity runs the
+	// stats sync worker), and undeclared there that spawn falls back to a `.ts` file beside the
+	// bundle, which npm installs do not ship (#20377). Module state is per thread, so declaring in
+	// the worker does not reach the main thread. The main thread stays undeclared: importers such
+	// as `runCli` in profile-CLI tests run there, and declaring would poison `workerHostEntry()` for
+	// the whole test process.
 	// This must run before worker selector dispatch so that worker subprocesses
 	// (e.g. stats activity) are registered as hosts and can themselves spawn worker threads.
-	if (isProcessEntry || isWorkerHostSelector(resolvedArgv[0])) declareWorkerHostEntry();
+	if (isProcessEntry || (!Bun.isMainThread && isWorkerHostSelector(resolvedArgv[0]))) declareWorkerHostEntry();
 
 	// Worker-thread entry dispatch must run before the first `await`: the
 	// stats sync worker's buffering onmessage handler is installed in the
