@@ -10,7 +10,7 @@ import { roleCandidatePool } from "../config/model-roles";
 import { type Settings, settings } from "../config/settings";
 import { type SttStreamHandle, sttClient } from "./asr-client";
 import { downloadSttModel, isSttModelCached } from "./downloader";
-import { type EndpointerEvent, StreamEndpointer } from "./endpointer";
+import { type EndpointerConfig, type EndpointerEvent, StreamEndpointer } from "./endpointer";
 import { resolveSttModelSpec, type SttModelKey } from "./models";
 import { evaluateSubmitTrigger } from "./submit-trigger";
 import { encodePcm16Wav, floatToPcm16 } from "./wav";
@@ -43,8 +43,17 @@ interface CaptureHandle {
 
 type CaptureFactory = (onAudio: (error: Error | null, samples: Float32Array) => void) => CaptureHandle;
 
-/** Live cloud phrases commit only: a volatile preview would re-upload the growing phrase every interval. */
-const CLOUD_PHRASE_ENDPOINTER = { partialIntervalMs: Number.POSITIVE_INFINITY };
+/**
+ * Endpointing for live cloud phrases. Each phrase is a request without its neighbors' context, so phrases end
+ * at a sentence-length pause rather than a breath, and pause-free speech is cut only after 30 s (about 1 MB of
+ * 16 kHz PCM16) instead of the local 12 s, where a fixed cut can split a word. No previews: a preview would
+ * re-upload the growing phrase every interval.
+ */
+const CLOUD_PHRASE_ENDPOINTER: Partial<EndpointerConfig> = {
+	endSilenceMs: 1000,
+	maxSegmentMs: 30_000,
+	partialIntervalMs: Number.POSITIVE_INFINITY,
+};
 
 /** Outcome of one live cloud phrase request, settled so it can wait for its turn to commit. */
 type CloudPhraseResult = { text: string } | { error: unknown };

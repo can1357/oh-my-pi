@@ -274,7 +274,7 @@ describe("STTController cloud transcription", () => {
 	});
 
 	describe("live phrases (stt.cloudLive)", () => {
-		it("commits each phrase while still recording and sends only that phrase's audio", async () => {
+		it("commits each phrase while still recording, keeping a breath inside its phrase", async () => {
 			const model = getBundledModel("openai", "whisper-1");
 			settings.setModelRole("dictation", "openai/whisper-1");
 			cfgSttCloudLive.set(settings, true);
@@ -298,14 +298,18 @@ describe("STTController cloud transcription", () => {
 			await controller.start(editor, options);
 			onAudio?.(null, speech(600));
 			onAudio?.(null, silence(700));
+			onAudio?.(null, speech(400));
+			onAudio?.(null, silence(1100));
 			await firstCommit.promise;
 
 			expect(controller.state).toBe("recording");
 			expect(editor.commitVolatileText.mock.calls).toEqual([["first phrase"]]);
-			// Pre-roll and onset frame plus the phrase, without the trailing pause beyond the endpoint tail.
+			// One request holds speech, breath and speech plus the short endpoint tail, not the closing pause.
 			const firstWav = transcribe.mock.calls[0]![1].audio;
 			if (!(firstWav instanceof Uint8Array)) throw new Error("expected encoded WAV bytes");
-			expect((firstWav.byteLength - 44) / 2).toBeLessThan((600 + 240 + 150) * 16);
+			const firstMs = (firstWav.byteLength - 44) / 2 / 16;
+			expect(firstMs).toBeGreaterThanOrEqual(600 + 700 + 400);
+			expect(firstMs).toBeLessThan(600 + 700 + 400 + 300);
 
 			onAudio?.(null, speech(400));
 			await controller.stop();
@@ -336,7 +340,7 @@ describe("STTController cloud transcription", () => {
 
 			await controller.start(editor, makeOptions());
 			onAudio?.(null, speech(500));
-			onAudio?.(null, silence(700));
+			onAudio?.(null, silence(1100));
 			onAudio?.(null, speech(500));
 			const stopping = controller.stop();
 			// The second phrase, flushed at stop, has its answer before the first.
@@ -369,9 +373,9 @@ describe("STTController cloud transcription", () => {
 
 			await controller.start(editor, options);
 			onAudio?.(null, speech(500));
-			onAudio?.(null, silence(700));
+			onAudio?.(null, silence(1100));
 			onAudio?.(null, speech(500));
-			onAudio?.(null, silence(700));
+			onAudio?.(null, silence(1100));
 			onAudio?.(null, speech(500));
 			await controller.stop();
 
