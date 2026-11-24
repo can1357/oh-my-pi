@@ -3881,9 +3881,11 @@ export declare function renderMermaidAscii(text: string, options?: MermaidRender
 export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
 
 /**
- * `script` with the `\` dropped after each `<<EOF &&` (or `||`, `|`, `|&`)
- * so the here-document body starts on the next line; `null` when nothing
- * needs repair or the result would not parse. omp's bash tool runs commands
+ * Repairs `\` continuations after here-document operators in `script`.
+ *
+ * Drops the `\` after each `<<EOF &&` (or `||`, `|`, `|&`) so the
+ * here-document body starts on the next line; `null` when nothing needs
+ * repair or the result would not parse. omp's bash tool runs commands
  * through it.
  */
 export declare function repairHeredocContinuations(script: string): string | null

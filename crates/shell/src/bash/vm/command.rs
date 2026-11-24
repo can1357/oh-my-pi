@@ -1985,7 +1985,9 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 					if simple_job
 						&& exec_as.is_none()
 						&& via != Via::Builtin
-						&& cx.host.prefers_background_program(BStr::new(&argv[0]), &resolved) =>
+						&& cx
+							.host
+							.prefers_background_program(BStr::new(&argv[0]), &resolved) =>
 				{
 					break match resolved {
 						Resolved::Native(native) => Target::SearchNative(native),
@@ -2123,8 +2125,7 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 				let rctx = ResolveCtx { has_slash: false, via: Via::Plain };
 				let target = if let Some(original) = fallback {
 					original
-				} else if exec.exec_as.is_none()
-					&& cx.host.defers_to_path(BStr::new(&name), &exec.argv)
+				} else if exec.exec_as.is_none() && cx.host.defers_to_path(BStr::new(&name), &exec.argv)
 				{
 					// A deferred command whose shadowed program `PATH` lacks:
 					// the host's own command after all.
