@@ -6,8 +6,8 @@
  * thinking slider. Every ordering, ranking and slider rule comes from the TUI picker's own helpers.
  */
 import type { Model } from "@oh-my-pi/pi-ai";
-import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { fuzzyRank } from "@oh-my-pi/pi-tui/fuzzy";
+import { routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { fuzzyRank } from "../../utils/fuzzy";
 import {
 	buildSearchAffinity,
 	heldRoles,
@@ -19,9 +19,9 @@ import {
 	roleChipLabel,
 	type SessionModelScope,
 	SessionModelScopeCache,
-} from "@oh-my-pi/pi-tui/overlays/model-browser";
-import { thinkingSlider } from "@oh-my-pi/pi-tui/overlays/model-picker";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+} from "../view-model/overlays/model-browser";
+import { thinkingSlider } from "../view-model/overlays/model-picker";
+import type { ConfiguredThinkingLevel } from "../../utils/render-utils";
 import { cfgCycleOrder } from "../../config/model-settings";
 import type { AgentSession } from "../../session/agent-session";
 import { createModelBrowserSource } from "../model-browser-source";
@@ -112,7 +112,7 @@ export class RpcModelPicker {
 				...(roles.length > 0 ? { roles } : {}),
 				...(slider.disabled ? {} : { thinking: [...slider.steps], thinkingLevel: slider.value }),
 				...(tokens > 0 && window > 0 && tokens > window ? { overContext: true } : {}),
-				...(modelsAreEqual(current, model) ? { current: true } : {}),
+				...(routedModelsAreEqual(current, model) ? { current: true } : {}),
 			};
 		});
 		return {

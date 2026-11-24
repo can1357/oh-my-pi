@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { agentLoop, type AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { AgentLoopConfig } from "@oh-my-pi/pi-agent-core/types";
 import * as ai from "@oh-my-pi/pi-ai";
@@ -15,10 +15,13 @@ import type {
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { AskTool, recoverAskHtml } from "@oh-my-pi/pi-coding-agent/tools/ask";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
-import { TERMINAL } from "@oh-my-pi/pi-tui";
-import { tagImageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import * as terminalSession from "@oh-my-pi/pi-tui/driver/session";
+import { tagImageAttachmentSource } from "@oh-my-pi/pi-coding-agent/utils/image-source";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 // 1x1 transparent PNG.
 const TINY_PNG_BASE64 =
@@ -100,10 +103,6 @@ function text(result: { content: { type: string; text?: string }[] }): string | 
 	const block = result.content[0];
 	return block?.type === "text" ? block.text : undefined;
 }
-
-beforeAll(async () => {
-	await initTheme(false);
-});
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -265,6 +264,60 @@ describe("AskTool form dialog", () => {
 		expect(formDialog).not.toHaveBeenCalled();
 	});
 
+	it("refuses a <fieldset> whose radios each carry their own name, without showing it", async () => {
+		const formDialog = vi.fn<FormDialog>();
+		const result = await new AskTool(createSession()).execute(
+			"call-split-radios",
+			{
+				html: `<form><fieldset>
+  <legend>Sharing</legend>
+  <label><input type="radio" name="shared_sources" value="common" checked> Common location only</label>
+  <label><input type="radio" name="personal_auto"> Include personal installations</label>
+</fieldset></form>`,
+			},
+			undefined,
+			undefined,
+			createContext({ formDialog }),
+		);
+
+		const message = text(result) ?? "";
+		expect(message).toContain("shared_sources");
+		expect(message).toContain("personal_auto");
+		expect(message).toContain("Sharing");
+		expect(result.details).toEqual({ answers: [] });
+		expect(formDialog).not.toHaveBeenCalled();
+	});
+
+	it("shows forms whose radio names are not split inside one fieldset", async () => {
+		const forms = {
+			"shared name": `<form><fieldset><legend>Sharing</legend>
+  <label><input type="radio" name="sources" value="common" checked> Common location only</label>
+  <label><input type="radio" name="sources" value="personal"> Include personal installations</label>
+</fieldset></form>`,
+			"lone radio": `<form><fieldset><legend>Sharing</legend>
+  <label><input type="radio" name="personal_auto"> Include personal installations</label>
+</fieldset></form>`,
+			"separate fieldsets": `<form><fieldset><legend>Sharing</legend>
+  <label><input type="radio" name="shared_sources" value="common" checked> Common location only</label>
+</fieldset><fieldset><legend>Personal</legend>
+  <label><input type="radio" name="personal_auto"> Include personal installations</label>
+</fieldset></form>`,
+		};
+		for (const [shape, html] of Object.entries(forms)) {
+			const formDialog = vi.fn<FormDialog>(async () => ({ data: { sources: "personal" } }));
+			const result = await new AskTool(createSession()).execute(
+				`call-${shape}`,
+				{ html },
+				undefined,
+				undefined,
+				createContext({ formDialog }),
+			);
+
+			expect(formDialog, shape).toHaveBeenCalledTimes(1);
+			expect(text(result), shape).toContain("User answers:");
+		}
+	});
+
 	it("closes for a message the user queued without cancelling the turn, but stays open for other interrupts", async () => {
 		const ask = (source: string) => {
 			const steering = new AbortController();
@@ -387,7 +440,7 @@ describe("AskTool form dialog", () => {
 	});
 
 	it("does not emit terminal notifications for non-terminal prompt surfaces", async () => {
-		const sendNotification = spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
+		const sendNotification = spyOn(terminalSession, "notifyTerminal").mockImplementation(() => {});
 		await new AskTool(
 			createSession({ hasUI: false, canPromptUser: true, settings: Settings.isolated({ "ask.notify": "on" }) }),
 		).execute(

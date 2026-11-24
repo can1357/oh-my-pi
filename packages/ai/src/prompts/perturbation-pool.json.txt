@@ -8113,12 +8113,30 @@
 			]
 		},
 		{
-			"source": "- :raw verbatim without anchors/prefixes; combine :2-4:raw or :raw:2-4 for exactly those lines.",
+			"source": "- :raw verbatim without anchors/prefixes (skips folding and the display-width limit); combine :2-4:raw or :raw:2-4 for exactly those lines.",
 			"origin": "tools/read.md",
 			"variants": [
-				"- :raw gives verbatim output with no anchors/prefixes; combine :2-4:raw or :raw:2-4 to get exactly those lines.",
-				"- :raw is verbatim, without anchors/prefixes; combine :2-4:raw or :raw:2-4 for exactly those lines.",
-				"- :raw verbatim, no anchors/prefixes; combine :2-4:raw or :raw:2-4 to obtain exactly those lines."
+				"- :raw gives verbatim output with no anchors/prefixes (no folding, no display-width limit); combine :2-4:raw or :raw:2-4 to get exactly those lines.",
+				"- :raw is verbatim, without anchors/prefixes (skips folding and the display-width limit); combine :2-4:raw or :raw:2-4 for exactly those lines.",
+				"- :raw verbatim, no anchors/prefixes (bypasses folding and the display-width limit); combine :2-4:raw or :raw:2-4 to obtain exactly those lines."
+			]
+		},
+		{
+			"source": "- :raw verbatim without line prefixes (skips folding and the display-width limit); combine :2-4:raw or :raw:2-4 for exactly those lines.",
+			"origin": "tools/read.md",
+			"variants": [
+				"- :raw gives verbatim output with no line prefixes (no folding, no display-width limit); combine :2-4:raw or :raw:2-4 to get exactly those lines.",
+				"- :raw is verbatim, without line prefixes (skips folding and the display-width limit); combine :2-4:raw or :raw:2-4 for exactly those lines.",
+				"- :raw verbatim, no line prefixes (bypasses folding and the display-width limit); combine :2-4:raw or :raw:2-4 to obtain exactly those lines."
+			]
+		},
+		{
+			"source": "- :raw verbatim (skips folding and the display-width limit); combine :2-4:raw or :raw:2-4 for exactly those lines.",
+			"origin": "tools/read.md",
+			"variants": [
+				"- :raw gives verbatim output (no folding, no display-width limit); combine :2-4:raw or :raw:2-4 to get exactly those lines.",
+				"- :raw is verbatim (skips folding and the display-width limit); combine :2-4:raw or :raw:2-4 for exactly those lines.",
+				"- :raw verbatim (bypasses folding and the display-width limit); combine :2-4:raw or :raw:2-4 to obtain exactly those lines."
 			]
 		},
 		{
@@ -17106,6 +17124,330 @@
 				"help://<tool>/<topic>: reference docs for a tool, linked in its description; help://<tool> lists its topics.",
 				"help://<tool>/<topic>: reference documentation for a tool, linked from its description; help://<tool> lists its topics.",
 				"help://<tool>/<topic>: reference docs of a tool, linked from its description; help://<tool> lists its topics."
+			]
+		},
+		{
+			"source": "- omp decides from the user's setting when input takes over their pointer and keyboard; you never choose it and need not ask the user about it.",
+			"origin": "system/computer-use.md",
+			"variants": [
+				"- omp decides, from the user's setting, when input takes control of their pointer and keyboard; you never choose this and need not ask the user.",
+				"- When input takes over the user's pointer and keyboard is decided by omp from the user's setting; you never choose it, nor do you need to ask the user.",
+				"- omp decides when input takes over the user's pointer and keyboard, based on the user's setting; that choice is never yours and you need not ask the user."
+			]
+		},
+		{
+			"source": "- `wait` in this fork: a wait that returns with nothing new means keep waiting while the request is blocked on a job or service; call `wait` again instead of ending your turn.",
+			"origin": "system/tan-context-switch.md",
+			"variants": [
+				"- `wait` in this fork: a wait that comes back with nothing new means keep waiting while the request is blocked on a job or service; call `wait` again rather than ending your turn.",
+				"- `wait` in this fork: if a wait returns with nothing new, keep waiting as long as the request is blocked on a job or service; call `wait` again instead of ending your turn.",
+				"- `wait` in this fork: a wait returning nothing new means continue waiting while the request is blocked on a job or service; call `wait` again, don't end your turn.",
+				"- In this fork, `wait`: when a wait returns with nothing new, that means keep waiting while the request stays blocked on a job or service; call `wait` again instead of ending your turn."
+			]
+		},
+		{
+			"source": "Error: a <fieldset> holds radios that each carry a different `name`, so each is a group of its own:",
+			"origin": "tools/ask-split-radio-groups.md",
+			"variants": [
+				"Error: a <fieldset> contains radios that each carry a different `name`, so each one forms a group of its own:",
+				"Error: within a <fieldset>, radios each carry a distinct `name`, so each is its own group:",
+				"Error: a <fieldset> holds radios that each have a different `name`, making each of them a group of its own:",
+				"Error: the radios in a <fieldset> each carry a different `name`, so every one is a group of its own:"
+			]
+		},
+		{
+			"source": "A preselected radio of one group is submitted together with the user's pick in another, so the answer holds two values for one question. Give every option of a question the same `name` with its own `value`:",
+			"origin": "tools/ask-split-radio-groups.md",
+			"variants": [
+				"A preselected radio belonging to one group is submitted together with the user's pick in another, so the answer contains two values for one question. Give every option of a question the same `name` with its own `value`:",
+				"A preselected radio from one group gets submitted alongside the user's pick in another, so the answer carries two values for a single question. Give all options of a question the same `name` each with its own `value`:",
+				"A preselected radio in one group is submitted along with the user's pick in another group, so the answer holds two values for one question. Give each option of a question the same `name` with its own `value`:",
+				"A preselected radio of one group is submitted together with the user's pick in another, meaning the answer holds two values for one question. Give every option of a question the same `name`, each with its own `value`:"
+			]
+		},
+		{
+			"source": "Questions that really are separate get a <fieldset> each. Then call ask again.",
+			"origin": "tools/ask-split-radio-groups.md",
+			"variants": [
+				"Questions that genuinely are separate each get a <fieldset>. Then call ask again.",
+				"Questions that truly are separate each get their own <fieldset>. Then call ask again.",
+				"Questions which really are distinct get a <fieldset> each. Then call ask again.",
+				"Questions that really are separate each receive a <fieldset>. Then call ask again."
+			]
+		},
+		{
+			"source": "- `holdKeys(keys, {duration})` and `holdMouse(x, y, {button?, duration, keys?})`",
+			"origin": "tools/computer.md",
+			"variants": [
+				"- `holdKeys(keys, {duration})` plus `holdMouse(x, y, {button?, duration, keys?})`",
+				"- `holdKeys(keys, {duration})` and also `holdMouse(x, y, {button?, duration, keys?})`",
+				"- `holdKeys(keys, {duration})`, and `holdMouse(x, y, {button?, duration, keys?})`"
+			]
+		},
+		{
+			"source": "  `drag(points, {keys?, modifiers?})` supports Space-drag and other held-key gestures. Do not invent cross-call key-down/button-down state.",
+			"origin": "tools/computer.md",
+			"variants": [
+				"  `drag(points, {keys?, modifiers?})` handles Space-drag and other gestures with held keys. Do not invent key-down/button-down state spanning calls.",
+				"  `drag(points, {keys?, modifiers?})` supports Space-drag and other held-key gestures. Never invent cross-call key-down/button-down state.",
+				"  `drag(points, {keys?, modifiers?})` supports Space-drag and other held-key gestures. Do not fabricate cross-call key-down/button-down state."
+			]
+		},
+		{
+			"source": "  - It does not change delivery, which omp decides from the user's setting (below).",
+			"origin": "tools/computer.md",
+			"variants": [
+				"  - It leaves delivery unchanged, and omp decides that from the user's setting (below).",
+				"  - It does not alter delivery, which omp determines from the user's setting (below).",
+				"  - Delivery is not changed by it; omp decides delivery from the user's setting (below)."
+			]
+		},
+		{
+			"source": "- omp, never you, decides whether an input call takes over (real pointer and keyboard input, which the user's Escape stops), from the user's setting;",
+			"origin": "tools/computer.md",
+			"variants": [
+				"- omp, never you, decides from the user's setting whether an input call takes over (real pointer and keyboard input, which the user's Escape halts);",
+				"- From the user's setting, omp, never you, decides whether an input call takes over (real pointer and keyboard input, which the user's Escape stops);",
+				"- Whether an input call takes over (real pointer and keyboard input, which the user's Escape stops) is decided by omp, never you, from the user's setting;"
+			]
+		},
+		{
+			"source": "  input helpers take no `takeover` option, and passing one throws with nothing sent. Never ask the user whether to take over.",
+			"origin": "tools/computer.md",
+			"variants": [
+				"  input helpers accept no `takeover` option, and passing one throws without sending anything. Never ask the user whether to take over.",
+				"  input helpers take no `takeover` option; passing one throws and nothing is sent. Never ask the user whether to take over.",
+				"  input helpers do not take a `takeover` option, and passing one throws with nothing sent. Never ask the user if you should take over."
+			]
+		},
+		{
+			"source": "  - The user's setting takes over input to a window in front of them, or every window and element input call;",
+			"origin": "tools/computer.md",
+			"variants": [
+				"  - The user's setting takes over input either to a window in front of them, or to every window and element input call;",
+				"  - The user's setting takes over input to a window in front of them, or every input call for a window and element;"
+			]
+		},
+		{
+			"source": "    other input runs in the background without moving the user's pointer or activating the target.",
+			"origin": "tools/computer.md",
+			"variants": [
+				"    other input runs in the background, neither moving the user's pointer nor activating the target.",
+				"    other input runs in the background without moving the user's pointer and without activating the target.",
+				"    the rest of input runs in the background without moving the user's pointer or activating the target."
+			]
+		},
+		{
+			"source": "  - When a background route is unavailable, omp reruns that call in takeover, hands the keyboard back to the user's window and says what it did in the output",
+			"origin": "tools/computer.md",
+			"variants": [
+				"  - When a background route is unavailable, omp reruns that call in takeover, returns the keyboard to the user's window and says what it did in the output",
+				"  - If a background route is unavailable, omp reruns that call in takeover, hands the keyboard back to the user's window, and states what it did in the output",
+				"  - When no background route is available, omp reruns that call in takeover, hands the keyboard back to the user's window and says in the output what it did",
+				"  - When a background route is unavailable, omp reruns that call in takeover and hands the keyboard back to the user's window, saying what it did in the output"
+			]
+		},
+		{
+			"source": "    (`… ran in takeover because …; the input was delivered, and handed the keyboard back to …'s window`).",
+			"origin": "tools/computer.md",
+			"variants": [
+				"    (`… ran in takeover because …; the input was delivered, and the keyboard was handed back to …'s window`).",
+				"    (`… ran in takeover because …; the input got delivered, and the keyboard was handed back to …'s window`)."
+			]
+		},
+		{
+			"source": "  - When a screenshot proves background input to a window did nothing and AX cannot do it, tell the user the step needs that window in front of them.",
+			"origin": "tools/computer.md",
+			"variants": [
+				"  - If a screenshot shows background input to a window did nothing and AX cannot do it, tell the user that step needs that window in front of them.",
+				"  - When a screenshot proves background input to a window did nothing and AX is unable to do it, tell the user the step needs that window in front of them.",
+				"  - When a screenshot proves that background input to a window did nothing and AX cannot do it, tell the user this step requires that window in front of them."
+			]
+		},
+		{
+			"source": "  - One question = one `name`: every option repeats it with its own `value` (`name=\"store\" value=\"sqlite\"`, `name=\"store\" value=\"redis\"`). A different `name` per option makes each option a group of its own and submits two answers; ask refuses a <fieldset> that does that.",
+			"origin": "tools/ask.md",
+			"variants": [
+				"  - One question = one `name`: each option repeats it with its own `value` (`name=\"store\" value=\"sqlite\"`, `name=\"store\" value=\"redis\"`). A distinct `name` per option makes every option its own group and submits two answers; ask refuses a <fieldset> doing that.",
+				"  - One question = one `name`: every option repeats that `name` with its own `value` (`name=\"store\" value=\"sqlite\"`, `name=\"store\" value=\"redis\"`). A different `name` for each option makes each option a group of its own and submits two answers; ask rejects a <fieldset> that does this.",
+				"  - One question = one `name`: all options repeat it, each with its own `value` (`name=\"store\" value=\"sqlite\"`, `name=\"store\" value=\"redis\"`). A different `name` per option turns each option into a group of its own and submits two answers; ask refuses a <fieldset> that does so."
+			]
+		},
+		{
+			"source": "This fork runs one assignment: while that assignment is blocked on a job or service you started, call `wait` again and keep waiting.",
+			"origin": "tools/wait-idle-fork.md",
+			"variants": [
+				"This fork runs a single assignment: while that assignment is blocked on a job or service you started, call `wait` again and continue waiting.",
+				"This fork runs one assignment: while that assignment stays blocked on a job or service you started, call `wait` again and keep on waiting.",
+				"This fork runs one assignment: as long as that assignment is blocked on a job or service you started, call `wait` again and keep waiting."
+			]
+		},
+		{
+			"source": "Anything else the assignment needs can be done now; NEVER start `sleep` jobs to wait longer.",
+			"origin": "tools/wait-idle-fork.md",
+			"variants": [
+				"Anything else the assignment requires can be done now; NEVER start `sleep` jobs to wait longer.",
+				"Whatever else the assignment needs can be done now; NEVER start `sleep` jobs in order to wait longer.",
+				"Anything else needed by the assignment can be done now; NEVER start `sleep` jobs so as to wait longer."
+			]
+		},
+		{
+			"source": "Read-only local history: recent projects, past sessions with recaps, full-text session search, prompt history, and tool-call activity (calls, regex over transcripts, counts, raw records).",
+			"origin": "tools/archive.md",
+			"variants": [
+				"Local history, read-only: recent projects, past sessions with recaps, full-text session search, prompt history, plus tool-call activity (calls, regex over transcripts, counts, raw records).",
+				"Read-only local history covering recent projects, past sessions with recaps, full-text session search, prompt history, and tool-call activity (calls, regex over transcripts, counts, raw records)."
+			]
+		},
+		{
+			"source": "- You SHOULD use it when the user refers to earlier work (\"what did we do yesterday\", \"the prompt where I asked about X\", \"pick up the auth work\"), asks for recent projects or sessions, or asks how tools behaved across sessions.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- You SHOULD use it when the user refers to earlier work (what did we do yesterday, the prompt where I asked about X, pick up the auth work), asks for recent projects or sessions, or asks how tools behaved across sessions.",
+				"- You SHOULD use it when the user mentions earlier work (what did we do yesterday, the prompt where I asked about X, pick up the auth work), requests recent projects or sessions, or asks how tools behaved across sessions.",
+				"- You SHOULD use it when the user refers to previous work (what did we do yesterday, the prompt where I asked about X, pick up the auth work), asks about recent projects or sessions, or asks how tools behaved across sessions."
+			]
+		},
+		{
+			"source": "- Scope: `project` omitted → current project; `\"*\"` → every project; otherwise a project path (`~` and relative paths resolve against the cwd). `limit`: 1–500, default 20; `calls`, `grep`, `messages` allow up to 10000.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- Scope: with `project` omitted → current project; `\"*\"` → every project; else a project path (`~` and relative paths resolve against the cwd). `limit`: 1–500, default 20; `calls`, `grep`, `messages` permit up to 10000.",
+				"- Scope: omitting `project` → current project; `\"*\"` → every project; otherwise a project path (`~` and relative paths resolve against the cwd). `limit`: 1–500, default 20; `calls`, `grep`, `messages` allow up to 10000."
+			]
+		},
+		{
+			"source": "- Time window: `since` (inclusive) and `until` (exclusive) on every method but `session`. Each is an age before now (`\"90m\"`, `\"36h\"`, `\"8d\"`, `\"2w\"`), an ISO date (`\"2026-11-16\"`, local midnight), an ISO date-time (local unless it names a zone), a JS `Date`, or a Python `datetime`.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- Time window: `since` (inclusive) and `until` (exclusive) on every method except `session`. Each is an age before now (`\"90m\"`, `\"36h\"`, `\"8d\"`, `\"2w\"`), an ISO date (`\"2026-11-16\"`, local midnight), an ISO date-time (local unless it names a zone), a JS `Date`, or a Python `datetime`.",
+				"- Time window: `since` (inclusive) and `until` (exclusive) on every method but `session`. Each can be an age before now (`\"90m\"`, `\"36h\"`, `\"8d\"`, `\"2w\"`), an ISO date (`\"2026-11-16\"`, local midnight), an ISO date-time (local unless it names a zone), a JS `Date`, or a Python `datetime`.",
+				"- Time window: `since` (inclusive) and `until` (exclusive) on every method but `session`. Every one is an age before now (`\"90m\"`, `\"36h\"`, `\"8d\"`, `\"2w\"`), an ISO date (`\"2026-11-16\"`, local midnight), an ISO date-time (local unless it names a zone), a JS `Date`, or a Python `datetime`."
+			]
+		},
+		{
+			"source": "- `projects({since, until, limit})` → `[{path, sessions, lastActive, latest}]` by last activity; `latest` is the project's newest session.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `projects({since, until, limit})` → `[{path, sessions, lastActive, latest}]` ordered by last activity; `latest` is the project's newest session.",
+				"- `projects({since, until, limit})` → `[{path, sessions, lastActive, latest}]` sorted by last activity; `latest` is that project's newest session."
+			]
+		},
+		{
+			"source": "- `sessions({project, since, until, limit})` → `[{id, file, project, title, created, modified, messages, status, recap}]`, newest first; 0-turn empties skipped; `recap` is the newest one. A window keeps sessions active in it.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `sessions({project, since, until, limit})` → `[{id, file, project, title, created, modified, messages, status, recap}]`, newest first; empty 0-turn ones skipped; `recap` is the newest. A window keeps sessions active in it.",
+				"- `sessions({project, since, until, limit})` → `[{id, file, project, title, created, modified, messages, status, recap}]`, newest first; 0-turn empties are skipped; `recap` is the newest. A window retains sessions active in it.",
+				"- `sessions({project, since, until, limit})` → `[{id, file, project, title, created, modified, messages, status, recap}]`, newest first; skipped are 0-turn empties; `recap` is the newest one. A window keeps sessions active in it."
+			]
+		},
+		{
+			"source": "- `search(query, {project, since, until, limit})` → sessions whose title, a recap, or a user or assistant message matches, newest first: `sessions` fields plus `matches: [{source, text, at}]` (`source`: `\"title\"`, `\"recap\"`, `\"user\"`, or `\"assistant\"`; a message's `text` is a snippet around the hit; `at` is `null` for titles). Covers all of history, not only the newest `limit` sessions.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `search(query, {project, since, until, limit})` → sessions where a title, a recap, or a user or assistant message matches, newest first: `sessions` fields plus `matches: [{source, text, at}]` (`source`: `\"title\"`, `\"recap\"`, `\"user\"`, or `\"assistant\"`; a message's `text` is a snippet around the hit; `at` is `null` for titles). Covers all of history, not only the newest `limit` sessions.",
+				"- `search(query, {project, since, until, limit})` → sessions whose title, recap, or user or assistant message matches, newest first: `sessions` fields plus `matches: [{source, text, at}]` (`source`: `\"title\"`, `\"recap\"`, `\"user\"`, or `\"assistant\"`; a message's `text` is a snippet around the hit; for titles `at` is `null`). Covers all of history, not only the newest `limit` sessions.",
+				"- `search(query, {project, since, until, limit})` → sessions with a matching title, recap, or user or assistant message, newest first: `sessions` fields plus `matches: [{source, text, at}]` (`source`: `\"title\"`, `\"recap\"`, `\"user\"`, or `\"assistant\"`; a message's `text` is a snippet around the hit; `at` is `null` for titles). Covers all of history, not only the newest `limit` sessions."
+			]
+		},
+		{
+			"source": "- `prompts({query, project, since, until, limit})` → `[{text, at, project, session, uses}]`, newest first; `query` keeps matching prompts, including ones with no session.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `prompts({query, project, since, until, limit})` → `[{text, at, project, session, uses}]`, newest first; `query` retains matching prompts, including ones lacking a session.",
+				"- `prompts({query, project, since, until, limit})` → `[{text, at, project, session, uses}]`, newest first; `query` keeps prompts that match, including ones with no session.",
+				"- `prompts({query, project, since, until, limit})` → `[{text, at, project, session, uses}]`, newest first; `query` keeps matching prompts, even those with no session."
+			]
+		},
+		{
+			"source": "- `recaps({project, since, until, limit})` → `[{text, at, session, project}]`, newest first.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `recaps({project, since, until, limit})` → `[{text, at, session, project}]`, ordered newest first.",
+				"- `recaps({project, since, until, limit})` → `[{text, at, session, project}]`, with newest first.",
+				"- `recaps({project, since, until, limit})` → `[{text, at, session, project}]`, newest at the top."
+			]
+		},
+		{
+			"source": "- `calls({tool, match, result, error, flags, project, subagents, since, until, limit})` → tool calls, newest first: `[{session, agent, project, file, at, entry, callId, tool, args, result, resultChars, isError, reasoning, model, version}]`. `tool`: name or list; `match`: regex over every string inside the arguments; `result`: regex over the result text; `error: true` keeps failed calls, `false` succeeded ones. `reasoning`: last 4,000 characters of the thinking and reply before the call; `version`: omp version that ran it.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `calls({tool, match, result, error, flags, project, subagents, since, until, limit})` → tool calls, newest first: `[{session, agent, project, file, at, entry, callId, tool, args, result, resultChars, isError, reasoning, model, version}]`. `tool`: name or list; `match`: regex over every string inside the arguments; `result`: regex over the result text; `error: true` keeps failed calls, `false` keeps succeeded ones. `reasoning`: last 4,000 characters of thinking and reply before the call; `version`: omp version that ran it.",
+				"- `calls({tool, match, result, error, flags, project, subagents, since, until, limit})` → tool calls, newest first: `[{session, agent, project, file, at, entry, callId, tool, args, result, resultChars, isError, reasoning, model, version}]`. `tool`: name or list; `match`: regex over every string within the arguments; `result`: regex over the result text; `error: true` keeps failed calls, `false` succeeded ones. `reasoning`: last 4,000 characters of the thinking and reply before the call; `version`: omp version that ran it.",
+				"- `calls({tool, match, result, error, flags, project, subagents, since, until, limit})` → tool calls, newest first: `[{session, agent, project, file, at, entry, callId, tool, args, result, resultChars, isError, reasoning, model, version}]`. `tool`: name or list; `match`: regex over every string inside the arguments; `result`: regex over the result text; `error: true` keeps failed calls, `false` succeeded ones. `reasoning`: the last 4,000 characters of thinking and reply before the call; `version`: omp version that ran it."
+			]
+		},
+		{
+			"source": "- `grep(pattern, {sources, tool, flags, project, subagents, since, until, limit})` → regex matches, newest first: `[{session, agent, project, file, at, entry, source, tool, callId, text, match}]`. `sources` (default all): `\"user\"`, `\"assistant\"`, `\"thinking\"`, `\"args\"`, `\"result\"`; `tool` narrows `args`/`result`; `text` is a snippet around `match`.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `grep(pattern, {sources, tool, flags, project, subagents, since, until, limit})` → regex matches, newest first: `[{session, agent, project, file, at, entry, source, tool, callId, text, match}]`. `sources` (default all): `\"user\"`, `\"assistant\"`, `\"thinking\"`, `\"args\"`, `\"result\"`; `tool` narrows `args`/`result`; `text` is the snippet around `match`.",
+				"- `grep(pattern, {sources, tool, flags, project, subagents, since, until, limit})` → regex matches, newest first: `[{session, agent, project, file, at, entry, source, tool, callId, text, match}]`. `sources` (default all): `\"user\"`, `\"assistant\"`, `\"thinking\"`, `\"args\"`, `\"result\"`; `tool` narrows down `args`/`result`; `text` is a snippet around `match`.",
+				"- `grep(pattern, {sources, tool, flags, project, subagents, since, until, limit})` → regex matches, newest first: `[{session, agent, project, file, at, entry, source, tool, callId, text, match}]`. `sources` (default all): `\"user\"`, `\"assistant\"`, `\"thinking\"`, `\"args\"`, `\"result\"`; `tool` narrows `args`/`result`; a snippet around `match` is `text`."
+			]
+		},
+		{
+			"source": "- `stats({by, tool, match, result, error, flags, project, subagents, since, until, limit})` → `[{key, calls, errors}]` for calls matching the `calls` filters; `by` (default `\"tool\"`): `\"tool\"`, `\"day\"` (local `YYYY-MM-DD`, newest first), `\"model\"`, `\"version\"`, `\"project\"`, `\"session\"`. Others sort by most calls.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `stats({by, tool, match, result, error, flags, project, subagents, since, until, limit})` → `[{key, calls, errors}]` for calls that match the `calls` filters; `by` (default `\"tool\"`): `\"tool\"`, `\"day\"` (local `YYYY-MM-DD`, newest first), `\"model\"`, `\"version\"`, `\"project\"`, `\"session\"`. The others sort by most calls.",
+				"- `stats({by, tool, match, result, error, flags, project, subagents, since, until, limit})` → `[{key, calls, errors}]` for calls matching the `calls` filters; `by` (default `\"tool\"`): `\"tool\"`, `\"day\"` (local `YYYY-MM-DD`, newest first), `\"model\"`, `\"version\"`, `\"project\"`, `\"session\"`. All others sort by most calls.",
+				"- `stats({by, tool, match, result, error, flags, project, subagents, since, until, limit})` → `[{key, calls, errors}]` for calls matching the `calls` filters; `by` (default `\"tool\"`): `\"tool\"`, `\"day\"` (local `YYYY-MM-DD`, newest first), `\"model\"`, `\"version\"`, `\"project\"`, `\"session\"`. Others are sorted by most calls."
+			]
+		},
+		{
+			"source": "- `messages(id, {kinds, since, until, limit})` → the newest `limit` records of one transcript, whole, oldest first: `[{entry, at, kind, text, tool, callId, args, isError}]`. `kinds` (default all): `\"user\"`, `\"assistant\"`, `\"thinking\"`, `\"call\"`, `\"result\"`. `id`: session id prefix or any transcript `file`, subagent ones included.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `messages(id, {kinds, since, until, limit})` → the newest `limit` records of a single transcript, whole, oldest first: `[{entry, at, kind, text, tool, callId, args, isError}]`. `kinds` (default all): `\"user\"`, `\"assistant\"`, `\"thinking\"`, `\"call\"`, `\"result\"`. `id`: session id prefix or any transcript `file`, subagent ones included.",
+				"- `messages(id, {kinds, since, until, limit})` → the newest `limit` records of one transcript, in full, oldest first: `[{entry, at, kind, text, tool, callId, args, isError}]`. `kinds` (default all): `\"user\"`, `\"assistant\"`, `\"thinking\"`, `\"call\"`, `\"result\"`. `id`: session id prefix or any transcript `file`, subagent ones included.",
+				"- `messages(id, {kinds, since, until, limit})` → the newest `limit` records of one transcript, whole, oldest first: `[{entry, at, kind, text, tool, callId, args, isError}]`. `kinds` (default all): `\"user\"`, `\"assistant\"`, `\"thinking\"`, `\"call\"`, `\"result\"`. `id`: a session id prefix or any transcript `file`, subagent ones included."
+			]
+		},
+		{
+			"source": "- Regex (`match`, `result`, `pattern`): the `grep` tool's dialect (Rust regex; look-around and back-references work); `^`/`$` anchor at lines. `flags`: `i` ignores case, `s` lets `.` cross newlines. A JS `RegExp` or Python compiled pattern works too; its flags merge into `flags`.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- Regex (`match`, `result`, `pattern`): the `grep` tool's dialect (Rust regex; look-around and back-references work); `^`/`$` anchor at lines. `flags`: `i` ignores case, `s` allows `.` across newlines. A JS `RegExp` or Python compiled pattern works too; its flags merge into `flags`.",
+				"- Regex (`match`, `result`, `pattern`): the `grep` tool's dialect (Rust regex; look-around and back-references work); `^`/`$` anchor at lines. `flags`: `i` ignores case, `s` lets `.` cross newlines. A JS `RegExp` or Python compiled pattern also works; its flags merge into `flags`.",
+				"- Regex (`match`, `result`, `pattern`): the `grep` tool's dialect (Rust regex; look-around and back-references work); `^`/`$` anchor at lines. `flags`: `i` ignores case, `s` lets `.` cross newlines. A JS `RegExp` or compiled Python pattern works too; its flags merge into `flags`."
+			]
+		},
+		{
+			"source": "- `subagents: true` adds the subagent transcripts of every session in scope; records name them in `agent` (`\"Scout\"`, `\"Scout/Helper\"`). Default off: they triple the bytes read.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `subagents: true` adds subagent transcripts for every session in scope; records name them in `agent` (`\"Scout\"`, `\"Scout/Helper\"`). Off by default: they triple the bytes read.",
+				"- `subagents: true` adds every in-scope session's subagent transcripts; records name them in `agent` (`\"Scout\"`, `\"Scout/Helper\"`). Default off: they triple the bytes read.",
+				"- `subagents: true` adds the subagent transcripts of each session in scope; records name them in `agent` (`\"Scout\"`, `\"Scout/Helper\"`). Default off: they triple the bytes read."
+			]
+		},
+		{
+			"source": "- `calls`, `grep`, and `stats` read transcripts from disk; a wide window over every project takes seconds. Narrow `since` and `project` first.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `calls`, `grep`, and `stats` read transcripts from disk; a wide window across every project takes seconds. Narrow `since` and `project` first.",
+				"- `calls`, `grep`, and `stats` read transcripts from disk; a wide window over all projects takes seconds. Narrow `since` and `project` first.",
+				"- `calls`, `grep`, and `stats` read transcripts off disk; a wide window over every project takes seconds. Narrow `since` and `project` first."
+			]
+		},
+		{
+			"source": "- Filters see whole texts; returned `calls` records cut a result over 1,000 characters to its first and last 500, and an argument string over 4,000 to its first and last 2,000. `messages` returns records whole.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- Filters see whole texts; returned `calls` records trim a result over 1,000 characters to its first and last 500, and an argument string over 4,000 to its first and last 2,000. `messages` returns records whole.",
+				"- Filters see whole texts; returned `calls` records cut a result longer than 1,000 characters to its first and last 500, and an argument string longer than 4,000 to its first and last 2,000. `messages` returns records whole.",
+				"- Filters see whole texts; returned `calls` records cut any result over 1,000 characters to its first and last 500, and any argument string over 4,000 to its first and last 2,000. `messages` returns records whole."
+			]
+		},
+		{
+			"source": "- You MUST use `calls`, `grep`, `stats`, or `messages` for thinking, tool calls, and tool output; NEVER parse session JSONL files yourself.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- For thinking, tool calls, and tool output, you MUST use `calls`, `grep`, `stats`, or `messages`; NEVER parse session JSONL files yourself.",
+				"- You MUST use `calls`, `grep`, `stats`, or `messages` for thinking, tool calls, and tool output; NEVER parse the session JSONL files yourself.",
+				"- You MUST use `calls`, `grep`, `stats`, or `messages` for thinking, tool calls, and tool output; you should NEVER parse session JSONL files yourself."
 			]
 		}
 	]

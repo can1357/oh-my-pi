@@ -39,6 +39,9 @@
  * The semantic heuristics (2, 3) judge prose only: code-shaped lines are dropped
  * before analysis because legitimate code repeats one keyword skeleton with
  * different literals, and numeric tokens are stripped during normalization.
+ * Segments that are recognisably structured rows (pipe-delimited table rows and
+ * JSON key/value records, including fragments the chunker cut from them) are
+ * skipped too; see {@link isStructuredSegment}.
  *
  * Scope: the `thinking-loop-guard` catalog axis picks the level per model line
  * ({@link loopGuardLevel}): exact cycles by default, plus semantic heuristics
@@ -97,6 +100,47 @@ const SEGMENT_SIMILARITY = 0.8;
 const SEGMENT_MIN_COUNT = 8;
 /** Near-duplicate cluster size (current + matches) that trips the loop. */
 const SEGMENT_MIN_CLUSTER = 4;
+
+/** The tail of a JSON string that the chunker cut at the segment start: the text up to
+ *  its closing quote, which a JSON delimiter follows. It is masked to `""` first, so the
+ *  first real token after it is read as an opener. */
+const JSON_STRING_TAIL = /^[^"\n]*"(?=\s*[,}\]:])/;
+/** A JSON string value whose opening quote starts the segment: the `:` or `,` that
+ *  introduced it landed at the end of the previous chunk, so the delimiter lookbehind
+ *  of {@link JSON_STRING} is outside the segment and {@link JSON_STRING_TAIL} cannot
+ *  cross the opening quote to find a closing one. The value may run to the segment
+ *  end with no closing quote (`"?`); it is masked to `""` like any other string. */
+const JSON_STRING_LEAD = /^\s*"(?:\\.|[^"\\\n])*"?(?=\s*[,}\]:]|$)/;
+/** A JSON key or value string, closed or cut off at the segment end. It is masked to
+ *  `""` before the record check, so a long descriptive value cannot hide the record
+ *  around it. Anchored after `{`, `[`, `,` or `:` so a closing quote that the chunker
+ *  left at a segment start is never read as an opener; a string whose opening quote
+ *  starts the segment is {@link JSON_STRING_LEAD}'s case. */
+const JSON_STRING = /(?<=[{[,:]\s*)"(?:\\.|[^"\\\n])*"?/g;
+/** A scalar JSON value on masked text: a masked string, a number, or a literal. */
+const JSON_SCALAR = /""|-?\d[\d.eE+-]*|true|false|null/;
+/** A flat JSON array of scalar values on masked text, possibly empty. */
+const JSON_SCALAR_ARRAY = new RegExp(
+	`\\[\\s*(?:(?:${JSON_SCALAR.source})(?:\\s*,\\s*(?:${JSON_SCALAR.source}))*)?\\s*\\]`,
+);
+/** A JSON record field on masked text: `"key": value` after a `{` or `,` delimiter,
+ *  with a masked key and a masked, number, literal, or flat-array value — or a leading
+ *  masked value whose `:` the chunker cut off at the previous segment boundary. Global
+ *  flag: collected with matchAll, never used with the stateful test(). */
+const JSON_FIELD = new RegExp(
+	`(?:^|[{,])\\s*""\\s*:\\s*(?:${JSON_SCALAR.source}|${JSON_SCALAR_ARRAY.source})|^\\s*""(?=\\s*[,}\\]])`,
+	"gm",
+);
+/** JSON fields a segment needs before its field text can make it a record. */
+const JSON_MIN_FIELDS = 2;
+/** Least share of a segment's characters that must be JSON field text. */
+const JSON_MIN_FIELD_SHARE = 0.5;
+/** Pipe count at which a line is a markdown table row. */
+const TABLE_ROW_MIN_PIPES = 2;
+/** Non-blank lines a segment needs before its rows can make it a table. */
+const TABLE_MIN_LINES = 2;
+/** Least share of a segment's non-blank lines that must be table rows. */
+const TABLE_ROW_MIN_SHARE = 0.6;
 
 /** Recent segments whose pooled unigram vocabulary is the novelty baseline for
  *  progress-lexicon stall detection. */
@@ -256,6 +300,10 @@ export class ThinkingLoopDetector {
 			.replace(/^[ \t]*\*{2,3}.+?\*{2,3}[ \t]*$/gm, "");
 		const normalized = normalizeSegment(segment);
 		if (normalized.length < SEGMENT_MIN_NORM_CHARS) return null;
+		// Structured answer content is not reasoning. Its rows differ only in data that
+		// normalization drops, so they would cluster like a loop. Skipping it leaves
+		// the cluster count and the stall run untouched.
+		if (isStructuredSegment(segment)) return null;
 
 		// (a) Near-duplicate trigram cluster: the same paragraph reused with
 		// cosmetic wording drift (high word-trigram overlap).
@@ -602,8 +650,18 @@ const exactZ = new Uint16Array(EXACT_MAX_UNIT + 1);
 function detectExactSuffixCycle(text: string): [unit: string, count: number] | null {
 	const n = text.length;
 	if (n < EXACT_SHORT_MIN_REPEATED_CHARS) return null;
-	const last = n - 1;
 	const maxUnit = Math.min(EXACT_MAX_UNIT, Math.floor(n / 3));
+	// Every match requires `z[len] >= min(EXACT_SHORT_MIN_REPEATED_CHARS - EXACT_SHORT_MAX_UNIT,
+	// 2 * (EXACT_SHORT_MAX_UNIT + 1))` = 120, so the last 32 chars must recur at `n - 32 - len`
+	// for some `len` in `[2, maxUnit]`. Forward `indexOf` from `needleEnd - maxUnit` scans at
+	// most `maxUnit` chars in native SIMD and rejects non-repeating tails while preserving the
+	// O(n) Z-array fallback for repeating/whitespace tails.
+	const needleLen = 32;
+	const needleEnd = n - needleLen;
+	const hit = text.indexOf(text.slice(needleEnd), needleEnd - maxUnit);
+	if (hit === -1 || hit > needleEnd - 2) return null;
+
+	const last = n - 1;
 	const z = exactZ;
 	let left = 0;
 	let right = 0;
@@ -611,7 +669,7 @@ function detectExactSuffixCycle(text: string): [unit: string, count: number] | n
 		let zi = i <= right ? Math.min(right - i + 1, z[i - left]) : 0;
 		while (i + zi < n && text.charCodeAt(last - zi) === text.charCodeAt(last - i - zi)) zi++;
 		z[i] = zi;
-		if (i + zi - 1 > right) {
+		if (zi > 0 && i + zi - 1 > right) {
 			left = i;
 			right = i + zi - 1;
 		}
@@ -635,6 +693,30 @@ function detectExactSuffixCycle(text: string): [unit: string, count: number] | n
 		if (len * count >= EXACT_PUNCTUATION_MIN_REPEATED_CHARS) return [unit, count];
 	}
 	return null;
+}
+
+/** Structured answer content: a segment whose text is mostly JSON key/value fields
+ *  (a record, or a fragment of one cut mid-line), or whose non-blank lines are mostly
+ *  markdown table rows. A table row leads with a pipe: prose that merely contains two
+ *  pipes (a union type such as `A | B`, a shell pipeline such as `cat f | grep x`) is
+ *  reasoning and must still trip. Bullet and numbered lists are not structured here. */
+function isStructuredSegment(segment: string): boolean {
+	const masked = segment.replace(JSON_STRING_TAIL, '""').replace(JSON_STRING_LEAD, '""').replace(JSON_STRING, '""');
+	let fields = 0;
+	let fieldChars = 0;
+	for (const match of masked.matchAll(JSON_FIELD)) {
+		fields++;
+		fieldChars += match[0].length;
+	}
+	if (fields >= JSON_MIN_FIELDS && fieldChars >= masked.trim().length * JSON_MIN_FIELD_SHARE) return true;
+	const lines = segment.split("\n").filter(line => line.trim() !== "");
+	if (lines.length < TABLE_MIN_LINES) return false;
+	// A table row leads with a pipe (GFM). A line that only contains two pipes is prose —
+	// a union type or a shell pipeline — and counts as reasoning, not as a table row.
+	const tableRows = lines.filter(
+		line => /^\s*\|/.test(line) && (line.match(/\|/g)?.length ?? 0) >= TABLE_ROW_MIN_PIPES,
+	).length;
+	return tableRows >= lines.length * TABLE_ROW_MIN_SHARE;
 }
 
 /** Lowercase and tokenize prose plus code/path payloads, dropping pure numbers. */

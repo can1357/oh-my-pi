@@ -11,6 +11,7 @@ import {
 	SINGULARITYAPI_TECH_API_BASE_URL,
 	normalizeSingularityApiBaseUrl,
 } from "../wire/singularityapi";
+import { OTARI_US_BASE_URL } from "../wire/otari";
 
 export interface ModelCacheProviderIdOptions extends AccountScope {
 	apiKey?: string;
@@ -52,6 +53,23 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	modal: true,
 };
 
+/**
+ * Cache namespace for a provider's auth-gateway roster (`transport: "pi-native"`).
+ * Scoped by gateway and configured bearer: a client-scoped gateway token lists
+ * only its granted models and the roster replaces the provider's catalog, so
+ * another gateway's or token's rows must never serve this one. `apiKey` is the
+ * configured value (a literal, env name, or `!command`), never resolved, so
+ * startup can name the namespace without running a command. Distinct from the
+ * provider's own namespace, which holds its direct roster.
+ */
+export function resolvePiNativeModelCacheProviderId(
+	providerId: string,
+	scope: { baseUrl: string; apiKey?: string },
+): string {
+	const baseUrl = scope.baseUrl.trim().replace(/\/+$/, "");
+	return `${providerId}:pi-native-v1:${Bun.hash(`${scope.apiKey ?? ""}\u0000${baseUrl}`).toString(36)}`;
+}
+
 /** Whether a provider's model-cache namespace requires its resolved credential. */
 export function isCredentialScopedModelCacheProvider(providerId: string): boolean {
 	return CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS[providerId] === true;
@@ -73,7 +91,7 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 		case "modal":
 			return normalizeModalBaseUrl(Bun.env.MODAL_BASE_URL);
 		case "otari":
-			return Bun.env.OTARI_BASE_URL?.trim() || "https://api.otari.ai/api/v1";
+			return Bun.env.OTARI_BASE_URL?.trim() || OTARI_US_BASE_URL;
 		case "bifrost":
 			return Bun.env.BIFROST_BASE_URL?.trim() || "http://localhost:8080/v1";
 		case "opencode-go":

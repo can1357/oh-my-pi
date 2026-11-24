@@ -1,4 +1,4 @@
-import { type NestedRepoPatch } from "@oh-my-pi/pi-tui/tools/task";
+import { type NestedRepoPatch } from "./task-details";
 import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";

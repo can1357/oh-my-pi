@@ -136,7 +136,7 @@ cp "$natives_pkg_backup" "$ROOT_DIR/packages/natives/package.json"
 # 3. Pack the remaining workspace packages (natives core and coding-agent
 #    handled separately). `collab-web` is private but still packed here so its
 #    prepack build and tarball file list stay release-safe.
-for pkg in utils wire omptype catalog ai mnemopi snapcompact agent tui stats collab-web; do
+for pkg in utils wire omptype catalog ai mnemopi snapcompact agent ui stats collab-web; do
    (
       cd "$ROOT_DIR/packages/$pkg"
       bun pm pack --destination "$TARBALL_DIR" --quiet >/dev/null
@@ -169,7 +169,7 @@ ai_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-ai-*.tgz)"
 mnemopi_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-mnemopi-*.tgz)"
 snapcompact_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-snapcompact-*.tgz)"
 agent_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-agent-core-*.tgz)"
-tui_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-tui-*.tgz)"
+ui_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-ui-*.tgz)"
 stats_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-omp-stats-*.tgz)"
 coding_agent_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-coding-agent-*.tgz)"
 collab_web_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-collab-web-*.tgz)"
@@ -195,7 +195,7 @@ mkdir -p "$TARBALL_APP_DIR"
 			'@oh-my-pi/pi-mnemopi': '$mnemopi_tgz',
 			'@oh-my-pi/snapcompact': '$snapcompact_tgz',
 			'@oh-my-pi/pi-agent-core': '$agent_tgz',
-			'@oh-my-pi/pi-tui': '$tui_tgz',
+			'@oh-my-pi/pi-tui': '$ui_tgz',
 			'@oh-my-pi/omp-stats': '$stats_tgz',
 			'@oh-my-pi/pi-coding-agent': '$coding_agent_tgz',
 			'@oh-my-pi/collab-web': '$collab_web_tgz'
@@ -203,7 +203,7 @@ mkdir -p "$TARBALL_APP_DIR"
 		require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2));
 	"
 
-   bun add "$utils_tgz" "$wire_tgz" "$omptype_tgz" "$natives_tgz" "$catalog_tgz" "$ai_tgz" "$mnemopi_tgz" "$snapcompact_tgz" "$agent_tgz" "$tui_tgz" "$stats_tgz" "$coding_agent_tgz" "$collab_web_tgz"
+   bun add "$utils_tgz" "$wire_tgz" "$omptype_tgz" "$natives_tgz" "$catalog_tgz" "$ai_tgz" "$mnemopi_tgz" "$snapcompact_tgz" "$agent_tgz" "$ui_tgz" "$stats_tgz" "$coding_agent_tgz" "$collab_web_tgz"
    # The platform leaf must arrive through the core's optionalDependencies +
    # override, not as a direct dependency — assert it landed before smoking so a
    # resolution regression is distinguishable from a runtime loader bug.
@@ -226,6 +226,12 @@ mkdir -p "$TARBALL_APP_DIR"
    ')"
    [ "$omptype_probe" = "omp:false:tb" ] || {
       echo "Unexpected @oh-my-pi/omptype probe result: $omptype_probe"
+      exit 1
+   }
+   # SDK consumers import the package root from the published `src`; any import escaping the tarball fails here.
+   sdk_probe="$(bun -e 'import { z } from "@oh-my-pi/pi-coding-agent"; process.stdout.write(typeof z);')"
+   [ "$sdk_probe" = "object" ] || {
+      echo "Unexpected @oh-my-pi/pi-coding-agent root import probe result: $sdk_probe"
       exit 1
    }
    [ -f "node_modules/@oh-my-pi/collab-web/dist/index.html" ] || {

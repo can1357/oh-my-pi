@@ -4,9 +4,44 @@
 
 ### Fixed
 
-- Fixed `grep()` with a match limit resolving with a short result when its directory walk panicked; it now rejects with the panic ([#20013](https://github.com/can1357/oh-my-pi/pull/20013) by [@sjawhar](https://github.com/sjawhar))
-- Fixed a use-after-free in `grep()`, `glob()`, `fuzzyFind()`, `astGrep()` and `astEdit()` when a timeout or an abort cancelled them just after they started ([#20014](https://github.com/can1357/oh-my-pi/pull/20014) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the `computer` tool on Linux Wayland leaving GTK 3 message dialogs (OK/Cancel and Yes/No boxes) out of `windows()`, so their buttons could not be found or pressed ([#19884](https://github.com/can1357/oh-my-pi/pull/19884) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed open PTY sessions and `reapChild()` waits each holding a native blocking-pool thread, which stalled new PTY starts and other native blocking work once 8 terminals were open on Windows (512 elsewhere) ([#20283](https://github.com/can1357/oh-my-pi/pull/20283) by [@iliaal](https://github.com/iliaal))
+- Fixed the shell's `open` command on Linux starting a private D-Bus thread pool, one thread per CPU, the first time it reached the session bus ([#20278](https://github.com/can1357/oh-my-pi/pull/20278) by [@iliaal](https://github.com/iliaal))
+- Fixed Windows captures and accessibility trees of a fully covered Chromium or Electron window passing as current when the cover is a popup, tool or click-through window, under which a paused page can stay paused; they now report `covered` there too ([#19849](https://github.com/can1357/oh-my-pi/pull/19849) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed standalone binaries failing to start when the natives directory is read-only (or owned by another user) even though it already holds this build's extracted addon ([#20266](https://github.com/can1357/oh-my-pi/issues/20266))
+### Added
+
+- Added `repairHeredocContinuations(script)`: drops the `\` after `<<EOF &&` (or `||`, `|`, `|&`) so the here-document body starts on the next line, or returns `null`
+- Added `commitReconciled()` to publish private-index commits without leaving staged reversals when the shared index is locked ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
+- Added `transcriptCalls()`, `transcriptGrep()`, `transcriptStats()`, and `transcriptMessages()`: parallel scans of session transcript files for tool calls with their results and reasoning, regex matches over message text, thinking, arguments, and results, call counts, and one transcript's records.
+
+### Changed
+
+- A persistent `Shell` session no longer carries `set -e` into later commands: errexit stops only the command that turned it on, while other options (`set -u`, `pipefail`, `shopt`) still persist
+- `ShellRunResult` now reports `movedCwd` (the command ended in another directory than it started in) and `errexit` (it ended with `set -e` on)
+
+## [19.1.1] - 2026-11-23
+
+### Fixed
+
+- Fixed `grep()`, `glob()`, `fuzzyFind()`, `astGrep()`, `astEdit()`, and recursive shell search commands occasionally hanging on machines with many CPUs.
+- Fixed cancellation and timeout races in native search, file-matching, fuzzy-search, AST, and editing operations that could cause crashes or use-after-free errors.
+- Fixed `grep()` with a match limit reporting incomplete results instead of rejecting when its directory walk failed.
+- Fixed `@oh-my-pi/pi-natives` failing to load when installed from Bun's cache or when standalone binaries had extracted native addons from another build.
+- Fixed Linux Wayland accessibility and automation support for GTK dialogs, control values, and selected rows, list items, and tabs.
+- Fixed Linux PTY output occasionally including an extra blank line after a command exits.
+- Fixed keypad navigation keys being dropped when NumLock is off under the kitty keyboard protocol.
+- Fixed Wayland screenshots incorrectly timing out while waiting for the screen-share picker.
+- Improved Windows accessibility action reliability by reporting uncertain dispatches accurately and preventing actions from being sent after their reply wait has expired.
+- Fixed Windows automation of classic Win32 and WinForms buttons and checkboxes incorrectly activating the application or reporting success without performing the click.
+- Fixed macOS computer-control takeover restoration so the previously active window is restored correctly after automation ends, with failures reported when restoration cannot be confirmed.
+- Fixed macOS background keyboard and scroll events, including events sent through iPhone Mirroring, being lost or unexpectedly activating another window.
+- Fixed X11 typing of non-Latin and other characters outside the active keyboard layout.
+- Binary patches now refuse to apply when the target file does not match the version the patch was created from, preventing accidental replacement of changed files.
+- On Windows, aborting or timing out an in-process utility blocked on an open empty stdin pipe now terminates it without waiting for the pipe writer.
+
+### Removed
+
+- Removed the startup warning shown when a source checkout loads a native addon from another release; incompatible addons still produce an actionable error when a required symbol is unavailable.
 
 ## [19.1.0] - 2026-11-21
 

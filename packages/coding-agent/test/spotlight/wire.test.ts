@@ -27,8 +27,8 @@ import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
-import { reasonShows, type SpotlightReason, spotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
-import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { reasonShows, type SpotlightReason, spotlightDetails } from "@oh-my-pi/pi-coding-agent/tools/details/spotlight";
+import { formatOutputNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta-format";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const tmpDirs: string[] = [];
@@ -845,14 +845,14 @@ function grepOutput(files: number, perFile = 10): string {
 }
 
 /** A tool without shaping of its own, wrapped as sessions wrap every tool, returning `text`. */
-function fakeTool(name: string, text: string): AgentTool {
+function fakeTool(name: string, text: string, isError = false): AgentTool {
 	return wrapToolWithMetaNotice({
 		name,
 		label: name,
 		description: `fake ${name}`,
 		parameters: {},
 		async execute() {
-			return { content: [{ type: "text", text }] };
+			return { content: [{ type: "text", text }], ...(isError ? { isError: true } : {}) };
 		},
 	} as unknown as AgentTool);
 }
@@ -1043,6 +1043,48 @@ describe("spotlight shaping of any tool", () => {
 		);
 		const entry = entries(run.manager, SPOTLIGHT_ENTRY.shape)[1];
 		expect(entry).toMatchObject({ toolCallId: "t2", steps: ["seen"], stats: { short: 1, seenLines: 10 } });
+	});
+
+	it("keeps an edit error's revealed lines whole when their text appeared earlier", async () => {
+		const run = await experimentSession(ranked());
+		await agentCall(fakeTool("board", OPEN.join("\n")), run, "t1");
+		const rejection = [
+			"This edit anchors to lines 15-24 of example.ts that [example.ts#TAG] never displayed.",
+			"Actual file content at those lines:",
+			...OPEN.map((line, i) => `  ${i + 15}: ${line}`),
+			"Verify the content matches what you intend to touch, then re-issue the edit with the same [example.ts#TAG] header — a straight retry now succeeds without a re-read.",
+		].join("\n");
+
+		const result = await agentCall(fakeTool("edit", rejection, true), run, "e1", { path: "example.ts" });
+
+		expect(result.isError).toBe(true);
+		expect(resultText(result)).toBe(rejection);
+		expect(spotlightDetails(result.details)).toBeUndefined();
+	});
+
+	it("keeps a non-edit tool's error result whole without journaling a Spotlight entry", async () => {
+		const run = await experimentSession(ranked());
+		await agentCall(fakeTool("board", BOARD.join("\n")), run, "t1");
+
+		const err = await agentCall(fakeTool("board", NEXT_BOARD, true), run, "t2");
+
+		expect(err.isError).toBe(true);
+		expect(resultText(err)).toBe(NEXT_BOARD);
+		expect(spotlightDetails(err.details)).toBeUndefined();
+		expect(entries(run.manager, SPOTLIGHT_ENTRY.shape).map(e => e.toolCallId)).toEqual(["t1"]);
+	});
+
+	it.each([10, 50])("keeps all %i numbered lines in an edit result when their text appeared earlier", async count => {
+		const run = await experimentSession(ranked());
+		const text = [
+			"Edit preview:",
+			...Array.from({ length: count }, (_, i) => `  ${i + 15}: ${OPEN[i % OPEN.length]}`),
+		].join("\n");
+		await agentCall(fakeTool("edit", text), run, "e1", { path: "example.ts" });
+
+		const again = await agentCall(fakeTool("edit", text), run, "e2", { path: "example.ts" });
+
+		expect(resultText(again)).toBe(text);
 	});
 
 	it("passes a short result whole when its runs already shown are too short to pay for a marker", async () => {

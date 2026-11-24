@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { getSettingsForTab } from "@oh-my-pi/pi-tui/overlays/settings-defs";
+import { getSettingsForTab } from "@oh-my-pi/pi-coding-agent/config/settings-defs";
 import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
 import { autosaveApprovedPlan, resolvePlanAutosaveDir } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-autosave";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";

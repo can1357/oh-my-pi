@@ -15,6 +15,7 @@ import {
 } from "@oh-my-pi/pi-ai/auth-broker";
 import { discoverAuthStorage } from "@oh-my-pi/pi-coding-agent/sdk";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { flush } from "./helpers/fake-clock";
 import { rejectionOf } from "./helpers/rejection";
 
 const ENV_KEYS = [
@@ -69,6 +70,8 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 	});
 
 	afterEach(async () => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
 		for (const key of ENV_KEYS) {
 			if (savedEnv[key] === undefined) delete process.env[key];
 			else process.env[key] = savedEnv[key];
@@ -279,46 +282,87 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 	});
 
 	test("fails startup once the broker stays unreachable for the whole retry budget", async () => {
-		// The broker accepts connections and never answers.
-		const reached = Promise.withResolvers<void>();
+		// The broker accepts connections and never answers. Each startup fetch makes two attempts,
+		// each cut by the client's 10 s request timeout, so startup retries once within its 30 s
+		// budget, whose deadline then cancels the third request in flight. Fake time moves only
+		// in fixed steps, each after the event it waits for, never by event-loop turns.
 		const hang = Promise.withResolvers<Response>();
+		const requests = Array.from({ length: 3 }, () => Promise.withResolvers<void>());
+		const unseen = [...requests];
 		const server = Bun.serve({
 			port: 0,
 			fetch: () => {
-				reached.resolve();
+				unseen.shift()?.resolve();
 				return hang.promise;
 			},
 		});
-		const turn = () => {
-			const { promise, resolve } = Promise.withResolvers<void>();
-			setImmediate(resolve);
-			return promise;
-		};
+		// The client takes the global `fetch` when startup makes it; each call's signal is the one
+		// the deadline aborts.
+		const fetched = vi.spyOn(globalThis, "fetch");
 		vi.useFakeTimers();
 		try {
 			process.env.OMP_AUTH_BROKER_URL = server.url.toString();
 			process.env.OMP_AUTH_BROKER_TOKEN = TOKEN;
 			process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS = "0";
-			let settled = false;
 			const retries: AuthBrokerStartupRetry[] = [];
-			const discovered = discoverAuthStorage(tempDir, { onBrokerRetry: retry => retries.push(retry) });
+			const retried = Promise.withResolvers<void>();
+			const discovered = discoverAuthStorage(tempDir, {
+				onBrokerRetry: retry => {
+					retries.push(retry);
+					retried.resolve();
+				},
+			});
+			let settled = false;
 			const outcome = rejectionOf(discovered).finally(() => {
 				settled = true;
 			});
-			await reached.promise;
-			// Short of 30 s of fake time, startup is still waiting on the broker.
-			for (let second = 1; second < 30; second++) {
-				vi.advanceTimersByTime(1_000);
-				await turn();
-			}
+			// Each step waits for an event only startup that is still running makes; if startup
+			// ends first, the step fails saying so rather than at the test's timeout.
+			const before = <T>(event: Promise<T>, what: string) =>
+				Promise.race([
+					event,
+					outcome.then(error => {
+						throw new Error(`startup ended before ${what}: ${error}`);
+					}),
+				]);
+			await before(requests[0].promise, "the first request");
+			// The 10 s steps and two attempts per fetch follow `DEFAULT_TIMEOUT_MS` and `DEFAULT_MAX_RETRIES` in
+			// packages/ai/src/auth-broker/client.ts. A longer timeout or another retry count leaves a step below
+			// waiting until the test times out; a timeout under 9.5 s fails the in-flight check 1 ms short of 30 s.
+			// At 10 s the request timeout cuts the first attempt, and the client makes its second.
+			vi.advanceTimersByTime(10_000);
+			await before(requests[1].promise, "the second request");
+			// At 20 s it cuts that one too: startup reports one retry and waits 500 ms.
+			vi.advanceTimersByTime(10_000);
+			await before(retried.promise, "the retry");
+			expect(retries).toMatchObject([{ delayMs: 500, budgetMs: 30_000 }]);
+			// No third request before 500 ms of fake time. Fixed steps, not a step to the next timer: the wait
+			// is `scheduler.wait`, which Bun may stop faking. Exactly one turn, not `flush()`'s default: where
+			// that wait runs on real time, the check must come before it can fire.
+			vi.advanceTimersByTime(499);
+			await flush(1);
+			expect(fetched).toHaveBeenCalledTimes(2);
+			vi.advanceTimersByTime(1);
+			await before(requests[2].promise, "the third request");
+			const third = fetched.mock.calls.at(-1)?.[1]?.signal;
+			expect(fetched).toHaveBeenCalledTimes(3);
+			// 1 ms short of 30 s, the third request is still in flight.
+			vi.advanceTimersByTime(9_499);
+			// Let the promise jobs that advance queued run, so an early end shows below.
+			await flush(1);
+			expect(third?.aborted).toBe(false);
 			expect(settled).toBe(false);
-			// At 30 s the deadline cancels the request in flight.
-			vi.advanceTimersByTime(1_000);
+			// At 30 s the deadline cancels it.
+			vi.advanceTimersByTime(1);
+			expect(third?.aborted).toBe(true);
 			expect(await outcome).toBeInstanceOf(AuthBrokerError);
 			// Giving up is not reported as one more retry.
-			expect(retries).toEqual([]);
+			expect(retries).toHaveLength(1);
+			// Counted at the `fetch` spy, so a request started at the deadline counts too.
+			expect(fetched).toHaveBeenCalledTimes(3);
 		} finally {
-			vi.useRealTimers();
+			// A check that fails before 30 s leaves startup retrying: fire its budget before real timers return.
+			vi.advanceTimersByTime(30_000);
 			hang.resolve(new Response(null, { status: 503 }));
 			server.stop(true);
 		}

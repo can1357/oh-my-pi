@@ -10,18 +10,18 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { STREAMING_REVEAL_FRAME_MS } from "@oh-my-pi/pi-coding-agent/modes/controllers/streaming-reveal";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import type { PendingTool } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { initTheme } from "../../../src/ui/theme/service";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+import { blockText } from "../../helpers/transcript-text";
 
 import { cfgDisplaySmoothStreaming } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 beforeAll(async () => {
-	await initTheme();
+	initTheme();
 });
 
 function makeStreamingMessage(content: AssistantMessage["content"]): AssistantMessage {
@@ -45,7 +45,7 @@ function makeStreamingMessage(content: AssistantMessage["content"]): AssistantMe
 }
 
 function createFixture(streamingMessage: AssistantMessage, tool?: AgentTool) {
-	const pendingTools = new Map<string, ToolExecutionComponent>();
+	const pendingTools = new Map<string, PendingTool>();
 	let approvalWaiter: ((toolCallId: string) => Promise<void>) | undefined;
 	const extensionRunner = {
 		setToolApprovalPreviewWaiter(waiter: (toolCallId: string) => Promise<void>) {
@@ -56,15 +56,28 @@ function createFixture(streamingMessage: AssistantMessage, tool?: AgentTool) {
 		},
 	};
 	const ctx = createInteractiveModeContext({
-		streamingComponent: new AssistantMessageComponent(),
 		streamingMessage,
 		pendingTools,
 		session: { getToolByName: () => tool, extensionRunner },
 	});
+	ctx.streaming = ctx.presentAssistant();
+	// Every args frame a card receives after it mounts (its first args come with the spec).
+	const argsFrames: unknown[] = [];
+	const presentToolCall = ctx.presentToolCall;
+	ctx.presentToolCall = (spec, options) => {
+		const card = presentToolCall(spec, options);
+		const updateArgs = card.updateArgs.bind(card);
+		card.updateArgs = (args, toolCallId) => {
+			argsFrames.push(args);
+			updateArgs(args, toolCallId);
+		};
+		return card;
+	};
 
 	return {
 		controller: new EventController(ctx),
 		pendingTools,
+		argsFrames,
 		getApprovalWaiter: () => approvalWaiter,
 	};
 }
@@ -100,7 +113,6 @@ describe("EventController paces streamed tool args", () => {
 	it("reveals the initial slice immediately, then paces growth across message_updates", async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
 		vi.useFakeTimers();
-		const updateArgsSpy = vi.spyOn(ToolExecutionComponent.prototype, "updateArgs");
 		const content = "x".repeat(400);
 		const target = `{"path":"/tmp/a.ts","content":"${content}"}`;
 		// Seed includes the complete `path` field (closing quote at byte 20) plus
@@ -113,15 +125,14 @@ describe("EventController paces streamed tool args", () => {
 		const seedStreaming = makeStreamingMessage([
 			{ type: "toolCall", id: "tc-1", name: "write", arguments: {}, [kStreamingPartialJson]: seed },
 		]);
-		const { controller, pendingTools } = createFixture(seedStreaming);
+		const { controller, pendingTools, argsFrames } = createFixture(seedStreaming);
 		await dispatch(controller, seedStreaming);
 		expect(pendingTools.size).toBe(1);
 
-		// Component constructor consumes the initial render args directly; no
-		// updateArgs has been invoked yet, but the seeded prefix is already on
-		// the pending preview.
-		const componentRender = pendingTools.get("tc-1")!.render(80).join("\n");
-		expect(Bun.stripANSI(componentRender)).toContain("/tmp/a.ts");
+		// The card mounts with the initial render args; no updateArgs has been
+		// invoked yet, but the seeded prefix is already on the pending preview.
+		expect(argsFrames).toHaveLength(0);
+		expect(blockText(pendingTools.get("tc-1")!.block, 80)).toContain("/tmp/a.ts");
 
 		// Second message_update: the rest of the payload arrives. The controller
 		// paces the new backlog through reveal ticks.
@@ -133,7 +144,7 @@ describe("EventController paces streamed tool args", () => {
 		for (let i = 0; i < 3; i++) {
 			vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
 		}
-		const pacedFrames = updateArgsSpy.mock.calls.map(call => call[0] as Record<string, unknown>);
+		const pacedFrames = argsFrames.map(frame => frame as Record<string, unknown>);
 		expect(pacedFrames.length).toBeGreaterThan(0);
 		let previousLength = seed.length;
 		for (const frame of pacedFrames) {
@@ -151,19 +162,18 @@ describe("EventController paces streamed tool args", () => {
 			controller,
 			makeStreamingMessage([{ type: "toolCall", id: "tc-1", name: "write", arguments: finalArgs }]),
 		);
-		expect(updateArgsSpy.mock.calls.at(-1)?.[0]).toBe(finalArgs);
+		expect(argsFrames.at(-1)).toBe(finalArgs);
 
 		// The reveal entry is gone: no further paced frames tick in.
-		const calls = updateArgsSpy.mock.calls.length;
+		const calls = argsFrames.length;
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 5);
-		expect(updateArgsSpy.mock.calls.length).toBe(calls);
+		expect(argsFrames.length).toBe(calls);
 	});
 
 	it("streams the full target through unpaced when smoothing is disabled", async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
 		cfgDisplaySmoothStreaming.set(settings, false);
 		vi.useFakeTimers();
-		const updateArgsSpy = vi.spyOn(ToolExecutionComponent.prototype, "updateArgs");
 		const target = `{"path":"/tmp/a.ts","content":"abc"}`;
 		const streaming = makeStreamingMessage([
 			{
@@ -174,16 +184,16 @@ describe("EventController paces streamed tool args", () => {
 				[kStreamingPartialJson]: target,
 			},
 		]);
-		const { controller } = createFixture(streaming);
+		const { controller, argsFrames } = createFixture(streaming);
 
 		await dispatch(controller, streaming);
 		await dispatch(controller, streaming);
 
-		const frame = updateArgsSpy.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+		const frame = argsFrames.at(-1) as Record<string, unknown>;
 		expect(frame.__partialJson).toBe(target);
-		const calls = updateArgsSpy.mock.calls.length;
+		const calls = argsFrames.length;
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 5);
-		expect(updateArgsSpy.mock.calls.length).toBe(calls);
+		expect(argsFrames.length).toBe(calls);
 	});
 
 	it("reconciles validated full args on tool_execution_start when the closing args update never lands", async () => {
@@ -202,7 +212,7 @@ describe("EventController paces streamed tool args", () => {
 		await dispatch(controller, streaming);
 		const component = pendingTools.get("tc-1");
 		if (!component) throw new Error("expected a pending write component");
-		expect(Bun.stripANSI(component.render(80).join("\n"))).toContain("/tmp/exec.ts");
+		expect(blockText(component.block, 80)).toContain("/tmp/exec.ts");
 
 		// The closing full-args message_update never arrives (throttled `arguments`
 		// with smoothing off, an owned-dialect projector, or a superseded turn that
@@ -213,12 +223,12 @@ describe("EventController paces streamed tool args", () => {
 			toolName: "write",
 			args: { path: "/tmp/exec.ts", content },
 		});
-		expect(Bun.stripANSI(component.render(80).join("\n"))).toContain("/tmp/exec.ts");
+		expect(blockText(component.block, 80)).toContain("/tmp/exec.ts");
 
 		// The reveal entry was cancelled: a late tick cannot re-truncate the body
 		// back to a streaming prefix.
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 5);
-		expect(Bun.stripANSI(component.render(80).join("\n"))).toContain("/tmp/exec.ts");
+		expect(blockText(component.block, 80)).toContain("/tmp/exec.ts");
 	});
 	it("holds approval until the native final edit preview is ready", async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
@@ -280,7 +290,9 @@ describe("EventController paces streamed tool args", () => {
 			},
 		});
 		await waiting;
-		const rendered = pendingTools.get("tc-approval")?.render(100).join("\n") ?? "";
-		expect(Bun.stripANSI(rendered)).toContain("ISSUE_7957_PROPOSED_EDIT");
+		const card = pendingTools.get("tc-approval");
+		if (!card) throw new Error("expected the edit card");
+		// The card holds the final preview the approval dialog was waiting for.
+		expect(JSON.stringify(card.call?.state().renderContext?.streamPreview)).toContain("ISSUE_7957_PROPOSED_EDIT");
 	});
 });

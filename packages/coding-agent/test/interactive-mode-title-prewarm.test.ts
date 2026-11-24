@@ -3,13 +3,15 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 // Issue #6462: the first submit used to spawn the local tiny-title worker
 // synchronously ahead of the first frame, and title generation started before
@@ -66,10 +68,10 @@ describe("InteractiveMode tiny-title prewarm", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test", () => {}, [], undefined, undefined);
+		mode = new InteractiveMode(session, "test", () => {}, [], undefined, undefined, createModeTerminal().frame);
 		// A real fs.watch on repo HEAD in a parallel Bun worker can trip a Bun
 		// SIGTRAP in the suite; this contract does not need branch watching.
-		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+		vi.spyOn(vcs, "watch").mockImplementation(() => () => {});
 	});
 
 	afterEach(async () => {

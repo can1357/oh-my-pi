@@ -15,7 +15,7 @@ import {
 	type FileMentionMessage,
 	isUserInvokedSkillPrompt,
 	isUserTurnInitiator,
-} from "@oh-my-pi/pi-tui/chat/messages";
+} from "./transcript/messages";
 export {
 	SKILL_PROMPT_MESSAGE_TYPE,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
@@ -48,7 +48,7 @@ export {
 	type FileMentionMessage,
 	isUserInvokedSkillPrompt,
 	isUserTurnInitiator,
-} from "@oh-my-pi/pi-tui/chat/messages";
+} from "./transcript/messages";
 import { calculateContextTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	invalidateMessageCache,
@@ -70,8 +70,8 @@ export {
 	createCustomMessage,
 } from "@oh-my-pi/pi-agent-core/compaction/messages";
 
-import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { titleTextFromSkillPrompt } from "@oh-my-pi/pi-tui/chat/skill-title-input";
+import { formatOutputNotice } from "../tools/output-meta-format";
+import { titleTextFromSkillPrompt } from "./transcript/skill-title-input";
 
 /**
  * Logs provider-error turns so their actual cause is available outside the
@@ -85,6 +85,7 @@ export function logProviderTurnError(msg: AssistantMessage): void {
 		errorMessage: msg.errorMessage,
 		errorStatus: msg.errorStatus,
 		errorId: msg.errorId,
+		requestId: msg.requestId,
 	});
 }
 
@@ -187,13 +188,19 @@ export function buildReplanTitleContext(messages: AgentMessage[]): string {
 }
 
 /**
- * Title text of a message the operator wrote: a typed prompt, or a `/skill:`
- * invocation as its chip (never the expanded skill body). `undefined` for
- * agent-attributed and non-user messages, which automatic titles never name.
+ * Title text of a message the operator wrote: a typed prompt, a writable-collab
+ * peer's prompt (a web client's first instruction included), or a `/skill:`
+ * invocation as its chip (never the expanded skill body). Images never count.
+ * `undefined` for agent-attributed, text-less, and non-user messages, which
+ * automatic titles never name.
  */
 export function operatorTitleText(message: AgentMessage): string | undefined {
-	if (message.role === "custom") return titleTextFromSkillPrompt(message);
-	if (message.role !== "user" || message.attribution !== "user") return undefined;
+	if (message.role === "custom") {
+		if (message.customType !== COLLAB_PROMPT_MESSAGE_TYPE) return titleTextFromSkillPrompt(message);
+	} else if (message.role !== "user") {
+		return undefined;
+	}
+	if (message.attribution !== "user") return undefined;
 	return textFromContent(message.content) || undefined;
 }
 
@@ -301,7 +308,7 @@ function thinkingFromContent(content: unknown): string {
 
 function titleConversationTurnFromMessage(message: AgentMessage): TitleConversationTurn | undefined {
 	if (message.role === "custom") {
-		const text = titleTextFromSkillPrompt(message);
+		const text = operatorTitleText(message);
 		if (!text) return undefined;
 		return { role: "user", text };
 	}

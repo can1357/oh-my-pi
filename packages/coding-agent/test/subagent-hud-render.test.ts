@@ -9,24 +9,23 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { resetHangulCompatibilityJamoWidthForTests, setHangulCompatibilityJamoWidth } from "@oh-my-pi/pi-tui";
-import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
-import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-coding-agent/task/output-manager";
 import {
-	InteractiveMode,
-	layoutPinnedHud,
-	nextSubagentPreviewTickMs,
-	renderSubagentHudLines,
-	SubagentHudComponent,
-} from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { type ObservableSession, SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
-import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
+	isSettingsInitialized,
+	resetSettingsForTest,
+	Settings,
+	settings,
+} from "@oh-my-pi/pi-coding-agent/config/settings";
+import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import {
+	type ObservableSession,
+	SessionObserverRegistry,
+} from "@oh-my-pi/pi-coding-agent/task/session-observer-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { type AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
-import { type TodoPhase, todoToolRenderer } from "@oh-my-pi/pi-tui/tools/todo";
+import { type AgentProgress } from "@oh-my-pi/pi-coding-agent/task/task-details";
+import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
+import { cfgTasksTodoClearDelay } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import {
 	type SubagentLifecyclePayload,
 	type SubagentProgressPayload,
@@ -34,11 +33,20 @@ import {
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 } from "@oh-my-pi/pi-coding-agent/task";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { createRoot, resolveChildren } from "@oh-my-pi/pi-tui";
+import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
+import { createTestTerminal, type TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { StatusHud, SubagentHud, SubagentHudModel, subagentEntries, subagentLayout, TodoHud } from "../src/ui/dock";
+import { thinkingLevelGlyph } from "../src/ui/tools/agent-common";
+import { setActiveTodoDescriptions } from "../src/ui/tools/todo";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal, renderRows } from "./helpers/mode-terminal";
 
 import { cfgDisplayPinnedAgents, cfgDisplaySubagentLivePreview } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { cfgTaskShowResolvedModelBadge } from "@oh-my-pi/pi-coding-agent/task/settings";
-import { cfgTasksTodoClearDelay } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 function makeSession(overrides: Partial<ObservableSession> & { id: string }): ObservableSession {
 	return {
@@ -99,13 +107,79 @@ function makeProgressPayload(
 	};
 }
 
+/** A node as the native backend describes it. */
+interface DescribedNode {
+	readonly k: string;
+	readonly p?: Readonly<Record<string, unknown>>;
+	readonly c?: readonly DescribedNode[];
+}
+
+/** The active theme's glyph for `key`. */
+const symbol = (key: string): string => currentTheme().symbols.symbol(key);
+
+/** The HUD model the interactive mode feeds for `sessions` (resolved-model badges per `task.showResolvedModelBadge`). */
+function hudModel(sessions: ObservableSession[], options: { livePreview?: boolean; expanded?: boolean } = {}) {
+	const model = new SubagentHudModel();
+	model.entries.set(subagentEntries(sessions, isSettingsInitialized() && cfgTaskShowResolvedModelBadge.get(settings)));
+	model.livePreview.set(options.livePreview ?? false);
+	model.expanded.set(options.expanded ?? false);
+	return model;
+}
+
+/** The HUD on a test terminal `columns` wide, its clock at the wall clock. */
+function hudTerminal(model: SubagentHudModel, columns = 120): TestTerminal {
+	return createTestTerminal(() => ({ main: SubagentHud({ model }) }), {
+		columns,
+		rows: 200,
+		theme: currentTheme(),
+		now: Date.now(),
+	});
+}
+
+/** The HUD's rows (escapes kept) for `sessions`. */
+function renderRaw(sessions: ObservableSession[], columns = 120, livePreview = false): string[] {
+	const term = hudTerminal(hudModel(sessions, { livePreview }), columns);
+	try {
+		const rows = [...term.rows()];
+		while (rows.length > 0 && Bun.stripANSI(rows.at(-1)!).trim() === "") rows.pop();
+		return rows;
+	} finally {
+		term.dispose();
+	}
+}
+
 function render(sessions: ObservableSession[], columns = 120, livePreview = false): string {
-	return Bun.stripANSI(renderSubagentHudLines(sessions, columns, false, livePreview).join("\n"));
+	return renderRaw(sessions, columns, livePreview)
+		.map(row => Bun.stripANSI(row).trimEnd())
+		.join("\n");
+}
+
+/** Click each row of the HUD for `model` and record what it asks for: an agent id, `toggle`, or nothing. */
+function clickTargets(model: SubagentHudModel, columns = 120): { rows: string[]; targets: (string | undefined)[] } {
+	const term = hudTerminal(model, columns);
+	try {
+		const rows = term.screen();
+		const targets = rows.map((_, row) => {
+			let target: string | undefined;
+			model.onFocus = id => {
+				target = id;
+			};
+			model.onToggle = () => {
+				target = "toggle";
+			};
+			term.mouse({ row, col: 2, button: "left", action: "press", mods: [] });
+			term.mouse({ row, col: 2, button: "left", action: "release", mods: [] });
+			return target;
+		});
+		return { rows, targets };
+	} finally {
+		term.dispose();
+	}
 }
 
 describe("subagent HUD lines", () => {
-	beforeAll(async () => {
-		await initTheme();
+	beforeAll(() => {
+		initTheme();
 	});
 
 	describe("model badges", () => {
@@ -132,8 +206,10 @@ describe("subagent HUD lines", () => {
 				}),
 			});
 			const out = render([session]);
-			expect(out).toContain(`${theme.thinking.high.split(" ")[0]} openai/gpt-5 ${theme.icon.advisor} BadgeWorker`);
-			expect(out).toContain(`BadgeWorker ${theme.format.bracketLeft}scout${theme.format.bracketRight}`);
+			expect(out).toContain(
+				`${thinkingLevelGlyph(symbol, "high")} openai/gpt-5 ${symbol("icon.advisor")} BadgeWorker`,
+			);
+			expect(out).toContain(`BadgeWorker ${symbol("format.bracketLeft")}scout${symbol("format.bracketRight")}`);
 			expect(out).toContain(": Inspect rendering");
 
 			session.progress = makeProgress({
@@ -145,7 +221,7 @@ describe("subagent HUD lines", () => {
 			});
 			const withoutAdvisor = render([session]);
 			expect(withoutAdvisor).toContain("openai/gpt-5 BadgeWorker");
-			expect(withoutAdvisor).not.toContain(theme.icon.advisor);
+			expect(withoutAdvisor).not.toContain(symbol("icon.advisor"));
 		});
 
 		it("keeps metadata hidden when disabled or settings have not initialized", () => {
@@ -164,9 +240,9 @@ describe("subagent HUD lines", () => {
 			];
 			cfgTaskShowResolvedModelBadge.override(Settings.instance, false);
 			const disabled = render(sessions);
-			expect(disabled).toContain(`${theme.status.running} HiddenBadge: Inspect rendering`);
+			expect(disabled).toContain(`${symbol("status.running")} HiddenBadge: Inspect rendering`);
 			expect(disabled).not.toContain("openai/gpt-5");
-			expect(disabled).not.toContain(theme.icon.advisor);
+			expect(disabled).not.toContain(symbol("icon.advisor"));
 
 			resetSettingsForTest();
 			expect(render(sessions)).toBe(disabled);
@@ -193,7 +269,7 @@ describe("subagent HUD lines", () => {
 			const lines = render(sessions, 60).split("\n");
 			for (const id of ["Description", "TaskPreview"]) {
 				const row = lines.find(line => line.includes(id))!;
-				expect(row).toContain(`variant-z ${theme.icon.advisor} ${id}`);
+				expect(row).toContain(`variant-z ${symbol("icon.advisor")} ${id}`);
 				expect(row.indexOf("variant-z")).toBeLessThan(row.indexOf(id));
 				expect(row).not.toContain(":high");
 			}
@@ -203,12 +279,11 @@ describe("subagent HUD lines", () => {
 		});
 
 		it("reserves custom tree prefixes, outer indent and roles before optional details", () => {
-			const priorTree = Object.getOwnPropertyDescriptor(theme, "tree");
+			const symbols = currentTheme().symbols;
+			const glyph = symbols.symbol.bind(symbols);
+			const tree: Record<string, string> = { "tree.branch": "界├", "tree.last": "界界└", "tree.vertical": "界界│" };
+			const custom = vi.spyOn(symbols, "symbol").mockImplementation(key => tree[key] ?? glyph(key));
 			try {
-				Object.defineProperty(theme, "tree", {
-					configurable: true,
-					value: { ...theme.tree, branch: "界├", last: "界界└", vertical: "界界│" },
-				});
 				const sessions = [
 					makeSession({
 						id: `LongWorker${"界".repeat(30)}`,
@@ -222,18 +297,17 @@ describe("subagent HUD lines", () => {
 					cfgTaskShowResolvedModelBadge.override(Settings.instance, enabled);
 					for (const width of [40, 120, 40]) {
 						const rows = render(sessions, width).split("\n");
-						expect(rows.find(row => row.includes("LongWorker"))).toStartWith(" 界├ ");
-						expect(rows.find(row => row.includes("ShortWorker"))).toStartWith(" 界界└ ");
+						expect(rows.find(row => row.includes("LongWorker"))).toStartWith("  界├ ");
+						expect(rows.find(row => row.includes("ShortWorker"))).toStartWith("  界界└ ");
 						for (const row of rows) expect(Bun.stringWidth(row)).toBeLessThanOrEqual(width);
 						expect(rows.find(row => row.includes("LongWorker"))).toContain("LongWorker");
 						expect(rows.find(row => row.includes("ShortWorker"))).toContain(
-							`${theme.format.bracketLeft}scout${theme.format.bracketRight}`,
+							`${glyph("format.bracketLeft")}scout${glyph("format.bracketRight")}`,
 						);
 					}
 				}
 			} finally {
-				if (priorTree) Object.defineProperty(theme, "tree", priorTree);
-				else Reflect.deleteProperty(theme, "tree");
+				custom.mockRestore();
 			}
 		});
 
@@ -244,8 +318,8 @@ describe("subagent HUD lines", () => {
 					progress: makeProgress({ id: "LegacyWorker", resolvedModel: "custom/model:high" }),
 				}),
 			]);
-			expect(out).toContain(`${theme.status.running} custom/model:high LegacyWorker`);
-			expect(out).not.toContain(theme.thinking.high.split(" ")[0]);
+			expect(out).toContain(`${symbol("status.running")} custom/model:high LegacyWorker`);
+			expect(out).not.toContain(thinkingLevelGlyph(symbol, "high"));
 		});
 	});
 
@@ -279,10 +353,9 @@ describe("subagent HUD lines", () => {
 
 	it("strips terminal control sequences from the assignment preview", () => {
 		const assignment = "\x1b]0;pwned\x07\x1b[2JAudit the corpus";
-		const raw = renderSubagentHudLines(
-			[makeSession({ id: "Corpus", progress: makeProgress({ id: "Corpus", task: assignment, assignment }) })],
-			120,
-		).join("\n");
+		const raw = renderRaw([
+			makeSession({ id: "Corpus", progress: makeProgress({ id: "Corpus", task: assignment, assignment }) }),
+		]).join("\n");
 		expect(Bun.stripANSI(raw)).toContain("Audit the corpus");
 		expect(raw).not.toContain("\x1b]0;");
 		expect(raw).not.toContain("\x1b[2J");
@@ -345,7 +418,7 @@ describe("subagent HUD lines", () => {
 			{ id: "main", kind: "main", label: "Main Session", status: "active", lastUpdate: Date.now() },
 			...finishedStates.map(status => makeSession({ id: `Done-${status}`, status, description: "old work" })),
 		];
-		expect(renderSubagentHudLines(sessions, 120)).toEqual([]);
+		expect(render(sessions)).toBe("");
 
 		const out = render([...sessions, makeSession({ id: "StillRunning", description: "live work" })]);
 		expect(out).toContain("StillRunning: live work");
@@ -402,15 +475,8 @@ describe("subagent HUD lines", () => {
 		expect(out).toContain("BackgroundSpawn: detached work");
 		expect(out).toContain("SyncSpawn: inline task work");
 		expect(out).toContain("EvalSpawn: eval cell work");
-		const hud = new SubagentHudComponent(renderSubagentHudLines(sessions, 120), [
-			"SyncSpawn",
-			"EvalSpawn",
-			"BackgroundSpawn",
-		]);
-		hud.render(120);
-		expect(hud.getClickAgentAtRow(2)).toBe("SyncSpawn");
-		expect(hud.getClickAgentAtRow(3)).toBe("EvalSpawn");
-		expect(hud.getClickAgentAtRow(4)).toBe("BackgroundSpawn");
+		const { targets } = clickTargets(hudModel(sessions));
+		expect(targets.slice(2, 5)).toEqual(["SyncSpawn", "EvalSpawn", "BackgroundSpawn"]);
 	});
 	it("threads the detached flag from lifecycle and progress payloads", () => {
 		const eventBus = new EventBus();
@@ -495,7 +561,9 @@ describe("subagent HUD lines", () => {
 			}),
 		);
 
-		const out = Bun.stripANSI(renderSubagentHudLines(active, 120, true).join("\n"));
+		const term = hudTerminal(hudModel(active, { expanded: true }));
+		const out = term.screen().join("\n");
+		term.dispose();
 
 		for (const session of active) {
 			expect(out).toContain(`${session.id}: ${session.description}`);
@@ -579,9 +647,9 @@ describe("subagent HUD lines", () => {
 				)
 					.split("\n")
 					.at(-1);
-			const done = Bun.stripANSI(theme.styledSymbol("status.success", "success"));
+			const done = symbol("status.success");
 			// Not yet run, so not marked with how it ended.
-			expect(row({ streaming: writing })).toEndWith(`${theme.tree.hook} write: tests/test_norm.py`);
+			expect(row({ streaming: writing })).toEndWith(`${symbol("tree.hook")} write: tests/test_norm.py`);
 			expect(row({ streaming: { ...writing, intent: "Write the norm test" } })).toContain(
 				"write: Write the norm test",
 			);
@@ -701,8 +769,8 @@ describe("subagent HUD lines", () => {
 				)
 					.split("\n")
 					.find(line => line.includes("read: a.ts"));
-			const success = Bun.stripANSI(theme.styledSymbol("status.success", "success"));
-			const error = Bun.stripANSI(theme.styledSymbol("status.error", "error"));
+			const success = symbol("status.success");
+			const error = symbol("status.error");
 			expect(rowFor(false)).toContain(`${success} read: a.ts`);
 			expect(rowFor(true)).toContain(`${error} read: a.ts`);
 			expect(rowFor(false)).not.toContain(error);
@@ -756,11 +824,7 @@ describe("subagent HUD lines", () => {
 				}),
 			];
 			for (const columns of [60, 120]) {
-				const hud = new SubagentHudComponent(
-					renderSubagentHudLines(sessions, columns, false, true),
-					sessions.map(session => session.id),
-				);
-				const rows = hud.render(columns).map(row => Bun.stripANSI(row));
+				const rows = render(sessions, columns, true).split("\n");
 				for (const row of rows) {
 					expect(Bun.stringWidth(row)).toBeLessThanOrEqual(columns);
 				}
@@ -776,18 +840,12 @@ describe("subagent HUD lines", () => {
 			const sessions = ["Alpha", "Beta", "Gamma", "Delta"].map(id =>
 				makeSession({ id, progress: makeProgress({ id, currentTool: "read", currentToolArgs: `${id}.ts` }) }),
 			);
-			const layout = layoutPinnedHud(sessions.length, false);
-			const hud = new SubagentHudComponent(
-				renderSubagentHudLines(sessions, 120, false, true),
-				sessions.map(session => session.id),
-				layout.toggleRow,
-			);
-			const rows = hud.render(120).map(row => Bun.stripANSI(row));
-			const rowOf = (text: string) => rows.findIndex(row => row.includes(text));
-			expect(hud.getClickAgentAtRow(rowOf("Alpha.ts"))).toBe("Alpha");
-			expect(hud.getClickAgentAtRow(rowOf("Beta"))).toBe("Beta");
-			expect(hud.getClickAgentAtRow(rowOf("Gamma.ts"))).toBe("Gamma");
-			expect(hud.getClickAgentAtRow(rowOf("more — expand"))).toBe(PINNED_HUD_TOGGLE_ID);
+			const { rows, targets } = clickTargets(hudModel(sessions, { livePreview: true }));
+			const targetOf = (text: string) => targets[rows.findIndex(row => row.includes(text))];
+			expect(targetOf("Alpha.ts")).toBe("Alpha");
+			expect(targetOf("Beta")).toBe("Beta");
+			expect(targetOf("Gamma.ts")).toBe("Gamma");
+			expect(targetOf("more — expand")).toBe("toggle");
 		});
 
 		it("labels a call with its own intent, never an earlier call's", () => {
@@ -835,124 +893,51 @@ describe("subagent HUD lines", () => {
 				makeSession({ id: `Worker${"W".repeat(80)}`, description: "Every available column ".repeat(10) }),
 			];
 			for (const columns of [40, 60]) {
-				const hud = new SubagentHudComponent(renderSubagentHudLines(sessions, columns, false, true), [
-					sessions[0]!.id,
-				]);
 				// No wrapping: exactly the blank row, the header and one agent row.
-				expect(hud.render(columns)).toHaveLength(3);
+				const rows = renderRaw(sessions, columns, true);
+				expect(rows).toHaveLength(3);
+				for (const row of rows) expect(Bun.stringWidth(Bun.stripANSI(row))).toBeLessThanOrEqual(columns);
 			}
-		});
-
-		it("arms the repaint for when the elapsed marker first shows, then every second", () => {
-			const now = 100_000;
-			const midCall = (id: string, startMs: number) =>
-				makeSession({ id, progress: makeProgress({ id, currentTool: "bash", currentToolStartMs: startMs }) });
-			const thinking = makeSession({ id: "Thinking", progress: makeProgress({ id: "Thinking" }) });
-			expect(nextSubagentPreviewTickMs([thinking], now)).toBeUndefined();
-			expect(nextSubagentPreviewTickMs([midCall("Fresh", now - 1_000)], now)).toBe(4_001);
-			expect(nextSubagentPreviewTickMs([midCall("Long", now - 30_000)], now)).toBe(1_000);
-			expect(
-				nextSubagentPreviewTickMs([thinking, midCall("Fresh", now - 4_500), midCall("Long", now - 30_000)], now),
-			).toBe(501);
 		});
 	});
 });
 
-describe("SubagentHudComponent click rows", () => {
-	beforeAll(async () => {
-		await initTheme();
+describe("subagent HUD click rows", () => {
+	beforeAll(() => {
+		initTheme();
 	});
 
 	it("maps item rows to session ids and chrome rows nowhere", () => {
-		const lines = renderSubagentHudLines([makeSession({ id: "Alpha" }), makeSession({ id: "Beta" })], 120);
-		const hud = new SubagentHudComponent(lines, ["Alpha", "Beta"]);
-
-		const rendered = hud.render(120);
-		expect(rendered).toHaveLength(lines.length);
-		expect(Bun.stripANSI(rendered[2] ?? "")).toContain("Alpha");
-		expect(Bun.stripANSI(rendered[3] ?? "")).toContain("Beta");
-
-		expect(hud.getClickAgentAtRow(0)).toBeUndefined();
-		expect(hud.getClickAgentAtRow(1)).toBeUndefined();
-		expect(hud.getClickAgentAtRow(2)).toBe("Alpha");
-		expect(hud.getClickAgentAtRow(3)).toBe("Beta");
-		expect(hud.getClickAgentAtRow(4)).toBeUndefined();
-		expect(hud.getClickAgentAtRow(-1)).toBeUndefined();
+		const { rows, targets } = clickTargets(hudModel([makeSession({ id: "Alpha" }), makeSession({ id: "Beta" })]));
+		expect(rows[2]).toContain("Alpha");
+		expect(rows[3]).toContain("Beta");
+		expect(targets).toEqual([undefined, undefined, "Alpha", "Beta"]);
 	});
 
-	it("resolves the expander row to the toggle sentinel", () => {
-		const hud = new SubagentHudComponent(["", "Subagents", "row", "toggle"], ["Only"], 3);
-		hud.render(120);
-		expect(hud.getClickAgentAtRow(3)).toBe(PINNED_HUD_TOGGLE_ID);
-		expect(hud.getClickAgentAtRow(2)).toBe("Only");
-	});
-
-	it("maps wrapped continuation rows to the agent that started them", () => {
-		const long = ` ${"x".repeat(200)}`;
-		const hud = new SubagentHudComponent(["", "Subagents", long, "short"], ["Long", "Short"]);
-		const rendered = hud.render(40);
-		expect(rendered.length).toBeGreaterThan(4);
-		const shortRow = rendered.findIndex(line => Bun.stripANSI(line).includes("short"));
-		expect(shortRow).toBeGreaterThan(3);
-		expect(hud.getClickAgentAtRow(2)).toBe("Long");
-		expect(hud.getClickAgentAtRow(3)).toBe("Long");
-		expect(hud.getClickAgentAtRow(shortRow)).toBe("Short");
-		expect(hud.getClickAgentAtRow(shortRow + 1)).toBeUndefined();
-	});
-
-	it("maps clicks after wrapping and resizing while leaving clicks before rendering unmapped", () => {
-		const hud = new SubagentHudComponent(["", "Subagents", ` ${"x".repeat(100)}`, "short"], ["Long", "Short"]);
-		expect(hud.getClickAgentAtRow(2)).toBeUndefined();
-
-		const narrowRows = hud.render(40);
-		const narrowShortRow = narrowRows.findIndex(line => Bun.stripANSI(line).includes("short"));
-		expect(narrowShortRow).toBeGreaterThan(3);
-		expect(hud.getClickAgentAtRow(narrowShortRow - 1)).toBe("Long");
-		expect(hud.getClickAgentAtRow(narrowShortRow)).toBe("Short");
-
-		const wideRows = hud.render(120);
-		expect(wideRows.length).toBeLessThan(narrowRows.length);
-		const wideShortRow = wideRows.findIndex(line => Bun.stripANSI(line).includes("short"));
-		expect(hud.getClickAgentAtRow(wideShortRow)).toBe("Short");
-		expect(hud.getClickAgentAtRow(wideShortRow + 1)).toBeUndefined();
-	});
-
-	it("remaps clicks when runtime character width changes", () => {
-		setHangulCompatibilityJamoWidth(1);
-		try {
-			const hud = new SubagentHudComponent(["", "Subagents", ` ${"ㅁ".repeat(25)}`, "next"], ["Jamo", "Next"]);
-			const narrowRows = hud.render(40);
-			const narrowNextRow = narrowRows.findIndex(line => Bun.stripANSI(line).includes("next"));
-			expect(hud.getClickAgentAtRow(narrowNextRow)).toBe("Next");
-
-			setHangulCompatibilityJamoWidth(2);
-			expect(hud.getClickAgentAtRow(narrowNextRow)).toBe("Next");
-			const wideRows = hud.render(40);
-			const wideNextRow = wideRows.findIndex(line => Bun.stripANSI(line).includes("next"));
-			expect(wideNextRow).toBeGreaterThan(narrowNextRow);
-			expect(hud.getClickAgentAtRow(wideNextRow - 1)).toBe("Jamo");
-			expect(hud.getClickAgentAtRow(wideNextRow)).toBe("Next");
-		} finally {
-			resetHangulCompatibilityJamoWidthForTests();
-		}
+	it("resolves the expander row to the toggle", () => {
+		const sessions = ["A", "B", "C", "D"].map(id => makeSession({ id }));
+		const { rows, targets } = clickTargets(hudModel(sessions));
+		const expander = rows.findIndex(row => row.includes("more — expand"));
+		expect(targets[expander]).toBe("toggle");
+		expect(targets[expander - 1]).toBe("C");
 	});
 });
 
-describe("layoutPinnedHud", () => {
+describe("subagent HUD layout", () => {
 	it("fits small lists without an expander", () => {
-		expect(layoutPinnedHud(0, false)).toEqual({ itemRows: 0, toggle: undefined, toggleRow: undefined });
-		expect(layoutPinnedHud(3, false)).toEqual({ itemRows: 3, toggle: undefined, toggleRow: undefined });
-		expect(layoutPinnedHud(3, true)).toEqual({ itemRows: 3, toggle: undefined, toggleRow: undefined });
+		expect(subagentLayout(0, false)).toEqual({ items: 0, toggle: undefined });
+		expect(subagentLayout(3, false)).toEqual({ items: 3, toggle: undefined });
+		expect(subagentLayout(3, true)).toEqual({ items: 3, toggle: undefined });
 	});
 
 	it("collapses longer lists behind an expander", () => {
-		expect(layoutPinnedHud(4, false)).toEqual({ itemRows: 3, toggle: "expand", toggleRow: 5 });
-		expect(layoutPinnedHud(10, false)).toEqual({ itemRows: 3, toggle: "expand", toggleRow: 5 });
+		expect(subagentLayout(4, false)).toEqual({ items: 3, toggle: "expand" });
+		expect(subagentLayout(10, false)).toEqual({ items: 3, toggle: "expand" });
 	});
 
 	it("expands to every row with a collapse row", () => {
-		expect(layoutPinnedHud(5, true)).toEqual({ itemRows: 5, toggle: "collapse", toggleRow: 7 });
-		expect(layoutPinnedHud(10, true)).toEqual({ itemRows: 10, toggle: "collapse", toggleRow: 12 });
+		expect(subagentLayout(5, true)).toEqual({ items: 5, toggle: "collapse" });
+		expect(subagentLayout(10, true)).toEqual({ items: 10, toggle: "collapse" });
 	});
 });
 
@@ -963,8 +948,8 @@ describe("InteractiveMode subagent observer UI sync", () => {
 	let mode: InteractiveMode;
 	let eventBus: EventBus;
 
-	beforeAll(async () => {
-		await initTheme();
+	beforeAll(() => {
+		initTheme();
 	});
 
 	beforeEach(async () => {
@@ -994,25 +979,44 @@ describe("InteractiveMode subagent observer UI sync", () => {
 			settings: Settings.isolated({ "startup.quiet": true }),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, eventBus);
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			eventBus,
+			createModeTerminal({ columns: 120, rows: 40 }).frame,
+		);
 	});
 
 	afterEach(async () => {
 		mode?.stop();
+		await mode?.shell.stop();
 		await session?.dispose();
 		authStorage?.close();
 		tempDir?.removeSync();
 		vi.useRealTimers();
 		setSystemTime();
 		vi.restoreAllMocks();
+		setActiveTodoDescriptions([]);
 		resetSettingsForTest();
 	});
 
-	it("coalesces a burst of progress observer changes into one HUD rebuild and render request", async () => {
+	/** The pinned subagents HUD as the terminal draws it, its clock at the wall clock. */
+	const hudText = (): string => {
+		const term = hudTerminal(mode.hud.subagents);
+		try {
+			return term.screen().join("\n");
+		} finally {
+			term.dispose();
+		}
+	};
+	const todoText = (): string[] => renderRows(() => TodoHud({ model: mode.hud.todo }));
+
+	it("coalesces a burst of progress observer changes into one HUD rebuild", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
-		const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
-		const mountHud = vi.spyOn(mode.subagentContainer, "addChild");
-		const updateHud = vi.spyOn(SubagentHudComponent.prototype, "update");
+		const rebuild = vi.spyOn(mode.hud.subagents.entries, "set");
 		vi.useFakeTimers();
 
 		for (let index = 0; index < 6; index++) {
@@ -1026,27 +1030,23 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		vi.runAllTimers();
 		await Promise.resolve();
 
-		const hud = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
+		const hud = hudText();
 		expect(hud).toContain("BurstAgent0: Burst job 0");
 		expect(hud).toContain("BurstAgent2: Burst job 2");
 		expect(hud).not.toContain("BurstAgent3: Burst job 3");
 		expect(hud).toContain("3 more — expand");
-		expect(mountHud.mock.calls.length + updateHud.mock.calls.length).toBe(1);
-		expect(requestRender).toHaveBeenCalledTimes(1);
+		expect(rebuild).toHaveBeenCalledTimes(1);
 	});
 
 	it("does not repaint unchanged background progress after the HUD settles", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
-		const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
-		const updateHud = vi.spyOn(SubagentHudComponent.prototype, "update");
 		vi.useFakeTimers();
 		const payload = makeProgressPayload("Background", 0, "Compile", true);
 		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, payload);
 		await Promise.resolve();
 		vi.runAllTimers();
 		await Promise.resolve();
-		requestRender.mockClear();
-		updateHud.mockClear();
+		const settled = mode.hud.subagents.entries();
 		for (let index = 0; index < 20; index++) {
 			eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
 				...payload,
@@ -1056,34 +1056,31 @@ describe("InteractiveMode subagent observer UI sync", () => {
 			vi.runAllTimers();
 			await Promise.resolve();
 		}
-		expect(requestRender).not.toHaveBeenCalled();
-		expect(updateHud).not.toHaveBeenCalled();
+		// Unchanged facts keep the same entries: nothing the HUD draws repaints.
+		expect(mode.hud.subagents.entries()).toEqual(settled);
 		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Background", 0, "Link", true));
 		await Promise.resolve();
 		vi.runAllTimers();
 		await Promise.resolve();
-		expect(requestRender).toHaveBeenCalled();
-		expect(Bun.stripANSI(mode.subagentContainer.render(120).join("\n"))).toContain("Link");
+		expect(hudText()).toContain("Link");
 	});
 
-	it("repaints native checklist changes outside the terminal TODO window", async () => {
+	it("updates native checklist matches outside the terminal TODO window", async () => {
 		cfgDisplayPinnedAgents.override(Settings.instance, "off");
 		await mode.init({ suppressWelcomeIntro: true });
-		const cx: DescribeContext = {
-			cols: 120,
-			reduceMotion: false,
-			dark: true,
-			supports: () => true,
-			feature: () => true,
-		};
-		let paintedStatus: string | undefined;
-		vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {
-			for (const child of mode.describeStatusHud([], cx).c ?? []) {
-				if ("k" in child && child.k === "checklist") {
-					paintedStatus = child.p?.phases[5]?.items[0]?.status;
+		const checklistStatus = (): unknown => {
+			const tree = createRoot(dispose => {
+				try {
+					const [root] = resolveChildren(StatusHud({ model: mode.hud.status }))();
+					return root ? (describeTree(root, staticEnvironment(currentTheme())) as DescribedNode) : undefined;
+				} finally {
+					dispose();
 				}
-			}
-		});
+			});
+			const checklist = (tree?.c ?? []).find(child => child.k === "checklist");
+			const phases = checklist?.p?.phases as { items: { status: string }[] }[] | undefined;
+			return phases?.[5]?.items[0]?.status;
+		};
 		mode.setTodos(
 			[
 				"Inspect inputs",
@@ -1097,22 +1094,22 @@ describe("InteractiveMode subagent observer UI sync", () => {
 				tasks: [{ content, status: "pending" as const }],
 			})),
 		);
-		expect(paintedStatus).toBe("pending");
+		expect(checklistStatus()).toBe("pending");
 		vi.useFakeTimers();
 		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Reviewer", 0, "Unrelated work", true));
 		await Promise.resolve();
 		vi.advanceTimersByTime(100);
-		const terminalRows = [...mode.todoContainer.render(120)];
+		const terminalRows = todoText();
 		expect(terminalRows.join("\n")).not.toContain("Verify deployment");
 
 		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Reviewer", 0, "Verify deployment", true));
 		await Promise.resolve();
 		vi.advanceTimersByTime(100);
-		expect(mode.todoContainer.render(120)).toEqual(terminalRows);
-		expect(paintedStatus).toBe("active");
+		expect(todoText()).toEqual(terminalRows);
+		expect(checklistStatus()).toBe("active");
 	});
 
-	it("repaints the transcript todo card after the sticky HUD auto-clears", async () => {
+	it("lights the transcript todo card's matching task after the sticky HUD auto-cleared", async () => {
 		cfgDisplayPinnedAgents.override(Settings.instance, "off");
 		cfgTasksTodoClearDelay.override(session.settings, 0);
 		await mode.init({ suppressWelcomeIntro: true });
@@ -1137,51 +1134,69 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		vi.advanceTimersByTime(0);
 		await session.settleInFlightMessagePersistence();
 		await session.sessionManager.flush();
-		expect(mode.todoContainer.render(120)).toEqual([]);
-		const card = todoToolRenderer.renderResult(
-			{ content: [], details: { op: "init", phases: transcriptPhases, storage: "session" } },
-			{ expanded: false, isPartial: false },
-			theme,
-		);
-		mode.chatContainer.addChild(card);
-		const readTranscript = () => Bun.stripANSI(mode.chatContainer.render(120).join("\n"));
-		let painted = readTranscript();
-		const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {
-			painted = readTranscript();
+		expect(todoText()).toEqual([]);
+		// The built-in todo tool draws the card (this session mounts no tools of its own).
+		vi.spyOn(session, "hasBuiltInTool").mockImplementation(name => name === "todo");
+		const card = mode.presentToolCall({
+			name: "todo",
+			args: { op: "init" },
+			tool: undefined,
+			id: "todo-1",
+			cwd: "/",
 		});
-		expect(painted).not.toContain(target);
+		card.setArgsComplete("todo-1");
+		card.updateResult(
+			{
+				content: [{ type: "text", text: "ok" }],
+				details: { op: "init", phases: transcriptPhases, storage: "session" },
+			},
+			false,
+			"todo-1",
+		);
+		/** The card's status for the target task. */
+		const targetStatus = (): unknown => {
+			const tree = createRoot(dispose => {
+				try {
+					return describeTree(card.block.node, staticEnvironment(currentTheme())) as DescribedNode;
+				} finally {
+					dispose();
+				}
+			});
+			const all = (node: DescribedNode): DescribedNode[] => [node, ...(node.c ?? []).flatMap(all)];
+			const checklist = all(tree).find(node => node.k === "checklist");
+			const phases = checklist?.p?.phases as { items: { text: string; status: string }[] }[] | undefined;
+			return phases?.flatMap(phase => phase.items).find(item => item.text === target)?.status;
+		};
+		expect(targetStatus()).toBe("pending");
 		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Reviewer", 0, "Unrelated work", true));
 		await Promise.resolve();
 		vi.advanceTimersByTime(100);
+		expect(targetStatus()).toBe("pending");
 
 		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Reviewer", 0, target, true));
 		await Promise.resolve();
 		vi.advanceTimersByTime(100);
-		expect(painted).toContain(target);
-		expect(mode.todoContainer.render(120)).toEqual([]);
-		expect(mode.subagentContainer.render(120)).toEqual([]);
+		expect(targetStatus()).toBe("active");
+		expect(todoText()).toEqual([]);
+		expect(hudText()).toBe("");
 
-		const unrelated = makeProgressPayload("Reviewer", 0, "Unrelated work", true);
-		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, unrelated);
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Reviewer", 0, "Unrelated work", true));
 		await Promise.resolve();
 		vi.advanceTimersByTime(100);
-		expect(painted).not.toContain(target);
-		requestRender.mockClear();
-		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, unrelated);
-		await Promise.resolve();
-		vi.advanceTimersByTime(100);
-		expect(requestRender).not.toHaveBeenCalled();
+		expect(targetStatus()).toBe("pending");
 	});
 
 	it("applies the setting over a clicked expand override", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
+		vi.useFakeTimers();
 		for (let index = 0; index < 5; index++) {
 			eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, makeLifecycle(`Override${index}`, index, `job ${index}`));
 		}
 		await Promise.resolve();
-		const hudText = () => Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
+		vi.advanceTimersByTime(100);
 
-		mode.togglePinnedHudExpanded();
+		// A click on the expander row.
+		mode.hud.subagents.onToggle?.();
 		expect(hudText()).toContain("Override4");
 
 		mode.applyPinnedAgentsSetting();
@@ -1189,10 +1204,9 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		expect(hudText()).toContain("more — expand");
 	});
 
-	it("advances a quiet call's elapsed marker by repainting the same HUD in place", async () => {
+	it("advances a quiet call's elapsed marker from the terminal clock, without rebuilding the HUD", async () => {
 		cfgDisplaySubagentLivePreview.override(Settings.instance, true);
 		await mode.init({ suppressWelcomeIntro: true });
-		vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
 		vi.useFakeTimers();
 		setSystemTime(1_000_000);
 		const payload = makeProgressPayload("Sleeper", 0, "Run sleep", true);
@@ -1205,22 +1219,17 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, payload);
 		await Promise.resolve();
 		vi.advanceTimersByTime(100); // observer UI coalesce window
-		const hudText = () => Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
-		const hud = mode.subagentContainer.children[0];
+		const entries = mode.hud.subagents.entries();
 		expect(hudText()).toContain("bash: sleep 40 · 20.1s");
 
 		vi.advanceTimersByTime(1_000);
-		expect(mode.subagentContainer.children[0]).toBe(hud);
+		expect(mode.hud.subagents.entries()).toBe(entries);
 		expect(hudText()).toContain("bash: sleep 40 · 21.1s");
 	});
 
-	it("repaints an identical new call after the elapsed timer painted the previous call", async () => {
+	it("drops the elapsed marker for an identical new call", async () => {
 		cfgDisplaySubagentLivePreview.override(Settings.instance, true);
 		await mode.init({ suppressWelcomeIntro: true });
-		let painted = "";
-		vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {
-			painted = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
-		});
 		vi.useFakeTimers();
 		setSystemTime(1_000_000);
 		const payload = makeProgressPayload("Builder", 0, "Build", true);
@@ -1233,18 +1242,18 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, payload);
 		await Promise.resolve();
 		vi.advanceTimersByTime(100);
-		expect(painted).toContain("bash: build it");
-		expect(painted).not.toContain("bash: build it ·");
+		expect(hudText()).toContain("bash: build it");
+		expect(hudText()).not.toContain("bash: build it ·");
 
 		vi.advanceTimersByTime(6_000);
-		expect(painted).toContain("bash: build it ·");
+		expect(hudText()).toContain("bash: build it ·");
 		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
 			...payload,
 			progress: { ...payload.progress, currentToolStartMs: Date.now(), toolCount: 2 },
 		});
 		await Promise.resolve();
 		vi.advanceTimersByTime(100);
-		expect(painted).toContain("bash: build it");
-		expect(painted).not.toContain("bash: build it ·");
+		expect(hudText()).toContain("bash: build it");
+		expect(hudText()).not.toContain("bash: build it ·");
 	});
 });

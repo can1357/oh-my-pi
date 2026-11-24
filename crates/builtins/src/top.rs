@@ -1,6 +1,7 @@
 //! `top` builtin, moved from `omp-shell`.
 
 use std::{
+	borrow::Cow,
 	collections::{HashMap, HashSet},
 	fmt::Write as _,
 	future::Future,
@@ -13,7 +14,7 @@ use tokio::time;
 
 use crate::{
 	host::{INTERRUPTED_EXIT_CODE, ProcContext, Process},
-	proc_snapshot::{CpuTimes, ProcInfo, sanitize_process_command},
+	proc_snapshot::{CpuTimes, ProcInfo, process_user_name, sanitize_process_command},
 };
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -32,8 +33,8 @@ enum TopSortKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum TopStat {
 	Pid,
-	#[value(alias = "uid")]
 	User,
+	Uid,
 	#[value(name = "pstate", alias = "state")]
 	State,
 	#[value(name = "nice", alias = "ni")]
@@ -74,6 +75,7 @@ impl TopStat {
 		match self {
 			Self::Pid => "PID",
 			Self::User => "USER",
+			Self::Uid => "UID",
 			Self::State => "S",
 			Self::Nice => "NI",
 			Self::Threads => "TH",
@@ -90,7 +92,7 @@ impl TopStat {
 	fn width(self) -> usize {
 		match self {
 			Self::Pid => 7,
-			Self::User => 8,
+			Self::User | Self::Uid => 8,
 			Self::State => 2,
 			Self::Nice => 3,
 			Self::Threads => 4,
@@ -245,6 +247,9 @@ impl Process for TopCommand {
 			let mut previous = HashMap::<i32, (u64, Duration)>::new();
 			let mut previous_sample = std::time::Instant::now();
 			let mut sample = 0_u64;
+			let mut user_names = HashMap::new();
+			#[cfg(target_os = "macos")]
+			let mut previous_cpu = macos_cpu_ticks();
 
 			loop {
 				if context.is_cancelled() {
@@ -314,7 +319,15 @@ impl Process for TopCommand {
 				}
 
 				sort_top_rows(&mut rows, sort);
-				let output = render_top_snapshot(&rows, row_limit, sample + 1, &stats);
+				let output = render_top_snapshot(
+					&rows,
+					row_limit,
+					sample + 1,
+					&stats,
+					&mut user_names,
+					#[cfg(target_os = "macos")]
+					MacosSummary::sample(&mut previous_cpu),
+				);
 				let write_result = context.stdout().write_all(output.as_bytes());
 				let written = match write_result {
 					Ok(()) => context.flush_output().await,
@@ -364,10 +377,22 @@ fn sort_top_rows(rows: &mut [TopProcessRow], key: TopSortKey) {
 	});
 }
 
-fn top_cell(row: &TopProcessRow, stat: TopStat) -> String {
+fn top_cell<'a>(
+	row: &'a TopProcessRow,
+	stat: TopStat,
+	user_names: &'a mut HashMap<u32, String>,
+) -> Cow<'a, str> {
 	match stat {
 		TopStat::Pid => row.pid.to_string(),
-		TopStat::User => row
+		TopStat::User => {
+			let name = if let Some(uid) = row.user {
+				user_names.entry(uid).or_insert_with(|| process_user_name(uid)).as_str()
+			} else {
+				"?"
+			};
+			return Cow::Borrowed(name);
+		},
+		TopStat::Uid => row
 			.user
 			.map_or_else(|| "?".to_string(), |value| value.to_string()),
 		TopStat::State => row.state.to_string(),
@@ -387,14 +412,82 @@ fn top_cell(row: &TopProcessRow, stat: TopStat) -> String {
 			.cpu_time
 			.map_or_else(|| "?".to_string(), format_top_time),
 		TopStat::Cpu => format!("{:.1}", row.cpu_percent),
-		TopStat::PctMem => "?".to_string(),
+		TopStat::PctMem => return Cow::Borrowed("?"),
 		TopStat::Command => {
-			if row.command.is_empty() {
-				"?".to_string()
-			} else {
-				row.command.clone()
-			}
+			return Cow::Borrowed(if row.command.is_empty() { "?" } else { &row.command });
 		},
+	}
+	.into()
+}
+
+#[cfg(target_os = "macos")]
+type MacosCpuTicks = [u32; libc::CPU_STATE_MAX as usize];
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated, reason = "libc's Mach bindings avoid a dependency for these two queries")]
+fn macos_cpu_ticks() -> Option<MacosCpuTicks> {
+	unsafe extern "C" {
+		fn mach_port_deallocate(task: libc::mach_port_t, name: libc::mach_port_t)
+		-> libc::kern_return_t;
+	}
+
+	let mut ticks = MacosCpuTicks::default();
+	let mut count = libc::HOST_CPU_LOAD_INFO_COUNT;
+	// SAFETY: the host port is owned by this call, ticks has the length and
+	// alignment required by HOST_CPU_LOAD_INFO, and count is in/out.
+	let status = unsafe {
+		let host = libc::mach_host_self();
+		let result = libc::host_statistics(
+			host,
+			libc::HOST_CPU_LOAD_INFO,
+			ticks.as_mut_ptr().cast(),
+			&raw mut count,
+		);
+		mach_port_deallocate(libc::mach_task_self(), host);
+		result
+	};
+	(status == libc::KERN_SUCCESS && count == libc::HOST_CPU_LOAD_INFO_COUNT).then_some(ticks)
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct MacosSummary {
+	load: Option<[f64; 3]>,
+	cpu:  Option<[f64; 3]>,
+}
+
+#[cfg(target_os = "macos")]
+impl MacosSummary {
+	fn sample(previous: &mut Option<MacosCpuTicks>) -> Self {
+		let mut load = [0.0; 3];
+		// SAFETY: load is writable for exactly three doubles.
+		let averages = unsafe { libc::getloadavg(load.as_mut_ptr(), 3) };
+		let cpu = macos_cpu_ticks().and_then(|current| {
+			let old = previous.replace(current)?;
+			let delta = |state: libc::c_int| {
+				let index = state as usize;
+				u64::from(current[index].wrapping_sub(old[index]))
+			};
+			let user = delta(libc::CPU_STATE_USER) + delta(libc::CPU_STATE_NICE);
+			let system = delta(libc::CPU_STATE_SYSTEM);
+			let idle = delta(libc::CPU_STATE_IDLE);
+			let total = user + system + idle;
+			(total != 0).then(|| [user, system, idle].map(|ticks| 100.0 * ticks as f64 / total as f64))
+		});
+		Self { load: (averages == 3).then_some(load), cpu }
+	}
+
+	fn write(self, output: &mut String) {
+		if let Some([one, five, fifteen]) = self.load {
+			let _ = writeln!(output, "Load Avg: {one:.2}, {five:.2}, {fifteen:.2}");
+		} else {
+			let _ = writeln!(output, "Load Avg: ?, ?, ?");
+		}
+		if let Some([user, system, idle]) = self.cpu {
+			let _ = writeln!(output, "CPU usage: {user:.2}% user, {system:.2}% sys, {idle:.2}% idle");
+		} else {
+			let _ = writeln!(output, "CPU usage: ?% user, ?% sys, ?% idle");
+		}
 	}
 }
 
@@ -403,6 +496,8 @@ fn render_top_snapshot(
 	row_limit: Option<usize>,
 	sample: u64,
 	stats: &[TopStat],
+	user_names: &mut HashMap<u32, String>,
+	#[cfg(target_os = "macos")] summary: MacosSummary,
 ) -> String {
 	let mut running = 0_usize;
 	let mut sleeping = 0_usize;
@@ -410,6 +505,7 @@ fn render_top_snapshot(
 	let mut zombie = 0_usize;
 	let mut resident = 0_u64;
 	let mut virtual_size = 0_u64;
+	#[cfg(not(target_os = "macos"))]
 	let mut cpu = 0.0;
 	for row in rows {
 		match row.state {
@@ -421,7 +517,10 @@ fn render_top_snapshot(
 		}
 		resident = resident.saturating_add(row.resident_size.unwrap_or(0));
 		virtual_size = virtual_size.saturating_add(row.virtual_size.unwrap_or(0));
-		cpu += row.cpu_percent;
+		#[cfg(not(target_os = "macos"))]
+		{
+			cpu += row.cpu_percent;
+		}
 	}
 
 	let mut output = String::new();
@@ -446,6 +545,9 @@ fn render_top_snapshot(
 		stopped,
 		zombie
 	);
+	#[cfg(target_os = "macos")]
+	summary.write(&mut output);
+	#[cfg(not(target_os = "macos"))]
 	let _ = writeln!(output, "%Cpu(s): {cpu:>6.1} process");
 	let _ = writeln!(
 		output,
@@ -468,7 +570,7 @@ fn render_top_snapshot(
 			if index > 0 {
 				line.push(' ');
 			}
-			let _ = write!(line, "{:>width$}", top_cell(row, *stat), width = stat.width());
+			let _ = write!(line, "{:>width$}", top_cell(row, *stat, user_names), width = stat.width());
 		}
 		let _ = writeln!(output, "{line}");
 	}
@@ -565,11 +667,65 @@ mod tests {
 			row(2, "visible-two", 0.0, 0, 0),
 			row(1, "hidden-one", 0.0, 0, 0),
 		];
-		let output = render_top_snapshot(&rows, Some(2), 7, DEFAULT_TOP_STATS);
+		let output = render_top_snapshot(
+			&rows,
+			Some(2),
+			7,
+			DEFAULT_TOP_STATS,
+			&mut HashMap::new(),
+			#[cfg(target_os = "macos")]
+			MacosSummary::default(),
+		);
 		assert!(output.contains("top - snapshot 7"));
 		assert!(output.contains("visible-three"));
 		assert!(output.contains("visible-two"));
 		assert!(!output.contains("hidden-one"));
+	}
+
+	#[cfg(target_os = "macos")]
+	#[tokio::test]
+	async fn macos_logging_shows_host_load_cpu_split_and_user_names() {
+		use crate::proc_snapshot::process_test_output;
+
+		let output = process_test_output(&[
+			"top", "-l", "2", "-n", "1", "-pid", "1", "-stats", "pid,user,uid",
+		])
+		.await;
+		let mut loads = output.lines().filter_map(|line| line.strip_prefix("Load Avg: "));
+		for _ in 0..2 {
+			let values: Vec<_> = loads.next().expect("load averages").split(", ").collect();
+			assert_eq!(values.len(), 3, "{output}");
+			for value in values {
+				assert!(value.parse::<f64>().is_ok_and(|load| load.is_finite() && load >= 0.0));
+			}
+		}
+		assert!(loads.next().is_none());
+
+		let mut cpu = output.lines().filter_map(|line| line.strip_prefix("CPU usage: "));
+		assert!(cpu.next().is_some(), "{output}");
+		let parts: Vec<_> = cpu.next().expect("second CPU sample").split(", ").collect();
+		assert_eq!(parts.len(), 3, "{output}");
+		let percentages = parts.iter().zip(["% user", "% sys", "% idle"]).map(|(part, suffix)| {
+			let percent: f64 = part
+				.strip_suffix(suffix)
+				.expect("CPU field label")
+				.parse()
+				.unwrap_or_else(|err| panic!("invalid host CPU percentage: {err}\n{output}"));
+			assert!((0.0..=100.0).contains(&percent), "{output}");
+			percent
+		});
+		assert!((percentages.sum::<f64>() - 100.0).abs() < 0.02, "{output}");
+		assert!(cpu.next().is_none());
+		assert!(!output.contains("%Cpu(s)"), "{output}");
+
+		let owners: Vec<_> = output
+			.lines()
+			.filter_map(|line| {
+				let fields: Vec<_> = line.split_whitespace().collect();
+				(fields.first() == Some(&"1")).then_some(fields)
+			})
+			.collect();
+		assert_eq!(owners, [["1", "root", "0"], ["1", "root", "0"]], "{output}");
 	}
 
 	#[test]
@@ -597,13 +753,15 @@ mod tests {
 	#[test]
 	fn snapshot_renders_selected_stats_in_order() {
 		let rows = vec![row(42, "worker", 12.3, 4096, 61)];
-		let output = render_top_snapshot(&rows, None, 1, &[
-			TopStat::Pid,
-			TopStat::Cpu,
-			TopStat::Threads,
-			TopStat::Res,
-			TopStat::State,
-		]);
+		let output = render_top_snapshot(
+			&rows,
+			None,
+			1,
+			&[TopStat::Pid, TopStat::Cpu, TopStat::Threads, TopStat::Res, TopStat::State],
+			&mut HashMap::new(),
+			#[cfg(target_os = "macos")]
+			MacosSummary::default(),
+		);
 		let header = output
 			.lines()
 			.find(|line| line.contains("PID"))
@@ -613,7 +771,7 @@ mod tests {
 		]);
 		let row_line = output
 			.lines()
-			.find(|line| line.contains("42"))
+			.find(|line| line.split_whitespace().next() == Some("42"))
 			.expect("process row");
 		assert_eq!(row_line.split_whitespace().collect::<Vec<_>>(), vec![
 			"42", "12.3", "2", "4.0k", "S"

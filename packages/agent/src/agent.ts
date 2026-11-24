@@ -23,11 +23,13 @@ import {
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import {
+	AgentLoopError,
 	abortReasonText,
 	agentLoop,
 	agentLoopContinue,
@@ -2026,6 +2028,7 @@ export class Agent {
 			return refreshToolChoiceForActiveTools(options?.toolChoice, this.#state.tools);
 		};
 
+		let requestModel: Model | undefined;
 		const config: AgentLoopConfig = {
 			model,
 			reasoning,
@@ -2104,6 +2107,9 @@ export class Agent {
 			onAssistantMessageEvent: this.#onAssistantMessageEvent,
 			onHarmonyLeak: this.#onHarmonyLeak,
 			onTurnEnd: (messages, signal, context) => this.#onTurnEnd?.(messages, signal, context),
+			onTurnEndEmitted: () => {
+				requestModel = undefined;
+			},
 			onPauseChange: paused => {
 				if (this.#isPaused === paused) return;
 				this.#isPaused = paused;
@@ -2114,7 +2120,10 @@ export class Agent {
 			onToolChoiceRejected: () => {
 				if (claimedToolChoice !== undefined) this.#deferredToolChoice = claimedToolChoice;
 			},
-			getModel: () => this.#state.model ?? model,
+			getModel: () => {
+				requestModel = this.#state.model ?? model;
+				return requestModel;
+			},
 			getReasoning: () => this.#state.thinkingLevel,
 			getDisableReasoning: () => this.#state.disableReasoning,
 			getServiceTier: this.#serviceTierResolver,
@@ -2244,6 +2253,14 @@ export class Agent {
 				: err instanceof Error
 					? err.message
 					: String(err);
+			const errorModel = requestModel ?? this.#state.model ?? model;
+			const errorStatus = stoppedForAbort ? undefined : AIError.status(err);
+			const errorId = stoppedForAbort
+				? errorMessage === "Request was aborted"
+					? AIError.create(AIError.Flag.Abort)
+					: AIError.classify(loopSignal.reason) || undefined
+				: AIError.classify(err, errorModel.api) || undefined;
+			const errorFromAgentLoop = (!stoppedForAbort && err instanceof AgentLoopError) || undefined;
 			const shouldEmitVisibleError = !stoppedForAbort;
 			const assistantPartial = partial?.role === "assistant" ? partial : undefined;
 			const hadAssistantStart = assistantPartial !== undefined;
@@ -2271,13 +2288,16 @@ export class Agent {
 							),
 							stopReason: "error",
 							errorMessage,
+							errorStatus,
+							errorId,
+							errorFromAgentLoop,
 						}
 					: {
 							role: "assistant",
 							content: [{ type: "text", text: "" }],
-							api: model.api,
-							provider: model.provider,
-							model: model.id,
+							api: errorModel.api,
+							provider: errorModel.provider,
+							model: errorModel.id,
 							usage: {
 								input: 0,
 								output: 0,
@@ -2288,6 +2308,9 @@ export class Agent {
 							},
 							stopReason: stoppedForAbort ? "aborted" : "error",
 							errorMessage,
+							errorStatus,
+							errorId,
+							errorFromAgentLoop,
 							timestamp: Date.now(),
 						};
 

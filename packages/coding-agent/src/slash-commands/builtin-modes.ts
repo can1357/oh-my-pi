@@ -1,13 +1,12 @@
 import { clearSubmittedText, runWithDetachedDraft } from "./helpers/draft";
 import * as path from "node:path";
 import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
-import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { prompt } from "@oh-my-pi/pi-utils";
 import {
 	formatModelString,
 	getModelMatchPreferences,
-	resolveCliModel,
 	type ResolveCliModelResult,
+	resolveCliModel,
 } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import {
@@ -17,8 +16,8 @@ import {
 	getModelPresetNames,
 	isCleanModelPresetSwitch,
 	isValidModelPresetName,
-	modelPresetSavedMessage,
 	type ModelPresetSession,
+	modelPresetSavedMessage,
 	saveModelPreset,
 } from "../config/model-presets";
 import { describeLoopCondition } from "../modes/loop-condition";
@@ -26,18 +25,17 @@ import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
 import ratchetKickoffPrompt from "../prompts/ratchet-kickoff.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
-import { CLI_THINKING_LEVELS, getConfiguredThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
+import { CLI_THINKING_LEVELS, getConfiguredThinkingLevelMetadata } from "../thinking/levels";
 import { noThinkingMessage, resolveThinkingArgument } from "./helpers/effort";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
 import type { SlashCommandSpec } from "./types";
-
 import {
-	cfgComputerBackgroundFallback,
 	cfgComputerDisplay,
 	cfgComputerEnabled,
 	cfgComputerMaxHeight,
 	cfgComputerMaxWidth,
+	cfgComputerTakeover,
 	cfgRatchetEnabled,
 } from "../tools/settings";
 import { cfgPrewalkFrom, cfgPrewalkInto, cfgSkillful } from "../session/settings";
@@ -45,10 +43,10 @@ import { formatSlowModeResetClock } from "../session/anthropic-slow-mode";
 import { cfgExtendedContext } from "../session/context-settings";
 import { cfgGoalEnabled } from "../goals/settings";
 import { cfgPlanEnabled } from "../plan-mode/settings";
+import { formatKeyHint } from "../ui/keys/hints";
 
 export function refreshStatusLine(ctx: InteractiveModeContext): void {
-	ctx.statusLine.invalidate();
-	ctx.ui.requestRender();
+	ctx.statusLine.refresh();
 }
 
 /**
@@ -89,8 +87,16 @@ const FAST_USAGE = "Usage: /fast [on|ultra|off|status]";
 function runFastCommand(arg: string, session: AgentSession): string | undefined {
 	switch (arg) {
 		case "":
-		case "toggle":
-			return `Fast mode ${session.toggleFastMode() ? "enabled" : "disabled"}.`;
+		case "toggle": {
+			// toggleFastMode() cannot distinguish "toggled off" from "refused":
+			// route through setFastMode so a tier-less model reports
+			// unavailability instead of claiming success.
+			if (session.isFastModeEnabled()) {
+				session.setFastMode(false);
+				return "Fast mode disabled.";
+			}
+			return session.setFastMode(true) ? "Fast mode enabled." : "Fast mode is unavailable for the current model.";
+		}
 		case "on":
 			return session.setFastMode(true) ? "Fast mode enabled." : "Fast mode is unavailable for the current model.";
 		case "ultra":
@@ -99,8 +105,7 @@ function runFastCommand(arg: string, session: AgentSession): string | undefined 
 				? "Ultrafast mode enabled."
 				: "Ultrafast is unavailable for the current model.";
 		case "off":
-			session.setFastMode(false);
-			return "Fast mode disabled.";
+			return session.setFastMode(false) ? "Fast mode disabled." : "Fast mode is unavailable for the current model.";
 		case "status":
 			return `Fast mode is ${formatFastModeStatus(session)}.`;
 		default:
@@ -174,12 +179,12 @@ function formatComputerUseStatus(session: AgentSession): string {
 		display: cfgComputerDisplay.get(session.settings),
 		maxWidth: cfgComputerMaxWidth.get(session.settings),
 		maxHeight: cfgComputerMaxHeight.get(session.settings),
-		backgroundFallback: cfgComputerBackgroundFallback.get(session.settings),
+		takeover: cfgComputerTakeover.get(session.settings),
 	};
 	return [
 		`Computer use: ${enabled ? "enabled" : "disabled"}`,
 		`prelude: ${active ? "active" : "inactive"}`,
-		`configured: display=${configured.display}, maxWidth=${configured.maxWidth}, maxHeight=${configured.maxHeight}, backgroundFallback=${configured.backgroundFallback}`,
+		`configured: display=${configured.display}, maxWidth=${configured.maxWidth}, maxHeight=${configured.maxHeight}, takeover=${configured.takeover}`,
 	].join(" · ");
 }
 
@@ -839,12 +844,11 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			}
 			const outcome = await runPresetsCommand(args, ctx.settings, ctx.session);
 			if (outcome.switched) {
-				ctx.statusLine.invalidate();
+				ctx.statusLine.refresh();
 				ctx.updateEditorBorderColor();
 			}
 			if (outcome.failed || outcome.usage) ctx.showWarning(outcome.message);
 			else ctx.showStatus(outcome.message);
-			ctx.ui.requestRender();
 		},
 	},
 	{
