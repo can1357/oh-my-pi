@@ -75,10 +75,7 @@ export function pictureRows(
 	const maxColumns = Math.max(1, Math.min(cx.width, extentCells(max?.w, cx.width) ?? cx.width));
 	const maxRows = Math.max(
 		1,
-		Math.min(
-			cx.height ?? Number.POSITIVE_INFINITY,
-			extentCells(max?.h, cx.height) ?? Number.POSITIVE_INFINITY,
-		),
+		Math.min(cx.height ?? Number.POSITIVE_INFINITY, extentCells(max?.h, cx.height) ?? Number.POSITIVE_INFINITY),
 	);
 	// Natural size when it fits; else the caps (the store scales to fit both, either way).
 	const fits = Math.ceil(picture.w / cell.w) <= maxColumns && Math.ceil(picture.h / cell.h) <= maxRows;
