@@ -90,5 +90,4 @@ describe("image attachments honour images.autoResize", () => {
 		const size = await dimensions(image.data);
 		expect(Math.max(size.width, size.height)).toBe(1568);
 	});
-
 });
