@@ -12,7 +12,7 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { formatAge, formatCount, prompt, truncate } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../../config/auxiliary-model-policy";
-import { ModelRegistry } from "../../config/model-registry";
+import { ModelRegistry, getDisabledProviderIdsFromSettings } from "../../config/model-registry";
 import { type RoleChainCandidate, resolveModelRoleValue, resolveRoleChain } from "../../config/model-resolver";
 import { getRoleInfo, roleCandidatePool } from "../../config/model-roles";
 import { settings, type Settings } from "../../config/settings";
@@ -266,6 +266,7 @@ function preferHackerNews(chain: RoleChainCandidate[], pool: Model<Api>[]): Role
  * The web role's candidates: the registry's available models, plus the google models that Gemini web
  * search takes on GOOGLE_CLOUD_API_KEY alone. The registry lists `google` only with a Developer API key
  * (model-registry.ts, #createProviderAvailabilityCheck), so without this the Vertex endpoint is never reached.
+ * A provider the disabledProviders setting lists stays out, as the registry keeps it out.
  */
 async function webCandidatePool(
 	activeSettings: Settings,
@@ -274,11 +275,12 @@ async function webCandidatePool(
 ): Promise<Model[]> {
 	const pool = roleCandidatePool("web", activeSettings, modelRegistry);
 	const accepts = getRoleInfo("web", activeSettings).accepts;
+	const disabled = getDisabledProviderIdsFromSettings(activeSettings);
 	const listed = new Set(pool.map(model => `${model.provider}/${model.id}`));
 	const gemini = await getGroundedSearchProvider("gemini");
 	const vertex: Model[] = [];
 	for (const model of modelRegistry.getProviderModels("google")) {
-		if (listed.has(`${model.provider}/${model.id}`) || !accepts(model)) continue;
+		if (disabled.has(model.provider) || listed.has(`${model.provider}/${model.id}`) || !accepts(model)) continue;
 		if (await gemini.isAvailable(authStorage, model)) vertex.push(model);
 	}
 	return vertex.length > 0 ? [...pool, ...vertex] : pool;

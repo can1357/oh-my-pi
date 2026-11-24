@@ -365,7 +365,7 @@ function yieldMacrotask(): Promise<void> {
  */
 type ModifyModelsHook = (models: Model<Api>[], credentials: OAuthCredentials) => Model<Api>[];
 
-function getDisabledProviderIdsFromSettings(settingsInstance?: Settings): Set<string> {
+export function getDisabledProviderIdsFromSettings(settingsInstance?: Settings): Set<string> {
 	try {
 		return new Set(cfgDisabledProviders.get(settingsInstance ?? settings));
 	} catch {

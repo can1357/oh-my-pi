@@ -547,4 +547,20 @@ describe("web_search with only GOOGLE_CLOUD_API_KEY", () => {
 		expect(requestHeaders.get("x-goog-api-key")).toBe("vertex-test-key");
 		expect(result.details.response.provider).toBe("gemini");
 	});
+
+	it("does not search a google model that disabledProviders turns off, even with GOOGLE_CLOUD_API_KEY", async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, overrides: { disabledProviders: ["google"] } });
+		modelRegistry = new ModelRegistry(authStorage);
+		let requestUrl = "";
+		vi.spyOn(globalThis, "fetch").mockImplementation((async (url: string | URL | Request) => {
+			requestUrl = String(url);
+			return new Response(SSE_RESPONSE, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+		}) as typeof fetch);
+
+		await runSearchQuery({ query: "test query", model: "google/gemini-2.5-flash" }, { authStorage, modelRegistry });
+
+		expect(requestUrl).not.toContain("aiplatform");
+		expect(requestUrl).toBe("");
+	});
 });
