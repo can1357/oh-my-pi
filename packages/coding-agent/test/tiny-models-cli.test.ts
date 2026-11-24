@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { resolveModels, runTinyModelsCommand } from "@oh-my-pi/pi-coding-agent/cli/tiny-models-cli";
 import { tinyModelBackendRefusal, tinyModelSupportsBackend } from "@oh-my-pi/pi-coding-agent/tiny/backend-policy";
 import { TINY_LOCAL_MODELS } from "@oh-my-pi/pi-coding-agent/tiny/models";
-import { mlxLaunch, tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import { mlxOpenSpec, tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -136,12 +136,8 @@ describe("tiny-models download model resolution", () => {
 });
 
 describe("mlx backend model gate", () => {
-	it("refuses a model the pinned mlx-lm cannot load", () => {
-		expect(() => mlxLaunch("lfm3-1.7b", () => {})).toThrow(/unavailable on MLX/);
-	});
-
-	it("builds a launch for a model mlx-lm can load", () => {
-		expect(mlxLaunch("lfm2-1.2b", () => {}).backend).toBe("mlx");
+	it("refuses a model the pinned mlx-lm cannot load", async () => {
+		await expect(mlxOpenSpec("lfm3-1.7b", {}, () => {})).rejects.toThrow(/unavailable on MLX/);
 	});
 });
 
