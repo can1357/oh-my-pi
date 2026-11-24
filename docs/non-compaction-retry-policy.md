@@ -242,7 +242,10 @@ until the earliest reported future reset when available,
 and state that no request was sent to the source model for that attempt.
 Startup quota skips use the same explanation in `modelFallbackMessage`.
 Request-failure notices include the provider's error instead of implying a
-preflight skip.
+preflight skip. A turn the agent loop ended itself (for example, after the
+model kept missing a soft tool requirement) reads `Turn stopped: …` instead of
+`Request failed: …`, since no request failed. Each switch also records its
+cause on the fallback's `model_change` entry (see `docs/session.md`).
 
 On success, `auto_retry_end` also carries additive `retryErrors`: one `RetryErrorUpdate` (`entryId`, `persistenceKey?`, `note`, `retryRecovery`) per persisted error entry left behind by the retry chain, recording how recovery happened (`recovery`: `plain`/`wait`/`credential`/`model`, plus a human-readable `note` such as `rate-limited; switched account; retried`) and which successful message superseded each error (`supersededBy` with timestamp/provider/model/responseId). Extensions and RPC consumers receive the same fields.
 

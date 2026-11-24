@@ -10,6 +10,10 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import {
+	lookupBuiltinSlashCommand,
+	type SlashCommandRuntime,
+} from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { withOfficialAnthropicEndpoint } from "./helpers/anthropic-endpoint";
 
 withOfficialAnthropicEndpoint();
@@ -116,21 +120,23 @@ describe("/fast targets the current model's service-tier family", () => {
 		expect(session.isFastModeActive()).toBe(true);
 	});
 
+	/** A Fireworks model, whose provider owns a tier control outside the service-tier families. */
+	const fireworksModel = () =>
+		buildModel({
+			id: "gpt-oss-120b",
+			name: "GPT OSS 120B",
+			api: "openai-completions",
+			provider: "fireworks",
+			baseUrl: "https://api.fireworks.ai/inference/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 64_000,
+		});
+
 	it("leaves Fireworks models on the dedicated Fireworks tier control", async () => {
-		const session = await createSessionForModel(
-			buildModel({
-				id: "gpt-oss-120b",
-				name: "GPT OSS 120B",
-				api: "openai-completions",
-				provider: "fireworks",
-				baseUrl: "https://api.fireworks.ai/inference/v1",
-				reasoning: true,
-				input: ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: 128_000,
-				maxTokens: 64_000,
-			}),
-		);
+		const session = await createSessionForModel(fireworksModel());
 		expect(session.setFastMode(true)).toBe(false);
 		expect(session.serviceTierByFamily).toEqual({});
 		expect(session.isFastModeEnabled()).toBe(false);
@@ -200,5 +206,45 @@ describe("/fast targets the current model's service-tier family", () => {
 		session.setFastMode(false);
 		expect(session.serviceTierByFamily).toEqual({});
 		expect(session.isFastModeActive()).toBe(false);
+	});
+	// The /fast command's message contract, driven through the builtin's
+	// portable handler: the text-mode/ACP runtime is where the reply is the
+	// only signal a host sees (the TUI overlays it with the session notice).
+	const fastCommand = lookupBuiltinSlashCommand("fast");
+
+	async function runFastCommand(session: AgentSession, args: string): Promise<string[]> {
+		const outputs: string[] = [];
+		const result = await fastCommand!.handle!({ name: "fast", args, text: `/fast ${args}`.trim() }, {
+			session,
+			output: (text: string) => {
+				outputs.push(text);
+			},
+		} as unknown as SlashCommandRuntime);
+		expect(result).toEqual({ consumed: true });
+		return outputs;
+	}
+
+	it("reports /fast off as unavailable for a model with no service-tier control", async () => {
+		const session = await createSessionForModel(fireworksModel());
+		expect(await runFastCommand(session, "off")).toEqual(["Fast mode is unavailable for the current model."]);
+		expect(session.serviceTierByFamily).toEqual({});
+	});
+
+	it("reports bare /fast as unavailable for a model with no service-tier control", async () => {
+		const session = await createSessionForModel(fireworksModel());
+		expect(await runFastCommand(session, "")).toEqual(["Fast mode is unavailable for the current model."]);
+		expect(await runFastCommand(session, "toggle")).toEqual(["Fast mode is unavailable for the current model."]);
+		expect(session.serviceTierByFamily).toEqual({});
+	});
+
+	it("disables fast mode with /fast off and toggles it both ways for a family model", async () => {
+		const session = await createSession("anthropic", "claude-sonnet-4-5");
+		session.setFastMode(true);
+		expect(await runFastCommand(session, "off")).toEqual(["Fast mode disabled."]);
+		expect(session.serviceTierByFamily).toEqual({});
+		expect(await runFastCommand(session, "")).toEqual(["Fast mode enabled."]);
+		expect(session.serviceTierByFamily.anthropic).toBe("priority");
+		expect(await runFastCommand(session, "")).toEqual(["Fast mode disabled."]);
+		expect(session.serviceTierByFamily).toEqual({});
 	});
 });

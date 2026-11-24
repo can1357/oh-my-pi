@@ -38,8 +38,8 @@ import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" w
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
 import userAppendPromptTemplate from "./prompts/system/user-append.md" with { type: "text" };
-import type { SystemPromptSource, SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
-import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
+import type { SystemPromptSource, SystemPromptSources } from "./session/context-usage";
+import type { ActiveRepoContext } from "./modes/view-model/status-line/host";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { normalizePromptPath } from "./utils/prompt-path";
 import { quotePosixArgument } from "./utils/shell-quote";

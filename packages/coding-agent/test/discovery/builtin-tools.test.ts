@@ -102,6 +102,29 @@ describe("native executable custom tool discovery", () => {
 		expect(definitions.items.find(tool => tool.path === notesPath)?.description).toBe("Declarative tool metadata");
 	});
 
+	test("explicit-only discovery skips ambient tool dirs but keeps explicit extension package tools", async () => {
+		const explicitPackage = path.join(root, "explicit-pkg");
+		await fs.mkdir(path.join(explicitPackage, "tools"), { recursive: true });
+		await Promise.all([
+			fs.writeFile(path.join(projectTools, "project-module.ts"), toolSource("project_module")),
+			fs.writeFile(path.join(userTools, "user-module.ts"), toolSource("user_module")),
+			fs.writeFile(path.join(explicitPackage, "tools", "explicit-module.ts"), toolSource("explicit_module")),
+		]);
+
+		const discoveredPaths = await discoverCustomToolPaths([], project, undefined, {
+			ambient: false,
+			extensionRoots: {
+				explicit: [explicitPackage],
+				mode: "explicit-only",
+				configured: [],
+				configuredLevel: "user",
+			},
+		});
+		const loaded = await loadCustomTools(discoveredPaths, project, []);
+		expect(loaded.errors).toEqual([]);
+		expect(loaded.tools.map(tool => tool.tool.name)).toEqual(["explicit_module"]);
+	});
+
 	test("reports explicitly configured metadata instead of silently skipping it", async () => {
 		const packagePath = path.join(projectTools, "package.json");
 		await fs.writeFile(packagePath, JSON.stringify({ type: "module" }));

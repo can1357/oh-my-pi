@@ -3,20 +3,26 @@
  * kinds, method tables, and the plain-data forms of OTEL values that hold
  * class instances (`TraceState`) and so cannot cross as-is.
  */
-import {
-	type Attributes,
-	createTraceState,
-	type Exception,
-	type Link,
-	type Span,
-	type SpanAttributes,
-	type SpanAttributeValue,
-	type SpanContext,
-	type SpanKind,
-	type SpanOptions,
-	type SpanStatus,
-	type TimeInput,
+import type * as OtelApi from "@opentelemetry/api";
+import type {
+	Attributes,
+	Exception,
+	Link,
+	Span,
+	SpanAttributes,
+	SpanAttributeValue,
+	SpanContext,
+	SpanKind,
+	SpanOptions,
+	SpanStatus,
+	TimeInput,
 } from "@opentelemetry/api";
+
+let otelApiCache: typeof OtelApi | undefined;
+function otelApi(): typeof OtelApi {
+	if (!otelApiCache) otelApiCache = require("@opentelemetry/api") as typeof OtelApi;
+	return otelApiCache;
+}
 import type { RpcMethod } from "../rpc";
 
 /** Codec kind of a config produced by `toWorkerTelemetryConfig`. */
@@ -102,7 +108,7 @@ export function toWireSpanContext(context: SpanContext): WireSpanContext {
 export function fromWireSpanContext(wire: WireSpanContext): SpanContext {
 	const context: SpanContext = { traceId: wire.traceId, spanId: wire.spanId, traceFlags: wire.traceFlags };
 	if (wire.isRemote !== undefined) context.isRemote = wire.isRemote;
-	if (wire.traceState !== undefined) context.traceState = createTraceState(wire.traceState);
+	if (wire.traceState !== undefined) context.traceState = otelApi().createTraceState(wire.traceState);
 	return context;
 }
 

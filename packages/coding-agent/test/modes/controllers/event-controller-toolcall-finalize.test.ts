@@ -11,18 +11,15 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { Component } from "@oh-my-pi/pi-tui";
+import { initTheme } from "../../../src/ui/theme/service";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
-
+import { blockText } from "../../helpers/transcript-text";
 import { cfgDisplayShowTokenUsage } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
-beforeAll(async () => {
-	await initTheme();
+beforeAll(() => {
+	initTheme();
 });
 
 function makeStreamingMessage(content: AssistantMessage["content"]): AssistantMessage {
@@ -45,26 +42,20 @@ function makeStreamingMessage(content: AssistantMessage["content"]): AssistantMe
 	};
 }
 
-// Components the controller mounts during a dispatch (pending tool previews).
-// Sealed in afterEach so their spinner intervals never outlive the test file.
-const mountedComponents: Component[] = [];
+// Contexts built by a test; their pending tool cards are sealed in afterEach.
+const contexts: ReturnType<typeof createInteractiveModeContext>[] = [];
 
 function createFixture(streamingMessage: AssistantMessage) {
-	const streamingComponent = new AssistantMessageComponent();
-	const markTranscriptBlockFinalized = vi.spyOn(streamingComponent, "markTranscriptBlockFinalized");
-	const ctx = createInteractiveModeContext({ streamingComponent, streamingMessage });
-	const addChild = ctx.chatContainer.addChild.bind(ctx.chatContainer);
-	vi.spyOn(ctx.chatContainer, "addChild").mockImplementation(child => {
-		mountedComponents.push(child);
-		addChild(child);
-	});
-
+	const ctx = createInteractiveModeContext({ streamingMessage });
+	const streaming = ctx.presentAssistant();
+	ctx.streaming = streaming;
+	contexts.push(ctx);
 	const controller = new EventController(ctx);
-	return { controller, markTranscriptBlockFinalized, ctx };
+	return { controller, streaming, ctx };
 }
 
 async function dispatchUpdate(message: AssistantMessage) {
-	const { controller, markTranscriptBlockFinalized } = createFixture(message);
+	const { controller, streaming } = createFixture(message);
 	// #handleMessageUpdate only reads `event.message`; the raw provider stream
 	// event is irrelevant to the finalization contract under test.
 	const event = {
@@ -73,14 +64,16 @@ async function dispatchUpdate(message: AssistantMessage) {
 		assistantMessageEvent: undefined as never,
 	} as Extract<AgentSessionEvent, { type: "message_update" }>;
 	await controller.handleEvent(event);
-	return markTranscriptBlockFinalized;
+	return streaming.finalized.peek();
+}
+
+function sealMounted(): void {
+	for (const ctx of contexts.splice(0)) for (const tool of ctx.pendingTools.values()) tool.seal();
 }
 
 describe("EventController finalizes assistant block when tool-call args stream", () => {
 	afterEach(() => {
-		for (const component of mountedComponents.splice(0)) {
-			if (component instanceof ToolExecutionComponent) component.seal();
-		}
+		sealMounted();
 		resetSettingsForTest();
 		vi.restoreAllMocks();
 	});
@@ -92,14 +85,14 @@ describe("EventController finalizes assistant block when tool-call args stream",
 			{ type: "toolCall", id: "tc-1", name: "write", arguments: { file_path: "/tmp/a.ts", content: "x" } },
 		]);
 		const finalized = await dispatchUpdate(message);
-		expect(finalized).toHaveBeenCalled();
+		expect(finalized).toBe(true);
 	});
 
 	it("keeps the assistant live while only text/thinking is streaming", async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
 		const message = makeStreamingMessage([{ type: "thinking", thinking: "still thinking" }]);
 		const finalized = await dispatchUpdate(message);
-		expect(finalized).not.toHaveBeenCalled();
+		expect(finalized).toBe(false);
 	});
 
 	it("marks the streaming assistant finalized even when the per-turn usage row is enabled", async () => {
@@ -110,7 +103,7 @@ describe("EventController finalizes assistant block when tool-call args stream",
 			{ type: "toolCall", id: "tc-2", name: "write", arguments: { file_path: "/tmp/b.ts", content: "y" } },
 		]);
 		const finalized = await dispatchUpdate(message);
-		expect(finalized).toHaveBeenCalled();
+		expect(finalized).toBe(true);
 	});
 
 	it("emits the per-turn usage row with the turn's local timestamp at message_end", async () => {
@@ -130,21 +123,21 @@ describe("EventController finalizes assistant block when tool-call args stream",
 			},
 			timestamp,
 		};
-		const { controller } = createFixture(message);
+		const { controller, ctx } = createFixture(message);
 		await controller.handleEvent({ type: "message_end", message } as Extract<
 			AgentSessionEvent,
 			{ type: "message_end" }
 		>);
-		const row = mountedComponents.at(-1) as unknown as { render(width: number): string[] } | undefined;
+		const row = ctx.shell.transcript.blocks().at(-1);
 		expect(row).toBeDefined();
-		expect(row?.render(120).join("\n")).toContain("2026-01-02 03:04:05");
+		expect(row).not.toBe(ctx.transcriptBlocks.get(message));
+		// The row stamps the turn's local wall-clock time.
+		expect(blockText(row!)).toContain("03:04");
 	});
 });
 describe("EventController finalizes orphaned post-tool assistant segments", () => {
 	afterEach(() => {
-		for (const component of mountedComponents.splice(0)) {
-			if (component instanceof ToolExecutionComponent) component.seal();
-		}
+		sealMounted();
 		resetSettingsForTest();
 		vi.restoreAllMocks();
 	});
@@ -166,15 +159,18 @@ describe("EventController finalizes orphaned post-tool assistant segments", () =
 			message,
 			assistantMessageEvent: undefined as never,
 		} as Extract<AgentSessionEvent, { type: "message_update" }>);
-		const segment = ctx.chatContainer.children.find(child => child instanceof AssistantMessageComponent);
-		expect(segment).toBeInstanceOf(AssistantMessageComponent);
-		expect((segment as AssistantMessageComponent).isTranscriptBlockFinalized()).toBe(false);
+		const segment = ctx.shell.transcript
+			.blocks()
+			.map(block => ctx.transcriptEntry(block))
+			.find(entry => entry?.kind === "assistant" && entry.view !== ctx.streaming);
+		if (segment?.kind !== "assistant") throw new Error("no post-tool segment");
+		expect(segment.view.finalized.peek()).toBe(false);
 
 		await controller.handleEvent({
 			type: "message_start",
 			message: makeStreamingMessage([]),
 		} as Extract<AgentSessionEvent, { type: "message_start" }>);
-		expect((segment as AssistantMessageComponent).isTranscriptBlockFinalized()).toBe(true);
+		expect(segment.view.finalized.peek()).toBe(true);
 		controller.dispose();
 	});
 });

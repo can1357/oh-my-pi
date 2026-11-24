@@ -65,8 +65,11 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 			format: "esm",
 			bytecode: true,
 			splitting: true,
-			// Discovery entry chunks can share a hash; include their source names to avoid collisions.
-			naming: { chunk: "chunks/[name]-[hash].[ext]" },
+			// The legacy Pi registry lazily imports every exported module, so side-effect-only
+			// modules (e.g. tui `painters/input.ts` and `widgets/input.ts`) become facade chunks
+			// holding only identical imports of shared chunks: same content, same hash. Mirror
+			// each source path so same-named modules in different directories never collide.
+			naming: { chunk: "chunks/[dir]/[name]-[hash].[ext]" },
 			minify: {
 				identifiers: options.minifyIdentifiers ?? false,
 				keepNames: true,

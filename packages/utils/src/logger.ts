@@ -499,6 +499,11 @@ interface LocalTransports {
 /** Local transports, constructed lazily on first log emission. */
 let activeTransports: LocalTransports | undefined;
 
+/** The file holding the latest local log record; absent when file logging is inactive. */
+export function currentLogFile(): string | undefined {
+	return activeTransports?.file?.currentPath;
+}
+
 function buildTransports(opts: { console?: boolean; file?: boolean | string }): LocalTransports {
 	return {
 		file: opts.file ? makeFileTransport(typeof opts.file === "string" ? opts.file : undefined) : undefined,

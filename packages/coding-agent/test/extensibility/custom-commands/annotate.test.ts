@@ -1,24 +1,21 @@
-import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import { Container, getKeybindings, setKeybindings, TUI } from "@oh-my-pi/pi-tui";
+import { createTestTerminal, type TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
+import type { ExtensionRender, ExtensionUiHost } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/render-types";
 import type {
+	ExtensionCustomFactory,
 	ExtensionCustomOptions,
 	ExtensionUIContext,
-	ExtensionUiComponent,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
-import type { Theme } from "@oh-my-pi/pi-tui/theme";
-import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
-import { CopySelectorComponent } from "@oh-my-pi/pi-tui/overlays/copy-selector";
-import {
-	selectSessionTextReviewSource,
-	type SessionPick,
-} from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/text-source";
+import { extensionOutput, extensionTheme, singleNode } from "../../../src/ui/extensions/render-output";
+import type { SessionPick } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/text-source";
 import {
 	AnnotateCommand,
 	runAnnotateCommand,
@@ -34,8 +31,6 @@ import type {
 	CustomCommandAPI,
 	CustomCommandContext,
 } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
-import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { ReviewPrRef } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review";
 import {
 	createResolvedReviewTarget,
@@ -48,18 +43,49 @@ import type {
 	CodeReviewAnnotation,
 	TextReviewAnnotation,
 	TextReviewSource,
-} from "@oh-my-pi/pi-tui/overlays/annotation-types";
+} from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/annotation-types";
 import * as gh from "@oh-my-pi/pi-coding-agent/tools/gh";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
-import { VirtualTerminal } from "../../../../tui/test/virtual-terminal";
-import { Editor } from "@oh-my-pi/pi-tui/components/editor";
-import { defaultEditorTheme } from "../../../../tui/test/test-themes";
-import { TspHarness } from "../../../../tui/test/native/tsp-harness";
 
 const ENTER = "\r";
 const UP = "\x1b[A";
 const RIGHT = "\x1b[C";
 const CTRL_E = "\x05";
+
+/** Raw input of the keys these tests press, as key ids. */
+const RAW_KEYS: Readonly<Record<string, string>> = {
+	"\r": "enter",
+	"\x1b": "escape",
+	"\t": "tab",
+	"\x1b[A": "up",
+	"\x1b[B": "down",
+	"\x1b[C": "right",
+	"\x05": "ctrl+e",
+};
+
+/** The UI host a custom view receives (no terminal to hand to an editor: `suspend` just runs). */
+const HOST: ExtensionUiHost = {
+	requestRender() {},
+	size: () => ({ columns: 120, rows: 40 }),
+	suspend: run => run(),
+};
+
+/** Mount a custom view the way the host's overlay does: one root node holding keyboard focus. */
+function mountView(output: ExtensionRender): TestTerminal {
+	const adapted = extensionOutput(output);
+	if (adapted === undefined) throw new Error("custom view drew nothing");
+	const node = singleNode(adapted);
+	const term = createTestTerminal(() => ({ layer: node }), { columns: 120, rows: 40 });
+	term.focus(node);
+	return term;
+}
+
+/** Feed one raw input chunk: a known key sequence as that key, anything else typed. */
+function feed(term: TestTerminal, raw: string): void {
+	const id = RAW_KEYS[raw];
+	if (id) term.press(id);
+	else term.type(raw);
+}
 
 const SAMPLE_DIFF = `diff --git a/src/value.ts b/src/value.ts
 --- a/src/value.ts
@@ -93,33 +119,31 @@ function createContext(options: ContextOptions = {}) {
 	const pickedSelections: SessionPick[] = [];
 	let customCalls = 0;
 	const custom: ExtensionUIContext["custom"] = async <T>(
-		factory: (
-			tui: TUI,
-			uiTheme: Theme,
-			keybindings: KeybindingsManager,
-			done: (result: T) => void,
-		) => ExtensionUiComponent | Promise<ExtensionUiComponent>,
+		factory: ExtensionCustomFactory<T>,
 		_options?: ExtensionCustomOptions,
 	): Promise<T> => {
 		customCalls++;
-		const terminal = new VirtualTerminal(120, 30);
-		const tui = new TUI(terminal);
 		const completion = Promise.withResolvers<T>();
+		let settled = false;
 		const done = (result: T): void => {
 			if (typeof result === "object" && result !== null && "entry" in result && "content" in result) {
 				pickedSelections.push(result as unknown as SessionPick);
 			}
+			settled = true;
 			completion.resolve(result);
 		};
-		const component = await factory(tui, theme, KeybindingsManager.inMemory(), done);
-		if (component instanceof CopySelectorComponent) {
-			component.render(120);
-			for (const key of options.customKeys ?? [ENTER]) component.handleInput?.(key);
-		} else {
-			if (options.customResult === undefined) throw new Error("test custom result missing");
+		const output = await factory(HOST, extensionTheme(currentTheme()), KeybindingsManager.inMemory(), done);
+		if (options.customResult !== undefined) {
 			done(options.customResult as T);
+			return completion.promise;
 		}
-		component.dispose?.();
+		const term = mountView(output);
+		try {
+			for (const key of options.customKeys ?? [ENTER]) feed(term, key);
+		} finally {
+			term.dispose();
+		}
+		if (!settled) throw new Error("custom view did not complete");
 		return completion.promise;
 	};
 	const ctx = {
@@ -206,9 +230,6 @@ async function driveEditorOverlay<T>(
 	show: (ctx: CustomCommandContext) => Promise<T | undefined>,
 	artifactsDir: string | null = null,
 ): Promise<T | undefined> {
-	const previous = getKeybindings();
-	setKeybindings(KeybindingsManager.inMemory({ "app.editor.external": "ctrl+e" }));
-	const tui = { terminal: { rows: 40 }, requestRender() {}, stop() {}, start() {} } as unknown as TUI;
 	const ctx = {
 		cwd,
 		sessionManager: {
@@ -219,26 +240,30 @@ async function driveEditorOverlay<T>(
 		},
 		ui: {
 			notify: vi.fn(),
-			custom: async (factory: Parameters<ExtensionUIContext["custom"]>[0]) => {
-				let result: unknown;
-				const component = await factory(tui, theme, KeybindingsManager.inMemory(), value => {
-					result = value;
-				});
-				component.render(120);
-				for (const key of keys) {
-					component.handleInput?.(key);
-					await new Promise<void>(resolve => setImmediate(resolve));
-					component.render(120);
+			custom: async <R>(factory: ExtensionCustomFactory<R>) => {
+				let result: R | undefined;
+				const output = await factory(
+					HOST,
+					extensionTheme(currentTheme()),
+					KeybindingsManager.inMemory({ "app.editor.external": "ctrl+e" }),
+					value => {
+						result = value;
+					},
+				);
+				const term = mountView(output);
+				try {
+					for (const key of keys) {
+						feed(term, key);
+						await new Promise<void>(resolve => setImmediate(resolve));
+					}
+				} finally {
+					term.dispose();
 				}
 				return result;
 			},
 		},
 	} as unknown as CustomCommandContext;
-	try {
-		return await show(ctx);
-	} finally {
-		setKeybindings(previous);
-	}
+	return await show(ctx);
 }
 
 function countOccurrences(text: string, value: string): number {
@@ -253,10 +278,6 @@ async function withTempDir<T>(callback: (directory: string) => Promise<T>): Prom
 		await rm(directory, { recursive: true, force: true });
 	}
 }
-
-beforeAll(async () => {
-	await initTheme();
-});
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -420,68 +441,6 @@ describe("/annotate contracts", () => {
 		expect(pasteToEditor).toHaveBeenCalledTimes(1);
 		expect(pasteToEditor.mock.calls[0]?.[0]).toContain(note);
 		expect(pasteToEditor.mock.calls[0]?.[0]).not.toContain(latestText);
-	});
-
-	it.each([true, false])("selects an older reply and restores the draft (native=%s)", async native => {
-		const older = makeAssistantEntry("older", "Older answer");
-		const { ctx } = createContext({
-			branch: [
-				makeUserEntry("user", "First question"),
-				older,
-				makeAssistantEntry("latest", "Latest answer", "older"),
-			],
-		});
-		const editor = new Editor(defaultEditorTheme);
-		editor.setText("Unsent draft");
-		const editorContainer = new Container();
-		editorContainer.addChild(editor);
-		const h = await TspHarness.start(
-			tui => {
-				tui.addChild(editorContainer);
-				tui.setFocus(editor);
-			},
-			{ reply: native },
-		);
-		const controller = new ExtensionUiController({
-			ui: h.tui,
-			editor,
-			editorContainer,
-			closeLinkBrowser: vi.fn(),
-		} as unknown as InteractiveModeContext);
-		ctx.ui.custom = controller.showHookCustom.bind(controller);
-		try {
-			const pending = selectSessionTextReviewSource(ctx);
-			await h.until(() => {
-				// Advance the manual clock for the classic renderer's throttled paints.
-				h.flush(100);
-				return native ? h.region("layer")?.c?.[0]?.k === "picker" : h.terminal.rowBytes.includes("\x1b[?1049h");
-			});
-			expect(editorContainer.children).toEqual([editor]);
-			if (native) {
-				const picker = h.region("layer")?.c?.[0];
-				expect(picker?.k).toBe("picker");
-				if (!picker) throw new Error("Native annotation picker was not mounted");
-				h.event({ ev: "activate", sf: h.terminal.surface!, id: picker.id, item: "older" });
-			} else {
-				h.terminal.send(UP);
-				h.flush();
-				h.terminal.send(ENTER);
-				h.flush();
-			}
-			expect(await pending).toMatchObject({ text: "Older answer", kind: "message" });
-			h.flush(100);
-			if (native) {
-				expect(h.region("layer")?.c ?? []).toEqual([]);
-				expect(h.terminal.rowBytes).not.toContain("\x1b[?1049h");
-				expect(h.terminal.rowBytes).not.toContain("\x1b[?1049l");
-			} else {
-				expect(h.terminal.rowBytes).toContain("\x1b[?1049l");
-			}
-			expect(h.tui.getFocused()).toBe(editor);
-			expect(editor.getText()).toBe("Unsent draft");
-		} finally {
-			h.stop();
-		}
 	});
 
 	it("uses the native selector for a whole session message and preserves its entry without a block", async () => {

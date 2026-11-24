@@ -30,7 +30,7 @@ import {
 	muxServerKey,
 } from "../../lsp/mux/protocol";
 import type { LspJsonRpcId, LspJsonRpcNotification, LspJsonRpcRequest, LspJsonRpcResponse } from "../../lsp/types";
-import { uriToFile } from "../../lsp/utils";
+import { uriToFile } from "../../lsp/uri";
 import { advertisesWatchedFiles, WATCHED_FILES_METHOD, WatchedFilesForwarder } from "../../lsp/watched-files";
 import type {
 	DaemonModule,
@@ -140,6 +140,9 @@ interface Reservation {
 
 /** Instance keys handed out by `acquire` and not yet attached, by {@link slotKey}. */
 const reservations = new Map<string, Reservation>();
+
+/** Acquires still resolving their cwd, by connection id; `disconnected` marks them gone so they reserve nothing. */
+const pendingAcquires = new Map<string, Set<{ gone: boolean }>>();
 
 function slotKey(scope: UnitScope, key: string): string {
 	return `${scopeKey(scope)}\0${key}`;
@@ -823,7 +826,25 @@ class LspServerUnit implements ModuleUnit {
 async function acquire(context: ModuleContext, params: unknown, client: ModuleClient): Promise<LspAcquireResult> {
 	const server = ServerParams(params);
 	if (server instanceof type.errors) throw new Error(`invalid lsp acquire params: ${server.summary}`);
-	const scope = projectScope(await canonicalDir(server.cwd));
+	const pending = { gone: false };
+	let connectionAcquires = pendingAcquires.get(client.connectionId);
+	if (!connectionAcquires) {
+		connectionAcquires = new Set();
+		pendingAcquires.set(client.connectionId, connectionAcquires);
+	}
+	connectionAcquires.add(pending);
+	let dir: string;
+	try {
+		dir = await canonicalDir(server.cwd);
+	} finally {
+		connectionAcquires.delete(pending);
+		if (connectionAcquires.size === 0 && pendingAcquires.get(client.connectionId) === connectionAcquires) {
+			pendingAcquires.delete(client.connectionId);
+		}
+	}
+	// `disconnected` already ran for this client: a reservation now would hold the key until it expires.
+	if (pending.gone) throw new Error("lsp acquire: client disconnected");
+	const scope = projectScope(dir);
 	const identity = muxServerKey(server);
 	// Synchronous from here: concurrent acquires each see the previous one's reservation.
 	for (let index = 0; ; index++) {
@@ -889,6 +910,8 @@ export const lspModule: DaemonModule = {
 		return new LspServerUnit({ child, slot: restored.slot, cwd: restored.cwd, label: restored.label, restored });
 	},
 	disconnected(client) {
+		for (const pending of pendingAcquires.get(client.connectionId) ?? []) pending.gone = true;
+		pendingAcquires.delete(client.connectionId);
 		for (const [slot, reservation] of reservations) {
 			if (reservation.connectionId === client.connectionId) releaseReservation(slot);
 		}
