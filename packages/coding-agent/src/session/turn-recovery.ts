@@ -27,7 +27,7 @@ import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy
 import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-credit";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
-import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong, sleepUntil } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
@@ -1164,6 +1164,7 @@ export class TurnRecovery {
 		this.#emptyStopRetryCount++;
 		if (this.#emptyStopRetryCount > EMPTY_STOP_MAX_RETRIES) {
 			const attempts = this.#emptyStopRetryCount - 1;
+			this.#emptyStopRetryCount = 0;
 			const outputTokens = assistantMessage.usage.output;
 			const outputTokensExcludingKnownReasoning = Math.max(
 				0,
@@ -1218,6 +1219,18 @@ export class TurnRecovery {
 			content: [{ type: "text", text: this.#emptyStopRetryReminder() }],
 			attribution: "agent",
 			timestamp: Date.now(),
+		});
+		logger.info("Empty-stop retry scheduled", {
+			attempt: this.#emptyStopRetryCount,
+			maxAttempts: EMPTY_STOP_MAX_RETRIES,
+			model: assistantMessage.model,
+			provider: assistantMessage.provider,
+			stopReason: assistantMessage.stopReason,
+			durationMs: assistantMessage.duration,
+			ttftMs: assistantMessage.ttft,
+			errorMessage: assistantMessage.errorMessage,
+			errorStatus: assistantMessage.errorStatus,
+			outputTokens: assistantMessage.usage.output,
 		});
 		this.#host.scheduleAgentContinue({
 			source: "empty-stop-retry",
@@ -2048,7 +2061,7 @@ export class TurnRecovery {
 		const configured = this.#host.settings.getModelRole(role);
 		if (!configured) return undefined;
 		const resolved = resolveModelOverride([configured], this.#host.modelRegistry, this.#host.settings);
-		return resolved.model && modelsAreEqual(resolved.model, currentModel) ? role : undefined;
+		return resolved.model && routedModelsAreEqual(resolved.model, currentModel) ? role : undefined;
 	}
 
 	/** Finds fallback candidates that follow the active selector. */
@@ -2086,7 +2099,7 @@ export class TurnRecovery {
 				signal,
 			});
 		} catch (error) {
-			if (signal.aborted || !modelsAreEqual(this.#host.model(), currentModel)) return false;
+			if (signal.aborted || !routedModelsAreEqual(this.#host.model(), currentModel)) return false;
 			logger.debug("Usage-aware runtime preflight failed open", {
 				provider: currentModel.provider,
 				model: currentModel.id,
@@ -2094,7 +2107,7 @@ export class TurnRecovery {
 			});
 			return false;
 		}
-		if (signal.aborted || !modelsAreEqual(this.#host.model(), currentModel)) return false;
+		if (signal.aborted || !routedModelsAreEqual(this.#host.model(), currentModel)) return false;
 		const selectedAccount = health.accounts.find(account => account.selected);
 		if (health.state === "healthy") {
 			// A healthy sibling does not end the selected account's reserve episode.
@@ -2152,7 +2165,7 @@ export class TurnRecovery {
 			if (
 				signal.aborted ||
 				this.#host.sessionManager.getSessionId() !== sessionId ||
-				!modelsAreEqual(this.#host.model(), currentModel)
+				!routedModelsAreEqual(this.#host.model(), currentModel)
 			)
 				return false;
 		}
@@ -2195,7 +2208,7 @@ export class TurnRecovery {
 		currentModel: Model,
 		signal: AbortSignal,
 	): Promise<{ role: string; selector: RetryFallbackSelector; apiKey: string } | undefined> {
-		const stale = () => signal.aborted || !modelsAreEqual(this.#host.model(), currentModel);
+		const stale = () => signal.aborted || !routedModelsAreEqual(this.#host.model(), currentModel);
 		const ceiling = this.#host.thinkingLevelCeiling();
 		for (const role of this.retryFallbackChainKeys(currentSelector, currentModel)) {
 			for (const candidate of this.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
@@ -3097,16 +3110,10 @@ export class TurnRecovery {
 		// by the stated wait so an unrelated large backoff cannot sneak
 		// through.
 		const maxDelayMs = retrySettings.maxDelayMs;
-		// An account out of money has no reset to wait for: the QUOTA_EXHAUSTED
-		// heuristic backoff is a guess at a clock that does not exist, and a
-		// `retry.maxDelayMs` set at or above it (the 30-minute default ceiling
-		// users raise) would sleep through the whole guess. Surface the provider
-		// error instead, so the user tops up and the error frame's Retry
-		// re-attempts at once rather than idling in a retry the session cannot
-		// finish.
-		const billingCap = isBillingCapUsageLimit(message.errorStatus, errorMessage);
+		// An out-of-credit account has no reset to wait for. Even when the
+		// 30-minute quota heuristic fits the cap, only a fallback can recover it.
+		const billingCap = !staleUsageLimit && isBillingCapUsageLimit(message.errorStatus, errorMessage);
 		const exceedsDelayCap = (waitMs: number): boolean => {
-			if (billingCap && !staleUsageLimit) return true;
 			const waitForUsageReset =
 				retrySettings.waitForUsageReset === true &&
 				recordedUsageLimitOutcome !== undefined &&
@@ -3190,7 +3197,7 @@ export class TurnRecovery {
 				!staleUsageLimit &&
 				!thinkingLoop &&
 				!sameModelSteerReplay &&
-				!waitForSiblingCredential &&
+				(!waitForSiblingCredential || billingCap) &&
 				!refusalWalkRepeats &&
 				!this.#isFirstAttemptMidStreamSocketDrop(message, id, retryBudgetExhausted)
 			) {
@@ -3227,6 +3234,7 @@ export class TurnRecovery {
 							(options?.fireworksFastFallback || options?.hardErrorFallback) &&
 							!this.isRetryableError(message)
 						) &&
+						!billingCap &&
 						!exceedsDelayCap(
 							usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs
 								? parsedRetryAfterMs
@@ -3319,7 +3327,7 @@ export class TurnRecovery {
 		}
 
 		// The fail-fast cap (`exceedsDelayCap`, defined above the chain consult).
-		if (exceedsDelayCap(delayMs) && !switchedCredential && !switchedModel) {
+		if (!switchedCredential && !switchedModel && (billingCap || exceedsDelayCap(delayMs))) {
 			const attempt = this.#retryAttempt;
 			this.#retryAttempt = 0;
 			await this.#closeRetrySaga(
@@ -3330,7 +3338,7 @@ export class TurnRecovery {
 					// money — so the message the user acts on is the provider's own.
 					finalError: billingCap
 						? errorMessage
-						: `Provider requested ${Math.ceil(delayMs)}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
+						: `${delayMs === parsedRetryAfterMs ? "Provider requested" : "Retry requires"} ${Math.ceil(delayMs)}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
 				},
 				{ terminalTurn: message },
 			);

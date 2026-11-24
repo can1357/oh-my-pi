@@ -2,46 +2,23 @@
  * Commit a {@link Draft}'s selection in a workspace other agents keep editing.
  *
  * The commit is built in a private index file: HEAD's tree plus one patch per selected path
- * rendering the exact content the draft chose. `commitCreate` commits that index with an
- * expected-HEAD guard (hooks see it as `GIT_INDEX_FILE`, like `git commit --only`), so a
- * concurrent commit by someone else can never be overwritten. Afterwards the same patches are
- * applied to the shared index so the committed paths do not show up as staged reversals; every
- * other index entry and the worktree stay untouched.
+ * rendering the exact content the draft chose. `commitReconciled` prepares the shared index
+ * under its lock before moving HEAD, then installs it only if the guarded HEAD update succeeds.
+ * Hooks see the private index; its staged rewrites are included in the reconciliation.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
+import type { VcsGitRepo, VcsReconciledCommit } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { Draft, SelectedChange } from "./draft";
 import type { ChangeJournal, JournalAgent } from "./journal";
 import { formatTextPatch } from "./patch";
 
-/** Attempts at a shared-index write while another git process holds `index.lock`. */
-const INDEX_WRITE_ATTEMPTS = 5;
-/** Pause before the first retry of a shared-index write, doubled per attempt. */
-const INDEX_WRITE_BACKOFF_MS = 40;
-
-/**
- * Apply `patch` to the shared index, retrying while it cannot be written; the last failure's
- * message, or `undefined` once applied. A patch whose preimage the index no longer holds fails
- * every attempt, which the caller tells apart with `canApplyPatch`.
- */
-async function applyToSharedIndex(repo: VcsGitRepo, patch: string, signal?: AbortSignal): Promise<string | undefined> {
-	let failure = "";
-	for (let attempt = 0; attempt < INDEX_WRITE_ATTEMPTS; attempt++) {
-		if (attempt > 0) {
-			if (!(await repo.canApplyPatch(patch, { cached: true }).catch(() => true))) return failure;
-			await Bun.sleep(INDEX_WRITE_BACKOFF_MS << (attempt - 1));
-		}
-		try {
-			await repo.applyPatch(patch, { cached: true }, signal);
-			return undefined;
-		} catch (error) {
-			failure = error instanceof Error ? error.message : String(error);
-		}
-	}
-	return failure;
+/** One selected path's patch, also used to diagnose a conflicting HEAD move. */
+interface PathPatch {
+	path: string;
+	patch: string;
 }
 
 /** Attempts when HEAD moves between building the private index and committing it. */
@@ -74,7 +51,7 @@ export interface CommitOutcome {
 	parent: string | null;
 	/** On amend, the commit that was replaced. */
 	amended?: string;
-	/** Committed paths whose shared-index entry kept someone else's staged content instead of the commit's. */
+	/** Staged content kept in the shared index, or warnings publishing the index. */
 	indexNotes: string[];
 }
 
@@ -97,7 +74,7 @@ function shortSha(sha: string | null): string {
 	return sha?.slice(0, 10) ?? "(no commits yet)";
 }
 
-async function patchFor(repo: VcsGitRepo, head: string | null, change: SelectedChange): Promise<string> {
+async function patchFor(repo: VcsGitRepo, change: SelectedChange, signal?: AbortSignal): Promise<string> {
 	if (change.kind === "text") {
 		if (change.after?.mode === "160000") {
 			const absolute = path.join(repo.info().repoRoot, change.path);
@@ -109,9 +86,17 @@ async function patchFor(repo: VcsGitRepo, head: string | null, change: SelectedC
 		}
 		return formatTextPatch(change.path, change.before, change.after);
 	}
-	return change.added || head === null
-		? repo.diffNoIndex("/dev/null", change.path, true)
-		: repo.diffText({ base: head, files: [change.path], binary: true });
+	return repo.diffBlobs(
+		{
+			path: change.path,
+			oldId: change.before?.id,
+			newId: change.after?.id,
+			oldMode: change.before?.mode,
+			newMode: change.after?.mode,
+		},
+		true,
+		signal,
+	);
 }
 
 /**
@@ -119,7 +104,7 @@ async function patchFor(repo: VcsGitRepo, head: string | null, change: SelectedC
  * @throws when a merge, cherry-pick, revert, rebase, or git am is in progress, or the index has
  * unresolved conflicts; when nothing is selected;
  * on `amend` when HEAD is not a selective commit of this session; when HEAD moved onto changes
- * that conflict with the selection; or when a hook fails.
+ * that conflict with the selection; when a hook fails; or when the shared index cannot be prepared.
  */
 export async function commitSelection(
 	draft: Draft,
@@ -147,9 +132,9 @@ export async function commitSelection(
 	}
 	const gitDir = repo.info().gitDir;
 	const message = composeMessage(request);
-	const patches: Array<{ path: string; patch: string }> = [];
+	const patches: PathPatch[] = [];
 	for (const change of changes) {
-		const patch = await patchFor(repo, draft.head, change);
+		const patch = await patchFor(repo, change, context.signal);
 		if (patch) patches.push({ path: change.path, patch });
 	}
 	if (patches.length === 0) throw new Error("The selection matches HEAD; nothing to commit.");
@@ -165,11 +150,11 @@ export async function commitSelection(
 		gitDir,
 		`omp-commit-${draft.id}-${Math.floor(Math.random() * 46656).toString(36)}.index`,
 	);
-	let sha: string | undefined;
+	let committed: VcsReconciledCommit | undefined;
 	/** HEAD the commit was built on; on amend, the commit it replaced. */
 	let base = draft.head;
 	try {
-		for (let attempt = 1; sha === undefined; attempt++) {
+		for (let attempt = 1; committed === undefined; attempt++) {
 			context.signal?.throwIfAborted();
 			const head = (await repo.headSha(context.signal)) ?? null;
 			if (ownCommits && (head === null || !ownCommits.has(head))) {
@@ -191,7 +176,7 @@ export async function commitSelection(
 				);
 			}
 			try {
-				sha = await repo.commitCreate(
+				committed = await repo.commitReconciled(
 					message,
 					{
 						indexPath,
@@ -199,6 +184,7 @@ export async function commitSelection(
 						amend: request.amend ?? false,
 						noVerify: request.noVerify ?? false,
 					},
+					joined,
 					context.signal,
 				);
 				base = head;
@@ -209,28 +195,8 @@ export async function commitSelection(
 	} finally {
 		await fs.rm(indexPath, { force: true });
 	}
+	const { sha, indexNotes } = committed;
 
-	const indexNotes: string[] = [];
-	// A new repository may have no index file yet. Git reads that as an empty index, but patch
-	// application reads HEAD in its place, so seed it with the root commit's tree instead.
-	const seedIndex = base === null && !(await Bun.file(path.join(gitDir, "index")).exists());
-	if (seedIndex) await repo.readTree(sha, undefined, context.signal);
-	// One write for every path: each write takes `index.lock`, which a concurrent git (a prompt's
-	// or an editor's `git status`) may hold. Per-path writes only when a path's entry differs.
-	const synced = seedIndex || (await applyToSharedIndex(repo, joined, context.signal)) === undefined;
-	for (const entry of synced ? [] : patches) {
-		const failure = await applyToSharedIndex(repo, entry.patch, context.signal);
-		if (failure === undefined) continue;
-		if (await repo.canApplyPatch(entry.patch, { cached: true, reverse: true }).catch(() => false)) continue;
-		const staged = await repo.canApplyPatch(entry.patch, { cached: true }).catch(() => undefined);
-		indexNotes.push(
-			staged === false
-				? `${entry.path}: its shared-index entry holds someone else's staged changes and was left as is; ` +
-						"`git diff --cached` there shows this commit reverted until they restage."
-				: `${entry.path}: the shared index could not be written (${failure}); ` +
-						`\`git diff --cached\` there shows this commit reverted until \`git reset -q -- ${entry.path}\`.`,
-		);
-	}
 	const selected = patches.map(entry => entry.path);
 	await context.journal?.recordCommit({
 		agent: context.agent.agent,

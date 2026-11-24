@@ -19,7 +19,7 @@ import { getSessionAccentAnsi, getSessionAccentHex } from "../theme/session-colo
 import { summarizeLoopCondition } from "./loop";
 import { formatMetric } from "../components/metric";
 import { formatBillingSummary } from "./metrics";
-import { sanitizeStatusText } from "../chrome/shared";
+import { sanitizeInlineStatusText, sanitizeStatusText } from "../chrome/shared";
 import {
 	formatContextUsage,
 	getContextUsageLevel,
@@ -29,7 +29,7 @@ import {
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { node, span } from "../native/describe";
 import { thinkingLevelToken } from "../theme/theme-class";
-import type { StatusLineSession } from "./host";
+import type { SessionTreePosition, StatusLineSession } from "./host";
 import type { RenderedSegment, SegmentContext, SegmentView, StatusLineSegment, StatusLineSegmentId } from "./types";
 
 export type { SegmentContext } from "./types";
@@ -264,25 +264,32 @@ function brandTimer(elapsedMs: number): string {
 const statusSegment: StatusLineSegment = {
 	id: "status",
 	render(ctx) {
+		// Plain statuses take the accent colour, a styled one keeps its own. The dot between
+		// statuses is dim like the segment separators; it sets its own colour, so what
+		// follows it (and a status that closed its styling) is re-opened in the accent.
+		const accent = sessionAccentAnsi(ctx) ?? theme.getFgAnsi("accent");
+		const separator = `${theme.getFgAnsi("dim")}${theme.sep.dot}${accent}`;
 		let text = "";
 		for (const status of ctx.hookStatuses ?? []) {
-			const sanitized = sanitizeStatusText(status);
+			const sanitized = sanitizeInlineStatusText(status, { fg: accent, faint: Boolean(ctx.focusedAgentId) });
 			if (!sanitized) continue;
-			text += text ? `${theme.sep.dot}${sanitized}` : sanitized;
+			text += text ? separator + sanitized : sanitized;
 		}
 		return {
-			content: text ? accentFg(ctx, "accent", text) : "",
+			content: text ? `${accent}${text}\x1b[39m` : "",
 			visible: text.length > 0,
 		};
 	},
 	describe(ctx) {
-		let text = "";
+		const accent = accentToken(ctx, "accent");
+		const spans: TspSpan[] = [];
 		for (const status of ctx.hookStatuses ?? []) {
 			const sanitized = sanitizeStatusText(status);
 			if (!sanitized) continue;
-			text += text ? `${theme.sep.dot}${sanitized}` : sanitized;
+			if (spans.length > 0) spans.push(span(theme.sep.dot, "dim"));
+			spans.push(span(sanitized, accent));
 		}
-		return text ? segView([span(text, accentToken(ctx, "accent"))]) : null;
+		return spans.length > 0 ? segView(spans) : null;
 	},
 };
 
@@ -1096,6 +1103,43 @@ const collabSegment: StatusLineSegment = {
 	},
 };
 
+/** `2/3 · 3 ahead`: the branch at the deepest fork on the path, then the turns past the leaf. */
+function treePositionLabel(position: SessionTreePosition): string {
+	const parts: string[] = [];
+	if (position.branch) parts.push(`${position.branch.index}/${position.branch.count}`);
+	if (position.ahead > 0) parts.push(`${position.ahead} ahead`);
+	return parts.join(" · ");
+}
+
+/**
+ * The session's place in its tree, shown only off the tip of a single line: after a rewind (the
+ * turns waiting past the leaf) or on one branch of a fork. ANSI names `/tree` beside it; a native
+ * click opens it (`status.tree`).
+ */
+const treeSegment: StatusLineSegment = {
+	id: "tree",
+	render(ctx) {
+		const position = ctx.treePosition;
+		const label = position ? treePositionLabel(position) : "";
+		if (!label) return { content: "", visible: false };
+		const content = `${theme.fg("accent", withIcon(theme.cmd.tree, label))} ${theme.fg("dim", "/tree")}`;
+		return { content, visible: true };
+	},
+	describe(ctx) {
+		const position = ctx.treePosition;
+		const label = position ? treePositionLabel(position) : "";
+		if (!position || !label) return null;
+		const facts: string[] = [];
+		if (position.branch) facts.push(`branch ${position.branch.index} of ${position.branch.count}`);
+		if (position.ahead > 0) facts.push(`${position.ahead} ${position.ahead === 1 ? "turn" : "turns"} ahead`);
+		return {
+			spans: [span(label, "accent")],
+			icon: "tree",
+			title: `Session tree: ${facts.join(", ")}\nOpen /tree to move between branches`,
+		};
+	},
+};
+
 const streamSegment: StatusLineSegment = {
 	id: "stream",
 	render(ctx) {
@@ -1152,7 +1196,14 @@ const vimSegment: StatusLineSegment = {
 	id: "vim",
 	render(ctx) {
 		const vim = ctx.vim;
-		if (!vim || vim.display === "none") return { content: "", visible: false };
+		if (!vim) return { content: "", visible: false };
+		// The command being typed shows even with the mode hidden: like Vim's showcmd, it is the one
+		// sign that a half-typed `15d` is waiting for its last key.
+		if (vim.display === "none") {
+			return vim.pending
+				? { content: theme.fg("muted", vim.pending), visible: true }
+				: { content: "", visible: false };
+		}
 		let label = vim.display === "icon" ? theme.symbol(VIM_MODE_ICON_KEYS[vim.mode]) : VIM_MODE_LABELS[vim.mode];
 		// The selection height rides along in both presentations — it is the one part of the
 		// indicator with no other on-screen source.
@@ -1164,7 +1215,8 @@ const vimSegment: StatusLineSegment = {
 	},
 	describe(ctx) {
 		const vim = ctx.vim;
-		if (!vim || vim.display === "none") return null;
+		if (!vim) return null;
+		if (vim.display === "none") return vim.pending ? segView([span(vim.pending, "muted")]) : null;
 		const color = VIM_MODE_COLORS[vim.mode];
 		const spans: TspSpan[] = [];
 		const lines = vim.selectedLines > 1 ? `${vim.selectedLines}L` : "";
@@ -1359,6 +1411,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	collab: collabSegment,
 	stream: streamSegment,
 	vim: vimSegment,
+	tree: treeSegment,
 };
 
 export function renderSegment(id: StatusLineSegmentId, ctx: SegmentContext): RenderedSegment {

@@ -4,6 +4,7 @@ pub(super) mod open_menu;
 mod placement;
 mod popup;
 mod selection;
+pub(crate) mod type_ahead;
 
 use std::{
 	collections::VecDeque,
@@ -30,8 +31,8 @@ pub(super) use selection::select_dragged;
 use super::{
 	super::{
 		ax::{
-			AxBounds, AxHandle, AxProps, AxReadAs, WalkBounds, confirm_read_as, normalize_role_macos,
-			performable_names, require_read_as, text_readback, truncate_chars,
+			AxBounds, AxHandle, AxProps, AxReadAs, WalkBounds, bounded_number, confirm_read_as,
+			normalize_role_macos, performable_names, require_read_as, text_readback, truncate_chars,
 		},
 		backend::{AxBackend, DeliveryMode, KeyboardFocus, is_raise_action, native_action_name},
 		control,
@@ -786,19 +787,77 @@ fn element_at_point(x: f64, y: f64) -> Option<(libc::pid_t, CFRetained<AXUIEleme
 	Some((pid, element))
 }
 
+/// A retained window root can outlive its membership in `AXWindows`.
+pub(super) fn retained_minimized_owner(root: &AxHandle, wid: u32) -> Option<libc::pid_t> {
+	let element = mac_handle(root).ok()?;
+	if window_id(element) != Some(wid) || copy_bool(element, "AXMinimized") != Some(true) {
+		return None;
+	}
+	element_pid(element).ok()
+}
+
+/// Reads only the exact minimized AX window. A sibling can be key, have the
+/// same title, or occupy the same frame; none of those identifies this root.
+/// `None` unless the app lists that window and reports it minimized, so a
+/// window hidden for another reason keeps its "not found" error.
+pub(super) fn minimized_root(pid: libc::pid_t, wid: u32) -> CoreResult<Option<AxHandle>> {
+	ensure_trusted()?;
+	let Some(app) = probe_application(pid) else {
+		return Ok(None);
+	};
+	let windows = copy_elements(&app, "AXWindows")?;
+	let Some(element) = minimized_element(
+		wid,
+		windows,
+		|element| window_id(element),
+		|element| copy_bool(element, "AXMinimized"),
+	) else {
+		return Ok(None);
+	};
+	if element_pid(&element)? != pid {
+		return Ok(None);
+	}
+	set_timeout(&element)?;
+	Ok(Some(AxHandle::Mac(element)))
+}
+
+fn minimized_element<E>(
+	wid: u32,
+	windows: impl IntoIterator<Item = E>,
+	id_of: impl Fn(&E) -> Option<u32>,
+	minimized: impl FnOnce(&E) -> Option<bool>,
+) -> Option<E> {
+	let window = windows
+		.into_iter()
+		.find(|window| id_of(window) == Some(wid))?;
+	(minimized(&window) == Some(true)).then_some(window)
+}
+
 /// Raises a known window for explicit takeover or restoration.
 pub(super) fn raise_window_id(pid: libc::pid_t, wid: u32) -> CoreResult<()> {
+	let window = window_by_id(pid, wid)?;
+	MacAx::new().perform(&AxHandle::Mac(window), "AXRaise")
+}
+
+/// Window `wid` of process `pid`, looked up through accessibility, which can
+/// block on a busy app; `WindowNotFound` when accessibility does not list it.
+pub(super) fn window_by_id(pid: libc::pid_t, wid: u32) -> CoreResult<CFRetained<AXUIElement>> {
 	let app = probe_application(pid).ok_or_else(|| {
 		DesktopError::ax_failed(format!("cannot inspect process {pid} for AXRaise"))
 	})?;
 	let windows = copy_elements(&app, "AXWindows")?;
-	let window = windows
+	windows
 		.into_iter()
 		.find(|window| window_id(window) == Some(wid))
 		.ok_or_else(|| {
 			DesktopError::window_not_found(format!("window {wid} is no longer available for AXRaise"))
-		})?;
-	MacAx::new().perform(&AxHandle::Mac(window), "AXRaise")
+		})
+}
+
+/// Sends `AXRaise` to a window from [`window_by_id`] and reads nothing first,
+/// so a check made right before it still holds when the request goes out.
+pub(super) fn raise(window: &AXUIElement) -> CoreResult<()> {
+	perform_action(window, "AXRaise")
 }
 
 fn probe_application(pid: libc::pid_t) -> Option<CFRetained<AXUIElement>> {
@@ -1101,6 +1160,7 @@ impl AxBackend for MacAx {
 
 	fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps> {
 		let element = mac_handle(h)?;
+		type_ahead::settle_read(element)?;
 		let values = NodeValues::read(element, NodeRead::Props);
 		let mut count: CFIndex = 0;
 		// SAFETY: `count` is writable and the retained element outlives the
@@ -1128,6 +1188,7 @@ impl AxBackend for MacAx {
 		_max_children: u32,
 	) -> CoreResult<(AxProps, Vec<AxHandle>)> {
 		let element = mac_handle(h)?;
+		type_ahead::settle_read(element)?;
 		let read = match read_bounds {
 			WalkBounds::Read => NodeRead::WalkWithBounds,
 			WalkBounds::Skip => NodeRead::Walk,
@@ -1290,6 +1351,7 @@ impl AxBackend for MacAx {
 
 	fn attributes(&mut self, h: &AxHandle) -> CoreResult<Vec<(String, String)>> {
 		let element = mac_handle(h)?;
+		type_ahead::settle_read(element)?;
 		let names = copy_attribute_names(element)?;
 		let mut result = Vec::with_capacity(names.len());
 		for name in names {
@@ -1322,6 +1384,14 @@ impl AxBackend for MacAx {
 
 	fn value_settable(&mut self, h: &AxHandle) -> Option<bool> {
 		attribute_settable_answer(mac_handle(h).ok()?, "AXValue")
+	}
+
+	fn pending(&mut self, h: &AxHandle) -> bool {
+		mac_handle(h).is_ok_and(type_ahead::pending)
+	}
+
+	fn settle(&mut self, h: &AxHandle) -> CoreResult<()> {
+		type_ahead::settle_read(mac_handle(h)?)
 	}
 }
 
@@ -1801,6 +1871,7 @@ fn activate_for_menu(
 		&window,
 		entry_front,
 		in_overlay,
+		input::KeyPurpose::Menu,
 		visit,
 	)?;
 	// The press that makes the window key waits in the application's event
@@ -3459,18 +3530,6 @@ fn stringify_number(number: &CFNumber) -> String {
 	text.unwrap_or_default()
 }
 
-/// A number as `Display` writes it, or in scientific notation where that would
-/// run past 24 characters (`f64::MAX` has 309 digits), the longest an `f64`
-/// takes in scientific notation: an extreme value an app publishes stays short.
-fn bounded_number<T: std::fmt::Display + std::fmt::LowerExp>(value: T) -> String {
-	let text = value.to_string();
-	if text.len() <= 24 {
-		text
-	} else {
-		format!("{value:e}")
-	}
-}
-
 fn nonempty(value: Option<String>) -> Option<String> {
 	value.filter(|value| !value.is_empty())
 }
@@ -3518,6 +3577,18 @@ mod tests {
 		target_window, value_kind, window_records_of, write_number,
 	};
 	use crate::desktop::error::{CoreResult, DesktopError, ErrorCode};
+
+	#[test]
+	fn a_minimized_root_requires_the_requested_id_not_its_visible_sibling() {
+		let windows = [(17, Some(false)), (42, Some(true)), (51, None)];
+		let root = |wid| {
+			super::minimized_element(wid, windows, |(id, _)| Some(*id), |(_, minimized)| *minimized)
+		};
+		assert_eq!(root(42), Some((42, Some(true))));
+		assert_eq!(root(17), None);
+		assert_eq!(root(51), None);
+		assert_eq!(root(99), None);
+	}
 
 	#[test]
 	fn an_unreadable_window_subrole_is_unknown_not_a_dialog() {

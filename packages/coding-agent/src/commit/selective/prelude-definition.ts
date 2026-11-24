@@ -1,10 +1,11 @@
 import { type } from "@oh-my-pi/omptype";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import type { EvalPreludeDefinition } from "../../eval/preludes";
+import type { HostEvalPreludeDefinition } from "../../eval/preludes";
 import commitDocumentation from "../../prompts/tools/commit.md" with { type: "text" };
 import commitGuidance from "../../prompts/tools/commit-guidance.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { ToolSession } from "../../tools";
+import { resolveOutputMaxColumns } from "../../tools/output-meta";
 import { resolveToCwd } from "../../tools/path-utils";
 import { cfgCommitEnabled } from "../../tools/settings";
 import { commitSelection } from "./apply";
@@ -13,6 +14,7 @@ import { ChangeJournal } from "./journal";
 // @ts-expect-error Bun imports this JavaScript source as text instead of evaluating its module shape.
 import commitJavascript from "./prelude.js" with { type: "text" };
 import commitPython from "./prelude.py" with { type: "text" };
+import { formatPatchPreview } from "./preview";
 
 /** Drafts kept per session; older ones expire. */
 const MAX_DRAFTS = 8;
@@ -91,7 +93,7 @@ function describeCall(parameters: unknown): string | undefined {
  * Create the `commit` eval prelude: draft the session agent tree's changes from its change
  * journal, adjust the selection, and commit it without touching other agents' work.
  */
-export function createCommitPrelude(session: ToolSession): EvalPreludeDefinition {
+export function createCommitPrelude(session: ToolSession): HostEvalPreludeDefinition {
 	const drafts = new Map<string, { draft: Draft; scope: ScopeSpec }>();
 	const remember = (draft: Draft, scope: ScopeSpec) => {
 		drafts.set(draft.id, { draft, scope });
@@ -125,8 +127,12 @@ export function createCommitPrelude(session: ToolSession): EvalPreludeDefinition
 		switch (params.action) {
 			case "show":
 				return { text: draft.show(params.path), details: undefined };
-			case "diff":
-				return { text: draft.diff(), details: undefined };
+			case "diff": {
+				const patch = draft.diff();
+				// Printed for reading; the caller still gets the patch itself.
+				const view = formatPatchPreview(patch, resolveOutputMaxColumns(session.settings));
+				return { text: view, details: view === patch ? undefined : { patch } };
+			}
 			case "only":
 				return { text: `${draft.only(params.globs)}\n${draft.summary()}`, details: undefined };
 			case "take":

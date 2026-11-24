@@ -2024,6 +2024,18 @@ describe("Editor component", () => {
 		});
 	});
 
+	describe("Character jump", () => {
+		// Regression: `lastIndexOf` clamped the start before column 0 to 0 and found the cursor's own character.
+		it("jumps backward past the cursor's own character at column 0", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("a\nab");
+			editor.handleInput("\x1b[H");
+			editor.handleInput("\x1b[93;7u"); // Ctrl+Alt+] — jump backward
+			editor.handleInput("a");
+			expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
+		});
+	});
+
 	describe("Sticky column", () => {
 		it("preserves target column when moving up through a shorter line", () => {
 			const editor = new Editor(defaultEditorTheme);

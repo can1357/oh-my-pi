@@ -275,7 +275,10 @@ fn wait_child(pid: i32) -> io::Result<RawExit> {
 /// `CLOEXEC` flags are restored and a JS error whose `code` is the errno name
 /// is thrown.
 #[napi(ts_return_type = "never")]
-#[allow(clippy::implicit_hasher, reason = "napi marshals a JS object into the default-hasher HashMap")]
+#[allow(
+	clippy::implicit_hasher,
+	reason = "napi marshals a JS object into the default-hasher HashMap"
+)]
 pub fn exec_replace(
 	js_env: &Env,
 	path: String,
@@ -419,6 +422,7 @@ struct FdIo(Arc<std::fs::File>);
 
 #[cfg(windows)]
 impl FdIo {
+	#[allow(clippy::unnecessary_wraps, reason = "mirrors the fallible unix constructor")]
 	fn new(fd: i64) -> io::Result<Self> {
 		use std::os::windows::io::FromRawHandle;
 		// SAFETY: the caller hands over ownership of the handle.

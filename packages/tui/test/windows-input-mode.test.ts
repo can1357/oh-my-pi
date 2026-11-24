@@ -116,6 +116,11 @@ describe("Win32InputModeDecoder", () => {
 		expect(new Win32InputModeDecoder().decode("\x1b[65;30;97;1;0;3_")).toEqual(["a", "a", "a"]);
 	});
 
+	// Regression: a spoofed repeat of 99999999999 pushed that many keys.
+	it("caps a record's repeat at the console's 16-bit count", () => {
+		expect(new Win32InputModeDecoder().decode("\x1b[65;30;97;1;0;99999999999_")).toHaveLength(0xffff);
+	});
+
 	it("decodes key records inside a paste as typed text", () => {
 		const decoder = new Win32InputModeDecoder();
 		// Blank line: two Enter down/up pairs; emoji: surrogate halves as VK_PACKET records.

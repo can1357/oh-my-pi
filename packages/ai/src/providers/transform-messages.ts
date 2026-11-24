@@ -22,6 +22,7 @@ import {
 	kSyntheticUser,
 	type SyntheticUserCarrier,
 } from "../utils/block-symbols";
+import { dropReasoningDetailsEnvelopes } from "../utils/reasoning-source";
 
 const enum ToolCallStatus {
 	/** A tool result has already been emitted for this tool call; later duplicates must be skipped. */
@@ -854,6 +855,9 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 		if (msg.role === "assistant") {
 			const assistantMsg = msg as AssistantMessage;
 			let changed = false;
+			// Rewritten thinking or arguments invalidate the turn's `reasoning_details`
+			// envelope, which still holds the original text and call signatures.
+			let replayStateChanged = false;
 			const content = assistantMsg.content.map((block): AssistantMessage["content"][number] => {
 				if (block.type === "text") {
 					const redacted = redactSensitiveCredentials(block.text);
@@ -865,6 +869,7 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 					const redacted = redactSensitiveCredentials(block.thinking);
 					if (redacted !== block.thinking) {
 						changed = true;
+						replayStateChanged = true;
 						return { ...block, thinking: redacted, thinkingSignature: undefined };
 					}
 				} else if (block.type === "toolCall") {
@@ -872,6 +877,7 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 						const { result: redactedArgs, changed: argsChanged } = redactSensitiveInObject(block.arguments);
 						if (argsChanged) {
 							changed = true;
+							replayStateChanged = true;
 							const castArgs =
 								redactedArgs && typeof redactedArgs === "object" && !Array.isArray(redactedArgs)
 									? (redactedArgs as Record<string, unknown>)
@@ -886,7 +892,11 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 				}
 				return block;
 			});
-			return (changed ? { ...assistantMsg, content } : assistantMsg) as Message;
+			if (!changed) return assistantMsg as Message;
+			return {
+				...assistantMsg,
+				content: replayStateChanged ? dropReasoningDetailsEnvelopes(content) : content,
+			} as Message;
 		}
 
 		return msg;
@@ -1607,5 +1617,70 @@ export function transformMessages<TApi extends Api>(
 	flushPendingToolCalls(Date.now());
 	flushPendingAbortedToolCalls();
 
-	return result;
+	const splitsToolCalls =
+		targetCompat !== undefined && "splitToolCalls" in targetCompat && targetCompat.splitToolCalls;
+	const replay = splitsToolCalls ? splitAssistantToolCalls(result) : result;
+	const foldsUserText =
+		targetCompat !== undefined && "foldUserAfterToolResult" in targetCompat && targetCompat.foldUserAfterToolResult;
+	return foldsUserText ? foldUserMessagesIntoToolResults(replay) : replay;
+}
+
+/**
+ * Replay each call of a multi-call assistant turn as its own assistant
+ * message, directly followed by that call's result (`splitToolCalls`): Llama 3
+ * chat templates served by vLLM reject an assistant message holding more than
+ * one tool call. The turn's text and thinking stay with its first call. The
+ * pieces drop the turn's native Responses items, which would replay the calls
+ * side by side again.
+ */
+function splitAssistantToolCalls(messages: Message[]): Message[] {
+	const split: Message[] = [];
+	for (let i = 0; i < messages.length; i++) {
+		const msg = messages[i];
+		const calls = msg.role === "assistant" ? msg.content.filter(block => block.type === "toolCall") : [];
+		if (msg.role !== "assistant" || calls.length < 2) {
+			split.push(msg);
+			continue;
+		}
+		const results: ToolResultMessage[] = [];
+		for (let next = messages[i + 1]; next?.role === "toolResult"; next = messages[i + 1]) {
+			results.push(next);
+			i++;
+		}
+		const { providerPayload: _native, ...turn } = msg;
+		const rest = msg.content.filter(block => block.type !== "toolCall");
+		for (const [n, call] of calls.entries()) {
+			split.push({ ...turn, content: n === 0 ? [...rest, call] : [call] });
+			const at = results.findIndex(result => result.toolCallId === call.id);
+			if (at >= 0) split.push(...results.splice(at, 1));
+		}
+		split.push(...results);
+	}
+	return split;
+}
+
+/**
+ * Append each user/developer message that directly follows a tool result to
+ * that result's content, so the request never continues with user text after
+ * a function response (`foldUserAfterToolResult`). Folding every position, not
+ * only the tail, keeps earlier turns byte-stable for prompt caching. Messages
+ * carrying native provider history stay separate turns.
+ */
+function foldUserMessagesIntoToolResults(messages: Message[]): Message[] {
+	const folded: Message[] = [];
+	for (const msg of messages) {
+		const previous = folded.at(-1);
+		if (previous?.role !== "toolResult" || (msg.role !== "user" && msg.role !== "developer") || msg.providerPayload) {
+			folded.push(msg);
+			continue;
+		}
+		const content: ToolResultMessage["content"] =
+			typeof msg.content === "string"
+				? msg.content.trim() === ""
+					? []
+					: [{ type: "text", text: msg.content }]
+				: msg.content;
+		folded[folded.length - 1] = { ...previous, content: [...previous.content, ...content] };
+	}
+	return folded;
 }

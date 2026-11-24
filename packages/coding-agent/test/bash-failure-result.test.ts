@@ -181,29 +181,20 @@ describe("BashTool execution results", () => {
 
 	it("gives a call the identity of the session it started in, even if the session changes before it runs", async () => {
 		let sessionId = "session-a";
-		const gate = Promise.withResolvers<void>();
-		let allocating = Promise.withResolvers<void>();
 		const tool = new BashTool({
 			...makeSession(),
 			getSessionId: () => sessionId,
 			getSessionFile: () => path.resolve(`/sessions/${sessionId}.jsonl`),
-			allocateOutputArtifact: async () => {
-				allocating.resolve();
-				await gate.promise;
-				return {};
-			},
 		} as unknown as ToolSession);
 		const probe = `printf '%s|%s|' "$PI_SESSION_ID" "$PI_SESSION_FILE"`;
 		const fields = (result: { content: readonly { type: string; text?: string }[] }) =>
 			(result.content.find(c => c.type === "text")?.text ?? "").split("|").slice(0, 2);
 
 		const pending = tool.execute("call-a", { command: probe });
-		await allocating.promise;
-		sessionId = "session-b"; // e.g. `/fork` while the call waits on its artifact
-		gate.resolve();
+		// e.g. `/fork` landing after the call started but before its shell runs.
+		sessionId = "session-b";
 		expect(fields(await pending)).toEqual(["session-a", path.resolve("/sessions/session-a.jsonl")]);
 
-		allocating = Promise.withResolvers<void>();
 		expect(fields(await tool.execute("call-b", { command: probe }))).toEqual([
 			"session-b",
 			path.resolve("/sessions/session-b.jsonl"),
@@ -225,6 +216,8 @@ describe("BashTool execution results", () => {
 				cancelled: false,
 				timedOut: false,
 				workingDir: process.cwd(),
+				movedCwd: false,
+				errexit: false,
 				minimized: {
 					filter: "lint",
 					text: "test/event-cache.e2e-spec.ts:281-405 multiple ... errors\n",
@@ -255,6 +248,8 @@ describe("BashTool execution results", () => {
 				cancelled: false,
 				timedOut: false,
 				workingDir: process.cwd(),
+				movedCwd: false,
+				errexit: false,
 				minimized: {
 					filter: "lint",
 					text: minimizedText,
@@ -265,7 +260,8 @@ describe("BashTool execution results", () => {
 			});
 		});
 		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "bash-minimized-meta-"));
-		// Sequential ids like the session's spill manager: the output spill gets 1, the raw original 2.
+		// Sequential ids like the session's spill manager. Output that fits inline claims
+		// no spill, so the raw original gets the first id.
 		let nextId = 1;
 		const session = {
 			...makeSession(),
@@ -283,12 +279,12 @@ describe("BashTool execution results", () => {
 				filter: "lint",
 				inputBytes: Buffer.byteLength(rawOutput, "utf-8"),
 				outputBytes: Buffer.byteLength(minimizedText, "utf-8"),
-				artifactId: "2",
+				artifactId: "1",
 			});
 			const text = result.content.find(c => c.type === "text")?.text ?? "";
-			expect(text).toContain(formatRawOutputNotice("2"));
+			expect(text).toContain(formatRawOutputNotice("1"));
 			expect(text).not.toContain("Minimized");
-			expect(await Bun.file(path.join(artifactsDir, "2.log")).text()).toBe(rawOutput);
+			expect(await Bun.file(path.join(artifactsDir, "1.log")).text()).toBe(rawOutput);
 
 			const theme = await getThemeByName("dark");
 			if (!theme) throw new Error("Expected dark theme");
@@ -298,7 +294,7 @@ describe("BashTool execution results", () => {
 					.render(160)
 					.join("\n"),
 			);
-			expect(rendered).toContain("Minimized: lint 1.9KB → 27B");
+			expect(rendered).toContain(`${theme.icon.minimize} lint 1.9KB → 27B`);
 			const view = JSON.stringify(
 				bashToolRenderer.describeResult(result, { expanded: false, isPartial: false }, args),
 			);

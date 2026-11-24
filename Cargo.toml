@@ -27,7 +27,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "18.22.2"
+version = "19.1.1"
 edition = "2024"
 rust-version = "1.101"
 license = "MIT"
@@ -323,6 +323,7 @@ fontdue = { version = "0.9", default-features = false }
 # Data Structures - Collections
 # ──────────────────────────────────────────────────────────────────────────────
 phf = { version = "0.14", features = ["macros"] }
+rpds = { version = "1.2", features = ["serde"] }
 smallvec = { version = "1.16.1", features = [
    "serde",
    "write",

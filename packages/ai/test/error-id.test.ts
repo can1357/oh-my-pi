@@ -155,6 +155,18 @@ describe("error-id classification", () => {
 		expect(AIError.isProviderRetryableError(new Error(errorMessage))).toBe(true);
 	});
 
+	it("retries a statusless gateway stream interruption but not a 400 rejection with the same wording", () => {
+		const errorMessage = "Provider error (Dots3 Note Preview (Kilo)): stream interrupted";
+		const id = AIError.classifyMessage(message({ errorMessage }));
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.retriable(id)).toBe(true);
+		expect(AIError.isProviderRetryableError(new Error(errorMessage))).toBe(true);
+
+		const denied = AIError.classifyMessage(message({ errorMessage, errorStatus: 400 }));
+		expect(AIError.retriable(denied)).toBe(false);
+		expect(AIError.isProviderRetryableError(new AIError.ProviderHttpError(errorMessage, 400))).toBe(false);
+	});
+
 	it("keeps a stream-drop phrase riding on a terminal 4xx terminal", () => {
 		const errorMessage = "stream closed before response.completed";
 		const id = AIError.classifyMessage(message({ errorStatus: 400, errorMessage }));
@@ -477,5 +489,34 @@ describe("error-id classification", () => {
 		expect(AIError.is(id, AIError.Flag.ThinkingLoop)).toBe(true);
 		expect(AIError.is(id, AIError.Flag.UsageLimit)).toBe(true);
 		expect(assistant.errorId).toBe(id);
+	});
+
+	it("classifies inflected stream-stall wording as timeout + transient while preserving word boundaries", () => {
+		for (const errorMessage of [
+			"pi-native stream stall while waiting for the next event",
+			"Anthropic stream stalled while waiting for the next event",
+			"Provider stream stalls while waiting for the next event",
+			"Provider stream stalling while waiting for the next event",
+		]) {
+			for (const id of [
+				AIError.classify(new Error(errorMessage), "anthropic-messages"),
+				AIError.classifyMessage(message({ errorMessage })),
+			]) {
+				expect(AIError.is(id, AIError.Flag.Timeout)).toBe(true);
+				expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+				expect(AIError.retriable(id)).toBe(true);
+			}
+		}
+
+		for (const nonMatch of ["upstream stalled", "stream stallone"]) {
+			const id = AIError.classify(new Error(nonMatch), "anthropic-messages");
+			expect(AIError.is(id, AIError.Flag.Timeout)).toBe(false);
+		}
+
+		const clientDenied = AIError.classifyMessage(
+			message({ errorStatus: 400, errorMessage: "Anthropic stream stalled while waiting for the next event" }),
+		);
+		expect(AIError.is(clientDenied, AIError.Flag.Timeout)).toBe(false);
+		expect(AIError.retriable(clientDenied)).toBe(false);
 	});
 });

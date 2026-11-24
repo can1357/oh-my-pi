@@ -1,8 +1,9 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Model, RawSseEvent } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { Effort } from "@oh-my-pi/pi-ai";
+import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import type { ModelRegistry } from "../../src/config/model-registry";
@@ -23,6 +24,7 @@ import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
 import { executeJs } from "../../src/eval/js/executor";
 import { disposeAllKernelSessions, type PythonResult } from "../../src/eval/py/executor";
 import type { ToolSession } from "../../src/tools";
+import type { AgentDefinition } from "../../src/task/types";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { CostGate } from "../../src/session/cost-gate";
 import { SessionManager } from "../../src/session/session-manager";
@@ -233,7 +235,7 @@ await Bun.write(${JSON.stringify(resultPath)}, JSON.stringify(result));
 process.exit(0);
 `,
 	);
-	const child = await $`bun ${scriptPath}`.cwd(repoRoot).quiet().nothrow();
+	const child = await $`${process.execPath} ${scriptPath}`.cwd(repoRoot).quiet().nothrow();
 	const stdout = child.stdout.toString();
 	const stderr = child.stderr.toString();
 	if (child.exitCode !== 0)
@@ -260,6 +262,31 @@ describe("runEvalCompletion", () => {
 			return `${model.provider}/${model.id}`;
 		});
 		expect(resolved).toEqual(["p/smol", "p/default", "p/slow"]);
+	});
+
+	it("runs the model a user-tagged agent (`m<N>`) names, at its tagged effort", async () => {
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+		const tagged = makeReasoningModel("tagged");
+		const session = makeSession({ available: [SMOL, tagged] });
+		session.getSessionAgents = (): readonly AgentDefinition[] => [
+			{ name: "m1", model: ["p/tagged"], thinkingLevel: Effort.High } as AgentDefinition,
+		];
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "m1" }, { session });
+
+		const model = spy.mock.calls[0]?.[0] as Model<Api>;
+		expect(`${model.provider}/${model.id}`).toBe("p/tagged");
+		const opts = spy.mock.calls[0]?.[2] as { reasoning?: unknown } | undefined;
+		expect(opts?.reasoning).toBe(Effort.High);
+		expect(result.details).toEqual({ model: "p/tagged", structured: false });
+	});
+
+	it("refuses a `model` that names neither a tier nor a tagged agent", async () => {
+		const session = makeSession();
+
+		await expect(runEvalCompletionAndWait({ prompt: "q", model: "m9" }, { session })).rejects.toThrow(
+			/could not resolve model "m9"/,
+		);
 	});
 
 	it("counts each completion against the session's cost cap and refuses at it", async () => {
@@ -584,6 +611,54 @@ describe("runEvalCompletion", () => {
 		const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session: makeSession() });
 		expect(result.text).toBe("the answer");
 		expect(result.details).toEqual({ model: "p/smol", tier: "smol", structured: false });
+	});
+
+	it("dumps captured provider frames to a .log when a completion fails", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-completion-dump-");
+		const session = makeSession();
+		// ToolSession narrows `sessionManager`; the dump only needs `getArtifactsDir`.
+		const scoped = session as { sessionManager?: { getArtifactsDir: () => string | null } };
+		scoped.sessionManager = { getArtifactsDir: () => tempDir.path() };
+		const frame: RawSseEvent = {
+			event: "content_block_delta",
+			data: '{"delta":"thinking"}',
+			raw: ["event: content_block_delta", 'data: {"delta":"thinking"}'],
+		};
+		vi.spyOn(ai, "completeSimple").mockImplementation(async (model, _ctx, opts) => {
+			// A real transport feeds raw frames through the request's `onSseEvent`
+			// hook; the empty-content response then surfaces the no-text-output error.
+			opts?.onSseEvent?.(frame, model);
+			return assistant({});
+		});
+
+		const error = (await rejectionOf(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session }))) as Error;
+		expect(error.message).toContain("completion() returned no text output.");
+		const match = /Streamed provider frames written to (.+?)\.$/.exec(error.message);
+		expect(match).not.toBeNull();
+		const dumped = await Bun.file(match![1]!).text();
+		expect(dumped).toContain("content_block_delta");
+		expect(dumped).toContain('{"delta":"thinking"}');
+	});
+
+	it("mirrors completion frames into the session debug buffer for /debug", async () => {
+		const session = makeSession();
+		const debug = new RawSseDebugBuffer();
+		session.rawSseDebugBuffer = debug;
+		const frame: RawSseEvent = {
+			event: "content_block_delta",
+			data: '{"delta":"thinking"}',
+			raw: ["event: content_block_delta", 'data: {"delta":"thinking"}'],
+		};
+		vi.spyOn(ai, "completeSimple").mockImplementation(async (model, _ctx, opts) => {
+			opts?.onSseEvent?.(frame, model);
+			return assistant({ text: "ok" });
+		});
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		const text = debug.toRawText();
+		expect(text).toContain("content_block_delta");
+		expect(text).toContain('{"delta":"thinking"}');
 	});
 
 	it("supplies a non-empty systemPrompt when system is omitted (codex 'Instructions are required' guard)", async () => {

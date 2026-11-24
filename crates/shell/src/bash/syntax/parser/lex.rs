@@ -167,33 +167,46 @@ impl T {
 	}
 }
 
-/// Reserved words (`word_token_alist`).
-const fn reserved(text: &[u8]) -> Option<T> {
-	Some(match text {
-		b"if" => T::If,
-		b"then" => T::Then,
-		b"else" => T::Else,
-		b"elif" => T::Elif,
-		b"fi" => T::Fi,
-		b"case" => T::Case,
-		b"esac" => T::Esac,
-		b"for" => T::For,
-		b"select" => T::Select,
-		b"while" => T::While,
-		b"until" => T::Until,
-		b"do" => T::Do,
-		b"done" => T::Done,
-		b"in" => T::In,
-		b"function" => T::Function,
-		b"time" => T::Time,
-		b"{" => T::LBrace,
-		b"}" => T::RBrace,
-		b"!" => T::Bang,
-		b"[[" => T::CondStart,
-		b"]]" => T::CondEnd,
-		b"coproc" => T::Coproc,
-		_ => return None,
-	})
+/// The reserved words (`word_token_alist`): [`RESERVED_WORDS`] and
+/// [`reserved`] from one table.
+macro_rules! reserved_words {
+	($($word:literal => $tok:ident,)*) => {
+		/// Every reserved word, in `word_token_alist` order.
+		pub(crate) const RESERVED_WORDS: &[&[u8]] = &[$($word),*];
+
+		/// The token of reserved word `text`.
+		const fn reserved(text: &[u8]) -> Option<T> {
+			Some(match text {
+				$($word => T::$tok,)*
+				_ => return None,
+			})
+		}
+	};
+}
+
+reserved_words! {
+	b"if" => If,
+	b"then" => Then,
+	b"else" => Else,
+	b"elif" => Elif,
+	b"fi" => Fi,
+	b"case" => Case,
+	b"esac" => Esac,
+	b"for" => For,
+	b"select" => Select,
+	b"while" => While,
+	b"until" => Until,
+	b"do" => Do,
+	b"done" => Done,
+	b"in" => In,
+	b"function" => Function,
+	b"time" => Time,
+	b"{" => LBrace,
+	b"}" => RBrace,
+	b"!" => Bang,
+	b"[[" => CondStart,
+	b"]]" => CondEnd,
+	b"coproc" => Coproc,
 }
 
 /// One token: a small `Copy` handle that the lookahead slot, `take` and
@@ -573,9 +586,31 @@ impl<'s> Parser<'s> {
 		self.compound.pop();
 	}
 
+	/// Record a `\`-newline about to be skipped after `&&`, `||`, `|` or `|&`
+	/// while a here-document waits for the next newline: it moves the body
+	/// below the next line.
+	fn note_doc_line_cont(&mut self) {
+		if self.pending.is_empty()
+			|| self.doc_line_cont.is_some()
+			|| !self.frames.is_empty()
+			|| !matches!(self.lx.last, T::AndAnd | T::OrOr | T::Bar | T::BarAnd)
+		{
+			return;
+		}
+		let rest = &self.buf[self.pos.min(self.buf.len())..];
+		let blanks = rest
+			.iter()
+			.take_while(|&&c| matches!(c, b' ' | b'\t'))
+			.count();
+		if rest[blanks..].starts_with(b"\\\n") {
+			self.doc_line_cont = Some(self.off() + blanks as u32);
+		}
+	}
+
 	/// `read_token`.
 	pub(super) fn read_token(&mut self) -> PResult<Tok> {
 		loop {
+			self.note_doc_line_cont();
 			self.skip_blanks();
 			let lo = self.off();
 			let line = self.line;

@@ -9,11 +9,10 @@ import { e2eApiKey, resolveApiKey } from "./oauth";
 const oauthTokens = await Promise.all([
 	resolveApiKey("anthropic"),
 	resolveApiKey("github-copilot"),
-	resolveApiKey("google-gemini-cli"),
 	resolveApiKey("google-antigravity"),
 	resolveApiKey("openai-codex"),
 ]);
-const [anthropicOAuthToken, githubCopilotToken, geminiCliToken, antigravityToken, openaiCodexToken] = oauthTokens;
+const [anthropicOAuthToken, githubCopilotToken, antigravityToken, openaiCodexToken] = oauthTokens;
 
 // Simple calculate tool
 const calculateSchema = type({
@@ -233,17 +232,6 @@ describe("Tool Call Without Result Tests", () => {
 			async () => {
 				const model = getBundledModel("github-copilot", "claude-sonnet-4");
 				await testToolCallWithoutResult(model, { apiKey: githubCopilotToken });
-			},
-			{ retry: 3, timeout: 30000 },
-		);
-	});
-
-	describe("Google Gemini CLI Provider", () => {
-		it.skipIf(!geminiCliToken)(
-			"gemini-2.5-flash - should filter out tool calls without corresponding tool results",
-			async () => {
-				const model = getBundledModel("google-gemini-cli", "gemini-2.5-flash");
-				await testToolCallWithoutResult(model, { apiKey: geminiCliToken });
 			},
 			{ retry: 3, timeout: 30000 },
 		);

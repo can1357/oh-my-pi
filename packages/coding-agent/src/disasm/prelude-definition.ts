@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import { type } from "@oh-my-pi/omptype";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
-import type { EvalPreludeDefinition } from "../eval/preludes";
+import type { HostEvalPreludeDefinition } from "../eval/preludes";
 import dsmDocumentation from "../prompts/tools/dsm.md" with { type: "text" };
 import dsmGuidance from "../prompts/tools/dsm-guidance.md" with { type: "text" };
 import type { ToolSession } from "../tools";
@@ -11,7 +11,7 @@ import { parseBinaryView } from "../tools/read-binary";
 import { cfgToolsMaxTimeout } from "../tools/settings";
 import { clampTimeout } from "../tools/tool-timeouts";
 import { cfgDisasmBackend } from "./active";
-import { DISASM_BACKENDS, type DisasmBackendId } from "./backend";
+import { DISASM_BACKEND_IDS, DISASM_BACKENDS, type DisasmBackendId, databaseOwner } from "./backend";
 import { acquireDatabase, type DisasmDatabase, findDatabaseHandle, findOpenDatabase, listDatabases } from "./client";
 // @ts-expect-error Bun imports this JavaScript source as text instead of evaluating its module shape.
 import dsmJavascript from "./prelude.js" with { type: "text" };
@@ -21,7 +21,7 @@ import { DSM_REFERENCES, type DsmReferenceOwner } from "./reference-owner";
 import { isExecutableFile, locateDatabase, splitSliceRef } from "./store";
 
 const REQUEST_TIMEOUT_MS = 120_000;
-const handleFields = { lease: type("string > 0"), backend: type("'ida' | 'ghidra'") };
+const handleFields = { lease: type("string > 0"), backend: type.enumerated(...DISASM_BACKEND_IDS) };
 const target = type("string > 0").or("number.integer");
 const paramsSchema = type({ action: "'open'", path: "string > 0", "+": "reject" })
 	.or({ action: "'list'", "+": "reject" })
@@ -128,7 +128,7 @@ function describeCall(parameters: unknown): string | undefined {
 }
 
 /** Hidden, backend-neutral disassembly capability with independently retained cross-agent database handles. */
-export function createDsmPrelude(session: ToolSession): EvalPreludeDefinition {
+export function createDsmPrelude(session: ToolSession): HostEvalPreludeDefinition {
 	const owner = referenceOwner(session);
 	const notOpen = () =>
 		new ToolError("Database reference is closed or expired; reopen with dsm.open(path or handle).");
@@ -223,10 +223,13 @@ export function createDsmPrelude(session: ToolSession): EvalPreludeDefinition {
 				const { path, arch } = splitSliceRef(params.path);
 				const absolutePath = resolveToCwd(path, session.cwd);
 				const stat = await fs.stat(absolutePath).catch(() => null);
-				if (
-					!stat?.isFile() ||
-					(!DISASM_BACKENDS[backend].isDatabasePath(absolutePath) && !(await isExecutableFile(absolutePath)))
-				) {
+				const databaseBackend = stat?.isFile() ? databaseOwner(absolutePath) : undefined;
+				if (databaseBackend && databaseBackend.id !== backend) {
+					throw new ToolError(
+						`${databaseBackend.label} database ${params.path} cannot be opened with the active ${DISASM_BACKENDS[backend].label} backend; set disassembler.backend to ${databaseBackend.id}.`,
+					);
+				}
+				if (!stat?.isFile() || (!databaseBackend && !(await isExecutableFile(absolutePath)))) {
 					throw new ToolError(`Not an executable or supported database: ${params.path}`);
 				}
 				active(backend);

@@ -74,7 +74,7 @@ Compaction receives a bounded live-kernel snapshot with environment and successf
 
 Disabled runtimes are removed from the session-scoped wire schema and model prompt. After a definitive failed Python probe, the next schema, description, and prelude also omit `py`; synchronous schema reads never run a probe. A successful explicit availability refresh restores Python, while changes to PATH, active environment, cwd, or the configured interpreter invalidate the advertised snapshot. Cancelled or deadline-limited probes do not establish permanent unavailability. Explicit Python calls retry failed probes, so a repaired interpreter can be picked up without restarting.
 
-A requested unavailable runtime raises `ToolError` with the bounded, sanitized probe reason and a remedy: provide a working Python 3.8+ on PATH or set `python.interpreter`. The tool never substitutes another language. `eval.tools.enabled=true` (default) independently controls whether kernel-defined tools and the `tools` subagent fields are advertised and usable.
+A requested unavailable runtime raises `ToolError` with the bounded, sanitized probe reason and a remedy: provide a working Python 3.8+ on PATH or set `python.interpreter`. The tool never substitutes another language. `eval.tools.enabled` (default off) independently controls whether kernel-defined tools and the `tools` subagent fields are advertised and usable.
 
 `eval.autoProvision=true` lets the first `%bun add` create the managed JavaScript package environment; turning it off requires an existing environment or `%environment project`. Package installation pauses the compute watchdog but has its own ten-minute deadline and remains cancellable.
 
@@ -149,7 +149,7 @@ All enabled runtimes expose equivalent helpers where the language permits:
 - `print(...)` (Python) / `print(...)` and `console.*` (JS)
 - `read(path, offset?, limit?)`, `write(path, content)`, `env(...)`, `output(...)`
 - `tool.<name>(args)` for a normal session tool call (async in both runtimes: `await tool.read({...})`)
-- `@tool` / `tool(fn, {...})` to define kernel-local tools for subagents (`eval.tools.enabled`, default on)
+- `@tool` / `tool(fn, {...})` to define kernel-local tools for subagents (`eval.tools.enabled`, default off)
 - `judge(...)`, `judge_batch(...)` (Python) / `judgeBatch(...)` (JS), `completion(...)`
 - `wait(...)` for agent/completion handles
 - `agent(...)`, `workpool(...)` when spawning is allowed
@@ -159,11 +159,11 @@ JS helpers are asynchronous; Python file helpers are synchronous while `tool.<na
 
 The prelude lists accepted session tool names, including unambiguous wire aliases such as `tool.apply_patch({ input: "..." })` for an enabled `edit` tool in apply-patch mode. Exact registered names shadow aliases; ambiguous aliases are unavailable. Both canonical and wire calls check the resolved tool's enablement and use its ordinary approval/ACP gate.
 
-Bridge restrictions and bookkeeping use the resolved canonical tool, not the requested wire spelling. `checkpoint`, `rewind`, and `yield`, including their aliases, are omitted and rejected because their session changes or task completion require direct tool events. Eval also rejects nested device execution such as `tool.write({ path: "xd://yield", content: "..." })` with the same direct-tool diagnostic; model-issued device writes are unchanged, including those of subagents a cell starts through `tool.task`. Aliases of `todo` retain branch persistence, and aliases of `task`/`wait` pause the cell watchdog like their canonical calls.
+Bridge restrictions and bookkeeping use the resolved canonical tool, not the requested wire spelling. `checkpoint`, `rewind`, and `yield`, including their aliases, are omitted and rejected because their session changes or task completion require direct tool events. A tool command reached from a cell through `sh()` is refused for `checkpoint`, `rewind`, and `yield` with the same direct-tool diagnostic; commands the model's own `bash` calls run are unaffected, including those of subagents a cell starts through `tool.task`. Aliases of `todo` retain branch persistence, and aliases of `task`/`wait` pause the cell watchdog like their canonical calls.
 
 Printing an image or figure attaches it to the result for both the model and the user. Printed data frames, `console.table`, Markdown objects, and large structured values also carry a pretty view for the user; the model sees the printed text.
 
-Enabled extension preludes add globals (such as `browser`) with documentation at `xd://eval/<name>`. Their host calls resolve approval and availability against the live session; disabling a prelude also prevents previously captured functions from retaining host access.
+Enabled extension preludes add globals (such as `browser`) with documentation at `help://eval/<name>`. Their host calls resolve approval and availability against the live session; disabling a prelude also prevents previously captured functions from retaining host access.
 
 ### `judge()` and judgment batches
 
@@ -171,7 +171,7 @@ Enabled extension preludes add globals (such as `browser`) with documentation at
 
 For many states, Python's `await judge_batch(states, questions, concurrency=32, retries=1, min_ok=1, intent=None)` or JS's `await judgeBatch(states, questions, { concurrency?, retries?, minOk?, intent? })` creates a host-owned batch. States are a list/array (index keys) or keyed object. `await b.drain(...)` pulls newly settled `(key, item)` pairs with `item.answers` or `item.error`; Python takes `timeout` directly, JS takes `{ timeout }`. Item failures are retained, while whole-run failure raises after the drain cursor is exhausted. `status()`, `results()`, `failed()`, `cancel()`, and `close()` inspect/control the batch. Batches outlive cells and kernel resets; `judge_batch.attach(id)` / `judgeBatch.attach(id)` reconnects an owning session until close or owner disposal. Completion and judgment requests share a process-wide 32-request semaphore.
 
-The full helper reference is `xd://eval/judge`.
+The full helper reference is `help://eval/judge`.
 
 ### MCP structured results
 
@@ -240,7 +240,7 @@ Registers one background subagent job and returns an `AgentHandle` immediately:
 
 ### Kernel-defined tools (`@tool` / `tool(fn)`)
 
-With `eval.tools.enabled` (default on), a cell can turn a function into a tool other agents may call:
+With `eval.tools.enabled` on (default off), a cell can turn a function into a tool other agents may call:
 
 - Python: `@tool` / `@tool(name=..., description=...)`; the JSON Schema is inferred from type hints (`str`, `int`, `float`, `bool`, `list[...]`, `dict[...]`, `Literal`, `Optional`, `Annotated[T, "description"]`) and defaults; positional-only parameters are rejected. Async functions are awaited.
 - JS: `tool(fn, { name?, description?, parameters? })`; `fn` receives one args object.

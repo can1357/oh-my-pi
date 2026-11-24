@@ -418,6 +418,12 @@ impl Request {
 		reply.send(result).is_ok()
 	}
 
+	/// Only routes that mark their mutation boundary may change timeout
+	/// outcomes.
+	const fn dispatch_fenced(&self) -> bool {
+		cfg!(target_os = "windows") && matches!(self, Self::AxPerform { menu: None, .. })
+	}
+
 	/// Requests that can send input or move focus, which hold the input lease.
 	/// A menu read counts: on macOS it makes its window key first.
 	const fn is_mutation(&self) -> bool {
@@ -440,6 +446,24 @@ impl Request {
 				| Self::MenuItems { .. }
 				| Self::MenuSelect { .. }
 				| Self::BringToCurrentSpace { .. }
+				| Self::HoldKeys { .. }
+				| Self::HoldMouse { .. }
+		)
+	}
+
+	/// Requests that send pointer or keyboard input, which a desktop with no
+	/// input route refuses ([`Backend::refuse_input`]). An element click is one:
+	/// it clicks at the element's bounds.
+	const fn is_raw_input(&self) -> bool {
+		matches!(
+			self,
+			Self::Click { .. }
+				| Self::MoveMouse { .. }
+				| Self::Drag { .. }
+				| Self::Scroll { .. }
+				| Self::TypeText { .. }
+				| Self::KeyChord { .. }
+				| Self::AxClick { .. }
 				| Self::HoldKeys { .. }
 				| Self::HoldMouse { .. }
 		)
@@ -803,6 +827,28 @@ impl Worker {
 		}
 	}
 
+	/// Whether `request` is an element action on an element whose input may
+	/// not show yet (letters typed on a macOS popup, [`AxBackend::pending`]),
+	/// which it waits for before taking the input lease. Keys and typing never
+	/// wait: further letters join the same search.
+	fn awaits_late_input(&mut self, request: &Request) -> bool {
+		if !request.is_mutation() || matches!(request, Request::AxInput { .. }) {
+			return false;
+		}
+		let Some(handle) = request
+			.reference()
+			.and_then(|reference| self.registry.resolve(reference).ok())
+		else {
+			return false;
+		};
+		self
+			.backend
+			.as_mut()
+			.ok()
+			.and_then(|backend| backend.ax())
+			.is_some_and(|ax| ax.pending(&handle))
+	}
+
 	fn backend(&mut self) -> CoreResult<&mut Box<dyn Backend>> {
 		self.backend.as_mut().map_err(|error| error.clone())
 	}
@@ -878,13 +924,31 @@ impl Worker {
 		Ok((x, y, frame))
 	}
 
+	fn minimized_root(&mut self, id: &str) -> CoreResult<Option<ax::WindowRoot>> {
+		let retained = self.registry.retained_root(id);
+		self
+			.backend
+			.as_mut()
+			.map_err(|error| error.clone())?
+			.minimized_root(id, retained)
+	}
+
 	fn explicit_window(&mut self, target: &Target) -> CoreResult<DesktopWindow> {
-		if !matches!(target, Target::Window(_)) {
+		let Target::Window(id) = target else {
 			return Err(DesktopError::invalid_target(
 				"this operation requires an explicit window target",
 			));
+		};
+		match self.window(target) {
+			Err(error) if error.code == ErrorCode::WindowNotFound => {
+				if self.minimized_root(id)?.is_some() {
+					Err(menus::minimized_window(id))
+				} else {
+					Err(error)
+				}
+			},
+			result => result,
 		}
-		self.window(target)
 	}
 
 	fn validate_keyboard_target(&mut self, target: &Target) -> CoreResult<()> {
@@ -914,15 +978,34 @@ impl Worker {
 		Ok(())
 	}
 
+	fn read_root(&mut self, target: &Target) -> CoreResult<ax::WindowRoot> {
+		match self.window(target) {
+			Ok(window) => ax::WindowRoot::listed(self.ax()?, window),
+			Err(error) => {
+				if error.code == ErrorCode::WindowNotFound
+					&& let Target::Window(id) = target
+					&& let Some(root) = self.minimized_root(id)?
+				{
+					Ok(root)
+				} else {
+					Err(error)
+				}
+			},
+		}
+	}
+
 	fn snapshot(&mut self, target: &Target, options: &AxSnapshotOptions) -> CoreResult<AxSnapshot> {
-		let window = self.window(target)?;
+		let window = self.read_root(target)?;
+		let covered_before = self.backend()?.window_covered(&window.id);
 		let (backend, registry) = (&mut self.backend, &mut self.registry);
 		let ax = backend
 			.as_mut()
 			.map_err(|error| error.clone())?
 			.ax()
 			.ok_or_else(DesktopError::ax_unsupported)?;
-		ax::snapshot(ax, registry, &window, options)
+		let mut snapshot = ax::snapshot(ax, registry, &window, options)?;
+		snapshot.covered = covered_before || self.backend()?.window_covered(&window.id);
+		Ok(snapshot)
 	}
 
 	fn capture_full(
@@ -933,13 +1016,16 @@ impl Worker {
 	) -> CoreResult<DesktopCapture> {
 		let selector = target.display_selector();
 		let mut attempt = 1;
-		let (image, geometry, displays, screen_locked, source_width, source_height) = loop {
+		let (image, geometry, displays, screen_locked, covered, source_width, source_height) = loop {
 			// Bracket the acquisition: a lock on either side marks the frame, so a
 			// later unlock during encoding cannot pass lock-screen pixels as the
-			// app.
+			// app. A cover on either side marks it the same way: an app that
+			// stopped drawing under it needs time to draw again once uncovered.
 			let locked_before = self.backend()?.screen_state(None).locked;
+			let covered_before = self.window_covered(target)?;
 			let (image, mut geometry) = self.backend()?.capture(target, caps, selector.as_ref())?;
 			let screen_locked = locked_before || self.backend()?.screen_state(None).locked;
+			let covered = covered_before || self.window_covered(target)?;
 			let source_width = image.width();
 			let source_height = image.height();
 			let layout = self.backend()?.displays()?;
@@ -947,7 +1033,15 @@ impl Worker {
 			let image = apply_capture_caps(image, &mut geometry, caps)?;
 			match self.capture_metadata(target, &geometry, &layout, source_width, source_height) {
 				Ok(displays) => {
-					break (image, geometry, displays, screen_locked, source_width, source_height);
+					break (
+						image,
+						geometry,
+						displays,
+						screen_locked,
+						covered,
+						source_width,
+						source_height,
+					);
 				},
 				// A window that appeared, animated or resized while it was
 				// captured: the pixels match a size it no longer has, so capture it
@@ -996,6 +1090,15 @@ impl Worker {
 			backend: capabilities.backend,
 			display_server: capabilities.display_server,
 			screen_locked,
+			covered,
+		})
+	}
+
+	/// Whether `target` is a window that appears fully covered.
+	fn window_covered(&mut self, target: &Target) -> CoreResult<bool> {
+		Ok(match target {
+			Target::Window(id) => self.backend()?.window_covered(id),
+			Target::Desktop | Target::Display(_) => false,
 		})
 	}
 
@@ -1012,14 +1115,15 @@ impl Worker {
 			Target::Window(_) => {
 				let window = self.window(target)?;
 				geometry.validate_window(Some(&window))?;
+				let (part_x, part_y, part_width, part_height) = geometry.window_part(&window);
 				DesktopDisplay {
 					id:           window.id,
 					name:         format!("{} — {}", window.app, window.title),
-					x:            window.x,
-					y:            window.y,
-					width:        window.width,
-					height:       window.height,
-					scale:        f64::from(source_width) / f64::from(window.width.max(1)),
+					x:            part_x,
+					y:            part_y,
+					width:        part_width,
+					height:       part_height,
+					scale:        f64::from(source_width) / f64::from(part_width.max(1)),
 					pixel_x:      0,
 					pixel_y:      0,
 					pixel_width:  source_width,
@@ -1128,18 +1232,37 @@ impl Worker {
 
 	fn execute(&mut self, request: &Request, token: &OperationToken) -> CoreResult<Response> {
 		if request.is_close() {
-			return Ok(Response::Unit);
+			// A backend that never started changed nothing.
+			return match &mut self.backend {
+				Ok(backend) => backend.close().map(|()| Response::Unit),
+				Err(_) => Ok(Response::Unit),
+			};
 		}
 		token.check()?;
+		// Pointer and keyboard input on a desktop with no input route is refused
+		// before it waits for the input lease or resolves its target or frame. A
+		// backend that could not be built leaves the call to fail where it did.
+		if request.is_raw_input()
+			&& let Ok(backend) = self.backend.as_mut()
+		{
+			backend.refuse_input()?;
+		}
 		let _scope = token.enter();
+		if request.is_mutation()
+			&& let Some(reference) = request.reference()
+		{
+			self.registry.require_actionable(reference)?;
+		}
+		let awaits_input = self.awaits_late_input(request);
 		// A ref whose row the app rebuilt names the row's copy before the
-		// request reads its element or its app. That probe asks the element's
-		// app, so on macOS the user's front app is read before it, for the
-		// whole request (`EntryFront` in `macos::input`).
+		// request reads its element or its app, and an element action waits
+		// for its element's late input; both ask the element's app, so on
+		// macOS the user's front app is read before them, for the whole
+		// request (`EntryFront` in `macos::input`).
 		#[cfg(target_os = "macos")]
 		let _front = request
 			.reference()
-			.filter(|reference| self.registry.has_row(reference))
+			.filter(|reference| awaits_input || self.registry.has_row(reference))
 			.map(|_| macos::pin_entry_front());
 		self.row_read = None;
 		if let Some(reference) = request.reference() {
@@ -1162,6 +1285,15 @@ impl Worker {
 				},
 			}
 		};
+		// An element action reads its element under the input lease, where
+		// nothing may wait, so it waits for the element's late input here.
+		if awaits_input
+			&& let Some(reference) = request.reference()
+			&& let Ok(handle) = self.registry.resolve(reference)
+			&& let Some(ax) = self.backend()?.ax()
+		{
+			ax.settle(&handle)?;
+		}
 		let lease = if !request.is_mutation() {
 			None
 		} else if request.takes_over_a_window() {
@@ -1423,6 +1555,13 @@ impl Worker {
 			// Input whose app cannot be named fails like the input itself
 			// would; a ref that no longer resolves fails in `process`.
 			return match access {
+				AppAccess::Input(id)
+					if matches!(request, Request::MenuItems { .. } | Request::MenuSelect { .. })
+						&& self.registry.retained_root(id).is_some()
+						&& self.minimized_root(id)?.is_some() =>
+				{
+					Err(menus::minimized_window(id))
+				},
 				AppAccess::Input(id) => Err(DesktopError::window_not_found(format!(
 					"window '{id}' was not found; it may be closed"
 				))),
@@ -1581,11 +1720,13 @@ impl Worker {
 				let selector = base.capture_selector();
 				token.check()?;
 				let locked_before = self.backend()?.screen_state(None).locked;
+				let covered_before = self.window_covered(target)?;
 				let (image, fresh) =
 					self
 						.backend()?
 						.capture(target, &CaptureCaps::default(), selector.as_ref())?;
 				let screen_locked = locked_before || self.backend()?.screen_state(None).locked;
+				let covered = covered_before || self.window_covered(target)?;
 				let layout = self.backend()?.displays().map_err(|error| {
 					DesktopError::invalid_coordinate_frame(format!(
 						"could not validate captured display layout: {error}"
@@ -1617,6 +1758,7 @@ impl Worker {
 					backend: capabilities.backend,
 					display_server: capabilities.display_server,
 					screen_locked,
+					covered,
 				}))
 			},
 			Request::Click { target, x, y, options, .. } => {
@@ -1713,7 +1855,7 @@ impl Worker {
 				Ok(Response::Snapshot(self.snapshot(target, options)?))
 			},
 			Request::AxQuery { target, query, .. } => {
-				let window = self.window(target)?;
+				let window = self.read_root(target)?;
 				let (backend, registry) = (&mut self.backend, &mut self.registry);
 				let ax = backend
 					.as_mut()
@@ -2059,23 +2201,56 @@ impl SessionCore {
 		token: OperationToken,
 		make: impl FnOnce(Reply) -> Request,
 	) -> CoreResult<Response> {
+		self.call_with_wait(token, make, |reply, deadline| reply.recv_deadline(deadline))
+	}
+
+	fn call_with_wait(
+		&self,
+		mut token: OperationToken,
+		make: impl FnOnce(Reply) -> Request,
+		wait: impl FnOnce(
+			&flume::Receiver<CoreResult<Response>>,
+			Instant,
+		) -> std::result::Result<CoreResult<Response>, flume::RecvTimeoutError>,
+	) -> CoreResult<Response> {
 		token.check()?;
 		// Rendezvous delivery: a timed-out/dropped caller must never commit a
 		// capture frame that it did not receive.
 		let (txr, rxr) = flume::bounded(0);
 		let tx = self.ensure_started()?;
 		self.in_flight.fetch_add(1, Ordering::AcqRel);
+		let request = make(txr);
+		if request.dispatch_fenced() {
+			token.fence_dispatch();
+		}
+		let fence = token.dispatch_fence();
 		let reply_by = Instant::now() + self.operation_timeout;
+		// Only the caller's wait stops short of the run deadline; the worker
+		// keeps the native deadline, so input-lock waits keep their own reserve.
+		let wait_by = token.reply_wait_deadline(reply_by);
 		// Input waiting for the user (to pause on macOS, to answer a Wayland
 		// permission prompt) or for another session's input lock gives up
 		// before this caller does.
 		let token = token.replying_by(reply_by);
 		let response = tx
-			.send(QueuedRequest { request: make(txr), token })
+			.send(QueuedRequest { request, token })
 			.map_err(|_| DesktopError::internal("native desktop worker stopped unexpectedly"))
 			.and_then(|()| {
-				rxr.recv_deadline(reply_by).map_err(|e| {
+				wait(&rxr, wait_by).map_err(|e| {
+					let expired = matches!(e, flume::RecvTimeoutError::Timeout);
+					let dispatched =
+						expired && fence.as_ref().is_some_and(|fence| fence.abandon_reply());
 					self.display_awake.cancel_and_release(&self.cancellation);
+					if dispatched {
+						return DesktopError::new(
+							error::ErrorCode::AxUnconfirmed,
+							"desktop action may already have been sent or may still take effect, but the \
+							 operation did not reply in time; inspect before retrying",
+						);
+					}
+					if expired && fence.is_some() {
+						return control::abandoned_before_dispatch();
+					}
 					DesktopError::timeout(format!("native desktop operation did not complete: {e}"))
 				})
 			});
@@ -2098,7 +2273,7 @@ impl SessionCore {
 			token:   self.cancellation.token(),
 		})
 		.map_err(|_| DesktopError::closed())?;
-		let _ = rrx.recv_timeout(CLOSE_TIMEOUT).map_err(|e| {
+		let closed = rrx.recv_timeout(CLOSE_TIMEOUT).map_err(|e| {
 			DesktopError::timeout(format!("timed out closing native desktop worker: {e}"))
 		})?;
 		if let Some(done) = lifecycle.done.take() {
@@ -2111,7 +2286,7 @@ impl SessionCore {
 				.join()
 				.map_err(|_| DesktopError::internal("native desktop worker panicked during close"))?;
 		}
-		Ok(())
+		closed.map(|_| ())
 	}
 }
 impl Drop for SessionCore {
@@ -3010,6 +3185,10 @@ mod capture_tests {
 		reads:             u32,
 		/// Runs as each press is delivered and as each probe asks.
 		on_call:           Option<Box<dyn Fn(Call) + Send>>,
+		/// Elements whose input may not show yet.
+		late_input:        HashSet<u64>,
+		/// Runs as an element's late input is awaited.
+		on_settle:         Option<Box<dyn Fn() + Send>>,
 		/// A press is delivered and the app answers with an unrelated error.
 		unconfirmed:       bool,
 	}
@@ -3039,6 +3218,7 @@ mod capture_tests {
 		window:                 DesktopWindow,
 		overlap:                Option<DesktopWindow>,
 		window_present:         bool,
+		minimized_id:           Option<&'static str>,
 		/// An AX tree the app can rebuild; `None` answers every element as one
 		/// button.
 		tree:                   Option<Arc<Mutex<FakeTree>>>,
@@ -3068,6 +3248,8 @@ mod capture_tests {
 		/// Each window listing signals the sender, then blocks until the
 		/// receiver's sender drops.
 		hang_windows:           Option<(flume::Sender<()>, flume::Receiver<()>)>,
+		/// Injects a provider call, including its dispatch boundary.
+		on_list_windows:        Option<Box<dyn Fn() -> CoreResult<()> + Send>>,
 		/// Runs as each menu read is served.
 		on_menu_read:           Option<Box<dyn Fn() + Send>>,
 		/// Another process drawing the window, such as an Open panel's.
@@ -3081,11 +3263,17 @@ mod capture_tests {
 		input_lookups:          Arc<Mutex<u32>>,
 		/// Every click lands on a control whose menu would take the keyboard.
 		menu_control:           bool,
+		/// The desktop has no input route at all.
+		no_input:               bool,
 		/// What a drag is made as instead of input; `None` posts it.
 		drag_selection:         Option<AxTextSelection>,
 		/// Captures after which the window grows 8 px wider, as one that animates
 		/// while it is captured.
 		grow_on_capture:        u32,
+		/// Nothing of the window shows on screen.
+		covered:                bool,
+		/// What the backend fails to undo when the session closes.
+		close_error:            Option<DesktopError>,
 	}
 
 	impl FakeWaylandBackend {
@@ -3155,8 +3343,11 @@ mod capture_tests {
 				},
 				overlap: None,
 				window_present: true,
+				minimized_id: None,
+				on_list_windows: None,
 				tree: None,
 				menu_control: false,
+				no_input: false,
 				clicks: Arc::new(Mutex::new(Vec::new())),
 				modes: Arc::new(Mutex::new(Vec::new())),
 				layout: Arc::new(Mutex::new(vec![DesktopDisplay {
@@ -3196,6 +3387,8 @@ mod capture_tests {
 				input_lookups: Arc::new(Mutex::new(0)),
 				drag_selection: None,
 				grow_on_capture: 0,
+				covered: false,
+				close_error: None,
 			}
 		}
 	}
@@ -3212,7 +3405,7 @@ mod capture_tests {
 			if let Some(tree) = &self.tree {
 				tree.lock().roots += 1;
 			}
-			Ok(AxHandle::Test(1))
+			Ok(AxHandle::Test(if self.minimized_id.is_some() { 2 } else { 1 }))
 		}
 
 		fn window_id(&mut self, _: &AxHandle, windows: &[DesktopWindow]) -> CoreResult<String> {
@@ -3365,6 +3558,23 @@ mod capture_tests {
 				tree.destroyed.contains(id)
 			})
 		}
+
+		fn pending(&mut self, h: &AxHandle) -> bool {
+			let AxHandle::Test(id) = h else { return false };
+			self
+				.tree
+				.as_ref()
+				.is_some_and(|tree| tree.lock().late_input.contains(id))
+		}
+
+		fn settle(&mut self, _: &AxHandle) -> CoreResult<()> {
+			if let Some(tree) = &self.tree
+				&& let Some(on_settle) = &tree.lock().on_settle
+			{
+				on_settle();
+			}
+			Ok(())
+		}
 	}
 
 	impl Backend for FakeWaylandBackend {
@@ -3384,6 +3594,13 @@ mod capture_tests {
 			}
 		}
 
+		fn refuse_input(&mut self) -> CoreResult<()> {
+			if self.no_input {
+				return Err(DesktopError::permission_denied("no input route"));
+			}
+			Ok(())
+		}
+
 		fn displays(&mut self) -> CoreResult<Vec<DesktopDisplay>> {
 			if std::mem::take(&mut *self.unlock_on_layout.lock()) {
 				*self.screen.lock() = ScreenState::default();
@@ -3392,6 +3609,9 @@ mod capture_tests {
 		}
 
 		fn windows(&mut self) -> CoreResult<Vec<DesktopWindow>> {
+			if let Some(on_list_windows) = &self.on_list_windows {
+				on_list_windows()?;
+			}
 			if let Some((entered, hang)) = &self.hang_windows {
 				let _ = entered.send(());
 				let _ = hang.recv();
@@ -3403,6 +3623,21 @@ mod capture_tests {
 				.chain(self.window_present.then_some(&self.window))
 				.cloned()
 				.collect())
+		}
+
+		fn minimized_root(
+			&mut self,
+			id: &str,
+			retained: Option<&AxHandle>,
+		) -> CoreResult<Option<ax::WindowRoot>> {
+			Ok(retained
+				.filter(|_| self.minimized_id == Some(id))
+				.map(|element| ax::WindowRoot {
+					id:      id.to_owned(),
+					app:     self.window.app.clone(),
+					state:   ax::RootState::Minimized,
+					element: element.clone(),
+				}))
 		}
 
 		#[cfg(target_os = "macos")]
@@ -3430,9 +3665,17 @@ mod capture_tests {
 			*self.screen.lock()
 		}
 
+		fn window_covered(&mut self, id: &str) -> bool {
+			self.covered && id == self.window.id
+		}
+
 		fn hold_display_awake(&mut self) -> Option<DisplayAwakeHold> {
 			self.awake.lock().push(true);
 			Some(Box::new(FakeAwakeHold(Arc::clone(&self.awake))))
+		}
+
+		fn close(&mut self) -> CoreResult<()> {
+			self.close_error.take().map_or(Ok(()), Err)
 		}
 
 		fn capture(
@@ -3888,11 +4131,18 @@ mod capture_tests {
 	/// A session serving `backend` with an hour's grace, so while a request
 	/// hangs only the session giving up can release the display.
 	fn session_serving(backend: FakeWaylandBackend) -> Arc<SessionCore> {
+		session_serving_with_timeout(backend, HUNG_CALL_TIMEOUT)
+	}
+
+	fn session_serving_with_timeout(
+		backend: FakeWaylandBackend,
+		operation_timeout: Duration,
+	) -> Arc<SessionCore> {
 		let core = SessionCore::with_operation_timeout(
 			DisplaySelector::Active,
 			Arc::default(),
 			None,
-			HUNG_CALL_TIMEOUT,
+			operation_timeout,
 		);
 		let display_awake = Arc::clone(&core.display_awake);
 		let (tx, rx) = flume::unbounded();
@@ -3909,6 +4159,20 @@ mod capture_tests {
 		lifecycle.join = Some(join);
 		drop(lifecycle);
 		core
+	}
+
+	#[test]
+	fn closing_a_session_reports_what_its_backend_could_not_undo() {
+		let mut backend = FakeWaylandBackend::new();
+		backend.close_error =
+			Some(DesktopError::input_failed("failed to restore temporary X11 text keymap"));
+		let error = session_serving(backend).close().unwrap_err();
+		assert!(
+			error
+				.message
+				.contains("failed to restore temporary X11 text keymap"),
+			"{error:?}"
+		);
 	}
 
 	/// Queues a window listing without waiting for its reply; returns the
@@ -3940,6 +4204,215 @@ mod capture_tests {
 		drop(unblock);
 		core.close().unwrap();
 		assert_eq!(*awake.lock(), [true, false], "the late return neither holds nor releases again");
+	}
+
+	/// Ends a fake session without `close`'s shutdown deadline: disconnects
+	/// its queue and joins the worker once it has finished.
+	fn shut_down(core: &SessionCore) {
+		let mut lifecycle = core.lifecycle.lock();
+		drop(lifecycle.tx.take());
+		lifecycle.join.take().unwrap().join().unwrap();
+	}
+
+	#[test]
+	fn a_dispatched_provider_reply_timeout_is_unconfirmed() {
+		let mut backend = FakeWaylandBackend::new();
+		let (entered_tx, entered) = flume::bounded(0);
+		let (unblock, blocked) = flume::bounded::<()>(0);
+		let mutations = Arc::new(AtomicUsize::new(0));
+		backend.on_list_windows = Some(Box::new({
+			let mutations = Arc::clone(&mutations);
+			move || {
+				let dispatched = control::dispatching();
+				entered_tx
+					.send(dispatched.is_ok())
+					.expect("caller did not await dispatch");
+				dispatched?;
+				blocked.recv().expect("provider was not unblocked");
+				mutations.fetch_add(1, Ordering::AcqRel);
+				Ok(())
+			}
+		}));
+		let core = session_serving_with_timeout(backend, Duration::from_secs(180));
+		let run_by = Instant::now() + Duration::from_secs(60);
+		core.cancellation.set_deadline(Some(run_by));
+		let mut token = core.cancellation.token();
+		token.fence_dispatch();
+		let error = core
+			.call_with_wait(
+				token,
+				|reply| Request::ListWindows { reply },
+				|_, reply_by| {
+					assert_eq!(reply_by, run_by.checked_sub(control::DEADLINE_MARGIN / 2).unwrap());
+					assert!(entered.recv().unwrap(), "provider did not cross its dispatch boundary");
+					Err(flume::RecvTimeoutError::Timeout)
+				},
+			)
+			.err()
+			.unwrap();
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
+		assert_eq!(mutations.load(Ordering::Acquire), 0);
+		unblock.send(()).expect("provider did not resume");
+		drop(unblock);
+		shut_down(&core);
+		assert_eq!(mutations.load(Ordering::Acquire), 1);
+	}
+
+	#[test]
+	fn an_abandoned_provider_cannot_dispatch_after_reply_timeout() {
+		let mut backend = FakeWaylandBackend::new();
+		let (entered_tx, entered) = flume::bounded(0);
+		let (unblock, blocked) = flume::bounded::<()>(0);
+		let (result_tx, result) = flume::bounded(1);
+		let mutations = Arc::new(AtomicUsize::new(0));
+		backend.on_list_windows = Some(Box::new({
+			let mutations = Arc::clone(&mutations);
+			move || {
+				entered_tx
+					.send(())
+					.expect("caller did not await provider entry");
+				blocked.recv().expect("provider was not unblocked");
+				let dispatched = control::dispatching();
+				result_tx
+					.send(dispatched.as_ref().err().map(|error| error.code))
+					.unwrap();
+				dispatched?;
+				mutations.fetch_add(1, Ordering::AcqRel);
+				Ok(())
+			}
+		}));
+		let core = session_serving_with_timeout(backend, Duration::from_secs(180));
+		let run_by = Instant::now() + Duration::from_secs(60);
+		core.cancellation.set_deadline(Some(run_by));
+		let mut token = core.cancellation.token();
+		token.fence_dispatch();
+		let error = core
+			.call_with_wait(
+				token,
+				|reply| Request::ListWindows { reply },
+				|_, reply_by| {
+					assert_eq!(reply_by, run_by.checked_sub(control::DEADLINE_MARGIN / 2).unwrap());
+					entered.recv().expect("provider did not enter");
+					Err(flume::RecvTimeoutError::Timeout)
+				},
+			)
+			.err()
+			.unwrap();
+		assert_eq!(error.code, ErrorCode::Timeout);
+		unblock.send(()).expect("provider did not resume");
+		assert_eq!(
+			result.recv().expect("provider did not check the fence"),
+			Some(ErrorCode::Timeout),
+		);
+		shut_down(&core);
+		assert_eq!(mutations.load(Ordering::Acquire), 0);
+	}
+
+	#[test]
+	fn a_dispatched_provider_can_reply_on_time() {
+		let mut backend = FakeWaylandBackend::new();
+		let mutations = Arc::new(AtomicUsize::new(0));
+		backend.on_list_windows = Some(Box::new({
+			let mutations = Arc::clone(&mutations);
+			move || {
+				control::dispatching()?;
+				mutations.fetch_add(1, Ordering::AcqRel);
+				Ok(())
+			}
+		}));
+		let core = session_serving(backend);
+		let mut token = core.cancellation.token();
+		token.fence_dispatch();
+		assert!(matches!(
+			core.call_with_wait(
+				token,
+				|reply| Request::ListWindows { reply },
+				|reply, _| Ok(reply.recv().expect("provider did not reply")),
+			),
+			Ok(Response::Windows(_))
+		));
+		assert_eq!(mutations.load(Ordering::Acquire), 1);
+		shut_down(&core);
+	}
+
+	#[test]
+	fn windows_fences_a_no_menu_action_through_the_request_itself() {
+		let core = SessionCore::with_operation_timeout(
+			DisplaySelector::Active,
+			Arc::default(),
+			None,
+			HUNG_CALL_TIMEOUT,
+		);
+		let (tx, _queued) = flume::unbounded();
+		core.lifecycle.lock().tx = Some(tx);
+		let error = core
+			.call_with_wait(
+				core.cancellation.token(),
+				|reply| Request::AxPerform {
+					reference: "e1".into(),
+					action: "press".into(),
+					menu: None,
+					reply,
+				},
+				|_, _| Err(flume::RecvTimeoutError::Timeout),
+			)
+			.err()
+			.unwrap();
+		#[cfg(target_os = "windows")]
+		{
+			let abandoned = control::abandoned_before_dispatch();
+			assert_eq!(error.code, abandoned.code);
+			assert_eq!(error.message, abandoned.message);
+		}
+		#[cfg(not(target_os = "windows"))]
+		{
+			assert_eq!(error.code, ErrorCode::Timeout);
+			assert_ne!(error.message, control::abandoned_before_dispatch().message);
+		}
+	}
+
+	#[test]
+	fn unfenced_requests_keep_their_native_reply_deadline_and_timeout() {
+		// No worker: only the caller's side of each off-side request runs.
+		let core = SessionCore::with_operation_timeout(
+			DisplaySelector::Active,
+			Arc::default(),
+			None,
+			HUNG_CALL_TIMEOUT,
+		);
+		let (tx, _queued) = flume::unbounded();
+		core.lifecycle.lock().tx = Some(tx);
+		let run_by = Instant::now();
+		core.cancellation.set_deadline(Some(run_by));
+		// Windows fences only actions without a menu path; others fence none.
+		let menu = cfg!(target_os = "windows").then(|| vec!["Open".to_owned()]);
+		for action in [true, false] {
+			let error = core
+				.call_with_wait(
+					core.cancellation.token(),
+					|reply| {
+						if action {
+							Request::AxPerform {
+								reference: "e1".into(),
+								action: "press".into(),
+								menu: menu.clone(),
+								reply,
+							}
+						} else {
+							Request::ListWindows { reply }
+						}
+					},
+					|_, reply_by| {
+						assert!(reply_by > run_by);
+						Err(flume::RecvTimeoutError::Timeout)
+					},
+				)
+				.err()
+				.unwrap();
+			assert_eq!(error.code, ErrorCode::Timeout);
+			// Not the fenced caller's outcome: nothing here was dispatch-fenced.
+			assert_ne!(error.message, control::abandoned_before_dispatch().message);
+		}
 	}
 
 	#[test]
@@ -4070,6 +4543,38 @@ mod capture_tests {
 			panic!("zoom without a frame must fail")
 		};
 		(capture.screen_locked, error)
+	}
+
+	#[test]
+	fn a_covered_window_marks_its_capture_and_tree() {
+		for covered in [true, false] {
+			let mut backend = FakeWaylandBackend::new();
+			backend.covered = covered;
+			let mut worker = worker_with(backend);
+			let token = CancellationSource::default().token();
+			let target = Target::Window(WAYLAND_ID.to_string());
+			let Ok(Response::Capture(capture)) =
+				worker.process(&capture_request(target.clone()), &token)
+			else {
+				panic!("window capture");
+			};
+			assert_eq!(capture.covered, covered);
+			let region = CaptureRegion { x: 0.0, y: 0.0, width: 8.0, height: 6.0 };
+			let Ok(Response::Capture(zoom)) =
+				worker.process(&zoom_request(target.clone(), region, CaptureCaps::default()), &token)
+			else {
+				panic!("window zoom");
+			};
+			assert_eq!(zoom.covered, covered);
+			// The desktop's tree is the focused window's: the mark follows that
+			// window, not the selector.
+			for target in [target, Target::Desktop] {
+				let tree = worker
+					.snapshot(&target, &AxSnapshotOptions::default())
+					.unwrap();
+				assert_eq!(tree.covered, covered);
+			}
+		}
 	}
 
 	#[test]
@@ -4712,6 +5217,71 @@ mod capture_tests {
 	}
 
 	#[test]
+	fn a_minimized_window_tree_is_read_only_and_never_uses_its_visible_sibling() {
+		let documents = Arc::new(Mutex::new(FakeTree {
+			titles: [(1, "Retained document"), (2, "Visible sibling")].into(),
+			roles: [(2, "window")].into(),
+			..Default::default()
+		}));
+		let roster = |minimized| {
+			let mut backend = FakeWaylandBackend::new();
+			backend.window.id = if minimized { "43" } else { "42" }.into();
+			backend.minimized_id = minimized.then_some("42");
+			backend.tree = Some(Arc::clone(&documents));
+			backend
+		};
+		let mut worker = worker_with(roster(false));
+		let target = Target::Window("42".into());
+		worker
+			.snapshot(&target, &AxSnapshotOptions::default())
+			.unwrap();
+		worker.backend = Ok(Box::new(roster(true)));
+		let tree = worker
+			.snapshot(&target, &AxSnapshotOptions::default())
+			.unwrap();
+		assert!(tree.text.contains("Retained document") && tree.text.contains("(minimized)"));
+		assert!(!tree.text.contains("Visible sibling"));
+		let menu = worker.explicit_window(&target).unwrap_err();
+		assert_eq!(menu.code, ErrorCode::WindowUnavailable);
+		assert!(menu.message.contains("'42' is minimized"));
+		let source = CancellationSource::default();
+		let focus =
+			call(&mut worker, |reply| Request::AxFocus { reference: "e1".into(), reply }, &source);
+		assert_eq!(focus.err().map(|error| error.code), Some(ErrorCode::WindowUnavailable));
+		assert_eq!(worker.window(&target).unwrap_err().code, ErrorCode::WindowNotFound);
+		let absent = Target::Window("99".into());
+		assert_eq!(
+			worker
+				.snapshot(&absent, &AxSnapshotOptions::default())
+				.unwrap_err()
+				.code,
+			ErrorCode::WindowNotFound
+		);
+		// A visible read that fails before producing a tree keeps those refs
+		// inspection-only.
+		documents.lock().destroyed.insert(1);
+		worker.backend = Ok(Box::new(roster(false)));
+		assert!(
+			worker
+				.snapshot(&target, &AxSnapshotOptions::default())
+				.is_err()
+		);
+		assert_eq!(
+			worker.registry.require_actionable("e1").unwrap_err().code,
+			ErrorCode::WindowUnavailable
+		);
+		documents.lock().destroyed.remove(&1);
+		worker.backend = Ok(Box::new(roster(false)));
+		let restored = worker
+			.snapshot(&target, &AxSnapshotOptions::default())
+			.unwrap();
+		assert!(
+			restored.text.contains("Retained document") && !restored.text.contains("(minimized)")
+		);
+		assert!(worker.registry.require_actionable("e1").is_ok());
+	}
+
+	#[test]
 	fn a_menu_read_holds_the_input_lease() {
 		let source = CancellationSource::default();
 		// Whether another call of the session could take input during the read.
@@ -4762,6 +5332,35 @@ mod capture_tests {
 			.expect("the element is gone");
 		assert_eq!(named(&error, "e2").as_deref(), Some("e4"));
 		assert!(free.load(Ordering::SeqCst), "the search held the call's input lease");
+	}
+
+	#[test]
+	fn an_element_action_waits_for_its_elements_late_input_with_input_released() {
+		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Stop")]);
+		tree.lock().late_input.insert(2);
+		let source = granted();
+		// Whether another call of the session could take input while the
+		// element's late input (macOS type-ahead) was awaited, and whether the
+		// user's front app was read before it.
+		let seen = Arc::new(Mutex::new(Vec::new()));
+		let (other, waits) = (source.clone(), Arc::clone(&seen));
+		tree.lock().on_settle = Some(Box::new(move || {
+			let free = InputLease::acquire(&other.token(), false).is_ok();
+			#[cfg(target_os = "macos")]
+			let pinned = macos::entry_front_pinned();
+			#[cfg(not(target_os = "macos"))]
+			let pinned = true;
+			waits.lock().push((free, pinned));
+		}));
+		call(&mut worker, press_request("e2"), &source).expect("pressed");
+		assert_eq!(
+			*seen.lock(),
+			[(true, true)],
+			"waited under the lease or with the front app unread"
+		);
+		// An element with nothing pending does not wait.
+		call(&mut worker, press_request("e3"), &source).expect("pressed");
+		assert_eq!(seen.lock().len(), 1);
 	}
 
 	#[test]
@@ -5178,6 +5777,116 @@ mod capture_tests {
 			ErrorCode::InvalidCoordinateFrame
 		);
 		assert_eq!(*captures.lock(), 1, "invalid zoom must not reach the capture backend");
+	}
+
+	/// With no input route, every pointer and keyboard call, element clicks
+	/// included, is refused at once: before it waits for control another session
+	/// holds or resolves a frame or a window, so none of them asks for a
+	/// screenshot first or opens a capture to refresh the display layout.
+	#[test]
+	fn every_input_call_is_refused_before_its_frame_when_input_is_unavailable() {
+		let mut backend = FakeWaylandBackend::new();
+		backend.no_input = true;
+		let captures = Arc::clone(&backend.captures);
+		let layout_reads = Arc::clone(&backend.window_queries);
+		let clicks = Arc::clone(&backend.clicks);
+		let mut worker = worker_with(backend);
+		let token = CancellationSource::default().token();
+		// Another session holds control, which input would otherwise wait for.
+		let other = CancellationSource::default();
+		control::grant_for_test(&other);
+		let window = Target::Window(WAYLAND_ID.to_string());
+		let pointer = || ParsedPointerOptions::parse(None).unwrap();
+		let takeover = Takeover::new(None, None);
+		let reply = || flume::unbounded().0;
+		let requests = [
+			Request::Click {
+				target:  Target::Desktop,
+				x:       1.0,
+				y:       1.0,
+				options: pointer(),
+				reply:   reply(),
+			},
+			Request::MoveMouse { target: window.clone(), x: 1.0, y: 1.0, takeover, reply: reply() },
+			Request::Drag {
+				target:  Target::Desktop,
+				path:    vec![(1.0, 1.0), (2.0, 2.0)],
+				options: pointer(),
+				reply:   reply(),
+			},
+			Request::Scroll {
+				target: window.clone(),
+				x: 1.0,
+				y: 1.0,
+				dx: 0.0,
+				dy: 3.0,
+				takeover,
+				reply: reply(),
+			},
+			Request::HoldMouse {
+				target: Target::Desktop,
+				x: 1.0,
+				y: 1.0,
+				button: MouseButton::Left,
+				keys: Vec::new(),
+				duration: Duration::ZERO,
+				takeover,
+				refuse_menu: false,
+				reply: reply(),
+			},
+			Request::TypeText { target: Target::Desktop, text: "x".into(), takeover, reply: reply() },
+			Request::KeyChord {
+				target: window.clone(),
+				keys: vec![KeyName::Enter],
+				takeover,
+				reply: reply(),
+			},
+			Request::HoldKeys {
+				target: window,
+				keys: vec![KeyName::Enter],
+				duration: Duration::ZERO,
+				takeover,
+				reply: reply(),
+			},
+			Request::AxClick { reference: "e1".into(), options: pointer(), reply: reply() },
+		];
+		for request in &requests {
+			let error = worker
+				.execute(request, &token)
+				.err()
+				.expect("input is refused");
+			assert_eq!(error.code, ErrorCode::PermissionDenied, "{}", error.message);
+		}
+		assert_eq!(*captures.lock(), 0);
+		assert_eq!(*layout_reads.lock(), 0, "no window was looked up");
+		assert!(clicks.lock().is_empty());
+	}
+
+	/// Without a backend there is nothing to ask about an input route, so a
+	/// coordinate call still fails on its missing frame first.
+	#[test]
+	fn input_without_a_backend_still_asks_for_its_frame() {
+		let mut worker = worker_with(FakeWaylandBackend::new());
+		worker.backend = Err(DesktopError::capture_failed("no display server"));
+		// The user-input watch would ask the missing backend for the window's
+		// app first, so it stays off.
+		#[cfg(target_os = "macos")]
+		{
+			worker.listener = control::intervention::Listener::off();
+		}
+		let token = CancellationSource::default().token();
+		let click = Request::Click {
+			target:  Target::Window(WAYLAND_ID.to_string()),
+			x:       1.0,
+			y:       1.0,
+			options: ParsedPointerOptions::parse(None).unwrap(),
+			reply:   flume::unbounded().0,
+		};
+		let error = worker
+			.execute(&click, &token)
+			.err()
+			.expect("the click fails");
+		assert_eq!(error.code, ErrorCode::InvalidCoordinateFrame, "{}", error.message);
 	}
 
 	#[test]

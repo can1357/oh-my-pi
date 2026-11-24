@@ -73,7 +73,6 @@ async fn brace_limit_reports_oversized_expansions() {
 	assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn uutils_diff_reads_process_substitution_fds() {
 	let (result, output) = run_command_capture_within(
@@ -88,6 +87,23 @@ async fn uutils_diff_reads_process_substitution_fds() {
 
 	assert_eq!(result.exit_code, Some(1));
 	assert!(output.contains("< a\n---\n> b\n"), "diff output missing changed lines: {output:?}");
+}
+
+/// `cat`, `grep` and `comm` open `/dev/fd/N` through the same descriptor mount
+/// as `diff`, on Windows as on Unix.
+#[tokio::test(flavor = "multi_thread")]
+async fn builtins_read_process_substitution_fds() {
+	let (result, output) = run_command_capture_within(
+		Duration::from_secs(5),
+		"cat <(echo x); grep -c x <(echo x); comm -12 <(printf 'a\\nb\\n') <(printf 'b\\n')",
+		None,
+		None,
+		CancelToken::default(),
+	)
+	.await
+	.expect("process substitution should not hang");
+
+	assert_eq!((result.exit_code, output.as_str()), (Some(0), "x\n1\nb\n"));
 }
 
 /// Every run reads through a cancellable filesystem, and its redirects must
@@ -522,7 +538,6 @@ async fn descriptor_paths_never_reach_host_only_descriptors() {
 /// `<(…)` operands resolve through the shell's descriptor table, so
 /// utilities report the name the shell passed and script-file options read
 /// them too.
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn process_substitution_operands_keep_the_shell_fd_name() {
 	let command = "wc -l <(printf 'a\\nb\\n'); ls <(true); sed -n -f <(echo p) <<< from-sed";
@@ -954,7 +969,8 @@ async fn persistent_shell_reaps_early_exiting_background_pipeline_stage() {
 }
 
 /// `exit` and errexit end the command, not the session: later runs keep
-/// the variables, functions, and options set before them.
+/// the variables and functions set before them. Errexit itself ends with
+/// the command that turned it on.
 #[tokio::test(flavor = "multi_thread")]
 async fn exit_and_errexit_keep_session_state() {
 	let _guard = shell_test_lock().lock().await;
@@ -972,12 +988,38 @@ async fn exit_and_errexit_keep_session_state() {
 	};
 	let state_intact = "test \"$PI_KEPT\" = kept && pi_kept_fn";
 
-	assert_eq!(exit_code("set -e; PI_KEPT=kept; pi_kept_fn() { true; }").await, Some(0));
-	assert_eq!(exit_code("false; true").await, Some(1), "errexit stops the command");
+	let set_state = "set -e; PI_KEPT=kept; pi_kept_fn() { true; }; false; true";
+	assert_eq!(exit_code(set_state).await, Some(1), "errexit stops the command");
 	assert_eq!(exit_code(state_intact).await, Some(0), "state lost after errexit");
+	assert_eq!(exit_code("false; true").await, Some(0), "errexit carried into a later command");
 	assert_eq!(exit_code("exit 3").await, Some(3));
 	assert_eq!(exit_code(state_intact).await, Some(0), "state lost after exit");
-	assert_eq!(exit_code("false; exit 0").await, Some(1), "errexit option lost");
+}
+
+/// A command's `set -e` holds across every run of its segmented chain, and
+/// the next command starts without it; the result says what the command left
+/// behind (errexit on, another directory).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn errexit_and_cd_last_one_segmented_command() {
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("minimizer directory");
+	let minimizer = printf_minimizer(&root.path().join("minimizer.toml"), None);
+	let shell = Shell::new(Some(ShellOptions { minimizer: Some(minimizer), ..Default::default() }));
+	let start = root.path().to_string_lossy().into_owned();
+	let run = async |command: String| {
+		let options = ShellRunOptions { command, cwd: Some(start.clone()), ..Default::default() };
+		shell.run(options, None, CancelToken::default()).await.expect("run")
+	};
+	let repeated = format!("printf '{}'", "hello\\n".repeat(200));
+
+	let left = run(format!("{repeated}; set -e; cd /; false; {repeated}")).await;
+	let filter = left.minimized.as_ref().map(|m| m.filter.as_str());
+	assert_eq!(filter, Some("chain"), "the command must run segment by segment");
+	assert_eq!((left.exit_code, left.moved_cwd, left.errexit), (Some(1), true, true));
+
+	let fresh = run(format!("{repeated}; false; {repeated}")).await;
+	assert_eq!((fresh.exit_code, fresh.moved_cwd, fresh.errexit), (Some(0), false, false));
 }
 
 /// An EXIT trap belongs to one run, while signal traps persist in the session.
@@ -2611,7 +2653,8 @@ async fn pipe_tap_exposes_input_a_later_stage_holds_back() {
 	let _guard = shell_test_lock().lock().await;
 	let mut cancel = CancelToken::default();
 	let abort = cancel.emplace_abort_token();
-	let (taps, run, rx) = run_tapped("{ printf 'a\\nb\\nc\\n'; sleep 30; } | tail -n 1", cancel);
+	let (taps, run, rx) =
+		run_tapped("{ printf 'a\\nb\\nc\\n'; sleep 30; } | tail -n 1", None, cancel);
 
 	let seen = time::timeout(Duration::from_secs(10), async {
 		loop {
@@ -2630,6 +2673,7 @@ async fn pipe_tap_exposes_input_a_later_stage_holds_back() {
 	let [stream] = taps.list().try_into().expect("one pipe");
 	assert!(stream.producer.contains("printf"), "producer text: {}", stream.producer);
 	assert!(stream.consumer.contains("tail"), "consumer text: {}", stream.consumer);
+	assert_eq!(stream.node, None, "a run without a trace names no node");
 
 	abort.abort(AbortReason::Signal);
 	let result = time::timeout(Duration::from_secs(10), run)
@@ -2663,7 +2707,7 @@ async fn pipe_tap_widows_the_producer_when_the_consumer_exits() {
 		}
 		Ok(())
 	});
-	let (_taps, run, rx) = run_tapped(&command, CancelToken::default());
+	let (_taps, run, rx) = run_tapped(&command, None, CancelToken::default());
 
 	let result = time::timeout(Duration::from_secs(10), run).await;
 	stop.store(true, Ordering::Relaxed);
@@ -2685,7 +2729,7 @@ async fn pipe_tap_widows_the_producer_when_the_consumer_exits() {
 async fn pipe_tap_forwards_every_byte_and_counts_them() {
 	let _guard = shell_test_lock().lock().await;
 	const LAST: usize = 200_000;
-	let (taps, run, rx) = run_tapped(&format!("seq 1 {LAST} | wc -l"), CancelToken::default());
+	let (taps, run, rx) = run_tapped(&format!("seq 1 {LAST} | wc -l"), None, CancelToken::default());
 
 	let result = time::timeout(Duration::from_secs(30), run)
 		.await
@@ -2700,6 +2744,141 @@ async fn pipe_tap_forwards_every_byte_and_counts_them() {
 	assert_eq!(read.data.len(), written.min(1 << 20));
 	assert!(read.data.ends_with(format!("\n{LAST}\n").as_bytes()));
 	assert!(!read.open);
+}
+
+/// A command whose output is redirected prints nothing: its file is a stream,
+/// under the path the shell resolved in the directory it had moved to, and
+/// reads what the command wrote so far while it still runs.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn pipe_tap_lists_the_file_a_command_redirects_into() {
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("output directory");
+	let mut cancel = CancelToken::default();
+	let abort = cancel.emplace_abort_token();
+	let command = format!(
+		"cd {} && {{ printf 'a\\nb\\n'; sleep 30; }} > run.log 2>/dev/null",
+		quote_arg(&root.path().to_string_lossy()),
+	);
+	let (taps, run, rx) = run_tapped(&command, None, cancel);
+
+	let seen = time::timeout(Duration::from_secs(10), async {
+		loop {
+			if let Some(read) = taps.read(1, None)
+				&& read.data == b"a\nb\n"
+			{
+				return read;
+			}
+			time::sleep(Duration::from_millis(20)).await;
+		}
+	})
+	.await
+	.expect("the redirected output never became stream 1");
+	assert!(seen.open);
+	assert!(rx.try_recv().is_err(), "redirected output reached the run's own");
+	// `/dev/null` is no file to read back.
+	let [stream] = taps.list().try_into().expect("one stream");
+	assert!(stream.file);
+	assert_eq!(std::path::Path::new(&stream.consumer), root.path().join("run.log"));
+	assert!(stream.producer.contains("printf"), "command text: {}", stream.producer);
+	assert_eq!(stream.node, None, "a run without a trace names no node");
+
+	abort.abort(AbortReason::Signal);
+	time::timeout(Duration::from_secs(10), run)
+		.await
+		.expect("run did not stop after abort")
+		.expect("run task panicked")
+		.expect("run");
+	assert!(!taps.read(1, None).expect("stream 1").open);
+}
+
+/// Source text of trace node `key` in `snapshot`.
+fn traced_text(snapshot: &crate::bash::trace::Snapshot, key: NodeKey) -> String {
+	let unit = &snapshot.units[key.unit as usize];
+	let node = &unit.nodes[key.node.0 as usize];
+	let source: &[u8] = match &unit.source {
+		Some(source) => source,
+		None => {
+			let at = unit.at.expect("a unit with no source is located") as usize;
+			&snapshot.script[at..at + unit.bytes as usize]
+		},
+	};
+	String::from_utf8_lossy(&source[node.lo as usize..node.hi as usize]).into_owned()
+}
+
+/// With a trace on the run, each tapped pipe names the stage writing into
+/// it by its trace node, the key the UI selects a step by.
+#[tokio::test(flavor = "multi_thread")]
+async fn pipe_tap_names_each_producing_stage_by_its_trace_node() {
+	let _guard = shell_test_lock().lock().await;
+	let command = "printf 'a\\nb\\n' | sort | head -1";
+	let trace = Arc::new(RunTrace::new(command));
+	let before = std::time::SystemTime::now();
+	let (taps, run, rx) = run_tapped(command, Some(Arc::clone(&trace)), CancelToken::default());
+	let result = time::timeout(Duration::from_secs(10), run)
+		.await
+		.expect("run did not finish")
+		.expect("run task panicked")
+		.expect("run");
+	assert_eq!(result.exit_code, Some(0));
+	assert_eq!(collect_output(&rx).await, "a\n");
+
+	let snapshot = trace.snapshot();
+	let streams = taps.list();
+	let producers: Vec<(u32, String)> = streams
+		.iter()
+		.map(|stream| {
+			let node = stream
+				.node
+				.unwrap_or_else(|| panic!("stream {} names no node", stream.id));
+			(stream.id, traced_text(&snapshot, node))
+		})
+		.collect();
+	assert_eq!(producers, [(1, "printf 'a\\nb\\n'".to_owned()), (2, "sort".to_owned())]);
+	assert!(streams.iter().all(|stream| stream.modified >= before), "{streams:?}");
+}
+
+/// Every file a loop body redirects into names the one command that wrote
+/// it: each iteration's stream carries the same trace node.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn pipe_tap_names_a_loop_body_s_files_by_one_trace_node() {
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("output directory");
+	let command = format!(
+		"dir={}; for i in 1 2; do echo $i > \"$dir/f$i\"; done",
+		quote_arg(&root.path().to_string_lossy()),
+	);
+	let trace = Arc::new(RunTrace::new(command.as_str()));
+	let (taps, run, _rx) = run_tapped(&command, Some(Arc::clone(&trace)), CancelToken::default());
+	let result = time::timeout(Duration::from_secs(10), run)
+		.await
+		.expect("run did not finish")
+		.expect("run task panicked")
+		.expect("run");
+	assert_eq!(result.exit_code, Some(0));
+
+	let streams = taps.list();
+	let files: Vec<&str> = streams
+		.iter()
+		.map(|stream| stream.consumer.as_str())
+		.collect();
+	let expected = [root.path().join("f1"), root.path().join("f2")];
+	assert_eq!(
+		files,
+		expected
+			.iter()
+			.map(|path| path.to_str().unwrap())
+			.collect::<Vec<_>>()
+	);
+	let node = streams[0].node.expect("the first file names its command");
+	assert_eq!(streams[1].node, Some(node), "both iterations ran one command");
+	assert_eq!(traced_text(&trace.snapshot(), node), "echo $i > \"$dir/f$i\"");
+	assert!(
+		streams
+			.iter()
+			.all(|stream| stream.modified > std::time::UNIX_EPOCH)
+	);
 }
 
 /// A process's own shell ([`Shell::for_process`]) is the bash tool's shell on

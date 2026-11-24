@@ -1,7 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
-import type { Component, Container, EditorTheme, HistoryContext, KeyId, Loader, TUI } from "@oh-my-pi/pi-tui";
+import type { Component, Container, Editor, EditorTheme, HistoryContext, KeyId, Loader, TUI } from "@oh-my-pi/pi-tui";
 import type { TspText } from "@oh-my-pi/pi-wire";
 import type { StatusNotice, StatusNoticeAction } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import type { CollabController } from "../collab/controller";
@@ -9,7 +9,6 @@ import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
-import type { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import type { Settings } from "../config/settings";
 import type {
 	AutocompleteProviderFactory,
@@ -46,6 +45,7 @@ import type { SessionContinuation } from "../session/session-listing";
 import type { SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { LspStartupServerInfo } from "../tools";
+import type { BackgroundCompactionHud } from "./progress-hud";
 import type { EventBus } from "../utils/event-bus";
 import type { TokenRateMeter } from "../utils/token-rate";
 import type { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
@@ -166,6 +166,19 @@ export interface ShowStatusOptions {
 	toast?: boolean;
 	/** A button on the native toast (Undo); the ANSI line has none. */
 	action?: StatusNoticeAction;
+	/**
+	 * Names a status that updates in place (the MCP startup line): a later status with the same key rewrites
+	 * that line while it is still mutable and only notices sit below it. Otherwise it appends a fresh line,
+	 * preserving both unrelated notices and status updates after the original line enters scrollback.
+	 * Keyed statuses never collapse with unkeyed ones.
+	 */
+	key?: string;
+	/**
+	 * Whether the status collapses into the status line directly above it and lets the next one collapse into it
+	 * (default true). False gives it a line of its own: an extension's notice, which must not overwrite or be
+	 * overwritten by another source's status.
+	 */
+	collapse?: boolean;
 }
 
 export interface AgentHubOpenOptions {
@@ -179,7 +192,6 @@ export interface AgentHubOpenOptions {
 export interface InteractiveModeContext {
 	// UI access
 	ui: TUI;
-	readonly composer: Pick<Composer, "setRunActive">;
 	chatContainer: TranscriptContainer;
 	/** `!`/`$` runs started while the agent streams, until {@link flushPendingBashComponents} moves them into the transcript. */
 	pendingShellContainer: Container;
@@ -390,6 +402,8 @@ export interface InteractiveModeContext {
 	loadingAnimation: Loader | undefined;
 	autoCompactionLoader: Loader | undefined;
 	retryLoader: Loader | undefined;
+	/** Where a background compaction (`/handoff`) shows: the empty status row, else a HUD row beside it. */
+	readonly backgroundCompaction: BackgroundCompactionHud;
 	unsubscribe?: () => void;
 	onInputCallback?: (input: SubmittedUserInput) => void;
 	optimisticUserMessageSignature: string | undefined;
@@ -575,6 +589,8 @@ export interface InteractiveModeContext {
 	/** Refresh the running-subagents status badge from the active local or collab registry. */
 	syncRunningSubagentBadge(): void;
 	updateEditorBorderColor(): void;
+	/** Give an editor a dialog owns the composer's clipboard routing and a cursor shape that shows its Vim mode. */
+	configureDialogEditor(editor: Editor): void;
 	rebuildChatFromMessages(options?: { reuseSettledComponents?: boolean }): void;
 	setTodos(todos: TodoItem[] | TodoPhase[]): void;
 	reloadTodos(source?: AgentViewSession): Promise<void>;
@@ -734,7 +750,8 @@ export interface InteractiveModeContext {
 	 */
 	showCommandReport(options: { title: string; head?: TspText; body: Component }): void;
 	/** The live background-jobs sheet (the jobs pill's). */
-	showJobsSheet(): void;
+	/** The jobs sheet, on job `selected` when it lists it. */
+	showJobsSheet(selected?: string): void;
 	/** Clear the docked command report; false when none was shown (Esc falls through). */
 	dismissCommandReport(): boolean;
 	/** Screen rows a report above the editor may take (all of them but the editor and the chrome under it). */

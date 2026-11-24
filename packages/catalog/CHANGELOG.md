@@ -4,11 +4,103 @@
 
 ### Added
 
-- `prompt-cache-prewarm` compat axis, read through `isPromptCachePrewarmSupported`: the first-party Anthropic endpoint accepts a `max_tokens: 0` prompt-cache pre-warm
+- Added GLM-5.4 to the Zhipu Coding Plan with image input and 1M context, gave it the low/high/max thinking ladder on every host, and preferred it over GLM-5.3 for the `slow` role
+- Added `fetchOpenRouterChatModels()` and `OPENROUTER_BASE_URL` to `@oh-my-pi/pi-catalog/provider-models/openai-compat` for reading OpenRouter's tool-capable chat roster outside the `openrouter` provider.
+- `toolSchemaFlavor: "google"` rewrites OpenAI-compatible tool schemas into Gemini's dialect; GitHub Copilot Gemini models use it ([#20198](https://github.com/can1357/oh-my-pi/issues/20198))
 
 ### Fixed
 
-- Hosted jev (TypeSafe, OpenRouter, Command Code, OpenCode Zen) splits judgment requests at 32 questions, ending `400 questions must map 1 through 32 ids` find failures
+- Fixed requests to Bedrock's Kimi K3.1 Pro Highspeed profiles failing with "The task request was rejected by the target"; requests now ask for 131,072 output tokens instead of the full context window ([#20240](https://github.com/can1357/oh-my-pi/pull/20240) by [@alblez](https://github.com/alblez))
+- Fixed Claude Opus 4.8+, Sonnet 5.5, Haiku 5.5, and Fable/Mythos 5 on Google Vertex failing every turn with a 400 (`Input tag 'tool_removal'`) after the active tool set changed mid-session ([#20275](https://github.com/can1357/oh-my-pi/issues/20275))
+- Claude models on OpenRouter now get their earlier thinking back on each follow-up request, so models that think between tool calls (e.g. Sonnet 4.6) keep doing so instead of only at the start and end of a tool loop
+- Added OpenCode's free `jev-1.13-free` judge to OpenCode Go; the `judge` role now prefers it on OpenCode Go and Zen logins over OpenRouter's paid Jev and chat models, falling back to Zen's `jev-1.14`
+
+### Fixed
+
+- Fixed OpenCode Zen's Jev 1.14, Gemini Decision 1, GPT-6 Luna Decision, and future decision models appearing as chat models that failed every request; they are now judge models
+
+## [19.1.1] - 2026-11-23
+
+### Added
+
+- Z.AI (`zai`) now discovers the models available to your GLM Coding Plan key, so newly released GLM models appear without waiting for a catalog update.
+- Added `getUpstreamPin()` and `routedModelsAreEqual()` to `@oh-my-pi/pi-catalog/models` for distinguishing aggregator models routed to different upstream providers.
+- Added `@oh-my-pi/pi-catalog/discovery/pi-native` and `piNativeModelManagerOptions()` for reading a provider's model roster from an auth gateway's `GET /v1/pi/models`.
+
+### Fixed
+
+- Fixed Llama 3.x models failing after turns that invoked multiple tools when served through vLLM-based hosts, including CoreWeave through OpenRouter.
+- Devin usage is now kept separate for organizations that share the same email address.
+- Updated Devin image token accounting to match Devin’s published 1,089-token charge per image across supported Gemini image models.
+- Corrected Devin pricing and context limits for GPT-5.6 Sol, Terra, and Luna Fast lanes, including long-context rates above 272K input tokens and the standard 272K limit when Extended Context is disabled.
+- Corrected Cursor pricing for GPT-5.6 Sol, Terra, and Luna models so output above 272K input tokens uses the documented 1.5× rate.
+- Turning thinking off for GPT-6.1 Terra now uses the supported `none` reasoning effort.
+- Fixed GPT-6.2 and later OpenAI Responses models losing reasoning context after session pruning and subsequent tool calls.
+- Corrected Bedrock Kimi K3.1 Pro Highspeed reasoning options and effort handling.
+- GitHub Copilot now lists only models available to the account, including after restarting.
+- Codex models discovered before being bundled now use their formatted display names, such as `GPT-6.2 Sol`.
+- Fixed Bedrock Kimi K3.1 requests that set a temperature (history summaries, skill routing hints) failing with "This model doesn't support the temperature field" ([#20239](https://github.com/can1357/oh-my-pi/issues/20239))
+- Fixed Llama 3.x models failing with "This model only supports single tool-calls at once!" after a turn that called several tools, on hosts serving them through vLLM (such as CoreWeave behind OpenRouter)
+- Devin usage from two organizations under one email is no longer merged into one account ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))
+- Devin's Gemini 4 Neon images are now budgeted at the 1,089 tokens Devin bills per image, measured across sizes, instead of the unverified 1,120-token Gemini estimate ([#19883](https://github.com/can1357/oh-my-pi/pull/19883) by [@will-bogusz](https://github.com/will-bogusz))
+- Devin's Gemini 4 Hydrogen and Argon and Gemini 3.5 and 3.8 Flash images are now budgeted at the 1,089 tokens Devin bills per image, measured across sizes, instead of the unverified 1,120-token Gemini estimate ([#20038](https://github.com/can1357/oh-my-pi/pull/20038) by [@will-bogusz](https://github.com/will-bogusz))
+- Devin's GPT-5.6 Sol, Terra and Luna Fast lanes are now costed at Devin's published long-context rates above 272K input tokens and, with Extended Context off, capped at 272K like the standard lanes ([#20094](https://github.com/can1357/oh-my-pi/pull/20094) by [@will-bogusz](https://github.com/will-bogusz))
+- Devin's GPT-5.6 Sol is costed above 272K input tokens at Devin's published $8 / $30 rate instead of $10 / $45 derived from its new standard-context price ([#20094](https://github.com/can1357/oh-my-pi/pull/20094) by [@will-bogusz](https://github.com/will-bogusz))
+- Cursor's GPT-5.6 Sol, Terra and Luna (standard and Fast) now price output above 272K input tokens at 1.5x the base rate, as each model's Cursor docs page publishes, instead of the base rate ([#20093](https://github.com/can1357/oh-my-pi/pull/20093) by [@will-bogusz](https://github.com/will-bogusz))
+- Turning thinking off on GPT-6.1 Terra now sends reasoning effort `none`, which the model supports, instead of falling back to `low` ([#20144](https://github.com/can1357/oh-my-pi/pull/20144) by [@Komzpa](https://github.com/Komzpa))
+- Fixed GPT-6.2 and later OpenAI Responses models lacking thinking prefix-binding, so sessions pruned already-sent tool results and the API dropped later reasoning items ([#19721](https://github.com/can1357/oh-my-pi/issues/19721), [#19988](https://github.com/can1357/oh-my-pi/pull/19988) by [@JamieJ5926](https://github.com/JamieJ5926))
+- Fixed Bedrock's Kimi K3.1 Pro Highspeed profiles missing the `xhigh` and `max` reasoning efforts, offering an unsupported `minimal`, and sending token budgets instead of effort controls ([#19998](https://github.com/can1357/oh-my-pi/pull/19998) by [@alblez](https://github.com/alblez))
+- Fixed GitHub Copilot listing bundled models the account's `/models` roster omits, and models Copilot disables for the account, including after a restart ([#14832](https://github.com/can1357/oh-my-pi/issues/14832), [#19984](https://github.com/can1357/oh-my-pi/pull/19984) by [@JamieJ5926](https://github.com/JamieJ5926))
+- Fixed Codex models discovered before they are bundled for `openai-codex` showing Codex's slug-style name, e.g. `GPT-6.2-Sol` instead of `GPT-6.2 Sol` ([#20167](https://github.com/can1357/oh-my-pi/issues/20167))
+
+## [19.1.0] - 2026-11-21
+
+### Breaking Changes
+
+- Removed the built-in Gemini CLI OAuth provider (`google-gemini-cli`). Google Antigravity and Antigravity CLI remain available.
+
+### Added
+
+- Added runtime provider rules (`setRuntimeProviderRule` in `compat/cascade`). They apply KDL directives to one provider's models, win ties with bundled rules, and clear rule-derived caches when they change.
+- Added the `prompt-perturbation` catalog axis, which opts a provider or model into per-install prompt paraphrasing.
+- Added the `uncached-instructions` compatibility flag for GPT-6.2 models across all hosts, moving system prompts out of the uncached Responses `instructions` field.
+
+### Fixed
+
+- Fixed Vercel AI Gateway model refreshes so public models remain discoverable when a stored API key has expired.
+- Fixed OpenRouter models that require reasoning but do not advertise effort levels; requests that disable thinking now use the lowest supported reasoning effort instead of failing.
+- Fixed Gemini 4 models (Argon, Carbon, Hydrogen, and Neon) failing with empty malformed responses when messages arrived immediately after tool results.
+- Updated pricing for newly served Cursor models to use their documented per-token rates instead of being reported as free.
+- Fixed Codex client version caching so its cache file is stored under the configured `$XDG_CACHE_HOME/omp` directory.
+
+## [19.0.1] - 2026-11-19
+
+### Added
+
+- Added Liquid AI's `d1.2` and `d1.2-ultra` judge models; `liquid` now defaults to `d1.2` ([#19753](https://github.com/can1357/oh-my-pi/pull/19753) by [@alphastorm](https://github.com/alphastorm))
+- Added `gemini-4-neon` to the bundled Antigravity CLI roster, with the `low`/`medium`/`high`/`xhigh` thought levels `agy` offers for it ([#19787](https://github.com/can1357/oh-my-pi/pull/19787) by [@ataberkus](https://github.com/ataberkus)).
+- `Model.snapcompactShape` (`{ variant, frameSize? }`) gives a model its own snapcompact frame shape ([#19591](https://github.com/can1357/oh-my-pi/pull/19591) by [@ryanskidmore](https://github.com/ryanskidmore))
+
+### Fixed
+
+- Discovered Kiro models that cannot turn reasoning off now use their lowest supported effort when thinking is set to off ([#19722](https://github.com/can1357/oh-my-pi/pull/19722) by [@emotionbug](https://github.com/emotionbug))
+- Kiro accepts AWS GovCloud (US) profile ARNs (`arn:aws-us-gov:codewhisperer:…`), which were previously skipped during profile listing ([#19726](https://github.com/can1357/oh-my-pi/pull/19726) by [@TechDufus](https://github.com/TechDufus))
+- Google Antigravity no longer lists Gemini 4 Hydrogen's sonar monitor slot or its tiered High/XHigh SKUs as separate models; the tiered SKUs fold into the one Gemini 4 Hydrogen model ([#19795](https://github.com/can1357/oh-my-pi/pull/19795) by [@eggpeat](https://github.com/eggpeat))
+- Gemini 4 Neon on Google Antigravity now shows as one model whose thinking level (low, medium, high, xhigh) selects the matching SKU, instead of four separate models, and is priced at $3/$15 per million tokens ($0.15 cached) instead of $0 ([#19789](https://github.com/can1357/oh-my-pi/pull/19789) by [@eggpeat](https://github.com/eggpeat))
+- Gemini 4 Neon now collapses into one model on Gemini CLI too, and on the Gemini API and Vertex AI offers the xhigh thinking level and long outputs up to 262,144 tokens, with its $3/$15 Gemini API price
+
+## [19.0.0] - 2026-11-18
+
+### Added
+
+- Added support for prompt-cache prewarming on the first-party Anthropic endpoint via the `isPromptCachePrewarmSupported` compatibility capability.
+
+### Fixed
+
+- Fixed hosted judgment requests for TypeSafe, OpenRouter, Command Code, and OpenCode Zen when evaluating more than 32 questions.
+- Improved Devin image handling to support more conversation images within provider limits, and updated image compaction for Devin Gemini models to reflect their billed token usage.
+- Fixed Devin Gemini model pricing so models switch from promotional to list pricing when promotions end.
+- Fixed Kiro API key authentication (`KIRO_API_KEY` and `ksk_…`) so model listing, chat, and `/usage` requests work correctly.
 
 ## [18.22.2] - 2026-11-18
 

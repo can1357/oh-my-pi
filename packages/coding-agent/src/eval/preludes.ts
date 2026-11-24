@@ -40,14 +40,19 @@ export interface EvalPreludeDefinition {
 	/** Static Markdown documentation shown only while this prelude is enabled. */
 	documentation: string;
 	/**
+	 * One-line listing summary, replacing the first `documentation` line; `""` lists
+	 * the global by name alone. MCP eval namespaces set a model-written hint here.
+	 */
+	summary?: string;
+	/**
 	 * Render `documentation` in the eval tool description instead of linking it
-	 * as an `xd://eval/<name>` topic, so the first call needs no `read`.
+	 * as an `help://eval/<name>` topic, so the first call needs no `read`.
 	 */
 	inlineDocumentation?: boolean;
 	/**
 	 * Short guide the session sends as a hidden message after the tool batch
 	 * holding this prelude's first call, so the model can start without reading
-	 * the `xd://eval/<name>` topic (which keeps `documentation`) while the
+	 * the `help://eval/<name>` topic (which keeps `documentation`) while the
 	 * always-on tool description keeps one line. Sent again once the context no
 	 * longer holds it. Sessions that cannot send it list the prelude as read-first.
 	 */
@@ -68,8 +73,11 @@ export interface EvalPreludeDefinition {
 	approval?: ToolApproval;
 	/** Live availability predicate. Omission means enabled. */
 	enabled?: () => boolean;
-	/** Execute a host call outside the language VM. */
-	invoke(parameters: unknown, context: EvalPreludeContext): Promise<AgentToolResult<unknown>>;
+	/**
+	 * Execute a host call outside the language VM. Omitted by preludes whose snippets
+	 * only call session tools (`__omp_call_tool__`), which carry their own approval.
+	 */
+	invoke?(parameters: unknown, context: EvalPreludeContext): Promise<AgentToolResult<unknown>>;
 	/**
 	 * One-line description of a successful host call for the eval status tree
 	 * (`main.goto("https://…")`). `undefined` records nothing; omit the hook
@@ -77,6 +85,11 @@ export interface EvalPreludeDefinition {
 	 * bridge regardless.
 	 */
 	status?(parameters: unknown, result: AgentToolResult<unknown>): string | undefined;
+}
+
+/** A prelude whose snippets call back into its own host handler through `__omp_prelude__`. */
+export interface HostEvalPreludeDefinition extends EvalPreludeDefinition {
+	invoke(parameters: unknown, context: EvalPreludeContext): Promise<AgentToolResult<unknown>>;
 }
 
 /**
@@ -92,8 +105,14 @@ export function getEnabledEvalPreludes(definitions: readonly EvalPreludeDefiniti
 	return Array.from(enabledByName.values());
 }
 
-/** First documentation line, advertised as the prelude's one-line summary; undefined when undocumented. */
-export function evalPreludeSummary(definition: Pick<EvalPreludeDefinition, "documentation">): string | undefined {
+/**
+ * The prelude's one-line listing summary: `summary` when set (possibly `""`), else the
+ * first documentation line; undefined when undocumented.
+ */
+export function evalPreludeSummary(
+	definition: Pick<EvalPreludeDefinition, "documentation" | "summary">,
+): string | undefined {
+	if (definition.summary !== undefined) return definition.summary;
 	const doc = definition.documentation.trim();
 	return doc ? doc.split("\n", 1)[0] : undefined;
 }
@@ -181,6 +200,7 @@ export async function invokeEvalPrelude(
 	context.signal?.throwIfAborted();
 	let definition = findEnabledEvalPrelude(context.session, name);
 	if (!definition) throw new Error(`Eval prelude "${name}" is not enabled in the current session.`);
+	if (!definition.invoke) throw new Error(`Eval prelude "${name}" has no host calls.`);
 
 	await approvePreludeInvocation(definition, parameters, context);
 	context.signal?.throwIfAborted();
@@ -194,6 +214,7 @@ export async function invokeEvalPrelude(
 			throw new Error(`Eval prelude "${name}" changed while authorizing the call.`);
 		}
 	}
+	if (!definition.invoke) throw new Error(`Eval prelude "${name}" has no host calls.`);
 	// Even a call that fails shows the model has reached for this prelude, so its guide is due.
 	if (definition.firstCallDocumentation?.trim()) context.session.noteEvalPreludeCall?.(definition.name);
 	return definition.invoke(parameters, context);

@@ -69,12 +69,22 @@ const CP_KP_SUBTRACT: i32 = 57412;
 const CP_KP_ADD: i32 = 57413;
 const CP_KP_ENTER: i32 = 57414;
 const CP_KP_EQUALS: i32 = 57415;
+const CP_KP_LEFT: i32 = 57417;
+const CP_KP_RIGHT: i32 = 57418;
+const CP_KP_UP: i32 = 57419;
+const CP_KP_DOWN: i32 = 57420;
+const CP_KP_PAGE_UP: i32 = 57421;
+const CP_KP_PAGE_DOWN: i32 = 57422;
+const CP_KP_HOME: i32 = 57423;
+const CP_KP_END: i32 = 57424;
+const CP_KP_INSERT: i32 = 57425;
+const CP_KP_DELETE: i32 = 57426;
+const CP_KP_BEGIN: i32 = 57427;
 
 const MOD_SHIFT: u32 = 1;
 const MOD_ALT: u32 = 2;
 const MOD_CTRL: u32 = 4;
 const MOD_SUPER: u32 = 8;
-const MOD_NUM_LOCK: u32 = 128;
 
 /// Event types from Kitty keyboard protocol (flag 2).
 #[napi]
@@ -97,22 +107,52 @@ fn optional_kitty_event_type(event: Option<u32>) -> Option<KeyEventType> {
 	})
 }
 
+/// Normalizes a keypad navigation codepoint and its alternate key code. Returns
+/// the normalized pair, or `None` when the codepoint is not a keypad navigation
+/// key.
 #[inline]
-const fn map_keypad_nav(codepoint: i32) -> Option<i32> {
-	match codepoint {
-		CP_KP_0 => Some(FUNC_INSERT),
-		CP_KP_1 => Some(FUNC_END),
-		CP_KP_2 => Some(ARROW_DOWN),
-		CP_KP_3 => Some(FUNC_PAGE_DOWN),
-		CP_KP_4 => Some(ARROW_LEFT),
-		CP_KP_5 => Some(FUNC_CLEAR),
-		CP_KP_6 => Some(ARROW_RIGHT),
-		CP_KP_7 => Some(FUNC_HOME),
-		CP_KP_8 => Some(ARROW_UP),
-		CP_KP_9 => Some(FUNC_PAGE_UP),
-		CP_KP_DECIMAL => Some(FUNC_DELETE),
-		_ => None,
+const fn map_keypad_nav(codepoint: i32, base: Option<i32>) -> Option<(i32, Option<i32>)> {
+	// `has_alias` means a codepoint that keeps the alternate key as an alias.
+	let (mapped, has_alias) = match codepoint {
+		CP_KP_LEFT => (ARROW_LEFT, false),
+		CP_KP_RIGHT => (ARROW_RIGHT, false),
+		CP_KP_UP => (ARROW_UP, false),
+		CP_KP_DOWN => (ARROW_DOWN, false),
+		CP_KP_PAGE_UP => (FUNC_PAGE_UP, false),
+		CP_KP_PAGE_DOWN => (FUNC_PAGE_DOWN, false),
+		CP_KP_HOME => (FUNC_HOME, false),
+		CP_KP_END => (FUNC_END, false),
+		CP_KP_INSERT => (FUNC_INSERT, false),
+		CP_KP_DELETE => (FUNC_DELETE, false),
+		CP_KP_BEGIN => (FUNC_CLEAR, false),
+
+		CP_KP_0 => (FUNC_INSERT, true),
+		CP_KP_1 => (FUNC_END, true),
+		CP_KP_2 => (ARROW_DOWN, true),
+		CP_KP_3 => (FUNC_PAGE_DOWN, true),
+		CP_KP_4 => (ARROW_LEFT, true),
+		CP_KP_5 => (FUNC_CLEAR, true),
+		CP_KP_6 => (ARROW_RIGHT, true),
+		CP_KP_7 => (FUNC_HOME, true),
+		CP_KP_8 => (ARROW_UP, true),
+		CP_KP_9 => (FUNC_PAGE_UP, true),
+		CP_KP_DECIMAL => (FUNC_DELETE, true),
+
+		_ => return None,
+	};
+	if !has_alias {
+		return Some((mapped, None));
 	}
+	// An alternate key that is itself a keypad key normalizes the same way.
+	let mapped_base = match base {
+		Some(b) => match map_keypad_nav(b, None) {
+			Some((mapped_base, _)) => Some(mapped_base),
+			None => Some(b),
+		},
+		None => None,
+	};
+
+	Some((mapped, mapped_base))
 }
 
 #[inline]
@@ -146,13 +186,14 @@ const fn keypad_operator_text_codepoint(codepoint: i32) -> Option<i32> {
 }
 
 /// Parsed Kitty keyboard protocol sequence (subset we care about).
-struct ParsedKittySequence {
-	codepoint:       i32,
-	shifted_key:     Option<i32>,
-	base_layout_key: Option<i32>,
-	text_codepoint:  Option<i32>,
-	modifier:        u32,
-	event_type:      Option<u32>,
+pub(crate) struct ParsedKittySequence {
+	pub(crate) codepoint:  i32,
+	shifted_key:           Option<i32>,
+	base_layout_key:       Option<i32>,
+	text_codepoint:        Option<i32>,
+	/// Modifier bitmask: the wire value minus one, lock bits included.
+	pub(crate) modifier:   u32,
+	pub(crate) event_type: Option<u32>,
 }
 
 /// Parsed Kitty keyboard protocol sequence result for a Kitty input sequence.
@@ -624,29 +665,16 @@ fn matches_key_inner(bytes: &[u8], key_id: &str, kitty_protocol_active: bool) ->
 			if let Some(text_codepoint) = keypad_operator_text_codepoint(parsed_codepoint) {
 				parsed_codepoint = text_codepoint;
 				parsed_base = None;
-			} else if actual_mod == 0 {
-				if let Some(text_codepoint) = keypad_num_lock_text_codepoint(parsed_codepoint) {
-					parsed_codepoint = text_codepoint;
-					parsed_base = None;
-				} else if p.modifier & MOD_NUM_LOCK != 0 {
-					if let Some(mapped) = map_keypad_nav(parsed_codepoint) {
-						parsed_codepoint = mapped;
-					}
-					if let Some(base) = parsed_base
-						&& let Some(mapped) = map_keypad_nav(base)
-					{
-						parsed_base = Some(mapped);
-					}
-				}
-			} else {
-				if let Some(mapped) = map_keypad_nav(parsed_codepoint) {
-					parsed_codepoint = mapped;
-				}
-				if let Some(base) = parsed_base
-					&& let Some(mapped) = map_keypad_nav(base)
-				{
-					parsed_base = Some(mapped);
-				}
+			} else if actual_mod == 0
+				&& let Some(text_codepoint) = keypad_num_lock_text_codepoint(parsed_codepoint)
+			{
+				parsed_codepoint = text_codepoint;
+				parsed_base = None;
+			} else if let Some((mapped_codepoint, mapped_base)) =
+				map_keypad_nav(parsed_codepoint, parsed_base)
+			{
+				parsed_codepoint = mapped_codepoint;
+				parsed_base = mapped_base;
 			}
 		}
 		if parsed_codepoint == codepoint {
@@ -1168,7 +1196,7 @@ fn parse_esc_pair(code: u8, kitty_protocol_active: bool) -> Option<Cow<'static, 
 // Kitty Protocol Parsing
 // =============================================================================
 
-fn parse_kitty_sequence_bytes(bytes: &[u8]) -> Option<ParsedKittySequence> {
+pub(crate) fn parse_kitty_sequence_bytes(bytes: &[u8]) -> Option<ParsedKittySequence> {
 	if bytes.len() < 3 || bytes[0] != 0x1b || bytes[1] != b'[' {
 		return None;
 	}
@@ -1422,7 +1450,9 @@ fn format_kitty_key(parsed: &ParsedKittySequence) -> Option<Cow<'static, str>> {
 		return None;
 	}
 	let effective_codepoint =
-		if let Some(text_codepoint) = keypad_operator_text_codepoint(parsed.codepoint) {
+		if let Some((nav_codepoint, _)) = map_keypad_nav(parsed.codepoint, None) {
+			nav_codepoint
+		} else if let Some(text_codepoint) = keypad_operator_text_codepoint(parsed.codepoint) {
 			text_codepoint
 		} else {
 			let cp = parsed.codepoint;
@@ -1704,6 +1734,54 @@ mod tests {
 		assert_eq!(parse_key_inner(b"\x1b[57400;133u", true).as_deref(), Some("ctrl+end"));
 		assert!(matches_key_inner(b"\x1b[57400;133u", "ctrl+end", true));
 		assert!(!matches_key_inner(b"\x1b[57400;133u", "1", true));
+	}
+
+	#[test]
+	fn keypad_navigation_codepoints_parse_and_match() {
+		let cases: [(i32, &str); 11] = [
+			(57417, "left"),
+			(57418, "right"),
+			(57419, "up"),
+			(57420, "down"),
+			(57421, "pageUp"),
+			(57422, "pageDown"),
+			(57423, "home"),
+			(57424, "end"),
+			(57425, "insert"),
+			(57426, "delete"),
+			(57427, "clear"),
+		];
+		for (codepoint, key) in cases {
+			let bytes = format!("\x1b[{codepoint}u");
+			assert_eq!(
+				parse_key_inner(bytes.as_bytes(), true).as_deref(),
+				Some(key),
+				"{codepoint} should parse as {key}"
+			);
+			assert!(matches_key_inner(bytes.as_bytes(), key, true), "{codepoint} should match {key}");
+		}
+		assert!(!matches_key_inner(b"\x1b[57424u", "1", true));
+		assert!(!matches_key_inner(b"\x1b[57419u", "5", true));
+		// Some terminals include the explicit default modifier group.
+		assert_eq!(parse_key_inner(b"\x1b[57424;1u", true).as_deref(), Some("end"));
+		assert!(matches_key_inner(b"\x1b[57419;1u", "up", true));
+	}
+
+	#[test]
+	fn keypad_navigation_codepoints_apply_modifiers_and_lock_bits() {
+		assert_eq!(parse_key_inner(b"\x1b[57424;2u", true).as_deref(), Some("shift+end"));
+		assert!(matches_key_inner(b"\x1b[57424;2u", "shift+end", true));
+		assert_eq!(parse_key_inner(b"\x1b[57419;5u", true).as_deref(), Some("ctrl+up"));
+		assert!(matches_key_inner(b"\x1b[57419;5u", "ctrl+up", true));
+		assert_eq!(parse_key_inner(b"\x1b[57426;6u", true).as_deref(), Some("shift+ctrl+delete"));
+		assert!(matches_key_inner(b"\x1b[57426;6u", "shift+ctrl+delete", true));
+		// Wire mod 129 = NumLock + 1; lock bits are not modifiers.
+		assert_eq!(parse_key_inner(b"\x1b[57424;129u", true).as_deref(), Some("end"));
+		assert!(matches_key_inner(b"\x1b[57424;129u", "end", true));
+		// An alternate key code must not override the navigation identity.
+		assert_eq!(parse_key_inner(b"\x1b[57424::57399;5u", true).as_deref(), Some("ctrl+end"));
+		assert!(matches_key_inner(b"\x1b[57424::57399;5u", "ctrl+end", true));
+		assert!(!matches_key_inner(b"\x1b[57424::57399;5u", "ctrl+insert", true));
 	}
 
 	#[test]

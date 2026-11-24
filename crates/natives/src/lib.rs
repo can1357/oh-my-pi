@@ -22,6 +22,7 @@
 #![allow(clippy::trivially_copy_pass_by_ref, reason = "napi env idiom")]
 #![feature(alloc_error_hook)]
 
+pub mod altgr;
 pub mod appearance;
 pub mod applefm;
 pub mod ast;
@@ -30,6 +31,7 @@ pub mod block;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 mod bundled_libc;
 pub mod clipboard;
+pub mod console_input;
 pub mod console_threads;
 pub mod crash_handler;
 pub mod desktop;
@@ -82,6 +84,7 @@ pub mod task;
 pub(crate) mod testing;
 pub mod text;
 pub mod tokens;
+pub mod transcripts;
 pub mod tts;
 pub mod tty_writer;
 pub(crate) mod utils;

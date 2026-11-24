@@ -23,6 +23,7 @@ import {
 } from "@oh-my-pi/pi-tui/tools/shell-viz";
 import * as shellSnapshot from "@oh-my-pi/pi-coding-agent/utils/shell-snapshot";
 import { encodeTerminalImage } from "@oh-my-pi/pi-coding-agent/utils/terminal-graphics";
+import { saveImagesToTemp } from "@oh-my-pi/pi-coding-agent/utils/image-temp";
 import type { Shell, ShellRunResult } from "@oh-my-pi/pi-natives";
 import * as piNatives from "@oh-my-pi/pi-natives";
 import { $which, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
@@ -235,9 +236,15 @@ describe("executeBash", () => {
 			timeout: 5000,
 		});
 
-		expect(result.output).toBe("beforeafter");
+		const [body, ...linkLines] = result.output.split("\n");
+		expect(body).toBe("beforeafter");
 		expect(result.images).toHaveLength(1);
 		expect(result.images?.[0]).toMatchObject({ type: "image", mimeType: "image/png" });
+		const savedLines = linkLines.filter(line => line.startsWith("Image saved: "));
+		expect(savedLines).toHaveLength(1);
+		const savedPath = savedLines[0].slice("Image saved: ".length);
+		expect(fs.existsSync(savedPath)).toBe(true);
+		removeSyncWithRetries(savedPath);
 		expect(result.output).not.toContain("\x1bP");
 	});
 
@@ -257,6 +264,51 @@ describe("executeBash", () => {
 		expect(result.timedOut).toBe(true);
 		expect(result.images).toHaveLength(1);
 		expect(result.output).not.toContain("\x1b_G");
+	});
+
+	it("saves decoded command images to temp files and links them in the text", async () => {
+		const image: ImageContent = {
+			type: "image",
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+		};
+		const frame = await encodeTerminalImage(image);
+		const framePath = path.join(tempDir, "frame.bin");
+		await Bun.write(framePath, frame);
+
+		const result = await executeBash(`cat ${shellQuote(framePath)}`, { cwd: tempDir, timeout: 5000 });
+
+		expect(result.images).toHaveLength(1);
+		expect(result.output).not.toContain("\x1b_G");
+		const savedLines = result.output.split("\n").filter(line => line.startsWith("Image saved: "));
+		expect(savedLines).toHaveLength(1);
+		const savedPath = savedLines[0].slice("Image saved: ".length);
+		expect(fs.existsSync(savedPath)).toBe(true);
+		const bytes = fs.readFileSync(savedPath);
+		expect([...bytes.subarray(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+		removeSyncWithRetries(savedPath);
+	});
+
+	it("writes images to content-addressed temp paths", async () => {
+		const image: ImageContent = {
+			type: "image",
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+		};
+		const [first] = await saveImagesToTemp([image]);
+		const [again] = await saveImagesToTemp([image]);
+		expect(again).toBe(first);
+
+		const other: ImageContent = {
+			type: "image",
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+		};
+		const [different] = await saveImagesToTemp([other]);
+		expect(different).not.toBe(first);
+
+		removeSyncWithRetries(first);
+		removeSyncWithRetries(different);
 	});
 
 	it("passes the full direnv-load budget when the command deadline is disabled (timeout: 0)", async () => {
@@ -732,7 +784,10 @@ exit 64
 		if (!zshPath) {
 			return;
 		}
-		// A fresh ZDOTDIR can start zsh-newuser-install before the command runs.
+		// An interactive zsh whose ZDOTDIR holds none of .zshenv, .zprofile, .zshrc and .zlogin
+		// runs zsh-newuser-install where the zsh install ships it (Debian and Ubuntu do), and its
+		// menu waits for a key before the command runs, so the prompt this test answers never
+		// appears. An empty .zshrc is a startup file, so zsh runs the command straight away.
 		fs.writeFileSync(path.join(tempDir, ".zshrc"), "");
 		cfgShellPath.set(Settings.instance, zshPath);
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
@@ -883,7 +938,7 @@ exit 64
 			return;
 		}
 
-		const nativeResult = Promise.withResolvers<{ exitCode: undefined; cancelled: true; timedOut: false }>();
+		const nativeResult = Promise.withResolvers<piNatives.ShellRunResult>();
 		const dispatched = Promise.withResolvers<void>();
 		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation((_options, onChunk) => {
 			onChunk?.(null, "started\n");
@@ -903,7 +958,7 @@ exit 64
 		controller.abort();
 		await promise;
 
-		nativeResult.resolve({ exitCode: undefined, cancelled: true, timedOut: false });
+		nativeResult.resolve({ exitCode: undefined, cancelled: true, timedOut: false, movedCwd: false, errexit: false });
 		await Bun.sleep(0);
 		vi.restoreAllMocks();
 
@@ -1121,8 +1176,8 @@ exit 64
 		expect(result.cancelled).toBe(true);
 		expect(abortSpy).toHaveBeenCalledTimes(1);
 
-		isolatedResult.resolve({ exitCode: undefined, cancelled: true, timedOut: true });
-		ownerResult.resolve({ exitCode: 0, cancelled: false, timedOut: false });
+		isolatedResult.resolve({ exitCode: undefined, cancelled: true, timedOut: true, movedCwd: false, errexit: false });
+		ownerResult.resolve({ exitCode: 0, cancelled: false, timedOut: false, movedCwd: false, errexit: false });
 		await owner;
 	});
 
@@ -1594,7 +1649,13 @@ exit 64
 			const nativeResult = Promise.withResolvers<piNatives.ShellRunResult>();
 			realSetTimeout(() => {
 				onChunk?.(null, "flushed-during-timeout\n");
-				nativeResult.resolve({ exitCode: undefined, cancelled: false, timedOut: true });
+				nativeResult.resolve({
+					exitCode: undefined,
+					cancelled: false,
+					timedOut: true,
+					movedCwd: false,
+					errexit: false,
+				});
 			}, 20);
 			return nativeResult.promise;
 		});

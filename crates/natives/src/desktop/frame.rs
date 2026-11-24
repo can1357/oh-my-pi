@@ -51,7 +51,17 @@ impl DisplayGeometry {
 #[derive(Debug, Clone, PartialEq)]
 enum FrameKind {
 	Desktop,
-	Window { captured_width: u32, captured_height: u32 },
+	/// A window's capture. `captured_width`×`captured_height` is the whole
+	/// window's logical size when captured, so a resize invalidates the frame;
+	/// the region may cover only part of the window (the part on the captured
+	/// screen), whose origin is `offset_x`,`offset_y` logical points from the
+	/// window's.
+	Window {
+		captured_width:  u32,
+		captured_height: u32,
+		offset_x:        i32,
+		offset_y:        i32,
+	},
 	Identity,
 }
 
@@ -94,17 +104,37 @@ impl FrameGeometry {
 		Self { width, height, regions, layout: Vec::new(), kind: FrameKind::Desktop }
 	}
 
+	/// A capture of the whole `window`. Linux backends capture only the
+	/// on-monitor part and use [`Self::for_window_part`] instead.
+	#[cfg(any(target_os = "macos", target_os = "windows", test))]
 	pub(crate) fn for_window(window: &DesktopWindow, px_width: u32, px_height: u32) -> Self {
+		Self::for_window_part(
+			window,
+			(window.x, window.y, window.width, window.height),
+			px_width,
+			px_height,
+		)
+	}
+
+	/// A capture of `part` of `window`: the logical rectangle, in global
+	/// coordinates, that the `px_width`×`px_height` pixels show, such as the
+	/// part of a window on the captured screen.
+	pub(crate) fn for_window_part(
+		window: &DesktopWindow,
+		(x, y, width, height): (i32, i32, u32, u32),
+		px_width: u32,
+		px_height: u32,
+	) -> Self {
 		Self {
 			width:   px_width,
 			height:  px_height,
 			regions: vec![FrameRegion {
 				id:           window.id.clone(),
-				scale:        f64::from(px_width) / f64::from(window.width.max(1)),
-				x:            f64::from(window.x),
-				y:            f64::from(window.y),
-				width:        f64::from(window.width),
-				height:       f64::from(window.height),
+				scale:        f64::from(px_width) / f64::from(width.max(1)),
+				x:            f64::from(x),
+				y:            f64::from(y),
+				width:        f64::from(width),
+				height:       f64::from(height),
 				pixel_x:      0.0,
 				pixel_y:      0.0,
 				pixel_width:  f64::from(px_width),
@@ -114,7 +144,20 @@ impl FrameGeometry {
 			kind:    FrameKind::Window {
 				captured_width:  window.width,
 				captured_height: window.height,
+				offset_x:        x - window.x,
+				offset_y:        y - window.y,
 			},
+		}
+	}
+
+	/// The logical rectangle a window frame shows while the window sits at
+	/// `window`'s position: the whole window, or the part that was captured.
+	pub(crate) fn window_part(&self, window: &DesktopWindow) -> (i32, i32, u32, u32) {
+		match (&self.kind, self.regions.as_slice()) {
+			(FrameKind::Window { offset_x, offset_y, .. }, [region]) => {
+				(window.x + offset_x, window.y + offset_y, region.width as u32, region.height as u32)
+			},
+			_ => (window.x, window.y, window.width, window.height),
 		}
 	}
 
@@ -180,7 +223,7 @@ impl FrameGeometry {
 	}
 
 	pub(crate) fn validate_window(&self, window: Option<&DesktopWindow>) -> CoreResult<()> {
-		if let FrameKind::Window { captured_width, captured_height } = self.kind {
+		if let FrameKind::Window { captured_width, captured_height, .. } = self.kind {
 			let current = window.ok_or_else(|| {
 				DesktopError::window_not_found("target window is no longer available")
 			})?;
@@ -351,11 +394,14 @@ impl FrameGeometry {
 		let local_x = (x - region.pixel_x) * region.width / region.pixel_width;
 		let local_y = (y - region.pixel_y) * region.height / region.pixel_height;
 		match self.kind {
-			FrameKind::Window { .. } => {
+			FrameKind::Window { offset_x, offset_y, .. } => {
 				let current = current_window.ok_or_else(|| {
 					DesktopError::window_not_found("target window is no longer available")
 				})?;
-				Ok((f64::from(current.x) + local_x, f64::from(current.y) + local_y))
+				Ok((
+					f64::from(current.x + offset_x) + local_x,
+					f64::from(current.y + offset_y) + local_y,
+				))
 			},
 			FrameKind::Desktop => Ok((region.x + local_x, region.y + local_y)),
 			FrameKind::Identity => Ok((x, y)),

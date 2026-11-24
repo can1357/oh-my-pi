@@ -29,6 +29,7 @@ import type {
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { cfgExtensionAssistantTextRenderers } from "../../extensibility/settings";
+import { cfgTuiVimMode } from "../settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import {
@@ -924,7 +925,8 @@ export class ExtensionUiController {
 	 * agent as the user's and closes the ask, not a command, a shell run or a `/btw` follow-up.
 	 */
 	#draftSkipsAsk(): boolean {
-		if (!this.#ask || this.ctx.isBtwFocused || this.ctx.isBashMode || this.ctx.isPythonMode || this.ctx.isBtwMode) return false;
+		if (!this.#ask || this.ctx.isBtwFocused || this.ctx.isBashMode || this.ctx.isPythonMode || this.ctx.isBtwMode)
+			return false;
 		const draft = this.ctx.editor.getText().trim();
 		return draft.length > 0 && !draft.startsWith("/");
 	}
@@ -999,6 +1001,8 @@ export class ExtensionUiController {
 				skipNotice: () => this.#skipNotice(),
 				claimKeys: () => this.focusAsk(),
 				releaseKeys: () => this.#focusComposer(),
+				configureEditor: editor => this.ctx.configureDialogEditor(editor),
+				vimMode: cfgTuiVimMode.get(this.ctx.settings),
 			});
 			const slot = this.#mountAsk(dialog);
 			return () => {
@@ -1193,7 +1197,14 @@ export class ExtensionUiController {
 					prefill,
 					(text, images) => finishPrompt({ text, images }),
 					(text, images) => finishPrompt({ draft: { text, images } }),
-					{ promptStyle: true, externalEditor: editDialogExternally, question: prompt.question, ...options },
+					{
+						promptStyle: true,
+						externalEditor: editDialogExternally,
+						question: prompt.question,
+						configureEditor: editor => this.ctx.configureDialogEditor(editor),
+						vimMode: cfgTuiVimMode.get(this.ctx.settings),
+						...options,
+					},
 				);
 				this.ctx.closeLinkBrowser();
 				this.ctx.editorContainer.clear();
@@ -1589,7 +1600,12 @@ export class ExtensionUiController {
 				prefill,
 				value => settle(value),
 				() => settle(undefined),
-				{ ...editorOptions, externalEditor: editDialogExternally },
+				{
+					...editorOptions,
+					externalEditor: editDialogExternally,
+					configureEditor: editor => this.ctx.configureDialogEditor(editor),
+					vimMode: cfgTuiVimMode.get(this.ctx.settings),
+				},
 			);
 			this.ctx.closeLinkBrowser();
 			this.ctx.editorContainer.clear();
@@ -1621,7 +1637,9 @@ export class ExtensionUiController {
 		} else if (type === "warning") {
 			this.ctx.showWarning(message);
 		} else {
-			this.ctx.showStatus(message);
+			// `notify` is shared by every extension: an info notice gets its own line so it neither
+			// overwrites nor is overwritten by another extension's notice or omp's own status.
+			this.ctx.showStatus(message, { collapse: false });
 		}
 	}
 

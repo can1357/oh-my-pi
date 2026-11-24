@@ -192,6 +192,7 @@ export class MainSessionBridge {
 	/** The worker died: see the module doc for the ordering. */
 	exit(reason: string): void {
 		this.exited.abort(new Error(`Subagent worker ${this.#peer.threadId} exited: ${reason}`));
+		// oxlint-disable-next-line unicorn/no-useless-spread -- snapshot: the loop body may add or remove subscriptions
 		for (const stop of [...this.#subscriptions]) {
 			try {
 				stop();
@@ -210,6 +211,7 @@ export class MainSessionBridge {
 			if (ref.status !== "aborted") registry.setStatus(ref.id, ref.sessionFile ? "parked" : "aborted", ref);
 		}
 		const why = `worker ${this.#peer.threadId} exited: ${reason}`;
+		// oxlint-disable-next-line unicorn/no-useless-spread -- snapshot: the loop body may add or remove open channels
 		for (const key of [...this.#open.keys()]) this.closed(key, why);
 	}
 }
@@ -254,7 +256,7 @@ function serveRegistry(bridge: MainSessionBridge): RpcServe<AgentRegistry, Agent
 		setStatus: (registry, id, status, expected) => registry.setStatus(id, status, expected),
 		markResultAccepted: (registry, id, expected, responseAt) => registry.markResultAccepted(id, expected, responseAt),
 		staleAcceptedRuns: registry => registry.staleAcceptedRuns(),
-		setActivity: (registry, id, activity) => registry.setActivity(id, activity),
+		setActivity: (registry, id, activity, expected) => registry.setActivity(id, activity, expected),
 		attachSession: (registry, id, session, sessionFile, expected) =>
 			registry.attachSession(id, session, sessionFile, expected),
 		detachSession: (registry, id, expected) => registry.detachSession(id, expected),

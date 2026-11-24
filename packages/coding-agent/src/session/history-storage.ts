@@ -12,7 +12,9 @@ import {
 	readSalvageableRows,
 } from "@oh-my-pi/pi-utils";
 import { primaryRootOrCwd } from "../utils/active-repo-context";
+import { type WordQuery, wordQuery } from "./search-query";
 import { closeSessionIndex, salvageSessionIndex } from "./session-index";
+import { inWindow, type TimeWindow } from "./time-window";
 
 /** A unique prompt with provenance from its most recent submission. */
 export interface HistoryEntry {
@@ -36,6 +38,8 @@ export interface HistoryFilter {
 	cwd?: string;
 	/** Exact session id of the prompt's latest submission. */
 	sessionId?: string;
+	/** Window holding the prompt's latest submission. */
+	window?: TimeWindow;
 }
 
 /**
@@ -63,6 +67,8 @@ export interface HistoryScope {
 	kind: HistoryScopeKind;
 	/** Session id (`session`), directory (`cwd`), or primary repository root (`repo`). */
 	value?: string;
+	/** Window holding the prompt's latest submission. */
+	window?: TimeWindow;
 }
 
 type HistoryRow = {
@@ -113,43 +119,14 @@ function readableRowClause(table: string): string {
 	return `typeof(${table}prompt) = 'text' AND typeof(${table}created_at) = 'integer' AND typeof(${table}use_count) = 'integer'`;
 }
 
-/** A query term's letter and digit runs, as FTS5's unicode61 tokenizer splits stored prompts. */
-function ftsTokens(term: string): string[] {
-	return term.split(/[^\p{L}\p{N}]+/u).filter(token => token.length > 0);
-}
-
-/** `text` case-folded with Latin diacritics removed, as the unicode61 tokenizer indexes it. */
-function ftsFold(text: string): string {
-	return text
-		.toLowerCase()
-		.normalize("NFD")
-		.replace(/(\p{Script=Latin})\p{M}+/gu, "$1")
-		.normalize("NFC");
-}
-
-/** Whether `phrase` occurs as consecutive `tokens`, its last token as a prefix: an FTS5 `"…"*` phrase. */
-function hasPhrasePrefix(tokens: string[], phrase: string[]): boolean {
-	const last = phrase.length - 1;
-	if (last < 0) return false;
-	for (let start = 0; start + last < tokens.length; start++) {
-		if (!tokens[start + last].startsWith(phrase[last])) continue;
-		let index = 0;
-		while (index < last && tokens[start + index] === phrase[index]) index++;
-		if (index === last) return true;
-	}
-	return false;
-}
-
 /**
- * Whether a queued `prompt` answers `terms` as {@link HistoryStorage.search}
- * matches stored rows: every term as an FTS phrase prefix, or every term as a
- * literal substring under LIKE's ASCII-only case folding.
+ * Whether a queued `prompt` answers a query as {@link HistoryStorage.search}
+ * matches stored rows: every term as an FTS phrase prefix (`words`), or every
+ * term as a literal substring under LIKE's ASCII-only case folding.
  */
-function promptMatchesTerms(prompt: string, terms: string[]): boolean {
+function promptMatchesTerms(prompt: string, terms: string[], words: WordQuery): boolean {
 	const likeText = prompt.replace(/[A-Z]+/g, run => run.toLowerCase());
-	if (terms.every(term => likeText.includes(term))) return true;
-	const tokens = ftsTokens(ftsFold(prompt));
-	return terms.every(term => hasPhrasePrefix(tokens, ftsTokens(ftsFold(term))));
+	return terms.every(term => likeText.includes(term)) || words.test(prompt);
 }
 
 // Escape LIKE wildcards so user input is treated as literal text.
@@ -262,6 +239,7 @@ END;
 			}
 		}
 		this.#assertRecentWindowReadable();
+
 		this.#upsertRowStmt = this.#db.prepare(`
 	INSERT INTO history (prompt, created_at, cwd, session_id)
 	VALUES (?, ?, ?, ?)
@@ -463,8 +441,10 @@ END;
 		if (safeLimit === 0) return [];
 
 		const terms = this.#terms(query);
-		if (terms.length === 0) return [];
-		const queued = this.#queuedEntries().filter(entry => promptMatchesTerms(entry.prompt, terms));
+		// Both drop the terms without a letter or digit.
+		const words = wordQuery(query);
+		if (terms.length === 0 || !words) return [];
+		const queued = this.#queuedEntries().filter(entry => promptMatchesTerms(entry.prompt, terms, words));
 		// Each matching queued prompt can displace its own stored row, so read that many more.
 		const fetchLimit = safeLimit + queued.length;
 
@@ -482,12 +462,11 @@ END;
 		//    and digit runs, split the way the unicode61 tokenizer indexed the
 		//    stored text, so "git-commit" -> "git commit"*: the runs must be
 		//    adjacent tokens, not two words anywhere in the prompt.
-		const ftsQuery = terms.map(term => `"${ftsTokens(term).join(" ")}"*`).join(" ");
 		let ftsRows: HistoryRow[] = [];
 		try {
 			ftsRows = this.#prepare(
 				`SELECT h.id, h.prompt, h.created_at, h.cwd, h.session_id, h.use_count FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ? AND ${readableRowClause("h.")} ${clause.and} ORDER BY h.created_at DESC, h.id DESC LIMIT ?`,
-			).all(ftsQuery, ...clause.params, fetchLimit) as HistoryRow[];
+			).all(words.match, ...clause.params, fetchLimit) as HistoryRow[];
 		} catch (error) {
 			// Malformed FTS expression - fall through to substring path.
 			logger.debug("HistoryStorage FTS query failed, using substring only", { error: String(error) });
@@ -518,6 +497,34 @@ END;
 
 		const rows = [...rowsById.values()].sort((a, b) => b.created_at - a.created_at || b.id - a.id);
 		return this.#withQueued(queued, rows, scope, safeLimit);
+	}
+
+	/**
+	 * Finds unique prompts holding every query term as words ({@link WordQuery}),
+	 * newest first. Unlike {@link search} it never matches inside a word ("mit"
+	 * misses "commit"), so the full-text index answers it alone instead of a
+	 * scan over every stored prompt.
+	 */
+	searchWords(words: WordQuery, limit: number, scope: HistoryScope | HistoryFilter = {}): HistoryEntry[] {
+		const safeLimit = this.#normalizeLimit(limit);
+		if (safeLimit === 0) return [];
+		const queued = this.#queuedEntries().filter(entry => words.test(entry.prompt));
+		// Each matching queued prompt can displace its own stored row, so read that many more.
+		const rows = this.#ftsRows(words, safeLimit + queued.length, scope);
+		return this.#withQueued(queued, rows, scope, safeLimit);
+	}
+
+	/** Stored rows matching `words` in the full-text index, newest first; a failed query yields none. */
+	#ftsRows(words: WordQuery, limit: number, scope?: HistoryScope | HistoryFilter): HistoryRow[] {
+		const clause = this.#scopeClause(scope);
+		try {
+			return this.#prepare(
+				`SELECT h.id, h.prompt, h.created_at, h.cwd, h.session_id, h.use_count FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ? AND ${readableRowClause("h.")} ${clause.and} ORDER BY h.created_at DESC, h.id DESC LIMIT ?`,
+			).all(words.match, ...clause.params, limit) as HistoryRow[];
+		} catch (error) {
+			logger.debug("HistoryStorage FTS query failed", { error: String(error) });
+			return [];
+		}
 	}
 
 	/**
@@ -602,6 +609,7 @@ END;
 	/** Whether `entry`'s provenance matches `scope`: the in-memory twin of {@link #scopeClause}. */
 	#queuedInScope(entry: HistoryEntry, scope: HistoryScope | HistoryFilter | undefined): boolean {
 		if (!scope) return true;
+		if (!inWindow(entry.created_at * 1000, scope.window)) return false;
 		const selection: Partial<HistoryScope> & HistoryFilter = scope;
 		const kind = selection.kind;
 		if (kind === undefined) {
@@ -848,35 +856,54 @@ ON CONFLICT(prompt) DO UPDATE SET
 	}
 
 	/**
-	 * SQL fragment (and its bound values) restricting a read to a scope or exact metadata filter.
-	 * Omitted filters and `global` read the whole table; unknown scope kinds match nothing.
+	 * SQL fragment (and its bound values) restricting a read to a scope or exact metadata
+	 * filter. Omitted filters and `global` read the whole table; unknown scope kinds match
+	 * nothing. A `window` narrows by submission time on every path, scope included.
 	 */
 	#scopeClause(scope?: HistoryScope | HistoryFilter): ScopeClause {
 		if (!scope) return EMPTY_SCOPE_CLAUSE;
+		const and: string[] = [];
+		const params: SQLQueryBindings[] = [];
+		const window = scope.window;
+		if (window?.since !== undefined) {
+			and.push("AND created_at >= ?");
+			params.push(window.since / 1000);
+		}
+		if (window?.until !== undefined) {
+			and.push("AND created_at < ?");
+			params.push(window.until / 1000);
+		}
 		const selection: Partial<HistoryScope> & HistoryFilter = scope;
 		const kind = selection.kind;
 		if (kind === undefined) {
 			const cwd = selection.cwd ?? null;
 			const sessionId = selection.sessionId ?? null;
-			if (cwd === null && sessionId === null) return EMPTY_SCOPE_CLAUSE;
-			if (cwd === null) return { and: "AND session_id = ?", params: [sessionId] };
-			if (sessionId === null) return { and: "AND cwd = ?", params: [cwd] };
-			return { and: "AND cwd = ? AND session_id = ?", params: [cwd, sessionId] };
+			if (cwd !== null) {
+				and.push("AND cwd = ?");
+				params.push(cwd);
+			}
+			if (sessionId !== null) {
+				and.push("AND session_id = ?");
+				params.push(sessionId);
+			}
+		} else {
+			switch (kind) {
+				case "global":
+					break;
+				case "session":
+					and.push("AND session_id = ?");
+					params.push(selection.value ?? "");
+					break;
+				case "cwd":
+				case "repo":
+					and.push(DIRS_AND);
+					params.push(JSON.stringify(this.#scopeDirs(kind, selection.value)));
+					break;
+				default:
+					and.push("AND 1 = 0");
+			}
 		}
-		switch (kind) {
-			case "global":
-				return EMPTY_SCOPE_CLAUSE;
-			case "session":
-				return { and: "AND session_id = ?", params: [selection.value ?? ""] };
-			case "cwd":
-			case "repo":
-				return {
-					and: DIRS_AND,
-					params: [JSON.stringify(this.#scopeDirs(kind, selection.value))],
-				};
-			default:
-				return { and: "AND 1 = 0", params: [] };
-		}
+		return and.length === 0 ? EMPTY_SCOPE_CLAUSE : { and: ` ${and.join(" ")}`, params };
 	}
 
 	/**

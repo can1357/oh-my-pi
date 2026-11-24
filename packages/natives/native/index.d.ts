@@ -317,9 +317,10 @@ export declare class FileLock {
   /**
    * Whether any handle, in any process including this one, holds `path`.
    *
-   * Observes without locking or opening the lock: a `connect(2)` probe on
-   * Linux, an `F_GETLK` query on other Unix platforms, a `\BaseNamedObjects`
-   * directory listing on Windows. A concurrent `tryAcquire()` never meets it.
+   * Observes without taking the lock: an `F_OFD_GETLK` query plus a
+   * `connect(2)` probe of the older abstract-socket name on Linux, an
+   * `F_GETLK` query on other Unix platforms, a `\BaseNamedObjects` directory
+   * listing on Windows. A concurrent `tryAcquire()` never meets it.
    */
   static isHeld(path: string): boolean
   /** Whether this handle owns the requested lock. */
@@ -588,13 +589,16 @@ export declare class PhononTts {
 }
 
 /**
- * The bytes crossing one shell run's pipeline pipes, during and after the run.
+ * The output of one shell run that never reaches its own stdout, during and
+ * after the run: the bytes crossing its pipeline pipes, and the files its
+ * commands redirect their output into.
  *
  * For `cargo build 2>&1 | tail -5`, stream 1 holds what `cargo` has written
- * so far while `tail` still holds it back. Create one per run and pass it as
+ * so far while `tail` still holds it back; for `cargo build > build.log`,
+ * stream 1 reads `build.log`. Create one per run and pass it as
  * [`ShellRunOptions::streams`]. Streams are numbered from 1 in the order the
- * run opened its pipes; each keeps its most recent 1 MiB, and a run keeps its
- * 4 newest finished streams.
+ * run opened them; each keeps (a file: reads) its most recent 1 MiB, and a
+ * run keeps its 4 newest finished pipes and its 8 newest files.
  */
 export declare class PipeStreams {
   constructor()
@@ -691,6 +695,18 @@ export declare class PtySession {
   masterFd(): number | null
   /** Process id of the running session's child. */
   pid(): number | null
+  /**
+   * Whether the program in the terminal waits on the user's keys.
+   *
+   * `true` while echo is off (a password prompt such as `sudo`'s, or a
+   * full-screen program like `less`) or, on Linux, while a foreground
+   * process is blocked reading the terminal (a `[y/N]` prompt). `false` when
+   * no session runs or, on Linux, no foreground process reads the terminal.
+   * `null` when an echoing line prompt cannot be told from a busy program:
+   * always on macOS and Windows, and on Linux when a foreground process
+   * cannot be inspected (one running setuid).
+   */
+  awaitsInput(): boolean | null
   /**
    * Start a shell command, stream output chunks, and report the spawned child
    * PID.
@@ -886,9 +902,11 @@ export declare class TextPredictor {
 }
 
 /**
- * Dedicated, cancellable terminal writer. The destination must be a TTY that
- * can be independently reopened (unix) or a console (Windows); pipes and
- * files are deliberately rejected.
+ * Dedicated, cancellable terminal writer.
+ *
+ * The destination must be a TTY (reopened independently when possible, else
+ * duplicated) on unix or a console on Windows; pipes and files are
+ * deliberately rejected.
  */
 export declare class TtyWriter {
   /**
@@ -910,7 +928,8 @@ export declare class TtyWriter {
   flushSync(timeoutMs: number): boolean
   /**
    * Drain until the deadline, then cancel and join. Nothing is written after
-   * return, except one chunk a Windows console refused to abort. Already
+   * return, except one chunk whose write could not be aborted (a Windows
+   * console refusing to, a blocking duplicate on unix). Already
    * queued JS callbacks may still run; callers must ignore callbacks from a
    * stopped writer.
    */
@@ -997,6 +1016,8 @@ export declare class VcsGitRepo {
   submodulePaths(signal?: unknown | undefined | null): Promise<Array<string>>
   /** Read blob bytes. */
   showBlob(spec: string, maxBytes?: number | undefined | null, signal?: unknown | undefined | null): Promise<VcsShowResult>
+  /** Write bytes as a blob and return its full object id. */
+  writeBlob(data: Uint8Array, signal?: unknown | undefined | null): Promise<string>
   /**
    * Convert worktree content to the blob `git add` would store per path
    * (EOL/`text` attributes, `core.autocrlf`, `ident`, clean filters such as
@@ -1011,6 +1032,11 @@ export declare class VcsGitRepo {
   diffText(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<string>
   /** Render a no-index patch between two filesystem paths. */
   diffNoIndex(left: string, right: string, binary: boolean, signal?: unknown | undefined | null): Promise<string>
+  /**
+   * Render a same-path patch between blobs already stored in the object
+   * database.
+   */
+  diffBlobs(change: VcsBlobChange, binary: boolean, signal?: unknown | undefined | null): Promise<string>
   /** Changed paths. */
   changedFiles(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<Array<string>>
   /** Per-file line counts. */
@@ -1027,6 +1053,8 @@ export declare class VcsGitRepo {
   stageHunks(selections: Array<VcsHunkSelection>, rawDiff?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
   /** Create commit. */
   commitCreate(message: string, options: VcsCommitOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Publish a private-index commit after preparing the shared index. */
+  commitReconciled(message: string, options: VcsCommitOptions, selection: string, signal?: unknown | undefined | null): Promise<VcsReconciledCommit>
   /**
    * Write a commit object for `tree` on `parents` without moving any ref or
    * touching the index/worktree (`git commit-tree`).
@@ -1542,6 +1570,12 @@ export interface AxSnapshot {
   text: string
   nodeCount: number
   truncated: boolean
+  /**
+   * The window appeared fully covered around the read, and its app can stop
+   * updating its tree while covered (Chromium on Windows), so the tree may
+   * be stale.
+   */
+  covered: boolean
 }
 
 export interface AxSnapshotOptions {
@@ -1767,6 +1801,12 @@ export interface DesktopCapture {
    * frame. Windows also detects disconnected sessions and secure desktops.
    */
   screenLocked: boolean
+  /**
+   * The target window appeared fully covered around this frame, and its app
+   * can stop drawing while covered (Chromium on Windows), so the frame may
+   * be stale.
+   */
+  covered: boolean
 }
 
 export interface DesktopControlState {
@@ -2039,6 +2079,16 @@ export interface DiffChange {
  * not another copy of the text.
  */
 export declare function diffLineRuns(oldText: string, newText: string): Array<DiffRun>
+
+/**
+ * [`diff_line_runs`] bounded to `max_edits` added or removed lines.
+ *
+ * Returns `null` once the edit script needs more. An exact diff of a
+ * wholesale rewrite takes time quadratic in its size; this one stops after
+ * `O((N + M) · max_edits)`, for callers that can treat such a rewrite as one
+ * replaced block.
+ */
+export declare function diffLineRunsWithin(oldText: string, newText: string, maxEdits: number): Array<DiffRun> | null
 
 /**
  * Line diff with jsdiff `diffLines(oldText, newText)` semantics (default
@@ -2324,6 +2374,15 @@ export declare enum Ellipsis {
   /** Omit ellipsis entirely. */
   Omit = 2
 }
+
+/**
+ * Add `ENABLE_VIRTUAL_TERMINAL_INPUT` to the stdin console's mode.
+ *
+ * Call after entering raw mode, which clears it. Returns the mode found, for
+ * `restoreConsoleInputMode`; `null` when stdin is not a console or the
+ * console refuses VT input, and always off Windows.
+ */
+export declare function enableConsoleVtInput(): number | null
 
 /**
  * Matching-bracket context for an arbitrary tree-sitter language.
@@ -3534,18 +3593,41 @@ export interface PipeStreamChunk {
   open: boolean
 }
 
-/** A tapped pipe of a run. */
+/** A tapped pipe or redirected file of a run. */
 export interface PipeStreamInfo {
   /** Stream number, from 1. */
   id: number
-  /** Source text of the stage writing into the pipe. */
+  /**
+   * Source text of the stage writing into the pipe, or of the command whose
+   * redirection opened the file.
+   */
   producer: string
-  /** Source text of the stage reading from it. */
+  /**
+   * Source text of the stage reading from the pipe, or the file's absolute
+   * path.
+   */
   consumer: string
-  /** Bytes written so far, including those no longer retained. */
+  /**
+   * Bytes written so far, including those no longer retained; a file's
+   * size now.
+   */
   total: number
-  /** Whether bytes may still arrive. */
+  /** Whether bytes may still arrive; for a file, whether the run goes on. */
   open: boolean
+  /** The stream is a file a command redirected its output into. */
+  file: boolean
+  /**
+   * Run-trace node key (`unit:0:node`) of the stage writing into the pipe,
+   * or of the command whose redirection opened the file. Absent when the
+   * run has no trace or the writer's unit is not in it.
+   */
+  node?: string
+  /**
+   * When it was last written, in ms since the UNIX epoch: a pipe's last
+   * write (its opening before any), a file's modification time (0 when
+   * unreadable).
+   */
+  modified: number
 }
 
 export interface PointerOptions {
@@ -3803,6 +3885,20 @@ export declare function renderMermaidAscii(text: string, options?: MermaidRender
 export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
 
 /**
+ * `script` with the `\` dropped after each `<<EOF &&` (or `||`, `|`, `|&`)
+ * so the here-document body starts on the next line; `null` when nothing
+ * needs repair or the result would not parse. omp's bash tool runs commands
+ * through it.
+ */
+export declare function repairHeredocContinuations(script: string): string | null
+
+/**
+ * Put back a stdin console mode `enableConsoleVtInput` returned. False when
+ * stdin is no longer a console or refuses the mode; always false off Windows.
+ */
+export declare function restoreConsoleInputMode(mode: number): boolean
+
+/**
  * Run the shell engine as a process shell in this process (`omp zsh`,
  * `omp bash`, `omp sh`).
  *
@@ -3877,6 +3973,36 @@ export declare function setHangulCompatJamoWidthOverride(value: number): void
  */
 export declare function shellBuiltins(sessionEnv?: Record<string, string>): Array<string>
 
+/** One invocation of a host-provided session command in the embedded shell. */
+export interface ShellCommandRequest {
+  /** Command name as invoked. */
+  name: string
+  /** Arguments after the command name. */
+  argv: Array<string>
+  /** Shell working directory at invocation time. */
+  cwd: string
+  /**
+   * UTF-8 stdin read to EOF, only when `argv` contains a bare `-`; empty
+   * otherwise.
+   */
+  stdin: string
+}
+
+/** Shell-composable response of a session command. */
+export interface ShellCommandResult {
+  stdout: string
+  stderr: string
+  /** 0..=255 */
+  exitCode: number
+}
+
+/** Host-provided commands installed for one `Shell.run`. */
+export interface ShellCommands {
+  /** Names resolvable as commands during this run. */
+  names: Array<string>
+  handler: (request: ShellCommandRequest) => Promise<ShellCommandResult>
+}
+
 /**
  *  Options for executing a shell command via the embedded bash engine
  * .
@@ -3902,6 +4028,19 @@ export interface ShellExecuteOptions {
   filesystem?: ShellFilesystem
 }
 
+/** One host text file a command changed, as `onFileChange` receives it. */
+export interface ShellFileChange {
+  /** Absolute host path. */
+  path: string
+  /**
+   * Content before the command touched the file; absent when there was
+   * no file.
+   */
+  before?: Buffer
+  /** Content once the command was done; absent when it removed the file. */
+  after?: Buffer
+}
+
 /** Host filesystem injected into shell sessions. */
 export interface ShellFilesystem {
   /**
@@ -3918,6 +4057,14 @@ export interface ShellFilesystem {
    * injected filesystem and receives every path, host paths included.
    */
   nativeLocalPaths?: boolean
+  /**
+   * Called for each host text file a command changed itself: a builtin's
+   * write, rename or removal (`sed -i`, `cp`, `mv`, `rm`, `tee`) and the
+   * target of a redirection, once the command is done with it. Only files
+   * git would track are reported (in a work tree, not ignored), at most
+   * 4 MiB each; what a spawned program writes on its own is not.
+   */
+  onFileChange?: (error: Error | null, change: ShellFileChange) => void
 }
 
 /** Permissions probed by an `access` request. */
@@ -4238,6 +4385,12 @@ export interface ShellOptions {
   process?: boolean
 }
 
+/**
+ * Every name the engine resolves before a session command (reserved words,
+ * shell builtins, pi shell tools, in-process utilities, bash/sh/zsh).
+ */
+export declare function shellReservedCommandNames(): Array<string>
+
 /** Options for running a shell command. */
 export interface ShellRunOptions {
   /** Command string to execute in the shell. */
@@ -4260,6 +4413,12 @@ export interface ShellRunOptions {
    * it has one configured; absent leaves `say` to the system's.
    */
   speech?: ShellSpeech
+  /**
+   * Host-provided commands installed for this run only, resolved after
+   * the shell's builtins, pi's shell tools and in-process utilities, and
+   * before shell functions, aliases and `PATH`.
+   */
+  commands?: ShellCommands
   /** Receives a copy of every byte crossing the run's pipeline pipes. */
   streams?: PipeStreams
   /** Folds the run's engine events into a live model of the command. */
@@ -4283,6 +4442,16 @@ export interface ShellRunResult {
   minimized?: MinimizerResult
   /** Shell working directory after command completion. */
   workingDir?: string
+  /**
+   * The command ended in another directory than it started in (a `cd` in
+   * it); a later run that passes `cwd` starts there instead.
+   */
+  movedCwd: boolean
+  /**
+   * The command ended with `errexit` (`set -e`) on; the next run starts
+   * with it off.
+   */
+  errexit: boolean
 }
 
 /** The application's speech synthesizer, injected into a shell run. */
@@ -4574,6 +4743,262 @@ export interface TextPredictorOptions {
   showThreshold?: number
 }
 
+/** A tool call with its result and the reasoning before it. */
+export interface TranscriptCall {
+  /** Index of the transcript in `files`. */
+  file: number
+  /** Session entry id of the assistant message holding the call. */
+  entry?: string
+  /** Unix milliseconds; 0 when the line carries no time. */
+  at: number
+  callId: string
+  tool: string
+  /**
+   * Arguments as a JSON object; strings longer than 4,003 characters keep
+   * their first and last 2,000.
+   */
+  args: string
+  /** Result text; longer than 1,003 characters keeps its first and last 500. */
+  result?: string
+  /** UTF-16 length of the whole result text. */
+  resultChars?: number
+  isError?: boolean
+  /** The last 4,000 characters of the thinking and reply before the call. */
+  reasoning?: string
+  model?: string
+  /** omp version that recorded the call. */
+  version?: string
+}
+
+/** Which tool calls count; omitted fields match every call. */
+export interface TranscriptCallFilter {
+  /** Tool names. */
+  tools?: Array<string>
+  /** Regex matching some string inside the arguments. */
+  args?: string
+  /** Regex matching the whole result text. */
+  result?: string
+  /**
+   * `true` keeps failed calls, `false` succeeded ones; a call without a
+   * result matches neither.
+   */
+  error?: boolean
+}
+
+/**
+ * The newest `limit` tool calls of `files` matching the filter, with their
+ * results and reasoning.
+ *
+ * # Errors
+ * Rejects when cancelled; a regex that compiles in neither engine falls back
+ * to literal text, as in the grep tool.
+ */
+export declare function transcriptCalls(options: TranscriptCallsOptions): Promise<TranscriptCallsResult>
+
+/** Options for [`transcript_calls`]. */
+export interface TranscriptCallsOptions {
+  files: Array<TranscriptFile>
+  /** Unix milliseconds; calls made earlier are skipped. */
+  since?: number
+  /** Unix milliseconds; calls made at or after it are skipped. */
+  until?: number
+  filter: TranscriptCallFilter
+  flags?: TranscriptRegexFlags
+  /** Newest calls returned at most. */
+  limit: number
+  signal?: unknown
+}
+
+/** What [`transcript_calls`] found. */
+export interface TranscriptCallsResult {
+  /** Newest first. */
+  calls: Array<TranscriptCall>
+  /** Headers of the transcripts read. */
+  headers: Array<TranscriptHeader>
+}
+
+/** A transcript to scan. */
+export interface TranscriptFile {
+  /** JSONL file. */
+  path: string
+  /**
+   * Unix milliseconds of its newest activity (its mtime): capped scans read
+   * files newest first and skip those older than every hit they keep.
+   */
+  newest: number
+}
+
+/**
+ * The newest `limit` matches of `pattern` in `sources` of `files`.
+ *
+ * # Errors
+ * Rejects when cancelled.
+ */
+export declare function transcriptGrep(options: TranscriptGrepOptions): Promise<TranscriptGrepResult>
+
+/** One place a grep pattern matched. */
+export interface TranscriptGrepHit {
+  file: number
+  entry?: string
+  at: number
+  source: TranscriptSource
+  /** Tool whose arguments or result matched. */
+  tool?: string
+  callId?: string
+  /** Snippet around the match, whitespace collapsed. */
+  text: string
+  /** The matched text. */
+  matched: string
+}
+
+/** Options for [`transcript_grep`]. */
+export interface TranscriptGrepOptions {
+  files: Array<TranscriptFile>
+  since?: number
+  until?: number
+  pattern: string
+  flags?: TranscriptRegexFlags
+  sources: Array<TranscriptSource>
+  /** Tools whose arguments and results are searched; all when omitted. */
+  tools?: Array<string>
+  limit: number
+  signal?: unknown
+}
+
+/** What [`transcript_grep`] found. */
+export interface TranscriptGrepResult {
+  /** Newest first. */
+  hits: Array<TranscriptGrepHit>
+  headers: Array<TranscriptHeader>
+}
+
+/** Session header of a scanned transcript. */
+export interface TranscriptHeader {
+  /** Index of the transcript in `files`. */
+  file: number
+  id: string
+  cwd: string
+}
+
+/**
+ * The newest `limit` records of `kinds` in one transcript, whole, oldest
+ * first.
+ *
+ * # Errors
+ * Rejects when the file cannot be read or the scan is cancelled.
+ */
+export declare function transcriptMessages(options: TranscriptMessagesOptions): Promise<Array<TranscriptRecord>>
+
+/** Options for [`transcript_messages`]. */
+export interface TranscriptMessagesOptions {
+  path: string
+  /** Kinds kept; all when omitted. */
+  kinds?: Array<TranscriptRecordKind>
+  since?: number
+  until?: number
+  /** Newest records returned at most. */
+  limit: number
+  signal?: unknown
+}
+
+/** One transcript record, whole. */
+export interface TranscriptRecord {
+  entry?: string
+  at: number
+  kind: TranscriptRecordKind
+  /** Message or result text; `null` for calls. */
+  text?: string
+  tool?: string
+  callId?: string
+  /** Arguments of a call as a JSON object. */
+  args?: string
+  isError?: boolean
+}
+
+/** Kind of a transcript record. */
+export declare enum TranscriptRecordKind {
+  User = 'user',
+  Assistant = 'assistant',
+  Thinking = 'thinking',
+  Call = 'call',
+  Result = 'result'
+}
+
+/**
+ * Regex dialect of a scan: the grep tool's (Rust `regex`, PCRE2 for
+ * look-around and back-references).
+ */
+export interface TranscriptRegexFlags {
+  /** Case-insensitive matching. */
+  ignoreCase?: boolean
+  /** `.` matches newlines and matches may span lines. */
+  dotAll?: boolean
+}
+
+/** Text a grep searches. */
+export declare enum TranscriptSource {
+  User = 'user',
+  Assistant = 'assistant',
+  Thinking = 'thinking',
+  Args = 'args',
+  Result = 'result'
+}
+
+/** Calls of one transcript counted under one key. */
+export interface TranscriptStat {
+  file: number
+  /** `null` when the fact is unknown, and for `by: "none"`. */
+  key?: string
+  calls: number
+  errors: number
+}
+
+/**
+ * Calls of `files` matching the filter, counted per transcript by `by`.
+ *
+ * # Errors
+ * Rejects when cancelled.
+ */
+export declare function transcriptStats(options: TranscriptStatsOptions): Promise<TranscriptStatsResult>
+
+/** Call fact [`transcript_stats`] counts by within each transcript. */
+export declare enum TranscriptStatsKey {
+  Tool = 'tool',
+  Model = 'model',
+  Version = 'version',
+  /** Local calendar day, `YYYY-MM-DD`. */
+  Day = 'day',
+  /** One count per transcript. */
+  PerTranscript = 'none'
+}
+
+/** Options for [`transcript_stats`]. */
+export interface TranscriptStatsOptions {
+  files: Array<TranscriptFile>
+  since?: number
+  until?: number
+  filter: TranscriptCallFilter
+  flags?: TranscriptRegexFlags
+  by: TranscriptStatsKey
+  signal?: unknown
+}
+
+/** What [`transcript_stats`] counted. */
+export interface TranscriptStatsResult {
+  stats: Array<TranscriptStat>
+  headers: Array<TranscriptHeader>
+}
+
+/**
+ * Translate a kitty CSI-u Alt/Ctrl+Alt chord into the text `AltGr` produced
+ * on the active keyboard layout; `null` when the sequence is not an `AltGr`
+ * keystroke there, and always off Windows.
+ *
+ * Only meaningful on native Windows `ConPTY` hosts with the kitty protocol
+ * active: other hosts report the produced text themselves.
+ */
+export declare function translateWindowsAltGrSequence(data: string): string | null
+
 /**
  * Truncate text to a visible width, preserving ANSI codes.
  *
@@ -4587,6 +5012,15 @@ export interface VcsApplyOptions {
   indexPath?: string
   reverse?: boolean
   threeWay?: boolean
+}
+
+/** One same-path change between blobs already stored in the object database. */
+export interface VcsBlobChange {
+  path: string
+  oldId?: string
+  newId?: string
+  oldMode?: string
+  newMode?: string
 }
 
 /** Clean options. */
@@ -4733,6 +5167,14 @@ export interface VcsPushOptions {
   remote?: string
   refspec?: string
   forceWithLease?: boolean
+}
+
+/** Published private-index commit and any shared-index entries left staged. */
+export interface VcsReconciledCommit {
+  /** Published commit's object ID. */
+  sha: string
+  /** Staged changes left in the shared index or publication warnings. */
+  indexNotes: Array<string>
 }
 
 /** Restore options. */

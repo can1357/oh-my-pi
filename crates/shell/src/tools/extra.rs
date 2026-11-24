@@ -528,14 +528,16 @@ impl Lookup {
 	}
 
 	/// Whether `name` runs in-process: an engine intrinsic, a tool, an extra
-	/// this shell offers, or a shell the engine runs itself (`env bash -c …`,
-	/// `xargs sh -c …`; [`PiHost::resolve`](crate::host::PiHost)).
+	/// this shell offers, a shell the engine runs itself (`env bash -c …`,
+	/// `xargs sh -c …`), or a session command of the run in flight
+	/// ([`PiHost::resolve`](crate::host::PiHost)).
 	fn builtin(&self, name: &OsStr) -> bool {
 		let name = os_bytes(name);
 		IntrinsicId::lookup(&name, ModeId::Bash).is_some()
 			|| self.config.lookup(name.as_bstr()).is_some()
 			|| self.config.native_extra(name.as_bstr()).is_some()
 			|| crate::sys::shebang::is_self_shell(&name)
+			|| self.config.commands.lookup(name.as_bstr()).is_some()
 	}
 }
 

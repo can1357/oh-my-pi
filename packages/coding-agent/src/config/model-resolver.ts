@@ -34,7 +34,13 @@ import { collapseVariantId, stripThinkingVariantSuffix } from "@oh-my-pi/pi-cata
 import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
-import { type GeneratedProvider, getBundledModels, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import {
+	type GeneratedProvider,
+	getBundledModels,
+	getUpstreamPin,
+	modelsAreEqual,
+	routedModelsAreEqual,
+} from "@oh-my-pi/pi-catalog/models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
 import { fuzzyMatch } from "@oh-my-pi/pi-tui";
@@ -185,30 +191,17 @@ export function formatModelString(model: Pick<Model<Api>, "provider" | "id">): s
 	return `${model.provider}/${model.id}`;
 }
 
-function getSingleRoutingOnly(routing: unknown): string | undefined {
-	if (!routing || typeof routing !== "object" || !("only" in routing) || !Array.isArray(routing.only)) {
-		return undefined;
-	}
-	if (routing.only.length !== 1) return undefined;
-	const upstream = routing.only[0];
-	return typeof upstream === "string" && upstream ? upstream : undefined;
-}
-
-function getSingleUpstreamRoute(model: Model<Api>): string | undefined {
-	const compat = model.compat;
-	if (!compat || typeof compat !== "object") return undefined;
-	if (modelMatchesHost(model, "vercelAIGateway") && "vercelGatewayRouting" in compat) {
-		return getSingleRoutingOnly(compat.vercelGatewayRouting);
-	}
-	if (modelMatchesHost(model, "openrouter") && "openRouterRouting" in compat) {
-		return getSingleRoutingOnly(compat.openRouterRouting);
-	}
-	return undefined;
+/** A pin can occupy its unpinned scope slot, but never another pin's slot. */
+export function findScopedModelIndex(scoped: ReadonlyArray<{ model: Model }>, model: Model | undefined): number {
+	if (!model) return -1;
+	const exact = scoped.findIndex(entry => routedModelsAreEqual(entry.model, model));
+	if (exact !== -1) return exact;
+	return scoped.findIndex(entry => modelsAreEqual(entry.model, model) && getUpstreamPin(entry.model) === undefined);
 }
 
 export function formatModelStringWithRouting(model: Model<Api>): string {
 	const selector = formatModelString(model);
-	const upstream = getSingleUpstreamRoute(model);
+	const upstream = getUpstreamPin(model);
 	return upstream ? `${selector}@${upstream}` : selector;
 }
 
@@ -221,8 +214,10 @@ export function resolveExactModelIdentity(
 	const literal = models.find(model => formatModelStringWithRouting(model) === identity);
 	if (literal) return literal;
 	const routing = splitUpstreamRouting(identity);
-	if (!routing) return undefined;
-	const base = models.find(model => formatModelString(model) === routing.base);
+	if (!routing) return findOpenRouterRouteVariant(identity, models);
+	const base =
+		models.find(model => formatModelString(model) === routing.base) ??
+		findOpenRouterRouteVariant(routing.base, models);
 	if (!base || !supportsUpstreamRouting(base)) return undefined;
 	const routed = applyUpstreamRouting(base, routing.upstream);
 	return formatModelStringWithRouting(routed) === identity ? routed : undefined;
@@ -242,6 +237,8 @@ function getOpenRouterRouteSuffix(modelId: string): { baseId: string; suffix: st
 		return undefined;
 	}
 
+	// `model@rev:free` can derive from `model@rev`; `model:free@host` must resolve its pin separately.
+	if (suffix.includes("@") && splitUpstreamRouting(modelId)) return undefined;
 	return { baseId: modelId.slice(0, colonIdx), suffix };
 }
 
@@ -283,6 +280,21 @@ function cloneModelWithRequestedId(model: Model<Api>, requestedId: string): Mode
 		id: requestedId,
 		...(model.name === model.id ? { name: requestedId } : {}),
 	};
+}
+
+/**
+ * An OpenRouter route variant (`openrouter/<id>:nitro`) of a literal catalog model, cloned the way
+ * full selector resolution clones it, so exact-only lookups accept the variants it accepts.
+ * Undefined for other providers, thinking-level suffixes, or a base the catalog lacks.
+ */
+export function findOpenRouterRouteVariant(selector: string, models: Model<Api>[]): Model<Api> | undefined {
+	const prefix = "openrouter/";
+	if (!selector.startsWith(prefix)) return undefined;
+	const modelId = selector.slice(prefix.length);
+	const route = getOpenRouterRouteSuffix(modelId);
+	if (!route) return undefined;
+	const base = models.find(model => model.provider === "openrouter" && model.id === route.baseId);
+	return base ? cloneModelWithRequestedId(base, modelId) : undefined;
 }
 
 const AMAZON_BEDROCK_PROVIDER = "amazon-bedrock";
@@ -343,6 +355,7 @@ function supportsUpstreamRouting(model: Model<Api>): boolean {
 
 /** Pin a resolved aggregator model to a single upstream provider via its compat routing block. */
 function applyUpstreamRouting(model: Model<Api>, upstream: string): Model<Api> {
+	if (getUpstreamPin(model) === upstream) return model;
 	const aggregatorModel = model as Model<"openai-completions">;
 	const routing = { only: [upstream] };
 	return buildModel({
@@ -351,6 +364,33 @@ function applyUpstreamRouting(model: Model<Api>, upstream: string): Model<Api> {
 			? { ...aggregatorModel.compatConfig, vercelGatewayRouting: routing }
 			: { ...aggregatorModel.compatConfig, openRouterRouting: routing },
 	} as ModelSpec<Api>);
+}
+
+/** A registry row for `source`'s model carrying `source`'s upstream pin, so a metadata refresh keeps the route. */
+export function withUpstreamPinOf(model: Model<Api>, source: Model<Api>): Model<Api> {
+	const upstream = getUpstreamPin(source);
+	return upstream && supportsUpstreamRouting(model) ? applyUpstreamRouting(model, upstream) : model;
+}
+
+const kAllowList = Symbol("model-resolver.allowList");
+type AllowList = Model<Api>[] & { [kAllowList]?: true };
+
+/**
+ * Mark `allowed` as an allow-list, so matching never re-pins its routes. The mark lives on this
+ * array instance: a filtered or spread copy is an open pool again.
+ */
+function markAllowList(allowed: Model<Api>[]): Model<Api>[] {
+	(allowed as AllowList)[kAllowList] = true;
+	return allowed;
+}
+
+function isAllowList(models: readonly Model<Api>[]): boolean {
+	return (models as AllowList)[kAllowList] === true;
+}
+
+/** An explicit session or startup scope as an allow-list. */
+export function scopeAllowList(scoped: ReadonlyArray<{ model: Model<Api> }>): Model<Api>[] {
+	return markAllowList(scoped.map(entry => entry.model));
 }
 
 const kProviderModelIndex = Symbol("model-resolver.providerIndex");
@@ -702,23 +742,29 @@ function isAlias(id: string): boolean {
 }
 
 function includeSyntheticAllowedModels(available: Model<Api>[], allowedModels: Iterable<Model<Api>>): Model<Api>[] {
-	const allowedByKey = new Map<string, Model<Api>>();
+	const allowedByKey = new Map<string, Model<Api>[]>();
 	for (const model of allowedModels) {
 		const key = formatModelString(model);
-		if (!allowedByKey.has(key)) {
-			allowedByKey.set(key, model);
+		const routes = allowedByKey.get(key);
+		if (!routes) {
+			allowedByKey.set(key, [model]);
+		} else if (!routes.some(route => routedModelsAreEqual(route, model))) {
+			routes.push(model);
 		}
 	}
 	if (allowedByKey.size === 0) return [];
 
 	const result: Model<Api>[] = [];
 	for (const model of available) {
-		if (allowedByKey.delete(formatModelString(model))) {
-			result.push(model);
+		const key = formatModelString(model);
+		const allowed = allowedByKey.get(key);
+		if (allowed) {
+			result.push(...allowed);
+			allowedByKey.delete(key);
 		}
 	}
 
-	result.push(...allowedByKey.values());
+	for (const routes of allowedByKey.values()) result.push(...routes);
 	return result;
 }
 
@@ -960,6 +1006,19 @@ export interface ParsedModelResult {
 	explicitThinkingLevel: boolean;
 }
 
+/*
+ * An allow-list (a pool marked by filterAvailableModelsByEnabledPatterns, resolveAllowedModels or
+ * scopeAllowList) constrains upstream pins only; IDs, variants and thinking suffixes match as in an
+ * open pool.
+ *
+ *  selector        open pool                          allow-list
+ *  --------------  ---------------------------------  ---------------------------------------------
+ *  provider/id     that model                         the listed unpinned route, else the first
+ *                                                     listed pin of that model
+ *  id@upstream     literal ID first, else id pinned   literal ID first, else a listed id already
+ *                  there                              pinned there or a listed unpinned id pinned
+ *                                                     there; never re-pinned
+ */
 /**
  * Parse a pattern to extract model and thinking level.
  * Handles models with colons in their IDs (e.g., OpenRouter's :exacto suffix).
@@ -978,7 +1037,17 @@ function parseModelPatternWithContext(
 	context: ModelPreferenceContext,
 	options?: { allowInvalidThinkingSelectorFallback?: boolean },
 ): ParsedModelResult {
-	// Exact match on the full pattern first (no fuzzy): a literal id that
+	const pool = isAllowList(availableModels) ? preferredRoutes(availableModels, undefined) : availableModels;
+	return parseModelPatternInPool(pattern, pool, context, options);
+}
+
+function parseModelPatternInPool(
+	pattern: string,
+	availableModels: Model<Api>[],
+	context: ModelPreferenceContext,
+	options?: { allowInvalidThinkingSelectorFallback?: boolean },
+): ParsedModelResult {
+	// A literal model ID takes precedence over a thinking suffix.
 	const exactMatch = matchModel(pattern, availableModels, context, { exactOnly: true });
 	if (exactMatch) {
 		const thinkingLevel = inferWireRouteThinkingLevel(pattern, exactMatch);
@@ -1010,7 +1079,7 @@ function parseModelPatternWithContext(
 		// id (e.g. `kimi-for-coding:high` must not match
 		// `kimi-for-coding-highspeed`). `max` is accepted only after the exact
 		// match above failed, so literal model IDs ending in `:max` keep winning.
-		const result = parseModelPatternWithContext(base, availableModels, context, options);
+		const result = parseModelPatternInPool(base, availableModels, context, options);
 		if (result.model) {
 			// Only use this thinking level if no warning from inner recursion
 			const explicitThinkingLevel = !result.warning;
@@ -1045,7 +1114,7 @@ function parseModelPatternWithContext(
 	}
 
 	// Invalid suffix - recurse on prefix and warn
-	const result = parseModelPatternWithContext(prefix, availableModels, context, options);
+	const result = parseModelPatternInPool(prefix, availableModels, context, options);
 	if (result.model) {
 		return {
 			model: result.model,
@@ -1055,6 +1124,41 @@ function parseModelPatternWithContext(
 		};
 	}
 	return result;
+}
+
+/** Upstream rank of an allow-listed route: the requested pin, then the unpinned model, then other pins. */
+function routeRank(model: Model<Api>, upstream: string | undefined): number {
+	const pin = getUpstreamPin(model);
+	return pin === undefined ? 1 : pin === upstream ? 2 : 0;
+}
+
+/**
+ * One allow-listed route per `provider/id`, by {@link routeRank} and then list order. Every ID stays
+ * in contention, so routes of one model never make its `provider/id` ambiguous to the matcher.
+ */
+function preferredRoutes(models: Model<Api>[], upstream: string | undefined): Model<Api>[] {
+	const byIdentity = new Map<string, Model<Api>>();
+	for (const model of models) {
+		const key = formatModelString(model);
+		const existing = byIdentity.get(key);
+		if (!existing || routeRank(model, upstream) > routeRank(existing, upstream)) byIdentity.set(key, model);
+	}
+	return byIdentity.size === models.length ? models : markAllowList([...byIdentity.values()]);
+}
+
+function matchScopedUpstream(
+	routing: { base: string; upstream: string },
+	availableModels: Model<Api>[],
+	context: ModelPreferenceContext,
+): ParsedModelResult {
+	const result = parseModelPatternInPool(routing.base, preferredRoutes(availableModels, routing.upstream), context, {
+		allowInvalidThinkingSelectorFallback: false,
+	});
+	const model = result.model;
+	if (!model || !supportsUpstreamRouting(model) || routeRank(model, routing.upstream) === 0) {
+		return { model: undefined, warning: undefined, explicitThinkingLevel: false };
+	}
+	return { ...result, model: applyUpstreamRouting(model, routing.upstream), upstream: routing.upstream };
 }
 
 /** Match a single pattern with a pre-built preference context (direct match plus
@@ -1067,15 +1171,22 @@ function matchPatternWithContext(
 	options?: { allowInvalidThinkingSelectorFallback?: boolean },
 ): ParsedModelResult {
 	const direct = parseModelPatternWithContext(pattern, availableModels, context, options);
-	if (direct.model) return direct;
+	if (direct.model && !direct.warning) {
+		return direct;
+	}
 
-	// No direct match: a trailing `@upstream` may be a provider-routing selector.
-	// Only honor it when the base resolves to an aggregator model (OpenRouter /
-	// Vercel Gateway); otherwise `@` stays part of the id and `direct` stands.
+	// A valid pin beats a match that discarded an invalid thinking suffix, but never a literal match.
 	const routing = splitUpstreamRouting(pattern);
 	if (routing) {
+		if (isAllowList(availableModels)) {
+			const scoped = matchScopedUpstream(routing, availableModels, context);
+			// Only a listed literal `@` ID survives; a base that dropped `@upstream` with the suffix would widen the list.
+			const literalDirect = direct.model?.id.toLowerCase().endsWith(`@${routing.upstream.toLowerCase()}`) === true;
+			if (scoped.model && (!literalDirect || !scoped.warning)) return scoped;
+			return literalDirect ? direct : scoped;
+		}
 		const routed = parseModelPatternWithContext(routing.base, availableModels, context, options);
-		if (routed.model && supportsUpstreamRouting(routed.model)) {
+		if (routed.model && supportsUpstreamRouting(routed.model) && (!direct.model || !routed.warning)) {
 			return { ...routed, model: applyUpstreamRouting(routed.model, routing.upstream), upstream: routing.upstream };
 		}
 	}
@@ -1494,6 +1605,47 @@ export interface ResolvedModelRoleValue {
 	warning: string | undefined;
 }
 
+function toResolvedRoleValue(
+	model: Model<Api>,
+	parsed: ParsedModelResult,
+	matchedPatternIndex: number,
+): ResolvedModelRoleValue {
+	return {
+		model,
+		matchedPatternIndex,
+		thinkingLevel: parsed.explicitThinkingLevel
+			? parsed.thinkingLevel === AUTO_THINKING
+				? AUTO_THINKING
+				: (resolveThinkingLevelForModel(model, parsed.thinkingLevel) ?? parsed.thinkingLevel)
+			: parsed.thinkingLevel,
+		explicitThinkingLevel: parsed.explicitThinkingLevel,
+		warning: parsed.warning,
+	};
+}
+
+/**
+ * Role cycling's implicit `default` slot: the active model itself. Resolved as a configured
+ * selector but without the `@upstream` fallback, so a literal `@` stays part of the ID and a
+ * spelling alias of a literal `@` ID cannot replace the pin; the active model's own pin is then
+ * re-applied. Unresolved when the resolved model cannot carry that pin.
+ */
+export function resolveImplicitDefaultRole(
+	model: Model<Api>,
+	availableModels: Model<Api>[],
+	matchPreferences?: ModelMatchPreferences,
+): ResolvedModelRoleValue {
+	const parsed = parseModelPatternWithContext(
+		formatModelString(model),
+		availableModels,
+		buildPreferenceContext(availableModels, matchPreferences),
+	);
+	const pin = getUpstreamPin(model);
+	if (!parsed.model || (pin && !supportsUpstreamRouting(parsed.model))) {
+		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: parsed.warning };
+	}
+	return toResolvedRoleValue(pin ? applyUpstreamRouting(parsed.model, pin) : parsed.model, parsed, 0);
+}
+
 export function resolveModelRoleValue(
 	roleValue: string | undefined,
 	availableModels: Model<Api>[],
@@ -1522,17 +1674,7 @@ export function resolveModelRoleValue(
 	for (const [patternIndex, effectivePattern] of effectivePatterns.entries()) {
 		const resolved = matchPatternWithContext(effectivePattern, availableModels, preferenceContext);
 		if (resolved.model) {
-			return {
-				model: resolved.model,
-				matchedPatternIndex: patternIndex,
-				thinkingLevel: resolved.explicitThinkingLevel
-					? resolved.thinkingLevel === AUTO_THINKING
-						? AUTO_THINKING
-						: (resolveThinkingLevelForModel(resolved.model, resolved.thinkingLevel) ?? resolved.thinkingLevel)
-					: resolved.thinkingLevel,
-				explicitThinkingLevel: resolved.explicitThinkingLevel,
-				warning: resolved.warning,
-			};
+			return toResolvedRoleValue(resolved.model, resolved, patternIndex);
 		}
 		if (!warning && resolved.warning) {
 			warning = resolved.warning;
@@ -1689,9 +1831,10 @@ export function resolveRoleChain(role: string, settings: Settings, pool: Model<A
 /**
  * Resolve a list of override patterns to the first matching model.
  *
- * `exactOnly` matches each pattern only as a literal `provider/model-id`,
- * optionally followed by a supported `:level` and an aggregator `@upstream` pin:
- * no role aliases, globs, or fuzzy ids.
+ * `exactOnly` matches each pattern only as a literal `provider/model-id` or an
+ * OpenRouter route variant of one (`openrouter/<id>:nitro`), optionally followed
+ * by a supported `:level` and an aggregator `@upstream` pin: no role aliases,
+ * globs, or fuzzy ids. Per-call grant matching relies on this contract.
  */
 export function resolveModelOverride(
 	modelPatterns: string[],
@@ -1702,7 +1845,9 @@ export function resolveModelOverride(
 	if (modelPatterns.length === 0) return { explicitThinkingLevel: false };
 	const availableModels = modelRegistry.getAvailable();
 	if (options?.exactOnly) {
-		const find = (selector: string) => availableModels.find(model => `${model.provider}/${model.id}` === selector);
+		const find = (selector: string) =>
+			availableModels.find(model => `${model.provider}/${model.id}` === selector) ??
+			findOpenRouterRouteVariant(selector, availableModels);
 		const exact = (selector: string) => {
 			// Some real ids end in a level-shaped segment, so the literal id wins over a suffix split.
 			const literal = find(selector);
@@ -1763,7 +1908,7 @@ export function disabledProviderIds(settings?: Settings): ReadonlySet<string> {
 	return new Set(settings ? cfgDisabledProviders.get(settings) : undefined);
 }
 
-function parseSessionModelSelector(modelRegistry: ModelRegistry, selector: string) {
+function parseSessionModelSelector(modelRegistry: Pick<ModelRegistry, "find">, selector: string) {
 	return parseModelString(selector, {
 		...MAX_THINKING_SUFFIX_OPTIONS,
 		isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
@@ -1771,10 +1916,43 @@ function parseSessionModelSelector(modelRegistry: ModelRegistry, selector: strin
 }
 
 /**
- * Resolve a saved session model selector (`provider/id`, optionally with a
- * thinking suffix) to a registered model whose provider is enabled and has
- * credentials configured. Startup resume and runtime session switches share
- * this lookup, so both restore the same models.
+ * Exact registry lookup for a provider-qualified selector, including its pin and thinking level.
+ *
+ * Journal entries resolve like configured selectors, so a registered literal ID wins over an
+ * `@upstream` reading: a routed `x` pinned to `host` journals as `x@host` and restores as a
+ * registered literal `x@host` if one exists. That needs an upstream slug equal to a literal ID's
+ * `@` suffix; retry-fallback entries already journal configured selectors this way.
+ */
+export function resolveRoutedModelSelector(
+	modelRegistry: Pick<ModelRegistry, "find">,
+	selector: string,
+): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
+	const parsed = parseSessionModelSelector(modelRegistry, selector);
+	if (!parsed) return undefined;
+	const literal = modelRegistry.find(parsed.provider, parsed.id);
+	if (literal) return { model: literal, thinkingLevel: parsed.thinkingLevel };
+
+	const routing = splitUpstreamRouting(parsed.id);
+	if (!routing) return undefined;
+	let base = modelRegistry.find(parsed.provider, routing.base);
+	let thinkingLevel = parsed.thinkingLevel;
+	if (!base) {
+		// Older selectors put the pin before a literal suffix (`model@host:max`) or after the effort.
+		const original = splitUpstreamRouting(selector);
+		const unpinned = original && parseSessionModelSelector(modelRegistry, original.base);
+		if (!unpinned) return undefined;
+		base = modelRegistry.find(unpinned.provider, unpinned.id);
+		thinkingLevel = unpinned.thinkingLevel;
+	}
+	if (!base || !supportsUpstreamRouting(base)) return undefined;
+	return { model: applyUpstreamRouting(base, routing.upstream), thinkingLevel };
+}
+
+/**
+ * Resolve a saved session model selector (`provider/id`, optionally with an
+ * upstream route and thinking suffix) to a registered model whose provider is
+ * enabled and has credentials configured. Startup resume and runtime session
+ * switches share this lookup, so both restore the same models.
  *
  * Uses the side-effect-free `hasConfiguredAuth` probe: it refreshes no OAuth
  * tokens and runs no `!command` keys, which would stall a restore on the network.
@@ -1783,11 +1961,8 @@ export function resolveSessionModelSelector(
 	modelRegistry: ModelRegistry,
 	selector: string,
 ): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
-	const parsed = parseSessionModelSelector(modelRegistry, selector);
-	if (!parsed) return undefined;
-	const model = modelRegistry.find(parsed.provider, parsed.id);
-	if (!model || !modelRegistry.hasConfiguredAuth(model)) return undefined;
-	return { model, thinkingLevel: parsed.thinkingLevel };
+	const resolved = resolveRoutedModelSelector(modelRegistry, selector);
+	return resolved && modelRegistry.hasConfiguredAuth(resolved.model) ? resolved : undefined;
 }
 
 /**
@@ -1961,10 +2136,11 @@ export async function resolveModelScope(
 	settings?: Settings,
 ): Promise<ScopedModel[]> {
 	const availableModels = modelRegistry.getAvailable();
-	const context = buildPreferenceContext(availableModels, preferences);
+	const matchPreferences = mergeModelMatchPreferences(settings, preferences);
+	const context = buildPreferenceContext(availableModels, matchPreferences);
 	const scopedModels: ScopedModel[] = [];
 	const addScopedModel = (model: Model<Api>, thinkingLevel: ThinkingLevel | undefined, explicit: boolean) => {
-		if (scopedModels.some(sm => modelsAreEqual(sm.model, model))) return;
+		if (scopedModels.some(sm => routedModelsAreEqual(sm.model, model))) return;
 		scopedModels.push({
 			model,
 			thinkingLevel: explicit
@@ -1981,7 +2157,7 @@ export async function resolveModelScope(
 		runnerModels ??= modelRegistry.getAvailable("all").filter(model => modelKind(model) !== "chat");
 		const namesRunner = glob
 			? resolveGlobScopePattern(pattern, runnerModels).models.length > 0
-			: parseModelPatternWithContext(pattern, runnerModels, buildPreferenceContext(runnerModels, preferences))
+			: parseModelPatternWithContext(pattern, runnerModels, buildPreferenceContext(runnerModels, matchPreferences))
 					.model !== undefined;
 		if (namesRunner) {
 			logger.debug(`Scope pattern "${pattern}" names a non-chat model; it stays out of the chat scope`);
@@ -2031,7 +2207,7 @@ export async function resolveModelScope(
 			continue;
 		}
 
-		const { model, thinkingLevel, warning, explicitThinkingLevel } = parseModelPatternWithContext(
+		const { model, thinkingLevel, warning, explicitThinkingLevel } = matchPatternWithContext(
 			pattern,
 			availableModels,
 			context,
@@ -2084,9 +2260,11 @@ export async function resolveAllowedModels(
 	if (scoped.length === 0) {
 		return [];
 	}
-	return includeSyntheticAllowedModels(
-		available,
-		scoped.map(entry => entry.model),
+	return markAllowList(
+		includeSyntheticAllowedModels(
+			available,
+			scoped.map(entry => entry.model),
+		),
 	);
 }
 
@@ -2110,10 +2288,11 @@ export function filterAvailableModelsByEnabledPatterns(
 	available: Model<Api>[],
 	patterns: readonly string[],
 	settings?: Settings,
+	roleLookup?: ModelRoleLookup,
 ): Model<Api>[] {
 	if (patterns.length === 0) return available;
 
-	const context = buildPreferenceContext(available, undefined);
+	const context = buildPreferenceContext(available, getModelMatchPreferences(settings));
 	const allowedModels: Model<Api>[] = [];
 	const addAllowed = (model: Model<Api>) => {
 		allowedModels.push(model);
@@ -2128,19 +2307,19 @@ export function filterAvailableModelsByEnabledPatterns(
 		}
 
 		// Mirror resolveModelScope: role aliases resolve to the role's model.
-		if (settings && modelRoleAliasPrefixLength(pattern) !== undefined) {
-			const { model } = resolveModelRoleValue(pattern, available, { settings });
+		if ((roleLookup || settings) && modelRoleAliasPrefixLength(pattern) !== undefined) {
+			const { model } = resolveModelRoleValue(pattern, available, { settings, roleLookup });
 			if (model) addAllowed(model);
 			continue;
 		}
 
-		const { model } = parseModelPatternWithContext(pattern, available, context);
+		const { model } = matchPatternWithContext(pattern, available, context);
 		if (model) {
 			addAllowed(model);
 		}
 	}
 
-	return includeSyntheticAllowedModels(available, allowedModels);
+	return markAllowList(includeSyntheticAllowedModels(available, allowedModels));
 }
 function findExactCliModel(
 	selector: string,
@@ -2372,7 +2551,7 @@ function resolveCliModelInScope(
 			if (resolved.model) {
 				return {
 					model: resolved.model,
-					selector: formatModelString(resolved.model),
+					selector: formatModelStringWithRouting(resolved.model),
 					configuredRole,
 					configuredPatterns,
 					configuredPatternIndex: resolved.matchedPatternIndex,

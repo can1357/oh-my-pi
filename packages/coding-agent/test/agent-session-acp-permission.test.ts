@@ -31,8 +31,11 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
-import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
-import { dispatchXdevTool, resolveMountedXdevExecutable, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
+import {
+	dispatchToolCommand,
+	resolveMountedToolCommandExecutable,
+	type ToolCommandState,
+} from "@oh-my-pi/pi-coding-agent/tools/tool-commands";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 
 // ---------------------------------------------------------------------------
@@ -95,7 +98,7 @@ async function createSession(
 	bridge?: ClientBridge,
 	settingsOverrides: Record<string, unknown> = {},
 	options?: {
-		xdev?: XdevState;
+		toolCommands?: ToolCommandState;
 		builtInToolNames?: string[];
 		persist?: boolean;
 	},
@@ -120,7 +123,7 @@ async function createSession(
 		streamFn: () => new AssistantMessageEventStream(),
 	});
 
-	const toolRegistry = options?.xdev?.tools ?? new Map<string, AgentTool>();
+	const toolRegistry = options?.toolCommands?.tools ?? new Map<string, AgentTool>();
 	for (const tool of tools) toolRegistry.set(tool.name, tool);
 	const authStorage = await AuthStorage.create(":memory:");
 	authStorages.push(authStorage);
@@ -130,7 +133,7 @@ async function createSession(
 		settings,
 		modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
 		toolRegistry,
-		xdev: options?.xdev,
+		toolCommands: options?.toolCommands,
 		builtInToolNames: options?.builtInToolNames,
 	});
 
@@ -259,30 +262,30 @@ it("eval applies direct-only restrictions to the resolved tool rather than its w
 	expect(tool.executeCalls).toBe(1);
 });
 
-it("eval resolves xd:// and Claude Code MCP spellings over enabled tools only", async () => {
+it("eval resolves canonical and Claude Code MCP spellings over enabled tools only", async () => {
 	const tools = ["read", "mcp__srv_active", "mcp__srv_idle", "lsp", "ast_grep"].map(makeFakeTool);
-	const xdev: XdevState = {
+	const toolCommands: ToolCommandState = {
 		tools: new Map(tools.map(tool => [tool.name, tool])),
 		mountedNames: new Set(),
 		builtInNames: new Set(),
 		isActive: name => session?.getActiveToolNames().includes(name) ?? false,
 	};
-	session = await createSession(tools, undefined, {}, { xdev });
+	session = await createSession(tools, undefined, {}, { toolCommands });
 	await session.setActiveToolsByName(["read", "mcp__srv_active"]);
-	xdev.mountedNames.add("lsp");
+	toolCommands.mountedNames.add("lsp");
 	const toolSession = makeToolSession(makeBridge({ outcome: "cancelled" }));
 	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
 	toolSession.getToolByName = name => session!.getToolByName(name);
 
 	await callSessionTool("mcp__srv__active", {}, { session: toolSession });
-	await callSessionTool("xd://lsp", {}, { session: toolSession });
-	await callSessionTool("xd://read", {}, { session: toolSession });
+	await callSessionTool("lsp", {}, { session: toolSession });
+	await callSessionTool("read", {}, { session: toolSession });
 	expect(tools.map(tool => tool.executeCalls)).toEqual([1, 1, 0, 1, 0]);
 
 	await expect(callSessionTool("mcp__srv__idle", {}, { session: toolSession })).rejects.toThrow(
 		"registered but not available",
 	);
-	await expect(callSessionTool("xd://ast_grep", {}, { session: toolSession })).rejects.toThrow(
+	await expect(callSessionTool("ast_grep", {}, { session: toolSession })).rejects.toThrow(
 		"registered but not available",
 	);
 	await expect(callSessionTool("nope", {}, { session: toolSession })).rejects.toThrow("Unknown tool");
@@ -292,18 +295,18 @@ it("eval leaves a Claude Code MCP spelling unresolved when mounted and active to
 	const emitted = "mcp__foo__bar__foo_bar_baz";
 	const active = makeFakeTool(createMCPToolName("foo__bar", "foo_bar_baz"));
 	const mounted = makeFakeTool(createMCPToolName("foo", "bar__foo_bar_baz"));
-	const xdev: XdevState = {
+	const toolCommands: ToolCommandState = {
 		tools: new Map([active, mounted].map(tool => [tool.name, tool])),
 		mountedNames: new Set(),
 		builtInNames: new Set(),
 		isActive: name => name === active.name,
 	};
-	session = await createSession([active, mounted], undefined, {}, { xdev });
+	session = await createSession([active, mounted], undefined, {}, { toolCommands });
 	await session.setActiveToolsByName([active.name]);
-	xdev.mountedNames.add(mounted.name);
+	toolCommands.mountedNames.add(mounted.name);
 
 	expect(session.getToolForEvalBridge(emitted)).toBeUndefined();
-	xdev.mountedNames.delete(mounted.name);
+	toolCommands.mountedNames.delete(mounted.name);
 	expect(session.getToolForEvalBridge(emitted)?.name).toBe(active.name);
 });
 
@@ -524,24 +527,30 @@ it("delete and move tools request ACP permission before executing", async () => 
 
 it("top-level fallback preserves ACP permission for mounted destructive tools", async () => {
 	const readTool = makeFakeTool("read");
+	const bashTool = makeFakeTool("bash");
 	const writeTool = makeFakeTool("write");
 	const deleteTool = makeFakeTool("delete");
 	deleteTool.loadMode = "discoverable";
 	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
 	const permissionSpy = spyOn(bridge, "requestPermission");
-	const tools = new Map([readTool, writeTool].map(tool => [tool.name, tool]));
-	const xdev: XdevState = {
+	const tools = new Map([readTool, writeTool, bashTool].map(tool => [tool.name, tool]));
+	const toolCommands: ToolCommandState = {
 		tools,
 		mountedNames: new Set(),
-		builtInNames: new Set(["read", "write"]),
-		isActive: name => name === "read" || name === "write",
+		builtInNames: new Set(["read", "write", "bash"]),
+		isActive: name => name === "read" || name === "write" || name === "bash",
 	};
-	session = await createSession([readTool, writeTool], bridge, {}, { xdev, builtInToolNames: ["read", "write"] });
+	session = await createSession(
+		[readTool, writeTool, bashTool],
+		bridge,
+		{},
+		{ toolCommands, builtInToolNames: ["read", "write", "bash"] },
+	);
 
 	await session.refreshRpcHostTools([deleteTool]);
-	expect(xdev.mountedNames.has("delete")).toBe(true);
+	expect(toolCommands.mountedNames.has("delete")).toBe(true);
 	expect(session.getActiveToolNames()).not.toContain("delete");
-	const fallbackTool = resolveMountedXdevExecutable(xdev, "delete");
+	const fallbackTool = resolveMountedToolCommandExecutable(toolCommands, "delete");
 	await fallbackTool!.execute(
 		"call-mounted-delete",
 		{ path: "/tmp/gone.ts" },
@@ -556,67 +565,37 @@ it("top-level fallback preserves ACP permission for mounted destructive tools", 
 
 it("startup-mounted destructive tools gain the ACP permission gate when the bridge attaches", async () => {
 	const readTool = makeFakeTool("read");
+	const bashTool = makeFakeTool("bash");
 	const writeTool = makeFakeTool("write");
 	const deleteTool = makeFakeTool("delete");
 	deleteTool.loadMode = "discoverable";
 	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
 	const permissionSpy = spyOn(bridge, "requestPermission");
-	const tools = new Map([readTool, writeTool, deleteTool].map(tool => [tool.name, tool]));
-	const xdev: XdevState = {
+	const tools = new Map([readTool, writeTool, bashTool, deleteTool].map(tool => [tool.name, tool]));
+	const toolCommands: ToolCommandState = {
 		tools,
 		mountedNames: new Set(["delete"]),
-		builtInNames: new Set(["read", "write"]),
-		isActive: name => name === "read" || name === "write",
+		builtInNames: new Set(["read", "write", "bash"]),
+		isActive: name => name === "read" || name === "write" || name === "bash",
 	};
 	session = await createSession(
-		[readTool, writeTool, deleteTool],
+		[readTool, writeTool, bashTool, deleteTool],
 		bridge,
 		{},
-		{ xdev, builtInToolNames: ["read", "write"] },
+		{ toolCommands, builtInToolNames: ["read", "write", "bash"] },
 	);
 
-	await dispatchXdevTool(xdev, "delete", JSON.stringify({ path: "/tmp/gone.ts" }), "call-startup-delete");
+	const { result, dispatch } = await dispatchToolCommand(
+		toolCommands,
+		"delete",
+		{ path: "/tmp/gone.ts" },
+		"call-startup-delete",
+	);
+	expect(result.isError).toBeUndefined();
+	expect(dispatch).toMatchObject({ tool: "delete", mode: "execute", exitCode: 0 });
 
 	expect(permissionSpy).toHaveBeenCalledTimes(1);
 	expect(deleteTool.executeCalls).toBe(1);
-});
-
-it("xd wire aliases keep edit's approval tier and cannot bypass ACP rejection", async () => {
-	const requests: ClientBridgePermissionToolCall[] = [];
-	const bridge: ClientBridge = {
-		capabilities: { requestPermission: true },
-		async requestPermission(toolCall) {
-			requests.push(toolCall);
-			return { outcome: "selected", optionId: "reject_once", kind: "reject_once" };
-		},
-	};
-	const toolSession = makeToolSession(bridge);
-	const edit = new EditTool(toolSession);
-	const xdev: XdevState = {
-		tools: new Map([[edit.name, edit as AgentTool]]),
-		mountedNames: new Set(),
-		builtInNames: new Set(["edit"]),
-		isActive: name => session?.getActiveToolNames().includes(name) ?? false,
-	};
-	toolSession.xdev = xdev;
-	const write = new WriteTool(toolSession);
-	session = await createSession([edit as AgentTool, write as AgentTool], bridge, {}, { xdev });
-	const target = tempDir.join("xd-wire-permission.txt");
-	await Bun.write(target, "keep\n");
-	const input = ["*** Begin Patch", `*** Delete File: ${target}`, "*** End Patch"].join("\n");
-	const content = JSON.stringify({ input });
-
-	for (const name of ["edit", "apply_patch"]) {
-		expect(write.approval({ path: `xd://${name}`, content })).toEqual({ tier: "write", policyKey: "edit" });
-		const result = await write.execute(`xd-permission-${name}`, { path: `xd://${name}`, content });
-		expect(result.isError).toBe(true);
-		expect(result.content.find(entry => entry.type === "text")?.text).toContain("rejected by user");
-		expect(await Bun.file(target).text()).toBe("keep\n");
-	}
-	expect(requests.map(({ toolName, title, locations }) => ({ toolName, title, locations }))).toEqual([
-		{ toolName: "edit", title: `Delete ${target}`, locations: [{ path: target }] },
-		{ toolName: "edit", title: `Delete ${target}`, locations: [{ path: target }] },
-	]);
 });
 
 it("edit, write, and ast_edit do not request ACP permission", async () => {

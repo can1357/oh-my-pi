@@ -33,6 +33,7 @@
 import { vi } from "bun:test";
 import { isSettingsInitialized, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import type { MCPDroppedServer } from "@oh-my-pi/pi-coding-agent/mcp/transforms";
 import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
@@ -123,6 +124,7 @@ export function createSessionStub(
 			metadataForProvider: () => undefined,
 		},
 		getEvalPreludes: () => [],
+		getActiveToolNames: () => [],
 		getEnabledToolNames: () => [],
 		getContextUsage: () => undefined,
 		getGoalModeState: () => undefined,
@@ -168,6 +170,7 @@ export function createMcpManagerStub(overrides?: McpManagerOverrides): MCPManage
 		getConnectedServers: vi.fn(() => []),
 		getAllServerNames: vi.fn(() => []),
 		getSource: vi.fn(() => undefined),
+		getBuiltinDrops: vi.fn(() => new Map<string, MCPDroppedServer>()),
 		getServerConfig: vi.fn(() => undefined),
 		getServerResources: vi.fn(() => undefined),
 		getServerPrompts: vi.fn(() => undefined),
@@ -223,7 +226,6 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 	};
 	const ctx = {
 		ui,
-		composer: { setRunActive: vi.fn() },
 		chatContainer,
 		statusContainer: new Container(),
 		editorContainer: new Container(),
@@ -296,6 +298,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		showStatus: vi.fn(),
 		showError: vi.fn(),
 		showWarning: vi.fn(),
+		showModelCycleTrack: vi.fn(),
 		showPinnedError: vi.fn(),
 		clearPinnedError: vi.fn(),
 		showHookInput: vi.fn(async () => undefined),
@@ -305,6 +308,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		renderInitialMessages: vi.fn(async () => {}),
 		updatePendingMessagesDisplay: vi.fn(),
 		updateEditorBorderColor: vi.fn(),
+		configureDialogEditor: vi.fn(),
 		syncIdleMaintenanceView: vi.fn(),
 		ensureLoadingAnimation: vi.fn(),
 		setWorkingMessage: vi.fn(),

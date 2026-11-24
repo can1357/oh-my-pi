@@ -2,9 +2,22 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
+### Added
+
+- Enhanced guest collaboration APIs: `GuestClient.sendPrompt` now supports sending images, while `sendResume`, `sendDeliverQueue`, and the `followUp` option enable continuing the host’s agent, interrupting it to deliver queued messages, or queueing a follow-up prompt.
+
+### Changed
+
+- Tool commands run inside a bash call render as nested cards under the bash card
+- Tool cards in shared sessions and HTML exports show brief intent labels instead of detailed ranking instructions.
+
+## [19.0.0] - 2026-11-18
+
 ### Fixed
 
-- Fixed web search cards without a synthesized answer (e.g. Parallel) showing the raw numbered result listing; each source now shows a short cleaned excerpt instead.
+- Fixed web search cards without a synthesized answer displaying raw numbered result lists; they now show a concise excerpt for each source instead.
 
 ## [18.22.0] - 2026-11-16
 

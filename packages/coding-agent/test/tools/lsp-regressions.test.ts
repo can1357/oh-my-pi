@@ -42,14 +42,13 @@ import {
 	collectGlobMatches,
 	dedupeWorkspaceSymbols,
 	detectLanguageId,
-	fileToUri,
 	filterWorkspaceSymbols,
 	hasGlobPattern,
 	readLocationContext,
 	resolveDiagnosticTargets,
 	resolveSymbolColumn,
-	uriToFile,
 } from "@oh-my-pi/pi-coding-agent/lsp/utils";
+import { fileToUri, uriToFile } from "@oh-my-pi/pi-coding-agent/lsp/uri";
 import { getThemeByName, initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
@@ -3184,6 +3183,39 @@ describe("lsp regressions", () => {
 			}
 		});
 
+		it("points typescript-language-server at the tsc package's tsserver when node_modules/typescript lacks one", async () => {
+			// `typescript` aliased to `@typescript/typescript6` (no tsserver.js) while `.bin/tsc`
+			// links `@typescript/old`: the server used to exit at initialize.
+			if (process.platform === "win32") return;
+			const tempDir = TempDir.createSync("@omp-lsp-ts-alias-");
+			vi.spyOn(Bun, "which").mockReturnValue(null);
+			try {
+				const root = tempDir.path();
+				await Bun.write(path.join(root, "package.json"), "{}");
+				await Bun.write(
+					path.join(root, "node_modules", "typescript", "package.json"),
+					'{"name":"@typescript/typescript6"}',
+				);
+				const oldDir = path.join(root, "node_modules", "@typescript", "old");
+				await Bun.write(path.join(oldDir, "package.json"), '{"name":"@typescript/old"}');
+				await Bun.write(path.join(oldDir, "bin", "tsc"), "");
+				await Bun.write(path.join(oldDir, "lib", "tsserver.js"), "");
+				const binDir = path.join(root, "node_modules", ".bin");
+				await fs.promises.mkdir(binDir, { recursive: true });
+				await fs.promises.symlink(path.join("..", "@typescript", "old", "bin", "tsc"), path.join(binDir, "tsc"));
+				await Bun.write(path.join(binDir, "typescript-language-server"), "");
+
+				const config = loadConfig(root);
+				expect(Object.keys(config.servers)).toEqual(["typescript-language-server"]);
+				expect(config.servers["typescript-language-server"]?.initOptions?.tsserver).toEqual({
+					fallbackPath: path.join(fs.realpathSync(oldDir), "lib", "tsserver.js"),
+				});
+			} finally {
+				vi.restoreAllMocks();
+				tempDir.removeSync();
+			}
+		});
+
 		it("drops tsc --lsp when the tsc install layout is unrecognized", async () => {
 			const tempDir = TempDir.createSync("@omp-lsp-ts-unknown-");
 			vi.spyOn(Bun, "which").mockReturnValue(null);
@@ -5057,6 +5089,36 @@ describe("lsp regressions", () => {
 				expect(loaded).toBe(true);
 			} finally {
 				vi.useRealTimers();
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
+		it("ends the load of a server that never reports progress shortly after its first open", async () => {
+			// pyright, ty, ruff, and typescript-language-server never send `$/progress`; their
+			// first project-aware wait used to sit out the whole fallback. The window starts at
+			// the first open, not at `initialized`: a warmed-up server that starts loading only
+			// once a file opens must not count as loaded before that.
+			const { tempDir, sessionRoot } = await makeCheckouts("@omp-lsp-silent-load-");
+			try {
+				const { serverConfig } = useServer(FOLDER_CHANGES);
+				const client = await lspClient.getOrCreateClient(serverConfig, sessionRoot);
+				let loaded = false;
+				void lspClient.waitForProjectLoaded(client).then(() => {
+					loaded = true;
+				});
+				// Real delay: the fake LSP subprocess and the client's init/IO timers share the
+				// clock, so fake timers cannot prove "no silent window before the first open".
+				await Bun.sleep(2_500);
+				expect(loaded).toBe(false);
+
+				const filePath = path.join(sessionRoot, "first-open.ts");
+				await Bun.write(filePath, "export const value = 1;\n");
+				await lspClient.ensureFileOpen(client, filePath);
+				const opened = Date.now();
+				await lspClient.waitForProjectLoaded(client);
+				expect(Date.now() - opened).toBeLessThan(5_000);
+			} finally {
 				await lspClient.shutdownAll();
 				tempDir.removeSync();
 			}

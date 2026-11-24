@@ -200,6 +200,16 @@ export function isAttachmentOnlyTitleInput(message: string): boolean {
  */
 export const NO_TITLE_SENTINEL = "none";
 
+/** Whether `value`, once unquoted and stripped of trailing sentence punctuation, is {@link NO_TITLE_SENTINEL}. */
+export function isNoTitleSentinel(value: string): boolean {
+	const bare = value
+		.trim()
+		.replace(/^["']|["']$/g, "")
+		.replace(/[.!?]$/, "")
+		.trim();
+	return bare.toLowerCase() === NO_TITLE_SENTINEL;
+}
+
 /**
  * Upper bounds on an accepted title. Titling is a 3-7 word task, so any output
  * past these limits is a model that ignored the task and answered the user's
@@ -222,7 +232,7 @@ export function normalizeGeneratedTitle(value: string | null | undefined, source
 		.replace(/^["']|["']$/g, "")
 		.replace(/[.!?]$/, "")
 		.trim();
-	if (!title || title.toLowerCase() === NO_TITLE_SENTINEL) return null;
+	if (!title || isNoTitleSentinel(title)) return null;
 	// Zero word characters means pure punctuation/symbol junk (e.g. ".."), which
 	// a sampling model occasionally emits instead of a title; reject so the
 	// caller defers titling rather than naming the session "..".

@@ -42,6 +42,7 @@ use bstr::{BStr, BString};
 use hashbrown::{DefaultHashBuilder, HashTable};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+pub use super::indexed_array::IndexedArray;
 use crate::bash::{
 	ids::{JobId, ModeId, UnitId, Vpid},
 	image::Image,
@@ -653,7 +654,7 @@ pub enum VarValue {
 	/// Scalar.
 	Str(BString),
 	/// Indexed array, sorted by index, sparse.
-	Indexed(Vec<(i64, BString)>),
+	Indexed(IndexedArray),
 	/// Associative array in bash iteration order.
 	Assoc(AssocArray),
 }

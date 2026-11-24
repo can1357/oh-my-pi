@@ -38,7 +38,7 @@ use async_trait::async_trait;
 use napi::{
 	Env, Status,
 	bindgen_prelude::{BigInt, Buffer, Either, Promise, Uint8Array},
-	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
+	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode, UnknownReturnValue},
 };
 use napi_derive::napi;
 use omp_vfs::{
@@ -46,6 +46,8 @@ use omp_vfs::{
 	FileTime, FileType, Fs, Metadata, MissingHandling, NodeKind, OpenOptions, Permissions, ReadDir,
 	ResolveMode, StatFs, SymlinkKind,
 };
+
+use super::changes::FileChangeSink;
 
 /// Largest payload moved by one `read`/`write` round trip. Larger requests
 /// are served short, which every `Read`/`Write` caller already handles, and
@@ -404,6 +406,22 @@ pub struct ShellFsResponse {
 type ShellFsHandler =
 	ThreadsafeFunction<ShellFsRequest, Promise<ShellFsResponse>, ShellFsRequest, Status, true, true>;
 
+/// One host text file a command changed, as `onFileChange` receives it.
+#[napi(object, object_from_js = false)]
+pub struct ShellFileChange {
+	/// Absolute host path.
+	pub path:   String,
+	/// Content before the command touched the file; absent when there was
+	/// no file.
+	pub before: Option<Buffer>,
+	/// Content once the command was done; absent when it removed the file.
+	pub after:  Option<Buffer>,
+}
+
+/// Weak, as [`ShellFsHandler`] is.
+pub(super) type ShellFileChangeHandler =
+	ThreadsafeFunction<ShellFileChange, UnknownReturnValue, ShellFileChange, Status, true, true>;
+
 /// Host filesystem injected into shell sessions.
 #[napi(object, object_to_js = false)]
 pub struct ShellFilesystem {
@@ -418,17 +436,28 @@ pub struct ShellFilesystem {
 	/// paths reach `handler`. When false or absent, `handler` is a fully
 	/// injected filesystem and receives every path, host paths included.
 	pub native_local_paths: Option<bool>,
+	/// Called for each host text file a command changed itself: a builtin's
+	/// write, rename or removal (`sed -i`, `cp`, `mv`, `rm`, `tee`) and the
+	/// target of a redirection, once the command is done with it. Only files
+	/// git would track are reported (in a work tree, not ignored), at most
+	/// 4 MiB each; what a spawned program writes on its own is not.
+	#[napi(ts_type = "(error: Error | null, change: ShellFileChange) => void")]
+	pub on_file_change:     Option<ShellFileChangeHandler>,
 }
 
 impl ShellFilesystem {
 	/// Filesystem facade backed by this provider.
 	pub fn into_fs(self) -> Fs {
-		Fs::new(Arc::new(JsFileSystem {
+		let fs = Fs::new(Arc::new(JsFileSystem {
 			bridge:             Arc::new(Bridge { handler: self.handler }),
 			native_local_paths: self.native_local_paths.unwrap_or(false),
 			native:             Fs::native(),
 			cleanup:            false,
-		}))
+		}));
+		match self.on_file_change {
+			Some(handler) => fs.with_change_sink(Arc::new(FileChangeSink::new(handler))),
+			None => fs,
+		}
 	}
 
 	/// Blocking facade for synchronous search workers: `filesystem`'s

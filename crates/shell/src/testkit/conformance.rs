@@ -243,14 +243,17 @@ fn samples() -> Vec<(KeyBuf, Record)> {
 			KeyBuf::Var(bytes(b"sparse")),
 			var_rec(
 				Attrs::INDEXED,
-				VarValue::Indexed(vec![
-					(i64::MIN, bytes(b"min")),
-					(-3, bytes(b"neg")),
-					(0, bytes(b"a")),
-					(5, bytes(b"b")),
-					(1_000_000, bytes(b"c")),
-					(i64::MAX, bytes(b"\xffmax")),
-				]),
+				VarValue::Indexed(
+					vec![
+						(i64::MIN, bytes(b"min")),
+						(-3, bytes(b"neg")),
+						(0, bytes(b"a")),
+						(5, bytes(b"b")),
+						(1_000_000, bytes(b"c")),
+						(i64::MAX, bytes(b"\xffmax")),
+					]
+					.into(),
+				),
 			),
 		),
 		(
@@ -472,19 +475,22 @@ fn set_scalar_replaces_the_value_and_keeps_the_attributes(store: &mut dyn StateS
 /// and keeps an existing one where it is; attributes are kept.
 fn set_elem_keeps_indices_sorted_and_assoc_keys_in_order(store: &mut dyn StateStore) {
 	let attrs = Attrs::INDEXED.with(Attrs::EXPORT);
-	let a = VarValue::Indexed(vec![(0, bytes(b"a")), (10, bytes(b"k"))]);
+	let a = VarValue::Indexed(vec![(0, bytes(b"a")), (10, bytes(b"k"))].into());
 	apply(store, Change::Put(var(b"a"), var_rec(attrs, a)));
 	let elems: [(i64, &[u8]); 4] = [(10, b"K"), (5, b"f"), (-2, b"neg"), (i64::MAX, b"\xffmax")];
 	for (i, v) in elems {
 		apply(store, Change::SetElem(var(b"a"), Elem::Index(i), BStr::new(v)));
 	}
-	let want = VarValue::Indexed(vec![
-		(-2, bytes(b"neg")),
-		(0, bytes(b"a")),
-		(5, bytes(b"f")),
-		(10, bytes(b"K")),
-		(i64::MAX, bytes(b"\xffmax")),
-	]);
+	let want = VarValue::Indexed(
+		vec![
+			(-2, bytes(b"neg")),
+			(0, bytes(b"a")),
+			(5, bytes(b"f")),
+			(10, bytes(b"K")),
+			(i64::MAX, bytes(b"\xffmax")),
+		]
+		.into(),
+	);
 	assert_eq!(read(store, var(b"a")), Some(var_rec(attrs, want)), "indices stay sorted");
 	let m = VarValue::Assoc(vec![(bytes(b"z"), bytes(b"1")), (bytes(b"a"), bytes(b"2"))].into());
 	apply(store, Change::Put(var(b"m"), var_rec(Attrs::ASSOC, m)));
@@ -520,17 +526,14 @@ fn append_changes_keep_attributes_and_order(store: &mut dyn StateStore) {
 	apply(store, Change::Put(local(0, b"s"), str_var(b"local", attrs)));
 	apply(store, Change::AppendScalar(local(0, b"s"), BStr::new("+")));
 	assert_eq!(read(store, local(0, b"s")), Some(str_var(b"local+", attrs)));
-	let indexed = VarValue::Indexed(vec![(2, bytes(b"x")), (9, bytes(b"z"))]);
+	let indexed = VarValue::Indexed(vec![(2, bytes(b"x")), (9, bytes(b"z"))].into());
 	apply(store, Change::Put(var(b"a"), var_rec(Attrs::INDEXED, indexed)));
 	for (i, v) in [(9, "Z"), (5, "m"), (12, ""), (2, "")] {
 		apply(store, Change::AppendElem(var(b"a"), Elem::Index(i), BStr::new(v)));
 	}
-	let want = VarValue::Indexed(vec![
-		(2, bytes(b"x")),
-		(5, bytes(b"m")),
-		(9, bytes(b"zZ")),
-		(12, bytes(b"")),
-	]);
+	let want = VarValue::Indexed(
+		vec![(2, bytes(b"x")), (5, bytes(b"m")), (9, bytes(b"zZ")), (12, bytes(b""))].into(),
+	);
 	assert_eq!(read(store, var(b"a")), Some(var_rec(Attrs::INDEXED, want)));
 	let assoc = VarValue::Assoc(vec![(bytes(b"z"), bytes(b"1")), (bytes(b"a"), bytes(b"2"))].into());
 	apply(store, Change::Put(var(b"m"), var_rec(Attrs::ASSOC, assoc)));
@@ -547,11 +550,11 @@ fn append_changes_keep_attributes_and_order(store: &mut dyn StateStore) {
 /// `DelElem` removes one element and keeps the others in order; an absent
 /// element has no effect.
 fn del_elem_removes_one_element(store: &mut dyn StateStore) {
-	let a = VarValue::Indexed(vec![(0, bytes(b"a")), (3, bytes(b"d")), (7, bytes(b"h"))]);
+	let a = VarValue::Indexed(vec![(0, bytes(b"a")), (3, bytes(b"d")), (7, bytes(b"h"))].into());
 	apply(store, Change::Put(var(b"a"), var_rec(Attrs::INDEXED, a)));
 	apply(store, Change::DelElem(var(b"a"), Elem::Index(3)));
 	apply(store, Change::DelElem(var(b"a"), Elem::Index(4)));
-	let want = VarValue::Indexed(vec![(0, bytes(b"a")), (7, bytes(b"h"))]);
+	let want = VarValue::Indexed(vec![(0, bytes(b"a")), (7, bytes(b"h"))].into());
 	assert_eq!(read(store, var(b"a")), Some(var_rec(Attrs::INDEXED, want)), "index 3 removed");
 	let m = VarValue::Assoc(
 		vec![(bytes(b"z"), bytes(b"1")), (bytes(b"a"), bytes(b"2")), (bytes(b"m"), bytes(b"3"))]
@@ -628,7 +631,7 @@ fn insert_elem_places_a_new_key(store: &mut dyn StateStore) {
 /// [`StoreError::Shape`] of the key's table and change nothing.
 fn fine_grained_changes_reject_the_wrong_shape(store: &mut dyn StateStore) {
 	let scalar = str_var(b"s", Attrs::NONE);
-	let indexed = var_rec(Attrs::INDEXED, VarValue::Indexed(vec![(1, bytes(b"x"))]));
+	let indexed = var_rec(Attrs::INDEXED, VarValue::Indexed(vec![(1, bytes(b"x"))].into()));
 	let assoc = var_rec(Attrs::ASSOC, VarValue::Assoc(vec![(bytes(b"k"), bytes(b"v"))].into()));
 	let alias = Record::Alias(bytes(b"echo"));
 	apply(store, Change::Put(var(b"s"), scalar.clone()));
@@ -1069,7 +1072,9 @@ fn assignments_are_visible_after_each_op<S: StateStore>(store: &mut S) {
 		.collect();
 	assert_eq!(xs, want, "x holds each value in turn after the op that assigned it");
 	let indexed = |s: &mut S| match s.get(var(b"a")).expect("get") {
-		Some(Record::Var(Var { value: VarValue::Indexed(items), .. })) => items.clone(),
+		Some(Record::Var(Var { value: VarValue::Indexed(items), .. })) => {
+			items.iter().cloned().collect::<Vec<_>>()
+		},
 		_ => Vec::new(),
 	};
 	let mut lens = vec![0];

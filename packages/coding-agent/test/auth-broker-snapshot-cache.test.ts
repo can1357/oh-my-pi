@@ -1,10 +1,13 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import {
+	AuthBrokerError,
 	type AuthBrokerServerHandle,
+	type AuthBrokerStartupRetry,
+	openAuthCredentialStore,
 	readAuthBrokerSnapshotCache,
 	type SnapshotResponse,
 	startAuthBroker,
@@ -12,6 +15,8 @@ import {
 } from "@oh-my-pi/pi-ai/auth-broker";
 import { discoverAuthStorage } from "@oh-my-pi/pi-coding-agent/sdk";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { flush } from "./helpers/fake-clock";
+import { rejectionOf } from "./helpers/rejection";
 
 const ENV_KEYS = [
 	"OMP_AUTH_BROKER_URL",
@@ -65,6 +70,8 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 	});
 
 	afterEach(async () => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
 		for (const key of ENV_KEYS) {
 			if (savedEnv[key] === undefined) delete process.env[key];
 			else process.env[key] = savedEnv[key];
@@ -165,6 +172,198 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 			expect(await storage.keys.get(PROVIDER)).toBe("cached-api-key");
 		} finally {
 			storage?.close();
+			server.stop(true);
+		}
+	});
+
+	// A TCP proxy in front of the broker sends a raw reply to the first connection
+	// (the startup snapshot request), as during a restart, and pipes later ones through.
+	const interruptions = [
+		{
+			name: "answers 503",
+			firstReply: "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 10\r\nConnection: close\r\n\r\nrestarting",
+			status: 503,
+		},
+		{
+			name: "drops the connection mid-body",
+			firstReply: 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{"generation":',
+			status: undefined,
+		},
+	];
+	test.each(interruptions)(
+		"retries the initial snapshot when the broker $name, reporting the retry",
+		async ({ firstReply, status }) => {
+			const brokerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "broker.db"));
+			await brokerStore.saveApiKey(PROVIDER, "broker-api-key");
+			const brokerStorage = new AuthStorage(brokerStore);
+			await brokerStorage.credentials.reload();
+			const handle = startAuthBroker({
+				storage: brokerStorage,
+				bind: "127.0.0.1:0",
+				bearerTokens: [TOKEN],
+				disableRefresher: true,
+			});
+			const brokerPort = Number(new URL(handle.url).port);
+			let connections = 0;
+			const proxy = Bun.listen<{ first: boolean; upstream?: Promise<Bun.Socket> }>({
+				hostname: "127.0.0.1",
+				port: 0,
+				socket: {
+					open(client) {
+						client.data = { first: ++connections === 1 };
+						if (client.data.first) return;
+						client.data.upstream = Bun.connect({
+							hostname: "127.0.0.1",
+							port: brokerPort,
+							socket: {
+								data: (_upstream, chunk) => {
+									client.write(chunk);
+								},
+								close: () => {
+									client.end();
+								},
+							},
+						});
+					},
+					async data(client, chunk) {
+						if (client.data.first) client.end(firstReply);
+						else (await client.data.upstream)?.write(chunk);
+					},
+					async close(client) {
+						(await client.data.upstream)?.end();
+					},
+				},
+			});
+			const proxyUrl = `http://127.0.0.1:${proxy.port}/`;
+			let storage: AuthStorage | undefined;
+			try {
+				process.env.OMP_AUTH_BROKER_URL = proxyUrl;
+				process.env.OMP_AUTH_BROKER_TOKEN = TOKEN;
+				process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS = "0";
+				const retries: AuthBrokerStartupRetry[] = [];
+				storage = await discoverAuthStorage(tempDir, { onBrokerRetry: retry => retries.push(retry) });
+				expect(await storage.keys.get(PROVIDER)).toBe("broker-api-key");
+				expect(retries).toMatchObject([{ url: proxyUrl, error: { status }, delayMs: 500, budgetMs: 30_000 }]);
+			} finally {
+				storage?.close();
+				proxy.stop(true);
+				await handle.close();
+				brokerStorage.close();
+				brokerStore.close();
+			}
+		},
+	);
+
+	test("fails at once on a rejected token, and on any failure when switching brokers at runtime", async () => {
+		let status = 401;
+		let requests = 0;
+		const server = Bun.serve({
+			port: 0,
+			fetch: () => {
+				requests += 1;
+				return new Response("refused", { status });
+			},
+		});
+		try {
+			process.env.OMP_AUTH_BROKER_URL = server.url.toString();
+			process.env.OMP_AUTH_BROKER_TOKEN = TOKEN;
+			process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS = "0";
+			expect(await rejectionOf(discoverAuthStorage(tempDir))).toMatchObject({ status: 401 });
+			expect(requests).toBe(1);
+
+			status = 503;
+			requests = 0;
+			const switched = openAuthCredentialStore({ brokerConfig: { url: server.url.toString(), token: TOKEN } });
+			expect(await rejectionOf(switched)).toMatchObject({ status: 503 });
+			expect(requests).toBe(1);
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	test("fails startup once the broker stays unreachable for the whole retry budget", async () => {
+		// The broker accepts connections and never answers. Each startup fetch makes two attempts,
+		// each cut by the client's 10 s request timeout, so startup retries once within its 30 s
+		// budget, whose deadline then cancels the third request in flight. Fake time moves only
+		// in fixed steps, each after the event it waits for, never by event-loop turns.
+		const hang = Promise.withResolvers<Response>();
+		const requests = Array.from({ length: 3 }, () => Promise.withResolvers<void>());
+		const unseen = [...requests];
+		const server = Bun.serve({
+			port: 0,
+			fetch: () => {
+				unseen.shift()?.resolve();
+				return hang.promise;
+			},
+		});
+		// The client takes the global `fetch` when startup makes it; each call's signal is the one
+		// the deadline aborts.
+		const fetched = vi.spyOn(globalThis, "fetch");
+		vi.useFakeTimers();
+		try {
+			process.env.OMP_AUTH_BROKER_URL = server.url.toString();
+			process.env.OMP_AUTH_BROKER_TOKEN = TOKEN;
+			process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS = "0";
+			const retries: AuthBrokerStartupRetry[] = [];
+			const retried = Promise.withResolvers<void>();
+			const discovered = discoverAuthStorage(tempDir, {
+				onBrokerRetry: retry => {
+					retries.push(retry);
+					retried.resolve();
+				},
+			});
+			let settled = false;
+			const outcome = rejectionOf(discovered).finally(() => {
+				settled = true;
+			});
+			// Each step waits for an event only startup that is still running makes; if startup
+			// ends first, the step fails saying so rather than at the test's timeout.
+			const before = <T>(event: Promise<T>, what: string) =>
+				Promise.race([
+					event,
+					outcome.then(error => {
+						throw new Error(`startup ended before ${what}: ${error}`);
+					}),
+				]);
+			await before(requests[0].promise, "the first request");
+			// The 10 s steps and two attempts per fetch follow `DEFAULT_TIMEOUT_MS` and `DEFAULT_MAX_RETRIES` in
+			// packages/ai/src/auth-broker/client.ts. A longer timeout or another retry count leaves a step below
+			// waiting until the test times out; a timeout under 9.5 s fails the in-flight check 1 ms short of 30 s.
+			// At 10 s the request timeout cuts the first attempt, and the client makes its second.
+			vi.advanceTimersByTime(10_000);
+			await before(requests[1].promise, "the second request");
+			// At 20 s it cuts that one too: startup reports one retry and waits 500 ms.
+			vi.advanceTimersByTime(10_000);
+			await before(retried.promise, "the retry");
+			expect(retries).toMatchObject([{ delayMs: 500, budgetMs: 30_000 }]);
+			// No third request before 500 ms of fake time. Fixed steps, not a step to the next timer: the wait
+			// is `scheduler.wait`, which Bun may stop faking. Exactly one turn, not `flush()`'s default: where
+			// that wait runs on real time, the check must come before it can fire.
+			vi.advanceTimersByTime(499);
+			await flush(1);
+			expect(fetched).toHaveBeenCalledTimes(2);
+			vi.advanceTimersByTime(1);
+			await before(requests[2].promise, "the third request");
+			const third = fetched.mock.calls.at(-1)?.[1]?.signal;
+			expect(fetched).toHaveBeenCalledTimes(3);
+			// 1 ms short of 30 s, the third request is still in flight.
+			vi.advanceTimersByTime(9_499);
+			// Let the promise jobs that advance queued run, so an early end shows below.
+			await flush(1);
+			expect(third?.aborted).toBe(false);
+			expect(settled).toBe(false);
+			// At 30 s the deadline cancels it.
+			vi.advanceTimersByTime(1);
+			expect(third?.aborted).toBe(true);
+			expect(await outcome).toBeInstanceOf(AuthBrokerError);
+			// Giving up is not reported as one more retry.
+			expect(retries).toHaveLength(1);
+			// Counted at the `fetch` spy, so a request started at the deadline counts too.
+			expect(fetched).toHaveBeenCalledTimes(3);
+		} finally {
+			// A check that fails before 30 s leaves startup retrying: fire its budget before real timers return.
+			vi.advanceTimersByTime(30_000);
+			hang.resolve(new Response(null, { status: 503 }));
 			server.stop(true);
 		}
 	});

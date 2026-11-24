@@ -13,6 +13,7 @@ import { isMarkdownPath } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "../sdk";
 import {
 	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
 	noTruncResult,
 	type TruncationResult,
 	truncateHead,
@@ -32,7 +33,7 @@ import type { ReadToolDetails, ReadTruncationStats } from "@oh-my-pi/pi-tui/tool
 import { isRawSelector, type ParsedSelector, resolveTailSelector, selToOffsetLimit } from "./read-selector";
 import { formatBytes, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import type { TruncationMetaInput } from "./output-meta";
+import { resolveArtifactSpillThreshold, resolveInlineByteCapBudget, type TruncationMetaInput } from "./output-meta";
 import { toolResult } from "./tool-result";
 
 import { cfgReadRenderMarkdown } from "./settings";
@@ -379,6 +380,14 @@ export async function buildInMemoryTextResult(
 	);
 	let startLine = expanded.startLine;
 	const endLine = expanded.endLine;
+	// Reserve row prefixes as the filesystem reader does, capped at half the spill threshold.
+	const spillThreshold = resolveArtifactSpillThreshold(session.settings);
+	const pageLines = Math.min(endLine - startLine, DEFAULT_MAX_LINES);
+	const prefixWidth = displayMode.lineNumbers ? String(startLine + pageLines).length + 1 : 0;
+	const maxBytes = Math.min(
+		DEFAULT_MAX_BYTES,
+		spillThreshold - Math.min(pageLines * prefixWidth, Math.floor(spillThreshold / 2)),
+	);
 
 	const resultBuilder = toolResult(details);
 	if (options.sourcePath) {
@@ -406,7 +415,7 @@ export async function buildInMemoryTextResult(
 	let selectedRange = allLines
 		? sliceLineRange(text, allLines, startLine, endLine)
 		: sliceRawLineRange(text, startLine, endLine);
-	let truncation = ignoreResultLimits ? noTruncResult(selectedRange) : truncateHead(selectedRange);
+	let truncation = ignoreResultLimits ? noTruncResult(selectedRange) : truncateHead(selectedRange, { maxBytes });
 	// The leading context line must not cost the requested start line: when the byte budget
 	// stops at or inside it, `:<start>` would widen to the same context and repeat this page.
 	// The whole text is in memory, so drop the context and page from the requested line.
@@ -418,7 +427,7 @@ export async function buildInMemoryTextResult(
 	) {
 		startLine = requestedStart;
 		selectedRange = sliceLineRange(text, allLines, startLine, endLine);
-		truncation = truncateHead(selectedRange);
+		truncation = truncateHead(selectedRange, { maxBytes });
 	}
 	const startLineDisplay = startLine + 1;
 	const joinSelectedLines = (): string =>
@@ -497,12 +506,12 @@ export async function buildInMemoryTextResult(
 	if (truncation.firstLineExceedsLimit) {
 		const firstLine = allLines ? (allLines[startLine] ?? "") : selectedRange.split("\n", 1)[0];
 		const firstLineBytes = Buffer.byteLength(firstLine, "utf-8");
-		const snippet = truncateHeadBytes(firstLine, DEFAULT_MAX_BYTES);
+		const snippet = truncateHeadBytes(firstLine, maxBytes);
 
 		if (shouldAddHashLines) {
 			outputText = `[Line ${startLineDisplay} is ${formatBytes(
 				firstLineBytes,
-			)}, exceeds ${formatBytes(DEFAULT_MAX_BYTES)} limit. Hashline output requires full lines; cannot emit an editable numbered preview for a truncated line.]`;
+			)}, exceeds ${formatBytes(maxBytes)} limit. Hashline output requires full lines; cannot emit an editable numbered preview for a truncated line.]`;
 		} else {
 			outputText = formatText(snippet.text, startLineDisplay);
 		}
@@ -510,7 +519,7 @@ export async function buildInMemoryTextResult(
 		if (snippet.text.length === 0) {
 			outputText = `[Line ${startLineDisplay} is ${formatBytes(
 				firstLineBytes,
-			)}, exceeds ${formatBytes(DEFAULT_MAX_BYTES)} limit. Unable to display a valid UTF-8 snippet.]`;
+			)}, exceeds ${formatBytes(maxBytes)} limit. Unable to display a valid UTF-8 snippet.]`;
 		}
 
 		details.truncation = toReadTruncationStats(truncation);
@@ -535,7 +544,7 @@ export async function buildInMemoryTextResult(
 				direction: "head",
 				startLine: startLineDisplay,
 				totalFileLines: totalLines,
-				maxBytes: DEFAULT_MAX_BYTES,
+				maxBytes,
 			},
 		};
 	} else if (!rawDisplay && userLimitedLines !== undefined && startLine + userLimitedLines < totalLines) {
@@ -565,6 +574,15 @@ export async function buildInMemoryTextResult(
 		recordInMemorySeenLines(session, options.sourcePath, text, rawSeenLines, options.sourceStartLine);
 	}
 	resultBuilder.text(outputText);
+	// Like filesystem pages, converted documents and URL text can be re-read by source
+	// line. Preserve that continuation rather than spilling an already bounded page.
+	if (
+		!ignoreResultLimits &&
+		!truncation.firstLineExceedsLimit &&
+		Buffer.byteLength(outputText, "utf-8") <= resolveInlineByteCapBudget(session.settings)
+	) {
+		resultBuilder.pagedSource();
+	}
 	if (truncationInfo) {
 		resultBuilder.truncation(truncationInfo.result, truncationInfo.options);
 	}

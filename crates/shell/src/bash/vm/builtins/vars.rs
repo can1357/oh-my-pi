@@ -319,7 +319,7 @@ pub fn set_value(
 					let line = exec::current_line(vp);
 					let msg = format!("warning: {}: removing nameref attribute", name.as_bstr());
 					k.diag(cx, vp, line, Diag::Warning { msg: msg.into() });
-					drop_nameref(k, cx, vp, name, VarValue::Indexed(Vec::new()))?;
+					drop_nameref(k, cx, vp, name, VarValue::Indexed(Default::default()))?;
 				}
 			}
 			// The first assignment to an unset reference names its target,
@@ -639,7 +639,7 @@ fn set_value_plain(
 				if matches!(var.value, VarValue::Str(_))
 					&& (!existed || var.attrs.contains(Attrs::INVISIBLE))
 				{
-					var.value = VarValue::Indexed(Vec::new());
+					var.value = VarValue::Indexed(Default::default());
 				}
 				let i = index_of(k, cx, vp, var.next_index(), idx, &|| element_text(name, idx))?;
 				let old = lhs
@@ -707,9 +707,9 @@ fn set_value_plain(
 						Var { attrs, value: VarValue::Indexed(items.clone()) }
 					},
 					(VarValue::Str(s), true) if set => {
-						Var { attrs, value: VarValue::Indexed(vec![(0, s.clone())]) }
+						Var { attrs, value: VarValue::Indexed(vec![(0, s.clone())].into()) }
 					},
-					_ => Var { attrs, value: VarValue::Indexed(Vec::new()) },
+					_ => Var { attrs, value: VarValue::Indexed(Default::default()) },
 				};
 				let mut i = if lhs.append { tmp.next_index() } else { 0 };
 				for (key, eappend, v) in elems {
@@ -2110,7 +2110,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 			let value = if on.contains(Attrs::ASSOC) {
 				VarValue::Assoc(Default::default())
 			} else if on.contains(Attrs::INDEXED) {
-				VarValue::Indexed(Vec::new())
+				VarValue::Indexed(Default::default())
 			} else {
 				VarValue::Str(BString::default())
 			};
@@ -2150,7 +2150,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 			} else {
 				Vec::new()
 			};
-			var.value = VarValue::Indexed(items);
+			var.value = VarValue::Indexed(items.into());
 		}
 		// `declare -A` on a scalar keeps its value as key `0`.
 		if on.contains(Attrs::ASSOC)
@@ -2365,7 +2365,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 					} else {
 						Vec::new()
 					};
-					var.value = VarValue::Indexed(items);
+					var.value = VarValue::Indexed(items.into());
 				}
 				ctx.set_var(name, Some(var), level);
 				// bash expands a `declare` argument's subscript again (quote
@@ -3398,7 +3398,9 @@ mod tests {
 		assert_eq!(out, b"declare -x x=\"a\\\"b\"");
 		let uu = Var {
 			attrs: Attrs::NONE,
-			value: VarValue::Indexed(vec![(0, "".into()), (1, "kghfjk".into()), (3, "i\n".into())]),
+			value: VarValue::Indexed(
+				vec![(0, "".into()), (1, "kghfjk".into()), (3, "i\n".into())].into(),
+			),
 		};
 		out.clear();
 		declare_line(b"uu", Some(&uu), &mut out);

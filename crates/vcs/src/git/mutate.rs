@@ -83,6 +83,41 @@ pub(crate) fn update_reference(
 	Ok(())
 }
 
+/// Translate a lost compare-and-swap on HEAD into [`Error::HeadMoved`], the
+/// failure [`CommitOptions::expected_head`] documents. Returns `None` for
+/// reference errors that are not precondition failures (locks, IO, name
+/// validation), which stay backend errors.
+///
+/// `expected` is the commit the update started from. `actual` is the value that
+/// broke the swap; a reference that disappeared leaves it `None`, the same way
+/// an unborn HEAD is reported.
+fn head_moved_at_commit(
+	expected: Option<gix::hash::ObjectId>,
+	err: &gix::reference::edit::Error,
+) -> Option<Error> {
+	let gix::reference::edit::Error::FileTransactionPrepare(prepare) = err else {
+		return None;
+	};
+	let actual = match prepare {
+		gix::refs::file::transaction::prepare::Error::ReferenceOutOfDate {
+			actual: gix::refs::Target::Object(id),
+			..
+		}
+		| gix::refs::file::transaction::prepare::Error::MustNotExist {
+			actual: gix::refs::Target::Object(id),
+			..
+		} => Some(id.to_hex().to_string()),
+		gix::refs::file::transaction::prepare::Error::ReferenceOutOfDate { .. }
+		| gix::refs::file::transaction::prepare::Error::MustExist { .. } => None,
+		_ => return None,
+	};
+	Some(Error::HeadMoved { expected: commit_head_label(expected), actual })
+}
+
+fn commit_head_label(head: Option<gix::ObjectId>) -> String {
+	head.map_or_else(|| "(unborn)".into(), |id| id.to_hex().to_string())
+}
+
 impl GitRepo {
 	/// Stage worktree files, or every change when `files` is empty.
 	///
@@ -194,6 +229,36 @@ impl GitRepo {
 	/// the object is written by `git commit-tree -S` so Git runs the
 	/// configured signer; a signer failure leaves HEAD unchanged.
 	pub fn commit_create(&self, message: &str, options: &CommitOptions) -> Result<String> {
+		self
+			.commit_with_index(message, options, None)
+			.map(|(id, _)| id)
+	}
+
+	/// Publish a private-index commit and its shared-index reconciliation.
+	/// `selection` is the patch applied to the private index; overlapping
+	/// staged edits are preserved and reported. A missing expected HEAD means
+	/// the branch must be unborn.
+	pub fn commit_reconciled(
+		&self,
+		message: &str,
+		options: &CommitOptions,
+		selection: &str,
+	) -> Result<(String, Vec<String>)> {
+		if options.index_path.is_none() || !options.files.is_empty() {
+			return Err(Error::backend(
+				"git commit",
+				"reconciliation requires a complete private index",
+			));
+		}
+		self.commit_with_index(message, options, Some(selection))
+	}
+
+	fn commit_with_index(
+		&self,
+		message: &str,
+		options: &CommitOptions,
+		reconcile: Option<&str>,
+	) -> Result<(String, Vec<String>)> {
 		let repo = self.gix()?;
 		// Git rejects a malformed value before doing any work; reading it as
 		// `false` would silently write unsigned commits.
@@ -220,6 +285,9 @@ impl GitRepo {
 		// `write_index_tree`.
 		let mut index = load_index()?;
 		reject_unmerged_index(&index, "git commit")?;
+		let selected_tree = (reconcile.is_some() && !options.no_verify)
+			.then(|| write_index_tree(&repo, &index))
+			.transpose()?;
 		if !options.no_verify {
 			run_commit_hook(self, "pre-commit", &[], index_path)?;
 			// The hook may have edited the index.
@@ -240,10 +308,15 @@ impl GitRepo {
 				.detach();
 			if old_commit != Some(expected) {
 				return Err(Error::HeadMoved {
-					expected: expected.to_hex().to_string(),
+					expected: commit_head_label(Some(expected)),
 					actual:   old_commit.map(|id| id.to_hex().to_string()),
 				});
 			}
+		} else if reconcile.is_some() && old_commit.is_some() {
+			return Err(Error::HeadMoved {
+				expected: commit_head_label(None),
+				actual:   old_commit.map(|id| id.to_hex().to_string()),
+			});
 		}
 		let tree = if options.files.is_empty() {
 			write_index_tree(&repo, &index)?
@@ -321,34 +394,66 @@ impl GitRepo {
 				.map_err(|err| Error::backend("git commit", err))?
 				.id
 		};
+		let prepared_index = if let Some(selection) = reconcile {
+			let hook_patch = match selected_tree {
+				Some(selected) if selected != tree => {
+					self.diff_tree(&selected.to_hex().to_string(), &tree.to_hex().to_string(), true)?
+				},
+				_ => String::new(),
+			};
+			Some(Self::prepare_commit_index(&repo, selection, &hook_patch)?)
+		} else {
+			None
+		};
 		let expected = old_commit
 			.map_or(gix::refs::transaction::PreviousValue::MustNotExist, |old| {
 				gix::refs::transaction::PreviousValue::MustExistAndMatch(old.into())
 			});
-		repo
-			.edit_reference(gix::refs::transaction::RefEdit {
-				change: gix::refs::transaction::Change::Update {
-					log: gix::refs::transaction::LogChange {
-						mode:                gix::refs::transaction::RefLog::AndReference,
-						force_create_reflog: false,
-						message:             if options.amend {
-							"commit (amend)"
-						} else {
-							"commit"
-						}
-						.into(),
-					},
-					expected,
-					new: gix::refs::Target::Object(id),
+		let edit = repo.edit_reference(gix::refs::transaction::RefEdit {
+			change: gix::refs::transaction::Change::Update {
+				log: gix::refs::transaction::LogChange {
+					mode:                gix::refs::transaction::RefLog::AndReference,
+					force_create_reflog: false,
+					message:             if options.amend {
+						"commit (amend)"
+					} else {
+						"commit"
+					}
+					.into(),
 				},
-				name:   "HEAD"
-					.try_into()
-					.map_err(|err| Error::backend("git commit", err))?,
-				deref:  true,
-			})
-			.map_err(|err| Error::backend("git commit", err))?;
+				expected,
+				new: gix::refs::Target::Object(id),
+			},
+			name:   "HEAD"
+				.try_into()
+				.map_err(|err| Error::backend("git commit", err))?,
+			deref:  true,
+		});
+		if let Err(err) = edit {
+			// HEAD moved after the check above, inside the hook/signing window:
+			// the swap lost, which is the `HeadMoved` this option documents, not
+			// a backend failure. Everything else keeps its backend error.
+			if let Some(moved) = head_moved_at_commit(old_commit, &err) {
+				return Err(moved);
+			}
+			return Err(Error::backend("git commit", err));
+		}
+		let notes = if let Some((lock, mut notes)) = prepared_index {
+			// As in Git, publish the written index after the ref swap succeeds.
+			// A failed swap drops the lock and leaves the original index in place.
+			if let Err(err) = lock.commit() {
+				notes.push(format!(
+					"Commit {id} was published, but the prepared shared index could not be installed \
+					 ({}); inspect `git diff --cached` before committing again.",
+					err.error
+				));
+			}
+			notes
+		} else {
+			Vec::new()
+		};
 		let _ = run_commit_hook(self, "post-commit", &[], index_path);
-		Ok(id.to_hex().to_string())
+		Ok((id.to_hex().to_string(), notes))
 	}
 
 	/// Write a commit object for `tree` on top of `parents` without touching
@@ -631,6 +736,15 @@ impl GitRepo {
 		index
 			.write(INDEX_WRITE)
 			.map_err(|e| Error::backend("git read-tree", e))
+	}
+
+	/// Write bytes as a blob and return its full object id.
+	pub fn write_blob(&self, bytes: &[u8]) -> Result<String> {
+		self
+			.gix()?
+			.write_blob(bytes)
+			.map(|id| id.detach().to_hex().to_string())
+			.map_err(|err| Error::backend("git write blob", err))
 	}
 
 	/// Seed a private index from `treeish`, retaining the shared index's
@@ -1731,7 +1845,7 @@ struct TreeNode {
 
 /// Refuse to serialize `index` while any entry is still at a conflict stage.
 /// A tree can store only stage 0; dropping stages 1-3 deletes that path.
-fn reject_unmerged_index(index: &gix::index::File, context: &'static str) -> Result<()> {
+pub(super) fn reject_unmerged_index(index: &gix::index::File, context: &'static str) -> Result<()> {
 	let mut paths = BTreeSet::new();
 	for entry in index.entries() {
 		if entry.stage() != gix::index::entry::Stage::Unconflicted {

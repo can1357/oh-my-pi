@@ -476,6 +476,11 @@ impl Drop for CancelOnDrop {
 /// terminal gets `ENXIO` for `/dev/tty`; a path cannot carry that errno.)
 #[cfg(unix)]
 const UNAVAILABLE_DESCRIPTOR: &str = "/dev/fd/-1";
+/// On Windows `/dev/fd/-1` is an ordinary file on the current drive, so the
+/// sentinel is a device name that nothing defines: opening, creating or
+/// statting it fails with `ERROR_FILE_NOT_FOUND`.
+#[cfg(not(unix))]
+const UNAVAILABLE_DESCRIPTOR: &str = r"\\.\omp-closed-descriptor";
 
 /// How a builtin running inside the host process sees paths.
 ///
@@ -518,8 +523,9 @@ impl ShellPaths {
 		// Scoped to the command's own cancellation (the operand's token under
 		// `timeout`), so a utility reading a host file stops when it fires
 		// instead of draining the file first: `timeout 1 cat /dev/zero` never
-		// returned.
-		let filesystem = fs.blocking();
+		// returned. The host files the command changes are reported once it
+		// (every clone of this resolver) is done.
+		let filesystem = fs.begin_changes().blocking();
 		let filesystem = match cancel {
 			Some(token) => filesystem.with_cancellation(token),
 			None => filesystem,
@@ -560,21 +566,12 @@ impl ShellPaths {
 	/// A descriptor path becomes `/dev/fd/<host fd>` for the shell's
 	/// descriptor, or a path that cannot be opened when the shell has none.
 	pub fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
-		// Windows has no `/dev/fd`: an engine-backed descriptor named as the
-		// shell spells it (`diff <(a) <(b)`) resolves to its mount, before the
-		// spelling becomes a native path.
-		#[cfg(not(unix))]
-		if let Some(DescriptorPath::Fd(fd)) = DescriptorPath::parse(path.as_ref())
-			&& self.file(fd).and_then(OpenFile::as_vfs).is_some()
-		{
-			return virtual_descriptor_path(fd);
-		}
 		let resolved = self.absolute(path.as_ref());
-		#[cfg(unix)]
-		if let Some(descriptor) = DescriptorPath::parse(&resolved) {
-			return self.descriptor_target(descriptor);
+		let spelled = Self::descriptor_spelling(path.as_ref(), &resolved);
+		match DescriptorPath::parse(spelled) {
+			Some(descriptor) => self.descriptor_or_native(descriptor, resolved),
+			None => resolved,
 		}
-		resolved
 	}
 
 	/// Like [`ShellPaths::resolve`], for calls that inspect `path` itself
@@ -586,15 +583,40 @@ impl ShellPaths {
 	/// spelled. `/dev/fd/N` names the descriptor itself and still resolves.
 	pub fn resolve_link(&self, path: impl AsRef<Path>) -> PathBuf {
 		let resolved = self.absolute(path.as_ref());
-		#[cfg(unix)]
-		if let Some(descriptor) = DescriptorPath::parse(&resolved)
-			&& descriptor != DescriptorPath::Terminal
-			// `/dev/stdin` and friends sit directly under `/dev`.
-			&& resolved.components().count() != 3
-		{
-			return self.descriptor_target(descriptor);
+		let spelled = Self::descriptor_spelling(path.as_ref(), &resolved);
+		match DescriptorPath::parse(spelled) {
+			Some(descriptor)
+				if descriptor != DescriptorPath::Terminal
+					// `/dev/stdin` and friends sit directly under `/dev`.
+					&& spelled.components().count() != 3 =>
+			{
+				self.descriptor_or_native(descriptor, resolved)
+			},
+			_ => resolved,
 		}
-		resolved
+	}
+
+	/// The path to match against the descriptor spellings. On Windows
+	/// `/dev/fd/N` has no drive, so `resolved` is that path on the working
+	/// directory's drive (`C:/dev/fd/N`); the path as written is matched.
+	fn descriptor_spelling<'a>(path: &'a Path, resolved: &'a Path) -> &'a Path {
+		if cfg!(windows) { path } else { resolved }
+	}
+
+	/// What a descriptor spelling opens. On Windows the spelling is also an
+	/// ordinary path on the working directory's drive (`C:\dev\fd\9`): a
+	/// descriptor the engine backs (`<(…)`) wins, then a file that really exists
+	/// there, and only when neither does it become a path that cannot be opened,
+	/// so a write never creates one.
+	fn descriptor_or_native(&self, descriptor: DescriptorPath, resolved: PathBuf) -> PathBuf {
+		let target = self.descriptor_target(descriptor);
+		if cfg!(windows)
+			&& !omp_vfs::is_virtual_path(&target)
+			&& self.filesystem.symlink_metadata(&resolved).is_ok()
+		{
+			return resolved;
+		}
+		target
 	}
 
 	fn absolute(&self, path: &Path) -> PathBuf {
@@ -605,10 +627,7 @@ impl ShellPaths {
 		absolute_path(&self.cwd, normalized_path.as_ref())
 	}
 
-	#[cfg(unix)]
 	fn descriptor_target(&self, descriptor: DescriptorPath) -> PathBuf {
-		use std::os::fd::AsRawFd as _;
-
 		let fd = match descriptor {
 			DescriptorPath::Fd(fd) => fd,
 			// A command whose stdin is not a terminal runs with no controlling
@@ -625,10 +644,11 @@ impl ShellPaths {
 		if self.file(fd).and_then(OpenFile::as_vfs).is_some() {
 			return virtual_descriptor_path(fd);
 		}
-		match self.file(fd).and_then(|file| file.try_borrow_as_fd().ok()) {
-			Some(host_fd) => PathBuf::from(format!("/dev/fd/{}", host_fd.as_raw_fd())),
-			None => PathBuf::from(UNAVAILABLE_DESCRIPTOR),
+		#[cfg(unix)]
+		if let Some(host_fd) = self.file(fd).and_then(OpenFile::raw_fd) {
+			return PathBuf::from(format!("/dev/fd/{host_fd}"));
 		}
+		PathBuf::from(UNAVAILABLE_DESCRIPTOR)
 	}
 
 	/// The shell's open descriptor `fd`; `None` when it is closed.
@@ -1854,10 +1874,10 @@ impl ChildEnv {
 /// Standard input for a utility builtin: the command's fd 0 plus the
 /// cancellation flag.
 ///
-/// On unix, when fd 0 is a descriptor whose reads can block (a pipe, FIFO,
-/// terminal, socket or device), reads wait for readiness in short
-/// slices so an abort or `timeout` is observed even when input never arrives on
-/// a blocked pipe. A cancelled read fails with [`omp_vfs::cancelled`], not EOF,
+/// When fd 0 is a descriptor whose reads can block (on unix, a pipe, FIFO,
+/// terminal, socket or device; on Windows, a pipe), reads wait for readiness
+/// in short slices so an abort or `timeout` is observed even when input never
+/// arrives. A cancelled read fails with [`omp_vfs::cancelled`], not EOF,
 /// so a utility never reports a result for input it did not finish reading
 /// (`timeout 1 md5sum - < big` printed a checksum of a prefix); it unwinds
 /// rather than leaving a detached thread writing to descriptors the host has
@@ -1866,11 +1886,27 @@ pub(crate) struct Stdin {
 	file:   OpenFile,
 	#[cfg_attr(not(unix), allow(dead_code, reason = "readiness polling is unix-only"))]
 	fd:     Option<i32>,
+	/// Whether fd 0 is a Windows pipe, decided once here rather than by a
+	/// `GetFileType` before every read.
+	#[cfg_attr(not(windows), allow(dead_code, reason = "Windows pipes have no pollable descriptor"))]
+	pipe:   bool,
 	/// The command's cancellation. A provider-backed fd 0 (`< virtual://f`) has
 	/// no descriptor to poll, and the facade that opened it is usually the
 	/// outer command's, not this command's (a `timeout` operand), so its reads
 	/// are raced against this command's token directly.
 	cancel: CommandCancel,
+}
+
+/// Whether fd 0 needs the Windows pipe readiness probe; `false` off Windows
+/// and for a provider-backed or in-process fd 0.
+#[cfg(windows)]
+fn is_pipe_file(file: &OpenFile) -> bool {
+	matches!(file, OpenFile::File(file) if crate::openfile::is_pipe(file))
+}
+
+#[cfg(not(windows))]
+const fn is_pipe_file(_file: &OpenFile) -> bool {
+	false
 }
 
 impl Stdin {
@@ -1891,7 +1927,8 @@ impl Stdin {
 	pub fn try_clone(&self) -> io::Result<Self> {
 		let file = self.file.try_clone()?;
 		let fd = pollable_fd(&file);
-		Ok(Self { file, fd, cancel: self.cancel.clone() })
+		let pipe = is_pipe_file(&file);
+		Ok(Self { file, fd, pipe, cancel: self.cancel.clone() })
 	}
 
 	/// Whether the command was cancelled, for utilities that read fd 0's
@@ -1931,6 +1968,13 @@ impl Read for Stdin {
 			// SAFETY: `fd` is owned by the live `OpenFile` held in this struct.
 			let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
 			omp_vfs::wait_readable(fd, || self.cancel.fired())?;
+		}
+		#[cfg(windows)]
+		if self.pipe
+			&& !buf.is_empty()
+			&& let OpenFile::File(file) = &self.file
+		{
+			omp_vfs::wait_pipe_readable(file, || self.cancel.fired())?;
 		}
 		match (&self.file, &self.cancel.token) {
 			(OpenFile::Vfs(file), Some(token)) => file.read_until_cancelled(buf, token),
@@ -2629,6 +2673,7 @@ fn build_host(invocation: Opened, spec: Spec) -> Result<Host, i32> {
 
 	Ok(Host {
 		stdin: Stdin {
+			pipe:   is_pipe_file(&stdin),
 			file:   stdin,
 			fd:     stdin_fd,
 			cancel: command_cancel,
@@ -3118,6 +3163,7 @@ mod testing {
 			};
 			let host = Self {
 				stdin:                 Stdin {
+					pipe:   false,
 					file:   OpenFile::stream(stdin),
 					fd:     None,
 					cancel: command_cancel.clone(),
@@ -3929,7 +3975,7 @@ mod testing {
 		use super::MemStream;
 		use crate::host::{
 			Arc, AsyncUtility, AtomicBool, CommandCancel, GuardedStream, Host, OpenFile, Sigpipe, StreamWriter,
-			Write, async_out_for, run_caught_async,
+			Write, async_out_for,
 		};
 
 		/// Writes a line to stdout and a note to stderr, knowing nothing of
@@ -3985,7 +4031,7 @@ mod testing {
 			drop(reader);
 			host.set_test_stdout(OpenFile::from(writer));
 
-			let code = run_caught_async::<Chatty>(Chatty, &mut host).await;
+			let code = crate::host::run_caught_async::<Chatty>(Chatty, &mut host).await;
 
 			assert_eq!(code, crate::host::SIGPIPE_EXIT_CODE);
 			assert_eq!(capture.err(), "");
