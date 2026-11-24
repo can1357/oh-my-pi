@@ -1,4 +1,4 @@
-import { type MCPProgress, parseMCPProgress } from "@oh-my-pi/pi-tui/tools/mcp";
+import { type MCPProgress, parseMCPProgress } from "@oh-my-pi/pi-tui/tools/mcp-progress";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import { MCPNotificationMethods } from "./types";
 

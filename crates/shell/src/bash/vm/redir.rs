@@ -718,7 +718,7 @@ fn deferrable(k: &Kernel, vp: &Vproc, cx: &mut Cx<'_>, rest: &[RedirIr], path: &
 		.and_then(|f| f.scratch.as_ref())
 		.and_then(|s| s.exec.as_ref())
 		.is_some_and(|e| e.stage == Stage::Redirect && !e.argv.is_empty());
-	bang.stage == BangStage::Lone
+	bang.stage.is_lone()
 		&& command
 		&& !k.deferrals.iter().any(|d| d.vproc == vp.vpid)
 		&& rest.iter().all(childable)

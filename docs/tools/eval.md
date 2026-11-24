@@ -74,7 +74,7 @@ Compaction receives a bounded live-kernel snapshot with environment and successf
 
 Disabled runtimes are removed from the session-scoped wire schema and model prompt. After a definitive failed Python probe, the next schema, description, and prelude also omit `py`; synchronous schema reads never run a probe. A successful explicit availability refresh restores Python, while changes to PATH, active environment, cwd, or the configured interpreter invalidate the advertised snapshot. Cancelled or deadline-limited probes do not establish permanent unavailability. Explicit Python calls retry failed probes, so a repaired interpreter can be picked up without restarting.
 
-A requested unavailable runtime raises `ToolError` with the bounded, sanitized probe reason and a remedy: provide a working Python 3.8+ on PATH or set `python.interpreter`. The tool never substitutes another language. `eval.tools.enabled=true` (default) independently controls whether kernel-defined tools and the `tools` subagent fields are advertised and usable.
+A requested unavailable runtime raises `ToolError` with the bounded, sanitized probe reason and a remedy: provide a working Python 3.8+ on PATH or set `python.interpreter`. The tool never substitutes another language. `eval.tools.enabled` (default off) independently controls whether kernel-defined tools and the `tools` subagent fields are advertised and usable.
 
 `eval.autoProvision=true` lets the first `%bun add` create the managed JavaScript package environment; turning it off requires an existing environment or `%environment project`. Package installation pauses the compute watchdog but has its own ten-minute deadline and remains cancellable.
 
@@ -149,7 +149,7 @@ All enabled runtimes expose equivalent helpers where the language permits:
 - `print(...)` (Python) / `print(...)` and `console.*` (JS)
 - `read(path, offset?, limit?)`, `write(path, content)`, `env(...)`, `output(...)`
 - `tool.<name>(args)` for a normal session tool call (async in both runtimes: `await tool.read({...})`)
-- `@tool` / `tool(fn, {...})` to define kernel-local tools for subagents (`eval.tools.enabled`, default on)
+- `@tool` / `tool(fn, {...})` to define kernel-local tools for subagents (`eval.tools.enabled`, default off)
 - `judge(...)`, `judge_batch(...)` (Python) / `judgeBatch(...)` (JS), `completion(...)`
 - `wait(...)` for agent/completion handles
 - `agent(...)`, `workpool(...)` when spawning is allowed
@@ -240,7 +240,7 @@ Registers one background subagent job and returns an `AgentHandle` immediately:
 
 ### Kernel-defined tools (`@tool` / `tool(fn)`)
 
-With `eval.tools.enabled` (default on), a cell can turn a function into a tool other agents may call:
+With `eval.tools.enabled` on (default off), a cell can turn a function into a tool other agents may call:
 
 - Python: `@tool` / `@tool(name=..., description=...)`; the JSON Schema is inferred from type hints (`str`, `int`, `float`, `bool`, `list[...]`, `dict[...]`, `Literal`, `Optional`, `Annotated[T, "description"]`) and defaults; positional-only parameters are rejected. Async functions are awaited.
 - JS: `tool(fn, { name?, description?, parameters? })`; `fn` receives one args object.

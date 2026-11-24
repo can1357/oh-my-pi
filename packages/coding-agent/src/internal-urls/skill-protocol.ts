@@ -14,6 +14,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger, withTimeout } from "@oh-my-pi/pi-utils";
 import { resolveContainedPath } from "../discovery/contained-path";
+import { substitutePluginRoot } from "../discovery/substitute-plugin-root";
 import {
 	claudeCodeToolNote,
 	findStaleSkillStandIn,
@@ -307,9 +308,18 @@ async function readSkillTarget(
 	}
 
 	const raw = await Bun.file(targetPath).text();
+	// Claude Code parity (#20165): plugin skills resolve ${CLAUDE_PLUGIN_ROOT} /
+	// ${OMP_PLUGIN_ROOT} in Markdown content when it is loaded, not in bash.
+	// Non-Markdown files (bundled scripts, data) are served verbatim.
+	const substituted =
+		skill.pluginRoot !== undefined && contentTypeForPath(targetPath) === "text/markdown"
+			? substitutePluginRoot(raw, skill.pluginRoot)
+			: raw;
 	// Only the skill's own instruction body is Claude-dialect prose; frontmatter and referenced assets are not.
 	const content =
-		instructions && !verbatim ? await withClaudeCodeToolNote(skill, raw, parseSkillBody(raw, targetPath)) : raw;
+		instructions && !verbatim
+			? await withClaudeCodeToolNote(skill, substituted, parseSkillBody(raw, targetPath))
+			: substituted;
 	return {
 		url: url.href,
 		content,

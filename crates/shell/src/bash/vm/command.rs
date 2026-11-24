@@ -1845,6 +1845,10 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 		let posix = state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
 			.unwrap_or(false);
 		let mut via = Via::Plain;
+		let simple_job = k
+			.bangs
+			.iter()
+			.any(|bang| bang.vproc == vp.vpid && bang.stage == BangStage::SimpleJob);
 		let target = loop {
 			// Borrowed (the resolution only reads `vp`): no copy of the
 			// name per command.
@@ -1977,6 +1981,18 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 				// has to outlive it (a detached tree, `nohup`) is the program
 				// on `PATH`: a nested shell ends with the shell it runs in.
 				Resolved::SelfShell if exec_as.is_some() || detached => break Target::Search,
+				Resolved::Tool(_) | Resolved::Native(_)
+					if simple_job
+						&& exec_as.is_none()
+						&& via != Via::Builtin
+						&& cx.host.prefers_background_program(BStr::new(&argv[0]), &resolved) =>
+				{
+					break match resolved {
+						Resolved::Native(native) => Target::SearchNative(native),
+						Resolved::Tool(tool) => Target::SearchTool(tool),
+						_ => unreachable!("only native commands and tools prefer PATH in a job"),
+					};
+				},
 				// Written for the program the host's command shadows: `PATH`
 				// first ([`Host::defers_to_path`](crate::bash::Host::defers_to_path)).
 				Resolved::Tool(_) | Resolved::Native(_) | Resolved::SelfShell
@@ -1991,7 +2007,11 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 		s.target = Some(target);
 		s.via_command = matches!(via, Via::Command | Via::CommandP);
 	}
-	if st(vp).target == Some(Target::Search) {
+	if let Some(target) = &st(vp).target
+		&& target.is_path_search()
+	{
+		let fallback = target.search_fallback();
+		let preferred = fallback.is_some();
 		// File-system probes: `CmdExpanded` reads the clock after them.
 		k.clock_stale();
 		// bash's `search_for_command`: a `PATH` in the command's temporary
@@ -2005,7 +2025,7 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 		let mut sc = exec::take_scratch(vp);
 		let name = sc.exec.as_ref().map_or_default(|e| e.argv[0].clone());
 		if sc.io.as_ref().is_none_or(|io| io.search.is_none()) {
-			let hashed = if std_path || temp_path {
+			let hashed = if preferred || std_path || temp_path {
 				None
 			} else {
 				match state::record(cx.store, vp, Key::CmdHash(BStr::new(&name))) {
@@ -2065,7 +2085,7 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 		// A hashed name ran without a search (its target is set).
 		let found = if sc.io.as_ref().is_some_and(|io| io.search.is_some()) {
 			let mut tcx = Context::from_waker(&k.waker);
-			Some(probe::path_search(&mut tcx, cx, &mut sc))
+			Some(probe::path_search(&mut tcx, cx, &mut sc, preferred))
 		} else {
 			None
 		};
@@ -2076,7 +2096,8 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 				// bash hashes every command it finds in PATH (not with a
 				// temporary PATH).
 				// zsh `pathdirs` names (with a slash) are not hashed.
-				if !temp_path
+				if !preferred
+					&& !temp_path
 					&& (vp.mode.dialect() != crate::bash::ids::Dialect::Zsh || !name.contains(&b'/'))
 					&& state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Hashall)
 						.unwrap_or(true)
@@ -2098,9 +2119,11 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 				// The host's stand-in for a missing tool, unless a not-found
 				// hook handles it; `exec` keeps its not-found handling (a
 				// process image cannot be a native).
-				let exec = sc.exec.as_ref().expect("exec");
+				let exec = sc.exec.as_mut().expect("exec");
 				let rctx = ResolveCtx { has_slash: false, via: Via::Plain };
-				let target = if exec.exec_as.is_none()
+				let target = if let Some(original) = fallback {
+					original
+				} else if exec.exec_as.is_none()
 					&& cx.host.defers_to_path(BStr::new(&name), &exec.argv)
 				{
 					// A deferred command whose shadowed program `PATH` lacks:
@@ -2122,7 +2145,7 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 				} else {
 					Target::NotFound
 				};
-				sc.exec.as_mut().expect("exec").target = Some(target);
+				exec.target = Some(target);
 				None
 			},
 			Some(Search::Pending(key)) => Some(Flow::Block(key)),
@@ -2271,7 +2294,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 			exec_failed(k, cx, vp);
 			None
 		},
-		Target::NotFound | Target::Search => {
+		Target::NotFound | Target::Search | Target::SearchNative(_) | Target::SearchTool(_) => {
 			if let Some(flow) = not_found_hook(k, vp, cx, line) {
 				return Some(flow);
 			}
@@ -4255,13 +4278,15 @@ fn bang_dispatch(k: &mut Kernel, vpid: crate::bash::ids::Vpid, target: &Target, 
 	let Some(bang) = k.bangs.iter_mut().find(|b| b.vproc == vpid) else {
 		return;
 	};
-	match (target, bang.stage) {
+	let stage = bang.stage;
+	match target {
 		// A refused spawn is retried (`Refused`, `Script`): that decides.
-		(Target::Intrinsic(IntrinsicId::Exec) | Target::Refused { .. }, _)
-		| (Target::External(_) | Target::Interp(_), BangStage::Lone) => {},
-		(Target::External(_) | Target::Interp(_), _) if exec => {},
-		(Target::Function(_), BangStage::Lone | BangStage::Exec) => bang.stage = BangStage::Exec,
-		(Target::Tool(_), BangStage::Lone) if !exec => bang.stage = BangStage::Callout,
+		Target::Intrinsic(IntrinsicId::Exec) | Target::Refused { .. } => {},
+		Target::External(_) | Target::Interp(_) if exec || stage.is_lone() => {},
+		Target::Function(_) if stage.is_lone() || stage == BangStage::Exec => {
+			bang.stage = BangStage::Exec;
+		},
+		Target::Tool(_) if !exec && stage.is_lone() => bang.stage = BangStage::Callout,
 		_ => k.settle_bang(vpid, None),
 	}
 }

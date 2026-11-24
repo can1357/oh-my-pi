@@ -37,6 +37,7 @@ import autoloadTemplate from "../prompts/skills/autoload.md" with { type: "text"
 import claudeCodeToolNoteTemplate from "../prompts/skills/claude-code-tool-note.md" with { type: "text" };
 import userInvocationTemplate from "../prompts/skills/user-invocation.md" with { type: "text" };
 import { SKILLSHARE_PROVIDER_ID } from "../discovery/skillshare";
+import { substitutePluginRoot } from "../discovery/substitute-plugin-root";
 import type { SkillPromptDetails } from "../session/messages";
 import { CLAUDE_CODE_TOOL_MAPPINGS } from "../tools/builtin-names";
 import { expandTilde } from "../tools/path-utils";
@@ -63,6 +64,12 @@ export interface Skill {
 	 * every `skill://` resource access must realpath-resolve within it.
 	 */
 	containRoot?: string;
+	/**
+	 * Plugin install path supplying this skill (Claude marketplace plugins).
+	 * `${CLAUDE_PLUGIN_ROOT}` / `${OMP_PLUGIN_ROOT}` in the skill's Markdown
+	 * body are substituted with it when the body is read (#20165).
+	 */
+	pluginRoot?: string;
 	/** Source metadata for display */
 	_source?: SourceMeta;
 }
@@ -280,6 +287,7 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: options.source,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
+			...(capSkill._source?.pluginRoot !== undefined && { pluginRoot: capSkill._source.pluginRoot }),
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
 			_source: capSkill._source,
 		})),
@@ -479,6 +487,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: `${capSkill._source.provider}:${capSkill.level}`,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
+			...(capSkill._source?.pluginRoot !== undefined && { pluginRoot: capSkill._source.pluginRoot }),
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
 			_source: capSkill._source,
 		};
@@ -522,6 +531,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 					baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 					source: "custom:user",
 					...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
+					...(capSkill._source?.pluginRoot !== undefined && { pluginRoot: capSkill._source.pluginRoot }),
 					hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
 					_source: { ...capSkill._source, providerName: "Custom" },
 				},
@@ -605,6 +615,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: `${capSkill._source.provider}:${capSkill.level}`,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
+			...(capSkill._source?.pluginRoot !== undefined && { pluginRoot: capSkill._source.pluginRoot }),
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
 			_source: capSkill._source,
 		});
@@ -858,10 +869,11 @@ export type SkillPromptInput = Pick<ParsedSkillInvocation, "args"> & Partial<Pic
 
 /**
  * The fields skill delivery reads off a skill: its file, plus the provider metadata that decides
- * whether its prose is Claude Code's. Callers holding a full {@link Skill} (or a narrowed view
- * without `_source`, which is simply never rewritten) both satisfy it.
+ * whether its prose is Claude Code's and its plugin root for placeholder substitution. Callers
+ * holding a full {@link Skill} (or a narrowed view without `_source`, which is simply never
+ * rewritten) both satisfy it.
  */
-export type SkillFile = Pick<Skill, "filePath"> & Partial<Pick<Skill, "_source">>;
+export type SkillFile = Pick<Skill, "filePath"> & Partial<Pick<Skill, "_source" | "pluginRoot">>;
 
 const CLAUDE_TOOL_OMP_NAME = new Map(CLAUDE_CODE_TOOL_MAPPINGS.map(entry => [entry.claudeName, entry.ompName]));
 const DISTINCTIVE_CLAUDE_TOOL_NAMES = CLAUDE_CODE_TOOL_MAPPINGS.filter(entry => entry.distinctive).map(
@@ -952,7 +964,11 @@ export async function withClaudeCodeToolNote(
 /** Read a skill's instruction body before rendering user-provided arguments. */
 export async function loadSkillPromptBody(skill: SkillFile): Promise<string> {
 	const content = await Bun.file(skill.filePath).text();
-	return withClaudeCodeToolNote(skill, parseSkillBody(content, skill.filePath));
+	const rawBody = parseSkillBody(content, skill.filePath);
+	// Claude Code parity (#20165): plugin skills resolve ${CLAUDE_PLUGIN_ROOT} /
+	// ${OMP_PLUGIN_ROOT} in the Markdown body when the content is loaded.
+	const body = skill.pluginRoot !== undefined ? substitutePluginRoot(rawBody, skill.pluginRoot) : rawBody;
+	return withClaudeCodeToolNote(skill, body, rawBody);
 }
 
 /** A skill's instruction body and the skill it was read from. */

@@ -699,9 +699,12 @@ async function generateModels(selectedProvider?: string) {
 	allModels = filterModelsDevCatalogRows(allModels);
 	allModels = normalizeAntigravityEndpoint(allModels);
 	// Previous-snapshot fallbacks keep their old baseUrl; re-base every OpenCode
-	// Go row so retained rows follow gateway endpoint moves (#15722).
+	// Go row so retained rows follow gateway endpoint moves (#15722). System One
+	// judge rows are not served by the Go gateway; they keep their seeded endpoint.
 	allModels = allModels.map(model =>
-		model.provider === "opencode-go" ? { ...model, baseUrl: openCodeGoBaseUrlForApi(model.api) } : model,
+		model.provider === "opencode-go" && model.api !== "typesafe"
+			? { ...model, baseUrl: openCodeGoBaseUrlForApi(model.api) }
+			: model,
 	);
 	// Normalize display names: gateway author prefixes ("OpenAI: …"), alias
 	// markers ("(latest)"), provider attribution ("(Antigravity)"), and

@@ -361,6 +361,12 @@ export interface ToolSession {
 	restrictToolNames?: boolean;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
+	/**
+	 * This session is a `/tan` fork. Its wait guidance keeps waiting while the
+	 * assignment is blocked on a job or service, instead of steering it away
+	 * from back-to-back waits like a top-level session.
+	 */
+	tanFork?: boolean;
 	/** Get this agent's eval executor session ID; keys its retained JS/Python/Ruby/Julia state. */
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
@@ -937,11 +943,13 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	}
 	if (!restrictToolNames) {
 		// Special tools stay registered so the session can present them top-level
-		// whenever `bash` is off; while it is on they run as commands.
+		// whenever `bash` is off; while it is on they run as commands. They are
+		// host-native, so they share the built-in provenance of the factory tools.
 		const planModeEnabled = session.getPlanModeState?.()?.enabled === true;
 		for (const special of specialToolCommands(session)) {
 			const wrapped = wrapToolWithMetaNotice(special);
 			toolRegistry.set(wrapped.name, wrapped);
+			builtInNames.add(wrapped.name);
 			if (toolCommandsEnabled || !specialToolApplies(wrapped.name, { tools, planModeEnabled })) continue;
 			tools.push(wrapped);
 			presentedSpecialTool = true;
