@@ -51,7 +51,7 @@ import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
 import { sanitizeDisplayLine } from "../inventory/display-text";
-import type { TodoApplyResult, TodoPhase } from "../../tools/details/todo";
+import type { TodoApplyOutcome, TodoPhase } from "../../tools/details/todo";
 import { extensionLinkClicksAvailable } from "./link-clicks";
 import {
 	notifyTranscriptPresentersChanged,
@@ -1812,7 +1812,7 @@ export class ExtensionRunner {
 	 * `replace`. `closing` is read here and again at commit: the dispose wrappers await before
 	 * `closeTodoBackend`.
 	 */
-	applyTodoBackend(request: TodoApplyRequest): TodoApplyResult | Promise<TodoApplyResult> {
+	applyTodoBackend(request: TodoApplyRequest): TodoApplyOutcome | Promise<TodoApplyOutcome> {
 		const owner = this.#sessionStartEvent ? this.getTodoBackends().get(request.backend) : undefined;
 		if (!owner?.definition.apply) {
 			request.commit();
@@ -1831,7 +1831,7 @@ export class ExtensionRunner {
 		extension: Extension,
 		definition: TodoBackendDefinition,
 		{ backend, change, current, commit, closing, selected, signal }: TodoApplyRequest,
-	): Promise<TodoApplyResult> {
+	): Promise<TodoApplyOutcome> {
 		const sessionId = this.sessionManager.getSessionId();
 		const timeoutMs = Math.min(TODO_APPLY_TIMEOUT_MS, extensionHandlerTimeoutMs);
 		const answered = Promise.withResolvers<void>();
@@ -1854,10 +1854,11 @@ export class ExtensionRunner {
 			async (event, ctx) => {
 				asked = true;
 				this.#todoResyncs.add(resync);
-				// A throw is not a refusal: it reaches `onFailure` below as an extension error.
+				// A throw is not a refusal but an extension error (`onFailure` below); a reason that is not text is dropped.
 				try {
 					const answer = await definition.apply?.(event.change, ctx);
-					return answer?.block === true ? { kind: "refused", message: answer.reason ?? "" } : { kind: "accepted" };
+					if (!answer?.block) return { kind: "accepted" };
+					return { kind: "refused", message: typeof answer.reason === "string" ? answer.reason : "" };
 				} finally {
 					answered.resolve();
 				}

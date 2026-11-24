@@ -725,7 +725,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 			? { phases: previousPhases, errors: [] as string[] }
 			: applyParams(clonePhases(previousPhases), entry);
 		let current = previousPhases;
-		let uncommitted: "refused" | "stale" | undefined;
+		let uncommitted: TodoToolDetails["uncommitted"];
 		if (op !== "view" && errors.length === 0) {
 			const commit = () => this.session.setTodoPhases?.(updated);
 			const asked = this.session.applyTodoChange?.({ op, previous: previousPhases, next: updated }, commit, signal);

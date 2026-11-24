@@ -111,7 +111,7 @@ import { cfgMemoryBackend } from "../memory-backend/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
 import type { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import type { StructuredSubagentSchemaMode } from "../task/task-details";
-import type { TodoApplyResult, TodoPhase } from "./details/todo";
+import type { TodoApplyOutcome, TodoPhase } from "./details/todo";
 
 export * from "../edit";
 export * from "../goals";
@@ -510,7 +510,7 @@ export interface ToolSession {
 		change: TodoBackendChange,
 		commit: () => void,
 		signal?: AbortSignal,
-	) => TodoApplyResult | Promise<TodoApplyResult>;
+	) => TodoApplyOutcome | Promise<TodoApplyOutcome>;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
 	/** The `i` intent the model wrote on a tool call of the current turn, by call ID. */

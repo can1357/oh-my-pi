@@ -291,7 +291,7 @@ import { toolCommandDispatches } from "../tools/tool-commands";
 import { PROPOSE_COMMAND_NAME, REJECT_COMMAND_NAME } from "../tools/details/resolve";
 import { supportsExternalThinking } from "../tools/think";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
-import type { TodoApplyResult, TodoPhase } from "../tools/details/todo";
+import type { TodoApplyOutcome, TodoPhase } from "../tools/details/todo";
 import { ToolError } from "../tools/tool-errors";
 import { currentThreadId, isMainThread } from "../thread/identity";
 import { registerLocalSession } from "../thread/session-directory";
@@ -12168,7 +12168,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		change: TodoBackendChange,
 		commit: () => void,
 		signal?: AbortSignal,
-	): TodoApplyResult | Promise<TodoApplyResult> {
+	): TodoApplyOutcome | Promise<TodoApplyOutcome> {
 		const backend = this.#todoBackend();
 		if (backend === undefined || !this.#extensionRunner) {
 			commit();

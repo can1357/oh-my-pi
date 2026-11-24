@@ -1909,7 +1909,7 @@ export interface TodoBackendDefinition {
 	 * eval cells included. Return `{ block: true, reason }` to refuse; a throw is an extension
 	 * error and fails the call without refusing it. omp commits `next` only on an accept within
 	 * `min(10s, the extension handler timeout)` of an unchanged list. Writes here are tolerated:
-	 * omp resyncs through `replace` after every outcome. Full contract: docs/extensions.md.
+	 * omp resyncs through `replace` after every outcome. Full contract: `docs/extensions.md`.
 	 */
 	apply?(
 		change: TodoBackendChange,

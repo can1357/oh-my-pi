@@ -84,8 +84,10 @@ interface Tracker {
 	asked: TodoBackendChange[];
 	/** Awaited by `apply` once it is recorded. */
 	applyHold?: Promise<void>;
-	/** Returned by `apply` as `{ block: true, reason }` after `applyHold`. */
+	/** Returned by `apply` as `{ block: true, reason }` after `applyHold`; without it `apply` returns `{ block: false }`. */
 	refusal?: string;
+	/** Thrown by `apply` after `applyHold`. */
+	applyError?: Error;
 	extension: ExtensionFactory;
 }
 
@@ -107,7 +109,8 @@ function tracker(id = "tracker", withApply = false): Tracker {
 							self.asked.push(change);
 							for (const resolve of waiting.splice(0)) resolve();
 							await self.applyHold;
-							if (self.refusal !== undefined) return { block: true, reason: self.refusal };
+							if (self.applyError) throw self.applyError;
+							return { block: self.refusal !== undefined, reason: self.refusal };
 						}
 					: undefined,
 				async replace(phases, ctx) {
@@ -746,6 +749,7 @@ describe("todo backend", () => {
 			["finds the list changed", "list changed"],
 			["finds the session changed", "session changed"],
 			["is aborted", "aborted"],
+			["throws", "failed: boom"],
 		])("a change whose backend %s fails the call and sends one full replace", async (scenario, cause) => {
 			const backend = tracker("tracker", true);
 			const { session, errors } = await open([backend.extension], "tracker");
@@ -760,6 +764,7 @@ describe("todo backend", () => {
 			testSetExtensionHandlerTimeoutMs(late || scenario === "times out" ? 40 : 5_000);
 
 			const asked = backend.entered();
+			if (scenario === "throws") backend.applyError = new TypeError("boom");
 			const result = call(session, { op: "init", items: ["a"] }, abort.signal);
 			await asked;
 			if (scenario === "finds the list changed") session.commitTodoPhases(list("x"));
@@ -792,7 +797,7 @@ describe("todo backend", () => {
 			expect(contents(session)).toEqual(scenario === "finds the list changed" ? ["x"] : []);
 			expect(backend.calls.length - before).toBe(1);
 			expect(backend.calls.at(-1)?.phases).toEqual(session.getTodoPhases());
-			expect(errors.length).toBe(scenario === "times out" || scenario === "answers after the timeout" ? 1 : 0);
+			expect(errors.length).toBe(["times out", "answers after the timeout", "throws"].includes(scenario) ? 1 : 0);
 		});
 
 		it("native and a backend without apply commit before the call's first await", async () => {

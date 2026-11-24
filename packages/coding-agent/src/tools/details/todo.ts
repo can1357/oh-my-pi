@@ -45,11 +45,11 @@ export interface TodoToolDetails {
 }
 
 /** How a `todo` call's change fared with the selected todo backend. Host-only: the package root does not export it. */
-export type TodoApplyResult =
+export type TodoApplyOutcome =
 	| { kind: "committed" }
 	/** The backend's `apply` returned `{ block: true }`. */
 	| { kind: "refused"; message: string }
-	/** Nothing committed for another reason: timeout, list, session or backend changed, abort, closing. */
+	/** Nothing committed for another reason: `apply` threw or timed out, list, session or backend changed, abort, closing. */
 	| { kind: "stale"; message: string };
 
 /** Minimum overlap (after normalization) required for a substring match.
