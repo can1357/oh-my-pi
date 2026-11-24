@@ -201,6 +201,24 @@ describe("HookToolWrapper tool_call contract", () => {
 		expect(result.isError).toBe(true);
 	});
 
+	it("keeps a flagged empty poll's noop and useless flags when a hook rewrites its content", async () => {
+		const runner = makeRunner(makeHook(() => ({ content: [{ type: "text", text: "patched" }] }), "tool_result"));
+		const emptyPoll: AgentTool = {
+			...makeRecordingTool([]),
+			execute: async () => ({
+				content: [{ type: "text" as const, text: "No turns in flight to wait for." }],
+				useless: true,
+				noop: true,
+			}),
+		};
+
+		const result = await new HookToolWrapper(emptyPoll, runner).execute("call-empty-poll", {} as never);
+
+		expect(result.content).toEqual([{ type: "text", text: "patched" }]);
+		expect(result.noop).toBe(true);
+		expect(result.useless).toBe(true);
+	});
+
 	// A secret-leaking tool: the model must only ever see the redacted text.
 	function makeSecretTool(isError: boolean): AgentTool {
 		return {

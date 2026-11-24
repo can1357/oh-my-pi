@@ -1890,6 +1890,33 @@ describe("ExtensionRunner", () => {
 			expect(firstText(res)).toBe("observed failure");
 			expect(res.isError).toBe(true);
 		});
+
+		it("keeps a flagged empty poll's noop and useless flags when a handler replaces its content", async () => {
+			const runner = await runnerFor(`
+				export default function(pi) {
+					pi.on("tool_result", () => ({
+						content: [{ type: "text", text: "patched" }],
+					}));
+				}
+			`);
+			const emptyPoll: AgentTool = {
+				name: "vibe_wait",
+				label: "Vibe Wait",
+				description: "empty poll",
+				parameters: {} as never,
+				approval: "read",
+				execute: async () => ({
+					content: [{ type: "text" as const, text: "No turns in flight to wait for." }],
+					useless: true,
+					noop: true,
+				}),
+			};
+			const wrapper = new ExtensionToolWrapper(emptyPoll, runner);
+			const res = await wrapper.execute("call-empty-poll", {} as never, undefined, undefined, undefined);
+			expect(firstText(res)).toBe("patched");
+			expect(res.noop).toBe(true);
+			expect(res.useless).toBe(true);
+		});
 	});
 
 	describe("handler timeouts", () => {
