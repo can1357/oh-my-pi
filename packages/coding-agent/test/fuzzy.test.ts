@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { fuzzyFilter, fuzzyMatch } from "@oh-my-pi/pi-tui";
+import { fuzzyFilter, fuzzyMatch } from "@oh-my-pi/pi-coding-agent/utils/fuzzy";
 
 describe("fuzzyMatch", () => {
 	test("empty query matches everything with score 0", () => {

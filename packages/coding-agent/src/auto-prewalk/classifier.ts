@@ -15,9 +15,9 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type ChoiceAnswer, judgeQuestions } from "@oh-my-pi/pi-ai";
-import { titleTextFromSkillPrompt } from "@oh-my-pi/pi-tui/chat/skill-title-input";
-import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import { assistantText } from "@oh-my-pi/pi-tui/overlays/copy-targets";
+import { titleTextFromSkillPrompt } from "../session/transcript/skill-title-input";
+import { textContent } from "../session/transcript/transcript-entry";
+import { assistantText } from "../modes/view-model/overlays/copy-targets";
 import { hasNativeJudge, judgeNatively, type NativeJudgmentDeps } from "../judgment";
 import questionFile from "../prompts/judge/auto-prewalk.json" with { type: "json" };
 import { preprocessTinyMessage } from "../tiny/message-preproc";

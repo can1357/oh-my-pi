@@ -16,7 +16,7 @@
  * {@link fromWireReason} maps it back on the receiving thread.
  */
 import { isRecord } from "@oh-my-pi/pi-utils";
-import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { JobWidgetView } from "../../tools/details/job-widget";
 import {
 	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
 	type AsyncJob,

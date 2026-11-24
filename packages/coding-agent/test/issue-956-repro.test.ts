@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,26 +6,30 @@ import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import * as mcpConfigWriter from "@oh-my-pi/pi-coding-agent/mcp/config-writer";
 import { HostLink } from "@oh-my-pi/pi-coding-agent/mcp/link";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { Component } from "@oh-my-pi/pi-tui";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { getConfigRootDir, getProjectDir, removeWithRetries, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../src/ui/theme/service";
 import {
+	type ContextOverrides,
 	createInteractiveModeContext,
 	createMcpManagerStub,
-	type ContextOverrides,
+	renderTranscript,
 } from "./helpers/interactive-mode-context";
 
 const originalProjectDir = getProjectDir();
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 
-type RenderableBlock = {
-	render: (width: number) => readonly string[];
-	isTranscriptBlockFinalized: () => boolean;
-};
-
-function isRenderableBlock(component: Component): component is Component & RenderableBlock {
-	return "isTranscriptBlockFinalized" in component && typeof component.isTranscriptBlockFinalized === "function";
+/** Resolves once the controller mounts command output (the `/mcp test` hint). */
+function whenOutputPresented(ctx: InteractiveModeContext): Promise<void> {
+	const presented = Promise.withResolvers<void>();
+	const output = ctx.presentCommandOutput as Mock<InteractiveModeContext["presentCommandOutput"]>;
+	const mount = output.getMockImplementation()!;
+	output.mockImplementation((factory, options) => {
+		mount(factory, options);
+		presented.resolve();
+	});
+	return presented.promise;
 }
 
 /** What a successful `connectToServer` hands back. Its link is never attached: every client call on it is stubbed. */
@@ -115,7 +119,7 @@ describe("interactive /mcp test", () => {
 
 		// The settled hint must stop advertising Esc the moment cancellation is
 		// impossible, or a later press kills the running agent turn instead.
-		const rendered = ctx.chatContainer.children.map(block => block.render(80).join("\n")).join("\n");
+		const rendered = renderTranscript(ctx, 80).join("\n");
 		expect(rendered).toContain(`Tested connection to "github".`);
 
 		// The grace window still holds while untouched...
@@ -142,7 +146,6 @@ describe("interactive /mcp test", () => {
 		);
 		expect(listTools).toHaveBeenCalledWith(connection, expect.objectContaining({ signal: expect.any(AbortSignal) }));
 		expect(disconnectServer).toHaveBeenCalledWith(connection);
-		expect(ctx.ui.requestRender).toHaveBeenCalled();
 	});
 
 	it("cancelling a pending test consumes Esc ownership without a grace window", async () => {
@@ -169,15 +172,10 @@ describe("interactive /mcp test", () => {
 			mcpServers: Record<string, { type: string; command: string; args: string[] }>;
 		}>();
 		vi.spyOn(mcpConfigWriter, "readMCPConfigFile").mockReturnValue(lookup as never);
-		const { promise: hintPresented, resolve: hintResolve } = Promise.withResolvers<void>();
 		const mcpTestEscapeHandlers = new Set<() => void>();
 		const { controller, ctx } = createController({ mcpTestEscapeHandlers });
 		const { showStatus } = ctx;
-		const addChild = ctx.chatContainer.addChild.bind(ctx.chatContainer);
-		vi.spyOn(ctx.chatContainer, "addChild").mockImplementation(component => {
-			addChild(component);
-			hintResolve();
-		});
+		const hintPresented = whenOutputPresented(ctx);
 
 		const pending = controller.handle("/mcp test github");
 		expect(mcpTestEscapeHandlers).toHaveLength(1);
@@ -188,9 +186,7 @@ describe("interactive /mcp test", () => {
 		// Let the hint render before cancelling: this exercises the post-hint
 		// cancellation path (connect still pending), not the pre-hint bailout.
 		await hintPresented;
-		const presented = ctx.chatContainer.children.filter(isRenderableBlock);
-		// keeps re-rendering it (post-settlement rewrite stays visible).
-		expect(presented[0]?.isTranscriptBlockFinalized()).toBe(false);
+		expect(renderTranscript(ctx, 80).join("\n")).toContain(`Testing connection to "github"... (`);
 
 		// Consume like InputController does: clear the set, then fire.
 		// oxlint-disable-next-line unicorn/no-useless-spread -- handlers are removed while dispatching
@@ -207,19 +203,18 @@ describe("interactive /mcp test", () => {
 		expect(mcpTestEscapeHandlers).toHaveLength(0);
 		expect(connectToServer).toHaveBeenCalledTimes(1);
 
-		// The hint must stop advertising esc immediately on cancellation, read
-		// as cancelled (not completed), and be sealed for scrollback history.
-		expect(presented).toHaveLength(1);
-		const rendered = presented.map(block => block.render(80).join("\n")).join("\n");
+		// The hint must stop advertising esc immediately on cancellation and read
+		// as cancelled (not completed).
+		expect(ctx.shell.transcript.blocks()).toHaveLength(1);
+		const rendered = renderTranscript(ctx, 80).join("\n");
 		expect(rendered).toContain(`Cancelled connection test for "github".`);
-		expect(presented[0]?.isTranscriptBlockFinalized()).toBe(true);
+		expect(rendered).not.toContain("to cancel)");
 	});
 
 	it("treats an abort landing during manager sync as a completed test", async () => {
 		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(githubConnection());
 		vi.spyOn(mcpClient, "listTools").mockResolvedValue([{ name: "search_issues" }] as never);
 		vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue();
-		const { promise: hintPresented, resolve: hintResolve } = Promise.withResolvers<void>();
 		const { promise: syncStarted, resolve: syncStartedResolve } = Promise.withResolvers<void>();
 		const { promise: syncGate, resolve: syncResolve } = Promise.withResolvers<void>();
 		const mcpTestEscapeHandlers = new Set<() => void>();
@@ -240,15 +235,10 @@ describe("interactive /mcp test", () => {
 			},
 		});
 		const { showStatus } = ctx;
-		const addChild = ctx.chatContainer.addChild.bind(ctx.chatContainer);
-		vi.spyOn(ctx.chatContainer, "addChild").mockImplementation(component => {
-			addChild(component);
-			hintResolve();
-		});
+		const hintPresented = whenOutputPresented(ctx);
 
 		const pending = controller.handle("/mcp test github");
 		await hintPresented;
-		const presented = ctx.chatContainer.children;
 
 		// Wait until the test is past listTools and inside #syncManagerConnection:
 		// an abort here does not observe the signal, so the flow still completes.
@@ -261,12 +251,11 @@ describe("interactive /mcp test", () => {
 		syncResolve();
 		await pending;
 
-		const rendered = presented.map(block => block.render(80).join("\n")).join("\n");
+		const rendered = renderTranscript(ctx, 80).join("\n");
 		expect(rendered).toContain(`Successfully connected to "github"`);
 		expect(rendered).toContain(`Tested connection to "github".`);
 		expect(rendered).not.toContain("Cancelled connection test");
 		expect(showStatus).not.toHaveBeenCalledWith(`Cancelled MCP test for "github"`);
-		expect(presented.find(isRenderableBlock)?.isTranscriptBlockFinalized()).toBe(true);
 	});
 
 	it("aborts during the awaited lookup without ever advertising esc", async () => {

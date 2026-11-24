@@ -1,5 +1,5 @@
 import { $which, isRecord } from "@oh-my-pi/pi-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 import { FORGE_NON_INTERACTIVE_ENV, type ForgeCliResult, type ForgeCliSpec, runForgeCli } from "./forge-cli";
 
 /** Options shaping `gh` failure messages and output handling. */

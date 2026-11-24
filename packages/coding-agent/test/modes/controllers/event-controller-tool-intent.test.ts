@@ -2,32 +2,21 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Settings, resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import type { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
-import type { DescribeContext, NativeNode } from "@oh-my-pi/pi-tui/native/node";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import type { PendingTool } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { initTheme } from "../../../src/ui/theme/service";
 import { createAssistantMessage } from "../../helpers/agent-session-setup";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
-/** The native node a TSP terminal draws for the card. */
-function toolNode(component: ToolExecutionComponent): NativeNode {
-	const cx: DescribeContext = {
-		cols: 100,
-		reduceMotion: false,
-		dark: true,
-		supports: kind => kind === "tool" || kind === "media",
-		feature: () => true,
-	};
-	const node = component.describe(cx);
-	if (!node) throw new Error("card described nothing");
-	return node;
+/** The primary fact the card's head shows (bash: the intent, else the command). */
+function headTarget(tool: PendingTool): unknown {
+	return tool.call?.view()?.head?.target;
 }
 
 describe("EventController tool intent", () => {
 	beforeEach(async () => {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true });
-		await initTheme();
+		initTheme();
 	});
 
 	afterEach(() => {
@@ -35,7 +24,7 @@ describe("EventController tool intent", () => {
 	});
 
 	function fixture() {
-		const pendingTools = new Map<string, ToolExecutionComponent>();
+		const pendingTools = new Map<string, PendingTool>();
 		const ctx = createInteractiveModeContext({
 			pendingTools,
 			session: { isStreaming: true },
@@ -58,10 +47,7 @@ describe("EventController tool intent", () => {
 		await controller.handleEvent(start("Listing the working tree...: Which files have changed?"));
 		const card = pendingTools.get("tc-bash");
 		if (!card) throw new Error("no card for the call");
-		expect(toolNode(card).p).toMatchObject({
-			target: "Listing the working tree...",
-			intent: "Listing the working tree...",
-		});
+		expect(headTarget(card)).toContain("Listing the working tree...");
 		expect(ctx.setWorkingMessage).toHaveBeenLastCalledWith("Listing the working tree");
 	});
 
@@ -70,19 +56,13 @@ describe("EventController tool intent", () => {
 		const args = { command: "ls -la", i: "Listing the working tree: Which files have changed?" };
 		const message = createAssistantMessage("");
 		message.content = [{ type: "toolCall", id: "tc-bash", name: "bash", arguments: args }];
-		ctx.streamingComponent = new AssistantMessageComponent();
+		ctx.streaming = ctx.presentAssistant();
 		await controller.syncAssistantMessage(message);
 		const card = pendingTools.get("tc-bash");
 		if (!card) throw new Error("no streamed card for the call");
-		expect(toolNode(card).p).toMatchObject({
-			target: "Listing the working tree",
-			intent: "Listing the working tree",
-		});
+		expect(headTarget(card)).toContain("Listing the working tree");
 		expect(ctx.setWorkingMessage).toHaveBeenLastCalledWith("Listing the working tree");
 		await controller.handleEvent(start(args.i));
-		expect(toolNode(card).p).toMatchObject({
-			target: "Listing the working tree",
-			intent: "Listing the working tree",
-		});
+		expect(headTarget(card)).toContain("Listing the working tree");
 	});
 });

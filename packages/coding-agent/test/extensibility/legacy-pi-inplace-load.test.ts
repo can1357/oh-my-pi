@@ -889,7 +889,6 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 		const dir = await writePackage({
 			"package.json": JSON.stringify({ name: "legacy-tool-factory-ext", version: "1.0.0" }),
 			"index.ts": [
-				'import { Text } from "@earendil-works/pi-tui";',
 				"import {",
 				"  createBashToolDefinition,",
 				"  createFindToolDefinition,",
@@ -910,7 +909,7 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 				"  createLsToolDefinition(cwd),",
 				"];",
 				"const fakeTheme = { fg: (_color, text) => text, bold: text => text };",
-				"const fakeContext = { lastComponent: new Text('', 0, 0) };",
+				"const fakeContext = { lastComponent: { render: () => [] } };",
 				"for (const definition of definitions) {",
 				"  if (typeof definition.renderCall === 'function') definition.renderCall({ command: 'echo ok', path: '.', pattern: '*.ts' }, fakeTheme, fakeContext);",
 				"}",

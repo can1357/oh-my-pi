@@ -1,9 +1,11 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
-import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { createRoot, effect, type JSXNode, onCleanup, type Signal, signal, type UiNode } from "@oh-my-pi/pi-tui";
+import { bubblePaste, pathTo } from "@oh-my-pi/pi-tui/dispatch";
+import { decodeInput } from "@oh-my-pi/pi-tui/driver/input/decoder";
+import { widgetContext, widgetFor } from "@oh-my-pi/pi-tui/term/widgets";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
 import type { CollabHost } from "../../collab/host";
-import { formatKeyHint, formatKeyHints, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type {
 	CompactOptions,
 	ExtensionActions,
@@ -14,13 +16,13 @@ import type {
 	ExtensionAskDialogResultItem,
 	ExtensionCommandContextActions,
 	ExtensionContextActions,
+	ExtensionCustomFactory,
 	ExtensionCustomOptions,
 	ExtensionError,
 	ExtensionFormDialogResult,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionUISelectItem,
-	ExtensionUiComponent,
 	ExtensionWidgetContent,
 	ExtensionWidgetOptions,
 	SendMessageHandler,
@@ -28,49 +30,50 @@ import type {
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
+import { extensionLinkClicksAvailable } from "../../extensibility/extensions/link-clicks";
+import type { ExtensionUiHost } from "../../extensibility/extensions/render-types";
 import { cfgExtensionAssistantTextRenderers } from "../../extensibility/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
-import {
-	type AskDialogPrompt,
-	type AskDialogPromptDraft,
-	type AskDialogPromptValue,
-	AskDialogComponent,
-	normalizeDialogQuestions,
-} from "@oh-my-pi/pi-tui/overlays/ask-dialog";
-import { installExtensionComposerShape } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+import type { ComposerOwner, InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
+import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { launchTerminal } from "../../subprocess/terminal-launch";
+import { approvalAnswerForChoice, approvalChoiceLabels, approvalOnceLabel } from "../../tools/approval";
 import {
 	choiceValue,
+	defaultFormData,
 	fieldError,
 	fieldQuestions,
 	type HtmlFormData,
 	type HtmlFormValue,
+	type OptionNote,
 	textValue,
-} from "@oh-my-pi/pi-tui/html-form/data";
-import { HtmlFormDialog } from "@oh-my-pi/pi-tui/html-form/dialog";
-import {
-	type ChoiceField,
-	type HtmlForm,
-	parseHtmlForm,
-	spansText,
-	type TextField,
-} from "@oh-my-pi/pi-tui/html-form/parse";
-import { EditorTopGap } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
-import { boundPromptTitle, HookEditorComponent, type HookEditorOptions } from "@oh-my-pi/pi-tui/overlays/hook-editor";
-import { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
-import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
-import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
-import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
-import type { ComposerOwner, InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
-import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
-import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
+} from "../../tools/html-form/data";
+import { type ChoiceField, type HtmlForm, parseHtmlForm, spansText, type TextField } from "../../tools/html-form/parse";
+import { extensionOutput, extensionTheme, singleNode } from "../../ui/extensions/render-output";
+import { formMedia, HtmlFormDialog, HtmlFormModel } from "../../ui/forms/html-form";
+import { htmlFormKeyHints } from "../../ui/styles/forms/html-form";
+import { formatKeyHint, formatKeyHints } from "../../ui/keys/hints";
+import { type ApprovalChoice, ApprovalDialog } from "../../ui/overlays/panels/approval-dialog";
+import { AskDialog, AskDialogModel } from "../../ui/overlays/panels/ask-dialog";
+import { HookEditor, type HookEditorHandle, HookInput } from "../../ui/overlays/panels/hook-dialogs";
+import { HookSelector } from "../../ui/overlays/pickers/hook-selector";
+import type { OverlayHandle, OverlayOptions } from "../../ui/shell";
+import { findNode } from "../../ui/styles/panels/common";
+import { registerComposerShape } from "../../ui/styles/composer/shapes";
+import { getAvailableThemesWithPaths, getThemeByName, setTheme } from "../../ui/theme/service";
+import { AnsiText } from "../../ui/transcript/ansi-text";
+import { getEditorCommand, openInEditor } from "../../utils/external-editor";
+import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "../../utils/render-utils";
 import { type BlockedKind, type BlockedStatus, holdBlockedStatus } from "../../utils/run-status";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
-import { getEditorCommand, openInEditor } from "../../utils/external-editor";
-import { launchTerminal } from "../../subprocess/terminal-launch";
-import { approvalAnswerForChoice, approvalChoiceLabels, approvalOnceLabel } from "../../tools/approval";
-
-const MAX_WIDGET_LINES = 10;
+import {
+	type AskDialogPrompt,
+	type AskDialogPromptDraft,
+	type AskDialogPromptValue,
+	normalizeDialogQuestions,
+} from "../view-model/overlays/ask-dialog";
+import { boundPromptTitle, type HookEditorOptions } from "../view-model/overlays/hook-editor";
+import type { HookSelectorSlider } from "../view-model/overlays/hook-selector";
+import { extensionOverlay } from "./extension-ui-blocks";
 
 /**
  * Footer hint for a guest-rendered ask selector. The guest's selector handles
@@ -85,6 +88,15 @@ const ASK_CHAT_OPTION = "Chat about this";
 const ASK_NEXT_OPTION = "Next →";
 /** What an inline ask warns while sending the composer's draft would skip it. */
 const ASK_SKIP_NOTICE = "Sending your message skips these questions";
+
+/** The local ask shown above the composer (`#mountAsk`). */
+interface MountedAsk {
+	readonly node: UiNode;
+	/** The view draws whether it holds the keys (the HTML form's faint state). */
+	setFocused?(focused: boolean): void;
+	/** Its keys on one line, for the composer under it to show while the ask holds them. */
+	keyHints?(): string;
+}
 
 /** Where a local ask shows; see `#mountAsk`. */
 interface AskSlot {
@@ -138,18 +150,47 @@ function toWireSelectOptions(options: ExtensionUISelectItem[]): CollabUiSelectIt
 	);
 }
 
+/** Overlay focus on the first node of `kinds` (in order of preference) inside the view, else its root. */
+function focusKind(...kinds: string[]): OverlayOptions {
+	return {
+		focus: root => {
+			for (const kind of kinds) {
+				const node = findNode(root, candidate => candidate.kind === kind);
+				if (node) return node;
+			}
+			return root;
+		},
+	};
+}
+
+/** What a form held beyond its defaults (changed values, saved notes); undefined when nothing was given. */
+function givenFormAnswers(
+	form: HtmlForm,
+	current: HtmlFormData,
+	notes: OptionNote[],
+): ExtensionFormDialogResult | undefined {
+	const defaults = defaultFormData(form);
+	const data: HtmlFormData = {};
+	let changed = false;
+	for (const name in current) {
+		const value = current[name]!;
+		if (Bun.deepEquals(value, defaults[name])) continue;
+		data[name] = value;
+		changed = true;
+	}
+	return changed || notes.length > 0 ? { data, ...(notes.length ? { notes } : {}) } : undefined;
+}
+
 export class ExtensionUiController {
 	#extensionTerminalInputUnsubscribers = new Set<() => void>();
 	#composerShapeDisposers: Array<() => void> = [];
-	#hookWidgetsAbove = new Map<string, ExtensionUiComponent>();
-	#hookWidgetsBelow = new Map<string, ExtensionUiComponent>();
-	// Single-file dialog surface (`editorContainer` + focus) is shared by the
-	// selector / input / editor modals, so only one may be presented at a time;
-	// the rest queue. See `#presentDialog`.
+	// The composer's place (and the ask slot above it) is shared by the selector / input /
+	// editor / approval / ask / form dialogs, so only one may be presented at a time; the rest
+	// queue. See `#presentDialog`.
 	#dialogActive = false;
 	#dialogQueue: Array<() => void> = [];
 	/** The local ask shown above the composer (`#mountAsk`). */
-	#ask: Component | undefined;
+	readonly #ask = signal<MountedAsk | undefined>(undefined);
 	/**
 	 * The steering messages that last denied an approval. Steering waits for the tool batch to
 	 * end, so while any of them is still pending, later approvals of that batch (an exclusive call
@@ -169,7 +210,7 @@ export class ExtensionUiController {
 	#syncExtensionComposerShapes(): void {
 		this.disposeComposerShapes();
 		for (const definition of this.ctx.session.extensionRunner?.getComposerShapes() ?? []) {
-			this.#composerShapeDisposers.push(installExtensionComposerShape(definition));
+			this.#composerShapeDisposers.push(registerComposerShape(definition));
 		}
 		this.ctx.syncComposerShape();
 		this.ctx.syncExtensionLinks();
@@ -181,19 +222,23 @@ export class ExtensionUiController {
 	}
 
 	/**
-	 * Redraw every transcript component of the reply sent at `timestamp` (one per tool-call segment),
-	 * and the link browser's copy while it is open. A plain terminal cannot repaint rows it already
-	 * moved into scrollback, so a reply with retired rows rebuilds the scrollback, as the
+	 * Redraw every transcript block of the reply sent at `timestamp` (one per tool-call segment),
+	 * and the link browser's copy while it is open: the reply is handed to its view again, so
+	 * the assistant text renderers run anew. A plain terminal cannot repaint rows it already moved
+	 * into scrollback, so a reply with retired rows rebuilds the scrollback, as the
 	 * thinking-visibility toggle does (once the link browser closes, if it covers the screen); one
 	 * still in the live viewport (and any block in Tern's native view) just repaints.
 	 */
 	#rerenderAssistantMessage(timestamp: number): void {
 		if (!cfgExtensionAssistantTextRenderers.get(this.ctx.settings)) return;
 		this.ctx.rerenderInLinkBrowser(timestamp);
-		this.ctx.redrawTranscriptBlocks(
-			this.ctx.chatContainer.children,
-			child => child instanceof AssistantMessageComponent && child.rerenderMessage(timestamp),
-		);
+		this.ctx.redrawTranscriptBlocks(this.ctx.shell.transcript.blocks(), (_block, entry) => {
+			if (entry?.kind !== "assistant") return false;
+			const message = entry.view.message.peek();
+			if (message?.timestamp !== timestamp) return false;
+			entry.view.message.set({ ...message });
+			return true;
+		});
 	}
 
 	/**
@@ -220,34 +265,43 @@ export class ExtensionUiController {
 			setWidget: (key, content, options) => this.setHookWidget(key, content, options),
 			setTitle: title => setExtensionTerminalTitle(title),
 			custom: (factory, options) => this.showHookCustom(factory, options),
-			setEditorText: text => {
-				this.ctx.editor.setText(text);
-				this.ctx.ui.requestRender();
-			},
+			setEditorText: text => this.ctx.composer.setText(text),
 			pasteToEditor: text => {
-				this.ctx.editor.handleInput(`\x1b[200~${text}\x1b[201~`);
-				this.ctx.ui.requestRender();
+				// Through the paste pipeline (large-paste markers, image paths) while the composer
+				// takes the keys; otherwise straight into the draft.
+				if (this.#composerFocused() && this.ctx.shell.paste(text)) return;
+				this.ctx.composer.insertText(text);
 			},
-			getEditorText: () => this.ctx.editor.getText(),
+			getEditorText: () => this.ctx.composer.text(),
 			editor: (title, prefill, dialogOptions, editorOptions) =>
 				this.showCollabAwareEditor(title, prefill, dialogOptions, editorOptions),
 			addAutocompleteProvider: factory => this.ctx.addAutocompleteProvider(factory),
-			getEditorComponent: () => this.ctx.getEditorComponent(),
+			composer: {
+				addKeyHandler: handler => this.ctx.composer.addKeyHandler(key => handler(key)),
+				addDecorator: decorator => this.ctx.composer.addDecorator(decorator),
+				setSubmitTransform: transform => this.ctx.composer.setSubmitTransform(transform),
+				setShape: (id, paddingX) => {
+					if (id === undefined) this.ctx.syncComposerShape();
+					else this.ctx.composer.setShape(id, paddingX);
+				},
+			},
 			get theme() {
-				return theme;
+				return extensionTheme(currentTheme());
 			},
 			getAllThemes: async () => (await getAvailableThemesWithPaths()).map(t => ({ name: t.name, path: t.path })),
-			getTheme: name => getThemeByName(name),
+			getTheme: async name => {
+				const theme = await getThemeByName(name);
+				return theme && extensionTheme(theme);
+			},
 			setTheme: async themeArg => {
 				if (typeof themeArg === "string") {
-					return await setTheme(themeArg, true);
+					return await setTheme(themeArg);
 				}
 				// Theme object passed directly - not supported in current implementation
 				return Promise.resolve({ success: false, error: "Direct theme object not supported" });
 			},
 			setFooter: () => {},
 			setHeader: () => {},
-			setEditorComponent: factory => this.ctx.setEditorComponent(factory),
 			getToolsExpanded: () => this.ctx.toolOutputExpanded,
 			setToolsExpanded: expanded => this.ctx.setToolsExpanded(expanded),
 		};
@@ -343,17 +397,13 @@ export class ExtensionUiController {
 				}
 
 				// Reset and update status line
-				this.ctx.statusLine.invalidate();
+				this.ctx.statusLine.refresh();
 				this.ctx.statusLine.resetActiveTime();
 				this.ctx.clearTransientSessionUi();
 				this.ctx.resetTranscript();
 
-				this.ctx.present([
-					new Spacer(1),
-					new Text(`${theme.fg("accent", `${theme.status.success} New session started`)}`, 1, 1),
-				]);
+				this.#presentNewSessionNotice();
 				await this.ctx.reloadTodos();
-				this.ctx.ui.requestRender(true, { clearScrollback: true });
 
 				return { cancelled: false };
 			},
@@ -367,7 +417,7 @@ export class ExtensionUiController {
 				// Update UI
 				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
-				this.ctx.editor.setDraft(result.selectedText, result.selectedImages);
+				this.ctx.composer.setDraft(result.selectedText, result.selectedImages);
 				this.ctx.showStatus("Branched to new session");
 
 				return { cancelled: false };
@@ -381,8 +431,8 @@ export class ExtensionUiController {
 				// Update UI
 				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
-				if (result.editorText && !this.ctx.editor.getText().trim()) {
-					this.ctx.editor.setDraft(result.editorText, result.editorImages);
+				if (result.editorText && !this.ctx.composer.text().trim()) {
+					this.ctx.composer.setDraft(result.editorText, result.editorImages);
 				}
 				this.ctx.showStatus("Navigated to selected point");
 
@@ -433,62 +483,49 @@ export class ExtensionUiController {
 		return this.#toolUIContext;
 	}
 
+	/**
+	 * Set widget `key` above or below the composer: lines as they are; a factory's output (pi-tui
+	 * nodes or a rows object) adapted, repainting rows when the factory's host asks.
+	 */
 	setHookWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void {
 		const placement = options?.placement ?? "aboveEditor";
-		this.#removeHookWidget(this.#hookWidgetsAbove, key);
-		this.#removeHookWidget(this.#hookWidgetsBelow, key);
-
-		if (content === undefined) {
-			this.#rebuildHookWidgets();
+		if (content === undefined || Array.isArray(content)) {
+			this.ctx.hud.widgets.set(key, content, placement);
 			return;
 		}
-
-		const target = placement === "belowEditor" ? this.#hookWidgetsBelow : this.#hookWidgetsAbove;
-		target.set(key, this.#createHookWidget(content));
-		this.#rebuildHookWidgets();
-	}
-
-	#removeHookWidget(widgets: Map<string, ExtensionUiComponent>, key: string): void {
-		const existing = widgets.get(key);
-		existing?.dispose?.();
-		widgets.delete(key);
-	}
-
-	#createHookWidget(content: ExtensionWidgetContent): ExtensionUiComponent {
-		if (Array.isArray(content)) {
-			const container = new Container();
-			for (const line of content.slice(0, MAX_WIDGET_LINES)) {
-				container.addChild(new Text(line, 1, 0));
-			}
-			if (content.length > MAX_WIDGET_LINES) {
-				container.addChild(new Text(theme.fg("muted", "... (widget truncated)"), 1, 0));
-			}
-			return container;
-		}
-		if (content === undefined) {
-			throw new Error("Widget content missing");
-		}
-		return content(this.ctx.ui, theme);
-	}
-
-	#rebuildHookWidgets(): void {
-		// The margin above the editor is the top gap, or a plain spacer over hook
-		// widgets; either way it stays in the one billed root, so installing a
-		// widget never moves that row out of the retirement baseline.
-		this.ctx.editorTopGapContainer.clear();
-		this.ctx.editorTopGapContainer.addChild(
-			this.#hookWidgetsAbove.size === 0 ? new EditorTopGap(() => this.ctx.statusRowOccupied) : new Spacer(1),
+		const factory = content as Exclude<ExtensionWidgetContent, readonly string[] | undefined>;
+		this.ctx.hud.widgets.set(
+			key,
+			() => {
+				const revision = signal(0);
+				return extensionOutput(factory(this.#uiHost(revision), extensionTheme(currentTheme())), {
+					revision,
+					onError: error => this.#reportRenderError(`widget "${key}"`, error),
+				});
+			},
+			placement,
 		);
-		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerAbove, this.#hookWidgetsAbove);
-		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerBelow, this.#hookWidgetsBelow);
-		this.ctx.ui.requestRender();
 	}
 
-	#renderHookWidgetContainer(container: Container, widgets: Map<string, ExtensionUiComponent>): void {
-		container.clear();
-		for (const widget of widgets.values()) {
-			container.addChild(widget);
-		}
+	/** What extension UI factories receive: `requestRender` bumps `revision`, which rows views read. */
+	#uiHost(revision: Signal<number>): ExtensionUiHost {
+		return {
+			requestRender: () => revision.set(revision.peek() + 1),
+			size: () => this.ctx.shell.size(),
+			suspend: run => this.ctx.suspend(run),
+		};
+	}
+
+	#reportRenderError(what: string, error: unknown): void {
+		this.ctx.showWarning(
+			`Extension ${what} failed to render: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+
+	#presentNewSessionNotice(): void {
+		const theme = currentTheme();
+		const text = theme.fg("accent", `${theme.symbols.symbol("status.success")} New session started`);
+		this.ctx.present(() => AnsiText({ text, padX: 1, padY: 1 }));
 	}
 
 	initializeHookRunner(uiContext: ExtensionUIContext, _hasUI: boolean): void {
@@ -570,12 +607,8 @@ export class ExtensionUiController {
 				this.ctx.clearTransientSessionUi();
 				this.ctx.resetTranscript();
 
-				this.ctx.present([
-					new Spacer(1),
-					new Text(`${theme.fg("accent", `${theme.status.success} New session started`)}`, 1, 1),
-				]);
+				this.#presentNewSessionNotice();
 				await this.ctx.reloadTodos();
-				this.ctx.ui.requestRender(true, { clearScrollback: true });
 
 				return { cancelled: false };
 			},
@@ -589,7 +622,7 @@ export class ExtensionUiController {
 				// Update UI
 				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
-				this.ctx.editor.setDraft(result.selectedText, result.selectedImages);
+				this.ctx.composer.setDraft(result.selectedText, result.selectedImages);
 				this.ctx.showStatus("Branched to new session");
 
 				return { cancelled: false };
@@ -603,8 +636,8 @@ export class ExtensionUiController {
 				// Update UI
 				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
-				if (result.editorText && !this.ctx.editor.getText().trim()) {
-					this.ctx.editor.setDraft(result.editorText, result.editorImages);
+				if (result.editorText && !this.ctx.composer.text().trim()) {
+					this.ctx.composer.setDraft(result.editorText, result.editorImages);
 				}
 				this.ctx.showStatus("Navigated to selected point");
 
@@ -668,8 +701,8 @@ export class ExtensionUiController {
 	 * Show a tool error in the chat.
 	 */
 	showToolError(toolName: string, error: string): void {
-		const errorText = new Text(`Tool "${toolName}" error: ${error}`, 1, 0).setStyleFn(t => theme.fg("error", t));
-		this.ctx.present(errorText);
+		const text = currentTheme().fg("error", `Tool "${toolName}" error: ${error}`);
+		this.ctx.present(() => AnsiText({ text, padX: 1 }));
 	}
 
 	/**
@@ -677,7 +710,6 @@ export class ExtensionUiController {
 	 */
 	setHookStatus(key: string, text: string | undefined): void {
 		this.ctx.statusLine.setHookStatus(key, text);
-		this.ctx.ui.requestRender();
 	}
 
 	async showCollabAwareSelector(
@@ -765,52 +797,71 @@ export class ExtensionUiController {
 		try {
 			const choice = await this.#raceCollabDialog(request, signal, localSignal =>
 				this.#presentDialog({ kind: "permission", msg: prompt.compact }, localSignal, settle => {
-					const editor = this.ctx.editor;
-					const dialog = new ApprovalDialogComponent(
-						prompt.compact,
-						{ onApprove: () => settle(onceLabel), onDeny: () => settle("Deny") },
-						{
-							tui: this.ctx.ui,
-							fullPrompt: prompt.full,
-							timeout: dialogOptions?.timeout,
-							onTimeout: dialogOptions?.onTimeout,
-							onTimeoutStart: dialogOptions?.onTimeoutStart,
-							onTimeoutReset: dialogOptions?.onTimeoutReset,
-							...(sessionLabel
-								? { session: { label: sessionLabel, onApprove: () => settle(sessionLabel) } }
-								: {}),
-							...(prompt.grants?.length
-								? {
-										grants: prompt.grants,
-										onGrant: (grant, always) => settle(always ? grant.alwaysLabel : grant.label),
-									}
-								: {}),
-							draft: {
-								hasDraft: () =>
-									editor.getText().length > 0 || editor.pendingImages.length > 0 || editor.pasteInFlight,
-								handleInput: keyData => editor.handleDraftEdit(keyData),
-							},
-						},
-					);
+					const composer = this.ctx.composer;
+					const grants = prompt.grants ?? [];
+					const answer = (choice: ApprovalChoice): void => {
+						if (choice.kind === "once") settle(onceLabel);
+						else if (choice.kind === "session") settle(sessionLabel);
+						else {
+							const grant = grants[choice.index];
+							settle(grant && (choice.remember ? grant.alwaysLabel : grant.label));
+						}
+					};
+					const hasDraft = (): boolean => composer.text().length > 0 || composer.pendingImages.length > 0;
+					// Keep focus on the dialog, but give edits, pastes and undo to the real composer field.
+					const field = composer.field;
+					const path = pathTo([composer.node], field);
+					const fieldContext = () =>
+						widgetContext(path, {
+							focus: node => this.ctx.shell.focus(node),
+							pageRows: this.ctx.shell.size().rows,
+						});
 					this.ctx.closeLinkBrowser();
-					this.ctx.editorContainer.clear();
-					this.ctx.editorContainer.addChild(dialog);
-					this.ctx.editorContainer.addChild(editor);
-					this.ctx.ui.setFocus(dialog);
-					// The dialog owns focus but forwards typing: keep the composer's cursor visible.
-					editor.focused = true;
+					// Right over the composer, which stays and takes the typing the dialog hands it.
+					const slot = this.ctx.shell.dock.slot("approval");
+					let node: UiNode | undefined;
+					slot.set(
+						() =>
+							(node = singleNode(
+								ApprovalDialog({
+									prompt: prompt.compact,
+									onApprove: answer,
+									onDeny: () => settle("Deny"),
+									options: {
+										fullPrompt: prompt.full,
+										timeout: dialogOptions?.timeout,
+										onTimeout: dialogOptions?.onTimeout,
+										onTimeoutStart: dialogOptions?.onTimeoutStart,
+										onTimeoutReset: dialogOptions?.onTimeoutReset,
+										...(sessionLabel ? { session: { label: sessionLabel } } : {}),
+										...(grants.length > 0 ? { grants } : {}),
+										draft: {
+											hasDraft,
+											handleInput: key => {
+												if (this.ctx.keybindings.matches(key, "app.clear")) composer.clearDraft();
+												else if (this.ctx.keybindings.matches(key, "app.clipboard.pasteImage"))
+													void this.ctx.handleImagePaste();
+												else if (!composer.handleDraftKey(key))
+													widgetFor(field)?.key?.(field, key, fieldContext());
+											},
+											handlePaste: paste => {
+												if (!bubblePaste(path, paste))
+													widgetFor(field)?.paste?.(field, paste, fieldContext());
+											},
+										},
+									},
+								}),
+							)),
+					);
+					if (node) this.ctx.shell.focus(node);
 					// Its submissions steer this (main) session, even from a focused agent's view.
 					this.ctx.approvalOwnsComposer = true;
-					const releaseComposerOwner = this.#claimComposerOwner(dialog, () => true);
-					this.ctx.ui.requestRender();
+					const releaseComposerOwner = node ? this.#claimComposerOwner(node, () => true) : () => {};
 					return () => {
 						this.ctx.approvalOwnsComposer = false;
 						releaseComposerOwner();
-						dialog.dispose();
-						this.ctx.editorContainer.clear();
-						this.ctx.editorContainer.addChild(editor);
-						this.ctx.ui.setFocus(editor);
-						this.ctx.ui.requestRender();
+						slot.clear();
+						this.#focusComposer();
 					};
 				}),
 			);
@@ -888,35 +939,37 @@ export class ExtensionUiController {
 	 * sending its draft would skip it; undefined with no ask or with the composer talking to a `/btw` note.
 	 */
 	composerAsk(): "pending" | "skip" | undefined {
-		if (!this.#ask || this.ctx.isBtwFocused) return undefined;
+		if (!this.#ask() || this.ctx.isBtwFocused) return undefined;
 		return this.#draftSkipsAsk() ? "skip" : "pending";
 	}
 
 	/** Whether an ask waits above the composer while the keys are away from the composer (it draws faint). */
 	askHoldsKeys(): boolean {
-		return this.#ask !== undefined && !this.ctx.editor.focused;
+		return this.#ask() !== undefined && !this.#composerFocused();
 	}
 
 	/** In rows, the keys of the ask holding them, which the faint composer under it shows. */
 	askKeyHints(): string | undefined {
-		if (!this.askHoldsKeys()) return undefined;
-		const ask = this.#ask;
-		return ask instanceof HtmlFormDialog || ask instanceof AskDialogComponent ? ask.keyHints() : undefined;
+		return this.askHoldsKeys() ? this.#ask()?.keyHints?.() : undefined;
 	}
 
 	/** Gives the keys to the ask waiting above the composer; false when none waits. */
 	focusAsk(): boolean {
-		const ask = this.#ask;
+		const ask = this.#ask.peek();
 		if (!ask) return false;
-		this.ctx.ui.setFocus(ask);
-		this.ctx.ui.requestRender();
+		this.ctx.shell.focus(ask.node);
+		ask.setFocused?.(true);
 		return true;
 	}
 
 	/** Gives the keys to the composer (Tab past an ask's last stop, the ask closing). */
 	#focusComposer(): void {
-		this.ctx.ui.setFocus(this.ctx.editor);
-		this.ctx.ui.requestRender();
+		this.#ask.peek()?.setFocused?.(false);
+		this.ctx.shell.focus(this.ctx.composer.field);
+	}
+
+	#composerFocused(): boolean {
+		return this.ctx.shell.focused() === this.ctx.composer.field;
 	}
 
 	/**
@@ -924,17 +977,17 @@ export class ExtensionUiController {
 	 * agent as the user's and closes the ask, not a command, a shell run or a `/btw` follow-up.
 	 */
 	#draftSkipsAsk(): boolean {
-		if (!this.#ask || this.ctx.isBtwFocused || this.ctx.isBashMode || this.ctx.isPythonMode || this.ctx.isBtwMode)
+		if (!this.#ask() || this.ctx.isBtwFocused || this.ctx.isBashMode || this.ctx.isPythonMode || this.ctx.isBtwMode)
 			return false;
-		const draft = this.ctx.editor.getText().trim();
+		const draft = this.ctx.composer.text().trim();
 		return draft.length > 0 && !draft.startsWith("/");
 	}
 
 	/** The ask's warning while sending the composer's draft would skip it, with the key back to it. */
 	#skipNotice(): string | undefined {
 		if (!this.#draftSkipsAsk()) return undefined;
-		const back = this.ctx.keybindings.getKeys("app.thinking.cycle")[0];
-		return this.ctx.editor.focused && back
+		const back = this.ctx.keybindings.keysFor("app.thinking.cycle")[0];
+		return this.#composerFocused() && back
 			? `${ASK_SKIP_NOTICE} · ${formatKeyHint(back)} answers them`
 			: ASK_SKIP_NOTICE;
 	}
@@ -944,33 +997,37 @@ export class ExtensionUiController {
 	 * just over it. The ask takes the keys unless the composer holds a draft, whose sending skips it;
 	 * Shift+Tab, Tab past the ask's last stop and clicks move the keys between them.
 	 */
-	#mountAsk(dialog: Component): AskSlot {
+	#mountAsk(view: () => JSXNode, setFocused?: (focused: boolean) => void, keyHints?: () => string): AskSlot {
 		this.ctx.closeLinkBrowser();
-		this.#ask = dialog;
-		this.ctx.askContainer.addChild(dialog);
+		const slot = this.ctx.shell.dock.slot("ask");
+		let node: UiNode | undefined;
+		slot.set(() => (node = singleNode(view())));
+		const ask: MountedAsk = { node: node!, setFocused, keyHints };
+		this.#ask.set(ask);
 		this.ctx.statusLine.setAwaitingAnswer(true);
-		if (this.ctx.editor.getText().trim()) this.ctx.ui.requestRender();
+		if (this.ctx.composer.text().trim()) setFocused?.(false);
 		else this.focusAsk();
 		return {
 			restore: () => {
-				this.ctx.editorContainer.clear();
-				this.ctx.editorContainer.addChild(this.ctx.editor);
 				this.focusAsk();
 			},
 			unmount: () => {
-				if (this.#ask === dialog) this.#ask = undefined;
-				this.ctx.askContainer.removeChild(dialog);
-				this.ctx.statusLine.setAwaitingAnswer(this.#ask !== undefined);
-				this.ctx.editorContainer.clear();
-				this.ctx.editorContainer.addChild(this.ctx.editor);
+				if (this.#ask.peek() === ask) this.#ask.set(undefined);
+				slot.clear();
+				this.ctx.statusLine.setAwaitingAnswer(this.#ask.peek() !== undefined);
 				this.#focusComposer();
 			},
 		};
 	}
 
-	/** Registers `component` as the composer's owner; the returned release clears it only if it is still registered. */
-	#claimComposerOwner(component: Component, owns: () => boolean): () => void {
-		const owner: ComposerOwner = { component, owns };
+	/** Image pastes stop going to the prompt at `node` (it closed). */
+	#releasePromptPasteTarget(node: UiNode): void {
+		if (this.ctx.promptPasteTarget?.node === node) this.ctx.promptPasteTarget = undefined;
+	}
+
+	/** Registers `node` as the composer's owner; the returned release clears it only if it is still registered. */
+	#claimComposerOwner(node: UiNode, owns: () => boolean): () => void {
+		const owner: ComposerOwner = { node, owns };
 		this.ctx.composerOwner = owner;
 		return () => {
 			if (this.ctx.composerOwner === owner) this.ctx.composerOwner = undefined;
@@ -984,32 +1041,79 @@ export class ExtensionUiController {
 		const first = form.fields.find(field => field.name);
 		const prompt = { kind: "question", msg: first && fieldQuestions(form).get(first) } as const;
 		return this.#presentDialog<ExtensionFormDialogResult>(prompt, dialogOptions?.signal, settle => {
-			const dialog = new HtmlFormDialog(form, {
-				tui: this.ctx.ui,
-				cwd: this.ctx.sessionManager.getCwd(),
-				timeout: dialogOptions?.timeout,
-				onTimeout: (data, notes) => {
-					dialogOptions?.onTimeout?.();
-					settle({ data, ...(notes.length ? { notes } : {}), timedOut: true });
+			const withNotes = (data: HtmlFormData, notes: OptionNote[]) => ({ data, ...(notes.length ? { notes } : {}) });
+			const model = new HtmlFormModel(
+				form,
+				{
+					onSubmit: (data, notes) => settle(withNotes(data, notes)),
+					onCancel: () => settle(undefined),
+					onTimeout: (data, notes) => {
+						dialogOptions?.onTimeout?.();
+						settle({ ...withNotes(data, notes), timedOut: true });
+					},
+					claimKeys: () => this.focusAsk(),
+					releaseKeys: () => this.#focusComposer(),
+					// Clipboard text lands in the focused box through the dialog's paste; images are refused there.
+					onPasteClipboard: () => this.ctx.handleImagePaste(),
+					...(dialogOptions?.acceptImages
+						? {
+								onPasteImage: () => void this.ctx.handleImagePaste(),
+								onPasteImagePath: (path: string) => void this.ctx.handleImagePathPaste(path),
+							}
+						: {}),
 				},
-				onSubmit: (data, notes) => settle({ data, ...(notes.length ? { notes } : {}) }),
-				onCancel: () => settle(undefined),
-				acceptImages: dialogOptions?.acceptImages === true,
-				onPasteImage: () => this.ctx.handleImagePaste(),
-				onPasteImagePath: path => this.ctx.handleImagePathPaste(path),
-				skipNotice: () => this.#skipNotice(),
-				claimKeys: () => this.focusAsk(),
-				releaseKeys: () => this.#focusComposer(),
-			});
-			const slot = this.#mountAsk(dialog);
+				{ focused: false, vim: this.ctx.dialogVim(), native: () => this.ctx.shell.native() },
+			);
+			const media = formMedia(form, this.ctx.sessionManager.getCwd());
+			const timeout = dialogOptions?.timeout;
+			const slot = this.#mountAsk(
+				() => {
+					// The form's countdown reads the clock reactively: tick it while one runs.
+					const now = signal(Date.now());
+					if (timeout !== undefined) {
+						const ticker = setInterval(() => now.set(Date.now()), Math.min(250, Math.max(1, timeout)));
+						onCleanup(() => clearInterval(ticker));
+					}
+					return HtmlFormDialog({
+						model,
+						media,
+						now,
+						timeout,
+						terminalRows: () => this.ctx.shell.size().rows,
+						skipNotice: () => this.#skipNotice(),
+					});
+				},
+				focused => model.focused.set(focused),
+				() => htmlFormKeyHints(model),
+			);
+			// Option notes take pasted images while one is being written.
+			const askNode = this.#ask.peek()?.node;
+			const stopNotePaste =
+				dialogOptions?.acceptImages && askNode
+					? createRoot(dispose => {
+							effect(() => {
+								if (model.note())
+									this.ctx.promptPasteTarget = {
+										node: askNode,
+										attachImage: (image, dims) => void model.attachNoteImage(image, dims),
+										setText: text => void model.setNoteText(text),
+									};
+								else this.#releasePromptPasteTarget(askNode);
+							});
+							return () => {
+								dispose();
+								this.#releasePromptPasteTarget(askNode);
+							};
+						})
+					: undefined;
 			return () => {
+				stopNotePaste?.();
 				// Closed by its signal (a message sent instead, the turn aborted): what was answered goes along.
 				if (dialogOptions?.signal?.aborted) {
-					const given = dialog.givenAnswers();
+					const given = givenFormAnswers(form, model.data(), model.notes());
 					if (given) dialogOptions.onAbandon?.(given);
 				}
 				slot.unmount();
-				dialog.dispose();
 			};
 		});
 	}
@@ -1160,7 +1264,7 @@ export class ExtensionUiController {
 	): Promise<ExtensionAskDialogResult | undefined> {
 		const prompt = { kind: "question", msg: questions[0]?.question } as const;
 		return this.#presentDialog<ExtensionAskDialogResult>(prompt, dialogOptions?.signal, settle => {
-			let promptEditor: HookEditorComponent | undefined;
+			let promptEditor: OverlayHandle | undefined;
 			let promptResolve: ((value: AskDialogPromptValue | AskDialogPromptDraft | undefined) => void) | undefined;
 			let closed = false;
 			// After a nested prompt took the composer's place: the composer back, the keys to the ask.
@@ -1171,15 +1275,15 @@ export class ExtensionUiController {
 			const finishPrompt = (value: AskDialogPromptValue | AskDialogPromptDraft | undefined): void => {
 				const resolvePrompt = promptResolve;
 				promptResolve = undefined;
-				promptEditor?.dispose();
+				if (promptEditor) this.#releasePromptPasteTarget(promptEditor.node);
+				promptEditor?.close();
 				promptEditor = undefined;
 				resolvePrompt?.(value);
-				// Let AskDialog apply the answer and clear its prompt guard before
-				// making the dialog visible and interactive again. This single-hop
-				// deferral relies on #promptForCustomInput/#promptForNote clearing
-				// #promptActive in the synchronous resume after their lone
-				// `await this.#openPrompt(...)` (no await before the `finally`); adding one
-				// there reopens the drop-Enter race, so revisit this deferral then.
+				// Let the ask apply the answer and clear its prompt guard before making it
+				// interactive again. This single-hop deferral relies on the model clearing its
+				// prompt guard in the synchronous resume after its lone `await` of the prompt (no
+				// await before the `finally`); adding one there reopens the drop-Enter race, so
+				// revisit this deferral then.
 				queueMicrotask(restoreAskDialog);
 			};
 
@@ -1188,19 +1292,39 @@ export class ExtensionUiController {
 				prefill: string | undefined,
 				options: HookEditorOptions,
 			): void => {
-				promptEditor = new HookEditorComponent(
-					this.ctx.ui,
-					prompt.title,
-					prefill,
-					(text, images) => finishPrompt({ text, images }),
-					(text, images) => finishPrompt({ draft: { text, images } }),
-					{ promptStyle: true, externalEditor: editDialogExternally, question: prompt.question, ...options },
-				);
 				this.ctx.closeLinkBrowser();
-				this.ctx.editorContainer.clear();
-				this.ctx.editorContainer.addChild(promptEditor);
-				this.ctx.ui.setFocus(promptEditor);
-				this.ctx.ui.requestRender();
+				let editor: HookEditorHandle | undefined;
+				promptEditor = this.ctx.showEditorAreaDialog(
+					() =>
+						HookEditor({
+							ref: handle => {
+								editor = handle;
+							},
+							title: prompt.title,
+							prefill,
+							options: {
+								promptStyle: true,
+								externalEditor: editDialogExternally,
+								question: prompt.question,
+								maxHeight: this.#dialogEditorRows(),
+								...options,
+							},
+							vim: this.ctx.dialogVim(),
+							onSubmit: (text, images) => finishPrompt({ text, images: images && [...images] }),
+							onCancel: (text, images) => finishPrompt({ draft: { text, images: images && [...images] } }),
+						}),
+					focusKind("editor"),
+				);
+				// Image pastes (the paste-image key, an image-only clipboard, dropped paths) attach to the answer.
+				if (options.acceptImages)
+					this.ctx.promptPasteTarget = {
+						node: promptEditor.node,
+						attachImage: (image, dims) => {
+							const marker = editor?.attachImage(image, dims);
+							if (marker) editor?.paste(marker);
+						},
+						setText: text => editor?.setText(text),
+					};
 			};
 
 			const promptForText = (
@@ -1232,7 +1356,7 @@ export class ExtensionUiController {
 				return promise;
 			};
 
-			const askDialog = new AskDialogComponent(
+			const model = new AskDialogModel(
 				questions,
 				{
 					onSubmit: result => settle(result),
@@ -1243,18 +1367,18 @@ export class ExtensionUiController {
 				{
 					timeout: dialogOptions?.timeout,
 					onTimeout: dialogOptions?.onTimeout,
-					tui: this.ctx.ui,
 					skipNotice: () => this.#skipNotice(),
 					claimKeys: () => this.focusAsk(),
 					releaseKeys: () => this.#focusComposer(),
+					terminalRows: () => this.ctx.shell.size().rows,
 				},
 			);
-			const slot = this.#mountAsk(askDialog);
+			const slot = this.#mountAsk(() => AskDialog({ model }));
 
 			return () => {
 				closed = true;
-				askDialog.dispose();
-				promptEditor?.dispose();
+				if (promptEditor) this.#releasePromptPasteTarget(promptEditor.node);
+				promptEditor?.close();
 				promptResolve?.(undefined);
 				promptResolve = undefined;
 				promptEditor = undefined;
@@ -1461,48 +1585,45 @@ export class ExtensionUiController {
 		extra?: { slider?: HookSelectorSlider; kind?: BlockedKind },
 	): Promise<string | undefined> {
 		return this.#presentDialog({ kind: extra?.kind ?? "question", msg: title }, dialogOptions?.signal, settle => {
-			const maxVisible = Math.max(4, Math.min(15, this.ctx.ui.terminal.rows - 12));
-			this.ctx.hookSelector = new HookSelectorComponent(
-				title,
-				options,
-				option => settle(option),
-				() => settle(undefined),
-				{
-					onLeft: dialogOptions?.onLeft
-						? () => {
-								dialogOptions.onLeft?.();
-								settle(undefined);
-							}
-						: undefined,
-					onRight: dialogOptions?.onRight
-						? () => {
-								dialogOptions.onRight?.();
-								settle(undefined);
-							}
-						: undefined,
-					onExternalEditor: dialogOptions?.onExternalEditor,
-					helpText: dialogOptions?.helpText,
-					initialIndex: dialogOptions?.initialIndex,
-					timeout: dialogOptions?.timeout,
-					onTimeout: dialogOptions?.onTimeout,
-					onTimeoutStart: dialogOptions?.onTimeoutStart,
-					onTimeoutReset: dialogOptions?.onTimeoutReset,
-					tui: this.ctx.ui,
-					outline: dialogOptions?.outline,
-					disabledIndices: dialogOptions?.disabledIndices,
-					selectionMarker: dialogOptions?.selectionMarker,
-					checkedIndices: dialogOptions?.checkedIndices,
-					markableCount: dialogOptions?.markableCount,
-					maxVisible,
-					inline: dialogOptions?.inline,
-					slider: extra?.slider,
-				},
-			);
+			const maxVisible = Math.max(4, Math.min(15, this.ctx.shell.size().rows - 12));
 			this.ctx.closeLinkBrowser();
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(this.ctx.hookSelector);
-			this.ctx.ui.setFocus(this.ctx.hookSelector);
-			this.ctx.ui.requestRender();
+			this.ctx.hookSelector = this.ctx.showEditorAreaDialog(
+				() =>
+					HookSelector({
+						title,
+						options,
+						onSelect: option => settle(option),
+						onCancel: () => settle(undefined),
+						onLeft: dialogOptions?.onLeft
+							? () => {
+									dialogOptions.onLeft?.();
+									settle(undefined);
+								}
+							: undefined,
+						onRight: dialogOptions?.onRight
+							? () => {
+									dialogOptions.onRight?.();
+									settle(undefined);
+								}
+							: undefined,
+						onExternalEditor: dialogOptions?.onExternalEditor,
+						helpText: dialogOptions?.helpText,
+						initialIndex: dialogOptions?.initialIndex,
+						timeout: dialogOptions?.timeout,
+						onTimeout: dialogOptions?.onTimeout,
+						onTimeoutStart: dialogOptions?.onTimeoutStart,
+						onTimeoutReset: dialogOptions?.onTimeoutReset,
+						outline: dialogOptions?.outline,
+						disabledIndices: dialogOptions?.disabledIndices,
+						selectionMarker: dialogOptions?.selectionMarker,
+						checkedIndices: dialogOptions?.checkedIndices,
+						markableCount: dialogOptions?.markableCount,
+						maxVisible,
+						inline: dialogOptions?.inline,
+						slider: extra?.slider,
+					}),
+				focusKind("picker", "list"),
+			);
 			return () => this.hideHookSelector();
 		});
 	}
@@ -1510,12 +1631,8 @@ export class ExtensionUiController {
 	 * Hide the hook selector.
 	 */
 	hideHookSelector(): void {
-		this.ctx.hookSelector?.dispose();
-		this.ctx.editorContainer.clear();
-		this.ctx.editorContainer.addChild(this.ctx.editor);
+		this.ctx.hookSelector?.close();
 		this.ctx.hookSelector = undefined;
-		this.ctx.ui.setFocus(this.ctx.editor);
-		this.ctx.ui.requestRender();
 	}
 
 	/**
@@ -1541,23 +1658,22 @@ export class ExtensionUiController {
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<string | undefined> {
 		return this.#presentDialog({ kind: "question", msg: title }, dialogOptions?.signal, settle => {
-			this.ctx.hookInput = new HookInputComponent(
-				title,
-				placeholder,
-				value => settle(value),
-				() => settle(undefined),
-				{
-					timeout: dialogOptions?.timeout,
-					onTimeout: dialogOptions?.onTimeout,
-					secret: dialogOptions?.secret,
-					tui: this.ctx.ui,
-				},
-			);
 			this.ctx.closeLinkBrowser();
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(this.ctx.hookInput);
-			this.ctx.ui.setFocus(this.ctx.hookInput);
-			this.ctx.ui.requestRender();
+			this.ctx.hookInput = this.ctx.showEditorAreaDialog(
+				() =>
+					HookInput({
+						title,
+						placeholder,
+						options: {
+							timeout: dialogOptions?.timeout,
+							onTimeout: dialogOptions?.onTimeout,
+							secret: dialogOptions?.secret,
+						},
+						onSubmit: value => settle(value),
+						onCancel: () => settle(undefined),
+					}),
+				focusKind("input"),
+			);
 			return () => this.hideHookInput();
 		});
 	}
@@ -1566,12 +1682,13 @@ export class ExtensionUiController {
 	 * Hide the hook input.
 	 */
 	hideHookInput(): void {
-		this.ctx.hookInput?.dispose();
-		this.ctx.editorContainer.clear();
-		this.ctx.editorContainer.addChild(this.ctx.editor);
+		this.ctx.hookInput?.close();
 		this.ctx.hookInput = undefined;
-		this.ctx.ui.setFocus(this.ctx.editor);
-		this.ctx.ui.requestRender();
+	}
+
+	/** Rows a dialog's editor may fill before it scrolls: the terminal's, less the room its chrome and the status rows take. */
+	#dialogEditorRows(): number {
+		return Math.max(3, this.ctx.shell.size().rows - 12);
 	}
 
 	/**
@@ -1584,19 +1701,23 @@ export class ExtensionUiController {
 		editorOptions?: { promptStyle?: boolean },
 	): Promise<string | undefined> {
 		return this.#presentDialog({ kind: "question", msg: title }, dialogOptions?.signal, settle => {
-			this.ctx.hookEditor = new HookEditorComponent(
-				this.ctx.ui,
-				title,
-				prefill,
-				value => settle(value),
-				() => settle(undefined),
-				{ ...editorOptions, externalEditor: editDialogExternally },
-			);
 			this.ctx.closeLinkBrowser();
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(this.ctx.hookEditor);
-			this.ctx.ui.setFocus(this.ctx.hookEditor);
-			this.ctx.ui.requestRender();
+			this.ctx.hookEditor = this.ctx.showEditorAreaDialog(
+				() =>
+					HookEditor({
+						title,
+						prefill,
+						options: {
+							...editorOptions,
+							externalEditor: editDialogExternally,
+							maxHeight: this.#dialogEditorRows(),
+						},
+						vim: this.ctx.dialogVim(),
+						onSubmit: value => settle(value),
+						onCancel: () => settle(undefined),
+					}),
+				focusKind("editor"),
+			);
 			return () => this.hideHookEditor();
 		});
 	}
@@ -1605,12 +1726,8 @@ export class ExtensionUiController {
 	 * Hide the hook editor.
 	 */
 	hideHookEditor(): void {
-		this.ctx.hookEditor?.dispose();
-		this.ctx.editorContainer.clear();
-		this.ctx.editorContainer.addChild(this.ctx.editor);
+		this.ctx.hookEditor?.close();
 		this.ctx.hookEditor = undefined;
-		this.ctx.ui.setFocus(this.ctx.editor);
-		this.ctx.ui.requestRender();
 	}
 
 	/**
@@ -1629,51 +1746,30 @@ export class ExtensionUiController {
 	}
 
 	/**
-	 * Show a custom component with keyboard focus.
+	 * `ctx.ui.custom`: the factory's view (pi-tui nodes, or a rows object drawn as a canvas that
+	 * receives keys and pastes) with keyboard focus, in the composer's place or, with
+	 * `options.overlay`, as an overlay (the whole screen with `fullscreen`). `done` closes it and
+	 * resolves; an abort of `options.signal` closes it and rejects.
 	 */
-	async showHookCustom<T>(
-		factory: (
-			tui: TUI,
-			theme: Theme,
-			keybindings: KeybindingsManager,
-			done: (result: T) => void,
-		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
-		options?: ExtensionCustomOptions,
-	): Promise<T> {
-		const savedText = this.ctx.editor.getText();
-		const keybindings = KeybindingsManager.inMemory();
-
+	async showHookCustom<T>(factory: ExtensionCustomFactory<T>, options?: ExtensionCustomOptions): Promise<T> {
 		const { promise, resolve, reject } = Promise.withResolvers<T>();
-		let component: (Component & { dispose?(): void }) | undefined;
-		let overlayHandle: OverlayHandle | undefined;
+		const revision = signal(0);
+		let handle: OverlayHandle | undefined;
 		let closed = false;
-		let editorReplaced = false;
 
-		const cleanup = () => {
-			component?.dispose?.();
-			overlayHandle?.hide();
-			overlayHandle = undefined;
-			if (editorReplaced) {
-				this.ctx.editorContainer.clear();
-				this.ctx.editorContainer.addChild(this.ctx.editor);
-				this.ctx.editor.setText(savedText);
-			}
-			this.ctx.ui.setFocus(this.ctx.editor);
-			this.ctx.ui.requestRender();
-		};
 		const finish = (settle: () => void) => {
 			if (closed) return;
 			closed = true;
 			options?.signal?.removeEventListener("abort", onAbort);
 			try {
-				cleanup();
+				handle?.close();
 			} finally {
 				settle();
 			}
 		};
 		const fail = (error: unknown) => finish(() => reject(error));
 		const onAbort = () => fail(options?.signal?.reason ?? new DOMException("Dialog aborted", "AbortError"));
-		const close = (result: T) => finish(() => resolve(result));
+		const done = (result: T) => finish(() => resolve(result));
 
 		if (options?.signal?.aborted) {
 			fail(options.signal.reason ?? new DOMException("Dialog aborted", "AbortError"));
@@ -1681,44 +1777,63 @@ export class ExtensionUiController {
 		}
 		options?.signal?.addEventListener("abort", onAbort, { once: true });
 
-		Promise.try(() => factory(this.ctx.ui, theme, keybindings, close))
-			.then(c => {
+		Promise.try(() => factory(this.#uiHost(revision), extensionTheme(currentTheme()), this.ctx.keybindings, done))
+			.then(output => {
 				if (closed) {
-					c.dispose?.();
+					// Settled while the factory ran: the view never mounts, but its rows still get disposed.
+					if (output && typeof output === "object" && "dispose" in output) output.dispose?.();
 					return;
 				}
-				component = c;
-				if (options?.overlay) {
-					const overlayOptions =
-						typeof options.overlayOptions === "function" ? options.overlayOptions() : options.overlayOptions;
-					overlayHandle = this.ctx.ui.showOverlay(
-						component,
-						overlayOptions ?? {
-							anchor: "bottom-center",
-							width: "100%",
-							maxHeight: "100%",
-							margin: 0,
-						},
+				// The view (and a rows object's `dispose`) lives in the mounted root.
+				const view = (): UiNode =>
+					singleNode(
+						extensionOutput(output, {
+							revision,
+							input: true,
+							onError: error => this.#reportRenderError("custom view", error),
+						}) ?? [],
 					);
-					options.onHandle?.(overlayHandle);
+				if (options?.overlay) {
+					let node: UiNode | undefined;
+					handle = this.ctx.shell.overlays.show(
+						() => extensionOverlay((node = view()), options.fullscreen === true, this.ctx.shell.native()),
+						// A view that is its own sheet takes the keys on the screen inside it.
+						{ focus: root => (node && node !== root ? node : (root.children()[0] ?? root)) },
+					);
+					options.onHandle?.({
+						get closed() {
+							return handle?.closed ?? true;
+						},
+						close: () => handle?.close(),
+					});
 					return;
 				}
-				editorReplaced = true;
 				this.ctx.closeLinkBrowser();
-				this.ctx.editorContainer.clear();
-				this.ctx.editorContainer.addChild(component);
-				this.ctx.ui.setFocus(component);
-				this.ctx.ui.requestRender();
+				handle = this.ctx.showEditorAreaDialog(view);
 			})
 			.catch(fail);
 		return promise;
 	}
 
 	/**
-	 * Show an extension error in the UI.
+	 * Raw terminal input for an extension: each key's bytes and each paste (bracketed) before the
+	 * focused view sees them; a `consume` answer swallows the input, a `data` answer replaces it
+	 * (decoded again, it continues to the older listeners and the focused view; empty drops it).
 	 */
 	addExtensionTerminalInputListener(handler: TerminalInputHandler): () => void {
-		const unsubscribe = this.ctx.ui.addInputListener(handler);
+		const unsubscribe = this.ctx.interceptInput(event => {
+			const data =
+				event.type === "key"
+					? event.key.raw
+					: event.type === "paste"
+						? `\x1b[200~${event.paste.text}\x1b[201~`
+						: undefined;
+			if (data === undefined) return false;
+			const result = handler(data);
+			if (result?.consume) return true;
+			if (result?.data === undefined || result.data === data) return false;
+			return decodeInput(result.data, { kitty: this.ctx.shell.host?.driver.capabilities.kittyKeyboard });
+		});
 		this.#extensionTerminalInputUnsubscribers.add(unsubscribe);
 		return () => {
 			unsubscribe();
@@ -1727,15 +1842,7 @@ export class ExtensionUiController {
 	}
 
 	clearHookWidgets(): void {
-		for (const widget of this.#hookWidgetsAbove.values()) {
-			widget.dispose?.();
-		}
-		for (const widget of this.#hookWidgetsBelow.values()) {
-			widget.dispose?.();
-		}
-		this.#hookWidgetsAbove.clear();
-		this.#hookWidgetsBelow.clear();
-		this.#rebuildHookWidgets();
+		this.ctx.hud.widgets.clear();
 	}
 
 	clearExtensionTerminalInputListeners(): void {
@@ -1746,10 +1853,8 @@ export class ExtensionUiController {
 	}
 
 	showExtensionError(extensionPath: string, error: string): void {
-		const errorText = new Text(`Extension "${extensionPath}" error: ${error}`, 1, 0).setStyleFn(t =>
-			theme.fg("error", t),
-		);
-		this.ctx.present(errorText);
+		const text = currentTheme().fg("error", `Extension "${extensionPath}" error: ${error}`);
+		this.ctx.present(() => AnsiText({ text, padX: 1 }));
 	}
 	async #handleInteractiveCompact(instructionsOrOptions: string | CompactOptions | undefined): Promise<void> {
 		await this.ctx.executeCompaction(instructionsOrOptions, false);
@@ -1848,7 +1953,6 @@ export class ExtensionUiController {
 				appended.customType === message.customType
 			) {
 				this.ctx.addMessageToChat(appended);
-				this.ctx.ui.requestRender();
 				return;
 			}
 		}
