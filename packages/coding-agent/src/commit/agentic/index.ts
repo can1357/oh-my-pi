@@ -225,7 +225,7 @@ async function completeAgentCommitState(
 				process.stdout.write(`  ├─ ${message}\n`);
 			},
 		});
-		updatedChangelogFiles = updated.map(filePath => path.relative(ctx.cwd, filePath).replace(/\\/g, "/"));
+		updatedChangelogFiles = updated.map(filePath => path.relative(ctx.cwd, filePath).split(path.sep).join("/"));
 		if (updated.length > 0) {
 			for (const filePath of updated) {
 				process.stdout.write(`  └─ ${filePath}\n`);
