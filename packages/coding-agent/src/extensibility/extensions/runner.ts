@@ -1857,9 +1857,17 @@ export class ExtensionRunner {
 			signal ? AbortSignal.any([signal, this.#todoGivenUp.signal]) : this.#todoGivenUp.signal,
 		);
 		if (!asked) answered.resolve();
-		const sameSession = this.sessionManager.getSessionId() === sessionId;
-		const live = !this.#todoClosed && !signal?.aborted && sameSession && Bun.deepEquals(current(), change.previous);
-		if (verdict?.kind === "accepted" && live) {
+		// Why the change can no longer commit, checked in the same synchronous step as the commit.
+		const staleCause = signal?.aborted
+			? "The call was aborted"
+			: this.#todoClosed
+				? "The session closed"
+				: this.sessionManager.getSessionId() !== sessionId
+					? "The session changed"
+					: !Bun.deepEquals(current(), change.previous)
+						? "The todo list changed"
+						: undefined;
+		if (verdict?.kind === "accepted" && staleCause === undefined) {
 			commit();
 			return { kind: "committed" };
 		}
@@ -1884,16 +1892,12 @@ export class ExtensionRunner {
 					message: `Todo backend "${id}" failed: ${sanitizeDisplayLine(verdict.message) || "no reason given"}${NOTHING_SAVED_SUFFIX}`,
 				};
 				break;
-			default: {
-				const why = signal?.aborted
-					? "The call was aborted"
-					: this.#todoClosed
-						? "The session closed"
-						: !sameSession
-							? "The session changed"
-							: "The todo list changed";
-				result = { kind: "stale", message: `${why} while todo backend "${id}" decided${NOTHING_SAVED_SUFFIX}` };
-			}
+			default:
+				// No verdict only after an abort of the call or of the session's wait, both named above.
+				result = {
+					kind: "stale",
+					message: `${staleCause ?? "The call was aborted"} while todo backend "${id}" decided${NOTHING_SAVED_SUFFIX}`,
+				};
 		}
 		this.#resendStaleTodoList(answered.promise, resend);
 		return result;
