@@ -1,30 +1,26 @@
 /**
  * Repeated `wait` calls must not stack "waiting on N jobs" frames in the
- * transcript: a wait whose watched jobs are all still running stays live
- * (displaceable) and the next `wait` call replaces it — one persistent wait.
+ * transcript: a wait whose watched jobs are all still running stays
+ * displaceable and the next `wait` call replaces it — one persistent wait.
  *
  * Contracts under test:
- *  - ToolExecutionComponent: a waiting-poll result stays displaceable but
- *    finalizes like any other settled result (so it can retire as history
- *    instead of pinning the live viewport); seal() always freezes.
+ *  - displaceableBy: a waiting-poll result (and a successful todo snapshot) is
+ *    displaceable until sealed; anything else is not.
  *  - EventController: a follow-up `wait` call removes the tracked waiting
  *    poll from the transcript; any other tool seals it in place.
+ *  - UiHelpers.renderSessionContext: replay collapses the same runs.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ToolExecutionComponent, type ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { cfgDisplayShowTokenUsage } from "@oh-my-pi/pi-coding-agent/modes/settings";
-import { ChatTranscriptBuilder } from "@oh-my-pi/pi-tui/chat/chat-transcript-builder";
-import { createUsageRowBlock } from "@oh-my-pi/pi-tui/overlays/usage-row";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import type { InteractiveModeContext, PendingTool } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { displaceableBy } from "@oh-my-pi/pi-coding-agent/modes/utils/displaceable";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
-import type { Component, TUI } from "@oh-my-pi/pi-tui";
-import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
-
-const uiStub = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
+import { isSettled } from "@oh-my-pi/pi-tui";
+import { createInteractiveModeContext, renderTranscript } from "./helpers/interactive-mode-context";
 
 type JobStatus = "running" | "completed" | "failed" | "cancelled";
 
@@ -64,417 +60,294 @@ function todoResult(items = ["investigate", "fix"]) {
 	};
 }
 
-function trackComponent(components: ToolExecutionComponent[], component: ToolExecutionComponent) {
-	components.push(component);
-	return component;
-}
-
-describe("wait block lifecycle", () => {
-	const created: ToolExecutionComponent[] = [];
-
-	beforeEach(async () => {
-		resetSettingsForTest();
-		await Settings.init({ inMemory: true });
-		await initTheme();
-	});
-
-	afterEach(() => {
-		// Seal everything so displaceable blocks' spinner intervals never leak
-		// into later test files.
-		for (const component of created.splice(0)) component.seal();
-		vi.restoreAllMocks();
-		resetSettingsForTest();
-	});
-
-	function makeJobComponent() {
-		return trackComponent(created, new ToolExecutionComponent("wait", {}, {}, undefined, uiStub));
-	}
-
-	it("keeps an all-running poll displaceable yet finalized until sealed", () => {
-		const component = makeJobComponent();
-		component.updateResult(pollResult(["running", "running"]), false);
-
-		expect(component.isDisplaceableBlock()).toBe(true);
-		expect(component.isTranscriptBlockFinalized()).toBe(true);
-
-		component.seal();
-		expect(component.isDisplaceableBlock()).toBe(false);
-		expect(component.isTranscriptBlockFinalized()).toBe(true);
-		expect(Bun.stripANSI(component.render(100).join("\n"))).toContain("waiting on 2 jobs");
-	});
-
-	it("finalizes a poll that observed a settled job", () => {
-		const component = makeJobComponent();
-		component.updateResult(pollResult(["completed", "running"]), false);
-
-		expect(component.isDisplaceableBlock()).toBe(false);
-		expect(component.isTranscriptBlockFinalized()).toBe(true);
-	});
-
-	it("finalizes a poll that carried cancel outcomes or an error", () => {
-		const cancelled = makeJobComponent();
-		cancelled.updateResult(pollResult(["running"], { cancelled: true }), false);
-		expect(cancelled.isDisplaceableBlock()).toBe(false);
-
-		const errored = makeJobComponent();
-		errored.updateResult(pollResult(["running"], { isError: true }), false);
-		expect(errored.isDisplaceableBlock()).toBe(false);
-		expect(errored.isTranscriptBlockFinalized()).toBe(true);
-	});
-
-	it("keeps successful todo snapshots displaceable yet finalized", () => {
-		const component = trackComponent(
-			created,
-			new ToolExecutionComponent("todo", { op: "view" }, {}, undefined, uiStub),
-		);
-		component.updateResult(todoResult(), false);
-
-		expect(component.isDisplaceableBlock()).toBe(true);
-		expect(component.isTranscriptBlockFinalized()).toBe(true);
-
-		component.seal();
-		expect(component.isDisplaceableBlock()).toBe(false);
-		expect(component.isTranscriptBlockFinalized()).toBe(true);
-	});
-
-	it("never marks ordinary non-refresh tools displaceable", () => {
-		const component = trackComponent(
-			created,
-			new ToolExecutionComponent("bash", { command: "ls" }, {}, undefined, uiStub),
-		);
-		component.updateResult(pollResult(["running"]), false);
-		expect(component.isDisplaceableBlock()).toBe(false);
-	});
+const usage = (input: number) => ({
+	input,
+	output: 7,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: input + 7,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 });
 
-describe("EventController displaces consecutive waiting polls", () => {
-	const created: ToolExecutionComponent[] = [];
+interface Fixture {
+	readonly ctx: InteractiveModeContext;
+	readonly controller: EventController;
+	readonly created: PendingTool[];
+}
+
+/** Start a tool through the controller and return its card. */
+async function start(fixture: Fixture, toolCallId: string, toolName: string, args: unknown): Promise<PendingTool> {
+	await fixture.controller.handleEvent({
+		type: "tool_execution_start",
+		toolCallId,
+		toolName,
+		args,
+	});
+	const tool = fixture.ctx.pendingTools.get(toolCallId)!;
+	fixture.created.push(tool);
+	return tool;
+}
+
+async function end(
+	fixture: Fixture,
+	toolCallId: string,
+	toolName: string,
+	result: {
+		content: { type: "text"; text: string }[];
+		details?: unknown;
+		isError?: boolean;
+	},
+): Promise<void> {
+	await fixture.controller.handleEvent({
+		type: "tool_execution_end",
+		toolCallId,
+		toolName,
+		result,
+		isError: result.isError === true,
+	});
+}
+
+async function run(
+	fixture: Fixture,
+	toolCallId: string,
+	toolName: string,
+	args: unknown,
+	result: Parameters<typeof end>[3],
+) {
+	const tool = await start(fixture, toolCallId, toolName, args);
+	await end(fixture, toolCallId, toolName, result);
+	return tool;
+}
+
+const shown = (fixture: Fixture, tool: PendingTool) => fixture.ctx.shell.transcript.blocks().includes(tool.block);
+
+describe("wait and todo displacement", () => {
+	let fixture: Fixture;
 
 	beforeEach(async () => {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true });
-		await initTheme();
+		const ctx = createInteractiveModeContext();
+		fixture = { ctx, controller: new EventController(ctx), created: [] };
 	});
 
 	afterEach(() => {
-		for (const component of created.splice(0)) component.seal();
+		// Seal everything so displaceable cards' spinners never leak into later files.
+		for (const tool of fixture.created.splice(0)) tool.seal();
 		vi.restoreAllMocks();
 		resetSettingsForTest();
 	});
 
-	function createFixture() {
-		const pendingTools = new Map<string, ToolExecutionHandle>();
-		const ctx = createInteractiveModeContext({ pendingTools });
-		const children = ctx.chatContainer.children;
-		return { controller: new EventController(ctx), children, pendingTools };
-	}
+	it("keeps an all-running poll displaceable until sealed", async () => {
+		const poll = await run(fixture, "t1", "wait", {}, pollResult(["running", "running"]));
+		expect(displaceableBy(poll)).toBe("wait");
 
-	async function runPoll(controller: EventController, children: Component[], toolCallId: string) {
-		await controller.handleEvent({
-			type: "tool_execution_start",
-			toolCallId,
-			toolName: "wait",
-			args: {},
-		});
-		const component = children[children.length - 1] as ToolExecutionComponent;
-		trackComponent(created, component);
-		await controller.handleEvent({
-			type: "tool_execution_end",
-			toolCallId,
-			toolName: "wait",
-			result: pollResult(["running", "running"]),
-			isError: false,
-		});
-		return component;
-	}
-
-	async function runTodo(controller: EventController, children: Component[], toolCallId: string, items?: string[]) {
-		await controller.handleEvent({
-			type: "tool_execution_start",
-			toolCallId,
-			toolName: "todo",
-			args: { op: "view" },
-		});
-		const component = children[children.length - 1] as ToolExecutionComponent;
-		trackComponent(created, component);
-		await controller.handleEvent({
-			type: "tool_execution_end",
-			toolCallId,
-			toolName: "todo",
-			result: todoResult(items),
-			isError: false,
-		});
-		return component;
-	}
-
-	it("removes the previous waiting poll when the next wait call starts", async () => {
-		const { controller, children } = createFixture();
-
-		const first = await runPoll(controller, children, "t1");
-		expect(children).toContain(first);
-
-		const second = await runPoll(controller, children, "t2");
-
-		// The stale "waiting" frame is gone; only the fresh poll remains.
-		expect(children).not.toContain(first);
-		expect(children).toContain(second);
-		// The displaced block is sealed so its spinner interval is stopped.
-		expect(first.isTranscriptBlockFinalized()).toBe(true);
+		poll.seal();
+		expect(displaceableBy(poll)).toBeUndefined();
+		expect(isSettled(poll.block.node)).toBe(true);
+		expect(renderTranscript(fixture.ctx).join("\n")).toContain("waiting on 2 jobs");
 	});
 
-	it("keeps a waiting snapshot beside its completed turn's usage when the next wait starts", async () => {
-		const { controller, children } = createFixture();
-		const first = await runPoll(controller, children, "t1");
-		const metrics = createUsageRowBlock({
-			input: 4242,
-			output: 7,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 4249,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		});
-		children.push(metrics);
-		await runPoll(controller, children, "t2");
-		expect(children).toContain(first);
-		expect(children.indexOf(first)).toBe(children.indexOf(metrics) - 1);
-		expect(Bun.stripANSI(first.render(100).join("\n"))).toContain("waiting on");
-		expect(Bun.stripANSI(metrics.render(100).join("\n"))).toContain("4.2K");
+	it("does not make a poll that observed a settled job displaceable", async () => {
+		const poll = await run(fixture, "t1", "wait", {}, pollResult(["completed", "running"]));
+		expect(displaceableBy(poll)).toBeUndefined();
+	});
+
+	it("does not make a poll that carried cancel outcomes or an error displaceable", async () => {
+		const cancelled = await run(fixture, "t1", "wait", {}, pollResult(["running"], { cancelled: true }));
+		expect(displaceableBy(cancelled)).toBeUndefined();
+
+		const errored = await run(fixture, "t2", "wait", {}, pollResult(["running"], { isError: true }));
+		expect(displaceableBy(errored)).toBeUndefined();
+	});
+
+	it("keeps a successful todo snapshot displaceable until sealed", async () => {
+		const todo = await run(fixture, "todo-1", "todo", { op: "view" }, todoResult());
+		expect(displaceableBy(todo)).toBe("todo");
+
+		todo.seal();
+		expect(displaceableBy(todo)).toBeUndefined();
+	});
+
+	it("never makes ordinary tools displaceable", async () => {
+		const bash = await run(fixture, "b1", "bash", { command: "ls" }, pollResult(["running"]));
+		expect(displaceableBy(bash)).toBeUndefined();
+	});
+
+	it("removes the previous waiting poll when the next wait call starts", async () => {
+		const first = await run(fixture, "t1", "wait", {}, pollResult(["running", "running"]));
+		expect(shown(fixture, first)).toBe(true);
+
+		const second = await run(fixture, "t2", "wait", {}, pollResult(["running", "running"]));
+
+		// The stale "waiting" frame is gone; only the fresh poll remains, and the displaced one is sealed.
+		expect(shown(fixture, first)).toBe(false);
+		expect(shown(fixture, second)).toBe(true);
+		expect(displaceableBy(first)).toBeUndefined();
+		expect(renderTranscript(fixture.ctx).join("\n").split("waiting on 2 jobs")).toHaveLength(2);
+	});
+
+	it("keeps a waiting poll beside the usage row that landed below it when the next wait starts", async () => {
+		cfgDisplayShowTokenUsage.set(settings, true);
+		const first = await run(fixture, "t1", "wait", {}, pollResult(["running", "running"]));
+		const message = assistantCalls([], 4242);
+		await fixture.controller.handleEvent({ type: "message_start", message });
+		await fixture.controller.handleEvent({ type: "message_end", message });
+		await run(fixture, "t2", "wait", {}, pollResult(["running", "running"]));
+
+		expect(shown(fixture, first)).toBe(true);
+		const rows = renderTranscript(fixture.ctx);
+		const poll = rows.findIndex(row => row.includes("waiting on"));
+		expect(poll).toBeGreaterThanOrEqual(0);
+		expect(rows.findIndex(row => row.includes("4.2K"))).toBeGreaterThan(poll);
 	});
 
 	it("seals the waiting poll in place when a different tool runs next", async () => {
-		const { controller, children } = createFixture();
+		const poll = await run(fixture, "t1", "wait", {}, pollResult(["running"]));
+		expect(displaceableBy(poll)).toBe("wait");
 
-		const poll = await runPoll(controller, children, "t1");
-		expect(poll.isDisplaceableBlock()).toBe(true);
+		await start(fixture, "t2", "bash", { command: "ls" });
 
-		await controller.handleEvent({
-			type: "tool_execution_start",
-			toolCallId: "t2",
-			toolName: "bash",
-			args: { command: "ls" },
-		});
-		trackComponent(created, children[children.length - 1] as ToolExecutionComponent);
-
-		// The poll frame stays — it is final history now, not displaceable.
-		expect(children).toContain(poll);
-		expect(poll.isTranscriptBlockFinalized()).toBe(true);
-		expect(poll.isDisplaceableBlock()).toBe(false);
+		// The poll frame stays as final history, no longer displaceable.
+		expect(shown(fixture, poll)).toBe(true);
+		expect(displaceableBy(poll)).toBeUndefined();
+		expect(isSettled(poll.block.node)).toBe(true);
 	});
 
 	it("removes the previous todo snapshot when a later todo update lands in the same turn", async () => {
-		const { controller, children } = createFixture();
+		const first = await run(fixture, "todo-1", "todo", { op: "view" }, todoResult(["plan", "read"]));
+		const bash = await start(fixture, "bash-1", "bash", { command: "true" });
+		expect(shown(fixture, first)).toBe(true);
+		expect(shown(fixture, bash)).toBe(true);
 
-		const first = await runTodo(controller, children, "todo-1", ["plan", "read"]);
-		expect(children).toContain(first);
-		expect(first.isDisplaceableBlock()).toBe(true);
+		const second = await run(fixture, "todo-2", "todo", { op: "view" }, todoResult(["fix", "test"]));
 
-		await controller.handleEvent({
-			type: "tool_execution_start",
-			toolCallId: "bash-1",
-			toolName: "bash",
-			args: { command: "true" },
-		});
-		const bash = trackComponent(created, children[children.length - 1] as ToolExecutionComponent);
-		expect(children).toContain(first);
-		expect(children).toContain(bash);
-
-		const second = await runTodo(controller, children, "todo-2", ["fix", "test"]);
-
-		expect(children).not.toContain(first);
-		expect(children).toContain(bash);
-		expect(children).toContain(second);
-		expect(first.isTranscriptBlockFinalized()).toBe(true);
+		expect(shown(fixture, first)).toBe(false);
+		expect(shown(fixture, bash)).toBe(true);
+		expect(shown(fixture, second)).toBe(true);
+		expect(displaceableBy(first)).toBeUndefined();
 	});
 
-	it("displaces a prior todo snapshot when a streamed second todo lands a successful result", async () => {
-		const { controller, children, pendingTools } = createFixture();
-
-		await controller.handleEvent({
-			type: "tool_execution_start",
-			toolCallId: "todo-1",
-			toolName: "todo",
+	it("displaces a prior todo snapshot only once a streamed second todo lands a successful result", async () => {
+		const first = await start(fixture, "todo-1", "todo", { op: "view" });
+		// The second call's card already streamed in before the first one finished.
+		const second = fixture.ctx.presentToolCall({
+			name: "todo",
 			args: { op: "view" },
+			tool: undefined,
+			id: "todo-2",
+			cwd: process.cwd(),
 		});
-		const first = trackComponent(created, children[children.length - 1] as ToolExecutionComponent);
+		fixture.ctx.pendingTools.set("todo-2", second);
+		fixture.created.push(second);
 
-		const second = trackComponent(created, new ToolExecutionComponent("todo", { op: "view" }, {}, undefined, uiStub));
-		children.push(second);
-		pendingTools.set("todo-2", second);
+		await end(fixture, "todo-1", "todo", todoResult(["plan", "read"]));
+		expect(displaceableBy(first)).toBe("todo");
 
-		await controller.handleEvent({
-			type: "tool_execution_end",
-			toolCallId: "todo-1",
-			toolName: "todo",
-			result: todoResult(["plan", "read"]),
-			isError: false,
-		});
-		expect(first.isDisplaceableBlock()).toBe(true);
-
-		await controller.handleEvent({
-			type: "tool_execution_start",
-			toolCallId: "bash-1",
-			toolName: "bash",
-			args: { command: "true" },
-		});
-		const bash = trackComponent(created, children[children.length - 1] as ToolExecutionComponent);
-		expect(children).toContain(first);
-		expect(children).toContain(second);
-		expect(children).toContain(bash);
-
-		await controller.handleEvent({
+		const bash = await start(fixture, "bash-1", "bash", { command: "true" });
+		await fixture.controller.handleEvent({
 			type: "tool_execution_start",
 			toolCallId: "todo-2",
 			toolName: "todo",
 			args: { op: "view" },
 		});
 
-		// Start alone is no longer enough — the prior snapshot stays so a failed
-		// follow-up cannot strand the user without a current todo panel.
-		expect(children).toContain(first);
-		expect(first.isDisplaceableBlock()).toBe(true);
+		// Start alone is not enough: a failed follow-up must not strand the user without a todo panel.
+		expect(shown(fixture, first)).toBe(true);
+		expect(displaceableBy(first)).toBe("todo");
 
-		await controller.handleEvent({
-			type: "tool_execution_end",
-			toolCallId: "todo-2",
-			toolName: "todo",
-			result: todoResult(["fix", "test"]),
-			isError: false,
-		});
+		await end(fixture, "todo-2", "todo", todoResult(["fix", "test"]));
 
-		expect(children).not.toContain(first);
-		expect(children).toContain(second);
-		expect(children).toContain(bash);
-		expect(first.isTranscriptBlockFinalized()).toBe(true);
+		expect(shown(fixture, first)).toBe(false);
+		expect(shown(fixture, second)).toBe(true);
+		expect(shown(fixture, bash)).toBe(true);
 	});
 
 	it("keeps the prior todo snapshot when a follow-up todo errors", async () => {
-		const { controller, children } = createFixture();
+		const first = await run(fixture, "todo-1", "todo", { op: "view" }, todoResult(["plan", "read"]));
+		const errored = await run(
+			fixture,
+			"todo-2",
+			"todo",
+			{ op: "view" },
+			{
+				content: [{ type: "text", text: "Phase missing" }],
+				isError: true,
+			},
+		);
 
-		const first = await runTodo(controller, children, "todo-1", ["plan", "read"]);
-		expect(children).toContain(first);
-		expect(first.isDisplaceableBlock()).toBe(true);
-
-		await controller.handleEvent({
-			type: "tool_execution_start",
-			toolCallId: "todo-2",
-			toolName: "todo",
-			args: { op: "view" },
-		});
-		const errored = trackComponent(created, children[children.length - 1] as ToolExecutionComponent);
-
-		await controller.handleEvent({
-			type: "tool_execution_end",
-			toolCallId: "todo-2",
-			toolName: "todo",
-			result: { content: [{ type: "text", text: "Phase missing" }], details: undefined, isError: true },
-			isError: true,
-		});
-
-		expect(children).toContain(first);
-		expect(children).toContain(errored);
-		expect(first.isDisplaceableBlock()).toBe(true);
+		expect(shown(fixture, first)).toBe(true);
+		expect(shown(fixture, errored)).toBe(true);
+		expect(displaceableBy(first)).toBe("todo");
 	});
 
 	it("does not displace a poll that observed completions", async () => {
-		const { controller, children } = createFixture();
-
-		await controller.handleEvent({
-			type: "tool_execution_start",
-			toolCallId: "t1",
-			toolName: "wait",
-			args: {},
-		});
-		const settled = trackComponent(created, children[children.length - 1] as ToolExecutionComponent);
-		await controller.handleEvent({
-			type: "tool_execution_end",
-			toolCallId: "t1",
-			toolName: "wait",
-			result: pollResult(["completed", "running"]),
-			isError: false,
-		});
-
-		const next = await runPoll(controller, children, "t2");
+		const settled = await run(fixture, "t1", "wait", {}, pollResult(["completed", "running"]));
+		const next = await run(fixture, "t2", "wait", {}, pollResult(["running", "running"]));
 
 		// A poll that carried real results is kept as history.
-		expect(children).toContain(settled);
-		expect(children).toContain(next);
+		expect(shown(fixture, settled)).toBe(true);
+		expect(shown(fixture, next)).toBe(true);
 	});
 });
 
+function replayContext(overrides: Parameters<typeof createInteractiveModeContext>[0] = {}) {
+	const ctx = createInteractiveModeContext(overrides);
+	const helpers = new UiHelpers(ctx);
+	ctx.addMessageToChat = helpers.addMessageToChat.bind(helpers);
+	return { ctx, helpers };
+}
+
+const assistantCalls = (calls: { id: string; name: string; arguments: unknown }[], input = 1): AgentMessage =>
+	({
+		role: "assistant",
+		content: calls.map(call => ({ type: "toolCall", ...call })),
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-sonnet-4-5",
+		stopReason: "stop",
+		usage: usage(input),
+		timestamp: Date.now(),
+	}) as AgentMessage;
+
+const toolResult = (toolCallId: string, toolName: string, result: { content: unknown[]; details?: unknown }) =>
+	({
+		role: "toolResult",
+		toolCallId,
+		toolName,
+		...result,
+		isError: false,
+		timestamp: Date.now(),
+	}) as AgentMessage;
+
 describe("#12248 completed wait turn replay", () => {
-	beforeEach(async () => {
+	beforeAll(async () => {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true });
-		cfgDisplayShowTokenUsage.set(settings, true);
-		await initTheme();
-	});
-	afterEach(() => {
-		resetSettingsForTest();
 	});
 
-	function waitTurn(id: string, input: number): AgentMessage[] {
-		return [
-			{
-				role: "assistant",
-				content: [{ type: "toolCall", id, name: "wait", arguments: {} }],
-				api: "anthropic-messages",
-				provider: "anthropic",
-				model: "claude-sonnet-4-5",
-				stopReason: "stop",
-				usage: {
-					input,
-					output: 7,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: input + 7,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
-				timestamp: Date.now(),
-			},
-			{
-				role: "toolResult",
-				toolCallId: id,
-				toolName: "wait",
-				...pollResult(["running"]),
-				isError: false,
-				timestamp: Date.now(),
-			},
-		] satisfies AgentMessage[];
-	}
+	afterEach(() => resetSettingsForTest());
 
-	it.each(["session", "transcript"] as const)("retains each wait with its original metrics in %s replay", mode => {
-		const messages = [...waitTurn("w1", 4242), ...waitTurn("w2", 2121)];
-		let children: Component[];
-		if (mode === "session") {
-			const ctx = createInteractiveModeContext({ settings: Settings.isolated({ "display.showTokenUsage": true }) });
-			const helpers = new UiHelpers(ctx);
-			ctx.addMessageToChat = helpers.addMessageToChat.bind(helpers);
-			helpers.renderSessionContext({ messages } as SessionContext);
-			children = ctx.chatContainer.children;
-		} else {
-			const builder = new ChatTranscriptBuilder({ ui: uiStub, cwd: process.cwd(), requestRender() {} });
-			builder.rebuild(
-				messages.map((message, i) => ({
-					type: "message" as const,
-					id: `m${i}`,
-					parentId: i ? `m${i - 1}` : null,
-					timestamp: new Date(0).toISOString(),
-					message,
-				})),
-			);
-			children = builder.container.children;
-		}
-		const polls = children.filter(
-			(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
-		);
-		for (const poll of polls) poll.seal();
+	it("retains each wait with its original metrics", () => {
+		const messages = [
+			assistantCalls([{ id: "w1", name: "wait", arguments: {} }], 4242),
+			toolResult("w1", "wait", pollResult(["running"])),
+			assistantCalls([{ id: "w2", name: "wait", arguments: {} }], 2121),
+			toolResult("w2", "wait", pollResult(["running"])),
+		];
+		const { ctx, helpers } = replayContext({
+			settings: Settings.isolated({ "display.showTokenUsage": true }),
+		});
+		helpers.renderSessionContext({ messages } as SessionContext);
+
+		const rows = renderTranscript(ctx);
+		const polls = rows.flatMap((row, index) => (row.includes("waiting on") ? [index] : []));
 		expect(polls).toHaveLength(2);
-		const output = children.map(child => Bun.stripANSI(child.render(120).join("\n")));
 		for (const [i, label] of ["4.2K", "2.1K"].entries()) {
-			const pollIndex = children.indexOf(polls[i]);
-			expect(output[pollIndex]).toContain("waiting on");
-			expect(output[pollIndex + 1]).toContain(label);
-			expect(output.filter(text => text.includes(label))).toHaveLength(1);
+			const metrics = rows.findIndex(row => row.includes(label));
+			expect(metrics).toBeGreaterThan(polls[i]!);
+			if (i === 0) expect(metrics).toBeLessThan(polls[1]!);
+			expect(rows.filter(row => row.includes(label))).toHaveLength(1);
 		}
 	});
 });
@@ -483,116 +356,52 @@ describe("UiHelpers.renderSessionContext collapses repeated todo snapshots", () 
 	beforeAll(async () => {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true });
-		await initTheme();
 	});
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+		resetSettingsForTest();
 	});
 
-	it("removes the earlier todo snapshot when an assistant message replays two todo calls", () => {
-		const ctx = createInteractiveModeContext();
-		const chatContainer = ctx.chatContainer;
-		const helpers = new UiHelpers(ctx);
-		ctx.addMessageToChat = helpers.addMessageToChat.bind(helpers);
-
-		const usage = {
-			input: 1,
-			output: 1,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 2,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		};
-		const assistant = {
-			role: "assistant",
-			content: [
-				{ type: "toolCall", id: "todo-1", name: "todo", arguments: { op: "view" } },
-				{ type: "toolCall", id: "todo-2", name: "todo", arguments: { op: "view" } },
+	it("removes the earlier todo snapshot when an assistant message replays two todo calls", async () => {
+		const { ctx, helpers } = replayContext();
+		helpers.renderSessionContext({
+			messages: [
+				assistantCalls([
+					{ id: "todo-1", name: "todo", arguments: { op: "view" } },
+					{ id: "todo-2", name: "todo", arguments: { op: "view" } },
+				]),
+				toolResult("todo-1", "todo", todoResult(["plan", "read"])),
+				toolResult("todo-2", "todo", todoResult(["fix", "test"])),
 			],
-			api: "anthropic-messages",
-			provider: "anthropic",
-			model: "claude-sonnet-4-5",
-			stopReason: "stop",
-			usage,
-			timestamp: Date.now(),
-		} as unknown as AgentMessage;
-		const firstResult = {
-			role: "toolResult",
-			toolCallId: "todo-1",
-			toolName: "todo",
-			content: [{ type: "text", text: "" }],
-			details: todoResult(["plan", "read"]).details,
-			timestamp: Date.now(),
-		} as unknown as AgentMessage;
-		const secondResult = {
-			role: "toolResult",
-			toolCallId: "todo-2",
-			toolName: "todo",
-			content: [{ type: "text", text: "" }],
-			details: todoResult(["fix", "test"]).details,
-			timestamp: Date.now(),
-		} as unknown as AgentMessage;
+		} as SessionContext);
 
-		helpers.renderSessionContext({ messages: [assistant, firstResult, secondResult] } as SessionContext);
-
-		const todos = chatContainer.children.filter(
-			(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
-		);
-		// Only the latest todo snapshot survives the rebuild; the trailing one is
-		// sealed as final history by the end-of-rebuild flush.
-		expect(todos).toHaveLength(1);
-		expect(todos[0].isTranscriptBlockFinalized()).toBe(true);
+		const out = renderTranscript(ctx).join("\n");
+		expect(out).not.toContain("plan");
+		expect(out).toContain("fix");
+		// The trailing snapshot is sealed as final history by the end-of-rebuild flush.
+		await Promise.resolve();
+		expect(ctx.shell.transcript.blocks().every(block => isSettled(block.node))).toBe(true);
 	});
 
 	it("hands the trailing todo snapshot to the controller during mid-turn rebuild", () => {
-		const ctx = createInteractiveModeContext({ session: { isStreaming: true } });
-		const chatContainer = ctx.chatContainer;
-		const helpers = new UiHelpers(ctx);
-		ctx.addMessageToChat = helpers.addMessageToChat.bind(helpers);
+		const { ctx, helpers } = replayContext({ session: { isStreaming: true } });
 		const eventController = new EventController(ctx);
 		ctx.eventController = eventController;
-		const inheritDisplaceableTodo = vi.spyOn(eventController, "inheritDisplaceableTodo");
+		const inherit = vi.spyOn(eventController, "inheritDisplaceableTodo");
 
-		const usage = {
-			input: 1,
-			output: 1,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 2,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		};
-		const assistant = {
-			role: "assistant",
-			content: [{ type: "toolCall", id: "todo-1", name: "todo", arguments: { op: "view" } }],
-			api: "anthropic-messages",
-			provider: "anthropic",
-			model: "claude-sonnet-4-5",
-			stopReason: "stop",
-			usage,
-			timestamp: Date.now(),
-		} as unknown as AgentMessage;
-		const result = {
-			role: "toolResult",
-			toolCallId: "todo-1",
-			toolName: "todo",
-			content: [{ type: "text", text: "" }],
-			details: todoResult(["plan", "read"]).details,
-			timestamp: Date.now(),
-		} as unknown as AgentMessage;
+		helpers.renderSessionContext({
+			messages: [
+				assistantCalls([{ id: "todo-1", name: "todo", arguments: { op: "view" } }]),
+				toolResult("todo-1", "todo", todoResult(["plan", "read"])),
+			],
+		} as SessionContext);
 
-		helpers.renderSessionContext({ messages: [assistant, result] } as SessionContext);
-
-		const todos = chatContainer.children.filter(
-			(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
-		);
-		expect(todos).toHaveLength(1);
-		// Mid-turn rebuild hands the live tail back to the controller — the
-		// snapshot stays displaceable so a follow-up `todo` event replaces it
-		// instead of stacking another panel.
-		expect(inheritDisplaceableTodo).toHaveBeenCalledTimes(1);
-		expect(inheritDisplaceableTodo).toHaveBeenCalledWith(todos[0]);
-		expect(todos[0].canBeDisplacedBy("todo")).toBe(true);
-		expect(todos[0].isTranscriptBlockFinalized()).toBe(true);
+		// Mid-turn rebuild hands the live tail back so a follow-up `todo` event
+		// replaces it instead of stacking another panel.
+		expect(inherit).toHaveBeenCalledTimes(1);
+		const snapshot = inherit.mock.calls[0]![0]!;
+		expect(displaceableBy(snapshot)).toBe("todo");
+		snapshot.seal();
 	});
 });

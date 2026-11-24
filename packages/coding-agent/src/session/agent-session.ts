@@ -118,9 +118,10 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
 import { frameDataBytesBudget, readerIncludesThinking } from "@oh-my-pi/snapcompact";
-import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
-import { ASYNC_NOTIFY_MESSAGE_TYPE } from "@oh-my-pi/pi-tui/chat/messages";
-import { formatUsageResetWindow } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import type { AdvisorConfig } from "../advisor/advisor-config-types";
+import type { ModelRoleLookup } from "../modes/view-model/overlays/model-browser";
+import { ASYNC_NOTIFY_MESSAGE_TYPE } from "./transcript/messages";
+import { formatUsageResetWindow } from "./usage-display";
 import { loadAdvisorTranscriptCosts } from "../advisor";
 import {
 	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
@@ -151,7 +152,7 @@ import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-temp
 import { buildServiceTierByFamily, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
 import { combine, type SettingsScope } from "../config/registry";
 import { type Settings, withActiveSettings } from "../config/settings";
-import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
+import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import { releaseCompletionHandles } from "../eval/completion-bridge";
 import { releaseJudgmentBatches } from "../eval/judgment-batch-bridge";
 import type { EvalPreludeDefinition } from "../eval/preludes";
@@ -204,17 +205,16 @@ import {
 	sessionLocalProtocolOptions,
 } from "../internal-urls";
 import { type ChainJudge, hasNativeJudge, journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
-import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { IrcMessage } from "../irc/irc-types";
+import type { JobWidgetEntry } from "../tools/details/job-widget";
 import type { DaemonCompletionEvent } from "../daemon/protocol";
 import { MEMORY_RECALL_CHANGES_MESSAGE_TYPE } from "../memory-backend/recall-entry";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { MAGIC_KEYWORDS, type MagicKeywordContext, type MagicKeywordId } from "../modes/magic-keywords";
-import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
-import { theme } from "@oh-my-pi/pi-tui/theme";
+import { containsMagicKeyword } from "./magic-keywords";
 import { parseTurnBudget } from "../modes/turn-budget";
-import { computeNonMessageTokens, type SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { computeNonMessageTokens, type SystemPromptSources } from "./context-usage";
 import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/approved-plan";
 import { listPlanFiles, readPlanFile, resolvePlanFilePath } from "../plan-mode/plan-files";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
@@ -252,15 +252,15 @@ import { flushSharpshooterExtraction } from "../sharpshooter/extract";
 import { toolReadsSkillUris } from "../system-prompt";
 import {
 	AUTO_THINKING,
-	type ConfiguredThinkingLevel,
 	parseConfiguredThinkingLevel,
 	shouldDisableReasoning,
 	toReasoningEffort,
-} from "@oh-my-pi/pi-tui/thinking";
+} from "../thinking/levels";
+import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import { isAttachmentOnlyTitleInput, isLowSignalTitleInput } from "../tiny/text";
 import type { ImageAttachmentEntry, ToolSession } from "../tools";
 import { resolveApproval } from "../tools/approval";
-import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
+import { type AskToolDetails } from "../tools/details/ask";
 import { recoverAskHtml } from "../tools/ask";
 import {
 	armIdleCloseForOwner,
@@ -281,17 +281,18 @@ import {
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
 import {
 	buildResolveReminderMessage,
+	buildResolveUnsatisfiedNotice,
 	isPreviewResolutionToolCall,
 	isProposeToolCall,
 	type PlanProposalHandler,
 	proposeDispatchDetails,
 } from "../tools/resolve";
 import { toolCommandDispatches } from "../tools/tool-commands";
-import { PROPOSE_COMMAND_NAME, REJECT_COMMAND_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
+import { PROPOSE_COMMAND_NAME, REJECT_COMMAND_NAME } from "../tools/details/resolve";
 import { supportsExternalThinking } from "../tools/think";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type { TodoPhase } from "../tools/details/todo";
+import { ToolError } from "../tools/tool-errors";
 import { currentThreadId, isMainThread } from "../thread/identity";
 import { registerLocalSession } from "../thread/session-directory";
 import { prewarmSubagentWorker } from "../thread/subagent-worker";
@@ -299,7 +300,7 @@ import { SubagentSpawnSignal } from "../thread/subagent-spawn-signal";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { AgentDefinition } from "../task/types";
 import type { AgentOutputManager } from "../task/output-manager";
-import type { ModelMention } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
+import type { ModelMention } from "./model-mention-syntax";
 import { ModelMentionRegistry, type ResolvedModelMention, referencedModelAgents } from "./model-mentions";
 import { parseCommandArgs } from "../utils/command-args";
 import type { EditModeSetting } from "../edit/settings";
@@ -360,8 +361,8 @@ import type {
 import { writeArtifact } from "./artifacts";
 import { type PowerAssertionHandle, startPowerAssertion } from "./power-assertion-backend";
 import { renderAttachmentSourceNotice } from "./attachment-source-notice";
-import { formatArtifactErrorNotice, type OutputMeta, stripOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { formatArtifactErrorNotice, type OutputMeta, stripOutputNotice } from "../tools/output-meta-format";
+import { truncateMiddle } from "../tools/streaming-output";
 import {
 	ASYNC_INLINE_RESULT_MAX_CHARS,
 	ASYNC_PREVIEW_MAX_CHARS,
@@ -504,8 +505,8 @@ import {
 } from "./cache-warmer";
 import { type ObservedPromptCacheEntry, promptCacheStatus } from "./prompt-cache-status";
 import { PromptFollowUps } from "./prompt-follow-ups";
-import type { PromptCacheStatus } from "@oh-my-pi/pi-tui/status-line/host";
-import { isUserRequestEntry, transcriptEntryMessage, userTurnDraft } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import type { PromptCacheStatus } from "../modes/view-model/status-line/host";
+import { isUserRequestEntry, transcriptEntryMessage, userTurnDraft } from "./transcript/transcript-entry";
 import { anonymizeSessionTranscripts } from "./session-anonymizer";
 import {
 	formatSessionDumpText,
@@ -542,6 +543,8 @@ import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
 import { YieldQueue } from "./yield-queue";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { extensionTheme } from "../ui/extensions/render-output";
 
 export * from "./agent-session-events";
 export * from "./agent-session-types";
@@ -778,15 +781,13 @@ const noOpUIContext: ExtensionUIContext = {
 	editor: async () => undefined,
 	addAutocompleteProvider: () => {},
 	get theme() {
-		return theme;
+		return extensionTheme(currentTheme());
 	},
 	getAllThemes: () => Promise.resolve([]),
 	getTheme: () => Promise.resolve(undefined),
 	setTheme: _theme => Promise.resolve({ success: false, error: "UI not available" }),
 	setFooter: () => {},
 	setHeader: () => {},
-	setEditorComponent: () => {},
-	getEditorComponent: () => undefined,
 	getToolsExpanded: () => false,
 	setToolsExpanded: () => {},
 };
@@ -1117,6 +1118,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	#powerAssertion: PowerAssertionHandle | undefined;
 	#scopedModelsRefresher: (() => Promise<void>) | undefined;
+	readonly scopedModelsFromSettings: boolean;
 
 	readonly configWarnings: string[] = [];
 	/** Construction skipped fallback-chain validation; {@link validateRetryFallbackChains} still owes it. */
@@ -2240,6 +2242,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
+		this.scopedModelsFromSettings = config.scopedModelsFromSettings ?? false;
 		this.tokenRate = new TokenRateMeter(text => this.agent.tokenizer.countTokens(text));
 		this.#reseedTokenRate();
 		this.agent.setQueuedMessageGrouping(
@@ -3550,6 +3553,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// Any `resolve`/`reject` call satisfies it; escalation forces `bash`, or `reject` (recoverable) when commands are inactive.
 				toolName: toolCommands ? "bash" : REJECT_COMMAND_NAME,
 				satisfies: isPreviewResolutionToolCall,
+				unsatisfiedNotice: toolCall => buildResolveUnsatisfiedNotice(toolCall, head.sourceToolName),
 				reminder: [buildResolveReminderMessage({ toolCommands }, head.sourceToolName)],
 			};
 		}
@@ -5098,7 +5102,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		} else if (event.type === "message_update" && event.message.role === "assistant") {
 			const delta = event.assistantMessageEvent;
 			if (delta.type === "text_delta" || delta.type === "thinking_delta" || delta.type === "toolcall_delta") {
-				this.tokenRate.push(delta.delta);
+				this.tokenRate.push(delta.delta, delta.type);
 			}
 		} else if (event.type === "message_end" && event.message.role === "assistant") {
 			const assistant = event.message as AssistantMessage;
@@ -12108,6 +12112,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#tools.skillHintVisible;
 	}
 
+	/** Frozen `find` hint visibility snapshot (see {@link SessionTools.findHintVisible}). */
+	getFindHintVisible(): boolean {
+		return this.#tools.findHintVisible;
+	}
+
 	/** Skill loading warnings captured by SDK */
 	get skillWarnings(): readonly SkillWarning[] {
 		return this.#tools.skillWarnings;
@@ -13276,9 +13285,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#models.cycleRoleModels(roleOrder, direction);
 	}
 
-	/** Lists available models after applying the configured enabled-model filter. */
-	getAvailableModels(): Model[] {
-		return this.#models.getAvailableModels();
+	/** Lists available models after applying the configured enabled-model filter; see {@link ModelControls.getAvailableModels}. */
+	getAvailableModels(roleLookup?: ModelRoleLookup): Model[] {
+		return this.#models.getAvailableModels(roleLookup);
 	}
 
 	/** Selects the session thinking level and optionally persists it as the default. */

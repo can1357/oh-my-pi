@@ -9,7 +9,7 @@
  *
  * Implementations: `server.ts` (daemon), `client.ts` ({@link DaemonClient}).
  */
-import type { DaemonRestartPolicy, ProcSpec, UnitPolicy, UnitScope, UnitSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
+import type { DaemonRestartPolicy, ProcSpec, UnitPolicy, UnitScope, UnitSnapshot } from "./daemon-types";
 
 export type { DaemonRestartPolicy, ProcSpec, UnitPolicy, UnitScope, UnitSnapshot };
 

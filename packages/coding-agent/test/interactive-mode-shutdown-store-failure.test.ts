@@ -5,11 +5,12 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 // Regression coverage for #12238: when the session store keeps failing, the
 // close-time write fails and dispose() rejects. shutdown() used to swallow the
@@ -60,9 +61,15 @@ describe("InteractiveMode shutdown when the session store keeps failing (#12238)
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
-		mode.ui.requestRender = vi.fn();
-		mode.ui.terminal.drainInput = async () => {};
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 
 		// A real conversation crosses the lazy gate and materializes the session
 		// file on disk.
@@ -109,6 +116,8 @@ describe("InteractiveMode shutdown when the session store keeps failing (#12238)
 	});
 
 	afterEach(async () => {
+		// The failed close skips the mode's teardown (the process quits); release it here.
+		mode.stop();
 		vi.restoreAllMocks();
 		authStorage.close();
 		tempDir.removeSync();

@@ -1,4 +1,4 @@
-import { blobExtensionForImageMimeType, normalizeBlobExtension } from "@oh-my-pi/pi-tui/prompt/image-format";
+import { blobExtensionForImageMimeType, normalizeBlobExtension } from "../utils/image-format";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";

@@ -17,20 +17,15 @@ import {
 
 import { renderStructuredJson, structuredStatusLabel, taskAgentHandles } from "../session/async-job-delivery";
 import { AGENT_KILL_LABEL, type InterruptReason } from "../session/messages";
-import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
-import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { StructuredSubagentOutput } from "../task/task-details";
+import { parseConfiguredThinkingLevel } from "../thinking/levels";
 
 import type { ToolSession } from "../tools";
 
-import { formatDuration, formatNumber } from "@oh-my-pi/pi-tui/render/render-utils";
-import type {
-	AgentActivitySnapshot,
-	CancelOutcome,
-	CoordinationDetails,
-	JobSnapshot,
-} from "@oh-my-pi/pi-tui/tools/wait";
+import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
+import type { AgentActivitySnapshot, CancelOutcome, CoordinationDetails, JobSnapshot } from "../tools/details/wait";
 
-import { isWaitingPollDetails } from "@oh-my-pi/pi-tui/tools/wait";
+import { isWaitingPollDetails } from "../tools/details/wait";
 
 /**
  * Resolve a list of job ids to job records visible to the calling agent.

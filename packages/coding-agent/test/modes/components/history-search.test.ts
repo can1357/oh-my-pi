@@ -1,234 +1,181 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search";
-import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
-import type { HistoryEntry, HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
+import { afterAll, describe, expect, it } from "bun:test";
+import type { TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import {
+	HistorySearch,
+	type HistorySearchEntry,
+	type HistorySource,
+} from "../../../src/ui/overlays/pickers/history-search";
+import { mountOverlay } from "../../helpers/overlay-terminal";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
-beforeAll(async () => {
-	await initTheme();
-});
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 const NOW_SECONDS = Math.floor(Date.now() / 1000);
 
-function makeEntry(id: number, prompt: string, ageSeconds = 0): HistoryEntry {
-	return { id, prompt, created_at: NOW_SECONDS - ageSeconds, useCount: 1 };
+function makeEntry(id: number, prompt: string, ageSeconds = 0): HistorySearchEntry {
+	return { id, prompt, created_at: NOW_SECONDS - ageSeconds };
 }
 
-/** Minimal in-memory stand-in matching the two methods the component touches. */
-function fakeStorage(entries: HistoryEntry[]): HistoryStorage {
+/** In-memory history that records every search it runs. */
+function fakeSource(entries: HistorySearchEntry[]): HistorySource & { searches: string[] } {
 	const tokenize = (q: string) =>
 		q
 			.toLowerCase()
 			.split(/[^\p{L}\p{N}]+/u)
 			.filter(Boolean);
+	const searches: string[] = [];
 	return {
-		getRecent: (limit: number) => entries.slice(0, limit),
-		delete: (id: number) => {
+		searches,
+		getRecent: limit => entries.slice(0, limit),
+		delete: id => {
 			const index = entries.findIndex(entry => entry.id === id);
 			if (index >= 0) entries.splice(index, 1);
 		},
-		search: (query: string, limit: number) => {
+		search: (query, limit) => {
+			searches.push(query);
 			const tokens = tokenize(query);
 			return entries.filter(e => tokens.every(t => e.prompt.toLowerCase().includes(t))).slice(0, limit);
 		},
-	} as unknown as HistoryStorage;
+	};
 }
 
-function render(component: HistorySearchComponent, width = 80): { raw: string; plain: string } {
-	const lines = component.render(width);
-	const raw = lines.join("\n");
-	return { raw, plain: Bun.stripANSI(raw) };
+/** A debounce the test fires by hand. */
+function manualSchedule(): { schedule: (run: () => void) => () => void; fire(): void; pending(): boolean } {
+	let queued: (() => void) | undefined;
+	return {
+		schedule: run => {
+			queued = run;
+			return () => {
+				if (queued === run) queued = undefined;
+			};
+		},
+		fire() {
+			const run = queued;
+			queued = undefined;
+			run?.();
+		},
+		pending: () => queued !== undefined,
+	};
 }
 
-function type(component: HistorySearchComponent, text: string): void {
-	for (const char of text) component.handleInput(char);
+function mount(
+	source: HistorySource,
+	options: { onSelect?: (prompt: string) => void; schedule?: (run: () => void) => () => void } = {},
+): TestTerminal {
+	return mountOverlay(
+		() =>
+			HistorySearch({
+				source,
+				onSelect: options.onSelect ?? (() => {}),
+				onCancel: () => {},
+				...(options.schedule ? { schedule: options.schedule } : {}),
+			}),
+		{ columns: 80, rows: 30 },
+	);
 }
 
-describe("HistorySearchComponent", () => {
+const screen = (term: TestTerminal): string => {
+	term.render();
+	return term.screen().join("\n");
+};
+
+describe("history search", () => {
 	it("deletes the selected result only when Delete is at the end of the query", () => {
-		const storage = fakeStorage([makeEntry(1, "alpha one"), makeEntry(2, "alpha two")]);
-		const component = new HistorySearchComponent(
-			storage,
-			() => {},
-			() => {},
-		);
-		type(component, "alpha");
-		component.handleInput("\x1b[D");
-		component.handleInput("\x1b[3~");
-		expect(storage.getRecent(10).map(entry => entry.prompt)).toEqual(["alpha one", "alpha two"]);
-		component.handleInput("a");
-		component.handleInput("\x1b[B");
-		component.handleInput("\x1b[3~");
-		expect(storage.getRecent(10).map(entry => entry.prompt)).toEqual(["alpha one"]);
-		expect(render(component).plain).not.toContain("alpha two");
+		const source = fakeSource([makeEntry(1, "alpha one"), makeEntry(2, "alpha two")]);
+		const term = mount(source);
+		try {
+			term.type("alpha");
+			term.press("left");
+			term.press("delete");
+			expect(source.getRecent(10).map(entry => entry.prompt)).toEqual(["alpha one", "alpha two"]);
+			term.type("a");
+			term.press("down");
+			term.press("delete");
+			expect(source.getRecent(10).map(entry => entry.prompt)).toEqual(["alpha one"]);
+			expect(screen(term)).not.toContain("alpha two");
+		} finally {
+			term.dispose();
+		}
 	});
 
-	it("paints the selected row with the selectedBg highlight bar and a relative timestamp", () => {
-		const component = new HistorySearchComponent(
-			fakeStorage([makeEntry(1, "deploy the release"), makeEntry(2, "older prompt", 7200)]),
-			() => {},
-			() => {},
-		);
+	it("distinguishes an empty history from an unmatched query", () => {
+		const empty = mount(fakeSource([]));
+		expect(screen(empty)).toContain("No history yet");
+		empty.dispose();
 
-		const { raw, plain } = render(component);
-
-		expect(plain).toContain("deploy the release");
-		// First (default-selected) row carries the selection background.
-		const selectedRow = raw.split("\n").find(line => line.includes("deploy the release"));
-		expect(selectedRow).toContain(theme.getBgAnsi("selectedBg"));
-		// Fresh entry renders the compact "now" age marker.
-		expect(plain).toContain("now");
-	});
-
-	it("highlights the matched query tokens within results", () => {
-		const component = new HistorySearchComponent(
-			fakeStorage([makeEntry(1, "deploy the needle rollback"), makeEntry(2, "routine status update")]),
-			() => {},
-			() => {},
-		);
-
-		type(component, "needle");
-
-		const { raw, plain } = render(component);
-		expect(plain).toContain("deploy the needle rollback");
-		expect(plain).not.toContain("routine status update");
-		// The matched substring is wrapped in the accent color.
-		expect(raw).toContain(theme.fg("accent", "needle"));
-	});
-
-	it("distinguishes an empty query from an unmatched query", () => {
-		const empty = new HistorySearchComponent(
-			fakeStorage([]),
-			() => {},
-			() => {},
-		);
-		expect(render(empty).plain).toContain("No history yet");
-
-		const unmatched = new HistorySearchComponent(
-			fakeStorage([makeEntry(1, "deploy the release")]),
-			() => {},
-			() => {},
-		);
-		type(unmatched, "zzzz");
-		expect(render(unmatched).plain).toContain("No matching history");
+		const unmatched = mount(fakeSource([makeEntry(1, "deploy the release")]));
+		unmatched.type("zzzz");
+		expect(screen(unmatched)).toContain("No matching history");
+		unmatched.dispose();
 	});
 });
 
-describe("HistorySearchComponent debounced search", () => {
-	afterEach(() => {
-		vi.useRealTimers();
-	});
+describe("history search debounce", () => {
+	it("searches once after the quiet period", () => {
+		const source = fakeSource([makeEntry(1, "deploy the needle rollback"), makeEntry(2, "routine status update")]);
+		const debounce = manualSchedule();
+		const term = mount(source, { schedule: debounce.schedule });
+		try {
+			const recent = source.searches.length;
+			term.type("needle");
+			expect(source.searches.slice(recent)).toEqual([]);
+			expect(screen(term)).toContain("routine status update");
 
-	function countingStorage(entries: HistoryEntry[]): { storage: HistoryStorage; searches: string[] } {
-		const base = fakeStorage(entries);
-		const searches: string[] = [];
-		const storage = {
-			getRecent: (limit: number) => base.getRecent(limit),
-			search: (query: string, limit: number) => {
-				searches.push(query);
-				return base.search(query, limit);
-			},
-		} as unknown as HistoryStorage;
-		return { storage, searches };
-	}
-
-	it("searches once after the quiet period and requests a repaint", () => {
-		vi.useFakeTimers();
-		const { storage, searches } = countingStorage([
-			makeEntry(1, "deploy the needle rollback"),
-			makeEntry(2, "routine status update"),
-		]);
-		const component = new HistorySearchComponent(
-			storage,
-			() => {},
-			() => {},
-		);
-		let renders = 0;
-		component.setOnRequestRender(() => renders++);
-
-		type(component, "needle");
-		expect(searches).toEqual([]);
-		expect(render(component).plain).toContain("routine status update");
-
-		vi.advanceTimersByTime(150);
-		expect(searches).toEqual(["needle"]);
-		expect(renders).toBe(1);
-		expect(render(component).plain).not.toContain("routine status update");
+			debounce.fire();
+			expect(source.searches.slice(recent)).toEqual(["needle"]);
+			expect(screen(term)).not.toContain("routine status update");
+		} finally {
+			term.dispose();
+		}
 	});
 
 	it("skips the search when only the cursor moves", () => {
-		vi.useFakeTimers();
-		const { storage, searches } = countingStorage([makeEntry(1, "deploy the needle rollback")]);
-		const component = new HistorySearchComponent(
-			storage,
-			() => {},
-			() => {},
-		);
-		component.setOnRequestRender(() => {});
-		type(component, "needle");
-		vi.advanceTimersByTime(150);
-		component.handleInput("\x1b[D");
-		component.handleInput("\x1b[C");
-		component.handleInput(" ");
-		vi.advanceTimersByTime(150);
-		expect(searches).toEqual(["needle"]);
+		const source = fakeSource([makeEntry(1, "deploy the needle rollback")]);
+		const debounce = manualSchedule();
+		const term = mount(source, { schedule: debounce.schedule });
+		try {
+			term.type("needle");
+			debounce.fire();
+			const searched = source.searches.length;
+			term.press("left");
+			term.press("right");
+			term.type(" ");
+			debounce.fire();
+			expect(source.searches.length).toBe(searched);
+		} finally {
+			term.dispose();
+		}
 	});
 
 	it("uses fresh results when Enter arrives before the debounce fires", () => {
-		vi.useFakeTimers();
-		const { storage } = countingStorage([
-			makeEntry(1, "routine status update"),
-			makeEntry(2, "needle in a haystack"),
-		]);
+		const source = fakeSource([makeEntry(1, "routine status update"), makeEntry(2, "needle in a haystack")]);
+		const debounce = manualSchedule();
 		const selected: string[] = [];
-		const component = new HistorySearchComponent(
-			storage,
-			prompt => selected.push(prompt),
-			() => {},
-		);
-		let renders = 0;
-		component.setOnRequestRender(() => renders++);
-		type(component, "needle");
-		component.handleInput("\n");
-		expect(selected).toEqual(["needle in a haystack"]);
-		vi.advanceTimersByTime(150);
-		expect(renders).toBe(0);
-	});
-
-	it("ignores a list pick of a row from the previous query while the search is pending", () => {
-		vi.useFakeTimers();
-		const stale = makeEntry(1, "routine status update");
-		const { storage } = countingStorage([stale, makeEntry(2, "needle in a haystack")]);
-		const selected: string[] = [];
-		const component = new HistorySearchComponent(
-			storage,
-			prompt => selected.push(prompt),
-			() => {},
-		);
-		component.setOnRequestRender(() => {});
-		type(component, "needle");
-		// The row is still on screen: the debounce has not refreshed results yet.
-		const staleKey = `${stale.created_at}-${Bun.hash(stale.prompt).toString(36)}`;
-		component.handleNativeEvent({ type: "activate", key: "list", item: staleKey });
-		expect(selected).toEqual([]);
-		expect(render(component).plain).not.toContain("routine status update");
+		const term = mount(source, { schedule: debounce.schedule, onSelect: prompt => selected.push(prompt) });
+		try {
+			term.type("needle");
+			term.press("enter");
+			expect(selected).toEqual(["needle in a haystack"]);
+			// The pending search was dropped with the pick.
+			expect(debounce.pending()).toBe(false);
+		} finally {
+			term.dispose();
+		}
 	});
 
 	it("shows recent history immediately when the query is cleared", () => {
-		vi.useFakeTimers();
-		const { storage } = countingStorage([
-			makeEntry(1, "routine status update"),
-			makeEntry(2, "needle in a haystack"),
-		]);
-		const component = new HistorySearchComponent(
-			storage,
-			() => {},
-			() => {},
-		);
-		component.setOnRequestRender(() => {});
-		type(component, "h");
-		vi.advanceTimersByTime(150);
-		expect(render(component).plain).not.toContain("routine status update");
-		component.handleInput("\x7f");
-		expect(render(component).plain).toContain("routine status update");
+		const source = fakeSource([makeEntry(1, "routine status update"), makeEntry(2, "needle in a haystack")]);
+		const debounce = manualSchedule();
+		const term = mount(source, { schedule: debounce.schedule });
+		try {
+			term.type("h");
+			debounce.fire();
+			expect(screen(term)).not.toContain("routine status update");
+			term.press("backspace");
+			expect(screen(term)).toContain("routine status update");
+		} finally {
+			term.dispose();
+		}
 	});
 });

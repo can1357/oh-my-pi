@@ -7,9 +7,12 @@
 import { APP_NAME, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
-import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
-import { renderSearchResult } from "@oh-my-pi/pi-tui/tools/web-search";
 import { runSearchQuery, type SearchQueryParams } from "../web/search/index";
+import { initTheme } from "../ui/theme/service";
+import { printRows } from "../ui/print-rows";
+import "../ui/styles/tools";
+import "../ui/tools";
+import { ToolBlock, ToolCall } from "../ui/transcript/tool-block";
 
 export interface SearchCommandArgs {
 	query: string;
@@ -80,7 +83,7 @@ export async function runSearchCommand(cmd: SearchCommandArgs): Promise<void> {
 
 	await Settings.init({ cwd: getProjectDir() });
 
-	await initTheme();
+	initTheme();
 
 	const params: SearchQueryParams = {
 		query: cmd.query,
@@ -90,13 +93,14 @@ export async function runSearchCommand(cmd: SearchCommandArgs): Promise<void> {
 	};
 
 	const result = await runSearchQuery(params);
-	const component = renderSearchResult(result, { expanded: cmd.expanded, isPartial: false }, theme, {
-		query: cmd.query,
-		maxAnswerLines: cmd.expanded ? undefined : 6,
-	});
+	const call = new ToolCall({ id: "web-search", name: "web_search", args: params });
+	call.setExpanded(cmd.expanded);
+	call.setExecutionStarted();
+	call.updateResult(result, false);
+	call.seal();
 
 	const width = Math.max(60, process.stdout.columns ?? 100);
-	process.stdout.write(`${component.render(width).join("\n")}\n`);
+	process.stdout.write(`${printRows(() => ToolBlock({ call }), width).join("\n")}\n`);
 
 	if (result.details?.error) {
 		process.exitCode = 1;

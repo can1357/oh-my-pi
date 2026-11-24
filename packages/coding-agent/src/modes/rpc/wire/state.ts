@@ -188,6 +188,11 @@ export const stateDefs = {
 		"artifactError?": JSON_OBJECT,
 		"minimized?": JSON_OBJECT,
 		"workingDir?": "string",
+		"movedCwd?": doc(
+			"boolean",
+			"The command ended in another directory than it started in; the next command starts in its own cwd.",
+		),
+		"errexit?": doc("boolean", "The command ended with `set -e` on; the next command starts with it off."),
 		"images?": "ImageContent[]",
 		"trace?": doc(
 			JSON_OBJECT,

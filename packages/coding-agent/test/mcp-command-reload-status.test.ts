@@ -5,9 +5,9 @@ import { disposeLocalMcpHost } from "@oh-my-pi/pi-coding-agent/mcp/host/local";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+import { createInteractiveModeContext, renderTranscript } from "./helpers/interactive-mode-context";
 import { TOOL_NAME, TOOL_RESULT } from "./fixtures/delayed-tool-mcp";
+import { initTheme } from "../src/ui/theme/service";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "delayed-tool-mcp.ts");
 
@@ -38,7 +38,7 @@ describe("/mcp reload status", () => {
 		try {
 			await controller.handle("/mcp reload");
 
-			const output = ctx.chatContainer.render(120).join("\n");
+			const output = renderTranscript(ctx).join("\n");
 			expect(output).toContain("Connected servers: 0");
 			expect(output).toContain("Connecting servers: 1");
 

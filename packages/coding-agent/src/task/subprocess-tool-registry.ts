@@ -4,9 +4,9 @@
  * Tools can register handlers to:
  * - Extract structured data from their execution results
  * - Trigger subprocess termination on completion
- * - Provide custom rendering for realtime/final display
+ * - Show extracted data on the task card (`inline` / `final`, see {@link SubprocessToolView})
  */
-import { registerSubprocessToolRenderer, type SubprocessToolRenderer } from "@oh-my-pi/pi-tui/tools/subprocess";
+import { registerSubprocessToolView, type SubprocessToolView } from "../ui/tools/task/subprocess-views";
 
 /** Event from subprocess tool execution (parsed from JSONL) */
 export interface SubprocessToolEvent {
@@ -21,7 +21,7 @@ export interface SubprocessToolEvent {
 }
 
 /** Handler for subprocess tool events */
-export interface SubprocessToolHandler<TData = unknown> extends SubprocessToolRenderer<TData> {
+export interface SubprocessToolHandler<TData = unknown> extends SubprocessToolView<TData> {
 	/**
 	 * Extract structured data from tool result.
 	 * Extracted data is accumulated in progress.extractedToolData[toolName][].
@@ -44,9 +44,9 @@ class SubprocessToolRegistryImpl {
 	 */
 	register<T>(toolName: string, handler: SubprocessToolHandler<T>): void {
 		this.#handlers.set(toolName, handler as SubprocessToolHandler);
-		registerSubprocessToolRenderer(toolName, {
-			renderInline: handler.renderInline,
-			renderFinal: handler.renderFinal,
+		registerSubprocessToolView(toolName, {
+			inline: handler.inline,
+			final: handler.final,
 		});
 	}
 
