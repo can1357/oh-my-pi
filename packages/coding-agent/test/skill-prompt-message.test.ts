@@ -1,8 +1,14 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSkillPromptMessage, type Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
+import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 async function createSkill(body: string): Promise<{ dir: string; skill: Skill }> {
@@ -106,5 +112,251 @@ describe("buildSkillPromptMessage", () => {
 		} finally {
 			await removeWithRetries(dir);
 		}
+	});
+
+	describe("Claude Code tool-name note", () => {
+		const NOTE = "This skill was written for Claude Code. In omp:";
+		const sourceFor = (provider: string, dir: string): Skill["_source"] => ({
+			provider,
+			providerName: provider,
+			path: dir,
+			level: "user",
+		});
+
+		test("maps the tool names a Claude skill mentions", async () => {
+			const { dir, skill } = await createSkill("Track work with TodoWrite, then delegate via the Task tool.");
+			try {
+				const built = await buildSkillPromptMessage({ ...skill, _source: sourceFor("claude", dir) }, { args: "" });
+				expect(built.message).toContain(`${NOTE} TodoWrite → todo, Task → task.`);
+			} finally {
+				await removeWithRetries(dir);
+			}
+		});
+
+		test("leaves a Claude skill that only uses plain words unchanged", async () => {
+			const { dir, skill } = await createSkill("Finish the task, then `read` and edit the files.");
+			try {
+				const built = await buildSkillPromptMessage({ ...skill, _source: sourceFor("claude", dir) }, { args: "" });
+				expect(built.message).toContain("Finish the task, then `read` and edit the files.");
+				expect(built.message).not.toContain("written for Claude Code");
+			} finally {
+				await removeWithRetries(dir);
+			}
+		});
+
+		test("annotates a whole read of a Claude skill through skill://", async () => {
+			const { dir, skill } = await createSkill("Track work with TodoWrite.");
+			try {
+				const session: ToolSession = {
+					cwd: dir,
+					hasUI: false,
+					getSessionFile: () => null,
+					getSessionSpawns: () => "*",
+					settings: Settings.isolated(),
+					skills: [{ ...skill, _source: sourceFor("claude", dir) }],
+				};
+				const readText = async (target: string) => {
+					const result = await new ReadTool(session).execute("read-claude-skill", { path: target });
+					return result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+				};
+				expect(await readText("skill://reviewer")).toContain(`${NOTE} TodoWrite → todo.`);
+				expect(await readText("skill://reviewer/SKILL.md")).toContain(`${NOTE} TodoWrite → todo.`);
+				expect(await readText("skill://reviewer:raw")).not.toContain(NOTE);
+				const resolvedExplicit = await new SkillProtocolHandler().resolve(
+					parseInternalUrl("skill://reviewer/SKILL.md"),
+					{ skills: [{ ...skill, _source: sourceFor("claude", dir) }] },
+				);
+				expect(resolvedExplicit.content).toContain(`${NOTE} TodoWrite → todo.`);
+			} finally {
+				await removeWithRetries(dir);
+			}
+		});
+
+		test("ignores Claude tool names that appear only in frontmatter across all delivery paths", async () => {
+			const raw =
+				"---\nname: reviewer\ndescription: Use TodoWrite\nallowed-tools: WebFetch\n---\n\nReview the files.\n";
+			const { dir, skill } = await createSkillFromRaw(raw);
+			const claudeSkill = { ...skill, _source: sourceFor("claude", dir) };
+			try {
+				const built = await buildSkillPromptMessage(claudeSkill, { args: "" });
+				expect(built.message).not.toContain(NOTE);
+
+				const session: ToolSession = {
+					cwd: dir,
+					hasUI: false,
+					getSessionFile: () => null,
+					getSessionSpawns: () => "*",
+					settings: Settings.isolated(),
+					skills: [claudeSkill],
+				};
+				const readResult = await new ReadTool(session).execute("read-claude-frontmatter", {
+					path: "skill://reviewer",
+				});
+				const readText = readResult.content
+					.flatMap(block => (block.type === "text" ? [block.text] : []))
+					.join("\n");
+				expect(readText).not.toContain(NOTE);
+
+				const resolved = await new SkillProtocolHandler().resolve(parseInternalUrl("skill://reviewer"), {
+					skills: [claudeSkill],
+				});
+				expect(resolved.content).toBe(raw);
+			} finally {
+				await removeWithRetries(dir);
+			}
+		});
+
+		test("preserves raw formatting and trailing newlines when SkillProtocolHandler appends the note", async () => {
+			const raw = "---\nname: reviewer\ndescription: Review code\n---\n\nFirst paragraph.\n\n\nUse TodoWrite.\n";
+			const { dir, skill } = await createSkillFromRaw(raw);
+			const claudeSkill = { ...skill, _source: sourceFor("claude", dir) };
+			try {
+				const resolved = await new SkillProtocolHandler().resolve(parseInternalUrl("skill://reviewer"), {
+					skills: [claudeSkill],
+				});
+				expect(resolved.content).toBe(`${raw}\n\n${NOTE} TodoWrite → todo.`);
+			} finally {
+				await removeWithRetries(dir);
+			}
+		});
+
+		afterEach(() => {
+			vi.restoreAllMocks();
+		});
+
+		test("does not duplicate the Claude tool note when ReadTool falls back to protocol resolution", async () => {
+			const { dir, skill } = await createSkill("Track tasks with TodoWrite.");
+			const claudeSkill = { ...skill, _source: sourceFor("claude", dir) };
+			try {
+				const router = InternalUrlRouter.instance();
+				const originalTarget = router.target.bind(router);
+				vi.spyOn(router, "target").mockImplementationOnce(async (input, context) => {
+					const located = await originalTarget(input, context);
+					if (!located || located.kind !== "file") return located;
+					return { ...located, path: path.join(dir, "vanished", "SKILL.md") };
+				});
+
+				const session: ToolSession = {
+					cwd: dir,
+					hasUI: false,
+					getSessionFile: () => null,
+					getSessionSpawns: () => "*",
+					settings: Settings.isolated(),
+					skills: [claudeSkill],
+				};
+				const result = await new ReadTool(session).execute("read-claude-fallback", { path: "skill://reviewer" });
+				const text = result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+				expect(text.split(NOTE).length - 1).toBe(1);
+
+				// Raw fallback must stay verbatim and omit the Claude tool note.
+				vi.spyOn(router, "target").mockImplementationOnce(async (input, context) => {
+					const located = await originalTarget(input, context);
+					if (!located || located.kind !== "file") return located;
+					return { ...located, path: path.join(dir, "vanished", "SKILL.md") };
+				});
+				const rawResult = await new ReadTool(session).execute("read-claude-raw-fallback", {
+					path: "skill://reviewer:raw",
+				});
+				const rawText = rawResult.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+				expect(rawText).not.toContain(NOTE);
+			} finally {
+				await removeWithRetries(dir);
+			}
+		});
+
+		test("computes the Claude tool note from the buffered snapshot without reopening the file", async () => {
+			const { dir, skill } = await createSkill("Track tasks with TodoWrite.");
+			const claudeSkill = { ...skill, _source: sourceFor("claude", dir) };
+			try {
+				const session: ToolSession = {
+					cwd: dir,
+					hasUI: false,
+					getSessionFile: () => null,
+					getSessionSpawns: () => "*",
+					settings: Settings.isolated(),
+					skills: [claudeSkill],
+				};
+				const realReadFile = fs.readFile;
+				vi.spyOn(fs, "readFile").mockImplementation((async (filePath: Parameters<typeof fs.readFile>[0]) => {
+					const bytes = await realReadFile(filePath);
+					if (String(filePath) === skill.filePath) {
+						// Remove the file right after ReadTool reads v1; the note must
+						// still come from the buffered v1 snapshot without reopening disk.
+						await fs.rm(skill.filePath, { force: true });
+					}
+					return bytes;
+				}) as typeof fs.readFile);
+				const result = await new ReadTool(session).execute("read-claude-snapshot", { path: "skill://reviewer" });
+				const text = result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+				expect(text).toContain(`${NOTE} TodoWrite → todo.`);
+			} finally {
+				await removeWithRetries(dir);
+			}
+		});
+
+		test("strips a leading UTF-8 BOM before checking frontmatter and skips nested child skill assets", async () => {
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skill-bom-nested-"));
+			const rootFile = path.join(dir, "SKILL.md");
+			const childDir = path.join(dir, "child");
+			const childFile = path.join(childDir, "SKILL.md");
+			await fs.mkdir(childDir, { recursive: true });
+			// BOM-prefixed skill whose only Claude tool name is in frontmatter.
+			await Bun.write(
+				rootFile,
+				"\uFEFF---\nname: root\ndescription: Use TodoWrite.\n---\nReview the code carefully.\n",
+			);
+			await Bun.write(childFile, "---\nname: child\ndescription: child\n---\nTrack tasks with TodoWrite.\n");
+			const rootSkill: Skill = {
+				name: "root",
+				description: "Use TodoWrite.",
+				filePath: rootFile,
+				baseDir: dir,
+				source: "claude:user",
+				_source: sourceFor("claude", dir),
+			};
+			const childSkill: Skill = {
+				name: "child",
+				description: "child",
+				filePath: childFile,
+				baseDir: childDir,
+				source: "claude:user",
+				_source: sourceFor("claude", dir),
+			};
+			try {
+				const session: ToolSession = {
+					cwd: dir,
+					hasUI: false,
+					getSessionFile: () => null,
+					getSessionSpawns: () => "*",
+					settings: Settings.isolated(),
+					skills: [rootSkill, childSkill],
+				};
+				const bomResult = await new ReadTool(session).execute("read-bom", { path: "skill://root" });
+				const bomText = bomResult.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+				expect(bomText).not.toContain(NOTE);
+
+				// Reading child/SKILL.md via the root skill addresses an asset of `root`, not `child`'s instruction URL.
+				const nestedResult = await new ReadTool(session).execute("read-nested-child", {
+					path: "skill://root/child/SKILL.md",
+				});
+				const nestedText = nestedResult.content
+					.flatMap(block => (block.type === "text" ? [block.text] : []))
+					.join("\n");
+				expect(nestedText).not.toContain(NOTE);
+			} finally {
+				await removeWithRetries(dir);
+			}
+		});
+
+		test("never annotates skills from other providers", async () => {
+			const { dir, skill } = await createSkill("Track work with TodoWrite.");
+			try {
+				const built = await buildSkillPromptMessage({ ...skill, _source: sourceFor("native", dir) }, { args: "" });
+				expect(built.message).toContain("Track work with TodoWrite.");
+				expect(built.message).not.toContain("written for Claude Code");
+			} finally {
+				await removeWithRetries(dir);
+			}
+		});
 	});
 });

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Claude Code skills (provider `claude`, or a Claude-format plugin) now end with a one-line note mapping the Claude Code tool names the skill mentions (`Task`, `TodoWrite`, `AskUserQuestion`, ...) to omp's tools when delivered through `/skill:`, autoload or `skill://`; skills that mention none, and skills from other providers, are unchanged ([#19888](https://github.com/can1357/oh-my-pi/pull/19888) by [@joseotaviorf](https://github.com/joseotaviorf))
 - The bash tool now runs `cmd <<'EOF' && \` as meant: the stray `\` that pushed the heredoc body below the next line (running that line as a command) is dropped, with a notice, when the result parses
 - Tray cards now mark subagents that are only waiting on their own agents or jobs (`wait`, `vibe_wait`), so Tern shows them apart from subagents doing work
 - The shell's `tail -r` builtin now takes `-c`, `-b`, and `+N` counts like BSD `tail`, and `tail -b N` selects 512-byte blocks; `-r` with `-f` is BSD's usage error instead of a "pipe through tac" refusal

@@ -98,30 +98,47 @@ export function normalizeToolName(name: string): string {
 	return LEGACY_BUILTIN_TOOL_NAME_ALIASES.get(lower) ?? (Object.hasOwn(CANONICAL_TOOL_NAMES, lower) ? lower : name);
 }
 
+/** One Claude Code built-in tool and the omp built-in that covers it. */
+export interface ClaudeCodeToolMapping {
+	/** Claude Code's canonical PascalCase tool name, as written in Claude skills and agent prose. */
+	readonly claudeName: string;
+	readonly ompName: BuiltinToolName;
+	/**
+	 * True when `claudeName` is distinctive enough to recognize in prose without backticks or a
+	 * trailing `tool` (e.g. `TodoWrite`, `WebFetch`); false for everyday words (`Task`, `Read`).
+	 */
+	readonly distinctive: boolean;
+}
+
 /**
- * Claude Code tool names (lowercased) and the omp built-in that covers each. Only names with a real
- * equivalent are listed; Claude-only tools such as `ExitPlanMode` or `KillShell` have none.
+ * Claude Code tools and the omp built-in that covers each. Only names with a real equivalent are
+ * listed; Claude-only tools such as `ExitPlanMode` or `KillShell` have none.
  */
-export const CLAUDE_CODE_TOOL_NAMES: ReadonlyMap<string, BuiltinToolName> = new Map([
-	["task", "task"],
-	["agent", "task"],
-	["bash", "bash"],
-	["read", "read"],
-	["notebookread", "read"],
-	["ls", "read"],
-	["webfetch", "read"],
-	["skill", "read"],
-	["write", "write"],
-	["edit", "edit"],
-	["multiedit", "edit"],
-	["notebookedit", "edit"],
-	["glob", "glob"],
-	["grep", "grep"],
-	["websearch", "web_search"],
-	["todowrite", "todo"],
-	["todoread", "todo"],
-	["askuserquestion", "ask"],
-]);
+export const CLAUDE_CODE_TOOL_MAPPINGS: readonly ClaudeCodeToolMapping[] = [
+	{ claudeName: "Task", ompName: "task", distinctive: false },
+	{ claudeName: "Agent", ompName: "task", distinctive: false },
+	{ claudeName: "Bash", ompName: "bash", distinctive: false },
+	{ claudeName: "Read", ompName: "read", distinctive: false },
+	{ claudeName: "NotebookRead", ompName: "read", distinctive: true },
+	{ claudeName: "LS", ompName: "read", distinctive: false },
+	{ claudeName: "WebFetch", ompName: "read", distinctive: true },
+	{ claudeName: "Skill", ompName: "read", distinctive: false },
+	{ claudeName: "Write", ompName: "write", distinctive: false },
+	{ claudeName: "Edit", ompName: "edit", distinctive: false },
+	{ claudeName: "MultiEdit", ompName: "edit", distinctive: true },
+	{ claudeName: "NotebookEdit", ompName: "edit", distinctive: true },
+	{ claudeName: "Glob", ompName: "glob", distinctive: false },
+	{ claudeName: "Grep", ompName: "grep", distinctive: false },
+	{ claudeName: "WebSearch", ompName: "web_search", distinctive: true },
+	{ claudeName: "TodoWrite", ompName: "todo", distinctive: true },
+	{ claudeName: "TodoRead", ompName: "todo", distinctive: true },
+	{ claudeName: "AskUserQuestion", ompName: "ask", distinctive: true },
+];
+
+/** Lowercased lookup view of {@link CLAUDE_CODE_TOOL_MAPPINGS}. */
+export const CLAUDE_CODE_TOOL_NAMES: ReadonlyMap<string, BuiltinToolName> = new Map(
+	CLAUDE_CODE_TOOL_MAPPINGS.map(entry => [entry.claudeName.toLowerCase(), entry.ompName]),
+);
 
 /** Canonicalize a tool name written in the Claude Code dialect, falling back to {@link normalizeToolName}. */
 export function normalizeClaudeCodeToolName(name: string): string {
