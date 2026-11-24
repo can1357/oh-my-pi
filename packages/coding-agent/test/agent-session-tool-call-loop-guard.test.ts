@@ -210,6 +210,14 @@ describe("AgentSession tool-call loop guard", () => {
 			redirects: 0,
 		},
 		{
+			scenario: "repeated empty vibe_wait poll with no worker in flight",
+			name: "vibe_wait",
+			args: { sessions: ["worker"], timeout: 600 },
+			result: "No turns in flight to wait for.",
+			useless: true,
+			redirects: 1,
+		},
+		{
 			scenario: "repeated bash command",
 			name: "bash",
 			args: { command: "pytest -q" },
