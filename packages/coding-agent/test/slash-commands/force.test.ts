@@ -13,7 +13,7 @@ function createRuntimeHarness(overrides?: { setForcedToolChoice?: (toolName: str
 	const showError = vi.fn();
 
 	const ctx = {
-		editor: { setText } as unknown as InteractiveModeContext["editor"],
+		composer: { setText } as unknown as InteractiveModeContext["composer"],
 		session: { setForcedToolChoice } as unknown as InteractiveModeContext["session"],
 		showStatus,
 		showError,

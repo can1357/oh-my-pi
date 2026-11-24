@@ -1,36 +1,21 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { RenderResultOptions } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { InternalUrlFilesystem } from "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem";
-import { getThemeByName, initTheme, type Theme } from "@oh-my-pi/pi-tui/theme";
 import {
 	expandDelimitedPathEntries,
 	parseFindPattern,
 	resolveToolSearchScope,
 	splitDelimitedPathEntry,
 } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
-import type { Component } from "@oh-my-pi/pi-tui";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-import { globToolRenderer } from "@oh-my-pi/pi-tui/tools/glob";
+import { ToolCall } from "../../src/ui/transcript/tool-block";
+import { toolCallText, toolText } from "../helpers/tool-text";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
-let uiTheme: Theme;
-
-beforeAll(async () => {
-	await initTheme(false, undefined, undefined, "dark", "light");
-	const theme = await getThemeByName("dark");
-	if (!theme) throw new Error("Missing dark theme");
-	uiTheme = theme;
-});
-const renderOptions: RenderResultOptions = {
-	expanded: false,
-	isPartial: true,
-};
-
-function renderText(component: Component): string {
-	return Bun.stripANSI(component.render(160).join("\n"));
-}
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 describe("delimited path expansion", () => {
 	let tempDir: string;
@@ -154,33 +139,39 @@ describe("delimited path expansion", () => {
 	});
 });
 
-describe("globToolRenderer", () => {
-	it("accepts a single string paths value before validation", async () => {
+describe("glob tool card", () => {
+	it("accepts a single string paths value before validation", () => {
 		const args = { paths: "src/**/*.ts" };
 		const renderings = [
-			globToolRenderer.renderCall(args, renderOptions, uiTheme),
-			globToolRenderer.renderResult(
-				{ content: [{ type: "text", text: "src/index.ts\n" }] },
-				renderOptions,
-				uiTheme,
+			toolCallText(new ToolCall({ id: "call-1", name: "glob", args }), 160),
+			toolText({
+				name: "glob",
 				args,
-			),
-			globToolRenderer.renderResult(
-				{ content: [{ type: "text", text: "" }], details: { fileCount: 0, files: [] } },
-				renderOptions,
-				uiTheme,
+				result: { content: [{ type: "text", text: "src/index.ts\n" }] },
+				partial: true,
+				width: 160,
+			}),
+			toolText({
+				name: "glob",
 				args,
-			),
-			globToolRenderer.renderResult(
-				{ content: [{ type: "text", text: "src/index.ts" }], details: { fileCount: 1, files: ["src/index.ts"] } },
-				renderOptions,
-				uiTheme,
+				result: { content: [{ type: "text", text: "" }], details: { fileCount: 0, files: [] } },
+				partial: true,
+				width: 160,
+			}),
+			toolText({
+				name: "glob",
 				args,
-			),
+				result: {
+					content: [{ type: "text", text: "src/index.ts" }],
+					details: { fileCount: 1, files: ["src/index.ts"] },
+				},
+				partial: true,
+				width: 160,
+			}),
 		];
 
-		for (const component of renderings) {
-			expect(renderText(component)).toContain("src/**/*.ts");
+		for (const rendered of renderings) {
+			expect(rendered).toContain("src/**/*.ts");
 		}
 	});
 });

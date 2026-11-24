@@ -1,18 +1,13 @@
-import { createModelBrowserSource } from "../src/modes/model-browser-source";
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { KeybindingsManager, setKeybindings } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ModelHubComponent } from "@oh-my-pi/pi-tui/overlays/model-hub";
-import { SessionSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-selector";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
-import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
-
-beforeAll(() => {
-	initTheme();
-});
+import { createModelBrowserSource } from "../src/modes/model-browser-source";
+import { ModelHub } from "../src/ui/overlays/pickers/model-hub";
+import { SessionSelector } from "../src/ui/overlays/pickers/session-selector";
+import { mountLayer } from "./helpers/layer-terminal";
 
 afterEach(() => {
 	setKeybindings(KeybindingsManager.inMemory());
@@ -35,6 +30,28 @@ function createSession(id: string, title: string): SessionInfo {
 }
 
 describe("component escape bindings", () => {
+	it("cancels the session selector on Esc and exits on Ctrl+C by default", () => {
+		const onCancel = vi.fn();
+		const onExit = vi.fn();
+		const selector = mountLayer(() =>
+			SessionSelector({
+				sessions: [createSession("session-a", "Alpha"), createSession("session-b", "Beta")],
+				onSelect: () => {},
+				onCancel,
+				onExit,
+			}),
+		);
+
+		selector.handleInput("\x1b");
+		expect(onCancel).toHaveBeenCalledTimes(1);
+		expect(onExit).not.toHaveBeenCalled();
+
+		selector.handleInput("\x03");
+		expect(onExit).toHaveBeenCalledTimes(1);
+		selector.dispose();
+	});
+
+	// Remapped selector keys: pending the picker keymap wiring (KeyRemaps).
 	it("uses app.interrupt for session selector cancel without changing Ctrl+C exit", () => {
 		const keybindings = KeybindingsManager.inMemory({
 			"app.interrupt": "alt+x",
@@ -43,11 +60,13 @@ describe("component escape bindings", () => {
 
 		const onCancel = vi.fn();
 		const onExit = vi.fn();
-		const selector = new SessionSelectorComponent(
-			[createSession("session-a", "Alpha"), createSession("session-b", "Beta")],
-			() => {},
-			onCancel,
-			onExit,
+		const selector = mountLayer(() =>
+			SessionSelector({
+				sessions: [createSession("session-a", "Alpha"), createSession("session-b", "Beta")],
+				onSelect: () => {},
+				onCancel,
+				onExit,
+			}),
 		);
 
 		selector.handleInput("\x1b");
@@ -58,6 +77,7 @@ describe("component escape bindings", () => {
 
 		selector.handleInput("\x03");
 		expect(onExit).toHaveBeenCalledTimes(1);
+		selector.dispose();
 	});
 
 	it("uses tui.select.cancel for model selector cancellation", () => {
@@ -86,22 +106,15 @@ describe("component escape bindings", () => {
 			refreshProvider: async () => {},
 			authStorage: { keys: { source: () => undefined } },
 		} as unknown as ModelRegistry;
-		const ui = {
-			requestRender: vi.fn(),
-			terminal: { rows: 40 },
-		} as unknown as TUI;
 		const onCancel = vi.fn();
 
-		const hub = new ModelHubComponent(
-			ui,
-			createModelBrowserSource(settings),
-			modelRegistry,
-			[{ model, thinkingLevel: "off" }],
-			{
-				onAssign: () => {},
-				onUnassign: () => {},
-				onCancel,
-			},
+		const hub = mountLayer(() =>
+			ModelHub({
+				source: createModelBrowserSource(settings),
+				registry: modelRegistry,
+				scopedModels: [{ model, thinkingLevel: "off" }],
+				callbacks: { onAssign: () => {}, onUnassign: () => {}, onCancel },
+			}),
 		);
 
 		hub.handleInput("\x1b");

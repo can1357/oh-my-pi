@@ -370,7 +370,8 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 			process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
 		}
 		// A failed fetch otherwise looks identical to a provider with no models.
-		for (const { provider, status, error } of modelRegistry.getRuntimeDiscoveryFailures()) {
+		const failures = modelRegistry.getDiscoveryFailures({ runtimeOnly: action !== "refresh" });
+		for (const { provider, status, error } of failures) {
 			const detail = error?.replace(/\s+/g, " ").trim();
 			process.stderr.write(
 				`${chalk.yellow(`Warning: ${provider} model discovery failed (${status}): ${detail}`)}\n`,

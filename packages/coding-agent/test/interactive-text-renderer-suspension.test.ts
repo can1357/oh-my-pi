@@ -12,17 +12,16 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { VirtualTerminal } from "../../tui/test/virtual-terminal";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal, type ModeTerminal, transcriptText } from "./helpers/mode-terminal";
 
 describe("assistant text renderers of a suspended extension", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let session: AgentSession;
 	let mode: InteractiveMode;
-	let term: VirtualTerminal;
+	let term: ModeTerminal;
 	let modelRegistry: ModelRegistry;
 
 	beforeAll(() => {
@@ -43,13 +42,14 @@ describe("assistant text renderers of a suspended extension", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		term = new VirtualTerminal(120, 32);
-		const composer = new Composer({ terminal: term });
-		mode = new InteractiveMode(session, "test", () => {}, undefined, undefined, new EventBus(), composer);
+		term = createModeTerminal({ columns: 120, rows: 32 });
+		mode = new InteractiveMode(session, "test", () => {}, undefined, undefined, new EventBus(), term.frame);
 	});
 
 	afterEach(async () => {
 		mode?.stop();
+		await mode?.shell.stop();
+		term?.dispose();
 		await session?.dispose();
 		authStorage?.close();
 		tempDir?.removeSync();
@@ -108,11 +108,7 @@ describe("assistant text renderers of a suspended extension", () => {
 		return runner;
 	}
 
-	const chat = () =>
-		mode.chatContainer
-			.render(120)
-			.map(row => Bun.stripANSI(row).trimEnd())
-			.join("\n");
+	const chat = () => transcriptText(mode.shell);
 
 	it("stops drawing with them while suspended, and draws with them again on resume", async () => {
 		const runner = await initWithShoutingExtension();

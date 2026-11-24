@@ -21,9 +21,9 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { TUI } from "@oh-my-pi/pi-tui";
+import type { PresentedFrame } from "@oh-my-pi/pi-tui";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { STREAM_FLUSH_INTERVAL_MS, StreamPaintEncoder } from "./paint-encoder";
+import { STREAM_FLUSH_INTERVAL_MS, type StreamFrameSource, StreamPaintEncoder, seedFrame } from "./paint-encoder";
 import { isDimension, isSessionFrame, type StreamScreenFrame } from "./protocol";
 import type { StreamRedactor } from "./redactor";
 
@@ -130,7 +130,7 @@ function isRecordingHeader(value: unknown): value is RecordingHeader {
 }
 
 export interface SessionRecorderOptions {
-	tui: TUI;
+	frames: StreamFrameSource;
 	redactor: StreamRedactor;
 	title: string;
 	/** Destination file; parent directories are created. */
@@ -155,7 +155,7 @@ export class SessionRecorder {
 
 	private constructor(options: SessionRecorderOptions) {
 		this.path = options.path;
-		const size = { columns: options.tui.terminal.columns, rows: options.tui.terminal.rows };
+		const size = options.frames.size();
 		this.#encoder = new StreamPaintEncoder(size, options.redactor);
 		this.#writer = Bun.file(options.path).writer();
 		const header: RecordingHeader = {
@@ -166,16 +166,18 @@ export class SessionRecorder {
 			createdAt: new Date().toISOString(),
 		};
 		this.#writer.write(`${JSON.stringify(header)}\n`);
-		this.#unsubscribe = options.tui.addPaintListener(paint => {
-			this.#encoder.push(paint);
+		const observe = (frame: PresentedFrame): void => {
+			this.#encoder.push(frame);
 			this.#lastPaintAt = performance.now() - this.#startedAt;
 			this.#flushTimer ??= setTimeout(() => {
 				this.#flushTimer = undefined;
 				this.#flush();
 			}, STREAM_FLUSH_INTERVAL_MS).unref();
-		});
+		};
+		this.#unsubscribe = options.frames.onFrame(observe);
 		// Seed the recording with the current screen instead of waiting for the next change.
-		options.tui.requestRender(true);
+		const seed = seedFrame(options.frames);
+		if (seed) observe(seed);
 	}
 
 	/** Milliseconds recorded so far. */

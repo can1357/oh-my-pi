@@ -21,7 +21,7 @@ import {
 	type FileContents,
 	type FileStreamUpdate,
 	type MediaRef,
-} from "@oh-my-pi/pi-tui/apps/git/state";
+} from "./model/state";
 
 /** SHA of git's canonical empty tree: diff base for a root commit. */
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";

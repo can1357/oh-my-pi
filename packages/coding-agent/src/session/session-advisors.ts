@@ -42,7 +42,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { extractHttpStatusFromError, logger, prompt } from "@oh-my-pi/pi-utils";
-import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
+import type { AdvisorConfig } from "../advisor/advisor-config-types";
 import {
 	ADVISOR_DEFAULT_BUDGET_PER_UPDATE,
 	ADVISOR_DEFAULT_TOOL_NAMES,
@@ -88,7 +88,7 @@ import { serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/s
 import type { Settings } from "../config/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "../cursor";
 import { bridgeToolMap } from "../cursor-bridge-tools";
-import { estimateContextToolSchemaTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { estimateContextToolSchemaTokens } from "./context-usage";
 import type { PlanModeState } from "../plan-mode/state";
 import advisorBoundaryGuidance from "../prompts/advisor/boundary-guidance.md" with { type: "text" };
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
@@ -100,7 +100,7 @@ import {
 	shouldDisableReasoning,
 	toReasoningEffort,
 	automaticThinkingLevel,
-} from "@oh-my-pi/pi-tui/thinking";
+} from "../thinking/levels";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ClientBridge } from "./client-bridge";
 import { resolveCompactionMethodOrder, resolveMethodSettings } from "./compaction-methods";

@@ -104,7 +104,33 @@ const PREPAINT_SAFE_FLAGS: Record<string, true> = {
 	"--no-title": true,
 	"--no-prewalk": true,
 	"--no-pty": true,
+	// `-e`/`--extension` only registers a local extension path; the extension
+	// loads later, so the speculative first frame stays valid (issue #20158).
+	// These take a value, so they are handled by `isPrepaintSafeArgv`.
 };
+
+/**
+ * Flags in `PREPAINT_SAFE_FLAGS` whose single value follows as the next argv
+ * token. `--extension=value` needs no special handling: it is one token that
+ * matches the flag directly.
+ */
+const PREPAINT_SAFE_VALUE_FLAGS: ReadonlySet<string> = new Set(["-e", "--extension"]);
+
+/** True when every token in `argv` still yields a valid speculative first frame. */
+export function isPrepaintSafeArgv(argv: readonly string[]): boolean {
+	for (let index = 0; index < argv.length; index++) {
+		const arg = argv[index]!;
+		if (PREPAINT_SAFE_VALUE_FLAGS.has(arg)) {
+			// The path value belongs to the flag; skip it. A missing value is
+			// a usage error the regular parse reports later.
+			index++;
+			continue;
+		}
+		if (PREPAINT_SAFE_VALUE_FLAGS.has(arg.split("=", 1)[0]!)) continue;
+		if (PREPAINT_SAFE_FLAGS[arg] !== true) return false;
+	}
+	return true;
+}
 
 /** Complete the OS-visible process-name setup after speculative first paint. */
 async function setFullProcessName(): Promise<void> {
@@ -562,7 +588,7 @@ export async function runCli(argv: string[]): Promise<void> {
 		!process.env.PI_TIMING &&
 		process.stdin.isTTY === true &&
 		process.stdout.isTTY === true &&
-		resolvedArgv.every(arg => PREPAINT_SAFE_FLAGS[arg] === true)
+		isPrepaintSafeArgv(resolvedArgv)
 	) {
 		// Intentional exception to the static-import convention: this latency boundary
 		// keeps the TUI graph out of worker, subcommand, help, and version launches.
