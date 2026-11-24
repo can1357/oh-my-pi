@@ -71,7 +71,7 @@
 - `tui.maxInlineImageColumns` and `tui.maxInlineImageRows` limit transcript pictures again, and a change applies to the pictures already on screen
 - Terminals that draw images show the picture of an image `read` and of a user-run command's output again instead of only its placeholder
 - In Tern, reading a media file (image, PDF, video, audio, 3D model) opens it in the media viewer again, capped at the inline image height, for single and grouped reads
-- Tight Layout (`tui.tight`) works again and applies at once: assistant prose, notices, command output and the dock's rows give up their one-cell side padding; read and search rows, user bubbles and framed tool cards keep theirs
+- Tight Layout (`tui.tight`) works again and applies at once: assistant prose, notices, command output, Read and search rows and the dock's rows give up their one-cell side padding, so they share one left edge; user bubbles and framed tool cards keep theirs
 - `omp gallery` draws aliased tool samples with their real tool's look, and its path and status segment samples match the status line
 - Extensions importing `@oh-my-pi/omptype` resolve to the host's copy, so they load offline and after Bun prunes the package's cached registry manifest; the bare import used to fall back to the install cache and fail the extension load
 - `--no-extensions` no longer imports custom tool modules from `.omp/tools`, `.claude/tools`, `.codex/tools`, or installed plugins; tools from explicitly passed `-e`/`--hook` packages still load

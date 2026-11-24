@@ -78,7 +78,7 @@ export interface ToolLook {
 	 * setting, while its compact row stays still unless {@link animated}.
 	 */
 	readonly clocked?: boolean;
-	/** A frameless look set in by one cell, in line with prose and the read row. */
+	/** A frameless look that takes the standard terminal inset, like prose. */
 	readonly inset?: boolean;
 	/** The transcript wraps the look in the custom-tool box: one blank row and one cell of padding around it, tinted by status. */
 	readonly boxed?: boolean;

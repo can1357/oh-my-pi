@@ -1,12 +1,13 @@
 /**
- * `read-group`: a run of reads. No read yet: ` • Read`. One row: ` ✔ Read
- * src/a.ts:1-20` (status glyph, accent path) with its usage indented under
- * it. Several: ` • Read (2)` over a branch tree of rows (dim directory, file
- * name in the file color, muted selectors, a status glyph unless it
- * succeeded) with each request's usage under its last row. Content previews
- * are framed code (or Markdown) cells titled `Read <path>`, three rows while
- * folded, each followed by its read's usage. A presenter's compact read is
- * its glyph and label over its rows. Reads {@link ReadGroupTerm}.
+ * `read-group`: a run of reads with the standard prose inset. No read yet:
+ * `• Read`. One read: `✔ Read src/a.ts:1-20` (status glyph, accent path) with
+ * usage indented below. Several: `• Read (2)` over a branch tree of rows
+ * (dim directory, colored file name, muted selectors, a status glyph unless
+ * it succeeded) with each request's usage under its last row. At the edge,
+ * content previews are framed code or Markdown cells titled `Read <path>`,
+ * three rows while folded, each followed by its read's usage. A presenter's
+ * compact read keeps its glyph and label at the edge over its rows.
+ * Reads {@link ReadGroupTerm}.
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
@@ -123,18 +124,20 @@ function paintReadGroup(node: UiNode, cx: PaintContext): Block {
 		};
 	}
 	const bullet = theme.symbols.symbol("format.bullet");
+	const pad = " ".repeat(terminalPaddingX());
+	const indent = `${pad}  `;
 	const previews = (term.previews ?? []).flatMap(preview => previewRows(cx, preview, width));
-	if (!term.count) return { rows: wrap(` ${bullet} ${title(cx)}`, width) };
+	if (!term.count) return { rows: wrap(`${pad}${bullet} ${title(cx)}`, width) };
 	if (term.count === 1) {
 		const rows: string[] = [];
 		const single = term.single;
 		if (single) {
-			rows.push(...wrap(` ${glyph(cx, single.status)} ${title(cx)} ${headPath(cx, single)}`.trimEnd(), width));
-			for (const usage of single.usage) rows.push(...wrap(theme.fg("dim", `   ${usage}`), width));
+			rows.push(...wrap(`${pad}${glyph(cx, single.status)} ${title(cx)} ${headPath(cx, single)}`.trimEnd(), width));
+			for (const usage of single.usage) rows.push(...wrap(theme.fg("dim", indent + usage), width));
 		}
 		return { rows: [...rows, ...previews] };
 	}
-	const rows = wrap(` ${bullet} ${title(cx)}${theme.fg("dim", ` (${term.count})`)}`, width);
+	const rows = wrap(`${pad}${bullet} ${title(cx)}${theme.fg("dim", ` (${term.count})`)}`, width);
 	const tree = term.tree ?? [];
 	const branch = theme.symbols.symbol("tree.branch");
 	const last = theme.symbols.symbol("tree.last");
@@ -148,13 +151,13 @@ function paintReadGroup(node: UiNode, cx: PaintContext): Block {
 		const status = row.status === "success" ? "" : `${glyph(cx, row.status)} `;
 		rows.push(
 			...hangingWrap(
-				`   ${theme.fg("dim", connector)} `,
-				`   ${continuation} `,
+				`${indent}${theme.fg("dim", connector)} `,
+				`${indent}${continuation} `,
 				`${status}${rowPath(cx, row)}`,
 				width,
 			),
 		);
-		for (const usage of row.usage) rows.push(...wrap(theme.fg("dim", `   ${continuation} ${usage}`), width));
+		for (const usage of row.usage) rows.push(...wrap(theme.fg("dim", `${indent}${continuation} ${usage}`), width));
 	});
 	return { rows: [...rows, ...previews] };
 }

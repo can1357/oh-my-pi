@@ -61,7 +61,7 @@ function plainRows(rows: readonly string[]): string[] {
 	return rows.map(row => stripEscapes(row).trimEnd());
 }
 
-test("live Tight Layout reflows assistant prose, keeps search and read one cell in, and leaves the user bubble alone", () => {
+test("assistant prose, search and read share a left edge in both layouts, without moving the user bubble", () => {
 	const settings = layoutSettings();
 	createRoot(dispose => {
 		try {
@@ -88,8 +88,8 @@ test("live Tight Layout reflows assistant prose, keeps search and read one cell 
 
 			cfgTuiTight.override(settings, true);
 			expect(plainRows(assistantRows())).toEqual([TEXT]);
-			expect(searchRows()).toEqual(off.search);
-			expect(readRows()).toEqual(off.read);
+			expect(plainRows(searchRows()).find(row => row.includes("Glob"))).toMatch(/^\S/);
+			expect(plainRows(readRows()).find(row => row.includes("Read"))).toMatch(/^\S/);
 			expect(userRows()).toEqual(off.user);
 			expect(describeTree(assistant, env)).toEqual(native);
 
