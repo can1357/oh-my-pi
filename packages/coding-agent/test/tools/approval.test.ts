@@ -449,9 +449,29 @@ describe("tool-owned dynamic approval declarations", () => {
 			"dd if=image.img of=/dev/ttyS0",
 			"dd if=image.img of=/dev/nullb0",
 			"dd if=big.mov of=/dev/null; dd if=image.iso of=/dev/sdb",
+			"rm -fr /tmp/x",
+			"rm -rf /usr",
+			"sudo rm -rf /",
+			"cd /tmp && rm -rf /",
+			"bash -c 'rm -rf /'",
+			"echo \"rm -rf /\" | sh",
+			"echo $(rm -rf /)",
+			"xargs sh -c 'rm -rf /'",
+			"ssh build.example \"rm -rf /\"",
 		]) {
 			expect(bashApproval(command)).toEqual({ tier: "exec", override: true, reason: "Critical pattern detected" });
 		}
+	});
+
+	it.each([
+		"grep -rn 'rm -rf' docs && echo ok",
+		"grep -rn 'rm -rf /' docs",
+		'git commit -m "drop the rm -rf / rule"',
+		'echo "sudo rm -rf /etc"',
+		"grep -rn 'sudo rm' docs",
+		"grep -rn 'rm --no-preserve-root' docs",
+	])("does not judge quoted text of a read-only command as a delete: %s", command => {
+		expect(bashApproval(command)).toBe("exec");
 	});
 
 	it("does not flag benign bash commands", () => {
