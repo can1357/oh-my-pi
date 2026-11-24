@@ -292,6 +292,7 @@ const CODEX_WEBSOCKET_IDLE_TIMEOUT_MS = Number($env.PI_CODEX_WEBSOCKET_IDLE_TIME
 const CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS = Number($env.PI_CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS || 300_000);
 const CODEX_WEBSOCKET_RETRY_BUDGET = Number($env.PI_CODEX_WEBSOCKET_RETRY_BUDGET || CODEX_MAX_RETRIES);
 const CODEX_WEBSOCKET_RETRY_DELAY_MS = Number($env.PI_CODEX_WEBSOCKET_RETRY_DELAY_MS || CODEX_RETRY_DELAY_MS);
+const CODEX_WEBSOCKET_FALLBACK_COOLDOWN_MS = Number($env.PI_CODEX_WEBSOCKET_FALLBACK_COOLDOWN_MS || 300_000);
 const CODEX_WEBSOCKET_TRANSPORT_ERROR_PREFIX = "Codex websocket transport error";
 // The native-lane steering rejection is replayable: the session stops steering
 // first, so the replay cannot trip it again.
@@ -1312,6 +1313,7 @@ function createCodexRequestContext(
 			: sharedWebsocketState;
 	if (isolatedTransportState && websocketState && sharedWebsocketState) {
 		websocketState.disableWebsocket = sharedWebsocketState.disableWebsocket;
+		websocketState.lastFallbackAt = sharedWebsocketState.lastFallbackAt;
 		websocketState.modelsEtag = sharedWebsocketState.modelsEtag;
 	}
 	const metadataSessionId = transportSessionId ?? crypto.randomUUID();
@@ -3471,8 +3473,12 @@ function shouldUseCodexWebSocket(
 ): boolean {
 	// Explicitly disabled by the model or session state.
 	if (model.preferWebsockets === false) return false;
-	// Explicitly disabled by the session state.
-	if (!state || state.disableWebsocket) return false;
+	if (!state) return false;
+	// A fallback holds for one cooldown after its failure; the first attempt after that is the retry.
+	if (state.disableWebsocket) {
+		if (Date.now() - (state.lastFallbackAt ?? 0) < CODEX_WEBSOCKET_FALLBACK_COOLDOWN_MS) return false;
+		state.disableWebsocket = false;
+	}
 	// Env val > Preference
 	const envVal = getOpenAICodexWebSocketEnvValue();
 	if (envVal !== undefined) return envVal;
