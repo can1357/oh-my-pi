@@ -606,6 +606,8 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					content: modifiedContent,
 					details: modifiedDetails,
 					providerMetadata: result.providerMetadata,
+					...(result.useless ? { useless: true } : {}),
+					...(result.noop ? { noop: true } : {}),
 					...(effectiveError ? { isError: true } : {}),
 				};
 			}
