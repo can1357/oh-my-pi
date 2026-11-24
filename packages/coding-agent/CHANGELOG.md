@@ -52,7 +52,7 @@
 
 ### Fixed
 
-- Git hooks run by selective commits receive `PI_SESSION_ID`, `PI_SESSION_FILE`, and `PI_TOOL_CALL_ID`, like commands run by `bash` ([#20364](https://github.com/can1357/oh-my-pi/issues/20364)).
+- Git hooks run by selective commits receive `PI_SESSION_ID`, `PI_SESSION_FILE`, and `PI_TOOL_CALL_ID`, like commands run by `bash` ([#20364](https://github.com/can1357/oh-my-pi/issues/20364), [#20367](https://github.com/can1357/oh-my-pi/pull/20367) by [@Eridanus117](https://github.com/Eridanus117)).
 - The `ask` tool returns a prefilled `<textarea>` value unchanged: text such as `<name>` or `<tag attr="x">…</tag>` is no longer dropped from it ([#20299](https://github.com/can1357/oh-my-pi/issues/20299))
 - Fixed context token accounting to reflect changes in system prompt sources
 - Cmd+A selects the full draft even when Tern forwards the keystroke; typing or pasting replaces the selection. Click the model name or chevron in Tern, or press Alt+P, to open the searchable `/switch` sheet without losing the draft.
