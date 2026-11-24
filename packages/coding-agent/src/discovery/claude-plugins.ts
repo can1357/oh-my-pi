@@ -6,7 +6,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isRecord, logger } from "@oh-my-pi/pi-utils";
+import { isEnoent, isRecord, logger } from "@oh-my-pi/pi-utils";
 import { isUserSourceEnabled, registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type Hook, hookCapability } from "../capability/hook";
@@ -137,12 +137,17 @@ async function readMarketplaceRootManifest(root: ClaudePluginRoot): Promise<Clau
  * Whether a path a plugin manifest names stays inside the plugin root. The lexical
  * check runs first. When the target exists, its symlinks are resolved and the real
  * target must sit under the real root, so a link inside the root that points outside
- * it is refused. A missing target has nothing to read and passes.
+ * it is refused. A missing target has nothing to read and passes; any other failure
+ * to resolve the target means it cannot be checked, so it is refused.
  */
 async function isWithinPluginRoot(rootPath: string, targetPath: string): Promise<boolean> {
 	if (!isContained(rootPath, targetPath)) return false;
-	const realTarget = await realpathIfExists(targetPath);
-	if (realTarget === null) return true;
+	let realTarget: string;
+	try {
+		realTarget = await fs.realpath(targetPath);
+	} catch (error) {
+		return isEnoent(error);
+	}
 	const realRoot = (await realpathIfExists(rootPath)) ?? rootPath;
 	return isContained(realRoot, realTarget);
 }
