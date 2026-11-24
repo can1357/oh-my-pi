@@ -903,7 +903,7 @@ describe("todo backend", () => {
 			await settled(session);
 			const before = backend.calls.length;
 
-			// `init` starts the first task, so the list equal to the last-sent one is a copy of the held list.
+			// omp's list is still the one last sent (the call failed); `list("a")` would not equal it, since `init` started `a`.
 			session.commitTodoPhases(structuredClone(session.getTodoPhases()));
 			await session.dispose();
 

@@ -1916,6 +1916,7 @@ export class ExtensionRunner {
 		void awaitDeliveryTurn(settled, deadline, this.#todoGivenUp.signal)
 			.then(() => {
 				if (this.#todoClosed) return;
+				// Again: a send during the wait cleared it, and the late answer may have written since.
 				this.#todoStale = true;
 				resend();
 			})
