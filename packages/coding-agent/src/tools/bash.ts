@@ -262,32 +262,62 @@ function isCriticalRmCall(words: readonly string[]): boolean {
 }
 
 /**
- * A word a critical rm pattern can start at: an rm or a sudo that ends the word, so `"/bin/rm"` and `$'rm'`
- * count, while an argument that only ends in rm after a space, such as `x rm`, does not.
+ * Commands that run their arguments, or one of them, as a shell line: their words are read joined, because the
+ * shell joins them (`eval 'rm -rf' /`). Any other command's words are read one by one (see isCriticalRemoval).
  */
-const RM_RUN_WORD = /(?:^|[^\w\s])(?:rm|sudo)$/i;
+const SHELL_LINE_COMMANDS = new Set([
+	"bash",
+	"busybox",
+	"command",
+	"dash",
+	"doas",
+	"env",
+	"eval",
+	"exec",
+	"ksh",
+	"nice",
+	"nohup",
+	"sh",
+	"ssh",
+	"su",
+	"sudo",
+	"time",
+	"timeout",
+	"watch",
+	"xargs",
+	"zsh",
+]);
+
+/**
+ * A word a critical rm pattern can start at: an rm or a sudo that is a command word, by its name or by a path
+ * (`rm`, `/bin/rm`) or after `$` (`$'rm'`). An argument that only ends in rm, such as `*.rm`, does not.
+ */
+const RM_RUN_WORD = /(?:^|[/$])(?:rm|sudo)$/i;
 
 /**
  * Whether a bash command runs a critical rm. When every simple command is judged from its words (see
  * isJudgedSimpleCommand), the rm calls are read from those words, so text quoted inside a grep pattern
  * or a commit message is not a delete. Otherwise the line may run its text, so the rm text patterns are
- * matched on the raw command and on each simple command's quote-removed words: each word alone, and, from
- * each word that ends in rm or sudo (see RM_RUN_WORD) to the end of its simple command, those words joined.
- * A shell, an interpreter, sudo, xargs, an assignment whose value is run, or a pipe into one of them can run
- * that text. Words before an rm or sudo are not joined in, so `rg 'rm -rf' /tmp/docs` is not an rm.
+ * matched on the raw command and on each simple command's quote-removed words. A command in SHELL_LINE_COMMANDS
+ * has all its words joined. Any other command's words are matched one by one, and from each word that is an rm
+ * or sudo command (see RM_RUN_WORD) to the end of its simple command, those words joined, so an argument that
+ * quotes rm text, such as `rg 'rm -rf' /tmp/docs`, is not joined with the words after it.
  */
 function isCriticalRemoval(command: string): boolean {
 	const simple = tokenizeShellSegments(command);
 	if (!UNREAD_BASH_SYNTAX.test(command) && simple.every(isJudgedSimpleCommand)) return simple.some(isCriticalRmCall);
 	return (
 		CRITICAL_RM_TEXT_PATTERNS.some(pattern => pattern.test(command)) ||
-		simple.some(words =>
-			words.some((word, index) =>
+		simple.some(words => {
+			const name = (words[0] ?? "").toLowerCase().replace(/^.*\//, "");
+			if (SHELL_LINE_COMMANDS.has(name))
+				return CRITICAL_RM_TEXT_PATTERNS.some(pattern => pattern.test(words.join(" ")));
+			return words.some((word, index) =>
 				CRITICAL_RM_TEXT_PATTERNS.some(pattern =>
 					pattern.test(RM_RUN_WORD.test(word) ? words.slice(index).join(" ") : word),
 				),
-			),
-		)
+			);
+		})
 	);
 }
 
