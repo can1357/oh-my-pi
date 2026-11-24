@@ -10,7 +10,9 @@ import { prepareElementUpload } from "@oh-my-pi/pi-coding-agent/tools/browser/in
 import { ensureChromiumExecutable, RENDERER_PRIORITY_ARGS } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import {
+	filesAreOpenable,
 	openUploadSource,
+	readsOwnPaths,
 	sweepUploadStaging,
 	type UploadRoute,
 	UploadStaging,
@@ -83,6 +85,8 @@ interface ProxyOptions {
 	maxMessageBytes?: number;
 	/** Answer `DOM.setFileInputFiles` with `Not allowed`, as Chrome does for a relay without file-URL access. */
 	denyFilePaths?: boolean;
+	/** Hand the browser a missing path for these files, as a browser that cannot see their folder would. */
+	hideFiles?: string[];
 }
 
 interface ProxiedSocket {
@@ -93,8 +97,8 @@ interface ProxiedSocket {
 
 interface CdpProxy {
 	port: number;
-	/** `DOM.setFileInputFiles` requests seen, forwarded or refused. */
-	filePathCalls: number;
+	/** The `files` of every `DOM.setFileInputFiles` request seen, forwarded, rewritten or refused. */
+	filePaths: string[][];
 	stop(): void;
 }
 
@@ -102,7 +106,7 @@ const LARGE_MESSAGE_BYTES = 1024 * 1024;
 
 /** Forward CDP to Chrome, applying `options` to what omp sends. */
 function startCdpProxy(chromePort: number, options: ProxyOptions): CdpProxy {
-	const proxy = { port: 0, filePathCalls: 0, stop: () => {} };
+	const proxy: CdpProxy = { port: 0, filePaths: [], stop: () => {} };
 	const server = Bun.serve<ProxiedSocket>({
 		hostname: "127.0.0.1",
 		port: 0,
@@ -126,20 +130,40 @@ function startCdpProxy(chromePort: number, options: ProxyOptions): CdpProxy {
 			},
 			async message(ws, message) {
 				const size = typeof message === "string" ? message.length : message.byteLength;
+				let outgoing = message;
 				if (size < LARGE_MESSAGE_BYTES) {
 					const text = typeof message === "string" ? message : message.toString();
 					if (text.includes('"DOM.setFileInputFiles"')) {
-						proxy.filePathCalls++;
+						const request = JSON.parse(text) as {
+							id: number;
+							sessionId?: string;
+							params?: { files?: string[] };
+						};
+						const files = request.params?.files ?? [];
+						proxy.filePaths.push(files);
 						if (options.denyFilePaths) {
-							const { id, sessionId } = JSON.parse(text) as { id: number; sessionId?: string };
-							ws.send(JSON.stringify({ id, sessionId, error: { code: -32000, message: "Not allowed" } }));
+							ws.send(
+								JSON.stringify({
+									id: request.id,
+									sessionId: request.sessionId,
+									error: { code: -32000, message: "Not allowed" },
+								}),
+							);
 							return;
+						}
+						const hide = options.hideFiles;
+						if (hide && files.some(file => hide.includes(file))) {
+							request.params = {
+								...request.params,
+								files: files.map(file => (hide.includes(file) ? `${file}.missing` : file)),
+							};
+							outgoing = JSON.stringify(request);
 						}
 					}
 				}
 				const { upstream } = ws.data;
-				if (upstream?.readyState === WebSocket.OPEN) upstream.send(message);
-				else ws.data.pending.push(message);
+				if (upstream?.readyState === WebSocket.OPEN) upstream.send(outgoing);
+				else ws.data.pending.push(outgoing);
 			},
 			close(ws) {
 				ws.data.upstream?.close();
@@ -290,9 +314,41 @@ async function stagingFolders(): Promise<Set<string>> {
 	return new Set((await fs.readdir(os.tmpdir())).filter(name => name.startsWith("omp-uploads-")));
 }
 
+/** Staging folders omp made since `before`. */
+async function stagingFoldersSince(before: Set<string>): Promise<string[]> {
+	return [...(await stagingFolders())].filter(
+		name => !before.has(name) && name.startsWith(`omp-uploads-${process.pid}-`),
+	);
+}
+
+/** On the paths route a browser reads staged copies on macOS, the files' own paths elsewhere. */
+const STAGED_COPIES = process.platform === "darwin";
+
+/** The text of the file each target received: the input, the chooser's input and the drop zone's. */
+const readTexts = `return await tab.evaluate(() => Promise.all([
+	document.querySelector("#direct").files[0],
+	document.querySelector("#trigger-input").files[0],
+	window.dropped[0],
+].map(file => file.text())));`;
+
+/** What each of the five targets holds: name, text, type and mtime, or the read's error; with the inputs that fired. */
+const readHanded = `return await tab.evaluate(async () => {
+	const files = [
+		document.querySelector("#direct").files[0],
+		document.querySelector("#trigger-input").files[0],
+		document.querySelector("#handle").files[0],
+		document.querySelector("#host").shadowRoot.querySelector("#shadow").files[0],
+		window.dropped[0],
+	];
+	return {
+		files: await Promise.all(files.map(file => file.text().then(text => [file.name, text, file.type, file.lastModified], error => [error.name]))),
+		composedInputs: window.composedInputs,
+	};
+});`;
+
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser uploadFile into a browser omp did not launch", () => {
 	describe.each(["paths", "contents"] as const)("on the %s route", route => {
-		test("hands over each file as the user's own pick would, readable after the original is gone", async () => {
+		test("hands over each file as the user's own pick would; a copy or the contents outlive the original", async () => {
 			const before = await stagingFolders();
 			const { run, close, proxy } = await openConnectedTab(`browser-upload-${route}`, {
 				proxy: routeProxy(route),
@@ -312,33 +368,30 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser uploadFile into a browser omp did 
 	() => tab.uploadFile("#drop", ${file}),`),
 				);
 				expect(errors).toEqual([]);
-				// Chrome reads a picked file lazily: the staged copy, or the contents, outlive the original.
-				await fs.rm(gone);
-				const received = await run(`return await tab.evaluate(async () => {
-	const files = [
-		document.querySelector("#direct").files[0],
-		document.querySelector("#trigger-input").files[0],
-		document.querySelector("#handle").files[0],
-		document.querySelector("#host").shadowRoot.querySelector("#shadow").files[0],
-		window.dropped[0],
-	];
-	return {
-		files: await Promise.all(files.map(file => file.text().then(text => [file.name, text, file.type, file.lastModified], error => [error.name]))),
-		composedInputs: window.composedInputs,
-	};
-});`);
 				const expected = [path.basename(gone), "gone soon", "text/plain", modified.getTime()];
-				expect(received).toEqual({
+				const handed = {
 					files: [expected, expected, expected, expected, expected],
 					composedInputs: ["direct", "trigger-input", "handle", "shadow"],
-				});
-				// The route check, then one call per path upload, versus only the refused route check.
-				expect(proxy.filePathCalls).toBe(route === "paths" ? 6 : 1);
-				created = [...(await stagingFolders())].filter(
-					name => !before.has(name) && name.startsWith(`omp-uploads-${process.pid}-`),
-				);
-				// One folder for the tab's copies; the contents route copies nothing, so it makes none.
-				expect(created).toHaveLength(route === "paths" ? 1 : 0);
+				};
+				// Chrome reads a picked file lazily: the staged copy, or the contents, outlive the original. Away from
+				// macOS the paths route reads the originals, so once this one is gone, never read, the page cannot read it.
+				const copies = route === "paths" && STAGED_COPIES;
+				await fs.rm(gone);
+				const missing = {
+					files: Array.from({ length: 5 }, () => ["NotFoundError"]),
+					composedInputs: handed.composedInputs,
+				};
+				expect(await run(readHanded)).toEqual(route === "contents" || copies ? handed : missing);
+				// The route check's token; then one path per upload for a staged copy or, for the file's own path, twice for
+				// an input or a chooser (a detached picker proves the browser opens the file, then the real input takes it)
+				// and once for the drop zone. The contents route sees only its refused route check.
+				expect(proxy.filePaths).toHaveLength(route === "paths" ? (copies ? 6 : 10) : 1);
+				if (route === "paths" && !copies) {
+					expect(proxy.filePaths.slice(1)).toEqual(Array.from({ length: 9 }, () => [gone]));
+				}
+				// One folder for the tab's copies; the contents route copies nothing, nor does a browser reading the originals.
+				created = await stagingFoldersSince(before);
+				expect(created).toHaveLength(copies ? 1 : 0);
 			} finally {
 				await close();
 			}
@@ -432,7 +485,9 @@ return { errors, dropped: await tab.evaluate(() => window.dropped.map(file => fi
 	});
 
 	test("stages a folder whole for a directory input", async () => {
+		const before = await stagingFolders();
 		const { run, close } = await openConnectedTab("browser-upload-folder", { proxy: routeProxy("paths") });
+		let created: string[] = [];
 		try {
 			const folder = path.join(tempDir, "album");
 			await fs.mkdir(path.join(folder, "nested"), { recursive: true });
@@ -440,16 +495,20 @@ return { errors, dropped: await tab.evaluate(() => window.dropped.map(file => fi
 			await Bun.write(path.join(folder, "nested", "two.txt"), "two");
 			expect(await run(collectErrors(`() => tab.uploadFile("#folder", "album"),`))).toEqual([]);
 			const received = await run(`return await tab.evaluate(() => Promise.all(
-	[...document.querySelector("#folder").files].map(async file => [file.webkitRelativePath, await file.text()]),
+[...document.querySelector("#folder").files].map(async file => [file.webkitRelativePath, await file.text()]),
 ).then(files => files.sort()));`);
 			// Chrome expands a folder path into its files, as it does for a user's pick of that folder.
 			expect(received).toEqual([
 				["album/nested/two.txt", "two"],
 				["album/one.txt", "one"],
 			]);
+			// A folder is copied on every platform, whatever the platform lets a browser read of a file's own path.
+			created = await stagingFoldersSince(before);
+			expect(created).toHaveLength(1);
 		} finally {
 			await close();
 		}
+		expect([...(await stagingFolders())].filter(name => created.includes(name))).toEqual([]);
 	}, 60_000);
 
 	test("refuses a folder by name where the browser takes only contents", async () => {
@@ -504,10 +563,11 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser uploadFile into a browser omp laun
 		const before = await stagingFolders();
 		await prelude.invoke({ action: "open", name, url }, context);
 		try {
-			const file = path.join(tempDir, "recycled.txt");
-			await Bun.write(file, "outlives its worker");
-			expect(valueOf(await run(collectErrors(`() => tab.uploadFile("#direct", "recycled.txt"),`)))).toEqual([]);
-			await fs.rm(file);
+			// A folder is staged on every platform; away from macOS a file goes over by its own path.
+			const album = path.join(tempDir, "survivor-album");
+			await Bun.write(path.join(album, "recycled.txt"), "outlives its worker");
+			expect(valueOf(await run(collectErrors(`() => tab.uploadFile("#folder", "survivor-album"),`)))).toEqual([]);
+			await fs.rm(album, { recursive: true });
 			// Request interception that cannot be reset after the run moves the tab to a new worker.
 			const recycled = await run(`await page.setRequestInterception(true);
 const client = page._client();
@@ -515,14 +575,145 @@ const send = client.send.bind(client);
 client.send = (method, ...args) => (method === "Fetch.disable" ? Promise.withResolvers().promise : send(method, ...args));
 return "done";`);
 			expect(JSON.stringify(recycled.content)).toContain("reattached to a new worker");
-			const read = await run(`return await tab.evaluate(() => document.querySelector("#direct").files[0].text());`);
-			expect(valueOf(read)).toBe("outlives its worker");
+			const read = await run(`return await tab.evaluate(() => Promise.all(
+[...document.querySelector("#folder").files].map(async file => [file.webkitRelativePath, await file.text()])));`);
+			expect(valueOf(read)).toEqual([["survivor-album/recycled.txt", "outlives its worker"]]);
 		} finally {
 			await prelude.invoke({ action: "close", name }, context);
 		}
 		// omp closed the page it launched, the last reader of the copies.
 		expect([...(await stagingFolders())].filter(folder => !before.has(folder))).toEqual([]);
 	}, 60_000);
+});
+
+describe.skipIf(!CHROMIUM_AVAILABLE || process.platform === "darwin")(
+	"browser uploadFile by the files' own paths",
+	() => {
+		test("gives the browser each file's own path, read as the user's own pick would be, and stages nothing", async () => {
+			const before = await stagingFolders();
+			const { run, close, proxy } = await openConnectedTab("browser-upload-own-paths", {
+				proxy: routeProxy("paths"),
+			});
+			try {
+				const own = path.join(tempDir, "own.txt");
+				await Bun.write(own, "by its own path");
+				const modified = new Date("2020-01-02T03:04:05Z");
+				await fs.utimes(own, modified, modified);
+				const errors = await run(
+					collectErrors(`() => tab.uploadFile("#direct", "own.txt"),
+() => tab.uploadFile("#trigger", "own.txt"),
+async () => (await tab.waitFor("#handle")).uploadFile("own.txt"),
+() => tab.uploadFile("pierce/#shadow", "own.txt"),
+() => tab.uploadFile("#drop", "own.txt"),`),
+				);
+				expect(errors).toEqual([]);
+				const expected = ["own.txt", "by its own path", "text/plain", modified.getTime()];
+				expect(await run(readHanded)).toEqual({
+					files: [expected, expected, expected, expected, expected],
+					composedInputs: ["direct", "trigger-input", "handle", "shadow"],
+				});
+				// The route check's token; then the file's own path for each upload, twice for an input or a chooser (a
+				// detached picker proves the browser opens the file, then the real input takes it) and once for the drop zone.
+				expect(proxy.filePaths).toEqual([[expect.any(String)], ...Array.from({ length: 9 }, () => [own])]);
+				// Nothing was copied.
+				expect(await stagingFoldersSince(before)).toEqual([]);
+			} finally {
+				await close();
+			}
+		}, 60_000);
+
+		test("stages a copy for a file the browser cannot see, which outlives the original", async () => {
+			const before = await stagingFolders();
+			const unseen = path.join(tempDir, "unseen.txt");
+			await Bun.write(unseen, "read from the copy");
+			const { run, close, proxy } = await openConnectedTab("browser-upload-unseen", {
+				proxy: routeProxy("paths", { hideFiles: [unseen] }),
+			});
+			try {
+				const errors = await run(
+					collectErrors(`() => tab.uploadFile("#direct", "unseen.txt"),
+() => tab.uploadFile("#trigger", "unseen.txt"),
+() => tab.uploadFile("#drop", "unseen.txt"),`),
+				);
+				expect(errors).toEqual([]);
+				await fs.rm(unseen);
+				expect(await run(readTexts)).toEqual(["read from the copy", "read from the copy", "read from the copy"]);
+				// Each upload's picker was handed the file's own path and listed a missing file, so a copy followed: onto the
+				// real input, or for the drop zone into a second picker whose files are the drop's.
+				expect(proxy.filePaths.filter(files => files.includes(unseen))).toHaveLength(3);
+				const folder = path.join(os.tmpdir(), (await stagingFoldersSince(before))[0] ?? "no staging folder");
+				expect(
+					proxy.filePaths.filter(files => files.length === 1 && files[0]?.startsWith(`${folder}/`)),
+				).toHaveLength(3);
+			} finally {
+				await close();
+			}
+		}, 60_000);
+	},
+);
+
+describe("a browser reading the files' own paths", () => {
+	test("gets them away from macOS for files, never for a folder", async () => {
+		const file = path.join(tempDir, "own-route.txt");
+		const folder = path.join(tempDir, "own-route-album");
+		await Bun.write(file, "x");
+		await fs.mkdir(path.join(folder, "nested"), { recursive: true });
+		const source = await openUploadSource(file);
+		const album = await openUploadSource(folder);
+		expect(readsOwnPaths([source])).toBe(process.platform !== "darwin");
+		expect(readsOwnPaths([album])).toBe(false);
+		expect(readsOwnPaths([source, album])).toBe(false);
+	});
+
+	test("must list them as given and open each", async () => {
+		const slices: [number, number][] = [];
+		const listed = (name: string, size: number, opens = true) => ({
+			name,
+			size,
+			slice: (start: number, end: number) => {
+				slices.push([start, end]);
+				return {
+					arrayBuffer: async () => {
+						if (!opens) throw new Error("NotReadableError");
+						return new ArrayBuffer(1);
+					},
+				};
+			},
+		});
+		// An empty file is listed complete without a read; another has its last byte read.
+		expect(
+			await filesAreOpenable(
+				[listed("a.txt", 5), listed("b.txt", 0)],
+				[
+					["a.txt", 5],
+					["b.txt", 0],
+				],
+			),
+		).toBe(true);
+		expect(slices).toEqual([[4, 5]]);
+		// Another count, name or size.
+		expect(
+			await filesAreOpenable(
+				[listed("a.txt", 5)],
+				[
+					["a.txt", 5],
+					["b.txt", 0],
+				],
+			),
+		).toBe(false);
+		expect(
+			await filesAreOpenable(
+				[listed("a.txt", 5), listed("b.txt", 0)],
+				[
+					["a.txt", 5],
+					["other.txt", 0],
+				],
+			),
+		).toBe(false);
+		expect(await filesAreOpenable([listed("a.txt", 5)], [["a.txt", 4]])).toBe(false);
+		// Listed with its size, as Chrome lists a path it cannot read, but not openable.
+		expect(await filesAreOpenable([listed("a.txt", 5, false)], [["a.txt", 5]])).toBe(false);
+	});
 });
 
 test("sweeps a staging folder a day after its last upload unless an open tab or a running omp owns it", async () => {

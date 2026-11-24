@@ -21,8 +21,11 @@ import { CANCELLED_RELEASE_POINT, OVERLAY_HOST_TAG } from "./relay/protocol";
 import type { SelectOptionChoice, SelectOptionInput } from "./select-options";
 import {
 	createFilePicker,
+	expectedFiles,
+	filesAreOpenable,
 	openUploadSources,
 	pickedFiles,
+	readsOwnPaths,
 	refuseFolders,
 	setFileInputPaths,
 	type UploadFileInfo,
@@ -1800,8 +1803,32 @@ async function pickFiles(realm: Realm, paths: string[], signal: AbortSignal | un
 }
 
 /**
- * Hand a file input the files: staged copies' paths, or contents streamed into the isolated world. `filling` runs once
- * the files are being set, after staging or streaming has succeeded.
+ * A detached picker's files for `sources` at their own paths, when the browser lists each one with its name and size and
+ * opens it; null when it lists something else (a path it cannot read, one on another machine's file system). Nothing on
+ * the page is touched, so a file the browser cannot read leaves no pick behind.
+ */
+async function pickOwnFiles(
+	realm: Realm,
+	sources: UploadSource[],
+	signal: AbortSignal | undefined,
+): Promise<JSHandle<unknown[]> | null> {
+	const files = await pickFiles(
+		realm,
+		sources.map(source => source.path),
+		signal,
+	);
+	try {
+		if (!(await untilAborted(signal, () => files.evaluate(filesAreOpenable, expectedFiles(sources))))) return null;
+		return files;
+	} catch (error) {
+		await files.dispose().catch(() => undefined);
+		throw error;
+	}
+}
+
+/**
+ * Hand a file input the files: the files' own paths, staged copies' paths, or contents streamed into the isolated world.
+ * `filling` runs once the files are being set: after the browser proved it opens them, or staging or streaming succeeded.
  */
 async function deliverToInput(
 	input: ElementHandle,
@@ -1812,12 +1839,24 @@ async function deliverToInput(
 	filling?: () => void,
 ): Promise<void> {
 	if (route === "paths") {
-		const staged = await staging.stage(sources, signal);
 		// Chrome expands a folder for a `webkitdirectory` input only on the front tab, as when a person picks one; a
 		// tab omp opened in the background is brought forward for this upload alone.
 		if (sources.some(source => source.directory)) {
 			await untilAborted(signal, () => input.frame.page().bringToFront());
 		}
+		// A detached picker proves the browser opens the files where they lie before the real input is touched; a staged
+		// copy stands in for a file it cannot, such as one in a folder a sandboxed browser does not see.
+		const own = sources.map(source => source.path);
+		const opened = readsOwnPaths(sources) ? await pickOwnFiles(input.frame.isolatedRealm(), sources, signal) : null;
+		if (opened) {
+			await opened.dispose().catch(() => undefined);
+			await untilAborted(signal, () => {
+				filling?.();
+				return setFileInputPaths(input, own);
+			});
+			return;
+		}
+		const staged = await staging.stage(sources, signal);
 		await untilAborted(signal, () => {
 			filling?.();
 			return setFileInputPaths(input, staged);
@@ -1843,8 +1882,8 @@ async function deliverToInput(
 }
 
 /**
- * Drop the files on an element, built from staged copies by a detached picker or from streamed contents; fails when
- * nothing on the page read them.
+ * Drop the files on an element: built by a detached picker from the files' own paths or staged copies, or streamed into
+ * the isolated world; fails when nothing on the page read them.
  */
 async function deliverToDropZone(
 	zone: ElementHandle,
@@ -1857,10 +1896,12 @@ async function deliverToDropZone(
 	const realm = zone.frame.isolatedRealm();
 	const target = await untilAborted(signal, () => realm.adoptHandle(zone));
 	try {
+		const own = route === "paths" && readsOwnPaths(sources) ? await pickOwnFiles(realm, sources, signal) : null;
 		const files =
-			route === "paths"
+			own ??
+			(route === "paths"
 				? await pickFiles(realm, await staging.stage(sources, signal), signal)
-				: await streamUploadFiles(realm, sources, signal);
+				: await streamUploadFiles(realm, sources, signal));
 		try {
 			const read = await dropRead(
 				zone,
