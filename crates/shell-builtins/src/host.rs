@@ -274,6 +274,18 @@ impl Host {
 		open_read_in(&self.cwd, self.path_policy.as_deref(), &self.substituted, path.as_ref())
 	}
 
+	/// Opens a file for writing through the installed path policy.
+	///
+	/// `path` resolves against [`Host::cwd`]. With a policy installed the open
+	/// is [`PathPolicy::open`] for `access`, so admission and the filesystem
+	/// open are one call: a symlink swapped in between cannot redirect the
+	/// write. A refusal is an [`io::ErrorKind::PermissionDenied`] error
+	/// carrying the typed [`omp_shell::PathDenied`].
+	pub fn open_write(&self, path: impl AsRef<Path>, access: PathAccess) -> io::Result<File> {
+		let path = resolve_against(&self.cwd, path.as_ref());
+		open_resolved_write(self.path_policy.as_deref(), &path, access)
+	}
+
 	/// Reads a whole file through [`Host::open_read`].
 	pub fn read_file(&self, path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
 		read_all(self.open_read(path)?)
@@ -692,6 +704,36 @@ pub(crate) fn open_resolved_read(policy: Option<&dyn PathPolicy>, path: &Path) -
 			.map_err(io::Error::from),
 		None => File::open(path),
 	}
+}
+
+/// Opens an already resolved, absolute `path` for `access` through `policy`.
+///
+/// This is the write twin of [`open_resolved_read`]. `create_mode` is
+/// `0o666`; the kernel applies the process umask.
+pub(crate) fn open_resolved_write(
+	policy: Option<&dyn PathPolicy>,
+	path: &Path,
+	access: PathAccess,
+) -> io::Result<File> {
+	match policy {
+		Some(policy) => policy
+			.open(path, OpenRequest { access, create_mode: 0o666 })
+			.map_err(io::Error::from),
+		None => open_access(path, access),
+	}
+}
+
+fn open_access(path: &Path, access: PathAccess) -> io::Result<File> {
+	let mut options = File::options();
+	match access {
+		PathAccess::Read => options.read(true),
+		PathAccess::CreateNew => options.write(true).create_new(true),
+		PathAccess::Truncate => options.write(true).create(true).truncate(true),
+		PathAccess::Append => options.append(true).create(true),
+		PathAccess::ReadWrite => options.read(true).write(true).create(true),
+		PathAccess::Write => options.write(true).create(true),
+	};
+	options.open(path)
 }
 
 /// A destination-aware buffered writer for utility output.
