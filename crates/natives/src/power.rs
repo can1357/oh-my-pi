@@ -316,6 +316,10 @@ mod platform {
 					})?)
 				},
 			};
+			Self::screensaver_inhibit(connection, reason)
+		}
+
+		fn screensaver_inhibit(connection: &Connection, reason: &str) -> Result<u32> {
 			let reply = match dbus_rt::block_on(connection.call_method(
 				Some(SCREENSAVER_DESTINATION),
 				SCREENSAVER_PATH,
@@ -353,6 +357,10 @@ mod platform {
 			let Some(connection) = session_bus.as_mut() else {
 				return;
 			};
+			Self::screensaver_uninhibit(connection, cookie);
+		}
+
+		fn screensaver_uninhibit(connection: &Connection, cookie: u32) {
 			// Best-effort release: ignore errors so a failed UnInhibit never
 			// drops the shared transport out from under other sessions' cookies.
 			let _ = dbus_rt::block_on(connection.call_method(
@@ -403,11 +411,11 @@ mod platform {
 			}
 		}
 
-		fn start_and_stop(held: &Arc<StdMutex<Vec<u32>>>) {
-			let mut assertion =
-				AssertionInner::start(None, true, "test").expect("ScreenSaver-only assertion starts");
+		fn start_and_stop(connection: &Connection, held: &Arc<StdMutex<Vec<u32>>>) {
+			let cookie = AssertionInner::screensaver_inhibit(connection, "test")
+				.expect("ScreenSaver Inhibit succeeds");
 			assert_eq!(*held.lock().unwrap(), [COOKIE]);
-			assertion.stop();
+			AssertionInner::screensaver_uninhibit(connection, cookie);
 			assert!(held.lock().unwrap().is_empty(), "stop() returned before UnInhibit was answered");
 		}
 
@@ -433,22 +441,20 @@ mod platform {
 				}
 			})
 			.expect("shared D-Bus runtime");
-			*SESSION_BUS.lock() = Some(client);
 
-			start_and_stop(&held);
+			start_and_stop(&client, &held);
 			let multi_thread = tokio::runtime::Builder::new_multi_thread()
 				.worker_threads(1)
 				.enable_all()
 				.build()
 				.unwrap();
-			multi_thread.block_on(async { start_and_stop(&held) });
+			multi_thread.block_on(async { start_and_stop(&client, &held) });
 			let current_thread = tokio::runtime::Builder::new_current_thread()
 				.enable_all()
 				.build()
 				.unwrap();
-			current_thread.block_on(async { start_and_stop(&held) });
+			current_thread.block_on(async { start_and_stop(&client, &held) });
 
-			SESSION_BUS.lock().take();
 			drop(server);
 		}
 	}
