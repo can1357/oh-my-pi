@@ -540,6 +540,12 @@ describe("tool-owned dynamic approval declarations", () => {
 		'eval "rm -rf /"',
 		'"sudo" rm x',
 		"rm -rf -- -- /",
+		'"/bin/rm" -rf /',
+		'"/usr/bin/sudo" rm x',
+		"bash -c 'r''m -rf /'",
+		"sh -c 'rm -rf '/",
+		'eval "r"m" -rf /"',
+		"git commit --trailer 'k=r''m -rf /' -m m",
 	])("keeps refusing a real delete: %s", command => {
 		expect(bashApproval(command)).toEqual({
 			tier: "exec",
