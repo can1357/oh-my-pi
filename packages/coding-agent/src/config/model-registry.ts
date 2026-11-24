@@ -2867,8 +2867,9 @@ export class ModelRegistry {
 	 * under one mode must never satisfy the other's cache read: under the
 	 * `offline` strategy nothing else refetches them.
 	 */
-	advertisedReasoningCacheSuffix(providerConfig: DiscoveryProviderConfig): string {
-		return providerConfig.discovery.advertisedReasoning === false ? "advertised-off-context-v7" : "context-v7";
+	advertisedReasoningCacheSuffix(providerConfig: DiscoveryProviderConfig, contextVersion: number): string {
+		const version = `context-v${contextVersion}`;
+		return providerConfig.discovery.advertisedReasoning === false ? `advertised-off-${version}` : version;
 	}
 
 	#configuredDiscoveryCacheProviderId(providerConfig: DiscoveryProviderConfig): string {
@@ -2898,8 +2899,8 @@ export class ModelRegistry {
 			// cached from the `/v1`-injected URL can hold a different (smaller)
 			// model set and must never satisfy a bare provider's cache read.
 			return providerConfig.discovery.injectV1 === false
-				? `${providerConfig.provider}:openai-models-list-bare-${this.advertisedReasoningCacheSuffix(providerConfig)}`
-				: `${providerConfig.provider}:openai-models-list-${this.advertisedReasoningCacheSuffix(providerConfig)}`;
+				? `${providerConfig.provider}:openai-models-list-bare-${this.advertisedReasoningCacheSuffix(providerConfig, 7)}`
+				: `${providerConfig.provider}:openai-models-list-${this.advertisedReasoningCacheSuffix(providerConfig, 7)}`;
 		}
 		if (providerConfig.discovery.type === "proxy") {
 			// proxy-v2 invalidates rows cached before a proxy row's advertised
@@ -2907,7 +2908,9 @@ export class ModelRegistry {
 			// provider id) pinned gateway ids at `reasoning: false`. The opt-out
 			// gets its own namespace for the same reason it does above: under the
 			// `offline` strategy nothing else would refetch the other mode's rows.
-			return `${providerConfig.provider}:proxy-v2-${this.advertisedReasoningCacheSuffix(providerConfig)}`;
+			// Stays on context-v6: the context-v7 bump is for openai-models-list rows only,
+			// and a shared version here would orphan every warm proxy row.
+			return `${providerConfig.provider}:proxy-v2-${this.advertisedReasoningCacheSuffix(providerConfig, 6)}`;
 		}
 		if (providerConfig.discovery.type === "litellm") {
 			// rich-v7 invalidates incomplete /v2/model/info rosters cached before
