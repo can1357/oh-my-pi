@@ -30,7 +30,7 @@ impl GitRepo {
 		if let Some(repo) = self.gix.get() {
 			return Ok(repo.to_thread_local());
 		}
-		let opened = open_discovered(self)?;
+		let opened = open_discovered(self, open_options())?;
 		// A concurrent open may have won the race; either handle is equivalent.
 		let repo = self.gix.get_or_init(move || opened);
 		Ok(repo.to_thread_local())
@@ -42,13 +42,23 @@ impl GitRepo {
 	/// must observe out-of-band mutations (config writes, remote edits) pay
 	/// for a fresh open instead.
 	pub(crate) fn gix_fresh(&self) -> Result<gix::Repository> {
+		self.open_fresh(open_options())
+	}
+
+	/// Freshly opened handle for the commit path, with the `GIT_*` config that
+	/// [`commit_open_options`] allows. Never build pathspecs on it.
+	pub(crate) fn gix_commit(&self) -> Result<gix::Repository> {
+		self.open_fresh(commit_open_options())
+	}
+
+	fn open_fresh(&self, options: Options) -> Result<gix::Repository> {
 		if self.info().is_reftable {
 			return Err(Error::backend(
 				"git open",
 				"reftable repository cannot be opened in-process; use the CLI fallback",
 			));
 		}
-		Ok(open_discovered(self)?.to_thread_local())
+		Ok(open_discovered(self, options)?.to_thread_local())
 	}
 }
 
@@ -60,8 +70,8 @@ impl GitRepo {
 /// `repo.git` would fail to open. The entry also keeps gix deriving the work
 /// tree from it, which the resolved `git_dir` alone cannot for separate git
 /// dirs.
-fn open_discovered(repo: &GitRepo) -> Result<gix::ThreadSafeRepository> {
-	open_options()
+fn open_discovered(repo: &GitRepo, options: Options) -> Result<gix::ThreadSafeRepository> {
+	options
 		.open(&repo.info().git_entry_path)
 		.map_err(|err| Error::backend("git open", err))
 }
@@ -149,27 +159,40 @@ pub(crate) fn status_with_fresh_index<'repo>(
 
 /// Open options for repositories the agent operates on.
 ///
-/// - Environment: `GIT_*` variables are allowed, as `git` allows them. gix reads
-///   `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_NOSYSTEM` under
-///   `git_prefix`; with it denied the commit helper ignored the identity and
-///   hooks that the user's global config names (#19819). Object database
-///   overrides stay denied. Home/XDG stay allowed so user config resolves.
+/// - Environment: deny `GIT_*` location/object overrides — operations bind to
+///   the discovered repository, mirroring the env-stripping the subprocess
+///   wrapper performed. Home/XDG stay allowed so user config resolves.
 /// - Config: user/system/git config allowed (identity, diff drivers), without
 ///   ever executing the git binary for its install-prefix config.
 /// - Trust: full. This is a local dev tool operating on the user's own
 ///   checkout; ownership quarantine would only reject repos the user already
 ///   chose to work in.
 fn open_options() -> Options {
+	open_options_with(Permission::Deny)
+}
+
+/// [`open_options`] for the commit path (`commitCreate` and its hooks), with
+/// `GIT_*` variables allowed as `git commit` allows them: gix reads
+/// `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_NOSYSTEM` under
+/// `git_prefix`, so the identity and hooks the user's global config names take
+/// effect (#19819). The same gate lets `GIT_*_PATHSPECS` reach every pathspec
+/// gix builds, so use this handle only for commit-path config reads; the
+/// commit path builds no pathspec.
+fn commit_open_options() -> Options {
+	open_options_with(Permission::Allow)
+}
+
+fn open_options_with(git_prefix: Permission) -> Options {
 	Options::default()
 		.permissions(Permissions {
 			env:        permissions::Environment {
 				xdg_config_home: Permission::Allow,
-				home:            Permission::Allow,
-				http_transport:  Permission::Deny,
-				identity:        Permission::Allow,
-				objects:         Permission::Deny,
-				git_prefix:      Permission::Allow,
-				ssh_prefix:      Permission::Deny,
+				home: Permission::Allow,
+				http_transport: Permission::Deny,
+				identity: Permission::Allow,
+				objects: Permission::Deny,
+				git_prefix,
+				ssh_prefix: Permission::Deny,
 			},
 			config:     permissions::Config::all(),
 			attributes: permissions::Attributes::all(),

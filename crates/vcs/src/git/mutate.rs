@@ -259,7 +259,7 @@ impl GitRepo {
 		options: &CommitOptions,
 		reconcile: Option<&str>,
 	) -> Result<(String, Vec<String>)> {
-		let repo = self.gix()?;
+		let repo = self.gix_commit()?;
 		// Git rejects a malformed value before doing any work; reading it as
 		// `false` would silently write unsigned commits.
 		let sign = repo
@@ -1159,14 +1159,20 @@ impl GitRepo {
 	/// or else the shared `hooks` directory, which linked worktrees read from
 	/// the common dir. `None` when the hook is missing or not executable.
 	pub fn hook_path(&self, name: &str) -> Result<Option<PathBuf>> {
-		let dir = self
-			.gix()?
-			.config_snapshot()
-			.string("core.hooksPath")
-			.map_or_else(
-				|| self.info().common_dir.join("hooks"),
-				|value| self.root().join(value.to_str_lossy().as_ref()),
-			);
+		self.hook_path_in(&self.gix()?, name)
+	}
+
+	/// [`Self::hook_path`] read through the commit path's handle, so a
+	/// `core.hooksPath` that `GIT_CONFIG_GLOBAL` names applies to commit hooks.
+	fn commit_hook_path(&self, name: &str) -> Result<Option<PathBuf>> {
+		self.hook_path_in(&self.gix_commit()?, name)
+	}
+
+	fn hook_path_in(&self, repo: &gix::Repository, name: &str) -> Result<Option<PathBuf>> {
+		let dir = repo.config_snapshot().string("core.hooksPath").map_or_else(
+			|| self.info().common_dir.join("hooks"),
+			|value| self.root().join(value.to_str_lossy().as_ref()),
+		);
 		let hook = dir.join(name);
 		Ok(hook_is_executable(&hook).then_some(hook))
 	}
@@ -1259,7 +1265,7 @@ fn run_commit_hook(
 	index_path: Option<&Path>,
 ) -> Result<()> {
 	let configured = hook_configured(repository, name)?;
-	let mut command = match repository.hook_path(name)? {
+	let mut command = match repository.commit_hook_path(name)? {
 		// Windows CreateProcess cannot execute a shebang script directly.
 		Some(hook) if !configured && !cfg!(windows) => Command::new(hook),
 		None if !configured => return Ok(()),
@@ -1319,7 +1325,7 @@ fn run_commit_hook(
 /// disabled or lacks a command is left to `git hook run`.
 fn hook_configured(repository: &GitRepo, name: &str) -> Result<bool> {
 	Ok(repository
-		.gix()?
+		.gix_commit()?
 		.config_snapshot()
 		.sections_by_name("hook")
 		.into_iter()
