@@ -335,6 +335,23 @@ describe("resolveActiveProjectRegistryPath", () => {
 		);
 	});
 
+	it("keeps reading a registry an older build wrote under the relocated config dir until .omp has one", async () => {
+		const project = path.join(tmpDir, "legacy-project");
+		const userConfigDir = path.join(".config", "omp");
+		fs.mkdirSync(path.join(project, ".git"), { recursive: true });
+		restoreEnvValue("PI_CONFIG_DIR", userConfigDir);
+		vi.spyOn(os, "homedir").mockReturnValue(path.join(tmpDir, "isolated-home"));
+		const legacy = path.join(project, userConfigDir, "plugins", "installed_plugins.json");
+		const current = path.join(project, ".omp", "plugins", "installed_plugins.json");
+		await writeInstalledPluginsRegistry(legacy, { version: 2, plugins: {} });
+
+		expect(await resolveActiveProjectRegistryPath(project)).toBe(legacy);
+		expect(await resolveOrDefaultProjectRegistryPath(project)).toBe(legacy);
+
+		await writeInstalledPluginsRegistry(current, { version: 2, plugins: {} });
+		expect(await resolveActiveProjectRegistryPath(project)).toBe(current);
+	});
+
 	it("keeps a custom-home plugin in user scope during discovery", async () => {
 		const home = path.join(tmpDir, "sdk-home");
 		const cwd = path.join(home, "work");

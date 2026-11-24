@@ -1129,18 +1129,56 @@ async function resolveProjectRegistryPath(cwd: string, ceilings: ReadonlySet<str
 				!isUserConfigRoot(dir) &&
 				(!aboveGitRoot || !(await isForeignUserConfigRoot(dir, configDirName)))
 			) {
-				return path.join(dir, configDirName, "plugins", "installed_plugins.json");
+				return projectRegistryIn(await projectConfigDir(dir));
 			}
 		} catch {
 			// not found at this level — continue up
 		}
+		const legacy = await legacyProjectConfigDir(dir);
+		if (legacy && !isUserConfigRoot(dir)) return projectRegistryIn(legacy);
 		if (dir === nearestGitRoot) aboveGitRoot = true;
 		const parent = path.dirname(dir);
 		if (parent === dir) break; // filesystem root
 		dir = parent;
 	}
 
-	return gitAnchor ? path.join(gitAnchor, configDirName, "plugins", "installed_plugins.json") : null;
+	return gitAnchor ? projectRegistryIn(await projectConfigDir(gitAnchor)) : null;
+}
+
+function projectRegistryIn(configDir: string): string {
+	return path.join(configDir, "plugins", "installed_plugins.json");
+}
+
+/** `<root>/.omp`, unless only a pre-relocation project config dir holds install state (see {@link legacyProjectConfigDir}). */
+async function projectConfigDir(root: string): Promise<string> {
+	const current = path.join(root, SOURCE_PATHS.native.projectDir);
+	if (await hasProjectInstallState(current)) return current;
+	return (await legacyProjectConfigDir(root)) ?? current;
+}
+
+/**
+ * Builds that joined `PI_CONFIG_DIR` onto the project root wrote project plugin
+ * registries and skill manifests to `<root>/<PI_CONFIG_DIR>` instead of
+ * `<root>/.omp`. Keep reading that directory while it is the only one with
+ * install state, so those installs do not vanish. Only a directory inside
+ * `root` that is not the user config root qualifies.
+ */
+async function legacyProjectConfigDir(root: string): Promise<string | undefined> {
+	const name = getConfigDirName();
+	if (name === SOURCE_PATHS.native.projectDir) return undefined;
+	const dir = path.join(root, name);
+	const relative = path.relative(root, dir);
+	if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
+	if (normalizePathForComparison(dir) === normalizePathForComparison(getBaseConfigRoot())) return undefined;
+	return (await hasProjectInstallState(dir)) ? dir : undefined;
+}
+
+/** Whether `configDir` holds a project plugin registry or skill manifest (`SKILLS_MANIFEST_FILE`). */
+async function hasProjectInstallState(configDir: string): Promise<boolean> {
+	for (const file of [projectRegistryIn(configDir), path.join(configDir, "skills.json")]) {
+		if (await fs.promises.exists(file)) return true;
+	}
+	return false;
 }
 
 /**
@@ -1166,7 +1204,7 @@ export async function resolveOrDefaultProjectRegistryPath(cwd: string): Promise<
 		(await isForeignUserConfigRoot(cwd, configDirName))
 	)
 		return undefined;
-	return path.join(cwd, configDirName, "plugins", "installed_plugins.json");
+	return projectRegistryIn(await projectConfigDir(cwd));
 }
 
 async function canonicalClaudeProjectPath(projectPath: string): Promise<string | null> {
