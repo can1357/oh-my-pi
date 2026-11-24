@@ -92,7 +92,7 @@ Do not add a wrapper merely to rename a generated root export.
 
 ### 5. Benchmark representative work
 
-Place a durable benchmark with the owning package (`packages/natives/bench`, `packages/tui/bench`, `packages/coding-agent/bench`, or another existing package bench directory). Run JS and native implementations in the same process on identical prepared input. Separate setup/conversion from the timed operation when callers can reuse that setup.
+Place a durable benchmark with the owning package (`packages/natives/bench`, `packages/coding-agent/bench`, or another existing package bench directory). Run JS and native implementations in the same process on identical prepared input. Separate setup/conversion from the timed operation when callers can reuse that setup.
 
 ```ts
 const ITERATIONS = 2_000;

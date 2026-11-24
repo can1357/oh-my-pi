@@ -22,7 +22,7 @@ describe("/branch slash command", () => {
 				collabGuest: false,
 				showTreeSelector,
 				showUserMessageSelector,
-				editor: { setText },
+				composer: { setText },
 			} as unknown as InteractiveModeContext,
 		};
 

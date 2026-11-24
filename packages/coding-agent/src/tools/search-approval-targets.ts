@@ -12,7 +12,7 @@
  * reports the tree key of that folder — which no plain folder grant matches,
  * because recursing below subfolders is more than one level of the folder.
  */
-import { isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";
+import { isReadableUrlPath } from "./details/read";
 import * as fs from "node:fs";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { approvalDirectoryKey } from "./approval-cache";

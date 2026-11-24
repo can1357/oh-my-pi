@@ -13,19 +13,12 @@ class RecordingArgsComponent {
 	updateArgs(args: unknown): void {
 		this.frames.push(args as Record<string, unknown>);
 	}
-
-	// Component protocol stub — the reveal controller hands the component
-	// straight to `requestComponentRender`, which only exercises identity.
-	render(): readonly string[] {
-		return [];
-	}
 }
 
-function makeController(options: { smooth?: boolean; requestRender?: () => void } = {}) {
+function makeController(options: { smooth?: boolean } = {}) {
 	const component = new RecordingArgsComponent();
 	const controller = new ToolArgsRevealController({
 		getSmoothStreaming: () => options.smooth ?? true,
-		requestRender: options.requestRender ?? (() => {}),
 	});
 	return { component, controller };
 }
@@ -59,27 +52,6 @@ function rawTarget() {
 describe("tool args reveal", () => {
 	afterEach(() => {
 		vi.useRealTimers();
-	});
-
-	it("passes the bound component to requestRender on each rendered tick", () => {
-		// Each entry's component reference is handed to `requestRender` so the
-		// caller scopes the render to that tool block's subtree via
-		// `TUI.requestComponentRender` (issue #4377).
-		vi.useFakeTimers();
-		const requestRender = vi.fn();
-		const { component, controller } = makeController({ requestRender });
-		const content = "x".repeat(400);
-		const target = `{"path":"a.ts","content":"${content}"}`;
-
-		controller.setTarget("call-1", target.slice(0, 12), jsonTarget({ exposeRawPartialJson: true }));
-		controller.bind("call-1", component);
-		controller.setTarget("call-1", target, jsonTarget({ exposeRawPartialJson: true }));
-		drain(80);
-
-		expect(requestRender).toHaveBeenCalled();
-		for (const call of requestRender.mock.calls) {
-			expect(call[0]).toBe(component);
-		}
 	});
 
 	it("reveals what already arrived on the first setTarget call", () => {
@@ -125,8 +97,7 @@ describe("tool args reveal", () => {
 
 	it("throttles JSON re-parses for renderers that do not read raw partial JSON", () => {
 		vi.useFakeTimers();
-		const requestRender = vi.fn();
-		const { component, controller } = makeController({ requestRender });
+		const { component, controller } = makeController();
 		const target = `{"path":"a.ts","content":"${"x".repeat(1200)}"}`;
 		const seed = target.slice(0, 10);
 
@@ -144,14 +115,12 @@ describe("tool args reveal", () => {
 		// frame fires.
 		drain(1);
 		expect(component.frames).toHaveLength(1);
-		expect(requestRender).toHaveBeenCalledTimes(1);
 		const firstPartial = partialOf(component.frames[0]);
 
 		// The next tick crosses into the throttled window: growth from the last
 		// parse hasn't yet hit STREAMING_JSON_PARSE_MIN_GROWTH, so no frame fires.
 		drain(1);
 		expect(component.frames).toHaveLength(1);
-		expect(requestRender).toHaveBeenCalledTimes(1);
 
 		drain(3);
 		expect(component.frames.length).toBeGreaterThan(1);
@@ -247,8 +216,7 @@ describe("tool args reveal", () => {
 
 	it("decodes the full received buffer, unpaced, when smoothing is disabled", () => {
 		vi.useFakeTimers();
-		const requestRender = vi.fn();
-		const { component, controller } = makeController({ smooth: false, requestRender });
+		const { component, controller } = makeController({ smooth: false });
 		const target = `{"path":"a.ts","content":"abc"}`;
 
 		const renderArgs = controller.setTarget("call-1", target, jsonTarget());
@@ -259,7 +227,6 @@ describe("tool args reveal", () => {
 		// provider-parsed snapshot that may lag the stream — and nothing paces.
 		expect(renderArgs).toEqual({ path: "a.ts", content: "abc", __partialJson: target });
 		expect(component.frames).toHaveLength(0);
-		expect(requestRender).not.toHaveBeenCalled();
 	});
 
 	it("keeps streamed string fields fresh across sub-throttle growth when smoothing is disabled", () => {

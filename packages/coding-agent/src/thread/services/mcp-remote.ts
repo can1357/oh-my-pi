@@ -5,7 +5,7 @@
  * resource read and change subscription runs on main.
  */
 import type { TSchema } from "@oh-my-pi/pi-ai";
-import type { MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
+import type { MCPToolDetails } from "../../tools/details/mcp";
 import type { CustomTool } from "../../extensibility/custom-tools/types";
 import type { MCPManagerApi, MCPToolScope } from "../../mcp/manager";
 import type { MCPRequestOptions, MCPResource, MCPResourceReadResult, MCPResourceTemplate } from "../../mcp/types";

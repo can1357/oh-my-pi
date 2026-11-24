@@ -1,5 +1,4 @@
-import { createModelBrowserSource } from "../src/modes/model-browser-source";
-import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -9,26 +8,17 @@ import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import type { ModelRegistry, ProviderDiscoveryState } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { ModelRegistry as ModelRegistryImpl } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ModelHubComponent } from "@oh-my-pi/pi-tui/overlays/model-hub";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import type { TUI } from "@oh-my-pi/pi-tui";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { createModelBrowserSource } from "../src/modes/model-browser-source";
+import { ModelHub } from "../src/ui/overlays/pickers/model-hub";
+import { type LayerTerminal, mountLayer } from "./helpers/layer-terminal";
 
 function normalizeRenderedText(text: string): string {
 	return stripVTControlCharacters(text).replace(/\s+/g, " ").trim();
 }
 
-let testTheme = await getThemeByName("dark");
-
-function installTestTheme(): void {
-	if (!testTheme) {
-		throw new Error("Failed to load dark theme for issue-970 selector test");
-	}
-	setThemeInstance(testTheme);
-}
-
-async function createHub(state: ProviderDiscoveryState): Promise<ModelHubComponent> {
+async function createHub(state: ProviderDiscoveryState): Promise<LayerTerminal> {
 	const modelRegistry = {
 		refresh: async () => {},
 		refreshProvider: async () => {},
@@ -39,14 +29,22 @@ async function createHub(state: ProviderDiscoveryState): Promise<ModelHubCompone
 		getProviderDiscoveryState: () => state,
 		authStorage: { keys: { source: () => undefined } },
 	} as unknown as ModelRegistry;
-	const ui = { requestRender: vi.fn(), terminal: { rows: 40 } } as unknown as TUI;
-	const hub = new ModelHubComponent(ui, createModelBrowserSource(Settings.isolated({})), modelRegistry, [], {
-		onAssign: () => {},
-		onUnassign: () => {},
-		onCancel: () => {},
-	});
+	const hub = mountLayer(
+		() =>
+			ModelHub({
+				source: createModelBrowserSource(Settings.isolated({})),
+				registry: modelRegistry,
+				scopedModels: [],
+				callbacks: {
+					onAssign: () => {},
+					onUnassign: () => {},
+					onCancel: () => {},
+				},
+				terminalRows: () => 40,
+			}),
+		{ columns: 200, rows: 40 },
+	);
 	await Bun.sleep(0);
-	installTestTheme();
 	// Scope-hop is the default arrow mode: one Down moves All models → the
 	// sole provider entry (separators are skipped).
 	hub.handleInput("\x1b[B");
@@ -58,13 +56,6 @@ describe("issue #970 custom provider discovery", () => {
 	let tempDir: string;
 	let modelsPath: string;
 	let authStorage: AuthStorage;
-
-	beforeAll(async () => {
-		testTheme = await getThemeByName("dark");
-		if (!testTheme) {
-			throw new Error("Failed to load dark theme for issue-970 selector test");
-		}
-	});
 
 	beforeEach(async () => {
 		tempDir = path.join(os.tmpdir(), `pi-test-issue-970-${Snowflake.next()}`);
@@ -111,13 +102,20 @@ describe("issue #970 custom provider discovery", () => {
 			const headers = init?.headers as Headers | Record<string, string> | undefined;
 			const authHeader = headers instanceof Headers ? headers.get("Authorization") : headers?.Authorization;
 			expect(authHeader).toBe("Bearer sk-1234");
-			return new Response(JSON.stringify({ data: [{ id: "qwen3.6" }, { id: "vllm-lab-fork-b2" }] }), {
-				status: 200,
-				headers: { "Content-Type": "application/json" },
-			});
+			return new Response(
+				JSON.stringify({
+					data: [{ id: "qwen3.6" }, { id: "vllm-lab-fork-b2" }],
+				}),
+				{
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				},
+			);
 		};
 
-		const registry = new ModelRegistryImpl(authStorage, modelsPath, { fetch: fetchMock });
+		const registry = new ModelRegistryImpl(authStorage, modelsPath, {
+			fetch: fetchMock,
+		});
 		await registry.refreshProvider("vllm");
 
 		const providerModels = registry.getAll().filter(model => model.provider === "vllm");
@@ -140,7 +138,6 @@ describe("issue #970 custom provider discovery", () => {
 	});
 
 	test("shows a provider-tab hint when discovery succeeds but returns zero models", async () => {
-		installTestTheme();
 		const hub = await createHub({
 			provider: "vllm",
 			status: "empty",
@@ -157,7 +154,6 @@ describe("issue #970 custom provider discovery", () => {
 	});
 
 	test("shows a provider-tab hint when the discovery endpoint returns 404", async () => {
-		installTestTheme();
 		const hub = await createHub({
 			provider: "vllm",
 			status: "unavailable",
@@ -197,21 +193,33 @@ describe("issue #970 custom provider discovery", () => {
 		const fetchMock: (input: string | URL | Request) => Promise<Response> = async input => {
 			const url = String(input);
 			if (url === "http://192.168.5.3:8085/v1/models") {
-				return new Response(JSON.stringify({ data: [{ id: "vllm-lab-fork-flash", max_model_len: 262_144 }] }), {
-					status: 200,
-					headers: { "Content-Type": "application/json" },
-				});
+				return new Response(
+					JSON.stringify({
+						data: [{ id: "vllm-lab-fork-flash", max_model_len: 262_144 }],
+					}),
+					{
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					},
+				);
 			}
 			if (url === "http://192.168.5.4:8085/v1/models") {
-				return new Response(JSON.stringify({ data: [{ id: "vllm-lab-fork-long", context_length: "1048576" }] }), {
-					status: 200,
-					headers: { "Content-Type": "application/json" },
-				});
+				return new Response(
+					JSON.stringify({
+						data: [{ id: "vllm-lab-fork-long", context_length: "1048576" }],
+					}),
+					{
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					},
+				);
 			}
 			throw new Error(`Unexpected URL: ${url}`);
 		};
 
-		const registry = new ModelRegistryImpl(authStorage, modelsPath, { fetch: fetchMock });
+		const registry = new ModelRegistryImpl(authStorage, modelsPath, {
+			fetch: fetchMock,
+		});
 		await registry.refreshProvider("vllm-fast");
 		await registry.refreshProvider("vllm-long");
 
@@ -277,7 +285,9 @@ describe("issue #970 custom provider discovery", () => {
 			});
 		};
 
-		const registry = new ModelRegistryImpl(authStorage, modelsPath, { fetch: fetchMock });
+		const registry = new ModelRegistryImpl(authStorage, modelsPath, {
+			fetch: fetchMock,
+		});
 		await registry.refreshProvider("vllm-fast", "online-if-uncached");
 
 		expect(calls).toEqual(["http://192.168.5.3:8085/v1/models"]);
@@ -291,7 +301,10 @@ describe("issue #970 custom provider discovery", () => {
 			["providers:", "  vllm:", "    baseUrl: http://192.168.5.3:8085/v1", "    auth: none"].join("\n"),
 		);
 
-		await authStorage.credentials.set("vllm", { type: "api_key", key: "vllm-local" });
+		await authStorage.credentials.set("vllm", {
+			type: "api_key",
+			key: "vllm-local",
+		});
 
 		const fetchMock: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = async (
 			input,
@@ -305,13 +318,20 @@ describe("issue #970 custom provider discovery", () => {
 			const authHeader = headers instanceof Headers ? headers.get("Authorization") : headers?.Authorization;
 			expect(authHeader).toBeUndefined();
 			expect(init?.signal).toBeInstanceOf(AbortSignal);
-			return new Response(JSON.stringify({ data: [{ id: "DeepSeek-V4-Flash", max_model_len: 262_144 }] }), {
-				status: 200,
-				headers: { "Content-Type": "application/json" },
-			});
+			return new Response(
+				JSON.stringify({
+					data: [{ id: "DeepSeek-V4-Flash", max_model_len: 262_144 }],
+				}),
+				{
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				},
+			);
 		};
 
-		const registry = new ModelRegistryImpl(authStorage, modelsPath, { fetch: fetchMock });
+		const registry = new ModelRegistryImpl(authStorage, modelsPath, {
+			fetch: fetchMock,
+		});
 		await registry.refreshProvider("vllm");
 
 		const model = registry.find("vllm", "DeepSeek-V4-Flash");
@@ -335,7 +355,9 @@ describe("issue #970 custom provider discovery", () => {
 			});
 		};
 
-		const registry = new ModelRegistryImpl(authStorage, modelsPath, { fetch: fetchMock });
+		const registry = new ModelRegistryImpl(authStorage, modelsPath, {
+			fetch: fetchMock,
+		});
 		await registry.refresh();
 
 		expect(urls).not.toContain("http://127.0.0.1:8000/v1/models");
@@ -353,13 +375,20 @@ describe("issue #970 custom provider discovery", () => {
 				throw new Error(`Unexpected URL: ${url}`);
 			}
 			expect(init?.signal).toBeInstanceOf(AbortSignal);
-			return new Response(JSON.stringify({ data: [{ id: "DefaultVllm", max_model_len: 262_144 }] }), {
-				status: 200,
-				headers: { "Content-Type": "application/json" },
-			});
+			return new Response(
+				JSON.stringify({
+					data: [{ id: "DefaultVllm", max_model_len: 262_144 }],
+				}),
+				{
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				},
+			);
 		};
 
-		const registry = new ModelRegistryImpl(authStorage, modelsPath, { fetch: fetchMock });
+		const registry = new ModelRegistryImpl(authStorage, modelsPath, {
+			fetch: fetchMock,
+		});
 		await registry.refreshProvider("vllm");
 
 		expect(registry.find("vllm", "DefaultVllm")?.contextWindow).toBe(262_144);
@@ -391,7 +420,9 @@ describe("issue #970 custom provider discovery", () => {
 			throw new Error(`Unexpected URL: ${url}`);
 		};
 
-		const firstRegistry = new ModelRegistryImpl(authStorage, modelsPath, { fetch: fetchMock });
+		const firstRegistry = new ModelRegistryImpl(authStorage, modelsPath, {
+			fetch: fetchMock,
+		});
 		await firstRegistry.refreshProvider("vllm");
 		expect(firstRegistry.find("vllm", "Old")?.contextWindow).toBe(262_144);
 
@@ -399,7 +430,9 @@ describe("issue #970 custom provider discovery", () => {
 			modelsPath,
 			["providers:", "  vllm:", "    baseUrl: http://192.168.5.4:8085/v1", "    auth: none"].join("\n"),
 		);
-		const secondRegistry = new ModelRegistryImpl(authStorage, modelsPath, { fetch: fetchMock });
+		const secondRegistry = new ModelRegistryImpl(authStorage, modelsPath, {
+			fetch: fetchMock,
+		});
 		await secondRegistry.refresh();
 
 		expect(secondRegistry.find("vllm", "New")?.contextWindow).toBe(524_288);
@@ -422,7 +455,9 @@ describe("issue #970 custom provider discovery", () => {
 			});
 		};
 
-		const firstRegistry = new ModelRegistryImpl(authStorage, modelsPath, { fetch: fetchMock });
+		const firstRegistry = new ModelRegistryImpl(authStorage, modelsPath, {
+			fetch: fetchMock,
+		});
 		await firstRegistry.refreshProvider("vllm");
 		expect(firstRegistry.find("vllm", "Cached")?.contextWindow).toBe(262_144);
 
@@ -459,13 +494,20 @@ describe("issue #970 custom provider discovery", () => {
 			const headers = init?.headers as Headers | Record<string, string> | undefined;
 			const authHeader = headers instanceof Headers ? headers.get("Authorization") : headers?.Authorization;
 			expect(authHeader).toBeUndefined();
-			return new Response(JSON.stringify({ data: [{ id: "DeepSeek-V4-Flash", max_model_len: 262_144 }] }), {
-				status: 200,
-				headers: { "Content-Type": "application/json" },
-			});
+			return new Response(
+				JSON.stringify({
+					data: [{ id: "DeepSeek-V4-Flash", max_model_len: 262_144 }],
+				}),
+				{
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				},
+			);
 		};
 
-		const registry = new ModelRegistryImpl(authStorage, modelsPath, { fetch: fetchMock });
+		const registry = new ModelRegistryImpl(authStorage, modelsPath, {
+			fetch: fetchMock,
+		});
 		await registry.refreshProvider("vllm");
 
 		expect(registry.getProviderDiscoveryState("vllm")?.status).toBe("ok");
@@ -511,7 +553,9 @@ describe("issue #970 custom provider discovery", () => {
 			});
 		};
 
-		const registry = new ModelRegistryImpl(authStorage, modelsPath, { fetch: fetchMock });
+		const registry = new ModelRegistryImpl(authStorage, modelsPath, {
+			fetch: fetchMock,
+		});
 		await registry.refreshProvider("llama.cpp");
 
 		expect(registry.getProviderDiscoveryState("llama.cpp")?.status).toBe("ok");

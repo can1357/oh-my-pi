@@ -12,10 +12,9 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import { AgentAwaits, type AgentAwaitsApi } from "./agent-awaits";
-import { oneLineLabel } from "@oh-my-pi/pi-tui/tools/task";
-
-import { MAIN_AGENT_ID, type AgentStatus, type AgentMetricsSummary } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
-import { noteAgentArrival } from "@oh-my-pi/pi-tui/overlays/agent-identity";
+import { oneLineLabel } from "../task/task-details";
+import { type AgentMetricsSummary, type AgentStatus, MAIN_AGENT_ID } from "./agent-hub-types";
+import { noteAgentArrival } from "../ui/tools/agent-identity";
 export { MAIN_AGENT_ID };
 export type { AgentStatus, AgentMetricsSummary };
 
