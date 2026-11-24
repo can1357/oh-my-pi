@@ -524,6 +524,37 @@ describe("buildSessionContext", () => {
 			]);
 		});
 
+		it("keeps the compaction summary at the head when a notebook from before the compaction is superseded", () => {
+			const notesEntry = (id: string, parentId: string, text: string): SessionEntry => ({
+				type: "custom",
+				customType: "experimental_context_notes",
+				data: { version: 1, text },
+				id,
+				parentId,
+				timestamp: "2025-01-01T00:00:00Z",
+			});
+			const start = msg("1", null, "user", "first");
+			const working = msg("2", "1", "assistant", "working");
+			const beforeCompaction = notesEntry("3", "2", "v1");
+			const summary = compaction("4", "3", "Summary of work", "");
+			const afterCompaction = msg("5", "4", "user", "after compact");
+			// The compaction discards the earlier entry, so its notebook sits after the summary in the live window.
+			const live = buildSessionContext([start, working, beforeCompaction, summary, afterCompaction]);
+			const superseded = notesEntry("6", "5", "v2");
+			const resumed = buildSessionContext([
+				start,
+				working,
+				beforeCompaction,
+				summary,
+				afterCompaction,
+				superseded,
+				msg("7", "6", "user", "continue"),
+			]);
+			expect(resumed.messages[0]).toEqual(live.messages[0]);
+			expect(live.messages.map(message => message.role)).toEqual(["compactionSummary", "custom", "user"]);
+			expect(resumed.messages.map(message => message.role)).toEqual(["compactionSummary", "user", "custom", "user"]);
+		});
+
 		it("predates native rewrite markers before the retained tail; summaries keep commit timestamps", () => {
 			// A rewrite marker newer than the tail strips the tail's bound
 			// thinking on the next request; native replay must not do that. The

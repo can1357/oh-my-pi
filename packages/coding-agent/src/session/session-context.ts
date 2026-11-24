@@ -743,9 +743,13 @@ export function buildSessionContext(
 				// retained assistant turn with its tool results.
 				const head = messages[0];
 				let insertAt = 0;
-				if (head?.role === "compactionSummary" && head.providerPayload?.type === "anthropicCompaction") {
+				// The summary opens every rebuild of its window, so a notebook with no entry in the
+				// kept messages starts right after it.
+				if (head?.role === "compactionSummary") {
 					insertAt = 1;
-					if (messages[insertAt]?.role === "assistant") insertAt++;
+					if (head.providerPayload?.type === "anthropicCompaction" && messages[insertAt]?.role === "assistant") {
+						insertAt++;
+					}
 				}
 				if (notesAt !== undefined && notesAt > insertAt) insertAt = notesAt;
 				// Never split an assistant turn from its tool results.
