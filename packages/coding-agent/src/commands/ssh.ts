@@ -5,7 +5,7 @@
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { sshHelp as commandHelp } from "../cli/command-help";
 import { runSSHCommand, type SSHAction, type SSHCommandArgs } from "../cli/ssh-cli";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../ui/theme/service";
 
 const ACTIONS: SSHAction[] = ["add", "remove", "list"];
 
@@ -55,7 +55,7 @@ export default class SSH extends Command {
 			},
 		};
 
-		await initTheme();
+		initTheme();
 		await runSSHCommand(cmd);
 	}
 }

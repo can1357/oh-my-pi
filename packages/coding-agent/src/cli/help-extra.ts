@@ -60,7 +60,7 @@ export function getExtraHelpText(): string {
   SINGULARITYAPI_TECH_API_KEY - SingularityAPI reserved DeepSeek lanes
   SCW_SECRET_KEY             - Scaleway Generative APIs models
   OTARI_API_KEY              - Otari AI gateway (workspace models)
-  OTARI_BASE_URL             - Otari self-hosted API root (e.g. https://host/api/v1)
+  OTARI_BASE_URL             - Otari API root (EU or self-hosted, e.g. https://host/api/v1)
 
   ${chalk.dim("# Cloud Providers")}
   AWS_PROFILE                - AWS Bedrock (or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY)

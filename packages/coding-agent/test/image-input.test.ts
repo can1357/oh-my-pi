@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { readImageMetadata, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { loadImageAttachmentInput, loadImageInput } from "../src/utils/image-loading";
-import { InvalidImageDataError } from "@oh-my-pi/pi-tui/chat/image-loading";
+import { InvalidImageDataError } from "@oh-my-pi/pi-coding-agent/utils/image-input";
 
 describe("readImageMetadata", () => {
 	let testDir: string;

@@ -31,7 +31,6 @@ import {
 	procmgr,
 } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
-import { isLightTheme } from "@oh-my-pi/pi-tui/theme/theme";
 import { JSONC, YAML } from "bun";
 import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
@@ -57,6 +56,7 @@ import {
 import "./all-settings";
 import { cfgDisabledProviders, cfgModelRoles, cfgModelRoleStorage } from "./model-settings";
 import { cfgShellPath } from "../exec/settings";
+import { isLightTheme } from "../ui/theme/service";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Types
@@ -2188,6 +2188,45 @@ export class Settings {
 		this.#setProjectModelRoleValue(role, null);
 		this.#captureRuntimeModelRoleOverride(role);
 		this.#updateRuntimeModelRoleOverride(role, undefined);
+	}
+
+	/** Replace roles in the configured storage layer and synchronize runtime overrides. */
+	replaceModelRoles(modelRoles: ReadOnlyDict<string>): void {
+		const project = cfgModelRoleStorage.get(this) === "project";
+		const roles = new Set([...Object.keys(this.getModelRoles()), ...Object.keys(modelRoles)]);
+		for (const role of roles) {
+			const value = Object.hasOwn(modelRoles, role) ? modelRoles[role] : undefined;
+			if (project) {
+				if (value !== undefined) this.setProjectModelRole(role, value);
+				else if (this.getProjectModelRole(role) || this.getModelRoleProvenance(role) === "runtime") {
+					this.clearProjectModelRole(role);
+				}
+			} else if (
+				value !== undefined ||
+				this.getGlobalModelRole(role) !== undefined ||
+				this.getModelRoleProvenance(role) === "runtime"
+			) {
+				this.setModelRole(role, value);
+			}
+		}
+	}
+
+	/**
+	 * Detached in-memory copy with {@link replaceModelRoles} applied: same layer precedence, no saves,
+	 * no notifications. Read its roles and their provenance; never write through it.
+	 */
+	previewModelRoles(modelRoles: ReadOnlyDict<string>): Settings {
+		const preview = new Settings({ inMemory: true, cwd: this.#cwd, agentDir: this.#agentDir }, { projection: true });
+		preview.#parent = this.#parent;
+		// The role mutators replace their layer's modelRoles map instead of editing it in place.
+		preview.#global = { ...this.#global };
+		preview.#project = { ...this.#project };
+		preview.#configOverlay = this.#configOverlay;
+		preview.#overrides = { ...this.#overrides };
+		preview.#savedRuntimeModelRoleOverrides = new Map(this.#savedRuntimeModelRoleOverrides);
+		preview.#remerge();
+		preview.replaceModelRoles(modelRoles);
+		return preview;
 	}
 
 	/**

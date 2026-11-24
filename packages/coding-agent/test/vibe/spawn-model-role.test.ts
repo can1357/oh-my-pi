@@ -19,9 +19,9 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import type { ExecutorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as nameGenerator from "@oh-my-pi/pi-coding-agent/task/name-generator";
-import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { VibeCli } from "@oh-my-pi/pi-tui/tools/vibe";
+import type { VibeCli } from "@oh-my-pi/pi-coding-agent/tools/details/vibe";
 import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 
 function makeParentSession(settings: Settings): ToolSession {

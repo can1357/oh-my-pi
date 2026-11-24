@@ -38,8 +38,6 @@ const USE_BUNDLED_PI_MODULES = isCompiledBinary() || Boolean(process.env.PI_BUND
 // retained package graph.
 const BUNDLED_VIRTUAL_SCHEME = "omp-legacy-pi-bundled:";
 const BUNDLED_VIRTUAL_NAMESPACE = "omp-legacy-pi-bundled";
-const BUNDLED_HOST_NAMESPACE = "omp-legacy-pi-host";
-const BUNDLED_HOST_SCHEME = `${BUNDLED_HOST_NAMESPACE}:`;
 const TYPEBOX_BUNDLED_MODULE_KEY = "typebox";
 
 type BundledModule = Readonly<Record<string, unknown>>;
@@ -52,7 +50,7 @@ interface LegacyPiResolveResult {
 
 interface BundledVirtualResolveResult {
 	path: string;
-	namespace: typeof BUNDLED_VIRTUAL_NAMESPACE | typeof BUNDLED_HOST_NAMESPACE;
+	namespace: typeof BUNDLED_VIRTUAL_NAMESPACE;
 }
 
 interface ExtensionSpecifierReference {
@@ -565,6 +563,15 @@ function extensionParseCacheKey(source: string, importerPath: string): string {
 	return `${EXTENSION_PARSE_CACHE_SCHEMA_VERSION}:${path.extname(importerPath).toLowerCase()}:${Bun.hash(source).toString(16)}`;
 }
 
+/**
+ * Close the process-wide parse cache so the next load reopens it under the then-current home. Tests
+ * that point the home at a temp dir need this on Windows, where an open database blocks removing it.
+ */
+export function closeExtensionParseCacheForTests(): void {
+	extensionParseCacheDb?.close();
+	extensionParseCacheDb = undefined;
+}
+
 function getExtensionParseCacheDb(): Database | null {
 	if (extensionParseCacheDb !== undefined) return extensionParseCacheDb;
 	try {
@@ -789,16 +796,14 @@ function toLegacyPiResolveResult(resolvedPath: string): LegacyPiResolveResult {
 }
 
 /** Maps a bundled virtual specifier or registry key to Bun's plugin namespace shape. */
-function resolveBundledVirtualSpecifier(
-	specifier: string,
-	namespace: BundledVirtualResolveResult["namespace"] = BUNDLED_VIRTUAL_NAMESPACE,
-): BundledVirtualResolveResult {
-	const scheme = `${namespace}:`;
-	const registryKey = specifier.startsWith(scheme) ? specifier.slice(scheme.length) : specifier;
+function resolveBundledVirtualSpecifier(specifier: string): BundledVirtualResolveResult {
+	const registryKey = specifier.startsWith(BUNDLED_VIRTUAL_SCHEME)
+		? specifier.slice(BUNDLED_VIRTUAL_SCHEME.length)
+		: specifier;
 	if (!registryKey) {
 		throw new Error("omp:legacy-pi-shim: bundled virtual specifier has no registry key");
 	}
-	return { path: registryKey, namespace };
+	return { path: registryKey, namespace: BUNDLED_VIRTUAL_NAMESPACE };
 }
 
 // Canonical scope for in-process pi packages. Plugins published against any of
@@ -827,6 +832,40 @@ const PI_PACKAGE_NAMES = [
 	"pi-utils",
 ] as const;
 
+/**
+ * Upstream pi-tui under a foreign scope: its component API is gone (`@oh-my-pi/pi-tui` is the
+ * reactive rewrite), so an extension importing it cannot load. {@link assertNoPiTuiImport} names
+ * the replacement instead of aliasing the import onto a package with another API.
+ */
+const PI_TUI_SPECIFIER = new RegExp(
+	`^@(?:${PI_SCOPE_ALIASES.filter(scope => scope !== "oh-my-pi").join("|")})/pi-tui(?:/.*)?$`,
+);
+
+/** Docs section describing the pi-tui → pi-tui migration. */
+export const PI_TUI_MIGRATION_DOC = "docs/extensions.md#migrating-from-pi-tui";
+
+/** An extension module imports upstream pi-tui, whose API omp no longer provides. */
+export class PiTuiImportError extends Error {
+	constructor(
+		readonly specifier: string,
+		readonly importerPath: string,
+	) {
+		super(
+			`${importerPath} imports "${specifier}", which omp no longer provides: its component API was ` +
+				`replaced by the reactive @oh-my-pi/pi-tui. Return pi-tui nodes (JSX from "@oh-my-pi/pi-tui") or a { render(width): string[] } ` +
+				`rows object from renderers, ctx.ui.custom and ctx.ui.setWidget; replace ctx.ui.setEditorComponent ` +
+				`with the ctx.ui.composer hooks; import Theme types from "@oh-my-pi/pi-coding-agent". ` +
+				`See ${PI_TUI_MIGRATION_DOC}.`,
+		);
+		this.name = "PiTuiImportError";
+	}
+}
+
+/** Throw {@link PiTuiImportError} when `specifier` names upstream pi-tui. */
+function assertNoPiTuiImport(specifier: string, importerPath: string): void {
+	if (PI_TUI_SPECIFIER.test(specifier)) throw new PiTuiImportError(specifier, importerPath);
+}
+
 const PI_SCOPE_ALTERNATION = PI_SCOPE_ALIASES.join("|");
 const PI_PACKAGE_ALTERNATION = PI_PACKAGE_NAMES.join("|");
 
@@ -840,6 +879,14 @@ const PI_SUBPATH_REMAPS: ReadonlyMap<string, string> = new Map<string, string>([
 	["pi-ai/utils/oauth", "pi-ai/oauth"],
 	["pi-ai/utils/oauth/", "pi-ai/oauth/"],
 	["pi-ai/compat", "pi-ai"],
+	// Helpers the old pi-tui carried that are no part of the UI: they kept their exports and moved.
+	["pi-tui/thinking", "pi-coding-agent/thinking/levels"],
+	["pi-tui/fuzzy", "pi-coding-agent/utils/fuzzy"],
+	["pi-tui/lang-from-path", "pi-coding-agent/utils/lang-from-path"],
+	["pi-tui/ttyid", "pi-coding-agent/utils/ttyid"],
+	["pi-tui/vim", "pi-coding-agent/ui/composer/vim"],
+	["pi-tui/loop-sampler", "pi-tui/diag/loop-sampler"],
+	["pi-tui/loop-watchdog", "pi-tui/diag/loop-watchdog"],
 ]);
 
 function remapLegacyPiSubpath(rest: string): string {
@@ -986,16 +1033,9 @@ const LEGACY_PI_CODING_AGENT_SHIM_PATH = USE_BUNDLED_PI_MODULES
 	? bundledModuleVirtualSpecifier(`${CANONICAL_PI_SCOPE}/pi-coding-agent`)
 	: sourceShimPath("legacy-pi-coding-agent-shim.ts");
 
-// Legacy pi-tui exported `decodeKittyPrintable` from its package root. The
-// canonical TUI replaced it with the broader `decodePrintableKey`; route only
-// legacy root imports through a sibling shim that preserves the old name.
-const LEGACY_PI_TUI_SHIM_PATH = USE_BUNDLED_PI_MODULES
-	? bundledModuleVirtualSpecifier(`${CANONICAL_PI_SCOPE}/pi-tui`)
-	: sourceShimPath("legacy-pi-tui-shim.ts");
-
-// Package-root overrides. Shim entries (`pi-ai`, `pi-coding-agent`, `pi-tui`)
+// Package-root overrides. Shim entries (`pi-ai`, `pi-coding-agent`)
 // always replace the canonical surface so legacy helpers stay reachable. The
-// other bundled host packages (`pi-agent-core`, `pi-natives`, `pi-utils`) are
+// other bundled host packages (`pi-agent-core`, `pi-natives`, `pi-tui`, `pi-utils`) are
 // added in compiled binaries and npm bundles to route extensions onto the
 // in-process module instance — in dev / source-link / source SDK mode the
 // canonical specifier resolves cleanly through `Bun.resolveSync`; hardcoding a
@@ -1044,7 +1084,6 @@ export function __buildLegacyPiPackageRootOverrides(
 	const candidates: Record<string, string> = {
 		[`${CANONICAL_PI_SCOPE}/pi-ai`]: LEGACY_PI_AI_SHIM_PATH,
 		[`${CANONICAL_PI_SCOPE}/pi-coding-agent`]: LEGACY_PI_CODING_AGENT_SHIM_PATH,
-		[`${CANONICAL_PI_SCOPE}/pi-tui`]: LEGACY_PI_TUI_SHIM_PATH,
 	};
 	if (useBundledModules) {
 		for (const key of bundledModuleKeys) {
@@ -1158,6 +1197,7 @@ async function rewriteLegacyExtensionSource(
 	const references = getExtensionSourceAnalysis(source, importerPath).references;
 	const replacements: Array<ExtensionSpecifierReference & { replacement: string }> = [];
 	for (const reference of references) {
+		assertNoPiTuiImport(reference.specifier, importerPath);
 		if (reference.kind !== "import") continue;
 
 		const specifier = reference.specifier;
@@ -2313,6 +2353,7 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 		const references = analysis.references;
 		for (const reference of references) {
 			const specifier = reference.specifier;
+			assertNoPiTuiImport(specifier, file);
 			try {
 				let resolved: string | null = null;
 				let nextCacheBustResolvedImports = cacheBustResolvedImports;
@@ -2886,41 +2927,13 @@ export function installLegacyPiSpecifierShim(): void {
 			build.onResolve({ filter: /^omp-legacy-pi-bundled:.+$/, namespace: "file" }, args =>
 				resolveBundledVirtualSpecifier(args.path),
 			);
-			build.onResolve({ filter: /^omp-legacy-pi-host:.+$/, namespace: "file" }, args =>
-				resolveBundledVirtualSpecifier(args.path, BUNDLED_HOST_NAMESPACE),
-			);
 			build.onResolve({ filter: /.*/, namespace: BUNDLED_VIRTUAL_NAMESPACE }, args =>
-				resolveBundledVirtualSpecifier(
-					args.path,
-					args.path.startsWith(BUNDLED_HOST_SCHEME) ? BUNDLED_HOST_NAMESPACE : BUNDLED_VIRTUAL_NAMESPACE,
-				),
+				resolveBundledVirtualSpecifier(args.path),
 			);
-			build.onResolve({ filter: /.*/, namespace: BUNDLED_HOST_NAMESPACE }, args =>
-				resolveBundledVirtualSpecifier(args.path, BUNDLED_HOST_NAMESPACE),
-			);
-			build.onLoad({ filter: /.*/, namespace: BUNDLED_HOST_NAMESPACE }, async args => ({
+			build.onLoad({ filter: /.*/, namespace: BUNDLED_VIRTUAL_NAMESPACE }, async args => ({
 				exports: await loadBundledModule(args.path),
 				loader: "object",
 			}));
-			build.onLoad({ filter: /.*/, namespace: BUNDLED_VIRTUAL_NAMESPACE }, async args => {
-				const module = await loadBundledModule(args.path);
-				if (!Object.hasOwn(module, "theme") || typeof module.bindTheme !== "function") {
-					return { exports: module, loader: "object" };
-				}
-				// Object modules snapshot values. Keep theme as a genuine ESM
-				// binding, mirrored at assignment time before UI notifications.
-				const host = JSON.stringify(`${BUNDLED_HOST_SCHEME}${args.path}`);
-				return {
-					contents: [
-						`export * from ${host};`,
-						`import { bindTheme } from ${host};`,
-						"export let theme;",
-						"bindTheme(value => { theme = value; });",
-						...(Object.hasOwn(module, "default") ? [`export { default } from ${host};`] : []),
-					].join("\n"),
-					loader: "js",
-				};
-			});
 		},
 	});
 }

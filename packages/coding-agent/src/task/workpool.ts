@@ -7,7 +7,7 @@ import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import type { CustomMessage } from "../session/messages";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 import { isCompletionProbeEnabled } from "./completion-probe";
 import { runSubagentFollowUpTurn, softRequestBudgetFor } from "./executor";
 import {
@@ -15,7 +15,7 @@ import {
 	reserveStructuredSubagentId,
 	runStructuredSubagent,
 } from "./structured-subagent";
-import { type AgentProgress, oneLineLabel, type SingleResult, type TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
+import { type AgentProgress, oneLineLabel, type SingleResult, type TaskToolDetails } from "./task-details";
 import { buildWorkPoolOutputSchema, type WorkPoolYieldItem } from "./workpool-yield";
 
 import { cfgEvalWorkpoolFreshAgents } from "../eval/settings";

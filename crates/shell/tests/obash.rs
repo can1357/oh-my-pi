@@ -37,7 +37,7 @@ fn background_commands_keep_fork_environment_and_cwd() {
 f() { echo exported:before; }; export -f f
 ( /bin/sh -c 'echo "env:$FORK_VALUE:${FORK_LATER-absent}"'; /bin/pwd
   bash -c f
-  [ "$(dirs -p)" = "$PWD" ] && echo stack:before ) &
+  [ "$(dirs -l -p)" = "$PWD" ] && echo stack:before ) &
 export FORK_VALUE=after FORK_LATER=after; f() { echo exported:after; }
 pushd / >/dev/null; wait"#,
 	]));

@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { type BtwHistoryRecord, type BtwHistoryTurn, getBtwLatestTurn } from "@oh-my-pi/pi-tui/overlays/btw-history";
+import { type BtwHistoryRecord, type BtwHistoryTurn, getBtwLatestTurn } from "./btw-history-model";
 import { acquireFileLock, type FileLockHandle, isEnoent, logger, toError } from "@oh-my-pi/pi-utils";
 import { writeFileAtomically } from "../utils/atomic-file";
 
@@ -13,7 +13,7 @@ export {
 	getBtwRecordInject,
 	getBtwTurns,
 	getBtwTurnKey,
-} from "@oh-my-pi/pi-tui/overlays/btw-history";
+} from "./btw-history-model";
 
 const imageSchema = type({ type: "'image'", data: "string", mimeType: "string" });
 const turnFields = {

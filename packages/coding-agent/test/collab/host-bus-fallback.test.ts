@@ -34,10 +34,8 @@ function makeHostContext(eventBus: EventBus): InteractiveModeContext {
 		eventBus,
 		statusLine: {
 			setCollabStatus: () => {},
-			invalidate: () => {},
-			getCachedContextBreakdown: () => ({ usedTokens: 0, contextWindow: 0 }),
+			facts: () => ({ context: { tokens: 0, window: 0, percent: null } }),
 		},
-		ui: { requestRender: () => {} },
 		showStatus: () => {},
 		collabHost: undefined,
 	} as unknown as InteractiveModeContext;

@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 import binjaWorker from "../binja/worker.py" with { type: "text" };
 import ghidraWorker from "../ghidra/worker.py" with { type: "text" };
 import idaWorker from "../ida/worker.py" with { type: "text" };
