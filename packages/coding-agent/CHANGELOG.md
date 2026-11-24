@@ -38,6 +38,7 @@
 
 ### Changed
 
+- A subagent spawned with a single step receives that step as written, without the `Complete assignment thoroughly:` and `# Step 1 of 1` framing
 - Shell command previews show chained commands with their real `&&`/`||` operators instead of `and`/`or`, and `cd dir` as written instead of a `cwd dir` badge
 - The agent works statically and verifies each code change once, after its last edit, before replying: the project's static check for renames and other behavior-preserving edits, the named or narrowest test for behavior changes, and nothing for questions. Its reply names that check and the result. It no longer runs checks between edits
 - The omp daemon no longer loads the model catalog, the AI provider code or most of the TUI; in npm installs it uses about 24 MB less resident memory (about 150 MB less when omp runs from source) ([#20224](https://github.com/can1357/oh-my-pi/pull/20224) by [@JustasMasiulis](https://github.com/JustasMasiulis))
