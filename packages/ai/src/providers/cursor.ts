@@ -5809,6 +5809,9 @@ async function pairSynthesizedExecResult(
 }
 
 /** Exported for tests: drives one Cursor interaction update through the streaming state machine. */
+// Cursor's tool-call dialect; cursor-agent sometimes returns it as text instead of a tool call (issue 8495).
+const TOOL_CALL_MARKUP_LEAK = "<|open|>toolscall";
+
 export function processInteractionUpdate(
 	update: any,
 	output: AssistantMessage,
@@ -5823,6 +5826,13 @@ export function processInteractionUpdate(
 	if (updateCase === "textDelta") {
 		state.setFirstTokenTime();
 		const delta = update.message.value.text || "";
+		// The marker can straddle two deltas, so check the stored tail plus this delta before anything is stored.
+		const seam = (state.currentTextBlock?.text.slice(-(TOOL_CALL_MARKUP_LEAK.length - 1)) ?? "") + delta;
+		if (seam.includes(TOOL_CALL_MARKUP_LEAK)) {
+			throw new Error(
+				"Cursor emitted tool-call markup as text instead of a native tool call; the call did not run.",
+			);
+		}
 		if (!state.currentTextBlock) {
 			const block: TextContent & { [kStreamingBlockIndex]: number } = {
 				type: "text",
