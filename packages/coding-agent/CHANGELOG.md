@@ -112,6 +112,7 @@
 - MCP, extension and other non-built-in tools now appear in name order after the built-ins (in the tool list, `eval`'s session tool names and the tool-command docs), so resuming a session no longer rewrites the whole prompt cache when MCP servers answer or extension tools register in a different order ([#20327](https://github.com/can1357/oh-my-pi/issues/20327))
 - On models that bind signed thinking to the prompt prefix (Claude with `thinking.prefixBinding`), a judge failure that withdraws `find` under `find.enabled: auto` no longer rewrites the system prompt and the `grep`/`glob`/`bash` descriptions mid-session, which had dropped the prompt cache and earlier thinking; the prompt change waits for the next rebuild that happens anyway ([#20325](https://github.com/can1357/oh-my-pi/issues/20325))
 - A daemon unit is no longer pinned when its client disconnects while the unit is still being created: the lease taken after the disconnect is dropped as on any lost connection, after the reconnect grace ([#20263](https://github.com/can1357/oh-my-pi/pull/20263) by [@yaacovcorcos](https://github.com/yaacovcorcos))
+- Fixed JS eval cells copied from the eval tool's helper list throwing `ReferenceError: judge_batch is not defined` when Python and JS are both on; the list now names `judgeBatch` for JS ([#17273](https://github.com/can1357/oh-my-pi/issues/17273), [#20392](https://github.com/can1357/oh-my-pi/pull/20392) by [@JamieJ5926](https://github.com/JamieJ5926))
 
 ### Removed
 
