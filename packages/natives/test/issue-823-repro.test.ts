@@ -292,11 +292,13 @@ describe("issue 823: standalone-binary native loader path resolution", () => {
 			expect(await fs.exists(embeddedAddonPath(testDir, file))).toBe(false);
 		});
 
-		it("prunes other builds' extractions and leaves everything else in the version directory", async () => {
+		it("prunes idle builds' extractions and leaves everything else in the version directory", async () => {
 			testDir = await fs.mkdtemp(path.join(os.tmpdir(), "natives-embedded-prune-"));
 			const current = await embeddedFile("baseline", "pi_natives.win32-x64-baseline.node", "aaaa", "current");
 			const older = await embeddedFile("baseline", "pi_natives.win32-x64-baseline.node", "bbbb", "older");
 			extractEmbeddedAddons({ files: [current, older], targetDir: testDir });
+			const longAgo = new Date(Date.now() - 60 * 60_000);
+			nodeFs.utimesSync(path.dirname(embeddedAddonPath(testDir, older)), longAgo, longAgo);
 			// Unhashed files belong to node_modules staging, not to extraction.
 			const staged = path.join(testDir, "pi_natives.win32-x64-baseline.node");
 			await Bun.write(staged, "staged");
@@ -306,6 +308,24 @@ describe("issue 823: standalone-binary native loader path resolution", () => {
 			]);
 			expect(await fs.exists(embeddedAddonPath(testDir, current))).toBe(true);
 			expect(await fs.exists(staged)).toBe(true);
+		});
+
+		it("keeps another build's addon while that build is starting, even when it was extracted long ago", async () => {
+			// Issue #20438: two builds of one version share the version directory;
+			// one build's prune deleted the addon the other was about to dlopen.
+			testDir = await fs.mkdtemp(path.join(os.tmpdir(), "natives-embedded-prune-race-"));
+			const x = await embeddedFile("default", "pi_natives.darwin-arm64.node", "c506", "build x");
+			const y = await embeddedFile("default", "pi_natives.darwin-arm64.node", "22bc", "build y");
+			extractEmbeddedAddons({ files: [y], targetDir: testDir });
+			const longAgo = new Date(Date.now() - 60 * 60_000);
+			nodeFs.utimesSync(path.dirname(embeddedAddonPath(testDir, y)), longAgo, longAgo);
+
+			// Build y starts again: its addon is already there, nothing is written.
+			expect(extractEmbeddedAddons({ files: [y], targetDir: testDir })).toEqual([]);
+			// Build x loads concurrently and prunes other builds of this version.
+			extractEmbeddedAddons({ files: [x], targetDir: testDir });
+			expect(pruneStaleEmbeddedAddons({ targetDir: testDir, keepHashes: [x.hash] })).toEqual([]);
+			expect(await fs.exists(embeddedAddonPath(testDir, y))).toBe(true);
 		});
 	});
 

@@ -519,11 +519,13 @@ function writeEmbeddedAddonFile(targetPath, content) {
 }
 
 /**
- * Refreshes `targetDir`'s activity time before probing, so a concurrently
- * starting newer build's `cleanupStaleNativeVersions` spares it until this
- * process loads the addon. A directory this process cannot create or touch
- * (read-only mount, another owner) is fatal only when a file must be written:
- * an addon already at its build's hash path is used as-is.
+ * Refreshes the activity time of `targetDir` and of each file's
+ * `embedded-<hash>` directory before probing, so neither a concurrently
+ * starting newer build's `cleanupStaleNativeVersions` nor another build's
+ * `pruneStaleEmbeddedAddons` removes them until this process loads the addon.
+ * A directory this process cannot create or touch (read-only mount, another
+ * owner) is fatal only when a file must be written: an addon already at its
+ * build's hash path is used as-is.
  */
 export function extractEmbeddedAddons({ files, targetDir }) {
 	for (const file of files) {
@@ -537,6 +539,7 @@ export function extractEmbeddedAddons({ files, targetDir }) {
 	let prepareError = null;
 	try {
 		prepareNativeVersionDir(targetDir);
+		for (const file of files) prepareNativeVersionDir(path.dirname(embeddedAddonPath(targetDir, file)));
 	} catch (err) {
 		prepareError = err;
 	}
@@ -549,7 +552,6 @@ export function extractEmbeddedAddons({ files, targetDir }) {
 		if (content.length !== file.size) {
 			throw new Error(`Embedded addon size mismatch for ${file.filename}: expected ${file.size}, got ${content.length}`);
 		}
-		fs.mkdirSync(path.dirname(targetPath), { recursive: true });
 		try {
 			writeEmbeddedAddonFile(targetPath, content);
 		} catch (err) {
@@ -565,8 +567,10 @@ export function extractEmbeddedAddons({ files, targetDir }) {
 
 /**
  * Best-effort removal of `embedded-<hash>` directories left by other builds of
- * this version. A directory still loaded by a running process (Windows locks
- * it) is skipped and retried on a later start.
+ * this version. A directory refreshed within `NATIVE_CACHE_CLEANUP_GRACE_MS`
+ * belongs to a build that is starting (or started) concurrently and is kept;
+ * a directory still loaded by a running process (Windows locks it) is skipped.
+ * Both are retried on a later start.
  */
 export function pruneStaleEmbeddedAddons({ targetDir, keepHashes }) {
 	const keep = new Set(keepHashes.map(hash => `${EMBEDDED_ADDON_DIR_PREFIX}${hash}`));
@@ -581,6 +585,7 @@ export function pruneStaleEmbeddedAddons({ targetDir, keepHashes }) {
 		if (!entry.isDirectory() || !entry.name.startsWith(EMBEDDED_ADDON_DIR_PREFIX) || keep.has(entry.name)) continue;
 		const dir = path.join(targetDir, entry.name);
 		try {
+			if (Date.now() - fs.statSync(dir).mtimeMs < NATIVE_CACHE_CLEANUP_GRACE_MS) continue;
 			fs.rmSync(dir, { recursive: true, force: true });
 			removed.push(dir);
 		} catch {
@@ -1085,7 +1090,10 @@ export function loadNative() {
 			configureGrammarDir(bindings, ctx.nativesDir);
 			loadedAddon = describeLoadedAddon(bindings, candidate, ctx);
 			cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
-			if (hasEmbedded) {
+			// Only the launched binary prunes: after a rebuild, a worker of a
+			// still-running session re-enters the older build's loader, whose
+			// "other builds" include the binary now on disk.
+			if (hasEmbedded && Bun.isMainThread) {
 				pruneStaleEmbeddedAddons({
 					targetDir: ctx.versionedDir,
 					keepHashes: [primaryEmbeddedFile, fallbackEmbeddedFile].filter(Boolean).map(file => file.hash),

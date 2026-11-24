@@ -95,7 +95,7 @@ export interface ExtractEmbeddedAddonsInput {
 
 /**
  * Decompress each manifest addon to its `embedded-<hash>/<filename>` path unless that build is already there; returns the paths written.
- * Creates and touches `targetDir` first; failing that (read-only or foreign-owned directory) throws only if an addon is missing.
+ * Creates and touches `targetDir` and each `embedded-<hash>` directory first; failing that (read-only or foreign-owned directory) throws only if an addon is missing.
  */
 export function extractEmbeddedAddons(input: ExtractEmbeddedAddonsInput): string[];
 
@@ -108,7 +108,7 @@ export interface PruneStaleEmbeddedAddonsInput {
 	keepHashes: string[];
 }
 
-/** Best-effort removal of other builds' `embedded-<hash>` directories; returns the directories removed. */
+/** Best-effort removal of other builds' `embedded-<hash>` directories untouched for the cleanup grace period; returns the directories removed. */
 export function pruneStaleEmbeddedAddons(input: PruneStaleEmbeddedAddonsInput): string[];
 
 export interface ResolveRuntimeCandidatesInput {
