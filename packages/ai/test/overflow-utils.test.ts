@@ -378,4 +378,18 @@ describe("isTextAmbiguousContextOverflow - dual-flag arbitration shared by fallb
 		expect(AIError.is(id, AIError.Flag.ContextOverflow)).toBe(true);
 		expect(AIError.isTextAmbiguousContextOverflow(id, undefined, 200_000)).toBe(true);
 	});
+
+	it("recognises a context overflow from the provider error code when the message names no overflow", async () => {
+		const error = new AIError.ProviderHttpError("request was rejected by the upstream gateway", 400, {
+			code: "context_length_exceeded",
+		});
+		const finalized = await AIError.finalize(error, { api: "openai-responses" });
+		const message: AIError.ContextOverflowMessage = {
+			stopReason: "error",
+			errorId: finalized.id,
+			errorStatus: finalized.status,
+			errorMessage: finalized.message,
+		};
+		expect(AIError.isContextOverflow(message)).toBe(true);
+	});
 });
