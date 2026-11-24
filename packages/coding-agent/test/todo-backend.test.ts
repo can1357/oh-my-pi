@@ -772,11 +772,12 @@ describe("todo backend", () => {
 			const answersMeanwhile = !late && scenario !== "times out";
 			if (answersMeanwhile) gate.resolve();
 			const outcome = await result.catch(() => undefined);
-			// A backend that times out never answers; a late one answers after omp gave up.
+			// A backend that times out never answers, so its resend goes out on exit; a late one answers after omp gave up.
+			if (scenario === "times out") await session.dispose();
 			if (late) {
-				// Real time on purpose: the runner's resend wait is a real timer, and the answer must land
-				// inside it, after the queued resend had its chance to run.
-				await Bun.sleep(15);
+				// Real time on purpose: past the 40 ms handler timeout, so a resend that did not wait for the answer
+				// would have gone out by then.
+				await Bun.sleep(60);
 				gate.resolve();
 			}
 			await resent;

@@ -711,7 +711,7 @@ export class ExtensionRunner {
 	 */
 	#todoUnsynced = new WeakMap<TodoBackendDefinition, Set<Extension>>();
 	/** The `resync` of each asked call not run yet: still deciding, or failed and waiting for its apply to settle. */
-	#todoRepairs = new Set<() => void>();
+	#todoResyncs = new Set<() => void>();
 	/** The selected `todo.backend` id last reported as unregistered; cleared once a selected id resolves. */
 	#reportedTodoBackend: string | undefined;
 	/** Selected todo backend ids whose shadowed registrations were already reported. */
@@ -1797,9 +1797,9 @@ export class ExtensionRunner {
 	async closeTodoBackend(): Promise<void> {
 		// Calls still deciding, or waiting for a late apply, resync now, before the closed flag drops them: a
 		// late write after this can still land, but the shutdown budget allows no longer wait.
-		const repairs = [...this.#todoRepairs];
-		this.#todoRepairs.clear();
-		for (const repair of repairs) repair();
+		const resyncs = [...this.#todoResyncs];
+		this.#todoResyncs.clear();
+		for (const resync of resyncs) resync();
 		this.#todoClosed = true;
 		await this.todoBackendSettled();
 		this.#todoPending = undefined;
@@ -1835,7 +1835,8 @@ export class ExtensionRunner {
 		const sessionId = this.sessionManager.getSessionId();
 		const timeoutMs = Math.min(TODO_APPLY_TIMEOUT_MS, extensionHandlerTimeoutMs);
 		const answered = Promise.withResolvers<void>();
-		// Whatever `apply` wrote is undone by the next list its holder takes, even one equal to the last.
+		// Whatever `apply` wrote is undone by the next list its holder takes, even one equal to the last: at
+		// once if it is still selected, else when it is selected again.
 		const resync = () => {
 			const holders = this.#todoUnsynced.get(definition) ?? new Set<Extension>();
 			this.#todoUnsynced.set(definition, holders.add(extension));
@@ -1852,7 +1853,7 @@ export class ExtensionRunner {
 		>(
 			async (event, ctx) => {
 				asked = true;
-				this.#todoRepairs.add(resync);
+				this.#todoResyncs.add(resync);
 				try {
 					await definition.apply?.(event.change, ctx);
 					return { kind: "accepted" };
@@ -1883,7 +1884,7 @@ export class ExtensionRunner {
 							? "The todo list changed"
 							: undefined;
 		if (verdict?.kind === "accepted" && staleCause === undefined) {
-			this.#todoRepairs.delete(resync);
+			this.#todoResyncs.delete(resync);
 			commit();
 			resync();
 			return { kind: "committed" };
@@ -1916,16 +1917,12 @@ export class ExtensionRunner {
 					message: `${staleCause ?? "The call was aborted"} while todo backend "${id}" decided${NOTHING_SAVED_SUFFIX}`,
 				};
 		}
-		// A failed call resyncs once its apply settled, so a late write lands first, but no later than the
-		// handler timeout; outside the call queue, so a later commit is not held behind it. Closing may run it first.
+		// A failed call resyncs once its apply settles, so a late write lands first, and outside the call queue, so
+		// a later commit is not held behind it. One that never answers resyncs when the session closes.
 		if (asked)
-			void awaitDeliveryTurn(
-				answered.promise,
-				performance.now() + extensionHandlerTimeoutMs,
-				this.#todoGivenUp.signal,
-			)
+			void answered.promise
 				.then(() => {
-					if (this.#todoRepairs.delete(resync)) resync();
+					if (this.#todoResyncs.delete(resync)) resync();
 				})
 				.catch((error: unknown) => logger.warn("Todo backend call failed", { error: String(error) }));
 		return result;

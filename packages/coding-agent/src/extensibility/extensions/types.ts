@@ -1905,10 +1905,9 @@ export interface TodoBackendDefinition {
 	 * outcome, even with an unchanged list. A committed change reaches `replace` like any other
 	 * commit. A refusal, a timeout, a late answer, or a list, session or backend that changed
 	 * meanwhile fails the call with omp's list unchanged, and omp's whole list goes out once the
-	 * answer settles, on exit at the latest; a backend no longer selected then gets it when it is
-	 * selected again. A todo call made, or still deciding, once the session is closing fails.
-	 * Other changes (`/todo`, RPC `set_todos`, resets, a subagent's calls) are not asked: they
-	 * reach `replace`.
+	 * answer settles, on exit at the latest. A todo call made, or still deciding, once the session
+	 * is closing fails. Other changes (`/todo`, RPC `set_todos`, resets, a subagent's calls) are
+	 * not asked: they reach `replace`.
 	 */
 	apply?(change: TodoBackendChange, ctx: ExtensionContext): void | Promise<void>;
 }
