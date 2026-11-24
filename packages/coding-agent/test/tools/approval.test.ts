@@ -460,6 +460,12 @@ describe("tool-owned dynamic approval declarations", () => {
 			'ssh build.example "rm -rf /"',
 			"python3 -c \"import os; os.system('rm -rf /')\"",
 			'echo "rm -rf /" | python3',
+			"echo hi # it's\nrm -rf /",
+			"GIT_EXTERNAL_DIFF='rm -rf /' git diff",
+			"GIT_EDITOR='rm -rf /' git commit -m fix",
+			"export GIT_EXTERNAL_DIFF='rm -rf /'; git diff",
+			"./test 'rm -rf /'",
+			"script/test 'rm -rf /'",
 		]) {
 			expect(bashApproval(command)).toEqual({ tier: "exec", override: true, reason: "Critical pattern detected" });
 		}
@@ -475,6 +481,17 @@ describe("tool-owned dynamic approval declarations", () => {
 	])("does not judge quoted text of a read-only command as a delete: %s", command => {
 		expect(bashApproval(command)).toBe("exec");
 	});
+
+	it.each(['pwd && nice rm -rf "/"', "pwd && nohup rm -rf '/'", "pwd && timeout 5 r\\m -rf /"])(
+		"keeps a quoted critical rm critical in a compound line: %s",
+		command => {
+			expect(bashApproval(command, { "bash.allowCompoundCommands": true })).toEqual({
+				tier: "exec",
+				override: true,
+				reason: "Critical pattern detected",
+			});
+		},
+	);
 
 	it("does not flag benign bash commands", () => {
 		for (const command of [
