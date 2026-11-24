@@ -34,8 +34,8 @@ export const AUTH_BLOCK_SCOPE = "auth";
 export const ACCOUNT_POLICY_BLOCK_SCOPE = "account-policy";
 /**
  * How long an account-wide policy denial (an organization that refuses OAuth, for example) keeps its
- * credential out of rotation. Nothing heals this block early, so a one-minute block picks the dead
- * account again for every new session.
+ * credential out of rotation. Usage evidence never heals this block early, so a one-minute block picks
+ * the dead account again for every new session.
  */
 export const ACCOUNT_POLICY_BLOCK_MS = 24 * 60 * 60_000;
 const PROTECTED_BLOCK_SCOPES = [AUTH_BLOCK_SCOPE, ACCOUNT_POLICY_BLOCK_SCOPE] as const;
