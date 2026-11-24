@@ -261,9 +261,9 @@ export interface MCPToolCallParams {
 	arguments?: Record<string, unknown>;
 }
 
-/** Structured authentication challenge returned in a tool result. */
+/** Authentication challenge a tool call was refused with. */
 export interface MCPAuthChallenge {
-	/** Values from `_meta["mcp/www_authenticate"]`. */
+	/** Values from the result's `_meta["mcp/www_authenticate"]`, or the HTTP refusal's `WWW-Authenticate` header. */
 	readonly wwwAuthenticate: readonly string[];
 }
 
