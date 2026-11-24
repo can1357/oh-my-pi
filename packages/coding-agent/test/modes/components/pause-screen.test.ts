@@ -68,6 +68,19 @@ afterEach(() => {
 });
 
 describe("pause screen", () => {
+	it("does not request mouse reporting while paused, so the terminal keeps native selection", async () => {
+		// Fullscreen apps open with mouse off unless they ask otherwise (presentFullscreen); a mouse
+		// request here would make the terminal send reports the paused screen drops.
+		const run = startPause();
+		try {
+			expect(run.ctx.shell.overlays.mouse()).toBe("off");
+		} finally {
+			run.term.press("enter");
+			await run.done;
+			run.term.dispose();
+		}
+	});
+
 	it("stops waiting on parked or quota-yielded advisor work", async () => {
 		vi.useFakeTimers();
 		AgentRegistry.resetGlobalForTests();
