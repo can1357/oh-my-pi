@@ -1009,12 +1009,26 @@ provider "commandcode" {
 		supports-reasoning-effort #true
 		thinking-efforts "low" "medium" "high" "max"
 	}
+	// Client catalog 014c3c66 (view=client): text+image, $0.075/$0.30/$0.015
+	// cache read, efforts off|low|medium|high|max. The id is chat-completions
+	// only (`supported_endpoints: ["/chat/completions"]`), so `off` stays the
+	// disable state and the ladder matches inkling-2-small:free.
+	models "thinkingmachines/inkling-2-mini" {
+		supports-reasoning-effort #true
+		thinking-efforts "low" "medium" "high" "max"
+		cost-patch {
+			input 0.075
+			output 0.3
+			cache-read 0.015
+			cache-write 0
+		}
+	}
 	models "claude-fable-5-2" "claude-haiku-5-5" "gpt-6.1-sol" "gpt-6.1-terra" \
 		"meta/muse-ember" "minimax/minimax-m3.1-flash" "deepseek/deepseek-v4.1-flash-ultrafast" \
 		"moonshotai/Kimi-K3.1-Pro" "meta/muse-spark-open" "mistral/mistral-large-4" \
 		"nvidia/nemotron-3.5-super-vl" "meta/muse-wonder-1.0" "Qwen/Qwen3.8-Max-Prime" \
-		"Qwen/Qwen4-Max" "thinkingmachines/inkling-2-small:free" "google/gemini-4-carbon" \
-		"ornith/ornith-1.5-122b" {
+		"Qwen/Qwen4-Max" "thinkingmachines/inkling-2-small:free" "thinkingmachines/inkling-2-mini" \
+		"google/gemini-4-carbon" "ornith/ornith-1.5-122b" {
 		input-modalities "text" "image"
 	}
 	models "gpt-6.1-sol" "gpt-6.1-terra" {

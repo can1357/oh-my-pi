@@ -780,7 +780,7 @@ describe("Command Code provider support", () => {
 			{ ids: ["Qwen/Qwen3.8-Max-Prime"], efforts: [Effort.Low, Effort.Medium, Effort.XHigh] },
 			{ ids: ["Qwen/Qwen4-Max"], efforts: [Effort.Low, Effort.High, Effort.XHigh] },
 			{
-				ids: ["thinkingmachines/inkling-2-small:free"],
+				ids: ["thinkingmachines/inkling-2-small:free", "thinkingmachines/inkling-2-mini"],
 				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.Max],
 			},
 			{ ids: ["google/gemini-4-carbon"], efforts: [Effort.Low, Effort.Medium, Effort.High] },
@@ -796,6 +796,7 @@ describe("Command Code provider support", () => {
 			"inclusionai/ling-3.1-flash-1019": true,
 			"minimax/minimax-m3.1-flash": true,
 			"ornith/ornith-1.5-122b": true,
+			"thinkingmachines/inkling-2-mini": true,
 			"thinkingmachines/inkling-2-small:free": true,
 			"Qwen/Qwen3.8-Max-Prime": true,
 			"Qwen/Qwen4-Max": true,
@@ -823,6 +824,7 @@ describe("Command Code provider support", () => {
 			{ id: "google/gemini-4-carbon", input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 },
 			{ id: "meta/muse-ember", input: 0.1, output: 0.5, cacheRead: 0.004, cacheWrite: 0 },
 			{ id: "Qwen/Qwen4-Max", input: 1.5, output: 4.5, cacheRead: 0.075, cacheWrite: 1.875 },
+			{ id: "thinkingmachines/inkling-2-mini", input: 0.075, output: 0.3, cacheRead: 0.015, cacheWrite: 0 },
 		];
 		const models = await discoverModels(cards.map(card => card.id));
 		for (const { id, ...cost } of cards) expect(models.find(model => model.id === id)?.cost).toEqual(cost);
