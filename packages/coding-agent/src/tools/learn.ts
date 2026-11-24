@@ -180,7 +180,7 @@ export class LearnTool implements AgentTool<LearnSchema> {
 			}
 			return {
 				content: [{ type: "text", text: `${memoryMessage}. ${verb} managed skill "${params.skill.name}".` }],
-				details: { skill: params.skill.name },
+				details: { skill: params.skill.name, action: params.skill.action },
 			};
 		}
 

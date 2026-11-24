@@ -1851,11 +1851,38 @@ export interface AutoLearnCaptureRunnerOptions {
 	onPayload?: SimpleStreamOptions["onPayload"];
 	onResponse?: SimpleStreamOptions["onResponse"];
 	createSessionId?: () => string;
+	/**
+	 * Reports a successful skill mutation performed by the capture turn. The capture runs on a
+	 * detached agent with no UI event bridge, so its tool cards are invisible; a host uses this to
+	 * surface the mutation the same way a foreground `learn` / `manage_skill` call would.
+	 */
+	onSkillMutated?: (mutation: { name: string; action: "create" | "update" | "delete" }) => void;
 }
 
 /** A tool the provider runs itself (a refused copy could not stop it); resolved headers can switch one on. */
 function hostRunsTool(model: Model, name: string): boolean {
 	return model.api === "anthropic-messages" && anthropicHostRunsTool(model as Model<"anthropic-messages">, name);
+}
+/** The `details` object a tool returned, when it carries one (name/action for a skill mutation). */
+function toolResultDetails(result: unknown): Record<string, unknown> | undefined {
+	if (!result || typeof result !== "object" || !("details" in result)) return undefined;
+	const { details } = result;
+	return details && typeof details === "object" ? (details as Record<string, unknown>) : undefined;
+}
+
+/**
+ * The skill mutation a `learn` / `manage_skill` result reports, when it completed one. `manage_skill`
+ * names the skill as `name`, `learn` as `skill`; a refused shadowed create carries no action.
+ */
+function skillMutationFromDetails(
+	details: Record<string, unknown>,
+): { name: string; action: "create" | "update" | "delete" } | undefined {
+	const name = typeof details.name === "string" ? details.name : details.skill;
+	const action = details.action;
+	if (typeof name !== "string" || (action !== "create" && action !== "update" && action !== "delete")) {
+		return undefined;
+	}
+	return { name, action };
 }
 
 /** Build a private capture runner over a detached message snapshot and provider session. */
@@ -1940,6 +1967,19 @@ export function createAutoLearnCaptureRunner(
 			onResponse: options.onResponse,
 		});
 		captureAgent.setMetadataResolver(provider => options.sourceAgent.metadataForProvider(provider));
+		// The capture runs detached from the primary session, so its tool cards never reach the UI.
+		// Forward a successful skill mutation to the host so an automatic mint stays visible.
+		if (options.onSkillMutated) {
+			const report = options.onSkillMutated;
+			captureAgent.subscribe(event => {
+				if (event.type !== "tool_execution_end" || event.isError) return;
+				const details = toolResultDetails(event.result);
+				if (!details) return;
+				if (event.toolName !== "learn" && event.toolName !== "manage_skill") return;
+				const mutation = skillMutationFromDetails(details);
+				if (mutation) report(mutation);
+			});
+		}
 		const captureMessage: CustomMessage = {
 			role: "custom",
 			customType: "autolearn-nudge",
@@ -6314,6 +6354,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				parentMnemopiSessionState: options.parentMnemopiSessionState,
 			});
 		};
+		// Skill mutations the auto-learn capture reports, batched into one notice per run: the capture
+		// is detached from the UI, so without this a mint writes to disk with nothing visible.
+		const skillMutations: string[] = [];
+		let skillNoticeTimer: NodeJS.Timeout | undefined;
+		const scheduleSkillNotice = () => {
+			clearTimeout(skillNoticeTimer);
+			// A short debounce collects the mutations of one capture turn before the single notice.
+			skillNoticeTimer = setTimeout(() => {
+				skillNoticeTimer = undefined;
+				if (skillMutations.length === 0) return;
+				const summary = skillMutations.splice(0);
+				session.emitNotice("info", `auto-learn: ${summary.join(", ")}.`);
+			}, 200);
+		};
 
 		const runAutoLearnCapture = createAutoLearnCaptureRunner({
 			sourceAgent: agent,
@@ -6324,6 +6378,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					.filter((tool): tool is AgentTool => tool !== undefined),
 			onPayload,
 			onResponse,
+			// Auto-learn mints run on the detached capture agent, so their tool cards never reach the
+			// UI. Surface the mutation as a session notice, the same out-of-band signal the TUI shows
+			// for a background condition.
+			onSkillMutated: mutation => {
+				// One capture can mint several skills; collect them and announce once, so the single
+				// status line lists every mutation instead of collapsing to the last.
+				const verb =
+					mutation.action === "create" ? "Created" : mutation.action === "update" ? "Updated" : "Deleted";
+				skillMutations.push(`${verb} "${mutation.name}"`);
+				scheduleSkillNotice();
+			},
 			createAgent: captureOptions => {
 				const captureModel = captureOptions.initialState?.model;
 				const captureSessionId = captureOptions.sessionId;
