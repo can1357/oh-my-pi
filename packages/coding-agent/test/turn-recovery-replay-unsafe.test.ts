@@ -426,6 +426,45 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		}
 	});
 
+	it("keeps a fallback provider healthy when an old-provider quota error arrives unstamped", async () => {
+		const codex = getBundledModel("openai-codex", "gpt-6.1-sol");
+		if (!codex) throw new Error("Expected bundled openai-codex model");
+		const host = createHost(model, modelRegistry, {
+			fallbackChains: { [`${model.provider}/${model.id}`]: ["openai/gpt-4o-mini"] },
+		});
+		const events: { type: string; delayMs?: number }[] = [];
+		host.emitSessionEvent = async event => {
+			events.push(
+				event.type === "auto_retry_start" ? { type: event.type, delayMs: event.delayMs } : { type: event.type },
+			);
+		};
+		const recovery = new TurnRecovery(host);
+		const mark = vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+		const redeem = vi.spyOn(host, "maybeAutoRedeemReset").mockResolvedValue({ restored: false });
+		const cooldown = vi.spyOn(recovery, "noteRetryFallbackCooldown").mockImplementation(() => {});
+		try {
+			// The session already moved to `model`; this Codex request carries no
+			// request-time stamp because an overlapping run overwrote the stamp slot.
+			const failed: AssistantMessage = {
+				...makeMessage([], codex),
+				errorMessage: "429 usage_limit_reached: You've reached your ChatGPT plan limit. Try again in ~9701 min.",
+			};
+			await recovery.recordUsageLimitOutcome(failed);
+			expect(mark).not.toHaveBeenCalled();
+			const retried = await recovery.handleRetryableError(failed);
+			expect(retried).toBe(true);
+			expect(redeem).not.toHaveBeenCalled();
+			expect(cooldown).not.toHaveBeenCalled();
+			const retryStart = events.find(event => event.type === "auto_retry_start");
+			expect(retryStart).toBeDefined();
+			expect(retryStart?.delayMs ?? Infinity).toBeLessThan(60_000);
+		} finally {
+			mark.mockRestore();
+			redeem.mockRestore();
+			cooldown.mockRestore();
+		}
+	});
+
 	it("does not spend a stale quota hint on the fallback even when no block was recorded", async () => {
 		const codex = getBundledModel("openai-codex", "gpt-6.1-sol");
 		if (!codex) throw new Error("Expected bundled openai-codex model");

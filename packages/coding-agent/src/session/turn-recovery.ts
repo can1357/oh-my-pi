@@ -875,6 +875,17 @@ export class TurnRecovery {
 	}
 
 	/**
+	 * The provider that served a failed request: the request-time stamp, or the message's own provider when
+	 * the registry knows that model. A lost stamp (overlapping requests share one slot) must not read as the
+	 * active provider (#17098); an origin the registry does not know keeps the active selection.
+	 */
+	#servingProvider(message: AssistantMessage): string | undefined {
+		const stamped = (message as IssuedProviderAssistantMessage)[kUsageLimitRequestProvider];
+		if (stamped !== undefined) return stamped;
+		return this.#host.modelRegistry.find(message.provider, message.model) ? message.provider : undefined;
+	}
+
+	/**
 	 * Records a usage-limit failure before replay eligibility decides whether the
 	 * failed turn may be discarded. Returns whether credential recovery switched
 	 * the active account.
@@ -885,7 +896,7 @@ export class TurnRecovery {
 		const activeModel = this.#host.model();
 		if (!activeModel || !AIError.is(id, AIError.Flag.UsageLimit)) return false;
 		// Only the request-time provider proves a delayed error belongs to the old pool.
-		const requestProvider = (message as IssuedProviderAssistantMessage)[kUsageLimitRequestProvider];
+		const requestProvider = this.#servingProvider(message);
 		if (requestProvider !== undefined && requestProvider !== activeModel.provider) return false;
 
 		let recorded = this.#usageLimitOutcomes.get(message);
@@ -2861,7 +2872,7 @@ export class TurnRecovery {
 
 		const errorMessage = message.errorMessage || "Unknown error";
 		const id = this.#classifyRetryMessage(message);
-		const requestProvider = (message as IssuedProviderAssistantMessage)[kUsageLimitRequestProvider];
+		const requestProvider = this.#servingProvider(message);
 		const oldProviderLimitFor = (model: Model | undefined): boolean =>
 			requestProvider !== undefined &&
 			model !== undefined &&
