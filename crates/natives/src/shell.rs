@@ -186,10 +186,10 @@ pub fn shell_reserved_command_names() -> Vec<&'static str> {
 	omp_shell::reserved_command_names()
 }
 
-/// `script` with the `\` dropped after each `<<EOF &&` (or `||`, `|`, `|&`)
-/// so the here-document body starts on the next line; `null` when nothing
-/// needs repair or the result would not parse. omp's bash tool runs commands
-/// through it.
+/// Remove stray continuations before here-document bodies in omp's bash tool.
+///
+/// Drops the `\` after `<<EOF &&` (or `||`, `|`, `|&`). Returns `null` if no
+/// repair is needed or the resulting script does not parse.
 #[napi]
 pub fn repair_heredoc_continuations(script: String) -> Option<String> {
 	let fixed = omp_shell::bash::syntax::repair_heredoc_continuations(script.as_bytes())?;
