@@ -1178,7 +1178,7 @@ The result's `details.spotlight` trace carries the same sizes and coins, `savedT
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `rpc.maxInputRecordBytes` | number | `67108864` (64 MiB) | Largest stdin record in bytes for `--mode rpc`, JSON included. A larger record is refused as a `parse` error and its bytes are skipped through its newline, so the next record still runs. Must be a whole number of at least 1. Read when RPC mode starts. See [rpc.md](rpc.md). |
+| `rpc.maxInputRecordBytes` | number | `67108864` (64 MiB) | Largest stdin record in bytes for RPC mode (`--mode rpc` and `--mode rpc-ui`), JSON included. A larger record is refused as a `parse` error and its bytes are skipped through its newline, so the next record still runs. Must be a whole number of at least 1. Read when RPC mode starts. See [rpc.md](rpc.md). |
 
 ### Other groups
 
