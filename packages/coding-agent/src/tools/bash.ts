@@ -799,6 +799,9 @@ class ToolCommandRecorder {
 	}
 }
 
+// Signal name → number from the OS table. A Map holds only the table's own names, so a wire name the table lacks misses without a cast.
+const SIGNAL_NUMBERS: ReadonlyMap<string, number> = new Map(Object.entries(os.constants.signals));
+
 /**
  * Bash tool implementation.
  *
@@ -2465,13 +2468,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				}
 
 				// Map exit status: null exitCode with a signal → 128 + the signal's number (shell convention).
-				// An unknown name keeps the 128 base, so the kill never reads as success.
+				// A name the OS table does not contain keeps the bare 128, so the kill never reads as success.
 				const rawExitCode = exitStatus.exitCode;
 				const exitCode: number | undefined =
 					rawExitCode != null
 						? rawExitCode
 						: exitStatus.signal
-							? 128 + (os.constants.signals[exitStatus.signal as NodeJS.Signals] ?? 0)
+							? 128 + (SIGNAL_NUMBERS.get(exitStatus.signal) ?? 0)
 							: undefined;
 
 				const decoded = await bridgeGraphics.finish(finalOutput.output);
