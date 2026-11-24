@@ -113,4 +113,4 @@ function paintAstGrep(node: UiNode, cx: PaintContext): Block {
 	};
 }
 
-defineToolLook("ast_grep", { paint: paintAstGrep, margin: true });
+defineToolLook("ast_grep", { paint: paintAstGrep, margin: true, inset: true });

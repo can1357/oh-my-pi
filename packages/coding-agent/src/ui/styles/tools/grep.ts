@@ -129,4 +129,4 @@ function paintGrep(node: UiNode, cx: PaintContext): Block {
 	return { rows: [...rows, ...treeRows(theme, items, cx.width), ...noteRows] };
 }
 
-defineToolLook("grep", { paint: paintGrep, margin: true });
+defineToolLook("grep", { paint: paintGrep, margin: true, inset: true });

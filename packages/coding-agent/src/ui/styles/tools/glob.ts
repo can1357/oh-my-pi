@@ -80,4 +80,4 @@ function paintGlob(node: UiNode, cx: PaintContext): Block {
 	};
 }
 
-defineToolLook("glob", { paint: paintGlob, margin: true });
+defineToolLook("glob", { paint: paintGlob, margin: true, inset: true });

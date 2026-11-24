@@ -125,4 +125,4 @@ function paintFind(node: UiNode, cx: PaintContext): Block {
 	return { rows };
 }
 
-defineToolLook("find", { paint: paintFind, margin: true, animated: true });
+defineToolLook("find", { paint: paintFind, margin: true, inset: true, animated: true });

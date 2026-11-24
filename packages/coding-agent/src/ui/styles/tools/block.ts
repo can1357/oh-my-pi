@@ -187,6 +187,15 @@ function paintLookRows(node: UiNode, cx: PaintContext): Block {
 		const rows = ["", ...inner.rows.map(row => ` ${row}`), ""].map(row => tintRow(cx.theme, key, row, cx.width));
 		return { rows };
 	}
+	if (look.inset) {
+		const inner = look.paint(node, withContext(still, { width: Math.max(1, cx.width - 1) }));
+		return {
+			...inner,
+			rows: inner.rows.map(row => (row === "" ? row : ` ${row}`)),
+			...(inner.hits ? { hits: inner.hits.map(hit => ({ ...hit, col: hit.col + 1 })) } : {}),
+			...(inner.cursor ? { cursor: { row: inner.cursor.row, col: inner.cursor.col + 1 } } : {}),
+		};
+	}
 	return look.paint(node, still);
 }
 
