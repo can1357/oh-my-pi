@@ -631,7 +631,7 @@ describe("UiHelpers.renderSessionContext — error-stop tool calls", () => {
 		expect(rendered).not.toContain("late tool result must not replace the assistant stop error");
 	});
 
-	it("shows the real results saved for an aborted Cursor turn instead of its error", async () => {
+	it("shows the real results of an aborted Cursor turn and keeps the error on a call that never ran", async () => {
 		const result = (toolCallId: string, toolName: string, text: string): AgentMessage => ({
 			role: "toolResult",
 			toolCallId,
@@ -647,6 +647,7 @@ describe("UiHelpers.renderSessionContext — error-stop tool calls", () => {
 					content: [
 						{ type: "toolCall", id: "read", name: "read", arguments: { path: "/tmp/file.txt" } },
 						{ type: "toolCall", id: "grep", name: "grep", arguments: { pattern: "foo" } },
+						{ type: "toolCall", id: "cut", name: "grep", arguments: { pattern: "bar" } },
 					],
 					api: "cursor-agent",
 					provider: "cursor",
@@ -658,15 +659,21 @@ describe("UiHelpers.renderSessionContext — error-stop tool calls", () => {
 				},
 				result("read", "read", "read output saved before the abort"),
 				result("grep", "grep", "grep output saved before the abort"),
+				{
+					...result("cut", "grep", "placeholder for the call that never ran"),
+					details: { __synthetic: true, source: "assistant_stop_aborted", executed: false },
+					isError: true,
+				} as AgentMessage,
 			]),
 		);
 
 		await harness.helpers.renderInitialMessages();
 
 		const rendered = harness.text();
-		expect(rendered).not.toContain("✘ Read");
+		expect(rendered).toContain("✔ Read /tmp/file.txt");
 		expect(rendered).toContain("grep output saved before the abort");
-		expect(rendered).not.toContain("Deadline exceeded");
+		expect(rendered).not.toContain("placeholder for the call that never ran");
+		expect(countOccurrences(rendered, "Deadline exceeded")).toBe(1);
 	});
 });
 
