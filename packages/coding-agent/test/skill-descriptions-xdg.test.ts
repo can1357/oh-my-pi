@@ -529,6 +529,12 @@ describe("previewSkillDescription", () => {
 		expect(previewSkillDescription(description)).toBe(`${description.slice(0, 99)}…`);
 	});
 
+	it("keeps a surrogate pair whole when the budget cut lands inside it", () => {
+		// U+20BB7 is outside the BMP: one character, two UTF-16 units.
+		const description = "\u{20BB7}".repeat(80);
+		expect(previewSkillDescription(description)).toBe(`${"\u{20BB7}".repeat(49)}…`);
+	});
+
 	it("cuts English text at the last word boundary within the budget", () => {
 		const description = `Use this skill ${"when editing files ".repeat(10)}`;
 		expect(previewSkillDescription(description)).toBe(`Use this skill ${"when editing files ".repeat(4)}when…`);
