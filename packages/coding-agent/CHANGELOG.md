@@ -104,6 +104,7 @@
 - `omp -e <path>` keeps the instant first frame, so a slow terminal reply no longer switches the keyboard protocol after keys were typed ([#20158](https://github.com/can1357/oh-my-pi/issues/20158), [#20193](https://github.com/can1357/oh-my-pi/pull/20193) by [@koeria](https://github.com/koeria))
 - MCP, extension and other non-built-in tools now appear in name order after the built-ins (in the tool list, `eval`'s session tool names and the tool-command docs), so resuming a session no longer rewrites the whole prompt cache when MCP servers answer or extension tools register in a different order ([#20327](https://github.com/can1357/oh-my-pi/issues/20327))
 - On models that bind signed thinking to the prompt prefix (Claude with `thinking.prefixBinding`), a judge failure that withdraws `find` under `find.enabled: auto` no longer rewrites the system prompt and the `grep`/`glob`/`bash` descriptions mid-session, which had dropped the prompt cache and earlier thinking; the prompt change waits for the next rebuild that happens anyway ([#20325](https://github.com/can1357/oh-my-pi/issues/20325))
+- A daemon unit is no longer pinned when its client disconnects while the unit is still being created: the lease taken after the disconnect is dropped as on any lost connection, after the reconnect grace ([#20263](https://github.com/can1357/oh-my-pi/pull/20263) by [@yaacovcorcos](https://github.com/yaacovcorcos))
 
 ### Removed
 
