@@ -220,6 +220,21 @@ export interface ThinkingLevelChangeEntry extends SessionEntryBase {
 	configured?: string | null;
 }
 
+/** Why a retry fallback moved the session off a model. */
+export interface ModelFallbackCause {
+	/** The model the session left, named as in `retry_fallback_applied.from` (`provider/modelId`, plus any `:thinking` level). */
+	from: string;
+	/**
+	 * - `request-error`: a request to `from` failed.
+	 * - `agent-loop`: the agent loop stopped the turn itself (e.g. an unmet soft tool requirement); no request failed.
+	 * - `usage-preflight`: usage health moved the request before it was sent.
+	 * - `missing-credential`: `from`'s provider had no usable credential.
+	 */
+	trigger: "request-error" | "agent-loop" | "usage-preflight" | "missing-credential";
+	/** The failed turn's error, or the usage or credential condition. */
+	reason?: string;
+}
+
 export interface ModelChangeEntry extends SessionEntryBase {
 	type: "model_change";
 	/** Model in "provider/modelId" format */
@@ -228,6 +243,8 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	role?: string;
 	/** True when this transition selected a retry-fallback model rather than the configured model. */
 	resolvedModelIsFallback?: boolean;
+	/** Why the retry fallback that wrote this entry switched models. */
+	fallback?: ModelFallbackCause;
 }
 
 export interface ServiceTierChangeEntry extends SessionEntryBase {

@@ -335,6 +335,28 @@ describe("agentLoop soft tool requirement", () => {
 		expect(h.resolveRuns).toBe(1);
 	});
 
+	it("ends a turn that never meets the requirement with an error the agent loop raised, not a failed request", async () => {
+		const h = makeSoftResolveHarness();
+		let detours = 0;
+		// Every turn, forced or not, detours to peek instead of resolving.
+		const mock = createMockModel({
+			handler: () => ({ content: [{ type: "toolCall", id: `p${++detours}`, name: "peek", arguments: {} }] }),
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["sys"], tools: h.tools, messages: [] },
+			streamFn: mock.stream,
+			getToolChoice: h.getToolChoice,
+		});
+
+		await agent.prompt("go");
+
+		const last = agent.state.messages.at(-1);
+		if (last?.role !== "assistant") throw new Error("Expected the turn to end on an assistant message");
+		expect(last.stopReason).toBe("error");
+		expect(last.errorFromAgentLoop).toBe(true);
+		expect(h.peekRuns).toBe(0);
+	});
+
 	it("leaves tool_choice untouched when no requirement is pending", async () => {
 		const context: AgentContext = { systemPrompt: ["sys"], messages: [], tools: [] };
 		const mock = createMockModel({ responses: [{ content: ["hi"] }] });

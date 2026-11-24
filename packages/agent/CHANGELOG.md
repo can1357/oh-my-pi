@@ -5,6 +5,7 @@
 ### Added
 
 - Added `SoftToolRequirement.unsatisfiedNotice`: the skipped-result text for a call to the required tool that fails `satisfies`, so a host can name the invocation it needs instead of the generic request to call that tool ([#20335](https://github.com/can1357/oh-my-pi/pull/20335) by [@baekjosh](https://github.com/baekjosh))
+- Added `AgentLoopError`, thrown when the loop ends a turn itself (a soft tool requirement the model never met); `Agent` marks that turn's error message `errorFromAgentLoop` so hosts can tell it from a failed request ([#20336](https://github.com/can1357/oh-my-pi/pull/20336) by [@baekjosh](https://github.com/baekjosh))
 
 ### Fixed
 

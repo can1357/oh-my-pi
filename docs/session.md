@@ -304,6 +304,29 @@ its count and `duration` are still visible.
 reserved role `fallback` is ephemeral: model restoration prefers the configured
 default instead of restoring that role's temporary model.
 
+A retry fallback's entry also carries `fallback`: the model it left (`from`),
+what moved it (`trigger`: `request-error`, `agent-loop` when the agent loop
+stopped the turn itself and no request failed, `usage-preflight`, or
+`missing-credential`), and the error or condition (`reason`):
+
+```json
+{
+	"type": "model_change",
+	"model": "openai/gpt-4o",
+	"role": "fallback",
+	"resolvedModelIsFallback": true,
+	"fallback": {
+		"from": "anthropic/claude-sonnet-4-5",
+		"trigger": "agent-loop",
+		"reason": "Soft tool requirement 'bash' was not satisfied after 3 forced turns; aborting to avoid an unbounded force loop."
+	}
+}
+```
+
+Anonymized exports keep `from` with the same model-identity rule as `model`,
+keep `trigger`, and redact `reason` like `errorMessage`, since a provider error
+can echo request content.
+
 ### `service_tier_change`
 
 ```json
