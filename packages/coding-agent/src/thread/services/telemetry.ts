@@ -39,15 +39,17 @@ import {
 	type TelemetryContentSerializer,
 } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
-import {
-	type Context,
-	context,
-	type Span,
-	type SpanOptions,
-	SpanStatusCode,
-	type Tracer,
-	trace,
-} from "@opentelemetry/api";
+import type * as OtelApi from "@opentelemetry/api";
+import type { Context, Span, SpanOptions, SpanStatusCode, Tracer } from "@opentelemetry/api";
+
+// Lazy loader: keeps @opentelemetry/api off startup unless subagent telemetry bridging runs.
+let otelApiCache: typeof OtelApi | undefined;
+function otelApi(): typeof OtelApi {
+	if (!otelApiCache) otelApiCache = require("@opentelemetry/api") as typeof OtelApi;
+	return otelApiCache;
+}
+
+const SPAN_STATUS_ERROR = 2 as SpanStatusCode;
 import type { MainThreadLink, WorkerThreadLink } from "../protocol";
 import { type RpcCodec, type RpcServe, rpcLossy, rpcSync } from "../rpc";
 import type { ThreadService, WorkerPeer } from "../services";
@@ -97,7 +99,7 @@ export class BridgedTracer implements Tracer {
 	): R {
 		if (typeof a === "function") return this.target.startActiveSpan(name, a);
 		if (typeof b === "function") return this.target.startActiveSpan(name, a ?? {}, b);
-		if (c) return this.target.startActiveSpan(name, a ?? {}, b ?? context.active(), c);
+		if (c) return this.target.startActiveSpan(name, a ?? {}, b ?? otelApi().context.active(), c);
 		throw new TypeError("startActiveSpan requires a callback");
 	}
 }
@@ -171,6 +173,7 @@ function syncSerializer(serializer: TelemetryContentSerializer): TelemetryConten
  * inside the OTEL context the subagent's spans should nest under.
  */
 export function toWorkerTelemetryConfig(config: AgentTelemetryConfig): AgentTelemetryConfig {
+	const { context, trace } = otelApi();
 	const target =
 		config.tracer instanceof BridgedTracer
 			? config.tracer.target
@@ -262,7 +265,7 @@ class PeerTelemetryState {
 
 	endAll(reason: string): void {
 		for (const span of this.open) {
-			span.setStatus({ code: SpanStatusCode.ERROR, message: `Subagent worker exited: ${reason}` });
+			span.setStatus({ code: SPAN_STATUS_ERROR, message: `Subagent worker exited: ${reason}` });
 			span.end();
 		}
 		this.open.clear();
@@ -282,9 +285,9 @@ function parentContext(tracer: BridgedTracer, parent: WireSpanParent): Context {
 		case "inherit":
 			return tracer.parentContext;
 		case "span":
-			return trace.setSpan(tracer.parentContext, parent.span);
+			return otelApi().trace.setSpan(tracer.parentContext, parent.span);
 		case "context":
-			return trace.setSpanContext(tracer.parentContext, fromWireSpanContext(parent.spanContext));
+			return otelApi().trace.setSpanContext(tracer.parentContext, fromWireSpanContext(parent.spanContext));
 	}
 }
 

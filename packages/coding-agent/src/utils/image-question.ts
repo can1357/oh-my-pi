@@ -11,9 +11,9 @@ import {
 } from "../config/model-resolver";
 import imageQuestionSystemPromptTemplate from "../prompts/tools/image-question-system.md" with { type: "text" };
 import { journalCompletion } from "../session/model-usage-journal";
-import { concreteThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
+import { concreteThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort } from "../thinking/levels";
 import type { ToolSession } from "../tools";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 import type { LoadedImageInput } from "./image-loading";
 
 import { cfgImagesBlockImages } from "../modes/settings";

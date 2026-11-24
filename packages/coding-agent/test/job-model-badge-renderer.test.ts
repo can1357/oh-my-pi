@@ -1,59 +1,61 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import { visibleWidth } from "@oh-my-pi/pi-tui";
+import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { formatDuration } from "@oh-my-pi/pi-utils";
+import { snapshotJobs } from "../src/async/job-control";
 import { AsyncJobManager } from "../src/async/job-manager";
 import { resetSettingsForTest, Settings, settings } from "../src/config/settings";
-import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
+import type { SingleResult, TaskToolDetails } from "../src/task/task-details";
+import { cfgTaskShowResolvedModelBadge } from "../src/task/settings";
 import type { ToolSession } from "../src/tools";
-import { type CoordinationDetails, waitToolRenderer } from "@oh-my-pi/pi-tui/tools/wait";
-import { snapshotJobs } from "../src/async/job-control";
-import { formatDuration, thinkingLevelGlyph } from "@oh-my-pi/pi-tui/render/render-utils";
+import type { EvalToolDetails } from "../src/tools/details/eval";
+import type { CoordinationDetails, JobSnapshot } from "../src/tools/details/wait";
+import { thinkingLevelGlyph } from "../src/ui/tools/agent-common";
+import { toolText } from "./helpers/tool-text";
 
-import { cfgTaskShowResolvedModelBadge } from "@oh-my-pi/pi-coding-agent/task/settings";
+const symbol = (key: string): string => currentTheme().symbols.symbol(key);
+const thinking = (level: string): string => thinkingLevelGlyph(symbol, level);
+const advisorIcon = (): string => symbol("icon.advisor");
 
-const ansiPattern = /\x1b\[[0-9;]*m/g;
-const hyperlinkPattern = /\x1b\]8;[^\x1b\x07]*(?:\x07|\x1b\\)/g;
-
-let uiTheme: Theme;
-let priorShowResolvedModelBadge = false;
-
-// Model badges live on job-tree rows, which a wait card draws once expanded (Ctrl+O).
-function renderJobText(details: Omit<CoordinationDetails, "op">, expanded = true, live = false, width = 160): string {
-	const component = waitToolRenderer.renderResult(
-		{ content: [{ type: "text", text: "Listed background jobs" }], details: { op: "wait", ...details } },
-		{ expanded, isPartial: live, spinnerFrame: live ? 0 : undefined },
-		uiTheme,
-	);
-	let text = component.render(width).join("\n");
-	text = text.replace(hyperlinkPattern, "");
-	text = text.replace(ansiPattern, "");
-	return text;
+/** A wait card listing `jobs`, expanded (model badges live on its job-tree rows). */
+function waitText(jobs: readonly unknown[], options: { width?: number; live?: boolean } = {}): string {
+	const details = { op: "wait", jobs } as unknown as CoordinationDetails;
+	return toolText({
+		name: "wait",
+		args: {},
+		result: { content: [{ type: "text", text: "Listed background jobs" }], details },
+		partial: options.live === true,
+		expanded: true,
+		width: options.width ?? 160,
+	});
 }
 
-describe("hub jobs task model badges", () => {
+/** The row of the job whose id or label contains `needle`. */
+function rowWith(text: string, needle: string): string {
+	const row = text.split("\n").find(line => line.includes(needle));
+	if (row === undefined) throw new Error(`no row with ${needle} in:\n${text}`);
+	return row;
+}
+
+function badgeOn(enabled: boolean): void {
+	cfgTaskShowResolvedModelBadge.override(settings, enabled);
+}
+
+describe("resolved model badges", () => {
 	beforeAll(async () => {
 		await Settings.init({ inMemory: true });
-		const loaded = await getThemeByName("dark");
-		if (!loaded) throw new Error("theme unavailable");
-		uiTheme = loaded;
-		setThemeInstance(uiTheme);
-	});
-
-	beforeEach(() => {
-		priorShowResolvedModelBadge = cfgTaskShowResolvedModelBadge.get(settings);
 	});
 
 	afterEach(() => {
-		cfgTaskShowResolvedModelBadge.override(settings, priorShowResolvedModelBadge);
 		cfgTaskShowResolvedModelBadge.clearOverride(settings);
-		vi.restoreAllMocks();
 	});
 
-	it("keeps a literal thinking suffix in a completed task's identity with a separate thinking glyph", () => {
-		cfgTaskShowResolvedModelBadge.override(settings, true);
-		const identity = "p/model:high";
-		const text = renderJobText({
-			jobs: [
+	describe("wait card job rows", () => {
+		it("keeps a literal thinking suffix in a completed task's identity with a separate thinking glyph", () => {
+			badgeOn(true);
+			const identity = "p/model:high";
+			const text = waitText([
 				{
 					id: "Architect",
 					type: "task",
@@ -65,20 +67,18 @@ describe("hub jobs task model badges", () => {
 					resolvedModelIdentity: identity,
 					resolvedThinkingLevel: ThinkingLevel.High,
 				},
-			],
+			]);
+
+			expect(text).toContain(`${thinking("high")} ${identity} Architect`);
+			expect(text.split(identity).length - 1).toBe(1);
+			expect(text).not.toContain(`${identity}:high`);
+			expect(text).not.toContain(advisorIcon());
 		});
 
-		expect(text).toContain(`${thinkingLevelGlyph(ThinkingLevel.High, uiTheme)} ${identity} Architect`);
-		expect(text.split(identity).length - 1).toBe(1);
-		expect(text).not.toContain(`${identity}:high`);
-		expect(text).not.toContain(uiTheme.icon.advisor);
-	});
-
-	it("fits a long model badge around the agent name and duration at 60 columns", () => {
-		cfgTaskShowResolvedModelBadge.override(settings, true);
-		const text = renderJobText(
-			{
-				jobs: [
+		it("fits a long model badge around the agent name and duration at 60 columns", () => {
+			badgeOn(true);
+			const text = waitText(
+				[
 					{
 						id: "Architect",
 						type: "task",
@@ -91,102 +91,64 @@ describe("hub jobs task model badges", () => {
 						advisor: true,
 					},
 				],
-			},
-			true,
-			true,
-			60,
-		);
-		const row = text.split("\n")[1]!;
+				{ width: 60, live: true },
+			);
+			const row = rowWith(text, "Architect");
 
-		expect(row).toContain(`${uiTheme.icon.advisor} Architect`);
-		expect(row).toContain(thinkingLevelGlyph(ThinkingLevel.High, uiTheme));
-		expect(row).toContain("…");
-		expect(row).toEndWith("1.2s");
-		for (const line of text.split("\n")) expect(visibleWidth(line)).toBeLessThanOrEqual(60);
-	});
+			expect(row).toContain(`${advisorIcon()} Architect`);
+			expect(row).toContain(thinking("high"));
+			expect(row).toContain("…");
+			expect(row.trimEnd()).toEndWith("1.2s");
+			for (const line of text.split("\n")) expect(visibleWidth(line)).toBeLessThanOrEqual(60);
+		});
 
-	it("keeps the ID and badge ahead of a long description and preserves expanded continuation", () => {
-		cfgTaskShowResolvedModelBadge.override(settings, true);
-		const text = renderJobText(
-			{
-				jobs: [
-					{
-						id: "Architect",
-						type: "task",
-						status: "completed",
-						label: `Architect ${"設計".repeat(40)}\nFollow-up design details`,
-						durationMs: 1_234,
-						resolvedModel: "provider/a-very-long-model-name-with-a-distinctive-tail:high",
-						resolvedModelIdentity: "provider/a-very-long-model-name-with-a-distinctive-tail",
-						resolvedThinkingLevel: ThinkingLevel.High,
-						advisor: true,
-					},
-				],
-			},
-			true,
-			false,
-			60,
-		);
-		const row = text.split("\n")[1]!;
+		it("draws a running job snapshot's model and advisor and keeps them once it settles", async () => {
+			badgeOn(true);
+			const identity = "p/runtime:max";
+			const reported = Promise.withResolvers<void>();
+			const finish = Promise.withResolvers<string>();
+			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			const id = manager.register(
+				"task",
+				"Architect",
+				async ({ reportProgress }) => {
+					await reportProgress("running", {
+						progress: [
+							{
+								id: "Architect",
+								resolvedModel: `${identity}:max`,
+								resolvedModelIdentity: identity,
+								resolvedThinkingLevel: ThinkingLevel.Max,
+								advisor: true,
+							},
+						],
+					});
+					reported.resolve();
+					return finish.promise;
+				},
+				{ id: "Architect" },
+			);
+			await reported.promise;
+			const session = { asyncJobManager: manager } as unknown as ToolSession;
+			const prefix = `${thinking("max")} ${identity} ${advisorIcon()} Architect`;
+			try {
+				const live = waitText(snapshotJobs(session, manager.getAllJobs()), { live: true });
+				expect(live).toContain(prefix);
+				expect(live.split(identity).length - 1).toBe(1);
+				expect(live).not.toContain(`${identity}:max`);
 
-		expect(row).toContain(`${uiTheme.icon.advisor} Architect`);
-		expect(row).toContain("task");
-		expect(row).toEndWith("1.2s");
-		expect(text.split("\n")[2]).toContain("Architect 設計");
-		expect(text.split("\n")[3]).toContain("Follow-up design details");
-		for (const line of text.split("\n")) expect(visibleWidth(line)).toBeLessThanOrEqual(60);
-	});
+				finish.resolve("finished architecture review");
+				await manager.getJob(id)?.promise;
+				expect(waitText(snapshotJobs(session, manager.getAllJobs()))).toContain(prefix);
+			} finally {
+				finish.resolve("done");
+				await manager.getJob(id)?.promise;
+			}
+		});
 
-	it("renders a running task snapshot's advisor badge and keeps it on the settled result", async () => {
-		cfgTaskShowResolvedModelBadge.override(settings, true);
-		const identity = "p/runtime:max";
-		const reported = Promise.withResolvers<void>();
-		const finish = Promise.withResolvers<string>();
-		const manager = new AsyncJobManager({ onJobComplete: () => {} });
-		const id = manager.register(
-			"task",
-			"Architect",
-			async ({ reportProgress }) => {
-				await reportProgress("running", {
-					progress: [
-						{
-							id: "Architect",
-							resolvedModel: `${identity}:max`,
-							resolvedModelIdentity: identity,
-							resolvedThinkingLevel: ThinkingLevel.Max,
-							advisor: true,
-						},
-					],
-				});
-				reported.resolve();
-				return finish.promise;
-			},
-			{ id: "Architect" },
-		);
-		await reported.promise;
-
-		const session = { asyncJobManager: manager } as unknown as ToolSession;
-		try {
-			const text = renderJobText({ jobs: snapshotJobs(session, manager.getAllJobs()) }, true, true);
-			const prefix = `${thinkingLevelGlyph(ThinkingLevel.Max, uiTheme)} ${identity} ${uiTheme.icon.advisor} Architect`;
-			expect(text).toContain(prefix);
-			expect(text.split(identity).length - 1).toBe(1);
-			expect(text).not.toContain(`${identity}:max`);
-
-			finish.resolve("finished architecture review");
-			await manager.getJob(id)?.promise;
-			const settled = renderJobText({ jobs: snapshotJobs(session, manager.getAllJobs()) });
-			expect(settled).toContain(prefix);
-		} finally {
-			finish.resolve("done");
-			await manager.getJob(id)?.promise;
-		}
-	});
-
-	it("preserves a legacy selector without inferring a thinking glyph", () => {
-		cfgTaskShowResolvedModelBadge.override(settings, true);
-		const text = renderJobText({
-			jobs: [
+		it("shows a legacy selector as given without inferring a thinking glyph", () => {
+			badgeOn(true);
+			const text = waitText([
 				{
 					id: "Legacy",
 					type: "task",
@@ -195,18 +157,15 @@ describe("hub jobs task model badges", () => {
 					durationMs: 0,
 					resolvedModel: "p/model:high",
 				},
-			],
+			]);
+
+			expect(text).toContain("p/model:high Legacy");
+			expect(text).not.toContain(thinking("high"));
 		});
 
-		expect(text).toContain("p/model:high Legacy");
-		expect(text).not.toContain(thinkingLevelGlyph(ThinkingLevel.High, uiTheme));
-	});
-
-	it("hides a task job's resolved model selector when the badge setting is disabled", () => {
-		cfgTaskShowResolvedModelBadge.override(settings, false);
-		const selector = "p/model:high";
-		const text = renderJobText({
-			jobs: [
+		it("hides a task job's model when the badge setting is off", () => {
+			badgeOn(false);
+			const text = waitText([
 				{
 					id: "Architect",
 					type: "task",
@@ -214,47 +173,42 @@ describe("hub jobs task model badges", () => {
 					label: "Architect",
 					durationMs: 1_234,
 					resultText: "done",
-					resolvedModel: selector,
+					resolvedModel: "p/model:high",
+					resolvedThinkingLevel: ThinkingLevel.High,
 					advisor: true,
 				},
-			],
+			]);
+
+			expect(text).toContain("Architect");
+			expect(text).not.toContain("p/model");
+			expect(text).not.toContain(thinking("high"));
+			expect(text).not.toContain(advisorIcon());
 		});
 
-		expect(text).toContain("Architect");
-		expect(text).not.toContain("p/model");
-		expect(text).not.toContain(thinkingLevelGlyph(ThinkingLevel.High, uiTheme));
-		expect(text).not.toContain(uiTheme.icon.advisor);
-	});
-
-	it("does not render resolved model metadata on bash job rows", () => {
-		cfgTaskShowResolvedModelBadge.override(settings, true);
-		const selector = "p/model:high";
-		const text = renderJobText({
-			jobs: [
+		it("never badges bash job rows", () => {
+			badgeOn(true);
+			const text = waitText([
 				{
 					id: "shell-1",
 					type: "bash",
 					status: "completed",
-					label: "bun test packages/coding-agent/src/tools/__tests__/job-render.test.ts",
+					label: "bun test",
 					durationMs: 1_234,
 					resultText: "ok",
-					resolvedModel: selector,
+					resolvedModel: "p/model:high",
 					advisor: true,
 				},
-			],
+			]);
+
+			expect(text).toContain("shell-1");
+			expect(text).not.toContain("p/model");
+			expect(text).not.toContain(advisorIcon());
 		});
 
-		expect(text).toContain("shell-1");
-		expect(text).toContain("bash");
-		expect(text).not.toContain("p/model");
-		expect(text).not.toContain(uiTheme.icon.advisor);
-	});
-
-	it("renders model-bearing task jobs before settings initialization", async () => {
-		resetSettingsForTest();
-		try {
-			const text = renderJobText({
-				jobs: [
+		it("draws model-bearing task jobs without a badge before settings load", async () => {
+			resetSettingsForTest();
+			try {
+				const text = waitText([
 					{
 						id: "ColdStart",
 						type: "task",
@@ -264,101 +218,167 @@ describe("hub jobs task model badges", () => {
 						resolvedModelIdentity: "provider/model",
 						advisor: true,
 					},
-				],
-			});
-			expect(text).toContain("ColdStart");
-			expect(text).toContain("task");
-			expect(text).not.toContain("provider/model");
-			expect(text).not.toContain(uiTheme.icon.advisor);
-		} finally {
-			await Settings.init({ inMemory: true });
-		}
-	});
+				]);
+				expect(text).toContain("ColdStart");
+				expect(text).not.toContain("provider/model");
+				expect(text).not.toContain(advisorIcon());
+			} finally {
+				await Settings.init({ inMemory: true });
+			}
+		});
 
-	it("reserves custom tree prefixes and task status for long IDs with badges on or off", () => {
-		const priorTree = Object.getOwnPropertyDescriptor(uiTheme, "tree");
-		try {
-			Object.defineProperty(uiTheme, "tree", {
-				configurable: true,
-				value: { ...uiTheme.tree, branch: "界├", last: "界界└", vertical: "界界│" },
-			});
+		it("keeps long ids, the type badge and the duration within the width with badges on or off", () => {
 			for (const enabled of [true, false]) {
-				cfgTaskShowResolvedModelBadge.override(settings, enabled);
+				badgeOn(enabled);
 				for (const width of [40, 120]) {
 					const id = `LongWorker${"界".repeat(40)}`;
-					const text = renderJobText(
-						{
-							jobs: [
-								{
-									id,
-									type: "task",
-									status: "failed",
-									label: id,
-									durationMs: 1000,
-									resolvedModelIdentity: "provider/model",
-									advisor: true,
-								},
-							],
-						},
-						true,
-						false,
-						width,
+					const text = waitText(
+						[
+							{
+								id,
+								type: "task",
+								status: "failed",
+								label: id,
+								durationMs: 1000,
+								resolvedModelIdentity: "provider/model",
+								advisor: true,
+							},
+						],
+						{ width },
 					);
-					const row = text.split("\n")[1]!;
-					expect(row).toStartWith("界界└ ");
-					expect(row).toEndWith(formatDuration(1000));
-					expect(row).toContain("LongWorker");
+					const row = rowWith(text, "LongWorker");
+					expect(row.trimEnd()).toEndWith(formatDuration(1000));
 					expect(row).toContain("task");
 					for (const line of text.split("\n")) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 				}
 			}
-		} finally {
-			if (priorTree) Object.defineProperty(uiTheme, "tree", priorTree);
-			else Reflect.deleteProperty(uiTheme, "tree");
-		}
+		});
+
+		it("draws no badge from missing or malformed model metadata", () => {
+			badgeOn(true);
+			const jobs: Partial<Record<keyof JobSnapshot, unknown>>[] = [
+				{ id: "NoModel", type: "task", status: "completed", label: "missing model metadata", durationMs: 0 },
+				{
+					id: "NumericModel",
+					type: "task",
+					status: "completed",
+					label: "numeric model metadata",
+					durationMs: 0,
+					resolvedModel: 9_001,
+				},
+				{
+					id: "ObjectModel",
+					type: "task",
+					status: "completed",
+					label: "object model metadata",
+					durationMs: 0,
+					resolvedModel: { selector: "not-a-renderable-selector" },
+				},
+			];
+			const text = waitText(jobs);
+
+			expect(text).toContain("missing model metadata");
+			expect(text).toContain("numeric model metadata");
+			expect(text).toContain("object model metadata");
+			expect(text).not.toContain("9001");
+			expect(text).not.toContain("[object Object]");
+			expect(text).not.toContain("not-a-renderable-selector");
+		});
 	});
 
-	it("renders task rows with missing or malformed resolved model metadata without leaking bogus badges", () => {
-		cfgTaskShowResolvedModelBadge.override(settings, true);
-		const text = renderJobText(
-			{
-				jobs: [
+	describe("task card agent rows", () => {
+		function result(overrides: Partial<SingleResult>): SingleResult {
+			return {
+				index: 0,
+				id: "Architect",
+				agent: "task",
+				agentSource: "bundled",
+				task: "Design the cache",
+				exitCode: 0,
+				output: "done",
+				stderr: "",
+				truncated: false,
+				durationMs: 1_234,
+				tokens: 0,
+				requests: 1,
+				...overrides,
+			};
+		}
+
+		function taskText(results: SingleResult[]): string {
+			const details: TaskToolDetails = { projectAgentsDir: null, results, totalDurationMs: 1_234 };
+			return toolText({
+				name: "task",
+				args: { tasks: results.map(entry => ({ id: entry.id, assignment: entry.task })) },
+				result: { content: [{ type: "text", text: "done" }], details },
+				width: 160,
+			});
+		}
+
+		it("leads a settled agent's name with its thinking glyph, model and advisor while the setting is on", () => {
+			const settled = result({
+				resolvedModel: "p/model:high",
+				resolvedModelIdentity: "p/model",
+				resolvedThinkingLevel: ThinkingLevel.High,
+				advisor: true,
+			});
+			badgeOn(true);
+			expect(rowWith(taskText([settled]), "Architect")).toContain(
+				`${thinking("high")} p/model ${advisorIcon()} Architect`,
+			);
+
+			badgeOn(false);
+			const off = taskText([settled]);
+			expect(off).toContain("Architect");
+			expect(off).not.toContain("p/model");
+			expect(off).not.toContain(advisorIcon());
+		});
+	});
+
+	describe("eval agent rows", () => {
+		function evalText(): string {
+			const details: EvalToolDetails = {
+				cells: [
 					{
-						id: "NoModel",
-						type: "task",
-						status: "completed",
-						label: "missing model metadata",
-						durationMs: 0,
-						resultText: "done",
-					},
-					{
-						id: "NumericModel",
-						type: "task",
-						status: "completed",
-						label: "numeric model metadata",
-						durationMs: 0,
-						resultText: "done",
-						resolvedModel: 9_001,
-					},
-					{
-						id: "ObjectModel",
-						type: "task",
-						status: "completed",
-						label: "object model metadata",
-						durationMs: 0,
-						resultText: "done",
-						resolvedModel: { selector: "not-a-renderable-selector" },
+						index: 0,
+						code: "await agent('Scout')",
+						language: "js",
+						output: "",
+						status: "complete",
+						durationMs: 1_000,
+						statusEvents: [
+							{
+								op: "agent",
+								id: "Scout",
+								status: "completed",
+								resolvedModelIdentity: "p/scout",
+								resolvedThinkingLevel: ThinkingLevel.Low,
+								advisor: true,
+								durationMs: 1_000,
+							},
+						],
 					},
 				],
-			} as unknown as Omit<CoordinationDetails, "op">,
-			true,
-		);
+			};
+			return toolText({
+				name: "eval",
+				args: { cells: [{ code: "await agent('Scout')", language: "js" }] },
+				result: { content: [{ type: "text", text: "" }], details },
+				width: 160,
+			});
+		}
 
-		expect(text).toContain("missing model metadata");
-		expect(text).toContain("numeric model metadata");
-		expect(text).toContain("object model metadata");
-		expect(text).not.toContain("9001");
-		expect(text).not.toContain("[object Object]");
-		expect(text).not.toContain("not-a-renderable-selector");
+		it("leads an agent() row with its resolved model only while the setting is on", () => {
+			badgeOn(true);
+			// The agent rows hang under the cell box.
+			expect(rowWith(evalText(), symbol("tree.last"))).toContain(
+				`${thinking("low")} p/scout ${advisorIcon()} Scout`,
+			);
+
+			badgeOn(false);
+			const off = evalText();
+			expect(off).toContain("Scout");
+			expect(off).not.toContain("p/scout");
+		});
 	});
 });

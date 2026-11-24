@@ -20,13 +20,47 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgTodoBackend } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools/todo";
-import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
-import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
-import * as themeModule from "@oh-my-pi/pi-tui/theme";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { createRoot } from "@oh-my-pi/pi-tui";
+import { jsx } from "@oh-my-pi/pi-tui/jsx-runtime";
+import * as themeLoader from "@oh-my-pi/pi-tui/theme/loader";
+import * as settingsWindowModule from "../src/ui/overlays/settings/settings";
+import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
-import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+
+/** The settings window `/settings` opens for `session`: what it was given and how it reports changes. */
+async function openSettings(session: AgentSession, settings: Settings) {
+	spyOn(themeLoader, "listThemes").mockResolvedValue(["dark"]);
+	const opened = Promise.withResolvers<{
+		context: settingsWindowModule.SettingsContext;
+		callbacks: settingsWindowModule.SettingsCallbacks;
+	}>();
+	spyOn(settingsWindowModule, "SettingsWindow").mockImplementation(props => {
+		opened.resolve(props);
+		return jsx("prefs", {});
+	});
+	const ctx = {
+		session,
+		settings,
+		shell: {
+			focus: () => {},
+			overlays: {
+				show: (factory: () => unknown) => {
+					createRoot(factory);
+					return { node: jsx("col", {}), closed: false, close: () => {} };
+				},
+			},
+		},
+	} as unknown as InteractiveModeContext;
+	new SelectorController(ctx).showSettingsSelector();
+	const window = await opened.promise;
+	/** Pick `value` for setting `path` as the window does: store it, then report the change. */
+	return (path: string, value: string): void => {
+		window.context.settings.set(path, value);
+		window.callbacks.onChange(path, value);
+	};
+}
 
 interface Tracker {
 	calls: Array<{ phases: TodoPhase[]; sessionId: string }>;
@@ -309,22 +343,8 @@ describe("todo backend", () => {
 		const settings = await Settings.init({ inMemory: true });
 		const { session } = await open([backend.extension], undefined, { settings });
 		session.commitTodoPhases(list("before"));
-		await themeModule.initTheme(false);
-		const themes = Promise.resolve(["dark"]);
-		spyOn(themeModule, "getAvailableThemes").mockReturnValue(themes);
-		const overlays: Component[] = [];
-		const showOverlay = (component: Component): OverlayHandle => {
-			overlays.push(component);
-			return { hide: () => {}, setHidden: () => {}, isHidden: () => false };
-		};
-		const ui = { showOverlay, setFocus: () => {} };
-
-		new SelectorController(createInteractiveModeContext({ session, settings, ui })).showSettingsSelector();
-		await themes;
-		const panel = overlays[0];
-		if (!(panel instanceof SettingsSelectorComponent)) throw new Error("the settings menu did not open");
-		panel.handleNativeEvent({ type: "action", key: "", act: "page", value: "tools", mods: [] });
-		panel.handleNativeEvent({ type: "change", key: "", item: cfgTodoBackend.id, value: "tracker" });
+		const pick = await openSettings(session, settings);
+		pick(cfgTodoBackend.id, "tracker");
 		await settled(session);
 
 		expect(backend.calls).toEqual([{ phases: list("before"), sessionId: session.sessionManager.getSessionId() }]);
@@ -338,21 +358,8 @@ describe("todo backend", () => {
 		const { session } = await open([picked.extension, kept.extension], undefined, { settings });
 		session.commitTodoPhases(list("before"));
 		await settled(session);
-		await themeModule.initTheme(false);
-		spyOn(themeModule, "getAvailableThemes").mockResolvedValue(["dark"]);
-		const opened = Promise.withResolvers<Component>();
-		const showOverlay = (component: Component): OverlayHandle => {
-			opened.resolve(component);
-			return { hide: () => {}, setHidden: () => {}, isHidden: () => false };
-		};
-
-		new SelectorController(
-			createInteractiveModeContext({ session, settings, ui: { showOverlay, setFocus: () => {} } }),
-		).showSettingsSelector();
-		const panel = await opened.promise;
-		if (!(panel instanceof SettingsSelectorComponent)) throw new Error("the settings menu did not open");
-		panel.handleNativeEvent({ type: "action", key: "", act: "page", value: "tools", mods: [] });
-		panel.handleNativeEvent({ type: "change", key: "", item: cfgTodoBackend.id, value: "tracker" });
+		const pick = await openSettings(session, settings);
+		pick(cfgTodoBackend.id, "tracker");
 		await settled(session);
 
 		expect(picked.calls).toEqual([]);
@@ -543,7 +550,10 @@ describe("todo backend", () => {
 		// What a config reload or a move to another project does: the setting lands before the extension.
 		// An approved `cfg://` write can too, and it also runs the settings panel's hook.
 		cfgTodoBackend.set(session.settings, "tracker");
-		const panel = new SelectorController(createInteractiveModeContext({ session, settings: session.settings }));
+		const panel = new SelectorController({
+			session,
+			settings: session.settings,
+		} as unknown as InteractiveModeContext);
 		panel.handleSettingChange(cfgTodoBackend.id, "tracker");
 		await settled(session);
 		session.extensionRunner?.setSuspendedExtensions(() => false);

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import type { VibeToolDetails } from "@oh-my-pi/pi-tui/tools/vibe";
+import type { VibeToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/vibe";
 import { AsyncJobManager } from "../../src/async/job-manager";
 import type { ToolSession } from "../../src/tools";
 import { VibeListTool, VibeWaitTool } from "../../src/tools/vibe";

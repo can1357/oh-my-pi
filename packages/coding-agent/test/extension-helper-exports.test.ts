@@ -7,10 +7,7 @@ import * as PiCodingAgent from "@oh-my-pi/pi-coding-agent";
  * these root exports disappears, extensions that use it stop loading.
  */
 const rootHelpers: [name: string, kind: "function" | "object"][] = [
-	["formTheme", "object"],
-	["compactText", "function"],
-	["rowsText", "function"],
-	["styledSpans", "function"],
+	["ansiSpans", "function"],
 	["cfgExtensionTranscriptPresenters", "object"],
 ];
 

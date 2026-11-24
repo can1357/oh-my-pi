@@ -13,7 +13,7 @@
  * body store and no request body size; their response body size is the
  * Content-Length the response declared, unknown without one.
  */
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tool-errors";
 import {
 	buildHarEntry,
 	buildHarLog,

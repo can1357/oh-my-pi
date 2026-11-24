@@ -1,12 +1,10 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { InteractiveModeContext, WorkingKind } from "@oh-my-pi/pi-coding-agent/modes/types";
 import * as sessionWorktree from "@oh-my-pi/pi-coding-agent/session/session-worktree";
-import { Container } from "@oh-my-pi/pi-tui";
 
 function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void>) {
 	const state = { cwd: sourceDir, movedTo: undefined as string | undefined, completedBtwVisible: true };
@@ -55,21 +53,23 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 		withBtwSessionMove,
 		updateEditorBorderColor: vi.fn(),
 		reloadTodos: vi.fn(async () => {}),
-		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
-		statusContainer: new Container(),
+		/** The working row's holder (`/wt` shows one while it creates the worktree). */
+		working: undefined as WorkingKind | undefined,
+		showWorking: vi.fn((kind: WorkingKind) => {
+			ctx.working = kind;
+		}),
+		clearWorking: vi.fn((kind?: WorkingKind) => {
+			if (ctx.working === undefined || (kind !== undefined && ctx.working !== kind)) return false;
+			ctx.working = undefined;
+			return true;
+		}),
 		present,
 		shutdown,
-	} as unknown as InteractiveModeContext;
+	} as unknown as InteractiveModeContext & { working: WorkingKind | undefined };
 	return { ctx, state, present, captureState, restoreState, rollbackMove, shutdown, sessionDir, withBtwSessionMove };
 }
 
 describe("CommandController /move", () => {
-	beforeAll(async () => {
-		const theme = await getThemeByName("dark");
-		if (!theme) throw new Error("Expected dark theme");
-		setThemeInstance(theme);
-	});
-
 	afterEach(() => vi.restoreAllMocks());
 
 	it("does not create a checkout when the BTW gate rejects a worktree command", async () => {
@@ -89,7 +89,7 @@ describe("CommandController /move", () => {
 			expect(state.completedBtwVisible).toBe(true);
 			expect(ctx.session.moveSession).not.toHaveBeenCalled();
 			expect(ctx.present).not.toHaveBeenCalled();
-			expect(ctx.statusContainer.children).toHaveLength(0);
+			expect(ctx.working).toBeUndefined();
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 		}
@@ -151,7 +151,7 @@ describe("CommandController /move", () => {
 			expect(commits).toBe(1);
 			expect(state.cwd).toBe(target);
 			expect(ctx.present).toHaveBeenCalled();
-			expect(ctx.statusContainer.children).toHaveLength(0);
+			expect(ctx.working).toBeUndefined();
 		} finally {
 			created.resolve();
 			relocated.resolve();
@@ -171,7 +171,7 @@ describe("CommandController /move", () => {
 			expect(state.cwd).toBe(sourceDir);
 			expect(state.completedBtwVisible).toBe(true);
 			expect(ctx.session.moveSession).not.toHaveBeenCalled();
-			expect(ctx.statusContainer.children).toHaveLength(0);
+			expect(ctx.working).toBeUndefined();
 			expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("Branch already exists"));
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
@@ -193,7 +193,6 @@ describe("CommandController /move", () => {
 			expect(ctx.applyCwdChange).toHaveBeenCalledWith(targetDir);
 			expect(ctx.updateEditorBorderColor).toHaveBeenCalled();
 			expect(ctx.reloadTodos).toHaveBeenCalled();
-			expect(ctx.ui.requestRender).toHaveBeenCalledWith();
 			expect(present).toHaveBeenCalled();
 			expect(ctx.showError).not.toHaveBeenCalled();
 		} finally {
@@ -226,7 +225,6 @@ describe("CommandController /move", () => {
 			expect(shutdown).not.toHaveBeenCalled();
 			expect(ctx.updateEditorBorderColor).not.toHaveBeenCalled();
 			expect(ctx.reloadTodos).not.toHaveBeenCalled();
-			expect(ctx.ui.requestRender).not.toHaveBeenCalled();
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 			await fs.rm(targetDir, { recursive: true, force: true });

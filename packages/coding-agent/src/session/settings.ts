@@ -36,8 +36,8 @@ import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/opena
 import { configureCodexAccessPrograms } from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
-import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
-import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
+import { formatKeyHint } from "../ui/keys/hints";
+import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking/levels";
 
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};

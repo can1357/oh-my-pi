@@ -27,8 +27,8 @@ import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
-import { reasonShows, type SpotlightReason, spotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
-import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { reasonShows, type SpotlightReason, spotlightDetails } from "@oh-my-pi/pi-coding-agent/tools/details/spotlight";
+import { formatOutputNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta-format";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const tmpDirs: string[] = [];

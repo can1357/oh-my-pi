@@ -18,7 +18,7 @@ import { type } from "@oh-my-pi/omptype";
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, Effort, type Model, type Tool } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
+import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
 
@@ -36,19 +36,15 @@ import type { Settings } from "../config/settings";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { Semaphore } from "../task/parallel";
 import type { ToolSession } from "../tools";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 import {
 	findRetryFallbackCandidates,
 	getRetryFallbackChains,
 	type RetryFallbackResolutionContext,
 	resolveRetryFallbackChainKey,
 } from "../session/retry-fallback-chains";
-import {
-	AUTO_THINKING,
-	type ConfiguredThinkingLevel,
-	shouldDisableReasoning,
-	toReasoningEffort,
-} from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING, shouldDisableReasoning, toReasoningEffort } from "../thinking/levels";
+import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { JsStatusEvent } from "./js/shared/types";
 
 import { cfgDisabledProviders } from "../config/model-settings";

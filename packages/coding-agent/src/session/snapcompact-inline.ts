@@ -23,8 +23,8 @@ import {
 	HL_FILE_PREFIX,
 	HL_FILE_SUFFIX,
 	HL_LINE_BODY_SEP,
-} from "@oh-my-pi/pi-tui/tools/hashline-format";
-import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+} from "../tools/hashline-format";
+import type { ReadToolDetails } from "../tools/details/read";
 import { prompt } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { SnapcompactFrameSink } from "../blob-broker/service";

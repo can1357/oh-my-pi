@@ -7,8 +7,8 @@
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { FindToolDetails } from "@oh-my-pi/pi-tui/tools/find";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type { FindToolDetails } from "../details/find";
+import { ToolError } from "../tool-errors";
 import { formatBytes, formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import { sessionResolveContext } from "../../internal-urls/context";
 import { InternalUrlFilesystem } from "../../internal-urls/url-filesystem";
