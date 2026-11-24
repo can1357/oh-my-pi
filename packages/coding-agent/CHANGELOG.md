@@ -42,6 +42,7 @@
 - With Vim editing mode on, the prompt after a message you send starts in **Vim Start Mode** (Insert by default) instead of staying in the mode you sent it from ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Eval-defined tools (`@tool` / `tool(fn)` and the `tools` field on `task`, `agent()`, `workpool()`) are now off by default; set `eval.tools.enabled` to turn them back on
 - When `/wt` moves the session into an ovnfs checkout, its message now says "Moved to ovnfs checkout <name> at <path>" instead of "Moved to worktree"
+- Cross-instance agent messaging (`task.crossInstance`) is now on by default: other omp instances in the same folder can read your agents' outputs and message them; turn the setting off to opt out
 
 ### Changed
 
