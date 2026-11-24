@@ -1859,7 +1859,7 @@ export type TodoApplyResult =
 	/** Nothing committed for another reason: timeout, list or session changed, abort, closing. */
 	| { kind: "stale"; message: string };
 
-/** Puts a `todo` call's change to the selected backend, which commits it when it accepts or when none decides. */
+/** Puts a `todo` call's change to the selected backend; the applier commits it when the backend accepts or when no backend decides. */
 export type TodoChangeApplier = (
 	change: TodoBackendChange,
 	commit: () => void,

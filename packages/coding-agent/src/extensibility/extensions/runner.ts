@@ -1909,6 +1909,9 @@ export class ExtensionRunner {
 	 */
 	#resendStaleTodoList(settled: Promise<void>, resend: () => void): void {
 		if (this.#todoClosed) return;
+		// A commit equal to the last-sent list may land during the wait, and the session may close before
+		// the resend runs; that commit's replace is then the backend's only correction, so it must not count as already sent.
+		this.#todoStale = true;
 		const deadline = performance.now() + extensionHandlerTimeoutMs;
 		void awaitDeliveryTurn(settled, deadline, this.#todoGivenUp.signal)
 			.then(() => {

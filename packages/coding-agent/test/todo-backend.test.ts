@@ -884,6 +884,34 @@ describe("todo backend", () => {
 			expect(tasksOf(backend).at(-1)).toEqual(["b"]);
 		});
 
+		it("a commit equal to the last-sent list during a failed call's resend wait still gets its replace when the session closes", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+			testSetSessionShutdownHandlerTimeoutMs(5);
+			await call(session, { op: "init", items: ["a"] });
+			await settled(session);
+			expect(tasksOf(backend)).toEqual([["a"]]);
+
+			// The held apply never answers, so the resend keeps waiting after the abort.
+			backend.applyHold = Promise.withResolvers<void>().promise;
+			const abort = new AbortController();
+			const asked = backend.entered();
+			const pending = call(session, { op: "append", phase: "Work", items: ["b"] }, abort.signal);
+			await asked;
+			abort.abort();
+			const result = await pending;
+			await settled(session);
+			const before = backend.calls.length;
+
+			// `init` starts the first task, so the list equal to the last-sent one is a copy of the held list.
+			session.commitTodoPhases(structuredClone(session.getTodoPhases()));
+			await session.dispose();
+
+			expect(result.isError).toBe(true);
+			expect(backend.calls.length - before).toBe(1);
+			expect(backend.calls.at(-1)?.phases).toEqual(session.getTodoPhases());
+		});
+
 		it("a refused todo call that follows bash and an accepted one in a message sees the committed list, and leaves no retry reminder", async () => {
 			// Written by the bash call itself as it ends: a real signal that it has finished.
 			const marker = path.join(dir.path(), "bash-done");
