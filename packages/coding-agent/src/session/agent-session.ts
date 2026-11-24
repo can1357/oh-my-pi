@@ -15898,6 +15898,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#stats.getContextUsage(options);
 	}
 
+	/** Whether `model` reads history behind a native compaction that its window cannot hold. */
+	switchOverrunsNativeCompaction(model: Model): boolean {
+		return this.#maintenance.overrunsNativeCompaction(model);
+	}
+
 	/**
 	 * Monotonic counter that changes whenever the in-flight pending context
 	 * snapshot is set or cleared. Status-line context memoization keys on this so

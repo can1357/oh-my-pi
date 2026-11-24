@@ -758,12 +758,14 @@ export class SelectorController {
 	 * failed compaction keeps the current model. A focused subagent switches
 	 * directly: `/compact` drives the main session, and the agent's own context
 	 * maintenance recovers an oversized transcript on its next turn.
+	 * A failed `nativeOverrun` pass still switches; the target then compacts that history itself.
 	 */
 	async #applySessionModel(
 		model: Model,
 		selector: string,
 		thinkingLevel: ConfiguredThinkingLevel | undefined,
 		compactFirst: boolean,
+		beforeCompact?: () => void,
 	): Promise<void> {
 		const target = this.ctx.viewSession;
 		const focusedAgentId = this.ctx.focusedAgentId;
@@ -779,13 +781,15 @@ export class SelectorController {
 			const roleSelectorHint = actionKey("app.model.select", this.ctx.keybindings) || formatKeyHint("alt+m");
 			this.ctx.showStatus(`Session-only model: ${selector}. Use ${roleSelectorHint} or /model for roles.`);
 		};
-		if (!compactFirst || focusedAgentId) {
+		const nativeOverrun = !compactFirst && !focusedAgentId && this.ctx.session.switchOverrunsNativeCompaction(model);
+		if ((!compactFirst && !nativeOverrun) || focusedAgentId) {
 			await apply();
 			return;
 		}
+		beforeCompact?.();
 		let switched = false;
 		const switchAfterCompaction = async (outcome: CompactionOutcome) => {
-			if (switched || outcome !== "ok") return;
+			if (switched || outcome === "cancelled" || (outcome === "failed" && !nativeOverrun)) return;
 			switched = true;
 			await apply();
 		};
@@ -844,11 +848,9 @@ export class SelectorController {
 					await prev;
 					// A closed picker never applies, and a newer pick supersedes this one.
 					if (!isCurrent() || pickId !== latestPickId) return;
-					// Over-context pick: close the picker first so the compaction
-					// loader is visible.
-					if (overContext) done();
-					await this.#applySessionModel(model, selector, thinkingLevel, overContext);
-					if (!overContext && pickId === latestPickId) done();
+					// The picker closes before a compaction so its loader is visible.
+					await this.#applySessionModel(model, selector, thinkingLevel, overContext, done);
+					if (pickId === latestPickId) done();
 				} catch (error) {
 					this.ctx.showError(error instanceof Error ? error.message : String(error));
 				} finally {

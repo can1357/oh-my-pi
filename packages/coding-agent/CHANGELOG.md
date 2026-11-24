@@ -51,6 +51,7 @@
 
 ### Fixed
 
+- After an OpenAI remote compaction, `/switch` and Alt+P to a model that cannot read it (such as Claude) now hand off with the OpenAI model first when the history behind the compaction does not fit the new model. Before, the new model had to compact that history itself: on a long session this failed with `prompt is too long` and then took many requests ([#20099](https://github.com/can1357/oh-my-pi/issues/20099), [#20342](https://github.com/can1357/oh-my-pi/pull/20342) by [@lemonleks](https://github.com/lemonleks))
 - Fixed context token accounting to reflect changes in system prompt sources
 - Cmd+A selects the full draft even when Tern forwards the keystroke; typing or pasting replaces the selection. Click the model name or chevron in Tern, or press Alt+P, to open the searchable `/switch` sheet without losing the draft.
 - Native composer status controls become clickable when the live session can handle them. The effort ring changes effort independently of the model name.
