@@ -2792,6 +2792,12 @@ describe("ModelRegistry runtime discovery", () => {
 							{ id: "openai-test/priced-model", min_prompt_price: 0.05, min_completion_price: 0.25 },
 							{ id: "openai-test/free-model", min_prompt_price: 0, min_completion_price: 0 },
 							{ id: "openai-test/unpriced-model" },
+							{
+								id: "openai-test/priced-embedder",
+								output_modalities: ["embedding"],
+								min_prompt_price: 0.02,
+								min_completion_price: 0,
+							},
 						],
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
@@ -2810,6 +2816,13 @@ describe("ModelRegistry runtime discovery", () => {
 		});
 		expect(find("openai-test/free-model")?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 		expect(find("openai-test/unpriced-model")?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		// Embedding rows are task rows, a separate branch of discoverOpenAIModelsList.
+		expect(registry.find("openai-test", "openai-test/priced-embedder")?.cost).toEqual({
+			input: 0.02,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
 	});
 	test("openai-models-list uses top_provider.max_completion_tokens over the bundled reference", async () => {
 		writeRawModelsJson({
