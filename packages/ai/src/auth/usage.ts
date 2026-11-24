@@ -684,11 +684,10 @@ export class UsageService implements UsageApi {
 			}
 			let entries = this.#deps.pool.entries(providerId);
 			if (entries.length > 0) {
-				const dedupedEntries = await this.#deps.pool.pruneDuplicates(providerId, entries);
-				if (dedupedEntries.length !== entries.length) {
-					this.#deps.pool.replaceVisible(providerId, dedupedEntries);
-				}
-				entries = dedupedEntries;
+				// pruneDuplicates drops each deleted duplicate from the pool by id; re-read the view so a pause
+				// or resume that landed while the deletes were awaited is reflected instead of overwritten.
+				await this.#deps.pool.pruneDuplicates(providerId, entries);
+				entries = this.#deps.pool.entries(providerId);
 			}
 
 			// A declared OAuth bearer env list means usage probes must ignore stored

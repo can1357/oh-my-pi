@@ -342,7 +342,8 @@ export class CredentialPool implements CredentialsApi {
 
 		const dedupedGrouped = new Map<string, StoredCredential[]>();
 		for (const [provider, entries] of grouped.entries()) {
-			const deduped = await this.pruneDuplicates(provider, entries);
+			// Every row is replaced below in one step; dropping each duplicate here would publish a half-reloaded view.
+			const deduped = await this.#deleteDuplicates(provider, entries);
 			this.#options.policies.validateFor(
 				provider,
 				deduped.map(entry => entry.credential),
@@ -398,7 +399,7 @@ export class CredentialPool implements CredentialsApi {
 	 * visible row takes the same-id entry from `visible` or is dropped when
 	 * absent; entries with new ids are appended.
 	 */
-	replaceVisible(provider: string, visible: StoredCredential[]): void {
+	#replaceVisible(provider: string, visible: StoredCredential[]): void {
 		this.#syncView();
 		const shown = new Set((this.#data.get(provider) ?? []).map(entry => entry.id));
 		const next = new Map(visible.map(entry => [entry.id, entry]));
@@ -507,7 +508,20 @@ export class CredentialPool implements CredentialsApi {
 		return deduped.reverse();
 	}
 
-	async pruneDuplicates(provider: string, entries: StoredCredential[]): Promise<StoredCredential[]> {
+	/**
+	 * Delete every stored duplicate of an OAuth identity in `entries` but its last
+	 * row, and forget each deleted row by id (see {@link CredentialPool.#dropRow}).
+	 * Returns the kept rows.
+	 */
+	pruneDuplicates(provider: string, entries: StoredCredential[]): Promise<StoredCredential[]> {
+		return this.#deleteDuplicates(provider, entries, id => this.#dropRow(provider, id));
+	}
+
+	async #deleteDuplicates(
+		provider: string,
+		entries: StoredCredential[],
+		onDeleted?: (credentialId: number) => void,
+	): Promise<StoredCredential[]> {
 		const seen = new Set<string>();
 		const kept: StoredCredential[] = [];
 		const removed: StoredCredential[] = [];
@@ -533,6 +547,7 @@ export class CredentialPool implements CredentialsApi {
 		if (removed.length > 0) {
 			for (const entry of removed) {
 				await this.#store.deleteAuthCredential(entry.id, "deduplicated duplicate credential");
+				onDeleted?.(entry.id);
 			}
 			this.reset(provider);
 		}
@@ -604,8 +619,8 @@ export class CredentialPool implements CredentialsApi {
 		}
 		const updated = [...entries];
 		updated[index] = { id, credential };
-		this.replaceVisible(provider, updated);
-		return index;
+		this.#replaceVisible(provider, updated);
+		return this.entries(provider).findIndex(entry => entry.id === id);
 	}
 
 	/**

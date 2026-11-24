@@ -727,6 +727,9 @@ export class CredentialSelector {
 							? { selection, usage: sessionPreferredUsage, usageChecked: true }
 							: { selection, usage: null, usageChecked: false },
 					);
+		// The row each candidate started with, by id: preflight refreshes and earlier tries can hide or
+		// remove rows (a disable, or a refresh that lands an account under a pause) and shift the rest.
+		const candidateIds = new Map(candidates.map(candidate => [candidate, credentialIds[candidate.selection.index]]));
 		// Keep the candidate object: preflight may rebind its positional index
 		// after a peer changes the credential pool.
 		const explicitPin = sessionPinIsExplicit
@@ -807,7 +810,7 @@ export class CredentialSelector {
 		await Promise.all(
 			candidates.map(async candidate => {
 				const force = forceRefreshIndex !== undefined && candidate.selection.index === forceRefreshIndex;
-				const initialCredentialId = credentialIds[candidate.selection.index];
+				const initialCredentialId = candidateIds.get(candidate);
 				if (initialCredentialId === undefined) {
 					preflightFailures.add(candidate);
 					return;
@@ -865,7 +868,11 @@ export class CredentialSelector {
 					candidate.selection.credential = updated;
 					if (credentialId !== undefined) {
 						const idx = this.#deps.pool.replaceById(provider, credentialId, updated);
-						if (idx !== -1) candidate.selection.index = idx;
+						if (idx === -1) {
+							preflightFailures.add(candidate);
+							return;
+						}
+						candidate.selection.index = idx;
 					} else {
 						const rowId = this.#deps.pool.entries(provider)[candidate.selection.index]?.id;
 						if (rowId !== undefined) this.#deps.pool.replaceById(provider, rowId, updated);
@@ -987,6 +994,13 @@ export class CredentialSelector {
 		for (const pass of passes) {
 			for (const candidate of pass.allowBlocked ? lastResortCandidates : candidates) {
 				if (preflightFailures.has(candidate)) continue;
+				// Address the candidate's own row; a row gone from the view is not retried at its old position,
+				// which may now name another account, one a session restriction excludes included.
+				const index = this.#deps.pool
+					.entries(provider)
+					.findIndex(entry => entry.id === candidateIds.get(candidate));
+				if (index === -1) continue;
+				candidate.selection.index = index;
 				const candidateAccountKey = oauthAccountKey(candidate.selection.credential);
 				if (pass.enforceAccounts && (candidateAccountKey === undefined || !accountIds?.has(candidateAccountKey)))
 					continue;
@@ -1165,7 +1179,9 @@ export class CredentialSelector {
 			const updated = mergeRefreshedCredential(selection.credential, result.newCredentials);
 			if (credentialId !== undefined) {
 				const idx = this.#deps.pool.replaceById(provider, credentialId, updated);
-				if (idx !== -1) selection.index = idx;
+				// Disabled, removed, or hidden by a pause the refresh moved it under: its old index names another account.
+				if (idx === -1) return undefined;
+				selection.index = idx;
 			} else {
 				const rowId = this.#deps.pool.entries(provider)[selection.index]?.id;
 				if (rowId !== undefined) this.#deps.pool.replaceById(provider, rowId, updated);

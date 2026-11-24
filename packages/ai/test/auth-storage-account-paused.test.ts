@@ -11,9 +11,10 @@ import {
 	type OAuthCredential,
 	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-ai/auth-storage";
+import type { CredentialPool } from "@oh-my-pi/pi-ai/auth/pool";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
-import type { UsageReport } from "@oh-my-pi/pi-ai/usage";
+import type { UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 
 // Two Anthropic-style accounts; `b` is the one an `auth.accountPolicies` entry pauses.
 const PROVIDER = "anthropic";
@@ -25,6 +26,20 @@ const PAUSE_BOTH: AuthAccountPolicies = [
 	...PAUSE_B,
 	{ provider: PROVIDER, account: { email: "a@example.com", orgId: "org-a" }, paused: true },
 ];
+// A refresh of `a` that changes its organization lands it under this pause.
+const PAUSE_MOVED_A: AuthAccountPolicies = [
+	{ provider: PROVIDER, account: { email: "a@example.com", orgId: "org-a-moved" }, paused: true },
+];
+
+/** `getOAuthApiKey` returns account `a` refreshed into the organization {@link PAUSE_MOVED_A} pauses. */
+function moveAUnderPauseOnKey(): void {
+	vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, all) => {
+		const credential = all[provider] as OAuthCredentials | undefined;
+		if (!credential?.accountId) return null;
+		const newCredentials = credential.accountId === "a" ? { ...credential, orgId: "org-a-moved" } : credential;
+		return { apiKey: `api-${credential.accountId}`, newCredentials };
+	});
+}
 
 function account(name: "a" | "b"): OAuthCredential {
 	const credential: OAuthCredentials = {
@@ -45,9 +60,13 @@ async function setup(
 	accountPolicies: AuthAccountPolicies,
 	credentials: AuthCredential[] = [account("a"), account("b")],
 	credentialStore?: AuthCredentialStore,
+	usageProvider?: UsageProvider,
 ): Promise<{ auth: AuthStorage; ids: Record<"a" | "b", number> }> {
 	if (!store) throw new Error("test setup failed");
-	const auth = new AuthStorage(credentialStore ?? store, { usageProviderResolver: () => undefined, accountPolicies });
+	const auth = new AuthStorage(credentialStore ?? store, {
+		usageProviderResolver: provider => (provider === usageProvider?.id ? usageProvider : undefined),
+		accountPolicies,
+	});
 	await auth.credentials.set(PROVIDER, credentials);
 	const rows = store.listAuthCredentials(PROVIDER);
 	const idOf = (name: string) =>
@@ -188,5 +207,73 @@ describe("accountPolicies paused", () => {
 		const reports = await auth.usage.reports();
 
 		expect(reports?.map(entry => entry.metadata?.label)).toEqual(["a", "api-key"]);
+	});
+
+	test("a refresh that moves an account under a pause falls through to the next account", async () => {
+		const { auth, ids } = await setup([
+			{ provider: PROVIDER, account: { email: "a@example.com", orgId: "org-a" }, priority: 100 },
+			...PAUSE_MOVED_A,
+		]);
+		moveAUnderPauseOnKey();
+
+		expect(await key(auth, "s1")).toBe("api-b");
+		expect(auth.oauth.accounts(PROVIDER).map(summary => summary.credentialId)).toEqual([ids.b]);
+		expect(await key(auth, "s1")).toBe("api-b");
+	});
+
+	test("a session restricted to an account a refresh moves under a pause gets no other account", async () => {
+		const { auth } = await setup(PAUSE_MOVED_A);
+		auth.sessions.restrict(PROVIDER, "s1", ["email:a@example.com|org:org-a"]);
+		moveAUnderPauseOnKey();
+
+		await expect(key(auth, "s1")).rejects.toThrow("none of those accounts is available");
+	});
+
+	test("a preflight refresh that moves an account under a pause leaves the next account usable", async () => {
+		const { auth } = await setup(PAUSE_MOVED_A, [{ ...account("a"), expires: Date.now() - 1000 }, account("b")]);
+		vi.spyOn(oauthUtils, "refreshProviderOAuthToken").mockImplementation(async (_provider, credential) =>
+			credential.accountId === "a"
+				? { ...credential, orgId: "org-a-moved", access: "access-a-new", expires: Date.now() + WEEK }
+				: credential,
+		);
+
+		expect(await key(auth, "s1")).toBe("api-b");
+	});
+
+	test("collecting usage while a duplicate is pruned keeps an account resumed meanwhile", async () => {
+		if (!store) throw new Error("test setup failed");
+		const deleting = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		const gated: AuthCredentialStore = Object.assign(store, {
+			deleteAuthCredential: async () => {
+				deleting.resolve();
+				await gate.promise;
+				return true;
+			},
+		});
+		const fetched: string[] = [];
+		const usageProvider: UsageProvider = {
+			id: PROVIDER,
+			fetchUsage: async params => {
+				fetched.push(params.credential.accountId ?? "");
+				return null;
+			},
+		};
+		const { auth, ids } = await setup(PAUSE_B, undefined, gated, usageProvider);
+		// A later row of account `a` makes `a`'s first row the duplicate usage collection prunes.
+		(auth.credentials as CredentialPool).replace(PROVIDER, [
+			{ id: ids.a, credential: account("a") },
+			{ id: ids.b, credential: account("b") },
+			{ id: 999, credential: { ...account("a"), access: "access-a-2" } },
+		]);
+
+		const reports = auth.usage.reports();
+		await deleting.promise;
+		auth.setAccountPolicies({ accountPolicies: [], defaultReservePct: DEFAULT_USAGE_RESERVE_PCT });
+		gate.resolve();
+		await reports;
+
+		expect(auth.oauth.accounts(PROVIDER).map(summary => summary.credentialId)).toEqual([ids.b, 999]);
+		expect(fetched.sort()).toEqual(["a", "b"]);
 	});
 });
