@@ -542,6 +542,8 @@ Navigation uses the `tui.select.*` bindings: up/down select and scroll, confirm 
 
 **Menu.** Without a ref, an interactive session opens a Review Mode menu: up to three PRs or MRs mentioned in the conversation, a base branch, uncommitted changes, a specific commit, a specific open PR or MR, and custom instructions (the last only when no extra instructions were given). When the checkout is outside any repository, the local and open-PR choices first ask for one of its direct child repositories. A local review whose checkout differs from the session cwd names the repository root in the prompt, because diff paths are relative to it and reviewer tasks start in the session cwd. Without a UI and without a ref, the prompt asks for one reviewer task over recent code changes.
 
+**PR/MR picker.** In `/review` and `/annotate code-review`, **Review a specific PR/MR** starts with recent open changes and searches the selected repository as you type. For GitHub, use `head:BRANCH` to search by branch or `author:NAME` to search by author. Paste a URL or enter a number to select an exact change, including one that is closed or merged.
+
 **Fan-out.** The prompt asks for one reviewer task when the diff has fewer than 100 changed lines or at most two files. Larger diffs ask for more reviewers, up to 16 once a diff reaches 5000 changed lines, grouped by locality. A diff over 50,000 characters or 20 files is not inlined. The prompt then carries a short preview per file and tells each reviewer to read its own diff.
 
 **Result.** The bundled `reviewer` declares this `output` schema in its frontmatter:

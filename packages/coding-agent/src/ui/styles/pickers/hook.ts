@@ -44,6 +44,7 @@ export type HookLookTerm = PickerTerm & {
 	readonly searchable: boolean;
 	readonly query: { readonly text: string; readonly cursor: number };
 	readonly help?: string;
+	readonly empty?: string;
 };
 
 /** Segment colors by position (the status line's chip palette). */
@@ -166,9 +167,10 @@ function listRows(theme: Theme, term: HookLookTerm, width: number): { text: stri
 		for (const text of optionLines(theme, option, selected, mode, width))
 			rows.push({ text, highlight: selected && !option.disabled });
 	}
-	if (options.length === 0) rows.push({ text: theme.style("dim", "  No matching options"), highlight: false });
+	if (options.length === 0)
+		rows.push({ text: theme.style("dim", `  ${term.empty ?? "No matching options"}`), highlight: false });
 	const searching = term.query.text.length > 0;
-	if (start > 0 || end < options.length || compact || searching) {
+	if (start > 0 || end < options.length || compact || searching || term.searchable) {
 		const shown = options.length === 0 ? 0 : term.cursor + 1;
 		const total =
 			term.query.text.trim() && options.length !== term.total

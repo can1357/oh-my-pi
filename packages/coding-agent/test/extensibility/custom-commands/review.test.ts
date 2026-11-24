@@ -3,8 +3,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings, withActiveSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import { ReviewCommand } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review";
 import type { CustomCommandAPI } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
+import type { ExtensionCustomFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { HookCommandContext } from "@oh-my-pi/pi-coding-agent/extensibility/hooks/types";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
@@ -17,9 +19,12 @@ import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import { gitlab } from "@oh-my-pi/pi-coding-agent/utils/gitlab";
 import type { VcsGitRepo, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { createTestTerminal, type TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { resourceText } from "../../helpers/resource-text";
+import { extensionOutput, extensionTheme, singleNode } from "../../../src/ui/extensions/render-output";
 
 const SAMPLE_JJ_DIFF = `diff --git a/src/workspace.ts b/src/workspace.ts
 --- a/src/workspace.ts
@@ -46,14 +51,28 @@ interface NotifyCall {
 	type: "info" | "warning" | "error" | undefined;
 }
 
-interface InputCall {
-	title: string;
-	placeholder: string | undefined;
-}
-
-interface StatusCall {
-	key: string;
-	text: string | undefined;
+function pickerUi(drive: (term: TestTerminal) => void | Promise<void>): HookCommandContext["ui"]["custom"] {
+	return async <T>(factory: ExtensionCustomFactory<T>) => {
+		const completion = Promise.withResolvers<T>();
+		const view = await factory(
+			{ requestRender() {}, size: () => ({ columns: 120, rows: 40 }), suspend: run => run() },
+			extensionTheme(currentTheme()),
+			KeybindingsManager.inMemory(),
+			completion.resolve,
+		);
+		const output = extensionOutput(view);
+		if (!output) throw new Error("Picker did not produce a view");
+		const node = singleNode(output);
+		const term = createTestTerminal(() => ({ layer: node }), { columns: 120, rows: 40 });
+		term.focus(node);
+		try {
+			await drive(term);
+			term.press("escape");
+			return await completion.promise;
+		} finally {
+			term.dispose();
+		}
+	};
 }
 
 function makePrDiffLookup(unified: string): ViewLookupResult<PrDiffPayload> {
@@ -117,19 +136,16 @@ describe("ReviewCommand", () => {
 	function createContext(options?: {
 		selectedMode?: string;
 		selectResults?: string[];
-		inputResults?: Array<string | undefined>;
+		drivePicker?: (term: TestTerminal) => void | Promise<void>;
 		editorValue?: string | undefined;
 		sessionEntries?: SessionEntry[];
 		branchEntries?: SessionEntry[];
 		onEditorCall?: (call: EditorCall) => void;
 		onSelectCall?: (call: SelectCall) => void;
-		onInputCall?: (call: InputCall) => void;
-		onStatusCall?: (call: StatusCall) => void;
 		onNotify?: (call: NotifyCall) => void;
 		cwd?: string;
 	}): HookCommandContext {
 		const selectResults = [...(options?.selectResults ?? [])];
-		const inputResults = [...(options?.inputResults ?? [])];
 		return {
 			hasUI: true,
 			sessionManager: {
@@ -144,13 +160,7 @@ describe("ReviewCommand", () => {
 						selectResults.shift() ?? options?.selectedMode ?? "5. Custom review instructions",
 					);
 				},
-				input: (title: string, placeholder?: string) => {
-					options?.onInputCall?.({ title, placeholder });
-					return Promise.resolve(inputResults.shift());
-				},
-				setStatus: (key: string, text: string | undefined) => {
-					options?.onStatusCall?.({ key, text });
-				},
+				custom: options?.drivePicker ? pickerUi(options.drivePicker) : undefined,
 				editor: (
 					title: string,
 					prefill?: string,
@@ -705,7 +715,8 @@ describe("ReviewCommand", () => {
 		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
 		const ctx = createContext({
-			selectResults: ["4. Review a specific PR/MR", "#42  Fix login  @octocat"],
+			selectResults: ["4. Review a specific PR/MR"],
+			drivePicker: term => term.press("enter"),
 		});
 
 		const result = await command.execute([], ctx);
@@ -717,94 +728,75 @@ describe("ReviewCommand", () => {
 		expect(listSpy).toHaveBeenCalled();
 	});
 
-	it("searches open pull requests and reviews a filtered pick", async () => {
+	it("reviews a server search result outside the initial list and ignores a stale result", async () => {
 		const dir = await createTempDir();
 		spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
-		const fullList = [
-			{ number: 42, title: "Fix login", author: { login: "octocat" } },
-			{ number: 43, title: "Other work", author: { login: "hubot" } },
-		];
-		const filteredList = [{ number: 7, title: "Filtered match", author: { login: "octocat" } }];
-		const listSpy = spyOn(github, "json").mockImplementation(async (_cwd: string, args: string[]) => {
-			const searchIndex = args.indexOf("--search");
-			return (searchIndex === -1 ? fullList : filteredList) as never;
+		const slow = Promise.withResolvers<unknown>();
+		const slowStarted = Promise.withResolvers<void>();
+		const latestStarted = Promise.withResolvers<void>();
+		const searches: string[] = [];
+		spyOn(github, "json").mockImplementation(async (_cwd, args) => {
+			const query = args.includes("--search") ? args[args.indexOf("--search") + 1] : undefined;
+			if (!query) return [{ number: 42, title: "Initial result" }] as never;
+			searches.push(query);
+			if (query === "old") {
+				slowStarted.resolve();
+				return (await slow.promise) as never;
+			}
+			latestStarted.resolve();
+			return [{ number: 7, title: "Server-only match" }] as never;
 		});
-		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
-		const selectCalls: SelectCall[] = [];
+		spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
 		const ctx = createContext({
-			selectResults: ["4. Review a specific PR/MR", "Search open pull requests…", "#7  Filtered match  @octocat"],
-			inputResults: ["match"],
-			onSelectCall: call => {
-				selectCalls.push(call);
+			selectResults: ["4. Review a specific PR/MR"],
+			drivePicker: async term => {
+				vi.useFakeTimers();
+				try {
+					term.type("old");
+					expect(searches).toEqual([]);
+					vi.advanceTimersByTime(300);
+					await slowStarted.promise;
+					term.press("ctrl+u");
+					term.type("new");
+					vi.advanceTimersByTime(300);
+					await latestStarted.promise;
+					slow.resolve([{ number: 99, title: "Stale result" }]);
+					await slow.promise;
+					await Promise.resolve();
+					term.render();
+					expect(term.screen().join("\n")).toContain("Server-only match");
+					expect(term.screen().join("\n")).not.toContain("Stale result");
+					term.press("enter");
+				} finally {
+					vi.useRealTimers();
+				}
 			},
 		});
 
-		const result = await command.execute([], ctx);
-
-		expect(result).toBeDefined();
-		expect(result!).toContain("PR owner/repo#7");
-		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 7 });
-		expect(
-			listSpy.mock.calls.some(
-				call => (call[1] as string[]).includes("--search") && (call[1] as string[]).includes("match"),
-			),
-		).toBe(true);
-		const filteredSelect = selectCalls.find(
-			call => call.title === 'Open pull requests in owner/repo matching "match"',
-		);
-		expect(filteredSelect?.options).toContain("#7  Filtered match  @octocat");
+		expect(await command.execute([], ctx)).toContain("PR owner/repo#7");
+		expect(searches).toEqual(["old", "new"]);
 	});
 
-	it("keeps the picker open when a search request fails", async () => {
+	it.each([
+		["#123", "owner/repo#123"],
+		["https://github.com/acme/project/pull/456", "acme/project#456"],
+	])("opens %s directly even when there are no open pull requests", async (query, target) => {
 		const dir = await createTempDir();
 		spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
-		spyOn(github, "json").mockImplementation(async (_cwd: string, args: string[]) => {
-			if (args.includes("--search")) throw new Error("gh: rate limited");
-			return [{ number: 42, title: "Fix login", author: { login: "octocat" } }] as never;
-		});
-		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
-		const notifications: NotifyCall[] = [];
+		const listSpy = spyOn(github, "json").mockResolvedValue([]);
+		spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
 		const ctx = createContext({
-			selectResults: ["4. Review a specific PR/MR", "Search open pull requests…", "#42  Fix login  @octocat"],
-			inputResults: ["login"],
-			onNotify: call => {
-				notifications.push(call);
+			selectResults: ["4. Review a specific PR/MR"],
+			drivePicker: term => {
+				term.paste(query);
+				term.press("enter");
 			},
 		});
 
-		const result = await command.execute([], ctx);
-
-		expect(notifications).toContainEqual({
-			message: "Failed to list open pull requests in owner/repo: gh: rate limited",
-			type: "error",
-		});
-		expect(result).toBeDefined();
-		expect(result!).toContain("PR owner/repo#42");
-		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 42 });
-	});
-
-	it("resolves a numeric search query directly without a search request", async () => {
-		const dir = await createTempDir();
-		spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
-		const listSpy = spyOn(github, "json").mockResolvedValue([
-			{ number: 42, title: "Fix login", author: { login: "octocat" } },
-		]);
-		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
-		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
-		const ctx = createContext({
-			selectResults: ["4. Review a specific PR/MR", "Search open pull requests…"],
-			inputResults: ["#123"],
-		});
-
-		const result = await command.execute([], ctx);
-
-		expect(result).toBeDefined();
-		expect(result!).toContain("PR owner/repo#123");
-		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 123 });
+		expect(await command.execute([], ctx)).toContain(`PR ${target}`);
 		expect(listSpy).toHaveBeenCalledTimes(1);
-		expect(listSpy.mock.calls.every(call => !(call[1] as string[]).includes("--search"))).toBe(true);
 	});
 
 	describe("GitLab merge requests", () => {
@@ -883,12 +875,12 @@ describe("ReviewCommand", () => {
 			]);
 			const ghListSpy = spyOn(github, "json");
 			const diffSpy = spyOn(glab, "getOrFetchMrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
-			const selectCalls: SelectCall[] = [];
 			const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
 			const ctx = createContext({
-				selectResults: ["4. Review a specific PR/MR", "!5  Fix  @alice  [draft]"],
-				onSelectCall: call => {
-					selectCalls.push(call);
+				selectResults: ["4. Review a specific PR/MR"],
+				drivePicker: async term => {
+					await Promise.resolve();
+					term.press("enter");
 				},
 			});
 
@@ -901,10 +893,6 @@ describe("ReviewCommand", () => {
 				"-R",
 				"https://gitlab.com/acme/app",
 			]);
-			expect(selectCalls[1]).toEqual({
-				title: "Open merge requests in gitlab.com/acme/app",
-				options: ["!5  Fix  @alice  [draft]", "Search open merge requests…"],
-			});
 			expect(ghListSpy).not.toHaveBeenCalled();
 		});
 
