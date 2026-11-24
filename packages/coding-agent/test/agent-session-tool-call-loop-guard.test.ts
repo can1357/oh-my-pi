@@ -119,6 +119,98 @@ describe("AgentSession tool-call loop guard", () => {
 		expect(redirects[0]!.display).toBe(false);
 	});
 
+	it("redirects a call that a cell repeats through the eval bridge", async () => {
+		const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
+		const modelRegistry = new ModelRegistry(authStorage);
+		const contexts: Context[] = [];
+		const cellTool: AgentTool = {
+			name: "run_cell",
+			label: "Run cell",
+			description: "Mock cell tool whose script calls todo through the eval bridge",
+			parameters: type({ "code?": "string" }),
+			execute: async () => {
+				// A cell that loops over one failing call: each bridged call reaches the loop guard as the model's own call would.
+				for (let index = 0; index < 5; index++) {
+					session!.recordCellToolCall(
+						{
+							type: "toolCall",
+							id: `cell-${index}`,
+							name: "todo",
+							arguments: { op: "done", task: "no such task" },
+						},
+						{ content: [{ type: "text", text: 'Errors: Task "no such task" not found' }] },
+					);
+				}
+				return { content: [{ type: "text" as const, text: "5 calls failed" }] };
+			},
+		};
+		let callCount = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [cellTool], messages: [] },
+			convertToLlm,
+			streamFn: (_model, context) => {
+				contexts.push(context);
+				const toolCallTurn = callCount < 1;
+				callCount++;
+				const message: AssistantMessage = toolCallTurn
+					? {
+							role: "assistant",
+							content: [{ type: "toolCall", id: "tc-cell", name: "run_cell", arguments: { code: "loop" } }],
+							api: model.api,
+							provider: model.provider,
+							model: model.id,
+							usage: zeroUsage,
+							stopReason: "toolUse",
+							timestamp: Date.now(),
+						}
+					: {
+							role: "assistant",
+							content: [{ type: "text", text: "Stopped repeating." }],
+							api: model.api,
+							provider: model.provider,
+							model: model.id,
+							usage: zeroUsage,
+							stopReason: "stop",
+							timestamp: Date.now(),
+						};
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: toolCallTurn ? "toolUse" : "stop", message });
+				});
+				return stream;
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"todo.enabled": false,
+			"model.toolCallLoopGuard.enabled": true,
+			"model.toolCallLoopGuard.threshold": 5,
+			"model.toolCallLoopGuard.exemptTools": ["wait"],
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map([[cellTool.name, cellTool]]),
+		});
+
+		await session.prompt("run the cell");
+		await session.waitForIdle();
+
+		expect(contexts).toHaveLength(2);
+		expect(JSON.stringify(contexts[1]!.messages)).toContain("tool_call_loop_detected");
+		expect(JSON.stringify(contexts[1]!.messages)).toContain("todo");
+		const redirects = session.agent.state.messages.filter(
+			(message): message is CustomMessage =>
+				message.role === "custom" && message.customType === "tool-call-loop-redirect",
+		);
+		expect(redirects).toHaveLength(1);
+	});
+
 	it.each([
 		{
 			scenario: "exempt tool command",

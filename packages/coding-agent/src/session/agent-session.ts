@@ -12060,6 +12060,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
 	}
 
+	/** Counts a tool call a cell made through the eval bridge in the tool-call loop guard. */
+	recordCellToolCall(call: ToolCall, result: AgentToolResult | undefined): void {
+		this.#loopGuards.recordCellCall(call, result);
+	}
+
 	/** `todo.backend` when this main session mirrors its list to an extension backend. */
 	#todoBackend(): string | undefined {
 		if (this.#agentKind !== "main") return undefined;

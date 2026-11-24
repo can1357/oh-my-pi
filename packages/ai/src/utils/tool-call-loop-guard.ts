@@ -21,6 +21,9 @@ export interface ToolCallLoopTurn {
 	readonly injectedContext?: boolean;
 }
 
+/** The part of a tool result the loop guard reads: its id, its text, and whether its tool flagged it useless. */
+export type ToolCallResult = Pick<ToolResultMessage, "toolCallId" | "content" | "useless">;
+
 /** Details needed to steer the model away from a repeated tool call. */
 export interface RepeatedToolCallDetection {
 	readonly kind: "repeated_tool_call";
@@ -55,7 +58,7 @@ function summarizeText(text: string, limit: number): string {
 	return summary;
 }
 
-function summarizeToolResult(toolResults: readonly ToolResultMessage[], toolCallId: string): string {
+function summarizeToolResult(toolResults: readonly ToolCallResult[], toolCallId: string): string {
 	const result = toolResults.find(candidate => candidate.toolCallId === toolCallId);
 	if (!result) return "";
 
@@ -93,6 +96,19 @@ export class ToolCallLoopGuard {
 	/** Records one completed turn and reports repetitions at or beyond the threshold. */
 	recordTurn(turn: ToolCallLoopTurn): RepeatedToolCallDetection | null {
 		const toolCalls = turn.message.content.filter((part): part is ToolCall => part.type === "toolCall");
+		return this.#recordCalls(toolCalls, turn.toolResults, turn.injectedContext === true);
+	}
+
+	/** Records one call a script made inside a turn, counted as a turn of its own. */
+	recordCall(call: ToolCall, toolResult: ToolCallResult | undefined): RepeatedToolCallDetection | null {
+		return this.#recordCalls([call], toolResult ? [toolResult] : [], false);
+	}
+
+	#recordCalls(
+		toolCalls: readonly ToolCall[],
+		toolResults: readonly ToolCallResult[],
+		injectedContext: boolean,
+	): RepeatedToolCallDetection | null {
 		if (toolCalls.length === 0) {
 			this.#lastHash = undefined;
 			this.#count = 0;
@@ -105,8 +121,8 @@ export class ToolCallLoopGuard {
 			// changed state (finished jobs, a message, injected context), so it ends
 			// the repetition.
 			const idle =
-				!turn.injectedContext &&
-				toolCalls.every(tc => turn.toolResults.find(result => result.toolCallId === tc.id)?.useless === true);
+				!injectedContext &&
+				toolCalls.every(tc => toolResults.find(result => result.toolCallId === tc.id)?.useless === true);
 			if (!idle) {
 				this.#lastHash = undefined;
 				this.#count = 0;
@@ -131,7 +147,7 @@ export class ToolCallLoopGuard {
 			kind: "repeated_tool_call",
 			toolName: reportCall.name,
 			count: this.#count,
-			resultSummary: summarizeToolResult(turn.toolResults, reportCall.id),
+			resultSummary: summarizeToolResult(toolResults, reportCall.id),
 			argumentsSummary: summarizeText(
 				JSON.stringify(canonicalizeToolCallValue(reportCall.arguments)),
 				ARGUMENT_SUMMARY_LIMIT,
