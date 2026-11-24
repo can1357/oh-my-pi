@@ -12,7 +12,7 @@ import * as vm from "node:vm";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 
-import type { EvalTableColumn } from "@oh-my-pi/pi-tui/tools/eval";
+import type { EvalTableColumn } from "../../../tools/details/eval";
 import { type EvalDisplayOutput, evalImageMetadata } from "../../types";
 import type { EvalPreludeSource } from "../worker-protocol";
 import { createHelpers, type HelperBundle } from "./helpers";
@@ -20,7 +20,10 @@ import { awaitMaybePromise, indirectEval } from "./indirect-eval";
 import { LocalModuleLoader } from "./local-module-loader";
 import { JAVASCRIPT_PRELUDE_SOURCE } from "./prelude";
 import { diagnoseCellSyntaxError, wrapCode } from "./rewrite-imports";
+import { type ShadowInitialGlobals, type ShadowSnapshot, shadowSnapshotDigest } from "./shadow-snapshot";
 import type { JsStatusEvent } from "./types";
+
+export { type ShadowInitialGlobals, type ShadowSnapshot, shadowSnapshotDigest };
 
 export interface RuntimeCallIdentity {
 	siteId: string;
@@ -126,53 +129,8 @@ const PRELUDE_GLOBAL_KEYS = [
 	"read",
 	"write",
 	"env",
+	"sh",
 ];
-
-/**
- * Which mutable global intrinsics still have their original identity.
- *
- * A retained cell can replace e.g. `String` with an arbitrary value; the shadow
- * projector models `String(...)`/`JSON.stringify(...)`/`Array.prototype.join`
- * calls as pure transforms only for names flagged intact here, so speculation
- * never performs I/O from a branch the real cell cannot reach.
- */
-export type ShadowInitialGlobals = Readonly<{
-	String: boolean;
-	JSON: boolean;
-	"JSON.stringify": boolean;
-	"Array.prototype.join": boolean;
-	/**
-	 * Whether `Object.prototype.toString` still has its original identity.
-	 * Implicit string coercion (templates, `+`) dispatches it for objects
-	 * (including arrays containing objects); a retained replacement changes
-	 * authoritative paths while leaving no snapshot trace. Absent only for
-	 * hand-built snapshots, where the intrinsic is assumed intact.
-	 */
-	"Object.prototype.toString"?: boolean;
-	/**
-	 * Whether the prelude tool bridge dispatcher still has its installed
-	 * identity. The proxy resolves `__omp_call_tool__` per call, so the flag
-	 * must track this binding; it also joins the snapshot digest, invalidating
-	 * plans if the installation ever changes under them. Absent only for
-	 * hand-built snapshots, where the bridge is assumed intact.
-	 */
-	__omp_call_tool__?: boolean;
-}>;
-
-export type ShadowSnapshot = Readonly<{
-	revision: number;
-	values: Readonly<Record<string, unknown>>;
-	initialGlobals: ShadowInitialGlobals;
-}>;
-
-export function shadowSnapshotDigest(snapshot: ShadowSnapshot): string {
-	// Intrinsic-identity flags participate: an async `globalThis.String = null` that
-	// lands after planning changes no value and bumps no revision, so a
-	// values-only digest would still match at verify time while projections made
-	// against the builtin no longer describe the cell. The template conversion
-	// avoids the mutable `String` global this function itself must survive.
-	return `${Bun.hash(JSON.stringify({ values: snapshot.values, initialGlobals: snapshot.initialGlobals }))}`;
-}
 
 const SHADOW_SNAPSHOT_MAX_DEPTH = 16;
 const SHADOW_SNAPSHOT_MAX_NODES = 2_000;
@@ -568,11 +526,22 @@ export class JsRuntime {
 						const finalValue = context.finalExpressionValue;
 						context.finalExpressionSet = false;
 						context.finalExpressionValue = undefined;
-						return await awaitMaybePromise(finalValue);
+						const settled = await awaitMaybePromise(finalValue);
+						return wrapped.finalExpressionSuppressed ? undefined : settled;
 					}
 					return awaited;
 				}
-				return await awaitMaybePromise(value);
+				// Classification is best-effort; keep the engine's completion for valid syntax
+				// the parser does not understand rather than silently dropping its result.
+				if (wrapped.finalExpressionReturned === null) return await awaitMaybePromise(value);
+				// The async wrapper's value is an explicit top-level `return`. A plain script's completion
+				// value is whatever statement ran last (an `if` body, the expression before a trailing
+				// `const`); as in Python, that is not the cell's result.
+				if (wrapped.asyncWrapped) return await awaitMaybePromise(value);
+				// Discard the displayed value, not its failure: assigned promises must still
+				// settle inside this run instead of rejecting unhandled in a persistent worker.
+				await awaitMaybePromise(value);
+				return undefined;
 			});
 		} finally {
 			this.#recordGlobals();
@@ -754,6 +723,11 @@ export class JsRuntime {
 	dispose(): void {
 		if (this.#disposed) return;
 		this.#disposed = true;
+		// Disposal releases realm run ownership, so a run abandoned by timeout cannot hold it forever.
+		if (activeGlobalRunOwner === this.#globalOwner) {
+			activeGlobalRunOwner = null;
+			activeGlobalRunDepth = 0;
+		}
 		RUN_HOOK_RESOLVERS.delete(this.#runHookResolver);
 		for (const key of this.#ownedGlobalKeys) releaseGlobalKey(key, this.#globalOwner);
 		this.#ownedGlobalKeys.clear();
@@ -861,6 +835,8 @@ function enterGlobalRun(owner: symbol, action: string): () => void {
 	return () => {
 		if (left) return;
 		left = true;
+		// A disposed owner's late leave must not touch another owner's depth.
+		if (activeGlobalRunOwner !== owner) return;
 		activeGlobalRunDepth--;
 		if (activeGlobalRunDepth === 0) activeGlobalRunOwner = null;
 	};

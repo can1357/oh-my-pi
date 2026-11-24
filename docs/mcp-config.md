@@ -94,7 +94,7 @@ Top-level keys:
 - `$schema` — optional JSON Schema URL for tooling
 - `mcpServers` — map of server name to server config
 - `disabledServers` — active-profile user denylist; it hides a discovered server by name regardless of the source entry's `enabled` value
-- `enabledServers` — active-profile user allowlist; it can force-enable a same-named entry whose source says `enabled: false`, but `disabledServers` still wins
+- `enabledServers` — active-profile user allowlist; it can force-enable a same-named entry whose source says `enabled: false` or that a [built-in transform](#built-in-transforms) would drop, but `disabledServers` still wins
 
 The config writer accepts names up to 100 characters containing letters, numbers, `_`, `-`, `.`, `:`, and single spaces between non-space name segments. The bundled schema omits colons and spaces from its name pattern, so names such as `cloudflare:cloudflare-api` or `MaaS Slack` may be valid at runtime while an editor reports a schema error.
 
@@ -111,7 +111,7 @@ Shared fields for every transport:
 
 Disable instructions when a server's guidance conflicts with your tool policy or adds unwanted context to every request, including subagent requests. If no connected server contributes instructions, the MCP Server Instructions section is omitted entirely. `instructions` does not distinguish connections: when two entries under different names describe the same endpoint, only the higher-priority entry is kept, together with its own `instructions` value, so set the option on the entry that wins (see `/mcp list`). A changed value applies to an already-connected server after `/mcp reload`.
 
-`OMP_MCP_TIMEOUT_MS` has process-wide precedence over every per-server `timeout`. Set it to `0` to disable client-side timeouts, or to a positive millisecond value such as `120000`. If it is unset or invalid, OMP uses the server value and then the 30-second default; invalid values are logged and ignored.
+`OMP_MCP_TIMEOUT_MS` has process-wide precedence over every per-server `timeout`. Set it to `0` to disable client-side timeouts, or to a positive millisecond value such as `120000`. If it is unset or invalid, OMP uses the server value and then the default (10 minutes for tool calls, 30 seconds otherwise); invalid values are logged and ignored.
 
 Claude marketplace plugins follow [Claude Code's per-server timeout rule](https://code.claude.com/docs/en/mcp): their `.mcp.json` values are milliseconds, and values below `1000` are ignored with a discovery warning so OMP's normal timeout fallback applies. This restriction does not change OMP-native configurations, where `0` still disables timeouts.
 
@@ -119,9 +119,35 @@ These request deadlines also govern subagent MCP calls over borrowed parent conn
 
 Initial MCP discovery returns after a 250 ms window while slower connections continue in the background. Set `mcp.startupTimeoutMs` or override it with `OMP_MCP_STARTUP_TIMEOUT_MS` to change the window; `0` waits for the initial connection attempts to settle. In print mode (`-p`, `--mode text|json`), OMP additionally waits for all configured servers to load tools or fail before the first turn, up to `OMP_MCP_TIMEOUT_MS` (default 30 seconds). `OMP_MCP_TIMEOUT_MS=0` disables this barrier deadline too, so an unresponsive server can block print mode indefinitely. Servers still unavailable at the deadline are named on stderr; `OMP_MCP_REQUIRE_READY=1` instead exits with code 1 before the turn. These print-mode waits do not affect interactive, RPC, or ACP startup. In interactive and `--mode rpc-ui` sessions, which connect MCP servers in the background, the first turn waits up to 1.5 s for MCP startup, so its system prompt includes servers connected by then; slower servers register later and change the next turn's prompt.
 
-Client-generated remote protocol headers take precedence over configured headers case-insensitively. Streamable HTTP owns `MCP-Protocol-Version`: it ignores configured copies and sends the negotiated version after initialization. Portable Agent Plugins' configured headers are origin-locked and are not forwarded to another origin on redirects.
+Client-generated remote protocol headers take precedence over configured headers case-insensitively. Streamable HTTP owns `MCP-Protocol-Version` (and `Mcp-Method`/`Mcp-Name` for servers on the 2026-07-28 revision): configured copies are ignored. Portable Agent Plugins' configured headers are origin-locked and are not forwarded to another origin on redirects.
 
 Remote HTTP and SSE transports do not impose an additional socket-idle timeout. Without an applicable MCP deadline, a silent connection can wait indefinitely; cancel the call or close the transport to stop it. A quiet stream alone does not prove that its peer is still reachable.
+
+## Where servers run, and when they are shared
+
+OMP sessions do not start MCP servers themselves. Every configured server is hosted by the per-user omp daemon and each session attaches to it. With `mcp.shared` off, or when the daemon cannot be reached, the same host runs inside the session and shares only between sessions of that process.
+
+How a server is shared depends on the protocol revision it speaks, which OMP detects once per server and remembers:
+
+- **MCP 2026-07-28 servers** are stateless by specification. One process (or one remote origin) serves every session whose configuration matches. It starts when a session first needs it and stops after `mcp.idleStopMinutes` (default 5) without use; the next call starts it again.
+- **Servers that require the `initialize` handshake** (2025-11-25 and earlier, and every `sse` server) keep a session inside the process. Each OMP session gets its own process, started on that session's first call and stopped when the session ends.
+
+Tool, prompt and resource lists are cached per server for as long as the server declares them fresh (30 days for handshake-era servers, which declare nothing), so a session that never calls a server starts no process for it. A list past its freshness window is still shown immediately and refreshed in the background.
+
+Two sessions share a stdio server when all of these are equal:
+
+- `command`, `args` and the working directory (`cwd`, or the session's project directory when unset),
+- every variable in the server's `env`, after resolution,
+- every inherited environment variable whose name contains `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `CREDENTIAL`, `API_KEY`, `ACCESS_KEY`, `PRIVATE_KEY`, `PROFILE`, `ACCOUNT`, `TENANT`, `CONFIG`, `CCNAME` or `AUTH`.
+
+Every other inherited variable (`PATH`, terminal and shell state) comes from whichever session started the process. In practice:
+
+- A server without `cwd` is shared per project. Set `cwd` (for example to your home directory) on servers that do not depend on the project, and every project shares one process.
+- If a server must see a variable that differs between your sessions, declare it in `env` (`"env": { "AWS_REGION": "${AWS_REGION}" }`); sessions with different values then get separate processes.
+
+Remote servers are shared between sessions that send the same URL and headers; a refreshed OAuth token is a different set of headers.
+
+`/mcp list` shows for each server whether it is running or idle, its pid, and how many sessions share it. `omp ps` lists the hosted processes.
 
 ### `stdio` transport
 
@@ -406,7 +432,7 @@ Portable Agent Plugins use different secret semantics: only `${PLUGIN_ROOT}` and
 
 Before OMP launches a stdio server or makes an HTTP/SSE request, it resolves stdio `env` values and HTTP/SSE `headers` values like this:
 
-1. If a value starts with `!`, OMP runs the rest as a shell command in the project directory with a 10s timeout and uses trimmed stdout. Successful results are process-cached until invalidated; concurrent resolutions share the same command execution.
+1. If a value starts with `!`, OMP runs the rest as a shell command in the project directory with a 10s timeout and uses trimmed stdout. Successful results are process-cached; concurrent resolutions share the same command execution. A server's commands run again when it reconnects (`/mcp reconnect`, an automatic reconnect, `/mcp reload`) and, for HTTP/SSE `headers`, when the server answers 401/403 — the request is then retried once with the new values. This keeps commands that mint short-lived tokens working past expiry.
 2. If the command fails, times out, or prints only whitespace, that `env`/`headers` entry is omitted. Failed commands are retried on a later resolution after a 30s backoff.
 3. Otherwise OMP checks whether the whole value names an environment variable.
 4. If that environment variable is set to a non-empty value, OMP uses the environment value; otherwise it uses the string literally.
@@ -435,7 +461,7 @@ That means this is valid and convenient for local secrets:
 The active profile's user file supplies two cross-source overrides:
 
 - `disabledServers` is the highest-precedence denylist. It hides a same-named server from any source.
-- `enabledServers` force-enables a same-named entry whose source has `enabled: false`; it cannot override `disabledServers`.
+- `enabledServers` force-enables a same-named entry whose source has `enabled: false` or that a [built-in transform](#built-in-transforms) would drop; it cannot override `disabledServers`.
 
 ```json
 {
@@ -446,6 +472,24 @@ The active profile's user file supplies two cross-source overrides:
 ```
 
 `/mcp enable` and `/mcp disable` update `enabled` directly when the definition is in an OMP-owned writable file. OMP does not mutate another tool's config: for such sources, those commands maintain the user-level allowlist or denylist instead and remove a conflicting stale override.
+
+## Built-in transforms
+
+OMP recognizes some MCP servers and changes how it treats them without being asked. The only transform so far is a drop: a server whose job one of OMP's own tools already does is not connected.
+
+| Server | Recognized by | Dropped while |
+| --- | --- | --- |
+| Codex Desktop's bundled Node REPL (Codex registers it as `node_repl` in `~/.codex/config.toml`) | a stdio command whose file name is `node_repl` or `node_repl.exe`, under any server name | the `eval` tool is active and `eval.js` is on |
+
+A drop is decided from the server's config at discovery (startup and `/mcp reload`), before the server starts. `/mcp list` shows dropped servers under **Replaced by built-ins** with the reason and the file each came from, and the `/extensions` dashboard shows them as disabled.
+
+An explicit enable always wins:
+
+- `/mcp enable <name>` connects a dropped server and keeps it: it writes `enabled: true` on an OMP-owned entry, or adds the name to `enabledServers` for another tool's config.
+- `enabled: true` on the entry, or the name in `enabledServers`, has the same effect when written by hand.
+- `mcp.builtinTransforms: false` turns every built-in transform off.
+
+`omp read` does not apply built-in transforms.
 
 ## `/mcp add` vs editing JSON directly
 
@@ -462,7 +506,7 @@ After editing, use:
 - `/mcp reload` to rediscover and reconnect servers in the current session
 - `/mcp list` to see which config file a server came from
 - `/mcp test <name>` to test a single server
-- `/mcp reconnect <name>` to reconnect one server without rediscovering all configs
+- `/mcp reconnect <name>` to restart one server without rediscovering all configs; a shared 2026-07-28 server restarts for every session using it
 - `/mcp reauth <name>` to replace managed OAuth credentials, or `/mcp unauth <name>` to remove them
 - `/mcp resources`, `/mcp prompts`, and `/mcp notifications` to inspect non-tool MCP capabilities
 
@@ -526,6 +570,10 @@ The JSON is valid, but the server may still be unreachable. Use `/mcp test <name
 
 Run `/mcp list`. OMP discovers many third-party MCP files, but project-level loading can also be disabled via the `mcp.enableProjectConfig` setting, and a user-level `disabledServers` entry can suppress a server by name.
 
+### Codex's `node_repl` server is configured but never loads
+
+A [built-in transform](#built-in-transforms) drops it while `eval` can run JavaScript. Run `/mcp enable node_repl` to connect it anyway.
+
 ### A browser MCP server is configured but never loads
 
 OMP drops recognized browser-automation servers at config load, before any connection attempt, whenever the built-in browser prelude is callable: `browser.enabled` is true (the default), Eval is registered and active, and the session is not restricted to explicitly named tools. The filter matches servers named `playwright`, `puppeteer`, `browserbase`, `browser-tools`, `browser-use` or `browser`, stdio servers whose command or args match one of a fixed set of recognized browser-MCP package patterns (`@playwright/mcp`, `@modelcontextprotocol/server-puppeteer`, `@browserbasehq/mcp-server-browserbase`, `@agentdeskai/browser-tools-mcp`, `@agent-infra/mcp-server-browser`, `puppeteer-mcp`, `playwright-mcp`, `pptr-mcp`, `browser-use-mcp`, `mcp-browser-use`), or HTTP/SSE servers whose URL points at browserbase.com or browser-use.com. Any other package (for example `chrome-devtools-mcp` under a server name outside the list above) is not matched. This filter is separate from `disabledServers`.
@@ -544,7 +592,8 @@ Malformed JSON or a missing/invalid server map makes that provider contribute no
 
 ## References
 
-- MCP transport spec: https://modelcontextprotocol.io/specification/2025-11-25/basic/transports
+- MCP specification, current revision: https://modelcontextprotocol.io/specification/2026-07-28
+- Handshake-era transports: https://modelcontextprotocol.io/specification/2025-11-25/basic/transports
 - Filesystem server package: https://www.npmjs.com/package/@modelcontextprotocol/server-filesystem
 - GitHub MCP server: https://github.com/github/github-mcp-server
 - Slack MCP server docs: https://docs.slack.dev/ai/slack-mcp-server/

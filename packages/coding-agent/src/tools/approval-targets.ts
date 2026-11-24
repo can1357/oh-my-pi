@@ -4,10 +4,10 @@
  * Shared by every path-based tool (`read`, `write`, `edit`) so one approved
  * target maps to one key: a filesystem path resolved against the session cwd
  * (case-folded on case-insensitive platforms via {@link approvalCacheKeyForPath}),
- * a registered internal URL (`xd://`, `local://`, …) kept in its normalized
+ * a registered internal URL (`help://`, `local://`, …) kept in its normalized
  * form, or a readable web URL kept as written.
  */
-import { isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";
+import { isReadableUrlPath } from "./details/read";
 import * as fs from "node:fs";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { approvalCacheKeyForPath } from "./approval-cache";
@@ -44,6 +44,8 @@ export function isApprovalPublicUrl(url: string): boolean {
 		}
 	}
 	if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+	// An absolute name (`intranet.`, `localhost.`) resolves to the same host as its relative form.
+	host = host.replace(/\.+$/, "");
 	if (host.length === 0) return false;
 	// Intranet names: a single label, or a reserved local suffix.
 	if (!host.includes(".") || host.endsWith(".local") || host.endsWith(".localhost") || host.endsWith(".internal")) {

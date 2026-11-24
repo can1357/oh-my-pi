@@ -1,42 +1,50 @@
+import * as fs from "node:fs/promises";
 import { clearSubmittedText } from "./helpers/draft";
-import { Spacer } from "@oh-my-pi/pi-tui";
 import { APP_NAME, formatAge } from "@oh-my-pi/pi-utils";
-import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
+import { formatKeyHint } from "../ui/keys/hints";
 import { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { type CollabHostSnapshot, listCollabHosts } from "../collab/registry";
 import { settings } from "../config/settings";
 import { parseExportArgs } from "../export/html/args";
 import { shareSession } from "../export/share";
-import { theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../modes/types";
-import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
-import { extractLastCodeBlock, extractLastCommand, extractLastLink } from "@oh-my-pi/pi-tui/overlays/copy-targets";
-import { restartBrowserForModeChange } from "../tools/browser";
-import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import { sanitizeDisplayLine } from "../extensibility/inventory/display-text";
+import { extractLastCodeBlock, extractLastCommand, extractLastLink } from "../modes/view-model/overlays/copy-targets";
+import { applyBrowserModeChange } from "../tools/browser";
+import { shortenPath, TRUNCATE_LENGTHS } from "../utils/render-utils";
+import { truncateToWidth } from "../utils/text-width";
 import { openPath } from "../utils/open";
 import { copyToClipboard } from "../utils/clipboard";
 import { refreshStatusLine } from "./builtin-modes";
-import { CollabQrCodeComponent, collabBrowserLink } from "@oh-my-pi/pi-tui/chrome/collab-qrcode";
+import { CollabQrCode } from "../ui/transcript/figures/collab";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
 import { formatDumpArchiveReport } from "../session/session-dump-format";
 import type { SlashCommandSpec } from "./types";
 
 import { cfgBrowserEnabled, cfgBrowserHeadless } from "../tools/browser/settings";
 import { cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "../commands/settings";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+/** Scheme-less display form of a collab browser deep link, OSC 8 linked to it. */
+function collabBrowserLink(webLink: string, label?: string): string {
+	const display = currentTheme().fg("accent", `\x1b[4m${label ?? webLink.replace(/^https?:\/\//, "")}\x1b[24m`);
+	if (/[\x00-\x1f\x7f]/.test(webLink)) return display;
+	return `\x1b]8;;${webLink}\x07${display}\x1b]8;;\x07`;
+}
 
 /** Join hint printed by /collab: compact terminal link + clickable browser deep link. */
 function collabLinkHint(host: CollabHost, heading: string, view = false): string {
-	const bullet = theme.fg("accent", theme.format.bullet);
+	const bullet = currentTheme().fg("accent", currentTheme().symbols.symbol("format.bullet"));
 	const link = view ? host.viewLink : host.link;
 	const webLink = view ? host.webViewLink : host.webLink;
 	return [
 		// Keep the URL on the first row: under transcript pressure the status
 		// block is clipped to rendered[0], which used to drop the join link.
-		`${collabBrowserLink(webLink, "Join in browser")}  ${theme.fg("success", heading)}`,
-		` ${bullet} ${theme.fg("muted", view ? "Watch from another terminal:" : "Join from another terminal:")} ${APP_NAME} join "${link}"`,
-		` ${bullet} ${theme.fg("muted", "or any web browser:")} ${collabBrowserLink(webLink)}`,
-		theme.fg(
+		`${collabBrowserLink(webLink, "Join in browser")}  ${currentTheme().fg("success", heading)}`,
+		` ${bullet} ${currentTheme().fg("muted", view ? "Watch from another terminal:" : "Join from another terminal:")} ${APP_NAME} join "${link}"`,
+		` ${bullet} ${currentTheme().fg("muted", "or any web browser:")} ${collabBrowserLink(webLink)}`,
+		currentTheme().fg(
 			"dim",
 			view
 				? "Anyone with this link can watch the session but cannot prompt the agent."
@@ -47,7 +55,7 @@ function collabLinkHint(host: CollabHost, heading: string, view = false): string
 
 function showCollabQrCode(ctx: InteractiveModeContext, webLink: string): void {
 	try {
-		ctx.present([new Spacer(1), new CollabQrCodeComponent(webLink)]);
+		ctx.present(() => CollabQrCode({ url: webLink }));
 	} catch (err) {
 		ctx.showError(`Failed to render collab QR code: ${errorMessage(err)}`);
 	}
@@ -389,9 +397,9 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 					ctx.showStatus("No active Collab hosts");
 					return;
 				}
-				const bullet = theme.fg("accent", theme.format.bullet);
+				const bullet = currentTheme().fg("accent", currentTheme().symbols.symbol("format.bullet"));
 				const plural = hosts.length === 1 ? "" : "s";
-				const lines = [theme.fg("success", `${hosts.length} active local Collab host${plural}`)];
+				const lines = [currentTheme().fg("success", `${hosts.length} active local Collab host${plural}`)];
 				for (const host of hosts) {
 					// Registry strings come from other processes: strip controls,
 					// collapse newlines, and bound the width before they hit the TUI.
@@ -416,9 +424,12 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 					lines.push(
 						// Fields are bounded above; each composed row is bounded too so the
 						// fixed details can never push it past one transcript line.
-						truncateToWidth(` ${bullet} ${session} ${theme.fg("muted", `— ${room}`)}`, TRUNCATE_LENGTHS.LINE),
-						truncateToWidth(`   ${theme.fg("muted", detail)}`, TRUNCATE_LENGTHS.LINE),
-						`   ${theme.fg("dim", `${APP_NAME} collab link ${host.instanceId}${host.access === "view" ? " --view" : ""}`)}`,
+						truncateToWidth(
+							` ${bullet} ${session} ${currentTheme().fg("muted", `— ${room}`)}`,
+							TRUNCATE_LENGTHS.LINE,
+						),
+						truncateToWidth(`   ${currentTheme().fg("muted", detail)}`, TRUNCATE_LENGTHS.LINE),
+						`   ${currentTheme().fg("dim", `${APP_NAME} collab link ${host.instanceId}${host.access === "view" ? " --view" : ""}`)}`,
 					);
 				}
 				ctx.showStatus(lines.join("\n"), { dim: false });
@@ -527,12 +538,12 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			else return usage("Usage: /browser [headless|visible]", runtime);
 			cfgBrowserHeadless.set(runtime.settings, next);
 			try {
-				await restartBrowserForModeChange();
+				await applyBrowserModeChange(next);
 			} catch (err) {
-				// Setting was already mutated; surface the restart failure so the
+				// Setting was already mutated; surface the failure so the
 				// user knows the browser is in an inconsistent state.
 				await runtime.output(
-					`Browser mode set to ${next ? "headless" : "visible"}, but restart failed: ${errorMessage(err)}`,
+					`Browser mode set to ${next ? "headless" : "visible"}, but applying it failed: ${errorMessage(err)}`,
 				);
 				return commandConsumed();
 			}
@@ -561,9 +572,9 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			}
 			cfgBrowserHeadless.set(settings, next);
 			try {
-				await restartBrowserForModeChange();
+				await applyBrowserModeChange(next);
 			} catch (error) {
-				runtime.ctx.showWarning(`Failed to restart browser: ${errorMessage(error)}`);
+				runtime.ctx.showWarning(`Failed to apply the browser mode: ${errorMessage(error)}`);
 				clearSubmittedText(runtime);
 				return;
 			}
@@ -584,7 +595,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				return;
 			}
 			if (arg === "code") {
-				const block = extractLastCodeBlock(runtime.ctx.session.messages);
+				const block = extractLastCodeBlock(runtime.ctx.viewSession.messages);
 				if (!block) {
 					runtime.ctx.showStatus("No code block to copy.");
 					clearSubmittedText(runtime);
@@ -596,7 +607,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				return;
 			}
 			if (arg === "cmd" || arg === "command") {
-				const lastCommand = extractLastCommand(runtime.ctx.session.messages);
+				const lastCommand = extractLastCommand(runtime.ctx.viewSession.messages);
 				if (!lastCommand) {
 					runtime.ctx.showStatus("No command to copy.");
 					clearSubmittedText(runtime);
@@ -608,7 +619,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				return;
 			}
 			if (arg === "link" || arg === "url") {
-				const link = extractLastLink(runtime.ctx.session.messages);
+				const link = extractLastLink(runtime.ctx.viewSession.messages);
 				if (!link) {
 					runtime.ctx.showStatus("No link to copy.");
 					clearSubmittedText(runtime);
@@ -619,7 +630,16 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				clearSubmittedText(runtime);
 				return;
 			}
-			runtime.ctx.showStatus("Usage: /copy [code|cmd|link]");
+			if (arg === "local") {
+				// Created first, so the copied path is one to cd into or drop files in.
+				const localRoot = runtime.ctx.session.localRoot;
+				await fs.mkdir(localRoot, { recursive: true });
+				await copyToClipboard(localRoot);
+				runtime.ctx.showStatus(`Copied ${shortenPath(localRoot)} to clipboard`);
+				clearSubmittedText(runtime);
+				return;
+			}
+			runtime.ctx.showStatus("Usage: /copy [code|cmd|link|local]");
 			clearSubmittedText(runtime);
 		},
 	},

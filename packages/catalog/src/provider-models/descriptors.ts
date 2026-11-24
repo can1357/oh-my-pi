@@ -5,7 +5,7 @@
  * the compiled entry (`src/compat/providers.ts`); this table holds only the
  * code half. Providers without a factory (`amazon-bedrock`, `azure`,
  * `gitlab-duo`, MiniMax, and the bespoke OAuth-driven managers
- * `google-antigravity` / `google-gemini-cli` / `openai-codex` built by the
+ * `google-antigravity` / `openai-codex` built by the
  * coding-agent runtime) still have a KDL entry but no runtime discovery here.
  */
 import type { KnownProvider } from "../compat/provider-ids";
@@ -24,8 +24,10 @@ import {
 	anthropicModelManagerOptions,
 	basetenModelManagerOptions,
 	bedrockMantleModelManagerOptions,
+	bifrostModelManagerOptions,
 	cerebrasModelManagerOptions,
 	charmHyperModelManagerOptions,
+	chutesModelManagerOptions,
 	clinePassModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
 	commandCodeModelManagerOptions,
@@ -48,6 +50,7 @@ import {
 	metaModelManagerOptions,
 	museCodeModelManagerOptions,
 	mistralModelManagerOptions,
+	modalModelManagerOptions,
 	moonshotModelManagerOptions,
 	nanoGptModelManagerOptions,
 	novitaModelManagerOptions,
@@ -57,6 +60,7 @@ import {
 	opencodeGoModelManagerOptions,
 	opencodeZenModelManagerOptions,
 	openrouterModelManagerOptions,
+	otariModelManagerOptions,
 	qianfanModelManagerOptions,
 	qwenPortalModelManagerOptions,
 	sakanaModelManagerOptions,
@@ -78,6 +82,7 @@ import {
 	xaiOAuthModelManagerOptions,
 	xiaomiModelManagerOptions,
 	yoloAutoModelManagerOptions,
+	zaiModelManagerOptions,
 	zenmuxModelManagerOptions,
 	zhipuCodingPlanModelManagerOptions,
 } from "./openai-compat";
@@ -87,10 +92,11 @@ import {
 	devinModelManagerOptions,
 	factoryDroidModelManagerOptions,
 	gitLabDuoWorkflowModelManagerOptions,
+	liquidModelManagerOptions,
 	localModelManagerOptions,
+	naceModelManagerOptions,
 	typesafeModelManagerOptions,
 	webModelManagerOptions,
-	zaiModelManagerOptions,
 } from "./special";
 
 export type { KnownProvider } from "../compat/provider-ids";
@@ -105,12 +111,14 @@ const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManag
 	"alibaba-token-plan": config => alibabaTokenPlanModelManagerOptions(config),
 	baseten: config => basetenModelManagerOptions(config),
 	"bedrock-mantle": config => bedrockMantleModelManagerOptions(config),
+	bifrost: config => bifrostModelManagerOptions(config),
 	anthropic: config => anthropicModelManagerOptions(config),
 	cerebras: config => cerebrasModelManagerOptions(config),
 	"charm-hyper": config => charmHyperModelManagerOptions(config),
 	"cloudflare-ai-gateway": config => cloudflareAiGatewayModelManagerOptions(config),
 	"cloudflare-workers-ai": () => cloudflareWorkersAiModelManagerOptions(),
 	commandcode: config => commandCodeModelManagerOptions(config),
+	chutes: config => chutesModelManagerOptions(config),
 	coralbricks: config => coralbricksModelManagerOptions(config),
 	cursor: config => cursorModelManagerOptions(config),
 	deepinfra: config => deepinfraModelManagerOptions(config),
@@ -131,13 +139,16 @@ const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManag
 	inception: config => inceptionModelManagerOptions(config),
 	kilo: config => kiloModelManagerOptions(config),
 	"kimi-code": config => kimiCodeModelManagerOptions(config),
+	liquid: () => liquidModelManagerOptions(),
 	litellm: config => litellmModelManagerOptions(config),
 	local: () => localModelManagerOptions(),
 	"lm-studio": config => lmStudioModelManagerOptions(config),
 	mistral: config => mistralModelManagerOptions(config),
+	modal: config => modalModelManagerOptions(config),
 	"muse-code": config => museCodeModelManagerOptions(config),
 	meta: config => metaModelManagerOptions(config),
 	moonshot: config => moonshotModelManagerOptions(config),
+	nace: () => naceModelManagerOptions(),
 	nanogpt: config => nanoGptModelManagerOptions(config),
 	nvidia: config => nvidiaModelManagerOptions(config),
 	novita: config => novitaModelManagerOptions(config),
@@ -147,6 +158,7 @@ const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManag
 	"opencode-go": config => opencodeGoModelManagerOptions(config),
 	"opencode-zen": config => opencodeZenModelManagerOptions(config),
 	openrouter: config => openrouterModelManagerOptions(config),
+	otari: config => otariModelManagerOptions(config),
 	qianfan: config => qianfanModelManagerOptions(config),
 	"qwen-portal": config => qwenPortalModelManagerOptions(config),
 	sakana: config => sakanaModelManagerOptions(config),

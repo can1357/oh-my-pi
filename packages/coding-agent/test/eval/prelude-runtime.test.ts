@@ -36,7 +36,12 @@ fixture = _FixturePrelude()
 del _FixturePrelude`,
 		exports: ["fixture"],
 		async invoke(parameters, context) {
-			calls.push({ parameters, session: context.session, toolCallId: context.toolCallId });
+			calls.push({
+				parameters,
+				session: context.session,
+				toolCallId: context.toolCallId,
+				cellTimeoutMs: context.cellTimeoutMs,
+			});
 			return {
 				content: [{ type: "text", text: `host-${version}` }, ...images],
 				details: { version },
@@ -91,9 +96,11 @@ describe("eval prelude runtime", () => {
 				language === "js"
 					? `await fixture.invoke({});\n${printImages.join("\n")}`
 					: `import json\nawait fixture.invoke()\n${printImages.join("\n")}`;
-			const result = await tool.execute(`frame-fidelity-${language}`, { language, code, timeout: 30 });
+			const result = await tool.execute(`frame-fidelity-${language}`, { language, code, timeout: 45 });
 			expect(result.details?.cells?.[0]?.status).toBe("complete");
 			expect(calls).toHaveLength(1);
+			// The cell's timeout reaches the prelude, which sizes calls that set no timeout from it.
+			expect(calls[0]).toMatchObject({ cellTimeoutMs: 45_000 });
 			const model = getBundledModels("openai")[0];
 			if (!model) throw new Error("Missing bundled OpenAI model");
 			const messages: Message[] = [
@@ -146,6 +153,8 @@ describe("eval prelude runtime", () => {
 			"{ text: 'host-v1', details: { version: 'v1' }, images: '(1 image displayed)' }",
 		);
 		expect(calls).toHaveLength(1);
+		// A cell without a timeout says so with 0.
+		expect(calls[0]).toMatchObject({ cellTimeoutMs: 0 });
 
 		const retained = await executeJs("fixture.invoke === globalThis.savedFixtureInvoke", options);
 		expect(retained.output.trim()).toBe("true");
@@ -190,6 +199,7 @@ describe("eval prelude runtime", () => {
 		expect(first.output.trim()).toBe("v1");
 		expect(first.displayOutputs).toContainEqual({ type: "image", mimeType: "image/png", data: IMAGE_DATA });
 		expect(calls).toHaveLength(1);
+		expect(calls[0]).toMatchObject({ cellTimeoutMs: 0 });
 		const retained = await executePython("print(fixture is saved_fixture)", options);
 		expect(retained.output.trim()).toBe("True");
 

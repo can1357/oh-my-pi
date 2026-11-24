@@ -3,11 +3,9 @@
  *
  * Handles /mcp subcommands for managing MCP servers.
  */
-import { type Component, replaceTabs, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { signal } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
-import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
-import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
-import { clearCache as clearFsCache } from "../../capability/fs";
+import { actionKey, formatKeyHint } from "../../ui/keys/hints";
 import type { SourceMeta } from "../../capability/types";
 import {
 	analyzeAuthError,
@@ -16,6 +14,8 @@ import {
 	loadAllMCPConfigs,
 	MCPManager,
 	OAuthIssuerMismatchError,
+	reconnectMCPServers,
+	resolveMCPTransformContext,
 } from "../../mcp";
 import {
 	findMcpServerForAuth,
@@ -31,12 +31,14 @@ import {
 	type OAuthFlowResult,
 } from "../../mcp/oauth-reauth";
 import { connectToServer, disconnectServer, listTools } from "../../mcp/client";
+import type { McpUpstreamStatus } from "../../mcp/host/contract";
 import {
 	addMCPServer,
 	readDisabledServers,
 	readMCPConfigFile,
 	removeMCPServer,
 	setServerDisabled,
+	setServerForceEnabled,
 	updateMCPServer,
 	validateServerName,
 } from "../../mcp/config-writer";
@@ -45,200 +47,33 @@ import {
 	removeManagedMcpOAuthCredential,
 	removeManagedMcpOAuthCredentials,
 } from "../../mcp/oauth-credentials";
-import {
-	clearSmitheryApiKey,
-	createSmitheryCliAuthSession,
-	getSmitheryApiKey,
-	getSmitheryLoginUrl,
-	pollSmitheryCliAuthSession,
-	type SmitheryCliPollResponse,
-	saveSmitheryApiKey,
-} from "../../mcp/smithery-auth";
-import {
-	SmitheryRegistryError,
-	type SmitherySearchResult,
-	searchSmitheryRegistry,
-	toConfigName,
-} from "../../mcp/smithery-registry";
 import type { MCPAuthChallenge, MCPConfigFile, MCPServerConfig, MCPServerConnection } from "../../mcp/types";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { urlHyperlinkAlways } from "@oh-my-pi/pi-tui/render";
+import { shortenPath } from "../../utils/render-utils";
 import { copyToClipboard } from "../../utils/clipboard";
-import { isTimeoutError } from "../../utils/fetch-timeout";
 import { openPath } from "../../utils/open";
-import { ChatBlock } from "@oh-my-pi/pi-tui/chrome/chat-block";
-import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
-import { MCPAddWizard } from "@oh-my-pi/pi-tui/overlays/mcp-add-wizard";
-import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { MCPAddWizard } from "../../ui/overlays/panels/mcp-add-wizard";
+import { MCPAddWizardModel } from "../../ui/overlays/panels/mcp-add-wizard-model";
+import { findNode } from "../../ui/styles/panels/common";
+import { reportTextView } from "./command-views";
 import { parseCommandArgs } from "../../utils/command-args";
-import { theme } from "@oh-my-pi/pi-tui/theme";
-import { col, span, text } from "@oh-my-pi/pi-tui/native/describe";
-import type { NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import type { InteractiveModeContext } from "../types";
 import { groupBySource, parseRemoveArgs, readScopeFlag, showCommandMessage } from "./command-controller-shared";
+import { mcpConnectingBlock, mcpNoteBlock, mcpOAuthBlock, mcpTestHintBlock } from "./mcp-blocks";
 
 import { cfgMcpEnableProjectConfig } from "../../mcp/settings";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 const MCP_MANUAL_INPUT_PROVIDER_ID = "mcp";
-const MCP_MANUAL_LOGIN_TIP = "Headless? Paste the redirect URL or code with /login <value>.";
 const MCP_TEST_ESCAPE_GRACE_MS = 5_000;
-/** MCP OAuth Esc handlers mapped to the handler each one restores when its flow unwinds. */
-const mcpOAuthEscapeOriginals = new WeakMap<() => void, (() => void) | undefined>();
 
-/**
- * Hint block for an in-flight `/mcp test`. It remains active until settlement
- * seals its final text, after which TranscriptContainer can retire it as an
- * immutable history batch.
- */
-class MutableHintBlock extends TranscriptBlock {
-	#sealed = false;
-
-	isTranscriptBlockFinalized(): boolean {
-		return this.#sealed;
-	}
-
-	seal(): void {
-		this.#sealed = true;
-	}
-}
-
-/**
- * Minimum column budget for URL wrapping. Below this the terminal is
- * effectively unusable, but we still emit chunks so no character is silently
- * dropped and the user can widen and reflow.
- */
-const MCP_AUTH_MIN_WRAP_WIDTH = 16;
-
-/**
- * Wrap `url` into rows that each fit inside `width`. When the label + URL fit
- * on one line, returns a single indented row; otherwise puts the label on its
- * own indented row and slices the URL into fixed-width chunks that start at
- * column 0. Continuation chunks carry ZERO leading bytes on purpose: a
- * multi-row terminal selection includes the newline plus any leading indent,
- * and while address bars strip newlines they preserve or percent-encode
- * embedded spaces — an indent would corrupt the URL at every chunk boundary
- * (silently, when the damage lands inside a query value).
- */
-function wrapUrlRows(label: string, url: string, width: number): string[] {
-	const indent = " ";
-	const sanitized = replaceTabs(url);
-	const effective = Math.max(MCP_AUTH_MIN_WRAP_WIDTH, Math.trunc(width));
-	const inlineWidth = indent.length + label.length + 1 + sanitized.length;
-	if (inlineWidth <= effective) {
-		return [`${indent}${theme.fg("muted", `${label} ${sanitized}`)}`];
-	}
-	const rows: string[] = [`${indent}${theme.fg("muted", label)}`];
-	for (let i = 0; i < sanitized.length; i += effective) {
-		rows.push(theme.fg("muted", sanitized.slice(i, i + effective)));
-	}
-	return rows;
-}
-
-/**
- * Renders the MCP OAuth fallback URL. Always shows the full authorization URL
- * as the primary `Copy URL:` target — that works from any machine, including
- * SSH/WSL/headless sessions where the OMP-hosted `/launch` loopback URL would
- * resolve against the user's local browser and fail.
- *
- * The render is `width`-aware: on any viewport narrower than the composed row
- * ({@link TUI#prepareLine} truncates anything wider with `Ellipsis.Omit`, no
- * marker), the URL is hard-wrapped into width-fitted rows so the primary copy
- * target can never silently lose trailing OAuth parameters — the failure mode
- * that motivated #4418 in the first place. Browsers strip whitespace when a
- * multi-row selection is pasted into the address bar, so the reassembled URL
- * is byte-identical to what we rendered.
- *
- * When the flow's callback server hosts a short `launchUrl`, it is offered
- * as an additional local shortcut for wide-terminal local users. The OSC 8
- * hyperlink continues to carry the full URL for terminals that support it.
- */
-export class MCPAuthorizationLinkPrompt implements Component {
-	readonly #fullUrl: string;
-	readonly #launchUrl: string | undefined;
-	#node: NativeNode | undefined;
-
-	constructor(url: string, launchUrl?: string) {
-		this.#fullUrl = url;
-		this.#launchUrl = launchUrl && launchUrl !== url ? launchUrl : undefined;
-	}
-
-	invalidate(): void {}
-
-	/** Prompt, clickable full URL (open + copy), and optional local shortcut; immutable, so built once. */
-	describe(): NativeNode {
-		this.#node ??= col(
-			[
-				text([span("Open authorization URL:", "success")]),
-				text([span("Click here to authorize", "link", { href: this.#fullUrl })], {
-					href: this.#fullUrl,
-					actions: { click: "open", menu: ["open", "copy"] },
-				}),
-				urlCopyRow("Copy URL:", this.#fullUrl),
-				...(this.#launchUrl ? [urlCopyRow("Local shortcut (this machine only):", this.#launchUrl)] : []),
-			],
-			{ gap: "xs" },
-		);
-		return this.#node;
-	}
-
-	render(width: number): readonly string[] {
-		const link = urlHyperlinkAlways(this.#fullUrl, "Click here to authorize");
-		const lines: string[] = [
-			` ${theme.fg("success", "Open authorization URL:")}`,
-			` ${theme.fg("accent", link)}`,
-			...wrapUrlRows("Copy URL:", this.#fullUrl, width),
-		];
-		if (this.#launchUrl) {
-			lines.push(...wrapUrlRows("Local shortcut (this machine only):", this.#launchUrl, width));
-		}
-		return lines;
-	}
-}
-
-/** Labelled URL that copies on click and wraps anywhere so no parameter is hidden. */
-function urlCopyRow(label: string, url: string): NativeNode {
-	return text([span(`${label} `, "muted"), span(url, "mono", { href: url })], {
-		wrap: "char",
-		href: url,
-		actions: { click: "copy", menu: ["copy", "open"] },
-		title: "Copy URL",
-	});
-}
-
-/**
- * Animated "Connecting to …" transcript block. Owns its spinner interval: it
- * starts on mount and is cleared on {@link ChatBlock.finish}/dispose, so callers
- * never juggle `setInterval`/`clearInterval` or `requestRender` by hand.
- */
-class McpConnectingBlock extends ChatBlock {
-	readonly #text: Text;
-
-	constructor(private readonly serverName: string) {
-		super();
-		this.addChild(new Spacer(1));
-		const frame = theme.spinnerFrames[0] ?? "|";
-		this.#text = new Text(theme.fg("muted", `${frame} Connecting to "${serverName}"...`), 1, 0);
-		this.addChild(this.#text);
-	}
-
-	protected override onMount(): void {
-		const frames = theme.spinnerFrames;
-		let frame = 0;
-		const interval = setInterval(() => {
-			frame++;
-			this.#text.setText(
-				theme.fg("muted", `${frames[frame % frames.length] ?? "|"} Connecting to "${this.serverName}"...`),
-			);
-			this.requestRender();
-		}, 80);
-		this.onCleanup(() => clearInterval(interval));
-	}
-
-	/** Replace the spinner line with a terminal status; pair with {@link finish}. */
-	setStatus(text: string): void {
-		this.#text.setText(text);
-		this.requestRender();
-	}
+/** Host-side state of a server for the `/mcp` list: upstream state, pid, and how many sessions share it. */
+function describeServerRuntime(runtime: McpUpstreamStatus | undefined): string {
+	if (!runtime) return "";
+	const parts = [
+		runtime.state === "running" && runtime.pid !== undefined ? `running, pid ${runtime.pid}` : runtime.state,
+	];
+	if (runtime.links > 1) parts.push(`shared by ${runtime.links} sessions`);
+	return parts.join(", ");
 }
 
 /** Reason recorded on the OAuth flow's AbortController when the user hits Esc. */
@@ -253,14 +88,6 @@ type MCPAddParsed = {
 	quickConfig?: MCPServerConfig;
 	isCommandQuickAdd?: boolean;
 	hasAuthToken?: boolean;
-	error?: string;
-};
-
-type MCPSearchParsed = {
-	keyword: string;
-	scope: MCPAddScope;
-	limit: number;
-	semantic: boolean;
 	error?: string;
 };
 
@@ -318,6 +145,11 @@ export async function collectMcpServerNames(
 		for (const name of ctx.mcpManager.getAllServerNames()) {
 			names.add(name);
 		}
+		// Dropped by a built-in transform: not running, so only what accepts a
+		// disabled server can act on them.
+		if (includeDisabledOnly) {
+			for (const name of ctx.mcpManager.getBuiltinDrops().keys()) names.add(name);
+		}
 	}
 	return [...names].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
 }
@@ -373,15 +205,6 @@ export class MCPCommandController {
 			case "notifications":
 				await this.#handleNotifications();
 				break;
-			case "smithery-search":
-				await this.#handleSearch(text);
-				break;
-			case "smithery-login":
-				await this.#handleSmitheryLogin();
-				break;
-			case "smithery-logout":
-				await this.#handleSmitheryLogout();
-				break;
 			case "reconnect":
 				await this.#handleReconnect(serverName);
 				break;
@@ -400,7 +223,7 @@ export class MCPCommandController {
 		const helpText = [
 			"Manage Model Context Protocol (MCP) servers for external tool integrations.",
 			"",
-			theme.fg("accent", "Commands:"),
+			currentTheme().fg("accent", "Commands:"),
 			"  /mcp add              Add a new MCP server (interactive wizard)",
 			"  /mcp add <name> [--scope project|user] [--url <url> --transport http|sse] [--token <token>] [-- <command...>]",
 			"  /mcp list             List all configured MCP servers",
@@ -410,10 +233,6 @@ export class MCPCommandController {
 			"  /mcp unauth <name>    Remove OAuth auth from an MCP server",
 			"  /mcp enable <name>    Enable an MCP server",
 			"  /mcp disable <name>   Disable an MCP server",
-			"  /mcp smithery-search <keyword> [--scope project|user] [--limit <1-100>] [--semantic]",
-			"                        Search Smithery registry and deploy from picker",
-			"  /mcp smithery-login   Login to Smithery and cache API key",
-			"  /mcp smithery-logout  Remove cached Smithery API key",
 			"  /mcp reconnect <name> Reconnect to a specific MCP server",
 			"  /mcp reload           Force reload and rediscover MCP runtime tools",
 			"  /mcp resources        List available resources from connected servers",
@@ -539,79 +358,6 @@ export class MCPCommandController {
 		};
 	}
 
-	#parseSearchCommand(text: string): MCPSearchParsed {
-		const prefixMatch = text.match(/^\/mcp\s+smithery-search\b\s*(.*)$/i);
-		const rest = prefixMatch?.[1]?.trim() ?? "";
-		const tokens = parseCommandArgs(rest);
-		if (tokens.length === 0) {
-			return {
-				keyword: "",
-				scope: "project",
-				limit: 20,
-				semantic: false,
-				error: "Keyword required. Usage: /mcp smithery-search <keyword> [--scope project|user] [--limit <1-100>] [--semantic]",
-			};
-		}
-
-		const keywordParts: string[] = [];
-		let scope: MCPAddScope = "project";
-		let limit = 20;
-		let semantic = false;
-
-		for (let i = 0; i < tokens.length; i++) {
-			const token = tokens[i];
-			if (token === "--scope") {
-				const value = tokens[i + 1];
-				if (!value || (value !== "project" && value !== "user")) {
-					return { keyword: "", scope, limit, semantic, error: "Invalid --scope value. Use project or user." };
-				}
-				scope = value;
-				i++;
-				continue;
-			}
-			if (token === "--limit") {
-				const value = tokens[i + 1];
-				if (!value) {
-					return { keyword: "", scope, limit, semantic, error: "Missing value for --limit." };
-				}
-				const parsed = Number(value);
-				if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
-					return {
-						keyword: "",
-						scope,
-						limit,
-						semantic,
-						error: "Invalid --limit value. Use an integer between 1 and 100.",
-					};
-				}
-				limit = parsed;
-				i++;
-				continue;
-			}
-			if (token === "--semantic") {
-				semantic = true;
-				continue;
-			}
-			if (token.startsWith("--")) {
-				return { keyword: "", scope, limit, semantic, error: `Unknown option: ${token}` };
-			}
-			keywordParts.push(token);
-		}
-
-		const keyword = keywordParts.join(" ").trim();
-		if (!keyword) {
-			return {
-				keyword: "",
-				scope,
-				limit,
-				semantic,
-				error: "Keyword required. Usage: /mcp smithery-search <keyword> [--scope project|user] [--limit <1-100>] [--semantic]",
-			};
-		}
-
-		return { keyword, scope, limit, semantic };
-	}
-
 	/**
 	 * Handle /mcp add - Launch interactive wizard or quick-add from args
 	 */
@@ -718,41 +464,29 @@ export class MCPCommandController {
 			return;
 		}
 
-		// Save current editor state
-		const done = () => {
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(this.ctx.editor);
-			this.ctx.ui.setFocus(this.ctx.editor);
-		};
-
-		// Create wizard with OAuth handler and connection test
-		const wizard = new MCPAddWizard(
+		const model = new MCPAddWizardModel(
 			{ validateServerName, analyzeAuthError, discoverOAuthEndpoints, fetchResourceMetadataScopes },
-			async (name: string, config: MCPServerConfig, scope: "user" | "project") => {
-				done();
-				await this.#handleWizardComplete(name, config, scope);
+			{
+				onComplete: (name, config, scope) => {
+					wizard.close();
+					void this.#handleWizardComplete(name, config, scope);
+				},
+				onCancel: () => {
+					wizard.close();
+					this.#handleWizardCancel();
+				},
+				onOAuth: (authUrl, tokenUrl, clientId, clientSecret, scopes, options) =>
+					this.#handleOAuthFlow(authUrl, tokenUrl, clientId, clientSecret, scopes, options),
+				onTestConnection: config => this.#handleTestConnection(config),
 			},
-			() => {
-				done();
-				this.#handleWizardCancel();
-			},
-			async (authUrl: string, tokenUrl: string, clientId: string, clientSecret: string, scopes: string, options) => {
-				return await this.#handleOAuthFlow(authUrl, tokenUrl, clientId, clientSecret, scopes, options);
-			},
-			async (config: MCPServerConfig) => {
-				return await this.#handleTestConnection(config);
-			},
-			() => {
-				this.ctx.ui.requestRender();
-			},
-			parsed.initialName,
+			{ theme: currentTheme },
+			{ initialName: parsed.initialName },
 		);
-
-		// Replace editor with wizard
-		this.ctx.editorContainer.clear();
-		this.ctx.editorContainer.addChild(wizard);
-		this.ctx.ui.setFocus(wizard);
-		this.ctx.ui.requestRender();
+		// The wizard takes the composer's place until it completes or is cancelled.
+		this.ctx.closeLinkBrowser();
+		const wizard = this.ctx.showEditorAreaDialog(() => MCPAddWizard({ model }), {
+			focus: root => findNode(root, node => node.kind === "picker" || node.kind === "list") ?? root,
+		});
 	}
 
 	/**
@@ -841,54 +575,27 @@ export class MCPCommandController {
 		return {
 			callbacks: {
 				onAuth: info => {
-					// Show auth URL prominently in chat as one block
-					const block = new TranscriptBlock();
-					this.ctx.present(block);
-					block.addChild(new Text(theme.fg("accent", "━━━ OAuth Authorization Required ━━━"), 1, 0));
-					block.addChild(new Spacer(1));
-					block.addChild(new Text(theme.fg("muted", "Preparing browser authorization..."), 1, 0));
-					block.addChild(new Spacer(1));
-					block.addChild(
-						new Text(
-							theme.fg(
-								"muted",
-								`Waiting for authorization... (Press ${appKey(this.ctx.keybindings, "app.interrupt")} to cancel, 5 minute timeout)`,
-							),
-							1,
-							0,
-						),
-					);
-					block.addChild(new Text(theme.fg("muted", MCP_MANUAL_LOGIN_TIP), 1, 0));
-					block.addChild(new Spacer(1));
-					block.addChild(new Text(theme.fg("accent", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"), 1, 0));
+					// Show auth URL prominently in chat as one block.
 					// `openPath` is best-effort — it logs spawn failures but never
-					// throws, so we always render the copy-URL fallback beneath the
-					// "attempting to open browser" line and no earlier try/catch is
-					// worth keeping.
+					// throws, so the copy-URL fallback always shows beneath the
+					// "attempting to open browser" line.
 					openPath(info.url);
 					// Stage the FULL authorization URL on the clipboard via OSC 52.
 					// The full URL works from any machine (unlike `launchUrl`, which
 					// only resolves against the OMP host), and OSC 52 is a
 					// wire-level protocol — the terminal writes it to the user's
 					// LOCAL clipboard even when OMP is on a remote SSH box.
-					// Best-effort: falls back to the visible copy-URL rows below
+					// Best-effort: the visible copy-URL rows remain the fallback
 					// whether or not the terminal honors OSC 52.
 					void copyToClipboard(info.url).catch(() => {});
-					block.addChild(new Spacer(1));
-					block.addChild(new Text(theme.fg("success", "→ Attempting to open browser..."), 1, 0));
-					block.addChild(new Spacer(1));
-					block.addChild(new Text(theme.fg("muted", "Alternative if browser did not open:"), 1, 0));
-					block.addChild(new MCPAuthorizationLinkPrompt(info.url, info.launchUrl));
-					this.ctx.ui.requestRender();
+					const interruptKey = actionKey("app.interrupt", this.ctx.keybindings);
+					this.ctx.present(() => mcpOAuthBlock({ url: info.url, launchUrl: info.launchUrl, interruptKey }));
 				},
 				onProgress: message => {
-					this.ctx.present([new Spacer(1), new Text(theme.fg("muted", message), 1, 0)]);
+					this.ctx.present(() => mcpNoteBlock("muted", message));
 				},
 				onFlowComplete: () => {
-					this.ctx.present([
-						new Spacer(1),
-						new Text(theme.fg("success", "✓ Authorization completed in browser."), 1, 0),
-					]);
+					this.ctx.present(() => mcpNoteBlock("success", "✓ Authorization completed in browser."));
 				},
 				onManualCodeInput: signal => {
 					if (manualInputClaim) return manualInputClaim.promise;
@@ -919,41 +626,28 @@ export class MCPCommandController {
 	}
 
 	/**
-	 * Install the editor Esc hook for the duration of an MCP OAuth flow: Esc
-	 * aborts the supplied signal, which the shared engine races and reclassifies
-	 * as a neutral {@link MCPOAuthCancelledError}.
+	 * Claim the interrupt key (Esc) in the composer for the duration of an MCP OAuth flow: it
+	 * aborts the supplied signal, which the shared engine races and reclassifies as a neutral
+	 * {@link MCPOAuthCancelledError}.
 	 *
-	 * The hook installs when the flow's single-flight claim resolves (via the
-	 * engine's `onClaimed`), not when the flow starts: a flow superseded while
-	 * queued never claims, so it installs — and later restores — nothing.
-	 * Restoration resolves through any OAuth handler chain to the live default:
-	 * when a replacement flow installs while this one unwinds, the replacement
-	 * captures the session default underneath the chain rather than this flow's
-	 * already-dead handler, so unwinding either order leaves the default
-	 * (interrupt, cancel compaction) installed for the session.
+	 * The claim starts when the flow's single-flight claim resolves (via the engine's
+	 * `onClaimed`), not when the flow starts: a flow superseded while queued never claims, so it
+	 * holds nothing. Claims stack newest first, so overlapping flows unwind in any order and the
+	 * key returns to its default (interrupt, cancel compaction) once the last one settles. A
+	 * wizard holding the keys absorbs Esc itself, so only the composer's Esc counts.
 	 */
 	#withOAuthEscape<T>(run: (escapeSignal: AbortSignal, onClaimed: () => void) => Promise<T>): Promise<T> {
 		const escape = new AbortController();
-		const installed = (): void => {
-			escape.abort(MCP_OAUTH_USER_CANCEL_REASON);
-		};
-		// Chain through any OAuth handler already installed to the session
-		// default underneath it, so unwinding in either order restores the default.
-		const current = this.ctx.editor.onEscape;
-		const original =
-			current !== undefined && mcpOAuthEscapeOriginals.has(current) ? mcpOAuthEscapeOriginals.get(current) : current;
-		mcpOAuthEscapeOriginals.set(installed, original);
+		let release: (() => void) | undefined;
 		const onClaimed = (): void => {
-			this.ctx.editor.onEscape = installed;
+			release ??= this.ctx.interceptInput(event => {
+				if (event.type !== "key" || this.ctx.shell.focused() !== this.ctx.composer.field) return false;
+				if (!this.ctx.keybindings.matches(event.key, "app.interrupt")) return false;
+				escape.abort(MCP_OAUTH_USER_CANCEL_REASON);
+				return true;
+			});
 		};
-		return run(escape.signal, onClaimed).finally(() => {
-			// Restore only while still owning the hook: a replacement flow
-			// installs its own handler after this one unwinds, and that
-			// handler (and the default it would restore) must survive here.
-			if (this.ctx.editor.onEscape === installed) {
-				this.ctx.editor.onEscape = original;
-			}
-		});
+		return run(escape.signal, onClaimed).finally(() => release?.());
 	}
 
 	/**
@@ -974,8 +668,8 @@ export class MCPCommandController {
 	): Promise<"connected" | "connecting" | "disconnected"> {
 		if (!this.ctx.mcpManager) return "disconnected";
 
-		const block = new McpConnectingBlock(name);
-		this.ctx.present(block);
+		const status = signal<string | undefined>(undefined);
+		const block = this.ctx.present(() => mcpConnectingBlock(name, status), { live: true });
 
 		try {
 			try {
@@ -989,19 +683,24 @@ export class MCPCommandController {
 				await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
 			}
 			if (state === "connected") {
-				block.setStatus(theme.fg("success", `${theme.status.enabled} Connected to "${name}"`));
+				status.set(
+					currentTheme().fg(
+						"success",
+						`${currentTheme().symbols.symbol("status.enabled")} Connected to "${name}"`,
+					),
+				);
 			} else if (state === "connecting") {
-				block.setStatus(theme.fg("muted", `◌ "${name}" is still connecting...`));
+				status.set(currentTheme().fg("muted", `◌ "${name}" is still connecting...`));
 			} else {
-				block.setStatus(
+				status.set(
 					options?.suppressDisconnectedWarning
-						? theme.fg("muted", `◌ Connection check complete for "${name}"`)
-						: theme.fg("warning", `⚠ Could not connect to "${name}" yet`),
+						? currentTheme().fg("muted", `◌ Connection check complete for "${name}"`)
+						: currentTheme().fg("warning", `⚠ Could not connect to "${name}" yet`),
 				);
 			}
 			return state;
 		} finally {
-			block.finish();
+			this.ctx.shell.transcript.settle(block);
 		}
 	}
 
@@ -1044,9 +743,8 @@ export class MCPCommandController {
 				}
 			}
 
-			// refreshMCPTools preserves the prior MCP tool selection, so tools from
-			// brand-new servers are registered in the registry but never activated.
-			// Explicitly activate the newly added server's tools now.
+			// A new server's tools are enabled by refresh; explicitly selecting this
+			// server also enables tools that were registered before the wizard ran.
 			if (isConnected && this.ctx.mcpManager) {
 				const serverTools = this.ctx.mcpManager.getTools().filter(t => t.mcpServerName === name);
 				if (serverTools.length > 0) {
@@ -1060,22 +758,42 @@ export class MCPCommandController {
 
 			// Show success message
 			const scopeLabel = scope === "user" ? "user" : "project";
-			const lines = ["", theme.fg("success", `+ Added server "${name}" to ${scopeLabel} config`), ""];
+			const lines = ["", currentTheme().fg("success", `+ Added server "${name}" to ${scopeLabel} config`), ""];
 
 			if (isConnected) {
-				lines.push(theme.fg("success", `${theme.status.enabled} Successfully connected to server`));
+				lines.push(
+					currentTheme().fg(
+						"success",
+						`${currentTheme().symbols.symbol("status.enabled")} Successfully connected to server`,
+					),
+				);
 				lines.push("");
 			} else if (isConnecting) {
-				lines.push(theme.fg("muted", `◌ Server is connecting in background...`));
-				lines.push(theme.fg("muted", `  Run ${theme.fg("accent", `/mcp test ${name}`)} in a few seconds.`));
+				lines.push(currentTheme().fg("muted", `◌ Server is connecting in background...`));
+				lines.push(
+					currentTheme().fg(
+						"muted",
+						`  Run ${currentTheme().fg("accent", `/mcp test ${name}`)} in a few seconds.`,
+					),
+				);
 				lines.push("");
 			} else {
-				lines.push(theme.fg("warning", `⚠ Server added but not yet connected`));
-				lines.push(theme.fg("muted", `  Run ${theme.fg("accent", `/mcp test ${name}`)} to test the connection.`));
+				lines.push(currentTheme().fg("warning", `⚠ Server added but not yet connected`));
+				lines.push(
+					currentTheme().fg(
+						"muted",
+						`  Run ${currentTheme().fg("accent", `/mcp test ${name}`)} to test the connection.`,
+					),
+				);
 				lines.push("");
 			}
 
-			lines.push(theme.fg("muted", `Run ${theme.fg("accent", "/mcp list")} to see all configured servers.`));
+			lines.push(
+				currentTheme().fg(
+					"muted",
+					`Run ${currentTheme().fg("accent", "/mcp list")} to see all configured servers.`,
+				),
+			);
 			lines.push("");
 
 			this.#showMessage(lines.join("\n"));
@@ -1089,7 +807,7 @@ export class MCPCommandController {
 			} else if (errorMsg.includes("ENOSPC")) {
 				helpText = "\n\nTip: Insufficient disk space.";
 			} else if (errorMsg.includes("already exists")) {
-				helpText = `\n\nTip: Use ${theme.fg("accent", "/mcp list")} to see existing servers.`;
+				helpText = `\n\nTip: Use ${currentTheme().fg("accent", "/mcp list")} to see existing servers.`;
 			}
 
 			this.ctx.showError(`Failed to add server: ${errorMsg}${helpText}`);
@@ -1100,11 +818,11 @@ export class MCPCommandController {
 		this.#showMessage(
 			[
 				"",
-				theme.fg("muted", "Server creation cancelled."),
+				currentTheme().fg("muted", "Server creation cancelled."),
 				"",
-				theme.fg(
+				currentTheme().fg(
 					"dim",
-					`Tip: Press ${formatKeyHint("ctrl+c")} or ${appKey(this.ctx.keybindings, "app.interrupt")} anytime to cancel`,
+					`Tip: Press ${formatKeyHint("ctrl+c")} or ${actionKey("app.interrupt", this.ctx.keybindings)} anytime to cancel`,
 				),
 				"",
 			].join("\n"),
@@ -1148,28 +866,34 @@ export class MCPCommandController {
 				}
 			}
 
+			const builtinDrops = this.ctx.mcpManager?.getBuiltinDrops();
 			if (
 				userServers.length === 0 &&
 				projectServers.length === 0 &&
 				discoveredServers.length === 0 &&
-				disabledServerNames.size === 0
+				disabledServerNames.size === 0 &&
+				!builtinDrops?.size
 			) {
 				this.#showReport(
 					"MCP Servers",
 					[
-						theme.fg("muted", "No MCP servers configured."),
+						currentTheme().fg("muted", "No MCP servers configured."),
 						"",
-						`Use ${theme.fg("accent", "/mcp add")} to add a server.`,
+						`Use ${currentTheme().fg("accent", "/mcp add")} to add a server.`,
 					].join("\n"),
 				);
 				return;
 			}
 
 			const lines: string[] = [];
+			const runtimeOf = (name: string): string => {
+				const text = describeServerRuntime(this.ctx.mcpManager?.getServerRuntime(name));
+				return text ? currentTheme().fg("dim", ` (${text})`) : "";
+			};
 
 			// Show user-level servers
 			if (userServers.length > 0) {
-				lines.push(theme.fg("accent", "User level") + theme.fg("muted", ` (${userPathLabel}):`));
+				lines.push(currentTheme().fg("accent", "User level") + currentTheme().fg("muted", ` (${userPathLabel}):`));
 				for (const name of userServers) {
 					const config = userConfig.mcpServers![name];
 					const type = config.type ?? "stdio";
@@ -1179,20 +903,25 @@ export class MCPCommandController {
 							: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
 					const status =
 						state === "inactive"
-							? theme.fg("warning", " ◌ inactive")
+							? currentTheme().fg("warning", " ◌ inactive")
 							: state === "connected"
-								? theme.fg("success", " ● connected")
+								? currentTheme().fg("success", " ● connected")
 								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
-					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
+									? currentTheme().fg("muted", " ◌ connecting")
+									: currentTheme().fg("muted", " ○ not connected");
+					const runtime = state === "inactive" ? "" : runtimeOf(name);
+					lines.push(
+						`  ${currentTheme().fg("accent", name)}${status}${runtime} ${currentTheme().fg("dim", `[${type}]`)}`,
+					);
 				}
 				lines.push("");
 			}
 
 			// Show project-level servers
 			if (projectServers.length > 0) {
-				lines.push(theme.fg("accent", "Project level") + theme.fg("muted", ` (${projectPathLabel}):`));
+				lines.push(
+					currentTheme().fg("accent", "Project level") + currentTheme().fg("muted", ` (${projectPathLabel}):`),
+				);
 				for (const name of projectServers) {
 					const config = projectConfig.mcpServers![name];
 					const type = config.type ?? "stdio";
@@ -1202,13 +931,16 @@ export class MCPCommandController {
 							: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
 					const status =
 						state === "inactive"
-							? theme.fg("warning", " ◌ inactive")
+							? currentTheme().fg("warning", " ◌ inactive")
 							: state === "connected"
-								? theme.fg("success", " ● connected")
+								? currentTheme().fg("success", " ● connected")
 								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
-					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
+									? currentTheme().fg("muted", " ◌ connecting")
+									: currentTheme().fg("muted", " ○ not connected");
+					const runtime = state === "inactive" ? "" : runtimeOf(name);
+					lines.push(
+						`  ${currentTheme().fg("accent", name)}${status}${runtime} ${currentTheme().fg("dim", `[${type}]`)}`,
+					);
 				}
 				lines.push("");
 			}
@@ -1216,16 +948,16 @@ export class MCPCommandController {
 			// Show discovered servers (from .claude.json, .cursor/mcp.json, .vscode/mcp.json, etc.)
 			if (discoveredServers.length > 0) {
 				for (const { providerName, shortPath, items: entries } of groupBySource(discoveredServers, e => e.source)) {
-					lines.push(theme.fg("accent", providerName) + theme.fg("muted", ` (${shortPath}):`));
+					lines.push(currentTheme().fg("accent", providerName) + currentTheme().fg("muted", ` (${shortPath}):`));
 					for (const { name } of entries) {
 						const state = this.ctx.mcpManager!.getConnectionStatus(name);
 						const status =
 							state === "connected"
-								? theme.fg("success", " ● connected")
+								? currentTheme().fg("success", " ● connected")
 								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
-						lines.push(`  ${theme.fg("accent", name)}${status}`);
+									? currentTheme().fg("muted", " ◌ connecting")
+									: currentTheme().fg("muted", " ○ not connected");
+						lines.push(`  ${currentTheme().fg("accent", name)}${status}${runtimeOf(name)}`);
 					}
 					lines.push("");
 				}
@@ -1234,9 +966,24 @@ export class MCPCommandController {
 			// Show servers disabled via /mcp disable (from third-party configs)
 			const relevantDisabled = [...disabledServerNames].filter(n => !configServerNames.has(n));
 			if (relevantDisabled.length > 0) {
-				lines.push(theme.fg("accent", "Disabled") + theme.fg("muted", " (discovered servers):"));
+				lines.push(currentTheme().fg("accent", "Disabled") + currentTheme().fg("muted", " (discovered servers):"));
 				for (const name of relevantDisabled) {
-					lines.push(`  ${theme.fg("accent", name)}${theme.fg("warning", " ◌ disabled")}`);
+					lines.push(`  ${currentTheme().fg("accent", name)}${currentTheme().fg("warning", " ◌ disabled")}`);
+				}
+				lines.push("");
+			}
+
+			// Show servers a built-in transform left unconnected, with the way back
+			if (builtinDrops?.size) {
+				lines.push(
+					currentTheme().fg("accent", "Replaced by built-ins") +
+						currentTheme().fg("muted", " (/mcp enable <name> connects one anyway):"),
+				);
+				for (const [name, drop] of builtinDrops) {
+					const detail = `${drop.reason} (${shortenPath(drop.source.path)})`;
+					lines.push(
+						`  ${currentTheme().fg("accent", name)}${currentTheme().fg("warning", " ◌ replaced:")} ${currentTheme().fg("dim", detail)}`,
+					);
 				}
 				lines.push("");
 			}
@@ -1286,7 +1033,9 @@ export class MCPCommandController {
 			// Reload MCP manager
 			await this.reloadServers();
 
-			this.#showMessage(["", theme.fg("success", `- Removed server "${name}" from ${scope} config`), ""].join("\n"));
+			this.#showMessage(
+				["", currentTheme().fg("success", `- Removed server "${name}" from ${scope} config`), ""].join("\n"),
+			);
 		} catch (error) {
 			this.ctx.showError(`Failed to remove server: ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -1321,8 +1070,7 @@ export class MCPCommandController {
 		// screen; a pre-hint failure must release Esc immediately so it is not
 		// swallowed for a prompt the user never saw.
 		let hintShown = false;
-		let hintText: Text | undefined;
-		let hintBlock: MutableHintBlock | undefined;
+		const hint = signal("");
 		// Outcome-branched settled text: a cancelled or failed test must not
 		// read as if it completed.
 		let settleNote = `Tested connection to "${name}".`;
@@ -1334,8 +1082,7 @@ export class MCPCommandController {
 		// #syncManagerConnection does not stop it).
 		abortController.signal.addEventListener("abort", () => {
 			if (settled || !hintShown) return;
-			hintText?.setText(theme.fg("muted", `Testing connection to "${name}"...`));
-			this.ctx.ui.requestRender();
+			hint.set(currentTheme().fg("muted", `Testing connection to "${name}"...`));
 		});
 		try {
 			// Race the config read against Esc: a slow/stuck `#resolveServerForAuth()`
@@ -1352,7 +1099,7 @@ export class MCPCommandController {
 			if (!found) {
 				this.ctx.mcpTestEscapeHandlers.delete(handleEscape);
 				this.ctx.showError(
-					`Server "${name}" not found.\n\nTip: Run ${theme.fg("accent", "/mcp list")} to see available servers.`,
+					`Server "${name}" not found.\n\nTip: Run ${currentTheme().fg("accent", "/mcp list")} to see available servers.`,
 				);
 				return;
 			}
@@ -1373,20 +1120,13 @@ export class MCPCommandController {
 				return;
 			}
 
-			hintBlock = new MutableHintBlock();
-			hintBlock.addChild(new DynamicBorder());
-			const text = new Text(
-				theme.fg(
+			hint.set(
+				currentTheme().fg(
 					"muted",
-					`Testing connection to "${name}"... (${appKey(this.ctx.keybindings, "app.interrupt")} to cancel)`,
+					`Testing connection to "${name}"... (${actionKey("app.interrupt", this.ctx.keybindings)} to cancel)`,
 				),
-				1,
-				1,
 			);
-			hintBlock.addChild(text);
-			hintBlock.addChild(new DynamicBorder());
-			this.ctx.presentCommandOutput(hintBlock);
-			hintText = text;
+			this.ctx.presentCommandOutput(() => mcpTestHintBlock(hint));
 			hintShown = true;
 
 			// Resolve auth config if needed
@@ -1400,14 +1140,18 @@ export class MCPCommandController {
 			}
 
 			// Create temporary connection
-			connection = await connectToServer(name, resolvedConfig, { signal: abortController.signal });
+			// Live: a test answered from the host's store would pass for a server that is down.
+			connection = await connectToServer(name, resolvedConfig, { signal: abortController.signal, live: true });
 
 			// List tools to verify connection
 			const tools = await listTools(connection, { signal: abortController.signal });
 
 			const lines = [
 				"",
-				theme.fg("success", `${theme.status.enabled} Successfully connected to "${name}"`),
+				currentTheme().fg(
+					"success",
+					`${currentTheme().symbols.symbol("status.enabled")} Successfully connected to "${name}"`,
+				),
 				"",
 				`  Server: ${connection.serverInfo.name} v${connection.serverInfo.version}`,
 				`  Tools: ${tools.length}`,
@@ -1455,12 +1199,8 @@ export class MCPCommandController {
 			if (hintShown) {
 				// The test can no longer be cancelled: stop advertising Esc so a
 				// later press cannot be mistaken for test cancellation and abort
-				// the running agent turn after the grace expires. Sealing the
-				// block after the final text lets TranscriptContainer treat it
-				// as immutable history from here on.
-				hintText?.setText(theme.fg("muted", settleNote));
-				this.ctx.ui.requestRender();
-				hintBlock?.seal();
+				// the running agent turn after the grace expires.
+				hint.set(currentTheme().fg("muted", settleNote));
 			}
 			if (this.ctx.mcpTestEscapeHandlers.has(handleEscape)) {
 				if (hintShown) {
@@ -1486,6 +1226,9 @@ export class MCPCommandController {
 		}
 
 		try {
+			// A server a built-in transform dropped counts as disabled: enabling it
+			// records an explicit enable, which outranks the transform.
+			const dropped = this.ctx.mcpManager?.getBuiltinDrops().get(name);
 			const found = await findMcpServerForAuth(name, getProjectDir(), this.ctx.mcpManager, {
 				enableProjectConfig: cfgMcpEnableProjectConfig.get(this.ctx.settings),
 			});
@@ -1493,34 +1236,40 @@ export class MCPCommandController {
 				// Check if this is a discovered server from a third-party config
 				const userConfigPath = getMCPConfigPath("user", getProjectDir());
 				const disabledServers = new Set(await readDisabledServers(userConfigPath));
-				const isDiscovered = this.ctx.mcpManager?.getSource(name);
-				const isCurrentlyDisabled = disabledServers.has(name);
+				const isDiscovered = this.ctx.mcpManager?.getSource(name) ?? dropped?.source;
+				const isCurrentlyDisabled = disabledServers.has(name) || dropped !== undefined;
 				if (!isDiscovered && !isCurrentlyDisabled) {
 					this.ctx.showError(`Server "${name}" not found.`);
 					return;
 				}
 				if (isCurrentlyDisabled === !enabled) {
 					this.#showMessage(
-						["", theme.fg("muted", `Server "${name}" is already ${enabled ? "enabled" : "disabled"}.`), ""].join(
-							"\n",
-						),
+						[
+							"",
+							currentTheme().fg("muted", `Server "${name}" is already ${enabled ? "enabled" : "disabled"}.`),
+							"",
+						].join("\n"),
 					);
 					return;
 				}
 				await setServerDisabled(userConfigPath, name, !enabled);
+				if (dropped) await setServerForceEnabled(userConfigPath, name, true);
 				if (enabled) {
 					await this.#connectEnabledMCPServer(name);
 					const state = await this.#waitForServerConnectionWithAnimation(name);
 					const status =
 						state === "connected"
-							? theme.fg("success", "Connected")
+							? currentTheme().fg("success", "Connected")
 							: state === "connecting"
-								? theme.fg("muted", "Connecting")
-								: theme.fg("warning", "Not connected yet");
+								? currentTheme().fg("muted", "Connecting")
+								: currentTheme().fg("warning", "Not connected yet");
 					this.#showMessage(
 						[
 							"",
-							theme.fg("success", `${theme.status.enabled} Enabled "${name}"`),
+							currentTheme().fg(
+								"success",
+								`${currentTheme().symbols.symbol("status.enabled")} Enabled "${name}"`,
+							),
 							"",
 							`  Status: ${status}`,
 							"",
@@ -1529,16 +1278,27 @@ export class MCPCommandController {
 				} else {
 					await this.ctx.mcpManager?.disconnectServer(name);
 					await this.ctx.session.refreshMCPTools(this.ctx.mcpManager?.getTools() ?? []);
-					this.#showMessage(["", theme.fg("muted", `${theme.status.disabled} Disabled "${name}"`), ""].join("\n"));
+					this.#showMessage(
+						[
+							"",
+							currentTheme().fg(
+								"muted",
+								`${currentTheme().symbols.symbol("status.disabled")} Disabled "${name}"`,
+							),
+							"",
+						].join("\n"),
+					);
 				}
 				return;
 			}
 
-			if ((found.config.enabled ?? true) === enabled) {
+			if ((found.config.enabled ?? true) === enabled && !(enabled && dropped)) {
 				this.#showMessage(
-					["", theme.fg("muted", `Server "${name}" is already ${enabled ? "enabled" : "disabled"}.`), ""].join(
-						"\n",
-					),
+					[
+						"",
+						currentTheme().fg("muted", `Server "${name}" is already ${enabled ? "enabled" : "disabled"}.`),
+						"",
+					].join("\n"),
 				);
 				return;
 			}
@@ -1557,17 +1317,23 @@ export class MCPCommandController {
 				const state = await this.#waitForServerConnectionWithAnimation(name);
 				status =
 					state === "connected"
-						? theme.fg("success", "Connected")
+						? currentTheme().fg("success", "Connected")
 						: state === "connecting"
-							? theme.fg("muted", "Connecting")
-							: theme.fg("warning", "Not connected yet");
+							? currentTheme().fg("muted", "Connecting")
+							: currentTheme().fg("warning", "Not connected yet");
 			}
 
 			const lines = [
 				"",
 				enabled
-					? theme.fg("success", `${theme.status.enabled} Enabled "${name}" (${found.scope} config)`)
-					: theme.fg("muted", `${theme.status.disabled} Disabled "${name}" (${found.scope} config)`),
+					? currentTheme().fg(
+							"success",
+							`${currentTheme().symbols.symbol("status.enabled")} Enabled "${name}" (${found.scope} config)`,
+						)
+					: currentTheme().fg(
+							"muted",
+							`${currentTheme().symbols.symbol("status.disabled")} Disabled "${name}" (${found.scope} config)`,
+						),
 			];
 			if (status) {
 				lines.push("");
@@ -1617,13 +1383,15 @@ export class MCPCommandController {
 			if (found.discovered && currentAuth?.type !== "oauth") {
 				if (!removedUrlKeyedCredential) {
 					this.#showMessage(
-						["", theme.fg("muted", `No stored OAuth auth to remove for "${name}".`), ""].join("\n"),
+						["", currentTheme().fg("muted", `No stored OAuth auth to remove for "${name}".`), ""].join("\n"),
 					);
 					return;
 				}
 				await this.reloadServers();
 				this.#showMessage(
-					["", theme.fg("success", `- Cleared auth for "${name}" (${found.scope} config)`), ""].join("\n"),
+					["", currentTheme().fg("success", `- Cleared auth for "${name}" (${found.scope} config)`), ""].join(
+						"\n",
+					),
 				);
 				return;
 			}
@@ -1633,7 +1401,7 @@ export class MCPCommandController {
 			await this.reloadServers();
 
 			this.#showMessage(
-				["", theme.fg("success", `- Cleared auth for "${name}" (${found.scope} config)`), ""].join("\n"),
+				["", currentTheme().fg("success", `- Cleared auth for "${name}" (${found.scope} config)`), ""].join("\n"),
 			);
 		} catch (error) {
 			this.ctx.showError(`Failed to clear auth: ${error instanceof Error ? error.message : String(error)}`);
@@ -1687,7 +1455,7 @@ export class MCPCommandController {
 								? (this.ctx.oauthManualInput.pendingProviderId ?? "another provider")
 								: undefined,
 						onReauthorizing: () => {
-							this.#showMessage(["", theme.fg("muted", `Reauthorizing "${name}"...`), ""].join("\n"));
+							this.#showMessage(["", currentTheme().fg("muted", `Reauthorizing "${name}"...`), ""].join("\n"));
 						},
 						// Install the Esc hook once the flow's claim resolves, so a
 						// superseded flow restores nothing (see #withOAuthEscape).
@@ -1702,14 +1470,14 @@ export class MCPCommandController {
 
 					const lines = [
 						"",
-						theme.fg("success", `✓ Reauthorized "${name}" (${found.scope} config)`),
+						currentTheme().fg("success", `✓ Reauthorized "${name}" (${found.scope} config)`),
 						"",
 						`  Status: ${
 							state === "connected"
-								? theme.fg("success", "connected")
+								? currentTheme().fg("success", "connected")
 								: state === "connecting"
-									? theme.fg("muted", "connecting")
-									: theme.fg("warning", "not connected")
+									? currentTheme().fg("muted", "connecting")
+									: currentTheme().fg("warning", "not connected")
 						}`,
 						"",
 					];
@@ -1734,7 +1502,9 @@ export class MCPCommandController {
 
 	async #handleReload(): Promise<void> {
 		try {
-			this.#showMessage(["", theme.fg("muted", "Reloading MCP servers and runtime tools..."), ""].join("\n"));
+			this.#showMessage(
+				["", currentTheme().fg("muted", "Reloading MCP servers and runtime tools..."), ""].join("\n"),
+			);
 			await this.reloadServers();
 			const manager = this.ctx.mcpManager;
 			const connectedCount = manager?.getConnectedServers().length ?? 0;
@@ -1743,7 +1513,7 @@ export class MCPCommandController {
 			this.#showMessage(
 				[
 					"",
-					theme.fg("success", `${theme.icon.loop} MCP reload complete`),
+					currentTheme().fg("success", `${currentTheme().symbols.symbol("icon.loop")} MCP reload complete`),
 					`  Connected servers: ${connectedCount}`,
 					`  Connecting servers: ${connectingCount}`,
 					"",
@@ -1767,7 +1537,7 @@ export class MCPCommandController {
 			return;
 		}
 
-		this.#showMessage(["", theme.fg("muted", `Reconnecting to "${name}"...`), ""].join("\n"));
+		this.#showMessage(["", currentTheme().fg("muted", `Reconnecting to "${name}"...`), ""].join("\n"));
 
 		try {
 			const connection = await this.ctx.mcpManager.reconnectServer(name, { manual: true });
@@ -1780,7 +1550,10 @@ export class MCPCommandController {
 				this.#showMessage(
 					[
 						"\n",
-						theme.fg("success", `${theme.status.enabled} Reconnected to "${name}"`),
+						currentTheme().fg(
+							"success",
+							`${currentTheme().symbols.symbol("status.enabled")} Reconnected to "${name}"`,
+						),
 						`  Tools: ${serverTools.length}`,
 						"\n",
 					].join("\n"),
@@ -1820,7 +1593,7 @@ export class MCPCommandController {
 			return;
 		}
 
-		const errorLines = ["", theme.fg("warning", "Some servers failed to connect:"), ""];
+		const errorLines = ["", currentTheme().fg("warning", "Some servers failed to connect:"), ""];
 		for (const [serverName, error] of errors.entries()) {
 			errorLines.push(`  ${serverName}: ${error}`);
 		}
@@ -1845,24 +1618,16 @@ export class MCPCommandController {
 			return;
 		}
 
-		// Disconnect all existing servers
-		await this.ctx.mcpManager.disconnectAll();
-		// Prompt enrichment is asynchronous. Clear commands before rediscovery so
-		// removed/disabled servers cannot leave stale `/server:prompt` entries;
-		// newly loaded prompts repopulate them through the manager callback.
-		this.ctx.session.setMCPPromptCommands([]);
-		// External edits to mcp.json (not via writeMCPConfigFile) otherwise
-		// keep stale env/command after reload.
-		clearFsCache();
-
 		// Rediscover and connect, mirroring startup's discovery filters.
-		const result = await this.ctx.mcpManager.discoverAndConnect({
+		const result = await reconnectMCPServers(this.ctx.mcpManager, this.ctx.session, {
 			enableProjectConfig: cfgMcpEnableProjectConfig.get(this.ctx.settings),
 			filterExa: true,
 			filterBrowser: this.ctx.session.getEvalPreludes().some(definition => definition.name === "browser"),
+			builtinTransforms: resolveMCPTransformContext(this.ctx.settings, {
+				evalActive: this.ctx.session.getActiveToolNames().includes("eval"),
+			}),
 			extensionRoots: this.ctx.session.effectiveExtensionRoots,
 		});
-		await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
 
 		this.#showMCPConnectionErrors(result.errors);
 	}
@@ -1887,24 +1652,24 @@ export class MCPCommandController {
 			if (resources.length === 0 && templates.length === 0) continue;
 			hasAny = true;
 
-			lines.push(`${theme.fg("accent", name)}:`);
+			lines.push(`${currentTheme().fg("accent", name)}:`);
 			for (const r of resources) {
-				const desc = r.description ? ` ${theme.fg("dim", r.description)}` : "";
-				const mime = r.mimeType ? ` ${theme.fg("dim", `[${r.mimeType}]`)}` : "";
-				lines.push(`  ${theme.fg("success", r.uri)}${mime}${desc}`);
+				const desc = r.description ? ` ${currentTheme().fg("dim", r.description)}` : "";
+				const mime = r.mimeType ? ` ${currentTheme().fg("dim", `[${r.mimeType}]`)}` : "";
+				lines.push(`  ${currentTheme().fg("success", r.uri)}${mime}${desc}`);
 			}
 			if (templates.length > 0) {
-				lines.push(`  ${theme.fg("muted", "Templates:")}`);
+				lines.push(`  ${currentTheme().fg("muted", "Templates:")}`);
 				for (const t of templates) {
-					const desc = t.description ? ` ${theme.fg("dim", t.description)}` : "";
-					lines.push(`    ${theme.fg("accent", t.uriTemplate)}${desc}`);
+					const desc = t.description ? ` ${currentTheme().fg("dim", t.description)}` : "";
+					lines.push(`    ${currentTheme().fg("accent", t.uriTemplate)}${desc}`);
 				}
 			}
 			lines.push("");
 		}
 
 		if (!hasAny) {
-			lines.push(theme.fg("muted", "No resources available on connected servers."));
+			lines.push(currentTheme().fg("muted", "No resources available on connected servers."));
 		}
 		this.#showReport("MCP Resources", lines.join("\n"));
 	}
@@ -1927,16 +1692,16 @@ export class MCPCommandController {
 			if (!prompts?.length) continue;
 			hasAny = true;
 
-			lines.push(`${theme.fg("accent", name)}:`);
+			lines.push(`${currentTheme().fg("accent", name)}:`);
 			for (const p of prompts) {
 				const commandName = `${name}:${p.name}`;
-				const desc = p.description ? ` ${theme.fg("dim", p.description)}` : "";
-				lines.push(`  ${theme.fg("success", `/${commandName}`)}${desc}`);
+				const desc = p.description ? ` ${currentTheme().fg("dim", p.description)}` : "";
+				lines.push(`  ${currentTheme().fg("success", `/${commandName}`)}${desc}`);
 				if (p.arguments?.length) {
 					for (const arg of p.arguments) {
-						const required = arg.required ? theme.fg("warning", " *") : "";
+						const required = arg.required ? currentTheme().fg("warning", " *") : "";
 						const argDesc = arg.description ? ` - ${arg.description}` : "";
-						lines.push(`    ${arg.name}=${required}${theme.fg("dim", argDesc)}`);
+						lines.push(`    ${arg.name}=${required}${currentTheme().fg("dim", argDesc)}`);
 					}
 				}
 			}
@@ -1944,7 +1709,7 @@ export class MCPCommandController {
 		}
 
 		if (!hasAny) {
-			lines.push(theme.fg("muted", "No prompts available on connected servers."));
+			lines.push(currentTheme().fg("muted", "No prompts available on connected servers."));
 		}
 		this.#showReport("MCP Prompts", lines.join("\n"));
 	}
@@ -1960,9 +1725,9 @@ export class MCPCommandController {
 
 		const { enabled, subscriptions } = this.ctx.mcpManager.getNotificationState();
 		const servers = this.ctx.mcpManager.getConnectedServers();
-		const statusIcon = enabled ? theme.fg("success", "enabled") : theme.fg("warning", "disabled");
+		const statusIcon = enabled ? currentTheme().fg("success", "enabled") : currentTheme().fg("warning", "disabled");
 		const lines: string[] = [];
-		lines.push(`  Status: ${statusIcon}  ${theme.fg("dim", "(mcp.notifications setting)")}`);
+		lines.push(`  Status: ${statusIcon}  ${currentTheme().fg("dim", "(mcp.notifications setting)")}`);
 		lines.push("");
 
 		let hasAny = false;
@@ -1981,9 +1746,9 @@ export class MCPCommandController {
 			if (!hasNotifications) continue;
 			hasAny = true;
 
-			lines.push(`${theme.fg("accent", name)}:`);
-			const check = theme.fg("success", "✓");
-			const cross = theme.fg("dim", "✗");
+			lines.push(`${currentTheme().fg("accent", name)}:`);
+			const check = currentTheme().fg("success", "✓");
+			const cross = currentTheme().fg("dim", "✗");
 			if (supportsToolsChanged) lines.push(`  ${check} tools/list_changed`);
 			if (supportsResourcesChanged) lines.push(`  ${check} resources/list_changed`);
 			if (supportsPromptsChanged) lines.push(`  ${check} prompts/list_changed`);
@@ -1993,340 +1758,26 @@ export class MCPCommandController {
 				const subCount = subscribedUris?.size ?? 0;
 				const subStatus =
 					enabled && subCount > 0
-						? theme.fg("success", `subscribed (${subCount} URI${subCount !== 1 ? "s" : ""})`)
+						? currentTheme().fg("success", `subscribed (${subCount} URI${subCount !== 1 ? "s" : ""})`)
 						: enabled
-							? theme.fg("muted", "no active subscriptions")
-							: theme.fg("dim", "inactive (notifications disabled)");
+							? currentTheme().fg("muted", "no active subscriptions")
+							: currentTheme().fg("dim", "inactive (notifications disabled)");
 				lines.push(`  ${check} resources/subscribe  ${subStatus}`);
 				if (enabled && subscribedUris && subscribedUris.size > 0) {
 					for (const uri of subscribedUris) {
-						lines.push(`    ${theme.fg("success", "✓")} ${theme.fg("dim", uri)}`);
+						lines.push(`    ${currentTheme().fg("success", "✓")} ${currentTheme().fg("dim", uri)}`);
 					}
 				}
 			} else if (supportsResources) {
-				lines.push(`  ${cross} resources/subscribe  ${theme.fg("dim", "not supported")}`);
+				lines.push(`  ${cross} resources/subscribe  ${currentTheme().fg("dim", "not supported")}`);
 			}
 			lines.push("");
 		}
 
 		if (!hasAny) {
-			lines.push(theme.fg("muted", "No servers support notifications."));
+			lines.push(currentTheme().fg("muted", "No servers support notifications."));
 		}
 		this.#showReport("MCP Notifications", lines.join("\n"));
-	}
-
-	async #validateSmitheryApiKey(apiKey: string): Promise<void> {
-		await searchSmitheryRegistry("mcp", { limit: 1, apiKey });
-	}
-
-	async #promptSmitheryApiKey(promptLabel: string): Promise<string | null> {
-		for (;;) {
-			const input = await this.ctx.showHookInput(promptLabel);
-			if (input === undefined) return null;
-			const apiKey = input.trim();
-			if (!apiKey) {
-				this.ctx.showError("Smithery API key cannot be empty.");
-				continue;
-			}
-			try {
-				await this.#validateSmitheryApiKey(apiKey);
-				return apiKey;
-			} catch (error) {
-				this.ctx.showError(
-					`Smithery API key validation failed: ${error instanceof Error ? error.message : String(error)}`,
-				);
-			}
-		}
-	}
-
-	async #handleSmitheryLoginWithApiKey(): Promise<boolean> {
-		const apiKey = await this.#promptSmitheryApiKey(
-			`Smithery API key (${appKey(this.ctx.keybindings, "app.interrupt")} to cancel)`,
-		);
-		if (!apiKey) return false;
-		await saveSmitheryApiKey(apiKey);
-		this.ctx.showStatus("Smithery API key saved.");
-		return true;
-	}
-
-	async #waitForSmitheryCliApiKey(sessionId: string, signal: AbortSignal): Promise<string> {
-		const pollIntervalMs = 2_000;
-		const timeoutMs = 300_000;
-		const startedAt = Date.now();
-
-		while (!signal.aborted) {
-			if (Date.now() - startedAt >= timeoutMs) {
-				throw new Error("Smithery authorization timed out after 5 minutes.");
-			}
-			let response: SmitheryCliPollResponse;
-			try {
-				response = await pollSmitheryCliAuthSession(sessionId, signal);
-			} catch (error) {
-				// A single hung/slow poll aborts with TimeoutError; retry until the deadline.
-				if (isTimeoutError(error)) continue;
-				throw error;
-			}
-			if (response.status === "success" && response.apiKey) {
-				return response.apiKey;
-			}
-			if (response.status === "error") {
-				throw new Error(response.message ?? "Smithery authorization failed.");
-			}
-			await Bun.sleep(pollIntervalMs);
-		}
-
-		throw new Error("Smithery authorization cancelled.");
-	}
-
-	async #handleSmitheryBrowserLogin(): Promise<boolean> {
-		const session = await createSmitheryCliAuthSession();
-		const fallbackLoginUrl = getSmitheryLoginUrl();
-		this.#showMessage(
-			[
-				"",
-				theme.bold("Smithery Login"),
-				theme.fg("muted", "Browser authorization started. Complete auth in your browser."),
-				theme.fg("dim", "Authorize URL:"),
-				theme.fg("accent", session.authUrl),
-				theme.fg("dim", `Fallback: ${fallbackLoginUrl}`),
-				"",
-			].join("\n"),
-		);
-		try {
-			openPath(session.authUrl);
-		} catch {
-			// URL is already shown above.
-		}
-
-		const apiKey = await this.#waitForSmitheryCliApiKey(session.sessionId, new AbortController().signal);
-		await this.#validateSmitheryApiKey(apiKey);
-		await saveSmitheryApiKey(apiKey);
-		this.ctx.showStatus("Smithery API key saved.");
-		return true;
-	}
-
-	async #promptSmitheryLogin(reason: string): Promise<boolean> {
-		this.#showMessage(
-			[
-				"",
-				theme.fg("muted", `Smithery authentication required (${reason}).`),
-				theme.fg("muted", "If browser auth fails, you can paste an API key."),
-				"",
-			].join("\n"),
-		);
-		try {
-			return await this.#handleSmitheryBrowserLogin();
-		} catch (error) {
-			this.ctx.showWarning(
-				`Browser authorization failed: ${error instanceof Error ? error.message : String(error)}. Falling back to API key.`,
-			);
-			return await this.#handleSmitheryLoginWithApiKey();
-		}
-	}
-
-	#getSmitheryErrorStatus(error: unknown): number | undefined {
-		if (error instanceof SmitheryRegistryError) {
-			return error.status;
-		}
-		return undefined;
-	}
-
-	#toSmitheryAuthReason(status: number): string {
-		return status === 429 ? "rate limited by Smithery" : "forbidden/unauthorized with Smithery";
-	}
-
-	async #requireSmitheryApiKey(reason: string): Promise<string> {
-		let apiKey = await getSmitheryApiKey();
-		if (apiKey) return apiKey;
-
-		const loggedIn = await this.#promptSmitheryLogin(reason);
-		if (!loggedIn) {
-			throw new Error("Smithery login cancelled. Run /mcp smithery-login, then retry /mcp smithery-search.");
-		}
-
-		apiKey = await getSmitheryApiKey();
-		if (!apiKey) {
-			throw new Error("Smithery API key not found after login.");
-		}
-		return apiKey;
-	}
-
-	async #runSmitheryOperationWithAuthRetry<T>(operation: (apiKey: string) => Promise<T>, reason: string): Promise<T> {
-		const apiKey = await this.#requireSmitheryApiKey(reason);
-		try {
-			return await operation(apiKey);
-		} catch (error) {
-			const status = this.#getSmitheryErrorStatus(error);
-			if (status === undefined || ![401, 403, 429].includes(status)) {
-				throw error;
-			}
-			const loggedIn = await this.#promptSmitheryLogin(this.#toSmitheryAuthReason(status));
-			if (!loggedIn) {
-				throw error;
-			}
-			const retryApiKey = await this.#requireSmitheryApiKey(reason);
-			return await operation(retryApiKey);
-		}
-	}
-
-	async #handleSmitheryLogin(): Promise<void> {
-		const ok = await this.#promptSmitheryLogin("login");
-		if (!ok) {
-			this.ctx.showStatus("Smithery login cancelled.");
-		}
-	}
-
-	async #handleSmitheryLogout(): Promise<void> {
-		const removed = await clearSmitheryApiKey();
-		this.ctx.showStatus(removed ? "Smithery API key removed." : "No cached Smithery API key found.");
-	}
-
-	async #nextAvailableServerName(scope: MCPAddScope, baseName: string): Promise<string> {
-		const filePath = getMCPConfigPath(scope, getProjectDir());
-		const config = await readMCPConfigFile(filePath);
-		const existingNames = new Set(Object.keys(config.mcpServers ?? {}));
-		if (!existingNames.has(baseName)) return baseName;
-		for (let i = 2; i <= 999; i++) {
-			const candidate = `${baseName}-${i}`;
-			if (!existingNames.has(candidate)) return candidate;
-		}
-		return `${baseName}-${Date.now()}`;
-	}
-
-	async #promptDeploymentServerName(scope: MCPAddScope, defaultName: string): Promise<string | null> {
-		for (;;) {
-			const input = await this.ctx.showHookInput(`Server name for deploy (default: ${defaultName})`, defaultName);
-			if (input === undefined) return null;
-			const proposed = input.trim() || defaultName;
-			if (!proposed) {
-				this.ctx.showError("Server name cannot be empty.");
-				continue;
-			}
-			const filePath = getMCPConfigPath(scope, getProjectDir());
-			const config = await readMCPConfigFile(filePath);
-			if (config.mcpServers?.[proposed]) {
-				this.ctx.showError(`Server "${proposed}" already exists in ${scope} config.`);
-				continue;
-			}
-			return proposed;
-		}
-	}
-
-	async #promptRequiredRegistryInputs(result: SmitherySearchResult): Promise<Record<string, string> | null> {
-		const values: Record<string, string> = {};
-		for (const input of result.requiredInputs) {
-			const label = input.required ? `${input.key} (required)` : `${input.key} (optional)`;
-			const prompt = `${label}${input.description ? ` - ${input.description}` : ""}`;
-			const userInput = await this.ctx.showHookInput(prompt, input.defaultValue);
-			if (userInput === undefined) {
-				if (input.required) return null;
-				continue;
-			}
-			const value = userInput.trim();
-			if (!value) {
-				if (input.required) {
-					this.ctx.showError(`Missing required value for "${input.key}".`);
-					return null;
-				}
-				continue;
-			}
-			values[input.key] = value;
-		}
-		return values;
-	}
-
-	#applyRegistryInputOverrides(config: MCPServerConfig, values: Record<string, string>): MCPServerConfig {
-		if (Object.keys(values).length === 0) return config;
-		if (config.type !== "stdio") {
-			return config;
-		}
-		const args = [...(config.args ?? [])];
-		const configJson = JSON.stringify(values);
-		const index = args.indexOf("--config");
-		if (index >= 0) {
-			if (index + 1 < args.length) {
-				args[index + 1] = configJson;
-			} else {
-				args.push(configJson);
-			}
-		} else {
-			args.push("--config", configJson);
-		}
-		return { ...config, args };
-	}
-
-	async #pickRegistryResult(results: SmitherySearchResult[], keyword: string): Promise<SmitherySearchResult | null> {
-		const options = results.map((result, index) => {
-			const label = `${index + 1}. ${result.display.displayName} (${result.display.transport}, uses ${result.display.useCount})`;
-			return label.length > 120 ? `${label.slice(0, 117)}...` : label;
-		});
-		const selected = await this.ctx.showHookSelector(`Registry results for "${keyword}"`, options);
-		if (!selected) return null;
-		const prefix = selected.split(".", 1)[0];
-		const index = Number(prefix) - 1;
-		if (!Number.isInteger(index) || index < 0 || index >= results.length) return null;
-		return results[index] ?? null;
-	}
-
-	async #deployRegistryResult(result: SmitherySearchResult, scope: MCPAddScope): Promise<void> {
-		const baseName = toConfigName(result.name);
-		const defaultName = await this.#nextAvailableServerName(scope, baseName);
-		const serverName = await this.#promptDeploymentServerName(scope, defaultName);
-		if (!serverName) {
-			this.ctx.showStatus("MCP deploy cancelled.");
-			return;
-		}
-		const inputValues = await this.#promptRequiredRegistryInputs(result);
-		if (inputValues === null) {
-			this.ctx.showStatus("MCP deploy cancelled.");
-			return;
-		}
-		const config = this.#applyRegistryInputOverrides(result.config, inputValues);
-		await this.#handleWizardComplete(serverName, config, scope);
-	}
-
-	async #handleSearch(text: string): Promise<void> {
-		const parsed = this.#parseSearchCommand(text);
-		if (parsed.error) {
-			this.ctx.showError(parsed.error);
-			return;
-		}
-
-		try {
-			this.#showMessage(
-				["", theme.fg("muted", `Searching Smithery registry for "${parsed.keyword}"...`), ""].join("\n"),
-			);
-			const results = await this.#runSmitheryOperationWithAuthRetry(
-				apiKey =>
-					searchSmitheryRegistry(parsed.keyword, {
-						limit: parsed.limit,
-						apiKey,
-						includeSemantic: parsed.semantic,
-					}),
-				"required for smithery-search",
-			);
-			if (results.length === 0) {
-				this.#showMessage(
-					["", theme.fg("warning", `No Smithery results found for "${parsed.keyword}".`), ""].join("\n"),
-				);
-				return;
-			}
-
-			const selected = await this.#pickRegistryResult(results, parsed.keyword);
-			if (!selected) {
-				this.ctx.showStatus("MCP Smithery selection cancelled.");
-				return;
-			}
-
-			await this.#deployRegistryResult(selected, parsed.scope);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			if (/authentication was cancelled|login cancelled/i.test(message)) {
-				this.ctx.showError(`${message} Run /mcp smithery-login to authenticate first.`);
-				return;
-			}
-			this.ctx.showError(`Smithery search failed: ${message}`);
-		}
 	}
 
 	/**
@@ -2338,6 +1789,6 @@ export class MCPCommandController {
 
 	/** A read-only listing shown outside the transcript (see `InteractiveModeContext.showCommandReport`). */
 	#showReport(title: string, text: string): void {
-		this.ctx.showCommandReport({ title, body: new Text(text.trim(), 0, 0) });
+		this.ctx.showCommandReport({ title, body: () => reportTextView(text.trim()) });
 	}
 }

@@ -42,7 +42,9 @@ describe("AgentSession snapcompact no-reduction guard", () => {
 	beforeEach(async () => {
 		authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("anthropic", "test-key");
-		modelRegistry = new ModelRegistry(authStorage);
+		// Default context windows: without its own settings the registry reads the
+		// process-global ones, which an earlier file may have loaded from the user's config.
+		modelRegistry = new ModelRegistry(authStorage, undefined, { settings: Settings.isolated() });
 		sessionManager = SessionManager.inMemory();
 
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");

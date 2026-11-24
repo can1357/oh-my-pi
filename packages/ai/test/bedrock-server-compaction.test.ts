@@ -908,7 +908,7 @@ describe("Bedrock native compaction transport", () => {
 				},
 				async () => {
 					const model = bedrockTestModel({
-						compat: { supportsServerCompaction: true, streamIdleTimeoutMs: 450_000 },
+						compat: { supportsServerCompaction: true, streamIdleTimeoutMs: 1_200_000 },
 					});
 					const assertTimeout = async (
 						options: { streamIdleTimeoutMs?: number; streamFirstEventTimeoutMs?: number },
@@ -929,7 +929,7 @@ describe("Bedrock native compaction transport", () => {
 						expect((await pending.result()).stopReason).toBe("error");
 					};
 
-					await assertTimeout({}, 450_000);
+					await assertTimeout({}, 1_200_000);
 					// Ordinary Converse turns keep the global pre-header default, not the model idle window.
 					{
 						const { fetch, requestSignal } = fetchWaitingForAbort();
@@ -938,15 +938,15 @@ describe("Bedrock native compaction transport", () => {
 							fetch,
 						});
 						const signal = await requestSignal;
-						vi.advanceTimersByTime(299_999);
+						vi.advanceTimersByTime(899_999);
 						expect(signal.aborted).toBe(false);
 						vi.advanceTimersByTime(1);
 						expect(signal.aborted).toBe(true);
 						expect((await pending.result()).stopReason).toBe("error");
 					}
-					await assertTimeout({ streamIdleTimeoutMs: 600_000 }, 600_000);
+					await assertTimeout({ streamIdleTimeoutMs: 1_500_000 }, 1_500_000);
 					await withEnv({ PI_STREAM_FIRST_EVENT_TIMEOUT_MS: "5" }, async () => {
-						await assertTimeout({ streamIdleTimeoutMs: 600_000, streamFirstEventTimeoutMs: 20 }, 20);
+						await assertTimeout({ streamIdleTimeoutMs: 1_500_000, streamFirstEventTimeoutMs: 20 }, 20);
 
 						const controller = new AbortController();
 						const { fetch, requestSignal } = fetchWaitingForAbort();

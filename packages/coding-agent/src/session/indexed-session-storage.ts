@@ -9,7 +9,6 @@ import {
 	type SessionStorageWriteOptions,
 	type WriteTextAtomicOptions,
 } from "./session-storage";
-import { isAssistantMessageLine } from "./session-entries";
 import { enoent } from "./session-storage-errors";
 import {
 	overlayTitleSlotContent,
@@ -18,6 +17,7 @@ import {
 	type SessionTitleUpdate,
 	titleUpdateFromSlot,
 } from "./session-title-slot";
+import { purgeDeletedSessionRows } from "./session-db-purge";
 
 export interface SessionStorageIndexEntry {
 	path: string;
@@ -303,11 +303,10 @@ export class IndexedSessionStorage implements SessionStorage {
 		return [title ? overlayTitleSlotPrefix(prefix, prefixLimit, title) : prefix, suffix];
 	}
 
-	async hasAssistantTurn(path: string): Promise<boolean> {
+	async scanLines(path: string, visit: (line: string) => boolean): Promise<void> {
 		for (const line of (await this.readText(path)).split("\n")) {
-			if (isAssistantMessageLine(line)) return true;
+			if (visit(line)) return;
 		}
-		return false;
 	}
 
 	async writeText(path: string, content: string): Promise<void> {
@@ -413,10 +412,21 @@ export class IndexedSessionStorage implements SessionStorage {
 		}
 	}
 
-	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
+	async deleteSessionWithArtifacts(
+		sessionPath: string,
+		options?: { historyDbPath?: string; statsDbPath?: string },
+	): Promise<void> {
 		await this.#awaitPath(sessionPath);
 		const sessionEntry = this.#index.get(sessionPath);
 		if (!sessionEntry) throw enoent(sessionPath);
+		// Capture the transcript before removal. History/stats are purged only
+		// after the backend remove succeeds, so a failed delete does not drop
+		// rows for a session that is still listed. An unreadable transcript
+		// still deletes; its id cannot be resolved.
+		let content: string | undefined;
+		try {
+			content = await this.readText(sessionPath);
+		} catch {}
 
 		const artifactsDir = sessionPath.slice(0, -6);
 		const prefix = artifactsDir.endsWith("/") ? artifactsDir : `${artifactsDir}/`;
@@ -444,6 +454,15 @@ export class IndexedSessionStorage implements SessionStorage {
 			for (const [path] of previous) this.#failFrame(path, sessionEntry.mtimeMs);
 			throw toError(err);
 		}
+
+		// Best-effort: a busy dashboard store never fails the delete itself.
+		try {
+			purgeDeletedSessionRows(sessionPath, {
+				content,
+				historyDbPath: options?.historyDbPath,
+				statsDbPath: options?.statsDbPath,
+			});
+		} catch {}
 	}
 
 	openWriter(path: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter {

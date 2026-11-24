@@ -12,8 +12,8 @@
  * on the first record written. Records are batched — one write per second or
  * per 64 KiB — while `warn`/`error` records are written at once together with
  * everything buffered before them; exit, fatal, and signal paths flush the
- * rest. `OMP_LOG_LEVEL` optionally limits the levels written to the file
- * (default: all).
+ * rest. `OMP_LOG_LEVEL` optionally limits the levels written to the file and
+ * the console (default: all).
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs";
@@ -457,10 +457,11 @@ const LOG_LEVEL_RANK: Record<LogLevel, number> = { error: 0, warn: 1, info: 2, d
 const IMMEDIATE_FLUSH_RANK = LOG_LEVEL_RANK.warn;
 
 /**
- * Rank of the most verbose level the file transport persists: `OMP_LOG_LEVEL`
- * (error|warn|info|debug, case-insensitive), default `debug` (everything).
+ * Rank of the most verbose level the local transports (file and console)
+ * write: `OMP_LOG_LEVEL` (error|warn|info|debug, case-insensitive), default
+ * `debug` (everything).
  */
-function resolveFileLevelRank(): number {
+function resolveLevelRank(): number {
 	const requested = process.env.OMP_LOG_LEVEL?.trim().toLowerCase();
 	return requested && Object.hasOwn(LOG_LEVEL_RANK, requested)
 		? LOG_LEVEL_RANK[requested as LogLevel]
@@ -491,18 +492,23 @@ let transportOpts: { console?: boolean; file?: boolean | string } = { file: true
 interface LocalTransports {
 	readonly file: RotatingFileSink | undefined;
 	readonly console: boolean;
-	/** Rank of the most verbose level written to {@link file}. */
-	readonly fileLevelRank: number;
+	/** Rank of the most verbose level written to {@link file} and the console. */
+	readonly levelRank: number;
 }
 
 /** Local transports, constructed lazily on first log emission. */
 let activeTransports: LocalTransports | undefined;
 
+/** The file holding the latest local log record; absent when file logging is inactive. */
+export function currentLogFile(): string | undefined {
+	return activeTransports?.file?.currentPath;
+}
+
 function buildTransports(opts: { console?: boolean; file?: boolean | string }): LocalTransports {
 	return {
 		file: opts.file ? makeFileTransport(typeof opts.file === "string" ? opts.file : undefined) : undefined,
 		console: opts.console === true,
-		fileLevelRank: resolveFileLevelRank(),
+		levelRank: resolveLevelRank(),
 	};
 }
 
@@ -525,12 +531,11 @@ function emitLocally(
 ): void {
 	const transports = getLocalTransports();
 	const rank = LOG_LEVEL_RANK[level];
-	const file = rank <= transports.fileLevelRank ? transports.file : undefined;
-	if (!file && !transports.console) return;
+	if (rank > transports.levelRank || (!transports.file && !transports.console)) return;
 	const now = new Date();
 	const scoped = foreignTimestamp ? undefined : logContextStorage.getStore();
 	const line = formatLogRecord(level, message, context, formatLocalTimestamp(foreignTimestamp ?? now), scoped);
-	file?.write(line, rank <= IMMEDIATE_FLUSH_RANK || exiting, localDay(now));
+	transports.file?.write(line, rank <= IMMEDIATE_FLUSH_RANK || exiting, localDay(now));
 	if (transports.console) fs.writeSync(1, `${line}${os.EOL}`);
 }
 
@@ -539,13 +544,13 @@ function emitLocally(
  * long-running services (the auth broker, etc.) that want their structured
  * logs piped into a process supervisor instead of the rotating file.
  * The previous file transport writes its buffered records before closing, and
- * the file level (`OMP_LOG_LEVEL`) is re-read on each reconfiguration.
+ * the level (`OMP_LOG_LEVEL`) is re-read on each reconfiguration.
  */
 export function setTransports(opts: { console?: boolean; file?: boolean | string }): void {
 	transportOpts = opts;
 	if (!activeTransports) return; // applied lazily when local logging is first initialized
 	const previousTransports = activeTransports;
-	activeTransports = { file: undefined, console: false, fileLevelRank: previousTransports.fileLevelRank };
+	activeTransports = { file: undefined, console: false, levelRank: previousTransports.levelRank };
 	previousTransports.file?.close();
 	activeTransports = buildTransports(opts);
 }

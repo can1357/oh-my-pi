@@ -111,6 +111,9 @@ or `--fork`.
 | `--provider-session-id <id>` | Reuse a specific provider-side session id for continuity and cache scoping.                                                |
 | `--prompt-cache-key <key>`   | Override the provider prompt-cache key for this session.                                                                   |
 | `--service-tier <tier>`      | OpenAI service tier: `none`, `auto`, `default`, `flex`, `scale`, `priority`, or `ultrafast` (`none` omits `service_tier`). |
+| `--no-judge`                 | Run judge-role calls only on the active model's provider; with no active model, nothing is judged.                         |
+| `--no-spotlight`             | Send no Spotlight requests, unless the active model's provider is `stencil` and `spotlight.url` is the default.           |
+| `--offline`                  | Both of the above, and keep memories, titles, commit messages, subagents, fallback models, web search, speech, image generation and descriptions, image questions, skill and MCP hints, job widgets and eval `completion()` on the active model's provider; a feature with no model there is skipped or fails. Not a network firewall: MCP servers and web fetches still go out. |
 
 See [providers](./providers.md) and [models](./models.md) for model resolution.
 
@@ -138,7 +141,7 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 
 | Flag                       | Description                                                                                                                                                                                          |
 | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--tools <a,b,c>`          | Comma-separated list of tools to enable (default: all).                                                                                                                                              |
+| `--tools <a,b,c>`          | Comma-separated list of tools to enable (default: tools enabled in settings; a tool whose setting is off stays off).                                                                                 |
 | `--no-tools`               | Disable all built-in tools.                                                                                                                                                                          |
 | `--no-lsp`                 | Disable LSP tools, formatting, and diagnostics.                                                                                                                                                      |
 | `--no-pty`                 | Disable PTY-based interactive bash execution.                                                                                                                                                        |
@@ -161,7 +164,7 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | `--hook <path>`                   | Load a hook/extension file (repeatable). See [hooks](./hooks.md).                                                                                                                         |
 | `--trusted-extension <abs-path>`  | Exact allowlist of existing absolute module files (repeatable); disables ambient extension discovery and package-root sub-discovery. Cannot be combined with `--extension`/`-e`/`--hook`. |
 | `--plugin-dir <dir>`              | Add a local plugin directory to discovery (repeatable).                                                                                                                                   |
-| `--no-extensions`                 | Disable extension discovery (explicit `-e` paths still work).                                                                                                                             |
+| `--no-extensions`                 | Disable extension, custom tool, and custom command module discovery (explicit `-e` paths still work).                                                                                                                             |
 | `--skills <globs>`                | Comma-separated glob patterns to filter [skills](./skills.md) (e.g. `git-*,docker`).                                                                                                      |
 | `--no-skills`                     | Disable skills discovery and loading.                                                                                                                                                     |
 | `--no-rules`                      | Disable rules discovery and loading. See [context files](./context-files.md).                                                                                                             |
@@ -225,9 +228,10 @@ the session, which cancels background jobs the run started (`bash` or `task`
 calls the model ran asynchronously). With `--wait-async` (or
 `async.printWake: true`) it instead waits for them; each job's result is
 delivered to the same session as it is in the TUI, starting another turn, and a
-turn may start further jobs. The run exits once no owned job or undelivered
-result remains, and text mode prints the answer of the last turn. Bound
-unattended runs with `--max-time`.
+turn may start further jobs (or child agents that message back). The process
+exits once the run ends — nothing streaming and nothing left that could resume
+it — and text mode prints the answer of the last turn. Bound unattended runs
+with `--max-time`.
 
 ```sh
 # Start a long build in the background, then react to its result in the same session

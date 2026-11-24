@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { adaptSchemaForStrict, toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -20,9 +21,9 @@ function createTestSession(cwd = "/tmp/test", overrides: Partial<ToolSession> = 
 		hasUI: true,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-		// xdev mounting (default-on) would unmount the discoverable ast_edit
-		// into xd://; these tests need it in the returned toolset.
-		settings: Settings.isolated({ "tools.xdev": false }),
+		// Tool command mounting (default-on) would turn the discoverable ast_edit
+		// into a bash command; these tests need it in the returned toolset.
+		settings: Settings.isolated({ "tools.commands": false }),
 		...overrides,
 	};
 }
@@ -132,6 +133,44 @@ describe("ast_edit tool schema", () => {
 			).toBe(1);
 			const updated = await Bun.file(filePath).text();
 			expect(updated).toContain("modernWrap(x, value)");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("reports and applies explicit file targets under their own paths", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-files-"));
+		try {
+			await fs.mkdir(path.join(tempDir, "server", "public"), { recursive: true });
+			const first = path.join(tempDir, "server", "public", "session.ts");
+			const second = path.join(tempDir, "client.ts");
+			await Bun.write(first, "legacyWrap(a, b)\n");
+			await Bun.write(second, "legacyWrap(c, d)\n");
+			const queue = new ToolChoiceQueue();
+			const tools = await createTools(
+				createTestSession(tempDir, {
+					getToolChoiceQueue: () => queue,
+					buildToolChoice: () => ({ type: "tool" as const, name: "resolve" }),
+					steer: () => {},
+				}),
+				["ast_edit"],
+			);
+			const tool = tools.find(entry => entry.name === "ast_edit")!;
+
+			const previewResult = await tool.execute("ast-edit-files", {
+				ops: [{ pat: "legacyWrap($A, $B)", out: "modernWrap($A, $B)" }],
+				paths: ["server/public/session.ts", "client.ts"],
+			});
+			const files = (previewResult.details as { files?: string[] }).files ?? [];
+			expect([...files].sort()).toEqual(["client.ts", "server/public/session.ts"]);
+
+			const applyResult = (await queue.peekPendingInvoker()!({
+				action: "apply",
+				reason: "apply previewed AST edit",
+			})) as InvokedToolResult;
+			expect(applyResult.isError).toBeUndefined();
+			expect(await Bun.file(first).text()).toBe("modernWrap(a, b)\n");
+			expect(await Bun.file(second).text()).toBe("modernWrap(c, d)\n");
 		} finally {
 			await removeWithRetries(tempDir);
 		}
@@ -277,6 +316,83 @@ describe("ast_edit tool schema", () => {
 			const invoker = queue.peekPendingInvoker()!;
 			await invoker({ action: "apply", reason: "apply tlaplus AST edit" });
 			expect(await Bun.file(filePath).text()).toContain("Start == x = 0");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("names explicit host and local:// file targets alongside directory targets", async () => {
+		const tempDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-files-")));
+		try {
+			const artifactsDir = path.join(tempDir, "artifacts");
+			const localOpts = { getArtifactsDir: () => artifactsDir, getSessionId: () => "ast-edit-files" };
+			const examplePath = path.join(tempDir, "a", "example.ts");
+			const otherPath = path.join(tempDir, "b", "other.ts");
+			const childPath = path.join(tempDir, "c", "nested", "child.ts");
+			const localNoteUrl = "local://scratch/note.ts";
+			const localDirChildUrl = "local://dir/nested.ts";
+			const localNotePath = resolveLocalUrlToPath(localNoteUrl, localOpts);
+			const localDirChildPath = resolveLocalUrlToPath(localDirChildUrl, localOpts);
+			await Bun.write(examplePath, "legacyWrap(value, other)\n");
+			await Bun.write(otherPath, "legacyWrap(value, other)\n");
+			await Bun.write(childPath, "legacyWrap(nested, other)\n");
+			await Bun.write(localNotePath, "legacyWrap(note, other)\n");
+			await Bun.write(localDirChildPath, "legacyWrap(dirChild, other)\n");
+			const queue = new ToolChoiceQueue();
+			const journaled: Array<{ path: string; before: string | null; after: string | null }> = [];
+			const tools = await createTools(
+				createTestSession(tempDir, {
+					getArtifactsDir: () => artifactsDir,
+					getSessionId: () => "ast-edit-files",
+					getToolChoiceQueue: () => queue,
+					buildToolChoice: () => ({ type: "tool" as const, name: "resolve" }),
+					steer: () => {},
+					recordFileChange: change => {
+						journaled.push({ path: change.path, before: change.before, after: change.after });
+					},
+				}),
+				["ast_edit"],
+			);
+			const tool = tools.find(entry => entry.name === "ast_edit");
+			expect(tool).toBeDefined();
+
+			const previewResult = await tool!.execute("ast-edit-sibling-files", {
+				ops: [{ pat: "legacyWrap($A, $B)", out: "modernWrap($A, $B)" }],
+				paths: [examplePath, otherPath, localNoteUrl, path.join(tempDir, "c"), "local://dir"],
+			});
+			const details = previewResult.details as
+				| {
+						files?: string[];
+						fileReplacements?: Array<{ path: string; count: number }>;
+						totalReplacements?: number;
+				  }
+				| undefined;
+			const expected = ["a/example.ts", "b/other.ts", "c/nested/child.ts", localDirChildUrl, localNoteUrl];
+			expect(details?.totalReplacements).toBe(5);
+			expect([...(details?.files ?? [])].sort()).toEqual([...expected].sort());
+			expect(
+				[...(details?.fileReplacements ?? [])].sort((left, right) => left.path.localeCompare(right.path)),
+			).toEqual([...expected].sort().map(filePath => ({ path: filePath, count: 1 })));
+
+			const invoker = queue.peekPendingInvoker()!;
+			const applyResult = (await invoker({
+				action: "apply",
+				reason: "apply sibling file preview",
+			})) as InvokedToolResult;
+			expect(applyResult.isError).toBeUndefined();
+			expect(journaled.map(change => change.path).sort()).toEqual(
+				[examplePath, otherPath, childPath, localDirChildPath, localNotePath].sort(),
+			);
+			for (const change of journaled) {
+				expect(change.before).toContain("legacyWrap(");
+				expect(change.after).toContain("modernWrap(");
+				expect(change.after).not.toContain("legacyWrap(");
+			}
+			expect(await Bun.file(examplePath).text()).toContain("modernWrap(value, other)");
+			expect(await Bun.file(otherPath).text()).toContain("modernWrap(value, other)");
+			expect(await Bun.file(childPath).text()).toContain("modernWrap(nested, other)");
+			expect(await Bun.file(localNotePath).text()).toContain("modernWrap(note, other)");
+			expect(await Bun.file(localDirChildPath).text()).toContain("modernWrap(dirChild, other)");
 		} finally {
 			await removeWithRetries(tempDir);
 		}

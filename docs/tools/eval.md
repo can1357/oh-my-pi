@@ -14,7 +14,7 @@
 - File/percent-command preparation: `packages/coding-agent/src/eval/input.ts`; extension preludes: `packages/coding-agent/src/eval/preludes.ts`
 - JavaScript: `packages/coding-agent/src/eval/js/`
 - Python: `packages/coding-agent/src/eval/py/`
-- Output/truncation: `packages/tui/src/tools/streaming-output.ts`
+- Output/truncation: `packages/coding-agent/src/tools/streaming-output.ts`
 - Python internals: `docs/python-repl.md`
 
 ## Inputs
@@ -26,7 +26,7 @@ The params object is one cell. There is no `cells` array, header parser, languag
 | `language` | `"py" \| "js"` | Yes      | Explicit backend token. Normally the live schema includes only enabled runtimes.                                                                                                                                                                                                                                                                                                                                                                                      |
 | `code`     | `string`       | Yes      | Inline code, or one standalone `%load` / `%pip install` (py) / `%bun add` / `%environment` (js) command.                                                                                                                                                                                                                                                                                                                                                              |
 | `title`    | `string`       | No       | Short transcript label.                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `timeout`  | `number`       | No       | Active-runtime timeout window in seconds. Default 30; `0` disables it. Nonzero values are clamped by the tool timeout policy (`TOOL_TIMEOUTS.eval`: 1–3600 s) and `tools.maxTimeout`. A supplied value that changes is disclosed as requested → effective at admission, in progress, and in the final result and `details.notice`. The schema and description include the configured ceiling. Paused host waits resume with a fresh window, not the unused remainder. |
+| `timeout`  | `number`       | No       | Active-runtime timeout window in seconds. Default 30; `0` disables it. Nonzero values are clamped by the tool timeout policy (`TOOL_TIMEOUTS.eval`: 1–3600 s) and `tools.maxTimeout`. A supplied value that changes is disclosed as requested → effective at admission, in progress, and in the final result and `details.notice`. The `timeout` field schema includes the configured ceiling. Paused host waits resume with a fresh window, not the unused remainder. |
 | `reset`    | `boolean`      | No       | Recreate this language's retained runtime before execution. Other language runtimes are untouched. Default `false`.                                                                                                                                                                                                                                                                                                                                                   |
 
 Example across three calls:
@@ -74,7 +74,7 @@ Compaction receives a bounded live-kernel snapshot with environment and successf
 
 Disabled runtimes are removed from the session-scoped wire schema and model prompt. After a definitive failed Python probe, the next schema, description, and prelude also omit `py`; synchronous schema reads never run a probe. A successful explicit availability refresh restores Python, while changes to PATH, active environment, cwd, or the configured interpreter invalidate the advertised snapshot. Cancelled or deadline-limited probes do not establish permanent unavailability. Explicit Python calls retry failed probes, so a repaired interpreter can be picked up without restarting.
 
-A requested unavailable runtime raises `ToolError` with the bounded, sanitized probe reason and a remedy: provide a working Python 3.8+ on PATH or set `python.interpreter`. The tool never substitutes another language. `eval.tools.enabled=true` (default) independently controls whether kernel-defined tools and the `tools` subagent fields are advertised and usable.
+A requested unavailable runtime raises `ToolError` with the bounded, sanitized probe reason and a remedy: provide a working Python 3.8+ on PATH or set `python.interpreter`. The tool never substitutes another language. `eval.tools.enabled` (default off) independently controls whether kernel-defined tools and the `tools` subagent fields are advertised and usable.
 
 `eval.autoProvision=true` lets the first `%bun add` create the managed JavaScript package environment; turning it off requires an existing environment or `%environment project`. Package installation pauses the compute watchdog but has its own ten-minute deadline and remains cancellable.
 
@@ -93,7 +93,6 @@ A requested unavailable runtime raises `ToolError` with the bounded, sanitized p
 - `language`: the backend used; `languages`: the distinct backend list. These retain the historical multi-cell-compatible shape, but a current call has one backend.
 - `cells[].views`: pretty views of printed values, in print order, as `{ text, view }` where `text` is the exact span of `output` the value printed and `view` is a `table` (data frames, `console.table`), `json` (dicts/lists/plain objects printing longer than 80 chars or multiple lines), or `markdown` (Python objects with `_repr_markdown_`). Renderers show the view in place of the matching text; the model only sees the text. At most 16 views per cell are kept, and a view whose JSON exceeds 32 KiB is dropped; dropped views show as their text.
 - `images`: present on live updates when images have arrived; final images are content blocks.
-- `statusEvents`: deduplicated helper/tool status events.
 - `notice`: optional backend notice.
 - `meta`: output truncation/artifact metadata supplied by `toolResult(...)`.
 - `async`: present when the cell was auto-backgrounded as an async job (`{ state, jobId, type: "eval" }`).
@@ -101,7 +100,7 @@ A requested unavailable runtime raises `ToolError` with the bounded, sanitized p
 
 `mcp_progress` status lines show an MCP tool's name and its latest progress while an awaited call is running: the server's message with `progress/total` when a total exists, or the bare progress value when there is no message. Updates for one call replace one another, including after Eval auto-backgrounds; old MCP snapshots can be evicted under the status-log cap. Internal call ids are not displayed.
 
-The renderer merges call and result inline, syntax-highlights from the declared language, renders cell views as tables, JSON trees, and Markdown in place of their text, and shows timeout/truncation metadata. `session.allocateOutputArtifact?.("eval")` backs spilled output; `artifact://...` in `meta` reaches the full capture.
+The renderer merges call and result inline, syntax-highlights from the declared language, renders cell views as tables, JSON trees, and Markdown in place of their text, and shows timeout/truncation metadata. `session.allocateOutputArtifact?.("eval")` backs spilled output; a `local://N.log` URL in `meta` reaches the full capture.
 
 ## Execution flow
 
@@ -131,6 +130,7 @@ With `eval.autoBackground.enabled` (default `false`), a cell that outlives `eval
 - Persistent worker VM keyed by `js:${sessionId}`; `reset` recreates the VM and is destructive to concurrent users of that session id.
 - Runs under Bun and exposes host globals including `Bun`, `Buffer`, `fetch`, `process`, `require`, `createRequire`, `fs`, and Web Crypto.
 - Top-level `await` and bare `return` work through async wrapping.
+- A trailing expression or top-level `return` value prints as `console.log` would. As in Python, other trailing statements print nothing: an assignment (`globalThis.items = items`, or a destructuring `({ a } = obj)`), a declaration, a loop or an `if` block. Assigned promises still settle within the run and report rejections. A parenthesized assignment prints its value, like Python's `(x := value)`.
 - Static top-level imports and dynamic imports are rewritten through the local module loader. Local filesystem imports are cache-busted between cells; bare package and scheme/URL imports retain normal cache identity.
 - Awaited regions can interleave with another session sharing the executor; synchronous code still blocks the worker event loop.
 
@@ -149,21 +149,21 @@ All enabled runtimes expose equivalent helpers where the language permits:
 - `print(...)` (Python) / `print(...)` and `console.*` (JS)
 - `read(path, offset?, limit?)`, `write(path, content)`, `env(...)`, `output(...)`
 - `tool.<name>(args)` for a normal session tool call (async in both runtimes: `await tool.read({...})`)
-- `@tool` / `tool(fn, {...})` to define kernel-local tools for subagents (`eval.tools.enabled`, default on)
+- `@tool` / `tool(fn, {...})` to define kernel-local tools for subagents (`eval.tools.enabled`, default off)
 - `judge(...)`, `judge_batch(...)` (Python) / `judgeBatch(...)` (JS), `completion(...)`
 - `wait(...)` for agent/completion handles
 - `agent(...)`, `workpool(...)` when spawning is allowed
 - `log(message)`, `phase(title)`, `budget`
 
-JS helpers are asynchronous; Python file helpers are synchronous while `tool.<name>()` is a coroutine. `read()` delegates non-`local://` schemes to the registered read tool, resolves `local://` through injected roots, and reads regular paths relative to cwd. A bare `read("artifact://<id>")` returns the artifact file's full text, with `offset`/`limit` selecting lines, whichever session's artifacts dir holds it; selector forms such as `artifact://<id>:raw:5-9` go to the read tool. `write()` accepts regular and `local://` paths but rejects other protocol URLs.
+JS helpers are asynchronous; Python file helpers are synchronous while `tool.<name>()` is a coroutine. `read()` delegates non-`local://` schemes to the registered read tool, resolves `local://` through injected roots, and reads regular paths relative to cwd. `read("local://N.log")` reads a spill like any other `local://` file, through the injected `local` root, with `offset`/`limit` selecting lines; there is no artifact special case. `write()` accepts regular and `local://` paths but rejects other protocol URLs.
 
 The prelude lists accepted session tool names, including unambiguous wire aliases such as `tool.apply_patch({ input: "..." })` for an enabled `edit` tool in apply-patch mode. Exact registered names shadow aliases; ambiguous aliases are unavailable. Both canonical and wire calls check the resolved tool's enablement and use its ordinary approval/ACP gate.
 
-Bridge restrictions and bookkeeping use the resolved canonical tool, not the requested wire spelling. Aliases of `checkpoint` and `rewind` are omitted and rejected because those tools need direct result events; aliases of `todo` retain branch persistence, and aliases of `task`/`wait` pause the cell watchdog like their canonical calls.
+Bridge restrictions and bookkeeping use the resolved canonical tool, not the requested wire spelling. `checkpoint`, `rewind`, and `yield`, including their aliases, are omitted and rejected because their session changes or task completion require direct tool events. A tool command reached from a cell through `sh()` is refused for `checkpoint`, `rewind`, and `yield` with the same direct-tool diagnostic; commands the model's own `bash` calls run are unaffected, including those of subagents a cell starts through `tool.task`. Aliases of `todo` retain branch persistence, and aliases of `task`/`wait` pause the cell watchdog like their canonical calls.
 
 Printing an image or figure attaches it to the result for both the model and the user. Printed data frames, `console.table`, Markdown objects, and large structured values also carry a pretty view for the user; the model sees the printed text.
 
-Enabled extension preludes add globals (such as `browser`) with documentation at `xd://eval/<name>`. Their host calls resolve approval and availability against the live session; disabling a prelude also prevents previously captured functions from retaining host access.
+Enabled extension preludes add globals (such as `browser`) with documentation at `help://eval/<name>`. Their host calls resolve approval and availability against the live session; disabling a prelude also prevents previously captured functions from retaining host access.
 
 ### `judge()` and judgment batches
 
@@ -171,7 +171,7 @@ Enabled extension preludes add globals (such as `browser`) with documentation at
 
 For many states, Python's `await judge_batch(states, questions, concurrency=32, retries=1, min_ok=1, intent=None)` or JS's `await judgeBatch(states, questions, { concurrency?, retries?, minOk?, intent? })` creates a host-owned batch. States are a list/array (index keys) or keyed object. `await b.drain(...)` pulls newly settled `(key, item)` pairs with `item.answers` or `item.error`; Python takes `timeout` directly, JS takes `{ timeout }`. Item failures are retained, while whole-run failure raises after the drain cursor is exhausted. `status()`, `results()`, `failed()`, `cancel()`, and `close()` inspect/control the batch. Batches outlive cells and kernel resets; `judge_batch.attach(id)` / `judgeBatch.attach(id)` reconnects an owning session until close or owner disposal. Completion and judgment requests share a process-wide 32-request semaphore.
 
-The full helper reference is `xd://eval/judge`.
+The full helper reference is `help://eval/judge`.
 
 ### MCP structured results
 
@@ -240,7 +240,7 @@ Registers one background subagent job and returns an `AgentHandle` immediately:
 
 ### Kernel-defined tools (`@tool` / `tool(fn)`)
 
-With `eval.tools.enabled` (default on), a cell can turn a function into a tool other agents may call:
+With `eval.tools.enabled` on (default off), a cell can turn a function into a tool other agents may call:
 
 - Python: `@tool` / `@tool(name=..., description=...)`; the JSON Schema is inferred from type hints (`str`, `int`, `float`, `bool`, `list[...]`, `dict[...]`, `Literal`, `Optional`, `Annotated[T, "description"]`) and defaults; positional-only parameters are rejected. Async functions are awaited.
 - JS: `tool(fn, { name?, description?, parameters? })`; `fn` receives one args object.
@@ -267,6 +267,8 @@ With `eval.tools.enabled` (default on), a cell can turn a function into a tool o
 - Eval subagent spawning obeys `task.maxRecursionDepth` (default `2`; negative values allow unlimited depth). Each `workpool()` caps its own live workers at `task.maxConcurrency` (default 32, `0` unbounded). `agent()` takes no `task.maxConcurrency` slot: every handle is a running background job counted against the session-wide `async.maxJobs` cap (default and maximum 100), which it shares with every other background job in the session, including async `bash`, async `task` spawns, `workpool()` pools and nested subagents' jobs. `agent()` fails with `Background job limit reached` once that cap is full. Completion/judgment requests have their own fixed 32-request cap.
 - Malformed params are schema errors; unavailable/disabled backends and missing session are `ToolError`s.
 - Runtime exceptions become backend output with nonzero exit. Interactive stdin is an error. Output truncation does not fail the call.
+- An uncaught JavaScript error prints its message and the frames of the cell, of functions it sent to a page or worker, and of modules it imported; frames in omp's install tree outside the cell's working directory, installed `@oh-my-pi` packages and engine internals are replaced by one line counting them. Project dependencies under the cell's working directory stay visible even with a project-local omp install, including dependencies also used by omp: a shared dependency path does not identify who imported it. The error's `stack` keeps every frame, so `catch (e) { print(e.stack) }` shows them.
+- Unhandled JavaScript promise rejections fail the cell while it is running. A rejection attributed to a finished cell keeps the kernel state and appears once at the start of the next cell's output, with its originating cell and error stack; bridge-call errors include the tool name or prelude action (for example, `browser.call`). The next cell shows at most ten late errors and counts any additional rejections.
 - A dead retained managed kernel may be replaced and the invocation retried once by its executor.
 
 ## Notes

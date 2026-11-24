@@ -1,0 +1,29 @@
+[package]
+name = "jaq-std"
+version = "3.0.3"
+authors = ["Michael Färber <michael.faerber@gedenkt.at>"]
+edition = "2021"
+license = "MIT"
+readme = "README.md"
+description = "Standard library for jaq"
+repository = "https://github.com/01mf02/jaq"
+
+[features]
+default = ["std", "format", "log", "math", "regex", "time"]
+regex = ["onig", "std"]
+std = ["jaq-core/std"]
+format = []
+log = []
+math = ["libm", "std"]
+time = ["jiff", "libm", "std"]
+
+[dependencies]
+jaq-core = { version = "3.1.1", default-features = false }
+
+bstr = { version = "1.6", default-features = false, features = ["alloc", "unicode"] }
+jiff = { version = "0.2.15", optional = true }
+onig = { version = "6.4", default-features = false, optional = true }
+libm = { version = "0.2.7", optional = true }
+
+[lints]
+workspace = true

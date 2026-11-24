@@ -4,12 +4,13 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 /**
  * Regression for issue #2372 — pressing Ctrl+T (or any other rebuild path)
@@ -49,13 +50,20 @@ describe("issue #2372 pre-streaming chat rebuild preserves optimistic submission
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
-		mode.ui.requestRender = vi.fn();
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 	});
 
 	beforeEach(() => {
 		mode.clearOptimisticUserMessage();
-		mode.chatContainer.clear();
+		mode.shell.transcript.clear();
 		mode.locallySubmittedUserSignatures.clear();
 		mode.optimisticUserMessageSignature = undefined;
 		mode.isInitialized = false;
@@ -80,11 +88,11 @@ describe("issue #2372 pre-streaming chat rebuild preserves optimistic submission
 		mode.startPendingSubmission({ text: "hello world" });
 		expect(mode.optimisticUserMessageSignature).toBe("hello world\u00000");
 		expect(addMessageSpy).toHaveBeenCalledTimes(1);
-		expect(mode.chatContainer.children.length).toBeGreaterThan(0);
+		expect(mode.shell.transcript.blocks().length).toBeGreaterThan(0);
 
 		// Pre-streaming rebuild: no streamingComponent yet, message is NOT in
 		// session entries yet, signature is still set.
-		expect(mode.streamingComponent).toBeUndefined();
+		expect(mode.streaming).toBeUndefined();
 		mode.rebuildChatFromMessages();
 		// Signature stays set until EventController processes user message_start.
 		expect(mode.optimisticUserMessageSignature).toBe("hello world\u00000");
@@ -98,7 +106,7 @@ describe("issue #2372 pre-streaming chat rebuild preserves optimistic submission
 			attribution: "user",
 		});
 		// Chat container is non-empty (the optimistic user message is back).
-		expect(mode.chatContainer.children.length).toBeGreaterThan(0);
+		expect(mode.shell.transcript.blocks().length).toBeGreaterThan(0);
 	});
 
 	it("does not duplicate the user message once message_start has cleared the optimistic signature", () => {
@@ -146,7 +154,7 @@ describe("issue #2372 pre-streaming chat rebuild preserves optimistic submission
 						.join("\n");
 		});
 		expect(renderedTexts).toEqual(["/jira-task", "/jira-task", "Expanded Jira task prompt"]);
-		expect(mode.chatContainer.children).toHaveLength(1);
+		expect(mode.shell.transcript.blocks()).toHaveLength(1);
 		expect(mode.optimisticUserMessageSignature).toBeUndefined();
 		expect(mode.locallySubmittedUserSignatures.has("/jira-task\u00000")).toBe(false);
 	});
@@ -170,7 +178,7 @@ describe("issue #2372 pre-streaming chat rebuild preserves optimistic submission
 		});
 
 		expect(mode.optimisticUserMessageSignature).toBe("/jira-task\u00000");
-		expect(mode.chatContainer.children).toHaveLength(2);
+		expect(mode.shell.transcript.blocks()).toHaveLength(2);
 		expect(mode.locallySubmittedUserSignatures.has("queued before prompt\u00000")).toBe(false);
 
 		await controller.handleEvent({
@@ -193,7 +201,7 @@ describe("issue #2372 pre-streaming chat rebuild preserves optimistic submission
 						.join("\n");
 		});
 		expect(renderedTexts).toEqual(["/jira-task", "queued before prompt", "Expanded Jira task prompt"]);
-		expect(mode.chatContainer.children).toHaveLength(2);
+		expect(mode.shell.transcript.blocks()).toHaveLength(2);
 		expect(mode.optimisticUserMessageSignature).toBeUndefined();
 	});
 
@@ -215,18 +223,18 @@ describe("issue #2372 pre-streaming chat rebuild preserves optimistic submission
 	it("recovers a cancelled submission without losing text and images added after Enter", () => {
 		const submittedImage = { type: "image" as const, data: "YQ==", mimeType: "image/png" };
 		const laterImage = { type: "image" as const, data: "Yg==", mimeType: "image/png" };
-		mode.editor.setText("");
+		mode.composer.setText("");
 		mode.startPendingSubmission(
 			{ text: "first [Image #1]", images: [submittedImage], imageLinks: ["file:///first.png"] },
 			{ clearEditor: false },
 		);
-		mode.editor.pendingImages = [laterImage];
-		mode.editor.pendingImageLinks = ["file:///later.png"];
-		mode.editor.setCollapsedText("later [Image #1]");
+		mode.composer.pendingImages.splice(0, mode.composer.pendingImages.length, laterImage);
+		mode.composer.pendingImageLinks.splice(0, mode.composer.pendingImageLinks.length, "file:///later.png");
+		mode.composer.setCollapsedText("later [Image #1]");
 
 		expect(mode.cancelPendingSubmission()).toBe(true);
-		expect(mode.editor.getExpandedText()).toBe("first [Image #1]\nlater [Image #2]");
-		expect(mode.editor.pendingImages).toEqual([submittedImage, laterImage]);
-		expect(mode.editor.pendingImageLinks).toEqual(["file:///first.png", "file:///later.png"]);
+		expect(mode.composer.expandedText()).toBe("first [Image #1]\nlater [Image #2]");
+		expect(mode.composer.pendingImages).toEqual([submittedImage, laterImage]);
+		expect(mode.composer.pendingImageLinks).toEqual(["file:///first.png", "file:///later.png"]);
 	});
 });

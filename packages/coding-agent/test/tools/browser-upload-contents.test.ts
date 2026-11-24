@@ -162,6 +162,8 @@ function makeSession(): ToolSession {
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		settings: Settings.isolated({
+			// Managed Chromium, whether or not omp's WebKit engine is installed on this machine.
+			"browser.webkit": false,
 			"browser.enabled": true,
 			"browser.headless": true,
 			"browser.cmux": false,
@@ -177,7 +179,7 @@ function routeProxy(route: UploadRoute, options: ProxyOptions = {}): ProxyOption
 }
 
 /**
- * Launch a Chrome omp did not start, open a fixture page in it over `app.cdp_url` through a CDP proxy, and run cells
+ * Launch a Chrome omp did not start, open a fixture page in it over an `app` CDP URL through a CDP proxy, and run cells
  * there.
  */
 async function openConnectedTab(toolCallId: string, options: { page?: string; proxy?: ProxyOptions } = {}) {
@@ -217,7 +219,7 @@ async function openConnectedTab(toolCallId: string, options: { page?: string; pr
 				action: "open",
 				name,
 				url: `${url}${options.page ?? ""}`,
-				app: { cdp_url: `http://127.0.0.1:${proxy.port}` },
+				app: `http://127.0.0.1:${proxy.port}`,
 			},
 			context,
 		);
@@ -340,9 +342,9 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser uploadFile into a browser omp did 
 			} finally {
 				await close();
 			}
-			// A page omp only attached to can outlive omp's tab, so its staged copies stay for the sweep.
+			// omp opened its own page in that browser and closed it with the tab, so its staged copies went too.
 			const left = await stagingFolders();
-			expect(created.filter(name => left.has(name))).toEqual(created);
+			expect(created.filter(name => left.has(name))).toEqual([]);
 		}, 60_000);
 
 		test("fails a chooser upload whose input went away or another upload holds", async () => {

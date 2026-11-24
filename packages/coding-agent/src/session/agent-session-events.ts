@@ -1,34 +1,46 @@
-import type { AgentEvent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { AgentEvent, AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort } from "@oh-my-pi/pi-ai";
 import type { Rule } from "../capability/rule";
 import type { RetryErrorUpdate } from "../extensibility/shared-events";
-import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
+import type { Goal } from "../tools/details/goal";
 import type { GoalModeState } from "../goals/state";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
-import type { TodoItem } from "@oh-my-pi/pi-tui/tools/todo";
+import type { ConfiguredThinkingLevel } from "../utils/render-utils";
+import type { TodoItem } from "../tools/details/todo";
 import type { CustomMessage } from "./messages";
 import type { CacheWarmingRefreshEnd, CacheWarmingRefreshStart } from "./cache-warmer";
 
-/** Session-specific events that extend the core AgentEvent. */
+/**
+ * Session-specific events that extend the core AgentEvent.
+ *
+ * Run lifecycle: a *run* opens at the first `agent_start` and closes at exactly one
+ * `agent_end`, emitted once nothing can resume it — no model loop is live, nothing
+ * the session scheduled is pending, and no background job, child agent or peer
+ * message can wake it ({@link AgentSession.wakeSources}). Every model loop that stops
+ * while the run goes on emits `agent_pause` instead, followed by the next loop's
+ * `agent_start` or by the run's `agent_end`. A session transition (`/new`, a switch,
+ * dispose) abandons an open run without either. The RPC, JSON print and collab wires and
+ * the extension `agent_end` keep their per-loop `agent_end` shape (see `loop-end-wire.ts`).
+ */
 export type AgentSessionEvent =
-	| Exclude<AgentEvent, { type: "agent_end" }>
-	| (Extract<AgentEvent, { type: "agent_end" }> & {
-			/** False when an async delivery will resume the session before its true final settle. */
-			isTerminal?: boolean;
+	| AgentEvent
+	| {
+			type: "agent_pause";
+			/** Messages of the model loop that stopped, as its `agent_end` would carry them. */
+			messages: AgentMessage[];
 			/**
-			 * True when the agent finished its turn: the end is terminal, or the session resumes
-			 * only for queued input or background-job results. False while the agent continues its
-			 * own work (retry, compaction continuation, stop-time reminders).
+			 * True when the model finished its turn and something outside it resumes the run:
+			 * queued input, a peer message, a background-job result or a child agent. False
+			 * while the session continues the model's own work (retry, compaction continuation,
+			 * stop-time reminders, hook continuations).
 			 */
-			yielded?: boolean;
+			yielded: boolean;
 			/**
-			 * True on a non-terminal end whose only possible resume is a background-job result
-			 * (no queued input, no continuation the agent scheduled itself). The wake is not
-			 * guaranteed: a cancelled or suppressed job never delivers one.
+			 * True when nothing the session scheduled resumes the run: it waits only on outside
+			 * work (a background job, child agent or peer message; see {@link WakeSources}).
 			 */
-			awaitingAsyncWork?: boolean;
-	  })
+			awaiting: boolean;
+	  }
 	| {
 			type: "auto_compaction_start";
 			reason: "threshold" | "overflow" | "idle" | "incomplete";
@@ -107,6 +119,19 @@ export type AgentSessionEvent =
 	// `steering` entries already sent into the streaming response, which
 	// `remove_queued_message` cannot reach.
 	| { type: "queue_update"; steering: string[]; followUp: string[]; liveSteered: number };
+
+/**
+ * What can still resume a session's run without user input once its model loop
+ * stops; see {@link AgentSession.wakeSources}.
+ */
+export interface WakeSources {
+	/** Owned background jobs whose result will be delivered into the run. */
+	readonly jobs: readonly string[];
+	/** Child agents whose run is still open; a message from one wakes the run. */
+	readonly agents: readonly string[];
+	/** Job results, launch completions or peer messages already queued for a wake turn. */
+	readonly queued: boolean;
+}
 
 /** Listener function for agent session events. */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;

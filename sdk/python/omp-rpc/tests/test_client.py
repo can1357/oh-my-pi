@@ -603,6 +603,9 @@ FAKE_SERVER = textwrap.dedent(
                     flush=True,
                 )
                 continue
+            if message == "needs form":
+                print(json.dumps({"type": "extension_ui_request", "id": "ui-form", "method": "form", "html": "<form></form>"}), flush=True)
+                continue
             if message == "side frames":
                 print(json.dumps({"type": "available_commands_update", "commands": [{"name": "plan", "source": "builtin"}]}), flush=True)
                 print(json.dumps({"type": "subagent_lifecycle", "payload": {"id": "Worker", "agent": "task", "agentSource": "bundled", "status": "started", "index": 0}}), flush=True)
@@ -627,17 +630,17 @@ FAKE_SERVER = textwrap.dedent(
                     flush=True,
                 )
                 continue
-            if message == "needs xd host tool":
+            if message == "needs bash tool command":
                 print(json.dumps({"type": "agent_start"}), flush=True)
-                host_event_tool_call_id = "toolu_write_1"
-                host_event_tool_name = "write"
+                host_event_tool_call_id = "toolu_bash_1"
+                host_event_tool_name = "bash"
                 print(
                     json.dumps(
                         {
                             "type": "tool_execution_start",
-                            "toolCallId": "toolu_write_1",
-                            "toolName": "write",
-                            "args": {"path": "xd://echo_host", "content": '{"message": "hello"}'},
+                            "toolCallId": "toolu_bash_1",
+                            "toolName": "bash",
+                            "args": {"command": "echo_host hello"},
                         }
                     ),
                     flush=True,
@@ -647,7 +650,7 @@ FAKE_SERVER = textwrap.dedent(
                         {
                             "type": "host_tool_call",
                             "id": "host-call-2",
-                            "toolCallId": "toolu_write_1",
+                            "toolCallId": "toolu_bash_1",
                             "toolName": "echo_host",
                             "arguments": {"message": "hello"},
                         }
@@ -1184,6 +1187,53 @@ class RpcClientTests(unittest.TestCase):
                 {"type": "extension_ui_response", "id": "ui-ask", "cancelled": True},
             )
 
+    def test_form_data_reaches_the_wire_as_json_values(self) -> None:
+        with self.make_client() as client:
+            client.prompt("needs form")
+            request = client.next_ui_request(timeout=2.0)
+            self.assertTrue(request.requires_response())
+            client.send_ui_data(request.id, {"target": "prod", "checks": ("lint", "smoke"), "replicas": 3})
+            client.wait_for_idle(timeout=2.0)
+            self.assertEqual(
+                client.request_raw("debug_last_ui_response"),
+                {
+                    "type": "extension_ui_response",
+                    "id": "ui-form",
+                    "data": {"target": "prod", "checks": ["lint", "smoke"], "replicas": 3},
+                },
+            )
+
+    def test_form_data_rejects_booleans_before_sending(self) -> None:
+        with self.make_client() as client:
+            with self.assertRaises(TypeError):
+                client.send_ui_data("ui-form", {"agree": True})
+
+    def test_form_data_rejects_non_finite_numbers_before_sending(self) -> None:
+        with self.make_client() as client:
+            with self.assertRaises(ValueError):
+                client.send_ui_data("ui-form", {"replicas": float("nan")})
+
+    def test_form_data_rejects_non_string_list_members_before_sending(self) -> None:
+        with self.make_client() as client:
+            with self.assertRaises(TypeError):
+                client.send_ui_data("ui-form", {"checks": ["lint", float("nan")]})
+
+    def test_form_data_rejects_values_that_are_not_string_sequences(self) -> None:
+        with self.make_client() as client:
+            for value in (None, {"lint": True}, {"lint"}):
+                with self.subTest(value=value), self.assertRaises(TypeError):
+                    client.send_ui_data("ui-form", {"checks": value})
+
+    def test_headless_ui_cancels_form_so_the_prompt_completes(self) -> None:
+        with self.make_client() as client:
+            client.install_headless_ui()
+            turn = client.prompt_and_wait("needs form", timeout=2.0)
+            self.assertEqual(turn.assistant_text, "ui acknowledged")
+            self.assertEqual(
+                client.request_raw("debug_last_ui_response"),
+                {"type": "extension_ui_response", "id": "ui-form", "cancelled": True},
+            )
+
     def test_null_command_data_is_distinct_from_an_empty_result(self) -> None:
         with self.make_client() as client:
             self.assertIsNone(client.handoff("decline"))
@@ -1217,13 +1267,10 @@ class RpcClientTests(unittest.TestCase):
             & {event.type for event in turn.events}
         )
 
-    def test_set_todos_accepts_blocked_tasks(self) -> None:
+    def test_set_todos_rejects_unknown_status(self) -> None:
         with self.make_client() as client:
-            phases = client.set_todos(
-                [{"content": "Ship", "status": "blocked", "blocker": "waiting on review"}]
-            )
-        task = phases[0].tasks[0]
-        self.assertEqual((task.status, task.blocker), ("blocked", "waiting on review"))
+            with self.assertRaises(RpcError):
+                client.set_todos([{"content": "Ship", "status": "blocked"}])
 
     def test_predict_word_outlasts_request_timeout(self) -> None:
         with self.make_client(request_timeout=0.3) as client:
@@ -1604,16 +1651,17 @@ class RpcClientTests(unittest.TestCase):
             self.assertEqual(len(end_events), 1)
             self.assertEqual(end_events[0].result["content"][0]["text"], "host:hello")
 
-    def test_xd_dispatched_custom_tool_events_carry_host_tool_name(self) -> None:
-        """Events for an xd:// device dispatch are renamed to the executed host tool.
+    def test_tool_command_events_carry_host_tool_name(self) -> None:
+        """Events for a tool command run inside a `bash` call are renamed to the executed host tool.
 
-        With `tools.xdev` on, omp invokes a custom tool through `write
-        xd://<name>` and the wire events carry the transport tool (`write`).
-        Consumers must observe the host-tool name on update/end events
-        regardless of transport — roboomp's terminal-action detection
-        triple-posted PR reviews when end events only said `write`
-        (oh-my-pi#6696). `tool_execution_start` precedes the `host_tool_call`
-        frame on the wire and keeps the transport name.
+        With `tools.commands` on, omp mounts a custom tool as a command in the
+        embedded bash engine and the agent runs it inside a `bash` call, so the
+        wire events carry the transport tool (`bash`). Consumers must observe
+        the host-tool name on update/end events regardless of dispatch path —
+        roboomp's terminal-action detection triple-posted PR reviews when end
+        events only said `bash` (oh-my-pi#6696). `tool_execution_start`
+        precedes the `host_tool_call` frame on the wire and keeps the transport
+        name.
         """
 
         def echo_host(args: dict[str, str], context) -> str:
@@ -1635,7 +1683,7 @@ class RpcClientTests(unittest.TestCase):
                 ),
             )
         ) as client:
-            turn = client.prompt_and_wait("needs xd host tool", timeout=2.0)
+            turn = client.prompt_and_wait("needs bash tool command", timeout=2.0)
             start_names = [
                 event.tool_name
                 for event in turn.events
@@ -1652,12 +1700,12 @@ class RpcClientTests(unittest.TestCase):
                 if getattr(event, "type", None) == "tool_execution_end"
             ]
 
-            self.assertEqual(start_names, ["write"])
+            self.assertEqual(start_names, ["bash"])
             self.assertEqual(
                 [event.tool_name for event in update_events], ["echo_host"]
             )
             self.assertEqual([event.tool_name for event in end_events], ["echo_host"])
-            self.assertEqual(end_events[0].tool_call_id, "toolu_write_1")
+            self.assertEqual(end_events[0].tool_call_id, "toolu_bash_1")
             self.assertEqual(end_events[0].result["content"][0]["text"], "host:hello")
 
     def _echo_host_tool(self, execute) -> HostTool:

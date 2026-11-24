@@ -9,7 +9,7 @@ import {
 	refreshFile,
 } from "@oh-my-pi/pi-coding-agent/lsp/client";
 import type { LspClient } from "@oh-my-pi/pi-coding-agent/lsp/types";
-import { fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
+import { fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/uri";
 import { rejectionOf } from "../helpers/rejection";
 
 /** Minimal client double: open files, a diagnostics map, and a frame sink. */
@@ -32,6 +32,8 @@ function fakeClient(openFiles: Map<string, { version: number; languageId: string
 		proc: { stdin: sink },
 		openFiles: new Map(openFiles),
 		diagnostics: new Map(),
+		publishedDiagnostics: new Map(),
+		pulledDiagnostics: new Map(),
 	} as unknown as LspClient;
 	return { client, frames };
 }

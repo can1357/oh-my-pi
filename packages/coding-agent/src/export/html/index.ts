@@ -4,7 +4,6 @@ import { buildSessionTraceFromSnapshots } from "@oh-my-pi/omp-stats/trace";
 import type { SessionTrace } from "@oh-my-pi/omp-stats/types";
 import type { AgentState } from "@oh-my-pi/pi-agent-core";
 import { APP_NAME, isCompiledBinary, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
-import { getResolvedThemeColors, getThemeExportColors } from "@oh-my-pi/pi-tui/theme";
 import type { SessionEntry, SessionHeader } from "../../session/session-entries";
 import { SessionManager } from "../../session/session-manager";
 import { collectSubSessions, type SubSession } from "../../session/sub-sessions";
@@ -13,6 +12,7 @@ import { writeBase64Json } from "./payload";
 import templateHtml from "./template.html.txt" with { type: "text" };
 import viewerAsset from "./viewer.generated.json" with { type: "json" };
 import { exportThemeStyles, webExportThemeVars } from "./web-palette";
+import { getResolvedThemeColors, getThemeExportColors } from "../../ui/theme/service";
 
 export { type ExportThemeNames, parseExportArgs } from "./args";
 
@@ -244,7 +244,10 @@ async function exportSessionData(sessionData: SessionData, sessionFile: string, 
 	}
 	sessionData.trace = buildSessionTraceFromSnapshots(sessionData, sessionData.subSessions);
 
-	const outputPath = opts.outputPath || `${APP_NAME}-session-${path.basename(sessionFile, ".jsonl")}.html`;
+	// Resolve once: Bun on Windows fails to mkdir relative paths that normalize to cwd (oven-sh/bun#45059).
+	const outputPath = path.resolve(
+		opts.outputPath || `${APP_NAME}-session-${path.basename(sessionFile, ".jsonl")}.html`,
+	);
 	await writeExportHtml(sessionData, outputPath, opts);
 	return outputPath;
 }

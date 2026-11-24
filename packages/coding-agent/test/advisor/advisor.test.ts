@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterAll, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { type AgentMessage, type AgentTelemetryConfig, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import {
@@ -36,14 +36,15 @@ import {
 	quarantineAdvisorUnsafeOutput,
 	resolveAdvisorDeliveryChannel,
 } from "../../src/advisor";
-import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
-import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
-import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
 import { obfuscateMessages } from "../../src/secrets/message-transform";
 import { SecretObfuscator } from "../../src/secrets/obfuscator";
 import { getOpenAiRemoteCompactionPayload } from "../../src/session/session-context";
 import { formatSessionHistoryMarkdown } from "../../src/session/session-history-format";
 import { YieldQueue } from "../../src/session/yield-queue";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 /** Poll until the drain loop reaches the asserted state — waitForCatchup
  *  releases IMMEDIATELY on advisor failure (the primary must never park on a
@@ -336,13 +337,7 @@ describe("advisor", () => {
 					id: "ask-1",
 					name: "ask",
 					arguments: {
-						questions: [
-							{
-								id: "deploy",
-								question: "Authorize deployment?",
-								options: [{ label: "Yes" }, { label: "No" }],
-							},
-						],
+						html: '<form><p>Authorize deployment?</p><label><input type="radio" name="deploy" value="yes"> Yes</label><label><input type="radio" name="deploy" value="no"> No</label></form>',
 					},
 				},
 			],
@@ -352,8 +347,8 @@ describe("advisor", () => {
 			role: "toolResult",
 			toolCallId: "ask-1",
 			toolName: "ask",
-			content: [{ type: "text", text: "User selected: Yes" }],
-			details: { selectedOptions: ["Yes"] },
+			content: [{ type: "text", text: 'User answers:\n{\n  "deploy": "yes"\n}' }],
+			details: { answers: [{ name: "deploy", question: "Authorize deployment?", answer: "Yes" }] },
 			isError: false,
 			timestamp: 2,
 		} as unknown as AgentMessage;
@@ -365,28 +360,22 @@ describe("advisor", () => {
 				expandToolIO: true,
 			});
 
-			expect(compact).not.toContain("User selected: Yes");
-			expect(expanded).toContain('"question": "Authorize deployment?"');
-			expect(expanded).toContain('"label": "Yes"');
-			expect(expanded).toContain("User selected: Yes");
+			expect(compact).not.toContain('"deploy": "yes"');
+			expect(expanded).toContain("<p>Authorize deployment?</p>");
+			expect(expanded).toContain('value="no"> No</label>');
+			expect(expanded).toContain('"deploy": "yes"');
 		});
 
-		it("bounds long ask questions and custom answers with visible head and tail context", () => {
+		it("bounds long ask forms and answers with visible head and tail context", () => {
 			const questionEnd = "question-at-end";
 			const answerEnd = "answer-at-end";
 			const longQuestion = {
-				...(askCall as unknown as { content: { arguments: { questions: unknown[] } }[] }),
+				...(askCall as unknown as Record<string, unknown>),
 				content: [
 					{
 						...(askCall as unknown as { content: Record<string, unknown>[] }).content[0],
 						arguments: {
-							questions: [
-								{
-									id: "deploy",
-									question: `question-start ${"context ".repeat(1200)}${questionEnd}`,
-									options: [{ label: "Custom" }],
-								},
-							],
+							html: `<form><p>question-start ${"context\n".repeat(1200)}${questionEnd}</p><textarea name="answer"></textarea></form>`,
 						},
 					},
 				],
@@ -411,18 +400,8 @@ describe("advisor", () => {
 				role: "toolResult",
 				toolCallId: "ask-orphan",
 				toolName: "ask",
-				content: [{ type: "text", text: "deploy: Yes" }],
-				details: {
-					results: [
-						{
-							id: "deploy",
-							question: "Authorize production deployment?",
-							options: ["Yes", "No"],
-							multi: false,
-							selectedOptions: ["Yes"],
-						},
-					],
-				},
+				content: [{ type: "text", text: 'User answers:\n{\n  "deploy": "yes"\n}' }],
+				details: { answers: [{ name: "deploy", question: "Authorize production deployment?", answer: "Yes" }] },
 				isError: false,
 				timestamp: 2,
 			} as unknown as AgentMessage;
@@ -430,7 +409,7 @@ describe("advisor", () => {
 			const expanded = formatSessionHistoryMarkdown([orphan], { expandToolIO: true });
 
 			expect(expanded).toContain("Authorize production deployment?");
-			expect(expanded).toContain("deploy: Yes");
+			expect(expanded).toContain('"deploy": "yes"');
 		});
 
 		it("bounds expanded tool results with visible head and tail context", () => {
@@ -1126,6 +1105,19 @@ describe("advisor", () => {
 			// The guard's dedupe memory is gone too: the same note admits again.
 			await tool.execute("q-1", { note: "Queued but never flushed.", severity: "concern" });
 			expect(delivered).toEqual(["Queued but never flushed."]);
+		});
+
+		it("emits nothing from a cancelled review", async () => {
+			const delivered: string[] = [];
+			const tool = new AdviseTool(note => delivered.push(note));
+			const cancelled = new AbortController();
+			cancelled.abort();
+			tool.beginUpdate(false);
+			await tool.execute("x-0", { note: "Stale finding.", severity: "blocker" }, cancelled.signal);
+			expect(delivered).toEqual([]);
+			// Nothing was admitted either: a later review may raise it.
+			await tool.execute("x-1", { note: "Stale finding.", severity: "blocker" });
+			expect(delivered).toEqual(["Stale finding."]);
 		});
 
 		it("validates parameters using ArkType", () => {
@@ -2114,6 +2106,43 @@ describe("advisor", () => {
 			expect(updateStates).toEqual([false]);
 		});
 
+		it("supersede cancels the review in flight and holds its update for the next dispatch", async () => {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const firstStarted = Promise.withResolvers<void>();
+			const firstRelease = Promise.withResolvers<void>();
+			const secondStarted = Promise.withResolvers<void>();
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+					if (promptInputs.length === 1) {
+						firstStarted.resolve();
+						await firstRelease.promise;
+					} else {
+						secondStarted.resolve();
+					}
+				},
+				abort: () => firstRelease.resolve(),
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "handoff", timestamp: 1 } as AgentMessage];
+			const runtime = new AdvisorRuntime(agent, { snapshotMessages: () => messages });
+
+			runtime.onTurnEnd(messages);
+			await firstStarted.promise;
+			expect(runtime.supersede()).toBe(true);
+			// The cancelled review no longer counts as backlog.
+			expect(await runtime.waitForCatchup(1_000, 1)).toBe(true);
+			expect(promptInputs).toHaveLength(1);
+
+			messages.push({ role: "user", content: "fix", timestamp: 2 } as AgentMessage);
+			runtime.onTurnEnd(messages);
+			await secondStarted.promise;
+			const second = promptText(promptInputs[1]!);
+			expect(second).toContain("handoff");
+			expect(second).toContain("fix");
+		});
+
 		it("sends the batch when context maintenance fails", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const { promise: promptStarted, resolve: startPrompt } = Promise.withResolvers<void>();
@@ -2248,6 +2277,62 @@ describe("advisor", () => {
 			expect(block?.type).toBe("toolCall");
 			expect(JSON.stringify(block?.type === "toolCall" ? block.arguments : {})).not.toContain(secret);
 			expect(block?.type === "toolCall" ? block.thoughtSignature : "kept").toBeUndefined();
+		});
+
+		it("drops a chat-completions reasoning_details envelope when it rewrites a later thinking block", async () => {
+			const secret = "ADVISOR_DETAILS_SECRET_123";
+			const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			// The first thinking block holds the turn's received `reasoning_details`,
+			// which carry the second block's raw text.
+			const assistant = {
+				role: "assistant",
+				content: [
+					{
+						type: "thinking",
+						thinking: "Plan.",
+						thinkingSignature: JSON.stringify({
+							reasoningDetails: [{ type: "reasoning.text", text: `Plan.Use ${secret} now.`, index: 0 }],
+							field: "reasoning",
+						}),
+					},
+					{ type: "text", text: "Working." },
+					{ type: "thinking", thinking: `Use ${secret} now.`, thinkingSignature: "reasoning" },
+				],
+				api: "openai-completions",
+				provider: "openrouter",
+				model: "google/gemini-3-pro-preview",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: 1,
+			} as AssistantMessage;
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [assistant] as AgentMessage[] },
+			};
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => [{ role: "user", content: "go on", timestamp: 2 } as AgentMessage],
+				obfuscator,
+			};
+			const runtime = new AdvisorRuntime(agent, host);
+
+			runtime.onTurnEnd();
+			await Promise.resolve();
+
+			expect(JSON.stringify(agent.state.messages)).not.toContain(secret);
+			const first = (agent.state.messages[0] as AssistantMessage).content[0];
+			expect(first).toMatchObject({ type: "thinking", thinking: "Plan.", thinkingSignature: "reasoning" });
 		});
 
 		it("falls back to one redacted update when a regex secret spans source messages", async () => {
@@ -5719,6 +5804,38 @@ describe("advisor", () => {
 			expect(runtime.backlog).toBe(0);
 		});
 
+		it("backs off between consecutive failures and honors a provider retry hint", async () => {
+			const promptTimes: number[] = [];
+			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
+			const agent: AdvisorAgent = {
+				prompt: async () => {
+					promptTimes.push(performance.now());
+					// The 1st failure carries a 150 ms hint (above the 40 ms base); the 2nd has none.
+					state.error = promptTimes.length === 1 ? "429 rate limited retry-after-ms=150" : "provider failed";
+				},
+				abort: () => {},
+				reset: () => {
+					state.error = undefined;
+				},
+				state,
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
+			const failures: unknown[] = [];
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => messages,
+				notifyFailure: error => failures.push(error),
+			};
+			const runtime = new AdvisorRuntime(agent, host, 40);
+
+			runtime.onTurnEnd(messages);
+			await settleUntil(() => failures.length >= 1 && runtime.backlog === 0);
+
+			expect(promptTimes).toHaveLength(3);
+			// Hint wins over the 40 ms jittered base; the second wait is 80 ms doubled, minus at most 25% jitter.
+			expect(promptTimes[1] - promptTimes[0]).toBeGreaterThanOrEqual(145);
+			expect(promptTimes[2] - promptTimes[1]).toBeGreaterThanOrEqual(58);
+		});
+
 		it("calls onTurnError for each consecutive failure including the dropped third turn", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const turnErrors: unknown[] = [];
@@ -6858,95 +6975,6 @@ describe("advisor", () => {
 			expect(runtime.quotaExhausted).toBe(false);
 			expect(quotaNotified).toBe(false);
 			expect(runtime.backlog).toBe(0);
-		});
-	});
-
-	describe("createAdvisorMessageCard", () => {
-		const strip = (lines: readonly string[]): string => lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
-
-		it("renders the advisor header, severity badge, and note text", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			const card = createAdvisorMessageCard(
-				{ notes: [{ note: "deleting the wrong file", severity: "blocker" }, { note: "watch the empty case" }] },
-				() => true,
-				uiTheme,
-			);
-			const text = strip(card.render(80));
-			expect(text).toContain("Advisor");
-			expect(text).toContain("2 notes");
-			expect(text).toContain("blocker");
-			expect(text).toContain("deleting the wrong file");
-			expect(text).toContain("watch the empty case");
-		});
-
-		it("prefixes the note with a named-advisor label, but not for the default advisor", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			const card = createAdvisorMessageCard(
-				{
-					notes: [
-						{ note: "module boundary leak", severity: "concern", advisor: "Architecture" },
-						{ note: "default-advisor note", advisor: "default" },
-					],
-				},
-				() => true,
-				uiTheme,
-			);
-			const text = strip(card.render(80));
-			expect(text).toContain("[Architecture]");
-			expect(text).toContain("module boundary leak");
-			// The implicit "default" advisor stays unlabeled.
-			expect(text).not.toContain("[default]");
-		});
-
-		it("collapses to the first notes with an overflow hint", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			const notes = Array.from({ length: 5 }, (_, i) => ({ note: `note ${i}` }));
-			const card = createAdvisorMessageCard({ notes }, () => false, uiTheme);
-			const text = strip(card.render(80));
-			expect(text).toContain("note 0");
-			expect(text).toContain("+2 more");
-			expect(text).not.toContain("note 4");
-		});
-
-		it("wraps long notes across multiple lines based on render width instead of truncating them", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			const note =
-				"This is a very long advisor note that will definitely exceed the restricted width constraint of thirty characters and should therefore wrap across multiple lines rather than getting truncated.";
-			const card = createAdvisorMessageCard({ notes: [{ note, severity: "concern" }] }, () => true, uiTheme);
-			const text = strip(card.render(30));
-			expect(text).toContain("truncated.");
-		});
-
-		it("wraps long notes even when the message card is collapsed", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			const note =
-				"This is a very long advisor note that will definitely exceed the restricted width constraint of thirty characters and should therefore wrap across multiple lines rather than getting truncated.";
-			const card = createAdvisorMessageCard({ notes: [{ note, severity: "concern" }] }, () => false, uiTheme);
-			const text = strip(card.render(30));
-			expect(text).toContain("truncated.");
-		});
-
-		it("caps collapsed note rows at advisorCollapsedLines and shows every row when expanded", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			const note =
-				"This is a very long advisor note that will definitely exceed the restricted width constraint of thirty characters and should therefore wrap across multiple lines rather than getting truncated.";
-			const details = { notes: [{ note, severity: "concern" as const }] };
-			try {
-				setChatTranscriptDisplayPreferences({ advisorCollapsedLines: 1 });
-				const rows = createAdvisorMessageCard(details, () => false, uiTheme).render(30);
-				expect(rows.length).toBe(2);
-				expect(strip(rows)).not.toContain("truncated.");
-				const expanded = createAdvisorMessageCard(details, () => true, uiTheme);
-				expect(strip(expanded.render(30))).toContain("truncated.");
-			} finally {
-				setChatTranscriptDisplayPreferences({ advisorCollapsedLines: 0 });
-			}
 		});
 	});
 

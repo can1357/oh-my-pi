@@ -7,6 +7,7 @@ import type { ExecutorBackendResult } from "@oh-my-pi/pi-coding-agent/eval/backe
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { cfgToolsMaxTimeout } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { TOOL_TIMEOUTS } from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 
 function makeSession(settings: Settings, asyncJobManager?: AsyncJobManager): ToolSession {
 	return {
@@ -87,10 +88,25 @@ describe("eval timeout admission contract", () => {
 		};
 		expect(description()).toContain("1–3600");
 		expect(description()).toContain("12");
-		expect(tool.description).toContain("12");
 		cfgToolsMaxTimeout.override(settings, 7);
 		expect(description()).toContain("7");
-		expect(tool.description).toContain("7");
+	});
+
+	it("tells the model the deadline an omitted timeout gets (#18856)", () => {
+		const settings = Settings.isolated({});
+		const tool = new EvalTool(makeSession(settings));
+		const timeoutDescription = () =>
+			(toolWireSchema(tool) as { properties: { timeout: { description: string } } }).properties.timeout.description;
+		const { default: defaultTimeout } = TOOL_TIMEOUTS.eval;
+		expect(timeoutDescription()).toContain(`(default ${defaultTimeout})`);
+		expect(tool.description).toContain(`without \`timeout\` stops after ${defaultTimeout}s`);
+		expect(tool.description).toContain("pass a larger `timeout`");
+		// A configured ceiling below the default is the deadline an omitted timeout really gets,
+		// and nothing larger can be passed, so the prompt must not suggest it.
+		cfgToolsMaxTimeout.override(settings, 12);
+		expect(timeoutDescription()).toContain("(default 12)");
+		expect(tool.description).toContain("without `timeout` stops after 12s.");
+		expect(tool.description).not.toContain("pass a larger `timeout`");
 	});
 
 	it("keeps a background cell's deadline and notices fixed at its admitted value", async () => {

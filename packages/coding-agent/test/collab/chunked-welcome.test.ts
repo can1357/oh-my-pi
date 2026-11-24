@@ -78,10 +78,8 @@ function makeHostContext(snapshot: SizedSnapshot): InteractiveModeContext {
 		eventBus: undefined,
 		statusLine: {
 			setCollabStatus: () => {},
-			invalidate: () => {},
-			getCachedContextBreakdown: () => ({ usedTokens: 0, contextWindow: 0 }),
+			facts: () => ({ context: { tokens: 0, window: 0, percent: null } }),
 		},
-		ui: { requestRender: () => {} },
 		showStatus: () => {},
 		collabHost: undefined,
 	};
@@ -99,11 +97,11 @@ function makeFailingGuestContext(failure: Error): InteractiveModeContext {
 			newSession: () => Promise.resolve(),
 			messages: [],
 		},
-		statusContainer: { clear: () => {} },
-		pendingShellContainer: { clear: () => {} },
-		pendingMessagesContainer: { clear: () => {} },
+		clearTransientSessionUi: () => {},
+		clearWorking: () => false,
+		ensureWorkingRow: () => {},
+		updatePendingMessagesDisplay: () => {},
 		compactionQueuedMessages: [],
-		streamingComponent: undefined,
 		streamingMessage: undefined,
 		transcriptMessageComponents: new WeakMap(),
 		pendingTools: new Map(),
@@ -112,13 +110,11 @@ function makeFailingGuestContext(failure: Error): InteractiveModeContext {
 			takeDisplaceableComponents: () => [],
 			resetTranscriptAnchors: () => {},
 		},
-		loadingAnimation: undefined,
 		statusLine: {
 			setCollabStatus: () => {},
-			invalidate: () => {},
 			resetActiveTime: () => {},
+			refresh: () => {},
 		},
-		ui: { requestRender: () => {} },
 		chatContainer: { clear: () => {}, disposeChildren: () => {} },
 		resetObserverRegistry: () => {},
 		renderInitialMessages: () => {},
@@ -156,11 +152,11 @@ function makeCancelledSwitchGuestContext(
 				setDisableReasoning: () => events.push("host-reasoning"),
 			},
 		},
-		statusContainer: { clear: () => events.push("clear-transient-ui") },
-		pendingShellContainer: { clear: () => {} },
-		pendingMessagesContainer: { clear: () => {} },
+		clearTransientSessionUi: () => events.push("clear-transient-ui"),
+		clearWorking: () => false,
+		ensureWorkingRow: () => {},
+		updatePendingMessagesDisplay: () => {},
 		compactionQueuedMessages: [],
-		streamingComponent: undefined,
 		streamingMessage: undefined,
 		transcriptMessageComponents: new WeakMap(),
 		pendingTools: new Map(),
@@ -169,14 +165,12 @@ function makeCancelledSwitchGuestContext(
 			takeDisplaceableComponents: () => [],
 			resetTranscriptAnchors: () => {},
 		},
-		loadingAnimation: undefined,
 		statusLine: {
 			setCollabStatus: () => {},
-			invalidate: () => {},
 			resetActiveTime: () => {},
+			refresh: () => {},
 			markActivityEnd: () => events.push("host-activity"),
 		},
-		ui: { requestRender: () => {} },
 		chatContainer: { clear: () => {}, disposeChildren: () => {} },
 		resetObserverRegistry: () => {},
 		renderInitialMessages: () => {},
@@ -205,8 +199,11 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-	uninstallInMemoryRelay();
-	await host.stop("test done");
+	try {
+		await host.stop("test done");
+	} finally {
+		uninstallInMemoryRelay();
+	}
 });
 
 const guestCleanups: (() => void)[] = [];

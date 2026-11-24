@@ -1,195 +1,137 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { SessionSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-selector";
-import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
-import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { afterAll, describe, expect, it } from "bun:test";
+import { mountSessionSelector, sessionEntry } from "../../helpers/session-selector";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
-beforeAll(async () => {
-	await initTheme();
-});
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
-afterAll(async () => {
-	await initTheme();
-});
-
-function createSession(id: string, title: string, modified: string): SessionInfo {
-	return {
-		path: `/work/${id}.jsonl`,
-		id,
-		cwd: "/work",
-		title,
-		created: new Date("2024-01-01T00:00:00Z"),
-		modified: new Date(modified),
-		messageCount: 1,
-		size: 2048,
-		firstMessage: `first message ${id}`,
-		allMessagesText: `first message ${id}`,
-	};
-}
-
-function renderPlain(sessions: SessionInfo[], currentSessionPath?: string): string {
-	const selector = new SessionSelectorComponent(
-		sessions,
-		() => {},
-		() => {},
-		() => {},
-		{
-			getTerminalRows: () => 100,
-			currentSessionPath,
-		},
-	);
-	return stripAnsi(selector.render(120).join("\n"));
-}
-
-function stripAnsi(text: string): string {
-	return text.replace(/\x1b\[[0-9;]*m/g, "");
-}
-
+/** The rows from the one naming `title` (its label and metadata lines). */
 function sessionSection(rendered: string, title: string): string {
 	const lines = rendered.split("\n");
 	const idx = lines.findIndex(line => line.includes(title));
 	expect(idx).toBeGreaterThan(-1);
-	return lines.slice(idx, idx + 4).join("\n");
+	return lines.slice(idx, idx + 3).join("\n");
 }
 
-describe("SessionSelectorComponent current session marker", () => {
-	const newer = createSession("newer", "Newer session", "2024-01-03T00:00:00Z");
-	const older = createSession("older", "Older session", "2024-01-02T00:00:00Z");
+describe("session selector current session", () => {
+	const newer = sessionEntry("newer", "Newer session", "2024-01-03T00:00:00Z");
+	const older = sessionEntry("older", "Older session", "2024-01-02T00:00:00Z");
 
 	it("renders no current marker when the live session path is not provided", () => {
-		const rendered = renderPlain([newer, older]);
+		const picker = mountSessionSelector({ sessions: [newer, older] });
+		const rendered = picker.screen();
+		picker.term.dispose();
 		expect(sessionSection(rendered, "Newer session")).not.toContain("current");
 		expect(sessionSection(rendered, "Older session")).not.toContain("current");
 	});
 
-	it("labels only the live session current on the metadata line", () => {
-		const rendered = renderPlain([newer, older], older.path);
+	it("labels only the live session current", () => {
+		const picker = mountSessionSelector({ sessions: [newer, older], currentSessionPath: older.path });
+		const rendered = picker.screen();
+		picker.term.dispose();
 		expect(sessionSection(rendered, "Older session")).toContain("current");
 		expect(sessionSection(rendered, "Newer session")).not.toContain("current");
 	});
 
 	it("focuses the live session even when it is not the most recent row", () => {
-		const rendered = renderPlain([newer, older], older.path);
-		const cursor = theme.nav.cursor;
-		expect(sessionSection(rendered, "Older session")).toContain(`${cursor} Older session`);
-		expect(sessionSection(rendered, "Newer session")).not.toContain(`${cursor} Newer session`);
+		const picker = mountSessionSelector({ sessions: [newer, older], currentSessionPath: older.path });
+		expect(picker.enter()?.id).toBe("older");
+		picker.term.dispose();
 	});
 
 	it("resets focus to the top search match when the live session is excluded", () => {
-		const work = createSession("work", "Alpha work", "2024-01-03T00:00:00Z");
-		const live = createSession("live", "Beta live", "2024-01-02T00:00:00Z");
-		const other = createSession("other", "Alpha other", "2024-01-01T00:00:00Z");
-		const selector = new SessionSelectorComponent(
-			[work, live, other],
-			() => {},
-			() => {},
-			() => {},
-			{
-				getTerminalRows: () => 100,
-				currentSessionPath: live.path,
-			},
-		);
-		for (const ch of "alpha") selector.handleInput(ch);
-		const rendered = stripAnsi(selector.render(120).join("\n"));
-		const cursor = theme.nav.cursor;
-		expect(sessionSection(rendered, "Alpha work")).toContain(`${cursor} Alpha work`);
-		expect(sessionSection(rendered, "Alpha other")).not.toContain(`${cursor} Alpha other`);
+		const work = sessionEntry("work", "Alpha work", "2024-01-03T00:00:00Z");
+		const live = sessionEntry("live", "Beta live", "2024-01-02T00:00:00Z");
+		const other = sessionEntry("other", "Alpha other", "2024-01-01T00:00:00Z");
+		const picker = mountSessionSelector({ sessions: [work, live, other], currentSessionPath: live.path });
+		picker.term.type("alpha");
+		expect(picker.enter()?.id).toBe("work");
+		picker.term.dispose();
 	});
 
-	it("keeps the neighboring row focused after deleting with an empty query", () => {
-		const alpha = createSession("alpha", "Alpha", "2024-01-03T00:00:00Z");
-		const bravo = createSession("bravo", "Bravo", "2024-01-02T00:00:00Z");
-		const live = createSession("live", "Charlie live", "2024-01-01T00:00:00Z");
-		const selector = new SessionSelectorComponent(
-			[alpha, bravo, live],
-			() => {},
-			() => {},
-			() => {},
-			{
-				getTerminalRows: () => 100,
-				currentSessionPath: live.path,
+	it("keeps the neighboring row focused after deleting with an empty query", async () => {
+		const alpha = sessionEntry("alpha", "Alpha", "2024-01-03T00:00:00Z");
+		const bravo = sessionEntry("bravo", "Bravo", "2024-01-02T00:00:00Z");
+		const live = sessionEntry("live", "Charlie live", "2024-01-01T00:00:00Z");
+		const deleted = Promise.withResolvers<void>();
+		const picker = mountSessionSelector({
+			sessions: [alpha, bravo, live],
+			currentSessionPath: live.path,
+			onDelete: async () => {
+				deleted.resolve();
+				return true;
 			},
-		);
-		selector.handleInput("\x1b[A");
-		selector.handleInput("\x1b[A");
-		selector.getSessionList().removeSession(alpha.path);
-		const rendered = stripAnsi(selector.render(120).join("\n"));
-		const cursor = theme.nav.cursor;
-		expect(sessionSection(rendered, "Bravo")).toContain(`${cursor} Bravo`);
-		expect(sessionSection(rendered, "Charlie live")).not.toContain(`${cursor} Charlie live`);
+		});
+		picker.press("up", "up", "delete", "enter");
+		await deleted.promise;
+		await Promise.resolve();
+		expect(picker.screen()).not.toContain("Alpha");
+		expect(picker.enter()?.id).toBe("bravo");
+		picker.term.dispose();
 	});
 
-	it("keeps the neighboring row focused after deleting a filtered result", () => {
-		const alpha = createSession("alpha", "Alpha work", "2024-01-03T00:00:00Z");
-		const bravo = createSession("bravo", "Alpha bravo", "2024-01-02T00:00:00Z");
-		const charlie = createSession("charlie", "Alpha charlie", "2024-01-01T00:00:00Z");
-		const live = createSession("live", "Beta live", "2023-12-31T00:00:00Z");
-		const selector = new SessionSelectorComponent(
-			[alpha, bravo, charlie, live],
-			() => {},
-			() => {},
-			() => {},
-			{
-				getTerminalRows: () => 100,
-				currentSessionPath: live.path,
+	it("keeps the neighboring row focused after deleting a filtered result", async () => {
+		const alpha = sessionEntry("alpha", "Alpha work", "2024-01-03T00:00:00Z");
+		const bravo = sessionEntry("bravo", "Alpha bravo", "2024-01-02T00:00:00Z");
+		const charlie = sessionEntry("charlie", "Alpha charlie", "2024-01-01T00:00:00Z");
+		const live = sessionEntry("live", "Beta live", "2023-12-31T00:00:00Z");
+		const deleted = Promise.withResolvers<void>();
+		const picker = mountSessionSelector({
+			sessions: [alpha, bravo, charlie, live],
+			currentSessionPath: live.path,
+			onDelete: async () => {
+				deleted.resolve();
+				return true;
 			},
-		);
-		for (const ch of "alpha") selector.handleInput(ch);
-		selector.handleInput("\x1b[B");
-		selector.getSessionList().removeSession(bravo.path);
-		const rendered = stripAnsi(selector.render(120).join("\n"));
-		const cursor = theme.nav.cursor;
-		expect(sessionSection(rendered, "Alpha charlie")).toContain(`${cursor} Alpha charlie`);
-		expect(sessionSection(rendered, "Alpha work")).not.toContain(`${cursor} Alpha work`);
+		});
+		picker.term.type("alpha");
+		picker.press("down", "delete", "enter");
+		await deleted.promise;
+		await Promise.resolve();
+		expect(picker.screen()).not.toContain("Alpha bravo");
+		expect(picker.enter()?.id).toBe("charlie");
+		picker.term.dispose();
 	});
 
 	it("restores live-session focus when the search query is cleared", () => {
-		const selector = new SessionSelectorComponent(
-			[newer, older],
-			() => {},
-			() => {},
-			() => {},
-			{
-				getTerminalRows: () => 100,
-				currentSessionPath: older.path,
-			},
-		);
-		selector.handleInput("x");
-		selector.handleInput("\x7f");
-		const rendered = stripAnsi(selector.render(120).join("\n"));
-		const cursor = theme.nav.cursor;
-		expect(sessionSection(rendered, "Older session")).toContain(`${cursor} Older session`);
-		expect(sessionSection(rendered, "Newer session")).not.toContain(`${cursor} Newer session`);
+		const picker = mountSessionSelector({ sessions: [newer, older], currentSessionPath: older.path });
+		picker.term.type("x");
+		picker.press("backspace");
+		expect(picker.enter()?.id).toBe("older");
+		picker.term.dispose();
 	});
 
-	it("drops a deleted live session from the cached all-projects list", async () => {
-		const alpha = createSession("alpha", "Alpha", "2024-01-03T00:00:00Z");
-		const live = createSession("live", "Charlie live", "2024-01-02T00:00:00Z");
-		const other = createSession("other", "Other project", "2024-01-01T00:00:00Z");
-		let currentPath: string | undefined = live.path;
-		const selector = new SessionSelectorComponent(
-			[alpha, live],
-			() => {},
-			() => {},
-			() => {},
-			{
-				getTerminalRows: () => 100,
-				currentSessionPath: () => currentPath,
-				allSessions: { sessions: [alpha, live, other] },
-				onDelete: async () => {
-					currentPath = "/work/fresh.jsonl";
-					return true;
-				},
+	it("drops a deleted live session from the all-projects listing", async () => {
+		const alpha = sessionEntry("alpha", "Alpha", "2024-01-03T00:00:00Z");
+		const live = sessionEntry("live", "Charlie live", "2024-01-02T00:00:00Z");
+		const other = sessionEntry("other", "Other project", "2024-01-01T00:00:00Z", { cwd: "/elsewhere" });
+		const deleted = Promise.withResolvers<void>();
+		const loaded = Promise.withResolvers<void>();
+		const picker = mountSessionSelector({
+			sessions: [alpha, live],
+			currentSessionPath: live.path,
+			loadAllSessions: async () => {
+				loaded.resolve();
+				return { sessions: [alpha, live, other] };
 			},
-		);
-		selector.handleInput("\x1b[3~");
-		selector.handleInput("\n");
-		await Promise.resolve();
-		selector.handleInput("\t");
-		const rendered = stripAnsi(selector.render(120).join("\n"));
-		expect(rendered).toContain("(all projects)");
-		expect(rendered).toContain("Other project");
-		expect(rendered).not.toContain("Charlie live");
-		expect(sessionSection(rendered, "Alpha")).not.toContain("current");
-		expect(sessionSection(rendered, "Other project")).not.toContain("current");
+			onDelete: async () => {
+				deleted.resolve();
+				return true;
+			},
+		});
+		try {
+			picker.press("delete", "enter");
+			await deleted.promise;
+			await Promise.resolve();
+			picker.press("tab");
+			await loaded.promise;
+			await Promise.resolve();
+			const rendered = picker.screen();
+			expect(rendered).toContain("(all projects)");
+			expect(rendered).toContain("Other project");
+			expect(rendered).not.toContain("Charlie live");
+		} finally {
+			picker.term.dispose();
+		}
 	});
 });

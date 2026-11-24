@@ -1,19 +1,17 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { all } from "@oh-my-pi/pi-coding-agent/config/registry";
 
-import { getSettingsForTab, SETTING_TABS, TAB_GROUPS } from "@oh-my-pi/pi-tui/overlays/settings-defs";
+import { getSettingsForTab, SETTING_TABS, TAB_GROUPS } from "@oh-my-pi/pi-coding-agent/config/settings-defs";
 import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
-import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
-import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
-import { initTheme, setTheme } from "@oh-my-pi/pi-tui/theme";
+import { mountSettingsWindow, settingsScreen } from "../../helpers/settings-window";
 import { cfgRetryUsageAwareFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
 import { cfgPythonKernelIdleShutdownSeconds } from "@oh-my-pi/pi-coding-agent/eval/settings";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
-beforeAll(async () => {
-	await initTheme();
-});
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 describe("settings layout", () => {
 	beforeEach(async () => {
@@ -97,65 +95,40 @@ describe("settings layout", () => {
 		expect(defs[2]?.condition?.()).toBe(true);
 	});
 
-	it("lets the settings panel enable and disable Python idle shutdown", async () => {
-		await setTheme("dark");
-		const selector = new SettingsSelectorComponent(
-			{
-				availableThinkingLevels: [],
-				thinkingLevel: undefined,
-				availableThemes: ["dark", "light"],
-				providers: [],
-				settings: createSettingsHost(),
-				plugins: createPluginSettingsHost(process.cwd()),
-			},
-			{ onChange: () => {}, onCancel: () => {} },
-		);
-		for (const ch of "python kernel idle shutdown") selector.handleInput(ch);
-		expect(selector.render(100).join("\n")).toContain("Python Kernel Idle Shutdown");
-		selector.handleInput("\n");
-		const menu = selector.render(100).join("\n");
-		for (const label of ["Off", "5 minutes", "15 minutes", "30 minutes", "1 hour"]) {
-			expect(menu).toContain(label);
+	it("lets the settings panel enable and disable Python idle shutdown", () => {
+		const term = mountSettingsWindow();
+		try {
+			term.type("python kernel idle shutdown");
+			expect(settingsScreen(term)).toContain("Python Kernel Idle Shutdown");
+			term.press("enter");
+			const menu = settingsScreen(term);
+			for (const label of ["Off", "5 minutes", "15 minutes", "30 minutes", "1 hour"]) {
+				expect(menu).toContain(label);
+			}
+			term.press("down");
+			term.press("enter");
+			expect(cfgPythonKernelIdleShutdownSeconds.get(Settings.instance)).toBe(300);
+			term.press("enter");
+			term.press("up");
+			term.press("enter");
+			expect(cfgPythonKernelIdleShutdownSeconds.get(Settings.instance)).toBe(0);
+		} finally {
+			term.dispose();
 		}
-		selector.handleInput("\x1b[B");
-		selector.handleInput("\n");
-		expect(cfgPythonKernelIdleShutdownSeconds.get(Settings.instance)).toBe(300);
-		selector.handleInput("\n");
-		selector.handleInput("\x1b[A");
-		selector.handleInput("\n");
-		expect(cfgPythonKernelIdleShutdownSeconds.get(Settings.instance)).toBe(0);
 	});
 
-	it("renders preview inside SettingsSelectorComponent submenu without crashing", async () => {
-		await setTheme("dark");
-		const selector = new SettingsSelectorComponent(
-			{
-				availableThinkingLevels: [],
-				thinkingLevel: undefined,
-				availableThemes: ["dark", "light"],
-				providers: [],
-				settings: createSettingsHost(),
-				plugins: createPluginSettingsHost(process.cwd()),
-			},
-			{
-				onChange: () => {},
-				onCancel: () => {},
-			},
-		);
-
-		for (const ch of "composer shape") selector.handleInput(ch);
-		// Open the composer.shape submenu
-		selector.handleInput("\n");
-
-		const rendered = selector.render(80).join("\n");
-		expect(rendered).toContain("Composer Shape");
-		expect(rendered).toContain("Preview:");
-		expect(rendered).toContain("Ask anything");
-
-		// Cycle down to claude
-		selector.handleInput("\x1b[B");
-		const nextRendered = selector.render(80).join("\n");
-		expect(nextRendered).toContain("Claude Code");
-		expect(nextRendered).toContain("Preview:");
+	it("offers every composer shape in the composer.shape menu", () => {
+		const term = mountSettingsWindow();
+		try {
+			term.type("composer shape");
+			// Open the composer.shape menu
+			term.press("enter");
+			const rendered = settingsScreen(term);
+			expect(rendered).toContain("Composer Shape");
+			expect(rendered).toContain("Rounded Box");
+			expect(rendered).toContain("Claude Code");
+		} finally {
+			term.dispose();
+		}
 	});
 });

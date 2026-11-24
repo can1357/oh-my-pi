@@ -3,7 +3,7 @@ import { logger, VERSION } from "@oh-my-pi/pi-utils";
 import { buildModel } from "./build";
 import { collapseBuiltVariants } from "./compat/collapse";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
-import { readModelCache, writeModelCache } from "./model-cache";
+import { forEachInSlices, readModelCache, writeModelCacheAsync } from "./model-cache";
 import { type GeneratedProvider, getBundledModels } from "./models";
 import { TimeBasedCostShape } from "./pricing";
 import { type Api, type Model, modelKind, type ModelSpec, type Provider } from "./types";
@@ -239,6 +239,9 @@ function restoreCachedModelHeaders<TApi extends Api>(
  *
  * Later sources override earlier ones by model id. Cached rows participate only
  * when at least one configured remote source did not refresh successfully.
+ * After a network fetch, models are built, merged and persisted in
+ * time-budgeted slices across event-loop turns; the returned promise settles
+ * once the cache row is stored.
  */
 export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPayload = unknown>(
 	options: ModelManagerOptions<TApi, TModelsDevPayload>,
@@ -380,11 +383,11 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			dynamicModels.length > 0 &&
 			(dynamicModelsAuthoritative || !hasModelsDevFetcher || modelsDevFetchSucceeded)
 		: modelsDevFetchSucceeded;
-	const mergedWithCache = mergeCachedModels(staticModels, cacheModels, {
+	const mergedWithCache = await mergeCachedModels(staticModels, cacheModels, {
 		authority: mergeAuthority,
 		matchesStatic: cacheFingerprintMatches,
 	});
-	const mergedWithModelsDev = mergeDynamicModels(
+	const mergedWithModelsDev = await mergeDynamicModels(
 		mergedWithCache,
 		modelsDevModels,
 		mergeAuthority,
@@ -396,7 +399,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	)
 		? mergeCatalogMetrics(mergedWithModelsDev, catalogMetricsSource)
 		: mergedWithModelsDev;
-	const mergedModels = mergeDynamicModels(
+	const mergedModels = await mergeDynamicModels(
 		mergedWithCatalogMetrics,
 		dynamicModels,
 		mergeAuthority,
@@ -413,7 +416,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const remoteUpdatedAt = anyRemoteFetchSucceeded ? now() : undefined;
 	if (shouldFetchFromNetwork) {
 		if (anyRemoteFetchSucceeded) {
-			writeModelCache(
+			await writeModelCacheAsync(
 				cacheProviderId,
 				remoteUpdatedAt!,
 				models,
@@ -432,7 +435,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			// non-authoritative row reads back as a fresh catalog and suppresses
 			// refetch for NON_AUTHORITATIVE_RETRY_MS, hiding every discovery-only
 			// model until it ages out. Writing nothing lets the next launch retry
-			// immediately (#10964).
+			// immediately (#10964). Likewise keep a prior row whose header-bearing
+			// models cannot be restored offline: rewriting it would drop them and
+			// mark the remainder fresh, while the untouched row keeps forcing a
+			// refetch that recovers them (#18227).
 			const latestCache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
 			const latestRestoredCache = restoreCachedModelHeaders(
 				latestCache?.models ?? cache?.models ?? [],
@@ -455,8 +461,8 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			const latestCacheModels = cacheAdditiveStaticModelIds
 				? preparedLatestCacheModels.filter(model => !cacheAdditiveStaticModelIds.has(model.id))
 				: preparedLatestCacheModels;
-			const mergedFallbackModels = mergeDynamicModels(
-				mergeCachedModels(staticModels, latestCacheModels, {
+			const mergedFallbackModels = await mergeDynamicModels(
+				await mergeCachedModels(staticModels, latestCacheModels, {
 					authority: mergeAuthority,
 					matchesStatic: cacheFingerprintMatches,
 				}),
@@ -468,8 +474,11 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 					? retainModelIds(mergedFallbackModels, latestUsableCacheModels)
 					: mergedFallbackModels,
 			);
-			if (fallbackSnapshotModels.length > 0 || latestCache !== null || cache !== null) {
-				writeModelCache(
+			if (
+				latestRestoredCache.unresolvedModelIds.size === 0 &&
+				(fallbackSnapshotModels.length > 0 || latestCache !== null || cache !== null)
+			) {
+				await writeModelCacheAsync(
 					cacheProviderId,
 					now(),
 					fallbackSnapshotModels,
@@ -518,7 +527,7 @@ async function fetchModelsDev<TApi extends Api, TModelsDevPayload>(
 
 	try {
 		const payload = await options.modelsDev.fetch();
-		return buildDiscoveredModelSpecs<TApi>(options.modelsDev.map(payload, options.providerId));
+		return await buildDiscoveredModelSpecs<TApi>(options.modelsDev.map(payload, options.providerId));
 	} catch {
 		return null;
 	}
@@ -530,7 +539,7 @@ async function fetchDynamicModels<TApi extends Api>(
 ): Promise<{ models: DiscoveredModelSet<TApi> | null; error?: string }> {
 	try {
 		const models = await fetcher();
-		return { models: models === null ? null : buildDiscoveredModelSpecs<TApi>(models) };
+		return { models: models === null ? null : await buildDiscoveredModelSpecs<TApi>(models) };
 	} catch (error) {
 		return { models: null, error: error instanceof Error ? error.message : String(error) };
 	}
@@ -605,32 +614,31 @@ interface DynamicMergeAuthority {
 	readonly staticNames: ReadonlyMap<string, string> | undefined;
 }
 
-function mergeDynamicModels<TApi extends Api>(
+/** Lays dynamic rows over `baseModels` by id; same-id rows are rebuilt merged, in slices. */
+async function mergeDynamicModels<TApi extends Api>(
 	baseModels: readonly Model<TApi>[],
 	dynamicModels: readonly Model<TApi>[],
 	authority: DynamicMergeAuthority,
 	explicitKindModels?: ReadonlySet<Model<TApi>>,
-): Model<TApi>[] {
+): Promise<Model<TApi>[]> {
 	// Empty-side fast paths: `mergeDynamicModels(base, [])` is the common shape
 	// after we've already merged the first pair, and `(...)` with no base
 	// happens for providers without static catalogs.
 	if (dynamicModels.length === 0) return baseModels.length === 0 ? [] : [...baseModels];
 	if (baseModels.length === 0) return [...dynamicModels];
 	const merged = new Map<string, Model<TApi>>(baseModels.map(model => [model.id, model]));
-	for (const dynamicModel of dynamicModels) {
-		if (!dynamicModel?.id) {
-			continue;
-		}
+	await forEachInSlices(dynamicModels, dynamicModel => {
+		if (!dynamicModel?.id) return;
 		const existingModel = merged.get(dynamicModel.id);
 		if (!existingModel) {
 			merged.set(dynamicModel.id, dynamicModel);
-			continue;
+			return;
 		}
 		// A policy-derived kind on a chat row is not permission to replace an
 		// authored runner. Only a kind present before materialization can do so.
-		if (modelKind(existingModel) !== "chat" && !explicitKindModels?.has(dynamicModel)) continue;
+		if (modelKind(existingModel) !== "chat" && !explicitKindModels?.has(dynamicModel)) return;
 		merged.set(dynamicModel.id, mergeDynamicModel(existingModel, dynamicModel, authority));
-	}
+	});
 	return Array.from(merged.values());
 }
 
@@ -641,12 +649,12 @@ function mergeDynamicModels<TApi extends Api>(
  * only rebuild them and churn the persisted payload. A snapshot from another
  * static catalog re-merges so upgraded bundled metadata applies.
  */
-function mergeCachedModels<TApi extends Api>(
+async function mergeCachedModels<TApi extends Api>(
 	staticModels: readonly Model<TApi>[],
 	cacheModels: readonly Model<TApi>[],
 	options: { authority: DynamicMergeAuthority; matchesStatic: boolean },
-): Model<TApi>[] {
-	if (!options.matchesStatic) return mergeDynamicModels(staticModels, cacheModels, options.authority);
+): Promise<Model<TApi>[]> {
+	if (!options.matchesStatic) return await mergeDynamicModels(staticModels, cacheModels, options.authority);
 	const merged = new Map<string, Model<TApi>>(staticModels.map(model => [model.id, model]));
 	for (const cachedModel of cacheModels) merged.set(cachedModel.id, cachedModel);
 	return Array.from(merged.values());
@@ -711,7 +719,15 @@ function mergeDynamicModel<TApi extends Api>(
 	// Providers with authoritative reasoning metadata must not regain a
 	// stale bundled dial after explicitly reporting no reasoning. Others
 	// retain the additive fallback for discovery that omits capabilities.
-	const reasoning = authority.reasoning ? dynamicModel.reasoning : existingModel.reasoning || dynamicModel.reasoning;
+	// A provisional ladder's derived `reasoning: true` is missing evidence,
+	// not capability, so it neither overrides nor joins the other side.
+	const liveReasoning = dynamicModel.thinking?.unverified ? undefined : dynamicModel.reasoning;
+	const fallbackReasoning = existingModel.thinking?.unverified ? undefined : existingModel.reasoning;
+	const reasoning = authority.reasoning
+		? (liveReasoning ?? fallbackReasoning)
+		: liveReasoning === true || fallbackReasoning === true
+			? true
+			: (liveReasoning ?? fallbackReasoning);
 	const longContextCost = dynamicModel.cost.longContext ?? existingModel.cost.longContext;
 	const timeBasedCost = dynamicModel.cost.timeBased ?? existingModel.cost.timeBased;
 	const existingHeaders = existingModel.resolveHeaders ?? existingModel.headers;
@@ -740,6 +756,7 @@ function mergeDynamicModel<TApi extends Api>(
 		liveCompat !== undefined &&
 		"trustExplicitThinkingOnly" in liveCompat &&
 		liveCompat.trustExplicitThinkingOnly === true;
+	const thinking = trustsOwnThinking || "thinking" in dynamicModel ? dynamicModel.thinking : existingModel.thinking;
 	return buildModel({
 		...existingModel,
 		...dynamicModel,
@@ -747,7 +764,9 @@ function mergeDynamicModel<TApi extends Api>(
 			authority.staticNames?.get(dynamicModel.id) ??
 			preferDiscoveryName(dynamicModel.name, existingModel.name, dynamicModel.id),
 		reasoning,
-		...(trustsOwnThinking ? { thinking: dynamicModel.thinking } : {}),
+		// `buildModel` re-derives a provisional ladder from the merged evidence;
+		// carried over, it would erase that evidence (see `resolveModelPolicy`).
+		thinking: thinking?.unverified ? undefined : thinking,
 		input: supportsImage ? ["text", "image"] : ["text"],
 		cost: {
 			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input, authority.cost),
@@ -809,19 +828,21 @@ function preferDiscoveryLimit(discoveryLimit: number | null, fallbackLimit: numb
  * than this build's rule tree that lands on an equal-rank overlap) is skipped
  * with a warning instead of discarding the source's other rows.
  *
+ * Rows are built in time-budgeted slices across event-loop turns.
+ *
  * @throws the first build error when rows were present but none built, so the
  * caller treats the source as failed (cache/static fallback) rather than as an
  * intentionally empty catalog that an authoritative provider would prune to.
  */
-function buildDiscoveredModelSpecs<TApi extends Api>(values: unknown): DiscoveredModelSet<TApi> {
+async function buildDiscoveredModelSpecs<TApi extends Api>(values: unknown): Promise<DiscoveredModelSet<TApi>> {
 	const models: Model<TApi>[] = [];
 	const explicitKindModels = new Set<Model<TApi>>();
 	if (!Array.isArray(values)) {
 		return { models, explicitKindModels };
 	}
 	const failures: unknown[] = [];
-	for (const value of values) {
-		if (!ModelSpecShape.allows(value)) continue;
+	await forEachInSlices<unknown>(values, value => {
+		if (!ModelSpecShape.allows(value)) return;
 		const item = value as ModelSpec<TApi>;
 		let model: Model<TApi>;
 		try {
@@ -833,11 +854,11 @@ function buildDiscoveredModelSpecs<TApi extends Api>(values: unknown): Discovere
 				model: item.id,
 				error: error instanceof Error ? error.message : String(error),
 			});
-			continue;
+			return;
 		}
 		models.push(model);
 		if (item.kind !== undefined) explicitKindModels.add(model);
-	}
+	});
 	if (models.length === 0 && failures.length > 0) throw failures[0];
 	return { models, explicitKindModels };
 }
@@ -852,7 +873,7 @@ const ModelSpecShape = type({
 	provider: "string > 0",
 	// Providers such as Azure resolve the deployment endpoint at request time.
 	baseUrl: "string",
-	reasoning: "boolean",
+	"reasoning?": "boolean | undefined",
 	input: "('text' | 'image')[] > 0",
 	cost: FiniteTokenCost.and({
 		"timeBased?": TimeBasedCostShape.or("undefined"),

@@ -71,6 +71,11 @@ const GOLDENS = [
 			'[link](https://example.com/a_\\(b\\) "A title") and [https://same.test](https://same.test) ![A \\[pic\\]](pic.png "T")',
 	},
 	{
+		name: "spaces around an inline image",
+		html: '<p>see <img src="x.png" alt="a"> here</p>',
+		markdown: "see ![a](x.png) here",
+	},
+	{
 		name: "strikethrough and task list items",
 		html: '<p><del>gone</del> and <s>also</s></p><ul><li><input type="checkbox" checked> done</li><li><input type="checkbox"> todo</li></ul>',
 		markdown: "~~gone~~ and ~~also~~\n\n- [x]  done\n- [ ]  todo",
@@ -79,6 +84,16 @@ const GOLDENS = [
 		name: "mixed inline and unknown HTML",
 		html: "<h2>1. Intro <span>inline <b>bold</b></span></h2><p>Hello&nbsp;  <mark>kept?</mark> <kbd>key</kbd> <u>under</u>.</p><hr><details><summary>More</summary><p>Body</p></details>",
 		markdown: "## 1. Intro inline **bold**\n\nHello  kept? key under.\n\n* * *\n\nMore\n\nBody",
+	},
+	{
+		name: "Pygments code block indentation",
+		html: '<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">def</span><span class="w"> </span><span class="nf">f</span><span class="p">():</span>\n<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">1</span>\n</pre></div></div>',
+		markdown: "def f():\n    return 1",
+	},
+	{
+		name: "whitespace-only inline elements",
+		html: "<p>Hello<span> </span>world, c <span> </span> d, x <wbr> y</p><div>a</div><span> </span><div>b</div><wbr> e",
+		markdown: "Hello world, c d, x y\n\na\n\nb\n\ne",
 	},
 ] as const;
 

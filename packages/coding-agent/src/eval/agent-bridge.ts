@@ -8,6 +8,7 @@ import { createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
 import {
 	buildStructuredSubagentRecoveryHint,
 	invalidModelSelectorReason,
+	normalizeModelSelector,
 	reserveStructuredSubagentId,
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
@@ -15,10 +16,10 @@ import {
 	type StructuredSubagentIsolationControls,
 	type StructuredSubagentResult,
 } from "../task/structured-subagent";
-import type { AgentProgress, SingleResult, StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
-import type { NestedRepoPatch } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentProgress, SingleResult, StructuredSubagentSchemaMode } from "../task/task-details";
+import type { NestedRepoPatch } from "../task/task-details";
 import type { ToolSession } from "../tools";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 import type { JsStatusEvent } from "./js/shared/types";
 
 /** Synthetic bridge name reserved for the `agent()` helper across both runtimes. */
@@ -93,9 +94,10 @@ function parseAgentArgs(args: unknown, settings: Settings): EvalAgentArgs {
 	if (result instanceof type.errors) {
 		throw new ToolError(`agent() received invalid arguments: ${result.summary}`);
 	}
-	const selectorProblem = invalidModelSelectorReason(result.model, "agent()", { settings, invocationKind: "eval" });
+	const model = normalizeModelSelector(result.model);
+	const selectorProblem = invalidModelSelectorReason(model, "agent()", { settings, invocationKind: "eval" });
 	if (selectorProblem) throw new ToolError(selectorProblem);
-	return result;
+	return { ...result, model };
 }
 
 function trimToUndefined(value: string | undefined): string | undefined {

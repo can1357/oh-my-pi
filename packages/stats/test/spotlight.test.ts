@@ -1,10 +1,15 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
 import { closeDb, initDb } from "@oh-my-pi/omp-stats/db";
+import { handleApi, startServer } from "@oh-my-pi/omp-stats/server";
 import type { SpotlightAgentScope, SpotlightDashboardStats } from "@oh-my-pi/omp-stats/shared-types";
-import { buildSpotlightDashboard, getSpotlightSessionContext } from "@oh-my-pi/omp-stats/spotlight-aggregator";
+import {
+	buildSpotlightDashboard,
+	getSpotlightDashboardStats,
+	getSpotlightSessionContext,
+} from "@oh-my-pi/omp-stats/spotlight-aggregator";
 import { argumentTokens } from "@oh-my-pi/omp-stats/spotlight-ingest";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { SpotlightSessionBuilder } from "./helpers/spotlight-session";
@@ -26,7 +31,7 @@ async function dashboard(scope: SpotlightAgentScope = "all"): Promise<SpotlightD
 	return buildSpotlightDashboard(await initDb(), { cutoff: null, bucketMs: DAY }, scope);
 }
 
-/** A shaped read of `file` lines 100-200 that hid lines 120-178 behind artifact://0. */
+/** A shaped read of `file` lines 100-200 that hid lines 120-178 behind local://0.log. */
 function shortenedRead(b: SpotlightSessionBuilder, saved = 2000): string {
 	const [id] = b.request({
 		cacheRead: 10_000,
@@ -34,13 +39,13 @@ function shortenedRead(b: SpotlightSessionBuilder, saved = 2000): string {
 		calls: [{ name: "read", args: { path: "src/a.ts:100-200" } }],
 	});
 	b.result(id, {
-		text: "100\tconst a = 1;\n… [120-178] (read artifact://0:21-79)\n179\tconst z = 2;",
+		text: "100\tconst a = 1;\n… [120-178] (read local://0.log:21-79)\n179\tconst z = 2;",
 		shape: {
 			inTokens: saved + 1000,
 			outTokens: 1000,
 			costUsd: 0.002,
 			original: {
-				url: "artifact://0",
+				url: "local://0.log",
 				lines: 101,
 				start: 100,
 				path: "src/a.ts",
@@ -69,8 +74,8 @@ function heldOutRead(b: SpotlightSessionBuilder, file: string, saved = 3000): st
 			inTokens: saved + 1000,
 			outTokens: 1000,
 			costUsd: 0.001,
-			holdout: { shapedUrl: "artifact://9" },
-			original: { url: "artifact://8", lines: 60, path: file, kept: [[1, 10]] },
+			holdout: { shapedUrl: "local://9.log" },
+			original: { url: "local://8.log", lines: 60, path: file, kept: [[1, 10]] },
 		},
 	});
 	return id;
@@ -83,7 +88,7 @@ function unchangedRead(b: SpotlightSessionBuilder, file: string, inTokens: numbe
 	return id;
 }
 
-/** A shortened `cargo test -p tern` that hid lines 11-50 behind artifact://1. */
+/** A shortened `cargo test -p tern` that hid lines 11-50 behind local://1.log. */
 function shortenedBash(b: SpotlightSessionBuilder, shape: { holdout?: boolean } = {}): string {
 	const [id] = b.request({
 		cacheRead: 11_000,
@@ -91,12 +96,12 @@ function shortenedBash(b: SpotlightSessionBuilder, shape: { holdout?: boolean } 
 		calls: [{ name: "bash", args: { command: "cargo test -p tern" } }],
 	});
 	b.result(id, {
-		text: shape.holdout ? "running 40 tests\n".repeat(50) : "running 40 tests\n… [11-50] (read artifact://1:11-50)",
+		text: shape.holdout ? "running 40 tests\n".repeat(50) : "running 40 tests\n… [11-50] (read local://1.log:11-50)",
 		shape: {
 			inTokens: 1500,
 			outTokens: 300,
-			original: { url: "artifact://1", lines: 50, kept: [[1, 10]] },
-			...(shape.holdout ? { holdout: { shapedUrl: "artifact://2" } } : {}),
+			original: { url: "local://1.log", lines: 50, kept: [[1, 10]] },
+			...(shape.holdout ? { holdout: { shapedUrl: "local://2.log" } } : {}),
 		},
 	});
 	return id;
@@ -125,15 +130,15 @@ describe("Spotlight recovery detection", () => {
 			calls: [{ name: "bash", args: { command: "cargo test -p tern" } }],
 		});
 		b.result(cargo, {
-			text: "running 40 tests\n… [11-50] (read artifact://1:11-50)",
+			text: "running 40 tests\n… [11-50] (read local://1.log:11-50)",
 			shape: {
 				inTokens: 1500,
 				outTokens: 300,
-				original: { url: "artifact://1", lines: 50, kept: [[1, 10]] },
+				original: { url: "local://1.log", lines: 50, kept: [[1, 10]] },
 			},
 		});
 		call(b, "bash", { command: "ls -la" }); // unrelated command
-		const dive = call(b, "read", { path: "artifact://1:10-40" }, "x".repeat(400));
+		const dive = call(b, "read", { path: "local://1.log:10-40" }, "x".repeat(400));
 		const rerun = call(b, "bash", { command: "cargo test -p tern | grep FAILED" }, "y".repeat(80));
 
 		const [rg] = b.request({
@@ -146,7 +151,7 @@ describe("Spotlight recovery detection", () => {
 			shape: {
 				inTokens: 900,
 				outTokens: 100,
-				original: { url: "artifact://2", lines: 60, kept: [[1, 1]] },
+				original: { url: "local://2.log", lines: 60, kept: [[1, 1]] },
 			},
 		});
 		for (let i = 0; i < 12; i++) call(b, "eval", { language: "py", code: `step(${i})` });
@@ -193,7 +198,7 @@ describe("Spotlight recovery detection", () => {
 				inTokens: 3000,
 				outTokens: 1000,
 				original: {
-					url: "artifact://0",
+					url: "local://0.log",
 					lines: 101,
 					start: 100,
 					path: "src/a.ts",
@@ -215,6 +220,67 @@ describe("Spotlight recovery detection", () => {
 	});
 });
 
+describe("Spotlight list reads", () => {
+	/** A shaped `a.py;b.py` read: `a.py` 1-10 kept whole, `b.py` 1-50 with lines 20-40 hidden. */
+	function listRead(b: SpotlightSessionBuilder): string {
+		const [id] = b.request({ cacheRead: 10_000, calls: [{ name: "read", args: { path: "a.py;b.py" } }] });
+		b.result(id, {
+			text: "a.py\n…\nb.py\n… [20-40] (read local://0.log:30-50)",
+			shape: {
+				inTokens: 3000,
+				outTokens: 1000,
+				original: {
+					url: "local://0.log",
+					lines: 60,
+					kept: [
+						[1, 29],
+						[51, 60],
+					],
+					windows: [
+						{ at: 0, lines: 10, start: 1, path: "a.py" },
+						{ at: 10, lines: 50, start: 1, path: "b.py" },
+					],
+				},
+			},
+		});
+		return id;
+	}
+
+	it("recovers a list read's hidden window by a later read of that window's file only", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		const list = listRead(b);
+		call(b, "read", { path: "c.py:25-30" });
+		const later = call(b, "read", { path: "b.py:25-30" });
+		await write("list.jsonl", b);
+
+		const stats = await dashboard();
+		const row = stats.recent.find(r => r.toolCallId === list);
+		expect(row?.hiddenLines).toBe(21);
+		expect(row?.recoveries.map(r => [r.kind, r.toolCallId])).toEqual([["reread", later]]);
+		expect(stats.clawback.events).toBe(1);
+	});
+
+	it("records a later read of a list read's window at its position in the whole original", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		const list = listRead(b);
+		call(b, "read", { path: "b.py:25-30" });
+		await write("list-needs.jsonl", b);
+		await dashboard();
+
+		const db = await initDb();
+		const need = db
+			.query<{ file: string; reread: string }, [string]>(
+				"SELECT file, reread FROM spotlight_needs WHERE tool_call_id = ?",
+			)
+			.get(list);
+		// `a.py` was shown whole: only `b.py`, the window shaping cut, collects needs.
+		expect(need?.file).toBe(path.resolve("/repo", "b.py"));
+		expect(JSON.parse(need?.reread ?? "null")).toEqual([[35, 40]]);
+	});
+});
+
 describe("Spotlight holdout", () => {
 	it("never counts a held-out result as a saving but measures its fetch-backs like a cut's", async () => {
 		const b = new SpotlightSessionBuilder(T0).header("/repo", "holdout").marker();
@@ -225,7 +291,7 @@ describe("Spotlight holdout", () => {
 		call(b, "eval", { language: "py", code: "print(1)" });
 		call(b, "read", { path: "src/h.ts:30-40" });
 		// The held-out result's original artifact was never shown: reading it recovers nothing.
-		call(b, "read", { path: "artifact://8" });
+		call(b, "read", { path: "local://8.log" });
 		await write("holdout.jsonl", b);
 
 		const stats = await dashboard();
@@ -249,6 +315,38 @@ describe("Spotlight holdout", () => {
 	});
 });
 
+describe("Spotlight overhead", () => {
+	it("breaks failed results down by cause, as shares of the results that called Spotlight", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo", "failures").marker();
+		b.user("go");
+		const failedBash = (shape: { failures: number; failureCauses?: Record<string, number> }) => {
+			const [id] = b.request({
+				cacheRead: 10_000,
+				cacheWrite: 500,
+				calls: [{ name: "bash", args: { command: "ls" } }],
+			});
+			b.result(id, { text: "ok", shape: { inTokens: 3000, outTokens: 3000, ...shape } });
+		};
+		failedBash({ failures: 2, failureCauses: { no_credential: 2 } });
+		failedBash({ failures: 1, failureCauses: { no_credential: 1 } });
+		failedBash({ failures: 2, failureCauses: { timeout: 1, rate_limited: 1 } });
+		// Journaled before pi recorded causes.
+		failedBash({ failures: 1 });
+		shortenedRead(b);
+		await write("failures.jsonl", b);
+
+		const { overhead } = await dashboard();
+
+		expect(overhead.failureRate).toBe(4 / 5);
+		expect(overhead.failureCauses).toEqual([
+			{ cause: "no_credential", results: 2, share: 2 / 5 },
+			{ cause: "rate_limited", results: 1, share: 1 / 5 },
+			{ cause: "timeout", results: 1, share: 1 / 5 },
+			{ cause: "unrecorded", results: 1, share: 1 / 5 },
+		]);
+	});
+});
+
 describe("Spotlight edits", () => {
 	it("does not count a re-read after an edit of the file, or a rerun after any edit, as fetching back", async () => {
 		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
@@ -260,9 +358,8 @@ describe("Spotlight edits", () => {
 		call(b, "write", { path: "src/other.ts", content: "x" });
 		call(b, "bash", { command: "cargo test -p tern" });
 		const second = shortenedRead(b);
-		// An edit of another file (ast_edit through `write xd://ast_edit`) excuses nothing; a write to an internal
-		// URL edits no file.
-		call(b, "write", { path: "xd://ast_edit", content: JSON.stringify({ paths: ["src/b.ts"], ops: [] }) });
+		// An `ast_edit` of another file excuses nothing; a write to an internal URL edits no file.
+		call(b, "ast_edit", { paths: ["src/b.ts"] });
 		call(b, "write", { path: "proc://job/kill" });
 		const reread = call(b, "read", { path: "src/a.ts:150-160" });
 		await write("edits.jsonl", b);
@@ -332,7 +429,7 @@ describe("Spotlight cut economics", () => {
 			cacheRead: 12_000,
 			cost: 0.08,
 			calls: [
-				{ name: "read", args: { path: "artifact://0:21-79" } },
+				{ name: "read", args: { path: "local://0.log:21-79" } },
 				{ name: "bash", args: { command: "cargo test -p tern | grep FAILED" } },
 			],
 		});
@@ -382,7 +479,7 @@ describe("Spotlight fetch-back gaps", () => {
 			shape: {
 				inTokens: 900,
 				outTokens: 100,
-				original: { url: "artifact://5", lines: 40, kept: [[1, 2]] },
+				original: { url: "local://5.log", lines: 40, kept: [[1, 2]] },
 			},
 		});
 		for (let i = 0; i < 12; i++) call(b, "eval", { language: "py", code: `wait(${i})` });
@@ -437,7 +534,7 @@ describe("Spotlight generic tools", () => {
 			shape: {
 				inTokens: 900,
 				outTokens: 400,
-				original: { url: "artifact://2", lines: 30, kept: [[1, 2]] },
+				original: { url: "local://2.log", lines: 30, kept: [[1, 2]] },
 			},
 		});
 		const [grep] = b.request({
@@ -445,13 +542,13 @@ describe("Spotlight generic tools", () => {
 			calls: [{ name: "grep", args: { i: "where is it", pattern: "fetchBack", path: "src" } }],
 		});
 		b.result(grep, {
-			text: "src/a.ts:12: fetchBack\n… [21-120] (read artifact://3:21-120)",
+			text: "src/a.ts:12: fetchBack\n… [21-120] (read local://3.log:21-120)",
 			shape: {
 				inTokens: 2400,
 				plainTokens: 2400,
 				outTokens: 400,
 				steps: ["dump"],
-				original: { url: "artifact://3", lines: 120, kept: [[1, 20]] },
+				original: { url: "local://3.log", lines: 120, kept: [[1, 20]] },
 			},
 		});
 		call(b, "grep", { i: "unrelated", pattern: "TODO", path: "docs" });
@@ -461,7 +558,7 @@ describe("Spotlight generic tools", () => {
 			{ i: "narrow it down", pattern: "fetchBack", path: "src", glob: "*.ts" },
 			"x".repeat(200),
 		);
-		const dive = call(b, "read", { path: "artifact://3:30-60" }, "y".repeat(400));
+		const dive = call(b, "read", { path: "local://3.log:30-60" }, "y".repeat(400));
 		const [search] = b.request({ cacheRead: 12_000, calls: [{ name: "web_search", args: { query: "jaccard" } }] });
 		b.result(search, { text: "results", shape: { inTokens: 300, plainTokens: 300, outTokens: 300 } });
 		await write("generic.jsonl", b);
@@ -718,6 +815,95 @@ describe("Spotlight session scope", () => {
 		expect(all.sessions).toBe(2);
 		expect([toolTokens(all, "shaped"), toolTokens(all, "outside")]).toEqual([300, 800]);
 	});
+
+	it("builds the dashboard route off the server thread, with the on-thread payload", async () => {
+		for (const rel of ["main.jsonl", "main/Worker.jsonl"]) {
+			const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+			b.user("go");
+			shortenedRead(b);
+			await write(rel, b);
+		}
+		await syncAllSessions({ workers: 1 });
+
+		// The server's own connection stays untouched: the route builds on a worker's.
+		const database = await initDb();
+		const reads = [vi.spyOn(database, "query"), vi.spyOn(database, "prepare")];
+		const response = await handleApi(new Request("http://stats.test/api/stats/spotlight?range=all&agent=subagent"));
+		for (const read of reads) {
+			expect(read).not.toHaveBeenCalled();
+			read.mockRestore();
+		}
+
+		const json = await response.text();
+		expect(json).toBe(JSON.stringify(await getSpotlightDashboardStats("all", "subagent")));
+		expect((JSON.parse(json) as SpotlightDashboardStats).sessions).toBe(1);
+	});
+
+	it("ends a running dashboard build only when the process's last dashboard stops", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		shortenedRead(b);
+		await write("main.jsonl", b);
+		await syncAllSessions({ workers: 1 });
+
+		const RealWorker = globalThis.Worker;
+		let spawned = Promise.withResolvers<Worker>();
+		const workers = vi.spyOn(globalThis, "Worker").mockImplementation((...args) => {
+			const worker = new RealWorker(...args);
+			spawned.resolve(worker);
+			return worker;
+		});
+		const first = await startServer(0);
+		const second = await startServer(0);
+		try {
+			const kept = handleApi(new Request("http://stats.test/api/stats/spotlight?range=30d&agent=main"));
+			await spawned.promise;
+			first.stop();
+			expect((await kept).status).toBe(200);
+
+			spawned = Promise.withResolvers<Worker>();
+			const ended = handleApi(new Request("http://stats.test/api/stats/spotlight?range=90d&agent=main"));
+			const worker = await spawned.promise;
+			const exited = Promise.withResolvers<void>();
+			worker.addEventListener("close", () => exited.resolve());
+			second.stop();
+			expect(await ended.catch((error: Error) => error.message)).toBe("Stats dashboard stopped");
+			await exited.promise;
+		} finally {
+			first.stop();
+			second.stop();
+			workers.mockRestore();
+		}
+	});
+
+	it("builds one dashboard view at a time", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		shortenedRead(b);
+		await write("main.jsonl", b);
+		await syncAllSessions({ workers: 1 });
+
+		const RealWorker = globalThis.Worker;
+		let building = 0;
+		let most = 0;
+		const workers = vi.spyOn(globalThis, "Worker").mockImplementation((...args) => {
+			const worker = new RealWorker(...args);
+			most = Math.max(most, ++building);
+			worker.addEventListener("message", () => building--);
+			return worker;
+		});
+		try {
+			const responses = await Promise.all(
+				["24h", "7d"].map(range =>
+					handleApi(new Request(`http://stats.test/api/stats/spotlight?range=${range}&agent=main`)),
+				),
+			);
+			expect(responses.map(response => response.status)).toEqual([200, 200]);
+			expect(most).toBe(1);
+		} finally {
+			workers.mockRestore();
+		}
+	});
 });
 
 describe("Spotlight ingest", () => {
@@ -730,12 +916,12 @@ describe("Spotlight ingest", () => {
 			cacheWrite: 500,
 			calls: [{ name: "bash", args: { command: "make" } }],
 		});
-		const text = "built\n… [3-40] (read artifact://4:3-40)";
+		const text = "built\n… [3-40] (read local://4.log:3-40)";
 		const shape = {
 			inTokens: 1200,
 			outTokens: 200,
 			costUsd: 0.0031,
-			original: { url: "artifact://4", lines: 40, kept: [[1, 2]] as [number, number][] },
+			original: { url: "local://4.log", lines: 40, kept: [[1, 2]] as [number, number][] },
 		};
 		b.shapeEntry(id, shape, text);
 		const head = b.text();
@@ -743,7 +929,7 @@ describe("Spotlight ingest", () => {
 		await syncAllSessions({ workers: 1 });
 
 		b.resultMessage(id, { text, shape });
-		const dive = call(b, "read", { path: "artifact://4:3-40" });
+		const dive = call(b, "read", { path: "local://4.log:3-40" });
 		await fs.appendFile(file, b.text().slice(head.length));
 
 		const stats = await dashboard();
@@ -753,6 +939,25 @@ describe("Spotlight ingest", () => {
 		expect(row.hiddenLines).toBe(38);
 		expect(row.savedTokens).toBe(1000);
 		expect(row.recoveries.map(r => [r.kind, r.toolCallId])).toEqual([["artifact", dive]]);
+	});
+
+	it("credits a read of a pre-`local://` transcript's `artifact://N` to the result that named it", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		const [id] = b.request({
+			cacheRead: 10_000,
+			cacheWrite: 500,
+			calls: [{ name: "bash", args: { command: "make" } }],
+		});
+		b.result(id, {
+			text: "built\n… [3-40] (read artifact://4:3-40)",
+			shape: { inTokens: 1200, outTokens: 200, original: { url: "artifact://4", lines: 40, kept: [[1, 2]] } },
+		});
+		const dive = call(b, "read", { path: "artifact://4:3-40" });
+		await write("legacy.jsonl", b);
+
+		const stats = await dashboard();
+		expect(stats.recent[0]?.recoveries.map(r => [r.kind, r.toolCallId])).toEqual([["artifact", dive]]);
 	});
 
 	it("does not count a fork's copied results twice", async () => {

@@ -18,6 +18,15 @@ export interface LspConfig {
 	servers: Record<string, ServerConfig>;
 	/** Idle timeout in milliseconds. If set, LSP clients will be shutdown after this period of inactivity. Disabled by default. */
 	idleTimeoutMs?: number;
+	/**
+	 * Servers whose root markers are not in the session cwd itself, e.g. a monorepo
+	 * root whose `package.json` or `go.mod` sits in a subdirectory. Each joins
+	 * `servers` the first time a file is looked up below a directory holding one of
+	 * its markers.
+	 */
+	nested?: { cwd: string; servers: Record<string, ServerConfig> };
+	/** Servers a project marker called for whose binary does not resolve, with the command looked up. */
+	unresolved?: Record<string, ServerConfig>;
 }
 
 // =============================================================================
@@ -364,9 +373,27 @@ function selectTypescriptServer(servers: Record<string, ServerConfig>, cwd: stri
 	if (!native?.resolvedCommand) return;
 	if (typescriptSpeaksLsp(native.resolvedCommand, cwd)) {
 		delete servers["typescript-language-server"];
-	} else {
-		delete servers["typescript-native"];
+		return;
 	}
+	delete servers["typescript-native"];
+	const server = servers["typescript-language-server"];
+	const packageDir = typescriptPackageDir(native.resolvedCommand);
+	if (!server || packageDir === null) return;
+	// The choice above inspected the package behind `tsc`, but typescript-language-server
+	// loads `node_modules/typescript`. Alias layouts split the two (`typescript` →
+	// `@typescript/typescript6`, an API-only package without tsserver.js, while `.bin/tsc`
+	// links `@typescript/old`), and the server then exits at initialize. `fallbackPath`
+	// applies only when the workspace TypeScript is unusable, so regular layouts keep it.
+	const tsserver = server.initOptions?.tsserver;
+	const tsserverOptions = isRecord(tsserver) ? tsserver : {};
+	if (tsserverOptions.fallbackPath !== undefined) return;
+	servers["typescript-language-server"] = {
+		...server,
+		initOptions: {
+			...server.initOptions,
+			tsserver: { ...tsserverOptions, fallbackPath: path.join(packageDir, "lib", "tsserver.js") },
+		},
+	};
 }
 
 function readMarketplaceLspConfig(root: ClaudePluginRoot): NormalizedConfig | null {
@@ -457,18 +484,83 @@ export function loadConfig(cwd: string): LspConfig {
 
 	// Filter to servers whose project markers exist and whose binary resolves (local or $PATH)
 	const servers: Record<string, ServerConfig> = {};
+	const nested: Record<string, ServerConfig> = {};
+	const unresolved: Record<string, ServerConfig> = {};
 	const candidates = applyRuntimeDefaults(mergedServers);
 	for (const name in candidates) {
 		const config = candidates[name];
 		if (config.disabled) continue;
-		if (!hasRootMarkers(cwd, config.rootMarkers)) continue;
+		if (!hasRootMarkers(cwd, config.rootMarkers)) {
+			if (config.rootMarkers.length > 0) nested[name] = config;
+			continue;
+		}
 		const resolved = resolveCommand(config.command, cwd);
-		if (!resolved) continue;
+		if (!resolved) {
+			unresolved[name] = config;
+			continue;
+		}
 		servers[name] = { ...config, resolvedCommand: resolved };
 	}
 	selectTypescriptServer(servers, cwd);
 
-	return { servers, idleTimeoutMs };
+	return { servers, idleTimeoutMs, nested: { cwd, servers: nested }, unresolved };
+}
+
+/**
+ * The nearest directory from `filePath` up to (not including) `cwd` that holds
+ * one of `markers`, or null when the file is outside `cwd` or none does.
+ */
+function nestedRootMarkerDir(filePath: string, cwd: string, markers: string[]): string | null {
+	const root = path.resolve(cwd);
+	let dir = path.dirname(path.resolve(filePath));
+	while (dir !== root && dir.startsWith(root + path.sep)) {
+		if (hasRootMarkers(dir, markers)) return dir;
+		dir = path.dirname(dir);
+	}
+	return null;
+}
+
+/**
+ * Enable the nested servers that claim `filePath` and have a root marker between
+ * it and the session cwd, resolving their binary from that project first.
+ */
+function activateNestedServers(config: LspConfig, filePath: string): void {
+	const nested = config.nested;
+	if (!nested) return;
+	const activated: Record<string, ServerConfig> = {};
+	let projectDir: string | undefined;
+	for (const [name, serverConfig] of Object.entries(nested.servers)) {
+		if (!serverHandlesFile(serverConfig, filePath)) continue;
+		const markerDir = nestedRootMarkerDir(filePath, nested.cwd, serverConfig.rootMarkers);
+		if (!markerDir) continue;
+		delete nested.servers[name];
+		const resolved = resolveCommand(serverConfig.command, nested.cwd, { localRoots: [markerDir, nested.cwd] });
+		if (!resolved) {
+			(config.unresolved ??= {})[name] = serverConfig;
+			continue;
+		}
+		activated[name] = { ...serverConfig, resolvedCommand: resolved };
+		projectDir ??= markerDir;
+	}
+	if (projectDir === undefined) return;
+	selectTypescriptServer(activated, projectDir);
+	Object.assign(config.servers, activated);
+}
+
+function serverHandlesFile(serverConfig: ServerConfig, filePath: string): boolean {
+	const ext = path.extname(filePath).toLowerCase();
+	const extNoDot = ext.startsWith(".") ? ext.slice(1) : ext;
+	const fileName = path.basename(filePath).toLowerCase();
+	return serverConfig.fileTypes.some(fileType => {
+		// Accept both `.ts` and `ts` forms in user config / fixtures so a
+		// missing dot in `fileTypes` doesn't silently exclude the server
+		// from extension-based routing (e.g. rename_file's relevance filter).
+		const normalized = fileType.toLowerCase();
+		const normalizedNoDot = normalized.startsWith(".") ? normalized.slice(1) : normalized;
+		return (
+			normalized === ext || normalized === fileName || normalizedNoDot === extNoDot || normalizedNoDot === fileName
+		);
+	});
 }
 
 // Cache config per cwd to avoid repeated file I/O
@@ -492,27 +584,11 @@ export function getConfig(cwd: string): LspConfig {
  * Returns servers sorted with primary (non-linter) servers first.
  */
 export function getServersForFile(config: LspConfig, filePath: string): Array<[string, ServerConfig]> {
-	const ext = path.extname(filePath).toLowerCase();
-	const extNoDot = ext.startsWith(".") ? ext.slice(1) : ext;
-	const fileName = path.basename(filePath).toLowerCase();
+	activateNestedServers(config, filePath);
 	const matches: Array<[string, ServerConfig]> = [];
 
 	for (const [name, serverConfig] of Object.entries(config.servers)) {
-		const supportsFile = serverConfig.fileTypes.some(fileType => {
-			// Accept both `.ts` and `ts` forms in user config / fixtures so a
-			// missing dot in `fileTypes` doesn't silently exclude the server
-			// from extension-based routing (e.g. rename_file's relevance filter).
-			const normalized = fileType.toLowerCase();
-			const normalizedNoDot = normalized.startsWith(".") ? normalized.slice(1) : normalized;
-			return (
-				normalized === ext ||
-				normalized === fileName ||
-				normalizedNoDot === extNoDot ||
-				normalizedNoDot === fileName
-			);
-		});
-
-		if (supportsFile) {
+		if (serverHandlesFile(serverConfig, filePath)) {
 			matches.push([name, serverConfig]);
 		}
 	}
@@ -523,6 +599,28 @@ export function getServersForFile(config: LspConfig, filePath: string): Array<[s
 		const bIsLinter = b[1].isLinter ? 1 : 0;
 		return aIsLinter - bIsLinter;
 	});
+}
+
+/**
+ * Why no server handles `filePath`: each server that claims its file type and
+ * what it lacks (a binary on PATH, or a root marker between the file and the
+ * session cwd).
+ */
+export function describeMissingServers(config: LspConfig, filePath: string): string {
+	const ext = path.extname(filePath) || path.basename(filePath);
+	const reasons: string[] = [];
+	for (const [name, serverConfig] of Object.entries(config.unresolved ?? {})) {
+		if (serverHandlesFile(serverConfig, filePath)) {
+			reasons.push(`${name}: \`${serverConfig.command}\` not found on PATH`);
+		}
+	}
+	for (const [name, serverConfig] of Object.entries(config.nested?.servers ?? {})) {
+		if (serverHandlesFile(serverConfig, filePath)) {
+			reasons.push(`${name}: no ${serverConfig.rootMarkers.join(", ")} in the file's directory or its parents`);
+		}
+	}
+	if (reasons.length === 0) return `No language server handles ${ext} files`;
+	return `No language server for ${ext}:\n${reasons.map(reason => `  ${reason}`).join("\n")}`;
 }
 
 /**

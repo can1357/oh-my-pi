@@ -12,13 +12,17 @@
  * in, text (or, with `schema`, a structured object) out.
  */
 
+import * as os from "node:os";
+import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, Effort, type Model, type Tool } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
+import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
 
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	expandRoleAlias,
@@ -26,6 +30,7 @@ import {
 	formatModelString,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
+	type ModelLookupRegistry,
 	resolveModelFromString,
 	resolveModelOverride,
 } from "../config/model-resolver";
@@ -33,22 +38,19 @@ import type { Settings } from "../config/settings";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { Semaphore } from "../task/parallel";
 import type { ToolSession } from "../tools";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 import {
 	findRetryFallbackCandidates,
 	getRetryFallbackChains,
 	type RetryFallbackResolutionContext,
 	resolveRetryFallbackChainKey,
 } from "../session/retry-fallback-chains";
-import {
-	AUTO_THINKING,
-	type ConfiguredThinkingLevel,
-	shouldDisableReasoning,
-	toReasoningEffort,
-} from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING, shouldDisableReasoning, toReasoningEffort } from "../thinking/levels";
+import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { JsStatusEvent } from "./js/shared/types";
 
 import { cfgDisabledProviders } from "../config/model-settings";
+import { journalCompletion } from "../session/model-usage-journal";
 import { cfgRetry } from "../session/settings";
 
 /** Synthetic bridge name reserved for the `completion()` helper across both runtimes. */
@@ -67,7 +69,8 @@ const TIER_TO_PATTERN: Record<CompletionTier, string> = {
 
 const completionArgsSchema = type({
 	prompt: "string>0",
-	"model?": "'smol'|'default'|'slow'",
+	// A tier name, or a user-tagged model agent (`m<N>`); see {@link isCompletionTier}.
+	"model?": "string",
 	"system?": "string",
 	"schema?": { "[string]": "unknown" },
 });
@@ -193,10 +196,24 @@ function candidateIdentity(
 
 interface FallbackExpansion {
 	context: RetryFallbackResolutionContext;
-	modelRegistry: ModelRegistry;
+	/** Where fallback selectors resolve; see {@link completionModelLookup}. */
+	lookup: ModelLookupRegistry;
 	settings: Settings | undefined;
 	tier: CompletionTier;
 	disabledProviders: Set<string>;
+	/** Offline mode (`models.offline`): the only provider a fallback entry may name. */
+	offlineProvider: string | undefined;
+}
+
+/**
+ * Where completion models resolve: the registry, or with offline mode
+ * (`models.offline`) only the active model provider's models, none without an active model.
+ */
+function completionModelLookup(session: ToolSession, registry: ModelRegistry): ModelLookupRegistry {
+	if (!cfgOffline.get(session.settings)) return registry;
+	const provider = session.getActiveModel?.()?.provider;
+	const models = provider ? registry.getAvailableForProviders(new Set([provider])) : [];
+	return { getAvailable: () => models };
 }
 
 /**
@@ -231,7 +248,10 @@ function appendFallbackCandidates(
 	for (const entry of findRetryFallbackCandidates(deps.context, chainKey, selector, model, {
 		allowMissingPrimary: true,
 	})) {
-		const resolved = resolveModelOverride([entry.raw], deps.modelRegistry, deps.settings);
+		// Like the turn path's offline filter: an entry for another provider is skipped, not re-read
+		// as a bare id that one of the allowed provider's models happens to carry.
+		if (deps.offlineProvider !== undefined && entry.provider !== deps.offlineProvider) continue;
+		const resolved = resolveModelOverride([entry.raw], deps.lookup, deps.settings);
 		const candidate = resolved.model;
 		if (!candidate || deps.disabledProviders.has(candidate.provider)) continue;
 		const reasoning = reasoningForCandidate(deps.tier, candidate, entry.thinkingLevel, parent);
@@ -250,7 +270,8 @@ function appendFallbackCandidates(
 function resolveTierCandidates(tier: CompletionTier, session: ToolSession): CompletionCandidate[] {
 	const modelRegistry = session.modelRegistry;
 	if (!modelRegistry) return [];
-	const available = modelRegistry.getAvailable();
+	const lookup = completionModelLookup(session, modelRegistry);
+	const available = lookup.getAvailable();
 	if (available.length === 0) return [];
 
 	const matchPreferences = getModelMatchPreferences(session.settings);
@@ -303,10 +324,12 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 				getModelRole: (role: string) => session.settings.getModelRole(role),
 				modelLookup: modelRegistry,
 			},
-			modelRegistry,
+			lookup,
 			settings: session.settings,
 			tier,
 			disabledProviders: new Set(cfgDisabledProviders.get(session.settings)),
+			// Offline, the primary resolved from the active provider's models.
+			offlineProvider: cfgOffline.get(session.settings) ? primary.model.provider : undefined,
 		},
 		primary.selector,
 		primary.model,
@@ -332,15 +355,46 @@ function reasoningForTier(tier: CompletionTier, model: Model<Api>): Effort | und
 	return efforts.includes(Effort.High) ? Effort.High : efforts[efforts.length - 1];
 }
 
+/** Whether `value` names one of the fixed completion tiers rather than a model agent. */
+function isCompletionTier(value: string): value is CompletionTier {
+	return value === "smol" || value === "default" || value === "slow";
+}
+
+/**
+ * Resolve a user-tagged model agent (`m<N>`) to its candidate. The agent's
+ * definition pins the exact `provider/id[:level]` the user tagged, so the
+ * candidate inherits that selector's effort. Returns nothing when the name is
+ * unknown or its pinned model is unavailable.
+ */
+function resolveTaggedAgentCandidates(agentName: string, session: ToolSession): CompletionCandidate[] {
+	const modelRegistry = session.modelRegistry;
+	if (!modelRegistry) return [];
+	const lookup = completionModelLookup(session, modelRegistry);
+	const available = lookup.getAvailable();
+	if (available.length === 0) return [];
+	const agent = session.getSessionAgents?.().find(candidate => candidate.name === agentName);
+	const selector = agent?.model?.[0];
+	if (!selector) return [];
+	// Offline mode matches the pin exactly: a fuzzy match on the active provider's models could
+	// swap in an aggregator's copy of a model the user tagged on another provider.
+	const resolved = resolveModelOverride([selector], lookup, session.settings, {
+		exactOnly: cfgOffline.get(session.settings),
+	});
+	if (!resolved.model) return [];
+	const reasoning = reasoningForCandidate("default", resolved.model, resolved.thinkingLevel ?? agent?.thinkingLevel);
+	return [{ selector, model: resolved.model, ...reasoning }];
+}
+
 async function executeCompletion(
 	prompt: string,
-	finalTier: CompletionTier,
+	tier: CompletionTier | undefined,
 	system: string | undefined,
 	schema: Record<string, unknown> | undefined,
 	candidates: CompletionCandidate[],
 	session: ToolSession,
 	signal: AbortSignal,
 	attempts: CompletionAttempt[],
+	rawBuffer: RawSseDebugBuffer,
 ): Promise<EvalCompletionResult> {
 	const registry = session.modelRegistry;
 	if (!registry) throw new ToolError("completion() has no model registry.");
@@ -361,6 +415,8 @@ async function executeCompletion(
 	// mirroring session recovery. Keyless candidates are skipped without
 	// consuming budget so a usable later fallback is still attempted.
 	const maxRetries = Math.max(0, cfgRetry.get(session.settings).maxRetries);
+	// One journal for the whole request: every fallback it sends is billed to the branch that asked.
+	const journal = journalCompletion(session.sessionManager, { purpose: "completion", role: tier });
 	let response: AssistantMessage | undefined;
 	let model: Model<Api> | undefined;
 	let lastError: unknown;
@@ -386,7 +442,7 @@ async function executeCompletion(
 			if (!apiKey) {
 				attempt.outcome = "no-credentials";
 				lastError = new ToolError(
-					`completion() has no API key for ${formatModelString(model)}. Configure credentials for this provider or choose another tier.`,
+					`completion() has no API key for ${formatModelString(model)}. Configure credentials for this provider or choose another model.`,
 				);
 				continue;
 			}
@@ -404,10 +460,18 @@ async function executeCompletion(
 					reasoning: candidate.reasoning,
 					disableReasoning: candidate.disableReasoning,
 					toolChoice: schema ? { type: "tool", name: STRUCTURED_TOOL_NAME } : undefined,
+					// Capture this request's raw provider frames (SSE / synthesized WS
+					// frames): the local buffer backs the on-error dump; the session
+					// buffer surfaces the same frames in `/debug`.
+					onSseEvent: (event, model) => {
+						rawBuffer.recordEvent(event, model);
+						session.rawSseDebugBuffer?.recordEvent(event, model);
+					},
 				},
 				{ telemetry, oneshotKind: "eval_completion" },
 			);
 			session.costGate?.record(response.usage.cost.total);
+			journal?.(response, prompt);
 		} catch (error) {
 			failAttempt(attempt, error, signal);
 			lastError = error;
@@ -442,7 +506,7 @@ async function executeCompletion(
 	attempt.outcome = "succeeded";
 	return {
 		text: resultText,
-		details: { model: formatModelString(model), tier: finalTier, structured: Boolean(schema) },
+		details: { model: formatModelString(model), tier, structured: Boolean(schema) },
 	};
 }
 
@@ -477,18 +541,65 @@ export async function runEvalCompletion(
 	if (parsed instanceof type.errors) {
 		throw new ToolError(`completion() received invalid arguments: ${parsed.summary}`);
 	}
-	const { prompt, model: modelTier, system, schema } = parsed;
-	const finalTier: CompletionTier = modelTier ?? "default";
-	const candidates = resolveTierCandidates(finalTier, options.session);
+	const { prompt, model: modelArg, system, schema } = parsed;
+	const requested = modelArg ?? "default";
+	const tier = isCompletionTier(requested) ? requested : undefined;
+	const candidates = tier
+		? resolveTierCandidates(tier, options.session)
+		: resolveTaggedAgentCandidates(requested, options.session);
 	if (candidates.length === 0) {
 		throw new ToolError(
-			`completion() could not resolve a model for the "${finalTier}" tier. Configure modelRoles.${finalTier === "default" ? "default" : finalTier} or ensure a provider is available.`,
+			tier
+				? `completion() could not resolve a model for the "${tier}" tier. Configure modelRoles.${tier === "default" ? "default" : tier} or ensure a provider is available.`
+				: `completion() could not resolve model "${requested}". Pass a tier ("smol"|"default"|"slow") or the name of a user-tagged model agent ("m<N>").`,
 		);
 	}
 
-	return retainCompletionHandle("cmp", options, (signal, attempts) =>
-		executeCompletion(prompt, finalTier, system, schema, candidates, options.session, signal, attempts),
-	);
+	return retainCompletionHandle("cmp", options, async (signal, attempts) => {
+		const rawBuffer = new RawSseDebugBuffer();
+		try {
+			return await executeCompletion(
+				prompt,
+				tier,
+				system,
+				schema,
+				candidates,
+				options.session,
+				signal,
+				attempts,
+				rawBuffer,
+			);
+		} catch (error) {
+			// A user cancel is not a diagnostic failure; skip the dump.
+			if (!signal.aborted) {
+				const file = await dumpCompletionStream(rawBuffer, options.session);
+				if (file && error instanceof Error) {
+					error.message = `${error.message}\nStreamed provider frames written to ${file}.`;
+				}
+			}
+			throw error;
+		}
+	});
+}
+
+/**
+ * Persist a failed `completion()`'s captured provider frames to a `.log` file,
+ * preferring the session artifacts directory so it is discoverable and cleaned
+ * up with the session. Returns the path, or `null` when nothing was captured
+ * (e.g. a transport without raw-frame support) or the write failed.
+ */
+async function dumpCompletionStream(buffer: RawSseDebugBuffer, session: ToolSession): Promise<string | null> {
+	const text = buffer.toRawText();
+	if (!text.trim()) return null;
+	const dir = session.sessionManager?.getArtifactsDir?.() ?? os.tmpdir();
+	const file = path.join(dir, `completion-${Snowflake.next()}.sse.log`);
+	try {
+		await Bun.write(file, text);
+		return file;
+	} catch (error) {
+		logger.debug("completion() stream dump failed", { file, error });
+		return null;
+	}
 }
 
 /**

@@ -23,15 +23,18 @@ import type { Api, completeSimple, ImageContent, Model, TextContent } from "@oh-
 import { getEffectiveTokenCost, getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
 import { logger, prompt, toError } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { expandRoleAlias, getModelMatchPreferences, resolveModelFromString } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import { type LocalProtocolOptions, resolveLocalRoot } from "../internal-urls";
 import { cfgImagesBlockImages } from "../modes/settings";
 import type { CostGateApi } from "../session/cost-gate";
+import { journalCompletion, type ModelUsageLedger } from "../session/model-usage-journal";
 import { cfgImagesDescribeForTextModels } from "../session/settings";
 import describeUserPrompt from "../prompts/tools/image-attachment-describe.md" with { type: "text" };
 import describeSystemPrompt from "../prompts/tools/image-attachment-describe-system.md" with { type: "text" };
+import offlineNoVisionTemplate from "../prompts/tools/image-attachment-offline.md" with { type: "text" };
 
 /** Telemetry tag for the oneshot vision-description calls. */
 const ONESHOT_KIND = "image_attachment_describe";
@@ -44,7 +47,10 @@ const DESCRIPTION_UNAVAILABLE_NOTE =
 	"[Image description unavailable: the vision model returned no usable text. The image was saved for further analysis.]";
 
 /** Registry surface needed to resolve a vision model and authorize requests. */
-export type VisionFallbackRegistry = Pick<ModelRegistry, "getAvailable" | "getApiKey" | "resolver">;
+export type VisionFallbackRegistry = Pick<
+	ModelRegistry,
+	"getAvailable" | "getAvailableForProviders" | "getApiKey" | "resolver"
+>;
 
 /** Whether user images sent to `model` should be replaced by a vision-model description. */
 export function shouldDescribeImagesForTextModel(
@@ -74,6 +80,8 @@ export interface DescribeAttachedImagesDeps {
 	completeImpl?: typeof completeSimple;
 	/** The session tree's cost gate: at the cap images are not described, and each description's cost is added. */
 	costGate?: CostGateApi;
+	/** The session the images were attached to; each description request is journaled there as `image-describe`. */
+	usageLedger?: Partial<ModelUsageLedger>;
 }
 
 /** Map an image MIME type to a file extension for the saved artifact. */
@@ -118,9 +126,12 @@ function formatImageBlock(localUrl: string, description: string): string {
 /**
  * Resolve a vision-capable model, honoring explicit roles and the active model
  * before choosing the least expensive priced vision model as a last resort.
+ * Offline mode (`models.offline`) keeps every candidate on the active model's provider.
  */
 function resolveVisionModel(deps: DescribeAttachedImagesDeps): Model<Api> | undefined {
-	const available = deps.modelRegistry.getAvailable();
+	const available = cfgOffline.get(deps.settings)
+		? deps.modelRegistry.getAvailableForProviders(new Set([deps.activeModel.provider]))
+		: deps.modelRegistry.getAvailable();
 	if (available.length === 0) return undefined;
 	const preferences = getModelMatchPreferences(deps.settings);
 	const resolvePattern = (pattern: string | undefined): Model<Api> | undefined => {
@@ -159,6 +170,8 @@ async function describeImage(
 	signal: AbortSignal | undefined,
 ): Promise<string | null> {
 	if (deps.costGate?.check()) return null;
+	// Usage only: the request carries a fixed instruction and the image, and the description lands in the transcript.
+	const journal = journalCompletion(deps.usageLedger, { purpose: "image-describe", usageOnly: true });
 	try {
 		const response = await instrumentedCompleteSimple(
 			visionModel,
@@ -179,6 +192,7 @@ async function describeImage(
 			{ telemetry, oneshotKind: ONESHOT_KIND, completeImpl: deps.completeImpl },
 		);
 		deps.costGate?.record(response.usage.cost.total);
+		journal?.(response);
 		if (response.stopReason === "error" || response.stopReason === "aborted") {
 			logger.warn("image attachment description did not complete", {
 				stopReason: response.stopReason,
@@ -221,6 +235,8 @@ export async function describeAttachedImagesForTextModel(
 			if (canDescribe && visionModel) {
 				description =
 					(await describeImage(image, visionModel, deps, telemetry, signal)) ?? DESCRIPTION_UNAVAILABLE_NOTE;
+			} else if (!visionModel && cfgOffline.get(deps.settings)) {
+				description = prompt.render(offlineNoVisionTemplate, { provider: deps.activeModel.provider }).trim();
 			} else {
 				description = NO_VISION_MODEL_NOTE;
 			}

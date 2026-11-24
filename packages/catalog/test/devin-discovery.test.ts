@@ -29,7 +29,7 @@ import { Effort } from "../src/effort";
 import { providerEntry } from "../src/compat/providers";
 import { readModelCache, writeModelCache } from "../src/model-cache";
 import { resolveProviderModels } from "../src/model-manager";
-import { calculateUncachedInputCost, getTimeBasedPricingPeriod } from "../src/models";
+import { calculateUncachedInputCost, getEffectiveTokenCost, getTimeBasedPricingPeriod } from "../src/models";
 import { devinModelManagerOptions } from "../src/provider-models/special";
 import type { Api, Model, ModelSpec, ThinkingConfig } from "../src/types";
 
@@ -619,8 +619,8 @@ describe("devin native display filtering", () => {
 			config({ uid: "gpt-6-sol-high-priority" }),
 			config({ uid: "claude-opus-5-high" }),
 			config({ uid: "claude-opus-5-high-priority", disabled: true }),
-			config({ uid: "swe-1-6-fast" }),
-			config({ uid: "swe-1-6-priority" }),
+			config({ uid: "claude-opus-5-5-high-fast" }),
+			config({ uid: "claude-opus-5-5-high-priority" }),
 			config({ uid: "swe-2-high" }),
 			config({ uid: "kimi-k3", disabled: true }),
 			pairing("fusion-gpt-6-sol-high-sidekick-swe-2-high", {
@@ -633,7 +633,7 @@ describe("devin native display filtering", () => {
 			}),
 			pairing("fusion-gpt-6-sol-high-fast-sidekick-swe-2-high"),
 			pairing("fusion-claude-opus-5-high-fast-sidekick-swe-2-high"),
-			pairing("fusion-swe-1-6-fast-sidekick-swe-2-high"),
+			pairing("fusion-claude-opus-5-5-high-fast-sidekick-swe-2-high"),
 			pairing("fusion-kimi-k3-sidekick-swe-2-high"),
 			pairing("fusion-sidekick-swe-2-high"),
 			pairing("fusion"),
@@ -652,7 +652,7 @@ describe("devin native display filtering", () => {
 		expect(wireId("fusion-gpt-6-sol-high-fast-sidekick-swe-2-high")).toBe("gpt-6-sol-high-priority");
 		expect(wireId("fusion-claude-opus-5-high-fast-sidekick-swe-2-high")).toBe("claude-opus-5-high");
 		// A lead whose own uid ends in `-fast` routes as written, not to a `-priority` lane.
-		expect(wireId("fusion-swe-1-6-fast-sidekick-swe-2-high")).toBe("swe-1-6-fast");
+		expect(wireId("fusion-claude-opus-5-5-high-fast-sidekick-swe-2-high")).toBe("claude-opus-5-5-high-fast");
 		// No live lead: the composite uid is unservable, so the pairing is not listed.
 		expect(find("fusion-kimi-k3-sidekick-swe-2-high")).toBeUndefined();
 		expect(wireId("fusion-sidekick-swe-2-high")).toBeUndefined();
@@ -838,32 +838,27 @@ describe("devin server-declared family collapsing", () => {
 });
 
 describe("devin catalog seed", () => {
-	it("seeds both live SWE-1.6 lanes so the descriptor default resolves offline", () => {
+	it("seeds the live SWE-1.6 lane so the descriptor default resolves offline", () => {
 		const descriptor = providerEntry("devin");
 		expect(descriptor?.defaultModel).toBe("swe-1-6");
-		expect(seedModels("devin").map(model => model.id)).toEqual(["swe-1-6-fast", "swe-1-6"]);
-		expect(seedModels("devin").some(model => model.id === descriptor?.defaultModel)).toBe(true);
+		expect(seedModels("devin").map(model => model.id)).toEqual(["swe-1-6"]);
 
-		const fast = buildModel(seedModels("devin")[0] as ModelSpec<"devin-agent">);
-		expect(fast.cost).toEqual({ input: 0.3, output: 1.5, cacheRead: 0.03, cacheWrite: 0 });
-		expect(fast.contextWindow).toBe(200_000);
-		expect(fast.maxTokens).toBe(128_000);
-		expect(fast.compat.supportsParallelToolCalls).toBe(true);
+		const seeded = buildModel(seedModels("devin")[0] as ModelSpec<"devin-agent">);
+		expect(seeded.contextWindow).toBe(200_000);
+		expect(seeded.maxTokens).toBe(128_000);
+		expect(seeded.compat.supportsParallelToolCalls).toBe(true);
 		// Image-blind lanes ship text-only (see DEVIN_IMAGE_BLIND_UIDS).
-		expect(fast.input).toEqual(["text"]);
+		expect(seeded.input).toEqual(["text"]);
 		// One wire uid per lane: Cascade encodes effort in the uid, so a seeded
 		// lane reasons without exposing a selectable ladder.
-		expect(fast.thinking).toBeUndefined();
-		expect(fast.reasoning).toBe(true);
+		expect(seeded.thinking).toBeUndefined();
+		expect(seeded.reasoning).toBe(true);
 	});
 
 	it("pins the seed to a configured Cascade host", () => {
 		expect(devinModelManagerOptions().staticModels).toBe(seedModels("devin"));
 		const scoped = devinModelManagerOptions({ baseUrl: "https://cascade.internal" });
-		expect(scoped.staticModels?.map(model => model.baseUrl)).toEqual([
-			"https://cascade.internal",
-			"https://cascade.internal",
-		]);
+		expect(scoped.staticModels?.map(model => model.baseUrl)).toEqual(["https://cascade.internal"]);
 	});
 
 	it("refetches a catalog cached before context windows came from modelInfo", async () => {
@@ -934,19 +929,95 @@ describe("devin catalog pricing", () => {
 		};
 	}
 
-	const PROMO_ENDS = Date.parse("2027-01-01T00:00:00Z");
+	const PROMO_ENDS = Date.parse("2027-01-01T08:00:00Z");
 	// Input cost of one million uncached prompt tokens: the input rate in force.
 	const inputRateAt = (model: Model<Api>, timestamp: number) =>
 		calculateUncachedInputCost(model.cost, 1_000_000, timestamp);
 
-	it("prices plan-included SWE-2 at the promo fallback and bills list from the promo's end", () => {
-		const model = buildModel(spec("swe-2"));
-		expect(model.cost).toMatchObject({ input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 });
-		// A dated card is not a peak/off-peak tariff.
-		expect(getTimeBasedPricingPeriod(model.cost, PROMO_ENDS)).toBeUndefined();
-		// A row built during the promo still bills list once it ends.
-		expect(inputRateAt(model, PROMO_ENDS - 1)).toBeCloseTo(0.75, 10);
-		expect(inputRateAt(model, PROMO_ENDS)).toBeCloseTo(3, 10);
+	it("keeps SWE-2 Flash, SWE-2 and SWE-2 Fast billing separate across their promo cutoffs", () => {
+		// SWE-2 Flash was billed at SWE-2 rates, 7.5x its real price, and SWE-2 Fast at half its own.
+		const now = Date.parse("2026-11-06T00:00:00Z");
+		const clock = spyOn(Date, "now").mockReturnValue(now);
+		try {
+			// Each family's logical id and a raw effort uid that arrives without family metadata.
+			for (const [ids, promoEnds, promo, list] of [
+				[
+					["swe-2-flash", "swe-2-flash-max"],
+					Date.parse("2026-11-18T18:00:00Z"),
+					{ input: 0.075, output: 0.375, cacheRead: 0.0075, cacheWrite: 0.09375 },
+					{ input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
+				],
+				[
+					["swe-2", "swe-2-high"],
+					PROMO_ENDS,
+					{ input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0 },
+					{ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
+				],
+				[
+					// No dated card: Devin publishes no end date or list price for SWE-2 Fast.
+					["swe-2-fast", "swe-2-high-lightning"],
+					PROMO_ENDS,
+					{ input: 1, output: 5, cacheRead: 0.1, cacheWrite: 0 },
+					{ input: 1, output: 5, cacheRead: 0.1, cacheWrite: 0 },
+				],
+			] as const) {
+				for (const id of ids) {
+					const model = buildModel(spec(id));
+					expect(model.cost).toMatchObject(promo);
+					expect(getEffectiveTokenCost(model.cost, now)).toMatchObject(promo);
+					expect(getEffectiveTokenCost(model.cost, promoEnds - 1)).toMatchObject(promo);
+					expect(getEffectiveTokenCost(model.cost, promoEnds)).toMatchObject(list);
+					// A dated card is not a peak/off-peak tariff.
+					expect(getTimeBasedPricingPeriod(model.cost, promoEnds)).toBeUndefined();
+				}
+			}
+		} finally {
+			clock.mockRestore();
+		}
+	});
+
+	it("switches Gemini promo prices that discovery reports to list when each promo ends", () => {
+		const now = Date.parse("2026-11-17T00:00:00Z");
+		const flashPromo = { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 };
+		const gemini4Promo = { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 };
+		const gemini4List = { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 0 };
+		const clock = spyOn(Date, "now").mockReturnValue(now);
+		try {
+			for (const [id, reported, ends, list] of [
+				[
+					"gemini-3-8-flash",
+					flashPromo,
+					"2027-01-01T08:00:00Z",
+					{ ...flashPromo, input: 1.5, output: 7.5, cacheRead: 0.15 },
+				],
+				["gemini-4-argon", gemini4Promo, "2026-12-01T08:00:00Z", gemini4List],
+				// An account billed below the public promo keeps its own rate until the promo ends.
+				[
+					"gemini-4-argon-low",
+					{ input: 1, output: 5, cacheRead: 0.05, cacheWrite: 0 },
+					"2026-12-01T08:00:00Z",
+					gemini4List,
+				],
+				// A raw effort uid that arrives without family metadata.
+				["gemini-4-carbon-high", gemini4Promo, "2026-11-24T16:00:00Z", gemini4List],
+			] as const) {
+				const model = buildModel(spec(id, reported));
+				expect(model.cost, id).toMatchObject(reported);
+				expect(getEffectiveTokenCost(model.cost, Date.parse(ends) - 1), id).toMatchObject(reported);
+				expect(getEffectiveTokenCost(model.cost, Date.parse(ends)), id).toMatchObject(list);
+			}
+			// Hydrogen shares Argon's and Carbon's class rank; Gemini 3.6 Flash sits below the promo revisions.
+			for (const [id, upstream] of [
+				["gemini-4-hydrogen", { input: 1.5, output: 7.5, cacheRead: 0.075, cacheWrite: 0 }],
+				["gemini-3-6-flash", { input: 1.5, output: 7.5, cacheRead: 0.15, cacheWrite: 0 }],
+			] as const) {
+				const model = buildModel(spec(id, upstream));
+				expect(model.cost, id).toMatchObject(upstream);
+				expect(model.cost.timeBased, id).toBeUndefined();
+			}
+		} finally {
+			clock.mockRestore();
+		}
 	});
 
 	it("switches the SWE-2 fallback to list after the promo ends, including on rows rebuilt from promo-era rows", () => {
@@ -957,7 +1028,7 @@ describe("devin catalog pricing", () => {
 			for (const model of [buildModel(spec("swe-2")), buildModel(promoEra)]) {
 				expect(model.cost).toMatchObject({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 });
 				// Requests made during the promo keep the promo price.
-				expect(inputRateAt(model, PROMO_ENDS - 1)).toBeCloseTo(0.75, 10);
+				expect(inputRateAt(model, PROMO_ENDS - 1)).toBeCloseTo(0.5, 10);
 			}
 		} finally {
 			clock.mockRestore();
@@ -998,19 +1069,36 @@ describe("devin catalog pricing", () => {
 		});
 	});
 
-	it("tiers the standard GPT-5.6 lanes but not their undocumented Fast lanes", () => {
-		const standard = buildModel(spec("gpt-5-6-sol-high", { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 0 }));
-		expect(standard.cost.longContext).toEqual({
+	it("tiers GPT-5.6 lanes, Fast included, at Devin's published long-context rates", () => {
+		const fast = buildModel(
+			spec("gpt-5-6-terra-high-priority", { input: 4, output: 24, cacheRead: 0.4, cacheWrite: 0 }),
+		);
+		expect(fast.cost.longContext).toEqual({
+			inputThreshold: 272_000,
+			input: 8,
+			output: 36,
+			cacheRead: 0.8,
+			cacheWrite: 10,
+		});
+		// Sol's published tier did not follow its standard-context price rise.
+		const sol = buildModel(spec("gpt-5-6-sol-high", { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 }));
+		expect(sol.cost.longContext).toEqual({
 			inputThreshold: 272_000,
 			input: 8,
 			output: 30,
 			cacheRead: 0.8,
 			cacheWrite: 10,
 		});
-		const fast = buildModel(
-			spec("gpt-5-6-sol-high-priority", { input: 8, output: 40, cacheRead: 0.8, cacheWrite: 0 }),
+		const solFast = buildModel(
+			spec("gpt-5-6-sol-max-priority", { input: 10, output: 60, cacheRead: 1, cacheWrite: 0 }),
 		);
-		expect(fast.cost.longContext).toBeUndefined();
+		expect(solFast.cost.longContext).toEqual({
+			inputThreshold: 272_000,
+			input: 16,
+			output: 60,
+			cacheRead: 1.6,
+			cacheWrite: 20,
+		});
 	});
 
 	it("doubles every Grok leg but raises Gemini Pro output only 1.5x above 200K", () => {
@@ -1046,7 +1134,15 @@ describe("devin catalog pricing", () => {
 	});
 
 	it("leaves models Devin publishes no tier for untiered", () => {
-		for (const id of ["gpt-7-sol", "gpt-6-mini", "gpt-6-nano", "gemini-3-pro", "gemini-4-pro", "grok-5"]) {
+		for (const id of [
+			"gpt-7-sol",
+			"gpt-6-mini",
+			"gpt-6-nano",
+			"gpt-5-5-high-priority",
+			"gemini-3-pro",
+			"gemini-4-pro",
+			"grok-5",
+		]) {
 			const model = buildModel(spec(id, { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 }));
 			expect(model.cost.longContext).toBeUndefined();
 		}

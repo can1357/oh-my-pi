@@ -1,14 +1,18 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgComposerShape } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as sessionPins from "@oh-my-pi/pi-coding-agent/session/session-pins";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { initTheme } from "../src/ui/theme/service";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 describe("InteractiveMode session pin indicator", () => {
 	const cleanups: Array<() => Promise<void> | void> = [];
@@ -54,7 +58,7 @@ describe("InteractiveMode session pin indicator", () => {
 			rules: [],
 			enableMCP: false,
 			enableLsp: false,
-			cacheWarming: false,
+			cacheWarming: "off",
 			workspaceTree: { rootPath: dir.path(), rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
 		});
 		cleanups.push(() => session.dispose());
@@ -63,8 +67,16 @@ describe("InteractiveMode session pin indicator", () => {
 		const staleRead = Promise.withResolvers<Set<string>>();
 		vi.spyOn(sessionPins, "loadPinnedSessionIds").mockReturnValue(staleRead.promise);
 
-		const mode = new InteractiveMode(session, "test");
-		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+		const mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
+		vi.spyOn(vcs, "watch").mockImplementation(() => () => {});
 		cleanups.push(() => mode.stop());
 		await mode.init();
 
@@ -73,6 +85,51 @@ describe("InteractiveMode session pin indicator", () => {
 		// The reload's continuation was queued on this promise first, so it has run once this await returns.
 		await staleRead.promise;
 
-		expect(mode.statusLine.isSessionPinned(sessionId)).toBe(true);
+		expect(mode.statusLine.facts().pinned).toBe(true);
+	});
+
+	it("renders the session pin indicator with theme accent in band mode trailer", async () => {
+		const dir = TempDir.createSync("omp-session-pin-");
+		cleanups.push(() => dir.removeSync());
+		await Settings.init({ inMemory: true, cwd: dir.path() });
+		cfgComposerShape.set(settings, "band");
+		const registry = new ModelRegistry(createInMemoryAuthStorage());
+		cleanups.push(() => registry.authStorage.close());
+		const { session } = await createAgentSession({
+			cwd: dir.path(),
+			agentDir: dir.path(),
+			modelRegistry: registry,
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			sessionManager: SessionManager.create(dir.path(), dir.path()),
+			settings: Settings.isolated({ "compaction.enabled": false, "composer.shape": "band" }),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			rules: [],
+			enableMCP: false,
+			enableLsp: false,
+			cacheWarming: "off",
+			workspaceTree: { rootPath: dir.path(), rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+		});
+		cleanups.push(() => session.dispose());
+		const sessionId = session.sessionManager.getSessionId();
+		await session.sessionManager.setSessionName("CHROME: Audit Outreach Leads Status");
+
+		const term = createModeTerminal({ columns: 80, rows: 24, settings });
+		const mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, term.frame);
+		vi.spyOn(vcs, "watch").mockImplementation(() => () => {});
+		cleanups.push(async () => {
+			mode.stop();
+			await mode.shell.stop();
+			term.dispose();
+		});
+		await mode.init();
+
+		mode.applySessionPin(sessionId, true);
+
+		const title = `${currentTheme().symbols.symbol("icon.pin")} CHROME: Audit Outreach Leads Status`;
+		await term.waitFor(screen => screen.some(row => row.trimEnd().endsWith(title)), 2000);
 	});
 });

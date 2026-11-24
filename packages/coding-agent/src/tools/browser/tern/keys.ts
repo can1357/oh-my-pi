@@ -2,7 +2,7 @@
  * Puppeteer-style key names (`Enter`, `ArrowLeft`, `KeyA`, `Shift`, `a`, `Control+a`)
  * as Tern trusted-input steps (`{"type":"key","action","key","code","mods"}`).
  */
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tool-errors";
 
 /** A modifier as Tern's input steps name it. */
 export type TernModifier = "shift" | "ctrl" | "alt" | "meta";
@@ -82,7 +82,7 @@ export function ternKey(name: string): TernKey {
 		const code = /^[a-z]$/i.test(name) ? `Key${name.toUpperCase()}` : /^\d$/.test(name) ? `Digit${name}` : undefined;
 		return code ? { key: name, code } : { key: name };
 	}
-	throw new ToolError(`Unknown key ${JSON.stringify(name)} for the Tern browser backend`);
+	throw new ToolError(`Unknown key ${JSON.stringify(name)} for this browser backend`);
 }
 
 /**

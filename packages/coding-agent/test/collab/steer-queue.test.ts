@@ -4,7 +4,7 @@
  * as `queueChipText` on the queued custom message; the session derives
  * `queuedMessageCount` from the agent-core queue for host and guest UI state.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import {
@@ -17,6 +17,7 @@ import {
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { installTestCollabHome, uninstallTestCollabHome } from "./helpers/in-memory-relay";
 
 interface RelayData {
 	role: "host" | "guest";
@@ -122,10 +123,8 @@ function makeStreamingHostContext(): StreamingHostHarness {
 		eventBus: undefined,
 		statusLine: {
 			setCollabStatus: () => {},
-			invalidate: () => {},
-			getCachedContextBreakdown: () => ({ usedTokens: 0, contextWindow: 0 }),
+			facts: () => ({ context: { tokens: 0, window: 0, percent: null } }),
 		},
-		ui: { requestRender: () => {} },
 		updatePendingMessagesDisplay: () => {},
 		showStatus: () => {},
 		collabHost: undefined,
@@ -174,8 +173,13 @@ async function joinAsGuest(link: string, name: string): Promise<TestGuest> {
 
 const cleanups: (() => void | Promise<void>)[] = [];
 
+beforeEach(() => {
+	installTestCollabHome();
+});
+
 afterEach(async () => {
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+	uninstallTestCollabHome();
 });
 
 describe("collab mid-turn guest prompts", () => {

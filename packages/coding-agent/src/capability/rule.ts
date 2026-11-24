@@ -5,6 +5,7 @@
  * Translated to a canonical shape regardless of source format.
  */
 import { logger } from "@oh-my-pi/pi-utils";
+import { LinearRegExp } from "@oh-my-pi/pi-utils/regex";
 import { defineCapability } from ".";
 import type { SourceMeta } from "./types";
 
@@ -39,6 +40,8 @@ export interface RuleFrontmatter {
 	agents?: string[] | string;
 	/** Per-rule TTSR interrupt mode override. */
 	interruptMode?: "never" | "prose-only" | "tool-only" | "always";
+	/** Per-rule TTSR repeat override (falls back to global ttsr.repeatMode). */
+	repeatMode?: "once" | "after-gap" | "always";
 	[key: string]: unknown;
 }
 
@@ -74,6 +77,8 @@ export interface Rule {
 	agents?: string[];
 	/** Per-rule TTSR interrupt mode override (falls back to global ttsr.interruptMode). */
 	interruptMode?: "never" | "prose-only" | "tool-only" | "always";
+	/** Per-rule TTSR repeat override (falls back to global ttsr.repeatMode); `always` is a one-turn gap, so the retry or continuation its own reminder spawns cannot re-fire it. */
+	repeatMode?: "once" | "after-gap" | "always";
 	/** Source metadata */
 	_source: SourceMeta;
 }
@@ -345,14 +350,15 @@ function canMatchWholeBufferFromStart(source: string): boolean {
 	return lookaheads > 0 && offset === source.length;
 }
 
-function optimizeRuleCondition(condition: RegExp): RegExp {
+function optimizeRuleCondition(condition: LinearRegExp): LinearRegExp {
 	if (condition.sticky || !canMatchWholeBufferFromStart(condition.source)) return condition;
-	return new RegExp(condition.source, `${condition.flags}y`);
+	return new LinearRegExp(condition.source, `${condition.flags}y`);
 }
 
 /**
- * Compile a rule `condition` into a `RegExp`, translating a leading PCRE-style
- * inline flag group into native `RegExp` flags.
+ * Compile a rule `condition` into a {@link LinearRegExp} (no catastrophic
+ * backtracking), translating a leading PCRE-style inline flag group into native
+ * `RegExp` flags.
  *
  * JS/Bun `RegExp` rejects inline flag prefixes such as `(?i)`, so a rule written
  * `condition: "(?i)pre.existing"` would otherwise throw at compile time and be
@@ -361,13 +367,13 @@ function optimizeRuleCondition(condition: RegExp): RegExp {
  * is passed through verbatim so the native error still surfaces for genuinely
  * invalid patterns.
  */
-export function compileRuleCondition(pattern: string): RegExp {
+export function compileRuleCondition(pattern: string): LinearRegExp {
 	const match = INLINE_FLAG_PREFIX.exec(pattern);
 	if (match && TRANSLATABLE_INLINE_FLAGS.test(match[1])) {
 		const flags = Array.from(new Set(match[1])).join("");
-		return optimizeRuleCondition(new RegExp(pattern.slice(match[0].length), flags));
+		return optimizeRuleCondition(new LinearRegExp(pattern.slice(match[0].length), flags));
 	}
-	return optimizeRuleCondition(new RegExp(pattern));
+	return optimizeRuleCondition(new LinearRegExp(pattern));
 }
 
 let activeRules: readonly Rule[] = [];

@@ -23,14 +23,16 @@ import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, AssistantMessageEvent, ImageContent } from "@oh-my-pi/pi-ai";
 import { getConfigRootDir, logger, toError } from "@oh-my-pi/pi-utils";
-import type { AgentHubRemote, AgentHubRemoteTranscript } from "@oh-my-pi/pi-tui/overlays/agent-hub";
+import { takeAutoRejoin } from "@oh-my-pi/pi-wire";
+import type { AgentHubRemote, AgentHubRemoteTranscript } from "../modes/view-model/overlays/agent-hub";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
+import { fromWireEvent } from "../session/loop-end-wire";
 import type { SessionEntry } from "../session/session-entries";
 import { mintSessionId, SessionManager } from "../session/session-manager";
 import { FileSessionStorage } from "../session/session-storage";
-import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
+import { shouldDisableReasoning, toReasoningEffort } from "../thinking/levels";
 import { emitSubagentFrame } from "../utils/event-bus";
 import { GuestLifecycleEmitter } from "../extensibility/extensions/lifecycle-mirror";
 import { setSessionTerminalTitle } from "../utils/title-generator";
@@ -95,8 +97,7 @@ interface PendingSnapshot {
 /** Minimal context surface the idle-state reconciler mutates. */
 export interface GuestIdleReconcilerCtx {
 	statusLine: { markActivityEnd: () => void };
-	statusContainer: Pick<InteractiveModeContext["statusContainer"], "disposeChildren">;
-	loadingAnimation: { stop: () => void } | undefined;
+	clearWorking: InteractiveModeContext["clearWorking"];
 }
 
 /**
@@ -105,61 +106,32 @@ export interface GuestIdleReconcilerCtx {
  * dropped the event mid-stream. Reached via {@link reconcileGuestSnapshotHostState}
  * (the live `state`-frame and welcome/resync reconciler) when the host reports `isStreaming === false`:
  * folds the in-flight active-time window into the per-session meter (so
- * `time_spent` stops ticking) and stops the `Working…` loader if one is
- * still animating. No-op when the host is still streaming.
+ * `time_spent` stops ticking) and takes down the turn's `Working…` row if one
+ * still shows. No-op when the host is still streaming.
  *
- * Exported for direct unit testing; mutates the loader field on `ctx` so
- * the same loader is not stopped twice on subsequent reconciliations.
+ * Exported for direct unit testing.
  */
 export function reconcileGuestIdleHostState(ctx: GuestIdleReconcilerCtx, isStreaming: boolean): void {
 	if (isStreaming) return;
 	ctx.statusLine.markActivityEnd();
-	if (ctx.loadingAnimation) {
-		ctx.loadingAnimation.stop();
-		ctx.loadingAnimation = undefined;
-		ctx.statusContainer.disposeChildren();
-	}
+	ctx.clearWorking("turn");
 }
 
 /** Reconcile a welcome/resync snapshot's host activity state into the guest meter. */
 export interface GuestSnapshotActivityReconcilerCtx extends GuestIdleReconcilerCtx {
 	statusLine: GuestIdleReconcilerCtx["statusLine"] & { markActivityStart: () => void };
 	/**
-	 * Start (or re-attach) the live "Working…" loader. Mirrors
-	 * `InteractiveModeContext.ensureLoadingAnimation`, which is what
-	 * `EventController` calls on `agent_start`. Required so a guest that
-	 * missed an earlier `agent_start` (a reconnect dropped it mid-stream)
-	 * starts its spinner when the host later reports it is streaming.
+	 * Show the turn's "Working…" row unless a compaction or retry row holds the status row.
+	 * `EventController` calls it on `agent_start`; a guest that missed an earlier `agent_start`
+	 * (a reconnect dropped it mid-stream) needs it when the host later reports it is streaming.
 	 */
-	ensureLoadingAnimation: InteractiveModeContext["ensureLoadingAnimation"];
-	autoCompactionLoader: InteractiveModeContext["autoCompactionLoader"];
-	retryLoader: InteractiveModeContext["retryLoader"];
-}
-
-/** Status-area state which cannot outlive removal of its child components. */
-export interface GuestTransientStatusCtx {
-	statusContainer: Pick<InteractiveModeContext["statusContainer"], "clear">;
-	autoCompactionLoader: InteractiveModeContext["autoCompactionLoader"];
-	retryLoader: InteractiveModeContext["retryLoader"];
-}
-
-/** Stop and forget status-area loaders before detaching their components. */
-export function clearGuestTransientStatus(ctx: GuestTransientStatusCtx): void {
-	if (ctx.autoCompactionLoader) {
-		ctx.autoCompactionLoader.stop();
-		ctx.autoCompactionLoader = undefined;
-	}
-	if (ctx.retryLoader) {
-		ctx.retryLoader.stop();
-		ctx.retryLoader = undefined;
-	}
-	ctx.statusContainer.clear();
+	ensureWorkingRow: InteractiveModeContext["ensureWorkingRow"];
 }
 
 export function reconcileGuestSnapshotHostState(ctx: GuestSnapshotActivityReconcilerCtx, isStreaming: boolean): void {
 	if (isStreaming) {
 		ctx.statusLine.markActivityStart();
-		if (!ctx.autoCompactionLoader && !ctx.retryLoader) ctx.ensureLoadingAnimation();
+		ctx.ensureWorkingRow();
 		return;
 	}
 	reconcileGuestIdleHostState(ctx, false);
@@ -230,6 +202,7 @@ export class CollabGuestLink {
 	#applyChain: Promise<void> = Promise.resolve();
 	/** True after the initial snapshot has been written to disk and resumed. */
 	#welcomed = false;
+	#autoRejoins: number[] = [];
 	#left = false;
 	#replicaActivated = false;
 	/** One owner spans cancellation, queued snapshot work, and local restoration. */
@@ -242,13 +215,14 @@ export class CollabGuestLink {
 	#pendingSnapshot: PendingSnapshot | null = null;
 	/**
 	 * Fires `firstWelcome.reject` from a stalled welcome/snapshot during the
-	 * initial join. Set in {@link join}, cleared on resolve/reject; arming a
-	 * timer after that point is a no-op so reconnect-time stalls fall through
-	 * to the normal socket close handling instead of aborting the live session.
+	 * initial join. Set in {@link join}, cleared on resolve/reject; a stall after
+	 * that point rejoins instead.
 	 */
 	#joinReject: ((err: Error) => void) | null = null;
 	#welcomeTimer: Timer | null = null;
 	#snapshotProgressTimer: Timer | null = null;
+	/** Set in {@link join}: fails the first join, or rejoins once joined. */
+	#onSnapshotTimeout: (() => void) | null = null;
 	/** base64url write token from a full link; absent when joined via a view link. */
 	#writeToken: string | undefined;
 	/** True when the host marked this peer read-only (view link). */
@@ -353,22 +327,47 @@ export class CollabGuestLink {
 			firstWelcome.resolve();
 		};
 
-		socket.onOpen = () => {
-			if (this.#left) return;
-			// (Re)connect: re-introduce ourselves; the host answers with a fresh
-			// welcome which (re)syncs the replica. Discard any partially-streamed
-			// snapshot from a prior connection: the host will resend the full
-			// chunk train.
+		// Re-introduce ourselves; the host answers with a fresh welcome which
+		// (re)syncs the replica. Discard any partially-streamed snapshot: the host
+		// will resend the full chunk train.
+		const introduce = (): void => {
 			this.#welcomed = false;
 			this.#pendingSnapshot = null;
 			this.#clearSnapshotProgressTimer();
-			this.#armWelcomeTimer();
+			this.#armWelcomeTimer(onWelcomeTimeout);
 			socket.send({
 				t: "hello",
 				proto: COLLAB_PROTO,
 				name: collabDisplayName(this.#ctx),
 				writeToken: this.#writeToken,
 			});
+		};
+		// The host dropped us (or never answered) while the relay link stayed up: say
+		// hello again, within the auto-rejoin budget.
+		const rejoin = (message: string): void => {
+			if (this.#left) return;
+			if (!takeAutoRejoin(this.#autoRejoins)) {
+				this.#ctx.showError(`Collab host: ${message}`);
+				return;
+			}
+			this.#ctx.showStatus(`Collab host: ${message}; rejoining…`, { dim: true });
+			// The host no longer counts us as a recipient of its open dialogs.
+			this.#clearUiRequests();
+			introduce();
+		};
+		this.#onSnapshotTimeout = () => {
+			const message = "timed out waiting for the host's session snapshot";
+			if (joined) rejoin(message);
+			else firstWelcome.reject(new Error(message));
+		};
+		const onWelcomeTimeout = (): void => {
+			const message = "timed out waiting for the host's welcome";
+			if (joined) rejoin(message);
+			else firstWelcome.reject(new Error(message));
+		};
+		socket.onOpen = () => {
+			if (this.#left) return;
+			introduce();
 		};
 		socket.onFrame = frame => {
 			this.#applyChain = this.#applyChain
@@ -389,6 +388,11 @@ export class CollabGuestLink {
 							await this.#finalizeSnapshot();
 							finishJoin();
 						}
+						return;
+					}
+					if (frame.t === "error" && frame.resync) {
+						// A hello still awaiting its welcome is retried by the welcome timer.
+						if (this.#welcomeTimer === null) rejoin(frame.message);
 						return;
 					}
 					if (frame.t === "error" && !this.#welcomed && !this.#left) {
@@ -431,7 +435,7 @@ export class CollabGuestLink {
 		try {
 			socket.connect();
 			// Cover a blackholed WebSocket handshake too; onOpen resets the timer.
-			this.#armWelcomeTimer();
+			this.#armWelcomeTimer(onWelcomeTimeout);
 			await firstWelcome.promise;
 			if (this.#left) throw new Error("Collab join cancelled");
 		} catch (err) {
@@ -603,12 +607,11 @@ export class CollabGuestLink {
 		);
 	}
 
-	#armWelcomeTimer(): void {
-		if (this.#joinReject === null) return;
+	#armWelcomeTimer(onTimeout: () => void): void {
 		this.#clearWelcomeTimer();
 		this.#welcomeTimer = setTimeout(() => {
 			this.#welcomeTimer = null;
-			this.#joinReject?.(new Error("timed out waiting for the host's welcome"));
+			onTimeout();
 		}, WELCOME_TIMEOUT_MS);
 	}
 
@@ -620,11 +623,12 @@ export class CollabGuestLink {
 	}
 
 	#armSnapshotProgressTimer(): void {
-		if (this.#joinReject === null) return;
+		const onTimeout = this.#onSnapshotTimeout;
+		if (this.#left || onTimeout === null) return;
 		this.#clearSnapshotProgressTimer();
 		this.#snapshotProgressTimer = setTimeout(() => {
 			this.#snapshotProgressTimer = null;
-			this.#joinReject?.(new Error("timed out waiting for the host's session snapshot"));
+			onTimeout();
 		}, SNAPSHOT_PROGRESS_TIMEOUT_MS);
 	}
 
@@ -656,7 +660,8 @@ export class CollabGuestLink {
 				break;
 			}
 			case "event":
-				this.#applyEvent(frame.event);
+				// Hosts send every stopped loop as a flagged `agent_end` (see loop-end-wire.ts).
+				this.#applyEvent(fromWireEvent(frame.event));
 				break;
 			case "state": {
 				this.state = frame.state;
@@ -665,8 +670,6 @@ export class CollabGuestLink {
 				this.#updateStatusSegment();
 				reconcileGuestSnapshotHostState(this.#ctx, frame.state.isStreaming);
 				this.#reconcileLifecycle(frame.state.isStreaming);
-				this.#ctx.statusLine.invalidate();
-				this.#ctx.ui.requestRender();
 				break;
 			}
 			case "bus":
@@ -711,7 +714,7 @@ export class CollabGuestLink {
 		// in-flight assistant message predates the snapshot. message_update
 		// carries the full accumulating message, so synthesize the missing start
 		// before the first orphaned update; every other handler is tolerant of
-		// unknown anchors (guarded by streamingComponent/pendingTools lookups).
+		// unknown anchors (guarded by streaming/pendingTools lookups).
 		if (event.type === "message_start" && event.message.role === "assistant") {
 			this.#assistantStreamSynced = true;
 			this.#streamedSnapshot = event.message;
@@ -784,11 +787,7 @@ export class CollabGuestLink {
 				this.#lifecycleEmitter.emit(runner, { type: "agent_start" });
 			}
 		} else if (this.#lifecycleEmitter.sawAgentStart) {
-			this.#lifecycleEmitter.emit(runner, {
-				type: "agent_end",
-				messages: [...this.#ctx.session.messages],
-				isTerminal: true,
-			});
+			this.#lifecycleEmitter.emit(runner, { type: "agent_end", messages: [...this.#ctx.session.messages] });
 		}
 	}
 
@@ -876,14 +875,19 @@ export class CollabGuestLink {
 		this.#pendingUiRequests.set(request.reqId, abort);
 		const dialog =
 			request.kind === "select"
-				? this.#ctx.showHookSelector(request.title, request.options, {
-						signal: abort.signal,
-						initialIndex: request.initialIndex,
-						selectionMarker: request.selectionMarker,
-						checkedIndices: request.checkedIndices,
-						markableCount: request.markableCount,
-						helpText: request.helpText,
-					})
+				? this.#ctx.showHookSelector(
+						request.title,
+						request.options,
+						{
+							signal: abort.signal,
+							initialIndex: request.initialIndex,
+							selectionMarker: request.selectionMarker,
+							checkedIndices: request.checkedIndices,
+							markableCount: request.markableCount,
+							helpText: request.helpText,
+						},
+						{ kind: request.approval ? "permission" : "question" },
+					)
 				: this.#ctx.showHookEditor(request.title, request.prefill, { signal: abort.signal });
 		dialog
 			.then(value => {
@@ -930,17 +934,11 @@ export class CollabGuestLink {
 
 	#clearTransientUi(): void {
 		this.#clearUiRequests();
-		clearGuestTransientStatus(this.#ctx);
-		this.#ctx.pendingShellContainer.clear();
-		this.#ctx.pendingMessagesContainer.clear();
+		// The view's transient rows, streaming state and pending tools go; the compaction queue
+		// belonged to the session being left, so it is dropped rather than handed to the editor.
+		this.#ctx.clearTransientSessionUi({ viewOnly: true });
 		this.#ctx.compactionQueuedMessages = [];
-		this.#ctx.streamingComponent = undefined;
-		this.#ctx.streamingMessage = undefined;
-		this.#ctx.pendingTools.clear();
-		if (this.#ctx.loadingAnimation) {
-			this.#ctx.loadingAnimation.stop();
-			this.#ctx.loadingAnimation = undefined;
-		}
+		this.#ctx.updatePendingMessagesDisplay();
 	}
 
 	#restoreAfterDisconnect(): void {
@@ -1008,13 +1006,11 @@ export class CollabGuestLink {
 			throw new Error("Local session restoration was cancelled");
 		}
 		setSessionTerminalTitle(this.#ctx.sessionManager.getSessionName(), this.#ctx.sessionManager.getCwd());
-		this.#ctx.statusLine.invalidate();
+		this.#ctx.statusLine.refresh();
 		this.#ctx.statusLine.resetActiveTime();
-		this.#ctx.ui.requestRender();
 		this.#ctx.updateEditorBorderColor();
 		await this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
 		await this.#ctx.reloadTodos();
-		this.#ctx.ui.requestRender(true, { clearScrollback: true });
 	}
 
 	#updateStatusSegment(): void {

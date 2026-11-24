@@ -12,13 +12,16 @@ import { $flag, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { HINDSIGHT_NOTICE_SOURCE } from "../hindsight/state";
 import type { MCPManager } from "../mcp/manager";
 import { resolveMCPTimeoutMs } from "../mcp/timeout";
+import { MNEMOPI_NOTICE_SOURCE } from "../mnemopi/embedding-notice";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
+import { toWireEvent } from "../session/loop-end-wire";
 import { COST_GATE_NOTICE_SOURCE } from "../session/cost-gate";
 import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "../session/credential-disabled-notice";
 import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
 import { parseSlashCommand, parseSubcommand } from "../slash-commands/helpers/parse";
 import type { SlashCommandRuntime } from "../slash-commands/types";
+import { SPOTLIGHT_NOTICE_SOURCE } from "../spotlight/session";
 import { reconnectMcpManagerServer } from "../mcp/oauth-reauth";
 import {
 	formatPersistenceDurabilityFailure,
@@ -84,8 +87,11 @@ function stripProviderPayload<T extends AgentMessage>(message: T): T {
  *   is printed. The authoritative message follows in `message_end`.
  * - `providerPayload` is transport-native replay state, opaque and useless
  *   outside this process.
+ * - Loop pauses and the run's end keep the JSON stream's per-loop `agent_end`
+ *   shape (`isTerminal`, `yielded`, `awaitingAsyncWork`; see `loop-end-wire.ts`).
  */
-export function printableEvent(event: AgentSessionEvent): unknown {
+export function printableEvent(sessionEvent: AgentSessionEvent): unknown {
+	const event = toWireEvent(sessionEvent);
 	switch (event.type) {
 		case "tool_stream_update":
 			return { type: event.type, toolCallId: event.toolCallId, toolName: event.toolName };
@@ -117,22 +123,63 @@ export function printableEvent(event: AgentSessionEvent): unknown {
 }
 
 /**
+ * Serialized print-mode stdout.
+ *
+ * process.stdout.write is fire-and-forget: a large final record (e.g. a
+ * multi-MB agent_end) can be dropped when the process exits before the pipe
+ * drains, truncating the record mid-line while the process still exits 0.
+ * Each line waits on the previous write's completion callback so records stay
+ * ordered and honor backpressure; shutdown blocks on {@link drained}. Same
+ * truncation class as issue #5309 (issue #7635).
+ */
+class SerialStdout {
+	#tail: Promise<void> = Promise.resolve();
+
+	writeLine(text: string): void {
+		this.#tail = this.#tail.then(() => {
+			const { promise, resolve, reject } = Promise.withResolvers<void>();
+			process.stdout.write(text, err => {
+				if (err) reject(err);
+				else resolve();
+			});
+			return promise;
+		});
+	}
+
+	/** Settles once every line written so far has drained; rejects with the first write error. */
+	drained(): Promise<void> {
+		return this.#tail;
+	}
+}
+
+/**
  * Run in print (single-shot) mode.
  *
  * Sends prompts, writes the selected output format, disposes the session, and
  * returns the process exit code for the completed turn.
  */
 export async function runPrintMode(session: AgentSession, options: PrintModeOptions): Promise<number> {
+	const stdout = new SerialStdout();
 	// A signal (SIGINT/SIGTERM/SIGHUP) landing mid-turn drives the exit code
 	// through postmortem (130/143/129). Record the reason so the aborted-response
 	// branch below never races that with its own ordinary failure status.
 	let signalReason: postmortem.Reason | undefined;
-	const cancelSignalTeardown = postmortem.register("print-mode-session", reason => {
+	const cancelSignalTeardown = postmortem.register("print-mode-session", async reason => {
 		signalReason = reason;
-		return session.dispose({ reason, mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+		// Join stdout only after dispose: event forwarding stays live through its
+		// bounded run drain, so a tool settling there still enqueues its terminal
+		// record. Postmortem exits once this callback settles (issue #18450).
+		try {
+			await session.dispose({ reason, mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+		} catch (error) {
+			// The disposal failure stays primary; a write error behind it is secondary.
+			await stdout.drained().catch(() => {});
+			throw error;
+		}
+		await stdout.drained();
 	});
 	try {
-		return await runPrintModeCore(session, options, () => signalReason !== undefined);
+		return await runPrintModeCore(session, options, stdout, () => signalReason !== undefined);
 	} finally {
 		cancelSignalTeardown();
 	}
@@ -141,34 +188,17 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 async function runPrintModeCore(
 	session: AgentSession,
 	options: PrintModeOptions,
+	stdout: SerialStdout,
 	signalTeardownActive: () => boolean,
 ): Promise<number> {
 	const { mode, messages = [], initialMessage, initialImages, printThoughts, planYolo = false } = options;
 	session.disableStopTimeTodoReminders();
 
-	// process.stdout.write is fire-and-forget: a large final record (e.g. a
-	// multi-MB agent_end) can be dropped when the process exits before the pipe
-	// drains, truncating the record mid-line while the process still exits 0.
-	// Serialize every stdout write on the previous write's completion callback so
-	// records stay ordered and honor backpressure, then block shutdown on the
-	// tail before dispose/exit. Same truncation class as issue #5309 (issue #7635).
-	let stdoutTail: Promise<void> = Promise.resolve();
-	const writeStdoutLine = (text: string): void => {
-		stdoutTail = stdoutTail.then(() => {
-			const { promise, resolve, reject } = Promise.withResolvers<void>();
-			process.stdout.write(text, err => {
-				if (err) reject(err);
-				else resolve();
-			});
-			return promise;
-		});
-	};
-
 	// Emit session header for JSON mode
 	if (mode === "json") {
 		const header = session.sessionManager.getHeader();
 		if (header) {
-			writeStdoutLine(`${JSON.stringify(header)}\n`);
+			stdout.writeLine(`${JSON.stringify(header)}\n`);
 		}
 	}
 	// Set up extensions for print mode (no UI, no command context)
@@ -187,8 +217,8 @@ async function runPrintModeCore(
 	// `plan.defaultOnStartup` opens fresh *interactive* sessions in plan mode so a
 	// human can review the plan before it executes. Headless print mode has no
 	// surface to review, approve, or exit a plan from, and the turn carries no
-	// deterministic way out of plan mode — the model must voluntarily emit a valid
-	// `xd://propose` execute-dispatch, and when it does not the run strands until
+	// deterministic way out of plan mode — the model must voluntarily submit a
+	// valid plan with `propose`, and when it does not the run strands until
 	// the deadline (issue #8272). So do not honor the startup default here; the
 	// supported headless plan flow is `--plan-yolo` (auto-approve → implement),
 	// which is wired independently through the prewalk coordinator.
@@ -283,7 +313,7 @@ async function runPrintModeCore(
 	let costCapRefusalBeforeTurn = session.costCapRefusal;
 	// The print-mode-dispatched commands. Only commands whose runtime hooks
 	// are real in the headless runtime belong here: each runs a session API
-	// (`/mcp reauth` engine, `session.compact`, `session.handoff`,
+	// (`/mcp reauth` engine, `session.compact`,
 	// `session.retry`). Commands whose hooks would be stubs
 	// (`/reload-plugins` and friends) stay undispatched, and so does
 	// `/stats`: its dashboard server is in-process (`Bun.serve` inside this
@@ -359,17 +389,20 @@ async function runPrintModeCore(
 	session.subscribe(event => {
 		// In JSON mode, output all events
 		if (mode === "json") {
-			writeStdoutLine(`${JSON.stringify(printableEvent(event))}\n`);
+			stdout.writeLine(`${JSON.stringify(printableEvent(event))}\n`);
 		} else if (
 			event.type === "notice" &&
 			(event.source === CREDENTIAL_DISABLED_NOTICE_SOURCE ||
 				event.source === COST_GATE_NOTICE_SOURCE ||
-				event.source === HINDSIGHT_NOTICE_SOURCE)
+				event.source === HINDSIGHT_NOTICE_SOURCE ||
+				event.source === MNEMOPI_NOTICE_SOURCE ||
+				event.source === SPOTLIGHT_NOTICE_SOURCE)
 		) {
 			// Text mode renders no session notices, but an automatic sign-out must not stay
 			// hidden behind a sibling account that quietly answers the prompt, a run must
-			// say when it crossed its cost thresholds, and a memory failure must not pass
-			// as an answer that used memories.
+			// say when it crossed its cost thresholds, a memory failure must not pass
+			// as an answer that used memories, and Spotlight must say when it lost its
+			// credential or Cloud access and fell back to unranked cuts.
 			writeStderrLine(event.source === COST_GATE_NOTICE_SOURCE ? event.message : `Warning: ${event.message}`);
 		} else if (event.type === "auto_retry_start") {
 			// Text mode shows only `Working...` while a turn runs; a turn stuck retrying
@@ -487,14 +520,15 @@ async function runPrintModeCore(
 	}
 
 	// Opt-in (`async.printWake` / `--wait-async`): background jobs the run started
-	// would otherwise be cancelled by the dispose below. Keep the process alive and
-	// let each job's async-result wake the same session for another turn, until no
-	// owned job or delivery remains (a follow-up turn may start new jobs). This runs
-	// before the headless advisor drain because these follow-ups are primary turns
-	// whose answer print mode still reports. The `--max-time` deadline only aborts
-	// running turns, not idle waiting or a retry backoff sleep, so every wait here
-	// races it; reaching it cancels the jobs and any pending retry (dispose below)
-	// and fails the run.
+	// would otherwise be cancelled by the dispose below. Keep the process alive until
+	// the run ends: each job's async-result (or a child agent's message) resumes the
+	// same run for another loop, and the session ends the run once no wake source
+	// remains. This runs before the headless advisor drain because these follow-ups
+	// are primary turns whose answer print mode still reports. The `--max-time`
+	// deadline only aborts running turns, not a paused run or a retry backoff sleep,
+	// so the wait races it; reaching it cancels the jobs and any pending retry
+	// (dispose below) and fails the run. Signal teardown disposes the session, which
+	// ends the wait.
 	let asyncWaitExpired = false;
 	if (admittedAgentTurn && !strictMCPFailure && cfgAsyncPrintWake.get(session.settings)) {
 		const { deadline } = options;
@@ -516,25 +550,13 @@ async function runPrintModeCore(
 			return true;
 		};
 		try {
-			// Without owned jobs a late primary turn is not this wait's business: it keeps its own exit path.
-			asyncWaitExpired = (await expires(session.waitForIdle())) && session.hasPendingAsyncWork();
-			while (!asyncWaitExpired && session.hasPendingAsyncWork() && !session.isDisposed && !signalTeardownActive()) {
-				// Checked synchronously too: an already-due timer fires only in the timers
-				// phase, after a settle of finished work would have resolved. The deadline
-				// stops new waits; a settle that already finished is kept: its follow-up turn
-				// ran under the agent-loop deadline (which aborts a turn that crosses it), so
-				// its answer is complete.
-				if (deadline !== undefined && Date.now() >= deadline) {
-					asyncWaitExpired = true;
-					break;
-				}
-				asyncWaitExpired = await expires(session.settleAsyncWork());
-			}
+			// A run that ended just as the deadline fired is complete: its answer stands.
+			asyncWaitExpired = (await expires(session.waitForRunEnd())) && session.isRunActive;
 		} finally {
 			clearTimeout(deadlineTimer);
 		}
 		if (asyncWaitExpired) {
-			writeStderrLine("Error: --max-time reached before background work settled; any running jobs were cancelled.");
+			writeStderrLine("Error: --max-time reached before the run ended; any running jobs were cancelled.");
 		}
 	}
 
@@ -583,9 +605,9 @@ async function runPrintModeCore(
 			// Output text content; narration the provider returned as thinking is part of the reply.
 			for (const content of presentNarrationAsAnswer(assistantMsg).content) {
 				if (content.type === "text") {
-					writeStdoutLine(`${sanitizeText(content.text)}\n`);
+					stdout.writeLine(`${sanitizeText(content.text)}\n`);
 				} else if (printThoughts && content.type === "thinking" && content.thinking.trim().length > 0) {
-					writeStdoutLine(`${sanitizeText(content.thinking)}\n`);
+					stdout.writeLine(`${sanitizeText(content.thinking)}\n`);
 				}
 			}
 		}
@@ -611,7 +633,7 @@ async function runPrintModeCore(
 	// Block shutdown until every serialized stdout write (including the final
 	// agent_end and late JSON advisor events) has drained; process.exit would
 	// otherwise discard the buffered tail and truncate the last record.
-	await stdoutTail;
+	await stdout.drained();
 	// Dispose before returning the status instead of hard-exiting ahead of it:
 	// the awaited `dispose()` runs the browser reaper (releaseTabsForOwner), so
 	// an OMP-owned Chromium cannot survive the exit (issue #5643).

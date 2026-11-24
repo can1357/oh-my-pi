@@ -21,8 +21,8 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../src/ui/theme/service";
 
 describe("a reply wait on an agent in `ask`", () => {
 	let tempDir: string;
@@ -31,7 +31,7 @@ describe("a reply wait on an agent in `ask`", () => {
 	let session: AgentSession | undefined;
 
 	beforeAll(async () => {
-		await initTheme(false);
+		initTheme();
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-wait-reply-ask-${Snowflake.next()}-`));
 		authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
 		authStorage.keys.setRuntime("openai", "test-key");
@@ -94,7 +94,7 @@ describe("a reply wait on an agent in `ask`", () => {
 							type: "toolCall",
 							name: "ask",
 							arguments: {
-								questions: [{ id: "go", question: "Go on?", options: [{ label: "Yes" }, { label: "No" }] }],
+								html: '<form><p>Go on?</p><label><input type="radio" name="go" value="yes"> Yes</label><label><input type="radio" name="go" value="no"> No</label></form>',
 							},
 						},
 					],

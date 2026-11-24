@@ -1,14 +1,11 @@
-import { TERMINAL } from "@oh-my-pi/pi-tui";
-import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
-import { SETTING_TABS, type SettingsDisplayEntry, type SettingsHost } from "@oh-my-pi/pi-tui/overlays/settings-defs";
+import { SETTING_TABS, type SettingsDisplayEntry, type SettingsHost } from "./settings-defs";
 import { isSettingsInitialized, Settings, settings } from "./settings";
 import { orderedSettings } from "./all-settings";
 import { type AnySetting, lookup } from "./registry";
-
 import { cfgPlanAutosave, cfgPlanEnabled } from "../plan-mode/settings";
 import {
-	cfgRetryUsageAwareFallback,
 	cfgDefaultThinkingLevel,
+	cfgRetryUsageAwareFallback,
 	normalizeProviderMaxInFlightRequests,
 	validateProviderMaxInFlightRequests,
 } from "../session/settings";
@@ -19,6 +16,9 @@ import { cfgAdvisorEnabled } from "../advisor/settings";
 import { cfgContextFilesExtra } from "../session/context-settings";
 import { cfgTaskPerCallModelAllow } from "../task/settings";
 import { cfgToolsRestrictedFolders } from "../tools/settings";
+import { cfgAuthUnpausedProviders } from "./model-settings";
+import { nativeRendering } from "@oh-my-pi/pi-tui";
+import { terminalCapabilities } from "@oh-my-pi/pi-tui/driver/session";
 
 /** Condition over the global settings; hidden (false) until they are initialized. */
 function whenSettings(test: (settings: Settings) => boolean): () => boolean {
@@ -27,8 +27,8 @@ function whenSettings(test: (settings: Settings) => boolean): () => boolean {
 
 const CONDITIONS: Record<string, () => boolean> = {
 	macOS: () => process.platform === "darwin",
-	hasImageProtocol: () => !!TERMINAL.imageProtocol,
-	nativeRendering: () => isNativeRendering(),
+	hasImageProtocol: () => terminalCapabilities().images !== null,
+	nativeRendering: () => nativeRendering(),
 	advisorEnabled: whenSettings(s => cfgAdvisorEnabled.get(s) === true),
 	vimModeEnabled: whenSettings(s => cfgTuiVimMode.get(s) === true),
 	composerPredictionsEnabled: whenSettings(s => cfgComposerPredictions.get(s) === true),
@@ -43,6 +43,7 @@ const CONDITIONS: Record<string, () => boolean> = {
 	contextFilesExtraNotProject: whenSettings(s => cfgContextFilesExtra.provenance(s) !== "project"),
 	restrictedFoldersNotProject: whenSettings(s => cfgToolsRestrictedFolders.provenance(s) !== "project"),
 	perCallModelAllowNotProject: whenSettings(s => cfgTaskPerCallModelAllow.provenance(s) !== "project"),
+	unpausedProvidersNotProject: whenSettings(s => cfgAuthUnpausedProviders.provenance(s) !== "project"),
 };
 
 /** Description suffix telling the panel user that an environment variable is in play. */

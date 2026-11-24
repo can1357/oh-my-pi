@@ -9,7 +9,7 @@
 import * as fs from "node:fs";
 import { APP_NAME } from "./dirs";
 import * as logger from "./logger";
-import { restoreTerminalStderr } from "./stderr-guard";
+import { isTerminalStderrSuppressed, restoreTerminalStderr } from "./stderr-guard";
 import { toError } from "./type-guards";
 
 // Cleanup reasons, in order of priority/meaning.
@@ -223,7 +223,7 @@ function runCleanup(reason: Reason, keepAlive = false): Promise<void> {
 	const announced: { message: string; until: number; open: () => boolean }[] = [];
 	let othersSettled = false;
 	const announce = (): void => {
-		if (passDone || !othersSettled) return;
+		if (passDone || !othersSettled || terminalDeclaredDead) return;
 		for (const hold of announced.splice(0)) {
 			if (!hold.open()) continue;
 			const seconds = Math.max(1, Math.ceil((hold.until - Date.now()) / 1000));
@@ -602,7 +602,7 @@ function removeEmbeddedRejectionListener(): void {
 
 /**
  * Register a synchronous recovery command to print when the process exits
- * through an uncaught exception, an unhandled rejection, or SIGTERM.
+ * through an uncaught exception, an unhandled rejection, SIGTERM, or SIGHUP.
  *
  * Providers are read once cleanup finishes (or hits its deadline), so they
  * report what teardown left behind: a session it saved or one it dropped.
@@ -635,6 +635,14 @@ function formatFatalRecoveryHints(providers: Iterable<FatalRecoveryHintProvider>
 	return lines.length > 0 ? `\n[Recovery]\n${lines.join("\n")}\n` : "";
 }
 
+/** The terminal gets one cause line; the log retains the original multiline message and full stack. */
+function formatTerminalFatalError(label: string, err: Error, logFile: string): string {
+	const name = escapeFatalHintText(err.name || "Error");
+	const firstLine = String(err.message || "").split(/[\r\n\u2028\u2029]/u, 1)[0] || "(no message)";
+	const message = firstLine.length > 240 ? `${firstLine.slice(0, 239)}…` : firstLine;
+	return `\n[${label}] ${name}: ${escapeFatalHintText(message)}\nDetails: ${escapeFatalHintText(logFile)}\n`;
+}
+
 function formatFatalError(label: string, err: Error): string {
 	const name = err.name || "Error";
 	const message = err.message || "(no message)";
@@ -644,8 +652,33 @@ function formatFatalError(label: string, err: Error): string {
 	return `\n[${label}] ${name}: ${message}${formattedStack}\n`;
 }
 
+/**
+ * Whether a terminal owner has declared the terminal gone, e.g. the TUI's
+ * `#markTerminalDisconnected`. The owner sets this before raising SIGHUP itself,
+ * so the signal handlers must not write afterwards: with stdout stalled, fd 2 is
+ * a blocking, full pty, and a write there hangs in the kernel before the exit.
+ */
+let terminalDeclaredDead = false;
+
+/**
+ * Record that the terminal is gone, so signal exits stop writing to fd 2.
+ *
+ * The terminal owner calls this before raising its own disconnect signal. The
+ * `EIO` try/catch in {@link writeTerminalReport} covers a descriptor revoked by
+ * an outside hangup; it cannot cover a write that blocks on a full pty.
+ */
+export function declareTerminalDead(): void {
+	terminalDeclaredDead = true;
+}
+
+/** Whether a terminal owner has already declared the terminal gone. */
+export function isTerminalDeclaredDead(): boolean {
+	return terminalDeclaredDead;
+}
+
 /** Write a final report to stderr once terminal owners have handed the terminal back. */
 function writeTerminalReport(output: string): void {
+	if (terminalDeclaredDead) return;
 	restoreTerminalStderr();
 	// A revoked terminal can make stream writes raise another fatal error. Use
 	// the descriptor directly so failure stays synchronous and contained.
@@ -670,8 +703,30 @@ function writeRecoveryHints(providers: readonly FatalRecoveryHintProvider[], hea
 	writeTerminalReport(`${heading}${hints}`);
 }
 
-async function exitAfterFatal(output: string, logMessage: string, err: Error, reason: Reason): Promise<never> {
+async function exitAfterFatal(
+	label: string,
+	logMessage: string,
+	err: Error,
+	reason: Reason,
+	detailedReport?: () => string,
+): Promise<never> {
 	const hintProviders = [...fatalRecoveryHintProviders];
+	// Persist the cause even when teardown hangs. Terminal output, unlike the log,
+	// must wait for an asynchronous owner to close its surface and restore echo.
+	logger.error(logMessage, { err });
+	// Capture the actual file that received the stack (including a rotation suffix).
+	// A pipe or redirected stderr retains the detailed report for its consumer.
+	const interactive =
+		process.stdin.isTTY && process.stdout.isTTY && (isTerminalStderrSuppressed() || process.stderr.isTTY);
+	const file = interactive ? logger.currentLogFile() : undefined;
+	const output = file
+		? formatTerminalFatalError(label, err, file)
+		: (detailedReport?.() ?? formatFatalError(label, err));
+	function reportAndExit(): never {
+		writeTerminalReport(output);
+		writeRecoveryHints(hintProviders);
+		return exitProcess(1);
+	}
 	// The forced exit backs up the pass deadline, so it waits while a callback with
 	// its own `deadlineMs` holds the pass open; that pass still ends at its deadline.
 	const forceExit = (): void => {
@@ -679,22 +734,14 @@ async function exitAfterFatal(output: string, logMessage: string, err: Error, re
 			forcedExit = setTimeout(forceExit, CLEANUP_DEADLINE_MS);
 			return;
 		}
-		writeRecoveryHints(hintProviders);
-		exitProcess(1);
+		reportAndExit();
 	};
 	let forcedExit = setTimeout(forceExit, CLEANUP_DEADLINE_MS);
 	try {
-		// Cleanup callbacks are invoked synchronously before runCleanup returns its
-		// completion promise. TUI owners therefore hand the cursor back before the
-		// fatal report is written, while slower resource cleanup continues afterward.
-		const cleanup = runCleanup(reason);
-		writeTerminalReport(output);
-		logger.error(logMessage, { err });
-		await cleanup;
-		writeRecoveryHints(hintProviders);
+		await runCleanup(reason);
 	} finally {
 		clearTimeout(forcedExit);
-		exitProcess(1);
+		reportAndExit();
 	}
 }
 
@@ -710,14 +757,14 @@ function handleWorkerSendEpipe(err: Error): boolean {
  */
 export async function fatal(error: unknown): Promise<never> {
 	const err = toError(error);
-	const report = `${Bun.inspect(error, { colors: process.stderr.isTTY === true })}\n`;
+	const report = (): string => `${Bun.inspect(error, { colors: process.stderr.isTTY === true })}\n`;
 	if (!Bun.isMainThread) {
-		process.stderr.write(`${report}${formatFatalRecoveryHints(fatalRecoveryHintProviders)}`);
+		process.stderr.write(`${report()}${formatFatalRecoveryHints(fatalRecoveryHintProviders)}`);
 		// An explicit exit alone leaves the parent only `close` with code 1; this reaches its `error` listeners.
 		reportError(err);
 		process.exit(1);
 	}
-	return exitAfterFatal(report, "Fatal error", err, Reason.UNHANDLED_REJECTION);
+	return exitAfterFatal("Fatal Error", "Fatal error", err, Reason.UNHANDLED_REJECTION, report);
 }
 
 // Exit-time cleanup is safe in any host: it neither delays nor triggers an exit. Signal and fatal
@@ -727,6 +774,32 @@ process.on("exit", () => {
 });
 
 let processHandlersInstalled = false;
+/** Set by {@link exitCleanlyOnStopSignals}: SIGINT/SIGTERM exit 0 after cleanup. */
+let stopSignalsAreRequests = false;
+
+/**
+ * For a long-running service, SIGINT and SIGTERM are how a supervisor asks it to stop
+ * (a restart, `systemctl stop`, `docker stop`), not a failure: after the usual cleanup
+ * pass the process exits 0 instead of 128 + the signal number. SIGHUP keeps its code.
+ */
+export function exitCleanlyOnStopSignals(): void {
+	stopSignalsAreRequests = true;
+}
+
+/**
+ * Exit through a termination signal: clean up, print the recovery hints, exit.
+ *
+ * The hint write is skipped once a terminal owner declared the terminal dead
+ * ({@link declareTerminalDead}): a stalled stdout leaves fd 2 a full, blocking
+ * pty, so the write would hang the process before the exit below. A repeated
+ * signal joins the same cleanup and the hints still print once.
+ */
+async function exitAfterSignal(reason: Reason, heading: string, exitCode: number): Promise<never> {
+	const hintProviders = [...fatalRecoveryHintProviders];
+	await runCleanup(reason);
+	if (!terminalDeclaredDead) writeRecoveryHints(hintProviders, heading);
+	exitProcess(exitCode);
+}
 
 /** Installs OMP's process-wide signal and fatal handlers for a CLI-owned process. */
 export function installProcessHandlers(): void {
@@ -739,7 +812,7 @@ export function installProcessHandlers(): void {
 	process
 		.on("SIGINT", async () => {
 			await runCleanup(Reason.SIGINT);
-			exitProcess(130); // 128 + SIGINT (2)
+			exitProcess(stopSignalsAreRequests ? 0 : 130); // 128 + SIGINT (2)
 		})
 		.on("SIGUSR1", async () => {
 			if (inspectorOpened) return;
@@ -781,12 +854,7 @@ export function installProcessHandlers(): void {
 				});
 				return;
 			}
-			await exitAfterFatal(
-				formatFatalError("Uncaught Exception", err),
-				"Uncaught exception",
-				err,
-				Reason.UNCAUGHT_EXCEPTION,
-			);
+			await exitAfterFatal("Uncaught Exception", "Uncaught exception", err, Reason.UNCAUGHT_EXCEPTION);
 		})
 		.on("unhandledRejection", async reason => {
 			const err = toError(reason);
@@ -796,25 +864,17 @@ export function installProcessHandlers(): void {
 				return;
 			}
 			if (interceptRejection(reason)) return;
-			await exitAfterFatal(
-				formatFatalError("Unhandled Rejection", err),
-				"Unhandled rejection",
-				err,
-				Reason.UNHANDLED_REJECTION,
-			);
+			await exitAfterFatal("Unhandled Rejection", "Unhandled rejection", err, Reason.UNHANDLED_REJECTION);
 		})
 		.on("SIGTERM", async () => {
 			// A stopped session otherwise leaves its last frame above the shell prompt,
-			// which reads as a crash. A repeated SIGTERM joins the same cleanup and the
-			// hints still print once.
-			const hintProviders = [...fatalRecoveryHintProviders];
-			await runCleanup(Reason.SIGTERM);
-			writeRecoveryHints(hintProviders, "\n[Stopped by SIGTERM]");
-			exitProcess(143); // 128 + SIGTERM (15)
+			// which reads as a crash.
+			await exitAfterSignal(Reason.SIGTERM, "\n[Stopped by SIGTERM]", stopSignalsAreRequests ? 0 : 143); // 128 + SIGTERM (15)
 		})
 		.on("SIGHUP", async () => {
-			await runCleanup(Reason.SIGHUP);
-			exitProcess(129); // 128 + SIGHUP (1)
+			// Same report as SIGTERM: a runtime that stops the program with a hangup
+			// keeps its screen, so the resume command survives the death.
+			await exitAfterSignal(Reason.SIGHUP, "\n[Stopped by SIGHUP]", 129); // 128 + SIGHUP (1)
 		});
 }
 

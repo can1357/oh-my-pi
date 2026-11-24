@@ -4,6 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import {
+	ALIBABA_TOKEN_PLAN_CN_BASE_URL,
+	serializeAlibabaTokenPlanCredential,
+} from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 import { runModelsListing } from "../../src/cli/models-cli";
 import { ModelRegistry } from "../../src/config/model-registry";
 
@@ -41,7 +45,10 @@ describe("ModelRegistry", () => {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	async function listModels(additionalExtensionPaths: string[] = []): Promise<{ stdout: string; stderr: string }> {
+	async function listModels(
+		additionalExtensionPaths: string[] = [],
+		action: "ls" | "refresh" = "ls",
+	): Promise<{ stdout: string; stderr: string }> {
 		let stdout = "";
 		let stderr = "";
 		const out = vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
@@ -56,6 +63,7 @@ describe("ModelRegistry", () => {
 			await runModelsListing({
 				modelRegistry: registry,
 				cwd: tmpDir,
+				action,
 				json: true,
 				additionalExtensionPaths,
 				disableExtensionDiscovery: true,
@@ -159,6 +167,94 @@ describe("ModelRegistry", () => {
 			expect.objectContaining({ provider: "flow-api", id: "flow-model" }),
 		);
 		expect(recovered.stderr).toBe("");
+	});
+
+	test("a forced refresh reports why Beijing Token Plan discovery fell back to bundled models", async () => {
+		const provider = "alibaba-token-plan";
+		for (const suffix of ["first", "second", "third"]) {
+			await authStorage.credentials.set(provider, {
+				type: "api_key",
+				key: serializeAlibabaTokenPlanCredential(`sk-sp-X.${suffix}`, "", ALIBABA_TOKEN_PLAN_CN_BASE_URL),
+				source: "login",
+			});
+		}
+		const urls: string[] = [];
+		let rejectDiscovery = true;
+		registry = new ModelRegistry(authStorage, path.join(tmpDir, "models.yaml"), {
+			cacheDbPath: path.join(tmpDir, "models.db"),
+			fetch: async input => {
+				const url = String(input);
+				urls.push(url);
+				return rejectDiscovery || url !== `${ALIBABA_TOKEN_PLAN_CN_BASE_URL}/models`
+					? new Response(null, { status: 401 })
+					: Response.json({ data: [{ id: "qwen-auto" }] });
+			},
+		});
+
+		await registry.refreshProvider(provider, "online");
+		const failed = await listModels([], "refresh");
+		const bundled = JSON.parse(failed.stdout).models.filter(
+			(model: { provider: string }) => model.provider === provider,
+		);
+		expect(bundled).toContainEqual(expect.objectContaining({ id: "qwen3.7-plus" }));
+		expect(bundled).not.toContainEqual(expect.objectContaining({ id: "qwen-auto" }));
+		expect(urls).toEqual([`${ALIBABA_TOKEN_PLAN_CN_BASE_URL}/models`]);
+		expect(failed.stderr).toContain("alibaba-token-plan model discovery failed");
+		expect(failed.stderr).toContain("HTTP 401");
+
+		rejectDiscovery = false;
+		await registry.refreshProvider(provider, "online");
+		const recovered = await listModels([], "refresh");
+		expect(JSON.parse(recovered.stdout).models).toContainEqual(
+			expect.objectContaining({ provider, id: "qwen-auto" }),
+		);
+		expect(recovered.stderr).toBe("");
+	});
+
+	test("keeps an authHeader extension provider's cached catalog when a forced refresh fails (#18227)", async () => {
+		const modelsPath = path.join(tmpDir, "models.yaml");
+		let fail = false;
+		const register = (target: ModelRegistry) =>
+			target.registerProvider(
+				"auth-ext",
+				{
+					baseUrl: "https://auth-ext.example.test/v1",
+					apiKey: "literal-test-key",
+					authHeader: true,
+					api: "openai-completions",
+					fetchDynamicModels: async () => {
+						if (fail) throw new Error("HTTP 503");
+						return [
+							{
+								id: "auth-model",
+								name: "Auth Model",
+								reasoning: false,
+								input: ["text"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 128000,
+								maxTokens: 4096,
+							},
+						];
+					},
+				},
+				"ext://auth-ext",
+			);
+		register(registry);
+		await registry.refreshProvider("auth-ext", "online");
+		expect(registry.find("auth-ext", "auth-model")).toBeDefined();
+
+		// Each step runs in a fresh registry, as separate `omp` invocations do.
+		fail = true;
+		const failedRefresh = new ModelRegistry(authStorage, modelsPath);
+		register(failedRefresh);
+		await failedRefresh.refreshProvider("auth-ext", "online");
+		const kept = failedRefresh.find("auth-ext", "auth-model");
+		expect(await kept?.resolveHeaders?.()).toEqual({ Authorization: "Bearer literal-test-key" });
+
+		const nextLaunch = new ModelRegistry(authStorage, modelsPath);
+		register(nextLaunch);
+		await nextLaunch.refreshRuntimeProviders();
+		expect(nextLaunch.find("auth-ext", "auth-model")).toBeDefined();
 	});
 
 	test("warns for nested fixed-field compat keys but accepts open extraBody payloads", async () => {

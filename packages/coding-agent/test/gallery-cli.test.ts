@@ -14,14 +14,13 @@ import {
 	getSegmentGalleryInventory,
 } from "@oh-my-pi/pi-coding-agent/cli/gallery-fixtures";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
-import { toolRenderers } from "@oh-my-pi/pi-tui/tools";
-import { writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/ui/theme/service";
+import { toolPresenterNames } from "@oh-my-pi/pi-coding-agent/ui/tools/registry";
 
 beforeAll(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
-	await initTheme(false, undefined, undefined, "dark", "light");
+	initTheme({ dark: "dark", light: "light" });
 });
 
 describe("gallery harness", () => {
@@ -76,15 +75,19 @@ describe("gallery harness", () => {
 	});
 
 	it("renders every registered tool in every lifecycle state without throwing", async () => {
-		for (const name in toolRenderers) {
+		const empty: string[] = [];
+		for (const name of toolPresenterNames()) {
 			const fixture = resolveFixture(name);
 			for (const state of GALLERY_STATES) {
 				const lines = await renderGalleryState(name, fixture, state, 100);
-				// A renderer that produces no lines for a state is a regression: the
-				// component should always emit at least the call header or result.
-				expect(lines.length, `${name}/${state} rendered nothing`).toBeGreaterThan(0);
+				if (lines.length === 0) empty.push(`${name}/${state}`);
 			}
 		}
+		// A presenter that produces no rows for a state is a regression: the
+		// block should always draw at least the call header or result. The
+		// one exception is a pending ask, whose questions live in the panel over
+		// the composer; its transcript entry appears once answers arrive.
+		expect(empty).toEqual(["ask/streaming", "ask/progress"]);
 	});
 
 	it("routes each state to the matching args/result (streaming args vs result, success vs error)", async () => {
@@ -114,21 +117,6 @@ describe("gallery harness", () => {
 		const error = await render("error");
 		expect(error).toContain("ERROR_OUT");
 		expect(error).not.toContain("SUCCESS_OUT");
-	});
-
-	it("routes customRendered tools (task) through the custom-tool branch", async () => {
-		// `task` attaches its renderer on the real AgentTool, so the gallery must
-		// reproduce that path. With a result present and mergeCallAndResult, the
-		// custom branch must NOT emit a redundant tool-name line above the result box
-		// (regression guard for tool-execution's custom-branch fallback label).
-		const task = resolveFixture("task");
-		expect(task.customRendered).toBe(true);
-		const lines = await renderGalleryState("task", task, "error", 100);
-		const stripped = lines.map(line => Bun.stripANSI(line).trim());
-		// The framed result header carries the label inside the box border...
-		expect(stripped.some(line => line.startsWith(theme.boxRound.topLeft) && line.includes("Task"))).toBe(true);
-		// ...but no standalone "Task" label line precedes it.
-		expect(stripped).not.toContain("Task");
 	});
 
 	it("renders curated failed states as failures", async () => {
@@ -175,15 +163,5 @@ describe("gallery harness", () => {
 		const procError = await render("read_proc_job", "error");
 		expect(procError).toContain("Proc build-42");
 		expect(procError).not.toContain("Read proc://");
-	});
-
-	it("defers write path prefixes until the streamed URL target settles", () => {
-		const options = { expanded: false, isPartial: true };
-		expect(writeToolRenderer.renderCall({ path: "ag" }, options, theme)).toBeUndefined();
-		expect(writeToolRenderer.renderCall({ path: "agent://Reviewer" }, options, theme)).toBeUndefined();
-		expect(writeToolRenderer.renderCall({ path: "pro" }, options, theme)).toBeUndefined();
-		expect(
-			writeToolRenderer.renderCall({ path: "proc://build-42/kill" }, { ...options, argsComplete: true }, theme),
-		).toBeDefined();
 	});
 });

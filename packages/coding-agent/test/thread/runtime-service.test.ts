@@ -136,6 +136,57 @@ describe("runtime thread services: async jobs", () => {
 		expect(await probe("deliveries")).toEqual([{ jobId: id, text: "all done", status: "completed", isRow: true }]);
 	});
 
+	it("returns and consumes a job settled during a worker-homed eval wait", async () => {
+		const manager = newManager();
+		const probe = await startWorker();
+		const id = await jobId(probe, manager, "Worker");
+
+		const waited = probe("evalWait", manager, "Worker", id);
+		await probe("awaitWaitStart", id);
+		await probe("finish", id, "all done");
+
+		expect(await waited).toEqual({ items: [{ kind: "agent", id, status: "completed", text: "all done" }] });
+		expect(manager.isJobResultConsumed(id)).toBe(true);
+	});
+
+	it("emits progress published while a worker-homed eval wait is open", async () => {
+		const manager = newManager();
+		const probe = await startWorker();
+		const id = await jobId(probe, manager, "Worker");
+
+		const waited = probe("evalWaitProgress", manager, "Worker", id);
+		await probe("awaitWaitStart", id);
+		await probe("progress", id, "halfway", "investigate");
+		await probe("finish", id, "all done");
+
+		expect(await waited).toMatchObject({
+			result: { items: [{ kind: "agent", id, status: "completed", text: "all done" }] },
+			progress: [{ op: "agent", id, taskPreview: "investigate" }],
+		});
+	});
+
+	it("retains a settled result after eviction while another handle remains running", async () => {
+		const manager = newManager();
+		const probe = await startWorker();
+		const first = await jobId(probe, manager, "Worker");
+		const second = await jobId(probe, manager, "Worker");
+
+		const waited = probe("evalWait", manager, "Worker", first, second);
+		await probe("awaitWaitStart", first);
+		await probe("finish", first, "first done");
+		await probe("awaitJob", manager, first);
+		expect(manager.evictCompletedJobs({ ownerId: "Worker" })).toBe(1);
+		expect(manager.getJob(first)).toBeUndefined();
+		await probe("finish", second, "second done");
+
+		expect(await waited).toEqual({
+			items: [
+				{ kind: "agent", id: first, status: "completed", text: "first done" },
+				{ kind: "agent", id: second, status: "completed", text: "second done" },
+			],
+		});
+	});
+
 	it("cancels the worker body from main and keeps the shutdown reason a symbol", async () => {
 		const manager = newManager();
 		const probe = await startWorker();
@@ -267,16 +318,17 @@ describe("runtime thread services: cost gate, event bus, artifacts, storage", ()
 	});
 
 	it("allocates artifact ids on main so two workers never collide", async () => {
-		const artifacts = new ArtifactManager(path.join(tmp, "artifacts"));
+		const sessionDir = path.join(tmp, "session");
+		const artifacts = new ArtifactManager(path.join(sessionDir, "local"), sessionDir);
 		const [first, second] = await Promise.all([startWorker(), startWorker()]);
 		const [a, b] = await Promise.all([first("allocate", artifacts, 40), second("allocate", artifacts, 40)]);
 		if (!Array.isArray(a) || !Array.isArray(b)) throw new Error("allocate returned no ids");
 		const all = new Set<unknown>([...a, ...b]);
 		expect(all.size).toBe(80);
-		expect(artifacts.allocateId()).toBe(80);
+		expect((await artifacts.allocatePath()).id).toBe("80");
 
 		const saved = await first("save", artifacts, "worker content");
-		expect(saved).toMatchObject({ dir: artifacts.dir });
+		expect(saved).toMatchObject({ dir: artifacts.dir, sessionDir });
 		const id = typeof saved === "object" && saved !== null ? Reflect.get(saved, "id") : undefined;
 		if (typeof id !== "string") throw new Error("save returned no id");
 		const file = await artifacts.getPath(id);

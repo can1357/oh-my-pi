@@ -2,6 +2,43 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `waiting` on agent tray cards: the agent runs, but its current call only waits on its own agents or jobs.
+- TSP `toggle` also accepts the `open` state Tern sends for menus and selectable controls, including the item id when supplied.
+
+## [19.1.0] - 2026-11-21
+
+### Added
+
+- Added `toolIntentLabel` for displaying the brief prefix of a structured tool-call intent.
+- Added clickable shell-command steps with output selection and visual highlighting of the currently displayed step.
+- Added a terminal `features` event for notifying clients when terminal settings change.
+- Added collaboration guest support for resuming sessions and delivering queued messages, plus `followUp` prompts.
+
+## [19.0.0] - 2026-11-18
+
+### Added
+
+- Added tray state and interaction properties, including focus, peek, quiet, main status, item references, card status and actions, and event state.
+- Added layout transition properties to nodes for coordinating layout animations.
+- Added support for folding a dock composer into its compact row.
+
+## [18.22.0] - 2026-11-16
+
+### Added
+
+- Added optional picker icons for tooltips and accessible names, plus an option to control the placement of the search interface.
+- Added buttons, menu, and document component kinds, including menu-row action state changes and document text editing, commenting, and uncommenting events.
+
+## [18.18.6] - 2026-11-09
+
+### Added
+
+- `actions.hold` (`TspMenuEntry[]`): what a long press on a touch screen offers, beside `actions.menu`; and `toast`'s `action` / `label` props for a button on the toast
+
+## [18.18.0] - 2026-11-07
+
 ### Changed
 
 - `ShellTrace` fields that carry values from the run (argv, assignments, redirect targets, unlocated unit sources, diagnostics) are `ShellTraceBytes`: a string when the bytes are UTF-8, otherwise the raw byte values. `isShellTrace` accepts both forms

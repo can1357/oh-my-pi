@@ -10,12 +10,13 @@ import {
 	renderChangelogEntries,
 	selectChangelogEntries,
 } from "../utils/changelog";
+import { jobDisplayLabel } from "../async/job-label";
 import { formatTokenCount, refreshStatusLine } from "./builtin-modes";
 import { buildContextReportText } from "./helpers/context-report";
-import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
-import { shortenEmbeddedPaths, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
-import { buildJobTree, jobTreeGuide, jobTreeIndent } from "@oh-my-pi/pi-tui/overlays/job-tree";
-import { theme } from "@oh-my-pi/pi-tui/theme";
+import { formatCoarseDuration } from "../modes/view-model/chrome/format";
+import { shortenEmbeddedPaths } from "../utils/render-utils";
+import { truncateToWidth } from "../utils/text-width";
+import { buildJobTree, jobTreeGuide, jobTreeIndent } from "../modes/view-model/overlays/job-tree";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { handleMcpAcp } from "./helpers/mcp";
 import { markdownFenceFor } from "../utils/markdown-fence";
@@ -28,7 +29,7 @@ import {
 	resolveResetUsageTarget,
 	toResetUsageAccounts,
 } from "./helpers/reset-usage";
-import type { ResetUsageAccount } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
+import type { ResetUsageAccount } from "../modes/view-model/overlays/reset-usage-selector";
 import { matchSessionPinAccounts, toSessionPinAccounts } from "./helpers/session-pin";
 import {
 	launchStatsDashboard,
@@ -36,10 +37,11 @@ import {
 	type StatsDashboardArgs,
 	type StatsDashboardLaunchResult,
 } from "./helpers/stats-dashboard";
-import { StatsNotice } from "@oh-my-pi/pi-tui/overlays/stats-notice";
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
 import type { SlashCommandRuntime, SlashCommandSpec } from "./types";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { StatsNotice } from "../ui/overlays/panels/stats-notice";
 
 async function handleUsageResetCommand(
 	arg: string,
@@ -194,6 +196,7 @@ function launchSessionStatsDashboard(
 	const judge = resolveJudge({
 		settings: owner.settings,
 		registry: owner.session.modelRegistry,
+		sessionModel: owner.session.model,
 		sessionId: owner.session.sessionId,
 		purpose: "stats_frustration",
 		onUsage: journalJudgmentUsage(owner.sessionManager),
@@ -274,18 +277,27 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				if (runtime.session.isStreaming) return usage("Cannot delete the session while streaming.", runtime);
 				const sessionFile = runtime.sessionManager.getSessionFile();
 				if (!sessionFile) return usage("No session file to delete (in-memory session).", runtime);
-				// Route through the active SessionManager so the persist writer is
-				// closed before the file is deleted. Constructing a fresh
-				// FileSessionStorage and calling deleteSessionWithArtifacts leaves
-				// the active writer attached to the now-deleted path, so the next
-				// prompt would silently resurrect or corrupt the "deleted" file.
+				// Detach the live agent before deleting its file; the next prompt must
+				// belong to a fresh session with a valid header and no old history.
+				// `drop` deletes the old file and keeps the successor lazy, so deleting
+				// never leaves an empty session behind.
 				try {
+					if (!(await runtime.session.newSession({ drop: true })))
+						return usage("Session deletion cancelled.", runtime);
+				} catch (err) {
+					return usage(`Failed to start a new session: ${errorMessage(err)}`, runtime);
+				}
+				try {
+					// `drop` only logs a failed delete; retry here to report it (ENOENT is success).
 					await runtime.sessionManager.dropSession(sessionFile);
 				} catch (err) {
-					return usage(`Failed to delete session: ${errorMessage(err)}`, runtime);
+					return usage(
+						`Started new session ${runtime.session.sessionId}, but failed to delete ${sessionFile}: ${errorMessage(err)}`,
+						runtime,
+					);
 				}
 				await runtime.output(
-					`Session deleted: ${sessionFile}. Use ACP \`session/load\` to switch to another session.`,
+					`Session deleted: ${sessionFile}. New session: ${runtime.session.sessionId} (${runtime.session.sessionFile}).`,
 				);
 				return commandConsumed();
 			}
@@ -356,7 +368,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const now = Date.now();
 			const rows: string[] = [];
 			for (const row of buildJobTree([...tree.running, ...tree.recent], tree.agents, tree.rootId)) {
-				const guide = jobTreeGuide(row, theme);
+				const guide = jobTreeGuide(row, currentTheme().symbols);
 				if (row.kind === "agent") {
 					rows.push(`${guide}${row.agent.id}`);
 					continue;
@@ -368,8 +380,8 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					`${guide}[${job.id}] ${job.type} (${job.status}) — ${formatCoarseDuration((job.endTime ?? now) - job.startTime)}${agent}`,
 				);
 				// What the job is for leads; full mode follows it with what the command does and the whole command.
-				const lines = full ? [job.intent, job.caption, job.command ?? job.label] : [job.intent ?? job.label];
-				const indent = jobTreeIndent(row, theme);
+				const lines = full ? [job.intent, job.caption, job.command ?? job.label] : [jobDisplayLabel(job)];
+				const indent = jobTreeIndent(row, currentTheme().symbols);
 				for (const entry of lines) {
 					if (!entry) continue;
 					const text = shortenEmbeddedPaths(sanitizeText(entry));
@@ -467,7 +479,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 		handleTui: async (command, runtime) => {
 			const ctx = runtime.ctx;
-			ctx.editor.setText("");
+			ctx.composer.setText("");
 			const parsed = parseStatsDashboardArgs(command.args);
 			if ("error" in parsed) {
 				ctx.showStatus(parsed.error);
@@ -475,7 +487,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			}
 			try {
 				const result = await launchSessionStatsDashboard(parsed, ctx);
-				ctx.presentCommandOutput(new StatsNotice(result.message, result.url));
+				ctx.presentCommandOutput(() => StatsNotice({ message: result.message, url: result.url }));
 			} catch (error) {
 				ctx.showError(`Stats dashboard failed: ${errorMessage(error)}`);
 			}
@@ -537,8 +549,8 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				return commandConsumed();
 			}
 			const lines = all.map(name => `${active.includes(name) ? "*" : "-"} ${name}`);
-			for (const mounted of runtime.session.getXdevToolEntries()) {
-				lines.push(`~ xd://${mounted.name}`);
+			for (const mounted of runtime.session.getToolCommandEntries()) {
+				lines.push(`~ ${mounted.name}`);
 			}
 			await runtime.output(lines.join("\n"));
 			return commandConsumed();
@@ -772,13 +784,6 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			{ name: "unauth", description: "Remove OAuth auth from a server", usage: "<name>" },
 			{ name: "enable", description: "Enable an MCP server", usage: "<name>" },
 			{ name: "disable", description: "Disable an MCP server", usage: "<name>" },
-			{
-				name: "smithery-search",
-				description: "Search Smithery registry and deploy an MCP server",
-				usage: "<keyword> [--scope project|user] [--limit <1-100>] [--semantic]",
-			},
-			{ name: "smithery-login", description: "Login to Smithery and cache API key" },
-			{ name: "smithery-logout", description: "Remove cached Smithery API key" },
 			{ name: "reconnect", description: "Reconnect to a specific MCP server", usage: "<name>" },
 			{ name: "reload", description: "Force reload MCP runtime tools" },
 			{ name: "resources", description: "List available resources from connected servers" },

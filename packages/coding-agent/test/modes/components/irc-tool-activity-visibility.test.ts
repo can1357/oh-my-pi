@@ -1,16 +1,16 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
+import type { UserMessage } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
-import { Text, TUI } from "@oh-my-pi/pi-tui";
-import { ChatTranscriptBuilder } from "@oh-my-pi/pi-tui/chat/chat-transcript-builder";
-import type { CustomMessage } from "@oh-my-pi/pi-tui/chat/messages";
-import type { TranscriptEntryLike } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { VirtualTerminal } from "../../../../tui/test/virtual-terminal";
-import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/transcript/messages";
+import { jsx } from "@oh-my-pi/pi-tui/jsx-runtime";
+import { corpusEnvironment, describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
+import { contextDisplay, createInteractiveModeContext, renderTranscript } from "../../helpers/interactive-mode-context";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
-beforeAll(() => initTheme());
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 const messages: CustomMessage[] = [
 	{
@@ -56,55 +56,62 @@ function expectCoordination(text: string, visible: boolean): void {
 	}
 }
 
+/** A fixture context whose transcript renders messages through the real helpers. */
+function context() {
+	const ctx = createInteractiveModeContext({ settings: Settings.isolated() });
+	const helpers = new UiHelpers(ctx);
+	ctx.addMessageToChat = (message, options) => helpers.addMessageToChat(message, options);
+	return { ctx, helpers, hidden: contextDisplay(ctx).hideToolActivity };
+}
+
 describe("IRC tool activity visibility", () => {
 	it("hides live cards, including arrivals while hidden, without hiding conversation", async () => {
-		const ctx = createInteractiveModeContext({ settings: Settings.isolated() });
-		const helpers = new UiHelpers(ctx);
-		ctx.addMessageToChat = (message, options) => helpers.addMessageToChat(message, options);
+		const { ctx, hidden } = context();
 		const controller = new EventController(ctx);
-		const render = () => Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
-		ctx.chatContainer.addChild(new Text("Conversation remains visible", 0, 0));
+		const render = () => renderTranscript(ctx).join("\n");
+		ctx.present(() => jsx("text", { text: "Conversation remains visible" }));
 		try {
 			await controller.handleEvent({ type: "irc_message", message: messages[0]! });
 			expect(render()).toContain(bodies[0]!);
-			ctx.chatContainer.setToolActivityVisible(false);
+			hidden.set(true);
 			for (const message of messages.slice(1)) await controller.handleEvent({ type: "irc_message", message });
 			expectCoordination(render(), false);
 			expect(render()).toContain("Conversation remains visible");
-			ctx.chatContainer.setToolActivityVisible(true);
+			hidden.set(false);
 			expectCoordination(render(), true);
 		} finally {
 			controller.dispose();
-			ctx.chatContainer.dispose();
 		}
 	});
 
 	it("replays stored IRC cards hidden and reveals them on toggle", () => {
-		const entries: TranscriptEntryLike[] = messages.map((message, index) => ({
-			type: "custom_message",
-			id: String(index),
-			parentId: index === 0 ? null : String(index - 1),
-			timestamp: new Date(message.timestamp).toISOString(),
-			customType: message.customType,
-			content: message.content,
-			details: message.details,
-			display: true,
-		}));
-		const builder = new ChatTranscriptBuilder({
-			ui: new TUI(new VirtualTerminal()),
-			cwd: process.cwd(),
-			requestRender: () => {},
-		});
-		const render = () => Bun.stripANSI(builder.container.render(120).join("\n"));
-		try {
-			builder.container.setToolActivityVisible(false);
-			builder.rebuild(entries.slice(0, 2));
-			builder.append(entries.slice(2));
-			expect(render()).toBe("");
-			builder.container.setToolActivityVisible(true);
-			expectCoordination(render(), true);
-		} finally {
-			builder.dispose();
-		}
+		const { ctx, helpers, hidden } = context();
+		const render = () => renderTranscript(ctx).join("\n");
+		hidden.set(true);
+		for (const message of messages) helpers.addMessageToChat(message);
+		expectCoordination(render(), false);
+		hidden.set(false);
+		expectCoordination(render(), true);
+	});
+
+	it("shows a parent steer as an IRC card in the live transcript even when tool activity is hidden", () => {
+		const { ctx, helpers, hidden } = context();
+		const body = "Please check the build";
+		const steer: UserMessage = {
+			role: "user",
+			content: '[Wait interrupted by message]\n<irc from="parent" agent="Main">\nPlease check the build\n</irc>',
+			parentIrc: { from: "Main", body },
+			attribution: "agent",
+			steering: true,
+			timestamp: Date.now(),
+		};
+		hidden.set(true);
+		const [block] = helpers.addMessageToChat(steer);
+		if (!block) throw new Error("the steer drew no block");
+		const tree = JSON.stringify(describeTree(block.node, corpusEnvironment("dark"), 120));
+		expect(tree).toContain('"role":"omp.irc.incoming"');
+		expect(tree).toContain("Main");
+		expect(tree).toContain(body);
+		expect(renderTranscript(ctx).join("\n")).toContain(body);
 	});
 });

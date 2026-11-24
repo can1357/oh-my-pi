@@ -30,6 +30,7 @@ const didClose: string[] = [];
 const notifications: string[] = [];
 const documents = new Map<string, { version: number; text: string }>();
 const workspaceFolders = new Set<string>();
+const watchedFileChanges: unknown[] = [];
 let nextServerRequestId = 1;
 const pendingServerRequests = new Map<
 	string | number,
@@ -104,6 +105,7 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 				didClose: [...didClose],
 				notifications: [...notifications],
 				workspaceFolders: [...workspaceFolders],
+				watchedFileChanges: [...watchedFileChanges],
 			});
 			break;
 		}
@@ -170,6 +172,15 @@ function handleNotification(message: JsonRpcMessage): void {
 			for (const folder of event.added) workspaceFolders.add(folder.uri);
 			break;
 		}
+		case "workspace/didChangeWatchedFiles": {
+			const { changes } = message.params as { changes: unknown[] };
+			watchedFileChanges.push(...changes);
+			break;
+		}
+		case "test/crash":
+			process.stderr.write("error: Unknown binary 'rust-analyzer' in official toolchain\n");
+			process.exit(3);
+			break;
 		case "exit":
 			process.exit(0);
 	}

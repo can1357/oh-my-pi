@@ -9,16 +9,19 @@ import type { AgentEvent, AgentMessage, AgentToolResult, ThinkingLevel } from "@
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { isRecord, ptree, readJsonl, toError } from "@oh-my-pi/pi-utils";
-import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { LogoutAccount } from "../view-model/overlays/logout-account-selector";
+import type { ConfiguredThinkingLevel } from "../../utils/render-utils";
+import type { TodoPhase } from "../../tools/details/todo";
 import type { FileSink } from "bun";
 import type { BashResult } from "../../exec/bash-executor";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type { CacheWarmingMode } from "../../session/cache-warmer";
+import type { WireSessionEvent } from "../../session/loop-end-wire";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import type { SessionLeaseReport } from "../../session/session-storage";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
 import type { RpcGoalOp, RpcGoalResult } from "./rpc-goal";
+import type { RpcModelPickerResult } from "./rpc-model-picker";
 import {
 	RPC_MESSAGES_PAGE_BUSY_ERROR,
 	RPC_MESSAGES_PAGE_STALE_ERROR,
@@ -147,42 +150,47 @@ export function defineRpcClientTool<
 	return tool;
 }
 
-const agentEventTypes = new Set<AgentEvent["type"]>([
-	"agent_start",
-	"agent_end",
-	"turn_start",
-	"turn_end",
-	"message_start",
-	"message_update",
-	"message_end",
-	"tool_execution_start",
-	"tool_execution_update",
-	"tool_stream_update",
-	"tool_execution_end",
-]);
+// Exhaustively keyed on the event-type unions so adding a session event without
+// listing it here fails type-checking instead of silently dropping the frame.
+const agentEventTypes: Record<AgentEvent["type"], true> = {
+	agent_start: true,
+	agent_end: true,
+	turn_start: true,
+	turn_end: true,
+	message_start: true,
+	message_update: true,
+	message_end: true,
+	tool_execution_start: true,
+	tool_execution_update: true,
+	tool_stream_update: true,
+	tool_execution_end: true,
+};
 
-const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
+const sessionEventTypes: Record<WireSessionEvent["type"], true> = {
 	...agentEventTypes,
-	"auto_compaction_start",
-	"auto_compaction_end",
-	"manual_compaction_start",
-	"manual_compaction_end",
-	"auto_retry_start",
-	"auto_retry_end",
-	"cache_warming_start",
-	"cache_warming_end",
-	"retry_fallback_applied",
-	"retry_fallback_succeeded",
-	"ttsr_triggered",
-	"todo_reminder",
-	"todo_auto_clear",
-	"irc_message",
-	"notice",
-	"thinking_level_changed",
-	"model_changed",
-	"goal_updated",
-	"queue_update",
-]);
+	auto_compaction_start: true,
+	auto_compaction_end: true,
+	manual_compaction_start: true,
+	manual_compaction_end: true,
+	auto_retry_start: true,
+	auto_retry_end: true,
+	cache_warming_start: true,
+	cache_warming_end: true,
+	retry_fallback_applied: true,
+	retry_fallback_succeeded: true,
+	model_changed: true,
+	config_warnings_changed: true,
+	advisor_cost_changed: true,
+	advisor_yielded: true,
+	ttsr_triggered: true,
+	todo_reminder: true,
+	todo_auto_clear: true,
+	irc_message: true,
+	notice: true,
+	thinking_level_changed: true,
+	goal_updated: true,
+	queue_update: true,
+};
 
 function isRpcResponse(value: unknown): value is RpcResponse {
 	if (!isRecord(value)) return false;
@@ -210,14 +218,14 @@ function isAgentEvent(value: unknown): value is AgentEvent {
 	if (!isRecord(value)) return false;
 	const type = value.type;
 	if (typeof type !== "string") return false;
-	return agentEventTypes.has(type as AgentEvent["type"]);
+	return Object.hasOwn(agentEventTypes, type);
 }
 
 function isAgentSessionEvent(value: unknown): value is AgentSessionEvent {
 	if (!isRecord(value)) return false;
 	const type = value.type;
 	if (typeof type !== "string") return false;
-	return sessionEventTypes.has(type as AgentSessionEvent["type"]);
+	return Object.hasOwn(sessionEventTypes, type);
 }
 
 function isRpcSubagentLifecycleFrame(value: unknown): value is RpcSubagentLifecycleFrame {
@@ -362,6 +370,7 @@ export class RpcClient {
 	#pendingHostToolCalls = new Map<string, { controller: AbortController }>();
 	#requestId = 0;
 	#protocolVersion: RpcProtocolVersion = 1;
+	#supportsBashExcludeFromContext = false;
 	#extensionUiListeners: Set<(req: RpcExtensionUIRequest) => void> = new Set();
 	#abortController = new AbortController();
 
@@ -387,6 +396,7 @@ export class RpcClient {
 		// short-circuit the new stdout reader (issue #4079).
 		this.#abortController = new AbortController();
 		this.#protocolVersion = 1;
+		this.#supportsBashExcludeFromContext = false;
 
 		const cliPath = this.options.cliPath ?? "dist/cli.js";
 		const args = ["--mode", "rpc"];
@@ -450,6 +460,7 @@ export class RpcClient {
 			for await (const line of lines) {
 				if (!readySettled && isRecord(line) && line.type === "ready") {
 					protocolV2Supported = supportsRpcProtocolV2(line);
+					this.#supportsBashExcludeFromContext = line.supportsBashExcludeFromContext === true;
 					readySettled = true;
 					readyResolve();
 					continue;
@@ -787,6 +798,24 @@ export class RpcClient {
 	}
 
 	/**
+	 * Abort the current run and continue it with the queued input (the TUI's empty Enter).
+	 * Returns false, doing nothing, when no run was streaming with queued input.
+	 */
+	async abortAndDeliverQueue(): Promise<boolean> {
+		const response = await this.#send({ type: "abort_and_deliver_queue" });
+		return this.#getData<{ aborted: boolean }>(response).aborted;
+	}
+
+	/**
+	 * Continue the agent (the TUI's `.`/`c` shortcut), interrupting a running turn first.
+	 * Rejects when there is no conversation to continue.
+	 */
+	async resume(): Promise<void> {
+		const response = await this.#send({ type: "resume" });
+		this.#getData(response);
+	}
+
+	/**
 	 * Withdraw queued user steering/follow-up messages, then abort (the TUI Esc path).
 	 * Returns the withdrawn messages so the caller can restore them to its editor.
 	 */
@@ -1026,6 +1055,14 @@ export class RpcClient {
 	}
 
 	/**
+	 * Model picker rows as omp's session picker orders them; a query starting with `@` lists quick roles.
+	 */
+	async getModelPicker(query?: string, limit?: number): Promise<RpcModelPickerResult> {
+		const response = await this.#send({ type: "get_model_picker", query, limit });
+		return this.#getData<RpcModelPickerResult>(response);
+	}
+
+	/**
 	 * Get list of available slash commands.
 	 */
 	async getAvailableCommands(): Promise<RpcAvailableSlashCommand[]> {
@@ -1063,7 +1100,7 @@ export class RpcClient {
 	/**
 	 * Set thinking level.
 	 */
-	async setThinkingLevel(level: ThinkingLevel): Promise<void> {
+	async setThinkingLevel(level: ConfiguredThinkingLevel): Promise<void> {
 		await this.#send({ type: "set_thinking_level", level });
 	}
 
@@ -1125,10 +1162,14 @@ export class RpcClient {
 	}
 
 	/**
-	 * Execute a bash command.
+	 * Execute a bash command, optionally keeping its output out of model context.
+	 * Excluded commands require an explicitly advertised runtime capability.
 	 */
-	async bash(command: string): Promise<BashResult> {
-		const response = await this.#send({ type: "bash", command });
+	async bash(command: string, options?: { excludeFromContext?: boolean }): Promise<BashResult> {
+		if (options?.excludeFromContext === true && !this.#supportsBashExcludeFromContext) {
+			throw new Error("RPC runtime does not support bash context exclusion");
+		}
+		const response = await this.#send({ type: "bash", command, excludeFromContext: options?.excludeFromContext });
 		return this.#getData(response);
 	}
 

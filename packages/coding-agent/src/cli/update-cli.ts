@@ -7,8 +7,6 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Transform } from "node:stream";
-import { pipeline } from "node:stream/promises";
 import { applyBinaryPatch } from "@oh-my-pi/pi-natives";
 import {
 	$which,
@@ -19,6 +17,7 @@ import {
 	getUpdateStateDir,
 	isCompiledBinary,
 	isEnoent,
+	logger,
 	VERSION,
 	WhichCachePolicy,
 } from "@oh-my-pi/pi-utils";
@@ -26,14 +25,22 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { type FileLockHandle, tryAcquireFileLock, withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { $ } from "bun";
 import { Settings, settings } from "../config/settings";
-import { theme } from "@oh-my-pi/pi-tui/theme";
 import {
 	isTimeoutError,
 	isUnsupportedProxyError,
 	unsupportedProxyMessage,
 	withTimeoutSignal,
 } from "../utils/fetch-timeout";
-import { type BuildAnswer, type BuildPatch, type Fetch, fetchBuild, type UpdateChannel } from "./build-service";
+import {
+	BUILD_DOWNLOAD_TIMEOUT_MS,
+	type BuildAnswer,
+	type BuildPatch,
+	downloadBuildFile,
+	type Fetch,
+	fetchBuild,
+	type UpdateChannel,
+} from "./build-service";
+import { managedInstallName } from "./managed-install";
 import {
 	DEFAULT_NPM_REGISTRY,
 	loadNpmRegistryResolver,
@@ -43,13 +50,13 @@ import {
 } from "./npm-registry";
 
 import { cfgUpdateChannel } from "../modes/settings";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
 const HOMEBREW_FORMULA = "can1357/tap/omp";
 const MISE_TOOL = "github:can1357/oh-my-pi";
 const NIX_STORE_DIR = "/nix/store";
 const RELEASE_METADATA_TIMEOUT_MS = 30_000;
-const BINARY_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
 
 /**
  * Core native addon package. Bumped in lock-step with {@link PACKAGE} so the
@@ -195,81 +202,6 @@ export function shouldForceBinaryUpdate(
 	return majorVersion(release.version) > majorVersion(currentVersion);
 }
 
-export interface VerifiedBinaryDownloadOptions {
-	url: string;
-	targetPath: string;
-	expectedSize: number;
-	expectedDigest: string;
-	fetchImpl?: Fetch;
-	/** Bytes received so far, after each chunk. */
-	onProgress?: (received: number) => void;
-}
-
-/**
- * Download a file and verify its build-service-reported size and SHA-256
- * digest (`sha256:<hex>`), leaving it executable. Nothing is left at
- * `targetPath` when the download fails or does not match.
- */
-export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOptions): Promise<void> {
-	const fetchImpl = options.fetchImpl ?? fetch;
-	await unlinkIfExists(options.targetPath);
-
-	let response: Response;
-	try {
-		response = await fetchImpl(options.url, {
-			redirect: "follow",
-			signal: withTimeoutSignal(BINARY_DOWNLOAD_TIMEOUT_MS),
-		});
-	} catch (err) {
-		if (isTimeoutError(err)) {
-			throw new Error("Timed out downloading release binary after 15 minutes", { cause: err });
-		}
-		if (isUnsupportedProxyError(err)) throw new Error(unsupportedProxyMessage(), { cause: err });
-		throw err;
-	}
-	if (!response.ok || !response.body) {
-		throw new Error(`Download failed: ${response.statusText}`);
-	}
-
-	const hash = new Bun.SHA256();
-	let size = 0;
-	const verifier = new Transform({
-		transform(chunk, _encoding, callback) {
-			size += chunk.byteLength;
-			if (size > options.expectedSize) {
-				callback(
-					new Error(
-						`Downloaded binary size mismatch: expected ${options.expectedSize} bytes, received at least ${size}`,
-					),
-				);
-				return;
-			}
-			hash.update(chunk);
-			options.onProgress?.(size);
-			callback(null, chunk);
-		},
-	});
-
-	try {
-		await pipeline(response.body, verifier, fs.createWriteStream(options.targetPath, { mode: 0o600 }));
-		const digest = `sha256:${hash.digest("hex")}`;
-		if (size !== options.expectedSize) {
-			throw new Error(`Downloaded binary size mismatch: expected ${options.expectedSize} bytes, received ${size}`);
-		}
-		if (digest !== options.expectedDigest) {
-			throw new Error(`Downloaded binary digest mismatch: expected ${options.expectedDigest}, received ${digest}`);
-		}
-		await fs.promises.chmod(options.targetPath, 0o755);
-	} catch (err) {
-		await unlinkIfExists(options.targetPath);
-		if (isTimeoutError(err)) {
-			throw new Error("Timed out downloading release binary after 15 minutes", { cause: err });
-		}
-		if (isUnsupportedProxyError(err)) throw new Error(unsupportedProxyMessage(), { cause: err });
-		throw err;
-	}
-}
-
 /** Result from running the installed binary and parsing its reported version. */
 export interface InstalledVersionVerification {
 	ok: boolean;
@@ -396,28 +328,6 @@ function tryRealpath(p: string): string | undefined {
  */
 export function isSourceCheckout(): boolean {
 	return !isCompiledBinary() && !import.meta.dir.split(path.sep).includes("node_modules");
-}
-
-/**
- * Name of the app that manages the omp at `binaryPath`, or undefined when none does.
- *
- * A manager (Tern) keeps `manager.json` (`{"manager": "tern", "name": "Tern"}`) two
- * directories above every binary it installs (`<root>/versions/<version>`,
- * `<root>/bin/omp.exe`) and updates them itself, so `omp update` must leave them alone.
- * A missing or unreadable manifest means unmanaged.
- */
-export async function managedInstallName(binaryPath: string): Promise<string | undefined> {
-	const resolved = tryRealpath(binaryPath);
-	if (!resolved) return undefined;
-	let manifest: unknown;
-	try {
-		manifest = await Bun.file(path.join(path.dirname(path.dirname(resolved)), "manager.json")).json();
-	} catch {
-		return undefined;
-	}
-	if (!isRecord(manifest)) return undefined;
-	const name = typeof manifest.name === "string" && manifest.name ? manifest.name : manifest.manager;
-	return typeof name === "string" && name ? name : undefined;
 }
 
 /**
@@ -1183,7 +1093,7 @@ export async function verifyInstalledVersion(expectedVersion: string): Promise<I
 }
 
 function printVerifiedVersion(expectedVersion: string, binaryPath?: string): void {
-	const icon = theme?.status?.success ?? "✔";
+	const icon = currentTheme().symbols.symbol("status.success");
 	const location = binaryPath ? ` at ${binaryPath}` : "";
 	console.log(chalk.green(`\n${icon} Updated to ${expectedVersion}${location}`));
 }
@@ -1195,21 +1105,32 @@ function formatVerificationFailure(result: InstalledVersionVerification, expecte
 	return `could not verify updated version${result.path ? ` at ${result.path}` : ""}`;
 }
 
-/**
- * Print post-update verification result.
- */
-function printVerificationResult(result: InstalledVersionVerification, expectedVersion: string): void {
+/** Publish extension assets from a verified launcher, not from the process that updated it. */
+export async function syncRelayAfterVerifiedUpdate(launcher: string | undefined): Promise<void> {
+	if (!launcher) return;
+	try {
+		const result = await $`${launcher} browser-relay sync`.quiet().nothrow();
+		if (result.exitCode !== 0) {
+			logger.warn("browser relay sync after update failed", {
+				launcher,
+				exitCode: result.exitCode,
+				error: result.stderr.toString().trim(),
+			});
+		}
+	} catch (error) {
+		logger.warn("browser relay sync after update failed", { launcher, error: String(error) });
+	}
+}
+
+/** Report verification and publish assets only when the requested installed version was confirmed. */
+async function finishVerifiedUpdate(result: InstalledVersionVerification, expectedVersion: string): Promise<void> {
 	if (result.ok) {
 		printVerifiedVersion(expectedVersion, result.path);
+		await syncRelayAfterVerifiedUpdate(result.path);
 		return;
 	}
 	console.log(chalk.yellow(`\nWarning: ${formatVerificationFailure(result, expectedVersion)}`));
 	console.log(chalk.yellow(`You may need to reinstall: ${installerHint()}`));
-}
-
-/** Verify the PATH-resolved launcher and print the outcome. */
-async function printVerification(expectedVersion: string): Promise<void> {
-	printVerificationResult(await verifyInstalledVersion(expectedVersion), expectedVersion);
 }
 
 async function unlinkIfExists(filePath: string): Promise<void> {
@@ -1314,7 +1235,7 @@ export async function sweepStaleUpdateArtifacts(targetPath: string): Promise<voi
 			} catch {
 				continue;
 			}
-			if (now - mtimeMs < BINARY_DOWNLOAD_TIMEOUT_MS) continue;
+			if (now - mtimeMs < BUILD_DOWNLOAD_TIMEOUT_MS) continue;
 		}
 		await removeBackupBestEffort(full);
 	}
@@ -1509,6 +1430,25 @@ export function buildMiseForceInstallArgs(expectedVersion: string): string[] {
 }
 
 /**
+ * Run a package-manager install on this process's stdio and return its exit
+ * code. Bun Shell pipes child output, so installers see no TTY and print every
+ * progress-bar frame as a new line instead of redrawing it in place.
+ *
+ * Matches Bun Shell otherwise: the binary resolves from PATH only (Bun.spawn
+ * searches the cwd first on Windows), and the child gets the live
+ * `process.env` (Bun.spawn without `env` gets the startup environment).
+ */
+async function runInstaller(
+	[name, ...args]: string[],
+	env: Record<string, string | undefined> = process.env,
+): Promise<number> {
+	const bin = $which(name);
+	if (!bin) throw new Error(`${name} not found in PATH`);
+	const child = Bun.spawn({ cmd: [bin, ...args], env, stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+	return await child.exited;
+}
+
+/**
  * Old-name globals a rename migration removes after the new install exists:
  * the set difference between the old install's top-level globals
  * ({@link buildVersionedPackageInstallArgs} installs the agent, natives core,
@@ -1548,15 +1488,16 @@ function packageManagerMigrationSteps(manager: "bun" | "npm", release: ReleaseIn
 					registry: release.registry,
 					supportsReleaseAgeOverride: await bunSupportsReleaseAgeOverride(),
 				});
-				return (await $`bun ${args}`.nothrow()).exitCode;
+				return await runInstaller(["bun", ...args]);
 			}
 			const args = buildNpmInstallArgs(release.version, nativeTag, release.packages, {
 				force: true,
 				registry: release.registry,
 			});
-			return (
-				await $`npm ${args}`.env(buildNpmUpdateEnv(process.env, await npmSupportsReleaseAgeOverride())).nothrow()
-			).exitCode;
+			return await runInstaller(
+				["npm", ...args],
+				buildNpmUpdateEnv(process.env, await npmSupportsReleaseAgeOverride()),
+			);
 		},
 		async removeOld() {
 			// One invocation per package: a single batched remove fails wholesale
@@ -1615,7 +1556,7 @@ export async function migrateRenamedInstall(release: ReleaseInfo, steps: RenameM
 			`${formatVerificationFailure(verification, release.version)}; reinstall with: ${installerHint()}`,
 		);
 	}
-	printVerifiedVersion(release.version);
+	await finishVerifiedUpdate(verification, release.version);
 }
 
 /** Older bun releases predate `--minimum-release-age` and reject unknown flags, so probe the installed help output before passing it. */
@@ -1652,9 +1593,9 @@ async function updateViaBun(release: ReleaseInfo): Promise<InstalledVersionVerif
 			registry: release.registry,
 			supportsReleaseAgeOverride: await bunSupportsReleaseAgeOverride(),
 		});
-		const result = await $`bun ${args}`.nothrow();
-		if (result.exitCode !== 0) {
-			throw new Error(`bun install failed with exit code ${result.exitCode}`);
+		const exitCode = await runInstaller(["bun", ...args]);
+		if (exitCode !== 0) {
+			throw new Error(`bun install failed with exit code ${exitCode}`);
 		}
 		verification = await verifyInstalledVersion(release.version);
 	}
@@ -1678,11 +1619,12 @@ async function updateViaNpm(release: ReleaseInfo): Promise<InstalledVersionVerif
 	const args = buildNpmInstallArgs(release.version, currentNativeTag(), release.packages, {
 		registry: release.registry,
 	});
-	const result = await $`npm ${args}`
-		.env(buildNpmUpdateEnv(process.env, await npmSupportsReleaseAgeOverride()))
-		.nothrow();
-	if (result.exitCode !== 0) {
-		throw new Error(`npm install failed with exit code ${result.exitCode}`);
+	const exitCode = await runInstaller(
+		["npm", ...args],
+		buildNpmUpdateEnv(process.env, await npmSupportsReleaseAgeOverride()),
+	);
+	if (exitCode !== 0) {
+		throw new Error(`npm install failed with exit code ${exitCode}`);
 	}
 
 	return await verifyInstalledVersion(release.version);
@@ -1769,7 +1711,7 @@ export async function updateViaManager(
 	const launcherNeedsRepair = !result.ok && (launcherIsBroken || launcherIsOlder);
 	if (!launcherNeedsRepair) {
 		if (installError) throw installError;
-		printVerificationResult(result, release.version);
+		await finishVerifiedUpdate(result, release.version);
 		return;
 	}
 	if (!launcherPath) {
@@ -1796,19 +1738,19 @@ export async function updateViaManager(
 
 async function updateViaHomebrew(expectedVersion: string, force: boolean): Promise<void> {
 	console.log(chalk.dim("Updating Homebrew formulae..."));
-	const update = await $`brew update`.nothrow();
-	if (update.exitCode !== 0) {
-		throw new Error(`brew update failed with exit code ${update.exitCode}`);
+	const updateExitCode = await runInstaller(["brew", "update"]);
+	if (updateExitCode !== 0) {
+		throw new Error(`brew update failed with exit code ${updateExitCode}`);
 	}
 
 	console.log(chalk.dim("Updating via Homebrew..."));
 	const args = buildHomebrewUpdateArgs(force);
-	const result = await $`brew ${args}`.nothrow();
-	if (result.exitCode !== 0) {
-		throw new Error(`brew ${args[0]} failed with exit code ${result.exitCode}`);
+	const exitCode = await runInstaller(["brew", ...args]);
+	if (exitCode !== 0) {
+		throw new Error(`brew ${args[0]} failed with exit code ${exitCode}`);
 	}
 
-	await printVerification(expectedVersion);
+	await finishVerifiedUpdate(await verifyInstalledVersion(expectedVersion), expectedVersion);
 }
 
 async function updateViaMise(expectedVersion: string, force: boolean): Promise<void> {
@@ -1817,20 +1759,20 @@ async function updateViaMise(expectedVersion: string, force: boolean): Promise<v
 	const help = await $`mise upgrade --help`.env(env).quiet().nothrow();
 	const supportsReleaseAgeOverride = help.exitCode === 0 && /(?:--minimum-release-age|--before)\b/.test(help.text());
 	const args = buildMiseUpgradeArgs(supportsReleaseAgeOverride);
-	const result = await $`mise ${args}`.env(env).nothrow();
-	if (result.exitCode !== 0) {
-		throw new Error(`mise upgrade failed with exit code ${result.exitCode}`);
+	const exitCode = await runInstaller(["mise", ...args], env);
+	if (exitCode !== 0) {
+		throw new Error(`mise upgrade failed with exit code ${exitCode}`);
 	}
 
 	if (force) {
 		const forceArgs = buildMiseForceInstallArgs(expectedVersion);
-		const forceResult = await $`mise ${forceArgs}`.env(env).nothrow();
-		if (forceResult.exitCode !== 0) {
-			throw new Error(`mise install --force failed with exit code ${forceResult.exitCode}`);
+		const forceExitCode = await runInstaller(["mise", ...forceArgs], env);
+		if (forceExitCode !== 0) {
+			throw new Error(`mise install --force failed with exit code ${forceExitCode}`);
 		}
 	}
 
-	await printVerification(expectedVersion);
+	await finishVerifiedUpdate(await verifyInstalledVersion(expectedVersion), expectedVersion);
 }
 
 // Monotonic within this process so two updates started in the same millisecond
@@ -1840,7 +1782,7 @@ let updateAttemptSeq = 0;
 
 /**
  * Applies an HDiffPatch single-stream patch to `oldPath`, writing `outPath`;
- * `applyBinaryPatch` from pi-natives in production.
+ * `applyBinaryPatch` from omp-natives in production.
  */
 export type BinaryPatchApplier = (oldPath: string, patchPath: string, outPath: string) => Promise<number>;
 
@@ -1885,11 +1827,11 @@ async function installFromPatch(
 	const from = patch.fromVersion ? ` from ${patch.fromVersion}` : "";
 	console.log(chalk.dim(`Downloading patch${from} (${formatBytes(patch.size)})…`));
 	try {
-		await downloadVerifiedBinary({
+		await downloadBuildFile({
 			url: patch.url,
 			targetPath: paths.patchPath,
-			expectedSize: patch.size,
-			expectedDigest: `sha256:${patch.sha256}`,
+			size: patch.size,
+			sha256: patch.sha256,
 			fetchImpl: options.fetchImpl,
 			onProgress: received =>
 				options.onProgress?.({ phase: "downloading", version: build.version, received, total: patch.size }),
@@ -1931,15 +1873,16 @@ async function downloadBuild(
 ): Promise<void> {
 	if (build.patch && (await installFromPatch(build, build.patch, paths, options))) return;
 	console.log(chalk.dim(`Downloading ${build.file.name} (${formatBytes(build.file.size)})…`));
-	await downloadVerifiedBinary({
+	await downloadBuildFile({
 		url: build.download,
 		targetPath: paths.tempPath,
-		expectedSize: build.file.size,
-		expectedDigest: `sha256:${build.file.sha256}`,
+		size: build.file.size,
+		sha256: build.file.sha256,
 		fetchImpl: options.fetchImpl,
 		onProgress: received =>
 			options.onProgress?.({ phase: "downloading", version: build.version, received, total: build.file.size }),
 	});
+	await fs.promises.chmod(paths.tempPath, 0o755);
 	console.log(chalk.dim(`Verified sha256:${build.file.sha256}`));
 }
 
@@ -1999,7 +1942,7 @@ export async function updateViaBinaryAt(
 		await sweepStaleUpdateArtifacts(targetPath);
 		return result;
 	});
-	printVerifiedVersion(build.version, verification.path ?? targetPath);
+	await finishVerifiedUpdate({ ...verification, path: verification.path ?? targetPath }, build.version);
 	console.log(chalk.dim(`Restart ${APP_NAME} to use the new version`));
 }
 
@@ -2048,7 +1991,7 @@ export async function updateViaShimTakeover(
 	// Serialize the launcher swap and artifact sweep so two overlapping updates
 	// never retire the same shims or reclaim a live run's backup before its
 	// verification can roll it back.
-	await withFileLock(exePath, async () => {
+	const verification = await withFileLock(exePath, async () => {
 		console.log(chalk.dim(`Installing ${APP_NAME}.exe beside the script launcher...`));
 		await fs.promises.rename(tempPath, exePath);
 		// Retire the shims so PATH resolution lands on the new exe. Renamed, not
@@ -2105,6 +2048,7 @@ export async function updateViaShimTakeover(
 		for (const ext of [".exe", "", ".cmd", ".ps1", ".bat"]) {
 			await sweepStaleUpdateArtifacts(path.join(launcherDir, `${APP_NAME}${ext}`));
 		}
+		return verification;
 	});
 	for (const { launcher } of forwarded) {
 		console.log(chalk.dim(`Converted ${launcher} to a forwarder (it could not be removed).`));
@@ -2116,7 +2060,7 @@ export async function updateViaShimTakeover(
 			),
 		);
 	}
-	printVerifiedVersion(build.version);
+	await finishVerifiedUpdate({ ...verification, path: exePath }, build.version);
 	console.log(chalk.dim(`Restart ${APP_NAME} to use the new version`));
 }
 
@@ -2212,7 +2156,7 @@ function acquireInstallLock(): FileLockHandle {
 function announceOffer(version: string, request: UpdateRequest): boolean {
 	const comparison = compareVersions(version, VERSION);
 	if (comparison <= 0 && !request.force && !request.isChannelSwitch) {
-		const icon = theme?.status?.success ?? "✔";
+		const icon = currentTheme().symbols.symbol("status.success");
 		console.log(chalk.green(`${icon} Already up to date`));
 		return false;
 	}

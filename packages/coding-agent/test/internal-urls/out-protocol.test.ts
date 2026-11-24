@@ -1,9 +1,13 @@
-import { describe, expect, it } from "bun:test";
-import { isReplyWrite } from "@oh-my-pi/pi-tui/chat/reply-write";
+import { afterAll, describe, expect, it } from "bun:test";
+import { isReplyWrite } from "@oh-my-pi/pi-coding-agent/session/transcript/reply-write";
 import { Settings } from "../../src/config/settings";
 import { InternalUrlRouter } from "../../src/internal-urls";
 import type { SchemeHost } from "../../src/internal-urls/types";
 import type { ToolSession } from "../../src/tools";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 const host: SchemeHost = {
 	skillUriAccess: false,
@@ -31,7 +35,7 @@ describe("out://", () => {
 	it("is advertised only where replies reach the user", () => {
 		const router = InternalUrlRouter.instance();
 		const advertised = (outReplies: boolean) =>
-			router.describe({ ...host, outReplies }).some(line => line.startsWith("`out://`"));
+			router.describe({ ...host, outReplies }).some(line => line.startsWith("out://"));
 		expect(advertised(true)).toBe(true);
 		expect(advertised(false)).toBe(false);
 	});

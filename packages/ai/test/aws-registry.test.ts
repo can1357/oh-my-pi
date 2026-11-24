@@ -232,6 +232,32 @@ describe("AWS provider availability", () => {
 		}
 	});
 
+	test("treats shared files under a regular-file ~/.aws as absent", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "aws-registry-notdir-"));
+		try {
+			// `~/.aws` is a file, so both default paths fail with ENOTDIR, not ENOENT.
+			const awsFile = path.join(tmp, ".aws");
+			const credentialsPath = path.join(tmp, "credentials");
+			await Promise.all([
+				Bun.write(awsFile, "not a directory\n"),
+				Bun.write(credentialsPath, "[default]\naws_access_key_id = test\naws_secret_access_key = test-secret\n"),
+			]);
+			const env = {
+				...EMPTY_AWS_ENV,
+				AWS_SHARED_CREDENTIALS_FILE: path.join(awsFile, "credentials"),
+				AWS_CONFIG_FILE: path.join(awsFile, "config"),
+				AWS_EC2_METADATA_DISABLED: "true",
+			};
+			await withEnv(env, async () => expect(getEnvApiKey("bedrock-mantle")).toBeUndefined());
+			// An unreachable config file does not hide a usable credentials file.
+			await withEnv({ ...env, AWS_SHARED_CREDENTIALS_FILE: credentialsPath }, async () =>
+				expect(getEnvApiKey("bedrock-mantle")).toBeDefined(),
+			);
+		} finally {
+			await removeWithRetries(tmp);
+		}
+	});
+
 	test("recognizes an explicitly configured EC2 metadata endpoint", async () => {
 		await withEnv(
 			{

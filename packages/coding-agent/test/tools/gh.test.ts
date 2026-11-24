@@ -20,12 +20,15 @@ import {
 	tryResolveCurrentRepoFresh,
 } from "@oh-my-pi/pi-coding-agent/tools/gh-common";
 import { sanitizeRemoteName } from "@oh-my-pi/pi-coding-agent/tools/gh-pr-checkout";
+import { resetForTests as resetGithubCache } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+import type { GhToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/github";
 import { withRepoLock } from "@oh-my-pi/pi-coding-agent/utils/repo-lock";
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getAgentDir, hashPath, normalizePathForComparison, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { hashPath, normalizePathForComparison, removeWithRetries, spillFileName } from "@oh-my-pi/pi-utils";
+import { mockSchedulerWaitWithClock } from "../helpers/mock-scheduler-clock";
 
 const TINY_PNG_BASE64 =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
@@ -64,11 +67,11 @@ function createSession(
 		getSessionFile: () => null,
 		getArtifactsDir: () => artifactsDir ?? null,
 		allocateOutputArtifact: artifactsDir
-			? async toolType => {
+			? async () => {
 					const artifactId = String(nextArtifactId++);
 					return {
 						id: artifactId,
-						path: path.join(artifactsDir, `${artifactId}-${toolType}.md`),
+						path: path.join(artifactsDir, spillFileName(artifactId)),
 					};
 				}
 			: undefined,
@@ -160,7 +163,12 @@ async function buildPrFixtureTemplate(): Promise<PrFixture> {
 	return { baseDir, repoRoot, originBare, forkBare, headRefName, headRefOid, otherRefName, otherRefOid };
 }
 
-async function createPrFixture(): Promise<PrFixture> {
+interface PrCheckoutFixture extends PrFixture {
+	worktreesDir: string;
+	cleanup: () => Promise<void>;
+}
+
+async function createPrFixture(): Promise<PrCheckoutFixture> {
 	const template = prFixtureTemplate;
 	if (!template) throw new Error("PR fixture template was not built (missing beforeAll)");
 
@@ -176,6 +184,13 @@ async function createPrFixture(): Promise<PrFixture> {
 	runGit(repoRoot, ["remote", "set-url", "origin", originBare]);
 	runGit(repoRoot, ["remote", "set-url", "forksrc", forkBare]);
 
+	const worktreesDir = path.join(baseDir, "worktrees");
+	const previousWorktreesDir = process.env.OMP_WORKTREE_DIR;
+	const previousCacheDb = process.env.OMP_GITHUB_CACHE_DB;
+	process.env.OMP_WORKTREE_DIR = worktreesDir;
+	process.env.OMP_GITHUB_CACHE_DB = path.join(baseDir, "github-cache.db");
+	resetGithubCache();
+
 	return {
 		baseDir,
 		repoRoot,
@@ -185,45 +200,16 @@ async function createPrFixture(): Promise<PrFixture> {
 		headRefOid: template.headRefOid,
 		otherRefName: template.otherRefName,
 		otherRefOid: template.otherRefOid,
-	};
-}
-
-/**
- * Stub `os.homedir()` AND rebuild the cached `dirs` resolver in pi-utils so
- * `getWorktreesDir()` resolves under an isolated temp home instead of the
- * user's real `~/.omp/wt`. Returns the temp home and a cleanup hook.
- */
-interface TempHome {
-	home: string;
-	cleanup: () => Promise<void>;
-}
-
-async function setupTempHome(): Promise<{ home: string; cleanup: () => Promise<void> }> {
-	const home = await fs.mkdtemp(path.join(os.tmpdir(), "gh-pr-tool-home-"));
-	vi.spyOn(os, "homedir").mockReturnValue(home);
-	// Clear XDG_*_HOME so the rebuilt resolver routes `dirs.rootSubdir("wt", "data")`
-	// through the spied homedir instead of `$XDG_DATA_HOME/omp/wt` (CI sets these).
-	const xdgKeys = ["XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"] as const;
-	const xdgPrevious: Partial<Record<(typeof xdgKeys)[number], string | undefined>> = {};
-	for (const key of xdgKeys) {
-		xdgPrevious[key] = process.env[key];
-		delete process.env[key];
-	}
-	// `dirs.configRoot` is computed at constructor time from `os.homedir()`, so
-	// we must rebuild the resolver after the spy + env scrub are in place.
-	// `setAgentDir` recreates it; we point it at the temp home's default agent dir.
-	const originalAgentDir = getAgentDir();
-	setAgentDir(path.join(home, ".omp", "agent"));
-	return {
-		home,
+		worktreesDir,
 		cleanup: async () => {
-			setAgentDir(originalAgentDir);
-			for (const key of xdgKeys) {
-				const previous = xdgPrevious[key];
-				if (previous === undefined) delete process.env[key];
-				else process.env[key] = previous;
-			}
-			await removeWithRetries(home);
+			// A real pr_push opens the cache singleton to invalidate PR rows.
+			// Close its SQLite handle before removing the fixture on Windows.
+			resetGithubCache();
+			if (previousWorktreesDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = previousWorktreesDir;
+			if (previousCacheDb === undefined) delete process.env.OMP_GITHUB_CACHE_DB;
+			else process.env.OMP_GITHUB_CACHE_DB = previousCacheDb;
+			await removeWithRetries(baseDir);
 		},
 	};
 }
@@ -234,10 +220,10 @@ async function setupTempHome(): Promise<{ home: string; cleanup: () => Promise<v
  * symlinks (matches the production `fs.realpath` step) so assertions match
  * the value rendered into the tool result.
  */
-async function expectedWorktreePath(home: string, primaryRoot: string, localBranch: string): Promise<string> {
+async function expectedWorktreePath(worktreesDir: string, primaryRoot: string, localBranch: string): Promise<string> {
 	const prNumber = localBranch.replace(/^pr-/, "");
 	const segment = `${prNumber}-${hashPath(primaryRoot)}`;
-	return fs.realpath(path.join(home, ".omp", "wt", segment));
+	return fs.realpath(path.join(worktreesDir, segment));
 }
 
 describe("sanitizeRemoteName", () => {
@@ -1142,17 +1128,12 @@ describe("github tool", () => {
 	});
 
 	describe("pr_checkout (single, cross-repository) and git remote handling", () => {
-		// Arrange the mutable fixture + isolated $HOME once in beforeAll (excluded
-		// from test-body time); the body only performs the checkout and assertions.
-		let fixture: PrFixture;
-		let tempHome: TempHome;
+		let fixture: PrCheckoutFixture;
 		beforeAll(async () => {
 			fixture = await createPrFixture();
-			tempHome = await setupTempHome();
 		});
 		afterAll(async () => {
-			await tempHome.cleanup();
-			await removeWithRetries(fixture.baseDir);
+			await fixture.cleanup();
 		});
 
 		it("checks out a pull request into a worktree and configures contributor push metadata", async () => {
@@ -1181,7 +1162,7 @@ describe("github tool", () => {
 			expect(githubSpy.mock.calls[1]?.[1]).toContain("ghe.example.com/contrib/repo");
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			const primaryRoot = vcs.requireGit(fixture.repoRoot).primaryRoot() ?? fixture.repoRoot;
-			const worktreePath = await expectedWorktreePath(tempHome.home, primaryRoot, "pr-123");
+			const worktreePath = await expectedWorktreePath(fixture.worktreesDir, primaryRoot, "pr-123");
 			expect(text).toContain("Checked Out Pull Request #123");
 			expect(text).toContain(`Worktree: ${worktreePath}`);
 			// Contributor push metadata persisted to git config (single read).
@@ -1302,15 +1283,12 @@ echo ok
 
 	describe("pr_checkout arrays and pr_push metadata", () => {
 		// One mutable fixture covers disjoint branches and worktrees for both contracts.
-		let fixture: PrFixture;
-		let tempHome: TempHome;
+		let fixture: PrCheckoutFixture;
 		beforeAll(async () => {
 			fixture = await createPrFixture();
-			tempHome = await setupTempHome();
 		});
 		afterAll(async () => {
-			await tempHome.cleanup();
-			await removeWithRetries(fixture.baseDir);
+			await fixture.cleanup();
 		});
 
 		it("checks out multiple pull requests in a single call when pr is an array", async () => {
@@ -1340,8 +1318,8 @@ echo ok
 			const result = await tool.execute("pr-checkout", { op: "pr_checkout", pr: ["100", "200"] });
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			const primaryRoot = vcs.requireGit(fixture.repoRoot).primaryRoot() ?? fixture.repoRoot;
-			const wt100 = await expectedWorktreePath(tempHome.home, primaryRoot, "pr-100");
-			const wt200 = await expectedWorktreePath(tempHome.home, primaryRoot, "pr-200");
+			const wt100 = await expectedWorktreePath(fixture.worktreesDir, primaryRoot, "pr-100");
+			const wt200 = await expectedWorktreePath(fixture.worktreesDir, primaryRoot, "pr-200");
 
 			expect(text).toContain("# 2 Pull Request Worktrees");
 			expect(text).toContain("Checked Out Pull Request #100");
@@ -1388,6 +1366,12 @@ echo ok
 				expect(runGit(fixture.baseDir, ["--git-dir", fixture.originBare, "rev-parse", "refs/heads/main"])).toBe(
 					originMainBefore,
 				);
+			});
+
+			it("pushes the branch pr_checkout made for the named PR, not the current branch", async () => {
+				const tool = new GithubTool(createSession(fixture.repoRoot));
+				const result = await tool.execute("pr-push-named", { op: "pr_push", pr: "100" });
+				expect(result.details).toMatchObject({ branch: "pr-100", remoteBranch: fixture.headRefName });
 			});
 		});
 	});
@@ -1455,14 +1439,14 @@ echo ok
 			expect(text).toContain("zeta");
 			expect(text).not.toContain("alpha");
 			expect(text).toContain("Run failed.");
-			expect(text).toContain("Full failed-job logs: artifact://0");
+			expect(text).toContain("Full failed-job logs: local://0.log");
 			expect(result.details?.artifactId).toBe("0");
 			expect(result.details?.watch?.mode).toBe("run");
 			expect(result.details?.watch?.state).toBe("completed");
 			expect(result.details?.watch?.failedLogs?.[0]?.jobName).toBe("test");
 			expect(result.details?.watch?.failedLogs?.[0]?.tail).toContain("zeta");
 
-			const artifactText = await Bun.file(path.join(artifactsDir, "0-github.md")).text();
+			const artifactText = await Bun.file(path.join(artifactsDir, spillFileName(0))).text();
 			expect(artifactText).toContain("# GitHub Actions Run #77");
 			expect(artifactText).toContain("Full log:");
 			expect(artifactText).toContain("alpha");
@@ -1475,6 +1459,201 @@ echo ok
 			await removeWithRetries(artifactsDir);
 		}
 	});
+
+	for (const mode of ["run", "commit"] as const) {
+		it(`streams normalized GitHub Actions step progress in ${mode} watch details`, async () => {
+			mockSchedulerWaitWithClock();
+			const observedAt = Date.parse("2026-11-11T12:00:30Z");
+			vi.spyOn(Date, "now").mockReturnValue(observedAt);
+
+			const sentinelTimestamp = "0001-01-01T00:00:00Z";
+			const liveSteps = [
+				{
+					number: 1,
+					name: "Checkout",
+					status: "completed",
+					conclusion: "success",
+					started_at: "2026-11-11T12:00:20Z",
+					completed_at: "2026-11-11T12:00:22Z",
+				},
+				{
+					number: 2,
+					name: "Run tests",
+					status: "in_progress",
+					started_at: "2026-11-11T12:00:25Z",
+					completed_at: sentinelTimestamp,
+				},
+				{
+					number: 3,
+					name: "Wait for deployment",
+					status: "queued",
+					started_at: sentinelTimestamp,
+					completed_at: sentinelTimestamp,
+				},
+				{ number: 4, status: "queued", started_at: sentinelTimestamp },
+				{ name: "No GitHub step number", status: "completed" },
+				{ number: 0, name: "Invalid zero step number", status: "completed" },
+				{ number: "5", name: "Invalid string step number", status: "completed" },
+			];
+			const completedSteps = [
+				liveSteps[0],
+				{
+					number: 2,
+					name: "Run tests",
+					status: "completed",
+					conclusion: "success",
+					started_at: "2026-11-11T12:00:25Z",
+					completed_at: "2026-11-11T12:00:34Z",
+				},
+				{
+					number: 3,
+					name: "Wait for deployment",
+					status: "queued",
+					started_at: sentinelTimestamp,
+					completed_at: sentinelTimestamp,
+				},
+				{ number: 4, status: "queued", started_at: sentinelTimestamp },
+				...liveSteps.slice(4),
+			];
+			const runSnapshots = [
+				{
+					id: 77,
+					name: "CI",
+					display_title: "Step progress",
+					status: "in_progress",
+					head_branch: "main",
+					head_sha: "0123456789abcdef",
+					html_url: "https://github.com/owner/repo/actions/runs/77",
+				},
+				{
+					id: 77,
+					name: "CI",
+					display_title: "Step progress",
+					status: "completed",
+					conclusion: "success",
+					head_branch: "main",
+					head_sha: "0123456789abcdef",
+					html_url: "https://github.com/owner/repo/actions/runs/77",
+				},
+			];
+			const jobSnapshots = [
+				[
+					{
+						id: 201,
+						name: "build",
+						status: "in_progress",
+						started_at: "2026-11-11T12:00:20Z",
+						steps: liveSteps,
+					},
+					{ id: 202, name: "legacy-job", status: "completed", conclusion: "success" },
+					{ id: 203, name: "empty-job", status: "completed", conclusion: "success", steps: [] },
+				],
+				[
+					{
+						id: 201,
+						name: "build",
+						status: "completed",
+						conclusion: "success",
+						started_at: "2026-11-11T12:00:20Z",
+						completed_at: "2026-11-11T12:00:35Z",
+						steps: completedSteps,
+					},
+					{ id: 202, name: "legacy-job", status: "completed", conclusion: "success" },
+					{ id: 203, name: "empty-job", status: "completed", conclusion: "success", steps: [] },
+				],
+			];
+			let runPoll = 0;
+			let jobsPoll = 0;
+			const runSpy = vi.spyOn(github, "run").mockImplementation(async (_cwd, args) => {
+				const endpoint = args.find(arg => arg.startsWith("/repos/"));
+				if (!endpoint) throw new Error(`Unexpected gh command: ${args.join(" ")}`);
+
+				let response: unknown;
+				if (endpoint === "/repos/owner/repo/branches/main") {
+					response = { commit: { sha: "0123456789abcdef" } };
+				} else if (endpoint === "/repos/owner/repo/actions/runs/77") {
+					response = runSnapshots[Math.min(runPoll++, runSnapshots.length - 1)];
+				} else if (endpoint === "/repos/owner/repo/actions/runs") {
+					response = { workflow_runs: [runSnapshots[Math.min(runPoll++, runSnapshots.length - 1)]] };
+				} else if (endpoint === "/repos/owner/repo/actions/runs/77/jobs") {
+					response = {
+						total_count: jobSnapshots[Math.min(jobsPoll, jobSnapshots.length - 1)].length,
+						jobs: jobSnapshots[Math.min(jobsPoll++, jobSnapshots.length - 1)],
+					};
+				} else {
+					throw new Error(`Unexpected gh command: ${args.join(" ")}`);
+				}
+
+				return { exitCode: 0, stdout: JSON.stringify(response), stderr: "" };
+			});
+
+			const updates: GhToolDetails[] = [];
+			const tool = new GithubTool(createSession("/tmp/gh-run-watch-steps"));
+			const result = await tool.execute(
+				"watch-steps",
+				{
+					op: "run_watch",
+					repo: "owner/repo",
+					...(mode === "run" ? { run: "77" } : { branch: "main" }),
+				},
+				undefined,
+				update => {
+					if (update.details) updates.push(update.details);
+				},
+			);
+			const getRun = (details: GhToolDetails | undefined) => {
+				const watch = details?.watch;
+				return watch?.mode === "run" ? watch.run : watch?.runs?.[0];
+			};
+			const liveDetails = updates.find(update => update.watch?.pollCount === 1);
+			expect(liveDetails?.watch?.state).toBe("watching");
+			const liveJob = getRun(liveDetails)?.jobs[0];
+			expect(liveJob?.steps?.map(step => step.number)).toEqual([1, 2, 3, 4]);
+			expect(liveJob?.steps).toMatchObject([
+				{ number: 1, name: "Checkout", status: "completed", conclusion: "success", durationSeconds: 2 },
+				{ number: 2, name: "Run tests", status: "in_progress", durationSeconds: 5 },
+				{ number: 3, name: "Wait for deployment", status: "queued" },
+				{ number: 4, name: "step-4", status: "queued" },
+			]);
+			expect(liveJob?.steps?.[2]?.durationSeconds).toBeUndefined();
+			expect(liveJob?.steps?.[3]?.durationSeconds).toBeUndefined();
+			expect(getRun(liveDetails)?.jobs[1]?.steps).toBeUndefined();
+			expect(getRun(liveDetails)?.jobs[2]?.steps).toEqual([]);
+			const finalPollDetails = updates.find(
+				update => update.watch?.pollCount === 2 && update.watch.note === undefined,
+			);
+			expect(finalPollDetails?.watch?.state).toBe("watching");
+			expect(getRun(finalPollDetails)?.jobs[0]?.steps?.slice(0, 2)).toMatchObject([
+				{ number: 1, name: "Checkout", durationSeconds: 2 },
+				{ number: 2, name: "Run tests", status: "completed", conclusion: "success", durationSeconds: 9 },
+			]);
+
+			expect(result.details?.watch?.mode).toBe(mode);
+			expect(result.details?.watch?.state).toBe("completed");
+			const finalJob = getRun(result.details)?.jobs[0];
+			expect(finalJob?.steps?.map(step => step.number)).toEqual([1, 2, 3, 4]);
+			expect(finalJob?.steps).toMatchObject([
+				{ number: 1, name: "Checkout", durationSeconds: 2 },
+				{ number: 2, name: "Run tests", status: "completed", conclusion: "success", durationSeconds: 9 },
+				{ number: 3, name: "Wait for deployment", status: "queued" },
+				{ number: 4, name: "step-4", status: "queued" },
+			]);
+			expect(finalJob?.steps?.[2]?.durationSeconds).toBeUndefined();
+			expect(finalJob?.steps?.[3]?.durationSeconds).toBeUndefined();
+			expect(getRun(result.details)?.jobs[1]?.steps).toBeUndefined();
+			expect(getRun(result.details)?.jobs[2]?.steps).toEqual([]);
+			// Steps are display data: a passing run's text result lists jobs only.
+			const text = result.content.map(block => (block.type === "text" ? block.text : "")).join("\n");
+			expect(text).toContain("- [success] build");
+			expect(text).not.toContain("Checkout");
+			expect(text).not.toContain("0001-01-01");
+
+			const jobsCalls = runSpy.mock.calls.filter(([, args]) =>
+				args.includes("/repos/owner/repo/actions/runs/77/jobs"),
+			);
+			expect(jobsCalls).toHaveLength(2);
+		});
+	}
 
 	it("honors the explicit `repo` argument and does not fall back to the cwd repo (issue #1949)", async () => {
 		// Reporter's scenario: cwd lives in repo A (`cagedbird043/cagedbird-ecosystem`),

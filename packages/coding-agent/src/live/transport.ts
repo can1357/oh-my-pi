@@ -1,20 +1,20 @@
 import { type AuthStorage, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
 import { getProxyForUrl, wrapFetchForProxy } from "@oh-my-pi/pi-ai/utils/proxy";
-import {
-	CODEX_BASE_URL,
-	CODEX_CLIENT_VERSION,
-	getCodexAccountId,
-	OPENAI_HEADERS,
-} from "@oh-my-pi/pi-catalog/wire/codex";
+import { CODEX_BASE_URL, getCodexAccountId, OPENAI_HEADERS } from "@oh-my-pi/pi-catalog/wire/codex";
+import { getCodexClientVersion } from "@oh-my-pi/pi-catalog/wire/codex-version";
 import { LiveWebRtcPeer } from "@oh-my-pi/pi-natives";
 import { toError } from "@oh-my-pi/pi-utils";
+import type { ScopeLike } from "../config/registry";
+import { resolveConfigValue } from "../config/resolve-config-value";
 import { generateCodexAttestation } from "./attestation";
 import {
 	buildLiveSessionPayload,
+	buildLiveSessionUpdate,
 	type LiveClientMessage,
 	type LiveServerEvent,
 	parseLiveServerEvent,
 } from "./protocol";
+import { cfgLiveApiKey, cfgLiveEndpoint } from "./settings";
 
 const SIGNALING_URL = `${CODEX_BASE_URL}/codex/realtime/calls?intent=quicksilver&architecture=avas`;
 const MAX_ERROR_BODY_LENGTH = 2_048;
@@ -23,14 +23,45 @@ const SIDEBAND_CONNECT_TIMEOUT_MS = 15_000;
 const LIVE_PROVIDER = "openai-codex";
 const LIVE_ORIGINATOR = "Codex Desktop";
 const LIVE_CALL_ID_PATTERN = /^rtc_[\w-]+$/;
+/** Proxy scope of a custom live endpoint: `PI_PROXY_LIVE`, else `PI_PROXY`, else the standard variables. */
+const LIVE_ENDPOINT_PROXY = "live";
+const MAX_ENDPOINT_REDIRECTS = 5;
 
 type Lifecycle = "idle" | "connecting" | "connected" | "closing" | "closed";
 
+/** A custom realtime server that replaces Codex for live calls (the `live.endpoint` setting). */
+export interface LiveEndpoint {
+	/** Base URL the OpenAI Realtime WebRTC paths hang off, e.g. `http://127.0.0.1:8080/v1`. */
+	baseUrl: string;
+	/** Resolved bearer key, sent only to this endpoint. */
+	apiKey?: string;
+}
+
+/**
+ * The custom endpoint live calls use, with `live.apiKey` resolved like other configured secrets
+ * (literal, environment variable name, or `!command`); `undefined` when `live.endpoint` is empty,
+ * so calls go to Codex.
+ */
+export async function resolveLiveEndpoint(scope: ScopeLike): Promise<LiveEndpoint | undefined> {
+	const baseUrl = cfgLiveEndpoint.get(scope)?.trim();
+	if (!baseUrl) return undefined;
+	const keyConfig = cfgLiveApiKey.get(scope)?.trim();
+	if (!keyConfig) return { baseUrl };
+	const apiKey = await resolveConfigValue(keyConfig);
+	if (!apiKey) throw new Error("live.apiKey resolved to no key: its command failed or printed nothing");
+	return { baseUrl, apiKey };
+}
+
+/** Where and with which credentials the call's sideband WebSocket connects. */
+interface LiveSideband {
+	url: string;
+	headers: Record<string, string>;
+	proxyScope: string;
+}
+
 interface LiveSignalingResult {
 	answer: string;
-	callId: string;
-	access: OAuthAccess;
-	attestation: string | undefined;
+	sideband: LiveSideband;
 }
 
 class LiveSignalingError extends Error {
@@ -51,9 +82,11 @@ export interface LiveTransportCallbacks {
 	onOutputLevel(level: number): void;
 }
 
-/** Configuration required to establish a Codex live call. */
+/** Configuration required to establish a live call. */
 export interface LiveTransportOptions {
 	authStorage: AuthStorage;
+	/** Custom realtime server; unset signals Codex with the session's ChatGPT (Codex) login. */
+	endpoint?: LiveEndpoint;
 	sessionId: string;
 	instructions: string;
 	voice: string;
@@ -62,7 +95,7 @@ export interface LiveTransportOptions {
 	/**
 	 * SDP offer from a caller-owned WebRTC peer (one Opus audio track plus an `oai-events`
 	 * data channel). When set, no native peer is created: the caller's peer carries the audio,
-	 * {@link CodexLiveTransport.sdpAnswer} holds the answer to apply to it, and this transport
+	 * {@link LiveTransport.sdpAnswer} holds the answer to apply to it, and this transport
 	 * keeps only the sideband.
 	 */
 	sdpOffer?: string;
@@ -84,6 +117,46 @@ export function buildLiveSidebandUrl(callId: string): string {
 	return url.toString();
 }
 
+/** Appends `path` to the endpoint base's path, keeping its query (`…/v1` → `…/v1/realtime`). */
+function liveEndpointUrl(baseUrl: string, path: string): URL {
+	const url = new URL(baseUrl);
+	url.pathname = `${url.pathname.replace(/\/+$/, "")}/${path}`;
+	return url;
+}
+
+/** The custom endpoint's signaling URL: `{base}/realtime/calls`. */
+export function liveEndpointCallsUrl(baseUrl: string): string {
+	return liveEndpointUrl(baseUrl, "realtime/calls").toString();
+}
+
+/** The custom endpoint's sideband URL: `{base as ws(s)}/realtime?call_id=<id>`. */
+export function liveEndpointSidebandUrl(baseUrl: string, callId: string): string {
+	const url = liveEndpointUrl(baseUrl, "realtime");
+	url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+	url.searchParams.set("call_id", callId);
+	return url.toString();
+}
+
+/** Extracts the call ID a custom endpoint names as the last path segment of its Location header. */
+export function parseLiveEndpointCallId(location: string | null): string | undefined {
+	const segment = location
+		?.split(/[?#]/, 1)[0]
+		?.split("/")
+		.filter(part => part.length > 0)
+		.at(-1);
+	if (!segment) return undefined;
+	try {
+		return decodeURIComponent(segment) || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Headers a custom endpoint receives: its own bearer key, never Codex credentials. */
+export function liveEndpointHeaders(endpoint: LiveEndpoint): Record<string, string> {
+	return endpoint.apiKey ? { Authorization: `Bearer ${endpoint.apiKey}` } : {};
+}
+
 function liveSessionHeaders(
 	access: OAuthAccess,
 	sessionId: string,
@@ -93,11 +166,11 @@ function liveSessionHeaders(
 	const headers: Record<string, string> = {
 		Authorization: `Bearer ${access.accessToken}`,
 		"OpenAI-Alpha": "quicksilver=v2",
-		"User-Agent": `Codex Desktop/${CODEX_CLIENT_VERSION}`,
+		"User-Agent": `Codex Desktop/${getCodexClientVersion()}`,
 		"x-session-id": realtimeSessionId,
 		[OPENAI_HEADERS.ORIGINATOR]: LIVE_ORIGINATOR,
-		[OPENAI_HEADERS.VERSION]: CODEX_CLIENT_VERSION,
-		[OPENAI_HEADERS.SCOPED_SESSION_ID]: sessionId,
+		[OPENAI_HEADERS.VERSION]: getCodexClientVersion(),
+		[OPENAI_HEADERS.SESSION_ID]: sessionId,
 		[OPENAI_HEADERS.THREAD_ID]: sessionId,
 	};
 	const accountId = access.accountId ?? getCodexAccountId(access.accessToken);
@@ -118,9 +191,14 @@ function abortReason(signal: AbortSignal | undefined): Error {
 	return new DOMException("Live connection aborted", "AbortError");
 }
 
-/** WebRTC transport for a Codex Frameless Bidi live session, with a native or caller-owned media peer. */
-export class CodexLiveTransport {
+/**
+ * WebRTC transport for a Frameless Bidi live session on Codex or a custom endpoint, with a native
+ * or caller-owned media peer.
+ */
+export class LiveTransport {
 	readonly #options: LiveTransportOptions;
+	/** Prefix of user-facing errors: which server the call talks to. */
+	readonly #label: string;
 	#peer: LiveWebRtcPeer | undefined;
 	#sdpAnswer: string | undefined;
 	readonly #realtimeSessionId = crypto.randomUUID();
@@ -135,6 +213,7 @@ export class CodexLiveTransport {
 
 	constructor(options: LiveTransportOptions) {
 		this.#options = options;
+		this.#label = options.endpoint ? "Live endpoint" : "Codex live";
 		this.#abortListener = () => {
 			void this.close();
 		};
@@ -146,7 +225,7 @@ export class CodexLiveTransport {
 		return this.#sdpAnswer;
 	}
 
-	/** Establish the media peer, perform Codex signaling, and wait for the data channel or sideband. */
+	/** Establish the media peer, signal the call, and wait for the data channel or sideband. */
 	connect(): Promise<void> {
 		if (this.#state === "connected") return Promise.resolve();
 		if (this.#connectPromise) return this.#connectPromise;
@@ -180,8 +259,13 @@ export class CodexLiveTransport {
 			this.#sdpAnswer = signaling.answer;
 		}
 		if (this.#state !== "connecting") throw abortReason(this.#options.signal);
-		await this.#connectSideband(signaling.callId, signaling.access, signaling.attestation);
+		await this.#connectSideband(signaling.sideband);
 		if (this.#state !== "connecting") throw abortReason(this.#options.signal);
+		// A custom endpoint got the bare SDP: the session configuration follows on the sideband.
+		if (this.#options.endpoint) {
+			const update = buildLiveSessionUpdate(this.#options.instructions, this.#options.voice);
+			this.#sideband?.send(JSON.stringify(update));
+		}
 		this.#state = "connected";
 	}
 
@@ -206,6 +290,7 @@ export class CodexLiveTransport {
 	}
 
 	async #signal(offer: string): Promise<LiveSignalingResult> {
+		if (this.#options.endpoint) return await this.#signalEndpoint(offer, this.#options.endpoint);
 		const attestation = await generateCodexAttestation();
 		return await withOAuthAccess(
 			this.#options.authStorage,
@@ -230,6 +315,7 @@ export class CodexLiveTransport {
 			"Content-Type": "application/json",
 		});
 		const fetchImpl = wrapFetchForProxy(fetch, LIVE_PROVIDER);
+		this.#options.signal?.throwIfAborted();
 		const response = await fetchImpl(SIGNALING_URL, {
 			method: "POST",
 			headers,
@@ -251,14 +337,77 @@ export class CodexLiveTransport {
 		if (!callId) {
 			throw new LiveSignalingError(response.status, "Codex live signaling returned no valid call ID");
 		}
-		return { answer, callId, access, attestation };
+		const sideband = {
+			url: buildLiveSidebandUrl(callId),
+			headers: liveSessionHeaders(access, this.#options.sessionId, this.#realtimeSessionId, attestation),
+			proxyScope: LIVE_PROVIDER,
+		};
+		return { answer, sideband };
 	}
 
-	async #connectSideband(callId: string, access: OAuthAccess, attestation: string | undefined): Promise<void> {
-		let failure = new Error("Codex live sideband connection failed");
+	/**
+	 * Signals a custom endpoint the OpenAI Realtime WebRTC way: the bare SDP offer, the endpoint's
+	 * own key, and only same-origin 307/308 redirects followed, so the key never leaves its origin.
+	 */
+	async #signalEndpoint(offer: string, endpoint: LiveEndpoint): Promise<LiveSignalingResult> {
+		const credentials = liveEndpointHeaders(endpoint);
+		let url = new URL(liveEndpointCallsUrl(endpoint.baseUrl));
+		const origin = url.origin;
+		for (let redirects = 0; ; redirects++) {
+			this.#options.signal?.throwIfAborted();
+			const response = await fetch(url, {
+				method: "POST",
+				headers: { ...credentials, "Content-Type": "application/sdp" },
+				body: offer,
+				redirect: "manual",
+				proxy: getProxyForUrl(LIVE_ENDPOINT_PROXY, url),
+				signal: this.#options.signal,
+			});
+			const location = response.headers.get("location");
+			if (response.status >= 300 && response.status < 400) {
+				await response.body?.cancel();
+				const target = location ? new URL(location, url) : undefined;
+				const preservesPost = response.status === 307 || response.status === 308;
+				if (!target || !preservesPost || target.origin !== origin || redirects >= MAX_ENDPOINT_REDIRECTS) {
+					throw new LiveSignalingError(
+						response.status,
+						`Live endpoint signaling was redirected (${response.status}) to ${location ?? "nowhere"}; ` +
+							"only same-origin 307/308 redirects are followed",
+					);
+				}
+				url = target;
+				continue;
+			}
+			const answer = await response.text();
+			if (!response.ok) {
+				const detail = boundedErrorBody(answer, response.statusText);
+				throw new LiveSignalingError(
+					response.status,
+					`Live endpoint signaling failed (${response.status}): ${detail}`,
+				);
+			}
+			if (!answer.trim()) {
+				throw new LiveSignalingError(response.status, "Live endpoint signaling returned an empty SDP answer");
+			}
+			const callId = parseLiveEndpointCallId(location);
+			if (!callId) {
+				throw new LiveSignalingError(response.status, "Live endpoint signaling returned no call ID in Location");
+			}
+			const sideband = {
+				url: liveEndpointSidebandUrl(endpoint.baseUrl, callId),
+				headers: credentials,
+				proxyScope: LIVE_ENDPOINT_PROXY,
+			};
+			return { answer, sideband };
+		}
+	}
+
+	async #connectSideband(sideband: LiveSideband): Promise<void> {
+		let failure = new Error(`${this.#label} sideband connection failed`);
 		for (let attempt = 0; attempt < SIDEBAND_CONNECT_ATTEMPTS; attempt++) {
+			this.#options.signal?.throwIfAborted();
 			try {
-				await this.#openSideband(callId, access, attestation);
+				await this.#openSideband(sideband);
 				return;
 			} catch (cause) {
 				failure = toError(cause);
@@ -269,13 +418,12 @@ export class CodexLiveTransport {
 		throw failure;
 	}
 
-	async #openSideband(callId: string, access: OAuthAccess, attestation: string | undefined): Promise<void> {
-		const url = buildLiveSidebandUrl(callId);
+	async #openSideband(sideband: LiveSideband): Promise<void> {
 		const options = {
-			headers: liveSessionHeaders(access, this.#options.sessionId, this.#realtimeSessionId, attestation),
-			proxy: getProxyForUrl(LIVE_PROVIDER, new URL(url)),
+			headers: sideband.headers,
+			proxy: getProxyForUrl(sideband.proxyScope, new URL(sideband.url)),
 		} satisfies Bun.WebSocketOptions;
-		const socket: Bun.WebSocket = Reflect.construct(WebSocket, [url, options]);
+		const socket: Bun.WebSocket = Reflect.construct(WebSocket, [sideband.url, options]);
 		socket.binaryType = "nodebuffer";
 		const { promise, resolve, reject } = Promise.withResolvers<void>();
 		let opened = false;
@@ -311,7 +459,7 @@ export class CodexLiveTransport {
 		};
 		socket.onmessage = event => {
 			if (typeof event.data !== "string") {
-				this.#reportFailure("Codex live sideband returned an unexpected binary frame.");
+				this.#reportFailure(`${this.#label} sideband returned an unexpected binary frame.`);
 				return;
 			}
 			this.#handleSidebandEvent(event.data);
@@ -319,22 +467,22 @@ export class CodexLiveTransport {
 		socket.onerror = event => {
 			const detail = event instanceof ErrorEvent && event.message ? `: ${event.message}` : "";
 			if (!opened) {
-				rejectConnect(new Error(`Codex live sideband connection failed${detail}`));
+				rejectConnect(new Error(`${this.#label} sideband connection failed${detail}`));
 				socket.close(1011, "connection failed");
 				return;
 			}
-			this.#reportFailure(`Codex live sideband failed${detail}`);
+			this.#reportFailure(`${this.#label} sideband failed${detail}`);
 		};
 		socket.onclose = event => {
 			if (!opened) {
-				rejectConnect(new Error(`Codex live sideband closed before connecting (${event.code})`));
+				rejectConnect(new Error(`${this.#label} sideband closed before connecting (${event.code})`));
 				return;
 			}
 			if (this.#sideband !== socket) return;
 			this.#sideband = undefined;
 			if (this.#state === "connecting" || this.#state === "connected") {
 				const detail = event.reason ? `: ${event.reason}` : "";
-				this.#reportFailure(`Codex live sideband closed (${event.code})${detail}`);
+				this.#reportFailure(`${this.#label} sideband closed (${event.code})${detail}`);
 			}
 		};
 		if (this.#options.signal?.aborted) {
@@ -343,7 +491,7 @@ export class CodexLiveTransport {
 			this.#options.signal?.addEventListener("abort", onAbort, { once: true });
 			timeout = setTimeout(() => {
 				socket.close(1000, "connect timeout");
-				rejectConnect(new Error("Codex live sideband connection timed out"));
+				rejectConnect(new Error(`${this.#label} sideband connection timed out`));
 			}, SIDEBAND_CONNECT_TIMEOUT_MS);
 			timeout.unref?.();
 		}
@@ -391,7 +539,7 @@ export class CodexLiveTransport {
 			if (this.#state !== "connected") throw new Error("Live transport is not connected");
 			const sideband = this.#sideband;
 			if (!sideband || sideband.readyState !== WebSocket.OPEN) {
-				throw new Error("Codex live sideband is not connected");
+				throw new Error(`${this.#label} sideband is not connected`);
 			}
 			sideband.send(JSON.stringify(message));
 		});

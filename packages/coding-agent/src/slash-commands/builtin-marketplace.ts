@@ -5,22 +5,25 @@ import {
 	resolveActiveProjectRegistryPath,
 	resolveOrDefaultProjectRegistryPath,
 } from "../discovery/helpers.js";
-import { PluginManager } from "../extensibility/plugins";
-import { setInstalledPluginEnabled } from "../extensibility/plugins/toggle";
-import {
-	getInstalledPluginsRegistryPath,
-	getMarketplacesCacheDir,
-	getMarketplacesRegistryPath,
-	getPluginsCacheDir,
-	MarketplaceManager,
-} from "../extensibility/plugins/marketplace";
-import { MCPCommandController } from "../modes/controllers/mcp-command-controller";
 import type { InteractiveModeContext } from "../modes/types";
-import { refreshAgentDiscovery } from "../task";
-import { createMarketplaceManager } from "./helpers/marketplace-manager";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
 import { parseMarketplaceInstallArgs, parsePluginScopeArgs } from "./marketplace-install-parser";
 import type { SlashCommandSpec } from "./types";
+
+// Lazy loaders: keep marketplace/plugin/MCP-controller modules off interactive-mode startup
+// until the user actually invokes `/marketplace`, `/plugins`, or `/reload-plugins`.
+async function loadMarketplaceHelper() {
+	return await import("./helpers/marketplace-manager");
+}
+async function loadMarketplaceModule() {
+	return await import("../extensibility/plugins/marketplace");
+}
+async function loadPluginManager() {
+	return (await import("../extensibility/plugins")).PluginManager;
+}
+async function loadPluginToggle() {
+	return (await import("../extensibility/plugins/toggle")).setInstalledPluginEnabled;
+}
 
 /**
  * Reload the interactive session's plugin runtime: invalidate fs/plugin-root
@@ -32,11 +35,13 @@ import type { SlashCommandSpec } from "./types";
 export async function reloadTuiPluginState(ctx: InteractiveModeContext): Promise<void> {
 	const projectPath = await resolveActiveProjectRegistryPath(ctx.sessionManager.getCwd());
 	clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+	const { refreshAgentDiscovery } = await import("../task");
 	await refreshAgentDiscovery(ctx.sessionManager.getCwd(), ctx.session.effectiveExtensionRoots);
 	await ctx.refreshSkillState();
 	await ctx.refreshSlashCommandState();
 	resetCapabilities();
 	if (ctx.mcpManager) {
+		const { MCPCommandController } = await import("../modes/controllers/mcp-command-controller");
 		await new MCPCommandController(ctx).reloadServers();
 	}
 }
@@ -69,6 +74,7 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 			const { verb, rest } = parseSubcommand(command.args);
 			if (!verb) {
 				try {
+					const { createMarketplaceManager } = await loadMarketplaceHelper();
 					const manager = await createMarketplaceManager(runtime);
 					const marketplaces = await manager.listMarketplaces();
 					if (marketplaces.length === 0) {
@@ -114,6 +120,7 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 				);
 			}
 			try {
+				const { createMarketplaceManager } = await loadMarketplaceHelper();
 				const manager = await createMarketplaceManager(runtime);
 				switch (verb) {
 					case "add": {
@@ -243,13 +250,20 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 			// /marketplace (no args) or /marketplace install (no args) → interactive browser
 			if ((sub === "install" && !rest) || (!args[0] && !command.args.trim())) {
 				try {
-					runtime.ctx.showPluginSelector("install");
+					await runtime.ctx.showPluginSelector("install");
 				} catch (err) {
-					runtime.ctx.showStatus(`Marketplace error: ${err}`);
+					runtime.ctx.showStatus(`Marketplace error: ${errorMessage(err)}`);
 				}
 				return;
 			}
 
+			const {
+				getInstalledPluginsRegistryPath,
+				getMarketplacesCacheDir,
+				getMarketplacesRegistryPath,
+				getPluginsCacheDir,
+				MarketplaceManager,
+			} = await loadMarketplaceModule();
 			const mgr = new MarketplaceManager({
 				marketplacesRegistryPath: getMarketplacesRegistryPath(),
 				installedRegistryPath: getInstalledPluginsRegistryPath(),
@@ -329,7 +343,7 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 					case "uninstall": {
 						if (!rest) {
 							// No args → open interactive uninstall selector
-							runtime.ctx.showPluginSelector("uninstall");
+							await runtime.ctx.showPluginSelector("uninstall");
 							return;
 						}
 						const uninstArgs = parsePluginScopeArgs(
@@ -441,6 +455,11 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 				if (verb === "enable" || verb === "disable") {
 					const parsed = parsePluginScopeArgs(rest, `Usage: /plugins ${verb} [--scope user|project] <plugin>`);
 					if ("error" in parsed) return usage(parsed.error, runtime);
+					const [{ createMarketplaceManager }, PluginManager, setInstalledPluginEnabled] = await Promise.all([
+						loadMarketplaceHelper(),
+						loadPluginManager(),
+						loadPluginToggle(),
+					]);
 					const marketplace = await createMarketplaceManager(runtime);
 					const marketplaceIds = new Set((await marketplace.listInstalledPlugins()).map(plugin => plugin.id));
 					await setInstalledPluginEnabled(parsed.pluginId, {
@@ -456,6 +475,10 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 				}
 				// Default: list
 				const lines: string[] = [];
+				const [{ createMarketplaceManager }, PluginManager] = await Promise.all([
+					loadMarketplaceHelper(),
+					loadPluginManager(),
+				]);
 				const npmManager = new PluginManager();
 				const npmPlugins = await npmManager.list();
 				if (npmPlugins.length > 0) {

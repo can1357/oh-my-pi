@@ -264,7 +264,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		// listener before `await abort()`, so the abort-finally stranded-message
 		// drain is suppressed while disconnected. Unlike /new (which resets the
 		// queue), compaction preserves the agent queues, so a steer/follow-up that
-		// arrives mid-compaction (async IRC, an xd:// mount notice, an SDK steer)
+		// arrives mid-compaction (async IRC, a tool-command mount notice, an SDK steer)
 		// would hang until the next explicit prompt unless compact() re-drains
 		// after reconnecting.
 		cfgCompactionKeepRecentTokens.set(session.settings, 1);
@@ -1331,13 +1331,18 @@ describe("AgentSession auto-compaction queue resume", () => {
 	const queueLaunchCompletion = (session: AgentSession): Promise<void> => {
 		const owner = session.sessionManager.getSessionId();
 		return session.queueLaunchCompletion({
-			event: "daemon-completed",
+			ev: "completed",
 			completionId: "idle-completion",
 			owner,
-			daemon: {
-				name: "worker",
+			unit: {
 				id: "daemon-id",
+				kind: "proc",
+				scope: { kind: "session", id: owner },
+				key: "worker",
+				label: "worker",
+				generation: "1",
 				state: "exited",
+				pids: [],
 				createdAt: 1,
 				startedAt: 1,
 				exitedAt: 2,
@@ -1345,8 +1350,9 @@ describe("AgentSession auto-compaction queue resume", () => {
 				restartCount: 0,
 				outputBytes: 0,
 				owner,
-				persist: false,
-				detached: false,
+				leases: 0,
+				policy: { hold: "leases", idleMs: 0, onIdle: "stop", restart: "no", survive: "none" },
+				supervised: true,
 			},
 		});
 	};

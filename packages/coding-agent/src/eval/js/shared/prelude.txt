@@ -52,31 +52,61 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		const res = await globalThis.__omp_call_tool__("read", { path });
 		return res && typeof res === "object" && "text" in res ? res.text : res;
 	};
+	// Delegated reads ask for `:raw`, which the bridge returns whole: no row prefixes, pages or cut lines.
+	// Web URLs keep their reader text; `:raw` there means the original HTML.
+	const rawReadPath = path =>
+		/^https?:\/\//i.test(path) || /:raw(?::|$)/i.test(path) ? path : `${path}:raw`;
 
 
 	const read = async (path, opts, ...rest) => {
 		const options = optionsArg("read", opts, rest, ["offset", "limit"], "{ offset, limit }");
-		if (typeof path === "string" && /^artifact:\/\/\d+$/i.test(path)) {
-			if (typeof options.limit === "number" && options.limit <= 0) return "";
-			const text = callHelper("hasRoot", path) ? await callHelper("read", path, options) : undefined;
+		if (!shouldDelegateRead(path)) {
+			const text = await callHelper("read", path, options);
 			if (text !== undefined) return text;
-			// Another session's, or no artifacts dir was injected: the read tool searches every registered one.
-			// A bounded raw read locates the file without inlining it; a bare `:raw` read refuses files over 50 KB.
-			const located = await globalThis.__omp_call_tool__("read", { path: `${path}:raw:1-1` });
-			const filePath = located?.details?.resolvedPath;
-			// Once located, the file is read like this session's artifacts and plain paths: read() is no read-tool policy gate.
-			if (typeof filePath === "string") return callHelper("read", filePath, options);
-			// An extension's replacement `read` may name no file: its own text for the selected lines is the answer.
-			return readToolText(withReadLineSelector(`${path}:raw`, options));
 		}
-		if (shouldDelegateRead(path)) {
-			const toolPath = withReadLineSelector(path, options);
-			return toolPath === null ? "" : readToolText(toolPath);
-		}
-		return callHelper("read", path, options);
+		// Protocol paths and directories (whose listing it renders) go through the read tool.
+		const toolPath = withReadLineSelector(rawReadPath(path), options);
+		return toolPath === null ? "" : readToolText(toolPath);
 	};
-	const write = async (path, data) => callHelper("writeFile", path, data);
+	const write = async (path, data) => {
+		// Schemes without an on-disk root (agent://, out://, ssh://, …) go through the write tool.
+		if (!shouldDelegateRead(path)) return callHelper("writeFile", path, data);
+		if (typeof data !== "string") throw new TypeError(`write() to ${path} expects string data`);
+		await globalThis.__omp_call_tool__("write", { path, content: data });
+		return path;
+	};
 	const env = (key, value) => callHelper("env", key, value);
+
+	// `sh` runs a command on the embedded bash engine (see `eval/shell-bridge.ts`) and resolves to its output.
+	// A template literal keeps its raw text and single-quotes each interpolation; an array becomes one word per element.
+	const shellQuote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+	const templateCommand = (strings, values) => {
+		let command = strings.raw[0];
+		for (let index = 0; index < values.length; index++) {
+			const value = values[index];
+			const words = Array.isArray(value) ? value.map(shellQuote).join(" ") : shellQuote(value);
+			command += words + strings.raw[index + 1];
+		}
+		return command;
+	};
+	const sh = async (command, ...rest) => {
+		let args;
+		if (Array.isArray(command) && Array.isArray(command.raw)) {
+			args = { command: templateCommand(command, rest) };
+		} else if (typeof command === "string") {
+			args = { ...optionsArg("sh", rest[0], rest.slice(1), ["cwd", "timeout"], "{ cwd, timeout }"), command };
+		} else {
+			throw new TypeError('sh() expects a command string or a template literal: sh("ls -la") or sh`ls ${dir}`');
+		}
+		const { output, exitCode, timedOut } = await globalThis.__omp_call_tool__("__shell__", args);
+		if (exitCode === 0) return output;
+		const status = timedOut ? `timed out after ${args.timeout}s` : `exited with code ${exitCode}`;
+		const error = new Error(`$ ${args.command}: ${status}${output ? `\n${output.trimEnd()}` : ""}`);
+		error.name = "ShellError";
+		error.exitCode = exitCode;
+		error.output = output;
+		throw error;
+	};
 
 	const __tools = new Map();
 	globalThis.__omp_tools__ = __tools;
@@ -373,11 +403,19 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		return value;
 	};
 
+	const WAIT_NOT_A_SLEEP =
+		"wait() takes agent or completion handles; it is not a sleep. Wait for page state with tab.waitFor*(…), or pause with await Bun.sleep(ms).";
 	const wait = async (handles, opts, ...rest) => {
 		const { timeout, raiseErrors = true } = optionsArg("wait", opts, rest, ["timeout", "raiseErrors"], "{ timeout, raiseErrors }");
 		const isHandleLike = value => value instanceof EvalHandle || value instanceof PendingHandle;
-		const raw = isHandleLike(handles) ? [handles] : Array.from(handles ?? []);
-		const items = await Promise.all(raw);
+		// `Array.from(1800)` is `[]`: a number would otherwise return at once, silently, where a sleep was meant.
+		if (typeof handles === "number") throw new TypeError(WAIT_NOT_A_SLEEP);
+		const raw = isHandleLike(handles) || typeof handles === "string" ? [handles] : Array.from(handles ?? []);
+		const items = (await Promise.all(raw)).map(value =>
+			typeof value === "string" && value.length > 0
+				? new AgentHandle(value.startsWith("agent://") ? value.slice(8) : value, "task")
+				: value,
+		);
 		for (const handle of items) {
 			if (!(handle instanceof EvalHandle)) throw new TypeError("wait() expects agent or completion handles");
 		}
@@ -563,8 +601,14 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 				item.images = images[key];
 			}
 		}
+		// `op` goes last so a caller-supplied `op` cannot turn create into close/cancel on an existing batch.
 		return judgeBatchFrom(
-			await globalThis.__omp_call_tool__("__judge_batch__", { op: "create", items, questions, ...batchOptions }),
+			await globalThis.__omp_call_tool__("__judge_batch__", {
+				...batchOptions,
+				items,
+				questions,
+				op: "create",
+			}),
 		);
 	};
 
@@ -645,10 +689,11 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			["name", "context", "tools", "model"],
 			"{ name, context, tools, model }",
 		);
+		// `op` goes last so a caller-supplied `op` cannot turn create into close/push on an existing pool.
 		const result = await globalThis.__omp_call_tool__("__workpool__", {
-			op: "create",
 			...(agentName === undefined ? {} : { agent: agentName }),
 			...options,
+			op: "create",
 		});
 		if (!result || typeof result.name !== "string") throw new Error("workpool() did not return a pool");
 		return new WorkPool(result.name, result.agent, result.limit);
@@ -765,4 +810,5 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	globalThis.read = read;
 	globalThis.write = write;
 	globalThis.env = env;
+	globalThis.sh = sh;
 }

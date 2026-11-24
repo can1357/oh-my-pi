@@ -106,6 +106,8 @@ export interface LoadOptions<T = unknown> {
 	providers?: string[];
 	/** Exclude these providers (by ID). Default: none */
 	excludeProviders?: string[];
+	/** Read providers regardless of their switch; settings discovery resolves switches from the discovered items. */
+	includeDisabledProviders?: boolean;
 	/** Custom cwd. Default: getProjectDir() */
 	cwd?: string;
 	/** Native user config dir, forwarded to {@link LoadContext.agentDir}. Default: getAgentDir() */
@@ -173,6 +175,12 @@ export interface SourceMeta {
 	 * put the version, not the plugin name, in the path segment owning `skills/`.
 	 */
 	pluginName?: string;
+	/**
+	 * Filesystem-resolved plugin root supplying this item. Body read paths
+	 * substitute `${CLAUDE_PLUGIN_ROOT}` / `${OMP_PLUGIN_ROOT}` in Markdown
+	 * bodies with it, matching Claude Code's in-body resolution (#20165).
+	 */
+	pluginRoot?: string;
 }
 
 /**

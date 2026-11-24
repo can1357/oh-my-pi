@@ -496,7 +496,7 @@ impl Shared {
 		}
 	}
 
-	/// With `tools.xdev`, host tools run through `write` to an `xd://` device,
+	/// With `tools.commands`, host tools run as tool commands inside `bash` calls,
 	/// so update/end events name the transport tool; report the host tool
 	/// instead. `tool_execution_start` precedes `host_tool_call` and keeps the
 	/// transport name.
@@ -822,10 +822,11 @@ impl Client {
 		});
 		let mut client = Self {
 			ready: ReadyEvent {
-				protocol_version:            None,
-				supported_protocol_versions: None,
-				max_frame_bytes:             None,
-				max_reassembled_frame_bytes: None,
+				protocol_version:                   None,
+				supported_protocol_versions:        None,
+				max_frame_bytes:                    None,
+				max_reassembled_frame_bytes:        None,
+				supports_bash_exclude_from_context: None,
 			},
 			shared,
 			child,

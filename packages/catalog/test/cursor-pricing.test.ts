@@ -75,6 +75,21 @@ describe("cursor API-equivalent pricing", () => {
 		});
 	});
 
+	it("keeps the explicit 500K Grok 4.7 lanes uncapped and on their own cards", () => {
+		const cards = [
+			["grok-4.7-500k", 4, 12, 1],
+			["grok-4.7-500k-fast", 6, 18, 1.5],
+		] as const;
+		for (const [id, input, output, cacheRead] of cards) {
+			const lane = buildModel(spec(id));
+			expect(lane.longContextWindowUncapped, id).toBe(true);
+			// The exact-id card wins over the `grok-4.7*` globs' cheaper 256K-lane card.
+			expect(lane.cost, id).toMatchObject({ input, output, cacheRead, cacheWrite: 0 });
+		}
+		// The base lane's wire context is pinned to 256k; it must keep the cap.
+		expect(buildModel(spec("grok-4.7")).longContextWindowUncapped).toBeUndefined();
+	});
+
 	it("prices third-party models at their Cursor API rates", () => {
 		expect(buildModel(spec("claude-opus-4-7-high-fast")).cost).toMatchObject({
 			input: 30,
@@ -146,13 +161,13 @@ describe("cursor API-equivalent pricing", () => {
 		}
 	});
 
-	it("models the GPT-5.6 272K 2x-input long tier", () => {
+	it("models the GPT-5.6 272K long tier: 2x input and cache, 1.5x output", () => {
 		const sol = buildModel(spec("gpt-5.6-sol"));
 		expect(sol.cost).toMatchObject({ input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 });
 		expect(sol.cost.longContext).toEqual({
 			inputThreshold: 272_000,
 			input: 8,
-			output: 20,
+			output: 30,
 			cacheRead: 0.8,
 			cacheWrite: 10,
 		});
@@ -188,11 +203,16 @@ describe("cursor API-equivalent pricing", () => {
 			"claude-fable-5-1-max",
 			"claude-fable-5-1-medium",
 			"claude-fable-5-1-xhigh",
+			"claude-fable-5-2",
+			"claude-fable-5-2-1m",
+			"claude-fable-5-2-1m-fast",
+			"claude-fable-5-2-fast",
 			"claude-fable-5-high",
 			"claude-fable-5-low",
 			"claude-fable-5-max",
 			"claude-fable-5-medium",
 			"claude-fable-5-xhigh",
+			"claude-haiku-4-5",
 			"claude-opus-4-7-high",
 			"claude-opus-4-7-high-fast",
 			"claude-opus-4-7-low",
@@ -230,6 +250,8 @@ describe("cursor API-equivalent pricing", () => {
 			"claude-sonnet-5-max",
 			"claude-sonnet-5-medium",
 			"claude-sonnet-5-xhigh",
+			"claude-sonnet-5-5",
+			"claude-sonnet-5-5-1m",
 			"composer-1",
 			"composer-1.5",
 			"composer-2.5",
@@ -251,8 +273,16 @@ describe("cursor API-equivalent pricing", () => {
 			"gemini-3.6-flash",
 			"gemini-3.7-flash",
 			"gemini-3.8-flash",
+			"gemini-2.5-flash",
 			"gemini-4-argon",
+			"gemini-4-carbon",
+			"gemini-4-hydrogen",
+			"gemini-4-hydrogen-1m",
+			"gemini-4-neon",
+			"gemini-4-neon-1m",
 			"glm-5.2",
+			"glm-5p3",
+			"glm-5p3-flash",
 			"gpt-5-mini",
 			"gpt-5.1",
 			"gpt-5.1-codex-max",
@@ -312,6 +342,8 @@ describe("cursor API-equivalent pricing", () => {
 			"kimi-k3-low",
 			"kimi-k3-max",
 			"muse-spark-1.3",
+			"muse-wonder-1.0",
+			"muse-wonder-1.0-1m",
 		];
 		const unpriced: Record<string, true> = {
 			// Absent from https://cursor.com/docs/models-and-pricing; left
@@ -319,9 +351,6 @@ describe("cursor API-equivalent pricing", () => {
 			"composer-1": true,
 			"composer-1.5": true,
 			default: true,
-			"gpt-5.1": true,
-			"gpt-5.1-high": true,
-			"gpt-5.1-low": true,
 			"grok-code-fast-1": true,
 			"kimi-k2.5": true,
 		};

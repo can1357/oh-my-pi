@@ -41,7 +41,7 @@ interface MockSessionHandle {
 	session: AgentSession;
 	prompts: Array<{ text: string; options?: PromptOptions }>;
 	abortCalls: () => number;
-	/** Owner async work the quiescence barrier sees; the test flips it. */
+	/** An owner job that keeps the run open and can wake it, as the quiescence barrier sees it; the test flips it. */
 	asyncPending: { value: boolean };
 }
 
@@ -90,7 +90,12 @@ function createMockSession(
 		},
 		getLastAssistantMessage: () => messages[messages.length - 1] as never,
 		sendUserMessage: async () => {},
-		hasPendingAsyncWork: () => asyncPending.value,
+		get isRunActive() {
+			return asyncPending.value;
+		},
+		get wakeSources() {
+			return asyncPending.value ? { jobs: ["bg_1"], agents: [], queued: false } : undefined;
+		},
 		getAsyncJobSnapshot: () => ({
 			running: asyncPending.value
 				? [{ id: "bg_1", label: "pytest", type: "bash" as const, status: "running" as const, startTime: 0 }]
@@ -98,7 +103,7 @@ function createMockSession(
 			recent: [],
 			delivery: { queued: 0, delivering: false, pendingJobIds: [] },
 		}),
-		settleAsyncWork: async () => {
+		waitForRunEnd: async () => {
 			asyncPending.value = false;
 		},
 		abort: async () => {
@@ -154,6 +159,7 @@ describe("runSubprocess incremental yield loops", () => {
 		return {
 			cwd: "/tmp",
 			agent: baseAgent,
+			outputSchema: {},
 			task: "inventory the api surface",
 			index: 0,
 			id,

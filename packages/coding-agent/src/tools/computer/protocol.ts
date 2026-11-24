@@ -4,7 +4,10 @@ import * as prompt from "@oh-my-pi/pi-utils/prompt";
 import escapeAfterCallMessage from "../../prompts/tools/computer-escape-after-call.md" with { type: "text" };
 import escapeRefusedMessage from "../../prompts/tools/computer-escape-refused.md" with { type: "text" };
 import escapeStoppedMessage from "../../prompts/tools/computer-escape-stopped.md" with { type: "text" };
+import coveredCaptureNote from "../../prompts/tools/computer-covered-capture.md" with { type: "text" };
+import coveredTreeNote from "../../prompts/tools/computer-covered-tree.md" with { type: "text" };
 import screenLockedCaptureNote from "../../prompts/tools/computer-screen-locked-capture.md" with { type: "text" };
+import secureInputTemplate from "../../prompts/tools/computer-secure-input.md" with { type: "text" };
 import screenStateTemplate from "../../prompts/tools/computer-screen-state.md" with { type: "text" };
 
 export { COMPUTER_WORKER_ARG } from "../../cli/worker-selectors";
@@ -13,17 +16,33 @@ export { COMPUTER_WORKER_ARG } from "../../cli/worker-selectors";
 export interface ComputerSessionSnapshot {
 	cwd: string;
 	sessionId: string;
+	/** Registry id of the agent the run acts for; another session waiting for its input lock names it. */
+	agentId?: string;
 	captureMaxWidth: number;
 	captureMaxHeight: number;
 	display: string;
 	readOnly: boolean;
-	/** `computer.backgroundFallback`: what a refused background input call does. */
-	backgroundFallback: "takeover" | "refuse";
+	/** `computer.takeover`: when window input takes over rather than running in the background. */
+	takeover: ComputerTakeoverMode;
 	/**
 	 * The agent turn the run belongs to, if any: once it acts, the display stays awake until that turn's
 	 * `release-display` rather than for the native grace period after its last request.
 	 */
 	displayTurn?: number;
+}
+
+/**
+ * The user's `computer.takeover` setting. `fallback` (the default) reruns a call whose background route is
+ * unavailable in takeover, and the model may pass `takeover` on a call; `refuse` never takes over, refusing the
+ * model's `takeover: true`. Under `foreground` and `always` omp alone decides, and the model has no `takeover`
+ * option: `foreground` takes over a target window already in front, `always` every window and element input
+ * call, and both rerun a call whose background route is unavailable in takeover.
+ */
+export type ComputerTakeoverMode = "fallback" | "foreground" | "always" | "refuse";
+
+/** Whether the model may pass `takeover` on an input call: only in the modes that predate omp deciding. */
+export function modelChoosesTakeover(mode: ComputerTakeoverMode): boolean {
+	return mode === "fallback" || mode === "refuse";
 }
 
 /** Reply envelope for a session tool invoked by desktop JavaScript. */
@@ -66,6 +85,16 @@ export type ComputerWorkerInbound =
 	| { type: "tool-reply"; id: string; reply: ToolReply }
 	| { type: "close" };
 
+/**
+ * Tells the model a run ended with macOS secure input on, when the user's
+ * Escape and typing never reach omp. While locked, the lock note already says
+ * keys fail (the lock screen's own field may be the holder).
+ */
+export function secureInputNotice(capabilities: DesktopCapabilities | undefined): string | undefined {
+	if (!capabilities?.secureInput || capabilities.screenLocked) return undefined;
+	return prompt.render(secureInputTemplate, { secureInputApp: capabilities.secureInputApp });
+}
+
 /** Successful computer run output returned to the host supervisor. */
 export interface ComputerRunOk {
 	displays: Array<TextContent | ImageContent>;
@@ -73,6 +102,9 @@ export interface ComputerRunOk {
 	screenshots: ComputerScreenshot[];
 	capabilities?: DesktopCapabilities;
 }
+
+/** Supervisor result: successful output, or partial output with `error` describing the failed run. */
+export type ComputerRunResult = ComputerRunOk & { error?: RunErrorPayload };
 
 /** Result of a computer call the user stopped with physical Escape during takeover input. */
 export const ESCAPE_STOPPED_MESSAGE = prompt.render(escapeStoppedMessage);
@@ -83,19 +115,31 @@ export const ESCAPE_AFTER_CALL_MESSAGE = prompt.render(escapeAfterCallMessage);
 /** Refusal of every later computer call until the user's next message acknowledges their Escape stop. */
 export const ESCAPE_REFUSED_MESSAGE = prompt.render(escapeRefusedMessage);
 
-/** Appended to a screenshot taken while the macOS lock screen is up. */
-export const SCREEN_LOCKED_CAPTURE_NOTE = prompt.render(screenLockedCaptureNote);
+/** Appended to a screenshot taken while the session's desktop is unavailable. */
+export function screenLockedCaptureNotice(platform: NodeJS.Platform = process.platform): string {
+	return prompt.render(screenLockedCaptureNote, { windows: platform === "win32" });
+}
+
+/** Appended to a window screenshot taken while nothing of the window showed on screen. */
+export const COVERED_CAPTURE_NOTICE = prompt.render(coveredCaptureNote);
+
+/** Closing line of an `ax()` tree read from a window that appeared fully covered around the read. */
+export const COVERED_TREE_NOTICE = prompt.render(coveredTreeNote);
 
 /**
- * Tells the model a run ended with the macOS screen locked or the session's
+ * Tells the model a run ended with the screen locked or the session's
  * display asleep, so lock-screen pixels and failed captures are not taken
  * for the app's state. Input is never refused because of it.
  */
-export function screenStateNotice(state: DesktopScreenState | undefined): string | undefined {
+export function screenStateNotice(
+	state: DesktopScreenState | undefined,
+	platform: NodeJS.Platform = process.platform,
+): string | undefined {
 	if (!state?.screenLocked && !state?.displayAsleep) return undefined;
 	return prompt.render(screenStateTemplate, {
 		screenLocked: state.screenLocked,
 		displayAsleep: state.displayAsleep,
+		windows: platform === "win32" && state.screenLocked,
 	});
 }
 
@@ -110,8 +154,10 @@ export interface ComputerScreenshot {
 	sourceWidth?: number;
 	sourceHeight?: number;
 	target: string;
-	/** The macOS lock screen was up: a display capture shows it, a window capture shows the window's last frame. */
+	/** The session was locked, disconnected or on a secure desktop when captured. */
 	screenLocked?: true;
+	/** The target window appeared fully covered around the capture, and its app can stop drawing while covered. */
+	covered?: true;
 }
 
 /** Clone-safe error metadata returned across the worker boundary. */
@@ -129,7 +175,7 @@ export type ComputerWorkerOutbound =
 	| { type: "control-revoked"; id: string }
 	| { type: "pong"; id: string }
 	| { type: "result"; id: string; ok: true; payload: ComputerRunOk }
-	| { type: "result"; id: string; ok: false; error: RunErrorPayload }
+	| { type: "result"; id: string; ok: false; error: RunErrorPayload; output?: ComputerRunOk }
 	| { type: "capabilities"; id: string; ok: true; capabilities: DesktopCapabilities }
 	| { type: "capabilities"; id: string; ok: false; error: RunErrorPayload }
 	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown }

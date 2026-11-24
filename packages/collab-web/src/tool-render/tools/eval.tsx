@@ -358,7 +358,7 @@ function viewsOf(raw: unknown): EvalViewEntry[] {
 	return out;
 }
 
-/** Same split as pi-tui's `splitEvalOutput`: views in order via a moving `indexOf` cursor; unmatched skipped. */
+/** Same split as the coding-agent eval look: views in order via a moving `indexOf` cursor; unmatched skipped. */
 function splitEvalOutput(output: string, views: readonly EvalViewEntry[]): EvalOutputPart[] {
 	const parts: EvalOutputPart[] = [];
 	const pushText = (chunk: string, trimStart: boolean, trimEnd: boolean): void => {

@@ -7,8 +7,8 @@
 - Entry: `packages/coding-agent/src/tools/gh.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/github.md`
 - Key collaborators:
-   - `packages/tui/src/tools/gh-format.ts` — shorten commit SHAs and format summary fields.
-   - `packages/tui/src/tools/github.ts` — result types and TUI rendering, especially `run_watch` live/result views.
+   - `packages/coding-agent/src/tools/gh-format.ts` — shorten commit SHAs and format summary fields.
+   - `packages/coding-agent/src/tools/details/github.ts` / `packages/coding-agent/src/ui/tools/github.tsx` — result types and TUI rendering, especially `run_watch` live/result views.
    - `packages/coding-agent/src/tools/gh-view.ts` — repository summaries and cached issue/PR view fetchers.
    - `packages/coding-agent/src/tools/gh-search.ts` — date qualifiers, search validation, and search operations.
    - `packages/coding-agent/src/tools/gh-pr-checkout.ts` — PR create/checkout/push operations.
@@ -20,7 +20,7 @@
    - `@oh-my-pi/pi-natives/vcs` — git operations (`vcs.git()` / `vcs.requireGit()`: branch/worktree/config/push).
    - `packages/utils/src/dirs.ts` — base directory for dedicated PR worktrees.
    - `packages/coding-agent/src/sdk.ts` — session artifact allocation hook.
-   - `packages/coding-agent/src/session/artifacts.ts` — artifact filename format `<id>.<toolType>.log`.
+   - `packages/coding-agent/src/session/artifacts.ts` — spill filename format `<id>.log` at the session's `local://` root.
 
 ## Availability and approval
 
@@ -65,10 +65,10 @@ Most operations return a text result built by `buildTextResult()` in `packages/c
 - `details`: optional structured metadata used by the TUI renderer.
    - Common fields: `artifactId`, `repo`, `branch`, `worktreePath`, `remote`, `remoteBranch`, `headSha`, `runId`, `runIds`, `status`, `conclusion`, `failedJobs`.
    - `pr_checkout` adds `checkouts: GhPrCheckoutSummary[]`, including `reused` and optional `clonedWith`.
-   - `run_watch` adds `watch: GhRunWatchViewDetails`, which drives the custom live/result renderer in `packages/tui/src/tools/github.ts`.
-- Artifact trailer: when `artifactId` is present, the text body gets an appended line like `Full failed-job logs: artifact://<id>`.
+   - `run_watch` adds `watch: GhRunWatchViewDetails`, which drives the custom live/result renderer in `packages/coding-agent/src/ui/tools/github.tsx`.
+- Artifact trailer: when `artifactId` is present, the text body gets an appended line like `Full failed-job logs: local://<id>.log`.
    - `run_watch` uses `Full failed-job logs` only when every failed job has a complete log capture, `Partial failed-job logs` when some logs are missing or a capture is truncated, and `Failed-job log diagnostics` when none have content. Unavailable entries name the failed job and explain the fetch failure.
-   - Artifacts are allocated with `session.allocateOutputArtifact("github")`; persistent sessions save captured logs and diagnostics as `<artifact-dir>/<id>.github.log`.
+   - Artifacts are allocated with `session.allocateOutputArtifact("github")`; captured logs and diagnostics are saved as the spill file `<id>.log` (`local://<id>.log`) in the session's `local://` root; sessions without a session file spill under `$TMPDIR/omp-local/<sessionId>`.
 
 - `run_watch` is the only streaming op. It emits `onUpdate` snapshots while polling, then returns one final text result. Empty search results and commit watches that find no runs are marked `useless: true`.
 
@@ -136,7 +136,7 @@ Branches:
 - `fill && (title || body !== undefined)` throws.
 - Non-empty `body` is written under a temp dir `gh-pr-body-*` in `os.tmpdir()`, passed as `--body-file`, then removed in `finally`.
 - After creation, the tool parses the returned URL and best-effort runs `gh pr view <number> --repo <repo> --json <GH_PR_CREATE_FIELDS>`, requesting only the summary fields above, not bodies, files, or reviews. Lookup failure still returns the creation URL and available input metadata.
-- `xd://github` creation results retain only `op` and `repo` in dispatch renderer arguments, not the body or other execution-only fields. The full validated body still reaches `gh pr create` unchanged; the original tool-call input remains in history. Read `pr://<N>` explicitly to retrieve the body.
+- `github` creation results retain only `op` and `repo` in dispatch renderer arguments, not the body or other execution-only fields. The full validated body still reaches `gh pr create` unchanged; the original tool-call input remains in history. Read `pr://<N>` explicitly to retrieve the body.
 
 ### `pr_checkout`
 
@@ -240,13 +240,13 @@ Push target resolution reads the `branch.<name>.ompPrHeadRef`, `pushRemote`/`rem
 
 ### `run_watch`
 
-| Aspect          | Value                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Required fields | `op`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Optional fields | `repo`, `branch`, `run`, `tail`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `gh` command    | Repo resolution: `gh repo view --json url -q .url` when `repo` and run URL repo are both absent. Single-run mode uses `gh api --method GET /repos/<repo>/actions/runs/<runId>` and `gh api --method GET /repos/<repo>/actions/runs/<runId>/jobs`. Commit mode uses `gh api --method GET /repos/<repo>/branches/<branch>`, `gh api --method GET /repos/<repo>/actions/runs`, `gh api --method GET /repos/<repo>/actions/runs/<runId>/jobs`, and `gh api /repos/<repo>/actions/jobs/<jobId>/logs` for failed jobs. |
-| Batching        | Implicit batching only in commit mode: all workflow runs for one commit are tracked together.                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| Output          | Streaming snapshots via `onUpdate`, then a final text report. When artifact allocation succeeds, sets `details.artifactId` and appends an artifact reference labeled as full logs, partial logs, or diagnostics according to captured log availability.                                                                                                                                                                                                                                                          |
+| Aspect          | Value                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Required fields | `op`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Optional fields | `repo`, `branch`, `run`, `tail`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `gh` command    | Repo resolution: `gh repo view --json url -q .url` when `repo` and run URL repo are both absent. Single-run mode uses `gh api --method GET /repos/<repo>/actions/runs/<runId>` and `gh api --method GET /repos/<repo>/actions/runs/<runId>/jobs`. Commit mode uses `gh api --method GET /repos/<repo>/branches/<branch>`, `gh api --method GET /repos/<repo>/actions/runs`, `gh api --method GET /repos/<repo>/actions/runs/<runId>/jobs`, and `gh api /repos/<repo>/actions/jobs/<jobId>/logs --allow-escape-sequences` for failed jobs. |
+| Batching        | Implicit batching only in commit mode: all workflow runs for one commit are tracked together.                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Output          | Streaming snapshots via `onUpdate`, then a final text report. When artifact allocation succeeds, sets `details.artifactId` and appends an artifact reference labeled as full logs, partial logs, or diagnostics according to captured log availability.                                                                                                                                                                                                                                                                                   |
 
 Watch flow:
 
@@ -255,10 +255,12 @@ Watch flow:
 - Run conclusions `success`, `neutral`, and `skipped` count as success. A completed single run returns immediately; only commit mode performs the extra confirmation poll.
 - Poll interval is `3` seconds (`RUN_WATCH_INTERVAL_DEFAULT`) for the first `60` seconds of the watch (`RUN_WATCH_FAST_WINDOW_MS`), then `15` seconds (`RUN_WATCH_INTERVAL_SLOW`). Rate-limited poll errors back off at the slow interval and are retried up to `5` consecutive failures (`RUN_WATCH_MAX_POLL_FAILURES`). Commit mode gives up with a clear message after `90` seconds if no runs ever appear (`RUN_WATCH_NO_RUNS_GIVE_UP_MS`).
 - Failure grace period is fixed at 5 seconds (`RUN_WATCH_GRACE_DEFAULT`). When any failed job appears before completion, the tool emits a note, waits once, re-fetches state, then collects logs so concurrent failures are included.
-- Failed-job logs are fetched with `gh api /repos/<repo>/actions/jobs/<jobId>/logs` via `github.run()`, not `json()`. Non-zero exit or empty output leaves `available: false` instead of failing the whole watch. Each unavailable entry retains a reason capped at 512 UTF-8 bytes, including exit status and stderr for failed commands.
+- Failed-job logs are fetched with `gh api /repos/<repo>/actions/jobs/<jobId>/logs --allow-escape-sequences` via `github.run()`, not `json()`; when an older `gh` rejects that flag as unknown, the fetch is retried once without it. Captured logs pass through `sanitizeText()`, stripping ANSI escapes and control characters. Non-zero exit or empty sanitized output leaves `available: false` instead of failing the whole watch. Each unavailable entry retains a reason capped at 512 UTF-8 bytes, including exit status and stderr for failed commands.
 - Inline result includes only the last `tail` captured lines per failed job. The saved artifact contains the captured logs (`mode: "full"`) and identifies any jobs without logs, with the same failure reasons. The subprocess capture's structured truncation flag marks logs exceeding 8 MiB as partial in both the artifact label and its contents.
 - In commit mode, success is intentionally double-checked: once all known runs are successful, the tool waits one more poll interval and succeeds only if the set of run IDs is unchanged. This avoids returning before late workflow runs appear for the same commit.
-- `details.watch` drives a specialized renderer in `packages/tui/src/tools/github.ts`; unavailable-log reasons are sanitized and flattened to one display row. Non-watch results use the fallback summary renderer.
+- `details.watch` drives a specialized renderer in `packages/coding-agent/src/ui/tools/github.tsx`; unavailable-log reasons are sanitized and flattened to one display row. Non-watch results use the fallback summary renderer.
+- Job snapshots retain the ordered steps returned by the same jobs API call (number, name, status, conclusion, timestamps); no extra step requests are made. GitHub's zero-date timestamps on steps that have not run are dropped at ingestion. `details.watch` projects step durations for both live and completed run/commit watches. The text result names only each failed job's failed step.
+- Collapsed job views show current-step progress or the failed step. **Ctrl+O** expands the card to show every reported step with its state and duration. Tern Surface Protocol views use native keyed job disclosures and step lists; native disclosure clicks and the existing tool-card expansion state remain available. Results without step data retain the job-only view.
 
 ## Side Effects
 
@@ -277,7 +279,7 @@ Watch flow:
    - Returned `details` objects carry run/checkouts metadata for the renderer/UI.
 - User-visible prompts / interactive UI
    - `gh` interactive editor fallback is suppressed for `pr_create` by forcing either `--body-file` or `--body ""`.
-   - `githubToolRenderer` in `packages/tui/src/tools/github.ts` provides compact headers and a custom live watch view.
+   - `githubPresenter` in `packages/coding-agent/src/ui/tools/github.tsx` provides compact headers and a custom live watch view.
 - Background work / cancellation
    - `run_watch` loops until success/failure and uses `scheduler.wait()` between polls.
    - `GithubTool.execute()` is wrapped in `untilAborted()`; `github.run()` forwards the abort signal into `Bun.spawn()`.
@@ -329,4 +331,4 @@ Watch flow:
 - Checkout write serialization is in-process and keyed by the primary repo root, not the current worktree path, because git worktrees share `.git/config`, `packed-refs`, commit-graph, and worktree metadata files.
 - `search_repos` is the only search op that never forwards `repo`; repository scoping must be expressed in the query itself.
 - `run_watch` success on commit mode means “all observed runs succeeded and no additional runs appeared one poll later”, not merely “latest poll looked green”.
-- The TUI renderer collapses failed log previews unless the result view is expanded; the underlying text result still contains the same tailed lines plus any artifact reference.
+- The TUI renderer collapses step details and failed log previews unless the result view is expanded; the underlying text result includes each failed job's failed step, the same tailed log lines, and any artifact reference.

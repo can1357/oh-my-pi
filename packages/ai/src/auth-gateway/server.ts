@@ -13,6 +13,7 @@
  *   GET  /v1/usage                         → aggregated provider usage (5-min per-credential cache via AuthStorage)
  *   GET  /v1/credentials/check             → per-credential auth probe (diagnose 401s in a multi-account pool)
  *   GET  /v1/models                        → list known models from the registry
+ *   GET  /v1/pi/models                     → the same catalog as pi-native model specs (pi-native clients' rosters)
  *   POST /v1/chat/completions              → OpenAI chat-completions in/out
  *   POST /v1/messages                      → Anthropic messages in/out
  *   POST /v1/responses                     → OpenAI Responses in/out
@@ -30,6 +31,7 @@
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import { type PiNativeModelsResponse, toPiNativeModelSpec } from "@oh-my-pi/pi-catalog/discovery/pi-native";
 import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyGatewayError } from "../error/gateway";
@@ -42,6 +44,7 @@ import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOpti
 import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
 import { resolvePeer } from "../utils/resolve-peer";
+import { applyCallerTrust } from "./caller-options";
 import { type AuthGatewayClientScope, AuthGatewayClientTable } from "./clients";
 import {
 	type AuthGatewayBootOptions,
@@ -55,7 +58,6 @@ import {
 	resolveGatewayApiKey,
 } from "./dispatch";
 import {
-	captureRequestHeaders,
 	corsHeaders,
 	gatewayResponseHeaders,
 	hasMisplacedBearer,
@@ -361,14 +363,6 @@ async function handleFormatEndpoint(
 		const message = error instanceof Error ? error.message : String(error);
 		return route.module.formatError(400, "invalid_request_error", message);
 	}
-	// Merge gateway-captured passthrough headers under the parser's own
-	// captures. Parsers that set `options.headers` themselves win (they may
-	// have stripped or normalized values); the gateway's allow-list fills in
-	// anything they didn't touch.
-	{
-		const captured = captureRequestHeaders(req.headers);
-		parsed.options.headers = { ...captured, ...parsed.options.headers };
-	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
 	const supportsOpenAIImageFileReferences =
@@ -411,6 +405,9 @@ async function handleFormatEndpoint(
 	if ("status" in apiKey) return route.module.formatError(apiKey.status, apiKey.type, apiKey.message);
 
 	const streamOpts = buildStreamOptions(parsed, model, controller.signal);
+	// Only the upstream-bound options: `encodeStream` reads the caller's parsed
+	// request, and the Anthropic encoder answers its `anthropic-beta`.
+	applyCallerTrust(streamOpts, req, bootOpts.client !== undefined);
 	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
 	// Per-session provider learning (sticky strict-tools / fast-mode / thinking
 	// fallbacks, Codex transport sessions). Owned by this gateway instance: the
@@ -656,10 +653,7 @@ async function handlePiNative(
 		delete streamOpts.frequencyPenalty;
 		delete streamOpts.repetitionPenalty;
 	}
-	// Merge gateway-captured passthrough headers under the client's own
-	// headers — the client's values win when they collide.
-	const captured = captureRequestHeaders(req.headers);
-	streamOpts.headers = { ...captured, ...streamOpts.headers };
+	applyCallerTrust(streamOpts, req, bootOpts.client !== undefined);
 	streamOpts.sessionId = sessionId;
 
 	logger.info("auth-gateway request", {
@@ -820,15 +814,22 @@ interface ModelListRow {
 	supports_tools?: boolean;
 }
 
-function handleModelsList(opts: AuthGatewayRouteOptions): Response {
+/** Every served model once, keyed by `provider/id`; the first listing of a key wins. */
+function* uniqueListedModels(opts: AuthGatewayRouteOptions): Generator<Model<Api>> {
 	const seen = new Set<string>();
-	const data: ModelListRow[] = [];
 	for (const model of opts.listModels?.() ?? []) {
 		const id = `${model.provider}/${model.id}`;
 		if (seen.has(id)) continue;
 		seen.add(id);
+		yield model;
+	}
+}
+
+function handleModelsList(opts: AuthGatewayRouteOptions): Response {
+	const data: ModelListRow[] = [];
+	for (const model of uniqueListedModels(opts)) {
 		const row: ModelListRow = {
-			id,
+			id: `${model.provider}/${model.id}`,
 			object: "model",
 			owned_by: model.provider,
 			api: model.api,
@@ -842,6 +843,12 @@ function handleModelsList(opts: AuthGatewayRouteOptions): Response {
 		data.push(row);
 	}
 	return json(200, { object: "list", data });
+}
+
+/** `GET /v1/pi/models`: the `/v1/models` catalog as specs, from which pi-native clients build their rosters. */
+function handlePiNativeModelsList(opts: AuthGatewayRouteOptions): Response {
+	const body: PiNativeModelsResponse = { models: [...uniqueListedModels(opts)].map(toPiNativeModelSpec) };
+	return json(200, body);
 }
 
 /** `GET /v1/videos/:id` (poll) and `GET /v1/videos/:id/content` (download); group 1 = id, group 2 = `/content`. */
@@ -864,6 +871,7 @@ const LOGGABLE_PATHS: Record<string, true> = {
 	"/v1/rerank": true,
 	"/v1/videos": true,
 	"/v1/models": true,
+	"/v1/pi/models": true,
 };
 
 /** Only static routes reach logs verbatim; dynamic or unknown paths may carry caller-supplied secrets. */
@@ -1001,6 +1009,9 @@ export function createAuthGatewayRouter(hostOpts: AuthGatewayRouteOptions): Auth
 			// Model catalog.
 			if (req.method === "GET" && pathname === "/v1/models") {
 				return handleModelsList(opts);
+			}
+			if (req.method === "GET" && pathname === "/v1/pi/models") {
+				return handlePiNativeModelsList(opts);
 			}
 
 			// Route-table miss: no format module to defer to, so we emit a

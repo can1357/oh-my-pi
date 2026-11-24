@@ -1,9 +1,10 @@
 import * as fs from "node:fs/promises";
-import { disambiguateDisplayLabels, replaceTabs, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { disambiguateDisplayLabels, shortenPath } from "../utils/render-utils";
+import { replaceTabs } from "../utils/text-width";
 import { formatBytes, sanitizeText } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter, type LocalFileEntry, type LocalProtocolOptions, listLocalFiles } from "../internal-urls";
-import type { SessionManager } from "../session/session-manager";
 import { getEditorCommand, openEditorOnPath } from "../utils/external-editor";
+import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import type { InteractiveModeContext } from "./types";
 
 const PICKER_TITLE = "Open local:// file in external editor";
@@ -15,15 +16,6 @@ function errorMessage(error: unknown): string {
 /** Error text safe for the UI: strips ANSI/C0 bytes and tabs, shortens home paths. */
 function showErrorMessage(error: unknown): string {
 	return shortenPath(replaceTabs(sanitizeText(errorMessage(error))));
-}
-
-export function sessionLocalProtocolOptions(
-	sessionManager: Pick<SessionManager, "getArtifactsDir" | "getSessionId">,
-): LocalProtocolOptions {
-	return {
-		getArtifactsDir: () => sessionManager.getArtifactsDir(),
-		getSessionId: () => sessionManager.getSessionId(),
-	};
 }
 
 /** Encode a filesystem name as `local://` path segments. `/` stays a separator; `%`, `#`, `?` are encoded once. */
@@ -141,14 +133,10 @@ export async function openLocalFileInEditor(ctx: InteractiveModeContext, target?
 
 	let exitCode: number;
 	try {
-		ctx.ui.stop();
-		exitCode = await openEditorOnPath(editorCmd, chosen.path);
+		exitCode = await ctx.suspend(() => openEditorOnPath(editorCmd, chosen.path));
 	} catch (error) {
 		ctx.showWarning(`Failed to open external editor: ${showErrorMessage(error)}`);
 		return;
-	} finally {
-		ctx.ui.start();
-		ctx.ui.requestRender();
 	}
 
 	if (exitCode !== 0) {

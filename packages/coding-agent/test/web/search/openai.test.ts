@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import type { Api, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -263,7 +264,7 @@ describe("OpenAI API-billed Responses web search", () => {
 		}
 	});
 
-	it("uses the upstream wire id and reasoning mode metadata for a Pro alias", async () => {
+	it("uses the upstream wire id and sends the role's reasoning effort alongside the Pro mode", async () => {
 		const fixture = createFixture({ requestModelId: "gpt-5.6-pro", reasoningMode: "pro" });
 		let requestBody: Record<string, unknown> | undefined;
 		const fetch: FetchImpl = async (_input, init) => {
@@ -285,10 +286,10 @@ describe("OpenAI API-billed Responses web search", () => {
 		};
 
 		try {
-			await searchOpenAIResponses(makeParams(fixture, fetch));
+			await searchOpenAIResponses({ ...makeParams(fixture, fetch), thinkingLevel: ThinkingLevel.High });
 			expect(requestBody).toMatchObject({
 				model: "gpt-5.6-pro",
-				reasoning: { mode: "pro" },
+				reasoning: { effort: "high", mode: "pro" },
 				store: false,
 			});
 		} finally {

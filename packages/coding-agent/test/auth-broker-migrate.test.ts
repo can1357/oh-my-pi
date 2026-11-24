@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { type AuthBrokerServerHandle, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import { runAuthBrokerCommand } from "@oh-my-pi/pi-coding-agent/cli/auth-broker-cli";
 import { getAgentDbPath, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
@@ -57,6 +58,7 @@ describe("auth-broker migrate", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		await handle?.close();
 		brokerStorage?.close();
 		brokerStore?.close();
@@ -174,6 +176,8 @@ describe("auth-broker migrate", () => {
 			local: { email: "alice@gmail.com", accountId: "acct-4444", projectId: "aicode-consumers" },
 		},
 	])("keeps the broker's newer token for an account it holds as $held", async ({ provider, onBroker, local }) => {
+		// Antigravity is paused in its auth rules; its credential rows still migrate.
+		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
 		await brokerStore!.upsertAuthCredential(provider, {
 			type: "oauth",
 			...onBroker,

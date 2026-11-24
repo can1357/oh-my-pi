@@ -10,7 +10,7 @@ import * as toolsManager from "@oh-my-pi/pi-coding-agent/utils/tools-manager";
 import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
 import * as scraperUtils from "@oh-my-pi/pi-coding-agent/web/scrapers/utils";
 import * as natives from "@oh-my-pi/pi-natives";
-import { ptree, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { ptree, removeSyncWithRetries, Snowflake, spillIdOfFileName } from "@oh-my-pi/pi-utils";
 import { asGlobalFetch } from "../helpers/fetch-mock";
 
 const withMissingSystemPython = () => {
@@ -46,11 +46,11 @@ describe("read tool URL handling", () => {
 			getSessionFile: () => sessionFile,
 			getArtifactsDir: () => artifactsDir,
 			getSessionSpawns: () => null,
-			allocateOutputArtifact: async toolType => {
+			allocateOutputArtifact: async () => {
 				const id = String(nextArtifactId++);
 				return {
 					id,
-					path: path.join(artifactsDir, `${id}.${toolType}.log`),
+					path: path.join(artifactsDir, `${id}.log`),
 				};
 			},
 			settings: Settings.isolated({
@@ -618,6 +618,8 @@ describe("read tool URL handling", () => {
 		// URL selectors address response body lines, like grep's URL matches.
 		expect(pagedText?.text).toContain("Line 2");
 		expect(pagedText?.text).toContain("Line 3");
-		expect(fs.readdirSync(path.join(testDir, "session")).some(file => file.endsWith(".read.log"))).toBe(true);
+		expect(fs.readdirSync(path.join(testDir, "session")).some(file => spillIdOfFileName(file) !== undefined)).toBe(
+			true,
+		);
 	});
 });

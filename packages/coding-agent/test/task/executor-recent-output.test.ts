@@ -16,7 +16,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as os from "node:os";
-import type { AssistantMessage, TextContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, AssistantMessageEvent, TextContent, ToolCall } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -24,8 +24,8 @@ import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
-import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
-import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
+import type { AgentProgress, AgentStreaming } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
@@ -389,6 +389,86 @@ describe("tool argument preview semantics", () => {
 		expect(active.currentToolArgs).toContain("echo payload");
 		expect(active.currentToolArgs!.length).toBeLessThanOrEqual(TRUNCATE_LENGTHS.CONTENT);
 		expect(completed.recentTools[0].args.length).toBeLessThanOrEqual(TRUNCATE_LENGTHS.CONTENT);
+	});
+});
+
+describe("streaming progress", () => {
+	afterEach(() => vi.restoreAllMocks());
+
+	it("publishes what the model writes before a call runs: reasoning, prose, then the call until it runs", async () => {
+		// Each event lands past the coalescing window, so each publishes its own snapshot.
+		let clock = 10_000;
+		vi.spyOn(Date, "now").mockImplementation(() => (clock += 200));
+		const partial = (...content: AssistantMessage["content"]) => ({ role: "assistant", content }) as AssistantMessage;
+		const update = (assistantMessageEvent: AssistantMessageEvent): AgentSessionEvent =>
+			({ type: "message_update", message: partial(), assistantMessageEvent }) as AgentSessionEvent;
+		const write = (args: Record<string, unknown>): ToolCall => ({
+			type: "toolCall",
+			id: "write-1",
+			name: "write",
+			arguments: args,
+		});
+		const prose: TextContent = { type: "text", text: "Next, the norm test" };
+		const written = write({ i: "Write the norm test.", path: "tests/test_norm.py", content: "import os" });
+		const steps: AgentSessionEvent[] = [
+			resetEvent(),
+			update({ type: "thinking_delta", contentIndex: 0, delta: "plan", partial: partial() }),
+			deltaEvent(prose.text),
+			update({ type: "toolcall_start", contentIndex: 1, partial: partial(prose, write({})) }),
+			update({ type: "toolcall_delta", contentIndex: 1, delta: "import os", partial: partial(prose, written) }),
+			{ type: "message_end", message: partial(prose, written) } as AgentSessionEvent,
+			{
+				type: "tool_execution_start",
+				toolCallId: "write-1",
+				toolName: "write",
+				args: { path: "tests/test_norm.py", content: "import os" },
+				intent: "Write the norm test",
+			} as AgentSessionEvent,
+		];
+		let latest: AgentProgress | undefined;
+		const seen: Array<Pick<AgentProgress, "streaming" | "currentTool">> = [];
+		const { session } = createScriptedSession(async emit => {
+			for (const event of steps) {
+				emit(event);
+				seen.push({ streaming: latest?.streaming, currentTool: latest?.currentTool });
+			}
+			for (const event of yieldEvents()) emit(event);
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({ session } as CreateAgentSessionResult);
+
+		await runSubprocess({
+			cwd: "/tmp",
+			agent,
+			task: "streaming scenario",
+			description: "streaming progress",
+			index: 0,
+			id: `streaming-${Math.random().toString(36).slice(2)}`,
+			settings: Settings.isolated(),
+			modelRegistry: { refresh: async () => {} } as ModelRegistry,
+			enableLsp: false,
+			eventBus: new EventBus(),
+			onProgress: progress => {
+				latest = progress;
+			},
+		});
+
+		const call: AgentStreaming = {
+			kind: "call",
+			tool: "write",
+			args: "tests/test_norm.py",
+			argsKey: "path",
+			intent: "Write the norm test",
+		};
+		expect(seen).toEqual([
+			{ streaming: undefined, currentTool: undefined },
+			{ streaming: { kind: "thinking" }, currentTool: undefined },
+			{ streaming: { kind: "text" }, currentTool: undefined },
+			{ streaming: { kind: "call", tool: "write" }, currentTool: undefined },
+			{ streaming: call, currentTool: undefined },
+			// The response ended; the call it wrote shows until it runs, not the call before it.
+			{ streaming: call, currentTool: undefined },
+			{ streaming: undefined, currentTool: "write" },
+		]);
 	});
 });
 

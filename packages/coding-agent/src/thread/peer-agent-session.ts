@@ -12,7 +12,7 @@
 import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import type { IrcMessage } from "../irc/irc-types";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type {
 	AgentSessionAdvisorOverview,
@@ -120,6 +120,10 @@ export class PeerAgentSession implements AgentSessionHandle {
 		return this.#field("ircWakesPending");
 	}
 
+	get hasPendingWake(): boolean {
+		return this.#field("hasPendingWake");
+	}
+
 	get messages(): AgentMessage[] {
 		return mainBridge().remote.callSync("readMessages", this);
 	}
@@ -165,10 +169,8 @@ export class PeerAgentSession implements AgentSessionHandle {
 	}
 
 	/** Only ever called on the caller's own session; a peer is never that. */
-	drainPendingIrcInboxMessages(_agentId: string, _opts?: { ifAny?: (msg: IrcMessage) => boolean }): IrcMessage[] {
-		throw new Error(
-			`drainPendingIrcInboxMessages must run on the session's home thread (${this.home}), not on a peer handle`,
-		);
+	hasIrcInterrupts(): boolean {
+		throw new Error(`hasIrcInterrupts must run on the session's home thread (${this.home}), not on a peer handle`);
 	}
 
 	emitIrcRelayObservation(record: CustomMessage): void {
@@ -237,6 +239,7 @@ export class PeerAgentSession implements AgentSessionHandle {
 	}
 
 	#dispatch(event: AgentSessionEvent): void {
+		// oxlint-disable-next-line unicorn/no-useless-spread -- snapshot: the loop body may add or remove listeners
 		for (const listener of [...this.#listeners]) {
 			try {
 				listener(event);
@@ -250,6 +253,7 @@ export class PeerAgentSession implements AgentSessionHandle {
 	}
 
 	#dispatchRunState(state: SessionRunState): void {
+		// oxlint-disable-next-line unicorn/no-useless-spread -- snapshot: the loop body may add or remove listeners
 		for (const listener of [...this.#runStateListeners]) {
 			try {
 				listener(state);

@@ -10,6 +10,7 @@ import {
 const NOW = 1_700_000_040_000;
 const HOUR = 3_600_000;
 const WEEK = 7 * 24 * HOUR;
+const ALL = { "5h": "yes", weekly: "yes", fable: "yes" } as const;
 
 interface ReportOptions {
 	orgId?: string;
@@ -17,6 +18,8 @@ interface ReportOptions {
 	fiveHourUsed?: number;
 	weeklyUsed?: number;
 	sonnetUsed?: number;
+	/** Adds the Fable weekly cap row when set. */
+	fableUsed?: number;
 }
 
 function report(options: ReportOptions = {}): UsageReport {
@@ -47,6 +50,17 @@ function report(options: ReportOptions = {}): UsageReport {
 				window: { id: "7d", label: "7 Day", durationMs: WEEK, resetsAt: NOW + 4 * 24 * HOUR },
 				amount: { usedFraction: options.sonnetUsed ?? 0.2, unit: "percent" },
 			},
+			...(options.fableUsed === undefined
+				? []
+				: [
+						{
+							id: "anthropic:7d:fable",
+							label: "Claude 7 Day (Fable)",
+							scope: { provider: "anthropic", tier: "fable", windowId: "7d" },
+							window: { id: "7d", label: "7 Day", durationMs: WEEK, resetsAt: NOW + 5 * 24 * HOUR },
+							amount: { usedFraction: options.fableUsed, unit: "percent" as const },
+						},
+					]),
 		],
 		metadata: { email, orgId },
 	};
@@ -102,7 +116,7 @@ function input(overrides: Partial<ClaudeResetPlanInput> = {}): ClaudeResetPlanIn
 		trigger: "blocked",
 		provider: "anthropic",
 		modelId: "claude-sonnet-4-6",
-		settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
+		settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
 		reports: [report()],
 		statuses: [status()],
 		attemptedKeys: new Set(),
@@ -130,6 +144,27 @@ describe("planClaudeResetRedemptions: blocked recovery", () => {
 				blockedWindows: ["anthropic:7d"],
 				remainingMs: 3 * 24 * HOUR,
 			}),
+		]);
+	});
+
+	it("restores a weekly-blocked account with a full reset that also clears the Fable cap", () => {
+		// A full reset clears both caps; healthy Fable headroom must not mark it a Fable-only grant.
+		const plan = planClaudeResetRedemptions(
+			input({
+				reports: [report({ fableUsed: 0.48 })],
+				statuses: [
+					status({
+						credit: {
+							clears: ["anthropic:7d", "anthropic:7d:fable"],
+							blocking: [],
+							usedFractions: { "anthropic:7d": 1, "anthropic:7d:fable": 0.48 },
+						},
+					}),
+				],
+			}),
+		);
+		expect(plan.actions).toMatchObject([
+			{ reason: "blocked-account", window: "weekly", blockedWindows: ["anthropic:7d"] },
 		]);
 	});
 
@@ -252,7 +287,7 @@ describe("planClaudeResetRedemptions: blocked recovery", () => {
 		expect(cooling.skipped[0]?.reason).toBe("provider-cooldown");
 
 		const reserved = planClaudeResetRedemptions(
-			input({ settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 12 * HOUR } }),
+			input({ settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 12 * HOUR } }),
 		);
 		expect(reserved.actions).toEqual([]);
 		expect(reserved.skipped[0]?.reason).toBe("reserve");
@@ -280,7 +315,7 @@ describe("planClaudeResetRedemptions: blocked recovery", () => {
 		});
 		const plan = planClaudeResetRedemptions(
 			input({
-				settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 12 * HOUR },
+				settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 12 * HOUR },
 				reports: [report(), report({ orgId: "org-b" })],
 				statuses: [status(), excluded],
 				permitsCredential: credentialId => credentialId === 11,
@@ -295,11 +330,106 @@ describe("planClaudeResetRedemptions: blocked recovery", () => {
 	});
 });
 
+describe("planClaudeResetRedemptions: window consent", () => {
+	const settings = (modes: ClaudeResetPlanInput["settings"]["modes"]) => ({
+		modes,
+		minBlockedMinutes: 60,
+		keepCredits: 0,
+		salvageHorizonMs: 12 * HOUR,
+	});
+	const fiveHourBlock = { fiveHourUsed: 1, weeklyUsed: 0.5 };
+	const fiveHourCredit = { blocking: ["anthropic:5h"], usedFractions: { "anthropic:5h": 1 } };
+	const fable = { clears: ["anthropic:5h", "anthropic:7d:fable"], usedFractions: {} };
+	const expiring = { requiresLimit: false, blocking: [], expiresAt: new Date(NOW + 60_000).toISOString() };
+
+	it.each<{
+		name: string;
+		trigger?: "sweep";
+		modes: ClaudeResetPlanInput["settings"]["modes"];
+		usage?: ReportOptions;
+		credit?: Partial<UsageResetCredit>;
+		expected: string;
+	}>([
+		{
+			name: "a weekly block is governed by the weekly key",
+			modes: { "5h": "yes", weekly: "no" },
+			expected: "window-disabled",
+		},
+		{
+			name: "a 5h-only block is governed by the 5h key",
+			modes: { "5h": "no", weekly: "yes" },
+			usage: fiveHourBlock,
+			credit: fiveHourCredit,
+			expected: "window-disabled",
+		},
+		{
+			name: "a Fable grant is governed by the Fable key alone",
+			modes: { "5h": "yes", weekly: "yes", fable: "no" },
+			usage: { ...fiveHourBlock, fableUsed: 1 },
+			credit: { ...fable, blocking: ["anthropic:7d:fable"] },
+			expected: "window-disabled",
+		},
+		{
+			name: "a Fable grant never restores a block without the Fable cap",
+			modes: ALL,
+			usage: { ...fiveHourBlock, fableUsed: 0.6 },
+			credit: { ...fable, ...fiveHourCredit },
+			expected: "fable-not-blocked",
+		},
+		{
+			name: "a Fable grant restores a Fable cap block",
+			modes: { fable: "yes" },
+			usage: { weeklyUsed: 0.5, fableUsed: 1 },
+			credit: { ...fable, blocking: ["anthropic:7d:fable"] },
+			expected: "fable",
+		},
+		{
+			name: "an expiring Fable grant is salvaged on its Fable usage",
+			trigger: "sweep",
+			modes: { fable: "yes" },
+			usage: { fiveHourUsed: 0.9, weeklyUsed: 0.5, fableUsed: 0.6 },
+			credit: { ...fable, ...expiring },
+			expected: "fable",
+		},
+		{
+			name: "an expiring Fable grant with no Fable usage is never spent, whatever its 5h usage",
+			trigger: "sweep",
+			modes: { fable: "yes" },
+			usage: { fiveHourUsed: 0.9, weeklyUsed: 0.5, fableUsed: 0 },
+			credit: { ...fable, ...expiring },
+			expected: "window-mostly-free",
+		},
+		{
+			name: "a salvage restoring 5h and weekly equally is governed by the weekly key",
+			trigger: "sweep",
+			modes: { "5h": "yes", weekly: "no" },
+			usage: { fiveHourUsed: 0.8, weeklyUsed: 0.8 },
+			credit: { ...expiring, usedFractions: {} },
+			expected: "window-disabled",
+		},
+	])("$name", ({ trigger, modes, usage, credit, expected }) => {
+		const plan = planClaudeResetRedemptions(
+			input({
+				trigger: trigger ?? "blocked",
+				modelId: "claude-fable-5",
+				settings: settings(modes),
+				...(usage ? { reports: [report(usage)] } : {}),
+				...(credit ? { statuses: [status({ credit })] } : {}),
+			}),
+		);
+		const rule = trigger === "sweep" ? "expiring-credit" : "blocked-account";
+		const outcome: string | undefined =
+			plan.actions.find(action => action.reason === rule)?.window ??
+			plan.skipped.find(skip => skip.rule === rule)?.reason;
+		expect(outcome).toBe(expected);
+	});
+});
+
 describe("planClaudeResetRedemptions: expiry salvage", () => {
 	it("salvages at the inclusive five-minute boundary despite zero horizon, reserve, and zero usage", () => {
 		const urgentInput = input({
 			trigger: "sweep",
-			settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
+			settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
 			reports: [report({ fiveHourUsed: 0, weeklyUsed: 0, sonnetUsed: 0 })],
 			statuses: [
 				status({
@@ -322,7 +452,7 @@ describe("planClaudeResetRedemptions: expiry salvage", () => {
 			},
 		]);
 		expect(
-			planClaudeResetRedemptions({ ...urgentInput, settings: { ...urgentInput.settings, enabled: false } }).actions,
+			planClaudeResetRedemptions({ ...urgentInput, settings: { ...urgentInput.settings, modes: {} } }).actions,
 		).toEqual([]);
 		for (const expiresInMs of [-1, 0, 5 * 60_000 + 1]) {
 			expect(
@@ -383,7 +513,7 @@ describe("planClaudeResetRedemptions: expiry salvage", () => {
 	it("uses urgent salvage rather than bypassing the blocked-recovery reserve", () => {
 		const plan = planClaudeResetRedemptions(
 			input({
-				settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
+				settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
 				statuses: [status({ credit: { expiresAt: new Date(NOW + 60_000).toISOString() } })],
 			}),
 		);

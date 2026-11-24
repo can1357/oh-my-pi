@@ -15,7 +15,7 @@
  * const reply = await callSocket<{ total: number }>(socket, "glob", { dir, pattern: "*.ts" }, signal);
  */
 import * as net from "node:net";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord, untilAborted } from "@oh-my-pi/pi-utils";
 
 /** The ovnfs admin protocol generation this client speaks. */
 export const PROTOCOL_VERSION = 5;
@@ -49,9 +49,12 @@ interface Pending {
 class Connection {
 	readonly #conn: net.Socket;
 	readonly #socket: string;
+	readonly #onClose: () => void;
 	readonly #ready = Promise.withResolvers<this>();
 	readonly #pending = new Map<number, Pending>();
+	#waiters = 0;
 	#ops: ReadonlySet<string> | undefined;
+	#features: ReadonlySet<string> = new Set();
 	#next = 1;
 	#chunks: Buffer[] = [];
 	#buffered = 0;
@@ -60,19 +63,43 @@ class Connection {
 
 	constructor(socket: string, onClose: () => void) {
 		this.#socket = socket;
+		this.#onClose = onClose;
+		this.#ready.promise.catch(() => {});
 		this.#conn = net.createConnection({ path: socket });
+		this.#conn.unref();
 		this.#conn.on("connect", () => this.#conn.write(frame({ hello: { client: "omp" } })));
 		this.#conn.on("data", (chunk: Buffer) => this.#receive(chunk));
 		this.#conn.on("error", err => this.#close(err));
-		this.#conn.on("close", () => {
-			this.#close(new Error(`ovnfs at ${socket} closed the connection`));
-			onClose();
-		});
+		this.#conn.on("close", () => this.#close(new Error(`ovnfs at ${socket} closed the connection`)));
 	}
 
-	/** Resolves once the daemon has welcomed this client on {@link PROTOCOL_VERSION}. */
-	get ready(): Promise<this> {
-		return this.#ready.promise;
+	/**
+	 * Resolves once the daemon has welcomed this client on {@link PROTOCOL_VERSION},
+	 * or rejects with `signal.reason` once `signal` aborts.
+	 */
+	ready(signal?: AbortSignal): Promise<this> {
+		if (signal?.aborted) return Promise.reject(signal.reason);
+		if (this.#closed) return Promise.reject(this.#closed);
+		if (this.#ops) return Promise.resolve(this);
+		this.#waiters++;
+		this.#conn.ref();
+		return untilAborted(signal, this.#ready.promise).then(
+			conn => {
+				this.#waiters--;
+				this.#idle();
+				return conn;
+			},
+			err => {
+				this.#waiters--;
+				this.#idle();
+				throw signal?.aborted ? signal.reason : err;
+			},
+		);
+	}
+
+	/** Optional request fields the daemon said it honors (`api.Features`), e.g. `diff.binary`. */
+	get features(): ReadonlySet<string> {
+		return this.#features;
 	}
 
 	/**
@@ -109,14 +136,23 @@ class Connection {
 		return promise;
 	}
 
-	/** Let the process exit while no call is in flight. */
+	/**
+	 * Close an unfinished connection once no caller is waiting on it; once
+	 * welcomed, let the process exit while no call is in flight.
+	 */
 	#idle(): void {
-		if (this.#pending.size === 0) this.#conn.unref();
+		if (this.#waiters > 0 || this.#pending.size > 0) return;
+		if (!this.#ops) {
+			this.#close(new Error(`ovnfs at ${this.#socket} closed before welcome`));
+			return;
+		}
+		this.#conn.unref();
 	}
 
 	#close(err: Error): void {
 		if (this.#closed) return;
 		this.#closed = err;
+		this.#onClose();
 		this.#conn.destroy();
 		this.#ready.reject(err);
 		for (const pending of this.#pending.values()) pending.reject(err);
@@ -162,8 +198,10 @@ class Connection {
 				return;
 			}
 			this.#ops = new Set(welcome.ops.filter(op => typeof op === "string"));
-			this.#conn.unref();
+			if (Array.isArray(welcome.features))
+				this.#features = new Set(welcome.features.filter(feature => typeof feature === "string"));
 			this.#ready.resolve(this);
+			this.#idle();
 			return;
 		}
 		const id = message.id;
@@ -179,19 +217,20 @@ class Connection {
 }
 
 /** Open connections by socket path. */
-const connections = new Map<string, Promise<Connection>>();
+const connections = new Map<string, Connection>();
 
 /** The shared connection to `socket`, opened (or reopened) on demand. */
-function connection(socket: string): Promise<Connection> {
-	let open = connections.get(socket);
-	if (!open) {
-		const conn = new Connection(socket, () => {
-			if (connections.get(socket) === open) connections.delete(socket);
+function connection(socket: string, signal?: AbortSignal): Promise<Connection> {
+	signal?.throwIfAborted();
+	let conn = connections.get(socket);
+	if (!conn) {
+		const opened = new Connection(socket, () => {
+			if (connections.get(socket) === opened) connections.delete(socket);
 		});
-		open = conn.ready;
-		connections.set(socket, open);
+		connections.set(socket, opened);
+		conn = opened;
 	}
-	return open;
+	return conn.ready(signal);
 }
 
 /**
@@ -201,8 +240,12 @@ function connection(socket: string): Promise<Connection> {
  * once `signal` aborts (the daemon is told to cancel).
  */
 export async function callSocket<T>(socket: string, op: string, args: object, signal?: AbortSignal): Promise<T> {
-	signal?.throwIfAborted();
-	const conn = await connection(socket);
+	const conn = await connection(socket, signal);
 	// Replies are the daemon's api shapes; callers name the one their op returns.
 	return conn.call(op, args, signal) as Promise<T>;
+}
+
+/** The optional request fields the daemon at `socket` honors; empty for one that names none. */
+export async function socketFeatures(socket: string): Promise<ReadonlySet<string>> {
+	return (await connection(socket)).features;
 }

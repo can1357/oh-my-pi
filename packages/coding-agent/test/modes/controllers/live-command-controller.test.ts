@@ -1,62 +1,44 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ExtensionLiveStartOptions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { LiveSessionController, type LiveSessionControllerOptions } from "@oh-my-pi/pi-coding-agent/live/controller";
 import type { LiveServerEvent } from "@oh-my-pi/pi-coding-agent/live/protocol";
 import * as liveTransport from "@oh-my-pi/pi-coding-agent/live/transport";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import type { LiveTransportOptions } from "@oh-my-pi/pi-coding-agent/live/transport";
-import { LiveVisualizer } from "@oh-my-pi/pi-tui/apps/live-visualizer";
 import { LiveCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/live-command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { type OverlayHandle, Shell } from "@oh-my-pi/pi-coding-agent/ui/shell/index";
+import { type JSXNode, signal } from "@oh-my-pi/pi-tui";
+import { keyEvent } from "../../helpers/input-harness";
 
-/** Fake InteractiveModeContext plus typed capture channels for focus/mount traffic. */
+/** Fake InteractiveModeContext on a real shell, recording what replaced the composer. */
 interface ContextHarness {
 	ctx: InteractiveModeContext;
-	/** The editor stub the controller must restore after live mode ends. */
-	editor: unknown;
-	/** Every component handed to `ui.setFocus`, in order. */
-	focused: unknown[];
-	/** Every component handed to `editorContainer.addChild`, in order. */
-	mounted: unknown[];
-	/** Resolves when `ui.setFocus` sees the original editor again. */
-	editorRefocused: Promise<void>;
+	shell: Shell;
+	/** Every dialog mounted in the composer's place, in order. */
+	dialogs: OverlayHandle[];
 }
 
 function createContext(): ContextHarness {
-	const editor = {
-		getUseTerminalCursor: vi.fn(() => true),
-		setUseTerminalCursor: vi.fn(),
-	};
-	const focused: unknown[] = [];
-	const mounted: unknown[] = [];
-	const refocused = Promise.withResolvers<void>();
+	const shell = new Shell();
+	const dialogs: OverlayHandle[] = [];
 	const ctx = {
+		shell,
 		settings: Settings.isolated({ "live.voice": "vale" }),
-		keybindings: { getKeys: vi.fn(() => ["ctrl+l"]) },
+		keybindings: { keysFor: vi.fn(() => ["ctrl+l"]) },
 		session: {},
 		extractAssistantText: vi.fn(() => ""),
-		editor,
-		editorContainer: {
-			clear: vi.fn(),
-			addChild: vi.fn((component: unknown) => {
-				mounted.push(component);
-			}),
-		},
-		ui: {
-			getShowHardwareCursor: vi.fn(() => true),
-			setShowHardwareCursor: vi.fn(),
-			setFocus: vi.fn((component: unknown) => {
-				focused.push(component);
-				if (component === editor) refocused.resolve();
-			}),
-			requestRender: vi.fn(),
-			requestComponentRender: vi.fn(),
+		showEditorAreaDialog: (factory: () => JSXNode) => {
+			const handle = shell.overlays.show(factory);
+			dialogs.push(handle);
+			return handle;
 		},
 		showError: vi.fn(),
-		chatContainer: { children: [] },
-		present: vi.fn(),
+		presentAssistant: vi.fn(),
 	} as unknown as InteractiveModeContext;
-	return { ctx, editor, focused, mounted, editorRefocused: refocused.promise };
+	return { ctx, shell, dialogs };
 }
 
 afterEach(() => {
@@ -83,8 +65,8 @@ describe("LiveCommandController", () => {
 		}
 	});
 
-	it("stops the session and restores the editor when the live-toggle chord hits the focused visualizer", async () => {
-		const { ctx, editor, focused, mounted, editorRefocused } = createContext();
+	it("stops the session and restores the composer when the live-toggle chord hits the focused visualizer", async () => {
+		const { ctx, shell, dialogs } = createContext();
 		const stop = vi.fn(async () => {});
 		const controller = new LiveCommandController(ctx, options => {
 			const session = new LiveSessionController(options);
@@ -96,18 +78,16 @@ describe("LiveCommandController", () => {
 		await controller.handleCommand();
 		expect(controller.active).toBe(true);
 
-		// The controller replaces and focuses the editor with the visualizer;
-		// Ctrl+L must end the call from there, not just from the editor.
-		const visualizer = focused[0];
-		if (!(visualizer instanceof LiveVisualizer)) {
-			throw new Error("expected the controller to focus a LiveVisualizer");
-		}
-		visualizer.handleInput("\x0c"); // Ctrl+L — the keypress alone must drive teardown
-		await editorRefocused;
+		// The visualizer takes the composer's place and its focus;
+		// Ctrl+L must end the call from there, not just from the composer.
+		const [visualizer] = dialogs;
+		if (!visualizer) throw new Error("expected the controller to mount the visualizer");
+		expect(shell.focused()).toBe(visualizer.node);
+		expect(visualizer.node.handlers.onKey?.(keyEvent("ctrl+l"))).toBe(true); // the keypress alone drives teardown
+		for (let i = 0; !visualizer.closed && i < 20; i++) await Promise.resolve();
 
 		expect(stop).toHaveBeenCalled();
-		expect(mounted.at(-1)).toBe(editor);
-		expect(focused.at(-1)).toBe(editor);
+		expect(visualizer.closed).toBe(true);
 		// `active` stays true until #finish's fire-and-forget settling promise
 		// clears; drain microtasks deterministically instead of sleeping.
 		for (let i = 0; controller.active && i < 20; i++) await Promise.resolve();
@@ -192,8 +172,34 @@ describe("LiveCommandController", () => {
 		expect(controller.active).toBe(true);
 	});
 
+	it("presents the spoken reply in the accent tone", async () => {
+		const { ctx } = createContext();
+		const view = { message: signal(undefined), transient: signal(false), finalized: signal(false) };
+		const present = vi.fn((..._args: Parameters<InteractiveModeContext["presentAssistant"]>) => view);
+		Object.assign(ctx, { presentAssistant: present });
+		const controller = new LiveCommandController(ctx, options => {
+			const session = new LiveSessionController(options);
+			vi.spyOn(session, "start").mockImplementation(async () => {
+				options.callbacks.onTranscript({ role: "assistant", turn: 1, text: "Hello there", final: true });
+			});
+			vi.spyOn(session, "stop").mockResolvedValue();
+			return session;
+		});
+
+		try {
+			await controller.handleCommand();
+			expect(present).toHaveBeenCalledTimes(1);
+			const [message, options] = present.mock.calls[0]!;
+			expect(message?.content).toEqual([{ type: "text", text: "Hello there" }]);
+			expect(options).toEqual({ tone: "accent" });
+			expect(view.finalized()).toBe(true);
+		} finally {
+			await controller.stop();
+		}
+	});
+
 	it("rejects an extension start without an SDP offer before creating a session", async () => {
-		const { ctx, mounted } = createContext();
+		const { ctx, dialogs } = createContext();
 		const factory = vi.fn((options: LiveSessionControllerOptions) => new LiveSessionController(options));
 		const controller = new LiveCommandController(ctx, factory);
 		const untyped = { sdpOffer: undefined } as unknown as ExtensionLiveStartOptions;
@@ -201,17 +207,18 @@ describe("LiveCommandController", () => {
 		await expect(controller.startRemote(untyped)).rejects.toThrow("non-empty sdpOffer");
 		await expect(controller.startRemote({ sdpOffer: "  " })).rejects.toThrow("non-empty sdpOffer");
 		expect(factory).not.toHaveBeenCalled();
-		expect(mounted).toEqual([]);
+		expect(dialogs).toEqual([]);
 		expect(controller.active).toBe(false);
 	});
 
-	it("surfaces a session factory failure from `/live` and puts the editor back", async () => {
-		const { ctx, editor, mounted } = createContext();
+	it("surfaces a session factory failure from `/live` and puts the composer back", async () => {
+		const { ctx, shell, dialogs } = createContext();
 		const controller = new LiveCommandController(ctx, () => {
 			throw new Error("factory broke");
 		});
 		await expect(controller.handleCommand()).rejects.toThrow("factory broke");
-		expect(mounted.at(-1)).toBe(editor);
+		expect(dialogs.every(dialog => dialog.closed)).toBe(true);
+		expect(shell.overlays.open()).toBe(false);
 		expect(controller.active).toBe(false);
 	});
 });
@@ -241,7 +248,7 @@ describe("LiveSessionController with a caller-owned peer", () => {
 		let onEvent: ((event: LiveServerEvent) => void) | undefined;
 		// bun's spyOn types a class export's implementation as `never`; the controller only needs
 		// a constructible stand-in, so a plain function (not an arrow: it is called with `new`) suffices.
-		const transportSpy = vi.spyOn(liveTransport, "CodexLiveTransport") as unknown as {
+		const transportSpy = vi.spyOn(liveTransport, "LiveTransport") as unknown as {
 			mockImplementation(implementation: (options: LiveTransportOptions) => object): void;
 		};
 		transportSpy.mockImplementation(function (options: LiveTransportOptions) {
@@ -258,6 +265,7 @@ describe("LiveSessionController with a caller-owned peer", () => {
 		const phases: string[] = [];
 		const agentSession = {
 			modelRegistry: { authStorage: {} },
+			settings: Settings.isolated(),
 			sessionId: "s1",
 			subscribe: () => () => {},
 			sendCustomMessage: async (message: { content: string }) => {
@@ -293,6 +301,78 @@ describe("LiveSessionController with a caller-owned peer", () => {
 		expect(phases.slice(phases.indexOf("muted"))).toEqual(["muted"]);
 		session.toggleMute();
 		expect(phases.at(-1)).toBe("working");
+		await session.stop();
+	});
+
+	it("hands the voice the answer when the run pauses on background work", async () => {
+		let onEvent: ((event: LiveServerEvent) => void) | undefined;
+		const transportSpy = vi.spyOn(liveTransport, "LiveTransport") as unknown as {
+			mockImplementation(implementation: (options: LiveTransportOptions) => object): void;
+		};
+		const sent: { delegation_item_id?: string; content?: { text: string }[] }[] = [];
+		const sentTwice = Promise.withResolvers<void>();
+		transportSpy.mockImplementation(function (options: LiveTransportOptions) {
+			onEvent = options.callbacks.onEvent;
+			return {
+				connect: async () => {},
+				setMuted: async () => {},
+				send: async (message: (typeof sent)[number]) => {
+					sent.push(message);
+					if (sent.length === 2) sentTwice.resolve();
+				},
+				close: async () => {},
+				sdpAnswer: "v=0 answer",
+			};
+		});
+		let emit: ((event: AgentSessionEvent) => void) | undefined;
+		const agentSession = {
+			modelRegistry: { authStorage: {} },
+			settings: Settings.isolated(),
+			sessionId: "s1",
+			subscribe: (listener: (event: AgentSessionEvent) => void) => {
+				emit = listener;
+				return () => {};
+			},
+			sendCustomMessage: async () => {},
+		} as unknown as LiveSessionControllerOptions["session"];
+		const phases: string[] = [];
+		const session = new LiveSessionController({
+			session: agentSession,
+			extractAssistantText: message =>
+				(message.content as { type: string; text?: string }[]).map(block => block.text ?? "").join(""),
+			sdpOffer: "v=0 offer",
+			callbacks: {
+				onPhase: phase => phases.push(phase),
+				onLevels: () => {},
+				onTranscript: () => {},
+				onTerminal: () => {},
+			},
+		});
+		await session.start();
+		const delegate = (id: string, text: string) =>
+			onEvent!({
+				type: "delegation.created",
+				item: { type: "delegation", target: "client", id, content: [{ type: "input_text", text }] },
+			});
+		const answer = (text: string) =>
+			[{ role: "assistant", content: [{ type: "text", text }] }] as unknown as AgentMessage[];
+
+		delegate("d1", "how is the work going?");
+		// The session continuing the model's own work (a retry) is no answer yet.
+		emit!({ type: "agent_pause", messages: answer("Retrying."), yielded: false, awaiting: false });
+		// The model answered; subagents it started keep the run open, so no `agent_end` comes now.
+		emit!({ type: "agent_pause", messages: answer("Two of five tasks are done."), yielded: true, awaiting: true });
+		expect(phases.at(-1)).not.toBe("working");
+		// The run's end, much later, must not repeat the answer the voice already has.
+		emit!({ type: "agent_end", messages: answer("Two of five tasks are done.") });
+		delegate("d2", "and now?");
+		emit!({ type: "agent_pause", messages: answer("All five are done."), yielded: true, awaiting: false });
+		await sentTwice.promise;
+
+		expect(sent.map(message => [message.delegation_item_id, message.content?.[0]?.text])).toEqual([
+			["d1", expect.stringContaining("Two of five tasks are done.")],
+			["d2", expect.stringContaining("All five are done.")],
+		]);
 		await session.stop();
 	});
 });

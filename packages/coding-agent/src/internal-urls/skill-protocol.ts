@@ -14,6 +14,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger, withTimeout } from "@oh-my-pi/pi-utils";
 import { resolveContainedPath } from "../discovery/contained-path";
+import { substitutePluginRoot } from "../discovery/substitute-plugin-root";
 import {
 	findStaleSkillStandIn,
 	getActiveSkills,
@@ -181,6 +182,7 @@ function contextRediscoveryHost(skills: readonly Skill[], context: ResolveContex
 interface LocatedSkillTarget {
 	path: string;
 	stats: fsTypes.Stats | null;
+	skill: Skill;
 }
 
 /**
@@ -196,13 +198,42 @@ async function isStaleTarget(
 	return isSkillSuperseded(target.skill, host);
 }
 
+/** {@link findUrlSkill}, or undefined for a name no skill in `skills` owns. */
+function findKnownUrlSkill(url: InternalUrl, skills: readonly Skill[]): UrlSkill | undefined {
+	try {
+		return findUrlSkill(url, skills);
+	} catch (error) {
+		if (error instanceof UnknownSkillError) return undefined;
+		throw error;
+	}
+}
+
+/**
+ * The skill a skill:// URL names in `skills` or, when it moved on since `skills` was taken, in the
+ * holder's current list, which wins where it names the URL more exactly (a namespaced skill added
+ * since, where `skills` only has the bare skill of the namespace's name); else in skills the holder
+ * rediscovers for the name ({@link SkillRediscoveryHost.rediscoverForUnknownName}): one created or
+ * installed after the list was taken.
+ */
+async function findUrlSkillAnew(
+	url: InternalUrl,
+	skills: readonly Skill[],
+	host: SkillRediscoveryHost,
+): Promise<UrlSkill> {
+	const captured = findKnownUrlSkill(url, skills);
+	const current = host.skills !== skills ? findKnownUrlSkill(url, host.skills) : undefined;
+	if (current && (!captured || current.urlPath.length < captured.urlPath.length)) return current;
+	if (captured) return captured;
+	return findUrlSkill(url, (await host.rediscoverForUnknownName?.()) ?? skills);
+}
+
 /**
  * {@link skillTargetPath}, resolved once more when the skill that owns the target is stale. Its
  * stand-in is the same skill of the same plugin ({@link findStaleSkillStandIn}), which a collision
  * can list under another name, at the same path inside it: first from the holder's current list,
  * when it moved on since `context.skills` was taken (a copied tool session, a read that began
  * before a rediscovery), and only if that is stale too from rediscovered skills
- * ({@link rediscoverSkills}).
+ * ({@link rediscoverSkills}). A name no loaded skill owns is looked up anew ({@link findUrlSkillAnew}).
  */
 async function locateSkillTarget(
 	url: InternalUrl,
@@ -212,10 +243,10 @@ async function locateSkillTarget(
 	contain = false,
 ): Promise<LocatedSkillTarget> {
 	const skills = context?.skills ?? getActiveSkills();
-	const named = findUrlSkill(url, skills);
+	const host = contextRediscoveryHost(skills, context);
+	const named = await findUrlSkillAnew(url, skills, host);
 	let target = await skillTargetPath(url, named, directory, create, contain);
 	let stats = await statIfExists(target.path);
-	const host = contextRediscoveryHost(skills, context);
 	if (await isStaleTarget(target, stats, host)) {
 		const held = host.skills !== skills ? findStaleSkillStandIn(named.skill, host.skills) : undefined;
 		if (held) {
@@ -227,7 +258,8 @@ async function locateSkillTarget(
 				contain,
 			);
 			const heldStats = await statIfExists(heldTarget.path);
-			if (!(await isStaleTarget(heldTarget, heldStats, host))) return { path: heldTarget.path, stats: heldStats };
+			if (!(await isStaleTarget(heldTarget, heldStats, host)))
+				return { path: heldTarget.path, stats: heldStats, skill: heldTarget.skill };
 		}
 		const rediscovered = findStaleSkillStandIn(named.skill, await rediscoverSkills(host));
 		// Not an UnknownSkillError: when an upgrade dropped the skill, another plugin's colliding skill
@@ -237,12 +269,12 @@ async function locateSkillTarget(
 		target = await skillTargetPath(url, { skill: rediscovered, urlPath: named.urlPath }, directory, create, contain);
 		stats = await statIfExists(target.path);
 	}
-	return { path: target.path, stats };
+	return { path: target.path, stats, skill: target.skill };
 }
 
 /** The file or directory resource at a located target; a target removed since it was located rejects with ENOENT. */
 async function readSkillTarget(url: InternalUrl, target: LocatedSkillTarget): Promise<InternalResource> {
-	const { path: targetPath, stats } = target;
+	const { skill, path: targetPath, stats } = target;
 	if (!stats) throw new Error(`File not found: ${targetPath}`);
 
 	if (stats.isDirectory()) {
@@ -253,11 +285,18 @@ async function readSkillTarget(url: InternalUrl, target: LocatedSkillTarget): Pr
 	}
 
 	const content = await Bun.file(targetPath).text();
+	// Claude Code parity (#20165): plugin skills resolve ${CLAUDE_PLUGIN_ROOT} /
+	// ${OMP_PLUGIN_ROOT} in Markdown content when it is loaded, not in bash.
+	// Non-Markdown files (bundled scripts, data) are served verbatim.
+	let substituted = content;
+	if (skill.pluginRoot !== undefined && contentTypeForPath(targetPath) === "text/markdown") {
+		substituted = substitutePluginRoot(content, skill.pluginRoot);
+	}
 	return {
 		url: url.href,
-		content,
+		content: substituted,
 		contentType: contentTypeForPath(targetPath),
-		size: Buffer.byteLength(content, "utf-8"),
+		size: Buffer.byteLength(substituted, "utf-8"),
 		sourcePath: targetPath,
 		notes: [],
 	};
@@ -281,7 +320,7 @@ export class SkillProtocolHandler implements ProtocolHandler {
 		return host.skillUriAccess ? skillDoc.trim() : undefined;
 	}
 
-	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
+	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource<string | Buffer>> {
 		let target: LocatedSkillTarget;
 		try {
 			target = await locateSkillTarget(url, context, false);

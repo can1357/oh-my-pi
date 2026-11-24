@@ -1,5 +1,5 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
+import { imageAttachmentSource } from "../utils/image-source";
 import { prompt } from "@oh-my-pi/pi-utils";
 import imageAttachmentPrompt from "../prompts/system/image-attachment.md" with { type: "text" };
 import videoAttachmentPrompt from "../prompts/system/video-attachment.md" with { type: "text" };
@@ -35,7 +35,7 @@ export function renderAttachmentSourceNotice(
 		content: prompt.render(isVideo ? videoAttachmentPrompt : imageAttachmentPrompt, {
 			index: String(index),
 			path: source.path,
-			askAnswer: options?.askAnswer,
+			askAnswer: options?.askAnswer === true,
 		}),
 		details: { index, path: source.path },
 	};

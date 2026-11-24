@@ -23,15 +23,19 @@ import {
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import {
+	AgentLoopError,
 	abortReasonText,
 	agentLoop,
 	agentLoopContinue,
 	createSyntheticToolResultMessage,
+	lastContextMessage,
+	type NormalizeToolsOptions,
 	normalizeMessagesForProvider,
 	normalizeTools,
 	resolveOwnedDialectFromEnv,
@@ -40,7 +44,7 @@ import {
 } from "./agent-loop";
 import type { AppendOnlyContextManager } from "./append-only-context";
 import { agentPauseGate } from "./pause";
-import { isProviderRefusalMessage } from "./replay-policy";
+import { filterProviderReplayMessages } from "./replay-policy";
 import { SentToolDefinitions } from "./sent-tool-definitions";
 import { Tokenizer } from "./tokenizer";
 import {
@@ -75,10 +79,12 @@ import { isSoftToolRequirement } from "./types";
  * Default convertToLlm: Keep only LLM-compatible replay messages.
  */
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
-	return messages.filter((m): m is Message => {
-		if (m.role === "assistant") return !isProviderRefusalMessage(m);
-		return m.role === "user" || m.role === "developer" || m.role === "toolResult";
-	});
+	return filterProviderReplayMessages(
+		messages.filter(
+			(m): m is Message =>
+				m.role === "assistant" || m.role === "user" || m.role === "developer" || m.role === "toolResult",
+		),
+	);
 }
 
 function refreshToolChoiceForActiveTools(
@@ -266,15 +272,15 @@ export interface AgentOptions {
 
 	/**
 	 * Resolve a tool call whose name matched no advertised tool. Lets hosts
-	 * route calls to tools exposed through side transports (e.g. `xd://`
-	 * device mounts) instead of failing with "Tool not found".
+	 * route calls to tools reached through a side transport (e.g. mounted
+	 * tool commands run through `bash`) instead of failing with "Tool not found".
 	 */
 	resolveFallbackTool?: (name: string, advertised: readonly AgentTool<any>[]) => AgentTool<any> | undefined;
 
 	/**
 	 * Names routable by {@link resolveFallbackTool} that the advertised set
-	 * omits (e.g. `xd://` device mounts), used only to suggest a target when a
-	 * call misses.
+	 * omits (e.g. mounted tool commands run through `bash`), used only to
+	 * suggest a target when a call misses.
 	 */
 	suggestFallbackToolNames?: () => Iterable<string>;
 
@@ -423,11 +429,13 @@ export class Agent {
 	#tokenizer = new Tokenizer(this.#state.model);
 	#listeners = new Set<(e: AgentEvent) => void>();
 	#queueListeners = new Set<() => void>();
+	#pauseListeners = new Set<(paused: boolean) => void>();
 	#abortController?: AbortController;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	#transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 	#sentToolDefinitions = new SentToolDefinitions();
+	#standbyTools: AgentTool[] = [];
 	#steeringQueue: AgentMessage[] = [];
 	#followUpQueue: AgentMessage[] = [];
 	#queuedMessageClaims: Partial<Record<QueuedMessageQueue, QueuedMessageClaim>> = {};
@@ -982,19 +990,19 @@ export class Agent {
 		if (!model) throw new Error("No active model on agent");
 		const ownedDialect = this.#ownedDialect(model);
 		const messages = normalizeMessagesForProvider(llmMessages, model);
-		const tools = ownedDialect
-			? []
-			: (normalizeTools(this.#toolsForModel(model), {
-					injectIntent: this.#intentTracing,
-					intentDescription: this.#intentDescription,
-					pruneDescriptions: this.#pruneToolDescriptions,
-				}) ?? []);
+		const toolOptions: NormalizeToolsOptions = {
+			injectIntent: this.#intentTracing,
+			intentDescription: this.#intentDescription,
+			pruneDescriptions: this.#pruneToolDescriptions,
+		};
+		const tools = ownedDialect ? [] : (normalizeTools(this.#toolsForModel(model), toolOptions) ?? []);
+		const standby = ownedDialect ? undefined : normalizeTools(this.#standbyTools, toolOptions);
 		let context: Context = { systemPrompt, messages, tools };
 		// Side requests reuse the main loop's sent definitions without recording their own; attached before the
 		// transform too, so a request-size clamp in it measures them.
-		context = this.#sentToolDefinitions.withInactiveTools(context);
+		context = this.#sentToolDefinitions.withInactiveTools(context, standby);
 		if (this.#transformProviderContext) context = await this.#transformProviderContext(context, model);
-		context = this.#sentToolDefinitions.withInactiveTools(context);
+		context = this.#sentToolDefinitions.withInactiveTools(context, context.inactiveTools);
 		return context;
 	}
 
@@ -1012,6 +1020,12 @@ export class Agent {
 	onQueueChange(listener: () => void): () => void {
 		this.#queueListeners.add(listener);
 		return () => this.#queueListeners.delete(listener);
+	}
+
+	/** Notify a session when this agent parks or resumes at a safe process-pause boundary. */
+	onPauseChange(listener: (paused: boolean) => void): () => void {
+		this.#pauseListeners.add(listener);
+		return () => this.#pauseListeners.delete(listener);
 	}
 
 	/** Register an independently removable hook that runs before queued messages are consumed. */
@@ -1357,6 +1371,11 @@ export class Agent {
 		this.#state.tools = t;
 	}
 
+	/** Set the inactive tools that may become active later ({@link AgentContext.standbyTools}). */
+	setStandbyTools(tools: AgentTool[]) {
+		this.#standbyTools = tools;
+	}
+
 	replaceMessages(ms: AgentMessage[]) {
 		// New array assignment is intentional: caller-owned `ms` may be mutated
 		// after handoff; snapshot it so external mutations cannot leak in.
@@ -1372,6 +1391,19 @@ export class Agent {
 				listener();
 			} catch (err) {
 				logger.warn("Agent queue listener threw", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+		}
+	}
+
+	/** Report a safe-boundary park/resume transition; a throwing observer never disrupts the loop. */
+	#emitPauseChanged(paused: boolean): void {
+		for (const listener of this.#pauseListeners) {
+			try {
+				listener(paused);
+			} catch (err) {
+				logger.warn("Agent pause listener threw", {
 					error: err instanceof Error ? err.message : String(err),
 				});
 			}
@@ -1803,11 +1835,25 @@ export class Agent {
 		try {
 			const dequeueSignal = this.#continuationDequeueSignal(signal) ?? continuationAbortController.signal;
 			const messages = this.#state.messages;
-			if (messages.length === 0) {
+			const literalTail = messages.at(-1);
+			// Rows kept out of context (`!!` runs, excluded extension rows) may trail the last message the
+			// model sees. A queued steer/follow-up is delivered as if they were absent; with nothing queued,
+			// continue from them as before and leave the tail to the caller's recovery.
+			const tail = lastContextMessage(messages);
+			if (!tail || tail.role === "assistant") {
+				// A tail with unpaired runnable tool calls resumes by re-executing
+				// them (see `unpairedToolCallTail` in agent-loop). This must win over
+				// queued-message delivery: injecting a message between the tool_use
+				// blocks and their results would break the provider's pairing
+				// invariant. Queued messages drain inside the resumed loop instead.
+				if (tail && unpairedToolCallTail([tail])) {
+					await this.#runLoop(undefined, undefined, signal, true);
+					return;
+				}
 				// An empty transcript has nothing to resume, but a queued steer/follow-up
-				// must still be delivered as the opening turn — mirroring the assistant-tail
-				// branch below. Throwing here leaves the message undeliverable, and idle-drain
-				// callers (AgentSession#scheduleQueuedMessageDrain) re-arm continue() on every
+				// must still be delivered as the opening turn. Throwing here leaves the
+				// message undeliverable, and idle-drain callers
+				// (AgentSession#scheduleQueuedMessageDrain) re-arm continue() on every
 				// microtask because hasQueuedMessages() never clears, spinning an unbounded
 				// allocation loop until OOM (issue #6344).
 				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
@@ -1816,30 +1862,6 @@ export class Agent {
 					await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal, true);
 					return;
 				}
-				const queuedFollowUp = await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal);
-				if (this.#abortController !== continuationAbortController) return;
-				if (queuedFollowUp.length > 0) {
-					await this.#runLoop(queuedFollowUp, undefined, signal, true);
-					return;
-				}
-				throw new Error("No messages to continue from");
-			}
-			if (messages[messages.length - 1].role === "assistant") {
-				// A tail with unpaired runnable tool calls resumes by re-executing
-				// them (see `unpairedToolCallTail` in agent-loop). This must win over
-				// queued-message delivery: injecting a message between the tool_use
-				// blocks and their results would break the provider's pairing
-				// invariant. Queued messages drain inside the resumed loop instead.
-				if (unpairedToolCallTail(messages)) {
-					await this.#runLoop(undefined, undefined, signal, true);
-					return;
-				}
-				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
-				if (this.#abortController !== continuationAbortController) return;
-				if (queuedSteering.length > 0) {
-					await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal, true);
-					return;
-				}
 
 				const queuedFollowUp = await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal);
 				if (this.#abortController !== continuationAbortController) return;
@@ -1848,7 +1870,8 @@ export class Agent {
 					return;
 				}
 
-				throw new Error("Cannot continue from message role: assistant");
+				if (!literalTail) throw new Error("No messages to continue from");
+				if (literalTail === tail) throw new Error("Cannot continue from message role: assistant");
 			}
 
 			await this.#runLoop(undefined, undefined, signal, true);
@@ -1914,6 +1937,7 @@ export class Agent {
 			systemPrompt: this.#state.systemPrompt,
 			messages: this.#state.messages.slice(),
 			tools: this.#state.tools,
+			standbyTools: this.#standbyTools,
 		};
 
 		// Installed unconditionally. Both `cursorExecHandlers` and
@@ -1965,7 +1989,11 @@ export class Agent {
 					try {
 						const updated = await transform(message);
 						if (updated) entry.toolResult = updated;
-					} catch {}
+					} catch (error) {
+						logger.warn("agent: cursor tool result transform failed", {
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
 				})();
 				entry.pending = pending;
 				await pending;
@@ -2000,6 +2028,7 @@ export class Agent {
 			return refreshToolChoiceForActiveTools(options?.toolChoice, this.#state.tools);
 		};
 
+		let requestModel: Model | undefined;
 		const config: AgentLoopConfig = {
 			model,
 			reasoning,
@@ -2040,6 +2069,7 @@ export class Agent {
 				context.systemPrompt = this.#state.systemPrompt;
 				this.#onModelCallSystemPrompt?.(context.systemPrompt);
 				context.tools = this.#toolsForModel(this.#state.model ?? model);
+				context.standbyTools = this.#standbyTools;
 			},
 			beforeModelCall:
 				this.#beforeModelCall || this.#additionalBeforeModelCalls.size > 0
@@ -2077,15 +2107,23 @@ export class Agent {
 			onAssistantMessageEvent: this.#onAssistantMessageEvent,
 			onHarmonyLeak: this.#onHarmonyLeak,
 			onTurnEnd: (messages, signal, context) => this.#onTurnEnd?.(messages, signal, context),
+			onTurnEndEmitted: () => {
+				requestModel = undefined;
+			},
 			onPauseChange: paused => {
+				if (this.#isPaused === paused) return;
 				this.#isPaused = paused;
+				this.#emitPauseChanged(paused);
 			},
 			getToolChoice,
 			softToolRequirementState: this.#softToolRequirementState,
 			onToolChoiceRejected: () => {
 				if (claimedToolChoice !== undefined) this.#deferredToolChoice = claimedToolChoice;
 			},
-			getModel: () => this.#state.model ?? model,
+			getModel: () => {
+				requestModel = this.#state.model ?? model;
+				return requestModel;
+			},
 			getReasoning: () => this.#state.thinkingLevel,
 			getDisableReasoning: () => this.#state.disableReasoning,
 			getServiceTier: this.#serviceTierResolver,
@@ -2215,6 +2253,14 @@ export class Agent {
 				: err instanceof Error
 					? err.message
 					: String(err);
+			const errorModel = requestModel ?? this.#state.model ?? model;
+			const errorStatus = stoppedForAbort ? undefined : AIError.status(err);
+			const errorId = stoppedForAbort
+				? errorMessage === "Request was aborted"
+					? AIError.create(AIError.Flag.Abort)
+					: AIError.classify(loopSignal.reason) || undefined
+				: AIError.classify(err, errorModel.api) || undefined;
+			const errorFromAgentLoop = (!stoppedForAbort && err instanceof AgentLoopError) || undefined;
 			const shouldEmitVisibleError = !stoppedForAbort;
 			const assistantPartial = partial?.role === "assistant" ? partial : undefined;
 			const hadAssistantStart = assistantPartial !== undefined;
@@ -2242,13 +2288,16 @@ export class Agent {
 							),
 							stopReason: "error",
 							errorMessage,
+							errorStatus,
+							errorId,
+							errorFromAgentLoop,
 						}
 					: {
 							role: "assistant",
 							content: [{ type: "text", text: "" }],
-							api: model.api,
-							provider: model.provider,
-							model: model.id,
+							api: errorModel.api,
+							provider: errorModel.provider,
+							model: errorModel.id,
 							usage: {
 								input: 0,
 								output: 0,
@@ -2259,6 +2308,9 @@ export class Agent {
 							},
 							stopReason: stoppedForAbort ? "aborted" : "error",
 							errorMessage,
+							errorStatus,
+							errorId,
+							errorFromAgentLoop,
 							timestamp: Date.now(),
 						};
 

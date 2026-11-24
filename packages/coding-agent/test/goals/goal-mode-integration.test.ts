@@ -8,7 +8,6 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -16,8 +15,10 @@ import { normalizeCustomMessagePayload } from "@oh-my-pi/pi-coding-agent/session
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../../src/ui/theme/service";
+import { createModeTerminal } from "../helpers/mode-terminal";
 
 function createToolSession(cwd: string, settings: Settings, overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -96,7 +97,15 @@ async function createGoalHarness(shared: SharedFixture): Promise<GoalHarness> {
 		toolRegistry,
 		rebuildSystemPrompt: async () => ({ systemPrompt: ["Test"] }),
 	});
-	const mode = new InteractiveMode(session, "test");
+	const mode = new InteractiveMode(
+		session,
+		"test",
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		createModeTerminal().frame,
+	);
 	const toolSession = createToolSession(tempDir.path(), settings, {
 		getGoalModeState: () => session.getGoalModeState(),
 		getGoalRuntime: () => session.goalRuntime,
@@ -122,6 +131,11 @@ async function createGoalHarness(shared: SharedFixture): Promise<GoalHarness> {
 			resetSettingsForTest();
 		},
 	};
+}
+
+/** Replace a draft array's contents in place (the composer's pending images are read-only references). */
+function replace<T>(target: T[], items: readonly T[]): void {
+	target.splice(0, target.length, ...items);
 }
 
 async function toolNamesFor(harness: GoalHarness): Promise<string[]> {
@@ -348,9 +362,9 @@ describe("InteractiveMode goal mode integration", () => {
 		const images: ImageContent[] = [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }];
 		const imageLinks = ["file:///shot.png"];
 		const commandText = "/goal [Image #1, 10x10] fix this";
-		harness.mode.editor.setText(commandText);
-		harness.mode.editor.pendingImages = images;
-		harness.mode.editor.pendingImageLinks = imageLinks;
+		harness.mode.composer.setText(commandText);
+		replace(harness.mode.composer.pendingImages, images);
+		replace(harness.mode.composer.pendingImageLinks, imageLinks);
 		vi.spyOn(harness.session.goalRuntime, "createGoal").mockRejectedValueOnce(new Error("goal setup failed"));
 		const showError = vi.spyOn(harness.mode, "showError");
 
@@ -360,16 +374,16 @@ describe("InteractiveMode goal mode integration", () => {
 		});
 
 		expect(showError).toHaveBeenCalledWith("goal setup failed");
-		expect(harness.mode.editor.getText()).toBe(commandText);
-		expect(harness.mode.editor.pendingImages).toEqual(images);
-		expect(harness.mode.editor.pendingImageLinks).toEqual(imageLinks);
+		expect(harness.mode.composer.text()).toBe(commandText);
+		expect(harness.mode.composer.pendingImages).toEqual(images);
+		expect(harness.mode.composer.pendingImageLinks).toEqual(imageLinks);
 	});
 
 	it("keeps images pasted while delayed plan setup completes in the later draft", async () => {
 		const submittedImages: ImageContent[] = [{ type: "image", data: "b2xk", mimeType: "image/png" }];
 		const submittedLinks = ["file:///submitted.png"];
-		harness.mode.editor.pendingImages = submittedImages;
-		harness.mode.editor.pendingImageLinks = submittedLinks;
+		replace(harness.mode.composer.pendingImages, submittedImages);
+		replace(harness.mode.composer.pendingImageLinks, submittedLinks);
 		const waiter = await armInputWaiter(harness.mode);
 		const setupStarted = Promise.withResolvers<void>();
 		const continueSetup = Promise.withResolvers<void>();
@@ -386,23 +400,23 @@ describe("InteractiveMode goal mode integration", () => {
 		});
 		await setupStarted.promise;
 		const laterImage: ImageContent = { type: "image", data: "bmV3", mimeType: "image/png" };
-		harness.mode.editor.pendingImages = [laterImage];
-		harness.mode.editor.pendingImageLinks = ["file:///later.png"];
+		replace(harness.mode.composer.pendingImages, [laterImage]);
+		replace(harness.mode.composer.pendingImageLinks, ["file:///later.png"]);
 		continueSetup.resolve();
 		await command;
 		await waiter.inputPromise;
 
 		expect(waiter.getResolvedInput()?.images).toBe(submittedImages);
-		expect(harness.mode.editor.pendingImages).toEqual([laterImage]);
-		expect(harness.mode.editor.pendingImageLinks).toEqual(["file:///later.png"]);
+		expect(harness.mode.composer.pendingImages).toEqual([laterImage]);
+		expect(harness.mode.composer.pendingImageLinks).toEqual(["file:///later.png"]);
 	});
 
 	it("keeps a later draft when a preserve-draft submission is cancelled", () => {
 		const submittedImage: ImageContent = { type: "image", data: "b2xk", mimeType: "image/png" };
 		const laterImage: ImageContent = { type: "image", data: "bmV3", mimeType: "image/png" };
-		harness.mode.editor.setText("later draft");
-		harness.mode.editor.pendingImages = [laterImage];
-		harness.mode.editor.pendingImageLinks = ["file:///later.png"];
+		harness.mode.composer.setText("later draft");
+		replace(harness.mode.composer.pendingImages, [laterImage]);
+		replace(harness.mode.composer.pendingImageLinks, ["file:///later.png"]);
 
 		harness.mode.startPendingSubmission(
 			{ text: "submitted draft", images: [submittedImage], imageLinks: ["file:///submitted.png"] },
@@ -410,9 +424,9 @@ describe("InteractiveMode goal mode integration", () => {
 		);
 
 		expect(harness.mode.cancelPendingSubmission()).toBe(true);
-		expect(harness.mode.editor.getText()).toBe("later draft");
-		expect(harness.mode.editor.pendingImages).toEqual([laterImage]);
-		expect(harness.mode.editor.pendingImageLinks).toEqual(["file:///later.png"]);
+		expect(harness.mode.composer.text()).toBe("later draft");
+		expect(harness.mode.composer.pendingImages).toEqual([laterImage]);
+		expect(harness.mode.composer.pendingImageLinks).toEqual(["file:///later.png"]);
 	});
 
 	it("includes escaped live todo state in hidden goal context during continuations", async () => {
@@ -525,77 +539,23 @@ describe("InteractiveMode goal mode integration", () => {
 		await waiter.inputPromise;
 	});
 
-	it("waits for input rather than continuing an active goal with only blocked work", async () => {
+	it("holds goal continuations while the run is paused awaiting background work", async () => {
+		// A turn that yields on background subagents/jobs pauses the open run
+		// (`agent_pause`): nothing streams, yet the result the goal needs has not
+		// arrived. The continuation belongs after the run's terminal `agent_end`.
 		await harness.mode.handleGoalModeCommand("Ship the release");
-		harness.session.setTodoPhases([
-			{
-				name: "Approval",
-				tasks: [
-					{ content: "Prepare the proposal", status: "completed" },
-					{ content: "Apply the approved change", status: "blocked", blocker: "Awaiting user approval" },
-				],
-			},
-		]);
 
 		vi.useFakeTimers();
 		const waiter = await armInputWaiter(harness.mode);
+		Object.defineProperty(harness.session, "isRunActive", { configurable: true, get: () => true });
+
 		vi.advanceTimersByTime(800);
 		await waitForMicrotasks();
+
 		expect(waiter.getResolvedInput()).toBeUndefined();
 
-		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "Approved" }));
-		await waiter.inputPromise;
-	});
-
-	it("drops an armed continuation when work becomes blocked, then resumes after input", async () => {
-		await harness.mode.handleGoalModeCommand("Ship the release");
-		harness.session.setTodoPhases([
-			{ name: "Approval", tasks: [{ content: "Apply the change", status: "pending" }] },
-		]);
-
-		vi.useFakeTimers();
-		const waiter = await armInputWaiter(harness.mode);
-		harness.session.setTodoPhases([
-			{
-				name: "Approval",
-				tasks: [{ content: "Apply the change", status: "blocked", blocker: "Awaiting user approval" }],
-			},
-		]);
-		vi.advanceTimersByTime(800);
-		await waitForMicrotasks();
-		expect(waiter.getResolvedInput()).toBeUndefined();
-
-		const approval = harness.mode.startPendingSubmission({ text: "Approved" });
-		harness.mode.onInputCallback?.(approval);
-		await waiter.inputPromise;
-		harness.mode.finishPendingSubmission(approval);
-		harness.session.setTodoPhases([
-			{ name: "Approval", tasks: [{ content: "Apply the change", status: "pending" }] },
-		]);
-		const resumed = await armInputWaiter(harness.mode);
-		vi.advanceTimersByTime(800);
-		await waitForMicrotasks();
-		expect(resumed.getResolvedInput()?.customType).toBe("goal-continuation");
-		await resumed.inputPromise;
-	});
-
-	it("continues an active goal when actionable work remains alongside blocked work", async () => {
-		await harness.mode.handleGoalModeCommand("Ship the release");
-		harness.session.setTodoPhases([
-			{
-				name: "Release",
-				tasks: [
-					{ content: "Get approval", status: "blocked", blocker: "Awaiting user approval" },
-					{ content: "Run independent checks", status: "pending" },
-				],
-			},
-		]);
-
-		vi.useFakeTimers();
-		const waiter = await armInputWaiter(harness.mode);
-		vi.advanceTimersByTime(800);
-		await waitForMicrotasks();
-		expect(waiter.getResolvedInput()?.customType).toBe("goal-continuation");
+		Reflect.deleteProperty(harness.session, "isRunActive");
+		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "cleanup" }));
 		await waiter.inputPromise;
 	});
 
@@ -821,4 +781,57 @@ describe("InteractiveMode goal mode integration", () => {
 		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "next turn" }));
 		await nextTurn;
 	});
+	const lateToolExitCases: Array<{
+		name: string;
+		exit: (mode: InteractiveMode, session: AgentSession, toolSession: ToolSession) => Promise<void>;
+	}> = [
+		{
+			name: "completing the goal",
+			exit: async (mode, session, toolSession) => {
+				const goalTool = (await createTools(toolSession, session.getActiveToolNames())).find(
+					tool => tool.name === "goal",
+				);
+				if (!goalTool) throw new Error("expected goal tool to be active");
+				await goalTool.execute("call-1", { op: "complete" });
+				const nextTurn = mode.getUserInput();
+				// getUserInput awaits the completion exit before arming onInputCallback.
+				for (let i = 0; i < 100 && session.getGoalModeState() !== undefined; i++) await waitForMicrotasks();
+				mode.onInputCallback?.(mode.startPendingSubmission({ text: "next turn" }));
+				await nextTurn;
+			},
+		},
+		{
+			name: "pausing the goal",
+			exit: async mode => {
+				vi.spyOn(mode, "showHookSelector").mockResolvedValue("Pause");
+				await mode.handleGoalModeCommand();
+			},
+		},
+		{
+			name: "dropping the goal",
+			exit: async mode => {
+				vi.spyOn(mode, "showHookSelector").mockResolvedValue("Drop");
+				vi.spyOn(mode, "showHookConfirm").mockResolvedValue(true);
+				await mode.handleGoalModeCommand();
+			},
+		},
+	];
+
+	for (const testCase of lateToolExitCases) {
+		it(`keeps a tool enabled after it registers when ${testCase.name}`, async () => {
+			await harness.mode.handleGoalModeCommand("Ship the release");
+			expect(await toolNamesFor(harness)).not.toContain("todo");
+
+			// A deferred extension registers and enables its tool after goal entry.
+			await harness.session.setActiveToolsByName([...harness.session.getEnabledToolNames(), "todo"]);
+			expect(await toolNamesFor(harness)).toContain("todo");
+			expect(await toolNamesFor(harness)).toContain("goal");
+
+			await testCase.exit(harness.mode, harness.session, harness.toolSession);
+
+			// Only `goal` goes away; the late tool stays enabled and dispatchable.
+			expect(await toolNamesFor(harness)).toContain("todo");
+			expect(await toolNamesFor(harness)).not.toContain("goal");
+		});
+	}
 });

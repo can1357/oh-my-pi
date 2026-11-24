@@ -63,11 +63,18 @@ type BabelFunctionDeclaration = {
 /** Top-level declarations whose bindings must survive the cell (demoted and/or published). */
 type BabelPublishableDecl = BabelLexicalDecl | BabelFunctionDeclaration;
 
+type BabelCellExpression = {
+	type?: string;
+	extra?: { parenthesized?: boolean };
+	left?: { type?: string };
+	expressions?: BabelCellExpression[];
+};
+
 type BabelExpressionStatement = {
 	type: "ExpressionStatement";
 	start: number;
 	end: number;
-	expression?: { type?: string };
+	expression?: BabelCellExpression;
 	directive?: string;
 };
 
@@ -104,7 +111,9 @@ export async function loadBabelParser(): Promise<typeof BabelParser> {
 	return babelParser;
 }
 
-type ParsedProgram = { program: { body: ReadonlyArray<BabelProgramNode> } };
+type ParsedProgram = {
+	program: { body: ReadonlyArray<BabelProgramNode>; directives?: ReadonlyArray<{ start: number; end: number }> };
+};
 
 async function tryParseProgram(
 	code: string,
@@ -1068,21 +1077,45 @@ async function demoteTopLevelLexicals(code: string, options: { publishGlobals?: 
 	return result;
 }
 
-async function returnFinalExpression(code: string): Promise<{ source: string; returned: boolean }> {
+async function returnFinalExpression(
+	code: string,
+): Promise<{ source: string; returned: boolean | null; suppressed?: boolean }> {
 	const ast = await parseProgram(code);
-	const body = ast?.program.body;
-	if (!body) return { source: code, returned: false };
+	const program = ast?.program;
+	if (!program) return { source: code, returned: null };
+	const body = program.body;
+	const asCellResult = (node: { start: number; end: number }, suppressed = false) => {
+		const statement = code.slice(node.start, node.end);
+		const semicolonMatch = statement.match(/;\s*$/);
+		const trimmedStatement = semicolonMatch ? statement.slice(0, semicolonMatch.index) : statement;
+		return {
+			source: `${code.slice(0, node.start)}__omp_set_final_expr__((${trimmedStatement}));${code.slice(node.end)}`,
+			returned: true,
+			suppressed,
+		};
+	};
 	let lastIndex = body.length - 1;
 	while (lastIndex >= 0 && body[lastIndex]?.type === "EmptyStatement") lastIndex--;
 	const last = lastIndex >= 0 ? body[lastIndex] : undefined;
+	// A cell of only string literals (`"hello"`) parses as directives with an empty body.
+	const directive = program.directives?.at(-1);
+	if (!last && directive) return asCellResult(directive);
 	if (last?.type === "ExpressionStatement") {
 		const expression = last as BabelExpressionStatement;
-		const prefix = code.slice(0, expression.start);
-		const statement = code.slice(expression.start, expression.end);
-		const suffix = code.slice(expression.end);
-		const semicolonMatch = statement.match(/;\s*$/);
-		const trimmedStatement = semicolonMatch ? statement.slice(0, semicolonMatch.index) : statement;
-		return { source: `${prefix}__omp_set_final_expr__((${trimmedStatement}));${suffix}`, returned: true };
+		// `x = value` is a statement, as in Python: only a bare or parenthesized expression is the
+		// cell's result, so a trailing `globalThis.items = items` does not print the whole array.
+		// `({ a, b } = obj)` needs its parentheses to parse, so they do not ask for the value.
+		let assigned = expression.expression;
+		while (assigned?.type === "SequenceExpression" && !assigned.extra?.parenthesized) {
+			assigned = assigned.expressions?.at(-1);
+		}
+		if (
+			assigned?.type === "AssignmentExpression" &&
+			(!assigned.extra?.parenthesized || assigned.left?.type === "ObjectPattern")
+		) {
+			return asCellResult(expression, true);
+		}
+		return asCellResult(expression);
 	}
 	if (last?.type === "ReturnStatement") {
 		// Top-level `return value;` is otherwise swallowed: it forces the cell into an async IIFE
@@ -1181,9 +1214,12 @@ export function stripTypeScriptSyntax(
 const LOOKS_LIKE_TS =
 	/(?:\bimport\s+type\b|\bexport\s+type\b|\b(?:import|export)\s*\{[^}\n]*\btype\s+\w|\binterface\s+\w|\btype\s+\w+\s*=|\b(?:as|satisfies)\s+(?:[A-Z]|\bconst\b)|:\s*(?:string|number|boolean|any|unknown|void|never|object|[A-Z]\w*)\b|<\s*[A-Z]\w*\s*[,>])/;
 
-export async function wrapCode(
-	code: string,
-): Promise<{ source: string; asyncWrapped: boolean; finalExpressionReturned: boolean }> {
+export async function wrapCode(code: string): Promise<{
+	source: string;
+	asyncWrapped: boolean;
+	finalExpressionReturned: boolean | null;
+	finalExpressionSuppressed?: boolean;
+}> {
 	const instrumented = await instrumentRuntimeCallSites(code);
 	const finalExpression = await returnFinalExpression(instrumented);
 	const stripped = stripTypeScript(finalExpression.source);
@@ -1194,11 +1230,17 @@ export async function wrapCode(
 		returned: finalExpression.returned,
 	};
 	if (!needsAsyncWrapper) {
-		return { source: rewritten.source, asyncWrapped: false, finalExpressionReturned: rewritten.returned };
+		return {
+			source: rewritten.source,
+			asyncWrapped: false,
+			finalExpressionReturned: rewritten.returned,
+			finalExpressionSuppressed: finalExpression.suppressed,
+		};
 	}
 	return {
 		source: `(async () => {\n${rewritten.source}\n})()`,
 		asyncWrapped: true,
 		finalExpressionReturned: rewritten.returned,
+		finalExpressionSuppressed: finalExpression.suppressed,
 	};
 }

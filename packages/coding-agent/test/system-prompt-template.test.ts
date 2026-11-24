@@ -1,7 +1,7 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
-import { __resetDirsFromEnvForTests, CONFIG_DIR_NAME, getConfigAgentDirName, TempDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, CONFIG_DIR_NAME, getAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import {
 	buildSystemPrompt,
 	discoverSystemPromptOverride,
@@ -12,7 +12,12 @@ import {
 import eagerTasksTemplate from "./fixtures/system-prompt-template/eager-tasks.md" with { type: "text" };
 import literalDataTemplate from "./fixtures/system-prompt-template/literal-data.md" with { type: "text" };
 import liveDataTemplate from "./fixtures/system-prompt-template/live-data.md" with { type: "text" };
-import { restoreEnvValue } from "./helpers/settings-test-state";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { cfgSystemPromptTemplates } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { compileModelPatterns } from "@oh-my-pi/pi-coding-agent/utils/model-patterns";
+import { YAML } from "bun";
+import { beginSettingsTest, restoreEnvValue, restoreSettingsTestState } from "./helpers/settings-test-state";
 
 const EMPTY_TREE = {
 	rootPath: "",
@@ -43,7 +48,7 @@ async function withDiscoveryHome<T>(fn: (paths: DiscoveryPaths) => Promise<T>): 
 		return await fn({
 			cwd: tempDir.join("project"),
 			projectConfig: tempDir.join("project", CONFIG_DIR_NAME),
-			userConfig: path.join(home, getConfigAgentDirName()),
+			userConfig: getAgentDir(),
 		});
 	} finally {
 		homedirSpy.mockRestore();
@@ -200,7 +205,7 @@ describe("system prompt Handlebars templates", () => {
 			const result = await buildSystemPrompt(options(cwd));
 			const text = result.systemPrompt.join("\n\n");
 			expect(text).toContain("fallback literal prompt");
-			expect(text).not.toContain("§ Tool Policy");
+			expect(text).not.toContain("⁂ Tool Policy");
 		});
 	});
 
@@ -211,7 +216,7 @@ describe("system prompt Handlebars templates", () => {
 			const result = await buildSystemPrompt(options(cwd));
 			const text = result.systemPrompt.join("\n\n");
 			expect(text).not.toContain("TASK_BRANCH=");
-			expect(text).toContain("§ Tool Policy");
+			expect(text).toContain("⁂ Tool Policy");
 		});
 	});
 
@@ -223,7 +228,7 @@ describe("system prompt Handlebars templates", () => {
 			const result = await buildSystemPrompt(options(cwd));
 			const text = result.systemPrompt.join("\n\n");
 			expect(text).toContain("fallback literal prompt");
-			expect(text).not.toContain("§ Tool Policy");
+			expect(text).not.toContain("⁂ Tool Policy");
 		});
 	});
 
@@ -244,50 +249,50 @@ describe("system prompt Handlebars templates", () => {
 		expect(alwaysBranch.text).not.toContain("TASK_BRANCH=eager");
 	});
 
-	it("refreshes live tools and device docs while retaining the footer and prelude guidance", async () => {
+	it("refreshes live tools and command docs while retaining the footer and prelude guidance", async () => {
 		using tempDir = TempDir.createSync("@omp-system-prompt-template-live-");
 		const cwd = tempDir.path();
 
 		const first = await render(cwd, liveDataTemplate, {
 			toolNames: ["read"],
-			xdevTools: [{ name: "fetch", summary: "fetches the first source" }],
-			xdevDocs: "device docs v1",
+			mountedCommands: [{ name: "fetch", summary: "fetches the first source" }],
+			toolCommandDocs: "command docs v1",
 			evalPreludes: [{ name: "computer", guidance: "COMPUTER-GUIDANCE" }],
 		});
 		const second = await render(cwd, liveDataTemplate, {
 			toolNames: ["edit"],
-			xdevTools: [{ name: "search", summary: "searches the second source" }],
-			xdevDocs: "device docs v2",
+			mountedCommands: [{ name: "search", summary: "searches the second source" }],
+			toolCommandDocs: "command docs v2",
 			evalPreludes: [{ name: "computer", guidance: "COMPUTER-GUIDANCE" }],
 		});
 
 		expect(first.text).toContain("TOOLS=read,fetch");
-		expect(first.text).toContain("DEVICES=fetch=fetches the first source");
-		expect(first.text).toContain("DOCS=device docs v1");
+		expect(first.text).toContain("COMMANDS=fetch=fetches the first source");
+		expect(first.text).toContain("DOCS=command docs v1");
 		expect(first.text).toContain("COMPUTER=enabled");
 		expect(first.text).toContain("<workstation>");
 		expect(first.text).toContain("COMPUTER-GUIDANCE");
-		expect(first.xdevCatalogNames).toBeUndefined();
+		expect(first.toolCommandCatalogNames).toEqual(["fetch"]);
 
 		expect(second.text).toContain("TOOLS=edit,search");
-		expect(second.text).toContain("DEVICES=search=searches the second source");
-		expect(second.text).toContain("DOCS=device docs v2");
-		expect(second.text).not.toContain("device docs v1");
+		expect(second.text).toContain("COMMANDS=search=searches the second source");
+		expect(second.text).toContain("DOCS=command docs v2");
+		expect(second.text).not.toContain("command docs v1");
 		expect(second.text).toContain("<workstation>");
 		expect(second.text).toContain("COMPUTER-GUIDANCE");
-		expect(second.xdevCatalogNames).toBeUndefined();
+		expect(second.toolCommandCatalogNames).toEqual(["search"]);
 	});
 
-	it("claims the xdev catalog when a template renders the xd:// section", async () => {
-		using tempDir = TempDir.createSync("@omp-system-prompt-template-xdev-");
+	it("claims the tool command catalog when a template renders the docs", async () => {
+		using tempDir = TempDir.createSync("@omp-system-prompt-template-tool-command-");
 		const cwd = tempDir.path();
 
-		const result = await render(cwd, "devices:\n{{xdevDocs}}\nreference xd://fetch here", {
-			xdevTools: [{ name: "fetch", summary: "fetches a source" }],
-			xdevDocs: "device docs",
+		const result = await render(cwd, "commands:\n{{toolCommandDocs}}\nrun fetch as a command", {
+			mountedCommands: [{ name: "fetch", summary: "fetches a source" }],
+			toolCommandDocs: "command docs",
 		});
-		expect(result.text).toContain("xd://fetch");
-		expect(result.xdevCatalogNames).toEqual(["fetch"]);
+		expect(result.text).toContain("run fetch as a command");
+		expect(result.toolCommandCatalogNames).toEqual(["fetch"]);
 	});
 
 	it("does not recursively render Handlebars syntax contained in inserted data", async () => {
@@ -295,7 +300,7 @@ describe("system prompt Handlebars templates", () => {
 		const inserted = "literal data {{eagerTasks}}";
 		const result = await render(tempDir.path(), literalDataTemplate, {
 			eagerTasks: true,
-			xdevDocs: inserted,
+			toolCommandDocs: inserted,
 		});
 
 		expect(result.text).toContain(`INSERTED=${inserted}`);
@@ -352,5 +357,112 @@ describe("system prompt Handlebars templates", () => {
 
 		expect(text).toContain(literal);
 		expect(text).not.toContain("legacy custom true");
+	});
+});
+
+describe("per-model system prompt template", () => {
+	const compile = (templates: Record<string, string>) => compileModelPatterns(templates, (file: string) => file);
+
+	it("selects the longest matching key regardless of config order", async () => {
+		await withDiscoveryHome(async ({ cwd }) => {
+			const routerPath = path.join(cwd, "templates", "router.md");
+			const qwenPath = path.join(cwd, "templates", "qwen.md");
+			await Bun.write(routerPath, "ROUTER TEMPLATE {{model}}");
+			await Bun.write(qwenPath, "QWEN TEMPLATE {{model}}");
+			// The shorter key comes first, so first-match would pick the wrong file.
+			const templates = compile({ qwen: qwenPath, "openrouter/qwen": routerPath });
+			const result = await buildSystemPrompt(
+				options(cwd, { model: "openrouter/qwen/qwen3", modelSystemPromptTemplates: templates }),
+			);
+			expect(result.systemPrompt[0]).toBe("ROUTER TEMPLATE openrouter/qwen/qwen3");
+		});
+	});
+
+	it("does not read the model template when a discovered project SYSTEM_TEMPLATE.md applies", async () => {
+		await withDiscoveryHome(async ({ cwd, projectConfig }) => {
+			await Bun.write(path.join(projectConfig, "SYSTEM_TEMPLATE.md"), "PROJECT TEMPLATE");
+			// A directory path fails to read with EISDIR, which is not swallowed: success proves no read.
+			const result = await buildSystemPrompt(
+				options(cwd, { model: "anthropic/claude-test", modelSystemPromptTemplates: compile({ claude: cwd }) }),
+			);
+			expect(result.systemPrompt.join("\n\n")).toContain("PROJECT TEMPLATE");
+		});
+	});
+
+	const fallbackCases: Array<{ name: string; content: string | undefined; warning: string }> = [
+		{
+			name: "missing",
+			content: undefined,
+			warning: "systemPromptTemplates template not found; using the bundled prompt",
+		},
+		{
+			name: "empty",
+			content: " \n",
+			warning: "Ignoring empty systemPromptTemplates template; using the bundled prompt",
+		},
+		{
+			name: "malformed",
+			content: "{{#if eagerTasks}}",
+			warning: "Ignoring invalid system prompt template file; using the bundled prompt",
+		},
+	];
+	for (const { name, content, warning } of fallbackCases) {
+		it(`warns when the selected template is ${name}`, async () => {
+			await withDiscoveryHome(async ({ cwd }) => {
+				const templatePath = path.join(cwd, "templates", "claude.md");
+				if (content !== undefined) await Bun.write(templatePath, content);
+				const warn = spyOn(logger, "warn").mockImplementation(() => {});
+				try {
+					await buildSystemPrompt(
+						options(cwd, {
+							model: "anthropic/claude-test",
+							modelSystemPromptTemplates: compile({ claude: templatePath }),
+						}),
+					);
+					expect(warn.mock.calls.filter(([message]) => message === warning)).toHaveLength(1);
+				} finally {
+					warn.mockRestore();
+				}
+			});
+		});
+	}
+});
+
+describe("systemPromptTemplates config validation", () => {
+	async function loadConfig(systemPromptTemplates: Record<string, unknown>): Promise<Settings> {
+		using tempDir = TempDir.createSync("@omp-system-prompt-templates-config-");
+		const agentDir = tempDir.join("agent");
+		await Bun.write(path.join(agentDir, "config.yml"), YAML.stringify({ systemPromptTemplates }));
+		const state = beginSettingsTest();
+		try {
+			return await Settings.init({ cwd: tempDir.join("project"), agentDir });
+		} finally {
+			AgentStorage.close();
+			restoreSettingsTestState(state);
+		}
+	}
+
+	it("rejects a config.yml naming blank keys and non-absolute paths, and accepts valid entries", async () => {
+		const error = await loadConfig({
+			"": "/tmp/blank.md",
+			glm: "prompts/x.md",
+			qwen: null,
+			claude: "~/x.md",
+			"openrouter/gpt": "/tmp/x.md",
+		}).then(
+			() => undefined,
+			(err: unknown) => err,
+		);
+		expect(error).toBeInstanceOf(Error);
+		const message = (error as Error).message;
+		expect(message).toContain(
+			'model patterns must not be blank (use SYSTEM.md or APPEND_SYSTEM.md for every model): ""',
+		);
+		expect(message).toContain("template paths must be absolute or start with ~/: glm, qwen");
+		expect(message).not.toContain("claude");
+		expect(message).not.toContain("openrouter/gpt");
+
+		const settings = await loadConfig({ claude: "~/x.md", "openrouter/gpt": "/tmp/x.md" });
+		expect(cfgSystemPromptTemplates.get(settings)).toEqual({ claude: "~/x.md", "openrouter/gpt": "/tmp/x.md" });
 	});
 });

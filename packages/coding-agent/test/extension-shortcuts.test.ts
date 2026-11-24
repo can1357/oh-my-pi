@@ -5,13 +5,12 @@ import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensi
 import type { Extension, ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { type KeyId } from "@oh-my-pi/pi-coding-agent/config/keybindings/key-id";
 import {
 	getKeybindings,
-	type KeyId,
+	KeybindingsManager,
 	setKeybindings,
-	type KeybindingsManager as TuiKeybindingsManager,
-} from "@oh-my-pi/pi-tui";
-import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+} from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import { logger } from "@oh-my-pi/pi-utils";
 
 const noop = (): void => {};
@@ -47,7 +46,7 @@ async function loadRunner(
 	runner.initialize(
 		{
 			sendMessage: noop,
-			sendUserMessage: noop,
+			sendUserMessage: async () => {},
 			appendEntry: noop,
 			setLabel: noop,
 			getActiveTools: () => [],
@@ -75,7 +74,7 @@ async function loadRunner(
 	return { runner, apis };
 }
 
-let loadedKeybindings: TuiKeybindingsManager;
+let loadedKeybindings: KeybindingsManager;
 
 beforeEach(() => {
 	loadedKeybindings = getKeybindings();

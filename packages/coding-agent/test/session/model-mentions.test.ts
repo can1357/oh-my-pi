@@ -18,7 +18,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { expandModelMentionTags } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
+import { expandModelMentionTags } from "@oh-my-pi/pi-coding-agent/session/model-mention-syntax";
 import {
 	MODEL_MENTION_ENTRY_TYPE,
 	ModelMentionRegistry,
@@ -282,7 +282,7 @@ describe("model mentions", () => {
 		});
 		const { dir, skill } = await createTaggedSkill();
 		const results = new RpcPromptResults(
-			{ isStreaming: false, hasAdmittedSubmission: false, queuedMessageCount: 0, hasPendingAsyncWork: () => false },
+			{ isStreaming: false, hasAdmittedSubmission: false, queuedMessageCount: 0, isRunActive: false },
 			() => {},
 		);
 		try {
@@ -330,6 +330,19 @@ describe("model mentions", () => {
 		const task = getBundledAgent("task");
 		if (!task) throw new Error("Missing bundled task agent");
 		expect(agents[0].systemPrompt).toBe(task.systemPrompt);
+	});
+
+	test("keeps sentence punctuation outside a registered model tag", () => {
+		expect(mentions.expandMentions("ask ^a/x, then ^b/y.")).toBe(
+			'ask <model agent="m1" name="X One"/>, then <model agent="m2" name="Y"/>.',
+		);
+	});
+
+	test("prefers a literal model id ending in punctuation over stripping it", () => {
+		vi.spyOn(registry, "getAvailable").mockReturnValue([...models, model("a", "x,", "Comma")]);
+		expect(mentions.expandMentions("ask ^a/x, and ^a/x,,")).toBe(
+			'ask <model agent="m1" name="Comma"/> and <model agent="m1" name="Comma"/>,',
+		);
 	});
 
 	test("registers a tagged effort as its own pseudonym under one canonical spelling", () => {

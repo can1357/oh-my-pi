@@ -9,11 +9,11 @@
 - Key collaborators:
    - `packages/coding-agent/src/tools/path-utils.ts` — normalize inputs; split base path vs glob (host paths and internal URLs).
    - `packages/coding-agent/src/internal-urls/url-filesystem.ts` — `InternalUrlFilesystem`, the URL filesystem native glob walks through.
-   - `packages/tui/src/tools/list-limit.ts` — apply result-count caps.
-   - `packages/tui/src/tools/streaming-output.ts` — truncate text output at byte cap.
+   - `packages/coding-agent/src/tools/list-limit.ts` — apply result-count caps.
+   - `packages/coding-agent/src/tools/streaming-output.ts` — truncate text output at byte cap.
    - `packages/coding-agent/src/tools/tool-result.ts` — build `content` and `details.meta`.
-   - `packages/tui/src/tools/output-meta.ts` — limit / truncation metadata.
-   - `packages/tui/src/tools/tool-errors.ts`, `packages/coding-agent/src/tools/tool-errors.ts` — user-facing errors and cancellation.
+   - `packages/coding-agent/src/tools/output-meta.ts` — limit / truncation metadata.
+   - `packages/coding-agent/src/tools/tool-errors.ts` — user-facing errors and cancellation.
    - `packages/coding-agent/src/tools/index.ts` — register the built-in local implementation.
 
 ## Inputs
@@ -96,7 +96,7 @@ The tool returns a single text block plus structured `details`.
 - Default result limit: `200` (`DEFAULT_LIMIT` in `packages/coding-agent/src/tools/glob.ts`).
 - Maximum result limit: `200` (`MAX_LIMIT`); larger inputs are clamped.
 - Scan timeout: fixed at `5000` ms, applied to both the built-in local branch and the custom-operations branch. In the custom branch it is a ceiling on waiting, not on the backend's own work: a call still outstanding at the deadline is abandoned, roots that already answered are kept, and the result is returned as a partial scan marked `timedOut`.
-- Output byte cap: `50 * 1024` bytes (`DEFAULT_MAX_BYTES` in `packages/tui/src/tools/streaming-output.ts`).
+- Output byte cap: `50 * 1024` bytes (`DEFAULT_MAX_BYTES` in `packages/coding-agent/src/tools/streaming-output.ts`).
 - Default generic line cap in `truncateHead()` is `3000`, but `glob` overrides `maxLines` to `Number.MAX_SAFE_INTEGER`, so byte size — not line count — is the practical output truncation cap.
 - Streaming update throttle: `200` ms between `onUpdate` emissions.
 - Sort order: most recent `mtime` first before directory grouping in the built-in local branch. The tool re-sorts merged native results in JS. Mtime ranking still requires walking the searched tree; a narrow filename pattern over a huge root does not avoid that cost.
@@ -110,7 +110,7 @@ The tool returns a single text block plus structured `details`.
    - `Limit must be a positive number`
    - `Path is not a directory: ...`
    - Timeout returns partial matches with an incomplete-scan notice directing the caller to a deeper directory. With zero matches it explicitly says the scan is `NOT proof of absence`. It is a successful truncated result, not a thrown error.
-   - `Cannot glob <url>: <reason>` when a URL target cannot be stat'ed through the URL filesystem: the handler's diagnosis (`Cannot glob artifact://9: Artifact 9 not found. Available: …`; `skill:// URL requires a skill name` for `skill://*/SKILL.md`) or the tier refusal (`ssh:// access needs exec approval; …`).
+   - `Cannot glob <url>: <reason>` when a URL target cannot be stat'ed through the URL filesystem: the handler's diagnosis (a missing `local://` file; `skill:// URL requires a skill name` for `skill://*/SKILL.md`) or the tier refusal (`ssh:// access needs exec approval; …`).
 - If the caller aborts, the local branch converts `AbortError` into `ToolAbortError`, and the custom branch rejects with the `AbortError` from `untilAborted()` (not `ToolAbortError`); the backend's `options.signal` is aborted and no further backend calls run. A deadline expiry is not a caller abort and is reported as a timeout, not as an error.
 - Non-`ENOENT` stat failures and other unexpected errors are rethrown.
 - Empty matches are not errors; they return the no-files text result.
@@ -126,3 +126,4 @@ The tool returns a single text block plus structured `details`.
 - The custom `GlobOperations.glob()` hook receives `ignore`, `limit`, `hidden`, `gitignore`, and `signal` (`GlobOperationsOptions`). `hidden` and `gitignore` arrive already resolved to booleans, so a delegate can apply the caller's policy directly instead of guessing defaults; `limit` is the clamped effective cap. The backend is expected to honour `signal`, but the tool does not depend on it: an unresponsive backend is abandoned at the deadline and reported as a timed-out partial result.
 - Built-in local globbing does not force `fileType: File`; it can return files and directories from native glob. A directory path is a recursive search scope, not exact-directory passthrough.
 - Explicit `skill://` walks follow directory links with the walker's cycle detection. Plugin skills stay within their plugin package; other skills stay within their real skill root. Linked roots and linked descendants retain `skill://` result identities. Ordinary host-tree walks still do not descend directory links.
+- Below an ovnfs checkout, native `glob()` asks the ovnfs daemon serving it instead of walking the NFS mount (`crates/xfs/src/ovnfs.rs`): omp-xfs finds ovnfs mounts in the host mount table, and the daemon lists the checkout's overlay in-process. Link-following walks (`skill://`) stay native, and any daemon failure falls back to the native walk.

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -123,14 +124,49 @@ describe("bash internal URLs through the shell filesystem", () => {
 		expect(refused.text).toContain("read-only working directory");
 	});
 
-	it("fails the command when a URL argument names nothing the provider knows", async () => {
-		const { text, isError } = await run(`'${process.execPath}' -e "console.log('ran')" skill://nope/tool.js`);
+	it("hands a program a URL argument the provider cannot resolve as written", async () => {
+		const script = path.join(tempDir, "argv.js");
+		await fs.writeFile(script, "console.log(process.argv.slice(2).join('\\n'));\n");
+		await fs.mkdir(localRoot, { recursive: true });
+		await fs.writeFile(path.join(localRoot, "data.txt"), "payload\n");
 
-		expect(isError).toBe(true);
-		expect(text).not.toContain("ran\n");
-		// Unix maps the provider's ENOENT to the native errno (its message is the
-		// OS's); other platforms keep the provider message. Both name the URL.
-		expect(text).toContain("cannot resolve skill://nope/tool.js");
+		// An identifier or message text that only looks like a path is the program's own.
+		const { text, isError } = await run(
+			`'${process.execPath}' '${script}' skill://nope/tool.js 'local://12.log; local://data.txt is the evidence'`,
+		);
+
+		expect(isError).toBeUndefined();
+		expect(text).toContain("skill://nope/tool.js\nlocal://12.log; local://data.txt is the evidence\n");
+	});
+
+	it.skipIf(process.platform === "win32")("hands omp every URL as written, selectors included", async () => {
+		const script = path.join(tempDir, "argv.js");
+		await fs.writeFile(script, "console.log(process.argv.slice(2).join('\\n'));\n");
+		await fs.mkdir(localRoot, { recursive: true });
+		await fs.writeFile(path.join(localRoot, "data.txt"), "payload\n");
+		await fs.writeFile(path.join(tempDir, "omp"), `#!/bin/sh\nexec '${process.execPath}' '${script}' "$@"\n`, {
+			mode: 0o755,
+		});
+
+		const { text, isError } = await run(`PATH="$PWD:$PATH" omp read local://data.txt:1-1 --from=local://data.txt`);
+
+		expect(isError).toBeUndefined();
+		expect(text).toContain("read\nlocal://data.txt:1-1\n--from=local://data.txt\n");
+	});
+
+	it("resolves URLs attached to an option, behind curl's @, and in the environment", async () => {
+		const script = path.join(tempDir, "argv.js");
+		await fs.writeFile(script, "console.log(process.argv.slice(2).concat(process.env.BODY).join('\\n'));\n");
+		await fs.mkdir(localRoot, { recursive: true });
+		await fs.writeFile(path.join(localRoot, "data.txt"), "payload\n");
+		const data = path.join(localRoot, "data.txt");
+
+		const { text, isError } = await run(
+			`BODY=local://data.txt '${process.execPath}' '${script}' -olocal://data.txt @local://data.txt body=@local://data.txt`,
+		);
+
+		expect(isError).toBeUndefined();
+		expect(text).toContain(`-o${data}\n@${data}\nbody=@${data}\n${data}\n`);
 	});
 
 	it("starts an external program in the directory a URL working directory aliases", async () => {
@@ -151,6 +187,48 @@ describe("bash internal URLs through the shell filesystem", () => {
 		const { isError } = await run("printf 'x' > omp://README.md");
 
 		expect(isError).toBe(true);
+	});
+});
+
+describe("bash writes to handler-written URLs", () => {
+	let manager: AsyncJobManager;
+
+	beforeEach(() => {
+		manager = new AsyncJobManager({});
+		session = {
+			...session,
+			getSessionId: () => tempDir,
+			asyncJobManager: manager,
+			settings: Settings.isolated({ "bash.autoBackground.enabled": false, "bashInterceptor.enabled": false }),
+		} as unknown as ToolSession;
+	});
+
+	afterEach(async () => {
+		await manager.dispose();
+	});
+
+	it("cancels a background job through a redirect to proc://<id>/kill and shows the handler's answer", async () => {
+		const started = await new BashTool(session).execute("bg", { command: "sleep 30", async: true, timeout: 0 });
+		const id = started.details?.async?.jobId;
+		if (!id) throw new Error("expected a background job");
+
+		const { text, isError } = await run(`: > proc://${id}/kill`);
+
+		expect(isError).toBeUndefined();
+		expect(manager.getJob(id)?.status).toBe("cancelled");
+		expect(text).toContain(`proc://${id}/kill:`);
+		expect(text).toContain(`Cancelled background job ${id}`);
+	});
+
+	it("fails the command with the handler's reason when it refuses a write, and refuses appends that would replace", async () => {
+		const missing = await run(": > proc://nope/kill");
+		expect(missing.isError).toBe(true);
+		expect(missing.text).toContain("Write to proc://nope/kill failed: Background job or service not found: nope");
+
+		// A handler write replaces a stored target whole, so `>>` must not silently drop its content.
+		const appended = await run("echo true >> cfg://async/enabled; echo status=$?");
+		expect(appended.text).toContain("status=1");
+		expect(appended.text).toContain("truncate (>) instead of appending (>>)");
 	});
 });
 

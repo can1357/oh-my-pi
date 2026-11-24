@@ -82,6 +82,60 @@ export const finalBeta = Reflect.get(globalThis, "__betaLoads") ?? 0;
 		expect(overrides["@oh-my-pi/pi-ai/oauth"]).toBe("omp-legacy-pi-bundled:@oh-my-pi/pi-ai/oauth");
 	});
 
+	it("loads utility root-wildcard subpaths used by external image-link extensions", async () => {
+		const keys = ["@oh-my-pi/pi-utils/lru", "@oh-my-pi/pi-utils/marked"] as const;
+		const entries = bundledEntries.filter(entry => (keys as readonly string[]).includes(entry.key));
+		expect(entries.map(entry => entry.key).sort()).toEqual([...keys]);
+
+		const observed = await runRegistryProbe(
+			entries,
+			`const { Lexer } = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-utils/marked"]();
+const { LRUCache } = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-utils/lru"]();
+const cache = new LRUCache({ max: 1 });
+cache.set("image", "photo.png");
+const paragraph = Lexer.lex("[photo.png](file:///tmp/photo.png)")[0];
+export const observed = {
+	cachedImage: cache.get("image"),
+	link: paragraph.tokens.map(token => ({ type: token.type, text: token.text, href: token.href })),
+};`,
+		);
+		expect(observed).toEqual({
+			cachedImage: "photo.png",
+			link: [{ type: "link", text: "photo.png", href: "file:///tmp/photo.png" }],
+		});
+		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
+		for (const key of keys) expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
+	});
+
+	it("loads exported .js utility aliases from the same host modules", async () => {
+		const keys = [
+			"@oh-my-pi/pi-utils/lru",
+			"@oh-my-pi/pi-utils/lru.js",
+			"@oh-my-pi/pi-utils/marked",
+			"@oh-my-pi/pi-utils/marked.js",
+		];
+		const entries = bundledEntries.filter(entry => keys.includes(entry.key));
+		expect(entries.map(entry => entry.key).sort()).toEqual(keys);
+
+		const observed = await runRegistryProbe(
+			entries,
+			`const marked = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-utils/marked"]();
+const markedJs = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-utils/marked.js"]();
+const lru = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-utils/lru"]();
+const lruJs = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-utils/lru.js"]();
+const cache = new lruJs.LRUCache({ max: 1 });
+cache.set("image", "photo.png");
+export const observed = {
+	sharedLexer: markedJs.Lexer === marked.Lexer,
+	sharedCache: lruJs.LRUCache === lru.LRUCache,
+	text: markedJs.Lexer.lex(cache.get("image"))[0].text,
+};`,
+		);
+		expect(observed).toEqual({ sharedLexer: true, sharedCache: true, text: "photo.png" });
+		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
+		for (const key of keys) expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
+	});
+
 	it("expands wildcard exports for concrete on-disk targets (issue #3442 follow-up)", () => {
 		// `pi-ai/oauth/anthropic` is exposed via the `./oauth/*` wildcard export;
 		// the original fix only bundled non-wildcard subpaths, so peer-only plugins
@@ -191,6 +245,8 @@ export const observed = buildModel({
 		// the virtual registry would expand the binary entry's transitive graph.
 		expect(bundledModuleKeys.has("@oh-my-pi/pi-coding-agent/cli")).toBe(false);
 		expect(bundledModuleKeys.has("@oh-my-pi/pi-coding-agent/main")).toBe(false);
+		expect(bundledModuleKeys.has("@oh-my-pi/pi-coding-agent/cli.js")).toBe(false);
+		expect(bundledModuleKeys.has("@oh-my-pi/pi-coding-agent/main.js")).toBe(false);
 	});
 
 	it("does not bundle main-thread-unsafe worker entrypoints", () => {
@@ -205,17 +261,10 @@ export const observed = buildModel({
 		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
 		const missing: string[] = [];
 		for (const key of bundledModuleKeys) {
-			// pi-ai/pi-coding-agent/pi-tui roots intentionally use the legacy compat
-			// shims (they re-attach `Type`, `defineTool`, `decodeKittyPrintable`, etc.
-			// dropped from the canonical package surfaces); typebox is served via
-			// TYPEBOX_SHIM_PATH.
-			if (
-				key === "@oh-my-pi/pi-ai" ||
-				key === "@oh-my-pi/pi-coding-agent" ||
-				key === "@oh-my-pi/pi-tui" ||
-				key === "typebox"
-			)
-				continue;
+			// pi-ai/pi-coding-agent roots intentionally use the legacy compat shims
+			// (they re-attach `Type`, `defineTool`, etc. dropped from the canonical
+			// package surfaces); typebox is served via TYPEBOX_SHIM_PATH.
+			if (key === "@oh-my-pi/pi-ai" || key === "@oh-my-pi/pi-coding-agent" || key === "typebox") continue;
 			if (overrides[key] !== `omp-legacy-pi-bundled:${key}`) {
 				missing.push(key);
 			}
@@ -250,50 +299,30 @@ export const observed = buildModel({
 		expect(bundledModuleKeys.has("@oh-my-pi/pi-coding-agent/slash-commands/helpers/active-oauth-account")).toBe(true);
 	});
 
-	it("loads pi-tui native/* modules through the bundled registry in compiled mode (issue #14834)", async () => {
-		// `native/*` was only reachable through pi-tui's root `./*` catch-all, which
-		// the generator skips, so extensions importing it failed inside the binary.
-		const keys = ["@oh-my-pi/pi-tui/native/overlay", "@oh-my-pi/pi-tui/native/spans"] as const;
-		const entries = bundledEntries.filter(entry => (keys as readonly string[]).includes(entry.key));
-		expect(entries.map(entry => entry.key).sort()).toEqual([...keys]);
-
-		const observed = await runRegistryProbe(
-			entries,
-			`const { actionBar, actionButton } = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-tui/native/overlay"]();
-const { plainLine } = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-tui/native/spans"]();
-export const observed = { role: actionBar([actionButton("Go", "go")]).p.role, line: plainLine("\\x1b[1ma\\n b\\x1b[0m") };`,
-		);
-		expect(observed).toEqual({ role: "omp.actions", line: "a b" });
-		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
-		for (const key of keys) expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
-	});
-
-	it("serves pi-tui root-level, nested, and index spellings from the host graph (issue #15659)", async () => {
-		// pi-tui's root `./*` catch-all and `x/index` spellings used to stay out of
-		// the registry, so a compiled extension loaded those specifiers from its
-		// own node_modules and saw a second `TERMINAL` / theme record.
+	it("serves pi-tui's root, JSX runtime and nested modules from the host graph", async () => {
+		// Extension nodes must come from the host's pi-tui: a second copy would
+		// bring its own reactive runtime, theme and painter registries. pi-tui's
+		// `./*` export targets `.js` names of TypeScript sources.
 		const keys = [
-			"@oh-my-pi/pi-tui/terminal-capabilities",
-			"@oh-my-pi/pi-tui/chat/svg-figure",
-			"@oh-my-pi/pi-tui/theme",
-			"@oh-my-pi/pi-tui/theme/index",
+			"@oh-my-pi/pi-tui",
+			"@oh-my-pi/pi-tui/jsx-runtime",
+			"@oh-my-pi/pi-tui/theme/runtime",
+			"@oh-my-pi/pi-tui/term/painters/md",
 		] as const;
 		const entries = bundledEntries.filter(entry => (keys as readonly string[]).includes(entry.key));
 		expect(entries.map(entry => entry.key).sort()).toEqual([...keys].sort());
 
 		const observed = await runRegistryProbe(
 			entries,
-			`const theme = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-tui/theme"]();
-const themeIndex = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-tui/theme/index"]();
-const svg = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-tui/chat/svg-figure"]();
-const caps = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-tui/terminal-capabilities"]();
+			`const ui = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-tui"]();
+const runtime = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-tui/jsx-runtime"]();
+const theme = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-tui/theme/runtime"]();
 export const observed = {
-	theme: theme.setThemeInstance === themeIndex.setThemeInstance,
-	svg: typeof svg.svgFigurePalette,
-	caps: typeof caps.setTerminalImageProtocol,
+	node: ui.isUiNode(runtime.jsx("text", { text: "x" })),
+	theme: typeof theme.currentTheme,
 };`,
 		);
-		expect(observed).toEqual({ theme: true, svg: "function", caps: "function" });
+		expect(observed).toEqual({ node: true, theme: "function" });
 		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
 		for (const key of keys) expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
 	});

@@ -22,7 +22,7 @@ let fixture: ServiceWorker<IntegrationsProbe>;
 beforeEach(async () => {
 	dir = path.join(os.tmpdir(), `omp-mcp-scoped-tools-${Snowflake.next()}`);
 	fs.mkdirSync(dir, { recursive: true });
-	manager = new MCPManager(dir, null, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
+	manager = new MCPManager(dir, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
 	await manager.connectServers(
 		{ alpha: { type: "stdio", command: process.execPath, args: [path.join(FIXTURES, "lazy-loader-mcp.ts")] } },
 		{},
@@ -53,4 +53,31 @@ it("a worker hosting two sessions reads each session's own MCP tool view", async
 	const [loaderView, siblingView] = await fixture.probe.mcpViews(["loader", "sibling"]);
 	expect(loaderView).toContain(LOADED_TOOL);
 	expect(siblingView).not.toContain(LOADED_TOOL);
+}, 20_000);
+
+it("attributes identical provider call IDs to each worker's own completed call", async () => {
+	const sibling = await startServiceWorker<IntegrationsProbe>(
+		new URL("../fixtures/integrations-worker.ts", import.meta.url),
+		[settingsThreadService, authService, integrationsThreadService],
+	);
+	try {
+		const barrier = new Int32Array(new SharedArrayBuffer(4));
+		const providerCallId = "ollama:0:load_extra";
+		const [loaderOutcome, siblingOutcome] = await Promise.all([
+			fixture.probe.mcpScopedCall("loader", LOADER_TOOL, providerCallId, barrier),
+			sibling.probe.mcpScopedCall("sibling", LOADER_TOOL, providerCallId, barrier),
+		]);
+		expect(loaderOutcome.error).toBeUndefined();
+		expect(siblingOutcome.error).toBeUndefined();
+
+		const [loaderViews, siblingViews] = await Promise.all([
+			fixture.probe.mcpViews(["loader"]),
+			sibling.probe.mcpViews(["sibling"]),
+		]);
+		expect(loaderViews[0]).toContain(LOADED_TOOL);
+		expect(siblingViews[0]).toContain(LOADED_TOOL);
+		expect(manager.getTools().map(tool => tool.mcpToolName)).not.toContain(LOADED_TOOL);
+	} finally {
+		await sibling.stop();
+	}
 }, 20_000);

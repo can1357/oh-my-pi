@@ -1,9 +1,11 @@
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, isExcludedFromContext } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { signal } from "@oh-my-pi/pi-tui";
 import type { MeterProvider } from "@opentelemetry/api";
 import { logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import composerPredictionPrompt from "../../prompts/system/composer-prediction-user.md" with { type: "text" };
 import type { AgentViewSession } from "../../session/agent-session-handle";
+import { completionRecord } from "../../session/model-usage-journal";
 import { isAdvisorCard } from "../../session/queued-messages";
 import { cfgComposerPredictionAlternatives, cfgComposerPredictions } from "../settings";
 import type { InteractiveModeContext } from "../types";
@@ -39,13 +41,16 @@ const LIST_MARKER = /^\s*(?:[-*•]|\d{1,2}[.)])\s+/;
 const NON_WORD = /[^\p{L}\p{N}]+/gu;
 
 /**
- * The message a prediction is keyed on: the last one that is not an advisor card. Silent advisor
- * notes land after the turn without changing what the user would reply to.
+ * The message a prediction is keyed on: the last one that reaches the model and is not an advisor
+ * card. Silent advisor notes and rows kept out of context (an extension's stats line sent with
+ * `excludeFromContext`) land after the turn without changing what the user would reply to.
  */
 function predictionAnchor(session: AgentViewSession): AgentMessage | undefined {
 	const messages = session.messages;
 	for (let i = messages.length - 1; i >= 0; i--) {
-		if (!isAdvisorCard(messages[i])) return messages[i];
+		const message = messages[i];
+		if (isAdvisorCard(message) || isExcludedFromContext(message)) continue;
+		return message;
 	}
 	return undefined;
 }
@@ -73,7 +78,7 @@ interface Prediction {
 	rank: number | undefined;
 }
 
-type PredictionContext = Pick<InteractiveModeContext, "settings" | "viewSession" | "focusedAgentId" | "editor" | "ui">;
+type PredictionContext = Pick<InteractiveModeContext, "settings" | "viewSession" | "focusedAgentId" | "composer">;
 
 /**
  * Normalize a prediction reply to the single line the composer shows, or
@@ -137,7 +142,8 @@ export class ComposerPredictionController {
 	/** Metrics sink; the global provider when unset. */
 	readonly #meterProvider: MeterProvider | undefined;
 	#abort: AbortController | undefined;
-	#prediction: Prediction | undefined;
+	/** Reactive: the composer's ghost reads {@link choices}, so offering or retiring repaints it. */
+	readonly #prediction = signal<Prediction | undefined>(undefined);
 
 	constructor(ctx: PredictionContext, options: { deadlineMs?: number; meterProvider?: MeterProvider } = {}) {
 		this.#ctx = ctx;
@@ -147,7 +153,7 @@ export class ComposerPredictionController {
 
 	/** The prediction's alternatives for the conversation as it stands now, most likely first, if one is ready. */
 	get choices(): readonly string[] | undefined {
-		const prediction = this.#prediction;
+		const prediction = this.#prediction();
 		if (!prediction || !this.#isCurrent(prediction.source)) return undefined;
 		return prediction.choices;
 	}
@@ -163,7 +169,7 @@ export class ComposerPredictionController {
 		// prediction), and a compaction would rewrite the history the prediction reads: skip the
 		// billed request either way.
 		const model = session.model;
-		if (!model || session.isStreaming || session.isCompacting || this.#ctx.editor.getText()) return;
+		if (!model || session.isStreaming || session.isCompacting || this.#ctx.composer.text()) return;
 		const abort = new AbortController();
 		this.#abort = abort;
 		const source: PredictionSource = {
@@ -180,7 +186,7 @@ export class ComposerPredictionController {
 
 	/** The composer painted the current prediction; its first painted frame counts it as shown. */
 	shown(): void {
-		const prediction = this.#prediction;
+		const prediction = this.#prediction.peek();
 		if (!prediction || prediction.shownAt !== undefined || !this.#isCurrent(prediction.source)) return;
 		prediction.shownAt = performance.now();
 		recordPredictionShown(prediction.source.model, prediction.choices.length, this.#meterProvider);
@@ -188,7 +194,7 @@ export class ComposerPredictionController {
 
 	/** The user inserted the alternative at `rank` (Tab or Right); the last insert before retirement counts. */
 	accepted(rank: number): void {
-		const prediction = this.#prediction;
+		const prediction = this.#prediction.peek();
 		if (!prediction || !this.#isCurrent(prediction.source)) return;
 		// Inserted before any frame painted it: outside the shown population the rate is taken over.
 		if (prediction.rank === undefined && prediction.shownAt !== undefined) {
@@ -201,7 +207,7 @@ export class ComposerPredictionController {
 	cancel(): void {
 		this.#abort?.abort();
 		this.#abort = undefined;
-		const prediction = this.#prediction;
+		const prediction = this.#prediction.peek();
 		if (!prediction) return;
 		// Resolved on retirement, so an accepted prediction counts the alternative the user kept.
 		const { source, choices, shownAt, rank, acceptDelayMs } = prediction;
@@ -225,8 +231,7 @@ export class ComposerPredictionController {
 				this.#meterProvider,
 			);
 		}
-		this.#prediction = undefined;
-		this.#ctx.ui.requestRender();
+		this.#prediction.set(undefined);
 	}
 
 	async #run(source: PredictionSource, abort: AbortController, alternatives: boolean): Promise<void> {
@@ -235,7 +240,7 @@ export class ComposerPredictionController {
 		let outcome: PredictionOutcome;
 		let offered: number | undefined;
 		try {
-			const { replyText, assistantMessage } = await source.session.runEphemeralTurn({
+			const { replyText } = await source.session.runEphemeralTurn({
 				promptText: prompt.render(composerPredictionPrompt, {
 					skip: SKIP_REPLY,
 					choices: alternatives ? MAX_PREDICTION_CHOICES : undefined,
@@ -243,9 +248,8 @@ export class ComposerPredictionController {
 				maxTokens: source.session.ephemeralMaxTokensPreservesRequest() ? PREDICTION_MAX_TOKENS : undefined,
 				minimizeEffort: true,
 				signal: AbortSignal.any([abort.signal, deadline]),
+				onUsage: message => this.#recordUsage(source, message),
 			});
-			// Paid for even when the reply arrives too late to show.
-			this.#recordUsage(source, assistantMessage);
 			const choices = parseReply(replyText, alternatives);
 			outcome = this.#offer(source, abort, choices);
 			if (outcome === "offered") offered = choices?.length;
@@ -264,8 +268,7 @@ export class ComposerPredictionController {
 		if (!this.#isCurrent(source)) return "stale";
 		if (!choices) return "skipped";
 		// Counted as shown by the composer's first frame that paints it (`shown()`), not here.
-		this.#prediction = { choices, source, shownAt: undefined, acceptDelayMs: undefined, rank: undefined };
-		this.#ctx.ui.requestRender();
+		this.#prediction.set({ choices, source, shownAt: undefined, acceptDelayMs: undefined, rank: undefined });
 		return "offered";
 	}
 
@@ -279,6 +282,11 @@ export class ComposerPredictionController {
 					model: message.model,
 					usage: message.usage,
 					stopReason: message.stopReason,
+					errorMessage: message.errorMessage,
+					duration: message.duration,
+					ttft: message.ttft,
+					// The prompt is a static template, so only the reply is kept.
+					completion: completionRecord(undefined, message),
 				},
 				{ sessionId: source.sessionId, parentId: source.leafId },
 			);

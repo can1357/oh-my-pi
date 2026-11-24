@@ -184,10 +184,10 @@ roles under `type: "message"`:
 | `developer`              | pi-ai         | Developer-role instruction turn.                                                  |
 | `assistant`              | pi-ai         | Model turn; tool calls live in its `content` as `{ "type": "toolCall" }` blocks.  |
 | `toolResult`             | pi-ai         | Result of one tool call — **not** `tool_result`. Carries `toolCallId`/`toolName`. |
-| `bashExecution`          | pi-tui        | Standalone `!`-bash run.                                                          |
-| `pythonExecution`        | pi-tui        | Standalone Python run.                                                            |
-| `hookMessage`            | pi-tui        | Legacy hook-injected message, retained for migration; new code uses `custom`.     |
-| `fileMention`            | pi-tui        | Inlined `@file` mention contents.                                                 |
+| `bashExecution`          | coding-agent  | Standalone `!`-bash run.                                                          |
+| `pythonExecution`        | coding-agent  | Standalone Python run.                                                            |
+| `hookMessage`            | coding-agent  | Legacy hook-injected message, retained for migration; new code uses `custom`.     |
+| `fileMention`            | coding-agent  | Inlined `@file` mention contents.                                                 |
 
 Branch and compaction summary roles are synthesized from dedicated top-level entries
 during session-context reconstruction. Extension messages sent through `pi.sendMessage`
@@ -208,7 +208,7 @@ a message role. An extension keying off `message.role` that matches snake_case c
 `toolResult` (and every other camelCase role) — no error is raised. Match the camelCase
 values above verbatim. The base roles are `Message` in `packages/ai/src/types.ts`; the rest
 are merged into `CustomAgentMessages` (`packages/agent/src/compaction/messages.ts`,
-`packages/tui/src/chat/messages.ts`). Coding-agent re-exports the custom types and
+`packages/coding-agent/src/session/transcript/messages.ts`). Coding-agent re-exports the custom types and
 converts them for provider context in `packages/coding-agent/src/session/messages.ts`.
 
 ### `model_usage`
@@ -218,6 +218,73 @@ optional model `role`, `api`, `provider`, `model`, `usage`, `stopReason`, and
 optional `errorMessage`. These records contribute usage accounting, not model
 messages or transcript turns. `appendModelUsage()` attaches the record to the
 initiating session/branch and rejects stale session ownership.
+
+Optional fields describe the call without copying the static prompt, which is
+identified by `purpose`.
+
+- `duration` / `ttft`: request wall time and time to first token, in ms.
+- `judgment`: a native judge query (TypeSafe jev and other judgment APIs).
+  `state` is the `sha256` of the canonical state, which is `states.id` in the
+  judgment answer cache (`~/.omp/cache/judgment-cache.db`): that database holds
+  the state text once and, under `oracle(state, model, name)`, each question's
+  rendered instructions, criteria, and full answer. `answers` keeps the headline
+  of each answer the request produced, by question id: a noul's probability of
+  yes, `[label, confidence]` for a choice, `[score, confidence]` for a score,
+  `[top, bottom, left, right, confidence]` for a box. `cached` counts questions
+  the cache answered instead (not billed, not in `answers`). A judgment answered
+  wholly from the cache writes no entry; a failed request has empty `answers`.
+- `completion`: a text side channel (title generation, recaps, commit
+  messages, memory extraction, …). `prompt` is the dynamic user-turn text the
+  model was sent; it is absent when the request read the conversation at the
+  entry's `parentId` (`title-fork`, `recap`, `btw`). `reply` is the raw reply
+  before parsing, or the tool arguments as JSON when the call answered through
+  a forced tool call. Either side is left out, never truncated, when it exceeds
+  4,000 characters (a diff, a transcript). Calls whose result the session
+  already stores (`compaction:<method>`, `branch-summary`, `web-search`,
+  `image-gen`, `image-describe`) journal usage and timing only. Compaction
+  purposes name the method that made the request: `compaction:remote`
+  (provider-native compaction, including OpenAI `/responses/compact` and V2
+  streaming), `compaction:soft` (local summary requests), `compaction:handoff`
+  (the handoff document); an advisor compacting its own history journals
+  `compaction:advisor`.
+
+An on-device model call that produced output is journaled with zero usage, so
+its count and `duration` are still visible.
+
+```json
+{
+	"type": "model_usage",
+	"id": "4e1e5bcf",
+	"parentId": "40ec204f",
+	"timestamp": "2026-11-18T10:16:19.964Z",
+	"purpose": "find",
+	"role": "typesafe",
+	"api": "typesafe",
+	"provider": "typesafe",
+	"model": "jev-1.14.0",
+	"usage": { "input": 824, "output": 87, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 911, "cost": { "input": 0.0000346, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0.0000346 } },
+	"stopReason": "stop",
+	"duration": 212,
+	"judgment": {
+		"state": "9f2c1a7b3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8",
+		"answers": { "p00": 0.46, "p01": 0.02, "kind": ["helper", 0.41] },
+		"cached": 1
+	}
+}
+```
+
+```json
+{
+	"type": "model_usage",
+	"purpose": "title",
+	"duration": 640,
+	"ttft": 410,
+	"completion": {
+		"prompt": "<user>\nfix the share bar\n</user>",
+		"reply": "<title>Fix stats share bar</title>"
+	}
+}
+```
 
 ### `model_change`
 
@@ -236,6 +303,29 @@ initiating session/branch and rejects stale session ownership.
 `resolvedModelIsFallback` optionally marks a retry-fallback transition. The
 reserved role `fallback` is ephemeral: model restoration prefers the configured
 default instead of restoring that role's temporary model.
+
+A retry fallback's entry also carries `fallback`: the model it left (`from`),
+what moved it (`trigger`: `request-error`, `agent-loop` when the agent loop
+stopped the turn itself and no request failed, `usage-preflight`, or
+`missing-credential`), and the error or condition (`reason`):
+
+```json
+{
+	"type": "model_change",
+	"model": "openai/gpt-4o",
+	"role": "fallback",
+	"resolvedModelIsFallback": true,
+	"fallback": {
+		"from": "anthropic/claude-sonnet-4-5",
+		"trigger": "agent-loop",
+		"reason": "Soft tool requirement 'bash' was not satisfied after 3 forced turns; aborting to avoid an unbounded force loop."
+	}
+}
+```
+
+Anonymized exports keep `from` with the same model-identity rule as `model`,
+keep `trigger`, and redact `reason` like `errorMessage`, since a provider error
+can echo request content.
 
 ### `service_tier_change`
 
@@ -331,9 +421,11 @@ Current core-owned values include:
 | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tool_execution_start`   | `{ toolCallId: string, toolName: string, startedAt: string, args?: { command?: string, path?: string }, intent?: string }`                                                                                                                               | `AgentSession` writes a marker immediately before a tool implementation starts. Exit diagnostics combine it with assistant tool calls and tool results to reconstruct calls left pending. Argument summaries are truncated projections; older full argument objects are accepted on read.                                                                                                                                                                              |
 | `session_exit`           | `{ reason: string, kind: "normal" \| "signal" \| "fatal" \| "process_exit", recordedAt: string, pendingToolCalls?: Array<{ toolCallId?: string, toolName: string, args?: unknown, intent?: string, assistantTimestamp?: number, startedAt?: string }> }` | Normal disposal and postmortem teardown record the exit when the session has assistant history or pending tool calls. The writer immediately calls `flushSync()` so a subsequent process can inspect the last durable turn; a flush failure is logged. Resume diagnostics consume the latest valid record.                                                                                                                                                             |
+| `tool_approval_requested` | `{ toolCallId: string, parentToolCallId?: string, toolName: string, approvalMode: string, reason?: string, requestedAt: string }` | The extension tool wrapper writes it to disk before the approval prompt opens, whether or not an extension listens to the matching event, creating the session file if there is no assistant message yet. The call is still waiting until a `tool_approval_resolved` or a tool result for its `toolCallId` follows, or, when an eval cell or kernel-defined tool dispatched it, a tool result for its `parentToolCallId` (fork and resume repair close an interrupted assistant call with a tool result, but never the nested calls an eval made), so another process reading the file can tell a session blocked on the user from one still working. |
+| `tool_approval_resolved` | `{ toolCallId: string, toolName: string, approved: boolean, reason?: string, resolvedAt: string }` | Ends that wait: approved, denied (`reason: "denied by user"`), aborted, or refused because no interactive UI is available. |
 | `user_todo_edit`         | `{ phases: TodoPhase[] }`                                                                                                                                                                                                                                | SDK/UI todo editing persists the complete phase snapshot. Todo restoration scans backward for the latest snapshot (or a successful `todo` tool result) and restores its phases.                                                                                                                                                                                                                                                                                        |
 | `vibe-session-lifecycle` | Version-1 event with `{ version: 1, id, ownerId, parentSessionId, action, ... }`; `spawn` adds `cli`, `agent`, `childSessionFile`, and `createdAt`; turn events add `turn`; tombstone events add `reason`.                                               | Vibe runtime persists and replays child spawn, turn-started/settled, tombstone, and tombstone-revoked transitions to recover owned child sessions and in-flight state. Invalid or out-of-scope events are ignored.                                                                                                                                                                                                                                                     |
-| `autoresearch-control`   | `{ mode: "on" \| "off" \| "clear", goal?: string }`                                                                                                                                                                                                      | The built-in autoresearch command writes mode/goal changes, and experiment-limit shutdown writes `mode: "off"`. `reconstructControlState()` replays valid records on resume to restore whether autoresearch is active and its goal; `clear` removes the goal.                                                                                                                                                                                                          |
+| `autoresearch-control`   | `{ mode: "on" \| "off" \| "clear", goal?: string }`                                                                                                                                                                                                      | The built-in autoresearch command writes mode/goal changes, and experiment-limit shutdown writes `mode: "off"`. `reconstructControlState()` replays valid records on resume to restore whether autoresearch is active and its goal; `clear` removes the goal. See [Autoresearch](./autoresearch.md).                                                                                                                                                                   |
 | `system-prompt-digest`   | Hexadecimal string: a hash of the base system prompt blocks (before a per-turn hook override)                                                                                                                                                            | `AgentSession` appends it just before a primary assistant reply with provider output whose prompt differs from the branch's latest record, and carries it onto a rewind branch with the reparented sibling reply. Before a resumed session's first model call, a prefix-bound tool-list rebuild commits only if it reproduces that prompt; without a record it freezes. Memory recall injected into the base prompt is part of the hash, so such sessions stay frozen. |
 
 On resume, a valid latest `session_exit` after a non-terminal conversation tail causes `AgentSession`/SDK initialization to append a synthetic assistant message with `stopReason: "aborted"` and rebuild the display/agent context. A normal exit only triggers that transition when it recorded pending tool calls; abnormal exit kinds can trigger it without that list. This prevents the restored transcript from presenting an interrupted turn as still live.
@@ -342,7 +434,7 @@ The strings in the table are reserved for their core consumers. Extensions MUST 
 
 ### `custom_message`
 
-Extension-provided message that does participate in LLM context. `content` can be a string or text/image content blocks, and `attribution` records whether the user or agent initiated it.
+Extension-provided message that participates in LLM context unless `excludeFromContext` is `true` (then it is only drawn and saved, like a `!!` bash row). `content` can be a string or text/image content blocks, and `attribution` records whether the user or agent initiated it.
 
 ```json
 {
@@ -426,10 +518,10 @@ rather than guessing from the historical-display `resolvedModel`. These fields
 are preserved in anonymized exports under the same flag, model-identity and
 effort rules as other session metadata.
 `isolated: true` marks an isolation-worktree child that cannot be cold-revived.
-`mountedTools` names the entries of `tools` presented as `xd://` devices rather than top-level
+`mountedTools` names the entries of `tools` presented as tool commands rather than top-level
 tools; cold revival mounts them again, so the revived session sends the same tool list and tool
-inventory. Files without it revive every name in `tools` top-level, and a seance restore uses its
-own validated tool contract instead. Anonymized exports treat it like `tools`.
+inventory. Files without it revive every name in `tools` top-level. Anonymized exports treat it like
+`tools`.
 `systemPrompt` holds the base prompt blocks a model call was built from (never a per-turn
 `before_agent_start` override), and revival replays them unchanged. A session appends a newer
 `session_init` when a model call runs on a different base prompt or work-pool yield items
@@ -505,7 +597,7 @@ The underlying model is append-only tree + mutable leaf pointer:
 
 `getEntries()` returns all non-header entries in insertion order. There is no separate persisted leaf field: loading rebuilds the leaf from the last physical entry. Pointer-only `branch()`/`resetLeaf()` changes therefore need a subsequent append to survive reload. `discardEntryDurably()` appends a metadata branch marker and rewrites the journal to make a discarded path durable.
 
-`createBranchedSession(leafId, { copyArtifacts? })` creates a new identity containing only the selected root-to-leaf path. It drops old label records and recreates the resolved labels for retained entries. Unlike a full fork, it does not inherit the provider prompt-cache key. With `copyArtifacts` (used by `AgentSession.fork(entryId)`), the artifacts directory is copied in the background and the new artifact manager waits for the copy before allocating ids or resolving `artifact://`, as for a move to a sibling file.
+`createBranchedSession(leafId, { copyArtifacts? })` creates a new identity containing only the selected root-to-leaf path. It drops old label records and recreates the resolved labels for retained entries. Unlike a full fork, it does not inherit the provider prompt-cache key. With `copyArtifacts` (used by `AgentSession.fork(entryId)`), the artifacts directory is copied in the background and the new artifact manager waits for the copy before allocating ids or resolving spills (`local://N.log`), as for a move to a sibling file.
 
 ## Context Reconstruction (`buildSessionContext`)
 
@@ -555,10 +647,10 @@ Ordinary completed appends update memory and local file storage synchronously on
 - `flush()` drains async disk/storage queues and the open writer (no `fsync`); `flushSync()` drains synchronously supported work or rewrites a non-current file. It cannot confirm queued remote publication; those backends still require awaited `flush()`/drain.
 - Atomic full rewrites use storage `writeTextAtomic` with a commit guard and expected byte-size precondition; file storage stages then renames over the target, including an EPERM-safe move-aside fallback.
 - Local appends and publication share a cross-process publish lock. A changed byte size raises `SessionWriteConflictError`; lock contention raises `SessionLockError` without publishing the staged rewrite. This is not a content-hash comparison and cannot protect against non-cooperating external writers.
-- `FileSessionStorage` holds a process-owned OS lease on each session a process writes, keyed by the session id rather than the file's path, so every process that reaches one journal (through a symlink, a hard link, or after a move) meets the same lease. The lease is `pi-utils` `tryAcquireFileLock` on `<session-owners>/<session-id>`, where `<session-owners>` is `~/.omp/run/session-owners` (XDG: `$XDG_STATE_HOME/omp/run/session-owners`), shared across profiles: on Linux an abstract socket and on Windows a named mutex, neither of which creates a file; on macOS and other non-Linux Unix a `flock` on a sidecar in that directory. Only write paths claim it, so the first process to write a session owns it; opening a session to inspect it (`omp share`, `--export`, `render`) never does. Managers in one process share the lease; it is released on close or a session switch, and the kernel drops it when its process exits. Processes with different home or state directories do not meet in this lease. A plain copy of a session file keeps its id, so a process writing the copy while the original's writer is live moves to a sibling; a collab guest's replica takes its own id (`parentSession` is the host's) so it never contends with the host.
-- A process never writes a session whose lease another live process holds: its first write moves the session to a fresh sibling `<timestamp>_<new-session-id>.jsonl` in the same directory, publishes the whole in-memory transcript there once, and continues appending incrementally. The owner's file is left untouched. Like `fork`, the sibling gets a new session id with `parentSession` pointing at the old one and keeps the provider prompt-cache key, so resume-by-id, the title index, and the picker never see two files for one id. The artifacts directory is copied in the background without overwriting files the moved session has already written; its artifact manager waits for the copy before allocating ids or resolving `artifact://`, and `flush()`/`close()` await it. `local://` and `agent://` reads that bypass the artifact manager can miss pre-move files until the copy finishes.
+- `FileSessionStorage` holds a process-owned OS lease on each session a process writes, keyed by the session id rather than the file's path, so every process that reaches one journal (through a symlink, a hard link, or after a move) meets the same lease. The lease is `pi-utils` `tryAcquireFileLock` on `<session-owners>/<session-id>`, where `<session-owners>` is `~/.omp/run/session-owners` (XDG: `$XDG_STATE_HOME/omp/run/session-owners`), shared across profiles: on Windows a named mutex, which creates no file; on Linux an open-file-description (`F_OFD_SETLK`) lock and on macOS and other Unix a `flock`, both on a sidecar in that directory. On Linux a lease whose abstract-socket name an older omp build still binds also counts as held. Only write paths claim it, so the first process to write a session owns it; opening a session to inspect it (`omp share`, `--export`, `render`) never does. Managers in one process share the lease; it is released on close or a session switch, and the kernel drops it when its process exits. Processes with different home or state directories do not meet in this lease. A plain copy of a session file keeps its id, so a process writing the copy while the original's writer is live moves to a sibling; a collab guest's replica takes its own id (`parentSession` is the host's) so it never contends with the host.
+- A process never writes a session whose lease another live process holds: its first write moves the session to a fresh sibling `<timestamp>_<new-session-id>.jsonl` in the same directory, publishes the whole in-memory transcript there once, and continues appending incrementally. The owner's file is left untouched. Like `fork`, the sibling gets a new session id with `parentSession` pointing at the old one and keeps the provider prompt-cache key, so resume-by-id, the title index, and the picker never see two files for one id. The artifacts directory is copied in the background without overwriting files the moved session has already written; its artifact manager waits for the copy before allocating ids or resolving spills, and `flush()`/`close()` await it. `local://` and `agent://` reads that bypass the artifact manager can miss pre-move files until the copy finishes.
 - `moveTo()` refuses, before anything moves or any directory is created, to move a session another live process writes or to replace a destination file whose session (by its header id) another live process writes.
-- Another program can check ownership without claiming: `isSessionLeaseHeld(sessionId)`, `omp session lease --json -- <id>...` (`{"held": [...], "unknown": [...]}`), and RPC `get_session_lease` observe the lease without taking or opening it (a connect probe on Linux, `F_GETLK` on other Unix, a `\BaseNamedObjects` directory listing on Windows), so they never make a concurrent claim fork the session.
+- Another program can check ownership without claiming: `isSessionLeaseHeld(sessionId)`, `omp session lease --json -- <id>...` (`{"held": [...], "unknown": [...]}`), and RPC `get_session_lease` observe the lease without taking it (an `F_OFD_GETLK` query plus a connect probe of the older abstract-socket name on Linux, `F_GETLK` on other Unix, a `\BaseNamedObjects` directory listing on Windows), so they never make a concurrent claim fork the session.
 - Under `bun test`, the lease directory is `<os temp>/omp-test-session-owners-<uid>` instead of the real state directory. It is exported as `PI_TEST_SESSION_OWNERS_DIR` when `session-storage` loads; a test that spawns an omp process which writes sessions must pass `env: process.env` (Bun's default is the launch environment), or run under `ci-test-ts`, whose children inherit `PI_TEST_RUNTIME=1` and derive the same directory.
 - On the file and memory backends, a `SessionWriteConflictError` on durable bytes during a full rewrite means a writer without the lease (an older omp, an external tool) changed the file. The manager reads it back, keeps the entries it lacks as a side branch (the active leaf stays its own), and retries against the size it read, up to three times per rewrite. If that writer changes the file inside every retry, the session leaves the file to it and moves to a sibling (`reason: "contested"`) rather than re-serializing the transcript on every later write. A deleted file is recreated; a file that no longer reads as this session is left untouched and the session moves to a sibling. Indexed backends keep reporting the conflict, since there it can be the manager racing its own unconfirmed publish.
 - `appendEntriesAtomically()` groups a synchronous callback's appends into one atomic publication. Failure rolls back staged entries and repairs retained concurrent work.
@@ -611,9 +703,11 @@ The compress phase is opt-in as well: `--compress` or `gc.compress` (default off
 
 Other filesystems report the phase as unsupported.
 
+The strip phase is opt-in too: `--strip` or `gc.strip` (default off). Providers return state only they can read back, which omp persists so a resumed turn replays natively: signed and encrypted reasoning, the verbatim wire response kept for prompt caching, request controls, uploaded-file references. Once a transcript has been idle for `gc.stripAfterDays` (default 30, `--strip-after-days`), past every provider's cache and response retention, the phase rewrites it without that state: incremental OpenAI Responses histories, Cursor and Gemini native histories, `requestControls`, `inputTransformations`, opaque `thinkingSignature`s, `itemId`s, `redactedThinking` blocks, tool-call `thoughtSignature`s and leftover streaming state, and image `providerFile` references. Each turn then reads like one recorded by another model, which every provider already replays (reasoning as plain text, or not at all). The latest replay turn keeps everything: its run of assistant responses joined by tool results, which a provider replays as one assistant message and validates as a unit, since a resumed tool loop must replay every one of those responses' reasoning unmodified. State with no copy elsewhere also stays: reasoning source markers (`reasoning_content`, including the one a chat-completions `reasoning_details` envelope carries, which the envelope is reduced to), text signatures (OpenAI message phase), Anthropic message controls and native compaction blocks, OpenAI snapshot histories, and compaction entries (an OpenAI remote compaction's stored summary is only a placeholder for its encrypted history). It covers each session's transcript and the subagent transcripts in its artifact tree, under the same ownership-lease rules as compression, and archived `.jsonl.gz` sessions, which are recompressed. Lines without replay data keep their bytes, the title slot included, and the transcript keeps its mtime, so session ordering is unchanged; the stats database reparses a rewritten transcript once. The phase runs before archiving and compression so both store the stripped transcripts.
+
 To compress without running the command, enable `gc.autoCompress` (default off). Once an interactive session has painted its first frame, omp starts a detached `omp gc --compress --apply` at low CPU priority when the last background run is at least a day old and the sessions directory supports compression. Support is checked by compressing a throwaway probe file in the sessions directory, so a volume whose compressor stores files uncompressed (macOS 27's `ditto --hfsCompression`, #16244) is not copied and hashed every day; when the check fails, `gc-auto-compress.log` records why and the next check is a day later. Launches claim the run under an OS lock keyed on the log and recheck the interval while holding it, so simultaneous launches start one child. The child outlives the launching session, writes its summary to `gc-auto-compress.log` in the agent dir, and that file's mtime marks the last run; a spawn that fails removes the log so the next launch retries. The child takes `gc.lock` like any other gc run, so a run that finds gc already running exits with that error in the log and is retried a day later. A file that compresses but does not shrink stays a candidate and is copied again on later runs. Print, RPC, and ACP launches never start it.
 
-Journal payload I/O is streamed during blob-reference scans, archive history/stats reconciliation, gzip creation, and rollback. Active `.jsonl`, recoverable `.jsonl.*.bak`, and archived `.jsonl.gz` records all participate in reference discovery, including references in malformed JSON text. Compressed scans drain and validate the complete stream before their results can authorize deletion. Archives retain the original JSONL bytes when decompressed, and artifact trees keep their existing layout.
+Journal payload I/O is streamed during blob-reference scans, archive history/stats reconciliation, gzip creation, and rollback. Active `.jsonl`, recoverable `.jsonl.*.bak`, and archived `.jsonl.gz` records all participate in reference discovery, including references in malformed JSON text. Compressed scans drain and validate the complete stream before their results can authorize deletion. Archives retain the original JSONL bytes when decompressed (less any replay data the strip phase removed), and artifact trees keep their existing layout.
 
 Streaming avoids materializing a whole journal; it does not make GC constant-memory. A single long record, reference sets, and history/stats identity collections still consume memory. Original files and temporary compressed output also coexist during archive publication.
 

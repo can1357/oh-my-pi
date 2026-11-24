@@ -27,7 +27,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
-import { cfgClaudeResetsAutoRedeem } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { resetWindowModes } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 const ACCOUNT_ID = "claude-account";
 const EMAIL = "claude@example.com";
@@ -845,7 +845,7 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it.each(["yes", "no", "unset"] as const)(
-		"consumes an imminent reset without a prompt UI unless auto-redeem is no (%s)",
+		"consumes an imminent reset without a prompt UI only when auto-redeem is yes (%s)",
 		async autoRedeem => {
 			const status = claudeStatus(false);
 			for (const credit of status.credits) {
@@ -865,7 +865,7 @@ describe("Claude saved-reset trigger integration", () => {
 			await session.fetchUsageReports();
 			await coordinator.sweepPromise;
 			expect(targets).toEqual(
-				autoRedeem !== "no"
+				autoRedeem === "yes"
 					? [
 							{
 								provider: "anthropic",
@@ -882,7 +882,7 @@ describe("Claude saved-reset trigger integration", () => {
 			coordinator.lastSweepAt = 0;
 			await session.fetchUsageReports();
 			await coordinator.sweepPromise;
-			expect(targets).toHaveLength(autoRedeem !== "no" ? 1 : 0);
+			expect(targets).toHaveLength(autoRedeem === "yes" ? 1 : 0);
 		},
 	);
 
@@ -900,7 +900,11 @@ describe("Claude saved-reset trigger integration", () => {
 		await coordinator.sweepPromise;
 		expect(targets).toHaveLength(0);
 		expect(coordinator.attemptedKeys.size).toBe(0);
-		expect(cfgClaudeResetsAutoRedeem.get(session.settings)).toBe("unset");
+		expect(resetWindowModes("anthropic", session.settings)).toEqual({
+			"5h": "unset",
+			weekly: "unset",
+			fable: "unset",
+		});
 	});
 
 	it("still asks before spending an imminent reset when a prompt UI is available", async () => {

@@ -4,7 +4,7 @@
  * into a `JobWidgetView` for the `wait` card, the HUD and the jobs sheet
  * ({@link JobWidgetRegistry}).
  */
-import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { JobWidgetView } from "../tools/details/job-widget";
 import type { AsyncJob } from "../async/job-manager";
 
 /** Id of a task job's source carrying its subagent's finished tool calls. */
@@ -33,7 +33,7 @@ export interface JobTextChunk {
  * a pipe, UTF-16 units for a tap); a reader only hands back an `end` it got.
  */
 export interface JobTextSource {
-	/** Stable id a widget rule names in `from`: `out`, `pipe:1`, `tools`, `bg_7:pipe:1`. */
+	/** Stable id a widget rule names in `from`: `out`, `pipe:1`, `file:2`, `tools`, `bg_7:pipe:1`. */
 	readonly id: string;
 	/** What the text is, for the widget author (`cargo nextest run … → tail -n 5`). */
 	readonly label: string;

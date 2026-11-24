@@ -581,15 +581,15 @@ describe("kernel restart notice claim", () => {
 		}
 	});
 
-	for (const disposal of ["disposeAll", "disposeByOwner"] as const) {
-		it(`does not give the notice after ${disposal} restores a record whose shutdown was unconfirmed`, async () => {
-			const { kernels, registry, cell } = claimingRegistry({ unconfirmedShutdown: true });
+	for (const unconfirmedShutdown of [false, true]) {
+		it(`gives the notice when a session is recreated after disposeByOwner (shutdown ${unconfirmedShutdown ? "unconfirmed" : "confirmed"})`, async () => {
+			const { kernels, registry, cell } = claimingRegistry({ unconfirmedShutdown });
 			try {
 				expect(await cell("first", { kernelOwnerId: "owner" })).toBe("none");
-				if (disposal === "disposeAll") await registry.disposeAll();
-				else await registry.disposeByOwner("owner");
+				await registry.disposeByOwner("owner");
 				expect(kernels[0]?.alive).toBe(false);
-				expect(await cell("after disposal", { kernelOwnerId: "owner" })).toBe("none");
+				expect(await cell("after disposal", { kernelOwnerId: "owner" })).toBe("notice");
+				expect(await cell("after notice", { kernelOwnerId: "owner" })).toBe("none");
 				expect(kernels).toHaveLength(2);
 			} finally {
 				for (const kernel of kernels) kernel.shutdown = FakeKernel.prototype.shutdown;
@@ -597,6 +597,19 @@ describe("kernel restart notice claim", () => {
 			}
 		});
 	}
+
+	it("gives no notice after disposeAll or an explicit reset", async () => {
+		const { kernels, registry, cell } = claimingRegistry();
+		try {
+			expect(await cell("first")).toBe("none");
+			await registry.disposeAll();
+			expect(await cell("after disposeAll")).toBe("none");
+			expect(await cell("reset", { reset: true })).toBe("none");
+			expect(kernels).toHaveLength(3);
+		} finally {
+			await registry.disposeAll();
+		}
+	});
 });
 
 describe("idle kernel shutdown", () => {

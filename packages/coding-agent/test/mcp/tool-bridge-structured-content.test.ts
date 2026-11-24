@@ -1,8 +1,7 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { getThemeByName, initTheme } from "@oh-my-pi/pi-tui/theme";
-import { type MCPToolDetails, renderMCPResult } from "@oh-my-pi/pi-tui/tools/mcp";
+import { type MCPToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/mcp";
 
 import { resetSettingsForTest, Settings } from "../../src/config/settings";
 import type { CustomToolContext, CustomToolResult } from "../../src/extensibility/custom-tools/types";
@@ -12,6 +11,11 @@ import { MCPTool } from "../../src/mcp/tool-bridge";
 import type { MCPServerConnection, MCPToolCallParams, MCPToolCallResult, MCPToolDefinition } from "../../src/mcp/types";
 import { SessionManager } from "../../src/session/session-manager";
 import { wrapToolWithMetaNotice } from "../../src/tools/output-meta";
+import { toolText } from "../helpers/tool-text";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 function toolFor(result: MCPToolCallResult | ((params: MCPToolCallParams) => MCPToolCallResult)): MCPTool {
 	const connection = {
@@ -38,6 +42,21 @@ async function modelText(result: MCPToolCallResult): Promise<string> {
 }
 
 describe("MCP bridge structuredContent", () => {
+	it("accepts structured content that is not an object", async () => {
+		// The modern revision allows any JSON value here, `null` included.
+		const empty = await build({ content: [{ type: "text", text: "done" }], structuredContent: null });
+		const listed = await build({ content: [{ type: "text", text: "two ids" }], structuredContent: [7, 9] });
+
+		expect(empty.isError).toBeFalsy();
+		expect(empty.content).toEqual([{ type: "text", text: "done" }]);
+		expect(empty.details?.structuredContent).toBeUndefined();
+		expect(listed.isError).toBeFalsy();
+		expect(listed.content.map(block => (block.type === "text" ? block.text : ""))).toEqual([
+			"two ids",
+			"```json\n[\n  7,\n  9\n]\n```",
+		]);
+	});
+
 	it("surfaces structuredContent when content is a minimal ack", async () => {
 		// rhizome-mcp shape: terse ack in content, real payload in structuredContent.
 		const text = await modelText({
@@ -64,6 +83,48 @@ describe("MCP bridge structuredContent", () => {
 		// The token must be reachable exactly once — not appended a second time.
 		const occurrences = text.split("abc123").length - 1;
 		expect(occurrences).toBe(1);
+	});
+
+	it("does not repeat SDK-wrapped list and string results already in content", async () => {
+		const marker = "PROBE-MARKER-7f3d-9a2c";
+		const items = [
+			{ marker, item: 1 },
+			{ marker, item: 2 },
+		];
+		const list = await build({
+			content: items.map(item => ({ type: "text", text: JSON.stringify(item) })),
+			structuredContent: { result: items },
+		});
+		const listText = list.content.map(block => (block.type === "text" ? block.text : "")).join("\n");
+		expect(listText.split(marker)).toHaveLength(3);
+		expect(list.details?.structuredContent).toEqual({ result: items });
+
+		const string = await modelText({
+			content: [{ type: "text", text: marker }],
+			structuredContent: { result: marker },
+		});
+		expect(string.split(marker)).toHaveLength(2);
+
+		const scalar = await modelText({
+			content: [{ type: "text", text: JSON.stringify(marker) }],
+			structuredContent: { result: marker },
+		});
+		expect(scalar.split(marker)).toHaveLength(2);
+	});
+
+	it("renders wrapped results when content carries distinct data or a partial payload", async () => {
+		const distinct = await modelText({
+			content: [{ type: "text", text: "issues listed" }],
+			structuredContent: { result: ["first", "second"] },
+		});
+		expect(distinct).toContain("issues listed");
+		expect(distinct).toContain("first");
+
+		const partial = await modelText({
+			content: [{ type: "text", text: '{"item":1}' }],
+			structuredContent: { result: [{ item: 1 }, { item: 2 }] },
+		});
+		expect(partial).toContain('"item": 2');
 	});
 
 	it("lets an eval consumer advance pages using opaque cursors rather than display text", async () => {
@@ -137,7 +198,7 @@ describe("MCP bridge structuredContent", () => {
 			expect((value.details as MCPToolDetails).structuredContent).toEqual(structuredContent);
 			expect(value.hasError).toBe(true);
 			expect(value.text).not.toContain(structuredContent.pages[0]!.rows[0]!.body);
-			expect(value.text).toContain(`artifact://${artifactId}`);
+			expect(value.text).toContain(`local://${artifactId}.log`);
 
 			const message = {
 				role: "toolResult" as const,
@@ -254,14 +315,17 @@ describe("MCP result rendering with structuredContent", () => {
 	beforeAll(async () => {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
-		await initTheme(false, undefined, undefined, "dark", "light");
 	}, 15_000);
 
+	/** The expanded transcript card of the MCP call's result, as plain text. */
 	async function renderText(result: MCPToolCallResult): Promise<string> {
-		const theme = await getThemeByName("dark");
-		if (!theme) throw new Error("dark theme missing");
-		const built = await build(result);
-		return Bun.stripANSI(renderMCPResult(built, { expanded: true, isPartial: false }, theme).render(160).join("\n"));
+		return toolText({
+			name: "mcp__rhizome-mcp_list_issues",
+			args: {},
+			result: await build(result),
+			expanded: true,
+			width: 160,
+		});
 	}
 
 	it("renders the appended structured payload, not just the ack", async () => {

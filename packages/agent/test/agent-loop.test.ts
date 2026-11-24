@@ -309,6 +309,42 @@ describe("agentLoop with AgentMessage", () => {
 		expect(messages.some(message => message.role === "developer")).toBe(false);
 	});
 
+	it("cuts leaked DSML off structured tool-call arguments before they run", async () => {
+		const executions: string[] = [];
+		const context: AgentContext = {
+			systemPrompt: ["You are helpful."],
+			messages: [],
+			tools: [makeEchoTool(executions)],
+		};
+		// Verbatim shape from a DeepSeek-on-OpenRouter session: the closer (with a
+		// stray space) and the next parameter's opener landed inside the JSON value.
+		const leaked = "rg -n 'metadata' src/dict.rs</｜DSML｜ parameter>|<parameter name=";
+		const quoted = "rg -n '</｜DSML｜parameter>' src";
+		const mock = createMockModel({
+			id: deepseekId,
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", name: "echo", arguments: { value: leaked } },
+						{ type: "toolCall", name: "echo", arguments: { value: quoted } },
+					],
+				},
+				{ content: ["Done."] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const messages = await agentLoop([createUserMessage("Hello")], context, config, undefined, mock.stream).result();
+
+		// Deliberately quoted DSML (a grep pattern) is an argument, not a leak.
+		expect(executions).toEqual(["rg -n 'metadata' src/dict.rs", quoted]);
+		expect((messages[1] as AssistantMessage).content).toEqual([
+			expect.objectContaining({ type: "toolCall", arguments: { value: "rg -n 'metadata' src/dict.rs" } }),
+			expect.objectContaining({ type: "toolCall", arguments: { value: quoted } }),
+		]);
+		expect(messages.some(message => message.role === "developer")).toBe(false);
+	});
+
 	it("keeps prose that follows a removed DSML call", async () => {
 		const context: AgentContext = { systemPrompt: ["You are helpful."], messages: [], tools: [] };
 		const mock = createMockModel({
@@ -1390,20 +1426,20 @@ describe("agentLoop with AgentMessage", () => {
 	it("routes unadvertised tool calls through resolveFallbackTool", async () => {
 		const executedParams: Array<{ value: string }> = [];
 		const toolSchema = type({ value: "string" });
-		const deviceTool: AgentTool<typeof toolSchema, { value: string }> = {
+		const mountedTool: AgentTool<typeof toolSchema, { value: string }> = {
 			name: "browser",
 			label: "Browser",
-			description: "Mounted device tool",
+			description: "Mounted tool command",
 			parameters: toolSchema,
 			async execute(_toolCallId, params) {
 				executedParams.push(params);
 				return {
-					content: [{ type: "text", text: `device: ${params.value}` }],
+					content: [{ type: "text", text: `mounted: ${params.value}` }],
 					details: { value: params.value },
 				};
 			},
 		};
-		// The device is NOT in the advertised tool set.
+		// The mounted tool is NOT in the advertised tool set.
 		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
 		const mock = createMockModel({
 			responses: [
@@ -1419,11 +1455,11 @@ describe("agentLoop with AgentMessage", () => {
 		const config: AgentLoopConfig = {
 			model: mock.model,
 			convertToLlm: identityConverter,
-			resolveFallbackTool: name => (name === "browser" ? deviceTool : undefined),
+			resolveFallbackTool: name => (name === "browser" ? mountedTool : undefined),
 		};
 
 		const messages = await agentLoop(
-			[createUserMessage("use the device")],
+			[createUserMessage("use the mounted tool")],
 			context,
 			config,
 			undefined,
@@ -1432,9 +1468,9 @@ describe("agentLoop with AgentMessage", () => {
 
 		expect(executedParams).toEqual([{ value: "open" }]);
 		const results = messages.filter((m): m is ToolResultMessage => m.role === "toolResult");
-		const deviceResult = results.find(r => r.toolCallId === "tool-1");
-		expect(deviceResult?.isError).toBeFalsy();
-		expect(deviceResult?.content).toContainEqual({ type: "text", text: "device: open" });
+		const mountedResult = results.find(r => r.toolCallId === "tool-1");
+		expect(mountedResult?.isError).toBeFalsy();
+		expect(mountedResult?.content).toContainEqual({ type: "text", text: "mounted: open" });
 		// Names the resolver does not know keep the "not found" failure.
 		const missingResult = results.find(r => r.toolCallId === "tool-2");
 		expect(missingResult?.isError).toBe(true);
@@ -1444,13 +1480,13 @@ describe("agentLoop with AgentMessage", () => {
 	});
 
 	it("records fallback-resolved alias calls under the resolved tool's name", async () => {
-		// Providers reject `xd://recall` as a replayed function-call name, so the
-		// alias must not reach history, persistence, or the next request.
+		// An MCP-spelled alias must not reach history, persistence, or the next
+		// request: the loop records the resolved tool's own name.
 		const toolSchema = type({ value: "string" });
-		const deviceTool: AgentTool<typeof toolSchema, { value: string }> = {
+		const recallTool: AgentTool<typeof toolSchema, { value: string }> = {
 			name: "recall",
 			label: "Recall",
-			description: "Mounted device tool",
+			description: "Mounted tool command",
 			parameters: toolSchema,
 			async execute(_toolCallId, params) {
 				return { content: [{ type: "text", text: `recall: ${params.value}` }], details: params };
@@ -1459,14 +1495,14 @@ describe("agentLoop with AgentMessage", () => {
 		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
 		const mock = createMockModel({
 			responses: [
-				{ content: [{ type: "toolCall", id: "tool-1", name: "xd://recall", arguments: { value: "x" } }] },
+				{ content: [{ type: "toolCall", id: "tool-1", name: "mcp__pi_agent__recall", arguments: { value: "x" } }] },
 				{ content: ["done"] },
 			],
 		});
 		const config: AgentLoopConfig = {
 			model: mock.model,
 			convertToLlm: identityConverter,
-			resolveFallbackTool: name => (name === "xd://recall" || name === "recall" ? deviceTool : undefined),
+			resolveFallbackTool: name => (name === "mcp__pi_agent__recall" || name === "recall" ? recallTool : undefined),
 		};
 
 		const messages = await agentLoop([createUserMessage("recall")], context, config, undefined, mock.stream).result();
@@ -1585,9 +1621,9 @@ describe("agentLoop with AgentMessage", () => {
 		expect(textOf("tool-3")).not.toContain("Did you mean");
 	});
 
-	it("suggests a mounted device the advertised set does not contain", async () => {
-		// Observed in a real transcript: the session mounts `github` as an
-		// `xd://` device, the model emitted `mcp__<ns>__<id>_github`, and the miss
+	it("suggests a mounted tool command the advertised set does not contain", async () => {
+		// Observed in a real transcript: the session mounts `github` as a tool
+		// command, the model emitted `mcp__<ns>__<id>_github`, and the miss
 		// produced a bare `not found`. That is the one unrecoverable shape — the
 		// capability is live, but it appears in no advertised name, so matching
 		// only the advertised set had nothing to offer.
@@ -1619,7 +1655,7 @@ describe("agentLoop with AgentMessage", () => {
 		const config: AgentLoopConfig = {
 			model: mock.model,
 			convertToLlm: identityConverter,
-			// Devices are routable by `resolveFallbackTool` but never advertised.
+			// Mounted tool commands are routable by `resolveFallbackTool` but never advertised.
 			suggestFallbackToolNames: () => ["github", "lsp"],
 		};
 
@@ -1631,7 +1667,7 @@ describe("agentLoop with AgentMessage", () => {
 			.join("\n");
 
 		expect(text).toContain("Did you mean github?");
-		// Advisory only: naming the device must not dispatch it. No
+		// Advisory only: naming the mounted tool must not dispatch it. No
 		// `resolveFallbackTool` is installed here, so the call still fails.
 		expect(result?.isError).toBe(true);
 	});
@@ -2497,6 +2533,131 @@ describe("agentLoop with AgentMessage", () => {
 		// The exclusive call waited for every shared call to finish.
 		expect(startTimes.exclusive).toBeGreaterThan(finishTimes.slow);
 		expect(startTimes.exclusive).toBeGreaterThan(finishTimes.fast);
+	});
+
+	it("tells a call when the earlier writing calls running beside it have settled", async () => {
+		const toolSchema = type({ value: "string", tier: "'read' | 'exec'", exclusive: "boolean?" });
+		const log: string[] = [];
+		// What the loop handed each call, by call id.
+		const settled: Record<string, Promise<void> | undefined> = {};
+		const writeStarted = Promise.withResolvers<void>();
+		const releaseWrite = Promise.withResolvers<void>();
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "op",
+			label: "Op",
+			description: "Op tool",
+			parameters: toolSchema,
+			approval: "read",
+			concurrency: args => (args.exclusive === true ? "exclusive" : "shared"),
+			async execute(toolCallId, params) {
+				if (params.value === "write") {
+					writeStarted.resolve();
+					await releaseWrite.promise;
+					// End a few turns after the release, so a call that did not wait logs first.
+					for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+					log.push("write ended");
+				}
+				if (params.value === "read-after") {
+					// Started beside the write, not after it.
+					await writeStarted.promise;
+					releaseWrite.resolve();
+					await settled[toolCallId];
+					log.push("read-after saw effects settled");
+				}
+				return { content: [{ type: "text", text: `ok:${params.value}` }], details: { value: params.value } };
+			},
+		};
+		const call = (value: string, tier: "read" | "exec", exclusive?: true) =>
+			({
+				type: "toolCall",
+				id: `tool-${value}`,
+				name: tier === "exec" ? "write" : "op",
+				arguments: exclusive ? { value, tier, exclusive } : { value, tier },
+			}) as const;
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						call("read-before", "read"),
+						call("write", "exec"),
+						call("read-after", "read"),
+						call("barrier", "read", true),
+						call("read-later", "read"),
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const context: AgentContext = {
+			systemPrompt: [""],
+			messages: [],
+			tools: [tool, { ...tool, name: "write", approval: "exec" }],
+		};
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			getToolContext: toolCall => {
+				if (toolCall) settled[toolCall.toolCalls[toolCall.index].id] = toolCall.earlierEffectsSettled;
+				return {} as AgentToolContext;
+			},
+		};
+
+		await agentLoop([createUserMessage("start")], context, config, undefined, mock.stream).result();
+
+		expect(log).toEqual(["write ended", "read-after saw effects settled"]);
+		// Only the call beside the earlier writing call gets told; nothing that
+		// may write ran before the others in their group.
+		expect(settled["tool-read-after"]).toBeInstanceOf(Promise);
+		expect(settled["tool-read-before"]).toBeUndefined();
+		expect(settled["tool-write"]).toBeUndefined();
+		expect(settled["tool-barrier"]).toBeUndefined();
+		expect(settled["tool-read-later"]).toBeUndefined();
+	});
+
+	it("counts a call as writing by what its approval resolver says for the call's arguments", async () => {
+		const toolSchema = type({ value: "string", tier: "'read' | 'exec' | 'throw'" });
+		const settled: Record<string, Promise<void> | undefined> = {};
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "op",
+			label: "Op",
+			description: "Op tool",
+			parameters: toolSchema,
+			approval: args => {
+				const tier = args && typeof args === "object" && "tier" in args ? args.tier : undefined;
+				if (tier === "throw") throw new Error("cannot classify");
+				return tier === "read" ? "read" : "exec";
+			},
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: `ok:${params.value}` }], details: { value: params.value } };
+			},
+		};
+		const call = (value: string, tier: "read" | "exec" | "throw") =>
+			({ type: "toolCall", id: `tool-${value}`, name: "op", arguments: { value, tier } }) as const;
+		const mock = createMockModel({
+			responses: [
+				{ content: [call("read-1", "read"), call("read-2", "read")] },
+				{ content: [call("write", "exec"), call("read-3", "read")] },
+				{ content: [call("unknown", "throw"), call("read-4", "read")] },
+				{ content: ["done"] },
+			],
+		});
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			getToolContext: toolCall => {
+				if (toolCall) settled[toolCall.toolCalls[toolCall.index].id] = toolCall.earlierEffectsSettled;
+				return {} as AgentToolContext;
+			},
+		};
+
+		await agentLoop([createUserMessage("start")], context, config, undefined, mock.stream).result();
+
+		// A resolver that says "read" for the earlier call's arguments leaves the later call alone;
+		// one that says anything else, or throws, makes it a writer.
+		expect(settled["tool-read-2"]).toBeUndefined();
+		expect(settled["tool-read-3"]).toBeInstanceOf(Promise);
+		expect(settled["tool-read-4"]).toBeInstanceOf(Promise);
 	});
 
 	it("drops incomplete tool calls when assistant aborts before toolcall_end", async () => {

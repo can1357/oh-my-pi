@@ -37,6 +37,8 @@ export interface IntegrationsProbe {
 		args: Record<string, unknown>,
 		signal?: AbortSignal,
 	): Promise<ToolCallOutcome>;
+	/** Call as `scope`, pausing after attribution until both participating workers have tracked their call. */
+	mcpScopedCall(scope: string, toolName: string, toolCallId: string, barrier: Int32Array): Promise<ToolCallOutcome>;
 	/** Subscribe to the remote manager's tool changes; the returned promise settles on the first one. */
 	watchTools(): Promise<{ changed: Promise<void> }>;
 	/** Execute a main-defined custom tool with a worker-side context; optionally abort on its first update. */
@@ -49,7 +51,6 @@ export interface IntegrationsProbe {
 	/** Read bridged executor options synchronously, as the child does. */
 	readOptions(options: ExecutorOptions): Promise<{
 		roots: unknown;
-		suffix: string | undefined;
 		localRoot: string;
 		approvalTargets: readonly string[] | undefined;
 	}>;
@@ -72,13 +73,14 @@ async function runTool(
 	ctx: CustomToolContext,
 	args: Record<string, unknown>,
 	abort: AbortSignal | "on-update" | undefined,
+	toolCallId = "call-1",
 ): Promise<ToolCallOutcome> {
 	const updates: string[] = [];
 	const controller = new AbortController();
 	const signal = abort instanceof AbortSignal ? abort : controller.signal;
 	try {
 		const result = await tool.execute(
-			"call-1",
+			toolCallId,
 			args,
 			partial => {
 				updates.push(resultText(partial));
@@ -140,6 +142,30 @@ function buildProbe(): IntegrationsProbe {
 				signal,
 			);
 		},
+		mcpScopedCall: async (scope, toolName, toolCallId, barrier) => {
+			const manager = MCPManager.instance();
+			if (!manager) throw new Error("no MCP manager in worker");
+			manager.openToolScope(scope);
+			const tool = createMCPProxyTools(manager, scope).find(candidate => candidate.mcpToolName === toolName);
+			if (!tool) throw new Error(`no proxy for ${toolName}`);
+			const trackToolCall = manager.trackToolCall;
+			manager.trackToolCall = (callScope, callId) => {
+				const release = trackToolCall.call(manager, callScope, callId);
+				Atomics.add(barrier, 0, 1);
+				Atomics.notify(barrier, 0);
+				while (true) {
+					const count = Atomics.load(barrier, 0);
+					if (count >= 2) break;
+					Atomics.wait(barrier, 0, count);
+				}
+				return release;
+			};
+			try {
+				return await runTool(tool, {} as CustomToolContext, {}, undefined, toolCallId);
+			} finally {
+				manager.trackToolCall = trackToolCall;
+			}
+		},
 		watchTools: async () => {
 			unwatch?.();
 			const { promise, resolve } = Promise.withResolvers<void>();
@@ -160,7 +186,6 @@ function buildProbe(): IntegrationsProbe {
 		},
 		readOptions: async options => ({
 			roots: options.extensionRoots?.(),
-			suffix: options.preparedSession?.promptSuffix("model-x"),
 			localRoot: options.localProtocolOptions ? resolveLocalRoot(options.localProtocolOptions) : "",
 			approvalTargets: options.customTools?.[0]?.approvalCacheTargets?.({ path: "a.txt" }),
 		}),

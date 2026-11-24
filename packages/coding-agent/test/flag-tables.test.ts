@@ -7,7 +7,12 @@ import {
 	validateRestorePrompt,
 	validateToolNames,
 } from "../src/cli/args";
-import { OPTIONAL_VALUE_FLAGS, restartArgv, STRING_VALUE_FLAGS } from "../src/cli/flag-tables";
+import {
+	EXTENSION_SHADOWABLE_STRING_FLAGS,
+	OPTIONAL_VALUE_FLAGS,
+	restartArgv,
+	STRING_VALUE_FLAGS,
+} from "../src/cli/flag-tables";
 import { CliUsageError } from "../src/cli/usage-error";
 
 /**
@@ -34,6 +39,7 @@ import { CliUsageError } from "../src/cli/usage-error";
  */
 describe("STRING_VALUE_FLAGS table is honored by args.ts parseArgs", () => {
 	for (const flag of STRING_VALUE_FLAGS) {
+		if (EXTENSION_SHADOWABLE_STRING_FLAGS.has(flag)) continue;
 		it(`${flag} consumes the next token unconditionally`, () => {
 			try {
 				const result = parseArgs([flag, "--profile", "work"]);
@@ -47,6 +53,25 @@ describe("STRING_VALUE_FLAGS table is honored by args.ts parseArgs", () => {
 				// token instead of activating the profile.
 				expect(error).toBeInstanceOf(CliUsageError);
 			}
+		});
+	}
+});
+
+describe("EXTENSION_SHADOWABLE_STRING_FLAGS table is honored by args.ts parseArgs", () => {
+	for (const flag of EXTENSION_SHADOWABLE_STRING_FLAGS) {
+		it(`${flag} consumes value-like and inline = tokens but releases tokens that start with -`, () => {
+			const released = parseArgs([flag, "--profile", "work"]);
+			expect(
+				released.profile,
+				`parseArgs should release --profile back to its own handler when it follows bare ${flag}`,
+			).toBe("work");
+
+			const consumed = parseArgs([flag, "work"]);
+			expect(consumed.messages).toEqual([]);
+
+			const inline = parseArgs([`${flag}=--profile`, "work"]);
+			expect(inline.profile).toBeUndefined();
+			expect(inline.messages).toEqual(["work"]);
 		});
 	}
 });
@@ -238,11 +263,11 @@ describe("foreign session import flags", () => {
 });
 
 describe("restartArgv (/restart relaunch argv)", () => {
-	it("keeps configuration flags, drops positionals, and appends --resume", () => {
+	it("keeps configuration flags, drops positionals, and appends --restore", () => {
 		expect(restartArgv(["--model", "gpt-5", "fix the bug", "@notes.md"], "sid")).toEqual([
 			"--model",
 			"gpt-5",
-			"--resume",
+			"--restore",
 			"sid",
 		]);
 	});
@@ -250,7 +275,7 @@ describe("restartArgv (/restart relaunch argv)", () => {
 	it("drops every session-source flag, including inline = and value forms", () => {
 		expect(
 			restartArgv(["--resume=old", "-r", "old2", "--continue", "-c", "--fork", "xyz", "--from-claude"], "sid"),
-		).toEqual(["--resume", "sid"]);
+		).toEqual(["--restore", "sid"]);
 	});
 
 	it("keeps the value of an unknown extension flag instead of dropping it as a positional", () => {
@@ -258,7 +283,7 @@ describe("restartArgv (/restart relaunch argv)", () => {
 			"--myext-flag",
 			"val",
 			"--no-tools",
-			"--resume",
+			"--restore",
 			"sid",
 		]);
 	});
@@ -266,15 +291,16 @@ describe("restartArgv (/restart relaunch argv)", () => {
 	it("treats everything after -- as prompt text and drops it", () => {
 		expect(restartArgv(["--print-thoughts", "--", "--model", "opus"], "sid")).toEqual([
 			"--print-thoughts",
-			"--resume",
+			"--restore",
 			"sid",
 		]);
 	});
 
-	it("drops a fresh-session --goal so the resumed relaunch passes goal validation", () => {
+	it("drops a fresh-session --goal so the relaunch passes goal and restore validation", () => {
 		const relaunch = restartArgv(["--goal", "ship the release", "--model", "gpt-5"], "sid");
-		expect(relaunch).toEqual(["--model", "gpt-5", "--resume", "sid"]);
+		expect(relaunch).toEqual(["--model", "gpt-5", "--restore", "sid"]);
 		expect(() => validateGoalLaunch(parseArgs(relaunch), true)).not.toThrow();
+		expect(() => validateRestoreLaunch(parseArgs(relaunch), true)).not.toThrow();
 	});
 
 	it("drops caller-supplied overrides together with their values", () => {
@@ -287,12 +313,30 @@ describe("restartArgv (/restart relaunch argv)", () => {
 		).toEqual(["--no-tools"]);
 	});
 
-	it("omits --resume for a session that never materialized on disk", () => {
+	it("omits --restore for a session that never materialized on disk", () => {
 		expect(restartArgv(["--no-session", "hello"], undefined)).toEqual(["--no-session"]);
+	});
+
+	it("treats --plan before another flag as boolean while keeping a value-like --plan model", () => {
+		const booleanPlan = restartArgv(["--plan", "--continue", "fix the bug"], "sid");
+		expect(booleanPlan).toEqual(["--plan", "--restore", "sid"]);
+		const startupParsed = parseArgs(booleanPlan);
+		expect(startupParsed.restore).toBe(true);
+		expect(startupParsed.resume).toBe("sid");
+		expect(startupParsed.plan).toBeUndefined();
+		expect(startupParsed.messages).toEqual([]);
+		expect(() => validateRestoreLaunch(startupParsed, true)).not.toThrow();
+
+		expect(restartArgv(["--plan", "opus", "--continue", "fix the bug"], "sid")).toEqual([
+			"--plan",
+			"opus",
+			"--restore",
+			"sid",
+		]);
 	});
 });
 describe("--restore", () => {
-	it("selects its session as --resume does, and a relaunch only resumes it", () => {
+	it("selects its session as --resume does, and a relaunch restores only the current one", () => {
 		const args = parseArgs(["--restore", "/s/a.jsonl"]);
 		expect(args.resume).toBe("/s/a.jsonl");
 		expect(args.restore).toBe(true);
@@ -301,9 +345,21 @@ describe("--restore", () => {
 		expect(restartArgv(["--restore", "/s/a.jsonl", "--model", "x"], "sid")).toEqual([
 			"--model",
 			"x",
-			"--resume",
+			"--restore",
 			"sid",
 		]);
+	});
+
+	it("restores the session --session names, before or after a bare --restore", () => {
+		for (const argv of [
+			["--session", "sid", "--restore"],
+			["--restore", "--session", "sid"],
+		]) {
+			const args = parseArgs(argv);
+			expect(args.resume).toBe("sid");
+			expect(args.restore).toBe(true);
+		}
+		expect(parseArgs(["--session", "a", "--restore", "b"]).resume).toBe("b");
 	});
 
 	it("needs the interactive TUI, one existing session, and no prompt", () => {

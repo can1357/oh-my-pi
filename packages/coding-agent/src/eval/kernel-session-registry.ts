@@ -4,6 +4,7 @@ import { logger, scheduleLong } from "@oh-my-pi/pi-utils";
 import {
 	attachSessionOwner,
 	type CancelledErrorClass,
+	type DisposeByOwnerOptions,
 	formatKernelRestartNotice,
 	getRemainingTimeoutMs,
 	isCancellationError,
@@ -53,6 +54,7 @@ export interface KernelSession<TKernel extends RegistryKernel> extends SessionOw
 }
 
 interface StartingKernelSession<TSession> extends SessionOwners {
+	sessionId: string;
 	promise: Promise<TSession>;
 }
 
@@ -114,7 +116,7 @@ export interface KernelSessionRegistry<
 	TSession extends KernelSession<TKernel>,
 > {
 	disposeAll(): Promise<void>;
-	disposeByOwner(ownerId: string): Promise<void>;
+	disposeByOwner(ownerId: string, options?: DisposeByOwnerOptions): Promise<void>;
 	executeOnSession(code: string, cwd: string, options: TOptions): Promise<R>;
 	peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined;
 	getPresentSession(cwd: string, options: TOptions): TSession | undefined;
@@ -167,9 +169,22 @@ export function createKernelSessionRegistry<
 	const startingSessions = new Map<string, StartingKernelSession<TSession>>();
 	const resettingSessions = new Map<string, Promise<void>>();
 	const replacingSessionKernels = new Map<TSession, { kernel: TKernel; promise: Promise<TKernel> }>();
-	// Kernel each session record's latest started cell ran on; a different live kernel means the old one died.
-	const servedKernels = new WeakMap<TSession, TKernel>();
-	const idleReapedKernels = new WeakSet<TKernel>();
+	// Kernel each session key's latest started cell ran on; a different kernel means the old one's state is gone.
+	// Keyed by the session key string, not the session record, so a disposed and recreated record
+	// (owner release, session switch and back, disposeAll) still reports the loss. Only an explicit reset clears it.
+	const kernelIds = new WeakMap<TKernel, number>();
+	let nextKernelId = 1;
+	const servedKernelIds = new Map<string, number>();
+	function kernelIdOf(kernel: TKernel): number {
+		let id = kernelIds.get(kernel);
+		if (id === undefined) {
+			id = nextKernelId++;
+			kernelIds.set(kernel, id);
+		}
+		return id;
+	}
+	// Id of the kernel an idle shutdown stopped, per session key, so the next restart notice names the setting.
+	const idleReapedKernelIds = new Map<string, number>();
 	const busySessions = new Map<string, number>();
 	// Owners sharing a key use the latest caller's idle policy. It lives on the record, not the key,
 	// so disposing one record cannot erase the policy a queued caller brings to the record it creates next.
@@ -246,6 +261,7 @@ export function createKernelSessionRegistry<
 		startingSession = {
 			ownerIds: new Set(),
 			hasFallbackOwner: false,
+			sessionId,
 			promise: startup,
 		};
 		attachSessionOwner(startingSession, sessionId, options.kernelOwnerId);
@@ -477,7 +493,7 @@ export function createKernelSessionRegistry<
 		try {
 			await reaped;
 		} finally {
-			if (!kernel.isAlive()) idleReapedKernels.add(kernel);
+			if (!kernel.isAlive()) idleReapedKernelIds.set(sessionKey, kernelIdOf(kernel));
 			if (reapingSessions.get(sessionKey) === reaped) reapingSessions.delete(sessionKey);
 		}
 		// A failed shutdown leaves the kernel running; retry after another idle window.
@@ -537,6 +553,8 @@ export function createKernelSessionRegistry<
 		const pending = [...startingSessions.values()].map(starting => starting.promise);
 		startingSessions.clear();
 		for (const sessionKey of new Set([...idleTimers.keys(), ...idleGenerations.keys()])) forgetIdleState(sessionKey);
+		servedKernelIds.clear();
+		idleReapedKernelIds.clear();
 		if (descriptor.clearResetsOnDisposeAll) resettingSessions.clear();
 		const all = [...sessions.entries()];
 		for (const [id, session] of all) {
@@ -566,17 +584,16 @@ export function createKernelSessionRegistry<
 				cwd: session.cwd,
 				reason,
 			});
-			// Intentional disposal: a later replacement is no surprise restart.
-			servedKernels.delete(session);
 			if (!sessions.has(id)) sessions.set(id, session);
 		}
 	}
 
-	async function disposeByOwner(ownerId: string): Promise<void> {
+	async function disposeByOwner(ownerId: string, options?: DisposeByOwnerOptions): Promise<void> {
+		const keepSessionId = options?.keepSessionId;
 		const toShutdown: TSession[] = [];
 		const startingToShutdown: StartingKernelSession<TSession>[] = [];
 		for (const session of Array.from(sessions.values())) {
-			if (!session.ownerIds.has(ownerId)) continue;
+			if (!session.ownerIds.has(ownerId) || session.sessionId === keepSessionId) continue;
 			if (session.ownerIds.size === 1) {
 				toShutdown.push(session);
 				continue;
@@ -584,7 +601,9 @@ export function createKernelSessionRegistry<
 			session.ownerIds.delete(ownerId);
 		}
 		for (const [sessionKey, starting] of Array.from(startingSessions.entries())) {
-			if (sessions.has(sessionKey) || !starting.ownerIds.has(ownerId)) continue;
+			if (sessions.has(sessionKey) || !starting.ownerIds.has(ownerId) || starting.sessionId === keepSessionId) {
+				continue;
+			}
 			if (starting.ownerIds.size === 1) {
 				startingSessions.delete(sessionKey);
 				startingToShutdown.push(starting);
@@ -626,7 +645,6 @@ export function createKernelSessionRegistry<
 				cwd: session.cwd,
 				reason,
 			});
-			servedKernels.delete(session);
 			if (!sessions.has(session.sessionKey)) sessions.set(session.sessionKey, session);
 		}
 	}
@@ -672,6 +690,8 @@ export function createKernelSessionRegistry<
 		if (inFlight) {
 			await waitForPromiseWithCancellation(inFlight, options, descriptor.cancelledErrorClass);
 		} else if (options.reset) {
+			servedKernelIds.delete(sessionKey);
+			idleReapedKernelIds.delete(sessionKey);
 			const resetPromise = resetSession(sessionKey);
 			const settled = resetPromise.then(
 				() => undefined,
@@ -691,12 +711,15 @@ export function createKernelSessionRegistry<
 		if (!isCurrent(session, kernel)) throw new descriptor.cancelledErrorClass(false);
 		throwIfCallerCancelled(options);
 		const claimKernelRestartNotice = (): string | undefined => {
-			const previous = servedKernels.get(session);
-			servedKernels.set(session, kernel);
-			if (previous === undefined || previous === kernel) return undefined;
+			const id = kernelIdOf(kernel);
+			const previous = servedKernelIds.get(sessionKey);
+			servedKernelIds.set(sessionKey, id);
+			if (previous === undefined || previous === id) return undefined;
+			const idleReaped = idleReapedKernelIds.get(sessionKey) === previous;
+			idleReapedKernelIds.delete(sessionKey);
 			return formatKernelRestartNotice(
 				`${descriptor.languageLabel} kernel`,
-				idleReapedKernels.has(previous) ? descriptor.idleShutdownSetting : undefined,
+				idleReaped ? descriptor.idleShutdownSetting : undefined,
 			);
 		};
 		const runOptions = { ...options, cwd, claimKernelRestartNotice };
@@ -706,8 +729,10 @@ export function createKernelSessionRegistry<
 		} catch (err) {
 			if (
 				descriptor.isCancellation?.(err) ||
-				isCancellationError(err, descriptor.cancelledErrorClass) ||
-				options.signal?.aborted
+				isCancellationError(err, descriptor.cancelledErrorClass, {
+					signal: options.signal,
+					deadlineMs: options.deadlineMs,
+				})
 			)
 				throw err;
 			if (kernel.isAlive()) throw err;

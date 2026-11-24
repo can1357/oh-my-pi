@@ -6,12 +6,14 @@ import type { AgentMessage, AgentTool, AgentToolContext, AgentToolResult } from 
 import type { Message } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as bashExecutor from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
+import { resolveToolCallIntent } from "@oh-my-pi/pi-coding-agent/job-widgets/intent";
 import type { CustomEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SpotlightClient } from "@oh-my-pi/pi-coding-agent/spotlight/client";
 import { type CalledToolResult, shapeCalledTool } from "@oh-my-pi/pi-coding-agent/spotlight/index";
 import { buildCallContext, callSummary } from "@oh-my-pi/pi-coding-agent/spotlight/context";
 import { RecordingScorer } from "@oh-my-pi/pi-coding-agent/spotlight/scorer";
+import { readArtifactText } from "@oh-my-pi/pi-coding-agent/spotlight/sink";
 import {
 	SpotlightExperiment,
 	type SpotlightExperimentOptions,
@@ -24,8 +26,9 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { reasonShows, type SpotlightReason, spotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
-import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
+import { reasonShows, type SpotlightReason, spotlightDetails } from "@oh-my-pi/pi-coding-agent/tools/details/spotlight";
+import { formatOutputNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta-format";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const tmpDirs: string[] = [];
@@ -212,7 +215,7 @@ describe("spotlight shaping hooks", () => {
 		const text = resultText(await new BashTool(session).execute("b2", { command: "./ingest.sh" }));
 
 		expect(text).toContain("ERROR: connection refused at db.ts:42");
-		expect(text).toMatch(/artifact:\/\/\d+/);
+		expect(text).toMatch(/local:\/\/\d+\.log/);
 		expect(text).not.toContain("step 300:");
 		const [entry] = entries(manager, SPOTLIGHT_ENTRY.shape);
 		expect(entry).toMatchObject({ toolCallId: "b2", tool: "bash", inChars: LONG_LOG.length });
@@ -233,11 +236,13 @@ describe("spotlight shaping hooks", () => {
 		expect(trace).toMatchObject({ tool: "bash", inChars: LONG_LOG.length });
 		expect(trace.savedTokens).toBe(trace.inTokens - trace.outTokens);
 		expect(trace.savedTokens).toBeGreaterThan(0);
-		const id = trace.original.url.replace("artifact://", "");
-		expect(manager.getArtifactContent(id)).toBe(LONG_LOG);
-		// Line 201 is the error: the hottest line, and shown to the agent; most of the log was not.
-		expect(trace.original.heat[200]).toBe("9");
-		expect(trace.original.heat[0]).toBe("1");
+		expect(await readArtifactText(manager, trace.original.url)).toBe(LONG_LOG);
+		// Line 201 is the error: the hottest line, and shown to the agent; most of the log was not. The rest tie, so
+		// they share one rank.
+		const heat = trace.original.heat;
+		expect(heat[200]).toBe("9");
+		expect(new Set([...heat.slice(0, 200), ...heat.slice(201)])).toEqual(new Set([heat[0]]));
+		expect(heat[0]).not.toBe("9");
 		const kept = trace.original.kept;
 		expect(kept.some(([from, to]) => from <= 201 && 201 <= to)).toBe(true);
 		expect(kept.reduce((n, [from, to]) => n + to - from + 1, 0)).toBeLessThan(200);
@@ -268,7 +273,7 @@ describe("spotlight shaping hooks", () => {
 		const scorer = new RecordingScorer(client, "low");
 		const ctx = buildCallContext([], "x", "./ingest.sh", undefined);
 		expect(await scorer.score(["a", "b"], ctx)).toBeNull();
-		expect(scorer.usage).toMatchObject({ calls: 1, failures: 1 });
+		expect(scorer.usage).toMatchObject({ calls: 1, failures: 1, failureCauses: { timeout: 1 } });
 
 		const { session, manager } = await experimentSession(client);
 		vi.spyOn(bashExecutor, "executeBash").mockResolvedValue(bashOutput(LONG_LOG));
@@ -277,8 +282,88 @@ describe("spotlight shaping hooks", () => {
 		expect(result.isError).toBeUndefined();
 		expect(resultText(result)).toContain(LONG_LOG.slice(LONG_LOG.lastIndexOf("\n") + 1));
 		const [entry] = entries(manager, SPOTLIGHT_ENTRY.shape);
-		expect(entry.spotlight).toMatchObject({ failures: 1 });
+		expect(entry.spotlight).toMatchObject({ failures: 1, failureCauses: { timeout: 1 } });
 		expect(entry.error).toBeUndefined();
+	});
+
+	it("reports a lost Stencil credential once per loss, not on warm-up, and again after a re-sign-in", async () => {
+		const credential = new StencilCredential();
+		const tokens: (string | null)[] = [null, null, null, "test-token", null];
+		vi.spyOn(credential, "resolve").mockImplementation(async () => tokens.shift() ?? null);
+		const client = new SpotlightClient({
+			url: "http://spotlight.test/v1/spotlight",
+			timeoutMs: 2_000,
+			credential,
+			fetch: fakeSpotlight({ score: () => 0.5 }),
+		});
+		let missing = 0;
+		client.onCredentialMissing = () => missing++;
+		const ctx = buildCallContext([], "x", "./ingest.sh", undefined);
+		const score = async () => {
+			const scorer = new RecordingScorer(client, "low");
+			return { scores: await scorer.score(["a"], ctx), usage: scorer.usage };
+		};
+
+		// The warm-up finds no credential too, but leaves it to the first ranking: one report below, not two.
+		client.warm();
+		const unsigned = await score();
+		expect(unsigned.scores).toBeNull();
+		expect(unsigned.usage.failureCauses).toEqual({ no_credential: 1 });
+		expect(missing).toBe(1);
+		expect((await score()).scores).toBeNull();
+		expect(missing).toBe(1);
+		expect((await score()).scores).toEqual([0.5]);
+		expect((await score()).scores).toBeNull();
+		expect(missing).toBe(2);
+	});
+});
+
+describe("spotlight access denial", () => {
+	it("stops asking for a waitlisted account, says so once, and asks again for another account", async () => {
+		const credential = new StencilCredential();
+		let token = "waitlisted-account";
+		const resolve = vi.spyOn(credential, "resolve").mockImplementation(async () => token);
+		const sent: (string | null)[] = [];
+		const denying = (async (_url: string | URL | Request, init?: RequestInit) => {
+			const headers = new Headers(init?.headers);
+			sent.push(headers.get("user-agent"));
+			if (headers.get("authorization") === "Bearer waitlisted-account") {
+				return Response.json(
+					{ error: "waitlisted", message: "This Stencil account does not have Stencil Cloud access yet." },
+					{ status: 403 },
+				);
+			}
+			return Response.json({ answers: { line: { scores: [0.5] } }, usage: { input_tokens: 1 } });
+		}) as typeof fetch;
+		const client = new SpotlightClient({
+			url: "http://waitlisted.test/v1/spotlight",
+			timeoutMs: 2_000,
+			credential,
+			fetch: denying,
+		});
+		const denied: string[] = [];
+		client.onAccessDenied = reason => denied.push(reason);
+		const ctx = buildCallContext([], "x", "./ingest.sh", undefined);
+		const score = async () => {
+			const scorer = new RecordingScorer(client, "low");
+			return { scores: await scorer.score(["a"], ctx), usage: scorer.usage };
+		};
+
+		for (let call = 0; call < 3; call++) {
+			const result = await score();
+			expect(result.scores).toBeNull();
+			expect(result.usage.failureCauses).toEqual({ waitlisted: 1 });
+		}
+		// The warm-up stays quiet too: it would send right after its credential lookup settles.
+		client.warm();
+		await resolve.mock.results.at(-1)?.value;
+		expect(sent).toHaveLength(1);
+		expect(sent[0]).toStartWith("omp/");
+		expect(denied).toEqual(["This Stencil account does not have Stencil Cloud access yet."]);
+
+		token = "admitted-account";
+		expect((await score()).scores).toEqual([0.5]);
+		expect(sent).toHaveLength(2);
 	});
 });
 
@@ -310,8 +395,8 @@ describe("spotlight holdout", () => {
 		if (!trace?.original?.shapedUrl) throw new Error("a held-out cut keeps its would-be text");
 		expect(trace).toMatchObject({ holdout: true, savedTokens: trace.inTokens - trace.outTokens });
 		expect(trace.savedTokens).toBeGreaterThan(0);
-		expect(held.manager.getArtifactContent(trace.original.url.replace("artifact://", ""))).toBe(LONG_LOG);
-		const wouldBe = held.manager.getArtifactContent(trace.original.shapedUrl.replace("artifact://", "")) ?? "";
+		expect(await readArtifactText(held.manager, trace.original.url)).toBe(LONG_LOG);
+		const wouldBe = (await readArtifactText(held.manager, trace.original.shapedUrl)) ?? "";
 		expect(wouldBe).toContain("ERROR: connection refused at db.ts:42");
 		expect(wouldBe).not.toContain("step 300:");
 		expect(wouldBe.length).toBe(entry.outChars as number);
@@ -336,9 +421,7 @@ describe("spotlight holdout", () => {
 		if (!shapedUrl) throw new Error("a held-out cut keeps its would-be text");
 		expect(trace).toMatchObject({ holdout: true, tool: "read" });
 		expect(trace?.original?.lines).toBeGreaterThan(1_500);
-		expect(held.manager.getArtifactContent(shapedUrl.replace("artifact://", ""))).toContain(
-			"export function step119",
-		);
+		expect(await readArtifactText(held.manager, shapedUrl)).toContain("export function step119");
 	});
 
 	it("applies every cut with holdout 0", async () => {
@@ -373,7 +456,7 @@ describe("spotlight holdout", () => {
 });
 
 describe("spotlight whole reads", () => {
-	it("shows a Markdown read and one line range as plain does, but still cuts a multi-range read", async () => {
+	it("shows a Markdown read and bounded line ranges as plain does, but still cuts an open-ended range", async () => {
 		const shaped = await experimentSession(undefined, {}, { scoreFree: 1 });
 		const plain = await plainSession();
 		// Every line is past the 400-character cap a cut read applies.
@@ -385,12 +468,144 @@ describe("spotlight whole reads", () => {
 		const read = async ({ session }: { session: ToolSession }, target: string) =>
 			resultText(await new ReadTool(session).execute("r1", { path: target }));
 
-		for (const target of ["wide.md", "wide.md:1-10,20-30", "wide.ts:5-40", "wide.ts:5+30"]) {
+		for (const target of [
+			"wide.md",
+			"wide.md:1-10,20-30",
+			"wide.ts:5-40",
+			"wide.ts:5+30",
+			"wide.ts:1-10,20-30",
+			"wide.ts:raw:5-40",
+			"wide.ts:-20",
+		]) {
 			expect(await read(shaped, target)).toBe(await read(plain, target));
 		}
-		for (const target of ["wide.ts:1-10,20-30", "wide.ts:raw:5-40"]) {
-			expect(await read(shaped, target)).not.toBe(await read(plain, target));
+		expect(await read(shaped, "wide.ts:5-")).not.toBe(await read(plain, "wide.ts:5-"));
+	});
+});
+
+describe("spotlight raw reads and path lists", () => {
+	/** Twelve Python functions: long enough to be outlined and cut when shaped. */
+	const SOURCE = Array.from({ length: 12 }, (_, k) => [
+		`def handler${k}(payload, ledger):`,
+		...Array.from(
+			{ length: 20 },
+			(_, j) => `    total_${j} = payload["amount"] * ${j} + ledger[${k}][${j}]  # step ${j}`,
+		),
+		"    return total_0",
+		"",
+	])
+		.flat()
+		.join("\n");
+	/** Lines past the 400-character cap a cut read applies. */
+	const WIDE = Array.from({ length: 50 }, (_, i) => `const row${i} = "${String(i).repeat(600)}";`).join("\n");
+
+	async function sessions() {
+		const shaped = await experimentSession(undefined, {}, { scoreFree: 1 });
+		const plain = await plainSession();
+		for (const { session } of [shaped, plain]) {
+			await Bun.write(path.join(session.cwd, "raw.py"), SOURCE);
+			await Bun.write(path.join(session.cwd, "wide.ts"), WIDE);
+			await Bun.write(path.join(session.cwd, "b.txt"), "b\n");
 		}
+		return { shaped, plain };
+	}
+
+	it("returns a `:raw` read's bytes, also when repeated, and journals it as a raw read", async () => {
+		const { shaped, plain } = await sessions();
+		const tool = new ReadTool(shaped.session);
+
+		expect(resultText(await tool.execute("r1", { path: "raw.py:raw" }))).toBe(SOURCE);
+		expect(resultText(await tool.execute("r2", { path: "raw.py:raw" }))).toBe(SOURCE);
+		const ranged = await tool.execute("r3", { path: "raw.py:20-140:raw" });
+		const plainRanged = await new ReadTool(plain.session).execute("r3", { path: "raw.py:20-140:raw" });
+		expect(resultText(ranged)).toBe(resultText(plainRanged));
+		const journal = entries(shaped.manager, SPOTLIGHT_ENTRY.shape);
+		expect(journal.map(entry => (entry.stats as Record<string, number>).rawReads)).toEqual([1, 1, 1]);
+	});
+
+	it("returns a URL `:raw` read's fetched bytes", async () => {
+		const { shaped } = await sessions();
+		const body = Array.from({ length: 200 }, (_, i) => `row ${i}: the ledger reconciles against shard ${i % 4}`).join(
+			"\n",
+		);
+		vi.spyOn(scrapers, "loadPage").mockImplementation(async (requestedUrl: string) => ({
+			ok: true,
+			status: 200,
+			finalUrl: requestedUrl,
+			contentType: "text/plain",
+			content: body,
+		}));
+
+		const result = await new ReadTool(shaped.session).execute("r1", { path: "https://example.test/data.txt:raw" });
+
+		expect(resultText(result)).toBe(body);
+		expect(entries(shaped.manager, SPOTLIGHT_ENTRY.shape)[0]?.stats).toMatchObject({ rawReads: 1 });
+	});
+
+	it("shapes each part of a path list on its own, as one call with one journal entry and one windowed trace", async () => {
+		const { shaped, plain } = await sessions();
+		const target = "raw.py;raw.py:raw;wide.ts:5-40;b.txt";
+		const plainRead = async (path: string) => resultText(await new ReadTool(plain.session).execute("p", { path }));
+
+		const result = await new ReadTool(shaped.session).execute("list", { path: target });
+		const text = resultText(result);
+
+		// The `:raw` part and the bounded range stay as their own reads show them; the whole source file is outlined.
+		expect(text).toContain(SOURCE);
+		expect(text).toContain(await plainRead("wide.ts:5-40"));
+		expect(text.length).toBeLessThan((await plainRead(target)).length);
+		const journal = entries(shaped.manager, SPOTLIGHT_ENTRY.shape);
+		expect(journal.map(entry => entry.toolCallId)).toEqual(["list"]);
+		expect(journal[0]?.steps).toContain("outline");
+		expect(journal[0]?.stats).toMatchObject({ rawReads: 1, wholeReads: 1 });
+		// Each part is its own window of the original; the `:raw` part has no file window.
+		const windows = spotlightDetails(result.details)?.original?.windows;
+		expect(windows?.map(window => window.path)).toEqual(["raw.py", undefined, "wide.ts", "b.txt"]);
+	});
+
+	it("keeps the trace's line map on the lines the model saw when a part carries a repeat-read hint", async () => {
+		const { shaped } = await sessions();
+		const tool = new ReadTool(shaped.session);
+		for (const id of ["l1", "l2"]) await tool.execute(id, { path: "b.txt;raw.py" });
+
+		// The third identical read of `b.txt` gets the loop hint, between it and `raw.py`.
+		const result = await tool.execute("l3", { path: "b.txt;raw.py" });
+		const model = resultText(result).split("\n");
+		const original = spotlightDetails(result.details)?.original;
+
+		expect(resultText(result)).toContain("You have received this identical output 3 times");
+		const files: Record<string, string[]> = { "b.txt": ["b"], "raw.py": SOURCE.split("\n") };
+		const lines = (original?.windows ?? []).flatMap(window =>
+			files[window.path ?? ""].slice(window.start - 1, window.start - 1 + window.lines),
+		);
+		const map = original?.map ?? [];
+		expect(map.length).toBe(model.length);
+		// A shown line maps to its original line; a gap marker to the run it hides.
+		map.forEach((entry, k) => {
+			if (typeof entry === "number") expect(model[k]).toContain(lines[entry - 1]);
+			else if (entry) expect(model[k]).toContain("… [");
+		});
+	});
+
+	it("leaves a path list no part of which is cut as its parts read, with no original", async () => {
+		const { shaped, plain } = await sessions();
+		for (const { session } of [shaped, plain]) await Bun.write(path.join(session.cwd, "wide.md"), WIDE);
+
+		const result = await new ReadTool(shaped.session).execute("list", { path: "wide.ts:5-40;wide.md" });
+
+		expect(resultText(result)).toBe(
+			resultText(await new ReadTool(plain.session).execute("list", { path: "wide.ts:5-40;wide.md" })),
+		);
+		expect(spotlightDetails(result.details)?.original).toBeUndefined();
+		expect(entries(shaped.manager, SPOTLIGHT_ENTRY.shape).map(entry => entry.toolCallId)).toEqual(["list"]);
+	});
+
+	it("does not collapse a list part against an earlier part of the same list", async () => {
+		const { shaped } = await sessions();
+
+		const text = resultText(await new ReadTool(shaped.session).execute("list", { path: "raw.py;raw.py" }));
+
+		expect(text).not.toContain("as shown before");
 	});
 });
 
@@ -403,7 +618,7 @@ describe("spotlight plain baseline", () => {
 
 	/** Every bash call spills: the sink keeps the last 300 lines and the session holds the whole output. */
 	async function spill(manager: SessionManager): Promise<void> {
-		const artifactId = await manager.saveArtifact(FULL, "bash");
+		const artifactId = await manager.saveArtifact(FULL);
 		if (artifactId === undefined) throw new Error("the in-memory session keeps artifacts");
 		vi.spyOn(bashExecutor, "executeBash").mockResolvedValue({
 			...bashOutput(FULL.split("\n").slice(-300).join("\n")),
@@ -429,7 +644,7 @@ describe("spotlight plain baseline", () => {
 		const cut = await new BashTool(shaping.session).execute("b1", { command: "./ingest.sh" });
 
 		const plain = await plainText();
-		expect(plain).toContain("artifact://");
+		expect(plain).toMatch(/local:\/\/\d+\.log/);
 		const trace = cut.details?.spotlight;
 		if (!trace?.original) throw new Error("the spilled output was shaped whole and cut");
 		expect(trace.inChars).toBe(FULL.length);
@@ -475,7 +690,7 @@ describe("spotlight column-capped output", () => {
 	it("gives a short cut of the whole artifact over the column cap's preview, counting what it costs", async () => {
 		const client = spotlightClient(fakeSpotlight({ score: item => (item.includes("on_hold") ? 1 : 0.05) }));
 		const { session, manager } = await experimentSession(client);
-		const artifactId = await manager.saveArtifact(FULL, "bash");
+		const artifactId = await manager.saveArtifact(FULL);
 		if (artifactId === undefined) throw new Error("the in-memory session keeps artifacts");
 		const preview = `${FULL.slice(0, 768)}…`;
 		const capped: bashExecutor.BashResult = {
@@ -501,7 +716,7 @@ describe("spotlight column-capped output", () => {
 	it("still says a timed-out command timed out when its cut comes from the artifact", async () => {
 		const client = spotlightClient(fakeSpotlight({ score: item => (item.includes("on_hold") ? 1 : 0.05) }));
 		const { session, manager } = await experimentSession(client);
-		const artifactId = await manager.saveArtifact(FULL, "bash");
+		const artifactId = await manager.saveArtifact(FULL);
 		if (artifactId === undefined) throw new Error("the in-memory session keeps artifacts");
 		// The sink puts its timeout notice above the preview; the artifact holds only what the command printed.
 		const preview = `[Command timed out after 1 seconds]\n${FULL.slice(0, 768)}…`;
@@ -630,14 +845,14 @@ function grepOutput(files: number, perFile = 10): string {
 }
 
 /** A tool without shaping of its own, wrapped as sessions wrap every tool, returning `text`. */
-function fakeTool(name: string, text: string): AgentTool {
+function fakeTool(name: string, text: string, isError = false): AgentTool {
 	return wrapToolWithMetaNotice({
 		name,
 		label: name,
 		description: `fake ${name}`,
 		parameters: {},
 		async execute() {
-			return { content: [{ type: "text", text }] };
+			return { content: [{ type: "text", text }], ...(isError ? { isError: true } : {}) };
 		},
 	} as unknown as AgentTool);
 }
@@ -708,9 +923,9 @@ describe("spotlight shaping of any tool", () => {
 		expect(text.length).toBeLessThan(OUTPUT.length / 4);
 		expect(sources).toContain(callSummary("grep", ARGS));
 		// Every hidden run reads back from the saved copy the last line names.
-		const footer = /\[cut: (artifact:\/\/(\d+))\]$/.exec(text);
+		const footer = /\[cut: (local:\/\/(\d+)\.log)\]$/.exec(text);
 		if (!footer) throw new Error("a cut names where its hidden lines are");
-		const saved = run.manager.getArtifactContent(footer[2]) ?? "";
+		const saved = (await readArtifactText(run.manager, footer[1])) ?? "";
 		expect(saved).toBe(OUTPUT);
 		// The trace's original is that same copy, not a second one.
 		expect(result.details?.spotlight?.original?.url).toBe(footer[1]);
@@ -731,7 +946,7 @@ describe("spotlight shaping of any tool", () => {
 		});
 		expect(trace.savedTokens).toBe(countTokens(OUTPUT) - trace.outTokens);
 		expect(trace.savedTokens).toBeGreaterThan(0);
-		expect(run.manager.getArtifactContent(trace.original.url.replace("artifact://", ""))).toBe(OUTPUT);
+		expect(await readArtifactText(run.manager, trace.original.url)).toBe(OUTPUT);
 		const [entry] = entries(run.manager, SPOTLIGHT_ENTRY.shape);
 		expect(entry).toMatchObject({ toolCallId: "g1", tool: "grep", plainTokens: countTokens(OUTPUT) });
 		expect(entry.steps).toContain("window");
@@ -742,7 +957,7 @@ describe("spotlight shaping of any tool", () => {
 		const plain = await plainSession(SMALL_SPILL);
 		const plainResult = await agentCall(fakeTool("grep", big), plain, "g1", ARGS);
 		const plainText = resultText(plainResult);
-		expect(plainText).toContain("artifact://");
+		expect(plainText).toMatch(/local:\/\/\d+\.log/);
 		expect(plainText.length).toBeLessThan(big.length / 4);
 
 		const run = await experimentSession(ranked(), SMALL_SPILL);
@@ -770,7 +985,7 @@ describe("spotlight shaping of any tool", () => {
 		if (!shapedUrl) throw new Error("a held-out cut keeps its would-be text");
 		expect(trace).toMatchObject({ holdout: true, tool: "find", plainTokens: countTokens(OUTPUT) });
 		expect(trace?.savedTokens).toBeGreaterThan(0);
-		expect(run.manager.getArtifactContent(shapedUrl.replace("artifact://", ""))).toContain(NEEDED);
+		expect(await readArtifactText(run.manager, shapedUrl)).toContain(NEEDED);
 		expect(entries(run.manager, SPOTLIGHT_ENTRY.shape)[0]).toMatchObject({ tool: "find", holdout: true });
 	});
 
@@ -822,12 +1037,54 @@ describe("spotlight shaping of any tool", () => {
 		expect(resultText(again)).toBe(
 			[
 				"board: 10 open, 2 done",
-				"… [10 lines as shown before: read artifact://0:2-11]",
+				"… [10 lines as shown before: read local://0.log:2-11]",
 				"- [done] add the edit gate setting",
 			].join("\n"),
 		);
 		const entry = entries(run.manager, SPOTLIGHT_ENTRY.shape)[1];
 		expect(entry).toMatchObject({ toolCallId: "t2", steps: ["seen"], stats: { short: 1, seenLines: 10 } });
+	});
+
+	it("keeps an edit error's revealed lines whole when their text appeared earlier", async () => {
+		const run = await experimentSession(ranked());
+		await agentCall(fakeTool("board", OPEN.join("\n")), run, "t1");
+		const rejection = [
+			"This edit anchors to lines 15-24 of example.ts that [example.ts#TAG] never displayed.",
+			"Actual file content at those lines:",
+			...OPEN.map((line, i) => `  ${i + 15}: ${line}`),
+			"Verify the content matches what you intend to touch, then re-issue the edit with the same [example.ts#TAG] header — a straight retry now succeeds without a re-read.",
+		].join("\n");
+
+		const result = await agentCall(fakeTool("edit", rejection, true), run, "e1", { path: "example.ts" });
+
+		expect(result.isError).toBe(true);
+		expect(resultText(result)).toBe(rejection);
+		expect(spotlightDetails(result.details)).toBeUndefined();
+	});
+
+	it("keeps a non-edit tool's error result whole without journaling a Spotlight entry", async () => {
+		const run = await experimentSession(ranked());
+		await agentCall(fakeTool("board", BOARD.join("\n")), run, "t1");
+
+		const err = await agentCall(fakeTool("board", NEXT_BOARD, true), run, "t2");
+
+		expect(err.isError).toBe(true);
+		expect(resultText(err)).toBe(NEXT_BOARD);
+		expect(spotlightDetails(err.details)).toBeUndefined();
+		expect(entries(run.manager, SPOTLIGHT_ENTRY.shape).map(e => e.toolCallId)).toEqual(["t1"]);
+	});
+
+	it.each([10, 50])("keeps all %i numbered lines in an edit result when their text appeared earlier", async count => {
+		const run = await experimentSession(ranked());
+		const text = [
+			"Edit preview:",
+			...Array.from({ length: count }, (_, i) => `  ${i + 15}: ${OPEN[i % OPEN.length]}`),
+		].join("\n");
+		await agentCall(fakeTool("edit", text), run, "e1", { path: "example.ts" });
+
+		const again = await agentCall(fakeTool("edit", text), run, "e2", { path: "example.ts" });
+
+		expect(resultText(again)).toBe(text);
 	});
 
 	it("passes a short result whole when its runs already shown are too short to pay for a marker", async () => {
@@ -872,7 +1129,7 @@ describe("spotlight shaping of any tool", () => {
 		const next = fakeTool("board", NEXT_BOARD);
 		context.push(shown("t1", await agentCall(board, run, "t1")), call("t2"));
 		expect(resultText(await agentCall(next, run, "t2"))).toMatch(
-			/… \[10 lines as shown before: read artifact:\/\/\d+:2-11\]/,
+			/… \[10 lines as shown before: read local:\/\/\d+\.log:2-11\]/,
 		);
 
 		// A compaction leaves its summary and the new turn: the boards are gone from the context.
@@ -890,7 +1147,7 @@ describe("spotlight shaping of any tool", () => {
 		await agentCall(fakeTool("board", BOARD.join("\n")), run, "t1");
 		const sibling = await agentCall(fakeTool("board", NEXT_BOARD), run, "t2");
 
-		expect(resultText(sibling)).toMatch(/… \[10 lines as shown before: read artifact:\/\/\d+:2-11\]/);
+		expect(resultText(sibling)).toMatch(/… \[10 lines as shown before: read local:\/\/\d+\.log:2-11\]/);
 	});
 
 	it("shapes and journals only the tools spotlight.experiment.tools names", async () => {
@@ -952,6 +1209,26 @@ describe("spotlight shaping of any tool", () => {
 });
 
 describe("spotlight session entry", () => {
+	it.each(["models.noSpotlight", "models.offline"])("%s blocks a foreign Spotlight endpoint", async key => {
+		const manager = SessionManager.inMemory(await tmpDir());
+		const fetchSpy = vi.spyOn(globalThis, "fetch");
+		const experiment = startSpotlightExperiment(
+			Settings.isolated({ "spotlight.experiment.enabled": true, [key]: true }),
+			manager,
+			() => "local",
+		);
+		expect(experiment).toBeDefined();
+		await expect(
+			experiment!.client.rank({
+				state: { task: "find files" },
+				source: "search",
+				items: ["one"],
+				questions: { q: "relevant?" },
+			}),
+		).rejects.toThrow("disabled by model policy");
+		expect(fetchSpy).not.toHaveBeenCalled();
+		experiment!.client.close();
+	});
 	it("journals the session entry on a session change only when the journal's last one differs", async () => {
 		const manager = SessionManager.inMemory(await tmpDir());
 		// A journal from before the toggle carries only an arm assignment: it gets a session entry.
@@ -980,6 +1257,7 @@ describe("spotlight call context", () => {
 			name: "bash",
 			arguments: { command },
 		});
+		const fullIntent = "Checking retry timing: Does http.py:42 honor Retry-After?";
 		const messages = [
 			{ role: "user", content: "fix the flaky test", timestamp: 0 },
 			{ role: "assistant", content: [bash("a", "ls"), bash("b", "git status")] },
@@ -990,17 +1268,17 @@ describe("spotlight call context", () => {
 				content: [
 					bash("d", "cat log"),
 					{ type: "text", text: "Now the suite." },
-					bash("now", "bun test --rerun"),
+					{ ...bash("now", "bun test --rerun"), intent: `  ${fullIntent}  ` },
 					bash("later", "echo after"),
 				],
 			},
 		] as unknown as AgentMessage[];
 
-		const ctx = buildCallContext(messages, "now", "bun test --rerun", "  rerun the suite ");
+		const ctx = buildCallContext(messages, "now", "bun test --rerun", resolveToolCallIntent(messages, "now"));
 		expect(ctx).toEqual({
 			task: "fix the flaky test",
 			said: "Now the suite.",
-			intent: "rerun the suite",
+			intent: fullIntent,
 			commands: ["git status", "bun test", "cat log"],
 			source: "bun test --rerun",
 		});

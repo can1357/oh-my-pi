@@ -1,17 +1,11 @@
-import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
-export {
-	TASK_SUBAGENT_PROGRESS_CHANNEL,
-	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
-} from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
-export type {
-	SubagentProgressPayload,
-	SubagentLifecyclePayload,
-} from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
+import type { AgentSource } from "./task-details";
+export { TASK_SUBAGENT_PROGRESS_CHANNEL, TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "./session-observer-registry";
+export type { SubagentProgressPayload, SubagentLifecyclePayload } from "./session-observer-registry";
 import { type BaseType, type FluentType, type } from "@oh-my-pi/omptype";
 import { $env, isRecord } from "@oh-my-pi/pi-utils";
 
 import type { AgentSessionEvent } from "../session/agent-session";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { ConfiguredThinkingLevel } from "../utils/render-utils";
 
 const parseNumber = (value: string | undefined, defaultValue: number): number => {
 	if (value) {
@@ -31,8 +25,6 @@ export const MAX_OUTPUT_BYTES = parseNumber($env.PI_TASK_MAX_OUTPUT_BYTES, 500_0
 /** Maximum output lines per agent */
 export const MAX_OUTPUT_LINES = parseNumber($env.PI_TASK_MAX_OUTPUT_LINES, 5000);
 
-export const MAX_TASK_FILE_BYTES = 4 * 1024 * 1024;
-
 /** EventBus channel for raw subagent events */
 export const TASK_SUBAGENT_EVENT_CHANNEL = "task:subagent:event";
 
@@ -47,27 +39,19 @@ const outputSchemaInputSchema = type("object | boolean | string | null");
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
 const effortRule = '"lo" | "med" | "hi"' as const;
 
-// Per-spawn fields the seance schema adds or widens. Typed against
-// SeanceTaskSchemaFields so a field added there fails to compile until it is
-// listed here too; a missed key would be dropped on batch items.
-const SEANCE_ITEM_KEY_SET = { sourceSession: true, model: true } as const satisfies Record<SeanceItemKey, true>;
-const SEANCE_ITEM_KEYS = Object.keys(SEANCE_ITEM_KEY_SET);
-
 /**
- * Keep a batch item's seance keys through undeclared-key deletion: the item
- * schema declares `sourceSession` only while seance is advertised, and argument
- * validation re-attaches only root keys, so without this a
- * `tasks[].sourceSession` on an ordinary agent is deleted before execute()
- * instead of reaching the refusal. Other stale item keys are still deleted, and
- * the wire schema is unchanged.
+ * Keep a batch item's `model` key through undeclared-key deletion: argument
+ * validation re-attaches only root keys, so without this an undeclared
+ * `tasks[].model` (per-call model disabled) is deleted before execute()
+ * instead of reaching the preflight refusal, leaving the child on its own
+ * model while the caller believes it pinned another. Other stale item keys are
+ * still deleted, and the wire schema is unchanged.
  */
-function keepSeanceItemKeys<T, I>(item: FluentType<T, I>): FluentType<unknown, I> {
+function keepItemModelKey<T, I>(item: FluentType<T, I>): FluentType<unknown, I> {
 	return item.onUndeclaredKey("ignore").pipe((input: unknown): unknown => {
 		const out: unknown = item(input);
 		if (out instanceof type.errors || !isRecord(out) || !isRecord(input)) return out;
-		for (const key of SEANCE_ITEM_KEYS) {
-			if (Object.hasOwn(input, key) && !Object.hasOwn(out, key)) out[key] = input[key];
-		}
+		if (Object.hasOwn(input, "model") && !Object.hasOwn(out, "model")) out.model = input.model;
 		return out;
 	});
 }
@@ -80,7 +64,6 @@ export const taskItemSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
-	"model?": "string",
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -91,7 +74,6 @@ const taskItemSchemaIsolated = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
-	"model?": "string",
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -104,7 +86,6 @@ export const taskSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
-	"model?": "string",
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -116,7 +97,6 @@ const taskSchemaNoIsolation = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
-	"model?": "string",
 	"+": "delete",
 });
 function guardBatchAgent(schema: BaseType): BaseType {
@@ -134,14 +114,14 @@ function guardBatchAgent(schema: BaseType): BaseType {
 const taskSchemaBatch = guardBatchAgent(
 	type.raw({
 		context: "string",
-		tasks: keepSeanceItemKeys(taskItemSchemaIsolated).array(),
+		tasks: keepItemModelKey(taskItemSchemaIsolated).array(),
 		"+": "delete",
 	}),
 );
 const taskSchemaBatchNoIsolation = guardBatchAgent(
 	type.raw({
 		context: "string",
-		tasks: keepSeanceItemKeys(taskItemSchema).array(),
+		tasks: keepItemModelKey(taskItemSchema).array(),
 		"+": "delete",
 	}),
 );
@@ -163,16 +143,6 @@ function taskAgentSchemaRule(defaultAgent: string): string {
 	return "string";
 }
 
-/** Task fields the seance schema adds or widens; `seanceTaskSchemaFields` in ./seance must match it exactly. */
-export type SeanceTaskSchemaFields = {
-	"sourceSession?"?: FluentType<string>;
-	"model?"?: FluentType<string | string[]>;
-};
-
-type SeanceItemKey = {
-	[K in keyof SeanceTaskSchemaFields]-?: K extends `${infer Name}?` ? Name : never;
-}[keyof SeanceTaskSchemaFields];
-
 function createTaskSchema(options: {
 	isolationEnabled: boolean;
 	batchEnabled: boolean;
@@ -180,19 +150,21 @@ function createTaskSchema(options: {
 	effortEnabled: boolean;
 	evalToolsEnabled: boolean;
 	structured: boolean;
-	file: boolean;
-	seanceFields: SeanceTaskSchemaFields;
+	steps: boolean;
+	perCallModel: boolean;
 }): BaseType {
 	const agent = taskAgentSchemaRule(options.defaultAgent);
-	const taskFields = options.file ? { "task?": "string", "taskFile?": "string" } : { task: "string" };
+	const taskFields = options.steps ? { steps: "string[]" } : { task: "string" };
 	const effortField = options.effortEnabled ? { "effort?": effortRule } : {};
 	const schemaFields = options.structured
 		? { "outputSchema?": outputSchemaInputSchema, "schemaMode?": '"permissive" | "strict"' }
 		: {};
 	const toolsField = options.evalToolsEnabled ? { "tools?": "string[]" } : {};
-	// `model` is always declared, and preflight decides whether a per-call model
-	// is allowed; seance widens it to a list.
-	const seanceFields = { "model?": "string", ...options.seanceFields };
+	// `model` is declared only when the caller may send it: a per-call selector
+	// while `task.perCallModel` allows task calls. An
+	// undeclared `model` still reaches preflight (root keys survive lenient
+	// validation; batch items keep it via keepItemModelKey) and is refused there.
+	const gatedFields = options.perCallModel ? { "model?": "string" } : {};
 	if (options.batchEnabled) {
 		if (options.isolationEnabled) {
 			const item = type.raw({
@@ -203,14 +175,14 @@ function createTaskSchema(options: {
 				...effortField,
 				...schemaFields,
 				...toolsField,
-				...seanceFields,
+				...gatedFields,
 				"isolated?": "boolean",
 				"+": "delete",
 			});
 			return guardBatchAgent(
 				type.raw({
 					context: "string",
-					tasks: keepSeanceItemKeys(item).array(),
+					tasks: keepItemModelKey(item).array(),
 					"+": "delete",
 				}),
 			);
@@ -223,13 +195,13 @@ function createTaskSchema(options: {
 			...effortField,
 			...schemaFields,
 			...toolsField,
-			...seanceFields,
+			...gatedFields,
 			"+": "delete",
 		});
 		return guardBatchAgent(
 			type.raw({
 				context: "string",
-				tasks: keepSeanceItemKeys(item).array(),
+				tasks: keepItemModelKey(item).array(),
 				"+": "delete",
 			}),
 		);
@@ -243,7 +215,7 @@ function createTaskSchema(options: {
 			...effortField,
 			...schemaFields,
 			...toolsField,
-			...seanceFields,
+			...gatedFields,
 			"isolated?": "boolean",
 			"+": "delete",
 		});
@@ -256,7 +228,7 @@ function createTaskSchema(options: {
 		...effortField,
 		...schemaFields,
 		...toolsField,
-		...seanceFields,
+		...gatedFields,
 		"+": "delete",
 	});
 }
@@ -270,33 +242,33 @@ export function getTaskSchema(options: {
 	evalToolsEnabled?: boolean;
 	/** Advertise `outputSchema`/`schemaMode` (`task.structured`); default on. */
 	structured?: boolean;
-	/** Advertise `taskFile` (`task.file`); default off. */
-	file?: boolean;
+	/** Advertise `steps` instead of `task` (`task.steps`); default off. */
+	steps?: boolean;
 	defaultAgent?: string;
-	/** Advertise historical source/model fields for the bundled seance agent. */
-	seanceFields?: SeanceTaskSchemaFields;
+	/** Advertise the per-call `model` field (`task.perCallModel` allows task calls); default off. */
+	perCallModel?: boolean;
 }): TaskToolSchemaInstance {
 	const defaultAgent = options.defaultAgent ?? "task";
 	const effortEnabled = options.effortEnabled ?? false;
 	const evalToolsEnabled = options.evalToolsEnabled ?? true;
 	const structured = options.structured ?? true;
-	const file = options.file ?? false;
-	const seanceFields = options.seanceFields ?? {};
-	if (defaultAgent === "task" && !effortEnabled && evalToolsEnabled && structured && !file && !options.seanceFields) {
+	const steps = options.steps ?? false;
+	const perCallModel = options.perCallModel ?? false;
+	if (defaultAgent === "task" && !effortEnabled && evalToolsEnabled && structured && !steps && !perCallModel) {
 		if (options.batchEnabled) return options.isolationEnabled ? taskSchemaBatch : taskSchemaBatchNoIsolation;
 		return options.isolationEnabled ? taskSchema : taskSchemaNoIsolation;
 	}
-	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${structured ? "structured" : "prose"}:${file ? "file" : "inline"}:${options.seanceFields ? "seance" : "plain"}:${defaultAgent}`;
+	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${structured ? "structured" : "prose"}:${steps ? "steps" : "task"}:${perCallModel ? "model" : "nomodel"}:${defaultAgent}`;
 	const cached = taskSchemaCache.get(key);
 	if (cached) return cached;
 	const schema = createTaskSchema({
 		...options,
+		steps,
 		effortEnabled,
 		evalToolsEnabled,
 		structured,
-		file,
 		defaultAgent,
-		seanceFields,
+		perCallModel,
 	});
 	taskSchemaCache.set(key, schema);
 	return schema;
@@ -322,7 +294,7 @@ export interface AgentDefinition {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	output?: unknown;
 	blocking?: boolean;
-	/** `true` = task spawns keep the `yield` tool and this agent's `output` schema even when `task.structured` is off. */
+	/** `true` = task spawns keep this agent's `output` schema, and with it the `yield` tool, even when `task.structured` is off. */
 	structured?: boolean;
 	autoloadSkills?: string[];
 	/** When `false`, the agent's `read` tool returns verbatim file content instead of structural summaries. */

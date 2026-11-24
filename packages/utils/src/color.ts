@@ -61,6 +61,17 @@ export function rgbToHex(rgb: RGB): string {
 	return `#${toHex(rgb.r)}${toHex(rgb.g)}${toHex(rgb.b)}`;
 }
 
+/** Linear sRGB blend of two hex colors: `t` = 0 gives `a`, 1 gives `b`. */
+export function mixHex(a: string, b: string, t: number): string {
+	const ca = hexToRgb(a);
+	const cb = hexToRgb(b);
+	return rgbToHex({
+		r: ca.r + (cb.r - ca.r) * t,
+		g: ca.g + (cb.g - ca.g) * t,
+		b: ca.b + (cb.b - ca.b) * t,
+	});
+}
+
 /**
  * Convert RGB to HSV.
  */

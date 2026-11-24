@@ -3,28 +3,22 @@
  * real focus controller, composer submit path, and status line drive the main
  * thread's `RemoteAgentSession` mirror of a real worker-homed `AgentSession`.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { stripVTControlCharacters } from "node:util";
-import { type AgentMessage, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { type AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import { IrcBus } from "../../src/irc/bus";
-import { EventController } from "../../src/modes/controllers/event-controller";
 import { InputController } from "../../src/modes/controllers/input-controller";
 import { SessionFocusController } from "../../src/modes/controllers/session-focus-controller";
-import { statusLineHost } from "../../src/modes/status-line-host";
+import { SessionStatusLine } from "../../src/modes/interactive/status-line";
 import type { InteractiveModeContext } from "../../src/modes/types";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { AgentRegistry } from "../../src/registry/agent-registry";
-import type { AgentSession } from "../../src/session/agent-session";
 import type { AgentSessionEvent } from "../../src/session/agent-session-events";
 import type { AgentViewSession } from "../../src/session/agent-session-handle";
 import { AuthStorage } from "../../src/session/auth-storage";
@@ -36,12 +30,16 @@ import { agentsThreadService } from "../../src/thread/services/agents";
 import { authService } from "../../src/thread/services/auth";
 import { identityThreadService } from "../../src/thread/services/identity";
 import { SubagentWorker } from "../../src/thread/subagent-worker";
-import { cfgTasksTodoClearDelay, cfgToolsApprovalMode } from "../../src/tools/settings";
+import { cfgTasksTodoClearDelay } from "../../src/tools/settings";
 import { TODO_HUD_STATE_CUSTOM_TYPE } from "../../src/tools/todo";
-import * as runStatus from "../../src/utils/run-status";
+import { Composer } from "../../src/ui/composer/composer";
+import { statusSegs } from "../../src/ui/status/status-line";
 import type { FocusProbe, FocusProbeGlobals } from "../fixtures/focus-view-worker";
-import { createInteractiveModeContext } from "../helpers/interactive-mode-context";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 const cleanups: Array<() => unknown> = [];
 let settingsState: SettingsTestState | undefined;
@@ -49,7 +47,6 @@ let settingsState: SettingsTestState | undefined;
 beforeEach(async () => {
 	settingsState = beginSettingsTest();
 	await Settings.init({ inMemory: true });
-	await initTheme();
 	AgentRegistry.resetGlobalForTests();
 	AgentLifecycleManager.resetGlobalForTests();
 	IrcBus.resetGlobalForTests();
@@ -164,13 +161,14 @@ function focusHarness(): FocusHarness {
 			},
 			resetTranscriptAnchors() {},
 			restorePendingToolResults() {},
+			runSerialized: (run: () => Promise<void>) => run(),
 			markViewIdle() {},
 		},
 		statusLine: {
 			setSession: (session: AgentViewSession) => {
 				statusSessions.push(session);
 			},
-			invalidate() {},
+			refresh() {},
 		},
 		clearTransientSessionUi() {},
 		renderInitialMessages: async () => {
@@ -189,7 +187,6 @@ function focusHarness(): FocusHarness {
 		updatePendingMessagesDisplay() {},
 		updateEditorBorderColor() {},
 		syncIdleMaintenanceView() {},
-		ui: { requestRender() {}, requestComponentRender() {} },
 		showStatus() {},
 		collabGuest: undefined,
 	} as unknown as InteractiveModeContext;
@@ -201,29 +198,10 @@ function focusHarness(): FocusHarness {
 
 /** The composer's submit path with `view` focused, as `InputController` dispatches it. */
 function composerFor(view: AgentViewSession, focusedAgentId: string) {
-	let editorText = "";
 	const showError = vi.fn();
-	const editor = {
-		setText(text: string) {
-			editorText = text;
-		},
-		getText: () => editorText,
-		setCollapsedText(text: string) {
-			editorText = text;
-		},
-		composerChips: () => [],
-		addToHistory: vi.fn(),
-		imageLinks: undefined as (string | undefined)[] | undefined,
-		pendingImages: [] as ImageContent[],
-		pendingImageLinks: [] as (string | undefined)[],
-		clearDraft() {
-			editorText = "";
-		},
-		onSubmit: undefined as ((text: string) => Promise<void>) | undefined,
-	};
+	const editor = new Composer();
 	const ctx = {
-		editor,
-		ui: { requestRender() {} },
+		composer: editor,
 		session: { isStreaming: false, isCompacting: false, extensionRunner: undefined, queuedMessageCount: 0 },
 		viewSession: view,
 		focusedAgentId,
@@ -239,7 +217,8 @@ function composerFor(view: AgentViewSession, focusedAgentId: string) {
 		showError,
 		async submit(text: string): Promise<void> {
 			editor.setText(text);
-			await editor.onSubmit?.(text);
+			editor.submit();
+			await controller.waitForSubmissionDispatches();
 		},
 	};
 }
@@ -333,16 +312,19 @@ describe("focused view of a worker-homed agent session", () => {
 		remote.setThinkingLevel(ThinkingLevel.Low);
 		await waitFor(() => remote.state.thinkingLevel === ThinkingLevel.Low);
 
-		const statusLine = new StatusLineComponent(remote, statusLineHost);
+		const statusLine = new SessionStatusLine(remote);
 		cleanups.push(() => statusLine.dispose());
-		statusLine.updateSettings({
+		statusLine.previewSettings({
 			preset: "custom",
 			leftSegments: ["model"],
 			rightSegments: [],
 			separator: "none",
 			transparent: true,
 		});
-		const render = (): string => stripVTControlCharacters(statusLine.getTopBorder(160).content);
+		const render = (): string =>
+			statusSegs(statusLine.settings(), statusLine.facts())
+				.flatMap(seg => seg.spans.map(span => span.t))
+				.join("");
 		const before = render();
 		expect(before).toContain("Sonnet");
 		const selectors = remote.getAvailableEffortSelectors();
@@ -353,7 +335,6 @@ describe("focused view of a worker-homed agent session", () => {
 		await waitFor(async () => (await probe.report("W1")).configuredThinkingLevel === next);
 		await waitFor(() => remote.state.thinkingLevel === next);
 		expect(view.events.some(event => event.type === "thinking_level_changed")).toBe(true);
-		statusLine.invalidate();
 		expect(render()).not.toBe(before);
 	});
 
@@ -489,50 +470,5 @@ describe("queued messages of a focused worker-homed session", () => {
 		await probe.release();
 		await running;
 		expect((await probe.report("W1")).userTexts).toEqual(["[hold] working"]);
-	});
-});
-
-describe("run status of a focused worker-homed session", () => {
-	function toolStart(toolCallId: string, args: Record<string, unknown>): AgentSessionEvent {
-		return { type: "tool_execution_start", toolCallId, toolName: "bash", args } as unknown as AgentSessionEvent;
-	}
-
-	it("reads approval prompts from the child's settings and the approvals its runner holds", async () => {
-		const probe = await startWorker();
-		await probe.open("W1", await mainRegistry(), { "tools.approvalMode": "always-ask" });
-		const remote = mirrorOf("W1");
-		cleanups.push(remote.subscribe(() => {}));
-		await waitFor(() => cfgToolsApprovalMode.get(remote.settings) === "always-ask");
-		// No main ancestor holds the child's tools here; serve an exec-tier tool for the lookup.
-		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;
-		const getTool = vi.spyOn(remote, "getToolByName").mockReturnValue(bash);
-		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
-		cleanups.push(
-			() => getTool.mockRestore(),
-			() => report.mockRestore(),
-		);
-		const controller = new EventController(
-			createInteractiveModeContext({ viewSession: remote as unknown as AgentSession }),
-		);
-
-		// Main runs yolo; the child asks before exec-tier calls.
-		await controller.handleEvent({ type: "agent_start" } as AgentSessionEvent);
-		await controller.handleEvent(toolStart("bash-1", { command: "make" }));
-		expect(report).toHaveBeenLastCalledWith(expect.objectContaining({ state: "blocked", kind: "permission" }));
-
-		// The user approved bash for the rest of the child's session: the child's wrapper no longer asks.
-		await probe.grantSessionApproval("W1", "bash\0exec");
-		await probe.prompt("W1", "carry on");
-		await waitFor(() => remote.hasSessionApproval("bash\0exec"));
-		report.mockClear();
-		await controller.handleEvent(toolStart("bash-2", { command: "make" }));
-		expect(report).not.toHaveBeenCalledWith(expect.objectContaining({ state: "blocked" }));
-
-		// The child's conversation tier of `always-ask-cached` grants is served from the mirror too.
-		const grant = "read\0/tmp/focus-view-grant";
-		expect(remote.getApprovalGrants().present([grant]).has(grant)).toBe(false);
-		await probe.recordSessionGrant("W1", grant);
-		await probe.prompt("W1", "once more");
-		await waitFor(() => remote.getApprovalGrants().present([grant]).has(grant));
 	});
 });

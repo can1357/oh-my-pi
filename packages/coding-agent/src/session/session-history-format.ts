@@ -8,7 +8,7 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import { countNewlines, escapeXmlText } from "@oh-my-pi/pi-utils";
+import { countNewlines, escapeXmlText, isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type {
 	BashExecutionMessage,
@@ -19,7 +19,7 @@ import type {
 	HookMessage,
 	PythonExecutionMessage,
 } from "./messages";
-import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { truncateMiddle } from "../tools/streaming-output";
 
 export interface HistoryFormatOptions {
 	/** Optional H1 prepended to the transcript. */
@@ -51,7 +51,7 @@ export interface HistoryFormatOptions {
 	 */
 	expandEditDiffs?: boolean;
 	/**
-	 * Append bounded tool-result text and, for `ask`, the structured questions.
+	 * Append bounded tool-result text and, for `ask`, the form it showed.
 	 * Advisor transcripts enable this so reviewers see user decisions and the
 	 * evidence returned by primary tools without admitting unbounded output.
 	 */
@@ -91,6 +91,9 @@ const EXPANDED_TOOL_IO_MAX_LINES = 80;
 const EXPANDED_DIFF_MAX_LINES = 300;
 const EXPANDED_ASK_FIELD_MAX_BYTES = 2 * 1024;
 const EXPANDED_ASK_FIELD_MAX_LINES = 20;
+/** Preview budget for a skill-prompt's user text: long enough to carry the
+ *  actual request past a large skill body that precedes it (issue #19164). */
+const SKILL_PROMPT_ARGS_MAX = 500;
 
 /** Per-tool preference order for the most informative scalar argument. */
 const PRIMARY_ARG_KEYS = [
@@ -274,7 +277,12 @@ function boundedAskJson(value: unknown, transform?: (text: string) => string): s
 	);
 }
 
-function boundedFencedToolContext(text: string, language: string, maxLines = EXPANDED_TOOL_IO_MAX_LINES): string {
+/** Bound and fence a tool I/O excerpt. `truncated` is true when this advisor cap shortened it (#12777). */
+function boundedFencedToolContext(
+	text: string,
+	language: string,
+	maxLines = EXPANDED_TOOL_IO_MAX_LINES,
+): { content: string; truncated: boolean } {
 	const longestFence = text.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0;
 	// A pathological run can make Markdown fences larger than the whole budget.
 	// Use indented code in that case: constant wrapper cost and no delimiter collision.
@@ -285,54 +293,26 @@ function boundedFencedToolContext(text: string, language: string, maxLines = EXP
 			maxLines,
 		});
 		const bounded = truncated.truncated ? `${marker}\n${truncated.content}` : truncated.content;
-		return bounded.replace(/^/gm, "    ");
+		return { content: bounded.replace(/^/gm, "    "), truncated: truncated.truncated === true };
 	}
 	const fenceBytes = Math.max(3, longestFence + 1) * 2 + language.length + 2;
-	return fencedText(
-		truncateMiddle(text, {
-			maxBytes: Math.max(1, EXPANDED_TOOL_IO_MAX_BYTES - fenceBytes),
-			maxLines,
-		}).content,
-		language,
-	);
-}
-
-function expandedAskArguments(
-	args: Record<string, unknown> | undefined,
-	transform?: (text: string) => string,
-): string | undefined {
-	if (!args) return undefined;
-	const visibleArgs = Object.fromEntries(Object.entries(args).filter(([key]) => key !== INTENT_FIELD));
-	try {
-		return boundedAskJson(visibleArgs, transform);
-	} catch {
-		return undefined;
-	}
+	const bounded = truncateMiddle(text, {
+		maxBytes: Math.max(1, EXPANDED_TOOL_IO_MAX_BYTES - fenceBytes),
+		maxLines,
+	});
+	return { content: fencedText(bounded.content, language), truncated: bounded.truncated === true };
 }
 
 function expandedAskDetails(
 	result: ToolResultMessage | undefined,
 	transform?: (text: string) => string,
 ): string | undefined {
-	if (!result?.details || typeof result.details !== "object") return undefined;
-	const details = result.details as {
-		question?: unknown;
-		questions?: unknown;
-		results?: unknown;
-	};
-	const questions = Array.isArray(details.results)
-		? details.results
-				.map(item =>
-					item && typeof item === "object" && typeof (item as { question?: unknown }).question === "string"
-						? (item as { question: string }).question
-						: undefined,
-				)
-				.filter((question): question is string => question !== undefined)
-		: Array.isArray(details.questions)
-			? details.questions.filter((question): question is string => typeof question === "string")
-			: typeof details.question === "string"
-				? [details.question]
-				: [];
+	const details = result?.details;
+	if (!isRecord(details)) return undefined;
+	const answers = details.answers;
+	const questions = Array.isArray(answers)
+		? answers.flatMap(item => (isRecord(item) && typeof item.question === "string" ? [item.question] : []))
+		: [];
 	return questions.length > 0 ? boundedAskJson({ questions }, transform) : undefined;
 }
 
@@ -371,21 +351,44 @@ function toolCallLine(
 	if (expandEditDiffs) {
 		const diff = (result?.details as { diff?: unknown } | undefined)?.diff;
 		if (typeof diff === "string" && diff.trim()) {
-			base = `${base}\n${boundedFencedToolContext(transformExpandedToolIO?.(diff) ?? diff, "diff", EXPANDED_DIFF_MAX_LINES)}`;
+			base = `${base}\n${boundedFencedToolContext(transformExpandedToolIO?.(diff) ?? diff, "diff", EXPANDED_DIFF_MAX_LINES).content}`;
 		}
 	}
 
 	if (expandToolIO) {
 		const sections: string[] = [];
 		if (name === "ask") {
-			const askArguments =
-				expandedAskArguments(args, transformExpandedToolIO) ?? expandedAskDetails(result, transformExpandedToolIO);
-			if (askArguments) sections.push(`Ask input:\n${boundedFencedToolContext(askArguments, "json")}`);
+			const html = args?.html;
+			if (typeof html === "string") {
+				sections.push(
+					`Ask input:\n${boundedFencedToolContext(transformExpandedToolIO?.(html) ?? html, "html").content}`,
+				);
+			} else {
+				// An orphaned result (its call not in view) still names the questions it answered.
+				const askQuestions = expandedAskDetails(result, transformExpandedToolIO);
+				if (askQuestions) sections.push(`Ask input:\n${boundedFencedToolContext(askQuestions, "json").content}`);
+			}
 		}
 		if (result) {
 			const resultText = expandedToolResultText(visibleResultText);
 			if (resultText) {
-				sections.push(`Tool result:\n${boundedFencedToolContext(resultText, "text")}`);
+				const bounded = boundedFencedToolContext(resultText, "text");
+				// The cut lines were part of the result the main thread received, so the label says only
+				// that this view cut them. The tool's own limits (summary, meta.limits) are not checked
+				// here, so no completeness is claimed; a tool-side truncation (meta.truncation) is named
+				// independently of this view's cap, so a small tool-truncated result is not mislabelled.
+				const toolTruncated =
+					isRecord(result.details) &&
+					isRecord(result.details.meta) &&
+					result.details.meta.truncation !== undefined;
+				const label = toolTruncated
+					? bounded.truncated
+						? "Tool result (shortened here for advisor view only; the tool itself truncated its output):"
+						: "Tool result (the tool itself truncated its output):"
+					: bounded.truncated
+						? "Tool result (shortened here for advisor view only; the omitted lines were part of the result the main thread received):"
+						: "Tool result:";
+				sections.push(`${label}\n${bounded.content}`);
 			}
 		}
 		if (sections.length > 0) base = `${base}\n${sections.join("\n")}`;
@@ -477,6 +480,17 @@ function customOneLiner(msg: CustomMessage | HookMessage, transform?: ToolIOTran
 			const index =
 				typeof details.index === "number" ? details.index : (LEGACY_IMAGE_ATTACHMENT_INDEX.exec(text)?.[1] ?? "?");
 			return `[image-attachment] Image #${index}: ${path}`;
+		}
+		case "skill-prompt": {
+			// The rendered content puts the full skill body before `User: <args>`, so the
+			// generic 120-char cap hides the user's request (issue #19164). Surface the
+			// structured user text from details with its own budget instead.
+			const userText =
+				str("prompt").trim() ||
+				(typeof details.args === "string" && details.args.trim() ? `User: ${details.args.trim()}` : "");
+			const label = typeof details.name === "string" && details.name ? `skill:${details.name}` : "skill-prompt";
+			if (!userText) return `[${label}] ${previewLine(contentToText(msg.content), transform)}`;
+			return `[${label}] ${previewLine(userText, transform, SKILL_PROMPT_ARGS_MAX)}`;
 		}
 		default:
 			return `[${msg.customType}] ${previewLine(contentToText(msg.content), transform)}`;
@@ -634,6 +648,7 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 			case "custom":
 			case "hookMessage": {
 				const custom = msg as CustomMessage | HookMessage;
+				if (custom.role === "custom" && custom.excludeFromContext) break;
 				if (
 					custom.display === false &&
 					!PRIMARY_CONTEXT_CUSTOM_TYPES.has(custom.customType) &&

@@ -10,15 +10,16 @@ import { AuthStorage } from "../../src/session/auth-storage";
 import { AgentSession } from "../../src/session/agent-session";
 import { SessionManager } from "../../src/session/session-manager";
 import * as workerClient from "../../src/subprocess/worker-client";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../../src/ui/theme/service";
+import { createModeTerminal } from "../helpers/mode-terminal";
 
 if (process.argv[2] === "receive") {
 	const extracted = extractProfileFlags(process.argv.slice(3));
 	// Require argv propagation even on the spawn fallback, whose env could mask a regression.
 	setProfile(extracted.profile);
-	const resumeIndex = extracted.argv.indexOf("--resume");
-	if (resumeIndex === -1) throw new Error("Restarted process did not receive --resume");
-	const sessionFile = extracted.argv[resumeIndex + 1];
+	const restoreIndex = extracted.argv.indexOf("--restore");
+	if (restoreIndex === -1) throw new Error("Restarted process did not receive --restore");
+	const sessionFile = extracted.argv[restoreIndex + 1];
 	// Listed under the restored profile only if the profile reached the new process.
 	const sessions = await SessionManager.list(process.cwd());
 	const found = sessionFile && sessions.find(session => path.resolve(session.path) === path.resolve(sessionFile));
@@ -45,9 +46,15 @@ if (process.argv[2] === "receive") {
 		settings: Settings.isolated(),
 		modelRegistry,
 	});
-	const mode = new InteractiveMode(session, "test");
-	mode.ui.requestRender = () => {};
-	mode.ui.terminal.drainInput = async () => {};
+	const mode = new InteractiveMode(
+		session,
+		"test",
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		createModeTerminal().frame,
+	);
 	vi.spyOn(workerClient, "resolveCliEntryCmd").mockReturnValue([process.execPath, import.meta.path, "receive"]);
 	await mode.restart();
 }

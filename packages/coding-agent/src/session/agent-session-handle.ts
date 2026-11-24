@@ -10,10 +10,10 @@
  */
 import type { AgentMessage, AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Effort, ImageContent, Model, ServiceTier, ToolResultMessage, UsageReport } from "@oh-my-pi/pi-ai";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
-import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { ConfiguredThinkingLevel } from "../utils/render-utils";
+import type { IrcMessage } from "../irc/irc-types";
+import type { JobWidgetEntry } from "../tools/details/job-widget";
+import type { TodoPhase } from "../tools/details/todo";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
@@ -22,7 +22,6 @@ import type { ExtensionRunner } from "../extensibility/extensions";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState } from "../goals/state";
-import type { ApprovalGrantStore } from "../tools/approval-cache";
 import type { TokenRateMeter } from "../utils/token-rate";
 import type { AgentDefinition } from "../task/types";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
@@ -34,12 +33,12 @@ import type {
 	AsyncJobInspection,
 	AsyncJobSnapshot,
 	AsyncJobTree,
+	DequeuedMessage,
 	EphemeralTurnOptions,
 	EphemeralTurnResult,
 	Prewalk,
 	PromptOptions,
 	ResolvedRoleModel,
-	RestoredQueuedMessage,
 	RoleModelCycle,
 	RoleModelCycleResult,
 	SessionStats,
@@ -51,7 +50,7 @@ import type { CustomMessage } from "./messages";
 import type { ServingModel } from "./retry-fallback-chains";
 import type { AdvisorStatusOverviewEntry } from "./session-advisors";
 import type { SessionContext, TranscriptSessionContextOptions } from "./session-context";
-import type { ModelUsageEntry, SessionEntry, UsageStatistics } from "./session-entries";
+import type { ModelUsageRecord, SessionEntry, UsageStatistics } from "./session-entries";
 
 /** Session-manager reads other agents' code performs on a session it does not own. */
 export interface AgentSessionManagerHandle {
@@ -107,6 +106,12 @@ export interface AgentSessionHandle {
 	readonly runStartedAt: number | undefined;
 	/** Whether the session still owes turns to IRC messages (held, queued, or awaiting compaction). */
 	readonly ircWakesPending: boolean;
+	/**
+	 * Whether the agent acts again without anyone messaging it: its turn is streaming or
+	 * continues, or something wakes it once the turn ends (queued input, or a background
+	 * job, live service or running subagent of its own that is not waiting on it).
+	 */
+	readonly hasPendingWake: boolean;
 	/** Full message list, including custom message types. */
 	readonly messages: AgentMessage[];
 	/** Current transcript path, or undefined when sessions are disabled. */
@@ -133,9 +138,8 @@ export interface AgentSessionHandle {
 	getSessionAgents(): AgentDefinition[];
 	/** Whether a message from `from` still waits for a turn of its own. */
 	hasQueuedIrcFrom(from: string): boolean;
-	/** Surface and consume every pending IRC record before automatic injection; with `ifAny`,
-	 *  none unless at least one of them satisfies it. */
-	drainPendingIrcInboxMessages(agentId: string, opts?: { ifAny?: (msg: IrcMessage) => boolean }): IrcMessage[];
+	/** Whether a queued IRC message, injected as a user turn at the next step boundary, ends a `wait`. */
+	hasIrcInterrupts(): boolean;
 	/** Emit a display-only IRC relay observation on this session's UI. */
 	emitIrcRelayObservation(record: CustomMessage): void;
 	/** Deliver an IRC message into this recipient session. */
@@ -171,8 +175,6 @@ export interface AgentViewSessionManager extends AgentSessionManagerHandle {
 	getLeafId(): string | null;
 	/** The newest entry that moves the conversation, when the active branch ends at it (`conversationTip`). */
 	getConversationTip(): SessionEntry | undefined;
-	/** Artifacts directory of the consulted seance source, when this is a seance session. */
-	getSeanceSourceArtifactsDir(): string | null;
 	/** Append a custom entry (a worker-homed session appends on its home thread). */
 	appendCustomEntry(customType: string, data?: unknown): void;
 	/** Flush pending writes to disk. */
@@ -180,21 +182,13 @@ export interface AgentViewSessionManager extends AgentSessionManagerHandle {
 	/** Materialize the session file on disk. */
 	ensureOnDisk(): Promise<void>;
 	/** Record an off-transcript model call under the entry `owner.parentId` (a worker-homed session records on its home thread). */
-	appendModelUsage(
-		usage: Pick<
-			ModelUsageEntry,
-			"purpose" | "role" | "api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage"
-		>,
-		owner: { sessionId: string; parentId: string | null },
-	): void;
+	appendModelUsage(usage: ModelUsageRecord, owner: { sessionId: string; parentId: string | null }): void;
 	/** Store a blob in the session's blob store. */
 	putBlob(data: Buffer, options?: BlobPutOptions): Promise<BlobPutResult>;
 	/** Store a blob in the session's blob store synchronously. */
 	putBlobSync(data: Buffer, options?: BlobPutOptions): BlobPutResult;
 	/** Path of a session artifact, or null when it is gone. */
 	getArtifactPath(id: string): Promise<string | null>;
-	/** In-memory content of a session artifact (non-persistent sessions), or null; a worker-homed session answers asynchronously. */
-	getArtifactContent(id: string): string | null | Promise<string | null>;
 }
 
 /** TTSR rule source the TUI's link resolver reads. */
@@ -288,8 +282,6 @@ export interface AgentViewSession extends AgentSessionHandle {
 	readonly compactionSpeculation: "idle" | "running" | "armed";
 	/** Bumped whenever context usage changes. */
 	readonly contextUsageRevision: number;
-	/** Whether a handoff is being generated. */
-	readonly isGeneratingHandoff: boolean;
 	/** Whether a retry is pending. */
 	readonly isRetrying: boolean;
 	/** Current retry attempt (0 when not retrying). */
@@ -316,8 +308,6 @@ export interface AgentViewSession extends AgentSessionHandle {
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist?: boolean): void;
 	/** Advance to the next thinking level. */
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined;
-	/** Thinking level a temporary switch to `model` would use. */
-	resolveTemporaryModelThinkingLevel(model: Model): ConfiguredThinkingLevel | undefined;
 	/** Switch model without persisting it as the default. */
 	setModelTemporary(
 		model: Model,
@@ -367,18 +357,14 @@ export interface AgentViewSession extends AgentSessionHandle {
 	setTodoPhases(phases: TodoPhase[]): void;
 	/** Replace the list from outside the `todo` tool: update the cache and record a `user_todo_edit` entry so reloads keep it. */
 	commitTodoPhases(phases: TodoPhase[]): void;
-	/** Whether the user approved approval scope `key` for the rest of this session, so its prompt is skipped. */
-	hasSessionApproval(key: string): boolean;
-	/** Remembered `always-ask-cached` grants this session's tool calls are checked against. */
-	getApprovalGrants(): ApprovalGrantStore;
 	/** Registered tool by name. */
 	getToolByName(name: string): AgentTool | undefined;
 	/** Whether a built-in tool with this name is registered. */
 	hasBuiltInTool(name: string): boolean;
 	/** Queued steering and follow-up messages. */
 	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[]; liveSteered: number };
-	/** Remove and return the newest queued message. */
-	popLastQueuedMessage(): RestoredQueuedMessage | undefined;
+	/** Remove and return the newest queued message with the queue it came from. */
+	popLastQueuedMessage(): DequeuedMessage | undefined;
 	/** Resume an interrupted turn. */
 	resume(): Promise<void>;
 	/** Retry the last failed turn. */
@@ -387,8 +373,6 @@ export interface AgentViewSession extends AgentSessionHandle {
 	abortRetry(): void;
 	/** Cancel an in-progress compaction. */
 	abortCompaction(reason?: unknown): void;
-	/** Cancel an in-progress handoff. */
-	abortHandoff(): void;
 	/** Run a side turn (e.g. /btw) against the session's model without touching its transcript. */
 	runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult>;
 	/** Whether an ephemeral turn's `maxTokens` reaches the provider unchanged. */
