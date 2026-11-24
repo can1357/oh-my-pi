@@ -15,10 +15,11 @@
 import { type Accessor, computed, For, type JSXNode, Show } from "@oh-my-pi/pi-tui";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { formatNumber } from "@oh-my-pi/pi-utils";
-import type { TspMeterMark, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
+import type { TspMeterMark, TspPropNode, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { StatusLineSegmentId } from "../../config/status-line-schema";
 import { sanitizeStatusText } from "../../modes/view-model/chrome/shared";
-import { promptCacheDetails } from "../../modes/view-model/status-line/prompt-cache";
+import type { PromptCacheStatus } from "../../modes/view-model/status-line/host";
+import { promptCacheBrief } from "../../modes/view-model/status-line/prompt-cache";
 import type { StatusLineSettings } from "../../modes/view-model/status-line/types";
 import type { StatusFacts } from "./facts";
 import { effectiveStatusSettings, type SegMotion, type SegView, segmentView, thinkingWord } from "./segments";
@@ -80,8 +81,31 @@ interface Fact {
 	readonly icon?: string;
 	readonly tone?: TspTone;
 	readonly title?: string;
+	readonly aria?: string;
+	readonly hovercard?: TspPropNode;
 	readonly actions?: { readonly click: ComposerBarAction };
 	readonly motion?: SegMotion;
+}
+
+function cacheFactProps(
+	cache: PromptCacheStatus,
+	now: number,
+): Pick<Fact, "role" | "side" | "aria" | "title" | "hovercard"> {
+	const [head, next] = promptCacheBrief(cache, now);
+	return {
+		role: "omp.composer.cache",
+		side: "right",
+		aria: head,
+		title: `${head}\n${next}`,
+		hovercard: {
+			k: "col",
+			p: { role: "omp.composer.cache.card" },
+			c: [
+				{ k: "text", p: cache.state === "cold" ? { spans: [{ t: head, s: "warning" }] } : { text: head } },
+				{ k: "text", p: { spans: [{ t: next, s: "muted" }] } },
+			],
+		},
+	};
 }
 
 /** Where a context level starts, as a share of the window: its percent or its token count, whichever comes first. */
@@ -124,21 +148,11 @@ export function composerFacts(props: {
 				const cache = id === "cache" ? state.promptCache : undefined;
 				out.push({
 					key: id,
-					role: cache ? "omp.composer.cache" : "omp.composer.fact",
+					...(cache ? cacheFactProps(cache, state.now) : { role: "omp.composer.fact", title: view.title }),
 					priority: (PINNED[id] ? PINNED_PRIORITY : 0) + order,
 					spans: dim(view.spans),
-					...(cache ? { side: "right" as const } : {}),
 					...(view.icon !== undefined ? { icon: view.icon } : {}),
 					...(view.tone !== undefined ? { tone: view.tone } : {}),
-					...(cache
-						? {
-								title: promptCacheDetails(cache, state.now)
-									.map(row => `${row.label}: ${row.value}`)
-									.join("\n"),
-							}
-						: view.title !== undefined
-							? { title: view.title }
-							: {}),
 					...(action ? { actions: props.click(action) } : {}),
 					...(view.motion ? { motion: view.motion } : {}),
 				});
@@ -254,6 +268,8 @@ export function composerFacts(props: {
 								icon={() => fact()?.icon}
 								tone={() => fact()?.tone}
 								title={() => fact()?.title}
+								aria={() => fact()?.aria}
+								hovercard={() => fact()?.hovercard}
 								actions={() => fact()?.actions}
 							>
 								<Show when={() => fact()?.motion}>{motion => <SegMotionNode motion={motion} />}</Show>
