@@ -53,8 +53,8 @@ import { findConfigFile } from "./config";
 import { cfgNoJudge, cfgNoSpotlight, cfgOffline } from "./config/auxiliary-model-policy";
 import { ModelRegistry } from "./config/model-registry";
 import { applyModelPresetOverrides, applyPresetLaunchThinkingLevel } from "./config/model-presets";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { formatModelSelectorValue } from "./config/model-selector";
+import { type ConfiguredThinkingLevel, sanitizeDisplayWarnings } from "./utils/render-utils";
 import {
 	disabledProviderIds,
 	expandRoleAlias,
@@ -147,7 +147,6 @@ import { cfgTelemetryOtlpExportEnabled } from "./telemetry-settings";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
 import { automaticThinkingLevel, concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking/levels";
 import type { LspStartupServerInfo } from "./tools";
-import { sanitizeDisplayWarnings } from "./utils/render-utils";
 import { getChangelogPath, readLastChangelogVersion, resolveStartupChangelogForDisplay } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
 import { resolveFirstLaunchPythonEvalWarning } from "./eval/startup-warning";
