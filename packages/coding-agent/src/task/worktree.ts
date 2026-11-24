@@ -6,7 +6,7 @@ import * as path from "node:path";
 import type { VcsCommitAuthor, VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { formatBytes, getWorktreeDir, isEnoent, isEnotdir, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { SettingValueOf } from "../config/registry";
 
 import { patchSectionPaths, splitPatchSections } from "../utils/git-diff-paths";
@@ -371,10 +371,10 @@ export async function captureIsolationBaseline(
 
 /**
  * The baseline untracked paths that the checkout a delta lands in no longer
- * holds. A patch cannot delete or change them there, so the delta leaves them
- * out of both trees and carries only what the task wrote. Empty when the delta
- * stays in the checkout it was captured from: there an absent path is the
- * task's own deletion.
+ * holds: the path is absent, or a parent component is a regular file (ENOTDIR).
+ * Any other lstat error is real and is rethrown. Empty when the delta stays in
+ * the checkout it was captured from: there an absent path is the task's own
+ * deletion.
  */
 async function parentVanishedUntracked(repoDir: string, rb: RepoBaseline): Promise<Set<string>> {
 	const vanished = new Set<string>();
@@ -383,11 +383,33 @@ async function parentVanishedUntracked(repoDir: string, rb: RepoBaseline): Promi
 		try {
 			await fs.lstat(path.join(rb.repoRoot, entry));
 		} catch (error) {
-			if (!isEnoent(error)) throw error;
+			if (!isEnoent(error) && !isEnotdir(error)) throw error;
 			vanished.add(entry);
 		}
 	});
 	return vanished;
+}
+
+/**
+ * The vanished paths the task left as the isolation held them at baseline: their
+ * section in the current untracked patch equals their baseline section. Those are
+ * no change of the task's, so the delta leaves them out. A vanished path the task
+ * modified or created keeps its section and lands as a creation.
+ */
+function unchangedVanished(vanished: ReadonlySet<string>, baselinePatch: string, currentPatch: string): Set<string> {
+	if (vanished.size === 0) return new Set();
+	const baselineSections = patchSectionsByPath(baselinePatch);
+	const currentSections = patchSectionsByPath(currentPatch);
+	return new Set([...vanished].filter(file => currentSections.get(file) === baselineSections.get(file)));
+}
+
+/** The `diff --git` section of `patch` for each file it touches, keyed by that path. */
+function patchSectionsByPath(patch: string): Map<string, string> {
+	const sections = new Map<string, string>();
+	for (const section of splitPatchSections(patch)) {
+		for (const file of patchSectionPaths(section)) sections.set(file, section);
+	}
+	return sections;
 }
 
 async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRepoDir = repoDir): Promise<string> {
@@ -397,8 +419,9 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 	const currentStaged = await repo.diffText({ binary: true, cached: true });
 	const currentUnstaged = await repo.diffText({ binary: true });
 	const vanished = await parentVanishedUntracked(repoDir, rb);
-	const currentUntracked = (await repo.lsFiles(true, true)).filter(entry => !vanished.has(entry));
+	const currentUntracked = await repo.lsFiles(true, true);
 	const currentUntrackedPatch = await captureUntrackedPatch(repoDir, currentUntracked, repo);
+	const unchanged = unchangedVanished(vanished, rb.untrackedPatch, currentUntrackedPatch);
 	const committedPatch =
 		currentHead && currentHead !== rb.headCommit ? await diffTreeOrEmpty(repo, rb.headCommit, currentHead) : "";
 
@@ -411,7 +434,7 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 		committedPatch,
 		currentStaged,
 		currentUnstaged,
-		currentUntrackedPatch,
+		unchanged.size === 0 ? currentUntrackedPatch : omitPatchFiles(currentUntrackedPatch, unchanged),
 	]);
 
 	return diffTreeOrEmpty(objectRepo, baselineTree, currentTree);
