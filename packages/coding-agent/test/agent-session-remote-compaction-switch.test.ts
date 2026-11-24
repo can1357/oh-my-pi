@@ -3,7 +3,8 @@
  * provider-bound payload and only a placeholder summary. A model that cannot
  * replay that payload must read the history behind it instead of the
  * placeholder, from the first request after the switch, and a target too small
- * for that history must compact it before sending.
+ * for that history must compact it before sending. A session-only switch onto
+ * such a target hands off from the model that reads the compaction first.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -16,16 +17,20 @@ import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock"
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { __resetDirsFromEnvForTests, setAgentDir } from "@oh-my-pi/pi-utils";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 import { restoreEnvValue } from "./helpers/settings-test-state";
 
 const FACT = "COMPACTED-FACT";
 const PLACEHOLDER = "Remote compaction preserved provider-native history for this session.";
 const NATIVE_STATE = "opaque-native-state";
+const HANDOFF_GOAL = "Continue from the handoff";
+const HANDOFF = `## Goal\n${HANDOFF_GOAL}`;
 
 function bundled(provider: GeneratedProvider, modelId: string): Model {
 	const model = getBundledModel(provider, modelId);
@@ -147,6 +152,25 @@ describe("switch after an OpenAI remote compaction", () => {
 		return { session, mock };
 	}
 
+	/** A selector controller whose `/compact` runs the session's real compaction. */
+	function selectorFor(session: AgentSession): SelectorController {
+		return new SelectorController(
+			createInteractiveModeContext({
+				session,
+				handleCompactCommand: async (_instructions, mode, beforeFlush, options) => {
+					let outcome: compactionModule.CompactionOutcome = "ok";
+					try {
+						await session.compact(undefined, { ...options, mode });
+					} catch {
+						outcome = "failed";
+					}
+					await beforeFlush?.(outcome);
+					return outcome;
+				},
+			}),
+		);
+	}
+
 	it("sends the history behind the compaction to Claude, and the native payload after a switch back", async () => {
 		const sessionManager = SessionManager.inMemory();
 		seedRemoteCompaction(sessionManager, 6);
@@ -197,6 +221,53 @@ describe("switch after an OpenAI remote compaction", () => {
 		expect(countFacts(sent)).toBeLessThan(80);
 	});
 
+	it("hands off before a /switch onto history behind the compaction that the target cannot hold", async () => {
+		const sessionManager = SessionManager.inMemory();
+		seedRemoteCompaction(sessionManager, 160);
+		const smallClaude: Model = { ...claude, contextWindow: 64_000, maxTokens: 8_000 };
+		const { session } = startSession(
+			sessionManager,
+			gpt,
+			Settings.isolated({ "compaction.methodOrder": ["remote", "soft"] }),
+		);
+		const handoffSpy = vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue(HANDOFF);
+		// The viewed usage fits the target; the history behind the compaction does not.
+		expect(session.getContextUsage()!.tokens).toBeLessThan(64_000);
+
+		await selectorFor(session).switchSessionModel(smallClaude);
+
+		// One request by the model that reads the compaction, over its compact context.
+		expect(handoffSpy).toHaveBeenCalledTimes(1);
+		const [context, handoffModel] = handoffSpy.mock.calls[0]!;
+		expect(handoffModel.provider).toBe("openai");
+		expect(countFacts(requestText(context))).toBe(0);
+		expect(session.model?.provider).toBe("anthropic");
+		const toClaude = JSON.stringify(session.agent.state.messages);
+		expect(toClaude).toContain(HANDOFF_GOAL);
+		expect(toClaude).not.toContain(PLACEHOLDER);
+		expect(countFacts(toClaude)).toBeLessThan(160);
+	});
+
+	it("still switches when that handoff fails, leaving the history to the target", async () => {
+		const sessionManager = SessionManager.inMemory();
+		seedRemoteCompaction(sessionManager, 160);
+		const smallClaude: Model = { ...claude, contextWindow: 64_000, maxTokens: 8_000 };
+		const { session } = startSession(
+			sessionManager,
+			gpt,
+			Settings.isolated({ "compaction.methodOrder": ["remote", "soft"] }),
+		);
+		const limit = new Error("usage limit reached");
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockRejectedValue(limit);
+		vi.spyOn(compactionModule, "compact").mockRejectedValue(limit);
+
+		await selectorFor(session).switchSessionModel(smallClaude);
+
+		expect(session.model?.provider).toBe("anthropic");
+		const latest = sessionManager.getBranch().findLast(entry => entry.type === "compaction");
+		expect(latest?.type === "compaction" && latest.method).toBe("remote");
+	});
+
 	// Native lanes run before a configured endpoint, so an endpoint does not make the remote method portable.
 	it.each([
 		["no remote endpoint", {}],
@@ -209,6 +280,10 @@ describe("switch after an OpenAI remote compaction", () => {
 			gpt,
 			Settings.isolated({ "compaction.methodOrder": ["remote", "soft"], ...extra }),
 		);
+		// The handoff comes first; when it fails, the configured methods run.
+		const handoffSpy = vi
+			.spyOn(compactionModule, "generateHandoffFromContext")
+			.mockRejectedValue(new Error("handoff unavailable"));
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => ({
 			summary: `portable summary by ${model.provider}`,
 			firstKeptEntryId: preparation.firstKeptEntryId,
@@ -217,6 +292,7 @@ describe("switch after an OpenAI remote compaction", () => {
 
 		const result = await session.compact(undefined, { readerModel: claude });
 
+		expect(handoffSpy).toHaveBeenCalledTimes(1);
 		expect(result.summary).toBe("portable summary by openai");
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		// Soft summarization re-expands the history behind the remote boundary.
