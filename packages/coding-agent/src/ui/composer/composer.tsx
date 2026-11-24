@@ -71,6 +71,7 @@ import {
 	chipLabel,
 	collapsesPaste,
 	type DraftImage,
+	draftImageBlob,
 	expandAtoms,
 	pasteMarker,
 } from "./attachments";
@@ -570,10 +571,18 @@ export class Composer {
 
 	// ─── Attachments ────────────────────────────────────────────────────────
 
+	/**
+	 * The token of chip `n` of `kind` in this composer's glyphs (the symbol preset's `chip.*`, see
+	 * {@link ComposerOptions.symbol}): what an attachment the app inserts ({@link insertAtom}) is labelled.
+	 */
+	chipLabel(kind: ChipKind, n: number): string {
+		return chipLabel(kind, n, this.#options.symbol);
+	}
+
 	/** Attach `content` as a text chip at the caret; the submission carries `expansion` (default: the content). */
 	insertTextAttachment(content: string, expansion: string = content): void {
 		const n = ++this.#counts.paste;
-		const label = chipLabel("paste", n, this.#options.symbol);
+		const label = this.chipLabel("paste", n);
 		this.#atoms.set([
 			...this.#atoms(),
 			{ label, kind: "paste", n, expansion, ...(expansion !== content ? { content } : {}) },
@@ -643,7 +652,7 @@ export class Composer {
 						const n = Number(idx);
 						if (n > count) return match;
 						const chipKind: ChipKind = kind === "Video" ? "video" : "image";
-						const label = chipLabel(chipKind, n, this.#options.symbol);
+						const label = this.chipLabel(chipKind, n);
 						this.#counts[chipKind] = Math.max(this.#counts[chipKind], n);
 						// The chip stands for the marker alone: a legacy `attachment://N` after it goes.
 						const marker = match.replace(/ attachment:\/\/\d+$/, "");
@@ -1769,7 +1778,7 @@ export class Composer {
 			const { ranges, extra } = decorations();
 			const out: TspEditorDecoration[] = ranges.map(({ from, to, atom }) =>
 				atom.kind === "image" && atom.image
-					? { from, to, s: "accent strong", blob: imageBlob(atom.image) }
+					? { from, to, s: "accent strong", blob: draftImageBlob(atom.image) }
 					: { from, to, s: (atom.kind === "token" && atom.s) || "accent strong" },
 			);
 			for (const d of extra)
@@ -2086,19 +2095,6 @@ export class Composer {
 /** The terminal link target of a chip's file `link` (a path, opened at `line`), if any. */
 export function chipHref(link: string | undefined, line?: number): string | undefined {
 	return link ? fileUriForTerminal(link, line === undefined ? undefined : { line }, terminalIdentity().id) : undefined;
-}
-
-const kBlob = Symbol("composer.image-blob");
-
-interface BlobHolder {
-	[kBlob]?: string;
-}
-
-/** The blob id of an image's bytes (sha-256, hex), cached on the image. */
-function imageBlob(image: DraftImage): string {
-	const holder = image as DraftImage & BlobHolder;
-	holder[kBlob] ??= new Bun.CryptoHasher("sha256").update(Buffer.from(image.data, "base64")).digest("hex");
-	return holder[kBlob];
 }
 
 /**

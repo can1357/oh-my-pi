@@ -9,6 +9,7 @@
  * text in `muted`, cut to the width, in the rows the picture would take.
  */
 import type { TspExtent, TspImageProps } from "@oh-my-pi/pi-wire";
+import type { ImageRows } from "../../driver/images/store";
 import type { UiNode } from "../../node";
 import { type BlobEntry, getBlob } from "../../native/blobs";
 import { truncate } from "../../text/width";
@@ -53,13 +54,20 @@ export interface Picture {
 }
 
 /**
- * The rows of `picture` at the context's size, with `label` (styled) as the
- * text shown when it cannot be drawn.
+ * What the terminal draws for `picture` at the context's size: its rows, the
+ * cells they span and whether they show the image, with `label` (styled) as
+ * the text fallback. Undefined when there is nothing to ask the terminal for
+ * (no image protocol, no registered blob, no pixel size). `cells` draws it
+ * only as cells of text, for a caller that puts other text on its rows.
  */
-export function paintPicture(picture: Picture, cx: PaintContext, label: string): Block {
-	const fallback = truncate(label, cx.width);
+export function pictureRows(
+	picture: Picture,
+	cx: PaintContext,
+	options: { readonly label: string; readonly cells?: boolean },
+): ImageRows | undefined {
+	const fallback = truncate(options.label, cx.width);
 	const entry = picture.blob ? getBlob(picture.blob) : undefined;
-	if (!cx.images || !entry || !picture.blob || !picture.w || !picture.h) return { rows: [fallback] };
+	if (!cx.images || !entry || !picture.blob || !picture.w || !picture.h) return undefined;
 	const cell = cx.images.cell();
 	const maxColumns = Math.max(1, Math.min(cx.width, extentCells(picture.max?.w, cx.width) ?? cx.width));
 	const maxRows = Math.max(
@@ -71,11 +79,22 @@ export function paintPicture(picture: Picture, cx: PaintContext, label: string):
 	);
 	// Natural size when it fits; else the caps (the store scales to fit both, either way).
 	const fits = Math.ceil(picture.w / cell.w) <= maxColumns && Math.ceil(picture.h / cell.h) <= maxRows;
-	const drawn = cx.images.rows(
+	return cx.images.rows(
 		{ key: picture.blob, data: base64Of(entry), mime: entry.mime, widthPx: picture.w, heightPx: picture.h },
-		fits ? { fallback } : { maxColumns, ...(Number.isFinite(maxRows) ? { maxRows } : {}), fallback },
+		{
+			...(fits ? {} : { maxColumns, ...(Number.isFinite(maxRows) ? { maxRows } : {}) }),
+			fallback,
+			...(options.cells ? { cells: true } : {}),
+		},
 	);
-	return { rows: drawn.rows };
+}
+
+/**
+ * The rows of `picture` at the context's size, with `label` (styled) as the
+ * text shown when it cannot be drawn.
+ */
+export function paintPicture(picture: Picture, cx: PaintContext, label: string): Block {
+	return { rows: pictureRows(picture, cx, { label })?.rows ?? [truncate(label, cx.width)] };
 }
 
 /** The rows of image `node` at the context's size (`label`: its fallback text, styled). */

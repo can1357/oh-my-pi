@@ -31,7 +31,7 @@ import { isTinyLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
 import { resolveReadPath } from "../../tools/path-utils";
 import { vocalizer } from "../../tts/vocalizer";
-import { chipLabel, collapsesPaste } from "../../ui/composer/attachments";
+import { collapsesPaste } from "../../ui/composer/attachments";
 import { enabledMagicKeywords, magicKeywordDecorator } from "../../ui/composer/magic-keywords";
 import { combineAtomizers, FOCUS_ACTION } from "../../ui/composer/composer";
 import { modelMentionAtomizer } from "../../ui/composer/model-mention-chips";
@@ -2482,7 +2482,8 @@ export class InputController {
 		const kind = source?.kind ?? "image";
 		// The buffer holds the compact chip token; the atom table expands it to the bracketed
 		// marker (the wire/transcript format) on submit.
-		this.ctx.composer.insertAtom(chipLabel(kind, imageNum), formatVisionMarker(kind, imageNum, dims), {
+		const composer = this.ctx.composer;
+		composer.insertAtom(composer.chipLabel(kind, imageNum), formatVisionMarker(kind, imageNum, dims), {
 			kind,
 			image,
 			link: imageLink,

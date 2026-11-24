@@ -9,6 +9,7 @@
  *   a number) stands for a text attachment, an image or a video. In the
  *   terminal each chip takes its own color from a fixed palette.
  */
+import { registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
 
 export type ChipKind = "paste" | "image" | "video";
 
@@ -36,6 +37,29 @@ export interface Atom {
 	readonly s?: string;
 	/** A token chip's file (a path) and the line it opens at, linked where the terminal draws links. */
 	readonly link?: { readonly path: string; readonly line?: number };
+}
+
+/** A draft image's blob id, riding on the image so its bytes are hashed and registered once. */
+const kBlob = Symbol("composer.imageBlob");
+
+interface DraftImageWithBlob extends DraftImage {
+	[kBlob]?: string;
+}
+
+/**
+ * The blob id of a draft image, its bytes registered so a terminal can be sent them: what the
+ * chip's token in the field and the picture on its card name.
+ */
+export function draftImageBlob(image: DraftImage): string {
+	const tagged = image as DraftImageWithBlob;
+	tagged[kBlob] ??= registerBlob(Buffer.from(image.data, "base64"), image.mimeType);
+	return tagged[kBlob];
+}
+
+/** The pixel size an image or video chip's marker states (`[Image #1, 800x600]`), when it states one. */
+export function markerPixelSize(marker: string | undefined): { readonly w: number; readonly h: number } | undefined {
+	const size = marker === undefined ? null : /^\[(?:Image|Video) #\d+, (\d+)x(\d+)[\],]/.exec(marker);
+	return size ? { w: Number(size[1]), h: Number(size[2]) } : undefined;
 }
 
 /** Lines over which a paste collapses into a marker. */
