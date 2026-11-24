@@ -101,6 +101,13 @@ pub fn roster(con: &Arc<Ctx>) -> Vec<Command> {
 		.map(|(name, desc)| Command::new(name, first_line(desc), &[]));
 	con.items()
 		.filter_map(|item| match item {
+			// `/seance` stays registered so a typed command can explain that it
+			// is off. The palette omits it until `cl_seance_enabled` (ADR 0056).
+			RegItem::Cmd(spec)
+				if spec.name == "seance" && !crate::commands::session::CL_SEANCE_ENABLED.get(con) =>
+			{
+				None
+			},
 			RegItem::Cmd(spec) => Some(spec),
 			RegItem::Var(_) | RegItem::Action(_) => None,
 		})

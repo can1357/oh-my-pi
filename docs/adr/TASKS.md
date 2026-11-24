@@ -242,6 +242,15 @@ Owner prompt 2026-11-12, roadmap P0 to P5. New records: [0051](0051-durable-resu
 - **OPEN** ADRs 0051 to 0053 are proposals, not implementation-ready: an EGM implementation-readiness review (2026-11-12) found factual errors, now corrected, and decisions left open, now listed in each record's "Not yet specified" section. Settle those lists before code.
 - **OPEN** the question text for the four decisions above was judged not decidable from its own text for three of them (reviewer finding); rewrite with definitions before asking the owner again.
 
+## ADR 0056 — consult a saved session
+
+ADR status: **proposed; S0–S4 implemented, P1–P3 open**.
+
+- **DONE** S0–S3: `Journal::is_live`, `resolve_source`, the private root and sweep, and the read-only child (`read`, `grep`, `glob`) in `crates/driver/src/consult.rs`.
+- **DONE** S4: `/seance [selector] [--model]` behind `cl_seance_enabled` (bool, default false). The slash palette omits the command while the convar is off. A bare `/seance` prints usage and leaves the resume picker closed. The app service copies the source to a private root and shows the answer in the `/btw` side panel. Each `ConsultError` is one line. Chat startup sweeps abandoned `omp-consult-*` roots.
+- **OPEN** P1–P3: the completion probe. D6 still requires a measurement that a copy reuses the child's prompt cache.
+- **OPEN** O2: that cache figure is unverified.
+
 ## ADR 0048 — schema and serialization boundaries
 
 ADR status: **accepted 2026-10-28; implementation gate open**.

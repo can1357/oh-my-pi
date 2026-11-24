@@ -107,7 +107,13 @@ Settled by the code, not open: a side turn on a live child is possible without o
 
 ## Status in omp
 
-**S0 landed; S1-S4 not started.** S0: `Journal::is_live(path) -> Result<bool, JournalError>` in `crates/journal/src/lib.rs` (backed by the private `WriterLock::is_held`, which shares `WriterLock::sidecar` with `acquire`), additive and ungated (no user-visible behaviour); tests in `crates/journal/tests/journal.rs` (`is_live_*`: held by `create` and `open` then dropped, absent sidecar and absent journal create nothing, a stale sidecar is untouched, cross-process observation, and a crashed writer is not live). Reusable: `Journal::scan`, `SessionIndex`, `live_chain`, `copy_journal_blobs`, the `EphemeralJournal` pattern, `KernelOptions.tools`, the `/btw` side panel. Still to build: the private-root guard and sweep, the `consult` module. Not verified: the cache behaviour of a copy (O2); how composition on a copy treats a source from another machine or cwd.
+Status: Partially implemented.
+
+- S0 (#647): `Journal::is_live(path) -> Result<bool, JournalError>` in `crates/journal/src/lib.rs` (backed by the private `WriterLock::is_held`). Tests in `crates/journal/tests/journal.rs` (`is_live_*`).
+- S1–S3 (#692, #694, #695): `crates/driver/src/consult.rs`. `resolve_source`, `prepare_root`, `sweep`, `child_options`, and the bundled `SEANCE_PROMPT`. The wire roster is `read`, `grep`, `glob`.
+- S4: `cl_seance_enabled` (bool, default false) in `crates/chat/src/commands/session.rs`. The slash palette omits `/seance` while the convar is off; a typed `/seance` returns one line that tells the operator to set it. `parse_seance_args` accepts `[selector] [--model]`. A missing selector posts usage (`SEANCE_USAGE`) and the host prints that line. The resume picker stays closed. `AppServices::seance` (`crates/app/src/chat_services/session_ops.rs`) resolves the source, copies it with `prepare_root`, composes `child_options`, and streams the answer through `SidePanel::btw`. Each `ConsultError` is shown as one line. `AppServices::new` sweeps abandoned `omp-consult-*` roots. A held private root stays outside `sessions_dir`, so `SessionIndex::list` gains no row (`a_held_private_root_adds_nothing_the_picker_lists`).
+- The `task` schema is unchanged.
+- P1–P3 are unbuilt. O2, whether a copy reuses the child's prompt cache, is unverified. There is no consult-specific session picker.
 
 ## Review (EGM, 2026-11-13)
 

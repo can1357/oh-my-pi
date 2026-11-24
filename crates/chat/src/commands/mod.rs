@@ -331,6 +331,16 @@ pub enum CommandAction {
 		/// The side question.
 		question: Str,
 	},
+	/// `/seance [selector] [--model]`: read-only consult of a finished session.
+	///
+	/// A missing selector prints usage. It does not open the resume picker,
+	/// which would switch to the session instead of consulting it.
+	Seance {
+		/// Session id or path. `None` prints usage.
+		selector: Option<Str>,
+		/// Model override. `None` uses the model saved in the session.
+		model:    Option<Str>,
+	},
 	/// `/tan <task>`: fire-and-forget tangent task on a child kernel.
 	Tan {
 		/// The tangent task.
