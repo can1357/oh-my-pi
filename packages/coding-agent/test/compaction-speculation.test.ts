@@ -1243,6 +1243,31 @@ describe("async speculative compaction", () => {
 		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("summary 2");
 	});
 
+	it("commits an armed handoff with the preserveData the session.compacting hook returned", async () => {
+		const generateHandoffDocument = vi.fn(async () => "handoff plan");
+		maintenance = createMaintenance({
+			methodOrder: ["handoff"],
+			generateHandoffDocument,
+			extensionRunner: {
+				hasHandlers: event => event === "session.compacting",
+				emit: async event => {
+					if (event.type !== "session.compacting") return undefined;
+					return { preserveData: { hookKey: "hook value" } };
+				},
+			},
+		});
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		sessionManager.appendMessage(assistantMessage("brief acknowledgment", model));
+
+		await maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
+
+		expect(generateHandoffDocument).toHaveBeenCalledTimes(1);
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.preserveData : undefined).toMatchObject({ hookKey: "hook value" });
+	});
+
 	it("discards an armed handoff summary when post-snapshot branch growth prevents recovery headroom", async () => {
 		let handoffInvocation = 0;
 		const generateHandoffDocument = vi.fn(async () => `handoff plan ${++handoffInvocation}`);
