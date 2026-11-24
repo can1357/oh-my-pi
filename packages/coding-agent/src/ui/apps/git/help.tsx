@@ -9,7 +9,7 @@ import { type Accessor, type JSXNode, type KeyEvent, nativeRendering } from "@oh
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import "../../styles/apps/git/help";
 import "../../styles/overlays/bare-sheet";
-import { formatKey } from "../../keys/format";
+import { formatKey, keyHintPlatform } from "../../keys/format";
 import { ActionButton } from "../../overlays/panels/common";
 import { formatKeyHint } from "../../keys/hints";
 import type { SheetAttributes } from "../../overlays/sheet";
@@ -106,7 +106,7 @@ export interface GitHelpProps {
 const keySpans = (keys: readonly string[], native: boolean): TspSpan[] =>
 	keys.map(key => ({
 		s: "key",
-		t: native ? formatKeyHint(key) : formatKey(key, { preset: "unicode", platform: process.platform }),
+		t: native ? formatKeyHint(key) : formatKey(key, { preset: "unicode", platform: keyHintPlatform() }),
 	}));
 
 /** The shortcuts sheet (see the module docs). */
