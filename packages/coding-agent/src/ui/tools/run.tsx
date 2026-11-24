@@ -15,6 +15,7 @@ import {
 	formatTruncationMetaNotice,
 	type MinimizedMeta,
 	type OutputMeta,
+	RAW_OUTPUT_SELECTOR,
 	stripTrailingNotice,
 } from "../../tools/output-meta-format";
 import { shortenPath } from "../../utils/render-utils";
@@ -168,7 +169,9 @@ export function stripRawOutputNotice(text: string): { text: string; artifactId?:
 		if (!line.startsWith(RAW_OUTPUT_PREFIX) || !line.endsWith(RAW_OUTPUT_SUFFIX)) return false;
 		const url = line.slice(RAW_OUTPUT_PREFIX.length, line.length - RAW_OUTPUT_SUFFIX.length);
 		const id = parseSpillUrl(url);
-		if (id === undefined || spillUrl(id) !== url) return false;
+		if (id === undefined) return false;
+		// Footers persisted before the selector was added name the bare spill; both forms are accepted.
+		if (url !== spillUrl(id) && url !== `${spillUrl(id)}${RAW_OUTPUT_SELECTOR}`) return false;
 		artifactId = String(id);
 		return true;
 	});
