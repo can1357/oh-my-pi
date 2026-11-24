@@ -136,6 +136,36 @@ describe("DOM scraper compatibility", () => {
 		expect(document.querySelector("svg title tspan")?.textContent).toBe("s");
 	});
 
+	test("ends text content at an HTML end tag that carries attributes or a slash", () => {
+		const { document } = parseHTML(
+			'<textarea>a</textarea foo="x>y"><p>one</p><script>b</script/><p>two</p><style>c</STYLE\n><p>three</p><title>d</titlex></title>',
+		);
+		expect(document.querySelector("textarea")?.textContent).toBe("a");
+		expect(document.querySelector("script")?.textContent).toBe("b");
+		expect(document.querySelector("style")?.textContent).toBe("c");
+		expect(document.querySelectorAll("p").map(p => p.textContent)).toEqual(["one", "two", "three"]);
+		// `</titlex>` names another element, so it stays text.
+		expect(document.querySelector("title")?.textContent).toBe("d</titlex>");
+	});
+
+	test("drops one line break after a textarea, pre or listing start tag", () => {
+		const { document } = parseHTML("<textarea>\r\n\nkept</textarea><pre>\ncode\n</pre><listing>\nl</listing>");
+		expect(document.querySelector("textarea")?.textContent).toBe("\nkept");
+		expect(document.querySelector("pre")?.textContent).toBe("code\n");
+		expect(document.querySelector("listing")?.textContent).toBe("l");
+	});
+
+	test("parses SVG style and Object prototype key names as ordinary markup", () => {
+		const { document } = parseHTML(
+			"<svg><style><![CDATA[.a{}]]></style><g></g></svg><constructor><b>x</b></constructor><p>&constructor; &toString;</p>",
+		);
+		expect(document.querySelector("svg style")?.textContent).toBe(".a{}");
+		expect(document.querySelector("svg g")).not.toBeNull();
+		// Object prototype keys are ordinary element and unknown entity names.
+		expect(document.querySelector("constructor b")?.textContent).toBe("x");
+		expect(document.querySelector("p")?.textContent).toBe("&constructor; &toString;");
+	});
+
 	test("supports every selector family used by consumers", () => {
 		const { document } = parseHTML(
 			'<main id="root"><article id="a" class="card featured" data-kind="news-item" title="alpha beta"><h2>A</h2><p class="body">One</p></article><article id="b" class="card" data-kind="blog"><h2>B</h2><p class="body muted">Two</p></article><aside id="c"></aside></main>',

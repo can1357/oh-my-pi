@@ -1,9 +1,30 @@
 import { Document, type DocumentFragment, Element, Text } from "./core";
 
-/** Closing-tag patterns for raw-text elements, reused across parses (callers reset `lastIndex`). */
-const RAW_TEXT_CLOSE: Record<string, RegExp> = { script: /<\/script\s*>/gi, style: /<\/style\s*>/gi };
-/** Closing-tag patterns for HTML RCDATA elements: text up to the close tag, entities decoded, no tags. */
-const RCDATA_CLOSE: Record<string, RegExp> = { textarea: /<\/textarea\s*>/gi, title: /<\/title\s*>/gi };
+/** How an element's content is tokenized when it is not parsed as markup. */
+interface TextContentElement {
+	/** Whether entities are decoded: RCDATA (`textarea`, `title`) decodes them, raw text (`script`, `style`) keeps them. */
+	decode: boolean;
+	/** Start of the element's end tag: `</name` followed by whitespace, `/`, `>` or EOF. Callers reset `lastIndex`. */
+	endTag: RegExp;
+}
+
+function textContentElement(name: string, decode: boolean): TextContentElement {
+	return { decode, endTag: new RegExp(`</${name}(?=[\\t\\n\\f\\r />]|$)`, "gi") };
+}
+
+/**
+ * HTML elements read as text up to their end tag, never as child elements. Applies only to
+ * HTML-namespace elements of an HTML document: SVG `<title>`/`<style>` and feed documents parse
+ * these names as ordinary elements.
+ */
+const TEXT_CONTENT_ELEMENTS: Record<string, TextContentElement> = {
+	script: textContentElement("script", false),
+	style: textContentElement("style", false),
+	textarea: textContentElement("textarea", true),
+	title: textContentElement("title", true),
+};
+/** HTML elements whose content drops one line break directly after the start tag, as browsers do. */
+const LEADING_NEWLINE_ELEMENTS: Record<string, true> = { pre: true, listing: true, textarea: true };
 const DOCTYPE_PATTERN = /<!doctype\b/iy;
 const TAG_NAME_PATTERN = /[^\s/>]+/y;
 const ATTRIBUTE_NAME_PATTERN = /[^\s=/>]+/y;
@@ -188,7 +209,7 @@ const ENTITY_PATTERN = /&(#(?:x[0-9a-f]+|\d+)|[a-z][a-z0-9]+);/gi;
 export function decodeEntities(value: string): string {
 	if (!value.includes("&")) return value;
 	return value.replace(ENTITY_PATTERN, (whole, entity: string) => {
-		if (entity[0] !== "#") return NAMED_ENTITIES[entity] ?? NAMED_ENTITIES[entity.toLowerCase()] ?? whole;
+		if (entity[0] !== "#") return namedEntity(entity) ?? namedEntity(entity.toLowerCase()) ?? whole;
 		const hexadecimal = entity[1]?.toLowerCase() === "x";
 		const codePoint = Number.parseInt(entity.slice(hexadecimal ? 2 : 1), hexadecimal ? 16 : 10);
 		if (
@@ -201,6 +222,11 @@ export function decodeEntities(value: string): string {
 		}
 		return String.fromCodePoint(codePoint);
 	});
+}
+
+/** The character a named entity stands for; `undefined` for unknown names, including Object prototype keys. */
+function namedEntity(name: string): string | undefined {
+	return Object.hasOwn(NAMED_ENTITIES, name) ? NAMED_ENTITIES[name] : undefined;
 }
 
 function findTagEnd(html: string, start: number): number {
@@ -274,12 +300,11 @@ function parseStartTag(
 function closeOptionalElements(stack: Element[], incoming: string): void {
 	const current = stack[stack.length - 1];
 	if (!current) return;
-	if (current.localName === "p" && P_CLOSERS[incoming]) {
+	if (current.localName === "p" && Object.hasOwn(P_CLOSERS, incoming)) {
 		stack.pop();
 		return;
 	}
-	const closeable = CLOSE_ON_OPEN[incoming];
-	if (closeable?.includes(current.localName)) stack.pop();
+	if (Object.hasOwn(CLOSE_ON_OPEN, incoming) && CLOSE_ON_OPEN[incoming].includes(current.localName)) stack.pop();
 }
 
 /** Parse markup, appending the resulting nodes to `root` (a document, fragment, or element). */
@@ -356,21 +381,16 @@ export function parseInto(html: string, document: Document, root: Document | Doc
 		}
 		parent.appendChild(element);
 		index = end + 1;
-		if (RAW_TEXT_CLOSE[parsed.name] && !parsed.selfClosing) {
-			// Prototype keys (e.g. `<constructor>`) were historically treated as raw text too; keep that.
-			const closePattern = Object.hasOwn(RAW_TEXT_CLOSE, parsed.name)
-				? RAW_TEXT_CLOSE[parsed.name]
-				: new RegExp(`</${parsed.name}\\s*>`, "ig");
-			const [text, next] = readUntilClose(html, index, closePattern);
-			element.appendChild(new Text(text, document));
-			index = next;
-			continue;
+		// Content rules below are the HTML tokenizer's; feeds follow XML and SVG holds child elements.
+		// A self-closing `<textarea/>` stays empty instead of swallowing the rest of the document.
+		const htmlElement = !xmlLike && namespace === HTML_NAMESPACE && !parsed.selfClosing;
+		if (htmlElement && Object.hasOwn(LEADING_NEWLINE_ELEMENTS, parsed.name)) {
+			index = skipLeadingNewline(html, index);
 		}
-		// Feeds keep XML parsing (CDATA titles) and SVG `<title>` holds child elements, so only HTML-namespace
-		// elements of an HTML document get RCDATA treatment.
-		if (!xmlLike && namespace === HTML_NAMESPACE && Object.hasOwn(RCDATA_CLOSE, parsed.name) && !parsed.selfClosing) {
-			const [text, next] = readUntilClose(html, index, RCDATA_CLOSE[parsed.name]);
-			if (text) element.appendChild(new Text(decodeEntities(text), document));
+		if (htmlElement && Object.hasOwn(TEXT_CONTENT_ELEMENTS, parsed.name)) {
+			const content = TEXT_CONTENT_ELEMENTS[parsed.name];
+			const [text, next] = readUntilEndTag(html, index, content.endTag);
+			if (text) element.appendChild(new Text(content.decode ? decodeEntities(text) : text, document));
 			index = next;
 			continue;
 		}
@@ -378,7 +398,7 @@ export function parseInto(html: string, document: Document, root: Document | Doc
 		// keeps its text instead of being treated as an HTML void element.
 		const isVoid = xmlLike
 			? parsed.selfClosing
-			: VOID_ELEMENTS[parsed.name] || (namespace === SVG_NAMESPACE && parsed.selfClosing);
+			: Object.hasOwn(VOID_ELEMENTS, parsed.name) || (namespace === SVG_NAMESPACE && parsed.selfClosing);
 		if (!isVoid) {
 			stack.push(element);
 			parent = element;
@@ -386,12 +406,21 @@ export function parseInto(html: string, document: Document, root: Document | Doc
 	}
 }
 
-/** Read the text from `index` up to the next `closePattern` match (or EOF); returns it and the index past the close tag. */
-function readUntilClose(html: string, index: number, closePattern: RegExp): [text: string, next: number] {
-	closePattern.lastIndex = index;
-	const match = closePattern.exec(html);
+/**
+ * Read the text from `index` up to the next `endTag` match (or EOF). Like an HTML end tag, it ends at
+ * its `>` past any attributes; returns the text and the index past the end tag.
+ */
+function readUntilEndTag(html: string, index: number, endTag: RegExp): [text: string, next: number] {
+	endTag.lastIndex = index;
+	const match = endTag.exec(html);
 	if (!match) return [html.slice(index), html.length];
-	return [html.slice(index, match.index), closePattern.lastIndex];
+	return [html.slice(index, match.index), findTagEnd(html, endTag.lastIndex) + 1];
+}
+
+/** Index past one line break (`\r\n`, `\n` or `\r`) at `index`, or `index` when none starts there. */
+function skipLeadingNewline(html: string, index: number): number {
+	if (html.startsWith("\r\n", index)) return index + 2;
+	return html[index] === "\n" || html[index] === "\r" ? index + 1 : index;
 }
 
 function isDoctypeAt(html: string, index: number): boolean {

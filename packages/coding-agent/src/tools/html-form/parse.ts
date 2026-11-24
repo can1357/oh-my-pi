@@ -484,7 +484,7 @@ class FormBuilder {
 				type: "textarea",
 				multiline: true,
 				label: label.length > 0 ? label : this.#nameLabel(name),
-				value: (control.textContent ?? "").replace(/^\r?\n/, ""),
+				value: control.textContent ?? "",
 				placeholder: control.getAttribute("placeholder") ?? "",
 				required,
 				minLength: numberAttr(control, "minlength"),
