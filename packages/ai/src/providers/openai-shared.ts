@@ -194,6 +194,8 @@ export interface OpenAIRequestSetupOptions {
 	};
 	sessionId?: string;
 	promptCacheSessionId?: string;
+	/** Parent conversation of a side request; routes OpenCode's `x-opencode-session` (see `applyInferenceHeaders`). */
+	parentSessionId?: string;
 	/**
 	 * Explicit prompt-cache identity only, never the sessionId fallback:
 	 * callers set it from the already-resolved `promptCacheSessionId` when an
@@ -362,6 +364,7 @@ export function resolveOpenAIRequestSetup(
 		protocol: "openai",
 		sessionId,
 		cacheAffinity: resolveOpenCodeGoCacheAffinity(model, options.promptCacheAffinityKey),
+		parentSessionId: options.parentSessionId,
 	});
 	if (options.promptCacheSessionId && model.compat?.promptCacheSessionHeader) {
 		setHeaderIfAbsent(headers, model.compat.promptCacheSessionHeader, options.promptCacheSessionId);
