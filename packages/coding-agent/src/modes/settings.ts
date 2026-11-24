@@ -15,6 +15,7 @@ import { WORD_COMPLETION_METHODS } from "./view-model/prompt/word-completion";
 import { DEFAULT_MAX_FPS, parseMaxFps } from "../config/frame-rate";
 import { parseSpinnerInterval } from "../config/spinner-interval";
 import { formatKeyHint, formatKeyHints } from "../ui/keys/hints";
+import { setTightLayout } from "../ui/styles/terminal-padding";
 import { setColorBlindMode, setSymbolPreset, setThemeSlot } from "../ui/theme/service";
 import {
 	DEFAULT_INLINE_IMAGE_COLUMNS,
@@ -650,6 +651,7 @@ export const cfgTuiMouse = register({
 	},
 });
 
+/** Whether terminal output removes a cell of horizontal padding on each side. */
 export const cfgTuiTight = register({
 	id: "tui.tight",
 	type: "boolean",
@@ -658,9 +660,12 @@ export const cfgTuiTight = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Tight Layout",
-		description: "Remove the 1-character horizontal padding from the left and right of the terminal output",
+		description:
+			"Remove the standard one-cell horizontal inset from terminal output; message bubbles and tool frames keep their padding",
 	},
 });
+
+effect(cfgTuiTight, setTightLayout);
 
 export const cfgDisplayShimmer = register({
 	id: "display.shimmer",

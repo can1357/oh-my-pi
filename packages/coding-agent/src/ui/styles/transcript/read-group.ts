@@ -13,6 +13,7 @@ import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { languageFromPath } from "@oh-my-pi/pi-tui/text/lang";
 import { renderMarkdown } from "@oh-my-pi/pi-tui/text/markdown/index";
 import { truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
+import { terminalPaddingX } from "../terminal-padding";
 import {
 	READ_PREVIEW_LINES,
 	type ReadGroupTerm,
@@ -101,8 +102,11 @@ function previewRows(cx: PaintContext, preview: ReadTermPreview, width: number):
 				},
 				width,
 			);
-	if (preview.usage)
-		rows.push(...wrap(theme.fg("dim", preview.usage), Math.max(1, width - 6)).map(row => `   ${row}`));
+	if (preview.usage) {
+		const paddingX = terminalPaddingX(3);
+		const pad = " ".repeat(paddingX);
+		rows.push(...wrap(theme.fg("dim", preview.usage), Math.max(1, width - 2 * paddingX)).map(row => pad + row));
+	}
 	return rows;
 }
 
