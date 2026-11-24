@@ -1,7 +1,8 @@
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { mapOpenAIReasoningEffort } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
-import { type ConfiguredThinkingLevel, concreteThinkingLevel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
+import { type ConfiguredThinkingLevel } from "../../../utils/render-utils";
+import { concreteThinkingLevel, toReasoningEffort } from "../../../thinking/levels";
 import { readBoundedBody } from "@oh-my-pi/pi-utils/bounded-json";
 import type { AgentStorageApi } from "../../../session/agent-storage";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, SearchProviderError } from "../../../web/search/types";

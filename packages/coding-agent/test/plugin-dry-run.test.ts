@@ -16,10 +16,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type PluginCommandArgs, runPluginCommand } from "@oh-my-pi/pi-coding-agent/cli/plugin-cli";
 import Update from "@oh-my-pi/pi-coding-agent/commands/update";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import type { CliConfig } from "@oh-my-pi/pi-utils/cli";
+import { initTheme } from "../src/ui/theme/service";
 
 const PLUGIN_ID = "hello@fixmkt";
 const LINKED = "lp";
@@ -65,7 +65,7 @@ describe("plugin --dry-run beyond install, uninstall and link", () => {
 	let output: string[];
 
 	beforeAll(async () => {
-		await initTheme();
+		initTheme();
 	});
 
 	beforeEach(async () => {

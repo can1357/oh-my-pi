@@ -26,8 +26,8 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient, AuthBrokerError } from "@oh-my-pi/pi-ai/auth-broker";
 import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
-import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
-import { peakBuckets, renderSparkline } from "@oh-my-pi/pi-tui/components/sparkline";
+import { formatProviderName } from "../modes/view-model/chrome/format";
+import { peakBuckets, sparkline } from "@oh-my-pi/pi-tui/term/painters/chart";
 import { formatDuration, formatNumber, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
@@ -36,7 +36,7 @@ import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 import { resetAccountLockKey } from "../session/codex-auto-reset";
 import { checkCodexBalance, type ResetMarker, resetLockPath, withResetFence } from "../session/reset-fence";
-import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import { collapseSharedUsageReports, summarizeUsageResetCredits } from "../session/usage-display";
 import { reportMatchesStatus } from "../session/claude-auto-reset";
 import {
 	classifyResetExpiry,
@@ -1035,7 +1035,7 @@ function renderHistorySparkline(entries: UsageHistoryEntry[], sinceMs: number, n
 	const points = entries.flatMap(entry =>
 		entry.usedFraction === undefined ? [] : [{ at: entry.recordedAt, value: entry.usedFraction }],
 	);
-	return renderSparkline(peakBuckets(points, sinceMs, nowMs, HISTORY_SPARK_WIDTH), {
+	return sparkline(peakBuckets(points, sinceMs, nowMs, HISTORY_SPARK_WIDTH), {
 		min: 0,
 		max: 1,
 		gap: chalk.dim("·"),

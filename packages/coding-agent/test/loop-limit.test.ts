@@ -12,7 +12,7 @@ describe("/loop slash command", () => {
 	test("forwards a bare limit argument verbatim", async () => {
 		const handleLoopCommand = vi.fn(async (_args?: string) => undefined);
 		const runtime = {
-			ctx: { handleLoopCommand, editor: { setText: vi.fn() } },
+			ctx: { handleLoopCommand, composer: { setText: vi.fn() } },
 		} as unknown as BuiltinSlashCommandRuntime;
 		const result = await executeBuiltinSlashCommand("/loop 10min", runtime);
 
@@ -27,7 +27,7 @@ describe("/loop slash command", () => {
 		const handleLoopCommand = vi.fn(async (_args?: string) => "fix the failing tests");
 		const setText = vi.fn();
 		const runtime = {
-			ctx: { handleLoopCommand, editor: { setText } },
+			ctx: { handleLoopCommand, composer: { setText } },
 		} as unknown as BuiltinSlashCommandRuntime;
 		const result = await executeBuiltinSlashCommand("/loop 10m fix the failing tests", runtime);
 

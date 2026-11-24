@@ -1,4 +1,4 @@
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tool-errors";
 
 /** A `select()` choice as the model writes it: a string (value, then label) or exactly one of label, value or index. */
 export type SelectOptionInput = string | { label: string } | { value: string } | { index: number };

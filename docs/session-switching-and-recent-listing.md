@@ -10,8 +10,8 @@ It focuses on current implementation behavior, including fallback paths and cave
 - [`../src/session/session-listing.ts`](../packages/coding-agent/src/session/session-listing.ts)
 - [`../src/session/session-paths.ts`](../packages/coding-agent/src/session/session-paths.ts)
 - [`../src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts)
-- [`packages/tui/src/apps/session-picker.ts`](../packages/tui/src/apps/session-picker.ts)
-- [`packages/tui/src/overlays/session-selector.ts`](../packages/tui/src/overlays/session-selector.ts)
+- [`packages/coding-agent/src/cli/session-picker.tsx`](../packages/coding-agent/src/cli/session-picker.tsx)
+- [`packages/coding-agent/src/ui/overlays/pickers/session-selector.tsx`](../packages/coding-agent/src/ui/overlays/pickers/session-selector.tsx)
 - [`../src/modes/controllers/selector-controller.ts`](../packages/coding-agent/src/modes/controllers/selector-controller.ts)
 - [`../src/main.ts`](../packages/coding-agent/src/main.ts)
 - [`../src/sdk.ts`](../packages/coding-agent/src/sdk.ts)
@@ -123,7 +123,7 @@ Uses `SessionManager.continueRecent(...)` directly (breadcrumb-first behavior ab
 
 ## Picker-based selection internals
 
-## CLI picker (`packages/tui/src/apps/session-picker.ts`)
+## CLI picker (`packages/coding-agent/src/cli/session-picker.tsx`)
 
 `selectSession(sessions, options)` creates a fullscreen alternate-screen TUI with `SessionSelectorComponent` and resolves exactly once:
 

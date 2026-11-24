@@ -29,6 +29,7 @@ import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import {
+	AgentLoopError,
 	abortReasonText,
 	agentLoop,
 	agentLoopContinue,
@@ -2259,6 +2260,7 @@ export class Agent {
 					? AIError.create(AIError.Flag.Abort)
 					: AIError.classify(loopSignal.reason) || undefined
 				: AIError.classify(err, errorModel.api) || undefined;
+			const errorFromAgentLoop = (!stoppedForAbort && err instanceof AgentLoopError) || undefined;
 			const shouldEmitVisibleError = !stoppedForAbort;
 			const assistantPartial = partial?.role === "assistant" ? partial : undefined;
 			const hadAssistantStart = assistantPartial !== undefined;
@@ -2288,6 +2290,7 @@ export class Agent {
 							errorMessage,
 							errorStatus,
 							errorId,
+							errorFromAgentLoop,
 						}
 					: {
 							role: "assistant",
@@ -2307,6 +2310,7 @@ export class Agent {
 							errorMessage,
 							errorStatus,
 							errorId,
+							errorFromAgentLoop,
 							timestamp: Date.now(),
 						};
 

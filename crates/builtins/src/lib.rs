@@ -114,6 +114,8 @@ mod combine;
 mod cut;
 #[cfg(feature = "util.date")]
 mod date;
+#[cfg(any(feature = "util.date", feature = "util.find"))]
+mod date_parser;
 #[cfg(feature = "util.dd")]
 mod dd;
 #[cfg(feature = "util.df")]
