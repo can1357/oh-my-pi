@@ -1405,9 +1405,8 @@ export function buildHomebrewUpdateArgs(force: boolean): string[] {
 }
 
 /**
- * omp update tells brew not to ask for confirmation on the upgrade and reinstall child. brew's ask prompt is on by
- * default and HOMEBREW_NO_ASK=1 turns that default off. An argv flag does not do it: brew 5.1.15 rejects `--yes`
- * as an invalid option.
+ * omp update tells brew not to ask for confirmation on the upgrade and reinstall child, through HOMEBREW_NO_ASK in
+ * its environment. brew 5.1.15 rejects a `--yes` argument, so the flag is not passed in argv.
  */
 export function buildHomebrewUpdateEnv(
 	base: Record<string, string | undefined> = process.env,
