@@ -610,7 +610,6 @@ interface TodoApplyRequest {
 	change: TodoBackendChange;
 	current(): TodoPhase[];
 	commit(): void;
-	resend(): void;
 	closing(): boolean;
 	/** The selected todo backend id, or undefined for native. */
 	selected(): string | undefined;
@@ -702,13 +701,16 @@ export class ExtensionRunner {
 	 */
 	#todoSent: { list: TodoBackendList; extension: Extension; definition: TodoBackendDefinition } | "none" | undefined =
 		"none";
-	/** The backend may hold a change omp did not commit: the next `replace` goes out even when it equals the last one. */
-	#todoStale = false;
 	/** Set by {@link closeTodoBackend}: the session is going away and takes no more lists to its backend. */
 	#todoClosed = false;
 	/** Aborted when {@link closeTodoBackend} stops waiting: a call still running is given up, and its handler timer with it. */
 	#todoGivenUp = new AbortController();
-	/** Resend callbacks of failed calls whose repair still waits for a late apply to settle. */
+	/**
+	 * Holders asked by `apply`, by definition, until their next list goes out: it is sent even when it
+	 * equals the last one they took, since the answer may have written something else.
+	 */
+	#todoUnsynced = new WeakMap<TodoBackendDefinition, Set<Extension>>();
+	/** The `resync` of each asked call not run yet: still deciding, or failed and waiting for its apply to settle. */
 	#todoRepairs = new Set<() => void>();
 	/** The selected `todo.backend` id last reported as unregistered; cleared once a selected id resolves. */
 	#reportedTodoBackend: string | undefined;
@@ -1793,8 +1795,8 @@ export class ExtensionRunner {
 	 * host's process alive long after the session is gone.
 	 */
 	async closeTodoBackend(): Promise<void> {
-		// Repairs still waiting for a late apply are flushed now, before the closed flag drops them: a late
-		// write after this can still land, but the shutdown budget allows no longer wait.
+		// Calls still deciding, or waiting for a late apply, resync now, before the closed flag drops them: a
+		// late write after this can still land, but the shutdown budget allows no longer wait.
 		const repairs = [...this.#todoRepairs];
 		this.#todoRepairs.clear();
 		for (const repair of repairs) repair();
@@ -1828,11 +1830,18 @@ export class ExtensionRunner {
 	async #askTodoBackend(
 		extension: Extension,
 		definition: TodoBackendDefinition,
-		{ backend, change, current, commit, resend, closing, selected, signal }: TodoApplyRequest,
+		{ backend, change, current, commit, closing, selected, signal }: TodoApplyRequest,
 	): Promise<TodoApplyResult> {
 		const sessionId = this.sessionManager.getSessionId();
 		const timeoutMs = Math.min(TODO_APPLY_TIMEOUT_MS, extensionHandlerTimeoutMs);
 		const answered = Promise.withResolvers<void>();
+		// Whatever `apply` wrote is undone by the next list its holder takes, even one equal to the last.
+		const resync = () => {
+			const holders = this.#todoUnsynced.get(definition) ?? new Set<Extension>();
+			this.#todoUnsynced.set(definition, holders.add(extension));
+			const now = selected();
+			if (now !== undefined) this.syncTodoBackend(now, current());
+		};
 		let asked = false;
 		const verdict = await this.#runHandlerWithTimeout<
 			{ type: typeof TODO_APPLY_EVENT; change: TodoBackendChange },
@@ -1843,6 +1852,7 @@ export class ExtensionRunner {
 		>(
 			async (event, ctx) => {
 				asked = true;
+				this.#todoRepairs.add(resync);
 				try {
 					await definition.apply?.(event.change, ctx);
 					return { kind: "accepted" };
@@ -1859,7 +1869,6 @@ export class ExtensionRunner {
 			(kind, failure) => (kind === "timeout" ? { kind: "timeout" } : { kind: "failed", message: failure }),
 			signal ? AbortSignal.any([signal, this.#todoGivenUp.signal]) : this.#todoGivenUp.signal,
 		);
-		if (!asked) answered.resolve();
 		// Why the change can no longer commit, checked in the same synchronous step as the commit.
 		const owner = this.getTodoBackends().get(backend);
 		const staleCause = signal?.aborted
@@ -1874,7 +1883,9 @@ export class ExtensionRunner {
 							? "The todo list changed"
 							: undefined;
 		if (verdict?.kind === "accepted" && staleCause === undefined) {
+			this.#todoRepairs.delete(resync);
 			commit();
+			resync();
 			return { kind: "committed" };
 		}
 		const id = sanitizeDisplayLine(backend);
@@ -1905,30 +1916,19 @@ export class ExtensionRunner {
 					message: `${staleCause ?? "The call was aborted"} while todo backend "${id}" decided${NOTHING_SAVED_SUFFIX}`,
 				};
 		}
-		this.#resendStaleTodoList(answered.promise, resend);
+		// A failed call resyncs once its apply settled, so a late write lands first, but no later than the
+		// handler timeout; outside the call queue, so a later commit is not held behind it. Closing may run it first.
+		if (asked)
+			void awaitDeliveryTurn(
+				answered.promise,
+				performance.now() + extensionHandlerTimeoutMs,
+				this.#todoGivenUp.signal,
+			)
+				.then(() => {
+					if (this.#todoRepairs.delete(resync)) resync();
+				})
+				.catch((error: unknown) => logger.warn("Todo backend call failed", { error: String(error) }));
 		return result;
-	}
-
-	/**
-	 * Resend the whole list once the apply has settled, so a late write lands first, but no later
-	 * than the handler timeout. The wait is outside the call queue: a later commit is not held behind it.
-	 */
-	#resendStaleTodoList(settled: Promise<void>, resend: () => void): void {
-		if (this.#todoClosed) return;
-		const repair = () => {
-			// Sent even when it equals the last list: the late answer may have written since.
-			this.#todoStale = true;
-			resend();
-		};
-		this.#todoRepairs.add(repair);
-		const deadline = performance.now() + extensionHandlerTimeoutMs;
-		void awaitDeliveryTurn(settled, deadline, this.#todoGivenUp.signal)
-			.then(() => {
-				// Gone once closing flushed it.
-				if (!this.#todoRepairs.delete(repair)) return;
-				repair();
-			})
-			.catch((error: unknown) => logger.warn("Todo backend call failed", { error: String(error) }));
 	}
 
 	#queueTodoBackendCall(): void {
@@ -1960,14 +1960,14 @@ export class ExtensionRunner {
 		const { extension, definition } = owner;
 		this.#reportShadowedTodoBackends(pending.backend, extension);
 		const sent = this.#todoSent;
+		const unsynced = this.#todoUnsynced.get(definition)?.delete(extension) === true;
 		if (
-			!this.#todoStale &&
+			!unsynced &&
 			(sent === "none"
 				? pending.phases.length === 0
 				: sent?.extension === extension && sent.definition === definition && Bun.deepEquals(sent.list, pending))
 		)
 			return;
-		this.#todoStale = false;
 		this.#todoSent = undefined;
 		const taken = await this.#runHandlerWithTimeout(
 			async (event, ctx) => {

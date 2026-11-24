@@ -1902,10 +1902,11 @@ export interface TodoBackendDefinition {
 	 * from an eval cell too: throw to refuse. omp commits `next` only if this resolves within
 	 * `min(10s, the extension handler timeout)` and omp's list is still `previous` (same session,
 	 * call not aborted). Writes here are tolerated: omp resyncs through `replace` after every
-	 * outcome. A committed change reaches it like any other commit. A refusal, a timeout, a late
-	 * answer, or a list, session or backend that changed meanwhile fails the call with omp's list
-	 * unchanged, and the selected backend is sent omp's whole list once, also on exit if that
-	 * resend is still due. A todo call made, or still deciding, once the session is closing fails.
+	 * outcome, even with an unchanged list. A committed change reaches `replace` like any other
+	 * commit. A refusal, a timeout, a late answer, or a list, session or backend that changed
+	 * meanwhile fails the call with omp's list unchanged, and omp's whole list goes out once the
+	 * answer settles, on exit at the latest; a backend no longer selected then gets it when it is
+	 * selected again. A todo call made, or still deciding, once the session is closing fails.
 	 * Other changes (`/todo`, RPC `set_todos`, resets, a subagent's calls) are not asked: they
 	 * reach `replace`.
 	 */

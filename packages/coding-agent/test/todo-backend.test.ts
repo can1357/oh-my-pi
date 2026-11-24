@@ -679,20 +679,23 @@ describe("todo backend", () => {
 			return tool.execute("call", params, signal, undefined, context);
 		};
 
-		it("an accepted change commits and the backend then gets exactly one replace, of the committed list", async () => {
+		it("an accepted change commits, and the backend then gets one replace of the committed list, even an unchanged one", async () => {
 			const backend = tracker("tracker", true);
 			const { session } = await open([backend.extension], "tracker");
 
 			const result = await call(session, { op: "init", items: ["a"] });
 			await settled(session);
+			// The same list again: `apply` may have written something else, so it goes out too.
+			await call(session, { op: "init", items: ["a"] });
+			await settled(session);
 
 			expect(result.isError).not.toBe(true);
-			expect(backend.asked).toEqual([{ op: "init", previous: [], next: session.getTodoPhases() }]);
+			expect(backend.asked[0]).toEqual({ op: "init", previous: [], next: session.getTodoPhases() });
 			expect(contents(session)).toEqual(["a"]);
-			expect(backend.calls.map(entry => entry.phases)).toEqual([session.getTodoPhases()]);
+			expect(backend.calls.map(entry => entry.phases)).toEqual([session.getTodoPhases(), session.getTodoPhases()]);
 		});
 
-		it("a refusal fails the call on one clean line, keeps the list, and is no extension error", async () => {
+		it("a refusal fails the call on one clean line, keeps the list, is no extension error, and resends the list once", async () => {
 			const backend = tracker("tracker", true);
 			const { session, errors } = await open([backend.extension], "tracker");
 			await call(session, { op: "init", items: ["a"] });
@@ -709,6 +712,9 @@ describe("todo backend", () => {
 			gate.resolve();
 			const result = await pending;
 			await resent;
+			// That resend took the mark with it: the same list after it is skipped as usual.
+			session.commitTodoPhases(session.getTodoPhases());
+			await settled(session);
 
 			expect(result.isError).toBe(true);
 			expect(result.details?.refused).toBe(true);
@@ -897,7 +903,10 @@ describe("todo backend", () => {
 			expect(tasksOf(backend).at(-1)).toEqual(["b"]);
 		});
 
-		it("a failed call's resend still waiting when the session closes goes out on exit", async () => {
+		it.each([
+			["failed and waits for its late answer", true],
+			["is still deciding", false],
+		])("a call that %s when the session closes gets the list resent on exit", async (_, aborted) => {
 			const backend = tracker("tracker", true);
 			const { session } = await open([backend.extension], "tracker");
 			testSetSessionShutdownHandlerTimeoutMs(5);
@@ -905,25 +914,25 @@ describe("todo backend", () => {
 			await settled(session);
 			expect(tasksOf(backend)).toEqual([["a"]]);
 
-			// The held apply never answers, so the resend keeps waiting after the abort.
+			// The held apply never answers.
 			backend.applyHold = Promise.withResolvers<void>().promise;
 			const abort = new AbortController();
 			const asked = backend.entered();
 			const pending = call(session, { op: "append", phase: "Work", items: ["b"] }, abort.signal);
 			await asked;
-			abort.abort();
-			const result = await pending;
+			if (aborted) abort.abort();
 			await settled(session);
 			const before = backend.calls.length;
 
 			await session.dispose();
+			const result = await pending;
 
 			expect(result.isError).toBe(true);
 			expect(backend.calls.length - before).toBe(1);
 			expect(backend.calls.at(-1)?.phases).toEqual(session.getTodoPhases());
 		});
 
-		it("a backend switched while apply decides fails the call, saves nothing and asks the new backend nothing", async () => {
+		it("a backend switched while apply decides fails the call, saves nothing, and the new backend is neither asked nor sent an empty list", async () => {
 			const first = tracker("first", true);
 			const second = tracker("second", true);
 			second.refusal = new Error("never");
@@ -937,11 +946,53 @@ describe("todo backend", () => {
 			cfgTodoBackend.override(session.settings, "second");
 			gate.resolve();
 			const result = await pending;
+			// The resend runs once the answer has settled, on microtasks only.
+			await Bun.sleep(0);
+			await settled(session);
 
 			expect(result.isError).toBe(true);
 			expect(textOf(result)).toContain("The todo backend changed");
 			expect(contents(session)).toEqual([]);
-			expect(second.asked).toEqual([]);
+			expect([second.asked, second.calls]).toEqual([[], []]);
+		});
+
+		it("a failed call's resend that finds native selected reaches the backend asked once it is selected again, list unchanged or not", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+			await call(session, { op: "init", items: ["a"] });
+			await settled(session);
+			backend.refusal = new Error("no");
+			const gate = Promise.withResolvers<void>();
+			backend.applyHold = gate.promise;
+
+			const asked = backend.entered();
+			const pending = call(session, { op: "append", phase: "Work", items: ["b"] });
+			await asked;
+			cfgTodoBackend.override(session.settings, "native");
+			gate.resolve();
+			await pending;
+			// As above: the resend's microtasks run before the backend is selected again.
+			await Bun.sleep(0);
+			cfgTodoBackend.override(session.settings, "tracker");
+			session.commitTodoPhases(session.getTodoPhases());
+			await settled(session);
+
+			// Its apply ran, so it may still hold what it wrote.
+			expect(tasksOf(backend)).toEqual([["a"], ["a"]]);
+		});
+
+		it("a call aborted before apply runs asks nothing and sends nothing", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+			const abort = new AbortController();
+			abort.abort();
+			const result = await call(session, { op: "init", items: ["a"] }, abort.signal);
+			// A resync would queue its list on microtasks: let it run if one was scheduled.
+			await Bun.sleep(0);
+			await settled(session);
+
+			expect(textOf(result)).toContain("aborted");
+			expect([backend.asked, backend.calls]).toEqual([[], []]);
 		});
 
 		it("an id whose owner changes while apply decides fails the call, saves nothing and asks the new owner nothing", async () => {

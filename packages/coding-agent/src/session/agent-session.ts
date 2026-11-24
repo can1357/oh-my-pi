@@ -12179,7 +12179,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			change,
 			current: () => this.#todo.phases,
 			commit,
-			resend: () => this.#mirrorTodoPhases(),
 			closing: () => this.#isDisposed,
 			selected: () => this.#todoBackend(),
 			signal,
