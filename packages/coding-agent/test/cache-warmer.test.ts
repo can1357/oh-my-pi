@@ -386,6 +386,15 @@ describe("cache warmer lifecycle", () => {
 		expect(h.warmer.status.state).toBe("inactive");
 	});
 
+	test("keeps refreshing a short-lived entry when its timer fires a millisecond late", async () => {
+		const h = harness();
+		const armedAt = Date.now();
+		start(h, {}, { ...makeModel(), promptCache: { short: 60, long: 3600 } });
+		vi.spyOn(Date, "now").mockReturnValue(armedAt + 50_001);
+		await advance(50_000);
+		expect(h.replays).toHaveLength(1);
+	});
+
 	test("stops after a refresh that re-wrote the prefix instead of reading it", async () => {
 		const h = harness();
 		h.script = { kind: "done", usage: makeUsage({ cacheWrite: PROMPT_TOKENS, output: 1 }) };

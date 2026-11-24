@@ -870,9 +870,12 @@ export class CacheWarmer {
 		run.timer = undefined;
 		run.refreshSentAt = undefined;
 		if (!this.#validateRun(run)) return;
-		// A timer that fires late (macOS sleep stalls it) must not refresh an entry that has run out.
+		// Sleep stalls the timer while the wall clock runs on. A late fire must not refresh an entry that has run out,
+		// nor one with less than the margin left; an on-time fire keeps the schedule's own margin.
 		const expiresAt = this.#expiresAt(run);
-		if (expiresAt !== undefined && Date.now() > expiresAt - EXPIRY_MARGIN_MS) {
+		const now = Date.now();
+		const late = now - run.nextWarmAt > EXPIRY_MARGIN_MS;
+		if (expiresAt !== undefined && (now >= expiresAt || (late && now > expiresAt - EXPIRY_MARGIN_MS))) {
 			this.#stop("cache entry ran out before the refresh fired");
 			return;
 		}
