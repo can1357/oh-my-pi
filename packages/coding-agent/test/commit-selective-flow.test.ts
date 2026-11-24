@@ -692,8 +692,22 @@ describe("selective commit flow", () => {
 			/a\.txt: take\(\) without units would add lines that are not yours: .*pre-existing/,
 		);
 		expect(draft.selection()).toEqual(selected);
+		const bothSelected = [
+			{
+				kind: "text",
+				path: "a.txt",
+				before: { text: original, mode: "100644" },
+				after: { text: outside.replace("line 10\n", "main session\n"), mode: "100644" },
+			},
+		];
 		expect(() => draft.take({ path: "a.txt", grep: "other session" })).not.toThrow();
+		expect(draft.selection()).toEqual(bothSelected);
+		expect(draft.diff()).toContain("-line 1\n+other session\n");
+		expect(draft.diff()).toContain("-line 10\n+main session\n");
 		expect(() => draft.take({ path: "**" })).not.toThrow();
+		expect(draft.selection()).toEqual(bothSelected);
+		expect(draft.diff()).toContain("-line 1\n+other session\n");
+		expect(draft.diff()).toContain("-line 10\n+main session\n");
 	});
 
 	it("refuses a bare take of an exact path whose name has glob characters", async () => {
