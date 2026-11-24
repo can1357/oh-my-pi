@@ -205,6 +205,8 @@ it("routes bracketed paste to the active Git field only", () =>
 		expect(app.sidebar.summary()).toEqual({ text: "afixitb", cursor: 6 });
 		term.press("enter");
 		term.paste("first\r\nsecond");
+		// Input behind an Enter is delivered on the next event-loop turn, to whatever the Enter focused.
+		await Bun.sleep(1);
 		expect(app.sidebar.description().text).toBe("first\nsecond");
 
 		const section = term.screen().findIndex(row => row.includes("Unstaged Files"));
