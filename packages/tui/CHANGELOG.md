@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- A theme name with a path separator, such as `../name`, no longer loads a theme file from outside the themes directory; it falls back as an unknown theme does ([#20407](https://github.com/can1357/oh-my-pi/pull/20407) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Corrected math environment detection to properly handle blocks starting with `\begin`
 - Cmd+A highlights the full text of editors and inputs when the terminal forwards the shortcut. Typing, deleting or pasting replaces the selected range.
 - Native overlays follow the field they are anchored to, including when the field moves or shares its local key with another field.
