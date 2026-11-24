@@ -54,7 +54,14 @@
  * const three = link.callSync("add", 1, 2);
  * ```
  */
-import { receiveMessageOnPort } from "node:worker_threads";
+import type * as WorkerThreads from "node:worker_threads";
+
+// Lazy loader: keeps node:worker_threads off main-thread startup; only worker sync RPC calls this.
+let workerThreadsCache: typeof WorkerThreads | undefined;
+function getReceiveMessageOnPort(): typeof WorkerThreads.receiveMessageOnPort {
+	if (!workerThreadsCache) workerThreadsCache = require("node:worker_threads") as typeof WorkerThreads;
+	return workerThreadsCache.receiveMessageOnPort;
+}
 import { logger } from "@oh-my-pi/pi-utils";
 
 /** One RPC method: argument tuple and result. */
@@ -516,7 +523,7 @@ export class RpcLink<Local extends RpcApi, Remote extends RpcApi> {
 		for (;;) {
 			// Load before draining: a reply posted after the drain bumps the counter and voids the wait.
 			const seen = Atomics.load(sync.counter, 0);
-			const received = receiveMessageOnPort(sync.port);
+			const received = getReceiveMessageOnPort()(sync.port);
 			if (received) {
 				const reply: SyncReply = received.message;
 				// A late reply to an earlier call that timed out; its caller already gave up.

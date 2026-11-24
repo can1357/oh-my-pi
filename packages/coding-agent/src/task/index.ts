@@ -1,6 +1,3 @@
-import { subprocessToolRegistry } from "./subprocess-tool-registry";
-import { isTaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
-import { taskSubprocessRenderer } from "@oh-my-pi/pi-tui/tools/subprocess";
 /**
  * Task tool - Delegate tasks to specialized agents.
  *
@@ -16,6 +13,8 @@ import { taskSubprocessRenderer } from "@oh-my-pi/pi-tui/tools/subprocess";
  *   - Progress tracking via JSON events
  *   - Session artifacts for debugging
  */
+import { subprocessToolRegistry } from "./subprocess-tool-registry";
+import { isTaskToolDetails } from "./task-details";
 import * as path from "node:path";
 import type {
 	AgentTool,
@@ -28,25 +27,24 @@ import { $env, isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { Settings } from "../config/settings";
-import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
 import taskAsyncContractTemplate from "../prompts/tools/task-async-contract.md" with { type: "text" };
 import taskCoordinationAdvisoryTemplate from "../prompts/tools/task-coordination-advisory.md" with { type: "text" };
+import taskFollowUpTemplate from "../prompts/tools/task-follow-up.md" with { type: "text" };
 import taskSpawnFeedbackTemplate from "../prompts/tools/task-spawn-feedback.md" with { type: "text" };
 import taskSpecializationAdvisoryTemplate from "../prompts/tools/task-specialization-advisory.md" with { type: "text" };
-import taskFollowUpTemplate from "../prompts/tools/task-follow-up.md" with { type: "text" };
-import { TASK_EFFORTS, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
+import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { truncateForPrompt } from "../tools/approval";
 import { hasWaitTool } from "../tools/wait";
+import { IrcBus } from "../irc/bus";
 import { isIrcEnabled } from "../irc/messaging";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
 import { type AgentDefinition, canSpawnAtDepth, getTaskSchema, type TaskToolSchemaInstance } from "./types";
-import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "./task-details";
 import { AsyncJobError, type AsyncJobManagerApi } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
-import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "./model-approval";
@@ -54,8 +52,7 @@ import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderStepsBrief } from "./steps";
-import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
-import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
+import { repairTaskParams } from "./repair-args";
 import {
 	invalidModelSelectorReason,
 	normalizeModelSelector,
@@ -65,18 +62,16 @@ import {
 	StructuredSubagentError,
 	type StructuredSubagentRequest,
 } from "./structured-subagent";
-import { SpawnRun, type SpawnPermit } from "./spawn-run";
+import { type SpawnPermit, SpawnRun } from "./spawn-run";
 import { type TaskLauncher, TaskLaunchSession } from "./speculative-launch";
 import type { TextTap } from "../job-widgets/text-tap";
 import type { SubagentToolResult } from "./executor";
 import { appendToolResult, createTaskWidgetInputs } from "./widget-inputs";
-
 import { cfgAsyncEnabled } from "../tools/settings";
 import {
 	cfgTaskBatch,
 	cfgTaskDisabledAgents,
 	cfgTaskEnableEffort,
-	cfgTaskEnableLsp,
 	cfgTaskIsolationApply,
 	cfgTaskIsolationEnabled,
 	cfgTaskMaxConcurrency,
@@ -87,6 +82,8 @@ import {
 	cfgTaskStructured,
 	perCallModelEnabled,
 } from "./settings";
+import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { TASK_EFFORTS, type TaskEffort } from "../thinking/levels";
 
 function createUsageTotals(): Usage {
 	return {
@@ -134,7 +131,7 @@ export { discoverAgents, getAgent } from "./discovery";
 export { AgentOutputManager } from "./output-manager";
 export * from "./read-only-policy";
 export type { AgentDefinition, SubagentEventPayload, SubagentLifecyclePayload, SubagentProgressPayload } from "./types";
-export type { AgentProgress, SingleResult, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
+export type { AgentProgress, SingleResult, TaskParams, TaskToolDetails } from "./task-details";
 export * from "./result-summary";
 export {
 	TASK_SUBAGENT_EVENT_CHANNEL,
@@ -293,6 +290,9 @@ function validateSpawnParams(
 ): string | undefined {
 	const tasks = params.tasks;
 	if (batchEnabled && tasks !== undefined) {
+		if (typeof tasks === "string") {
+			return '`tasks` must be an array of task items, not a JSON string. Pass a real JSON array, e.g. [{"task":"instructions","solutionSpace":"Open-ended"}].';
+		}
 		if (!Array.isArray(tasks) || tasks.length === 0) {
 			return `Missing \`tasks\`. Provide at least one task item with \`${stepsEnabled ? "steps" : "task"}\`.`;
 		}
@@ -544,7 +544,7 @@ export function buildSpecializationAdvisory(
 	return prompt
 		.render(taskSpecializationAdvisoryTemplate, {
 			count: generics.length,
-			agent: generics[0],
+			agents: [...new Set(generics)].map(name => `\`${name}\``).join(", "),
 			scoutAvailable,
 		})
 		.trim();
@@ -746,11 +746,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	// calls still normalize through arktype; `execute()` resolves `agent`
 	// defaults independently, so the success path is unchanged.
 	readonly lenientArgValidation = true;
-	readonly renderResult = renderResult;
-	// Suppress the streaming call preview once a (partial or final) result exists
-	// so the task renders as ONE block that transitions in place — not a pending
-	// call frame stacked above the result frame. Mirrors `taskToolRenderer`.
-	readonly mergeCallAndResult = true;
 	readonly #discoveredAgents: AgentDefinition[];
 	readonly #blockedAgent: string | undefined;
 	/**
@@ -820,10 +815,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			perCallModel: perCallModelEnabled(this.session.settings, "task"),
 			defaultAgent: this.#defaultAgent(),
 		});
-	}
-
-	renderCall(args: unknown, options: Parameters<typeof renderTaskCall>[1], theme: Theme) {
-		return renderTaskCall(repairTaskParams(args as TaskParams), options, theme);
 	}
 
 	/** Background-job lifecycle contract; inherited by extension replacements that delegate to Task. */
@@ -922,7 +913,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	#outputManager(): AgentOutputManager {
 		let manager = this.session.agentOutputManager;
 		if (!manager) {
-			manager = new AgentOutputManager(this.session.getArtifactsDir ?? (() => null));
+			manager = new AgentOutputManager(this.session.getArtifactsDir ?? (() => null), {
+				settings: this.session.settings,
+			});
 			this.session.agentOutputManager = manager;
 		}
 		return manager;
@@ -1012,7 +1005,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			...this.#effortParams(params),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 			blockedAgent: this.#blockedAgent,
-			enableLsp: (this.session.enableLsp ?? true) && cfgTaskEnableLsp.get(this.session.settings),
+			enableLsp: this.session.enableLsp ?? true,
 			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 			maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
 		});
@@ -1505,17 +1498,20 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			// nothing about the worktree itself: the runner keeps it when captured
 			// changes could not be written, and names that path in the result.
 			const isolated = spawnParams.isolated === true;
-			const ref = aborted ? AgentRegistry.global().get(agentId) : undefined;
+			// A failed or killed run may never have written the transcript a revival
+			// reads, so a resumable-looking ref alone does not make it messageable.
+			const transcriptAvailable = await hasResolvableTranscript(agentId);
+			const ref = AgentRegistry.global().get(agentId);
 			return `\n\n${prompt.render(taskFollowUpTemplate, {
 				agentId,
 				aborted,
 				isolated,
 				ircEnabled,
-				resumable: !isolated && isResumable(ref),
-				transcriptAvailable: aborted ? await hasResolvableTranscript(agentId) : true,
+				resumable: !isolated && transcriptAvailable && (Boolean(ref?.session) || isResumable(ref)),
+				transcriptAvailable,
 			})}`;
 		};
-		return manager.register(
+		const jobId = manager.register(
 			"task",
 			agentId,
 			async ({ jobId, signal: runSignal, reportProgress, markRunning }) => {
@@ -1687,6 +1683,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				},
 			},
 		);
+		// A spawn that ends without ever registering its agent (cancelled while
+		// queued, or failed before its session opened) never takes the messages
+		// held for it; drop them so none reach a later agent of the same id.
+		const dropHeld = () => {
+			if (AgentRegistry.global().get(agentId)) return;
+			const bus = IrcBus.existing();
+			let held = bus?.take(agentId);
+			while (held) held = bus?.take(agentId);
+		};
+		void manager.getJob(jobId)?.promise.then(dropHeld, dropHeld);
+		return jobId;
 	}
 
 	/**
@@ -1887,7 +1894,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				acquiredAt: launchTiming?.acquiredAt,
 				...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 				blockedAgent: this.#blockedAgent,
-				enableLsp: (this.session.enableLsp ?? true) && cfgTaskEnableLsp.get(this.session.settings),
+				enableLsp: this.session.enableLsp ?? true,
 				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 				maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
 				signal,
@@ -1961,6 +1968,5 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 }
 
 subprocessToolRegistry.register<TaskToolDetails>("task", {
-	...taskSubprocessRenderer,
 	extractData: event => (isTaskToolDetails(event.result?.details) ? event.result.details : undefined),
 });

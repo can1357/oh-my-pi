@@ -1,59 +1,61 @@
-import { createAgentHubRuntime } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
 /**
  * Regression: the agent hub keeps its initial status/recency order while open,
  * regardless of heartbeats; newly spawned agents appear above existing rows.
  */
-import { afterEach, beforeAll, describe, expect, it, setSystemTime, vi } from "bun:test";
+import { afterEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
-import { type AgentHubDeps, AgentHubOverlayComponent } from "@oh-my-pi/pi-tui/overlays/agent-hub";
-import { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
-import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { createAgentHubRuntime } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
+import { type AgentRef, AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
+import { SessionObserverRegistry } from "@oh-my-pi/pi-coding-agent/task/session-observer-registry";
+import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { AgentActivityIndex, type AgentActivityRow } from "../src/activity";
+import { agentColored, agentColorHex, agentPalette } from "../src/ui/tools/agent-identity";
+import { type HubProps, type MountedHub, mountAgentHub } from "./helpers/agent-hub";
+import { paintedIn } from "./helpers/layer-terminal";
 
 interface GeometryStub {
 	setRows(n: number): void;
 	restore(): void;
 }
 
+/** The terminal size the next hub mounts on. */
+const size = { columns: 120, rows: 24 };
+
 function stubStdoutGeometry(cols: number): GeometryStub {
-	const rowsDesc = Object.getOwnPropertyDescriptor(process.stdout, "rows");
-	const colsDesc = Object.getOwnPropertyDescriptor(process.stdout, "columns");
-	let rows = 24;
-	Object.defineProperty(process.stdout, "rows", { configurable: true, get: () => rows, set: () => {} });
-	Object.defineProperty(process.stdout, "columns", { configurable: true, get: () => cols, set: () => {} });
-	const restoreOne = (key: "rows" | "columns", desc: PropertyDescriptor | undefined) => {
-		if (desc) Object.defineProperty(process.stdout, key, desc);
-		else Object.defineProperty(process.stdout, key, { configurable: true, value: undefined, writable: true });
-	};
+	size.columns = cols;
+	size.rows = 24;
 	return {
 		setRows(n: number) {
-			rows = n;
+			size.rows = n;
 		},
 		restore() {
-			restoreOne("rows", rowsDesc);
-			restoreOne("columns", colsDesc);
+			size.columns = 120;
+			size.rows = 24;
 		},
 	};
 }
 
-function makeHub(agents: AgentRegistry, overrides: Partial<AgentHubDeps> = {}) {
-	return new AgentHubOverlayComponent({
-		...createAgentHubRuntime({ settings: Settings.isolated(), registry: agents }),
-		observers: new SessionObserverRegistry(),
-		hubKeys: [],
-		onDone: () => {},
-		requestRender: () => {},
-		registry: agents,
-		irc: new IrcBus(agents),
-		focusAgent: async () => {},
-		manageActivityLive: !overrides.activity,
-		...overrides,
-	});
+function makeHub(agents: AgentRegistry, overrides: Partial<HubProps<AgentRef>> = {}): MountedHub {
+	return mountAgentHub(
+		{
+			...createAgentHubRuntime({
+				settings: Settings.isolated(),
+				registry: agents,
+			}),
+			observers: new SessionObserverRegistry(),
+			onDone: () => {},
+			registry: agents,
+			irc: new IrcBus(agents),
+			focusAgent: async () => {},
+			manageActivityLive: !overrides.activity,
+			...overrides,
+		},
+		{ ...size },
+	);
 }
 
 interface RenderedAgentRow {
@@ -76,7 +78,7 @@ function rosterCell(raw: string): string | undefined {
 	return line.slice(2, Math.max(2, divider - 1));
 }
 
-function renderedAgentRows(hub: AgentHubOverlayComponent, width = 120): RenderedAgentRow[] {
+function renderedAgentRows(hub: MountedHub, width = 120): RenderedAgentRow[] {
 	// `<cursor> <status-glyph> [tree-prefix] <id> …`; continuation rows may
 	// carry `│` in the status column and are rejected by rosterEntryMatch.
 	const rows: RenderedAgentRow[] = [];
@@ -87,15 +89,15 @@ function renderedAgentRows(hub: AgentHubOverlayComponent, width = 120): Rendered
 	return rows;
 }
 
-function renderedAgentIds(hub: AgentHubOverlayComponent): string[] {
+function renderedAgentIds(hub: MountedHub): string[] {
 	return renderedAgentRows(hub).map(row => row.id);
 }
 
-function selectedAgentId(hub: AgentHubOverlayComponent): string | undefined {
+function selectedAgentId(hub: MountedHub): string | undefined {
 	return renderedAgentRows(hub).find(row => row.selected)?.id;
 }
 
-function renderedRosterEntry(hub: AgentHubOverlayComponent, id: string, width: number): string {
+function renderedRosterEntry(hub: MountedHub, id: string, width: number): string {
 	const cells = hub.render(width).map(rosterCell);
 	const start = cells.findIndex(cell => rosterEntryMatch(cell)?.[3] === id);
 	expect(start).toBeGreaterThanOrEqual(0);
@@ -108,10 +110,16 @@ function renderedRosterEntry(hub: AgentHubOverlayComponent, id: string, width: n
 	}
 	return entry.join("\n");
 }
-function renderedRosterHeaderLineRaw(hub: AgentHubOverlayComponent, id: string, width: number): string {
+function renderedRosterHeaderLineRaw(hub: MountedHub, id: string, width: number): string {
 	const line = hub.render(width).find(raw => rosterEntryMatch(rosterCell(raw))?.[3] === id);
 	if (!line) throw new Error(`No rendered roster header for ${id}`);
 	return line;
+}
+
+/** The foreground SGR of an agent's identity colour. */
+function identitySgr(id: string): string {
+	const colored = agentColored(currentTheme(), id, "");
+	return colored.slice(0, colored.indexOf("\x1b[39m"));
 }
 
 function leftClick(row1Based: number): string {
@@ -124,10 +132,6 @@ function wheel(direction: "up" | "down"): string {
 
 describe("Agent hub row ordering", () => {
 	let geometry: GeometryStub | undefined;
-
-	beforeAll(async () => {
-		await initTheme();
-	});
 
 	afterEach(() => {
 		vi.useRealTimers();
@@ -170,9 +174,19 @@ describe("Agent hub row ordering", () => {
 				status: "parked",
 			});
 			setSystemTime(1000);
-			agents.register({ id: "Older", displayName: "Older", kind: "sub", session: {} as AgentSession });
+			agents.register({
+				id: "Older",
+				displayName: "Older",
+				kind: "sub",
+				session: {} as AgentSession,
+			});
 			setSystemTime(2000);
-			agents.register({ id: "Newer", displayName: "Newer", kind: "sub", session: {} as AgentSession });
+			agents.register({
+				id: "Newer",
+				displayName: "Newer",
+				kind: "sub",
+				session: {} as AgentSession,
+			});
 
 			vi.advanceTimersByTime(100);
 			expect(renderedAgentIds(hub)).toEqual(["Newer", "Older", "Parked"]);
@@ -183,21 +197,36 @@ describe("Agent hub row ordering", () => {
 
 	it("pins existing rows across activity changes and puts new agents at the top", () => {
 		vi.useFakeTimers();
-		let hub: AgentHubOverlayComponent | undefined;
+		let hub: MountedHub | undefined;
 		try {
 			geometry = stubStdoutGeometry(120);
 			const agents = new AgentRegistry();
 			setSystemTime(1000);
 			const sessionA = {} as AgentSession;
-			agents.register({ id: "A", displayName: "Alpha", kind: "sub", session: sessionA });
+			agents.register({
+				id: "A",
+				displayName: "Alpha",
+				kind: "sub",
+				session: sessionA,
+			});
 
 			setSystemTime(2000);
 			const sessionB = {} as AgentSession;
-			agents.register({ id: "B", displayName: "Beta", kind: "sub", session: sessionB });
+			agents.register({
+				id: "B",
+				displayName: "Beta",
+				kind: "sub",
+				session: sessionB,
+			});
 
 			setSystemTime(3000);
 			const sessionC = {} as AgentSession;
-			agents.register({ id: "C", displayName: "Gamma", kind: "sub", session: sessionC });
+			agents.register({
+				id: "C",
+				displayName: "Gamma",
+				kind: "sub",
+				session: sessionC,
+			});
 
 			hub = makeHub(agents);
 			// Captured once on open: status then recency (most-recent first).
@@ -212,9 +241,20 @@ describe("Agent hub row ordering", () => {
 
 			setSystemTime(5000);
 			const sessionD = {} as AgentSession;
-			agents.register({ id: "D", displayName: "Delta", kind: "sub", session: sessionD, status: "parked" });
+			agents.register({
+				id: "D",
+				displayName: "Delta",
+				kind: "sub",
+				session: sessionD,
+				status: "parked",
+			});
 			setSystemTime(6000);
-			agents.register({ id: "E", displayName: "Epsilon", kind: "sub", session: {} as AgentSession });
+			agents.register({
+				id: "E",
+				displayName: "Epsilon",
+				kind: "sub",
+				session: {} as AgentSession,
+			});
 			// One coalesced refresh: new agents use the existing status/recency
 			// ranking, but both precede the frozen roster.
 			expect(renderedAgentIds(hub)).toEqual(["C", "B", "A"]);
@@ -232,7 +272,12 @@ describe("Agent hub row ordering", () => {
 			// Reusing an unregistered id creates a new generation at the top,
 			// rather than reclaiming the previous generation's old rank.
 			agents.unregister("B", sessionB);
-			agents.register({ id: "B", displayName: "Beta 2", kind: "sub", session: {} as AgentSession });
+			agents.register({
+				id: "B",
+				displayName: "Beta 2",
+				kind: "sub",
+				session: {} as AgentSession,
+			});
 			vi.advanceTimersByTime(100);
 			expect(renderedAgentIds(hub)).toEqual(["B", "E", "D", "C", "A"]);
 		} finally {
@@ -247,9 +292,19 @@ describe("Agent hub row ordering", () => {
 		geometry = stubStdoutGeometry(120);
 		const agents = new AgentRegistry();
 		setSystemTime(1000);
-		agents.register({ id: "A", displayName: "Alpha", kind: "sub", session: {} as AgentSession });
+		agents.register({
+			id: "A",
+			displayName: "Alpha",
+			kind: "sub",
+			session: {} as AgentSession,
+		});
 		setSystemTime(2000);
-		agents.register({ id: "B", displayName: "Beta", kind: "sub", session: {} as AgentSession });
+		agents.register({
+			id: "B",
+			displayName: "Beta",
+			kind: "sub",
+			session: {} as AgentSession,
+		});
 		const killed = agents.register({
 			id: "Killed",
 			displayName: "Killed",
@@ -259,7 +314,10 @@ describe("Agent hub row ordering", () => {
 		});
 		setSystemTime(3000);
 		const load = Promise.withResolvers<void>();
-		const hub = makeHub(agents, { sessionFile: "/tmp/hub/session.jsonl", loadPersisted: () => load.promise });
+		const hub = makeHub(agents, {
+			sessionFile: "/tmp/hub/session.jsonl",
+			loadPersisted: () => load.promise,
+		});
 		try {
 			expect(renderedAgentIds(hub)).toEqual(["B", "A", "Killed"]);
 			hub.handleInput("j");
@@ -283,7 +341,13 @@ describe("Agent hub row ordering", () => {
 				status: "parked",
 				lastActivity: 900,
 			});
-			agents.register({ id: "Fresh", displayName: "Fresh", kind: "sub", session: null, status: "running" });
+			agents.register({
+				id: "Fresh",
+				displayName: "Fresh",
+				kind: "sub",
+				session: null,
+				status: "running",
+			});
 			vi.advanceTimersByTime(100);
 			expect(renderedAgentIds(hub)).toEqual(["Fresh", "B", "A", "Saved", "Killed"]);
 			expect(selectedAgentId(hub)).toBe("A");
@@ -294,11 +358,17 @@ describe("Agent hub row ordering", () => {
 			expect(renderedAgentIds(hub)).toEqual(["Killed", "Fresh", "B", "A", "Saved"]);
 
 			load.resolve();
-			await hub.persistedSubagentsReady;
+			await hub.handle.persistedReady;
 			expect(renderedAgentIds(hub)).toEqual(["Killed", "Fresh", "B", "A", "Saved"]);
 
 			// Once the scan is over, a parked agent that appears is a spawn that already finished.
-			agents.register({ id: "Late", displayName: "Late", kind: "sub", session: null, status: "parked" });
+			agents.register({
+				id: "Late",
+				displayName: "Late",
+				kind: "sub",
+				session: null,
+				status: "parked",
+			});
 			vi.advanceTimersByTime(100);
 			expect(renderedAgentIds(hub)).toEqual(["Late", "Killed", "Fresh", "B", "A", "Saved"]);
 		} finally {
@@ -308,14 +378,24 @@ describe("Agent hub row ordering", () => {
 
 	it("filters agents with a fuzzy query and clears on Escape", () => {
 		vi.useFakeTimers();
-		let hub: AgentHubOverlayComponent | undefined;
+		let hub: MountedHub | undefined;
 		try {
 			geometry = stubStdoutGeometry(120);
 			const agents = new AgentRegistry();
 			const sessionA = {} as AgentSession;
-			agents.register({ id: "alpha-one", displayName: "Alpha", kind: "sub", session: sessionA });
+			agents.register({
+				id: "alpha-one",
+				displayName: "Alpha",
+				kind: "sub",
+				session: sessionA,
+			});
 			const sessionB = {} as AgentSession;
-			agents.register({ id: "beta-two", displayName: "Beta", kind: "sub", session: sessionB });
+			agents.register({
+				id: "beta-two",
+				displayName: "Beta",
+				kind: "sub",
+				session: sessionB,
+			});
 
 			hub = makeHub(agents);
 			expect(renderedAgentIds(hub)).toEqual(["alpha-one", "beta-two"]);
@@ -338,22 +418,29 @@ describe("Agent hub row ordering", () => {
 		const agents = new AgentRegistry();
 		for (let i = 0; i < 10_000; i++) {
 			const id = `Agent-${i.toString().padStart(5, "0")}`;
-			agents.register({ id, displayName: id, kind: "sub", session: null, status: "parked" });
+			agents.register({
+				id,
+				displayName: id,
+				kind: "sub",
+				session: null,
+				status: "parked",
+			});
 		}
 
 		const observers = new SessionObserverRegistry();
 		const getSessions = vi.spyOn(observers, "getSessions");
 		const getSession = vi.spyOn(observers, "getSession");
-		const hub = new AgentHubOverlayComponent({
-			...createAgentHubRuntime({ registry: agents }),
-			observers,
-			hubKeys: [],
-			onDone: () => {},
-			requestRender: () => {},
-			registry: agents,
-			irc: new IrcBus(agents),
-			focusAgent: async () => {},
-		});
+		const hub = mountAgentHub(
+			{
+				...createAgentHubRuntime({ registry: agents }),
+				observers,
+				onDone: () => {},
+				registry: agents,
+				irc: new IrcBus(agents),
+				focusAgent: async () => {},
+			},
+			{ ...size },
+		);
 
 		try {
 			getSessions.mockClear();
@@ -400,27 +487,28 @@ describe("Agent hub row ordering", () => {
 
 		const observers = new SessionObserverRegistry();
 		const getSession = vi.spyOn(observers, "getSession");
-		const hub = new AgentHubOverlayComponent({
-			...createAgentHubRuntime({ registry: agents }),
-			observers,
-			hubKeys: [],
-			onDone: () => {},
-			requestRender: () => {},
-			registry: agents,
-			irc: new IrcBus(agents),
-			focusAgent: async () => {},
-		});
+		// Force a second task line via observer metadata so entry height is 2.
+		getSession.mockImplementation((id: string) => ({
+			id,
+			kind: "subagent",
+			label: "Subagent",
+			status: "active",
+			description: `task for ${id}`,
+			lastUpdate: Date.now(),
+		}));
+		const hub = mountAgentHub(
+			{
+				...createAgentHubRuntime({ registry: agents }),
+				observers,
+				onDone: () => {},
+				registry: agents,
+				irc: new IrcBus(agents),
+				focusAgent: async () => {},
+			},
+			{ ...size },
+		);
 
 		try {
-			// Force a second task line via observer metadata so entry height is 2.
-			getSession.mockImplementation((id: string) => ({
-				id,
-				kind: "subagent",
-				label: "Subagent",
-				status: "active",
-				description: `task for ${id}`,
-				lastUpdate: Date.now(),
-			}));
 			getSession.mockClear();
 			const visibleIds = renderedAgentIds(hub);
 			// Each entry is 2 lines; budget 5 → at most 2 full entries + probes.
@@ -509,11 +597,26 @@ describe("Agent hub row ordering", () => {
 		geometry = stubStdoutGeometry(120);
 		const agents = new AgentRegistry();
 		setSystemTime(1_000);
-		agents.register({ id: "Alpha", displayName: "Alpha", kind: "sub", session: {} as AgentSession });
+		agents.register({
+			id: "Alpha",
+			displayName: "Alpha",
+			kind: "sub",
+			session: {} as AgentSession,
+		});
 		setSystemTime(2_000);
-		agents.register({ id: "Beta", displayName: "Beta", kind: "sub", session: {} as AgentSession });
+		agents.register({
+			id: "Beta",
+			displayName: "Beta",
+			kind: "sub",
+			session: {} as AgentSession,
+		});
 		setSystemTime(3_000);
-		agents.register({ id: "Gamma", displayName: "Gamma", kind: "sub", session: {} as AgentSession });
+		agents.register({
+			id: "Gamma",
+			displayName: "Gamma",
+			kind: "sub",
+			session: {} as AgentSession,
+		});
 
 		const focused: string[] = [];
 		const done = vi.fn();
@@ -550,7 +653,12 @@ describe("Agent hub row ordering", () => {
 		const agents = new AgentRegistry();
 		// A collab guest / observer-only row carries no live AgentSession, so the
 		// badge must come from the executor-reported progress instead.
-		agents.register({ id: "GuestAgent", displayName: "Guest Agent", kind: "sub", session: null });
+		agents.register({
+			id: "GuestAgent",
+			displayName: "Guest Agent",
+			kind: "sub",
+			session: null,
+		});
 
 		const observers = new SessionObserverRegistry();
 		vi.spyOn(observers, "getSession").mockReturnValue({
@@ -584,9 +692,17 @@ describe("Agent hub row ordering", () => {
 		const session = {
 			model: { id: "gpt-5.6-sol", thinking: true },
 			thinkingLevel: "high",
-			servingModel: { selector: "anthropic/claude-sonnet-5", isFallback: false },
+			servingModel: {
+				selector: "anthropic/claude-sonnet-5",
+				isFallback: false,
+			},
 		} as unknown as AgentSession;
-		agents.register({ id: "MainAgent", displayName: "Main Agent", kind: "sub", session });
+		agents.register({
+			id: "MainAgent",
+			displayName: "Main Agent",
+			kind: "sub",
+			session,
+		});
 
 		const hub = makeHub(agents, { observers: new SessionObserverRegistry() });
 
@@ -613,7 +729,12 @@ describe("Agent hub row ordering", () => {
 			// still flagged as fallback-routed.
 			servingModel: { selector: "openai-codex/gpt-5.6-sol", isFallback: true },
 		} as unknown as AgentSession;
-		agents.register({ id: "UnprovenAgent", displayName: "Unproven Agent", kind: "sub", session });
+		agents.register({
+			id: "UnprovenAgent",
+			displayName: "Unproven Agent",
+			kind: "sub",
+			session,
+		});
 
 		const hub = makeHub(agents, { observers: new SessionObserverRegistry() });
 
@@ -631,8 +752,16 @@ describe("Agent hub row ordering", () => {
 		// Fireworks Fast → base degrade emits `retry_fallback_applied` without
 		// arming `#activeRetryFallback`, so the badge must fall back to the
 		// executor-reported progress flag.
-		const session = { model: { id: "kimi-k2" }, servingModel: undefined } as unknown as AgentSession;
-		agents.register({ id: "FastAgent", displayName: "Fast Agent", kind: "sub", session });
+		const session = {
+			model: { id: "kimi-k2" },
+			servingModel: undefined,
+		} as unknown as AgentSession;
+		agents.register({
+			id: "FastAgent",
+			displayName: "Fast Agent",
+			kind: "sub",
+			session,
+		});
 
 		const observers = new SessionObserverRegistry();
 		vi.spyOn(observers, "getSession").mockReturnValue({
@@ -659,8 +788,12 @@ describe("Agent hub row ordering", () => {
 	it("retains the live thinking level unless progress has an explicit suffix", () => {
 		geometry = stubStdoutGeometry(140);
 		const agents = new AgentRegistry();
-		const inheritedSession = { thinkingLevel: ThinkingLevel.High } as unknown as AgentSession;
-		const explicitSession = { thinkingLevel: ThinkingLevel.High } as unknown as AgentSession;
+		const inheritedSession = {
+			thinkingLevel: ThinkingLevel.High,
+		} as unknown as AgentSession;
+		const explicitSession = {
+			thinkingLevel: ThinkingLevel.High,
+		} as unknown as AgentSession;
 		agents.register({
 			id: "InheritedLevel",
 			displayName: "Inherited level",
@@ -697,12 +830,12 @@ describe("Agent hub row ordering", () => {
 		try {
 			const inherited = renderedRosterEntry(hub, "InheritedLevel", 140);
 			expect(inherited).toContain("gpt-5.4");
-			expect(inherited).toContain(theme.thinking.high);
+			expect(inherited).toContain(currentTheme().symbols.symbol("thinking.high"));
 
 			const explicit = renderedRosterEntry(hub, "ExplicitLevel", 140);
 			expect(explicit).toContain("gpt-5.4");
-			expect(explicit).toContain(theme.thinking.low);
-			expect(explicit).not.toContain(theme.thinking.high);
+			expect(explicit).toContain(currentTheme().symbols.symbol("thinking.low"));
+			expect(explicit).not.toContain(currentTheme().symbols.symbol("thinking.high"));
 		} finally {
 			hub.dispose();
 		}
@@ -798,8 +931,20 @@ describe("Agent hub row ordering", () => {
 		geometry = stubStdoutGeometry(160);
 		geometry.setRows(32);
 		const agents = new AgentRegistry();
-		agents.register({ id: "Running", displayName: "Running", kind: "sub", session: null, status: "running" });
-		agents.register({ id: "Completed", displayName: "Completed", kind: "sub", session: null, status: "idle" });
+		agents.register({
+			id: "Running",
+			displayName: "Running",
+			kind: "sub",
+			session: null,
+			status: "running",
+		});
+		agents.register({
+			id: "Completed",
+			displayName: "Completed",
+			kind: "sub",
+			session: null,
+			status: "idle",
+		});
 		agents.register({
 			id: "Historical",
 			displayName: "Historical",
@@ -899,7 +1044,14 @@ describe("Agent hub row ordering", () => {
 			toolCalls: 4,
 			toolResults: 4,
 			totalMessages: 18,
-			tokens: { input: 100, output: 50, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 150 },
+			tokens: {
+				input: 100,
+				output: 50,
+				reasoning: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				total: 150,
+			},
 			premiumRequests: 0,
 			cost: 0.25,
 		}));
@@ -909,7 +1061,12 @@ describe("Agent hub row ordering", () => {
 			kind: "sub",
 			session: { getSessionStats } as unknown as AgentSession,
 		});
-		agents.register({ id: "NonFinite", displayName: "Non-finite", kind: "sub", session: null });
+		agents.register({
+			id: "NonFinite",
+			displayName: "Non-finite",
+			kind: "sub",
+			session: null,
+		});
 		const observers = new SessionObserverRegistry();
 		vi.spyOn(observers, "getSessions").mockReturnValue([
 			{
@@ -957,8 +1114,18 @@ describe("Agent hub row ordering", () => {
 	it("shows configured role text beside a resolved model but not for an explicit selector", () => {
 		geometry = stubStdoutGeometry(160);
 		const agents = new AgentRegistry();
-		agents.register({ id: "RoleAgent", displayName: "Role Agent", kind: "sub", session: null });
-		agents.register({ id: "ExplicitAgent", displayName: "Explicit Agent", kind: "sub", session: null });
+		agents.register({
+			id: "RoleAgent",
+			displayName: "Role Agent",
+			kind: "sub",
+			session: null,
+		});
+		agents.register({
+			id: "ExplicitAgent",
+			displayName: "Explicit Agent",
+			kind: "sub",
+			session: null,
+		});
 		const observers = new SessionObserverRegistry();
 		vi.spyOn(observers, "getSessions").mockReturnValue([
 			{
@@ -1037,11 +1204,29 @@ describe("Agent hub row ordering", () => {
 		geometry = stubStdoutGeometry(120);
 		const agents = new AgentRegistry();
 		setSystemTime(1_000);
-		agents.register({ id: "Parent", displayName: "Parent", kind: "sub", parentId: "Main", session: null });
+		agents.register({
+			id: "Parent",
+			displayName: "Parent",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+		});
 		setSystemTime(2_000);
-		agents.register({ id: "Peer", displayName: "Peer", kind: "sub", parentId: "Main", session: null });
+		agents.register({
+			id: "Peer",
+			displayName: "Peer",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+		});
 		setSystemTime(3_000);
-		agents.register({ id: "Child", displayName: "Child", kind: "sub", parentId: "Parent", session: null });
+		agents.register({
+			id: "Child",
+			displayName: "Child",
+			kind: "sub",
+			parentId: "Parent",
+			session: null,
+		});
 		const hub = makeHub(agents);
 
 		try {
@@ -1051,8 +1236,9 @@ describe("Agent hub row ordering", () => {
 			expect(flat).toContain("Flat");
 			expect(flat).toContain("By parent");
 
-			hub.setHoverIndex(0);
-			expect(renderedRosterHeaderLineRaw(hub, "Child", 120)).toContain(theme.getBgAnsi("selectedBg"));
+			const childRow = hub.lines().findIndex(line => rosterEntryMatch(rosterCell(line))?.[3] === "Child");
+			hub.handleInput(`\x1b[<35;4;${childRow + 1}M`);
+			expect(renderedRosterHeaderLineRaw(hub, "Child", 120)).toContain(currentTheme().bgSgr("selectedBg"));
 			hub.handleInput("t");
 			const byParentIds = renderedAgentIds(hub);
 			expect(byParentIds).toEqual(["Parent", "Child", "Peer"]);
@@ -1061,8 +1247,8 @@ describe("Agent hub row ordering", () => {
 			expect(byParent).toContain("Flat");
 			expect(byParent).toContain("By parent");
 			expect(byParentIds.indexOf("Parent")).toBeLessThan(byParentIds.indexOf("Child"));
-			expect(renderedRosterHeaderLineRaw(hub, "Parent", 120)).not.toContain(theme.getBgAnsi("selectedBg"));
-			expect(renderedRosterHeaderLineRaw(hub, "Child", 120)).not.toContain(theme.getBgAnsi("selectedBg"));
+			expect(renderedRosterHeaderLineRaw(hub, "Parent", 120)).not.toContain(currentTheme().bgSgr("selectedBg"));
+			expect(renderedRosterHeaderLineRaw(hub, "Child", 120)).not.toContain(currentTheme().bgSgr("selectedBg"));
 
 			hub.handleInput("t");
 			expect(renderedAgentIds(hub)).toEqual(["Child", "Peer", "Parent"]);
@@ -1080,11 +1266,29 @@ describe("Agent hub row ordering", () => {
 		geometry.setRows(50);
 		const agents = new AgentRegistry();
 		setSystemTime(1_000);
-		agents.register({ id: "P1", displayName: "Parent 1", kind: "sub", parentId: "Main", session: null });
+		agents.register({
+			id: "P1",
+			displayName: "Parent 1",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+		});
 		setSystemTime(1_100);
-		agents.register({ id: "C0", displayName: "Old child", kind: "sub", parentId: "P1", session: null });
+		agents.register({
+			id: "C0",
+			displayName: "Old child",
+			kind: "sub",
+			parentId: "P1",
+			session: null,
+		});
 		setSystemTime(2_000);
-		agents.register({ id: "P2", displayName: "Parent 2", kind: "sub", parentId: "Main", session: null });
+		agents.register({
+			id: "P2",
+			displayName: "Parent 2",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+		});
 		const hub = makeHub(agents);
 
 		try {
@@ -1093,19 +1297,43 @@ describe("Agent hub row ordering", () => {
 			expect(selectedAgentId(hub)).toBe("P2");
 
 			setSystemTime(3_000);
-			agents.register({ id: "C1", displayName: "New child", kind: "sub", parentId: "P1", session: null });
+			agents.register({
+				id: "C1",
+				displayName: "New child",
+				kind: "sub",
+				parentId: "P1",
+				session: null,
+			});
 			setSystemTime(4_000);
-			agents.register({ id: "N", displayName: "New root", kind: "sub", parentId: "Main", session: null });
+			agents.register({
+				id: "N",
+				displayName: "New root",
+				kind: "sub",
+				parentId: "Main",
+				session: null,
+			});
 			vi.advanceTimersByTime(100);
 
 			expect(renderedAgentIds(hub)).toEqual(["N", "P2", "P1", "C1", "C0"]);
 			expect(selectedAgentId(hub)).toBe("P2");
 			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "C1", 120))).toContain("├──");
 			setSystemTime(5_000);
-			agents.register({ id: "M", displayName: "Newest root", kind: "sub", parentId: "Main", session: null });
+			agents.register({
+				id: "M",
+				displayName: "Newest root",
+				kind: "sub",
+				parentId: "Main",
+				session: null,
+			});
 			vi.advanceTimersByTime(100);
 			setSystemTime(6_000);
-			agents.register({ id: "NC", displayName: "New root's child", kind: "sub", parentId: "N", session: null });
+			agents.register({
+				id: "NC",
+				displayName: "New root's child",
+				kind: "sub",
+				parentId: "N",
+				session: null,
+			});
 			vi.advanceTimersByTime(100);
 			expect(renderedAgentIds(hub)).toEqual(["M", "N", "NC", "P2", "P1", "C1", "C0"]);
 			expect(selectedAgentId(hub)).toBe("P2");
@@ -1123,10 +1351,34 @@ describe("Agent hub row ordering", () => {
 		geometry = stubStdoutGeometry(120);
 		geometry.setRows(32);
 		const agents = new AgentRegistry();
-		agents.register({ id: "Parent", displayName: "Parent", kind: "sub", parentId: "Main", session: null });
-		agents.register({ id: "First", displayName: "First", kind: "sub", parentId: "Parent", session: null });
-		agents.register({ id: "Grandchild", displayName: "Grandchild", kind: "sub", parentId: "First", session: null });
-		agents.register({ id: "Last", displayName: "Last", kind: "sub", parentId: "Parent", session: null });
+		agents.register({
+			id: "Parent",
+			displayName: "Parent",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+		});
+		agents.register({
+			id: "First",
+			displayName: "First",
+			kind: "sub",
+			parentId: "Parent",
+			session: null,
+		});
+		agents.register({
+			id: "Grandchild",
+			displayName: "Grandchild",
+			kind: "sub",
+			parentId: "First",
+			session: null,
+		});
+		agents.register({
+			id: "Last",
+			displayName: "Last",
+			kind: "sub",
+			parentId: "Parent",
+			session: null,
+		});
 		const hub = makeHub(agents);
 
 		try {
@@ -1138,19 +1390,108 @@ describe("Agent hub row ordering", () => {
 			hub.dispose();
 		}
 	});
+	it("draws each unselected agent's id in its identity colour and the selected one in accent", () => {
+		geometry = stubStdoutGeometry(120);
+		const agents = new AgentRegistry();
+		agents.register({
+			id: "Scout",
+			displayName: "Scout",
+			kind: "sub",
+			session: null,
+		});
+		agents.register({
+			id: "Scout.Probe",
+			displayName: "Probe",
+			kind: "sub",
+			parentId: "Scout",
+			session: null,
+		});
+		const hub = makeHub(agents);
+
+		try {
+			const selected = selectedAgentId(hub)!;
+			const other = selected === "Scout" ? "Scout.Probe" : "Scout";
+			expect(
+				paintedIn(renderedRosterHeaderLineRaw(hub, selected, 120), currentTheme().fgSgr("accent"), selected),
+			).toBe(true);
+			expect(paintedIn(renderedRosterHeaderLineRaw(hub, other, 120), identitySgr(other), other)).toBe(true);
+		} finally {
+			hub.dispose();
+		}
+	});
+	it("keeps each agent's arrival colour across re-renders and after an earlier agent ends", () => {
+		vi.useFakeTimers();
+		geometry = stubStdoutGeometry(120);
+		// Arrival slots are process-wide, so these ids appear in no other test.
+		const [lead, tests, docs, bench] = ["ArrivalLead", "ArrivalTests", "ArrivalDocs", "ArrivalBench"] as const;
+		const agents = new AgentRegistry();
+		for (const id of [lead, tests, docs]) agents.register({ id, displayName: id, kind: "sub", session: null });
+		const palette = agentPalette(currentTheme()).subagents;
+		const slotOf = (id: string) => palette.indexOf(agentColorHex(currentTheme(), id));
+		const first = slotOf(lead);
+		expect([tests, docs].map(slotOf)).toEqual([(first + 1) % palette.length, (first + 2) % palette.length]);
+		const hub = makeHub(agents);
+
+		try {
+			const drawnInOwnColour = (id: string) =>
+				id === selectedAgentId(hub) || paintedIn(renderedRosterHeaderLineRaw(hub, id, 120), identitySgr(id), id);
+			expect([tests, docs].every(drawnInOwnColour)).toBe(true);
+
+			agents.unregister(lead);
+			agents.register({
+				id: bench,
+				displayName: bench,
+				kind: "sub",
+				session: null,
+			});
+			vi.advanceTimersByTime(100);
+			expect([tests, docs, bench].map(slotOf)).toEqual([
+				(first + 1) % palette.length,
+				(first + 2) % palette.length,
+				(first + 3) % palette.length,
+			]);
+			expect([tests, docs, bench].every(drawnInOwnColour)).toBe(true);
+		} finally {
+			hub.dispose();
+		}
+	});
 	it("keeps tree rails continuous across task and metrics rows", () => {
 		// Equal activity timestamps keep the sibling order used by the rail assertions deterministic.
 		setSystemTime(1_000);
 		geometry = stubStdoutGeometry(120);
 		geometry.setRows(32);
 		const agents = new AgentRegistry();
-		agents.register({ id: "Parent", displayName: "Parent", kind: "sub", parentId: "Main", session: null });
+		agents.register({
+			id: "Parent",
+			displayName: "Parent",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+		});
 		agents.setActivity("Parent", "Parent task");
-		agents.register({ id: "First", displayName: "First", kind: "sub", parentId: "Parent", session: null });
+		agents.register({
+			id: "First",
+			displayName: "First",
+			kind: "sub",
+			parentId: "Parent",
+			session: null,
+		});
 		agents.setActivity("First", "First task");
-		agents.register({ id: "Grandchild", displayName: "Grandchild", kind: "sub", parentId: "First", session: null });
+		agents.register({
+			id: "Grandchild",
+			displayName: "Grandchild",
+			kind: "sub",
+			parentId: "First",
+			session: null,
+		});
 		agents.setActivity("Grandchild", "Grandchild task");
-		agents.register({ id: "Last", displayName: "Last", kind: "sub", parentId: "Parent", session: null });
+		agents.register({
+			id: "Last",
+			displayName: "Last",
+			kind: "sub",
+			parentId: "Parent",
+			session: null,
+		});
 		agents.setActivity("Last", "Last task");
 		const hub = makeHub(agents);
 
@@ -1180,8 +1521,20 @@ describe("Agent hub row ordering", () => {
 
 	it("keeps cyclic parent links renderable in tree mode", () => {
 		const agents = new AgentRegistry();
-		agents.register({ id: "CycleA", displayName: "Cycle A", kind: "sub", parentId: "CycleB", session: null });
-		agents.register({ id: "CycleB", displayName: "Cycle B", kind: "sub", parentId: "CycleA", session: null });
+		agents.register({
+			id: "CycleA",
+			displayName: "Cycle A",
+			kind: "sub",
+			parentId: "CycleB",
+			session: null,
+		});
+		agents.register({
+			id: "CycleB",
+			displayName: "Cycle B",
+			kind: "sub",
+			parentId: "CycleA",
+			session: null,
+		});
 		const hub = makeHub(agents);
 
 		try {
@@ -1198,7 +1551,12 @@ describe("Agent hub row ordering", () => {
 		geometry = stubStdoutGeometry(80);
 		geometry.setRows(12);
 		const agents = new AgentRegistry();
-		agents.register({ id: "NarrowAgent", displayName: "Narrow Agent", kind: "sub", session: null });
+		agents.register({
+			id: "NarrowAgent",
+			displayName: "Narrow Agent",
+			kind: "sub",
+			session: null,
+		});
 		const observers = new SessionObserverRegistry();
 		vi.spyOn(observers, "getSessions").mockReturnValue([
 			{
@@ -1247,7 +1605,14 @@ describe("Agent hub row ordering", () => {
 		geometry = stubStdoutGeometry(120);
 		geometry.setRows(28);
 		const agents = new AgentRegistry();
-		agents.register({ id: "Worker", displayName: "Worker", kind: "sub", parentId: "Main", session: null });
+		agents.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+		});
+		const openTranscript = vi.fn();
 		const activity = new AgentActivityIndex();
 		activity.setLive("Worker", [
 			{
@@ -1273,7 +1638,11 @@ describe("Agent hub row ordering", () => {
 				source: "transcript",
 			},
 		] satisfies AgentActivityRow[]);
-		const hub = makeHub(agents, { activity, initialSection: "activity" });
+		const hub = makeHub(agents, {
+			openTranscript,
+			activity,
+			initialSection: "activity",
+		});
 
 		try {
 			const initial = Bun.stripANSI(hub.render(120).join("\n"));
@@ -1296,9 +1665,8 @@ describe("Agent hub row ordering", () => {
 			expect(searched).toContain("authentication");
 			expect(searched).not.toContain("src/auth.ts");
 
-			const open = vi.spyOn(hub, "openChat");
 			hub.handleInput("\r");
-			expect(open).toHaveBeenCalledWith("Worker", "entry-42");
+			expect(openTranscript).toHaveBeenCalledWith("Worker", "entry-42");
 			hub.handleInput(" ");
 			expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("paused");
 			hub.handleInput("1");

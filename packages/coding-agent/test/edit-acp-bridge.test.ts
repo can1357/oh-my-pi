@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { hashlineFileHash } from "@oh-my-pi/pi-natives";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
-import { type EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
+import { type EditToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/edit";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
@@ -79,6 +79,22 @@ describe("EditTool ACP write routing", () => {
 		expect(spy).toHaveBeenCalledTimes(1);
 		expect(spy).toHaveBeenCalledWith({ path: target, content: "new content\n" });
 		expect((result.details as EditToolDetails).newText).toBe("new content\n");
+	});
+
+	it("fails a bridged write the client never persisted", async () => {
+		const target = path.join(tmpDir, "buffer-only.txt");
+		await Bun.write(target, "old content\n");
+		const bridge: ClientBridge = { capabilities: { writeTextFile: true }, writeTextFile: async () => undefined };
+
+		const result = await new EditTool(createSession(tmpDir, { bridge }), "replace").execute("replace", {
+			path: "buffer-only.txt",
+			old_string: "old content",
+			new_string: "new content",
+		});
+
+		expect(result.isError).toBe(true);
+		expect(resultText(result)).toContain("file content did not change on disk");
+		expect(await Bun.file(target).text()).toBe("old content\n");
 	});
 
 	it("routes patch writes through the ACP bridge", async () => {

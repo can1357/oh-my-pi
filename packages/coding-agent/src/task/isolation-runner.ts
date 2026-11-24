@@ -36,7 +36,7 @@ import { withRepoLock } from "../utils/repo-lock";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
 import { needsNativeTeardown, writeRetainedBackend } from "./isolation-ownership";
-import type { NestedRepoPatch, SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { NestedRepoPatch, SingleResult } from "./task-details";
 import {
 	applyNestedPatches,
 	captureDeltaPatch,
@@ -178,7 +178,14 @@ export function makeIsolationCommitMessage(session: ToolSession): BuildCommitMes
 		const settings = session.settings;
 		const sessionId = session.getSessionId?.() ?? undefined;
 		return async (diff: string) =>
-			generateCommitMessage(diff, registry, settings, sessionId, session.getActiveModel?.()?.provider);
+			generateCommitMessage(
+				diff,
+				registry,
+				settings,
+				sessionId,
+				session.getActiveModel?.()?.provider,
+				session.sessionManager,
+			);
 	};
 }
 
@@ -874,7 +881,6 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 							tool: "task",
 							before: before.text,
 							after: after.text,
-							beforeMtimeMs: before.mtimeMs,
 							agent: { agent: result.id, parent: opts.parentAgentId },
 						});
 					}

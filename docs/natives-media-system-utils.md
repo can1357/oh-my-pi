@@ -4,22 +4,22 @@ This document covers the media/system/conversion exports in `@oh-my-pi/pi-native
 
 ## Implementation files
 
-- `crates/pi-natives/src/audio.rs`
-- `crates/pi-natives/src/live.rs`
-- `crates/pi-voice/src/audio.rs` and `crates/pi-voice/src/live.rs` (media engines behind the N-API adapters)
-- `crates/pi-natives/src/snapcompact.rs`
-- `crates/pi-natives/src/sixel.rs`
-- `crates/pi-natives/src/svg.rs`
-- `crates/pi-natives/src/pdf.rs`
-- `crates/pi-natives/src/html.rs`
-- `crates/pi-natives/src/clipboard.rs`
-- `crates/pi-natives/src/tokens.rs`
-- `crates/pi-natives/src/utok/` (embedded tokenizer implementation and vocabularies)
-- `crates/pi-natives/src/devicecheck.rs`
-- `crates/pi-natives/src/appearance.rs`
-- `crates/pi-natives/src/power.rs`
-- `crates/pi-natives/src/prof.rs`
-- `crates/pi-natives/src/task.rs`
+- `crates/natives/src/audio.rs`
+- `crates/natives/src/live.rs`
+- `crates/voice/src/audio.rs` and `crates/voice/src/live.rs` (media engines behind the N-API adapters)
+- `crates/natives/src/snapcompact.rs`
+- `crates/natives/src/sixel.rs`
+- `crates/natives/src/svg.rs`
+- `crates/natives/src/pdf.rs`
+- `crates/natives/src/html.rs`
+- `crates/natives/src/clipboard.rs`
+- `crates/natives/src/tokens.rs`
+- `crates/natives/src/utok/` (embedded tokenizer implementation and vocabularies)
+- `crates/natives/src/devicecheck.rs`
+- `crates/natives/src/appearance.rs`
+- `crates/natives/src/power.rs`
+- `crates/natives/src/prof.rs`
+- `crates/natives/src/task.rs`
 - `packages/natives/native/index.d.ts`
 
 There is no native `PhotonImage` class or `image.rs` in the addon. General-purpose image processing stays in `Bun.Image`; the native image surface supplies SIXEL encoding/decoding, bounded SVG rasterization, and snapcompact frame rendering. Filesystem isolation is a separate subsystem.
@@ -55,7 +55,7 @@ There is no native `PhotonImage` class or `image.rs` in the addon. General-purpo
 - `AudioCapture(sampleRate, callback)` opens the default microphone and delivers low-latency mono `Float32Array` PCM chunks at the requested logical rate. `stop()` immediately releases capture.
 - `AudioPlayback(sampleRate)` opens the default speaker. `write(samples)` queues mono `Float32Array` PCM in order; `setGain(gain)` changes render-time gain even for queued samples; `end()` drains and closes, while `stop()` discards queued audio immediately.
 - `LiveWebRtcPeer(onEvent, onLevel, onFailure)` owns a WebRTC peer for Codex live media. `createOffer()` returns SDP, `acceptAnswer(sdp)` applies the remote answer, and `waitForOpen(timeoutMs?)` waits for the `oai-events` data channel (default 20 seconds). `pushAudio(samples)` accepts 16 kHz mono PCM with a bounded queue; muted input and input that would overflow the queue are dropped. `setMuted()` controls transmission and discards partial muted frames; `close()` asynchronously tears down media, data channel, peer, and playback.
-- The N-API modules adapt callbacks/buffers; device discovery, conversion, playback, WebRTC, and Opus media live in `pi-voice`. The TypeScript host owns authenticated signaling and sideband protocol handling.
+- The N-API modules adapt callbacks/buffers; device discovery, conversion, playback, WebRTC, and Opus media live in `omp-voice`. The TypeScript host owns authenticated signaling and sideband protocol handling.
 
 ### SIXEL image encoding (`sixel`)
 

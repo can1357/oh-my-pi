@@ -1,5 +1,6 @@
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
-import { type Component, type OverlayHandle, replaceTabs } from "@oh-my-pi/pi-tui";
+import { jsx, type KeyEvent, type PasteEvent, type Signal, signal, untrack } from "@oh-my-pi/pi-tui";
+import { replaceTabs } from "../../utils/text-width";
 import type { TspMenuEntry } from "@oh-my-pi/pi-wire";
 import { logger, toError, withTimeout } from "@oh-my-pi/pi-utils";
 import {
@@ -13,22 +14,27 @@ import {
 	getBtwTurns,
 } from "../../session/btw-history";
 import { beginBtwTurn, patchLatestBtwTurn, runBtwTurn } from "../../session/btw-turn";
-import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
+import { TRUNCATE_LENGTHS } from "../../utils/render-utils";
 import { copyToClipboard } from "../../utils/clipboard";
-import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
-import { focusActiveEditorArea } from "./selector-controller";
-import { BtwPanelComponent } from "@oh-my-pi/pi-tui/overlays/btw-panel";
-import { BTW_INJECT_LABEL, type BtwInjectState } from "@oh-my-pi/pi-tui/overlays/btw-inject";
-import { type BtwNoteAction, BtwNoteComponent, type BtwNoteHost } from "@oh-my-pi/pi-tui/overlays/btw-note";
-import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
-import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import { BtwHistoryPanel, btwHistorySheet } from "../../ui/overlays/panels/btw-history-panel";
+import { BtwHistoryModel } from "../../ui/overlays/panels/btw-history-panel-model";
+import { BtwPanel, BtwPanelState } from "../../ui/overlays/panels/btw-panel";
+import { BtwNote } from "../../ui/overlays/panels/btw-note";
+import type { OverlayHandle, TranscriptBlock } from "../../ui/shell";
+import { actionKey } from "../../ui/keys/hints";
+import { canonicalKeyId } from "../../config/keybindings/key-id";
+import "../../ui/styles/apps/screen/look";
+import { BTW_INJECT_LABEL, type BtwInjectState } from "../view-model/overlays/btw-inject";
+import { type BtwNoteAction, type BtwNoteHost } from "../view-model/overlays/btw-note";
+import { sanitizeErrorLine } from "../view-model/chrome/error-block";
 import type { AgentViewSession, AgentViewSessionManager } from "../../session/agent-session-handle";
 import type { DroppedPrompt } from "../../session/agent-session-types";
 import { cfgBtwInject } from "../settings";
 import type { InteractiveModeContext } from "../types";
 
 interface BtwRequest {
-	component: BtwPanelComponent;
+	/** The inline panel's state (also drives copy/branch eligibility). */
+	panel: BtwPanelState;
 	abortController: AbortController;
 	question: string;
 	images?: ImageContent[];
@@ -76,6 +82,25 @@ function assistantMessageWithReplyText(assistantMessage: AssistantMessage, reply
 	return { ...assistantMessage, content, providerPayload: undefined };
 }
 
+/** A topic's transcript note (Tern): its signals outlive the block, which a rebuild may drop. */
+interface BtwNoteView {
+	readonly record: Signal<BtwHistoryRecord>;
+	readonly folded: Signal<boolean>;
+	/** Bumped when the host's answers (menu, inject states) changed. */
+	readonly revision: Signal<number>;
+	block: TranscriptBlock | undefined;
+}
+
+/** The answer as the panel shows and copies it; empty until there is visible text. */
+function visibleAnswer(panel: BtwPanelState): string {
+	return replaceTabs(panel.answer.peek()).trim();
+}
+
+/** A completed answer with visible text: it can be copied or branched. */
+function isCopyable(panel: BtwPanelState): boolean {
+	return panel.status.peek() === "complete" && visibleAnswer(panel).length > 0;
+}
+
 export class BtwController {
 	#activeRequest: BtwRequest | undefined;
 	#lastQuestion: string | undefined;
@@ -96,12 +121,12 @@ export class BtwController {
 	#storeSessionId: string | undefined;
 	#storeArtifactsDir: string | undefined;
 	#storeScope: string | undefined;
-	#historyPanel: BtwHistoryPanel | undefined;
+	#historyPanel: BtwHistoryModel | undefined;
 	#historyOverlay: OverlayHandle | undefined;
 	/** Tern's transcript notes of the store's topics on the shown branch, by topic id. */
-	readonly #notes = new Map<string, BtwNoteComponent>();
-	/** The topic whose note the composer talks to (Tern): drafts become its follow-ups. */
-	#focus: string | undefined;
+	readonly #notes = new Map<string, BtwNoteView>();
+	/** The topic whose note the composer talks to (Tern): drafts become its follow-ups (reactive: the composer follows). */
+	readonly #focus = signal<string | undefined>(undefined);
 	readonly #noteHost: BtwNoteHost = {
 		menu: (record, folded) => this.#noteMenu(record, folded),
 		injectState: (record, turnIndex) => this.#noteInjectState(record, turnIndex),
@@ -139,17 +164,17 @@ export class BtwController {
 
 	/** Whether /btw owns Escape: the inline panel, or a note the composer talks to. */
 	hasActiveRequest(): boolean {
-		return this.#visible || this.#focus !== undefined;
+		return this.#visible || this.#focus() !== undefined;
 	}
 
 	/** Whether the composer talks to a note: its drafts go to {@link submitFollowUp}. */
 	isFocused(): boolean {
-		return this.#focus !== undefined;
+		return this.#focus() !== undefined;
 	}
 
 	/** Sends a composer draft to the focused note's topic; false when no follow-up started. */
 	submitFollowUp(question: string, images?: ImageContent[]): Promise<boolean> {
-		const id = this.#focus;
+		const id = this.#focus.peek();
 		return id === undefined ? Promise.resolve(false) : this.startFollowUp(id, question, undefined, images);
 	}
 
@@ -159,15 +184,16 @@ export class BtwController {
 
 	/** The answer lives in the inline panel, or in Tern's open history sheet. */
 	#answerShown(): boolean {
-		return this.#visible || (this.ctx.ui.nativeRendering && this.#historyOverlay !== undefined);
+		return this.#visible || (this.ctx.shell.native() && this.#historyOverlay !== undefined);
 	}
 
 	/** Whether plain `b` is currently reserved for a completed or pending branch action. */
 	handlesBranchKey(): boolean {
 		if (this.#branchInFlight) return true;
-		if (!this.#answerShown() || this.#activeRequest?.component.isBranchable() !== true) return false;
+		const request = this.#activeRequest;
+		if (!this.#answerShown() || !request || !isCopyable(request.panel)) return false;
 		// Branch promotion rewrites the main session; focused-subagent answers stay side-only.
-		if (this.#activeRequest.session !== this.ctx.session || this.ctx.focusedAgentId) return false;
+		if (request.session !== this.ctx.session || this.ctx.focusedAgentId) return false;
 		return (
 			this.#lastQuestion !== undefined &&
 			this.#lastReplyText !== undefined &&
@@ -183,7 +209,7 @@ export class BtwController {
 		if (this.#transitionCount > 0) return "a session operation is in progress";
 		const request = this.#activeRequest;
 		const shown = this.#answerShown() || (request !== undefined && this.#notes.has(request.record.id));
-		if (!shown || request?.component.isBranchable() !== true) return "the answer is not ready";
+		if (!shown || !request || !isCopyable(request.panel)) return "the answer is not ready";
 		if (request.session !== this.ctx.session || this.ctx.focusedAgentId)
 			return "only main-session answers can be branched";
 		// Inline branch promotion carries one pair; do not drop earlier side turns.
@@ -204,7 +230,8 @@ export class BtwController {
 		return (
 			this.#visible &&
 			!this.#copyInFlight &&
-			this.#activeRequest?.component.isCopyable() === true &&
+			this.#activeRequest !== undefined &&
+			isCopyable(this.#activeRequest.panel) &&
 			this.#lastCopyText !== undefined
 		);
 	}
@@ -220,7 +247,7 @@ export class BtwController {
 			this.ctx.showStatus("Copied /btw answer to clipboard");
 			if (options?.historyRecordId !== undefined) this.#historyPanel?.markCopied(options.historyRecordId, answer);
 			else if (inlineRequest && this.#visible && this.#activeRequest === inlineRequest)
-				inlineRequest.component.markCopied();
+				inlineRequest.panel.markCopied();
 			return true;
 		} catch (error) {
 			this.ctx.showError(sanitizeErrorLine(error));
@@ -249,7 +276,7 @@ export class BtwController {
 		const sessionId = this.#lastSessionId;
 		if (!request || !question || !assistantMessage || !leafId || !sessionId) return false;
 		this.#branchInFlight = true;
-		request.component.markBranching();
+		request.panel.markBranching();
 		try {
 			await this.flush();
 			await this.ctx.handleBtwBranch(question, assistantMessage, leafId, sessionId, images);
@@ -259,7 +286,7 @@ export class BtwController {
 			return false;
 		} finally {
 			this.#branchInFlight = false;
-			if (this.#activeRequest === request) request.component.markComplete();
+			if (this.#activeRequest === request) request.panel.markComplete();
 		}
 	}
 
@@ -268,7 +295,7 @@ export class BtwController {
 			this.ctx.showStatus("/btw branch is in progress", { dim: true });
 			return true;
 		}
-		if (this.#focus !== undefined) {
+		if (this.#focus.peek() !== undefined) {
 			this.#setFocus(undefined);
 			return true;
 		}
@@ -366,15 +393,15 @@ export class BtwController {
 			this.#injects.set(key, sent ? "sent" : "ready");
 			// Only the turn that was sent: a follow-up may have taken the panel while the send waited.
 			const request = this.#activeRequest;
-			if (request && getBtwTurnKey(request.record) === key) request.component.setInjected(sent);
+			if (request && getBtwTurnKey(request.record) === key) request.panel.setInjected(sent);
 			this.#refreshHistory();
-			this.#notes.get(record.id)?.refresh();
+			this.#refreshNote(record.id);
 			if (sent) return;
 			if (reason) {
 				this.ctx.showError(sanitizeErrorLine(`Cannot inject /btw prompt: ${reason}`));
 				return;
 			}
-			const retry = appKey(this.ctx.keybindings, "app.btw.inject");
+			const retry = actionKey("app.btw.inject", this.ctx.keybindings);
 			this.ctx.showStatus(retry ? `/btw prompt not sent · ${retry} to retry` : "/btw prompt not sent", {
 				dim: true,
 			});
@@ -452,8 +479,8 @@ export class BtwController {
 		if (!request || getBtwLatestTurn(request.record).status !== "running") return false;
 		this.#updateRequest(request, { status: "cancelled", updatedAt: Date.now() });
 		request.abortController.abort();
-		request.component.markAborted();
-		this.#notes.get(request.record.id)?.update(request.record);
+		request.panel.markAborted();
+		this.#updateNote(request.record);
 		this.#persist(request);
 		this.#refreshHistory();
 		return true;
@@ -473,7 +500,7 @@ export class BtwController {
 			this.#hideInline();
 			this.#setFocus(undefined);
 			this.#notes.clear();
-			this.#activeRequest?.component.close();
+			this.#activeRequest?.panel.close();
 			this.#activeRequest = undefined;
 			this.#clearCompletedState();
 			this.#store = undefined;
@@ -634,7 +661,7 @@ export class BtwController {
 				const panel = this.#showHistory(store);
 				// Tern: reopening lands on the side question put away while it answered.
 				const active = this.#activeRequest;
-				if (this.ctx.ui.nativeRendering && active?.store === store && this.#isActiveRequest(active)) {
+				if (this.ctx.shell.native() && active?.store === store && this.#isActiveRequest(active)) {
 					panel.showRecord(active.record.id);
 				}
 				return true;
@@ -661,20 +688,13 @@ export class BtwController {
 			if (signal?.aborted || generation !== this.#generation || sessionId !== this.#sessionManager.getSessionId())
 				return false;
 			if (!previous) this.#closeHistory();
-			this.#activeRequest?.component.close();
+			this.#activeRequest?.panel.close();
 			this.#clearCompletedState();
 			const leafId = this.#sessionManager.getLeafId();
 			const { record, history, conversationKey } = beginBtwTurn(trimmedQuestion, leafId, previous, images, title);
 			const injectEnabled = this.#injectEnabled();
 			const request: BtwRequest = {
-				component: new BtwPanelComponent({
-					question: trimmedQuestion,
-					title,
-					tui: this.ctx.ui,
-					canBranch: () => this.canBranch(),
-					canFollowUp: () => this.canFollowUp(),
-					canInject: injectEnabled ? () => this.canInject() : undefined,
-				}),
+				panel: new BtwPanelState(title),
 				abortController: new AbortController(),
 				question: trimmedQuestion,
 				images,
@@ -691,15 +711,14 @@ export class BtwController {
 			};
 			this.#activeRequest = request;
 			// Tern draws the topic as a note in its transcript; the text renderer keeps the inline panel.
-			const native = this.ctx.ui.nativeRendering;
+			const native = this.ctx.shell.native();
 			this.#visible = !native && (!previous || !this.#historyOverlay);
-			this.ctx.btwContainer.clear();
-			if (this.#visible) this.ctx.btwContainer.addChild(request.component);
-			this.ctx.ui.requestRender();
+			if (this.#visible) this.#mountInline(request);
+			else this.ctx.shell.dock.slot("btw").clear();
 			if (!(await this.#persist(request))) {
 				if (this.#activeRequest === request) {
 					this.#activeRequest = undefined;
-					request.component.close();
+					request.panel.close();
 					this.#hideInline();
 					this.#store = undefined;
 					this.#storePromise = undefined;
@@ -732,14 +751,15 @@ export class BtwController {
 		}
 	}
 
-	#showHistory(store: BtwHistoryStore): BtwHistoryPanel {
+	#showHistory(store: BtwHistoryStore): BtwHistoryModel {
 		if (this.#historyOverlay && this.#historyPanel) {
 			this.#refreshHistory();
 			return this.#historyPanel;
 		}
 		this.#hideInline();
 		const historySessionId = this.#sessionManager.getSessionId();
-		const panel = new BtwHistoryPanel({
+		const [injectKey] = this.ctx.keybindings.keysFor("app.btw.inject");
+		const panel = new BtwHistoryModel({
 			records: this.#historyRecords(store),
 			onClose: () => this.#closeHistory(),
 			onCopy: record => {
@@ -768,9 +788,8 @@ export class BtwController {
 			},
 			onPasteImage: () => this.ctx.handleImagePaste(),
 			onPasteImagePath: path => this.ctx.handleImagePathPaste(path),
-			spaceHoldKeys: this.ctx.keybindings.getKeys("app.stt.pushToTalk"),
-			spaceHold: input => this.ctx.dictationSpaceHold(input),
-			requestRender: () => this.ctx.ui.requestRender(),
+			spaceHoldKeys: this.ctx.keybindings.keysFor("app.stt.pushToTalk").map(canonicalKeyId),
+			spaceHold: target => this.ctx.dictationSpaceHold(target),
 			inject: this.#injectEnabled()
 				? {
 						state: (record, turnIndex) => this.#injectState(record, turnIndex),
@@ -778,20 +797,37 @@ export class BtwController {
 						send: record => this.#inject(record),
 					}
 				: undefined,
-			getHeight: () => this.ctx.ui.terminal.rows,
+			injectKey: injectKey === undefined ? undefined : canonicalKeyId(injectKey),
+			terminalRows: () => this.ctx.shell.size().rows,
 			// Tern has no inline panel: Esc puts the sheet away, `x` cancels.
-			escapeHides: this.ctx.ui.nativeRendering,
+			escapeHides: this.ctx.shell.native(),
 		});
 		this.#historyPanel = panel;
-		this.#historyOverlay = this.ctx.ui.showOverlay(panel, {
-			anchor: "bottom-center",
-			width: "100%",
-			maxHeight: "100%",
-			margin: 0,
-			fullscreen: true,
-		});
-		this.ctx.ui.setFocus(panel);
-		this.ctx.ui.requestRender();
+		// The sheet rebuilds its node on every change, so the overlay (stable) holds focus and feeds the model.
+		const handle = this.ctx.shell.overlays.show(
+			() =>
+				jsx("overlay", {
+					...(this.ctx.shell.native() ? btwHistorySheet(panel) : { size: "full", role: "omp.app.screen" }),
+					onKey: (key: KeyEvent) => panel.key(key),
+					onPaste: (paste: PasteEvent) => {
+						if (!panel.composer) return false;
+						panel.paste(paste.text);
+						return true;
+					},
+					children: BtwHistoryPanel({ model: panel }),
+				}),
+			{ onClose: () => this.#historyClosed(handle) },
+		);
+		this.#historyOverlay = handle;
+		// Image pastes (Ctrl+V, dropped paths) attach to the follow-up being written.
+		this.ctx.promptPasteTarget = {
+			node: handle.node,
+			attachImage: image => {
+				const marker = panel.attachImage(image);
+				if (marker) panel.paste(marker);
+			},
+			setText: text => panel.setDraft({ text, cursor: text.length }),
+		};
 		return panel;
 	}
 
@@ -807,28 +843,49 @@ export class BtwController {
 	}
 
 	#closeHistory(): void {
-		const overlay = this.#historyOverlay;
+		this.#historyOverlay?.close();
+	}
+
+	/** The history sheet closed (Esc, Close, or the shell closing every overlay); focus went back where it was. */
+	#historyClosed(handle: OverlayHandle): void {
+		if (this.#historyOverlay !== handle) return;
 		this.#historyOverlay = undefined;
+		this.#historyPanel?.dispose();
 		this.#historyPanel = undefined;
-		if (!overlay) return;
-		overlay.hide();
-		focusActiveEditorArea(this.ctx);
+		if (this.ctx.promptPasteTarget?.node === handle.node) this.ctx.promptPasteTarget = undefined;
 		// Closing while a BTW still answers keeps it running: text mode returns
 		// to its inline panel; Tern answers in its note, or says how to get back.
 		const request = this.#activeRequest;
 		if (request && this.#isActiveRequest(request) && getBtwLatestTurn(request.record).status === "running") {
-			if (this.ctx.ui.nativeRendering) {
+			if (this.ctx.shell.native()) {
 				if (!this.#notes.has(request.record.id)) {
 					this.ctx.showStatus("/btw is still answering in the background · /btw to reopen it", { dim: true });
 				}
 			} else {
-				request.component.setAnswer(getBtwLatestTurn(request.record).answer);
+				request.panel.setAnswer(getBtwLatestTurn(request.record).answer);
 				this.#visible = true;
-				this.ctx.btwContainer.clear();
-				this.ctx.btwContainer.addChild(request.component);
+				this.#mountInline(request);
 			}
 		}
-		this.ctx.ui.requestRender();
+	}
+
+	/** Shows `request`'s inline panel in the `btw` slot above the composer. */
+	#mountInline(request: BtwRequest): void {
+		this.ctx.shell.dock.slot("btw").set(() =>
+			BtwPanel({
+				question: request.question,
+				state: request.panel,
+				canFollowUp: () => this.canFollowUp(),
+				canBranch: () => this.canBranch(),
+				canInject: request.injectEnabled ? () => this.canInject() : undefined,
+				onCancel: () => this.handleCancel(),
+				onClose: () => this.#hideInline(),
+				onCopy: () => void this.handleCopy(),
+				onBranch: () => void this.handleBranch(),
+				onInject: () => this.handleInject(),
+				onFollowUp: () => this.handleFollowUp(),
+			}),
+		);
 	}
 
 	#persist(request: BtwRequest, retry = false): Promise<boolean> {
@@ -876,9 +933,9 @@ export class BtwController {
 					if (latest.status !== "running") return;
 					this.#updateRequest(request, { answer: latest.answer + delta, updatedAt: Date.now() });
 					if (this.#isActiveRequest(request)) {
-						if (this.#visible) request.component.appendText(delta);
+						if (this.#visible) request.panel.appendText(delta);
 						this.#refreshHistory();
-						this.#notes.get(request.record.id)?.update(request.record);
+						this.#updateNote(request.record);
 					}
 				},
 				signal: request.abortController.signal,
@@ -890,15 +947,15 @@ export class BtwController {
 				this.#injects.set(getBtwTurnKey(request.record), "ready");
 			}
 			if (this.#isActiveRequest(request)) {
-				request.component.setAnswer(replyText);
-				request.component.markComplete();
+				request.panel.setAnswer(replyText);
+				request.panel.markComplete();
 				// Tern: an answer folded away or left only in history says it is ready.
-				if (this.ctx.ui.nativeRendering && !this.#historyOverlay) {
+				if (this.ctx.shell.native() && !this.#historyOverlay) {
 					const note = this.#notes.get(request.record.id);
 					if (!note) this.ctx.showStatus("/btw answer ready · /btw to read it");
-					else if (note.folded) this.ctx.showStatus("/btw answer ready");
+					else if (note.folded.peek()) this.ctx.showStatus("/btw answer ready");
 				}
-				const copyText = request.component.getCopyText();
+				const copyText = isCopyable(request.panel) ? visibleAnswer(request.panel) : undefined;
 				if (copyText !== undefined) {
 					this.#lastQuestion = request.question;
 					this.#lastImages = request.images;
@@ -919,50 +976,76 @@ export class BtwController {
 				...(cancelled ? {} : { error: message }),
 			});
 			if (this.#isActiveRequest(request)) {
-				if (cancelled) request.component.markAborted();
-				else request.component.markError(message);
+				if (cancelled) request.panel.markAborted();
+				else request.panel.markError(message);
 			}
 		}
 		this.#persist(request);
 		if (this.#isActiveRequest(request)) {
 			this.#refreshHistory();
-			this.#notes.get(request.record.id)?.update(request.record);
+			this.#updateNote(request.record);
 		}
 	}
 
 	#hideInline(): void {
 		this.#visible = false;
-		this.ctx.btwContainer.clear();
-		this.ctx.ui.requestRender();
+		this.ctx.shell.dock.slot("btw").clear();
 	}
 
 	/** Makes the composer talk to topic `id`'s note (undefined: back to the chat); the note rings while it does. */
 	#setFocus(id: string | undefined): void {
-		if (this.#focus === id) return;
-		if (this.#focus !== undefined) this.#notes.get(this.#focus)?.setActive(false);
-		this.#focus = id;
-		if (id !== undefined) this.#notes.get(id)?.setActive(true);
-		// The composer's role, chip and placeholder follow.
-		this.ctx.ui.requestRender();
+		// The composer's role, chip and placeholder and the notes' rings follow the signal.
+		this.#focus.set(id);
+	}
+
+	#updateNote(record: BtwHistoryRecord): void {
+		this.#notes.get(record.id)?.record.set(record);
+	}
+
+	/** The host's answers for the note (menu, inject states) changed. */
+	#refreshNote(id: string): void {
+		const note = this.#notes.get(id);
+		if (note) note.revision.set(note.revision.peek() + 1);
 	}
 
 	/** Tern: the topic's note, updated in place, or (`append`) a new one at the transcript's end. */
 	#showNote(record: BtwHistoryRecord, options: { append: boolean }): void {
 		const note = this.#notes.get(record.id);
 		if (note) {
-			note.update(record);
-			note.setFolded(false);
+			note.record.set(record);
+			note.folded.set(false);
 			return;
 		}
 		if (!options.append) return;
-		this.ctx.chatContainer.addChild(this.#createNote(record, { folded: false }));
-		this.ctx.ui.requestRender();
+		this.#mountNote(this.#createNote(record, { folded: false }));
 	}
 
-	#createNote(record: BtwHistoryRecord, options: { folded: boolean }): BtwNoteComponent {
-		const note = new BtwNoteComponent({ record, folded: options.folded, tui: this.ctx.ui, host: this.#noteHost });
+	#createNote(record: BtwHistoryRecord, options: { folded: boolean }): BtwNoteView {
+		const note: BtwNoteView = {
+			record: signal(record),
+			folded: signal(options.folded),
+			revision: signal(0),
+			block: undefined,
+		};
 		this.#notes.set(record.id, note);
 		return note;
+	}
+
+	/** Mounts `note` live (it changes as its topic does) before `before`, else at the transcript's end. */
+	#mountNote(note: BtwNoteView, before?: TranscriptBlock): void {
+		const id = note.record.peek().id;
+		// The note swaps its face (folded line, open column) inside the block's own stable node.
+		note.block = this.ctx.present(
+			() =>
+				BtwNote({
+					record: note.record,
+					folded: note.folded,
+					active: () => this.#focus() === id,
+					revision: note.revision,
+					host: this.#noteHost,
+				}),
+			{ live: true, ...(before ? { before } : {}) },
+		);
 	}
 
 	/** A note's right-click entries: what can be done with its topic now; a press re-checks. */
@@ -996,15 +1079,15 @@ export class BtwController {
 		const note = this.#notes.get(record.id);
 		switch (action) {
 			case "btw-focus":
-				this.#setFocus(this.#focus === record.id ? undefined : record.id);
+				this.#setFocus(this.#focus.peek() === record.id ? undefined : record.id);
 				return;
 			case "btw-expand":
-				note?.setFolded(false);
+				note?.folded.set(false);
 				this.#setFocus(record.id);
 				return;
 			case "btw-fold":
-				note?.setFolded(true);
-				if (this.#focus === record.id) this.#setFocus(undefined);
+				note?.folded.set(true);
+				if (this.#focus.peek() === record.id) this.#setFocus(undefined);
 				return;
 			case "btw-copy": {
 				const answer = getBtwCopyText(record);
@@ -1033,7 +1116,7 @@ export class BtwController {
 	 * answering in another view. Resolves once placed (or skipped); never rejects.
 	 */
 	async placeNotes(): Promise<void> {
-		if (!this.ctx.ui.nativeRendering) return;
+		if (!this.ctx.shell.native()) return;
 		if (this.#store && this.#storeMatchesView()) {
 			this.#placeNotes(this.#store);
 			return;
@@ -1051,39 +1134,38 @@ export class BtwController {
 	}
 
 	#placeNotes(store: BtwHistoryStore): void {
-		const container = this.ctx.chatContainer;
-		const shown = new Map<Component, number>();
-		container.children.forEach((child, index) => shown.set(child, index));
+		const blocks = untrack(this.ctx.shell.transcript.blocks);
+		const shown = new Map<TranscriptBlock, number>();
+		blocks.forEach((block, index) => shown.set(block, index));
 		const onBranch = new Set<string>();
 		// Message blocks in transcript order with when their message was created.
-		const anchors: { at: number; index: number }[] = [];
+		const anchors: { at: number; block: TranscriptBlock }[] = [];
 		for (const entry of this.#sessionManager.getBranch()) {
 			onBranch.add(entry.id);
 			if (entry.type !== "message") continue;
-			const component = this.ctx.transcriptMessageComponents.get(entry.message);
-			const index = component && shown.get(component);
-			if (index !== undefined) anchors.push({ at: entry.message.timestamp, index });
+			const block = this.ctx.transcriptBlocks.get(entry.message);
+			if (block && shown.has(block)) anchors.push({ at: entry.message.timestamp, block });
 		}
-		const notes = new Map<string, BtwNoteComponent>();
-		const inserts: { index: number; at: number; note: BtwNoteComponent }[] = [];
+		const notes = new Map<string, BtwNoteView>();
+		const inserts: { before: TranscriptBlock | undefined; at: number; note: BtwNoteView }[] = [];
 		for (const record of this.#historyRecords(store)) {
 			if (record.leafId !== null && !onBranch.has(record.leafId)) continue;
 			const existing = this.#notes.get(record.id);
 			const note = existing ?? this.#createNote(record, { folded: true });
-			if (existing) note.update(record);
+			if (existing) note.record.set(record);
 			notes.set(record.id, note);
 			// Still in the transcript (a rebuild that kept it): it stays where it is.
-			if (shown.has(note)) continue;
-			const index = anchors.find(anchor => anchor.at > record.createdAt)?.index ?? container.children.length;
-			inserts.push({ index, at: record.createdAt, note });
+			if (note.block && shown.has(note.block)) continue;
+			const before = anchors.find(anchor => anchor.at > record.createdAt)?.block;
+			inserts.push({ before, at: record.createdAt, note });
 		}
-		// From the end, so earlier indices hold; the older of two notes at one index goes first.
-		inserts.sort((a, b) => b.index - a.index || b.at - a.at);
-		for (const { index, note } of inserts) container.insertChildAt(note, index);
+		// Oldest first: notes before one anchor keep their order, each landing right before it.
+		inserts.sort((a, b) => a.at - b.at);
+		for (const { before, note } of inserts) this.#mountNote(note, before);
 		this.#notes.clear();
 		for (const [id, note] of notes) this.#notes.set(id, note);
-		if (this.#focus !== undefined && !notes.has(this.#focus)) this.#setFocus(undefined);
-		this.ctx.ui.requestRender();
+		const focus = this.#focus.peek();
+		if (focus !== undefined && !notes.has(focus)) this.#setFocus(undefined);
 	}
 
 	#clearCompletedState(): void {

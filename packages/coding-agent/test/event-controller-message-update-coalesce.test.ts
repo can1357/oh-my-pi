@@ -1,9 +1,8 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../src/ui/theme/service";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { vocalizer } from "@oh-my-pi/pi-coding-agent/tts/vocalizer";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
@@ -49,21 +48,23 @@ function createStreamingFixture() {
 				return () => {};
 			},
 		},
-		streamingComponent: new AssistantMessageComponent(),
 	});
+	ctx.streaming = ctx.presentAssistant();
+	// One streaming rebuild per handled update.
+	const draws = vi.spyOn(ctx, "noteDisplayableThinkingContent");
 	const controller = new EventController(ctx);
 	controller.subscribeToAgent();
 	const emit = (event: AgentSessionEvent) => {
 		for (const listener of listeners) void listener(event);
 	};
-	return { controller, ctx, ui: ctx.ui, emit };
+	return { controller, ctx, draws, emit };
 }
 async function flushMicrotasks(): Promise<void> {
 	for (let i = 0; i < 12; i++) await Promise.resolve();
 }
 
 beforeAll(async () => {
-	await initTheme(false);
+	initTheme();
 });
 
 describe("EventController message_update coalescing", () => {
@@ -80,7 +81,7 @@ describe("EventController message_update coalescing", () => {
 	});
 
 	it("runs the streaming rebuild once per window instead of once per delta, applying the latest snapshot", async () => {
-		const { ctx, ui, emit } = createStreamingFixture();
+		const { ctx, draws, emit } = createStreamingFixture();
 
 		emit(messageUpdate("tok1"));
 		emit(messageUpdate("tok1 tok2"));
@@ -89,11 +90,11 @@ describe("EventController message_update coalescing", () => {
 		emit(messageUpdate("tok1 tok2 tok3 tok4 tok5"));
 
 		vi.advanceTimersByTime(32);
-		expect(ui.requestRender).not.toHaveBeenCalled();
+		expect(draws).not.toHaveBeenCalled();
 		vi.advanceTimersByTime(1);
 		await flushMicrotasks();
 
-		expect(ui.requestRender).toHaveBeenCalledTimes(1);
+		expect(draws).toHaveBeenCalledTimes(1);
 		expect((ctx.streamingMessage as AssistantMessage | undefined)?.content).toEqual([
 			{ type: "text", text: "tok1 tok2 tok3 tok4 tok5" },
 		]);
@@ -103,7 +104,7 @@ describe("EventController message_update coalescing", () => {
 		vi.advanceTimersByTime(33);
 		await flushMicrotasks();
 
-		expect(ui.requestRender).toHaveBeenCalledTimes(2);
+		expect(draws).toHaveBeenCalledTimes(2);
 		expect((ctx.streamingMessage as AssistantMessage | undefined)?.content).toEqual([
 			{ type: "text", text: "tok1 tok2 tok3 tok4 tok5 tok6 tok7" },
 		]);

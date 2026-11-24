@@ -2,7 +2,7 @@
  * Content helpers shared by every whole-file writer: the `write` tool's file
  * pipeline and handler-owned writes that splice files directly (conflict://).
  */
-import { formatHashlineHeader, stripHashlinePrefixes } from "@oh-my-pi/pi-tui/tools/hashline-format";
+import { formatHashlineHeader, stripHashlinePrefixes } from "./hashline-format";
 import { normalizeToLF } from "../edit/normalize";
 import { getEditStore } from "../edit/store";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
@@ -36,13 +36,43 @@ function joinStrippedLines(lines: string[], text?: string): string | undefined {
 	return cleanedText === (text ?? lines.join("\n")) ? undefined : cleanedText;
 }
 
+/** A read/search row prefix (`12:`, `12|`, `+12:`, `>>12:`) and the text after it. */
+const NUMBERED_ROW_RE = /^\s*(?:(?:>>>|>>)\s*)?(?:[+*-]\s*)?(\d+)[:|](.*)$/;
+
+/**
+ * Whether numbered rows are evidenced as copied display prefixes rather than
+ * content (a TSV index column, numbered notes, `000:` rows): the payload
+ * carries a `[path#TAG]` header, or at least two of its rows (its only row,
+ * for one) repeat the line at that number of the target's latest snapshot.
+ */
+function prefixesEvidenced(session: ToolSession, lines: string[], absolutePath: string | undefined): boolean {
+	if (lines.some(line => LOOSE_HASHLINE_HEADER_RE.test(line))) return true;
+	if (!absolutePath) return false;
+	const head = getEditStore(session).headText(absolutePath);
+	if (head === null) return false;
+	const source = head.split("\n");
+	let numbered = 0;
+	let matched = 0;
+	for (const line of lines) {
+		const row = NUMBERED_ROW_RE.exec(line);
+		if (!row) continue;
+		numbered++;
+		if (source[Number(row[1]) - 1] === row[2]) matched++;
+	}
+	return matched > 0 && matched >= Math.min(2, numbered);
+}
+
 /**
  * Strip hashline display prefixes from write content.
  *
  * Includes a fallback for loosely-formed section headers that still carry
  * line-number prefixes (for example legacy or malformed hashline echoes).
  */
-function stripWriteContentWithPotentialLooseHeader(content: string): { text: string; stripped: boolean } {
+function stripWriteContentWithPotentialLooseHeader(
+	session: ToolSession,
+	content: string,
+	evidence: WriteStripEvidence | undefined,
+): { text: string; stripped: boolean } {
 	// Lone surrogates still take the native path: its UTF-8 round trip rewrites them.
 	if (PLAIN_FIRST_ROW_RE.test(content) && content.isWellFormed()) {
 		return { text: content, stripped: false };
@@ -50,7 +80,9 @@ function stripWriteContentWithPotentialLooseHeader(content: string): { text: str
 	const lines = content.split("\n");
 	const cleanedText = joinStrippedLines(lines, content);
 	if (cleanedText !== undefined) {
-		return { text: cleanedText, stripped: true };
+		return evidence === undefined || prefixesEvidenced(session, lines, evidence.targetPath)
+			? { text: cleanedText, stripped: true }
+			: { text: content, stripped: false };
 	}
 
 	const headerIndex = lines.findIndex(line => line.trim().length > 0);
@@ -66,17 +98,29 @@ function stripWriteContentWithPotentialLooseHeader(content: string): { text: str
 	return { text: cleanedWithoutHeader, stripped: true };
 }
 
+/** What a whole-file write checks before it strips numbered rows; `targetPath` is the file written, when known. */
+export interface WriteStripEvidence {
+	targetPath: string | undefined;
+}
+
 /**
  * Strip hashline display prefixes from write content.
  *
  * Only active when hashline edit mode is enabled — the model sees `[PATH#HASH]`
  * headers plus `LINE:` prefixes in read output and sometimes copies them into write content.
+ * With `evidence`, numbered content (a TSV index column, numbered notes) is kept
+ * unless it is evidenced as copied output ({@link prefixesEvidenced}); without it
+ * (conflict:// regions, which are read with their numbers) every copied prefix is stripped.
  */
-export function stripWriteContent(session: ToolSession, content: string): { text: string; stripped: boolean } {
+export function stripWriteContent(
+	session: ToolSession,
+	content: string,
+	evidence?: WriteStripEvidence,
+): { text: string; stripped: boolean } {
 	if (!resolveFileDisplayMode(session).hashLines) {
 		return { text: content, stripped: false };
 	}
-	return stripWriteContentWithPotentialLooseHeader(content);
+	return stripWriteContentWithPotentialLooseHeader(session, content, evidence);
 }
 
 /**
@@ -88,10 +132,9 @@ export function stripWriteContent(session: ToolSession, content: string): { text
  *
  * Mirrors the post-commit snapshot recording the hashline patcher performs
  * after a successful edit — the model gets a tag without an extra `read` —
- * but with EMPTY seen-line provenance: a write displays no numbered lines,
- * so anchored edits against this tag must first see the anchor content (the
- * patcher rejects them with an inline reveal). Authoring content is not
- * knowing its line numbers.
+ * but with EMPTY seen-line provenance: the model authored every line, so the
+ * tag is unrestricted, and a later partial read of the same content does not
+ * narrow it (see `merge_seen` in omp-edit's store).
  */
 export function maybeWriteSnapshotHeader(
 	session: ToolSession,

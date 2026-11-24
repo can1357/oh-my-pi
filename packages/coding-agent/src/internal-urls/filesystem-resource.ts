@@ -1,7 +1,8 @@
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { hasFsCode, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
-import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
+import { isMarkdownPath } from "../utils/lang-from-path";
 import type { InternalResource } from "./types";
 
 /** Resource content type inferred from a file extension: markdown, JSON, or plain text. */
@@ -9,6 +10,48 @@ export function contentTypeForPath(filePath: string): InternalResource["contentT
 	if (isMarkdownPath(filePath)) return "text/markdown";
 	if (path.extname(filePath).toLowerCase() === ".json") return "application/json";
 	return "text/plain";
+}
+
+/**
+ * Extension for the binary types `read` parses by file name (documents,
+ * archives, notebooks); images and SQLite are sniffed from their bytes.
+ */
+const EXTENSION_BY_MIME: Record<string, string> = {
+	"application/pdf": ".pdf",
+	"application/x-pdf": ".pdf",
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+	"application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+	"application/epub+zip": ".epub",
+	"application/zip": ".zip",
+	"application/x-zip-compressed": ".zip",
+	"application/x-tar": ".tar",
+	"application/gzip": ".tar.gz",
+	"application/x-gzip": ".tar.gz",
+	"application/x-ipynb+json": ".ipynb",
+};
+
+/**
+ * Write a byte resource to a stable backing file and return its path, so `read`
+ * handles it like any other file. The file keeps the URL's last path segment;
+ * one without an extension gains the extension its MIME type implies.
+ */
+export async function writeResourceBackingFile(url: string, bytes: Uint8Array, mimeType: string): Promise<string> {
+	const root = await fs.realpath(os.tmpdir());
+	// Server URIs are often opaque (`repo://logo`), so take the last segment of the whole string.
+	let name = url.split(/[?#]/, 1)[0].split("/").filter(Boolean).at(-1) ?? "";
+	try {
+		name = decodeURIComponent(name);
+	} catch {
+		// Malformed percent-encoding: keep the segment as written.
+	}
+	name = name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_");
+	if (!name || name === "." || name === "..") name = "resource";
+	const extension = EXTENSION_BY_MIME[mimeType.split(";")[0].trim().toLowerCase()];
+	if (extension && !path.extname(name)) name += extension;
+	const file = path.join(root, "omp-resource", Bun.hash(url).toString(16), name);
+	await Bun.write(file, bytes);
+	return file;
 }
 
 /**

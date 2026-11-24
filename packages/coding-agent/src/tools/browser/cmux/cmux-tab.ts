@@ -6,7 +6,7 @@ import { JsRuntime } from "../../../eval/js/shared/runtime";
 import { readImageHeaderDimensions, resizeImage } from "../../../utils/image-resize";
 import { resolveToCwd } from "../../path-utils";
 import { throwIfAborted } from "../../tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tool-errors";
 import {
 	type BrowserCaptureResult,
 	type BrowserConsoleEntry,
@@ -22,7 +22,12 @@ import {
 	formatA11ySummary,
 	normalizeA11yResult,
 } from "../a11y/audit";
-import type { BrowserEmulateOptions, ClipboardActionResult, ClipboardReadResult } from "../emulation";
+import {
+	type BrowserEmulateOptions,
+	type ClipboardActionResult,
+	type ClipboardReadResult,
+	validateEmulateOptions,
+} from "../emulation";
 import {
 	type AriaSnapshotOptions,
 	type AriaSnapshotPayload,
@@ -50,7 +55,8 @@ import type {
 } from "../network";
 import { urlMatcher } from "../network";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "../readable";
-import { assertTabPressArgs } from "../tab-arguments";
+import { normalizeSelectOptions, type SelectOptionInput } from "../select-options";
+import { optionalSelectorArgs, type PendingElement, pendingElement, scrollDeltas, pressArgs } from "../tab-arguments";
 import { readFilePayloads } from "../upload-files";
 import type { VitalsOptions, VitalsResult } from "../react/vitals";
 import type { RecordingOptions, RecordingStartResult, RecordingStatus, RecordingStopResult } from "../recording";
@@ -77,6 +83,7 @@ import {
 	type PdfOptions,
 	type ScreenshotOptions,
 	screenshotThreshold,
+	validateScreenshotOptions,
 } from "../screenshot";
 import type { InProcessRunContext, InProcessRunTab } from "../in-process-run";
 import { PointerSpace } from "../pointer-space";
@@ -517,9 +524,10 @@ export class CmuxTab implements InProcessRunTab {
 		};
 	}
 
-	async emulate(options: BrowserEmulateOptions = {}): Promise<BrowserEmulateOptions> {
+	async emulate(input: unknown = {}): Promise<BrowserEmulateOptions> {
+		const options = validateEmulateOptions(input);
 		for (const key in options) {
-			if (key !== "viewport") {
+			if (key !== "viewport" || options.viewport?.isMobile || options.viewport?.hasTouch) {
 				throw new ToolError(`tab.emulate() option ${JSON.stringify(key)} is not supported on the cmux backend`);
 			}
 		}
@@ -587,8 +595,8 @@ export class CmuxTab implements InProcessRunTab {
 		this.#runContext = context;
 	}
 
-	clearRunContext(): void {
-		this.#runContext = undefined;
+	clearRunContext(context: InProcessRunContext): void {
+		if (this.#runContext === context) this.#runContext = undefined;
 	}
 
 	async a11y(options: BrowserA11yOptions = {}): Promise<BrowserA11yResult> {
@@ -847,7 +855,13 @@ export class CmuxTab implements InProcessRunTab {
 		return observation;
 	}
 
-	async ariaSnapshot(selector?: string, opts?: AriaSnapshotOptions): Promise<string | AriaSnapshotDiffResult> {
+	async ariaSnapshot(
+		selectorArg?: string | AriaSnapshotOptions,
+		optsArg?: AriaSnapshotOptions,
+	): Promise<string | AriaSnapshotDiffResult> {
+		const split = optionalSelectorArgs(selectorArg, optsArg);
+		const selector = split.selector as string | undefined;
+		const opts = split.opts;
 		const timeoutMs = Math.min(this.#runContext?.timeoutMs ?? 30_000, 30_000);
 		const result = (await this.#request(
 			"browser.eval",
@@ -863,7 +877,12 @@ export class CmuxTab implements InProcessRunTab {
 		return diffAriaSnapshot(this.#ariaSnapshotBaselines, key, this.#lastUrl, snapshot);
 	}
 
-	async ref(id: string): Promise<CmuxElementHandle> {
+	/** Handle for ARIA snapshot ref `eN`; its methods work before it is awaited. */
+	ref(id: string): PendingElement<CmuxElementHandle> {
+		return pendingElement(this.#ref(id));
+	}
+
+	async #ref(id: string): Promise<CmuxElementHandle> {
 		const refId = /^e\d+$/.test(id.trim()) ? id.trim() : id.trim().replace(/^(?:aria-ref=|aria-ref\/|ariaref\/)/, "");
 		const selector = `aria-ref=${refId}`;
 		const timeoutMs = this.#runContext?.timeoutMs ?? 30_000;
@@ -978,7 +997,8 @@ export class CmuxTab implements InProcessRunTab {
 		})()`);
 	}
 
-	async wheel(deltaX: number, deltaY: number): Promise<void> {
+	async wheel(dx: unknown, dy?: unknown): Promise<void> {
+		const { deltaX, deltaY } = scrollDeltas("tab.wheel()", dx, dy);
 		await this.#request("browser.scroll", { dx: deltaX, dy: deltaY });
 	}
 
@@ -1001,15 +1021,19 @@ export class CmuxTab implements InProcessRunTab {
 		await this.#selectorAction(selector, "fill", { value });
 	}
 
-	async press(key: string, opts?: { selector?: string }): Promise<void> {
-		assertTabPressArgs(key, opts);
+	async press(keyArg: string, optsArg?: { selector?: string } | string): Promise<void> {
+		const { key, opts } = pressArgs(keyArg, optsArg);
 		if (opts?.selector) {
 			await this.focus(opts.selector);
 		}
 		await this.#request("browser.press", { key });
 	}
 
-	async scroll(dx: number, dy: number, opts?: { selector?: string }): Promise<void> {
+	async scroll(dxArg: unknown, dyArg?: unknown, scrollOpts?: { selector?: string }): Promise<void> {
+		// `scroll({x, y}, opts?)` takes its options second.
+		const objectForm = typeof dxArg === "object" && dxArg !== null;
+		const { deltaX: dx, deltaY: dy } = scrollDeltas("tab.scroll()", dxArg, objectForm ? undefined : dyArg);
+		const opts = objectForm ? (dyArg as { selector?: string } | undefined) : scrollOpts;
 		if (opts?.selector) {
 			await this.#selectorAction(opts.selector, "scroll", { dx, dy });
 			return;
@@ -1047,8 +1071,9 @@ export class CmuxTab implements InProcessRunTab {
 		await this.#selectorAction(selector, "scrollIntoView");
 	}
 
-	async select(selector: string, ...values: string[]): Promise<string[]> {
-		return await this.#selectorAction<string[]>(selector, "select", { values });
+	async select(selector: string, ...values: SelectOptionInput[]): Promise<string[]> {
+		const choices = normalizeSelectOptions(values, { coercePrimitives: true });
+		return await this.#selectorAction<string[]>(selector, "select", { values: choices });
 	}
 
 	async extract(format: ReadableFormat = "markdown", opts?: ReadableExtractOptions): Promise<string> {
@@ -1071,12 +1096,13 @@ export class CmuxTab implements InProcessRunTab {
 
 	async screenshot(opts: ScreenshotOptions = {}): Promise<string> {
 		const context = this.#requireRunContext("tab.screenshot()");
+		validateScreenshotOptions(opts);
 		if (opts.annotate) throw new ToolError("tab.screenshot({ annotate: true }) is not supported on the cmux backend");
 		if (opts.ifChanged || opts.threshold !== undefined) {
 			throw new ToolError("tab.screenshot() change detection is not supported on the cmux backend");
 		}
-		if (opts.format === "jpeg" || opts.quality !== undefined) {
-			throw new ToolError("tab.screenshot() JPEG encoding is not supported on the cmux backend");
+		if ((opts.format !== undefined && opts.format !== "png") || opts.quality !== undefined) {
+			throw new ToolError("tab.screenshot() JPEG/WebP encoding is not supported on the cmux backend");
 		}
 		// The cmux daemon's `browser.screenshot` captures the surface viewport
 		// only — it has no element-clip or full-page mode, and Bun.Image cannot
@@ -1114,6 +1140,7 @@ export class CmuxTab implements InProcessRunTab {
 				mimeType: "image/png",
 				area: "viewport",
 				scale: cssWidth && pixelWidth ? pixelWidth / cssWidth : undefined,
+				path: opts.path === undefined ? undefined : resolveToCwd(opts.path, context.session.cwd),
 				silent: opts.silent,
 				notes: captureNotes.length > 0 ? [`[cmux surface: ${captureNotes.join("; ")}]`] : undefined,
 			},
@@ -1590,7 +1617,8 @@ export class CmuxTab implements InProcessRunTab {
 		);
 	}
 
-	async uploadFile(selector: string, ...filePaths: string[]): Promise<void> {
+	async uploadFile(selector: string, ...paths: Array<string | string[]>): Promise<void> {
+		const filePaths = paths.flat();
 		if (!filePaths.length) throw new ToolError("tab.uploadFile() requires at least one file path");
 		const cwd = this.#requireRunContext("tab.uploadFile()").session.cwd;
 		const files = await readFilePayloads(filePaths.map(filePath => resolveToCwd(filePath, cwd)));
@@ -1623,10 +1651,21 @@ export class CmuxTab implements InProcessRunTab {
 		throw new ToolError(`tab.waitForResponse() timed out after ${timeoutMs}ms`);
 	}
 
-	async id(id: number): Promise<CmuxElementHandle> {
+	/** Handle for observation id `id`; its methods work before it is awaited. */
+	id(id: number): PendingElement<CmuxElementHandle> {
+		return pendingElement(this.#id(id));
+	}
+
+	async #id(id: number): Promise<CmuxElementHandle> {
 		const ref = this.#elementRefs.get(id)?.ref ?? `@e${id}`;
 		await this.#waitForSelector(ref, this.#runContext?.timeoutMs ?? 30_000);
 		return new CmuxElementHandle(this, ref);
+	}
+
+	/** Drop the tab's runtime (a run abandoned mid-flight, or the tab closing); the next run gets a fresh one. */
+	discardRuntime(): void {
+		this.#runtime?.dispose();
+		this.#runtime = undefined;
 	}
 
 	ensureRuntime(session: SessionSnapshot): JsRuntime {
@@ -1933,18 +1972,19 @@ export class CmuxTab implements InProcessRunTab {
 					return true;
 				}
 				case "select": {
-					const values = Array.isArray(args.values) ? args.values.map(String) : [String(args.value || "")];
+					const values = args.values;
 					if (element.tagName !== "SELECT") throw new Error("tab.select() requires a <select> element");
-					// An exact value wins over a visible label.
 					const options = Array.from(element.options);
 					const wanted = [];
 					const missing = [];
-					for (const value of values) {
-						const option =
-							options.find(candidate => candidate.value === value) ||
-							options.find(candidate => candidate.label === value || candidate.text.replace(/\\s+/g, " ").trim() === value);
+					for (const choice of values) {
+						const option = choice.kind === "index"
+							? options[choice.value]
+							: (choice.kind !== "label" && options.find(candidate => candidate.value === choice.value)) ||
+								(choice.kind !== "value" && options.find(candidate =>
+									candidate.label === choice.value || candidate.text.replace(/\\s+/g, " ").trim() === choice.value));
 						if (option) wanted.push(option);
-						else missing.push(value);
+						else missing.push(choice.kind === "string" ? choice.value : { [choice.kind]: choice.value });
 					}
 					// A value that matches nothing leaves the select untouched rather than committing its default option.
 					if (missing.length > 0) throw new Error("No <select> option matches " + missing.map(value => JSON.stringify(value)).join(", "));
@@ -2101,13 +2141,16 @@ export class CmuxTab implements InProcessRunTab {
 			if (prefix === "role") {
 				const roleMatch = /^\s*([^\s[]+)/.exec(value);
 				const nameMatch = /\[\s*name\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))(?:\s+(exact))?\s*\]/i.exec(value);
+				// `[name="Save exact"]` reads " exact" inside the quotes as the flag, as `[name="Save" exact]` does.
+				const quoted = nameMatch?.[1] ?? nameMatch?.[2] ?? nameMatch?.[3];
+				const flagInQuotes = quoted !== undefined && /\s+exact$/i.test(quoted);
 				return {
 					kind: "role",
 					value,
 					raw,
 					role: roleMatch?.[1] ?? "",
-					name: nameMatch?.[1] ?? nameMatch?.[2] ?? nameMatch?.[3],
-					exact: nameMatch?.[4]?.toLowerCase() === "exact",
+					name: flagInQuotes ? quoted.replace(/\s+exact$/i, "") : quoted,
+					exact: flagInQuotes || nameMatch?.[4]?.toLowerCase() === "exact",
 				};
 			}
 			if (
@@ -2259,6 +2302,10 @@ class CmuxElementHandle {
 
 	async press(key: string): Promise<void> {
 		await this.#tab.press(key, { selector: this.#selector });
+	}
+
+	async select(...values: SelectOptionInput[]): Promise<string[]> {
+		return await this.#tab.select(this.#selector, ...values);
 	}
 
 	async focus(): Promise<void> {

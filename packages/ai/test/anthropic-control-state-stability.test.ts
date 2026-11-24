@@ -195,6 +195,19 @@ describe("Anthropic controls derived from the transcript", () => {
 		expectCacheStableContinuation(main.payload, side.payload);
 	});
 
+	it("declares an inactive tool deferred from the first request, so activating it leaves the declaration unchanged", async () => {
+		const turn0 = [user("start")];
+		const first = await capture(turn0, Effort.Low, { tools: [tool("read")], inactiveTools: [tool("goal")] });
+		expect(first.payload.tools?.map(declared => declared.defer_loading)).toEqual([undefined, true]);
+
+		const turn1 = [...turn0, answering(reply("ready"), first), user("/goal ship it")];
+		const activated = await capture(turn1, Effort.Low, { tools: [tool("read"), tool("goal")] });
+		// Anthropic re-writes the system and message caches when the tool declaration changes.
+		expect(withoutCacheControl(activated.payload.tools)).toEqual(withoutCacheControl(first.payload.tools));
+		expect(referencesTool(activated.payload, wireName(first, 1))).toBe(true);
+		expectCacheStableContinuation(first.payload, activated.payload);
+	});
+
 	it("drops a declared tool whose definition is no longer available", async () => {
 		const turn0 = [user("start")];
 		const first = await capture(turn0, Effort.High, { tools: [tool("read"), tool("grep")] });

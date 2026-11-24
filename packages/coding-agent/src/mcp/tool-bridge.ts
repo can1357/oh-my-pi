@@ -1,35 +1,24 @@
-import {
-	formatMCPProgress,
-	MCP_TOOL_NAME_PREFIX,
-	type MCPProgress,
-	type MCPToolDetails,
-} from "@oh-my-pi/pi-tui/tools/mcp";
 /**
  * MCP to CustomTool bridge.
  *
  * Converts MCP tool definitions to CustomTool format for the agent.
  */
+import { formatMCPProgress, MCP_TOOL_NAME_PREFIX, type MCPToolDetails } from "../tools/details/mcp";
+import type { MCPProgress } from "../tools/mcp-progress";
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import { normalizeSchemaForMCP } from "@oh-my-pi/pi-ai/utils/schema";
-import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
-import type { SourceMeta } from "../capability/types";
-import type {
-	CustomTool,
-	CustomToolContext,
-	CustomToolResult,
-	RenderResultOptions,
-} from "../extensibility/custom-tools/types";
+import type { CustomTool, CustomToolContext, CustomToolResult } from "../extensibility/custom-tools/types";
 import { extractUriScheme } from "../internal-urls/parse";
 import { InternalUrlRouter } from "../internal-urls/router";
-import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import { formatApprovalArguments } from "../tools/approval";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
 import { callTool } from "./client";
 import { formatMCPToolFailure, MCPTransportError } from "./errors";
-import { describeMCPCall, describeMCPResult, renderMCPCall, renderMCPResult } from "@oh-my-pi/pi-tui/tools/mcp";
+import { insufficientScopeOf } from "./oauth-discovery";
 import type {
 	MCPAuthChallenge,
 	MCPRequestOptions,
@@ -38,10 +27,22 @@ import type {
 	MCPToolCallResult,
 	MCPToolDefinition,
 } from "./types";
-import type { MCPContent } from "@oh-my-pi/pi-tui/tools/mcp";
+import type { MCPContent } from "../tools/details/mcp";
 
-/** Reconnect callback: tears down a stale connection, optionally authorizing first. */
-export type MCPReconnect = (options?: { authChallenge?: MCPAuthChallenge }) => Promise<MCPServerConnection | null>;
+/** Options of an {@link MCPReconnect}. */
+export interface MCPReconnectOptions {
+	/** Authorize first: the server answered the call with this challenge. */
+	authChallenge?: MCPAuthChallenge;
+	/**
+	 * The server refused the call because the protocol session it holds for us
+	 * is gone, and the host did not replace that session itself: a
+	 * handshake-era upstream has to be started anew before the retry.
+	 */
+	staleSession?: boolean;
+}
+
+/** Reconnect callback: brings a failed connection back, optionally authorizing first. */
+export type MCPReconnect = (options?: MCPReconnectOptions) => Promise<MCPServerConnection | null>;
 
 /**
  * Told about every MCP tool call when it starts, by tool-call id; returns the
@@ -66,6 +67,8 @@ const RETRIABLE_PATTERNS = [
 	"transport closed",
 	"network error",
 ];
+const EXPIRED_SESSION = /(?:unknown|expired|invalid) session|session (?:not found|expired|is invalid)/i;
+
 export function isRetriableConnectionError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
 	if (error instanceof MCPTransportError) {
@@ -77,12 +80,28 @@ export function isRetriableConnectionError(error: unknown): boolean {
 		) {
 			return error.retryable;
 		}
-		return error.failure === "http_status" && (error.code === 404 || error.code === 502 || error.code === 503);
+		if (error.failure === "http_status" && (error.code === 404 || error.code === 502 || error.code === 503))
+			return true;
+		// An expired HTTP session (`-32001 Unknown or expired session`) never ran the call: re-initialize and retry.
+		return isStaleSessionError(error);
 	}
 	const msg = error.message.toLowerCase();
 	// Stale session (server restarted, old session ID is gone)
 	if (/^http (404|502|503):/.test(msg)) return true;
 	return RETRIABLE_PATTERNS.some(p => msg.includes(p));
+}
+
+/**
+ * Whether a server refused a call because the session it held is gone. The
+ * host replaces a session it sees expire and reports that as retryable; what
+ * arrives here otherwise still sits in the upstream and needs a restart.
+ */
+function isStaleSessionError(error: unknown): error is MCPTransportError {
+	return (
+		error instanceof MCPTransportError &&
+		(error.failure === "http_status" || error.failure === "json_rpc") &&
+		EXPIRED_SESSION.test(error.message)
+	);
 }
 
 type MCPToolArgs = NonNullable<MCPToolCallParams["arguments"]>;
@@ -237,6 +256,9 @@ function formatMCPContent(content: MCPContent[]): Array<TextContent | ImageConte
 						: `[Resource: ${item.resource.uri}]`,
 				);
 				break;
+			case "resource_link":
+				appendText(`[Resource: ${item.uri}]`);
+				break;
 		}
 	}
 	flushText();
@@ -250,7 +272,7 @@ function formatMCPContent(content: MCPContent[]): Array<TextContent | ImageConte
  * usual spill/byte-cap machinery like any other text block.
  * Programmatic consumers use details.structuredContent instead of parsing this rendering.
  */
-function formatStructuredContent(structured: Record<string, unknown>): string {
+function formatStructuredContent(structured: unknown): string {
 	let json: string;
 	try {
 		json = JSON.stringify(structured, null, 2);
@@ -283,9 +305,11 @@ function textCarries(trimmed: string, parsed: unknown, value: unknown): boolean 
  * `chain.from_iterable` (`[[1,2],[3]]` → 3 blocks vs 2), drops `None` items, and
  * whitespace-padded item strings fail the verbatim comparison — those shapes still render.
  */
-function structuredContentAlreadyInText(structured: Record<string, unknown>, content: MCPContent[]): boolean {
+function structuredContentAlreadyInText(structured: unknown, content: MCPContent[]): boolean {
 	const wrapped =
-		Object.hasOwn(structured, "result") && Object.keys(structured).length === 1 ? structured.result : undefined;
+		isRecord(structured) && Object.hasOwn(structured, "result") && Object.keys(structured).length === 1
+			? structured.result
+			: undefined;
 	const wrappedItems = Array.isArray(wrapped) ? wrapped : undefined;
 	const blocks: Array<{ trimmed: string; parsed: unknown }> = [];
 	for (const item of content) {
@@ -338,9 +362,12 @@ function buildResult(
 			content.unshift({ type: "text", text: "Error:" });
 		}
 	}
+	// Any JSON value is allowed. Details carry the object form their consumers
+	// expect; other values reach them through the rendered text, and `null`
+	// says nothing worth rendering.
 	const structured = result.structuredContent;
-	if (structured !== undefined) details.structuredContent = structured;
-	if (structured !== undefined && !structuredContentAlreadyInText(structured, result.content)) {
+	if (isRecord(structured)) details.structuredContent = structured;
+	if (structured !== undefined && structured !== null && !structuredContentAlreadyInText(structured, result.content)) {
 		const rendered = formatStructuredContent(structured);
 		if (rendered.length > 0) {
 			content.push({ type: "text", text: rendered });
@@ -440,6 +467,19 @@ function getMcpAuthChallenge(result: MCPToolCallResult): MCPAuthChallenge | unde
 	return wwwAuthenticate.length > 0 ? { wwwAuthenticate } : undefined;
 }
 
+/**
+ * The challenge of an HTTP refusal for want of scope (RFC 6750 §3.1), read
+ * from the `[WWW-Authenticate: …]` suffix the HTTP upstream appends to its
+ * status error. Any other refusal (an expired or revoked token) is the link's
+ * to refresh, not a reason to ask the user for more consent.
+ */
+function getStepUpChallenge(error: unknown): MCPAuthChallenge | undefined {
+	if (!(error instanceof MCPTransportError) || error.failure !== "http_status") return undefined;
+	const challenge = error.message.match(/\[WWW-Authenticate: (.*?)(?:; Mcp-Auth-Server: [^\]]*)?\]$/)?.[1];
+	if (challenge === undefined || insufficientScopeOf([challenge]) === undefined) return undefined;
+	return { wwwAuthenticate: [challenge] };
+}
+
 async function callToolWithAuthRetry(
 	connection: MCPServerConnection,
 	toolName: string,
@@ -448,9 +488,20 @@ async function callToolWithAuthRetry(
 	signal?: AbortSignal,
 	onProgress?: MCPRequestOptions["onProgress"],
 ): Promise<MCPToolCallAttempt> {
-	const result = await callTool(connection, toolName, args, { signal, onProgress });
-	const authChallenge = getMcpAuthChallenge(result);
-	if (!authChallenge || !reconnect) return { connection, result };
+	let refused: MCPToolCallAttempt;
+	let authChallenge: MCPAuthChallenge | undefined;
+	try {
+		const result = await callTool(connection, toolName, args, { signal, onProgress });
+		refused = { connection, result };
+		authChallenge = getMcpAuthChallenge(result);
+	} catch (error) {
+		// The server refused the call before running it for want of scope:
+		// step up exactly like a tool-result challenge, and retry once.
+		authChallenge = getStepUpChallenge(error);
+		if (!authChallenge || !reconnect) throw error;
+		refused = { connection, error };
+	}
+	if (!authChallenge || !reconnect) return refused;
 
 	let newConnection: MCPServerConnection | null;
 	try {
@@ -459,7 +510,8 @@ async function callToolWithAuthRetry(
 		rethrowIfAborted(error, signal);
 		return { connection, error };
 	}
-	if (!newConnection) return { connection, result };
+	// Authorization declined or failed: the refusal stands.
+	if (!newConnection) return refused;
 
 	try {
 		return {
@@ -482,7 +534,7 @@ function rethrowIfAborted(error: unknown, signal?: AbortSignal): void {
 async function reconnectWithAbort(
 	reconnect: MCPReconnect,
 	signal?: AbortSignal,
-	options?: { authChallenge?: MCPAuthChallenge },
+	options?: MCPReconnectOptions,
 ): Promise<MCPServerConnection | null> {
 	try {
 		return await untilAborted(signal, () => reconnect(options));
@@ -518,25 +570,32 @@ function sanitizeMCPToolNamePart(value: string, fallback: string, keepDigits: bo
  * if the prefix-strip or cap rules change, the legacy alias changes with them.
  */
 function mintMCPToolName(serverName: string, toolName: string, keepDigits: boolean): string {
-	const sanitizedServerName = sanitizeMCPToolNamePart(serverName, "server", keepDigits);
-	const sanitizedToolName = sanitizeMCPToolNamePart(toolName, "tool", keepDigits);
+	const parts = nameParts(serverName, toolName, keepDigits);
+	return capMCPToolNameLength(`mcp__${parts.server}_${parts.tool}`);
+}
 
+function nameParts(serverName: string, toolName: string, keepDigits: boolean): { server: string; tool: string } {
+	const server = sanitizeMCPToolNamePart(serverName, "server", keepDigits);
+	const tool = sanitizeMCPToolNamePart(toolName, "tool", keepDigits);
 	// Strip redundant server name prefix from tool name if present
-	const prefixWithUnderscore = `${sanitizedServerName}_`;
+	const prefix = `${server}_`;
+	return { server, tool: tool.startsWith(prefix) ? tool.slice(prefix.length) : tool };
+}
 
-	let normalizedToolName = sanitizedToolName;
-	if (sanitizedToolName.startsWith(prefixWithUnderscore)) {
-		normalizedToolName = sanitizedToolName.slice(prefixWithUnderscore.length);
-	}
-
-	return capMCPToolNameLength(`mcp__${sanitizedServerName}_${normalizedToolName}`);
+/**
+ * Sanitized server and tool halves of {@link createMCPToolName}, before the
+ * length cap: `mcp__<server>_<tool>`. Eval namespaces (`mcp/eval-namespaces.ts`)
+ * present them as `<server>.<tool>(…)`.
+ */
+export function mcpToolNameParts(serverName: string, toolName: string): { server: string; tool: string } {
+	return nameParts(serverName, toolName, true);
 }
 
 /**
  * Mint the name {@link createMCPToolName} produced before digits were kept in
  * sanitized parts (`[^a-z_]+` collapsed to `_`). Digit-bearing servers/tools
  * were renamed by that fix, so user config keys written against the old form
- * (`tools.approval`, `tools.xdevInlineDevices`) would no longer match.
+ * (`tools.approval`, `tools.commandInline`) would no longer match.
  * Approval resolution consults this legacy key as a fail-closed fallback.
  * Returns `undefined` when minting is unchanged (no digits involved).
  */
@@ -655,7 +714,7 @@ export function canonicalMCPToolNameCandidates(name: string): string[] {
  * main-session tool it was never offered. Naming the source at every call site
  * makes that mistake unrepresentable.
  *
- * A caller whose tools span several presentation sets (mounted `xd://` devices
+ * A caller whose tools span several presentation sets (mounted tool commands
  * plus advertised top-level tools) MUST pass one lookup covering the union.
  * Checking each set with its own call and taking the first hit would let set
  * order silently break the uniqueness rule below.
@@ -802,22 +861,6 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		this.mcpReadOnlyHint = tool.annotations?.readOnlyHint;
 	}
 
-	renderCall(args: unknown, _options: RenderResultOptions, theme: Theme) {
-		return renderMCPCall(normalizeToolArgs(args), theme, this.label);
-	}
-
-	renderResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, theme: Theme, args?: unknown) {
-		return renderMCPResult(result, options, theme, normalizeToolArgs(args));
-	}
-
-	describeCall(args: unknown, options: RenderResultOptions) {
-		return describeMCPCall(normalizeToolArgs(args), this.label, options);
-	}
-
-	describeResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, args?: unknown) {
-		return describeMCPResult(result, options, normalizeToolArgs(args));
-	}
-
 	async execute(
 		toolCallId: string,
 		params: unknown,
@@ -878,7 +921,8 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		} catch (error) {
 			rethrowIfAborted(error, signal);
 			if (this.reconnect && isRetriableConnectionError(error)) {
-				const newConn = await reconnectWithAbort(this.reconnect, signal);
+				const staleSession = isStaleSessionError(error) && !error.retryable;
+				const newConn = await reconnectWithAbort(this.reconnect, signal, { staleSession });
 				if (newConn) {
 					// Rebind so subsequent calls on this instance use the fresh connection
 					this.connection = newConn;
@@ -900,199 +944,6 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 				}
 			}
 			return buildErrorResult(error, this.connection.name, this.tool.name, provider, providerName);
-		} finally {
-			progress?.close();
-		}
-	}
-}
-
-/**
- * CustomTool wrapping an MCP tool with deferred connection resolution.
- */
-export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
-	readonly name: string;
-	/** See {@link MCPTool.legacyName}. */
-	readonly legacyName?: string;
-	readonly label: string;
-	readonly description: string;
-	readonly parameters: TSchema;
-	/** Original MCP tool name (before normalization) */
-	readonly mcpToolName: string;
-	/** Server name */
-	readonly mcpServerName: string;
-	/** See {@link MCPTool.mcpReadOnlyHint}. */
-	readonly mcpReadOnlyHint: boolean | undefined;
-	readonly approval = "write" as const;
-	/** Render completed MCP calls with the result header replacing the pending call header. */
-	readonly mergeCallAndResult = true;
-	/** See {@link MCPTool.strict}: MCP servers own validation, so stay non-strict. */
-	readonly strict = false as const;
-	readonly formatApprovalDetails = formatApprovalArguments;
-
-	readonly #fallbackProvider: string | undefined;
-	readonly #fallbackProviderName: string | undefined;
-
-	/** Create DeferredMCPTool instances for all tools from an MCP server */
-	static fromTools(
-		serverName: string,
-		tools: MCPToolDefinition[],
-		getConnection: () => Promise<MCPServerConnection>,
-		source?: SourceMeta,
-		reconnect?: MCPReconnect,
-		observeCall?: MCPToolCallObserver,
-	): DeferredMCPTool[] {
-		return tools.map(tool => new DeferredMCPTool(serverName, tool, getConnection, source, reconnect, observeCall));
-	}
-
-	constructor(
-		private readonly serverName: string,
-		private readonly tool: MCPToolDefinition,
-		private readonly getConnection: () => Promise<MCPServerConnection>,
-		source?: SourceMeta,
-		private readonly reconnect?: MCPReconnect,
-		private readonly observeCall?: MCPToolCallObserver,
-	) {
-		this.name = createMCPToolName(serverName, tool.name);
-		this.legacyName = createLegacyMCPToolName(serverName, tool.name);
-		this.label = `${serverName}/${tool.name}`;
-		this.description = tool.description ?? `MCP tool from ${serverName}`;
-		this.parameters = normalizeSchemaForMCP(tool.inputSchema) as TSchema;
-		this.mcpToolName = tool.name;
-		this.mcpServerName = serverName;
-		this.mcpReadOnlyHint = tool.annotations?.readOnlyHint;
-		this.#fallbackProvider = source?.provider;
-		this.#fallbackProviderName = source?.providerName;
-	}
-
-	renderCall(args: unknown, _options: RenderResultOptions, theme: Theme) {
-		return renderMCPCall(normalizeToolArgs(args), theme, this.label);
-	}
-
-	renderResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, theme: Theme, args?: unknown) {
-		return renderMCPResult(result, options, theme, normalizeToolArgs(args));
-	}
-
-	describeCall(args: unknown, options: RenderResultOptions) {
-		return describeMCPCall(normalizeToolArgs(args), this.label, options);
-	}
-
-	describeResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, args?: unknown) {
-		return describeMCPResult(result, options, normalizeToolArgs(args));
-	}
-
-	async execute(
-		toolCallId: string,
-		params: unknown,
-		onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
-		ctx: CustomToolContext,
-		signal?: AbortSignal,
-	): Promise<CustomToolResult<MCPToolDetails>> {
-		const settle = this.observeCall?.(toolCallId);
-		try {
-			return await this.#call(params, onUpdate, ctx, signal);
-		} finally {
-			await settle?.();
-		}
-	}
-
-	async #call(
-		params: unknown,
-		onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
-		_ctx: CustomToolContext,
-		signal?: AbortSignal,
-	): Promise<CustomToolResult<MCPToolDetails>> {
-		throwIfAborted(signal);
-		const args = await prepareOutboundArgs(params, this.tool.inputSchema, _ctx);
-		const provider = this.#fallbackProvider;
-		const providerName = this.#fallbackProviderName;
-		const progress = progressUpdater(onUpdate, this.serverName, this.tool.name, provider, providerName);
-		const onProgress = progress?.onProgress;
-
-		try {
-			const connection = await untilAborted(signal, () => this.getConnection());
-			throwIfAborted(signal);
-			try {
-				const attempt = await callToolWithAuthRetry(
-					connection,
-					this.tool.name,
-					args,
-					this.reconnect,
-					signal,
-					onProgress,
-				);
-				if (attempt.error !== undefined) {
-					return buildErrorResult(
-						attempt.error,
-						this.serverName,
-						this.tool.name,
-						attempt.connection._source?.provider ?? provider,
-						attempt.connection._source?.providerName ?? providerName,
-					);
-				}
-				if (!attempt.result) {
-					return buildErrorResult(
-						new Error("MCP tool call returned no result"),
-						this.serverName,
-						this.tool.name,
-						provider,
-						providerName,
-					);
-				}
-				return buildResult(
-					attempt.result,
-					this.serverName,
-					this.tool.name,
-					attempt.connection._source?.provider ?? provider,
-					attempt.connection._source?.providerName ?? providerName,
-				);
-			} catch (callError) {
-				rethrowIfAborted(callError, signal);
-				if (this.reconnect && isRetriableConnectionError(callError)) {
-					const newConn = await reconnectWithAbort(this.reconnect, signal);
-					if (newConn) {
-						const retryProvider = newConn._source?.provider ?? provider;
-						const retryProviderName = newConn._source?.providerName ?? providerName;
-						try {
-							const result = await callTool(newConn, this.tool.name, args, { signal, onProgress });
-							return buildResult(result, this.serverName, this.tool.name, retryProvider, retryProviderName);
-						} catch (retryError) {
-							rethrowIfAborted(retryError, signal);
-							return buildErrorResult(
-								retryError,
-								this.serverName,
-								this.tool.name,
-								retryProvider,
-								retryProviderName,
-							);
-						}
-					}
-				}
-				return buildErrorResult(callError, this.serverName, this.tool.name, provider, providerName);
-			}
-		} catch (connError) {
-			// getConnection() failed — server never connected or connection lost.
-			// This is always worth a reconnect attempt for deferred tools, since the
-			// error ("MCP server not connected") isn't a network error from callTool.
-			rethrowIfAborted(connError, signal);
-			if (this.reconnect) {
-				const newConn = await reconnectWithAbort(this.reconnect, signal);
-				if (newConn) {
-					try {
-						const result = await callTool(newConn, this.tool.name, args, { signal, onProgress });
-						return buildResult(
-							result,
-							this.serverName,
-							this.tool.name,
-							newConn._source?.provider ?? provider,
-							newConn._source?.providerName ?? providerName,
-						);
-					} catch (retryError) {
-						rethrowIfAborted(retryError, signal);
-						return buildErrorResult(retryError, this.serverName, this.tool.name, provider, providerName);
-					}
-				}
-			}
-			return buildErrorResult(connError, this.serverName, this.tool.name, provider, providerName);
 		} finally {
 			progress?.close();
 		}

@@ -12,7 +12,7 @@ import { Settings } from "../config/settings";
 import { initializeWithSettings } from "../discovery";
 import { cfgDisasmBackend, installStatus, releaseDatabases, resolveWorkerRuntime } from "../disasm";
 import { loadSkills } from "../extensibility/skills";
-import { closeDaemonClients } from "../launch/client";
+import { closeDaemonClient } from "../daemon/client";
 import { discoverAndLoadMCPTools } from "../mcp/loader";
 import { MCPManager } from "../mcp/manager";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
@@ -85,7 +85,6 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 				filterExa: true,
 				// `omp read` has no Eval prelude, so browser MCP remains available.
 				filterBrowser: false,
-				cacheStorage: settings.getStorage(),
 				authStorage,
 			});
 			mcpManager = result.manager;
@@ -144,7 +143,7 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 		authStorage?.close();
 		// Save backend changes and drop host sockets that would keep the event loop alive.
 		await releaseDatabases();
-		await closeDaemonClients();
+		await closeDaemonClient();
 	}
 
 	if (failed) process.exit(1);

@@ -1,9 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult, RenderResultOptions } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -21,7 +21,6 @@ import {
 	type ExecutedWorkspaceChange,
 	sortAndValidateTextEdits,
 } from "@oh-my-pi/pi-coding-agent/lsp/edits";
-import { renderCall, renderResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import {
 	type CodeAction,
 	type CreateFile,
@@ -36,21 +35,20 @@ import {
 	type TextDocumentEdit,
 	type WorkspaceEdit,
 } from "@oh-my-pi/pi-coding-agent/lsp/types";
-import { type LspToolDetails } from "@oh-my-pi/pi-tui/tools/lsp";
+import { type LspToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/lsp";
 import {
 	applyCodeAction,
 	collectGlobMatches,
 	dedupeWorkspaceSymbols,
 	detectLanguageId,
-	fileToUri,
 	filterWorkspaceSymbols,
 	hasGlobPattern,
 	readLocationContext,
 	resolveDiagnosticTargets,
 	resolveSymbolColumn,
-	uriToFile,
 } from "@oh-my-pi/pi-coding-agent/lsp/utils";
-import { getThemeByName, initTheme } from "@oh-my-pi/pi-tui/theme";
+import { fileToUri, uriToFile } from "@oh-my-pi/pi-coding-agent/lsp/uri";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/ui/theme/service";
 import type { FileChangeReport, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { clampTimeout } from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
@@ -58,8 +56,13 @@ import * as piUtils from "@oh-my-pi/pi-utils";
 import { sanitizeText, TempDir } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import DEFAULTS from "../../src/lsp/defaults.json" with { type: "json" };
-import { renderResult as renderLocalResult } from "@oh-my-pi/pi-tui/tools/lsp";
-import { getLanguageFromPath } from "@oh-my-pi/pi-tui/lang-from-path";
+import { ToolCall } from "../../src/ui/transcript/tool-block";
+import { toolCallText, toolText } from "../helpers/tool-text";
+import { getLanguageFromPath } from "@oh-my-pi/pi-coding-agent/utils/lang-from-path";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 const lspTestSettings = Settings.isolated();
 
@@ -970,7 +973,6 @@ describe("lsp regressions", () => {
 			const client = await lspClient.getOrCreateClient(serverConfig, tempDir.path(), 1_000);
 			const targetPath = await openDocument(client, "target.ts");
 			const before = await Bun.file(targetPath).text();
-			const beforeMtimeMs = (await fsp.stat(targetPath)).mtimeMs;
 			const recorded: FileChangeReport[] = [];
 			const tool = new LspTool({
 				...makeLspSession(tempDir.path()),
@@ -997,7 +999,7 @@ describe("lsp regressions", () => {
 			});
 			expect(await Bun.file(targetPath).text()).toBe("organized\n");
 			expect(recorded).toEqual([
-				{ path: await fsp.realpath(targetPath), tool: "lsp", before, after: "organized\n", beforeMtimeMs },
+				{ path: await fsp.realpath(targetPath), tool: "lsp", before, after: "organized\n" },
 			]);
 		} finally {
 			await lspClient.shutdownAll();
@@ -1912,79 +1914,71 @@ describe("lsp regressions", () => {
 	});
 
 	it("sanitizes symbol metadata in renderer output", async () => {
-		const theme = await getThemeByName("dark");
-		const uiTheme = theme!;
-		const renderOptions: RenderResultOptions = { expanded: false, isPartial: false };
-
-		const call = renderCall(
-			{ action: "definition", file: "src/example.ts", line: 10, symbol: "foo\tbar\nbaz" },
-			renderOptions,
-			uiTheme,
+		const callText = sanitizeText(
+			toolCallText(
+				new ToolCall({
+					id: "call-1",
+					name: "lsp",
+					args: { action: "definition", file: "src/example.ts", line: 10, symbol: "foo\tbar\nbaz" },
+				}),
+			),
 		);
-		const callText = sanitizeText(call.render(120).join("\n"));
 		const normalizedCallText = callText.replace(/\s+/g, " ");
 		expect(normalizedCallText).toContain("foo bar baz");
 		expect(callText).not.toContain("\t");
-		const result = renderResult(
-			{
-				content: [{ type: "text", text: "No definition found" }],
-				details: {
-					action: "definition",
-					success: true,
-					request: {
+		const resultText = sanitizeText(
+			toolText({
+				name: "lsp",
+				args: { action: "definition", file: "src/example.ts", line: 10, symbol: "foo\tbar\nbaz" },
+				result: {
+					content: [{ type: "text", text: "No definition found" }],
+					details: {
 						action: "definition",
-						file: "src/example.ts",
-						line: 10,
-						symbol: "foo\tbar\nbaz",
+						success: true,
+						request: { action: "definition", file: "src/example.ts", line: 10, symbol: "foo\tbar\nbaz" },
 					},
 				},
-			},
-			renderOptions,
-			uiTheme,
+			}),
 		);
-		const resultText = sanitizeText(result.render(120).join("\n"));
 		const normalizedResultText = resultText.replace(/\s+/g, " ");
 		expect(normalizedResultText).toContain("src/example.ts:10 (foo bar baz)");
 		expect(resultText).not.toContain("\t");
 	});
 
 	it("sanitizes tabs in rendered diagnostic output", async () => {
-		const theme = await getThemeByName("dark");
-		const uiTheme = theme!;
-		const renderOptions: RenderResultOptions = { expanded: false, isPartial: false };
-
-		const result = renderResult(
-			{
-				content: [
-					{
-						type: "text",
-						text: "Diagnostics: 1 error(s)\nsrc/example.go:183:41 [error] [compiler] too many\targuments in call (WrongArgCount)",
-					},
-				],
-			},
-			renderOptions,
-			uiTheme,
+		const resultText = sanitizeText(
+			toolText({
+				name: "lsp",
+				args: { action: "diagnostics", file: "src/example.go" },
+				result: {
+					content: [
+						{
+							type: "text",
+							text: "Diagnostics: 1 error(s)\nsrc/example.go:183:41 [error] [compiler] too many\targuments in call (WrongArgCount)",
+						},
+					],
+				},
+			}),
 		);
-
-		const resultText = sanitizeText(result.render(120).join("\n"));
 		expect(resultText).not.toContain("\t");
 		expect(resultText.replace(/\s+/g, " ")).toContain("too many arguments in call");
 	});
 
 	it("hang-wraps expanded generic output without tabs or lost text (#7041, #15824)", async () => {
-		const theme = await getThemeByName("dark");
 		const note =
 			"note: 'configured, not started' means the binary resolves on PATH but no request has spawned it yet";
-		const result = renderLocalResult(
-			{
-				content: [{ type: "text", text: `Error:\nserver\tstderr ${"x".repeat(200)}\n  ${note}` }],
-			},
-			{ expanded: true, isPartial: false },
-			theme!,
-		);
-
 		const width = 80;
-		const lines = sanitizeText(result.render(width).join("\n")).split("\n");
+		const lines = sanitizeText(
+			toolText({
+				name: "lsp",
+				args: { action: "status" },
+				result: { content: [{ type: "text", text: `Error:\nserver\tstderr ${"x".repeat(200)}\n  ${note}` }] },
+				expanded: true,
+				width,
+			}),
+		)
+			.split("\n")
+			.filter(line => line.trim() !== "");
 		const text = lines.join("\n");
 		expect(text).not.toContain("\t");
 		expect(lines.every(line => Bun.stringWidth(line) <= width)).toBe(true);
@@ -2877,7 +2871,6 @@ describe("lsp regressions", () => {
 					tool: "lsp",
 					before: "const oldName = 1;\n",
 					after: "const newName = 1;\n",
-					beforeMtimeMs: expect.any(Number),
 				},
 			]);
 		} finally {
@@ -3271,6 +3264,39 @@ describe("lsp regressions", () => {
 				await writeTypescriptWorkspace(tempDir.path(), { tsserver: true, symlinkTsc: false });
 				const config = loadConfig(tempDir.path());
 				expect(Object.keys(config.servers)).toEqual(["typescript-language-server"]);
+			} finally {
+				vi.restoreAllMocks();
+				tempDir.removeSync();
+			}
+		});
+
+		it("points typescript-language-server at the tsc package's tsserver when node_modules/typescript lacks one", async () => {
+			// `typescript` aliased to `@typescript/typescript6` (no tsserver.js) while `.bin/tsc`
+			// links `@typescript/old`: the server used to exit at initialize.
+			if (process.platform === "win32") return;
+			const tempDir = TempDir.createSync("@omp-lsp-ts-alias-");
+			vi.spyOn(Bun, "which").mockReturnValue(null);
+			try {
+				const root = tempDir.path();
+				await Bun.write(path.join(root, "package.json"), "{}");
+				await Bun.write(
+					path.join(root, "node_modules", "typescript", "package.json"),
+					'{"name":"@typescript/typescript6"}',
+				);
+				const oldDir = path.join(root, "node_modules", "@typescript", "old");
+				await Bun.write(path.join(oldDir, "package.json"), '{"name":"@typescript/old"}');
+				await Bun.write(path.join(oldDir, "bin", "tsc"), "");
+				await Bun.write(path.join(oldDir, "lib", "tsserver.js"), "");
+				const binDir = path.join(root, "node_modules", ".bin");
+				await fs.promises.mkdir(binDir, { recursive: true });
+				await fs.promises.symlink(path.join("..", "@typescript", "old", "bin", "tsc"), path.join(binDir, "tsc"));
+				await Bun.write(path.join(binDir, "typescript-language-server"), "");
+
+				const config = loadConfig(root);
+				expect(Object.keys(config.servers)).toEqual(["typescript-language-server"]);
+				expect(config.servers["typescript-language-server"]?.initOptions?.tsserver).toEqual({
+					fallbackPath: path.join(fs.realpathSync(oldDir), "lib", "tsserver.js"),
+				});
 			} finally {
 				vi.restoreAllMocks();
 				tempDir.removeSync();
@@ -4297,7 +4323,6 @@ describe("lsp regressions", () => {
 			expect(
 				textResult(await tool.execute("symbols-before-rename", { action: "symbols", file: filePath })),
 			).toContain("OldName");
-			const beforeMtimeMs = (await fsp.stat(filePath)).mtimeMs;
 			await tool.execute("rename-open-document", {
 				action: "rename",
 				file: filePath,
@@ -4312,7 +4337,6 @@ describe("lsp regressions", () => {
 					tool: "lsp",
 					before: "package main\nfunc OldName() {}\n",
 					after: "package main\nfunc NewName() {}\n",
-					beforeMtimeMs,
 				},
 			]);
 
@@ -5164,6 +5188,36 @@ describe("lsp regressions", () => {
 				expect(loaded).toBe(true);
 			} finally {
 				vi.useRealTimers();
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
+		it("ends the load of a server that never reports progress shortly after its first open", async () => {
+			// pyright, ty, ruff, and typescript-language-server never send `$/progress`; their
+			// first project-aware wait used to sit out the whole fallback. The window starts at
+			// the first open, not at `initialized`: a warmed-up server that starts loading only
+			// once a file opens must not count as loaded before that.
+			const { tempDir, sessionRoot } = await makeCheckouts("@omp-lsp-silent-load-");
+			try {
+				const { serverConfig } = useServer(FOLDER_CHANGES);
+				const client = await lspClient.getOrCreateClient(serverConfig, sessionRoot);
+				let loaded = false;
+				void lspClient.waitForProjectLoaded(client).then(() => {
+					loaded = true;
+				});
+				// Real delay: the fake LSP subprocess and the client's init/IO timers share the
+				// clock, so fake timers cannot prove "no silent window before the first open".
+				await Bun.sleep(2_500);
+				expect(loaded).toBe(false);
+
+				const filePath = path.join(sessionRoot, "first-open.ts");
+				await Bun.write(filePath, "export const value = 1;\n");
+				await lspClient.ensureFileOpen(client, filePath);
+				const opened = Date.now();
+				await lspClient.waitForProjectLoaded(client);
+				expect(Date.now() - opened).toBeLessThan(5_000);
+			} finally {
 				await lspClient.shutdownAll();
 				tempDir.removeSync();
 			}
@@ -6661,6 +6715,112 @@ describe("lsp regressions", () => {
 
 		expect(output).toContain("rust-analyzer (configured, not started)");
 		expect(output).toContain("typescript-language-server (ready)");
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"status reports a rustup proxy whose toolchain lacks the component",
+		async () => {
+			const cargoHome = TempDir.createSync("@omp-cargo-home-");
+			const previousCargoHome = process.env.CARGO_HOME;
+			try {
+				const proxy = path.join(cargoHome.path(), "bin", "rust-analyzer");
+				fs.mkdirSync(path.dirname(proxy), { recursive: true });
+				fs.writeFileSync(
+					proxy,
+					"#!/bin/sh\necho \"error: Unknown binary 'rust-analyzer' in official toolchain 'stable'\" >&2\nexit 1\n",
+					{ mode: 0o755 },
+				);
+				process.env.CARGO_HOME = cargoHome.path();
+				vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+					servers: {
+						"rust-analyzer": {
+							command: "rust-analyzer",
+							resolvedCommand: proxy,
+							fileTypes: [".rs"],
+							rootMarkers: ["Cargo.toml"],
+						},
+					},
+					idleTimeoutMs: undefined,
+				});
+				vi.spyOn(lspClient, "getActiveClients").mockReturnValue([]);
+
+				const tool = new LspTool(makeLspSession(cargoHome.path()));
+				const result = await tool.execute("status-rustup", { action: "status" });
+				const output = result.content
+					.filter(block => block.type === "text")
+					.map(block => block.text)
+					.join("\n");
+
+				expect(output).toContain("rust-analyzer (unusable: error: Unknown binary 'rust-analyzer'");
+			} finally {
+				if (previousCargoHome === undefined) delete process.env.CARGO_HOME;
+				else process.env.CARGO_HOME = previousCargoHome;
+				configCache.delete(cargoHome.path());
+				vi.restoreAllMocks();
+				cargoHome.removeSync();
+			}
+		},
+	);
+
+	it("routes position actions to a server that advertises them and explains when none does", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-capability-routing-");
+		try {
+			const file = path.join(tempDir.path(), "app.py");
+			await Bun.write(file, "def target():\n    return 1\n");
+			const ruff: ServerConfig = { command: "ruff", fileTypes: [".py"], rootMarkers: [] };
+			const pyright: ServerConfig = { command: "pyright", fileTypes: [".py"], rootMarkers: [] };
+			const makeClient = (config: ServerConfig, serverCapabilities: LspClient["serverCapabilities"]): LspClient => ({
+				name: config.command,
+				cwd: tempDir.path(),
+				config,
+				proc: { stdin: { write() {}, flush: async () => {} } } as unknown as LspClient["proc"],
+				requestId: 0,
+				diagnostics: new Map(),
+				publishedDiagnostics: new Map(),
+				pulledDiagnostics: new Map(),
+				diagnosticsVersion: 0,
+				openFiles: new Map(),
+				pendingRequests: new Map(),
+				isReading: false,
+				status: "ready",
+				lastActivity: Date.now(),
+				writeQueue: Promise.resolve(),
+				activeProgressTokens: new Set(),
+				projectLoaded: Promise.resolve(),
+				resolveProjectLoaded: () => {},
+				serverCapabilities,
+			});
+			const clients = new Map([
+				[ruff, makeClient(ruff, { codeActionProvider: true })],
+				[pyright, makeClient(pyright, { referencesProvider: true })],
+			]);
+			vi.spyOn(lspClient, "getOrCreateClient").mockImplementation(async config => clients.get(config)!);
+			vi.spyOn(lspClient, "reconcileFileFromDisk").mockResolvedValue(false);
+			const requests: string[] = [];
+			vi.spyOn(lspClient, "sendRequest").mockImplementation(async (client, method) => {
+				requests.push(`${client.name} ${method}`);
+				if (client.name === "ruff") throw new lspClient.LspResponseError(-32601, undefined, "Unknown request");
+				return [];
+			});
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const references = { action: "references", file, line: 1, symbol: "target" } as const;
+
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { ruff, pyright }, idleTimeoutMs: undefined });
+			configCache.delete(tempDir.path());
+			await tool.execute("routed", references);
+			expect(requests).toContain("pyright textDocument/references");
+			expect(requests).not.toContain("ruff textDocument/references");
+
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { ruff }, idleTimeoutMs: undefined });
+			configCache.delete(tempDir.path());
+			const text = textResult(await tool.execute("unsupported", references));
+			expect(text).toContain("No configured language server for .py supports references");
+			expect(text).toContain("ruff: does not implement textDocument/references");
+		} finally {
+			configCache.delete(tempDir.path());
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
 	});
 
 	it("reload * invalidates the per-cwd config cache so newly written .omp/lsp.json is observed", async () => {

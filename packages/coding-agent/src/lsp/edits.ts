@@ -2,8 +2,9 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEexist, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { readSnapshot } from "../commit/selective/journal";
+import { stripBom } from "../edit/normalize";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 import type {
 	CreateFile,
 	CreateFileOptions,
@@ -17,8 +18,8 @@ import type {
 	TextEdit,
 	WorkspaceEdit,
 } from "./types";
-import { stripBom } from "../edit/normalize";
-import { readDiskSnapshot, uriToFile } from "./utils";
+import { uriToFile } from "./uri";
+import { readTextFromDisk } from "./utils";
 
 // =============================================================================
 // Text Edit Application
@@ -162,7 +163,6 @@ export function flattenWorkspaceTextEdits(edit: WorkspaceEdit): Map<string, Text
 export interface TextEditOutcome {
 	before: string;
 	after: string;
-	beforeMtimeMs: number;
 }
 
 /**
@@ -175,11 +175,11 @@ export async function applyTextEdits(
 	edits: TextEdit[],
 	onFileChange?: (change: WorkspaceFileChange) => void,
 ): Promise<TextEditOutcome> {
-	const snapshot = await readDiskSnapshot(filePath);
+	const before = await readTextFromDisk(filePath, true);
 	// LSP positions address the text after a BOM; the edited text is written without it.
-	const after = applyTextEditsToString(stripBom(snapshot.text).text, edits);
+	const after = applyTextEditsToString(stripBom(before).text, edits);
 	await Bun.write(filePath, after);
-	const outcome = { before: snapshot.text, after, beforeMtimeMs: snapshot.mtimeMs };
+	const outcome = { before, after };
 	if (onFileChange) onFileChange({ path: await fs.realpath(filePath), ...outcome });
 	return outcome;
 }
@@ -233,7 +233,7 @@ export async function applyEditsThenRename(
 	};
 	const edited: Array<{ filePath: string; outcome: TextEditOutcome }> = [];
 	const editChanges: WorkspaceFileChange[] = [];
-	let moved: Array<{ from: string; to: string; text: string; mtimeMs?: number } | undefined> = [];
+	let moved: Array<{ from: string; to: string; text: string } | undefined> = [];
 	try {
 		for (const { filePath, edits } of references) {
 			edited.push({ filePath, outcome: await applyTextEdits(filePath, edits) });
@@ -245,10 +245,10 @@ export async function applyEditsThenRename(
 			}
 			moved = await Promise.all(
 				moves.map(async ({ from, to }) => {
-					if ((await fs.lstat(from)).isSymbolicLink()) return undefined;
+					if (!(await fs.lstat(from)).isFile()) return undefined;
 					const snapshot = await readSnapshot(from);
 					if (snapshot?.text == null) return undefined;
-					return { from: await entryLocation(from), to, text: snapshot.text, mtimeMs: snapshot.mtimeMs };
+					return { from: await entryLocation(from), to, text: snapshot.text };
 				}),
 			);
 		}
@@ -262,7 +262,7 @@ export async function applyEditsThenRename(
 	for (const change of editChanges) onFileChange(change);
 	for (const entry of moved) {
 		if (!entry) continue;
-		onFileChange({ path: entry.from, before: entry.text, after: null, beforeMtimeMs: entry.mtimeMs });
+		onFileChange({ path: entry.from, before: entry.text, after: null });
 		onFileChange({ path: await entryLocation(entry.to), before: null, after: entry.text });
 	}
 }
@@ -276,7 +276,6 @@ export interface WorkspaceFileChange {
 	path: string;
 	before: string | null;
 	after: string | null;
-	beforeMtimeMs?: number;
 }
 
 type WorkspaceEditOp =

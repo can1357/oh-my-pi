@@ -1,10 +1,10 @@
 import type { Database } from "bun:sqlite";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ToolSession } from "../sdk";
-import { DEFAULT_MAX_LINES, truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
+import { DEFAULT_MAX_LINES, truncateHead } from "./streaming-output";
+import { applyListLimit } from "./list-limit";
 import { resolveReadPath } from "./path-utils";
-import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import type { ReadToolDetails } from "./details/read";
 import { prependSuffixResolutionNotice, toReadTruncationStats } from "./read-format";
 import {
 	findSuffixMatchCached,
@@ -22,6 +22,7 @@ import {
 	MAX_RAW_QUERY_ROWS,
 	openSqliteReadConnection,
 	parseSqlitePathCandidates,
+	parseSqliteSelectorBoundaryCandidates,
 	parseSqliteSelector,
 	queryRows,
 	renderRow,
@@ -31,7 +32,7 @@ import {
 	resolveTableRowLookup,
 } from "./sqlite-reader";
 import { throwIfAborted } from "./tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
 interface ResolvedSqliteReadPath {
@@ -88,6 +89,16 @@ export async function resolveSqliteReadPath(
 				}
 			}
 		}
+	}
+
+	// A SQLite file without a database extension is recognized by its header alone.
+	for (const candidate of parseSqliteSelectorBoundaryCandidates(readPath)) {
+		const absolutePath = resolveReadPath(candidate.sqlitePath, session.cwd);
+		const stat = await Bun.file(absolutePath)
+			.stat()
+			.catch(() => null);
+		if (!stat?.isFile() || !(await isSqliteFile(absolutePath))) continue;
+		return { absolutePath, sqliteSubPath: candidate.subPath, queryString: candidate.queryString };
 	}
 
 	return null;

@@ -7,19 +7,27 @@ import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mo
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AUTO_PREWALK_TIMEOUT_MS, type PrewalkRoute } from "@oh-my-pi/pi-coding-agent/auto-prewalk/classifier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { formatModelStringWithRouting, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { cfgPrewalkAuto } from "@oh-my-pi/pi-coding-agent/session/settings";
+import {
+	cfgPrewalkAuto,
+	cfgPrewalkAutoTarget,
+	cfgRetryBaseDelayMs,
+	cfgRetryFallbackChains,
+	cfgRetryFallbackRevertPolicy,
+} from "@oh-my-pi/pi-coding-agent/session/settings";
 import { EAGER_TODO_PRELUDE_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/todo-tracker";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { asGlobalFetch } from "./helpers/fetch-mock";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 /**
  * `prewalk.auto`: the native judge decides per user task whether to arm the
@@ -146,6 +154,8 @@ describe("AgentSession auto-prewalk", () => {
 
 	interface FixtureOptions {
 		auto?: "off" | "suggest" | "on";
+		primary?: Model;
+		target?: Model;
 		/** Credential the native judge (default true). */
 		judge?: boolean;
 		agentKind?: "main" | "sub";
@@ -158,14 +168,15 @@ describe("AgentSession auto-prewalk", () => {
 	}
 
 	function createFixture(responses: MockResponse[], options: FixtureOptions = {}) {
-		const primary = modelOrThrow("claude-sonnet-4-5");
-		const target = modelOrThrow("claude-sonnet-4-6");
+		const primary = options.primary ?? modelOrThrow("claude-sonnet-4-5");
+		const target = options.target ?? modelOrThrow("claude-sonnet-4-6");
 		authStorage = createInMemoryAuthStorage();
 		authStorage.keys.setRuntime("anthropic", "test-key");
+		authStorage.keys.setRuntime(primary.provider, "test-key");
 		if (options.judge !== false) authStorage.keys.setRuntime("typesafe", "ts-key");
 		// Only the credentials set here exist. Ambient provider keys (TYPESAFE_API_KEY, OPENROUTER_API_KEY, …) must
 		// neither conjure a native judge nor give the chain a fallback candidate that reaches the network.
-		const credentialed = options.judge === false ? ["anthropic"] : ["anthropic", "typesafe"];
+		const credentialed = options.judge === false ? [primary.provider] : [primary.provider, "typesafe"];
 		const source = authStorage.keys.source.bind(authStorage.keys);
 		vi.spyOn(authStorage.keys, "source").mockImplementation((provider, sourceOptions) =>
 			credentialed.includes(provider) ? source(provider, sourceOptions) : undefined,
@@ -181,6 +192,7 @@ describe("AgentSession auto-prewalk", () => {
 		settings.setModelRole("smol", `${target.provider}/${target.id}:low`);
 		const mock = createMockModel({ responses });
 		const requested: string[] = [];
+		const requestedModels: Model[] = [];
 		const efforts: Array<string | undefined> = [];
 		const nudges: string[][] = [];
 		const customs: string[][] = [];
@@ -201,6 +213,7 @@ describe("AgentSession auto-prewalk", () => {
 			},
 			streamFn: async (model, context, streamOptions) => {
 				requested.push(model.id);
+				requestedModels.push(model);
 				efforts.push(agent.state.thinkingLevel);
 				nudges.push(requestCustoms.filter(customType => customType.startsWith("prewalk-")));
 				customs.push(requestCustoms);
@@ -232,7 +245,7 @@ describe("AgentSession auto-prewalk", () => {
 			settings,
 			collabGuest: false,
 			showStatus: vi.fn(),
-			editor: { setText: vi.fn() },
+			composer: { setText: vi.fn() },
 			refreshSlashCommandState: vi.fn(),
 		} as unknown as InteractiveModeContext;
 		return {
@@ -241,6 +254,7 @@ describe("AgentSession auto-prewalk", () => {
 			primary,
 			target,
 			requested,
+			requestedModels,
 			efforts,
 			nudges,
 			customs,
@@ -249,6 +263,65 @@ describe("AgentSession auto-prewalk", () => {
 			ctx,
 		};
 	}
+
+	it("hands off an automatic route-only prewalk without selecting a new planning model", async () => {
+		const row = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!row) throw new Error("Expected bundled OpenRouter model");
+		const source = parseModelPattern("openrouter/z-ai/glm-4.7@cerebras", [row]).model;
+		const target = parseModelPattern("openrouter/z-ai/glm-4.7@sambanova", [row]).model;
+		if (!source || !target) throw new Error("Expected routed prewalk models");
+		const calls = stubJudge([PREWALK]);
+		const f = createFixture(cycle(), { auto: "on", primary: source, target });
+		cfgPrewalkAutoTarget.set(f.settings, "openrouter/z-ai/glm-4.7@sambanova:high");
+
+		await f.session.prompt(TASK);
+
+		expect(asked(calls)).toHaveLength(1);
+		expect(f.requestedModels.map(model => model.compat)).toEqual([source.compat, source.compat, target.compat]);
+		expect(f.session.model?.compat).toMatchObject({ openRouterRouting: { only: ["sambanova"] } });
+		expect(f.session.sessionManager.getSessionLocalModelChange()).toMatchObject({
+			model: "openrouter/z-ai/glm-4.7@sambanova",
+			role: "prewalk",
+		});
+		expect(f.nudges.at(-1)).toContain("prewalk-checklist");
+	});
+
+	it("keeps a same-model, same-effort retry fallback route on the next task", async () => {
+		const row = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!row) throw new Error("Expected bundled OpenRouter model");
+		const sourceSelector = "openrouter/z-ai/glm-4.7@cerebras";
+		const targetSelector = "openrouter/z-ai/glm-4.7@sambanova";
+		const fallbackSelector = "openrouter/z-ai/glm-4.7@chutes";
+		const source = parseModelPattern(sourceSelector, [row]).model;
+		const target = parseModelPattern(targetSelector, [row]).model;
+		if (!source || !target) throw new Error("Expected routed prewalk models");
+		stubJudge([PREWALK, DIRECT]);
+		const f = createFixture([...cycle(), { throw: "500 upstream is unwell" }, done("fallback"), done("two")], {
+			auto: "on",
+			primary: source,
+			target,
+		});
+		cfgPrewalkAutoTarget.set(f.settings, `${targetSelector}:high`);
+		cfgRetryBaseDelayMs.override(f.settings, 5);
+		cfgRetryFallbackChains.override(f.settings, { [`${targetSelector}:high`]: [`${fallbackSelector}:high`] });
+		cfgRetryFallbackRevertPolicy.override(f.settings, "never");
+		mockSchedulerWaitWithClock();
+
+		await f.session.prompt(TASK);
+		expect(f.requestedModels.at(-1)?.compat).toEqual(target.compat);
+		expect(f.session.configuredThinkingLevel()).toBe(Effort.High);
+
+		await f.session.prompt("continue this task through a retry", { synthetic: true });
+		await f.session.waitForIdle();
+		expect(f.requestedModels.slice(3).map(formatModelStringWithRouting)).toEqual([targetSelector, fallbackSelector]);
+		expect(f.session.model?.compat).toMatchObject({ openRouterRouting: { only: ["chutes"] } });
+		expect(f.session.configuredThinkingLevel()).toBe(Effort.High);
+
+		await f.session.prompt("task two");
+
+		expect(f.requestedModels.slice(5).map(formatModelStringWithRouting)).toEqual([fallbackSelector]);
+		expect(f.efforts.at(-1)).toBe(Effort.High);
+	});
 
 	describe("modes", () => {
 		it("does nothing and asks the judge nothing while prewalk.auto is off, the default", async () => {

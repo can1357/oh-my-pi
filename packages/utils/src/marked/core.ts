@@ -4,6 +4,7 @@ import {
 	canOpenDelimiter,
 	escapedAt,
 	InlineClosers,
+	matchDestination,
 	PUNCTUATION,
 } from "./inline-closers";
 import { TextRun, TextStops } from "./inline-text";
@@ -418,30 +419,6 @@ function findDelimiter(src: string, delimiter: string, from: number): number {
 	while (at !== -1 && escapedAt(src, at)) at = src.indexOf(delimiter, at + delimiter.length);
 	return at;
 }
-
-/**
- * The autolink at the start of `src`, a suffix of `closers`' source: "<", a URL or an address, ">". A URL runs from its
- * scheme to the first " " or ">", which must be a ">"; an address holds no " ", "<", ">" or second "@". An address
- * that matches after a scheme ends where the URL does, so only the URL is tried there.
- */
-function autolinkPrefix(src: string, closers: InlineClosers): string | undefined {
-	const scheme = /^<(?:https?:\/\/|ftp:\/\/)/i.exec(src);
-	if (!scheme) return /^<[^ <>@]+@[^ <>@]+>/.exec(src)?.[0];
-	const close = closers.closeUrlAutolink(src, scheme[0].length);
-	return close === -1 ? undefined : src.slice(0, close + 1);
-}
-
-/** The inline HTML (a tag or a comment) at the start of `src`, a suffix of `closers`' source, or `undefined`. */
-function inlineHtmlPrefix(src: string, closers: InlineClosers): string | undefined {
-	if (src.startsWith("<!--")) {
-		const end = closers.closeComment(src);
-		return end === -1 ? undefined : src.slice(0, end + 3);
-	}
-	if (!/^<\/?[A-Za-z][A-Za-z0-9-]*(?:\s|\/?>)/.test(src)) return undefined;
-	const end = closers.closeTag(src);
-	return end === -1 ? undefined : src.slice(0, end + 1);
-}
-
 /** Tokenizes the built-in inline Markdown surface. */
 export class Tokenizer {
 	options: MarkedOptions;
@@ -515,13 +492,10 @@ function matchLink(src: string, lexer: Lexer, closers: InlineClosers): NestedMat
 	if (src[labelEnd + 1] === "(") {
 		const destinationEnd = closers.closeRound(src, labelEnd + 2);
 		if (destinationEnd === -1) return undefined;
-		const inside = src.slice(labelEnd + 2, destinationEnd).trim();
-		let href = inside;
-		let title: string | null = null;
-		const titleMatch = /^(<[^>]*>|\S+?)(?:\s+(?:"([\s\S]*)"|'([\s\S]*)'|\(([\s\S]*)\)))?$/.exec(inside);
+		const titleMatch = matchDestination(src.slice(labelEnd + 2, destinationEnd));
 		if (!titleMatch) return undefined;
-		href = cleanUrl(titleMatch[1]!);
-		title = titleMatch[2] ?? titleMatch[3] ?? titleMatch[4] ?? null;
+		const href = cleanUrl(titleMatch[1]!);
+		const title = titleMatch[2] ?? titleMatch[3] ?? titleMatch[4] ?? null;
 		const raw = src.slice(0, destinationEnd + 1);
 		// An image's text is its label unescaped. Nested images each unescape their label, so a label without an escape
 		// is taken as it is instead of read again.
@@ -581,7 +555,7 @@ function matchEmphasis(rest: string, output: Token[], closers: InlineClosers): N
 	const previous = output.at(-1)?.raw.at(-1) ?? "\n";
 	if (marker !== "*" && marker !== "_") return undefined;
 	if (rest.startsWith(marker.repeat(3)) && canOpenDelimiter(rest, 0, 3, marker, previous)) {
-		const end = findDelimiter(rest, marker.repeat(3), 3);
+		const end = closers.findDelimiter(rest, marker.repeat(3), 3);
 		if (end !== -1 && canCloseDelimiter(rest, end, marker)) {
 			// The text between the delimiters inside the outer two markers of each: `**inner**`.
 			const text = rest.slice(1, end + 2);
@@ -711,17 +685,21 @@ function lexToNested(lex: InlineLex): NestedMatch | undefined {
 				continue;
 			}
 		}
-		const auto = autolinkPrefix(rest, closers);
-		if (auto) {
-			const text = auto.slice(1, -1);
-			const href = text.includes("@") && !/^[a-z][a-z+.-]*:\/\//i.test(text) ? `mailto:${text}` : text;
-			consumeToken({ type: "link", raw: auto, text, href, tokens: [{ type: "text", raw: text, text }] });
-			continue;
-		}
-		const html = inlineHtmlPrefix(rest, closers);
-		if (html) {
-			consumeToken({ type: "html", raw: html, inLink: false, inRawBlock: false, block: false, text: html });
-			continue;
+		if (rest.startsWith("<")) {
+			const autolink = closers.autolinkLength(rest);
+			if (autolink !== -1) {
+				const raw = rest.slice(0, autolink);
+				const text = raw.slice(1, -1);
+				const href = text.includes("@") && !/^[a-z][a-z+.-]*:\/\//i.test(text) ? `mailto:${text}` : text;
+				consumeToken({ type: "link", raw, text, href, tokens: [{ type: "text", raw: text, text }] });
+				continue;
+			}
+			const html = closers.htmlLength(rest);
+			if (html !== -1) {
+				const raw = rest.slice(0, html);
+				consumeToken({ type: "html", raw, inLink: false, inRawBlock: false, block: false, text: raw });
+				continue;
+			}
 		}
 		const nested = matchLink(rest, lexer, closers) ?? matchEmphasis(rest, output, closers);
 		if (nested) {
@@ -816,34 +794,96 @@ function isHtmlStart(line: string): boolean {
 		line,
 	);
 }
+function leadingSpacesUpTo4(line: string): number {
+	let n = 0;
+	while (n < 4 && line.charCodeAt(n) === 0x20) n++;
+	return n;
+}
+
+/** Equivalent to `/^\s*\n$/.test(line)` without regex overhead on non-blank lines. */
+function isBlankNewline(line: string): boolean {
+	const len = line.length;
+	if (len === 0 || line.charCodeAt(len - 1) !== 0x0a) return false;
+	if (len === 1) return true;
+	for (let i = 0; i < len - 1; i++) {
+		const c = line.charCodeAt(i);
+		if (c === 0x20 || c === 0x09) continue;
+		if (c >= 0x21 && c <= 0x7e) return false;
+		return /^\s*\n$/.test(line);
+	}
+	return true;
+}
+
+/** Equivalent to `line.trim() === ""` without allocating a trimmed string. */
+function isBlankLine(line: string): boolean {
+	for (let i = 0; i < line.length; i++) {
+		const c = line.charCodeAt(i);
+		if (c === 0x20 || c === 0x09 || c === 0x0a || c === 0x0d) continue;
+		if (c >= 0x21 && c <= 0x7e) return false;
+		return line.trim() === "";
+	}
+	return true;
+}
+
+function isSetextUnderline(line: string): boolean {
+	const indent = leadingSpacesUpTo4(line);
+	if (indent >= 4) return false;
+	const ch = line.charCodeAt(indent);
+	return (ch === 0x3d || ch === 0x2d) && /^ {0,3}(?:=+|-+)[ \t]*(?:\n|$)$/.test(line);
+}
+
 function isBlockStart(lines: string[], index: number): boolean {
 	const line = lines[index] ?? "";
-	if (/^\n+$/.test(line)) return true;
-	if (
-		isFence(line) ||
-		isHeading(line) ||
-		isHr(line) ||
-		isList(line) ||
-		isBlockquote(line) ||
-		isDefinition(line) ||
-		isHtmlStart(line) ||
-		/^ {4}\S/.test(line)
-	)
-		return true;
-	if (index + 1 < lines.length && /^ {0,3}(?:=+|-+)[ \t]*(?:\n|$)$/.test(lines[index + 1]!)) return true;
-	if (
-		index + 1 < lines.length &&
-		line.includes("|") &&
-		splitTableRow(lines[index + 1]!).every(c => /^:?-{1,}:?$/.test(c))
-	)
-		return true;
+	if (line === "\n" || (line.charCodeAt(0) === 0x0a && /^\n+$/.test(line))) return true;
+	const indent = leadingSpacesUpTo4(line);
+	if (indent === 4) {
+		if (/^ {4}\S/.test(line)) return true;
+	} else {
+		const ch = line.charCodeAt(indent);
+		if (ch === 0x60 || ch === 0x7e) {
+			if (isFence(line)) return true;
+		} else if (ch === 0x23) {
+			if (isHeading(line)) return true;
+		} else if (ch === 0x3e) {
+			if (isBlockquote(line)) return true;
+		} else if (ch === 0x3c) {
+			if (isHtmlStart(line)) return true;
+		} else if (ch === 0x5b) {
+			if (isDefinition(line)) return true;
+		} else if (ch === 0x2a || ch === 0x2d) {
+			if (isHr(line) || isList(line)) return true;
+		} else if (ch === 0x5f) {
+			if (isHr(line)) return true;
+		} else if (ch === 0x2b || (ch >= 0x30 && ch <= 0x39)) {
+			if (isList(line)) return true;
+		}
+	}
+	if (index + 1 < lines.length) {
+		const next = lines[index + 1]!;
+		if (isSetextUnderline(next)) return true;
+		if (line.includes("|") && next.includes("-") && splitTableRow(next).every(c => /^:?-{1,}:?$/.test(c)))
+			return true;
+	}
 	return false;
 }
 
 // `[^\n]`, not `.`: `.` stops at U+2028 and U+2029, which end no Markdown line,
 // and the match then skips the text in front of them.
 function lineArray(src: string): string[] {
-	return src.match(/[^\n]*(?:\n|$)/g)?.filter((line, index, all) => line !== "" || index < all.length - 1) ?? [];
+	const len = src.length;
+	if (len === 0) return [];
+	const lines: string[] = [];
+	let start = 0;
+	while (start < len) {
+		const nl = src.indexOf("\n", start);
+		if (nl === -1) {
+			lines.push(src.slice(start));
+			break;
+		}
+		lines.push(src.slice(start, nl + 1));
+		start = nl + 1;
+	}
+	return lines;
 }
 function stripFinalNewline(value: string): string {
 	return value.endsWith("\n") ? value.slice(0, -1) : value;
@@ -851,13 +891,12 @@ function stripFinalNewline(value: string): string {
 
 function makeTable(lines: string[], index: number, lexer: Lexer): { token: Tokens.Table; count: number } | undefined {
 	if (index + 1 >= lines.length) return undefined;
-	const headerValues = splitTableRow(stripFinalNewline(lines[index]!));
-	const delimiterValues = splitTableRow(stripFinalNewline(lines[index + 1]!));
-	if (
-		!lines[index]!.includes("|") ||
-		headerValues.length !== delimiterValues.length ||
-		!delimiterValues.every(c => /^:?-{1,}:?$/.test(c))
-	)
+	const headerLine = lines[index]!;
+	const delimiterLine = lines[index + 1]!;
+	if (!headerLine.includes("|") || !delimiterLine.includes("-")) return undefined;
+	const headerValues = splitTableRow(stripFinalNewline(headerLine));
+	const delimiterValues = splitTableRow(stripFinalNewline(delimiterLine));
+	if (headerValues.length !== delimiterValues.length || !delimiterValues.every(c => /^:?-{1,}:?$/.test(c)))
 		return undefined;
 	const align = delimiterValues.map(cell =>
 		cell.startsWith(":") && cell.endsWith(":")
@@ -870,7 +909,7 @@ function makeTable(lines: string[], index: number, lexer: Lexer): { token: Token
 	);
 	let count = 2;
 	const body: string[][] = [];
-	while (index + count < lines.length && !/^\s*\n?$/.test(lines[index + count]!)) {
+	while (index + count < lines.length && !isBlankLine(lines[index + count]!)) {
 		const cells = splitTableRow(stripFinalNewline(lines[index + count]!));
 		if (cells.length === 1 && !lines[index + count]!.includes("|")) break;
 		while (cells.length < headerValues.length) cells.push("");
@@ -1026,9 +1065,9 @@ function blockTokens(src: string, lexer: Lexer, output: Token[]): Token[] {
 			continue;
 		}
 		const line = lines[i]!;
-		if (/^\s*\n$/.test(line)) {
+		if (isBlankNewline(line)) {
 			let raw = "";
-			while (i < lines.length && /^\s*\n$/.test(lines[i]!)) raw += lines[i++]!;
+			while (i < lines.length && isBlankNewline(lines[i]!)) raw += lines[i++]!;
 			if (output.length > 0) {
 				const previous = output.at(-1)!;
 				if (previous.raw.endsWith("\n")) previous.raw = previous.raw.slice(0, -1);
@@ -1037,63 +1076,73 @@ function blockTokens(src: string, lexer: Lexer, output: Token[]): Token[] {
 			if (raw.length > 1) output.push({ type: "space", raw });
 			continue;
 		}
-		const fence = isFence(line);
-		if (fence) {
-			const marker = fence[1]!;
-			let raw = line;
-			let text = "";
-			i++;
-			const closer = new RegExp(`^ {0,3}${marker[0]}{${marker.length},}[ \\t]*(?:\\n|$)$`);
-			while (i < lines.length) {
-				const next = lines[i++]!;
-				if (closer.test(next)) {
-					raw += next;
-					break;
-				}
-				raw += next;
-				text += next;
-			}
-			text = stripFinalNewline(text);
-			const rawToken = i < lines.length && /^\s*\n$/.test(lines[i]!) ? stripFinalNewline(raw) : raw;
-			output.push({ type: "code", raw: rawToken, lang: fence[2]!.trim(), text });
-			continue;
-		}
-		if (/^ {4}/.test(line)) {
+		const indent = leadingSpacesUpTo4(line);
+		if (indent === 4) {
 			let raw = "";
 			let text = "";
-			while (i < lines.length && /^ {4}/.test(lines[i]!)) {
+			while (i < lines.length && leadingSpacesUpTo4(lines[i]!) === 4) {
 				raw += lines[i]!;
 				text += lines[i]!.slice(4);
 				i++;
-				if (i < lines.length && /^\s*\n$/.test(lines[i]!) && i + 1 < lines.length && /^ {4}/.test(lines[i + 1]!)) {
+				if (
+					i < lines.length &&
+					isBlankNewline(lines[i]!) &&
+					i + 1 < lines.length &&
+					leadingSpacesUpTo4(lines[i + 1]!) === 4
+				) {
 					raw += lines[i]!;
 					text += lines[i]!;
 					i++;
 				}
 			}
-			if (i < lines.length && /^\s*\n$/.test(lines[i]!)) {
+			if (i < lines.length && isBlankNewline(lines[i]!)) {
 				raw = stripFinalNewline(raw);
 				text = stripFinalNewline(text);
 			}
 			output.push({ type: "code", raw, codeBlockStyle: "indented", text: text.replace(/\n+$/, "\n") });
 			continue;
 		}
-		const heading = /^ {0,3}(#{1,6})(?:[ \t]+|$)(.*?)(?:\n|$)$/.exec(line);
-		if (heading) {
-			const text = heading[2]!.replace(/[ \t]+#+[ \t]*$/, "").trim();
-			const raw = i + 1 < lines.length && /^\s*\n$/.test(lines[i + 1]!) ? stripFinalNewline(line) : line;
-			const tokens: Token[] = [];
-			lexer.inline(text, tokens);
-			output.push({ type: "heading", raw, depth: heading[1]!.length, text, tokens });
-			i++;
-			continue;
-		}
-		if (isHr(line)) {
-			output.push({ type: "hr", raw: line });
-			i++;
-			continue;
-		}
-		if (isBlockquote(line)) {
+		const ch = line.charCodeAt(indent);
+		if (ch === 0x60 || ch === 0x7e) {
+			const fence = isFence(line);
+			if (fence) {
+				const marker = fence[1]!;
+				let raw = line;
+				let text = "";
+				i++;
+				const closer = new RegExp(`^ {0,3}${marker[0]}{${marker.length},}[ \\t]*(?:\\n|$)$`);
+				while (i < lines.length) {
+					const next = lines[i++]!;
+					if (closer.test(next)) {
+						raw += next;
+						break;
+					}
+					raw += next;
+					text += next;
+				}
+				text = stripFinalNewline(text);
+				const rawToken = i < lines.length && isBlankNewline(lines[i]!) ? stripFinalNewline(raw) : raw;
+				output.push({ type: "code", raw: rawToken, lang: fence[2]!.trim(), text });
+				continue;
+			}
+		} else if (ch === 0x23) {
+			const heading = /^ {0,3}(#{1,6})(?:[ \t]+|$)(.*?)(?:\n|$)$/.exec(line);
+			if (heading) {
+				const text = heading[2]!.replace(/[ \t]+#+[ \t]*$/, "").trim();
+				const raw = i + 1 < lines.length && isBlankNewline(lines[i + 1]!) ? stripFinalNewline(line) : line;
+				const tokens: Token[] = [];
+				lexer.inline(text, tokens);
+				output.push({ type: "heading", raw, depth: heading[1]!.length, text, tokens });
+				i++;
+				continue;
+			}
+		} else if (ch === 0x2a || ch === 0x2d || ch === 0x5f) {
+			if (isHr(line)) {
+				output.push({ type: "hr", raw: line });
+				i++;
+				continue;
+			}
+		} else if (ch === 0x3e) {
 			let raw = "";
 			let text = "";
 			while (i < lines.length) {
@@ -1104,7 +1153,7 @@ function blockTokens(src: string, lexer: Lexer, output: Token[]): Token[] {
 					i++;
 					continue;
 				}
-				if (!/^\s*\n$/.test(next) && !isBlockStart(lines, i)) {
+				if (!isBlankNewline(next) && !isBlockStart(lines, i)) {
 					raw += next;
 					text += next;
 					i++;
@@ -1115,55 +1164,59 @@ function blockTokens(src: string, lexer: Lexer, output: Token[]): Token[] {
 			text = stripFinalNewline(text);
 			output.push({ type: "blockquote", raw, tokens: lexer.blockTokens(text, []), text });
 			continue;
-		}
-		const list = parseList(lines, i, lexer);
-		if (list) {
-			output.push(list.token);
-			i += list.count;
-			continue;
-		}
-		if (isHtmlStart(line)) {
-			let raw = line;
-			const tag = /^ {0,3}<([A-Za-z][\w-]*)/.exec(line)?.[1]?.toLowerCase();
-			i++;
-			if (line.trimStart().startsWith("<!--")) {
-				while (!raw.includes("-->") && i < lines.length) raw += lines[i++]!;
-			} else if (tag) {
-				// A closing tag never spans lines, so testing each appended line is
-				// equivalent to re-testing the accumulated block.
-				const closeTag = new RegExp(`</${tag}>`, "i");
-				if (!closeTag.test(raw)) {
-					while (i < lines.length) {
-						const next = lines[i++]!;
-						raw += next;
-						if (closeTag.test(next)) break;
+		} else if (ch === 0x3c) {
+			if (isHtmlStart(line)) {
+				let raw = line;
+				const tag = /^ {0,3}<([A-Za-z][\w-]*)/.exec(line)?.[1]?.toLowerCase();
+				i++;
+				if (line.trimStart().startsWith("<!--")) {
+					while (!raw.includes("-->") && i < lines.length) raw += lines[i++]!;
+				} else if (tag) {
+					// A closing tag never spans lines, so testing each appended line is
+					// equivalent to re-testing the accumulated block.
+					const closeTag = new RegExp(`</${tag}>`, "i");
+					if (!closeTag.test(raw)) {
+						while (i < lines.length) {
+							const next = lines[i++]!;
+							raw += next;
+							if (closeTag.test(next)) break;
+						}
 					}
 				}
+				const value = i < lines.length && isBlankNewline(lines[i]!) ? stripFinalNewline(raw) : raw;
+				output.push({
+					type: "html",
+					block: true,
+					raw: value,
+					pre: tag === "pre" || tag === "script" || tag === "style",
+					text: value,
+				});
+				continue;
 			}
-			const value = i < lines.length && /^\s*\n$/.test(lines[i]!) ? stripFinalNewline(raw) : raw;
-			output.push({
-				type: "html",
-				block: true,
-				raw: value,
-				pre: tag === "pre" || tag === "script" || tag === "style",
-				text: value,
-			});
-			continue;
+		} else if (ch === 0x5b) {
+			const def =
+				/^ {0,3}\[([^\]]+)\]:[ \t]*(?:<([^>]+)>|(\S+))(?:[ \t]+(?:"([^"]*)"|'([^']*)'|\(([^)]*)\)))?[ \t]*(?:\n|$)$/.exec(
+					line,
+				);
+			if (def) {
+				const tag = def[1]!.replace(/\s+/g, " ").toLowerCase();
+				const href = cleanUrl(def[2] ?? def[3] ?? "");
+				const title = def[4] ?? def[5] ?? def[6];
+				lexer.tokens.links[tag] = { href, title: title ?? null };
+				const token: Tokens.Def = { type: "def", tag, raw: line, href };
+				if (title !== undefined) token.title = title;
+				output.push(token);
+				i++;
+				continue;
+			}
 		}
-		const def =
-			/^ {0,3}\[([^\]]+)\]:[ \t]*(?:<([^>]+)>|(\S+))(?:[ \t]+(?:"([^"]*)"|'([^']*)'|\(([^)]*)\)))?[ \t]*(?:\n|$)$/.exec(
-				line,
-			);
-		if (def) {
-			const tag = def[1]!.replace(/\s+/g, " ").toLowerCase();
-			const href = cleanUrl(def[2] ?? def[3] ?? "");
-			const title = def[4] ?? def[5] ?? def[6];
-			lexer.tokens.links[tag] = { href, title: title ?? null };
-			const token: Tokens.Def = { type: "def", tag, raw: line, href };
-			if (title !== undefined) token.title = title;
-			output.push(token);
-			i++;
-			continue;
+		if (ch === 0x2a || ch === 0x2b || ch === 0x2d || (ch >= 0x30 && ch <= 0x39)) {
+			const list = parseList(lines, i, lexer);
+			if (list) {
+				output.push(list.token);
+				i += list.count;
+				continue;
+			}
 		}
 		const table = makeTable(lines, i, lexer);
 		if (table) {
@@ -1171,7 +1224,7 @@ function blockTokens(src: string, lexer: Lexer, output: Token[]): Token[] {
 			i += table.count;
 			continue;
 		}
-		if (i + 1 < lines.length && /^ {0,3}(=+|-+)[ \t]*(?:\n|$)$/.test(lines[i + 1]!)) {
+		if (i + 1 < lines.length && isSetextUnderline(lines[i + 1]!)) {
 			let fallback: Tokens.Heading | undefined | false;
 			if (lheadingOverride) fallback = lheadingOverride.call(lexer.tokenizer, src.slice(lineStarts![i]));
 			if (!lheadingOverride || fallback === false) {
@@ -1200,9 +1253,10 @@ function blockTokens(src: string, lexer: Lexer, output: Token[]): Token[] {
 		let prevBlankish = false;
 		while (i < lines.length) {
 			const next = lines[i]!;
-			const indented = next.trim() !== "" && /^ {4}/.test(next);
+			const blank = isBlankLine(next);
+			const indented = !blank && leadingSpacesUpTo4(next) === 4;
 			if (indented ? prevBlankish : isBlockStart(lines, i)) break;
-			prevBlankish = next.trim() === "";
+			prevBlankish = blank;
 			raw += next;
 			i++;
 		}

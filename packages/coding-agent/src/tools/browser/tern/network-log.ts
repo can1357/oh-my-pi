@@ -13,7 +13,7 @@
  * body store and no request body size; their response body size is the
  * Content-Length the response declared, unknown without one.
  */
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tool-errors";
 import {
 	buildHarEntry,
 	buildHarLog,
@@ -394,7 +394,7 @@ export class TernNetworkLog {
 		const limit = normalizeLimit(options.limit);
 		let records = this.#records.filter(record => matchesRequest(record, options));
 		if (limit !== undefined) records = records.slice(-limit);
-		const result = records.map(toPublicRecord);
+		const result = records.map(record => toPublicRecord(record, true));
 		if (options.clear) this.clear();
 		return result;
 	}

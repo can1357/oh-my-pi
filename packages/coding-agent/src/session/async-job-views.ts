@@ -7,7 +7,8 @@
 import type { AsyncJob, AsyncJobManagerApi } from "../async";
 import type { JobWidgetRegistry } from "../job-widgets/types";
 import { AgentRegistry } from "../registry/agent-registry";
-import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
+import { nativeShellStreams } from "../tools/shell-steps";
+import type { JobWidgetEntry } from "../tools/details/job-widget";
 import type { AsyncJobInspection, AsyncJobSnapshot, AsyncJobSnapshotItem, AsyncJobTree } from "./agent-session-types";
 
 /** The public summary of `job` (see {@link AsyncJobSnapshotItem}); its caption shows only while widgets are on. */
@@ -125,8 +126,9 @@ export function requestJobTreeCaptions(manager: AsyncJobManagerApi, rootId: stri
 
 /**
  * One async job in `rootId`'s tree (see {@link asyncJobTree}): its command,
- * live pids, exit status and output. Undefined when the job is unknown, owned
- * outside the tree, or evicted.
+ * live pids, exit status, output, shell trace and the streams its output
+ * takes instead. Undefined when the job is unknown, owned outside the tree,
+ * or evicted.
  */
 export function inspectAsyncJob(
 	manager: AsyncJobManagerApi,
@@ -146,8 +148,11 @@ export function inspectAsyncJob(
 		pids: job.status === "running" ? (job.process?.pids() ?? []) : [],
 		exitCode,
 		output,
+		outputModified: job.process?.outputModified?.(),
 		artifactId: details?.meta?.truncation?.artifactId,
 		widget: manager.widgets?.view(job),
+		trace: job.process?.trace?.(),
+		streams: job.process?.streams && nativeShellStreams(job.process.streams),
 	};
 }
 

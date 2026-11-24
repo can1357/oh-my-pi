@@ -8,7 +8,7 @@ import {
 	type WorkspaceFileChange,
 } from "@oh-my-pi/pi-coding-agent/lsp/edits";
 import type { TextEdit, WorkspaceEdit } from "@oh-my-pi/pi-coding-agent/lsp/types";
-import { fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
+import { fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/uri";
 
 // Rewrite `./moved` → `./renamed` on line 0 of the reference file below.
 const importEdit: TextEdit[] = [
@@ -33,11 +33,9 @@ describe("applyEditsThenRename", () => {
 		await fs.rm(dir, { recursive: true, force: true });
 	});
 
-	it("applies reference edits, moves the source, and then reports both", async () => {
+	it("applies reference edits and moves the source when the move succeeds", async () => {
 		const dest = path.join(dir, "nested", "renamed.ts");
 		const recorded: WorkspaceFileChange[] = [];
-		const refMtimeMs = (await fs.stat(ref)).mtimeMs;
-		const sourceMtimeMs = (await fs.stat(source)).mtimeMs;
 		await applyEditsThenRename(
 			[{ filePath: ref, edits: importEdit }],
 			source,
@@ -55,19 +53,13 @@ describe("applyEditsThenRename", () => {
 				path: path.join(real, "ref.ts"),
 				before: refBefore,
 				after: 'import { x } from "./renamed";\n',
-				beforeMtimeMs: refMtimeMs,
 			},
-			{
-				path: path.join(real, "moved.ts"),
-				before: "export const x = 1;\n",
-				after: null,
-				beforeMtimeMs: sourceMtimeMs,
-			},
+			{ path: path.join(real, "moved.ts"), before: "export const x = 1;\n", after: null },
 			{ path: path.join(real, "nested", "renamed.ts"), before: null, after: "export const x = 1;\n" },
 		]);
 	});
 
-	it("restores the reference files' exact bytes and reports nothing when the move fails", async () => {
+	it("rolls back reference edits when the move fails", async () => {
 		// A regular file stands where a dest-parent directory must be, so the
 		// recursive mkdir throws ENOTDIR before the rename runs.
 		const blocker = path.join(dir, "blocker");
@@ -113,7 +105,6 @@ describe("workspace edit recorder", () => {
 			await Bun.write(first, "const oldName = oldName;\n");
 			await Bun.write(second, "oldName();\n");
 			const before = await Promise.all([Bun.file(first).text(), Bun.file(second).text()]);
-			const stats = await Promise.all([fs.stat(first), fs.stat(second)]);
 			const replace = (start: number): TextEdit => ({
 				range: { start: { line: 0, character: start }, end: { line: 0, character: start + 7 } },
 				newText: "newName",
@@ -138,8 +129,8 @@ describe("workspace edit recorder", () => {
 			expect(await Bun.file(first).text()).toBe("const newName = newName;\n");
 			expect(await Bun.file(second).text()).toBe("newName();\n");
 			expect(recorded).toEqual([
-				{ path: first, before: before[0], after: await Bun.file(first).text(), beforeMtimeMs: stats[0].mtimeMs },
-				{ path: second, before: before[1], after: await Bun.file(second).text(), beforeMtimeMs: stats[1].mtimeMs },
+				{ path: first, before: before[0], after: await Bun.file(first).text() },
+				{ path: second, before: before[1], after: await Bun.file(second).text() },
 			]);
 		},
 	);
@@ -154,7 +145,6 @@ describe("workspace edit recorder", () => {
 			await Bun.write(target, before);
 			await fs.mkdir(workspace);
 			await fs.symlink("../target.ts", link);
-			const beforeMtimeMs = (await fs.stat(target)).mtimeMs;
 			const edits: TextEdit[] = [
 				{
 					range: { start: { line: 0, character: 6 }, end: { line: 0, character: 13 } },
@@ -173,7 +163,7 @@ describe("workspace edit recorder", () => {
 			expect(await fs.readFile(target, "utf8")).toBe("const newName = 1;\n");
 			expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
 			expect(path.resolve(workspace, await fs.readlink(link))).toBe(target);
-			expect(recorded).toEqual([{ path: target, before, after: "const newName = 1;\n", beforeMtimeMs }]);
+			expect(recorded).toEqual([{ path: target, before, after: "const newName = 1;\n" }]);
 		},
 	);
 
@@ -183,7 +173,6 @@ describe("workspace edit recorder", () => {
 			const file = path.join(dir, "bom.ts");
 			const before = "\uFEFFconst oldName = 1;\n";
 			await Bun.write(file, before);
-			const beforeMtimeMs = (await fs.stat(file)).mtimeMs;
 			const edits: TextEdit[] = [
 				{
 					range: { start: { line: 0, character: 6 }, end: { line: 0, character: 13 } },
@@ -200,7 +189,7 @@ describe("workspace edit recorder", () => {
 			await applyWorkspaceEdit(edit, dir, undefined, change => recorded.push(change));
 
 			expect(await fs.readFile(file, "utf8")).toBe("const newName = 1;\n");
-			expect(recorded).toEqual([{ path: file, before, after: await fs.readFile(file, "utf8"), beforeMtimeMs }]);
+			expect(recorded).toEqual([{ path: file, before, after: await fs.readFile(file, "utf8") }]);
 		},
 	);
 
@@ -253,7 +242,6 @@ describe("workspace edit recorder", () => {
 		await Bun.write(edited, "oldName\n");
 		await Bun.write(target, "keep target\n");
 		await Bun.write(child, "keep child\n");
-		const beforeMtimeMs = (await fs.stat(edited)).mtimeMs;
 		const recorded: WorkspaceFileChange[] = [];
 
 		await expect(
@@ -293,6 +281,6 @@ describe("workspace edit recorder", () => {
 		expect(await Bun.file(edited).text()).toBe("newName\n");
 		expect(await Bun.file(target).text()).toBe("keep target\n");
 		expect(await Bun.file(child).text()).toBe("keep child\n");
-		expect(recorded).toEqual([{ path: edited, before: "oldName\n", after: "newName\n", beforeMtimeMs }]);
+		expect(recorded).toEqual([{ path: edited, before: "oldName\n", after: "newName\n" }]);
 	});
 });

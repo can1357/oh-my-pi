@@ -1,10 +1,10 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { initTheme } from "../src/ui/theme/service";
 
 beforeAll(async () => {
-	await initTheme(false);
+	initTheme();
 });
 
 interface NewSessionHarness {
@@ -54,7 +54,7 @@ function makeHarness(): NewSessionHarness {
 		},
 		resetObserverRegistry: () => {},
 		statusLine: {
-			invalidate: () => {},
+			refresh: () => {},
 			resetActiveTime: () => {},
 		},
 		updateEditorBorderColor: () => {},
@@ -66,7 +66,7 @@ function makeHarness(): NewSessionHarness {
 			presented++;
 		},
 		reloadTodos: async () => {},
-		ui: { requestRender: () => {} },
+		shell: { host: undefined },
 	} as unknown as InteractiveModeContext;
 
 	return {

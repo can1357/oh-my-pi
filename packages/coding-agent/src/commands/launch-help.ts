@@ -1,7 +1,7 @@
 import { Args, type CommandMetadata, Flags } from "@oh-my-pi/pi-utils/cli";
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
-import { formatKeyHint } from "@oh-my-pi/pi-tui/key-hint-format";
-import { CLI_THINKING_LEVELS } from "@oh-my-pi/pi-tui/thinking";
+import { formatKey, keyHintPlatform } from "../ui/keys/format";
+import { CLI_THINKING_LEVELS } from "../thinking/levels";
 import { SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
 
 export const launchHelp = {
@@ -50,7 +50,7 @@ export const launchHelp = {
 		alias: Flags.string({ description: "Create a shell shortcut for the selected profile and exit" }),
 		cwd: Flags.string({ description: "Directory to start in (overrides the launch cwd)" }),
 		mode: Flags.string({
-			description: "Output mode: text (default), json, rpc, or rpc-ui",
+			description: "Output mode: text (default), json, rpc, acp, or rpc-ui",
 			options: ["text", "json", "rpc", "acp", "rpc-ui"],
 		}),
 		config: Flags.string({
@@ -72,8 +72,13 @@ export const launchHelp = {
 		"from-codex": Flags.boolean({ description: "Import a Codex session into OMP" }),
 		"session-dir": Flags.string({ description: "Directory for session storage and lookup" }),
 		"no-session": Flags.boolean({ description: "Don't save session (ephemeral)" }),
-		models: Flags.string({ description: `Comma-separated model patterns for ${formatKeyHint("ctrl+p")} cycling` }),
-		"no-tools": Flags.boolean({ description: "Disable all built-in tools" }),
+		models: Flags.string({
+			description: `Comma-separated model patterns for ${formatKey("ctrl+p", { preset: "ascii", platform: keyHintPlatform() })} cycling`,
+		}),
+		"no-tools": Flags.boolean({
+			description:
+				"Allow only the built-in tools named in --tools; load no MCP, LSP, extensions, custom tools or memory",
+		}),
 		"no-judge": Flags.boolean({ description: "Restrict judge calls to the active model's provider" }),
 		"no-spotlight": Flags.boolean({ description: "Restrict Spotlight calls to the active model's provider" }),
 		offline: Flags.boolean({

@@ -7,25 +7,13 @@
 import { describe, expect, it, vi } from "bun:test";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { Composer } from "../src/ui/composer/composer";
 
 function createContext(approvalOwnsComposer: boolean) {
 	const mainPrompt = vi.fn(async () => true);
 	const focusedPrompt = vi.fn(async () => true);
-	const editor = {
-		pendingImages: [],
-		pendingImageLinks: [],
-		imageLinks: undefined,
-		addToHistory: vi.fn(),
-		setText: vi.fn(),
-		getText: () => "",
-		getExpandedText: () => "",
-		clearDraft: vi.fn(),
-		setCollapsedText: vi.fn(),
-		composerChips: () => [],
-	} as unknown as InteractiveModeContext["editor"];
 	const ctx = {
-		editor,
-		ui: { requestRender: vi.fn() },
+		composer: new Composer(),
 		session: {
 			isStreaming: true,
 			isCompacting: false,
@@ -42,7 +30,7 @@ function createContext(approvalOwnsComposer: boolean) {
 		approvalOwnsComposer,
 		sessionManager: { putBlob: vi.fn() },
 		loopModeEnabled: false,
-		flushPendingBashComponents: vi.fn(),
+		flushPendingExecRuns: vi.fn(),
 		startPendingSubmission: vi.fn((input: { text: string }) => ({ ...input, cancelled: false, started: false })),
 		withLocalSubmission: async (_text: string, fn: () => unknown) => fn(),
 		updatePendingMessagesDisplay: vi.fn(),
@@ -67,7 +55,8 @@ describe("approval composer routing from a focused view", () => {
 			const controller = new InputController(ctx);
 			controller.setupEditorSubmitHandler();
 
-			await ctx.editor.onSubmit?.("keep the build dir");
+			ctx.composer.onSubmit?.("keep the build dir");
+			await controller.waitForSubmissionDispatches();
 
 			expect(mainPrompt).toHaveBeenCalledTimes(owned ? 1 : 0);
 			expect(focusedPrompt).toHaveBeenCalledTimes(owned ? 0 : 1);

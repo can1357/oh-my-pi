@@ -2,7 +2,7 @@
  * Repro for https://github.com/can1357/oh-my-pi/issues/4812
  *
  * A long-lived omp session that survives an in-place `bun install -g` upgrade
- * keeps the previous pi-natives NAPI addon resident in the process. A tab
+ * keeps the previous omp-natives NAPI addon resident in the process. A tab
  * the new release (e.g. `16.3.11`), but `require` returns the resident old
  * exports reporting the PRIOR release (`16.3.10`) — via
  * `__piNativesBuildVersion()`, or a legacy `__piNativesV16_3_10` export for
@@ -47,7 +47,7 @@ function reporting(version: string | null) {
 	return { __piNativesBuildVersion: () => version, grep: () => {} };
 }
 
-describe("issue 4812: pi-natives release process-stale diagnosis", () => {
+describe("issue 4812: omp-natives release process-stale diagnosis", () => {
 	it("accepts bindings that report the expected version", () => {
 		expect(() => validateLoadedBindings(ctxFor("16.3.11"), reporting("16.3.11"), unusedCandidate)).not.toThrow();
 	});

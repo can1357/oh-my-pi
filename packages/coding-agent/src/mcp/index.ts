@@ -2,7 +2,7 @@
  * MCP (Model Context Protocol) support.
  *
  * Provides per-project .mcp.json configuration for connecting to
- * MCP servers via stdio or HTTP transports.
+ * MCP servers, each reached through the MCP host.
  */
 
 // Client
@@ -22,11 +22,11 @@ export * from "./oauth-discovery";
 export * from "./reload";
 // Tool bridge
 export * from "./tool-bridge";
-// Tool cache
-export * from "./tool-cache";
-// Transports
-export * from "./transports/http";
-export * from "./transports/stdio";
+// Built-in transforms
+export * from "./transforms";
+// Protocol (MCP 2026-07-28) and the session ↔ host contract
+export * from "./host/contract";
+export * from "./protocol";
 // Types
 export * from "./types";
 
@@ -34,6 +34,8 @@ export type {
 	MCPToolDetails,
 	MCPTextContent,
 	MCPImageContent,
+	MCPAudioContent,
 	MCPResourceContent,
+	MCPResourceLinkContent,
 	MCPContent,
-} from "@oh-my-pi/pi-tui/tools/mcp";
+} from "../tools/details/mcp";

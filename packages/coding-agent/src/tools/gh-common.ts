@@ -1,12 +1,12 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { logger, sanitizeText, spillUrl } from "@oh-my-pi/pi-utils";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { CwdLookupMemo } from "../utils/forge-cli";
 import { github } from "../utils/github";
 import type { ToolSession } from ".";
-import type { GhToolDetails } from "@oh-my-pi/pi-tui/tools/github";
+import type { GhToolDetails } from "./details/github";
 import type { GhLabel, GhUser } from "./gh-types";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
 export function normalizeText(value: string | null | undefined): string {
@@ -335,12 +335,8 @@ export async function tryResolveCurrentRepoFresh(
 	}
 }
 
-export async function saveArtifactText(
-	session: ToolSession,
-	toolType: string,
-	text: string,
-): Promise<string | undefined> {
-	const { path: artifactPath, id: artifactId } = (await session.allocateOutputArtifact?.(toolType)) ?? {};
+export async function saveArtifactText(session: ToolSession, text: string): Promise<string | undefined> {
+	const { path: artifactPath, id: artifactId } = (await session.allocateOutputArtifact?.()) ?? {};
 	if (!artifactPath || !artifactId) {
 		return undefined;
 	}
@@ -354,7 +350,7 @@ export function appendArtifactReference(text: string, artifactId: string | undef
 		return text;
 	}
 
-	return `${text}\n\n${label}: artifact://${artifactId}`;
+	return `${text}\n\n${label}: ${spillUrl(artifactId)}`;
 }
 
 export function buildTextResult(

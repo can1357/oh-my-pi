@@ -1,10 +1,9 @@
-import type { Component } from "@oh-my-pi/pi-tui";
 import { parseStreamingJson, parseStreamingJsonThrottled, STREAMING_JSON_PARSE_MIN_GROWTH } from "@oh-my-pi/pi-utils";
 import { nextStep, STREAMING_REVEAL_FRAME_MS } from "./streaming-reveal";
 
-/** Minimal component surface the reveal pushes frames into. */
-type ToolArgsRevealComponent = Component & {
-	updateArgs(args: unknown, toolCallId?: string): void;
+/** What the reveal pushes frames into (a pending tool's handle). */
+type ToolArgsRevealComponent = {
+	updateArgs(args: unknown, toolCallId: string): void;
 };
 
 // Top-level string args a renderer reads mid-stream. The streamed-args decode
@@ -13,8 +12,6 @@ type ToolArgsRevealComponent = Component & {
 // STREAMING_JSON_PARSE_MIN_GROWTH bytes at a time. Nested-array modes (edit
 // patch/replace `edits[].diff`) still fall through to the throttled parse.
 const STREAMING_STRING_KEYS_BY_TOOL: Record<string, readonly string[]> = {
-	// write.content also carries xd:// device args (a JSON string) — the same
-	// incremental decode feeds the delegated tool renderer live inner args.
 	write: ["content"],
 	edit: ["input", "_input"],
 	eval: ["code"],
@@ -28,10 +25,6 @@ export function streamingStringKeysForTool(toolName: string, rawInput: boolean):
 
 type ToolArgsRevealControllerOptions = {
 	getSmoothStreaming(): boolean;
-	/** Called after each reveal tick with the component whose subtree changed;
-	 *  callers scope the render to that subtree instead of forcing a full-tree
-	 *  walk at 30fps (issue #4377). */
-	requestRender(component: Component): void;
 };
 
 type StreamingJsonStringExtractorResult = {
@@ -490,13 +483,11 @@ export function decodeStreamedToolArgs(partialJson: string, source: StreamedTool
  */
 export class ToolArgsRevealController {
 	readonly #getSmoothStreaming: () => boolean;
-	readonly #requestRender: (component: Component) => void;
 	readonly #entries = new Map<string, RevealEntry>();
 	#timer: NodeJS.Timeout | undefined;
 
 	constructor(options: ToolArgsRevealControllerOptions) {
 		this.#getSmoothStreaming = options.getSmoothStreaming;
-		this.#requestRender = options.requestRender;
 	}
 
 	/**
@@ -612,26 +603,15 @@ export class ToolArgsRevealController {
 
 	#tick(): void {
 		let advanced = false;
-		// Collect components with changed display args; render each subtree once
-		// per tick even when multiple entries share a component (they don't
-		// today, but the API contract doesn't prevent it).
-		const rendered = new Set<ToolArgsRevealComponent>();
 		for (const [id, entry] of this.#entries) {
 			const backlog = entry.target.length - entry.revealed;
 			if (backlog <= 0 || !entry.component) continue;
 			entry.revealed = clampSliceEnd(entry.target, entry.revealed + nextStep(backlog));
 			const display = displayArgsForPrefix(entry, entry.target.slice(0, entry.revealed));
-			if (display.changed) {
-				entry.component.updateArgs(display.args, id);
-				rendered.add(entry.component);
-			}
+			if (display.changed) entry.component.updateArgs(display.args, id);
 			advanced = true;
 		}
-		if (advanced) {
-			for (const component of rendered) this.#requestRender(component);
-		} else {
-			// Every entry caught up (or unbound); setTarget restarts on growth.
-			this.#stopTimer();
-		}
+		// Every entry caught up (or unbound); setTarget restarts on growth.
+		if (!advanced) this.#stopTimer();
 	}
 }

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as ai from "@oh-my-pi/pi-ai";
 import type { Api, AssistantMessage, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { cfgOffline } from "@oh-my-pi/pi-coding-agent/config/auxiliary-model-policy";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createModelJobWidgetAuthor } from "@oh-my-pi/pi-coding-agent/job-widgets/author";
@@ -50,7 +51,12 @@ function setup(backupReply: AssistantMessage) {
 		"retry.fallbackChains": { widget: ["llama.cpp/widget-backup"] },
 	});
 	const modelRegistry = {
-		getAvailable: () => [primary, backup],
+		getAvailable: () => {
+			if (cfgOffline.get(settings)) throw new Error("Offline mode read every provider's catalog");
+			return [primary, backup];
+		},
+		getAvailableForProviders: (providers: ReadonlySet<string>) =>
+			[primary, backup].filter(model => providers.has(model.provider)),
 		getApiKey: async () => "test-key",
 		resolver: () => async () => "test-key",
 	} as unknown as ModelRegistry;
@@ -69,12 +75,24 @@ describe("job widget model chain", () => {
 
 	it("writes the spec with the role's fallback when the primary errors, charging both attempts", async () => {
 		const { options, sent, costGate } = setup(answered('{"rules":[]}'));
-		const author = createModelJobWidgetAuthor(options);
+		const reported: Array<{ cost: number; stopReason: string; prompt: string }> = [];
+		const author = createModelJobWidgetAuthor({
+			...options,
+			onUsage: (message, prompt) =>
+				reported.push({ cost: message.usage.cost.total, stopReason: message.stopReason, prompt }),
+		});
 		const request = { jobId: "job-1", brief: { kind: "bash" as const, command: "make" }, sources: [] };
 
 		expect(await author(request, new AbortController().signal)).toEqual({ rules: [] });
 		expect(sent).toEqual([primary.id, backup.id]);
 		expect(costGate.spent).toBe(0.75);
+		// Each attempt is reported once, with the same user turn it was sent.
+		expect(reported.map(({ cost, stopReason }) => ({ cost, stopReason }))).toEqual([
+			{ cost: 0.25, stopReason: "error" },
+			{ cost: 0.5, stopReason: "stop" },
+		]);
+		expect(reported[0]!.prompt).toContain("make");
+		expect(reported[1]!.prompt).toBe(reported[0]!.prompt);
 	});
 
 	it("fails with the last error once every candidate has failed", async () => {
@@ -88,6 +106,23 @@ describe("job widget model chain", () => {
 		);
 		expect(error).toBeInstanceOf(Error);
 		expect((error as Error).message).toBe("backup route down");
+		expect(sent).toEqual([primary.id, backup.id]);
+	});
+
+	it("offline mode writes nothing unless the chain is on the session model's provider", async () => {
+		const { options, sent } = setup(answered('{"rules":[]}'));
+		cfgOffline.set(options.settings, true);
+		let sessionProvider: string | undefined = "anthropic";
+		const author = createModelJobWidgetAuthor({ ...options, getSessionProvider: () => sessionProvider });
+		const request = { jobId: "job-1", brief: { kind: "bash" as const, command: "make" }, sources: [] };
+
+		expect(await author(request, new AbortController().signal)).toBeUndefined();
+		sessionProvider = undefined;
+		expect(await author(request, new AbortController().signal)).toBeUndefined();
+		expect(sent).toEqual([]);
+
+		sessionProvider = "llama.cpp";
+		expect(await author(request, new AbortController().signal)).toEqual({ rules: [] });
 		expect(sent).toEqual([primary.id, backup.id]);
 	});
 });
