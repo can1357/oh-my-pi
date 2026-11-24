@@ -1167,6 +1167,7 @@ describe("is402BillingCapBody", () => {
 		expect(is402BillingCapBody("A positive credit balance is required")).toBe(true);
 		expect(isUsageLimitOutcome(402, "A positive credit balance is required")).toBe(true);
 		expect(isUsageLimit(new ProviderHttpError("A positive credit balance is required", 402))).toBe(true);
+		expect(isUsageLimitOutcome(400, "A positive credit balance is required")).toBe(false);
 	});
 
 	it("returns true for quota exhaustion and concurrent limit reasons", () => {
