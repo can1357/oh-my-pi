@@ -187,14 +187,14 @@ describe("InputController Python prompt prefix", () => {
 		expect(onInputCallback).not.toHaveBeenCalled();
 	});
 
-	it("submits a bare `?` as a normal prompt", async () => {
+	it.each(["?", "?? why did this change?"])("submits %j as a normal prompt", async text => {
 		const { ctx, editor, handleBtwCommand, submitted } = createContext();
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await editor.onSubmit?.("?");
+		await editor.onSubmit?.(text);
 
 		expect(handleBtwCommand).not.toHaveBeenCalled();
-		expect(submitted).toEqual([{ text: "?", images: undefined, imageLinks: undefined, streamingBehavior: "steer" }]);
+		expect(submitted).toEqual([{ text, images: undefined, imageLinks: undefined, streamingBehavior: "steer" }]);
 	});
 });

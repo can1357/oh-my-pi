@@ -321,6 +321,11 @@ viewed: the focused subagent's session when one is focused, otherwise the main
 session. It uses that session's active model and context, including partial
 streaming assistant text. Bare `/btw` opens that view's history, with the newest
 question selected.
+
+In the interactive composer, one leading `?` followed by question text is a
+shortcut for `/btw <question>`. A bare `?` or a draft starting with consecutive
+question marks (`??`) submits as a normal prompt.
+
 Saved side questions are not appended to the main transcript or sent as history
 to unrelated turns. Each new `/btw <question>` remains independent; explicit
 follow-ups include only the selected side conversation alongside the current
