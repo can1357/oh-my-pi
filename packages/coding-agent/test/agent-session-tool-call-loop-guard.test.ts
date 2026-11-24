@@ -215,6 +215,7 @@ describe("AgentSession tool-call loop guard", () => {
 			args: { sessions: ["worker"], timeout: 600 },
 			result: "No turns in flight to wait for.",
 			useless: true,
+			noop: true,
 			redirects: 1,
 		},
 		{
@@ -225,13 +226,13 @@ describe("AgentSession tool-call loop guard", () => {
 			useless: false,
 			redirects: 1,
 		},
-	])("applies the default exempt list to $scenario", async ({ name, args, result, useless, redirects }) => {
+	])("applies the default exempt list to $scenario", async ({ name, args, result, useless, noop, redirects }) => {
 		const tool: AgentTool = {
 			name,
 			label: name,
 			description: `Mock ${name} tool`,
 			parameters: type({ "sessions?": "string[]", "timeout?": "number", "command?": "string" }),
-			execute: async () => ({ content: [{ type: "text", text: result }], useless }),
+			execute: async () => ({ content: [{ type: "text", text: result }], useless, noop }),
 		};
 		const toolCallTurn = { content: [{ type: "toolCall" as const, name, arguments: args }] };
 		const mock = createMockModel({

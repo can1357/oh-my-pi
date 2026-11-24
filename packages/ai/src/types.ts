@@ -1488,6 +1488,12 @@ export interface ToolResultMessage<TDetails = unknown> {
 	 * Never set together with isError.
 	 */
 	useless?: boolean;
+	/**
+	 * Tool-declared: the call was a poll with nothing to wait for. The loop guard
+	 * counts it like any other call, even when its tool is exempt. Never set
+	 * together with isError.
+	 */
+	noop?: boolean;
 	timestamp: number; // Unix timestamp in milliseconds
 }
 

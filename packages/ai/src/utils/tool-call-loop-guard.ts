@@ -90,6 +90,11 @@ export class ToolCallLoopGuard {
 		return alias !== undefined && this.#exemptTools.has(alias);
 	}
 
+	/** A poll flagged `noop` is an ordinary call even when its tool is exempt, so an empty poll loop still trips the guard. */
+	#isExemptCall(call: ToolCall, toolResults: readonly ToolResultMessage[]): boolean {
+		return this.#isExempt(call) && toolResults.find(result => result.toolCallId === call.id)?.noop !== true;
+	}
+
 	/** Records one completed turn and reports repetitions at or beyond the threshold. */
 	recordTurn(turn: ToolCallLoopTurn): RepeatedToolCallDetection | null {
 		const toolCalls = turn.message.content.filter((part): part is ToolCall => part.type === "toolCall");
@@ -98,7 +103,7 @@ export class ToolCallLoopGuard {
 			this.#count = 0;
 			return null;
 		}
-		if (toolCalls.every(tc => this.#isExempt(tc))) {
+		if (toolCalls.every(tc => this.#isExemptCall(tc, turn.toolResults))) {
 			// An exempt poll its tool flagged useless (a wait that elapsed or found
 			// nothing to wait for) is skipped, so alternating it with a repeated call
 			// cannot hide the loop. Any other exempt turn, failures included, may have
@@ -126,7 +131,7 @@ export class ToolCallLoopGuard {
 		}
 
 		if (this.#count < this.#threshold) return null;
-		const reportCall = toolCalls.find(tc => !this.#isExempt(tc)) ?? toolCalls[0]!;
+		const reportCall = toolCalls.find(tc => !this.#isExemptCall(tc, turn.toolResults)) ?? toolCalls[0]!;
 		return {
 			kind: "repeated_tool_call",
 			toolName: reportCall.name,
