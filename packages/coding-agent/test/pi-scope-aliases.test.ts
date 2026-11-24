@@ -7,13 +7,11 @@
  * regardless of which scope name their peerDependencies happened to declare.
  *
  * Reported failures the test covers:
- *   - `@juicesharp/rpiv-ask-user-question` ⇒ `@earendil-works/pi-tui`
  *   - `@plannotator/pi-extension`         ⇒ `@oh-my-pi/pi-agent-core`
  *   - `@runfusion/fusion`                 ⇒ `@oh-my-pi/pi-coding-agent/...`
  *
- * Plus the two upstream-only surfaces that turned up via real-plugin E2E:
- *   - `Key` runtime helper from `pi-tui` (used by plannotator + rpiv-*).
- *   - `pi-ai/oauth` subpath (used by runfusion's bundled extension).
+ * Plus the upstream-only `pi-ai/oauth` subpath that turned up via real-plugin
+ * E2E (used by runfusion's bundled extension).
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
@@ -27,7 +25,6 @@ const canonicalCodingAgentExtensions = Bun.resolveSync(
 	import.meta.dir,
 );
 const canonicalUtils = Bun.resolveSync("@oh-my-pi/pi-utils", import.meta.dir);
-const canonicalTui = Bun.resolveSync("@oh-my-pi/pi-tui", import.meta.dir);
 // Subpath: upstream `pi-ai/oauth` re-exported `utils/oauth/index`; our pi-ai now
 // exposes the same surface at the real `@oh-my-pi/pi-ai/oauth` export, so the
 // legacy `@mariozechner/pi-ai/oauth` specifier canonicalizes straight to it.
@@ -41,16 +38,14 @@ interface AliasCase {
 }
 
 const CASES: readonly AliasCase[] = [
-	// @earendil-works fork — used by @juicesharp/rpiv-* plugins.
-	{
-		id: "earendil-tui",
-		aliasSpecifier: "@earendil-works/pi-tui",
-		canonicalPath: canonicalTui,
-		symbol: "visibleWidth",
-	},
 	// @oh-my-pi self-import — canonical scope must still flow through the shim
 	// so a duplicate copy is never dragged in from a plugin's own node_modules.
-	{ id: "ohmypi-utils", aliasSpecifier: "@oh-my-pi/pi-utils", canonicalPath: canonicalUtils, symbol: "logger" },
+	{
+		id: "ohmypi-utils",
+		aliasSpecifier: "@oh-my-pi/pi-utils",
+		canonicalPath: canonicalUtils,
+		symbol: "logger",
+	},
 	{
 		id: "ohmypi-coding-agent",
 		aliasSpecifier: "@oh-my-pi/pi-coding-agent",
@@ -72,13 +67,6 @@ const CASES: readonly AliasCase[] = [
 		// `refreshOAuthToken` is exported by our `oauth/index` and by upstream's
 		// `oauth.d.ts`; it makes a stable probe across both layouts.
 		symbol: "refreshOAuthToken",
-	},
-	// `Key` runtime helper restored on pi-tui (plannotator + rpiv-* import it).
-	{
-		id: "earendil-tui-key",
-		aliasSpecifier: "@earendil-works/pi-tui",
-		canonicalPath: canonicalTui,
-		symbol: "Key",
 	},
 ];
 

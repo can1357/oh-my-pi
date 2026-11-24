@@ -1,13 +1,8 @@
-import { beforeAll, describe, expect, it } from "bun:test";
-import { runStartupSplash } from "@oh-my-pi/pi-tui/setup/startup-splash";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { describe, expect, it, vi } from "bun:test";
 import { shouldShowStartupSplash } from "@oh-my-pi/pi-coding-agent/startup-splash";
-import type { Component } from "@oh-my-pi/pi-tui";
-
-beforeAll(async () => {
-	await initTheme(false);
-});
+import { signal } from "@oh-my-pi/pi-tui";
+import { SPLASH_MS, StartupSplash } from "../src/ui/setup/splash";
+import { mountLayer } from "./helpers/layer-terminal";
 
 describe("startup splash", () => {
 	it("requires the explicit setting and normal interactive TTY startup", () => {
@@ -31,42 +26,36 @@ describe("startup splash", () => {
 		expect(shouldShowStartupSplash({ ...base, stdoutIsTTY: false })).toBe(false);
 	});
 
-	it("shows and hides a fullscreen setup-splash overlay", async () => {
-		const preSplashEditor: Component = { render: () => [] };
-		let hidden = false;
-		let renderRequests = 0;
-		let focused: Component | undefined = preSplashEditor;
-		let overlayComponent: Component | undefined;
-		const ctx = {
-			ui: {
-				terminal: { rows: 8 },
-				showOverlay: (component: Component) => {
-					overlayComponent = component;
-					const preFocus = focused;
-					focused = component;
-					return {
-						hide: () => {
-							hidden = true;
-							if (focused === component) {
-								focused = preFocus;
-							}
-						},
-					};
-				},
-				setFocus: (component: Component) => {
-					focused = component;
-				},
-				requestRender: () => {
-					renderRequests += 1;
-				},
-			},
-		} as unknown as InteractiveModeContext;
+	it("ends once on its time-out", () => {
+		const now = signal(0);
+		const onDone = vi.fn();
+		const splash = mountLayer(() => StartupSplash({ version: "1.0.0", now, onDone }), { fullscreen: true });
+		try {
+			now.set(SPLASH_MS - 1);
+			expect(onDone).not.toHaveBeenCalled();
+			now.set(SPLASH_MS);
+			now.set(SPLASH_MS * 2);
+			expect(onDone).toHaveBeenCalledTimes(1);
+		} finally {
+			splash.dispose();
+		}
+	});
 
-		await runStartupSplash(ctx, { durationMs: 0, tickMs: 1, now: () => 0 });
-
-		expect(hidden).toBe(true);
-		expect(renderRequests).toBeGreaterThan(0);
-		expect(focused).toBe(preSplashEditor);
-		expect(overlayComponent?.render(32)).toHaveLength(8);
+	it("ends early on Enter, Space or Escape and ignores other keys", () => {
+		for (const key of ["enter", "space", "escape"]) {
+			const onDone = vi.fn();
+			const splash = mountLayer(() => StartupSplash({ version: "1.0.0", now: () => 0, onDone }), {
+				fullscreen: true,
+			});
+			try {
+				splash.press("x");
+				expect(onDone).not.toHaveBeenCalled();
+				splash.press(key);
+				splash.press(key);
+				expect(onDone).toHaveBeenCalledTimes(1);
+			} finally {
+				splash.dispose();
+			}
+		}
 	});
 });
