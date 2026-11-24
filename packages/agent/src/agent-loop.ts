@@ -1726,11 +1726,6 @@ async function runLoopBody(
 				const additionalMessages: AgentMessage[] = [];
 				if (softNonCompliant && softRequiredTool !== undefined) {
 					SpeculativeOperationCoordinator.discardForMessage(message, "soft tool requirement deferred execution");
-					if (softRequirementState.escalations >= MAX_SOFT_TOOL_ESCALATIONS) {
-						throw new Error(
-							`Soft tool requirement '${softRequiredTool}' was not satisfied after ${MAX_SOFT_TOOL_ESCALATIONS} forced turns; aborting to avoid an unbounded force loop.`,
-						);
-					}
 					// A soft-required tool is pending but the model called something else
 					// (or yielded). Do NOT execute the detour — pair each call with a
 					// skipped result and force the required tool next turn. This is the
@@ -1752,6 +1747,14 @@ async function runLoopBody(
 							toolName: toolCall.name,
 							status: "skipped",
 						});
+					}
+					// Abort only after pairing the calls: a retry continues from this
+					// transcript, and `agentLoopContinue` executes an unanswered tool-call
+					// tail, which would run the calls the gate just refused.
+					if (softRequirementState.escalations >= MAX_SOFT_TOOL_ESCALATIONS) {
+						throw new Error(
+							`Soft tool requirement '${softRequiredTool}' was not satisfied after ${MAX_SOFT_TOOL_ESCALATIONS} forced turns; aborting to avoid an unbounded force loop.`,
+						);
 					}
 					softRequirementState.forcedToolChoice = { type: "tool", name: softRequiredTool };
 					softRequirementState.escalations++;

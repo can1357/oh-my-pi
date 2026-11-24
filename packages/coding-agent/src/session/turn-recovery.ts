@@ -199,6 +199,11 @@ function unansweredPrompt(messages: readonly AgentMessage[], end: number): Agent
 	return undefined;
 }
 
+/** A result the loop wrote for a call it skipped rather than ran: a pending soft tool requirement refused it, so nothing failed. */
+function isSkippedToolResult(message: AgentMessage): boolean {
+	return isSyntheticToolResultMessage(message) && message.details?.source === "assistant_stop_skipped";
+}
+
 /** Whether `messages` ends in a failed/aborted turn whose most recent activity was a tool call. */
 function abortedToolCallTail(messages: readonly AgentMessage[]): boolean {
 	const turnEnd = retryableAssistantTurnEnd(messages);
@@ -206,7 +211,7 @@ function abortedToolCallTail(messages: readonly AgentMessage[]): boolean {
 	// Synthetic tool results only ever trail a turn that emitted tool calls.
 	if (isSyntheticToolResultMessage(messages[turnEnd])) return true;
 	const beforeTurn = messages[turnEnd - 2];
-	return beforeTurn?.role === "toolResult" && beforeTurn.isError === true;
+	return beforeTurn?.role === "toolResult" && beforeTurn.isError === true && !isSkippedToolResult(beforeTurn);
 }
 /**
  * Index of the first trailing failed tool result to strip for a tool replay,
@@ -222,6 +227,8 @@ function abortedToolCallTail(messages: readonly AgentMessage[]): boolean {
  * would repeat its side effects. Synthetic placeholder tails never qualify
  * either — their anchor is the aborted turn itself and its arguments may be
  * truncated, so those are re-generated via a fresh model call instead. Nor
+ * does a batch the loop skipped rather than ran (a pending soft tool
+ * requirement refused it): replaying it would run what the loop refused. Nor
  * does a tail carrying a delivery other than an eval snapshot: the strip
  * would erase it from history, while a fresh model call keeps it in context.
  */
@@ -252,6 +259,7 @@ function toolReplayStart(messages: readonly AgentMessage[]): number | undefined 
 		if (result.role !== "toolResult" || result.isError !== true || !callIds.has(result.toolCallId)) {
 			return undefined;
 		}
+		if (isSkippedToolResult(result)) return undefined;
 	}
 	return start;
 }

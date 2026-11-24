@@ -426,6 +426,83 @@ describe("AgentSession manual retry", () => {
 		expect(lastAgentMessage(session).content).toContainEqual({ type: "text", text: "done after replay" });
 	});
 
+	it("does not replay a call the soft tool requirement refused when retrying the aborted turn", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const probeSchema = type({ value: type("string") });
+		const executed: string[] = [];
+		const probeTool: AgentTool<typeof probeSchema, { value: string }> = {
+			name: "probe",
+			label: "Probe",
+			description: "Probe tool",
+			parameters: probeSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				return { content: [{ type: "text", text: `ok:${params.value}` }], details: params };
+			},
+		};
+		let pending = true;
+		const resolveSchema = type({});
+		const resolveTool: AgentTool<typeof resolveSchema, Record<string, never>> = {
+			name: "resolve",
+			label: "Resolve",
+			description: "Resolve the pending action",
+			parameters: resolveSchema,
+			async execute() {
+				pending = false;
+				return { content: [{ type: "text", text: "resolved" }], details: {} };
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				// The reminded turn and all three forced turns call `probe` instead.
+				{ content: [{ type: "toolCall", id: "call_1", name: "probe", arguments: { value: "first" } }] },
+				{ content: [{ type: "toolCall", id: "call_2", name: "probe", arguments: { value: "second" } }] },
+				{ content: [{ type: "toolCall", id: "call_3", name: "probe", arguments: { value: "third" } }] },
+				{ content: [{ type: "toolCall", id: "call_4", name: "probe", arguments: { value: "refused" } }] },
+				// The retry resolves.
+				{ content: [{ type: "toolCall", id: "call_5", name: "resolve", arguments: {} }] },
+				{ content: ["done"], stopReason: "stop" },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [probeTool, resolveTool] },
+			streamFn: mock.stream,
+			getToolChoice: () =>
+				pending
+					? {
+							soft: true,
+							id: "preview-1",
+							toolName: "resolve",
+							reminder: [{ role: "user", content: "Resolve the pending preview.", timestamp: Date.now() }],
+						}
+					: undefined,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			modelRegistry,
+		});
+		session.subscribe(() => {});
+
+		await session.prompt("rename the greeting");
+		expect(lastAgentMessage(session).stopReason).toBe("error");
+		// The turn ended on a refusal, not a tool that died mid-run, so no retry hint.
+		expect(session.hasAbortedToolCallTail).toBe(false);
+
+		await expect(session.retry()).resolves.toBe(true);
+		await session.waitForIdle();
+
+		expect(executed).toEqual([]);
+		expect(pending).toBe(false);
+		expect(lastAgentMessage(session).content).toContainEqual({ type: "text", text: "done" });
+	});
+
 	it("retries an aborted tool-call turn past a background-job result folded in after the interrupt", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {

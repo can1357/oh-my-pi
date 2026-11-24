@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
 import type {
 	AgentContext,
@@ -226,6 +227,35 @@ describe("agentLoop soft tool requirement", () => {
 		expect(h.resolveRuns).toBe(1);
 		expect(mock.calls.length).toBeGreaterThanOrEqual(2);
 		expect(mock.calls[1]?.options?.toolChoice).toEqual({ type: "tool", name: "resolve" });
+	});
+
+	it("answers the calls of a turn it aborts, so continuing the run never executes them", async () => {
+		const h = makeSoftResolveHarness();
+		const mock = createMockModel({
+			responses: [
+				// The reminded turn and all three forced turns call `peek` instead.
+				{ content: [{ type: "toolCall", id: "p1", name: "peek", arguments: {} }] },
+				{ content: [{ type: "toolCall", id: "p2", name: "peek", arguments: {} }] },
+				{ content: [{ type: "toolCall", id: "p3", name: "peek", arguments: {} }] },
+				{ content: [{ type: "toolCall", id: "p4", name: "peek", arguments: {} }] },
+				// The continued run resolves.
+				{ content: [{ type: "toolCall", id: "r1", name: "resolve", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const agent = new Agent({ streamFn: mock.stream, getToolChoice: h.getToolChoice });
+		agent.setTools(h.tools);
+
+		await agent.prompt("go");
+		const failed = agent.state.messages.at(-1);
+		expect(failed?.role === "assistant" ? failed.stopReason : undefined).toBe("error");
+
+		// What an automatic retry does: drop the failed turn, then continue the agent.
+		agent.replaceMessages(agent.state.messages.slice(0, -1));
+		await agent.continue();
+
+		expect(h.peekRuns).toBe(0);
+		expect(h.resolveRuns).toBe(1);
 	});
 
 	it("leaves tool_choice untouched when no requirement is pending", async () => {
