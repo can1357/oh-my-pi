@@ -425,3 +425,54 @@ describe("searchGemini tools serialization", () => {
 		expect(capturedRequest?.body?.requestType).toBeUndefined();
 	});
 });
+
+describe("searchGemini with a Google Cloud API key", () => {
+	const savedVertexKey = Bun.env.GOOGLE_CLOUD_API_KEY;
+	const savedGeminiKey = Bun.env.GEMINI_API_KEY;
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+
+	beforeEach(() => {
+		delete Bun.env.GEMINI_API_KEY;
+		Bun.env.GOOGLE_CLOUD_API_KEY = "vertex-test-key";
+		authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	afterEach(() => {
+		if (savedVertexKey === undefined) delete Bun.env.GOOGLE_CLOUD_API_KEY;
+		else Bun.env.GOOGLE_CLOUD_API_KEY = savedVertexKey;
+		if (savedGeminiKey === undefined) delete Bun.env.GEMINI_API_KEY;
+		else Bun.env.GEMINI_API_KEY = savedGeminiKey;
+		authStorage.close();
+	});
+
+	it("treats a Google Cloud API key as an available Gemini web search credential", () => {
+		expect(new GeminiProvider().isAvailable(authStorage, developerModel)).toBe(true);
+	});
+
+	it("sends a Google Cloud API key to the Vertex endpoint when no Developer API key is set", async () => {
+		let requestUrl = "";
+		let requestHeaders = new Headers();
+		const fetchMock: FetchImpl = (url, init) => {
+			requestUrl = String(url);
+			requestHeaders = new Headers(init?.headers);
+			return Promise.resolve(
+				new Response(DEVELOPER_SSE_RESPONSE, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+			);
+		};
+		const response = await searchGemini({
+			query: "vertex search",
+			system_prompt: "Gemini test prompt",
+			authStorage,
+			model: developerModel,
+			modelRegistry,
+			fetch: fetchMock,
+		});
+		expect(requestUrl).toBe(
+			"https://aiplatform.googleapis.com/v1beta1/publishers/google/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+		);
+		expect(requestHeaders.get("x-goog-api-key")).toBe("vertex-test-key");
+		expect(response.answer).toBe("Developer answer");
+	});
+});
