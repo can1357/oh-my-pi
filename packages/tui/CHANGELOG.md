@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Corrected math environment detection to properly handle blocks starting with `\begin`
 - Cmd+A highlights the full text of editors and inputs when the terminal forwards the shortcut. Typing, deleting or pasting replaces the selected range.
 - Native overlays follow the field they are anchored to, including when the field moves or shares its local key with another field.
 - Native menu and tree toggles now reach the intended control or branch. Clicking behind an explicitly modal sheet no longer moves keyboard focus out of it.

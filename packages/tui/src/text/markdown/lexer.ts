@@ -91,10 +91,25 @@ const ENV_BEGIN = /^(?:([^\n]*[=([{][ \t]*)\n)?[ \t]{0,3}\\begin\{([A-Za-z]+\*?)
  * A bare math environment at the start of a block: `\begin{env}…\end{env}`
  * with no blank line inside, optionally after one `lhs =` line.
  */
+function startsWithEnvBegin(src: string, offset: number): boolean {
+	let i = offset;
+	const limit = offset + 3;
+	while (i < limit) {
+		const c = src.charCodeAt(i);
+		if (c !== 0x20 && c !== 0x09) break;
+		i++;
+	}
+	return src.startsWith("\\begin{", i);
+}
+
 const mathEnvironmentExtension: TokenizerAndRendererExtension = {
 	name: "omp-math-env",
 	level: "block",
 	tokenizer(src) {
+		if (!startsWithEnvBegin(src, 0)) {
+			const nl = src.indexOf("\n");
+			if (nl === -1 || !startsWithEnvBegin(src, nl + 1)) return undefined;
+		}
 		const match = ENV_BEGIN.exec(src);
 		if (!match || !MATH_ENVIRONMENTS[match[2]!]) return undefined;
 		const close = `\\end{${match[2]}}`;
