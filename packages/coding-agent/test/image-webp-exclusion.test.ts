@@ -312,6 +312,31 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 		expect(serializedWire).not.toContain(webp);
 	});
 
+	test("keeps a WebP retained only in native Responses history at full size when autoResize is off", async () => {
+		const model = buildStbVisionModel("managed-primary", "openai-responses");
+		const webp = await makeRedWebP(2048, 1024);
+		const providerPayload = {
+			type: "openaiResponsesHistory" as const,
+			provider: model.provider,
+			dt: true,
+			items: [
+				{
+					type: "message",
+					role: "user",
+					content: [{ type: "input_image", image_url: `data:image/webp;base64,${webp}` }],
+				},
+			],
+		};
+		const message: Message = { role: "user", content: "inspect native image", providerPayload, timestamp: 1 };
+
+		const messages = await normalizeModelContextMessages([message], model, false);
+		const replayed = new RegExp("data:(image/[a-z]+);base64,([A-Za-z0-9+/=]+)").exec(JSON.stringify(messages[0]));
+		if (!replayed) throw new Error("Expected a replayed native image");
+		expect(replayed[1]).not.toBe("image/webp");
+		const metadata = await new Bun.Image(Buffer.from(replayed[2]!, "base64")).metadata();
+		expect({ width: metadata.width, height: metadata.height }).toEqual({ width: 2048, height: 1024 });
+	});
+
 	test("replaces an undecodable historical WebP with an omission note", async () => {
 		const corrupt = {
 			type: "image" as const,
