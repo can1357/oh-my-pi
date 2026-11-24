@@ -2592,6 +2592,7 @@ export class SelectorController {
 					actions: transcriptActions,
 					hour12: this.ctx.shell.hour12,
 					inspectShell: source => presentShellInspector(this.ctx.shell, source),
+					settings: this.ctx.settings,
 				});
 				viewer = this.ctx.shell.overlays.show(
 					() => fullscreenMenuView("agent-transcript", AgentTranscriptViewer({ model })),
