@@ -2508,6 +2508,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			initialRetryFallback: config.initialRetryFallback,
 			deferFallbackChainValidation: this.#fallbackChainValidationDeferred,
 			unexpectedStopJudgeTimeoutMs: config.unexpectedStopJudgeTimeoutMs,
+			automaticRetryJitterWindowMs: config.automaticRetryJitterWindowMs,
 		});
 		this.#detachUsageBeforeQueueDequeue = this.agent.addBeforeQueuedMessageDequeueHook(async signal => {
 			if (

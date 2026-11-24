@@ -362,6 +362,12 @@ export interface TurnRecoveryOptions {
 	 * seconds; production never sets it.
 	 */
 	unexpectedStopJudgeTimeoutMs?: number;
+	/**
+	 * Window for the per-session automatic-retry resume spread (default 5s).
+	 * Test seam so exact-clock retry tests pin continue timing; production
+	 * never sets it.
+	 */
+	automaticRetryJitterWindowMs?: number;
 }
 
 type PendingRetryError = {
@@ -400,10 +406,29 @@ type UsageLimitOutcome = {
 export const kUsageLimitRequestProvider = Symbol("usage-limit-request-provider");
 type IssuedProviderAssistantMessage = AssistantMessage & { [kUsageLimitRequestProvider]?: string };
 
+/**
+ * Window across which concurrent sessions spread their automatic-retry resumes.
+ * Sessions that hit the same provider 429 compute the same backoff and would
+ * resume in lockstep, flooding downstream services (providers, memory daemons)
+ * with simultaneous context recalls and observe writes.
+ */
+export const AUTOMATIC_RETRY_JITTER_WINDOW_MS = 5_000;
+
+/** Deterministic per-session offset in [0, windowMs). */
+export function automaticRetryJitterMs(sessionId: string, windowMs: number): number {
+	if (windowMs <= 0) return 0;
+	let hash = 0;
+	for (let i = 0; i < sessionId.length; i++) {
+		hash = (hash * 31 + sessionId.charCodeAt(i)) >>> 0;
+	}
+	return hash % windowMs;
+}
+
 /** Owns terminal-stop recovery, automatic retries, and fallback routing. */
 export class TurnRecovery {
 	readonly #host: TurnRecoveryHost;
 	readonly #unexpectedStopJudgeTimeoutMs: number;
+	readonly #automaticRetryJitterWindowMs: number;
 	#retryAbortController: AbortController | undefined;
 	#retryAttempt = 0;
 	#genericAbortStreak = 0;
@@ -483,6 +508,7 @@ export class TurnRecovery {
 	constructor(host: TurnRecoveryHost, options: TurnRecoveryOptions = {}) {
 		this.#host = host;
 		this.#unexpectedStopJudgeTimeoutMs = options.unexpectedStopJudgeTimeoutMs ?? UNEXPECTED_STOP_TIMEOUT_MS;
+		this.#automaticRetryJitterWindowMs = options.automaticRetryJitterWindowMs ?? AUTOMATIC_RETRY_JITTER_WINDOW_MS;
 		if (options.initialRetryFallback) {
 			this.#activeRetryFallback = {
 				...options.initialRetryFallback,
@@ -3414,7 +3440,15 @@ export class TurnRecovery {
 		// the in-flight prompt() (and the TUI retry indicator) hang forever.
 		this.#host.scheduleAgentContinue({
 			source: "automatic-retry",
-			delayMs: 1,
+			// Per-session jitter on top of the (identical) backoff: sessions that hit the
+			// same provider 429 resume spread across the window instead of in lockstep.
+			// The spread scales with the wait (10%, capped at the window) so long shared
+			// rate-limit waits decollate fully while short backoffs stay near-instant.
+			delayMs: 1 +
+				automaticRetryJitterMs(
+					this.#host.sessionId(),
+					Math.min(this.#automaticRetryJitterWindowMs, Math.ceil(delayMs / 10)),
+				),
 			generation,
 			shouldContinue: () => this.#retryAttempt > 0,
 			onError: error =>
