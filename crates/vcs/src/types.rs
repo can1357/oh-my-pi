@@ -269,6 +269,11 @@ pub struct CommitOptions {
 	pub expected_head: Option<String>,
 	/// Skip the `pre-commit` and `commit-msg` hooks (`git commit --no-verify`).
 	pub no_verify:     bool,
+	/// Variables set for the commit's hooks on top of the process
+	/// environment. The repository variables the hook runner sets itself
+	/// (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` for an `index_path`)
+	/// override same-named entries.
+	pub hook_env:      Vec<(String, String)>,
 }
 
 /// Which hunks of a file a selection covers.

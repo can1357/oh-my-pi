@@ -10,6 +10,7 @@
 - Added `repairHeredocContinuations(script)`: drops the `\` after `<<EOF &&` (or `||`, `|`, `|&`) so the here-document body starts on the next line, or returns `null`
 - Added `commitReconciled()` to publish private-index commits without leaving staged reversals when the shared index is locked ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
 - Added `transcriptCalls()`, `transcriptGrep()`, `transcriptStats()`, and `transcriptMessages()`: parallel scans of session transcript files for tool calls with their results and reasoning, regex matches over message text, thinking, arguments, and results, call counts, and one transcript's records.
+- Added `hookEnv` to `commitCreate()`/`commitReconciled()` options: variables set for the `pre-commit`, `commit-msg`, and `post-commit` hooks ([#20364](https://github.com/can1357/oh-my-pi/issues/20364))
 
 ### Changed
 

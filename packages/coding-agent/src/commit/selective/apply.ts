@@ -109,7 +109,13 @@ async function patchFor(repo: VcsGitRepo, change: SelectedChange, signal?: Abort
 export async function commitSelection(
 	draft: Draft,
 	request: CommitRequest,
-	context: { journal: ChangeJournal | null; agent: JournalAgent; signal?: AbortSignal },
+	context: {
+		journal: ChangeJournal | null;
+		agent: JournalAgent;
+		/** Variables the commit's Git hooks receive on top of the process environment. */
+		hookEnv?: Record<string, string>;
+		signal?: AbortSignal;
+	},
 ): Promise<CommitOutcome> {
 	const changes = draft.selection();
 	if (changes.length === 0) {
@@ -183,6 +189,7 @@ export async function commitSelection(
 						expectedHead: head ?? undefined,
 						amend: request.amend ?? false,
 						noVerify: request.noVerify ?? false,
+						hookEnv: context.hookEnv,
 					},
 					joined,
 					context.signal,

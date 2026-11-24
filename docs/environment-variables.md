@@ -663,6 +663,8 @@ Values are read when each tool call starts, so the next call follows `/fork`, `/
 
 `PI_TOOL_CALL_ID` matches the `toolCall` entry in `PI_SESSION_FILE` when the agent called `bash` itself (a subagent's call is in the subagent's own transcript). A `bash` call made from an `eval` cell through the tool bridge gets the bridge's generated id (`js-bash-…`), which no transcript entry carries; the transcript records the `eval` call instead.
 
+Git hooks run by the `eval` `commit` helper receive the same three variables, with `PI_TOOL_CALL_ID` set to the bridge's generated id for that `commit` call.
+
 ```bash
 echo "$PI_SESSION_ID"
 ```
