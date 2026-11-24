@@ -1580,6 +1580,18 @@ describe("resolveSessionModelSelector", () => {
 		expect(restored?.thinkingLevel).toBe(thinking);
 	});
 
+	test("does not restore a web-search runner as the session chat model", () => {
+		// web/exa is kind `search` on api `web-search`: mapOptionsForApi throws on that api at the next turn.
+		const exa = getBundledModel("web", "exa");
+		if (!exa) throw new Error("web/exa is missing from the bundled catalog");
+		expect(resolveSessionModelSelector(registryFor([exa]), "web/exa")).toBeUndefined();
+	});
+
+	test("still restores a tiny-kind model, which shares the chat transport", () => {
+		const tiny = { ...mockOpenRouterModels[2], kind: "tiny" as const };
+		expect(resolveSessionModelSelector(registryFor([tiny]), `openrouter/${tiny.id}`)?.model.id).toBe(tiny.id);
+	});
+
 	test("restores the wire model and pin separately for an OpenRouter colon variant", async () => {
 		const auth = await AuthStorage.create(":memory:");
 		try {
