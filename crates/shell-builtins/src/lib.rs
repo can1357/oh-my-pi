@@ -50,6 +50,9 @@ mod paste;
 mod printenv;
 #[cfg(test)]
 mod read_policy_tests;
+#[cfg(all(test, unix))]
+mod write_seam_tests;
+
 mod readlink;
 mod realpath;
 mod rg;

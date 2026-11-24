@@ -417,6 +417,11 @@ Found while building units 2 and 4, and not part of R1:
   unrelated notices. ADR 0039 section A4 names advisor subtrees as host-local, so R1 ships with
   that card unredacted.
 
+## ADR 0054 — shell builtins
+
+- **DONE** S2 write seam: `Host::open_write` over `PathPolicy::open`; a new `DirFd::open_walk` walks each component with no-follow (only the final component follows `symlink_behavior`); `DirFd::open` and `open_subdir` are unchanged because `rm` uses them. No builtin registered. Device writes other than `/dev/null` stay denied by the default workspace policy. O3 (migrate existing writers) remains open.
+
+
 ## Superseded task snapshots
 
 - `adr-task-list` is **HISTORICAL**. It is a session snapshot, predates ADR
