@@ -52,6 +52,7 @@
 - The bash tool's visualization keeps a one-line awk, jq, regex or other embedded program highlighted where it appears in the command; only multi-line programs move below it behind a `⟦awk ↓⟧`-style chip.
 
 ### Fixed
+- Restricted subagents report which OAuth accounts are usage-limited or rejected by org policy instead of showing only the provider’s 403; `omp usage` also lists rejected logins and when they can be tried again ([#20373](https://github.com/can1357/oh-my-pi/issues/20373)).
 - Fixed `/fast off` and bare `/fast` claiming "Fast mode disabled." on a model with no service-tier control; they now report that fast mode is unavailable for the current model ([#20284](https://github.com/can1357/oh-my-pi/pull/20284) by [@adammekki](https://github.com/adammekki))
 
 - The `ask` tool returns a prefilled `<textarea>` value unchanged: text such as `<name>` or `<tag attr="x">…</tag>` is no longer dropped from it ([#20299](https://github.com/can1357/oh-my-pi/issues/20299))
