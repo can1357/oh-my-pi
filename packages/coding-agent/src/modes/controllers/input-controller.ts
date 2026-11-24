@@ -242,7 +242,11 @@ function pythonCommandPrefixLength(trimmedText: string): 0 | 1 | 2 {
 /** The question after a `?` draft's sigil (the `/btw` shortcut), or undefined when the draft is not one. */
 function parseBtwShortcutInput(text: string): string | undefined {
 	const trimmed = text.trimStart();
-	return trimmed.startsWith("?") ? trimmed.slice(1).trim() : undefined;
+	if (!trimmed.startsWith("?")) return undefined;
+	// `??` opens a literal prompt, not a `/btw` question (#20337): a draft that
+	// starts with two or more question marks is sent as the user typed it.
+	if (trimmed.charCodeAt(1) === 63 /* ? */) return undefined;
+	return trimmed.slice(1).trim();
 }
 
 function parsePythonCommandInput(text: string): { code: string; isExcluded: boolean } | undefined {
