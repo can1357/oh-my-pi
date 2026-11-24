@@ -9,6 +9,7 @@ import {
 	listClaudePluginRoots,
 	parseClaudePluginsRegistry,
 } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import type { MCPServer } from "@oh-my-pi/pi-coding-agent/capability/mcp";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import { loadSkills, loadSkillPromptBody } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { loadSlashCommands } from "@oh-my-pi/pi-coding-agent/extensibility/slash-commands";
@@ -796,6 +797,71 @@ describe("listClaudePluginRoots", () => {
 			expect(result.all.find(skill => skill.name === "skill-creator")).toBeUndefined();
 		});
 	}
+
+	test("a symlinked skills directory that points outside the plugin root does not load its skills", async () => {
+		const pluginPath = path.join(tempDir, "plugins", "linked-skills");
+		const outsidePath = path.join(tempDir, "outside-skills");
+		const registryPath = path.join(tempDir, ".omp", "plugins", "installed_plugins.json");
+		await Promise.all([
+			fs.mkdir(path.join(pluginPath, ".claude-plugin"), { recursive: true }),
+			fs.mkdir(path.join(outsidePath, "escaped"), { recursive: true }),
+			fs.mkdir(path.dirname(registryPath), { recursive: true }),
+		]);
+		await fs.writeFile(
+			path.join(outsidePath, "escaped", "SKILL.md"),
+			"---\nname: escaped\ndescription: Lives outside the plugin root\n---\nBody\n",
+		);
+		await fs.symlink(outsidePath, path.join(pluginPath, "skills"));
+		await Promise.all([
+			fs.writeFile(path.join(pluginPath, ".claude-plugin", "plugin.json"), JSON.stringify({ skills: "./skills" })),
+			fs.writeFile(
+				registryPath,
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"linked-skills@market": [{ scope: "user", installPath: pluginPath, version: "1.0.0" }],
+					},
+				}),
+			),
+		]);
+
+		const result = await loadCapability<Skill>("skills", { cwd: tempDir });
+
+		expect(result.all.find(skill => skill.name === "escaped")).toBeUndefined();
+		expect(result.warnings.some(warning => warning.includes("outside plugin root"))).toBe(true);
+	});
+
+	test("a symlinked MCP config that points outside the plugin root does not load its servers", async () => {
+		const pluginPath = path.join(tempDir, "plugins", "linked-mcp");
+		const outsidePath = path.join(tempDir, "outside-mcp.json");
+		const registryPath = path.join(tempDir, ".omp", "plugins", "installed_plugins.json");
+		await Promise.all([
+			fs.mkdir(path.join(pluginPath, ".claude-plugin"), { recursive: true }),
+			fs.mkdir(path.dirname(registryPath), { recursive: true }),
+			fs.writeFile(outsidePath, JSON.stringify({ mcpServers: { escaped: { command: "echo" } } })),
+		]);
+		await fs.symlink(outsidePath, path.join(pluginPath, "mcp.json"));
+		await Promise.all([
+			fs.writeFile(
+				path.join(pluginPath, ".claude-plugin", "plugin.json"),
+				JSON.stringify({ mcpServers: "./mcp.json" }),
+			),
+			fs.writeFile(
+				registryPath,
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"linked-mcp@market": [{ scope: "user", installPath: pluginPath, version: "1.0.0" }],
+					},
+				}),
+			),
+		]);
+
+		const result = await loadCapability<MCPServer>("mcps", { cwd: tempDir, providers: ["claude-plugins"] });
+
+		expect(result.all.find(server => server.name.endsWith("escaped"))).toBeUndefined();
+		expect(result.warnings.some(warning => warning.includes("outside plugin root"))).toBe(true);
+	});
 
 	test("defaults scope to user when not specified", async () => {
 		const pluginsDir = path.join(tempDir, ".claude", "plugins");
