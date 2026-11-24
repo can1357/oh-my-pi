@@ -1400,8 +1400,12 @@ export function buildNpmUpdateEnv(
 	return { ...base, npm_config_min_release_age: "0" };
 }
 
+/**
+ * `--yes` skips brew's y/n confirmation. brew asks for it whenever its stdin and stdout are a terminal, and
+ * {@link runInstaller} gives the child this terminal, so without the flag `omp update` waited on that prompt.
+ */
 export function buildHomebrewUpdateArgs(force: boolean): string[] {
-	return [force ? "reinstall" : "upgrade", HOMEBREW_FORMULA];
+	return [force ? "reinstall" : "upgrade", "--yes", HOMEBREW_FORMULA];
 }
 
 /**
