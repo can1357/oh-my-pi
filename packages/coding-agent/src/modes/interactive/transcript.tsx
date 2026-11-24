@@ -46,6 +46,7 @@ import "../../ui/styles/tools";
 import "../../ui/styles/transcript/exec-run";
 import "../../ui/styles/transcript/read-group";
 import { defaultPresenter } from "../../ui/tools/default";
+import { toolEditMode } from "../../ui/tools/edit";
 import { legacyPresenter, type LegacyToolRenderer } from "../../ui/tools/legacy";
 import { toolPresenter } from "../../ui/tools/registry";
 import type { ToolCommandMounted } from "../../ui/tools/tool-command";
@@ -424,6 +425,8 @@ export class TranscriptPresenter {
 			inspectShell: source => presentShellInspector(this.#host.shell, source),
 			mcpMarkdown: display.mcpMarkdown.peek(),
 		});
+		const editMode = toolEditMode(spec.name, spec.tool);
+		if (editMode) call.setRenderContext({ editMode });
 		const presentedId = signal(spec.id);
 		const block = this.#mount(() => {
 			effect(() => {
