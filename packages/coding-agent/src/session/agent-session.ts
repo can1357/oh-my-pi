@@ -12111,6 +12111,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#tools.skillHintVisible;
 	}
 
+	/** Frozen `find` hint visibility snapshot (see {@link SessionTools.findHintVisible}). */
+	getFindHintVisible(): boolean {
+		return this.#tools.findHintVisible;
+	}
+
 	/** Skill loading warnings captured by SDK */
 	get skillWarnings(): readonly SkillWarning[] {
 		return this.#tools.skillWarnings;
