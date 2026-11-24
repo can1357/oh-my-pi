@@ -17,6 +17,8 @@
 - Fixed Claude Opus 4.8+, Sonnet 5.5, Haiku 5.5, and Fable/Mythos 5 on Google Vertex failing every turn with a 400 (`Input tag 'tool_removal'`) after the active tool set changed mid-session ([#20275](https://github.com/can1357/oh-my-pi/issues/20275))
 - Claude models on OpenRouter now get their earlier thinking back on each follow-up request, so models that think between tool calls (e.g. Sonnet 4.6) keep doing so instead of only at the start and end of a tool loop
 - Added OpenCode's free `jev-1.13-free` judge to OpenCode Go; the `judge` role now prefers it on OpenCode Go and Zen logins over OpenRouter's paid Jev and chat models, falling back to Zen's `jev-1.14`
+- ai& now defaults to `moonshotai/kimi-k3`; its previous default, `moonshotai/kimi-k2.7-code`, is no longer served
+- StepFun's `dr-search-api` web search SKU no longer appears as a chat model
 
 ### Fixed
 

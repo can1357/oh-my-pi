@@ -781,7 +781,7 @@ ai& (`aiand`) is an OpenAI-compatible inference API provider (aiand.com) offerin
 
 ### Catalog model handling
 
-- **Provider entry (`aiand`)**: `packages/catalog/src/compat/rules/providers/aiand.kdl` declares default model `moonshotai/kimi-k2.7-code`. Environment keys: `AIAND_API_KEY`.
+- **Provider entry (`aiand`)**: `packages/catalog/src/compat/rules/providers/aiand.kdl` declares default model `moonshotai/kimi-k3`. Environment keys: `AIAND_API_KEY`.
 - **Discovery replacement**: Successful authoritative discovery replaces fallback provider rows rather than retaining retired seed models.
 - **Authored seeds**: `qwen/qwen3.6-27b`, `deepseek-ai/deepseek-v4-flash`, `google/gemma-4-31b-it`, `openai/gpt-oss-120b`, `deepseek-ai/deepseek-v4-pro`, `moonshotai/kimi-k2.7-code`, `moonshotai/kimi-k2.6`, `zai-org/glm-5.2`, `zai-org/glm-5.1`; bundle policy `fallback`. Limits, capabilities, and prices are authored alongside these rows.
 - **Authoritative Discovery**: `aiandModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts` sets `dynamicModelsAuthoritative: true` and invalidates static IDs via `dropCachedModelIdsOnStaticMismatch: AIAND_STATIC_MODEL_IDS`. When an `apiKey` is supplied, `fetchDynamicModels` queries `/v1/models` using `fetchOpenAICompatibleModels` with `mapAiandModel`.
@@ -1988,7 +1988,7 @@ StepFun is the OpenAI-compatible Open Platform endpoint at `https://api.stepfun.
 - **`max_tokens` Only**: The provider rule sets `max-tokens-field "max_tokens"` in `packages/catalog/src/compat/rules/providers/stepfun.kdl`. StepFun documents `max_tokens` (default `INF`) and never the `max_completion_tokens` spelling the OpenAI baseline assumes, which the endpoint silently ignores — output budgets would go unlimited.
 - **Provider-Owned Effort Ladder**: The same rule file assigns `thinking-mode "effort"` and `thinking-efforts "low" "medium" "high"` for the `stepfun` class/`step` family. The census ladder for this class spans `minimal`…`xhigh` because relay hosts (OpenRouter, NanoGPT, NVIDIA, ZenMux) advertise those tiers; StepFun's own API rejects them, so the provider scope overrides the relay default.
 - **`reasoning_content` Reasoning Field**: Reasoning streams arrive as `reasoning_content` deltas (StepFun's `reasoning_format: "general"` default returns a `reasoning` field, and both are parsed), handled by the generic dispatch in `packages/ai/src/providers/openai-completions.ts`.
-- **Non-Chat Roster Filtering**: `/v1/models` interleaves StepAudio (ASR/TTS/realtime/gen) and image-generation SKUs with the chat models. `isStepfunChatModelId` in `packages/catalog/src/provider-models/openai-compat.ts` drops them using the `exclude-models provider="stepfun"` policy in `packages/catalog/src/compat/rules/runtime/behavior.kdl`.
+- **Non-Chat Roster Filtering**: `/v1/models` interleaves StepAudio (ASR/TTS/realtime/gen), image-generation, and web search (`dr-search-api`) SKUs with the chat models. `isStepfunChatModelId` in `packages/catalog/src/provider-models/openai-compat.ts` drops them using the `exclude-models provider="stepfun"` policy in `packages/catalog/src/compat/rules/runtime/behavior.kdl`.
 - **No Cross-Host Limit Backfill**: The provider entry sets `skip-cross-provider-reference-fills #true` so the generator never copies relay-host output ceilings (e.g. the 256K figures on NanoGPT/Hugging Face rows) onto first-party rows where StepFun publishes no cap.
 
 ### Auth & usage
