@@ -77,6 +77,13 @@ pub trait Host {
 	fn defers_to_path(&mut self, _name: &BStr, _argv: &[BString]) -> bool {
 		false
 	}
+	/// Whether an in-process command should give an executable of the same
+	/// name on `PATH` precedence when it is the sole command of a background
+	/// job. This lets `$!` name a process OS tools can inspect or signal.
+	/// Without an executable, the original command still runs.
+	fn prefers_background_program(&mut self, _name: &BStr, _resolved: &Resolved) -> bool {
+		false
+	}
 	/// Whether the host's command `name` (a bare name, no slash) comes before
 	/// the shell functions and aliases of that name: a simple command naming
 	/// it skips the function, the parser does not expand an alias of it in

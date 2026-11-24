@@ -1,1131 +1,1010 @@
 /**
- * Reconciler: turns successive component descriptions into minimal TSP ops.
+ * The native reconciler: a {@link Surface} → minimal TSP ops.
  *
- * Ids. Every component instance gets a stable base-36 id (its root node's
- * wire id); a node nested inside it gets `<base>.<keypath>`, where the
- * keypath joins each level's `key` (or child index) with `/`. Ids therefore
- * derive from the description itself, so the reconciler keeps no per-node
- * table: its whole memory is, per mounted component, the node object the
- * component last returned (which the component itself retains as its memo),
- * the component boundaries and hoisted overlays found inside it, and
- * rows-fallback bookkeeping.
+ * Every described node keeps a record: its wire id, the props last sent and
+ * the identities of the node's `props()`/`children()` last seen. One watcher
+ * effect per record marks it dirty when anything it reads changes and flags
+ * the path to the region, so a frame visits only dirty paths and skips
+ * unchanged subtrees without walking them.
  *
- * Diffing. Reference-equal nodes are skipped without walking; component
- * boundaries inside them are still visited through the recorded boundary
- * list. Children are matched by id; keyed reorders become `move`s placed
- * around the longest run of children that kept their order, removals are
- * deferred to the end of the frame so a component moved elsewhere in the same
- * frame keeps its terminal-side state. Primary text that extends the previous
- * text becomes `text append`.
- *
- * Settling. A settled component (see `settle.ts`) drops its retained node
- * after the `settle` hint; only a weak identity, its root kind, root prop
- * names and child ids survive. A later change is sent as targeted ops by id
- * (`set` of the root props, `del` + `add` of its children), never by diffing
- * against state omp no longer keeps.
- *
- * `overlay` nodes described anywhere but directly under `layer` are hoisted
- * into `layer`; their anchor keypaths are rewritten to wire ids.
+ * - Ids come from keypaths: the structural parent's id, `/`, then the node's
+ *   `key` or child index (`^` before it when hoisted). An id still in use
+ *   (a deferred delete, a moved node) gets a `~n` suffix. A record keeps its
+ *   id while its node lives, wherever it moves.
+ * - Children match by node identity first; a node replacing a retired one
+ *   at the same key/index with the same kind takes over its record (`set`
+ *   of what differs). Matched children that left the longest stable run are
+ *   `move`d before their next sibling; new ones are `add`ed whole.
+ * - `set` carries changed props only (`null` removes one). A primary-text
+ *   kind's `text` travels as `text append` when it extends, else `replace`.
+ * - Deletes are deferred to the end of the frame, so nodes moved out of a
+ *   deleted subtree survive.
+ * - `overlay` and `picker` nodes in `main`/`dock` are hoisted into `layer`
+ *   (ahead of the layer region's own nodes, in document order).
+ *   An overlay's anchor keypath is relative to its structural parent, not
+ *   its wire parent; the terminal receives the target's actual wire id.
+ * - A settled top-level `main` node gets `settle`; its subtree's retained
+ *   props and per-node watchers are dropped. It stays editable: one watcher
+ *   over the whole block notices a later change, which describes just that
+ *   block again (`del` + `add` under its id), then settles it again.
+ * - `focus` follows the surface focus; `reveal`/`scroll` follow node fields
+ *   (a plain reveal on add; a repeatable reveal or a scroll when `n` moves).
+ * - `canvas` nodes become `rows` painted at the surface width.
+ * - A `card`/`section` without a `head` prop names its child keyed `head`
+ *   by wire id: the row that stays when it folds.
+ * - A node's `term` prop (terminal-only look facts) is never sent.
+ * - A streaming `md` sends its text without the table row still being
+ *   written, its last open link/math span closed.
  */
-import * as logger from "@oh-my-pi/pi-utils/logger";
-import { TSP_TEXT_KINDS, type TspKind, type TspNode, type TspOp, type TspScrollBy } from "@oh-my-pi/pi-wire";
-import { type Component, CURSOR_MARKER, ownDescription } from "../tui";
-import { getNativeBlob } from "./blobs";
+import {
+	TSP_TEXT_KINDS,
+	type TspKind,
+	type TspNode,
+	type TspOp,
+	type TspOverlayAnchor,
+	type TspOverlayProps,
+} from "@oh-my-pi/pi-wire";
+import type { UiEvent } from "../events";
+import type { CanvasProps, UiNode } from "../node";
+import { type Accessor, computed, createRoot, effect, untrack } from "../reactive";
+import { isSettled, type Surface } from "../surface";
+import { holdPartialTableRow, speculativeStreamingSource } from "../text/markdown/stream";
+import type { NativeEnvironment } from "./connection";
 import { normalizeIconProps } from "./icons";
-import type { DescribeContext, NativeChild, NativeNode, NativeRevealAt } from "./node";
-import { quietMotion } from "./quiet";
-import { isNativeSettled } from "./settle";
+import { estimateRows } from "./measure";
 
-/** The regions a frame fills. */
-export interface NativeRegions {
-	readonly main: readonly NativeChild[];
-	readonly dock: readonly NativeChild[];
-	readonly layer: readonly NativeChild[];
+type Props = Readonly<Record<string, unknown>>;
+type AnchorRef = Exclude<TspOverlayAnchor, string>;
+
+const TEXT_KINDS: ReadonlySet<string> = new Set(TSP_TEXT_KINDS);
+const HOISTED_KINDS: Readonly<Record<string, true>> = { overlay: true, picker: true };
+
+/** Whether `node` is drawn in `layer` wherever it is declared. A picker sized to the screen is its program's content and stays put. */
+function hoists(node: UiNode): boolean {
+	if (!HOISTED_KINDS[node.kind]) return false;
+	return !(node.kind === "picker" && (node.props() as { size?: unknown }).size === "screen");
 }
-
-/** Where a wire id came from, for event routing. */
-export interface NativeTarget {
-	readonly component: Component;
-	/** Keypath inside the component ("" for its root node). */
-	readonly keypath: string;
-}
-
-const kNativeId = Symbol("native.id");
-
-interface IdTagged {
-	[kNativeId]?: string;
-}
-
+/** Kinds whose wire props name a child by its wire id (see `#wireProps`). */
+const CHILD_REF_KINDS: Readonly<Record<string, true>> = { list: true, card: true, section: true };
+/** The document's top-level regions, children of the surface's root. */
 const REGION_IDS = ["main", "dock", "layer"] as const;
 type RegionId = (typeof REGION_IDS)[number];
-const RESERVED_IDS: ReadonlySet<string> = new Set(REGION_IDS);
-const TEXT_KINDS: ReadonlySet<string> = new Set(TSP_TEXT_KINDS);
-/** Most `scroll` ops one node's coalesced key presses send in a frame. */
-const MAX_SCROLL_REPEAT = 32;
-let nextComponentId = 0;
 
-/** Stable base-36 wire id of a component instance (its root node's id). */
-export function nativeComponentId(component: Component): string {
-	const tagged = component as IdTagged;
-	let id = tagged[kNativeId];
-	if (id === undefined) {
-		do {
-			id = (nextComponentId++).toString(36);
-		} while (RESERVED_IDS.has(id));
-		tagged[kNativeId] = id;
-	}
-	return id;
+const NO_RECORDS: readonly Rec[] = Object.freeze([]);
+const NO_HOISTS: readonly Hoist[] = Object.freeze([]);
+/** Scroll steps sent for one change of a scroll request at most. */
+const MAX_SCROLL_STEPS = 64;
+
+/** An overlay found in `main`/`dock`, bound for `layer`. */
+interface Hoist {
+	readonly node: UiNode;
+	readonly owner: Rec;
+	readonly seg: string;
 }
 
-function isComponent(child: NativeChild): child is Component {
-	return typeof (child as Component).render === "function";
+/** A child to place under a wire parent. */
+interface Placement {
+	readonly node: UiNode;
+	/** Structural parent (the wire parent unless hoisted). */
+	readonly owner: Rec;
+	readonly seg: string;
+	readonly hoisted: boolean;
 }
 
-const KEY_ESCAPES: Readonly<Record<string, string>> = { "%": "%25", "/": "%2F", "^": "%5E" };
-const KEY_UNESCAPES: Readonly<Record<string, string>> = { "%25": "%", "%2F": "/", "%5E": "^" };
-
-function escapeKey(key: string): string {
-	return key.replace(/[%/^]/g, c => KEY_ESCAPES[c]!);
+interface Rec {
+	readonly id: string;
+	/** Null for the three region records. */
+	node: UiNode | null;
+	readonly kind: TspKind;
+	/** Structural parent: events bubble along it. */
+	owner: Rec | null;
+	/** Wire parent. */
+	parent: Rec | null;
+	/** Whether `overlay`/`picker` descendants are hoisted (in `main`/`dock`, outside hoisted nodes). */
+	readonly hoisting: boolean;
+	kids: readonly Rec[];
+	/** Hoisted descendants in document order (records under `main`/`dock`). */
+	hoists: readonly Hoist[];
+	/** Structural children: wire children and hoisted ones, in order. */
+	structural: readonly (Rec | Hoist)[];
+	/** Wire props last sent (null once settled). */
+	props: Props | null;
+	rawProps: unknown;
+	rawChildren: readonly UiNode[] | null;
+	revealN: number | undefined;
+	scrollN: number | undefined;
+	dirty: boolean;
+	childDirty: boolean;
+	settled: boolean;
+	/** Removed from its parent this frame and not placed again (yet). */
+	detached: boolean;
+	released: boolean;
+	/** Frame in which the record was last placed (duplicate detection). */
+	placed: number;
+	canvas: Accessor<readonly string[]> | null;
+	stop: (() => void) | null;
 }
 
-/** A keypath segment back to the key it was built from (hoisted overlays carry a `^` marker). */
-function unescapeKey(segment: string): string {
-	return (segment.startsWith("^") ? segment.slice(1) : segment).replace(/%2F|%25|%5E/g, c => KEY_UNESCAPES[c]!);
+/** The ops of one frame and the blobs they reference. */
+export interface NativeFrame {
+	readonly ops: TspOp[];
+	readonly blobs: ReadonlySet<string>;
 }
 
-function nodeId(base: string, keypath: string): string {
-	return keypath === "" ? base : `${base}.${keypath}`;
+/** A terminal event resolved to its node: the path from its top-level node, and the {@link UiEvent} it means. */
+export interface ResolvedEvent {
+	readonly path: readonly UiNode[];
+	readonly event: UiEvent;
 }
 
-function sameValue(a: unknown, b: unknown): boolean {
-	if (a === b) return true;
-	return typeof a === "object" && typeof b === "object" && a !== null && b !== null && Bun.deepEquals(a, b);
+function escapeSegment(segment: string): string {
+	return segment.replace(/[%/~^]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
-function asProps(node: NativeNode): Readonly<Record<string, unknown>> | undefined {
-	return node.p as Readonly<Record<string, unknown>> | undefined;
-}
-
-/** Longest increasing subsequence over non-negative `sources`; marks the members. */
-function stableMask(sources: readonly number[]): boolean[] {
-	const n = sources.length;
-	const mask = Array.from({ length: n }, () => false);
+/** Index of each element of the longest increasing subsequence of `values` (-1 entries skipped). */
+function longestIncreasing(values: readonly number[]): Set<number> {
 	const tails: number[] = [];
-	const prev = Array.from({ length: n }, () => -1);
-	for (let i = 0; i < n; i++) {
-		const value = sources[i]!;
+	const prev: number[] = Array.from({ length: values.length }, () => -1);
+	for (let i = 0; i < values.length; i++) {
+		const value = values[i]!;
 		if (value < 0) continue;
 		let lo = 0;
 		let hi = tails.length;
 		while (lo < hi) {
 			const mid = (lo + hi) >> 1;
-			if (sources[tails[mid]!]! < value) lo = mid + 1;
+			if (values[tails[mid]!]! < value) lo = mid + 1;
 			else hi = mid;
 		}
 		if (lo > 0) prev[i] = tails[lo - 1]!;
 		tails[lo] = i;
 	}
-	for (let at = tails.length > 0 ? tails[tails.length - 1]! : -1; at >= 0; at = prev[at]!) mask[at] = true;
-	return mask;
+	const out = new Set<number>();
+	for (let i = tails.at(-1) ?? -1; i >= 0; i = prev[i]!) out.add(i);
+	return out;
 }
 
-interface Owner {
-	readonly base: string;
-	readonly state: CompState | null;
+/** Collect blob ids referenced by `props` (an image's `blob`, editor decorations). */
+function collectBlobs(props: Props, out: Set<string>): void {
+	for (const name in props) {
+		const value = props[name];
+		if (name === "blob" && typeof value === "string") out.add(value);
+		else if (Array.isArray(value)) {
+			for (const item of value) {
+				const blob = (item as { blob?: unknown } | null)?.blob;
+				if (typeof blob === "string") out.add(blob);
+			}
+		}
+	}
 }
 
-interface NodeEntry {
-	readonly id: string;
-	readonly node: NativeNode;
-	readonly owner: Owner;
-	readonly keypath: string;
-	/** Whether overlay descendants of this node are hoisted into `layer`. */
-	readonly hoist: boolean;
-	readonly comp?: undefined;
+function sameHoists(a: readonly Hoist[], b: readonly Hoist[]): boolean {
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) if (a[i]!.node !== b[i]!.node || a[i]!.owner !== b[i]!.owner) return false;
+	return true;
 }
 
-interface CompEntry {
-	readonly id: string;
-	readonly comp: Component;
-}
-
-type Entry = NodeEntry | CompEntry;
+/** Below this many columns a centered sheet with tall content fills the pane instead of floating with margins. */
+export const NARROW_SHEET_COLS = 100;
+/** The share of the viewport's rows a sheet's content must reach to fill a narrow pane. */
+const SHEET_FILL_FRACTION = 0.5;
 
 /**
- * What a component's walk met, in walk order: nested component boundaries
- * (with their document position) and hoisted overlays. Replaying it for an
- * unchanged component reproduces the walk's visits and overlay order.
+ * The first `editor`/`input` at or under `node`: the terminal's keyboard focus is a text field's
+ * (it edits and selects there natively); any other focused node keeps the keys in the program.
  */
-type Inner =
-	| {
-			readonly comp: Component;
-			readonly parent: string;
-			readonly before: string | null;
-			readonly portal?: undefined;
-	  }
-	| { readonly portal: NodeEntry; readonly comp?: undefined };
-
-interface CompState {
-	readonly comp: Component;
-	readonly id: string;
-	readonly owner: Owner;
-	/** Last description while unsettled; null once settled. */
-	node: NativeNode | null;
-	/** Settled: identity of the last description (node, or rows array). */
-	weak: WeakRef<object> | null;
-	kind: TspKind;
-	propKeys: readonly string[];
-	childIds: readonly string[];
-	inner: Inner[];
-	rowsLines: readonly string[] | null;
-	rowsCols: number;
-	rowsNode: NativeNode | null;
-	settled: boolean;
-	settleSent: boolean;
-	frame: number;
-	/** The component whose node currently contains this one in the document (null: a region or the root). */
-	container: CompState | null;
-	/** Moved under the surface root this frame to survive a delete or a parent/child swap. */
-	parked: boolean;
+function firstField(node: UiNode, depth: number): UiNode | undefined {
+	if (node.kind === "editor" || node.kind === "input") return node;
+	if (depth > 64) return undefined;
+	for (const child of node.children()) {
+		const found = firstField(child, depth + 1);
+		if (found) return found;
+	}
+	return undefined;
 }
 
-interface Walk {
-	readonly owner: Owner;
-	/** Records the owner's boundaries and hoisted overlays (null: don't record). */
-	readonly inner: Inner[] | null;
-	readonly settled: boolean;
-	readonly hoist: boolean;
-}
-
-interface PendingMove {
-	readonly id: string;
-	readonly parent: string;
-	readonly before: string | null;
-}
-
-const EMPTY_ENTRIES: readonly Entry[] = [];
-
-/** One surface's reconciler. */
+/** See the module docs. */
 export class Reconciler {
-	readonly surface: string;
-	#cx: DescribeContext | undefined;
-	#states = new Map<Component, CompState>();
-	#byId = new Map<string, CompState>();
+	readonly #surface: Surface;
+	/** The surface's wire id: the document root the regions hang off. */
+	readonly #root: string;
+	readonly #env: NativeEnvironment;
+	readonly #onDirty: () => void;
+	readonly #byNode = new Map<UiNode, Rec>();
+	readonly #byId = new Map<string, Rec>();
+	/** Overlays whose anchor depends on the placement of another record. */
+	readonly #anchors = new Map<Rec, AnchorRef>();
+	/** Ids the terminal holds (live records plus deletes not yet sent). */
+	readonly #ids = new Set<string>();
+	/** A retained transcript can still contain rows the terminal has evicted. Never describe those rows again. */
+	#evicted: WeakSet<UiNode> | undefined;
+	#main!: Rec;
+	#dock!: Rec;
+	#layer!: Rec;
+	/** Regions the terminal's document lacks: the next frame adds them first (a fresh open, a keep-close). */
+	#missingRegions: readonly RegionId[] = REGION_IDS;
+	#layerHoists: readonly Hoist[] = NO_HOISTS;
+	#focusDirty = true;
+	#sentFocus: string | null = null;
+	/** Centered sheets that fill a narrow pane: once tall, they stay full while they live. */
+	readonly #filling = new WeakSet<UiNode>();
 	#frame = 0;
+	#disposeRegions: (() => void) | undefined;
+	// Per-frame output.
 	#ops: TspOp[] = [];
-	#dels: Entry[] = [];
-	#settles: string[] = [];
-	/**
-	 * Selected list items, added `reveal` nodes and nodes whose reveal `n` moved this frame,
-	 * revealed once the frame's adds have landed.
-	 */
-	#reveals: [id: string, at: NativeRevealAt][] = [];
-	/** `scroll` requests whose `n` moved this frame, sent after the reveals. */
-	#scrolls: [id: string, by: TspScrollBy][] = [];
-	/** Wire ids `list.selected` keys resolved to (an unresolved key names no node to reveal). */
-	#selectedIds = new Set<string>();
-	#moves: PendingMove[] = [];
-	/** Ids of components updated this frame that wait for an enclosing `add` to move in. */
-	#pendingMoves = new Set<string>();
-	/** Components parked under the root this frame. */
-	#parked: CompState[] = [];
-	#framePortals: NodeEntry[] = [];
-	#prevPortals: NodeEntry[] = [];
-	#regions: Record<RegionId, readonly Entry[]> | null = null;
-	#rows = 0;
-	#gone = new Set<string>();
-	/** Live-only regions to re-add after the surface was closed and adopted. */
-	#readd: readonly RegionId[] = [];
-	#regionOwners: Record<RegionId, Owner> = {
-		main: { base: "main", state: null },
-		dock: { base: "dock", state: null },
-		layer: { base: "layer", state: null },
-	};
+	#late: TspOp[] = [];
+	#removed: Rec[] = [];
+	#blobs = new Set<string>();
 
-	constructor(surface: string) {
-		this.surface = surface;
+	constructor(surface: Surface, root: string, env: NativeEnvironment, onDirty: () => void) {
+		this.#surface = surface;
+		this.#root = root;
+		this.#env = env;
+		this.#onDirty = onDirty;
+		this.#init();
 	}
 
-	/** `rows` fallback nodes in the last reconciled frame. */
-	get fallbackCount(): number {
-		return this.#rows;
+	/** Whether a frame would have something to send. */
+	get dirty(): boolean {
+		for (const region of [this.#main, this.#dock, this.#layer]) if (region.dirty || region.childDirty) return true;
+		return this.#focusDirty || this.#missingRegions.length > 0;
 	}
 
-	/** Diff the regions against the previous frame; the first call adds everything. */
-	reconcile(regions: NativeRegions, cx: DescribeContext): TspOp[] {
-		this.#cx = cx;
+	/** The wire id `node` is described under, if it is. */
+	idOf(node: UiNode): string | undefined {
+		const rec = this.#byNode.get(node);
+		if (!rec) return undefined;
+		// A record under a subtree leaving this frame is on its way out too.
+		for (let r: Rec | null = rec; r; r = r.parent) if (r.released || r.detached) return undefined;
+		return rec.id;
+	}
+
+	/** Compute the ops that bring the terminal's document to the surface's current state. */
+	reconcile(): NativeFrame {
 		this.#frame++;
 		this.#ops = [];
-		this.#dels = [];
-		this.#settles = [];
-		this.#reveals = [];
-		this.#scrolls = [];
-		this.#selectedIds.clear();
-		this.#framePortals = [];
-		this.#rows = 0;
-		let prev = this.#regions;
-		if (prev === null) {
-			for (const region of REGION_IDS) this.#ops.push(["add", region, this.surface, null, { id: region, k: "col" }]);
-			prev = { main: EMPTY_ENTRIES, dock: EMPTY_ENTRIES, layer: EMPTY_ENTRIES };
-		}
-		for (const region of this.#readd) this.#ops.push(["add", region, this.surface, null, { id: region, k: "col" }]);
-		this.#readd = [];
-		const next = {} as Record<RegionId, readonly Entry[]>;
-		for (const region of REGION_IDS) {
-			const hoist = region !== "layer";
-			const walk: Walk = { owner: this.#regionOwners[region], inner: null, settled: false, hoist };
-			const entries = this.#entries(regions[region], "", walk.owner, hoist, walk);
-			this.#diffChildren(region, prev[region], entries, null, walk);
-			next[region] = entries;
-		}
-		// Hoisted overlays sit before the overlay stack in `layer`.
-		const layerFirst = next.layer.length > 0 ? next.layer[0]!.id : null;
-		const portalWalk: Walk = { owner: this.#regionOwners.layer, inner: null, settled: false, hoist: false };
-		const portals = this.#framePortals.slice();
-		this.#diffChildren("layer", this.#prevPortals, portals, layerFirst, portalWalk);
-		if (this.#framePortals.length > portals.length) {
-			// Components inside a hoisted overlay described overlays of their own;
-			// only one level of hoisting exists, so those stay unsent.
-			logger.debug("TSP: overlay nested in a hoisted overlay dropped", {
-				ids: this.#framePortals.slice(portals.length).map(portal => portal.id),
-			});
-		}
-		this.#prevPortals = portals;
-		this.#regions = next;
-		for (const entry of this.#dels) this.#deleteEntry(entry);
-		this.#dels = [];
-		// Parked to survive a parent/child swap but absent from the new description.
-		for (const state of this.#parked) {
-			if (!state.parked) continue;
-			state.parked = false;
-			this.#dropState(state);
-			this.#ops.push(["del", state.id]);
-		}
-		this.#parked = [];
-		for (const id of this.#settles) this.#ops.push(["settle", id]);
-		for (const [id, at] of this.#reveals) this.#ops.push(["reveal", id, at]);
-		if (cx.feature("scroll")) for (const [id, by] of this.#scrolls) this.#ops.push(["scroll", id, by]);
+		this.#late = [];
+		this.#removed = [];
+		this.#blobs = new Set();
+		// A document starts as its root alone; the regions are the program's to add.
+		for (const id of this.#missingRegions) this.#ops.push(["add", id, this.#root, null, { id, k: "col" }]);
+		this.#missingRegions = [];
+		untrack(() => {
+			this.#visit(this.#main);
+			this.#visit(this.#dock);
+			const hoists = [...this.#main.hoists, ...this.#dock.hoists];
+			if (!sameHoists(hoists, this.#layerHoists)) {
+				this.#layerHoists = hoists;
+				this.#layer.dirty = true;
+			}
+			this.#visit(this.#layer);
+			// A target can move or be replaced without dirtying the overlay.
+			// Resolve again after all siblings (including forward references) have been placed.
+			for (const [rec, ref] of this.#anchors) {
+				if (!rec.node || !rec.props || this.idOf(rec.node) !== rec.id) continue;
+				const props = this.#anchorProps(rec, rec.props, ref);
+				if (props === rec.props) continue;
+				rec.props = props;
+				this.#ops.push(["set", rec.id, { anchor: props.anchor ?? null }]);
+			}
+			this.#measureSheets();
+			// The focused node may have been described (or re-created) this frame: resolve it every time.
+			this.#focusDirty = false;
+			const focused = this.#surface.focused();
+			const field = focused ? firstField(focused, 0) : undefined;
+			const id = field ? (this.idOf(field) ?? null) : null;
+			if (id !== this.#sentFocus) {
+				this.#sentFocus = id;
+				this.#late.push(["focus", id]);
+			}
+		});
 		const ops = this.#ops;
-		this.#ops = [];
-		return this.#gone.size === 0 ? ops : ops.filter(op => !this.#touchesGone(op));
+		ops.push(...this.#late);
+		for (const rec of this.#removed) {
+			if (!rec.detached || rec.released) continue;
+			ops.push(["del", rec.id]);
+			this.#release(rec);
+		}
+		// Deleted ids are free again once their `del` is out.
+		for (const rec of this.#removed) if (rec.released) this.#ids.delete(rec.id);
+		return { ops, blobs: this.#blobs };
 	}
 
 	/**
-	 * The surface was closed (`keep:true`) and is being adopted: the terminal
-	 * dropped `dock`, `layer` and focus but kept `main`. The next frame re-adds
-	 * the live regions from scratch and keeps diffing `main`.
+	 * Forget everything sent (the terminal lost the surface): the next frame
+	 * describes the whole surface again.
 	 */
-	detachLive(): void {
-		const regions = this.#regions;
-		if (!regions) return;
-		// A fresh frame number so every state below counts as unvisited.
-		this.#frame++;
-		for (const region of ["dock", "layer"] as const) {
-			for (const entry of regions[region]) {
-				if (entry.comp === undefined) this.#dropSubtree(entry);
-				else {
-					const state = this.#states.get(entry.comp);
-					if (state) this.#dropState(state);
-				}
+	reset(): void {
+		for (const region of [this.#main, this.#dock, this.#layer]) for (const rec of region.kids) this.#release(rec);
+		this.#disposeRegions?.();
+		this.#byNode.clear();
+		this.#byId.clear();
+		this.#ids.clear();
+		this.#evicted = undefined;
+		this.#layerHoists = NO_HOISTS;
+		this.#sentFocus = null;
+		this.#missingRegions = REGION_IDS;
+		this.#init();
+	}
+
+	/**
+	 * The terminal dropped the live regions (`x keep:true` keeps only `main`): the next frame adds
+	 * `dock` and `layer` again and describes their content afresh, and resends the focus.
+	 */
+	dropLiveRegions(): void {
+		for (const region of [this.#dock, this.#layer]) {
+			for (const rec of region.kids) {
+				if (rec.parent !== region) continue;
+				this.#release(rec);
+				this.#ids.delete(rec.id);
 			}
+			region.kids = NO_RECORDS;
+			region.structural = NO_RECORDS;
+			region.hoists = NO_HOISTS;
+			region.dirty = true;
 		}
-		for (const portal of this.#prevPortals) this.#dropSubtree(portal);
-		this.#prevPortals = [];
-		this.#regions = { main: regions.main, dock: EMPTY_ENTRIES, layer: EMPTY_ENTRIES };
-		this.#readd = ["dock", "layer"];
+		this.#layerHoists = NO_HOISTS;
+		this.#missingRegions = ["dock", "layer"];
+		this.#sentFocus = null;
+		this.#focusDirty = true;
 	}
 
-	/** The component and keypath that described wire node `id`. */
-	target(id: string): NativeTarget | null {
-		const dot = id.indexOf(".");
-		const state = this.#byId.get(dot === -1 ? id : id.slice(0, dot));
-		if (!state) return null;
-		const keypath =
-			dot === -1
-				? ""
-				: id
-						.slice(dot + 1)
-						.split("/")
-						.map(unescapeKey)
-						.join("/");
-		return { component: state.comp, keypath };
-	}
-
-	/**
-	 * The component that described wire node `id`, then each component whose
-	 * node contains it, innermost first (empty for an unknown id).
-	 */
-	owners(id: string): Component[] {
-		const dot = id.indexOf(".");
-		const out: Component[] = [];
-		for (let state = this.#byId.get(dot === -1 ? id : id.slice(0, dot)) ?? null; state; state = state.container) {
-			out.push(state.comp);
-		}
-		return out;
-	}
-
-	/** The key a list item node was described with (its key, else its child index). */
-	itemKey(id: string): string {
-		const dot = id.indexOf(".");
-		if (dot === -1) return this.#byId.get(id)?.node?.key ?? id;
-		const slash = id.lastIndexOf("/");
-		return unescapeKey(id.slice(Math.max(dot, slash) + 1));
-	}
-
-	/** Wire id of the first `editor`/`input` `component` describes (for `focus`), or null. */
-	focusTarget(component: Component): string | null {
-		const state = this.#states.get(component);
-		return state ? this.#findEditor(state, 0) : null;
-	}
-
-	/**
-	 * The last description of `component` on this surface (a settled one only
-	 * while still referenced elsewhere), or undefined when it isn't mounted.
-	 */
-	described(component: Component): NativeNode | undefined {
-		const state = this.#states.get(component);
-		if (!state) return undefined;
-		const node = state.node ?? (state.weak?.deref() as NativeNode | readonly string[] | undefined);
-		// A settled `rows` fallback is held by its lines; its node is kept beside them.
-		return Array.isArray(node) ? (state.rowsNode ?? undefined) : (node as NativeNode | undefined);
-	}
-
-	/** Stop referencing ids the terminal dropped (`gone`). */
+	/** Tern's retention budget drops settled children of `main`, including their subtrees. */
 	forget(ids: readonly string[]): void {
-		for (const id of ids) this.#gone.add(id);
-	}
-
-	#touchesGone(op: TspOp): boolean {
-		const gone = this.#gone;
-		switch (op[0]) {
-			case "add":
-			case "move":
-				return gone.has(op[1]) || gone.has(op[2]) || (op[3] !== null && gone.has(op[3]));
-			case "focus":
-				return op[1] !== null && gone.has(op[1]);
-			case "suspend":
-			case "resume":
-				return false;
-			default:
-				return gone.has(op[1]);
+		let lost = false;
+		for (const id of ids) {
+			const rec = this.#byId.get(id);
+			if (!rec?.node || rec.parent !== this.#main || !rec.settled) continue;
+			lost = true;
+			(this.#evicted ??= new WeakSet()).add(rec.node);
+			this.#release(rec);
+			this.#ids.delete(id);
 		}
+		if (!lost) return;
+		// It is already absent: do not delete it or use it as a `before` sibling.
+		this.#main.kids = this.#main.kids.filter(kid => !kid.released);
+		this.#markDirty(this.#main);
 	}
 
-	#findEditor(state: CompState, depth: number): string | null {
-		if (depth > 64) return null;
-		const node = state.node ?? (state.weak?.deref() as NativeNode | undefined);
-		if (!node || typeof node.k !== "string") return null;
-		return this.#findEditorIn(node, state.id, "", state.owner, depth);
+	/** Release every watcher. */
+	dispose(): void {
+		for (const region of [this.#main, this.#dock, this.#layer]) for (const rec of region.kids) this.#release(rec);
+		this.#disposeRegions?.();
+		this.#disposeRegions = undefined;
+	}
+
+	/** Describe again the settled `main` block holding `node`: the program changed it after it was final. */
+	redescribe(node: UiNode): void {
+		let rec = this.#byNode.get(node);
+		while (rec && rec.parent !== this.#main) rec = rec.parent ?? undefined;
+		if (rec?.settled && !rec.released) this.#markDirty(rec);
+	}
+
+	/** Resolve a terminal UI event to the node it names; null for unknown ids. */
+	resolve(event: { readonly id: string }): readonly UiNode[] | null {
+		const rec = this.#byId.get(event.id);
+		if (!rec?.node || rec.released || rec.node.disposed) return null;
+		const path: UiNode[] = [];
+		for (let r: Rec | null = rec; r?.node; r = r.owner) path.push(r.node);
+		return path.reverse();
 	}
 
 	/**
-	 * The first editor under `node`. An `overlay`/`picker` child outside a hoisted
-	 * sheet is hoisted into `layer` under its `^` keypath (see {@link #entries}), so
-	 * a field in a sheet a dock component describes is found under that id.
+	 * The key of the child of node `id` that wire id `item` names (a `list`
+	 * selection), or `item` itself when it names no child (picker item ids).
 	 */
-	#findEditorIn(
-		node: NativeNode,
-		id: string,
-		keypath: string,
-		owner: Owner,
-		depth: number,
-		hoist = true,
-	): string | null {
-		if (node.k === "editor" || node.k === "input") return id;
-		for (const entry of this.#entries(node.c, keypath, owner, false, null)) {
-			let found: string | null;
-			if (entry.comp !== undefined) {
-				found = this.#findEditorOf(entry.comp, depth + 1);
-			} else if (hoist && (entry.node.k === "overlay" || entry.node.k === "picker")) {
-				const path = entry.keypath;
-				const portalPath = keypath === "" ? `^${path}` : `${keypath}/^${path.slice(keypath.length + 1)}`;
-				found = this.#findEditorIn(entry.node, nodeId(owner.base, portalPath), portalPath, owner, depth, false);
-			} else {
-				found = this.#findEditorIn(entry.node, entry.id, entry.keypath, owner, depth, hoist);
-			}
-			if (found !== null) return found;
-		}
-		return null;
+	itemKey(id: string, item: string): string {
+		const rec = this.#byId.get(id);
+		const child = this.#byId.get(item);
+		if (!rec?.node || !child?.node || child.owner !== rec) return item;
+		return child.node.key() ?? String(rec.node.children().indexOf(child.node));
 	}
 
-	#findEditorOf(component: Component, depth: number): string | null {
-		const state = this.#states.get(component);
-		return state ? this.#findEditor(state, depth) : null;
-	}
-
-	// ── Entries ──────────────────────────────────────────────────────────
-
-	/**
-	 * Child slots of a node with their wire ids. Overlays are split off into the
-	 * hoisted list when `hoist` is set (and a walk collects them).
-	 */
-	#entries(
-		children: readonly NativeChild[] | undefined,
-		keypath: string,
-		owner: Owner,
-		hoist: boolean,
-		walk: Walk | null,
-	): readonly Entry[] {
-		if (!children || children.length === 0) return EMPTY_ENTRIES;
-		const out: Entry[] = [];
-		let used: Set<string> | undefined;
-		for (let i = 0; i < children.length; i++) {
-			const child = children[i]!;
-			if (isComponent(child)) {
-				out.push({ id: nativeComponentId(child), comp: child });
-				continue;
-			}
-			const segment = child.key === undefined ? String(i) : escapeKey(child.key);
-			let path = keypath === "" ? segment : `${keypath}/${segment}`;
-			if (children.length > 1) {
-				// A key may repeat, or equal an unkeyed sibling's index.
-				used ??= new Set();
-				if (used.has(path)) {
-					let n = 2;
-					while (used.has(`${path}~${n}`)) n++;
-					path = `${path}~${n}`;
-				}
-				used.add(path);
-			}
-			const entry: NodeEntry = {
-				id: nodeId(owner.base, path),
-				node: child,
-				owner,
-				keypath: path,
-				hoist: hoist && child.k !== "overlay" && child.k !== "picker",
+	#init(): void {
+		const surface = this.#surface;
+		this.#main = this.#region("main");
+		this.#dock = this.#region("dock");
+		this.#layer = this.#region("layer");
+		createRoot(dispose => {
+			this.#disposeRegions = dispose;
+			const watch = (rec: Rec, source: Accessor<readonly UiNode[]>): void => {
+				let first = true;
+				effect(() => {
+					source();
+					if (first) first = false;
+					else this.#markDirty(rec);
+				});
 			};
-			// A picker is its own sheet: hoisted like an overlay.
-			if (hoist && (child.k === "overlay" || child.k === "picker")) {
-				if (walk) {
-					// Its own id namespace (`^` marks the hoisted segment): the node now
-					// lives under `layer`, so a same-keypath node in place must not collide.
-					const portalPath = keypath === "" ? `^${path}` : `${keypath}/^${path.slice(keypath.length + 1)}`;
-					const portal: NodeEntry = {
-						...entry,
-						id: nodeId(owner.base, portalPath),
-						keypath: portalPath,
-						hoist: false,
-					};
-					walk.inner?.push({ portal });
-					this.#framePortals.push(portal);
+			watch(this.#main, surface.main);
+			watch(this.#dock, surface.dock);
+			watch(this.#layer, surface.layer);
+			let first = true;
+			effect(() => {
+				surface.focused();
+				if (first) {
+					first = false;
+					return;
 				}
-				continue;
-			}
-			out.push(entry);
-		}
-		return out;
-	}
-
-	// ── Children ─────────────────────────────────────────────────────────
-
-	#diffChildren(
-		parent: string,
-		oldEntries: readonly Entry[],
-		newEntries: readonly Entry[],
-		tailBefore: string | null,
-		walk: Walk,
-	): void {
-		const oldIndex = new Map<string, number>();
-		if (oldEntries.length > 0) {
-			const keep = new Set<string>();
-			for (const entry of newEntries) keep.add(entry.id);
-			for (let i = 0; i < oldEntries.length; i++) {
-				const entry = oldEntries[i]!;
-				oldIndex.set(entry.id, i);
-				if (!keep.has(entry.id)) this.#dels.push(entry);
-			}
-		}
-		const count = newEntries.length;
-		const sources = newEntries.map(entry => oldIndex.get(entry.id) ?? -1);
-		const stable = stableMask(sources);
-		// Children that kept their relative order stay; every other child is
-		// placed before the nearest following one that stays. Processing left to
-		// right keeps walk order (and so hoisted-overlay order) canonical.
-		const anchors: (string | null)[] = [];
-		let anchor = tailBefore;
-		for (let i = count - 1; i >= 0; i--) {
-			anchors[i] = anchor;
-			if (stable[i]) anchor = newEntries[i]!.id;
-		}
-		for (let i = 0; i < count; i++) {
-			const entry = newEntries[i]!;
-			const source = sources[i]!;
-			const before = anchors[i]!;
-			const next = i + 1 < count ? newEntries[i + 1]!.id : tailBefore;
-			if (source < 0) {
-				this.#place(entry, parent, before, next, walk);
-				continue;
-			}
-			if (!stable[i]) {
-				const state = entry.comp === undefined ? undefined : this.#states.get(entry.comp);
-				if (state) this.#move(state, parent, before);
-				else this.#ops.push(["move", entry.id, parent, before]);
-			}
-			if (entry.comp !== undefined) this.#visitChild(entry.comp, parent, before, next, walk);
-			else this.#diffNode(oldEntries[source] as NodeEntry, entry, parent, before, walk);
-		}
-	}
-
-	/**
-	 * Put a child that wasn't under `parent` last frame before `before`.
-	 * `next` is its following sibling, recorded for later re-adds.
-	 */
-	#place(entry: Entry, parent: string, before: string | null, next: string | null, walk: Walk): void {
-		if (entry.comp === undefined) {
-			this.#ops.push(["add", entry.id, parent, before, this.#materialize(entry, this.#walkFor(entry, walk))]);
-			this.#flushMoves();
-			return;
-		}
-		const state = this.#states.get(entry.comp);
-		if (state?.frame === this.#frame) {
-			this.#warnDuplicate(state);
-			return;
-		}
-		walk.inner?.push({ comp: entry.comp, parent, before: next });
-		if (state) {
-			this.#move(state, parent, before);
-			this.#visit(state, parent, before, walk.settled);
-			return;
-		}
-		this.#addComponent(entry.comp, parent, before, walk.settled);
-	}
-
-	/**
-	 * Visit a component whose document position is already right. `before` is
-	 * an anchor present in the document now (for a root re-add); `next` is its
-	 * following sibling, recorded for later frames.
-	 */
-	#visitChild(comp: Component, parent: string, before: string | null, next: string | null, walk: Walk): void {
-		const state = this.#states.get(comp);
-		if (state?.frame === this.#frame) {
-			this.#warnDuplicate(state);
-			return;
-		}
-		walk.inner?.push({ comp, parent, before: next });
-		if (state) this.#visit(state, parent, before, walk.settled);
-		else this.#addComponent(comp, parent, before, walk.settled);
-	}
-
-	#addComponent(comp: Component, parent: string, before: string | null, settled: boolean): void {
-		const state = this.#createState(comp, parent);
-		this.#ops.push(["add", state.id, parent, before, this.#materializeComponent(state, settled)]);
-		this.#flushMoves();
-	}
-
-	#warnDuplicate(state: CompState): void {
-		logger.warn("TSP: component described twice in one frame; later occurrence skipped", {
-			id: state.id,
-			kind: state.comp.constructor.name,
+				this.#focusDirty = true;
+				this.#onDirty();
+			});
 		});
 	}
 
-	#walkFor(entry: NodeEntry, walk: Walk): Walk {
-		return entry.hoist === walk.hoist ? walk : { ...walk, hoist: entry.hoist };
+	#region(id: RegionId): Rec {
+		return {
+			id,
+			node: null,
+			kind: "col",
+			owner: null,
+			parent: null,
+			hoisting: id !== "layer",
+			kids: NO_RECORDS,
+			hoists: NO_HOISTS,
+			structural: NO_RECORDS,
+			props: null,
+			rawProps: undefined,
+			rawChildren: null,
+			revealN: undefined,
+			scrollN: undefined,
+			dirty: true,
+			childDirty: false,
+			settled: false,
+			detached: false,
+			released: false,
+			placed: 0,
+			canvas: null,
+			stop: null,
+		};
 	}
 
-	// ── Nodes ────────────────────────────────────────────────────────────
+	/**
+	 * A narrow pane has no room for a floating sheet with margins, but a sheet stretched over a few
+	 * lines is mostly empty. The terminal lays the content out, so the rows are estimated from what
+	 * was just described: a centered sheet whose content reaches {@link SHEET_FILL_FRACTION} of the
+	 * viewport fills the pane from the next frame on, and keeps filling while it stays open, so a
+	 * filter or a reload never makes it jump between sizes.
+	 */
+	#measureSheets(): void {
+		const cols = this.#env.cols();
+		if (cols >= NARROW_SHEET_COLS) return;
+		const limit = Math.max(1, Math.ceil(this.#env.rows() * SHEET_FILL_FRACTION));
+		for (const rec of this.#layer.kids) {
+			const node = rec.node;
+			if (!node || rec.kind !== "overlay" || !rec.props || this.#filling.has(node)) continue;
+			const { anchor, size } = rec.props as TspOverlayProps;
+			if (size === "full" || (anchor !== undefined && anchor !== "center")) continue;
+			if (estimateRows(rec, cols, limit) < limit) continue;
+			this.#filling.add(node);
+			rec.rawProps = undefined;
+			this.#markDirty(rec);
+		}
+	}
 
-	#diffNode(old: NodeEntry, next: NodeEntry, parent: string, before: string | null, walk: Walk): void {
-		const inner = this.#walkFor(next, walk);
-		if (old.node === next.node) {
-			this.#revisitNode(next, inner);
+	#markDirty(rec: Rec): void {
+		rec.dirty = true;
+		for (let p = rec.parent; p && !p.childDirty; p = p.parent) p.childDirty = true;
+		this.#onDirty();
+	}
+
+	/** The nodes a record's children come from. */
+	#sourceOf(rec: Rec): readonly UiNode[] {
+		if (rec.node) return rec.node.children();
+		if (rec === this.#main) return this.#surface.main();
+		if (rec === this.#dock) return this.#surface.dock();
+		return this.#surface.layer();
+	}
+
+	/** The placements a record's children are now. */
+	#placements(rec: Rec): Placement[] {
+		const out: Placement[] = [];
+		if (rec === this.#layer) {
+			for (const hoist of this.#layerHoists) out.push({ ...hoist, hoisted: true });
+		}
+		const nodes = this.#sourceOf(rec);
+		for (let i = 0; i < nodes.length; i++) {
+			const node = nodes[i]!;
+			if (this.#evicted?.has(node)) continue;
+			out.push({ node, owner: rec, seg: node.key() ?? String(i), hoisted: false });
+		}
+		return out;
+	}
+
+	#visit(rec: Rec): void {
+		if (rec.dirty && rec.settled && rec.parent === this.#main) {
+			const before = this.#main.kids[this.#main.kids.indexOf(rec) + 1]?.id ?? null;
+			this.#republish(rec, this.#main, before);
 			return;
 		}
-		const reveal = next.node.reveal;
-		if (typeof reveal === "object") {
-			const was = old.node.reveal;
-			if (reveal.n !== (typeof was === "object" ? was.n : undefined)) this.#reveals.push([next.id, reveal.at]);
+		if (rec.dirty) {
+			rec.dirty = false;
+			const node = rec.node;
+			const reshaped = !node || node.children() !== rec.rawChildren;
+			if (reshaped) this.#updateChildren(rec);
+			if (node) this.#updateNode(rec, node, reshaped);
 		}
-		if (old.node.k !== next.node.k) {
-			this.#dropSubtree(old);
-			this.#ops.push(["del", next.id]);
-			this.#ops.push(["add", next.id, parent, before, this.#materialize(next, inner)]);
-			this.#flushMoves();
+		if (rec.childDirty) {
+			rec.childDirty = false;
+			for (const kid of rec.kids) if (kid.dirty || kid.childDirty) this.#visit(kid);
+		}
+		if (rec.hoisting) this.#gatherHoists(rec);
+		if (rec.node && rec.parent === this.#main && !rec.settled && isSettled(rec.node)) this.#settle(rec);
+	}
+
+	/** Recompute a visited record's hoisted descendants, keeping the old list when unchanged. */
+	#gatherHoists(rec: Rec): void {
+		let out: Hoist[] | undefined;
+		for (const item of rec.structural) {
+			if ("seg" in item) (out ??= []).push(item);
+			else if (item.hoists.length > 0) (out ??= []).push(...item.hoists);
+		}
+		const next = out ?? NO_HOISTS;
+		if (!sameHoists(next, rec.hoists)) rec.hoists = next;
+	}
+
+	/** Diff a node's props, text, reveal and scroll against what was sent. */
+	#updateNode(rec: Rec, node: UiNode, reshaped: boolean): void {
+		const raw = rec.canvas ? rec.canvas() : node.props();
+		// A list's selection and a fold's head name a child by wire id: new children may change it.
+		if (raw !== rec.rawProps || (reshaped && CHILD_REF_KINDS[rec.kind])) {
+			rec.rawProps = raw;
+			const next = this.#wireProps(rec, node);
+			const prev = rec.props ?? {};
+			rec.props = next;
+			let changed: Record<string, unknown> | undefined;
+			const textual = TEXT_KINDS.has(rec.kind);
+			for (const name in next) {
+				if (textual && name === "text") continue;
+				const before = prev[name];
+				const after = next[name];
+				// Most props are the same value the last frame sent (or a primitive): only a
+				// value that changed identity needs the deep comparison.
+				if (before === after) continue;
+				if (!Bun.deepEquals(before, after)) (changed ??= {})[name] = after;
+			}
+			for (const name in prev) {
+				if (textual && name === "text") continue;
+				if (!(name in next)) (changed ??= {})[name] = null;
+			}
+			if (changed) {
+				this.#ops.push(["set", rec.id, changed]);
+				collectBlobs(changed, this.#blobs);
+			}
+			if (textual) {
+				const before = typeof prev.text === "string" ? prev.text : "";
+				const after = typeof next.text === "string" ? next.text : "";
+				if (before !== after) this.#textOp(rec.id, rec.kind, before, after);
+			}
+		}
+		const reveal = node.reveal();
+		if (typeof reveal === "object" && reveal.n !== rec.revealN) {
+			rec.revealN = reveal.n;
+			this.#late.push(["reveal", rec.id, reveal.at]);
+		}
+		const scroll = node.scroll();
+		if (rec.scrollN === undefined) {
+			// A node that replaced a retired one starts from its request, as a new node does.
+			rec.scrollN = scroll?.n ?? 0;
+		} else if (scroll && scroll.n !== rec.scrollN) {
+			const steps = Math.min(MAX_SCROLL_STEPS, scroll.n - rec.scrollN);
+			rec.scrollN = scroll.n;
+			if (steps > 0 && this.#env.hasFeature("scroll"))
+				for (let i = 0; i < steps; i++) this.#late.push(["scroll", rec.id, scroll.by]);
+		}
+	}
+
+	/**
+	 * The op taking a node's primary text from `before` to `after`: an append when it only grew,
+	 * else a splice of the changed range for an edited field or a streaming answer (whose
+	 * speculatively closed tail is rewritten as it arrives), else a replace.
+	 */
+	#textOp(id: string, kind: TspKind, before: string, after: string): void {
+		if (after.length > before.length && after.startsWith(before)) {
+			this.#ops.push(["text", id, "append", after.slice(before.length)]);
 			return;
 		}
-		const scroll = next.node.scroll;
-		if (scroll && scroll.n !== old.node.scroll?.n) {
-			// Presses described in one frame coalesce: repeat the latest step once per
-			// press (an end once), so key repeat keeps its distance.
-			const jump = scroll.by === "start" || scroll.by === "end";
-			const presses = jump ? 1 : Math.min(Math.max(scroll.n - (old.node.scroll?.n ?? 0), 1), MAX_SCROLL_REPEAT);
-			for (let i = 0; i < presses; i++) this.#scrolls.push([next.id, scroll.by]);
-		}
-		const oldEntries = this.#entries(old.node.c, old.keypath, old.owner, old.hoist, null);
-		const newEntries = this.#entries(next.node.c, next.keypath, next.owner, next.hoist, inner);
-		this.#diffProps(
-			next.id,
-			next.node.k,
-			this.#wireProps(old.node, old.owner, oldEntries),
-			this.#wireProps(next.node, next.owner, newEntries),
-		);
-		this.#diffChildren(next.id, oldEntries, newEntries, null, inner);
-	}
-
-	/** Walk an unchanged node for the component boundaries and overlays inside it. */
-	#revisitNode(entry: NodeEntry, walk: Walk): void {
-		const entries = this.#entries(entry.node.c, entry.keypath, entry.owner, entry.hoist, walk);
-		for (let i = 0; i < entries.length; i++) {
-			const child = entries[i]!;
-			const before = i + 1 < entries.length ? entries[i + 1]!.id : null;
-			if (child.comp === undefined) this.#revisitNode(child, this.#walkFor(child, walk));
-			else this.#visitChild(child.comp, entry.id, before, before, walk);
-		}
-	}
-
-	#diffProps(
-		id: string,
-		kind: TspKind,
-		oldProps: Readonly<Record<string, unknown>> | undefined,
-		newProps: Readonly<Record<string, unknown>> | undefined,
-	): void {
-		const textKind = TEXT_KINDS.has(kind);
-		let set: Record<string, unknown> | undefined;
-		if (newProps) {
-			for (const key in newProps) {
-				const value = newProps[key];
-				if (value === undefined || (textKind && key === "text")) continue;
-				if (!sameValue(oldProps?.[key], value)) (set ??= {})[key] = value;
-			}
-			if (kind === "list") this.#noteSelected(set?.selected);
-		}
-		if (oldProps) {
-			for (const key in oldProps) {
-				if (oldProps[key] === undefined || newProps?.[key] !== undefined) continue;
-				if (textKind && key === "text") continue;
-				(set ??= {})[key] = null;
-			}
-		}
-		if (textKind) {
-			const oldText = oldProps?.text as string | undefined;
-			const newText = newProps?.text as string | undefined;
-			if (newText === undefined) {
-				if (oldText !== undefined) (set ??= {}).text = null;
-			} else if (newText !== oldText) {
-				this.#textOp(id, kind, oldText ?? "", newText);
-			}
-		}
-		if (set) this.#ops.push(["set", id, set]);
-	}
-
-	#textOp(id: string, kind: TspKind, oldText: string, newText: string): void {
-		if (newText.length >= oldText.length && newText.startsWith(oldText)) {
-			this.#ops.push(["text", id, "append", newText.slice(oldText.length)]);
-			return;
-		}
-		// A streaming `md` node rewrites only its tail (the speculatively closed span it ends in), so an
-		// edit past a shared head splices too instead of resending the whole text.
-		if ((kind === "editor" || kind === "input" || kind === "md") && oldText.length > 0) {
-			const limit = Math.min(oldText.length, newText.length);
+		if ((kind === "editor" || kind === "input" || kind === "md") && before.length > 0) {
+			const limit = Math.min(before.length, after.length);
 			let prefix = 0;
-			while (prefix < limit && oldText.charCodeAt(prefix) === newText.charCodeAt(prefix)) prefix++;
+			while (prefix < limit && before.charCodeAt(prefix) === after.charCodeAt(prefix)) prefix++;
+			// A Markdown source rewritten from its start re-renders whole either way.
 			if (kind !== "md" || prefix > 0) {
 				let suffix = 0;
 				while (
 					suffix < limit - prefix &&
-					oldText.charCodeAt(oldText.length - 1 - suffix) === newText.charCodeAt(newText.length - 1 - suffix)
+					before.charCodeAt(before.length - 1 - suffix) === after.charCodeAt(after.length - 1 - suffix)
 				)
 					suffix++;
 				this.#ops.push([
 					"splice",
 					id,
 					prefix,
-					oldText.length - prefix - suffix,
-					newText.slice(prefix, newText.length - suffix),
+					before.length - prefix - suffix,
+					after.slice(prefix, after.length - suffix),
 				]);
 				return;
 			}
 		}
-		this.#ops.push(["text", id, "replace", newText]);
+		this.#ops.push(["text", id, "replace", after]);
 	}
 
 	/**
-	 * Props as sent: item keys, header children and anchor keypaths resolved to
-	 * wire ids, and icon glyphs split into `icon` spans.
+	 * A node's props as sent: canvas rows, a list's selection as its item's wire id, a card's or
+	 * section's child keyed `head` (when no `head` prop is set) as its `head` wire id.
 	 */
-	#wireProps(
-		node: NativeNode,
-		owner: Owner,
-		entries: readonly Entry[],
-	): Readonly<Record<string, unknown>> | undefined {
-		// Dereferencing pins the blob through this synchronous reconcile/upload job, even after settling drops its node.
-		if (node.k === "image" && node.p?.blob) getNativeBlob(node.p.blob);
-		return normalizeIconProps(node.k, this.#resolveRefs(node, owner, entries));
+	#wireProps(rec: Rec, node: UiNode): Props {
+		return normalizeIconProps(rec.kind, this.#sentProps(rec, node));
 	}
 
-	#resolveRefs(
-		node: NativeNode,
-		owner: Owner,
-		entries: readonly Entry[],
-	): Readonly<Record<string, unknown>> | undefined {
-		const props = asProps(node);
-		switch (node.k) {
-			case "list": {
-				const selected = props?.selected;
-				if (typeof selected !== "string") return props;
-				const item = entries.find(entry => entry.comp === undefined && entry.node.key === selected);
-				if (!item) return props;
-				this.#selectedIds.add(item.id);
-				return { ...props, selected: item.id };
-			}
-			case "card":
-			case "section": {
-				if (props?.head !== undefined) return props;
-				const head = entries.find(entry => entry.comp === undefined && entry.node.key === "head");
-				return head ? { ...props, head: head.id } : props;
-			}
-			case "overlay": {
-				const anchor = props?.anchor;
-				if (owner.state === null || typeof anchor !== "object" || anchor === null) return props;
-				if ("caret" in anchor && typeof anchor.caret === "string")
-					return { ...props, anchor: { caret: nodeId(owner.base, anchor.caret) } };
-				if ("node" in anchor && typeof anchor.node === "string")
-					return { ...props, anchor: { ...anchor, node: nodeId(owner.base, anchor.node) } };
-				return props;
-			}
-			default:
-				return props;
+	/** {@link #wireProps} before icon normalization. */
+	#sentProps(rec: Rec, node: UiNode): Props {
+		let raw = node.props() as Props;
+		if ("term" in raw) {
+			// Terminal-only look facts never travel.
+			const { term: _term, ...rest } = raw;
+			raw = rest;
 		}
+		if (rec.kind === "overlay" && "page" in raw) {
+			// Nor does an overlay's page declaration (`prefs` has a wire prop of that name).
+			const { page: _page, ...rest } = raw;
+			raw = rest;
+		}
+		if (rec.canvas) {
+			const { paint: _paint, ...common } = raw as Readonly<CanvasProps>;
+			return { ...common, cols: this.#env.cols(), lines: rec.canvas() };
+		}
+		if (rec.kind === "md" && "prepared" in raw) {
+			// Nor does an `md`'s note that its streaming text is final as given.
+			const { prepared, ...rest } = raw;
+			if (prepared === true) return rest;
+			raw = rest;
+		}
+		if (rec.kind === "md" && raw.stream === true && typeof raw.text === "string") {
+			// A terminal lays out every row it gets: hold the table row being written, close an open link/math span.
+			return { ...raw, text: speculativeStreamingSource(holdPartialTableRow(raw.text)) };
+		}
+		if (rec.kind === "overlay") {
+			const ref = (raw as TspOverlayProps).anchor;
+			if (ref && typeof ref === "object") {
+				this.#anchors.set(rec, ref);
+				return this.#anchorProps(rec, raw, ref);
+			}
+			this.#anchors.delete(rec);
+			if (this.#filling.has(node) && raw.size !== "full") return { ...raw, size: "full" };
+		}
+		if (rec.kind === "list" && typeof raw.selected === "string") {
+			const selected = raw.selected;
+			const item = rec.kids.find(kid => kid.node && (kid.node.key() ?? null) === selected);
+			const byIndex =
+				item ?? rec.kids.find(kid => kid.node && String(node.children().indexOf(kid.node)) === selected);
+			return { ...raw, selected: byIndex ? byIndex.id : null };
+		}
+		if ((rec.kind === "card" || rec.kind === "section") && raw.head === undefined) {
+			const head = rec.kids.find(kid => kid.node?.key() === "head");
+			if (head) return { ...raw, head: head.id };
+		}
+		return raw;
 	}
 
-	/** A full wire subtree for an entry; nested components get states (or pending moves when mounted elsewhere). */
-	#materialize(entry: NodeEntry, walk: Walk): TspNode {
-		if (typeof entry.node.reveal === "string") this.#reveals.push([entry.id, entry.node.reveal]);
-		const entries = this.#entries(entry.node.c, entry.keypath, entry.owner, entry.hoist, walk);
-		const children: TspNode[] = [];
-		for (let i = 0; i < entries.length; i++) {
-			const child = entries[i]!;
-			if (child.comp === undefined) {
-				children.push(this.#materialize(child, this.#walkFor(child, walk)));
+	/** Resolve an owner's keypath through structural children, never guessing a collision suffix or a moved id. */
+	#anchorProps(rec: Rec, props: Props, ref: AnchorRef): Props {
+		const path = "caret" in ref ? ref.caret : ref.node;
+		let target = rec.owner;
+		for (const segment of path.split("/")) {
+			if (!target) break;
+			const child: UiNode | undefined = this.#sourceOf(target).find((node, i) => {
+				const key = node.key();
+				return (key === undefined ? String(i) : escapeSegment(key)) === segment;
+			});
+			const record: Rec | undefined = child && this.#byNode.get(child);
+			target = record?.owner === target ? record : null;
+		}
+		// A layer may also name an already-qualified wire id in another region.
+		const record = target ?? this.#byId.get(path);
+		const id = record?.node && this.idOf(record.node) === record.id ? record.id : undefined;
+		const prev = (props as TspOverlayProps).anchor;
+		if (id === undefined) {
+			if (prev === undefined) return props;
+			const { anchor: _missing, ...rest } = props;
+			return rest;
+		}
+		if ("caret" in ref) {
+			if (typeof prev === "object" && "caret" in prev && prev.caret === id) return props;
+			return { ...props, anchor: { caret: id } };
+		}
+		if (typeof prev === "object" && "node" in prev && prev.node === id && prev.side === ref.side) return props;
+		return { ...props, anchor: { node: id, side: ref.side } };
+	}
+
+	/** Reconcile a record's wire children with its node's current children. */
+	#updateChildren(rec: Rec): void {
+		const node = rec.node;
+		if (node) rec.rawChildren = node.children();
+		const placements = this.#placements(rec);
+		const old = rec.kids;
+		const next: Rec[] = [];
+		const structural: (Rec | Hoist)[] = [];
+		const fresh = new Set<Rec>();
+		const slots: (Rec | undefined)[] = [];
+		for (const placement of placements) {
+			if (rec.hoisting && !placement.hoisted && hoists(placement.node)) {
+				slots.push(undefined);
 				continue;
 			}
-			let state = this.#states.get(child.comp);
-			if (state?.frame === this.#frame) {
-				this.#warnDuplicate(state);
+			let match = this.#byNode.get(placement.node);
+			if (match && (match.released || match.placed === this.#frame)) match = undefined;
+			slots.push(match);
+		}
+		// Old children that may be taken over by a node replacing them (their node retired, not placed again).
+		let vacant: Map<string, Rec> | undefined;
+		for (const kid of old) {
+			if (kid.node?.disposed && kid.parent === rec && !slots.includes(kid))
+				(vacant ??= new Map()).set(`${kid.kind}\0${kid.id}`, kid);
+		}
+		for (let i = 0; i < placements.length; i++) {
+			const placement = placements[i]!;
+			if (rec.hoisting && !placement.hoisted && hoists(placement.node)) {
+				structural.push({ node: placement.node, owner: rec, seg: placement.seg });
 				continue;
 			}
-			const before = i + 1 < entries.length ? entries[i + 1]!.id : null;
-			walk.inner?.push({ comp: child.comp, parent: entry.id, before });
-			if (state) {
-				const next = this.#resolve(state);
-				if (next.k === (state.node?.k ?? state.kind)) {
-					// Mounted elsewhere: update it in place now, then move it in once
-					// this subtree lands, keeping its terminal-side state. Its own adds
-					// flush their moves; ours wait for the enclosing add.
-					// Pending before the visit: a delete during it that would take this
-					// component along parks it instead.
-					this.#pendingMoves.add(state.id);
-					const pending = this.#moves;
-					this.#moves = [];
-					this.#visit(state, entry.id, before, walk.settled, next);
-					this.#moves = pending;
-					pending.push({ id: state.id, parent: entry.id, before });
-					continue;
+			let kid = slots[i];
+			if (!kid && vacant) {
+				const id = this.#childId(placement, false);
+				const key = `${this.#kindOf(placement.node)}\0${id}`;
+				const candidate = vacant.get(key);
+				if (candidate) {
+					vacant.delete(key);
+					kid = this.#rebind(candidate, placement.node);
+					rec.childDirty = true;
 				}
-				// Its root kind changed too: nothing worth keeping, rebuild it here.
-				this.#dropState(state);
-				this.#ops.push(["del", state.id]);
 			}
-			state = this.#createState(child.comp, entry.id);
-			children.push(this.#materializeComponent(state, walk.settled));
-		}
-		return this.#wire(entry.id, entry.node.k, this.#wireProps(entry.node, entry.owner, entries), children);
-	}
-
-	#wire(
-		id: string,
-		k: TspKind,
-		props: Readonly<Record<string, unknown>> | undefined,
-		children: readonly TspNode[],
-	): TspNode {
-		if (k === "list") this.#noteSelected(props?.selected);
-		const out: { id: string; k: TspKind; p?: Record<string, unknown>; c?: readonly TspNode[] } = { id, k };
-		if (props) {
-			let p: Record<string, unknown> | undefined;
-			for (const key in props) {
-				const value = props[key];
-				if (value !== undefined && value !== null) (p ??= {})[key] = value;
+			if (kid) {
+				kid.owner = placement.owner;
+				kid.detached = false;
+			} else {
+				kid = this.#create(placement, rec);
+				fresh.add(kid);
 			}
-			if (p) out.p = p;
+			kid.placed = this.#frame;
+			next.push(kid);
+			structural.push(kid);
 		}
-		if (children.length > 0) out.c = children;
-		return out as TspNode;
-	}
-
-	/** A list's selection went out (on add or change): scroll it into view at frame end. */
-	#noteSelected(selected: unknown): void {
-		if (typeof selected === "string" && this.#selectedIds.has(selected)) this.#reveals.push([selected, "nearest"]);
-	}
-
-	/** Move components an `add` left out into their new parent, last first so every `before` exists. */
-	#flushMoves(): void {
-		const moves = this.#moves;
-		if (moves.length === 0) return;
-		this.#moves = [];
-		for (let i = moves.length - 1; i >= 0; i--) {
-			const move = moves[i]!;
-			const state = this.#byId.get(move.id);
-			if (state) this.#move(state, move.parent, move.before);
-			else this.#ops.push(["move", move.id, move.parent, move.before]);
-			this.#pendingMoves.delete(move.id);
+		// Old children not placed again leave (their delete waits for the frame's end).
+		for (const kid of old) {
+			if (kid.parent !== rec || kid.placed === this.#frame || kid.detached) continue;
+			kid.detached = true;
+			this.#removed.push(kid);
 		}
-	}
-
-	/** The component whose description holds node `parent` in the document (null: region, root, or `layer` via hoisting). */
-	#containerOf(parent: string): CompState | null {
-		if (parent.includes("^")) return null;
-		const dot = parent.indexOf(".");
-		return this.#byId.get(dot === -1 ? parent : parent.slice(0, dot)) ?? null;
-	}
-
-	/**
-	 * Move a component. When the target currently sits inside the component
-	 * itself (a parent and child swapped places this frame), first park the
-	 * component on that path under the root; it moves to its own new place
-	 * later in the frame.
-	 */
-	#move(state: CompState, parent: string, before: string | null): void {
-		const target = this.#containerOf(parent);
-		// The first component on the path that still has to move this frame
-		// (not yet visited, or waiting for an enclosing add): parking it breaks
-		// the cycle without disturbing anything already in its final place.
-		let movable: CompState | null = null;
-		for (let at = target, guard = 0; at && guard < 4096; at = at.container, guard++) {
-			if (at === state) {
-				if (movable) {
-					this.#ops.push(["move", movable.id, this.surface, null]);
-					movable.container = null;
-					movable.parked = true;
-					this.#parked.push(movable);
-				}
-				break;
+		// Keep the longest run of children already in order; place the rest right to left.
+		const oldIndex = new Map<Rec, number>();
+		for (let i = 0; i < old.length; i++) oldIndex.set(old[i]!, i);
+		const order = next.map(kid => (kid.parent === rec && !fresh.has(kid) ? (oldIndex.get(kid) ?? -1) : -1));
+		const stable = longestIncreasing(order);
+		// Right to left: each `before` sibling already sits where it ends up.
+		let before: string | null = null;
+		for (let i = next.length - 1; i >= 0; i--) {
+			const kid = next[i]!;
+			if (fresh.has(kid)) this.#ops.push(["add", kid.id, rec.id, before, this.#describe(kid)]);
+			// A settled ancestor dropped this child's props and watches. Moving it out must
+			// describe its current state and install watches appropriate to its new position.
+			else if (kid.parent !== rec && (!kid.stop || kid.settled)) this.#republish(kid, rec, before);
+			else if (!stable.has(i)) {
+				kid.parent = rec;
+				this.#ops.push(["move", kid.id, rec.id, before]);
 			}
-			if (!movable && (at.frame !== this.#frame || this.#pendingMoves.has(at.id))) movable = at;
+			before = kid.id;
 		}
-		this.#ops.push(["move", state.id, parent, before]);
-		state.container = target;
-		state.parked = false;
+		rec.kids = next.length > 0 ? next : NO_RECORDS;
+		rec.structural = structural.length > 0 ? structural : NO_RECORDS;
 	}
 
-	// ── Components ───────────────────────────────────────────────────────
+	/** Rebuild one record whose old props were discarded, preserving its wire identity. */
+	#republish(rec: Rec, parent: Rec, before: string | null): void {
+		for (const kid of rec.kids) {
+			if (kid.parent !== rec) continue;
+			this.#release(kid);
+			this.#ids.delete(kid.id);
+		}
+		rec.parent = parent;
+		rec.dirty = false;
+		rec.childDirty = false;
+		if (rec.settled) {
+			// The block-wide watcher gives way to the per-node ones until it settles again.
+			rec.settled = false;
+			rec.stop?.();
+			rec.stop = null;
+		}
+		if (!rec.stop) this.#watch(rec);
+		this.#ops.push(["del", rec.id], ["add", rec.id, parent.id, before, this.#describe(rec)]);
+	}
 
-	#createState(comp: Component, parent: string): CompState {
-		const id = nativeComponentId(comp);
-		const owner: { base: string; state: CompState | null } = { base: id, state: null };
-		const state: CompState = {
-			comp,
+	#kindOf(node: UiNode): TspKind {
+		return node.kind === "canvas" ? "rows" : node.kind;
+	}
+
+	#childId(placement: Placement, unique: boolean): string {
+		const base = `${placement.owner.id}/${placement.hoisted ? "^" : ""}${escapeSegment(placement.seg)}`;
+		if (!unique || !this.#ids.has(base)) return base;
+		for (let n = 1; ; n++) {
+			const id = `${base}~${n}`;
+			if (!this.#ids.has(id)) return id;
+		}
+	}
+
+	#create(placement: Placement, parent: Rec): Rec {
+		const node = placement.node;
+		const id = this.#childId(placement, true);
+		// A node still described elsewhere (moved into a new subtree) gets a fresh record; the old one is deleted.
+		const previous = this.#byNode.get(node);
+		if (previous && !previous.released && previous.placed !== this.#frame && !previous.detached) {
+			previous.detached = true;
+			this.#removed.push(previous);
+		}
+		const rec: Rec = {
 			id,
-			owner,
-			node: null,
-			weak: null,
-			kind: "col",
-			propKeys: [],
-			childIds: [],
-			inner: [],
-			rowsLines: null,
-			rowsCols: 0,
-			rowsNode: null,
+			node,
+			kind: this.#kindOf(node),
+			owner: placement.owner,
+			parent,
+			hoisting: parent.hoisting && !placement.hoisted,
+			kids: NO_RECORDS,
+			hoists: NO_HOISTS,
+			structural: NO_RECORDS,
+			props: null,
+			rawProps: undefined,
+			rawChildren: null,
+			revealN: undefined,
+			scrollN: undefined,
+			dirty: false,
+			childDirty: false,
 			settled: false,
-			settleSent: false,
-			frame: 0,
-			container: this.#containerOf(parent),
-			parked: false,
+			detached: false,
+			released: false,
+			placed: this.#frame,
+			canvas: null,
+			stop: null,
 		};
-		owner.state = state;
-		this.#states.set(comp, state);
-		this.#byId.set(id, state);
-		return state;
+		this.#ids.add(id);
+		this.#byId.set(id, rec);
+		this.#byNode.set(node, rec);
+		this.#watch(rec);
+		return rec;
 	}
 
-	/** The component's description, or a `rows` node rendered at `cx.cols`. */
-	#resolve(state: CompState): NativeNode {
-		const comp = state.comp;
-		const node = ownDescription(comp, this.#cx!);
-		if (node) return quietMotion(node);
-		this.#rows++;
-		const cols = Math.max(1, this.#cx!.cols);
-		const lines = comp.render(cols);
-		if (state.rowsNode && lines === state.rowsLines && cols === state.rowsCols) return state.rowsNode;
-		state.rowsLines = lines;
-		state.rowsCols = cols;
-		const clean = lines.some(line => line.includes(CURSOR_MARKER))
-			? lines.map(line => line.replaceAll(CURSOR_MARKER, ""))
-			: lines;
-		state.rowsNode = { k: "rows", p: { cols, lines: clean } };
-		return state.rowsNode;
+	/** Point an existing record at the node that replaced its retired one. */
+	#rebind(rec: Rec, node: UiNode): Rec {
+		const old = rec.node;
+		if (old && this.#byNode.get(old) === rec) this.#byNode.delete(old);
+		rec.stop?.();
+		rec.canvas = null;
+		rec.node = node;
+		rec.rawProps = undefined;
+		rec.rawChildren = null;
+		rec.revealN = undefined;
+		rec.scrollN = undefined;
+		this.#byNode.set(node, rec);
+		this.#watch(rec);
+		rec.dirty = true;
+		rec.childDirty = true;
+		rec.detached = false;
+		return rec;
 	}
 
-	#identity(state: CompState, node: NativeNode): object {
-		return node === state.rowsNode && state.rowsLines ? state.rowsLines : node;
-	}
-
-	#rootEntry(state: CompState, node: NativeNode): NodeEntry {
-		return { id: state.id, node, owner: state.owner, keypath: "", hoist: true };
-	}
-
-	#materializeComponent(state: CompState, settledAbove: boolean): TspNode {
-		state.frame = this.#frame;
-		const node = this.#resolve(state);
-		const settled = settledAbove || state.settled || isNativeSettled(state.comp);
-		const inner: Inner[] = [];
-		const wire = this.#materialize(this.#rootEntry(state, node), { owner: state.owner, inner, settled, hoist: true });
-		state.inner = inner;
-		state.node = node;
-		state.weak = null;
-		state.settleSent = false;
-		this.#finish(state, node, settled);
-		return wire;
-	}
-
-	#visit(
-		state: CompState,
-		parent: string,
-		before: string | null,
-		settledAbove: boolean,
-		next: NativeNode = this.#resolve(state),
-	): void {
-		state.frame = this.#frame;
-		const settled = settledAbove || state.settled || isNativeSettled(state.comp);
-		if (state.node !== null) {
-			if (next === state.node) this.#revisitComponent(state, settled);
-			else {
-				const inner: Inner[] = [];
-				const walk: Walk = { owner: state.owner, inner, settled, hoist: true };
-				this.#diffNode(this.#rootEntry(state, state.node), this.#rootEntry(state, next), parent, before, walk);
-				state.inner = inner;
-				state.node = next;
+	/** Watch everything a record's description reads; any change marks it dirty. */
+	#watch(rec: Rec): void {
+		const node = rec.node!;
+		const settleable = rec.parent === this.#main;
+		rec.stop = createRoot(dispose => {
+			if (node.kind === "canvas") {
+				rec.canvas = computed(() => (node.props() as Readonly<CanvasProps>).paint(this.#env.cols()), {
+					equals: (a, b) => a.length === b.length && a.every((row, i) => row === b[i]),
+				});
 			}
-		} else if (state.weak?.deref() === this.#identity(state, next)) {
-			this.#revisitComponent(state, settled);
-		} else {
-			this.#replaceSettled(state, next, parent, before, settled);
-		}
-		this.#finish(state, next, settled);
+			let first = true;
+			effect(() => {
+				node.props();
+				node.children();
+				node.key();
+				node.reveal();
+				node.scroll();
+				rec.canvas?.();
+				if (settleable) isSettled(node);
+				if (first) first = false;
+				else this.#markDirty(rec);
+			});
+			return dispose;
+		});
 	}
 
-	/** Replay an unchanged component's walk: visit its boundaries, re-offer its overlays. */
-	#revisitComponent(state: CompState, settled: boolean): void {
-		const walk: Walk = { owner: state.owner, inner: null, settled, hoist: true };
-		for (const item of state.inner) {
-			if (item.comp === undefined) this.#framePortals.push(item.portal);
-			else this.#visitChild(item.comp, item.parent, item.before, item.before, walk);
-		}
-	}
-
-	/** A settled component changed: targeted ops by id, no diff against dropped state. */
-	#replaceSettled(state: CompState, next: NativeNode, parent: string, before: string | null, settled: boolean): void {
-		state.settleSent = false;
-		const inner: Inner[] = [];
-		const walk: Walk = { owner: state.owner, inner, settled, hoist: true };
-		if (next.k !== state.kind) {
-			this.#dropNested(state);
-			this.#ops.push(["del", state.id]);
-			this.#ops.push(["add", state.id, parent, before, this.#materialize(this.#rootEntry(state, next), walk)]);
-			this.#flushMoves();
-			state.inner = inner;
-			return;
-		}
-		const entries = this.#entries(next.c, "", state.owner, true, walk);
-		const props = this.#wireProps(next, state.owner, entries);
-		const textKind = TEXT_KINDS.has(next.k);
-		let set: Record<string, unknown> | undefined;
-		if (props) {
-			for (const key in props) {
-				const value = props[key];
-				if (value === undefined || (textKind && key === "text")) continue;
-				(set ??= {})[key] = value;
+	/** Describe a new record (and its subtree) as a wire node. */
+	#describe(rec: Rec): TspNode {
+		const node = rec.node!;
+		rec.rawChildren = node.children();
+		const placements = this.#placements(rec);
+		const kids: Rec[] = [];
+		const structural: (Rec | Hoist)[] = [];
+		const children: TspNode[] = [];
+		for (const placement of placements) {
+			if (rec.hoisting && hoists(placement.node)) {
+				structural.push({ node: placement.node, owner: rec, seg: placement.seg });
+				continue;
 			}
+			const previous = this.#byNode.get(placement.node);
+			if (previous?.placed === this.#frame && !previous.released) continue;
+			const kid = this.#create(placement, rec);
+			kids.push(kid);
+			structural.push(kid);
+			children.push(this.#describe(kid));
 		}
-		for (const key of state.propKeys) {
-			if (props?.[key] === undefined) (set ??= {})[key] = null;
-		}
-		if (set) this.#ops.push(["set", state.id, set]);
-		if (next.k === "list") this.#noteSelected(set?.selected);
-		if (textKind && typeof props?.text === "string") this.#ops.push(["text", state.id, "replace", props.text]);
-		this.#dropNested(state);
-		for (const childId of state.childIds) {
-			// A child component updated elsewhere this frame, or parked, no longer sits here.
-			const child = this.#byId.get(childId);
-			if (child?.frame !== this.#frame && !child?.parked) this.#ops.push(["del", childId]);
-		}
-		this.#diffChildren(state.id, EMPTY_ENTRIES, entries, null, walk);
-		state.inner = inner;
-	}
-
-	/** Send the settle hint once, then keep only what targeted updates need. */
-	#finish(state: CompState, node: NativeNode, settled: boolean): void {
-		if (!settled) return;
-		state.settled = true;
-		if (!state.settleSent) {
-			state.settleSent = true;
-			this.#settles.push(state.id);
-		}
-		const entries = this.#entries(node.c, "", state.owner, true, null);
-		const props = this.#wireProps(node, state.owner, entries);
-		const keys: string[] = [];
-		if (props) for (const key in props) if (props[key] !== undefined) keys.push(key);
-		state.kind = node.k;
-		state.propKeys = keys;
-		state.childIds = entries.map(entry => entry.id);
-		state.weak = new WeakRef(this.#identity(state, node));
-		state.node = null;
-	}
-
-	// ── Removal ──────────────────────────────────────────────────────────
-
-	#deleteEntry(entry: Entry): void {
-		if (entry.comp !== undefined) {
-			const state = this.#states.get(entry.comp);
-			if (state?.frame === this.#frame) return;
-			if (state) this.#dropState(state);
-			this.#ops.push(["del", entry.id]);
-			return;
-		}
-		this.#dropSubtree(entry);
-		this.#ops.push(["del", entry.id]);
+		rec.kids = kids.length > 0 ? kids : NO_RECORDS;
+		rec.structural = structural.length > 0 ? structural : NO_RECORDS;
+		if (rec.hoisting) this.#gatherHoists(rec);
+		rec.rawProps = rec.canvas ? rec.canvas() : node.props();
+		const props = this.#wireProps(rec, node);
+		rec.props = props;
+		collectBlobs(props, this.#blobs);
+		const reveal = node.reveal();
+		if (typeof reveal === "string") this.#late.push(["reveal", rec.id, reveal]);
+		else if (reveal) rec.revealN = reveal.n;
+		rec.scrollN = node.scroll()?.n ?? 0;
+		if (rec.parent === this.#main && isSettled(node)) this.#settle(rec);
+		const wire: Record<string, unknown> = { id: rec.id, k: rec.kind };
+		// A new node has no prop to clear: `null` (the `set` spelling of "remove") is left out.
+		let sent: Record<string, unknown> | undefined;
+		for (const name in props)
+			if (props[name] !== null && props[name] !== undefined) (sent ??= {})[name] = props[name];
+		if (sent) wire.p = sent;
+		if (children.length > 0) wire.c = children;
+		return wire as TspNode;
 	}
 
 	/**
-	 * Forget the components inside a subtree about to be deleted. Call before
-	 * emitting its `del`: a component already updated this frame and waiting to
-	 * move into a new subtree is parked under the surface root first, so the
-	 * delete doesn't take it along.
+	 * Send `settle` and drop the subtree's per-node watchers and retained props. One watcher over the
+	 * whole block stays: a settled block that changes after all is described again.
 	 */
-	#dropSubtree(entry: NodeEntry): void {
-		for (const child of this.#entries(entry.node.c, entry.keypath, entry.owner, entry.hoist, null)) {
-			if (child.comp === undefined) this.#dropSubtree(child);
-			else {
-				const state = this.#states.get(child.comp);
-				if (state) this.#dropOrPark(state);
-			}
-		}
+	#settle(rec: Rec): void {
+		rec.settled = true;
+		if (this.#env.hasFeature("settle")) this.#late.push(["settle", rec.id]);
+		const drop = (r: Rec): void => {
+			r.stop?.();
+			r.stop = null;
+			r.canvas = null;
+			r.props = null;
+			r.rawProps = undefined;
+			r.dirty = false;
+			r.childDirty = false;
+			for (const kid of r.kids) drop(kid);
+		};
+		drop(rec);
+		const root = rec.node!;
+		const read = (node: UiNode): void => {
+			node.props();
+			for (const child of node.children()) read(child);
+		};
+		rec.stop = createRoot(dispose => {
+			let first = true;
+			effect(() => {
+				read(root);
+				if (first) first = false;
+				else this.#markDirty(rec);
+			});
+			return dispose;
+		});
 	}
 
-	#dropNested(state: CompState): void {
-		for (const item of state.inner) {
-			if (item.comp === undefined) continue;
-			const child = this.#states.get(item.comp);
-			if (child) this.#dropOrPark(child);
+	/** Forget a deleted record and its subtree (children moved elsewhere stay). */
+	#release(rec: Rec): void {
+		if (rec.released) return;
+		rec.released = true;
+		this.#anchors.delete(rec);
+		rec.stop?.();
+		rec.stop = null;
+		rec.canvas = null;
+		if (this.#byId.get(rec.id) === rec) this.#byId.delete(rec.id);
+		if (rec.node && this.#byNode.get(rec.node) === rec) this.#byNode.delete(rec.node);
+		for (const kid of rec.kids) {
+			if (kid.parent !== rec) continue;
+			this.#release(kid);
+			this.#ids.delete(kid.id);
 		}
-		state.inner = [];
-	}
-
-	#dropOrPark(state: CompState): void {
-		// Already parked: no longer inside the subtree being deleted.
-		if (state.parked) return;
-		if (state.frame !== this.#frame) this.#dropState(state);
-		else if (this.#pendingMoves.has(state.id)) {
-			this.#ops.push(["move", state.id, this.surface, null]);
-			state.container = null;
-			state.parked = true;
-			this.#parked.push(state);
-		}
-	}
-
-	#dropState(state: CompState): void {
-		state.parked = false;
-		this.#states.delete(state.comp);
-		this.#byId.delete(state.id);
-		this.#dropNested(state);
 	}
 }

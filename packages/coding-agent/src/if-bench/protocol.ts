@@ -8,7 +8,7 @@
  * so a model cannot succeed by only attending to the prompt's edges.
  */
 import { prompt } from "@oh-my-pi/pi-utils";
-import type { IfBenchFailure } from "@oh-my-pi/pi-tui/apps/if-bench-board";
+import type { IfBenchFailure } from "../modes/view-model/apps/if-bench-board";
 import type { Action } from "./actions";
 import { encodeAction } from "./actions";
 import catDirectiveTemplate from "./prompts/cat-directive.md" with { type: "text" };

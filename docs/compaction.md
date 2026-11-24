@@ -71,7 +71,7 @@ The LLM context is built for the model that reads it. When the active model cann
 
 Compaction/context maintenance can run in six ways:
 
-1. **Manual context compaction**: `/compact [instructions]` calls `AgentSession.compact(...)`.
+1. **Manual context compaction**: `/compact [instructions]` calls `AgentSession.compact(...)`. It walks `compaction.methodOrder` and falls back to `soft` when the order omits it, so a manual pass always compacts; `/compact <mode>` keeps the mode's pinned chain.
 2. **Automatic overflow recovery**: after a same-model assistant error that matches context overflow.
 3. **Automatic incomplete-output recovery**: after a same-model assistant message ends with `stopReason === "length"` (including OpenAI/Codex `response.incomplete` and Anthropic output/context limits), subject to the output-cap checks below.
 4. **Automatic threshold maintenance**: after a successful turn when context exceeds the resolved threshold.

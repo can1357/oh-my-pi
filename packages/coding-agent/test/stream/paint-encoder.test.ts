@@ -5,7 +5,7 @@ import { StreamRedactor } from "@oh-my-pi/pi-coding-agent/stream/redactor";
 const SIZE = { columns: 40, rows: 2 };
 
 function paint(viewport: string[], history: string[] = []) {
-	return { history, viewport, reset: false, alt: false, columns: SIZE.columns, rows: SIZE.rows };
+	return { history, viewport, reset: false, alt: false, cursor: null, columns: SIZE.columns, rows: SIZE.rows };
 }
 
 describe("StreamPaintEncoder while the consumer is backpressured", () => {

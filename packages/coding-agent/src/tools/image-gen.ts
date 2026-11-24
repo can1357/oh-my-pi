@@ -12,7 +12,7 @@ import {
 	parseAntigravityCredentials,
 } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { getEffectiveTokenCost } from "@oh-my-pi/pi-catalog/models";
 import { isEnoent, logger, parseImageMetadata, prompt, ptree, truncate, untilAborted } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";

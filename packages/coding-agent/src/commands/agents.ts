@@ -5,7 +5,7 @@
 import { Args, Command, Flags, renderCommandHelp } from "@oh-my-pi/pi-utils/cli";
 import { type AgentsAction, type AgentsCommandArgs, runAgentsCommand } from "../cli/agents-cli";
 import { agentsHelp as commandHelp } from "../cli/command-help";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../ui/theme/service";
 
 const ACTIONS: AgentsAction[] = ["unpack"];
 
@@ -52,7 +52,7 @@ export default class Agents extends Command {
 			},
 		};
 
-		await initTheme();
+		initTheme();
 		await runAgentsCommand(cmd);
 	}
 }
