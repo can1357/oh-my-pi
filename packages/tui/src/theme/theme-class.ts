@@ -529,6 +529,10 @@ export class Theme {
 		return (str: string) => this.fg("pythonMode", str);
 	}
 
+	getBtwModeBorderColor(): (str: string) => string {
+		return (str: string) => this.fg("btwMode", str);
+	}
+
 	// ============================================================================
 	// Symbol Methods
 	// ============================================================================
@@ -702,10 +706,13 @@ export class Theme {
 			output: this.#symbols["icon.output"],
 			throughput: this.#symbols["icon.throughput"],
 			host: this.#symbols["icon.host"],
+			server: this.#symbols["icon.server"],
 			session: this.#symbols["icon.session"],
+			pid: this.#symbols["icon.pid"],
 			package: this.#symbols["icon.package"],
 			warning: this.#symbols["icon.warning"],
 			rewind: this.#symbols["icon.rewind"],
+			minimize: this.#symbols["icon.minimize"],
 			auto: this.#symbols["icon.auto"],
 			fast: this.#symbols["icon.fast"],
 			extensionSkill: this.#symbols["icon.extensionSkill"],

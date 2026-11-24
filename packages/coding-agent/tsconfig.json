@@ -1,8 +1,5 @@
 {
 	"extends": "../tsconfig.workspace.json",
-	"include": [
-		"src",
-		"test",
-		"scripts"
-	]
+	"include": ["src", "test", "scripts", "examples"],
+	"exclude": ["examples/extensions/with-deps"]
 }

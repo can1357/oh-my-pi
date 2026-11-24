@@ -174,6 +174,29 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("");
 		});
 
+		it("hands Up on the first line to the host when it takes it (an ask above), else recalls history", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.addToHistory("earlier prompt");
+			let askWaits = true;
+			const taken: string[] = [];
+			editor.onUpFromTop = () => {
+				if (askWaits) taken.push(editor.getText());
+				return askWaits;
+			};
+
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("");
+			editor.setText("draft\nsecond line");
+			editor.handleInput("\x1b[A"); // second line → first line: the cursor moves
+			editor.handleInput("\x1b[A"); // on the first line: out to the ask
+			expect(taken).toEqual(["", "draft\nsecond line"]);
+
+			askWaits = false;
+			editor.setText("");
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("earlier prompt");
+		});
+
 		it("cycles through history entries on repeated Up arrow", () => {
 			const editor = new Editor(defaultEditorTheme);
 
@@ -1762,6 +1785,18 @@ describe("Editor component", () => {
 			// em dash delimiter
 			editor.handleInput(wordLeft);
 			expect(editor.getCursor()).toEqual({ line: 0, col: text.indexOf("—") });
+		});
+	});
+
+	describe("Character jump", () => {
+		// Regression: `lastIndexOf` clamped the start before column 0 to 0 and found the cursor's own character.
+		it("jumps backward past the cursor's own character at column 0", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("a\nab");
+			editor.handleInput("\x1b[H");
+			editor.handleInput("\x1b[93;7u"); // Ctrl+Alt+] — jump backward
+			editor.handleInput("a");
+			expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
 		});
 	});
 

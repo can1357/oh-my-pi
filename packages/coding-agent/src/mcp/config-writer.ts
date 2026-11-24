@@ -256,7 +256,7 @@ export async function setServerDisabled(filePath: string, name: string, disabled
 
 /**
  * Read the user-level force-enable list (allowlist that overrides a
- * non-writable source config's `enabled: false`).
+ * non-writable source config's `enabled: false` and a built-in transform's drop).
  */
 export async function readEnabledServers(filePath: string): Promise<string[]> {
 	const config = await readMCPConfigFile(filePath);
@@ -265,8 +265,8 @@ export async function readEnabledServers(filePath: string): Promise<string[]> {
 
 /**
  * Add or remove a server name from the user-level force-enable list.
- * The list overrides a discovered server's `enabled: false` flag but does
- * NOT override the `disabledServers` denylist.
+ * The list overrides a discovered server's `enabled: false` flag and a
+ * built-in transform's drop, but does NOT override the `disabledServers` denylist.
  */
 export async function setServerForceEnabled(filePath: string, name: string, force: boolean): Promise<void> {
 	// Serialize the read-modify-write (see addMCPServer).

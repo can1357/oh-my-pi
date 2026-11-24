@@ -8,7 +8,7 @@ import type {
 	RenderResultOptions,
 	ToolRenderer,
 } from "./renderer";
-import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { type TspSpan, toolIntentLabel } from "@oh-my-pi/pi-wire";
 import { code, compact, keyed, md, node, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
 import { plainText } from "../native/spans";
@@ -35,7 +35,8 @@ import {
 	renderJsonTreeLines,
 } from "./json-tree";
 import { formatStyledTruncationWarning, stripOutputNotice } from "./output-meta";
-import { formatMCPProgress, parseMCPProgress } from "./mcp";
+import { formatMCPProgress } from "./mcp";
+import { parseMCPProgress } from "./mcp-progress";
 import { splitPathAndSel } from "./read";
 import {
 	DEFAULT_TERMINAL_PREVIEW_LINES,
@@ -333,7 +334,8 @@ function renderAgentProgressEvents(
 
 		const status = agentEventStatus(event.status);
 		const currentTool = eventString(event.currentTool);
-		const lastIntent = eventString(event.lastIntent);
+		const intent = eventString(event.lastIntent);
+		const lastIntent = intent && toolIntentLabel(intent);
 		const preview = status === "running" && !currentTool && !lastIntent ? eventString(event.taskPreview) : undefined;
 		const toolCount = eventNumber(event.toolCount);
 		lines.push(

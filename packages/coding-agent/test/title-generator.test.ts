@@ -98,6 +98,45 @@ describe("title generator", () => {
 		expect(completeSimpleMock).not.toHaveBeenCalled();
 	});
 
+	it("reports a produced local title as an unmetered request, and a null result as nothing", async () => {
+		const localModel = getBundledModel("local", "lfm2.5-230m");
+		if (!localModel) throw new Error("Expected bundled local tiny model");
+		const settings = createSettings(localModel);
+		const registry = createRegistry(localModel);
+		// A null result may be an abort or a failed model that never reached the worker.
+		vi.spyOn(tinyTitleClient, "generate").mockResolvedValueOnce("Local Title").mockResolvedValueOnce(null);
+		const reports: Array<{ message: ai.AssistantMessage; prompt: string }> = [];
+		const run = () =>
+			generateSessionTitle(
+				"Investigate the resolver",
+				registry,
+				settings,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				(message, prompt) => {
+					reports.push({ message, prompt });
+				},
+			);
+
+		expect(await run()).toBe("Local Title");
+		expect(await run()).toBeNull();
+
+		expect(reports).toHaveLength(1);
+		expect(reports[0]?.prompt).toContain("Investigate the resolver");
+		expect(reports[0]?.message).toMatchObject({
+			api: "local-inference",
+			provider: localModel.provider,
+			model: localModel.id,
+			stopReason: "stop",
+			content: [{ type: "text", text: "Local Title" }],
+		});
+		expect(reports[0]?.message.usage.totalTokens).toBe(0);
+	});
+
 	it("never falls back to a paid title model when local inference fails", async () => {
 		const localModel = getBundledModel("local", "lfm2.5-230m");
 		if (!localModel) throw new Error("Expected bundled local tiny model");
@@ -353,6 +392,69 @@ describe("title generator", () => {
 
 		expect(title).toBeNull();
 		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+	});
+
+	it.each(["<title>none</title>", "<title/>", '<title>"None."</title>'])(
+		"stops before the next paid model when the first model declines with %s",
+		async reply => {
+			const primary = getModelOrThrow("claude-haiku-4-5");
+			const fallback = getModelOrThrow("claude-sonnet-4-5");
+			const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockImplementation(
+				async model =>
+					({
+						stopReason: "stop",
+						content: [
+							{ type: "text", text: model.id === primary.id ? reply : "<title>Unwanted fallback title</title>" },
+						],
+					}) as never,
+			);
+			const settings = Settings.isolated({
+				modelRoles: { tiny: `${primary.provider}/${primary.id}`, smol: `${fallback.provider}/${fallback.id}` },
+				"retry.modelFallback": true,
+				"retry.fallbackChains": {
+					[`${primary.provider}/${primary.id}`]: [`${fallback.provider}/${fallback.id}`],
+				},
+			});
+
+			const title = await generateSessionTitle(
+				"I have a quick question for you",
+				createRegistry(primary, [primary, fallback]),
+				settings,
+			);
+
+			expect(title).toBeNull();
+			expect(completeSimpleMock.mock.calls.map(call => call[0].id)).toEqual([primary.id]);
+		},
+	);
+
+	it.each([
+		["an empty reply", []],
+		["a reply cut off after an opening <title>", [{ type: "text", text: "<title>" }]],
+	])("tries the next title model after %s", async (_shape, primaryContent) => {
+		const primary = getModelOrThrow("claude-haiku-4-5");
+		const fallback = getModelOrThrow("claude-sonnet-4-5");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockImplementation(
+			async model =>
+				({
+					stopReason: "stop",
+					content:
+						model.id === primary.id
+							? primaryContent
+							: [{ type: "text", text: "<title>Fix resolver errors</title>" }],
+				}) as never,
+		);
+		const settings = Settings.isolated({
+			modelRoles: { tiny: `${primary.provider}/${primary.id}`, smol: `${fallback.provider}/${fallback.id}` },
+		});
+
+		const title = await generateSessionTitle(
+			"Investigate resolver errors",
+			createRegistry(primary, [primary, fallback]),
+			settings,
+		);
+
+		expect(title).toBe("Fix resolver errors");
+		expect(completeSimpleMock.mock.calls.map(call => call[0].id)).toEqual([primary.id, fallback.id]);
 	});
 
 	it("logs and returns null when title credentials are missing", async () => {

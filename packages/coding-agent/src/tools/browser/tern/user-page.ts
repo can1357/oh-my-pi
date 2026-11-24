@@ -8,6 +8,7 @@
  * the system browser.
  */
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
+import { redactUrlForLog } from "../../../utils/redact-url";
 import { resolveTernPane } from "./kind";
 import { TernError, TernSocketClient } from "./wire";
 
@@ -103,7 +104,14 @@ export async function openTernPage(url: string, how: TernPagePlacement): Promise
 		});
 		return new TernPage(client, pane.socketPath, block);
 	} catch (error) {
-		logger.debug("Tern could not open the page; using the system browser", { url, how, error: String(error) });
+		logger.debug("Tern could not open the page; using the system browser", {
+			url: redactUrlForLog(url, "omit"),
+			how,
+			// Tern's answers can echo the original URL; log only their kind. Connect failures
+			// are built locally from the transport reason (ENOENT, ECONNREFUSED, …), so keep those.
+			kind: error instanceof TernError ? error.kind : undefined,
+			reason: error instanceof TernError && error.kind === "connect" ? error.message : undefined,
+		});
 		client.close();
 		return null;
 	}

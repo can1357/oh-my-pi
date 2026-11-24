@@ -15,7 +15,11 @@ import { StrippedToolCallsPlaceholder } from "@oh-my-pi/pi-tui/chat/stripped-too
 import { stopSharedSpinnerTicker, ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { setInternalUrlSchemeHost } from "@oh-my-pi/pi-tui/tools/url-scheme-host";
 import type { TranscriptEntryLike } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import { buildAsyncResultBlock, buildFileMentionBlock } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
+import {
+	buildAsyncNotifyBlock,
+	buildAsyncResultBlock,
+	buildFileMentionBlock,
+} from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { TodoReminderComponent } from "@oh-my-pi/pi-tui/chat/todo-reminder";
 import { TtsrNotificationComponent } from "@oh-my-pi/pi-tui/chat/ttsr-notification";
 import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
@@ -134,7 +138,7 @@ function aliasReplyWriteTranscript(): TranscriptEntryLike[] {
 				{
 					type: "toolCall",
 					id: "call-1",
-					name: "xd://write",
+					name: "mcp__pi_agent__write",
 					arguments: { path: "out://final", content: "Rebuild answer: 42" },
 				},
 			]),
@@ -147,7 +151,7 @@ function aliasReplyWriteTranscript(): TranscriptEntryLike[] {
 			message: {
 				role: "toolResult",
 				toolCallId: "call-1",
-				toolName: "xd://write",
+				toolName: "mcp__pi_agent__write",
 				content: [{ type: "text", text: "ok" }],
 				isError: false,
 				timestamp: 2,
@@ -165,7 +169,12 @@ function aliasReadTranscript(): TranscriptEntryLike[] {
 			parentId: null,
 			timestamp: "2026-01-01T00:00:00Z",
 			message: assistant([
-				{ type: "toolCall", id: "call-2", name: "xd://read", arguments: { path: "/tmp/rebuild-target.ts" } },
+				{
+					type: "toolCall",
+					id: "call-2",
+					name: "mcp__pi_agent__read",
+					arguments: { path: "/tmp/rebuild-target.ts" },
+				},
 			]),
 		},
 		{
@@ -176,7 +185,7 @@ function aliasReadTranscript(): TranscriptEntryLike[] {
 			message: {
 				role: "toolResult",
 				toolCallId: "call-2",
-				toolName: "xd://read",
+				toolName: "mcp__pi_agent__read",
 				content: [{ type: "text", text: "const rebuilt = true;\n" }],
 				isError: false,
 				timestamp: 2,
@@ -556,7 +565,7 @@ describe("native transcript", () => {
 		const h = await startWith(h => {
 			const builder = new ChatTranscriptBuilder({
 				ui: h.tui,
-				getTool: name => (name === "xd://write" ? writeTool : undefined),
+				getTool: name => (name === "mcp__pi_agent__write" ? writeTool : undefined),
 				isBuiltInTool: name => name === "write",
 				cwd: "/tmp",
 				requestRender: () => h.tui.requestRender(),
@@ -582,7 +591,7 @@ describe("native transcript", () => {
 		const h = await startWith(h => {
 			const builder = new ChatTranscriptBuilder({
 				ui: h.tui,
-				getTool: name => (name === "xd://read" ? readTool : undefined),
+				getTool: name => (name === "mcp__pi_agent__read" ? readTool : undefined),
 				isBuiltInTool: name => name === "read",
 				cwd: "/tmp",
 				requestRender: () => h.tui.requestRender(),
@@ -984,6 +993,31 @@ describe("native transcript", () => {
 			]),
 		);
 		expect(h.errors).toEqual([]);
+	});
+});
+
+describe("background job output notice", () => {
+	it("draws one icon row natively with the full output lines beneath it", async () => {
+		const long = `02 INTERP: NOT RECORDED, omp quit resuming it (its screen, with --keep: ${"x".repeat(120)})`;
+		const report = { id: "bg_5", type: "bash", pattern: "^\\d\\d ", lines: [long, "03 shell: 43 KB"] };
+		const block = buildAsyncNotifyBlock(
+			createCustomMessage(
+				"async-notify",
+				"notice",
+				true,
+				{ reports: [{ ...report, omitted: 0, running: true, stopped: false }] },
+				"2026",
+			),
+		);
+		const h = await startWith(h => h.tui.addChild(block));
+		const texts = h
+			.findAll(n => n.k === "text")
+			.flatMap(n => (n.k === "text" ? [(n.p?.spans ?? []).map(part => part.t).join("")] : []));
+
+		expect(h.findAll(n => n.k === "icon")).toHaveLength(1);
+		expect(texts).toEqual(["Background job output · bg_5 · 2 lines", long, "03 shell: 43 KB"]);
+		// The text terminal still cuts the overlong line to keep its row.
+		expect(Bun.stripANSI(block.render(200).join("\n"))).not.toContain(long);
 	});
 });
 

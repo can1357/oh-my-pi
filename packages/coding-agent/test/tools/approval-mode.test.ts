@@ -206,39 +206,26 @@ describe("tools.approvalMode setting", () => {
 		expect(textOf(result)).toContain("(no output, exit code 0)");
 	});
 
-	it("xd:// dispatch approval (xdevPolicyKey) suppresses the tier-only re-prompt", async () => {
-		// The write tool's outer gate already prompted at the device tool's tier;
-		// without the flag this exact call rejects (see the always-ask test above).
-		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
-		const result = await bashTool().execute("xdev-tier", { command: "echo dispatched" }, undefined, undefined, {
-			settings,
-			xdevPolicyKey: "bash",
-		} as AgentToolContext);
-		expect(textOf(result)).toContain("dispatched");
-	});
-
-	it("xd:// dispatch approval does not cover explicit prompts under another key, or deny policies", async () => {
-		// The outer gate resolved `tools.approval.<device>`; a policy keyed
-		// elsewhere was never asked about, so it must still prompt.
+	it("the bash gate applies its own prompt and deny policies", async () => {
 		const promptSettings = approvalSettings({
 			"tools.approvalMode": "always-ask",
 			"tools.approval": { bash: "prompt" },
 		});
 		await expect(
-			bashTool().execute("xdev-explicit-prompt", { command: "echo blocked" }, undefined, undefined, {
+			bashTool().execute("bash-explicit-prompt", { command: "echo blocked" }, undefined, undefined, {
 				settings: promptSettings,
-				xdevPolicyKey: "other_device",
 			} as AgentToolContext),
 		).rejects.toThrow(/requires approval but no interactive UI available/);
+	});
 
+	it("the bash gate applies its own deny policies", async () => {
 		const denySettings = approvalSettings({
 			"tools.approvalMode": "always-ask",
 			"tools.approval": { bash: "deny" },
 		});
 		await expect(
-			bashTool().execute("xdev-denied", { command: "echo blocked" }, undefined, undefined, {
+			bashTool().execute("bash-denied", { command: "echo blocked" }, undefined, undefined, {
 				settings: denySettings,
-				xdevPolicyKey: "bash",
 			} as AgentToolContext),
 		).rejects.toThrow(/blocked by user policy/);
 	});

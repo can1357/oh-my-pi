@@ -8,7 +8,14 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { type FetchImpl, getEnvApiKey, type ImageContent, type TextContent } from "@oh-my-pi/pi-ai";
 import { htmlToMarkdown, notebookToEditableText } from "@oh-my-pi/pi-natives";
 import { $which, ptree } from "@oh-my-pi/pi-utils";
-import { type ArchiveFormat, listArchiveRoot, sniffArchiveFormat } from "@oh-my-pi/pi-utils/ar";
+import {
+	type ArchiveFormat,
+	formatArchiveEntryLines,
+	listArchiveRoot,
+	openArchive,
+	parseArchivePathCandidates,
+	sniffArchiveFormat,
+} from "@oh-my-pi/pi-utils/ar";
 import type { Element } from "@oh-my-pi/pi-utils/dom";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
@@ -30,6 +37,7 @@ import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
 import { parseTailCount } from "./path-utils";
 import { type LineRange, parseLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
 import { isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";
+import { executeJsonQuery } from "./read-json";
 import type { ParsedSelector } from "./read-selector";
 import { formatBytes } from "@oh-my-pi/pi-tui/render/render-utils";
 import { listTables, looksLikeSqlite, openSqliteReadConnection, renderTableList } from "./sqlite-reader";
@@ -168,7 +176,7 @@ export function parseReadUrlTarget(readPath: string): ParsedReadUrlTarget | null
 				`URL selector has multiple range groups; combine them with commas (e.g. \`:5-10,20-30\`).`,
 			);
 		}
-		ranges = parseLineRanges(token, raw ? "single" : "onward") ?? undefined;
+		ranges = parseLineRanges(token) ?? undefined;
 		if (ranges !== undefined) continue;
 		const count = parseTailCount(token);
 		if (count === null) {
@@ -362,11 +370,12 @@ function parseAlternateLinks(html: string, pageUrl: string): Array<{ href: strin
 			const type = getHtmlAttribute(tag, "type")?.toLowerCase() ?? "";
 			if (!href) continue;
 
-			// Skip site-wide feeds
+			// Skip site-wide and comment feeds
 			if (
 				href.includes("RecentChanges") ||
 				href.includes("Special:") ||
-				href.includes("/feed/") ||
+				/\/feed(?:\/|$|\?)/.test(href) ||
+				/\/comments?\//.test(href) ||
 				href.includes("action=feed")
 			) {
 				continue;
@@ -908,9 +917,11 @@ function binaryContentType(mime: string): string {
 	return mime || "application/octet-stream";
 }
 
-function buildBinaryNotice(finalUrl: string, mime: string, byteLength?: number): string {
+function buildBinaryNotice(finalUrl: string, mime: string, byteLength?: number, notes?: readonly string[]): string {
 	const size = byteLength === undefined ? "unknown size" : formatBytes(byteLength);
-	return `[Binary content: ${binaryContentType(mime)}, ${size}] ${finalUrl}`;
+	// Why no text came out (a refused download, a failed conversion) belongs with the notice: a ranged read shows no notes.
+	const failure = notes?.filter(note => /failed|no usable output/i.test(note)).at(-1);
+	return `[Binary content: ${binaryContentType(mime)}, ${size}${failure ? `; ${failure}` : ""}] ${finalUrl}`;
 }
 
 function buildBinaryPayloadResult(
@@ -1001,7 +1012,7 @@ async function tryRenderBinaryPayload(
 			finalUrl,
 			mime,
 			"binary",
-			buildBinaryNotice(finalUrl, mime),
+			buildBinaryNotice(finalUrl, mime, undefined, resultNotes),
 			fetchedAt,
 			resultNotes,
 		);
@@ -1026,7 +1037,7 @@ async function tryRenderBinaryPayload(
 				finalUrl,
 				mime,
 				"binary",
-				buildBinaryNotice(finalUrl, mime, binary.buffer.byteLength),
+				buildBinaryNotice(finalUrl, mime, binary.buffer.byteLength, resultNotes),
 				fetchedAt,
 				resultNotes,
 			);
@@ -1051,7 +1062,7 @@ async function tryRenderBinaryPayload(
 				finalUrl,
 				mime,
 				"binary",
-				buildBinaryNotice(finalUrl, mime, binary.buffer.byteLength),
+				buildBinaryNotice(finalUrl, mime, binary.buffer.byteLength, resultNotes),
 				fetchedAt,
 				resultNotes,
 			);
@@ -1079,7 +1090,7 @@ async function tryRenderBinaryPayload(
 				finalUrl,
 				mime,
 				"binary",
-				buildBinaryNotice(finalUrl, mime, binary.buffer.byteLength),
+				buildBinaryNotice(finalUrl, mime, binary.buffer.byteLength, resultNotes),
 				fetchedAt,
 				resultNotes,
 			);
@@ -1101,7 +1112,7 @@ async function tryRenderBinaryPayload(
 			finalUrl,
 			mime,
 			"binary",
-			buildBinaryNotice(finalUrl, mime, binary.buffer.byteLength),
+			buildBinaryNotice(finalUrl, mime, binary.buffer.byteLength, resultNotes),
 			fetchedAt,
 			resultNotes,
 		);
@@ -1135,13 +1146,14 @@ async function handleSpecialUrls(
 	signal: AbortSignal | undefined,
 	storage: AgentStorageApi | null,
 	modelRegistry: ModelRegistry | undefined,
+	settings: Settings,
 ): Promise<FetchRenderResult | null> {
 	const specialHandlers = await loadSpecialHandlers();
 	for (const handler of specialHandlers) {
 		if (signal?.aborted) {
 			throw new ToolAbortError();
 		}
-		const result = await handler(url, timeout, signal, storage, modelRegistry);
+		const result = await handler(url, timeout, signal, storage, modelRegistry, settings);
 		if (result) return result;
 	}
 	return null;
@@ -1190,7 +1202,7 @@ async function renderUrl(
 
 	// Step 1: Try special handlers for known sites (unless raw mode)
 	if (!raw) {
-		const specialResult = await handleSpecialUrls(url, timeout, signal, storage, modelRegistry);
+		const specialResult = await handleSpecialUrls(url, timeout, signal, storage, modelRegistry, settings);
 		if (specialResult) return specialResult;
 	}
 
@@ -1554,15 +1566,18 @@ async function renderUrl(
 			};
 		}
 
-		// 5C: Check for feed alternates
-		const feedAlternates = alternates.filter(alt => alt.kind === "feed");
-		for (const alt of feedAlternates.slice(0, 2)) {
-			const resolved = new URL(alt.href, finalUrl).href;
-			const altResult = await loadPage(resolved, { timeout, signal });
-			if (altResult.ok && altResult.content.trim().length > 200) {
+		if (signal?.aborted) {
+			throw new ToolAbortError();
+		}
+
+		// A page-scoped RSS/Atom alternate stands in for the page only when the page itself renders to nothing usable.
+		const feedFallback = async (): Promise<FetchRenderResult | undefined> => {
+			for (const alt of alternates.filter(entry => entry.kind === "feed").slice(0, 2)) {
+				const resolved = new URL(alt.href, finalUrl).href;
+				const altResult = await loadPage(resolved, { timeout, signal });
+				if (!altResult.ok || altResult.content.trim().length <= 200) continue;
 				notes.push(`Used feed alternate: ${resolved}`);
-				const parsed = await parseFeedToMarkdown(altResult.content);
-				const output = finalizeOutput(parsed);
+				const output = finalizeOutput(await parseFeedToMarkdown(altResult.content));
 				return {
 					url,
 					finalUrl: altResult.finalUrl,
@@ -1574,13 +1589,10 @@ async function renderUrl(
 					notes,
 				};
 			}
-		}
+			return undefined;
+		};
 
-		if (signal?.aborted) {
-			throw new ToolAbortError();
-		}
-
-		// 5D: Render HTML via the reader-backend chain
+		// 5C: Render HTML via the reader-backend chain
 		// (native/trafilatura/lynx/parallel/firecrawl/jina)
 		const htmlResult = await renderHtmlToText(
 			finalUrl,
@@ -1593,6 +1605,9 @@ async function renderUrl(
 		);
 		if (!htmlResult.ok) {
 			notes.push("html rendering failed (no reader backend produced usable output)");
+
+			const feed = await feedFallback();
+			if (feed) return feed;
 
 			const llmResult = await tryLlmEndpoints(finalUrl, timeout, signal);
 			if (llmResult) {
@@ -1666,6 +1681,9 @@ async function renderUrl(
 		}
 
 		if (lowQuality) {
+			const feed = await feedFallback();
+			if (feed) return feed;
+
 			const llmResult = await tryLlmEndpoints(finalUrl, timeout, signal);
 			if (llmResult) {
 				notes.push(`Used llms.txt fallback: ${llmResult.endpoint}`);
@@ -1719,7 +1737,7 @@ async function renderUrl(
 // Tool Definition
 // =============================================================================
 
-interface ReadUrlEntry {
+export interface ReadUrlEntry {
 	artifactId?: string;
 	artifactPath?: string;
 	details: ReadUrlToolDetails;
@@ -1745,7 +1763,7 @@ async function persistReadUrlArtifact(
 	session: ToolSession,
 	output: string,
 ): Promise<{ id?: string; path?: string } | undefined> {
-	const artifact = await session.allocateOutputArtifact?.("read");
+	const artifact = await session.allocateOutputArtifact?.();
 	if (!artifact?.path) return undefined;
 	await Bun.write(artifact.path, output);
 	return artifact;
@@ -1771,11 +1789,9 @@ function readUrlContentExtension(finalUrl: string): string {
 }
 
 async function materializeReadUrlContent(session: ToolSession, entry: ReadUrlEntry, raw: boolean): Promise<string> {
+	// Without a session file there is no artifacts dir; a per-process temp dir still gives grep a file.
 	const root = session.getArtifactsDir?.();
-	if (!root) {
-		throw new ToolError("Cannot search URL output because this session cannot materialize read artifacts.");
-	}
-	const dir = path.join(root, "url-search");
+	const dir = root ? path.join(root, "url-search") : path.join(os.tmpdir(), "omp-url-search", String(process.pid));
 	await fs.mkdir(dir, { recursive: true });
 	const hash = Bun.hash(`${raw ? "raw" : "rendered"}:${entry.details.finalUrl}`).toString(36);
 	const contentPath = path.join(dir, `${hash}${readUrlContentExtension(entry.details.finalUrl)}`);
@@ -1799,17 +1815,22 @@ export async function fetchReadUrl(
 	}
 
 	const storage = session.settings.getStorage();
-	let result = await renderUrl(
-		url,
-		effectiveTimeout,
-		raw,
-		session.settings,
-		signal,
-		storage,
-		session.modelRegistry,
-		session.fetch,
-		webpExclusionForModel(session.getActiveModel?.()),
-	);
+	const render = (target: string) =>
+		renderUrl(
+			target,
+			effectiveTimeout,
+			raw,
+			session.settings,
+			signal,
+			storage,
+			session.modelRegistry,
+			session.fetch,
+			webpExclusionForModel(session.getActiveModel?.()),
+		);
+	let result =
+		(raw ? null : await renderUrlArchiveMember(url, effectiveTimeout, signal)) ??
+		(raw ? null : await renderUrlJsonQuery(url, render, signal)) ??
+		(await render(url));
 	if (result.truncated) {
 		// Covers special handlers and every renderUrl branch, whichever response supplied the content.
 		const cutNote = `Response body exceeded ${formatBytes(MAX_BYTES)} and was cut mid-stream; content is incomplete`;
@@ -1834,6 +1855,108 @@ export async function fetchReadUrl(
 		image: result.image,
 		output,
 		content: result.content,
+	};
+}
+
+/** A `q` that reads as a jq filter (`.items[0]`, `[.[] | .id]`, `keys`) rather than a search term. */
+const JQ_FILTER_RE =
+	/^\s*(?:\.|\[|\{|(?:keys|length|to_entries|paths|first|last|add|flatten)\b|(?:map|select|has|sort_by|group_by)\()/;
+
+/**
+ * An http(s) URL whose `q` is a jq filter (`https://api.example.com/items.json?q=.items[0]`): the filter runs over
+ * the JSON the URL without it returns, as `?q=` does on local files. Null when `q` is no filter or the response is
+ * no JSON, so the URL is fetched as written, `q` and all.
+ */
+async function renderUrlJsonQuery(
+	url: string,
+	render: (target: string) => Promise<FetchRenderResult>,
+	signal: AbortSignal | undefined,
+): Promise<FetchRenderResult | null> {
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		return null;
+	}
+	// Percent-decoded only, never form-decoded: jq's `+` stays a `+`.
+	const pairs = parsed.search.slice(1).split("&");
+	const index = pairs.findIndex(pair => pair.startsWith("q="));
+	if (index === -1) return null;
+	let query = pairs[index].slice(2);
+	try {
+		query = decodeURIComponent(query);
+	} catch {
+		// A filter with a bare `%` (jq modulo) is not valid percent-encoding; take it verbatim.
+	}
+	if (!JQ_FILTER_RE.test(query)) return null;
+	pairs.splice(index, 1);
+	parsed.search = pairs.length > 0 ? `?${pairs.join("&")}` : "";
+	const result = await render(parsed.href);
+	if (!result.contentType.includes("json")) return null;
+	const scratch = path.join(os.tmpdir(), `omp-url-json-${crypto.randomUUID()}.json`);
+	await Bun.write(scratch, result.content);
+	try {
+		const content = await executeJsonQuery(scratch, { query, raw: false, compact: false }, signal);
+		return { ...result, url, content, notes: [...result.notes, `Applied jq filter ${query} to ${parsed.href}`] };
+	} finally {
+		await fs.rm(scratch, { force: true });
+	}
+}
+
+/**
+ * A member of an archive URL (`https://…/pkg.whl:pkg/__init__.py`, `…/src.tar.gz:dir/`), read from the downloaded
+ * archive as local archives are: a file's text, or a directory's listing. Null when the URL names no member or the
+ * download is no archive, so the URL is fetched as written.
+ */
+async function renderUrlArchiveMember(
+	url: string,
+	timeout: number,
+	signal: AbortSignal | undefined,
+): Promise<FetchRenderResult | null> {
+	const candidate = parseArchivePathCandidates(url).find(
+		entry => entry.subPath !== "" && isReadableUrlPath(entry.archivePath),
+	);
+	if (!candidate) return null;
+	const archiveUrl = candidate.archivePath;
+	const binary = await fetchBinary(archiveUrl, timeout, signal);
+	if (!binary.ok) return null;
+	const mime = normalizeMime(binary.contentType ?? "");
+	const format =
+		sniffArchiveFormat(binary.buffer) ??
+		getArchiveFormatHint(mime, getExtensionHint(archiveUrl, binary.contentDisposition));
+	if (!format) return null;
+	const archive = await openArchive({ bytes: binary.buffer, format });
+	const node = archive.getNode(candidate.subPath);
+	if (!node) {
+		throw new ToolError(`${archiveUrl} has no member ${JSON.stringify(candidate.subPath)}.`);
+	}
+	const fetchedAt = new Date().toISOString();
+	const notes = [`Read archive member ${candidate.subPath} of ${archiveUrl}`];
+	if (node.isDirectory) {
+		const lines = formatArchiveEntryLines(archive.listDirectory(candidate.subPath));
+		return {
+			url,
+			finalUrl: url,
+			contentType: "text/plain",
+			method: "archive",
+			content: lines.length > 0 ? lines.join("\n") : "(empty archive directory)",
+			fetchedAt,
+			truncated: false,
+			notes,
+		};
+	}
+	const file = await archive.readFile(candidate.subPath);
+	const bytes = Buffer.from(file.bytes.buffer, file.bytes.byteOffset, file.bytes.byteLength);
+	const text = decodeBody(bytes, "text/plain");
+	return {
+		url,
+		finalUrl: url,
+		contentType: sampleLooksBinary(text) ? "application/octet-stream" : "text/plain",
+		method: "archive",
+		content: sampleLooksBinary(text) ? buildBinaryNotice(url, "application/octet-stream", file.size) : text,
+		fetchedAt,
+		truncated: false,
+		notes,
 	};
 }
 

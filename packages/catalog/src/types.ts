@@ -510,13 +510,18 @@ export interface OpenAICompat {
 	 * grammar converter reads them as closed/open-object semantics, and
 	 * `additionalProperties: false` pins the strict object shape.
 	 *
+	 * `"google"` rewrites schemas into Google's Gemini dialect
+	 * (`normalizeSchemaForGoogle`: scalar `type`, `nullable`, no unsupported
+	 * keywords) for Gemini models behind an OpenAI-compatible host (GitHub
+	 * Copilot), which 400s on JSON Schema `type` arrays.
+	 *
 	 * Default: auto-detected — `"moonshot-mfjs"` on Moonshot native hosts
 	 * (api.moonshot.ai / api.kimi.com) and Kimi-family model ids on any host,
 	 * since proxies (OpenRouter, custom gateways) forward schemas to Moonshot
 	 * verbatim; `"grammar"` on local OpenAI-compatible backends. Set `"none"`
 	 * to opt a host out.
 	 */
-	toolSchemaFlavor?: "moonshot-mfjs" | "grammar" | "none";
+	toolSchemaFlavor?: "moonshot-mfjs" | "grammar" | "google" | "none";
 	/**
 	 * Stream-watchdog first-event timeout in ms.
 	 * Set to `0` to allow unbounded prompt processing. Default: auto-detected
@@ -995,6 +1000,19 @@ export interface ResolvedOpenAISharedCompat {
 	requiresMistralToolIds: boolean;
 	requiresToolResultName: boolean;
 	requiresAssistantAfterToolResult: boolean;
+	/**
+	 * Append a user/developer message that directly follows a tool result to
+	 * that result's content instead of sending it as its own turn. Rule-owned:
+	 * Gemini 4 Neon ends about half of the requests that close on user text
+	 * after a function response with an empty `MALFORMED_RESPONSE`.
+	 */
+	foldUserAfterToolResult: boolean;
+	/**
+	 * Replay each call of a multi-call assistant turn as its own assistant
+	 * message followed by its result. Rule-owned: vLLM's Llama 3 chat templates
+	 * reject an assistant message with more than one tool call.
+	 */
+	splitToolCalls: boolean;
 	requiresAssistantContentForToolCalls: boolean;
 	stripDeepseekSpecialTokens: boolean;
 	streamMarkupHealingPattern?: OpenAIStreamMarkupHealingPattern;
@@ -1155,6 +1173,12 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	 * input into the in-flight response. Rule-owned: GPT-6 family.
 	 */
 	supportsSteering: boolean;
+	/**
+	 * Whether the model never prompt-caches the top-level `instructions` field,
+	 * so system prompts must ride as leading `developer` input items on every
+	 * host. Rule-owned: GPT-6.2 (openai/codex#62312).
+	 */
+	uncachedInstructions: boolean;
 	/** Inject the `# Juice: 0 !important` developer item when reasoning is forced off (gpt-5.6+). */
 	requiresReasoningOffJuiceInstruction: boolean;
 	/**
@@ -1440,6 +1464,16 @@ export type CompatOf<TApi extends Api> = TApi extends "openrouter"
 								? ResolvedOllamaCompat
 								: undefined;
 
+/**
+ * A configured snapcompact frame shape: a snapcompact shape variant name
+ * (`11on16-bw`, `8on22-bw`, …) and optionally the frame edge in px, which
+ * otherwise is the variant's own. An unknown variant name is ignored.
+ */
+export interface SnapcompactShapeConfig {
+	variant: string;
+	frameSize?: number;
+}
+
 /** Provider-native compaction endpoint configuration for one model. */
 export interface RemoteCompactionConfig<TApi extends Api = Api> {
 	/** Enables provider-native compaction for providers not enabled by built-in policy. */
@@ -1668,6 +1702,14 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	imageCountBudget?: number;
 	/**
+	 * Snapcompact frame shape for this model, from user or extension
+	 * configuration. Replaces the model line's eval default (a gateway may
+	 * serve a model whose readers or network path favor another shape); an
+	 * explicit `snapcompact.shape` setting still wins, and the frame stays
+	 * within the host's `image-max-edge`.
+	 */
+	snapcompactShape?: SnapcompactShapeConfig;
+	/**
 	 * Native provider tool-call support. `false` is the only unsupported signal:
 	 * `true` and `undefined` both mean callers may use native tools. Catalog and
 	 * discovery sources should set this sparsely when an upstream explicitly
@@ -1794,9 +1836,10 @@ export interface Model<TApi extends Api = Api> {
 	 *
 	 * Used by containerized omp installs (e.g. robomp slots) to route every
 	 * LLM call through a sidecar gateway that holds the real provider
-	 * credentials. The model's other metadata (pricing, context window,
-	 * thinking config, …) still resolves locally; only the streaming
-	 * dispatch is redirected.
+	 * credentials. The provider's roster and model metadata (pricing, context
+	 * window, thinking config, …) come from the gateway's `GET /v1/pi/models`
+	 * (`piNativeModelManagerOptions`), falling back to the local catalog when
+	 * the gateway predates that route.
 	 */
 	transport?: "pi-native";
 	/** Standard Responses is opt-in and catalog-gated; either model/request false vetoes true. Codex keeps its independent policy. */

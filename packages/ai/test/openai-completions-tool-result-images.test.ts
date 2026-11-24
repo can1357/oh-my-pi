@@ -30,6 +30,8 @@ const compat: ResolvedOpenAICompat = {
 	maxTokensField: "max_completion_tokens",
 	requiresToolResultName: false,
 	requiresAssistantAfterToolResult: false,
+	foldUserAfterToolResult: false,
+	splitToolCalls: false,
 	requiresThinkingAsText: false,
 	requiresMistralToolIds: false,
 	thinkingFormat: "openai",

@@ -1,15 +1,16 @@
 /**
  * Client for the per-model tiny-model workers.
  *
- * Each local model is served by one worker process on the machine — the ONNX
- * worker (`worker.ts`) or, with `PI_TINY_DEVICE=mlx`, the MLX worker
- * (`mlx-server.py`) — that owns a socket named after the model. This client
- * connects to it, spawning it detached when it is not running, and lets it
- * die on its own once idle. Prompt construction and title extraction live
- * here so both workers only ever see message-level `chat` requests.
+ * Each (model, backend, device, dtype) is one `infer` unit in the omp daemon
+ * (`daemon/modules/infer.ts`), backed by the ONNX worker (`worker.ts`) or,
+ * with `PI_TINY_DEVICE=mlx`, the MLX worker (`mlx-server.py`). This client
+ * opens the unit, attaches a tunnel, and speaks the worker protocol over it;
+ * the daemon shares the worker machine-wide and stops it once idle. Prompt
+ * construction and title extraction live here so both workers only ever see
+ * message-level `chat` requests.
  */
-import { $env, getTinyWorkerRuntimeDir, logger, prompt } from "@oh-my-pi/pi-utils";
-import packageJson from "../../package.json" with { type: "json" };
+import * as os from "node:os";
+import { $env, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { Setting } from "../config/registry";
 import { isSettingsInitialized, settings } from "../config/settings";
 
@@ -17,19 +18,12 @@ import { stageRunnerScript } from "../eval/runner-cache";
 import { ModelDownloadActivity } from "../downloads/model-downloads";
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
 import {
-	connectSharedWorker,
-	LazyWorkerHandle,
-	type SharedWorkerLaunch,
-	smokeTestSharedWorker,
-	spawnDetached,
-	WORKER_CONNECTION_CLOSED,
-} from "../subprocess/shared-worker";
-import {
-	inferenceWorkerEnv,
-	type RefCountedWorkerHandle,
-	resolveWorkerSpawnCmd,
-	SMOKE_TEST_TIMEOUT_MS,
-} from "../subprocess/worker-client";
+	INFER_CONNECTION_CLOSED,
+	InferConnection,
+	type InferOpenSpec,
+	smokeTestInferWorker,
+} from "../daemon/modules/infer";
+import { inferenceWorkerEnv, resolveWorkerSpawnCmd, SMOKE_TEST_TIMEOUT_MS } from "../subprocess/worker-client";
 import { tinyModelBackendRefusal } from "./backend-policy";
 import { MLX_DEVICE, resolveTinyModelDevicePreference, tinyMlxSupported, tinyModelDeviceSettingToEnv } from "./device";
 import { tinyModelDtypeSettingToEnv } from "./dtype";
@@ -42,14 +36,11 @@ import {
 	TINY_WORKER_ARG,
 	TINY_WORKER_IDLE_MS_ENV,
 	TINY_WORKER_MODEL_ENV,
-	TINY_WORKER_SOCKET_ENV,
-	TINY_WORKER_TAG_ENV,
 	type TinyChatMessage,
 	type TinyTitleProgressEvent,
 	type TinyWorkerBackend,
 	type TinyWorkerRequest,
 	type TinyWorkerResponse,
-	tinyWorkerName,
 } from "./title-protocol";
 import { cfgProvidersTinyModelDevice, cfgProvidersTinyModelDtype } from "../session/settings";
 
@@ -59,9 +50,8 @@ const TITLE_MAX_NEW_TOKENS = 20;
 const COMPLETION_DEFAULT_MAX_NEW_TOKENS = 256;
 const COMPLETION_MAX_NEW_TOKENS = 1024;
 const TINY_TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
-const MLX_IDLE_SECONDS = 15 * 60;
 
-type WorkerHandle = RefCountedWorkerHandle<TinyWorkerRequest, TinyWorkerResponse>;
+type WorkerConnection = InferConnection<TinyWorkerRequest, TinyWorkerResponse>;
 
 type PendingRequest =
 	| { kind: "title"; modelKey: TinyLocalModelKey; source: string; resolve: (title: string | null) => void }
@@ -170,89 +160,82 @@ export function tinyWorkerUsesMlx(): boolean {
 
 // ── Worker launch ────────────────────────────────────────────────────
 
-/** How to start one tiny worker: a shared-worker launch plus the backend that names its endpoint. */
-export interface TinyWorkerLaunch extends SharedWorkerLaunch {
-	backend: TinyWorkerBackend;
+/** Idle grace override from {@link TINY_WORKER_IDLE_MS_ENV}. */
+function tinyIdleMs(): number | undefined {
+	const idleMs = Number($env[TINY_WORKER_IDLE_MS_ENV]);
+	return idleMs > 0 ? idleMs : undefined;
 }
 
-/** How to start the ONNX worker for `modelKey` with the resolved device/dtype env. @internal */
-export function onnxLaunch(modelKey: TinyLocalModelKey, modelEnv: Record<string, string>): TinyWorkerLaunch {
-	const tag = `${packageJson.version}|onnx|${modelEnv.PI_TINY_DEVICE ?? ""}|${modelEnv.PI_TINY_DTYPE ?? ""}`;
+/** Unit key of one (model, backend, device, dtype) worker. */
+function tinyUnitKey(
+	modelKey: TinyLocalModelKey,
+	backend: TinyWorkerBackend,
+	modelEnv: Record<string, string>,
+): string {
+	return `tiny:${modelKey}:${backend}:${modelEnv.PI_TINY_DEVICE ?? "auto"}:${modelEnv.PI_TINY_DTYPE ?? "auto"}`;
+}
+
+/** Daemon open spec for the ONNX worker serving `modelKey` with the resolved device/dtype env. */
+function onnxOpenSpec(modelKey: TinyLocalModelKey, modelEnv: Record<string, string>): InferOpenSpec {
+	const command = resolveWorkerSpawnCmd(TINY_WORKER_ARG);
+	const [application, ...args] = command.cmd;
 	return {
-		label: `tiny onnx worker for ${modelKey}`,
-		backend: "onnx",
-		tag,
-		spawn(endpoint, logPath) {
-			const command = resolveWorkerSpawnCmd(TINY_WORKER_ARG);
-			const env = inferenceWorkerEnv({
-				...modelEnv,
-				[TINY_WORKER_SOCKET_ENV]: endpoint,
-				[TINY_WORKER_MODEL_ENV]: modelKey,
-				[TINY_WORKER_TAG_ENV]: tag,
-			});
-			return Promise.resolve(spawnDetached(command.cmd, command.cwd, env, logPath));
+		key: tinyUnitKey(modelKey, "onnx", modelEnv),
+		params: {
+			worker: "tiny",
+			label: `tiny onnx ${modelKey}`,
+			application: application!,
+			args,
+			cwd: command.cwd ?? os.homedir(),
+			env: inferenceWorkerEnv({ ...modelEnv, [TINY_WORKER_MODEL_ENV]: modelKey }),
+			idleMs: tinyIdleMs(),
 		},
 	};
 }
 
-/** How to start the MLX worker for `modelKey`. @internal */
-export function mlxLaunch(
+/** Daemon open spec for the MLX worker; installs the mlx-lm runtime first (with progress). */
+export async function mlxOpenSpec(
 	modelKey: TinyLocalModelKey,
+	modelEnv: Record<string, string>,
 	emitProgress: (event: TinyTitleProgressEvent) => void,
-): TinyWorkerLaunch {
+): Promise<InferOpenSpec> {
 	const spec = getTinyLocalModelSpec(modelKey);
 	if (!spec) throw new Error(`Unknown tiny local model: ${modelKey}`);
 	// Callers gate on this before choosing the backend; keep a loud failure here so a
 	// future caller that skips the gate cannot download weights mlx-lm cannot load.
 	const mlxRefusal = tinyModelBackendRefusal(modelKey, "mlx");
 	if (mlxRefusal) throw new Error(`${modelKey} is unavailable on MLX: ${mlxRefusal}`);
-	const tag = `mlx|${MLX_LM_VERSION}|${Bun.hash.crc32(MLX_SERVER_SCRIPT).toString(16)}`;
+	const python = await ensureTinyMlxRuntime(phase =>
+		emitProgress({ modelKey, status: phase, name: `mlx-lm@${MLX_LM_VERSION}` }),
+	);
+	const script = await stageRunnerScript("omp-tiny-mlx", "py", MLX_SERVER_SCRIPT);
 	return {
-		label: `tiny mlx worker for ${modelKey}`,
-		backend: "mlx",
-		tag,
-		async spawn(endpoint, logPath) {
-			const python = await ensureTinyMlxRuntime(phase =>
-				emitProgress({ modelKey, status: phase, name: `mlx-lm@${MLX_LM_VERSION}` }),
-			);
-			const script = await stageRunnerScript("omp-tiny-mlx", "py", MLX_SERVER_SCRIPT);
-			const env = inferenceWorkerEnv({
-				PYTHONUNBUFFERED: "1",
-				PYTHONIOENCODING: "utf-8",
-				TRANSFORMERS_VERBOSITY: "error",
-				HF_HUB_DISABLE_PROGRESS_BARS: "1",
-				TOKENIZERS_PARALLELISM: "false",
-			});
-			const idleSeconds = Number($env[TINY_WORKER_IDLE_MS_ENV]) / 1000 || MLX_IDLE_SECONDS;
-			const cmd = [
-				python,
+		key: tinyUnitKey(modelKey, "mlx", modelEnv),
+		params: {
+			worker: "tiny",
+			label: `tiny mlx ${modelKey}`,
+			application: python,
+			args: [
 				"-u",
 				script,
-				"--socket",
-				endpoint,
-				"--tag",
-				tag,
 				"--model-key",
 				modelKey,
 				"--repo",
 				spec.mlxRepo,
 				"--dir",
 				getTinyMlxModelDir(spec.mlxRepo),
-				"--idle-seconds",
-				String(idleSeconds),
-			];
-			return spawnDetached(cmd, undefined, env, logPath);
+			],
+			cwd: os.homedir(),
+			env: inferenceWorkerEnv({
+				PYTHONUNBUFFERED: "1",
+				PYTHONIOENCODING: "utf-8",
+				TRANSFORMERS_VERBOSITY: "error",
+				HF_HUB_DISABLE_PROGRESS_BARS: "1",
+				TOKENIZERS_PARALLELISM: "false",
+			}),
+			idleMs: tinyIdleMs(),
 		},
 	};
-}
-
-/** Connect to the machine-shared worker serving `modelKey` on `launch.backend`, spawning or replacing it as needed. */
-export function connectTinyWorker(
-	launch: TinyWorkerLaunch,
-	modelKey: TinyLocalModelKey,
-	runtimeDir = getTinyWorkerRuntimeDir(),
-): Promise<WorkerHandle> {
-	return connectSharedWorker(launch, runtimeDir, tinyWorkerName(modelKey, launch.backend));
 }
 
 // ── Prompt construction / output parsing ─────────────────────────────
@@ -284,11 +267,9 @@ function extractTinyTitle(text: string, sourceText: string): string | null {
 
 // ── Client ───────────────────────────────────────────────────────────
 
-/** One connection per model this process has used; the worker behind it is shared machine-wide. */
+/** One daemon tunnel per model this process has used; the worker behind it is shared machine-wide. */
 interface ModelWorker {
-	handle: WorkerHandle;
-	unsubscribe: () => void;
-	refed: boolean;
+	connection: WorkerConnection;
 	/** {@link tinyModelEnvKey} when the connection was made. */
 	envKey: string;
 }
@@ -296,7 +277,7 @@ interface ModelWorker {
 /**
  * Per-model worker connections. Device/dtype settings are read at use time: a
  * connection made under a different device/dtype is replaced on its next idle
- * use, and the launch-tag probe then swaps the machine-wide worker.
+ * use by one to the unit for the new key; the old unit idles out.
  */
 export class TinyTitleClient {
 	#workers = new Map<TinyLocalModelKey, ModelWorker>();
@@ -306,38 +287,26 @@ export class TinyTitleClient {
 	#progressListeners = new Set<(event: TinyTitleProgressEvent) => void>();
 	#downloads = new ModelDownloadActivity(modelKey => getTinyLocalModelSpec(modelKey)?.label ?? modelKey);
 	#nextRequestId = 0;
-	#connect: (modelKey: TinyLocalModelKey) => Promise<WorkerHandle>;
 
-	constructor(connect?: (modelKey: TinyLocalModelKey) => Promise<WorkerHandle>) {
-		this.#connect = connect ?? (modelKey => this.#connectDefault(modelKey));
-	}
-
-	async #connectDefault(modelKey: TinyLocalModelKey): Promise<WorkerHandle> {
-		if (tinyWorkerUsesMlx()) {
-			// Per-model, not process-wide: a model the pinned mlx-lm cannot load falls back
-			// to ONNX without demoting every other model in this process.
-			const reason = tinyModelBackendRefusal(modelKey, "mlx");
-			if (reason) {
-				logger.debug("tiny-title: MLX backend cannot load this model; using ONNX CPU", { modelKey, reason });
-			} else {
-				try {
-					return await connectTinyWorker(
-						mlxLaunch(modelKey, event => this.#emitProgress(event)),
-						modelKey,
-					);
-				} catch (error) {
-					mlxUnavailable = true;
-					const message = error instanceof Error ? error.message : String(error);
-					logger.warn("tiny-title: MLX worker unavailable; falling back to ONNX CPU", {
-						modelKey,
-						error: message,
-					});
-					// Ends a visible `mlx-lm` install row; the ONNX fallback tracks its own load.
-					this.#downloads.observe({ modelKey, status: "error" }, `MLX unavailable: ${message}`);
-				}
+	async #openSpec(modelKey: TinyLocalModelKey): Promise<InferOpenSpec> {
+		const modelEnv = tinyModelEnv();
+		// Per-model, not process-wide: a model the pinned mlx-lm cannot load falls back
+		// to ONNX without demoting every other model in this process.
+		const reason = tinyWorkerUsesMlx() ? tinyModelBackendRefusal(modelKey, "mlx") : undefined;
+		if (reason) {
+			logger.debug("tiny-title: MLX backend cannot load this model; using ONNX CPU", { modelKey, reason });
+		} else if (tinyWorkerUsesMlx()) {
+			try {
+				return await mlxOpenSpec(modelKey, modelEnv, event => this.#emitProgress(event));
+			} catch (error) {
+				mlxUnavailable = true;
+				const message = error instanceof Error ? error.message : String(error);
+				logger.warn("tiny-title: MLX worker unavailable; falling back to ONNX CPU", { modelKey, error: message });
+				// Ends a visible `mlx-lm` install row; the ONNX fallback tracks its own load.
+				this.#downloads.observe({ modelKey, status: "error" }, `MLX unavailable: ${message}`);
 			}
 		}
-		return connectTinyWorker(onnxLaunch(modelKey, tinyModelEnv()), modelKey);
+		return onnxOpenSpec(modelKey, modelEnv);
 	}
 
 	onProgress(listener: (event: TinyTitleProgressEvent) => void): () => void {
@@ -347,14 +316,14 @@ export class TinyTitleClient {
 
 	/**
 	 * Reach the model's worker ahead of first use without loading anything, so
-	 * the first {@link generate} finds a live connection instead of paying the
-	 * probe/spawn latency on the submit hot path (issue #6462). No-ops for
+	 * the first {@link generate} finds a live unit instead of paying the
+	 * open/spawn latency on the submit hot path (issue #6462). No-ops for
 	 * online / non-local keys and for models already marked failed.
 	 */
 	prewarm(modelKey: string): void {
 		if (!isTinyLocalModelKey(modelKey) || this.#hasFailed(modelKey)) return;
 		try {
-			this.#ensureWorker(modelKey).handle.send({ type: "ping", id: String(++this.#nextRequestId) });
+			this.#ensureWorker(modelKey).connection.send({ type: "ping", id: String(++this.#nextRequestId) });
 		} catch (error) {
 			logger.debug("tiny-title: prewarm failed", {
 				modelKey,
@@ -440,17 +409,18 @@ export class TinyTitleClient {
 		signal: AbortSignal | undefined,
 		onAbort: () => void,
 	): Promise<T> {
+		let worker: ModelWorker | undefined;
 		const abort = (): void => {
 			if (!this.#pending.delete(request.id)) return;
-			this.#syncWorkerRef(pending.modelKey);
+			// The worker still answers; this process need not stay alive for it.
+			worker?.connection.abandon(request.id);
 			onAbort();
 		};
 		try {
-			const worker = this.#ensureWorker(pending.modelKey);
+			worker = this.#ensureWorker(pending.modelKey);
 			this.#pending.set(request.id, pending);
-			this.#syncWorkerRef(pending.modelKey);
 			signal?.addEventListener("abort", abort, { once: true });
-			worker.handle.send(request);
+			worker.connection.send(request);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			logger.debug("tiny-title: local request failed", {
@@ -463,7 +433,7 @@ export class TinyTitleClient {
 		}
 		return promise.finally(() => {
 			signal?.removeEventListener("abort", abort);
-			if (this.#pending.delete(request.id)) this.#syncWorkerRef(pending.modelKey);
+			this.#pending.delete(request.id);
 		});
 	}
 
@@ -472,14 +442,7 @@ export class TinyTitleClient {
 		this.#workers.clear();
 		for (const pending of this.#pending.values()) this.#fail(pending, undefined);
 		this.#pending.clear();
-		for (const worker of workers) {
-			worker.unsubscribe();
-			try {
-				await worker.handle.terminate();
-			} catch {
-				// Already gone.
-			}
-		}
+		await Promise.all(workers.map(worker => worker.connection.close()));
 	}
 
 	#ensureWorker(modelKey: TinyLocalModelKey): ModelWorker {
@@ -490,38 +453,21 @@ export class TinyTitleClient {
 			// requests finish on the old worker.
 			if (existing.envKey === envKey || this.#hasPending(modelKey)) return existing;
 			this.#workers.delete(modelKey);
-			existing.unsubscribe();
-			void existing.handle.terminate();
+			void existing.connection.close();
 		}
-		const handle = new LazyWorkerHandle<TinyWorkerRequest, TinyWorkerResponse>(() => this.#connect(modelKey));
-		const unsubscribeMessage = handle.onMessage(message => this.#handleMessage(modelKey, message));
-		const unsubscribeError = handle.onError(error => this.#handleWorkerError(modelKey, error));
 		const worker: ModelWorker = {
-			handle,
-			refed: false,
 			envKey,
-			unsubscribe: () => {
-				unsubscribeMessage();
-				unsubscribeError();
-			},
+			connection: new InferConnection<TinyWorkerRequest, TinyWorkerResponse>(
+				() => this.#openSpec(modelKey),
+				message => this.#handleMessage(modelKey, message),
+				error => {
+					// Only the current connection's loss matters; a replaced one was already dropped.
+					if (this.#workers.get(modelKey) === worker) this.#handleWorkerError(modelKey, error);
+				},
+			),
 		};
 		this.#workers.set(modelKey, worker);
 		return worker;
-	}
-
-	/**
-	 * Keep the socket referenced only while a request for that model is in
-	 * flight, so idle TUI sessions can exit while short-lived CLI downloads
-	 * are not starved by Bun draining the event loop first.
-	 */
-	#syncWorkerRef(modelKey: TinyLocalModelKey): void {
-		const worker = this.#workers.get(modelKey);
-		if (!worker) return;
-		const inFlight = this.#hasPending(modelKey);
-		if (inFlight === worker.refed) return;
-		worker.refed = inFlight;
-		if (inFlight) worker.handle.ref();
-		else worker.handle.unref();
 	}
 
 	#handleMessage(modelKey: TinyLocalModelKey, message: TinyWorkerResponse): void {
@@ -537,7 +483,6 @@ export class TinyTitleClient {
 		const pending = this.#pending.get(message.id);
 		if (!pending) return;
 		this.#pending.delete(message.id);
-		this.#syncWorkerRef(modelKey);
 		if (message.type === "error") {
 			logger.debug("tiny-title: worker returned error", { modelKey, error: message.error });
 			this.#markFailedModel(pending);
@@ -586,8 +531,7 @@ export class TinyTitleClient {
 		const worker = this.#workers.get(modelKey);
 		if (worker) {
 			this.#workers.delete(modelKey);
-			worker.unsubscribe();
-			void worker.handle.terminate();
+			void worker.connection.close();
 		}
 		let failed = 0;
 		for (const [id, pending] of this.#pending) {
@@ -604,7 +548,7 @@ export class TinyTitleClient {
 		const failed = this.#dropWorker(modelKey, error.message);
 		// A worker exiting on its own while idle is routine; losing requests is not. A load
 		// abandoned by an aborted request is still on the HUD, so close that row only.
-		if (failed === 0 && error.message.startsWith(WORKER_CONNECTION_CLOSED)) {
+		if (failed === 0 && error.message.startsWith(INFER_CONNECTION_CLOSED)) {
 			this.#downloads.failOpen(modelKey, error.message);
 			logger.debug("tiny-title: worker went away while idle", { modelKey });
 			return;
@@ -620,22 +564,17 @@ export const tinyTitleClient = new TinyTitleClient();
 /** Alias for the shared tiny-model worker client (titles + generic chat completions). */
 export const tinyModelClient = tinyTitleClient;
 
-/** Drop this process's worker connections; the workers themselves keep serving others until idle. */
+/** Drop this process's tunnels; the daemon keeps the workers for other omp processes until idle. */
 export async function shutdownTinyTitleClient(): Promise<void> {
 	await tinyTitleClient.terminate();
 }
 
-/** Exercise ONNX worker startup and the tagged ping handshake for distribution smoke tests. */
+/** Exercise ONNX worker startup under the daemon and its stdio `ping` for distribution smoke tests. */
 export async function smokeTestTinyTitleWorker({
 	timeoutMs = SMOKE_TEST_TIMEOUT_MS,
 }: {
 	timeoutMs?: number;
 } = {}): Promise<void> {
-	const modelKey: TinyLocalModelKey = "lfm2.5-230m";
-	await smokeTestSharedWorker(
-		onnxLaunch(modelKey, {}),
-		getTinyWorkerRuntimeDir(),
-		tinyWorkerName(modelKey, "onnx"),
-		timeoutMs,
-	);
+	const spec = onnxOpenSpec("lfm2.5-230m", {});
+	await smokeTestInferWorker({ ...spec, key: `${spec.key}:smoke` }, timeoutMs);
 }

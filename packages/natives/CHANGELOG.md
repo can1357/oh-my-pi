@@ -2,6 +2,85 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Windows captures and accessibility trees of a fully covered Chromium or Electron window passing as current when the cover is a popup, tool or click-through window, under which a paused page can stay paused; they now report `covered` there too ([#19849](https://github.com/can1357/oh-my-pi/pull/19849) by [@will-bogusz](https://github.com/will-bogusz))
+### Added
+
+- Added `repairHeredocContinuations(script)`: drops the `\` after `<<EOF &&` (or `||`, `|`, `|&`) so the here-document body starts on the next line, or returns `null`
+- Added `commitReconciled()` to publish private-index commits without leaving staged reversals when the shared index is locked ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
+- Added `transcriptCalls()`, `transcriptGrep()`, `transcriptStats()`, and `transcriptMessages()`: parallel scans of session transcript files for tool calls with their results and reasoning, regex matches over message text, thinking, arguments, and results, call counts, and one transcript's records.
+
+### Changed
+
+- A persistent `Shell` session no longer carries `set -e` into later commands: errexit stops only the command that turned it on, while other options (`set -u`, `pipefail`, `shopt`) still persist
+- `ShellRunResult` now reports `movedCwd` (the command ended in another directory than it started in) and `errexit` (it ended with `set -e` on)
+
+## [19.1.1] - 2026-11-23
+
+### Fixed
+
+- Fixed `grep()`, `glob()`, `fuzzyFind()`, `astGrep()`, `astEdit()`, and recursive shell search commands occasionally hanging on machines with many CPUs.
+- Fixed cancellation and timeout races in native search, file-matching, fuzzy-search, AST, and editing operations that could cause crashes or use-after-free errors.
+- Fixed `grep()` with a match limit reporting incomplete results instead of rejecting when its directory walk failed.
+- Fixed `@oh-my-pi/pi-natives` failing to load when installed from Bun's cache or when standalone binaries had extracted native addons from another build.
+- Fixed Linux Wayland accessibility and automation support for GTK dialogs, control values, and selected rows, list items, and tabs.
+- Fixed Linux PTY output occasionally including an extra blank line after a command exits.
+- Fixed keypad navigation keys being dropped when NumLock is off under the kitty keyboard protocol.
+- Fixed Wayland screenshots incorrectly timing out while waiting for the screen-share picker.
+- Improved Windows accessibility action reliability by reporting uncertain dispatches accurately and preventing actions from being sent after their reply wait has expired.
+- Fixed Windows automation of classic Win32 and WinForms buttons and checkboxes incorrectly activating the application or reporting success without performing the click.
+- Fixed macOS computer-control takeover restoration so the previously active window is restored correctly after automation ends, with failures reported when restoration cannot be confirmed.
+- Fixed macOS background keyboard and scroll events, including events sent through iPhone Mirroring, being lost or unexpectedly activating another window.
+- Fixed X11 typing of non-Latin and other characters outside the active keyboard layout.
+- Binary patches now refuse to apply when the target file does not match the version the patch was created from, preventing accidental replacement of changed files.
+- On Windows, aborting or timing out an in-process utility blocked on an open empty stdin pipe now terminates it without waiting for the pipe writer.
+
+### Removed
+
+- Removed the startup warning shown when a source checkout loads a native addon from another release; incompatible addons still produce an actionable error when a required symbol is unavailable.
+
+## [19.1.0] - 2026-11-21
+
+### Added
+
+- Added host-provided session commands to `Shell.run` (`commands`) and `shellReservedCommandNames()`
+
+### Fixed
+
+- Fixed grouped `sed` scripts such as `1{h;d};2{G}` being rejected when no semicolon precedes a closing brace.
+- Fixed the native addon failing to load when `HOME`, `PI_NATIVES_DIR`, or the installation path contains `?`.
+- `commitCreate()` now reports a `HeadMoved` error when `HEAD` changes after the expected-HEAD check, including changes made by a `commit-msg` hook.
+- Fixed macOS window reads for minimized windows so the requested window remains inspectable without being restored or replaced by a sibling window; unavailable menus and commands now report `WindowUnavailable`.
+- Fixed Windows captures and accessibility trees incorrectly reporting fully covered Chromium and Electron windows as current; they now report `covered` when those applications stop drawing while covered.
+- Fixed Windows `computer` `setValue` bringing classic Win32 and WinForms text-box windows to the foreground and directing subsequent keyboard input into them.
+
+## [19.0.1] - 2026-11-19
+
+### Fixed
+
+- Fixed omp freezing for seconds to minutes on WSL2 while saving sessions: Linux `FileLock` now locks a sidecar file instead of binding a socket, which takes about 10 ms per call there. Older omp versions still running do not see these locks, so restart them after updating ([#19704](https://github.com/can1357/oh-my-pi/pull/19704) by [@turgaybulut](https://github.com/turgaybulut))
+
+## [19.0.0] - 2026-11-18
+
+### Added
+
+- Added `VcsGitRepo.worktreeToGit()` to convert worktree content into the blob representation produced by `git add`.
+- Added support for using a `Shell` as a process's shell, routing commands through the process's standard streams while preserving the process session and terminal for external commands.
+- Added `ShellRunOptions.speech` to connect the host speech handler to the shell's `say` command.
+- Added an in-process `file` shell builtin with broad file-type detection, MIME and encoding output, archive/image/document support, and compatibility with the commonly used `file` command options.
+
+### Changed
+
+- Improved typing and key-press responsiveness in iPhone Mirroring, reducing per-character latency by approximately half.
+
+### Fixed
+
+- Fixed screenshots of partially off-screen Linux windows on Wayland and X11 so the visible region is captured and coordinate-based zoom targets correctly.
+- Fixed Wayland input operations on desktops without an available input route to fail immediately with a clear `PermissionDenied` error instead of attempting unnecessary screen capture first.
+- Fixed macOS `computer` interactions so background clicks, key presses, pop-up menu actions, and takeover calls restore the previously active window within the call.
+- Fixed macOS pop-up menu reads immediately after typing so they reflect the option selected by the entered letters.
+
 ## [18.22.2] - 2026-11-18
 
 ### Added

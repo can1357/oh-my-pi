@@ -4,6 +4,8 @@ import * as prompt from "@oh-my-pi/pi-utils/prompt";
 import escapeAfterCallMessage from "../../prompts/tools/computer-escape-after-call.md" with { type: "text" };
 import escapeRefusedMessage from "../../prompts/tools/computer-escape-refused.md" with { type: "text" };
 import escapeStoppedMessage from "../../prompts/tools/computer-escape-stopped.md" with { type: "text" };
+import coveredCaptureNote from "../../prompts/tools/computer-covered-capture.md" with { type: "text" };
+import coveredTreeNote from "../../prompts/tools/computer-covered-tree.md" with { type: "text" };
 import screenLockedCaptureNote from "../../prompts/tools/computer-screen-locked-capture.md" with { type: "text" };
 import secureInputTemplate from "../../prompts/tools/computer-secure-input.md" with { type: "text" };
 import screenStateTemplate from "../../prompts/tools/computer-screen-state.md" with { type: "text" };
@@ -20,13 +22,27 @@ export interface ComputerSessionSnapshot {
 	captureMaxHeight: number;
 	display: string;
 	readOnly: boolean;
-	/** `computer.backgroundFallback`: what a refused background input call does. */
-	backgroundFallback: "takeover" | "refuse";
+	/** `computer.takeover`: when window input takes over rather than running in the background. */
+	takeover: ComputerTakeoverMode;
 	/**
 	 * The agent turn the run belongs to, if any: once it acts, the display stays awake until that turn's
 	 * `release-display` rather than for the native grace period after its last request.
 	 */
 	displayTurn?: number;
+}
+
+/**
+ * The user's `computer.takeover` setting. `fallback` (the default) reruns a call whose background route is
+ * unavailable in takeover, and the model may pass `takeover` on a call; `refuse` never takes over, refusing the
+ * model's `takeover: true`. Under `foreground` and `always` omp alone decides, and the model has no `takeover`
+ * option: `foreground` takes over a target window already in front, `always` every window and element input
+ * call, and both rerun a call whose background route is unavailable in takeover.
+ */
+export type ComputerTakeoverMode = "fallback" | "foreground" | "always" | "refuse";
+
+/** Whether the model may pass `takeover` on an input call: only in the modes that predate omp deciding. */
+export function modelChoosesTakeover(mode: ComputerTakeoverMode): boolean {
+	return mode === "fallback" || mode === "refuse";
 }
 
 /** Reply envelope for a session tool invoked by desktop JavaScript. */
@@ -104,6 +120,12 @@ export function screenLockedCaptureNotice(platform: NodeJS.Platform = process.pl
 	return prompt.render(screenLockedCaptureNote, { windows: platform === "win32" });
 }
 
+/** Appended to a window screenshot taken while nothing of the window showed on screen. */
+export const COVERED_CAPTURE_NOTICE = prompt.render(coveredCaptureNote);
+
+/** Closing line of an `ax()` tree read from a window that appeared fully covered around the read. */
+export const COVERED_TREE_NOTICE = prompt.render(coveredTreeNote);
+
 /**
  * Tells the model a run ended with the screen locked or the session's
  * display asleep, so lock-screen pixels and failed captures are not taken
@@ -134,6 +156,8 @@ export interface ComputerScreenshot {
 	target: string;
 	/** The session was locked, disconnected or on a secure desktop when captured. */
 	screenLocked?: true;
+	/** The target window appeared fully covered around the capture, and its app can stop drawing while covered. */
+	covered?: true;
 }
 
 /** Clone-safe error metadata returned across the worker boundary. */

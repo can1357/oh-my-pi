@@ -476,11 +476,7 @@ async function getOAuthAccessFromStorage(provider: OAuthProvider): Promise<OAuth
 			// expired-but-refreshable credential gets rotated before discovery,
 			// and identity metadata (accountId/projectId/email) flows through
 			// for Codex/Antigravity downstream calls.
-			let access = await authStorage.oauth.access(provider);
-			if (!access && provider === "google-antigravity") {
-				access = await authStorage.oauth.access("google-gemini-cli");
-			}
-			return access ?? null;
+			return (await authStorage.oauth.access(provider)) ?? null;
 		} finally {
 			authStorage.close();
 		}
@@ -500,7 +496,7 @@ async function getOAuthAccessFromStorage(provider: OAuthProvider): Promise<OAuth
 async function fetchAntigravityModels(): Promise<ModelSpec<"google-gemini-cli">[]> {
 	const access = await getOAuthAccessFromStorage("google-antigravity");
 	if (!access) {
-		console.log("No Antigravity or Gemini CLI credentials found, will use previous models.");
+		console.log("No Antigravity credentials found, will use previous models.");
 		console.log("Tip: If you are logged in under a specific profile, run with OMP_PROFILE=<name>.");
 		return [];
 	}
@@ -574,6 +570,14 @@ async function fetchCodexDiscoveryModels(): Promise<ModelSpec<"openai-codex-resp
 }
 
 async function generateModels(selectedProvider?: string) {
+	// Retire a single provider without refreshing unrelated model rows.
+	if (selectedProvider !== undefined && isRetiredProvider(selectedProvider)) {
+		const models = { ...prevModelsJson };
+		delete models[selectedProvider];
+		await Bun.write(path.join(packageRoot, "src/models.json"), encodeModelCatalog(models));
+		console.log(`Removed ${selectedProvider} from src/models.json`);
+		return;
+	}
 	// Fetch models from dynamic sources.
 	const modelsDevModels = await loadModelsDevData();
 	const catalogProviderDescriptors = PROVIDER_DESCRIPTORS.filter(
@@ -695,9 +699,12 @@ async function generateModels(selectedProvider?: string) {
 	allModels = filterModelsDevCatalogRows(allModels);
 	allModels = normalizeAntigravityEndpoint(allModels);
 	// Previous-snapshot fallbacks keep their old baseUrl; re-base every OpenCode
-	// Go row so retained rows follow gateway endpoint moves (#15722).
+	// Go row so retained rows follow gateway endpoint moves (#15722). System One
+	// judge rows are not served by the Go gateway; they keep their seeded endpoint.
 	allModels = allModels.map(model =>
-		model.provider === "opencode-go" ? { ...model, baseUrl: openCodeGoBaseUrlForApi(model.api) } : model,
+		model.provider === "opencode-go" && model.api !== "typesafe"
+			? { ...model, baseUrl: openCodeGoBaseUrlForApi(model.api) }
+			: model,
 	);
 	// Normalize display names: gateway author prefixes ("OpenAI: …"), alias
 	// markers ("(latest)"), provider attribution ("(Antigravity)"), and

@@ -10,19 +10,35 @@
 	const log = (text, silent) => {
 		if (!silent && text) globalThis.__omp_log__("log", text);
 	};
-	const units = list => (list && list.length > 0 ? list.map(String) : undefined);
-	/** `given` as an options object for `method`; throws on a non-object or a name outside `known`, as Python does for keywords. */
-	const accept = (method, given, known) => {
-		if (given === undefined) return {};
-		if (given === null || typeof given !== "object" || Array.isArray(given)) {
-			throw new TypeError(`${method}() takes an options object: { ${known.join(", ")} }`);
-		}
-		const unknown = Object.keys(given).filter(key => !known.includes(key));
+	const units = list => {
+		const ids = list.flat().map(String);
+		return ids.length > 0 ? ids : undefined;
+	};
+	/**
+	 * Split `args` into positionals and a trailing options object. Throws on an option name outside
+	 * `known` (as Python does for keywords) and on more than `max` positionals.
+	 */
+	const parse = (method, args, known, max = Infinity) => {
+		const last = args.at(-1);
+		const hasOptions = last !== null && typeof last === "object" && !Array.isArray(last);
+		const options = hasOptions ? last : {};
+		const unknown = Object.keys(options).filter(key => !known.includes(key));
 		if (unknown.length > 0) {
 			const names = unknown.map(key => `"${key}"`).join(", ");
 			throw new TypeError(`${method}(): unknown option ${names}; expected ${known.join(", ")}`);
 		}
-		return given;
+		const positionals = hasOptions ? args.slice(0, -1) : args;
+		if (positionals.length > max) {
+			throw new TypeError(`${method}() takes at most ${max} positional argument(s), got ${positionals.length}`);
+		}
+		return [positionals, options];
+	};
+	/** A parameter given positionally or as an option, not both. */
+	const either = (method, name, positional, option) => {
+		if (positional !== undefined && option !== undefined) {
+			throw new TypeError(`${method}(): ${name} given both positionally and as an option`);
+		}
+		return positional ?? option;
 	};
 	class Draft {
 		#text;
@@ -39,42 +55,45 @@
 			log(response.text, silent);
 			return response;
 		}
-		async show(path, options) {
-			const { silent } = accept("show", options, ["silent"]);
+		[Symbol.for("nodejs.util.inspect.custom")]() {
+			return this.#text;
+		}
+		async show(...args) {
+			const [[path], { silent }] = parse("show", args, ["silent"], 1);
 			return (await this.#run("show", { path }, silent)).text;
 		}
-		async take(path, options) {
-			const { units: ids, grep, silent } = accept("take", options, ["units", "grep", "silent"]);
-			this.#text = (await this.#run("take", { path, units: units(ids), grep }, silent)).text;
+		async take(...args) {
+			this.#text = (await this.#select("take", args)).text;
 			return this;
 		}
-		async drop(path, options) {
-			const { units: ids, grep, silent } = accept("drop", options, ["units", "grep", "silent"]);
-			this.#text = (await this.#run("drop", { path, units: units(ids), grep }, silent)).text;
+		async drop(...args) {
+			this.#text = (await this.#select("drop", args)).text;
 			return this;
 		}
-		async only(globs, options) {
-			const { silent } = accept("only", options, ["silent"]);
-			this.#text = (await this.#run("only", { globs: [globs].flat() }, silent)).text;
+		async #select(method, args) {
+			const [[path, ...ids], options] = parse(method, args, ["units", "grep", "silent"]);
+			const given = either(method, "units", ids.length > 0 ? ids : undefined, options.units);
+			return this.#run(method, { path, units: units([given ?? []]), grep: options.grep }, options.silent);
+		}
+		async only(...args) {
+			const [globs, { silent }] = parse("only", args, ["silent"]);
+			this.#text = (await this.#run("only", { globs: globs.flat() }, silent)).text;
 			return this;
 		}
-		async diff(options) {
-			const { silent } = accept("diff", options, ["silent"]);
-			return (await this.#run("diff", {}, silent)).text;
+		async diff(...args) {
+			const [, { silent }] = parse("diff", args, ["silent"], 0);
+			const { text, details } = await this.#run("diff", {}, silent);
+			// What printed may show long edited lines as word rows; the patch is returned as it is.
+			return details?.patch ?? text;
 		}
-		async commit(subject, options) {
-			const { body, fixes, amend, noVerify, silent } = accept("commit", options, [
-				"body",
-				"fixes",
-				"amend",
-				"noVerify",
-				"silent",
-			]);
+		async commit(...args) {
+			const [[subject, body], options] = parse("commit", args, ["body", "fixes", "amend", "noVerify", "silent"], 2);
+			const { fixes, amend, noVerify, silent } = options;
 			const response = await this.#run(
 				"commit",
 				{
 					subject,
-					body,
+					body: either("commit", "body", body, options.body),
 					fixes: fixes === undefined ? undefined : [fixes].flat(),
 					amend: amend || undefined,
 					noVerify: noVerify || undefined,
@@ -89,8 +108,10 @@
 		}
 	}
 	globalThis.commit = Object.freeze({
-		async draft(options) {
-			const { agents, repo, silent } = accept("draft", options, ["agents", "repo", "silent"]);
+		async draft(...args) {
+			const [[scope], options] = parse("draft", args, ["agents", "repo", "silent"], 1);
+			const { repo, silent } = options;
+			const agents = either("draft", "agents", scope, options.agents);
 			const { text, details } = await call("draft", { agents, repo });
 			log(text, silent);
 			return new Draft(details, text);

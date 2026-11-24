@@ -200,6 +200,18 @@ describe("AskTool form dialog", () => {
 		expect(result.details?.notes).toEqual(notes);
 	});
 
+	it("gives no answer when a timeout leaves a required field empty", async () => {
+		const result = await new AskTool(createSession()).execute(
+			"call-timeout-required",
+			{ html: '<form><input name="transport" required></form>' },
+			undefined,
+			undefined,
+			createContext({ formDialog: async () => ({ data: { transport: "" }, timedOut: true }) }),
+		);
+		expect(text(result)).toContain("no answer was given");
+		expect(result.details).toEqual({ answers: [], timedOut: true });
+	});
+
 	it("aborts the turn when the user cancels the form", async () => {
 		const abort = vi.fn();
 		const outcome = new AskTool(createSession()).execute(
@@ -253,6 +265,60 @@ describe("AskTool form dialog", () => {
 		expect(formDialog).not.toHaveBeenCalled();
 	});
 
+	it("refuses a <fieldset> whose radios each carry their own name, without showing it", async () => {
+		const formDialog = vi.fn<FormDialog>();
+		const result = await new AskTool(createSession()).execute(
+			"call-split-radios",
+			{
+				html: `<form><fieldset>
+  <legend>Sharing</legend>
+  <label><input type="radio" name="shared_sources" value="common" checked> Common location only</label>
+  <label><input type="radio" name="personal_auto"> Include personal installations</label>
+</fieldset></form>`,
+			},
+			undefined,
+			undefined,
+			createContext({ formDialog }),
+		);
+
+		const message = text(result) ?? "";
+		expect(message).toContain("shared_sources");
+		expect(message).toContain("personal_auto");
+		expect(message).toContain("Sharing");
+		expect(result.details).toEqual({ answers: [] });
+		expect(formDialog).not.toHaveBeenCalled();
+	});
+
+	it("shows forms whose radio names are not split inside one fieldset", async () => {
+		const forms = {
+			"shared name": `<form><fieldset><legend>Sharing</legend>
+  <label><input type="radio" name="sources" value="common" checked> Common location only</label>
+  <label><input type="radio" name="sources" value="personal"> Include personal installations</label>
+</fieldset></form>`,
+			"lone radio": `<form><fieldset><legend>Sharing</legend>
+  <label><input type="radio" name="personal_auto"> Include personal installations</label>
+</fieldset></form>`,
+			"separate fieldsets": `<form><fieldset><legend>Sharing</legend>
+  <label><input type="radio" name="shared_sources" value="common" checked> Common location only</label>
+</fieldset><fieldset><legend>Personal</legend>
+  <label><input type="radio" name="personal_auto"> Include personal installations</label>
+</fieldset></form>`,
+		};
+		for (const [shape, html] of Object.entries(forms)) {
+			const formDialog = vi.fn<FormDialog>(async () => ({ data: { sources: "personal" } }));
+			const result = await new AskTool(createSession()).execute(
+				`call-${shape}`,
+				{ html },
+				undefined,
+				undefined,
+				createContext({ formDialog }),
+			);
+
+			expect(formDialog, shape).toHaveBeenCalledTimes(1);
+			expect(text(result), shape).toContain("User answers:");
+		}
+	});
+
 	it("closes for a message the user queued without cancelling the turn, but stays open for other interrupts", async () => {
 		const ask = (source: string) => {
 			const steering = new AbortController();
@@ -277,6 +343,36 @@ describe("AskTool form dialog", () => {
 
 		const irc = ask("irc");
 		expect((await irc.outcome).details?.answers[0]).toMatchObject({ name: "store", answer: "SQLite" });
+	});
+
+	it("tells the model what the user answered before a message closed the form", async () => {
+		const steering = new AbortController();
+		const formDialog: FormDialog = async (_html, options) => {
+			options?.onAbandon?.({
+				data: { store: "postgres" },
+				notes: [{ name: "store", question: "Store", option: "Postgres", value: "postgres", text: "managed  one" }],
+			});
+			steering.abort("user");
+			return undefined;
+		};
+		const outcome = new AskTool(createSession()).execute(
+			"call-given",
+			{ html: DB_FORM },
+			undefined,
+			undefined,
+			createContext({ formDialog, steeringSignal: steering.signal }),
+		);
+
+		const error = await outcome.then(
+			() => undefined,
+			(rejection: unknown) => rejection,
+		);
+		expect(error).toBeInstanceOf(ToolAbortError);
+		const message = (error as Error).message;
+		expect(message).toContain("Ask interrupted by message");
+		expect(message).toContain('"store": "postgres"');
+		expect(message).toContain("Store: Postgres");
+		expect(message).toContain("managed one");
 	});
 
 	it("delivers queued steering while the form is open without cancelling the turn", async () => {
@@ -601,10 +697,18 @@ describe("AskTool without an interactive UI", () => {
 });
 
 describe("recoverAskHtml", () => {
-	it("recovers the form of an html call and nothing from legacy question calls", () => {
+	it("recovers the form of an html call, a bare string and a legacy question call", () => {
 		expect(recoverAskHtml({ html: DB_FORM })).toBe(DB_FORM);
-		expect(recoverAskHtml({ questions: [{ id: "q", question: "Q?", options: [] }] })).toBeUndefined();
-		expect(recoverAskHtml("<form></form>")).toBeUndefined();
+		expect(recoverAskHtml("<form></form>")).toBe("<form></form>");
+		const legacy = recoverAskHtml({
+			questions: [
+				{ id: "db", question: "Which <db>?", options: [{ label: "pg" }, { label: "sqlite" }], recommended: 1 },
+			],
+		});
+		expect(legacy).toBe(
+			'<form><fieldset><legend>Which &lt;db&gt;?</legend><label><input type="radio" name="db" value="pg"> pg</label><label><input type="radio" name="db" value="sqlite" checked> sqlite</label></fieldset></form>',
+		);
+		expect(recoverAskHtml({ questions: [{ id: "q" }] })).toBeUndefined();
 	});
 });
 

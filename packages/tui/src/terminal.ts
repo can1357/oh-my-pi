@@ -1,6 +1,11 @@
-import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as fs from "node:fs";
-import { isolateThreadStartsFromConsole, TtyWriter } from "@oh-my-pi/pi-natives";
+import {
+	enableConsoleVtInput,
+	isolateThreadStartsFromConsole,
+	restoreConsoleInputMode,
+	TtyWriter,
+	translateWindowsAltGrSequence,
+} from "@oh-my-pi/pi-natives";
 import { $env, isBunTestRuntime, isTerminalHeadless, isWsl } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { popLoopPhase, pushLoopPhase } from "@oh-my-pi/pi-utils/loop-phase";
@@ -29,12 +34,12 @@ import {
 	setTerminalGlyphProtocol,
 	TERMINAL,
 } from "./terminal-capabilities";
+import { isInsideHerdrDesktopTerminal } from "./multiplexers/herdr";
 import { tmuxMultiplexer } from "./multiplexers/tmux";
 import type { TerminalMultiplexerBackgroundColorCache } from "./multiplexers/types";
 import { classifyTerminalMultiplexerModule, terminalMultiplexerSessions } from "./terminal-multiplexer";
 import { setTmuxPaneApcTitles, tmuxSessionSpeaksTsp } from "./tmux";
 import { setHangulCompatibilityJamoWidth } from "./utils";
-import { translateWindowsAltGrSequence } from "./windows-altgr";
 import { Win32InputModeDecoder, Win32PasteMarkerNormalizer } from "./windows-input-mode";
 
 export { writeTerminalSequence, writeThroughActiveTerminal } from "./active-terminal";
@@ -43,6 +48,7 @@ const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
 const WINDOWS_TERMINAL_OSC11_POLL_MS = 30_000;
+const OSC11_FORWARDED_REPLY_TIMEOUT_MS = 5000;
 /** How long a relayed ESC record waits for the rest of its sequence before acting as Escape (matches StdinBuffer). */
 const WIN32_RELAYED_ESCAPE_TIMEOUT_MS = 75;
 /**
@@ -58,6 +64,12 @@ const CSI_INTRODUCER_GRACE_MS = 150;
  * after it, `t` is a real keystroke again.
  */
 const INBAND_TERMINATOR_GRACE_MS = 300;
+
+/**
+ * How long, in a Herdr desktop terminal, an applied DEC 2048 report that
+ * disagrees with the pty size waits for the SIGWINCH that makes them agree.
+ */
+const HERDR_INBAND_SETTLE_MS = 500;
 
 /**
  * How long a relayed OSC/DCS/APC string waits for its terminator. Far longer
@@ -386,9 +398,6 @@ function registerPostmortemTerminalRestore(): void {
 export function setAltScreenActive(active: boolean): void {
 	altScreenActive = active;
 }
-
-const STD_INPUT_HANDLE = -10;
-const ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200;
 
 /**
  * Emergency terminal restore - call this from signal/crash handlers
@@ -869,7 +878,8 @@ export class ProcessTerminal implements Terminal {
 	#stdoutDrainListener?: () => void;
 	#outputDrainListeners = new Set<() => void>();
 
-	#windowsVTInputRestore?: () => void;
+	// Stdin console mode found before VT input was enabled (Windows).
+	#windowsInputMode?: number;
 	#xtermScrollToBottomRestoreModes = new Set<number>();
 	#appearanceCallbacks: Array<
 		(appearance: TerminalAppearance, requestToken?: TerminalAppearanceRequestToken) => void
@@ -878,12 +888,15 @@ export class ProcessTerminal implements Terminal {
 		(appearance: TerminalAppearance, requestToken?: TerminalAppearanceRequestToken) => void
 	> = [];
 	#appearance: TerminalAppearance | undefined;
+	/** Last CSI ?997 report from a multiplexer that owns the color scheme. */
+	#reportedColorScheme?: TerminalAppearance;
 	#osc11Pending = false;
 	#osc11ActiveToken?: TerminalAppearanceRequestToken;
 	#osc11QueuedQuery?: { cache?: TerminalMultiplexerBackgroundColorCache; token?: TerminalAppearanceRequestToken };
 	#nextAppearanceRequestToken = 1;
 	#osc11ResponseBuffer = "";
 	#osc11CacheRefreshTimer?: Timer;
+	#osc11Da1GraceTimer?: Timer;
 	#osc99PendingId: string | undefined;
 	#osc99ResponseBuffer = "";
 	#osc99Capabilities = new Map<string, string>();
@@ -941,6 +954,8 @@ export class ProcessTerminal implements Terminal {
 	#pendingInBandTerminatorAt = 0;
 	#reportedColumns?: number;
 	#reportedRows?: number;
+	/** Herdr only: drops an applied report the pty size has not come to match. */
+	#inBandSettleTimer?: Timer;
 	#mode2031DebounceTimer?: Timer;
 	#windowsTerminalAppearancePollTimer?: Timer;
 	#progressActive = false;
@@ -1248,11 +1263,12 @@ export class ProcessTerminal implements Terminal {
 		// data handler are installed. Keep this false throughout temporary stops.
 		this.#active = true;
 		// Query terminal background color via OSC 11 for dark/light detection.
-		// Uses DA1 (Primary Device Attributes) as a sentinel: terminals process
-		// sequences in order, so if DA1 arrives before OSC 11 response,
-		// the terminal does not support OSC 11. This avoids indefinite hangs.
-		// Technique used by Neovim, bat, fish, and terminal-colorsaurus.
+		// DA1 bounds unanswered queries; Zellij may forward OSC 11 after answering
+		// DA1 locally, so its forwarded reply gets a short additional window.
 		this.#queryBackgroundColor();
+		// CSI ?996n asks a multiplexer that owns the color scheme for its light/dark
+		// mode; its CSI ?997 reply then outranks the forwarded OSC 11 background.
+		if (this.#multiplexerOwnsColorScheme()) this.#safeWrite("\x1b[?996n");
 
 		// Query OSC 99 notification capabilities for Kitty. The query uses the
 		// same DA1 sentinel FIFO as OSC 11/DECRQM so unsupported terminals resolve
@@ -1315,47 +1331,13 @@ export class ProcessTerminal implements Terminal {
 	#enableWindowsVTInput(): void {
 		if (process.platform !== "win32") return;
 		this.#restoreWindowsVTInput();
-		try {
-			const kernel32 = dlopen("kernel32.dll", {
-				GetStdHandle: { args: [FFIType.i32], returns: FFIType.ptr },
-				GetConsoleMode: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
-				SetConsoleMode: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.bool },
-			});
-			const handle = kernel32.symbols.GetStdHandle(STD_INPUT_HANDLE);
-			const mode = new Uint32Array(1);
-			const modePtr = ptr(mode);
-			if (!modePtr || !kernel32.symbols.GetConsoleMode(handle, modePtr)) {
-				kernel32.close();
-				return;
-			}
-			const originalMode = mode[0]!;
-			const vtMode = originalMode | ENABLE_VIRTUAL_TERMINAL_INPUT;
-			if (vtMode !== originalMode && !kernel32.symbols.SetConsoleMode(handle, vtMode)) {
-				kernel32.close();
-				return;
-			}
-			this.#windowsVTInputRestore = () => {
-				try {
-					kernel32.symbols.SetConsoleMode(handle, originalMode);
-				} finally {
-					kernel32.close();
-				}
-			};
-		} catch {
-			// bun:ffi unavailable or console API unsupported; keep startup non-fatal.
-		}
+		this.#windowsInputMode = enableConsoleVtInput() ?? undefined;
 	}
 
 	#restoreWindowsVTInput(): void {
-		if (process.platform !== "win32") return;
-		const restore = this.#windowsVTInputRestore;
-		this.#windowsVTInputRestore = undefined;
-		if (!restore) return;
-		try {
-			restore();
-		} catch {
-			// Ignore restore errors during terminal teardown.
-		}
+		const mode = this.#windowsInputMode;
+		this.#windowsInputMode = undefined;
+		if (mode !== undefined) restoreConsoleInputMode(mode);
 	}
 
 	/**
@@ -1660,22 +1642,22 @@ export class ProcessTerminal implements Terminal {
 				switch (owner.kind) {
 					case "osc11": {
 						if (this.#osc11Pending) {
-							// DA1 arrived before OSC 11 response: terminal doesn't support OSC 11.
-							this.#osc11Pending = false;
-							this.#osc11ActiveToken = undefined;
-							this.#osc11ResponseBuffer = "";
+							if (terminalMultiplexerSessions().some(multiplexer => multiplexer.backgroundReplyMayFollowDa1)) {
+								// Zellij answers DA1 locally while the OSC query is still in flight to its host.
+								this.#osc11Da1GraceTimer = setTimeout(() => {
+									this.#osc11Da1GraceTimer = undefined;
+									this.#osc11Pending = false;
+									this.#osc11ActiveToken = undefined;
+									this.#osc11ResponseBuffer = "";
+									this.#startQueuedOsc11Query();
+								}, OSC11_FORWARDED_REPLY_TIMEOUT_MS);
+							} else {
+								this.#osc11Pending = false;
+								this.#osc11ActiveToken = undefined;
+								this.#osc11ResponseBuffer = "";
+							}
 						}
-						// Start a queued OSC 11 query once the prior cycle is fully drained.
-						if (
-							this.#osc11QueuedQuery !== undefined &&
-							!this.#osc11Pending &&
-							!this.#da1SentinelOwners.some(o => o.kind === "osc11") &&
-							!this.#dead
-						) {
-							const query = this.#osc11QueuedQuery;
-							this.#osc11QueuedQuery = undefined;
-							this.#startOsc11Query(query.cache, query.token);
-						}
+						this.#startQueuedOsc11Query();
 						break;
 					}
 					case "privateMode": {
@@ -1786,7 +1768,12 @@ export class ProcessTerminal implements Terminal {
 					const requestToken = this.#osc11ActiveToken;
 					this.#osc11ActiveToken = undefined;
 					this.#osc11ResponseBuffer = "";
+					if (this.#osc11Da1GraceTimer) {
+						clearTimeout(this.#osc11Da1GraceTimer);
+						this.#osc11Da1GraceTimer = undefined;
+					}
 					this.#handleOsc11Response(rHex!, gHex!, bHex!, requestToken);
+					this.#startQueuedOsc11Query();
 					return;
 				}
 			}
@@ -1877,6 +1864,9 @@ export class ProcessTerminal implements Terminal {
 			// (Neovim convention — coalesces rapid notifications during transitions)
 			const appearanceMatch = sequence.match(appearanceDsrPattern);
 			if (appearanceMatch) {
+				if (this.#multiplexerOwnsColorScheme()) {
+					this.#applyColorSchemeReport(appearanceMatch[1] === "2" ? "light" : "dark");
+				}
 				if (this.#mode2031DebounceTimer) clearTimeout(this.#mode2031DebounceTimer);
 				this.#mode2031DebounceTimer = setTimeout(() => {
 					this.#mode2031DebounceTimer = undefined;
@@ -1926,8 +1916,8 @@ export class ProcessTerminal implements Terminal {
 
 	/**
 	 * Send OSC 11 background color query followed by DA1 sentinel.
-	 * DA1 avoids indefinite hangs: if DA1 response arrives before OSC 11,
-	 * the terminal does not support OSC 11.
+	 * A DA1 reply normally ends an unanswered query; forwarding multiplexers
+	 * may deliver OSC 11 later, so those queries expire after a bounded delay.
 	 */
 	#queryBackgroundColor(
 		cache?: TerminalMultiplexerBackgroundColorCache,
@@ -1971,6 +1961,19 @@ export class ProcessTerminal implements Terminal {
 		this.#da1SentinelOwners.push({ kind: "osc11" });
 		this.#safeWrite("\x1b]11;?\x07"); // OSC 11 query (BEL terminated)
 		this.#safeWrite("\x1b[c"); // DA1 sentinel
+	}
+
+	#startQueuedOsc11Query(): void {
+		if (
+			this.#osc11QueuedQuery === undefined ||
+			this.#osc11Pending ||
+			this.#da1SentinelOwners.some(owner => owner.kind === "osc11") ||
+			this.#dead
+		)
+			return;
+		const query = this.#osc11QueuedQuery;
+		this.#osc11QueuedQuery = undefined;
+		this.#startOsc11Query(query.cache, query.token);
 	}
 
 	#queryProgramStatusSupport(): void {
@@ -2222,6 +2225,24 @@ export class ProcessTerminal implements Terminal {
 		}
 	}
 
+	#multiplexerOwnsColorScheme(): boolean {
+		return terminalMultiplexerSessions().some(multiplexer => multiplexer.colorSchemeQueryAuthoritative);
+	}
+
+	/** Applies a CSI ?997 report; reached only when a multiplexer owns the color scheme. */
+	#applyColorSchemeReport(mode: TerminalAppearance): void {
+		this.#reportedColorScheme = mode;
+		if (mode === this.#appearance) return;
+		this.#appearance = mode;
+		for (const cb of this.#appearanceCallbacks) {
+			try {
+				cb(mode);
+			} catch {
+				/* ignore callback errors */
+			}
+		}
+	}
+
 	/**
 	 * Parse an OSC 11 background color response and compute BT.601 luminance.
 	 * Handles 1-, 2-, 3-, and 4-digit XParseColor hex components.
@@ -2238,7 +2259,8 @@ export class ProcessTerminal implements Terminal {
 		const b = normalize(bHex);
 		setTerminalBackgroundColor((Math.round(r * 255) << 16) | (Math.round(g * 255) << 8) | Math.round(b * 255));
 		const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
-		const mode: TerminalAppearance = luminance < 0.5 ? "dark" : "light";
+		// A multiplexer's own CSI ?997 report outranks the host background's luminance.
+		const mode: TerminalAppearance = this.#reportedColorScheme ?? (luminance < 0.5 ? "dark" : "light");
 		const changed = mode !== this.#appearance;
 		this.#appearance = mode;
 		// oxlint-disable-next-line unicorn/no-useless-spread -- callbacks may unsubscribe while reporting
@@ -2457,6 +2479,40 @@ export class ProcessTerminal implements Terminal {
 		if (rows > 0 && cols > 0 && (rows !== previousRows || cols !== previousColumns)) {
 			this.#resizeHandler?.();
 		}
+		this.#armHerdrInBandSettleCheck();
+	}
+
+	/**
+	 * In a Herdr desktop terminal, drop an applied report once it has disagreed
+	 * with the pty size for {@link HERDR_INBAND_SETTLE_MS}. Herdr reports the
+	 * smaller size of a peek but sends no report when the terminal returns to
+	 * its pane. Read after that return's SIGWINCH (or with the peek's SIGWINCH
+	 * coalesced away while the event loop was busy), the peek report pinned
+	 * rows/columns to the peek until the next OS resize. Herdr keeps the pty
+	 * size in step with the pane, so the pty wins there; elsewhere in-band stays
+	 * authoritative, as it can be more accurate than ioctl under multiplexers.
+	 * A multiplexer that owns the grid inside the Herdr terminal (tmux, screen,
+	 * zellij, including one known only by TERM) owns its own pty, so it keeps the
+	 * in-band precedence. The report's cell pixel size is kept.
+	 */
+	#armHerdrInBandSettleCheck(): void {
+		clearTimeout(this.#inBandSettleTimer);
+		this.#inBandSettleTimer = undefined;
+		if (!isInsideHerdrDesktopTerminal() || isInsideTerminalMultiplexer()) return;
+		const osRows = process.stdout.rows;
+		const osColumns = process.stdout.columns;
+		const disagrees =
+			(this.#reportedRows !== undefined && osRows > 0 && this.#reportedRows !== osRows) ||
+			(this.#reportedColumns !== undefined && osColumns > 0 && this.#reportedColumns !== osColumns);
+		if (!disagrees) return;
+		this.#inBandSettleTimer = setTimeout(() => {
+			this.#inBandSettleTimer = undefined;
+			const rows = this.rows;
+			const columns = this.columns;
+			this.#reconcileInBandGeometryOnResize();
+			if (this.rows !== rows || this.columns !== columns) this.#resizeHandler?.();
+		}, HERDR_INBAND_SETTLE_MS);
+		this.#inBandSettleTimer.unref?.();
 	}
 
 	/**
@@ -2636,6 +2692,10 @@ export class ProcessTerminal implements Terminal {
 			clearTimeout(this.#osc11CacheRefreshTimer);
 			this.#osc11CacheRefreshTimer = undefined;
 		}
+		if (this.#osc11Da1GraceTimer) {
+			clearTimeout(this.#osc11Da1GraceTimer);
+			this.#osc11Da1GraceTimer = undefined;
+		}
 		this.#appearanceCallbacks = [];
 		this.#appearanceReportCallbacks = [];
 		this.#osc11Pending = false;
@@ -2675,6 +2735,8 @@ export class ProcessTerminal implements Terminal {
 		this.#xtermScrollToBottomRestoreModes.clear();
 		this.#reportedColumns = undefined;
 		this.#reportedRows = undefined;
+		clearTimeout(this.#inBandSettleTimer);
+		this.#inBandSettleTimer = undefined;
 
 		// Disable Kitty keyboard protocol if not already done by drainInput()
 		if (this.#kittyProtocolActive) {

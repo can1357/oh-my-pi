@@ -17,6 +17,7 @@ import { ToolAbortError, throwIfAborted } from "../tool-errors";
 import { splitKeyCombo, ternKey } from "./tern/keys";
 import { devtoolsFrameId } from "./frames";
 import { untilAbortedOrReleased } from "./op-timeouts";
+import { CANCELLED_RELEASE_POINT, OVERLAY_HOST_TAG } from "./relay/protocol";
 import type { SelectOptionChoice, SelectOptionInput } from "./select-options";
 import {
 	createFilePicker,
@@ -505,6 +506,20 @@ export async function focusKeyTarget(handle: ElementHandle, label: string, signa
 }
 
 /**
+ * Focus an element with the DOM's own `focus()`. Puppeteer's `ElementHandle.focus()` refuses anything but an
+ * HTMLElement, though a focusable SVG element (`<g tabindex="0" role="button">`) takes focus too.
+ */
+export async function focusElement(handle: ElementHandle, signal?: AbortSignal): Promise<void> {
+	await untilAborted(signal, () =>
+		handle.evaluate(el => {
+			const node = el as unknown as { focus?: () => void };
+			if (typeof node.focus !== "function") throw new Error("Cannot focus an element without a focus() method");
+			node.focus();
+		}),
+	);
+}
+
+/**
  * Click an element only after verifying the dispatched point is not occluded, then confirm the browser
  * delivered the click to it: the target got the `mousedown` or `click` (a label's forwarded `click` counts
  * for its control), or the page consumed its `pointerdown` with `preventDefault()`, which suppresses the
@@ -512,7 +527,8 @@ export async function focusKeyTarget(handle: ElementHandle, label: string, signa
  * nothing, so a click the page never saw fails instead of reporting success. When the page took the record
  * with it, a navigation or a frame removed after the release counts as delivered. A child frame the page
  * removed while the first press was down took the element before any click, so that click fails as
- * unconfirmed even when the element saw the `mousedown`.
+ * unconfirmed even when the element saw the `mousedown`. The relay's page overlay host ({@link OVERLAY_HOST_TAG})
+ * is not the page: its mutations never confirm a click.
  */
 export async function clickElement(
 	handle: ElementHandle,
@@ -522,26 +538,70 @@ export async function clickElement(
 ): Promise<void> {
 	const point = await actionableClickPoint(handle, label, signal, options);
 	const watch = await untilAborted(signal, () =>
-		handle.evaluateHandle(el => {
+		handle.evaluateHandle((el, overlayHostTag) => {
 			interface InputEvent {
 				type: string;
 				defaultPrevented: boolean;
 				composedPath(): unknown[];
 			}
+			interface Mutation {
+				type: string;
+				target: unknown;
+				addedNodes: ArrayLike<unknown>;
+				removedNodes: ArrayLike<unknown>;
+			}
 			type Listen = (type: string, listener: (event: InputEvent) => void, capture: boolean) => void;
 			const target = el as unknown as { addEventListener: Listen; removeEventListener: Listen };
-			const page = globalThis as unknown as { addEventListener: Listen; removeEventListener: Listen };
+			const page = globalThis as unknown as {
+				addEventListener: Listen;
+				removeEventListener: Listen;
+				location: { href: string };
+				document: { documentElement: unknown };
+				MutationObserver: new (callback: (records: Mutation[]) => void) => {
+					observe(node: unknown, options: Record<string, boolean>): void;
+					disconnect(): void;
+				};
+			};
+			const isOverlayHost = (node: unknown) =>
+				typeof node === "object" &&
+				node !== null &&
+				"tagName" in node &&
+				typeof node.tagName === "string" &&
+				node.tagName.toLowerCase() === overlayHostTag;
+			// The overlay draws inside its host's closed shadow root, which the observer never sees; what it can see
+			// is the host itself coming, going, or changing its attributes.
+			const overlayOnly = (record: Mutation) => {
+				if (isOverlayHost(record.target)) return true;
+				if (record.type !== "childList") return false;
+				const nodes = [...Array.from(record.addedNodes), ...Array.from(record.removedNodes)];
+				return nodes.length > 0 && nodes.every(isOverlayHost);
+			};
 			const pointerDowns: InputEvent[] = [];
+			const href = page.location.href;
+			let changed = false;
 			const state = {
 				get detached() {
 					return !(el as unknown as PageElement).isConnected;
 				},
 				reached: false,
-				// Read after the click: the page's handlers have run by then.
-				delivered: () => state.reached || pointerDowns.some(event => event.defaultPrevented),
+				// Read after the click: the page's handlers have run by then. A handler that replaced the element,
+				// changed the DOM, submitted a form or navigated also shows the page took the click,
+				// even when it re-rendered the target before the listeners saw it.
+				delivered: () =>
+					state.reached ||
+					pointerDowns.some(event => event.defaultPrevented) ||
+					state.detached ||
+					changed ||
+					page.location.href !== href,
 				stop: () => {},
 			};
 			if (state.detached) return state;
+			const observer = new page.MutationObserver(records => {
+				if (!records.every(overlayOnly)) changed = true;
+			});
+			const onChange = () => {
+				changed = true;
+			};
 			const record = (event: InputEvent) => {
 				if (event.type === "pointerdown") pointerDowns.push(event);
 				else state.reached = true;
@@ -552,18 +612,28 @@ export async function clickElement(
 				if (event.composedPath().includes(el)) record(event);
 			};
 			const types = ["pointerdown", "mousedown", "click"];
+			const pageChanges = ["submit", "beforeunload", "pagehide"];
 			for (const type of types) {
 				target.addEventListener(type, record, true);
 				page.addEventListener(type, onPage, true);
 			}
+			for (const type of pageChanges) page.addEventListener(type, onChange, true);
+			observer.observe(page.document.documentElement, {
+				childList: true,
+				subtree: true,
+				attributes: true,
+				characterData: true,
+			});
 			state.stop = () => {
+				observer.disconnect();
 				for (const type of types) {
 					target.removeEventListener(type, record, true);
 					page.removeEventListener(type, onPage, true);
 				}
+				for (const type of pageChanges) page.removeEventListener(type, onChange, true);
 			};
 			return state;
-		}),
+		}, OVERLAY_HOST_TAG.toLowerCase()),
 	);
 	const frame = handle.frame;
 	// The main frame outlives any press; a child frame's record is read once while the first press is down, since
@@ -607,7 +677,9 @@ export async function clickElement(
 	});
 	await watch.dispose().catch(() => undefined);
 	if (!delivered) {
-		throw new ToolError(`${label}: the browser did not deliver the click to the element (disabled or inert)`);
+		throw new ToolError(
+			`${label}: could not confirm the click reached the element (no listener saw it and the page did not change; it may be disabled or inert); check the page before clicking again`,
+		);
 	}
 }
 
@@ -777,7 +849,23 @@ const PICKER_VALUE_EXAMPLES: Record<string, string> = {
 const PICKER_INPUT_TYPES = Object.keys(PICKER_VALUE_EXAMPLES);
 
 /**
- * Focus a field that can take text, clear any existing value, then retype. A colour, date, time or
+ * Run on a filled text field (`this`, an HTML `<textarea>` or text-entry `<input>`) with the value's last character: a
+ * keydown and then a keyup, each only while it is still such a field and has focus. Created in the page, they carry
+ * no text, held modifier or default action.
+ */
+const FIELD_KEY_EVENTS = `function (key) {
+	const textEntry = ["text", "search", "email", "url", "tel", "password", "number"];
+	for (const type of ["keydown", "keyup"]) {
+		const field =
+			this.namespaceURI === "http://www.w3.org/1999/xhtml" &&
+			(this.localName === "textarea" || (this.localName === "input" && textEntry.includes(this.type)));
+		if (!field || this.getRootNode().activeElement !== this) return;
+		this.dispatchEvent(new KeyboardEvent(type, { key, bubbles: true, cancelable: true, composed: true }));
+	}
+}`;
+
+/**
+ * Focus a field that can take text, clear any existing value, then insert the value in one input. A colour, date, time or
  * range input gets its value set the way its picker would, and refuses one it rejects. A
  * contenteditable element has its contents selected and replaced by one text insertion (or deleted
  * by Backspace for an empty value), as a paste would.
@@ -935,7 +1023,7 @@ export async function fillViaHandle(
 				}
 				const before = node.value;
 				if ("value" in node) write("");
-				// Typing a value fires its own input events; an empty value types nothing,
+				// Inserting a value fires its own input event; an empty value inserts nothing,
 				// so report the clear itself when there was something to clear.
 				if (wanted === "" && before) report();
 				return { target: "field" as const };
@@ -955,6 +1043,44 @@ export async function fillViaHandle(
 			return;
 		case "unfocused":
 			throw new ToolError("Cannot fill an element that does not keep focus");
+		case "field":
+			// One `Input.insertText` puts the whole value in with a single native input event: a newline stays text
+			// instead of pressing Enter (which submits chat forms), a controlled component sees the full value
+			// rather than re-rendering its old one between keys, and long text takes one round trip.
+			// It fires no key events, which pages that search as you type often wait for (`keyup`), so a text field
+			// then gets {@link FIELD_KEY_EVENTS} for the value's last code point that is not a control character. They
+			// go out without the user gesture puppeteer's `evaluate` requests, which would renew the page's user
+			// activation.
+			if (!value) return;
+			throwIfAborted(signal);
+			try {
+				await untilAborted(signal, () => page.keyboard.sendCharacter(value));
+				let end = value.length;
+				while (end > 0 && /\p{Cc}/u.test(value.charAt(end - 1))) end--;
+				// A trailing low surrogate ends the code point its high surrogate starts.
+				const start = end > 1 && (value.codePointAt(end - 2) ?? 0) > 0xffff ? end - 2 : end - 1;
+				const key = value.slice(start, end);
+				if (key) {
+					// The insert is done; a page that navigated or dropped the field in answer has no field to tell.
+					await untilAborted(signal, () =>
+						handle.frame.client
+							.send("Runtime.callFunctionOn", {
+								objectId: handle.remoteObject().objectId,
+								functionDeclaration: FIELD_KEY_EVENTS,
+								arguments: [{ value: key }],
+							})
+							.catch(() => undefined),
+					);
+				}
+			} catch (error) {
+				if (signal?.aborted) {
+					throw new TypingInterruptedError("the value was already sent and may have reached the field", {
+						cause: signal.reason,
+					});
+				}
+				throw error;
+			}
+			return;
 		case "editable":
 			if (!value && !prepared.deletable) return;
 			throwIfAborted(signal);
@@ -975,8 +1101,6 @@ export async function fillViaHandle(
 				throw error;
 			}
 			return;
-		case "field":
-			await typeKeys(page, value, signal);
 	}
 }
 
@@ -1689,6 +1813,11 @@ async function deliverToInput(
 ): Promise<void> {
 	if (route === "paths") {
 		const staged = await staging.stage(sources, signal);
+		// Chrome expands a folder for a `webkitdirectory` input only on the front tab, as when a person picks one; a
+		// tab omp opened in the background is brought forward for this upload alone.
+		if (sources.some(source => source.directory)) {
+			await untilAborted(signal, () => input.frame.page().bringToFront());
+		}
 		await untilAborted(signal, () => {
 			filling?.();
 			return setFileInputPaths(input, staged);
@@ -1952,12 +2081,6 @@ async function releaseKeys(page: Page, keys: readonly KeyInput[], signal?: Abort
 	if (failure) throw failure.error;
 	throwIfAborted(signal);
 }
-
-/**
- * Where a cancelled press is released: off the page, so the press drops no drag (unless the page captured the
- * pointer), at a point no real pointer reports, so {@link CANCELLED_RELEASE_GUARD} can tell the release apart.
- */
-const CANCELLED_RELEASE_POINT = -7919;
 
 /**
  * Swallows the `click`/`auxclick` Chrome fires on the document root for a release at

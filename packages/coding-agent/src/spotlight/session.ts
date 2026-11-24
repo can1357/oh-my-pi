@@ -30,7 +30,7 @@ import {
 
 /**
  * Schema description of the tool-call intent field `i` in experiment sessions. Spotlight ranks output against the
- * intent, so it asks what the agent wants from the call's output; `PI_INTENT_DESC` still overrides it.
+ * full intent, while the UI shows its brief label; `PI_INTENT_DESC` still overrides it.
  */
 export const SPOTLIGHT_INTENT_DESCRIPTION: string = intentField.trim();
 
@@ -77,6 +77,11 @@ export const SPOTLIGHT_NOTICE_SOURCE = "spotlight";
 /** The warning a session shows when Spotlight finds no Stencil credential. */
 export const NO_CREDENTIAL_NOTICE =
 	"No Stencil credential: Spotlight ranking is off, and tool output is cut by the unranked fallback rules. To restore it, run /login and choose Stencil, or set STENCIL_API_KEY.";
+
+/** The warning a session shows when Stencil Cloud refuses the account Spotlight access (`waitlisted`/`forbidden`). */
+export function accessDeniedNotice(reason: string): string {
+	return `Spotlight ranking is off: ${reason} Tool output is cut by the unranked fallback rules; omp asks again in a few hours, or as soon as you sign in to another Stencil account.`;
+}
 
 /**
  * The experiment's state for one session: the Spotlight client, the coin shares, and the per-session shaping state

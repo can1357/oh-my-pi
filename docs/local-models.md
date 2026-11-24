@@ -30,7 +30,7 @@ The tiny-model CLI and source registry retain **title** and **memory** groupings
 
 - **Text/Whisper stack**: `@huggingface/transformers` (transformers.js) v4 running in a Bun
   worker, using the native `onnxruntime-node` backend by default. Phonon TTS runs
-  natively in `pi-natives` (no side install) inside an isolated worker; Parakeet uses `sherpa-onnx-node`.
+  natively in `omp-natives` (no side install) inside an isolated worker; Parakeet uses `sherpa-onnx-node`.
 - **Non-FHS distros (NixOS, and any host without `libstdc++.so.6` on the loader path)**: the
   on-demand `onnxruntime-node` / `sherpa-onnx-node` / `sharp` addons are prebuilt binaries that
   `dlopen` `libstdc++.so.6` and `libgcc_s.so.1`, and they carry their own `DT_RUNPATH`, so nothing in
@@ -213,7 +213,7 @@ The `speech` role accepts TTS catalog models and the `dictation` role accepts ST
 
 | Selector       | Repository                            | Precision | Download | Notes                                   |
 | -------------- | ------------------------------------- | --------- | -------- | --------------------------------------- |
-| `local/phonon-31m` | `gradium/phonon-31m-en` (pinned revision) | GGUF q8 | ~68 MB (64.5 MB weights + 12 voice embeddings) | 24 kHz Phonon 31M, English only, native pi-natives TTS |
+| `local/phonon-31m` | `gradium/phonon-31m-en` (pinned revision) | GGUF q8 | ~68 MB (64.5 MB weights + 12 voice embeddings) | 24 kHz Phonon 31M, English only, native omp-natives TTS |
 
 Phonon voice selection remains independent of the model role. Set `tts.localVoice` for the `tts` tool and `speech.voice` for assistant-output vocalization. Available local voice ids are `harper` (default), `hadley`, `delia`, `everly` (American female), `easton`, `preston`, `miles`, `trevor` (American male), `maeve`, `bryony` (British female), `edwin`, and `hugh` (British male). Changing voices does not download another model. Speaking rate is likewise split: `tts.localSpeed` for the `tts` tool and `omp say`, `speech.speed` for vocalization (both default `1`, clamped to `0.8`–`1.3`). Legacy Kokoro voice settings migrate automatically (`af_*`→`harper`, `am_*`→`easton`, `bf_*`→`maeve`, `bm_*`→`edwin`).
 
@@ -229,7 +229,7 @@ Use these canonical catalog model ids:
 | `local/parakeet-tdt-0.6b-v3`       | `csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8`                           | sherpa-onnx int8    | ~680 MB  | Default; fast multilingual Parakeet TDT v3 |
 | `local/nemotron-streaming-en-0.6b` | `csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25` | sherpa-onnx int8    | ~630 MB  | Native streaming; English only             |
 
-The transformers.js Whisper models read `providers.tinyModelDevice` / `PI_TINY_DEVICE` and `providers.tinyModelDtype` / `PI_TINY_DTYPE`; the default precision comes from each speech model's spec, not the text models' q4 default. Phonon runs on CPU through pi-natives and ignores these settings. MLX is a text-model backend, so selecting it leaves speech inference on CPU. Parakeet and Nemotron use their shipped sherpa-onnx int8 files on CPU. Keep `stt.language`, `stt.submitTrigger`, `tts.localVoice`, and the other speech/live settings for behavior; only model selection moved into roles.
+The transformers.js Whisper models read `providers.tinyModelDevice` / `PI_TINY_DEVICE` and `providers.tinyModelDtype` / `PI_TINY_DTYPE`; the default precision comes from each speech model's spec, not the text models' q4 default. Phonon runs on CPU through omp-natives and ignores these settings. MLX is a text-model backend, so selecting it leaves speech inference on CPU. Parakeet and Nemotron use their shipped sherpa-onnx int8 files on CPU. Keep `stt.language`, `stt.submitTrigger`, `tts.localVoice`, and the other speech/live settings for behavior; only model selection moved into roles.
 
 Choose Nemotron for live English dictation. It processes new audio in 160 ms chunks and updates the draft while recording, without repeatedly decoding the whole phrase. The chunk size is not a guarantee of word-display latency. The first recording waits for the recognizer to load; later recordings reuse it. Audio stays on your machine. The multilingual default remains Parakeet.
 
