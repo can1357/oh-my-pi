@@ -11205,12 +11205,13 @@
 			]
 		},
 		{
-			"source": "- The summary lists Selected (`✓` whole file, `◐` part of it), Review (`?`), other agents of the session left out, and Unrecorded (`·`): paths changed by other programs or by hand, the first few by name.",
+			"source": "- The summary lists Selected (`✓` whole file, `◐` part of it), Review (`?`), other agents of the session not in scope, Left out (`·`, deselected in-scope edits), and Unrecorded (`·`, paths changed by other programs or by hand).",
 			"origin": "tools/commit.md",
 			"variants": [
-				"- The summary shows Selected (`✓` whole file, `◐` part of it), Review (`?`), other agents of the session left out, and Unrecorded (`·`): paths changed by other programs or by hand, the first few by name.",
-				"- The summary lists Selected (`✓` whole file, `◐` part of it), Review (`?`), other agents of the session left out, and Unrecorded (`·`): paths changed by other programs or manually, the first few named.",
-				"- The summary enumerates Selected (`✓` whole file, `◐` part of it), Review (`?`), other agents of the session left out, and Unrecorded (`·`): paths changed by other programs or by hand, the first few by name."
+				"- The summary enumerates Selected (`✓` entire file, `◐` portion of it), Review (`?`), other agents of the session not in scope, Left out (`·`, deselected in-scope edits), and Unrecorded (`·`, paths changed by other programs or by hand).",
+				"- Listed in the summary are Selected (`✓` whole file, `◐` part of it), Review (`?`), other agents of the session not in scope, Left out (`·`, deselected in-scope edits), and Unrecorded (`·`, paths changed by other programs or by hand).",
+				"- The summary shows Selected (`✓` whole file, `◐` part of it), Review (`?`), other agents of the session not in scope, Left out (`·`, deselected in-scope edits), and Unrecorded (`·`, paths changed by other programs or by hand).",
+				"- Selected (`✓` whole file, `◐` part of it), Review (`?`), other agents of the session not in scope, Left out (`·`, deselected in-scope edits), and Unrecorded (`·`, paths changed by other programs or by hand) are all listed in the summary."
 			]
 		},
 		{
