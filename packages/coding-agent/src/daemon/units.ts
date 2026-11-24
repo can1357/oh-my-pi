@@ -586,14 +586,10 @@ export class UnitTable {
 		entry.lastUsed = Date.now();
 		let lease: string | undefined;
 		if (request.lease !== false) lease = this.#addLease(entry, connection);
-		// The connection closed while this open waited for the unit, and `disconnected` ran without this lease: drop it as `disconnected` would.
+		// The connection closed while this open waited for the unit, so `disconnected` already ran without this lease.
 		if (lease !== undefined && connection.closed) {
-			entry.idleNotBefore = Math.max(entry.idleNotBefore ?? 0, Date.now() + this.#leaseGraceMs);
-			this.#dropLease(lease);
+			this.#dropConnectionLeases(connection.client.connectionId);
 			lease = undefined;
-			// `#addLease` recreated the closed connection's lease set; `disconnected` will not run again to remove it.
-			const connectionId = connection.client.connectionId;
-			if (this.#connectionLeases.get(connectionId)?.size === 0) this.#connectionLeases.delete(connectionId);
 		}
 		if (request.awaitReady !== false) {
 			try {
@@ -961,14 +957,7 @@ export class UnitTable {
 	disconnected(connection: UnitConnection): void {
 		const connectionId = connection.client.connectionId;
 		this.#watchers.delete(connection);
-		// A dropped connection is not a release: give its client time to reconnect and retake the lease.
-		const graceUntil = Date.now() + this.#leaseGraceMs;
-		for (const leaseId of this.#connectionLeases.get(connectionId) ?? []) {
-			const entry = this.#leases.get(leaseId)?.entry;
-			if (entry) entry.idleNotBefore = Math.max(entry.idleNotBefore ?? 0, graceUntil);
-			this.#dropLease(leaseId);
-		}
-		this.#connectionLeases.delete(connectionId);
+		this.#dropConnectionLeases(connectionId);
 		for (const [owner, registration] of this.#ownerConnections) {
 			if (registration.connection.client.connectionId === connectionId) this.#ownerConnections.delete(owner);
 		}
@@ -1504,6 +1493,17 @@ export class UnitTable {
 		this.#evaluateIdle(entry);
 		this.#emit(entry);
 		return leaseId;
+	}
+
+	/** Drop a lost connection's leases. Not a release: each unit waits out the reconnect grace before idling. */
+	#dropConnectionLeases(connectionId: string): void {
+		const graceUntil = Date.now() + this.#leaseGraceMs;
+		for (const leaseId of this.#connectionLeases.get(connectionId) ?? []) {
+			const entry = this.#leases.get(leaseId)?.entry;
+			if (entry) entry.idleNotBefore = Math.max(entry.idleNotBefore ?? 0, graceUntil);
+			this.#dropLease(leaseId);
+		}
+		this.#connectionLeases.delete(connectionId);
 	}
 
 	#dropLease(leaseId: string): void {
