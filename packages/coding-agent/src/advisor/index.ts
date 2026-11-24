@@ -1,5 +1,5 @@
 export * from "./advise-tool";
-export type { AdvisorConfig, AdvisorConfigScope, WatchdogConfigDoc } from "@oh-my-pi/pi-tui/overlays/advisor-config";
+export type { AdvisorConfig, AdvisorConfigScope, WatchdogConfigDoc } from "./advisor-config-types";
 export * from "./config";
 export * from "./emission-guard";
 export * from "./loop-guard";

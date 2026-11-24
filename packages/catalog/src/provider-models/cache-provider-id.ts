@@ -11,6 +11,7 @@ import {
 	SINGULARITYAPI_TECH_API_BASE_URL,
 	normalizeSingularityApiBaseUrl,
 } from "../wire/singularityapi";
+import { OTARI_US_BASE_URL } from "../wire/otari";
 
 export interface ModelCacheProviderIdOptions extends AccountScope {
 	apiKey?: string;
@@ -90,7 +91,7 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 		case "modal":
 			return normalizeModalBaseUrl(Bun.env.MODAL_BASE_URL);
 		case "otari":
-			return Bun.env.OTARI_BASE_URL?.trim() || "https://api.otari.ai/api/v1";
+			return Bun.env.OTARI_BASE_URL?.trim() || OTARI_US_BASE_URL;
 		case "bifrost":
 			return Bun.env.BIFROST_BASE_URL?.trim() || "http://localhost:8080/v1";
 		case "opencode-go":

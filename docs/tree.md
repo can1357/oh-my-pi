@@ -17,7 +17,7 @@ Primary implementation:
 - `packages/coding-agent/src/slash-commands/builtin-session.ts` (`/tree`, `/branch` command routing)
 - `packages/coding-agent/src/modes/controllers/input-controller.ts` (keybinding wiring, double-escape behavior)
 - `packages/coding-agent/src/modes/controllers/selector-controller.ts` (tree UI launch + summary prompt flow)
-- `packages/tui/src/overlays/tree-selector.ts` (navigation, filters, search, labels, rendering)
+- `packages/coding-agent/src/ui/overlays/pickers/tree-selector.tsx` (navigation, filters, search, labels, rendering)
 - `packages/coding-agent/src/session/agent-session.ts` (`navigateTree` leaf switching + optional summary)
 - `packages/coding-agent/src/session/session-manager.ts` (`getTree`, `branch`, `branchWithSummary`, `resetLeaf`, label persistence)
 

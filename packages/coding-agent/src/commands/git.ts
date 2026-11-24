@@ -8,9 +8,9 @@ import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { gitHelp as commandHelp } from "../cli/command-help";
 import { runGitTui } from "../cli/git-tui";
 import { Settings, settings } from "../config/settings";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 import { cfgColorBlindMode, cfgSymbolPreset, cfgThemeDark, cfgThemeLight } from "../modes/settings";
+import { initTheme } from "../ui/theme/service";
 
 export default class Git extends Command {
 	static description = commandHelp.description;
@@ -37,13 +37,12 @@ export default class Git extends Command {
 		// Load settings first so the user's configured theme/symbol preset apply
 		// exactly like interactive mode (bare initTheme falls back to built-ins).
 		await Settings.init({ cwd: getProjectDir() });
-		await initTheme(
-			false,
-			cfgSymbolPreset.get(settings),
-			cfgColorBlindMode.get(settings),
-			cfgThemeDark.get(settings),
-			cfgThemeLight.get(settings),
-		);
+		initTheme({
+			symbolPreset: cfgSymbolPreset.get(settings),
+			colorBlindMode: cfgColorBlindMode.get(settings),
+			dark: cfgThemeDark.get(settings),
+			light: cfgThemeLight.get(settings),
+		});
 		await runGitTui({ cwd: flags.dir, revision: args.revision });
 	}
 }

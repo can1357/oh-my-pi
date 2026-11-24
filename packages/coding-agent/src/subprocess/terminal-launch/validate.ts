@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import type { TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import type { MultiplexerId } from "@oh-my-pi/pi-tui/driver/mux/detect";
 import { terminalLaunchCapabilities } from "./providers";
 import { launchError } from "./shared";
 import {
@@ -26,15 +26,15 @@ export function validateRequest(value: unknown): asserts value is TerminalLaunch
 		throw new TypeError("The requested terminal placement is not supported.");
 	}
 
-	const provider = terminalLaunchCapabilities[multiplexer as TerminalMultiplexer];
+	const provider = terminalLaunchCapabilities[multiplexer as MultiplexerId];
 	if (!provider.supported) {
-		throw new TerminalLaunchError(provider.reason, multiplexer as TerminalMultiplexer, placement, "capability");
+		throw new TerminalLaunchError(provider.reason, multiplexer as MultiplexerId, placement, "capability");
 	}
 	const capabilities = provider[placement] as PlacementCapabilities | undefined;
 	if (!capabilities) {
 		throw new TerminalLaunchError(
 			`${multiplexer} does not support ${placement} launches.`,
-			multiplexer as TerminalMultiplexer,
+			multiplexer as MultiplexerId,
 			placement,
 			"capability",
 		);

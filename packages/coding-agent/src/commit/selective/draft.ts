@@ -329,9 +329,8 @@ export async function createDraft(source: DraftSource): Promise<Draft> {
 			source.journal,
 			source.signal,
 		);
-	for (let start = 0; start < dirty.length; start += READ_CONCURRENCY) {
+	for (const chunk of await readChunks(root, dirty)) {
 		source.signal?.throwIfAborted();
-		const chunk = dirty.slice(start, start + READ_CONCURRENCY);
 		const results = await Promise.all(chunk.map(load));
 		// One conversion per chunk: each call loads the index and attributes afresh.
 		const pending = results.filter(
@@ -380,6 +379,37 @@ export async function createDraft(source: DraftSource): Promise<Draft> {
 		skipped,
 		journaled: source.journal !== null,
 	});
+}
+
+/**
+ * Splits `entries` into the chunks a draft reads and converts together: at most READ_CONCURRENCY files
+ * and at most MAX_TEXT_BYTES of content, so one conversion never holds several large files at once. A
+ * file larger than that is a chunk of its own. Sizes are lstat sizes, taken before any file is read.
+ */
+async function readChunks<T extends { path: string }>(root: string, entries: readonly T[]): Promise<T[][]> {
+	const sizes = await Promise.all(
+		entries.map(entry =>
+			fs.lstat(path.join(root, entry.path)).then(
+				stat => stat.size,
+				() => 0,
+			),
+		),
+	);
+	const chunks: T[][] = [];
+	let chunk: T[] = [];
+	let bytes = 0;
+	entries.forEach((entry, index) => {
+		const size = sizes[index];
+		if (chunk.length > 0 && (chunk.length === READ_CONCURRENCY || bytes + size > MAX_TEXT_BYTES)) {
+			chunks.push(chunk);
+			chunk = [];
+			bytes = 0;
+		}
+		chunk.push(entry);
+		bytes += size;
+	});
+	if (chunk.length > 0) chunks.push(chunk);
+	return chunks;
 }
 
 /** A first-parent commit on HEAD and its parent (`undefined` for a root commit). */
@@ -521,8 +551,9 @@ async function loadFile(
 				: (await repo.worktreeToGit([{ path: file, data: workBytes }], signal))[0];
 		return whole("symlink", stored);
 	}
+	// Capped: decodeText rejects anything longer than MAX_TEXT_BYTES, so a larger HEAD blob is never needed whole.
 	const headBytes =
-		head.sha && head.mode ? (await repo.showBlob(`${head.sha}:${file}`, undefined, signal)).data : null;
+		head.sha && head.mode ? (await repo.showBlob(`${head.sha}:${file}`, MAX_TEXT_BYTES + 1, signal)).data : null;
 	const [snapshots, headMoved] = await Promise.all([
 		journal && records.length > 0 ? journal.snapshots(records) : undefined,
 		head.sha && head.mode && records.length > 0

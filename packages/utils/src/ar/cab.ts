@@ -1,4 +1,10 @@
-import * as zlib from "node:zlib";
+import type * as Zlib from "node:zlib";
+
+let zlibCache: typeof Zlib | undefined;
+function getZlib(): typeof Zlib {
+	if (!zlibCache) zlibCache = require("node:zlib") as typeof Zlib;
+	return zlibCache;
+}
 import { readUInt16LE, readUInt32LE } from "./bytes";
 import { LzxDecoder } from "./codecs/lzx";
 import { ArchiveError } from "./error";
@@ -193,7 +199,7 @@ class CabFolder {
 				try {
 					const dictionary = output.subarray(Math.max(0, outputPosition - MAX_DATA_OUTPUT), outputPosition);
 					decoded = new Uint8Array(
-						zlib.inflateRawSync(payload.subarray(2), { dictionary, maxOutputLength: uncompressed }),
+						getZlib().inflateRawSync(payload.subarray(2), { dictionary, maxOutputLength: uncompressed }),
 					);
 				} catch (error) {
 					throw new ArchiveError(
