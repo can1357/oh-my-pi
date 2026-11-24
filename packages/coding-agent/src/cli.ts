@@ -532,14 +532,21 @@ export async function runCli(argv: string[]): Promise<void> {
 	// Declare this module as the worker-host entry now that the active profile
 	// is resolved. The worker-host module is side-effect-free; importing
 	// `@oh-my-pi/pi-utils/env` here would snapshot the wrong agent `.env`.
-	// Gated on `isProcessEntry`: only the real CLI process entry is a valid
-	// worker host. Worker-thread re-entry has `!Bun.isMainThread` (isProcessEntry === false),
-	// and importers (`runCli` in profile-CLI tests, SDK embedding) have `import.meta.main === false`
-	// — declaring there would poison `workerHostEntry()` for the whole test process, forcing eval/stats/
-	// browser workers onto the same-realm inline fallback.
+	// Gated on `isProcessEntry` plus worker-thread host re-entry: the real CLI
+	// process entry is a valid worker host, and so is a worker thread re-entered
+	// through a `__omp_*` host selector (e.g. the stats activity worker, which
+	// must itself be able to spawn stats sync workers). In a worker thread
+	// `import.meta.main` is false and `PI_COMPILED` is unset in the npm bundle,
+	// so without the selector check `workerHostEntry()` returns null there and
+	// nested worker spawns fall back to a source path that does not exist in
+	// the bundle (`dist/sync-worker.ts`).
+	// Importers (`runCli` in profile-CLI tests, SDK embedding) have
+	// `import.meta.main === false` and run on the main thread with a normal
+	// argv — neither matches, so `workerHostEntry()` is not poisoned there and
+	// eval/stats/browser workers keep the same-realm inline fallback.
 	// This must run before worker selector dispatch so that worker subprocesses
 	// (e.g. stats activity) are registered as hosts and can themselves spawn worker threads.
-	if (isProcessEntry) declareWorkerHostEntry();
+	if (isProcessEntry || (!Bun.isMainThread && isWorkerHostSelector(resolvedArgv[0]))) declareWorkerHostEntry();
 
 	// Worker-thread entry dispatch must run before the first `await`: the
 	// stats sync worker's buffering onmessage handler is installed in the
