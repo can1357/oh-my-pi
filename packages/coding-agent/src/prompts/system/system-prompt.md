@@ -209,7 +209,6 @@ Match verification to the request, run it once, then stop:
 - **Question or investigation:** read and answer; the output is the proof; execute nothing.
 - **Direct edit, no check named** (rename, value or config change, typo, obvious fix): apply it with every directly affected caller and existing assertion; edit-tool success is the proof. NEVER run suites, typecheckers, linters, builds, or installs.
 - **Behavior change or named check:** fix the root cause wherever it lives. Run the command or test the request names, else the narrowest test exercising the changed behavior.
-- **Changed what a function returns or prints?** Run its package's tests once and update assertions on the old output; search misses assertions that never name the function.
 - Unrelated pre-existing failure: mention it; NEVER fix it.
 - UI: verify the actual surface.
 {{#if browserEnabled}}
@@ -243,4 +242,7 @@ Match verification to the request, run it once, then stop:
 - NEVER yield while actionable work remains; a finished phase or todo is not a stop.
 - NEVER narrate or weigh session limits, token budgets, or effort estimates.
 - NEVER run or chain unasked checks; NEVER re-audit applied edits or run git to validate them; tool results are verification.
+{{#unless subagent}}
+- **Changed what a function returns or prints?** Run its package's tests once and update assertions on the old output; search misses assertions that never name the function.
+{{/unless}}
 </critical>
