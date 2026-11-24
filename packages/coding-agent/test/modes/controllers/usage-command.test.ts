@@ -4,16 +4,28 @@ import { AuthStorage, type UsageReport } from "@oh-my-pi/pi-ai";
 import { CommandController, renderUsageReports } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import * as activityClient from "@oh-my-pi/pi-coding-agent/stats/activity-client";
-import { Container, visibleWidth } from "@oh-my-pi/pi-tui";
-import { UsageDashboardComponent } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
-import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-tui/theme";
-import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { type JSXNode, type KeyEvent, signal, type UiNode } from "@oh-my-pi/pi-tui";
+import { renderBlock } from "@oh-my-pi/pi-tui/term/render";
+import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
+import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { printRows } from "../../../src/ui/print-rows";
+import { Overlays } from "../../../src/ui/shell/overlays";
+import { initTheme } from "../../../src/ui/theme/service";
+import { nativeShell } from "../../helpers/native-shell";
+
+let theme: Theme;
+
+/** A key as the driver reports it. */
+function key(id: string, raw: string): KeyEvent {
+	return { id, kind: "press", raw };
+}
 
 describe("renderUsageReports content", () => {
-	beforeAll(async () => {
-		const darkTheme = await getThemeByName("dark");
-		if (!darkTheme) throw new Error("Expected dark theme");
-		setThemeInstance(darkTheme);
+	beforeAll(() => {
+		initTheme();
+		theme = currentTheme();
 	});
 
 	it("renders bars and free percentage for limits that only report remainingFraction", () => {
@@ -313,13 +325,11 @@ describe("interactive /usage account visibility", () => {
 	const email = "shared@example.test";
 	const sessionId = "usage-visibility-test";
 	let authStorage: AuthStorage;
-	let mounted: UsageDashboardComponent | undefined;
+	let overlays: Overlays;
 	let terminalRows: PropertyDescriptor | undefined;
 
-	beforeAll(async () => {
-		const darkTheme = await getThemeByName("dark");
-		if (!darkTheme) throw new Error("Expected dark theme");
-		setThemeInstance(darkTheme);
+	beforeAll(() => {
+		initTheme();
 	});
 
 	beforeEach(async () => {
@@ -350,19 +360,30 @@ describe("interactive /usage account visibility", () => {
 	});
 
 	afterEach(() => {
-		mounted?.dispose();
-		mounted = undefined;
+		overlays?.closeAll();
 		authStorage?.close();
 		if (terminalRows) Object.defineProperty(process.stdout, "rows", terminalRows);
 		else Reflect.deleteProperty(process.stdout, "rows");
 		vi.restoreAllMocks();
 	});
 
+	function rowsShell() {
+		const focused = signal<UiNode | null>(null);
+		return {
+			overlays: new Overlays({ focused, focus: node => focused.set(node), fallback: () => null }),
+			focus: (node: UiNode | null) => focused.set(node),
+			size: () => ({ columns: 120, rows: 40 }),
+			native: () => false,
+		};
+	}
+
 	function command(
 		fetchUsageReports?: () => Promise<UsageReport[] | null>,
 		warnings: string[] = [],
+		shell: Pick<InteractiveModeContext["shell"], "overlays" | "focus" | "size" | "native"> = rowsShell(),
 	): CommandController {
-		const ctx = createInteractiveModeContext({
+		overlays = shell.overlays;
+		const ctx = {
 			session: {
 				sessionId,
 				model: { provider: "anthropic" },
@@ -370,39 +391,44 @@ describe("interactive /usage account visibility", () => {
 				fetchUsageReports,
 				getUsageReportingModelSelectors: () => [],
 			},
-			ui: {
-				showOverlay: component => {
-					if (!(component instanceof UsageDashboardComponent)) throw new Error("Expected usage dashboard");
-					mounted = component;
-					return {
-						hide: () => {
-							mounted = undefined;
-						},
-						setHidden: () => {},
-						isHidden: () => false,
-						isFocused: () => false,
-					};
-				},
-			},
-			showWarning: message => {
+			shell,
+			showWarning: (message: string) => {
 				warnings.push(message);
 			},
-		});
+			showError: () => {},
+		} as unknown as InteractiveModeContext;
 		const selector = new SelectorController(ctx);
 		ctx.showUsageDashboard = reports => selector.showUsageDashboard(reports);
 		return new CommandController(ctx);
 	}
 
+	/** The open dashboard's layer (its keys are taken there), if any. */
+	function mounted(): UiNode | undefined {
+		return overlays.top()?.node;
+	}
+
 	function display(): string {
-		return stripVTControlCharacters(mounted?.render(120).join("\n") ?? "");
+		const layer = mounted();
+		return layer
+			? stripVTControlCharacters(renderBlock(layer, 120, { theme: currentTheme(), height: 40 }).rows.join("\n"))
+			: "";
+	}
+
+	function press(id: string, raw: string): void {
+		mounted()?.handlers.onKey?.(key(id, raw));
 	}
 
 	it("renders advisor status before usage refresh returns", async () => {
 		const refresh = Promise.withResolvers<UsageReport[] | null>();
-		const ctx = createInteractiveModeContext({
-			reportContainer: new Container(),
+		let report: (() => JSXNode) | undefined;
+		const ctx = {
 			commandReportRows: () => 20,
-			ui: { terminal: { columns: 120, rows: 30 } },
+			keybindings: { keysFor: () => ["escape"] },
+			shell: {
+				native: () => false,
+				size: () => ({ columns: 120, rows: 30 }),
+				dock: { slot: () => ({ set: (factory: () => JSXNode) => (report = factory), clear: () => {} }) },
+			},
 			session: {
 				getAdvisorStats: () => ({
 					configured: true,
@@ -417,9 +443,10 @@ describe("interactive /usage account visibility", () => {
 				fetchUsageReports: () => refresh.promise,
 				modelRegistry: { authStorage },
 			},
-		});
+		} as unknown as InteractiveModeContext;
 		const result = new CommandController(ctx).handleAdvisorStatusCommand();
-		expect(stripVTControlCharacters(ctx.reportContainer.render(120).join("\n"))).toContain("Advisor Status");
+		if (!report) throw new Error("Expected the advisor report above the editor");
+		expect(stripVTControlCharacters(printRows(report, 120).join("\n"))).toContain("Advisor Status");
 		refresh.resolve([]);
 		await result;
 	});
@@ -429,7 +456,37 @@ describe("interactive /usage account visibility", () => {
 		await command(undefined, warnings).handleUsageCommand();
 
 		expect(warnings).toEqual([expect.stringContaining("not configured")]);
-		expect(mounted).toBeUndefined();
+		expect(mounted()).toBeUndefined();
+	});
+
+	it("mounts /usage as a centered native sheet with a scrolling report and a Close footer", async () => {
+		await using ui = await nativeShell();
+		await command(async () => [], [], ui.shell).handleUsageCommand();
+
+		const sheet = ui.node("overlay");
+		expect(sheet.parent).toBe("layer");
+		expect(sheet.p).toMatchObject({
+			role: "omp.overlay.usage",
+			head: "Usage",
+			anchor: "center",
+			size: "lg",
+			modal: true,
+		});
+		const body = ui.node("col", "overview");
+		const footer = ui.node("row", "actions");
+		// The renderer pads the direct content column and pins its last action row.
+		expect(sheet.c).toHaveLength(1);
+		expect(body.parent).toBe(sheet.c[0] ?? null);
+		expect(body.p.role).toBe("omp.usage.body");
+		expect(footer.parent).toBe(body.parent);
+		expect(footer.p.role).toBe("omp.actions");
+		expect(mounted()?.children()[0]?.children().at(-1)?.key()).toBe("actions");
+		expect(ui.node("button", "close").parent).toBe(footer.id);
+
+		ui.send({ ev: "select", sf: ui.sf, id: ui.node("tabs", "tabs").id, item: "detail" });
+		expect(ui.node("tabs", "tabs").p.active).toBe("detail");
+		ui.click("button", "close");
+		expect(mounted()).toBeUndefined();
 	});
 
 	it("keeps a missing Claude subscription visible beside its same-email sibling's real usage", async () => {
@@ -451,6 +508,7 @@ describe("interactive /usage account visibility", () => {
 		};
 		await command(async () => [report]).handleUsageCommand();
 
+		expect(mounted()?.props()).toMatchObject({ size: "full", role: "omp.app.screen" });
 		const overview = display();
 		expect(overview).toContain("2 accts");
 		expect(overview).toContain(email);
@@ -459,7 +517,7 @@ describe("interactive /usage account visibility", () => {
 		expect(overview).toContain("75%");
 		expect(overview).not.toContain("Tavily");
 
-		mounted?.handleInput("\r");
+		press("enter", "\r");
 		const details = display();
 		expect(details).toMatch(/shared@example\.test.*org-personal.*usage unavailable/);
 		expect(details).toContain("shared@example.test (org-team)");
@@ -489,7 +547,7 @@ describe("interactive /usage account visibility", () => {
 			expect(overview).not.toContain("no limits");
 			expect(overview).not.toContain("Tavily");
 
-			mounted?.handleInput("\r");
+			press("enter", "\r");
 			const details = display();
 			expect(details).toMatch(/shared@example\.test.*org-team.*usage unavailable/);
 			expect(details).toMatch(/shared@example\.test.*org-personal.*usage unavailable/);
@@ -497,10 +555,10 @@ describe("interactive /usage account visibility", () => {
 			expect(details).not.toContain("%");
 			expect(details).not.toContain("Infinity");
 
-			mounted?.handleInput("\x1b");
+			press("escape", "\x1b");
 			expect(display()).toContain("2 accts");
-			mounted?.handleInput("\x1b");
-			expect(mounted).toBeUndefined();
+			press("escape", "\x1b");
+			expect(mounted()).toBeUndefined();
 		},
 	);
 });

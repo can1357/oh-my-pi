@@ -12,7 +12,7 @@
 import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import type { IrcMessage } from "../irc/irc-types";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type {
 	AgentSessionAdvisorOverview,

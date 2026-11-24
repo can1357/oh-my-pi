@@ -7,7 +7,7 @@
  * a registered internal URL (`help://`, `local://`, …) kept in its normalized
  * form, or a readable web URL kept as written.
  */
-import { isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";
+import { isReadableUrlPath } from "./details/read";
 import * as fs from "node:fs";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { approvalCacheKeyForPath } from "./approval-cache";

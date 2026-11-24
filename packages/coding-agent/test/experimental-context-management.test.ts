@@ -20,7 +20,7 @@ import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensi
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { computeNonMessageTokens } from "@oh-my-pi/pi-coding-agent/session/context-usage";
 import { mnemopiBackend } from "@oh-my-pi/pi-coding-agent/mnemopi/backend";
 import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ContextNotesTool, NewContextTool } from "@oh-my-pi/pi-coding-agent/tools/context-notes";

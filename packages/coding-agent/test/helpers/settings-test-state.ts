@@ -1,13 +1,11 @@
 import { vi } from "bun:test";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { isTuiTight, setTuiTight } from "@oh-my-pi/pi-tui";
 import { getAgentDir, getProjectDir, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
 
 export interface SettingsTestState {
 	agentDir: string;
 	env: Record<string, string | undefined>;
 	projectDir: string;
-	tuiTight: boolean;
 }
 
 export function beginSettingsTest(): SettingsTestState {
@@ -22,7 +20,6 @@ export function beginSettingsTest(): SettingsTestState {
 		agentDir: getAgentDir(),
 		env,
 		projectDir: getProjectDir(),
-		tuiTight: isTuiTight(),
 	};
 	resetSettingsForTest();
 	return state;
@@ -36,7 +33,6 @@ export function restoreSettingsTestState(state: SettingsTestState | undefined): 
 	restoreEnv(state.env);
 	setProjectDir(state.projectDir);
 	setAgentDir(state.agentDir);
-	setTuiTight(state.tuiTight);
 	restoreEnvValue("PI_CODING_AGENT_DIR", state.env.PI_CODING_AGENT_DIR);
 }
 

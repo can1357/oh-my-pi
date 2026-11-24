@@ -9,7 +9,7 @@
  * a run that advanced before adoption is not rendered as pending.
  */
 import type { AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
+import type { TaskToolDetails } from "./task-details";
 import { TextTap } from "../job-widgets/text-tap";
 import { TOOLS_SOURCE_ID } from "../job-widgets/types";
 import { TOOLS_SOURCE_LABEL } from "./widget-inputs";

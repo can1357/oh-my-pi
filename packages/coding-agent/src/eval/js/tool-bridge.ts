@@ -9,9 +9,9 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
 import { committedTodoPhases } from "../../tools/todo";
-import { isReplyWrite, toolResultReplies } from "@oh-my-pi/pi-tui/chat/reply-write";
-import { parseMCPProgress } from "@oh-my-pi/pi-tui/tools/mcp-progress";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { isReplyWrite, toolResultReplies } from "../../session/transcript/reply-write";
+import { parseMCPProgress } from "../../tools/mcp-progress";
+import { ToolError } from "../../tools/tool-errors";
 import { schemaDeclaresIntentField } from "../../utils/tool-schema";
 import { findEnabledEvalPrelude, invokeEvalPrelude } from "../preludes";
 import { EVAL_AGENT_BRIDGE_NAME, type EvalAgentHandleResult, runEvalAgent } from "../agent-bridge";
@@ -27,9 +27,9 @@ import { EVAL_JUDGMENT_BRIDGE_NAME, type EvalJudgmentResult, runEvalJudgment } f
 import { EVAL_SHELL_BRIDGE_NAME, type EvalShellResult, runEvalShell } from "../shell-bridge";
 import {
 	EVAL_CANCEL_BRIDGE_NAME,
-	type EvalHandleSnapshot,
 	EVAL_STATUS_BRIDGE_NAME,
 	EVAL_WAIT_BRIDGE_NAME,
+	type EvalHandleSnapshot,
 	runEvalCancel,
 	runEvalStatus,
 	runEvalWait,

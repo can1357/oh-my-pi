@@ -28,7 +28,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 function createAssistantMessage(content: AssistantMessage["content"], stopReason: StopReason): AssistantMessage {
