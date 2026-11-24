@@ -6,13 +6,17 @@ import type { StructuredSubagentOutput } from "../task/task-details";
 import type { OutputMeta } from "../tools/output-meta-format";
 import type { ShellTrace } from "@oh-my-pi/pi-wire";
 import { IrcBus } from "../irc/bus";
+import { yieldQueueStaleMessage } from "../session/yield-queue";
 import type { JobWidgetInputs, JobWidgetRegistry } from "../job-widgets/types";
 
 const DELIVERY_RETRY_BASE_MS = 500;
 const DELIVERY_RETRY_MAX_MS = 30_000;
 const DELIVERY_RETRY_JITTER_MS = 200;
-/** How the session's async-result sink rejects a queued push that went stale because this manager suppressed its delivery. */
-const STALE_ASYNC_RESULT_ERROR = "Yield queue entry became stale: async-result";
+/**
+ * How the session's async-result sink rejects a queued push that went stale because this manager
+ * suppressed its delivery. Matched by message: the sink may sit behind the thread RPC boundary.
+ */
+const STALE_ASYNC_RESULT_ERROR = yieldQueueStaleMessage("async-result");
 const DEFAULT_RETENTION_MS = 5 * 60 * 1000;
 
 /** Maximum characters kept in a command-derived async job label. */

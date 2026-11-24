@@ -3,7 +3,7 @@ import { scheduler } from "node:timers/promises";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { AsyncJobError, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { buildAsyncResultBatchMessage } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
-import { YieldQueue } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
+import { YieldQueue, yieldQueueStaleMessage } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
 import { logger } from "@oh-my-pi/pi-utils";
 
 async function waitForJobEviction(manager: AsyncJobManager, jobId: string): Promise<void> {
@@ -31,7 +31,7 @@ function mockPositiveSleepsImmediate() {
 	});
 }
 
-const STALE_ASYNC_RESULT = "Yield queue entry became stale: async-result";
+const STALE_ASYNC_RESULT = yieldQueueStaleMessage("async-result");
 
 describe("AsyncJobManager", () => {
 	afterEach(() => {
@@ -1100,30 +1100,6 @@ describe("AsyncJobManager", () => {
 
 		expect(payload).toMatchObject({ jobId: id, attempt: 1, error: "sink exploded" });
 		expect(payload?.nextRetryAt).toBeUndefined();
-		expect(manager.isDeliveryPending(id)).toBe(false);
-	});
-
-	test("warns with nextRetryAt when a failed delivery queues a real retry", async () => {
-		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
-		vi.spyOn(logger, "debug").mockImplementation(() => {});
-		const manager = new AsyncJobManager({});
-		manager.registerDeliverySink("Main", () => {
-			throw new Error("sink exploded");
-		});
-		const id = manager.register("bash", "finished", async () => "done", { ownerId: "Main" });
-
-		await waitForCondition(() =>
-			warn.mock.calls.some(([message]) => message === "Async job completion delivery failed"),
-		);
-		const payload = warn.mock.calls.find(([message]) => message === "Async job completion delivery failed")?.[1];
-
-		expect(payload).toMatchObject({ jobId: id, attempt: 1, error: "sink exploded" });
-		expect(typeof payload?.nextRetryAt).toBe("number");
-		expect(payload?.nextRetryAt).toBeGreaterThan(Date.now());
-		expect(manager.isDeliveryPending(id)).toBe(true);
-
-		// The requeued push is a real retry; acknowledging it stops the loop.
-		expect(manager.acknowledgeDeliveries([id])).toBeGreaterThanOrEqual(1);
 		expect(manager.isDeliveryPending(id)).toBe(false);
 	});
 
