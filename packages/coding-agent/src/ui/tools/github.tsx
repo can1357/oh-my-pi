@@ -141,6 +141,10 @@ export type GithubTerm = {
 	/** Failed jobs' log tails, in a `failed logs` section under the runs. */
 	readonly failedLogs?: readonly GithubTermFailedLog[];
 	readonly error?: string;
+	/** Optional symbol key override (defaults to `tool.gh`). */
+	readonly icon?: string;
+	/** Optional watch placeholder text (defaults to `waiting for workflow data...`). */
+	readonly waitText?: string;
 };
 
 /** Body rows shown while collapsed. */
