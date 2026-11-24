@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `AssistantMessage.errorFromAgentLoop`, set when the agent loop rather than the provider ended the turn with the error
+- Added `AssistantMessage.errorFromAgentLoop`, set when the agent loop rather than the provider ended the turn with the error ([#20336](https://github.com/can1357/oh-my-pi/pull/20336) by [@baekjosh](https://github.com/baekjosh))
 
 ### Fixed
 

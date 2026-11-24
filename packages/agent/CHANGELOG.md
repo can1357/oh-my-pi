@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `AgentLoopError`, thrown when the loop ends a turn itself (a soft tool requirement the model never met); `Agent` marks that turn's error message `errorFromAgentLoop` so hosts can tell it from a failed request
+- Added `AgentLoopError`, thrown when the loop ends a turn itself (a soft tool requirement the model never met); `Agent` marks that turn's error message `errorFromAgentLoop` so hosts can tell it from a failed request ([#20336](https://github.com/can1357/oh-my-pi/pull/20336) by [@baekjosh](https://github.com/baekjosh))
 
 ### Fixed
 
