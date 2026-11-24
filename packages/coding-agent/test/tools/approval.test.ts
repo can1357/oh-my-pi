@@ -513,6 +513,8 @@ describe("tool-owned dynamic approval declarations", () => {
 
 	it("does not flatten the arguments of an unrelated command into an rm line", () => {
 		expect(bashApproval("rg 'rm -rf' /tmp/docs")).toBe("exec");
+		expect(bashApproval("tar --exclude='*.rm' -cf /tmp/out.tar .")).toBe("exec");
+		expect(bashApproval("find src -name '*.rm' -newer /ref -print")).toBe("exec");
 		expect(bashApproval("rg 'rm -rf /' docs")).toEqual({
 			tier: "exec",
 			override: true,
@@ -549,6 +551,10 @@ describe("tool-owned dynamic approval declarations", () => {
 		"git commit --trailer 'k=r''m -rf /' -m m",
 		"$'rm' -rf /",
 		"rm -rf -- x /",
+		"eval 'rm -rf' /",
+		"ssh host 'rm -rf' /",
+		'eval "echo; rm" -rf /',
+		'eval "echo; sudo" rm x',
 	])("keeps refusing a real delete: %s", command => {
 		expect(bashApproval(command)).toEqual({
 			tier: "exec",
