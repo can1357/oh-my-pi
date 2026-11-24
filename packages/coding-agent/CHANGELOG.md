@@ -4,6 +4,7 @@
 
 ### Added
 
+- Fast mode, advisor, and auto-compaction now appear as boolean switches in ACP editor clients (Zed 1.14.2+), alongside the existing mode/model/thinking selectors ([#9080](https://github.com/can1357/oh-my-pi/pull/9080) by [@joseotaviorf](https://github.com/joseotaviorf))
 - The bash tool now runs `cmd <<'EOF' && \` as meant: the stray `\` that pushed the heredoc body below the next line (running that line as a command) is dropped, with a notice, when the result parses
 - Tray cards now mark subagents that are only waiting on their own agents or jobs (`wait`, `vibe_wait`), so Tern shows them apart from subagents doing work
 - The shell's `tail -r` builtin now takes `-c`, `-b`, and `+N` counts like BSD `tail`, and `tail -b N` selects 512-byte blocks; `-r` with `-f` is BSD's usage error instead of a "pipe through tac" refusal

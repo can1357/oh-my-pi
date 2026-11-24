@@ -131,6 +131,7 @@ describe("/fast targets the current model's service-tier family", () => {
 				maxTokens: 64_000,
 			}),
 		);
+		expect(session.supportsFastMode()).toBe(false);
 		expect(session.setFastMode(true)).toBe(false);
 		expect(session.serviceTierByFamily).toEqual({});
 		expect(session.isFastModeEnabled()).toBe(false);
@@ -175,15 +176,27 @@ describe("/fast targets the current model's service-tier family", () => {
 		expect(session.isUltrafastModeEnabled()).toBe(false);
 	});
 
-	it("refuses /fast on a Codex model whose discovered tiers omit priority", async () => {
+	it("refuses /fast on a Codex model whose discovered tiers omit priority, but exposes it to clear an active fast tier", async () => {
 		const session = await createSessionForModel(codexModel(["ultrafast"]));
+		expect(session.supportsFastMode()).toBe(false);
 		expect(session.setFastMode(true)).toBe(false);
 		expect(session.serviceTierByFamily).toEqual({});
 		expect(session.isFastModeActive()).toBe(false);
+
+		// Once ultrafast is active, `supportsFastMode()` exposes the toggle so
+		// ACP clients can still turn it off; clearing hides it again.
+		expect(session.setUltrafastMode(true)).toBe(true);
+		expect(session.supportsFastMode()).toBe(true);
+		expect(session.setFastMode(true)).toBe(false);
+		expect(session.serviceTierByFamily).toEqual({ openai: "ultrafast" });
+		expect(session.setFastMode(false)).toBe(true);
+		expect(session.serviceTierByFamily).toEqual({});
+		expect(session.supportsFastMode()).toBe(false);
 	});
 
 	it("keeps /fast on a Codex model whose discovered tier list is empty", async () => {
 		const session = await createSessionForModel(codexModel([]));
+		expect(session.supportsFastMode()).toBe(true);
 		expect(session.setFastMode(true)).toBe(true);
 		expect(session.serviceTierByFamily).toEqual({ openai: "priority" });
 		expect(session.isFastModeActive()).toBe(true);
@@ -200,5 +213,50 @@ describe("/fast targets the current model's service-tier family", () => {
 		session.setFastMode(false);
 		expect(session.serviceTierByFamily).toEqual({});
 		expect(session.isFastModeActive()).toBe(false);
+	});
+
+	it("emits service_tier_changed when switching to a session with a different saved tier on the same model", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const sessionDir = path.join(tempDir.path(), "switch-tier-sessions");
+		const targetFile = path.join(sessionDir, "target-tier.jsonl");
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			targetFile,
+			`${[
+				{ type: "session", version: 3, id: "target-tier", timestamp, cwd: tempDir.path() },
+				{ type: "model_change", id: "m1", parentId: null, timestamp, model: `${model.provider}/${model.id}` },
+				{
+					type: "service_tier_change",
+					id: "t1",
+					parentId: "m1",
+					timestamp,
+					serviceTier: { anthropic: "priority" },
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+
+		const agent = new Agent({
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		authStorage.keys.setRuntime(model.provider, "token");
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.create(tempDir.path(), sessionDir),
+			settings: Settings.isolated(),
+			modelRegistry,
+		});
+		expect(session.isFastModeEnabled()).toBe(false);
+
+		const events: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "service_tier_changed" || event.type === "model_changed") events.push(event.type);
+		});
+
+		const switched = await session.switchSession(targetFile);
+		expect(switched).toBe(true);
+		expect(session.isFastModeEnabled()).toBe(true);
+		expect(events).toEqual(["service_tier_changed"]);
 	});
 });

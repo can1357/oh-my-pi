@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ClientCapabilities.session.configOptions.boolean` in the ACP protocol types so clients can advertise support for boolean session config options ([#9080](https://github.com/can1357/oh-my-pi/pull/9080) by [@joseotaviorf](https://github.com/joseotaviorf))
 ### Fixed
 
 - `ptree` child processes spawned without an explicit `env` now inherit `Bun.env`, including values loaded from `.env` files after startup, on every platform rather than only under the Linux subreaper.

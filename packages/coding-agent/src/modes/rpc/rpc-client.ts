@@ -179,6 +179,7 @@ const sessionEventTypes: Record<WireSessionEvent["type"], true> = {
 	retry_fallback_applied: true,
 	retry_fallback_succeeded: true,
 	model_changed: true,
+	service_tier_changed: true,
 	config_warnings_changed: true,
 	advisor_cost_changed: true,
 	advisor_yielded: true,

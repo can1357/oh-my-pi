@@ -4399,6 +4399,17 @@
 				"type"
 			]
 		},
+		"ServiceTierChangedEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "service_tier_changed"
+				}
+			},
+			"required": [
+				"type"
+			]
+		},
 		"ConfigWarningsChangedEvent": {
 			"type": "object",
 			"properties": {
@@ -4674,6 +4685,9 @@
 				},
 				{
 					"$ref": "#/$defs/ModelChangedEvent"
+				},
+				{
+					"$ref": "#/$defs/ServiceTierChangedEvent"
 				},
 				{
 					"$ref": "#/$defs/ConfigWarningsChangedEvent"

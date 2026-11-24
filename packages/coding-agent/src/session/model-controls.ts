@@ -281,7 +281,15 @@ export class ModelControls {
 
 	/** Restores service tiers without persisting a duplicate transcript entry. */
 	restoreServiceTiers(tiers: ServiceTierByFamily): void {
+		const previous = this.#serviceTierByFamily;
 		this.#serviceTierByFamily = tiers;
+		if (
+			previous.openai !== tiers.openai ||
+			previous.anthropic !== tiers.anthropic ||
+			previous.google !== tiers.google
+		) {
+			this.#host.emit({ type: "service_tier_changed" });
+		}
 	}
 	resolveRoleModel(role: string): Model | undefined {
 		return resolveRoleModelFull(this.#host.settings, role, this.#host.modelRegistry.getAvailable(), this.#model)
@@ -776,6 +784,23 @@ export class ModelControls {
 	}
 
 	/**
+	 * Whether the active model exposes a `/fast` toggle: requires a service-tier
+	 * family, and on the OpenAI family either an existing fast tier to clear or a
+	 * model that accepts the `priority` tier (e.g. false for Fireworks, which has
+	 * its own Providers › Fireworks Tier toggle, and for Codex models whose
+	 * discovered `serviceTiers` omit `priority` when no fast tier is active).
+	 *
+	 * Callers that surface a fast-mode control use this to hide it rather than
+	 * offering a switch whose writes {@link setFastMode} would discard.
+	 */
+	supportsFastMode(): boolean {
+		const model = this.#model;
+		const family = model ? serviceTierFamily(model) : undefined;
+		if (!model || !family) return false;
+		return this.isFastModeEnabled() || family !== "openai" || shouldSendServiceTier("priority", model);
+	}
+
+	/**
 	 * True when the currently selected model's family is set to a fast tier —
 	 * `priority`, or `ultrafast` on the OpenAI family — the `/fast` on/off state
 	 * for the active model. Returns false when no model is selected or the
@@ -870,6 +895,7 @@ export class ModelControls {
 		}
 		this.#serviceTierByFamily = next;
 		this.#host.sessionManager.appendServiceTierChange(this.serviceTierEntry());
+		this.#host.emit({ type: "service_tier_changed" });
 	}
 
 	/**
