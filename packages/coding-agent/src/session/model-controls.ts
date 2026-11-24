@@ -708,8 +708,11 @@ export class ModelControls {
 			}
 		}
 
-		// Drop the result if the turn was aborted/superseded while classifying.
-		if (this.#host.promptGeneration() !== generation || !this.#autoThinking) return;
+		// Drop the result if the turn was aborted/superseded while classifying, or if another model was
+		// selected meanwhile: the classifier chose from this model's levels.
+		if (this.#host.promptGeneration() !== generation || !this.#autoThinking || !modelsAreEqual(this.#model, model)) {
+			return;
+		}
 
 		const effort = clampThinkingLevelToCeiling(
 			model,
