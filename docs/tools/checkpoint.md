@@ -83,7 +83,7 @@ You are in an active checkpoint. You MUST call rewind with your investigation fi
 
 ## Notes
 
-- Despite the summary string `Create a git-based checkpoint to save and restore session state`, the implementation does not call git and does not snapshot filesystem state.
+- The implementation does not call git and does not snapshot filesystem state.
 - Captured state is conversation/session metadata only:
    - in-memory message count
    - persisted checkpoint tool-result entry ID in the session tree

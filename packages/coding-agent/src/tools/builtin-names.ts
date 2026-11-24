@@ -69,7 +69,7 @@ export const BUILTIN_TOOL_HELP: Record<BuiltinToolName, BuiltinToolHelp> = {
 	debug: { summary: "Debug a running process over DAP", defaultState: "on" },
 	ast_grep: { summary: "Search code with AST patterns", defaultState: "off" },
 	github: { summary: "Query and act on GitHub repositories, issues, and PRs", defaultState: "off" },
-	checkpoint: { summary: "Save a git-based checkpoint of session state", defaultState: "off" },
+	checkpoint: { summary: "Mark a conversation checkpoint before exploratory work", defaultState: "off" },
 	rewind: { summary: "Rewind to a saved checkpoint", defaultState: "off" },
 	context_notes: { summary: "Read or replace the session's persistent context notes", defaultState: "off" },
 	new_context: { summary: "Request a fresh context window after the current turn", defaultState: "off" },
