@@ -3,12 +3,16 @@
  *
  * Splits each shell command (bash `command`, or string literals inside an `eval` cell) into
  * segments, classifies each segment by its leading program, and charges segments that run
- * tests, typecheckers, linters, builds, installs, or programs the task did not ask for. Also
- * counts reads of files the agent had already edited ({@link CallAnalysis.postEditReads}).
+ * tests, typecheckers, linters, builds, installs, programs, or filesystem-wide searches the
+ * task did not ask for. Also counts reads of files the agent had already edited
+ * ({@link CallAnalysis.postEditReads}).
  */
 
-/** Verification a command segment performs. `vcs` (status/diff/log/show) is inspection and never charged. */
-export type CheckKind = "test" | "typecheck" | "lint" | "build" | "install" | "run" | "vcs";
+/**
+ * Work a command segment performs. `scan` = a search rooted at `/`, `~`, or a top-level
+ * system directory. `vcs` (status/diff/log/show) is inspection and never charged.
+ */
+export type CheckKind = "test" | "typecheck" | "lint" | "build" | "install" | "run" | "scan" | "vcs";
 
 /** One tool call that performed verification. */
 export interface CheckCall {
@@ -53,6 +57,10 @@ const CHECK_PATTERNS: ReadonlyArray<readonly [CheckKind, RegExp]> = [
 	[
 		"run",
 		/^(?:(?:bun|npm|pnpm|yarn)\s+(?:run\s+)?(?:start|dev)\b|bun\s+(?:run\s+)?(?:-e\b|--eval\b|\S+\.[cm]?[jt]sx?\b)|node\s+(?:-e\b|\S+\.[cm]?js\b)|python3?\s+(?:-c\b|\S+\.py\b)|deno\s+run\b)/,
+	],
+	[
+		"scan",
+		/^(?:(?:find|fd|rg|ag|grep)\b.*\s(?:\/|~\/?|\$HOME\/?|\/(?:Users|home|private|var|tmp|opt|usr)\/?)(?=\s|$)|(?:locate|mdfind)\b)/,
 	],
 	["vcs", /^git\s+(?:-C\s+\S+\s+)?(?:status|diff|log|show)\b/],
 ];
@@ -113,7 +121,13 @@ export function analyzeCalls(
 			if (charged && !opts.allowedChecks.some(allowed => allowed.test(segment))) unrequested = true;
 		}
 		if (kinds.size > 0) {
-			checks.push({ tool: call.name, kinds: [...kinds], command: texts.join("\n").slice(0, 240), ms: call.ms, unrequested });
+			checks.push({
+				tool: call.name,
+				kinds: [...kinds],
+				command: texts.join("\n").slice(0, 240),
+				ms: call.ms,
+				unrequested,
+			});
 		}
 
 		const serialized = JSON.stringify(call.args) ?? "";

@@ -9,6 +9,7 @@
  * bun adapters/scope/cli.ts --model openrouter/deepseek/deepseek-v4.1-flash --label lean \
  *   --append-system-prompt adapters/scope/variants/lean-verification.md
  * bun adapters/scope/cli.ts compare ../../runs/scope/base/result.json ../../runs/scope/lean/result.json
+ * bun adapters/scope/cli.ts rescore ../../runs/scope/*\/result.json   # after editing task specs or the classifier
  * ```
  *
  * The metaharness manager spawns it with `--output <jobDir>/result.json` and reads only that file.
@@ -21,7 +22,7 @@ import { postmortem } from "@oh-my-pi/pi-utils";
 import { discoverSharedInfra } from "@oh-my-pi/typescript-edit-benchmark/in-process-client";
 import { renderComparison, renderReport, type ScopeResult, type ScopeRun, summarize } from "./result";
 import { loadTasks, type ScopeTask } from "./tasks";
-import { runTrial, type TrialConfig } from "./trial";
+import { rescoreRun, runTrial, type TrialConfig } from "./trial";
 
 const RUNS_DIR = path.resolve(import.meta.dir, "..", "..", "..", "..", "runs", "scope");
 
@@ -47,6 +48,33 @@ async function compare(files: string[]): Promise<void> {
 	if (files.length !== 2) throw new Error("usage: compare <a/result.json> <b/result.json>");
 	const [a, b]: ScopeResult[] = await Promise.all(files.map(file => Bun.file(file).json()));
 	process.stdout.write(renderComparison(a, b));
+}
+
+/** Re-derives every finished run's checks, scope, and pass from its trace under the current specs. */
+async function rescore(files: string[]): Promise<void> {
+	if (files.length === 0) throw new Error("usage: rescore <result.json>...");
+	const tasks = new Map((await loadTasks()).map(task => [task.id, task]));
+	for (const file of files) {
+		const result: ScopeResult = await Bun.file(file).json();
+		if (result.finishedAt === null) {
+			log(`skip ${file}: still running`);
+			continue;
+		}
+		const jobDir = path.dirname(path.resolve(file));
+		result.runs = await Promise.all(
+			result.runs.map(run => {
+				const task = tasks.get(run.task);
+				if (!task) throw new Error(`${file}: unknown task ${run.task}`);
+				return rescoreRun(run, task, jobDir);
+			}),
+		);
+		result.summary = summarize(result.runs);
+		await Bun.write(file, JSON.stringify(result, null, "\t"));
+		await Bun.write(path.join(jobDir, "report.md"), renderReport(result));
+		log(
+			`rescored ${result.config.label}: pass ${result.summary.passRate} · ${result.summary.unrequestedChecksPerRun} unrequested/run`,
+		);
+	}
 }
 
 function selectTasks(all: ScopeTask[], list: string | undefined): ScopeTask[] {
@@ -94,7 +122,8 @@ async function run(argv: string[]): Promise<void> {
 
 	const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
 	const output = path.resolve(
-		values.output ?? path.join(RUNS_DIR, values.label ?? `${model.replace(/[^a-zA-Z0-9]+/g, "-")}-${stamp}`, "result.json"),
+		values.output ??
+			path.join(RUNS_DIR, values.label ?? `${model.replace(/[^a-zA-Z0-9]+/g, "-")}-${stamp}`, "result.json"),
 	);
 	const jobDir = path.dirname(output);
 	const reportPath = path.join(jobDir, "report.md");
@@ -144,7 +173,9 @@ async function run(argv: string[]): Promise<void> {
 	});
 
 	log(`scope benchmark · ${result.config.label}`);
-	log(`  model ${model} · thinking ${thinking ?? "default"} · ${tasks.length} tasks × ${runs} runs · concurrency ${concurrency}`);
+	log(
+		`  model ${model} · thinking ${thinking ?? "default"} · ${tasks.length} tasks × ${runs} runs · concurrency ${concurrency}`,
+	);
 	if (appendFile) log(`  append ${appendFile}`);
 	if (templateFile) log(`  template ${templateFile}`);
 	log(`  ${output}`);
@@ -171,9 +202,10 @@ async function run(argv: string[]): Promise<void> {
 	log(`report: ${reportPath}`);
 }
 
-/** `compare <a> <b>` prints an arm comparison; anything else runs the benchmark. */
+/** `compare <a> <b>` prints an arm comparison, `rescore <files…>` re-derives scores; anything else runs the benchmark. */
 export async function main(argv = process.argv.slice(2)): Promise<void> {
 	if (argv[0] === "compare") return compare(argv.slice(1));
+	if (argv[0] === "rescore") return rescore(argv.slice(1));
 	return run(argv);
 }
 

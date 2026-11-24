@@ -151,7 +151,10 @@ function fmt(value: number | null, digits = 1): string {
 /** Runs grouped by task, in first-seen order, plus the whole arm as `**all**`. */
 function rows(runs: readonly ScopeRun[]): Array<[string, RunStats]> {
 	const grouped = Map.groupBy(runs, run => run.task);
-	return [...[...grouped].map(([task, taskRuns]): [string, RunStats] => [task, stats(taskRuns)]), ["**all**", stats(runs)]];
+	return [
+		...[...grouped].map(([task, taskRuns]): [string, RunStats] => [task, stats(taskRuns)]),
+		["**all**", stats(runs)],
+	];
 }
 
 /** Markdown report for one arm: per-task medians, then every unrequested check and failure. */
@@ -174,7 +177,8 @@ export function renderReport(result: ScopeResult): string {
 	}
 	const charged = result.runs.flatMap(run =>
 		unrequestedChecks(run).map(
-			check => `- \`${run.task}#${run.attempt}\` ${(check.ms / 1000).toFixed(1)}s ${check.kinds.join("+")}: \`${check.command.replaceAll("\n", " ⏎ ")}\``,
+			check =>
+				`- \`${run.task}#${run.attempt}\` ${(check.ms / 1000).toFixed(1)}s ${check.kinds.join("+")}: \`${check.command.replaceAll("\n", " ⏎ ")}\``,
 		),
 	);
 	if (charged.length > 0) lines.push("", "## Unrequested checks", "", ...charged);
@@ -184,7 +188,9 @@ export function renderReport(result: ScopeResult): string {
 			"",
 			"## Failures",
 			"",
-			...failed.map(run => `- \`${run.task}#${run.attempt}\`: ${[run.error, ...run.failures].filter(Boolean).join("; ")}`),
+			...failed.map(
+				run => `- \`${run.task}#${run.attempt}\`: ${[run.error, ...run.failures].filter(Boolean).join("; ")}`,
+			),
 		);
 	}
 	return `${lines.join("\n")}\n`;
