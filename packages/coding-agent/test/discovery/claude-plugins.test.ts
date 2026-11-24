@@ -959,6 +959,42 @@ describe("listClaudePluginRoots", () => {
 		expect(result.warnings.some(warning => warning.includes("outside plugin root"))).toBe(true);
 	});
 
+	test("a symlink inside skills/ that points at a file inside the plugin root loads no outside-root warning", async () => {
+		const pluginPath = path.join(tempDir, "plugins", "inner-link");
+		const registryPath = path.join(tempDir, ".omp", "plugins", "installed_plugins.json");
+		await Promise.all([
+			fs.mkdir(path.join(pluginPath, ".claude-plugin"), { recursive: true }),
+			fs.mkdir(path.join(pluginPath, "skills", "real"), { recursive: true }),
+			fs.mkdir(path.join(pluginPath, "shared"), { recursive: true }),
+			fs.mkdir(path.dirname(registryPath), { recursive: true }),
+		]);
+		await Promise.all([
+			fs.writeFile(
+				path.join(pluginPath, "skills", "real", "SKILL.md"),
+				"---\nname: real\ndescription: Stays in the plugin root\n---\nBody\n",
+			),
+			fs.writeFile(path.join(pluginPath, "shared", "notes.md"), "notes\n"),
+		]);
+		await fs.symlink(path.join("..", "shared", "notes.md"), path.join(pluginPath, "skills", "notes"));
+		await Promise.all([
+			fs.writeFile(path.join(pluginPath, ".claude-plugin", "plugin.json"), JSON.stringify({ skills: "./skills" })),
+			fs.writeFile(
+				registryPath,
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"inner-link@market": [{ scope: "user", installPath: pluginPath, version: "1.0.0" }],
+					},
+				}),
+			),
+		]);
+
+		const result = await loadCapability<Skill>("skills", { cwd: tempDir });
+
+		expect(result.all.find(skill => skill.name === "real")).toBeDefined();
+		expect(result.warnings.some(warning => warning.includes("outside plugin root"))).toBe(false);
+	});
+
 	test("a declared skills path that cannot be resolved for a reason other than a missing file is refused", async () => {
 		const pluginPath = path.join(tempDir, "plugins", "looping-skills");
 		const registryPath = path.join(tempDir, ".omp", "plugins", "installed_plugins.json");
