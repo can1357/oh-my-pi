@@ -1656,6 +1656,31 @@ describe("commitToBranch preserves agent commits", () => {
 		expect(merge).toEqual({ failed: [], merged: ["omp/task/parent-only-wip"] });
 	});
 
+	// A runtime lock the isolation held when it opened but the parent never did
+	// (a Beads gate lock at the checkout root) is gone when the task ends. The
+	// deletion is not the task's change and the parent cannot apply it, so it must
+	// stay out of the captured patch while the task's own edit is still captured.
+	it("leaves a root lock only the isolation held out of the captured patch", async () => {
+		await fs.writeFile(path.join(isolation, ".beads.gate.lock"), "pid 2\n");
+		const baseline = await captureIsolationBaseline(isolation, parent);
+
+		await fs.rm(path.join(isolation, ".beads.gate.lock"), { force: true });
+		await fs.writeFile(
+			path.join(isolation, "EXP_CLEAN_COMMIT.txt"),
+			"line1\nline2\nline3\nline4\nLINE5-TASK-EDIT\nline6\nline7\nline8\nline9\nline10\n",
+		);
+		const delta = await captureDeltaPatch(isolation, baseline);
+
+		expect(delta.rootPatch).toContain("+LINE5-TASK-EDIT");
+		expect(delta.rootPatch).not.toContain(".beads.gate.lock");
+
+		const patchDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-lock-delta-"));
+		tempDirs.push(patchDir);
+		const patchFile = path.join(patchDir, "delta.patch");
+		await fs.writeFile(patchFile, delta.rootPatch);
+		await runGit(parent, ["apply", "--check", patchFile]);
+	});
+
 	describe("with baseline WIP overlapping the agent's changes (#4136)", () => {
 		async function seedWipFileFromParent(destRoot: string, relPath: string): Promise<void> {
 			await fs.mkdir(path.join(destRoot, path.dirname(relPath)), { recursive: true });
