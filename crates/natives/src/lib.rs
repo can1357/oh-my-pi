@@ -34,6 +34,8 @@ pub mod clipboard;
 pub mod console_input;
 pub mod console_threads;
 pub mod crash_handler;
+#[cfg(target_os = "linux")]
+mod dbus_rt;
 pub mod desktop;
 pub mod devicecheck;
 pub mod diff;

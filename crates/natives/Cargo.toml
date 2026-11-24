@@ -78,7 +78,7 @@ atspi = { version = "=0.30.0", default-features = false, features = ["proxies", 
 reis = { version = "=0.7.1", features = ["tokio"] }
 x11rb = { version = "=0.13.2", features = ["composite", "randr", "render", "screensaver", "shape", "xinput", "xkb", "xtest"] }
 xkeysym = "=0.2.1"
-zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
+zbus = { version = "5.19", default-features = false, features = ["tokio"] }
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 libm.workspace = true

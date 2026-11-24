@@ -23,12 +23,13 @@ use x11rb::{
 	protocol::xproto::{Atom, AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask, Window},
 	rust_connection::RustConnection,
 };
-use zbus::blocking::Connection as BusConnection;
+use zbus::Connection as BusConnection;
 
 use super::{
 	super::error::{CoreResult, DesktopError},
 	Application,
 };
+use crate::dbus_rt;
 
 struct Entry {
 	id:                String,
@@ -440,30 +441,30 @@ impl Entry {
 		let (name, _) = self.dbus_address().ok()?;
 		// Resolve a unique owner first: neither query activates the application,
 		// and a replacement well-known owner cannot redirect the PID query.
-		let owner: String = connection
-			.call_method(
-				Some("org.freedesktop.DBus"),
-				"/org/freedesktop/DBus",
-				Some("org.freedesktop.DBus"),
-				"GetNameOwner",
-				&(name,),
-			)
-			.ok()?
-			.body()
-			.deserialize()
-			.ok()?;
-		let pid: u32 = connection
-			.call_method(
-				Some("org.freedesktop.DBus"),
-				"/org/freedesktop/DBus",
-				Some("org.freedesktop.DBus"),
-				"GetConnectionUnixProcessID",
-				&(owner,),
-			)
-			.ok()?
-			.body()
-			.deserialize()
-			.ok()?;
+		let owner: String = dbus_rt::block_on(connection.call_method(
+			Some("org.freedesktop.DBus"),
+			"/org/freedesktop/DBus",
+			Some("org.freedesktop.DBus"),
+			"GetNameOwner",
+			&(name,),
+		))
+		.ok()?
+		.ok()?
+		.body()
+		.deserialize()
+		.ok()?;
+		let pid: u32 = dbus_rt::block_on(connection.call_method(
+			Some("org.freedesktop.DBus"),
+			"/org/freedesktop/DBus",
+			Some("org.freedesktop.DBus"),
+			"GetConnectionUnixProcessID",
+			&(owner,),
+		))
+		.ok()?
+		.ok()?
+		.body()
+		.deserialize()
+		.ok()?;
 		(pid != 0).then_some(pid)
 	}
 
@@ -476,15 +477,15 @@ impl Entry {
 		}
 		// Never forward an unrelated inherited Wayland activation token. The
 		// timestamp-zero hint is advisory, including for D-Bus Activate.
-		match connection.call_method(
+		match dbus_rt::block_on(connection.call_method(
 			Some(name),
 			path.as_str(),
 			Some("org.freedesktop.Application"),
 			"Activate",
 			&(platform,),
-		) {
-			Ok(_) => Ok(true),
-			Err(zbus::Error::MethodError(error, ..))
+		)) {
+			Ok(Ok(_)) => Ok(true),
+			Ok(Err(zbus::Error::MethodError(error, ..)))
 				if self.exec.is_some()
 					&& matches!(
 						error.as_str(),
@@ -499,9 +500,12 @@ impl Entry {
 			},
 			// Do not double-launch on ambiguous timeouts or transport failures:
 			// the application might already have processed Activate.
-			Err(error) => {
+			Ok(Err(error)) => {
 				Err(DesktopError::unsupported(format!("D-Bus activation of {name} failed: {error}")))
 			},
+			Err(error) => Err(DesktopError::unsupported(format!(
+				"D-Bus activation of {name} failed (runtime unavailable): {error}"
+			))),
 		}
 	}
 
@@ -547,10 +551,18 @@ fn processes() -> HashMap<PathBuf, Vec<u32>> {
 	processes
 }
 
+fn session_bus() -> Result<BusConnection, String> {
+	match dbus_rt::block_on(BusConnection::session()) {
+		Ok(Ok(bus)) => Ok(bus),
+		Ok(Err(error)) => Err(error.to_string()),
+		Err(error) => Err(error.to_owned()),
+	}
+}
+
 #[allow(clippy::unnecessary_wraps, reason = "matches the fallible macOS and Windows signatures")]
 pub(super) fn list() -> CoreResult<Vec<Application>> {
 	let processes = processes();
-	let bus = BusConnection::session().ok();
+	let bus = session_bus().ok();
 	let mut seen = HashSet::new();
 	let mut applications = Vec::new();
 	for root in data_roots() {
@@ -578,7 +590,7 @@ pub(super) fn from_path(path: &Path) -> CoreResult<Application> {
 		.iter()
 		.find(|root| path.starts_with(root))
 		.map_or_else(|| path.to_string_lossy().into_owned(), |root| desktop_id(root, path));
-	let bus = BusConnection::session().ok();
+	let bus = session_bus().ok();
 	Ok(read_entry(path, id)?.application(&processes(), bus.as_ref()))
 }
 
@@ -587,7 +599,7 @@ pub(super) fn open(app: Application, activate: bool) -> CoreResult<Application> 
 	// Preflight before launching: XWayland cannot activate arbitrary native
 	// Wayland windows, and Wayland tokens require an originating user gesture.
 	let activation = activate.then(Activation::connect).transpose()?;
-	let bus = BusConnection::session();
+	let bus = session_bus();
 	let current = entry.application(&processes(), bus.as_ref().ok());
 	let executable = entry.executable();
 	if current.running {
@@ -895,9 +907,17 @@ impl Activation {
 
 #[cfg(test)]
 mod tests {
-	use std::path::Path;
+	use std::{
+		path::{Path, PathBuf},
+		sync::{
+			Arc,
+			atomic::{AtomicBool, AtomicUsize, Ordering},
+		},
+	};
 
-	use super::exec_argv;
+	use zbus::{Guid, connection::Builder as ConnectionBuilder, interface, zvariant::OwnedValue};
+
+	use super::{Entry, HashMap, dbus_rt, exec_argv};
 
 	fn parse(value: &str) -> super::CoreResult<Vec<String>> {
 		exec_argv(
@@ -960,6 +980,74 @@ mod tests {
 			"app",
 			"$(touch /tmp/file); * | >"
 		]);
+	}
+
+	/// An `org.freedesktop.Application` peer whose `Activate` either succeeds
+	/// or reports the method as unsupported.
+	#[derive(Clone, Default)]
+	struct Application {
+		supported: Arc<AtomicBool>,
+		calls:     Arc<AtomicUsize>,
+	}
+
+	#[interface(name = "org.freedesktop.Application")]
+	impl Application {
+		fn activate(&self, _platform: HashMap<String, OwnedValue>) -> zbus::fdo::Result<()> {
+			self.calls.fetch_add(1, Ordering::SeqCst);
+			if self.supported.load(Ordering::SeqCst) {
+				Ok(())
+			} else {
+				Err(zbus::fdo::Error::UnknownMethod("Activate".into()))
+			}
+		}
+	}
+
+	/// Failure mode: an unsupported `Activate` blocks the entry's Exec
+	/// fallback, or a successful one leaves `open()` free to launch Exec too.
+	#[test]
+	fn unsupported_dbus_activate_allows_exec_fallback_and_success_does_not() {
+		let application = Application::default();
+		let (_server, client) = dbus_rt::block_on({
+			let application = application.clone();
+			async move {
+				let (client, server) = tokio::net::UnixStream::pair().unwrap();
+				let server = ConnectionBuilder::unix_stream(server)
+					.server(Guid::generate())
+					.unwrap()
+					.p2p()
+					.serve_at("/org/example/App", application)
+					.unwrap()
+					.build();
+				let client = ConnectionBuilder::unix_stream(client).p2p().build();
+				tokio::try_join!(server, client).unwrap()
+			}
+		})
+		.expect("shared D-Bus runtime");
+		let entry = Entry {
+			id:                "org.example.App.desktop".into(),
+			path:              PathBuf::from("/apps/org.example.App.desktop"),
+			name:              "Example".into(),
+			icon:              None,
+			exec:              Some("example".into()),
+			working_directory: None,
+			terminal:          false,
+			dbus:              true,
+		};
+
+		assert!(
+			!entry
+				.activate_dbus(&client, true)
+				.expect("an unsupported Activate is not a hard failure"),
+			"an unsupported Activate must leave the Exec fallback to open()"
+		);
+		application.supported.store(true, Ordering::SeqCst);
+		assert!(
+			entry
+				.activate_dbus(&client, true)
+				.expect("a successful Activate succeeds"),
+			"a successful Activate must stop open() from launching Exec"
+		);
+		assert_eq!(application.calls.load(Ordering::SeqCst), 2);
 	}
 
 	#[test]

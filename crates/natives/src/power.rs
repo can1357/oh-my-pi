@@ -192,7 +192,9 @@ mod platform {
 	use log::debug;
 	use napi::{Error, Result};
 	use parking_lot::Mutex;
-	use zbus::{blocking::Connection, zvariant::OwnedFd};
+	use zbus::{Connection, zvariant::OwnedFd};
+
+	use crate::dbus_rt;
 
 	/// Message prefix marking "no platform backend present". Mirrored by
 	/// `POWER_BACKEND_UNAVAILABLE_CODE` in `packages/coding-agent`.
@@ -256,35 +258,44 @@ mod platform {
 			// drop a fresh connection on every acquisition.
 			let connection = match &mut *system_bus {
 				Some(connection) => connection,
-				slot => slot.insert(Connection::system().map_err(|error| {
-					// An absent bus socket means this host has no D-Bus at all
-					// (headless container). Tag it with a stable code so callers
-					// can tell "no backend" apart from a bus that exists but
-					// refuses or rejects us, which stays a plain failure.
-					let absent = matches!(
-						&error,
-						zbus::Error::Connection(source, _) | zbus::Error::InputOutput(source)
-							if source.kind() == std::io::ErrorKind::NotFound
-					);
-					let code = if absent {
-						format!("{POWER_BACKEND_UNAVAILABLE_CODE}: ")
-					} else {
-						String::new()
-					};
-					Error::from_reason(format!("{code}Unable to connect to the system bus: {error}"))
-				})?),
+				slot => {
+					let connected = dbus_rt::block_on(Connection::system()).map_err(|err| {
+						Error::from_reason(format!("Unable to start D-Bus runtime: {err}"))
+					})?;
+					slot.insert(connected.map_err(|error| {
+						// An absent bus socket means this host has no D-Bus at all
+						// (headless container). Tag it with a stable code so callers
+						// can tell "no backend" apart from a bus that exists but
+						// refuses or rejects us, which stays a plain failure.
+						let absent = matches!(
+							&error,
+							zbus::Error::Connection(source, _) | zbus::Error::InputOutput(source)
+								if source.kind() == std::io::ErrorKind::NotFound
+						);
+						let code = if absent {
+							format!("{POWER_BACKEND_UNAVAILABLE_CODE}: ")
+						} else {
+							String::new()
+						};
+						Error::from_reason(format!("{code}Unable to connect to the system bus: {error}"))
+					})?)
+				},
 			};
-			let reply = match connection.call_method(
+			let reply = match dbus_rt::block_on(connection.call_method(
 				Some(LOGIN1_DESTINATION),
 				LOGIN1_PATH,
 				Some(LOGIN1_MANAGER),
 				"Inhibit",
 				&(what, INHIBIT_WHO, reason, INHIBIT_MODE),
-			) {
-				Ok(reply) => reply,
-				Err(error) => {
+			)) {
+				Ok(Ok(reply)) => reply,
+				Ok(Err(error)) => {
 					*system_bus = None;
 					return Err(Error::from_reason(format!("login1 Inhibit failed: {error}")));
+				},
+				Err(error) => {
+					*system_bus = None;
+					return Err(Error::from_reason(format!("Unable to run login1 Inhibit: {error}")));
 				},
 			};
 			reply.body().deserialize::<OwnedFd>().map_err(|error| {
@@ -296,19 +307,28 @@ mod platform {
 			let mut session_bus = SESSION_BUS.lock();
 			let connection = match &mut *session_bus {
 				Some(connection) => connection,
-				slot => slot.insert(Connection::session().map_err(|error| {
-					Error::from_reason(format!("Unable to connect to the session bus: {error}"))
-				})?),
+				slot => {
+					let connected = dbus_rt::block_on(Connection::session()).map_err(|err| {
+						Error::from_reason(format!("Unable to start D-Bus runtime: {err}"))
+					})?;
+					slot.insert(connected.map_err(|error| {
+						Error::from_reason(format!("Unable to connect to the session bus: {error}"))
+					})?)
+				},
 			};
-			let reply = match connection.call_method(
+			Self::screensaver_inhibit(connection, reason)
+		}
+
+		fn screensaver_inhibit(connection: &Connection, reason: &str) -> Result<u32> {
+			let reply = match dbus_rt::block_on(connection.call_method(
 				Some(SCREENSAVER_DESTINATION),
 				SCREENSAVER_PATH,
 				Some(SCREENSAVER_INTERFACE),
 				"Inhibit",
 				&(INHIBIT_WHO, reason),
-			) {
-				Ok(reply) => reply,
-				Err(error) => {
+			)) {
+				Ok(Ok(reply)) => reply,
+				Ok(Err(error)) => {
 					// A method error does not invalidate the shared transport,
 					// and dropping it here would orphan every other session's
 					// ScreenSaver cookie (the service releases inhibitors when
@@ -316,6 +336,11 @@ mod platform {
 					// only the connection-acquisition failure above leaves it
 					// unset for the next acquisition to reconnect.
 					return Err(Error::from_reason(format!("ScreenSaver Inhibit failed: {error}")));
+				},
+				Err(error) => {
+					return Err(Error::from_reason(format!(
+						"Unable to run ScreenSaver Inhibit: {error}"
+					)));
 				},
 			};
 			reply.body().deserialize::<u32>().map_err(|error| {
@@ -332,21 +357,105 @@ mod platform {
 			let Some(connection) = session_bus.as_mut() else {
 				return;
 			};
+			Self::screensaver_uninhibit(connection, cookie);
+		}
+
+		fn screensaver_uninhibit(connection: &Connection, cookie: u32) {
 			// Best-effort release: ignore errors so a failed UnInhibit never
 			// drops the shared transport out from under other sessions' cookies.
-			let _ = connection.call_method(
+			let _ = dbus_rt::block_on(connection.call_method(
 				Some(SCREENSAVER_DESTINATION),
 				SCREENSAVER_PATH,
 				Some(SCREENSAVER_INTERFACE),
 				"UnInhibit",
 				&(cookie,),
-			);
+			));
 		}
 	}
 
 	impl Drop for AssertionInner {
 		fn drop(&mut self) {
 			self.stop();
+		}
+	}
+
+	#[cfg(test)]
+	mod tests {
+		use std::{
+			sync::{Arc, Mutex as StdMutex},
+			time::Duration,
+		};
+
+		use zbus::{Guid, connection::Builder as ConnectionBuilder, interface};
+
+		use super::*;
+
+		const COOKIE: u32 = 7;
+
+		/// A `ScreenSaver` service that answers `UnInhibit` only after a delay.
+		struct ScreenSaver {
+			held: Arc<StdMutex<Vec<u32>>>,
+		}
+
+		#[interface(name = "org.freedesktop.ScreenSaver")]
+		impl ScreenSaver {
+			fn inhibit(&self, who: &str, reason: &str) -> u32 {
+				assert_eq!((who, reason), (INHIBIT_WHO, "test"));
+				self.held.lock().unwrap().push(COOKIE);
+				COOKIE
+			}
+
+			async fn un_inhibit(&self, cookie: u32) {
+				tokio::time::sleep(Duration::from_millis(100)).await;
+				self.held.lock().unwrap().retain(|held| *held != cookie);
+			}
+		}
+
+		fn start_and_stop(connection: &Connection, held: &Arc<StdMutex<Vec<u32>>>) {
+			let cookie = AssertionInner::screensaver_inhibit(connection, "test")
+				.expect("ScreenSaver Inhibit succeeds");
+			assert_eq!(*held.lock().unwrap(), [COOKIE]);
+			AssertionInner::screensaver_uninhibit(connection, cookie);
+			assert!(held.lock().unwrap().is_empty(), "stop() returned before UnInhibit was answered");
+		}
+
+		/// Failure mode: `stop()` hands `UnInhibit` to the D-Bus runtime and
+		/// returns before the service releases the inhibitor, or the shared
+		/// runtime panics when the caller already runs inside Tokio.
+		#[test]
+		fn screensaver_inhibit_is_released_before_stop_returns() {
+			let held = Arc::new(StdMutex::new(Vec::new()));
+			let (server, client) = dbus_rt::block_on({
+				let held = Arc::clone(&held);
+				async move {
+					let (client, server) = tokio::net::UnixStream::pair().unwrap();
+					let server = ConnectionBuilder::unix_stream(server)
+						.server(Guid::generate())
+						.unwrap()
+						.p2p()
+						.serve_at(SCREENSAVER_PATH, ScreenSaver { held })
+						.unwrap()
+						.build();
+					let client = ConnectionBuilder::unix_stream(client).p2p().build();
+					tokio::try_join!(server, client).unwrap()
+				}
+			})
+			.expect("shared D-Bus runtime");
+
+			start_and_stop(&client, &held);
+			let multi_thread = tokio::runtime::Builder::new_multi_thread()
+				.worker_threads(1)
+				.enable_all()
+				.build()
+				.unwrap();
+			multi_thread.block_on(async { start_and_stop(&client, &held) });
+			let current_thread = tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap();
+			current_thread.block_on(async { start_and_stop(&client, &held) });
+
+			drop(server);
 		}
 	}
 }
