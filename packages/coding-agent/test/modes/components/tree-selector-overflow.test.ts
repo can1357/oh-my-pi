@@ -1,8 +1,11 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
-import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { treeListRows } from "../../helpers/tree-selector";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 let counter = 0;
 function makeUserNode(text: string, parentId: string | null = null): SessionTreeNode {
@@ -32,21 +35,10 @@ function buildBranchyTree(branchDepth: number): { root: SessionTreeNode; leaf: S
 }
 
 function renderSelector(tree: SessionTreeNode, leafId: string, width: number): string[] {
-	const selector = new TreeSelectorComponent(
-		[tree],
-		leafId,
-		200,
-		() => {},
-		() => {},
-	);
-	return selector.renderContent(width).map(line => Bun.stripANSI(line));
+	return treeListRows({ roots: [tree], currentLeafId: leafId }, { columns: width, rows: 200 });
 }
 
 describe("TreeSelectorComponent deep branching overflow", () => {
-	beforeAll(async () => {
-		await themeModule.initTheme(false, undefined, undefined, "dark", "light");
-	});
-
 	it("keeps the selected entry text visible when branching exceeds the viewport width", () => {
 		const { root, leaf } = buildBranchyTree(80);
 		const width = 120;

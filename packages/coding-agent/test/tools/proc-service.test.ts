@@ -15,7 +15,7 @@ import { BashTool } from "../../src/tools/bash";
 import { WriteTool } from "../../src/tools/write";
 import { sharedBrowserDaemonName } from "../../src/tools/browser/shared-daemon";
 import type { ToolSession } from "../../src/tools";
-import type { UnitSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
+import type { UnitSnapshot } from "@oh-my-pi/pi-coding-agent/daemon/daemon-types";
 
 /** A `proc` unit in the current project with the given board fields. */
 function serviceUnit(key: string, fields: Partial<UnitSnapshot> = {}): UnitSnapshot {

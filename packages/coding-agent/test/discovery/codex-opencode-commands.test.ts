@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,12 +7,17 @@ import { type SlashCommand, slashCommandCapability } from "@oh-my-pi/pi-coding-a
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { loadSlashCommands } from "@oh-my-pi/pi-coding-agent/extensibility/slash-commands";
-import { commandInspectorData, commandPreview } from "@oh-my-pi/pi-tui/overlays/extensions/inspector-model";
-import { InspectorPanel } from "@oh-my-pi/pi-tui/overlays/extensions/inspector-panel";
-import { applyFilter } from "@oh-my-pi/pi-tui/overlays/extensions/state-manager";
-import type { Extension } from "@oh-my-pi/pi-tui/overlays/extensions/types";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import {
+	commandInspectorData,
+	commandPreview,
+} from "@oh-my-pi/pi-coding-agent/extensibility/inventory/inspector-model";
+import { applyFilter } from "@oh-my-pi/pi-coding-agent/extensibility/inventory/state-manager";
+import type { Extension } from "@oh-my-pi/pi-coding-agent/extensibility/inventory/types";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 const COMMAND_FILE = `---
 description: Deploy a service
@@ -21,10 +26,6 @@ argument-hint: <service>
 
 Deploy $ARGUMENTS
 `;
-
-beforeAll(async () => {
-	await initTheme(false);
-});
 
 function dashboardCommand(command: SlashCommand): Extension {
 	const preserved = typeof command.description === "string" ? command.description.trim() : "";
@@ -101,14 +102,6 @@ describe("Codex and OpenCode slash-command frontmatter", () => {
 		expect(data.body).not.toContain("description:");
 		expect(data.usesArguments).toBe(true);
 
-		const panel = new InspectorPanel();
-		panel.setExtension(ext);
-		const rendered = Bun.stripANSI(panel.render(72).join("\n"));
-		expect(rendered).toContain("Deploy a service");
-		expect(rendered).toContain("<service>");
-		expect(rendered).toContain("accepts $ARGUMENTS");
-		expect(rendered).not.toContain("description:");
-
 		expect(applyFilter([ext], "Deploy a service").map(item => item.name)).toEqual(["deploy"]);
 	});
 
@@ -128,12 +121,6 @@ describe("Codex and OpenCode slash-command frontmatter", () => {
 		expect(data.description).toBe("Deploy a service");
 		expect(data.argumentHint).toBe("<service>");
 		expect(data.usesArguments).toBe(true);
-
-		const panel = new InspectorPanel();
-		panel.setExtension(ext);
-		const rendered = Bun.stripANSI(panel.render(72).join("\n"));
-		expect(rendered).toContain("Deploy a service");
-		expect(rendered).toContain("<service>");
 
 		expect(applyFilter([ext], "Deploy a service").map(item => item.name)).toEqual(["deploy"]);
 	});

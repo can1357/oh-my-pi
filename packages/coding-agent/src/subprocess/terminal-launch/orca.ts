@@ -1,4 +1,4 @@
-import { hasTerminalMultiplexerSession } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import { hasMultiplexerSession } from "@oh-my-pi/pi-tui/driver/mux/detect";
 import { quotePosixArgvAsciiSafe } from "../../utils/shell-quote";
 import { launchError, nestedString, parseJson, runStep } from "./shared";
 import type {
@@ -39,7 +39,7 @@ function resolveOrcaCli(environment: NodeJS.ProcessEnv, platform: NodeJS.Platfor
 	if (override) return override;
 	if (environment.ORCA_DEV_REPO_ROOT?.trim()) return "orca-dev";
 	// Outside Orca's terminals, Linux `orca` is normally the GNOME screen reader.
-	if (platform === "linux" && !hasTerminalMultiplexerSession("orca", environment)) return "orca-ide";
+	if (platform === "linux" && !hasMultiplexerSession("orca", environment)) return "orca-ide";
 	return "orca";
 }
 

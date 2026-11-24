@@ -1,9 +1,7 @@
 export { truncate } from "@oh-my-pi/pi-utils";
 
 import * as fs from "node:fs/promises";
-import path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import { formatPathRelativeToCwd, resolveToCwd, specialFileKind } from "../tools/path-utils";
 import type {
 	CodeAction,
@@ -17,100 +15,16 @@ import type {
 	TextEdit,
 	WorkspaceEdit,
 } from "./types";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { uriToFile } from "./uri";
 
-export { detectLanguageId } from "@oh-my-pi/pi-tui/lang-from-path";
+export { detectLanguageId } from "../utils/lang-from-path";
 
 /** Read a file's text, refusing FIFOs, devices and sockets, whose reads can block forever or never end. */
 export async function readTextFromDisk(filePath: string): Promise<string> {
 	const kind = specialFileKind(await fs.stat(filePath));
 	if (kind) throw new Error(`Cannot open '${filePath}': it is a ${kind}, not a regular file or directory.`);
 	return Bun.file(filePath).text();
-}
-
-// =============================================================================
-// URI Handling (Cross-Platform)
-// =============================================================================
-
-/**
- * Convert a file path to a file:// URI.
- * Uses the URL machinery so special characters (`%`, `#`, `?`, spaces) are
- * percent-encoded; plain concatenation produced URIs that broke round-trips.
- * Handles Windows drive letters correctly.
- */
-export function fileToUri(filePath: string): string {
-	return Bun.pathToFileURL(path.resolve(filePath)).href;
-}
-
-/**
- * Convert a file:// URI to a file path.
- * Tolerates both percent-encoded URIs and lax servers that send raw paths.
- * Handles Windows drive letters correctly.
- */
-export function uriToFile(uri: string): string {
-	if (!uri.startsWith("file://")) {
-		return uri;
-	}
-
-	// A raw `#`/`?` parses *successfully* as fragment/query and silently
-	// truncates the path — it never reaches the catch below. LSP servers do
-	// not use fragments or queries on file URIs (encoded forms are %23/%3F),
-	// so raw occurrences mean a lax server sent an unencoded path.
-	if (uri.includes("#") || uri.includes("?")) {
-		return laxUriToFile(uri);
-	}
-
-	try {
-		return Bun.fileURLToPath(uri);
-	} catch {
-		// Not a well-formed file URL (unencoded characters, stray `%`, host
-		// component). Fall back to a lenient manual conversion.
-		return laxUriToFile(uri);
-	}
-}
-
-function laxUriToFile(uri: string): string {
-	let filePath = uri.slice(7);
-	try {
-		filePath = decodeURIComponent(filePath);
-	} catch {
-		// Invalid percent-encoding — treat as a literal path.
-	}
-
-	// Windows: file:///C:/path → C:/path (strip leading slash before drive letter)
-	if (process.platform === "win32" && filePath.startsWith("/") && /^[A-Za-z]:/.test(filePath.slice(1))) {
-		filePath = filePath.slice(1);
-	}
-
-	return filePath;
-}
-
-/** Map that treats equivalent file URI spellings as the same key. */
-export class EquivalentUriMap<Value> extends Map<string, Value> {
-	#key(uri: string): string {
-		if (!uri.startsWith("file://")) return uri;
-		const filePath = path.normalize(uriToFile(uri));
-		return process.platform === "win32" ? filePath.toLowerCase() : filePath;
-	}
-
-	override delete(uri: string): boolean {
-		const key = this.#key(uri);
-		return super.delete(key);
-	}
-
-	override get(uri: string): Value | undefined {
-		const key = this.#key(uri);
-		return super.get(key);
-	}
-
-	override has(uri: string): boolean {
-		const key = this.#key(uri);
-		return super.has(key);
-	}
-
-	override set(uri: string, value: Value): this {
-		const key = this.#key(uri);
-		return super.set(key, value);
-	}
 }
 
 // =============================================================================
@@ -182,20 +96,16 @@ export function mergeDiagnosticLists(primary: Diagnostic[], secondary: Diagnosti
  * Get icon for diagnostic severity.
  */
 export function severityToIcon(severity?: DiagnosticSeverity): string {
-	const currentTheme = theme as Theme | undefined;
-	const fallback = currentTheme?.format?.bullet ?? "*";
-	const status = currentTheme?.status;
+	const symbols = currentTheme().symbols;
 	switch (severity ?? 1) {
-		case 1:
-			return status?.error ?? fallback;
 		case 2:
-			return status?.warning ?? fallback;
+			return symbols.symbol("status.warning");
 		case 3:
-			return status?.info ?? fallback;
+			return symbols.symbol("status.info");
 		case 4:
-			return currentTheme?.format?.bullet ?? fallback;
+			return symbols.symbol("format.bullet");
 		default:
-			return status?.error ?? fallback;
+			return symbols.symbol("status.error");
 	}
 }
 
@@ -357,16 +267,13 @@ export function formatTextEdit(edit: TextEdit, maxLength = 50): string {
 // =============================================================================
 
 function getSymbolKindIcons(): Record<SymbolKind, string> {
-	const currentTheme = theme as Theme | undefined;
-	const fallback = currentTheme?.format?.bullet ?? "*";
-	const dash = currentTheme?.format?.dash ?? fallback;
-	const icon = currentTheme?.icon;
-
-	const file = icon?.file ?? fallback;
-	const folder = icon?.folder ?? fallback;
-	const pkg = icon?.package ?? folder;
-	const model = icon?.model ?? fallback;
-	const func = icon?.auto ?? dash;
+	const symbols = currentTheme().symbols;
+	const fallback = symbols.symbol("format.bullet");
+	const file = symbols.symbol("icon.file");
+	const folder = symbols.symbol("icon.folder");
+	const pkg = symbols.symbol("icon.package");
+	const model = symbols.symbol("icon.model");
+	const func = symbols.symbol("icon.auto");
 
 	return {
 		1: file, // File
@@ -402,9 +309,7 @@ function getSymbolKindIcons(): Record<SymbolKind, string> {
  * Get icon for symbol kind.
  */
 export function symbolKindToIcon(kind: SymbolKind): string {
-	const currentTheme = theme as Theme | undefined;
-	const bullet = currentTheme?.format?.bullet ?? "*";
-	return getSymbolKindIcons()[kind] ?? bullet;
+	return getSymbolKindIcons()[kind] ?? currentTheme().symbols.symbol("format.bullet");
 }
 
 /**
@@ -461,9 +366,9 @@ export function formatDocumentSymbol(symbol: DocumentSymbol, indent = 0): string
 	return results;
 }
 
-/** The theme's arrow glyph; `theme` is unset outside the TUI (eval, headless runs). */
+/** The theme's arrow glyph. */
 function navArrow(): string {
-	return (theme as Theme | undefined)?.nav.cursor ?? "→";
+	return currentTheme().symbols.symbol("nav.cursor");
 }
 
 /**

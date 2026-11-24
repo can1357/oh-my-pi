@@ -84,6 +84,7 @@ pub mod task;
 pub(crate) mod testing;
 pub mod text;
 pub mod tokens;
+pub mod transcripts;
 pub mod tts;
 pub mod tty_writer;
 pub(crate) mod utils;
@@ -108,7 +109,7 @@ use napi_derive::{module_init, napi};
 #[cfg(target_os = "windows")]
 const NAPI_TOKIO_MAX_WORKER_THREADS: usize = 4;
 /// Cap on Tokio's lazily-grown blocking pool (used by `spawn_blocking` offloads
-/// such as `iso_start`/`iso_stop`/`pty.start`/`walk_diff`). Threads here are
+/// such as `iso_start`/`iso_stop`/`walk_diff`). Threads here are
 /// created on demand, not at load, so this only bounds peak fan-out.
 #[cfg(target_os = "windows")]
 const NAPI_TOKIO_MAX_BLOCKING_THREADS: usize = 8;

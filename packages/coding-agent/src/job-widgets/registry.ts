@@ -4,13 +4,13 @@
  * worth describing (and for a caption of a command that needs explaining),
  * and pushes refreshed views to subscribers while jobs run.
  */
-import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { JobWidgetView } from "../tools/details/job-widget";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJob } from "../async/job-manager";
 import type { JobWidgetAuthor, JobWidgetAuthorRequest } from "./author";
 import { type JobCaptionWriter, needsJobCaption, normalizeJobCaption } from "./caption";
 import { JobWidgetRuntime, sampleLines } from "./runtime";
-import { jobDisplayLabel } from "@oh-my-pi/pi-tui/tools/job-label";
+import { jobDisplayLabel } from "../async/job-label";
 import { type JobWidgetSpec, jobWidgetSkip, validateJobWidgetSpec } from "./spec";
 import type { JobWidgetBrief, JobWidgetRegistry } from "./types";
 

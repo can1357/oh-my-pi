@@ -16,11 +16,12 @@
  */
 
 import { logger } from "@oh-my-pi/pi-utils";
-import type { LoopConditionConfig } from "@oh-my-pi/pi-tui/status-line/loop";
+import type { LoopConditionConfig } from "./view-model/status-line/loop";
 import type { BashResult } from "../exec/bash-executor";
 import { executeBash } from "../exec/bash-executor";
-import { TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
-import { sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
+import { TRUNCATE_LENGTHS } from "../utils/render-utils";
+import { truncateToWidth } from "../utils/text-width";
+import { sanitizeStatusText } from "./view-model/chrome/shared";
 
 export type LoopConditionVerdict =
 	/** The condition says run another iteration. */

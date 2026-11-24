@@ -2,9 +2,22 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed open PTY sessions and `reapChild()` waits each holding a native blocking-pool thread, which stalled new PTY starts and other native blocking work once 8 terminals were open on Windows (512 elsewhere) ([#20283](https://github.com/can1357/oh-my-pi/pull/20283) by [@iliaal](https://github.com/iliaal))
+- Fixed the shell's `open` command on Linux starting a private D-Bus thread pool, one thread per CPU, the first time it reached the session bus ([#20278](https://github.com/can1357/oh-my-pi/pull/20278) by [@iliaal](https://github.com/iliaal))
+- Fixed Windows captures and accessibility trees of a fully covered Chromium or Electron window passing as current when the cover is a popup, tool or click-through window, under which a paused page can stay paused; they now report `covered` there too ([#19849](https://github.com/can1357/oh-my-pi/pull/19849) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed standalone binaries failing to start when the natives directory is read-only (or owned by another user) even though it already holds this build's extracted addon ([#20266](https://github.com/can1357/oh-my-pi/issues/20266))
 ### Added
 
+- Added `repairHeredocContinuations(script)`: drops the `\` after `<<EOF &&` (or `||`, `|`, `|&`) so the here-document body starts on the next line, or returns `null`
 - Added `commitReconciled()` to publish private-index commits without leaving staged reversals when the shared index is locked ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
+- Added `transcriptCalls()`, `transcriptGrep()`, `transcriptStats()`, and `transcriptMessages()`: parallel scans of session transcript files for tool calls with their results and reasoning, regex matches over message text, thinking, arguments, and results, call counts, and one transcript's records.
+
+### Changed
+
+- A persistent `Shell` session no longer carries `set -e` into later commands: errexit stops only the command that turned it on, while other options (`set -u`, `pipefail`, `shopt`) still persist
+- `ShellRunResult` now reports `movedCwd` (the command ended in another directory than it started in) and `errexit` (it ended with `set -e` on)
 
 ## [19.1.1] - 2026-11-23
 

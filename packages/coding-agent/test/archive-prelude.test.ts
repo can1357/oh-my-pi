@@ -3,6 +3,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type {
+	ArchiveCall,
+	ArchiveGrepHit,
+	ArchiveMessage,
+	ArchiveStat,
+} from "@oh-my-pi/pi-coding-agent/archive/activity";
+import type {
 	ArchiveProject,
 	ArchivePrompt,
 	ArchiveRecap,
@@ -215,5 +221,228 @@ describe("archive prelude", () => {
 
 	it("rejects misspelled options instead of falling back to the default scope", async () => {
 		await expect(call({ action: "sessions", projects: "*" })).rejects.toThrow("invalid arguments");
+	});
+
+	it("narrows listings to a time window", async () => {
+		const ids = (sessions: ArchiveSession[]) => sessions.map(session => session.id);
+		expect(ids(await call({ action: "sessions", since: "2024-02-15" }))).toEqual([newApp]);
+		expect(ids(await call({ action: "sessions", until: "2024-02-01" }))).toEqual([oldApp]);
+		expect(ids(await call({ action: "sessions", project: "*", since: "2024-01-15", until: "2024-02-15" }))).toEqual([
+			libSession,
+		]);
+		// Prompts and recaps carry their recording time: now.
+		expect(await call<ArchivePrompt[]>({ action: "prompts", until: "2000-01-01" })).toEqual([]);
+		expect((await call<ArchivePrompt[]>({ action: "prompts", since: "1h" })).length).toBe(2);
+		expect(await call<ArchiveRecap[]>({ action: "recaps", until: "2000-01-01" })).toEqual([]);
+		await expect(call({ action: "sessions", since: "yesterday-ish" })).rejects.toThrow("must be an age");
+		await expect(call({ action: "sessions", since: "2024-03-01", until: "2024-02-01" })).rejects.toThrow(
+			"since must be before until",
+		);
+	});
+});
+
+describe("archive activity", () => {
+	const at = (minute: number) => `2024-06-01T10:${String(minute).padStart(2, "0")}:00.000Z`;
+	let nextEntry = 0;
+	const entry = (time: string, message: Record<string, unknown>) => ({
+		type: "message",
+		id: `e${nextEntry++}`,
+		parentId: null,
+		timestamp: time,
+		runtime: { version: "19.1.1" },
+		message: { timestamp: 1, ...message },
+	});
+	const user = (time: string, text: string) => entry(time, { role: "user", content: text });
+	const assistant = (time: string, content: unknown[]) =>
+		entry(time, { role: "assistant", content, model: "model-a", provider: "test", api: "test" });
+	const toolCall = (id: string, name: string, args: Record<string, unknown>) => ({
+		type: "toolCall",
+		id,
+		name,
+		arguments: args,
+	});
+	const toolResult = (time: string, callId: string, tool: string, text: string, isError = false) =>
+		entry(time, {
+			role: "toolResult",
+			toolCallId: callId,
+			toolName: tool,
+			content: [{ type: "text", text }],
+			isError,
+		});
+
+	/** Writes a transcript at `file` whose mtime is its last entry's time. */
+	function writeTranscript(file: string, id: string, cwd: string, entries: { timestamp: string }[]): string {
+		const header = { type: "session", version: 3, id, timestamp: entries[0]?.timestamp ?? at(0), cwd };
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, `${[header, ...entries].map(line => JSON.stringify(line)).join("\n")}\n`);
+		const mtime = new Date(entries.at(-1)?.timestamp ?? at(0));
+		fs.utimesSync(file, mtime, mtime);
+		return file;
+	}
+
+	/** A top-level session file of `cwd`. */
+	function sessionFile(cwd: string, id: string): string {
+		return path.join(sessionDirForCwd(cwd), `2024-06-01T10-00-00-000Z_${id}.jsonl`);
+	}
+
+	/** A subagent transcript `key` ("Scout", "Scout/Helper") of a session file. */
+	function subagentFile(session: string, key: string): string {
+		return path.join(session.slice(0, -".jsonl".length), `${key}.jsonl`);
+	}
+
+	const callIds = (calls: ArchiveCall[]) => calls.map(found => found.callId);
+
+	let sessionId: string;
+	let mainFile: string;
+
+	beforeEach(async () => {
+		sessionId = `act-${crypto.randomUUID()}`;
+		mainFile = writeTranscript(sessionFile(app, sessionId), sessionId, app, [
+			user(at(0), "clean the build"),
+			assistant(at(1), [
+				{ type: "thinking", thinking: "the builtin sed lacks -z" },
+				{ type: "text", text: "Running sed." },
+				toolCall("c1", "bash", { command: "/usr/bin/sed -z s/a/b/ build.log", timeout: 5 }),
+			]),
+			toolResult(at(2), "c1", "bash", "sed: illegal option -- z", true),
+			assistant(at(4), [toolCall("c2", "read", { path: "src/build.ts" })]),
+			toolResult(at(5), "c2", "read", `${"x".repeat(3000)}TAIL`),
+			user(at(8), "now the tests"),
+			assistant(at(9), [toolCall("c3", "bash", { command: "bun test" })]),
+			toolResult(at(10), "c3", "bash", "ok"),
+		]);
+		writeTranscript(subagentFile(mainFile, "Scout"), "scout", app, [
+			user(at(2), "look around"),
+			assistant(at(3), [toolCall("s1", "bash", { command: "ls" })]),
+			toolResult(at(3), "s1", "bash", "README.md", true),
+		]);
+		writeTranscript(subagentFile(mainFile, "Scout/Helper"), "helper", app, [
+			assistant(at(6), [toolCall("h1", "grep", { pattern: "TODO" })]),
+		]);
+		const libFile = writeTranscript(sessionFile(lib, `lib-${crypto.randomUUID()}`), "lib", lib, [
+			assistant(at(30), [toolCall("l0", "bash", { command: "make" })]),
+		]);
+		writeTranscript(subagentFile(libFile, "Scout"), "lib-scout", lib, [
+			assistant(at(31), [toolCall("l1", "bash", { command: "make check" })]),
+		]);
+		// The test runner never reaches the user's daemon, so this indexes on a worker thread here.
+		expect((await syncTranscripts()).outcome).toBe("synced");
+	});
+
+	it("lists tool calls with their results and the reasoning before them", async () => {
+		const calls = await call<ArchiveCall[]>({ action: "calls" });
+		expect(calls.map(found => [found.callId, found.tool, found.isError, found.session, found.agent])).toEqual([
+			["c3", "bash", false, sessionId, null],
+			["c2", "read", false, sessionId, null],
+			["c1", "bash", true, sessionId, null],
+		]);
+		const [tests, read, sed] = calls;
+		expect(sed.args).toEqual({ command: "/usr/bin/sed -z s/a/b/ build.log", timeout: 5 });
+		expect(sed.result).toBe("sed: illegal option -- z");
+		expect([sed.model, sed.version, sed.file]).toEqual(["model-a", "19.1.1", mainFile]);
+		expect(sed.reasoning).toBe("the builtin sed lacks -z\n\nRunning sed.");
+		// A message without its own thinking links to the reasoning before it, until the user speaks again.
+		expect(read.reasoning).toBe(sed.reasoning);
+		expect(tests.reasoning).toBeNull();
+		// Long results keep their ends; `resultChars` counts the whole.
+		expect(read.resultChars).toBe(3004);
+		expect(read.result?.length).toBeLessThan(3004);
+		expect(read.result?.endsWith("TAIL")).toBe(true);
+	});
+
+	it("filters calls by tool, argument and result regexes, failure, and window", async () => {
+		expect(callIds(await call({ action: "calls", tool: "bash" }))).toEqual(["c3", "c1"]);
+		expect(callIds(await call({ action: "calls", tool: ["read", "grep"] }))).toEqual(["c2"]);
+		expect(callIds(await call({ action: "calls", match: "^/usr/bin/sed\\b" }))).toEqual(["c1"]);
+		expect(callIds(await call({ action: "calls", result: "ILLEGAL OPTION", flags: "i" }))).toEqual(["c1"]);
+		expect(callIds(await call({ action: "calls", error: true }))).toEqual(["c1"]);
+		expect(callIds(await call({ action: "calls", error: false }))).toEqual(["c3", "c2"]);
+		expect(callIds(await call({ action: "calls", since: at(3), until: at(6) }))).toEqual(["c2"]);
+		expect(callIds(await call({ action: "calls", limit: 1 }))).toEqual(["c3"]);
+		// Look-around falls back to PCRE2, as in the grep tool.
+		expect(callIds(await call({ action: "calls", match: "(?<=/usr/bin/)sed\\b" }))).toEqual(["c1"]);
+		await expect(call({ action: "calls", match: "x", flags: "g" })).rejects.toThrow("flags may hold only");
+	});
+
+	it("keeps a call still awaiting its result out of failure filters, past a half-written line", async () => {
+		const id = `live-${crypto.randomUUID()}`;
+		const file = writeTranscript(sessionFile(app, id), id, app, [
+			assistant(at(20), [toolCall("live", "bash", { command: "sleep 9" })]),
+		]);
+		// A live session's last line may still be mid-write.
+		fs.appendFileSync(file, JSON.stringify(toolResult(at(21), "live", "bash", "slept")).slice(0, 40));
+		const calls = await call<ArchiveCall[]>({ action: "calls", since: at(20) });
+		expect(calls.map(found => [found.callId, found.result, found.isError])).toEqual([["live", null, null]]);
+		expect(await call<ArchiveCall[]>({ action: "calls", since: at(20), error: false })).toEqual([]);
+		expect(await call<ArchiveCall[]>({ action: "calls", since: at(20), error: true })).toEqual([]);
+	});
+
+	it("includes subagent transcripts only when asked, and only of sessions in scope", async () => {
+		const agents = (calls: ArchiveCall[]) => calls.map(found => [found.callId, found.agent]);
+		expect(agents(await call({ action: "calls", subagents: true }))).toEqual([
+			["c3", null],
+			["h1", "Scout/Helper"],
+			["c2", null],
+			["s1", "Scout"],
+			["c1", null],
+		]);
+		expect(callIds(await call({ action: "calls", project: "*", subagents: true, since: at(30) }))).toEqual([
+			"l1",
+			"l0",
+		]);
+		// A window the session is not active in leaves out its subagents too, whatever their own times.
+		expect(await call<ArchiveCall[]>({ action: "calls", subagents: true, until: at(0) })).toEqual([]);
+	});
+
+	it("greps thinking, replies, arguments, and results; word search still skips thinking", async () => {
+		const found = (hits: ArchiveGrepHit[]) => hits.map(hit => [hit.source, hit.tool, hit.match]);
+		expect(found(await call({ action: "grep", pattern: "builtin \\w+" }))).toEqual([
+			["thinking", null, "builtin sed"],
+		]);
+		// A result hit carries the result's time, after its call's.
+		expect(found(await call({ action: "grep", pattern: "sed", sources: ["args", "result"] }))).toEqual([
+			["result", "bash", "sed"],
+			["args", "bash", "sed"],
+		]);
+		expect(await call<ArchiveGrepHit[]>({ action: "grep", pattern: "sed", sources: ["args"], tool: "read" })).toEqual(
+			[],
+		);
+		expect(found(await call({ action: "grep", pattern: "README", subagents: true }))).toEqual([
+			["result", "bash", "README"],
+		]);
+		expect(await call<ArchiveSearchHit[]>({ action: "search", query: "builtin" })).toEqual([]);
+	});
+
+	it("counts calls and errors by tool, session, and day", async () => {
+		const counts = (stats: ArchiveStat[]) => stats.map(stat => [stat.key, stat.calls, stat.errors]);
+		expect(counts(await call({ action: "stats" }))).toEqual([
+			["bash", 2, 1],
+			["read", 1, 0],
+		]);
+		expect(counts(await call({ action: "stats", by: "session", subagents: true }))).toEqual([[sessionId, 5, 2]]);
+		expect(counts(await call({ action: "stats", by: "tool", error: true, subagents: true }))).toEqual([
+			["bash", 2, 2],
+		]);
+		const [day] = await call<ArchiveStat[]>({ action: "stats", by: "day" });
+		const local = new Date(at(1));
+		const month = String(local.getMonth() + 1).padStart(2, "0");
+		expect(day.key).toBe(`${local.getFullYear()}-${month}-${String(local.getDate()).padStart(2, "0")}`);
+	});
+
+	it("reads one transcript's newest records whole, oldest first", async () => {
+		const results = await call<ArchiveMessage[]>({ action: "messages", id: sessionId, kinds: ["result"] });
+		expect(results.map(message => [message.callId, message.isError])).toEqual([
+			["c1", true],
+			["c2", false],
+			["c3", false],
+		]);
+		expect(results[1].text).toBe(`${"x".repeat(3000)}TAIL`);
+		const newest = await call<ArchiveMessage[]>({ action: "messages", id: sessionId, limit: 2 });
+		expect(newest.map(message => [message.kind, message.tool])).toEqual([
+			["call", "bash"],
+			["result", "bash"],
+		]);
+		const scout = await call<ArchiveMessage[]>({ action: "messages", id: subagentFile(mainFile, "Scout") });
+		expect(scout.map(message => `${message.kind}`)).toEqual(["user", "call", "result"]);
 	});
 });
