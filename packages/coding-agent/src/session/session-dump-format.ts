@@ -13,7 +13,7 @@ import { renderDelimitedThinking, renderToolInventory } from "@oh-my-pi/pi-ai/di
 import { formatDuration } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { YAML } from "bun";
-import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
+import { canonicalizeMessage } from "./transcript/thinking-display";
 import {
 	type BashExecutionMessage,
 	type BranchSummaryMessage,
@@ -132,7 +132,7 @@ const CUSTOM_TYPE_ACRONYMS: Readonly<Record<string, string>> = {
 	rpc: "RPC",
 	ttsr: "TTSR",
 	tui: "TUI",
-	xdev: "XDev",
+	toolCommands: "XDev",
 };
 
 function systemNoticeTitle(customType: string): string {
@@ -269,7 +269,9 @@ function appendMarkdownTranscript(lines: string[], messages: readonly AgentMessa
 				lines.push("\n");
 			}
 		} else if (msg.role === "custom" || msg.role === "hookMessage") {
-			appendCustomMessage(lines, msg as CustomMessage | HookMessage);
+			if (msg.role === "hookMessage" || !msg.excludeFromContext) {
+				appendCustomMessage(lines, msg as CustomMessage | HookMessage);
+			}
 		} else if (msg.role === "branchSummary") {
 			const branchMsg = msg as BranchSummaryMessage;
 			lines.push(`## Branch Summary${headingStamp(msg)}\n`);

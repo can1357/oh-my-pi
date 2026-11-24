@@ -15,7 +15,7 @@
  */
 import * as path from "node:path";
 import type { Judge, JudgmentResult, NoulQuestion } from "@oh-my-pi/pi-ai";
-import type { FindCoverage, FindHit, FindLexicalMatch, FindStats, FindTimeout } from "@oh-my-pi/pi-tui/tools/find";
+import type { FindCoverage, FindHit, FindLexicalMatch, FindStats, FindTimeout } from "../details/find";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { InternalUrlFilesystem } from "../../internal-urls/url-filesystem";
 import { type SpotlightClient, SpotlightError } from "../../spotlight/client";
@@ -116,9 +116,10 @@ export interface CascadeOptions {
 	includeHidden: boolean;
 	signal?: AbortSignal;
 	/**
-	 * The call's wall-clock budget. Firing during verification ends the search
-	 * with the hits verified so far and {@link CascadeResult.timeout}; firing
-	 * earlier, or a `signal` abort, rejects.
+	 * The call's wall-clock budget. Firing after the lexical scan ends the
+	 * search with {@link CascadeResult.timeout} and the hits verified so far,
+	 * or the literal keyword matches of the files read when there are none.
+	 * Firing during the lexical scan, or a `signal` abort, rejects.
 	 */
 	deadline?: AbortSignal;
 	/** Verified-passage probability at or above which a file is a hit and a range is listed; defaults to 0.2. */
@@ -129,7 +130,7 @@ export interface CascadeOptions {
 export interface CascadeResult {
 	/** Files whose verified passages cleared the threshold, strongest first. */
 	hits: FindHit[];
-	/** Literal keyword lines from the already-read files; non-empty only when `coverage` is `unavailable`. */
+	/** Literal keyword lines from the already-read files; non-empty only when `coverage` is `unavailable` or the deadline fired before any hit was verified. */
 	lexicalFallback: FindLexicalMatch[];
 	/** Whether the judge answered; an empty `hits` proves nothing when `unavailable`. */
 	coverage: FindCoverage;
@@ -137,7 +138,7 @@ export interface CascadeResult {
 	keywords: string[];
 	stats: FindStats;
 	ranking: CascadeRanking;
-	/** Set when the deadline cut verification short. */
+	/** Set when the deadline cut judging short; `passages` is 0 when it fired before verification. */
 	timeout?: FindTimeout;
 }
 
@@ -344,10 +345,13 @@ class Cascade {
 				ranking.judgeRequestsSaved = nameJobs.length;
 			}
 		}
+		// Set when the deadline cuts judging short before verification: the
+		// remaining judge waves are skipped and literal matches stand in.
+		let deadlineHit = false;
 		if (ranking.ranker === "judge") {
 			let named = 0;
 			onProgress?.(`filename ranking 0/${ranked.length}`);
-			await this.#dispatch(this.#options.judge, nameJobs, (job, outcome) => {
+			const naming = this.#dispatch(this.#options.judge, nameJobs, (job, outcome) => {
 				named += job.batch.length;
 				if (!outcome.ok) this.#fail("filenames", outcome.error);
 				job.batch.forEach((node, k) => {
@@ -361,6 +365,7 @@ class Cascade {
 				});
 				onProgress?.(`filename ranking ${named}/${ranked.length}`);
 			});
+			deadlineHit = await this.#untilDeadline(naming);
 		}
 
 		// The two strongest lexical candidates are read regardless of the name
@@ -395,7 +400,7 @@ class Cascade {
 		files.forEach((plan, f) => plan.passages.forEach((_, p) => cards.push({ f, p })));
 		let sketchSentBytes = 0;
 		const sketchJobs = chunks(
-			cards,
+			deadlineHit ? [] : cards,
 			Math.min(SKETCH_CARDS_MAX, Math.max(1, Math.floor(SKETCH_STATE_BYTES / SKETCH_BYTES))),
 		).map(batch => {
 			const sketches: SketchCard[] = batch.map(({ f, p }) => {
@@ -405,18 +410,21 @@ class Cascade {
 			});
 			return { batch, request: sketchBatch(query, sketches) };
 		});
-		this.stats.mapCards += cards.length;
-		onProgress?.(`scoring ${cards.length} passage sketches across ${files.length} files`);
 		const candidates: { f: number; p: number; score: number }[] = [];
-		await this.#dispatch(this.#options.judge, sketchJobs, (job, outcome) => {
-			if (!outcome.ok) this.#fail("sketches", outcome.error);
-			job.batch.forEach(({ f, p }, k) => {
-				const score = noul(outcome, passageKey(k));
-				if (score === undefined && outcome.ok) this.stats.unanswered++;
-				// Failure is unknown, never grounds for a negative judgment.
-				candidates.push({ f, p, score: score ?? 1 });
+		if (!deadlineHit) {
+			this.stats.mapCards += cards.length;
+			onProgress?.(`scoring ${cards.length} passage sketches across ${files.length} files`);
+			const scoring = this.#dispatch(this.#options.judge, sketchJobs, (job, outcome) => {
+				if (!outcome.ok) this.#fail("sketches", outcome.error);
+				job.batch.forEach(({ f, p }, k) => {
+					const score = noul(outcome, passageKey(k));
+					if (score === undefined && outcome.ok) this.stats.unanswered++;
+					// Failure is unknown, never grounds for a negative judgment.
+					candidates.push({ f, p, score: score ?? 1 });
+				});
 			});
-		});
+			deadlineHit = await this.#untilDeadline(scoring);
+		}
 		candidates.sort(
 			(a, b) =>
 				b.score - a.score ||
@@ -424,8 +432,10 @@ class Cascade {
 				compareRel(entries[files[a.f]!.node]!, entries[files[b.f]!.node]!) ||
 				files[a.f]!.passages[a.p]!.start - files[b.f]!.passages[b.p]!.start,
 		);
-		const survivors = candidates.filter(candidate => candidate.score >= CUTOFF).slice(0, FULL_LIMIT);
-		this.stats.windowsPruned += cards.length - survivors.length;
+		const survivors = deadlineHit
+			? []
+			: candidates.filter(candidate => candidate.score >= CUTOFF).slice(0, FULL_LIMIT);
+		if (!deadlineHit) this.stats.windowsPruned += cards.length - survivors.length;
 		const chosen = new Map<number, number[]>();
 		for (const { f, p } of survivors) {
 			const list = chosen.get(f);
@@ -443,9 +453,9 @@ class Cascade {
 				verifyJobs.push({ f, passages, request: passageBatch(query, rel, passages) });
 			}
 		}
-		onProgress?.(`verifying ${survivors.length} passages in ${chosen.size} files`);
+		if (!deadlineHit) onProgress?.(`verifying ${survivors.length} passages in ${chosen.size} files`);
 		const results = new Map<number, { score: number; heat: HeatRange[]; lines: number; bytes: number }>();
-		let timeout: FindTimeout | undefined;
+		let timeout: FindTimeout | undefined = deadlineHit ? { verified: 0, passages: 0 } : undefined;
 		const verifier = this.#options.verifyJudge ?? this.#options.judge;
 		const verification = this.#dispatch(verifier, verifyJobs, (job, outcome) => {
 			if (!outcome.ok) {
@@ -476,10 +486,7 @@ class Cascade {
 				this.stats.windowsJudged++;
 			});
 		});
-		try {
-			await verification;
-		} catch (error) {
-			if (!this.#options.deadline?.aborted || this.#options.signal?.aborted) throw error;
+		if (await this.#untilDeadline(verification)) {
 			timeout = { verified: this.stats.windowsJudged, passages: survivors.length };
 		}
 
@@ -505,11 +512,26 @@ class Cascade {
 		const { requests, failed } = this.stats;
 		const coverage: FindCoverage =
 			failed > 0 && failed === requests ? "unavailable" : failed > 0 || timeout ? "partial" : "complete";
-		// Every judge request failed, but the lexical pass already read the
-		// strongest files and cut keyword windows: surface those literal matches
-		// so the caller need not re-run the search with grep.
-		const lexicalFallback = coverage === "unavailable" ? fallbackMatches(files, entries, keywords) : [];
+		// Every judge request failed, or the deadline fired before any hit was
+		// verified, but the lexical pass already read the strongest files and
+		// cut keyword windows: surface those literal matches so the caller need
+		// not re-run the search with grep.
+		const lexicalFallback =
+			coverage === "unavailable" || (timeout !== undefined && hits.length === 0)
+				? fallbackMatches(files, entries, keywords)
+				: [];
 		return { hits, coverage, threshold, keywords, stats: this.stats, ranking, timeout, lexicalFallback };
+	}
+
+	/** Await a judge wave; resolves true when the deadline (not the caller) cut it short, rethrows anything else. */
+	async #untilDeadline(wave: Promise<void>): Promise<boolean> {
+		try {
+			await wave;
+			return false;
+		} catch (error) {
+			if (!this.#options.deadline?.aborted || this.#options.signal?.aborted) throw error;
+			return true;
+		}
 	}
 
 	/**

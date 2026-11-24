@@ -5,7 +5,6 @@ import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
-
 import {
 	type Api,
 	type AssistantMessage,
@@ -15,26 +14,24 @@ import {
 	retryTransientCompletion,
 } from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
-import { writeTerminalSequence } from "@oh-my-pi/pi-tui";
-import { isNativeRendering, onNativeRenderingChange } from "@oh-my-pi/pi-tui/native/state";
-import { theme } from "@oh-my-pi/pi-tui/theme";
-import { SPINNER_FRAMES } from "@oh-my-pi/pi-tui/theme/symbols";
+import { SPINNER_FRAMES } from "../modes/view-model/theme/symbols";
 import { $env, isTerminalHeadless, isWsl, logger, prompt } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
-
 import { roleCandidatePool } from "../config/model-roles";
 import { formatModelStringWithRouting } from "../config/model-resolver";
 import { collectOnlineTinyCandidates, expandOnlineTinyModelFallbacks } from "../tiny/online-candidates";
 import type { Settings } from "../config/settings";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
-import { formatTitleUserMessage } from "../tiny/message-preproc";
-import { isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
-import { tinyTitleClient } from "../tiny/title-client";
-
 import { cfgRetryModelFallback } from "../session/settings";
-import { DEFAULT_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC } from "@oh-my-pi/pi-tui/spinner-clock";
+import { isLowSignalTitleInput, isNoTitleSentinel, normalizeGeneratedTitle } from "../tiny/text";
+import { tinyTitleClient } from "../tiny/title-client";
+import { DEFAULT_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC } from "../config/spinner-interval";
+import { createRoot, effect, nativeRendering, untrack } from "@oh-my-pi/pi-tui";
+import { writeTerminalSequence } from "@oh-my-pi/pi-tui/driver/session";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { formatTitleUserMessage } from "../tiny/message-preproc";
 
 const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
 const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
@@ -194,10 +191,49 @@ function getTitleModels(registry: ModelRegistry, settings: Settings, currentMode
 }
 
 /**
- * Receives each title request the provider billed, for the caller's usage
- * ledger. Must not throw: accounting never fails a title.
+ * Receives each title request that ran, with the user-turn text it was sent, for the caller's
+ * usage ledger: every attempt a provider billed, and a local model's title, which bills nothing.
+ * Must not throw: accounting never fails a title.
  */
-export type TitleUsageReporter = (message: AssistantMessage) => void;
+export type TitleUsageReporter = (message: AssistantMessage, prompt: string) => void;
+
+/** Hand one title attempt to the caller's ledger. Best-effort: accounting never fails a title. */
+function reportTitleAttempt(
+	onUsage: TitleUsageReporter | undefined,
+	message: AssistantMessage,
+	prompt: string,
+	context: Record<string, unknown>,
+): void {
+	try {
+		onUsage?.(message, prompt);
+	} catch (err) {
+		logger.debug("title-generator: usage report failed", {
+			...context,
+			error: err instanceof Error ? err.message : String(err),
+		});
+	}
+}
+
+/** An assistant message for `model` that no provider metered: an assistant prefill, or a local worker's reply. */
+export function unmeteredMessage(model: Model<Api>, text: string): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text }],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: Date.now(),
+	};
+}
 
 /**
  * Generate a title for a session based on the first user message.
@@ -215,8 +251,9 @@ export type TitleUsageReporter = (message: AssistantMessage) => void;
  * @param signal Session-lifecycle cancellation for background title requests
  * @param credentialSourceSessionId Optional foreground session whose selected
  *   OAuth credential should seed an isolated title-request session.
- * @param onUsage Optional reporter for every title attempt the provider billed,
- *   so the caller can record its usage on the session's cost ledger.
+ * @param onUsage Optional reporter for every title attempt the provider billed
+ *   and for a local model's title, so the caller can journal the request on
+ *   the session's cost ledger.
  */
 export async function generateSessionTitle(
 	firstMessage: string,
@@ -265,6 +302,7 @@ export async function generateSessionTitle(
 	// fails (download missing, runtime crash, abort, or no output), leave the
 	// session untitled rather than advancing into a paid fallback candidate.
 	try {
+		const started = performance.now();
 		let localTitle: string | null;
 		if (signal) {
 			localTitle = await tinyTitleClient.generate(
@@ -287,6 +325,14 @@ export async function generateSessionTitle(
 			});
 			return null;
 		}
+		// A null result may never have reached the worker (failed model, abort), so only a
+		// produced title is journaled.
+		reportTitleAttempt(
+			onUsage,
+			{ ...unmeteredMessage(firstModel, localTitle), duration: Math.round(performance.now() - started) },
+			formatTitleUserMessage(firstMessage),
+			{ titleSessionId: sessionId, model: firstModel.id },
+		);
 		return localTitle;
 	} catch (err) {
 		logger.warn("title-generator: local tiny model errored; skipping (no online fallback)", {
@@ -398,7 +444,11 @@ async function generateTitleOnlineWithModels(
 			logger.debug("title-generator: request", { ...modelContext, maxTokens });
 
 			const messages: Message[] = [{ role: "user", content: userMessage, timestamp: Date.now() }];
-			if (model.supportsAssistantPrefill) messages.push(titlePrefill(model));
+			// Open the `<title>` marker as a trailing assistant turn on hosts that continue it
+			// verbatim. Some Ollama chat templates (LFM2.5) open a reasoning channel regardless
+			// of the disable flag, burning the whole output budget on thinking and never emitting
+			// a title. Committing the marker first skips the reasoning channel entirely.
+			if (model.supportsAssistantPrefill) messages.push(unmeteredMessage(model, "<title>"));
 
 			const response = await retryTransientCompletion(
 				async () => {
@@ -423,19 +473,11 @@ async function generateTitleOnlineWithModels(
 						},
 					);
 					// Every attempt that reached the provider was billed, failures included,
-					// so a transient retry must not discard the attempt it replaced. Reporting
-					// is best-effort: accounting can never fail the title.
-					try {
-						onUsage?.(message);
-					} catch (err) {
-						logger.debug("title-generator: usage report failed", {
-							...modelContext,
-							error: err instanceof Error ? err.message : String(err),
-						});
-					}
+					// so a transient retry must not discard the attempt it replaced.
+					reportTitleAttempt(onUsage, message, userMessage, modelContext);
 					return message;
 				},
-				{ signal, provider: model.provider },
+				{ signal, provider: model.provider, baseUrl: model.baseUrl },
 			);
 
 			if (response.stopReason === "aborted" || signal?.aborted) {
@@ -457,15 +499,17 @@ async function generateTitleOnlineWithModels(
 				continue;
 			}
 
-			const title = normalizeGeneratedTitle(extractGeneratedTitle(response.content), firstMessage);
+			const extractedTitle = extractGeneratedTitle(response.content);
+			const title = normalizeGeneratedTitle(extractedTitle, firstMessage);
 
 			if (!title) {
 				logger.debug("title-generator: no title returned", {
 					...modelContext,
-					reason: "model-returned-none",
+					reason: extractedTitle === null ? "model-returned-none" : "invalid-title",
 					usage: response.usage,
 					stopReason: response.stopReason,
 				});
+				if (extractedTitle === null) return null;
 				continue;
 			}
 
@@ -496,34 +540,7 @@ async function generateTitleOnlineWithModels(
 	return null;
 }
 
-/**
- * Open the `<title>` marker as a trailing assistant turn on hosts that continue
- * it verbatim (`Model.supportsAssistantPrefill`). Some Ollama chat templates
- * (LFM2.5) open a reasoning channel regardless of the disable flag, burning the
- * whole output budget on thinking and never emitting a title. Committing the
- * marker first skips the reasoning channel entirely.
- */
-function titlePrefill(model: Model<Api>): AssistantMessage {
-	return {
-		role: "assistant",
-		content: [{ type: "text", text: "<title>" }],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "stop",
-		timestamp: Date.now(),
-	};
-}
-
-function extractGeneratedTitle(contentBlocks: AssistantMessage["content"]): string {
+function extractGeneratedTitle(contentBlocks: AssistantMessage["content"]): string | null {
 	let textTitle = "";
 	for (const content of contentBlocks) {
 		if (content.type === "text") {
@@ -535,21 +552,30 @@ function extractGeneratedTitle(contentBlocks: AssistantMessage["content"]): stri
 	// thinking envelopes plus any stray/unclosed title tag fragment. Reject a
 	// prose thinking preamble only on the markerless path: a later marked title
 	// remains authoritative.
-	const markedTitle = extractVisibleMarkedTitle(textTitle);
-	if (markedTitle !== undefined) return unwrapJsonTitle(markedTitle);
-	const cleanedTextTitle = stripLeadingLeakedThinkingMarkup(textTitle)
-		.replace(/<\/?title>/gi, "")
-		.trim();
-	if (LEADING_PROSE_THINKING_PREAMBLE_RE.test(cleanedTextTitle)) return "";
-	return unwrapJsonTitle(cleanedTextTitle);
+	// A closed marker with nothing in it (`<title/>`) or the sentinel is a decline
+	// (null); an unclosed trailing `<title>` is a cut-off reply, not a decline.
+	const marked = extractVisibleMarkedTitle(textTitle);
+	let candidate: string;
+	if (marked) {
+		candidate = marked.content;
+	} else {
+		candidate = stripLeadingLeakedThinkingMarkup(textTitle)
+			.replace(/<\/?title>/gi, "")
+			.trim();
+		if (LEADING_PROSE_THINKING_PREAMBLE_RE.test(candidate)) return "";
+	}
+	const title = unwrapJsonTitle(candidate);
+	if (marked?.closed && !title.trim()) return null;
+	return isNoTitleSentinel(title) ? null : title;
 }
 
-function extractVisibleMarkedTitle(text: string): string | undefined {
+function extractVisibleMarkedTitle(text: string): { content: string; closed: boolean } | undefined {
 	TITLE_MARKER_GLOBAL_RE.lastIndex = 0;
 	let marker: RegExpExecArray | null = TITLE_MARKER_GLOBAL_RE.exec(text);
 	while (marker !== null) {
-		const content = marker[1];
-		if (isVisibleTitleMarker(text, marker.index)) return content?.trim() ?? "";
+		if (isVisibleTitleMarker(text, marker.index)) {
+			return { content: marker[1]?.trim() ?? "", closed: !/^<title>\s*$/i.test(marker[0]) };
+		}
 		marker = TITLE_MARKER_GLOBAL_RE.exec(text);
 	}
 	return undefined;
@@ -741,7 +767,7 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
  * the title fork then asks the model for a Nerd Fonts glyph to head the title.
  */
 export function nerdGlyphsActive(): boolean {
-	return typeof theme !== "undefined" && theme.getSymbolPreset() === "nerd";
+	return currentTheme().symbols.preset === "nerd";
 }
 
 /** The OSC 1337 user variable Tern reads the session file from. */
@@ -894,6 +920,8 @@ const terminalTitleRuntime: {
 	 *  While latched the working separator stays `:` and no interval is
 	 *  scheduled. */
 	nativeTitleFailed: boolean;
+	/** Another program holds the terminal (see {@link setTerminalTitleHandoff}). */
+	handoff: boolean;
 	/** The console title `initTerminalTitleState()` read on a Windows console.
 	 *  The console has no title stack, so teardown puts it back through
 	 *  `SetConsoleTitleW`. */
@@ -916,6 +944,7 @@ const terminalTitleRuntime: {
 	extensionOverride: undefined,
 	disposed: false,
 	nativeTitleFailed: false,
+	handoff: false,
 	initialWindowsConsoleTitle: undefined,
 	nativeTitleRestored: false,
 };
@@ -972,7 +1001,7 @@ function emitTerminalTitle(): void {
 	// here is covered without a second check.
 	// An extension override owns the terminal verbatim; the terminal sink
 	// deduplicates repeated state updates.
-	const native = isNativeRendering();
+	const native = untrack(nativeRendering) && !terminalTitleRuntime.handoff;
 	const next =
 		terminalTitleRuntime.extensionOverride ??
 		(native
@@ -1008,7 +1037,7 @@ function stopTerminalTitleSpinner(): void {
 
 function startTerminalTitleSpinner(): void {
 	if (
-		isNativeRendering() ||
+		untrack(nativeRendering) ||
 		isStaticTitleHost() ||
 		terminalTitleRuntime.disposed ||
 		terminalTitleRuntime.timer ||
@@ -1037,6 +1066,17 @@ export function setTerminalTitleState(state: TerminalTitleState): void {
 	terminalTitleRuntime.state = state;
 	if (state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
 	else stopTerminalTitleSpinner();
+	emitTerminalTitle();
+}
+
+/**
+ * The terminal is handed to another program (an external editor, a suspend)
+ * or taken back. A Tern pane shows no surface meanwhile, so its tab gets the
+ * title terminal rows use until the surface is back; in rows nothing changes.
+ */
+export function setTerminalTitleHandoff(on: boolean): void {
+	if (terminalTitleRuntime.handoff === on) return;
+	terminalTitleRuntime.handoff = on;
 	emitTerminalTitle();
 }
 
@@ -1117,10 +1157,20 @@ export function initTerminalTitleState(): void {
 	if (terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
 	// A TSP terminal takes the plain native title while it renders; the
 	// classic `π > label` (and its spinner) comes back when it stops.
-	terminalTitleRuntime.unwatchNative ??= onNativeRenderingChange(native => {
-		if (native) stopTerminalTitleSpinner();
-		else if (terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
-		emitTerminalTitle();
+	terminalTitleRuntime.unwatchNative ??= createRoot(dispose => {
+		let previous = untrack(nativeRendering);
+		effect(() => {
+			const native = nativeRendering();
+			if (native === previous) return;
+			previous = native;
+			untrack(() => {
+				if (native) stopTerminalTitleSpinner();
+				else if (terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled)
+					startTerminalTitleSpinner();
+				emitTerminalTitle();
+			});
+		});
+		return dispose;
 	});
 }
 

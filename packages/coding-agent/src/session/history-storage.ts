@@ -2,6 +2,7 @@ import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+	AsyncDrain,
 	checkpointWal,
 	getHistoryDbPath,
 	logger,
@@ -9,7 +10,9 @@ import {
 	postmortem,
 	readSalvageableRows,
 } from "@oh-my-pi/pi-utils";
+import { type WordQuery, wordQuery } from "./search-query";
 import { closeSessionIndex, salvageSessionIndex } from "./session-index";
+import { inWindow, type TimeWindow } from "./time-window";
 
 /** A unique prompt with provenance from its most recent submission. */
 export interface HistoryEntry {
@@ -33,6 +36,8 @@ export interface HistoryFilter {
 	cwd?: string;
 	/** Exact session id of the prompt's latest submission. */
 	sessionId?: string;
+	/** Window holding the prompt's latest submission. */
+	window?: TimeWindow;
 }
 
 type HistoryRow = {
@@ -44,6 +49,24 @@ type HistoryRow = {
 	use_count: number;
 };
 
+/** A submitted prompt awaiting the deferred write, with its provenance bound at submission. */
+interface QueuedPrompt {
+	prompt: string;
+	cwd: string | undefined;
+	sessionId: string | undefined;
+	/** Unix seconds at submission, written as `created_at` so the row keeps its submission time. */
+	createdAt: number;
+}
+
+/**
+ * Delay before submitted prompts are written. The write is a disk-bound
+ * transaction; deferring it past the submit keystroke lets the frame answering
+ * Enter paint first and coalesces prompts submitted in quick succession.
+ * {@link HistoryStorage.close} and the exit-only postmortem hook flush the
+ * queue, so only a hard kill inside this window loses a prompt.
+ */
+const HISTORY_FLUSH_DELAY_MS = 100;
+
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 
 /**
@@ -52,9 +75,23 @@ const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
  * `table` qualifies the columns (`"h."`) when the statement joins.
  */
 function historyFilterClause(table: string, first: number): string {
-	const session = first + 1;
-	return `(?${first} IS NULL OR ${table}cwd = ?${first}) AND (?${session} IS NULL OR ${table}session_id = ?${session})`;
+	const [session, since, until] = [first + 1, first + 2, first + 3];
+	return `(?${first} IS NULL OR ${table}cwd = ?${first}) AND (?${session} IS NULL OR ${table}session_id = ?${session}) AND (?${since} IS NULL OR ${table}created_at >= ?${since}) AND (?${until} IS NULL OR ${table}created_at < ?${until})`;
 }
+
+/** Bindings for the parameters {@link historyFilterClause} reads, in order; window bounds become Unix seconds. */
+function historyFilterParams(filter: HistoryFilter): SQLQueryBindings[] {
+	const { since, until } = filter.window ?? {};
+	return [
+		filter.cwd ?? null,
+		filter.sessionId ?? null,
+		since === undefined ? null : since / 1000,
+		until === undefined ? null : until / 1000,
+	];
+}
+
+/** Parameters {@link historyFilterClause} reads. */
+const HISTORY_FILTER_PARAMS = 4;
 
 /**
  * Rows a reader may hand to callers. A damaged page cross-linked into
@@ -65,9 +102,14 @@ function readableRowClause(table: string): string {
 	return `typeof(${table}prompt) = 'text' AND typeof(${table}created_at) = 'integer' AND typeof(${table}use_count) = 'integer'`;
 }
 
-/** A query term's letter and digit runs, as FTS5's unicode61 tokenizer splits stored prompts. */
-function ftsTokens(term: string): string[] {
-	return term.split(/[^\p{L}\p{N}]+/u).filter(token => token.length > 0);
+/**
+ * Whether a queued `prompt` answers a query as {@link HistoryStorage.search}
+ * matches stored rows: every term as an FTS phrase prefix (`words`), or every
+ * term as a literal substring under LIKE's ASCII-only case folding.
+ */
+function promptMatchesTerms(prompt: string, terms: string[], words: WordQuery): boolean {
+	const likeText = prompt.replace(/[A-Z]+/g, run => run.toLowerCase());
+	return terms.every(term => likeText.includes(term)) || words.test(prompt);
 }
 
 // Escape LIKE wildcards so user input is treated as literal text.
@@ -121,6 +163,12 @@ export class HistoryStorage {
 	#addListener?: () => void;
 	#errorListener?: (error: unknown) => void;
 	#writeFailureReported = false;
+	/** Prompts accepted by {@link add} and not yet written, oldest first: always the drain's pending batch. */
+	#queued: QueuedPrompt[] = [];
+	/** Coalesces submitted prompts into one deferred transaction off the submit keystroke. */
+	#drain = new AsyncDrain<QueuedPrompt>(HISTORY_FLUSH_DELAY_MS, { unref: true });
+	/** Negative stand-in ids handed out for queued prompts without a stored row, keyed by prompt. */
+	#provisionalIds = new Map<string, number>();
 
 	// Prepared statements
 	#upsertRowStmt: Statement;
@@ -166,14 +214,14 @@ END;
 		}
 		this.#assertRecentWindowReadable();
 		this.#recentStmt = this.#db.prepare(
-			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${readableRowClause("")} AND ${historyFilterClause("", 1)} ORDER BY created_at DESC, id DESC LIMIT ?3`,
+			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${readableRowClause("")} AND ${historyFilterClause("", 1)} ORDER BY created_at DESC, id DESC LIMIT ?${HISTORY_FILTER_PARAMS + 1}`,
 		);
 		this.#searchStmt = this.#db.prepare(
-			`SELECT h.id, h.prompt, h.created_at, h.cwd, h.session_id, h.use_count FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ?1 AND ${readableRowClause("h.")} AND ${historyFilterClause("h.", 2)} ORDER BY h.created_at DESC, h.id DESC LIMIT ?4`,
+			`SELECT h.id, h.prompt, h.created_at, h.cwd, h.session_id, h.use_count FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ?1 AND ${readableRowClause("h.")} AND ${historyFilterClause("h.", 2)} ORDER BY h.created_at DESC, h.id DESC LIMIT ?${HISTORY_FILTER_PARAMS + 2}`,
 		);
 		this.#upsertRowStmt = this.#db.prepare(`
 INSERT INTO history (prompt, created_at, cwd, session_id)
-VALUES (?, ${SQLITE_NOW_EPOCH}, ?, ?)
+VALUES (?, ?, ?, ?)
 ON CONFLICT(prompt) DO UPDATE SET
 	created_at = excluded.created_at,
 	cwd = excluded.cwd,
@@ -219,7 +267,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 		return instance;
 	}
 
-	/** Checkpoints and closes the process-wide database, and permits reopening it. */
+	/** Writes queued prompts, checkpoints and closes the process-wide database, and permits reopening it. */
 	static close(): void {
 		const instance = HistoryStorage.#instance;
 		HistoryStorage.#instance = undefined;
@@ -229,6 +277,10 @@ ON CONFLICT(prompt) DO UPDATE SET
 	}
 
 	#close(): void {
+		// The drain handler runs synchronously, so queued prompts are committed
+		// before the checkpoint and before their statement is finalized, including
+		// in process.on("exit").
+		void this.#drain.flush();
 		checkpointWal(this.#db);
 		for (const stmt of this.#substringStmts.values()) stmt.finalize();
 		this.#substringStmts.clear();
@@ -238,12 +290,29 @@ ON CONFLICT(prompt) DO UPDATE SET
 		this.#db.close();
 	}
 
-	#insertBatch(rows: Array<Pick<HistoryEntry, "prompt" | "cwd" | "sessionId">>): void {
-		this.#db.transaction((rows: Array<Pick<HistoryEntry, "prompt" | "cwd" | "sessionId">>) => {
+	#insertBatch(rows: QueuedPrompt[]): void {
+		this.#db.transaction((rows: QueuedPrompt[]) => {
 			for (const row of rows) {
-				this.#upsertRowStmt.run(row.prompt, row.cwd ?? null, row.sessionId ?? null);
+				this.#upsertRowStmt.run(row.prompt, row.createdAt, row.cwd ?? null, row.sessionId ?? null);
 			}
 		})(rows);
+	}
+
+	/** Writes one drained batch in a single transaction; failures are logged and reported once per outage. */
+	#write(rows: QueuedPrompt[]): void {
+		this.#queued = [];
+		try {
+			this.#insertBatch(rows);
+		} catch (error) {
+			logger.error("HistoryStorage add failed", { error: String(error) });
+			if (!this.#writeFailureReported) {
+				this.#writeFailureReported = true;
+				this.#errorListener?.(error);
+			}
+			return;
+		}
+		this.#writeFailureReported = false;
+		this.#addListener?.();
 	}
 
 	/**
@@ -255,7 +324,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 		this.#sessionResolver = resolver;
 	}
 
-	/** Register a callback run after each successful {@link add}, once the row is durable. */
+	/** Register a callback run after each successful write of queued prompts, once their rows are durable. */
 	setAddListener(listener: () => void): void {
 		this.#addListener = listener;
 	}
@@ -268,33 +337,50 @@ ON CONFLICT(prompt) DO UPDATE SET
 	/**
 	 * Stores a prompt, replaces its provenance with the latest submission, and
 	 * bumps its use count on resubmission.
-	 * The write is synchronous: prompt submission is human-paced, not a hot
-	 * path. On success the row is durable the moment `add()` returns and cannot
-	 * be lost to an exit racing a deferred flush. Failures are logged, not thrown;
-	 * the error listener is notified once per outage until a write succeeds.
+	 * Recall and search see the prompt as soon as `add()` returns, but the write
+	 * is queued so the submit keystroke never waits on disk: queued prompts are
+	 * written in one transaction {@link HISTORY_FLUSH_DELAY_MS} later, or at once
+	 * by {@link flush}, {@link delete}, {@link HistoryStorage.close}, and the
+	 * exit-only postmortem hook. Resolves once the write is done. Failures are
+	 * logged, not thrown; the error listener is notified once per outage until a
+	 * write succeeds.
 	 */
 	add(prompt: string, cwd?: string, sessionId?: string): Promise<void> {
 		const trimmed = normalizePrompt(prompt);
 		if (!trimmed) return Promise.resolve();
 		const session = sessionId ?? this.#sessionResolver?.();
-		try {
-			this.#insertBatch([{ prompt: trimmed, cwd: cwd ?? undefined, sessionId: session || undefined }]);
-		} catch (error) {
-			logger.error("HistoryStorage add failed", { error: String(error) });
-			if (!this.#writeFailureReported) {
-				this.#writeFailureReported = true;
-				this.#errorListener?.(error);
-			}
-			return Promise.resolve();
-		}
-		this.#writeFailureReported = false;
-		this.#addListener?.();
-		return Promise.resolve();
+		const row: QueuedPrompt = {
+			prompt: trimmed,
+			cwd,
+			sessionId: session || undefined,
+			createdAt: Math.floor(Date.now() / 1000),
+		};
+		this.#queued.push(row);
+		return this.#drain.push(row, rows => this.#write(rows));
 	}
 
-	/** Deletes a stored prompt and its search index entry. */
+	/** Writes every queued prompt now; resolves once they are persisted or their failure is reported. */
+	flush(): Promise<void> {
+		return this.#drain.flush();
+	}
+
+	/**
+	 * Deletes a stored prompt and its search index entry. Queued prompts are
+	 * written first, so a queued resubmission cannot re-insert the prompt, and a
+	 * provisional id from {@link getRecent} or {@link search} deletes the row its
+	 * queued write created.
+	 */
 	delete(id: number): void {
-		this.#db.query("DELETE FROM history WHERE id = ?").run(id);
+		void this.#drain.flush();
+		if (id >= 0) {
+			this.#db.query("DELETE FROM history WHERE id = ?").run(id);
+			return;
+		}
+		for (const [prompt, provisional] of this.#provisionalIds) {
+			if (provisional !== id) continue;
+			this.#db.query("DELETE FROM history WHERE prompt = ?").run(prompt);
+			return;
+		}
 	}
 
 	/** Returns unique prompts ordered by their most recent submission. */
@@ -303,8 +389,10 @@ ON CONFLICT(prompt) DO UPDATE SET
 		if (safeLimit === 0) return [];
 
 		try {
-			const rows = this.#recentStmt.all(filter.cwd ?? null, filter.sessionId ?? null, safeLimit) as HistoryRow[];
-			return rows.map(row => this.#toEntry(row));
+			const queued = this.#queuedEntries();
+			// Each queued prompt can displace its own stored row, so read that many more.
+			const rows = this.#recentStmt.all(...historyFilterParams(filter), safeLimit + queued.length) as HistoryRow[];
+			return this.#withQueued(queued, rows, filter, safeLimit);
 		} catch (error) {
 			logger.error("HistoryStorage getRecent failed", { error: String(error) });
 			return [];
@@ -317,39 +405,29 @@ ON CONFLICT(prompt) DO UPDATE SET
 		if (safeLimit === 0) return [];
 
 		const terms = this.#terms(query);
-		if (terms.length === 0) return [];
+		// Both drop the terms without a letter or digit.
+		const words = wordQuery(query);
+		if (terms.length === 0 || !words) return [];
+		const queued = this.#queuedEntries().filter(entry => promptMatchesTerms(entry.prompt, terms, words));
+		// Each matching queued prompt can displace its own stored row, so read that many more.
+		const fetchLimit = safeLimit + queued.length;
 
-		// 1. FTS5 prefix match (term AND). Each term is one phrase of its letter
-		//    and digit runs, split the way the unicode61 tokenizer indexed the
-		//    stored text, so "git-commit" -> "git commit"*: the runs must be
-		//    adjacent tokens, not two words anywhere in the prompt.
-		const ftsQuery = terms.map(term => `"${ftsTokens(term).join(" ")}"*`).join(" ");
-		let ftsRows: HistoryRow[] = [];
-		try {
-			ftsRows = this.#searchStmt.all(
-				ftsQuery,
-				filter.cwd ?? null,
-				filter.sessionId ?? null,
-				safeLimit,
-			) as HistoryRow[];
-		} catch (error) {
-			// Malformed FTS expression - fall through to substring path.
-			logger.debug("HistoryStorage FTS query failed, using substring only", { error: String(error) });
-		}
+		// 1. FTS5 prefix match (term AND); a malformed expression leaves only the substring path.
+		const ftsRows = this.#ftsRows(words, fetchLimit, filter);
 
 		// 2. Substring fallback (term-AND LIKE, each term literal). Catches infix
 		//    matches FTS5's prefix-only wildcard cannot reach (e.g. "mit" ->
-		//    "commit"). Bounded by safeLimit, ordered by recency - no full-table
+		//    "commit"). Bounded by fetchLimit, ordered by recency - no full-table
 		//    load into JS.
 		let subRows: HistoryRow[] = [];
 		try {
-			subRows = this.#searchSubstring(terms, safeLimit, filter);
+			subRows = this.#searchSubstring(terms, fetchLimit, filter);
 		} catch (error) {
 			logger.error("HistoryStorage substring search failed", { error: String(error) });
 		}
 
 		if (ftsRows.length === 0) {
-			return subRows.map(row => this.#toEntry(row));
+			return this.#withQueued(queued, subRows, filter, safeLimit);
 		}
 
 		const rowsById = new Map<number, HistoryRow>();
@@ -360,10 +438,111 @@ ON CONFLICT(prompt) DO UPDATE SET
 			if (!rowsById.has(row.id)) rowsById.set(row.id, row);
 		}
 
-		return [...rowsById.values()]
-			.sort((a, b) => b.created_at - a.created_at || b.id - a.id)
-			.slice(0, safeLimit)
-			.map(row => this.#toEntry(row));
+		const rows = [...rowsById.values()].sort((a, b) => b.created_at - a.created_at || b.id - a.id);
+		return this.#withQueued(queued, rows, filter, safeLimit);
+	}
+
+	/**
+	 * Finds unique prompts holding every query term as words ({@link WordQuery}),
+	 * newest first. Unlike {@link search} it never matches inside a word ("mit"
+	 * misses "commit"), so the full-text index answers it alone instead of a
+	 * scan over every stored prompt.
+	 */
+	searchWords(words: WordQuery, limit: number, filter: HistoryFilter = {}): HistoryEntry[] {
+		const safeLimit = this.#normalizeLimit(limit);
+		if (safeLimit === 0) return [];
+		const queued = this.#queuedEntries().filter(entry => words.test(entry.prompt));
+		// Each matching queued prompt can displace its own stored row, so read that many more.
+		const rows = this.#ftsRows(words, safeLimit + queued.length, filter);
+		return this.#withQueued(queued, rows, filter, safeLimit);
+	}
+
+	/** Stored rows matching `words` in the full-text index, newest first; a failed query yields none. */
+	#ftsRows(words: WordQuery, limit: number, filter: HistoryFilter): HistoryRow[] {
+		try {
+			return this.#searchStmt.all(words.match, ...historyFilterParams(filter), limit) as HistoryRow[];
+		} catch (error) {
+			logger.debug("HistoryStorage FTS query failed", { error: String(error) });
+			return [];
+		}
+	}
+
+	/**
+	 * Queued prompts as recall lists them once written: one entry per prompt,
+	 * newest submission first, with its latest provenance and its stored use
+	 * count plus the queued submissions. A prompt without a stored row gets a
+	 * negative provisional id that {@link delete} accepts.
+	 */
+	#queuedEntries(): HistoryEntry[] {
+		const entries = new Map<string, HistoryEntry>();
+		for (let index = this.#queued.length - 1; index >= 0; index--) {
+			const row = this.#queued[index];
+			const entry = entries.get(row.prompt);
+			if (entry) {
+				entry.useCount++;
+				continue;
+			}
+			const stored = this.#storedRow(row.prompt);
+			entries.set(row.prompt, {
+				id: stored?.id ?? this.#provisionalId(row.prompt),
+				prompt: row.prompt,
+				created_at: row.createdAt,
+				cwd: row.cwd,
+				sessionId: row.sessionId,
+				useCount: (stored?.use_count ?? 0) + 1,
+			});
+		}
+		return [...entries.values()];
+	}
+
+	/** Id and use count of the readable stored row for `prompt`, which the queued upsert will update in place. */
+	#storedRow(prompt: string): { id: number; use_count: number } | null {
+		try {
+			return this.#db
+				.query<{ id: number; use_count: number }, [string]>(
+					"SELECT id, use_count FROM history WHERE prompt = ?1 AND typeof(use_count) = 'integer'",
+				)
+				.get(prompt);
+		} catch (error) {
+			logger.debug("HistoryStorage stored-row lookup failed", { error: String(error) });
+			return null;
+		}
+	}
+
+	#provisionalId(prompt: string): number {
+		let id = this.#provisionalIds.get(prompt);
+		if (id === undefined) {
+			id = -(this.#provisionalIds.size + 1);
+			this.#provisionalIds.set(prompt, id);
+		}
+		return id;
+	}
+
+	/**
+	 * Stored `rows` (newest first) with the `queued` entries merged in as their
+	 * write will leave them: a queued prompt replaces its stored row, which drops
+	 * out even when the queued provenance no longer matches `filter`.
+	 */
+	#withQueued(queued: HistoryEntry[], rows: HistoryRow[], filter: HistoryFilter, limit: number): HistoryEntry[] {
+		if (queued.length === 0) return rows.slice(0, limit).map(row => this.#toEntry(row));
+		const queuedPrompts = new Set<string>();
+		const entries: HistoryEntry[] = [];
+		for (const entry of queued) {
+			queuedPrompts.add(entry.prompt);
+			// The JS form of historyFilterClause: an omitted field matches every prompt.
+			if (
+				(filter.cwd === undefined || entry.cwd === filter.cwd) &&
+				(filter.sessionId === undefined || entry.sessionId === filter.sessionId) &&
+				inWindow(entry.created_at * 1000, filter.window)
+			) {
+				entries.push(entry);
+			}
+		}
+		for (const row of rows) {
+			if (!queuedPrompts.has(row.prompt)) entries.push(this.#toEntry(row));
+		}
+		// Stable sort: within one second, queued submissions stay ahead of stored rows.
+		return entries.sort((a, b) => b.created_at - a.created_at).slice(0, limit);
 	}
 
 	/**
@@ -564,7 +743,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 	#searchSubstring(terms: string[], limit: number, filter: HistoryFilter): HistoryRow[] {
 		const stmt = this.#getSubstringStmt(terms.length);
 		const params: SQLQueryBindings[] = terms.map(term => `%${escapeLikePattern(term)}%`);
-		params.push(filter.cwd ?? null, filter.sessionId ?? null, limit);
+		params.push(...historyFilterParams(filter), limit);
 		return stmt.all(...params) as HistoryRow[];
 	}
 
@@ -577,7 +756,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 		);
 		const whereClause = [...tokenClauses, historyFilterClause("", tokenCount + 1)].join(" AND ");
 		stmt = this.#db.prepare(
-			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${readableRowClause("")} AND ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ?${tokenCount + 3}`,
+			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${readableRowClause("")} AND ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ?${tokenCount + HISTORY_FILTER_PARAMS + 1}`,
 		);
 		this.#substringStmts.set(tokenCount, stmt);
 		return stmt;

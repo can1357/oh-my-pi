@@ -1,11 +1,14 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import type { ImageContent, UserMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, UserMessage } from "@oh-my-pi/pi-ai";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
+import { recapBlock } from "../../../src/modes/controllers/event-blocks";
+import { initTheme } from "../../../src/ui/theme/service";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
-import type { Component } from "@oh-my-pi/pi-tui";
+import { isSettled } from "@oh-my-pi/pi-tui";
+import type { PendingTool } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+import { blockText } from "../../helpers/transcript-text";
 
 beforeAll(() => {
 	initTheme();
@@ -26,17 +29,7 @@ function createContext(options: {
 	locallySubmittedSignatures?: string[];
 	pendingImages?: ImageContent[];
 }) {
-	let currentEditorText = options.editorText;
-	const setText = vi.fn((text: string) => {
-		currentEditorText = text;
-	});
-	const editor = {
-		setText,
-		getText: () => currentEditorText,
-		pendingImages: [...(options.pendingImages ?? [])],
-	};
 	const ctx = createInteractiveModeContext({
-		editor,
 		optimisticUserMessageSignature: options.optimisticSignature,
 		locallySubmittedUserSignatures: new Set<string>(options.locallySubmittedSignatures ?? []),
 	});
@@ -48,6 +41,18 @@ function createContext(options: {
 	});
 	ctx.clearOptimisticUserMessage = clearOptimisticUserMessage;
 	ctx.replaceOptimisticUserMessage = replaceOptimisticUserMessage;
+	const composer = ctx.composer;
+	composer.setText(options.editorText);
+	for (const image of options.pendingImages ?? []) {
+		composer.pendingImages.push({ type: "image", data: image.data, mimeType: image.mimeType });
+	}
+	const setText = vi.spyOn(composer, "setText");
+	const editor = {
+		getText: () => composer.text(),
+		get pendingImages() {
+			return composer.pendingImages.map(image => ({ type: "image", data: image.data, mimeType: image.mimeType }));
+		},
+	};
 	return {
 		ctx,
 		editor,
@@ -176,24 +181,17 @@ function createIrcMessage(timestamp: number): CustomMessage<{ from: string; mess
 
 function createIrcContext(options: { liveBlockAbove?: boolean } = {}) {
 	const ctx = createInteractiveModeContext();
-	const { chatContainer } = ctx;
 	if (options.liveBlockAbove) {
 		// A still-running tool above the cards: they sit in the live region,
-		// where their rows cannot have committed to native scrollback.
-		chatContainer.addChild({
-			render: () => ["running tool"],
-			invalidate: () => {},
-			isTranscriptBlockFinalized: () => false,
-		} as Component);
+		// where their rows cannot have reached terminal scrollback.
+		ctx.present(() => recapBlock("running tool"), { live: true });
 	}
-	const helpers = new UiHelpers(ctx);
-	ctx.addMessageToChat = vi.fn((message, options) => helpers.addMessageToChat(message, options));
-	return {
-		ctx,
-		chatContainer,
-		requestRender: ctx.ui.requestRender,
-		addMessageToChat: ctx.addMessageToChat,
-	};
+	// The card a delivered IRC message draws: its text in one block.
+	ctx.addMessageToChat = vi.fn(message => {
+		const details = (message as CustomMessage<{ message: string }>).details;
+		return [ctx.present(() => recapBlock(details?.message ?? ""))];
+	});
+	return { ctx, transcript: ctx.shell.transcript, addMessageToChat: ctx.addMessageToChat };
 }
 
 describe("EventController IRC expiry", () => {
@@ -205,37 +203,31 @@ describe("EventController IRC expiry", () => {
 	it("renders IRC messages immediately and removes live-region cards after the TTL", async () => {
 		vi.useFakeTimers();
 		const message = createIrcMessage(1);
-		const { ctx, chatContainer, requestRender } = createIrcContext({ liveBlockAbove: true });
+		const { ctx, transcript } = createIrcContext({ liveBlockAbove: true });
 		const controller = new EventController(ctx);
 
 		await controller.handleEvent({ type: "irc_message", message });
 
-		expect(chatContainer.children).toHaveLength(2);
-		// One requestRender from the IRC handler mounting the card. The blanket
-		// pre-render that `handleEvent` used to fire before every dispatch was
-		// removed in #4353 (it doubled the paint rate during streaming and did no
-		// visible work beyond what the handlers already trigger).
-		expect(requestRender).toHaveBeenCalledTimes(1);
+		expect(transcript.blocks()).toHaveLength(2);
 
 		vi.advanceTimersByTime(9_999);
-		expect(chatContainer.children).toHaveLength(2);
+		expect(transcript.blocks()).toHaveLength(2);
 
 		vi.advanceTimersByTime(1);
-		expect(chatContainer.children).toHaveLength(1);
-		expect(requestRender).toHaveBeenCalledTimes(2);
+		expect(transcript.blocks()).toHaveLength(1);
 	});
 
 	it("evicts the oldest live-region card beyond the cap", async () => {
 		vi.useFakeTimers();
-		const { ctx, chatContainer } = createIrcContext({ liveBlockAbove: true });
+		const { ctx, transcript } = createIrcContext({ liveBlockAbove: true });
 		const controller = new EventController(ctx);
 
 		for (let i = 0; i < 5; i++) {
 			await controller.handleEvent({ type: "irc_message", message: createIrcMessage(100 + i) });
 		}
 		// live block + MAX_LIVE_IRC_CARDS (4): the 5th card evicted the 1st.
-		expect(chatContainer.children).toHaveLength(5);
-		const rendered = chatContainer.children.map(child => child.render(80).join("\n"));
+		expect(transcript.blocks()).toHaveLength(5);
+		const rendered = transcript.blocks().map(block => blockText(block, 80));
 		expect(rendered.some(text => text.includes("100"))).toBe(false);
 		expect(rendered.some(text => text.includes("104"))).toBe(true);
 	});
@@ -243,29 +235,111 @@ describe("EventController IRC expiry", () => {
 	it("does not schedule duplicate expiry for duplicate IRC events", async () => {
 		vi.useFakeTimers();
 		const message = createIrcMessage(2);
-		const { ctx, chatContainer, addMessageToChat } = createIrcContext({ liveBlockAbove: true });
+		const { ctx, transcript, addMessageToChat } = createIrcContext({ liveBlockAbove: true });
 		const controller = new EventController(ctx);
 
 		await controller.handleEvent({ type: "irc_message", message });
 		await controller.handleEvent({ type: "irc_message", message });
 
 		expect(addMessageToChat).toHaveBeenCalledTimes(1);
-		expect(chatContainer.children).toHaveLength(2);
+		expect(transcript.blocks()).toHaveLength(2);
 		vi.advanceTimersByTime(10_000);
-		expect(chatContainer.children).toHaveLength(1);
+		expect(transcript.blocks()).toHaveLength(1);
 	});
 
 	it("clears pending IRC expiry timers on dispose", async () => {
 		vi.useFakeTimers();
 		const message = createIrcMessage(3);
-		const { ctx, chatContainer, requestRender } = createIrcContext();
+		const { ctx, transcript } = createIrcContext();
 		const controller = new EventController(ctx);
 
 		await controller.handleEvent({ type: "irc_message", message });
 		controller.dispose();
 		vi.advanceTimersByTime(10_000);
 
-		expect(chatContainer.children).toHaveLength(1);
-		expect(requestRender).toHaveBeenCalledTimes(1);
+		expect(transcript.blocks()).toHaveLength(1);
+	});
+});
+
+describe("EventController message_start (assistant role)", () => {
+	const opening: AssistantMessage = {
+		role: "assistant",
+		content: [],
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-sonnet-4-5",
+		stopReason: "stop",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		timestamp: 1,
+	};
+
+	it("seals tool cards no result can reach, so they cannot block transcript retirement, and leaves a running call alone", async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		const pendingTools = new Map<string, PendingTool>();
+		const ctx = createInteractiveModeContext({ pendingTools });
+		const controller = new EventController(ctx);
+		const card = (id: string) =>
+			ctx.presentToolCall({ name: "bash", args: { command: "echo hi" }, tool: undefined, id, cwd: process.cwd() });
+		// No call id routes to it: a preview left behind by a stream that never ended.
+		const untracked = card("gone");
+		// Streamed by an earlier message, never started.
+		const stale = card("stale");
+		pendingTools.set("stale", stale);
+		await controller.handleEvent({ type: "tool_execution_start", toolCallId: "run", toolName: "bash", args: {} });
+		const running = pendingTools.get("run")!;
+
+		await controller.handleEvent({ type: "message_start", message: opening });
+
+		expect(isSettled(untracked.block.node)).toBe(true);
+		expect(isSettled(stale.block.node)).toBe(true);
+		expect(pendingTools.has("stale")).toBe(false);
+		expect(isSettled(running.block.node)).toBe(false);
+		expect(pendingTools.get("run")).toBe(running);
+		running.seal();
+		resetSettingsForTest();
+	});
+
+	it("leaves a finished todo snapshot displaceable, so the next todo update replaces its card", async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		const ctx = createInteractiveModeContext();
+		const controller = new EventController(ctx);
+		const todo = async (id: string, status: string) => {
+			const call = { type: "toolCall" as const, id, name: "todo", arguments: { op: "update" } };
+			await controller.handleEvent({ type: "message_start", message: { ...opening, content: [] } });
+			await controller.handleEvent({ type: "message_end", message: { ...opening, content: [call] } });
+			await controller.handleEvent({ type: "tool_execution_start", toolCallId: id, toolName: "todo", args: {} });
+			await controller.handleEvent({
+				type: "tool_execution_end",
+				toolCallId: id,
+				toolName: "todo",
+				result: {
+					content: [{ type: "text", text: "ok" }],
+					details: { phases: [{ name: "Work", tasks: [{ content: "task", status }] }] },
+				},
+				isError: false,
+			});
+		};
+		const todoCards = () =>
+			ctx.shell.transcript
+				.blocks()
+				.map(block => ctx.transcriptEntry(block))
+				.filter(entry => entry?.kind === "tool" && entry.tool.call?.name === "todo");
+
+		await todo("todo-1", "pending");
+		// The next assistant message opens: the finished snapshot is not an orphan to seal.
+		await todo("todo-2", "in_progress");
+
+		expect(todoCards()).toHaveLength(1);
+		controller.dispose();
+		resetSettingsForTest();
 	});
 });

@@ -6498,15 +6498,15 @@ export function buildMcpToolDefinitions(
 		return [];
 	}
 
-	// The `write` tool doubles as the xd:// transport: forwarded devices such as
-	// `ast_edit` stage previews finalized only by writing a reason to xd://resolve
-	// or xd://reject. Cursor's native catalog may expose no write path, so
-	// re-include the built-in `write` (dropped as native above) whenever pi-agent
-	// devices are advertised — otherwise a staged preview can never be resolved
-	// and the SoftToolRequirement('write') escalation aborts the turn.
-	const writeTool = tools.find(tool => tool.name === "write");
-	const forwarded =
-		writeTool && !advertisedTools.includes(writeTool) ? [...advertisedTools, writeTool] : advertisedTools;
+	// Staged previews (e.g. from `ast_edit`) are finalized only by `resolve` or
+	// `reject`. Without the bash tool those are ordinary tools, forwarded above;
+	// with it they are commands run through `bash`. Cursor's native catalog may
+	// expose no shell path, so re-include the built-in `bash` (dropped as native
+	// above) whenever pi-agent tools are advertised — otherwise a staged preview
+	// can never be resolved and the SoftToolRequirement('bash') escalation aborts
+	// the turn.
+	const bashTool = tools.find(tool => tool.name === "bash");
+	const forwarded = bashTool && !advertisedTools.includes(bashTool) ? [...advertisedTools, bashTool] : advertisedTools;
 
 	return forwarded.map(tool => {
 		const wireSchema = toolWireSchema(tool);

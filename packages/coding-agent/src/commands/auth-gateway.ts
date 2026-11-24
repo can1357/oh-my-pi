@@ -10,7 +10,7 @@ import {
 	runAuthGatewayCommand,
 } from "../cli/auth-gateway-cli";
 import { authGatewayHelp as commandHelp } from "../cli/command-help";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../ui/theme/service";
 
 export default class AuthGateway extends Command {
 	static description = commandHelp.description;
@@ -76,7 +76,7 @@ export default class AuthGateway extends Command {
 				clients: flags.clients,
 			},
 		};
-		await initTheme();
+		initTheme();
 		await runAuthGatewayCommand(cmd);
 	}
 }

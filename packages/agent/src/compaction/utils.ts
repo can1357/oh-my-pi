@@ -109,7 +109,7 @@ export function extractFileOpsFromMessage(message: AgentMessage, fileOps: snapco
 		const path = typeof args.path === "string" ? args.path : undefined;
 		if (!path) continue;
 
-		// Internal URIs (conflict://, artifact://, local://, history://, …) and
+		// Internal URIs (conflict://, local://, history://, …) and
 		// web URLs are not re-groundable files — keep them out of `<files>`.
 		if (snapcompact.isUrlSchemePath(path)) continue;
 

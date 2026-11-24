@@ -1,11 +1,17 @@
 import * as os from "node:os";
 import * as path from "node:path";
-import { inflateSync } from "node:zlib";
+import type * as Zlib from "node:zlib";
+
+let zlibCache: typeof Zlib | undefined;
+function inflateSync(buf: Zlib.InputType): Buffer {
+	if (!zlibCache) zlibCache = require("node:zlib") as typeof Zlib;
+	return zlibCache.inflateSync(buf);
+}
 
 import { deliveredImageSize, fitLongEdge, type ImageSize } from "@oh-my-pi/pi-catalog/compat/image-tokenization";
 import { logger, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { shortenPath } from "../../utils/render-utils";
+import { ToolError } from "../tool-errors";
 import type { CDPSession, ElementHandle, ElementScreenshotOptions, Page } from "puppeteer-core";
 import {
 	DEFAULT_MIN_DIMENSION,
@@ -27,10 +33,50 @@ export interface ScreenshotOptions {
 	fullPage?: boolean;
 	silent?: boolean;
 	annotate?: boolean;
-	format?: "png" | "jpeg";
+	format?: ScreenshotFormat;
 	quality?: number;
 	ifChanged?: boolean;
 	threshold?: number;
+	/** Save the full-size capture to this path (relative to the session cwd) instead of a temp file. */
+	path?: string;
+}
+
+/** Encodings tab.screenshot() can capture in. */
+export type ScreenshotFormat = "png" | "jpeg" | "webp";
+
+const SCREENSHOT_FORMATS: readonly ScreenshotFormat[] = ["png", "jpeg", "webp"];
+const SCREENSHOT_OPTION_KEYS = [
+	"selector",
+	"fullPage",
+	"silent",
+	"annotate",
+	"format",
+	"quality",
+	"ifChanged",
+	"threshold",
+	"path",
+] as const satisfies readonly (keyof ScreenshotOptions)[];
+
+/** The MIME type of a capture in `format`. */
+export function screenshotMime(format: ScreenshotFormat): ScreenshotCapture["mimeType"] {
+	return format === "jpeg" ? "image/jpeg" : format === "webp" ? "image/webp" : "image/png";
+}
+
+/** Refuse a screenshot option the capture would silently ignore (an unknown key or format). */
+export function validateScreenshotOptions(opts: ScreenshotOptions): void {
+	for (const key in opts) {
+		if (!(SCREENSHOT_OPTION_KEYS as readonly string[]).includes(key)) {
+			throw new ToolError(
+				`tab.screenshot() has no ${JSON.stringify(key)} option; it takes ${SCREENSHOT_OPTION_KEYS.join(", ")}`,
+			);
+		}
+	}
+	if (opts.format !== undefined && !SCREENSHOT_FORMATS.includes(opts.format)) {
+		throw new ToolError(`tab.screenshot() format must be one of ${SCREENSHOT_FORMATS.join(", ")}`);
+	}
+	if (opts.path !== undefined && (typeof opts.path !== "string" || !opts.path)) {
+		throw new ToolError("tab.screenshot() path must be a non-empty file path");
+	}
 }
 
 /** Stateful screenshot result returned when change detection is enabled. */
@@ -118,12 +164,14 @@ export type ScreenshotArea = "viewport" | "page" | "element";
 export interface ScreenshotCapture {
 	/** The capture as the browser encoded it, at device resolution. */
 	bytes: Uint8Array;
-	mimeType: "image/png" | "image/jpeg";
+	mimeType: "image/png" | "image/jpeg" | "image/webp";
 	area: ScreenshotArea;
 	/** Capture pixels per CSS pixel; `undefined` when the surface could not report it. */
 	scale: number | undefined;
 	/** Store `bytes` rather than the model-visible image even without `browser.screenshotDir` (an explicit `format`). */
 	keepCapture?: boolean;
+	/** Absolute file to store the full-size capture in (`screenshot({path})`); implies keeping the capture. */
+	path?: string;
 	/** Captured through a frame handle: filed as a frame screenshot. */
 	inFrame?: boolean;
 	/** Store the capture without showing it. */
@@ -164,12 +212,14 @@ export function screenshotThreshold(value: number | undefined): number {
 	return value;
 }
 
-/** Validate JPEG quality and reject quality on PNG captures. */
+/** Validate JPEG/WebP quality and reject quality on PNG captures. */
 export function screenshotQuality(opts: ScreenshotOptions): number | undefined {
 	if (opts.quality === undefined) return undefined;
-	if (opts.format !== "jpeg") throw new ToolError('Screenshot quality is only valid with format: "jpeg"');
+	if (opts.format !== "jpeg" && opts.format !== "webp") {
+		throw new ToolError('Screenshot quality is only valid with format: "jpeg" or "webp"');
+	}
 	if (!Number.isInteger(opts.quality) || opts.quality < 0 || opts.quality > 100) {
-		throw new ToolError("Screenshot JPEG quality must be an integer from 0 to 100");
+		throw new ToolError("Screenshot quality must be an integer from 0 to 100");
 	}
 	return opts.quality;
 }
@@ -284,16 +334,18 @@ export async function emitScreenshot(
 		{ maxWidth: edge, maxHeight: edge, jpegQuality: 70, excludeWebP: session.excludeWebP },
 	);
 	throwIfAborted(signal);
-	const kept = capture.keepCapture === true || !!session.browserScreenshotDir;
+	const kept = capture.keepCapture === true || capture.path !== undefined || !!session.browserScreenshotDir;
 	const saved = kept ? capture.bytes : resized.buffer;
 	const mimeType = kept ? capture.mimeType : resized.mimeType;
 	const ext = mimeType === "image/webp" ? "webp" : mimeType === "image/jpeg" ? "jpg" : "png";
-	const dest = session.browserScreenshotDir
-		? path.join(
-				session.browserScreenshotDir,
-				`${capture.inFrame ? "frame-screenshot" : "screenshot"}-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1)}.${ext}`,
-			)
-		: path.join(os.tmpdir(), `${capture.inFrame ? "omp-frame-sshots" : "omp-sshots"}-${Snowflake.next()}.${ext}`);
+	const dest =
+		capture.path ??
+		(session.browserScreenshotDir
+			? path.join(
+					session.browserScreenshotDir,
+					`${capture.inFrame ? "frame-screenshot" : "screenshot"}-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1)}.${ext}`,
+				)
+			: path.join(os.tmpdir(), `${capture.inFrame ? "omp-frame-sshots" : "omp-sshots"}-${Snowflake.next()}.${ext}`));
 	await Bun.write(dest, saved);
 	throwIfAborted(signal);
 	run.screenshots.push({ dest, mimeType, bytes: saved.length, width: resized.width, height: resized.height });
@@ -314,16 +366,23 @@ export async function emitScreenshot(
 	return dest;
 }
 
+/** How long a capture waits for the page to draw an animation frame before treating its renderer as stalled. */
+const RENDER_FRAME_WAIT_MS = 1_500;
+/** How long a capture of a stalled renderer may take before it fails with a named error. */
+const STALLED_CAPTURE_MS = 5_000;
+
 /**
  * Let pending style and layout changes paint before a capture. A hidden page (a
  * background tab, a minimized or fully covered window) runs no animation frames,
  * so the wait ends at once there, or as soon as the page turns hidden mid-wait.
+ * Resolves `false` when a visible page drew no frame within {@link RENDER_FRAME_WAIT_MS}:
+ * its compositor has stalled, and a capture that waits for a fresh frame would hang.
  */
-async function waitForRenderFrame(page: Page, signal: AbortSignal | undefined): Promise<void> {
-	await untilAborted(signal, () =>
+async function waitForRenderFrame(page: Page, signal: AbortSignal | undefined): Promise<boolean> {
+	return await untilAborted(signal, () =>
 		page.evaluate(
-			() =>
-				new Promise<void>(resolve => {
+			(waitMs: number) =>
+				new Promise<boolean>(resolve => {
 					const pageGlobal = globalThis as unknown as {
 						document: {
 							visibilityState: string;
@@ -331,18 +390,51 @@ async function waitForRenderFrame(page: Page, signal: AbortSignal | undefined): 
 							removeEventListener(type: string, listener: () => void): void;
 						};
 						requestAnimationFrame(callback: () => void): number;
+						setTimeout(callback: () => void, ms: number): number;
 					};
 					const { document } = pageGlobal;
-					if (document.visibilityState === "hidden") return resolve();
-					const done = (): void => {
+					if (document.visibilityState === "hidden") return resolve(true);
+					const finish = (drew: boolean): void => {
 						document.removeEventListener("visibilitychange", done);
-						resolve();
+						resolve(drew);
 					};
+					const done = (): void => finish(true);
 					document.addEventListener("visibilitychange", done);
 					pageGlobal.requestAnimationFrame(done);
+					pageGlobal.setTimeout(() => finish(false), waitMs);
 				}),
+			RENDER_FRAME_WAIT_MS,
 		),
 	);
+}
+
+/**
+ * Capture once the page has drawn a frame. A renderer that drew none gets a capture
+ * from the view (`fromSurface: false`), which needs no new frame, bounded so a dead
+ * compositor fails fast with a named error instead of the op timeout.
+ */
+async function captureAfterFrame(
+	page: Page,
+	signal: AbortSignal | undefined,
+	capture: (fromSurface: boolean | undefined) => Promise<Uint8Array>,
+): Promise<Uint8Array> {
+	if (await waitForRenderFrame(page, signal)) return await untilAborted(signal, () => capture(undefined));
+	logger.debug("Browser screenshot: page drew no animation frame; capturing from the view");
+	const { promise: stalled, reject } = Promise.withResolvers<never>();
+	const timer = setTimeout(
+		() =>
+			reject(
+				new ToolError(
+					`Screenshot failed: the page's renderer stopped drawing (no animation frame in ${RENDER_FRAME_WAIT_MS}ms and no capture in ${STALLED_CAPTURE_MS}ms). DOM helpers still work; reopen the tab with kill:true to get a fresh renderer.`,
+				),
+			),
+		STALLED_CAPTURE_MS,
+	);
+	try {
+		return await untilAborted(signal, () => Promise.race([capture(false), stalled]));
+	} finally {
+		clearTimeout(timer);
+	}
 }
 
 /**
@@ -389,9 +481,9 @@ export async function captureScreenshotBuffer(
 	opts: ScreenshotOptions,
 	signal: AbortSignal | undefined,
 	resolveSelector: (selector: string) => Promise<ElementHandle | null>,
-	format: "png" | "jpeg" = opts.format ?? "png",
+	format: ScreenshotFormat = opts.format ?? "png",
 ): Promise<Uint8Array> {
-	const quality = format === "jpeg" ? screenshotQuality({ ...opts, format }) : undefined;
+	const quality = format === "png" ? undefined : screenshotQuality({ ...opts, format });
 	if (opts.selector) {
 		const handle = await resolveSelector(opts.selector);
 		if (!handle) throw new ToolError("Screenshot selector did not resolve to an element");
@@ -404,20 +496,16 @@ export async function captureScreenshotBuffer(
 					target.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
 				}),
 			).catch(() => undefined);
-			await waitForRenderFrame(page, signal);
-			const shotOptions: ElementScreenshotOptions = {
-				type: format,
-				quality,
-				scrollIntoView: false,
-			};
-			return await untilAborted(signal, () => handle.screenshot(shotOptions));
+			return await captureAfterFrame(page, signal, fromSurface => {
+				const shotOptions: ElementScreenshotOptions = { type: format, quality, scrollIntoView: false, fromSurface };
+				return handle.screenshot(shotOptions);
+			});
 		} finally {
 			await handle.dispose().catch(() => undefined);
 		}
 	}
-	await waitForRenderFrame(page, signal);
-	return await untilAborted(signal, () =>
-		page.screenshot({ type: format, quality, fullPage: opts.fullPage ?? false }),
+	return await captureAfterFrame(page, signal, fromSurface =>
+		page.screenshot({ type: format, quality, fullPage: opts.fullPage ?? false, fromSurface }),
 	);
 }
 

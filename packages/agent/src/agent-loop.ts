@@ -170,6 +170,18 @@ const MAX_DSML_LEAK_NUDGES = 2;
 const MAX_SOFT_TOOL_ESCALATIONS = 3;
 
 /**
+ * The loop ended the turn itself, not a provider: the model kept missing a soft
+ * tool requirement. `Agent` marks the turn's error message `errorFromAgentLoop`
+ * so recovery does not report it as a failed request.
+ */
+export class AgentLoopError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "AgentLoopError";
+	}
+}
+
+/**
  * Whether a hard `toolChoice` for a turn conflicts with a pending soft tool
  * requirement — i.e. forbids tools (`"none"`) or forces a *different* specific
  * tool. `"auto"`/`"required"`/`"any"` and a same-tool force still let the model
@@ -684,6 +696,26 @@ export function agentLoop(
 }
 
 /**
+ * Whether `message` is kept out of model context: drawn and saved, never sent (a `!!` bash run, a
+ * custom row sent with `excludeFromContext`).
+ */
+export function isExcludedFromContext(message: AgentMessage): boolean {
+	return "excludeFromContext" in message && message.excludeFromContext === true;
+}
+
+/** Index of the last message the model sees, or -1; rows kept out of context after it do not change the request tail. */
+export function lastContextIndex(messages: readonly AgentMessage[]): number {
+	let i = messages.length - 1;
+	while (i >= 0 && isExcludedFromContext(messages[i])) i--;
+	return i;
+}
+
+/** The last message the model sees (see {@link lastContextIndex}). */
+export function lastContextMessage(messages: readonly AgentMessage[]): AgentMessage | undefined {
+	return messages[lastContextIndex(messages)];
+}
+
+/**
  * Trailing assistant message whose runnable tool calls have no results yet.
  *
  * A harness that strips failed/aborted tool results in order to re-execute
@@ -806,6 +838,7 @@ async function emitTurnEnd(
 	runHookOnAbortedMessage = false,
 ): Promise<void> {
 	stream.push({ type: "turn_end", message, toolResults });
+	config.onTurnEndEmitted?.();
 	const terminalYield = signal?.reason === TERMINAL_TOOL_RESULT_ABORT_REASON;
 	const isAbortedOrError =
 		message.role === "assistant" && (message.stopReason === "aborted" || message.stopReason === "error");
@@ -1097,7 +1130,11 @@ function resolveIntentMode(intent: AgentTool["intent"]): "require" | "optional" 
 	return "require";
 }
 
-function extractIntent(args: Record<string, unknown>): { intent?: string; strippedArgs: Record<string, unknown> } {
+/** Split a traced call's intent (`i`, trimmed, trailing periods dropped) from the arguments its tool reads. */
+export function extractIntent(args: Record<string, unknown>): {
+	intent?: string;
+	strippedArgs: Record<string, unknown>;
+} {
 	const { [INTENT_FIELD]: intent, ...strippedArgs } = args;
 	if (typeof intent !== "string") {
 		return { strippedArgs };
@@ -1316,6 +1353,7 @@ async function runLoopBody(
 		let hostToolChoice: ToolChoice | undefined;
 		let softRequiredTool: string | undefined;
 		let softSatisfies: SoftToolRequirement["satisfies"];
+		let softUnsatisfiedNotice: SoftToolRequirement["unsatisfiedNotice"];
 		let directiveResolvedForTurn = false;
 		let turnOpen = false;
 		// A trailing assistant message with unpaired tool calls: the harness
@@ -1417,6 +1455,7 @@ async function runLoopBody(
 						hostToolChoice = directive === undefined || isSoftToolRequirement(directive) ? undefined : directive;
 						softRequiredTool = softReq?.toolName;
 						softSatisfies = softReq?.satisfies;
+						softUnsatisfiedNotice = softReq?.unsatisfiedNotice;
 						const softRequirementId = softRequirementState.id;
 						if (softReq !== undefined) {
 							if (softReq.id !== softRequirementId) {
@@ -1701,11 +1740,6 @@ async function runLoopBody(
 				const additionalMessages: AgentMessage[] = [];
 				if (softNonCompliant && softRequiredTool !== undefined) {
 					SpeculativeOperationCoordinator.discardForMessage(message, "soft tool requirement deferred execution");
-					if (softRequirementState.escalations >= MAX_SOFT_TOOL_ESCALATIONS) {
-						throw new Error(
-							`Soft tool requirement '${softRequiredTool}' was not satisfied after ${MAX_SOFT_TOOL_ESCALATIONS} forced turns; aborting to avoid an unbounded force loop.`,
-						);
-					}
 					// A soft-required tool is pending but the model called something else
 					// (or yielded). Do NOT execute the detour — pair each call with a
 					// skipped result and force the required tool next turn. This is the
@@ -1713,11 +1747,18 @@ async function runLoopBody(
 					// reminder pays no message-cache invalidation. Re-engage so the loop
 					// never yields while the requirement is unmet.
 					for (const toolCall of toolCalls) {
+						// A call to the required tool that fails `satisfies` already did what the
+						// generic notice asks; give it the host's notice naming the invocation needed.
+						const wrongInvocationNotice =
+							toolCall.name === softRequiredTool && softSatisfies?.(toolCall) === false
+								? softUnsatisfiedNotice?.(toolCall)
+								: undefined;
 						const result = createAbortedToolResult(
 							toolCall,
 							stream,
 							"skipped",
-							`Not executed: call the \`${softRequiredTool}\` tool to resolve the pending action before using other tools.`,
+							wrongInvocationNotice ??
+								`Not executed: call the \`${softRequiredTool}\` tool to resolve the pending action before using other tools.`,
 						);
 						currentContext.messages.push(result);
 						newMessages.push(result);
@@ -1727,6 +1768,14 @@ async function runLoopBody(
 							toolName: toolCall.name,
 							status: "skipped",
 						});
+					}
+					// Abort only after pairing the calls: a retry continues from this
+					// transcript, and `agentLoopContinue` executes an unanswered tool-call
+					// tail, which would run the calls the gate just refused.
+					if (softRequirementState.escalations >= MAX_SOFT_TOOL_ESCALATIONS) {
+						throw new AgentLoopError(
+							`Soft tool requirement '${softRequiredTool}' was not satisfied after ${MAX_SOFT_TOOL_ESCALATIONS} forced turns; aborting to avoid an unbounded force loop.`,
+						);
 					}
 					softRequirementState.forcedToolChoice = { type: "tool", name: softRequiredTool };
 					softRequirementState.escalations++;
@@ -2019,31 +2068,35 @@ async function prepareProviderCall(
 	const normalizedMessages = normalizeMessagesForProvider(llmMessages, model);
 	const ownedDialect: Dialect | undefined =
 		(config.getDialect ? config.getDialect(model) : config.dialect) ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
-	const pruneToolDescriptions = !!config.pruneToolDescriptions && !ownedDialect;
+	const toolOptions: NormalizeToolsOptions = {
+		injectIntent: !!config.intentTracing,
+		intentDescription: config.intentDescription,
+		pruneDescriptions: !!config.pruneToolDescriptions && !ownedDialect,
+	};
 	let llmContext: Context;
 	if (config.appendOnlyContext) {
 		config.appendOnlyContext.syncMessages(normalizedMessages);
 		llmContext = config.appendOnlyContext.build(context, {
-			intentTracing: !!config.intentTracing,
-			intentDescription: config.intentDescription,
-			pruneToolDescriptions,
+			intentTracing: toolOptions.injectIntent,
+			intentDescription: toolOptions.intentDescription,
+			pruneToolDescriptions: toolOptions.pruneDescriptions,
 		});
 	} else {
 		llmContext = {
 			systemPrompt: context.systemPrompt,
 			messages: normalizedMessages,
-			tools: normalizeTools(context.tools, {
-				injectIntent: !!config.intentTracing,
-				intentDescription: config.intentDescription,
-				pruneDescriptions: pruneToolDescriptions,
-			}),
+			tools: normalizeTools(context.tools, toolOptions),
 		};
 	}
 	// Before the transform too, so a request-size clamp in it measures the withdrawn definitions the provider
-	// re-declares; recomputed below against what the transform returns.
-	if (config.sentToolDefinitions) llmContext = config.sentToolDefinitions.withInactiveTools(llmContext);
+	// re-declares; recomputed below against what the transform returns. Standby tools are normalized like
+	// `tools`, so a standby tool's definition matches the one it is sent with once active.
+	if (config.sentToolDefinitions) {
+		const standbyTools = normalizeTools(context.standbyTools, toolOptions);
+		llmContext = config.sentToolDefinitions.withInactiveTools(llmContext, standbyTools);
+	}
 	if (config.transformProviderContext) {
-		llmContext = await config.transformProviderContext(llmContext, model);
+		llmContext = await config.transformProviderContext(llmContext, model, signal);
 	}
 
 	let promptToolWireTools: Context["tools"];
@@ -2059,7 +2112,9 @@ async function prepareProviderCall(
 	// After `transformProviderContext`, so the recorded definitions are exactly what the provider receives.
 	if (config.sentToolDefinitions) {
 		if (llmContext.tools) config.sentToolDefinitions.record(llmContext.tools);
-		llmContext = config.sentToolDefinitions.withInactiveTools(llmContext);
+		if (llmContext.inactiveTools) config.sentToolDefinitions.record(llmContext.inactiveTools);
+		// The transformed standby definitions, when no request has declared tools yet.
+		llmContext = config.sentToolDefinitions.withInactiveTools(llmContext, llmContext.inactiveTools);
 	}
 	return { model, context: llmContext, promptToolWireTools, ownedDialect };
 }
@@ -2372,16 +2427,7 @@ async function streamAssistantResponse(
 							}
 						}
 						finalMessage = snapshotAssistantMessage(finalMessage);
-						// Unhealed DSML markup must not reach history, including reasoning
-						// and turns with a valid structured call. Only a failed text-only
-						// call needs the recovery nudge.
-						if (dsmlLeakRecoveryEnabled) {
-							const hasToolCall = finalMessage.content.some(block => block.type === "toolCall");
-							const removed = removeDsmlToolMarkupLeak(finalMessage);
-							if (removed && finalMessage.stopReason === "stop" && !hasToolCall) {
-								dsmlLeakMessages.add(finalMessage);
-							}
-						}
+						if (dsmlLeakRecoveryEnabled && removeDsmlLeak(finalMessage)) dsmlLeakMessages.add(finalMessage);
 						// Expand inline macros (and any other registered rewrite) on the
 						// finalized message before it reaches the context, the UI, or tool
 						// dispatch — so a single mutation is the source of truth for all three.
@@ -2664,10 +2710,12 @@ async function streamAssistantResponse(
 						throw new HarmonyLeakInterruption(detection, removed, recovered);
 					}
 				}
+				const dsmlLeakNudge = dsmlLeakRecoveryEnabled && removeDsmlLeak(trailing);
 				if (config.transformAssistantMessage) {
 					await config.transformAssistantMessage(trailing, requestSignal);
 				}
 				trailing = snapshotAssistantMessage(trailing);
+				if (dsmlLeakNudge) dsmlLeakMessages.add(trailing);
 				const finalToolCallsCanDispatch =
 					!requestSignal?.aborted &&
 					(canDispatchFinalToolCalls?.(trailing) ??
@@ -2933,6 +2981,16 @@ interface PreparedToolCall {
 const dsmlLeakMessages = new WeakSet<AssistantMessage>();
 
 /**
+ * Strip unhealed DSML markup from a finalized turn before anything dispatches
+ * or commits it: text, reasoning, and tool-call arguments. Returns whether the
+ * turn was a failed text-only call that needs the recovery nudge.
+ */
+function removeDsmlLeak(message: AssistantMessage): boolean {
+	const hasToolCall = message.content.some(block => block.type === "toolCall");
+	return removeDsmlToolMarkupLeak(message) && message.stopReason === "stop" && !hasToolCall;
+}
+
+/**
  * Prepare results computed in the stream-done branch (before `message_start`/
  * `message_end`) so a `beforeToolCall` args revision is baked into the message
  * every consumer snapshots. `executeToolCalls` consumes them; a message that
@@ -2953,10 +3011,11 @@ function resolveToolForCall(
 	return (
 		tools?.find(t => t.name === toolCall.name) ??
 		tools?.find(t => t.customWireName !== undefined && t.customWireName === toolCall.name) ??
-		// Not in the advertised set: let the host route side-transport tools
-		// (e.g. xd:// device mounts) called by their top-level name. It receives
-		// the snapshot searched above, never the agent's live tools, so a
-		// mid-stream roster change cannot widen what this request can reach.
+		// Not in the advertised set: let the host route tools reached through a
+		// side transport (e.g. mounted tool commands run through `bash`) called
+		// by their top-level name. It receives the snapshot searched above, never
+		// the agent's live tools, so a mid-stream roster change cannot widen what
+		// this request can reach.
 		resolveFallbackTool?.(toolCall.name, tools ?? [])
 	);
 }
@@ -2977,9 +3036,10 @@ const MAX_TOOL_NAME_SUGGESTIONS = 3;
  * Both the last `__` and last `_` boundary are tried, so a name that lost only
  * its separator (`…__resolve_library_id`) and one that lost a whole id segment
  * (`…__read`) both recover. `fallbackNames` adds targets the host can route but
- * never advertises (`xd://` device mounts); without them a corrupted device
- * call is the one miss with nothing to suggest, because the capability exists
- * in the session yet appears in no advertised name. Purely advisory: this only
+ * never advertises (tools reached only as mounted tool commands through
+ * `bash`); without them a corrupted command name is the one miss with nothing
+ * to suggest, because the capability exists in the session yet appears in no
+ * advertised name. Purely advisory: this only
  * builds an error string and never selects a tool, so dispatch semantics are
  * unchanged.
  */
@@ -3155,8 +3215,8 @@ async function prepareToolCallDispatch(
 		if (toolCall.type !== "toolCall") continue;
 		if ((toolCall as CursorExecResolvedCarrier)[kCursorExecResolved] === true) continue;
 		const tool = resolveToolForCall(context.tools, toolCall, resolveFallbackTool);
-		// A host fallback accepts aliases (`xd://recall`, a mis-separated MCP
-		// name) that providers reject when replayed as a function-call name.
+		// A host fallback accepts aliases (`recal`, a mis-separated MCP name)
+		// that providers reject when replayed as a function-call name.
 		// Record the call under the resolved tool's canonical name so history,
 		// persistence, and replay agree; custom-wire calls keep their wire name.
 		if (tool && toolCall.name !== tool.name && toolCall.name !== tool.customWireName) {
@@ -3701,9 +3761,9 @@ async function executeToolCalls(
 					// ride the loop-owned ToolCallContext (surfacing as
 					// `ctx.toolCall.*`); the host surfaces the sink on the context it
 					// builds, and the loop hands that object to the tool untouched.
-					// Wrapper-dispatched nested calls (for example `write xd://…`)
-					// inherit the context, so their passive hook context joins this
-					// root call at the batch boundary.
+					// Wrapper-dispatched nested calls (for example a `bash` call
+					// running a mounted tool command) inherit the context, so their
+					// passive hook context joins this root call at the batch boundary.
 					const toolContext = getToolContext?.({
 						batchId,
 						index,
@@ -3996,9 +4056,9 @@ async function executeToolCalls(
 
 	// Skipped calls never ran. Hook-prepared context also requires a non-error
 	// final result; context the tool itself reported during execution stands.
-	// Within a call, tool-reported context (including nested `xd://` dispatch)
-	// precedes the hook's: wrappers release hook context only after the call
-	// succeeds, so this is the one order every dispatch path can produce.
+	// Within a call, tool-reported context (including nested tool command
+	// dispatch) precedes the hook's: wrappers release hook context only after
+	// the call succeeds, so this is the one order every dispatch path can produce.
 	const additionalContext = joinAdditionalContext(
 		records
 			.filter(record => !record.skipped)

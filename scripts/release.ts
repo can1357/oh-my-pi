@@ -384,7 +384,7 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	}
 	console.log();
 
-	// pi-natives addons carry no per-release Rust edit: every install stamps
+	// omp-natives addons carry no per-release Rust edit: every install stamps
 	// `packages/natives/package.json#version` into the addon post-link
 	// (scripts/stamp-native-version.ts via scripts/bazel-natives.ts), so the
 	// version bump above is the only native-facing change.
@@ -395,9 +395,9 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	await $`bun install`;
 	await $`cargo update --workspace`;
 	await generateNixBunDeps(nixBunDepsGenerator);
-	// bazel/clippy.bazelrc mirrors [workspace.lints] in Cargo.toml; regenerate
-	// it here (like the lockfiles) so the bazel clippy policy can never drift.
-	// The release_gate CI job runs the matching `--check`.
+	// bazel/clippy.bazelrc and bazel/lints/BUILD.bazel mirror [workspace.lints]
+	// in Cargo.toml; regenerate them here (like the lockfiles) so the bazel
+	// clippy policy can never drift. The release_gate CI job runs the matching `--check`.
 	await $`bun scripts/gen-clippy-bazelrc.ts`;
 	// MODULE.bazel.lock caches the crate_universe extension result keyed by
 	// Cargo.toml/Cargo.lock hashes, which the bump just rewrote. Unrefreshed,

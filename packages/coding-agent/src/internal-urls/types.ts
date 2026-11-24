@@ -22,24 +22,22 @@ import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { LocalProtocolOptions } from "./local-protocol";
 import type { SessionEntry } from "../session/session-entries";
 import type { ToolSession } from "../tools";
-import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
-import type { ProcReadDetails, ProcWriteDetails } from "@oh-my-pi/pi-tui/tools/proc-render";
-import type { CfgReadDetails, CfgWriteDetails } from "@oh-my-pi/pi-tui/tools/cfg-render";
-import type { XdevRenderDispatch } from "@oh-my-pi/pi-tui/tools/xdev";
-import type { SchemeWriteScope } from "@oh-my-pi/pi-tui/tools/url-scheme-host";
+import type { CoordinationDetails } from "../tools/details/wait";
+import type { ProcReadDetails, ProcWriteDetails } from "../tools/details/proc-render";
+import type { CfgReadDetails, CfgWriteDetails } from "../tools/details/cfg-render";
+import type { SchemeWriteScope } from "./url-scheme";
 
 /** Render state and prewalk facts a handler write attaches to the `write` tool result. */
 export interface InternalWriteDetails {
 	message?: CoordinationDetails;
 	proc?: ProcWriteDetails;
 	cfg?: CfgWriteDetails;
-	xdev?: XdevRenderDispatch;
 	/** Absolute file the write landed in, for the transcript card's file link (conflict://). */
 	resolvedPath?: string;
 	/**
 	 * The write changed no files (process stdin, service mode), so the prewalk gate must not read
-	 * it as implementation work. Unlike {@link SchemeWritePolicy.cancels}, the plan-mode and
-	 * device-only gates still apply.
+	 * it as implementation work. Unlike {@link SchemeWritePolicy.cancels}, the plan-mode
+	 * gate still applies.
 	 */
 	touchesNoFiles?: true;
 }
@@ -61,13 +59,13 @@ export interface InternalWriteResult {
  *   returns; `read` routes located URLs through its filesystem pipeline (paging, images, sqlite, archives).
  * - `virtual`: content is rendered by the handler (it may still `locate` a backing file for search/bash).
  * - `remote`: content lives on another host or service; never locatable.
- * - `device`: session-bound control surface (processes, tool devices).
+ * - `device`: session-bound control surface (processes, replies to the user).
  */
 export type SchemeBacking = "file" | "virtual" | "remote" | "device";
 
 /**
  * Read-selector grammar after the URL.
- * - `lines`: any trailing `:<selector>` chain is a read selector (`artifact://3:raw:1-50`).
+ * - `lines`: any trailing `:<selector>` chain is a read selector (`local://3.log:raw:1-50`).
  * - `none`: never peel; the URL is passed through as written.
  * - `opaque`: server-defined URIs that may legitimately end in selector-shaped tails (mcp://).
  */
@@ -80,7 +78,7 @@ export interface SchemeWritePolicy {
 	 * - `file`: tools (`write`, `edit`, `ast_edit`) write the file {@link ProtocolHandler.locate}
 	 *   returns with `{ create: true }`; the handler has no `write` hook.
 	 * - `handler`: {@link ProtocolHandler.write} performs it (messages, stdin, settings, remote
-	 *   hosts, devices) for `write` and for bash redirects, which deliver a handle's bytes as one
+	 *   hosts) for `write` and for bash redirects, which deliver a handle's bytes as one
 	 *   write on close; file-editing tools refuse the URL even when it locates a backing file.
 	 */
 	via: "file" | "handler";
@@ -98,7 +96,7 @@ export interface SchemeWritePolicy {
 	maxBytes?: number;
 	/**
 	 * True when this URL's write only cancels background work (`proc://<id>/kill`), so it
-	 * passes the plan-mode and device-only gates like a `coordination`-scoped write. Approval
+	 * passes the plan-mode gate like a `coordination`-scoped write. Approval
 	 * still follows {@link SchemeWritePolicy.tier}.
 	 */
 	cancels?(url: InternalUrl): boolean;
@@ -117,15 +115,18 @@ export interface SchemeSpec {
 	pathAuthority?: true;
 	/** Default immutability of resolved resources; a resource may override it per URL. */
 	immutable: boolean;
-	/** Resources are session artifact storage (artifact://); located read pages skip the artifact spill. */
-	artifactStore?: true;
+	/**
+	 * Located read pages get the full line-scaled byte budget and never spill: the file is already
+	 * session storage (`local://N.log` spills) that selectors re-read, so a spill would only copy it.
+	 */
+	unspilledPages?: true;
 	/** Approval tier for reading/searching this scheme. Default `read`; ssh:// is `exec`. */
 	readTier?: ToolTier;
 	/** Read output bypasses result truncation limits (skill:// instructions). */
 	unbounded?: boolean;
 	/** Renderers may call `locate` to hyperlink these URLs: locate is local, cheap, never spawns or fetches. */
 	linkable?: boolean;
-	/** Transcript read cards collapse like plain files instead of expanding (xd://). */
+	/** Transcript read cards collapse like plain files instead of expanding (help://). */
 	compactTranscript?: boolean;
 	/** `read` peels a trailing `?q=<question>` as an image question (local://, attachment://); other schemes own their query. */
 	imageQuestion?: true;
@@ -161,6 +162,8 @@ export interface SchemeHost {
 	settingsApproval: boolean;
 	/** `out://` writes reach the user as transcript replies: `out.enabled` is on in the top-level TUI session. */
 	outReplies: boolean;
+	/** Advertise PID-qualified agent URLs and same-folder peer discovery. */
+	crossInstanceAgents?: boolean;
 	/** The session is a subagent: `agent://all` broadcasts are refused, so they go unadvertised. */
 	subagent: boolean;
 }
@@ -169,14 +172,25 @@ export interface SchemeHost {
  * Raw resource payload returned by protocol handlers. The router defaults
  * `immutable` from {@link SchemeSpec.immutable}, so handlers set it only to
  * override the scheme default for a specific URL.
+ *
+ * `Content` is text for most handlers; a handler that can serve binary
+ * (`mcp://` blobs) resolves `InternalResource<string | Buffer>`, which is also
+ * what {@link ProtocolHandler.resolve} and the router return.
  */
-export interface InternalResource {
+export interface InternalResource<Content extends string | Buffer = string> {
 	/** Canonical URL that was resolved */
 	url: string;
-	/** Resolved text content */
-	content: string;
-	/** MIME type: text/markdown, application/json, or text/plain */
-	contentType: "text/markdown" | "application/json" | "text/plain";
+	/**
+	 * Resolved text, or the raw bytes of a binary resource. `read` treats bytes
+	 * like a file of the same name and type (image, document, binary notice);
+	 * byte-oriented consumers (the bash URL filesystem) take them verbatim.
+	 */
+	content: Content;
+	/**
+	 * MIME type: text/markdown, application/json, or text/plain for text; the
+	 * reported type of byte `content` (`application/pdf`), when known.
+	 */
+	contentType: string;
 	/** Content size in bytes */
 	size?: number;
 	/** Underlying filesystem path (for debugging, not exposed to agent) */
@@ -326,7 +340,7 @@ export interface ResolveContext {
 	 */
 	rules?: readonly Rule[];
 	/**
-	 * Calling tool session. Session-bound schemes (`proc://`, `xd://`) require it
+	 * Calling tool session. Session-bound schemes (`proc://`) require it
 	 * and throw when it is absent.
 	 */
 	session?: ToolSession;
@@ -352,10 +366,10 @@ export interface WriteContext {
 	localProtocolOptions?: LocalProtocolOptions;
 	/**
 	 * Calling tool session. Session-bound writes (`agent://` messages,
-	 * `proc://` stdin/stop/mode, `xd://` devices) require it and throw when it is absent.
+	 * `proc://` stdin/stop/mode) require it and throw when it is absent.
 	 */
 	session?: ToolSession;
-	/** The tool call dispatching this write (`write`, or a bash command redirecting into the URL); device dispatch (`xd://`) forwards it to the wrapped tool. */
+	/** The tool call dispatching this write (`write`, or a bash command redirecting into the URL). */
 	toolCall?: {
 		id: string;
 		onUpdate?: AgentToolUpdateCallback;
@@ -364,7 +378,7 @@ export interface WriteContext {
 }
 
 /**
- * Handler for a specific internal URL scheme (e.g., agent://, memory://, skill://, xd://).
+ * Handler for a specific internal URL scheme (e.g., agent://, memory://, skill://).
  */
 export interface ProtocolHandler {
 	/** The scheme this handler processes (without trailing ://) */
@@ -381,7 +395,7 @@ export interface ProtocolHandler {
 	 *   preference to global state.
 	 * @throws Error with user-friendly message if resolution fails
 	 */
-	resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource>;
+	resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource<string | Buffer>>;
 	/**
 	 * Handler-owned write hook: present exactly when `spec.write.via` is
 	 * `"handler"` (the router enforces this at registration). The write tool
@@ -443,7 +457,7 @@ export interface ProtocolHandler {
 	/**
 	 * Sub-path, query and limit grammar the {@link promptDoc} line leaves out
 	 * (rendered from `prompts/internal-urls/<scheme>-reference.md`), served on demand
-	 * at `xd://read/urls`. Reads cheap process facts only; `undefined` omits the scheme.
+	 * at `help://read/urls`. Reads cheap process facts only; `undefined` omits the scheme.
 	 */
 	promptReference?(): string | undefined;
 }

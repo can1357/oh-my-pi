@@ -2,6 +2,49 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fatal interactive errors now print a concise cause and the path to the full log after terminal cleanup. Piped stderr still includes the stack trace.
+- `ptree` child processes spawned without an explicit `env` now inherit `Bun.env`, including values loaded from `.env` files after startup, on every platform rather than only under the Linux subreaper.
+- `<textarea>` and HTML `<title>` content now parses as text, as in a browser: `<…>` parts are kept instead of becoming child elements, and entities are still decoded ([#20299](https://github.com/can1357/oh-my-pi/issues/20299))
+
+## [19.1.0] - 2026-11-21
+
+### Added
+
+- Added `LinearRegExp` (`@oh-my-pi/pi-utils/regex`), a JavaScript-compatible regular expression engine that avoids catastrophic backtracking, with support for scoped modifiers, Unicode modes and properties, Unicode set operations, large repetitions and literal dictionaries, fixed-width block counts, and additional character classes.
+- Added `RegexStream` for detecting regular-expression matches in text received incrementally in chunks.
+- Added `getCodexClientVersionPath()` to locate the Codex client version cache record under the initialized `$XDG_CACHE_HOME/omp` directory.
+
+### Changed
+
+- Improved `LinearRegExp` performance for scans and searches involving delimiters, word backreferences, required literals or suffixes, lookbehinds, and large character alphabets.
+
+### Fixed
+
+- Fixed RAR4 extraction stalling for seconds per filter on archives that declare an out-of-range delta filter channel count; such archives are now rejected as corrupt.
+- Fixed `formatAge` to display durations of one year or more in years, such as `23y ago`, instead of months.
+
+## [19.0.0] - 2026-11-18
+
+### Added
+
+- Added utilities for formatting and parsing session spill URLs using the `local://N.log` format.
+- Added `postmortem.exitCleanlyOnStopSignals()` so long-running services exit successfully after completing cleanup on SIGINT or SIGTERM.
+
+### Fixed
+
+- Fixed Windows shell discovery incorrectly selecting the WSL `bash.exe` launcher, which could cause services to run under WSL.
+- Fixed archive opening so the extraction-size limit is enforced when an oversized member is read rather than preventing access to the entire archive.
+- Fixed `OMP_LOG_LEVEL` so it also controls console output from services such as `omp auth-broker serve`, not just log-file output.
+- Fixed Markdown parsing so emphasis and link labels are not prematurely terminated by marker characters inside code spans, autolinks, inline HTML tags, or link destinations.
+
+## [18.22.2] - 2026-11-18
+
+### Added
+
+- Added `readBoundedBody` and `readBoundedJson` for reading HTTP response bodies with a size limit, with an optional signal so a stalled peer cannot outlive the caller's deadline ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix))
+
 ## [18.21.0] - 2026-11-16
 
 ### Fixed

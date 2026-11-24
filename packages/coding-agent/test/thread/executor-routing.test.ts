@@ -11,7 +11,7 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { __resetDirsFromEnvForTests, logger, removeWithRetries } from "@oh-my-pi/pi-utils";
-import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentProgress } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import { AsyncJobManager } from "../../src/async/job-manager";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
@@ -431,6 +431,21 @@ describe("subagent runs routed into pooled workers", () => {
 			await waitFor(() => !mirror.ircWakesPending);
 			await AgentLifecycleManager.global().park("Parkable");
 			expect(AgentRegistry.global().get("Parkable")?.status).toBe("parked");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"reads a worker-homed child's pending wake on main: set while its run streams, clear once it ends",
+		async () => {
+			const controller = new AbortController();
+			const running = runSubprocess(runOptions("Waker", HANG_TASK, { signal: controller.signal }));
+			await server.hung();
+			const session = AgentRegistry.global().get("Waker")?.session;
+			await waitFor(() => session?.hasPendingWake === true);
+			controller.abort(new Error("stop from main"));
+			await running;
+			await waitFor(() => session?.hasPendingWake === false);
 		},
 		TEST_TIMEOUT_MS,
 	);

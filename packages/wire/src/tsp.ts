@@ -195,6 +195,20 @@ export interface TspCommonProps {
 	 * that don't know it ignore it and keep showing `title`.
 	 */
 	hovercard?: TspPropNode;
+	/**
+	 * `layout` makes the node a layout-transition container: descendants carrying a {@link motionKey} glide to
+	 * their new place and size when an update moves, resizes, adds or removes them; new keys fade in, leaving
+	 * ones fade out. Reduced motion turns it off.
+	 */
+	transition?: "layout";
+	/** A `transition` container's duration in ms (200 by default, at most 1000; 0 snaps). */
+	transitionMs?: number;
+	/**
+	 * The node's identity in its nearest `transition` container. Unlike `key`, it survives a move to another
+	 * parent, so the node glides there; give two shapes of one thing (a folded and an open question) the
+	 * same one so it resizes instead of swapping.
+	 */
+	motionKey?: string;
 }
 
 /** A {@link TspCommonProps.mark}. */
@@ -208,12 +222,60 @@ export type TspPreview = { lines: number } | "auto";
 export interface TspColProps {
 	gap?: TspSpace;
 	align?: "start" | "center" | "end" | "stretch";
+	/**
+	 * On a dock composer's container: fold it to its compact row now, as an unfocused pane's composer folds,
+	 * while the keys are elsewhere in the document (a question above it).
+	 */
+	folded?: boolean;
+	/** On `omp.tray`: a counter the program bumps to move keyboard focus into the tray (acted on a change, never on first sight). */
+	focus?: number;
+	/** On `omp.tray`: the `ref` of the card its `omp.tray.peek` child belongs to. */
+	peek?: string;
+	/** On `omp.tray` (sent while it has cards): what the main agent is doing. */
+	main?: TspTrayMain;
+	/**
+	 * On `omp.tray`: it holds only finished work (nothing queued, running or failed). The host keeps a
+	 * quiet tray out of sight until the user asks for it.
+	 */
+	quiet?: boolean;
+	/** On `omp.tray.card`: what the card stands for. */
+	item?: TspTrayItem;
+	/** On `omp.tray.card` and `omp.tray.peek`: the item's id (an agent id, a job id, or `done`). */
+	ref?: string;
+	/** On `omp.tray.card`: the item's state. */
+	status?: TspTrayStatus;
+	/**
+	 * On an agent's `omp.tray.card` while `running`: the call it is in only waits on its own agents or
+	 * jobs (`wait`, `vibe_wait`), so it does no work of its own until that call returns.
+	 */
+	waiting?: boolean;
+	/** On an agent's `omp.tray.card`: epoch ms of its last operation (its latest tool call start, or when it settled). */
+	acted?: number;
+	/** On `omp.tray.card`: `false` when its closer look would add nothing to its face (`tray.peek` on it is ignored). */
+	look?: boolean;
 }
+/** What an `omp.tray.card` stands for. */
+export type TspTrayItem = "agent" | "job" | "done";
+/** The state of an `omp.tray.card`. */
+export type TspTrayStatus = "queued" | "running" | "done" | "failed" | "stopped";
+/**
+ * The main agent on `omp.tray`: `idle` once it has yielded (no turn runs, or the run waits only on
+ * outside work); `waiting` while every call it executes only blocks on its agents or jobs (a `wait`,
+ * a `vibe_wait`, a `task` call running an agent inline), or its last calls were such and it has
+ * started nothing else since; `working` otherwise.
+ */
+export type TspTrayMain = "idle" | "working" | "waiting";
 export interface TspRowProps {
 	gap?: TspSpace;
 	align?: "start" | "center" | "baseline" | "end" | "stretch";
 	justify?: "start" | "between" | "end";
 	wrap?: boolean;
+	/** On `omp.tray.ev`: how the operation went, or `run` while it is in flight. */
+	state?: "ok" | "err" | "run";
+	/** On `omp.tray.done.item`: the finished agent's id. */
+	ref?: string;
+	/** On `omp.tray.done.item`: how the agent ended, which colors its dot. */
+	status?: "done" | "failed" | "stopped";
 }
 export interface TspCardProps {
 	/** Header content, inline. */
@@ -1134,6 +1196,18 @@ export interface TspShellProps {
 	 * disclosure, and never applies in the inspector. The Raw/Pseudo switch and menu stay on the first visible line.
 	 */
 	preview?: { lines: number };
+	/**
+	 * Step mode: every segment with an execution node (`executionNode ?? node ?? row.node`) is a click target
+	 * (pointer, `role=button`, Enter/Space) sending the `shell-viz` action `select:<executionNode>`; hovering one
+	 * highlights every segment of that step. Chips with `expanded` keep sending `expand:<node>` only. No details
+	 * panel and no gutter Inspect command button; effect chips and annotations keep their text as a tooltip.
+	 */
+	steps?: boolean;
+	/**
+	 * Execution-node keys of the step whose output the host shows now: every segment drawn under one of them is
+	 * marked focused, re-applied whenever this changes even when the rows did not.
+	 */
+	focus?: readonly string[];
 }
 
 /** Kind-specific props, indexed by kind. */
@@ -1299,8 +1373,12 @@ export type TspEvent =
 	| { ev: "resize"; sf?: string; cols: number; cell?: { w: number; h: number }; visible?: boolean }
 	| { ev: "theme"; dark: boolean }
 	| { ev: "motion"; reduce: boolean }
+	/** The terminal's features changed (a setting: Tern's Agents tray drops `tray`); the list replaces `hello.features`. */
+	| { ev: "features"; features: readonly string[] }
 	| { ev: "visible"; sf?: string; visible: boolean }
 	| { ev: "toggle"; sf: string; id: string; key?: string; collapsed: boolean }
+	/** Menu opening/closing; a toggle of a named sub-item also reports its id. */
+	| { ev: "toggle"; sf: string; id: string; open: boolean; item?: string }
 	| { ev: "select"; sf: string; id: string; item: string }
 	| { ev: "activate"; sf: string; id: string; item: string }
 	/** A click action; a `menu` check or radio row adds its new `checked` state. */
@@ -1362,4 +1440,5 @@ export type TspEvent =
 	 */
 	| { ev: "focus"; sf: string; id: string }
 	| { ev: "error"; sf?: string; s?: number; op?: number; msg: string }
+	/** A lost surface, or (scoped to `sf`) settled main children dropped under the retention budget. */
 	| { ev: "gone"; sf?: string; ids: readonly string[] };

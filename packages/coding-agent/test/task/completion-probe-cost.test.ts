@@ -122,6 +122,7 @@ describe("completion probe cost persistence", () => {
 				type: "model_usage",
 				purpose: "task-completion-probe",
 				usage: { cost: { total: 0.4 } },
+				completion: { reply: "The task is about 80% complete." },
 			});
 			if (!probeUsage) throw new Error("Expected probe usage in the live session");
 			expect(sessionManager.getBranch().some(entry => entry.id === probeUsage.id)).toBe(false);

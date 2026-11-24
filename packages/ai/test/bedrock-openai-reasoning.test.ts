@@ -87,4 +87,23 @@ describe("Bedrock OpenAI-schema reasoning", () => {
 			}
 		},
 	);
+
+	test.each(["global.moonshotai.kimi-k3.1", "us.moonshotai.kimi-k3.1"])(
+		"exposes the documented K3.1 efforts and sends them for the %s inference profile",
+		async id => {
+			const model = bedrockModel(id, undefined);
+			expect(model.thinking).toMatchObject({
+				mode: "effort",
+				efforts: OPENAI_LADDER,
+				defaultLevel: Effort.Max,
+				requiresEffort: true,
+			});
+			for (const effort of [Effort.XHigh, Effort.Max]) {
+				const payload = (await payloadFor(model, effort)) as {
+					additionalModelRequestFields?: Record<string, unknown>;
+				};
+				expect(payload.additionalModelRequestFields).toEqual({ reasoning: { effort } });
+			}
+		},
+	);
 });

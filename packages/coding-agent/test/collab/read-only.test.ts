@@ -30,6 +30,7 @@ interface HostHarness {
 	ctx: InteractiveModeContext;
 	prompts: { from?: string }[];
 	aborts: { count: number };
+	resumes: { count: number };
 	/** Resolves on the next promptCustomMessage call — no polling. */
 	nextPrompt(): Promise<{ from?: string }>;
 }
@@ -38,6 +39,7 @@ interface HostHarness {
 function makeHostContext(): HostHarness {
 	const prompts: { from?: string }[] = [];
 	const aborts = { count: 0 };
+	const resumes = { count: 0 };
 	const promptWaiters: ((details: { from?: string }) => void)[] = [];
 	const ctx = {
 		settings: Settings.isolated(),
@@ -68,14 +70,16 @@ function makeHostContext(): HostHarness {
 				aborts.count++;
 				return Promise.resolve();
 			},
+			resume: () => {
+				resumes.count++;
+				return Promise.resolve();
+			},
 		},
 		eventBus: undefined,
 		statusLine: {
 			setCollabStatus: () => {},
-			invalidate: () => {},
-			getCachedContextBreakdown: () => ({ usedTokens: 0, contextWindow: 0 }),
+			facts: () => ({ context: { tokens: 0, window: 0, percent: null } }),
 		},
-		ui: { requestRender: () => {} },
 		showStatus: () => {},
 		collabHost: undefined,
 	} as unknown as InteractiveModeContext;
@@ -84,7 +88,7 @@ function makeHostContext(): HostHarness {
 		promptWaiters.push(resolve);
 		return promise;
 	};
-	return { ctx, prompts, aborts, nextPrompt };
+	return { ctx, prompts, aborts, resumes, nextPrompt };
 }
 
 interface TestGuest {
@@ -161,6 +165,7 @@ afterEach(() => {
 	for (const cleanup of guestCleanups.splice(0).reverse()) cleanup();
 	harness.prompts.length = 0;
 	harness.aborts.count = 0;
+	harness.resumes.count = 0;
 });
 
 afterAll(async () => {
@@ -322,7 +327,7 @@ describe("collab read-only links", () => {
 	}
 
 	it("welcomes view-link guests read-only and refuses their mutating frames", async () => {
-		const { prompts, aborts } = harness;
+		const { prompts, aborts, resumes } = harness;
 		expect(host.viewLink).not.toBe(host.link);
 
 		const guest = await joinAsGuest(host.viewLink, "viewer");
@@ -340,6 +345,13 @@ describe("collab read-only links", () => {
 		guest.socket.send({ t: "abort" });
 		const abortReply = await guest.nextFrame();
 		expect(abortReply.t).toBe("error");
+		expect(aborts.count).toBe(0);
+
+		for (const frame of [{ t: "resume" }, { t: "deliver-queue" }] as const) {
+			guest.socket.send(frame);
+			expect((await guest.nextFrame()).t).toBe("error");
+		}
+		expect(resumes.count).toBe(0);
 		expect(aborts.count).toBe(0);
 
 		guest.socket.send({ t: "agent-cmd", cmd: "kill", agentId: "nope" });

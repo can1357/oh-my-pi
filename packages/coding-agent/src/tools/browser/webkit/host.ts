@@ -12,9 +12,10 @@
  * visible, focused window either way.
  */
 import * as path from "node:path";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tool-errors";
 import { logger, readLines } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
+import { ToolAbortError } from "../../tool-errors";
 import { gracefulKillTreeOnce } from "../attach";
 import type { TernInputStep } from "../tern/keys";
 import { TernSocketClient, type TernTransport, type TernTransportEvents } from "../tern/wire";
@@ -24,6 +25,15 @@ import { WebKitViewer } from "./viewer";
 const EXIT_GRACE_MS = 2_000;
 /** How long the host's last output may trail its exit (or its exit trail the end of its output). */
 const DRAIN_MS = 250;
+/**
+ * How long a started host may take to answer the greeting. The first launch of
+ * a new engine build on macOS waits while the system scans each of its
+ * ad-hoc-signed binaries and libraries, one at a time, which can take longer
+ * than a socket peer's limit. A host that fails exits, and its exit is reported
+ * at once, so this only limits a host that hangs. The open's deadline still
+ * applies, so a host that hangs past it fails the open rather than falling back.
+ */
+const GREETING_TIMEOUT_MS = 60_000;
 
 /** omp's WebKit host cannot run here: it did not start, or could not open its first tab. An open falls back to Chromium. */
 export class WebKitUnavailableError extends ToolError {}
@@ -33,6 +43,7 @@ class HostProcessTransport implements TernTransport {
 	readonly product = "WebKit";
 	readonly peer: string;
 	readonly waitsForEvents = true;
+	readonly greetingTimeoutMs = GREETING_TIMEOUT_MS;
 	readonly #executable: string;
 	#child: Subprocess<"pipe", "pipe", "pipe"> | undefined;
 	#ended = false;
@@ -140,15 +151,21 @@ export class WebKitHost {
 	/**
 	 * Start `executable` and greet it. A host that cannot be started, exits, or
 	 * does not answer the greeting is a {@link WebKitUnavailableError}; what was
-	 * started is stopped again.
+	 * started is stopped again, as it is when `signal` aborts before the greeting.
 	 */
-	static async launch(executable: string, viewerPath?: string): Promise<WebKitHost> {
+	static async launch(executable: string, viewerPath?: string, signal?: AbortSignal): Promise<WebKitHost> {
 		const host = new WebKitHost(executable, viewerPath);
+		const abandon = (): void => host.client.close();
+		signal?.addEventListener("abort", abandon, { once: true });
 		try {
+			if (signal?.aborted) abandon();
 			await host.client.connect();
 		} catch (error) {
 			await host.close();
+			if (signal?.aborted) throw new ToolAbortError("Browser open aborted");
 			throw new WebKitUnavailableError(error instanceof Error ? error.message : String(error));
+		} finally {
+			signal?.removeEventListener("abort", abandon);
 		}
 		logger.debug("WebKit host started", { executable, pid: host.pid });
 		return host;

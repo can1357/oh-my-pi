@@ -1,4 +1,9 @@
-import { DEFAULT_MAX_BYTES, type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import {
+	type ArtifactAllocator,
+	DEFAULT_MAX_BYTES,
+	type OutputArtifactError,
+	OutputSink,
+} from "../../tools/streaming-output";
 import type { ToolSession } from "../../tools";
 import {
 	resolveOutputMaxColumns,
@@ -8,7 +13,7 @@ import {
 import { isEvalTimeoutControlEvent, withBridgeTimeoutPause } from "../bridge-timeout";
 import { DisplayOutputCollector } from "../executor-base";
 import type { EvalDisplayOutput } from "../types";
-import { executeInVmContext } from "./context-manager";
+import { executeInVmContext, hasLiveVmContext } from "./context-manager";
 import { formatCellError } from "./error-text";
 import { installJsPackages } from "./package-installer";
 import type { JsPackageEnvironmentMode } from "./package-installer";
@@ -32,6 +37,7 @@ export interface JsExecutorOptions {
 	onReply?: (text: string) => void;
 	signal?: AbortSignal;
 	sessionId: string;
+	parentToolCallId?: string;
 	/** Logical owner identifier; scopes retained-worker cleanup. */
 	kernelOwnerId?: string;
 	reset?: boolean;
@@ -42,8 +48,7 @@ export interface JsExecutorOptions {
 	packages?: string[];
 	/** Package target. Repository mutation requires explicit project selection. */
 	environment?: JsPackageEnvironmentMode;
-	artifactPath?: string;
-	artifactId?: string;
+	allocateArtifact?: ArtifactAllocator;
 	session: ToolSession;
 	/** On-disk roots the helpers substitute for internal-URL schemes (e.g. `local://`). */
 	localRoots?: Record<string, string>;
@@ -105,8 +110,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 	const display = new DisplayOutputCollector();
 	const displayOutputs = display.outputs;
 	const outputSink = new OutputSink({
-		artifactPath: options.artifactPath,
-		artifactId: options.artifactId,
+		allocateArtifact: options.allocateArtifact,
 		spillThreshold: DEFAULT_MAX_BYTES,
 		headBytes: resolveOutputSinkHeadBytes(options.session.settings),
 		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(options.session.settings),
@@ -143,6 +147,14 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 				: await installJsPackages(installOptions);
 		packageSignal?.throwIfAborted();
 		if (install.summary) outputSink.push(`${install.summary}\n`);
+		// Bun's resolver caches node_modules directory listings per process, so a retained
+		// worker cannot see packages added after it looked there: restart it to resolve them.
+		const restartForInstall = packages.length > 0 && !options.reset && hasLiveVmContext(options.sessionId);
+		if (restartForInstall) {
+			outputSink.push(
+				"The retained JS worker was restarted so the new packages resolve; earlier JS globals were cleared.\n",
+			);
+		}
 		packageWorkComplete = true;
 		// Start the legacy compute timer only after host-side package work. The
 		// eval tool's normal idle watchdog is already paused by the status
@@ -167,13 +179,14 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			localRoots: options.localRoots,
 			packageRoot: install.environment.packageRoot,
 			packageEnvironment: install.environment.description,
-			reset: options.reset,
+			reset: options.reset || restartForInstall,
 			code,
 			filename,
 			timeoutMs: runtimeTimeoutMs ?? options.idleTimeoutMs,
 			runState: {
 				signal,
 				onReply: options.onReply,
+				parentToolCallId: options.parentToolCallId,
 				onText: chunk => outputSink.push(chunk),
 				onDisplay: output => {
 					if (output.type === "status") {

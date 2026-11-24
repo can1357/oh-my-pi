@@ -31,7 +31,7 @@
     },
     "enabledServers": {
       "type": "array",
-      "description": "User-level allowlist that overrides a discovered server's `enabled: false` flag (e.g. when the source config is owned by another tool such as opencode.json). The denylist still wins.",
+      "description": "User-level allowlist that overrides a discovered server's `enabled: false` flag (e.g. when the source config is owned by another tool such as opencode.json) and keeps a server a built-in transform would drop. The denylist still wins.",
       "items": {
         "type": "string",
         "minLength": 1

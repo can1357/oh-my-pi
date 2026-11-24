@@ -15,6 +15,7 @@ import type {
 	VercelGatewayRouting,
 } from "@oh-my-pi/pi-catalog/types";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
+import { parseOtariCredential } from "@oh-my-pi/pi-catalog/wire/otari";
 import { resolveXiaomiRequestBaseUrl } from "../registry/oauth/xiaomi";
 import {
 	COREWEAVE_PROJECT_HEADER,
@@ -57,6 +58,7 @@ import {
 	type StreamOptions,
 	shouldSendServiceTier,
 	type TextContent,
+	type AssistantMessagePhase,
 	type TextSignatureV1,
 	type ThinkingContent,
 	type Tool,
@@ -193,6 +195,8 @@ export interface OpenAIRequestSetupOptions {
 	};
 	sessionId?: string;
 	promptCacheSessionId?: string;
+	/** Parent conversation of a side request; routes OpenCode's `x-opencode-session` (see `applyInferenceHeaders`). */
+	parentSessionId?: string;
 	/**
 	 * Explicit prompt-cache identity only, never the sessionId fallback:
 	 * callers set it from the already-resolved `promptCacheSessionId` when an
@@ -328,6 +332,13 @@ export function resolveOpenAIRequestSetup(
 		if (credential.baseUrl) baseUrl = credential.baseUrl;
 	}
 
+	if (model.provider === "otari" && options.apiKey) {
+		const credential = parseOtariCredential(rawApiKey);
+		if (!credential) throw new AIError.ConfigurationError("Invalid Otari credential");
+		apiKey = credential.token;
+		if (credential.baseUrl) baseUrl = credential.baseUrl;
+	}
+
 	if (options.alibabaCodingPlanAuth && model.provider === "alibaba-coding-plan") {
 		try {
 			const parsed = JSON.parse(rawApiKey);
@@ -361,6 +372,7 @@ export function resolveOpenAIRequestSetup(
 		protocol: "openai",
 		sessionId,
 		cacheAffinity: resolveOpenCodeGoCacheAffinity(model, options.promptCacheAffinityKey),
+		parentSessionId: options.parentSessionId,
 	});
 	if (options.promptCacheSessionId && model.compat?.promptCacheSessionHeader) {
 		setHeaderIfAbsent(headers, model.compat.promptCacheSessionHeader, options.promptCacheSessionId);
@@ -400,11 +412,11 @@ export function applyOpenAIServiceTier(
  * Standard OpenAI Responses service-tier cost multipliers. The non-Codex
  * Responses path bills the tier it was served (or requested): Flex processing is
  * half price; Priority (Fast mode) is a 2x premium. Codex bills the same tiers
- * with its own table (Fast is 2.5x on every model) and applies that separately.
+ * with its own table (Fast is 2.5x, or 2x on GPT-6.2) and applies that separately.
  * `ultrafast` has no API-generic default — only models with a published
  * ultrafast price carry a `serviceTierCost.ultrafast` entry (GPT-6 Astra and
- * GPT-6.1 Sol, 6x) and everything else stays at 1x rather than an invented
- * multiplier.
+ * GPT-6.1 Sol at 6x, GPT-6.2 at 3x) and everything else stays at 1x rather than
+ * an invented multiplier.
  */
 function getOpenAIResponsesServiceTierCostMultiplier(
 	model: Pick<Model, "serviceTierCost">,
@@ -1497,6 +1509,11 @@ export function encodeTextSignatureV1(id: string, phase?: TextSignatureV1["phase
 	return JSON.stringify(payload);
 }
 
+/** Narrows a wire `phase` value to a known {@link AssistantMessagePhase}; unknown values yield `undefined`. */
+export function parseAssistantMessagePhase(value: unknown): AssistantMessagePhase | undefined {
+	return value === "commentary" || value === "final_answer" || value === "partial_answer" ? value : undefined;
+}
+
 export function parseTextSignature(
 	signature: string | undefined,
 ): { id: string; phase?: TextSignatureV1["phase"] } | undefined {
@@ -1505,8 +1522,9 @@ export function parseTextSignature(
 		try {
 			const parsed = JSON.parse(signature) as Partial<TextSignatureV1>;
 			if (parsed.v === 1 && typeof parsed.id === "string") {
-				if (parsed.phase === "commentary" || parsed.phase === "final_answer") {
-					return { id: parsed.id, phase: parsed.phase };
+				const phase = parseAssistantMessagePhase(parsed.phase);
+				if (phase) {
+					return { id: parsed.id, phase };
 				}
 				return { id: parsed.id };
 			}

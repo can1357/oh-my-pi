@@ -6,6 +6,7 @@ import { Settings } from "../../src/config/settings";
 import { InternalUrlRouter, SecurityProtocolHandler } from "../../src/internal-urls";
 import { parseInternalUrl } from "../../src/internal-urls/parse";
 import { importCodexSecurityBundle, importSarifFile, SecurityStore } from "../../src/security";
+import { resourceText } from "../helpers/resource-text";
 
 const FIXTURE_ROOT = path.join(import.meta.dir, "..", "fixtures", "security");
 let temporaryRoot = "";
@@ -106,7 +107,9 @@ describe("security://", () => {
 
 		const list = await router.resolve(listUrl, { cwd: repositoryRoot });
 		const detail = await router.resolve(detailUrl, { cwd: repositoryRoot });
-		const entry = list.content.split("\n").find(line => line.includes(`\`${finding.id}\``));
+		const entry = resourceText(list)
+			.split("\n")
+			.find(line => line.includes(`\`${finding.id}\``));
 		expect(entry).toContain("**validated**");
 		expect(detail.content).toContain("- Disposition: **open**");
 		expect(detail.content).toContain("- Validation: **validated** (2026-11-04T09:52:00.949Z)");

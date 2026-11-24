@@ -271,7 +271,7 @@ const LOCAL_OPENAI_COMPAT_PROVIDERS: Record<string, true> = {
 	vllm: true,
 	ollama: true,
 };
-const PROXY_OPENAI_COMPAT_PROVIDERS: Record<string, true> = { litellm: true };
+const PROXY_OPENAI_COMPAT_PROVIDERS: Record<string, true> = { litellm: true, bifrost: true };
 function hasLocalLoopbackBaseUrl(baseUrl: string | undefined): boolean {
 	if (!baseUrl) return false;
 	let hostname: string;
@@ -536,6 +536,8 @@ function detectOpenAICompat(
 		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",
 		requiresToolResultName: isMistral,
 		requiresAssistantAfterToolResult: isMistral,
+		foldUserAfterToolResult: false,
+		splitToolCalls: false,
 		requiresThinkingAsText: isMistral,
 		requiresMistralToolIds: isMistral,
 		thinkingFormat,
@@ -543,7 +545,7 @@ function detectOpenAICompat(
 		reasoningDisableMode: d.isVenice ? "venice-disable-thinking" : resolveReasoningDisableMode(thinkingFormat),
 		omitReasoningEffort: false,
 		includeEncryptedReasoning: true,
-		filterReasoningHistory: d.isOpenRouter && isAnthropicModel,
+		filterReasoningHistory: false,
 		thinkingKeep: usesMoonshotKimiPreservedThinking ? "all" : undefined,
 		reasoningContentField: "reasoning_content",
 		mistralReasoningContentParts: undefined,
@@ -767,6 +769,7 @@ function resolveOpenAIResponsesPolicy(
 		supportsAllTurnsReasoningContext: false,
 		supportsConfigurationUpdate: false,
 		supportsSteering: false,
+		uncachedInstructions: false,
 		requiresReasoningOffJuiceInstruction: false,
 		stripImageInput: false,
 		reasoningEffortMap: {},
@@ -777,7 +780,7 @@ function resolveOpenAIResponsesPolicy(
 		reasoningDisableMode: resolveReasoningDisableMode(thinkingFormat),
 		omitReasoningEffort: false,
 		includeEncryptedReasoning: true,
-		filterReasoningHistory: isOpenRouter && isAnthropicModel,
+		filterReasoningHistory: false,
 		disableReasoningOnForcedToolChoice: facts.is("kimi"),
 		disableReasoningOnToolChoice: isDeepseekFamily && reasoningCapable && !isOpenRouter,
 		disableReasoningWithTools: false,
@@ -798,6 +801,8 @@ function resolveOpenAIResponsesPolicy(
 		requiresMistralToolIds: false,
 		requiresToolResultName: false,
 		requiresAssistantAfterToolResult: false,
+		foldUserAfterToolResult: false,
+		splitToolCalls: false,
 		requiresAssistantContentForToolCalls: facts.is("kimi"),
 		openRouterRouting: undefined,
 		vercelGatewayRouting: undefined,
@@ -883,6 +888,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		supportsAllTurnsReasoningContext: compat.supportsAllTurnsReasoningContext,
 		supportsConfigurationUpdate: compat.supportsConfigurationUpdate,
 		supportsSteering: compat.supportsSteering,
+		uncachedInstructions: compat.uncachedInstructions,
 		officialEndpoint: compat.officialEndpoint,
 		harmonyLeakMitigation: compat.harmonyLeakMitigation,
 		cacheControlFormat: compat.cacheControlFormat,

@@ -2,6 +2,50 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `SoftToolRequirement.unsatisfiedNotice`: the skipped-result text for a call to the required tool that fails `satisfies`, so a host can name the invocation it needs instead of the generic request to call that tool ([#20335](https://github.com/can1357/oh-my-pi/pull/20335) by [@baekjosh](https://github.com/baekjosh))
+- `transformProviderContext` now receives the request's abort signal, and `Agent.buildSideRequestContext` accepts one to pass along ([#20369](https://github.com/can1357/oh-my-pi/pull/20369) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Added `AgentLoopError`, thrown when the loop ends a turn itself (a soft tool requirement the model never met); `Agent` marks that turn's error message `errorFromAgentLoop` so hosts can tell it from a failed request ([#20336](https://github.com/can1357/oh-my-pi/pull/20336) by [@baekjosh](https://github.com/baekjosh))
+
+### Fixed
+
+- Fixed DeepSeek DSML markup leaking into tool-call arguments (e.g. a `</｜DSML｜ parameter>` tail on an edit or bash command) being executed and replayed; the leaked tail is now cut before the call runs
+- Fixed DSML markup removed from a DeepSeek turn's text and reasoning still being sent back to the model on OpenRouter's Responses route, which replays the turn's original output items
+- Fixed the loop aborting an unmet soft tool requirement without answering that turn's tool calls, so continuing the run (as a retry does) executed a call the requirement had refused ([#20338](https://github.com/can1357/oh-my-pi/pull/20338) by [@baekjosh](https://github.com/baekjosh))
+
+## [19.1.1] - 2026-11-23
+
+### Fixed
+
+- Prevented oversized handoffs from reaching the provider by detecting when prepared context exceeds the target model’s context window.
+- Preserved provider error status, error identifiers, retry classification, and cancellation markers on failed or cancelled assistant turns.
+- Fixed speculative tool calls hanging when discarded or aborted before execution completed.
+
+## [19.1.0] - 2026-11-21
+
+### Added
+
+- Added standby tools support through `Agent.setStandbyTools()` and `AgentContext.standbyTools`, allowing tools to remain inactive until a request explicitly enables tool use.
+
+## [19.0.0] - 2026-11-18
+
+### Added
+
+- Added support for excluding custom messages from model context and compaction or branch summaries, while allowing queued steering and follow-up messages to continue correctly after excluded messages.
+
+## [18.22.1] - 2026-11-17
+
+### Added
+
+- A model on an extension's custom api can take the Anthropic on-demand compaction lane by declaring `remoteCompaction: { api: "anthropic-messages", enabled: true }`; the request goes through its own stream like any turn ([#19580](https://github.com/can1357/oh-my-pi/pull/19580) by [@ryanskidmore](https://github.com/ryanskidmore))
+
+### Fixed
+
+- Fixed provider-error handling so failed tool calls are no longer fed back to the model as refusal explanations.
+- Fixed one-shot retries and title generation for custom Zhipu Coding Plan providers so Beijing-time quota resets are honored.
+- Fixed OpenAI remote compaction (V1 and V2) dropping configured headers of models.yml and extension-registered models, so header-authenticated gateways returned 401 ([#19579](https://github.com/can1357/oh-my-pi/pull/19579) by [@ryanskidmore](https://github.com/ryanskidmore))
+
 ## [18.20.1] - 2026-11-14
 
 ### Fixed

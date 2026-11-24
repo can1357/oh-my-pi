@@ -1,6 +1,6 @@
 import type { DeferredDiagnosticsEntry, ToolSession } from "../tools";
 import { getDiagnosticsLedger } from "./diagnostics-ledger";
-import type { FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
+import type { FileDiagnosticsResult } from "../tools/details/lsp";
 import type { WritethroughDeferredHandle } from "./index";
 
 import { cfgLspDiagnosticsDeduplicate } from "./settings";

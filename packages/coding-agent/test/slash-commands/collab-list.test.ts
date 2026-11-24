@@ -3,17 +3,17 @@ import { CollabController } from "@oh-my-pi/pi-coding-agent/collab/controller";
 import type { CollabHostSnapshot } from "@oh-my-pi/pi-coding-agent/collab/registry";
 import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import {
 	type BuiltinSlashCommandRuntime,
 	executeBuiltinSlashCommand,
 } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
+import { initTheme } from "../../src/ui/theme/service";
 
 beforeAll(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
-	await initTheme(false);
+	initTheme();
 });
 
 afterEach(() => {
@@ -44,7 +44,7 @@ function createHarness() {
 	const showStatus = vi.fn();
 	const showError = vi.fn();
 	const ctx = {
-		editor: { setText },
+		composer: { setText },
 		showStatus,
 		showError,
 		settings: { get: () => "" },

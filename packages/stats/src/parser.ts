@@ -335,6 +335,17 @@ function extractStats(
 	};
 }
 
+/**
+ * Stored for a `model_usage` entry whose `purpose` is missing or not a string:
+ * a non-null purpose is what keeps the row off the conversation turns.
+ */
+const UNKNOWN_PURPOSE = "unknown";
+
+/**
+ * Row for a `model_usage` entry (usage of a model call that is not a
+ * conversation turn). It keeps the entry's raw `purpose`, which assistant
+ * messages lack, and the request timings newer entries carry.
+ */
 function extractModelUsageStats(
 	sessionFile: string,
 	folder: string,
@@ -342,7 +353,7 @@ function extractModelUsageStats(
 	agentType: AgentType,
 ): MessageStatsInput | null {
 	const timestamp = Date.parse(entry.timestamp);
-	return extractStats(
+	const stats = extractStats(
 		sessionFile,
 		folder,
 		{
@@ -360,11 +371,16 @@ function extractModelUsageStats(
 				stopReason: entry.stopReason ?? "stop",
 				errorMessage: entry.errorMessage,
 				timestamp: Number.isFinite(timestamp) ? timestamp : 0,
+				duration: isFiniteCount(entry.duration) ? entry.duration : undefined,
+				ttft: isFiniteCount(entry.ttft) ? entry.ttft : undefined,
 			},
 		},
 		undefined,
 		agentType,
 	);
+	if (!stats) return null;
+	stats.purpose = typeof entry.purpose === "string" && entry.purpose.length > 0 ? entry.purpose : UNKNOWN_PURPOSE;
+	return stats;
 }
 
 /** Message timestamp, falling back to the entry's ISO timestamp, then 0. */
@@ -525,7 +541,7 @@ export function parseAllSessionEntries(bytes: Uint8Array): SessionEntry[] {
 
 /**
  * Entries that start a new request below a user message rather than lead to its reply: a `/clear` and the custom
- * messages that open a user turn (a directly invoked skill, a collab peer's prompt), as pi-tui's
+ * messages that open a user turn (a directly invoked skill, a collab peer's prompt), as the coding agent's
  * `isUserTurnInitiator` defines them.
  */
 function startsNewRequest(entry: SessionEntry): boolean {

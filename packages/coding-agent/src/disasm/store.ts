@@ -1,8 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDir, peekFile } from "@oh-my-pi/pi-utils";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { shortenPath } from "../utils/render-utils";
+import { ToolError } from "../tools/tool-errors";
 import type { DisasmBackend } from "./backend";
 
 /** Number of leading bytes needed by {@link isExecutableHeader} (a full 64-byte DOS header for PE). */
@@ -228,9 +228,24 @@ async function hashFileContent(absPath: string): Promise<string> {
 }
 
 /**
+ * Lock target of an in-place database at `realPath` (already symlink-resolved). A file directly inside one of
+ * `backend`'s managed store directories (`<agent dir>/<storeDir>/<id>/`) shares that directory's `db` lock,
+ * spelled exactly as {@link locateDatabase} spells it for the managed unit, so opening a managed database by
+ * its own path cannot run beside the unit that manages it.
+ */
+async function inPlaceLockTarget(backend: DisasmBackend, realPath: string): Promise<string> {
+	const dir = path.dirname(realPath);
+	const storeRoot = path.join(getAgentDir(), backend.storeDir);
+	const realStoreRoot = await fs.promises.realpath(storeRoot).catch(() => storeRoot);
+	return path.dirname(dir) === realStoreRoot ? path.join(storeRoot, path.basename(dir), "db") : realPath;
+}
+
+/**
  * Compute the database location for a binary (content-addressed store, one per slice of a universal binary)
- * or an existing `.i64`/`.idb` (in place).
- * Throws a ToolError when `arch` is given for a thin binary or IDB, or names no slice.
+ * or an existing backend database such as `.i64`/`.idb`/`.bndb` (in place).
+ * An in-place database is identified and locked by its symlink-resolved path, so every name of one file
+ * maps to one unit and one lock.
+ * Throws a ToolError when `arch` is given for a thin binary or a database, or names no slice.
  */
 export async function locateDatabase(
 	backend: DisasmBackend,
@@ -238,26 +253,29 @@ export async function locateDatabase(
 	options: LocateDatabaseOptions = {},
 ): Promise<DatabaseLocation> {
 	const absPath = path.resolve(sourcePath);
-	const name = sanitizeDatabaseName(path.basename(absPath));
-	const slices = backend.isDatabasePath(absPath) ? null : await readFatSlices(absPath);
+	const isDatabase = backend.isDatabasePath(absPath);
+	const slices = isDatabase ? null : await readFatSlices(absPath);
 	if (options.arch !== undefined && !slices) {
 		throw new ToolError(`${shortenPath(absPath)} is not a universal binary; drop ${SLICE_SEPARATOR}${options.arch}`);
 	}
 
-	if (backend.isDatabasePath(absPath)) {
-		const pathSha = new Bun.CryptoHasher("sha256").update(absPath).digest("hex");
+	if (isDatabase) {
+		// A missing file keeps its lexical path; the worker's open reports it.
+		const realPath = await fs.promises.realpath(absPath).catch(() => absPath);
+		const pathSha = new Bun.CryptoHasher("sha256").update(realPath).digest("hex");
 		return {
-			id: `${name}-${pathSha.slice(0, 8)}`,
-			dir: path.dirname(absPath),
+			id: `${sanitizeDatabaseName(path.basename(realPath))}-${pathSha.slice(0, 8)}`,
+			dir: path.dirname(realPath),
 			sourcePath: absPath,
-			stagedPath: absPath,
+			stagedPath: realPath,
 			kind: "inplace",
-			openPath: absPath,
+			openPath: realPath,
 			isNew: false,
-			lockTarget: absPath,
+			lockTarget: await inPlaceLockTarget(backend, realPath),
 		};
 	}
 
+	const name = sanitizeDatabaseName(path.basename(absPath));
 	const sha = await hashFileContent(absPath);
 	const fat = slices ? { slice: selectSlice(slices, options.arch), slices } : undefined;
 	const id = `${sha.slice(0, 16)}-${name}${fat ? `.${sanitizeDatabaseName(fat.slice.arch)}` : ""}`;
@@ -276,15 +294,16 @@ export async function locateDatabase(
 }
 
 /**
- * Validate an in-place location (refuses when IDA has it unpacked) or stage a store binary and settle `loc.openPath`/`loc.isNew`.
+ * Validate an in-place location (refuses while the backend's application has it unpacked) or stage a store binary and settle `loc.openPath`/`loc.isNew`.
  * Call only while holding the lock on `loc.lockTarget` and only when the DB is not already open in this process.
  */
 export async function prepareStoreDir(backend: DisasmBackend, loc: DatabaseLocation): Promise<void> {
 	if (loc.kind === "inplace") {
-		const id0Path = path.join(loc.dir, `${path.basename(loc.openPath, path.extname(loc.openPath))}.id0`);
-		if (await Bun.file(id0Path).exists()) {
+		if (!backend.unpackedExt) return;
+		const stem = path.basename(loc.openPath, path.extname(loc.openPath));
+		if (await Bun.file(path.join(loc.dir, `${stem}${backend.unpackedExt}`)).exists()) {
 			throw new ToolError(
-				`${shortenPath(loc.openPath)} appears open in IDA (unpacked .id0 present); close it in IDA first`,
+				`${shortenPath(loc.openPath)} appears open in ${backend.label} (unpacked ${backend.unpackedExt} present); close it in ${backend.label} first`,
 			);
 		}
 		return;

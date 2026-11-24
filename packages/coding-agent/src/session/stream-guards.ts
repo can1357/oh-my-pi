@@ -21,7 +21,7 @@ import {
 } from "./tool-call-loop-redirect";
 
 import { cfgEditStreamingAbort } from "../edit/settings";
-import { writeDeviceName } from "../tools/resolve";
+import { toolCommandCallName } from "../tools/tool-commands";
 import {
 	cfgModelLoopGuardEnabled,
 	cfgModelLoopGuardToolCallReminder,
@@ -45,7 +45,7 @@ const STREAMING_EDIT_RECOVERY_LIMIT = 2;
 const STREAMING_EDIT_NOTICE_SOURCE = "streaming-edit";
 // Prefix of the native no-op diagnostic emitted by the Rust edit engine when a
 // preview produces byte-identical content. Kept in sync with
-// crates/pi-edit/src/modes/replace.rs and crates/pi-edit/src/hashline/preview.rs
+// crates/edit/src/modes/replace.rs and crates/edit/src/hashline/preview.rs
 // ("No changes would be made to <path>..."). Prefix match (not equality)
 // because the Rust messages append the path and mode-specific suffixes.
 const NO_CHANGES_PREVIEW_PREFIX = "No changes would be made";
@@ -246,7 +246,11 @@ export class LoopGuards {
 			.filter((tool): tool is string => typeof tool === "string" && tool.length > 0);
 		const settingsKey = `${threshold}:${JSON.stringify(exemptTools)}`;
 		if (!this.#toolCallLoopGuard || this.#toolCallLoopGuardSettingsKey !== settingsKey) {
-			this.#toolCallLoopGuard = new ToolCallLoopGuard({ threshold, exemptTools, exemptionAlias: writeDeviceName });
+			this.#toolCallLoopGuard = new ToolCallLoopGuard({
+				threshold,
+				exemptTools,
+				exemptionAlias: toolCommandCallName,
+			});
 			this.#toolCallLoopGuardSettingsKey = settingsKey;
 		}
 		return this.#toolCallLoopGuard;

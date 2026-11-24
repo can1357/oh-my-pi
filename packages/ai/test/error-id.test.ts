@@ -155,6 +155,18 @@ describe("error-id classification", () => {
 		expect(AIError.isProviderRetryableError(new Error(errorMessage))).toBe(true);
 	});
 
+	it("retries a statusless gateway stream interruption but not a 400 rejection with the same wording", () => {
+		const errorMessage = "Provider error (Dots3 Note Preview (Kilo)): stream interrupted";
+		const id = AIError.classifyMessage(message({ errorMessage }));
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.retriable(id)).toBe(true);
+		expect(AIError.isProviderRetryableError(new Error(errorMessage))).toBe(true);
+
+		const denied = AIError.classifyMessage(message({ errorMessage, errorStatus: 400 }));
+		expect(AIError.retriable(denied)).toBe(false);
+		expect(AIError.isProviderRetryableError(new AIError.ProviderHttpError(errorMessage, 400))).toBe(false);
+	});
+
 	it("keeps a stream-drop phrase riding on a terminal 4xx terminal", () => {
 		const errorMessage = "stream closed before response.completed";
 		const id = AIError.classifyMessage(message({ errorStatus: 400, errorMessage }));
@@ -297,6 +309,46 @@ describe("error-id classification", () => {
 		});
 		expect(AIError.isMismatchedModelEntitlementDenial(oversized, oversized.provider, "other-model")).toBe(false);
 		expect(AIError.is(AIError.classifyMessage(oversized), AIError.Flag.AccountPolicy)).toBe(false);
+	});
+
+	it("treats agy's unknown-model rejection as a denial of only the requested antigravity-cli model", async () => {
+		const provider = "antigravity-cli";
+		const agy = (errorMessage: string, model = "gemini-4-neon") =>
+			message({ api: "antigravity-acp", provider, model, errorMessage });
+
+		// The provider finalizes the ACP RequestError; its text must survive unchanged.
+		const finalized = await AIError.finalize(new Error("Unknown model ID: gemini-4-neon"), {
+			api: "antigravity-acp",
+			provider,
+			model: "gemini-4-neon",
+		});
+		const denial = agy(finalized.message);
+		expect(AIError.modelEntitlementDenialKinds(denial, provider, "gemini-4-neon")).toBe(AIError.Flag.AccountPolicy);
+		expect(AIError.isModelEntitlementDenial(denial, provider, "gemini-4-neon")).toBe(true);
+		expect(AIError.isMismatchedModelEntitlementDenial(denial, provider, "gemini-4-neon")).toBe(false);
+
+		// agy may be asked for the effort-suffixed roster value.
+		const suffixed = agy("Unknown model ID: gemini-4-neon-high");
+		expect(AIError.isModelEntitlementDenial(suffixed, provider, "gemini-4-neon")).toBe(true);
+
+		// A different model, a non-effort suffix, another provider or other wording must not block this model.
+		for (const [error, modelId, errorProvider] of [
+			[agy("Unknown model ID: gemini-4-neon"), "gemini-3.8-flash", provider],
+			[agy("Unknown model ID: gemini-4-neon-preview"), "gemini-4-neon", provider],
+			[agy("Unknown model ID: gemini-4-neon"), "gemini-4-neon", "google-antigravity"],
+		] as const) {
+			expect(AIError.isModelEntitlementDenial(error, errorProvider, modelId)).toBe(false);
+		}
+		expect(
+			AIError.isMismatchedModelEntitlementDenial(
+				agy("Unknown model ID: gemini-4-neon"),
+				provider,
+				"gemini-3.8-flash",
+			),
+		).toBe(true);
+		expect(AIError.isModelEntitlementDenial(agy("model gemini-4-neon is unknown"), provider, "gemini-4-neon")).toBe(
+			false,
+		);
 	});
 
 	it("classifies Anthropic permission and oauth organization policy denials as account policy without content blocked", () => {
@@ -477,5 +529,34 @@ describe("error-id classification", () => {
 		expect(AIError.is(id, AIError.Flag.ThinkingLoop)).toBe(true);
 		expect(AIError.is(id, AIError.Flag.UsageLimit)).toBe(true);
 		expect(assistant.errorId).toBe(id);
+	});
+
+	it("classifies inflected stream-stall wording as timeout + transient while preserving word boundaries", () => {
+		for (const errorMessage of [
+			"pi-native stream stall while waiting for the next event",
+			"Anthropic stream stalled while waiting for the next event",
+			"Provider stream stalls while waiting for the next event",
+			"Provider stream stalling while waiting for the next event",
+		]) {
+			for (const id of [
+				AIError.classify(new Error(errorMessage), "anthropic-messages"),
+				AIError.classifyMessage(message({ errorMessage })),
+			]) {
+				expect(AIError.is(id, AIError.Flag.Timeout)).toBe(true);
+				expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+				expect(AIError.retriable(id)).toBe(true);
+			}
+		}
+
+		for (const nonMatch of ["upstream stalled", "stream stallone"]) {
+			const id = AIError.classify(new Error(nonMatch), "anthropic-messages");
+			expect(AIError.is(id, AIError.Flag.Timeout)).toBe(false);
+		}
+
+		const clientDenied = AIError.classifyMessage(
+			message({ errorStatus: 400, errorMessage: "Anthropic stream stalled while waiting for the next event" }),
+		);
+		expect(AIError.is(clientDenied, AIError.Flag.Timeout)).toBe(false);
+		expect(AIError.retriable(clientDenied)).toBe(false);
 	});
 });

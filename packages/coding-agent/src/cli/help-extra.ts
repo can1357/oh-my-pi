@@ -43,6 +43,7 @@ export function getExtraHelpText(): string {
   ZAI_API_KEY                - z.ai models (ZhipuAI/GLM)
   UMANS_AI_CODING_PLAN_API_KEY - Umans AI Coding Plan models
   ABLITERATION_API_KEY       - Abliteration uncensored GLM models
+  KIRO_API_KEY               - Kiro agentic IDE models
   UMANS_WEBSEARCH_PROVIDER    - Umans gateway web search backend (native or exa)
   MINIMAX_API_KEY            - MiniMax models
   OPENCODE_API_KEY           - OpenCode Zen/OpenCode Go models
@@ -59,7 +60,7 @@ export function getExtraHelpText(): string {
   SINGULARITYAPI_TECH_API_KEY - SingularityAPI reserved DeepSeek lanes
   SCW_SECRET_KEY             - Scaleway Generative APIs models
   OTARI_API_KEY              - Otari AI gateway (workspace models)
-  OTARI_BASE_URL             - Otari self-hosted API root (e.g. https://host/api/v1)
+  OTARI_BASE_URL             - Otari API root (EU or self-hosted, e.g. https://host/api/v1)
 
   ${chalk.dim("# Cloud Providers")}
   AWS_PROFILE                - AWS Bedrock (or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY)

@@ -20,9 +20,11 @@ import {
 import {
 	fetchLiteLLMRichModels,
 	fetchLmStudioNativeModelMetadata,
+	fetchOpenRouterChatModels,
 	isSelectableLiteLLMModelMode,
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_CONTEXT_WINDOW,
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS,
+	OPENROUTER_BASE_URL,
 	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import {
@@ -273,6 +275,49 @@ function toTokenLimitOrUndefined(value: unknown): number | undefined {
 	return parsed !== undefined && Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
+/**
+ * Context window a gateway implies by publishing both halves of its token
+ * budget (`limits.max_input_tokens` + `limits.max_output_tokens`). Either half
+ * alone is not a window, and a sum outside the safe-integer range is rejected
+ * so a malformed row cannot overflow into a bogus context.
+ */
+function nestedLimitsContextWindow(limits: Record<string, unknown> | undefined): number | undefined {
+	const maxInputTokens = toTokenLimitOrUndefined(limits?.max_input_tokens);
+	const maxOutputTokens = toTokenLimitOrUndefined(limits?.max_output_tokens);
+	if (maxInputTokens === undefined || maxOutputTokens === undefined) return undefined;
+	const total = maxInputTokens + maxOutputTokens;
+	return Number.isSafeInteger(total) ? total : undefined;
+}
+
+/**
+ * Output cap a `/v1/models` row advertises. Gateways spell it nested
+ * (`limits.max_output_tokens`), flat (`max_output_tokens`, OpenRouter-style
+ * `max_completion_tokens`, generic `max_tokens` (#13062)), or under
+ * OpenRouter's `top_provider.max_completion_tokens` (ModelRelay and other
+ * OpenRouter-shaped catalogs). Each spelling is validated on its own so a
+ * malformed one never masks a usable sibling. A `/v1/models` row declares what
+ * the endpoint accepts, so `max_tokens` here is a cap — unlike llama.cpp, whose
+ * positive `max_tokens` is only a per-request default.
+ */
+function advertisedOutputTokenLimit(
+	item: {
+		max_output_tokens?: unknown;
+		max_completion_tokens?: unknown;
+		max_tokens?: unknown;
+		top_provider?: unknown;
+	},
+	limits: Record<string, unknown> | undefined,
+): number | undefined {
+	const topProvider = isRecord(item.top_provider) ? item.top_provider : undefined;
+	return (
+		toTokenLimitOrUndefined(limits?.max_output_tokens) ??
+		toTokenLimitOrUndefined(item.max_output_tokens) ??
+		toTokenLimitOrUndefined(item.max_completion_tokens) ??
+		toTokenLimitOrUndefined(topProvider?.max_completion_tokens) ??
+		toTokenLimitOrUndefined(item.max_tokens)
+	);
+}
+
 function isLlamaCppUnlimitedSentinel(value: unknown): boolean {
 	if (typeof value === "number") {
 		return value === -1;
@@ -466,9 +511,45 @@ export function discoverModelsByProviderType(
 			return discoverProxyModels(providerConfig, ctx);
 		case "litellm":
 			return discoverLiteLLMModels(providerConfig, ctx);
+		case "openrouter":
+			return discoverOpenRouterModels(providerConfig, ctx);
 		case "apple-foundation-models":
 			return discoverAppleFoundationModels(providerConfig);
 	}
+}
+
+/**
+ * Lists OpenRouter's public chat roster for an endpoint that fronts OpenRouter
+ * under its own URL and auth. The roster comes from openrouter.ai without
+ * this provider's credentials; rows serve through the provider's `baseUrl`
+ * (OpenRouter itself when omitted) and `api`, under OpenRouter's wire policy.
+ */
+async function discoverOpenRouterModels(
+	providerConfig: DiscoveryProviderConfig,
+	ctx: DiscoveryContext,
+): Promise<Model<Api>[]> {
+	const specs = await fetchOpenRouterChatModels({
+		fetch: ctx.fetch,
+		timeoutMs: providerConfig.discovery.timeoutMs ?? REMOTE_DISCOVERY_TIMEOUT_MS,
+	});
+	if (!specs) throw new Error(`OpenRouter model list unavailable from ${OPENROUTER_BASE_URL}/models`);
+	const models: Model<Api>[] = [];
+	for (const spec of specs) {
+		const model = skipAmbiguousModel(providerConfig.provider, spec.id, () =>
+			buildDiscoveredModel(
+				{
+					...spec,
+					api: providerConfig.api,
+					provider: providerConfig.provider,
+					baseUrl: providerConfig.baseUrl ?? OPENROUTER_BASE_URL,
+					headers: providerConfig.headers,
+				},
+				"openrouter",
+			),
+		);
+		if (model) models.push(model);
+	}
+	return models;
 }
 
 /**
@@ -878,15 +959,23 @@ function extractOpenAIModelsListInputCapabilities(item: {
 
 /**
  * Map an explicit non-chat output modality onto the runner kind and API that
- * serves it. Only endpoint-unambiguous tasks are routed: a row whose sole
- * output is `embeddings` or an image answers through the `/embeddings` and
- * `/images/generations` surfaces of the same OpenAI-compatible root the
- * provider already serves its model list from.
+ * serves it, on the same OpenAI-compatible root the provider already serves
+ * its model list from. Only a sole output that names its task is routed:
+ * `embeddings` (`/embeddings`), `image` (`/images/generations`), and
+ * OpenRouter's `speech` (`/audio/speech`) and `transcription`
+ * (`/audio/transcriptions`). Outputs come from the row's arrays or
+ * OpenRouter's `architecture.modality` summary (`text->speech`).
  *
- * Anything else stays chat. Rows that also emit `text` are ordinary (multimodal)
- * chat models, and an `audio` or `video` output alone cannot distinguish a TTS
- * SKU from a music generator, or a chat response from a video-job API — those
- * need explicit task metadata this list shape does not carry.
+ * Anything else stays chat. Rows that also emit `text` are ordinary
+ * (multimodal) chat models, and an `audio` or `video` output alone cannot
+ * distinguish a TTS SKU from a music generator, or a chat response from a
+ * video-job API: Poe lists TTS voices, music generators and `gpt-audio` alike
+ * as `text->audio` and serves them all on `/chat/completions`. Text from audio
+ * input reads the same for a transcriber and an audio-understanding chat model.
+ * OpenRouter's `decisions` output is left alone too: it names a task but not
+ * the wire (OpenRouter's own `/decisions` takes the System One body, OpenAI's
+ * Decisions API another). A row that declares nothing keeps the provider's
+ * chat API.
  */
 function extractOpenAIModelsListOutputTask(item: {
 	output?: unknown;
@@ -894,15 +983,25 @@ function extractOpenAIModelsListOutputTask(item: {
 	architecture?: unknown;
 }): { kind: KindApiKind; api: Api } | undefined {
 	const architecture = isRecord(item.architecture) ? item.architecture : undefined;
-	const modalities = collectModalities([item.output, item.output_modalities, architecture?.output_modalities]);
-	if (modalities.size !== 1) return undefined;
-	const [modality] = modalities;
+	const summary = typeof architecture?.modality === "string" ? architecture.modality.split("->") : [];
+	const output = collectModalities([
+		item.output,
+		item.output_modalities,
+		architecture?.output_modalities,
+		summary.length === 2 ? summary[1].split("+") : undefined,
+	]);
+	if (output.size !== 1) return undefined;
+	const [modality] = output;
 	switch (modality) {
 		case "embedding":
 		case "embeddings":
 			return { kind: "embedding", api: "openai-embeddings" };
 		case "image":
 			return { kind: "image", api: "openai-images" };
+		case "speech":
+			return { kind: "tts", api: "openai-speech" };
+		case "transcription":
+			return { kind: "stt", api: "openai-transcriptions" };
 		default:
 			return undefined;
 	}
@@ -1242,29 +1341,8 @@ export async function discoverOpenAIModelsList(
 			extractOpenAIModelsListInputCapabilities(item) ??
 			reference?.input ?? ["text"];
 		const limits = isRecord(item.limits) ? item.limits : undefined;
-		const maxInputTokens = toTokenLimitOrUndefined(limits?.max_input_tokens);
-		const maxOutputTokens = toTokenLimitOrUndefined(limits?.max_output_tokens);
-		const reportedLimitsContextWindow =
-			maxInputTokens !== undefined &&
-			maxOutputTokens !== undefined &&
-			Number.isSafeInteger(maxInputTokens + maxOutputTokens)
-				? maxInputTokens + maxOutputTokens
-				: undefined;
-		// Gateways spell the output cap nested (`limits.max_output_tokens`),
-		// flat (`max_output_tokens`, OpenRouter-style `max_completion_tokens`,
-		// generic `max_tokens` (#13062)), or under OpenRouter's
-		// `top_provider.max_completion_tokens` (ModelRelay and other
-		// OpenRouter-shaped catalogs). Each spelling is validated on its own so a
-		// malformed one never masks a usable sibling. A `/v1/models` row declares
-		// what the endpoint accepts, so `max_tokens` here is a cap — unlike
-		// llama.cpp, whose positive `max_tokens` is only a per-request default.
-		const topProvider = isRecord(item.top_provider) ? item.top_provider : undefined;
-		const reportedMaxTokens =
-			maxOutputTokens ??
-			toTokenLimitOrUndefined(item.max_output_tokens) ??
-			toTokenLimitOrUndefined(item.max_completion_tokens) ??
-			toTokenLimitOrUndefined(topProvider?.max_completion_tokens) ??
-			toTokenLimitOrUndefined(item.max_tokens);
+		const reportedLimitsContextWindow = nestedLimitsContextWindow(limits);
+		const reportedMaxTokens = advertisedOutputTokenLimit(item, limits);
 		const reportedContextWindow =
 			toPositiveNumberOrUndefined(item.max_model_len) ??
 			toPositiveNumberOrUndefined(item.context_length) ??
@@ -1294,8 +1372,8 @@ export async function discoverOpenAIModelsList(
 				input,
 				supportsTools: false,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				// Embeddings and judges cap their input by context; image jobs
-				// carry no token window. None produces output tokens.
+				// Embeddings, judges, speech and transcription cap their input by
+				// context; image jobs carry no token window. None produces output tokens.
 				contextWindow: task.kind === "image" ? null : reportedContextWindow,
 				maxTokens: null,
 				headers: baseHeaders,
@@ -1493,6 +1571,14 @@ export async function discoverProxyModels(
 					name?: string;
 					supported_endpoint_types?: string[];
 					context_length?: number;
+					max_output_tokens?: unknown;
+					max_completion_tokens?: unknown;
+					max_tokens?: unknown;
+					limits?: unknown;
+					top_provider?: unknown;
+					input?: unknown;
+					input_modalities?: unknown;
+					architecture?: unknown;
 					metadata?: unknown;
 					supported_reasoning_levels?: unknown;
 					default_reasoning_level?: unknown;
@@ -1536,6 +1622,18 @@ export async function discoverProxyModels(
 			reference?.name ??
 			stripBracketedModelIdAffixes(id) ??
 			id;
+		// Same row shapes the generic list discovery reads: Synthetic-style
+		// `input_modalities`, OpenRouter-style `architecture.input_modalities`,
+		// and a flat `input` array. Keep the bundled reference as the fallback so
+		// silent rows behave exactly as before.
+		const input = extractOpenAIModelsListInputCapabilities(item) ?? reference?.input ?? ["text"];
+		const limits = isRecord(item.limits) ? item.limits : undefined;
+		const reportedMaxTokens = advertisedOutputTokenLimit(item, limits);
+		const contextWindow =
+			toPositiveNumberOrUndefined(item.context_length) ??
+			nestedLimitsContextWindow(limits) ??
+			reference?.contextWindow ??
+			DISCOVERY_DEFAULT_CONTEXT_WINDOW;
 		const spec = {
 			id,
 			name: displayName,
@@ -1544,18 +1642,19 @@ export async function discoverProxyModels(
 			baseUrl,
 			reasoning: reference?.reasoning,
 			thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
-			input: reference?.input ?? ["text"],
+			input,
 			// Proxy pricing is provider-specific and usually does not match
 			// upstream bundled catalogs, so keep costs local-unknown even when
 			// we successfully recover the upstream model identity.
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			// Prefer the context_length the API reports for this model; fall
-			// back to the bundled reference, then a sane default.
-			contextWindow:
-				toPositiveNumberOrUndefined(item.context_length) ??
-				reference?.contextWindow ??
-				DISCOVERY_DEFAULT_CONTEXT_WINDOW,
-			maxTokens: reference?.maxTokens ?? discoveryDefaultMaxTokens(api),
+			// Prefer what the API reports for this model; fall back to the
+			// bundled reference, then a sane default. Cap the output limit at the
+			// context window so a row cannot request more tokens than it accepts.
+			contextWindow,
+			maxTokens: Math.min(
+				reportedMaxTokens ?? reference?.maxTokens ?? discoveryDefaultMaxTokens(api),
+				contextWindow,
+			),
 			headers: baseHeaders,
 			// OpenAI-compat fields are no-ops on anthropic models; the
 			// Anthropic SDK ignores them. Provider-level disableStrictTools

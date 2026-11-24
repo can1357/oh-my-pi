@@ -378,7 +378,7 @@ export interface EasyInputMessage {
 	 * sending follow-up requests, preserve and resend phase on all assistant messages
 	 * — dropping it can degrade performance. Not used for user messages.
 	 */
-	phase?: "commentary" | "final_answer" | null;
+	phase?: "commentary" | "final_answer" | "partial_answer" | null;
 	/**
 	 * The type of the message input. Always `message`.
 	 */
@@ -4201,7 +4201,7 @@ export interface ResponseOutputMessage {
 	 * sending follow-up requests, preserve and resend phase on all assistant messages
 	 * — dropping it can degrade performance. Not used for user messages.
 	 */
-	phase?: "commentary" | "final_answer" | null;
+	phase?: "commentary" | "final_answer" | "partial_answer" | null;
 }
 /**
  * A refusal from the model.

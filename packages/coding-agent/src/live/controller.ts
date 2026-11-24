@@ -17,8 +17,8 @@ import {
 	type LiveServerEvent,
 } from "./protocol";
 import { OUTPUT_ACTIVE_LEVEL, OutputActivity } from "./output-activity";
-import { CodexLiveTransport } from "./transport";
-import type { LivePhase } from "@oh-my-pi/pi-tui/apps/live-visualizer";
+import { type LiveEndpoint, LiveTransport, resolveLiveEndpoint } from "./transport";
+import type { LivePhase } from "../modes/view-model/apps/live-visualizer";
 import { DEFAULT_LIVE_VOICE } from "./voices";
 
 const MIN_BARGE_IN_LEVEL = 0.04;
@@ -107,7 +107,9 @@ export class LiveSessionController {
 	readonly #instructionsTemplate: string;
 	readonly #sdpOffer: string | undefined;
 
-	#transport: CodexLiveTransport | undefined;
+	#transport: LiveTransport | undefined;
+	/** The custom server set by `live.endpoint`, resolved at start; unset uses Codex. */
+	#endpoint: LiveEndpoint | undefined;
 	readonly #transportAbort = new AbortController();
 	#recorder: AudioCapture | undefined;
 	#unsubscribeSession: (() => void) | undefined;
@@ -181,14 +183,19 @@ export class LiveSessionController {
 		}
 
 		try {
+			this.#endpoint = await resolveLiveEndpoint(this.#session.settings);
+			if (this.#stopped) {
+				throw this.#failure ?? new Error("The live session stopped while starting.");
+			}
 			this.#assertProviderAllowed();
 			this.#unsubscribeSession = this.#session.subscribe(event =>
 				this.#guardEvent(() => this.#handleSessionEvent(event)),
 			);
 			const user = currentUser();
 			const instructions = prompt.render(this.#instructionsTemplate, user);
-			const transport = new CodexLiveTransport({
+			const transport = new LiveTransport({
 				authStorage: this.#session.modelRegistry.authStorage,
+				endpoint: this.#endpoint,
 				sessionId: this.#session.sessionId,
 				instructions,
 				voice: this.#voice,
@@ -369,9 +376,11 @@ export class LiveSessionController {
 			.catch(cause => this.#reportFailure(toError(cause)));
 	}
 
+	/** Offline mode reaches only the session's provider, unless `live.endpoint` names the voice server. */
 	#assertProviderAllowed(): void {
-		if (cfgOffline.get(this.#session.settings) && this.#session.model?.provider !== "openai-codex") {
-			throw new Error("Live audio requires the openai-codex session provider in offline mode.");
+		if (this.#endpoint || !cfgOffline.get(this.#session.settings)) return;
+		if (this.#session.model?.provider !== "openai-codex") {
+			throw new Error("Live audio requires the openai-codex session provider or live.endpoint in offline mode.");
 		}
 	}
 
@@ -381,8 +390,11 @@ export class LiveSessionController {
 			if (event.message.stopReason === "toolUse") this.#appendProgress(event.message);
 			return;
 		}
-		if (event.type !== "agent_end") return;
-		this.#appendFinalResponse(event.messages);
+		// A run held open by background work (a subagent, an async job) pauses once the model has
+		// answered; its `agent_end` may come much later, so the voice takes the answer at the pause.
+		if (event.type === "agent_end" || (event.type === "agent_pause" && event.yielded)) {
+			this.#appendFinalResponse(event.messages);
+		}
 	}
 
 	#appendProgress(message: AssistantMessage): void {

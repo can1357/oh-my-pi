@@ -46,10 +46,12 @@ import { type FactoryDroidOptions, streamFactoryDroid } from "./providers/factor
 import { streamGitLabDuo } from "./providers/gitlab-duo";
 import { type GitLabDuoWorkflowOptions, streamGitLabDuoWorkflow } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
+import { perturbContext } from "./prompts/perturbation";
 import { getVertexAccessToken } from "./providers/google-auth";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
 import { streamKimi } from "./providers/kimi";
+import type { KiroOptions } from "./providers/kiro/stream";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import { streamPiNative } from "./providers/pi-native-client";
@@ -65,12 +67,15 @@ import {
 	streamGoogle,
 	streamGoogleGeminiCli,
 	streamGoogleVertex,
+	streamKiro,
 	streamOllama,
 	streamOpenAICodexResponses,
 	streamOpenAICompletions,
 	streamOpenAIResponses,
 } from "./providers/register-builtins";
+import { getProviderHooks } from "./provider-hooks";
 import { getProviderDefinition } from "./registry";
+import type { PreparedProviderRequest } from "./registry/types";
 import type {
 	Api,
 	AssistantMessage,
@@ -88,6 +93,7 @@ import { getHeaderCaseInsensitive, resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
+import { withResolvedHeaders } from "./utils/model-headers";
 import { withThinkingLoopGuard } from "./utils/thinking-loop";
 import { withTransportFetch } from "./utils/transport-fetch";
 
@@ -844,15 +850,12 @@ function withResolvedModelHeaders<TApi extends Api>(
 	signal: AbortSignal | undefined,
 	run: (resolvedModel: Model<TApi>) => AssistantMessageEventStream,
 ): AssistantMessageEventStream {
-	const resolveHeaders = model.resolveHeaders;
-	if (!resolveHeaders) return run(model);
+	if (!model.resolveHeaders) return run(model);
 
 	const outer = new AssistantMessageEventStream();
 	void (async () => {
 		try {
-			const headers = await untilAborted(signal, () => resolveHeaders(signal));
-			signal?.throwIfAborted();
-			const inner = run({ ...model, resolveHeaders: undefined, headers: headers ? { ...headers } : undefined });
+			const inner = run(await withResolvedHeaders(model, signal));
 			for await (const event of inner) {
 				outer.push(event);
 				if (outer.done) return;
@@ -889,6 +892,13 @@ export function stream<TApi extends Api>(
 	);
 }
 
+/** Applies the provider's own model normalization and request shaping ahead of its api adapter. */
+function prepareProviderRequest(model: Model<Api>, options: StreamOptions): PreparedProviderRequest {
+	const definition = getProviderDefinition(model.provider);
+	const requestModel = definition?.prepareModel?.(model) ?? model;
+	return definition?.prepareRequest?.(requestModel, options) ?? { model: requestModel, options };
+}
+
 function streamDispatch<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
@@ -896,12 +906,24 @@ function streamDispatch<TApi extends Api>(
 	limited: boolean,
 ): AssistantMessageEventStream {
 	// A provider turned off in its auth rules is never called, even with a key passed in directly.
+	context = perturbContext(model, context);
 	assertProviderEnabled(model.provider);
 	const requestOptions = withSupportedSamplingParams(
 		model,
 		withTransportFetch(model, (options || {}) as StreamOptions),
 	) as OptionsForApi<TApi>;
 	assertExplicitOpenAIResponsesPromptCacheSupport(model, requestOptions);
+
+	// A provider hook owns every request to the provider, ahead of api-level dispatch.
+	const hooks = getProviderHooks(model.provider);
+	if (hooks?.stream) {
+		const prepared = prepareProviderRequest(model, requestOptions as StreamOptions);
+		return hooks.stream(prepared.model, context, {
+			...prepared.options,
+			apiKey: prepared.options.apiKey || getEnvApiKey(prepared.model.provider),
+			waitForTerminalDrain: limited,
+		});
+	}
 
 	// Check custom API registry first (extension-provided APIs like "vertex-claude-api")
 	const customApiProvider = getCustomApi(model.api);
@@ -946,11 +968,10 @@ function streamDispatch<TApi extends Api>(
 		});
 	}
 
-	const providerDefinition = getProviderDefinition(model.provider);
-	const requestModel = providerDefinition?.prepareModel?.(model) ?? model;
-	const prepared = providerDefinition?.prepareRequest?.(requestModel, requestOptions as StreamOptions);
-	const providerModel = prepared?.model ?? requestModel;
-	const preparedOptions = prepared?.options ?? (requestOptions as StreamOptions);
+	const { model: providerModel, options: preparedOptions } = prepareProviderRequest(
+		model,
+		requestOptions as StreamOptions,
+	);
 	const apiKey = preparedOptions.apiKey || getEnvApiKey(providerModel.provider);
 	if (!apiKey) {
 		throw new AIError.MissingApiKeyError(providerModel.provider);
@@ -1021,6 +1042,9 @@ function streamDispatch<TApi extends Api>(
 
 		case "ollama-chat":
 			return streamOllama(providerModel as Model<"ollama-chat">, context, providerOptions as OllamaChatOptions);
+
+		case "kiro-api":
+			return streamKiro(providerModel as Model<"kiro-api">, context, providerOptions as KiroOptions);
 
 		case "cursor-agent":
 			return streamCursor(providerModel as Model<"cursor-agent">, context, providerOptions as CursorOptions);
@@ -1131,8 +1155,9 @@ function isRetryableUpstreamError(
 	// denied by plan, model policy, or org restriction — a sibling account may
 	// not share it). Explicit account-scoped policy errors such as Codex
 	// `cyber_policy` are likewise rotatable. A denial of only the requested
-	// model (Codex ChatGPT account, Cursor plan, Anthropic model-not-found 404)
-	// is rotatable when its provider and requested model match.
+	// model (Codex ChatGPT account, Cursor plan, Anthropic model-not-found 404,
+	// agy `Unknown model ID`) is rotatable when its provider and requested model
+	// match.
 	// Usage-limit phrasing (Codex's
 	// "You have hit your ChatGPT usage limit", Anthropic's "usage_limit_reached",
 	// Google's "resource_exhausted", OpenAI's "insufficient_quota") and 429s
@@ -1461,6 +1486,13 @@ function streamSimpleDispatch<TApi extends Api>(
 				return streamPiNative(model, context, nativeOptions);
 			}),
 		);
+	}
+
+	// A hooked provider keeps its api's option mapping; stream() then hands the request to the hook.
+	if (getProviderHooks(model.provider)?.stream) {
+		const providerModel = getProviderDefinition(model.provider)?.prepareModel?.(model) ?? model;
+		const apiKey = typeof requestOptions.apiKey === "string" ? requestOptions.apiKey : getEnvApiKey(model.provider);
+		return stream(providerModel, context, mapOptionsForApi(providerModel, requestOptions, apiKey));
 	}
 
 	// Check custom API registry (extension-provided APIs)
@@ -1881,6 +1913,7 @@ function mapOptionsForApi<TApi extends Api>(
 		anthropicCompaction: options?.anthropicCompaction,
 		anthropicSlowMode: options?.anthropicSlowMode,
 		userProfileId: options?.userProfileId,
+		prewarm: options?.prewarm,
 		...simpleProviderOptions,
 	};
 
@@ -2356,6 +2389,14 @@ function mapOptionsForApi<TApi extends Api>(
 				reasoning: resolveOpenAiReasoningEffort(model, options),
 				disableReasoning: options?.disableReasoning,
 				toolChoice: options?.toolChoice,
+			});
+
+		case "kiro-api":
+			return castApi<"kiro-api">({
+				...base,
+				reasoning: options?.reasoning,
+				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
+				hideThinkingSummary: options?.hideThinkingSummary,
 			});
 
 		case "cursor-agent": {

@@ -1015,6 +1015,28 @@ def _magic_line_indices(lines: list[str]) -> set[int]:
     return indices
 
 
+# Blank lines plus `//`, `/* */`, and `#` comments, matched from the start of a cell.
+_COMMENT_PREAMBLE_RE = re.compile(r"(?:\s+|//[^\n]*|/\*.*?\*/|#[^\n]*)*", re.DOTALL)
+
+
+def _strip_c_comment_preamble(source: str) -> str:
+    """Blank the C-style comment preamble some models put atop Python cells.
+
+    Only text before the first statement is touched, and only when it contains a
+    ``//`` or ``/* */`` comment (neither can open valid Python). Stripped spans
+    become newlines so traceback line numbers still match the submitted source.
+    """
+    end = _COMMENT_PREAMBLE_RE.match(source).end()
+    # Keep the first statement's own indentation; Python reports it as before.
+    line_start = source.rfind("\n", 0, end) + 1
+    if not source[line_start:end].strip():
+        end = line_start
+    preamble = source[:end]
+    if "//" not in preamble and "/*" not in preamble:
+        return source
+    return "\n" * preamble.count("\n") + source[end:]
+
+
 def transform_cell(source: str) -> str:
     """Translate IPython-style magics + shell escapes into plain Python.
 
@@ -1032,8 +1054,12 @@ def transform_cell(source: str) -> str:
     Python tokenization identifies command lines outside strings and comments.
     Real command payloads are skipped before resuming lexical scanning so shell
     quoting cannot change how subsequent Python source is interpreted.
+
+    A leading ``//`` / ``/* */`` comment preamble is blanked first; see
+    :func:`_strip_c_comment_preamble`.
     """
 
+    source = _strip_c_comment_preamble(source)
     if "%" not in source and "!" not in source:
         return source
 
@@ -1520,6 +1546,11 @@ def _run_pip(argv: list[str], args: str) -> None:
     if not _has_pip():
         code = _bootstrap_pip()
         if code != 0:
+            sys.stderr.write(
+                f"%pip: {sys.executable} has no pip and it could not be bootstrapped"
+                " (ensurepip failed and `uv` is not on PATH). Install `uv`, or your distribution's"
+                " python3-pip/python3-venv package, then retry.\n"
+            )
             _emit_status("pip", args=args, installed=[], exit_code=code)
             return
     installed_packages: list[str] = []
@@ -2404,7 +2435,9 @@ def _install_builtins(ns: dict) -> None:
     ns["__omp_magic_async"] = __omp_magic_async
     ns["__omp_magic_cell"] = __omp_magic_cell
     ns["__omp_shell"] = __omp_shell
-    ns["__omp_current_run_id__"] = lambda: _CURRENT_RID.get()
+    # Plain threads (ThreadPoolExecutor) do not inherit the ContextVar: fall back
+    # to the request currently executing, the same target fd-1 capture uses.
+    ns["__omp_current_run_id__"] = lambda: _CURRENT_RID.get() or _STATE.capture_rid
 
 
 _install_builtins(_STATE.user_ns)
@@ -2708,10 +2741,29 @@ _MANAGED_ENV_KEYS = (
 )
 
 
-def _apply_request_runtime(req: dict) -> None:
+def _apply_request_runtime(req: dict, rid: str) -> None:
     cwd = req.get("cwd")
     if isinstance(cwd, str) and cwd:
-        os.chdir(cwd)
+        try:
+            os.chdir(cwd)
+        except OSError as exc:
+            # The session cwd was moved or removed (e.g. a deleted worktree): keep running
+            # in the last valid directory instead of failing every cell.
+            try:
+                fallback = os.getcwd()
+            except OSError:
+                # The process cwd is gone too (usually the same deleted directory).
+                fallback = os.path.expanduser("~")
+                os.chdir(fallback)
+            _emit(
+                {
+                    "type": "stderr",
+                    "id": rid,
+                    "data": f"Warning: session cwd {cwd} is unavailable ({exc.strerror or exc}); this cell runs in {fallback}\n",
+                }
+            )
+            cwd = None
+    if isinstance(cwd, str) and cwd:
         try:
             sys.path.remove(cwd)
         except ValueError:
@@ -2914,7 +2966,7 @@ async def _handle_request_async(req: dict) -> None:
 
     try:
         try:
-            _apply_request_runtime(req)
+            _apply_request_runtime(req, rid)
             source = req.get("code", "")
             requested_filename = req.get("filename")
             filename = (

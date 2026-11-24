@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { hasFsCode, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 function makeSession(cwd: string): ToolSession {
@@ -15,9 +15,9 @@ function makeSession(cwd: string): ToolSession {
 		getSessionFile: () => path.join(cwd, "session.jsonl"),
 		getSessionSpawns: () => "*",
 		getArtifactsDir: () => path.join(cwd, "session"),
-		allocateOutputArtifact: async (toolType: string) => ({
+		allocateOutputArtifact: async () => ({
 			id: "a1",
-			path: path.join(cwd, "session", `a1.${toolType}.log`),
+			path: path.join(cwd, "session", `a1.log`),
 		}),
 		settings: Settings.isolated(),
 	};

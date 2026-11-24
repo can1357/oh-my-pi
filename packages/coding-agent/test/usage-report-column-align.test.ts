@@ -2,12 +2,13 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
 import { renderUsageReports } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
-import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../src/ui/theme/service";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 const HOUR = 3_600_000;
 
 beforeAll(async () => {
-	await initTheme();
+	initTheme();
 });
 
 function win(label: string, windowId: string, durationMs: number, frac: number) {
@@ -66,7 +67,7 @@ describe("renderUsageReports multi-account column alignment (#6067)", () => {
 		// Account A: weekly exhausted, 5h free. Account B: weekly light, 5h exhausted.
 		// A naive per-window sort by used fraction swaps the columns between rows.
 		const reports: UsageReport[] = [acct("alice@example.test", 1.0, 0.0), acct("bob@example.test", 0.2, 1.0)];
-		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 160));
+		const text = stripVTControlCharacters(renderUsageReports(reports, currentTheme(), Date.now(), 160));
 		const lines = text.split("\n");
 
 		const columnOrder = (sectionLabel: string): string[] => {
@@ -84,7 +85,7 @@ describe("renderUsageReports multi-account column alignment (#6067)", () => {
 
 	it("keeps all-used-only amount cells within four-column narrow widths", () => {
 		const reports = [spendAcct("first@example.test", 123.45), spendAcct("second@example.test", 67.89)];
-		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 11));
+		const text = stripVTControlCharacters(renderUsageReports(reports, currentTheme(), Date.now(), 11));
 		const lines = text.split("\n");
 		const headerIdx = lines.findIndex(line => line.includes("Claude Extra Usage"));
 		expect(headerIdx).toBeGreaterThanOrEqual(0);
@@ -98,7 +99,7 @@ describe("renderUsageReports multi-account column alignment (#6067)", () => {
 
 	it("keeps mixed capped and used-only amount cells aligned at narrow widths", () => {
 		const reports = [spendAcct("capped@example.test", 50, 100), spendAcct("uncapped@example.test", 123.45)];
-		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 20));
+		const text = stripVTControlCharacters(renderUsageReports(reports, currentTheme(), Date.now(), 20));
 		const lines = text.split("\n");
 		const headerIdx = lines.findIndex(line => line.includes("Claude Extra Usage"));
 		expect(headerIdx).toBeGreaterThanOrEqual(0);

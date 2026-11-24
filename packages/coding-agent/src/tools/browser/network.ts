@@ -3,7 +3,7 @@ import * as path from "node:path";
 
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { HTTPRequest, HTTPResponse, Page } from "puppeteer-core";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tool-errors";
 
 /** Maximum number of request records retained per tab; the oldest are evicted first. */
 export const REQUEST_LOG_LIMIT = 200;
@@ -348,7 +348,7 @@ export class BrowserNetworkManager {
 		const limit = normalizeLimit(options.limit);
 		let records = this.#records.filter(record => matchesRequest(record, options));
 		if (limit !== undefined) records = records.slice(-limit);
-		const result = records.map(toPublicRecord);
+		const result = records.map(record => toPublicRecord(record, true));
 		if (options.clear) this.clearRequests();
 		return result;
 	}
@@ -582,6 +582,7 @@ function domainMatches(hostname: string, pattern: string): boolean {
 }
 
 const ROUTE_OPTION_KEYS = "{ abort?, status?, headers?, contentType?, body?, delay?, resourceType? }";
+const ROUTE_OPTION_NAMES = new Set(["abort", "status", "headers", "contentType", "body", "delay", "resourceType"]);
 
 /** Validate `tab.route()` options and return a normalised copy (resource types stringified, headers copied). */
 export function normalizeRouteOptions(options: NetworkRouteOptions): NetworkRouteOptions {
@@ -592,6 +593,12 @@ export function normalizeRouteOptions(options: NetworkRouteOptions): NetworkRout
 	}
 	if (!options || typeof options !== "object" || Array.isArray(options)) {
 		throw new ToolError(`tab.route(pattern, options): options must be an object ${ROUTE_OPTION_KEYS}`);
+	}
+	// An unread key (`{action: "abort"}`, `method`) would register a route that lets every request through.
+	for (const key in options) {
+		if (!ROUTE_OPTION_NAMES.has(key)) {
+			throw new ToolError(`tab.route() has no ${JSON.stringify(key)} option; it takes ${ROUTE_OPTION_KEYS}`);
+		}
 	}
 	if (options.delay !== undefined && (!Number.isFinite(options.delay) || options.delay < 0)) {
 		throw new ToolError("tab.route() delay must be a non-negative number");
@@ -690,10 +697,12 @@ export function globToRegExp(glob: string): RegExp {
 
 /**
  * A URL string pattern as URL waits and the request-log filter read it: with a `*` it is a glob, as `tab.route()`
- * takes ({@link globToRegExp}); without one, a substring of the URL. A RegExp passes through.
+ * takes ({@link globToRegExp}); without one, a substring of the URL. A single `*` at either end spans `/` like `**`,
+ * so `*title=Redis*` matches anywhere in a full URL the way it reads. A RegExp passes through.
  */
 export function urlPattern(pattern: NetworkPattern): NetworkPattern {
-	return typeof pattern === "string" && pattern.includes("*") ? globToRegExp(pattern) : pattern;
+	if (typeof pattern !== "string" || !pattern.includes("*")) return pattern;
+	return globToRegExp(pattern.replace(/^\*(?!\*)/, "**").replace(/(?<!\*)\*$/, "**"));
 }
 
 /** A test of URLs against `pattern` as {@link urlPattern} reads it, compiled once. */
@@ -742,8 +751,23 @@ export function normalizeLimit(limit: number | undefined): number | undefined {
 	return limit;
 }
 
-/** A detached copy of the public fields of `record` (backend bookkeeping dropped). */
-export function toPublicRecord(record: NetworkRequestRecord): NetworkRequestRecord {
+/** Headers whose values are credentials: `tab.requests()` lists them as `[redacted]`; `tab.request(id)` has them. */
+const CREDENTIAL_HEADERS = new Set(["cookie", "set-cookie", "authorization", "proxy-authorization"]);
+
+function redactCredentialHeaders(headers: Record<string, string>): Record<string, string> {
+	const redacted: Record<string, string> = {};
+	for (const name in headers) {
+		redacted[name] = CREDENTIAL_HEADERS.has(name.toLowerCase()) ? "[redacted]" : headers[name]!;
+	}
+	return redacted;
+}
+
+/**
+ * A detached copy of the public fields of `record` (backend bookkeeping dropped). `redact` replaces credential
+ * header values, for the metadata listing.
+ */
+export function toPublicRecord(record: NetworkRequestRecord, redact = false): NetworkRequestRecord {
+	const copyHeaders = redact ? redactCredentialHeaders : (headers: Record<string, string>) => ({ ...headers });
 	return {
 		id: record.id,
 		seq: record.seq,
@@ -755,8 +779,8 @@ export function toPublicRecord(record: NetworkRequestRecord): NetworkRequestReco
 		ok: record.ok,
 		failureText: record.failureText,
 		durationMs: record.durationMs,
-		requestHeaders: { ...record.requestHeaders },
-		responseHeaders: record.responseHeaders ? { ...record.responseHeaders } : undefined,
+		requestHeaders: copyHeaders(record.requestHeaders),
+		responseHeaders: record.responseHeaders ? copyHeaders(record.responseHeaders) : undefined,
 		sizes: { ...record.sizes },
 	};
 }

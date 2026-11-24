@@ -10,13 +10,16 @@ import * as path from "node:path";
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
+import { parseOtariCredential } from "@oh-my-pi/pi-catalog/wire/otari";
 import {
 	getAgentDbPath,
 	getDbBusyTimeoutMs,
 	isSqliteBusyError,
 	isSqliteCorruptionError,
 	logger,
+	openQuarantinedStoreForSalvage,
 	openSqliteDatabase,
+	readSalvageableRows,
 } from "@oh-my-pi/pi-utils";
 import type { AuthCredentialStore, CredentialRefreshLeaseFence, CredentialRefreshLeaseHolder } from "./store";
 import type {
@@ -252,6 +255,11 @@ export function matchesReplacementCredential(
 		if (provider === "alibaba-token-plan") {
 			const existingToken = parseAlibabaTokenPlanCredential(existing.key)?.token;
 			const incomingToken = parseAlibabaTokenPlanCredential(incoming.key)?.token;
+			return existingToken !== undefined && existingToken === incomingToken;
+		}
+		if (provider === "otari") {
+			const existingToken = parseOtariCredential(existing.key)?.token;
+			const incomingToken = parseOtariCredential(incoming.key)?.token;
 			return existingToken !== undefined && existingToken === incomingToken;
 		}
 		if (provider === "cloudflare-ai-gateway" || provider === "cloudflare-workers-ai") {
@@ -595,7 +603,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			await fs.mkdir(dir, { recursive: true, mode: 0o700 });
 		}
 
-		return openSqliteDatabase(
+		let preservedPath: string | undefined;
+		const store = await openSqliteDatabase(
 			dbPath,
 			async db => {
 				try {
@@ -606,8 +615,129 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				SqliteAuthCredentialStore.#ensureAuthCredentialRefreshLeasesTable(db);
 				return new SqliteAuthCredentialStore(db);
 			},
-			{ recoverCorruption: true },
+			{
+				recoverCorruption: true,
+				onCorruptionPreserved: backupPath => {
+					preservedPath = backupPath;
+				},
+			},
 		);
+		if (preservedPath) store.salvageQuarantinedCredentials(preservedPath);
+		return store;
+	}
+
+	/**
+	 * Copies the credentials still readable in a quarantined store into this one, keeping
+	 * their ids so block and lease rows keep pointing at them. Never throws and never stays
+	 * silent: a failed salvage is logged as an error naming the quarantined path, which
+	 * keeps the original bytes for `sqlite3 <path> '.recover'`.
+	 * @returns the number of credentials restored
+	 */
+	salvageQuarantinedCredentials(backupPath: string): number {
+		const columns = [
+			"id",
+			"provider",
+			"credential_type",
+			"data",
+			"disabled_cause",
+			"disabled",
+			"identity_key",
+			"created_at",
+			"updated_at",
+		];
+		try {
+			using source = openQuarantinedStoreForSalvage(backupPath);
+			const present = new Set(
+				source.db
+					.query<{ name: string }, []>("PRAGMA table_info(auth_credentials)")
+					.all()
+					.map(column => column.name),
+			);
+			if (!["id", "provider", "credential_type", "data"].every(column => present.has(column))) {
+				throw new Error("quarantined store has no readable auth_credentials table");
+			}
+			const rows = readSalvageableRows<Record<string, unknown>>(
+				source.db,
+				"auth_credentials",
+				columns.filter(column => present.has(column)).join(", "),
+			).filter(
+				row =>
+					Number.isSafeInteger(row.id) &&
+					typeof row.provider === "string" &&
+					typeof row.credential_type === "string" &&
+					typeof row.data === "string",
+			);
+			const text = (value: unknown): string | null => (typeof value === "string" ? value : null);
+			const epoch = (value: unknown): number | null => (Number.isSafeInteger(value) ? (value as number) : null);
+			// Every non-NULL cause disables a row at runtime; a damaged non-text cause must not revive it.
+			const disabledCause = (value: unknown): string | null =>
+				value === null || value === undefined ? null : typeof value === "string" ? value : "disabled";
+			let restored = 0;
+			this.#db.transaction(() => {
+				using insert = this.#db.prepare(
+					`INSERT OR IGNORE INTO auth_credentials (id, provider, credential_type, data, disabled_cause, identity_key, created_at, updated_at)
+					VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, ${SQLITE_NOW_EPOCH}), COALESCE(?, ${SQLITE_NOW_EPOCH}))`,
+				);
+				for (const row of rows) {
+					const result = insert.run(
+						row.id as number,
+						row.provider as string,
+						row.credential_type as string,
+						row.data as string,
+						present.has("disabled_cause")
+							? disabledCause(row.disabled_cause)
+							: row.disabled === 1
+								? "disabled"
+								: null,
+						text(row.identity_key),
+						epoch(row.created_at),
+						epoch(row.updated_at),
+					);
+					restored += result.changes;
+				}
+			})();
+			// Logins an auth broker does not serve stay local; without their markers the
+			// hybrid store would route the restored credentials back to the broker.
+			try {
+				const providers = readSalvageableRows<Record<string, unknown>>(
+					source.db,
+					"auth_broker_local_providers",
+					"provider, created_at",
+				);
+				for (const row of providers) {
+					if (typeof row.provider !== "string") continue;
+					this.#db.run(
+						`INSERT OR IGNORE INTO auth_broker_local_providers (provider, created_at) VALUES (?, COALESCE(?, ${SQLITE_NOW_EPOCH}))`,
+						[row.provider, epoch(row.created_at)],
+					);
+				}
+			} catch (error) {
+				logger.debug("No local-provider markers salvaged from the quarantined auth database", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+			// The replacement is already at the current schema, so rows from an older
+			// store never pass through the migration that renamed their provider.
+			if (rows.some(row => row.provider === "singularityapi")) this.#migrateAuthSchemaV7ToV8();
+			const log = restored > 0 ? logger.warn : logger.error;
+			log("Restored credentials from the quarantined auth database", {
+				quarantinedPath: backupPath,
+				restored,
+				readable: rows.length,
+				headerRepaired: source.headerRepaired,
+			});
+			return restored;
+		} catch (error) {
+			logger.error(
+				"Could not restore credentials from the quarantined auth database; stored credentials are missing until you log in again or recover them manually",
+				{
+					quarantinedPath: backupPath,
+					error: error instanceof Error ? error.message : String(error),
+					recover: `sqlite3 '${backupPath}' '.recover'`,
+				},
+			);
+			return 0;
+		}
 	}
 
 	static #ensureAuthCredentialRefreshLeasesTable(db: Database): void {
@@ -654,6 +784,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				expires_at INTEGER NOT NULL
 			);
 			CREATE INDEX IF NOT EXISTS idx_cache_expires ON cache(expires_at);
+			CREATE TABLE IF NOT EXISTS auth_broker_local_providers (
+				provider TEXT PRIMARY KEY,
+				created_at INTEGER NOT NULL
+			);
 			CREATE TABLE IF NOT EXISTS usage_history (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				recorded_at INTEGER NOT NULL,
@@ -2081,6 +2215,30 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 */
 	async deleteProvider(provider: string): Promise<void> {
 		await this.deleteAuthCredentials(provider, "deleted by user");
+	}
+
+	/**
+	 * Providers whose logins this machine keeps although an auth broker is
+	 * configured: the broker stored them but would not serve them back.
+	 * Maintained by `HybridAuthCredentialStore`.
+	 */
+	listBrokerLocalProviders(): string[] {
+		const rows = this.#db.query<{ provider: string }, []>("SELECT provider FROM auth_broker_local_providers").all();
+		return rows.map(row => row.provider);
+	}
+
+	/** Record `provider` in {@link listBrokerLocalProviders}; a no-op when already listed. */
+	markBrokerLocalProvider(provider: string): void {
+		this.#db
+			.query(
+				`INSERT OR IGNORE INTO auth_broker_local_providers (provider, created_at) VALUES (?, ${SQLITE_NOW_EPOCH})`,
+			)
+			.run(provider);
+	}
+
+	/** Drop `provider` from {@link listBrokerLocalProviders}, so its next login tries the broker again. */
+	unmarkBrokerLocalProvider(provider: string): void {
+		this.#db.query("DELETE FROM auth_broker_local_providers WHERE provider = ?").run(provider);
 	}
 
 	/**

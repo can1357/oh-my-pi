@@ -10,8 +10,8 @@ It focuses on current implementation behavior, including fallback paths and cave
 - [`../src/session/session-listing.ts`](../packages/coding-agent/src/session/session-listing.ts)
 - [`../src/session/session-paths.ts`](../packages/coding-agent/src/session/session-paths.ts)
 - [`../src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts)
-- [`packages/tui/src/apps/session-picker.ts`](../packages/tui/src/apps/session-picker.ts)
-- [`packages/tui/src/overlays/session-selector.ts`](../packages/tui/src/overlays/session-selector.ts)
+- [`packages/coding-agent/src/cli/session-picker.tsx`](../packages/coding-agent/src/cli/session-picker.tsx)
+- [`packages/coding-agent/src/ui/overlays/pickers/session-selector.tsx`](../packages/coding-agent/src/ui/overlays/pickers/session-selector.tsx)
 - [`../src/modes/controllers/selector-controller.ts`](../packages/coding-agent/src/modes/controllers/selector-controller.ts)
 - [`../src/main.ts`](../packages/coding-agent/src/main.ts)
 - [`../src/sdk.ts`](../packages/coding-agent/src/sdk.ts)
@@ -100,7 +100,7 @@ Breadcrumb writes are best-effort and non-fatal.
 
 Both modes follow the session's continuations: when its conversation went on in a sibling file whose header names it in `continuationOf`, the copy with the newest turn opens instead (unless the named file has turns that copy lacks) and a notice names both files. A file that no longer holds the session its generated name records was replaced under that session; it is followed by that name's id when it no longer parses, or, for a resume key that matched only the file name, when it holds another session.
 
-If a matched session's recorded cwd no longer exists, CLI prompts `Move (re-root) it into the current directory? [Y/n]`. Acceptance opens it and `moveTo(cwd)` relocates it; decline exits cleanly. A non-TTY cannot answer and raises `SessionResolutionError`.
+If a matched session's recorded cwd no longer exists, CLI prompts `Move (re-root) it into the current directory? [Y/n]`. Acceptance opens it and `moveTo(cwd)` relocates it; decline exits cleanly. A non-TTY cannot answer and raises `SessionResolutionError`. Under `--mode rpc`, `--mode rpc-ui` and `--mode acp` no question is asked, with or without a TTY: the session opens where it is stored, with the launch directory as its working directory. A session recorded in a since-removed worktree of the launch checkout's repository is moved into the launch directory without a question, in every mode.
 
 Otherwise the session is opened in its recorded project, including global matches; startup switches process cwd, reloads project-scoped settings/plugins, and re-resolves enabled models before constructing the agent. It does **not** fork merely because the match is cross-project.
 
@@ -123,7 +123,7 @@ Uses `SessionManager.continueRecent(...)` directly (breadcrumb-first behavior ab
 
 ## Picker-based selection internals
 
-## CLI picker (`packages/tui/src/apps/session-picker.ts`)
+## CLI picker (`packages/coding-agent/src/cli/session-picker.tsx`)
 
 `selectSession(sessions, options)` creates a fullscreen alternate-screen TUI with `SessionSelectorComponent` and resolves exactly once:
 

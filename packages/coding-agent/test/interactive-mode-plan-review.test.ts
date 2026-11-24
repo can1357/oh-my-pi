@@ -4,38 +4,35 @@ import * as path from "node:path";
 import { Agent, AgentBusyError, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { KeybindingsManager, setKeybindings } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import type { HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
-import { type PlanReviewAnnotationState, PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
+import type { HookSelectorSlider } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/hook-selector";
+import { type PlanReviewAnnotationState } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/plan-review-overlay";
+import { PlanReviewModel } from "../src/ui/overlays/panels/plan-review-model";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import type {
-	AskRequestedEvent,
-	AskResolvedEvent,
 	Extension,
 	ExtensionContext,
 	ExtensionEvent,
 	PlanReviewRequestedEvent,
 	PlanReviewResolvedEvent,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import { HtmlFormDialog } from "@oh-my-pi/pi-tui/html-form/dialog";
-import { AskTool } from "@oh-my-pi/pi-coding-agent/tools/ask";
 import { planSaveFileName } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-autosave";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking/levels";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
-import { setKeybindings } from "@oh-my-pi/pi-tui";
 import { formatNumber, TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../src/ui/theme/service";
+import { createInteractiveModeContext, renderTranscript } from "./helpers/interactive-mode-context";
+import { createModeTerminal, type ModeTerminal, pressKey, renderRows } from "./helpers/mode-terminal";
 
 import { cfgPlanAutosave, cfgPlanAutosaveDir } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
 
@@ -97,13 +94,13 @@ function observeExtensionEvents(session: AgentSession, onEvent?: (event: Extensi
 function planReviewExtension(
 	name: string,
 	onEvent: (event: ExtensionEvent, ctx: ExtensionContext) => void | Promise<void>,
-	events: ExtensionEvent["type"][] = ["plan_review_requested", "plan_review_resolved"],
 ): Extension {
 	const handle = async (...args: unknown[]): Promise<void> => {
 		await onEvent(args[0] as ExtensionEvent, args[1] as ExtensionContext);
 	};
 	const handlers: Extension["handlers"] = new Map();
-	for (const event of events) handlers.set(event, [handle]);
+	handlers.set("plan_review_requested", [handle]);
+	handlers.set("plan_review_resolved", [handle]);
 	const extensionPath = `/test/${name}.ts`;
 	return {
 		path: extensionPath,
@@ -155,6 +152,7 @@ describe("InteractiveMode plan review rendering", () => {
 	let tempDir: TempDir;
 	let session: AgentSession;
 	let mode: InteractiveMode;
+	let term: ModeTerminal;
 	// Shared across the whole describe: global Settings initialization, AuthStorage
 	// (a SQLite db), and ModelRegistry are immutable inputs here. Tests mutate only
 	// their per-session Settings.isolated() instances, so rebuilding these process-
@@ -178,7 +176,39 @@ describe("InteractiveMode plan review rendering", () => {
 		sharedTempDir?.removeSync();
 	});
 
-	beforeEach(() => {
+	/** A fresh interactive mode on a started in-memory terminal: overlays take keys through it. */
+	async function createMode(): Promise<void> {
+		term = createModeTerminal({ columns: 100, rows: 40 });
+		await term.start();
+		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, term.frame);
+	}
+
+	/**
+	 * Run `act` the moment the next overlay mounts (as the user would act on it), inside
+	 * `shell.overlays.show`: the review is focused and takes the keys `act` presses.
+	 */
+	function onOverlayShown(act: () => void): void {
+		const overlays = mode.shell.overlays;
+		const show = overlays.show.bind(overlays);
+		vi.spyOn(overlays, "show").mockImplementation((factory, options) => {
+			const handle = show(factory, options);
+			act();
+			return handle;
+		});
+	}
+
+	/** The open review's model, caught on the next key it takes. */
+	function catchReview(): { readonly current: PlanReviewModel | undefined } {
+		const caught: { current: PlanReviewModel | undefined } = { current: undefined };
+		const key = PlanReviewModel.prototype.key;
+		vi.spyOn(PlanReviewModel.prototype, "key").mockImplementation(function (this: PlanReviewModel, ...args) {
+			caught.current = this;
+			return key.apply(this, args);
+		});
+		return caught;
+	}
+
+	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-plan-review-");
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) {
@@ -198,11 +228,10 @@ describe("InteractiveMode plan review rendering", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
+		await createMode();
 	});
 
 	afterEach(async () => {
-		vi.useRealTimers();
 		vi.restoreAllMocks();
 		const currentMode = mode;
 		const currentSession = session;
@@ -211,6 +240,8 @@ describe("InteractiveMode plan review rendering", () => {
 		session = undefined as unknown as AgentSession;
 		tempDir = undefined as unknown as TempDir;
 		currentMode?.stop();
+		await currentMode?.shell.stop();
+		term?.dispose();
 		await currentSession?.dispose();
 		currentTempDir?.removeSync();
 		setKeybindings(KeybindingsManager.inMemory());
@@ -232,258 +263,6 @@ describe("InteractiveMode plan review rendering", () => {
 		await mode.initHooksAndCustomTools();
 		return runner;
 	}
-
-	async function loadAskRecorder(
-		onEvent?: (event: AskRequestedEvent | AskResolvedEvent, ctx: ExtensionContext) => void | Promise<void>,
-	) {
-		const events: Array<AskRequestedEvent | AskResolvedEvent> = [];
-		const resolved = Promise.withResolvers<AskResolvedEvent>();
-		const runner = await loadExtensions(
-			planReviewExtension(
-				"ask",
-				async (event, ctx) => {
-					if (event.type !== "ask_requested" && event.type !== "ask_resolved") return;
-					events.push(event);
-					await onEvent?.(event, ctx);
-					if (event.type === "ask_resolved") resolved.resolve(event);
-				},
-				["ask_requested", "ask_resolved"],
-			),
-		);
-		return { runner, ctx: runner.createContext(), events, resolved: resolved.promise };
-	}
-
-	function mountedForm(): HtmlFormDialog {
-		const form = mode.editorContainer.children.find(child => child instanceof HtmlFormDialog);
-		if (!(form instanceof HtmlFormDialog)) throw new Error("Expected a mounted form");
-		return form;
-	}
-
-	it("lets an extension find and answer an ask tool call with canonical data and notes", async () => {
-		const { ctx, resolved } = await loadAskRecorder();
-		const html = `<form><fieldset><legend>Store</legend>
-			<label><input type="radio" name="store" value="sqlite" checked>SQLite</label>
-			<label><input type="radio" name="store" value="redis">Redis</label></fieldset>
-			<input name="ttl" type="number" min="1" value="2"><input type="hidden" name="kind" value="deploy"></form>`;
-		const tool = new AskTool({
-			cwd: tempDir.path(),
-			hasUI: true,
-			canPromptUser: true,
-			settings: Settings.isolated({ "ask.timeout": 30, "ask.notify": "off" }),
-			getSessionFile: () => null,
-			getSessionSpawns: () => "*",
-		});
-		const outcome = tool.execute("ask-tool", { html }, undefined, undefined, {
-			...ctx,
-			hasQueuedMessages: () => session.queuedMessageCount > 0,
-		});
-		const pending = ctx.getPendingAsks();
-		expect(pending).toEqual([
-			{
-				toolCallId: "ask-tool",
-				html,
-				sessionId: session.sessionManager.getSessionId(),
-				timeoutMs: 30_000,
-				deadline: mountedForm().deadline,
-			},
-		]);
-		pending[0]!.html = "mutated";
-		expect(ctx.getPendingAsks()[0]!.html).toBe(html);
-		const data = { kind: "deploy", store: "redis", ttl: 7 };
-		const notes = [{ name: "store", value: "redis", question: "Store", option: "Redis", text: "shared cache" }];
-		expect(ctx.resolveAsk("ask-tool", { data, notes })).toEqual({ ok: true });
-		expect(ctx.resolveAsk("ask-tool", { data })).toEqual({ ok: false, reason: "not_pending" });
-		const result = await outcome;
-		expect(result.content[0]).toEqual({
-			type: "text",
-			text: `User answers:\n${JSON.stringify(data, null, 2)}\nOption notes:\n- Store: Redis [store="redis"] — shared cache`,
-		});
-		expect(result.details?.notes).toEqual(notes);
-		expect(await resolved).toEqual({
-			type: "ask_resolved",
-			toolCallId: "ask-tool",
-			sessionId: session.sessionManager.getSessionId(),
-			data,
-			notes,
-			by: "extension",
-		});
-		expect(ctx.getPendingAsks()).toEqual([]);
-	});
-
-	it("refuses invalid and stale ask answers without closing the form or resetting its deadline", async () => {
-		const { ctx, resolved } = await loadAskRecorder();
-		const html = '<form><input name="title" required><input name="n" type="number" min="2"></form>';
-		const outcome = ctx.ui.formDialog!(html, { toolCallId: "invalid", timeout: 30_000 });
-		const deadline = ctx.getPendingAsks()[0]!.deadline;
-		expect(ctx.resolveAsk("wrong", { data: {} })).toEqual({ ok: false, reason: "not_pending" });
-		expect(ctx.resolveAsk("invalid", { data: { n: 1 } })).toEqual({
-			ok: false,
-			reason: "invalid",
-			errors: [
-				{ name: "title", message: "Required" },
-				{ name: "n", message: "Must be at least 2" },
-			],
-		});
-		expect(ctx.getPendingAsks()[0]!.deadline).toBe(deadline);
-		expect(mountedForm()).toBeInstanceOf(HtmlFormDialog);
-		expect(ctx.resolveAsk("invalid", { data: { title: "ready", n: "2" } })).toEqual({ ok: true });
-		expect(await outcome).toEqual({ data: { title: "ready", n: 2 } });
-		await resolved;
-	});
-
-	it("keeps queued ask forms pending and resolves only the addressed form", async () => {
-		const { ctx, events, resolved } = await loadAskRecorder();
-		const first = ctx.ui.formDialog!('<form><input name="first"></form>', { toolCallId: "first", timeout: 30_000 });
-		const second = ctx.ui.formDialog!('<form><input name="second"></form>', {
-			toolCallId: "second",
-			timeout: 30_000,
-		});
-		expect(ctx.getPendingAsks().map(ask => ask.toolCallId)).toEqual(["first", "second"]);
-		expect(ctx.getPendingAsks()[1]!.deadline).toBeUndefined();
-		expect(ctx.resetAskTimeout("second")).toBe(false);
-		const mounted = mountedForm();
-		expect(ctx.resolveAsk("second", { data: { second: "two" } })).toEqual({ ok: true });
-		expect(await second).toEqual({ data: { second: "two" } });
-		expect(mountedForm()).toBe(mounted);
-		expect(ctx.getPendingAsks().map(ask => ask.toolCallId)).toEqual(["first"]);
-		expect(ctx.resolveAsk("first", { data: { first: "one" } })).toEqual({ ok: true });
-		expect(await first).toEqual({ data: { first: "one" } });
-		await resolved;
-		await Bun.sleep(0);
-		expect(
-			events
-				.filter(event => event.type === "ask_resolved")
-				.map(event => event.toolCallId)
-				.sort(),
-		).toEqual(["first", "second"]);
-	});
-
-	it("keeps a pending id with the first form: a second form given it is shown untracked", async () => {
-		const { ctx, resolved } = await loadAskRecorder();
-		const first = ctx.ui.formDialog!('<form><input name="first"></form>', { toolCallId: "same" });
-		const second = ctx.ui.formDialog!('<form><input name="second"></form>', { toolCallId: "same" });
-		expect(ctx.getPendingAsks().map(ask => ask.html)).toEqual(['<form><input name="first"></form>']);
-		// The id still answers the first form, and only with that form's own fields.
-		expect(ctx.resolveAsk("same", { data: { second: "two" } })).toEqual({
-			ok: false,
-			reason: "invalid",
-			errors: [{ name: "second", message: "Unknown field" }],
-		});
-		expect(ctx.resolveAsk("same", { data: { first: "one" } })).toEqual({ ok: true });
-		expect(await first).toEqual({ data: { first: "one" } });
-		expect(ctx.getPendingAsks()).toEqual([]);
-		// The untracked form is now mounted as an ordinary form: no id reaches it.
-		expect(ctx.resolveAsk("same", { data: { second: "two" } })).toEqual({ ok: false, reason: "not_pending" });
-		mountedForm().handleInput("\x1b");
-		expect(await second).toBeUndefined();
-		await resolved;
-	});
-
-	it.each(["submit", "cancel", "abort"] as const)(
-		"reports a local ask %s once and refuses later answers",
-		async action => {
-			const { ctx, events, resolved } = await loadAskRecorder();
-			const abort = new AbortController();
-			const outcome = ctx.ui.formDialog!('<form><input name="answer" value="native"></form>', {
-				toolCallId: action,
-				signal: abort.signal,
-			});
-			const form = mountedForm();
-			if (action === "submit") {
-				form.handleInput("\t");
-				form.handleInput("\r");
-			} else if (action === "cancel") form.handleInput("\x1b");
-			else abort.abort();
-			expect(ctx.resolveAsk(action, { data: { answer: "late" } })).toEqual({ ok: false, reason: "not_pending" });
-			expect(await outcome).toEqual(action === "submit" ? { data: { answer: "native" } } : undefined);
-			expect(await resolved).toEqual({
-				type: "ask_resolved",
-				toolCallId: action,
-				sessionId: session.sessionManager.getSessionId(),
-				...(action === "submit" ? { data: { answer: "native" } } : {}),
-				by: "local",
-			});
-			expect(events.filter(event => event.type === "ask_resolved")).toHaveLength(1);
-		},
-	);
-
-	it("resets a mounted ask deadline and reports the eventual timeout as a local answer", async () => {
-		const { ctx, resolved } = await loadAskRecorder();
-		vi.useFakeTimers();
-		const outcome = ctx.ui.formDialog!('<form><input name="answer" value="default"></form>', {
-			toolCallId: "timeout",
-			timeout: 1000,
-		});
-		const deadline = ctx.getPendingAsks()[0]!.deadline!;
-		vi.advanceTimersByTime(500);
-		expect(ctx.resetAskTimeout("timeout")).toBe(true);
-		expect(ctx.getPendingAsks()[0]!.deadline).toBe(deadline + 500);
-		vi.advanceTimersByTime(1600);
-		expect(ctx.resolveAsk("timeout", { data: { answer: "late" } })).toEqual({ ok: false, reason: "not_pending" });
-		expect(ctx.resetAskTimeout("timeout")).toBe(false);
-		expect(await outcome).toEqual({ data: { answer: "default" }, timedOut: true });
-		expect(await resolved).toEqual({
-			type: "ask_resolved",
-			toolCallId: "timeout",
-			sessionId: session.sessionManager.getSessionId(),
-			data: { answer: "default" },
-			timedOut: true,
-			by: "local",
-		});
-	});
-
-	it("does not expose extension-owned forms without a tool call id", async () => {
-		const { ctx, events } = await loadAskRecorder();
-		const outcome = ctx.ui.formDialog!('<form><input name="answer"></form>');
-		expect(ctx.getPendingAsks()).toEqual([]);
-		expect(ctx.resetAskTimeout("unknown")).toBe(false);
-		mountedForm().handleInput("\x1b");
-		expect(await outcome).toBeUndefined();
-		expect(events).toEqual([]);
-	});
-
-	it("delivers ask_resolved only after every ask_requested handler returned", async () => {
-		const released = Promise.withResolvers<void>();
-		const entered = Promise.withResolvers<void>();
-		const order: string[] = [];
-		const first = planReviewExtension(
-			"first",
-			(event, ctx) => {
-				if (event.type === "ask_requested") {
-					order.push("first requested");
-					expect(ctx.resolveAsk(event.toolCallId, { data: { answer: "first" } })).toEqual({ ok: true });
-				} else if (event.type === "ask_resolved") order.push("first resolved");
-			},
-			["ask_requested", "ask_resolved"],
-		);
-		const second = planReviewExtension(
-			"second",
-			async event => {
-				if (event.type === "ask_requested") {
-					order.push("second requested");
-					entered.resolve();
-					await released.promise;
-					order.push("second returned");
-				} else if (event.type === "ask_resolved") order.push("second resolved");
-			},
-			["ask_requested", "ask_resolved"],
-		);
-		const runner = await loadExtensions(first, second);
-		const ctx = runner.createContext();
-		const outcome = ctx.ui.formDialog!('<form><input name="answer"></form>', { toolCallId: "barrier" });
-		await entered.promise;
-		expect(await outcome).toEqual({ data: { answer: "first" } });
-		expect(order).toEqual(["first requested", "second requested"]);
-		released.resolve();
-		await Bun.sleep(0);
-		expect(order).toEqual([
-			"first requested",
-			"second requested",
-			"second returned",
-			"first resolved",
-			"second resolved",
-		]);
-	});
 
 	it("exits empty plan mode without confirmation", async () => {
 		const planFilePath = "local://PLAN.md";
@@ -651,7 +430,7 @@ describe("InteractiveMode plan review rendering", () => {
 				ctx.resolvePlanReview(event.reviewId, "refine"),
 				ctx.resolvePlanReview(event.reviewId, "refine", { feedback: "   " }),
 			);
-			stayedOpen = mode.ui.hasOverlay();
+			stayedOpen = mode.shell.overlays.open();
 			accepted = ctx.resolvePlanReview(event.reviewId, "execute");
 		});
 		await loadExtensions(recorder.extension);
@@ -734,9 +513,8 @@ describe("InteractiveMode plan review rendering", () => {
 		let answered: boolean | undefined;
 		const recorder = planReviewRecorder("remote", (event, ctx) => {
 			answered = ctx.resolvePlanReview(event.reviewId, "keep", { role: "slow" });
-			const overlay = mode.ui.getFocused() as PlanReviewOverlay;
-			overlay.handleInput("\x1b[C");
-			overlay.handleInput("\x1b[D");
+			pressKey(mode.shell, "right");
+			pressKey(mode.shell, "left");
 		});
 		await loadExtensions(recorder.extension);
 
@@ -780,7 +558,7 @@ describe("InteractiveMode plan review rendering", () => {
 				// A tier only means something for an approval; refine must not silently drop it.
 				ctx.resolvePlanReview(event.reviewId, "refine", { feedback: "tighten it", role: "slow" }),
 			);
-			stayedOpen = mode.ui.hasOverlay();
+			stayedOpen = mode.shell.overlays.open();
 			accepted = ctx.resolvePlanReview(event.reviewId, "execute");
 		});
 		await loadExtensions(recorder.extension);
@@ -833,10 +611,10 @@ describe("InteractiveMode plan review rendering", () => {
 		const approval = mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
 		const first = await firstOpened.promise;
 
-		expect(mode.ui.hasOverlay()).toBe(true);
+		expect(mode.shell.overlays.open()).toBe(true);
 		// Dismiss the review like a pinned error does: the pending plan survives, the overlay does not.
 		mode.showPinnedError("test dismissal");
-		expect(mode.ui.hasOverlay()).toBe(false);
+		expect(mode.shell.overlays.open()).toBe(false);
 		expect(ctxForLater?.getPendingPlanReview()).toBeUndefined();
 
 		const opened = await ctxForLater!.openPlanReview();
@@ -921,7 +699,7 @@ describe("InteractiveMode plan review rendering", () => {
 					ctx.resolvePlanReview(event.reviewId, "compact");
 				} else if (event.type === "plan_review_resolved") {
 					seen.push(event.type);
-					overlayOpenWhenResolved = mode.ui.hasOverlay();
+					overlayOpenWhenResolved = mode.shell.overlays.open();
 					resolved.resolve(event);
 				}
 			}),
@@ -932,7 +710,7 @@ describe("InteractiveMode plan review rendering", () => {
 		// One macrotask turn drains every queued microtask, so a resolution emitted at the
 		// pick (rather than at the hide) would already have reached the handler.
 		await new Promise<void>(resolve => setImmediate(resolve));
-		expect(mode.ui.hasOverlay()).toBe(true);
+		expect(mode.shell.overlays.open()).toBe(true);
 		expect(seen).toEqual(["plan_review_requested"]);
 
 		compactDone.resolve("ok");
@@ -985,10 +763,7 @@ describe("InteractiveMode plan review rendering", () => {
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
-		vi.spyOn(mode.ui, "showOverlay").mockImplementation(component => {
-			(component as PlanReviewOverlay).handleInput("\n");
-			return { hide: vi.fn() } as never;
-		});
+		onOverlayShown(() => pressKey(mode.shell, "enter"));
 		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
 		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 		let remoteAccepted: boolean | undefined;
@@ -1078,7 +853,7 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(
 			events.filter(event => event.type === "plan_review_resolved" && event.reviewId === first.reviewId),
 		).toHaveLength(1);
-		expect(mode.ui.hasOverlay()).toBe(true);
+		expect(mode.shell.overlays.open()).toBe(true);
 
 		await mode.prepareSessionSwitch();
 		await secondApproval;
@@ -1173,7 +948,7 @@ describe("InteractiveMode plan review rendering", () => {
 		let stillOpen = false;
 		const recorder = planReviewRecorder("remote", (event, ctx) => {
 			answered = ctx.resolvePlanReview(event.reviewId, "save");
-			stillOpen = ctx.getPendingPlanReview()?.reviewId === event.reviewId && mode.ui.hasOverlay();
+			stillOpen = ctx.getPendingPlanReview()?.reviewId === event.reviewId && mode.shell.overlays.open();
 			// Saved, the review still takes an answer.
 			void saved.promise.then(() => ctx.resolvePlanReview(event.reviewId, "execute"));
 		});
@@ -1200,10 +975,7 @@ describe("InteractiveMode plan review rendering", () => {
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
-		vi.spyOn(mode.ui, "showOverlay").mockImplementation(component => {
-			(component as PlanReviewOverlay).handleInput("\n");
-			return { hide: vi.fn() } as never;
-		});
+		onOverlayShown(() => pressKey(mode.shell, "enter"));
 		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
 		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 		const events = observeExtensionEvents(session);
@@ -1417,15 +1189,14 @@ describe("InteractiveMode plan review rendering", () => {
 		});
 		mode.keybindings = keybindings;
 		setKeybindings(keybindings);
-		let capturedOverlay: PlanReviewOverlay | undefined;
-		vi.spyOn(mode.ui, "showOverlay").mockImplementation(component => {
-			capturedOverlay = component as PlanReviewOverlay;
-			return { hide: vi.fn() } as never;
-		});
 		let feedback = "";
-		// The terminal restarts after external output returns to the draft.
+		// The terminal comes back once the external editor exits; its output then reaches the draft.
 		const { promise: editorApplied, resolve: markEditorApplied } = Promise.withResolvers<void>();
-		vi.spyOn(mode.ui, "start").mockImplementation(() => markEditorApplied());
+		vi.spyOn(mode, "suspend").mockImplementation(async run => {
+			const result = await run();
+			setImmediate(markEditorApplied);
+			return result;
+		});
 
 		try {
 			Bun.env.EDITOR = editorPath;
@@ -1442,21 +1213,22 @@ describe("InteractiveMode plan review rendering", () => {
 				},
 			);
 
-			expect(capturedOverlay).toBeDefined();
-			const overlay = capturedOverlay!;
-			overlay.render(80);
-			overlay.handleInput("\t"); // -> toc (Rollout)
-			overlay.handleInput("a");
-			for (const ch of "draft") overlay.handleInput(ch);
-			overlay.handleInput("\x05"); // ctrl+e
+			expect(mode.shell.overlays.open()).toBe(true);
+			// The review lays out its sections once painted.
+			await term.settle();
+			const key = (id: string) => pressKey(mode.shell, id);
+			key("tab"); // -> toc (Rollout)
+			key("a");
+			for (const ch of "draft") key(ch);
+			key("ctrl+e");
 			await editorApplied;
 			expect(feedback).toBe("");
-			overlay.handleInput("\r"); // Explicitly save the returned draft.
+			key("enter"); // Explicitly save the returned draft.
 			expect(feedback).toContain("## Rollout\n```md\n- add rollback command\n- include smoke test\n```");
 
-			overlay.handleInput("\x1b[B"); // Rollout -> Verify
-			overlay.handleInput("\x1b[B"); // toc -> actions, where Refine now leads and is selected
-			overlay.handleInput("\r");
+			key("down"); // Rollout -> Verify
+			key("down"); // toc -> actions, where Refine now leads and is selected
+			key("enter");
 			expect(await choice).toBe("refine");
 		} finally {
 			if (previousEditor === undefined) delete Bun.env.EDITOR;
@@ -1466,29 +1238,44 @@ describe("InteractiveMode plan review rendering", () => {
 		}
 	});
 
+	it("captures a plan decision click with inline tracking off, then returns the mouse to the terminal", async () => {
+		const report = (x: number, y: number) => term.engine.encodeMouse({ x, y });
+		expect(report(0, 0)).toBe("");
+		const label = "Apply the reviewed plan";
+		const choice = mode.showPlanReview("# Plan\n\nReady.", "Plan review", [{ id: "apply", label }]);
+		await term.waitFor(screen => screen.some(row => row.includes(label)));
+		const screen = term.screen();
+		const row = screen.findIndex(line => line.includes(label));
+		const click = report(screen[row]!.indexOf(label), row);
+		expect(click).not.toBe("");
+		term.feed(click);
+		await expect(choice).resolves.toBe("apply");
+		// A settled choice remains mounted until its owner replaces the review.
+		expect(report(0, 0)).not.toBe("");
+		mode.showPinnedError("Cancelled by provider");
+		expect(mode.shell.overlays.open()).toBe(false);
+		expect(report(0, 0)).toBe("");
+	});
+
 	it("dismisses Plan Review and restores input when a provider error is pinned", async () => {
-		mode.ui.setFocus(mode.editor);
+		mode.shell.focus(mode.composer.field);
 		const choice = mode.showPlanReview("# Plan\n\nReady for approval.", "Plan mode - next step", [
 			{ id: "approve", label: "Approve" },
 		]);
 
-		expect(mode.ui.hasOverlay()).toBe(true);
+		expect(mode.shell.overlays.open()).toBe(true);
 
 		mode.showPinnedError("Codex rate limit reached");
 
-		expect(mode.ui.hasOverlay()).toBe(false);
-		expect(mode.ui.getFocused()).toBe(mode.editor);
-		expect(mode.errorBannerContainer.render(80).join("\n")).toContain("Codex rate limit reached");
+		expect(mode.shell.overlays.open()).toBe(false);
+		expect(mode.shell.focused()).toBe(mode.composer.field);
+		const banner = mode.shell.dock.slot("errorBanner").view;
+		expect(renderRows(() => banner()).join("\n")).toContain("Codex rate limit reached");
 		await expect(choice).resolves.toBeUndefined();
 	});
 
 	it("copies the overlay's current edited plan markdown from the real plan review overlay", async () => {
-		let capturedOverlay: PlanReviewOverlay | undefined;
-		const overlayHandle = { hide: vi.fn() };
-		vi.spyOn(mode.ui, "showOverlay").mockImplementation(component => {
-			capturedOverlay = component as PlanReviewOverlay;
-			return overlayHandle as never;
-		});
+		const review = catchReview();
 		const copySpy = vi.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
 		const statusSpy = vi.spyOn(mode, "showStatus");
 		const constructorPlan = "# Plan\n\nOriginal constructor body.\n";
@@ -1498,10 +1285,10 @@ describe("InteractiveMode plan review rendering", () => {
 			{ id: "execute", label: "Approve and execute" },
 		]);
 
-		expect(capturedOverlay).toBeDefined();
-		const overlay = capturedOverlay!;
-		overlay.setPlanContent(editedPlan);
-		overlay.handleInput("c");
+		pressKey(mode.shell, "down");
+		expect(review.current).toBeDefined();
+		review.current!.setPlanContent(editedPlan);
+		pressKey(mode.shell, "c");
 		await Promise.resolve();
 
 		expect(copySpy).toHaveBeenCalledTimes(1);
@@ -1509,11 +1296,11 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(copySpy).not.toHaveBeenCalledWith(constructorPlan);
 		expect(statusSpy).toHaveBeenCalledWith("Copied plan to clipboard");
 
-		overlay.handleInput("\x1b");
+		pressKey(mode.shell, "escape");
 		await expect(choice).resolves.toBeUndefined();
 		// showPlanReview no longer hides on settle: the plan-approval caller fuses
 		// #hidePlanReview() with the replacement paint to avoid stale-buffer flicker.
-		expect(overlayHandle.hide).not.toHaveBeenCalled();
+		expect(mode.shell.overlays.open()).toBe(true);
 	});
 
 	it("approves with in-overlay edits and mirrors them to the plan file", async () => {
@@ -1579,7 +1366,14 @@ describe("InteractiveMode plan review rendering", () => {
 		});
 		const generateTitle = vi.spyOn(session, "generateTitle").mockResolvedValue("Auto QA");
 		const destination = path.join(tempDir.path(), "AUTO_QA_PLAN.md");
-		vi.spyOn(mode, "showHookCustom").mockResolvedValue({ path: "AUTO_QA_PLAN.md" });
+		// The save dialog suggests a name from the generated title; Enter takes the suggestion.
+		onOverlayShown(() => {
+			void (async () => {
+				await generateTitle.mock.results[0]?.value;
+				await Promise.resolve();
+				pressKey(mode.shell, "enter");
+			})();
+		});
 		const clear = vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
 
 		await mode.handlePlanApproval({
@@ -1718,7 +1512,9 @@ describe("InteractiveMode plan review rendering", () => {
 			settings: Settings.isolated({ modelRoles: { plan: `anthropic/${planModel.id}` } }),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
+		await mode.shell.stop();
+		term.dispose();
+		await createMode();
 
 		await mode.handlePlanModeCommand();
 		expect(session.model?.id).toBe(planModel.id);
@@ -1752,6 +1548,75 @@ describe("InteractiveMode plan review rendering", () => {
 			id: "keep",
 			meta: `~${compactNumber(tokens)} / ${compactNumber(executionModel.contextWindow)}`,
 		});
+	});
+
+	/** Plan mode on opus-4-6 (1m) with tiers default=sonnet-4-5 (200k) and slow=opus-4-6, context sized at 300k tokens. */
+	async function openTieredPlanReview(): Promise<string> {
+		session.settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
+		session.settings.setModelRole("slow", "anthropic/claude-opus-4-6");
+		session.settings.setModelRole("plan", "anthropic/claude-opus-4-6");
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nKeep the large context.");
+		await mode.handlePlanModeCommand();
+		const tokens = 300_000;
+		vi.spyOn(session, "getContextUsage").mockImplementation(options => {
+			const contextWindow = options?.contextWindow ?? 0;
+			return { tokens, contextWindow, percent: (tokens / contextWindow) * 100 };
+		});
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		return planFilePath;
+	}
+
+	it("re-measures keep-context approval as the slider moves between context tiers", async () => {
+		const planFilePath = await openTieredPlanReview();
+		let keptOnDefault: boolean | undefined;
+		let keepLabelOnSlow: string | undefined;
+		let keptBackOnDefault: boolean | undefined;
+		const review = catchReview();
+		onOverlayShown(() => {
+			pressKey(mode.shell, "j");
+			const overlay = review.current!;
+			keptOnDefault = overlay.selectOption("keep");
+			pressKey(mode.shell, "right");
+			keepLabelOnSlow = mode.getPendingPlanReview()?.options.find(option => option.id === "keep")?.label;
+			pressKey(mode.shell, "left");
+			keptBackOnDefault = overlay.selectOption("keep");
+			pressKey(mode.shell, "right");
+			overlay.selectOption("keep");
+		});
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+
+		expect(keptOnDefault).toBe(false);
+		expect(keepLabelOnSlow).toBe(
+			`Approve and keep context (~${compactNumber(300_000)} / ${compactNumber(1_000_000)})`,
+		);
+		expect(keptBackOnDefault).toBe(false);
+		expect(session.model?.id).toBe("claude-opus-4-6");
+		expect(session.getPlanModeState()?.enabled).not.toBe(true);
+	});
+
+	it("judges a remote keep-context approval against the tier it names", async () => {
+		const planFilePath = await openTieredPlanReview();
+		const answers: boolean[] = [];
+		const recorder = planReviewRecorder("remote", (event, ctx) => {
+			answers.push(
+				ctx.resolvePlanReview(event.reviewId, "keep", { role: "default" }),
+				ctx.resolvePlanReview(event.reviewId, "keep", { role: "slow" }),
+			);
+		});
+		await loadExtensions(recorder.extension);
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		const resolved = await recorder.resolved;
+
+		expect(answers).toEqual([false, true]);
+		expect(resolved).toMatchObject({ choice: "keep", by: "extension" });
+		expect(session.model?.id).toBe("claude-opus-4-6");
 	});
 
 	it("disables keep-context approval when execution context usage is above ninety-five percent", async () => {
@@ -1880,13 +1745,16 @@ describe("InteractiveMode plan review rendering", () => {
 		// "Approve and keep context" (index 2) — that branch keeps the session, so no
 		// clear machinery runs — and confirm with Enter. `showOverlay` runs inside
 		// `showPlanReview`, so the pick resolves the picker promise without a wait.
-		const overlayHandle = { hide: vi.fn() };
-		vi.spyOn(mode.ui, "showOverlay").mockImplementation(component => {
-			const overlay = component as PlanReviewOverlay;
-			overlay.handleInput("j");
-			overlay.handleInput("j");
-			overlay.handleInput("\n");
-			return overlayHandle as never;
+		let overlayHandle: { readonly closed: boolean } | undefined;
+		const overlays = mode.shell.overlays;
+		const show = overlays.show.bind(overlays);
+		vi.spyOn(overlays, "show").mockImplementation((factory, options) => {
+			const handle = show(factory, options);
+			overlayHandle = handle;
+			pressKey(mode.shell, "j");
+			pressKey(mode.shell, "j");
+			pressKey(mode.shell, "enter");
+			return handle;
 		});
 
 		// Block the execution dispatch until released, mirroring a real turn that
@@ -1896,7 +1764,7 @@ describe("InteractiveMode plan review rendering", () => {
 		const promptEntered = Promise.withResolvers<void>();
 		let hiddenWhenPromptEntered: boolean | undefined;
 		vi.spyOn(session, "prompt").mockImplementation(async () => {
-			hiddenWhenPromptEntered = overlayHandle.hide.mock.calls.length > 0;
+			hiddenWhenPromptEntered = overlayHandle?.closed === true;
 			promptEntered.resolve();
 			return gate.promise;
 		});
@@ -1906,7 +1774,7 @@ describe("InteractiveMode plan review rendering", () => {
 		// Await the real dispatch signal instead of a wall-clock guess.
 		await promptEntered.promise;
 		expect(hiddenWhenPromptEntered).toBe(true);
-		expect(overlayHandle.hide).toHaveBeenCalledTimes(1);
+		expect(mode.shell.overlays.open()).toBe(false);
 
 		gate.resolve(true);
 		await approval;
@@ -3099,7 +2967,7 @@ describe("InteractiveMode plan review rendering", () => {
 
 			expect(abort).not.toHaveBeenCalled();
 			expect(warn).not.toHaveBeenCalled();
-			expect(mode.ui.hasOverlay()).toBe(false);
+			expect(mode.shell.overlays.open()).toBe(false);
 			expect(recorder.events).toEqual([]);
 		});
 
@@ -3114,7 +2982,7 @@ describe("InteractiveMode plan review rendering", () => {
 
 			expect(await mode.openPlanReview()).toBe(false);
 
-			expect(mode.ui.hasOverlay()).toBe(false);
+			expect(mode.shell.overlays.open()).toBe(false);
 			expect(recorder.events).toEqual([]);
 		});
 
@@ -3137,13 +3005,13 @@ describe("InteractiveMode plan review rendering", () => {
 	});
 });
 
-describe("AssistantMessageComponent aborted replay", () => {
+describe("assistant message aborted replay", () => {
 	beforeAll(() => {
 		initTheme();
 	});
 
 	// ==========================================================================
-	// Phase 6 — D layer: replay-side render branches in AssistantMessageComponent.
+	// Phase 6 — D layer: replay-side render branches of the assistant message view.
 	//
 	// D1 asserts that the persisted `SILENT_ABORT_MARKER` suppresses the red abort
 	// line. D2 is the over-suppression regression guard — an aborted message with
@@ -3152,8 +3020,9 @@ describe("AssistantMessageComponent aborted replay", () => {
 	// ==========================================================================
 
 	function renderAssistant(message: AssistantMessage, width = 120): string {
-		const component = new AssistantMessageComponent(message);
-		return Bun.stripANSI(component.render(width).join("\n"));
+		const ctx = createInteractiveModeContext();
+		ctx.presentAssistant(message).finalized.set(true);
+		return renderTranscript(ctx, width).join("\n");
 	}
 
 	/** Build an aborted assistant message with the minimum required fields. */

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
+### Fixed
+
+- Improved diagnostics when a configured embedding provider fails, making provider errors visible in logs while preserving the existing fallback behavior.
+
+## [18.22.1] - 2026-11-17
+
+### Fixed
+
+- Fixed embedding requests failing when oversized inputs were clipped in the middle of an emoji or other Unicode character.
+
 ## [18.21.0] - 2026-11-16
 
 ### Changed

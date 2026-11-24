@@ -1,5 +1,5 @@
-import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
-import { truncateHead, truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { RawSseDebugBuffer } from "../../src/debug/raw-sse-buffer";
+import { truncateHead, truncateTail } from "@oh-my-pi/pi-coding-agent/tools/streaming-output";
 
 const EVENTS = 16;
 const PARENT_BYTES = 8 * 1024 * 1024;

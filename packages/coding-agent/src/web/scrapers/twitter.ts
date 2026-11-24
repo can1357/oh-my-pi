@@ -1,5 +1,4 @@
 import { prompt } from "@oh-my-pi/pi-utils";
-import { settings } from "../../config/settings";
 import xReadPrompt from "../../prompts/system/x-read.md" with { type: "text" };
 import { ToolAbortError } from "../../tools/tool-errors";
 import { SEARCH_HARD_TIMEOUT_MS } from "../search/providers/utils";
@@ -12,7 +11,7 @@ import {
 } from "../search/providers/xai";
 import { parseXUrl, type XProfileTab, type XTarget } from "../x";
 import type { RenderResult, SpecialHandler } from "./types";
-import { buildResult } from "./types";
+import { buildResult, handlerSettings } from "./types";
 
 /** Search operators narrowing `from:<handle>` to what each profile tab shows. */
 const PROFILE_TAB_FILTERS: Record<XProfileTab, string> = {
@@ -57,7 +56,7 @@ function unavailable(url: string, fetchedAt: string, reason: string): RenderResu
  * scraping. Needs `xai-oauth` or `xai` credentials; tries the models of
  * {@link xaiModelChain} in order until one answers.
  */
-export const handleTwitter: SpecialHandler = async (url, timeout, signal, _storage, modelRegistry) => {
+export const handleTwitter: SpecialHandler = async (url, timeout, signal, _storage, modelRegistry, sessionSettings) => {
 	const target = parseXUrl(url);
 	if (!target) return null;
 	const fetchedAt = new Date().toISOString();
@@ -68,7 +67,7 @@ export const handleTwitter: SpecialHandler = async (url, timeout, signal, _stora
 			"X blocks automated access, and Grok's X tools only read posts, profiles, post searches, and hashtags.",
 		);
 	}
-	const models = modelRegistry ? xaiModelChain(modelRegistry, settings) : [];
+	const models = modelRegistry ? xaiModelChain(modelRegistry, handlerSettings(sessionSettings)) : [];
 	if (!modelRegistry || models.length === 0) {
 		return unavailable(
 			url,

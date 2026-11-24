@@ -8,8 +8,10 @@ import * as fsSync from "node:fs";
 import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
-import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
+import { getModelPricingStatus, modelsAreEqual, routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import type { ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { ensureSqliteLockShim, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
+import { bindAgentMesh } from "./irc/mesh";
 import {
 	APP_NAME,
 	directoryIsMissing,
@@ -23,7 +25,7 @@ import {
 import { $env, isBunTestRuntime, isCompiledBinary, setInteractiveHost } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
-import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
+import { fuzzyFilter } from "./utils/fuzzy";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
 import {
@@ -39,8 +41,9 @@ import {
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
-import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
+import { KeybindingsManager } from "./config/keybindings/keybindings";
+import { formatKeyHint } from "./ui/keys/hints";
+import type { SessionPickerOptions } from "./modes/view-model/apps/session-picker";
 import { fetchBuild } from "./cli/build-service";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { runAutoUpdate } from "./cli/auto-update";
@@ -49,16 +52,18 @@ import { getLatestRelease, isSourceCheckout } from "./cli/update-cli";
 import { findConfigFile } from "./config";
 import { cfgNoJudge, cfgNoSpotlight, cfgOffline } from "./config/auxiliary-model-policy";
 import { ModelRegistry } from "./config/model-registry";
-import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { formatModelSelectorValue } from "./config/model-selector";
 import {
 	disabledProviderIds,
 	expandRoleAlias,
+	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	resolveCliModel,
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
 	resolveModelScope,
 	type ScopedModel,
+	scopeAllowList,
 } from "./config/model-resolver";
 import { ModelsConfigFile } from "./config/models-config";
 import { serviceTierSettingToTier } from "./config/service-tier";
@@ -80,16 +85,14 @@ import {
 	scheduleMarketplaceAutoUpdate,
 	type MarketplaceAutoUpdateOptions,
 } from "./extensibility/plugins/marketplace-auto-update";
-import { registerDaemonProjectPresence } from "./launch/presence";
 import type { MCPManager } from "./mcp";
 import type { InteractiveMode } from "./modes/interactive-mode";
 import { formatSessionContinuationNotice } from "./modes/persistence-failure";
 import type { PrintModeOptions } from "./modes/print-mode";
 import type { RpcModeOptions } from "./modes/rpc/rpc-mode";
 import { claimRpcInput } from "./modes/rpc/rpc-input";
-import { CURRENT_SETUP_VERSION } from "@oh-my-pi/pi-tui/setup/setup-version";
+import { CURRENT_SETUP_VERSION } from "./config/setup-version";
 import type * as SetupWizardModule from "./modes/setup";
-import type { SetupScene } from "@oh-my-pi/pi-tui/setup/scenes/types";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./modes/skill-command";
 import {
 	applyStartupComposerPreferences,
@@ -97,7 +100,6 @@ import {
 	stopPendingStartupComposer,
 	takeStartupComposerLease,
 } from "./modes/startup-composer";
-import { ensureTheme, initTheme, stopThemeWatcher } from "@oh-my-pi/pi-tui/theme";
 import type { SubmittedUserInput } from "./modes/types";
 import { createWarpEventBridgeExtension } from "./modes/warp-events";
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
@@ -144,9 +146,9 @@ import { type RestoreOutcome, restoreSession } from "./task/restore";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { cfgTelemetryOtlpExportEnabled } from "./telemetry-settings";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
-import { automaticThinkingLevel, concreteThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { automaticThinkingLevel, concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking/levels";
 import type { LspStartupServerInfo } from "./tools";
-import { sanitizeDisplayWarnings } from "@oh-my-pi/pi-tui/render/render-utils";
+import { sanitizeDisplayWarnings } from "./utils/render-utils";
 import { getChangelogPath, readLastChangelogVersion, resolveStartupChangelogForDisplay } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
 import { resolveFirstLaunchPythonEvalWarning } from "./eval/startup-warning";
@@ -157,8 +159,9 @@ import { cfgGoalEnabled } from "./goals/settings";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "./plan-mode/settings";
 
 import { cfgAdvisorEnabled } from "./advisor/settings";
-import { cfgAsyncPrintWake, cfgLaunchPersist, cfgToolsApprovalMode } from "./tools/settings";
+import { syncRelayInstallsOnStartup } from "./tools/browser/relay/installs";
 import { claimTerminal } from "./tools/browser/terminal-owner";
+import { cfgAsyncPrintWake, cfgLaunchPersist, cfgToolsApprovalMode } from "./tools/settings";
 import {
 	cfgAutocompleteMaxVisible,
 	cfgAutoResume,
@@ -167,10 +170,6 @@ import {
 	cfgImagesAutoResize,
 	cfgMarketplaceAutoUpdate,
 	cfgSetupVersion,
-	cfgShowHardwareCursor,
-	cfgSpellingAutocomplete,
-	cfgSpellingAutocorrect,
-	cfgSpellingTypoDetection,
 	cfgStartupChangelogMode,
 	cfgStartupCheckUpdate,
 	cfgStartupQuiet,
@@ -179,11 +178,9 @@ import {
 	cfgSymbolPreset,
 	cfgThemeDark,
 	cfgThemeLight,
-	cfgTuiCompleteScrollback,
-	cfgTuiImeSafeCursor,
-	cfgTuiMaxInlineImages,
 	cfgTuiResizeScrollback,
 	cfgTuiSpinnerInterval,
+	cfgTuiVimMode,
 	cfgTuiMaxFps,
 	cfgTuiMotion,
 	cfgUpdateAuto,
@@ -200,10 +197,11 @@ import {
 	cfgSessionWarnCost,
 	cfgSessionWorktreeScope,
 } from "./session/settings";
-import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
+import { cfgDisabledProviders, cfgEnabledModels, cfgModelProviderOrder, cfgModelRoles } from "./config/model-settings";
 import { cfgTaskAgentIdleTtlMs } from "./task/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
+import { ensureTheme, getTerminalAppearance, initTheme, stopThemeWatcher } from "./ui/theme/service";
 
 type RunAcpMode = (createSession: AcpSessionFactory) => Promise<never>;
 type RunPrintMode = (session: AgentSession, options: PrintModeOptions) => Promise<number>;
@@ -223,7 +221,7 @@ type SessionPicker = (
 async function loadSessionPicker(init?: { foreign?: boolean }): Promise<SessionPicker> {
 	const [{ selectSession }, { HistoryStorage }, { loadPinnedSessionIds, setSessionPinned }, { FileSessionStorage }] =
 		await Promise.all([
-			import("@oh-my-pi/pi-tui/apps/session-picker"),
+			import("./cli/session-picker"),
 			import("./session/history-storage"),
 			import("./session/session-pins"),
 			import("./session/session-storage"),
@@ -410,6 +408,16 @@ export interface InteractiveModeNotify {
 	message: string;
 }
 
+/** The startup fallback warning, unless setup selected a model the session did not have before it. */
+function postSetupModelFallback(
+	message: string | undefined,
+	modelBeforeSetup: Model | undefined,
+	modelAfterSetup: Model | undefined,
+): string | undefined {
+	if (modelAfterSetup && !modelsAreEqual(modelBeforeSetup, modelAfterSetup)) return undefined;
+	return message;
+}
+
 export function buildModelScopeNotification(
 	scopedModelsForDisplay: readonly Pick<ScopedModel, "model" | "thinkingLevel" | "explicitThinkingLevel">[],
 	startupQuiet: boolean,
@@ -531,13 +539,21 @@ interface AcpSessionHandle {
 
 type AcpSessionFactory = (cwd: string, options?: { interactivePrompts?: boolean }) => Promise<AcpSessionHandle>;
 
+const API_KEY_REQUIRES_MODEL =
+	"--api-key requires a model to be specified via --model, --provider/--model, or --models";
+
 export interface AcpSessionFactoryOptions {
 	baseOptions: CreateAgentSessionOptions;
 	settings: Settings;
 	sessionDir?: string;
 	authStorage: AuthStorage;
+	/** Provider selected at launch, even when the workspace will select a different model. */
+	apiKeyProvider?: string;
 	modelRegistry: ModelRegistry;
-	parsedArgs: Pick<Args, "apiKey" | "trustedExtensions" | "tools" | "invalidFlagValues">;
+	parsedArgs: Pick<
+		Args,
+		"apiKey" | "trustedExtensions" | "tools" | "invalidFlagValues" | "model" | "models" | "thinking"
+	>;
 	rawArgs: string[];
 	createSession: (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
 }
@@ -563,6 +579,42 @@ async function loadTrustedSessionExtensions(
 }
 
 /**
+ * The provider an ACP `--api-key` belongs to when no launch model names one: the provider of the model the
+ * launch scope starts on, else the one provider a declared launch scope names. Without a launch scope, or
+ * with one naming zero or several providers, the launch is refused, so no workspace can claim the key.
+ */
+async function resolveAcpApiKeyProvider(
+	parsed: Pick<Args, "model" | "models" | "thinking">,
+	modelRegistry: ModelRegistry,
+	settings: Settings,
+): Promise<{ provider: string } | { error: string }> {
+	// The launch scope names the credential's provider, but must not select the workspace's model.
+	const keyTarget: CreateAgentSessionOptions = {};
+	applyStartupScopedModels(
+		keyTarget,
+		parsed,
+		await resolveScopedModels(parsed, modelRegistry, settings),
+		settings,
+		false,
+	);
+	if (keyTarget.model) return { provider: keyTarget.model.provider };
+	const declaredScope = parsed.models ?? cfgEnabledModels.get(settings);
+	if (declaredScope.length === 0) return { error: API_KEY_REQUIRES_MODEL };
+	// Without a stored credential the scope matches nothing available, but it still names its provider.
+	const disabled = disabledProviderIds(settings);
+	const catalog = {
+		getAvailable: (kind?: ModelKind | "all") =>
+			modelRegistry.getAll(kind).filter(model => !disabled.has(model.provider)),
+	};
+	const matches = await resolveModelScope(declaredScope, catalog, getModelMatchPreferences(settings), settings);
+	const [provider, ...others] = new Set(matches.map(entry => entry.model.provider));
+	if (!provider || others.length > 0) {
+		return { error: "--api-key requires exactly one enabled provider in the launch scope" };
+	}
+	return { provider };
+}
+
+/**
  * Build the per-`session/new` factory used by ACP mode.
  *
  * MCP servers in ACP sessions are owned exclusively by the ACP client, which
@@ -573,8 +625,31 @@ async function loadTrustedSessionExtensions(
  * tool registry and shadow the client-supplied servers (issue #1234).
  */
 export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSessionFactory {
+	const apiKey = args.parsedArgs.apiKey;
+	// The launch names the key's provider (a model or the launch scope), and a workspace can only match it.
+	// Without one, only an explicit CLI pattern names it, by the model it resolves to at session creation.
+	let apiKeyProvider = args.apiKeyProvider ?? args.baseOptions.model?.provider;
+	const bindApiKey = (provider: string | undefined, key: string) => {
+		if (!provider) throw new CliUsageError(API_KEY_REQUIRES_MODEL);
+		// Auth storage is shared by every session/new. Never copy one CLI key to a second provider.
+		if (apiKeyProvider && apiKeyProvider !== provider) {
+			throw new CliUsageError(`--api-key is bound to ${apiKeyProvider}, not ${provider}`);
+		}
+		args.authStorage.keys.setRuntime(provider, key);
+		apiKeyProvider = provider;
+	};
 	return async (cwd, factoryOptions) => {
 		const nextSettings = await args.settings.cloneForCwd(cwd);
+		const nextOptions = { ...args.baseOptions };
+		if (args.parsedArgs.models === undefined) {
+			const scope = await resolveScopedModels(args.parsedArgs, args.modelRegistry, nextSettings);
+			applyStartupScopedModels(nextOptions, args.parsedArgs, scope, nextSettings, false);
+		}
+		if (apiKey) {
+			if (!apiKeyProvider && !nextOptions.modelPattern) throw new CliUsageError(API_KEY_REQUIRES_MODEL);
+			if (nextOptions.model) bindApiKey(nextOptions.model.provider, apiKey);
+		}
+
 		const nextSessionManager = SessionManager.create(cwd, args.sessionDir);
 		const agentId = `acp:${nextSessionManager.getSessionId()}`;
 		// `baseOptions.titleSystemPrompt` is resolved from the launch cwd; an ACP
@@ -598,7 +673,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		// limits, …) on its own project's settings until disposed; its requests redact credentials
 		// per that project's `secrets.enabled` regardless of which session holds the effects.
 		const { session: nextSession, setToolUIContext } = await args.createSession({
-			...args.baseOptions,
+			...nextOptions,
 			cwd,
 			sessionManager: nextSessionManager,
 			settings: nextSettings,
@@ -614,9 +689,6 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			eventBus,
 			preloadedExtensions: trustedExtensions,
 		});
-		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
-			args.authStorage.keys.setRuntime(nextSession.model.provider, args.parsedArgs.apiKey);
-		}
 		const runner = nextSession.extensionRunner;
 		const reparsedArgs = applyExtensionFlags(
 			runner
@@ -643,6 +715,26 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 				throw error;
 			}
 		}
+		if (apiKey && !nextOptions.model) {
+			try {
+				bindApiKey(nextSession.model?.provider, apiKey);
+			} catch (error) {
+				await nextSession.dispose();
+				throw error;
+			}
+		}
+		nextSession.setScopedModelsRefresher(async () => {
+			await rebuildScopedModels(nextSession, args.parsedArgs, args.modelRegistry, nextSettings);
+		});
+		watchScopedModelSettings(nextSession, args.parsedArgs, args.modelRegistry, nextSettings);
+		const configuredScope = args.parsedArgs.models ?? cfgEnabledModels.get(nextSettings);
+		if (configuredScope.length > 0) {
+			await rebuildScopedModels(nextSession, args.parsedArgs, args.modelRegistry, nextSettings);
+			// Fire-and-forget is safe: rebuildScopedModels returns without writing once the session is disposed.
+			void rebuildScopedModelsAfterDiscovery(nextSession, args.parsedArgs, args.modelRegistry, nextSettings).catch(
+				error => logger.warn("Scoped model rebuild after discovery failed", { error: String(error) }),
+			);
+		}
 		return { session: nextSession, setToolUIContext };
 	};
 }
@@ -668,10 +760,15 @@ async function runInteractiveMode(
 	startupLease?: ComposerLease,
 	startupGoal?: string,
 	startupRestore?: () => Promise<RestoreOutcome>,
+	modelFallbackMessage?: string,
 ): Promise<void> {
+	// Captured before setup: the setup wizard may replace the model the fallback warning describes.
+	const modelBeforeSetup = session.model;
 	const InteractiveModeConstructor = await loadInteractiveModeConstructor();
 	let mode: InteractiveMode;
 	try {
+		// The interactive mode adopts a started frame; a frame still starting would be started twice.
+		await startupLease?.ready;
 		mode = new InteractiveModeConstructor(
 			session,
 			version,
@@ -679,7 +776,7 @@ async function runInteractiveMode(
 			lspServers,
 			mcpManager,
 			eventBus,
-			startupLease?.composer,
+			startupLease?.frame,
 			subagentEventBus,
 		);
 		startupLease?.adopt();
@@ -689,7 +786,7 @@ async function runInteractiveMode(
 	}
 
 	let setupWizard: typeof SetupWizardModule | undefined;
-	let setupScenes: SetupScene[] = [];
+	let setupScenes: SetupWizardModule.SetupScene[] = [];
 	let playStartupSplash = false;
 	try {
 		// Cold-launch gate: the full setup wizard (every scene + the overlay and
@@ -785,6 +882,14 @@ async function runInteractiveMode(
 			if (!notify) {
 				continue;
 			}
+			if (notify.message === modelFallbackMessage) {
+				// Setup may have replaced the model this fallback warning describes.
+				const postSetupFallback = postSetupModelFallback(modelFallbackMessage, modelBeforeSetup, session.model);
+				if (!postSetupFallback) {
+					continue;
+				}
+				notify.message = postSetupFallback;
+			}
 			if (notify.kind === "warn") {
 				mode.showWarning(notify.message);
 			} else if (notify.kind === "error") {
@@ -878,7 +983,11 @@ async function runInteractiveMode(
 	}
 }
 
-type SessionPromptResult = "accepted" | "declined" | "unavailable";
+/**
+ * `"keep"`: open the session where it is stored, with the launch directory as
+ * its working directory, as `--resume <path>` does.
+ */
+type SessionPromptResult = "accepted" | "declined" | "unavailable" | "keep";
 
 type SessionPrompt = (session: SessionInfo) => Promise<SessionPromptResult>;
 
@@ -897,6 +1006,11 @@ async function promptMoveSession(session: SessionInfo): Promise<SessionPromptRes
 		rl.close();
 		resumeStartupWatchdog();
 	}
+}
+
+/** Protocol modes (`rpc`, `rpc-ui`, `acp`) own stdin and stdout, so they never ask. */
+async function keepSessionInPlace(): Promise<SessionPromptResult> {
+	return "keep";
 }
 
 /**
@@ -947,6 +1061,7 @@ function isForeignSessionImport(parsed: Pick<Args, "fromClaude" | "fromCodex">):
 type MissingCwdMoveResult =
 	| { status: "not-needed" }
 	| { status: "declined" }
+	| { status: "kept" }
 	| { status: "moved"; manager: SessionManager };
 
 async function moveMissingCwdSessionIfNeeded(
@@ -964,6 +1079,9 @@ async function moveMissingCwdSessionIfNeeded(
 	// Filed under this folder (or a removed worktree of it): the session belongs here, no question to ask.
 	if (!(await SessionManager.isStrandedIn(session, cwd, sessionDir))) {
 		const movePromptResult = await askToMoveSession(session);
+		if (movePromptResult === "keep") {
+			return { status: "kept" };
+		}
 		if (movePromptResult === "unavailable") {
 			throw new SessionResolutionError(
 				`Session "${sessionArg}" belongs to a directory that no longer exists (${sourceCwd}); run interactively to move it into the current project.`,
@@ -1083,7 +1201,7 @@ function notifyResumeCwdFallback(
  * destination project's settings-derived scope wins over the launch directory's.
  */
 export async function resolveScopedModels(
-	parsed: Args,
+	parsed: Pick<Args, "models">,
 	modelRegistry: Pick<ModelRegistry, "getAvailable" | "getDiscoverableProviders" | "refresh">,
 	activeSettings: Settings,
 ): Promise<ScopedModel[]> {
@@ -1124,9 +1242,7 @@ export function toSessionScopedModels(
 
 /** Whether two scope lists reference the same set of models (order-independent). */
 function sameScopedModelSet(a: ReadonlyArray<{ model: Model }>, b: ReadonlyArray<{ model: Model }>): boolean {
-	if (a.length !== b.length) return false;
-	const keys = new Set(a.map(entry => `${entry.model.provider}/${entry.model.id}`));
-	return b.every(entry => keys.has(`${entry.model.provider}/${entry.model.id}`));
+	return a.length === b.length && a.every(entry => b.some(other => routedModelsAreEqual(entry.model, other.model)));
 }
 
 /** Minimal session surface the post-discovery scope rebuild mutates. */
@@ -1152,7 +1268,7 @@ export interface ScopedModelSink {
  */
 export async function rebuildScopedModelsAfterDiscovery(
 	session: ScopedModelSink,
-	parsed: Args,
+	parsed: Pick<Args, "models">,
 	modelRegistry: Pick<ModelRegistry, "getAvailable" | "awaitBackgroundRefresh">,
 	activeSettings: Settings,
 ): Promise<void> {
@@ -1171,7 +1287,7 @@ export async function rebuildScopedModelsAfterDiscovery(
  */
 export async function rebuildScopedModels(
 	session: ScopedModelSink,
-	parsed: Args,
+	parsed: Pick<Args, "models">,
 	modelRegistry: Pick<ModelRegistry, "getAvailable">,
 	activeSettings: Settings,
 ): Promise<ScopedModel[] | undefined> {
@@ -1192,18 +1308,24 @@ export async function rebuildScopedModels(
 }
 
 /** Settings the scoped model list follows (see {@link watchScopedModelSettings}). */
-const cfgScopedModelInputs = combine({ enabledModels: cfgEnabledModels, disabledProviders: cfgDisabledProviders });
+const cfgScopedModelInputs = combine({
+	enabledModels: cfgEnabledModels,
+	disabledProviders: cfgDisabledProviders,
+	modelProviderOrder: cfgModelProviderOrder,
+	// Role aliases in `enabledModels` (`@slow`) resolve through the current roles.
+	modelRoles: cfgModelRoles,
+});
 
 /**
  * Keep the Ctrl+P / scoped `/models` list in step with live settings: an
- * `enabledModels` edit re-resolves a settings-derived scope (an explicit
- * `--models` scope stays pinned), and a `disabledProviders` edit re-resolves
+ * `enabledModels`, provider-order or model-role edit re-resolves a settings-derived scope
+ * (an explicit `--models` scope stays pinned), and a `disabledProviders` edit re-resolves
  * after the catalog rebuild so re-enabled providers rejoin (disabled ones are
  * already filtered from `session.scopedModels` at read time).
  */
 export function watchScopedModelSettings(
 	session: ScopedModelSink & Pick<AgentSession, "addDisposer">,
-	parsed: Args,
+	parsed: Pick<Args, "models">,
 	modelRegistry: Pick<ModelRegistry, "getAvailable" | "reapplyModelPolicies">,
 	activeSettings: Settings,
 ): void {
@@ -1368,12 +1490,16 @@ export async function createSessionManager(
 		return await forkIfMovedAway(await SessionManager.open(session.path, parsed.sessionDir), parsed.sessionDir);
 	}
 	if (parsed.continue) {
-		return await forkIfMovedAway(
+		const manager = await forkIfMovedAway(
 			await SessionManager.continueRecent(cwd, parsed.sessionDir, undefined, {
 				onSessionContinuation: options.onSessionContinuation,
 			}),
 			parsed.sessionDir,
 		);
+		// Nothing to resume (none left, or the newest is open in another omp
+		// process): start up as a plain launch would.
+		if (manager.getEntries().length === 0) parsed.continue = false;
+		return manager;
 	}
 	// --resume without value is handled separately (needs picker UI)
 	// If --session-dir provided without --continue/--resume, create new session there
@@ -1429,6 +1555,102 @@ export function applyResolvedSystemPromptInputs(
 }
 
 /**
+ * Seeds the startup model, thinking level and cycling scope from `scopedModels`. Runs after `--model`
+ * resolution and is the only other writer of `options.thinkingLevel`, so a level present on entry
+ * alongside `--model` came from its selector and outranks the scope entry for the same model.
+ */
+function applyStartupScopedModels(
+	options: CreateAgentSessionOptions,
+	parsed: Pick<Args, "model" | "models" | "thinking">,
+	scopedModels: readonly ScopedModel[],
+	activeSettings: Settings,
+	restoringSession: boolean,
+): void {
+	const cliModelThinking = parsed.model !== undefined && options.thinkingLevel !== undefined;
+	const first = scopedModels[0];
+	// True when a configured `default` role was deliberately left unresolved for
+	// createAgentSession's post-extension re-resolution (issue #6694); the
+	// scoped thinking-level seed below must be deferred along with the model.
+	let deferredDefaultRole = false;
+	if (!parsed.model && !options.model && !restoringSession) {
+		if (first) {
+			const remembered = activeSettings.getModelRole("default");
+			if (remembered) {
+				const rememberedSpec = resolveModelRoleValue(remembered, scopeAllowList(scopedModels), {
+					settings: activeSettings,
+					matchPreferences: getModelMatchPreferences(activeSettings),
+				});
+				// The resolved model keeps its variant and pin; only an unresolved role falls back to an id match.
+				const rememberedModel =
+					rememberedSpec.model ??
+					scopedModels.find(scopedModel => scopedModel.model.id.toLowerCase() === remembered.toLowerCase())?.model;
+				if (rememberedModel) {
+					options.model = rememberedModel;
+					options.rebindModelAfterDiscovery = true;
+					// Apply explicit thinking level from remembered role value
+					if (!parsed.thinking && rememberedSpec.explicitThinkingLevel && rememberedSpec.thinkingLevel) {
+						options.thinkingLevel = rememberedSpec.thinkingLevel;
+					}
+				}
+			}
+			// A configured `default` role that doesn't resolve within the startup
+			// scope is deferred, NOT silently pinned to `scopedModels[0]`: the scope
+			// is resolved before extensions register their providers, so a role naming
+			// an extension-registered model (listed in `enabledModels`) would drop out
+			// here and the session would run on an unrelated in-scope provider without
+			// any error. Leaving `options.model` unset lets createAgentSession's
+			// post-extension default-role resolution reclaim it against the fully
+			// registered, still enabledModels-scoped catalog (issue #6694).
+			// Defer ONLY for a settings-derived scope: createAgentSession re-resolves
+			// against `settings.enabledModels` and never sees CLI `--models`, so
+			// deferring under an explicit CLI scope would let the saved default
+			// escape it — keep pinning the first scoped model there.
+			deferredDefaultRole = !options.model && Boolean(remembered) && !((parsed.models?.length ?? 0) > 0);
+			if (!options.model && !deferredDefaultRole) {
+				options.model = first.model;
+				options.rebindModelAfterDiscovery = true;
+			}
+		} else if ((parsed.models?.length ?? 0) > 0) {
+			// A CLI `--models` scope that resolved to zero models at startup: its
+			// selectors name only models supplied by extension providers (or discovery)
+			// that register during createAgentSession, so nothing matched the
+			// pre-session catalog and `getDiscoverableProviders()` did not yet list the
+			// provider for resolveScopedModels' pre-refresh. Defer the choice to the
+			// SDK's post-extension resolution — the same `modelPattern` path a deferred
+			// `--model` uses — so the initial model is picked from the requested scope
+			// instead of an unrelated fallback. The rebuild right after createSession
+			// then activates the scoped list for extension providers (issue #6694), and
+			// the fire-and-forget one once discovery settles (issue #9220).
+			options.modelPattern = parsed.models;
+		}
+	}
+
+	// Thinking level comes from the scope entry the session starts on, which is not always the
+	// first one (e.g. a remembered default). A model outside the scope (an explicit `--model`) keeps its own.
+	const startScoped = options.model
+		? scopedModels.find(entry => routedModelsAreEqual(entry.model, options.model))
+		: first;
+	if (parsed.thinking) {
+		options.thinkingLevel = parsed.thinking;
+	} else if (
+		startScoped?.explicitThinkingLevel === true &&
+		!cliModelThinking &&
+		// A deferred default role resolves its own model (and any explicit
+		// thinking suffix) after extensions register; seeding the fallback
+		// scoped model's level here would override it in createAgentSession.
+		!deferredDefaultRole &&
+		!restoringSession
+	) {
+		options.thinkingLevel = startScoped.thinkingLevel;
+	}
+
+	// Scoped models for Ctrl+P cycling — fill in default thinking levels when not explicit.
+	if (first) {
+		options.scopedModels = toSessionScopedModels(scopedModels, activeSettings);
+	}
+}
+
+/**
  * Builds startup session options from parsed CLI flags, scoped models, and resolved session lineage.
  * Non-fatal warnings go to `warn`, which an interactive launch points at its UI's startup notices.
  */
@@ -1443,6 +1665,7 @@ export async function buildSessionOptions(
 	const options: CreateAgentSessionOptions = {
 		cwd: parsed.cwd ?? getProjectDir(),
 		autoApprove: parsed.autoApprove ?? false,
+		scopedModelsFromSettings: parsed.models === undefined,
 	};
 	const restoringSession = Boolean(parsed.continue || parsed.resume || isForeignSessionImport(parsed));
 	if (parsed.serviceTier !== undefined) {
@@ -1524,16 +1747,11 @@ export async function buildSessionOptions(
 	// configured assignment so explicit prewalk role targets still resolve
 	// against the value that existed when the CLI was invoked.
 	const preModelOverrideDefaultRole = activeSettings.getModelRole("default");
-	// True when a configured `default` role was deliberately left unresolved for
-	// createAgentSession's post-extension re-resolution (issue #6694); the
-	// scoped thinking-level seed below must be deferred along with the model.
-	let deferredDefaultRole = false;
 	if (parsed.model) {
 		const resolved = resolveCliModel({
 			cliProvider: parsed.provider,
 			cliModel: parsed.model,
 			modelRegistry,
-			availableModels: modelRegistry.getAvailable(),
 			settings: activeSettings,
 			preferences: modelMatchPreferences,
 		});
@@ -1581,7 +1799,7 @@ export async function buildSessionOptions(
 			// at, or the first cycle back into `default` overrides it.
 			activeSettings.overrideModelRoles({
 				default: formatModelSelectorValue(
-					resolved.selector ?? `${resolved.model.provider}/${resolved.model.id}`,
+					resolved.selector ?? formatModelStringWithRouting(resolved.model),
 					parsed.thinking ?? resolved.thinkingLevel,
 				),
 			});
@@ -1589,63 +1807,6 @@ export async function buildSessionOptions(
 				options.thinkingLevel = resolved.thinkingLevel;
 			}
 		}
-	} else if (scopedModels.length > 0 && !restoringSession) {
-		const remembered = activeSettings.getModelRole("default");
-		if (remembered) {
-			const rememberedSpec = resolveModelRoleValue(
-				remembered,
-				scopedModels.map(scopedModel => scopedModel.model),
-				{
-					settings: activeSettings,
-					matchPreferences: modelMatchPreferences,
-				},
-			);
-			const rememberedResolvedModel = rememberedSpec.model;
-			const rememberedModel = rememberedResolvedModel
-				? scopedModels.find(
-						scopedModel =>
-							scopedModel.model.provider === rememberedResolvedModel.provider &&
-							scopedModel.model.id === rememberedResolvedModel.id,
-					)
-				: scopedModels.find(scopedModel => scopedModel.model.id.toLowerCase() === remembered.toLowerCase());
-			if (rememberedModel) {
-				options.model = rememberedModel.model;
-				options.rebindModelAfterDiscovery = true;
-				// Apply explicit thinking level from remembered role value
-				if (!parsed.thinking && rememberedSpec.explicitThinkingLevel && rememberedSpec.thinkingLevel) {
-					options.thinkingLevel = rememberedSpec.thinkingLevel;
-				}
-			}
-		}
-		// A configured `default` role that doesn't resolve within the startup
-		// scope is deferred, NOT silently pinned to `scopedModels[0]`: the scope
-		// is resolved before extensions register their providers, so a role naming
-		// an extension-registered model (listed in `enabledModels`) would drop out
-		// here and the session would run on an unrelated in-scope provider without
-		// any error. Leaving `options.model` unset lets createAgentSession's
-		// post-extension default-role resolution reclaim it against the fully
-		// registered, still enabledModels-scoped catalog (issue #6694).
-		// Defer ONLY for a settings-derived scope: createAgentSession re-resolves
-		// against `settings.enabledModels` and never sees CLI `--models`, so
-		// deferring under an explicit CLI scope would let the saved default
-		// escape it — keep pinning the first scoped model there.
-		deferredDefaultRole = !options.model && Boolean(remembered) && !((parsed.models?.length ?? 0) > 0);
-		if (!options.model && !deferredDefaultRole) {
-			options.model = scopedModels[0].model;
-			options.rebindModelAfterDiscovery = true;
-		}
-	} else if ((parsed.models?.length ?? 0) > 0 && !restoringSession) {
-		// A CLI `--models` scope that resolved to zero models at startup: its
-		// selectors name only models supplied by extension providers (or discovery)
-		// that register during createAgentSession, so nothing matched the
-		// pre-session catalog and `getDiscoverableProviders()` did not yet list the
-		// provider for resolveScopedModels' pre-refresh. Defer the choice to the
-		// SDK's post-extension resolution — the same `modelPattern` path a deferred
-		// `--model` uses — so the initial model is picked from the requested scope
-		// instead of an unrelated fallback. The rebuild right after createSession
-		// then activates the scoped list for extension providers (issue #6694), and
-		// the fire-and-forget one once discovery settles (issue #9220).
-		options.modelPattern = parsed.models;
 	}
 
 	if (parsed.noPrewalk && (parsed.prewalk || parsed.prewalkInto !== undefined)) {
@@ -1717,25 +1878,7 @@ export async function buildSessionOptions(
 		options.planYolo = { target: resolved.model, thinkingLevel: resolved.thinkingLevel };
 	}
 
-	// Thinking level
-	if (parsed.thinking) {
-		options.thinkingLevel = parsed.thinking;
-	} else if (
-		scopedModels.length > 0 &&
-		scopedModels[0].explicitThinkingLevel === true &&
-		// A deferred default role resolves its own model (and any explicit
-		// thinking suffix) after extensions register; seeding the fallback
-		// scoped model's level here would override it in createAgentSession.
-		!deferredDefaultRole &&
-		!restoringSession
-	) {
-		options.thinkingLevel = scopedModels[0].thinkingLevel;
-	}
-
-	// Scoped models for Ctrl+P cycling — fill in default thinking levels when not explicit.
-	if (scopedModels.length > 0) {
-		options.scopedModels = toSessionScopedModels(scopedModels, activeSettings);
-	}
+	applyStartupScopedModels(options, parsed, scopedModels, activeSettings, restoringSession);
 
 	// API key from CLI - set in authStorage
 	// (handled by caller before createAgentSession)
@@ -1755,7 +1898,12 @@ export async function buildSessionOptions(
 
 	// Tools
 	if (parsed.noTools) {
+		// `--tools` is the whole tool surface: no MCP, extensions, custom tools,
+		// memory, auto-learn or Auto-QA, and subagents inherit the restriction.
 		options.toolNames = parsed.tools && parsed.tools.length > 0 ? parsed.tools : [];
+		options.restrictToolNames = true;
+		// The restricted session would not bind them; do not run their factories either.
+		options.disableExtensionDiscovery = true;
 	} else if (parsed.tools) {
 		options.toolNames = parsed.tools;
 	}
@@ -1846,7 +1994,7 @@ export async function runRootCommand(
 	try {
 		// Non-prepaint commands still need a default theme; an existing Composer
 		// already initialized its cached theme synchronously for the first frame.
-		await logger.time("initTheme:initial", ensureTheme);
+		logger.time("initTheme:initial", ensureTheme);
 
 		const parsedArgs = parsed;
 		try {
@@ -1893,6 +2041,7 @@ export async function runRootCommand(
 		if (parsedArgs.invalidFlagValues.length === 0) {
 			rejectNoUiWithoutRpc(parsedArgs);
 		}
+		if (!parsedArgs.help && !isBunTestRuntime()) syncRelayInstallsOnStartup();
 		const mode = parsedArgs.mode || "text";
 		// RPC owns stdin. Claim its singleton stream before plugin/extension discovery can load an in-process consumer.
 		const rpcInput = mode === "rpc" || mode === "rpc-ui" ? claimRpcInput() : undefined;
@@ -2095,28 +2244,22 @@ export async function runRootCommand(
 			cfgTuiMotion.override(settingsInstance, parsedArgs.motion);
 		}
 
-		await logger.time(
-			"initTheme:final",
-			initTheme,
-			isInteractive,
-			cfgSymbolPreset.get(settingsInstance),
-			cfgColorBlindMode.get(settingsInstance),
-			cfgThemeDark.get(settingsInstance),
-			cfgThemeLight.get(settingsInstance),
-		);
+		logger.time("initTheme:final", initTheme, {
+			watch: isInteractive,
+			// Keep the startup frame's appearance (the last launch's report) until the terminal answers.
+			appearance: getTerminalAppearance(),
+			symbolPreset: cfgSymbolPreset.get(settingsInstance),
+			colorBlindMode: cfgColorBlindMode.get(settingsInstance),
+			dark: cfgThemeDark.get(settingsInstance),
+			light: cfgThemeLight.get(settingsInstance),
+		});
 
 		applyStartupComposerPreferences({
 			quiet: cfgStartupQuiet.get(settingsInstance),
 			composerShape: cfgComposerShape.get(settingsInstance),
-			showHardwareCursor: cfgShowHardwareCursor.get(settingsInstance),
-			maxInlineImages: cfgTuiMaxInlineImages.get(settingsInstance),
 			resizeScrollback: cfgTuiResizeScrollback.get(settingsInstance),
-			completeScrollback: cfgTuiCompleteScrollback.get(settingsInstance),
-			imeSafeCursor: cfgTuiImeSafeCursor.get(settingsInstance),
 			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(settingsInstance),
-			spellingTypoDetection: cfgSpellingTypoDetection.get(settingsInstance),
-			spellingAutocomplete: cfgSpellingAutocomplete.get(settingsInstance),
-			spellingAutocorrect: cfgSpellingAutocorrect.get(settingsInstance),
+			vim: cfgTuiVimMode.get(settingsInstance),
 			theme: {
 				symbolPreset: cfgSymbolPreset.get(settingsInstance),
 				colorBlindMode: cfgColorBlindMode.get(settingsInstance),
@@ -2126,13 +2269,12 @@ export async function runRootCommand(
 		});
 
 		await credentialScopedCacheHydration;
-		let scopedModels = await logger.time(
-			"resolveModelScope",
-			resolveScopedModels,
-			parsedArgs,
-			modelRegistry,
-			settingsInstance,
-		);
+		// ACP's settings-derived scope belongs to each session/new workspace.
+		const resolveStartupScopedModels = () =>
+			mode === "acp" && parsedArgs.models === undefined
+				? Promise.resolve([])
+				: resolveScopedModels(parsedArgs, modelRegistry, settingsInstance);
+		let scopedModels = await logger.time("resolveModelScope", resolveStartupScopedModels);
 
 		// Resolve an explicit `--continue <id>` before extension flags are loaded.
 		// Reading the token immediately after `--continue` distinguishes the session
@@ -2218,7 +2360,7 @@ export async function runRootCommand(
 					parsedArgs,
 					cwd,
 					settingsInstance,
-					promptMoveSession,
+					isProtocolMode ? keepSessionInPlace : promptMoveSession,
 					{
 						nativeFlagOwnership: "preliminary",
 						onSessionContinuation: continuation => resumedContinuations.push(continuation),
@@ -2252,7 +2394,7 @@ export async function runRootCommand(
 				// Destination project may scope a different `enabledModels`; re-resolve
 				// so the model UI and session options reflect it (explicit `--models`
 				// stays fixed inside resolveScopedModels).
-				scopedModels = await resolveScopedModels(parsedArgs, modelRegistry, settingsInstance);
+				scopedModels = await resolveStartupScopedModels();
 			}
 		}
 
@@ -2306,7 +2448,7 @@ export async function runRootCommand(
 			if (!picked) {
 				writeStartupNotice(parsedArgs, `${chalk.dim("No session selected")}\n`);
 				// Quit instead of returning: startup already armed long-lived handles
-				// (theme watcher + SIGWINCH/macOS appearance listeners via initTheme,
+				// (the theme file watcher started by initTheme,
 				// settings save timer, model registry) that keep the event loop alive,
 				// so a bare return hangs the process after the picker leaves the alt
 				// screen. No session was built here, so there is nothing to flush. The
@@ -2345,7 +2487,7 @@ export async function runRootCommand(
 			notifyResumeCwdFallback(parsedArgs, resumedProject, cwd, isInteractive ? notifs : undefined);
 			if (cwd !== previousCwd) {
 				parsedArgs.cwd = cwd;
-				scopedModels = await resolveScopedModels(parsedArgs, modelRegistry, settingsInstance);
+				scopedModels = await resolveStartupScopedModels();
 			}
 		}
 
@@ -2369,13 +2511,6 @@ export async function runRootCommand(
 			}
 		}
 		await pluginPreloadPromise;
-		// Pure file I/O: overlap it with session-option building, but land it before
-		// extensions load or the session can start project daemons.
-		const daemonPresencePromise =
-			deps === DEFAULT_RUN_ROOT_DEPENDENCIES
-				? logger.time("registerDaemonProjectPresence", registerDaemonProjectPresence, cwd)
-				: undefined;
-		daemonPresencePromise?.catch(() => {});
 
 		let startupTelemetry: CreateAgentSessionOptions["telemetry"];
 		let startupTopLevelExtensions: CreateAgentSessionOptions["topLevelExtensions"];
@@ -2411,7 +2546,7 @@ export async function runRootCommand(
 			options.settingsApproval = isInteractive;
 			options.tuiTranscript = isInteractive;
 			options.autoTitle = isInteractive;
-			options.deferSkillDescriptionCompression = isInteractive;
+			options.deferHintCompression = isInteractive;
 			options.settings = settingsInstance;
 			options.telemetry = startupTelemetry;
 			options.topLevelExtensions = startupTopLevelExtensions;
@@ -2444,18 +2579,24 @@ export async function runRootCommand(
 			});
 			startupTelemetry = sessionOptions.telemetry;
 		}
-		await daemonPresencePromise;
 
 		// Handle CLI --api-key as runtime override (not persisted)
+		let apiKeyProvider = sessionOptions.model?.provider;
 		if (parsedArgs.apiKey) {
-			if (!sessionOptions.model && !sessionOptions.modelPattern) {
-				process.stderr.write(
-					`${chalk.red("--api-key requires a model to be specified via --model, --provider/--model, or --models")}\n`,
-				);
-				process.exit(1);
+			if (!apiKeyProvider && !sessionOptions.modelPattern) {
+				// ACP sessions select their own workspace's model, so only the launch scope can name the provider.
+				const launchKey =
+					mode === "acp"
+						? await resolveAcpApiKeyProvider(parsedArgs, modelRegistry, settingsInstance)
+						: { error: API_KEY_REQUIRES_MODEL };
+				if ("error" in launchKey) {
+					process.stderr.write(`${chalk.red(launchKey.error)}\n`);
+					process.exit(1);
+				}
+				apiKeyProvider = launchKey.provider;
 			}
-			if (sessionOptions.model) {
-				authStorage.keys.setRuntime(sessionOptions.model.provider, parsedArgs.apiKey);
+			if (apiKeyProvider) {
+				authStorage.keys.setRuntime(apiKeyProvider, parsedArgs.apiKey);
 			}
 		}
 
@@ -2486,6 +2627,7 @@ export async function runRootCommand(
 			}
 			const createAcpSession = createAcpSessionFactory({
 				baseOptions: sessionOptions,
+				apiKeyProvider,
 				settings: settingsInstance,
 				sessionDir: parsedArgs.sessionDir,
 				authStorage,
@@ -2680,6 +2822,7 @@ export async function runRootCommand(
 				mcpManager,
 				startBackgroundModelDiscovery,
 			} = createdSession;
+			if (isInteractive) session.addDisposer(bindAgentMesh(sessionOptions.cwd ?? getProjectDir(), settingsInstance));
 			if (!isInteractive) session.validateRetryFallbackChains();
 
 			const sessionToolNames = session.getAllToolNames();
@@ -2758,7 +2901,7 @@ export async function runRootCommand(
 						.catch(error => logger.warn("Startup changelog failed", { error: String(error) }));
 				}
 				void session.loadDeferredExtensions();
-				session.startSkillDescriptionCompression();
+				session.startHintCompression();
 				modelRegistry.refreshInBackground();
 				session.validateRetryFallbackChains();
 				if (configuredScope.length > 0) {
@@ -2912,6 +3055,7 @@ export async function runRootCommand(
 						startupLease,
 						initialArgs.goal,
 						parsedArgs.restore ? () => restoreSession(session, { eventBus, subagentEventBus }) : undefined,
+						modelFallbackMessage,
 					);
 				} finally {
 					startupLease?.dispose();

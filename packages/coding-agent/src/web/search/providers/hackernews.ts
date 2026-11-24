@@ -178,6 +178,10 @@ export class HackerNewsProvider extends SearchProvider {
 		return true;
 	}
 
+	override isKeyless(): boolean {
+		return true;
+	}
+
 	search(params: SearchParams): Promise<SearchResponse> {
 		return searchHackerNews(params);
 	}

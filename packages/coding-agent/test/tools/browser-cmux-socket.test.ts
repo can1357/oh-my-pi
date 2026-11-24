@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { CmuxTab } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/cmux-tab";
 import { CmuxSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/socket-client";
 import { RunOutput } from "@oh-my-pi/pi-coding-agent/tools/browser/run-output";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 
 type RequestLine = {
 	id?: unknown;
@@ -159,7 +159,6 @@ describe("CmuxSocketClient", () => {
 					await client.request("sentinel", {});
 					expect(methods).toEqual(["blocking", "sentinel"]);
 				} finally {
-					tab.clearRunContext();
 					client.close();
 				}
 			},
@@ -198,7 +197,6 @@ describe("CmuxSocketClient", () => {
 					socket.write(`${JSON.stringify({ ok: true, result: { value: { __ompOk: 42 } } })}\n`);
 					expect(await outcome).toEqual({ value: 42 });
 				} finally {
-					tab.clearRunContext();
 					client.close();
 					vi.useRealTimers();
 				}
@@ -245,7 +243,6 @@ describe("CmuxSocketClient", () => {
 					expect(error).toBeInstanceOf(ToolError);
 					expect(String(error)).toContain("Timed out waiting for cmux socket response");
 				} finally {
-					tab.clearRunContext();
 					client.close();
 					vi.useRealTimers();
 				}

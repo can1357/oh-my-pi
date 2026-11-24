@@ -3,7 +3,6 @@ import { Agent, type AgentEvent, validateAgentToolArguments } from "@oh-my-pi/pi
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { convertOpenAICodexResponsesTools } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { Model, Tool, ToolCall } from "@oh-my-pi/pi-ai/types";
-import { enforceStrictSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -12,7 +11,7 @@ import { buildOutputValidator } from "@oh-my-pi/pi-coding-agent/tools/output-sch
 import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
 import { buildWorkPoolOutputSchema } from "../../src/task/workpool-yield";
 import { yieldSectionShapes } from "../../src/task/yield-assembly";
-import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
+import { assembleYieldResult } from "@oh-my-pi/pi-coding-agent/task/yield-sections";
 
 function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -268,6 +267,24 @@ describe("YieldTool", () => {
 			error: undefined,
 			type: "result",
 		});
+	});
+
+	it("treats an array-wrapped `result` type as the finalize marker", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					type: "object",
+					properties: { findings: { type: "array", items: { type: "string" } } },
+					required: ["findings"],
+				},
+			}),
+		);
+		await expect(
+			tool.execute("call-whole-array", { type: ["findings"], data: ["one", "two"] } as never),
+		).rejects.toThrow("Send one element per call.");
+		await tool.execute("call-section", { type: ["findings"], data: "one finding" } as never);
+		const finalize = await tool.execute("call-finalize", { type: ["result"] } as never);
+		expect(finalize.details).toMatchObject({ status: "success", type: "result" });
 	});
 
 	it("parses JSON-string data when the schema rejects the string form", async () => {
@@ -1164,7 +1181,9 @@ describe("YieldTool", () => {
 		} as never);
 		expect(result.details).toEqual({ data: { nested: { x: 1 }, ok: true }, status: "success", error: undefined });
 	});
-	it("repairs strict schema generation for required-only object output schemas", () => {
+	it("keeps a required-only object output schema non-strict instead of closing it to `{}`", () => {
+		// A bare output object declares no fields. Strict mode would close it to `{}` only,
+		// which cannot carry the `data` value the schema requires, so the tool falls back.
 		const tool = new YieldTool(
 			createSession({
 				outputSchema: {
@@ -1173,17 +1192,8 @@ describe("YieldTool", () => {
 				},
 			}),
 		);
-		const strictParameters = enforceStrictSchema(tool.parameters as unknown as Record<string, unknown>);
-		// Strict enforcement wraps the optional `data` as `anyOf: [T, null]`; inspect T.
-		const nullable = getDataSchema(strictParameters);
-		const dataSchema = toRecord(
-			(Array.isArray(nullable.anyOf) ? nullable.anyOf : []).find(v => toRecord(v).type === "object"),
-		);
 
-		expect(tool.strict).toBe(true);
-		expect(dataSchema.properties).toEqual({});
-		expect(dataSchema.required).toEqual([]);
-		expect(dataSchema.additionalProperties).toBe(false);
+		expect(tool.strict).toBe(false);
 	});
 
 	it("normalizes object/null type arrays into strict-compatible data variants", () => {

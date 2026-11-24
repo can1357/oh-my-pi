@@ -242,7 +242,27 @@ const SHELL_INTERPRETER_COMMANDS: Record<string, true> = {
 
 const SHELL_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/u;
 const SHELL_ASSIGNMENT_NAME = /^([A-Za-z_][A-Za-z0-9_]*)\+?=/u;
-const SHELL_REINTERPRET_OPTION = /^(?:-[^-]*[ce]|--(?:command|eval)(?:=.*)?)$/u;
+const SHELL_REINTERPRET_OPTION = /^(?:-[^-\s]*[ce]|--(?:command|eval)(?:=.*)?)$/u;
+export const BASH_APPROVAL_SHELL_CONTROL_CHARS: Record<string, true> = {
+	"\n": true,
+	"\r": true,
+	";": true,
+	"&": true,
+	"|": true,
+	"<": true,
+	">": true,
+	"`": true,
+	$: true,
+	"(": true,
+	")": true,
+};
+
+function hasBashApprovalShellControlChar(text: string): boolean {
+	for (let i = 0; i < text.length; i++) {
+		if (Object.hasOwn(BASH_APPROVAL_SHELL_CONTROL_CHARS, text[i]!)) return true;
+	}
+	return false;
+}
 
 /** Whether `word` begins with a POSIX shell variable assignment prefix (`NAME=` or `NAME+=`). */
 export function isShellEnvironmentAssignment(word: string): boolean {
@@ -288,7 +308,7 @@ function skipShellWord(command: string, start: number): number | null {
 
 /**
  * Removes leading `NAME=value` (or `NAME+=value`) assignments without interpreting shell syntax.
- * When `allowName` is supplied, stops stripping at the first assignment whose variable name it rejects.
+ * When `allowName` is supplied, every leading assignment variable name must satisfy it or `null` is returned.
  */
 export function withoutLeadingEnvironmentAssignments(
 	command: string,
@@ -300,7 +320,7 @@ export function withoutLeadingEnvironmentAssignments(
 		while (command[index] === " " || command[index] === "\t") index++;
 		const match = SHELL_ASSIGNMENT_NAME.exec(command.slice(index));
 		if (!match) break;
-		if (allowName && !allowName(match[1])) break;
+		if (allowName && !allowName(match[1])) return null;
 		const wordEnd = skipShellWord(command, index + match[0].length);
 		if (wordEnd === null) return null;
 		foundAssignment = true;
@@ -308,7 +328,8 @@ export function withoutLeadingEnvironmentAssignments(
 	}
 	if (!foundAssignment) return null;
 	const commandWithoutAssignments = command.slice(index).trimStart();
-	return commandWithoutAssignments.length > 0 ? commandWithoutAssignments : null;
+	if (commandWithoutAssignments.length === 0 || SHELL_ASSIGNMENT.test(commandWithoutAssignments)) return null;
+	return commandWithoutAssignments;
 }
 
 /**
@@ -317,9 +338,10 @@ export function withoutLeadingEnvironmentAssignments(
  *
  * Anything that needs shell interpretation beyond quote removal is rejected.
  * In particular, this excludes expansion, globbing, redirection, comments,
- * assignments, control flow, shell wrappers/interpreters, and commands that
- * mutate the current shell. Rejection is a normal result: callers must retain
- * their existing approval behavior.
+ * standalone or subscripted assignments, control flow, shell wrappers/interpreters,
+ * and commands that mutate the current shell. Leading `NAME=value` assignments
+ * scoped to a non-stateful command are retained in the segment text so callers can
+ * validate them against `bash.allowedEnvVars` and per-rule `env` allowlists.
  */
 export function extractLiteralAndChainSegments(command: string): LiteralShellCommandSegment[] | null {
 	for (let i = 0; i < command.length; i++) {
@@ -328,26 +350,38 @@ export function extractLiteralAndChainSegments(command: string): LiteralShellCom
 	}
 	const segments: LiteralShellCommandSegment[] = [];
 	let argv: string[] = [];
+	let rawTokens: string[] = [];
 	let token = "";
-	let tokenStarted = false;
+	let tokenStart = -1;
 	let quote: "'" | '"' | undefined;
 	let segmentStart = 0;
 
-	const pushToken = () => {
-		if (!tokenStarted) return;
+	const startToken = (index: number) => {
+		if (tokenStart < 0) tokenStart = index;
+	};
+	const pushToken = (end: number) => {
+		if (tokenStart < 0) return;
 		argv.push(token);
+		rawTokens.push(command.slice(tokenStart, end));
 		token = "";
-		tokenStarted = false;
+		tokenStart = -1;
 	};
 	const pushSegment = (end: number): boolean => {
-		pushToken();
+		pushToken(end);
 		if (argv.length === 0) return false;
-		const executable = argv[0];
+		let commandIndex = 0;
+		while (commandIndex < rawTokens.length && SHELL_ASSIGNMENT_NAME.test(rawTokens[commandIndex]!)) {
+			commandIndex++;
+		}
+		if (commandIndex >= argv.length) return false;
+		const executable = argv[commandIndex]!;
 		if (executable.length === 0) return false;
 		const commandName = executable.slice(Math.max(executable.lastIndexOf("/"), executable.lastIndexOf("\\")) + 1);
+		const commandArguments = argv.slice(commandIndex + 1);
 		if (
-			argv.some(argument => SHELL_ASSIGNMENT.test(argument)) ||
-			argv.some((argument, index) => index > 0 && SHELL_REINTERPRET_OPTION.test(argument)) ||
+			argv.slice(commandIndex).some(argument => SHELL_ASSIGNMENT.test(argument)) ||
+			(commandArguments.some(argument => SHELL_REINTERPRET_OPTION.test(argument)) &&
+				commandArguments.some(hasBashApprovalShellControlChar)) ||
 			SHELL_STATEFUL_COMMANDS.has(commandName) ||
 			Object.hasOwn(SHELL_INTERPRETER_COMMANDS, commandName)
 		) {
@@ -355,6 +389,7 @@ export function extractLiteralAndChainSegments(command: string): LiteralShellCom
 		}
 		segments.push({ text: command.slice(segmentStart, end).trim(), argv });
 		argv = [];
+		rawTokens = [];
 		return true;
 	};
 
@@ -391,19 +426,19 @@ export function extractLiteralAndChainSegments(command: string): LiteralShellCom
 
 		if (ch === "'" || ch === '"') {
 			quote = ch;
-			tokenStarted = true;
+			startToken(i);
 			continue;
 		}
 		if (ch === "\\") {
 			const next = command[i + 1];
 			if (next === undefined || next === "\n" || next === "\r") return null;
+			startToken(i);
 			token += next;
-			tokenStarted = true;
 			i++;
 			continue;
 		}
 		if (ch === " " || ch === "\t") {
-			pushToken();
+			pushToken(i);
 			continue;
 		}
 		if (ch === "&" && command[i + 1] === "&") {
@@ -431,13 +466,13 @@ export function extractLiteralAndChainSegments(command: string): LiteralShellCom
 			ch === "{" ||
 			ch === "}" ||
 			ch === "~" ||
-			(ch === "#" && !tokenStarted)
+			(ch === "#" && tokenStart < 0)
 		) {
 			return null;
 		}
 		if (ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f) return null;
+		startToken(i);
 		token += ch;
-		tokenStarted = true;
 	}
 
 	if (quote || !pushSegment(command.length) || segments.length < 2) return null;
@@ -472,10 +507,12 @@ function segmentMutatesShellState(segmentText: string, literal: LiteralShellComm
 		const executable = words[index];
 		if (!executable) return true;
 		const commandName = executable.slice(Math.max(executable.lastIndexOf("/"), executable.lastIndexOf("\\")) + 1);
+		const commandArguments = words.slice(index + 1);
 		if (
 			SHELL_STATEFUL_COMMANDS.has(commandName) ||
 			Object.hasOwn(SHELL_INTERPRETER_COMMANDS, commandName) ||
-			words.slice(index + 1).some(arg => SHELL_REINTERPRET_OPTION.test(arg))
+			(commandArguments.some(arg => SHELL_REINTERPRET_OPTION.test(arg)) &&
+				commandArguments.some(hasBashApprovalShellControlChar))
 		) {
 			return true;
 		}
@@ -790,6 +827,8 @@ const CD_TARGET_TERMINATORS: Record<string, true> = {
 	")": true,
 };
 
+const CD_TARGET_EXPANSION_CHARS = "$`()*?[]{}";
+
 /**
  * Parses a leading `cd <path> && ...` or `cd <path>; ...` prefix so the bash
  * tool can route the target through its structured `cwd` parameter when the
@@ -808,6 +847,7 @@ export function extractLeadingCdTarget(command: string): { path: string; rest: s
 	const prefix = /^cd[ \t]+/.exec(command);
 	if (!prefix) return null;
 	let i = prefix[0].length;
+	const hasUnquotedLeadingTilde = command[i] === "~";
 	let path = "";
 	let inSingle = false;
 	let inDouble = false;
@@ -837,6 +877,7 @@ export function extractLeadingCdTarget(command: string): { path: string; rest: s
 				inDouble = false;
 				continue;
 			}
+			if (ch === "$" || ch === "`") return null;
 			path += ch;
 			continue;
 		}
@@ -855,13 +896,18 @@ export function extractLeadingCdTarget(command: string): { path: string; rest: s
 			i++;
 			continue;
 		}
+		if (CD_TARGET_EXPANSION_CHARS.includes(ch)) return null;
 		if (CD_TARGET_TERMINATORS[ch]) break;
 		path += ch;
 	}
 	// Unterminated quote or empty target: leave the command for the shell.
 	if (inSingle || inDouble || path.length === 0) return null;
-	// A path needing shell expansion can't be resolved literally through cwd.
-	if (/[$`(]/.test(path)) return null;
+	// These operands depend on shell directory-stack state rather than naming a
+	// literal directory, even when their spelling was quoted.
+	if (path === "-" || /^[+-]\d+$/.test(path)) return null;
+	// Only the current user's home is resolved outside the shell. A named-user
+	// (or other special) tilde prefix needs the shell's own expansion rules.
+	if (hasUnquotedLeadingTilde && path !== "~" && !path.startsWith("~/")) return null;
 	// Skip inter-token whitespace, then require a top-level `&&` or `;` (a single
 	// `&`, `||`, `|`, a `case` terminator `;;`/`;&`, or a redirect all mean this
 	// is not a bare `cd <path>`).

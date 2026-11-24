@@ -31,7 +31,12 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction/messages";
 import { type AuthCredential, SqliteAuthCredentialStore, type TSchema } from "@oh-my-pi/pi-ai";
 import { piEscapeRegexLiteral, piJoinPath } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
-import { getKeybindings, type Keybinding, Text } from "@oh-my-pi/pi-tui";
+import { highlightCode as highlightWithTheme } from "@oh-my-pi/pi-tui/text/highlight";
+import { wrap } from "@oh-my-pi/pi-tui/text/width";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import type { ExtensionRows } from "./extensions/render-types";
+import type { Keybinding } from "../config/keybindings/app-keybindings";
+import { getKeybindings } from "../config/keybindings/keybindings";
 import {
 	escapeXmlText,
 	getAgentDbPath,
@@ -43,7 +48,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import legacyAvailableSkillsTemplate from "./legacy-pi-available-skills.md" with { type: "text" };
 import { getPackageDir as getOmpPackageDir } from "../config";
-import { formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
+import { formatKeyHints } from "../ui/keys/hints";
 import type { PromptTemplate } from "../config/prompt-templates";
 import { findScopedSettings, Settings } from "../config/settings";
 import { cfgLegacyShellCommandPrefix, cfgShellPath } from "../exec/settings";
@@ -62,18 +67,18 @@ import {
 	type TruncationResult,
 	truncateHead,
 	truncateTail,
-} from "@oh-my-pi/pi-tui/tools/streaming-output";
+} from "../tools/streaming-output";
 import type { SessionEntry } from "../session/session-entries";
 import type { Tool, ToolSession } from "../tools";
 import { BashTool } from "../tools/bash";
 import { GlobTool } from "../tools/glob";
 import { GrepTool } from "../tools/grep";
 import { ReadTool } from "../tools/read";
-import { formatBytes } from "@oh-my-pi/pi-tui/render/render-utils";
+import { formatBytes } from "@oh-my-pi/pi-utils";
 import { WriteTool } from "../tools/write";
 import { expandTilde, resolveToCwd } from "../tools/path-utils";
 import { EventBus } from "../utils/event-bus";
-import { convertImageToPng } from "@oh-my-pi/pi-tui/chat/image-loading";
+import { convertImageToPng } from "../utils/png-conversion";
 import { discoverExtensionPaths, loadExtensionFromFactory, loadExtensions } from "./extensions";
 import { ExtensionRuntime } from "./extensions/loader";
 import type {
@@ -332,10 +337,15 @@ function textResult(result: AgentToolResult<unknown> | undefined): string {
 	return result?.content.find(block => block.type === "text")?.text ?? "";
 }
 
-function legacyRenderResult(result: AgentToolResult<unknown>, _options: unknown, themeArg: unknown): Text {
+/** `text` wrapped at the width, as the rows pi-tui's `Text` drew (none for ""). */
+function textRows(text: string): ExtensionRows {
+	return { render: width => (text === "" ? [] : wrap(text, width)) };
+}
+
+function legacyRenderResult(result: AgentToolResult<unknown>, _options: unknown, themeArg: unknown): ExtensionRows {
 	const theme = renderTheme(themeArg, undefined);
 	const output = textResult(result);
-	return new Text(output ? `\n${themedMuted(theme, output)}` : "", 0, 0);
+	return textRows(output ? `\n${themedMuted(theme, output)}` : "");
 }
 
 function lineRangePath(readPath: string, offset: number | undefined, limit: number | undefined): string {
@@ -436,7 +446,7 @@ export async function convertToPng(
 
 /** Format the active shortcut for legacy extensions that render keybinding hints. */
 export function keyText(action: Keybinding): string {
-	return formatKeyHints(getKeybindings().getKeys(action));
+	return formatKeyHints(getKeybindings().keysFor(action));
 }
 
 /** Parse frontmatter using the historical Pi package-root helper. */
@@ -482,7 +492,7 @@ export function createReadToolDefinition(cwd: string, options?: ReadToolOptions)
 		renderCall: (params, options, themeArg) => {
 			const theme = renderTheme(options, themeArg);
 			const readPath = stringField(params, "path") ?? "";
-			return new Text(`${themedTitle(theme, "read")} ${themedMuted(theme, readPath)}`, 0, 0);
+			return textRows(`${themedTitle(theme, "read")} ${themedMuted(theme, readPath)}`);
 		},
 		renderResult: legacyRenderResult,
 		execute: (toolCallId, params, signal, onUpdate) => {
@@ -528,7 +538,7 @@ export function createBashToolDefinition(cwd: string, options?: BashToolOptions)
 		renderCall: (params, optionsArg, themeArg) => {
 			const theme = renderTheme(optionsArg, themeArg);
 			const command = stringField(params, "command") ?? "";
-			return new Text(`${themedTitle(theme, "bash")} ${themedMuted(theme, command)}`, 0, 0);
+			return textRows(`${themedTitle(theme, "bash")} ${themedMuted(theme, command)}`);
 		},
 		renderResult: legacyRenderResult,
 		execute: (toolCallId, params, signal, onUpdate) => {
@@ -590,7 +600,7 @@ export function createGrepToolDefinition(cwd: string, options?: GrepToolOptions)
 			const theme = renderTheme(optionsArg, themeArg);
 			const pattern = stringField(params, "pattern") ?? "";
 			const searchPath = stringField(params, "path") ?? ".";
-			return new Text(`${themedTitle(theme, "grep")} ${themedMuted(theme, `/${pattern}/ in ${searchPath}`)}`, 0, 0);
+			return textRows(`${themedTitle(theme, "grep")} ${themedMuted(theme, `/${pattern}/ in ${searchPath}`)}`);
 		},
 		renderResult: legacyRenderResult,
 		execute: async (toolCallId, params, signal, onUpdate) => {
@@ -652,7 +662,7 @@ export function createFindToolDefinition(cwd: string, options?: FindToolOptions)
 			const theme = renderTheme(optionsArg, themeArg);
 			const pattern = stringField(params, "pattern") ?? "";
 			const searchPath = stringField(params, "path") ?? ".";
-			return new Text(`${themedTitle(theme, "find")} ${themedMuted(theme, `${pattern} in ${searchPath}`)}`, 0, 0);
+			return textRows(`${themedTitle(theme, "find")} ${themedMuted(theme, `${pattern} in ${searchPath}`)}`);
 		},
 		renderResult: legacyRenderResult,
 		execute: async (toolCallId, params, signal, onUpdate) => {
@@ -708,7 +718,7 @@ export function createLsToolDefinition(cwd: string, options?: LsToolOptions): To
 			createRegistryTool(cwd, "read").approvalCacheTargets?.({ path: stringField(params, "path") ?? "." }),
 		renderCall: (params, optionsArg, themeArg) => {
 			const theme = renderTheme(optionsArg, themeArg);
-			return new Text(`${themedTitle(theme, "ls")} ${themedMuted(theme, stringField(params, "path") ?? ".")}`, 0, 0);
+			return textRows(`${themedTitle(theme, "ls")} ${themedMuted(theme, stringField(params, "path") ?? ".")}`);
 		},
 		renderResult: legacyRenderResult,
 		execute: async (_toolCallId, params, _signal, _onUpdate) => {
@@ -1623,6 +1633,7 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 				entry.details,
 				entry.timestamp,
 				entry.attribution,
+				entry.excludeFromContext,
 			),
 		];
 	}
@@ -1644,7 +1655,13 @@ export { CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils";
 export { parseArgs } from "../cli/args";
 
 export * from "../index";
-export { formatBytes as formatSize } from "@oh-my-pi/pi-tui/render/render-utils";
+export { getLanguageFromPath } from "../utils/lang-from-path";
+export { formatBytes as formatSize } from "@oh-my-pi/pi-utils";
+
+/** Upstream's `highlightCode(code, lang?)`: ANSI-highlighted lines in the current theme. */
+export function highlightCode(code: string, lang?: string): string[] {
+	return highlightWithTheme(code, lang, currentTheme());
+}
 export { copyToClipboard } from "../utils/clipboard";
 export { Type } from "./legacy-typebox";
 

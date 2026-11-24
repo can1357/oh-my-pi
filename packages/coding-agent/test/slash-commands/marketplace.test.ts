@@ -28,7 +28,7 @@ describe("/marketplace interactive selector failures", () => {
 				sessionManager: { getCwd: () => root },
 				showPluginSelector: () => Promise.reject(new Error(CATALOG_ERROR)),
 				showStatus: (message: string) => statuses.push(message),
-				editor: { setText: () => {} },
+				composer: { setText: () => {} },
 			} as never as InteractiveModeContext;
 
 			await executeBuiltinSlashCommand(input, { ctx });
