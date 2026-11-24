@@ -969,7 +969,7 @@ export class RemoteAgentSession implements AgentViewSession {
 				this.#state = { ...this.#state, streamMessage: event.message };
 				const delta = event.assistantMessageEvent;
 				if (delta.type === "text_delta" || delta.type === "thinking_delta" || delta.type === "toolcall_delta") {
-					this.tokenRate.push(delta.delta);
+					this.tokenRate.push(delta.delta, delta.type);
 				}
 				return;
 			}
