@@ -1,23 +1,15 @@
-# Topic branches carried in every build, merged in this order onto the mirror branch.
-# Each is cut from the mirror, so each is also a clean upstream pull request.
+# Topic branches carried in every build, merged in this order onto the quarantined upstream base.
+# Original topics remain available; safe topics retain their fork-only changes without importing young upstream.
 feat/goal-park-guard-2cdc756
 feat/extension-ctx-restart-source-88c8dc4
 fix/skip-underscore-extension-files
 fix/eval-names-top-level-only-tip
 fix/force-cli-verify
-fix/tern-mux-current
 relay/zys-10234-3ff86e7ac4
 fix/chat-completions-claude-demoted-reasoning
-chore/fork-upstream-compat-fbb8085
-feat/resume-by-title-fbb8085
+chore/fork-safe-compat-01a20e96
 feat/composer-draft-stash
-chore/fork-format-upstream-f4e3d0d
-fix/ai-compat-test-fixtures-fold-field
 fix/typed-text-import-declarations
 perf/startup-audit
 feat/stash-on-esc-restore
-feat/unified-find-01a20496
-chore/fork-export-viewer-01a20496
-fix/advisor-role-fallback
-zab/9bb1ecc8
-fix/exhausted-fallback-chains
+feat/find-quarantine-01a20e96
