@@ -10,7 +10,7 @@ import * as downloader from "@oh-my-pi/pi-coding-agent/stt/downloader";
 import { STTController } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
-import { cfgSttLanguage, cfgSttSubmitTrigger } from "@oh-my-pi/pi-coding-agent/stt/settings";
+import { cfgSttCloudLive, cfgSttLanguage, cfgSttSubmitTrigger } from "@oh-my-pi/pi-coding-agent/stt/settings";
 
 const ZERO_USAGE = {
 	input: 0,
@@ -20,6 +20,15 @@ const ZERO_USAGE = {
 	totalTokens: 0,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
+
+/** 16 kHz mono audio: a voiced square wave the endpointer reads as speech, or digital silence. */
+function speech(ms: number): Float32Array {
+	return Float32Array.from({ length: ms * 16 }, (_, index) => (index % 2 === 0 ? 0.5 : -0.5));
+}
+
+function silence(ms: number): Float32Array {
+	return new Float32Array(ms * 16);
+}
 
 function makeEditor() {
 	return {
@@ -262,5 +271,114 @@ describe("STTController cloud transcription", () => {
 		expect(stop).toHaveBeenCalledTimes(1);
 		expect(cloudTranscribe).not.toHaveBeenCalled();
 		expect(editor.commitVolatileText).toHaveBeenCalledWith("local transcript");
+	});
+
+	describe("live phrases (stt.cloudLive)", () => {
+		it("commits each phrase while still recording and sends only that phrase's audio", async () => {
+			const model = getBundledModel("openai", "whisper-1");
+			settings.setModelRole("dictation", "openai/whisper-1");
+			cfgSttCloudLive.set(settings, true);
+			const transcribe = vi
+				.spyOn(transcription, "transcribeAudio")
+				.mockResolvedValueOnce({ text: "first phrase", usage: ZERO_USAGE })
+				.mockResolvedValueOnce({ text: "second phrase", usage: ZERO_USAGE });
+			let onAudio: ((error: Error | null, samples: Float32Array) => void) | undefined;
+			controller = new STTController(
+				callback => {
+					onAudio = callback;
+					return { stop: vi.fn() };
+				},
+				{ settings, registry: registryFor(model) },
+			);
+			const editor = makeEditor();
+			const firstCommit = Promise.withResolvers<void>();
+			editor.commitVolatileText.mockImplementationOnce(() => firstCommit.resolve());
+			const options = makeOptions();
+
+			await controller.start(editor, options);
+			onAudio?.(null, speech(600));
+			onAudio?.(null, silence(700));
+			await firstCommit.promise;
+
+			expect(controller.state).toBe("recording");
+			expect(editor.commitVolatileText.mock.calls).toEqual([["first phrase"]]);
+			// Pre-roll and onset frame plus the phrase, without the trailing pause beyond the endpoint tail.
+			const firstWav = transcribe.mock.calls[0]![1].audio;
+			if (!(firstWav instanceof Uint8Array)) throw new Error("expected encoded WAV bytes");
+			expect((firstWav.byteLength - 44) / 2).toBeLessThan((600 + 240 + 150) * 16);
+
+			onAudio?.(null, speech(400));
+			await controller.stop();
+
+			expect(transcribe).toHaveBeenCalledTimes(2);
+			expect(editor.commitVolatileText.mock.calls).toEqual([["first phrase"], [" second phrase"]]);
+			expect(options.showStatus).toHaveBeenLastCalledWith("");
+		});
+
+		it("commits phrases in capture order when a later request answers first", async () => {
+			const model = getBundledModel("openai", "whisper-1");
+			settings.setModelRole("dictation", "openai/whisper-1");
+			cfgSttCloudLive.set(settings, true);
+			const slowFirst = Promise.withResolvers<TranscriptionResult>();
+			const transcribe = vi
+				.spyOn(transcription, "transcribeAudio")
+				.mockReturnValueOnce(slowFirst.promise)
+				.mockResolvedValueOnce({ text: "second", usage: ZERO_USAGE });
+			let onAudio: ((error: Error | null, samples: Float32Array) => void) | undefined;
+			controller = new STTController(
+				callback => {
+					onAudio = callback;
+					return { stop: vi.fn() };
+				},
+				{ settings, registry: registryFor(model) },
+			);
+			const editor = makeEditor();
+
+			await controller.start(editor, makeOptions());
+			onAudio?.(null, speech(500));
+			onAudio?.(null, silence(700));
+			onAudio?.(null, speech(500));
+			const stopping = controller.stop();
+			// The second phrase, flushed at stop, has its answer before the first.
+			await transcribe.mock.results[1]!.value;
+			slowFirst.resolve({ text: "first", usage: ZERO_USAGE });
+			await stopping;
+
+			expect(editor.commitVolatileText.mock.calls).toEqual([["first"], [" second"]]);
+		});
+
+		it("keeps later phrases, warns once, and never auto-submits when a phrase is lost", async () => {
+			const model = getBundledModel("openai", "whisper-1");
+			settings.setModelRole("dictation", "openai/whisper-1");
+			cfgSttCloudLive.set(settings, true);
+			cfgSttSubmitTrigger.set(settings, "release");
+			vi.spyOn(transcription, "transcribeAudio")
+				.mockRejectedValueOnce(new Error("rate limited"))
+				.mockRejectedValueOnce(new Error("rate limited"))
+				.mockResolvedValueOnce({ text: "third phrase survives", usage: ZERO_USAGE });
+			let onAudio: ((error: Error | null, samples: Float32Array) => void) | undefined;
+			controller = new STTController(
+				callback => {
+					onAudio = callback;
+					return { stop: vi.fn() };
+				},
+				{ settings, registry: registryFor(model) },
+			);
+			const editor = makeEditor();
+			const options = makeOptions();
+
+			await controller.start(editor, options);
+			onAudio?.(null, speech(500));
+			onAudio?.(null, silence(700));
+			onAudio?.(null, speech(500));
+			onAudio?.(null, silence(700));
+			onAudio?.(null, speech(500));
+			await controller.stop();
+
+			expect(editor.commitVolatileText.mock.calls).toEqual([["third phrase survives"]]);
+			expect(options.showWarning.mock.calls).toEqual([["rate limited"]]);
+			expect(editor.submit).not.toHaveBeenCalled();
+			expect(controller.state).toBe("idle");
+		});
 	});
 });

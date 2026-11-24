@@ -20,6 +20,19 @@ export const cfgSttEnabled = register({
 
 export const cfgSttLanguage = register({ id: "stt.language", type: "string", default: "en" });
 
+export const cfgSttCloudLive = register({
+	id: "stt.cloudLive",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Speech",
+		label: "Live Cloud Dictation",
+		description:
+			"Transcribe cloud dictation phrase by phrase at pauses, so text appears while recording (one request per phrase)",
+	},
+});
+
 export const cfgSttSubmitTrigger = register({
 	id: "stt.submitTrigger",
 	type: "enum",
