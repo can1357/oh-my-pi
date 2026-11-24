@@ -718,6 +718,10 @@ class BashResult:
     artifact_error: JsonObject | None = None
     minimized: JsonObject | None = None
     working_dir: str | None = None
+    moved_cwd: bool | None = None
+    """The command ended in another directory than it started in; the next command starts in its own cwd."""
+    errexit: bool | None = None
+    """The command ended with `set -e` on; the next command starts with it off."""
     images: tuple[ImageContent, ...] | None = None
     trace: JsonObject | None = None
     """The embedded shell's final `ShellTrace` of the run; only when the caller asked for one."""
@@ -2183,6 +2187,8 @@ def parse_bash_result(value: object, path: str = "BashResult") -> BashResult:
         artifact_error=optional(payload, "artifactError", decode_json_object, path),
         minimized=optional(payload, "minimized", decode_json_object, path),
         working_dir=optional(payload, "workingDir", decode_str, path),
+        moved_cwd=optional(payload, "movedCwd", decode_bool, path),
+        errexit=optional(payload, "errexit", decode_bool, path),
         images=optional(payload, "images", array(parse_image_content), path),
         trace=optional(payload, "trace", decode_json_object, path),
         fork=optional(payload, "fork", parse_shell_fork_outcome, path),

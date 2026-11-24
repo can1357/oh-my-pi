@@ -46,7 +46,7 @@ export const cfgEvalAutoProvision = register({
 export const cfgEvalToolsEnabled = register({
 	id: "eval.tools.enabled",
 	type: "boolean",
-	default: true,
+	default: false,
 	ui: {
 		tab: "shell",
 		group: "Eval & Runtimes",

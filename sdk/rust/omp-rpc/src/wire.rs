@@ -3215,6 +3215,12 @@ pub struct BashResult {
 	pub minimized: Option<Map<String, Value>>,
 	#[serde(rename = "workingDir", default, skip_serializing_if = "Option::is_none")]
 	pub working_dir: Option<String>,
+	/// The command ended in another directory than it started in; the next command starts in its own cwd.
+	#[serde(rename = "movedCwd", default, skip_serializing_if = "Option::is_none")]
+	pub moved_cwd: Option<bool>,
+	/// The command ended with `set -e` on; the next command starts with it off.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub errexit: Option<bool>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub images: Option<Vec<ImageContent>>,
 	/// The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.

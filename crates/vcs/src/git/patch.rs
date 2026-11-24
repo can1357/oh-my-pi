@@ -150,6 +150,69 @@ impl GitRepo {
 		}
 	}
 
+	/// Prepare the shared index before publishing a selective commit. The
+	/// caller holds the returned lock across the HEAD compare-and-swap.
+	pub(super) fn prepare_commit_index(
+		repo: &gix::Repository,
+		selection: &str,
+		hook_patch: &str,
+	) -> Result<(gix::lock::File, Vec<String>)> {
+		let selection = parse_patch(selection).map_err(ApplyFailure::into_error)?;
+		let hook_patches = if hook_patch.is_empty() {
+			Vec::new()
+		} else {
+			parse_patch(hook_patch).map_err(ApplyFailure::into_error)?
+		};
+		let lock = lock_index(repo, None).map_err(|err| {
+			Error::backend("git commit: could not lock the shared index; commit not published", err)
+		})?;
+		let index = load_index_or_head(repo, "git commit read shared index")?;
+		super::mutate::reject_unmerged_index(&index, "git commit")?;
+		let mut state = index_state_map(&index);
+		let mut kept = BTreeSet::new();
+		for patch in selection.iter().chain(&hook_patches) {
+			let paths = [patch.old_path.as_deref(), patch.new_path.as_deref()];
+			if paths.iter().flatten().any(|path| kept.contains(path)) {
+				continue;
+			}
+			let options = ApplyOptions { cached: true, ..Default::default() };
+			let patches = std::slice::from_ref(patch);
+			match apply_patches_to_map(repo, &mut state, patches, &options) {
+				Ok(()) => continue,
+				Err(Error::PatchFailed { .. } | Error::Conflict { .. }) => {},
+				Err(err) => return Err(err),
+			}
+			// The selected change may already be staged. Test its reverse on
+			// just the affected entries without changing the real update.
+			let mut affected = paths
+				.into_iter()
+				.flatten()
+				.filter_map(|path| {
+					state
+						.get_key_value(path)
+						.map(|(path, entry)| (path.clone(), entry.clone()))
+				})
+				.collect();
+			let reverse = ApplyOptions { reverse: true, ..options };
+			match apply_patches_to_map(repo, &mut affected, patches, &reverse) {
+				Ok(()) => continue,
+				Err(Error::PatchFailed { .. } | Error::Conflict { .. }) => {},
+				Err(err) => return Err(err),
+			}
+			kept.extend(paths.into_iter().flatten());
+		}
+		let notes = kept
+			.into_iter()
+			.map(|path| {
+				format!(
+					"{path}: its shared-index entry holds someone else's staged changes and was left \
+					 as is; inspect `git diff --cached` before committing it."
+				)
+			})
+			.collect();
+		Ok((prepare_index_map(repo, &state, None, Some(&index), lock)?, notes))
+	}
+
 	/// Stage selected hunks from a supplied or freshly generated worktree diff.
 	pub fn stage_hunks(&self, selections: &[HunkSelection], raw_diff: Option<&str>) -> Result<()> {
 		if selections.is_empty() {
@@ -1055,11 +1118,6 @@ fn apply_patches_to_map(
 					message: format!("gitlink does not match for {}", source_path.unwrap_or_default()),
 				});
 			}
-			if let Some(path) = source_path
-				&& target_path != Some(path)
-			{
-				state.remove(path);
-			}
 			if let Some(path) = target_path {
 				validate_repo_path(path).map_err(ApplyFailure::into_error)?;
 				let id = match &source {
@@ -1068,7 +1126,26 @@ fn apply_patches_to_map(
 				};
 				state.insert(path.to_owned(), FileEntry::new(id, Mode::COMMIT));
 			}
+			if let Some(path) = source_path
+				&& target_path != Some(path)
+			{
+				state.remove(path);
+			}
 			continue;
+		}
+		// A literal binary block does not look at the bytes it replaces. Direct
+		// applies refuse it unless those bytes are the blob the patch was built
+		// from, so a newer commit or staged copy is not overwritten. Three-way is
+		// left alone: a delta that fails to apply still merges from the recorded
+		// blob.
+		if !options.three_way {
+			ensure_binary_preimage(
+				repo,
+				patch,
+				source.as_ref().map(|entry| entry.id),
+				options.reverse,
+			)
+			.map_err(ApplyFailure::into_error)?;
 		}
 		let source_bytes = match source.as_ref() {
 			Some(entry) => blob_bytes(repo, entry.id)?,
@@ -1082,11 +1159,6 @@ fn apply_patches_to_map(
 			},
 			Err(err) => return Err(err.into_error()),
 		};
-		if let Some(path) = source_path
-			&& target_path != Some(path)
-		{
-			state.remove(path);
-		}
 		if let Some(path) = target_path {
 			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
 			let id = repo
@@ -1098,6 +1170,11 @@ fn apply_patches_to_map(
 				.or(source_mode)
 				.unwrap_or(Mode::FILE);
 			state.insert(path.to_owned(), FileEntry::new(id, mode));
+		}
+		if let Some(path) = source_path
+			&& target_path != Some(path)
+		{
+			state.remove(path);
 		}
 	}
 	Ok(())
@@ -1124,6 +1201,66 @@ fn patch_sides(
 	} else {
 		(patch.old_path.as_deref(), patch.new_path.as_deref(), patch.old_mode, patch.new_mode)
 	}
+}
+
+/// `git apply` refuses a binary patch whose `index` line is not a pair of full
+/// object ids, and refuses it when the preimage id is not the blob currently
+/// applied to. Checked before the block is decoded: the forward block of a
+/// literal patch does not depend on those bytes, so a mismatch would otherwise
+/// succeed and replace them.
+fn ensure_binary_preimage(
+	repo: &gix::Repository,
+	patch: &FilePatch,
+	source: Option<gix::ObjectId>,
+	reverse: bool,
+) -> std::result::Result<(), ApplyFailure> {
+	if patch.binary.is_empty() {
+		return Ok(());
+	}
+	let hex_len = repo.object_hash().len_in_hex();
+	let (preimage, postimage) = if reverse {
+		(patch.new_oid.as_deref(), patch.old_oid.as_deref())
+	} else {
+		(patch.old_oid.as_deref(), patch.new_oid.as_deref())
+	};
+	let full = |oid: &str| oid.len() == hex_len && oid.bytes().all(|byte| byte.is_ascii_hexdigit());
+	let (Some(preimage), Some(postimage)) = (preimage, postimage) else {
+		return Err(ApplyFailure::Invalid(
+			"cannot apply binary patch without full index line".into(),
+		));
+	};
+	if !full(preimage) || !full(postimage) {
+		return Err(ApplyFailure::Invalid(
+			"cannot apply binary patch without full index line".into(),
+		));
+	}
+	let path = if reverse {
+		patch.new_path.as_deref()
+	} else {
+		patch.old_path.as_deref()
+	}
+	.or(patch.new_path.as_deref())
+	.unwrap_or("file");
+	// An all-zero id is a creation: the preimage is absent, not the empty blob.
+	if preimage.bytes().all(|byte| byte == b'0') {
+		if source.is_none() {
+			return Ok(());
+		}
+		return Err(ApplyFailure::Context(format!(
+			"binary patch creates '{path}' but it already exists"
+		)));
+	}
+	let expected = gix::ObjectId::from_hex(preimage.as_bytes()).map_err(|_| {
+		ApplyFailure::Invalid("binary patch index line has an invalid object id".into())
+	})?;
+	if source.as_ref() == Some(&expected) {
+		return Ok(());
+	}
+	let actual = source.map_or_else(|| "absent".to_owned(), |id| id.to_hex().to_string());
+	Err(ApplyFailure::Context(format!(
+		"binary patch for '{path}' expects {preimage}, which does not match the current contents \
+		 ({actual})"
+	)))
 }
 
 fn apply_file_bytes(
@@ -1813,11 +1950,24 @@ fn write_index_map_at(
 	// zeroed stats make every later status re-hash each tracked file, and
 	// sparse checkouts would lose their skip-worktree bits.
 	let previous = load_index_at(repo, index_path)?;
+	prepare_index_map(repo, map, index_path, previous.as_ref(), lock)?
+		.commit()
+		.map_err(|err| Error::backend("git write index", err.error))?;
+	Ok(())
+}
+
+fn prepare_index_map(
+	repo: &gix::Repository,
+	map: &BTreeMap<String, FileEntry>,
+	index_path: Option<&Path>,
+	previous: Option<&gix::index::File>,
+	lock: gix::lock::File,
+) -> Result<gix::lock::File> {
 	let mut state = gix::index::State::new(repo.object_hash());
 	for (path, entry) in map {
 		validate_repo_path(path).map_err(ApplyFailure::into_error)?;
 		let rela_path = BStr::new(path.as_bytes());
-		let unchanged = previous.as_ref().and_then(|index| {
+		let unchanged = previous.and_then(|index| {
 			let old = index
 				.entry_by_path_and_stage(rela_path, Stage::Unconflicted)
 				.filter(|old| {
@@ -1856,10 +2006,7 @@ fn write_index_map_at(
 		.write_to(&mut out, gix::index::write::Options::default())
 		.map_err(|err| Error::backend("git write index", err))?;
 	out.into_inner()
-		.map_err(|err| Error::backend("git write index", err.into_error()))?
-		.commit()
-		.map_err(|err| Error::backend("git write index", err.error))?;
-	Ok(())
+		.map_err(|err| Error::backend("git write index", err.into_error()))
 }
 
 fn write_tree_map(
@@ -3240,5 +3387,134 @@ mod tests {
 		assert_cached_apply_matches_git(&temp, &repository, &[&created]);
 		let ours_index = temp.path().join("ours-space.index");
 		assert!(git_with_index(temp.path(), &ours_index, &["ls-files", "-z"]).contains(weird));
+	}
+
+	/// A binary patch records the blob it replaces. Applying it onto a different
+	/// blob, forward or reverse, must fail and leave that blob in the index:
+	/// a literal block would otherwise overwrite it.
+	#[test]
+	fn binary_patch_refuses_a_different_preimage() {
+		let original = b"\0draft-base\0";
+		let drafted = b"\0drafted\0";
+		let later = b"\0later-commit\0";
+		let temp = init(&[("data.bin", original)]);
+		let preimage = git(temp.path(), &["rev-parse", "HEAD:data.bin"]);
+		fs::write(temp.path().join("data.bin"), drafted).expect("write drafted bytes");
+		let repository = repo(temp.path());
+		let patch = repository
+			.diff_text(&DiffOptions { binary: true, ..DiffOptions::default() })
+			.expect("render binary patch");
+		assert!(patch.contains("GIT binary patch"), "{patch}");
+		assert!(patch.contains(preimage.trim()), "patch must name the preimage blob: {patch}");
+		reset(temp.path());
+
+		let cached =
+			ApplyOptions { cached: true, index_path: None, reverse: false, three_way: false };
+		let reversed =
+			ApplyOptions { cached: true, index_path: None, reverse: true, three_way: false };
+		assert!(
+			repository
+				.can_apply_patch(&patch, &cached)
+				.expect("check matching preimage")
+		);
+		repository
+			.apply_patch(&patch, &cached)
+			.expect("apply onto the recorded preimage");
+		let drafted_id = git(temp.path(), &["rev-parse", ":data.bin"]);
+		assert_ne!(drafted_id.trim(), preimage.trim());
+		// The index now holds the postimage, so only the reverse direction
+		// applies.
+		assert!(
+			!repository
+				.can_apply_patch(&patch, &cached)
+				.expect("forward onto postimage")
+		);
+		assert!(
+			repository
+				.can_apply_patch(&patch, &reversed)
+				.expect("reverse onto postimage")
+		);
+
+		reset(temp.path());
+		fs::write(temp.path().join("data.bin"), later).expect("write later bytes");
+		git(temp.path(), &["add", "data.bin"]);
+		let kept = git(temp.path(), &["rev-parse", ":data.bin"]);
+		assert_ne!(kept.trim(), preimage.trim());
+		assert_ne!(kept.trim(), drafted_id.trim());
+		assert!(
+			!repository
+				.can_apply_patch(&patch, &cached)
+				.expect("forward onto other blob")
+		);
+		assert!(
+			!repository
+				.can_apply_patch(&patch, &reversed)
+				.expect("reverse onto other blob")
+		);
+		let err = repository
+			.apply_patch(&patch, &cached)
+			.expect_err("refuse to overwrite a different blob");
+		assert!(err.to_string().contains("does not match"), "{err}");
+		assert_eq!(git(temp.path(), &["rev-parse", ":data.bin"]), kept);
+	}
+
+	/// A mode-only change of a binary file still names the unchanged blob. The
+	/// mode applies when that blob is current, and is refused when it is not.
+	#[cfg(unix)]
+	#[test]
+	fn binary_mode_change_refuses_a_different_blob() {
+		use std::os::unix::fs::PermissionsExt;
+		let bytes = b"\0same-bytes\0";
+		let temp = init(&[("data.bin", bytes)]);
+		let preimage = git(temp.path(), &["rev-parse", "HEAD:data.bin"]);
+		let path = temp.path().join("data.bin");
+		let mut perms = fs::metadata(&path).expect("stat").permissions();
+		perms.set_mode(0o755);
+		fs::set_permissions(&path, perms).expect("chmod");
+		let repository = repo(temp.path());
+		let worktree_patch = repository
+			.diff_text(&DiffOptions { binary: true, ..DiffOptions::default() })
+			.expect("render mode patch");
+		assert!(worktree_patch.contains("old mode 100644\nnew mode 100755\n"), "{worktree_patch}");
+		assert!(
+			worktree_patch.contains(preimage.trim()),
+			"mode patch must name the unchanged blob: {worktree_patch}"
+		);
+		let new_id = repository
+			.write_blob(bytes)
+			.expect("freeze mode-change bytes");
+		let patch = repository
+			.diff_blobs(
+				&crate::types::BlobChange {
+					path:     "data.bin".to_owned(),
+					old_id:   Some(preimage.trim().to_owned()),
+					new_id:   Some(new_id),
+					old_mode: Some("100644".to_owned()),
+					new_mode: Some("100755".to_owned()),
+				},
+				true,
+			)
+			.expect("render frozen mode patch");
+		assert_eq!(patch, worktree_patch);
+		reset(temp.path());
+
+		let cached =
+			ApplyOptions { cached: true, index_path: None, reverse: false, three_way: false };
+		repository
+			.apply_patch(&patch, &cached)
+			.expect("apply mode onto the same bytes");
+		let staged = git(temp.path(), &["ls-files", "-s", "data.bin"]);
+		assert!(staged.starts_with("100755"), "{staged}");
+		assert_eq!(git(temp.path(), &["rev-parse", ":data.bin"]).trim(), preimage.trim());
+
+		reset(temp.path());
+		fs::write(&path, b"\0other-bytes\0").expect("diverge");
+		git(temp.path(), &["add", "data.bin"]);
+		let kept = git(temp.path(), &["rev-parse", ":data.bin"]);
+		let err = repository
+			.apply_patch(&patch, &cached)
+			.expect_err("refuse mode change onto a different blob");
+		assert!(err.to_string().contains("does not match"), "{err}");
+		assert_eq!(git(temp.path(), &["rev-parse", ":data.bin"]), kept);
 	}
 }

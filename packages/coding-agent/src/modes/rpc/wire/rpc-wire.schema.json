@@ -2891,6 +2891,14 @@
 				"workingDir": {
 					"type": "string"
 				},
+				"movedCwd": {
+					"type": "boolean",
+					"description": "The command ended in another directory than it started in; the next command starts in its own cwd."
+				},
+				"errexit": {
+					"type": "boolean",
+					"description": "The command ended with `set -e` on; the next command starts with it off."
+				},
 				"images": {
 					"type": "array",
 					"items": {

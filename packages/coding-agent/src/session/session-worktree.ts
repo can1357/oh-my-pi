@@ -60,14 +60,14 @@ export function formatSessionWorktreeSummary(worktree: SessionWorktree, sourceCl
 		: sourceCleaned
 			? "uncommitted changes moved, source checkout cleaned"
 			: "uncommitted changes carried over";
-	const where = `Moved to worktree ${worktree.path} on branch ${worktree.branch}`;
+	const on = `${worktree.path} on branch ${worktree.branch}`;
 	if (worktree.ovnfs) {
 		const { checkout } = worktree.ovnfs;
-		return `${where} (ovnfs checkout ${checkout}, ${changeStatus}; \`ovnfs land ${checkout}\` lands its commits).`;
+		return `Moved to ovnfs checkout ${checkout} at ${on} (${changeStatus}; \`ovnfs land ${checkout}\` lands its commits).`;
 	}
 	const how =
 		worktree.clonedWith === undefined ? "checked out" : `cloned via ${formatIsolationBackend(worktree.clonedWith)}`;
-	return `${where} (${how}, ${changeStatus}).`;
+	return `Moved to worktree ${on} (${how}, ${changeStatus}).`;
 }
 
 /**

@@ -118,6 +118,8 @@ export type WritethroughDeferredHandle = {
 export interface WritethroughResult {
 	diagnostics?: FileDiagnosticsResult;
 	finalContent: string;
+	/** True when formatting altered this call's target file before committing it. */
+	formatted?: boolean;
 }
 
 /**
@@ -637,7 +639,11 @@ async function runLspWritethrough(
 		diagnostics.formatter = formatter;
 	}
 
-	return { finalContent, diagnostics };
+	return {
+		finalContent,
+		diagnostics,
+		...(finalContent !== content ? { formatted: true } : {}),
+	};
 }
 
 async function flushWritethroughBatch(
@@ -654,6 +660,7 @@ async function flushWritethroughBatch(
 	}
 	const results: Array<FileDiagnosticsResult | undefined> = [];
 	const finalContents = new Map<string, string>();
+	let requestedFormatted = false;
 	for (const entry of batch) {
 		const bundle = getDeferred?.(entry.dst);
 		let content: string;
@@ -688,6 +695,9 @@ async function flushWritethroughBatch(
 			{ contentAlreadyWritten: true, onCommitted: entry.dst === requestedDst ? onCommitted : undefined },
 		);
 		finalContents.set(entry.dst, diag.finalContent);
+		if (entry.dst === requestedDst && diag.formatted) {
+			requestedFormatted = true;
+		}
 		bundle?.finalize(diag.diagnostics);
 		results.push(diag.diagnostics);
 	}
@@ -697,6 +707,7 @@ async function flushWritethroughBatch(
 	return {
 		finalContent,
 		diagnostics: mergeDiagnostics(results, options),
+		...(requestedFormatted ? { formatted: true } : {}),
 	};
 }
 

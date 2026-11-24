@@ -5,6 +5,7 @@ import { providerEntry, seedModels } from "../compat/providers";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
 import { fetchKiroModels } from "../discovery/kiro";
+import { fetchPiNativeModels, type PiNativeModelDiscoveryOptions } from "../discovery/pi-native";
 import { decodeKiroCredential } from "../wire/kiro";
 
 import {
@@ -118,6 +119,32 @@ function unionCodexModels(
 		catalogs.push(result.models);
 	}
 	return catalogs.length > 0 ? unionAccountCatalogs(catalogs) : null;
+}
+
+// ---------------------------------------------------------------------------
+// Auth gateway (pi-native transport)
+// ---------------------------------------------------------------------------
+
+/** A provider whose traffic rides `transport: "pi-native"` through an auth gateway. */
+export interface PiNativeModelManagerConfig extends PiNativeModelDiscoveryOptions {
+	/** Namespace from {@link resolvePiNativeModelCacheProviderId}. */
+	cacheProviderId: string;
+}
+
+/**
+ * Model manager that takes a pi-native provider's roster from its gateway
+ * (`GET /v1/pi/models`). Authoritative: the gateway lists exactly what it can
+ * route for the provider, so bundled models it does not serve are pruned and
+ * models it discovered at runtime appear.
+ */
+export function piNativeModelManagerOptions(config: PiNativeModelManagerConfig): ModelManagerOptions<Api> {
+	const { cacheProviderId, ...discovery } = config;
+	return {
+		providerId: config.providerId,
+		cacheProviderId,
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: () => fetchPiNativeModels(discovery),
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -518,17 +545,4 @@ export function kiroModelManagerOptions(config: KiroModelManagerConfig = {}): Mo
 				? { fetchDynamicModels: async () => discover(apiKey) }
 				: undefined),
 	};
-}
-
-// ---------------------------------------------------------------------------
-// Zai
-// ---------------------------------------------------------------------------
-
-export interface ZaiModelManagerConfig {}
-
-/** Creates model-manager options for Z.AI's mixed native and Anthropic transports. */
-export function zaiModelManagerOptions(
-	_config: ZaiModelManagerConfig = {},
-): ModelManagerOptions<"anthropic-messages" | "openai-completions"> {
-	return { providerId: "zai" };
 }

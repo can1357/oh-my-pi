@@ -1025,6 +1025,16 @@ function isCodexWebSocketRetryableStreamError(error: unknown): boolean {
 	);
 }
 
+/**
+ * Whether a stream event mirrors per-response HTTP headers (`x-codex-turn-state`,
+ * `x-models-etag`) in its `headers` field. WebSocket frames carry no HTTP
+ * headers; the live backend sends them on `codex.response.metadata`, while
+ * `response.metadata` is the shape codex-rs parses.
+ */
+function isCodexHeaderMetadataEvent(type: unknown): boolean {
+	return type === "codex.response.metadata" || type === "response.metadata";
+}
+
 function updateCodexSessionMetadataFromHeaders(
 	turnState: CodexTurnStateCell | undefined,
 	state: CodexWebSocketSessionState | undefined,
@@ -1651,7 +1661,7 @@ function applyCodexCompactionResponseMetadata(
 	requestContext: CodexRequestContext,
 	event: Record<string, unknown>,
 ): void {
-	if (event.type !== "response.metadata") return;
+	if (!isCodexHeaderMetadataEvent(event.type)) return;
 	updateCodexSessionMetadataFromHeaders(
 		requestContext.turnState,
 		requestContext.websocketState,
@@ -1836,7 +1846,7 @@ async function openCodexWebSocketTransport(
 				model: requestContext.transformedBody.model,
 				reasoningEffort: requestContext.transformedBody.reasoning?.effort ?? null,
 				headers: redactHeaders(websocketHeaders),
-				sentTurnStateHeader: websocketHeaders.has(X_CODEX_TURN_STATE_HEADER),
+				sentTurnState: websocketRequest.client_metadata?.[X_CODEX_TURN_STATE_HEADER] !== undefined,
 				sentModelsEtagHeader: websocketHeaders.has(X_MODELS_ETAG_HEADER),
 				requestType: websocketRequest.type,
 				retry,
@@ -2333,12 +2343,11 @@ class CodexStreamProcessor {
 			return firstTokenTime;
 		}
 
-		if (eventType === "response.metadata") {
-			// The WebSocket transport has no per-response HTTP headers; codex-rs
-			// mirrors them into this event's `headers` and reads
-			// `x-codex-turn-state` from there (ResponsesStreamEvent::turn_state).
-			// Capture only the first non-empty value so same-turn follow-ups keep
-			// the server's original sticky-routing token on either transport.
+		if (isCodexHeaderMetadataEvent(eventType)) {
+			// WebSocket frames carry no per-response HTTP headers; the backend
+			// mirrors them into this event's `headers`. Capture only the first
+			// non-empty `x-codex-turn-state` so same-turn follow-ups keep the
+			// server's original sticky-routing token on either transport.
 			updateCodexSessionMetadataFromHeaders(
 				this.requestContext.turnState,
 				this.requestContext.websocketState,

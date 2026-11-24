@@ -16,6 +16,7 @@ import type { FileSink } from "bun";
 import type { BashResult } from "../../exec/bash-executor";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type { CacheWarmingMode } from "../../session/cache-warmer";
+import type { WireSessionEvent } from "../../session/loop-end-wire";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import type { SessionLeaseReport } from "../../session/session-storage";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
@@ -149,43 +150,48 @@ export function defineRpcClientTool<
 	return tool;
 }
 
-const agentEventTypes = new Set<AgentEvent["type"]>([
-	"agent_start",
-	"agent_end",
-	"turn_start",
-	"turn_end",
-	"message_start",
-	"message_update",
-	"message_end",
-	"tool_execution_start",
-	"tool_execution_update",
-	"tool_stream_update",
-	"tool_execution_end",
-]);
+// Exhaustively keyed on the event-type unions so adding a session event without
+// listing it here fails type-checking instead of silently dropping the frame.
+const agentEventTypes: Record<AgentEvent["type"], true> = {
+	agent_start: true,
+	agent_end: true,
+	turn_start: true,
+	turn_end: true,
+	message_start: true,
+	message_update: true,
+	message_end: true,
+	tool_execution_start: true,
+	tool_execution_update: true,
+	tool_stream_update: true,
+	tool_execution_end: true,
+};
 
-const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
+const sessionEventTypes: Record<WireSessionEvent["type"], true> = {
 	...agentEventTypes,
-	"auto_compaction_start",
-	"auto_compaction_end",
-	"manual_compaction_start",
-	"manual_compaction_end",
-	"auto_retry_start",
-	"auto_retry_end",
-	"cache_warming_start",
-	"cache_warming_end",
-	"retry_fallback_applied",
-	"retry_fallback_succeeded",
-	"ttsr_triggered",
-	"todo_reminder",
-	"todo_auto_clear",
-	"irc_message",
-	"notice",
-	"thinking_level_changed",
-	"model_changed",
-	"service_tier_changed",
-	"goal_updated",
-	"queue_update",
-]);
+	auto_compaction_start: true,
+	auto_compaction_end: true,
+	manual_compaction_start: true,
+	manual_compaction_end: true,
+	auto_retry_start: true,
+	auto_retry_end: true,
+	cache_warming_start: true,
+	cache_warming_end: true,
+	retry_fallback_applied: true,
+	retry_fallback_succeeded: true,
+	model_changed: true,
+	service_tier_changed: true,
+	config_warnings_changed: true,
+	advisor_cost_changed: true,
+	advisor_yielded: true,
+	ttsr_triggered: true,
+	todo_reminder: true,
+	todo_auto_clear: true,
+	irc_message: true,
+	notice: true,
+	thinking_level_changed: true,
+	goal_updated: true,
+	queue_update: true,
+};
 
 function isRpcResponse(value: unknown): value is RpcResponse {
 	if (!isRecord(value)) return false;
@@ -213,14 +219,14 @@ function isAgentEvent(value: unknown): value is AgentEvent {
 	if (!isRecord(value)) return false;
 	const type = value.type;
 	if (typeof type !== "string") return false;
-	return agentEventTypes.has(type as AgentEvent["type"]);
+	return Object.hasOwn(agentEventTypes, type);
 }
 
 function isAgentSessionEvent(value: unknown): value is AgentSessionEvent {
 	if (!isRecord(value)) return false;
 	const type = value.type;
 	if (typeof type !== "string") return false;
-	return sessionEventTypes.has(type as AgentSessionEvent["type"]);
+	return Object.hasOwn(sessionEventTypes, type);
 }
 
 function isRpcSubagentLifecycleFrame(value: unknown): value is RpcSubagentLifecycleFrame {
