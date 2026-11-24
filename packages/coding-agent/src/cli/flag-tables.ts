@@ -180,6 +180,10 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--max-time": (result, value) => {
 		result.maxTime = parseMaxTimeSeconds(value);
 	},
+	"--output-schema": (result, value) => {
+		if (!value.trim()) throw new CliUsageError("--output-schema requires a schema file path.");
+		result.outputSchema = value;
+	},
 	"--warn-cost": (result, value) => {
 		result.warnCost = parseCostUsd("--warn-cost", value);
 	},

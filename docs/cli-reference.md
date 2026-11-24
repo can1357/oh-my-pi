@@ -147,6 +147,7 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | `--advisor`                | Enable the advisor runtime (passively reviews each turn and injects notes). See [advisor / watchdog](./advisor-watchdog.md).                                                                         |
 | `--wait-async`             | Print mode: before exiting, wait for this run's background jobs and start another turn in the same session with each result (`async.printWake`). See [Headless / print mode](#headless--print-mode). |
 | `--max-time <duration>`    | Stop the session after this duration (e.g. `600`, `10m`, `1h`).                                                                                                                                      |
+| `--output-schema <file>`   | Print mode (`-p`) only: the final answer must be one JSON value valid against this JSON Schema file. See [Structured output](#structured-output-schema-enforced). |
 | `--motion <mode>`          | Animation preset: `full` (default), `reduced` (250 ms spinners, no shimmer or blink/fade) or `none` (static spinners and title). Streaming text is unaffected; see `--max-fps`. Overrides `tui.motion` and `PI_MOTION` for this run.                  |
 | `--spinner-interval <ms>`  | Milliseconds between spinner frames, terminal title included (default `80`; `0` = static). Overrides `tui.spinnerInterval` and `PI_SPINNER_INTERVAL` for this run.                                                                                  |
 | `--max-fps <n>`            | Repaint ceiling in frames per second (default `30`; `1`–`120`), streaming text included; keystroke echo keeps 30 fps. Overrides `tui.maxFps` and `PI_MAX_FPS` for this run.                                                                          |
@@ -235,6 +236,23 @@ with `--max-time`.
 omp -p --wait-async --max-time 2h "Run the integration suite in the background and fix what fails"
 ```
 
+### Structured output (schema-enforced)
+
+```sh
+cat > schema.json <<'EOF'
+{"type":"object","properties":{"path":{"type":"string"},"code":{"type":"string","minLength":1}},"required":["path","code"],"additionalProperties":false}
+EOF
+omp -p --output-schema ./schema.json 'Rewrite src/clamp.ts to use early returns' > result.json || echo "no valid result" >&2
+```
+
+Contract:
+
+- Success: exit `0`, stdout is exactly one line of compact JSON (the value, no fences, no prose, no logs). Logs and diagnostics go to stderr.
+- Failure: stdout is empty and the exit status is nonzero (`1`; `3` when `--max-cost` stopped the run) with a diagnostic on stderr. Failures: unreadable, malformed or unsupported schema (checked before any model call, no session is created); no final text; non-JSON or fenced/prose-wrapped answer; schema mismatch after correction; provider error or refusal (`content_filter`); truncation (`finish_reason: length`); a run that ended on a tool call.
+- Correction: a wrong answer (not JSON, or fails validation) gets at most 2 further turns in the same session with every tool disabled, so tools that already ran are never replayed. Truncation, provider errors and refusals are not retried.
+- Validation is always local and strict; there is no permissive fallback and the provider route is never changed to honor the schema. The schema is also shown to the model in the prompt; that text is guidance, not enforcement.
+- Dialect: the keywords enforced by the in-tree validator (`type`, `enum`, `const`, `allOf`/`anyOf`/`oneOf`/`not`, `if`/`then`/`else`, `properties`, `required`, `additionalProperties`, `patternProperties`, `propertyNames`, `min/maxProperties`, `dependentRequired`/`dependentSchemas`, `items`/`prefixItems`/`contains`/`min/maxItems`/`uniqueItems`, `min/maxLength`, `pattern`, numeric bounds, `multipleOf`, local `$ref`). `format` is an annotation and is not asserted. These are rejected up front because the validator would ignore them: `unevaluatedProperties`, `unevaluatedItems`, `dependencies`, `additionalItems`, `$dynamicRef`, `$recursiveRef`, `contentSchema`, non-local `$ref`.
+- Not combinable with `--mode json`, `rpc`, `rpc-ui`, `acp`, the interactive TUI or `--restore` (rejected with a usage error). There is no terminal result record in the JSONL event stream in this release.
 `--mode json` emits a session header followed by events as JSON lines.
 Incremental `message_update` events omit full partial-message snapshots; completed
 messages arrive in `message_end`, and opaque provider replay payloads are omitted.

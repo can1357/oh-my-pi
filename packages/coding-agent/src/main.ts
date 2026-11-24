@@ -33,6 +33,7 @@ import {
 	reportUnrecognizedFlags,
 	validateGoalLaunch,
 	validateGoalStartup,
+	validateOutputSchemaLaunch,
 	validateRestoreLaunch,
 	validateRestorePrompt,
 	validateToolNames,
@@ -40,6 +41,7 @@ import {
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
+import { loadOutputSchema } from "./modes/output-schema";
 import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
 import { fetchBuild } from "./cli/build-service";
@@ -1946,6 +1948,11 @@ export async function runRootCommand(
 		// transcripts (or an opened picker) behind a usage error.
 		validateGoalLaunch(parsedArgs, isInteractive);
 		validateRestoreLaunch(parsedArgs, isInteractive);
+		validateOutputSchemaLaunch(parsedArgs, isInteractive);
+		// A malformed, unreadable or unsupported schema fails here, before any session, tool or model call.
+		const outputSchema = parsedArgs.outputSchema
+			? (await loadOutputSchema(parsedArgs.outputSchema)).schema
+			: undefined;
 		// Without piped text the prompt must come from argv, which only the
 		// post-extension reparse can settle: an extension string flag's value
 		// (`--spawn-peer reviewer`) looks like a prompt here, and a boolean flag
@@ -2923,6 +2930,7 @@ export async function runRootCommand(
 					initialImages,
 					printThoughts: initialArgs.printThoughts,
 					planYolo: parsedArgs.planYolo,
+					outputSchema,
 					mcpManager,
 					deadline: sessionOptions.deadline,
 				});

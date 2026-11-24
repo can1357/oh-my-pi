@@ -57,6 +57,8 @@ export interface Args {
 	advisor?: boolean;
 	/** Print mode: wake the session with background-job results before exiting (`async.printWake`). */
 	waitAsync?: boolean;
+	/** Print mode: path to a JSON Schema file the final answer must satisfy (`--output-schema`). */
+	outputSchema?: string;
 	externalThinking?: boolean;
 	continue?: boolean;
 	resume?: string | true;
@@ -149,6 +151,22 @@ export function validateGoalLaunch(args: Args, interactive: boolean): void {
 	}
 	if (args.continue || args.resume || args.fork || args.fromClaude || args.fromCodex) {
 		throw new CliUsageError("--goal requires a fresh session (no resume, continue, fork, or import).");
+	}
+}
+
+/**
+ * Reject a `--output-schema` launch outside plain print mode. Judged on the startup parse, before any
+ * session resolution, so a rejected launch leaves no session behind.
+ */
+export function validateOutputSchemaLaunch(args: Args, interactive: boolean): void {
+	if (args.outputSchema === undefined) return;
+	if (interactive || (args.mode !== undefined && args.mode !== "text")) {
+		throw new CliUsageError(
+			"--output-schema applies to plain print mode (`omp -p`) only; it cannot combine with --mode json, rpc, rpc-ui, acp or the interactive TUI.",
+		);
+	}
+	if (args.restore) {
+		throw new CliUsageError("--output-schema cannot combine with --restore.");
 	}
 }
 

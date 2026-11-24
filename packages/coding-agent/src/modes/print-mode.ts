@@ -29,6 +29,13 @@ import {
 	formatPersistenceNotice,
 } from "./persistence-failure";
 import { initializeExtensions } from "./runtime-init";
+import {
+	correctionPrompt,
+	OUTPUT_SCHEMA_MAX_CORRECTIONS,
+	outputContractPrompt,
+	resolveStructuredOutput,
+	type StructuredOutcome,
+} from "./output-schema";
 
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
 import { cfgAsyncPrintWake } from "../tools/settings";
@@ -51,6 +58,11 @@ export interface PrintModeOptions {
 	planYolo?: boolean;
 	/** Manager returned by session creation; only print mode waits for its servers. */
 	mcpManager?: MCPManager;
+	/**
+	 * `--output-schema`: validated JSON Schema for the final answer. Text mode only. Success prints exactly one
+	 * JSON value; any other outcome prints nothing on stdout and exits nonzero with a stderr diagnostic.
+	 */
+	outputSchema?: Record<string, unknown>;
 	/** `--max-time` deadline (epoch ms). It aborts running turns; the background-job wait enforces it itself. */
 	deadline?: number;
 }
@@ -191,7 +203,7 @@ async function runPrintModeCore(
 	stdout: SerialStdout,
 	signalTeardownActive: () => boolean,
 ): Promise<number> {
-	const { mode, messages = [], initialMessage, initialImages, printThoughts, planYolo = false } = options;
+	const { mode, messages = [], initialMessage, initialImages, printThoughts, planYolo = false, outputSchema } = options;
 	session.disableStopTimeTodoReminders();
 
 	// Emit session header for JSON mode
@@ -490,8 +502,9 @@ async function runPrintModeCore(
 		if (!(await prepareAgentTurn())) return;
 		admittedAgentTurn = true;
 		costCapRefusalBeforeTurn = session.costCapRefusal;
+		const framed = outputSchema ? `${text}\n\n${outputContractPrompt(outputSchema)}` : text;
 		await logger.time("print:prompt", () =>
-			images !== undefined ? session.prompt(text, { images }) : session.prompt(text),
+			images !== undefined ? session.prompt(framed, { images }) : session.prompt(framed),
 		);
 	};
 
@@ -571,11 +584,32 @@ async function runPrintModeCore(
 	// refusal is pruned from active context at settle, and an aborted turn
 	// can trail synthetic tool results — both would hide the terminal
 	// assistant message (and its error) from a last-element read.
-	const assistantMsg = admittedAgentTurn ? session.getLastAssistantMessage() : undefined;
+	let assistantMsg = admittedAgentTurn ? session.getLastAssistantMessage() : undefined;
 	// A request refused during the last admitted turn ends the run short of an
 	// answer; the refusal (already on stderr, or a `cost-gate` notice in the JSON
 	// stream) is the outcome, with its own exit code.
-	const costCapped = admittedAgentTurn && !strictMCPFailure && session.costCapRefusal !== costCapRefusalBeforeTurn;
+	let costCapped = admittedAgentTurn && !strictMCPFailure && session.costCapRefusal !== costCapRefusalBeforeTurn;
+	// `--output-schema`: the answer must validate locally before it can be printed. A wrong answer earns a
+	// bounded number of tool-less correction turns, so nothing a tool already did is replayed.
+	let structured: StructuredOutcome | undefined;
+	if (outputSchema && admittedAgentTurn && !strictMCPFailure && !asyncWaitExpired && !costCapped) {
+		structured = resolveStructuredOutput(assistantMsg, outputSchema);
+		if (!structured.ok && structured.retryable && !signalTeardownActive()) {
+			await session.setActiveToolsByName([]);
+			for (let attempt = 0; attempt < OUTPUT_SCHEMA_MAX_CORRECTIONS && !structured.ok && structured.retryable; attempt++) {
+				writeStderrLine(`Output schema: ${structured.reason}; correction ${attempt + 1}/${OUTPUT_SCHEMA_MAX_CORRECTIONS}.`);
+				costCapRefusalBeforeTurn = session.costCapRefusal;
+				await session.prompt(correctionPrompt(structured.reason));
+				await session.waitForIdle();
+				assistantMsg = session.getLastAssistantMessage();
+				if (session.costCapRefusal !== costCapRefusalBeforeTurn) {
+					costCapped = true;
+					break;
+				}
+				structured = resolveStructuredOutput(assistantMsg, outputSchema);
+			}
+		}
+	}
 	// The terminal stop reason decides the process exit code in every output
 	// mode: `--mode json` used to report success for the same turn-fatal error
 	// text mode exits 1 on (issue #11498). Silent aborts (plan-mode compaction
@@ -592,7 +626,7 @@ async function runPrintModeCore(
 	// In text mode, output the final response. A terminal failure prints only
 	// the error line below; JSON mode already emitted the assistant message and
 	// stop reason through the event subscription.
-	if (mode === "text" && !terminalFailure && !strictMCPFailure && !asyncWaitExpired && !costCapped) {
+	if (mode === "text" && !outputSchema && !terminalFailure && !strictMCPFailure && !asyncWaitExpired && !costCapped) {
 		if (assistantMsg) {
 			if (
 				assistantMsg.errorMessage &&
@@ -611,6 +645,14 @@ async function runPrintModeCore(
 				}
 			}
 		}
+		session.setTextOutputCommitted(true);
+	}
+
+	// `--output-schema` success: the one JSON value, printed only after local validation passed. Every other
+	// outcome leaves stdout empty and is reported on stderr below.
+	const schemaFailure = outputSchema !== undefined && structured?.ok !== true;
+	if (structured?.ok) {
+		stdout.writeLine(`${structured.json}\n`);
 		session.setTextOutputCommitted(true);
 	}
 
@@ -663,7 +705,21 @@ async function runPrintModeCore(
 		}
 	}
 
+	if (schemaFailure && !terminalFailure && !strictMCPFailure && !asyncWaitExpired && !costCapped) {
+		const reason =
+			structured && !structured.ok ? structured.reason : "no model turn ran, so there is no result to validate";
+		writeStderrLine(`Error: --output-schema: no valid result (${singleLine(reason)}). Nothing was written to stdout.`);
+	}
 	await stderrTail;
-	if (terminalFailure || durabilityFailure || strictMCPFailure || builtinFailed || asyncWaitExpired) return 1;
+	if (
+		terminalFailure ||
+		durabilityFailure ||
+		strictMCPFailure ||
+		builtinFailed ||
+		asyncWaitExpired ||
+		(schemaFailure && !costCapped)
+	) {
+		return 1;
+	}
 	return costCapped ? PRINT_MODE_COST_CAP_EXIT_CODE : 0;
 }
