@@ -911,9 +911,9 @@ export async function realPathOf(filePath: string): Promise<string> {
 
 /**
  * The checkout to add to `client`'s workspace before it opens `filePath`: the one holding
- * the file (symlinks resolved), when it is not the checkout holding the client's root. A
- * server rooted at the session cwd never loads another checkout on its own (rust-analyzer
- * finds no references there), nested worktrees and checkouts included. Only servers that
+ * the file (symlinks resolved), when it is not the checkout holding the client's root.
+ * Some servers do not load another checkout on their own (rust-analyzer finds no
+ * references there), nested worktrees and checkouts included. Only servers that
  * accept `workspace/didChangeWorkspaceFolders` get one.
  */
 async function workspaceFolderToAdd(client: LspClient, filePath: string): Promise<string | undefined> {
@@ -924,8 +924,8 @@ async function workspaceFolderToAdd(client: LspClient, filePath: string): Promis
 /**
  * The checkout holding `filePath` when the server cannot be told about it: it is
  * not the checkout of the client's root and the server does not accept
- * `workspace/didChangeWorkspaceFolders`. Its answers for the file then come from
- * the root's checkout index.
+ * `workspace/didChangeWorkspaceFolders`. The server may still discover the
+ * checkout's project when it opens the file.
  */
 export async function unservedCheckout(client: LspClient, filePath: string): Promise<string | undefined> {
 	if (client.serverCapabilities?.workspace?.workspaceFolders?.changeNotifications) return undefined;

@@ -131,3 +131,47 @@ it("reports rename leftovers only in the edited checkout", async () => {
 	expect(warning).not.toContain(`${FILE}:`);
 	expect(warning).not.toContain(`main-only${EXT}`);
 });
+
+it("does not warn that the checkout is unloaded when references include another file in it", async () => {
+	const output = await execute(
+		{ action: "references" },
+		{
+			capabilities: { referencesProvider: true },
+			responses: { "textDocument/references": [location(queriedFile, 0, 4), location(otherFile, 0, 0)] },
+		},
+	);
+	expect(output).toContain(`feature-only${EXT}:1:1`);
+	expect(output).not.toContain("cannot load the checkout");
+});
+
+it.each(["only the queried file", "only the session checkout", "no files"] as const)(
+	"keeps the checkout note when references cover %s",
+	async scenario => {
+		const result =
+			scenario === "no files"
+				? []
+				: [location(path.join(scenario === "only the queried file" ? checkout : cwd, "src", FILE), 0, 4)];
+		const output = await execute(
+			{ action: "references" },
+			{ capabilities: { referencesProvider: true }, responses: { "textDocument/references": result } },
+		);
+		expect(output).toContain(result.length === 0 ? "No references found" : `${FILE}:1:5`);
+		expect(output).toContain("cannot load the checkout");
+	},
+);
+
+it.each(["changes", "documentChanges"] as const)(
+	"uses cross-file rename edits in %s as evidence that the checkout is loaded",
+	async encoding => {
+		const { uri, range } = location(otherFile, 0, 0);
+		const edits = [{ range, newText: "renamed" }];
+		const edit: WorkspaceEdit =
+			encoding === "changes" ? { changes: { [uri]: edits } } : { documentChanges: [{ textDocument: { uri }, edits }] };
+		const output = await execute(
+			{ action: "rename", new_name: "renamed", apply: false },
+			{ capabilities: { renameProvider: true }, responses: { "textDocument/rename": edit } },
+		);
+		expect(output).toContain(`feature-only${EXT}: 1 edit`);
+		expect(output).not.toContain("cannot load the checkout");
+	},
+);

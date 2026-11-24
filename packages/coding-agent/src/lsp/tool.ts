@@ -9,6 +9,7 @@ import type {
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 import { isEnoent, isFsError, logger, prompt, ptree, untilAborted } from "@oh-my-pi/pi-utils";
+import { findRepoRoot } from "../capability/fs";
 import lspDescription from "../prompts/tools/lsp.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
@@ -26,6 +27,7 @@ import {
 	getOrCreateClient,
 	isRustAnalyzerClient,
 	type LspServerStatus,
+	realPathOf,
 	reconcileFileFromDisk,
 	reconcileIdleChecker,
 	reconcileOpenFilesFromDisk,
@@ -276,6 +278,41 @@ async function offTargetNote(
 			? "; clangd has no compile_commands.json and is parsing with fallback flags"
 			: "";
 	return `\n⚠ ${misses.length} location(s) do not mention ${symbolName} (${examples})${clangdHint}`;
+}
+
+function* answerFileUris(answer: Location[] | WorkspaceEdit): Iterable<string> {
+	if (Array.isArray(answer)) {
+		for (const location of answer) yield location.uri;
+		return;
+	}
+	if (answer.changes) {
+		for (const uri in answer.changes) {
+			if (answer.changes[uri].length > 0) yield uri;
+		}
+	}
+	if (answer.documentChanges) {
+		for (const change of answer.documentChanges) {
+			if ("textDocument" in change && change.edits.length > 0) yield change.textDocument.uri;
+		}
+	}
+}
+
+/** Opening one document is not evidence of indexing the checkout; answering from another file is. */
+async function answerShowsCheckout(
+	answer: Location[] | WorkspaceEdit,
+	targetFile: string,
+	checkout: string,
+): Promise<boolean> {
+	const queriedFile = await realPathOf(targetFile);
+	const seen = new Set([targetFile, queriedFile]);
+	for (const uri of answerFileUris(answer)) {
+		const file = uriToFile(uri);
+		if (!path.isAbsolute(file) || seen.has(file)) continue;
+		seen.add(file);
+		const resolved = await realPathOf(file);
+		if (resolved !== queriedFile && (await findRepoRoot(path.dirname(resolved))) === checkout) return true;
+	}
+	return false;
 }
 
 const RUSTUP_PROXY_PROBE_MS = 5_000;
@@ -1470,6 +1507,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const symbolName = symbol ? parseSymbolSpec(symbol).symbol : undefined;
 
 			let output: string;
+			let answer: Location[] | WorkspaceEdit | undefined;
 			// Set on bare empty-lookup outcomes (no definition/references/…): the
 			// result carries no information once consumed, so compaction may elide
 			// it. Clean diagnostics runs are NOT useless — they are verification
@@ -1606,6 +1644,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						if (missing) output += `\n${missing}`;
 						else useless = true;
 					} else {
+						answer = result;
 						const contextualReferences = result.slice(0, REFERENCE_CONTEXT_LIMIT);
 						const plainReferences = result.slice(REFERENCE_CONTEXT_LIMIT);
 						const contextualLines = await Promise.all(
@@ -1845,6 +1884,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					if (!result) {
 						output = "Rename returned no edits";
 					} else {
+						answer = result;
 						const shouldApply = apply !== false;
 						if (shouldApply) {
 							const applied = await applyWorkspaceEditWithLsp(result, this.session.cwd, signal);
@@ -1887,7 +1927,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			}
 			if (targetFile && CROSS_FILE_ACTIONS.has(action)) {
 				const checkout = await unservedCheckout(client, targetFile);
-				if (checkout) {
+				if (checkout && (!answer || !(await answerShowsCheckout(answer, targetFile, checkout)))) {
 					output += `\nnote: ${serverName} indexes ${client.cwd} only and cannot load the checkout ${checkout}; these results may describe ${client.cwd}'s copy of the code`;
 				}
 			}
