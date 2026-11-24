@@ -1951,11 +1951,12 @@ fn resolve_checkout_target(
 
 /// Checkout options for `repo`, a linked worktree or the primary checkout.
 ///
-/// gix reads `info/attributes` under `repo.git_dir()`, which for a linked worktree is its
-/// `worktrees/<name>` directory; git reads it from the common directory. Without this, a
-/// `filter=` rule in `.git/info/attributes` never reached a linked worktree's checkout, and
-/// its blobs were written in their stored form. The attribute stack comes from the common
-/// repository; everything else comes from `repo`.
+/// gix reads `info/attributes` under `repo.git_dir()`, which for a linked
+/// worktree is its `worktrees/<name>` directory; git reads it from the common
+/// directory. Without this, a `filter=` rule in `.git/info/attributes` never
+/// reached a linked worktree's checkout, and its blobs were written in their
+/// stored form. The attribute stack comes from the common repository;
+/// everything else comes from `repo`.
 fn worktree_checkout_options(
 	owner: &GitRepo,
 	repo: &gix::Repository,

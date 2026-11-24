@@ -51,9 +51,10 @@ impl GitRepo {
 		Ok(open_discovered(self)?.to_thread_local())
 	}
 
-	/// Freshly opened repository at the common git directory, which holds `info/attributes`
-	/// for every worktree of this repository. A linked worktree's own handle reads that file
-	/// from its `worktrees/<name>` directory instead.
+	/// Freshly opened repository at the common git directory, which holds
+	/// `info/attributes` for every worktree of this repository. A linked
+	/// worktree's own handle reads that file from its `worktrees/<name>`
+	/// directory instead.
 	pub(crate) fn gix_common(&self) -> Result<gix::Repository> {
 		if self.info().is_reftable {
 			return Err(Error::backend(
@@ -79,7 +80,8 @@ fn open_discovered(repo: &GitRepo) -> Result<gix::ThreadSafeRepository> {
 		.map_err(|err| Error::backend("git open", err))
 }
 
-/// Open the primary checkout's git directory, the common directory shared by every worktree.
+/// Open the primary checkout's git directory, the common directory shared by
+/// every worktree.
 fn open_common(repo: &GitRepo) -> Result<gix::ThreadSafeRepository> {
 	open_options()
 		.open(&repo.info().common_dir)
