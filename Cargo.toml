@@ -1,6 +1,5 @@
 [workspace]
 members = ["crates/*"]
-exclude = ["crates/exec-ssh"]
 resolver = "3"
 
 [workspace.package]
