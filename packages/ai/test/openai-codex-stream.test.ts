@@ -3757,6 +3757,88 @@ describe("openai-codex streaming", () => {
 		expect(fallbackDetails.fallbackCount).toBe(1);
 	});
 
+	it("retries the websocket once the fallback cooldown has passed", async () => {
+		using tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const payload = Buffer.from(
+			JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acc_test" } }),
+			"utf8",
+		).toBase64();
+		const token = `aaa.${payload}.bbb`;
+		const sse = `${[
+			`data: ${JSON.stringify({ type: "response.content_part.added", part: { type: "output_text", text: "" } })}`,
+			`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "Hello" })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Hello" }] } })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } } } })}`,
+		].join("\n\n")}\n\n`;
+		const fetchMock = vi.fn(async (input: string | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "https://chatgpt.com/backend-api/codex/responses") {
+				return new Response(sse, {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				});
+			}
+			return new Response("not found", { status: 404 });
+		});
+		let websocketAttempts = 0;
+		class FailingWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				websocketAttempts += 1;
+				setTimeout(() => {
+					this.emit("error", new Event("error"));
+					this.emit("close", new Event("close"));
+					this.readyState = MockWebSocket.CLOSED;
+				}, 0);
+			}
+		}
+
+		global.WebSocket = FailingWebSocket as unknown as typeof WebSocket;
+		const model: Model<"openai-codex-responses"> = buildModel({
+			id: "gpt-5.3-codex-spark",
+			name: "GPT-5.3 Codex Spark",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			preferWebsockets: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 128000,
+		});
+		const context: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+		};
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const sessionOptions = { sessionId: "ws-cooldown-session", providerSessionState };
+		let now = 1_800_000_000_000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const streamOnce = async () => {
+			const result = await streamOpenAICodexResponses(model, context, {
+				fetch: fetchMock as FetchImpl,
+				apiKey: token,
+				...sessionOptions,
+			}).result();
+			expect(result.role).toBe("assistant");
+		};
+
+		await streamOnce();
+		const attemptsAfterFallback = websocketAttempts;
+		expect(attemptsAfterFallback).toBeGreaterThan(0);
+		expect(getOpenAICodexTransportDetails(model, sessionOptions).websocketDisabled).toBe(true);
+
+		now += 1_000;
+		await streamOnce();
+		expect(websocketAttempts).toBe(attemptsAfterFallback);
+
+		now += 10 * 60_000;
+		await streamOnce();
+		expect(websocketAttempts).toBeGreaterThan(attemptsAfterFallback);
+	});
+
 	it.each(["during handshake", "before request", "during request"] as const)(
 		"preserves timeout classification when compaction is aborted %s",
 		async phase => {
