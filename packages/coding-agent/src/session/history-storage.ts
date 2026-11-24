@@ -12,6 +12,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { type WordQuery, wordQuery } from "./search-query";
 import { closeSessionIndex, salvageSessionIndex } from "./session-index";
+import { inWindow, type TimeWindow } from "./time-window";
 
 /** A unique prompt with provenance from its most recent submission. */
 export interface HistoryEntry {
@@ -35,6 +36,8 @@ export interface HistoryFilter {
 	cwd?: string;
 	/** Exact session id of the prompt's latest submission. */
 	sessionId?: string;
+	/** Window holding the prompt's latest submission. */
+	window?: TimeWindow;
 }
 
 type HistoryRow = {
@@ -72,9 +75,23 @@ const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
  * `table` qualifies the columns (`"h."`) when the statement joins.
  */
 function historyFilterClause(table: string, first: number): string {
-	const session = first + 1;
-	return `(?${first} IS NULL OR ${table}cwd = ?${first}) AND (?${session} IS NULL OR ${table}session_id = ?${session})`;
+	const [session, since, until] = [first + 1, first + 2, first + 3];
+	return `(?${first} IS NULL OR ${table}cwd = ?${first}) AND (?${session} IS NULL OR ${table}session_id = ?${session}) AND (?${since} IS NULL OR ${table}created_at >= ?${since}) AND (?${until} IS NULL OR ${table}created_at < ?${until})`;
 }
+
+/** Bindings for the parameters {@link historyFilterClause} reads, in order; window bounds become Unix seconds. */
+function historyFilterParams(filter: HistoryFilter): SQLQueryBindings[] {
+	const { since, until } = filter.window ?? {};
+	return [
+		filter.cwd ?? null,
+		filter.sessionId ?? null,
+		since === undefined ? null : since / 1000,
+		until === undefined ? null : until / 1000,
+	];
+}
+
+/** Parameters {@link historyFilterClause} reads. */
+const HISTORY_FILTER_PARAMS = 4;
 
 /**
  * Rows a reader may hand to callers. A damaged page cross-linked into
@@ -197,10 +214,10 @@ END;
 		}
 		this.#assertRecentWindowReadable();
 		this.#recentStmt = this.#db.prepare(
-			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${readableRowClause("")} AND ${historyFilterClause("", 1)} ORDER BY created_at DESC, id DESC LIMIT ?3`,
+			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${readableRowClause("")} AND ${historyFilterClause("", 1)} ORDER BY created_at DESC, id DESC LIMIT ?${HISTORY_FILTER_PARAMS + 1}`,
 		);
 		this.#searchStmt = this.#db.prepare(
-			`SELECT h.id, h.prompt, h.created_at, h.cwd, h.session_id, h.use_count FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ?1 AND ${readableRowClause("h.")} AND ${historyFilterClause("h.", 2)} ORDER BY h.created_at DESC, h.id DESC LIMIT ?4`,
+			`SELECT h.id, h.prompt, h.created_at, h.cwd, h.session_id, h.use_count FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ?1 AND ${readableRowClause("h.")} AND ${historyFilterClause("h.", 2)} ORDER BY h.created_at DESC, h.id DESC LIMIT ?${HISTORY_FILTER_PARAMS + 2}`,
 		);
 		this.#upsertRowStmt = this.#db.prepare(`
 INSERT INTO history (prompt, created_at, cwd, session_id)
@@ -374,11 +391,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 		try {
 			const queued = this.#queuedEntries();
 			// Each queued prompt can displace its own stored row, so read that many more.
-			const rows = this.#recentStmt.all(
-				filter.cwd ?? null,
-				filter.sessionId ?? null,
-				safeLimit + queued.length,
-			) as HistoryRow[];
+			const rows = this.#recentStmt.all(...historyFilterParams(filter), safeLimit + queued.length) as HistoryRow[];
 			return this.#withQueued(queued, rows, filter, safeLimit);
 		} catch (error) {
 			logger.error("HistoryStorage getRecent failed", { error: String(error) });
@@ -447,7 +460,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 	/** Stored rows matching `words` in the full-text index, newest first; a failed query yields none. */
 	#ftsRows(words: WordQuery, limit: number, filter: HistoryFilter): HistoryRow[] {
 		try {
-			return this.#searchStmt.all(words.match, filter.cwd ?? null, filter.sessionId ?? null, limit) as HistoryRow[];
+			return this.#searchStmt.all(words.match, ...historyFilterParams(filter), limit) as HistoryRow[];
 		} catch (error) {
 			logger.debug("HistoryStorage FTS query failed", { error: String(error) });
 			return [];
@@ -519,7 +532,8 @@ ON CONFLICT(prompt) DO UPDATE SET
 			// The JS form of historyFilterClause: an omitted field matches every prompt.
 			if (
 				(filter.cwd === undefined || entry.cwd === filter.cwd) &&
-				(filter.sessionId === undefined || entry.sessionId === filter.sessionId)
+				(filter.sessionId === undefined || entry.sessionId === filter.sessionId) &&
+				inWindow(entry.created_at * 1000, filter.window)
 			) {
 				entries.push(entry);
 			}
@@ -729,7 +743,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 	#searchSubstring(terms: string[], limit: number, filter: HistoryFilter): HistoryRow[] {
 		const stmt = this.#getSubstringStmt(terms.length);
 		const params: SQLQueryBindings[] = terms.map(term => `%${escapeLikePattern(term)}%`);
-		params.push(filter.cwd ?? null, filter.sessionId ?? null, limit);
+		params.push(...historyFilterParams(filter), limit);
 		return stmt.all(...params) as HistoryRow[];
 	}
 
@@ -742,7 +756,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 		);
 		const whereClause = [...tokenClauses, historyFilterClause("", tokenCount + 1)].join(" AND ");
 		stmt = this.#db.prepare(
-			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${readableRowClause("")} AND ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ?${tokenCount + 3}`,
+			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${readableRowClause("")} AND ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ?${tokenCount + HISTORY_FILTER_PARAMS + 1}`,
 		);
 		this.#substringStmts.set(tokenCount, stmt);
 		return stmt;

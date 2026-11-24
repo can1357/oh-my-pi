@@ -1015,6 +1015,28 @@ def _magic_line_indices(lines: list[str]) -> set[int]:
     return indices
 
 
+# Blank lines plus `//`, `/* */`, and `#` comments, matched from the start of a cell.
+_COMMENT_PREAMBLE_RE = re.compile(r"(?:\s+|//[^\n]*|/\*.*?\*/|#[^\n]*)*", re.DOTALL)
+
+
+def _strip_c_comment_preamble(source: str) -> str:
+    """Blank the C-style comment preamble some models put atop Python cells.
+
+    Only text before the first statement is touched, and only when it contains a
+    ``//`` or ``/* */`` comment (neither can open valid Python). Stripped spans
+    become newlines so traceback line numbers still match the submitted source.
+    """
+    end = _COMMENT_PREAMBLE_RE.match(source).end()
+    # Keep the first statement's own indentation; Python reports it as before.
+    line_start = source.rfind("\n", 0, end) + 1
+    if not source[line_start:end].strip():
+        end = line_start
+    preamble = source[:end]
+    if "//" not in preamble and "/*" not in preamble:
+        return source
+    return "\n" * preamble.count("\n") + source[end:]
+
+
 def transform_cell(source: str) -> str:
     """Translate IPython-style magics + shell escapes into plain Python.
 
@@ -1032,8 +1054,12 @@ def transform_cell(source: str) -> str:
     Python tokenization identifies command lines outside strings and comments.
     Real command payloads are skipped before resuming lexical scanning so shell
     quoting cannot change how subsequent Python source is interpreted.
+
+    A leading ``//`` / ``/* */`` comment preamble is blanked first; see
+    :func:`_strip_c_comment_preamble`.
     """
 
+    source = _strip_c_comment_preamble(source)
     if "%" not in source and "!" not in source:
         return source
 

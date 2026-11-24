@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as statsCli from "../src/cli/stats-cli";
 import Stats from "../src/commands/stats";
-import * as theme from "@oh-my-pi/pi-tui/theme";
+import * as themeService from "../src/ui/theme/service";
 import { parseStatsDashboardArgs } from "../src/slash-commands/helpers/stats-dashboard";
 
 const TEST_CONFIG = { bin: "omp", version: "0.0.0-test", commands: new Map() };
@@ -12,7 +12,7 @@ afterEach(() => {
 
 describe("stats dashboard host arguments", () => {
 	it("forwards the real omp stats flags to the dashboard runner", async () => {
-		vi.spyOn(theme, "initTheme").mockResolvedValue();
+		vi.spyOn(themeService, "initTheme").mockImplementation(() => {});
 		const runStatsCommand = vi.spyOn(statsCli, "runStatsCommand").mockResolvedValue();
 		const command = new Stats(["--host", "::", "--port", "3850"], TEST_CONFIG);
 

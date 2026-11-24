@@ -10,7 +10,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
-import { getTerminalId } from "@oh-my-pi/pi-tui";
+import { getTerminalId } from "@oh-my-pi/pi-coding-agent/utils/ttyid";
 import {
 	getAgentDir,
 	getCustomSessionFilesDir,
