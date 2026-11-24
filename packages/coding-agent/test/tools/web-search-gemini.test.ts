@@ -472,7 +472,7 @@ describe("searchGemini with a Google Cloud API key", () => {
 			modelRegistry,
 			fetch: fetchMock,
 		});
-		expect(requestUrl.startsWith("https://generativelanguage.googleapis.com/v1beta/")).toBe(true);
+		expect(requestUrl).toContain("https://generativelanguage.googleapis.com/v1beta/");
 		expect(requestUrl).not.toContain("aiplatform");
 		expect(requestHeaders.get("x-goog-api-key")).toBe("developer-test-key");
 	});
@@ -506,12 +506,11 @@ describe("searchGemini with a Google Cloud API key", () => {
 describe("web_search with only GOOGLE_CLOUD_API_KEY", () => {
 	const savedVertexKey = Bun.env.GOOGLE_CLOUD_API_KEY;
 	const savedGeminiKey = Bun.env.GEMINI_API_KEY;
-	let settings: Settings;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 
 	beforeEach(async () => {
-		settings = await Settings.init({ inMemory: true });
+		await Settings.init({ inMemory: true });
 		delete Bun.env.GEMINI_API_KEY;
 		Bun.env.GOOGLE_CLOUD_API_KEY = "vertex-test-key";
 		authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));

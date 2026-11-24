@@ -14,7 +14,7 @@ import { formatAge, formatCount, prompt, truncate } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../../config/auxiliary-model-policy";
 import { ModelRegistry } from "../../config/model-registry";
 import { type RoleChainCandidate, resolveModelRoleValue, resolveRoleChain } from "../../config/model-resolver";
-import { roleCandidatePool } from "../../config/model-roles";
+import { getRoleInfo, roleCandidatePool } from "../../config/model-roles";
 import { settings, type Settings } from "../../config/settings";
 import type { CustomTool, CustomToolContext } from "../../extensibility/custom-tools/types";
 import webSearchSystemPrompt from "../../prompts/system/web-search.md" with { type: "text" };
@@ -262,6 +262,28 @@ function preferHackerNews(chain: RoleChainCandidate[], pool: Model<Api>[]): Role
 	return model ? [{ model, explicit: false }, ...chain] : chain;
 }
 
+/**
+ * The web role's candidates: the registry's available models, plus the google models that Gemini web
+ * search takes on GOOGLE_CLOUD_API_KEY alone. The registry lists `google` only with a Developer API key
+ * (model-registry.ts, #createProviderAvailabilityCheck), so without this the Vertex endpoint is never reached.
+ */
+async function webCandidatePool(
+	activeSettings: Settings,
+	modelRegistry: ModelRegistry,
+	authStorage: AuthStorage,
+): Promise<Model[]> {
+	const pool = roleCandidatePool("web", activeSettings, modelRegistry);
+	const accepts = getRoleInfo("web", activeSettings).accepts;
+	const listed = new Set(pool.map(model => `${model.provider}/${model.id}`));
+	const gemini = await getGroundedSearchProvider("gemini");
+	const vertex: Model[] = [];
+	for (const model of modelRegistry.getProviderModels("google")) {
+		if (listed.has(`${model.provider}/${model.id}`) || !accepts(model)) continue;
+		if (await gemini.isAvailable(authStorage, model)) vertex.push(model);
+	}
+	return vertex.length > 0 ? [...pool, ...vertex] : pool;
+}
+
 /** Execute web search */
 async function executeSearch(
 	_toolCallId: string,
@@ -273,7 +295,7 @@ async function executeSearch(
 	const activeSettings = options.settings ?? settings;
 	const modelRegistry =
 		options.modelRegistry ?? new ModelRegistry(authStorage, undefined, { settings: activeSettings });
-	const pool = roleCandidatePool("web", activeSettings, modelRegistry);
+	const pool = await webCandidatePool(activeSettings, modelRegistry, authStorage);
 	const candidates = params.model
 		? (() => {
 				const resolved = resolveModelRoleValue(params.model, pool, { settings: activeSettings });
