@@ -100,24 +100,27 @@ async function memoizedStbImageNormalization(
 	return normalized ? { ...image, ...normalized } : null;
 }
 
-async function normalizeNativeResponsesImagePart(part: unknown): Promise<unknown> {
+async function normalizeNativeResponsesImagePart(part: unknown, autoResize: boolean): Promise<unknown> {
 	if (!isRecord(part) || part.type !== "input_image") return part;
 	const image = imageFromBase64DataUrl(part.image_url);
 	if (!image || !isWebPImage(image)) return part;
-	const normalized = await memoizedStbImageNormalization(image, undefined);
+	const normalized = await memoizedStbImageNormalization(image, webpConversionResize(autoResize));
 	if (!normalized) return createNativeUndecodableStbImageOmission();
 	return { ...part, image_url: `data:${normalized.mimeType};base64,${normalized.data}` };
 }
 
-async function normalizeNativeResponsesItem(item: Record<string, unknown>): Promise<Record<string, unknown>> {
-	const normalizedItem = await normalizeNativeResponsesImagePart(item);
+async function normalizeNativeResponsesItem(
+	item: Record<string, unknown>,
+	autoResize: boolean,
+): Promise<Record<string, unknown>> {
+	const normalizedItem = await normalizeNativeResponsesImagePart(item, autoResize);
 	if (normalizedItem !== item) return normalizedItem as Record<string, unknown>;
 	if (!Array.isArray(item.content)) return item;
 
 	let content: unknown[] | undefined;
 	for (let index = 0; index < item.content.length; index++) {
 		const part = item.content[index];
-		const normalizedPart = await normalizeNativeResponsesImagePart(part);
+		const normalizedPart = await normalizeNativeResponsesImagePart(part, autoResize);
 		if (normalizedPart !== part) content ??= item.content.slice(0, index);
 		content?.push(normalizedPart);
 	}
@@ -126,12 +129,13 @@ async function normalizeNativeResponsesItem(item: Record<string, unknown>): Prom
 
 async function normalizeNativeResponsesHistoryPayload(
 	payload: ProviderPayload | undefined,
+	autoResize: boolean,
 ): Promise<ProviderPayload | undefined> {
 	if (payload?.type !== "openaiResponsesHistory" || !Array.isArray(payload.items)) return payload;
 	let items: Array<Record<string, unknown>> | undefined;
 	for (let index = 0; index < payload.items.length; index++) {
 		const item = payload.items[index]!;
-		const normalizedItem = await normalizeNativeResponsesItem(item);
+		const normalizedItem = await normalizeNativeResponsesItem(item, autoResize);
 		if (normalizedItem !== item) items ??= payload.items.slice(0, index);
 		items?.push(normalizedItem);
 	}
@@ -318,7 +322,7 @@ export async function normalizeModelContextMessages(
 		const message = messages[messageIndex]!;
 		const hasNativePayload = message.role === "user" || message.role === "developer";
 		const normalizedProviderPayload = hasNativePayload
-			? await normalizeNativeResponsesHistoryPayload(message.providerPayload)
+			? await normalizeNativeResponsesHistoryPayload(message.providerPayload, autoResize)
 			: undefined;
 		const providerPayloadChanged = hasNativePayload && normalizedProviderPayload !== message.providerPayload;
 		let content: Array<(typeof message.content)[number]> | undefined;
