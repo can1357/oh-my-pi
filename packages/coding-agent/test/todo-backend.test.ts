@@ -775,8 +775,8 @@ describe("todo backend", () => {
 			// A backend that times out never answers, so its resend goes out on exit; a late one answers after omp gave up.
 			if (scenario === "times out") await session.dispose();
 			if (late) {
-				// Real time on purpose: past the 40 ms handler timeout, so a resend that did not wait for the answer
-				// would have gone out by then.
+				// Real time on purpose: the rows share a real 40 ms handler timeout; a resend capped at it would fire
+				// 40 ms after the call fails, so sleep past that.
 				await Bun.sleep(60);
 				gate.resolve();
 			}
