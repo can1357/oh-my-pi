@@ -13,7 +13,7 @@ import { keyLabel } from "../../setup/scenes/choice";
 import "../../styles/forms";
 import { type HtmlFormLook, noteEditHint } from "../../styles/forms/html-form";
 import { type FormGroup, type FormPart, isFoldCaption } from "./layout";
-import { isDropdown, OTHER_ROW, type HtmlFormModel, type TextBox } from "./model";
+import { ACTION_ACT, isDropdown, OTHER_ROW, type HtmlFormModel, type TextBox } from "./model";
 import type { MediaState } from "./media";
 import { actionKbd, actionKeyId, cancelKbd, confirmKbd } from "../../keys/hints";
 import { keyTitle } from "../../styles/panels/common";
@@ -359,7 +359,13 @@ function Parts(props: PartsProps & { readonly parts: readonly FormPart[] }): JSX
 		const children: JSXNode[] = [];
 		if (start === 0 && section.title.length > 0)
 			children.push(
-				<text key={`l${s}`} motionKey={`l${s}`} role="omp.ask.legend" wrap="word" spans={tspSpans(section.title)} />,
+				<text
+					key={`l${s}`}
+					motionKey={`l${s}`}
+					role="omp.ask.legend"
+					wrap="word"
+					spans={tspSpans(section.title)}
+				/>,
 			);
 		for (let at = start; at < end; at++) {
 			const block = section.blocks[at]!;
@@ -411,10 +417,7 @@ function Actions(props: { readonly model: HtmlFormModel; readonly remaining?: nu
 	if (model.note())
 		return (
 			<row key="actions" motionKey="actions" role="omp.actions" align="center" gap="sm">
-				<text
-					role="omp.ask.note"
-					text={noteEditHint(model)}
-				/>
+				<text role="omp.ask.note" text={noteEditHint(model)} />
 				<ActionButton
 					id="cancel"
 					label="Keep"
@@ -437,7 +440,9 @@ function Actions(props: { readonly model: HtmlFormModel; readonly remaining?: nu
 				? ["alt", "n"]
 				: ["n"]
 			: undefined;
-	const enterSubmits = active === "submit" || model.sole;
+	// Enter on the Submit row presses its selected button: Submit, or one of the form's actions.
+	const pressed = active === "submit" ? model.pressed() : undefined;
+	const enterSubmits = (active === "submit" && !pressed) || model.sole;
 	return (
 		<row key="actions" motionKey="actions" role="omp.actions" align="center" gap="sm">
 			{props.remaining !== undefined ? (
@@ -448,7 +453,23 @@ function Actions(props: { readonly model: HtmlFormModel; readonly remaining?: nu
 				/>
 			) : null}
 			<spacer grow={1} />
-			<ActionButton id="cancel" label="Cancel" title="Cancel" />
+			{model.actions.length > 0 ? (
+				model.actions.map(action => (
+					<ActionButton
+						id={`${ACTION_ACT}${action.id}`}
+						label={action.label}
+						title={
+							action === pressed
+								? `${action.label}  ${keyTitle(actionKeyId("tui.select.confirm", "enter"))}`
+								: action.label
+						}
+						tone={action === pressed ? "accent" : undefined}
+						keys={action === pressed ? confirmKbd() : undefined}
+					/>
+				))
+			) : (
+				<ActionButton id="cancel" label="Cancel" title="Cancel" />
+			)}
 			{noteKeys ? (
 				<ActionButton
 					id="note"
@@ -460,7 +481,7 @@ function Actions(props: { readonly model: HtmlFormModel; readonly remaining?: nu
 			<ActionButton
 				id="submit"
 				label="Submit"
-				tone="accent"
+				tone={pressed ? undefined : "accent"}
 				title={enterSubmits ? `Submit  ${keyTitle(actionKeyId("tui.select.confirm", "enter"))}` : "Submit"}
 				keys={enterSubmits ? confirmKbd() : undefined}
 			/>

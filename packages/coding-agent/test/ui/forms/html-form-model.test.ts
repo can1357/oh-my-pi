@@ -45,6 +45,34 @@ function clipboardRead() {
 }
 
 describe("html form model", () => {
+	it("presses an action beside Submit without submitting, whatever the fields hold", () => {
+		const onAction = vi.fn();
+		const onSubmit = vi.fn<(data: HtmlFormData, notes: OptionNote[]) => void>();
+		const actions = [
+			{ id: "decline", label: "Decline" },
+			{ id: "cancel", label: "Cancel" },
+		];
+		const model = new HtmlFormModel(
+			parseHtmlForm(`<form><label>Name <input name="name" required></label></form>`),
+			{ onSubmit, onCancel: vi.fn(), onAction },
+			{ actions },
+		);
+		model.key(keyEvent("tab")); // the Submit row
+		model.key(keyEvent("right")); // Decline
+		expect(model.pressed()?.id).toBe("decline");
+		model.key(keyEvent("enter"));
+		// The required name is still empty: declining needs no valid answers.
+		expect(onAction).toHaveBeenCalledWith("decline");
+		model.key(keyEvent("left"));
+		model.key(keyEvent("left")); // wraps past Submit to Cancel
+		model.key(keyEvent("enter"));
+		expect(onAction).toHaveBeenLastCalledWith("cancel");
+		// A click on an action button in Tern.
+		model.action("action:decline", "actions/action:decline");
+		expect(onAction).toHaveBeenLastCalledWith("decline");
+		expect(onSubmit).not.toHaveBeenCalled();
+	});
+
 	describe("text paste", () => {
 		it("asks the host for clipboard text on the paste key and pastes it into a one-line answer without submitting", async () => {
 			const { onPasteClipboard, reads } = clipboardRead();

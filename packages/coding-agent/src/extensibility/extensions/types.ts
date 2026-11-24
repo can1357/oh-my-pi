@@ -244,9 +244,11 @@ export interface ExtensionUIDialogOptions {
 	 */
 	onAbandon?: (given: ExtensionFormDialogResult) => void;
 	/**
-	 * Form dialogs: invoked when the user explicitly declined or cancelled the
-	 * form, on hosts whose client tells the two apart (ACP). Hosts that only
-	 * see the form closed never invoke it.
+	 * Form dialogs: the caller tells declining from cancelling. The interactive
+	 * TUI then shows Decline and Cancel beside Submit, and ACP reports its
+	 * client's explicit decline or cancel; either invokes this with the action
+	 * before the dialog resolves undefined. Hosts that only see the form closed
+	 * never invoke it.
 	 */
 	onDismiss?: (action: "decline" | "cancel") => void;
 	/**

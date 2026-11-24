@@ -34,6 +34,9 @@ import { listKeyId, matchesSelectCancel } from "../../../config/keybindings/matc
 /** The free-text answer row of a choice field. */
 export const OTHER_ROW = -1;
 
+/** Action id prefix of an {@link HtmlFormAction} button: `action:<id>`. */
+export const ACTION_ACT = "action:";
+
 /** Where the dialog's keys go: a field (by index) or the Submit row. */
 export type Active = number | "submit";
 
@@ -61,10 +64,18 @@ export interface NoteDraft {
 	readonly images: readonly ImageContent[];
 }
 
+/** A button beside Submit that ends the form without submitting it (e.g. Decline): its `label`, and the `id` {@link HtmlFormCallbacks.onAction} receives. */
+export interface HtmlFormAction {
+	readonly id: string;
+	readonly label: string;
+}
+
 /** How the host hears from the dialog. */
 export interface HtmlFormCallbacks {
 	onSubmit(data: HtmlFormData, notes: OptionNote[]): void;
 	onCancel(): void;
+	/** One of the form's {@link HtmlFormAction}s was pressed. */
+	onAction?(id: string): void;
 	/** The dialog gives keys back to the composer (Escape, Tab past Submit). */
 	releaseKeys?(): void;
 	/** A pointer event in the dialog: it takes keys again. */
@@ -172,6 +183,10 @@ export class HtmlFormModel {
 	 */
 	readonly scrollAnchor = signal<"top" | "bottom">("top");
 	readonly focused: Signal<boolean>;
+	/** The buttons beside Submit; empty when the host passed none. */
+	readonly actions: readonly HtmlFormAction[];
+	/** The Submit row's button Enter presses: 0 for Submit, else `actions[button - 1]`. */
+	readonly button = signal(0);
 	readonly #callbacks: HtmlFormCallbacks;
 	#done = false;
 	/** Clipboard pastes still reading, oldest first; a submit waits for them. */
@@ -191,8 +206,14 @@ export class HtmlFormModel {
 			vim?: DialogVim;
 			/** Whether Tern draws the form (reactive); a plain terminal when omitted. */
 			native?: () => boolean;
+			/**
+			 * Buttons beside Submit that end the form without submitting it. On the Submit row ←/→ pick
+			 * one and Enter presses it; they replace the Cancel button, so include a cancel when wanted.
+			 */
+			actions?: readonly HtmlFormAction[];
 		} = {},
 	) {
+		this.actions = options.actions ?? [];
 		this.form = form;
 		this.questions = fieldQuestions(form);
 		this.layout = formLayout(form);
@@ -577,6 +598,19 @@ export class HtmlFormModel {
 		this.#callbacks.onCancel();
 	}
 
+	/** End the form with one of its {@link actions}, whatever the fields hold. */
+	act(id: string): void {
+		if (this.#done) return;
+		this.#submitAfterPastes = false;
+		this.#callbacks.onAction?.(id);
+	}
+
+	/** The action the Submit row's Enter presses, or undefined for Submit itself. */
+	pressed(): HtmlFormAction | undefined {
+		const button = this.button();
+		return button > 0 ? this.actions[button - 1] : undefined;
+	}
+
 	timeout(): void {
 		if (this.#done) return;
 		this.#done = true;
@@ -740,10 +774,18 @@ export class HtmlFormModel {
 
 	#submitKey(key: KeyEvent): boolean {
 		const id = listKeyId(key);
+		if (this.actions.length > 0 && (id === "left" || id === "right")) {
+			const buttons = this.actions.length + 1;
+			this.button.set((untrack(this.button) + (id === "right" ? 1 : buttons - 1)) % buttons);
+			return true;
+		}
 		switch (id) {
-			case "enter":
-				this.submit();
+			case "enter": {
+				const action = untrack(() => this.pressed());
+				if (action) this.act(action.id);
+				else this.submit();
 				return true;
+			}
 			case "tab":
 				this.#callbacks.releaseKeys?.();
 				return true;
@@ -1017,6 +1059,7 @@ export class HtmlFormModel {
 		if (open) return this.open(Number(open[1]));
 		const pick = /^pick:(\d+):(\d+)$/.exec(act);
 		if (pick) return this.pick(Number(pick[1]), Number(pick[2]));
+		if (act.startsWith(ACTION_ACT)) return this.act(act.slice(ACTION_ACT.length));
 		switch (act) {
 			case "note": {
 				const row = /(?:^|\/)f(\d+)\/o(\d+)$/.exec(key);

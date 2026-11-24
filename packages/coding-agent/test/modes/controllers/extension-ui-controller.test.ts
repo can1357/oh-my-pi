@@ -112,6 +112,22 @@ describe("ExtensionUiController form dialog", () => {
 		expect(harness.composerFocused()).toBe(true);
 	});
 
+	it("offers Decline and Cancel beside Submit to a caller that tells them apart, and reports the one pressed", async () => {
+		const harness = makeHarness();
+		const dismissed: string[] = [];
+		const pending = harness.controller.showFormDialog(html, { onDismiss: action => dismissed.push(action) });
+		harness.term.press("tab"); // the Submit row
+		expect(harness.screen()).toMatch(/Submit\s+Decline\s+Cancel/);
+
+		harness.term.press("right"); // Decline
+		harness.term.press("enter");
+
+		expect(await pending).toBeUndefined();
+		expect(dismissed).toEqual(["decline"]);
+		expect(harness.askSlot()).toBe(false);
+		expect(harness.composerFocused()).toBe(true);
+	});
+
 	it("gives the form's text boxes the app's Vim mode: Esc leaves Insert before handing the keys back", async () => {
 		const harness = makeHarness();
 		Object.assign(harness.ctx, { dialogVim: () => ({}) });

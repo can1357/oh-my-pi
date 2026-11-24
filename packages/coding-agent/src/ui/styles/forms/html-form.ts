@@ -75,8 +75,11 @@ export function htmlFormKeyHints(model: HtmlFormModel): string {
 	if (model.dropdown() !== undefined) return `${upDown} highlight · ${enter} choose${note} · ${cancel} close`;
 	const next = model.sole ? "submit" : "next";
 	let action: string;
-	if (!field) action = `${enter} submit`;
-	else if (field.kind === "text") action = `${enter} ${next}`;
+	if (!field) {
+		const press = `${enter} ${model.pressed()?.label.toLowerCase() ?? "submit"}`;
+		action =
+			model.actions.length > 0 ? `${formatKeyHint("left")}/${formatKeyHint("right")} choose · ${press}` : press;
+	} else if (field.kind === "text") action = `${enter} ${next}`;
 	else if (dropdown)
 		action = `${formatKeyHint("space")} open · ${formatKeyHint("left")}/${formatKeyHint("right")} change · ${enter} ${next}`;
 	else if (!option) action = `type your own · ${enter} ${next}`;
@@ -551,15 +554,16 @@ function buildColumn(cx: PaintContext, look: HtmlFormLook, view: View, width: nu
 	const submitFocused = view.active === "submit" && view.focused;
 	if (view.active === "submit") column.groupStart = column.focusStart = lines.length;
 	const fix = errors > 0 ? theme.fg("error", `  ${errors} to fix`) : "";
-	lines.push(
-		truncate(
-			submitFocused
-				? `${theme.style("strong", theme.fg("accent", "❯ Submit"))}${fix}`
-				: `${theme.fg("muted", "  Submit")}${fix}`,
-			width,
-			"…",
-		),
-	);
+	// Submit and the form's actions side by side; the one Enter presses is highlighted while the row is focused.
+	const button = model.button();
+	const buttons = ["Submit", ...model.actions.map(action => action.label)]
+		.map((label, index) =>
+			submitFocused && index === button
+				? theme.style("strong", theme.fg("accent", `❯ ${label}`))
+				: theme.fg("muted", `  ${label}`),
+		)
+		.join("  ");
+	lines.push(truncate(`${buttons}${fix}`, width, "…"));
 	if (view.active === "submit") column.focusEnd = lines.length;
 	return column;
 }

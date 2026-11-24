@@ -49,7 +49,7 @@ import {
 } from "../../tools/html-form/data";
 import { type ChoiceField, type HtmlForm, parseHtmlForm, spansText, type TextField } from "../../tools/html-form/parse";
 import { extensionOutput, extensionTheme, singleNode } from "../../ui/extensions/render-output";
-import { formMedia, HtmlFormDialog, HtmlFormModel } from "../../ui/forms/html-form";
+import { formMedia, type HtmlFormAction, HtmlFormDialog, HtmlFormModel } from "../../ui/forms/html-form";
 import { htmlFormKeyHints } from "../../ui/styles/forms/html-form";
 import { formatKeyHint, formatKeyHints } from "../../ui/keys/hints";
 import { type ApprovalChoice, ApprovalDialog } from "../../ui/overlays/panels/approval-dialog";
@@ -180,6 +180,12 @@ function givenFormAnswers(
 	}
 	return changed || notes.length > 0 ? { data, ...(notes.length ? { notes } : {}) } : undefined;
 }
+
+/** The form buttons of a caller that tells declining from cancelling; see `ExtensionUIDialogOptions.onDismiss`. */
+const DISMISS_ACTIONS: readonly HtmlFormAction[] = [
+	{ id: "decline", label: "Decline" },
+	{ id: "cancel", label: "Cancel" },
+];
 
 export class ExtensionUiController {
 	#extensionTerminalInputUnsubscribers = new Set<() => void>();
@@ -1040,6 +1046,7 @@ export class ExtensionUiController {
 	): Promise<ExtensionFormDialogResult | undefined> {
 		const first = form.fields.find(field => field.name);
 		const prompt = { kind: "question", msg: first && fieldQuestions(form).get(first) } as const;
+		const onDismiss = dialogOptions?.onDismiss;
 		return this.#presentDialog<ExtensionFormDialogResult>(prompt, dialogOptions?.signal, settle => {
 			const withNotes = (data: HtmlFormData, notes: OptionNote[]) => ({ data, ...(notes.length ? { notes } : {}) });
 			const model = new HtmlFormModel(
@@ -1047,6 +1054,10 @@ export class ExtensionUiController {
 				{
 					onSubmit: (data, notes) => settle(withNotes(data, notes)),
 					onCancel: () => settle(undefined),
+					onAction: id => {
+						if (id === "decline" || id === "cancel") onDismiss?.(id);
+						settle(undefined);
+					},
 					onTimeout: (data, notes) => {
 						dialogOptions?.onTimeout?.();
 						settle({ ...withNotes(data, notes), timedOut: true });
@@ -1062,7 +1073,13 @@ export class ExtensionUiController {
 							}
 						: {}),
 				},
-				{ focused: false, vim: this.ctx.dialogVim(), native: () => this.ctx.shell.native() },
+				{
+					focused: false,
+					vim: this.ctx.dialogVim(),
+					native: () => this.ctx.shell.native(),
+					// A caller that tells declining from cancelling (an MCP elicitation) gets both as buttons beside Submit.
+					actions: onDismiss ? DISMISS_ACTIONS : undefined,
+				},
 			);
 			const media = formMedia(form, this.ctx.sessionManager.getCwd());
 			const timeout = dialogOptions?.timeout;
