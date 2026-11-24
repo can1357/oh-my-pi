@@ -860,9 +860,9 @@ class LegacyPeer implements McpPeer {
 
 // ── probe ──────────────────────────────────────────────────────────────────
 
-type Outcome = { value: unknown } | { error: unknown };
+type Outcome<T = unknown> = { value: T } | { error: unknown };
 
-function outcomeOf(request: Promise<unknown>): Promise<Outcome> {
+function outcomeOf<T>(request: Promise<T>): Promise<Outcome<T>> {
 	return request.then(
 		value => ({ value }),
 		error => ({ error }),
@@ -905,11 +905,12 @@ async function probeStdio(upstream: StdioUpstream, deps: McpPeerDeps, signal: Ab
 		// The server refused the legacy handshake: it may be of the 2026-07-28
 		// era alone, so ask its own question before giving up.
 		const discovered = await outcomeOf(upstream.request("server/discover", { _meta: requestMeta() }, { signal }));
-		if (!("error" in discovered)) {
+		if ("error" in discovered) {
+			if (eraOfDiscoverError(discovered.error) === "modern") return { era: "modern" };
+		} else {
 			const result = discoverResultOf(discovered.value);
 			if (result) return { era: "modern", discover: result };
 		}
-		if ("error" in discovered && eraOfDiscoverError(discovered.error) === "modern") return { era: "modern" };
 		throw initialized.error;
 	}
 	const discovered = await Promise.race([
