@@ -214,6 +214,8 @@ Each named tab permits one active run; Chromium-backed tabs have one worker, whi
 
 By default, omp-owned managed Chromium tabs freeze at turn settle and unfreeze on next use (`browser.freezeOnTurnEnd = true`). Owned Chromium, WebKit and Tern tabs idle for 1,800 seconds are closed (`browser.idleCloseSec`; `0` disables this). `persist: true` opts a tab out of both policies, but explicit close still releases it. Relay, connected, spawned, and cmux tabs are not auto-frozen or idle-closed. When a session ends, the relay tabs omp opened close, except `persist` ones, which stay open in the user's Chrome.
 
+Chrome shows its "started debugging this browser" infobar while omp drives any relay tab. With `browser.relayReleaseOnRunEnd = true` (default `false`), omp lets go of the session's idle relay tabs once the agent finishes its reply (its run ends, not each model turn within it), so the infobar goes while omp waits for you: the tabs stay open as they are, and the next call on one reattaches to it on a new worker without reloading it, which resets the tab state earlier calls set (routes, emulation and user agent, init scripts, element ids, the request log) and says so in its result. A tab opened with `persist: true`, one with a run in flight, and one recording, tracing, profiling or capturing a HAR is kept, as is a tab another agent (a subagent on its parent's tab, say) drove since its owner last did: that agent may still be between calls on it. Each agent's settle only lets go of tabs it opened, so agents sharing the relay never release each other's tabs.
+
 ## Common recovery
 
 - Missing/dead tab: call `browser.open` again.

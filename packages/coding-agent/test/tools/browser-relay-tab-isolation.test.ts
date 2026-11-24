@@ -390,8 +390,17 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 		try {
 			const source = await fixture.browser.newPage();
 			await source.goto(`${fixture.origin}/framed`);
-			first = await puppeteer.connect({ browserURL: fixture.cdpUrl });
-			second = await puppeteer.connect({ browserURL: fixture.cdpUrl });
+			// Only tabs a client drives are attached now; both connections claim this one before connecting.
+			const targetId = fixture.server.bridge.listTargets().find(target => target.url === source.url())?.id;
+			if (!targetId) throw new Error("relay does not list the framed page");
+			// The relay's /json/version answer, whose shape its own server test covers.
+			const version = (await (await fetch(`${fixture.cdpUrl}/json/version`)).json()) as {
+				webSocketDebuggerUrl: string;
+			};
+			const endpoint = new URL(version.webSocketDebuggerUrl);
+			endpoint.searchParams.set("claim", targetId);
+			first = await puppeteer.connect({ browserWSEndpoint: endpoint.toString() });
+			second = await puppeteer.connect({ browserWSEndpoint: endpoint.toString() });
 			const firstPage = (await first.pages()).find(page => page.url() === source.url())!;
 			const secondPage = (await second.pages()).find(page => page.url() === source.url())!;
 			const frame = secondPage.frames().find(frame => frame.parentFrame())!;
@@ -426,7 +435,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 			await second?.disconnect();
 			await fixture.close();
 		}
-	});
+	}, 60_000);
 
 	it("opens default relay tabs in the background and closes them, leaving borrowed pages open", async () => {
 		const fixture = await launchRelayFixture();

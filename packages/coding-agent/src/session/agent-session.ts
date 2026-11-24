@@ -268,6 +268,7 @@ import {
 	cancelIdleCloseForOwner,
 	freezeTabsForOwner,
 	releaseIdleTabsForOwner,
+	releaseRelayTabsForOwner,
 	releaseTabsForOwner,
 } from "../tools/browser/tab-supervisor";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
@@ -564,7 +565,12 @@ import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "../advisor/settings";
 import { cfgDisasmBackend } from "../disasm/active";
-import { cfgBrowserEnabled, cfgBrowserFreezeOnTurnEnd, cfgBrowserIdleCloseSec } from "../tools/browser/settings";
+import {
+	cfgBrowserEnabled,
+	cfgBrowserFreezeOnTurnEnd,
+	cfgBrowserIdleCloseSec,
+	cfgBrowserRelayReleaseOnRunEnd,
+} from "../tools/browser/settings";
 import {
 	cfgClaudeResets,
 	cfgCodexResets,
@@ -6321,6 +6327,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		const end = this.#loopEnd;
 		this.#closeRun();
+		// Nothing can resume the run now, so the agent's tabs wait for the user's next prompt.
+		void this.#releaseRelayTabsAtRunEnd();
 		void this.#emitSessionEvent(end.event).catch(error =>
 			logger.warn("agent_end session event emission failed", { error: String(error) }),
 		);
@@ -7182,6 +7190,27 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 		} catch (error) {
 			logger.warn("Failed to settle owned browser tabs at turn end", { error: String(error) });
+		}
+	}
+
+	/**
+	 * Under `browser.relayReleaseOnRunEnd`, let go of this session's idle relay tabs once its run ends: they stay open,
+	 * and Chrome drops the debugger attachment and its infobar until the next call reattaches. Runs at the run's end, not
+	 * at each model turn, since reattaching resets the tab's worker state (element ids, routes, emulation) that the
+	 * agent's next tool call in the same run may still rely on. Best-effort: never throws.
+	 */
+	async #releaseRelayTabsAtRunEnd(): Promise<void> {
+		const ownerId = this.#eval.getKernelOwnerId();
+		if (!ownerId || !cfgBrowserRelayReleaseOnRunEnd.get(this.settings)) return;
+		try {
+			const released = await withTimeout(
+				releaseRelayTabsForOwner(ownerId),
+				3_000,
+				"Timed out releasing owned relay browser tabs at run end",
+			);
+			if (released > 0) logger.debug("Released owned relay browser tabs at run end", { ownerId, released });
+		} catch (error) {
+			logger.warn("Failed to release owned relay browser tabs at run end", { error: String(error) });
 		}
 	}
 
