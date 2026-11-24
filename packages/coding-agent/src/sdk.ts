@@ -2252,7 +2252,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			? undefined
 			: options.preloadedCustomToolPaths !== undefined
 				? Promise.resolve(options.preloadedCustomToolPaths)
-				: logger.time("discoverCustomToolPaths", () => discoverCustomToolPaths([], cwd, agentDir));
+				: logger.time("discoverCustomToolPaths", () =>
+						discoverCustomToolPaths([], cwd, agentDir, {
+							// Explicit-only sessions keep tools of explicit extension roots only, like custom commands.
+							ambient: !(options.extensionRoots
+								? options.extensionRoots().mode === "explicit-only"
+								: options.disableExtensionDiscovery),
+						}),
+					);
 	customToolPathsPromise?.catch(() => {});
 
 	const sessionManager =
@@ -5866,8 +5873,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const loadCustomToolGeneration = async (
 				scopeCwd: string,
 				scopeKey: string,
+				roots: EffectiveExtensionRoots,
 			): Promise<Extension | undefined> => {
-				const paths = await discoverCustomToolPaths([], scopeCwd, agentDir);
+				const paths = await discoverCustomToolPaths([], scopeCwd, agentDir, {
+					ambient: roots.mode !== "explicit-only",
+					extensionRoots: roots,
+				});
 				const loaded = await loadCustomTools(paths, scopeCwd, builtInToolNames, action =>
 					queueResolveHandler(toolSession, action),
 				);
@@ -5985,7 +5996,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					}
 				}
 				if (!restrictToolNames && !customToolGenerations.has(scopeKey)) {
-					const generation = await loadCustomToolGeneration(cwdNow, scopeKey);
+					const generation = await loadCustomToolGeneration(cwdNow, scopeKey, roots);
 					if (generation) added.push(generation);
 				}
 				if (session.isDisposed) return;
