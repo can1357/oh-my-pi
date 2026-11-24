@@ -1073,6 +1073,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settings: Settings;
+	/** Tools are exactly the explicit list (`--no-tools`, structured children): no goal or plan mode. */
+	readonly restrictToolNames: boolean;
 	/** Session-start policy, independent of the selected project memory backend. */
 	readonly memoryEnabled: boolean;
 	#costGate: CostGateApi;
@@ -2265,6 +2267,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#costGate = config.costGate ?? this.#createCostGate();
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
 		this.#mcpNamespaces = config.mcpNamespaces;
+		this.restrictToolNames = config.restrictToolNames === true;
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
 		this.#allowSessionModelFallback = config.allowSessionModelFallback === true;

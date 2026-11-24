@@ -10,6 +10,7 @@
 - `registerComposerShape` takes a `ComposerShape` (`id`, `label`, `row`, `sideWidth`, optional `top`/`bottom` and layout facts) instead of `{ label, style: ComposerStyle }`.
 - Tool `describeCall`/`describeResult` are removed; return nodes from `renderCall`/`renderResult`, which Tern draws natively.
 - `ctx.ui.custom` options drop the pi-tui `overlayOptions` (anchors, sizes, margins); `fullscreen` is now an option of its own; `onHandle` receives `{ closed, close() }`.
+- `--no-tools` now gives the model only the built-in tools named in `--tools`, and subagents inherit that limit. MCP, extension, custom, memory and auto-learn tools no longer reach it, and memory is neither recalled nor saved. Extensions (including their model providers) and LSP don't load, goal and plan mode are unavailable, and `-e`/`--hook`/`--trusted-extension` are rejected alongside it ([#20354](https://github.com/can1357/oh-my-pi/pull/20354) by [@materemias](https://github.com/materemias))
 - The package root no longer re-exports pi-tui components and helpers (`Text`, `Container`, `Markdown`, `Spacer`, the `modes/components` classes, `formTheme`, `styledSpans`, `compactText`, `rowsText`, `getSettingsListTheme`, …); it exports `ansiSpans` and the theme service instead.
 
 ### Added

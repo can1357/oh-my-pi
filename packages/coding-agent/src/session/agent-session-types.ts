@@ -288,6 +288,8 @@ export interface AgentSessionConfig {
 	/** Custom TypeScript slash commands. */
 	customCommands?: LoadedCustomCommand[];
 	skillsSettings?: SkillsSettings;
+	/** Tools are exactly the explicit list (`restrictToolNames` session option); goal and plan mode are unavailable. */
+	restrictToolNames?: boolean;
 	/** Whether this session may start memory backends. Defaults to true. */
 	memoryEnabled?: boolean;
 	/** Agent directory used when changing memory backends in a live session. */
