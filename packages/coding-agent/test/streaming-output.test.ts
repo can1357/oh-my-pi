@@ -15,9 +15,9 @@ import {
 	truncateMiddle,
 	truncateTail,
 	truncateTailBytes,
-} from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { stripOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+} from "@oh-my-pi/pi-coding-agent/tools/streaming-output";
+import { stripOutputNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta-format";
+import { formatOutputNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta-format";
 import { outputMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { flush } from "./helpers/fake-clock";

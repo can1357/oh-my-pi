@@ -6,7 +6,10 @@
  *
  * Thinking is derived from scratch (`thinking: undefined`), mirroring the
  * generator's `rebakeModelThinking`, except its documented provider-authored
- * exemption rows, which keep their explicit metadata.
+ * exemption rows, which keep their explicit metadata. A baked provisional
+ * (`thinking.unverified`) ladder's `reasoning: true` is derived by `buildModel`,
+ * not capability evidence, so those rows are re-derived from a neutral
+ * `reasoning`, as `resolveModelPolicy` normalizes them.
  *
  * Hermetic (no network). Zero diffs required — a failure names each divergent
  * field as `provider/model.field: baked=X engine=Y`; fix the KDL rules (or a
@@ -105,6 +108,7 @@ describe("compat parity", () => {
 				}
 				const exempt = keepsExplicitThinking(row);
 				if (!exempt) (rest as Record<string, unknown>).thinking = undefined;
+				if (row.thinking?.unverified === true) (rest as Record<string, unknown>).reasoning = undefined;
 				const umansAuthored =
 					provider === "umans" && (row.thinking?.requiresEffort === true || row.id === "umans-kimi-k2.7");
 				let policy: ReturnType<typeof resolveModelPolicy>;

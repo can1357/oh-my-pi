@@ -3,8 +3,8 @@ import type { DaemonCompletionEvent } from "../daemon/protocol";
 import launchCompletionTemplate from "../prompts/session/launch-completion.md" with { type: "text" };
 import type { CustomMessage } from "./messages";
 
-import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "@oh-my-pi/pi-tui/chat/messages";
-export { LAUNCH_COMPLETION_MESSAGE_TYPE } from "@oh-my-pi/pi-tui/chat/messages";
+import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "./transcript/messages";
+export { LAUNCH_COMPLETION_MESSAGE_TYPE } from "./transcript/messages";
 
 /** One daemon service completion awaiting injection into its owning session. */
 export type LaunchCompletionEntry = DaemonCompletionEvent;

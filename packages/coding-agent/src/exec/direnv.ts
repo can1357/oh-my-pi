@@ -1,7 +1,13 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { inflateSync } from "node:zlib";
+import type * as Zlib from "node:zlib";
 import { $which, isEnoent, logger } from "@oh-my-pi/pi-utils";
+
+let zlibCache: typeof Zlib | undefined;
+function inflateSync(buf: Zlib.InputType): Buffer {
+	if (!zlibCache) zlibCache = require("node:zlib") as typeof Zlib;
+	return zlibCache.inflateSync(buf);
+}
 
 /** Default cap on a single `direnv` invocation. The first export for a devenv
  *  `.envrc` can build a shell; callers may raise this via `bash.direnvLoadTimeoutMs`. */

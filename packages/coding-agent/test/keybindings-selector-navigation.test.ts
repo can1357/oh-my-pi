@@ -1,19 +1,18 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { KeybindingsManager, setKeybindings } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ExtensionList } from "@oh-my-pi/pi-tui/overlays/extensions/extension-list";
-import type { Extension } from "@oh-my-pi/pi-tui/overlays/extensions/types";
-import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search";
-import { RewindSelectorComponent } from "@oh-my-pi/pi-tui/overlays/rewind-selector";
-import { SessionSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-selector";
-import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import type { Extension } from "@oh-my-pi/pi-coding-agent/extensibility/inventory/types";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import type { SessionMessageEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
-import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { ExtensionListModel } from "../src/ui/overlays/panels/extension-list-model";
+import { HistorySearch } from "../src/ui/overlays/pickers/history-search";
+import { RewindSelector } from "../src/ui/overlays/pickers/rewind-selector";
+import { SessionSelector } from "../src/ui/overlays/pickers/session-selector";
+import { TreeSelector } from "../src/ui/overlays/pickers/tree-selector";
+import { type LayerTerminal, mountLayer } from "./helpers/layer-terminal";
 
 const CTRL_N = "\x0e";
 const CTRL_P = "\x10";
@@ -29,14 +28,37 @@ const BRANCH_KEYBINDINGS = KeybindingsManager.inMemory({
 });
 
 const tempDirs: TempDir[] = [];
+const mounted: LayerTerminal[] = [];
+
+function mountTree(roots: SessionTreeNode[], currentLeafId: string, onSelect: (id: string) => void): LayerTerminal {
+	const selector = mountLayer(
+		() =>
+			TreeSelector({
+				roots,
+				currentLeafId,
+				terminalHeight: 40,
+				onSelect,
+				onCancel: () => {},
+			}),
+		{ fullscreen: true },
+	);
+	mounted.push(selector);
+	return selector;
+}
+
+function mountHistory(storage: HistoryStorage, onSelect: (prompt: string) => void): LayerTerminal {
+	const selector = mountLayer(() => HistorySearch({ source: storage, onSelect, onCancel: () => {} }));
+	mounted.push(selector);
+	return selector;
+}
 
 beforeAll(() => {
-	initTheme();
 	// The default registry is TUI-only; the app registry carries the `app.tree.*` branch bindings.
 	setKeybindings(KeybindingsManager.inMemory());
 });
 
 afterEach(async () => {
+	for (const selector of mounted.splice(0)) selector.dispose();
 	setKeybindings(KeybindingsManager.inMemory());
 	HistoryStorage.close();
 	await Bun.sleep(0);
@@ -137,12 +159,14 @@ describe("selector navigation keybindings", () => {
 	it("uses tui.select.down in the session selector", () => {
 		setKeybindings(TEST_KEYBINDINGS);
 		const selected: string[] = [];
-		const selector = new SessionSelectorComponent(
-			[createSession("session-a", "Alpha"), createSession("session-b", "Beta")],
-			session => selected.push(session.path),
-			() => {},
-			() => {},
+		const selector = mountLayer(() =>
+			SessionSelector({
+				sessions: [createSession("session-a", "Alpha"), createSession("session-b", "Beta")],
+				onSelect: session => selected.push(session.path),
+				onCancel: () => {},
+			}),
 		);
+		mounted.push(selector);
 
 		selector.handleInput(CTRL_N);
 		selector.handleInput("\n");
@@ -156,13 +180,7 @@ describe("selector navigation keybindings", () => {
 		const child = createMessageNode("child", "root", "Child");
 		root.children.push(child);
 		const selected: string[] = [];
-		const selector = new TreeSelectorComponent(
-			[root],
-			"root",
-			40,
-			id => selected.push(id),
-			() => {},
-		);
+		const selector = mountTree([root], "root", id => selected.push(id));
 		selector.handleInput(CTRL_N);
 		selector.handleInput("\n");
 
@@ -210,13 +228,7 @@ describe("selector navigation keybindings", () => {
 		secondUser.children.push(trailingToolResult);
 
 		const selected: string[] = [];
-		const selector = new TreeSelectorComponent(
-			[firstUser],
-			"trailing-tool-result",
-			40,
-			id => selected.push(id),
-			() => {},
-		);
+		const selector = mountTree([firstUser], "trailing-tool-result", id => selected.push(id));
 
 		selector.handleInput("\x1b[1;3A");
 		selector.handleInput("\n");
@@ -262,13 +274,7 @@ describe("selector navigation keybindings", () => {
 		toolResult.children.push(secondUser);
 
 		const selected: string[] = [];
-		const selector = new TreeSelectorComponent(
-			[firstUser],
-			"first-user",
-			40,
-			id => selected.push(id),
-			() => {},
-		);
+		const selector = mountTree([firstUser], "first-user", id => selected.push(id));
 
 		selector.handleInput("\x1b[1;3B");
 		selector.handleInput("\n");
@@ -285,13 +291,7 @@ describe("selector navigation keybindings", () => {
 		root.children.push(activeBranch, inactiveBranch);
 
 		const selected: string[] = [];
-		const selector = new TreeSelectorComponent(
-			[root],
-			"active-branch",
-			40,
-			id => selected.push(id),
-			() => {},
-		);
+		const selector = mountTree([root], "active-branch", id => selected.push(id));
 
 		selector.handleInput("\x1b[F");
 		selector.handleInput("\n");
@@ -312,13 +312,7 @@ describe("selector navigation keybindings", () => {
 		root.children.push(activeBranch, filteredBranch, promotedHead);
 
 		const selected: string[] = [];
-		const selector = new TreeSelectorComponent(
-			[root],
-			"active-branch",
-			40,
-			id => selected.push(id),
-			() => {},
-		);
+		const selector = mountTree([root], "active-branch", id => selected.push(id));
 
 		selector.handleInput("\x1b[1;2C");
 		selector.handleInput("\n");
@@ -339,13 +333,7 @@ describe("selector navigation keybindings", () => {
 		root.children.push(forkA, branchB);
 
 		const selected: string[] = [];
-		const selector = new TreeSelectorComponent(
-			[root],
-			"a1",
-			40,
-			id => selected.push(id),
-			() => {},
-		);
+		const selector = mountTree([root], "a1", id => selected.push(id));
 		for (let press = 0; press < 5; press++) {
 			selector.handleInput("\x1b[1;2D");
 			selector.handleInput("\n");
@@ -354,20 +342,14 @@ describe("selector navigation keybindings", () => {
 		expect(selected).toEqual(["a", "b", "a2", "a1", "a"]);
 	});
 
-	it("leaves branch navigation unbound by default and follows configured bindings", () => {
+	it("leaves branch navigation unbound by default", () => {
 		const root = createMessageNode("root", null, "Root");
 		const activeBranch = createMessageNode("active-branch", "root", "Active branch");
 		const siblingBranch = createMessageNode("sibling-branch", "root", "Sibling branch");
 		root.children.push(activeBranch, siblingBranch);
 		const navigate = (keys: string[]) => {
 			const selected: string[] = [];
-			const selector = new TreeSelectorComponent(
-				[root],
-				"active-branch",
-				40,
-				id => selected.push(id),
-				() => {},
-			);
+			const selector = mountTree([root], "active-branch", id => selected.push(id));
 			for (const key of keys) {
 				selector.handleInput(key);
 				selector.handleInput("\n");
@@ -377,6 +359,22 @@ describe("selector navigation keybindings", () => {
 
 		// Default registry: Shift+arrows do nothing, so Enter re-selects the starting row.
 		expect(navigate(["\x1b[1;2C", "\x1b[1;2D"])).toEqual(["active-branch", "active-branch"]);
+	});
+
+	it("follows configured branch navigation bindings", () => {
+		const root = createMessageNode("root", null, "Root");
+		const activeBranch = createMessageNode("active-branch", "root", "Active branch");
+		const siblingBranch = createMessageNode("sibling-branch", "root", "Sibling branch");
+		root.children.push(activeBranch, siblingBranch);
+		const navigate = (keys: string[]) => {
+			const selected: string[] = [];
+			const selector = mountTree([root], "active-branch", id => selected.push(id));
+			for (const key of keys) {
+				selector.handleInput(key);
+				selector.handleInput("\n");
+			}
+			return selected;
+		};
 
 		setKeybindings(KeybindingsManager.inMemory({ "app.tree.nextBranch": "ctrl+n" }));
 		expect(navigate([CTRL_N])).toEqual(["sibling-branch"]);
@@ -390,13 +388,7 @@ describe("selector navigation keybindings", () => {
 		root.children.push(activeBranch, modelBranch);
 
 		const selected: string[] = [];
-		const selector = new TreeSelectorComponent(
-			[root],
-			"active-branch",
-			40,
-			id => selected.push(id),
-			() => {},
-		);
+		const selector = mountTree([root], "active-branch", id => selected.push(id));
 
 		selector.handleInput("\x1b[1;2C");
 		selector.handleInput("\n");
@@ -421,13 +413,7 @@ describe("selector navigation keybindings", () => {
 		root.children.push(outerActive, outerSibling);
 
 		const selected: string[] = [];
-		const selector = new TreeSelectorComponent(
-			[root],
-			"inner-leaf",
-			40,
-			id => selected.push(id),
-			() => {},
-		);
+		const selector = mountTree([root], "inner-leaf", id => selected.push(id));
 
 		selector.handleInput("\x1b[1;2C");
 		selector.handleInput("\n");
@@ -449,13 +435,7 @@ describe("selector navigation keybindings", () => {
 		}
 
 		const selected: string[] = [];
-		const selector = new TreeSelectorComponent(
-			[root],
-			"node-0",
-			40,
-			id => selected.push(id),
-			() => {},
-		);
+		const selector = mountTree([root], "node-0", id => selected.push(id));
 
 		selector.handleInput("\x1b[6~");
 		selector.handleInput("\n");
@@ -478,13 +458,16 @@ describe("selector navigation keybindings", () => {
 				timestamp: "2024-01-01T00:00:00Z",
 				message: { role: "user", content: `${id} prompt`, timestamp: 1 },
 			}));
-			const selector = new RewindSelectorComponent(entries, {
-				ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
-				cwd: "/tmp",
-				requestRender: () => {},
-				onSelect: id => selected.push(id),
-				onCancel: () => {},
-			});
+			const selector = mountLayer(
+				() =>
+					RewindSelector({
+						entries,
+						onSelect: id => selected.push(id),
+						onCancel: () => {},
+					}),
+				{ fullscreen: true },
+			);
+			mounted.push(selector);
 
 			selector.handleInput(CTRL_P);
 			selector.handleInput("\n");
@@ -497,35 +480,31 @@ describe("selector navigation keybindings", () => {
 
 	it("uses tui.select.down in the extension list", () => {
 		setKeybindings(TEST_KEYBINDINGS);
-		const list = new ExtensionList([createExtension("tool-a", "Tool A"), createExtension("tool-b", "Tool B")]);
+		const list = new ExtensionListModel([createExtension("tool-a", "Tool A"), createExtension("tool-b", "Tool B")]);
 
-		list.handleInput(CTRL_N);
+		list.key("ctrl+n", undefined);
 
-		expect(list.getSelectedExtension()?.id).toBe("tool-a");
+		expect(list.selectedExtension()?.id).toBe("tool-a");
 	});
 
 	it("appends bare j/k to the extension search filter instead of navigating", () => {
 		setKeybindings(TEST_KEYBINDINGS);
-		const list = new ExtensionList([
+		const list = new ExtensionListModel([
 			createExtension("jira", "Jira"),
 			createExtension("json", "JSON"),
 			createExtension("apple", "Apple"),
 		]);
 
-		for (const ch of "jira") list.handleInput(ch);
+		for (const ch of "jira") list.key(ch, ch);
 
-		expect(list.getSearchQuery()).toBe("jira");
+		expect(list.search.text).toBe("jira");
 	});
 
 	it("uses tui.select.down in history search", async () => {
 		setKeybindings(TEST_KEYBINDINGS);
 		const selected: string[] = [];
 		const storage = await createHistoryStorage(["old prompt", "middle prompt", "new prompt"]);
-		const selector = new HistorySearchComponent(
-			storage,
-			prompt => selected.push(prompt),
-			() => {},
-		);
+		const selector = mountHistory(storage, prompt => selected.push(prompt));
 		selector.handleInput(CTRL_N);
 		selector.handleInput("\n");
 
@@ -537,11 +516,7 @@ describe("selector navigation keybindings", () => {
 		const selected: string[] = [];
 		// Added oldest-first; getRecent returns newest-first, so index 0 is "p14", index 14 is "p0".
 		const storage = await createHistoryStorage(Array.from({ length: 15 }, (_, i) => `p${i}`));
-		const selector = new HistorySearchComponent(
-			storage,
-			prompt => selected.push(prompt),
-			() => {},
-		);
+		const selector = mountHistory(storage, prompt => selected.push(prompt));
 
 		const PAGE_UP = "\x1b[5~";
 		const PAGE_DOWN = "\x1b[6~";

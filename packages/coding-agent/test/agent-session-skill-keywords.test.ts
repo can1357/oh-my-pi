@@ -96,6 +96,7 @@ describe("AgentSession skill prompt keyword steering", () => {
 				"eval.py": false,
 				"eval.js": true,
 				"eval.workpool.freshAgents": true,
+				"eval.tools.enabled": true,
 			}),
 			modelRegistry,
 		});

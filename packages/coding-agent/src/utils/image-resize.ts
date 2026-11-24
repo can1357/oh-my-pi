@@ -1,5 +1,11 @@
-import { inflateSync } from "node:zlib";
+import type * as Zlib from "node:zlib";
 import type { BoxEdges, ImageContent } from "@oh-my-pi/pi-ai";
+
+let zlibCache: typeof Zlib | undefined;
+function inflateSync(buf: Zlib.InputType): Buffer {
+	if (!zlibCache) zlibCache = require("node:zlib") as typeof Zlib;
+	return zlibCache.inflateSync(buf);
+}
 import { JUDGMENT_IMAGE_PATCH_SIDE, judgmentImagePatches } from "@oh-my-pi/pi-catalog/compat/judgment-images";
 import { encodeRawPng } from "./png-encode";
 

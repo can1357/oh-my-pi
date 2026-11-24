@@ -1,10 +1,12 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
-import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import type { TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { mountTreeSelector } from "../../helpers/tree-selector";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
-const ALT_A = "\x1ba";
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 function node(entry: SessionEntry): SessionTreeNode {
 	return { entry, children: [] };
@@ -63,32 +65,26 @@ const bookkeeping: SessionEntry[] = [
 	},
 ] as SessionEntry[];
 
-function selectorFor(entries: SessionEntry[]): TreeSelectorComponent {
-	return new TreeSelectorComponent(
-		[chain(entries)],
-		entries.at(-1)?.id ?? null,
-		40,
-		() => {},
-		() => {},
+/** The tree over `entries` (one chain), the last entry current, run through `keys`; its plain screen. */
+function visibleRows(entries: SessionEntry[], ...keys: string[]): string {
+	const term: TestTerminal = mountTreeSelector(
+		{ roots: [chain(entries)], currentLeafId: entries.at(-1)?.id ?? null },
+		{ columns: 100, rows: 40 },
 	);
-}
-
-function visibleRows(selector: TreeSelectorComponent): string[] {
-	return selector
-		.render(100)
-		.map(row => Bun.stripANSI(row).trimEnd())
-		.filter(row => row.trim());
+	try {
+		for (const key of keys) {
+			if (key.startsWith("alt+")) term.press(key);
+			else term.type(key);
+		}
+		return term.screen().join("\n");
+	} finally {
+		term.dispose();
+	}
 }
 
 describe("tree selector entry labels", () => {
-	beforeAll(async () => {
-		await themeModule.initTheme(false, undefined, undefined, "dark", "light");
-	});
-
 	it("labels each bookkeeping entry with what it recorded", () => {
-		const selector = selectorFor([userEntry, ...bookkeeping]);
-		selector.handleInput(ALT_A);
-		const rows = visibleRows(selector).join("\n");
+		const rows = visibleRows([userEntry, ...bookkeeping], "alt+a");
 		expect(rows).toContain("[title: fork cleanup]");
 		expect(rows).toContain("[credential pin: anthropic]");
 		expect(rows).toContain("[mode: plan]");
@@ -100,9 +96,7 @@ describe("tree selector entry labels", () => {
 	});
 
 	it("falls back to the entry type for kinds with nothing to spell out", () => {
-		const selector = selectorFor([userEntry, ...bookkeeping]);
-		selector.handleInput(ALT_A);
-		const rows = visibleRows(selector).join("\n");
+		const rows = visibleRows([userEntry, ...bookkeeping], "alt+a");
 		expect(rows).toContain("[ttsr injection]");
 		expect(rows).toContain("[reset boundary]");
 		expect(rows).toContain("[session init]");
@@ -114,16 +108,12 @@ describe("tree selector entry labels", () => {
 			["anthropic", "[credential pin: anthropic]"],
 			["priority", "[service tier: claude:priority]"],
 		]) {
-			const selector = selectorFor([userEntry, ...bookkeeping]);
-			selector.handleInput(ALT_A);
-			selector.handleInput(query);
-			expect(visibleRows(selector).join("\n")).toContain(expected);
+			expect(visibleRows([userEntry, ...bookkeeping], "alt+a", query)).toContain(expected);
 		}
 	});
 
 	it("hides bookkeeping entries in the default view", () => {
-		const selector = selectorFor([userEntry, ...bookkeeping]);
-		const rows = visibleRows(selector).join("\n");
+		const rows = visibleRows([userEntry, ...bookkeeping]);
 		expect(rows).toContain("user: start");
 		for (const label of [
 			"[title:",

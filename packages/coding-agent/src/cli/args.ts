@@ -7,7 +7,8 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { MotionMode } from "../config/motion-presets";
 import type { ServiceTierOpenAISettingValue } from "../config/service-tier";
 import type { ApprovalMode } from "../tools/approval";
-import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { CLI_THINKING_LEVELS, parseCliThinkingLevel } from "../thinking/levels";
+import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {
 	EXTENSION_SHADOWABLE_STRING_FLAGS,

@@ -43,8 +43,8 @@ import { BUILTIN_TOOLS, GrepTool, ReadTool, type Tool, type ToolSession } from "
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { TodoTool } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
-import type { TruncationMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { TruncationMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta-format";
+import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
 import { removeWithRetries, spillFileName, spillUrl } from "@oh-my-pi/pi-utils";
 import { AdviseTool } from "../src/advisor/advise-tool";
 

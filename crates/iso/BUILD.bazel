@@ -7,6 +7,7 @@ exports_files(["Cargo.toml"])
 
 rust_library(
     name = "iso",
+    lint_config = "//bazel/lints:workspace_lints",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
     crate_name = "omp_iso",
