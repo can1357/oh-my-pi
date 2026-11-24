@@ -1,10 +1,14 @@
 import * as path from "node:path";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
+import binjaWorker from "../binja/worker.py" with { type: "text" };
 import ghidraWorker from "../ghidra/worker.py" with { type: "text" };
 import idaWorker from "../ida/worker.py" with { type: "text" };
 
+/** Every backend id; handle hosts, unit params and eval arguments validate against this list. */
+export const DISASM_BACKEND_IDS = ["ida", "ghidra", "binja"] as const;
+
 /** Backend identity used by settings, host daemons, and executable views. */
-export type DisasmBackendId = "ida" | "ghidra";
+export type DisasmBackendId = (typeof DISASM_BACKEND_IDS)[number];
 
 /** Interpreter and environment used to spawn a backend's Python worker. */
 export interface WorkerRuntime {
@@ -30,6 +34,11 @@ export interface DisasmBackend {
 	interrupt: "signal" | "frame";
 	/** Ghidra rejects hidden path elements; use a temporary symlink/junction to its store directory. */
 	projectAlias: boolean;
+	/**
+	 * Extension of the file the backend's own application unpacks beside a database while it has
+	 * it open; an in-place open is refused while that file exists.
+	 */
+	unpackedExt?: string;
 }
 
 /** Backend-specific paths, worker sources, and interruption mechanisms; no settings dependencies. */
@@ -48,6 +57,7 @@ export const DISASM_BACKENDS: Record<DisasmBackendId, DisasmBackend> = {
 		workerStageDir: "omp-ida-worker",
 		interrupt: "signal",
 		projectAlias: false,
+		unpackedExt: ".id0",
 	},
 	ghidra: {
 		id: "ghidra",
@@ -61,4 +71,21 @@ export const DISASM_BACKENDS: Record<DisasmBackendId, DisasmBackend> = {
 		interrupt: "frame",
 		projectAlias: true,
 	},
+	binja: {
+		id: "binja",
+		label: "Binary Ninja",
+		storeDir: "bndbs",
+		databaseExt: ".bndb",
+		databaseName: name => `${name}.bndb`,
+		isDatabasePath: p => path.extname(p).toLowerCase() === ".bndb",
+		workerScript: binjaWorker,
+		workerStageDir: "omp-binja-worker",
+		interrupt: "signal",
+		projectAlias: false,
+	},
 };
+
+/** Backend whose database format `p` names, whichever backend is active; undefined for anything else. */
+export function databaseOwner(p: string): DisasmBackend | undefined {
+	return DISASM_BACKEND_IDS.map(id => DISASM_BACKENDS[id]).find(backend => backend.isDatabasePath(p));
+}

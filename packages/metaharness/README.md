@@ -122,6 +122,82 @@ omitted from the benchmark prompt. Override infrastructure with
 `--vmon-host`, `--vmon-source`, `--vmon-bin`, `--vmon-home`,
 `--vmon-kernel`, `--vmon-agent`, and `--gateway-url`.
 
+## Compaction benchmark (ProgramBench baseline)
+
+`bench:compaction baseline` runs one ProgramBench task (default
+`bellard__quickjs.d7ae12a`) with omp's auto-compaction off, records every
+turn's request size, and captures the fork point every compaction arm
+resumes from: at the first turn whose request reaches `--fork-tokens`
+(default 300k) it runs `docker commit`, which pauses the container, so the
+image holds the workspace and the session prefix with no tool mid-run.
+
+```bash
+bun --cwd packages/metaharness run bench:compaction baseline --run qjs-ds41-1
+```
+
+- **Docker over SSH, official sandbox.** Trials run on `--host` (default
+  `xeon.internal`, x86_64) with ProgramBench's inference limits:
+  `--network none --cpus 20 --memory 60g --cap-drop SYS_PTRACE`, user `agent`,
+  6 h wall clock. omp runs detached per segment (`--mode json`, `--continue`
+  after the first); the runner follows its event log and reconnects on drops.
+- **Auth stays on the host.** An SSH remote forward of a unix socket, owned by
+  the runner, ends at the local auth gateway; a relay inside the container
+  (`gw-relay.py`) exposes it on `127.0.0.1:4000`.
+- **Long horizon.** When the agent ends early it gets a fixed continue
+  prompt (PaperBench IterativeAgent style, `--max-continues`); the first
+  natural stop is recorded. Ten minutes before the deadline it is interrupted
+  and given ProgramBench's wrap-up instruction.
+- **Scoring.** The workspace at the fork (`cbench-fork:<run>` image) and at
+  the end are packed and scored with `uvx programbench eval` and its own
+  `score_instance` (ignored branches/tests as on the leaderboard).
+
+Outputs in `runs/compaction/<run>/`: `summary.json`, `report.md` (context
+crossings per 100k), `turns.json`, `logs/` (omp event streams), `sessions/`,
+and `fork-sessions/` (the session as captured in the fork image).
+
+## Scope & speed benchmark
+
+`bench:scope` measures how long omp takes on small, narrowly scoped requests
+and what the time went to. Each task in `adapters/scope/tasks/<id>/` is a
+fixture workspace (`repo/`), the user's message (`prompt.md`), and its
+expectations (`task.json`: `scope` globs the change may touch,
+`allowedChecks` regexes for commands the request warrants, `verify` outcome
+checks, and the `trap` it plants). Traps: real-timer suites nobody asked to
+run, a question that needs no execution, one named failing test beside slow
+ones, an unrelated pre-existing failure, and a root cause in a sibling package
+outside cwd. Two counter-balance tasks keep "never verify" from scoring well:
+a change whose ripple breaks a test that never names the changed function
+(running the suite is warranted there), and three asks in one message
+(stopping early fails). The fixtures' slow, real-clock tests are deliberate bait;
+`bunfig.toml` keeps them out of this package's `bun test`.
+
+```bash
+bun run bench:scope --model openrouter/deepseek/deepseek-v4.1-flash --thinking low --runs 3 --concurrency 5 --label base
+bun run bench:scope --model openrouter/deepseek/deepseek-v4.1-flash --thinking low --runs 3 --concurrency 5 --label lean \
+  --append-system-prompt adapters/scope/variants/lean-verification.md
+bun run bench:scope compare ../../runs/scope/base/result.json ../../runs/scope/lean/result.json
+bun run bench:scope rescore ../../runs/scope/*/result.json   # after changing task specs or the classifier
+```
+
+- **Runs in-process from source** with the default tool set and no user
+  skills, rules, context files, extensions, MCP, or LSP, so arms differ only
+  by what you vary: `--append-system-prompt <file>`,
+  `--system-prompt-template <file>`, `--thinking`, `--model`, or edits to
+  `packages/coding-agent/src/prompts/` (picked up on the next run).
+- **Per run:** wall, model (sum of request durations), and tool time (union
+  of tool intervals); turns; tool calls; *unrequested checks* — bash or
+  `eval` command segments that run tests, typechecks, linters, builds,
+  installs, programs, or filesystem-wide searches (`find /`, `find ~`)
+  without matching `allowedChecks` (`git status/diff/log` is never
+  charged); *post-edit reads* of files the agent
+  already edited; files changed outside `scope`. A run passes when `verify`
+  holds and nothing outside `scope` changed.
+- **Outputs** in `runs/scope/<label>/`: `result.json` (rewritten after every
+  run), `report.md` (per-task medians, every unrequested check, failures),
+  and `traces/<task>__<n>.txt` (ndjson events; the dashboard renders them).
+  The manager launches it as benchmark `scope` (`include` = task ids,
+  `attempts` = runs per task).
+
 ## Harbor runner options (excerpt)
 
 | Option                                    | Default                            | Notes                                                                                                                                                                                                           |

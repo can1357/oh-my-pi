@@ -4,9 +4,9 @@ import type {
 	CustomCommandContext,
 } from "../../../../extensibility/custom-commands/types";
 import { parseCommandArgs } from "../../../../utils/command-args";
-import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
-import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
-import type { CodeReviewOverlayResult, TextReviewSource } from "@oh-my-pi/pi-tui/overlays/annotation-types";
+import type { AutocompleteItem } from "../../../../autocomplete/autocomplete";
+import { CombinedAutocompleteProvider } from "../../../../autocomplete/autocomplete";
+import type { CodeReviewOverlayResult, TextReviewSource } from "./annotation-types";
 import {
 	liveCommandCwd,
 	resolvePrReviewTarget,

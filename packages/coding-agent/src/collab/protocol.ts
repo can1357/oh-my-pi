@@ -23,7 +23,7 @@ import {
 	ROOM_KEY_BYTES,
 	WRITE_TOKEN_BYTES,
 } from "@oh-my-pi/pi-wire";
-import type { CollabSessionState } from "@oh-my-pi/pi-tui/status-line/types";
+import type { CollabSessionState } from "../modes/view-model/status-line/types";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { SessionEntry, SessionHeader } from "../session/session-entries";
 
@@ -58,9 +58,9 @@ export type { CollabSessionState };
  * that serialize into those shapes.
  */
 export type CollabFrame =
-	// guest -> host (hello/abort/agent-cmd/fetch-transcript/ui-response are taken verbatim from the wire grammar)
+	// guest -> host (every guest frame but prompt is taken verbatim from the wire grammar)
 	| Exclude<GuestFrame, { t: "prompt" }>
-	| { t: "prompt"; text: string; images?: ImageContent[] }
+	| { t: "prompt"; text: string; images?: ImageContent[]; followUp?: true }
 	// host -> guest
 	| {
 			t: "welcome";

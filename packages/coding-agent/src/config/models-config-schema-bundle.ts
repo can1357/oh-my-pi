@@ -2,6 +2,12 @@ import { type NarrowContext, type } from "@oh-my-pi/omptype";
 import { AXES } from "@oh-my-pi/pi-catalog/compat/axes";
 import { MODEL_KINDS, RUNNER_API_KINDS } from "@oh-my-pi/pi-catalog/types";
 import { once } from "@oh-my-pi/pi-utils";
+import {
+	isConfigurableFrameSize,
+	MAX_CONFIGURED_FRAME_SIZE,
+	MIN_CONFIGURED_FRAME_SIZE,
+	SHAPE_VARIANT_NAMES,
+} from "@oh-my-pi/snapcompact";
 
 /**
  * Input modalities the catalog can express (`input-modalities` axis). A
@@ -204,6 +210,18 @@ export const getModelsConfigSchemaBundle = once(() => {
 		'"claude-v3" | "claude-v47" | "claude-v5" | "claude-v5-sonnet" | "qwen3" | "deepseek-v3" | "kimi-k2" | "glm5" | "cl100k" | "o200k"',
 	);
 
+	const SnapcompactShapeSchema = type({
+		variant: type.enumerated(...SHAPE_VARIANT_NAMES),
+		"frameSize?": "number",
+	}).narrow(
+		(value, ctx) =>
+			value.frameSize === undefined ||
+			isConfigurableFrameSize(value.frameSize) ||
+			ctx.mustBe(
+				`snapcompactShape.frameSize an integer from ${MIN_CONFIGURED_FRAME_SIZE} to ${MAX_CONFIGURED_FRAME_SIZE}`,
+			),
+	);
+
 	const RemoteCompactionSchema = type({
 		"enabled?": "boolean",
 		"api?": ApiSchema,
@@ -243,6 +261,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"input?": ModelInputSchema,
 		"imageInputDecoder?": '"stb"',
 		"imageCountBudget?": "number",
+		"snapcompactShape?": SnapcompactShapeSchema,
 		"tokenizer?": ModelTokenizerSchema,
 		"supportsTools?": "boolean",
 		"cost?": {
@@ -303,6 +322,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"input?": ModelInputSchema,
 		"imageInputDecoder?": '"stb"',
 		"imageCountBudget?": "number",
+		"snapcompactShape?": SnapcompactShapeSchema,
 		"tokenizer?": ModelTokenizerSchema,
 		"supportsTools?": "boolean",
 		"cost?": {
@@ -348,7 +368,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 	});
 
 	const ProviderDiscoverySchema = type({
-		type: '"ollama" | "llama.cpp" | "lm-studio" | "openai-models-list" | "proxy" | "litellm" | "apple-foundation-models"',
+		type: '"ollama" | "llama.cpp" | "lm-studio" | "openai-models-list" | "proxy" | "litellm" | "openrouter" | "apple-foundation-models"',
 		"timeoutMs?": "number",
 		/**
 		 * Defaults to `true`. Set `false` to fetch the model list from
@@ -427,7 +447,8 @@ export const getModelsConfigSchemaBundle = once(() => {
 		 * every model under this provider via the auth-gateway's
 		 * `POST /v1/pi/stream` endpoint instead of the per-provider SDK. The
 		 * provider's `baseUrl` must point at a compatible `omp auth-gateway`
-		 * and `apiKey` must carry the gateway bearer.
+		 * and `apiKey` must carry the gateway bearer. The provider's model list
+		 * comes from the gateway's `GET /v1/pi/models`.
 		 */
 		"transport?": '"pi-native"',
 	}).narrow((value, ctx) => {

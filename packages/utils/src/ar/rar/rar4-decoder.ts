@@ -252,6 +252,8 @@ export class Rar4Decoder {
 				throw new ArchiveError(`Unsupported RAR4 RarVM filter type ${type || "unknown"}`);
 			}
 			if (start < 0 || blockSize < 0 || start + blockSize > unpackedSize) corrupt("invalid RarVM filter range");
+			// unrar's MAX3_UNPACK_CHANNELS: a forged count of 2^31 spins the delta loop for seconds per filter.
+			if (type === 6 && (registers[0]! < 1 || registers[0]! > 1024)) corrupt("invalid delta filter channel count");
 			filters.push({ type, start, size: blockSize, channels: registers[0]!, fileOffset: registers[6]! });
 		};
 

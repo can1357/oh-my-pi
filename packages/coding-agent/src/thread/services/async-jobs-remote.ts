@@ -19,7 +19,7 @@
  * Its `process` / `widgetInputs` stay here too; main reads them through a
  * {@link WireJobFeed} whose pulls and final push this module answers.
  */
-import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { JobWidgetView } from "../../tools/details/job-widget";
 import type {
 	AsyncJob,
 	AsyncJobDeliverySink,
@@ -33,6 +33,7 @@ import type {
 	AsyncJobRun,
 	AsyncJobRunResult,
 	AsyncJobType,
+	EvictedJob,
 } from "../../async/job-manager";
 import type { JobTextSource, JobWidgetInputs, JobWidgetRegistry } from "../../job-widgets/types";
 import type { RemoteObject } from "../rpc";
@@ -235,6 +236,10 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 		return localUnsubscribe(this.#remote.callSync("onJobSettled", listener));
 	}
 
+	onJobsChanged(listener: () => void): () => void {
+		return localUnsubscribe(this.#remote.callSync("onJobsChanged", listener));
+	}
+
 	register(type: AsyncJobType, label: string, run: AsyncJobRun, options?: AsyncJobRegisterOptions): string {
 		const local: LocalInputs | undefined =
 			options?.process || options?.widgetInputs
@@ -277,6 +282,15 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 		options: { id?: string; ownerId?: string; agentId?: string },
 	): string {
 		return this.#remote.callSync("publishCompleted", type, label, result, options);
+	}
+
+	publishFailed(
+		type: AsyncJobType,
+		label: string,
+		errorText: string,
+		options: { id?: string; ownerId?: string; agentId?: string },
+	): string {
+		return this.#remote.callSync("publishFailed", type, label, errorText, options);
 	}
 
 	cancel(id: string, filter?: AsyncJobFilter): boolean {
@@ -347,6 +361,14 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 
 	evictCompletedJobs(filter?: AsyncJobFilter): number {
 		return this.#remote.callSync("evictCompletedJobs", filter);
+	}
+
+	getEvictedJob(id: string, filter?: AsyncJobFilter): EvictedJob | undefined {
+		return this.#remote.callSync("getEvictedJob", id, filter);
+	}
+
+	getEvictedJobs(filter?: AsyncJobFilter): EvictedJob[] {
+		return this.#remote.callSync("getEvictedJobs", filter);
 	}
 
 	waitForAll(): Promise<void> {

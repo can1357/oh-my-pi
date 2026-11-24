@@ -2,8 +2,8 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
-import { ADVISOR_SEVERITIES } from "@oh-my-pi/pi-tui/chat/messages";
-import { ADVISOR_REVIEW_MODES, ADVISOR_SYNC_BACKLOG_MODES } from "@oh-my-pi/pi-tui/overlays/advisor-config";
+import { ADVISOR_SEVERITIES } from "../session/transcript/messages";
+import { ADVISOR_REVIEW_MODES, ADVISOR_SYNC_BACKLOG_MODES } from "./advisor-config-types";
 import { register } from "../config/registry";
 import { ADVISOR_DEFAULT_BUDGET_PER_UPDATE } from "./emission-guard";
 

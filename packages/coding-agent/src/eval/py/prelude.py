@@ -5,6 +5,8 @@ if "__omp_prelude_loaded__" not in globals():
     __omp_prelude_loaded__ = True
     from pathlib import Path
     import asyncio, collections.abc, contextvars, inspect, os, json, math, re, time, types, typing
+    # Private aliases: cell code may rebind `asyncio`/`inspect` in the shared namespace.
+    import asyncio as _omp_asyncio, inspect as _omp_inspect
     from urllib.parse import unquote
 
 
@@ -28,8 +30,6 @@ if "__omp_prelude_loaded__" not in globals():
         return val
 
     _OMP_INTERNAL_URL_RE = re.compile(r"^([a-z][a-z0-9+.-]*)://(.*)$", re.IGNORECASE)
-    _OMP_ARTIFACT_ID_RE = re.compile(r"^\d+$")
-    _OMP_BARE_ARTIFACT_RE = re.compile(r"^artifact://\d+$", re.IGNORECASE)
 
     def _omp_url_roots() -> dict:
         """On-disk roots for internal-URL schemes, keyed by scheme (PI_EVAL_LOCAL_ROOTS)."""
@@ -40,19 +40,13 @@ if "__omp_prelude_loaded__" not in globals():
         return roots if isinstance(roots, dict) else {}
 
     def _should_delegate_read(path: str | Path) -> bool:
-        """Delegate `scheme://` reads to the read tool unless the scheme has an injected root.
-
-        `artifact://<id>` reads its file directly; selector forms
-        (`artifact://3:raw:5-9`) stay with the read tool, which parses them."""
+        """Delegate `scheme://` reads to the read tool unless the scheme has an injected root."""
         if not isinstance(path, str):
             return False
         match = _OMP_INTERNAL_URL_RE.match(path)
         if match is None:
             return False
-        scheme = match.group(1).lower()
-        if scheme not in _omp_url_roots():
-            return True
-        return scheme == "artifact" and not _OMP_ARTIFACT_ID_RE.match(match.group(2))
+        return match.group(1).lower() not in _omp_url_roots()
 
     def _read_line_selector(offset: int, limit: int | None) -> str | None:
         if offset <= 1 and limit is None:
@@ -68,25 +62,13 @@ if "__omp_prelude_loaded__" not in globals():
             return result["text"]
         return result
 
-    def _artifact_file(path: str) -> Path | None:
-        """This session's file for `artifact://<id>` (`<id>.<tool>.log` in its
-        artifacts dir), or None when the id is not there or no dir is known."""
-        root = _omp_url_roots().get("artifact")
-        if not root:
-            return None
-        artifact_id = path[11:]
-        try:
-            names = os.listdir(root)
-        except FileNotFoundError:
-            return None
-        for name in names:
-            if name.startswith(f"{artifact_id}."):
-                return Path(os.path.join(os.path.abspath(root), name))
-        return None
-
     def _read_through_tool(path: str, offset: int, limit: int | None) -> str:
         if limit is not None and limit <= 0:
             return ""
+        # `:raw` reads come back whole through the bridge: no row prefixes, pages or cut lines.
+        # Web URLs keep their reader text; `:raw` there means the original HTML.
+        if not re.match(r"https?://", path, re.IGNORECASE) and not re.search(r":raw(?::|$)", path, re.IGNORECASE):
+            path = f"{path}:raw"
         selector = _read_line_selector(offset, limit)
         return _read_tool_text(path if selector is None else f"{path}:{selector}")
 
@@ -97,8 +79,7 @@ if "__omp_prelude_loaded__" not in globals():
         PI_EVAL_LOCAL_ROOTS) is rewritten under that root so it lands where
         `read scheme://…` resolves — not a literal `scheme:/` directory under
         the cwd (which `Path("scheme://x")` collapses to). Plain paths pass
-        through unchanged; any other `scheme://` is rejected, as is
-        `artifact://`, whose root is a lookup dir for reads, not a path prefix."""
+        through unchanged; any other `scheme://` is rejected."""
         if not isinstance(path, str):
             return Path(path)
         match = _OMP_INTERNAL_URL_RE.match(path)
@@ -106,7 +87,7 @@ if "__omp_prelude_loaded__" not in globals():
             return Path(path)
         scheme = match.group(1).lower()
         root = _omp_url_roots().get(scheme)
-        if not root or scheme == "artifact":
+        if not root:
             raise ValueError(f"Protocol paths are not supported by this helper: {path}")
         relative = unquote(match.group(2).replace("\\", "/"))
         # Mirror the host `path.resolve`/`resolveLocalUrlToPath`: normalize and
@@ -125,25 +106,13 @@ if "__omp_prelude_loaded__" not in globals():
 
     def read(path: str | Path, offset: int = 1, limit: int | None = None) -> str:
         """Read file or read-tool URI contents. offset/limit are 1-indexed lines."""
-        if isinstance(path, str) and _OMP_BARE_ARTIFACT_RE.match(path):
-            if limit is not None and limit <= 0:
-                return ""
-            p = _artifact_file(path)
-            if p is None:
-                # Another session's, or no artifacts dir was injected: the read tool searches every registered one.
-                # A bounded raw read locates the file without inlining it; a bare `:raw` read refuses files over 50 KB.
-                located = _bridge_call("read", {"path": f"{path}:raw:1-1"})
-                details = located.get("details") if isinstance(located, dict) else None
-                file_path = details.get("resolvedPath") if isinstance(details, dict) else None
-                if not isinstance(file_path, str):
-                    # An extension's replacement `read` may name no file: its own text for the selected lines is the answer.
-                    return _read_through_tool(f"{path}:raw", offset, limit)
-                # Once located, the file is read like this session's artifacts and plain paths: read() is no read-tool policy gate.
-                p = Path(file_path)
-        elif _should_delegate_read(path):
+        if _should_delegate_read(path):
             return _read_through_tool(path, offset, limit)
         else:
             p = _resolve_omp_path(path)
+            if p.is_dir():
+                # The read tool renders the listing.
+                return _read_through_tool(str(p), offset, limit)
         data = p.read_text(encoding="utf-8")
         lines = data.splitlines(keepends=True)
         if offset > 1 or limit is not None:
@@ -155,11 +124,15 @@ if "__omp_prelude_loaded__" not in globals():
         _emit_status("read", path=str(p), chars=len(data), preview=preview)
         return data
 
-    def write(path: str | Path, content: str) -> Path:
-        """Write file contents (create parents)."""
+    def write(path: str | Path, content: str) -> Path | str:
+        """Write file contents (create parents). `scheme://` paths without an on-disk root go through the write tool."""
+        if _should_delegate_read(path):
+            _bridge_call("write", {"path": path, "content": content})
+            _emit_status("write", path=str(path), chars=len(content))
+            return path
         p = _resolve_omp_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
+        p.write_text(content, encoding="utf-8", newline="")
         _emit_status("write", path=str(p), chars=len(content))
         return p
 
@@ -450,10 +423,10 @@ if "__omp_prelude_loaded__" not in globals():
             # `action` is the async `_ToolCallable.__call__`: calling it only
             # builds the coroutine, so the identity must stay set until the
             # coroutine body reaches `_bridge_call`. Awaiting here keeps the
-            # ContextVar alive across the await (and into `asyncio.to_thread`,
+            # ContextVar alive across the await (and into `_omp_asyncio.to_thread`,
             # which propagates the current context).
             result = action(args)
-            if inspect.isawaitable(result):
+            if _omp_inspect.isawaitable(result):
                 return await result
             return result
         finally:
@@ -468,6 +441,12 @@ if "__omp_prelude_loaded__" not in globals():
             if callable(_run_id_getter)
             else globals().get("__omp_run_id__")
         )
+        # Only the runner tracks executing cells; a bare prelude (no getter) sends what it has.
+        if callable(_run_id_getter) and not _run_id:
+            raise RuntimeError(
+                f"bridge call {name!r} ran outside an executing cell: helper and tool calls must settle"
+                " inside the cell that started them (a task left running after its cell cannot call tools)"
+            )
         payload = {
             "session": session,
             "run": _run_id,
@@ -523,7 +502,7 @@ if "__omp_prelude_loaded__" not in globals():
 
     async def _omp_prelude(name: str, parameters):
         """Invoke one enabled eval prelude capability through the host bridge."""
-        value = await asyncio.to_thread(
+        value = await _omp_asyncio.to_thread(
             _bridge_call,
             "__prelude__",
             {"name": name, "parameters": parameters},
@@ -542,21 +521,23 @@ if "__omp_prelude_loaded__" not in globals():
             return f"<tool.{self._name}>"
 
         async def __call__(self, args=None, /, **kwargs):
-            if args is None:
-                merged: dict = {}
+            if isinstance(args, str) and not kwargs:
+                # FREEFORM tools (e.g. `edit`) take their raw text; the host maps it to `{input}`.
+                merged: dict | str = args
+            elif args is None:
+                merged = dict(kwargs)
             elif isinstance(args, dict):
-                merged = dict(args)
+                merged = {**args, **kwargs}
             else:
                 raise TypeError(
-                    f"tool.{self._name}(...) expects a dict of arguments (got {type(args).__name__})"
+                    f"tool.{self._name}(...) expects a dict of arguments or a FREEFORM tool's raw text (got {type(args).__name__})"
                 )
-            merged.update(kwargs)
-            value = await asyncio.to_thread(_bridge_call, self._name, merged)
+            value = await _omp_asyncio.to_thread(_bridge_call, self._name, merged)
             return _surface_bridged_tool_images(value)
 
     def _annotation_schema(annotation) -> dict:
         """Map supported Python annotations to JSON Schema."""
-        if annotation is inspect.Parameter.empty or annotation is typing.Any:
+        if annotation is _omp_inspect.Parameter.empty or annotation is typing.Any:
             return {}
 
         origin = typing.get_origin(annotation)
@@ -615,7 +596,7 @@ if "__omp_prelude_loaded__" not in globals():
 
     def _tool_schema(fn) -> dict:
         """Infer one eval-defined tool's object schema from its signature."""
-        signature = inspect.signature(fn)
+        signature = _omp_inspect.signature(fn)
         try:
             hints = typing.get_type_hints(fn, include_extras=True)
         except Exception:
@@ -623,15 +604,15 @@ if "__omp_prelude_loaded__" not in globals():
         properties = {}
         required = []
         for parameter in signature.parameters.values():
-            if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
+            if parameter.kind is _omp_inspect.Parameter.POSITIONAL_ONLY:
                 raise TypeError("tool parameters must be keyword-capable")
             if parameter.kind in (
-                inspect.Parameter.VAR_POSITIONAL,
-                inspect.Parameter.VAR_KEYWORD,
+                _omp_inspect.Parameter.VAR_POSITIONAL,
+                _omp_inspect.Parameter.VAR_KEYWORD,
             ):
                 continue
             schema = _annotation_schema(hints.get(parameter.name, parameter.annotation))
-            if parameter.default is inspect.Parameter.empty:
+            if parameter.default is _omp_inspect.Parameter.empty:
                 required.append(parameter.name)
             else:
                 try:
@@ -700,7 +681,7 @@ if "__omp_prelude_loaded__" not in globals():
             resolved_description = (
                 description
                 if isinstance(description, str) and description
-                else inspect.getdoc(fn) or f"Python tool {resolved_name}"
+                else _omp_inspect.getdoc(fn) or f"Python tool {resolved_name}"
             )
             __omp_tools__[resolved_name] = _EvalTool(
                 resolved_name,
@@ -779,7 +760,7 @@ if "__omp_prelude_loaded__" not in globals():
         def __await__(self):
             # `to_thread` copies the cell's contextvars into the worker; a bare
             # `run_in_executor` drops them, so the bridge loses its run identity.
-            return asyncio.to_thread(self.wait).__await__()
+            return _omp_asyncio.to_thread(self.wait).__await__()
 
     class AgentHandle(_Handle):
         """Background subagent handle returned by ``agent()``."""
@@ -851,7 +832,11 @@ if "__omp_prelude_loaded__" not in globals():
                 "wait() takes agent or completion handles; it is not a sleep. "
                 "Wait for page state with tab.waitFor*(…), or pause with await asyncio.sleep(seconds)."
             )
-        items = [handles] if isinstance(handles, _Handle) else list(handles)
+        items = [handles] if isinstance(handles, (_Handle, str)) else list(handles)
+        items = [
+            AgentHandle(item.removeprefix("agent://"), "task") if isinstance(item, str) and item else item
+            for item in items
+        ]
         for handle in items:
             if not isinstance(handle, _Handle):
                 raise TypeError("wait() expects agent or completion handles")
@@ -913,7 +898,7 @@ if "__omp_prelude_loaded__" not in globals():
         args = {"state": state, "questions": questions}
         if images is not None:
             args["images"] = images
-        result = await asyncio.to_thread(_bridge_call, "__judge__", args)
+        result = await _omp_asyncio.to_thread(_bridge_call, "__judge__", args)
         if not isinstance(result, dict) or not isinstance(result.get("answers"), dict):
             raise RuntimeError("judge() did not return answers")
         return result["answers"]
@@ -960,7 +945,7 @@ if "__omp_prelude_loaded__" not in globals():
             args = {}
             if timeout is not None:
                 args["timeoutMs"] = max(0, float(timeout) * 1000)
-            result = await asyncio.to_thread(self._call, "drain", **args)
+            result = await _omp_asyncio.to_thread(self._call, "drain", **args)
             items = result.get("items", []) if isinstance(result, dict) else []
             return [(item.get("key"), JudgmentItem(item)) for item in items]
 

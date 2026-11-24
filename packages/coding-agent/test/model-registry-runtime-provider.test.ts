@@ -14,7 +14,9 @@ import {
 import { getOAuthProviders, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { cfgExtendedContext } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("ModelRegistry runtime provider registration", () => {
@@ -177,6 +179,24 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(registry.getAll().some(isGatewayImage)).toBe(false);
 		await registry.refresh("offline");
 		expect(registry.getAll("image").some(isGatewayImage)).toBe(true);
+	});
+
+	test("an extension model keeps its configured snapcompact shape across refresh", async () => {
+		const snapcompactShape = { variant: "11on16-bw", frameSize: 1932 };
+		registry.registerProvider(
+			"my-gateway",
+			{
+				baseUrl: "https://gateway.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				models: [{ ...baseModel, id: "gemini-3.5-flash", snapcompactShape }],
+			},
+			"ext://runtime",
+		);
+
+		expect(registry.find("my-gateway", "gemini-3.5-flash")?.snapcompactShape).toEqual(snapcompactShape);
+		await registry.refresh("offline");
+		expect(registry.find("my-gateway", "gemini-3.5-flash")?.snapcompactShape).toEqual(snapcompactShape);
 	});
 
 	test("fetchDynamicModels drops a row whose api cannot serve its kind", async () => {
@@ -457,6 +477,35 @@ describe("ModelRegistry runtime provider registration", () => {
 
 		expect(runtimeFetchCalls).toBe(0);
 		expect(configuredRegistry.find(providerName, "shared-runtime-model")?.contextWindow).toBe(32_768);
+	});
+
+	test("runtime-discovered models retain their extended context window across offline policy reload", async () => {
+		const provider = "runtime-extended-context";
+		const settings = Settings.isolated();
+		cfgExtendedContext.set(settings, false);
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			settings,
+			cacheDbPath: path.join(tempDir, "models.db"),
+			fetch: offlineFetch,
+		});
+		const discover = vi.fn(async () => [{ ...baseModel, contextWindow: 272_000, maxContextWindow: 872_000 }]);
+		registry.registerProvider(
+			provider,
+			{ api: "openai-responses", baseUrl: "https://example.invalid/v1", fetchDynamicModels: discover },
+			"ext://runtime",
+		);
+		await registry.refreshProvider(provider, "online");
+		const window = () => registry.find(provider, baseModel.id)?.contextWindow;
+		expect(window()).toBe(272_000);
+
+		cfgExtendedContext.set(settings, true);
+		await registry.reapplyModelPolicies();
+		expect(window()).toBe(872_000);
+
+		cfgExtendedContext.set(settings, false);
+		await registry.reapplyModelPolicies();
+		expect(window()).toBe(272_000);
+		expect(discover).toHaveBeenCalledTimes(1);
 	});
 
 	test("runtime provider manager supersedes the built-in shared catalog manager", async () => {

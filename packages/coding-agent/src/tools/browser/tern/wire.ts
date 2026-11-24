@@ -18,7 +18,7 @@
  * the hello and hangs up.
  */
 import * as net from "node:net";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tool-errors";
 
 /** Frames larger than this are a protocol error (the daemon's own cap). */
 const MAX_FRAME_BYTES = 256 << 20;
@@ -270,6 +270,8 @@ export interface TernTransport {
 	readonly waitsForEvents: boolean;
 	/** Why a peer may hang up before greeting, appended to that error. */
 	readonly greetingHint?: string;
+	/** How long the peer may take to answer the greeting; {@link CONNECT_TIMEOUT_MS} when unset. */
+	readonly greetingTimeoutMs?: number;
 	/** Open the stream. Called once; a throw is a failed connection. */
 	start(events: TernTransportEvents): void;
 	/** Send one frame. A throw is a dropped connection. */
@@ -478,7 +480,7 @@ export class TernSocketClient {
 		this.#greeting = greeting;
 		const timer = setTimeout(() => {
 			this.#fail(new TernError("connect", `The ${transport.peer} did not answer the greeting in time`));
-		}, CONNECT_TIMEOUT_MS);
+		}, transport.greetingTimeoutMs ?? CONNECT_TIMEOUT_MS);
 		timer.unref();
 		// A stream that drops before the welcome never connected (`connect`); after it, the connection dropped (`closed`).
 		const dropped = (reason: string | undefined): TernError => {

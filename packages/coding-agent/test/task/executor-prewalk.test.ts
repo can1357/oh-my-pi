@@ -24,7 +24,7 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -553,7 +553,7 @@ describe("runSubprocess task.agentPrewalkAuto", () => {
 				agent: {
 					...baseAgent,
 					model: [
-						options.openRouter ? "openrouter/anthropic/claude-sonnet-4" : `${primary.provider}/${primary.id}`,
+						options.openRouter ? "openrouter/anthropic/claude-sonnet-4.6" : `${primary.provider}/${primary.id}`,
 					],
 				},
 			});

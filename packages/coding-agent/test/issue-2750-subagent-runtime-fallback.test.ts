@@ -19,7 +19,7 @@ import type { RetryFallbackRole, ServingModel } from "@oh-my-pi/pi-coding-agent/
 import { TurnRecovery, type TurnRecoveryHost } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentProgress } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { createSessionDefaults } from "./helpers/session-defaults";
@@ -680,14 +680,14 @@ describe("subagent runtime model resolution", () => {
 		const defaultModel = model("zai", "glm-5.2");
 		let childModel: Model | undefined;
 		let childModelPattern: unknown;
-		let childModelPatternAuthFallback: unknown;
+		let childModelPatternParentFallback: unknown;
 		let childModelPatternFallbackRole: unknown;
 		let childModelPatternDefaultFallbackChain: unknown;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			if (!options) throw new Error("Expected createAgentSession options");
 			childModel = options.model;
 			childModelPattern = options.modelPattern;
-			childModelPatternAuthFallback = options.modelPatternAuthFallback;
+			childModelPatternParentFallback = options.modelPatternParentFallback;
 			childModelPatternFallbackRole = options.modelPatternFallbackRole;
 			childModelPatternDefaultFallbackChain = options.modelPatternDefaultFallbackChain;
 			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
@@ -717,7 +717,7 @@ describe("subagent runtime model resolution", () => {
 
 		expect(childModel).toBeUndefined();
 		expect(childModelPattern).toEqual(["openai-codex/gpt-5.5:auto"]);
-		expect(childModelPatternAuthFallback).toBe("openai-codex/gpt-5.5");
+		expect(childModelPatternParentFallback).toBe("openai-codex/gpt-5.5");
 		expect(childModelPatternFallbackRole).toBe("subagent:issue-4421");
 		expect(childModelPatternDefaultFallbackChain).toEqual(["openai-codex/gpt-5.6-sol"]);
 	});

@@ -11,7 +11,7 @@ import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { openaiCodexModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/special";
-import { modelKind, type ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { type Model, modelKind, type ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { resolveProviderModelReference } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 
 describe("Codex model discovery", () => {
@@ -288,12 +288,12 @@ describe("Codex model discovery", () => {
 		}
 	});
 
-	it("applies GPT-6 / GPT-6.1 Sol, Terra, and Luna pricing to discovered plain and worker routes", async () => {
+	it("applies GPT-6 / GPT-6.1 / GPT-6.2 pricing to discovered plain and worker routes", async () => {
 		const fetchFn: typeof fetch = Object.assign(
 			async () =>
 				Response.json({
 					// GPT-6 plain rows are bundled, so their `-wm` listing also yields
-					// the plain route; GPT-6.1 Sol and Terra are not yet bundled and ship both.
+					// the plain route; GPT-6.1 Terra and GPT-6.2 are not yet bundled and ship both.
 					models: [
 						"gpt-6-sol-wm",
 						"gpt-6-luna-wm",
@@ -301,6 +301,10 @@ describe("Codex model discovery", () => {
 						"gpt-6.1-sol-wm",
 						"gpt-6.1-terra",
 						"gpt-6.1-terra-wm",
+						"gpt-6.2-astra",
+						"gpt-6.2-astra-wm",
+						"gpt-6.2-sol",
+						"gpt-6.2-sol-wm",
 					].map(slug => ({
 						slug,
 						display_name: slug,
@@ -327,28 +331,47 @@ describe("Codex model discovery", () => {
 			"gpt-6.1-sol-wm",
 			"gpt-6.1-terra",
 			"gpt-6.1-terra-wm",
+			"gpt-6.2-astra",
+			"gpt-6.2-astra-wm",
+			"gpt-6.2-sol",
+			"gpt-6.2-sol-wm",
 		]);
+		// GPT-6.1 Sol ships Ultrafast at Codex's 8x included-usage rate and GPT-6.2
+		// at 6x with Fast at 2x; GPT-6.1 Terra, GPT-6 Sol, and Luna have only Fast and Flex.
+		const expected: Record<string, { cost: Model["cost"]; serviceTierCost: Model["serviceTierCost"] }> = {
+			"gpt-6.2-astra": {
+				cost: { input: 8, output: 40, cacheRead: 0.4, cacheWrite: 0 },
+				serviceTierCost: { flex: 0.5, priority: 2, ultrafast: 6 },
+			},
+			"gpt-6.2-sol": {
+				cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 },
+				serviceTierCost: { flex: 0.5, priority: 2, ultrafast: 6 },
+			},
+			"gpt-6.1-sol": {
+				cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 },
+				serviceTierCost: { flex: 0.5, priority: 2.5, ultrafast: 8 },
+			},
+			"gpt-6.1-terra": {
+				cost: { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 0 },
+				serviceTierCost: { flex: 0.5, priority: 2.5 },
+			},
+			"gpt-6-sol": {
+				cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 0 },
+				serviceTierCost: { flex: 0.5, priority: 2.5 },
+			},
+			"gpt-6-luna": {
+				cost: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0 },
+				serviceTierCost: { flex: 0.5, priority: 2.5 },
+			},
+		};
 		for (const model of result!.models) {
 			// Discovery has no rates; the generated KDL policy supplies them
 			// when the discovered spec becomes a usable model.
 			expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 			const builtModel = buildModel(model);
-			expect(builtModel.cost).toEqual(
-				model.id.startsWith("gpt-6.1-sol")
-					? { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 }
-					: model.id.startsWith("gpt-6.1-terra")
-						? { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 0 }
-						: model.id.startsWith("gpt-6-sol")
-							? { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 0 }
-							: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0 },
-			);
-			// GPT-6.1 Sol ships Ultrafast at Codex's 8x included-usage rate;
-			// GPT-6.1 Terra, GPT-6 Sol, and Luna have only Fast and Flex.
-			expect(builtModel.serviceTierCost).toEqual(
-				model.id.startsWith("gpt-6.1-sol")
-					? { flex: 0.5, priority: 2.5, ultrafast: 8 }
-					: { flex: 0.5, priority: 2.5 },
-			);
+			const want = expected[model.id.replace(/-wm$/, "")];
+			expect(builtModel.cost).toEqual(want.cost);
+			expect(builtModel.serviceTierCost).toEqual(want.serviceTierCost);
 		}
 	});
 
@@ -506,7 +529,7 @@ describe("Codex model discovery", () => {
 		}
 	});
 
-	it("keeps bundled display names over Codex's slug-style display_name", async () => {
+	it("names discovered rows with the bundled spelling over Codex's slug-style display_name", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-names-"));
 		// Codex reports `GPT-6.1-Sol` where every other surface (and the bundled
 		// row) says `GPT-6.1 Sol`; the composer chip flipped between the two once
@@ -529,6 +552,8 @@ describe("Codex model discovery", () => {
 					JSON.stringify({
 						models: [
 							{ slug: "gpt-6.1-sol", display_name: "GPT-6.1-Sol", supported_in_api: true },
+							// Not in the Codex static catalog; OpenAI ships the same id (#20167).
+							{ slug: "gpt-6.2-sol", display_name: "GPT-6.2-Sol", supported_in_api: true },
 							{ slug: "gpt-6.2-nova", display_name: "GPT-6.2-Nova", supported_in_api: true },
 						],
 					}),
@@ -550,7 +575,8 @@ describe("Codex model discovery", () => {
 
 			const names = Object.fromEntries(result.models.map(model => [model.id, model.name]));
 			expect(names["gpt-6.1-sol"]).toBe("GPT-6.1 Sol");
-			// Without a bundled row there is no other name to keep consistent with.
+			expect(names["gpt-6.2-sol"]).toBe("GPT-6.2 Sol");
+			// Without a bundled row anywhere there is no other name to keep consistent with.
 			expect(names["gpt-6.2-nova"]).toBe("GPT-6.2-Nova");
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });

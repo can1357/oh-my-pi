@@ -12,7 +12,7 @@
 import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import type { IrcMessage } from "../irc/irc-types";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type {
 	AgentSessionAdvisorOverview,
@@ -118,6 +118,10 @@ export class PeerAgentSession implements AgentSessionHandle {
 
 	get ircWakesPending(): boolean {
 		return this.#field("ircWakesPending");
+	}
+
+	get hasPendingWake(): boolean {
+		return this.#field("hasPendingWake");
 	}
 
 	get messages(): AgentMessage[] {
@@ -235,6 +239,7 @@ export class PeerAgentSession implements AgentSessionHandle {
 	}
 
 	#dispatch(event: AgentSessionEvent): void {
+		// oxlint-disable-next-line unicorn/no-useless-spread -- snapshot: the loop body may add or remove listeners
 		for (const listener of [...this.#listeners]) {
 			try {
 				listener(event);
@@ -248,6 +253,7 @@ export class PeerAgentSession implements AgentSessionHandle {
 	}
 
 	#dispatchRunState(state: SessionRunState): void {
+		// oxlint-disable-next-line unicorn/no-useless-spread -- snapshot: the loop body may add or remove listeners
 		for (const listener of [...this.#runStateListeners]) {
 			try {
 				listener(state);

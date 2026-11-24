@@ -175,6 +175,8 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 			return entry.message;
 
 		case "custom_message":
+			// A row kept out of context is not conversation: it must not use the summary's budget.
+			if (entry.excludeFromContext) return undefined;
 			return createCustomMessage(
 				entry.customType,
 				entry.content,

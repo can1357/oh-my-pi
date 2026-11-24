@@ -3,18 +3,25 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { importExtensionModule } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import {
 	installLegacyPiSpecifierShim,
 	loadLegacyPiModule,
+	PI_TUI_MIGRATION_DOC,
+	PiTuiImportError,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 // End-to-end resolution proof for the upstream-root bridges: legacy extensions
 // import the aliased package roots (`@earendil-works/pi-ai` etc.) and Bun's
 // static named-export check fails the whole plugin on one missing symbol.
-// pi-optchat imports `getCurrentSystemMessage` from the pi-ai root,
-// `parseSkillBlock` from the pi-coding-agent root, and `compositeTuiLine`
-// from the pi-tui root; each failed plugin validation before the respective
-// shim bridge existed. Fixtures here import through the public legacy
+// pi-optchat imports `getCurrentSystemMessage` from the pi-ai root and
+// `parseSkillBlock` from the pi-coding-agent root; each failed plugin
+// validation before the respective shim bridge existed. pi-tui is gone: an
+// extension importing it fails with an error naming the pi-tui migration. Fixtures here import through the public legacy
 // specifiers — the same path `loadLegacyPiModule` gives real extensions.
 
 installLegacyPiSpecifierShim();
@@ -71,81 +78,77 @@ describe("legacy aliased-scope roots resolve the upstream 1.1.0 bridges", () => 
 		expect(loaded.miss).toBeNull();
 	});
 
-	it("resolves compositeTuiLine from the @earendil-works/pi-tui root", async () => {
-		const entry = await writeFixtureExtension(
-			[
-				'import { compositeTuiLine } from "@earendil-works/pi-tui";',
-				"export const composed = compositeTuiLine('abcdefgh', 'XY', 2, 2, 8);",
-			].join("\n"),
+	it.each(["@mariozechner/pi-tui", "@earendil-works/pi-tui/components/editor"])(
+		"rejects an import of %s with the pi-tui migration error",
+		async specifier => {
+			const entry = await writeFixtureExtension(
+				`import { Text } from "${specifier}";\nexport const probe = Text;\n`,
+			);
+			const error = await loadLegacyPiModule(entry).then(
+				() => undefined,
+				(caught: unknown) => caught,
+			);
+			expect(error).toBeInstanceOf(PiTuiImportError);
+			expect((error as PiTuiImportError).specifier).toBe(specifier);
+			expect((error as Error).message).toContain("@oh-my-pi/pi-tui");
+			expect((error as Error).message).toContain(PI_TUI_MIGRATION_DOC);
+		},
+	);
+
+	it("rejects pi-tui reached through a relative module and a require()", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-legacy-pi-tui-"));
+		tempRoots.push(dir);
+		await fs.writeFile(path.join(dir, "index.ts"), 'export { probe } from "./ui";\n', "utf8");
+		await fs.writeFile(path.join(dir, "ui.cjs"), 'exports.probe = require("@mariozechner/pi-tui").Text;\n', "utf8");
+		await fs.writeFile(path.join(dir, "ui.ts"), 'export { probe } from "./ui.cjs";\n', "utf8");
+		const error = await loadLegacyPiModule(path.join(dir, "index.ts")).then(
+			() => undefined,
+			(caught: unknown) => caught,
 		);
-		const loaded = (await loadLegacyPiModule(entry)) as { composed: string };
-		// The overlay is spliced at column 2 with ANSI resets around it.
-		expect(loaded.composed).toContain("XY");
-		expect(loaded.composed.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b\]8;;[^\x07\x1b]*(\x07|\x1b\\)/g, "")).toBe(
-			"abXYefgh",
-		);
+		expect(error).toBeInstanceOf(PiTuiImportError);
+		expect((error as PiTuiImportError).importerPath).toEndWith("ui.cjs");
 	});
 
-	it("resolves the complete published pi-optchat v0.7.2 runtime import closure", async () => {
-		// The consumer that drove these bridges: every runtime name its published
-		// closure imports from the three aliased roots, imported at once. Bun's
-		// static named-export check fails the whole module on any single miss,
-		// so a clean load proves the shim covers the entire consumer surface.
-		const aiNames = ["clampThinkingLevel", "getCurrentSystemMessage", "getSupportedThinkingLevels"];
-		const tuiNames = [
-			"Box",
-			"Container",
-			"Editor",
-			"Input",
-			"Loader",
-			"Markdown",
-			"SelectList",
-			"SettingsList",
-			"Spacer",
-			"Text",
-			"compositeTuiLine",
-			"fuzzyFilter",
-			"getKeybindings",
-			"matchesKey",
-			"sliceByColumn",
-			"truncateToWidth",
-			"visibleWidth",
-			"wrapTextWithAnsi",
-		];
-		const caNames = [
-			"AssistantMessageComponent",
-			"CustomEditor",
-			"CustomMessageComponent",
-			"DefaultResourceLoader",
-			"DynamicBorder",
-			"ModelRegistry",
-			"SessionManager",
-			"SettingsManager",
-			"ToolExecutionComponent",
-			"UserMessageComponent",
-			"createAgentSession",
-			"createBashToolDefinition",
-			"createEditToolDefinition",
-			"createFindToolDefinition",
-			"createGrepToolDefinition",
-			"createLsToolDefinition",
-			"createReadToolDefinition",
-			"createWriteToolDefinition",
-			"getAgentDir",
-			"getMarkdownTheme",
-			"getSelectListTheme",
-			"parseSkillBlock",
-		];
+	it("fails the extension load with the actionable message", async () => {
 		const entry = await writeFixtureExtension(
 			[
-				`import { ${aiNames.join(", ")} } from "@earendil-works/pi-ai";`,
-				`import { ${tuiNames.join(", ")} } from "@earendil-works/pi-tui";`,
-				`import { ${caNames.join(", ")} } from "@earendil-works/pi-coding-agent";`,
-				`export const probe = [${[...aiNames, ...tuiNames, ...caNames].join(", ")}];`,
+				'import { Container } from "@mariozechner/pi-tui";',
+				"export default function extension() { return new Container(); }",
 			].join("\n"),
 		);
-		const loaded = (await loadLegacyPiModule(entry)) as { probe: unknown[] };
-		expect(loaded.probe).toHaveLength(aiNames.length + tuiNames.length + caNames.length);
-		expect(loaded.probe.every(v => v !== undefined)).toBe(true);
+		const prepared = await importExtensionModule(entry, path.dirname(entry));
+		expect(prepared.factory).toBeNull();
+		expect(prepared.error).toStartWith("Failed to load extension: ");
+		expect(prepared.error).toContain('imports "@mariozechner/pi-tui"');
+		expect(prepared.error).toContain(PI_TUI_MIGRATION_DOC);
+	});
+
+	it("resolves @oh-my-pi/pi-tui to the host's copy so extension nodes share its runtime", async () => {
+		const entry = await writeFixtureExtension(
+			[
+				'import { isUiNode, jsx } from "@oh-my-pi/pi-tui";',
+				'export const node = jsx("text", { text: "x" });',
+				"export { isUiNode };",
+			].join("\n"),
+		);
+		const loaded = (await loadLegacyPiModule(entry)) as { node: unknown; isUiNode: (value: unknown) => boolean };
+		const host = await import("@oh-my-pi/pi-tui");
+		expect(host.isUiNode(loaded.node)).toBe(true);
+		expect(loaded.isUiNode).toBe(host.isUiNode);
+	});
+
+	it("loads the helpers the old pi-tui carried from where they live now", async () => {
+		const entry = await writeFixtureExtension(
+			[
+				'import { concreteThinkingLevel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";',
+				'import { fuzzyMatch } from "@oh-my-pi/pi-tui/fuzzy";',
+				"export { concreteThinkingLevel, toReasoningEffort, fuzzyMatch };",
+			].join("\n"),
+		);
+		const loaded = (await loadLegacyPiModule(entry)) as Record<string, unknown>;
+		const levels = await import("@oh-my-pi/pi-coding-agent/thinking/levels");
+		expect(loaded.concreteThinkingLevel).toBe(levels.concreteThinkingLevel);
+		expect(loaded.toReasoningEffort).toBe(levels.toReasoningEffort);
+		expect(typeof loaded.fuzzyMatch).toBe("function");
 	});
 });

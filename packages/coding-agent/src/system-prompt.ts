@@ -38,11 +38,11 @@ import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" w
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
 import userAppendPromptTemplate from "./prompts/system/user-append.md" with { type: "text" };
-import type { SystemPromptSource, SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
-import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
-import { XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
+import type { SystemPromptSource, SystemPromptSources } from "./session/context-usage";
+import type { ActiveRepoContext } from "./modes/view-model/status-line/host";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { normalizePromptPath } from "./utils/prompt-path";
+import { quotePosixArgument } from "./utils/shell-quote";
 import { expandTilde } from "./tools/path-utils";
 import { matchModelPattern, type ModelPatternEntry } from "./utils/model-patterns";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
@@ -67,13 +67,14 @@ import {
 	cfgPersonality,
 	cfgSystemPromptTemplates,
 } from "./session/settings";
-import { cfgOvnfsPath, cfgTaskBatch, cfgTaskEager } from "./task/settings";
+import { cfgOvnfsPath, cfgTaskBatch, cfgTaskCrossInstance, cfgTaskEager } from "./task/settings";
+import { cfgBrowserCdpUrl, cfgBrowserRelayUrl } from "./tools/browser/settings";
 import {
 	cfgAsyncEnabled,
 	cfgOutEnabled,
 	cfgToolsIntentTracing,
-	cfgToolsXdevDocs,
-	cfgToolsXdevInlineDevices,
+	cfgToolsCommandDocs,
+	cfgToolsCommandInline,
 	cfgVaultEnabled,
 } from "./tools/settings";
 
@@ -91,10 +92,11 @@ export const cfgSystemPromptInputs = combine({
 	inlineToolDescriptors: cfgInlineToolDescriptors,
 	toolsFormat: cfgToolsFormat,
 	intentTracing: cfgToolsIntentTracing,
-	xdevDocs: cfgToolsXdevDocs,
-	xdevInlineDevices: cfgToolsXdevInlineDevices,
+	toolCommandDocs: cfgToolsCommandDocs,
+	toolCommandInline: cfgToolsCommandInline,
 	vaultEnabled: cfgVaultEnabled,
 	outEnabled: cfgOutEnabled,
+	crossInstanceAgents: cfgTaskCrossInstance,
 	renderMermaid: cfgTuiRenderMermaid,
 	renderSvg: cfgTuiRenderSvg,
 	renderEmbeds: cfgTuiRenderEmbeds,
@@ -106,6 +108,9 @@ export const cfgSystemPromptInputs = combine({
 	asyncEnabled: cfgAsyncEnabled,
 	bashAutoBackground: cfgBashAutoBackgroundEnabled,
 	evalAutoBackground: cfgEvalAutoBackgroundEnabled,
+	// Browser endpoint changes can enable pre-call platform safety guidance.
+	browserCdpUrl: cfgBrowserCdpUrl,
+	browserRelayUrl: cfgBrowserRelayUrl,
 	taskEager: cfgTaskEager,
 	taskBatch: cfgTaskBatch,
 	// Separate-checkout guidance names the ovnfs command.
@@ -599,6 +604,8 @@ export interface BuildSystemPromptOptions {
 	settingsApproval?: boolean;
 	/** Whether `out://` writes reach the user as transcript replies; gates advertising `out://`. */
 	outReplies?: boolean;
+	/** Advertise cross-instance agent addressing. */
+	crossInstanceAgents?: boolean;
 	/**
 	 * Eval preludes advertised by this prompt. Each prelude's `guidance` is
 	 * appended as its own block after the rendered template, so custom templates
@@ -627,16 +634,14 @@ export interface BuildSystemPromptOptions {
 	encourageEdits?: boolean;
 	/** Pre-resolved nested active repo context. Undefined resolves from cwd. */
 	activeRepoContext?: ActiveRepoContext | null;
-	/** Tools mounted under `xd://`; renders the protocol section when non-empty. `dynamic` marks external devices whose summary is third-party metadata. */
-	xdevTools?: Array<{ name: string; summary: string; dynamic?: boolean }>;
-	/** Full docs + JSON schema for every `xd://`-mounted tool, inlined into the protocol section so no discovery `read` is needed. */
-	xdevDocs?: string;
-	/** Whether Auto-QA grievance reporting is enabled; renders the `xd://report_issue` note. */
+	/** Tools mounted as commands; renders the Tool Commands section when non-empty. `dynamic` marks external commands whose summary is third-party metadata. */
+	mountedCommands?: Array<{ name: string; summary: string; dynamic?: boolean }>;
+	/** Inlined `--help` sections and the one-line catalog for mounted commands. */
+	toolCommandDocs?: string;
+	/** Whether Auto-QA grievance reporting is enabled; renders the `report_issue` note. */
 	autoQaEnabled?: boolean;
 	/** ovnfs command when its binary is found (`ovnfsCommand`); renders the separate-checkout guidance. */
 	ovnfs?: string;
-	/** Whether active `write` is restricted to xd:// dispatch and the plan artifact sandbox. */
-	writeTransportOnly?: boolean;
 	/**
 	 * Whether this prompt is for a subagent session. Replaces the Verify workflow with a hand-off:
 	 * the main agent verifies once after all subagents land, so parallel children don't storm the CPU.
@@ -651,13 +656,13 @@ export interface BuildSystemPromptResult {
 	/** Context files and skills located in `systemPrompt`; absent for prompts not built from templates. */
 	sources?: SystemPromptSources;
 	/**
-	 * Names of `xd://` devices whose catalog/protocol section this prompt renders.
-	 * Empty/undefined when no catalog was emitted (no mounted devices, or a custom
-	 * prompt template that omits the section). Lets the session fold these devices
+	 * Names of mounted commands whose catalog section this prompt renders.
+	 * Empty/undefined when no catalog was emitted (no mounted commands, or a custom
+	 * prompt template that omits the section). Lets the session fold these commands
 	 * into its announced-mount baseline so a same-turn mount notice does not re-list
 	 * a catalog the prompt already carries (issue #7139).
 	 */
-	xdevCatalogNames?: readonly string[];
+	toolCommandCatalogNames?: readonly string[];
 }
 
 /** Static wrapper; compiled (not rendered) so user-authored Markdown passes through byte-for-byte. */
@@ -698,7 +703,7 @@ function trackedSources(
 }
 
 /**
- * Join generated append blocks (memory, auto-learn, `xd://` routes, MCP server
+ * Join generated append blocks (memory, auto-learn, tool-command routes, MCP server
  * instructions) with the user's append prompt. Keep the user text in its own
  * section so it is not misclassified as MCP server-controlled instructions.
  */
@@ -752,6 +757,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		securityEnabled = false,
 		settingsApproval = false,
 		outReplies = false,
+		crossInstanceAgents = false,
 		evalPreludes = [],
 		model,
 		includeModelInPrompt = true,
@@ -763,11 +769,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		autoGraph = false,
 		reactions = false,
 		encourageEdits = true,
-		xdevTools = [],
-		xdevDocs = "",
+		mountedCommands = [],
+		toolCommandDocs = "",
 		autoQaEnabled = false,
 		ovnfs,
-		writeTransportOnly = false,
 		subagent = false,
 		activeRepoContext: providedActiveRepoContext,
 	} = options;
@@ -1012,18 +1017,20 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const toolListMode = !inlineToolDescriptors && nativeTools;
 	// Build tool descriptions for system prompt rendering.
 	const toolPromptNames = new Map<string, string>(toolNames.map(name => [name, tools?.get(name)?.wireName ?? name]));
-	// xd://-mounted tools count as present for prompt gates ({{#has tools "lsp"}})
-	// and resolve to their `xd://<name>` URL, the only way to reach them. The
-	// Tool Inventory list stays limited to real defs.
-	for (const mounted of xdevTools) {
-		if (!toolPromptNames.has(mounted.name)) toolPromptNames.set(mounted.name, `${XD_URL_PREFIX}${mounted.name}`);
+	// Mounted tool commands count as present for prompt gates ({{#has tools "lsp"}})
+	// and are referred to by their bare name, which is also the command to run.
+	// The Tool Inventory list stays limited to tools with a top-level definition.
+	for (const mounted of mountedCommands) {
+		if (!toolPromptNames.has(mounted.name)) toolPromptNames.set(mounted.name, mounted.name);
 	}
 	const toolRefs = Object.fromEntries(toolPromptNames.entries());
-	const xdevToolNames = new Set(xdevTools.map(mounted => mounted.name));
-	// A direct custom tool can share a name with a retained built-in device.
+	const mountedCommandNames = new Set(mountedCommands.map(mounted => mounted.name));
+	// A direct custom tool can share a name with a mounted tool command.
 	// Presence in both toolNames and tools proves it still has a top-level definition.
 	const inventoryToolNames =
-		xdevToolNames.size === 0 ? toolNames : toolNames.filter(name => tools?.has(name) || !xdevToolNames.has(name));
+		mountedCommandNames.size === 0
+			? toolNames
+			: toolNames.filter(name => tools?.has(name) || !mountedCommandNames.has(name));
 	const toolInfo = inventoryToolNames.map(name => ({
 		name: toolPromptNames.get(name) ?? name,
 		internalName: name,
@@ -1046,13 +1053,13 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// Filter skills for the rendered system prompt:
 	// - require an active tool that declares `skill://` read capability (any tool
 	//   name, not just `read`, so custom resolvers count once projected; mounted
-	//   xd:// tools count too when their metadata is projected);
+	//   tool commands count too when their metadata is projected);
 	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
 	const hasSkillReader =
 		tools === undefined
 			? toolNames.includes("read")
 			: toolNames.some(name => toolReadsSkillUris(tools.get(name))) ||
-				xdevTools.some(entry => toolReadsSkillUris(tools.get(entry.name)));
+				mountedCommands.some(entry => toolReadsSkillUris(tools.get(entry.name)));
 	const hasSkillUriAccess = hasSkillReader && skills.length > 0;
 	const schemeHost: SchemeHost = {
 		skillUriAccess: hasSkillUriAccess,
@@ -1061,6 +1068,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		securityEnabled,
 		settingsApproval,
 		outReplies,
+		crossInstanceAgents,
 		subagent,
 	};
 	const filteredSkills = (options.skillDescriptions ?? new SkillDescriptionCatalog()).render(
@@ -1105,7 +1113,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		systemPromptCustomization: effectiveSystemPromptCustomization,
 		customPrompt: resolvedCustomPrompt,
 		appendPrompt: resolvedAppendPrompt ?? "",
-		tools: [...new Set([...toolNames, ...xdevTools.map(mounted => mounted.name)])],
+		tools: [...new Set([...toolNames, ...mountedCommands.map(mounted => mounted.name)])],
 		toolInfo,
 		toolInventory,
 		inlineToolDescriptors,
@@ -1146,12 +1154,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		autoGraph,
 		reactions,
 		encourageEdits,
-		xdevTools,
-		hasDynamicXdevTools: xdevTools.some(mounted => mounted.dynamic === true),
-		xdevDocs,
+		mountedCommands,
+		hasDynamicToolCommands: mountedCommands.some(mounted => mounted.dynamic === true),
+		toolCommandDocs,
 		autoQaEnabled,
-		ovnfs,
-		writeTransportOnly,
+		// The guidance pastes it into shell commands: always single-quoted, so no path character splits or expands it.
+		ovnfs: ovnfs && quotePosixArgument(ovnfs),
 		subagent,
 	};
 	let rendered: prompt.TrackedRender;
@@ -1187,12 +1195,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		systemPrompt.push(projectPrompt.text);
 	}
 
-	// Claim delivery only when the rendered block 0 actually carries the xd://
-	// section, so a template that references {{xdevDocs}} keeps mount-notice
+	// Claim delivery only when the rendered block 0 actually carries the tool-command
+	// catalog, so a template that references {{toolCommandDocs}} keeps mount-notice
 	// dedupe while one that omits it stays honest.
-	const xdevCatalogNames =
-		!resolvedCustomPrompt && xdevTools.length > 0 && rendered.text.includes("xd://")
-			? xdevTools.map(mounted => mounted.name)
+	const toolCommandCatalogNames =
+		!resolvedCustomPrompt && toolCommandDocs.length > 0 && rendered.text.includes(toolCommandDocs)
+			? mountedCommands.map(mounted => mounted.name)
 			: undefined;
-	return { systemPrompt, xdevCatalogNames, sources: { blocks: systemPrompt.slice(), sources } };
+	return { systemPrompt, toolCommandCatalogNames, sources: { blocks: systemPrompt.slice(), sources } };
 }

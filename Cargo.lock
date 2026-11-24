@@ -229,6 +229,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "archery"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33ca55ee147b1926dbea904f50fe4902494e97bc742205abbbf10c709e43815f"
+dependencies = [
+ "triomphe",
+]
+
+[[package]]
 name = "argmax"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -305,6 +314,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "ast-grep-config"
+version = "0.39.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8499e99d47e870619c5ab0c09b1d03954584a80a591418b436ed7c04589844d9"
+dependencies = [
+ "ast-grep-core",
+ "bit-set",
+ "globset",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_yaml",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1142,6 +1167,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fa961b519f0b462e3a3b4a34b64d119eeaca1d59af726fe450bbba07a9fc0a1"
 dependencies = [
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "codespan-reporting"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
+dependencies = [
+ "serde",
+ "unicode-width",
 ]
 
 [[package]]
@@ -5401,9 +5436,9 @@ dependencies = [
 
 [[package]]
 name = "mio"
-version = "1.2.3"
+version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b18443e9c262bfe8fa82f51666e2642c53393f7e5c27b3e1aeab922cff5b9d8"
+checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
 dependencies = [
  "libc",
  "log",
@@ -6091,6 +6126,414 @@ dependencies = [
 ]
 
 [[package]]
+name = "omp-ast"
+version = "19.1.1"
+dependencies = [
+ "anyhow",
+ "ast-grep-core",
+ "async-trait",
+ "futures",
+ "omp-vfs",
+ "omp-xfs",
+ "parking_lot",
+ "phf",
+ "semver",
+ "serde",
+ "tokio",
+ "tokio-util",
+ "tree-sitter",
+ "tree-sitter-bash",
+ "tree-sitter-c",
+ "tree-sitter-cpp",
+ "tree-sitter-css",
+ "tree-sitter-diff",
+ "tree-sitter-elisp",
+ "tree-sitter-fortran",
+ "tree-sitter-go",
+ "tree-sitter-html",
+ "tree-sitter-java",
+ "tree-sitter-javascript",
+ "tree-sitter-json",
+ "tree-sitter-md",
+ "tree-sitter-python",
+ "tree-sitter-regex",
+ "tree-sitter-ruby",
+ "tree-sitter-rust",
+ "tree-sitter-swift",
+ "tree-sitter-toml-ng",
+ "tree-sitter-typescript",
+ "tree-sitter-yaml",
+ "xutf",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "omp-builtins"
+version = "19.1.1"
+dependencies = [
+ "ansi-width",
+ "anyhow",
+ "argmax",
+ "ast-grep-config",
+ "ast-grep-core",
+ "async-trait",
+ "base64 0.23.1",
+ "bigdecimal",
+ "block2",
+ "bstr",
+ "bzip2",
+ "chrono",
+ "clap",
+ "codespan-reporting",
+ "dns-lookup",
+ "fancy-regex 0.17.0",
+ "flate2",
+ "flume",
+ "foldhash 0.2.0",
+ "futures",
+ "glob",
+ "globset",
+ "grep-cli",
+ "grep-matcher",
+ "grep-pcre2",
+ "grep-printer",
+ "grep-regex",
+ "grep-searcher",
+ "hex",
+ "icu_collator",
+ "icu_decimal",
+ "icu_locale_core",
+ "icu_provider",
+ "ignore",
+ "indicatif",
+ "itertools 0.14.0",
+ "jaq-core",
+ "jaq-json",
+ "jaq-std",
+ "jiff",
+ "libc",
+ "lscolors",
+ "lz4_flex",
+ "lzma-rust2",
+ "md-5 0.10.6",
+ "md4",
+ "memchr",
+ "nix 0.31.3",
+ "nom 8.0.0",
+ "notify",
+ "num-bigint",
+ "num-traits",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "omp-ast",
+ "omp-diff",
+ "omp-iso",
+ "omp-vfs",
+ "omp-xfs",
+ "onig",
+ "os_display",
+ "parking_lot",
+ "parse_datetime",
+ "rand 0.10.3",
+ "rayon",
+ "regex",
+ "regex-automata",
+ "rustc-hash",
+ "rustix 1.1.5",
+ "self_cell",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "serde_yaml",
+ "sha1",
+ "sha2 0.10.9",
+ "smallvec",
+ "stacker",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "uucore",
+ "uutils_term_grid",
+ "windows-sys 0.61.2",
+ "xutf",
+ "xxhash-rust",
+ "zbus",
+ "zstd",
+]
+
+[[package]]
+name = "omp-diff"
+version = "19.1.1"
+dependencies = [
+ "xutf",
+]
+
+[[package]]
+name = "omp-edit"
+version = "19.1.1"
+dependencies = [
+ "async-trait",
+ "omp-ast",
+ "omp-diff",
+ "omp-xfs",
+ "parking_lot",
+ "regex",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tree-sitter-lua",
+ "xutf",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "omp-iso"
+version = "19.1.1"
+dependencies = [
+ "async-trait",
+ "libc",
+ "omp-diff",
+ "parking_lot",
+ "tokio",
+ "windows-sys 0.61.2",
+ "xutf",
+]
+
+[[package]]
+name = "omp-natives"
+version = "19.1.1"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "ashpd",
+ "async-trait",
+ "atspi",
+ "base64 0.23.1",
+ "bitflags 2.13.2",
+ "block2",
+ "clipboard-win",
+ "crc32fast",
+ "data-encoding",
+ "either",
+ "enigo",
+ "fancy-regex 0.17.0",
+ "fastrand",
+ "find-msvc-tools",
+ "flate2",
+ "flume",
+ "foldhash 0.2.0",
+ "fontdue",
+ "futures",
+ "grep-matcher",
+ "hashbrown 0.17.1",
+ "html-escape",
+ "html-to-markdown-rs",
+ "ignore",
+ "image",
+ "indexmap",
+ "jiff",
+ "libc",
+ "libm",
+ "log",
+ "memchr",
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "notify",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-application-services",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation",
+ "omp-ast",
+ "omp-builtins",
+ "omp-diff",
+ "omp-edit",
+ "omp-iso",
+ "omp-predict",
+ "omp-shell",
+ "omp-vcs",
+ "omp-vfs",
+ "omp-voice",
+ "omp-xfs",
+ "parking_lot",
+ "pdf-inspector",
+ "peg-runtime",
+ "phf",
+ "png",
+ "portable-pty",
+ "ptts",
+ "rand_core 0.6.4",
+ "rayon",
+ "regex",
+ "reis",
+ "resvg",
+ "serde",
+ "serde_core",
+ "serde_json",
+ "shlex 2.0.1",
+ "simd-adler32",
+ "smallvec",
+ "syntect",
+ "tempfile",
+ "tiktoken-rs",
+ "tinyvec",
+ "tokio",
+ "tokio-util",
+ "uiautomation",
+ "unicode-bidi",
+ "windows 0.62.2",
+ "windows-sys 0.61.2",
+ "winreg 0.56.0",
+ "x11rb",
+ "xcap",
+ "xkeysym",
+ "xutf",
+ "xxhash-rust",
+ "zbus",
+ "zlib-rs",
+ "zstd",
+ "zune-jpeg",
+]
+
+[[package]]
+name = "omp-predict"
+version = "19.1.1"
+dependencies = [
+ "anyhow",
+ "candle-core",
+ "candle-nn",
+ "flume",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "xutf",
+ "zstd",
+]
+
+[[package]]
+name = "omp-shell"
+version = "19.1.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.23.1",
+ "blake3",
+ "bstr",
+ "bytes",
+ "clap",
+ "encoding_rs",
+ "flume",
+ "hashbrown 0.17.1",
+ "jiff",
+ "libc",
+ "libm",
+ "omp-builtins",
+ "omp-vcs",
+ "omp-vfs",
+ "parking_lot",
+ "pcre2-sys",
+ "postcard",
+ "regex",
+ "rpds",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "strum",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "windows-sys 0.61.2",
+ "winreg 0.56.0",
+ "xutf",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "omp-vcs"
+version = "19.1.1"
+dependencies = [
+ "futures",
+ "gix",
+ "gix-utils",
+ "jj-lib",
+ "libc",
+ "omp-iso",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "windows-sys 0.61.2",
+ "xutf",
+]
+
+[[package]]
+name = "omp-vfs"
+version = "19.1.1"
+dependencies = [
+ "async-trait",
+ "libc",
+ "parking_lot",
+ "tokio",
+ "tokio-util",
+ "windows-sys 0.61.2",
+ "xattr",
+]
+
+[[package]]
+name = "omp-voice"
+version = "19.1.1"
+dependencies = [
+ "bytes",
+ "flume",
+ "libc",
+ "opus",
+ "parking_lot",
+ "tokio",
+ "webrtc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "omp-xfs"
+version = "19.1.1"
+dependencies = [
+ "async-trait",
+ "flume",
+ "futures",
+ "globset",
+ "grep-matcher",
+ "grep-pcre2",
+ "grep-regex",
+ "grep-searcher",
+ "hashbrown 0.17.1",
+ "ignore",
+ "libc",
+ "memchr",
+ "omp-vfs",
+ "parking_lot",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "windows-sys 0.61.2",
+ "xutf",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6435,396 +6878,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6fd9027e2d9319be6349febd1db4e8d02aa544921200c9b777720ac34a3aa89"
 dependencies = [
  "siphasher",
-]
-
-[[package]]
-name = "pi-ast"
-version = "18.22.0"
-dependencies = [
- "anyhow",
- "ast-grep-core",
- "async-trait",
- "futures",
- "parking_lot",
- "phf",
- "pi-vfs",
- "pi-walker",
- "semver",
- "serde",
- "tokio",
- "tokio-util",
- "tree-sitter",
- "tree-sitter-bash",
- "tree-sitter-c",
- "tree-sitter-cpp",
- "tree-sitter-css",
- "tree-sitter-diff",
- "tree-sitter-elisp",
- "tree-sitter-fortran",
- "tree-sitter-go",
- "tree-sitter-html",
- "tree-sitter-java",
- "tree-sitter-javascript",
- "tree-sitter-json",
- "tree-sitter-md",
- "tree-sitter-python",
- "tree-sitter-regex",
- "tree-sitter-ruby",
- "tree-sitter-rust",
- "tree-sitter-swift",
- "tree-sitter-toml-ng",
- "tree-sitter-typescript",
- "tree-sitter-yaml",
- "xutf",
- "xxhash-rust",
-]
-
-[[package]]
-name = "pi-builtins"
-version = "18.22.0"
-dependencies = [
- "ansi-width",
- "anyhow",
- "argmax",
- "async-trait",
- "base64 0.23.1",
- "bigdecimal",
- "bstr",
- "bzip2",
- "chrono",
- "clap",
- "dns-lookup",
- "fancy-regex 0.17.0",
- "flate2",
- "flume",
- "foldhash 0.2.0",
- "futures",
- "glob",
- "globset",
- "grep-cli",
- "grep-matcher",
- "grep-pcre2",
- "grep-printer",
- "grep-regex",
- "grep-searcher",
- "hex",
- "icu_collator",
- "icu_decimal",
- "icu_locale_core",
- "icu_provider",
- "ignore",
- "indicatif",
- "itertools 0.14.0",
- "jaq-core",
- "jaq-json",
- "jaq-std",
- "jiff",
- "libc",
- "lscolors",
- "lz4_flex",
- "lzma-rust2",
- "md-5 0.10.6",
- "md4",
- "memchr",
- "nix 0.31.3",
- "nom 8.0.0",
- "notify",
- "num-bigint",
- "num-traits",
- "onig",
- "os_display",
- "parking_lot",
- "parse_datetime",
- "pi-ast",
- "pi-diff",
- "pi-iso",
- "pi-vfs",
- "pi-walker",
- "rand 0.10.3",
- "rayon",
- "regex",
- "regex-automata",
- "rustc-hash",
- "rustix 1.1.5",
- "self_cell",
- "serde_json",
- "sha1",
- "sha2 0.10.9",
- "smallvec",
- "stacker",
- "tar",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "uucore",
- "uutils_term_grid",
- "windows-sys 0.61.2",
- "xutf",
- "xxhash-rust",
- "zstd",
-]
-
-[[package]]
-name = "pi-diff"
-version = "18.22.0"
-dependencies = [
- "xutf",
-]
-
-[[package]]
-name = "pi-edit"
-version = "18.22.0"
-dependencies = [
- "async-trait",
- "parking_lot",
- "pi-ast",
- "pi-diff",
- "pi-walker",
- "regex",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tree-sitter-lua",
- "xutf",
- "xxhash-rust",
-]
-
-[[package]]
-name = "pi-iso"
-version = "18.22.0"
-dependencies = [
- "async-trait",
- "libc",
- "parking_lot",
- "pi-diff",
- "tokio",
- "windows-sys 0.61.2",
- "xutf",
-]
-
-[[package]]
-name = "pi-natives"
-version = "18.22.0"
-dependencies = [
- "anyhow",
- "arboard",
- "ashpd",
- "async-trait",
- "atspi",
- "base64 0.23.1",
- "bitflags 2.13.2",
- "block2",
- "clipboard-win",
- "crc32fast",
- "data-encoding",
- "either",
- "enigo",
- "fancy-regex 0.17.0",
- "fastrand",
- "find-msvc-tools",
- "flate2",
- "flume",
- "foldhash 0.2.0",
- "fontdue",
- "futures",
- "grep-matcher",
- "hashbrown 0.17.1",
- "html-escape",
- "html-to-markdown-rs",
- "image",
- "indexmap",
- "libc",
- "libm",
- "log",
- "memchr",
- "napi",
- "napi-build",
- "napi-derive",
- "notify",
- "objc2",
- "objc2-app-kit",
- "objc2-application-services",
- "objc2-core-foundation",
- "objc2-core-graphics",
- "objc2-foundation",
- "parking_lot",
- "pdf-inspector",
- "peg-runtime",
- "phf",
- "pi-ast",
- "pi-builtins",
- "pi-diff",
- "pi-edit",
- "pi-iso",
- "pi-predict",
- "pi-shell",
- "pi-vcs",
- "pi-vfs",
- "pi-voice",
- "pi-walker",
- "pipewire",
- "png",
- "portable-pty",
- "ptts",
- "rand_core 0.6.4",
- "rayon",
- "regex",
- "reis",
- "resvg",
- "serde",
- "serde_core",
- "serde_json",
- "shlex 2.0.1",
- "simd-adler32",
- "smallvec",
- "syntect",
- "tiktoken-rs",
- "tinyvec",
- "tokio",
- "tokio-util",
- "uiautomation",
- "unicode-bidi",
- "windows 0.62.2",
- "windows-sys 0.61.2",
- "winreg 0.56.0",
- "x11rb",
- "xcap",
- "xkeysym",
- "xutf",
- "xxhash-rust",
- "zbus",
- "zlib-rs",
- "zstd",
- "zune-jpeg",
-]
-
-[[package]]
-name = "pi-predict"
-version = "18.22.0"
-dependencies = [
- "anyhow",
- "candle-core",
- "candle-nn",
- "flume",
- "objc2",
- "objc2-app-kit",
- "objc2-foundation",
- "rayon",
- "regex",
- "serde",
- "serde_json",
- "xutf",
- "zstd",
-]
-
-[[package]]
-name = "pi-shell"
-version = "18.22.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64 0.23.1",
- "blake3",
- "bstr",
- "bytes",
- "clap",
- "encoding_rs",
- "flume",
- "hashbrown 0.17.1",
- "jiff",
- "libc",
- "libm",
- "parking_lot",
- "pcre2-sys",
- "pi-builtins",
- "pi-vcs",
- "pi-vfs",
- "postcard",
- "regex",
- "serde",
- "serde_json",
- "smallvec",
- "strum",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "toml",
- "windows-sys 0.61.2",
- "winreg 0.56.0",
- "xutf",
- "xxhash-rust",
-]
-
-[[package]]
-name = "pi-vcs"
-version = "18.22.0"
-dependencies = [
- "futures",
- "gix",
- "gix-utils",
- "jj-lib",
- "libc",
- "pi-iso",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "xutf",
-]
-
-[[package]]
-name = "pi-vfs"
-version = "18.22.0"
-dependencies = [
- "async-trait",
- "libc",
- "parking_lot",
- "tokio",
- "tokio-util",
- "windows-sys 0.61.2",
- "xattr",
-]
-
-[[package]]
-name = "pi-voice"
-version = "18.22.0"
-dependencies = [
- "bytes",
- "flume",
- "libc",
- "opus",
- "parking_lot",
- "tokio",
- "webrtc",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "pi-walker"
-version = "18.22.0"
-dependencies = [
- "async-trait",
- "flume",
- "futures",
- "globset",
- "grep-matcher",
- "grep-pcre2",
- "grep-regex",
- "grep-searcher",
- "ignore",
- "libc",
- "memchr",
- "parking_lot",
- "pi-vfs",
- "regex",
- "serde",
- "serde_json",
- "tokio",
- "windows-sys 0.61.2",
- "xutf",
 ]
 
 [[package]]
@@ -7501,12 +7554,14 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reis"
-version = "0.5.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00939c5c526a1b4054ef8d9d96b3f92227f08ca355965e986741b556eda6d289"
+checksum = "4b967ec6489a42067a20724f11987bb96178ea796873cbe1afd25fb93ee6f85f"
 dependencies = [
- "futures",
- "rustix 0.38.44",
+ "enumflags2",
+ "futures-util",
+ "log",
+ "rustix 1.1.5",
  "tokio",
 ]
 
@@ -7613,6 +7668,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "rpds"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e025feb26210bc196b908e72deb063b1b4000754304341cbc168a1e72c857ebc"
+dependencies = [
+ "archery",
+ "serde",
+ "smallvec",
 ]
 
 [[package]]
@@ -7768,6 +7834,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "schemars"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab508826f74a77ca9d5aba6ff19b522583ee3eaf28a19384ff3d0e5835fadf6e"
+dependencies = [
+ "dyn-clone",
+ "ref-cast",
+ "schemars_derive",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "schemars_derive"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1c3a92094fa7d61aa124645844facb6b554dfc797136d0f5fd1f890e2bffc69"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_derive_internals",
+ "syn 3.0.6",
+]
+
+[[package]]
 name = "scoped-tls"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7834,6 +7925,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde-saphyr"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d43fb82d550b07e6f929a58d7d0935182602f48ddead875f5ee313c41c8f07fe"
+dependencies = [
+ "base64 0.23.1",
+ "nohash-hasher",
+ "num-traits",
+ "serde_core",
+ "zmij",
+]
+
+[[package]]
 name = "serde_core"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7847,6 +7951,17 @@ name = "serde_derive"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+]
+
+[[package]]
+name = "serde_derive_internals"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f852137cce035d6a4df67ccce505ff6b3e9fd3a10e3e52b24dc71e650bb1a9bd"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7885,6 +8000,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "serde_yaml"
+version = "0.9.34+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
 ]
 
 [[package]]
@@ -9012,6 +9140,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "triomphe"
+version = "0.1.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d15f4f5898bcfc5d8a8e45ed30b2f108d710c1a2e5489dbf80e078f707181bc"
+
+[[package]]
 name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9275,6 +9409,12 @@ dependencies = [
  "crypto-common 0.1.7",
  "subtle",
 ]
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"

@@ -1,6 +1,6 @@
 # jaq-json (vendored)
 
-Vendored copy of [jaq-json 2.0.3](https://crates.io/crates/jaq-json/2.0.3), licensed under MIT. The workspace's `[patch.crates-io]` routes `pi-builtins` through this copy.
+Vendored copy of [jaq-json 2.0.3](https://crates.io/crates/jaq-json/2.0.3), licensed under MIT. The workspace's `[patch.crates-io]` routes `omp-builtins` through this copy.
 
 ## Why
 

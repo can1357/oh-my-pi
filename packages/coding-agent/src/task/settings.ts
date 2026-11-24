@@ -12,8 +12,8 @@ import type { Settings } from "../config/settings";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { $which, isRecord, logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
-import { setFeedModelBadgeEnabled } from "@oh-my-pi/pi-tui/render/render-utils";
-import { getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
+import { getThinkingLevelMetadata } from "../thinking/levels";
+import { setFeedModelBadgeEnabled } from "../utils/render-utils";
 
 const EMPTY_AGENT_SERVICE_TIER_OVERRIDES: Record<string, ServiceTierInheritSettingValue> = {};
 const EMPTY_AGENT_COMPACTION_THRESHOLD_OVERRIDES: Record<string, AgentCompactionThresholdOverride> = {};
@@ -53,7 +53,7 @@ export const cfgIsolationBackend = register({
 				value: "auto",
 				label: "Auto",
 				description:
-					"Isolated subagents use ovnfs checkouts when ovnfs is found; otherwise (and for worktrees) the PAL picks the best available backend",
+					"Isolated subagents and `/wt` use ovnfs checkouts when ovnfs is found; otherwise (and for other worktrees) the PAL picks the best available backend",
 			},
 			{ value: "apfs", label: "APFS", description: "macOS clonefile reflink (APFS)" },
 			{ value: "btrfs", label: "btrfs", description: "btrfs subvolume snapshot" },
@@ -179,18 +179,21 @@ export const cfgOvnfsPath = register({
 		group: "Isolation",
 		label: "ovnfs Binary",
 		description:
-			"ovnfs executable; unset looks for `ovnfs` on PATH. When it is found, ovnfs checkouts (copy-on-write views of a folder, ready in about a second at any size) serve every separate copy: the system prompt tells agents to open checkouts instead of git worktrees or copies, and isolated subagents (when allowed, with `isolation.backend` on auto) run in checkouts instead of native clones",
+			"ovnfs executable; unset looks for `ovnfs` on PATH. When it is found, ovnfs checkouts (copy-on-write views of a folder, ready in about a second at any size) serve every separate copy: the system prompt tells agents to open checkouts instead of git worktrees or copies, and with `isolation.backend` on auto, isolated subagents (when allowed) run in checkouts instead of native clones and `/wt` moves the session into a checkout instead of a linked worktree",
 	},
 });
 
 /**
  * The ovnfs command agents and isolated subagents use (`ovnfs.path`, else `ovnfs`),
  * or `undefined` when that binary is not found. Read by the system prompt (checkout
- * guidance), the bash git guard, and the task runner (ovnfs-backed isolation when
- * `isolation.backend` is auto).
+ * guidance), the bash git guard, and, when `isolation.backend` is auto, the task
+ * runner (ovnfs-backed isolation) and `/wt` (ovnfs-backed session worktrees).
+ * Windows paths come back with forward slashes: the command is pasted into
+ * bash, which strips backslashes (`C:\Users\…` runs as `C:Users…`).
  */
-export function ovnfsCommand(settings: Settings): string | undefined {
-	const command = cfgOvnfsPath.get(settings)?.trim() || "ovnfs";
+export function ovnfsCommand(settings?: Settings): string | undefined {
+	const configured = (settings && cfgOvnfsPath.get(settings)?.trim()) || "ovnfs";
+	const command = process.platform === "win32" ? configured.replaceAll("\\", "/") : configured;
 	return $which(command) ? command : undefined;
 }
 
@@ -339,7 +342,7 @@ export const cfgTaskStructured = register({
 		group: "Subagents",
 		label: "Structured Task Results",
 		description:
-			"Expose outputSchema/schemaMode on the task tool and return subagent results through the yield tool, validated against caller or agent output schemas. Off: task subagents have no yield tool and return their final message as plain text, except agents whose definition sets structured: true. Eval agent()/workpool spawns always keep structured results.",
+			"Expose outputSchema/schemaMode on the task tool and honor agent output schemas; a subagent with a schema returns its result through the yield tool, validated against it. Off: task subagents ignore schemas, except agents whose definition sets structured: true. A subagent without a schema has no yield tool and returns its final message. Eval agent()/workpool spawns always honor schemas.",
 	},
 });
 
@@ -499,9 +502,22 @@ export const cfgTaskEnableLsp = register({
 	ui: {
 		tab: "tasks",
 		group: "Subagents",
-		label: "LSP in Subagents",
+		label: "LSP Edit Checks in Subagents",
 		description:
-			"Allow subagents spawned via the task tool to use the lsp tool. Off by default to keep subagents cheap; enable when LSP-aware delegation is worth the extra tokens.",
+			"Run LSP formatting and diagnostics on subagent edits. Off by default to keep subagents cheap; the lsp tool stays available to them either way.",
+	},
+});
+
+/** Allow interactive instances in the same folder to discover and message each other's agents. */
+export const cfgTaskCrossInstance = register({
+	id: "task.crossInstance",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Cross-Instance Agent Messaging",
+		description: "Let other omp instances in this folder read agent outputs and send messages that can wake agents",
 	},
 });
 

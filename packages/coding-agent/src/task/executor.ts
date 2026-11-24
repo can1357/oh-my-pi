@@ -9,8 +9,8 @@
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
-import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import { AgentBusyError, extractIntent, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import type { Api, AssistantMessageEvent, Model, ServiceTierByFamily, ToolCall, Usage } from "@oh-my-pi/pi-ai";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import {
 	isRecord,
@@ -31,14 +31,10 @@ import {
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { ModelRegistry } from "../config/model-registry";
-import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
-import {
-	previewLine,
-	replaceTabs,
-	shortenToolArgumentPaths,
-	TRUNCATE_LENGTHS,
-} from "@oh-my-pi/pi-tui/render/render-utils";
-import { type EditMode, getEditInputPaths } from "@oh-my-pi/pi-tui/tools/edit";
+import { formatModelSelectorValue } from "../config/model-selector";
+import { previewLine, shortenToolArgumentPaths, TRUNCATE_LENGTHS } from "../utils/render-utils";
+import { replaceTabs } from "../utils/text-width";
+import { type EditMode, getEditInputPaths } from "../tools/details/edit";
 import {
 	formatModelStringWithRouting,
 	resolveAgentAdvisorRolePattern,
@@ -98,22 +94,23 @@ import type { AuthStorage } from "../session/auth-storage";
 import { type CostCapRefusal, CostCapError, type CostGateApi } from "../session/cost-gate";
 import { INTERRUPTED_TURN_ERROR } from "../session/exit-diagnostics";
 import { SKILL_PROMPT_MESSAGE_TYPE, usageContextTokens } from "../session/messages";
+import type { CompletionJournal } from "../session/model-usage-journal";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
-import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { truncateTail } from "../tools/streaming-output";
 import {
 	AUTO_THINKING,
 	assertModelSupportsEffortCeiling,
-	type ConfiguredThinkingLevel,
 	clampThinkingLevelToCeiling,
 	prewalkWouldBeNoop,
 	resolveTaskEffortLevel,
 	type TaskEffort,
-} from "@oh-my-pi/pi-tui/thinking";
+} from "../thinking/levels";
+import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { ContextFileEntry, ToolSession } from "../tools";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../irc/messaging";
-import { LIST_STATUS_ORDER } from "@oh-my-pi/pi-tui/tools/irc";
-import { DEFAULT_PEER_ROSTER_LIMIT } from "@oh-my-pi/pi-tui/tools/irc";
+import { LIST_STATUS_ORDER } from "../irc/irc-types";
+import { DEFAULT_PEER_ROSTER_LIMIT } from "../irc/irc-types";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
 import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
 import { ToolAbortError } from "../tools/tool-errors";
@@ -147,16 +144,17 @@ import {
 } from "./types";
 import {
 	type AgentProgress,
+	type AgentStreaming,
 	type SingleResult,
 	type StructuredSubagentOutput,
 	type StructuredSubagentSchemaMode,
 	type StructuredSubagentSchemaSource,
 	type TaskToolDetails,
 	type YieldItem,
-} from "@oh-my-pi/pi-tui/tools/task";
+} from "./task-details";
 import { yieldSectionShapes } from "./yield-assembly";
 import { assertPerCallModelApproved, PerCallModelError, type PerCallModelGrants } from "./model-approval";
-import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
+import { assembleYieldResult } from "./yield-sections";
 import {
 	cfgTaskPrewalk,
 	cfgTaskAgentPrewalk,
@@ -170,6 +168,7 @@ import {
 	cfgTaskMaxRecursionDepth,
 	cfgTaskAgentAdvisor,
 	cfgTaskAgentAccountPools,
+	cfgTaskEnableLsp,
 } from "./settings";
 import {
 	cfgTierSubagent,
@@ -191,7 +190,7 @@ import {
 	cfgCompactionThresholdTokens,
 } from "../session/context-settings";
 
-export type { YieldItem } from "@oh-my-pi/pi-tui/tools/task";
+export type { YieldItem } from "./task-details";
 
 const TASK_ABORT_CLEANUP_GRACE_MS = 10_000;
 
@@ -261,6 +260,10 @@ function formatSalvageSnippet(text: string, maxLength = 500): string {
 	const flattened = text.replace(/\s+/g, " ").trim();
 	return flattened.length > maxLength ? `${flattened.slice(0, maxLength - 1)}…` : flattened;
 }
+
+/** The model reasons, or writes prose: the stream states without a payload, shared by every snapshot. */
+const STREAMING_THINKING: AgentStreaming = { kind: "thinking" };
+const STREAMING_TEXT: AgentStreaming = { kind: "text" };
 
 /** Events the run monitor tracks: the core loop events plus the session's `agent_pause`. */
 type MonitoredEvent = AgentEvent | Extract<AgentSessionEvent, { type: "agent_pause" }>;
@@ -497,6 +500,11 @@ export interface ExecutorOptions {
 	parentActiveModelPattern?: string;
 	/** Active parent provider, independent of whether parent-model auth fallback is allowed. */
 	parentActiveProvider?: string;
+	/**
+	 * Journals the tiny-model label request on the spawning session. A reporter rather than the
+	 * session's ledger: a function still reaches the parent when the run is placed in a worker.
+	 */
+	journalTaskLabel?: CompletionJournal;
 	/** Set for a per-call `model`; every model the child sends to must stay approved by these grants. */
 	perCallModelGrants?: PerCallModelGrants;
 	thinkingLevel?: ConfiguredThinkingLevel;
@@ -505,12 +513,10 @@ export interface ExecutorOptions {
 	/** Caller's description of how open-ended the work is; rides the initial prompt into the child's `auto` thinking classifier. */
 	solutionSpace?: string;
 	/**
-	 * `false` = the child has no `yield` tool and its final assistant message is
-	 * the result (`task.structured` off); callers then supply no {@link outputSchema}.
-	 * Default `true`.
+	 * Schema used to validate the final structured completion. Its presence is
+	 * what gives the child a `yield` tool (see {@link usesYield}); without one the
+	 * child's final assistant message is the result.
 	 */
-	structured?: boolean;
-	/** Schema used to validate the final structured completion. */
 	outputSchema?: unknown;
 	/** Enforcement policy for {@link outputSchema}; defaults to legacy permissive behavior. */
 	outputSchemaMode?: StructuredSubagentSchemaMode;
@@ -729,9 +735,6 @@ interface FinalizeSubprocessOutputArgs {
 	outputSchema: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
-	lastAssistantText?: string;
-	/** `false` = no `yield` tool: `rawOutput` is the final assistant message, returned verbatim. Default `true`. */
-	structured?: boolean;
 }
 
 interface FinalizeSubprocessOutputResult {
@@ -748,6 +751,15 @@ export const SUBAGENT_WARNING_NULL_YIELD = "SYSTEM WARNING: Subagent called yiel
 export const SUBAGENT_WARNING_MISSING_YIELD =
 	"SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.";
 export const SUBAGENT_WARNING_EMPTY_MESSAGE = "SYSTEM WARNING: Subagent ended without a final message.";
+
+/**
+ * Whether a run returns its result through `yield`. Only a schema-bound result
+ * needs the tool; without an output schema the child has no `yield` and its
+ * final assistant message is the result, verbatim.
+ */
+export function usesYield(outputSchema: unknown): boolean {
+	return outputSchema !== undefined;
+}
 
 /** Build a schema_violation outcome — surfaced as a non-zero exit so callers treat it as a failure. */
 function buildSchemaViolationOutcome(
@@ -776,7 +788,7 @@ function buildSchemaViolationOutcome(
 
 export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): FinalizeSubprocessOutputResult {
 	let { rawOutput, exitCode, stderr } = args;
-	const { yieldItems, doneAborted, signalAborted, outputSchema, lastAssistantText } = args;
+	const { yieldItems, doneAborted, signalAborted, outputSchema } = args;
 	const mode = args.outputSchemaMode ?? "permissive";
 	const source = args.outputSchemaSource ?? (outputSchema === undefined ? "none" : "session");
 	const includeStructuredOutput = source !== "none";
@@ -797,7 +809,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 				rawOutput = `{"aborted":true,"error":"${lastYield.error || "Unknown error"}"}`;
 			}
 		} else {
-			const assembled = assembleYieldResult(yieldItems, lastAssistantText, yieldSectionShapes(outputSchema));
+			const assembled = assembleYieldResult(yieldItems, yieldSectionShapes(outputSchema));
 			if (!assembled || assembled.missingData) {
 				rawOutput = rawOutput ? `${SUBAGENT_WARNING_NULL_YIELD}\n\n${rawOutput}` : SUBAGENT_WARNING_NULL_YIELD;
 				if (includeStructuredOutput) {
@@ -819,7 +831,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 				}
 			} else {
 				const { validator, error: schemaError, normalized } = buildOutputValidator(outputSchema);
-				const submittedData = assembled.rawText ? assembled.data : parseStringifiedJson(assembled.data ?? null);
+				const submittedData = parseStringifiedJson(assembled.data ?? null);
 				const completeData =
 					mode === "strict" ? (validator?.normalize(submittedData) ?? submittedData) : submittedData;
 				const validation = validator?.validate(completeData);
@@ -854,10 +866,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 					exitCode = outcome.exitCode;
 				} else {
 					try {
-						rawOutput =
-							assembled.rawText && typeof completeData === "string"
-								? completeData
-								: (JSON.stringify(completeData, null, 2) ?? "null");
+						rawOutput = JSON.stringify(completeData, null, 2) ?? "null";
 					} catch (err) {
 						const errorMessage = err instanceof Error ? err.message : String(err);
 						rawOutput = `{"error":"Failed to serialize yield data: ${errorMessage}"}`;
@@ -873,7 +882,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 				}
 			}
 		}
-	} else if (args.structured === false) {
+	} else if (!usesYield(outputSchema)) {
 		// The final assistant message is the result verbatim; only an empty one fails.
 		if (exitCode === 0 && !rawOutput.trim()) {
 			rawOutput = SUBAGENT_WARNING_EMPTY_MESSAGE;
@@ -1016,7 +1025,7 @@ function getUsageTokens(usage: unknown): number {
 /**
  * Create proxy tools that reuse the parent's MCP connections, as `scope` sees them.
  *
- * Each proxy delegates to the current source `MCPTool`/`DeferredMCPTool` rather
+ * Each proxy delegates to the current source `MCPTool` rather
  * than rebuilding a raw `tools/call` request, so the Task/subagent path shares
  * the source tool's authoritative outbound boundary: harness-intent (`i`)
  * stripping, optional-placeholder pruning, local-URL resolution, reconnect
@@ -1232,6 +1241,17 @@ export function compactionThresholdSettings(
 			};
 }
 
+/**
+ * Settings a subagent's edits and writes skip LSP formatting and diagnostics
+ * under, unless `task.enableLsp` opts in: the per-edit writethrough is the cost
+ * that setting gates, while the `lsp` tool itself stays available on demand.
+ */
+export function subagentLspWritethroughSettings(settings: Settings): Readonly<Record<string, unknown>> | undefined {
+	return cfgTaskEnableLsp.get(settings)
+		? undefined
+		: { "lsp.formatOnWrite": false, "lsp.diagnosticsOnWrite": false, "lsp.diagnosticsOnEdit": false };
+}
+
 export function createSubagentSettings(
 	baseSettings: SubagentChainSettings,
 	overrides?: Readonly<Record<string, unknown>>,
@@ -1323,6 +1343,8 @@ interface RunMonitorArgs {
 	settings?: Settings;
 	parentActiveModelPattern?: string;
 	parentActiveProvider?: string;
+	/** See {@link ExecutorOptions.journalTaskLabel}. */
+	journalTaskLabel?: CompletionJournal;
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
@@ -1750,13 +1772,49 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		progress.recentOutput = filtered.slice(-8).reverse();
 	};
 
+	/**
+	 * The tool call the model is writing, by its newest stream snapshot. Its preview is taken at the
+	 * emit boundary, as recentOutput is: a large edit's patch parses at most once per emit, not per delta.
+	 */
+	let streamingCall: ToolCall | undefined;
+	let streamingCallDirty = false;
+	const refreshStreamingCall = () => {
+		if (!streamingCallDirty || !streamingCall) return;
+		streamingCallDirty = false;
+		const { intent, strippedArgs } = extractIntent(isRecord(streamingCall.arguments) ? streamingCall.arguments : {});
+		const preview = previewToolArgs(streamingCall.name, strippedArgs);
+		progress.streaming = {
+			kind: "call",
+			tool: streamingCall.name,
+			args: preview?.value,
+			argsKey: preview?.key,
+			intent,
+		};
+	};
+	/** What the model now produces, other than a call it is writing; undefined once nothing streams. */
+	const setStreaming = (state: AgentStreaming | undefined) => {
+		streamingCall = undefined;
+		streamingCallDirty = false;
+		progress.streaming = state;
+	};
+
+	/** A call's argument preview, read as its tool reads it (an edit tool's mode decides its paths). */
+	const previewToolArgs = (toolName: string, args: Record<string, unknown>) => {
+		const editMode =
+			toolName === "apply_patch"
+				? "apply_patch"
+				: ((activeSession?.getToolByName(toolName) as { mode?: EditMode } | undefined)?.mode ?? undefined);
+		return extractToolArgsPreview(args, toolName, editMode);
+	};
+
 	const emitProgressNow = () => {
 		refreshRecentOutput();
+		refreshStreamingCall();
 		progress.durationMs = Date.now() - startTime;
 		onProgress?.({ ...progress });
 		const activityGist =
 			progress.lastIntent ?? (progress.currentTool ? `running ${progress.currentTool}` : undefined);
-		if (activityGist) AgentRegistry.global().setActivity(id, activityGist);
+		if (activityGist && activeSession) AgentRegistry.global().setActivity(id, activityGist, activeSession);
 		const progressPayload = {
 			index,
 			agent: agent.name,
@@ -1813,6 +1871,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			abortSignal,
 			args.parentActiveModelPattern,
 			args.parentActiveProvider,
+			args.journalTaskLabel,
 		)
 			.then(label => {
 				if (!label || abortSignal.aborted || progress.description) return;
@@ -1975,6 +2034,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			case "message_start":
 				if (event.message?.role === "assistant") {
 					assistantStreaming = true;
+					setStreaming(undefined);
 					resetRecentOutput();
 				}
 				// An async-result follow-up injected after a recorded yield
@@ -1983,7 +2043,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				// reminder ladder demands a fresh yield. Guarded on the run signal:
 				// once the run is completing, late injections must not destabilize
 				// the settled classification.
-				if (yieldCalled && !abortSignal.aborted && isAsyncResultInjection(event.message)) {
+				// Workpool items are final once accepted (`yield` refuses a resubmission),
+				// so there is no fresh yield to demand.
+				if (
+					yieldCalled &&
+					!abortSignal.aborted &&
+					isAsyncResultInjection(event.message) &&
+					!activeSession?.getWorkPoolYieldItems().length
+				) {
 					yieldCalled = false;
 					yieldInvalidatedByAsync = true;
 					yieldAcceptedAt = undefined;
@@ -1999,12 +2066,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				} else if (isRecord(event.args)) {
 					startArgs = event.args;
 				}
-				const editMode =
-					event.toolName === "apply_patch"
-						? "apply_patch"
-						: ((activeSession?.getToolByName(event.toolName) as { mode?: EditMode } | undefined)?.mode ??
-							undefined);
-				const preview = extractToolArgsPreview(startArgs, event.toolName, editMode);
+				const preview = previewToolArgs(event.toolName, startArgs);
+				// The running call takes over from the one being written; calls written after it wait their turn.
+				setStreaming(undefined);
 				progress.currentToolArgs = preview?.value;
 				progress.currentToolArgsKey = preview?.key;
 				progress.currentToolStartMs = now;
@@ -2207,22 +2271,41 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 
 			case "message_update": {
 				if (event.message?.role !== "assistant") break;
-				const assistantEvent = (
-					event as AgentEvent & {
-						assistantMessageEvent?: { type?: string; delta?: string };
+				// Optional at runtime: a replayed content update carries no stream event.
+				const update: AssistantMessageEvent | undefined = event.assistantMessageEvent;
+				if (!update) {
+					const updateContent =
+						getMessageContent(event.message) || (event as AgentEvent & { content?: unknown }).content;
+					if (updateContent && Array.isArray(updateContent)) {
+						replaceRecentOutputFromContent(updateContent);
 					}
-				).assistantMessageEvent;
-				if (assistantEvent?.type === "text_delta" && typeof assistantEvent.delta === "string") {
-					appendRecentOutputTail(assistantEvent.delta);
 					break;
 				}
-				if (assistantEvent && assistantEvent.type !== "text_delta") {
-					break;
-				}
-				const updateContent =
-					getMessageContent(event.message) || (event as AgentEvent & { content?: unknown }).content;
-				if (updateContent && Array.isArray(updateContent)) {
-					replaceRecentOutputFromContent(updateContent);
+				switch (update.type) {
+					case "text_delta":
+						appendRecentOutputTail(update.delta);
+						setStreaming(STREAMING_TEXT);
+						break;
+					case "text_start":
+						setStreaming(STREAMING_TEXT);
+						break;
+					case "thinking_start":
+					case "thinking_delta":
+						setStreaming(STREAMING_THINKING);
+						break;
+					case "toolcall_start":
+					case "toolcall_delta": {
+						const block = update.partial.content[update.contentIndex];
+						if (block?.type === "toolCall" && block.name) {
+							streamingCall = block;
+							streamingCallDirty = true;
+						}
+						break;
+					}
+					case "toolcall_end":
+						streamingCall = update.toolCall;
+						streamingCallDirty = true;
+						break;
 				}
 				break;
 			}
@@ -2232,6 +2315,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				const role = event.message?.role;
 				if (role === "assistant") {
 					assistantStreaming = false;
+					// Reasoning and prose end with the response; a call it wrote stays until it runs.
+					if (!streamingCall) setStreaming(undefined);
 					sawAssistantMessage = true;
 					progress.requests += 1;
 					const eventContent = isRecord(event) && "content" in event ? event.content : undefined;
@@ -2328,6 +2413,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				// vanished after a pause ends with that paused loop's messages again.
 				const resent = event.type === "agent_end" && pausedLoopCollected;
 				pausedLoopCollected = event.type === "agent_pause";
+				setStreaming(undefined);
 				// Extract final content from assistant messages only (not user prompts).
 				if (!resent && Array.isArray(event.messages)) {
 					for (const msg of event.messages) {
@@ -2598,9 +2684,8 @@ function recordedYields(progress: AgentProgress): YieldItem[] {
  * delivered no data.
  */
 function stepReport(monitor: SubagentRunMonitor, structured: boolean, firstYield: number): string | undefined {
-	const lastTurn = monitor.lastReportTurnText();
-	if (!structured) return lastTurn;
-	const assembled = assembleYieldResult(recordedYields(monitor.progress).slice(firstYield), lastTurn);
+	if (!structured) return monitor.lastReportTurnText();
+	const assembled = assembleYieldResult(recordedYields(monitor.progress).slice(firstYield));
 	if (!assembled || assembled.missingData) return undefined;
 	return typeof assembled.data === "string" ? assembled.data : JSON.stringify(assembled.data, null, 2);
 }
@@ -2911,6 +2996,7 @@ async function driveSessionToResult(
 							count: running.length,
 							multiple: running.length > 1,
 							jobs,
+							workPool: session.getWorkPoolYieldItems().length > 0,
 						});
 						try {
 							await dispatchPrompt(notice, { attribution: "agent", synthetic: true }, "async-pending notice");
@@ -3055,8 +3141,7 @@ interface FinalizeRunArgs {
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
-	/** `false` = no `yield` tool: the run's last report turn is the result verbatim. Default `true`. */
-	structured?: boolean;
+	/** Absent = no `yield` tool: the run's last report turn is the result verbatim (see {@link usesYield}). */
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
@@ -3094,7 +3179,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	// A structured run finalizes from its yield (falling back to the run's
 	// output); a message-result run is exactly its final report turn, never
 	// the narration of earlier turns.
-	const structured = args.structured !== false;
+	const structured = usesYield(args.outputSchema);
 	let rawOutput = structured ? monitor.rawOutput() : (monitor.lastReportTurnText() ?? "");
 	const yieldItems = recordedYields(progress);
 	// Breadcrumb the synchronous yield-payload shaping (O(rawOutput)) so a block
@@ -3112,8 +3197,6 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 			outputSchema: args.outputSchema,
 			outputSchemaMode: args.outputSchemaMode,
 			outputSchemaSource: args.outputSchemaSource,
-			lastAssistantText: monitor.lastReportTurnText(),
-			structured,
 		});
 	} finally {
 		popLoopPhase();
@@ -3320,8 +3403,7 @@ export interface IrcWakeTurnMonitorOptions {
 	completionProbe?: boolean;
 	softRequestBudget?: number;
 	softRequestBudgetNotice?: boolean;
-	/** `false` = the session has no `yield` tool; see {@link ExecutorOptions.structured}. */
-	structured?: boolean;
+	/** Absent = the session has no `yield` tool; see {@link usesYield}. */
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
@@ -3709,7 +3791,6 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					task: ircTask,
 					modelOverride: options.modelOverride,
 					modelRole: options.modelRole,
-					structured: options.structured,
 					outputSchema: options.outputSchema,
 					outputSchemaMode: options.outputSchemaMode,
 					outputSchemaSource: options.outputSchemaSource,
@@ -3735,7 +3816,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				// A focused-user result can complete without a registered wake job;
 				// enqueue its delivery without reserving an execution slot.
 				const messageResult =
-					(userPrompted || ownerPrompted) && options.structured === false && result?.outputPath !== undefined;
+					(userPrompted || ownerPrompted) && !usesYield(options.outputSchema) && result?.outputPath !== undefined;
 				if (messageResult && !wakeJob && ownerId && session.asyncJobManager && result) {
 					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 					try {
@@ -3961,8 +4042,7 @@ export interface FollowUpTurnOptions {
 	description?: string;
 	/** Explicit pre-expansion model role alias retained from the original run. */
 	modelRole?: string;
-	/** Structured-output state retained from the original invocation; see {@link ExecutorOptions.structured}. */
-	structured?: boolean;
+	/** Output schema retained from the original invocation; absent = no `yield` tool (see {@link usesYield}). */
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
@@ -4154,7 +4234,7 @@ async function driveFollowUpTurn(
 	// ordinary contract so the wake cannot consume pooled items, wait it out,
 	// then reinstall and reattach for the retry.
 	let attemptUnsubscribe = monitor.attach(session);
-	const structured = options.structured !== false;
+	const structured = usesYield(options.outputSchema);
 	// As in a first run: this turn's monitor would take a wake turn's answer
 	// (or its `yield`) as this turn's result, so non-parent wakes wait for it.
 	const releaseIrcWakes = session.holdIrcWakes();
@@ -4205,7 +4285,6 @@ async function driveFollowUpTurn(
 			agent,
 			task: message,
 			modelRole: options.modelRole,
-			structured,
 			outputSchema: options.outputSchema,
 			outputSchemaMode: options.outputSchemaMode,
 			outputSchemaSource: options.outputSchemaSource,
@@ -4633,7 +4712,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		onProgress,
 	} = options;
 	const cleanupGraceMs = options.cleanupGraceMs ?? TASK_ABORT_CLEANUP_GRACE_MS;
-	const structured = options.structured !== false;
+	const structured = usesYield(outputSchema);
 	const startTime = Date.now();
 	// Set by the session's onFirstChatDispatch hook the first time the agent
 	// loop dispatches a chat request to the provider — the launch-complete boundary.
@@ -4690,6 +4769,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		settings,
 		{
 			...compactionThresholdSettings(options.compactionThresholdOverride),
+			...subagentLspWritethroughSettings(settings),
 			...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
 			// Isolated runs must not expose roots outside the worktree.
 			...(worktree !== undefined ? { "workspace.additionalDirectories": [] } : undefined),
@@ -4775,6 +4855,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		settings,
 		parentActiveModelPattern: options.parentActiveModelPattern,
 		parentActiveProvider: options.parentActiveProvider,
+		journalTaskLabel: options.journalTaskLabel,
 		modelOverride,
 		modelRole,
 		modelRoute: options.modelRoute,
@@ -4813,7 +4894,6 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		maxRuntimeMs,
 		softRequestBudget,
 		softRequestBudgetNotice,
-		structured,
 		outputSchema,
 		outputSchemaMode: options.outputSchemaMode,
 		outputSchemaSource: options.outputSchemaSource,
@@ -5155,7 +5235,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					inheritedSessionAgents: options.inheritedSessionAgents,
 					model,
 					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
-					modelPatternAuthFallback:
+					modelPatternParentFallback:
 						model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
 					modelPatternFallbackRole:
 						model || modelOverride === undefined ? undefined : subagentRetryFallbackRole(id),
@@ -5179,8 +5259,9 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 							}
 						: {}),
 					thinkingLevelCeiling: spawnEffortCeiling,
-					// Subagents are short-lived; never schedule background warm requests.
-					cacheWarming: false,
+					// Bridge long tool waits (a third of them happen in subagents), but never
+					// warm after the subagent settles; the user's `off` still wins.
+					cacheWarming: "streaming",
 					toolNames,
 					outputSchema,
 					outputSchemaMode: options.outputSchemaMode,
@@ -5260,6 +5341,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					)
 				: undefined;
 			let session: AgentSession;
+			let modelFallbackMessage: string | undefined;
 			let sessionPromise: Promise<CreateAgentSessionResult> | undefined;
 			try {
 				sessionPromise = createAgentSession(
@@ -5274,7 +5356,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 						},
 					}),
 				);
-				({ session } = await awaitAbortable(sessionPromise));
+				({ session, modelFallbackMessage } = await awaitAbortable(sessionPromise));
 				// Stash the sibling family candidate once the child session exists,
 				// independent of its initial model, so a later model change (retry
 				// fallback, model switch) still finds it. Consumption is gated per
@@ -5316,10 +5398,26 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			sessionCreatedAt = performance.now();
 
 			monitor.setActiveSession(session);
+			// Neither the agent's patterns nor the parent's model resolved (the session
+			// says why): name the agent and the setting to fix instead of letting the
+			// first prompt fail with the generic `/login` error.
+			if (!session.model && modelFallbackMessage) {
+				const role = modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings);
+				const configure = [
+					...(role ? [`\`modelRoles.${role}\``] : []),
+					`\`task.agentModelOverrides.${agent.name}\``,
+				].join(" or ");
+				throw new Error(
+					`Agent \`${agent.name}\` has no usable model: ${modelFallbackMessage}. Configure ${configure}, or spawn another agent.`,
+				);
+			}
 			// Run-state notifications precede deferrable wire-level `agent_end`,
 			// so adopted keep-alive lifecycle cannot get stuck during prompt unwind.
 			const registry = AgentRegistry.global();
 			registry.syncSessionStatus(id, session);
+			// Messages parked while this agent waited for a spawn slot or was starting.
+			const bus = IrcBus.existing();
+			for (let parked = bus?.take(id); parked; parked = bus?.take(id)) await session.deliverIrcMessage(parked);
 			const runRef = registry.get(id);
 			if (runRef) {
 				// Agent Hub kills bypass this run's caller signal: lifecycle.release()
@@ -5394,7 +5492,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				systemPrompt: session.agent.state.systemPrompt,
 				task,
 				tools: persistedSubagentTools,
-				mountedTools: session.getMountedXdevToolNames(),
+				mountedTools: session.getMountedToolCommandNames(),
 				agent: agent.name,
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,
@@ -5672,7 +5770,6 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			assignment,
 			modelOverride,
 			modelRole,
-			structured,
 			outputSchema,
 			outputSchemaMode: options.outputSchemaMode,
 			outputSchemaSource: options.outputSchemaSource,

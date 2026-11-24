@@ -23,6 +23,7 @@ import { roleCandidatePool } from "../config/model-roles";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import speechRewritePrompt from "../prompts/system/speech-rewrite.md" with { type: "text" };
+import { journalCompletion, type ModelUsageLedger } from "../session/model-usage-journal";
 
 const SYSTEM_PROMPT = prompt.render(speechRewritePrompt);
 // Rewrite budget: a paragraph in, a spoken paragraph (usually shorter) out.
@@ -43,6 +44,8 @@ export interface SpeechEnhancerDeps {
 	sessionId: string;
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
 	getSessionProvider?: () => string | undefined;
+	/** The session being spoken; each rewrite request is journaled there as `speech-rewrite`. */
+	usageLedger?: Partial<ModelUsageLedger>;
 }
 
 function extractText(content: AssistantMessage["content"]): string {
@@ -89,17 +92,19 @@ export class SpeechEnhancer {
 			if (!apiKey) return null;
 			// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
 			const metadata = this.#deps.metadataResolver?.(model.provider);
+			const bounded = boundBlock(block);
+			const journal = journalCompletion(this.#deps.usageLedger, { purpose: "speech-rewrite", role: "tiny" });
 			const response = await retryTransientCompletion(
-				() => {
+				async () => {
 					if (cfgOffline.get(settings) && model.provider !== this.#deps.getSessionProvider?.()) {
 						throw new Error("Speech rewrite provider no longer matches the active session provider.");
 					}
 					const timeout = AbortSignal.timeout(REWRITE_TIMEOUT_MS);
-					return completeSimple(
+					const attempt = await completeSimple(
 						model,
 						{
 							systemPrompt: [SYSTEM_PROMPT],
-							messages: [{ role: "user", content: boundBlock(block), timestamp: Date.now() }],
+							messages: [{ role: "user", content: bounded, timestamp: Date.now() }],
 						},
 						{
 							apiKey: registry.resolver(model, sessionId),
@@ -110,6 +115,11 @@ export class SpeechEnhancer {
 							signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
 						},
 					);
+					// Reported per attempt: a transient retry was billed too and would otherwise be replaced.
+					// An on-device model bills nothing and its failure may never have reached the worker,
+					// so only a rewrite it produced is journaled.
+					if (model.api !== "local-inference" || attempt.stopReason === "stop") journal?.(attempt, bounded);
+					return attempt;
 				},
 				{ signal, provider: model.provider },
 			);

@@ -27,7 +27,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/approval-cache";
 import { approvalTargetKey, approvalTreeSearchKey } from "@oh-my-pi/pi-coding-agent/tools/approval-targets";
 import { getAgentDir, isRecord, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { shortenPath } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
 
 /** Tool that keys `args.path` like read/write/edit do. */
 function pathTool(name: string, tier: ToolTier, cwd: string): AgentTool {
@@ -234,20 +234,30 @@ describe("grant choices in the prompt", () => {
 		const agentDir = freshAgentDir();
 		const huge = path.join(agentDir, "Huge");
 		fs.mkdirSync(huge);
+		const names: string[] = [];
 		for (let index = 0; index < 205; index += 1) {
-			fs.writeFileSync(path.join(huge, `entry-${String(index).padStart(3, "0")}.txt`), "x");
+			const name = `entry-${String(index).padStart(3, "0")}.txt`;
+			fs.writeFileSync(path.join(huge, name), "x");
+			names.push(name);
 		}
 		const { ui, prompts } = recordingUi();
 		await requestApproval(ui, pathTool("write", "write", huge), { path: "entry-000.txt" }, { grants: true });
 		const compact = prompts[0]!.compact.split("\n");
 		expect(compact[1]).toContain("200+ entries");
-		expect(compact.slice(2)).toEqual([
-			"  - entry-000.txt",
-			"  - entry-001.txt",
-			"  - entry-002.txt",
-			"  - entry-003.txt",
-			"  … 196 more",
-		]);
+		expect(compact.at(-1)).toBe("  … 196 more");
+		// The scan stops after 200 of the 205 entries, in the order the directory returns them:
+		// creation order on some filesystems, name-hash order on others (ext4), so which five go
+		// unread depends on the machine. The prompt names the first four in sort order of those it
+		// read; with five unread at most, the i-th of them lies between the i-th and the (i+5)-th name.
+		const listed = compact.slice(2, -1);
+		expect(listed).toHaveLength(4);
+		const listedNames = listed.map(line => line.replace(/^ {2}- /, ""));
+		expect(listed).toEqual(listedNames.map(name => `  - ${name}`));
+		expect(listedNames).toEqual([...new Set(listedNames)].sort());
+		for (const [i, name] of listedNames.entries()) {
+			expect(names.indexOf(name)).toBeGreaterThanOrEqual(i);
+			expect(names.indexOf(name)).toBeLessThanOrEqual(i + 5);
+		}
 	});
 
 	it("offers only the directory answer for a call that names just that directory", async () => {
@@ -369,8 +379,6 @@ describe("always-ask-cached wrapper cycle", () => {
 				getEditorText: () => "",
 				editor: async () => undefined,
 				addAutocompleteProvider: () => {},
-				setEditorComponent: () => {},
-				getEditorComponent: () => undefined,
 				get theme() {
 					return {} as never;
 				},

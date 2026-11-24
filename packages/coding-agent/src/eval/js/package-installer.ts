@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDir, isEnoent, ptree, withFileLock, writeRuntimeManifest } from "@oh-my-pi/pi-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tools/tool-errors";
 import { trackDownload } from "../../downloads/activity";
 import { resolveExecutablePath } from "../../subprocess/worker-client";
 import { normalizePackageRequirements } from "../package-requirements";
@@ -126,8 +126,9 @@ function installFailure(
 
 /**
  * Reconcile explicit JavaScript requirements in a host-owned package
- * environment. The persistent eval worker is deliberately untouched: an
- * install failure or cancellation cannot discard its namespace.
+ * environment. This never touches the persistent eval worker, so an install
+ * failure or cancellation cannot discard its namespace; the executor restarts
+ * a retained worker only after a successful install.
  */
 export async function installJsPackages(options: InstallJsPackagesOptions): Promise<JsPackageInstallResult> {
 	const mode = options.environment ?? "managed";
@@ -174,8 +175,7 @@ export async function installJsPackages(options: InstallJsPackagesOptions): Prom
 				environment,
 				summary:
 					`Bun reconciled ${environment.description}. Current declared dependencies: ${dependencies}. ` +
-					"Lifecycle scripts were disabled, so packages requiring native builds/postinstall may not work. " +
-					"Already imported modules remain cached in this persistent runtime; use reset to load upgraded package code.",
+					"Lifecycle scripts were disabled, so packages requiring native builds/postinstall may not work.",
 			};
 		},
 		{ signal: options.signal, retries: LOCK_ATTEMPTS, retryDelayMs: LOCK_RETRY_MS },

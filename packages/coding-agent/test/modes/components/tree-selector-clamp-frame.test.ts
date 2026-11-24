@@ -1,8 +1,11 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
-import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { treeListRows } from "../../helpers/tree-selector";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 let counter = 0;
 function makeNode(role: "user" | "assistant", text: string, parentId: string | null = null): SessionTreeNode {
@@ -45,14 +48,7 @@ function forkedSpine(forks: number): { root: SessionTreeNode; leaf: SessionTreeN
 }
 
 function renderStripped(root: SessionTreeNode, leaf: SessionTreeNode): string[] {
-	const selector = new TreeSelectorComponent(
-		[root],
-		leaf.entry.id,
-		30,
-		() => {},
-		() => {},
-	);
-	return selector.renderContent(120).map(line => Bun.stripANSI(line));
+	return treeListRows({ roots: [root], currentLeafId: leaf.entry.id }, { columns: 120, rows: 200 });
 }
 
 /** Column of a row's `├─`/`└─`, or `undefined` when it draws no connector. */
@@ -62,13 +58,8 @@ function connectorColumn(row: string): number | undefined {
 }
 
 describe("clamped rows share one horizontal frame", () => {
-	beforeAll(async () => {
-		await themeModule.initTheme(false, undefined, undefined, "dark", "light");
-	});
-
-	// 120 columns caps the prefix at 18 levels, so 25 forks render scrolled.
-	// Offsetting each row by its own depth puts unrelated depths in one column,
-	// stacking the `└─` that closes each abandoned turn at one width.
+	// 25 nested forks: the `└─` closing each abandoned turn must step one level
+	// outward per fork, never stack unrelated depths in one column.
 	it("steps closing connectors outward one level at a time", () => {
 		const { root, leaf } = forkedSpine(25);
 		const closing = renderStripped(root, leaf)

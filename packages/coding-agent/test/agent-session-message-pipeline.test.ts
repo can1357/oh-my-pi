@@ -36,7 +36,6 @@ import {
 import { RegisteredToolAdapter } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import * as memoryBackend from "@oh-my-pi/pi-coding-agent/memory-backend";
-import * as imageVisionFallback from "@oh-my-pi/pi-coding-agent/utils/image-vision-fallback";
 import { MEMORY_RECALL_CHANGES_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/memory-backend/recall-entry";
 import type { MemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
 import { type MnemopiSessionState, setMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
@@ -50,6 +49,7 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { createTestImageDescriptions } from "./helpers/image-description";
 
 function createAgent(): Agent {
 	return new Agent({
@@ -1082,6 +1082,7 @@ describe("AgentSession message pipeline", () => {
 		if (!context.runEphemeralTurn) throw new Error("Host did not expose side turns");
 		const messagesBefore = structuredClone(session.agent.state.messages);
 		const entriesBefore = structuredClone(sessionManager.getEntries());
+		const transcriptBefore = structuredClone(sessionManager.buildSessionContext().messages);
 		const deltas: string[] = [];
 		const result = await context.runEphemeralTurn({
 			promptText: "Question?",
@@ -1092,7 +1093,17 @@ describe("AgentSession message pipeline", () => {
 		expect(deltas.join("")).toBe("Answer");
 		expect(JSON.stringify(capturedContext?.messages)).toContain("zephyr-42");
 		expect(session.agent.state.messages).toEqual(messagesBefore);
-		expect(sessionManager.getEntries()).toEqual(entriesBefore);
+		// Only the spend is journaled, off-transcript: the reply without the question, and no message entry.
+		const entriesAfter = sessionManager.getEntries();
+		expect(entriesAfter.slice(0, entriesBefore.length)).toEqual(entriesBefore);
+		expect(entriesAfter.slice(entriesBefore.length)).toEqual([
+			expect.objectContaining({
+				type: "model_usage",
+				purpose: "extension",
+				completion: { reply: "Answer" },
+			}),
+		]);
+		expect(sessionManager.buildSessionContext().messages).toEqual(transcriptBefore);
 
 		expect(result.replyText).toBe("Answer");
 		expect(capturedOptions?.promptCacheKey).toBe(promptCacheKey);
@@ -1210,9 +1221,6 @@ describe("AgentSession message pipeline", () => {
 		["sends the image to a vision model", ["text", "image"]],
 		["describes the image for a text-only model", ["text"]],
 	] as const)("ephemeral prompt and history images: %s", async (_label, input) => {
-		const describe = vi
-			.spyOn(imageVisionFallback, "describeAttachedImagesForTextModel")
-			.mockResolvedValue([{ type: "text", text: "A red square." }]);
 		const model = buildModel({
 			id: "side-stream-model",
 			name: "Side Stream Model",
@@ -1232,37 +1240,58 @@ describe("AgentSession message pipeline", () => {
 			queueMicrotask(() => stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Red") }));
 			return stream;
 		};
-		const agent = new Agent({
-			initialState: { model, systemPrompt: ["system prompt"], messages: [], tools: [] },
-		});
-		const session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: createModelRegistryStub() as never,
-			sideStreamFn,
-		});
-		sessions.push(session);
-		const screenshot: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
+		const vision = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const modelRegistry = {
+			...createModelRegistryStub(),
+			getAvailable: () => [vision],
+			getAvailableForProviders: () => [vision],
+		};
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const artifacts = TempDir.createSync("@pi-ephemeral-image-");
+		try {
+			const descriptions = createTestImageDescriptions({
+				modelRegistry: modelRegistry as never,
+				settings,
+				artifactsDir: artifacts.path(),
+				description: "A red square.",
+			});
+			const agent = new Agent({
+				initialState: { model, systemPrompt: ["system prompt"], messages: [], tools: [] },
+				transformProviderContext: descriptions.transform,
+			});
+			const session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry: modelRegistry as never,
+				sideStreamFn,
+			});
+			sessions.push(session);
+			const screenshot: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
+			const textOnly = input.length === 1;
+			const expectRequest = (context: Context | undefined) => {
+				const request = JSON.stringify(context?.messages);
+				expect(request.includes('"type":"image"')).toBe(!textOnly);
+				expect(request.includes("A red square.")).toBe(textOnly);
+			};
 
-		await session.runEphemeralTurn({ promptText: "What colour is this?", promptImages: [screenshot] });
+			await session.runEphemeralTurn({ promptText: "What colour is this?", promptImages: [screenshot] });
+			expectRequest(contexts[0]);
 
-		const request = JSON.stringify(contexts[0]?.messages);
-		expect(contexts[0]?.messages.at(-1)?.content).toContainEqual(expect.objectContaining({ type: "image" }));
-		expect(request.includes("A red square.")).toBe(input.length === 1);
-		expect(describe).toHaveBeenCalledTimes(input.length === 1 ? 1 : 0);
-
-		// A follow-up replays the image from history with the same handling.
-		await session.runEphemeralTurn({
-			promptText: "And the border?",
-			history: [
-				{ role: "user", content: [{ type: "text", text: "What colour is this?" }, screenshot], timestamp: 1 },
-				createAssistantMessage("Red"),
-			],
-		});
-		expect(JSON.stringify(contexts[1]?.messages).includes("A red square.")).toBe(input.length === 1);
-		expect(describe).toHaveBeenCalledTimes(input.length === 1 ? 2 : 0);
-		expect(agent.state.messages).toEqual([]);
+			// A follow-up replays the image from history with the same handling, reusing the description.
+			await session.runEphemeralTurn({
+				promptText: "And the border?",
+				history: [
+					{ role: "user", content: [{ type: "text", text: "What colour is this?" }, screenshot], timestamp: 1 },
+					createAssistantMessage("Red"),
+				],
+			});
+			expectRequest(contexts[1]);
+			expect(descriptions.calls).toHaveLength(textOnly ? 1 : 0);
+			expect(agent.state.messages).toEqual([]);
+		} finally {
+			artifacts.removeSync();
+		}
 	});
 
 	it.each(["anthropic-messages", "ollama-chat", "openai-responses"])(
@@ -1365,64 +1394,6 @@ describe("AgentSession message pipeline", () => {
 		expect(nextWire).toEqual(firstWire);
 	});
 
-	it("does not cache keyed side history beyond regenerated image descriptions", async () => {
-		const describe = vi
-			.spyOn(imageVisionFallback, "describeAttachedImagesForTextModel")
-			.mockResolvedValueOnce([{ type: "text", text: "A red square." }])
-			.mockResolvedValueOnce([{ type: "text", text: "A blue square." }]);
-		const model = buildModel({
-			id: "text-only-side-test",
-			name: "Text Only",
-			api: "anthropic-messages",
-			provider: "anthropic",
-			baseUrl: "https://api.anthropic.com",
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 200_000,
-			maxTokens: 8192,
-		});
-		const { session, bodies } = capturingAnthropicSideSession(model);
-		const image: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
-		const stableHistory: Message[] = [
-			{ role: "user", content: [{ type: "text", text: "First question" }], timestamp: 1 },
-			{ ...createAssistantMessage("First answer"), model: model.id },
-		];
-		await expect(
-			session.runEphemeralTurn({
-				promptText: "Which color?",
-				promptImages: [image],
-				conversationKey: "btw:topic",
-				history: stableHistory,
-			}),
-		).rejects.toThrow();
-		await expect(
-			session.runEphemeralTurn({
-				promptText: "What next?",
-				conversationKey: "btw:topic",
-				history: [
-					...stableHistory,
-					{ role: "user", content: [{ type: "text", text: "Which color?" }, image], timestamp: 2 },
-					{ ...createAssistantMessage("Red"), model: model.id },
-				],
-			}),
-		).rejects.toThrow();
-
-		expect(describe).toHaveBeenCalledTimes(2);
-		expect(bodies).toHaveLength(2);
-		for (const [index, body] of bodies.entries()) {
-			const description = index === 0 ? "A red square." : "A blue square.";
-			const noticeIndex = body.messages.findIndex(message => JSON.stringify(message.content).includes(description));
-			const cached = body.messages.flatMap((message, index) =>
-				Array.isArray(message.content) && message.content.some(block => block.cache_control != null) ? [index] : [],
-			);
-			expect(noticeIndex).toBeGreaterThan(1);
-			expect(cached).toContain(1);
-			expect(cached.some(index => index > 1 && index < noticeIndex)).toBe(true);
-			expect(cached.every(index => index < noticeIndex)).toBe(true);
-		}
-	});
-
 	it.each([
 		["Antigravity fixed-profile transport", getBundledModel("google-antigravity", "claude-sonnet-4-6")],
 		...(["cursor-agent", "gitlab-duo-agent"] as const).map(
@@ -1496,9 +1467,9 @@ describe("AgentSession message pipeline", () => {
 			true,
 		],
 		[
-			"Gemini CLI",
+			"Antigravity",
 			buildModel({
-				...getBundledModel("google-gemini-cli", "gemini-2.5-pro"),
+				...getBundledModel("google-antigravity", "gemini-2.5-pro"),
 				thinking: { mode: "budget", efforts: [Effort.Medium] },
 			}),
 			false,
@@ -2716,7 +2687,7 @@ describe("AgentSession message pipeline", () => {
 				"compaction.enabled": false,
 				"bash.autoBackground.enabled": false,
 				"bashInterceptor.enabled": false,
-				"tools.xdev": false,
+				"tools.commands": false,
 			}),
 			model,
 			disableExtensionDiscovery: true,
@@ -2834,7 +2805,7 @@ describe("AgentSession message pipeline", () => {
 				"compaction.enabled": false,
 				"bash.autoBackground.enabled": false,
 				"bashInterceptor.enabled": false,
-				"tools.xdev": false,
+				"tools.commands": false,
 			}),
 			model,
 			disableExtensionDiscovery: true,
@@ -2934,7 +2905,7 @@ describe("AgentSession message pipeline", () => {
 			modelRegistry,
 			settings: Settings.isolated({
 				"compaction.enabled": false,
-				"tools.xdev": false,
+				"tools.commands": false,
 				"web_search.enabled": true,
 			}),
 			model,

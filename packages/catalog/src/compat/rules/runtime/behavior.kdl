@@ -10,15 +10,16 @@ behavior {
 			"omni-speech" "gpt-image-" "gpt-realtime"
 		exclude-substring "embedding"
 	}
-
 	// Retired providers: their entire roster is excluded from the generated
 	// bundle and must never be resurrected from the previous snapshot.
 	// `opencode` was split into `opencode-go` / `opencode-zen`; models.dev's
 	// `opencode` key now maps to `opencode-zen`, so fresh discovery never emits
 	// it, but its legacy rows survived as previous-snapshot zombies (no
 	// descriptor makes it authoritative to prune), surfacing a dead, un-authable
-	// `opencode` provider in the picker.
-	retired-providers "wafer-pass" "wandb" "opencode"
+	// `opencode` provider in the picker. `google-gemini-cli` was removed as a
+	// standalone provider; its `google-gemini-cli` API id remains for
+	// Antigravity/custom users.
+	retired-providers "wafer-pass" "wandb" "opencode" "google-gemini-cli"
 
 	// ClinePass exposes gateway-specific limits, pricing, and reasoning
 	// controls; matching them by bare model id contaminates unrelated proxy
@@ -62,17 +63,6 @@ behavior {
 		fallback "auto" substring="composer"
 	}
 
-	// Exact quota bucket memberships reported by Google Gemini CLI.
-	quota-tiers provider="google-gemini-cli" {
-		tier "3-Flash" "gemini-3-flash-preview" "gemini-3-flash" "gemini-3.5-flash"
-		tier "Flash" "gemini-2.5-flash" "gemini-2.5-flash-lite" "gemini-2.0-flash" \
-			"gemini-1.5-flash"
-		tier "Pro" "gemini-2.5-pro" "gemini-3-pro-preview" "gemini-3.1-pro-preview" \
-			"gemini-3-pro" "gemini-3.1-pro" "gemini-pro-agent" "gemini-1.5-pro"
-		// Unknown discovered quota ids retain the upstream display heuristic.
-		fallback "Flash" substring="flash"
-		fallback "Pro" substring="pro"
-	}
 	// Antigravity reports backend-family counters, with a separate weekly bucket
 	// for Gemini 4 Argon. Exact memberships cover bundled/current ids; fallbacks
 	// preserve the same counter for newly discovered family ids.
@@ -121,19 +111,22 @@ behavior {
 	}
 	// Subscription eligibility for model-aware Codex credential routing.
 	// GPT-6.1 Terra launched for Plus, Pro, Enterprise, and Edu, not Free/Go
-	// (https://openai.com/index/introducing-gpt-6-1-terra/, 2026-10-26).
+	// (https://openai.com/index/introducing-gpt-6-1-terra/, 2026-10-26); so did
+	// GPT-6.2 Astra and Sol (https://openai.com/index/introducing-gpt-6-2-astra-sol/,
+	// 2026-11-17).
 	plan-requirement provider="openai-codex" {
 		tier "pro" substring="-spark"
 		tier "paid" exact="gpt-5.6" exact="gpt-5.6-sol" exact="gpt-5.6-sol-pro" \
 			exact="gpt-5.6-luna" exact="gpt-5.6-luna-pro" glob="*/gpt-5.6" glob="*/gpt-5.6-sol" \
 			glob="*/gpt-5.6-sol-pro" glob="*/gpt-5.6-luna" glob="*/gpt-5.6-luna-pro" \
-			glob="gpt-6.1-terra*" glob="*/gpt-6.1-terra*"
+			glob="gpt-6.1-terra*" glob="*/gpt-6.1-terra*" glob="gpt-6.2-astra*" glob="*/gpt-6.2-astra*" \
+			glob="gpt-6.2-sol*" glob="*/gpt-6.2-sol*"
 	}
 
 	// Z.AI and Zhipu emit timezone-naive account-reset wall clocks in Beijing
-	// time. Provider-aware retry paths append this offset before parsing.
+	// time. Custom provider IDs pointing at the Coding Plan endpoint inherit it.
 	retry-reset-timezone provider="zai" offset="+08:00"
-	retry-reset-timezone provider="zhipu-coding-plan" offset="+08:00"
+	retry-reset-timezone provider="zhipu-coding-plan" base-url="https://open.bigmodel.cn/api/coding/paas/v4" offset="+08:00"
 
 	// Cloudflare AI Gateway namespace routing. The Workers AI prefix remains
 	// on the request id; the upstream namespaces are stripped.
@@ -182,8 +175,12 @@ behavior {
 	exclude-models provider="xiaomi-token-plan-cn" substring="-tts" substring="-asr"
 	exclude-models provider="xiaomi-token-plan-sgp" substring="-tts" substring="-asr"
 	// Text-chat transports cannot serve StepFun's audio-only and image-editing
-	// SKUs, which its /v1/models roster interleaves with the chat models.
-	exclude-models provider="stepfun" prefix="stepaudio-" prefix="step-image-" prefix="step-tts-" prefix="step-2x-large"
+	// SKUs, which its /v1/models roster interleaves with the chat models, nor
+	// `dr-search-api`, the roster entry for its standalone web search service
+	// (`POST /v1/search`, platform.stepfun.com/docs/zh/api-reference/search/search),
+	// which is not a chat model.
+	exclude-models provider="stepfun" prefix="stepaudio-" prefix="step-image-" prefix="step-tts-" prefix="step-2x-large" \
+		exact="dr-search-api"
 	// Helmcode's /v1/models roster lists embedding, rerank, TTS, and STT models
 	// beside the chat models (helmcode.com/docs/models).
 	exclude-models provider="helmcode" exact="qwen3-embedding" exact="rerank" exact="kokoro" exact="whisper"
@@ -201,6 +198,12 @@ behavior {
 	exclude-models provider="otari" substring="embed" substring="rerank" substring="-tts" substring="transcribe" \
 		substring="realtime" substring="minilm" substring="mpnet" substring="/bge-" substring="/e5-" substring="/flux-" \
 		prefix="openai/gpt-image-" prefix="alibaba/qwen-image"
+	// Bifrost lists every model of every configured upstream, including
+	// embedding, speech, transcription, and image models. Rows with metadata are
+	// filtered on `architecture.output_modalities` in the mapper; these catch
+	// metadata-less non-chat rows behind the `<bifrost-provider>/` prefix.
+	exclude-models provider="bifrost" substring="embed" substring="rerank" substring="-tts" substring="transcribe" \
+		substring="whisper" substring="realtime" substring="/dall-e" substring="/gpt-image-" substring="moderation"
 	// SuperGrok's roster interleaves media models the chat picker cannot
 	// serve; the dedicated tool surfaces route them instead.
 	exclude-models provider="xai-oauth" exact="grok-imagine-image-quality" exact="grok-imagine-image-2.0" \
@@ -277,6 +280,10 @@ behavior {
 			exact="xai/grok-4.5" exact="xai/grok-4.6" exact="xai/grok-4.7" exact="meta/muse-spark-1.1" \
 			exact="meta/muse-spark-1.2" exact="meta/muse-spark-1.2-contributor" exact="meta/muse-spark-1.3" \
 			exact="meta/muse-spark-1.3-contributor" exact="stealth/pixel-canary" exact="sakana/fugu-ultra"
+		route "openai-responses" exact="deepseek/deepseek-v4.1-flash-ultrafast" exact="google/gemini-4-carbon" \
+			exact="gpt-6.1-sol" exact="gpt-6.1-terra" exact="meta/muse-ember" exact="meta/muse-spark-open" \
+			exact="meta/muse-wonder-1.0" exact="mistral/mistral-large-4" exact="moonshotai/Kimi-K3.1-Pro" \
+			exact="nvidia/nemotron-3.5-super-vl" exact="stealth/glyph-cluster:free" exact="tencent/hy4-flash"
 	}
 	// ZenMux fronts Anthropic ids on a dedicated Messages endpoint; every
 	// other namespace stays on chat completions.
@@ -484,6 +491,8 @@ behavior {
 		model "kimi-k3"
 		model "moonshotai/kimi-k3"
 		model "k3"
+		model "zai/glm-5.4"
+		model "glm-5.4"
 		model "zai/glm-5.3"
 		model "glm-5.3"
 		model "anthropic/claude-opus-5-5"
@@ -539,7 +548,11 @@ behavior {
 	// Pinned: TypeSafe's `jev-latest` alias moves only after a release ships (jev-1.14.0 shipped 2026-10-14; the alias moved 2026-10-22).
 	role-defaults "judge" {
 		model "typesafe/jev-1.14.0"
+		// OpenCode's limited-time free Jev, for Go and Zen logins.
+		model "opencode-go/jev-1.13-free"
+		model "opencode-zen/jev-1.13-free"
 		model "openrouter/typesafe/jev-1.14"
+		model "opencode-zen/jev-1.14"
 		model "@tiny"
 		model "@smol"
 		model "@default"

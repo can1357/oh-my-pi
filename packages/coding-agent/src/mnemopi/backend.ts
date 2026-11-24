@@ -12,7 +12,7 @@ import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { roleCandidatePool } from "../config/model-roles";
 import { resolveRoleChain } from "../config/model-resolver";
-import { type JudgmentUsageLedger, journalJudgmentUsage } from "../judgment";
+import { journalCompletion, type ModelUsageLedger } from "../session/model-usage-journal";
 import type {
 	MemoryBackend,
 	MemoryBackendSaveInput,
@@ -21,14 +21,14 @@ import type {
 	MemoryBackendStatus,
 	MemoryPromptPreparation,
 } from "../memory-backend/types";
-import { memoryToolRefs } from "../memory-backend/tool-names";
 import memoryConsolidationPrompt from "../prompts/system/memory-consolidation-system.md" with { type: "text" };
 import memoryExtractionPrompt from "../prompts/system/memory-extraction-system.md" with { type: "text" };
 import mnemopiInstructions from "../prompts/system/mnemopi-instructions.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
 import { tinyModelClient } from "../tiny/title-client";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { concreteThinkingLevel, shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
+import { unmeteredMessage } from "../utils/title-generator";
+import { shortenPath } from "../utils/render-utils";
+import { concreteThinkingLevel, shouldDisableReasoning, toReasoningEffort } from "../thinking/levels";
 import {
 	loadMnemopiConfig,
 	type MnemopiBackendConfig,
@@ -163,9 +163,7 @@ export const mnemopiBackend: MemoryBackend = {
 		return withLoopPhase("mnemopi.recall", () => {
 			const state = getMnemopiSessionState(session);
 			const primary = state?.aliasOf ?? state;
-			const parts = [
-				prompt.render(mnemopiInstructions, { toolRefs: memoryToolRefs(session?.getXdevToolEntries()) }),
-			];
+			const parts = [prompt.render(mnemopiInstructions)];
 			if (primary?.lastRecallSnippet) parts.push(primary.lastRecallSnippet);
 			const rendered = parts.join("\n\n").trim();
 			if (!rendered) return undefined;
@@ -491,7 +489,7 @@ async function loadMnemopiConfigWithProviders(
 	agentDir: string,
 	modelRegistry: ModelRegistry,
 	sessionId: string,
-	usageLedger: Partial<JudgmentUsageLedger>,
+	usageLedger: Partial<ModelUsageLedger>,
 	session: AgentSession,
 ): Promise<MnemopiBackendConfig> {
 	const config = loadMnemopiConfig(settings, agentDir);
@@ -530,7 +528,7 @@ async function resolveMnemopiProviderOptions(
 	settings: MemoryBackendStartOptions["settings"],
 	modelRegistry: ModelRegistry,
 	sessionId: string,
-	usageLedger: Partial<JudgmentUsageLedger>,
+	usageLedger: Partial<ModelUsageLedger>,
 	session: AgentSession,
 ): Promise<MnemopiProviderOptions> {
 	const base: MnemopiProviderOptions = {
@@ -607,11 +605,11 @@ async function resolveMnemopiProviderOptions(
 		}
 
 		const complete = async (prompt: string, opts?: MnemopiLlmCompleteOptions): Promise<string | null> => {
-			// journalJudgmentUsage snapshots the session id. /new, fork, and session
+			// journalCompletion snapshots the session id and leaf. /new, fork, and session
 			// switch keep this function, so bind inside each call. An in-flight call
-			// keeps the callback it already created and still journals to its start.
-			const { onUsage, request, signal } = {
-				onUsage: journalJudgmentUsage(usageLedger),
+			// keeps the journal it already created and still journals to its start.
+			const { journal, request, signal } = {
+				journal: journalCompletion(usageLedger, { purpose: "memory", role: "memory" }),
 				request: resolveMemoryCompletionInput(prompt, opts),
 				signal:
 					typeof opts?.timeout === "number" && Number.isFinite(opts.timeout) && opts.timeout > 0
@@ -626,12 +624,22 @@ async function resolveMnemopiProviderOptions(
 					if (model.api === "local-inference") {
 						// The tiny worker may download its runtime or model on first use.
 						if (cfgOffline.get(settings)) continue;
+						const started = performance.now();
 						const result = await tinyModelClient.complete(model.id, request.prompt, {
 							maxTokens: opts?.maxTokens,
 							systemPrompt: request.systemPrompt,
 							signal,
 						});
-						if (result !== null) return result;
+						if (result !== null) {
+							// A null result may never have reached the worker, so only produced output is journaled.
+							if (result) {
+								journal?.(
+									{ ...unmeteredMessage(model, result), duration: Math.round(performance.now() - started) },
+									request.prompt,
+								);
+							}
+							return result;
+						}
 						if (signal?.aborted) return null;
 						logger.warn("Mnemopi: local memory completion failed; trying the next configured fallback.", {
 							provider: model.provider,
@@ -671,17 +679,7 @@ async function resolveMnemopiProviderOptions(
 										reasoning: clampThinkingLevelForModel(model, toReasoningEffort(level)),
 										disableReasoning: shouldDisableReasoning(level) ? true : undefined,
 										signal,
-										onAttempt: message =>
-											onUsage?.({
-												purpose: "memory",
-												role: "memory",
-												api: model.api,
-												provider: model.provider,
-												model: model.id,
-												usage: message.usage,
-												stopReason: message.stopReason,
-												errorMessage: message.errorMessage,
-											}),
+										onAttempt: message => journal?.(message, request.prompt),
 									},
 								),
 							);

@@ -8,20 +8,53 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import type { TspPropNode } from "@oh-my-pi/pi-wire";
-import type { NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { JobWidgetEntry, JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { AsyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
+import type { JobWidgetEntry, JobWidgetView } from "@oh-my-pi/pi-coding-agent/tools/details/job-widget";
+import { createRoot, resolveChildren } from "@oh-my-pi/pi-tui";
+import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { HudPills, type HudPillsModel } from "../src/ui/dock";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
-function nodes(root: NativeNode): NativeNode[] {
-	const out: NativeNode[] = [root];
-	for (const child of root.c ?? []) if ("k" in child) out.push(...nodes(child));
-	return out;
+/** A node as the native backend describes it. */
+interface Described {
+	readonly k: string;
+	readonly key?: string;
+	readonly p?: Readonly<Record<string, unknown>>;
+	readonly c?: readonly Described[];
 }
 
-function prop(node: NativeNode | TspPropNode | NativeChild | undefined, name: string): unknown {
-	return node && "p" in node && node.p ? Reflect.get(node.p, name) : undefined;
+function nodes(root: Described | undefined): Described[] {
+	return root ? [root, ...(root.c ?? []).flatMap(nodes)] : [];
+}
+
+function prop(node: Described | undefined, name: string): unknown {
+	return node?.p?.[name];
+}
+
+/** The HUD pills row over `model`, as the native backend describes it. */
+function describePills(model: HudPillsModel): Described {
+	return createRoot(dispose => {
+		try {
+			const [root] = resolveChildren(HudPills({ model }))();
+			if (!root) throw new Error("the pills built nothing");
+			return describeTree(root, staticEnvironment(currentTheme()), 120) as Described;
+		} finally {
+			dispose();
+		}
+	});
+}
+
+/** A job snapshot running background jobs `ids`. */
+function running(...ids: string[]): AsyncJobSnapshot {
+	return snapshot(ids.map((id, index) => ({ id, type: "bash", status: "running", label: id, startTime: index })));
+}
+
+function snapshot(items: AsyncJobSnapshot["running"]): AsyncJobSnapshot {
+	return { running: items, recent: [], delivery: { queued: 0, delivering: false, pendingJobIds: [] } };
 }
 
 const decode: JobWidgetView = {
@@ -56,7 +89,7 @@ describe("InteractiveMode HUD pills", () => {
 	let mode: InteractiveMode;
 
 	beforeAll(async () => {
-		await initTheme();
+		initTheme();
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-hud-job-widgets-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
@@ -70,7 +103,15 @@ describe("InteractiveMode HUD pills", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 	});
 
 	afterEach(() => {
@@ -85,15 +126,20 @@ describe("InteractiveMode HUD pills", () => {
 		resetSettingsForTest();
 	});
 
-	const jobsSegment = (): NativeNode | undefined =>
-		nodes(mode.describeHudPills()).find(node => node.key === "jobs" && prop(node, "role") === "omp.hud.seg");
+	/** The jobs segment after the mode re-reads the session's jobs (as a job widget change makes it). */
+	const jobsSegment = (): Described | undefined => {
+		mode.applyPinnedAgentsSetting();
+		return nodes(describePills(mode.hud.pills)).find(
+			node => node.key === "jobs" && prop(node, "role") === "omp.hud.seg",
+		);
+	};
 
 	it("shows the freshest headline and a mini spark, lists every widget in the title and stacks them in a hover card", () => {
 		let entries: JobWidgetEntry[] = [
 			{ id: "bg_1", type: "bash", view: evalRun },
 			{ id: "bg_2", type: "bash", view: decode },
 		];
-		spyOn(mode.statusLine, "runningBackgroundJobCount").mockReturnValue(2);
+		spyOn(session, "getAsyncJobSnapshot").mockReturnValue(running("bg_1", "bg_2"));
 		spyOn(session, "getRunningJobWidgets").mockImplementation(() => entries);
 
 		const segment = jobsSegment()!;
@@ -108,27 +154,24 @@ describe("InteractiveMode HUD pills", () => {
 		expect(prop(segment, "title")).toBe(
 			"2 jobs running  /jobs\nbg_1  eval · per model — trials 7/9 trials\nbg_2  loadtest · decode — decode 186 tok/s ▲ 15%",
 		);
-		const card = prop(segment, "hovercard") as TspPropNode;
+		const card = prop(segment, "hovercard") as Described;
 		expect(card).toMatchObject({ k: "col", p: { role: "omp.jobs.hovercard" } });
 		expect(card.c?.map(child => prop(child, "role"))).toEqual(["omp.job.tiles"]);
 		expect(card.c?.[0]?.c?.map(child => prop(child, "role"))).toEqual(["omp.job.tile", "omp.job.tile"]);
 
-		// Unchanged widget data keeps the described node; moved data re-describes it.
-		expect(jobsSegment()).toBe(segment);
+		// Moved widget data re-describes the segment.
 		entries = [
 			entries[0]!,
 			{ id: "bg_2", type: "bash", view: { ...decode, updatedAt: 3_000, headline: { text: "191 tok/s" } } },
 		];
-		const next = jobsSegment()!;
-		expect(next).not.toBe(segment);
-		expect(JSON.stringify(next)).toContain("191 tok/s");
+		expect(JSON.stringify(jobsSegment())).toContain("191 tok/s");
 	});
 
 	// A refresh recomputes the view from the wall clock (rate decay) even when no data moved:
 	// updatedAt and state stand still while the view object is swapped for a fresh one.
 	it("re-describes the segment when a refresh swaps the view object without moving updatedAt or state", () => {
 		let entries: JobWidgetEntry[] = [{ id: "bg_1", type: "bash", view: decode }];
-		spyOn(mode.statusLine, "runningBackgroundJobCount").mockReturnValue(1);
+		spyOn(session, "getAsyncJobSnapshot").mockReturnValue(running("bg_1"));
 		spyOn(session, "getRunningJobWidgets").mockImplementation(() => entries);
 
 		const segment = jobsSegment()!;
@@ -137,26 +180,49 @@ describe("InteractiveMode HUD pills", () => {
 		entries = [{ id: "bg_1", type: "bash", view: { ...decode, headline: { text: "171 tok/s" } } }];
 
 		const next = jobsSegment()!;
-		expect(next).not.toBe(segment);
 		const glance = nodes(next).find(node => prop(node, "role") === "omp.hud.glance");
 		expect(prop(glance, "spans")).toEqual([{ t: "171 tok/s", s: "num strong" }]);
 		expect(prop(next, "title")).toBe("1 job running  /jobs\nbg_1  loadtest · decode — 171 tok/s");
 	});
 
 	it("keeps the bare count segment while no running job draws a widget", () => {
-		spyOn(mode.statusLine, "runningBackgroundJobCount").mockReturnValue(1);
+		spyOn(session, "getAsyncJobSnapshot").mockReturnValue(running("bg_1"));
 		spyOn(session, "getRunningJobWidgets").mockReturnValue([]);
 		const segment = jobsSegment()!;
 		expect(prop(segment, "hovercard")).toBeUndefined();
 		expect(prop(segment, "title")).toBe("1 job running  /jobs");
 	});
 
+	// An agent's task job draws a widget too; it belongs to the agents segment, so it neither makes nor grows the jobs segment.
+	it("counts and lists background jobs only, never a job that runs an agent", () => {
+		spyOn(session, "getAsyncJobSnapshot").mockReturnValue(
+			snapshot([
+				{ id: "bg_1", type: "bash", status: "running", label: "loadtest", startTime: 1 },
+				{ id: "Scout", type: "task", status: "running", label: "scout", startTime: 2, agentId: "Scout" },
+			]),
+		);
+		spyOn(session, "getRunningJobWidgets").mockReturnValue([
+			{ id: "bg_1", type: "bash", view: decode },
+			{ id: "Scout", type: "task", view: evalRun },
+		]);
+		const segment = jobsSegment()!;
+		expect(prop(segment, "title")).toBe("1 job running  /jobs\nbg_1  loadtest · decode — decode 186 tok/s ▲ 15%");
+		const card = prop(segment, "hovercard") as Described;
+		expect(card.c?.[0]?.c).toHaveLength(1);
+
+		spyOn(session, "getAsyncJobSnapshot").mockReturnValue(
+			snapshot([{ id: "Scout", type: "task", status: "running", label: "scout", startTime: 2, agentId: "Scout" }]),
+		);
+		spyOn(session, "getRunningJobWidgets").mockReturnValue([{ id: "Scout", type: "task", view: evalRun }]);
+		expect(jobsSegment()).toBeUndefined();
+	});
+
 	it("keeps a clickable idle agents segment after the last subagent finishes, and drops it once none remain", () => {
 		const registry = AgentRegistry.global();
 		const id = "hud-finished-sub";
-		const agentsSegment = (): NativeNode | undefined => {
-			mode.syncRunningSubagentBadge({ requestRender: false });
-			return nodes(mode.describeHudPills()).find(
+		const agentsSegment = (): Described | undefined => {
+			mode.syncRunningSubagentBadge();
+			return nodes(describePills(mode.hud.pills)).find(
 				node => node.key === "agents" && prop(node, "role") === "omp.hud.seg",
 			);
 		};

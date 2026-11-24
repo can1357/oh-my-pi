@@ -442,9 +442,9 @@ export class RateLimits implements LimitsApi {
 	 * - usage-limit / account-rate-limit error → {@link RateLimits.markReached}
 	 *   (temporary block via its own backoff — default plus server usage-report
 	 *   reset; sticky left intact so the next resolve re-ranks around the block).
-	 * - exact model-entitlement denial (Codex ChatGPT account, Cursor plan, or
-	 *   Anthropic model-not-found 404) → temporarily block only that requested
-	 *   model, then rotate. A denial naming another model or provider changes nothing.
+	 * - exact model-entitlement denial (Codex ChatGPT account, Cursor plan,
+	 *   Anthropic model-not-found 404, or agy `Unknown model ID`) → temporarily
+	 *   block only that requested model, then rotate. A denial naming another model or provider changes nothing.
 	 * - other account-scoped policy denial → temporarily block that account
 	 *   without marking its credential suspect, then rotate through siblings.
 	 * - otherwise (hard 401 / auth failure) → mark the credential suspect (or
@@ -474,7 +474,7 @@ export class RateLimits implements LimitsApi {
 			// Thread the provider-specified reset window (e.g. Devin "Your limit
 			// will reset in 13 minutes") into the block duration so the credential
 			// is not reselected and hammered while the cap remains active.
-			const retryAfterMs = extractProviderRetryHint(provider, message);
+			const retryAfterMs = extractProviderRetryHint(provider, message, options?.baseUrl);
 			const mark = await this.markReached(provider, sessionId, {
 				retryAfterMs,
 				providerTimed: retryAfterMs !== undefined,

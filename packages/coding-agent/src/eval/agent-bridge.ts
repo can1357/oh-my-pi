@@ -16,10 +16,10 @@ import {
 	type StructuredSubagentIsolationControls,
 	type StructuredSubagentResult,
 } from "../task/structured-subagent";
-import type { AgentProgress, SingleResult, StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
-import type { NestedRepoPatch } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentProgress, SingleResult, StructuredSubagentSchemaMode } from "../task/task-details";
+import type { NestedRepoPatch } from "../task/task-details";
 import type { ToolSession } from "../tools";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 import type { JsStatusEvent } from "./js/shared/types";
 
 /** Synthetic bridge name reserved for the `agent()` helper across both runtimes. */
