@@ -347,6 +347,18 @@ fn truncate_nfc(units: &[u16], max_tokens: u32) -> usize {
 		at += nfc.len();
 		ControlFlow::Continue(())
 	});
+	let last = last - usize::from(splits_pair(units, last));
+	// A window that needs no NFC itself is cut like any other text.
+	let window = &units[from..last];
+	let budget = max_tokens - from_tokens;
+	if budget == 0 {
+		return from;
+	}
+	if bpe::nfc_quick(window) {
+		return from
+			+ find_crossing(window, budget)
+				.map_or(window.len(), |c| resolve_crossing(window, &c, budget));
+	}
 	(from + 1..=last)
 		.rev()
 		.find(|&k| {
