@@ -5,6 +5,7 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { type CompactionPreparation, resolveThresholdTokens, shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -475,6 +476,28 @@ describe("AgentSession auto-compaction progress guard", () => {
 		expect(compactEvents).toHaveLength(1);
 		expect(compactEvents[0]?.fromExtension).toBe(true);
 		expect(compactEvents[0]?.compactionEntry).toMatchObject({ summary: "compacted", fromExtension: true });
+	});
+
+	it("auto-continues after compaction of a status reply the context budget asked for", async () => {
+		// A budgeted Cursor turn ends with a text-only status because the
+		// provider told it to stop for compaction; the work is not done.
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 1000, contextWindow: 200000, percent: 0.5 });
+
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") onCompactionDone();
+		});
+
+		const assistantMsg = { ...highUsageAssistant(), contextBudgetWrapUp: true };
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await compactionDone;
+		await session.waitForIdle();
+
+		expect(promptSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("auto-continues after compaction while an active goal still needs work", async () => {
@@ -1239,6 +1262,137 @@ describe("AgentSession auto-compaction progress guard", () => {
 		await reloaded.close();
 	});
 
+	it("budgets a Cursor turn opening past the threshold only while a speculative summary runs", async () => {
+		const cursor = getBundledModel("cursor", "composer-2.5");
+		cfgCompactionMethodOrder.set(session.settings, ["handoff"]);
+		cfgCompactionEnabled.set(session.settings, true);
+		cfgCompactionAsyncEnabled.set(session.settings, true);
+		cfgCompactionThresholdTokens.set(session.settings, 150_000);
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgContextPromotionEnabled.set(session.settings, false);
+		compactHookEnabled = false;
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const handoffStarted = Promise.withResolvers<void>();
+		const handoffResult = Promise.withResolvers<string>();
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(async () => {
+			handoffStarted.resolve();
+			return handoffResult.promise;
+		});
+
+		const trigger = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "working" }],
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			stopReason: "stop" as const,
+			usage: {
+				input: 143_000,
+				output: 1_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 144_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+		sessionManager.appendMessage(trigger);
+		session.agent.emitExternalEvent({ type: "message_end", message: trigger });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [trigger] });
+		await handoffStarted.promise;
+		// The context now sits past the threshold, as after a deferred threshold pass.
+		cfgCompactionThresholdTokens.set(session.settings, 140_000);
+
+		expect(session.compactionSpeculation).toBe("running");
+		expect(await session.cursorContextBudgetTokens(cursor)).toBe(140_000);
+
+		handoffResult.resolve("summary");
+		while (session.compactionSpeculation === "running") await scheduler.yield();
+
+		expect(await session.cursorContextBudgetTokens(cursor)).toBeUndefined();
+	});
+
+	it("preserves the Cursor budget when a pre-prompt deferral's speculation settles before dispatch", async () => {
+		const cursor = getBundledModel("cursor", "composer-2.5");
+		cfgCompactionMethodOrder.set(session.settings, ["handoff"]);
+		cfgCompactionEnabled.set(session.settings, true);
+		cfgCompactionAsyncEnabled.set(session.settings, true);
+		cfgCompactionThresholdTokens.set(session.settings, 150_000);
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgContextPromotionEnabled.set(session.settings, false);
+		compactHookEnabled = false;
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const handoffStarted = Promise.withResolvers<void>();
+		const handoffResult = Promise.withResolvers<string>();
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(async () => {
+			handoffStarted.resolve();
+			return handoffResult.promise;
+		});
+
+		const trigger = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "working" }],
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			stopReason: "stop" as const,
+			usage: {
+				input: 143_000,
+				output: 1_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 144_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+		sessionManager.appendMessage(trigger);
+		session.agent.emitExternalEvent({ type: "message_end", message: trigger });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [trigger] });
+		await handoffStarted.promise;
+		cfgCompactionThresholdTokens.set(session.settings, 140_000);
+
+		let budgetAtDispatch: number | undefined;
+		vi.spyOn(session.agent, "prompt").mockImplementation(async () => {
+			// Speculation settles after pre-prompt maintenance deferred to it, before the turn queries its budget.
+			handoffResult.resolve("summary");
+			while (session.compactionSpeculation === "running") await scheduler.yield();
+			expect(session.compactionSpeculation).not.toBe("running");
+			budgetAtDispatch = await session.cursorContextBudgetTokens(cursor);
+		});
+
+		await session.prompt("next step");
+		expect(budgetAtDispatch).toBe(140_000);
+	});
+
+	it("omits the Cursor budget when fixed non-message context exceeds the recovery band without an authenticated promotion target", async () => {
+		const cursor = getBundledModel("cursor", "composer-2.5");
+		const largerModel = { ...getBundledModel("anthropic", "claude-sonnet-4-6"), contextWindow: 1_000_000 };
+		const promotableCursor = {
+			...cursor,
+			contextWindow: 100_000,
+			contextPromotionTarget: `${largerModel.provider}/${largerModel.id}`,
+		};
+		cfgCompactionEnabled.set(session.settings, true);
+		cfgCompactionThresholdTokens.set(session.settings, 10_000);
+		cfgContextPromotionEnabled.set(session.settings, true);
+		vi.spyOn(session.modelRegistry, "getAvailable").mockReturnValue([promotableCursor, largerModel]);
+
+		// ~8,500 tokens in the system prompt alone: below the 10k threshold, but above the 8k (80%) recovery band.
+		session.agent.setSystemPrompt("x".repeat(36_000));
+		// Even when promotion is enabled and a larger target is listed, an unauthenticated target cannot promote.
+		const getApiKeySpy = vi.spyOn(session.modelRegistry, "getApiKey").mockResolvedValue(undefined);
+		expect(await session.cursorContextBudgetTokens(promotableCursor)).toBeUndefined();
+
+		// When the larger promotion target actually resolves credentials, budgeting stays active.
+		getApiKeySpy.mockResolvedValue("valid-key");
+		expect(await session.cursorContextBudgetTokens(promotableCursor)).toBe(10_000);
+
+		// A session restricted to an OAuth pool that cannot serve the target throws; that is "unavailable", not a crash.
+		getApiKeySpy.mockRejectedValue(new MissingApiKeyError(largerModel.provider));
+		expect(await session.cursorContextBudgetTokens(promotableCursor)).toBeUndefined();
+	});
+
 	it("settles an overlapping successful stop but resumes a thinking-only length stop", async () => {
 		cfgCompactionMethodOrder.set(session.settings, ["handoff"]);
 		cfgCompactionEnabled.set(session.settings, true);
@@ -1344,6 +1498,81 @@ describe("AgentSession auto-compaction progress guard", () => {
 				}),
 			}),
 		);
+	});
+
+	it("waits for an in-flight speculative handoff when a Cursor budget wrap-up lands", async () => {
+		cfgCompactionMethodOrder.set(session.settings, ["handoff"]);
+		cfgCompactionEnabled.set(session.settings, true);
+		cfgCompactionAsyncEnabled.set(session.settings, true);
+		cfgCompactionThresholdTokens.set(session.settings, 150_000);
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgContextPromotionEnabled.set(session.settings, false);
+		compactHookEnabled = false;
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const handoffStarted = Promise.withResolvers<void>();
+		const handoffResult = Promise.withResolvers<string>();
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(async () => {
+			handoffStarted.resolve();
+			return handoffResult.promise;
+		});
+
+		const speculativeTrigger = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "working" }],
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			stopReason: "stop" as const,
+			usage: {
+				input: 143_000,
+				output: 1_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 144_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+		sessionManager.appendMessage(speculativeTrigger);
+		session.agent.emitExternalEvent({ type: "message_end", message: speculativeTrigger });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [speculativeTrigger] });
+		await handoffStarted.promise;
+		expect(session.compactionSpeculation).toBe("running");
+
+		await session.waitForIdle();
+		const wrapUpStop = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "Paused for compaction." }],
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			stopReason: "stop" as const,
+			contextBudgetWrapUp: true,
+			usage: {
+				input: 155_000,
+				output: 1_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 156_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: speculativeTrigger.timestamp + 1,
+		};
+		sessionManager.appendMessage(wrapUpStop);
+		session.agent.emitExternalEvent({ type: "message_end", message: wrapUpStop });
+		await scheduler.yield();
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [wrapUpStop] });
+		await scheduler.yield();
+
+		handoffResult.resolve("## Goal\nContinue after Cursor wrap-up");
+		await session.waitForIdle();
+
+		expect(promptSpy).toHaveBeenCalledTimes(1);
+		expect(sessionManager.getBranch().at(-1)).toMatchObject({
+			type: "compaction",
+			summary: expect.stringContaining("## Goal\nContinue after Cursor wrap-up"),
+		});
 	});
 
 	it("resumes length recovery when overlapping speculation fails before agent_end", async () => {

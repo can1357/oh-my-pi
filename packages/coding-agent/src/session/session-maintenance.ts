@@ -244,6 +244,31 @@ function hasUsableCompactionMethod(
 }
 
 /**
+ * Where a Cursor turn is asked to wrap up so compaction can run. Cursor runs the
+ * tool loop server-side, which leaves mid-turn compaction no boundary inside the
+ * turn. Undefined when the post-turn threshold check would not compact and
+ * continue, so stopping the turn would only stall the work. Notes-backed rollover
+ * runs ahead of method selection, so it counts without a usable method when the
+ * session carries the tools it needs.
+ */
+export function resolveCursorContextBudgetTokens(
+	settings: Settings,
+	model: Model,
+	hasRolloverTools: boolean,
+): number | undefined {
+	const contextWindow = model.contextWindow ?? 0;
+	if (model.api !== "cursor-agent" || contextWindow <= 0) return undefined;
+	const compaction = resolveModelCompactionSettings(settings, model);
+	const rollsOver = compaction.experimentalContextManagement === true && hasRolloverTools;
+	const compactsAndContinues =
+		compaction.enabled &&
+		compaction.midTurnEnabled !== false &&
+		compaction.autoContinue !== false &&
+		(rollsOver || hasUsableCompactionMethod("threshold", model, compaction));
+	return compactsAndContinues ? resolveThresholdTokens(contextWindow, compaction) : undefined;
+}
+
+/**
  * Concrete media-limit wording in a payload-rejection error (e.g.
  * `request_too_large: too many images`, `image count exceeds the limit of
  * 20`). `ambiguousPayloadRejection` (dual `ContextOverflow` + `PayloadRejected`)
@@ -643,6 +668,13 @@ export class SessionMaintenance {
 	/** In-flight or armed background speculative compaction, if any. */
 	#speculation: SpeculationRun | undefined;
 	/**
+	 * Set when pre-prompt or mid-run threshold maintenance deferred to a running
+	 * speculation. Survives an intervening await (e.g. `autoParallel`/`autoPrewalk`)
+	 * where that speculation finishes before the turn dispatches, so Cursor still
+	 * gets its wrap-up budget for the deferred turn.
+	 */
+	#thresholdDeferredToSpeculation = false;
+	/**
 	 * {@link #remoteSpeculationKey} of the session and model whose speculative
 	 * remote compaction failed for a reason a retry would hit again (a native
 	 * request's exhausted output budget, tool call or refusal, or a
@@ -751,6 +783,12 @@ export class SessionMaintenance {
 	/** Clears per-prompt recovery counters when a new user prompt starts. */
 	resetForNewPrompt(): void {
 		this.#incompleteRecoveryAttempts = 0;
+		this.#thresholdDeferredToSpeculation = false;
+	}
+
+	/** Whether the latest pre-prompt or mid-run threshold check deferred to speculation. */
+	get thresholdDeferredToSpeculation(): boolean {
+		return this.#thresholdDeferredToSpeculation;
 	}
 
 	/** Whether blocking compaction owns prompt admission. */
@@ -3087,6 +3125,7 @@ export class SessionMaintenance {
 	}
 
 	async runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
+		this.#thresholdDeferredToSpeculation = false;
 		const model = this.#model;
 		if (!model) return;
 		const contextWindow = model.contextWindow ?? 0;
@@ -3120,6 +3159,7 @@ export class SessionMaintenance {
 		// blocking summarization; the user's prompt goes out immediately and the
 		// armed result is spliced in at the next boundary.
 		if (this.deferThresholdCompactionToSpeculation(contextTokens, contextWindow)) {
+			this.#thresholdDeferredToSpeculation = true;
 			logger.debug("Pre-prompt threshold deferred to speculative compaction", {
 				contextTokens,
 				contextWindow,
@@ -3176,6 +3216,7 @@ export class SessionMaintenance {
 		context: AgentTurnEndContext | undefined,
 	): Promise<void> {
 		if (signal?.aborted || this.#host.isDisposed() || this.isCompacting) return;
+		this.#thresholdDeferredToSpeculation = false;
 
 		const ready = this.#readyCompaction;
 		if (ready && context) {
@@ -3297,6 +3338,7 @@ export class SessionMaintenance {
 		// (live or started here) produces the summary. Unless a prior dead end
 		// needed its cut point rechecked, deferred boundaries never await the journal.
 		if (this.deferThresholdCompactionToSpeculation(contextTokens, contextWindow)) {
+			this.#thresholdDeferredToSpeculation = true;
 			logger.debug("Mid-run threshold deferred to speculative compaction", {
 				contextTokens,
 				contextWindow,
@@ -3376,6 +3418,7 @@ export class SessionMaintenance {
 		skipAbortedCheck = true,
 		autoContinue = true,
 	): Promise<CompactionCheckResult> {
+		this.#thresholdDeferredToSpeculation = false;
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return COMPACTION_CHECK_NONE;
 		const contextWindow = this.#model?.contextWindow ?? 0;
@@ -3890,11 +3933,17 @@ export class SessionMaintenance {
 			contextPromotionEnabled: cfgContextPromotionEnabled.get(this.#host.settings) === true,
 		});
 		if (shouldThresholdCompact) {
+			// A budgeted Cursor turn that was asked to stop here so the host could
+			// compact. Its tool loop ran server-side, so no later boundary in this run
+			// picks the work back up: it must neither wait for a speculative summary
+			// nor end on a promotion, and its status-only reply is not a final answer.
+			const cursorWrapUp = sameModel === true && assistantMessage.contextBudgetWrapUp === true;
+			const terminalTextAnswer = !cursorWrapUp && isTerminalTextAssistantAnswer(assistantMessage);
 			// Grace band: a live (or just-started) background speculation absorbs
 			// the blocking summarization; the session stays responsive and the
 			// armed result lands at the next boundary. Deferral delays promotion
 			// by at most the band — the eventual real pass still promotes first.
-			if (this.deferThresholdCompactionToSpeculation(postMaintenanceContextTokens, contextWindow)) {
+			if (!cursorWrapUp && this.deferThresholdCompactionToSpeculation(postMaintenanceContextTokens, contextWindow)) {
 				logger.debug("Post-turn threshold deferred to speculative compaction", {
 					postMaintenanceContextTokens,
 					contextWindow,
@@ -3908,7 +3957,7 @@ export class SessionMaintenance {
 					autoContinue,
 					triggerContextTokens: postMaintenanceContextTokens,
 					phase: "pre_turn",
-					terminalTextAnswer: isTerminalTextAssistantAnswer(assistantMessage),
+					terminalTextAnswer,
 				});
 			}
 			logger.debug("Auto-compaction threshold satisfied but context promotion took over", {
@@ -3916,6 +3965,17 @@ export class SessionMaintenance {
 				contextWindow,
 				model: `${assistantMessage.provider}/${assistantMessage.model}`,
 			});
+			if (
+				cursorWrapUp &&
+				this.#host.scheduleCompactionContinuation({
+					generation,
+					autoContinue,
+					terminalTextAnswer,
+					suppressContinuation: false,
+				})
+			) {
+				return COMPACTION_CHECK_CONTINUATION;
+			}
 		} else {
 			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
 		}
@@ -3970,6 +4030,14 @@ export class SessionMaintenance {
 		}
 	}
 
+	/** Whether context promotion is enabled and has an authenticated strictly larger target for `model`. */
+	async hasAuthenticatedContextPromotionTarget(model: Model, signal?: AbortSignal): Promise<boolean> {
+		if (!cfgContextPromotionEnabled.get(this.#host.settings) || this.#host.modelFallbackDisabled?.()) return false;
+		const contextWindow = model.contextWindow ?? 0;
+		if (contextWindow <= 0) return false;
+		return (await this.resolveContextPromotionTarget(model, contextWindow, signal)) !== undefined;
+	}
+
 	async resolveContextPromotionTarget(
 		currentModel: Model,
 		contextWindow: number,
@@ -3994,7 +4062,14 @@ export class SessionMaintenance {
 		) {
 			return undefined;
 		}
-		const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal });
+		// A session restricted to an OAuth account pool throws for a provider none of its
+		// pooled accounts can serve; that target is unavailable, exactly like one without a credential.
+		let apiKey: string | undefined;
+		try {
+			apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal });
+		} catch (error) {
+			if (!(error instanceof AIError.MissingApiKeyError)) throw error;
+		}
 		if (!apiKey) return undefined;
 		return candidate;
 	}
@@ -4686,8 +4761,9 @@ export class SessionMaintenance {
 		});
 	}
 
-	#fixedContextExceedsRecoveryBand(): boolean {
-		const contextWindow = this.#model?.contextWindow ?? 0;
+	/** Whether fixed non-message context alone exceeds the threshold recovery band for `model`. */
+	fixedContextExceedsRecoveryBand(model: Model | undefined = this.#model): boolean {
+		const contextWindow = model?.contextWindow ?? 0;
 		if (contextWindow <= 0) return false;
 		const recoveryBand = Math.floor(
 			resolveThresholdTokens(contextWindow, this.#compactionSettings) * COMPACTION_RECOVERY_BAND,
@@ -4705,7 +4781,7 @@ export class SessionMaintenance {
 	 * `undefined` when compaction can still help.
 	 */
 	#thresholdFixedContextDeadEnd(): CompactionCheckResult | undefined {
-		if (!this.#fixedContextExceedsRecoveryBand()) {
+		if (!this.fixedContextExceedsRecoveryBand()) {
 			this.#fixedContextDeadEndNotifiedSessionId = undefined;
 			return undefined;
 		}
@@ -4718,7 +4794,7 @@ export class SessionMaintenance {
 	}
 
 	#compactionDeadEndWarning(remedies: string): string {
-		if (this.#fixedContextExceedsRecoveryBand()) return FIXED_CONTEXT_DEAD_END_WARNING;
+		if (this.fixedContextExceedsRecoveryBand()) return FIXED_CONTEXT_DEAD_END_WARNING;
 		return (
 			"Compaction freed too little context to make progress — pausing automatic maintenance to avoid a compaction loop. " +
 			`The most recent turn alone is too large to reduce further; ${remedies} or switch to a larger-context model.`

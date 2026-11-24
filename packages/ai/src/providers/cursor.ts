@@ -233,6 +233,7 @@ import { waitForRetry } from "../utils/retry-wait";
 import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
 import { formatConnectEndStreamError, hasRetryableCursorErrorDetail } from "./connect-error-detail";
 import { CONNECT_END_STREAM_FLAG, ConnectFrameDecoder, frameConnectMessage } from "./connect-frame";
+import { CursorContextBudget } from "./cursor/context-budget";
 import mcpExternalHandoffMessage from "./cursor-external-tool-handoff.md" with { type: "text" };
 import {
 	buildMcpStateResult,
@@ -452,6 +453,11 @@ export interface CursorOptions extends StreamOptions {
 	wireModelId?: string;
 	/** Run transport. `auto` starts with HTTP/2 and falls back on failed ALPN negotiation or a TLS reset. */
 	transport?: "auto" | "http2" | "http1";
+	/**
+	 * Conversation size at which a turn is asked to wrap up so the host can
+	 * compact between turns; see {@link CursorContextBudget}.
+	 */
+	contextBudgetTokens?: number;
 }
 
 type CursorWireMode = "normalized" | "discovered";
@@ -471,6 +477,7 @@ interface CursorRetryContext {
 	conversationId: string;
 	blobStore: Map<string, Uint8Array>;
 	turnRecords: CursorTurnRecordState;
+	contextBudget: CursorContextBudget | undefined;
 	firstTokenTime?: number;
 	/** Output tokens a relayed run's earlier responses reported (`CursorRelayState.reportedOutput`). */
 	relayReportedOutput?: number;
@@ -792,12 +799,21 @@ function parseConnectEndStream(data: Uint8Array): Error | null {
 	}
 }
 
+interface CursorAdditionalContext {
+	content: string;
+	onDelivered?: () => void;
+}
+
 interface CursorMessageWriter {
-	write(frame: Uint8Array): void;
+	write(frame: Uint8Array, onDelivered?: () => void): void;
+	/** Context the host wants the model to read with the next tool result that accepts it. */
+	takeAdditionalContext?(): CursorAdditionalContext | undefined;
 }
 
 interface CursorRunTransport extends CursorMessageWriter {
 	readonly closed: boolean;
+	/** Whether `write` still sends: false once the transport ended or closed. */
+	readonly writable: boolean;
 	close(): void;
 	/**
 	 * Stop sending after the server's end frame. HTTP/2 half-closes the request
@@ -818,8 +834,14 @@ function wrapHttp2RunTransport(request: http2.ClientHttp2Stream): CursorRunTrans
 		get closed() {
 			return request.closed;
 		},
-		write(frame) {
-			if (!request.writableEnded) request.write(frame);
+		get writable() {
+			return !request.writableEnded && !request.closed;
+		},
+		write(frame, onDelivered) {
+			if (!request.writableEnded && !request.closed) {
+				request.write(frame);
+				onDelivered?.();
+			}
 		},
 		close() {
 			request.close();
@@ -855,6 +877,7 @@ interface CursorHttp1RunTransportOptions {
 interface CursorPendingAppend {
 	seqno: bigint;
 	data: Uint8Array;
+	onDelivered?: () => void;
 }
 
 const CURSOR_HTTP1_APPEND_CONCURRENCY = 16;
@@ -884,15 +907,17 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 	const pendingAppends: CursorPendingAppend[] = [];
 	let appendSeqno = 0n;
 	let activeAppends = 0;
+	const inFlightAppends = new Set<Promise<void>>();
 	let closed = false;
 	let ended = false;
+	let streamEnded = false;
 	let responseListener: (headers: http2.IncomingHttpHeaders) => void = () => {};
 	let dataListener: (chunk: Buffer) => void = () => {};
 	let endListener: () => void = () => {};
 	let errorListener: (error: unknown) => void = () => {};
 
 	const fail = (error: unknown): void => {
-		if (closed) return;
+		if (closed || streamEnded) return;
 		closed = true;
 		pendingAppends.length = 0;
 		abortController.abort(error);
@@ -918,6 +943,7 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 			signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
 		});
 		if (response.ok) {
+			append.onDelivered?.();
 			await response.body?.cancel();
 			return;
 		}
@@ -932,12 +958,14 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 			const append = pendingAppends.shift();
 			if (!append) return;
 			activeAppends++;
-			void sendAppend(append)
+			const sending: Promise<void> = sendAppend(append)
 				.catch(fail)
 				.finally(() => {
 					activeAppends--;
+					inFlightAppends.delete(sending);
 					pumpAppends();
 				});
+			inFlightAppends.add(sending);
 		}
 	};
 
@@ -967,6 +995,13 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 				dataListener(Buffer.from(chunk));
 			}
 			if (closed) return;
+			// Appends are unary calls that can still be answering when the server has already
+			// streamed its reply: let them settle so each delivery is recorded before the
+			// stream finalizes. A failure from here on no longer changes how the stream ended.
+			streamEnded = true;
+			pendingAppends.length = 0;
+			await Promise.allSettled(inFlightAppends);
+			if (closed) return;
 			closed = true;
 			endListener();
 		} catch (error) {
@@ -975,14 +1010,18 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 	};
 	void run();
 	return {
+		get writable() {
+			return !closed && !ended && !streamEnded;
+		},
 		get closed() {
 			return closed;
 		},
-		write(frame) {
-			if (closed || ended) return;
+		write(frame, onDelivered) {
+			if (closed || ended || streamEnded) return;
 			pendingAppends.push({
 				seqno: appendSeqno++,
 				data: readConnectFrameMessage(frame),
+				onDelivered,
 			});
 			pumpAppends();
 		},
@@ -1360,6 +1399,9 @@ function streamCursorWithWireMode(
 			given: new Map(),
 			relayed: false,
 		};
+		const contextBudget =
+			retryContext?.contextBudget ??
+			(options?.contextBudgetTokens ? new CursorContextBudget(options.contextBudgetTokens) : undefined);
 		const hostOnToolResult = options?.onToolResult;
 		const onToolResult: CursorToolResultHandler | undefined = hostOnToolResult
 			? result => {
@@ -1600,12 +1642,27 @@ function streamCursorWithWireMode(
 			// call and runs the handler twice. KV blob replies bypass this writer —
 			// they are idempotent and the server re-requests them on resume.
 			// Heartbeats and the run request write the transport directly.
+			let wrapUpDelivered = false;
 			const resultTransport = runTransport;
 			const resultWriter: CursorMessageWriter = {
-				write(frame) {
+				write(frame, onDelivered) {
 					progressVersion++;
 					checkpointCoversTurn = false;
-					resultTransport.write(frame);
+					resultTransport.write(frame, onDelivered);
+				},
+				takeAdditionalContext: () => {
+					// A result written after the server's end is dropped; the notice
+					// would never reach the model, so it stays pending.
+					if (!resultTransport.writable) return undefined;
+					const notice = contextBudget?.takeNotice(output.usage.contextTokens);
+					if (notice === undefined) return undefined;
+					return {
+						content: notice,
+						onDelivered: () => {
+							wrapUpDelivered = true;
+							output.contextBudgetWrapUp = true;
+						},
+					};
 				},
 			};
 
@@ -1889,8 +1946,12 @@ function streamCursorWithWireMode(
 						log("relay", "closed", { transportSettled: h2Settled });
 						return false;
 					}
+					const latestContextTokens = output.usage.contextTokens;
+					const wrappedForBudget = wrapUpDelivered || output.contextBudgetWrapUp === true;
 					({ context, options, stream } = resumption);
 					output = createCursorOutput(model, Date.now());
+					if (latestContextTokens !== undefined) output.usage.contextTokens = latestContextTokens;
+					if (wrappedForBudget) output.contextBudgetWrapUp = true;
 					startTime = performance.now();
 					firstTokenTime = undefined;
 					stream.push({ type: "start", partial: output });
@@ -2054,6 +2115,7 @@ function streamCursorWithWireMode(
 						conversationId,
 						blobStore: activeBlobStore,
 						turnRecords,
+						contextBudget,
 						firstTokenTime,
 					},
 				});
@@ -2193,6 +2255,7 @@ function streamCursorWithWireMode(
 							conversationId: retryConversationId,
 							blobStore: retryBlobStore,
 							turnRecords,
+							contextBudget,
 							firstTokenTime,
 							relayReportedOutput: relay?.reportedOutput,
 						},
@@ -3995,18 +4058,26 @@ function sendExecClientMessage<TCase extends NonNullable<ExecClientMessage["mess
 	messageCase: TCase,
 	value: Extract<ExecClientMessage["message"], { case: TCase }>["value"],
 ): void {
+	// Stream deltas are not results: a shell's context rides on its final `shellResult`.
+	const additional =
+		execMsg.acceptHookAdditionalContexts && messageCase !== "shellStream"
+			? runTransport.takeAdditionalContext?.()
+			: undefined;
+	const additionalContext = additional?.content;
 	const execClientMessage = create(ExecClientMessageSchema, {
 		id: execMsg.id,
 		execId: execMsg.execId,
 		message: { case: messageCase, value } as ExecClientMessage["message"],
+		hookAdditionalContexts: additionalContext ? [{ hookEventName: "postToolUse", content: additionalContext }] : [],
 	});
+	if (additionalContext) log("execClientMessage", "additionalContext", { id: execMsg.id, additionalContext });
 
 	const clientMessage = create(AgentClientMessageSchema, {
 		message: { case: "execClientMessage", value: execClientMessage },
 	});
 
 	const responseBytes = toBinary(AgentClientMessageSchema, clientMessage);
-	runTransport.write(frameConnectMessage(responseBytes));
+	runTransport.write(frameConnectMessage(responseBytes), additional?.onDelivered);
 
 	log("execClientMessage", messageCase, value);
 }

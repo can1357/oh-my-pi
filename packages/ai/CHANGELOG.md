@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `cursorContextBudgetTokens` stream option: a Cursor turn whose conversation crosses it is asked, once, to end with a status so the host can compact between turns ([#16181](https://github.com/can1357/oh-my-pi/pull/16181) by [@joseotaviorf](https://github.com/joseotaviorf))
+
 ### Fixed
 
 - DeepSeek tool calls written as DSML text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route, instead of failing and triggering a retry nudge

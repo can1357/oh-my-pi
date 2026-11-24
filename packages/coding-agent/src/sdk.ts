@@ -5136,7 +5136,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			...cfgSampling.get(settings),
 			getToolContext: tc => toolContextStore.getContext(tc),
 			getApiKey: effectiveGetApiKey,
-			streamFn: (streamModel, context, streamOptions) => {
+			streamFn: async (streamModel, context, streamOptions) => {
 				mainRequestProvider = undefined;
 				options.assertDispatchModel?.(streamModel);
 				// The loop checks the cap before each request, but a side request can finish
@@ -5144,7 +5144,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const refusal = currentCostGate()?.check();
 				if (refusal) {
 					session.reportCostCapRefusal(refusal);
-					return Promise.reject(new CostCapError(refusal));
+					throw new CostCapError(refusal);
 				}
 				if (notifyFirstChatDispatch) {
 					const cb = notifyFirstChatDispatch;
@@ -5163,11 +5163,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					supportsExternalThinking(streamModel);
 				const fallbackCreditRedemption = session?.consumeActiveFallbackCreditRedemption(streamModel);
 				if (streamOptions?.promptCacheKey === undefined) session?.promoteTaskSiblingCandidate(streamModel);
+				const cursorContextBudgetTokens = await session?.cursorContextBudgetTokens(
+					streamModel,
+					streamOptions?.signal,
+				);
 				const merged: SimpleStreamOptions = {
 					...streamOptions,
 					promptCacheKey: streamOptions?.promptCacheKey ?? session?.getPromptCacheKeyForModel(streamModel),
 					forceReasoningOff: externalThinking || streamOptions?.forceReasoningOff,
 					omitDemotedReasoning: session?.omitsDemotedReasoning(streamModel) || streamOptions?.omitDemotedReasoning,
+					cursorContextBudgetTokens,
 				};
 				// The provider calls `onPayload` as it sends, past any wait for an in-flight
 				// slot: the prompt cache entry's lifetime starts there, not here.
