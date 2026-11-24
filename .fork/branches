@@ -5,7 +5,7 @@ feat/extension-ctx-restart-source-88c8dc4
 fix/skip-underscore-extension-files
 fix/eval-names-top-level-only-tip
 fix/force-cli-verify
-fix/tern-fork-launch
+fix/tern-mux-current
 relay/zys-10234-3ff86e7ac4
 fix/chat-completions-claude-demoted-reasoning
 chore/fork-upstream-compat-fbb8085
