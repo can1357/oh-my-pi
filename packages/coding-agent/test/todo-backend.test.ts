@@ -730,10 +730,10 @@ describe("todo backend", () => {
 			expect(tasksOf(backend)).toEqual([["a"], ["a"]]);
 		});
 
-		it("a refusal with no reason still fails the call and says so", async () => {
+		it("a refusal whose reason is not text still fails the call and says no reason was given", async () => {
 			const backend = tracker("tracker", true);
 			const { session } = await open([backend.extension], "tracker");
-			backend.refusal = "";
+			backend.refusal = JSON.parse("42"); // what a JS backend can return
 
 			const result = await call(session, { op: "init", items: ["a"] });
 			await settled(session);

@@ -1854,7 +1854,7 @@ export class ExtensionRunner {
 			async (event, ctx) => {
 				asked = true;
 				this.#todoResyncs.add(resync);
-				// A throw is not a refusal but an extension error (`onFailure` below); a reason that is not text is dropped.
+				// A throw is an extension error, not a refusal (`onFailure` below makes its message text); a non-text reason is dropped.
 				try {
 					const answer = await definition.apply?.(event.change, ctx);
 					if (!answer?.block) return { kind: "accepted" };
@@ -1867,7 +1867,7 @@ export class ExtensionRunner {
 			this.createContext(),
 			extension,
 			timeoutMs,
-			(kind, failure) => (kind === "timeout" ? { kind: "timeout" } : { kind: "failed", message: failure }),
+			(kind, failure) => (kind === "timeout" ? { kind: "timeout" } : { kind: "failed", message: String(failure) }),
 			signal ? AbortSignal.any([signal, this.#todoGivenUp.signal]) : this.#todoGivenUp.signal,
 		);
 		// Why the change can no longer commit, checked in the same synchronous step as the commit.
