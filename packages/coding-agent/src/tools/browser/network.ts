@@ -348,7 +348,7 @@ export class BrowserNetworkManager {
 		const limit = normalizeLimit(options.limit);
 		let records = this.#records.filter(record => matchesRequest(record, options));
 		if (limit !== undefined) records = records.slice(-limit);
-		const result = records.map(record => toPublicRecord(record, true));
+		const result = records.map(record => toPublicRecord(record));
 		if (options.clear) this.clearRequests();
 		return result;
 	}
@@ -751,10 +751,10 @@ export function normalizeLimit(limit: number | undefined): number | undefined {
 	return limit;
 }
 
-/** Headers whose values are credentials: `tab.requests()` lists them as `[redacted]`; `tab.request(id)` has them. */
+/** Headers whose values are credentials: `tab.requests()` and `tab.request(id)` both list them as `[redacted]`. */
 const CREDENTIAL_HEADERS = new Set(["cookie", "set-cookie", "authorization", "proxy-authorization"]);
 
-function redactCredentialHeaders(headers: Record<string, string>): Record<string, string> {
+export function redactCredentialHeaders(headers: Record<string, string>): Record<string, string> {
 	const redacted: Record<string, string> = {};
 	for (const name in headers) {
 		redacted[name] = CREDENTIAL_HEADERS.has(name.toLowerCase()) ? "[redacted]" : headers[name]!;
@@ -763,11 +763,10 @@ function redactCredentialHeaders(headers: Record<string, string>): Record<string
 }
 
 /**
- * A detached copy of the public fields of `record` (backend bookkeeping dropped). `redact` replaces credential
- * header values, for the metadata listing.
+ * A detached copy of the public fields of `record` (backend bookkeeping dropped), with credential header values
+ * replaced by `[redacted]`.
  */
-export function toPublicRecord(record: NetworkRequestRecord, redact = false): NetworkRequestRecord {
-	const copyHeaders = redact ? redactCredentialHeaders : (headers: Record<string, string>) => ({ ...headers });
+export function toPublicRecord(record: NetworkRequestRecord): NetworkRequestRecord {
 	return {
 		id: record.id,
 		seq: record.seq,
@@ -779,8 +778,8 @@ export function toPublicRecord(record: NetworkRequestRecord, redact = false): Ne
 		ok: record.ok,
 		failureText: record.failureText,
 		durationMs: record.durationMs,
-		requestHeaders: copyHeaders(record.requestHeaders),
-		responseHeaders: record.responseHeaders ? copyHeaders(record.responseHeaders) : undefined,
+		requestHeaders: redactCredentialHeaders(record.requestHeaders),
+		responseHeaders: record.responseHeaders ? redactCredentialHeaders(record.responseHeaders) : undefined,
 		sizes: { ...record.sizes },
 	};
 }

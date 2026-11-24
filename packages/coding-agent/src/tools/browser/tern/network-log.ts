@@ -394,7 +394,7 @@ export class TernNetworkLog {
 		const limit = normalizeLimit(options.limit);
 		let records = this.#records.filter(record => matchesRequest(record, options));
 		if (limit !== undefined) records = records.slice(-limit);
-		const result = records.map(record => toPublicRecord(record, true));
+		const result = records.map(record => toPublicRecord(record));
 		if (options.clear) this.clear();
 		return result;
 	}
