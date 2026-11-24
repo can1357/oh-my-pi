@@ -89,6 +89,7 @@
 - A `set -e` in one bash tool call no longer stays on for later calls, where the first failing command silently skipped the rest of an unrelated call.
 - A bash tool call that ends after a `cd` or with `set -e` on now says so in its result (`Reset before the next call: cwd → …, set -e off.`), so the agent no longer assumes either carries over.
 - Fixed duplicate language servers starting when a client disconnects while requesting one ([#20277](https://github.com/can1357/oh-my-pi/pull/20277) by [@yaacovcorcos](https://github.com/yaacovcorcos))
+- With `PI_CONFIG_DIR` set, project plugin registries and skill manifests stay in the project's `.omp/` directory instead of a project-relative copy of the user configuration path ([#20279](https://github.com/can1357/oh-my-pi/pull/20279) by [@iliaal](https://github.com/iliaal))
 - `!command` values in `models.yml` (`apiKey`, `headers`) can now read variables defined in `~/.env` or `~/.omp/agent/.env` on macOS and Windows; previously the command saw an empty value.
 - The bash tool's visualization now draws a script run by `bash file.sh`, `source`, or `eval "$var"` as one block under the command that ran it, instead of repeating a “built at runtime” header above every line of the script.
 - Fixed `RpcClient.onSessionEvent` silently dropping the `config_warnings_changed`, `advisor_cost_changed`, and `advisor_yielded` session events emitted over RPC ([#20254](https://github.com/can1357/oh-my-pi/pull/20254) by [@eggpeat](https://github.com/eggpeat))
