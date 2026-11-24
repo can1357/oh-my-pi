@@ -74,7 +74,7 @@ import {
 } from "../../slash-commands/helpers/active-oauth-account";
 import { formatProviderName } from "../view-model/chrome/format";
 import { formatCompactQuota } from "../../advisor/advisor-config-types";
-import { resolveTernPane } from "../../tools/browser/tern/kind";
+import { resolveTernPane, type TernPane } from "../../tools/browser/tern/kind";
 import { TernError, type TernErrorKind, TernSocketClient } from "../../tools/browser/tern/wire";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
@@ -1475,7 +1475,8 @@ export class CommandController {
 		}
 
 		// A Tern pane fork leaves this session untouched, so it may run mid-turn.
-		if (await this.#forkIntoTernPane()) return;
+		const tern = resolveTernPane(this.#forkTerminalDependencies.environment());
+		if (tern && (await this.#forkIntoTernPane(tern)) === undefined) return;
 
 		// An in-place fork moves this process onto the new file; a running turn
 		// would finish there and leave the original transcript cut mid-turn.
@@ -1509,6 +1510,13 @@ export class CommandController {
 		const dependencies = this.#forkTerminalDependencies;
 		const environment = dependencies.environment();
 		const multiplexer = dependencies.classifyMultiplexer(environment);
+		// Tern is no multiplexer, but opens the fork in a pane of its own, as bare `/fork` there does.
+		const tern = multiplexer === null ? resolveTernPane(environment) : null;
+		if (tern) {
+			const refusal = await this.#forkIntoTernPane(tern);
+			if (refusal !== undefined) this.ctx.showError(`Tern could not open the fork: ${refusal}`);
+			return;
+		}
 		const placementInfo = getTerminalLaunchPlacement(multiplexer, placement);
 		if ("error" in placementInfo) {
 			this.ctx.showError(placementInfo.error);
@@ -1635,25 +1643,24 @@ export class CommandController {
 	}
 
 	/**
-	 * `/fork` inside a Tern pane: ask Tern to run `omp --fork` of this session in a new pane beside
-	 * this one, which keeps the original session. False means fork in place instead: outside Tern,
-	 * an unsaved session, a Tern without `fork`, or Tern refusing it. Once the request is out, an
-	 * unconfirmed one is reported rather than retried in place, since Tern may still open the pane.
+	 * `/fork` inside Tern pane `tern`: ask Tern to run `omp --fork` of this session in a new pane beside
+	 * this one, which keeps the original session. Resolves undefined once the fork is Tern's, else why
+	 * Tern did not take it (an unsaved session, Tern unreachable or without `fork`, or Tern refusing it)
+	 * for bare `/fork` to fork in place and `/fork pane|window` to report. Once the request is out, an
+	 * unconfirmed one is reported here rather than retried, since Tern may still open the pane.
 	 */
-	async #forkIntoTernPane(): Promise<boolean> {
-		const tern = resolveTernPane();
-		if (!tern || !this.ctx.sessionManager.isSessionOnDisk()) return false;
+	async #forkIntoTernPane(tern: TernPane): Promise<string | undefined> {
+		if (!this.ctx.sessionManager.isSessionOnDisk()) return "the current session has not been persisted yet";
 		const client = new TernSocketClient({ socketPath: tern.socketPath });
 		try {
 			try {
 				await client.connect();
 			} catch (error) {
-				logger.debug("Tern unreachable for /fork; forking in place", {
-					error: error instanceof Error ? error.message : String(error),
-				});
-				return false;
+				const message = error instanceof Error ? error.message : String(error);
+				logger.debug("Tern unreachable for /fork", { error: message });
+				return message;
 			}
-			if (!client.supports("fork")) return false;
+			if (!client.supports("fork")) return "this Tern build cannot open forks; update Tern";
 			// The new pane's omp reads the session file as it starts.
 			await this.ctx.session.flushToDisk();
 			try {
@@ -1661,21 +1668,21 @@ export class CommandController {
 			} catch (error) {
 				if (error instanceof TernError && !TERN_FORK_UNCONFIRMED[error.kind]) {
 					const details = { kind: error.kind, error: error.message };
-					if (error.kind === "failed") logger.warn("Tern could not open the fork pane; forking in place", details);
-					else logger.debug("Tern refused the fork; forking in place", details);
-					return false;
+					if (error.kind === "failed") logger.warn("Tern could not open the fork pane", details);
+					else logger.debug("Tern refused the fork", details);
+					return error.message;
 				}
 				this.ctx.showError(
 					`Tern did not confirm the fork: ${error instanceof Error ? error.message : String(error)}`,
 				);
-				return true;
+				return undefined;
 			}
 		} finally {
 			client.close();
 		}
 		const note = this.ctx.session.isStreaming ? " · the running response continues here, not in the fork" : "";
 		this.ctx.present(() => successLineView(`Session forked into a new pane${note}`));
-		return true;
+		return undefined;
 	}
 
 	/**

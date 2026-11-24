@@ -447,37 +447,29 @@ describe("/fork terminal placement", () => {
 });
 
 describe("/fork inside Tern", () => {
-	const TERN_ENV_KEYS = ["TERN_PANE_SOCKET", "TERN_PANE"] as const;
-	let savedEnv: Map<string, string | undefined>;
 	let daemon: FakeDaemon | undefined;
 
 	beforeAll(async () => {
 		initTheme();
 	});
 
-	beforeEach(() => {
-		savedEnv = new Map(TERN_ENV_KEYS.map(key => [key, process.env[key]]));
-	});
-
 	afterEach(async () => {
 		await daemon?.close();
 		daemon = undefined;
-		for (const [key, value] of savedEnv) {
-			if (value === undefined) delete process.env[key];
-			else process.env[key] = value;
-		}
 	});
 
-	async function startTern(fork: () => FakeAnswer): Promise<FakeDaemon> {
+	/** A fake Tern answering forks with `fork`, and the environment of its pane 5. */
+	async function startTern(
+		fork: () => FakeAnswer,
+	): Promise<{ tern: FakeDaemon; environment: () => NodeJS.ProcessEnv }> {
 		daemon = await startFakeDaemon(() => ({ ok: {} }), { welcome: { ops: ["browser", "fork"] }, fork });
-		process.env.TERN_PANE_SOCKET = daemon.socketPath;
-		process.env.TERN_PANE = "5";
-		return daemon;
+		const environment = { TERN_PANE_SOCKET: daemon.socketPath, TERN_PANE: "5" };
+		return { tern: daemon, environment: () => environment };
 	}
 
 	it("forks into a new pane while a turn is running, leaving the running session in place", async () => {
-		const tern = await startTern(() => ({ ok: { block: 9 } }));
-		const { controller, ctx, session } = createContext({ streaming: true });
+		const { tern, environment } = await startTern(() => ({ ok: { block: 9 } }));
+		const { controller, ctx, session } = createContext({ streaming: true, environment });
 		await controller.handleForkCommand();
 		expect(tern.forks).toEqual([{ id: 1, op: { block: 5 } }]);
 		expect(session.flushToDisk).toHaveBeenCalledTimes(1);
@@ -487,13 +479,45 @@ describe("/fork inside Tern", () => {
 	});
 
 	it("aborts the running turn and forks in place when Tern declines the fork", async () => {
-		const tern = await startTern(() => ({ error: { kind: "not_agent", message: "no session file" } }));
-		const { controller, ctx, session } = createContext({ streaming: true });
+		const { tern, environment } = await startTern(() => ({
+			error: { kind: "not_agent", message: "no session file" },
+		}));
+		const { controller, ctx, session } = createContext({ streaming: true, environment });
 		await controller.handleForkCommand();
 		expect(tern.forks).toHaveLength(1);
 		expect(session.abort).toHaveBeenCalledTimes(1);
 		expect(session.fork).toHaveBeenCalledTimes(1);
 		expect(session.abort.mock.invocationCallOrder[0]).toBeLessThan(session.fork.mock.invocationCallOrder[0]);
 		expect(ctx.showWarning).not.toHaveBeenCalled();
+	});
+
+	it("opens /fork window as a Tern pane when no multiplexer is detected", async () => {
+		const { tern, environment } = await startTern(() => ({ ok: { block: 9 } }));
+		const { controller, ctx, session, launchTerminal } = createContext({ environment });
+		await controller.handleForkCommand("window");
+		expect(tern.forks).toEqual([{ id: 1, op: { block: 5 } }]);
+		expect(launchTerminal).not.toHaveBeenCalled();
+		expect(session.fork).not.toHaveBeenCalled();
+		expect(ctx.showError).not.toHaveBeenCalled();
+		expect(ctx.present).toHaveBeenCalledTimes(1);
+	});
+
+	it("reports Tern's refusal of /fork window instead of forking in place", async () => {
+		const { environment } = await startTern(() => ({ error: { kind: "not_agent", message: "no session file" } }));
+		const { controller, ctx, session, launchTerminal } = createContext({ environment });
+		await controller.handleForkCommand("window");
+		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("no session file"));
+		expect(session.fork).not.toHaveBeenCalled();
+		expect(launchTerminal).not.toHaveBeenCalled();
+	});
+
+	it("prefers a multiplexer running inside Tern for /fork window", async () => {
+		const { tern, environment } = await startTern(() => ({ ok: { block: 9 } }));
+		const { controller, launchTerminal } = createContext({
+			environment: () => ({ ...environment(), TMUX: "server,1,0", TMUX_PANE: "%1" }),
+		});
+		await controller.handleForkCommand("window");
+		expect(launchTerminal).toHaveBeenCalledTimes(1);
+		expect(tern.forks).toHaveLength(0);
 	});
 });

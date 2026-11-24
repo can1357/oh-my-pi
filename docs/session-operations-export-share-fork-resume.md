@@ -305,7 +305,11 @@ Placement commands autodetect tmux, Zellij, Herdr, CMUX, or Orca from the termin
 `/fork auto` is not a subcommand (valid arguments are `pane`, `window`, and
 `tab`). `window` maps to a tmux window, a Zellij/Herdr/Orca tab, or a CMUX workspace.
 Plain terminals, `screen`, and `wmux` cannot host this fork placement and receive
-an explicit error; use bare `/fork` there instead.
+an explicit error; use bare `/fork` there instead. Inside a Tern pane with no
+multiplexer running in it, every placement asks Tern to open the fork in a new
+pane beside this one, as bare `/fork` does there (Tern forks only into panes);
+where bare `/fork` would fall back to forking in place, a placement reports why
+Tern did not open the pane.
 
 ### Preconditions and immediate guards
 
