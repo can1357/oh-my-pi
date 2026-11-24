@@ -36,7 +36,7 @@
 
 ### Fixed
 
-- A retry after a turn gave up on a pending preview (the model ignored three forced `resolve` turns) no longer runs the tool call that turn refused, whether the retry switched to a fallback model or you retried by hand ([#20338](https://github.com/can1357/oh-my-pi/pull/20338) by [@baekjosh](https://github.com/baekjosh))
+- A retry no longer runs a tool call that was refused while a preview was pending, whether the turn gave up after three forced `resolve` turns or the request after the refusal failed, and whether the retry switched to a fallback model or you retried by hand ([#20338](https://github.com/can1357/oh-my-pi/pull/20338) by [@baekjosh](https://github.com/baekjosh))
 - Tern no longer loses the tray's dots when the working line above the composer comes and goes: the line stays one row instead of turning into an empty column while idle
 - In the bash tool on macOS, `ls -lT` shows full timestamps instead of failing with `invalid tab size`, `uptime` prints macOS's format, and `chmod +a` and the other ACL forms run `/bin/chmod`.
 - The bash tool's `top -l` now reports load averages, user/sys/idle CPU and usernames, and `ps` shows start and elapsed times for other users' processes such as pid 1.
