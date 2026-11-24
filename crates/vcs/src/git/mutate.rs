@@ -1962,8 +1962,10 @@ fn worktree_checkout_options(
 	source: gix::worktree::stack::state::attributes::Source,
 	op: &'static str,
 ) -> Result<gix::worktree::state::checkout::Options> {
-	let common = gix::open(owner.info().common_dir.as_path()).map_err(|e| Error::backend(op, e))?;
-	let mut opts = repo.checkout_options(source).map_err(|e| Error::backend(op, e))?;
+	let common = owner.gix_common()?;
+	let mut opts = repo
+		.checkout_options(source)
+		.map_err(|e| Error::backend(op, e))?;
 	opts.attributes = common
 		.checkout_options(source)
 		.map_err(|e| Error::backend(op, e))?
