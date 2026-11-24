@@ -391,19 +391,17 @@ export class PrewalkCoordinator {
 		return decision;
 	}
 
-	/** Asks the judge and logs how long it took; never rejects. */
+	/** Asks the judge; never rejects. Every judgment logs its latency, so the escalate budget can be checked in use. */
 	async #judge(request: string, signal: AbortSignal, timeoutMs?: number): Promise<AutoPrewalkDecision | undefined> {
 		const started = performance.now();
-		try {
-			return await this.#host.classifyAutoPrewalk(request, signal, timeoutMs);
-		} catch (error) {
+		const decision = await this.#host.classifyAutoPrewalk(request, signal, timeoutMs).catch((error: unknown) => {
 			logger.debug("auto-prewalk: skipped after a failure", {
 				error: error instanceof Error ? error.message : String(error),
 			});
 			return undefined;
-		} finally {
-			logger.debug("auto-prewalk: judged", { ms: Math.round(performance.now() - started) });
-		}
+		});
+		logger.debug("auto-prewalk: judged", { ms: Math.round(performance.now() - started), route: decision?.route });
+		return decision;
 	}
 
 	/**

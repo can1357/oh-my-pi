@@ -975,6 +975,22 @@ describe("AgentSession auto-prewalk", () => {
 			},
 		);
 
+		it("leaves the task where it is when the judge runs past the escalate budget", async () => {
+			stubJudge([PREWALK]);
+			const f = escalating([done("one")]);
+			const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+			vi.spyOn(AbortSignal, "timeout").mockImplementation(ms =>
+				ms === AUTO_PREWALK_ESCALATE_TIMEOUT_MS
+					? AbortSignal.abort(new DOMException("timed out", "TimeoutError"))
+					: realTimeout(ms),
+			);
+
+			await f.session.prompt(TASK);
+
+			expect(f.requested).toEqual([f.primary.id]);
+			expect(f.session.getPrewalkState()).toBeUndefined();
+		});
+
 		it("stays on the planner after an Esc, and starts the next task where the aborted one started", async () => {
 			stubJudge([PREWALK, DIRECT]);
 			let escaped = false;
