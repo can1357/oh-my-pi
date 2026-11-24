@@ -111,7 +111,7 @@ If `pty` is requested but unavailable, the call falls back to non-PTY and append
 
 A pty command runs as a shell process (`src/exec/shell-process.ts`): the embedded engine with the tool profile in a process of its own, leading the overlay's pseudo-terminal, so its programs own that terminal (`/dev/tty`, terminal signals, resize). It starts from the session shell's exports, functions and aliases, and its `local://` (spills included), `skill://` and `attachment://` paths resolve to the session's host files; other schemes are missing there.
 
-Before the local PTY/non-PTY choice, a foreground (`async: false`) call can route to a managed background job (auto-backgrounding; see below) or — when the session's client advertises a terminal capability (`clientBridge.capabilities.terminal` + `createTerminal`, with `pty` false) — to a **client-bridge editor terminal** that runs the command remotely (streaming `terminalId` updates, killing on timeout, mapping a signal kill to exit code `137`). Otherwise it uses non-interactive `executeBash()`.
+Before the local PTY/non-PTY choice, a foreground (`async: false`) call can route to a managed background job (auto-backgrounding; see below) or — when the session's client advertises a terminal capability (`clientBridge.capabilities.terminal` + `createTerminal`, with `pty` false) — to a **client-bridge editor terminal** that runs the command remotely (streaming `terminalId` updates, killing on timeout, mapping a signal kill to exit code `128` plus the signal's number, so SIGTERM gives `143`). Otherwise it uses non-interactive `executeBash()`.
 
 Print mode and non-UI RPC/tool contexts cannot use the local interactive overlay. Named services have their own broker-owned PTY and do not require a TUI.
 
