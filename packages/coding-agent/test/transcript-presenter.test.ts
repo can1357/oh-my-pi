@@ -24,19 +24,15 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
-import { minFrameIntervalMs, setMaxFps } from "@oh-my-pi/pi-tui/frame-rate";
-import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
-import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as piUtils from "@oh-my-pi/pi-utils";
-import { VirtualTerminal } from "../../tui/test/virtual-terminal";
+import type { PendingTool } from "../src/modes/types";
+import { initTheme } from "../src/ui/theme/service";
+import * as clipboard from "../src/utils/clipboard";
+import { nativeShell } from "./helpers/native-shell";
+import { createModeTerminal, type ModeTerminal, renderRows, transcriptText } from "./helpers/mode-terminal";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./collab/helpers/in-memory-relay";
-
-function plainRows(rows: readonly string[]): string[] {
-	return rows.map(row => Bun.stripANSI(row).trimEnd());
-}
 
 const USAGE = {
 	input: 0,
@@ -52,7 +48,7 @@ describe("extension transcript presenters", () => {
 	let authStorage: AuthStorage;
 	let session: AgentSession;
 	let mode: InteractiveMode;
-	let term: VirtualTerminal;
+	let term: ModeTerminal;
 	let eventBus: EventBus;
 	let modelRegistry: ModelRegistry;
 
@@ -76,25 +72,18 @@ describe("extension transcript presenters", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		term = new VirtualTerminal(120, 32);
+		term = createModeTerminal({ columns: 120, rows: 32 });
 		eventBus = new EventBus();
-		mode = new InteractiveMode(
-			session,
-			"test",
-			() => {},
-			undefined,
-			undefined,
-			eventBus,
-			new Composer({ terminal: term }),
-		);
+		mode = new InteractiveMode(session, "test", () => {}, undefined, undefined, eventBus, term.frame);
 		// Presenters are opt-in; every test but the opt-in one runs with them on.
 		cfgExtensionTranscriptPresenters.set(mode.settings, true);
 	});
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
-		setNativeRendering(false);
 		mode?.stop();
+		await mode?.shell.stop();
+		term?.dispose();
 		await session?.dispose();
 		authStorage?.close();
 		tempDir?.removeSync();
@@ -183,11 +172,115 @@ describe("extension transcript presenters", () => {
 	async function start(): Promise<void> {
 		await mode.init({ suppressWelcomeIntro: true });
 		void mode.getUserInput();
-		await term.waitForRender();
+		await term.settle();
 	}
 
-	const chat = () => plainRows(mode.chatContainer.render(120)).join("\n");
-	const screen = () => plainRows(term.getViewport()).join("\n");
+	const chat = () => transcriptText(mode.shell);
+	const screen = () => term.screen().join("\n");
+	/** Terminal history then the viewport. */
+	const buffer = () => term.text();
+	/** The transcript's tool cards. */
+	const toolCards = (): PendingTool[] =>
+		mode.shell.transcript.blocks().flatMap(block => {
+			const entry = mode.transcriptEntry(block);
+			return entry?.kind === "tool" ? [entry.tool] : [];
+		});
+	/** Spy the host's scrollback replays (rebuilding terminal history). */
+	const replays = () => vi.spyOn(mode.shell.host!, "replayHistory");
+
+	it("restores the pending steer ahead of a draft when the native queue pill’s Edit is clicked", async () => {
+		mode.compactionQueuedMessages = [{ text: "Check the release", mode: "steer" }];
+		mode.updatePendingMessagesDisplay();
+		mode.composer.setText("Unfinished draft");
+		await using ui = await nativeShell(mode.shell);
+		ui.click("row", "edit");
+		expect(ui.node("editor").p.text).toBe("Check the release\n\nUnfinished draft");
+		expect(mode.compactionQueuedMessages).toHaveLength(0);
+	});
+
+	it.each([
+		[undefined, "Error"],
+		["503 Backend unavailable\nBackend unavailable: try later", "Backend unavailable: try later"],
+	] as const)("copies the failed card’s visible error for provider error %p", async (errorMessage, expected) => {
+		const copied = vi.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+		mode.presentAssistant({
+			role: "assistant",
+			content: [],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			...(errorMessage ? { errorMessage } : {}),
+			usage: USAGE,
+			timestamp: 10,
+		});
+		await using ui = await nativeShell(mode.shell);
+		ui.click("row", "copy-error");
+		expect(copied).toHaveBeenCalledWith(expected);
+	});
+
+	it("copies a reply’s displayed narration and paragraphs, excluding private thinking", async () => {
+		const copied = vi.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+		const view = mode.presentAssistant({
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "Checking the config", narration: true },
+				{ type: "thinking", thinking: "Private deliberation" },
+				{ type: "text", text: "The config is valid." },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: USAGE,
+			timestamp: 10,
+		});
+		view.turnUsage.set({ elapsedMs: 50, input: 1, output: 2, cost: 0 });
+		await using ui = await nativeShell(mode.shell);
+		ui.click("icon", "copy");
+		expect(copied).toHaveBeenCalledWith("Checking the config\n\nThe config is valid.");
+	});
+
+	it("opens and folds a settled skill’s lazy prompt via its published native disclosure", async () => {
+		mode.presentMessage({
+			role: "custom",
+			customType: "skill-prompt",
+			display: true,
+			details: { name: "review", path: "/skills/review/SKILL.md" },
+			content: "Check the patch against the release.",
+			timestamp: 10,
+		});
+		await using ui = await nativeShell(mode.shell);
+		const prompt = ui.node("section", "prompt");
+		expect(prompt.p.collapsed).toBe(true);
+		expect(prompt.c).toHaveLength(0);
+		ui.send({ ev: "toggle", sf: ui.sf, id: prompt.id, collapsed: false });
+		expect(ui.node("md").p.text).toBe("Check the patch against the release.");
+		expect(mode.toolOutputExpanded).toBe(false);
+		ui.send({ ev: "toggle", sf: ui.sf, id: prompt.id, collapsed: true });
+		expect(ui.node("section", "prompt").c).toHaveLength(0);
+	});
+
+	it("unfolds an extension’s compact skill row into the actual prompt, then folds it back", async () => {
+		await installExtensions(presenter(() => ({ compact: { label: "Skill summary" } })));
+		await mode.renderInitialMessages();
+		mode.presentMessage({
+			role: "custom",
+			customType: "skill-prompt",
+			display: true,
+			details: { name: "review", path: "/skills/review/SKILL.md" },
+			content: "The skill’s actual instructions",
+			timestamp: 10,
+		});
+		await using ui = await nativeShell(mode.shell);
+		const compact = ui.node("tool");
+		expect(compact.p.collapsed).toBe(true);
+		ui.send({ ev: "toggle", sf: ui.sf, id: compact.id, collapsed: false });
+		expect(ui.node("md").p.text).toBe("The skill’s actual instructions");
+		const prompt = ui.node("section", "prompt");
+		ui.send({ ev: "toggle", sf: ui.sf, id: prompt.id, collapsed: true });
+		expect(ui.node("tool").p.collapsed).toBe(true);
+	});
 
 	it("takes the first answer in load order, skips a suspended extension and draws a throwing presenter's block in full", async () => {
 		// Regression guard: a later extension overriding an earlier one, a suspended extension still
@@ -356,12 +449,16 @@ describe("extension transcript presenters", () => {
 			// The guest claims the process before connecting; the local transcript keeps its drawing meanwhile.
 			expect(chat()).toContain("ROW-local1");
 			await joined;
-			const ui = { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} };
-			const card = new ToolExecutionComponent("bash", { command: "echo host1" }, {}, undefined, ui, "/tmp", "host1");
+			const card = mode.presentToolCall({
+				name: "bash",
+				args: { command: "echo host1" },
+				tool: undefined,
+				id: "host1",
+				cwd: "/tmp",
+			});
 			card.setArgsComplete("host1");
 			card.setExecutionStarted("host1");
-			card.updateResult({ content: [{ type: "text", text: "OUTPUT-host1" }], isError: false });
-			mode.chatContainer.addChild(card);
+			card.updateResult({ content: [{ type: "text", text: "OUTPUT-host1" }], isError: false }, false, "host1");
 			expect(chat()).toContain("OUTPUT-host1");
 			expect(asked).not.toContain("host1");
 
@@ -424,13 +521,13 @@ describe("extension transcript presenters", () => {
 		appendReply("Answer here.", 20);
 		await start();
 		await mode.renderInitialMessages();
-		await term.waitForRender(() => screen().includes("Answer here."));
+		await term.waitFor(() => screen().includes("Answer here."));
 		expect(screen()).toContain("echo call1");
 
-		const resets = vi.spyOn(mode.ui, "resetDisplay");
+		const resets = replays();
 		hidden = true;
 		runner.getUIContext().refreshTranscript(["call1"]);
-		await term.waitForRender(() => !screen().includes("echo call1"));
+		await term.waitFor(() => !screen().includes("echo call1"));
 		expect(screen()).not.toContain("echo call1");
 		expect(screen()).toContain("Answer here.");
 		expect(resets).not.toHaveBeenCalled();
@@ -453,19 +550,16 @@ describe("extension transcript presenters", () => {
 		term.resize(120, 12);
 		await start();
 		await mode.renderInitialMessages();
-		const buffer = () => plainRows(term.getScrollBuffer()).join("\n");
 		// Retirement to scrollback is spread over frames; wait until the calls reached it.
-		await term.waitForRender(() => screen().includes("Filler paragraph 19.") && buffer().includes("ROW-call1"));
+		await term.waitFor(() => screen().includes("Filler paragraph 19.") && buffer().includes("ROW-call1"));
 		expect(screen()).not.toContain("ROW-call1");
 		expect(buffer()).toContain("ROW-call1");
 
-		const resets = vi.spyOn(mode.ui, "resetDisplay");
-		const emissions = vi.spyOn(mode.chatContainer, "resetStableEmission");
+		const resets = replays();
 		hidden = true;
 		runner.getUIContext().refreshTranscript(["call1", "call2"]);
-		await term.waitForRender(() => !buffer().includes("ROW-call1"));
+		await term.waitFor(() => !buffer().includes("ROW-call1"));
 		expect(resets).toHaveBeenCalledTimes(1);
-		expect(emissions).toHaveBeenCalledTimes(1);
 		expect(buffer()).not.toContain("ROW-call1");
 		expect(buffer()).not.toContain("ROW-call2");
 		expect(buffer()).toContain("First reply.");
@@ -488,18 +582,16 @@ describe("extension transcript presenters", () => {
 		term.resize(120, 12);
 		await start();
 		await mode.renderInitialMessages();
-		const buffer = () => plainRows(term.getScrollBuffer()).join("\n");
-		await term.waitForRender(() => screen().includes("Filler paragraph 19.") && buffer().includes("ROW-call1"));
-		const tool = mode.chatContainer.children.find(child => child instanceof ToolExecutionComponent);
-		if (!(tool instanceof ToolExecutionComponent)) throw new Error("Expected the call's card");
+		await term.waitFor(() => screen().includes("Filler paragraph 19.") && buffer().includes("ROW-call1"));
+		const tool = toolCards()[0];
+		if (!tool) throw new Error("Expected the call's card");
 
-		const resets = vi.spyOn(mode.ui, "resetDisplay");
-		tool.updateResult({ content: [{ type: "text", text: "LATE" }], isError: false });
-		mode.ui.requestRender();
-		await term.waitForRender();
+		const resets = replays();
+		tool.updateResult({ content: [{ type: "text", text: "LATE" }], isError: false }, false, "call1");
+		await term.settle();
 		// The late result already replayed; the refresh must not replay a second time.
 		runner.getUIContext().refreshTranscript(["call1"]);
-		await term.waitForRender(() => !buffer().includes("ROW-call1"));
+		await term.waitFor(() => !buffer().includes("ROW-call1"));
 		expect(resets).toHaveBeenCalledTimes(1);
 		expect(buffer()).not.toContain("ROW-call1");
 		expect(buffer()).toContain("First reply.");
@@ -522,29 +614,27 @@ describe("extension transcript presenters", () => {
 		term.resize(120, 12);
 		await start();
 		await mode.renderInitialMessages();
-		const buffer = () => plainRows(term.getScrollBuffer()).join("\n");
-		const card = () => mode.chatContainer.children.find(child => child instanceof ToolExecutionComponent);
+		const card = () => toolCards()[0];
 		// Retirement is spread over frames: wait until the card's head is committed (split), its tail live.
-		await term.waitForRender(() => {
+		await term.waitFor(() => {
 			const shown = card();
 			return (
 				screen().includes("Last reply.") &&
 				buffer().includes("ROW-call1") &&
 				shown !== undefined &&
-				!mode.chatContainer.canRemoveBlock(shown)
+				mode.shell.transcript.retired(shown.block)
 			);
 		});
 		const tool = card();
-		if (!(tool instanceof ToolExecutionComponent)) throw new Error("Expected the call's card");
-		expect(mode.chatContainer.canRemoveBlock(tool)).toBe(false);
+		if (!tool) throw new Error("Expected the call's card");
+		expect(mode.shell.transcript.retired(tool.block)).toBe(true);
 		expect(screen()).toContain("ROWLINE-19");
 
-		const resets = vi.spyOn(mode.ui, "resetDisplay");
-		tool.updateResult({ content: [{ type: "text", text: "LATE" }], isError: false });
-		mode.ui.requestRender();
-		await term.waitForRender(() => !buffer().includes("ROW-call1"));
+		const resets = replays();
+		tool.updateResult({ content: [{ type: "text", text: "LATE" }], isError: false }, false, "call1");
+		await term.waitFor(() => !buffer().includes("ROW-call1"));
 		runner.getUIContext().refreshTranscript(["call1"]);
-		await term.waitForRender();
+		await term.settle();
 		expect(resets).toHaveBeenCalledTimes(1);
 		expect(buffer()).not.toContain("ROW-call1");
 		expect(buffer()).toContain("First reply.");
@@ -566,50 +656,28 @@ describe("extension transcript presenters", () => {
 		term.resize(120, 12);
 		await start();
 		await mode.renderInitialMessages();
-		const buffer = () => plainRows(term.getScrollBuffer()).join("\n");
-		await term.waitForRender(() => screen().includes("Filler paragraph 19.") && buffer().includes("ROW-call3"));
-		const tools = mode.chatContainer.children.filter(child => child instanceof ToolExecutionComponent);
+		await term.waitFor(() => screen().includes("Filler paragraph 19.") && buffer().includes("ROW-call3"));
+		const tools = toolCards();
 		expect(tools).toHaveLength(3);
 
-		const resets = vi.spyOn(mode.ui, "resetDisplay");
+		const resets = replays();
 		// A 200 ms frame, so a loaded runner still lands all three results inside it.
-		const fps = 1000 / minFrameIntervalMs();
-		setMaxFps(5);
+		const interval = term.frame.frameInterval.peek();
+		term.frame.frameInterval.set(200);
 		try {
-			for (const tool of tools) {
-				tool.updateResult({ content: [{ type: "text", text: "LATE" }], isError: false });
+			for (const [index, tool] of tools.entries()) {
+				tool.updateResult({ content: [{ type: "text", text: "LATE" }], isError: false }, false, `call${index + 1}`);
 				// The next result lands in a later event-loop turn, as background results do.
 				const tick = Promise.withResolvers<void>();
 				setImmediate(tick.resolve);
 				await tick.promise;
 			}
-			await term.waitForRender(() => !buffer().includes("ROW-call"));
+			await term.waitFor(() => !buffer().includes("ROW-call"));
 		} finally {
-			setMaxFps(fps);
+			term.frame.frameInterval.set(interval);
 		}
 		expect(resets).toHaveBeenCalledTimes(1);
 		expect(buffer()).toContain("First reply.");
-	});
-
-	it("never replays in a natively drawn transcript", async () => {
-		// Regression guard: Tern, which keeps no terminal history, paying for a full replay.
-		let hidden = false;
-		const { runner } = await installExtensions(
-			presenter(block => (block.type !== "toolCall" ? undefined : hidden ? "hidden" : "compact")),
-		);
-		appendToolCall("call1", 10);
-		for (let index = 0; index < 40; index++) appendReply(`Filler paragraph ${index}.`, 100 + index);
-		await start();
-		await mode.renderInitialMessages();
-		await term.waitForRender(() => screen().includes("Filler paragraph 39."));
-
-		setNativeRendering(true);
-		await Promise.resolve();
-		const resets = vi.spyOn(mode.ui, "resetDisplay");
-		hidden = true;
-		runner.getUIContext().refreshTranscript(["call1"]);
-		expect(resets).not.toHaveBeenCalled();
-		expect(chat()).not.toContain("echo call1");
 	});
 
 	it("asks presenters only while the opt-in setting is on, redrawing the transcript when it flips", async () => {
@@ -688,7 +756,7 @@ describe("extension transcript presenters", () => {
 		await mode.renderInitialMessages();
 		expect(chat()).toContain("ROW-call1");
 		const before = asked;
-		const resets = vi.spyOn(mode.ui, "resetDisplay");
+		const resets = replays();
 
 		// A child session's extension, loaded through the same process-wide registry.
 		await loadExtensionFromFactory(
@@ -777,7 +845,7 @@ describe("extension transcript presenters", () => {
 		stubShell();
 		await start();
 		await mode.handleBashCommand("echo live");
-		mode.chatContainer.render(120);
+		chat();
 		const recorded = session.sessionManager
 			.getEntries()
 			.flatMap(entry => (entry.type === "message" && entry.message.role === "bashExecution" ? [entry.message] : []));
@@ -787,7 +855,7 @@ describe("extension transcript presenters", () => {
 
 		ids.length = 0;
 		await mode.renderInitialMessages();
-		mode.chatContainer.render(120);
+		chat();
 		expect(ids).toEqual([recordedId]);
 	});
 
@@ -806,13 +874,13 @@ describe("extension transcript presenters", () => {
 		stubShell();
 		await start();
 		await runBashMidRun("echo live");
-		const pending = () => plainRows(mode.pendingShellContainer.render(120)).join("\n");
+		const pending = () => renderRows(() => term.frame.pendingShellRuns.nodes).join("\n");
 		expect(pending()).toContain("BEFORE-ROW");
 
 		label = "AFTER-ROW";
 		runner.getUIContext().refreshTranscript([runId!]);
 		expect(pending()).toContain("AFTER-ROW");
-		mode.flushPendingBashComponents();
+		mode.flushPendingExecRuns();
 		expect(chat()).toContain("AFTER-ROW");
 		expect(chat()).not.toContain("BEFORE-ROW");
 	});
@@ -863,14 +931,13 @@ describe("extension transcript presenters", () => {
 		term.resize(120, 12);
 		await start();
 		await mode.renderInitialMessages();
-		const buffer = () => plainRows(term.getScrollBuffer()).join("\n");
-		await term.waitForRender(() => screen().includes("Filler paragraph 19.") && buffer().includes("MSG-ROW"));
+		await term.waitFor(() => screen().includes("Filler paragraph 19.") && buffer().includes("MSG-ROW"));
 
-		const resets = vi.spyOn(mode.ui, "resetDisplay");
+		const resets = replays();
 		hidden = true;
 		runner.getUIContext().refreshTranscript(["10"]);
 		expect(resets).toHaveBeenCalledTimes(1);
-		await term.waitForRender(() => !buffer().includes("MSG-ROW"));
+		await term.waitFor(() => !buffer().includes("MSG-ROW"));
 		expect(buffer()).not.toContain("MSG-ROW");
 		expect(buffer()).toContain("First reply.");
 	});
@@ -894,7 +961,9 @@ describe("extension transcript presenters", () => {
 		});
 		await start();
 		await mode.renderInitialMessages();
-		const rows = mode.chatContainer.render(120).join("\n");
+		const raw = createTestTerminal(() => ({ main: mode.shell.transcript.nodes }), { columns: 120, rows: 200 });
+		const rows = raw.rows().join("\n");
+		raw.dispose();
 		expect(rows).not.toContain("\x07");
 		expect(rows).not.toContain("\x1b]0;");
 		expect(Bun.stripANSI(rows)).toContain("echo hi there");

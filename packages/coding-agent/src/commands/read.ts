@@ -5,7 +5,7 @@
 import { Args, Command } from "@oh-my-pi/pi-utils/cli";
 import { readHelp as commandHelp } from "../cli/command-help";
 import { type ReadCommandArgs, runReadCommand } from "../cli/read-cli";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../ui/theme/service";
 
 export default class Read extends Command {
 	static description = commandHelp.description;
@@ -33,7 +33,7 @@ export default class Read extends Command {
 		const cmd: ReadCommandArgs = {
 			path: args.path ?? "",
 		};
-		await initTheme();
+		initTheme();
 		await runReadCommand(cmd);
 	}
 }

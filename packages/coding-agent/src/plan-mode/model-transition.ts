@@ -15,7 +15,7 @@
 import type { Model } from "@oh-my-pi/pi-ai";
 import { routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedModelRoleValue } from "../config/model-resolver";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { ConfiguredThinkingLevel } from "../utils/render-utils";
 
 /** The action implied by resolving the `plan` role against the active model. */
 export type PlanModelTransition =

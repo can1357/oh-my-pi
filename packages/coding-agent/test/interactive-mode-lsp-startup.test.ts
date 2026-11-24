@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
@@ -6,7 +7,6 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "@oh-my-pi/pi-coding-agent/lsp/startup-events";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -15,6 +15,8 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 describe("InteractiveMode LSP startup events", () => {
 	let authStorage: AuthStorage;
@@ -71,12 +73,20 @@ describe("InteractiveMode LSP startup events", () => {
 				fileTypes: [".rs"],
 			},
 		];
-		mode = new InteractiveMode(session, "test", () => {}, lspServers, undefined, eventBus);
+		mode = new InteractiveMode(
+			session,
+			"test",
+			() => {},
+			lspServers,
+			undefined,
+			eventBus,
+			createModeTerminal().frame,
+		);
 		// This test exercises the LSP startup banner, not git branch watching.
 		// Starting a real fs.watch on the repo HEAD in a parallel Bun worker is
 		// enough to trigger a Bun SIGTRAP in unrelated workers during the
 		// 4-worker suite reproducer, so keep the watcher out of this contract.
-		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+		vi.spyOn(vcs, "watch").mockImplementation(() => () => {});
 	});
 
 	afterEach(async () => {

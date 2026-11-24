@@ -22,7 +22,7 @@ import {
 import { type MCPInitializeResult, MCPNotificationMethods, type MCPRequestOptions } from "../types";
 import type { McpEra, McpServerSpec, McpUpstreamExit } from "./contract";
 import { encodeMcpHeaderValue, HttpUpstream } from "./http-upstream";
-import { MCP_LEGACY_INITIALIZE_PARAMS, openLegacySession, parseInitializeResult } from "./legacy-session";
+import { openLegacySession, parseInitializeResult } from "./legacy-session";
 import type {
 	McpPeer,
 	McpPeerDeps,
@@ -41,9 +41,10 @@ type Upstream = StdioUpstream | HttpUpstream | SseUpstream;
 /** Bound of the era probe when the spec disables its own. */
 const PROBE_TIMEOUT_MS = 30_000;
 /**
- * How long a server that answered `initialize` first may still answer the
- * `server/discover` written before it. A server of both eras answers both; the
- * modern answer wins.
+ * How long a server that answered `initialize` may still answer the
+ * `server/discover` written after it. A server of both eras answers both; the
+ * modern answer wins. A handshake-era server that refuses the method or
+ * ignores it is classified from the `initialize` session instead.
  */
 const PROBE_DISCOVER_GRACE_MS = 250;
 
@@ -859,9 +860,9 @@ class LegacyPeer implements McpPeer {
 
 // ── probe ──────────────────────────────────────────────────────────────────
 
-type Outcome = { value: unknown } | { error: unknown };
+type Outcome<T = unknown> = { value: T } | { error: unknown };
 
-function outcomeOf(request: Promise<unknown>): Promise<Outcome> {
+function outcomeOf<T>(request: Promise<T>): Promise<Outcome<T>> {
 	return request.then(
 		value => ({ value }),
 		error => ({ error }),
@@ -891,35 +892,36 @@ function eraOfDiscoverError(error: unknown): McpEra | undefined {
 }
 
 /**
- * Probe a subprocess: `server/discover`, and right behind it `initialize`, so
- * a handshake-era server that ignores the unknown method still shows itself
- * without waiting out the bound.
+ * Probe a subprocess with `initialize` first: the handshake era requires it as
+ * the very first request — strict servers such as rmcp exit on anything else —
+ * and `server/discover`, asked only once the handshake is done, names the
+ * modern ones.
  */
 async function probeStdio(upstream: StdioUpstream, deps: McpPeerDeps, signal: AbortSignal): Promise<McpProbeResult> {
 	upstream.onRequest = legacyRequestHandler(deps);
 	await upstream.connect(deps.spawn, signal);
-	const discover = outcomeOf(upstream.request("server/discover", { _meta: requestMeta() }, { signal }));
-	const initialize = outcomeOf(upstream.request("initialize", { ...MCP_LEGACY_INITIALIZE_PARAMS }, { signal }));
-
-	const discovered = await Promise.race([
-		discover,
-		initialize.then(outcome =>
-			"value" in outcome
-				? Promise.race([discover, Bun.sleep(PROBE_DISCOVER_GRACE_MS).then(() => undefined)])
-				: discover,
-		),
-	]);
-	if (discovered) {
+	const initialized = await outcomeOf(openLegacySession(upstream, signal));
+	if ("error" in initialized) {
+		// The server refused the legacy handshake: it may be of the 2026-07-28
+		// era alone, so ask its own question before giving up.
+		const discovered = await outcomeOf(upstream.request("server/discover", { _meta: requestMeta() }, { signal }));
 		if ("error" in discovered) {
 			if (eraOfDiscoverError(discovered.error) === "modern") return { era: "modern" };
 		} else {
 			const result = discoverResultOf(discovered.value);
 			if (result) return { era: "modern", discover: result };
 		}
+		throw initialized.error;
 	}
-	const initialized = await initialize;
-	if ("error" in initialized) throw initialized.error;
-	return { era: "legacy", discover: legacyDiscover(parseInitializeResult(initialized.value)) };
+	const discovered = await Promise.race([
+		outcomeOf(upstream.request("server/discover", { _meta: requestMeta() }, { signal })),
+		Bun.sleep(PROBE_DISCOVER_GRACE_MS).then(() => undefined),
+	]);
+	if (discovered && !("error" in discovered)) {
+		const result = discoverResultOf(discovered.value);
+		if (result) return { era: "modern", discover: result };
+	}
+	return { era: "legacy", discover: legacyDiscover(initialized.value) };
 }
 
 /** The HTTP status behind a failed modern POST, whether or not its body was a JSON-RPC error. */

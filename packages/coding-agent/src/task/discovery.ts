@@ -30,7 +30,7 @@ import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
 import { substitutePluginRoot } from "../discovery/substitute-plugin-root";
 import { normalizeClaudeCodeToolName, normalizeToolNames } from "../tools/builtin-names";
 import { loadBundledAgents, parseAgent } from "./agents";
-import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentSource } from "./task-details";
 import type { AgentDefinition } from "./types";
 
 const TASK_AGENT_CONFIG_SOURCE = ".omp";

@@ -3,27 +3,22 @@
  * session's subagents after `/new` or a session switch, but the Agent Hub
  * roster only lists the current session's tree.
  */
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { createAgentHubRuntime } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
+import type { AgentHubRemote } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/agent-hub";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { copySessionArtifacts } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { type AgentHubRemote, AgentHubOverlayComponent } from "@oh-my-pi/pi-tui/overlays/agent-hub";
-import { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { type MountedHub, mountAgentHub } from "./helpers/agent-hub";
 
 describe("Agent Hub session scope", () => {
 	let dir: string;
-	const hubs: AgentHubOverlayComponent[] = [];
-
-	beforeAll(async () => {
-		await initTheme();
-	});
+	const hubs: MountedHub[] = [];
 
 	afterEach(async () => {
 		for (const hub of hubs.splice(0)) hub.dispose();
@@ -71,7 +66,12 @@ describe("Agent Hub session scope", () => {
 			session: {} as AgentSession,
 			sessionFile: path.join(dir, "new", "NewLive.jsonl"),
 		});
-		registry.register({ id: "Memory", displayName: "Memory", kind: "sub", session: {} as AgentSession });
+		registry.register({
+			id: "Memory",
+			displayName: "Memory",
+			kind: "sub",
+			session: {} as AgentSession,
+		});
 		if (options.old) {
 			registry.register({
 				id: "OldIdle",
@@ -95,24 +95,20 @@ describe("Agent Hub session scope", () => {
 			if (options.old === "copied") await copySessionArtifacts(oldRoot, newRoot);
 			else for (const file of files) await Bun.write(path.join(dir, "new", file), header(`new-${file}`));
 		}
-		const hub = new AgentHubOverlayComponent({
+		const hub = mountAgentHub({
 			...createAgentHubRuntime({
 				settings: Settings.isolated(),
 				registry,
 				remote: options.remote,
 				sessionFile: newRoot,
 			}),
-			observers: new SessionObserverRegistry(),
-			hubKeys: [],
-			onDone: () => {},
-			requestRender: () => {},
 			irc: new IrcBus(registry),
 			remote: options.remote,
 			sessionFile: newRoot,
 		});
 		hubs.push(hub);
-		await hub.persistedSubagentsReady;
-		return Bun.stripANSI(hub.render(120).join("\n"));
+		await hub.handle.persistedReady;
+		return hub.text();
 	}
 
 	it("hides subagents persisted under a previous session's root", async () => {

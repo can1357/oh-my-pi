@@ -957,7 +957,7 @@ describe("isUsageLimitOutcome", () => {
 		expect(isUsageLimitOutcome(429, message)).toBe(true);
 	});
 
-	it("rotates on Anthropic 402 in-flight credit exhaustion instead of surfacing the retry hint", () => {
+	it("rotates on OpenRouter 402 in-flight credit exhaustion instead of surfacing the retry hint", () => {
 		const message =
 			"402 This request would exceed your available credits given your current in-flight requests. Retry after in-flight requests settle, or add credits. retry-after-ms=120000";
 		expect(parseRateLimitReason(message)).toBe("QUOTA_EXHAUSTED");
