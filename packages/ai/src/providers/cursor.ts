@@ -1817,6 +1817,8 @@ function streamCursorWithWireMode(
 				// response is complete and `finally` closes the transport.
 				const parkUntilResumed = async (): Promise<boolean> => {
 					await drainInFlightDispatches();
+					// The refusal ends this response. A park would carry the flag into the resumed response, which drops its text.
+					if (state.toolCallMarkupRefusal) throw new Error(state.toolCallMarkupRefusal);
 					endCurrentTextBlock(output, stream, state);
 					endCurrentThinkingBlock(output, stream, state);
 					// The held calls went out whole as their exec frames were held

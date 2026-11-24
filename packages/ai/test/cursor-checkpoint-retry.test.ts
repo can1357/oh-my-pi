@@ -292,6 +292,59 @@ it("does not resume from a checkpoint that predates the client's exec result", a
 	expect(result.stopReason).toBe("error");
 });
 
+it("keeps the tool-call markup refusal when the retry resumes the turn (issue 8495)", async () => {
+	const sessions = new Set<http2.Http2Session>();
+	let requestCount = 0;
+	const server = http2.createServer();
+	server.on("session", session => {
+		sessions.add(session);
+		session.on("close", () => sessions.delete(session));
+	});
+	server.on("stream", (providerStream: http2.ServerHttp2Stream) => {
+		requestCount++;
+		let handled = false;
+		providerStream.on("data", () => {
+			if (handled) return;
+			handled = true;
+			providerStream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+			if (requestCount === 1) {
+				// The markup, a fresh checkpoint, then a cut before turnEnded.
+				providerStream.end(
+					Buffer.concat([textDeltaFrame('<|open|>toolscall tool="Shell" index="1"<|sep|>'), checkpointFrame()]),
+				);
+				return;
+			}
+			providerStream.end(Buffer.concat([textDeltaFrame(" after"), turnEndedFrame()]));
+		});
+	});
+	const listening = Promise.withResolvers<void>();
+	server.once("error", listening.reject);
+	server.listen(0, "127.0.0.1", listening.resolve);
+	await listening.promise;
+	const address = server.address();
+	if (!address || typeof address === "string") throw new Error("expected HTTP/2 fixture server address");
+
+	try {
+		const response = streamCursor(makeModel(`http://127.0.0.1:${address.port}`), context, {
+			apiKey: "test-token",
+			providerRetryWait: async () => {},
+		});
+		const eventTypes: string[] = [];
+		for await (const event of response) eventTypes.push(event.type);
+		const result = await response.result();
+		const storedText = result.content.map(block => (block.type === "text" ? block.text : "")).join("");
+
+		expect(requestCount).toBe(2);
+		expect(eventTypes).not.toContain("done");
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("tool-call markup");
+		expect(storedText).not.toContain(" after");
+	} finally {
+		for (const session of sessions) session.destroy();
+		server.close();
+	}
+});
+
 it("does not resume from a checkpoint while the exec handler is still running at the drop", async () => {
 	const { requestCount, handlerRuns, result } = await runStaleCheckpointScenario(false);
 
