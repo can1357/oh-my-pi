@@ -15,6 +15,8 @@ export interface ScopeConfig {
 	appendSystemPrompt: string | null;
 	/** Handlebars file replacing the system prompt template. */
 	systemPromptTemplate: string | null;
+	/** JSON file of `{ find, replace }` pairs applied to the rendered prompt. Absent in results written before the flag existed. */
+	rewrite?: string | null;
 	tasks: string[];
 	runs: number;
 	concurrency: number;
@@ -163,7 +165,7 @@ export function renderReport(result: ScopeResult): string {
 	const lines = [
 		`# Scope benchmark: ${config.label}`,
 		"",
-		`\`${config.model}\` · thinking \`${config.thinking ?? "default"}\` · append \`${config.appendSystemPrompt ?? "none"}\` · template \`${config.systemPromptTemplate ?? "default"}\` · ${result.runs.length}/${result.total} runs · $${result.summary.costUsd.toFixed(3)}`,
+		`\`${config.model}\` · thinking \`${config.thinking ?? "default"}\` · append \`${config.appendSystemPrompt ?? "none"}\` · template \`${config.systemPromptTemplate ?? "default"}\` · rewrite \`${config.rewrite ?? "none"}\` · ${result.runs.length}/${result.total} runs · $${result.summary.costUsd.toFixed(3)}`,
 		"",
 		"Times and counts are per-run medians; unrequested checks, their seconds, and post-edit reads are per-run means.",
 		"",

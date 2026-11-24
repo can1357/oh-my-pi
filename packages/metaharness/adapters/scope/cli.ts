@@ -8,6 +8,8 @@
  * bun adapters/scope/cli.ts --model openrouter/deepseek/deepseek-v4.1-flash --label base
  * bun adapters/scope/cli.ts --model openrouter/deepseek/deepseek-v4.1-flash --label lean \
  *   --append-system-prompt adapters/scope/variants/lean-verification.md
+ * bun adapters/scope/cli.ts --model openrouter/deepseek/deepseek-v4.1-flash --label swap \
+ *   --rewrite adapters/scope/variants/rw-final-drop.json   # swap single prompt lines, no template fork
  * bun adapters/scope/cli.ts compare ../../runs/scope/base/result.json ../../runs/scope/lean/result.json
  * bun adapters/scope/cli.ts rescore ../../runs/scope/*\/result.json   # after editing task specs or the classifier
  * ```
@@ -22,7 +24,7 @@ import { postmortem } from "@oh-my-pi/pi-utils";
 import { discoverSharedInfra } from "@oh-my-pi/typescript-edit-benchmark/in-process-client";
 import { renderComparison, renderReport, type ScopeResult, type ScopeRun, summarize } from "./result";
 import { loadTasks, type ScopeTask } from "./tasks";
-import { rescoreRun, runTrial, type TrialConfig } from "./trial";
+import { type PromptRewrite, rescoreRun, runTrial, type TrialConfig } from "./trial";
 
 const RUNS_DIR = path.resolve(import.meta.dir, "..", "..", "..", "..", "runs", "scope");
 
@@ -77,6 +79,30 @@ async function rescore(files: string[]): Promise<void> {
 	}
 }
 
+/**
+ * Reads a `--rewrite` file: a JSON array of `{ "find": string, "replace": string }`.
+ * @throws when the file holds anything else.
+ */
+async function loadRewrites(file: string): Promise<PromptRewrite[]> {
+	const parsed: unknown = await Bun.file(file).json();
+	if (!Array.isArray(parsed)) throw new Error(`${file}: expected an array of { find, replace }`);
+	const entries: unknown[] = parsed;
+	return entries.map((entry, index): PromptRewrite => {
+		if (
+			typeof entry !== "object" ||
+			entry === null ||
+			!("find" in entry) ||
+			typeof entry.find !== "string" ||
+			entry.find === "" ||
+			!("replace" in entry) ||
+			typeof entry.replace !== "string"
+		) {
+			throw new Error(`${file}: entry ${index + 1} needs a non-empty "find" and a "replace" string`);
+		}
+		return [entry.find, entry.replace];
+	});
+}
+
 function selectTasks(all: ScopeTask[], list: string | undefined): ScopeTask[] {
 	if (list === undefined) return all;
 	const wanted = list
@@ -101,6 +127,7 @@ async function run(argv: string[]): Promise<void> {
 			thinking: { type: "string" },
 			"append-system-prompt": { type: "string" },
 			"system-prompt-template": { type: "string" },
+			rewrite: { type: "string" },
 			timeout: { type: "string" },
 			label: { type: "string" },
 			output: { type: "string" },
@@ -134,6 +161,7 @@ async function run(argv: string[]): Promise<void> {
 		thinking,
 		appendSystemPrompt: appendFile === undefined ? undefined : await Bun.file(appendFile).text(),
 		systemPromptTemplate: templateFile === undefined ? undefined : await Bun.file(templateFile).text(),
+		rewrites: values.rewrite === undefined ? [] : await loadRewrites(values.rewrite),
 		timeoutMs: timeoutSec * 1000,
 		jobDir,
 	};
@@ -144,6 +172,7 @@ async function run(argv: string[]): Promise<void> {
 			thinking: thinking ?? null,
 			appendSystemPrompt: appendFile ?? null,
 			systemPromptTemplate: templateFile ?? null,
+			rewrite: values.rewrite ?? null,
 			tasks: tasks.map(task => task.id),
 			runs,
 			concurrency,
@@ -178,6 +207,7 @@ async function run(argv: string[]): Promise<void> {
 	);
 	if (appendFile) log(`  append ${appendFile}`);
 	if (templateFile) log(`  template ${templateFile}`);
+	if (values.rewrite) log(`  rewrite ${values.rewrite}`);
 	log(`  ${output}`);
 
 	const shared = await discoverSharedInfra();

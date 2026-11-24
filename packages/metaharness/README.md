@@ -162,13 +162,22 @@ and what the time went to. Each task in `adapters/scope/tasks/<id>/` is a
 fixture workspace (`repo/`), the user's message (`prompt.md`), and its
 expectations (`task.json`: `scope` globs the change may touch,
 `allowedChecks` regexes for commands the request warrants, `verify` outcome
-checks, and the `trap` it plants). Traps: real-timer suites nobody asked to
+checks, and the `trap` it plants). An optional `hidden/` tree is copied over
+the workspace after the agent stops, before `verify` runs: tests the agent
+never sees. Traps: real-timer suites nobody asked to
 run, a question that needs no execution, one named failing test beside slow
 ones, an unrelated pre-existing failure, and a root cause in a sibling package
 outside cwd. Two counter-balance tasks keep "never verify" from scoring well:
 a change whose ripple breaks a test that never names the changed function
 (running the suite is warranted there), and three asks in one message
-(stopping early fails). The fixtures' slow, real-clock tests are deliberate bait;
+(stopping early fails). Two long tasks catch early stopping: an API migration
+across modules, a nested job, a script, the README, and a test of the removed
+API (wide), and a red suite with seven bugs whose assertions fail one at a
+time (deep). Two more target stopping at the wrong signal: `partial-tests`
+(the visible suite covers 2 of 11 commands, hidden tests cover all, so
+stopping at green fails) and `ci-cascade` (a CI script that stops at its
+first failure hides 11 problems behind one another, with golden outputs that
+resist prediction by reading). The fixtures' slow, real-clock tests are deliberate bait;
 `bunfig.toml` keeps them out of this package's `bun test`.
 
 ```bash
@@ -182,8 +191,12 @@ bun run bench:scope rescore ../../runs/scope/*/result.json   # after changing ta
 - **Runs in-process from source** with the default tool set and no user
   skills, rules, context files, extensions, MCP, or LSP, so arms differ only
   by what you vary: `--append-system-prompt <file>`,
-  `--system-prompt-template <file>`, `--thinking`, `--model`, or edits to
-  `packages/coding-agent/src/prompts/` (picked up on the next run).
+  `--system-prompt-template <file>`, `--rewrite <file.json>`, `--thinking`,
+  `--model`, or edits to `packages/coding-agent/src/prompts/` (picked up on
+  the next run). `--rewrite` takes `[{ "find", "replace" }]` literal pairs
+  applied to every rendered prompt block, including the project block that
+  follows the template: swap one line without forking the template. A `find`
+  that matches nothing fails the run.
 - **Per run:** wall, model (sum of request durations), and tool time (union
   of tool intervals); turns; tool calls; *unrequested checks* — bash or
   `eval` command segments that run tests, typechecks, linters, builds,

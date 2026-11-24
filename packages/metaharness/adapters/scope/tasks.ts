@@ -1,7 +1,9 @@
 /**
  * Scope benchmark tasks: one directory per task under `tasks/`, holding the user prompt
  * (`prompt.md`), the expectations (`task.json`), and the fixture workspace (`repo/`) every
- * run starts from. The fixture's suites stay out of this package's `bun test` via `bunfig.toml`.
+ * run starts from. An optional `hidden/` tree is laid over the workspace after the agent stops,
+ * before `verify` runs: checks the agent never sees. The fixture's suites stay out of this
+ * package's `bun test` via `bunfig.toml`.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -37,6 +39,8 @@ export interface ScopeTask extends Required<TaskFile> {
 	prompt: string;
 	/** Absolute path of the fixture workspace. */
 	repoDir: string;
+	/** Absolute path of the tree laid over the workspace before `verify`; `null` when the task has none. */
+	hiddenDir: string | null;
 }
 
 /** Directory holding the built-in tasks. */
@@ -62,6 +66,7 @@ export async function loadTasks(dir = TASKS_DIR): Promise<ScopeTask[]> {
 			if (typeof spec.verify !== "object" || spec.verify === null) throw new Error(`${id}/task.json needs "verify"`);
 			const repoDir = path.join(taskDir, "repo");
 			if (!(await fs.stat(repoDir)).isDirectory()) throw new Error(`${id}/repo is not a directory`);
+			const hasHidden = (await fs.readdir(taskDir)).includes("hidden");
 			return {
 				id,
 				trap: spec.trap,
@@ -71,6 +76,7 @@ export async function loadTasks(dir = TASKS_DIR): Promise<ScopeTask[]> {
 				verify: spec.verify,
 				prompt: (await Bun.file(path.join(taskDir, "prompt.md")).text()).trim(),
 				repoDir,
+				hiddenDir: hasHidden ? path.join(taskDir, "hidden") : null,
 			};
 		}),
 	);

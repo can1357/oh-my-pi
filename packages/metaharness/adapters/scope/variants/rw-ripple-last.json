@@ -1,0 +1,10 @@
+[
+	{
+		"find": "- **Changed what a function returns or prints?** Run its package's tests once and update assertions on the old output; search misses assertions that never name the function.\n",
+		"replace": ""
+	},
+	{
+		"find": "- Before yielding, MUST verify significant behavioral changes: run the specific test, command, or scenario covering the change.\n",
+		"replace": "- Before yielding, MUST verify significant behavioral changes: run the specific test, command, or scenario covering the change.\n- **Changed what a function returns or prints?** Run its package's tests once and update assertions on the old output; search misses assertions that never name the function.\n"
+	}
+]

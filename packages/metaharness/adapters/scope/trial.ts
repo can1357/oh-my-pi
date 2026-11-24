@@ -19,6 +19,9 @@ import { analyzeCalls, type ToolCallRecord } from "./checks";
 import type { ScopeRun } from "./result";
 import type { ScopeTask, VerifySpec } from "./tasks";
 
+/** A literal `find` → `replace` substitution on the rendered system prompt. */
+export type PromptRewrite = readonly [find: string, replace: string];
+
 /** Session settings shared by every run of an arm. */
 export interface TrialConfig {
 	model: string;
@@ -27,6 +30,8 @@ export interface TrialConfig {
 	appendSystemPrompt: string | undefined;
 	/** Handlebars text replacing the system prompt template. */
 	systemPromptTemplate: string | undefined;
+	/** Substitutions applied, in order, to every rendered prompt block (template, project block, appended text). */
+	rewrites: readonly PromptRewrite[];
 	timeoutMs: number;
 	/** Job directory; the run's trace lands in `traces/`. */
 	jobDir: string;
@@ -46,6 +51,21 @@ async function snapshot(root: string): Promise<Map<string, number | bigint>> {
 		files.set(file, Bun.hash(await fs.readFile(path.join(root, file))));
 	}
 	return files;
+}
+
+/**
+ * Applies `rewrites` to every block of the rendered system prompt.
+ * @throws when a `find` occurs in no block: the prompt moved on and the arm would silently equal its baseline.
+ */
+function rewritePrompt(blocks: string[], rewrites: readonly PromptRewrite[]): string[] {
+	let rewritten = blocks;
+	for (const [find, replace] of rewrites) {
+		if (!rewritten.some(block => block.includes(find))) {
+			throw new Error(`rewrite target is not in the system prompt: ${find.trim().slice(0, 80)}`);
+		}
+		rewritten = rewritten.map(block => block.replaceAll(find, replace));
+	}
+	return rewritten;
 }
 
 /** Pairs tool start/end events into timed {@link ToolCallRecord}s, live or replayed from a trace. */
@@ -252,6 +272,7 @@ export async function runTrial(
 			thinkingLevel: config.thinking,
 			appendSystemPrompt: config.appendSystemPrompt,
 			systemPromptTemplate: config.systemPromptTemplate,
+			systemPrompt: config.rewrites.length > 0 ? blocks => rewritePrompt(blocks, config.rewrites) : undefined,
 			authStorage: shared.authStorage,
 			modelRegistry: shared.modelRegistry,
 			sessionManager: SessionManager.inMemory(cwd),
@@ -312,6 +333,8 @@ export async function runTrial(
 	const after = await snapshot(root);
 	const files = [...new Set([...before.keys(), ...after.keys()])].sort();
 	const changed = files.filter(file => before.get(file) !== after.get(file));
+	// Hidden checks land only now: the agent never saw them, and they never count as its changes.
+	if (task.hiddenDir) await fs.cp(task.hiddenDir, root, { recursive: true });
 	const verifyFailures = error === null ? await verify(task.verify, root, [...after.keys()], answer) : [];
 	return {
 		task: task.id,
