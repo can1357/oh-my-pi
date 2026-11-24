@@ -83,6 +83,7 @@
 - Extensions importing `@oh-my-pi/omptype` resolve to the host's copy, so they load offline and after Bun prunes the package's cached registry manifest; the bare import used to fall back to the install cache and fail the extension load
 - After plan mode is paused or disabled without approving a plan, the agent no longer refuses edits by citing plan mode's read-only rules; those rules leave the model context when plan mode ends and are not restored on resume ([#20375](https://github.com/can1357/oh-my-pi/issues/20375))
 - `--no-extensions` no longer imports custom tool modules from `.omp/tools`, `.claude/tools`, `.codex/tools`, or installed plugins; tools from explicitly passed `-e`/`--hook` packages still load
+- Restricted subagents report which OAuth accounts are usage-limited or rejected by org policy instead of showing only the provider’s 403; `omp usage` also lists rejected logins and when they can be tried again ([#20373](https://github.com/can1357/oh-my-pi/issues/20373)).
 - Fixed `/fast off` and bare `/fast` claiming "Fast mode disabled." on a model with no service-tier control; they now report that fast mode is unavailable for the current model ([#20284](https://github.com/can1357/oh-my-pi/pull/20284) by [@adammekki](https://github.com/adammekki))
 
 - The `ask` tool returns a prefilled `<textarea>` value unchanged: text such as `<name>` or `<tag attr="x">…</tag>` is no longer dropped from it ([#20299](https://github.com/can1357/oh-my-pi/issues/20299))
