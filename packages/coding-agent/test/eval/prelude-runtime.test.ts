@@ -113,7 +113,7 @@ describe("eval prelude runtime", () => {
 					timestamp: 1,
 				},
 			];
-			const normalized = await normalizeModelContextMessages(messages, model);
+			const normalized = await normalizeModelContextMessages(messages, model, true);
 			const message = normalized[0];
 			if (!message || message.role !== "toolResult") throw new Error("Missing provider-bound Eval result");
 			const images = message.content.filter((part): part is ImageContent => part.type === "image");

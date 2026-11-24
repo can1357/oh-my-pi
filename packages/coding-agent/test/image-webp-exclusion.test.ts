@@ -210,7 +210,7 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 			},
 		];
 
-		const result = await normalizeModelContextMessages(messages, buildStbVisionModel("managed-primary"));
+		const result = await normalizeModelContextMessages(messages, buildStbVisionModel("managed-primary"), true);
 		const resultMessage = result[0]!;
 		expect(resultMessage.role).toBe("toolResult");
 		if (resultMessage.role !== "toolResult") throw new Error("Expected tool result message");
@@ -252,7 +252,7 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 			timestamp: 1,
 		};
 
-		const messages = await normalizeModelContextMessages([message], model);
+		const messages = await normalizeModelContextMessages([message], model, true);
 		const normalizedMessage = messages[0]!;
 		expect(normalizedMessage.role).toBe("user");
 		if (normalizedMessage.role !== "user") throw new Error("Expected user message");
@@ -291,7 +291,7 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 		};
 		const message: Message = { role: "user", content: "inspect native image", providerPayload, timestamp: 1 };
 
-		const messages = await normalizeModelContextMessages([message], model);
+		const messages = await normalizeModelContextMessages([message], model, true);
 		const normalizedMessage = messages[0]!;
 		expect(normalizedMessage.role).toBe("user");
 		if (normalizedMessage.role !== "user") throw new Error("Expected user message");
@@ -329,7 +329,7 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 			},
 		];
 
-		const result = await normalizeModelContextMessages(messages, buildStbVisionModel("managed-primary"));
+		const result = await normalizeModelContextMessages(messages, buildStbVisionModel("managed-primary"), true);
 		const resultMessage = result[0]!;
 		expect(resultMessage.role).toBe("toolResult");
 		if (resultMessage.role !== "toolResult") throw new Error("Expected tool result message");
@@ -358,7 +358,7 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 				},
 			] as unknown as Message[];
 
-			const result = await normalizeModelContextMessages(messages, buildStbVisionModel("managed-primary"));
+			const result = await normalizeModelContextMessages(messages, buildStbVisionModel("managed-primary"), true);
 			const resultMessage = result[0]!;
 			expect(resultMessage.role).toBe("toolResult");
 			if (resultMessage.role !== "toolResult") throw new Error("Expected tool result message");
@@ -386,7 +386,7 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 				},
 			] as unknown as Message[];
 
-			const result = await normalizeModelContextMessages(messages, buildStbVisionModel("managed-primary"));
+			const result = await normalizeModelContextMessages(messages, buildStbVisionModel("managed-primary"), true);
 			expect(result).toBe(messages);
 			expect((result[0]!.content as unknown[])[0]).toBe(malformedImage);
 		}

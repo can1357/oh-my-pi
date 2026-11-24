@@ -247,6 +247,16 @@ export interface NormalizeModelContextImagesOptions {
 }
 
 /**
+ * Resize for the WebP re-encode a model that cannot decode WebP needs. With autoResize
+ * off the re-encode still happens but carries no caps; minDimension 0 turns off the lift
+ * floor so the image keeps its size. Admission and history replay both use it.
+ */
+function webpConversionResize(autoResize: boolean, resize?: ImageResizeOptions): ImageResizeOptions | undefined {
+	if (autoResize) return resize;
+	return { ...resize, maxWidth: Infinity, maxHeight: Infinity, maxBytes: Infinity, minDimension: 0 };
+}
+
+/**
  * Normalize image blocks before they enter agent/model context. This keeps
  * provider request construction from having to resize an unbounded batch of
  * large images on the streaming hot path. Images are processed sequentially on
@@ -266,12 +276,10 @@ export async function normalizeModelContextImages(
 	for (const image of images) {
 		try {
 			if (excludesWebP && isWebPImage(image)) {
-				// With autoResize off the WebP conversion is still required, but carries no caps.
-				// minDimension 0 turns off the lift floor so the image keeps its size.
-				const webpResize = options.autoResize
-					? options.resize
-					: { ...options.resize, maxWidth: Infinity, maxHeight: Infinity, maxBytes: Infinity, minDimension: 0 };
-				const converted = await memoizedStbImageNormalization(image, webpResize);
+				const converted = await memoizedStbImageNormalization(
+					image,
+					webpConversionResize(options.autoResize, options.resize),
+				);
 				// Mixed-content callers reassemble normalized images positionally, so
 				// preserve one output slot per input. The provider-boundary pass replaces
 				// an undecodable WebP with an omission note before dispatch.
@@ -297,8 +305,13 @@ export async function normalizeModelContextImages(
  * Rewrites historical/resumed WebP blocks in the ephemeral provider request.
  * Persisted session messages remain untouched, while STB-backed local servers
  * never receive a format they cannot decode.
+ * `autoResize` is `images.autoResize`: off keeps the re-encoded WebP at full size, as admission does.
  */
-export async function normalizeModelContextMessages(messages: Message[], model: Model | undefined): Promise<Message[]> {
+export async function normalizeModelContextMessages(
+	messages: Message[],
+	model: Model | undefined,
+	autoResize: boolean,
+): Promise<Message[]> {
 	if (!modelLacksWebpSupport(model)) return messages;
 	let output: Message[] | undefined;
 	for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
@@ -317,7 +330,7 @@ export async function normalizeModelContextMessages(messages: Message[], model: 
 					continue;
 				}
 				content ??= message.content.slice(0, partIndex);
-				const normalized = await memoizedStbImageNormalization(part, undefined);
+				const normalized = await memoizedStbImageNormalization(part, webpConversionResize(autoResize));
 				content.push(normalized ?? createUndecodableStbImageOmission());
 			}
 		}
@@ -340,8 +353,12 @@ export async function normalizeModelContextMessages(messages: Message[], model: 
 }
 
 /** Normalizes historical image blocks in an ephemeral provider request. */
-export async function normalizeProviderContextImagesForModel(context: Context, model: Model): Promise<Context> {
-	const messages = await normalizeModelContextMessages(context.messages, model);
+export async function normalizeProviderContextImagesForModel(
+	context: Context,
+	model: Model,
+	autoResize: boolean,
+): Promise<Context> {
+	const messages = await normalizeModelContextMessages(context.messages, model, autoResize);
 	return messages === context.messages ? context : { ...context, messages };
 }
 
