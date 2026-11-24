@@ -15,7 +15,11 @@ import type { FetchImpl } from "../../types";
 const PROVIDER = "antigravity-cli";
 // ACP stores credentials under app-data-dir, whose default is the
 // antigravity-cli subdirectory of --gemini-dir (not directly in gemini-dir).
-const TOKEN_FILE = path.join("antigravity-cli", "antigravity-oauth-token");
+// agy 1.5.13 renamed the token file to `jetski-standalone-oauth-token`;
+// older releases only ever wrote `antigravity-oauth-token`. Stage both names
+// and prefer the current one when reading.
+const TOKEN_FILE_CURRENT = path.join("antigravity-cli", "jetski-standalone-oauth-token");
+const TOKEN_FILE_LEGACY = path.join("antigravity-cli", "antigravity-oauth-token");
 const REQUEST_TIMEOUT_MS = 30_000;
 const EXPIRY_SKEW_MS = 60_000;
 // These public installed-application credentials match agy's getOauthParams
@@ -89,7 +93,12 @@ export function parseAgyStoredCredentials(value: unknown): OAuthCredentials {
 export async function exportAgyCredentials(geminiDir: string): Promise<OAuthCredentials> {
 	let contents: string;
 	try {
-		const file = path.join(geminiDir, TOKEN_FILE);
+		let file = path.join(geminiDir, TOKEN_FILE_CURRENT);
+		try {
+			if (!(await fs.stat(file)).isFile()) file = path.join(geminiDir, TOKEN_FILE_LEGACY);
+		} catch {
+			file = path.join(geminiDir, TOKEN_FILE_LEGACY);
+		}
 		if ((await fs.stat(file)).size > 1024 * 1024) throw new Error();
 		contents = await fs.readFile(file, "utf8");
 	} catch {
@@ -144,13 +153,17 @@ export function agyCredentialVersion(apiKey: string): string {
 
 /**
  * Apply ONLY to agy's subprocess, never omp or host-executed tools.
- * agy has no file-storage flag. Its native sshDetector checks SSH_TTY for a
- * nonempty value (it does not open the path), selecting file-only storage for
- * the process lifetime. This explicit headless marker prevents both reads and
- * writes of the user's global keychain, including during login and refresh.
+ * Its native sshDetector checks SSH_TTY for a nonempty value (it does not open
+ * the path), selecting file-only storage for the process lifetime. Since agy
+ * 1.5.13 that alone is not enough: `agy acp --login` still writes the grant to
+ * the user's global macOS keychain (svce=gemini, acct=antigravity), so also set
+ * the explicit file-storage switch added in 1.5.16. Older releases ignore the
+ * unknown variable, and SSH_TTY keeps them on file-only storage. Together these
+ * prevent reads and writes of the user's global keychain, including during
+ * login and refresh.
  */
 export function agyCredentialEnv(): Record<string, string> {
-	return { SSH_TTY: "omp-agy-file-auth" };
+	return { SSH_TTY: "omp-agy-file-auth", AGY_CLI_FORCE_FILE_TOKEN_STORAGE: "1" };
 }
 
 /**
@@ -171,41 +184,43 @@ export async function stageAgyCredentials(apiKey: string, geminiDir: string): Pr
 		refresh_token: credentials.refresh === REMOTE_REFRESH_SENTINEL ? undefined : credentials.refresh,
 		expiry: new Date(credentials.expires).toISOString(),
 	};
-	const file = path.join(geminiDir, TOKEN_FILE);
-	const temporary = `${file}.${randomUUID()}.tmp`;
+	const staged = JSON.stringify({ token, auth_method: "consumer", id_token_email: credentials.email });
 	try {
 		// Non-Linux locks create `${geminiDir}.lock` beside this directory.
-		await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+		await fs.mkdir(path.join(geminiDir, "antigravity-cli"), { recursive: true, mode: 0o700 });
 		await withFileLock(geminiDir, async () => {
 			await fs.chmod(geminiDir, 0o700);
-			await fs.chmod(path.dirname(file), 0o700);
-			await fs.writeFile(
-				temporary,
-				JSON.stringify({ token, auth_method: "consumer", id_token_email: credentials.email }),
-				{
-					mode: 0o600,
-					flag: "wx",
-				},
-			);
-			await fs.rename(temporary, file);
-			// Check only local bytes; never send an identity-probing inference request.
-			// The directory lock is still held, so these bytes are this caller's grant.
-			const staged = record(json(await fs.readFile(file, "utf8")));
-			const stagedToken = record(staged?.token);
-			if (
-				staged?.auth_method !== "consumer" ||
-				stagedToken?.access_token !== token.access_token ||
-				stagedToken.refresh_token !== token.refresh_token ||
-				stagedToken.expiry !== token.expiry ||
-				staged.id_token_email !== credentials.email
-			) {
-				throw new Error();
+			await fs.chmod(path.join(geminiDir, "antigravity-cli"), 0o700);
+			// Stage both file names: agy >= 1.5.13 reads only
+			// `jetski-standalone-oauth-token`, older releases only the legacy name.
+			for (const file of [TOKEN_FILE_CURRENT, TOKEN_FILE_LEGACY].map(name => path.join(geminiDir, name))) {
+				const temporary = `${file}.${randomUUID()}.tmp`;
+				try {
+					await fs.writeFile(temporary, staged, {
+						mode: 0o600,
+						flag: "wx",
+					});
+					await fs.rename(temporary, file);
+					// Check only local bytes; never send an identity-probing inference request.
+					// The directory lock is still held, so these bytes are this caller's grant.
+					const written = record(json(await fs.readFile(file, "utf8")));
+					const writtenToken = record(written?.token);
+					if (
+						written?.auth_method !== "consumer" ||
+						writtenToken?.access_token !== token.access_token ||
+						writtenToken.refresh_token !== token.refresh_token ||
+						writtenToken.expiry !== token.expiry ||
+						written.id_token_email !== credentials.email
+					) {
+						throw new Error();
+					}
+				} finally {
+					await fs.rm(temporary, { force: true }).catch(() => {});
+				}
 			}
 		});
 	} catch {
 		throw invalid("Could not stage the isolated Antigravity CLI account credentials");
-	} finally {
-		await fs.rm(temporary, { force: true }).catch(() => {});
 	}
 }
 

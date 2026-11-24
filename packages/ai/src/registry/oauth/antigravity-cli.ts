@@ -97,7 +97,16 @@ async function bounded<T>(work: Promise<T>, signal: AbortSignal, milliseconds?: 
 
 const LOGIN_DIRECTORY_PREFIX = "login-";
 const LOGIN_DIRECTORY_RETENTION_MS = 24 * 60 * 60 * 1000;
-const LOGIN_TOKEN_FILE = path.join("antigravity-cli", "antigravity-oauth-token");
+const LOGIN_TOKEN_DIR = "antigravity-cli";
+const LOGIN_TOKEN_FILES = ["jetski-standalone-oauth-token", "antigravity-oauth-token"];
+
+/** agy 1.5.13 renamed the token file; a login that produced either name succeeded. */
+async function loginTokenExists(directory: string): Promise<boolean> {
+	for (const name of LOGIN_TOKEN_FILES) {
+		if (await Bun.file(path.join(directory, LOGIN_TOKEN_DIR, name)).exists()) return true;
+	}
+	return false;
+}
 
 export interface CleanupLoginOptions {
 	/** Test seam: runs after the directory is claimed and before the credential check. */
@@ -121,14 +130,14 @@ export async function cleanupAbandonedLoginDirectories(
 		if (!entry.isDirectory() || !entry.name.startsWith(LOGIN_DIRECTORY_PREFIX)) continue;
 		const directory = path.join(root, entry.name);
 		try {
-			if (await Bun.file(path.join(directory, LOGIN_TOKEN_FILE)).exists()) continue;
+			if (await loginTokenExists(directory)) continue;
 			const stat = await fs.stat(directory);
 			if (now - stat.mtimeMs < LOGIN_DIRECTORY_RETENTION_MS) continue;
 			const claimed = path.join(root, `cleanup-${crypto.randomUUID()}`);
 			await fs.rename(directory, claimed);
 			try {
 				await options.afterClaim?.(claimed);
-				if (await Bun.file(path.join(claimed, LOGIN_TOKEN_FILE)).exists()) {
+				if (await loginTokenExists(claimed)) {
 					try {
 						await fs.rename(claimed, directory);
 					} catch {

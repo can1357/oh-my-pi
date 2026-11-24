@@ -128,7 +128,10 @@ describe("Antigravity CLI credential ownership", () => {
 			expect((await fs.stat(account)).mode & 0o777).toBe(0o700);
 			expect((await fs.stat(tokenPath)).mode & 0o777).toBe(0o600);
 		}
-		expect(await fs.readdir(path.join(account, "antigravity-cli"))).toEqual(["antigravity-oauth-token"]);
+		expect(await fs.readdir(path.join(account, "antigravity-cli"))).toEqual([
+			"antigravity-oauth-token",
+			"jetski-standalone-oauth-token",
+		]);
 		const otherKey = JSON.stringify({
 			...JSON.parse(apiKey),
 			accountId: "second",
@@ -206,7 +209,7 @@ describe("Antigravity CLI credential ownership", () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agy-broker-"));
 		directories.push(directory);
 		const before = process.env.SSH_TTY;
-		expect(agyCredentialEnv()).toEqual({ SSH_TTY: "omp-agy-file-auth" });
+		expect(agyCredentialEnv()).toEqual({ SSH_TTY: "omp-agy-file-auth", AGY_CLI_FORCE_FILE_TOKEN_STORAGE: "1" });
 		expect(process.env.SSH_TTY).toBe(before);
 		await stageAgyCredentials(JSON.stringify({ ...JSON.parse(apiKey), refreshToken: "__remote__" }), directory);
 		const contents = await fs.readFile(path.join(directory, "antigravity-cli", "antigravity-oauth-token"), "utf8");
@@ -259,7 +262,7 @@ describe("Antigravity CLI login handoff", () => {
 				`#!${process.execPath}
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-if (process.env.SSH_TTY !== "omp-agy-file-auth") process.exit(9);
+if (process.env.SSH_TTY !== "omp-agy-file-auth" || process.env.AGY_CLI_FORCE_FILE_TOKEN_STORAGE !== "1") process.exit(9);
 const args = process.argv.slice(2);
 const appData = args[args.indexOf("--app-data-dir") + 1];
 process.stdout.write("https://accounts.google.com/o/oauth2/v2/auth?client_id=${AGY_OAUTH_CLIENT_ID}&state=fixture\\n");
@@ -270,7 +273,7 @@ if (process.env.FIXTURE_MODE === "failure") {
 	process.exit(1);
 }
 await fs.mkdir(appData, {recursive: true, mode: 0o700});
-await fs.writeFile(path.join(appData, "antigravity-oauth-token"), JSON.stringify({
+await fs.writeFile(path.join(appData, "jetski-standalone-oauth-token"), JSON.stringify({
 	token: ${JSON.stringify(stored.token)}, auth_method: "consumer", id_token_email: "account@example.test"
 }), {mode: 0o600});
 `,
