@@ -1,12 +1,12 @@
 /**
  * A split commit plan that carries changelog entries must validate on Windows,
  * where `path.relative` returns backslash paths while git reports `/` paths
- * (issue #17446). The Windows case runs the relative computation and the path
- * separator under win32 semantics. The POSIX case uses a literal backslash in a
- * directory name, which git reports as-is.
+ * (issue #17446). The Windows case runs on a Windows host, where path.relative and
+ * path.sep are win32's. The POSIX case uses a literal backslash in a directory name,
+ * which git reports as-is.
  */
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it, mock, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
@@ -22,7 +22,6 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 
 const CHANGELOG = "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n## [1.0.0]\n\n### Fixed\n\n- old\n";
-const actualPath = { ...nodePath };
 
 let authStorage: AuthStorage | undefined;
 let workspace: string | undefined;
@@ -41,7 +40,6 @@ afterEach(() => {
 	authStorage?.close();
 	authStorage = undefined;
 	vi.restoreAllMocks();
-	mock.module("node:path", () => actualPath);
 	if (originalProjectDir) setProjectDir(originalProjectDir);
 	originalProjectDir = undefined;
 	if (workspace) fs.rmSync(workspace, { recursive: true, force: true });
@@ -102,11 +100,9 @@ async function expectSplitPlanValidates(pkgs: string[]): Promise<void> {
 }
 
 describe("runAgenticCommit split plan with changelog entries (issue #17446)", () => {
-	it("validates a split plan whose changelog paths are on Windows", async () => {
-		// Win32 relative paths and the backslash separator for completeAgentCommitState. The
-		// namespace binding of node:path cannot be assigned, so the module is swapped; afterEach restores it.
-		mock.module("node:path", () => ({ ...actualPath, relative: actualPath.win32.relative, sep: "\\" }));
-
+	// node:path's sep cannot be swapped on a POSIX host without mock.module, which leaks across
+	// test files (AGENTS.md), so this case runs only where path.sep and path.relative are win32's.
+	it.skipIf(process.platform !== "win32")("validates a split plan whose changelog paths are on Windows", async () => {
 		await expectSplitPlanValidates(["a", "b"]);
 	});
 
