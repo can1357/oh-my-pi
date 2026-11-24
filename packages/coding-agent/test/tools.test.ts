@@ -3523,6 +3523,20 @@ describe("edit tool CRLF handling", () => {
 		expect(content).toBe("first\r\nREPLACED\r\nthird\r\n");
 	});
 
+	it("should keep the ending of each line an edit does not touch", async () => {
+		const testFile = path.join(testDir, "mixed-untouched.txt");
+		fs.writeFileSync(testFile, "first\r\nsecond\nthird\r\nfourth\n");
+
+		await editTool.execute("test-crlf-untouched", {
+			path: testFile,
+			old_string: "third\n",
+			new_string: "REPLACED\n",
+		});
+
+		const content = await Bun.file(testFile).text();
+		expect(content).toBe("first\r\nsecond\nREPLACED\r\nfourth\n");
+	});
+
 	it("should preserve LF line endings for LF files", async () => {
 		const testFile = path.join(testDir, "lf-preserve.txt");
 		fs.writeFileSync(testFile, "first\nsecond\nthird\n");
