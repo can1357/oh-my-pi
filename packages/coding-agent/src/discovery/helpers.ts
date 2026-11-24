@@ -525,11 +525,12 @@ export async function scanSkillsFromDir(
 	};
 
 	const isLoadableSkillFile = async (skillPath: string): Promise<boolean> => {
+		if (!fs.existsSync(skillPath)) return false;
 		if (options.isWithinRoot && !(await options.isWithinRoot(skillPath))) {
 			warnings.push(`Skipping skill at ${skillPath}: SKILL.md resolves outside plugin root`);
 			return false;
 		}
-		return fs.existsSync(skillPath);
+		return true;
 	};
 
 	const work: Promise<void>[] = [];
