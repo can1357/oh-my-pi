@@ -1163,6 +1163,12 @@ describe("is402BillingCapBody", () => {
 		expect(is402BillingCapBody("Insufficient balance in account")).toBe(true);
 	});
 
+	it("returns true for a 402 whose body names a credit balance requirement and no quota marker", () => {
+		expect(is402BillingCapBody("A positive credit balance is required")).toBe(true);
+		expect(isUsageLimitOutcome(402, "A positive credit balance is required")).toBe(true);
+		expect(isUsageLimit(new ProviderHttpError("A positive credit balance is required", 402))).toBe(true);
+	});
+
 	it("returns true for quota exhaustion and concurrent limit reasons", () => {
 		expect(is402BillingCapBody("quota exceeded")).toBe(true);
 		expect(is402BillingCapBody("insufficient_quota")).toBe(true);
