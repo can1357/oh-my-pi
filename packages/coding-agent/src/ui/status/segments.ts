@@ -722,7 +722,9 @@ export function segmentView(
 			return view(input, [span(text)], [{ icon: "time" }, { t: text }], "time");
 		}
 		case "session": {
-			const text = facts.sessionId?.slice(0, 8) || "new";
+			// Thirteen characters: a UUIDv7's whole 48-bit millisecond timestamp (`01a03242-993e`). Eight dropped
+			// its low 16 bits, so sessions created within ~65 s showed the same id.
+			const text = facts.sessionId?.slice(0, 13) || "new";
 			return view(input, [span(text)], [{ icon: "session" }, { t: text }], "session");
 		}
 		case "hostname": {

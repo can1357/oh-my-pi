@@ -51,6 +51,7 @@
 - The bash tool's visualization keeps a one-line awk, jq, regex or other embedded program highlighted where it appears in the command; only multi-line programs move below it behind a `⟦awk ↓⟧`-style chip.
 
 ### Fixed
+- Fixed the status-line `session` segment showing identical IDs for sessions created within about a minute of each other; it now shows the first 13 characters of the ID ([#9572](https://github.com/can1357/oh-my-pi/issues/9572), [#19937](https://github.com/can1357/oh-my-pi/pull/19937) by [@JamieJ5926](https://github.com/JamieJ5926))
 - `--no-extensions` no longer imports custom tool modules from `.omp/tools`, `.claude/tools`, `.codex/tools`, or installed plugins; tools from explicitly passed `-e`/`--hook` packages still load
 - Fixed `/fast off` and bare `/fast` claiming "Fast mode disabled." on a model with no service-tier control; they now report that fast mode is unavailable for the current model ([#20284](https://github.com/can1357/oh-my-pi/pull/20284) by [@adammekki](https://github.com/adammekki))
 
