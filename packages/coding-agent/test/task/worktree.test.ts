@@ -1711,7 +1711,7 @@ describe("commitToBranch preserves agent commits", () => {
 
 		expect(result?.rootPatch ?? "").toContain("+pid 3");
 		expect(result?.branchName).toBe("omp/task/modified-lock");
-		expect(await runGit(parent, ["show", "omp/task/modified-lock:.beads.gate.lock"])).toBe("pid 3\n");
+		expect(await runGit(parent, ["show", "omp/task/modified-lock:.beads.gate.lock"])).toBe("pid 3");
 
 		const merge = await mergeTaskBranches(parent, [
 			{ branchName: result!.branchName!, taskId: "modified-lock", baseSha: result!.baseSha! },
