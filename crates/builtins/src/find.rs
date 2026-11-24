@@ -4274,9 +4274,10 @@ pub mod matchers {
 	pub async fn build_top_level_matcher(
 		args: &[&str],
 		config: &mut Config,
+		now: SystemTime,
 		host: &mut Host,
 	) -> Result<Box<dyn Matcher>, Box<dyn Error>> {
-		let (_, top_level_matcher) = build_matcher_tree(args, config, 0, false, host).await?;
+		let (_, top_level_matcher) = build_matcher_tree(args, config, 0, false, now, host).await?;
 
 		// if the matcher doesn't have any side-effects, then we default to printing
 		if !top_level_matcher.has_side_effects() {
@@ -4349,19 +4350,13 @@ pub mod matchers {
 		)))
 	}
 
-	/// Converts a `-newerXt`-style reference time string into a Unix timestamp
-	/// (milliseconds).
-	///
-	/// Accepts, in order:
-	/// - `@N[.N]` seconds since the epoch (GNU extension)
-	/// - RFC 3339 datetimes with an explicit offset, e.g.
-	///   "2026-01-01T00:00:00Z"
-	/// - ISO-style naive dates/datetimes ("2026-01-01",
-	///   "2026-01-01 12:30[:45]", with ` ` or `T` separators), interpreted in
-	///   the shell's time zone like GNU find
-	/// - "(month abbreviation) (date), (year) (time)" strings, e.g.
-	///   "jan 01, 2025 00:00:01" (time defaults to 00:00:00)
-	fn parse_date_str_to_timestamps(date_str: &str, time_zone: &jiff::tz::TimeZone) -> Option<i64> {
+	/// Parse a `-newerXt` reference time into milliseconds since the epoch.
+	fn parse_date_str_to_timestamps(date_str: &str, now: &jiff::Zoned) -> Option<i64> {
+		if let Ok((parsed, _)) = crate::date_parser::parse_date(date_str, now) {
+			return Some(parsed.timestamp().as_millisecond());
+		}
+
+		// Preserve absolute forms previously accepted by find.
 		if let Some(epoch) = date_str.strip_prefix('@')
 			&& let Ok(seconds) = epoch.parse::<f64>()
 		{
@@ -4386,7 +4381,6 @@ pub mod matchers {
 				r"^(?P<month_day>\w{3} \d{2})?(?:, (?P<year>\d{4}))?(?: (?P<time>\d{2}:\d{2}:\d{2}))?$";
 			let re = Regex::new(regex_pattern).ok()?;
 			let captures = re.captures(date_str)?;
-			let now = jiff::Timestamp::now().to_zoned(time_zone.clone());
 			let month_day = captures
 				.get(1)
 				.map_or_else(|| now.strftime("%b %d").to_string(), |m| m.as_str().to_string());
@@ -4411,7 +4405,7 @@ pub mod matchers {
 			naive.second() as i8,
 			0,
 		).ok()?;
-		let timestamp = time_zone.to_ambiguous_timestamp(datetime);
+		let timestamp = now.time_zone().to_ambiguous_timestamp(datetime);
 		// Preserve chrono's earliest-fold choice and rejection of nonexistent times.
 		if matches!(timestamp.offset(), jiff::tz::AmbiguousOffset::Gap { .. }) {
 			None
@@ -4482,6 +4476,7 @@ pub mod matchers {
 		config: &mut Config,
 		arg_index: usize,
 		mut expecting_bracket: bool,
+		now: SystemTime,
 		host: &mut Host,
 	) -> Result<(usize, Box<dyn Matcher>), Box<dyn Error>> {
 		let mut top_level_matcher = ListMatcherBuilder::new();
@@ -4842,7 +4837,7 @@ pub mod matchers {
 				},
 				"(" => {
 					let (new_arg_index, sub_matcher) =
-						Box::pin(build_matcher_tree(args, config, i + 1, true, host)).await?;
+						Box::pin(build_matcher_tree(args, config, i + 1, true, now, host)).await?;
 					i = new_arg_index;
 					Some(sub_matcher)
 				},
@@ -4949,7 +4944,10 @@ pub mod matchers {
 								let time = args[i + 1];
 								let newer_time_type = NewerOptionType::from_str(x_option.as_str());
 								// Convert args to unix timestamps. (expressed in numeric types)
-								let Some(comparable_time) = parse_date_str_to_timestamps(time, &shell_time_zone(host)) else {
+								let comparable_time = jiff::Timestamp::try_from(now).ok().and_then(|now| {
+									parse_date_str_to_timestamps(time, &now.to_zoned(shell_time_zone(host)))
+								});
+								let Some(comparable_time) = comparable_time else {
 									return Err(From::from(format!(
 										"find: I cannot figure out how to interpret ‘{}’ as a date or time",
 										args[i + 1]
@@ -5135,7 +5133,7 @@ struct ParsedInfo {
 
 /// Function to generate a `ParsedInfo` from the strings supplied on the
 /// command-line.
-async fn parse_args(args: &[&str], host: &mut Host) -> Result<ParsedInfo, Box<dyn Error>> {
+async fn parse_args(args: &[&str], now: SystemTime, host: &mut Host) -> Result<ParsedInfo, Box<dyn Error>> {
 	let mut paths = vec![];
 	let mut i = 0;
 	let mut config = Config::default();
@@ -5184,9 +5182,9 @@ async fn parse_args(args: &[&str], host: &mut Host) -> Result<ParsedInfo, Box<dy
 		let mut expression = Vec::with_capacity(args.len() - i + 2);
 		expression.extend(["-regextype", "posix-extended"]);
 		expression.extend_from_slice(&args[i..]);
-		matchers::build_top_level_matcher(&expression, &mut config, host).await?
+		matchers::build_top_level_matcher(&expression, &mut config, now, host).await?
 	} else {
-		matchers::build_top_level_matcher(&args[i..], &mut config, host).await?
+		matchers::build_top_level_matcher(&args[i..], &mut config, now, host).await?
 	};
 	if let Some(new_paths) = &config.new_paths {
 		if paths.len() == 1 && paths[0] == "." {
@@ -5369,7 +5367,7 @@ async fn do_find(
 	deps: &dyn Dependencies,
 	host: &mut Host,
 ) -> Result<i32, Box<dyn Error>> {
-	let ParsedInfo { matcher, paths, mut config } = parse_args(args, host).await?;
+	let ParsedInfo { matcher, paths, mut config } = parse_args(args, deps.now(), host).await?;
 	let mut ret = run_find(&*matcher, &paths, &config, deps, host).await;
 	// The matchers hold the other clones of each output file; release them so
 	// closing the kept clone closes the file and reports write-back errors.
@@ -5475,11 +5473,11 @@ fn print_version(host: &mut Host) {
 /// existing meaning. The inserted setting starts the expression, before every
 /// `-regex`/`-iregex`, because matcher construction applies the current regex
 /// type as it encounters those predicates.
-async fn rewrite_bsd_invocation(args: &[&str], host: &mut Host) -> Option<Vec<String>> {
+async fn rewrite_bsd_invocation(args: &[&str], now: SystemTime, host: &mut Host) -> Option<Vec<String>> {
 	if !args.contains(&"-E") {
 		return None;
 	}
-	let Err(error) = parse_args(args, host).await else {
+	let Err(error) = parse_args(args, now, host).await else {
 		return None;
 	};
 	if !error.to_string().contains("Unrecognized flag: '-E'") {
@@ -5537,6 +5535,7 @@ impl AsyncUtility for Find {
 	const RUNS_COMMANDS: bool = true;
 
 	async fn run(self, host: &mut Host) -> i32 {
+		let deps = StandardDependencies::new(host);
 		let owned: Vec<String> = self
 			.matches
 			.get_many::<std::ffi::OsString>("args")
@@ -5545,12 +5544,11 @@ impl AsyncUtility for Find {
 			.map(|arg| arg.to_string_lossy().into_owned())
 			.collect();
 		let raw: Vec<&str> = owned.iter().map(String::as_str).collect();
-		let rewritten = rewrite_bsd_invocation(&raw, host).await;
+		let rewritten = rewrite_bsd_invocation(&raw, deps.now(), host).await;
 		let args: Vec<&str> = match &rewritten {
 			Some(args) => args.iter().map(String::as_str).collect(),
 			None => raw,
 		};
-		let deps = StandardDependencies::new(host);
 		let code = match do_find(&args, &deps, host).await {
 			Ok(code) => code,
 			Err(error) => {
@@ -5648,11 +5646,11 @@ mod tests {
 			.set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1_699_876_800))).unwrap();
 		let (mut host, capture) = Host::for_test_async("find", "", &root);
 		host.set_test_var("TZ", "Asia/Tokyo");
-		let parsed = super::parse_args(&["a.txt", "-daystart", predicate, age], &mut host).await.unwrap();
 		let deps = super::StandardDependencies {
 			now: UNIX_EPOCH + Duration::from_secs(1_700_000_000),
 			..super::StandardDependencies::new(&host)
 		};
+		let parsed = super::parse_args(&["a.txt", "-daystart", predicate, age], deps.now, &mut host).await.unwrap();
 		let code = super::run_find(parsed.matcher.as_ref(), &parsed.paths, &parsed.config, &deps, &mut host).await;
 		// Calling run_find directly bypasses AsyncUtility::run's final drain.
 		host.flush_output().await.unwrap();
@@ -5700,6 +5698,44 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn newermt_named_dates_use_the_shell_time_zone() {
 		assert_newermt_uses_the_shell_time_zone(&["Nov 15, 2023", "Nov 15, 2023 07:00:00"]).await;
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn newermt_accepts_relative_and_absolute_reference_times() {
+		let dir = tempfile::tempdir().unwrap();
+		let root = dir.path();
+		let now = std::time::SystemTime::now();
+		for (name, modified) in [
+			("recent", now - Duration::from_secs(120)),
+			("old", UNIX_EPOCH + Duration::from_secs(946_684_799)),
+		] {
+			fs::File::create(root.join(name))
+				.unwrap()
+				.set_times(fs::FileTimes::new().set_modified(modified))
+				.unwrap();
+		}
+
+		for date in ["-10 minutes", "10 minutes ago", "yesterday", "@946684800", "2000-01-01"] {
+			let (code, capture) =
+				run_in_time_zone(root, &[".", "-type", "f", "-newermt", date], "UTC").await;
+			assert_eq!(
+				(code, capture.out().as_str(), capture.err().as_str()),
+				(0, "./recent\n", ""),
+				"date: {date}",
+			);
+		}
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn newermt_rejects_an_invalid_reference_time() {
+		let (_dir, root) = fixture();
+		let (code, capture) = run_in_time_zone(&root, &[".", "-newermt", "not-a-date"], "UTC").await;
+		assert_eq!(code, 1);
+		assert_eq!(capture.out(), "");
+		assert_eq!(
+			capture.err(),
+			"Error: find: I cannot figure out how to interpret ‘not-a-date’ as a date or time\n",
+		);
 	}
 
 	/// A chain as deep as path syscalls reach must be walked, in both visit

@@ -650,8 +650,18 @@ const exactZ = new Uint16Array(EXACT_MAX_UNIT + 1);
 function detectExactSuffixCycle(text: string): [unit: string, count: number] | null {
 	const n = text.length;
 	if (n < EXACT_SHORT_MIN_REPEATED_CHARS) return null;
-	const last = n - 1;
 	const maxUnit = Math.min(EXACT_MAX_UNIT, Math.floor(n / 3));
+	// Every match requires `z[len] >= min(EXACT_SHORT_MIN_REPEATED_CHARS - EXACT_SHORT_MAX_UNIT,
+	// 2 * (EXACT_SHORT_MAX_UNIT + 1))` = 120, so the last 32 chars must recur at `n - 32 - len`
+	// for some `len` in `[2, maxUnit]`. Forward `indexOf` from `needleEnd - maxUnit` scans at
+	// most `maxUnit` chars in native SIMD and rejects non-repeating tails while preserving the
+	// O(n) Z-array fallback for repeating/whitespace tails.
+	const needleLen = 32;
+	const needleEnd = n - needleLen;
+	const hit = text.indexOf(text.slice(needleEnd), needleEnd - maxUnit);
+	if (hit === -1 || hit > needleEnd - 2) return null;
+
+	const last = n - 1;
 	const z = exactZ;
 	let left = 0;
 	let right = 0;
@@ -659,7 +669,7 @@ function detectExactSuffixCycle(text: string): [unit: string, count: number] | n
 		let zi = i <= right ? Math.min(right - i + 1, z[i - left]) : 0;
 		while (i + zi < n && text.charCodeAt(last - zi) === text.charCodeAt(last - i - zi)) zi++;
 		z[i] = zi;
-		if (i + zi - 1 > right) {
+		if (zi > 0 && i + zi - 1 > right) {
 			left = i;
 			right = i + zi - 1;
 		}

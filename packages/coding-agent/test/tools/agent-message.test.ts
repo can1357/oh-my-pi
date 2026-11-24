@@ -8,7 +8,7 @@ import { AgentRegistry, type AgentRegistryApi } from "@oh-my-pi/pi-coding-agent/
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
-import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/irc-types";
 
 const received = new Map<string, IrcMessage[]>();
 let registry: AgentRegistryApi;

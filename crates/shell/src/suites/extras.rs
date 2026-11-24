@@ -328,6 +328,15 @@ async fn find_exec_runs_commands() {
 	assert_eq!(out(&mut s, "find . -name x -exec cat {} +").await, "hello\n");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fd_exec_runs_commands() {
+	let dir = tempfile::tempdir().unwrap();
+	std::fs::write(dir.path().join("x"), "hello\n").unwrap();
+	let mut s = session_in(dir.path(), &[]);
+	assert_eq!(out(&mut s, "fd -x echo {/}").await, "x\n");
+	assert_eq!(out(&mut s, "fd -X cat").await, "hello\n");
+}
+
 /// awk's command strings are command lines of the shell itself, so pi's
 /// builtins run in them; a missing command is the shell's 127.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

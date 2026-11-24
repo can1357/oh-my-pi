@@ -9,6 +9,7 @@ exports_files(["Cargo.toml"])
 # languages load WebAssembly grammars at runtime (src/language/grammar.rs).
 rust_library(
     name = "ast",
+    lint_config = "//bazel/lints:workspace_lints",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
     # Cargo gates WebAssembly grammars behind the default `wasm` feature; omp's

@@ -18,7 +18,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/tool-commands";
 import { TerminalGraphicsDecoder } from "@oh-my-pi/pi-coding-agent/utils/terminal-graphics";
 import type { ShellCommandRequest } from "@oh-my-pi/pi-natives";
-import { convertImageToPng } from "@oh-my-pi/pi-tui/png-conversion";
+import { convertImageToPng } from "@oh-my-pi/pi-coding-agent/utils/png-conversion";
 
 const PNG_1X1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
 

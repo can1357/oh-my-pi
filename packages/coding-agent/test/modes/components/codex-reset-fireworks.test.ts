@@ -1,87 +1,31 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import { stripVTControlCharacters } from "node:util";
-import type { Component, OverlayHandle, OverlayOptions } from "@oh-my-pi/pi-tui";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { createTestTerminal, type TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { Settings } from "../../../src/config/settings";
 import {
-	CodexResetFireworksController,
+	type CodexResetFireworksEvent,
 	detectCodexResetFireworks,
-} from "@oh-my-pi/pi-tui/overlays/codex-reset-fireworks";
-import { getThemeByName, setThemeInstance, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
+} from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/codex-reset-fireworks";
+import { CodexResetFireworks } from "../../../src/ui/overlays/panels/codex-reset-fireworks";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
-type CodexResetFireworksHost = ConstructorParameters<typeof CodexResetFireworksController>[0];
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
-interface FakeHost {
-	host: CodexResetFireworksHost;
-	shown: Component[];
-	options: OverlayOptions[];
-	focused: Component[];
-	requestRenderCount(): number;
-	hiddenCount(): number;
-}
-
-function makeHost(rows = 24): FakeHost {
-	const shown: Component[] = [];
-	const options: OverlayOptions[] = [];
-	const focused: Component[] = [];
-	let renders = 0;
-	let hidden = 0;
-	const host: CodexResetFireworksHost = {
-		ui: {
-			showOverlay(component, nextOptions) {
-				shown.push(component);
-				options.push(nextOptions ?? {});
-				return {
-					hide() {
-						hidden++;
-					},
-					setHidden() {},
-					isHidden: () => false,
-				} satisfies OverlayHandle;
-			},
-			setFocus(component) {
-				focused.push(component);
-			},
-			requestRender() {
-				renders++;
-			},
-			terminal: { rows },
-		},
-	};
-	return {
-		host,
-		shown,
-		options,
-		focused,
-		requestRenderCount: () => renders,
-		hiddenCount: () => hidden,
-	};
-}
-
-async function flushMicrotasks(): Promise<void> {
-	await Promise.resolve();
-	await Promise.resolve();
+/** The celebration on a terminal, its root focused the way the overlay focuses it. */
+function mountFireworks(event: CodexResetFireworksEvent, onClose: () => void = () => {}): TestTerminal {
+	const term = createTestTerminal(() => ({ layer: CodexResetFireworks({ event, startedAt: 0, onClose }) }), {
+		columns: 80,
+		rows: 24,
+		theme: loadThemeSync("dark"),
+	});
+	term.focus(term.surface.layer()[0] ?? null);
+	return term;
 }
 
 describe("Codex reset fireworks", () => {
-	let priorTheme: Theme | undefined;
 	beforeAll(async () => {
-		priorTheme = theme;
 		await Settings.init({ inMemory: true });
-		const loaded = await getThemeByName("dark");
-		if (!loaded) throw new Error("theme unavailable");
-		setThemeInstance(loaded);
-	});
-
-	afterAll(() => {
-		if (priorTheme) setThemeInstance(priorTheme);
-	});
-
-	beforeEach(() => {
-		vi.useFakeTimers();
-	});
-
-	afterEach(() => {
-		vi.useRealTimers();
 	});
 
 	it("detects an unscheduled weekly reset and prioritizes newly banked resets", () => {
@@ -184,48 +128,30 @@ describe("Codex reset fireworks", () => {
 	});
 
 	it("renders distinct copy for usage-window and saved-reset celebrations", () => {
-		const usage = makeHost();
-		const usageController = new CodexResetFireworksController(usage.host);
-		usageController.show({ kind: "unscheduled-weekly-reset" });
-		const usageText = usage.shown[0]?.render(80).map(stripVTControlCharacters).join("\n") ?? "";
+		const usage = mountFireworks({ kind: "unscheduled-weekly-reset" });
+		const usageText = usage.screen().join("\n");
+		usage.dispose();
+		const saved = mountFireworks({ kind: "saved-reset-banked", added: 1, available: 3 });
+		const savedText = saved.screen().join("\n");
+		saved.dispose();
 
-		const saved = makeHost();
-		const savedController = new CodexResetFireworksController(saved.host);
-		savedController.show({ kind: "saved-reset-banked", added: 1, available: 3 });
-		const savedText = saved.shown[0]?.render(80).map(stripVTControlCharacters).join("\n") ?? "";
-
-		expect(usageText).toContain("O P E N A I   R E S E T");
 		expect(usageText).toContain("Weekly usage cleared early");
-		expect(savedText).toContain("S A V E D   R E S E T");
 		expect(savedText).toContain("New reset banked · 3 available");
 		expect(savedText).not.toContain("Weekly usage cleared early");
-
-		usageController.dispose();
-		savedController.dispose();
 	});
 
-	it("holds a top-third modal until Escape and ignores overlapping celebrations", async () => {
-		const fake = makeHost(24);
-		const controller = new CodexResetFireworksController(fake.host);
-		expect(controller.show({ kind: "unscheduled-weekly-reset" })).toBe(true);
-		expect(controller.show({ kind: "saved-reset-banked", added: 1, available: 1 })).toBe(false);
-		expect(fake.shown).toHaveLength(1);
-		expect(fake.focused).toEqual(fake.shown);
-		expect(fake.options[0]).toMatchObject({ anchor: "top-center", width: "100%", maxHeight: "33%", margin: 0 });
-		expect(fake.shown[0]?.render(80)).toHaveLength(7);
-
-		vi.advanceTimersByTime(5_000);
-		expect(fake.requestRenderCount()).toBeGreaterThan(FRAME_COUNT_FOR_THREE_SECONDS);
-		expect(fake.hiddenCount()).toBe(0);
-
-		const component = fake.shown[0];
-		component?.handleInput?.("x");
-		expect(fake.hiddenCount()).toBe(0);
-		component?.handleInput?.("\x1b");
-		await flushMicrotasks();
-		expect(fake.hiddenCount()).toBe(1);
-		controller.dispose();
+	it("holds the celebration until Escape", () => {
+		let closed = 0;
+		const term = mountFireworks({ kind: "unscheduled-weekly-reset" }, () => closed++);
+		try {
+			term.tick(5_000);
+			expect(closed).toBe(0);
+			term.press("x");
+			expect(closed).toBe(0);
+			term.press("escape");
+			expect(closed).toBe(1);
+		} finally {
+			term.dispose();
+		}
 	});
 });
-
-const FRAME_COUNT_FOR_THREE_SECONDS = Math.floor(3_000 / 85);

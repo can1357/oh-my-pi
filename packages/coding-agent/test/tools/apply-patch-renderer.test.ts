@@ -1,20 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
-import * as themeModule from "@oh-my-pi/pi-tui/theme";
-import { toolRenderers } from "@oh-my-pi/pi-tui/tools";
-import type { TUI } from "@oh-my-pi/pi-tui";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { ToolCall } from "../../src/ui/transcript/tool-block";
+import { toolCallText, toolText } from "../helpers/tool-text";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
-async function getUiTheme() {
-	await themeModule.initTheme(false, undefined, undefined, "dark", "light");
-	const theme = await themeModule.getThemeByName("dark");
-	expect(theme).toBeDefined();
-	return theme!;
-}
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 beforeEach(async () => {
 	await Settings.init({ inMemory: true, cwd: process.cwd() });
@@ -24,41 +15,28 @@ afterEach(() => {
 	resetSettingsForTest();
 });
 
+/** An apply_patch call whose input is still streaming (args incomplete). */
+function streamingCall(input: string): ToolCall {
+	return new ToolCall({ id: "call-1", name: "apply_patch", args: { input } });
+}
+
 describe("apply_patch rendering", () => {
-	it("renders apply_patch results through edit UI instead of generic fallback", async () => {
-		await getUiTheme();
-		const uiStub = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
-
-		const component = new ToolExecutionComponent(
-			"apply_patch",
-			{
-				input: "*** Begin Patch\n*** Update File: src/demo.ts\n@@\n-old\n+new\n*** End Patch",
-			},
-			{},
-			undefined,
-			uiStub,
-		);
-
-		component.updateResult(
-			{
+	it("renders apply_patch results through edit UI instead of generic fallback", () => {
+		const rendered = toolText({
+			name: "apply_patch",
+			args: { input: "*** Begin Patch\n*** Update File: src/demo.ts\n@@\n-old\n+new\n*** End Patch" },
+			result: {
 				content: [{ type: "text", text: "" }],
-				details: {
-					path: "src/demo.ts",
-					op: "update",
-					diff: "@@\n-old\n+new",
-				},
+				details: { path: "src/demo.ts", op: "update", diff: "@@\n-old\n+new" },
 			},
-			false,
-		);
-
-		const rendered = Bun.stripANSI(component.render(140).join("\n"));
+			width: 140,
+		});
 		expect(rendered).toContain("src/demo.ts");
 		expect(rendered).toContain("+new");
 		expect(rendered).not.toContain("(no output)");
 	});
 
-	it("derives call path, operation, and file-count hints from apply_patch input", async () => {
-		const uiTheme = await getUiTheme();
+	it("derives call path, operation, and file-count hints from apply_patch input", () => {
 		const input = [
 			"*** Begin Patch",
 			"*** Update File: src/first.ts",
@@ -70,127 +48,71 @@ describe("apply_patch rendering", () => {
 			"*** End Patch",
 		].join("\n");
 
-		const component = toolRenderers.apply_patch.renderCall({ input }, { expanded: false, isPartial: true }, uiTheme);
-		if (!component) throw new Error("expected a call component");
-		const rendered = Bun.stripANSI(component.render(160).join("\n"));
-
+		const rendered = toolCallText(streamingCall(input), 160);
 		expect(rendered).toContain("src/first.ts");
 		expect(rendered).toContain("Edit");
 		expect(rendered).toContain("(+1 more)");
 	});
 
-	it("does not show missing end-marker errors while apply_patch input is streaming", async () => {
-		const uiTheme = await getUiTheme();
+	it("does not show missing end-marker errors while apply_patch input is streaming", () => {
 		const input = ["*** Begin Patch", "*** Update File: src/streaming.ts", "@@", "-before", "+after"].join("\n");
 
-		const component = toolRenderers.apply_patch.renderCall({ input }, { expanded: false, isPartial: true }, uiTheme);
-		if (!component) throw new Error("expected a call component");
-		const rendered = Bun.stripANSI(component.render(160).join("\n"));
-
+		const rendered = toolCallText(streamingCall(input), 160);
 		expect(rendered).toContain("src/streaming.ts");
 		expect(rendered).not.toContain("The last line of the patch must be");
 	});
 
-	it("shows an apply_patch parse error preview for malformed input", async () => {
-		await getUiTheme();
-		const uiStub = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
-		const malformedInput = ["*** Begin Patch", "*** Update File: src/bad.ts", "*** End Patch"].join("\n");
-
-		const component = new ToolExecutionComponent("apply_patch", { input: malformedInput }, {}, undefined, uiStub);
-		component.updateStreamPreview({
+	it("shows an apply_patch parse error preview for malformed input", () => {
+		const call = streamingCall(["*** Begin Patch", "*** Update File: src/bad.ts", "*** End Patch"].join("\n"));
+		call.updateStreamPreview({
 			generation: 1,
 			streaming: false,
 			files: [{ path: "", error: "Line 3: Update file hunk for path 'src/bad.ts' is empty" }],
 		});
-		const rendered = Bun.stripANSI(component.render(160).join("\n"));
 
+		const rendered = toolCallText(call, 160);
 		expect(rendered).toContain("src/bad.ts");
 		expect(rendered).toContain("is empty");
 	});
 
-	it("shows apply_patch preview diffs after args complete", async () => {
-		const uiTheme = await getUiTheme();
-		const uiStub = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
-		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "apply-patch-preview-"));
-		try {
-			await Bun.write(path.join(tmpDir, "preview.ts"), "const value = 1;\n");
-			const input = [
-				"*** Begin Patch",
-				"*** Update File: preview.ts",
-				"@@",
-				"-const value = 1;",
-				"+const value = 2;",
-				"*** End Patch",
-			].join("\n");
+	it("shows apply_patch preview diffs after args complete", () => {
+		const input = [
+			"*** Begin Patch",
+			"*** Update File: preview.ts",
+			"@@",
+			"-const value = 1;",
+			"+const value = 2;",
+			"*** End Patch",
+		].join("\n");
+		const call = streamingCall(input);
+		// The card's bottom rule, where the preview label sits.
+		const bottomRule = (text: string): string => text.split("\n").findLast(line => line.includes("╰")) ?? "";
+		const before = toolCallText(call, 160);
+		expect(bottomRule(before)).not.toContain(" preview ");
+		expect(before).not.toContain("const value = 2;");
 
-			// The card's bottom rule, where the preview label sits.
-			const bottomRule = (text: string): string =>
-				text.split("\n").findLast(line => line.includes(uiTheme.boxRound.bottomLeft)) ?? "";
-			const component = new ToolExecutionComponent("apply_patch", { input }, {}, undefined, uiStub, tmpDir);
-			const before = Bun.stripANSI(component.render(160).join("\n"));
-			expect(bottomRule(before)).not.toContain("preview");
-
-			component.updateStreamPreview({
-				generation: 1,
-				streaming: false,
-				files: [
-					{
-						path: "preview.ts",
-						diff: " 1|const value = 1;\n-1|const value = 1;\n+1|const value = 2;",
-						firstChangedLine: 1,
-					},
-				],
-			});
-			component.setArgsComplete();
-			const after = Bun.stripANSI(component.render(160).join("\n"));
-			expect(bottomRule(after)).toContain(" preview ");
-			expect(after).toContain("const value = 2;");
-		} finally {
-			await removeWithRetries(tmpDir);
-		}
+		call.updateStreamPreview({
+			generation: 1,
+			streaming: false,
+			files: [
+				{
+					path: "preview.ts",
+					diff: " 1|const value = 1;\n-1|const value = 1;\n+1|const value = 2;",
+					firstChangedLine: 1,
+				},
+			],
+		});
+		call.setArgsComplete();
+		const after = toolCallText(call, 160);
+		expect(bottomRule(after)).toContain(" preview ");
+		expect(after).toContain("const value = 2;");
 	});
 
-	it("refreshes streaming preview immediately on arg updates without scheduling a debounce", async () => {
-		await getUiTheme();
-		const uiStub = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
-		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "apply-patch-instant-preview-"));
-		const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
-		try {
-			await Bun.write(path.join(tmpDir, "preview.ts"), "const value = 1;\n");
-			const component = new ToolExecutionComponent("apply_patch", { input: "" }, {}, undefined, uiStub, tmpDir);
-
-			setTimeoutSpy.mockClear();
-			component.updateArgs({
-				input: [
-					"*** Begin Patch",
-					"*** Update File: preview.ts",
-					"@@",
-					"-const value = 1;",
-					"+const value = 2;",
-					"*** End Patch",
-				].join("\n"),
-			});
-
-			expect(setTimeoutSpy).not.toHaveBeenCalled();
-		} finally {
-			setTimeoutSpy.mockRestore();
-			await removeWithRetries(tmpDir);
-		}
-	});
-
-	it("aligns rendered edit diff separators", async () => {
-		await getUiTheme();
-		const uiStub = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
-		const component = new ToolExecutionComponent(
-			"edit",
-			{ path: "packages/coding-agent/src/tools/image-gen.ts" },
-			{},
-			undefined,
-			uiStub,
-		);
-
-		component.updateResult(
-			{
+	it("aligns rendered edit diff separators", () => {
+		const rendered = toolText({
+			name: "edit",
+			args: { path: "packages/coding-agent/src/tools/image-gen.ts" },
+			result: {
 				content: [{ type: "text", text: "" }],
 				details: {
 					path: "packages/coding-agent/src/tools/image-gen.ts",
@@ -205,10 +127,8 @@ describe("apply_patch rendering", () => {
 					].join("\n"),
 				},
 			},
-			false,
-		);
-
-		const rendered = Bun.stripANSI(component.render(220).join("\n"));
+			width: 220,
+		});
 		expect(rendered).toContain("  10│}");
 		expect(rendered).toContain(" +11│import");
 		expect(rendered).toContain(" 228│");

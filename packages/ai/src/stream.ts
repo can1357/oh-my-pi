@@ -1155,8 +1155,9 @@ function isRetryableUpstreamError(
 	// denied by plan, model policy, or org restriction — a sibling account may
 	// not share it). Explicit account-scoped policy errors such as Codex
 	// `cyber_policy` are likewise rotatable. A denial of only the requested
-	// model (Codex ChatGPT account, Cursor plan, Anthropic model-not-found 404)
-	// is rotatable when its provider and requested model match.
+	// model (Codex ChatGPT account, Cursor plan, Anthropic model-not-found 404,
+	// agy `Unknown model ID`) is rotatable when its provider and requested model
+	// match.
 	// Usage-limit phrasing (Codex's
 	// "You have hit your ChatGPT usage limit", Anthropic's "usage_limit_reached",
 	// Google's "resource_exhausted", OpenAI's "insufficient_quota") and 429s
