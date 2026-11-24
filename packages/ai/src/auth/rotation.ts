@@ -6,6 +6,7 @@ import type { CredentialRankingContext, CredentialRankingStrategy } from "../usa
 import type { RankingStrategyResolver } from "../usage/registry";
 import { raceSignal } from "./abort";
 import {
+	ACCOUNT_POLICY_BLOCK_MS,
 	ACCOUNT_POLICY_BLOCK_SCOPE,
 	AUTH_BLOCK_SCOPE,
 	DEFAULT_BLOCK_MS,
@@ -516,7 +517,8 @@ export class RateLimits implements LimitsApi {
 				sessionId,
 				sessionCredential.type,
 				sessionCredential.index,
-				Date.now() + DEFAULT_BLOCK_MS,
+				// Model-entitlement denials keep the short block: they bar only the requested model.
+				Date.now() + (modelPolicy ? DEFAULT_BLOCK_MS : ACCOUNT_POLICY_BLOCK_MS),
 				routing,
 				false,
 				{ signal: options?.signal },

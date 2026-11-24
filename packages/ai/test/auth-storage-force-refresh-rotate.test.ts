@@ -1281,4 +1281,38 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		});
 		expect(secondSwitched.switched).toBe(false);
 	});
+
+	test("organization denial keeps the credential out of rotation for new sessions past one minute", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		const now = Date.now();
+		await authStorage.credentials.set("anthropic", [
+			{
+				type: "oauth",
+				access: "denied-access",
+				refresh: "denied-refresh",
+				expires: farExpiry(),
+				orgId: "denied-org",
+			},
+			{
+				type: "oauth",
+				access: "healthy-access",
+				refresh: "healthy-refresh",
+				expires: farExpiry(),
+				orgId: "healthy-org",
+			},
+		]);
+
+		const deniedKey = await authStorage.keys.get("anthropic", "sess-org-denied-first");
+		expect(deniedKey).toBe("denied-access");
+		const switched = await authStorage.limits.rotate("anthropic", "sess-org-denied-first", {
+			error: new ProviderHttpError("OAuth authentication is currently not allowed for this organization.", 403, {
+				code: "oauth_not_allowed_for_organization",
+			}),
+			apiKey: deniedKey,
+		});
+		expect(switched.switched).toBe(true);
+
+		vi.spyOn(Date, "now").mockReturnValue(now + 61_000);
+		expect(await authStorage.keys.get("anthropic", "sess-org-denied-later")).toBe("healthy-access");
+	});
 });
