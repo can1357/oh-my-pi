@@ -838,7 +838,9 @@ describe("ACP agent", () => {
 	});
 
 	it("plan-proposal handler approves the agent-named plan and exits plan mode on submit", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({
+			elicitationHandler: async () => ({ action: "accept", content: { value: "Approve and execute" } }),
+		});
 		cfgPlanEnabled.set(Settings.instance, true);
 
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
@@ -897,8 +899,46 @@ describe("ACP agent", () => {
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});
+
+	it("plan-proposal without elicitation form does not exit plan mode", async () => {
+		const elicitations: CreateElicitationRequest[] = [];
+		// Explicit empty capabilities: the client advertises no elicitation.form, but the
+		// handler records any elicitation/create request the agent makes anyway.
+		const harness = await createHarness({
+			clientCapabilities: {},
+			elicitationHandler: async request => {
+				elicitations.push(request);
+				return { action: "cancel" };
+			},
+		});
+		cfgPlanEnabled.set(Settings.instance, true);
+
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "plan" });
+
+		const localOptions = {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		};
+		cleanupRoots.push(resolveLocalUrlToPath("local://", localOptions));
+		const planPath = resolveLocalUrlToPath("local://words-counter-plan.md", localOptions);
+		await Bun.write(planPath, "# Words Counter\n\nFile contents.");
+
+		const handler = session.planProposalHandler!;
+		await handler("words-counter");
+
+		expect(session.planModeState?.enabled).toBe(true);
+		expect(elicitations).toHaveLength(0);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
 	it("plan-proposal handler autosaves the approved plan without leaking the path", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({
+			elicitationHandler: async () => ({ action: "accept", content: { value: "Approve and execute" } }),
+		});
 		cfgPlanEnabled.set(Settings.instance, true);
 		cfgPlanAutosave.set(Settings.instance, true);
 
@@ -933,7 +973,9 @@ describe("ACP agent", () => {
 	});
 
 	it("plan-proposal handler approves and notes autosave failure without the path", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({
+			elicitationHandler: async () => ({ action: "accept", content: { value: "Approve and execute" } }),
+		});
 		cfgPlanEnabled.set(Settings.instance, true);
 		const blocker = path.join(harness.cwdA, "blocker");
 		await Bun.write(blocker, "x");
