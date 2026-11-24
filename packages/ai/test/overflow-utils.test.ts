@@ -392,4 +392,31 @@ describe("isTextAmbiguousContextOverflow - dual-flag arbitration shared by fallb
 		};
 		expect(AIError.isContextOverflow(message)).toBe(true);
 	});
+
+	for (const httpStatus of [429, 402]) {
+		it(`does not read a ${httpStatus} with an overflow code as context overflow`, async () => {
+			const error = new AIError.ProviderHttpError("request was rejected by the upstream gateway", httpStatus, {
+				code: "context_length_exceeded",
+			});
+			const finalized = await AIError.finalize(error, { api: "openai-responses" });
+			const message: AIError.ContextOverflowMessage = {
+				stopReason: "error",
+				errorId: finalized.id,
+				errorStatus: finalized.status,
+				errorMessage: finalized.message,
+			};
+			expect(AIError.isContextOverflow(message)).toBe(false);
+		});
+	}
+
+	it("keeps a 413 with an overflow code an overflow, not a payload rejection", async () => {
+		const error = new AIError.ProviderHttpError("request was rejected by the upstream gateway", 413, {
+			code: "context_length_exceeded",
+		});
+		const finalized = await AIError.finalize(error, { api: "openai-responses" });
+		const message = createErrorMessage(finalized.message);
+		message.errorId = finalized.id;
+		expect(AIError.isContextOverflow(message)).toBe(true);
+		expect(AIError.isPayloadRejection(message)).toBe(false);
+	});
 });
