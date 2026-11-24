@@ -617,7 +617,8 @@ describe("UiHelpers.renderSessionContext — error-stop tool calls", () => {
 					toolCallId: "error-tool",
 					toolName: "eval",
 					content: [{ type: "text", text: "late tool result must not replace the assistant stop error" }],
-					isError: false,
+					details: { __synthetic: true, source: "assistant_stop_error", executed: false },
+					isError: true,
 					timestamp: 2,
 				},
 			]),
@@ -628,6 +629,44 @@ describe("UiHelpers.renderSessionContext — error-stop tool calls", () => {
 		const rendered = harness.text();
 		expect(rendered).toContain("synthetic assistant stop error");
 		expect(rendered).not.toContain("late tool result must not replace the assistant stop error");
+	});
+
+	it("shows the real results saved for an aborted Cursor turn instead of its error", async () => {
+		const result = (toolCallId: string, toolName: string, text: string): AgentMessage => ({
+			role: "toolResult",
+			toolCallId,
+			toolName,
+			content: [{ type: "text", text }],
+			isError: false,
+			timestamp: 2,
+		});
+		const harness = makeRenderCtx(
+			transcriptWith([
+				{
+					role: "assistant",
+					content: [
+						{ type: "toolCall", id: "read", name: "read", arguments: { path: "/tmp/file.txt" } },
+						{ type: "toolCall", id: "grep", name: "grep", arguments: { pattern: "foo" } },
+					],
+					api: "cursor-agent",
+					provider: "cursor",
+					model: "composer-2.5",
+					usage: emptyUsage,
+					stopReason: "aborted",
+					errorMessage: "Deadline exceeded",
+					timestamp: 1,
+				},
+				result("read", "read", "read output saved before the abort"),
+				result("grep", "grep", "grep output saved before the abort"),
+			]),
+		);
+
+		await harness.helpers.renderInitialMessages();
+
+		const rendered = harness.text();
+		expect(rendered).not.toContain("✘ Read");
+		expect(rendered).toContain("grep output saved before the abort");
+		expect(rendered).not.toContain("Deadline exceeded");
 	});
 });
 

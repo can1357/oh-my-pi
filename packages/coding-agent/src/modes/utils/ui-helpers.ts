@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, isSyntheticToolResultMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { jsx } from "@oh-my-pi/pi-tui";
@@ -440,6 +440,8 @@ export class UiHelpers {
 		};
 		const readToolCallArgs = new Map<string, Record<string, unknown>>();
 		const readToolCallAssistants = new Map<string, AssistantView>();
+		// Calls shown with their turn's error: one that ran inside the stream (Cursor) can still have a real result.
+		const erroredCalls = new Map<string, PendingTool>();
 		// Defer per-turn metrics until the turn's tool results have materialized.
 		// Read-only invisible turns attach the metrics to their shared compact
 		// group; every other turn keeps the standalone row below its tool blocks.
@@ -586,6 +588,8 @@ export class UiHelpers {
 								false,
 								content.id,
 							);
+							erroredCalls.set(content.id, group);
+							readToolCallAssistants.set(content.id, assistant);
 						} else if (afterToolSegment) {
 							const group = ensureReadGroup();
 							group.updateArgs(content.arguments, content.id);
@@ -631,6 +635,7 @@ export class UiHelpers {
 							false,
 							content.id,
 						);
+						erroredCalls.set(content.id, pending);
 					} else {
 						ctx.pendingTools.set(content.id, pending);
 					}
@@ -661,6 +666,10 @@ export class UiHelpers {
 					: undefined;
 			} else if (message.role === "toolResult") {
 				if (options.preservedLiveToolCallIds?.has(message.toolCallId)) continue;
+				const errored = erroredCalls.get(message.toolCallId);
+				// The placeholder for a call that never ran keeps the turn's error.
+				if (errored && isSyntheticToolResultMessage(message)) continue;
+				if (errored) ctx.pendingTools.set(message.toolCallId, errored);
 				const pendingRead = ctx.pendingTools.get(message.toolCallId);
 				// Mirror the call side: resolve the wire toolName through the registry
 				// so aliased results route under the canonical name their call used.
