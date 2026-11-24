@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -592,6 +594,28 @@ export function expandEnvVarsDeep<T>(obj: T, extraEnv?: Record<string, string>):
 }
 
 /**
+ * Files git tracks under `dir`, as paths relative to `dir`, from the
+ * repository's index. Returns an empty set when `dir` is not inside a git
+ * repository or git is unavailable — callers treat that as "nothing tracked".
+ */
+/** Bun does not promisify `execFile` when called without a callback. */
+const execFileAsync = promisify(execFile);
+
+async function listGitTrackedFiles(dir: string): Promise<string[]> {
+	try {
+		// Bun's execFile does not promisify when called without a callback.
+		const { stdout } = await execFileAsync("git", ["ls-files", "-z", "--", "."], {
+			cwd: dir,
+			maxBuffer: 64 << 20,
+			timeout: 10_000,
+		});
+		return stdout.split("\0").filter(Boolean);
+	} catch {
+		return [];
+	}
+}
+
+/**
  * Load files from a directory matching extensions.
  * Uses native glob for fast filesystem scanning with gitignore support.
  */
@@ -609,12 +633,18 @@ export async function loadFilesFromDir<T>(
 		recursive?: boolean;
 		/** Registry/CLI origin forwarded to {@link SourceMeta.origin} (see {@link createSourceMeta}). */
 		origin?: string;
+		/**
+		 * Also load files git tracks even when ignore rules (e.g. `.git/info/exclude`)
+		 * hide them from the walker (#20322). Tracked files are what the repository
+		 * deliberately ships, so a stray exclude entry must not hide them.
+		 */
+		includeTracked?: boolean;
 	},
 ): Promise<LoadResult<T>> {
 	const items: T[] = [];
 	const warnings: string[] = [];
 	// Build glob pattern based on extensions and recursion
-	const { extensions, recursive = false } = options;
+	const { extensions, recursive = false, includeTracked = false } = options;
 
 	let pattern: string;
 	if (extensions && extensions.length > 0) {
@@ -643,6 +673,24 @@ export async function loadFilesFromDir<T>(
 	} catch {
 		// Directory doesn't exist or isn't readable
 		return { items, warnings };
+	}
+
+	// Tracked files are exempt from ignore filtering (#20322): the repository
+	// deliberately ships them, so an entry in `.gitignore` or `.git/info/exclude`
+	// (e.g. managing symlinked rule packs) must not hide them from discovery.
+	if (includeTracked) {
+		const tracked = await listGitTrackedFiles(dir);
+		const seen = new Set(matches.map(m => m.path));
+		for (const rel of tracked) {
+			if (seen.has(rel)) continue;
+			if (extensions?.length) {
+				const ext = rel.slice(rel.lastIndexOf(".") + 1);
+				if (!extensions.includes(ext)) continue;
+			}
+			if (!recursive && rel.includes("/")) continue;
+			matches.push({ path: rel });
+			seen.add(rel);
+		}
 	}
 
 	// Read all matching files in parallel

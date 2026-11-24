@@ -407,6 +407,9 @@ async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 		const rulesDir = path.join(dir, "rules");
 		const result = await loadFilesFromDir<Rule>(ctx, rulesDir, PROVIDER_ID, level, {
 			extensions: ["md", "mdc"],
+			// Tracked rules must load even when `.git/info/exclude` or a
+			// `.gitignore` entry matches them (#20322) — the repo ships them.
+			includeTracked: level === "project",
 			transform: (name, content, path, source) =>
 				discoverRuleFromMarkdown(name, content, path, source, { stripNamePattern: /\.(md|mdc)$/ }),
 		});
