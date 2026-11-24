@@ -34,6 +34,8 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { isEvalBridgeToolCall, isEvalBridgeToolCallable } from "../eval/tool-bridge-policy";
 import { renderToolHelp } from "../exec/tool-cli";
+import type { Settings } from "../config/settings";
+import { cfgToolsForceCommands } from "./settings";
 import toolCommandCatalogPrompt from "../prompts/system/tool-command-catalog.md" with { type: "text" };
 import toolCommandDescriptionCutPrompt from "../prompts/system/tool-command-description-cut.md" with { type: "text" };
 import { resolveToolWireName } from "../utils/tool-wire-name";
@@ -83,17 +85,64 @@ export function isToolCommandName(name: string): boolean {
 }
 
 /**
+ * Suffix of the alias command word a shell-reserved tool name mounts under
+ * (`eval` → `eval.tool`): the engine resolves intrinsics and builtins before
+ * session commands, so a reserved name can never reach its own command, while
+ * the aliased word is a plain, unreserved command name (#20332).
+ */
+export const TOOL_COMMAND_ALIAS_SUFFIX = ".tool";
+
+/**
+ * Command word a mounted tool runs as: its own name when the shell does not
+ * reserve it, otherwise the name with {@link TOOL_COMMAND_ALIAS_SUFFIX}
+ * appended. Presentation shows this word everywhere the model can run the
+ * command; canonical tool names remain the identity for dispatch state.
+ */
+export function toolCommandWord(name: string): string {
+	return isToolCommandName(name) ? name : `${name}${TOOL_COMMAND_ALIAS_SUFFIX}`;
+}
+
+/** Resolve a mounted tool by the command word a `bash` line invokes it with. */
+export function resolveMountedToolCommandWord(state: ToolCommandState, word: string): Tool | undefined {
+	const direct = resolveMountedToolCommand(state, word);
+	if (direct) return direct;
+	if (!word.endsWith(TOOL_COMMAND_ALIAS_SUFFIX)) return undefined;
+	const base = word.slice(0, -TOOL_COMMAND_ALIAS_SUFFIX.length);
+	// A base that is itself a valid, unreserved command word means the word is a
+	// tool's own name (`github.tool`), never a stripped alias.
+	if (COMMAND_WORD_RE.test(base) && isToolCommandName(base)) return undefined;
+	return resolveMountedToolCommand(state, base);
+}
+
+/** Tools the `tools.forceCommands` setting mounts despite a shell-reserved name; empty when unset. */
+export function toolCommandForceNames(settings: Settings | undefined): ReadonlySet<string> {
+	const list = settings === undefined ? [] : cfgToolsForceCommands.get(settings);
+	return new Set(
+		Array.isArray(list) ? list.filter((name): name is string => typeof name === "string" && name !== "") : [],
+	);
+}
+
+/**
  * Whether an enabled tool is presented as a bash command (rather than
  * top-level) while the command transport is active. Discoverable tools mount
  * unless they are pinned top-level by {@link TOOL_COMMAND_KEEP_TOP_LEVEL},
  * carry the transport itself ({@link TOOL_COMMAND_TRANSPORT_TOOLS}), or have
  * a name the shell cannot run as a session command; essential tools never do.
+ * `forceNames` (the `tools.forceCommands` setting) overrides the name gate:
+ * a listed reserved name mounts under its {@link toolCommandWord} alias, since
+ * the engine resolves intrinsics like `eval` and `wait` before session
+ * commands and the tool's own name could never dispatch (#20332).
  * The caller gates this on the transport being active.
  */
-export function isMountableAsToolCommand(tool: { name: string; loadMode?: ToolLoadMode }): boolean {
+export function isMountableAsToolCommand(
+	tool: { name: string; loadMode?: ToolLoadMode },
+	forceNames?: ReadonlySet<string>,
+): boolean {
 	if (Object.hasOwn(TOOL_COMMAND_TRANSPORT_TOOLS, tool.name) || Object.hasOwn(TOOL_COMMAND_KEEP_TOP_LEVEL, tool.name))
 		return false;
-	return tool.loadMode === "discoverable" && isToolCommandName(tool.name);
+	if (tool.loadMode !== "discoverable") return false;
+	if (isToolCommandName(tool.name)) return true;
+	return forceNames?.has(tool.name) === true && COMMAND_WORD_RE.test(toolCommandWord(tool.name));
 }
 
 /** One tool command invocation inside a bash run, in invocation order on BashToolDetails.toolCommands. */
@@ -169,12 +218,14 @@ function renderHelp(tool: Tool, descriptionCap?: number): string {
 	if (descriptionCap !== undefined && description !== undefined && description.length > descriptionCap) {
 		description = `${description.slice(0, descriptionCap).trimEnd()}${prompt.render(toolCommandDescriptionCutPrompt, { name: tool.name })}`;
 	}
-	return renderToolHelp({ name: tool.name, description, schema: toolWireSchema(tool) });
+	// Help documents the command word the model runs (`eval.tool` for a
+	// shell-reserved name), not the canonical tool identity (#20332).
+	return renderToolHelp({ name: toolCommandWord(tool.name), description, schema: toolWireSchema(tool) });
 }
 
 /** Prompt section for one mounted tool: a heading over exactly what `--help` prints. */
 function renderHelpSection(tool: Tool, descriptionCap?: number): string {
-	return `## ${tool.name}\n\n${renderHelp(tool, descriptionCap).trimEnd()}`;
+	return `## ${toolCommandWord(tool.name)}\n\n${renderHelp(tool, descriptionCap).trimEnd()}`;
 }
 
 /** One-line catalog summary for a mounted tool: `summary`, else first description line. */
@@ -253,6 +304,12 @@ export function resolveMountedToolCommandExecutable(state: ToolCommandState, nam
 	return tool && state.decorateExecution ? state.decorateExecution(tool) : tool;
 }
 
+/** {@link resolveMountedToolCommandExecutable} keyed by the command word a `bash` line ran (#20332). */
+export function resolveMountedToolCommandWordExecutable(state: ToolCommandState, word: string): Tool | undefined {
+	const tool = resolveMountedToolCommandWord(state, word);
+	return tool && state.decorateExecution ? state.decorateExecution(tool) : tool;
+}
+
 /** Mounted tools in presentation order, resolved from the canonical map. */
 export function listToolCommands(state: ToolCommandState): Tool[] {
 	return [...state.mountedNames].flatMap(name => {
@@ -271,7 +328,7 @@ export function toolCommandEntries(
 		// the two can never disagree about which summaries are untrusted.
 		const dynamic = !state.builtInNames.has(tool.name);
 		return {
-			name: tool.name,
+			name: toolCommandWord(tool.name),
 			summary: promptCatalogSummary(tool, dynamic ? TOOL_COMMAND_EXTERNAL_DESCRIPTION_CAP : undefined),
 			dynamic,
 		};
@@ -317,7 +374,7 @@ export function planToolCommandPromptDocs(
 				continue;
 			}
 		}
-		catalog.set(tool.name, promptCatalogSummary(tool, descriptionCap));
+		catalog.set(toolCommandWord(tool.name), promptCatalogSummary(tool, descriptionCap));
 	}
 	return { sections, catalog };
 }
@@ -500,7 +557,16 @@ export function toolCommandCallName(toolCall: {
 	const command = toolCall.arguments?.command;
 	if (typeof command !== "string") return undefined;
 	const word = LEADING_WORD_RE.exec(command)?.[1];
-	return word !== undefined && isToolCommandName(word) ? word : undefined;
+	if (word === undefined || !isToolCommandName(word)) return undefined;
+	// An alias word (`eval.tool`, whose base the shell reserves) attributes to
+	// the canonical tool (`eval`) so loop-guard exemptions keyed by tool name
+	// keep matching. A word whose base is itself a valid command name is a
+	// tool's own name (`foo.tool`) and stays as-is (#20332).
+	if (word.endsWith(TOOL_COMMAND_ALIAS_SUFFIX)) {
+		const base = word.slice(0, -TOOL_COMMAND_ALIAS_SUFFIX.length);
+		if (COMMAND_WORD_RE.test(base) && !isToolCommandName(base)) return base;
+	}
+	return word;
 }
 
 function isToolCommandDispatch(value: unknown): value is ToolCommandDispatch {

@@ -32,6 +32,8 @@ import {
 	toolCommandDispatches,
 	toolCommandEntries,
 	toolCommandHelp,
+	toolCommandWord,
+	resolveMountedToolCommandWord,
 } from "@oh-my-pi/pi-coding-agent/tools/tool-commands";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -102,6 +104,33 @@ describe("tool command mount rule", () => {
 		}
 		expect(isMountableAsToolCommand({ name: "github", loadMode: "essential" })).toBe(false);
 		expect(isMountableAsToolCommand({ name: "github" })).toBe(false);
+	});
+
+	it("mounts a shell-reserved name only when tools.forceCommands lists it, under its alias word (#20332)", () => {
+		const force = new Set(["eval"]);
+		expect(isMountableAsToolCommand({ name: "eval", loadMode: "discoverable" })).toBe(false);
+		expect(isMountableAsToolCommand({ name: "eval", loadMode: "discoverable" }, force)).toBe(true);
+		expect(toolCommandWord("eval")).toBe("eval.tool");
+		// The alias is only ever a plain, unreserved command word.
+		expect(isToolCommandName("eval.tool")).toBe(true);
+		// Unlisted reserved names stay top-level, and the force list never
+		// overrides the keep-top-level or transport pins or the load-mode gate.
+		expect(isMountableAsToolCommand({ name: "wait", loadMode: "discoverable" }, force)).toBe(false);
+		expect(isMountableAsToolCommand({ name: "eval", loadMode: "essential" }, force)).toBe(false);
+		expect(isMountableAsToolCommand({ name: "bash", loadMode: "discoverable" }, new Set(["bash"]))).toBe(false);
+	});
+
+	it("resolves a mounted tool by command word: own name, or alias for a reserved name", () => {
+		const plain = queryTool("github");
+		const forced = queryTool("eval");
+		const state = stateOf([plain, forced], { mounted: ["github", "eval"] });
+
+		expect(resolveMountedToolCommandWord(state, "github")).toBe(plain);
+		expect(resolveMountedToolCommandWord(state, "eval.tool")).toBe(forced);
+		// An alias word whose base is a valid command word is a tool's own name,
+		// never a stripped alias.
+		expect(resolveMountedToolCommandWord(state, "github.tool")).toBeUndefined();
+		expect(resolveMountedToolCommandWord(state, "no_such_tool")).toBeUndefined();
 	});
 });
 
@@ -501,6 +530,12 @@ describe("toolCommandCallName", () => {
 		expect(toolCommandCallName({ name: "bash", arguments: { command: 42 } })).toBeUndefined();
 		expect(toolCommandCallName({ name: "bash", arguments: {} })).toBeUndefined();
 		expect(toolCommandCallName({ name: "bash" })).toBeUndefined();
+	});
+
+	it("attributes an alias command word to its canonical tool name (#20332)", () => {
+		expect(toolCommandCallName({ name: "bash", arguments: { command: "eval.tool --flag v" } })).toBe("eval");
+		// A tool legitimately named with a valid base keeps its own name.
+		expect(toolCommandCallName({ name: "bash", arguments: { command: "github.tool --flag v" } })).toBe("github.tool");
 	});
 });
 

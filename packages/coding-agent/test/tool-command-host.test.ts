@@ -79,6 +79,11 @@ describe("toolCommandNames", () => {
 		const names = toolCommandNames(commandSession([fakeTool([])]));
 		expect(names).toEqual(expect.arrayContaining(["fake", "resolve", "reject", "propose"]));
 	});
+
+	it("installs a shell-reserved tool name under its alias command word (#20332)", () => {
+		const names = toolCommandNames(commandSession([fakeTool([], { name: "eval" })]));
+		expect(names).toEqual(expect.arrayContaining(["eval.tool", "resolve", "reject", "propose"]));
+	});
 });
 
 describe("createToolCommandHandler", () => {
@@ -87,6 +92,21 @@ describe("createToolCommandHandler", () => {
 		const handler = createToolCommandHandler({ session: commandSession([fakeTool(executed)]), toolCallId: "call" });
 
 		expect(await handler(request("fake", ["--flag", "v"]))).toEqual({ stdout: "fake:v\n", stderr: "", exitCode: 0 });
+		expect(executed).toEqual([{ flag: "v" }]);
+	});
+
+	it("dispatches a shell-reserved tool name through its alias command word (#20332)", async () => {
+		const executed: unknown[] = [];
+		const handler = createToolCommandHandler({
+			session: commandSession([fakeTool(executed, { name: "eval" })]),
+			toolCallId: "call",
+		});
+
+		expect(await handler(request("eval.tool", ["--flag", "v"]))).toEqual({
+			stdout: "fake:v\n",
+			stderr: "",
+			exitCode: 0,
+		});
 		expect(executed).toEqual([{ flag: "v" }]);
 	});
 

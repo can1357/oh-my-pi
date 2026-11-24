@@ -81,7 +81,13 @@ import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TodoTool } from "./todo";
 import { WriteTool } from "./write";
 import { WaitTool } from "./wait";
-import { isMountableAsToolCommand, resolveToolCommand, type ToolCommandState } from "./tool-commands";
+import {
+	isMountableAsToolCommand,
+	resolveMountedToolCommandWord,
+	resolveToolCommand,
+	type ToolCommandState,
+	toolCommandForceNames,
+} from "./tool-commands";
 import { YieldTool } from "./yield";
 import { PROPOSE_COMMAND_NAME, REJECT_COMMAND_NAME, RESOLVE_COMMAND_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { REPORT_ISSUE_COMMAND_NAME } from "@oh-my-pi/pi-tui/tools/report-tool-issue";
@@ -889,7 +895,7 @@ export function createToolCommandState(
 		isActive: name => session.isToolActive?.(name) === true,
 		// Card rendering reads the same predicate as execution: mounted commands
 		// plus active top-level tools.
-		resolve: name => resolveToolCommand(state, name),
+		resolve: name => resolveToolCommand(state, name) ?? resolveMountedToolCommandWord(state, name),
 	};
 	return state;
 }
@@ -934,7 +940,10 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		const mountedNames = new Set<string>();
 		const kept: Tool[] = [];
 		for (const tool of tools) {
-			const mountable = mountBuiltinTools && isMountableAsToolCommand(tool) && tool.name in BUILTIN_TOOLS;
+			const mountable =
+				mountBuiltinTools &&
+				isMountableAsToolCommand(tool, toolCommandForceNames(session.settings)) &&
+				tool.name in BUILTIN_TOOLS;
 			if (mountable) mountedNames.add(tool.name);
 			else kept.push(tool);
 		}

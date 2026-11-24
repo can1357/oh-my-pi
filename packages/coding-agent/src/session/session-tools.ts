@@ -61,7 +61,9 @@ import {
 	type ToolCommandState,
 	toolCommandDocsFor,
 	toolCommandEntries,
+	toolCommandForceNames,
 	toolCommandHostAvailable,
+	toolCommandWord,
 } from "../tools/tool-commands";
 import type { EditModeSetting } from "../edit/settings";
 import { resolveEditMode } from "../utils/edit-mode";
@@ -1528,7 +1530,7 @@ export class SessionTools {
 				this.#toolCommands !== undefined &&
 				!evalBound.has(name) &&
 				!isPresentationPinned(name) &&
-				isMountableAsToolCommand(tool),
+				isMountableAsToolCommand(tool, toolCommandForceNames(this.#host.settings)),
 		);
 		const mountNames = new Set(commandTransportActive ? mountEligible.map(({ name }) => name) : []);
 		const transportDemotedNames = new Set(commandTransportActive ? [] : mountEligible.map(({ name }) => name));
@@ -1712,8 +1714,8 @@ export class SessionTools {
 		);
 		return new Set(
 			projectMountedMCPToolCommandGuidance(collectMountedMCPToolRoutes(listToolCommands(this.#toolCommands)))
-				.mappings.filter(mapping => docsPlan.catalog.has(mapping.name))
-				.map(mapping => mapping.name),
+				.mappings.filter(mapping => docsPlan.catalog.has(toolCommandWord(mapping.name)))
+				.map(mapping => toolCommandWord(mapping.name)),
 		);
 	}
 

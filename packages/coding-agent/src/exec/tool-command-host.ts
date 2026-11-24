@@ -5,9 +5,10 @@ import type { Tool, ToolSession } from "../tools";
 import { specialToolCommands } from "../tools/resolve";
 import {
 	dispatchToolCommand,
-	resolveMountedToolCommand,
+	resolveMountedToolCommandWord,
 	type ToolCommandDispatch,
 	type ToolCommandState,
+	toolCommandWord,
 } from "../tools/tool-commands";
 import { throwIfAborted } from "../tools/tool-errors";
 import { encodeTerminalImage } from "../utils/terminal-graphics";
@@ -18,11 +19,14 @@ function commandTransportActive(session: ToolSession): boolean {
 	return session.toolCommands !== undefined && session.isToolActive?.("bash") === true;
 }
 
-/** Mounted tools plus special commands while `bash` is active in a session with tool-command state; `[]` otherwise. */
+/** Mounted command words plus special commands while `bash` is active in a session with tool-command state; `[]` otherwise. */
 export function toolCommandNames(session: ToolSession): string[] {
 	const state = session.toolCommands;
 	if (!state || !commandTransportActive(session)) return [];
-	const names = new Set(state.mountedNames);
+	// The shell resolves a line's leading word, so the names it can run are the
+	// mounted tools' command words — aliased (`eval.tool`) for shell-reserved
+	// tool names, whose own name never reaches a session command (#20332).
+	const names = new Set([...state.mountedNames].map(toolCommandWord));
 	for (const special of specialToolCommands(session)) names.add(special.name);
 	return [...names];
 }
@@ -92,7 +96,7 @@ export function createToolCommandHandler(options: {
 		const special = commandTransportActive(session)
 			? specialToolCommands(session).find(tool => tool.name === name)
 			: undefined;
-		const tool = special ?? (state ? resolveMountedToolCommand(state, name) : undefined);
+		const tool = special ?? (state ? resolveMountedToolCommandWord(state, name) : undefined);
 		if (!state || !tool) {
 			onDispatch?.(fallback, index);
 			return { stdout: "", stderr: `${name}: command is no longer available\n`, exitCode: 1 };
@@ -102,7 +106,8 @@ export function createToolCommandHandler(options: {
 		let dispatch: ToolCommandDispatch | undefined;
 		const host: ToolCliHost = {
 			async definition() {
-				return { name: tool.name, description: tool.description, schema: toolWireSchema(tool) };
+				// Help usage documents the command word (`eval.tool`), not the tool identity.
+				return { name: toolCommandWord(tool.name), description: tool.description, schema: toolWireSchema(tool) };
 			},
 			async call(_name, args) {
 				throwIfAborted(signal);

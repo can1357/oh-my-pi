@@ -1168,6 +1168,20 @@ export const cfgToolsCommandInline = register({
 	},
 });
 
+/** Tools `tools.forceCommands` mounts as commands even though the shell reserves their name (#20332). */
+export const cfgToolsForceCommands = register({
+	id: "tools.forceCommands",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	ui: {
+		tab: "tools",
+		group: "Discovery & MCP",
+		label: "Force Tool Commands",
+		description:
+			"Mount these tools as bash commands even though the shell reserves their name (bash builtins like eval or wait). A reserved name runs as `<name>.tool` (`eval.tool --help`); unreserved names run under their own name.",
+	},
+});
+
 export const cfgToolsCommandNotices = register({
 	id: "tools.commandNotices",
 	type: "boolean",

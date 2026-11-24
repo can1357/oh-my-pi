@@ -333,6 +333,8 @@ import {
 	GrepTool,
 	HIDDEN_TOOLS,
 	isMountableAsToolCommand,
+	toolCommandForceNames,
+	toolCommandWord,
 	type LspStartupServerInfo,
 	listToolCommands,
 	planToolCommandPromptDocs,
@@ -341,6 +343,7 @@ import {
 	renderToolCommandPromptDocs,
 	resolveBuiltinToolPlan,
 	resolveMountedToolCommandExecutable,
+	resolveMountedToolCommandWordExecutable,
 	SETTINGS_GATED_BUILTIN_TOOL_NAMES,
 	SPECIAL_TOOL_NAMES,
 	specialToolApplies,
@@ -4303,7 +4306,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const resolveToolCommandTool = (name: string, advertised: readonly AgentTool[] = []): AgentTool | undefined => {
 			const state = toolSession.toolCommands;
 			// An exact mounted name is the name itself, not a guess.
-			const exact = state ? resolveMountedToolCommandExecutable(state, name) : undefined;
+			const exact =
+				(state ? resolveMountedToolCommandExecutable(state, name) : undefined) ??
+				(state ? resolveMountedToolCommandWordExecutable(state, name) : undefined);
 			if (exact) return exact;
 			// One lookup spanning BOTH presentation sets this request can reach, so
 			// the uniqueness rule applies across their union: an alias answered by
@@ -4554,8 +4559,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			);
 			const routedCatalogNames = new Set(
 				projection.mappings
-					.filter(mapping => toolCommandPromptDocs?.catalog.has(mapping.name))
-					.map(mapping => mapping.name),
+					.filter(mapping => toolCommandPromptDocs?.catalog.has(toolCommandWord(mapping.name)))
+					.map(mapping => toolCommandWord(mapping.name)),
 			);
 			if (projection.mappings.length > 0 || projection.hasOmittedMappings) {
 				appendParts.push(
@@ -4564,7 +4569,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							tools: projection.mappings.map(mapping => ({
 								mcpToolName: mapping.label,
 								path: mapping.path,
-								summary: toolCommandPromptDocs?.catalog.get(mapping.name),
+								summary: toolCommandPromptDocs?.catalog.get(toolCommandWord(mapping.name)),
 							})),
 							hasCatalogOnlyTools: routedCatalogNames.size > 0,
 							hasOmittedTools: projection.hasOmittedMappings,
@@ -4835,7 +4840,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			for (const name of initialToolNames) {
 				const tool = toolRegistry.get(name);
 				const explicitlyRequested = presentationPinnedToolNames?.has(name) === true;
-				if (tool && commandTransportActive && !explicitlyRequested && isMountableAsToolCommand(tool))
+				if (
+					tool &&
+					commandTransportActive &&
+					!explicitlyRequested &&
+					isMountableAsToolCommand(tool, toolCommandForceNames(settings))
+				)
 					mountedNames.push(name);
 				else topLevelToolNames.push(name);
 			}
@@ -5763,7 +5773,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						toolSession.toolCommands !== undefined &&
 						commandHostAvailable() &&
 						enabled.includes("bash") &&
-						isMountableAsToolCommand(liveTool);
+						isMountableAsToolCommand(liveTool, toolCommandForceNames(settings));
 					const nextMounted = shouldMount
 						? mounted.includes(name)
 							? mounted
