@@ -98,4 +98,58 @@ describe("RPC mode malformed stdin", () => {
 		expect(parseErrors).toEqual([]);
 		expect(frames).toEqual([prompt]);
 	});
+
+	test("refuses a record over a configured cap that the default cap accepts", async () => {
+		const prompt = { type: "prompt", id: "over-cap", message: "x".repeat(100) };
+		const line = `${JSON.stringify(prompt)}\n`;
+		const refusedFrames: unknown[] = [];
+		const refusedErrors: string[] = [];
+
+		await readRpcInputFrames(
+			new Blob([line]).stream(),
+			frame => refusedFrames.push(frame),
+			message => refusedErrors.push(message),
+			64,
+		);
+
+		expect(refusedErrors).toHaveLength(1);
+		expect(refusedErrors[0]).toContain("line is over the 64-byte cap");
+		expect(refusedFrames).toEqual([]);
+
+		const frames: unknown[] = [];
+		const parseErrors: string[] = [];
+		await readRpcInputFrames(
+			new Blob([line]).stream(),
+			frame => frames.push(frame),
+			message => parseErrors.push(message),
+		);
+
+		expect(parseErrors).toEqual([]);
+		expect(frames).toEqual([prompt]);
+	});
+
+	test("resumes after an oversized record that spans chunks and dispatches the next record", async () => {
+		const encoder = new TextEncoder();
+		const probe = { type: "get_state", id: "probe" };
+		const input = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(encoder.encode(`{"type":"prompt","id":"big","message":"${"x".repeat(40)}`));
+				controller.enqueue(encoder.encode(`${"x".repeat(60)}"}\n${JSON.stringify(probe)}\n`));
+				controller.close();
+			},
+		});
+		const frames: unknown[] = [];
+		const parseErrors: string[] = [];
+
+		await readRpcInputFrames(
+			input,
+			frame => frames.push(frame),
+			message => parseErrors.push(message),
+			64,
+		);
+
+		expect(parseErrors).toHaveLength(1);
+		expect(parseErrors[0]).toContain("line is over the 64-byte cap");
+		expect(frames).toEqual([probe]);
+	});
 });
