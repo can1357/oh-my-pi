@@ -19,7 +19,7 @@ prewalk:
    enabled: true
 ```
 
-`prewalk.into` (default `@smol`) sets the handoff target, and `prewalk.from` (default `@default`) sets the planning model `/prewalk restart` returns to. Both take a model pattern or role. For example, to plan on a slower model and hand off to your default model:
+`prewalk.into` (default `@smol`) sets the handoff target, and `prewalk.from` (default `@default`) sets the planning model: `/prewalk restart` returns to it, and auto-prewalk's `escalate` mode plans on it. Both take a model pattern or role. For example, to plan on a slower model and hand off to your default model:
 
 ```yaml
 prewalk:
@@ -89,7 +89,7 @@ If prewalk is already armed, `/prewalk` leaves the existing target in place. `/p
 
 ## Auto-prewalk
 
-`prewalk.enabled` and `/prewalk` unconditionally arm a one-shot handoff. Auto-prewalk asks OMP's native judge, per task, whether prewalk is worthwhile, and arms the same handoff from the active model when it is. It is a prewalk-suitability check, not a difficulty rating or a general model router: it never picks a different planning model.
+`prewalk.enabled` and `/prewalk` unconditionally arm a one-shot handoff. Auto-prewalk asks OMP's native judge, per task, whether prewalk is worthwhile, and arms the same handoff from the active model when it is. It is a prewalk-suitability check, not a difficulty rating or a general model router: under `on` it never picks a different planning model, and under `escalate` the only other model it plans on is the one `prewalk.from` names.
 
 ```yaml
 prewalk:
@@ -105,8 +105,22 @@ prewalk:
 | `off` (default) | No classification. An earlier automatic handoff is still returned from at the next task.                                                                                                             |
 | `suggest`       | Classifies each new task and reports the decision only. Never arms prewalk; an earlier automatic handoff is still returned from at the next task.                                                    |
 | `on`            | Classifies each new task. When the judge is confident the task fits and the target resolves with a usable credential, arms a handoff from the active model to the target; otherwise nothing changes. |
+| `escalate`      | Like `on`, but a task the judge is confident about first moves to `prewalk.from` to plan, then hands off from it. When `prewalk.from` already is the active model and thinking level, this is exactly `on`. |
 
-Run `suggest` for a while to see how it judges your prompts, then set `auto: on`. To plan on a stronger model, make it your active (`@default`) model; auto-prewalk hands off from whatever you are on.
+Run `suggest` for a while to see how it judges your prompts, then set `auto: on`. To plan on a stronger model, either make it your active (`@default`) model, or set it as `prewalk.from` and use `escalate`. The planning model does not have to be stronger; `escalate` plans on whatever `prewalk.from` names.
+
+### Plan on another model
+
+```yaml
+prewalk:
+   auto: escalate
+   from: "anthropic/claude-opus-4-5"
+   autoTarget: "@initial"
+```
+
+Under `escalate`, the judge runs on the model the task starts on. When it is confident, OMP switches to `prewalk.from` before the rest of setup, so memory recall, hooks, attachments, and auto thinking all run on the planner, and the switch shows as a model change in the session. The handoff then goes from the planner to `prewalk.autoTarget`. With `autoTarget: "@initial"`, it hands back to the model and thinking level the task started on; when the planner is the same model at a different thinking level, both moves are effort changes only, which keep the provider session. `@initial` needs `escalate`; under `on` it warns once and hands off to `@smol` instead, and subagents always use `@smol` for it.
+
+Every task routed this way waits for the judge before setup starts, so `escalate` caps the judge at 1 second instead of 4, and loads the planner's metadata and credential while the judge runs. An unusable `prewalk.from` (unresolvable, or without a credential) warns once and plans on the active model, as under `on`. `suggest` adds the planner `escalate` would move to, for example `Auto-prewalk: prewalk 0.84; escalate would plan on anthropic/claude-opus-4-5`.
 
 `prewalk.enabled` keeps its meaning: unconditional prewalk, independent of `prewalk.auto`.
 
@@ -139,7 +153,7 @@ Under `on`, a confident decision shows the usual `Prewalk: armed for …` notice
 
 ### One task at a time
 
-An automatic handoff belongs to the task that armed it. When the next task starts, OMP returns to the model and thinking level that task planned on, then judges the new task, so a `primary` task is never left on the handoff target. `/new` does the same. This return happens whatever `prewalk.auto` is set to by then, including after `/prewalk off`. An auto arm that its task never used is dropped at the next task, which is judged on its own.
+An automatic handoff belongs to the task that armed it. When the next task starts, OMP returns to the model and thinking level that task started on (before an `escalate` switch to the planner, if it made one), then judges the new task, so a `primary` task is never left on the handoff target. `/new` does the same. This return happens whatever `prewalk.auto` is set to by then, including after `/prewalk off`. An auto arm that its task never used is dropped at the next task, which is judged on its own. An Esc while the task is still on the planner leaves the session there, and the next task returns to where the interrupted one started.
 
 An explicit model or thinking-level selection after the handoff takes ownership: the session stays where you put it. Such a selection also cancels a pending auto arm before it switches; this includes the switches plan mode makes on entry and exit, model presets, and extension or ACP selections. Pending arms made by `/prewalk`, `--prewalk`, or `prewalk.enabled` stay armed, and their handoffs are never restored by auto-prewalk.
 
@@ -159,7 +173,7 @@ A pending prewalk from `/prewalk`, `prewalk.enabled`, or `--prewalk` is never re
 
 ### Failure behavior
 
-Auto-prewalk is an optimization and fails open. A missing native judge, a judge error or malformed answer, the 4-second timeout, an abort, or a prompt superseded while the judge ran all leave the task exactly as it would be without auto-prewalk. Answers with invalid probabilities, an inconsistent winning route, or invalid confidence are rejected. Judge failures are logged rather than shown; an unusable target reports an `Auto-prewalk not armed: target …` warning. Judgments are journaled as model usage under the purpose `auto-prewalk`.
+Auto-prewalk is an optimization and fails open. A missing native judge, a judge error or malformed answer, the timeout (4 seconds, or 1 second under `escalate`), an abort, or a prompt superseded while the judge ran all leave the task exactly as it would be without auto-prewalk. Answers with invalid probabilities, an inconsistent winning route, or invalid confidence are rejected. Judge failures, and how long each judgment took, are logged rather than shown; an unusable target reports an `Auto-prewalk not armed: target …` warning. Judgments are journaled as model usage under the purpose `auto-prewalk`.
 
 ## Subagent prewalk
 
