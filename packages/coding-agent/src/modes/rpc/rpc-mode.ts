@@ -43,13 +43,13 @@ import {
 import {
 	choiceValue,
 	defaultFormData,
-	fieldError,
 	type HtmlFormData,
 	type HtmlFormValue,
 	isArrayChoice,
 	textValue,
 } from "../../tools/html-form/data";
 import { type ChoiceField, type HtmlForm, parseHtmlForm, type TextField } from "../../tools/html-form/parse";
+import { findChoiceOption, validateFormField } from "../../utils/form-validation";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import {
 	type WordCompletionEngine,
@@ -1222,6 +1222,7 @@ export async function requestRpcAskDialog(
  * field's enabled option values, except one free-text entry when the field
  * offers "Other". Checkbox groups and multi-selects take an array; every other
  * choice takes one string.
+ * RPC sends values rather than Collab's option indices, so equal option values cannot identify distinct selections.
  */
 function parseFormChoice(field: ChoiceField, value: unknown): HtmlFormValue | undefined {
 	const label = JSON.stringify(field.name);
@@ -1237,9 +1238,7 @@ function parseFormChoice(field: ChoiceField, value: unknown): HtmlFormValue | un
 	let other: string | undefined;
 	for (const entry of entries) {
 		if (typeof entry !== "string") throw new Error(`Form field ${label} must carry ${shape}`);
-		// Prefer an enabled option, so a disabled duplicate of the same value earlier in the group cannot shadow it.
-		const enabled = field.options.findIndex(option => !option.disabled && option.value === entry);
-		const index = enabled >= 0 ? enabled : field.options.findIndex(option => option.value === entry);
+		const index = findChoiceOption(field, entry);
 		if (index >= 0 && field.options[index]!.disabled) {
 			throw new Error(`Form field ${label} carries disabled option ${JSON.stringify(entry)}`);
 		}
@@ -1337,8 +1336,7 @@ function parseFormDialogResponse(
 		});
 		if (!values.some(({ carried }) => carried)) throw mismatch;
 		for (const { field, value, carried } of values) {
-			const problem = fieldError(field, value);
-			if (problem) throw new Error(`Form field ${JSON.stringify(name)}: ${problem}`);
+			validateFormField(field, value);
 			if (carried && value !== undefined) data[name] = value;
 		}
 	}

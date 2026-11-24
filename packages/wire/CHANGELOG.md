@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added the form-v2 Collab response wire contract ([#20344](https://github.com/can1357/oh-my-pi/pull/20344) by [@andrewleech](https://github.com/andrewleech)).
 - Added `waiting` on agent tray cards: the agent runs, but its current call only waits on its own agents or jobs.
 - TSP `toggle` also accepts the `open` state Tern sends for menus and selectable controls, including the item id when supplied.
 

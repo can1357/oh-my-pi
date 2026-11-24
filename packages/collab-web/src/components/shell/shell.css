@@ -538,6 +538,26 @@
 	width: 100%;
 }
 
+.sh-form { display: grid; gap: 10px; min-width: 0; }
+.sh-form-content { display: grid; gap: 14px; max-height: min(50vh, 500px); padding: 6px; overflow: auto; }
+.sh-form-section { display: grid; gap: 10px; min-width: 0; }
+.sh-form-section p, .sh-form-section h3, .sh-form-section ul, .sh-form-section ol { margin: 0; white-space: pre-wrap; }
+.sh-form-field, .sh-form-choices, .sh-form-other { display: grid; gap: 6px; min-width: 0; }
+.sh-form-field fieldset { display: grid; gap: 6px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.sh-form-field legend { padding: 0; }
+.sh-form-field input:not([type="radio"]):not([type="checkbox"]), .sh-form-field textarea {
+	width: 100%; min-width: 0; padding: 8px; color: var(--fg); background: var(--bg-raised);
+	border: 1px solid var(--border); border-radius: var(--radius);
+}
+.sh-form-section h3, .sh-form-field, .sh-form-field input, .sh-form-field textarea, .sh-form-field .sh-form-error { scroll-margin: 6px; }
+.sh-form-choice { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+.sh-form-choice input { flex: none; }
+.sh-form-error { color: var(--fg); font-weight: 600; }
+.sh-form-media { color: var(--fg-muted); }
+.sh-form-table, .sh-form-section pre { max-width: 100%; overflow: auto; }
+.sh-form-image { max-width: 100%; height: auto; }
+.sh-form-table th, .sh-form-table td { padding: 4px 8px; text-align: left; border: 1px solid var(--border); }
+
 .sh-queued {
 	display: inline-flex;
 	align-items: center;
@@ -909,6 +929,11 @@
 		width: 34px;
 		height: 34px;
 		padding: 0;
+	}
+	.sh-composer-actions.sh-ask-actions .sh-btn {
+		width: auto;
+		min-width: 68px;
+		padding: 0 12px;
 	}
 	.sh-ask-title,
 	.sh-ask-option-label {

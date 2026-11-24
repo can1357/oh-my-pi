@@ -67,6 +67,90 @@ function liveClient(entries: SessionEntry[] = []): GuestClient {
 	return client;
 }
 
+describe("form capability compatibility", () => {
+	it("retains a form until accepted and reports a rejected replay without queuing it", () => {
+		const request = { reqId: 11, kind: "form" as const, title: "Questions", html: "<form></form>" };
+		const client = liveClient();
+		client.applyFrameForTest({ t: "ui-request", request });
+		client.sendUiResponse(11, { fields: ["draft"] });
+		expect(client.getSnapshot().uiRequest).toEqual(request);
+		expect(client.getSnapshot().uiFormStatus).toBe("pending");
+		client.applyFrameForTest({ t: "ui-request", request });
+		expect(client.getSnapshot().uiFormStatus).toBe("rejected");
+		client.sendUiResponse(11, { fields: ["corrected"] });
+		expect(client.getSnapshot().uiFormStatus).toBe("pending");
+		client.applyFrameForTest({ t: "ui-request-end", reqId: 11 });
+		expect(client.getSnapshot().uiRequest).toBeNull();
+		expect(client.getSnapshot().uiFormStatus).toBe("idle");
+		client.close();
+	});
+
+	it("advertises forms on open and rejoin while accepting an old welcome and requests", () => {
+		const sent: GuestFrame[] = [];
+		let socket: CollabSocket | undefined;
+		const spy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation(function (
+			this: CollabSocket,
+			frame: GuestFrame,
+		) {
+			socket = this;
+			sent.push(frame);
+		});
+		try {
+			const client = new GuestClient(LINK, "tester", { formSupport: true });
+			client.applyFrameForTest(welcomeFrame());
+			client.sendAbort();
+			socket!.onOpen!();
+			client.applyFrameForTest(welcomeFrame());
+			client.applyFrameForTest({
+				t: "ui-request",
+				request: { reqId: 10, kind: "editor", title: "Old host", prefill: "draft" },
+			});
+			expect(client.getSnapshot().uiRequest?.kind).toBe("editor");
+			client.sendUiResponse(10, "answer");
+			client.applyFrameForTest({ t: "error", message: "rejoin to resync", resync: true });
+			const hellos = sent.filter(frame => frame.t === "hello");
+			expect(hellos).toHaveLength(2);
+			expect(
+				hellos.every(
+					frame =>
+						frame.t === "hello" &&
+						frame.capabilities?.includes("form-v2") &&
+						!frame.capabilities?.includes("form"),
+				),
+			).toBe(true);
+			expect(sent).toContainEqual({ t: "ui-response", reqId: 10, value: "answer" });
+			client.close();
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it("does not advertise forms by default on open or rejoin", () => {
+		const sent: GuestFrame[] = [];
+		let socket: CollabSocket | undefined;
+		const spy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation(function (
+			this: CollabSocket,
+			frame: GuestFrame,
+		) {
+			socket = this;
+			sent.push(frame);
+		});
+		try {
+			const client = liveClient();
+			client.sendAbort();
+			socket!.onOpen!();
+			client.applyFrameForTest(welcomeFrame());
+			client.applyFrameForTest({ t: "error", message: "rejoin to resync", resync: true });
+			const hellos = sent.filter(frame => frame.t === "hello");
+			expect(hellos).toHaveLength(2);
+			expect(hellos.every(frame => frame.t === "hello" && !frame.capabilities?.includes("form-v2"))).toBe(true);
+			client.close();
+		} finally {
+			spy.mockRestore();
+		}
+	});
+});
+
 describe("GuestClient frame apply", () => {
 	it("throws on an invalid link", () => {
 		expect(() => new GuestClient("not a link", "tester")).toThrow();

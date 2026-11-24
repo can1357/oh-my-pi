@@ -121,6 +121,7 @@
       "version": "16.3.6",
       "dependencies": {
         "@oh-my-pi/omp-stats": "catalog:",
+        "@oh-my-pi/pi-coding-agent": "catalog:",
         "@oh-my-pi/pi-utils": "catalog:",
         "@oh-my-pi/pi-wire": "catalog:",
         "katex": "catalog:",
@@ -243,6 +244,18 @@
         "@types/react-dom": "catalog:",
       },
     },
+    "packages/tui": {
+      "name": "@oh-my-pi/pi-tui",
+      "version": "19.1.1",
+      "dependencies": {
+        "@oh-my-pi/pi-natives": "catalog:",
+        "@oh-my-pi/pi-utils": "catalog:",
+        "@oh-my-pi/pi-wire": "catalog:",
+      },
+      "devDependencies": {
+        "kitty-vt-wasm": "catalog:",
+      },
+    },
     "packages/typescript-edit-benchmark": {
       "name": "@oh-my-pi/typescript-edit-benchmark",
       "version": "0.0.1",
@@ -263,18 +276,6 @@
         "@types/babel__generator": "catalog:",
         "@types/babel__traverse": "catalog:",
         "@types/bun": "catalog:",
-      },
-    },
-    "packages/tui": {
-      "name": "@oh-my-pi/pi-tui",
-      "version": "19.1.1",
-      "dependencies": {
-        "@oh-my-pi/pi-natives": "catalog:",
-        "@oh-my-pi/pi-utils": "catalog:",
-        "@oh-my-pi/pi-wire": "catalog:",
-      },
-      "devDependencies": {
-        "kitty-vt-wasm": "catalog:",
       },
     },
     "packages/utils": {

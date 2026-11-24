@@ -44,7 +44,7 @@ export function App(): ReactNode {
 	const connect = useCallback((link: string, name: string): void => {
 		let next: GuestClient;
 		try {
-			next = new GuestClient(link, name);
+			next = new GuestClient(link, name, { formSupport: true });
 		} catch (err) {
 			setConnectError(err instanceof Error ? err.message : String(err));
 			return;
@@ -187,6 +187,7 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 						phase={snap.phase}
 						readOnly={snap.readOnly}
 						uiRequest={snap.uiRequest}
+						uiFormStatus={snap.uiFormStatus}
 						working={snap.working}
 						queuedMessageCount={snap.state?.queuedMessageCount ?? 0}
 					/>

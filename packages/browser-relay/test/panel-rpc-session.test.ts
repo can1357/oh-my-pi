@@ -233,6 +233,24 @@ describe("rpc panel session", () => {
 		expect(worker.last("get_entries").since).toBe("e2");
 	});
 
+	it("rejects a form response without consuming a pending dialog", async () => {
+		const { worker, session } = await attached();
+		worker.line({ type: "extension_ui_request", id: "ui-1", method: "editor", title: "Edit" });
+		const request = session.getSnapshot().uiRequest;
+		expect(request).not.toBeNull();
+
+		expect(() => session.answer(request!.reqId, { fields: [] })).toThrow(
+			"form responses are not supported by the RPC panel",
+		);
+		expect(session.getSnapshot().uiRequest).toEqual(request);
+		expect(worker.sent.filter(command => command.type === "extension_ui_response")).toEqual([]);
+
+		session.answer(request!.reqId, "text");
+		expect(worker.sent.filter(command => command.type === "extension_ui_response")).toEqual([
+			{ type: "extension_ui_response", id: "ui-1", value: "text" },
+		]);
+	});
+
 	it("forwards prompts with images, answers dialogs and acknowledges stop", async () => {
 		const { worker, session } = await attached();
 		const image = { type: "image" as const, data: "iVBORw0K", mimeType: "image/png" };

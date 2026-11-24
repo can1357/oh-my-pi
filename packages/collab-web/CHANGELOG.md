@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Render whole-form Ask requests for browser guests ([#20344](https://github.com/can1357/oh-my-pi/pull/20344) by [@andrewleech](https://github.com/andrewleech)).
+
 ## [19.1.0] - 2026-11-21
 
 ### Added

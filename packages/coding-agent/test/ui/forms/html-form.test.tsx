@@ -7,7 +7,7 @@ import { expect, test, vi } from "bun:test";
 import { nativeShell } from "../../helpers/native-shell";
 import { signal } from "@oh-my-pi/pi-tui";
 import { CORPUS_NOW } from "@oh-my-pi/pi-tui/testing/corpus";
-import { parseHtmlForm } from "../../../src/tools/html-form/parse";
+import { parseHtmlForm, spansText } from "../../../src/tools/html-form/parse";
 import { formMedia, HtmlFormDialog, HtmlFormModel } from "../../../src/ui/forms/html-form";
 import { figureWorkSettled } from "../../../src/ui/transcript/figures";
 import { corpusSuite, type Driver, type Mounted, settle } from "../setup/harness";
@@ -20,6 +20,24 @@ interface FormInputs {
 	readonly timeoutMs: number | null;
 	readonly cwd: string;
 }
+
+test("html form media notices preserve field order and appear only when requested", () => {
+	const html =
+		'<form><input name="before"><canvas aria-label="drawing"><input name="nested"></canvas><input name="after"><img></form>';
+	const original = parseHtmlForm(html);
+	const withNotices = parseHtmlForm(html, { mediaNotices: true });
+	expect(withNotices.fields).toEqual(original.fields);
+	expect(withNotices.fields.map(field => field.name)).toEqual(["before", "nested", "after"]);
+	const originalText = original.sections.flatMap(section =>
+		section.blocks.flatMap(block => (block.kind === "text" ? [spansText(block.spans)] : [])),
+	);
+	const noticeText = withNotices.sections.flatMap(section =>
+		section.blocks.flatMap(block => (block.kind === "text" ? [spansText(block.spans)] : [])),
+	);
+	expect(originalText).not.toContain("Media not supported: drawing");
+	expect(noticeText).toContain("Media not supported: drawing");
+	expect(noticeText).toContain("Media not supported");
+});
 
 test("native form checkboxes and option-note menus reach the submitted answers", async () => {
 	await using ui = await nativeShell();

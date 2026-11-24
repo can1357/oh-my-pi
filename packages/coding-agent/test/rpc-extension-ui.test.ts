@@ -924,6 +924,20 @@ describe("RPC form dialog", () => {
 		expect(await result).toEqual({ data: { tier: "basic" } });
 	});
 
+	it("rejects duplicate submitted values even when two options have that value", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const html = `<form>
+  <input type="checkbox" name="pick" value="a">
+  <input type="checkbox" name="pick" value="a">
+</form>`;
+		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, html);
+
+		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: { pick: ["a", "a"] } });
+
+		await expect(result).rejects.toThrow('unexpected value "a"');
+	});
+
 	it("keeps a control named __proto__ as an ordinary key of the data", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();

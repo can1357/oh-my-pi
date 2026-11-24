@@ -304,7 +304,9 @@ export interface SubagentLifecyclePayload {
 
 export type CollabUiSelectItem = string | { label: string; description?: string };
 
-export type CollabUiResponseValue = string | undefined;
+export type CollabFormField = string | { checked: number[]; other?: string };
+export type CollabFormResponse = { fields: CollabFormField[] };
+export type CollabUiResponseValue = string | CollabFormResponse | undefined;
 
 export type CollabUiRequestDraft =
 	| {
@@ -323,6 +325,11 @@ export type CollabUiRequestDraft =
 			kind: "editor";
 			title: string;
 			prefill?: string;
+	  }
+	| {
+			kind: "form";
+			title: string;
+			html: string;
 	  };
 
 export type CollabUiRequest = CollabUiRequestDraft & { reqId: number };
@@ -338,6 +345,7 @@ export type GuestFrame =
 			 * read-only and rejects their mutating frames.
 			 */
 			writeToken?: string;
+			capabilities?: string[];
 	  }
 	/** `followUp`: wait for the running turn to finish instead of steering it (the TUI's Ctrl+Enter). */
 	| { t: "prompt"; text: string; images?: ImageContent[]; followUp?: true }
