@@ -329,8 +329,11 @@ export class NativeBackend {
 		if (end === ops.length) this.#pending = undefined;
 		// Account for the frame before writing: an ack can arrive on the write stack.
 		this.#unacked.push({ s, sentAt: this.#clock!.now() });
+		// Slice before sending: an eviction handled on the write stack compacts `ops`.
+		const onFrame = this.#options.onFrame;
+		const sent = onFrame ? ops.slice(start, end) : undefined;
 		connection.send("f", `${body}]}`);
-		this.#options.onFrame?.({ sf: this.id, s, ops: start === 0 && end === ops.length ? ops : ops.slice(start, end) });
+		if (sent) onFrame?.({ sf: this.id, s, ops: sent });
 	}
 
 	#forget(ids: readonly string[]): void {
@@ -341,8 +344,11 @@ export class NativeBackend {
 			return;
 		}
 		const gone = new Map<string, string | null>();
-		for (const id of ids) gone.set(id, null);
 		reconciler.forget(ids, gone);
+		// An evicted id the reconciler still holds (a changed settled block queued
+		// as del + add) keeps its ops so the add recreates it; drop the rest.
+		for (const id of ids) if (!gone.has(id) && !reconciler.resolve({ id })) gone.set(id, null);
+		if (gone.size === 0) return;
 		// The terminal can evict between batches. Skip ops for lost nodes and
 		// keep surviving insertions in order if their `before` sibling was lost.
 		const { ops, start } = pending;
